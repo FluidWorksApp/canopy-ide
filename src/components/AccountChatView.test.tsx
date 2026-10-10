@@ -1,9 +1,9 @@
 import {render,screen,fireEvent,waitFor,cleanup} from '@testing-library/react';
 import {afterEach,beforeEach,it,expect,vi} from 'vitest';
-const mock=vi.hoisted(()=>({markRead:vi.fn(),send:vi.fn(async(..._args:unknown[])=>({id:'new'})),retry:vi.fn(async(..._args:unknown[])=>({id:'retried'})),discard:vi.fn(),snapshot:{members:{ada:'Ada Lovelace'},messages:[{id:'m',sender:'ada',recipient:null,text:'Hello team',created:1}],receipts:{},status:'Connected · end-to-end encrypted'} as {members:Record<string,string>;messages:{id:string;sender:string;recipient:string|null;text:string;created:number}[];receipts:Record<string,string[]>;delivery?:Record<string,{state:string;detail?:string}>;status:string}}));
-vi.mock('../teamMessaging/session',()=>({teamSession:()=>({retain:()=>()=>{},markRead:mock.markRead,subscribe:()=>()=>{},getSnapshot:()=>mock.snapshot,send:mock.send,retry:mock.retry,discard:mock.discard})}));
+const mock=vi.hoisted(()=>({attachment:vi.fn(async(..._args:unknown[])=>new Blob(['x'])),markRead:vi.fn(),send:vi.fn(async(..._args:unknown[])=>({id:'new'})),retry:vi.fn(async(..._args:unknown[])=>({id:'retried'})),discard:vi.fn(),snapshot:{members:{ada:'Ada Lovelace'},messages:[{id:'m',sender:'ada',recipient:null,text:'Hello team',created:1}],receipts:{},status:'Connected · end-to-end encrypted'} as {members:Record<string,string>;messages:{id:string;sender:string;recipient:string|null;text:string;created:number;attachments?:{id:string;name:string;size:number;type:string;sha256:string}[]}[];receipts:Record<string,string[]>;delivery?:Record<string,{state:string;detail?:string}>;attachments?:Record<string,Record<string,unknown>>;status:string}}));
+vi.mock('../teamMessaging/session',()=>({teamSession:()=>({retain:()=>()=>{},markRead:mock.markRead,subscribe:()=>()=>{},getSnapshot:()=>mock.snapshot,send:mock.send,attachment:mock.attachment,retry:mock.retry,discard:mock.discard})}));
 import {AccountChatView} from './AccountChatView';
-beforeEach(()=>{mock.markRead.mockClear();mock.send.mockClear();mock.retry.mockClear();mock.discard.mockClear();});
+beforeEach(()=>{mock.attachment.mockClear();mock.markRead.mockClear();mock.send.mockClear();mock.retry.mockClear();mock.discard.mockClear();});
 afterEach(cleanup);
 const channel={teamId:'engineering',userId:'me',peer:null,name:'Engineering'};
 const box=()=>screen.getByRole('textbox',{name:'Message'});
@@ -128,6 +128,62 @@ it('reports the conversation as on screen only while active',async()=>{
  expect(conversationShown('engineering','me',null)).toBe(false);
  rerender(<AccountChatView conversation={channel} active/>);unmount();
  expect(conversationShown('engineering','me',null)).toBe(false);
+});
+
+const picked=(name:string,bytes:number,type='text/plain')=>new File([new Uint8Array(bytes)],name,{type});
+it('attaches picked and pasted files as removable chips and sends them without text',async()=>{
+ render(<AccountChatView conversation={channel}/>);
+ const picker=document.querySelector('input[type=file]') as HTMLInputElement,click=vi.spyOn(picker,'click');
+ fireEvent.click(screen.getByRole('button',{name:'Attach files'}));expect(click).toHaveBeenCalled();
+ const notes=picked('notes.txt',2048),logs=picked('logs.txt',10);
+ fireEvent.change(picker,{target:{files:[notes,logs]}});
+ const chips=screen.getByRole('list',{name:'Attachments'});
+ expect(chips.textContent).toContain('notes.txt · 2.0 KB');expect(chips.textContent).toContain('logs.txt · 10 B');
+ fireEvent.click(screen.getByRole('button',{name:'Remove logs.txt'}));
+ expect(screen.queryByText('logs.txt')).toBeNull();
+ const shot=picked('image.png',5,'image/png');
+ fireEvent.paste(box(),{clipboardData:{files:[shot]}});
+ expect(chips.textContent).toContain('image.png');
+ expect((screen.getByRole('button',{name:'Send'}) as HTMLButtonElement).disabled).toBe(false);
+ fireEvent.click(screen.getByRole('button',{name:'Send'}));
+ await waitFor(()=>expect(mock.send).toHaveBeenCalledWith('',null,[notes,shot]));
+ expect(screen.queryByRole('list',{name:'Attachments'})).toBeNull();
+});
+it('refuses a file over 100 MB before it reaches the composer',()=>{
+ render(<AccountChatView conversation={channel}/>);
+ const huge=picked('huge.iso',1);Object.defineProperty(huge,'size',{value:100*1024*1024+1});
+ fireEvent.change(document.querySelector('input[type=file]')!,{target:{files:[huge]}});
+ expect(screen.getByRole('alert').textContent).toBe('huge.iso is larger than 100 MB');
+ expect(screen.queryByRole('list',{name:'Attachments'})).toBeNull();
+});
+it('shows each attachment state and pulls on Download',()=>{
+ const file=(id:string,name:string,type='application/pdf')=>({id,name,size:4096,type,sha256:'a'.repeat(64)});
+ withSnapshot({messages:[
+  {id:'r',sender:'ada',recipient:null,text:'',created:1,attachments:[file('idle','idle.pdf'),file('busy','busy.pdf'),file('away','away.pdf'),file('gone','gone.pdf'),file('bad','bad.pdf')]},
+  {id:'o',sender:'me',recipient:null,text:'mine',created:2,attachments:[file('mine','mine.pdf')]}],
+  attachments:{busy:{state:'downloading',received:1730,total:4096},away:{state:'unavailable',reason:'offline'},gone:{state:'unavailable',reason:'expired'},bad:{state:'failed',detail:'The file failed its integrity check'}}},()=>{
+  render(<AccountChatView conversation={channel}/>);
+  const chip=(name:string)=>screen.getByTitle(name).closest('.account-chat-file') as HTMLElement;
+  expect(chip('busy.pdf').textContent).toContain('Downloading 42%');
+  expect(chip('away.pdf').textContent).toContain('Waiting for Ada Lovelace to come online');
+  expect(chip('gone.pdf').textContent).toContain('No longer available');
+  expect(chip('bad.pdf').textContent).toContain('Failed');
+  expect(chip('idle.pdf').textContent).toContain('4.0 KB');
+  expect(chip('mine.pdf').textContent).toContain('Save');
+  expect(mock.attachment).not.toHaveBeenCalled();
+  fireEvent.click(screen.getByRole('button',{name:'Download'}));
+  expect(mock.attachment).toHaveBeenCalledWith('r','idle');
+ });
+});
+it('pulls a small image on sight and previews it',async()=>{
+ const create=vi.fn(()=>'blob:preview'),revoke=vi.fn();vi.stubGlobal('URL',Object.assign(URL,{createObjectURL:create,revokeObjectURL:revoke}));
+ const prev=mock.snapshot;mock.snapshot={...prev,messages:[{id:'r',sender:'ada',recipient:null,text:'',created:1,attachments:[{id:'img',name:'shot.png',size:2048,type:'image/png',sha256:'a'.repeat(64)}]}]};
+ try{
+  const {unmount}=render(<AccountChatView conversation={channel}/>);
+  expect(mock.attachment).toHaveBeenCalledWith('r','img');
+  await waitFor(()=>expect((screen.getByRole('img',{name:'shot.png'}) as HTMLImageElement).src).toBe('blob:preview'));
+  unmount();expect(revoke).toHaveBeenCalledWith('blob:preview');
+ }finally{mock.snapshot=prev;vi.unstubAllGlobals();}
 });
 it('renders links in team messages as clickable links',()=>{
  const previous=mock.snapshot.messages;mock.snapshot.messages=[{id:'u',sender:'ada',recipient:null,text:'see https://claude.com/resources/webinars/x.',created:2}];

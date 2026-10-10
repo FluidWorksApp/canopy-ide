@@ -132,3 +132,15 @@ it('refuses empty or oversized text without adding it to the conversation',async
  await expect(session.send('x'.repeat(16001),null)).rejects.toThrow('under 16 KB');
  expect(session.getSnapshot().messages).toEqual([]);expect(mocks.send).not.toHaveBeenCalled();
 });
+
+it('hashes attachments before the optimistic copy and hands the same metadata and bytes to the transport',async()=>{
+ const {session}=await open();mocks.send.mockImplementation(async(_t:string,_r:string,draft:{id:string})=>({id:draft.id,queued:false,partial:false}));
+ const file=Object.assign(new Blob(['peer to peer only'],{type:'text/plain'}),{name:'notes.txt'});
+ await expect(session.send('   ',null)).rejects.toThrow('Write a message first');
+ const outcome=await session.send('',null,[file]);
+ const [message]=session.getSnapshot().messages;
+ expect(message.id).toBe(outcome.id);expect(message.text).toBe('');
+ expect(message.attachments).toEqual([{id:expect.any(String),name:'notes.txt',size:17,type:'text/plain',sha256:expect.stringMatching(/^[a-f0-9]{64}$/)}]);
+ expect(mocks.send).toHaveBeenCalledWith('',null,{id:message.id,created:message.created},[{meta:message.attachments![0],blob:file}]);
+ await expect(session.send('',null,Array.from({length:11},()=>file))).rejects.toThrow('Attach up to 10 files');
+});
