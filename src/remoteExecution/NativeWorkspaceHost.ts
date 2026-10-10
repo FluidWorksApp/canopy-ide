@@ -48,6 +48,8 @@ export class NativeWorkspaceHost implements Host {
   private streams = new Map<number, Stream>();
   private metadata: Record<string, Args> = {};
   private disposed = false;
+  /** The workspace service's harness subscription (harnessStream.ts), while connected. */
+  harness?: {stop():void};
   private onAccountChanged=()=>{this.dispose();reportConnection(connectionKey(this.connection.endpoint,this.connection.workspaceId),'authentication-error');};
   private desktopListeners=new Set<UnlistenFn>();
   private poll?: ReturnType<typeof setTimeout>;
@@ -294,5 +296,5 @@ export class NativeWorkspaceHost implements Host {
     const list=this.listeners.get(event)??new Set();this.listeners.set(event,list);list.add(handler as (event:HostEvent<unknown>)=>void);this.beginPoll();return ()=>{list.delete(handler as (event:HostEvent<unknown>)=>void);};
   }
   channel<T>():HostChannel<T>{return {onmessage:()=>{}};}
-  dispose(){this.disposed=true;for(const release of [...this.desktopListeners]){try{release();}catch{/* Disposed handlers stay inert even if native teardown fails. */}}this.desktopListeners.clear();window.removeEventListener('canopy:account-changed',this.onAccountChanged);clearTimeout(this.heartbeat);for(const input of this.inputs.values())input.dispose();this.inputs.clear();clearTimeout(this.poll);for(const id of this.streams.keys())this.detach(id);this.listeners.clear();}
+  dispose(){this.disposed=true;this.harness?.stop();this.harness=undefined;for(const release of [...this.desktopListeners]){try{release();}catch{/* Disposed handlers stay inert even if native teardown fails. */}}this.desktopListeners.clear();window.removeEventListener('canopy:account-changed',this.onAccountChanged);clearTimeout(this.heartbeat);for(const input of this.inputs.values())input.dispose();this.inputs.clear();clearTimeout(this.poll);for(const id of this.streams.keys())this.detach(id);this.listeners.clear();}
 }

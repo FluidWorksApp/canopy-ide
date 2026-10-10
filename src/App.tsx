@@ -4,7 +4,8 @@ import {startBackgroundTeams} from "./teamMessaging/background";
 import {startTeamMessageNotifications} from "./teamMessaging/notifications";
 import {liveTeamSessions,subscribeTeamJobs} from "./teamMessaging/session";
 import {teamName} from "./teamMessaging/unread";
-import {createMeshJobs,type MeshJobs} from "./meshJobs";
+import {createMeshJobs,localRemoteJobs,type MeshJobs} from "./meshJobs";
+import {peekWorkspaceList} from "./remoteExecution/workspaceListCache";
 import {MeshJobInbox} from "./components/MeshJobInbox";
 import {ensureProjectWorkspace,ProjectWorkspaceProgress} from "./remoteExecution/projectWorkspace";
 import {stopIdleProjectWorkspace} from "./remoteExecution/projectIdle";
@@ -135,6 +136,7 @@ import { AboutDialog } from "./components/AboutDialog";
 import { Dictation } from "./components/Dictation";
 import { Companion } from "./components/Companion";
 import { startCompanion, stopCompanion, subscribeCompanion } from "./companionSession";
+import { slackConfirm, startSlack } from "./slackLive";
 import { remoteCompanionSnapshot } from "./remoteCompanion";
 import { companionToolNames } from "./companionTools";
 import {
@@ -245,6 +247,7 @@ const PROJECTLESS_OPS = new Set([
   // stands decides nothing.
   "mesh_targets",
   "mesh_submit",
+  "mesh_message_cloud",
 ]);
 
 /** Ticket for one companion-requested session launch, so the ProjectView that
@@ -843,6 +846,8 @@ export default function App() {
     resolve: resolveAttention,
     now: Date.now,
     newId: () => crypto.randomUUID(),
+    cloudWorkspaces: () => (peekWorkspaceList()?.workspaces ?? []).map((w) => ({ id: w.id, name: w.name })),
+    remoteJobs: localRemoteJobs(),
   });
   const meshJobs = meshJobsRef.current;
   useEffect(() => subscribeTeamJobs((event) => meshJobs.receive(event)), [meshJobs]);
@@ -3084,6 +3089,9 @@ export default function App() {
     [],
   );
   const startCompanionRef = useRef(launchCompanion);
+  // Slack requests arrive from the hub on canopyide.dev for the signed-in
+  // account; with nothing linked this only checks every few minutes.
+  useEffect(() => startSlack(), []);
   startCompanionRef.current = launchCompanion;
 
   const companionOn = useSyncExternalStore(
@@ -3275,7 +3283,23 @@ export default function App() {
                     : `${companionName()} is asking`,
                   source: "agent",
                 });
-                setProposal({ ...p, attentionId, resolve });
+                // A Slack turn asks in its thread as well; the first answer,
+                // there or on the chip, is the answer and closes the other.
+                const slack = slackConfirm(p);
+                let settled = false;
+                const answer = (a: { accepted: boolean; note?: string }) => {
+                  if (settled) return;
+                  settled = true;
+                  slack?.cancel(a.accepted);
+                  resolve(a);
+                };
+                setProposal({ ...p, attentionId, resolve: answer });
+                void slack?.answer.then((a) => {
+                  if (settled) return;
+                  resolveAttention(attentionId, a.accepted ? "answered" : "dismissed");
+                  setProposal((cur) => (cur?.resolve === answer ? null : cur));
+                  answer(a);
+                });
               }),
             openProject: async (name: string, why?: string | null) => {
               const target = wsRef.current.projects.find(

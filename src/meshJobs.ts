@@ -19,10 +19,19 @@
 // Every step (accepted, declined, started, done, blocked, failed) is reported
 // back into the submitting agent's terminal as a mesh message tagged
 // ref {kind: "job", id}, so the submitter can wait for it or look it up with
-// canopy_mesh. State is in memory: a restart forgets pending approvals and
-// in-flight jobs, and the 5-minute envelope window means a peer that is
-// offline that long misses a status update. Both are stated, not hidden, in
-// what the submit tool returns.
+// canopy_mesh.
+//
+// A cloud workspace has its own Canopy service with a host device on the
+// relay. A job for one goes there as a v2 envelope addressed to that workspace
+// (seven-day lifetime), and the service — not this window — decides whether it
+// runs: the owner's own account, or a granted teammate when the owner has
+// turned teammate delivery on. Those outgoing jobs are recorded durably, so a
+// status the service sends while this window is closed still reaches the
+// submitting terminal after a restart, if it is still open.
+//
+// Person-device jobs keep the in-memory state: a restart forgets their pending
+// approvals and in-flight runs, and their 5-minute envelope window means a peer
+// offline that long misses a status update. Both are stated in what submit returns.
 
 import type { AttentionInput } from "./attention";
 import type { Device } from "./teamMessaging/client";
@@ -33,6 +42,7 @@ import {
   type JobRequest,
   type JobState,
   type JobStatus,
+  type MeshMessage,
 } from "./teamMessaging/jobSchema";
 import type { TeamJobEvent, TeamJobSender } from "./teamMessaging/session";
 
@@ -44,6 +54,10 @@ export interface JobSession {
   devices(): Device[];
   deviceId(): string | undefined;
   submitJob(job: JobRequest, recipient: string, device?: string): Promise<Device>;
+  /** Host devices of cloud workspaces this account can reach. */
+  hosts?(): Device[];
+  submitWorkspaceJob?(job: JobRequest, workspace: string): Promise<Device>;
+  sendWorkspaceMessage?(message: MeshMessage, workspace: string): Promise<Device>;
   sendJobStatus(status: JobStatus, device: string): Promise<void>;
 }
 
@@ -67,6 +81,53 @@ export interface MeshJobDeps {
   resolve: (attentionId: string, how: "answered" | "withdrawn" | "dismissed") => void;
   now: () => number;
   newId: () => string;
+  /** Cloud workspaces of this account, by control-plane id and name. */
+  cloudWorkspaces?: () => { id: string; name: string }[];
+  /** Durable record of jobs sent to cloud workspaces. */
+  remoteJobs?: RemoteJobStore;
+}
+
+/** A job sent to a cloud workspace's service, kept until its final status. */
+export interface RemoteJob {
+  jobId: string;
+  ptyId: number;
+  instance: string;
+  title: string;
+  workspace: string;
+  target: string;
+  team: string;
+  device: string;
+  expires: number;
+}
+export interface RemoteJobStore {
+  load(): RemoteJob[];
+  put(job: RemoteJob): void;
+  remove(jobId: string): void;
+}
+const REMOTE_JOB_LIMIT = 200;
+const WORKSPACE_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+/** localStorage is enough: a few hundred small records, read once at startup. */
+export function localRemoteJobs(key = "canopy:mesh-remote-jobs:v1", storage: () => Storage = () => localStorage): RemoteJobStore {
+  const read = (): RemoteJob[] => {
+    try {
+      const rows = JSON.parse(storage().getItem(key) ?? "[]");
+      return Array.isArray(rows) ? rows.filter((r) => r && typeof r.jobId === "string" && Number.isSafeInteger(r.ptyId)) : [];
+    } catch {
+      return [];
+    }
+  };
+  const write = (rows: RemoteJob[]) => {
+    try {
+      storage().setItem(key, JSON.stringify(rows.slice(-REMOTE_JOB_LIMIT)));
+    } catch {
+      /* quota: the in-memory record still reports */
+    }
+  };
+  return {
+    load: () => read().filter((r) => r.expires > Date.now()),
+    put: (job) => write([...read().filter((r) => r.jobId !== job.jobId && r.expires > Date.now()), job]),
+    remove: (jobId) => write(read().filter((r) => r.jobId !== jobId)),
+  };
 }
 
 /** A job someone else sent this account, waiting on the user. */
@@ -89,7 +150,7 @@ interface Origin {
   ptyId: number;
   instance: string;
 }
-type Outgoing = Origin & { title: string; team?: string; device?: string; target: string };
+type Outgoing = Origin & { title: string; team?: string; device?: string; target: string; workspace?: string };
 /** A run this window started for a job, keyed by its task run id. */
 type RunOrigin =
   | { kind: "local"; jobId: string; origin: Origin }
@@ -137,12 +198,14 @@ export function incomingBrief(job: JobRequest, from: string): string {
 const STEP: Record<JobState, string> = {
   accepted: "approved",
   declined: "declined",
+  refused: "refused",
+  interrupted: "interrupted",
   started: "started",
   done: "done",
   blocked: "blocked",
   failed: "failed",
 };
-const FINAL = new Set<JobState>(["declined", "done", "failed"]);
+const FINAL = new Set<JobState>(["declined", "refused", "done", "failed", "interrupted"]);
 
 export function stepText(title: string, where: string, state: JobState, detail: string): string {
   const head = `Job "${title}" (${where}) ${STEP[state]}`;
@@ -151,6 +214,9 @@ export function stepText(title: string, where: string, state: JobState, detail: 
 
 export function createMeshJobs(deps: MeshJobDeps) {
   const outgoing = new Map<string, Outgoing>();
+  for (const r of deps.remoteJobs?.load() ?? []) {
+    outgoing.set(r.jobId, { ptyId: r.ptyId, instance: r.instance, title: r.title, team: r.team, device: r.device, target: r.target, workspace: r.workspace });
+  }
   const runs = new Map<string, RunOrigin>();
   const seen = new Set<string>();
   let inbox: IncomingJob[] = [];
@@ -216,6 +282,11 @@ export function createMeshJobs(deps: MeshJobDeps) {
     }
     return {
       workspaces: deps.workspaces().map((w) => w.name),
+      cloudWorkspaces: (deps.cloudWorkspaces?.() ?? []).map((w) => ({
+        id: w.id,
+        name: w.name,
+        reachable: sessions.some((s) => s.hosts?.().some((h) => h.workspaceIds?.includes(w.id))),
+      })),
       myMachines: machines,
       teammates: [...people.values()],
       note: sessions.length
@@ -252,6 +323,59 @@ export function createMeshJobs(deps: MeshJobDeps) {
     throw new Error(`No teammate called "${member}" — see canopy_mesh_targets.`);
   }
 
+  function cloudWorkspace(wanted: string) {
+    const key = wanted.trim().toLowerCase();
+    return (deps.cloudWorkspaces?.() ?? []).find((w) => w.id.toLowerCase() === key || w.name.toLowerCase() === key);
+  }
+
+  async function submitRemote(req: { id: string; title: string; brief: string; origin: Origin; cloud: { id: string; name: string }; agent?: string | null }) {
+    const { id, title, brief, origin, cloud } = req;
+    const agent = req.agent?.trim();
+    const job: JobRequest = { id, title, brief, workspace: cloud.id, created: deps.now(), ...(agent ? { target: { name: agent } } : {}) };
+    const errors: string[] = [];
+    for (const s of deps.sessions()) {
+      if (!s.submitWorkspaceJob) continue;
+      try {
+        const device = await s.submitWorkspaceJob(job, cloud.id);
+        const record: RemoteJob = { jobId: id, ...origin, title, workspace: cloud.id, target: cloud.name, team: s.team, device: device.id, expires: deps.now() + WORKSPACE_TTL_MS };
+        deps.remoteJobs?.put(record);
+        outgoing.set(id, { ...origin, title, team: s.team, device: device.id, target: cloud.name, workspace: cloud.id });
+        return {
+          jobId: id,
+          status: "sent",
+          workspace: cloud.name,
+          device: device.id,
+          note: `Sent to the Canopy service of cloud workspace ${cloud.name}. It waits on the encrypted relay for up to 7 days while that workspace is stopped. The service runs it for the workspace owner's account, or for a granted teammate only when the owner allows teammates' agents; otherwise it is refused and you hear why. Updates arrive here as mesh notices tagged ref {kind: "job", id: "${id}"}.`,
+        };
+      } catch (err) {
+        errors.push(err instanceof Error ? err.message : String(err));
+      }
+    }
+    throw new Error(errors[0] ?? `Sign in to a Canopy team to reach cloud workspace ${cloud.name}.`);
+  }
+
+  /** An agent message to an agent in a cloud workspace, through its service. */
+  async function message(req: { workspace: string; text: string; agent?: string | null; ptyId?: number | null; replyTo?: string }) {
+    const cloud = cloudWorkspace(req.workspace);
+    if (!cloud) throw new Error(`No cloud workspace called "${req.workspace}".`);
+    const text = (req.text ?? "").trim();
+    if (!text) throw new Error("A message needs text.");
+    const target = req.ptyId != null ? { ptyId: req.ptyId } : req.agent?.trim() ? { name: req.agent.trim() } : null;
+    if (!target) throw new Error("Name the agent to message (its name or ptyId).");
+    const msg: MeshMessage = { id: deps.newId(), text, target, created: deps.now(), ...(req.replyTo ? { replyTo: req.replyTo } : {}) };
+    const errors: string[] = [];
+    for (const s of deps.sessions()) {
+      if (!s.sendWorkspaceMessage) continue;
+      try {
+        await s.sendWorkspaceMessage(msg, cloud.id);
+        return { messageId: msg.id, status: "sent", workspace: cloud.name };
+      } catch (err) {
+        errors.push(err instanceof Error ? err.message : String(err));
+      }
+    }
+    throw new Error(errors[0] ?? `Sign in to a Canopy team to reach cloud workspace ${cloud.name}.`);
+  }
+
   async function submit(req: {
     brief: string;
     title?: string | null;
@@ -260,6 +384,8 @@ export function createMeshJobs(deps: MeshJobDeps) {
     device?: string | null;
     ptyId?: number | null;
     instance?: string | null;
+    /** The agent in a cloud workspace that takes the job; the service picks when absent. */
+    agent?: string | null;
   }) {
     const brief = (req.brief ?? "").trim();
     if (!brief) throw new Error("A job needs a brief.");
@@ -275,6 +401,8 @@ export function createMeshJobs(deps: MeshJobDeps) {
     if (!member) {
       if (!workspace) throw new Error("Name the workspace to run the job in (see canopy_mesh_targets).");
       const named = pickWorkspace(workspace, deps.workspaces());
+      const cloud = named ? undefined : cloudWorkspace(workspace);
+      if (cloud) return submitRemote({ id, title, brief, origin, cloud, agent: req.agent });
       if (!named) {
         throw new Error(
           `No workspace called "${workspace}" — the workspaces are: ${deps.workspaces().map((w) => w.name).join(", ")}`,
@@ -347,14 +475,24 @@ export function createMeshJobs(deps: MeshJobDeps) {
   }
 
   function receive(event: TeamJobEvent) {
-    if (event.kind === "job-status") {
-      const sent = outgoing.get(event.status.jobId);
-      // Only the device the job went to may speak for it.
-      if (!sent || sent.device !== event.sender.device || sent.team !== event.team) return;
-      void report(sent, event.status.jobId, stepText(sent.title, sent.target, event.status.state, event.status.detail));
-      if (FINAL.has(event.status.state)) outgoing.delete(event.status.jobId);
+    if (event.kind === "mesh" || event.kind === "mesh-status") {
+      if (event.kind === "mesh-status")
+        deps.post({ kind: "fyi", tone: "warn", source: "team", title: `A cloud workspace refused an agent message: ${event.status.detail}`, where: { kind: "panel", panel: "team" } });
       return;
     }
+    if (event.kind === "job-status") {
+      const sent = outgoing.get(event.status.jobId);
+      // Only the device the job went to may speak for it, and a service only for its own workspace.
+      if (!sent || sent.device !== event.sender.device || sent.team !== event.team || sent.workspace !== event.workspace) return;
+      void report(sent, event.status.jobId, stepText(sent.title, sent.target, event.status.state, event.status.detail));
+      if (FINAL.has(event.status.state)) {
+        outgoing.delete(event.status.jobId);
+        if (sent.workspace) deps.remoteJobs?.remove(event.status.jobId);
+      }
+      return;
+    }
+    // A cloud service never sends this window a job; jobs arrive from people's devices.
+    if (event.workspace) return;
     const { job } = event;
     if (seen.has(job.id)) return;
     seen.add(job.id);
@@ -443,6 +581,7 @@ export function createMeshJobs(deps: MeshJobDeps) {
   return {
     targets,
     submit,
+    message,
     receive,
     approve,
     decline,

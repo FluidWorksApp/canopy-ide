@@ -3,7 +3,7 @@ import {invoke} from '@tauri-apps/api/core';
 import {PeerClient,AttachmentUnavailable,type Attachment,type AttachmentState,type ChatMessage,type Device} from './client';
 import {prepareFile} from './files';
 import {MAX_ATTACHMENTS} from './messageSchema';
-import type {JobRequest,JobStatus} from './jobSchema';
+import type {JobRequest,JobStatus,MeshMessage,MeshStatus} from './jobSchema';
 import {countUnread,type ConversationUnread} from './unread';
 
 /** Local lifecycle of a message this account sent. A delivery receipt (tracked
@@ -44,7 +44,8 @@ export const subscribeTeamMessages=(listener:(event:TeamMessageEvent)=>void)=>{m
 /** Who sent a job or job status, as the envelope proved it: `user` is the
  * server-authenticated account, `device` the signing device. */
 export type TeamJobSender={user:string;device:string;name?:string};
-export type TeamJobEvent={team:string;user:string;sender:TeamJobSender}&({kind:'job';job:JobRequest}|{kind:'job-status';status:JobStatus});
+/** `workspace` is set for v2 workspace traffic: the cloud workspace the envelope's signed header names. */
+export type TeamJobEvent={team:string;user:string;sender:TeamJobSender;workspace?:string}&({kind:'job';job:JobRequest}|{kind:'job-status';status:JobStatus}|{kind:'mesh';message:MeshMessage}|{kind:'mesh-status';status:MeshStatus});
 const jobListeners=new Set<(event:TeamJobEvent)=>void>();
 export const subscribeTeamJobs=(listener:(event:TeamJobEvent)=>void)=>{jobListeners.add(listener);return()=>{jobListeners.delete(listener);};};
 export class TeamSession {
@@ -80,7 +81,9 @@ export class TeamSession {
     if(incoming){const event={team:this.team,user:this.user,message,senderName:this.snapshot.members[message.sender]};messageListeners.forEach(fn=>{try{fn(event);}catch{/* a listener never breaks delivery */}});}
    },
    job:(job,sender)=>this.emitJob(sender,{kind:'job',job}),
-   jobStatus:(status,sender)=>this.emitJob(sender,{kind:'job-status',status}),
+   jobStatus:(status,sender,workspace)=>this.emitJob(sender,{kind:'job-status',status},workspace),
+   mesh:(message,sender,workspace)=>this.emitJob(sender,{kind:'mesh',message},workspace),
+   meshStatus:(status,sender,workspace)=>this.emitJob(sender,{kind:'mesh-status',status},workspace),
    receipt:(id,user)=>{if(this.invalid||!this.snapshot.messages.some(m=>m.id===id))return;this.update({receipts:{...this.snapshot.receipts,[id]:[...new Set([...(this.snapshot.receipts[id]??[]),user])].slice(-512)}});this.persistReadState();},
    status:status=>{this.update({status});if(status.startsWith('Connected'))this.resendWaiting();},
    pending:ids=>{
@@ -109,9 +112,9 @@ export class TeamSession {
   }catch{this.update({status:'Local history could not be restored.'});}
   if(!this.invalid)await this.client.start().catch(e=>this.update({status:String(e)}));
  }
- private emitJob(sender:Device,body:{kind:'job';job:JobRequest}|{kind:'job-status';status:JobStatus}){
+ private emitJob(sender:Device,body:{kind:'job';job:JobRequest}|{kind:'job-status';status:JobStatus}|{kind:'mesh';message:MeshMessage}|{kind:'mesh-status';status:MeshStatus},workspace?:string){
   if(this.invalid)return;
-  const event:TeamJobEvent={team:this.team,user:this.user,sender:{user:sender.user_id,device:sender.id,name:this.snapshot.members[sender.user_id]},...body};
+  const event:TeamJobEvent={team:this.team,user:this.user,sender:{user:sender.user_id,device:sender.id,name:this.snapshot.members[sender.user_id]},...(workspace?{workspace}:{}),...body};
   jobListeners.forEach(fn=>{try{fn(event);}catch{/* a listener never breaks delivery */}});
  }
  /** Team members by account id, as the directory last named them. */
@@ -121,6 +124,15 @@ export class TeamSession {
  async submitJob(job:JobRequest,recipient:string,device?:string){
   if(this.invalid)throw Error('Sign in again to submit jobs');
   await this.ready;return this.client.sendJob(job,recipient,device);
+ }
+ hosts(){return this.invalid?[]:this.client.directoryHosts();}
+ async submitWorkspaceJob(job:JobRequest,workspace:string){
+  if(this.invalid)throw Error('Sign in again to submit jobs');
+  await this.ready;return this.client.sendWorkspaceJob(job,workspace);
+ }
+ async sendWorkspaceMessage(message:MeshMessage,workspace:string){
+  if(this.invalid)throw Error('Sign in again to message agents');
+  await this.ready;return this.client.sendWorkspaceMessage(message,workspace);
  }
  async sendJobStatus(status:JobStatus,device:string){
   if(this.invalid)throw Error('Signed out of this team');

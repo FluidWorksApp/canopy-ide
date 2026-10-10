@@ -591,6 +591,54 @@ export async function sendToCompanion(
   }
 }
 
+/** A turn asked from outside the panel (Slack), answered back there. Waits for
+ *  the companion to be free rather than interleaving with the user's own turn,
+ *  and resolves with the reply once the turn ends. No spotlight envelope: the
+ *  person asking is not the one looking at this window. */
+export async function askCompanion(
+  shown: string,
+  wire: string,
+  { timeoutMs = 10 * 60_000 }: { timeoutMs?: number } = {},
+): Promise<{ text: string; failed: boolean }> {
+  const until = (done: () => boolean) =>
+    new Promise<void>((resolve, reject) => {
+      if (done()) return resolve();
+      const timer = setTimeout(() => {
+        off();
+        reject(new Error("The companion did not answer in time."));
+      }, timeoutMs);
+      const off = subscribeCompanion(() => {
+        if (!done()) return;
+        clearTimeout(timer);
+        off();
+        resolve();
+      });
+    });
+  await until(() => state.status !== "working");
+  if (!transport || state.status !== "ready") {
+    throw new Error("The companion is not running in Canopy right now.");
+  }
+  const replyId = nextId();
+  set({
+    status: "working",
+    error: null,
+    messages: [
+      ...state.messages.slice(-(MAX_COMPANION_MESSAGES - 2)),
+      { id: nextId(), who: "you", text: shown },
+      { id: replyId, who: "ash", text: "" },
+    ],
+  });
+  try {
+    await transport.send(wire);
+  } catch (err) {
+    set({ status: "ready", error: String(err) });
+    throw err;
+  }
+  await until(() => state.status !== "working");
+  const reply = state.messages.find((m) => m.id === replyId);
+  return { text: reply?.text.trim() ?? "", failed: !!reply?.failed };
+}
+
 /** Clear what is on screen. Deliberately not a new conversation: the CLI still
  *  holds the transcript, so this is tidying the panel, and the companion still
  *  remembers. Starting over is `forgetCompanionSession`, in Settings. */

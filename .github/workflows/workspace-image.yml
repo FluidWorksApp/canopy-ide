@@ -14,6 +14,9 @@ on:
       - 'shared/agentLife/**'
       - 'src/teamMessaging/**'
       - 'packages/control-plane/lib/peer-messaging.mjs'
+      - 'crates/canopy-core/**'
+      - 'crates/canopy-service/**'
+      - 'src-tauri/Cargo.lock'
       - '.github/workflows/workspace-image.yml'
   workflow_dispatch:
     inputs:
@@ -38,8 +41,10 @@ jobs:
         include:
           - arch: amd64
             runner: ubuntu-24.04
+            rust_target: x86_64-unknown-linux-musl
           - arch: arm64
             runner: ubuntu-24.04-arm
+            rust_target: aarch64-unknown-linux-musl
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 60
     permissions:
@@ -55,6 +60,27 @@ jobs:
       - run: node --test packages/remote-host/*.test.mjs
       - run: node packages/remote-host/prepare-hook-build.mjs
       - run: node packages/remote-host/prepare-browser-build.mjs
+      # canopy-serviced ships in the host release archive (not the image), as a
+      # static musl binary so it runs on any managed host's libc.
+      - name: Build canopy-serviced (${{ matrix.rust_target }})
+        env:
+          TARGET: ${{ matrix.rust_target }}
+        run: |
+          sudo apt-get install -y musl-tools
+          rustup toolchain install stable --profile minimal --target "$TARGET"
+          target_env=$(printf '%s' "$TARGET" | tr '[:lower:]-' '[:upper:]_')
+          export "CC_$(printf '%s' "$TARGET" | tr '-' '_')=musl-gcc" "CARGO_TARGET_${target_env}_LINKER=musl-gcc"
+          cargo +stable build --locked --release --manifest-path crates/canopy-service/Cargo.toml -p canopy-service --bin canopy-serviced --target "$TARGET"
+          mkdir -p service-bin
+          install -m 0755 "src-tauri/target/$TARGET/release/canopy-serviced" "service-bin/canopy-serviced-linux-${{ matrix.arch }}"
+          file "service-bin/canopy-serviced-linux-${{ matrix.arch }}" | grep -q 'statically linked'
+          sha256sum "service-bin/canopy-serviced-linux-${{ matrix.arch }}"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: canopy-serviced-${{ github.sha }}-${{ matrix.arch }}
+          path: service-bin/canopy-serviced-linux-${{ matrix.arch }}
+          retention-days: 7
+          if-no-files-found: error
       - uses: docker/setup-buildx-action@v3
       - name: Build candidate locally
         uses: docker/build-push-action@v6
@@ -116,6 +142,11 @@ jobs:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: canopy-serviced-${{ github.sha }}-*
+          path: service-bin
+          merge-multiple: true
       - name: Assemble immutable release after both platforms pass
         env:
           REVISION: ${{ github.sha }}
@@ -127,8 +158,10 @@ jobs:
           cat workspace-release.json >> "$GITHUB_STEP_SUMMARY"
       - name: Package matching trusted host runtime
         run: |
+          # Bind each architecture's canopy-serviced to the manifest it ships with.
+          node packages/remote-host/service-release.mjs --merge workspace-release.json service-bin
           node packages/remote-host/prepare-browser-build.mjs
-          bash packages/remote-host/package-host-release.sh workspace-host.tar.gz workspace-release.json
+          bash packages/remote-host/package-host-release.sh workspace-host.tar.gz workspace-release.json service-bin
           sha256sum workspace-host.tar.gz > workspace-host.tar.gz.sha256
       # The archive is uploaded (and can reach S3/production) only after this
       # exact archive booted like a managed host: root image step, then

@@ -462,7 +462,7 @@ export interface UiOpContext {
   }) => Promise<{ started: boolean; project: string; dir: string; note: string; runId?: string }>;
   /** Mesh jobs (meshJobs.ts): where a job can go, and submitting one. Open to
    *  every agent, not just the companion. */
-  meshJobs?: Pick<MeshJobs, "targets" | "submit">;
+  meshJobs?: Pick<MeshJobs, "targets" | "submit" | "message">;
   /** The preview tab an agent's browser ops are driving, for the vault ops:
    *  filling a credential needs to know which page is being logged in to. */
   preview: () => Promise<PreviewTarget | null>;
@@ -703,6 +703,15 @@ export async function runUiOp(op: ipc.AgentUiOp, ctx: UiOpContext): Promise<unkn
         device: op.device,
         ptyId: op.ptyId,
         instance: op.instance,
+        agent: op.agent,
+      });
+    case "mesh_message_cloud":
+      return needMeshJobs(ctx).message({
+        workspace: op.project ?? "",
+        text: op.prompt ?? "",
+        agent: op.agent,
+        ptyId: op.targetPtyId,
+        ...(op.replyTo ? { replyTo: op.replyTo } : {}),
       });
     case "pr_details":
       return prDetails(op, ctx);

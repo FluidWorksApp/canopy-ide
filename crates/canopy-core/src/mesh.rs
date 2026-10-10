@@ -1,0 +1,1302 @@
+// The agent mesh's message store: every message one agent sends another,
+// first-class and durable.
+//
+// canopy_message_agent delivers by typing into the target's terminal — the one
+// interface every CLI has — but the message itself used to live only in that
+// keystroke stream: no id to reply to, no history an agent could read back,
+// one flattened line of plain text or nothing. This store is the message's
+// real home. Delivery is still a typed line; the record is the artifact, and
+// it can be more than the line — a multi-line body, shared files, a reply
+// pointer, a typed reference other systems can query by.
+//
+// Doctrine, inherited from claims (context.rs) and the mesh audit:
+//   - identity comes from the terminal's credential, never the body: the
+//     `from` fields are filled in by the bridge from `Caller`, and no argument
+//     an agent passes can claim another sender;
+//   - one write door: `record` is called from the bridge's action handler and
+//     nowhere else;
+//   - unlike claims, messages survive a restart. "What did I send, to whom,
+//     and what came back" is a question about history, and its answer must not
+//     depend on whether the app has been relaunched since — so the log lives
+//     under ~/.canopy/mesh, outside every repo, exactly as notes and research
+//     do and for the same reasons.
+
+use crate::claims::Claim;
+use crate::events::{EventSink, Store, StoreChange};
+use rusqlite::{params, Connection, TransactionBehavior};
+use serde::{Deserialize, Serialize};
+use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
+use sysinfo::{Pid, ProcessesToUpdate, System};
+
+/// Dual cap for the rewritten JSONL log. A count cap alone allowed 500 maximum
+/// sized mesh bodies (~16 MiB) to be serialized on each delivery-state change.
+/// Keep the newest traffic while bounding the actual rewrite cost.
+const MAX_KEPT: usize = 500;
+const MAX_KEPT_BYTES: usize = 2 * 1024 * 1024;
+/// The append log may briefly retain superseded delivery events and messages
+/// that the in-memory cap has dropped. Compact before that history can cost
+/// more than twice the authoritative message window.
+const MAX_LOG_BYTES: u64 = (MAX_KEPT_BYTES * 2) as u64;
+const MAX_CLAIM_HISTORY: usize = 200;
+
+/// How long a message stays even under the count cap. Pty ids only mean
+/// anything within the app run that minted them, so week-old traffic names
+/// terminals that no longer exist. Applied by `prune_stale`, which the
+/// maintenance scheduler calls (maintenance.rs) — never the write path.
+pub const MAX_AGE_MS: u64 = 7 * 24 * 60 * 60 * 1000;
+
+/// One shared item riding on a message: a file on this machine, by absolute
+/// path. "Multimodal" here means the receiver opens it with its own tools —
+/// the mesh carries the reference and what it is, not the bytes, so a
+/// screenshot, a log or a diff costs the store one line either way.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct MeshItem {
+    /// "image" for formats a model can look at directly, else "file".
+    pub kind: String,
+    pub path: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+}
+
+/// A typed reference a message can carry — a task, an attempt, a PR — so
+/// "every message about X" is one query rather than an archaeology dig. The
+/// kinds are deliberately open: the mesh records them, it does not know them.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct MeshRef {
+    pub kind: String,
+    pub id: String,
+}
+
+/// One agent-to-agent message. Field names are the store's wire format twice
+/// over — each is one JSONL line on disk, and `context_messages` hands the
+/// same shape to the frontend — so additions here must default cleanly for
+/// lines written before they existed.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct MeshMessage {
+    /// "m<n>", unique across app runs: the counter resumes past everything
+    /// the log already holds.
+    pub id: String,
+    /// The terminal it came from, when the sender was an agent. `None` is the
+    /// companion or another root-token caller.
+    #[serde(default)]
+    pub from_pty_id: Option<u32>,
+    #[serde(default)]
+    pub from_cwd: Option<String>,
+    #[serde(default)]
+    pub from_name: Option<String>,
+    /// Which CLI the sender was, and what its run was titled at send time —
+    /// the "who is this and what are they working on" that a bare pty id
+    /// stops answering the moment the app restarts.
+    #[serde(default)]
+    pub from_agent: Option<String>,
+    #[serde(default)]
+    pub from_task: Option<String>,
+    pub to_pty_id: u32,
+    #[serde(default)]
+    pub to_cwd: Option<String>,
+    #[serde(default)]
+    pub to_name: Option<String>,
+    #[serde(default)]
+    pub to_agent: Option<String>,
+    #[serde(default)]
+    pub to_task: Option<String>,
+    /// The message itself, as the sender wrote it. For a plain
+    /// canopy_message_agent send this is the sanitised delivered line; for a
+    /// mesh send it is the full body, and `delivered` records the notice.
+    pub text: String,
+    /// The line actually typed into the target, when it differs from `text`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delivered: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub items: Vec<MeshItem>,
+    /// The message this answers, by id — what turns a log into threads.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reply_to: Option<String>,
+    #[serde(rename = "ref", default, skip_serializing_if = "Option::is_none")]
+    pub reference: Option<MeshRef>,
+    /// The app run that delivered it. Pty ids restart at 1 every launch, so
+    /// without this a message from a previous run appears to involve whatever
+    /// terminal holds that small integer now.
+    #[serde(default)]
+    pub instance: Option<String>,
+    pub at_ms: u64,
+    /// False when the terminal died before the return that submits the typed
+    /// line could be written — the notice is sitting unsent in a composer
+    /// nobody will press enter on.
+    pub submitted: bool,
+}
+
+/// Everything the bridge knows at send time. The store adds the id and the
+/// submitted flag; everything else is evidence the caller of `record` already
+/// established.
+pub struct NewMessage {
+    pub from_pty_id: Option<u32>,
+    pub from_cwd: Option<String>,
+    pub from_name: Option<String>,
+    pub from_agent: Option<String>,
+    pub from_task: Option<String>,
+    pub to_pty_id: u32,
+    pub to_cwd: Option<String>,
+    pub to_name: Option<String>,
+    pub to_agent: Option<String>,
+    pub to_task: Option<String>,
+    pub text: String,
+    pub items: Vec<MeshItem>,
+    pub reply_to: Option<String>,
+    pub reference: Option<MeshRef>,
+    pub instance: Option<String>,
+    pub at_ms: u64,
+}
+
+/// Append-only mutations for the durable JSONL. Existing installations contain
+/// bare `MeshMessage` lines; the loader accepts both and compaction writes the
+/// old canonical form, so this changes write amplification without a migration.
+#[derive(Serialize, Deserialize)]
+#[serde(tag = "mesh_event", rename_all = "snake_case")]
+enum MeshLogEntry {
+    Message { message: MeshMessage },
+    Delivery { id: String, line: String },
+    Submitted { id: String },
+}
+
+/// One severed agent pair: the user cut the edge between two terminals in the
+/// control panel, and delivery between them — either direction — is refused at
+/// `record` until they reconnect it. Keyed the way claims key identity
+/// (pty id + the app launch that minted it), because a pty id from another
+/// launch names a different terminal.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct SeveredPair {
+    /// The two terminals, lower pty id first — one row per pair, not per
+    /// direction.
+    pub a: u32,
+    pub b: u32,
+    pub instance: String,
+    pub at_ms: u64,
+}
+
+/// Why `record` refused: the user severed this pair. The wording and the
+/// status code are the send door's business (context.rs), not the store's.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Severed {
+    pub from_pty_id: u32,
+    pub to_pty_id: u32,
+}
+
+/// How many severed pairs the store keeps. Rows from previous app launches
+/// never match again (their pty ids name nothing), so the cap is what stops
+/// them accumulating forever.
+const MAX_SEVERED: usize = 100;
+
+struct Inner {
+    messages: Vec<MeshMessage>,
+    severed: Vec<SeveredPair>,
+    next_id: u64,
+    /// None means "nowhere to persist" (no home directory): the mesh still
+    /// works for this run, it just starts empty next time.
+    path: Option<PathBuf>,
+    persisted_bytes: u64,
+}
+
+pub struct MeshStore {
+    inner: Mutex<Inner>,
+    events: Arc<dyn EventSink>,
+}
+
+impl MeshStore {
+    #[cfg(test)]
+    fn at(path: Option<PathBuf>) -> Self {
+        Self::with_events(path, Arc::new(crate::events::NoopEventSink))
+    }
+
+    /// Open an explicit store location. None keeps the legacy in-memory mode.
+    /// The caller owns workspace scoping and must provide one writer per log.
+    pub fn with_events(path: Option<PathBuf>, events: Arc<dyn EventSink>) -> Self {
+        let mut messages: Vec<MeshMessage> = Vec::new();
+        let mut severed: Vec<SeveredPair> = Vec::new();
+        let persisted_bytes = path
+            .as_ref()
+            .and_then(|path| std::fs::metadata(path).ok())
+            .map(|metadata| metadata.len())
+            .unwrap_or(0);
+        if let Some(p) = &path {
+            if let Ok(raw) = std::fs::read_to_string(p) {
+                // A line that doesn't parse is skipped, not fatal: one
+                // corrupted write must not take the whole history with it.
+                for line in raw.lines() {
+                    if let Ok(entry) = serde_json::from_str::<MeshLogEntry>(line) {
+                        apply_log_entry(&mut messages, entry);
+                    } else if let Ok(message) = serde_json::from_str::<MeshMessage>(line) {
+                        messages.push(message);
+                    }
+                }
+            }
+            if let Ok(raw) = std::fs::read_to_string(severed_sibling(p)) {
+                severed.extend(
+                    raw.lines()
+                        .filter_map(|l| serde_json::from_str::<SeveredPair>(l).ok()),
+                );
+            }
+        }
+        cap_messages(&mut messages);
+        // Resume past everything ever written, including messages the cap has
+        // already dropped from the front — an id, once handed out, is never
+        // reused for a different message.
+        let next_id = messages
+            .iter()
+            .filter_map(|m| m.id.strip_prefix('m')?.parse::<u64>().ok())
+            .max()
+            .unwrap_or(0)
+            + 1;
+        MeshStore {
+            events,
+            inner: Mutex::new(Inner {
+                messages,
+                severed,
+                next_id,
+                path,
+                persisted_bytes,
+            }),
+        }
+    }
+
+    /// The one write door. Mints the id, appends, caps, persists, and returns
+    /// the record as stored. A send between a severed pair is refused here —
+    /// at the door every delivery path already goes through — so nothing is
+    /// recorded and nothing is delivered, whichever tool asked.
+    pub fn record(&self, new: NewMessage) -> Result<MeshMessage, Severed> {
+        let mut inner = self.inner.lock().unwrap();
+        if let (Some(from), Some(instance)) = (new.from_pty_id, new.instance.as_deref()) {
+            if inner
+                .severed
+                .iter()
+                .any(|s| s.instance == instance && pair_of(from, new.to_pty_id) == (s.a, s.b))
+            {
+                return Err(Severed {
+                    from_pty_id: from,
+                    to_pty_id: new.to_pty_id,
+                });
+            }
+        }
+        let id = format!("m{}", inner.next_id);
+        inner.next_id += 1;
+        let msg = MeshMessage {
+            id,
+            from_pty_id: new.from_pty_id,
+            from_cwd: new.from_cwd,
+            from_name: new.from_name,
+            from_agent: new.from_agent,
+            from_task: new.from_task,
+            to_pty_id: new.to_pty_id,
+            to_cwd: new.to_cwd,
+            to_name: new.to_name,
+            to_agent: new.to_agent,
+            to_task: new.to_task,
+            text: new.text,
+            delivered: None,
+            items: new.items,
+            reply_to: new.reply_to,
+            reference: new.reference,
+            instance: new.instance,
+            at_ms: new.at_ms,
+            submitted: false,
+        };
+        inner.messages.push(msg.clone());
+        cap_messages(&mut inner.messages);
+        inner.append(MeshLogEntry::Message {
+            message: msg.clone(),
+        });
+        self.events.publish(StoreChange {
+            store: Store::Mesh,
+            scope: String::new(),
+            id: msg.id.clone(),
+        });
+        Ok(msg)
+    }
+
+    /// Record what was actually typed into the target, when it differs from
+    /// the body (a mesh send's notice line).
+    pub fn note_delivery(&self, id: &str, line: &str) {
+        let mut inner = self.inner.lock().unwrap();
+        if let Some(index) = inner.messages.iter().position(|m| m.id == id) {
+            inner.messages[index].delivered = Some(line.to_string());
+            inner.append(MeshLogEntry::Delivery {
+                id: id.to_string(),
+                line: line.to_string(),
+            });
+        }
+    }
+
+    /// The return that submits the typed line landed.
+    pub fn mark_submitted(&self, id: &str) {
+        let mut inner = self.inner.lock().unwrap();
+        if let Some(index) = inner.messages.iter().position(|m| m.id == id) {
+            inner.messages[index].submitted = true;
+            inner.append(MeshLogEntry::Submitted { id: id.to_string() });
+            self.events.publish(StoreChange {
+                store: Store::Mesh,
+                scope: String::new(),
+                id: id.to_string(),
+            });
+        }
+    }
+
+    /// Sever or reconnect one pair, from the control panel. The pair is
+    /// unordered — a severed connection blocks both directions — and keyed to
+    /// the launch whose pty ids these are. Returns whether anything changed.
+    pub fn set_severed(&self, a: u32, b: u32, instance: &str, severed: bool, at_ms: u64) -> bool {
+        if a == b {
+            return false;
+        }
+        let mut inner = self.inner.lock().unwrap();
+        let pair = pair_of(a, b);
+        let at = inner
+            .severed
+            .iter()
+            .position(|s| s.instance == instance && (s.a, s.b) == pair);
+        let changed = match (at, severed) {
+            (None, true) => {
+                inner.severed.push(SeveredPair {
+                    a: pair.0,
+                    b: pair.1,
+                    instance: instance.to_string(),
+                    at_ms,
+                });
+                if inner.severed.len() > MAX_SEVERED {
+                    let excess = inner.severed.len() - MAX_SEVERED;
+                    inner.severed.drain(0..excess);
+                }
+                true
+            }
+            (Some(i), false) => {
+                inner.severed.remove(i);
+                true
+            }
+            _ => false,
+        };
+        if changed {
+            inner.persist_severed();
+            self.events.publish(StoreChange {
+                store: Store::Mesh,
+                scope: String::new(),
+                id: String::new(),
+            });
+        }
+        changed
+    }
+
+    /// Every severed pair, oldest first.
+    pub fn severed_pairs(&self) -> Vec<SeveredPair> {
+        self.inner.lock().unwrap().severed.clone()
+    }
+
+    pub fn get(&self, id: &str) -> Option<MeshMessage> {
+        self.inner
+            .lock()
+            .unwrap()
+            .messages
+            .iter()
+            .find(|m| m.id == id)
+            .cloned()
+    }
+
+    /// Every kept message, oldest first.
+    pub fn all(&self) -> Vec<MeshMessage> {
+        self.inner.lock().unwrap().messages.clone()
+    }
+
+    /// Drop messages older than `MAX_AGE_MS` and persist the survivors.
+    /// Returns how many went. Not a second write door — it only removes.
+    pub fn prune_stale(&self, now_ms: u64) -> usize {
+        let cutoff = now_ms.saturating_sub(MAX_AGE_MS);
+        let mut inner = self.inner.lock().unwrap();
+        let before = inner.messages.len();
+        inner.messages.retain(|m| m.at_ms >= cutoff);
+        let dropped = before - inner.messages.len();
+        if dropped > 0 {
+            inner.persist();
+        }
+        dropped
+    }
+}
+
+fn message_bytes(message: &MeshMessage) -> usize {
+    serde_json::to_vec(message)
+        .map(|bytes| bytes.len() + 1)
+        .unwrap_or(0)
+}
+
+fn cap_messages(messages: &mut Vec<MeshMessage>) {
+    if messages.len() > MAX_KEPT {
+        let excess = messages.len() - MAX_KEPT;
+        messages.drain(0..excess);
+    }
+    let mut bytes: usize = messages.iter().map(message_bytes).sum();
+    while messages.len() > 1 && bytes > MAX_KEPT_BYTES {
+        bytes = bytes.saturating_sub(message_bytes(&messages[0]));
+        messages.remove(0);
+    }
+}
+
+fn apply_log_entry(messages: &mut Vec<MeshMessage>, entry: MeshLogEntry) {
+    match entry {
+        MeshLogEntry::Message { message } => messages.push(message),
+        MeshLogEntry::Delivery { id, line } => {
+            if let Some(message) = messages.iter_mut().rev().find(|message| message.id == id) {
+                message.delivered = Some(line);
+            }
+        }
+        MeshLogEntry::Submitted { id } => {
+            if let Some(message) = messages.iter_mut().rev().find(|message| message.id == id) {
+                message.submitted = true;
+            }
+        }
+    }
+}
+
+impl Inner {
+    /// Append one mutation. A send records its body once, then delivery and
+    /// submission each add one small event rather than serializing the full
+    /// message window three times while holding the store mutex.
+    fn append(&mut self, entry: MeshLogEntry) {
+        let Some(path) = self.path.clone() else {
+            return;
+        };
+        if let Some(dir) = path.parent() {
+            if std::fs::create_dir_all(dir).is_err() {
+                return;
+            }
+        }
+        let Ok(encoded) = serde_json::to_vec(&entry) else {
+            return;
+        };
+        // Start as well as end with a newline. If a crash left the previous
+        // append truncated before its terminator, the next valid event still
+        // begins on its own line rather than being fused to the corrupt tail.
+        let mut line = Vec::with_capacity(encoded.len() + 2);
+        line.push(b'\n');
+        line.extend_from_slice(&encoded);
+        line.push(b'\n');
+        use std::io::Write;
+        let wrote = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)
+            .and_then(|mut file| file.write_all(&line))
+            .is_ok();
+        if !wrote {
+            return;
+        }
+        self.persisted_bytes = self.persisted_bytes.saturating_add(line.len() as u64);
+        if self.persisted_bytes > MAX_LOG_BYTES {
+            self.persist();
+        }
+    }
+
+    /// Compact the append log to the authoritative in-memory message window,
+    /// via a sibling and rename so a crash keeps the old complete log.
+    fn persist(&mut self) {
+        let Some(path) = &self.path else {
+            return;
+        };
+        if let Some(dir) = path.parent() {
+            if std::fs::create_dir_all(dir).is_err() {
+                return;
+            }
+        }
+        let mut out = String::new();
+        for m in &self.messages {
+            if let Ok(line) = serde_json::to_string(m) {
+                out.push_str(&line);
+                out.push('\n');
+            }
+        }
+        let tmp = path.with_extension("jsonl.tmp");
+        if std::fs::write(&tmp, out).is_ok() {
+            if std::fs::rename(&tmp, path).is_ok() {
+                self.persisted_bytes = std::fs::metadata(path)
+                    .map(|metadata| metadata.len())
+                    .unwrap_or(0);
+            }
+        }
+    }
+
+    /// The severed list, same tmp-and-rename discipline, in its own sibling
+    /// file — a send must not rewrite it and a cut must not rewrite the log.
+    fn persist_severed(&self) {
+        let Some(path) = &self.path else {
+            return;
+        };
+        let path = severed_sibling(path);
+        if let Some(dir) = path.parent() {
+            if std::fs::create_dir_all(dir).is_err() {
+                return;
+            }
+        }
+        let mut out = String::new();
+        for s in &self.severed {
+            if let Ok(line) = serde_json::to_string(s) {
+                out.push_str(&line);
+                out.push('\n');
+            }
+        }
+        let tmp = path.with_extension("jsonl.tmp");
+        if std::fs::write(&tmp, out).is_ok() {
+            let _ = std::fs::rename(&tmp, &path);
+        }
+    }
+}
+
+/// Where the severed pairs live, next to the message log.
+fn severed_sibling(messages_path: &std::path::Path) -> PathBuf {
+    messages_path.with_file_name("severed.jsonl")
+}
+
+/// The unordered key for a terminal pair.
+fn pair_of(a: u32, b: u32) -> (u32, u32) {
+    (a.min(b), a.max(b))
+}
+
+/// Durable claim history. Held rows from a previous app run are ended at load:
+/// no process from that run can still own them, so keeping them live would wedge
+/// paths after a crash.
+pub struct ClaimStore {
+    db: Mutex<Connection>,
+    instance: String,
+    available: bool,
+    open_error: Option<String>,
+}
+
+impl ClaimStore {
+    /// Open durable claim history for the supplied runtime instance. A missing
+    /// or unwritable path refuses mutations, matching the desktop contract.
+    pub fn load(path: Option<PathBuf>, instance: String) -> Self {
+        Self::open(path, instance, true)
+    }
+
+    #[cfg(test)]
+    pub fn at(path: Option<PathBuf>) -> Self {
+        Self::open(path, format!("test-{}", std::process::id()), false)
+    }
+
+    #[cfg(test)]
+    fn at_with_instance(path: Option<PathBuf>, instance: String) -> Self {
+        Self::open(path, instance, false)
+    }
+
+    fn open(path: Option<PathBuf>, instance: String, require_disk: bool) -> Self {
+        let had_path = path.is_some();
+        let opened = path.and_then(|path| {
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent).ok()?;
+            }
+            Connection::open(path).ok()
+        });
+        let mut available = opened.is_some() || !require_disk;
+        let mut open_error = if require_disk && !had_path {
+            Some("claim history has no durable home directory".into())
+        } else if require_disk && opened.is_none() {
+            Some("claim history database could not be opened".into())
+        } else {
+            None
+        };
+        let db = opened
+            .or_else(|| Connection::open_in_memory().ok())
+            .expect("SQLite in-memory claim store opens");
+        if let Err(error) = db.execute_batch(
+            "PRAGMA journal_mode = WAL;
+             PRAGMA busy_timeout = 5000;
+             CREATE TABLE IF NOT EXISTS claims (
+                 id TEXT PRIMARY KEY,
+                 body TEXT NOT NULL,
+                 released_at_ms INTEGER,
+                 process_id INTEGER,
+                 instance TEXT,
+                 at_ms INTEGER NOT NULL
+             );
+             CREATE INDEX IF NOT EXISTS claims_released ON claims(released_at_ms);
+             CREATE TABLE IF NOT EXISTS claim_sequence (value INTEGER NOT NULL);
+             INSERT INTO claim_sequence(value)
+                 SELECT 1 WHERE NOT EXISTS(SELECT 1 FROM claim_sequence);",
+        ) {
+            available = false;
+            open_error = Some(format!("claim history schema failed: {error}"));
+        }
+        let store = Self {
+            db: Mutex::new(db),
+            instance,
+            available,
+            open_error,
+        };
+        if store.available {
+            let _ = store.reconcile_stale();
+        }
+        store
+    }
+
+    fn ensure_available(&self) -> Result<(), String> {
+        if self.available {
+            Ok(())
+        } else {
+            Err(self
+                .open_error
+                .clone()
+                .unwrap_or_else(|| "claim history store is unavailable".into()))
+        }
+    }
+
+    pub fn next_id(&self) -> Result<String, String> {
+        self.ensure_available()?;
+        let mut db = self.db.lock().map_err(|_| "claim store lock poisoned")?;
+        let tx = db
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(|error| error.to_string())?;
+        let value: u64 = tx
+            .query_row("SELECT value FROM claim_sequence", [], |row| row.get(0))
+            .map_err(|error| error.to_string())?;
+        tx.execute("UPDATE claim_sequence SET value = value + 1", [])
+            .map_err(|error| error.to_string())?;
+        tx.commit().map_err(|error| error.to_string())?;
+        Ok(format!("c{value}"))
+    }
+
+    pub fn mutate<T>(
+        &self,
+        f: impl FnOnce(&mut Vec<Claim>) -> (T, bool),
+    ) -> Result<(T, bool), String> {
+        self.ensure_available()?;
+        self.reconcile_stale()?;
+        let mut db = self.db.lock().map_err(|_| "claim store lock poisoned")?;
+        let tx = db
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(|error| error.to_string())?;
+        let mut claims = read_claims(&tx)?;
+        let (out, changed) = f(&mut claims);
+        if changed {
+            tx.execute("DELETE FROM claims", [])
+                .map_err(|error| error.to_string())?;
+            for claim in &claims {
+                insert_claim(&tx, claim)?;
+            }
+        }
+        tx.commit().map_err(|error| error.to_string())?;
+        Ok((out, changed))
+    }
+
+    pub fn held(&self) -> Result<Vec<Claim>, String> {
+        self.ensure_available()?;
+        self.reconcile_stale()?;
+        let db = self.db.lock().map_err(|_| "claim store lock poisoned")?;
+        Ok(read_claims(&db)?
+            .into_iter()
+            .filter(|claim| claim.released_at_ms.is_none())
+            .collect())
+    }
+
+    pub fn all_newest(&self) -> Result<Vec<Claim>, String> {
+        self.ensure_available()?;
+        self.reconcile_stale()?;
+        let db = self.db.lock().map_err(|_| "claim store lock poisoned")?;
+        let mut claims = read_claims(&db)?;
+        claims.reverse();
+        Ok(claims)
+    }
+
+    pub fn history_for_path(&self, path: &str) -> Result<Vec<Claim>, String> {
+        Ok(self
+            .all_newest()?
+            .into_iter()
+            .filter(|claim| {
+                claim
+                    .paths
+                    .iter()
+                    .any(|claimed| claim_paths_overlap(claimed, path))
+            })
+            .collect())
+    }
+
+    fn reconcile_stale(&self) -> Result<(), String> {
+        let mut db = self.db.lock().map_err(|_| "claim store lock poisoned")?;
+        let tx = db
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(|error| error.to_string())?;
+        let claims = read_claims(&tx)?;
+        let now = claim_now_ms();
+        let mut changed = false;
+        for mut claim in claims
+            .into_iter()
+            .filter(|claim| claim.released_at_ms.is_none())
+        {
+            let stale = match claim.process_id {
+                Some(pid) if pid == std::process::id() => {
+                    claim.instance.as_deref() != Some(&self.instance)
+                        || !process_matches(pid, claim.process_started_at)
+                }
+                Some(pid) => !process_matches(pid, claim.process_started_at),
+                None => claim.instance.as_deref() != Some(&self.instance),
+            };
+            if !stale {
+                continue;
+            }
+            claim.released_at_ms = Some(now);
+            claim.released_by = Some("death".into());
+            tx.execute(
+                "UPDATE claims SET body = ?1, released_at_ms = ?2 WHERE id = ?3",
+                params![
+                    serde_json::to_string(&claim).map_err(|error| error.to_string())?,
+                    now,
+                    claim.id
+                ],
+            )
+            .map_err(|error| error.to_string())?;
+            changed = true;
+        }
+        if changed {
+            prune_claim_rows(&tx)?;
+        }
+        tx.commit().map_err(|error| error.to_string())
+    }
+}
+
+fn read_claims(db: &Connection) -> Result<Vec<Claim>, String> {
+    let mut statement = db
+        .prepare("SELECT body FROM claims ORDER BY at_ms, rowid")
+        .map_err(|error| error.to_string())?;
+    let rows = statement
+        .query_map([], |row| row.get::<_, String>(0))
+        .map_err(|error| error.to_string())?;
+    rows.map(|row| {
+        let body = row.map_err(|error| error.to_string())?;
+        serde_json::from_str(&body).map_err(|error| error.to_string())
+    })
+    .collect()
+}
+
+fn insert_claim(db: &Connection, claim: &Claim) -> Result<(), String> {
+    db.execute(
+        "INSERT INTO claims(id, body, released_at_ms, process_id, instance, at_ms)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        params![
+            claim.id,
+            serde_json::to_string(claim).map_err(|error| error.to_string())?,
+            claim.released_at_ms,
+            claim.process_id,
+            claim.instance,
+            claim.at_ms
+        ],
+    )
+    .map_err(|error| error.to_string())?;
+    Ok(())
+}
+
+fn prune_claim_rows(db: &Connection) -> Result<(), String> {
+    db.execute(
+        "DELETE FROM claims WHERE id IN (
+             SELECT id FROM claims WHERE released_at_ms IS NOT NULL
+             ORDER BY at_ms DESC LIMIT -1 OFFSET ?1
+         )",
+        [MAX_CLAIM_HISTORY as i64],
+    )
+    .map_err(|error| error.to_string())?;
+    Ok(())
+}
+
+fn claim_now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64
+}
+
+fn process_matches(pid: u32, started_at: Option<u64>) -> bool {
+    let mut system = System::new();
+    let pid = Pid::from_u32(pid);
+    system.refresh_processes(ProcessesToUpdate::Some(&[pid]), true);
+    system
+        .process(pid)
+        .is_some_and(|process| started_at.is_none_or(|expected| process.start_time() == expected))
+}
+
+pub fn current_process_started_at() -> Option<u64> {
+    let mut system = System::new();
+    let pid = Pid::from_u32(std::process::id());
+    system.refresh_processes(ProcessesToUpdate::Some(&[pid]), true);
+    system.process(pid).map(|process| process.start_time())
+}
+
+fn claim_paths_overlap(a: &str, b: &str) -> bool {
+    let a = a.trim_end_matches('/');
+    let b = b.trim_end_matches('/');
+    a == b || a.starts_with(&format!("{b}/")) || b.starts_with(&format!("{a}/"))
+}
+
+#[cfg(test)]
+pub(crate) mod tests {
+    use super::*;
+
+    pub(crate) fn new_msg(text: &str, to: u32) -> NewMessage {
+        NewMessage {
+            from_pty_id: Some(1),
+            from_cwd: Some("/w".into()),
+            from_name: Some("Ember".into()),
+            from_agent: Some("claude".into()),
+            from_task: Some("mesh work".into()),
+            to_pty_id: to,
+            to_cwd: Some("/w".into()),
+            to_name: Some("Juniper".into()),
+            to_agent: None,
+            to_task: None,
+            text: text.into(),
+            items: Vec::new(),
+            reply_to: None,
+            reference: None,
+            instance: Some("test".into()),
+            at_ms: 42,
+        }
+    }
+
+    fn tmp_store(name: &str) -> PathBuf {
+        let dir =
+            std::env::temp_dir().join(format!("canopy-mesh-test-{}-{name}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        dir.join("messages.jsonl")
+    }
+
+    fn claim(id: &str, path: &str, attempt_id: Option<&str>) -> Claim {
+        Claim {
+            id: id.into(),
+            paths: vec![path.into()],
+            owner: "agent (/repo)".into(),
+            owner_key: "pty:test:1".into(),
+            pty_id: Some(1),
+            instance: Some("test".into()),
+            process_id: Some(std::process::id()),
+            process_started_at: current_process_started_at(),
+            run_id: attempt_id.map(|_| "run_1".into()),
+            attempt_id: attempt_id.map(str::to_string),
+            note: None,
+            at_ms: 1,
+            released_at_ms: None,
+            released_by: None,
+            refusals: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn claim_history_survives_restart_and_stale_holders_die() {
+        let path = tmp_store("claim-restart").with_file_name("claims.sqlite");
+        let store = ClaimStore::at_with_instance(Some(path.clone()), "first".into());
+        store
+            .mutate(|claims| {
+                let mut held = claim("c1", "/repo/src", Some("attempt_1"));
+                held.instance = Some("first".into());
+                held.process_id = Some(u32::MAX);
+                claims.push(held);
+                ((), true)
+            })
+            .unwrap();
+        drop(store);
+
+        let reopened = ClaimStore::at_with_instance(Some(path.clone()), "second".into());
+        assert!(reopened.held().unwrap().is_empty());
+        let history = reopened.history_for_path("/repo/src/auth.ts").unwrap();
+        assert_eq!(history.len(), 1);
+        assert_eq!(history[0].attempt_id.as_deref(), Some("attempt_1"));
+        assert_eq!(history[0].released_by.as_deref(), Some("death"));
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn live_instances_share_claims_and_never_reuse_ids() {
+        let path = tmp_store("claim-concurrent").with_file_name("claims.sqlite");
+        let first = ClaimStore::at_with_instance(Some(path.clone()), "shared-test".into());
+        let second = ClaimStore::at_with_instance(Some(path.clone()), "shared-test".into());
+        let id = first.next_id().unwrap();
+        first
+            .mutate(|claims| {
+                let mut held = claim(&id, "/repo/src", Some("attempt_1"));
+                held.instance = Some("shared-test".into());
+                claims.push(held);
+                ((), true)
+            })
+            .unwrap();
+        assert_eq!(second.held().unwrap().len(), 1);
+        assert_eq!(second.next_id().unwrap(), "c2");
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn durable_store_failure_refuses_claim_mutations() {
+        let root = tmp_store("claim-unavailable");
+        let blocker = root.parent().unwrap().join("not-a-directory");
+        std::fs::create_dir_all(root.parent().unwrap()).unwrap();
+        std::fs::write(&blocker, "file").unwrap();
+        let store = ClaimStore::open(Some(blocker.join("claims.sqlite")), "test".into(), true);
+        assert!(store.next_id().is_err());
+        assert!(store
+            .mutate(|claims| {
+                claims.push(claim("c1", "/repo", None));
+                ((), true)
+            })
+            .is_err());
+        let _ = std::fs::remove_dir_all(root.parent().unwrap());
+    }
+
+    #[test]
+    fn process_start_time_detects_pid_reuse() {
+        let pid = std::process::id();
+        let started = current_process_started_at().unwrap();
+        assert!(process_matches(pid, Some(started)));
+        assert!(!process_matches(pid, Some(started.saturating_add(1))));
+    }
+
+    #[test]
+    fn path_history_returns_only_overlapping_claims_newest_first() {
+        let store = ClaimStore::at(None);
+        store
+            .mutate(|claims| {
+                let mut first = claim("c1", "/repo/src", Some("attempt_1"));
+                first.released_at_ms = Some(2);
+                first.released_by = Some("settled".into());
+                claims.push(first);
+                claims.push(claim("c2", "/repo/docs", Some("attempt_2")));
+                claims.push(claim("c3", "/repo/src/auth.ts", Some("attempt_3")));
+                ((), true)
+            })
+            .unwrap();
+        let history = store.history_for_path("/repo/src/auth.ts").unwrap();
+        assert_eq!(
+            history
+                .iter()
+                .map(|claim| claim.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["c3", "c1"]
+        );
+    }
+
+    #[test]
+    fn a_message_survives_a_restart_and_ids_never_repeat() {
+        let path = tmp_store("restart");
+        let store = MeshStore::at(Some(path.clone()));
+        let first = store.record(new_msg("take src/auth.ts", 7)).unwrap();
+        assert_eq!(first.id, "m1");
+        store.mark_submitted(&first.id);
+
+        // A new store on the same file is "the app restarted".
+        let reopened = MeshStore::at(Some(path.clone()));
+        let kept = reopened.all();
+        assert_eq!(kept.len(), 1);
+        assert_eq!(kept[0].id, "m1");
+        assert_eq!(kept[0].text, "take src/auth.ts");
+        assert_eq!(kept[0].from_task.as_deref(), Some("mesh work"));
+        assert!(kept[0].submitted);
+        // The counter resumes past history: the old id still names the old
+        // message, and the next send cannot collide with it.
+        let second = reopened.record(new_msg("done, released", 1)).unwrap();
+        assert_eq!(second.id, "m2");
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn rich_fields_round_trip_through_disk() {
+        let path = tmp_store("rich");
+        let store = MeshStore::at(Some(path.clone()));
+        let mut msg = new_msg("full handoff\nwith a second line", 7);
+        msg.items = vec![MeshItem {
+            kind: "image".into(),
+            path: "/w/shot.png".into(),
+            note: Some("the broken layout".into()),
+        }];
+        msg.reply_to = Some("m9".into());
+        msg.reference = Some(MeshRef {
+            kind: "task".into(),
+            id: "T-12".into(),
+        });
+        let stored = store.record(msg).unwrap();
+        store.note_delivery(&stored.id, "notice line");
+
+        let back = MeshStore::at(Some(path.clone())).get(&stored.id).unwrap();
+        assert_eq!(back.text, "full handoff\nwith a second line");
+        assert_eq!(back.delivered.as_deref(), Some("notice line"));
+        assert_eq!(back.items, stored.items);
+        assert_eq!(back.reply_to.as_deref(), Some("m9"));
+        assert_eq!(
+            back.reference,
+            Some(MeshRef {
+                kind: "task".into(),
+                id: "T-12".into()
+            })
+        );
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn delivery_state_appends_without_rewriting_the_message_window() {
+        let path = tmp_store("append-updates");
+        let store = MeshStore::at(Some(path.clone()));
+        let message = store.record(new_msg("handoff body", 7)).unwrap();
+        let recorded = std::fs::read(&path).unwrap();
+
+        store.note_delivery(&message.id, "typed notice");
+        let delivered = std::fs::read(&path).unwrap();
+        assert!(delivered.starts_with(&recorded));
+        assert!(delivered.len() > recorded.len());
+
+        store.mark_submitted(&message.id);
+        let submitted = std::fs::read(&path).unwrap();
+        assert!(submitted.starts_with(&delivered));
+        assert!(submitted.len() > delivered.len());
+
+        let reopened = MeshStore::at(Some(path.clone()));
+        let restored = reopened.get(&message.id).unwrap();
+        assert_eq!(restored.delivered.as_deref(), Some("typed notice"));
+        assert!(restored.submitted);
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn the_cap_drops_the_oldest_and_only_the_oldest() {
+        let path = tmp_store("cap");
+        let store = MeshStore::at(Some(path.clone()));
+        for n in 0..MAX_KEPT + 3 {
+            store.record(new_msg(&format!("msg {n}"), 7)).unwrap();
+        }
+        let kept = store.all();
+        assert_eq!(kept.len(), MAX_KEPT);
+        assert_eq!(kept[0].text, "msg 3");
+        assert_eq!(kept.last().unwrap().text, format!("msg {}", MAX_KEPT + 2));
+        // And the file agrees: reload sees the same window, and the counter
+        // still moves forward from the highest id ever written.
+        let reopened = MeshStore::at(Some(path.clone()));
+        assert_eq!(reopened.all().len(), MAX_KEPT);
+        let next = reopened.record(new_msg("one more", 7)).unwrap();
+        assert_eq!(next.id, format!("m{}", MAX_KEPT + 4));
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn the_log_is_bounded_by_serialized_bytes_not_only_rows() {
+        let path = tmp_store("byte-cap");
+        let store = MeshStore::at(Some(path.clone()));
+        let body = "x".repeat(32 * 1024);
+        for n in 0..140 {
+            store.record(new_msg(&format!("{n}:{body}"), 7)).unwrap();
+        }
+        let kept = store.all();
+        let bytes: usize = kept.iter().map(message_bytes).sum();
+        assert!(bytes <= MAX_KEPT_BYTES, "kept {bytes} bytes");
+        assert!(kept.len() < 140);
+        assert!(kept.last().unwrap().text.starts_with("139:"));
+        let disk_bytes = std::fs::metadata(&path).unwrap().len();
+        assert!(disk_bytes <= MAX_LOG_BYTES, "stored {disk_bytes} bytes");
+        let reopened = MeshStore::at(Some(path.clone()));
+        assert!(reopened.all().last().unwrap().text.starts_with("139:"));
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn a_corrupt_line_costs_that_line_and_nothing_else() {
+        let path = tmp_store("corrupt");
+        let store = MeshStore::at(Some(path.clone()));
+        store.record(new_msg("good", 7)).unwrap();
+        // Something truncated mid-write, ahead of a valid line.
+        let mut raw = std::fs::read_to_string(&path).unwrap();
+        raw = format!("{{\"half\": tru\n{raw}");
+        std::fs::write(&path, raw).unwrap();
+        let reopened = MeshStore::at(Some(path.clone()));
+        assert_eq!(reopened.all().len(), 1);
+        assert_eq!(reopened.all()[0].text, "good");
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn a_truncated_append_does_not_consume_the_next_valid_event() {
+        let path = tmp_store("truncated-append");
+        let store = MeshStore::at(Some(path.clone()));
+        store.record(new_msg("before", 7)).unwrap();
+        use std::io::Write;
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap()
+            .write_all(br#"{"mesh_event":"delivery""#)
+            .unwrap();
+        store.record(new_msg("after", 7)).unwrap();
+
+        let reopened = MeshStore::at(Some(path.clone()));
+        assert_eq!(
+            reopened
+                .all()
+                .iter()
+                .map(|message| message.text.as_str())
+                .collect::<Vec<_>>(),
+            vec!["before", "after"]
+        );
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn stale_messages_age_out_and_the_file_agrees() {
+        let path = tmp_store("prune");
+        let store = MeshStore::at(Some(path.clone()));
+        let old = store.record(new_msg("ancient", 7)).unwrap(); // at_ms 42
+        let mut recent = new_msg("fresh", 7);
+        recent.at_ms = MAX_AGE_MS + 1_000;
+        let kept = store.record(recent).unwrap();
+
+        assert_eq!(store.prune_stale(MAX_AGE_MS + 2_000), 1);
+        assert!(store.get(&old.id).is_none());
+        assert!(store.get(&kept.id).is_some());
+        // The file agrees, and a second prune finds nothing to do.
+        let reopened = MeshStore::at(Some(path.clone()));
+        assert_eq!(reopened.all().len(), 1);
+        assert_eq!(reopened.all()[0].text, "fresh");
+        assert_eq!(reopened.prune_stale(MAX_AGE_MS + 2_000), 0);
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn no_home_means_a_working_in_memory_store() {
+        let store = MeshStore::at(None);
+        let msg = store.record(new_msg("still works", 7)).unwrap();
+        assert_eq!(store.get(&msg.id).unwrap().text, "still works");
+    }
+
+    /// The block lives at the one write door, so a send between a severed pair
+    /// is refused in both directions, nothing lands in the log, and traffic
+    /// between every other pair is untouched.
+    #[test]
+    fn a_severed_pair_delivers_nothing_in_either_direction() {
+        let store = MeshStore::at(None);
+        assert!(store.set_severed(7, 1, "test", true, 5));
+        // new_msg sends from pty 1; 1 -> 7 and 7 -> 1 are the same severed pair.
+        let refused = store.record(new_msg("into the cut", 7)).unwrap_err();
+        assert_eq!(
+            refused,
+            Severed {
+                from_pty_id: 1,
+                to_pty_id: 7
+            }
+        );
+        let mut back = new_msg("reply into the cut", 1);
+        back.from_pty_id = Some(7);
+        assert!(store.record(back).is_err());
+        assert!(store.all().is_empty());
+        // A third terminal still reaches both of them.
+        let mut aside = new_msg("unrelated", 7);
+        aside.from_pty_id = Some(3);
+        assert!(store.record(aside).is_ok());
+        assert_eq!(store.all().len(), 1);
+    }
+
+    /// Reconnecting from the panel restores delivery — the severed list is
+    /// state, not history.
+    #[test]
+    fn reconnecting_restores_delivery() {
+        let store = MeshStore::at(None);
+        assert!(store.set_severed(1, 7, "test", true, 5));
+        assert!(store.record(new_msg("blocked", 7)).is_err());
+        assert!(store.set_severed(7, 1, "test", false, 6));
+        assert!(store.severed_pairs().is_empty());
+        let delivered = store.record(new_msg("open again", 7)).unwrap();
+        assert_eq!(store.get(&delivered.id).unwrap().text, "open again");
+        // Severing twice, reconnecting twice: idempotent, never an error.
+        assert!(!store.set_severed(1, 7, "test", false, 7));
+    }
+
+    /// A pty id from another app launch names a different terminal, so a
+    /// severed pair only ever matches its own instance — and it survives a
+    /// restart on disk, exactly as the messages do.
+    #[test]
+    fn severed_pairs_are_per_instance_and_survive_restart() {
+        let path = tmp_store("severed");
+        let store = MeshStore::at(Some(path.clone()));
+        assert!(store.set_severed(1, 7, "other-launch", true, 5));
+        // Same numbers, different launch: not this pair.
+        assert!(store.record(new_msg("delivered", 7)).is_ok());
+
+        assert!(store.set_severed(1, 7, "test", true, 6));
+        let reopened = MeshStore::at(Some(path.clone()));
+        assert_eq!(reopened.severed_pairs().len(), 2);
+        assert!(reopened.record(new_msg("still severed", 7)).is_err());
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    /// The companion has no terminal to sever: a root-token send (no from pty)
+    /// is never caught by a severed pair.
+    #[test]
+    fn a_sender_with_no_terminal_is_never_severed() {
+        let store = MeshStore::at(None);
+        assert!(store.set_severed(1, 7, "test", true, 5));
+        let mut from_companion = new_msg("companion note", 7);
+        from_companion.from_pty_id = None;
+        assert!(store.record(from_companion).is_ok());
+    }
+}
+
+#[cfg(test)]
+mod event_tests {
+    use super::*;
+
+    #[derive(Default)]
+    struct Recorder(Mutex<Vec<StoreChange>>);
+    impl EventSink for Recorder {
+        fn publish(&self, change: StoreChange) {
+            self.0.lock().unwrap().push(change);
+        }
+    }
+
+    #[test]
+    fn explicit_workspace_paths_keep_history_and_events_separate() {
+        let root = std::env::temp_dir().join(format!("canopy-core-scopes-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let a_path = root.join("a/messages.jsonl");
+        let b_path = root.join("b/messages.jsonl");
+        let a_events = Arc::new(Recorder::default());
+        let b_events = Arc::new(Recorder::default());
+        let a = MeshStore::with_events(Some(a_path.clone()), a_events.clone());
+        let b = MeshStore::with_events(Some(b_path.clone()), b_events.clone());
+        let first = a.record(super::tests::new_msg("workspace a", 7)).unwrap();
+        let second = b.record(super::tests::new_msg("workspace b", 7)).unwrap();
+        a.note_delivery(&first.id, "notice");
+        a.mark_submitted(&first.id);
+        assert!(a.get(&first.id).unwrap().submitted);
+        assert!(!b.get(&second.id).unwrap().submitted);
+        let changes = a_events.0.lock().unwrap();
+        assert_eq!(changes.len(), 2);
+        assert!(changes
+            .iter()
+            .all(|event| event.id == first.id && event.store == Store::Mesh));
+        assert_eq!(b_events.0.lock().unwrap().len(), 1);
+        drop(a);
+        drop(b);
+        let a = MeshStore::with_events(Some(a_path), a_events.clone());
+        let b = MeshStore::with_events(Some(b_path), b_events.clone());
+        assert_eq!(a.all().len(), 1);
+        assert_eq!(b.all().len(), 1);
+        assert_eq!(a.get(&first.id).unwrap().text, "workspace a");
+        assert_eq!(b.get(&second.id).unwrap().text, "workspace b");
+        assert!(a.get(&first.id).unwrap().submitted);
+        assert!(!b.get(&second.id).unwrap().submitted);
+        assert_eq!(b_events.0.lock().unwrap().len(), 1, "reads must not emit");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn headless_writes_notify_only_their_own_subscribers() {
+        let a = Arc::new(Recorder::default());
+        let b = Arc::new(Recorder::default());
+        let first = MeshStore::with_events(None, a.clone());
+        let second = MeshStore::with_events(None, b.clone());
+        assert!(first.set_severed(1, 2, "host-a", true, 1));
+        assert!(!first.set_severed(1, 2, "host-a", true, 2));
+        assert_eq!(first.severed_pairs().len(), 1);
+        assert!(second.severed_pairs().is_empty());
+        let changes = a.0.lock().unwrap();
+        assert_eq!(changes.len(), 1, "a headless mutation must announce itself");
+        assert_eq!(changes[0].store, Store::Mesh);
+        assert_eq!(changes[0].scope, "");
+        assert_eq!(changes[0].id, "");
+        assert!(b.0.lock().unwrap().is_empty());
+    }
+}

@@ -30,6 +30,7 @@ npm run lint         # oxlint
 npm run test         # vitest — frontend unit + component tests
 npm run build        # tsc -b && vite build
 cargo test --manifest-path src-tauri/Cargo.toml --no-default-features
+cargo test --locked --manifest-path crates/canopy-core/Cargo.toml
 ```
 
 CI (`.github/workflows/ci.yml`) runs the same checks on every pull request, so a
@@ -72,6 +73,7 @@ cargo test --manifest-path src-tauri/Cargo.toml --no-default-features git::tests
 | Path | What |
 |---|---|
 | `src/` | React + Vite frontend (components, IPC wrappers, editor) |
+| `crates/canopy-core/` | Tauri-free mesh/claim stores, event contract and terminal delivery |
 | `src-tauri/src/` | Rust core — `pty.rs`, `lsp.rs`, `fsx.rs`, `git.rs`, `agents.rs` |
 | `src-tauri/src/bin/canopy_hook.rs` | the agent-hook helper (a second binary) |
 | `packages/ui/` | shared UI primitives (`@canopy/ui`) |

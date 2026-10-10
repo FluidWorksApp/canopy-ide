@@ -185,3 +185,9 @@ it('pulls a small image on sight and previews it',async()=>{
   unmount();expect(revoke).toHaveBeenCalledWith('blob:preview');
  }finally{mock.snapshot=prev;vi.unstubAllGlobals();}
 });
+it('renders links in team messages as clickable links',()=>{
+ const previous=mock.snapshot.messages;mock.snapshot.messages=[{id:'u',sender:'ada',recipient:null,text:'see https://claude.com/resources/webinars/x.',created:2}];
+ try{render(<AccountChatView conversation={channel}/>);
+  const link=screen.getByRole('link',{name:'https://claude.com/resources/webinars/x'});expect(link.getAttribute('href')).toBe('https://claude.com/resources/webinars/x');
+ }finally{mock.snapshot.messages=previous;}
+});

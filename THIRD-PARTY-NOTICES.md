@@ -74,9 +74,9 @@ terms govern use of the model:
 - **SenseVoice Small (int8)** — FunASR MODEL_LICENSE (custom) — <https://github.com/modelscope/FunASR/blob/main/MODEL_LICENSE>, by FunAudioLLM / Alibaba. <https://huggingface.co/FunAudioLLM/SenseVoiceSmall>
 - **Moonshine Base** — MIT, by Useful Sensors. <https://huggingface.co/UsefulSensors/moonshine>
 
-## Rust crates (718)
+## Rust crates (719)
 
-### MIT — 659
+### MIT — 660
 
 - **adler2 2.0.1** — Copyright (C) Jonas Schievink <jonasschievink@gmail.com>
 - **aead 0.5.2** — Copyright (c) 2019 The RustCrypto Project Developers; Copyright (c) 2019 MobileCoin, LLC
@@ -134,6 +134,7 @@ terms govern use of the model:
 - **cairo-rs 0.18.5** — Copyright The gtk-rs Project Developers (per package manifest; the distributed license file carries no copyright line)
 - **cairo-sys-rs 0.18.2** — Copyright The gtk-rs Project Developers (per package manifest; the distributed license file carries no copyright line)
 - **camino 1.2.4** — Copyright Without Boats, Ashley Williams, Steve Klabnik, Rain (per package manifest; the distributed license file carries no copyright line)
+- **canopy-core 0.1.0** — Copyright Cause Connect Pte Ltd (per package manifest; the distributed license file carries no copyright line)
 - **cargo_metadata 0.19.2** — Copyright Oliver Schneider (per package manifest; the distributed license file carries no copyright line)
 - **cargo_toml 0.22.3** — Copyright Kornel (per package manifest; the distributed license file carries no copyright line)
 - **cargo-platform 0.1.9** — no copyright line in the distributed license file

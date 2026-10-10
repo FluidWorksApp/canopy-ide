@@ -298,71 +298,7 @@ impl Caller {
     }
 }
 
-/// One agent's advisory claim over a set of paths, and everything that has
-/// happened to it since.
-///
-/// A release used to delete the row, so the two questions the user asks of a
-/// claim after the fact — when did that agent let go, and what did it hold up
-/// while it had it — had no answer anywhere. Ending a claim now writes its
-/// ending down instead.
-#[derive(Clone, serde::Serialize, serde::Deserialize)]
-pub struct Claim {
-    /// Identity for the detail tab. The owner cannot be it: an agent that
-    /// claims, releases and claims again is two claims with one owner, and a
-    /// tab opened on the first must not silently start showing the second.
-    pub id: String,
-    pub paths: Vec<String>,
-    /// Who holds it, for a human to read — the agent's cwd plus whatever name
-    /// it gave itself. Display only: it is supplied by the caller, and every
-    /// agent in a shared checkout writes the same one.
-    pub owner: String,
-    /// Who holds it, for the rules to compare. Derived from the caller's
-    /// credential (see `AgentIdentity::key`), never from the body.
-    ///
-    /// Splitting this from `owner` is the whole fix for the defect that made
-    /// claims useless where they mattered most: the conflict test was
-    /// `owner != owner`, and two agents sharing a checkout had the same owner
-    /// string — so they never collided with each other, and the second one's
-    /// claim silently superseded the first's.
-    pub owner_key: String,
-    /// The terminal behind the claim, so a claim can be swept when its agent
-    /// dies and resolved to a live session without parsing a display string.
-    pub pty_id: Option<u32>,
-    pub instance: Option<String>,
-    #[serde(default)]
-    pub process_id: Option<u32>,
-    #[serde(default)]
-    pub process_started_at: Option<u64>,
-    #[serde(default)]
-    pub run_id: Option<String>,
-    #[serde(default)]
-    pub attempt_id: Option<String>,
-    pub note: Option<String>,
-    pub at_ms: u64,
-    /// None while it is held; this is the only thing that decides whether a
-    /// claim still blocks anyone.
-    pub released_at_ms: Option<u64>,
-    /// How it ended: `agent` (it released), `canopy` (dropped from the UI, for
-    /// an agent that died holding it) or `superseded` (the same owner claimed
-    /// again). The wording is the frontend's business; this is the fact.
-    pub released_by: Option<String>,
-    /// Claims turned away because they overlapped this one, oldest first. The
-    /// collision is the most useful thing a claim ever records — it is the
-    /// moment two agents wanted the same file — and it used to exist only in a
-    /// 409 body the user never saw.
-    pub refusals: Vec<Refusal>,
-}
-
-/// A claim that was refused, recorded against the claim that refused it.
-#[derive(Clone, serde::Serialize, serde::Deserialize)]
-pub struct Refusal {
-    pub owner: String,
-    pub paths: Vec<String>,
-    pub note: Option<String>,
-    pub at_ms: u64,
-    #[serde(default)]
-    pub attempt_id: Option<String>,
-}
+pub use canopy_core::claims::{Claim, Refusal};
 
 /// How many refusals one held claim remembers.
 ///
@@ -392,12 +328,12 @@ impl Default for ContextBridge {
             pending: Mutex::new(HashMap::new()),
             pending_spawns: Mutex::new(HashMap::new()),
             next_op: AtomicU64::new(1),
-            claims: crate::mesh::ClaimStore::load(),
+            claims: crate::mesh::load_claims(),
             disabled_tools: Mutex::new(None),
             agents_may_spawn: AtomicBool::new(true),
             mesh_scopes: Mutex::new(Vec::new()),
             worktree_roots: Mutex::new(HashMap::new()),
-            mesh: crate::mesh::MeshStore::load(),
+            mesh: crate::mesh::load_messages(),
         }
     }
 }
@@ -1538,70 +1474,10 @@ fn pick_project(candidates: &[ProjectCandidate], cwd: &str) -> Option<ProjectCan
     best.map(|(_, c)| c.clone())
 }
 
-#[derive(serde::Deserialize)]
-struct ResearchReq {
-    action: String,
-    cwd: String,
-    /// Which project this is about, by name. Absent falls back to `cwd`.
-    #[serde(default)]
-    project: Option<String>,
-    #[serde(default)]
-    id: Option<String>,
-    #[serde(default)]
-    title: Option<String>,
-    #[serde(default)]
-    question: Option<String>,
-    #[serde(default)]
-    query: Option<String>,
-    #[serde(default)]
-    status: Option<String>,
-    #[serde(default)]
-    statuses: Option<Vec<String>>,
-    #[serde(default)]
-    digest: Option<String>,
-    #[serde(default)]
-    recommendation: Option<String>,
-    #[serde(default)]
-    open_questions: Option<Vec<String>>,
-    #[serde(default)]
-    tags: Option<Vec<String>>,
-    #[serde(default)]
-    text: Option<String>,
-    #[serde(default)]
-    origin: Option<String>,
-    #[serde(default)]
-    note: Option<String>,
-    #[serde(default)]
-    by: Option<String>,
-    #[serde(default)]
-    limit: Option<usize>,
-    #[serde(default)]
-    agent: Option<String>,
-    #[serde(default)]
-    pty_id: Option<u64>,
-    /// Which app launch the calling terminal belongs to — pty ids restart with
-    /// the app, so the session binding is keyed by both.
-    #[serde(default)]
-    instance: Option<String>,
-    #[serde(default)]
-    pr: Option<crate::research::PrLink>,
-    #[serde(default)]
-    ticket: Option<crate::research::TicketLink>,
-    #[serde(default)]
-    branch: Option<String>,
-    #[serde(default)]
-    files: Option<Vec<String>>,
-    #[serde(default)]
-    supersedes: Option<String>,
-    /// import: the markdown file to adopt.
-    #[serde(default)]
-    path: Option<String>,
-}
-
 async fn research_op(
     State(app): State<tauri::AppHandle>,
     headers: HeaderMap,
-    Json(req): Json<ResearchReq>,
+    Json(req): Json<canopy_core::research::ResearchReq>,
 ) -> (StatusCode, String) {
     if !authorized(&app, &headers) {
         return (StatusCode::UNAUTHORIZED, "bad token".into());
@@ -1620,108 +1496,15 @@ async fn research_op(
             ),
         );
     };
-    let store = app.state::<crate::research::ResearchStore>();
-    let need_id = |r: &ResearchReq| -> Result<String, String> {
-        r.id.clone()
-            .filter(|s| !s.is_empty())
-            .ok_or_else(|| "this action needs an id — call list to see them".to_string())
-    };
-
-    let out: Result<serde_json::Value, String> = (|| match req.action.as_str() {
-        "list" => {
-            crate::research::research_list(project_id.clone(), req.statuses.clone(), req.limit)
-                .map(|rows| serde_json::json!({ "research": rows }))
-        }
-        "search" => crate::research::research_search(
-            project_id.clone(),
-            req.query.clone().unwrap_or_default(),
-            req.limit,
-        )
-        .map(|rows| serde_json::json!({ "research": rows })),
-        "get" => crate::research::research_get(project_id.clone(), need_id(&req)?)
-            .and_then(|d| serde_json::to_value(d).map_err(|e| e.to_string())),
-        "start" => crate::research::research_start(
-            app.clone(),
-            store.clone(),
-            project_id.clone(),
-            Some(project_name.clone()),
-            Some(roots.clone()),
-            req.title.clone().unwrap_or_default(),
-            req.question.clone(),
-            req.agent.clone(),
-            Some(req.cwd.clone()),
-            req.pty_id,
-            req.tags.clone(),
-            req.text.clone(),
-            req.instance.clone(),
-        )
-        .and_then(|s| serde_json::to_value(s).map_err(|e| e.to_string())),
-        // digest and append are the same command; naming them separately at the
-        // tool boundary is what stops an agent treating the digest as somewhere
-        // to put the whole finding.
-        "digest" | "update" | "append" => crate::research::research_update(
-            app.clone(),
-            store.clone(),
-            project_id.clone(),
-            need_id(&req)?,
-            req.title.clone(),
-            req.digest.clone(),
-            req.recommendation.clone(),
-            req.open_questions.clone(),
-            req.tags.clone(),
-            (req.action == "append").then(|| req.text.clone().unwrap_or_default()),
-            None,
-        )
-        .and_then(|s| serde_json::to_value(s).map_err(|e| e.to_string())),
-        "source" => crate::research::research_add_source(
-            app.clone(),
-            store.clone(),
-            project_id.clone(),
-            need_id(&req)?,
-            req.title.clone().unwrap_or_default(),
-            req.text.clone().unwrap_or_default(),
-            req.origin.clone(),
-        )
-        .and_then(|s| serde_json::to_value(s).map_err(|e| e.to_string())),
-        "status" => crate::research::research_set_status(
-            app.clone(),
-            store.clone(),
-            project_id.clone(),
-            need_id(&req)?,
-            req.status.clone().unwrap_or_default(),
-            req.by.clone(),
-            req.note.clone(),
-        )
-        .and_then(|s| serde_json::to_value(s).map_err(|e| e.to_string())),
-        // The same adoption the file tab's button performs, reachable by an
-        // agent that finds loose research while doing something else.
-        "import" => crate::research::research_import(
-            app.clone(),
-            store.clone(),
-            project_id.clone(),
-            Some(project_name.clone()),
-            Some(roots.clone()),
-            req.path.clone().unwrap_or_default(),
-            req.instance.clone(),
-        )
-        .and_then(|s| serde_json::to_value(s).map_err(|e| e.to_string())),
-        "link" | "supersede" => crate::research::research_link(
-            app.clone(),
-            store.clone(),
-            project_id.clone(),
-            need_id(&req)?,
-            req.pr.clone(),
-            req.ticket.clone(),
-            req.branch.clone(),
-            req.files.clone(),
-            req.supersedes.clone(),
-        )
-        .and_then(|d| serde_json::to_value(d).map_err(|e| e.to_string())),
-        other => Err(format!(
-            "unknown research action: {other} — one of list, search, get, start, digest, \
-             append, source, status, link, import"
-        )),
-    })();
+    let out = canopy_core::research::op(
+        &app.state::<crate::research::ResearchStore>(),
+        canopy_core::project::Project {
+            id: &project_id,
+            name: &project_name,
+            roots: &roots,
+        },
+        &req,
+    );
 
     match out {
         Ok(value) => (StatusCode::OK, value.to_string()),
@@ -1738,63 +1521,10 @@ async fn research_op(
 // fixing this" is the case, and before this the only options were to derail
 // onto them or to lose them.
 
-#[derive(serde::Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct NotesReq {
-    action: String,
-    cwd: String,
-    /// Which project this is about, by name. Absent falls back to `cwd`.
-    #[serde(default)]
-    project: Option<String>,
-    #[serde(default)]
-    id: Option<String>,
-    #[serde(default)]
-    title: Option<String>,
-    #[serde(default)]
-    text: Option<String>,
-    #[serde(default)]
-    tags: Option<Vec<String>>,
-    #[serde(default)]
-    query: Option<String>,
-    #[serde(default)]
-    statuses: Option<Vec<String>>,
-    #[serde(default)]
-    limit: Option<usize>,
-    #[serde(default)]
-    status: Option<String>,
-    #[serde(default)]
-    note: Option<String>,
-    #[serde(default)]
-    by: Option<String>,
-    #[serde(default)]
-    pr: Option<crate::notes::PrLink>,
-    #[serde(default)]
-    research: Option<String>,
-    #[serde(default)]
-    branch: Option<String>,
-    #[serde(default)]
-    file: Option<crate::notes::FileRef>,
-    /// attach: an absolute path already on disk, inside a workspace root.
-    #[serde(default)]
-    path: Option<String>,
-    /// remind: when. Any of the shapes `remind::parse_when` accepts — an ISO
-    /// stamp, a local wall clock, a bare date, or epoch seconds. Taken as a
-    /// string even when it is a number so a JSON integer and its digits are the
-    /// same request.
-    #[serde(default)]
-    at: Option<serde_json::Value>,
-    /// remind: a delay instead of a time — `45m`, `2h`, `3d`.
-    #[serde(default, rename = "in")]
-    within: Option<String>,
-    /// remind: `true` takes the reminder off.
-    #[serde(default)]
-    clear: Option<bool>,
-}
-
 async fn notes_op(
     State(app): State<tauri::AppHandle>,
     headers: HeaderMap,
-    Json(req): Json<NotesReq>,
+    Json(req): Json<canopy_core::notes::NotesReq>,
 ) -> (StatusCode, String) {
     if !authorized(&app, &headers) {
         return (StatusCode::UNAUTHORIZED, "bad token".into());
@@ -1812,122 +1542,17 @@ async fn notes_op(
             ),
         );
     };
-    let store = app.state::<crate::notes::NotesStore>();
     let ws = app.state::<crate::fsx::WorkspaceManager>();
-    let need_id = |r: &NotesReq| -> Result<String, String> {
-        r.id.clone()
-            .filter(|s| !s.is_empty())
-            .ok_or_else(|| "this action needs an id — call list to see them".to_string())
-    };
-
-    let out: Result<serde_json::Value, String> = (|| match req.action.as_str() {
-        "list" => crate::notes::notes_list(project_id.clone(), req.statuses.clone(), req.limit)
-            .map(|rows| serde_json::json!({ "notes": rows })),
-        "search" => crate::notes::notes_search(
-            project_id.clone(),
-            req.query.clone().unwrap_or_default(),
-            req.limit,
-        )
-        .map(|rows| serde_json::json!({ "notes": rows })),
-        "get" => crate::notes::notes_get(project_id.clone(), need_id(&req)?)
-            .and_then(|d| serde_json::to_value(d).map_err(|e| e.to_string())),
-        "create" => crate::notes::notes_create(
-            store.clone(),
-            project_id.clone(),
-            Some(project_name.clone()),
-            Some(roots.clone()),
-            req.title.clone().unwrap_or_default(),
-            req.text.clone(),
-            req.tags.clone(),
-            // No page context: an agent has no page. The `origin` is what
-            // answers "where do my notes come from" later.
-            None,
-            Some("agent".into()),
-            Some(req.cwd.clone()),
-        )
-        .and_then(|s| serde_json::to_value(s).map_err(|e| e.to_string())),
-        "append" => crate::notes::notes_update(
-            store.clone(),
-            project_id.clone(),
-            need_id(&req)?,
-            req.title.clone(),
-            None,
-            req.text.clone(),
-            req.tags.clone(),
-        )
-        .and_then(|s| serde_json::to_value(s).map_err(|e| e.to_string())),
-        "status" => crate::notes::notes_set_status(
-            store.clone(),
-            project_id.clone(),
-            need_id(&req)?,
-            req.status.clone().unwrap_or_default(),
-            // Credited to the agent, not to the user: the history is the one
-            // record of who moved a note, and it has to stay honest.
-            req.by.clone().or_else(|| Some("an agent".into())),
-            req.note.clone(),
-        )
-        .and_then(|s| serde_json::to_value(s).map_err(|e| e.to_string())),
-        "link" => crate::notes::notes_link(
-            store.clone(),
-            project_id.clone(),
-            need_id(&req)?,
-            req.pr.clone(),
-            req.research.clone(),
-            None,
-            req.branch.clone(),
-            req.file.clone(),
-        )
-        .and_then(|d| serde_json::to_value(d).map_err(|e| e.to_string())),
-        "attach" => crate::notes::notes_attach_file(
-            store.clone(),
-            ws.clone(),
-            project_id.clone(),
-            need_id(&req)?,
-            req.path.clone().unwrap_or_default(),
-            req.title.clone(),
-            None,
-        )
-        .and_then(|a| serde_json::to_value(a).map_err(|e| e.to_string())),
-        // The agent's half of the reminder. Worth its own action rather than a
-        // field on `create`: the case that matters most is putting a time on a
-        // note that already exists — the user's own, written weeks ago — and an
-        // agent that could only set one while creating would be an agent that
-        // has to duplicate the note to remind you of it.
-        "remind" => {
-            let clear = req.clear.unwrap_or(false);
-            let at = if clear {
-                None
-            } else {
-                let raw = req.at.as_ref().and_then(|v| match v {
-                    serde_json::Value::String(s) => Some(s.clone()),
-                    serde_json::Value::Number(n) => Some(n.to_string()),
-                    _ => None,
-                });
-                let now = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .map(|d| d.as_secs() as i64)
-                    .unwrap_or(0);
-                Some(crate::remind::parse_when(
-                    raw.as_deref(),
-                    req.within.as_deref(),
-                    now,
-                )?)
-            };
-            crate::notes::notes_remind(
-                store.clone(),
-                project_id.clone(),
-                need_id(&req)?,
-                at,
-                req.text.clone().or_else(|| req.note.clone()),
-                req.by.clone().or_else(|| Some("an agent".into())),
-            )
-            .and_then(|s| serde_json::to_value(s).map_err(|e| e.to_string()))
-        }
-        other => Err(format!(
-            "unknown notes action: {other} — one of list, search, get, create, append, \
-             status, link, attach, remind"
-        )),
-    })();
+    let out = canopy_core::notes::op(
+        &app.state::<crate::notes::NotesStore>(),
+        canopy_core::project::Project {
+            id: &project_id,
+            name: &project_name,
+            roots: &roots,
+        },
+        &req,
+        &|src| crate::fsx::check_scope(&ws, src),
+    );
 
     match out {
         Ok(value) => (StatusCode::OK, value.to_string()),
@@ -2822,12 +2447,6 @@ fn human_bytes(n: u64) -> String {
     }
 }
 
-/// How long to wait between typing a message into another agent's terminal and
-/// sending the return that submits it. Matches the delay the desktop uses for
-/// every seeded prompt: long enough that the TUI has settled the text as input
-/// rather than folding the CR into a paste, short enough not to feel deferred.
-const SUBMIT_DELAY: std::time::Duration = std::time::Duration::from_millis(250);
-
 /// How a message announces where it came from.
 ///
 /// The receiving agent is otherwise being handed something indistinguishable
@@ -3108,29 +2727,23 @@ fn deliver_line(
     msg_id: String,
     line: &str,
 ) -> Result<(), String> {
-    app.state::<crate::pty::PtyManager>().write(id, line)?;
+    let pending = canopy_core::terminals::PendingDelivery::begin(
+        &*app.state::<crate::pty::PtyManager>(),
+        id,
+        target_cwd,
+        msg_id,
+        line,
+    )?;
     let send = app.clone();
     tauri::async_runtime::spawn(async move {
-        tokio::time::sleep(SUBMIT_DELAY).await;
-        let submitted = send
-            .state::<crate::pty::PtyManager>()
-            .write(id, "\r")
-            .is_ok();
-        if submitted {
-            send.state::<ContextBridge>().mesh.mark_submitted(&msg_id);
-        }
-        // The user is told either way: an agent reaching into another agent's
-        // session is exactly the "something happened over here" the attention
-        // channel exists for, and it used to happen entirely in silence.
-        let _ = send.emit(
-            "agent:message",
-            serde_json::json!({
-                "id": msg_id,
-                "toPtyId": id,
-                "toCwd": target_cwd,
-                "submitted": submitted,
-            }),
-        );
+        let terminals = send.state::<crate::pty::PtyManager>();
+        let bridge = send.state::<ContextBridge>();
+        let receipt = pending
+            .finish(tokio::time::sleep, &*terminals, &bridge.mesh)
+            .await;
+        // Preserve the desktop attention event whether submission succeeds or
+        // the child exits during the delay. The core owns the two-write rule.
+        let _ = send.emit("agent:message", receipt);
     });
     Ok(())
 }
@@ -4609,6 +4222,11 @@ struct UiOp {
     /// workspace in this window, named by `project`.
     member: Option<String>,
     device: Option<String>,
+    /// mesh_message_cloud: the target agent's terminal in the cloud workspace.
+    #[serde(rename = "targetPtyId")]
+    target_pty_id: Option<u32>,
+    #[serde(rename = "replyTo")]
+    reply_to: Option<String>,
 }
 
 /// The longest job brief the mesh carries. A team envelope holds 32 KB of
@@ -4641,6 +4259,18 @@ async fn ui_op(
     let mut submitter: Option<u32> = None;
     let deadline = match op.op.as_str() {
         "mesh_targets" => UI_OP_TIMEOUT,
+        "mesh_message_cloud" => {
+            if who.agent().is_none() {
+                return (
+                    StatusCode::FORBIDDEN,
+                    "Only a Canopy agent terminal can message a cloud workspace's agents.".into(),
+                );
+            }
+            if op.prompt.as_deref().map_or(true, |t| t.trim().is_empty()) {
+                return (StatusCode::BAD_REQUEST, "a mesh message needs text".into());
+            }
+            std::time::Duration::from_secs(30)
+        }
         "mesh_submit" => {
             let Some(agent) = who.agent() else {
                 return (

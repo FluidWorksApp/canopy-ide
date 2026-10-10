@@ -77,7 +77,7 @@ describe("the status model", () => {
 
 // This is the test that matters most in this file. NEXT_STATUSES exists so the
 // detail view offers only moves the store will accept; the store's own machine
-// is in src-tauri/src/research.rs and is the authority. If someone changes one
+// is in crates/canopy-core/src/research.rs and is the authority. If someone changes one
 // side, this is what says so — the alternative is a button that fails when
 // pressed, which teaches users the UI lies.
 describe("the transition table mirrored from the Rust state machine", () => {
