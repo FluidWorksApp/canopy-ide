@@ -1,3 +1,5 @@
+import { activeWorkspace } from "../../remoteExecution/workspace";
+import { rememberedLiveTerminal, recoverLiveGroups } from "../../terminalRecovery";
 import {subscribeTeamUnread,getTeamUnread,getUnreadSummary} from "../../teamMessaging/session";
 import {isReadOnlyHost,isRemoteHost} from "../../host";
 import { AgentIntegrationWarning } from "../AgentIntegrationWarning";
@@ -396,13 +398,14 @@ import {
 } from "../../agentDisplayName";
 import {
   tabName,
+  multiplexTabName,
   namePatch,
   sessionAddress,
   snapshotNames,
   adoptSnapshotNames,
   isUserNamed,
 } from "../../tabName";
-import { renameSession, onSessionRenamed } from "../../sessionRename";
+import { renameSession, reassertSessionName, onSessionRenamed } from "../../sessionRename";
 import {
   modelCommandLine,
   type ModelChoice,
@@ -1033,6 +1036,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
   const [changeGroups, setChangeGroups] = useState<ChangeGroup[]>([]);
   const [changesLoading, setChangesLoading] = useState(false);
   // Which tab is being renamed inline, and the working text. Null = none.
+  const renamingGroupId = useRef<string | null>(null);
   const [renamingTabId, setRenamingTabId] = useState<string | null>(null);
   const [renameDraft, setRenameDraft] = useState("");
   // Right-click on the empty area below the file list creates here (the last
@@ -1356,6 +1360,22 @@ const ProjectViewBody = memo(function ProjectViewBody({
    *  and sized through it: one rect for all of them, because every pane is the
    *  same box. */
   const contentRef = useRef<HTMLDivElement>(null);
+  const workspaceConnection = activeWorkspace()?.connection;
+  const terminalMemoryScope = workspaceConnection
+    ? `workspace:${workspaceConnection.workspaceId}` : "local";
+  // Keep the pre-recovery snapshot until all live panes have committed. An
+  // intermediate one-pane render must never replace the complete saved mux.
+  const [terminalRecoveryMemory] = useState(() =>
+    rememberedTerminalState(project.id, terminalMemoryScope),
+  );
+  const recoveredTabIds = useRef(new Map<string, string>());
+  const expectedRecoveredTabs = useRef(new Set<string>());
+  const restoredLiveGroups = useRef(new Set<string>());
+  const terminalRecoveryComplete = useRef(false);
+  const recoveryNativeSessions = useRef<ipc.PtySummary[]>([]);
+  const [thisInstance, setThisInstance] = useState<string | null>(null);
+  const thisInstanceRef = useRef(thisInstance);
+  thisInstanceRef.current = thisInstance;
   const tabsRef = useRef(tabs);
   tabsRef.current = tabs;
   useEffect(() => registerExecutionModeGuard(
@@ -1911,7 +1931,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
       name?: string,
       presentation?: Pick<
         TerminalAttachment,
-        "run" | "command" | "componentId" | "runCommandId"
+        "run" | "command" | "componentId" | "runCommandId" | "sessionGeneration" | "recovered"
       >,
     ): string => {
       const existing = tabsRef.current.find(
@@ -1921,7 +1941,16 @@ const ProjectViewBody = memo(function ProjectViewBody({
         if (activate) setActiveTabId(existing.id);
         return existing.id;
       }
-      const id = tabId();
+      const saved = presentation && thisInstanceRef.current
+        ? rememberedLiveTerminal(
+            terminalRecoveryMemory,
+            { ptyId, sessionGeneration: presentation.sessionGeneration, cwd, name },
+            thisInstanceRef.current,
+          )
+        : undefined;
+      const id = saved?.tabId && !tabsRef.current.some(tab => tab.id === saved.tabId)
+        ? saved.tabId : tabId();
+      if (saved?.tabId) recoveredTabIds.current.set(saved.tabId, id);
       const configured = presentation?.componentId && presentation.runCommandId
         ? componentsRef.current
             .find((component) => component.id === presentation.componentId)
@@ -1937,7 +1966,9 @@ const ProjectViewBody = memo(function ProjectViewBody({
           // and what the launcher called the thing running in it.
           nativeName: name,
           launchTitle: configured?.name || title || undefined,
+          ...(saved ? adoptSnapshotNames(saved) : {}),
           ptyId,
+          sessionGeneration: presentation?.sessionGeneration,
           attachId: ptyId,
           killAttachedOnClose: killOnClose || undefined,
           icon,
@@ -1952,13 +1983,24 @@ const ProjectViewBody = memo(function ProjectViewBody({
       if (activate) setActiveTabId(id);
       return id;
     },
-    [],
+    [terminalRecoveryMemory],
   );
 
   // App routes native PTYs to the owning project through an acknowledged queue.
   // Not gated on `visible`: a remote spawn can target a background project, and
   // subscribing flushes recovery that waited while this view was closed/asleep.
   useEffect(() => {
+    if (!thisInstance) return;
+    const existing = [
+      ...terminalAttachmentQueue.attachments(project.id),
+      ...recoveryNativeSessions.current.filter(s => s.kind !== "detached").map(s => ({
+        ptyId: s.id, sessionGeneration: s.session_generation, cwd: s.cwd, name: s.name,
+      })),
+    ];
+    for (const attachment of existing) {
+      const saved = rememberedLiveTerminal(terminalRecoveryMemory, attachment, thisInstance);
+      if (saved?.tabId) expectedRecoveredTabs.current.add(saved.tabId);
+    }
     return terminalAttachmentQueue.subscribe(project.id, (d) => {
       // Recovery must not replace a user's existing selection, but a fresh or
       // remounted view has no selection to protect. Activate one recovered tab
@@ -1979,7 +2021,39 @@ const ProjectViewBody = memo(function ProjectViewBody({
         d,
       );
     });
-  }, [project.id, attachTerminal]);
+  }, [project.id, attachTerminal, thisInstance, terminalRecoveryMemory]);
+  useEffect(() => {
+    if (!thisInstance) return;
+    const groups = recoverLiveGroups(
+      terminalRecoveryMemory, recoveredTabIds.current, expectedRecoveredTabs.current,
+    );
+    const fresh = Object.entries(groups).filter(([id]) => !restoredLiveGroups.current.has(id));
+    if (fresh.length) {
+      const membership = new Map(fresh.flatMap(([id, group]) =>
+        leafIds(group.root).map(tabId => [tabId, id] as const),
+      ));
+      for (const [id] of fresh) restoredLiveGroups.current.add(id);
+      terminalGroupsRef.current = { ...terminalGroupsRef.current, ...Object.fromEntries(fresh) };
+      setTerminalGroups(terminalGroupsRef.current);
+      setTabs(prev => prev.map(tab =>
+        tab.type === "terminal" && membership.has(tab.id)
+          ? { ...tab, paneGroup: membership.get(tab.id) } : tab,
+      ));
+      const focusedGroup = fresh.find(([, group]) =>
+        leafIds(group.root).includes(activeTabIdRef.current ?? ""),
+      );
+      if (focusedGroup) setActiveTabId(focusedGroup[1].activeTabId);
+      return; // Persist after both group and pane membership have committed.
+    }
+    const attached = [...expectedRecoveredTabs.current].every(id => recoveredTabIds.current.has(id));
+    const hydrated = Object.entries(groups).every(([id, group]) =>
+      !!terminalGroups[id] && leafIds(group.root).every(member =>
+        tabs.some(tab => tab.type === "terminal" && tab.id === member && tab.paneGroup === id),
+      ),
+    );
+    if (attached && hydrated) terminalRecoveryComplete.current = true;
+  }, [tabs, terminalGroups, thisInstance, terminalRecoveryMemory]);
+
   useEffect(() => {
     // Receipt means a render committed the attached tab, not merely that its
     // setState was requested. If this view unmounted mid-render, the queue must
@@ -2065,6 +2139,13 @@ const ProjectViewBody = memo(function ProjectViewBody({
     );
   }, []);
 
+  const restoreTerminalNames = useCallback((id: string, snapshot: Parameters<typeof adoptSnapshotNames>[0]) => {
+    setTabs(prev => prev.map(tab =>
+      tab.type === "terminal" && tab.id === id && !isUserNamed(tab)
+        ? { ...tab, ...adoptSnapshotNames(snapshot) } : tab,
+    ));
+  }, []);
+
   /** Record a user rename, whichever surface it came from — the inline tab
    *  rename, a pane header, or the Agents page editor, which addresses a
    *  session by pty and knows nothing about tabs. One subscription, so the
@@ -2072,14 +2153,16 @@ const ProjectViewBody = memo(function ProjectViewBody({
    *  remember to flag it. */
   useEffect(
     () =>
-      onSessionRenamed(({ ptyId, accepted, cleared }) => {
+      onSessionRenamed(({ ptyId, accepted, requested, cleared, source }) => {
         setTabs((prev) =>
           prev.map((t) => {
             if (t.type !== "terminal" || t.ptyId !== ptyId) return t;
             // Clearing the field asks for the generated label back: forget the
             // user's name rather than adopting native's fallback as a choice.
-            const patch = namePatch(t, "user", cleared ? undefined : accepted);
-            return patch ? { ...t, ...patch, nativeName: accepted } : t;
+            const patch = source === "intent"
+              ? namePatch(t, "user", cleared ? undefined : requested)
+              : namePatch(t, "native", accepted);
+            return patch ? { ...t, ...patch } : t;
           }),
         );
       }),
@@ -2520,7 +2603,6 @@ const ProjectViewBody = memo(function ProjectViewBody({
   // resolve the agent behind the active terminal the same way AgentsPanel does
   // (by PTY surface id). Polled while an agent terminal is open; idle otherwise.
   const [wsDigests, setWsDigests] = useState<ipc.SessionDigest[]>([]);
-  const [thisInstance, setThisInstance] = useState<string | null>(null);
   /** Which agent terminals have their workspace overlay open, by ptyId.
    *
    *  Per-terminal, not one global flag. Opening the workspace is a statement
@@ -2535,8 +2617,6 @@ const ProjectViewBody = memo(function ProjectViewBody({
   // re-subscribe every time a digest poll lands.
   const wsDigestsRef = useRef(wsDigests);
   wsDigestsRef.current = wsDigests;
-  const thisInstanceRef = useRef(thisInstance);
-  thisInstanceRef.current = thisInstance;
   const routeToRaiserRef = useRef<
     (
       pr: string,
@@ -2544,10 +2624,15 @@ const ProjectViewBody = memo(function ProjectViewBody({
     ) => Promise<{ delivered: boolean; note: string; [key: string]: unknown }>
   >(async () => ({ delivered: false, note: "PR routing is not ready." }));
   useEffect(() => {
-    void ipc
-      .instanceId()
-      .then(setThisInstance)
-      .catch(() => {});
+    let cancelled = false;
+    let retry: ReturnType<typeof setTimeout> | undefined;
+    const load = () => void Promise.all([ipc.instanceId(), ipc.rendererPtySessionsLive()]).then(([id, sessions]) => {
+      if (!cancelled) { recoveryNativeSessions.current = sessions; setThisInstance(id); }
+    }).catch(() => {
+      if (!cancelled) retry = setTimeout(load, 1000);
+    });
+    load();
+    return () => { cancelled = true; if (retry) clearTimeout(retry); };
   }, []);
   useEffect(() => {
     const load = () =>
@@ -2639,6 +2724,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
   // "reopen it" would re-run a task that already finished. Chore runs go for
   // the same reason — "restore my terminals" must not mean "install that again".
   useEffect(() => {
+    if (!terminalRecoveryComplete.current) return;
     const open: RememberedTerminal[] = tabs
       .filter(
         (t): t is TermSubTab =>
@@ -2655,6 +2741,9 @@ const ProjectViewBody = memo(function ProjectViewBody({
         componentId: t.componentId,
         runCommandId: t.runCommandId,
         tabId: t.id,
+        ptyId: t.ptyId ?? undefined,
+        sessionGeneration: t.sessionGeneration,
+        instance: thisInstanceRef.current ?? undefined,
         paneGroup: t.paneGroup,
         sessionId:
           (t.ptyId != null ? liveSessionByPtyRef.current.get(t.ptyId) : undefined) ??
@@ -2662,8 +2751,8 @@ const ProjectViewBody = memo(function ProjectViewBody({
           undefined,
         profile: t.profile,
       }));
-    rememberTerminals(project.id, open, terminalGroups);
-  }, [tabs, terminalGroups, project.id, events]);
+    rememberTerminals(project.id, open, terminalGroups, terminalMemoryScope);
+  }, [tabs, terminalGroups, project.id, events, thisInstance, terminalMemoryScope]);
 
   const [remembered, setRemembered] = useState<RememberedTerminal[]>([]);
   const [rememberedLayouts, setRememberedLayouts] = useState<
@@ -2671,7 +2760,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
   >({});
   useEffect(() => {
     if (tabs.length > 0 || !visible) return;
-    const memory = rememberedTerminalState(project.id);
+    const memory = rememberedTerminalState(project.id, terminalMemoryScope);
     // The command marker drops micro-tasks snapshotted before they were
     // excluded above — they'd otherwise sit in the list until overwritten.
     setRemembered(
@@ -2680,7 +2769,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
       ),
     );
     setRememberedLayouts(memory.terminalGroups);
-  }, [tabs.length, visible, project.id]);
+  }, [tabs.length, visible, project.id, terminalMemoryScope]);
 
   const resumeCards = useMemo(
     () => terminalResumeCards(remembered, rememberedLayouts, restorable),
@@ -2724,10 +2813,10 @@ const ProjectViewBody = memo(function ProjectViewBody({
       );
       // A name the user chose outlives the pty that held it: it comes back in
       // its own slot, and the spawn callback re-asserts it on the new session.
-      patchTabRaw(id, adoptSnapshotNames(t));
+      restoreTerminalNames(id, t);
       return id;
     },
-    [addTerminal, patchTabRaw],
+    [addTerminal, restoreTerminalNames],
   );
 
   const resumeSession = useCallback(
@@ -2792,8 +2881,8 @@ const ProjectViewBody = memo(function ProjectViewBody({
       const leaves = only ? [only] : card.leaves;
       const ids = new Map<string, string>();
       // Every tab that came back, in strip order. The map above only holds the
-      // ones that carry a remembered tabId — a resumed agent session has none —
-      // so it can never be what decides which tab ends up in front.
+      // ones that carry a remembered tabId, so unremembered sessions must not
+      // disappear from the choice of which tab ends up in front.
       const opened: (string | null)[] = [];
       for (const leaf of leaves) {
         const id = leaf.restorable
@@ -2802,14 +2891,20 @@ const ProjectViewBody = memo(function ProjectViewBody({
             ? await reopenTerminal(leaf.remembered, false)
             : null;
         opened.push(id);
-        if (id && leaf.remembered?.tabId) ids.set(leaf.remembered.tabId, id);
+        if (id && leaf.remembered) {
+          restoreTerminalNames(id, leaf.remembered);
+          if (leaf.remembered.tabId) ids.set(leaf.remembered.tabId, id);
+        }
       }
 
       const root = card.group && !only ? mapSplitTabIds(card.group.root, ids) : null;
       const memberIds = root ? leafIds(root) : [];
       if (card.group && root && memberIds.length >= 2) {
+        const existingGroup = terminalGroupsRef.current[card.group.id];
         const group: TerminalGroup = {
           ...card.group,
+          ...(existingGroup && isUserNamed(existingGroup)
+            ? namePatch({}, "user", tabName(existingGroup)) : {}),
           root,
           activeTabId: ids.get(card.group.activeTabId) ?? memberIds[0],
           zoomedTabId: card.group.zoomedTabId
@@ -2834,7 +2929,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
         if (front) setActiveTabId(front);
       }
     },
-    [reopenTerminal, resumeSession],
+    [reopenTerminal, resumeSession, restoreTerminalNames],
   );
 
   /** Carry out an accepted reload: each eligible agent's terminal is replaced
@@ -7811,7 +7906,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
           );
           // Waking spawns a new pty, which names itself. A name the user chose
           // has to be re-asserted onto it or the wake silently renames the tab.
-          patchTabRaw(id, adoptSnapshotNames(t));
+          restoreTerminalNames(id, t);
           return id;
         }
         case "file": {
@@ -7901,7 +7996,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
           });
       }
     },
-    [addTerminal, patchFile, patchTabRaw, ticketRepo],
+    [addTerminal, patchFile, patchTabRaw, ticketRepo, restoreTerminalNames],
   );
 
   // Wake: rebuild the workspace step by step while the frost (rendered by App,
@@ -9089,9 +9184,11 @@ const ProjectViewBody = memo(function ProjectViewBody({
   };
 
   const startRename = useCallback(
-    (tab: TermSubTab) => {
+    (tab: TermSubTab, scope: "tab" | "pane" = "tab") => {
+      const group = scope === "tab" && tab.paneGroup ? terminalGroupsRef.current[tab.paneGroup] : undefined;
+      renamingGroupId.current = group?.id ?? null;
       setRenamingTabId(tab.id);
-      setRenameDraft(tabName(tab, { agent: isAgentTabRef.current(tab) }));
+      setRenameDraft(group && isUserNamed(group) ? tabName(group) : tabName(tab, { agent: isAgentTabRef.current(tab) }));
     },
     [],
   );
@@ -9105,7 +9202,19 @@ const ProjectViewBody = memo(function ProjectViewBody({
         (candidate): candidate is TermSubTab =>
           candidate.id === renamingTabId && candidate.type === "terminal",
       );
-      if (tab?.ptyId != null) {
+      const groupId = renamingGroupId.current;
+      const group = groupId ? terminalGroupsRef.current[groupId] : undefined;
+      if (group) {
+        const patch = namePatch(group, "user", renameDraft);
+        if (patch) {
+          const next = {
+            ...terminalGroupsRef.current,
+            [group.id]: { ...group, ...patch },
+          };
+          terminalGroupsRef.current = next;
+          setTerminalGroups(next);
+        }
+      } else if (tab?.ptyId != null) {
         void renameSession(tab.ptyId, renameDraft).catch((error) =>
           onNotice(String(error), "error"),
         );
@@ -9114,9 +9223,13 @@ const ProjectViewBody = memo(function ProjectViewBody({
         if (patch) patchTab(tab.id, patch);
       }
     }
+    renamingGroupId.current = null;
     setRenamingTabId(null);
   }, [renamingTabId, renameDraft, patchTab, onNotice]);
-  const cancelRename = useCallback(() => setRenamingTabId(null), []);
+  const cancelRename = useCallback(() => {
+    renamingGroupId.current = null;
+    setRenamingTabId(null);
+  }, []);
 
   // Agents are the crux of this IDE, so they own the main strip. Detection is
   // by launch command, bound hook session, or the running pty tree, so a
@@ -9373,9 +9486,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
       out.push({
         ...tab,
         multiplexCount: ids.length,
-        multiplexTitle: tab.userName
-          ? `${tab.userName} · ${ids.length}`
-          : `${tabName(focused, { agent: isAgentTabRef.current(focused) })} +${ids.length - 1}`,
+        multiplexTitle: multiplexTabName(group, tab, focused, ids.length, { agent: isAgentTabRef.current(focused) }),
       });
     }
     return out;
@@ -12763,7 +12874,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
                     }`}
                     aria-hidden
                   />
-                  {renamingTabId === tab.id ? (
+                  {renamingTabId === tab.id && !renamingGroupId.current ? (
                     <input
                       className="multiplex-pane-rename"
                       autoFocus
@@ -12789,7 +12900,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
                       title="Double-click to rename"
                       onDoubleClick={(event) => {
                         event.stopPropagation();
-                        startRename(tab);
+                        startRename(tab, "pane");
                       }}
                     >
                       {tabName(tab, { agent: !!paneAgent?.id })}
@@ -12909,7 +13020,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
                 env={tab.env}
                 runId={tab.micro?.runId ?? tab.spawnedTask?.runId}
                 attemptId={tab.micro?.attemptId ?? tab.spawnedTask?.attemptId}
-                onSpawned={(ptyId, assignedName) => {
+                onSpawned={(ptyId, assignedName, sessionGeneration) => {
                   livePtyByTab.current.set(tab.id, ptyId);
                   // A freshly spawned pty is alive by definition, so clear any
                   // stale exited/failed state. Restart kills the old pty and
@@ -12918,6 +13029,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
                   // process is the one now running (a red ✕ on a live server).
                   patchTab(tab.id, {
                     ptyId,
+                    sessionGeneration: sessionGeneration ?? tab.sessionGeneration,
                     // The generated label, into its own slot. A restart used to
                     // write it over whatever the tab was called, so a renamed
                     // server came back as "Moss"; now it cannot reach the
@@ -12931,7 +13043,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
                   // new session is told about it rather than the other way
                   // round. Native is where the mesh and the Agents page look.
                   if (isUserNamed(tab) && tab.userName)
-                    void renameSession(ptyId, tab.userName).catch((error) =>
+                    void reassertSessionName(ptyId, tab.userName).catch((error) =>
                       onNotice(String(error), "error"),
                     );
                   if (tab.micro?.runId) updateTaskRun(tab.micro.runId, { ptyId });
@@ -13316,7 +13428,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
                     <Button icon
                       title="Forget everything here — remembered terminals and restorable agent sessions — for this project"
                       onClick={() => {
-                        forgetTerminals(project.id);
+                        forgetTerminals(project.id, terminalMemoryScope);
                         setRemembered([]);
                         // Every row's whole directory, not just the session it
                         // happens to be showing — otherwise "forget everything

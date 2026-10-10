@@ -7,6 +7,7 @@
 // Kept in localStorage rather than the workspace file: it is a convenience
 // record, not part of the project's definition, and a corrupt one should cost
 // nothing.
+import { rememberedGroupNames } from "./terminalRecovery";
 import type { TerminalGroup } from "./terminalGroups";
 import type { Restorable } from "./restorable";
 import { resumeSessionId } from "./projects";
@@ -23,6 +24,10 @@ export interface RememberedTerminal {
   runCommandId?: string;
   /** Runtime identity used to reconnect this terminal to a remembered split. */
   tabId?: string;
+  /** Exact running terminal identity, scoped to the backend instance. */
+  ptyId?: number;
+  sessionGeneration?: number;
+  instance?: string;
   paneGroup?: string;
   /** The name the user chose, which restore re-asserts on the new session.
    *  `renamed` is the pre-tabName spelling of the same fact and is still read
@@ -56,6 +61,8 @@ const KEY = "canopy.terminals";
 
 type StoredProject = RememberedTerminal[] | RememberedTerminalState;
 type Store = Record<string, StoredProject>;
+const storageKey = (projectId: string, scope: string) =>
+  scope === "local" ? projectId : JSON.stringify([scope, projectId]);
 
 function read(): Store {
   try {
@@ -69,14 +76,15 @@ export function rememberTerminals(
   projectId: string,
   terminals: RememberedTerminal[],
   terminalGroups: Record<string, TerminalGroup> = {},
+  scope = "local",
 ) {
   // Never record an empty set. Closing the last tab is exactly when this
   // memory becomes valuable — overwriting it at that moment would erase the
   // thing the user wants back.
   if (terminals.length === 0) return;
   const store = read();
-  store[projectId] = {
-    terminals: terminals.slice(0, 12),
+  store[storageKey(projectId, scope)] = {
+    terminals,
     terminalGroups,
   };
   try {
@@ -87,19 +95,36 @@ export function rememberTerminals(
   }
 }
 
-export function rememberedTerminals(projectId: string): RememberedTerminal[] {
-  return rememberedTerminalState(projectId).terminals;
+export function rememberedTerminals(
+  projectId: string,
+  scope = "local",
+): RememberedTerminal[] {
+  return rememberedTerminalState(projectId, scope).terminals;
 }
 
-export function rememberedTerminalState(projectId: string): RememberedTerminalState {
-  const stored = read()[projectId];
+export function rememberedTerminalState(
+  projectId: string,
+  scope = "local",
+): RememberedTerminalState {
+  const store = read();
+  const legacy = store[projectId];
+  const legacyRows = Array.isArray(legacy) ? legacy : legacy?.terminals;
+  // A newly scoped local record belongs to local execution. Only pre-scope
+  // snapshots may migrate into a remote workspace.
+  const fallback =
+    scope === "local" || legacyRows?.every((t) => !t.instance)
+      ? legacy
+      : undefined;
+  const stored = store[storageKey(projectId, scope)] ?? fallback;
   if (Array.isArray(stored)) return { terminals: stored, terminalGroups: {} };
   return stored ?? { terminals: [], terminalGroups: {} };
 }
 
-export function forgetTerminals(projectId: string) {
+export function forgetTerminals(projectId: string, scope = "local") {
   const store = read();
-  delete store[projectId];
+  if (scope === "local") delete store[storageKey(projectId, scope)];
+  else
+    store[storageKey(projectId, scope)] = { terminals: [], terminalGroups: {} };
   try {
     localStorage.setItem(KEY, JSON.stringify(store));
   } catch {
@@ -120,7 +145,8 @@ export function terminalResumeCards(
 
   for (const terminal of terminals) {
     const agentId = agentIdForCommand(terminal.command);
-    const sessionId = terminal.sessionId ?? resumeSessionId(terminal.command) ?? undefined;
+    const sessionId =
+      terminal.sessionId ?? resumeSessionId(terminal.command) ?? undefined;
     const restorable = sessionId ? available.get(sessionId) : undefined;
     if (restorable) available.delete(sessionId!);
 
@@ -128,7 +154,9 @@ export function terminalResumeCards(
     // be live, user-closed, or unresumable. Never replay it as a fresh agent.
     if (agentId && sessionId && !restorable) continue;
     leaves.push({
-      key: terminal.tabId ? `terminal:${terminal.tabId}` : `terminal:${leaves.length}`,
+      key: terminal.tabId
+        ? `terminal:${terminal.tabId}`
+        : `terminal:${leaves.length}`,
       remembered: terminal,
       restorable,
     });
@@ -155,7 +183,7 @@ export function terminalResumeCards(
       .filter((leaf) => leaf.remembered?.paneGroup === group.id);
     if (members.length < 2) continue;
     members.forEach((leaf) => claimed.add(leaf));
-    cards.push({ key: `group:${group.id}`, group, leaves: members });
+    cards.push({ key: `group:${group.id}`, group: rememberedGroupNames(group, terminals), leaves: members });
   }
   for (const leaf of leaves) {
     if (!claimed.has(leaf)) cards.push({ key: leaf.key, leaves: [leaf] });

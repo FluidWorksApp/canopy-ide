@@ -236,3 +236,16 @@ export function adoptSnapshotNames(snapshot: {
     ...(clean(snapshot.title) ? { launchTitle: clean(snapshot.title) } : {}),
   };
 }
+
+/** A mux owns its user label independently of its focused pane. */
+export function multiplexTabName(
+  group: TabNames,
+  representative: NamedTab,
+  focused: NamedTab,
+  count: number,
+  opts: { agent?: boolean } = {},
+): string {
+  if (isUserNamed(group)) return tabName(group);
+  if (isUserNamed(representative)) return tabName(representative);
+  return `${tabName(focused, opts)} +${count - 1}`;
+}

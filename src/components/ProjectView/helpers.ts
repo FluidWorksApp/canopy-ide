@@ -33,6 +33,8 @@ export interface TermSubTab extends TabNames {
    *  whenever the work changes. */
   description?: string;
   ptyId: number | null;
+  /** The backend lifetime, independent of output-stream attachment epochs. */
+  sessionGeneration?: number;
   /** When set, this tab attaches to an already-running headless PTY (spawned
    *  from the remote portal) instead of spawning its own. Closing it detaches;
    *  the agent keeps running for the phone. */

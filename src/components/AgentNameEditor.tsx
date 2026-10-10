@@ -17,8 +17,13 @@ export function AgentNameEditor({
   const saving = useRef(false);
   const [error, setError] = useState<string | null>(null);
   useEffect(() => {
+    // Background process-name updates cannot replace text the user is typing.
+    if(editing || saving.current)return;
     setSaved(name);
     setDraft(name);
+  // The saved result may precede the parent's stats refresh; ending an edit
+  // must not reapply that old prop over the newly accepted choice.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [name]);
 
   const cancel = () => {

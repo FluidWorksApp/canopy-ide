@@ -27,6 +27,8 @@ export type SessionRenameListener = (rename: {
   requested: string;
   /** True when the user emptied the field: undo the rename, don't store one. */
   cleared: boolean;
+  /** Restore/native acknowledgements may update routing, never user intent. */
+  source: "intent" | "confirmed" | "restore";
 }) => void;
 
 const listeners = new Set<SessionRenameListener>();
@@ -46,14 +48,80 @@ export function onSessionRenamed(fn: SessionRenameListener): () => void {
  * characters, collision with another live session) and on its accepted
  * spelling; it rejects by throwing, which callers surface as they see fit.
  */
-export async function renameSession(ptyId: number, requested: string): Promise<string> {
-  const accepted = await ipc.ptySetName(ptyId, requested);
-  const rename = {
-    ptyId,
-    accepted,
-    requested,
-    cleared: requested.trim().length === 0,
-  };
+const pending = new Map<number, Promise<unknown>>();
+const choices = new Map<number, { requested: string; revision: number }>();
+function announce(rename: Parameters<SessionRenameListener>[0]) {
   for (const fn of [...listeners]) fn(rename);
-  return accepted;
+}
+
+/** User intent is applied before IPC. Serialize native writes, and fence old
+ * acknowledgements so restoring an older label cannot undo a newer rename. */
+export function renameSession(
+  ptyId: number,
+  requested: string,
+): Promise<string> {
+  const revision = (choices.get(ptyId)?.revision ?? 0) + 1;
+  choices.set(ptyId, { requested, revision });
+  announce({
+    ptyId,
+    accepted: requested.trim(),
+    requested,
+    cleared: !requested.trim(),
+    source: "intent",
+  });
+  return synchronize(ptyId, requested, revision, false);
+}
+
+/** Reassert a saved user name on a replacement PTY without manufacturing a
+ * new user edit. In particular, its late reply may never change a tab label. */
+export function reassertSessionName(
+  ptyId: number,
+  requested: string,
+): Promise<string> {
+  return synchronize(ptyId, requested, choices.get(ptyId)?.revision ?? 0, true);
+}
+
+function synchronize(
+  ptyId: number,
+  requested: string,
+  revision: number,
+  restore: boolean,
+): Promise<string> {
+  const operation = (pending.get(ptyId) ?? Promise.resolve())
+    .catch(() => {})
+    .then(async () => {
+      const current = choices.get(ptyId);
+      if (current && current.revision !== revision)
+        return current.requested.trim();
+      try {
+        const accepted = await ipc.ptySetName(
+          ptyId,
+          current?.requested ?? requested,
+        );
+        const latest = choices.get(ptyId);
+        if (latest && latest.revision !== revision)
+          return latest.requested.trim();
+        announce({
+          ptyId,
+          accepted,
+          requested: latest?.requested ?? requested,
+          cleared: !(latest?.requested ?? requested).trim(),
+          source: restore ? "restore" : "confirmed",
+        });
+        // Native's routing label is not the authority over the user's tab text.
+        return (latest?.requested ?? requested).trim() || accepted;
+      } catch (error) {
+        const latest = choices.get(ptyId);
+        if (latest && latest.revision !== revision)
+          return latest.requested.trim();
+        throw error;
+      }
+    });
+  pending.set(ptyId, operation);
+  void operation
+    .finally(() => {
+      if (pending.get(ptyId) === operation) pending.delete(ptyId);
+    })
+    .catch(() => {});
+  return operation;
 }

@@ -1,3 +1,5 @@
+import type { TabNames } from "./tabName";
+
 export type SplitAxis = "horizontal" | "vertical";
 
 export type TerminalSplitNode =
@@ -11,7 +13,7 @@ export type TerminalSplitNode =
       second: TerminalSplitNode;
     };
 
-export interface TerminalGroup {
+export interface TerminalGroup extends Pick<TabNames, "userName"> {
   id: string;
   root: TerminalSplitNode;
   activeTabId: string;
