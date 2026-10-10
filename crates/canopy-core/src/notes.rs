@@ -1,0 +1,2698 @@
+// The scratchpad: thoughts captured before they are work.
+//
+// The gap this fills is narrow and specific. Canopy could already *dispatch* an
+// idea — ⌘K composes a sentence and runs it as a one-shot agent task, or sends
+// it off as research — but it could not *park* one. A thought you are not ready
+// to act on had nowhere to go, so it went into a comment, a terminal scrollback,
+// or nowhere at all. This is the parking state, and everything else here exists
+// to make a parked thought worth coming back to.
+//
+// It borrows research.rs's shape deliberately — same directory discipline, same
+// atomic writes, same id-as-path-gate, same state machine checked in Rust — and
+// differs from it in three ways that matter:
+//
+//   1. The store is the spine, not the output. A research entry is a finding an
+//      agent produced. A note is the user's own sentence, and the research
+//      runs, tasks and PRs that come out of it hang off it as evidence
+//      (`links`). One thought lives in one place; you always know where to look.
+//
+//   2. Attachments are first-class, because the capture is the point. An image
+//      pasted into ⌘K, a selection lifted out of an editor, a file at the commit
+//      you were looking at — a note that loses those is a note that reads as
+//      "fix the thing" three weeks later.
+//
+//   3. Archiving is reversible. Research treats archived as terminal, which is
+//      right for a finding somebody deliberately put down. A scratchpad whose
+//      archive is a one-way door is a scratchpad people stop archiving into,
+//      and then the list rots instead.
+//
+// Everything on disk is plain JSON, markdown and the attachment bytes as they
+// arrived: readable without Canopy, greppable, recoverable by hand. `meta.json`
+// is the source of truth; the SpotSearch index over it (spot.rs, kind = "note")
+// is derived and rebuildable, and nothing here reads from it.
+
+use crate::events::{EventSink, Store, StoreChange};
+use crate::project::Project;
+use serde::{Deserialize, Serialize};
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
+
+/// One reminder, as the scheduler needs it.
+pub struct ReminderJob<'a> {
+    pub project_id: &'a str,
+    pub note_id: &'a str,
+    /// The note's title — the banner's body.
+    pub title: &'a str,
+    /// What the user (or the agent) wrote when setting it, if anything.
+    pub note: &'a str,
+    pub at: i64,
+    /// `canopy://note?…`, the click target.
+    pub link: &'a str,
+}
+
+/// Whatever holds a reminder outside the store. The embedding process decides
+/// whether the OS can take the job; the store only records which alarm it got.
+pub trait Reminders: Send + Sync {
+    /// Hand the job over. True when the system holds it and will announce it
+    /// with the app closed; false when the in-app tick is the only alarm.
+    fn schedule(&self, job: &ReminderJob) -> bool;
+    /// Take the job away. Silent: a job the user cannot see is never worth an
+    /// error in front of them.
+    fn unschedule(&self, project_id: &str, note_id: &str);
+}
+
+/// No system alarm: every reminder is in-app only.
+pub struct InAppReminders;
+impl Reminders for InAppReminders {
+    fn schedule(&self, _job: &ReminderJob) -> bool {
+        false
+    }
+    fn unschedule(&self, _project_id: &str, _note_id: &str) {}
+}
+
+/// The scratchpad, rooted at an explicit directory.
+///
+/// Serializes every write, for the same reason research.rs does: a note can be
+/// open in the panel, in a detail tab, and in an agent's hands at once, and a
+/// read-modify-write of meta.json is exactly the shape that loses one of them.
+pub struct NotesStore {
+    root: Option<PathBuf>,
+    events: Arc<dyn EventSink>,
+    reminders: Arc<dyn Reminders>,
+    lock: Mutex<()>,
+}
+
+// ---- caps -----------------------------------------------------------------
+//
+// Looser than research's, and for the opposite reason. Research caps exist to
+// protect the *next agent's* context window — a digest is a tier because
+// something will read twenty of them at once. A note is read by one human, one
+// at a time, so these caps are only here to keep a scratchpad from becoming a
+// document store by accident.
+
+const TITLE_MAX: usize = 200;
+/// `note.md`. Past this you are writing a document, and a document with a
+/// lifecycle is what research.rs is for.
+const BODY_MAX: usize = 32 * 1024;
+/// One pasted image. Generous — a retina screenshot of a wide editor is a few
+/// megabytes and refusing it would break the single most valuable capture path.
+const IMAGE_MAX: usize = 16 * 1024 * 1024;
+/// One text artifact: a stack trace, a log slice, a chunk of a file.
+const ARTIFACT_MAX: usize = 512 * 1024;
+/// Attachments per note. A note needing more than this is a research entry.
+const MAX_ATTACHMENTS: usize = 32;
+/// What a list row carries of the body.
+const PREVIEW_MAX: usize = 240;
+/// The line a reminder carries into the banner. A notification body is two
+/// lines on screen whatever you put in it, and the note itself is one click
+/// away.
+const REMINDER_NOTE_MAX: usize = 200;
+/// The panel shows the user's whole scratchpad, so this is far higher than
+/// research's — that list is read by agents, this one by a person scrolling.
+const LIST_DEFAULT: usize = 200;
+const LIST_MAX: usize = 1000;
+
+// ---- status ---------------------------------------------------------------
+
+/// Where a thought is between having it and being done with it.
+///
+/// The two that earn their place are `Ideation` and `Ready`. Without the split
+/// there is one bucket holding both the two hundred raw thoughts and the five
+/// you actually decided were worth doing — which is the pile this module exists
+/// to replace, reproduced inside it.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Status {
+    /// Captured, raw, untriaged. The default, and where most notes live.
+    #[default]
+    Ideation,
+    /// Triaged: you decided this is worth doing. Nobody has started.
+    Ready,
+    /// An agent or the user is on it now.
+    Doing,
+    /// It landed. When an agent did it, `links.prs` says which PR — which is
+    /// why there is no separate "implemented": the evidence distinguishes them
+    /// better than a second terminal state would.
+    Done,
+    /// Deliberately not now, but still real. Distinct from archived: parked
+    /// says "come back to this", archived says "stop showing me this".
+    Parked,
+    /// Filed away, out of the default list. Reversible — see `next`.
+    Archived,
+}
+
+impl Status {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Status::Ideation => "ideation",
+            Status::Ready => "ready",
+            Status::Doing => "doing",
+            Status::Done => "done",
+            Status::Parked => "parked",
+            Status::Archived => "archived",
+        }
+    }
+
+    fn parse(s: &str) -> Result<Status, String> {
+        Ok(match s {
+            "ideation" => Status::Ideation,
+            "ready" => Status::Ready,
+            "doing" => Status::Doing,
+            "done" => Status::Done,
+            "parked" => Status::Parked,
+            "archived" => Status::Archived,
+            other => {
+                return Err(format!(
+                    "unknown status \"{other}\" — one of: ideation, ready, doing, \
+                     done, parked, archived"
+                ))
+            }
+        })
+    }
+
+    /// Where this state may go next.
+    ///
+    /// Three rules shape this list, and each is a departure from research.rs
+    /// made on purpose:
+    ///
+    /// - **Ideation may skip straight to Doing.** The triage state is there to
+    ///   make a pile legible, not to be a tollgate: a thought you have and
+    ///   immediately hand to an agent should not need two clicks to get there.
+    /// - **Everything may be reopened.** `Done` goes back to `Doing`, because
+    ///   "done" here is one person's judgement and it is routinely wrong.
+    /// - **Archived is a door, not a wall.** It returns to `Ideation` — the
+    ///   state it can honestly claim, since anything else would be asserting a
+    ///   triage decision nobody made. An archive you cannot pull out of is one
+    ///   people stop putting things into.
+    fn next(self) -> &'static [Status] {
+        use Status::*;
+        match self {
+            Ideation => &[Ready, Doing, Parked, Archived],
+            Ready => &[Doing, Ideation, Parked, Archived],
+            Doing => &[Done, Ready, Parked, Archived],
+            Done => &[Doing, Archived],
+            Parked => &[Ideation, Ready, Doing, Archived],
+            Archived => &[Ideation],
+        }
+    }
+
+    /// Re-entering a state is always allowed, so a repeated call is a no-op
+    /// rather than an error — an agent retrying after a dropped reply should
+    /// not get a failure for the state it already reached.
+    fn can_move_to(self, to: Status) -> bool {
+        self == to || self.next().contains(&to)
+    }
+}
+
+// ---- the record -----------------------------------------------------------
+
+/// A pull request that came out of this note. Its `state` is refreshed by the
+/// frontend reconciler, and a linked PR reaching "merged" is the one thing that
+/// moves a note to `Done` without a human asserting it.
+#[derive(Clone, Serialize, Deserialize, Default)]
+pub struct PrLink {
+    pub repo: String,
+    pub number: u64,
+    #[serde(default)]
+    pub url: String,
+    #[serde(default)]
+    pub state: String,
+}
+
+/// A file the note is about.
+///
+/// Both halves are deliberate. `rev` is the commit the note was written
+/// against, so the UI can say "captured 12 commits ago, this file has moved"
+/// instead of quietly showing you something else. `snapshot` freezes only the
+/// lines that were selected — a whole-file copy goes stale, takes space, and
+/// misleads, while the selected lines are exactly the thing the thought was
+/// about and are worth keeping verbatim.
+#[derive(Clone, Serialize, Deserialize, Default)]
+pub struct FileRef {
+    pub path: String,
+    #[serde(default)]
+    pub start_line: Option<u32>,
+    #[serde(default)]
+    pub end_line: Option<u32>,
+    /// Short commit hash at capture time; empty when the file was not in a repo
+    /// or git could not be read.
+    #[serde(default)]
+    pub rev: String,
+    /// Relative path under `attachments/` holding the frozen lines, when any
+    /// were taken.
+    #[serde(default)]
+    pub snapshot: Option<String>,
+}
+
+#[derive(Clone, Serialize, Deserialize, Default)]
+pub struct Links {
+    #[serde(default)]
+    pub prs: Vec<PrLink>,
+    /// Research entries started from this note — ids in the research store of
+    /// the same project.
+    #[serde(default)]
+    pub research: Vec<String>,
+    /// `TaskRun` ids from the frontend's task history.
+    #[serde(default)]
+    pub task_runs: Vec<String>,
+    #[serde(default)]
+    pub branches: Vec<String>,
+    #[serde(default)]
+    pub files: Vec<FileRef>,
+}
+
+/// A blob kept with the note: a pasted image, or a lifted chunk of text.
+#[derive(Clone, Serialize, Deserialize)]
+pub struct Attachment {
+    /// Relative to the note directory, always under `attachments/`.
+    pub file: String,
+    /// "image" | "artifact". Free-form on disk so an unknown kind written by a
+    /// future version still opens rather than failing the whole note.
+    pub kind: String,
+    pub title: String,
+    /// Where it came from — a path, a URL, "pasted". Free text, because the
+    /// useful answer varies and a taxonomy here would be guessed.
+    #[serde(default)]
+    pub origin: String,
+    #[serde(default)]
+    pub bytes: u64,
+}
+
+/// A time to be handed this note back at.
+///
+/// One per note, not a list. A note is a single thought, and "remind me about
+/// this on Friday, and again on Monday" is a thing nobody has ever wanted from
+/// a scratchpad — while two live alarms on one note is a UI that has to explain
+/// which one the row's chip means. Re-setting replaces.
+///
+/// `system` is the load-bearing field. It records that launchd took the job, so
+/// the app knows to stay quiet when the time comes: the banner is already
+/// coming from outside, and an app that announces it too is an app that
+/// double-notifies for every reminder set while it happened to be open.
+#[derive(Clone, Serialize, Deserialize, Default, Debug)]
+pub struct Reminder {
+    /// When it is due, epoch seconds.
+    pub at: i64,
+    /// What to say beyond the title — the user's or the agent's own words.
+    #[serde(default)]
+    pub note: String,
+    /// Who set it: "you", or the agent's name. Same convention as history's
+    /// `by`, and for the same reason — a reminder you did not set yourself is
+    /// a different thing to see at 9am than one you did.
+    #[serde(default)]
+    pub by: String,
+    #[serde(default)]
+    pub created_at: i64,
+    /// Set once the time has passed and the app has noticed. Kept rather than
+    /// cleared: an overdue note stays visibly overdue until it is dealt with,
+    /// which is the entire point of having asked to be reminded.
+    #[serde(default)]
+    pub fired_at: Option<i64>,
+    /// The OS holds this one — it fires with Canopy closed. False means the
+    /// in-app tick is the only alarm, and the UI says so.
+    #[serde(default)]
+    pub system: bool,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+pub struct HistoryEntry {
+    pub at: i64,
+    pub from: String,
+    pub to: String,
+    /// Who moved it — "you" from the panel, "Canopy" for a move the app made on
+    /// its own (a merged PR), an agent's name otherwise.
+    #[serde(default)]
+    pub by: String,
+    #[serde(default)]
+    pub note: String,
+}
+
+/// `meta.json`. Every field defaulted: a note hand-edited to something slightly
+/// wrong should still open, because the alternative is losing a thought to a
+/// typo — which is the failure this whole module exists to prevent.
+#[derive(Clone, Serialize, Deserialize)]
+pub struct Meta {
+    pub id: String,
+    #[serde(default)]
+    pub project_id: String,
+    #[serde(default)]
+    pub title: String,
+    #[serde(default)]
+    pub status: Status,
+    #[serde(default)]
+    pub tags: Vec<String>,
+    /// What the user was looking at when they captured it — the active tab,
+    /// caret, selection, terminal tail, as `capturePageContext` composed it.
+    /// Kept verbatim and never re-derived: it describes a moment that has
+    /// passed.
+    #[serde(default)]
+    pub context: String,
+    /// Which surface captured it: "spot", "menu", "panel". Not shown anywhere
+    /// yet; recorded because "where do my notes actually come from" is the
+    /// question that decides which capture path is worth improving.
+    #[serde(default)]
+    pub origin: String,
+    /// Where the note was taken, for the SpotSearch index's project scoping.
+    #[serde(default)]
+    pub cwd: String,
+    #[serde(default)]
+    pub created_at: i64,
+    #[serde(default)]
+    pub updated_at: i64,
+    #[serde(default)]
+    pub attachments: Vec<Attachment>,
+    #[serde(default)]
+    pub links: Links,
+    #[serde(default)]
+    pub history: Vec<HistoryEntry>,
+    #[serde(default)]
+    pub reminder: Option<Reminder>,
+}
+
+/// A list row. Carries a preview rather than the body — the panel renders
+/// hundreds of these and the body can be 32KB.
+#[derive(Serialize, Debug)]
+pub struct Summary {
+    pub id: String,
+    pub title: String,
+    pub status: &'static str,
+    pub preview: String,
+    pub tags: Vec<String>,
+    pub created_at: i64,
+    pub updated_at: i64,
+    pub attachment_count: usize,
+    pub image_count: usize,
+    pub file_count: usize,
+    pub pr_count: usize,
+    pub research_count: usize,
+    /// The whole reminder, not just its time: a row has to distinguish "due in
+    /// two hours" from "was due yesterday and nobody looked", and the panel
+    /// sorts overdue notes to the top, which needs `fired_at` too.
+    pub reminder: Option<Reminder>,
+}
+
+#[derive(Serialize)]
+pub struct Detail {
+    #[serde(flatten)]
+    pub summary: Summary,
+    pub body: String,
+    pub context: String,
+    pub origin: String,
+    pub attachments: Vec<Attachment>,
+    pub links: Links,
+    pub history: Vec<HistoryEntry>,
+    /// Absolute path to the note directory.
+    pub dir: String,
+}
+
+/// Written beside the notes so a project removed from the workspace (which
+/// changes its id) leaves something recoverable rather than an orphaned hash.
+#[derive(Clone, Serialize, Deserialize, Default)]
+pub struct ProjectRef {
+    pub id: String,
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub roots: Vec<String>,
+    /// The highest note number ever issued for this project.
+    ///
+    /// Kept here rather than derived from the directory listing because a
+    /// delete removes the directory: derived alone, throwing away note 7 hands
+    /// the number 7 to the next note written, and every reference to the old
+    /// one — a PR body, another note's `links`, a message to a teammate — now
+    /// silently points at something else. Ids are permanent references, so the
+    /// counter has to outlive the thing it named.
+    #[serde(default)]
+    pub last_seq: u32,
+}
+
+/// Ids are minted here (`nnnn-slug`) and never accepted in any other shape,
+/// which is the whole path gate: a value matching this pattern cannot contain a
+/// separator, a dot segment, or anything else that escapes.
+fn valid_id(id: &str) -> bool {
+    let Some((num, slug)) = id.split_once('-') else {
+        return false;
+    };
+    num.len() == 4
+        && num.bytes().all(|b| b.is_ascii_digit())
+        && !slug.is_empty()
+        && slug.len() <= 64
+        && slug
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+}
+
+fn now_secs() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
+}
+
+/// Lowercase, dashed, and short enough to read in a tab title.
+fn slugify(s: &str) -> String {
+    let mut out = String::new();
+    for ch in s.chars() {
+        if ch.is_ascii_alphanumeric() {
+            out.push(ch.to_ascii_lowercase());
+        } else if !out.ends_with('-') {
+            out.push('-');
+        }
+        if out.len() >= 48 {
+            break;
+        }
+    }
+    let s = out.trim_matches('-').to_string();
+    if s.is_empty() {
+        "untitled".into()
+    } else {
+        s
+    }
+}
+
+/// Rename over the top rather than truncate-and-write: a crash mid-write leaves
+/// the previous meta.json, not half of one.
+fn write_atomic(path: &Path, body: &[u8]) -> Result<(), String> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+    let tmp = path.with_extension(format!("tmp{}", std::process::id()));
+    std::fs::write(&tmp, body).map_err(|e| e.to_string())?;
+    std::fs::rename(&tmp, path).map_err(|e| e.to_string())
+}
+
+fn cap(field: &str, value: &str, max: usize, fix: &str) -> Result<(), String> {
+    let n = value.chars().count();
+    if n > max {
+        return Err(format!(
+            "{field} is {n} characters; the limit is {max}. {fix}"
+        ));
+    }
+    Ok(())
+}
+
+fn read_meta(dir: &Path) -> Result<Meta, String> {
+    let raw = std::fs::read_to_string(dir.join("meta.json"))
+        .map_err(|e| format!("no note there: {e}"))?;
+    serde_json::from_str(&raw).map_err(|e| format!("meta.json is unreadable: {e}"))
+}
+
+fn body_path(dir: &Path) -> PathBuf {
+    dir.join("note.md")
+}
+
+fn read_body(dir: &Path) -> String {
+    std::fs::read_to_string(body_path(dir)).unwrap_or_default()
+}
+
+/// The first stretch of the body, on one line, for a list row.
+///
+/// A note's body routinely opens with a markdown heading repeating the title,
+/// or with the pasted thing the thought was about. Neither says anything in a
+/// row next to the title, so headings and blank lines are skipped and the
+/// preview starts at the first line that carries prose.
+fn preview_of(body: &str) -> String {
+    let text = body
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty() && !l.starts_with('#'))
+        .collect::<Vec<_>>()
+        .join(" ");
+    let text = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    if text.chars().count() <= PREVIEW_MAX {
+        return text;
+    }
+    let cut: String = text.chars().take(PREVIEW_MAX).collect();
+    match cut.rfind(' ') {
+        Some(at) if at > PREVIEW_MAX / 2 => format!("{}…", &cut[..at]),
+        _ => format!("{cut}…"),
+    }
+}
+
+fn summarize(m: &Meta, body: &str) -> Summary {
+    Summary {
+        id: m.id.clone(),
+        title: m.title.clone(),
+        status: m.status.as_str(),
+        preview: preview_of(body),
+        tags: m.tags.clone(),
+        created_at: m.created_at,
+        updated_at: m.updated_at,
+        attachment_count: m.attachments.len(),
+        image_count: m.attachments.iter().filter(|a| a.kind == "image").count(),
+        file_count: m.links.files.len(),
+        pr_count: m.links.prs.len(),
+        research_count: m.links.research.len(),
+        reminder: m.reminder.clone(),
+    }
+}
+
+/// Cut to a word boundary, so a title taken from a paragraph reads as a phrase
+/// rather than as a sentence that ran out of room.
+fn clip_words(s: &str, max: usize) -> String {
+    if s.chars().count() <= max {
+        return s.to_string();
+    }
+    let cut: String = s.chars().take(max).collect();
+    match cut.rfind(' ') {
+        Some(at) if at > max / 2 => format!("{}…", &cut[..at]),
+        _ => format!("{cut}…"),
+    }
+}
+
+/// Where clicking the banner has to land: this note, in this project.
+///
+/// Built here rather than in the frontend because the string leaves the
+/// process — it goes into a launchd plist that may be read months from now, by
+/// a helper that has no idea what a project is. `path` rides along as the
+/// second way to find the project: ids are derived from the workspace file and
+/// a project removed and re-added gets a new one, at which point the note's own
+/// cwd is the only surviving evidence of where it belongs.
+pub fn note_link(meta: &Meta) -> String {
+    let mut link = format!(
+        "canopy://note?note={}&id={}",
+        urlish(&meta.id),
+        urlish(&meta.project_id)
+    );
+    if !meta.cwd.is_empty() {
+        link.push_str(&format!("&path={}", urlish(&meta.cwd)));
+    }
+    link
+}
+
+/// Percent-encoding for the few characters a path or an id can carry that would
+/// end the query parameter. Not a general encoder: ids are `nnnn-slug` and the
+/// only realistic hazard is a space or an ampersand in a directory name.
+fn urlish(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for b in s.bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' | b'/' => {
+                out.push(b as char)
+            }
+            _ => out.push_str(&format!("%{b:02X}")),
+        }
+    }
+    out
+}
+
+/// A reminder whose time has come, with enough of its note to announce it.
+#[derive(Serialize)]
+pub struct Due {
+    pub project_id: String,
+    pub id: String,
+    pub title: String,
+    pub note: String,
+    pub at: i64,
+    pub by: String,
+    /// launchd already announced this one — the app must not announce it again.
+    pub system: bool,
+    /// The click target, so the caller never has to compose one.
+    pub link: String,
+}
+
+/// One indexable document per note, for spot.rs. `cwd` is where the note was
+/// taken, which is what scopes a hit to a project in the existing index — notes
+/// inherit SpotSearch's project scoping rather than inventing their own.
+pub struct IndexDoc {
+    pub project_id: String,
+    pub id: String,
+    pub title: String,
+    pub body: String,
+    pub cwd: String,
+    pub dir: String,
+    pub ts: i64,
+}
+
+impl NotesStore {
+    // ---- paths ----------------------------------------------------------------
+    //
+    // Outside every repo, exactly as research.rs is and for the same reasons:
+    // several agents share one checkout here and switch its branches under each
+    // other, worktrees are created and removed hourly, and `.canopy/` inside a tree
+    // is a directory that merge-conflicts or vanishes. A scratchpad that disappears
+    // with a worktree is worse than no scratchpad, because you trusted it.
+
+    pub fn new(
+        root: Option<PathBuf>,
+        events: Arc<dyn EventSink>,
+        reminders: Arc<dyn Reminders>,
+    ) -> NotesStore {
+        NotesStore {
+            root,
+            events,
+            reminders,
+            lock: Mutex::new(()),
+        }
+    }
+
+    /// The store's own directory, created on first use.
+    pub fn root(&self) -> Result<PathBuf, String> {
+        let dir = self.root.clone().ok_or_else(|| "no home dir".to_string())?;
+        std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+        Ok(dir)
+    }
+
+    /// Project ids come from the frontend workspace file, so they are trusted-ish —
+    /// but "ish" is not a security model when the value becomes a path segment.
+    fn project_dir(&self, project_id: &str) -> Result<PathBuf, String> {
+        let id = project_id.trim();
+        if id.is_empty() {
+            return Err("no project — notes are scoped to the project they were \
+                        written in, and this directory is not inside an open one"
+                .into());
+        }
+        if id.len() > 128
+            || id.contains('/')
+            || id.contains('\\')
+            || id.contains("..")
+            || id.starts_with('.')
+        {
+            return Err(format!("bad project id: {id}"));
+        }
+        Ok(self.root()?.join(id))
+    }
+
+    fn note_dir(&self, project_id: &str, id: &str) -> Result<PathBuf, String> {
+        if !valid_id(id) {
+            return Err(format!(
+                "not a note id: \"{id}\" — ids look like 0007-tiered-donations \
+                 (call list to see them)"
+            ));
+        }
+        Ok(self.project_dir(project_id)?.join(id))
+    }
+
+    /// A path inside a note, for attachment reads. Resolved and then checked to be
+    /// under the note, so a symlink or a `..` that survived the textual check still
+    /// cannot address anything outside it.
+    fn note_file(&self, project_id: &str, id: &str, rel: &str) -> Result<PathBuf, String> {
+        let dir = self.note_dir(project_id, id)?;
+        let rel = rel.trim_start_matches('/');
+        if rel.is_empty() || rel.contains("..") {
+            return Err(format!("bad path inside the note: {rel}"));
+        }
+        let target = dir.join(rel);
+        let base = dir.canonicalize().unwrap_or(dir.clone());
+        let resolved = target.canonicalize().unwrap_or(target.clone());
+        if !resolved.starts_with(&base) {
+            return Err(format!("{rel} is outside the note"));
+        }
+        Ok(target)
+    }
+
+    // ---- read -----------------------------------------------------------------
+
+    /// The store's write boundary. Every mutation lands here — a note's
+    /// `updated_at` moves whenever anything about it does — so this is the one
+    /// place that can tell the app a note changed without depending on which of
+    /// the four possible authors did it. See `change.rs`.
+    fn write_meta(&self, dir: &Path, meta: &Meta) -> Result<(), String> {
+        let body = serde_json::to_string_pretty(meta).map_err(|e| e.to_string())?;
+        write_atomic(&dir.join("meta.json"), body.as_bytes())?;
+        // From the meta, never from the directory path: `Meta` carries both fields
+        // already, and deriving them from path components would break silently the
+        // day a store's layout changes.
+        self.events.publish(StoreChange {
+            store: Store::Notes,
+            scope: meta.project_id.clone(),
+            id: meta.id.clone(),
+        });
+        Ok(())
+    }
+
+    /// Every note of one project, newest first. Unreadable notes are skipped rather
+    /// than failing the list — one hand-mangled meta.json must not hide the rest.
+    fn load_project(&self, project_id: &str) -> Result<Vec<(Meta, PathBuf)>, String> {
+        let dir = self.project_dir(project_id)?;
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            return Ok(Vec::new());
+        };
+        let mut out: Vec<(Meta, PathBuf)> = entries
+            .filter_map(Result::ok)
+            .filter(|e| e.path().is_dir())
+            .filter_map(|e| {
+                let name = e.file_name().to_string_lossy().to_string();
+                if !valid_id(&name) {
+                    return None;
+                }
+                read_meta(&e.path()).ok().map(|m| (m, e.path()))
+            })
+            .collect();
+        out.sort_by(|a, b| b.0.updated_at.cmp(&a.0.updated_at));
+        Ok(out)
+    }
+
+    // ---- commands -------------------------------------------------------------
+    //
+    // Each write command is a thin wrapper that takes the serialising lock and
+    // delegates to an `*_impl` below. The split is what lets the tests at the
+    // bottom drive a whole lifecycle against a real directory, which is the only
+    // way the state machine is actually checked rather than merely described.
+
+    /// The panel's list. Without `status` the archived are hidden — a scratchpad is
+    /// a worklist, and the archive is what you put things in to get them out of it.
+    pub fn list(
+        &self,
+        project_id: String,
+        status: Option<Vec<String>>,
+        limit: Option<usize>,
+    ) -> Result<Vec<Summary>, String> {
+        let want: Option<Vec<Status>> = match status {
+            Some(list) if !list.is_empty() => Some(
+                list.iter()
+                    .map(|s| Status::parse(s))
+                    .collect::<Result<_, _>>()?,
+            ),
+            _ => None,
+        };
+        let cap = limit.unwrap_or(LIST_DEFAULT).clamp(1, LIST_MAX);
+        Ok(self
+            .load_project(&project_id)?
+            .into_iter()
+            .filter(|(m, _)| match &want {
+                Some(w) => w.contains(&m.status),
+                None => m.status != Status::Archived,
+            })
+            .take(cap)
+            .map(|(m, dir)| {
+                let body = read_body(&dir);
+                summarize(&m, &body)
+            })
+            .collect())
+    }
+
+    /// Find notes matching `query`.
+    ///
+    /// Exists mainly for the agents. "Has this already been noticed?" is the
+    /// question worth asking before adding the two hundred and first thought to a
+    /// scratchpad, and without it an agent's only option is to list everything and
+    /// read it — which is how a context window gets spent on a duplicate.
+    ///
+    /// Ranked by where the match landed: a title hit is a different kind of answer
+    /// than a word buried in the body.
+    pub fn search(
+        &self,
+        project_id: String,
+        query: String,
+        limit: Option<usize>,
+    ) -> Result<Vec<Summary>, String> {
+        let needle = query.trim().to_lowercase();
+        if needle.is_empty() {
+            return Ok(Vec::new());
+        }
+        let cap = limit.unwrap_or(LIST_DEFAULT).clamp(1, LIST_MAX);
+        let mut hits: Vec<(u8, Summary)> = Vec::new();
+        for (m, dir) in self.load_project(&project_id)? {
+            let body = read_body(&dir);
+            let rank = if m.title.to_lowercase().contains(&needle) {
+                0
+            } else if m.tags.iter().any(|t| t.to_lowercase().contains(&needle)) {
+                1
+            } else if body.to_lowercase().contains(&needle) {
+                2
+            } else if m.context.to_lowercase().contains(&needle)
+                || m.links
+                    .files
+                    .iter()
+                    .any(|f| f.path.to_lowercase().contains(&needle))
+            {
+                3
+            } else {
+                continue;
+            };
+            hits.push((rank, summarize(&m, &body)));
+        }
+        // Stable within a rank, so the newest-first order load_project established
+        // survives — two title hits should come back most-recent first.
+        hits.sort_by_key(|(rank, _)| *rank);
+        Ok(hits.into_iter().take(cap).map(|(_, s)| s).collect())
+    }
+
+    pub fn get(&self, project_id: String, id: String) -> Result<Detail, String> {
+        let dir = self.note_dir(&project_id, &id)?;
+        let meta = read_meta(&dir)?;
+        let body = read_body(&dir);
+        Ok(Detail {
+            summary: summarize(&meta, &body),
+            body,
+            context: meta.context.clone(),
+            origin: meta.origin.clone(),
+            attachments: meta.attachments.clone(),
+            links: meta.links.clone(),
+            history: meta.history.clone(),
+            dir: dir.to_string_lossy().to_string(),
+        })
+    }
+
+    /// Capture a thought.
+    ///
+    /// `title` is the only required field, and it is allowed to be the whole
+    /// thought — the capture path that matters most is one line typed into ⌘K and
+    /// nothing else, so a note with a title and an empty body is the normal case,
+    /// not a degenerate one.
+    #[allow(clippy::too_many_arguments)]
+    pub fn create(
+        &self,
+        project_id: String,
+        project_name: Option<String>,
+        roots: Option<Vec<String>>,
+        title: String,
+        body: Option<String>,
+        tags: Option<Vec<String>>,
+        context: Option<String>,
+        origin: Option<String>,
+        cwd: Option<String>,
+    ) -> Result<Summary, String> {
+        let _guard = self.lock.lock().unwrap();
+        self.create_impl(
+            project_id,
+            project_name,
+            roots,
+            title,
+            body,
+            tags,
+            context,
+            origin,
+            cwd,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn create_impl(
+        &self,
+        project_id: String,
+        project_name: Option<String>,
+        roots: Option<Vec<String>>,
+        title: String,
+        body: Option<String>,
+        tags: Option<Vec<String>>,
+        context: Option<String>,
+        origin: Option<String>,
+        cwd: Option<String>,
+    ) -> Result<Summary, String> {
+        // A long first line is a thought, not a mistake: someone typed a paragraph
+        // into the omnibox and hit save. Rather than refusing it — which loses the
+        // thought, the one outcome this module may never produce — the title takes
+        // the head of it and the whole thing goes in the body.
+        let raw = title.trim().to_string();
+        if raw.is_empty() {
+            return Err("a note needs something in it".into());
+        }
+        let mut body = body.unwrap_or_default();
+        let title = if raw.chars().count() > TITLE_MAX {
+            if body.trim().is_empty() {
+                body = raw.clone();
+            }
+            clip_words(&raw, TITLE_MAX)
+        } else {
+            raw
+        };
+        if body.len() > BODY_MAX {
+            return Err(format!(
+                "that note is {} bytes; the limit is {BODY_MAX}. Anything this long is \
+                 a document rather than a note — attach it instead, or make it a \
+                 research entry.",
+                body.len()
+            ));
+        }
+
+        let pdir = self.project_dir(&project_id)?;
+        std::fs::create_dir_all(&pdir).map_err(|e| e.to_string())?;
+        let pfile = pdir.join("project.json");
+        let previous: ProjectRef = std::fs::read_to_string(&pfile)
+            .ok()
+            .and_then(|raw| serde_json::from_str(&raw).ok())
+            .unwrap_or_default();
+
+        // The highest number ever issued, taken as the greater of what the counter
+        // remembers and what is actually on disk. Both halves are load-bearing: the
+        // counter survives a delete, and the directory listing survives a
+        // project.json that was lost, hand-edited, or never written by an older
+        // build. Archived notes are included — they are hidden, not gone.
+        let on_disk = std::fs::read_dir(&pdir)
+            .map(|entries| {
+                entries
+                    .filter_map(Result::ok)
+                    .filter_map(|e| {
+                        let name = e.file_name().to_string_lossy().to_string();
+                        valid_id(&name)
+                            .then(|| {
+                                name.split_once('-')
+                                    .and_then(|(n, _)| n.parse::<u32>().ok())
+                            })
+                            .flatten()
+                    })
+                    .max()
+                    .unwrap_or(0)
+            })
+            .unwrap_or(0);
+        let next = on_disk.max(previous.last_seq) + 1;
+
+        // Written every time rather than once: a project renamed or re-rooted
+        // should be recognisable from its notes directory, this is the only record
+        // of what the id meant, and it carries the counter above.
+        let pref = ProjectRef {
+            id: project_id.clone(),
+            name: project_name.unwrap_or_default(),
+            roots: roots.clone().unwrap_or_default(),
+            last_seq: next,
+        };
+        if let Ok(json) = serde_json::to_string_pretty(&pref) {
+            let _ = write_atomic(&pfile, json.as_bytes());
+        }
+
+        let id = format!("{next:04}-{}", slugify(&title));
+        let dir = pdir.join(&id);
+        std::fs::create_dir_all(dir.join("attachments")).map_err(|e| e.to_string())?;
+
+        let now = now_secs();
+        let meta = Meta {
+            id: id.clone(),
+            project_id,
+            title,
+            status: Status::Ideation,
+            tags: tags.unwrap_or_default(),
+            context: context.unwrap_or_default(),
+            origin: origin.unwrap_or_default(),
+            cwd: cwd
+                .or_else(|| roots.and_then(|r| r.first().cloned()))
+                .unwrap_or_default(),
+            created_at: now,
+            updated_at: now,
+            attachments: Vec::new(),
+            links: Links::default(),
+            history: Vec::new(),
+            reminder: None,
+        };
+        self.write_meta(&dir, &meta)?;
+        write_atomic(&body_path(&dir), body.as_bytes())?;
+        Ok(summarize(&meta, &body))
+    }
+
+    /// Edit the note. `append` adds to the body (what an agent picking the note up
+    /// does); `body` replaces it outright (what the detail tab's editor does).
+    #[allow(clippy::too_many_arguments)]
+    pub fn update(
+        &self,
+        project_id: String,
+        id: String,
+        title: Option<String>,
+        body: Option<String>,
+        append: Option<String>,
+        tags: Option<Vec<String>>,
+    ) -> Result<Summary, String> {
+        let _guard = self.lock.lock().unwrap();
+        self.update_impl(project_id, id, title, body, append, tags)
+    }
+
+    fn update_impl(
+        &self,
+        project_id: String,
+        id: String,
+        title: Option<String>,
+        body: Option<String>,
+        append: Option<String>,
+        tags: Option<Vec<String>>,
+    ) -> Result<Summary, String> {
+        let dir = self.note_dir(&project_id, &id)?;
+        let mut meta = read_meta(&dir)?;
+
+        if let Some(t) = title {
+            let t = t.trim().to_string();
+            // Empty is refused rather than stored: a row with no name is worse than
+            // a clumsy one, and the panel has nothing else to render.
+            if !t.is_empty() {
+                cap("title", &t, TITLE_MAX, "Put the detail in the note itself.")?;
+                meta.title = t;
+            }
+        }
+        if let Some(list) = tags {
+            meta.tags = list.into_iter().filter(|t| !t.trim().is_empty()).collect();
+        }
+
+        let mut current = read_body(&dir);
+        let mut touched = false;
+        if let Some(next) = body {
+            current = next;
+            touched = true;
+        }
+        if let Some(extra) = append {
+            if !extra.trim().is_empty() {
+                if !current.is_empty() && !current.ends_with('\n') {
+                    current.push('\n');
+                }
+                current.push_str(&extra);
+                if !current.ends_with('\n') {
+                    current.push('\n');
+                }
+                touched = true;
+            }
+        }
+        if touched {
+            if current.len() > BODY_MAX {
+                return Err(format!(
+                    "that note would be {} bytes; the limit is {BODY_MAX}. Attach the \
+                     long material instead of pasting it into the note.",
+                    current.len()
+                ));
+            }
+            write_atomic(&body_path(&dir), current.as_bytes())?;
+        }
+
+        meta.updated_at = now_secs();
+        self.write_meta(&dir, &meta)?;
+        Ok(summarize(&meta, &current))
+    }
+
+    /// Keep a blob with the note: a pasted image, or a lifted chunk of text.
+    ///
+    /// `data` is base64 for `kind = "image"` and plain text for everything else.
+    /// Two encodings rather than one because the image path is the hot one — a
+    /// screenshot is already base64 by the time the webview has it, and forcing the
+    /// text path through base64 too would mean every stack trace round-trips
+    /// through an encoder for no reason.
+    #[allow(clippy::too_many_arguments)]
+    pub fn add_attachment(
+        &self,
+        project_id: String,
+        id: String,
+        kind: String,
+        title: String,
+        data: String,
+        origin: Option<String>,
+        ext: Option<String>,
+    ) -> Result<Attachment, String> {
+        let _guard = self.lock.lock().unwrap();
+        self.add_attachment_impl(project_id, id, kind, title, data, origin, ext)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn add_attachment_impl(
+        &self,
+        project_id: String,
+        id: String,
+        kind: String,
+        title: String,
+        data: String,
+        origin: Option<String>,
+        ext: Option<String>,
+    ) -> Result<Attachment, String> {
+        use base64::Engine;
+
+        let dir = self.note_dir(&project_id, &id)?;
+        let mut meta = read_meta(&dir)?;
+        if meta.attachments.len() >= MAX_ATTACHMENTS {
+            return Err(format!(
+                "this note already has {MAX_ATTACHMENTS} attachments — that is enough \
+                 material for a research entry rather than more of one note"
+            ));
+        }
+
+        let is_image = kind == "image";
+        let bytes: Vec<u8> = if is_image {
+            base64::engine::general_purpose::STANDARD
+                .decode(data.trim())
+                .map_err(|e| format!("that image did not decode: {e}"))?
+        } else {
+            data.into_bytes()
+        };
+        let limit = if is_image { IMAGE_MAX } else { ARTIFACT_MAX };
+        if bytes.len() > limit {
+            return Err(format!(
+                "that attachment is {} bytes; the limit is {limit}",
+                bytes.len()
+            ));
+        }
+
+        let title = {
+            let t = title.trim();
+            if t.is_empty() {
+                if is_image {
+                    "image".to_string()
+                } else {
+                    "capture".to_string()
+                }
+            } else {
+                t.to_string()
+            }
+        };
+        // The extension is the caller's, sanitised — it decides how the detail tab
+        // renders the thing, and an attacker-controlled one would only ever be
+        // writing inside the note's own directory anyway.
+        let ext = ext
+            .map(|e| {
+                e.trim_start_matches('.')
+                    .chars()
+                    .filter(|c| c.is_ascii_alphanumeric())
+                    .take(8)
+                    .collect::<String>()
+            })
+            .filter(|e| !e.is_empty())
+            .unwrap_or_else(|| if is_image { "png".into() } else { "txt".into() });
+        let file = format!(
+            "attachments/{:02}-{}.{ext}",
+            meta.attachments.len() + 1,
+            slugify(&title)
+        );
+        write_atomic(&dir.join(&file), &bytes)?;
+
+        let attachment = Attachment {
+            file,
+            kind,
+            title,
+            origin: origin.unwrap_or_default(),
+            bytes: bytes.len() as u64,
+        };
+        meta.attachments.push(attachment.clone());
+        meta.updated_at = now_secs();
+        self.write_meta(&dir, &meta)?;
+        Ok(attachment)
+    }
+
+    /// Copy a file that is already on disk into the note.
+    ///
+    /// Two paths need this and they look unrelated until you notice both start
+    /// with bytes somewhere else. An image pasted into ⌘K is written under
+    /// `.canopy/spot/` before there is a note to put it in — the palette
+    /// deliberately does not hold the base64 in React state, because a 4K
+    /// screenshot re-encoded on every keystroke is megabytes of churn. And
+    /// attaching a file the user is looking at is the same operation with a
+    /// different source.
+    ///
+    /// Copied rather than moved, and copied *into the note*, because the source is
+    /// inside the repo: `.canopy/spot/` dies with a worktree removal, and a
+    /// scratchpad whose attachments vanish when a branch is cleaned up is a
+    /// scratchpad you stop trusting. The note's own directory is outside every
+    /// repo precisely so this cannot happen.
+    pub fn attach_file(
+        &self,
+        scope: &dyn Fn(&Path) -> Result<PathBuf, String>,
+        project_id: String,
+        id: String,
+        path: String,
+        title: Option<String>,
+        kind: Option<String>,
+    ) -> Result<Attachment, String> {
+        let _guard = self.lock.lock().unwrap();
+        let src = PathBuf::from(&path);
+        // The source is arbitrary user-supplied text, so it is held to the same
+        // scope rule every other read in the app is: inside a registered workspace
+        // root, or refused.
+        let src = scope(&src)?;
+
+        let dir = self.note_dir(&project_id, &id)?;
+        let mut meta = read_meta(&dir)?;
+        if meta.attachments.len() >= MAX_ATTACHMENTS {
+            return Err(format!(
+                "this note already has {MAX_ATTACHMENTS} attachments — that is enough \
+                 material for a research entry rather than more of one note"
+            ));
+        }
+
+        let ext = src
+            .extension()
+            .map(|e| e.to_string_lossy().to_ascii_lowercase())
+            .unwrap_or_default();
+        // The kind decides how the detail tab renders it, and the extension is the
+        // only honest signal available for a file nobody labelled.
+        let kind = kind.unwrap_or_else(|| {
+            if matches!(
+                ext.as_str(),
+                "png" | "jpg" | "jpeg" | "gif" | "webp" | "bmp"
+            ) {
+                "image".into()
+            } else {
+                "artifact".into()
+            }
+        });
+        let is_image = kind == "image";
+        let limit = if is_image { IMAGE_MAX } else { ARTIFACT_MAX };
+        let bytes = crate::bounded_file::read(&src, limit)
+            .map_err(|error| format!("could not read {path}: {error}"))?;
+
+        let title = title
+            .map(|t| t.trim().to_string())
+            .filter(|t| !t.is_empty())
+            .or_else(|| {
+                src.file_stem()
+                    .map(|s| s.to_string_lossy().to_string())
+                    .filter(|s| !s.is_empty())
+            })
+            .unwrap_or_else(|| {
+                if is_image {
+                    "image".into()
+                } else {
+                    "capture".into()
+                }
+            });
+        let ext = if ext.is_empty() {
+            if is_image {
+                "png".to_string()
+            } else {
+                "txt".to_string()
+            }
+        } else {
+            ext.chars()
+                .filter(|c| c.is_ascii_alphanumeric())
+                .take(8)
+                .collect()
+        };
+        let file = format!(
+            "attachments/{:02}-{}.{ext}",
+            meta.attachments.len() + 1,
+            slugify(&title)
+        );
+        write_atomic(&dir.join(&file), &bytes)?;
+
+        let attachment = Attachment {
+            file,
+            kind,
+            title,
+            // The path it came from, which is the thing you want to know months
+            // later when the note says "the dropdown" and shows you a picture.
+            origin: path,
+            bytes: bytes.len() as u64,
+        };
+        meta.attachments.push(attachment.clone());
+        meta.updated_at = now_secs();
+        self.write_meta(&dir, &meta)?;
+        Ok(attachment)
+    }
+
+    /// Move the note along. The transition is checked, so nothing can declare a
+    /// note done that was never started.
+    pub fn set_status(
+        &self,
+        project_id: String,
+        id: String,
+        status: String,
+        by: Option<String>,
+        note: Option<String>,
+    ) -> Result<Summary, String> {
+        let _guard = self.lock.lock().unwrap();
+        self.set_status_impl(project_id, id, status, by, note)
+    }
+
+    fn set_status_impl(
+        &self,
+        project_id: String,
+        id: String,
+        status: String,
+        by: Option<String>,
+        note: Option<String>,
+    ) -> Result<Summary, String> {
+        let to = Status::parse(&status)?;
+        let dir = self.note_dir(&project_id, &id)?;
+        let mut meta = read_meta(&dir)?;
+        let from = meta.status;
+        if !from.can_move_to(to) {
+            return Err(format!(
+                "{} cannot become {} — from here it can go to: {}",
+                from.as_str(),
+                to.as_str(),
+                from.next()
+                    .iter()
+                    .map(|s| s.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ));
+        }
+        if from != to {
+            meta.status = to;
+            meta.history.push(HistoryEntry {
+                at: now_secs(),
+                from: from.as_str().into(),
+                to: to.as_str().into(),
+                by: by.unwrap_or_default(),
+                note: note.unwrap_or_default(),
+            });
+            meta.updated_at = now_secs();
+            self.write_meta(&dir, &meta)?;
+        }
+        let body = read_body(&dir);
+        Ok(summarize(&meta, &body))
+    }
+
+    // ---- reminders ------------------------------------------------------------
+    //
+    // A note is a thought you were not ready to act on. The missing half was always
+    // "and bring it back to me on Friday" — without it, coming back is a thing you
+    // have to remember to do, which is what the scratchpad exists to stop being
+    // your job. See remind.rs for why the alarm is handed to the OS rather than
+    // kept in a timer here.
+
+    /// Set, move or clear a note's reminder.
+    ///
+    /// `at` of `None` clears. Everything else is one path: whatever job was there
+    /// is taken away first, so a reminder moved from Friday to Monday cannot leave
+    /// Friday's still armed — which is the failure that would teach someone never
+    /// to trust this again.
+    pub fn remind(
+        &self,
+        project_id: String,
+        id: String,
+        at: Option<i64>,
+        note: Option<String>,
+        by: Option<String>,
+    ) -> Result<Summary, String> {
+        let _guard = self.lock.lock().unwrap();
+        self.remind_impl(project_id, id, at, note, by)
+    }
+
+    fn remind_impl(
+        &self,
+        project_id: String,
+        id: String,
+        at: Option<i64>,
+        note: Option<String>,
+        by: Option<String>,
+    ) -> Result<Summary, String> {
+        let dir = self.note_dir(&project_id, &id)?;
+        let mut meta = read_meta(&dir)?;
+        let text = note.unwrap_or_default();
+        cap(
+            "the reminder note",
+            &text,
+            REMINDER_NOTE_MAX,
+            "Put the detail in the note itself — the reminder is one line.",
+        )?;
+
+        // Unconditional, including on the way to setting a new one.
+        self.reminders.unschedule(&project_id, &id);
+
+        meta.reminder = match at {
+            None => None,
+            Some(at) => {
+                if at <= now_secs() {
+                    return Err(
+                        "that time has already passed — a reminder has to be in the \
+                                future"
+                            .into(),
+                    );
+                }
+                let scheduled = self.reminders.schedule(&ReminderJob {
+                    project_id: &project_id,
+                    note_id: &id,
+                    title: &meta.title,
+                    note: &text,
+                    at,
+                    link: &note_link(&meta),
+                });
+                Some(Reminder {
+                    at,
+                    note: text,
+                    by: by.unwrap_or_default(),
+                    created_at: now_secs(),
+                    fired_at: None,
+                    system: scheduled,
+                })
+            }
+        };
+        meta.updated_at = now_secs();
+        self.write_meta(&dir, &meta)?;
+        let body = read_body(&dir);
+        Ok(summarize(&meta, &body))
+    }
+
+    /// Every reminder due at or before `before`, across every project, marked fired
+    /// as they are returned.
+    ///
+    /// One call, one pass, and the marking happens here rather than in a second
+    /// round trip: whatever the app does with these, it must not be able to show
+    /// the same reminder twice because it crashed between reading and recording.
+    ///
+    /// The scan is over `meta.json` files the app has already loaded for its
+    /// panels; a scratchpad is hundreds of notes, not millions, and a separate
+    /// index would be a second source of truth for the one field whose whole job is
+    /// to be right.
+    pub fn due(&self, before: i64) -> Result<Vec<Due>, String> {
+        let _guard = self.lock.lock().unwrap();
+        self.due_impl(before)
+    }
+
+    fn due_impl(&self, before: i64) -> Result<Vec<Due>, String> {
+        let root = self.root()?;
+        let Ok(projects) = std::fs::read_dir(&root) else {
+            return Ok(Vec::new());
+        };
+        let mut out = Vec::new();
+        for p in projects
+            .filter_map(Result::ok)
+            .filter(|p| p.path().is_dir())
+        {
+            let project_id = p.file_name().to_string_lossy().to_string();
+            let Ok(notes) = self.load_project(&project_id) else {
+                continue;
+            };
+            for (mut meta, dir) in notes {
+                let Some(reminder) = meta.reminder.clone() else {
+                    continue;
+                };
+                if reminder.fired_at.is_some() || reminder.at > before {
+                    continue;
+                }
+                out.push(Due {
+                    project_id: project_id.clone(),
+                    id: meta.id.clone(),
+                    title: meta.title.clone(),
+                    note: reminder.note.clone(),
+                    at: reminder.at,
+                    by: reminder.by.clone(),
+                    system: reminder.system,
+                    link: note_link(&meta),
+                });
+                // The job has run (or never existed); either way nothing outside
+                // this note should still be holding it.
+                self.reminders.unschedule(&project_id, &meta.id);
+                if let Some(r) = meta.reminder.as_mut() {
+                    r.fired_at = Some(now_secs());
+                }
+                // Not `updated_at`: firing is not an edit, and bumping it would
+                // reorder the whole panel every time a reminder came due.
+                let _ = self.write_meta(&dir, &meta);
+            }
+        }
+        out.sort_by_key(|d| d.at);
+        Ok(out)
+    }
+
+    /// Tie the note to what came out of it.
+    ///
+    /// This is what makes the note the spine rather than a duplicate: a research
+    /// run, a task, a PR and a file all hang off the one thought, so "what happened
+    /// to that idea" has a single answer.
+    #[allow(clippy::too_many_arguments)]
+    pub fn link(
+        &self,
+        project_id: String,
+        id: String,
+        pr: Option<PrLink>,
+        research: Option<String>,
+        task_run: Option<String>,
+        branch: Option<String>,
+        file: Option<FileRef>,
+    ) -> Result<Detail, String> {
+        let _guard = self.lock.lock().unwrap();
+        self.link_impl(project_id, id, pr, research, task_run, branch, file)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn link_impl(
+        &self,
+        project_id: String,
+        id: String,
+        pr: Option<PrLink>,
+        research: Option<String>,
+        task_run: Option<String>,
+        branch: Option<String>,
+        file: Option<FileRef>,
+    ) -> Result<Detail, String> {
+        let dir = self.note_dir(&project_id, &id)?;
+        let mut meta = read_meta(&dir)?;
+
+        if let Some(pr) = pr {
+            match meta
+                .links
+                .prs
+                .iter_mut()
+                .find(|p| p.repo == pr.repo && p.number == pr.number)
+            {
+                // Re-linking is how the reconciler reports a merge, so an existing
+                // link updates rather than duplicating.
+                Some(existing) => *existing = pr,
+                None => meta.links.prs.push(pr),
+            }
+        }
+        if let Some(r) = research {
+            let r = r.trim().to_string();
+            if !r.is_empty() && !meta.links.research.contains(&r) {
+                meta.links.research.push(r);
+            }
+        }
+        if let Some(t) = task_run {
+            let t = t.trim().to_string();
+            if !t.is_empty() && !meta.links.task_runs.contains(&t) {
+                meta.links.task_runs.push(t);
+            }
+        }
+        if let Some(b) = branch {
+            let b = b.trim().to_string();
+            if !b.is_empty() && !meta.links.branches.contains(&b) {
+                meta.links.branches.push(b);
+            }
+        }
+        if let Some(f) = file {
+            if !f.path.trim().is_empty() {
+                // Keyed by path and line range together: the same file noted twice
+                // about two different functions is two references, not one.
+                match meta.links.files.iter_mut().find(|x| {
+                    x.path == f.path && x.start_line == f.start_line && x.end_line == f.end_line
+                }) {
+                    Some(existing) => *existing = f,
+                    None => meta.links.files.push(f),
+                }
+            }
+        }
+
+        meta.updated_at = now_secs();
+        self.write_meta(&dir, &meta)?;
+        self.get(project_id, id)
+    }
+
+    /// Read a text attachment. The store lives outside every registered workspace
+    /// root, so `fsx::check_scope` cannot reach it and this is the only reader the
+    /// UI has for these paths.
+    pub fn read_file(
+        &self,
+        project_id: String,
+        id: String,
+        path: String,
+    ) -> Result<String, String> {
+        let file = self.note_file(&project_id, &id, &path)?;
+        crate::bounded_file::read_string(&file, ARTIFACT_MAX)
+    }
+
+    /// Read an image attachment, base64, for an `<img src="data:…">` in the detail
+    /// tab. Separate from `notes_read_file` because the bytes are not text and
+    /// reading them as such would mangle them.
+    pub fn read_image(
+        &self,
+        project_id: String,
+        id: String,
+        path: String,
+    ) -> Result<String, String> {
+        use base64::Engine;
+        let file = self.note_file(&project_id, &id, &path)?;
+        let bytes = crate::bounded_file::read(&file, IMAGE_MAX)?;
+        Ok(base64::engine::general_purpose::STANDARD.encode(bytes))
+    }
+
+    /// The note's directory, for an agent that has been handed the note and needs
+    /// to read its attachments with its own file tools.
+    pub fn dir(&self, project_id: String, id: String) -> Result<String, String> {
+        Ok(self
+            .note_dir(&project_id, &id)?
+            .to_string_lossy()
+            .to_string())
+    }
+
+    pub fn delete(&self, project_id: String, id: String) -> Result<(), String> {
+        let _guard = self.lock.lock().unwrap();
+        let dir = self.note_dir(&project_id, &id)?;
+        // Before the directory goes: a launchd job outliving its note would fire a
+        // banner for a thought that no longer exists, pointing at a dead link.
+        self.reminders.unschedule(&project_id, &id);
+        if !dir.exists() {
+            return Ok(());
+        }
+        std::fs::remove_dir_all(&dir).map_err(|e| e.to_string())?;
+        // A delete writes no meta, so it is the one mutation the write boundary
+        // cannot speak for.
+        self.events.publish(StoreChange {
+            store: Store::Notes,
+            scope: project_id,
+            id,
+        });
+        Ok(())
+    }
+
+    // ---- the index's view -----------------------------------------------------
+
+    /// Everything indexable, across projects. The index scopes by cwd at query
+    /// time; nothing here decides who may see what.
+    pub fn index_docs(&self) -> Vec<IndexDoc> {
+        let Ok(dir) = self.root() else {
+            return Vec::new();
+        };
+        let Ok(projects) = std::fs::read_dir(&dir) else {
+            return Vec::new();
+        };
+        let mut out = Vec::new();
+        for p in projects
+            .filter_map(Result::ok)
+            .filter(|p| p.path().is_dir())
+        {
+            let project_id = p.file_name().to_string_lossy().to_string();
+            // The project's own roots are the honest cwd for a note whose capture
+            // never recorded one.
+            let fallback: String = std::fs::read_to_string(p.path().join("project.json"))
+                .ok()
+                .and_then(|raw| serde_json::from_str::<ProjectRef>(&raw).ok())
+                .and_then(|r| r.roots.first().cloned())
+                .unwrap_or_default();
+            let Ok(entries) = std::fs::read_dir(p.path()) else {
+                continue;
+            };
+            for e in entries.filter_map(Result::ok).filter(|e| e.path().is_dir()) {
+                let id = e.file_name().to_string_lossy().to_string();
+                if !valid_id(&id) {
+                    continue;
+                }
+                let Ok(meta) = read_meta(&e.path()) else {
+                    continue;
+                };
+                // Attachment titles and the referenced file paths, not their
+                // contents: "the note with the screenshot of the broken dropdown"
+                // and "the note about PrView.tsx" are both real searches, and
+                // indexing the blobs themselves would put megabytes into an index
+                // that exists to stay small.
+                let attachments = meta
+                    .attachments
+                    .iter()
+                    .map(|a| a.title.as_str())
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                let files = meta
+                    .links
+                    .files
+                    .iter()
+                    .map(|f| f.path.as_str())
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                let body = [
+                    read_body(&e.path()),
+                    meta.context.clone(),
+                    attachments,
+                    files,
+                    meta.tags.join(" "),
+                ]
+                .join("\n");
+                out.push(IndexDoc {
+                    project_id: project_id.clone(),
+                    id: id.clone(),
+                    title: format!("{} · {}", meta.title, meta.status.as_str()),
+                    body,
+                    cwd: if meta.cwd.is_empty() {
+                        fallback.clone()
+                    } else {
+                        meta.cwd.clone()
+                    },
+                    dir: e.path().to_string_lossy().to_string(),
+                    ts: meta.updated_at,
+                });
+            }
+        }
+        out
+    }
+}
+
+// ---- the agent's half ----------------------------------------------------
+//
+// The panel and ⌘K are how a human parks a thought; this is how an agent does —
+// "I noticed three unrelated things while fixing this" is the case, and before
+// this the only options were to derail onto them or to lose them.
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NotesReq {
+    pub action: String,
+    pub cwd: String,
+    /// Which project this is about, by name. Absent falls back to `cwd`.
+    #[serde(default)]
+    pub project: Option<String>,
+    #[serde(default)]
+    pub id: Option<String>,
+    #[serde(default)]
+    pub title: Option<String>,
+    #[serde(default)]
+    pub text: Option<String>,
+    #[serde(default)]
+    pub tags: Option<Vec<String>>,
+    #[serde(default)]
+    pub query: Option<String>,
+    #[serde(default)]
+    pub statuses: Option<Vec<String>>,
+    #[serde(default)]
+    pub limit: Option<usize>,
+    #[serde(default)]
+    pub status: Option<String>,
+    #[serde(default)]
+    pub note: Option<String>,
+    #[serde(default)]
+    pub by: Option<String>,
+    #[serde(default)]
+    pub pr: Option<PrLink>,
+    #[serde(default)]
+    pub research: Option<String>,
+    #[serde(default)]
+    pub branch: Option<String>,
+    #[serde(default)]
+    pub file: Option<FileRef>,
+    /// attach: an absolute path already on disk, inside a workspace root.
+    #[serde(default)]
+    pub path: Option<String>,
+    /// remind: when. Any of the shapes `when::parse_when` accepts — an ISO
+    /// stamp, a local wall clock, a bare date, or epoch seconds. Taken as a
+    /// string even when it is a number so a JSON integer and its digits are the
+    /// same request.
+    #[serde(default)]
+    pub at: Option<serde_json::Value>,
+    /// remind: a delay instead of a time — `45m`, `2h`, `3d`.
+    #[serde(default, rename = "in")]
+    pub within: Option<String>,
+    /// remind: `true` takes the reminder off.
+    #[serde(default)]
+    pub clear: Option<bool>,
+}
+
+/// One agent request against one project's notes. The embedder resolves the
+/// project and authenticates the caller; `scope` is its rule for which files an
+/// `attach` may read. An `Err` is a tool failure the agent reads and corrects
+/// against, not a protocol failure.
+pub fn op(
+    store: &NotesStore,
+    project: Project,
+    req: &NotesReq,
+    scope: &dyn Fn(&Path) -> Result<PathBuf, String>,
+) -> Result<serde_json::Value, String> {
+    let project_id = project.id.to_string();
+    let need_id = |r: &NotesReq| -> Result<String, String> {
+        r.id.clone()
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| "this action needs an id — call list to see them".to_string())
+    };
+
+    match req.action.as_str() {
+        "list" => store
+            .list(project_id, req.statuses.clone(), req.limit)
+            .map(|rows| serde_json::json!({ "notes": rows })),
+        "search" => store
+            .search(project_id, req.query.clone().unwrap_or_default(), req.limit)
+            .map(|rows| serde_json::json!({ "notes": rows })),
+        "get" => store
+            .get(project_id, need_id(req)?)
+            .and_then(|d| serde_json::to_value(d).map_err(|e| e.to_string())),
+        "create" => store
+            .create(
+                project_id,
+                Some(project.name.to_string()),
+                Some(project.roots.to_vec()),
+                req.title.clone().unwrap_or_default(),
+                req.text.clone(),
+                req.tags.clone(),
+                // No page context: an agent has no page. The `origin` is what
+                // answers "where do my notes come from" later.
+                None,
+                Some("agent".into()),
+                Some(req.cwd.clone()),
+            )
+            .and_then(|s| serde_json::to_value(s).map_err(|e| e.to_string())),
+        "append" => store
+            .update(
+                project_id,
+                need_id(req)?,
+                req.title.clone(),
+                None,
+                req.text.clone(),
+                req.tags.clone(),
+            )
+            .and_then(|s| serde_json::to_value(s).map_err(|e| e.to_string())),
+        "status" => store
+            .set_status(
+                project_id,
+                need_id(req)?,
+                req.status.clone().unwrap_or_default(),
+                // Credited to the agent, not to the user: the history is the one
+                // record of who moved a note, and it has to stay honest.
+                req.by.clone().or_else(|| Some("an agent".into())),
+                req.note.clone(),
+            )
+            .and_then(|s| serde_json::to_value(s).map_err(|e| e.to_string())),
+        "link" => store
+            .link(
+                project_id,
+                need_id(req)?,
+                req.pr.clone(),
+                req.research.clone(),
+                None,
+                req.branch.clone(),
+                req.file.clone(),
+            )
+            .and_then(|d| serde_json::to_value(d).map_err(|e| e.to_string())),
+        "attach" => store
+            .attach_file(
+                scope,
+                project_id,
+                need_id(req)?,
+                req.path.clone().unwrap_or_default(),
+                req.title.clone(),
+                None,
+            )
+            .and_then(|a| serde_json::to_value(a).map_err(|e| e.to_string())),
+        // The agent's half of the reminder. Worth its own action rather than a
+        // field on `create`: the case that matters most is putting a time on a
+        // note that already exists — the user's own, written weeks ago — and an
+        // agent that could only set one while creating would be an agent that
+        // has to duplicate the note to remind you of it.
+        "remind" => {
+            let clear = req.clear.unwrap_or(false);
+            let at = if clear {
+                None
+            } else {
+                let raw = req.at.as_ref().and_then(|v| match v {
+                    serde_json::Value::String(s) => Some(s.clone()),
+                    serde_json::Value::Number(n) => Some(n.to_string()),
+                    _ => None,
+                });
+                Some(crate::when::parse_when(
+                    raw.as_deref(),
+                    req.within.as_deref(),
+                    now_secs(),
+                )?)
+            };
+            store
+                .remind(
+                    project_id,
+                    need_id(req)?,
+                    at,
+                    req.text.clone().or_else(|| req.note.clone()),
+                    req.by.clone().or_else(|| Some("an agent".into())),
+                )
+                .and_then(|s| serde_json::to_value(s).map_err(|e| e.to_string()))
+        }
+        other => Err(format!(
+            "unknown notes action: {other} — one of list, search, get, create, append, \
+             status, link, attach, remind"
+        )),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ids_are_the_path_gate() {
+        assert!(valid_id("0001-a"));
+        assert!(valid_id("0042-tiered-donations"));
+        assert!(!valid_id("1-short-number"));
+        assert!(!valid_id("0001-Upper"));
+        assert!(!valid_id("0001-with/slash"));
+        assert!(!valid_id("0001-.."));
+        assert!(!valid_id("../etc"));
+        assert!(!valid_id("0001"));
+    }
+
+    #[test]
+    fn project_ids_that_could_climb_out_are_refused() {
+        let store = Home::new("climb");
+        assert!(store.project_dir("../../etc").is_err());
+        assert!(store.project_dir("a/b").is_err());
+        assert!(store.project_dir(".hidden").is_err());
+        assert!(store.project_dir("").is_err());
+        assert!(store.project_dir("proj-1").is_ok());
+    }
+
+    #[test]
+    fn status_round_trips_through_its_wire_name() {
+        for s in [
+            Status::Ideation,
+            Status::Ready,
+            Status::Doing,
+            Status::Done,
+            Status::Parked,
+            Status::Archived,
+        ] {
+            assert_eq!(Status::parse(s.as_str()).unwrap(), s);
+        }
+        assert!(Status::parse("completed").is_err());
+    }
+
+    /// The three departures from research.rs's machine, asserted rather than
+    /// merely commented — each is a decision someone could "tidy up" later
+    /// without realising it changes how the feature feels.
+    #[test]
+    fn the_machine_allows_the_three_moves_a_scratchpad_needs() {
+        // Skipping triage: a thought you act on immediately.
+        assert!(Status::Ideation.can_move_to(Status::Doing));
+        // Reopening: "done" is one person's judgement and is routinely wrong.
+        assert!(Status::Done.can_move_to(Status::Doing));
+        // Un-archiving, or the archive becomes a place nobody puts anything.
+        assert!(Status::Archived.can_move_to(Status::Ideation));
+    }
+
+    #[test]
+    fn the_machine_still_refuses_the_shortcut_that_matters() {
+        // Nothing becomes done without having been worked on: the status has to
+        // mean something, or the list is decoration.
+        assert!(!Status::Ideation.can_move_to(Status::Done));
+        assert!(!Status::Ready.can_move_to(Status::Done));
+        assert!(!Status::Parked.can_move_to(Status::Done));
+        // An archived note comes back as untriaged, never as decided or done —
+        // un-archiving must not silently assert a judgement nobody made.
+        assert!(!Status::Archived.can_move_to(Status::Ready));
+        assert!(!Status::Archived.can_move_to(Status::Done));
+    }
+
+    #[test]
+    fn re_entering_a_state_is_a_no_op_not_an_error() {
+        for s in [
+            Status::Ideation,
+            Status::Doing,
+            Status::Done,
+            Status::Archived,
+        ] {
+            assert!(s.can_move_to(s));
+        }
+    }
+
+    #[test]
+    fn slugs_are_short_lowercase_and_never_empty() {
+        assert_eq!(slugify("Tiered Donations!"), "tiered-donations");
+        assert_eq!(slugify("   "), "untitled");
+        assert_eq!(slugify("///"), "untitled");
+        assert!(slugify(&"x".repeat(200)).len() <= 48);
+    }
+
+    #[test]
+    fn a_preview_skips_the_heading_and_stops_on_a_word() {
+        assert_eq!(
+            preview_of("# Tiered donations\n\nWe should tier these by amount."),
+            "We should tier these by amount."
+        );
+        assert_eq!(preview_of("\n\n#only a heading\n"), "");
+        let long = preview_of(&"word ".repeat(200));
+        assert!(long.chars().count() <= PREVIEW_MAX + 1);
+        assert!(long.ends_with('…'));
+        assert!(!long.contains("wor…"));
+    }
+
+    // ---- lifecycle against a real directory --------------------------------
+
+    struct Home(PathBuf, NotesStore);
+
+    impl Home {
+        fn new(name: &str) -> Home {
+            let dir = std::env::temp_dir()
+                .join(format!("canopy-notes-test-{name}-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).unwrap();
+            let store = NotesStore::new(
+                Some(dir.clone()),
+                Arc::new(crate::events::NoopEventSink),
+                Arc::new(InAppReminders),
+            );
+            Home(dir, store)
+        }
+    }
+
+    impl std::ops::Deref for Home {
+        type Target = NotesStore;
+        fn deref(&self) -> &NotesStore {
+            &self.1
+        }
+    }
+
+    impl Drop for Home {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn create(store: &NotesStore, project: &str, title: &str) -> Summary {
+        store
+            .create_impl(
+                project.into(),
+                Some("Canopy".into()),
+                Some(vec!["/tmp/canopy".into()]),
+                title.into(),
+                None,
+                None,
+                None,
+                Some("spot".into()),
+                None,
+            )
+            .unwrap()
+    }
+
+    // These share one process-wide env var, so they run under one test rather
+    // than racing each other for it.
+    #[test]
+    fn a_note_goes_from_thought_to_shipped() {
+        let store = Home::new("lifecycle");
+        let p = "proj";
+
+        let note = create(&store, p, "Tier donations by amount");
+        assert_eq!(note.status, "ideation");
+        assert_eq!(note.id, "0001-tier-donations-by-amount");
+
+        // Triage, then hand it off.
+        store
+            .set_status_impl(
+                p.into(),
+                note.id.clone(),
+                "ready".into(),
+                Some("you".into()),
+                None,
+            )
+            .unwrap();
+        let doing = store
+            .set_status_impl(
+                p.into(),
+                note.id.clone(),
+                "doing".into(),
+                Some("you".into()),
+                None,
+            )
+            .unwrap();
+        assert_eq!(doing.status, "doing");
+
+        // The agent raises a PR and links it back.
+        store
+            .link_impl(
+                p.into(),
+                note.id.clone(),
+                Some(PrLink {
+                    repo: "/tmp/canopy".into(),
+                    number: 281,
+                    url: "https://example.test/281".into(),
+                    state: "open".into(),
+                }),
+                None,
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+
+        // That PR merges, and the reconciler settles the note.
+        store
+            .link_impl(
+                p.into(),
+                note.id.clone(),
+                Some(PrLink {
+                    repo: "/tmp/canopy".into(),
+                    number: 281,
+                    url: "https://example.test/281".into(),
+                    state: "merged".into(),
+                }),
+                None,
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+        let done = store
+            .set_status_impl(
+                p.into(),
+                note.id.clone(),
+                "done".into(),
+                Some("Canopy".into()),
+                Some("the linked pull request merged".into()),
+            )
+            .unwrap();
+        assert_eq!(done.status, "done");
+        // Re-linking updated in place rather than duplicating.
+        assert_eq!(done.pr_count, 1);
+
+        let detail = store.get(p.into(), note.id.clone()).unwrap();
+        assert_eq!(detail.links.prs[0].state, "merged");
+        // Every move is on the record, with who made it.
+        let moves: Vec<_> = detail
+            .history
+            .iter()
+            .map(|h| (h.from.as_str(), h.to.as_str(), h.by.as_str()))
+            .collect();
+        assert_eq!(
+            moves,
+            vec![
+                ("ideation", "ready", "you"),
+                ("ready", "doing", "you"),
+                ("doing", "done", "Canopy"),
+            ]
+        );
+    }
+
+    #[test]
+    fn the_default_list_is_a_worklist_and_hides_the_archive() {
+        let store = Home::new("worklist");
+        let p = "proj";
+        let keep = create(&store, p, "Keep this one");
+        let gone = create(&store, p, "Archive this one");
+        store
+            .set_status_impl(p.into(), gone.id.clone(), "archived".into(), None, None)
+            .unwrap();
+
+        let rows = store.list(p.into(), None, None).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].id, keep.id);
+
+        // Asked for explicitly, it is still there — archiving hides, never
+        // deletes.
+        let archived = store
+            .list(p.into(), Some(vec!["archived".into()]), None)
+            .unwrap();
+        assert_eq!(archived.len(), 1);
+        assert_eq!(archived[0].id, gone.id);
+
+        // And it can come back out.
+        let back = store
+            .set_status_impl(p.into(), gone.id.clone(), "ideation".into(), None, None)
+            .unwrap();
+        assert_eq!(back.status, "ideation");
+        assert_eq!(store.list(p.into(), None, None).unwrap().len(), 2);
+    }
+
+    #[test]
+    fn a_paragraph_typed_into_the_omnibox_is_kept_whole() {
+        let store = Home::new("paragraph");
+        let p = "proj";
+        let long = "we should tier donations by amount and tag the github users who \
+                    gave, then show the tier on their profile badge, and also let \
+                    maintainers opt out of the badge entirely because some of them \
+                    will hate it, and none of this should touch the checkout flow"
+            .to_string();
+        let note = store
+            .create_impl(
+                p.into(),
+                None,
+                None,
+                long.clone(),
+                None,
+                None,
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+        // The title is cut to something that fits a row…
+        assert!(note.title.chars().count() <= TITLE_MAX + 1);
+        assert!(note.title.ends_with('…'));
+        // …and the thought itself is not lost, which is the whole point.
+        let detail = store.get(p.into(), note.id).unwrap();
+        assert_eq!(detail.body, long);
+    }
+
+    #[test]
+    fn an_empty_note_is_refused_and_an_over_long_body_says_where_it_goes() {
+        let store = Home::new("caps");
+        let p = "proj";
+        assert!(store
+            .create_impl(
+                p.into(),
+                None,
+                None,
+                "   ".into(),
+                None,
+                None,
+                None,
+                None,
+                None
+            )
+            .is_err());
+
+        let note = create(&store, p, "Fine");
+        let err = store
+            .update_impl(
+                p.into(),
+                note.id,
+                None,
+                Some("x".repeat(BODY_MAX + 1)),
+                None,
+                None,
+            )
+            .unwrap_err();
+        assert!(
+            err.to_lowercase().contains("attach"),
+            "should say where it goes: {err}"
+        );
+    }
+
+    #[test]
+    fn attachments_land_in_the_note_and_are_read_back() {
+        let store = Home::new("attach");
+        let p = "proj";
+        let note = create(&store, p, "Dropdown looks wrong");
+
+        // A 1x1 PNG, as the webview would hand it over.
+        let png = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==";
+        let img = store
+            .add_attachment_impl(
+                p.into(),
+                note.id.clone(),
+                "image".into(),
+                "the broken dropdown".into(),
+                png.into(),
+                Some("pasted".into()),
+                None,
+            )
+            .unwrap();
+        assert_eq!(img.file, "attachments/01-the-broken-dropdown.png");
+        assert_eq!(
+            store
+                .read_image(p.into(), note.id.clone(), img.file.clone())
+                .unwrap(),
+            png
+        );
+
+        let text = store
+            .add_attachment_impl(
+                p.into(),
+                note.id.clone(),
+                "artifact".into(),
+                "stack trace".into(),
+                "TypeError: x is not a function".into(),
+                None,
+                Some(".log".into()),
+            )
+            .unwrap();
+        assert_eq!(text.file, "attachments/02-stack-trace.log");
+        assert_eq!(
+            store
+                .read_file(p.into(), note.id.clone(), text.file)
+                .unwrap(),
+            "TypeError: x is not a function"
+        );
+
+        let summary = store.list(p.into(), None, None).unwrap();
+        assert_eq!(summary[0].attachment_count, 2);
+        assert_eq!(summary[0].image_count, 1);
+    }
+
+    #[test]
+    fn a_file_reference_keeps_the_commit_it_was_taken_at() {
+        let store = Home::new("fileref");
+        let p = "proj";
+        let note = create(&store, p, "This memo is wrong");
+        let detail = store
+            .link_impl(
+                p.into(),
+                note.id.clone(),
+                None,
+                None,
+                None,
+                None,
+                Some(FileRef {
+                    path: "src/spotSources.ts".into(),
+                    start_line: Some(560),
+                    end_line: Some(581),
+                    rev: "58777d9".into(),
+                    snapshot: None,
+                }),
+            )
+            .unwrap();
+        assert_eq!(detail.links.files.len(), 1);
+        assert_eq!(detail.links.files[0].rev, "58777d9");
+
+        // The same file at a different range is a second reference, not an
+        // overwrite of the first.
+        let detail = store
+            .link_impl(
+                p.into(),
+                note.id.clone(),
+                None,
+                None,
+                None,
+                None,
+                Some(FileRef {
+                    path: "src/spotSources.ts".into(),
+                    start_line: Some(24),
+                    end_line: Some(51),
+                    rev: "58777d9".into(),
+                    snapshot: None,
+                }),
+            )
+            .unwrap();
+        assert_eq!(detail.links.files.len(), 2);
+    }
+
+    #[test]
+    fn reads_cannot_escape_the_note() {
+        let store = Home::new("escape");
+        let p = "proj";
+        let note = create(&store, p, "Anything");
+        assert!(store
+            .read_file(p.into(), note.id.clone(), "../../etc/passwd".into())
+            .is_err());
+        assert!(store
+            .read_file(p.into(), note.id.clone(), "/etc/passwd".into())
+            .is_err());
+        assert!(store
+            .read_file(p.into(), "../../../etc".into(), "passwd".into())
+            .is_err());
+    }
+
+    #[test]
+    fn ids_are_never_reused_after_a_delete() {
+        let store = Home::new("ids");
+        let p = "proj";
+        let first = create(&store, p, "First");
+        assert_eq!(first.id, "0001-first");
+        store.delete(p.into(), first.id.clone()).unwrap();
+        // 0002, not 0001 — an id may be cited from a PR body or another note,
+        // and reuse would silently repoint it. Nothing is left on disk to
+        // derive that from, so this is the persisted counter doing the work.
+        let second = create(&store, p, "Second");
+        assert_eq!(second.id, "0002-second");
+
+        // The other half: with the counter gone (an older build, a lost or
+        // hand-mangled project.json) the listing still has to hold the line.
+        std::fs::remove_file(store.project_dir(p).unwrap().join("project.json")).unwrap();
+        let third = create(&store, p, "Third");
+        assert_eq!(third.id, "0003-third");
+    }
+
+    #[test]
+    fn search_ranks_a_title_hit_above_one_buried_in_the_body() {
+        let store = Home::new("search");
+        let p = "proj";
+        let buried = create(&store, p, "Something else entirely");
+        store
+            .update_impl(
+                p.into(),
+                buried.id.clone(),
+                None,
+                Some("we should tier donations eventually".into()),
+                None,
+                None,
+            )
+            .unwrap();
+        let titled = create(&store, p, "Tier donations by amount");
+
+        let hits = store
+            .search(p.into(), "tier donations".into(), None)
+            .unwrap();
+        assert_eq!(hits.len(), 2);
+        // The title hit answers the question; the body mention is a lead.
+        assert_eq!(hits[0].id, titled.id);
+        assert_eq!(hits[1].id, buried.id);
+    }
+
+    #[test]
+    fn search_is_empty_rather_than_everything_for_an_empty_query() {
+        let store = Home::new("search-empty");
+        let p = "proj";
+        create(&store, p, "Anything");
+        assert!(store
+            .search(p.into(), "   ".into(), None)
+            .unwrap()
+            .is_empty());
+        assert!(store
+            .search(p.into(), "nothing matches this".into(), None)
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
+    fn the_index_sees_notes_with_the_cwd_that_scopes_them() {
+        let store = Home::new("index");
+        let p = "proj";
+        let note = create(&store, p, "Tier donations");
+        store
+            .update_impl(
+                p.into(),
+                note.id.clone(),
+                None,
+                Some("badge on the profile".into()),
+                None,
+                None,
+            )
+            .unwrap();
+
+        let docs = store.index_docs();
+        let doc = docs.iter().find(|d| d.id == note.id).expect("indexed");
+        assert_eq!(doc.project_id, p);
+        assert!(doc.title.contains("ideation"));
+        assert!(doc.body.contains("badge on the profile"));
+        // The cwd fell back to the project's root, which is what scopes a hit.
+        assert_eq!(doc.cwd, "/tmp/canopy");
+    }
+
+    #[test]
+    fn a_reminder_is_set_moved_fired_once_and_cleared() {
+        let store = Home::new("reminders");
+        let p = "proj";
+        let note = create(&store, p, "Chase the pricing page copy");
+        let now = now_secs();
+
+        let set = store
+            .remind_impl(
+                p.into(),
+                note.id.clone(),
+                Some(now + 3_600),
+                Some("before the call".into()),
+                Some("you".into()),
+            )
+            .unwrap();
+        let r = set.reminder.clone().expect("set");
+        assert_eq!(r.at, now + 3_600);
+        assert_eq!(r.note, "before the call");
+        assert_eq!(r.by, "you");
+        assert!(r.fired_at.is_none());
+        // Sandboxed: no launchctl ran, so the store must not claim the system
+        // has it. The claim is what the UI suppresses its own banner on.
+        assert!(!r.system);
+
+        // Nothing is due yet, and asking must not disturb it.
+        assert!(store.due_impl(now).unwrap().is_empty());
+        assert!(store
+            .get(p.into(), note.id.clone())
+            .unwrap()
+            .summary
+            .reminder
+            .is_some());
+
+        // Moved earlier. One reminder per note — the second replaces the first
+        // rather than arming two.
+        let moved = store.remind_impl(p.into(), note.id.clone(), Some(now - 60), None, None);
+        assert!(moved.is_err(), "the past is refused: {moved:?}");
+        store
+            .remind_impl(
+                p.into(),
+                note.id.clone(),
+                Some(now + 60),
+                Some("actually, sooner".into()),
+                Some("an agent".into()),
+            )
+            .unwrap();
+        let r = store
+            .get(p.into(), note.id.clone())
+            .unwrap()
+            .summary
+            .reminder
+            .expect("still set");
+        assert_eq!(r.at, now + 60);
+        assert_eq!(r.by, "an agent");
+
+        // It comes due. Exactly once — the second sweep is what would
+        // double-announce if firing were not recorded in the store.
+        let due = store.due_impl(now + 120).unwrap();
+        assert_eq!(due.len(), 1);
+        assert_eq!(due[0].id, note.id);
+        assert_eq!(due[0].note, "actually, sooner");
+        assert_eq!(
+            due[0].link,
+            // Slashes stay slashes: legal in a query value, and a plist a
+            // human may have to read should not be a wall of %2F.
+            format!("canopy://note?note={}&id=proj&path=/tmp/canopy", note.id)
+        );
+        assert!(store.due_impl(now + 120).unwrap().is_empty(), "fired twice");
+
+        // Fired, not cleared: the note stays visibly overdue until dealt with.
+        let after = store.get(p.into(), note.id.clone()).unwrap();
+        assert!(after.summary.reminder.as_ref().unwrap().fired_at.is_some());
+
+        // And taking it off leaves nothing behind.
+        let cleared = store
+            .remind_impl(p.into(), note.id.clone(), None, None, None)
+            .unwrap();
+        assert!(cleared.reminder.is_none());
+        assert!(store.due_impl(now + 10_000).unwrap().is_empty());
+    }
+
+    #[test]
+    fn the_reminder_link_survives_a_path_that_needs_encoding() {
+        let meta = Meta {
+            id: "0007-x".into(),
+            project_id: "p1".into(),
+            cwd: "/Users/me/My Projects/café".into(),
+            title: "t".into(),
+            status: Status::Ideation,
+            tags: Vec::new(),
+            context: String::new(),
+            origin: String::new(),
+            created_at: 0,
+            updated_at: 0,
+            attachments: Vec::new(),
+            links: Links::default(),
+            history: Vec::new(),
+            reminder: None,
+        };
+        // A raw space would end the query parameter, and the link is read back
+        // by a parser in another language after a trip through a plist.
+        let link = note_link(&meta);
+        assert!(link.contains("note=0007-x"), "{link}");
+        assert!(link.contains("id=p1"), "{link}");
+        assert!(link.contains("%20"), "{link}");
+        assert!(!link.contains(' '), "{link}");
+    }
+
+    struct Recorder(Mutex<Vec<StoreChange>>);
+
+    impl EventSink for Recorder {
+        fn publish(&self, change: StoreChange) {
+            self.0.lock().unwrap().push(change);
+        }
+    }
+
+    /// A write by any author reaches the embedder, named by the record's own
+    /// ids; a read never does, or a reader refetching on it would loop.
+    #[test]
+    fn writes_publish_the_records_own_ids_and_reads_publish_nothing() {
+        let home = Home::new("events");
+        let recorder = Arc::new(Recorder(Mutex::new(Vec::new())));
+        let store = NotesStore::new(
+            Some(home.0.clone()),
+            recorder.clone(),
+            Arc::new(InAppReminders),
+        );
+        let note = create(&store, "p1", "Announce me");
+        let seen = recorder.0.lock().unwrap().clone();
+        assert_eq!(
+            seen,
+            vec![StoreChange {
+                store: Store::Notes,
+                scope: "p1".into(),
+                id: note.id.clone(),
+            }]
+        );
+
+        store.list("p1".into(), None, None).unwrap();
+        store.get("p1".into(), note.id.clone()).unwrap();
+        store.search("p1".into(), "announce".into(), None).unwrap();
+        assert_eq!(recorder.0.lock().unwrap().len(), 1);
+
+        store.delete("p1".into(), note.id.clone()).unwrap();
+        assert_eq!(recorder.0.lock().unwrap().last().unwrap().id, note.id);
+    }
+
+    struct Alarms(Mutex<Vec<String>>);
+
+    impl Reminders for Alarms {
+        fn schedule(&self, job: &ReminderJob) -> bool {
+            self.0.lock().unwrap().push(format!("set {}", job.note_id));
+            true
+        }
+        fn unschedule(&self, _project_id: &str, note_id: &str) {
+            self.0.lock().unwrap().push(format!("clear {note_id}"));
+        }
+    }
+
+    /// The hook decides which alarm holds a reminder; the store records it, and
+    /// never leaves a moved or deleted reminder's old job armed.
+    #[test]
+    fn the_injected_alarm_is_cleared_before_it_is_moved_and_on_delete() {
+        let home = Home::new("alarms");
+        let alarms = Arc::new(Alarms(Mutex::new(Vec::new())));
+        let store = NotesStore::new(
+            Some(home.0.clone()),
+            Arc::new(crate::events::NoopEventSink),
+            alarms.clone(),
+        );
+        let note = create(&store, "p1", "Ring me");
+        let set = store
+            .remind(
+                "p1".into(),
+                note.id.clone(),
+                Some(now_secs() + 600),
+                None,
+                None,
+            )
+            .unwrap();
+        assert!(set.reminder.unwrap().system);
+        store.delete("p1".into(), note.id.clone()).unwrap();
+        let id = &note.id;
+        assert_eq!(
+            *alarms.0.lock().unwrap(),
+            vec![
+                format!("clear {id}"),
+                format!("set {id}"),
+                format!("clear {id}")
+            ]
+        );
+    }
+
+    fn req(value: serde_json::Value) -> NotesReq {
+        serde_json::from_value(value).unwrap()
+    }
+
+    #[test]
+    fn the_agents_half_runs_against_one_project() {
+        let store = Home::new("op");
+        let roots = vec!["/repo".to_string()];
+        let project = Project {
+            id: "p1",
+            name: "Canopy",
+            roots: &roots,
+        };
+        let open = |_: &Path| -> Result<PathBuf, String> { Err("outside".into()) };
+
+        let made = op(
+            &store,
+            project,
+            &req(serde_json::json!({ "action": "create", "cwd": "/repo/src", "title": "Agent thought" })),
+            &open,
+        )
+        .unwrap();
+        let id = made["id"].as_str().unwrap().to_string();
+        let detail = store.get("p1".into(), id.clone()).unwrap();
+        assert_eq!(detail.origin, "agent");
+
+        let moved = op(
+            &store,
+            project,
+            &req(serde_json::json!({ "action": "status", "cwd": "/repo", "id": id, "status": "ready" })),
+            &open,
+        )
+        .unwrap();
+        assert_eq!(moved["status"], "ready");
+        let history = store.get("p1".into(), id.clone()).unwrap().history;
+        assert_eq!(history[0].by, "an agent");
+
+        let listed = op(
+            &store,
+            project,
+            &req(serde_json::json!({ "action": "list", "cwd": "/repo" })),
+            &open,
+        )
+        .unwrap();
+        assert_eq!(listed["notes"].as_array().unwrap().len(), 1);
+
+        let reminded = op(
+            &store,
+            project,
+            &req(serde_json::json!({ "action": "remind", "cwd": "/repo", "id": id, "in": "2h" })),
+            &open,
+        )
+        .unwrap();
+        assert!(reminded["reminder"]["at"].as_i64().unwrap() > now_secs());
+
+        // The embedder's file scope is the only gate on what attach may read.
+        let refused = op(
+            &store,
+            project,
+            &req(serde_json::json!({ "action": "attach", "cwd": "/repo", "id": id, "path": "/etc/hosts" })),
+            &open,
+        )
+        .unwrap_err();
+        assert_eq!(refused, "outside");
+
+        assert!(op(
+            &store,
+            project,
+            &req(serde_json::json!({ "action": "get", "cwd": "/repo" })),
+            &open,
+        )
+        .unwrap_err()
+        .contains("needs an id"));
+        assert!(op(
+            &store,
+            project,
+            &req(serde_json::json!({ "action": "shred", "cwd": "/repo" })),
+            &open,
+        )
+        .unwrap_err()
+        .contains("unknown notes action"));
+    }
+}

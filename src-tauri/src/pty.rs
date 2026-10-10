@@ -2709,6 +2709,34 @@ fn canopy_omp_task_overlay(home: Option<&str>) -> Option<std::path::PathBuf> {
     path.is_file().then_some(path)
 }
 
+// Mesh delivery uses the same bounded input queue as ordinary terminal input.
+// Resolve and write through a retained Session so validation cannot race an ID
+// being reassigned between the generation check and the actual enqueue.
+impl canopy_core::terminals::Terminals for PtyManager {
+    fn resolve(&self, id: u32) -> Result<canopy_core::terminals::TerminalTarget, String> {
+        let session = self.get(id).ok_or_else(|| format!("no pty session {id}"))?;
+        Ok(canopy_core::terminals::TerminalTarget {
+            id,
+            instance: instance_token().to_string(),
+            generation: session.session_generation,
+        })
+    }
+
+    fn write(
+        &self,
+        target: &canopy_core::terminals::TerminalTarget,
+        data: &str,
+    ) -> Result<(), String> {
+        let session = self
+            .get(target.id)
+            .ok_or_else(|| format!("no pty session {}", target.id))?;
+        if target.instance != instance_token() || target.generation != session.session_generation {
+            return Err("terminal identity changed before mesh delivery".into());
+        }
+        session.enqueue_input(data.as_bytes())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3712,6 +3740,62 @@ mod tests {
         }
         assert_eq!(actual, expected);
         let _ = pm.kill(id);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn core_mesh_delivery_reaches_a_real_pty_and_rejects_stale_targets() {
+        use canopy_core::terminals::{PendingDelivery, Terminals};
+        let app = tauri::test::mock_app();
+        let pm = PtyManager::default();
+        let command = r#"stty -echo; printf 'MESH_READY\n'; read line; printf 'MESH_ACCEPTED:%s\n' "$line"; sleep 2"#;
+        let id = pm
+            .spawn(
+                app.handle().clone(),
+                120,
+                40,
+                Some("/tmp".into()),
+                Some("/bin/sh".into()),
+                None,
+                Some(RunSpec::Shell(command.into())),
+                SessionKind::Detached,
+                None,
+                None,
+                None,
+            )
+            .expect("spawn")
+            .id;
+        let ready = wait_for(&pm, id, "MESH_READY", Duration::from_secs(8));
+        if !ready {
+            let _ = pm.kill(id);
+        }
+        assert!(ready, "test child did not start");
+        let mesh = canopy_core::mesh::MeshStore::with_events(
+            None,
+            Arc::new(canopy_core::events::NoopEventSink),
+        );
+        let mut stale = Terminals::resolve(&pm, id).unwrap();
+        stale.generation += 1;
+        assert!(Terminals::write(&pm, &stale, "WRONG").is_err());
+        stale = Terminals::resolve(&pm, id).unwrap();
+        stale.instance = "previous-service".into();
+        assert!(Terminals::write(&pm, &stale, "WRONG").is_err());
+        let pending =
+            PendingDelivery::begin(&pm, id, "/tmp".into(), "m1".into(), "hello-from-core").unwrap();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .unwrap();
+        let receipt = runtime.block_on(pending.finish(tokio::time::sleep, &pm, &mesh));
+        let seen = wait_for(
+            &pm,
+            id,
+            "MESH_ACCEPTED:hello-from-core",
+            Duration::from_secs(8),
+        );
+        let _ = pm.kill(id);
+        assert!(receipt.submitted);
+        assert!(seen, "core delivery never reached the real child process");
     }
 
     // Regression: kill tears the session down (no leaked child / map entry).

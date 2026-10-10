@@ -21,6 +21,7 @@ import { DIGEST_FALLBACK_MS, subscribeSessionDigests } from "./sessionDigests";
 import { forgetSessions, restorableFrom } from "./restorable";
 import { getSettings, subscribeSettings } from "./settings";
 import { claimConcernsRoots } from "./claims";
+import { subscribeRemoteHarness, withRemoteMesh } from "./remoteExecution/harnessStores";
 
 /** Last thing the *human* typed. Hooks also record injected payloads
     (`<task-notification>…`, shared-context blocks) as prompts; an XML-ish
@@ -187,8 +188,13 @@ export function useAgentSessions(opts: {
   const [messages, setMessages] = useState<ipc.MeshMessage[]>([]);
   useEffect(() => {
     if (!visible) return;
-    const load = () => void ipc.contextMessages().then(setMessages).catch(() => {});
+    const load = () =>
+      void ipc
+        .contextMessages()
+        .then((local) => setMessages(withRemoteMesh(local)))
+        .catch(() => {});
     load();
+    const unRemote = subscribeRemoteHarness((store) => store === "mesh" && load());
     let cancelled = false;
     let un: (() => void) | undefined;
     void ipc.onAgentMessage(load).then((u) => {
@@ -198,6 +204,7 @@ export function useAgentSessions(opts: {
     return () => {
       cancelled = true;
       un?.();
+      unRemote();
     };
   }, [visible]);
 

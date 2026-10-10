@@ -15,6 +15,7 @@
 // speaks over the store-change channel — never by a polling loop here.
 import { useEffect, useMemo, useRef, useState } from "react";
 import * as ipc from "../ipc";
+import { subscribeRemoteHarness, withRemoteMesh } from "../remoteExecution/harnessStores";
 import { basename } from "../paths";
 import { LIFE_META } from "../../shared/agentLife";
 import type { Life } from "../../shared/agentLife";
@@ -157,11 +158,19 @@ export function AgentControlPanel({
   useEffect(() => {
     if (!active) return;
     const load = () => {
-      void ipc.contextMessages().then(setMessages).catch(() => {});
+      void ipc
+        .contextMessages()
+        .then((local) => setMessages(withRemoteMesh(local)))
+        .catch(() => {});
       void ipc.meshSevered().then(setSevered).catch(() => {});
     };
     load();
-    return subscribeMesh(load);
+    const unRemote = subscribeRemoteHarness((store) => store === "mesh" && load());
+    const unMesh = subscribeMesh(load);
+    return () => {
+      unRemote();
+      unMesh();
+    };
   }, [active]);
 
   const nodes: Node[] = useMemo(

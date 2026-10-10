@@ -104,3 +104,17 @@ it('ignores a response for a previous workspace or account',async()=>{
  await act(async()=>resolveOld(listing([{subject:{type:'team',id:'stale',name:'Old private team'},level:'edit',projects:true,sessions:false,accounts:false,via:[]}])));
  expect(screen.queryByText('Old private team')).toBeNull();
 });
+it('the owner turns teammate agent delivery on and off; an older control plane shows no toggle',async()=>{
+ let enabled=false;
+ fixture({'workspace-share-list':()=>({...listing(),teamDelivery:enabled}),'workspace-team-delivery-set':(b:Body)=>{enabled=b.enabled as boolean;return {ok:true};}});
+ const {unmount}=render(<WorkspaceSharing workspaceId="ws"/>);
+ const toggle=await screen.findByRole('checkbox',{name:'Let granted teammates’ agents message my agents'});
+ expect(toggle).not.toBeChecked();
+ fireEvent.click(toggle);
+ await waitFor(()=>expect(calls('workspace-team-delivery-set')).toEqual([{action:'workspace-team-delivery-set',enabled:true,workspaceId:'ws'}]));
+ await waitFor(()=>expect(screen.getByRole('checkbox',{name:'Let granted teammates’ agents message my agents'})).toBeChecked());
+ unmount();
+ fixture();render(<WorkspaceSharing workspaceId="ws"/>);
+ await screen.findByRole('list',{name:'Shared with'});
+ expect(screen.queryByRole('checkbox',{name:/teammates’ agents/})).toBeNull();
+});

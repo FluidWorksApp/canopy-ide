@@ -1,12 +1,14 @@
 import {validChatMessage} from './messageSchema';
-import {open,seal,registration,MessageReplayError,type Envelope,type PublicIdentity,type Address} from './crypto';
+import {open,seal,registration,MessageReplayError,type Envelope,type EnvelopeKind,type PublicIdentity,type Address} from './crypto';
 import {deviceIdentity,rememberMessage,messageOutbox,type MessageOutbox,type PendingEnvelope,type DeviceIdentity} from './store';
-import {validJobRequest,validJobStatus,type JobRequest,type JobStatus} from './jobSchema';
+import {validJobRequest,validJobStatus,validMeshMessage,validMeshStatus,type JobRequest,type JobStatus,type MeshMessage,type MeshStatus} from './jobSchema';
 /** `last_seen_at` is bumped by every poll the device makes, so it is the
  * directory's only "online" signal. */
-export type Device={id:string;user_id:string;public_keys:PublicIdentity;last_seen_at?:string|null};
+export type Device={id:string;user_id:string;public_keys:PublicIdentity;last_seen_at?:string|null;kind?:'user'|'host';workspaceIds?:string[]};
 export type ChatMessage={id:string;sender:string;recipient:string|null;text:string;created:number};
-type Payload={kind:'message';message:ChatMessage}|{kind:'receipt';id:string}|{kind:'signal';description:RTCSessionDescriptionInit}|{kind:'job';job:JobRequest}|{kind:'job-status';status:JobStatus};
+type Payload={kind:'message';message:ChatMessage}|{kind:'receipt';id:string}|{kind:'signal';description:RTCSessionDescriptionInit}|{kind:'job';job:JobRequest}|{kind:'job-status';status:JobStatus}|{kind:'mesh';message:MeshMessage}|{kind:'mesh-status';status:MeshStatus};
+/** The envelope kind each payload must travel under (protocol §6.1). */
+const ENVELOPE_KIND:Record<Payload['kind'],EnvelopeKind>={message:'chat',receipt:'chat',signal:'chat',job:'job','job-status':'job-status',mesh:'mesh','mesh-status':'mesh'};
 export type PeerRequest=<T>(body:unknown)=>Promise<T>;
 /** A device polls every 2s; one quiet for longer than this is not online. */
 export const DEVICE_ONLINE_MS=60_000;
@@ -19,7 +21,10 @@ type Options={members?:(members:{id:string;name:string}[])=>void;request:PeerReq
  /** A mesh job from a team device, or this account's other device. */
  job?:(job:JobRequest,sender:Device)=>void;
  /** A step of a job this device submitted, from the device running it. */
- jobStatus?:(status:JobStatus,sender:Device)=>void;
+ jobStatus?:(status:JobStatus,sender:Device,workspace?:string)=>void;
+ /** An agent message from a workspace's service (host device), or its refusal of one this account sent. */
+ mesh?:(message:MeshMessage,sender:Device,workspace:string)=>void;
+ meshStatus?:(status:MeshStatus,sender:Device,workspace:string)=>void;
  /** Message ids with ciphertext still waiting in the restored outbox. */
  pending?:(messageIds:string[])=>void;
  /** A message's last pending delivery expired or became undeliverable. */
@@ -31,7 +36,7 @@ type Options={members?:(members:{id:string;name:string}[])=>void;request:PeerReq
 export type MessageDraft={id:string;created:number};
 export type SendResult={id:string;queued:boolean;partial:boolean};
 export class PeerClient {
- private identity?:DeviceIdentity;private devices=new Map<string,Device>();private peers=new Map<string,{pc:RTCPeerConnection;channel?:RTCDataChannel}>();
+ private identity?:DeviceIdentity;private devices=new Map<string,Device>();private hosts=new Map<string,Device>();private peers=new Map<string,{pc:RTCPeerConnection;channel?:RTCDataChannel}>();
  private timer?:ReturnType<typeof setTimeout>;private stopped=false;private directoryAt=0;private tail=Promise.resolve();private watchdog?:ReturnType<typeof setInterval>;
  private fallbacks=new Map<string,{timer:ReturnType<typeof setTimeout>;user:string;message:string}>();
  private registered=false;private started=false;
@@ -58,9 +63,12 @@ export class PeerClient {
   await this.poll();
  }
  private closePeers(){for(const value of this.peers.values())value.pc.close();this.peers.clear();}
- stop(){this.stopped=true;clearTimeout(this.timer);clearInterval(this.watchdog);this.closePeers();this.devices.clear();for(const value of this.fallbacks.values())clearTimeout(value.timer);this.fallbacks.clear();}
+ stop(){this.stopped=true;clearTimeout(this.timer);clearInterval(this.watchdog);this.closePeers();this.devices.clear();this.hosts.clear();for(const value of this.fallbacks.values())clearTimeout(value.timer);this.fallbacks.clear();}
  private async directory(){
-  const {devices,members=[],iceServers=[]}=await this.request<{devices:Device[];members?:{id:string;name:string}[];iceServers?:RTCIceServer[]}>({action:'directory'});if(this.stopped)return;
+  const {devices:listed,hosts=[],members=[],iceServers=[]}=await this.request<{devices:Device[];hosts?:Device[];members?:{id:string;name:string}[];iceServers?:RTCIceServer[]}>({action:'directory'});if(this.stopped)return;
+  // Host devices carry workspace traffic only; they never join person chat.
+  const devices=listed.filter(d=>d.kind!=='host');
+  this.hosts=new Map(hosts.filter(h=>h.kind==='host'&&Array.isArray(h.workspaceIds)).map(h=>[h.id,h]));
   if(!devices.some(d=>d.id===this.identity!.id&&d.user_id===this.options.user))throw Error('This device no longer has team access');
   const next=new Map(devices.map(d=>[d.id,d]));
   for(const [id,peer] of this.peers)if(!next.has(id)||JSON.stringify(next.get(id)?.public_keys)!==JSON.stringify(this.devices.get(id)?.public_keys)){peer.pc.close();this.peers.delete(id);}
@@ -166,6 +174,31 @@ export class PeerClient {
   await this.deliver(online[0],{kind:'job',job});
   return online[0];
  }
+ /** Host devices of workspaces this account can reach, as of the last directory refresh. */
+ directoryHosts():Device[]{return [...this.hosts.values()];}
+ private async hostFor(workspace:string){
+  await this.directory();
+  const host=[...this.hosts.values()].filter(h=>h.workspaceIds?.includes(workspace)).sort((a,b)=>Date.parse(b.last_seen_at??'')-Date.parse(a.last_seen_at??''))[0];
+  if(!host)throw Error('That workspace has no Canopy service registered yet, or you no longer have access to it.');
+  return host;
+ }
+ private async deliverWorkspace(host:Device,workspace:string,payload:Payload){
+  const text=JSON.stringify(payload);if(new TextEncoder().encode(text).length>32000)throw Error('This is too large after encoding. Shorten it.');
+  const envelope=await seal(this.identity!.keys,host.public_keys,this.address(this.identity!.id),this.address(host.id,host.user_id),text,Date.now(),{version:2,kind:ENVELOPE_KIND[payload.kind],workspace});
+  if(this.stopped)throw Error('Team connection closed');
+  // Workspace traffic always goes through the durable relay: the host drains it while nobody is watching.
+  await this.request({action:'relay',recipientDevice:host.id,envelope});
+ }
+ /** Sends a job to the service of a cloud workspace; it waits on the relay up to seven days. */
+ async sendWorkspaceJob(job:JobRequest,workspace:string):Promise<Device>{
+  if(!validJobRequest(job)||job.workspace!==workspace)throw Error('Invalid job');
+  const host=await this.hostFor(workspace);await this.deliverWorkspace(host,workspace,{kind:'job',job});return host;
+ }
+ /** Sends an agent message to the service of a cloud workspace. */
+ async sendWorkspaceMessage(message:MeshMessage,workspace:string):Promise<Device>{
+  if(!validMeshMessage(message))throw Error('Invalid message');
+  const host=await this.hostFor(workspace);await this.deliverWorkspace(host,workspace,{kind:'mesh',message});return host;
+ }
  /** Reports a job's progress to the device that submitted it. */
  async sendJobStatus(status:JobStatus,device:string){
   if(!validJobStatus(status))throw Error('Invalid job status');
@@ -176,25 +209,27 @@ export class PeerClient {
  private receive(envelope:Envelope):Promise<void>{
   const task=this.tail.catch(()=>{}).then(async()=>{
    if(this.stopped||Date.now()-this.directoryAt>10000)throw Error('Team access expired');
-   const sender=this.devices.get(envelope.from?.device);if(!sender)throw Error('Sender is no longer a team member');
+   const sender=this.devices.get(envelope.from?.device)??this.hosts.get(envelope.from?.device);if(!sender)throw Error('Sender is no longer a team member');
    let text:string;
    try{text=await open(this.identity!.keys,sender.public_keys,this.address(sender.id,sender.user_id),this.address(this.identity!.id),envelope,this.options.remember??rememberMessage,Date.now(),async decoded=>{
     if(this.stopped||Date.now()-this.directoryAt>10000||!this.currentSender(sender))throw Error('Team access expired');
     const payload=JSON.parse(decoded) as Payload;
     if(payload.kind==='message'){this.validateMessage(payload.message,sender,envelope);await this.options.persist?.(payload.message);}
    });}
-   catch(error){if(error instanceof MessageReplayError){const prior=JSON.parse(error.plaintext) as Payload;if(prior.kind==='message'){this.validateMessage(prior.message,sender,envelope);await this.deliver(sender,{kind:'receipt',id:prior.message.id});return;}if(prior.kind==='receipt'){await this.acceptReceipt(prior.id,sender);return;}
+   catch(error){if(error instanceof MessageReplayError){if(sender.kind==='host')return;const prior=JSON.parse(error.plaintext) as Payload;if(prior.kind==='message'){this.validateMessage(prior.message,sender,envelope);await this.deliver(sender,{kind:'receipt',id:prior.message.id});return;}if(prior.kind==='receipt'){await this.acceptReceipt(prior.id,sender);return;}
     // The same job arriving twice (direct channel and relay) acts once.
     if(prior.kind==='job'||prior.kind==='job-status')return;}throw error;}
    if(this.stopped||Date.now()-this.directoryAt>10000||!this.currentSender(sender))return;
-   const payload=JSON.parse(text) as Payload;
+   const payload=JSON.parse(text) as Payload,workspace=this.routed(envelope,sender,payload);
    if(payload.kind==='message'){
     const m=payload.message;this.validateMessage(m,sender,envelope);
     this.options.message(m);await this.deliver(sender,{kind:'receipt',id:m.id});
    }else if(payload.kind==='receipt'){await this.acceptReceipt(payload.id,sender);}
    else if(payload.kind==='signal')await this.signal(sender,payload.description);
    else if(payload.kind==='job'){this.validateTimed(payload.job,validJobRequest,envelope);this.options.job?.(payload.job,sender);}
-   else if(payload.kind==='job-status'){this.validateTimed(payload.status,validJobStatus,envelope);this.options.jobStatus?.(payload.status,sender);}
+   else if(payload.kind==='job-status'){this.validateTimed(payload.status,validJobStatus,envelope);this.options.jobStatus?.(payload.status,sender,workspace);}
+   else if(payload.kind==='mesh'&&workspace){this.validateTimed(payload.message,validMeshMessage,envelope);this.options.mesh?.(payload.message,sender,workspace);}
+   else if(payload.kind==='mesh-status'&&workspace){this.validateTimed(payload.status,validMeshStatus,envelope);this.options.meshStatus?.(payload.status,sender,workspace);}
    else throw Error('Unknown peer message');
   });this.tail=task;return task;
  }
@@ -208,7 +243,17 @@ export class PeerClient {
   for(const [key,pending]of this.fallbacks)if(pending.message===id&&pending.user===sender.user_id){clearTimeout(pending.timer);this.fallbacks.delete(key);}
   this.options.receipt(id,sender.user_id);
  }
- private currentSender(sender:Device){const current=this.devices.get(sender.id);return current?.user_id===sender.user_id&&JSON.stringify(current.public_keys)===JSON.stringify(sender.public_keys);}
+ /** The verified routing of a payload: its envelope kind must match, and a host
+  * speaks only in v2 workspace traffic for a workspace it serves. */
+ private routed(envelope:Envelope,sender:Device,payload:Payload):string|undefined{
+  const expected=ENVELOPE_KIND[payload?.kind];if(!expected)throw Error('Unknown peer message');
+  if(envelope.version===1){if(sender.kind==='host'||expected==='mesh')throw Error('Invalid peer message');return undefined;}
+  if(envelope.kind!==expected)throw Error('Envelope kind does not match its payload');
+  const workspace=envelope.to.workspace;
+  if(sender.kind==='host'&&(!workspace||!sender.workspaceIds?.includes(workspace)||expected==='chat'||expected==='job'))throw Error('Host sent traffic outside its workspace');
+  return workspace;
+ }
+ private currentSender(sender:Device){const current=this.devices.get(sender.id)??this.hosts.get(sender.id);return current?.user_id===sender.user_id&&JSON.stringify(current.public_keys)===JSON.stringify(sender.public_keys);}
  private validateMessage(m:ChatMessage,sender:Device,envelope:Envelope){
   if(!validChatMessage(m)||m.sender!==sender.user_id||(m.recipient!==null&&m.recipient!==this.options.user)||typeof m.text!=='string'||new TextEncoder().encode(m.text).length>16000||!Number.isSafeInteger(m.created)||m.created<envelope.created-300000||m.created>envelope.expires)throw Error('Invalid peer message');
  }

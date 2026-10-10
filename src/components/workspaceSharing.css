@@ -49,3 +49,4 @@
 .workspace-share-controls.compact select{width:auto;height:28px;min-height:0;padding:3px 24px 3px 8px;font-size:12px;background-position:right 7px center}
 .workspace-share-controls.compact .workspace-share-switch{flex-direction:row;gap:4px;white-space:nowrap;font-weight:500}
 .workspace-share-controls.compact .workspace-share-switch input{width:14px;height:14px}
+.workspace-team-delivery{margin:4px 0 14px!important}

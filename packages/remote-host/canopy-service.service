@@ -1,0 +1,64 @@
+[Unit]
+Description=Canopy agent harness service
+Documentation=https://github.com/FluidWorksApp/canopy-ide/blob/main/docs/canopy-service-protocol.md
+After=network-online.target
+Wants=network-online.target
+# Ready (admin socket answering) before the gateway can launch any agent.
+Before=canopy-host.service
+StartLimitIntervalSec=120
+StartLimitBurst=5
+
+[Service]
+Type=simple
+User=canopy-service
+Group=canopy-host
+# Root-owned declaration in /etc/tmpfiles.d (installed by install-service.sh);
+# never a file under /opt/canopy-host, which the gateway user owns.
+ExecStartPre=+/usr/bin/systemd-tmpfiles --create canopy-service.conf
+# A socket kept from the previous run must not satisfy the readiness check.
+ExecStartPre=+/bin/rm -f /run/canopy-service/admin.sock
+Environment=CANOPY_SERVICE_STATE=/var/lib/canopy-service
+Environment=CANOPY_SERVICE_RUNTIME=/run/canopy-service
+Environment=CANOPY_SERVICE_RELAY_DIR=/run/canopy-relay
+# CANOPY_SERVICE_RELAY_URL on managed hosts (written by install-service.sh).
+EnvironmentFile=-/etc/canopy-service/env
+StateDirectory=canopy-service
+StateDirectoryMode=0700
+# Workspace containers bind /run/canopy-service/ws/<id>; removing it on stop
+# would leave every running container with a dead mount.
+RuntimeDirectory=canopy-service
+RuntimeDirectoryMode=0755
+RuntimeDirectoryPreserve=yes
+UMask=0027
+ExecStart=/usr/local/lib/canopy-service/canopy-serviced
+ExecStartPost=/bin/sh -c 'i=0; until /usr/bin/curl -fsS --max-time 1 --unix-socket /run/canopy-service/admin.sock http://canopy-service/admin/health >/dev/null 2>&1; do i=$((i+1)); [ "$i" -ge 100 ] && exit 1; sleep 0.1; done'
+TimeoutStartSec=30
+TimeoutStopSec=15
+Restart=on-failure
+RestartSec=2
+MemoryMax=512M
+TasksMax=256
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+RestrictNamespaces=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+SystemCallArchitectures=native
+CapabilityBoundingSet=
+AmbientCapabilities=
+# Unix: admin and agent sockets. IP: container runners on loopback, relay.
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+
+[Install]
+WantedBy=multi-user.target
