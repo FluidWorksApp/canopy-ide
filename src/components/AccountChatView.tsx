@@ -5,6 +5,7 @@ import {Button} from './ui';
 import {InfoIcon,LockIcon,SendIcon} from './icons';
 import {isSendKey} from './chatComposerKeys';
 import './teamHub.css';
+import {LinkifiedText} from './LinkifiedText';
 export type AccountConversation={teamId:string;userId:string;peer:string|null;name:string;email?:string};
 /** Consecutive messages from one sender within this window share one header. */
 const GROUP_MS=5*60_000;
@@ -88,7 +89,7 @@ export function AccountChatView({conversation,active=true}:{conversation:Account
      {newDay&&<div className="account-chat-day" role="separator"><span>{dayLabel(m.created)}</span></div>}
      <article className={`account-chat-msg${own?' own':''}${grouped?' grouped':''}${pending?' pending':''}${failed?' failed':''}`} data-delivery={delivered?'delivered':state}>
       {!grouped&&<header><strong>{senderName(m.sender)}</strong><time dateTime={new Date(m.created).toISOString()}>{time(m.created)}</time></header>}
-      <p title={time(m.created)}>{m.text}</p>
+      <p title={time(m.created)}><LinkifiedText text={m.text}/></p>
       {receipt&&<small title={state?delivery[m.id]?.detail:undefined}>{receipt}{failed&&<> · <button type="button" className="account-chat-action" onClick={()=>act(()=>session.retry(m.id))}>Retry</button> · <button type="button" className="account-chat-action" onClick={()=>act(()=>session.discard(m.id))}>Discard</button></>}</small>}
      </article>
     </div>;
