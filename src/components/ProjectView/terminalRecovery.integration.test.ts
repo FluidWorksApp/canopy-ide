@@ -2,9 +2,18 @@
 import { readFileSync } from "node:fs";
 import { transformWithOxc } from "vite";
 import { expect, it, vi } from "vitest";
-import { adoptSnapshotNames, namePatch, tabName } from "../../tabName";
+import {
+  adoptSnapshotNames,
+  isUserNamed,
+  namePatch,
+  tabName,
+} from "../../tabName";
 import { rememberedLiveTerminal } from "../../terminalRecovery";
-import { leafIds, mapSplitTabIds, type TerminalGroup } from "../../terminalGroups";
+import {
+  leafIds,
+  mapSplitTabIds,
+  type TerminalGroup,
+} from "../../terminalGroups";
 import { restoredFront } from "./helpers";
 
 const source = readFileSync("src/components/ProjectView/index.tsx", "utf8");
@@ -111,9 +120,18 @@ it("the actual conversation resume callback restores user labels and mux layout 
       useCallback: (fn: any) => fn,
       resumeSession: vi.fn(async (r: any) => `resumed-${r.key}`),
       reopenTerminal: vi.fn(),
-      patchTabRaw: (id: string, patch: any) => {
-        tabs = tabs.map((t) => (t.id === id ? { ...t, ...patch } : t));
-      },
+      restoreTerminalNames: await callback(
+        "restoreTerminalNames",
+        "\n  /** Record a user rename",
+        {
+          useCallback: (fn: any) => fn,
+          setTabs: (update: any) => {
+            tabs = update(tabs);
+          },
+          adoptSnapshotNames,
+          isUserNamed,
+        },
+      ),
       adoptSnapshotNames,
       mapSplitTabIds,
       leafIds,
@@ -214,4 +232,28 @@ it("renaming the mux writes its own durable label without renaming a member sess
   expect(setGroups).toHaveBeenCalledWith(groups.current);
   expect(rename).not.toHaveBeenCalled();
   expect(panePatch).not.toHaveBeenCalled();
+});
+
+it("restoring an old snapshot cannot replace the user name of an already open tab", async () => {
+  let tabs = [
+    {
+      id: "live",
+      type: "terminal",
+      ...namePatch({}, "user", "My newer choice"),
+    },
+  ];
+  const restore = await callback(
+    "restoreTerminalNames",
+    "\n  /** Record a user rename",
+    {
+      useCallback: (fn: any) => fn,
+      setTabs: (update: any) => {
+        tabs = update(tabs);
+      },
+      isUserNamed,
+      adoptSnapshotNames,
+    },
+  );
+  restore("live", { title: "Old name", ...namePatch({}, "user", "Old name") });
+  expect(tabName(tabs[0])).toBe("My newer choice");
 });

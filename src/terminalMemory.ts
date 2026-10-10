@@ -7,6 +7,7 @@
 // Kept in localStorage rather than the workspace file: it is a convenience
 // record, not part of the project's definition, and a corrupt one should cost
 // nothing.
+import { rememberedGroupNames } from "./terminalRecovery";
 import type { TerminalGroup } from "./terminalGroups";
 import type { Restorable } from "./restorable";
 import { resumeSessionId } from "./projects";
@@ -182,7 +183,7 @@ export function terminalResumeCards(
       .filter((leaf) => leaf.remembered?.paneGroup === group.id);
     if (members.length < 2) continue;
     members.forEach((leaf) => claimed.add(leaf));
-    cards.push({ key: `group:${group.id}`, group, leaves: members });
+    cards.push({ key: `group:${group.id}`, group: rememberedGroupNames(group, terminals), leaves: members });
   }
   for (const leaf of leaves) {
     if (!claimed.has(leaf)) cards.push({ key: leaf.key, leaves: [leaf] });

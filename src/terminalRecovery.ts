@@ -48,15 +48,22 @@ export function recoverLiveGroups(
   for (const [key, group] of Object.entries(memory.terminalGroups)) {
     const surviving = leafIds(group.root).filter((id) => expected.has(id));
     if (surviving.every((id) => ids.has(id))) {
-      const original = memory.terminals.find(
-        (t) => t.tabId && leafIds(group.root).includes(t.tabId),
-      );
-      const names = original ? adoptSnapshotNames(original) : {};
-      ready[key] =
-        !isUserNamed(group) && isUserNamed(names)
-          ? { ...group, ...namePatch(group, "user", tabName(names)) }
-          : group;
+      ready[key] = rememberedGroupNames(group, memory.terminals);
     }
   }
   return remapTerminalGroups(ready, ids);
+}
+
+/** Older builds stored a mux caption on its strip representative. Keep that
+ * user's choice even when the split tree or attachment order starts elsewhere. */
+export function rememberedGroupNames(
+  group: TerminalGroup,
+  terminals: RememberedTerminal[],
+): TerminalGroup {
+  const members = new Set(leafIds(group.root));
+  const original = terminals.find((t) => t.tabId && members.has(t.tabId));
+  const names = original ? adoptSnapshotNames(original) : {};
+  return !isUserNamed(group) && isUserNamed(names)
+    ? { ...group, ...namePatch(group, "user", tabName(names)) }
+    : group;
 }

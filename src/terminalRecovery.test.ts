@@ -1,6 +1,11 @@
 // @vitest-environment jsdom
 import { beforeEach, expect, it } from "vitest";
-import { rememberTerminals, rememberedTerminalState, forgetTerminals } from "./terminalMemory";
+import {
+  rememberTerminals,
+  rememberedTerminalState,
+  forgetTerminals,
+  terminalResumeCards,
+} from "./terminalMemory";
 import { rememberedLiveTerminal, recoverLiveGroups } from "./terminalRecovery";
 import {
   adoptSnapshotNames,
@@ -127,7 +132,12 @@ it("never gives a recycled PTY a previous session user name or split membership"
 it("legacy recovery requires a unique exact label and directory instead of guessing between same-command agents", () => {
   const legacy = {
     terminals: rows.map(
-      ({ ptyId: _ptyId, sessionGeneration: _generation, instance: _instance, ...row }) => row,
+      ({
+        ptyId: _ptyId,
+        sessionGeneration: _generation,
+        instance: _instance,
+        ...row
+      }) => row,
     ),
     terminalGroups: { mux: group },
   };
@@ -200,4 +210,22 @@ it("does not inherit new local state or resurrect forgotten legacy remote layout
   );
   forgetTerminals("project", "remote:A");
   expect(rememberedTerminalState("project", "remote:A").terminals).toEqual([]);
+});
+
+it("cold resume cards retain legacy mux captions when tree order differs from strip order", () => {
+  const old = { ...group, ...namePatch(group, "user", undefined) };
+  const reversed = {
+    ...old,
+    root: {
+      type: "split" as const,
+      id: "split",
+      axis: "vertical" as const,
+      ratio: 0.6,
+      first: { type: "leaf" as const, tabId: "b" },
+      second: { type: "leaf" as const, tabId: "a" },
+    },
+  };
+  const cards = terminalResumeCards(rows, { mux: reversed }, []);
+  expect(cards).toHaveLength(1);
+  expect(cards[0].group && tabName(cards[0].group)).toBe("First");
 });

@@ -2139,6 +2139,13 @@ const ProjectViewBody = memo(function ProjectViewBody({
     );
   }, []);
 
+  const restoreTerminalNames = useCallback((id: string, snapshot: Parameters<typeof adoptSnapshotNames>[0]) => {
+    setTabs(prev => prev.map(tab =>
+      tab.type === "terminal" && tab.id === id && !isUserNamed(tab)
+        ? { ...tab, ...adoptSnapshotNames(snapshot) } : tab,
+    ));
+  }, []);
+
   /** Record a user rename, whichever surface it came from — the inline tab
    *  rename, a pane header, or the Agents page editor, which addresses a
    *  session by pty and knows nothing about tabs. One subscription, so the
@@ -2806,10 +2813,10 @@ const ProjectViewBody = memo(function ProjectViewBody({
       );
       // A name the user chose outlives the pty that held it: it comes back in
       // its own slot, and the spawn callback re-asserts it on the new session.
-      patchTabRaw(id, adoptSnapshotNames(t));
+      restoreTerminalNames(id, t);
       return id;
     },
-    [addTerminal, patchTabRaw],
+    [addTerminal, restoreTerminalNames],
   );
 
   const resumeSession = useCallback(
@@ -2885,7 +2892,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
             : null;
         opened.push(id);
         if (id && leaf.remembered) {
-          patchTabRaw(id, adoptSnapshotNames(leaf.remembered));
+          restoreTerminalNames(id, leaf.remembered);
           if (leaf.remembered.tabId) ids.set(leaf.remembered.tabId, id);
         }
       }
@@ -2893,8 +2900,11 @@ const ProjectViewBody = memo(function ProjectViewBody({
       const root = card.group && !only ? mapSplitTabIds(card.group.root, ids) : null;
       const memberIds = root ? leafIds(root) : [];
       if (card.group && root && memberIds.length >= 2) {
+        const existingGroup = terminalGroupsRef.current[card.group.id];
         const group: TerminalGroup = {
           ...card.group,
+          ...(existingGroup && isUserNamed(existingGroup)
+            ? namePatch({}, "user", tabName(existingGroup)) : {}),
           root,
           activeTabId: ids.get(card.group.activeTabId) ?? memberIds[0],
           zoomedTabId: card.group.zoomedTabId
@@ -2919,7 +2929,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
         if (front) setActiveTabId(front);
       }
     },
-    [reopenTerminal, resumeSession, patchTabRaw],
+    [reopenTerminal, resumeSession, restoreTerminalNames],
   );
 
   /** Carry out an accepted reload: each eligible agent's terminal is replaced
@@ -7896,7 +7906,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
           );
           // Waking spawns a new pty, which names itself. A name the user chose
           // has to be re-asserted onto it or the wake silently renames the tab.
-          patchTabRaw(id, adoptSnapshotNames(t));
+          restoreTerminalNames(id, t);
           return id;
         }
         case "file": {
@@ -7986,7 +7996,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
           });
       }
     },
-    [addTerminal, patchFile, patchTabRaw, ticketRepo],
+    [addTerminal, patchFile, patchTabRaw, ticketRepo, restoreTerminalNames],
   );
 
   // Wake: rebuild the workspace step by step while the frost (rendered by App,
