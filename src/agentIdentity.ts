@@ -156,6 +156,7 @@ export function identifyAgent(
  * UI ownership is not momentary — dropping it on one empty sample unmounts the
  * agent workspace and destroys the interaction in progress.
  *
+ * Bound live hook digests can seed identity before a process hint arrives.
  * A later positive sample replaces the remembered id, so starting a different
  * CLI in the same terminal still changes identity. Closing the terminal is the
  * only negative evidence strong enough to forget it. */
@@ -163,10 +164,19 @@ export function rememberAgentPtys(
   memory: Map<number, string>,
   livePtys: Iterable<number>,
   samples: Iterable<Pick<SessionStats, "id" | "agent_hint">>,
+  boundDigests: ReadonlyMap<number, SessionDigest> = new Map(),
 ): Map<number, string> {
   const live = new Set(livePtys);
   for (const pty of memory.keys()) {
     if (!live.has(pty)) memory.delete(pty);
+  }
+  // A session bound to this live PTY is positive agent evidence even when
+  // foreground sampling sees only its shell. Never match by cwd or a title.
+  // Seed missing identity only: a stale hook cannot override a new CLI that
+  // has already been positively identified in this terminal.
+  for (const [pty, digest] of boundDigests) {
+    if (!live.has(pty) || memory.has(pty) || !digestIsLive(digest, Date.now())) continue;
+    if (digest.agent && cliById(digest.agent)) memory.set(pty, digest.agent);
   }
   for (const sample of samples) {
     if (!live.has(sample.id)) continue;

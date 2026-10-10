@@ -119,6 +119,35 @@ describe("identifyAgent", () => {
 });
 
 describe("rememberAgentPtys", () => {
+  it("promotes a bound live hook session without a process hint and keeps it promoted", () => {
+    const memory = new Map<number, string>();
+    const sessions = new Map([[7, digest()]]);
+    rememberAgentPtys(memory, [7], [{ id: 7, agent_hint: null }], sessions);
+    expect(memory.get(7)).toBe("claude");
+    rememberAgentPtys(memory, [7], [], new Map());
+    expect(memory.get(7)).toBe("claude");
+  });
+
+  it("does not promote ended, stale, unknown, or closed hook sessions", () => {
+    const memory = new Map<number, string>();
+    const sessions = new Map([
+      [7, digest({ state: "ended" })],
+      [8, digest({ updated: Date.now() - 24 * 60 * 60_000 })],
+      [9, digest({ agent: "not-a-registered-cli" })],
+      [10, digest()],
+    ]);
+    rememberAgentPtys(memory, [7, 8, 9], [], sessions);
+    expect(memory.size).toBe(0);
+  });
+
+  it("lets current process identity override an older bound hook identity", () => {
+    const memory = new Map<number, string>();
+    rememberAgentPtys(memory, [7], [
+      { id: 7, agent_hint: hint({ bin: "codex", path: "/usr/bin/codex" }) },
+    ], new Map([[7, digest({ agent: "claude" })]]));
+    expect(memory.get(7)).toBe("codex");
+  });
+
   it("holds identity through empty samples, updates it, and forgets on close", () => {
     const memory = new Map<number, string>();
     rememberAgentPtys(memory, [7], [{ id: 7, agent_hint: hint() }]);

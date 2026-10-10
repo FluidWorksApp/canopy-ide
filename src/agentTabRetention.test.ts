@@ -3,7 +3,7 @@ import {transformWithOxc} from 'vite';
 import {describe,expect,it,vi} from 'vitest';
 import {identifyAgent,rememberAgentPtys,agentIdForCommand} from './agentIdentity';
 import {namePatch} from './tabName';
-import type {SessionStats} from './ipc';
+import type {SessionStats,SessionDigest} from './ipc';
 import type {TermSubTab,SubTab} from './components/ProjectView/helpers';
 
 // Exercise ProjectView's actual stats subscriber without mounting its editor,
@@ -58,4 +58,25 @@ describe('agent tab survival during stats gaps',()=>{
   const h=harness();for(let i=0;i<5;i++)h.tick(h.sample(null));
   expect(h.close).not.toHaveBeenCalled();expect(h.memory.size).toBe(0);expect(h.tabsRef.current).toHaveLength(1);
  });
+});
+
+// Exercise the rail's actual evidence wiring as well as the stats listener:
+// a hook-bound agent must not wait for a process hint to leave SHELLS.
+const classificationStart=source.indexOf('  const liveTerminalPtys =');
+const classificationEnd=source.indexOf('  const agentPtyKey =',classificationStart);
+if(classificationStart<0||classificationEnd<0)throw Error('Missing agent rail classification');
+const {code:classification}=await transformWithOxc(source.slice(classificationStart,classificationEnd),'agent-rail.ts');
+it('places a hook-bound live agent in the agent rail before process hints arrive',()=>{
+ const memory=new Map<number,string>();
+ const tabs=[{id:'agent-in-shell',type:'terminal',ptyId:7,cwd:'/project'}];
+ const scope={tabs,projectStats:[],rememberedAgentPtys:{current:memory},rememberAgentPtys,identifyAgent,
+  liveSessionByPty:new Map([[7,'bound-session']]),
+  bound:{digestBySession:new Map<string,SessionDigest>([
+   ['bound-session',{session_id:'bound-session',agent:'claude',state:'working',updated:Date.now()}],
+   ['unrelated',{session_id:'unrelated',agent:'codex',state:'working',updated:Date.now()}],
+  ])}};
+ const render=new Function(...Object.keys(scope),`${classification}\nreturn agentPtyList;`);
+ expect(render(...Object.values(scope))).toEqual([7]);
+ scope.bound.digestBySession.clear();
+ expect(render(...Object.values(scope))).toEqual([7]);
 });

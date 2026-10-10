@@ -9119,7 +9119,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
   const cancelRename = useCallback(() => setRenamingTabId(null), []);
 
   // Agents are the crux of this IDE, so they own the main strip. Detection is
-  // by launch command OR by what's actually running in the pty tree, so a
+  // by launch command, bound hook session, or the running pty tree, so a
   // `claude` typed by hand into a shell promotes that tab too. Plain shells and
   // long-running commands are demoted to their own right-hand rails (below);
   // reference docs (files, PRs, tickets) form a quieter group after the agents.
@@ -9135,7 +9135,14 @@ const ProjectViewBody = memo(function ProjectViewBody({
   const liveTerminalPtys = tabs
     .filter((tab): tab is TermSubTab => tab.type === "terminal" && tab.ptyId != null)
     .map((tab) => tab.ptyId as number);
-  rememberAgentPtys(rememberedAgentPtys.current, liveTerminalPtys, projectStats);
+  const boundAgentDigests = new Map<number, ipc.SessionDigest>();
+  for (const [ptyId, sessionId] of liveSessionByPty) {
+    const digest = bound.digestBySession.get(sessionId);
+    if (digest) boundAgentDigests.set(ptyId, digest as ipc.SessionDigest);
+  }
+  rememberAgentPtys(
+    rememberedAgentPtys.current, liveTerminalPtys, projectStats, boundAgentDigests,
+  );
   const agentPtyList = [
     ...new Set([
       ...projectStats.filter((s) => identifyAgent(s.agent_hint)).map((s) => s.id),
