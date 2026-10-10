@@ -320,8 +320,9 @@ export async function startBridge(config, connectBrowser = config.workspace?()=>
       if (['ack', 'visible', 'connect'].includes(message.type)) { void handle(message).catch(fail); return; }
       // Pointer/keyboard input must not sit behind a navigation or a picker
       // waiting for the dev server. Serialize controls separately to preserve
-      // press/release ordering while keeping their queue bounded.
-      if(['mouse','key','text','dialog'].includes(message.type)){
+      // press/release ordering while keeping their queue bounded. Picker mode
+      // changes share this queue: the input after them must see the new mode.
+      if(['mouse','key','text','dialog'].includes(message.type)||['mode','sync','region'].includes(message.canopy)){
         if(controlsQueued>=128){ws.close(1013,'Preview input queue full');return;}
         controlsQueued++;
         controlQueue=controlQueue.then(()=>handle(message)).catch(fail).finally(()=>controlsQueued--);

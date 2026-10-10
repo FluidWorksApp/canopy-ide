@@ -40,8 +40,9 @@ Workspace previews match the viewing display's pixel density up to 2×, capped
 at 3840×2400 physical pixels. An explicit compositor viewport preserves CSS
 layout and pointer coordinates while avoiding canvas upscaling on retina
 screens. JPEG quality is 90. Screenshots report their actual PNG dimensions.
-Controls have a separate bounded queue, so a slow navigation or picker cannot
-hold pointer and keyboard input; a later navigation cancels an earlier load.
+Controls have a separate bounded queue, so a slow navigation or agent operation
+cannot hold pointer and keyboard input. Picker mode changes remain ordered with
+the input that depends on them; a later navigation cancels an earlier load.
 
 The release workflow runs the real Chromium recovery fixture inside the
 candidate image before publishing. To run it locally with Chromium installed:

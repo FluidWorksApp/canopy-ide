@@ -70,6 +70,18 @@ try{
  await viewer.locator('#canvas').click({position:point});
  assert.equal(await page.evaluate(()=>window.op('document.querySelector("#click").textContent')),'Clicked');
  console.log('PASS physical-density pointer coordinates');
+ await page.evaluate(point=>{
+  window.command({canopy:'mode',on:true});
+  for(const message of [{type:'mouse',event:'mouseMoved',x:point.x,y:point.y,button:'none',buttons:0},{type:'mouse',event:'mousePressed',x:point.x,y:point.y,button:'left',buttons:1,clickCount:1},{type:'mouse',event:'mouseReleased',x:point.x,y:point.y,button:'left',buttons:0,clickCount:1}])window.command(message);
+ },point);
+ await page.waitForFunction(()=>window.replies.some(m=>m.canopy==='annotation'&&m.payload.id==='click'),{},{timeout:10_000});
+ await page.evaluate(()=>{
+  window.command({canopy:'mode',on:false});window.command({canopy:'region',on:true});
+  for(const message of [{type:'mouse',event:'mousePressed',x:10,y:10,button:'left',buttons:1,clickCount:1},{type:'mouse',event:'mouseMoved',x:100,y:100,button:'left',buttons:1},{type:'mouse',event:'mouseReleased',x:100,y:100,button:'left',buttons:0,clickCount:1}])window.command(message);
+ });
+ await page.waitForFunction(()=>window.replies.some(m=>m.canopy==='region-done'&&m.rect.w>50&&m.rect.h>50),{},{timeout:10_000});
+ console.log('PASS annotation and region modes applied before dependent pointer input');
+
  const captureId=randomUUID();await page.evaluate(id=>window.command({canopy:'capture',id}),captureId);
  await page.waitForFunction(id=>window.replies.some(m=>m.canopy==='capture-result'&&m.id===id),captureId,{timeout:12000});
  const capture=await page.evaluate(id=>window.replies.find(m=>m.canopy==='capture-result'&&m.id===id),captureId),png=Buffer.from(capture.image,'base64');
