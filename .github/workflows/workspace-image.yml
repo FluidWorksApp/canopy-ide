@@ -57,7 +57,7 @@ jobs:
           node-version: 22
       - run: sudo apt-get update && sudo apt-get install -y ripgrep
       - run: npm ci --prefix packages/remote-host --workspaces=false --ignore-scripts
-      - run: node --test packages/remote-host/*.test.mjs
+      - run: node --test packages/remote-host/*.test.mjs packages/chrome-stream/protocol.test.mjs packages/chrome-stream/screencast.test.mjs packages/chrome-stream/recovery.test.mjs
       - run: node packages/remote-host/prepare-hook-build.mjs
       - run: node packages/remote-host/prepare-browser-build.mjs
       # canopy-serviced ships in the host release archive (not the image), as a
@@ -97,6 +97,7 @@ jobs:
       - name: Verify actual candidate runtime and integrations
         run: |
           docker run --rm --network none -v "$PWD/packages/remote-host/browser-smoke.mjs:/opt/canopy/browser-smoke.mjs:ro" --entrypoint node canopy-workspace:0.1.0 /opt/canopy/browser-smoke.mjs
+          docker run --rm --network none --cap-drop ALL --security-opt no-new-privileges:true --shm-size 256m -v "$PWD/packages/chrome-stream/recovery-smoke.mjs:/opt/canopy/chrome-stream/recovery-smoke.mjs:ro" -e CANOPY_BROWSER_STREAMS_MODULE=file:///opt/canopy/browser-streams.mjs -e CANOPY_BROWSER_STREAM_SCRIPT=/opt/canopy/chrome-stream/server.mjs --entrypoint node canopy-workspace:0.1.0 /opt/canopy/chrome-stream/recovery-smoke.mjs
           node packages/remote-host/smoke-linux.mjs
           node packages/remote-host/smoke-agent-integrations.mjs canopy-workspace:0.1.0
           CANOPY_WORKSPACE_IMAGE=canopy-workspace:0.1.0 node packages/remote-host/smoke-cli-compatibility.mjs

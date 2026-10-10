@@ -29,3 +29,13 @@ test('unresolved CDP commands fail within a bound and fence late completion',asy
  await assert.rejects(f.stream.start(),/Reconnect/);await assert.rejects(f.stream.restart(),/Reconnect/);
  assert.equal(f.calls.length,count,'A timed-out command must not be followed by another ambiguous start');
 });
+
+test('screenshots wait for preceding visibility transitions and do not race a screencast start',async()=>{
+ const f=fixture(),release=f.hold(),start=f.stream.start();
+ while(!f.calls.includes('Page.startScreencast'))await Promise.resolve();
+ const hidden=f.stream.stop(),shown=f.stream.start();
+ const capture=f.stream.enqueue(()=>f.stream.command('Page.captureScreenshot',{format:'png',fromSurface:true}));
+ await Promise.resolve();assert.ok(!f.calls.includes('Page.captureScreenshot'));
+ release();await Promise.all([start,hidden,shown,capture]);
+ assert.deepEqual(f.calls.filter(method=>['Page.startScreencast','Page.stopScreencast','Page.captureScreenshot'].includes(method)),['Page.startScreencast','Page.stopScreencast','Page.startScreencast','Page.captureScreenshot']);
+});

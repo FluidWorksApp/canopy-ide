@@ -217,6 +217,7 @@ export function PreviewView({
   const [chromeSrc, setChromeSrc] = useState<string | null>(null);
   const [chromeStarted, setChromeStarted] = useState(false);
   const [chromeRetry, setChromeRetry] = useState(0);
+  const chromeOpenFailures = useRef(0);
   const [capturing, setCapturing] = useState(false);
   // The mode the plain click uses, remembered across sessions. Held in state as
   // well as settings so the menu's "default" hint updates without a reload.
@@ -281,8 +282,9 @@ export function PreviewView({
     setChromeSrc(null);
     void ipc.chromeStreamOpen(sessionId, urlRef.current, tabId).then(src => {
       if (stale) { void ipc.chromeStreamClose(sessionId); return; }
+      chromeOpenFailures.current = 0;
       setChromeSrc(src);
-    }, error => { if (!stale) setProxyError(String(error)); });
+    }, error => { if (!stale) { chromeOpenFailures.current++; setProxyError(String(error)); } });
     return () => {
       stale = true;
       if(chromeSession.current===sessionId)chromeSession.current=null;
@@ -290,9 +292,18 @@ export function PreviewView({
     };
   }, [engine, hasUrl, tabId, chromeStarted, chromeRetry]);
 
+  // A failed bridge open is recoverable when the project comes back into
+  // view. Keep retries bounded and paused while nobody needs this preview.
+  useEffect(() => {
+    if (engine !== "chrome" || !proxyError || (!visible && !streaming)) return;
+    const timer = window.setTimeout(() => setChromeRetry(n => n + 1),
+      Math.min(500 * 2 ** Math.min(chromeOpenFailures.current, 5), 10_000));
+    return () => window.clearTimeout(timer);
+  }, [engine, proxyError, visible, streaming, chromeRetry]);
+
   const initChromeFrame = useCallback(() => {
     if (!chromeSrc) return;
-    iframeRef.current?.contentWindow?.postMessage({ canopy: "stream-init", url: urlRef.current, visible: visibleRef.current || streamingRef.current }, new URL(chromeSrc).origin);
+    iframeRef.current?.contentWindow?.postMessage({ canopy: "stream-init", sessionId: chromeSession.current, url: urlRef.current, visible: visibleRef.current || streamingRef.current }, new URL(chromeSrc).origin);
   }, [chromeSrc]);
 
   useEffect(() => {
@@ -689,9 +700,19 @@ export function PreviewView({
       if (e.source !== iframeRef.current?.contentWindow) return;
       if (engine === "chrome") {
         if (!chromeSrc || e.origin !== new URL(chromeSrc).origin) return;
+        if(e.data?.canopy === "stream-reopen" && e.data.sessionId===chromeSession.current){
+          setChromeRetry(n => n + 1);return;
+        }
         if(e.data?.canopy === "remote-stream-ticket-request" && e.data.sessionId===chromeSession.current){
-          const session=e.data.sessionId,source=e.source,origin=e.origin;
-          void ipc.chromeStreamTicket(session).then(url=>{if(chromeSession.current===session&&iframeRef.current?.contentWindow===source)iframeRef.current?.contentWindow?.postMessage({canopy:"remote-stream-ticket",url},origin);},error=>setProxyError(String(error)));
+          const session=e.data.sessionId,requestId=e.data.requestId,source=e.source,origin=e.origin;
+          const reply=(message:Record<string,unknown>)=>{
+            if(chromeSession.current===session&&iframeRef.current?.contentWindow===source)
+              iframeRef.current.contentWindow?.postMessage({...message,sessionId:session,...(requestId!=null?{requestId}:{})},origin);
+          };
+          void ipc.chromeStreamTicket(session).then(
+            url=>reply({canopy:"remote-stream-ticket",url}),
+            ()=>reply({canopy:"remote-stream-ticket-error"}),
+          );
           return;
         }
         if (e.data?.canopy === "stream-ready") { initChromeFrame(); return; }
