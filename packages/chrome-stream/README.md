@@ -27,6 +27,37 @@ the project tab appear in the viewer's tab selector. Basic JavaScript dialogs
 are answered inside the iframe. Closing the preview closes only this bridge's
 tabs and detaches from Chrome, leaving personal tabs alone.
 
+## Workspace recovery and display quality
+
+The viewer retries dropped sockets with fresh one-use tickets, pauses retry
+work while hidden, and resumes when the preview returns. Ticket and handshake
+waits have deadlines. Repeated failures or a fenced Chrome session ask the IDE
+to reopen the bridge with the same tab profile and latest URL. Refresh survives
+socket reconnects; mouse and keyboard events are never replayed. A reconnect
+receives a fresh frame even when the page's pixels have not changed.
+
+Workspace previews match the viewing display's pixel density up to 2×, capped
+at 3840×2400 physical pixels. An explicit compositor viewport preserves CSS
+layout and pointer coordinates while avoiding canvas upscaling on retina
+screens. JPEG quality is 90. Screenshots report their actual PNG dimensions.
+Controls have a separate bounded queue, so a slow navigation or agent operation
+cannot hold pointer and keyboard input. Picker mode changes remain ordered with
+the input that depends on them; a later navigation cancels an earlier load.
+
+The release workflow runs the real Chromium recovery fixture inside the
+candidate image before publishing. To run it locally with Chromium installed:
+
+```sh
+node packages/remote-host/prepare-browser-build.mjs
+node packages/chrome-stream/recovery-smoke.mjs
+```
+
+This uses disposable local pages, profiles, tickets and browser processes. It
+checks transient reconnects, project hiding, expired bridge replacement,
+persistent cookies/storage, dev-server restart, input during stalled navigation,
+retina pixels, screenshot dimensions and pointer coordinates. It does not pair
+with a personal Chrome profile or contact an external website.
+
 ## Build and test
 
 `npm install` installs the exact-pinned Playwright package. `npm run build:hook`
