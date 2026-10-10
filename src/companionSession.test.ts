@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { emptyTurnFallback, isStaleResume, retryDelay } from "./companionSession";
+import { askCompanion, emptyTurnFallback, isStaleResume, retryDelay } from "./companionSession";
 
 describe("empty companion turns", () => {
   it("does not guess at a limit when the transport reported a real failure", () => {
@@ -101,5 +101,13 @@ describe("recovering once a CLI appears", () => {
     // was broken.
     await mod.startCompanion({ projects: [], installed: () => true, tools: [] });
     expect(mod.companionState().status).not.toBe("unavailable");
+  });
+});
+
+// Slack asks from outside the panel; with no companion running there is no one
+// to answer, and saying so beats a reply that never comes.
+describe("asking from Slack", () => {
+  it("refuses at once when the companion is not running", async () => {
+    await expect(askCompanion("Slack · Sam: hi", "hi")).rejects.toThrow(/not running/);
   });
 });

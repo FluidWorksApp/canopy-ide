@@ -136,6 +136,7 @@ import { AboutDialog } from "./components/AboutDialog";
 import { Dictation } from "./components/Dictation";
 import { Companion } from "./components/Companion";
 import { startCompanion, stopCompanion, subscribeCompanion } from "./companionSession";
+import { slackConfirm, startSlack } from "./slackLive";
 import { remoteCompanionSnapshot } from "./remoteCompanion";
 import { companionToolNames } from "./companionTools";
 import {
@@ -3088,6 +3089,9 @@ export default function App() {
     [],
   );
   const startCompanionRef = useRef(launchCompanion);
+  // Slack requests arrive from the hub on canopyide.dev for the signed-in
+  // account; with nothing linked this only checks every few minutes.
+  useEffect(() => startSlack(), []);
   startCompanionRef.current = launchCompanion;
 
   const companionOn = useSyncExternalStore(
@@ -3279,7 +3283,23 @@ export default function App() {
                     : `${companionName()} is asking`,
                   source: "agent",
                 });
-                setProposal({ ...p, attentionId, resolve });
+                // A Slack turn asks in its thread as well; the first answer,
+                // there or on the chip, is the answer and closes the other.
+                const slack = slackConfirm(p);
+                let settled = false;
+                const answer = (a: { accepted: boolean; note?: string }) => {
+                  if (settled) return;
+                  settled = true;
+                  slack?.cancel(a.accepted);
+                  resolve(a);
+                };
+                setProposal({ ...p, attentionId, resolve: answer });
+                void slack?.answer.then((a) => {
+                  if (settled) return;
+                  resolveAttention(attentionId, a.accepted ? "answered" : "dismissed");
+                  setProposal((cur) => (cur?.resolve === answer ? null : cur));
+                  answer(a);
+                });
               }),
             openProject: async (name: string, why?: string | null) => {
               const target = wsRef.current.projects.find(
