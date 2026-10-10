@@ -49,9 +49,11 @@ jobs:
           cache: npm
       - run: npm ci
       - run: node packages/remote-host/prepare-hook-build.mjs
+      - run: node --test packages/chrome-stream/*.test.mjs
       - run: node packages/remote-host/prepare-browser-build.mjs
       - run: docker build -t canopy-workspace:0.1.0 packages/remote-host
       - run: docker run --rm --network none -v "$PWD/packages/remote-host/browser-smoke.mjs:/opt/canopy/browser-smoke.mjs:ro" --entrypoint node canopy-workspace:0.1.0 /opt/canopy/browser-smoke.mjs
+      - run: docker run --rm --network none --cap-drop ALL --security-opt no-new-privileges:true --shm-size 256m -v "$PWD/packages/chrome-stream/recovery-smoke.mjs:/opt/canopy/chrome-stream/recovery-smoke.mjs:ro" -e CANOPY_BROWSER_STREAMS_MODULE=file:///opt/canopy/browser-streams.mjs -e CANOPY_BROWSER_STREAM_SCRIPT=/opt/canopy/chrome-stream/server.mjs --entrypoint node canopy-workspace:0.1.0 /opt/canopy/chrome-stream/recovery-smoke.mjs
       - run: node packages/remote-host/smoke-linux.mjs
 
   # THIRD-PARTY-NOTICES.md is what discharges the attribution conditions of the

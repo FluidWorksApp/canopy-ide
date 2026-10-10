@@ -4,7 +4,7 @@ import { readFile } from 'node:fs/promises';
 import { createInterface } from 'node:readline';
 import { fileURLToPath } from 'node:url';
 import { connectChrome, connectWorkspace, pageSession, WebSocketServer } from './playwright.mjs';
-import { FRAME_POLL_MS, FrameGate, ScreencastLifecycle, refreshBackoff, shouldRefreshStream, viewportSize, websiteUrl } from './protocol.mjs';
+import { FRAME_POLL_MS, FrameGate, ScreencastLifecycle, refreshBackoff, shouldRefreshStream, viewportSize, streamPixelRatio, websiteUrl } from './protocol.mjs';
 
 export async function waitForPicker(page,timeoutMs=10000){
   const deadline=Date.now()+timeoutMs;
@@ -30,6 +30,8 @@ export async function startBridge(config, connectBrowser = config.workspace?()=>
   let active;
   let serial = 0;
   let size = { width: 1280, height: 720 };
+  let pixelRatio = 1;
+  let navigationInFlight = false;
   let pendingUrl = initialUrl;
   let visible = true;
   let lastFrameAt = 0;
@@ -43,8 +45,8 @@ export async function startBridge(config, connectBrowser = config.workspace?()=>
   const send = message => {
     if (viewer?.readyState === 1) viewer.send(JSON.stringify(message));
   };
-  const status = (text, error = false) => send({ type: 'status', text, error });
-  const fail = error => status(String(error.message || error), true);
+  const status = (text, error = false, reconnect = false) => send({ type: 'status', text, error, reconnect });
+  const fail = error => status(String(error.message || error), true, Boolean(active?.frames?.fault));
   const tabs = () => send({ type: 'tabs', active: active?.id, tabs: [...pages.values()].map(p => ({ id: p.id, url: p.page.url() })) });
 
   async function select(entry) {
@@ -52,10 +54,20 @@ export async function startBridge(config, connectBrowser = config.workspace?()=>
     active = entry;
     gate.reset();
     tabs();
-    if (!entry) return status('The Chrome tab was closed. Reconnect to open a new tab.', true);
-    await entry.page.setViewportSize(size);
+    if (!entry) return status('The Chrome tab was closed. Reconnecting…', true, true);
+    await applyViewport(entry);
     send({ canopy: 'nav', url: entry.page.url(), title: await entry.page.title().catch(() => '') });
     if (visible) await startFrames(entry);
+  }
+
+  async function applyViewport(entry) {
+    await entry.page.setViewportSize(size);
+    if(config.workspace)await entry.frames.command('Emulation.setDeviceMetricsOverride', {
+      ...size,deviceScaleFactor:pixelRatio,mobile:false,
+      // An explicit compositor viewport is required: DPR alone still makes
+      // CDP screencast emit one pixel per CSS pixel. Keep layout in CSS units.
+      viewport:{x:0,y:0,...size,scale:1},
+    });
   }
 
   async function startFrames(entry) {
@@ -78,7 +90,10 @@ export async function startBridge(config, connectBrowser = config.workspace?()=>
     nextRefreshAt = Date.now() + refreshDelay;
     try {
       await entry.frames.restart();
-    } catch {
+    } catch (error) {
+      // Navigation races may retry. A fenced CDP session cannot: ask the IDE
+      // to replace the bridge instead of silently freezing on its last frame.
+      if(entry.frames.fault&&!entry.recoveryReported){entry.recoveryReported=true;fail(error);}
       // A restart races navigation and tab closure; the next tick retries.
     } finally {
       refreshing = false;
@@ -113,7 +128,7 @@ export async function startBridge(config, connectBrowser = config.workspace?()=>
       sentData = frame.data;
       refreshDelay = 0;
       nextRefreshAt = 0;
-      gate.offer(send, { type: 'frame', data: frame.data, width: frame.metadata.deviceWidth, height: frame.metadata.deviceHeight });
+      gate.offer(send, { type: 'frame', data: frame.data, width: config.workspace?size.width:frame.metadata.deviceWidth, height: config.workspace?size.height:frame.metadata.deviceHeight });
     });
     page.on('framenavigated', frame => {
       if (frame === page.mainFrame()) {
@@ -150,7 +165,7 @@ export async function startBridge(config, connectBrowser = config.workspace?()=>
           active = undefined;
           pages.clear();
           tabs();
-          status('Chrome disconnected. Reconnect to continue.', true);
+          status('Chrome disconnected. Reconnecting…', true, true);
         });
       }
       if (closing) return;
@@ -174,19 +189,25 @@ export async function startBridge(config, connectBrowser = config.workspace?()=>
     if (message.type === 'ack') return gate.ack();
     if (message.type === 'connect') return connect();
     if (message.type === 'visible') {
+      const resuming=!!message.visible&&!visible;
       visible = !!message.visible;
+      if(resuming){sentData=undefined;nextRefreshAt=0;refreshDelay=0;}
       gate.reset();
       if (active) await (visible ? startFrames(active) : active.frames.stop());
       return;
     }
     if (message.type === 'resize') {
-      size = viewportSize(message.width, message.height);
+      const nextSize=viewportSize(message.width,message.height);
+      const nextRatio=streamPixelRatio(nextSize.width,nextSize.height,message.deviceScaleFactor);
+      if(nextSize.width===size.width&&nextSize.height===size.height&&nextRatio===pixelRatio)return;
+      size=nextSize;pixelRatio=nextRatio;
       // The picture is about to change shape, so the frame held back as a
       // duplicate no longer describes what the viewer is showing.
       sentData = undefined;
       refreshDelay = 0;
       nextRefreshAt = 0;
-      if (active) await active.page.setViewportSize(size);
+      gate.reset();
+      if (active) { await applyViewport(active);await active.frames.restart(); }
       return;
     }
     if (message.type === 'select') {
@@ -231,14 +252,21 @@ export async function startBridge(config, connectBrowser = config.workspace?()=>
         ...(!message.up && (modifier & 6) && editingCommand ? { commands: [editingCommand] } : {}),
       });
     } else if (message.canopy === 'navigate') {
-      if (message.url) await page.goto(pendingUrl, { waitUntil: 'domcontentloaded' });
-      else if (message.delta < 0) await page.goBack({ waitUntil: 'domcontentloaded' });
-      else if (message.delta > 0) await page.goForward({ waitUntil: 'domcontentloaded' });
-      else await page.reload({ waitUntil: 'domcontentloaded' });
-      send({ canopy: 'nav', url: page.url(), title: await page.title() });
+      navigationInFlight=true;
+      try {
+        if (message.url) await page.goto(pendingUrl, { waitUntil: 'domcontentloaded', timeout:10_000 });
+        else if (message.delta < 0) await page.goBack({ waitUntil: 'domcontentloaded', timeout:10_000 });
+        else if (message.delta > 0) await page.goForward({ waitUntil: 'domcontentloaded', timeout:10_000 });
+        else await page.reload({ waitUntil: 'domcontentloaded', timeout:10_000 });
+        send({ canopy: 'nav', url: page.url(), title: await page.title() });
+      } finally { navigationInFlight=false; }
     } else if (message.canopy === 'capture') {
-      const image = await page.screenshot({ type: 'png' });
-      send({ canopy: 'capture-result', id: message.id, image: image.toString('base64'), width: size.width, height: size.height });
+      // Playwright's screenshot helper restores its context's DPR and would
+      // undo the workspace compositor override. Headless CDP capture keeps it.
+      const image = config.workspace
+        ? Buffer.from((await active.frames.command('Page.captureScreenshot',{format:'png',fromSurface:true})).data,'base64')
+        : await page.screenshot({ type: 'png' });
+      send({ canopy: 'capture-result', id: message.id, image: image.toString('base64'), width: image.readUInt32BE(16), height: image.readUInt32BE(20) });
     } else if (['mode', 'sync', 'region', 'agent'].includes(message.canopy)) {
       await waitForPicker(page);
       await page.evaluate(d => {
@@ -273,17 +301,38 @@ export async function startBridge(config, connectBrowser = config.workspace?()=>
   wss.on('connection', ws => {
     clearTimeout(idleTimer);
     viewer = ws;
+    // The new viewer has not acknowledged the old socket's last picture.
+    // Identical pixels must still be delivered to restore its input controls.
+    sentData=undefined;lastFrameAt=0;nextRefreshAt=0;refreshDelay=0;
     gate.reset();
     let queued = 0;
     let inputQueue = Promise.resolve();
+    let controlsQueued = 0;
+    let controlQueue = Promise.resolve();
     ws.on('message', raw => {
       let message;
       try { message = JSON.parse(raw.toString()); } catch { return; }
+      // A user's new navigation must be able to interrupt a server that no
+      // longer answers; otherwise Reload waits behind its old 30-second load.
+      if(message.canopy==='navigate'&&navigationInFlight&&active)
+        void active.session.send('Page.stopLoading').catch(() => {});
       // Acks and visibility must not queue behind a navigation or pairing UI.
       if (['ack', 'visible', 'connect'].includes(message.type)) { void handle(message).catch(fail); return; }
+      // Pointer/keyboard input must not sit behind a navigation or a picker
+      // waiting for the dev server. Serialize controls separately to preserve
+      // press/release ordering while keeping their queue bounded.
+      if(['mouse','key','text','dialog'].includes(message.type)){
+        if(controlsQueued>=128){ws.close(1013,'Preview input queue full');return;}
+        controlsQueued++;
+        controlQueue=controlQueue.then(()=>handle(message)).catch(fail).finally(()=>controlsQueued--);
+        return;
+      }
       if (queued >= 128) return;
       queued++;
-      inputQueue = inputQueue.then(() => handle(message)).catch(error => {
+      // A capture/op received after typing must observe those earlier keys,
+      // without holding later controls behind this potentially slow command.
+      const earlierControls=controlQueue;
+      inputQueue = inputQueue.then(async () => {await earlierControls;return handle(message);}).catch(error => {
         if (message.canopy === 'agent') send({ canopy: 'agent-result', id: message.id, ok: false, data: String(error.message || error) });
         else if (message.canopy === 'capture') send({ canopy: 'capture-result', id: message.id, error: String(error.message || error) });
         else fail(error);

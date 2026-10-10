@@ -1,33 +1,32 @@
 /* The iframe contains only this viewer. Website HTML never enters the IDE. */
-import { fitContain } from './protocol.mjs';
+import { fitContain, ViewerConnection } from './protocol.mjs';
 const $ = id => document.getElementById(id);
 const canvas = $('canvas');
 const context = canvas.getContext('2d', { alpha: false });
 const typing = $('typing');
-let socket;
 let parentOrigin;
 let wanted = true;
 let connected = false;
 let frameWidth = 1280;
 let frameHeight = 720;
 let composing = false;
-let decoding = false;
+let decodingSocket;
 let dialogPage;
 let resizeTimer;
 let latestPageMessage;
 const parameters=new URLSearchParams(location.search),remote=parameters.get('remote')==='1';
-let requestingTicket=false;
+let bridgeSessionId=parameters.get('sessionId');
 if(remote)$('welcome').textContent='Connecting to your workspace browser…';
 const heldKeys = new Map();
 const post = message => { if (parentOrigin) parent.postMessage(message, parentOrigin === 'null' ? '*' : parentOrigin); };
-const send = message => { if (socket?.readyState === WebSocket.OPEN) socket.send(JSON.stringify(message)); };
+const send = message => connection.send(message);
 function visibility() { send({ type: 'visible', visible: wanted && !document.hidden }); }
 function resize() {
   layout();
   clearTimeout(resizeTimer);
   resizeTimer = setTimeout(() => {
     const r = $('screen').getBoundingClientRect();
-    if (r.width > 1 && r.height > 1) send({ type: 'resize', width: r.width, height: r.height });
+    if (r.width > 1 && r.height > 1) send({ type: 'resize', width: r.width, height: r.height, deviceScaleFactor: window.devicePixelRatio || 1 });
   }, 120);
 }
 /** Draw the frame at the pane's size rather than its own. Chrome's viewport
@@ -42,29 +41,23 @@ function layout() {
   canvas.style.width = `${fit.width}px`;
   canvas.style.height = `${fit.height}px`;
 }
-function connect() {
-  if (socket && socket.readyState < 2) { send({ type: 'connect' }); return; }
-  if(remote){if(parentOrigin&&!requestingTicket){requestingTicket=true;post({canopy:'remote-stream-ticket-request',sessionId:parameters.get('sessionId')});}return;}
-  connectSocket(`${location.origin.replace('http:', 'ws:')}${location.pathname}socket`);
-}
-function connectSocket(url){
-  socket = new WebSocket(url);
-  let initialized=false;
-  const initialize=()=>{if(initialized)return;initialized=true;visibility();resize();post({canopy:'stream-ready'});};
-  socket.onopen = () => {if(!remote)initialize();};
-  socket.onclose = () => { connected = false; $('status').textContent = 'Preview disconnected. Reconnect to continue.'; };
-  socket.onmessage = async event => {
-    const message = JSON.parse(event.data);
-    if(remote)initialize();
+const connection=new ViewerConnection({
+  remote,url:`${location.origin.replace('http:', 'ws:')}${location.pathname}socket`,
+  requestTicket:requestId=>{if(!parentOrigin||!bridgeSessionId)return false;post({canopy:'remote-stream-ticket-request',sessionId:bridgeSessionId,requestId});},
+  onReady:()=>{visibility();resize();post({canopy:'stream-ready'});},
+  onDisconnect:reason=>{connected=false;$('status').textContent=reason;},
+  onReopen:()=>{if(!parentOrigin||!bridgeSessionId)return false;post({canopy:'stream-reopen',sessionId:bridgeSessionId});},
+  onMessage:async(message,sourceSocket)=>{
     if (message.type === 'frame') {
-      if (decoding) { send({ type: 'ack' }); return; }
-      decoding = true;
+      if (decodingSocket===sourceSocket) { send({ type: 'ack' }); return; }
+      decodingSocket = sourceSocket;
       const bytes = Uint8Array.from(atob(message.data), c => c.charCodeAt(0));
       const url = URL.createObjectURL(new Blob([bytes], { type: 'image/jpeg' }));
       const image = new Image();
       try {
         image.src = url;
         await image.decode();
+        if(connection.socket!==sourceSocket||!connection.ready)return;
         canvas.width = image.naturalWidth;
         canvas.height = image.naturalHeight;
         context.drawImage(image, 0, 0);
@@ -76,15 +69,17 @@ function connectSocket(url){
         layout();
         $('welcome').hidden = true;
         connected = true;
+        $('status').textContent='Connected to Chrome';$('status').classList.remove('error');
       } finally {
         URL.revokeObjectURL(url);
-        decoding = false;
-        send({ type: 'ack' });
+        if(decodingSocket===sourceSocket)decodingSocket=undefined;
+        if(connection.socket===sourceSocket)send({ type: 'ack' });
       }
     } else if (message.type === 'status') {
       $('status').textContent = message.text;
       $('status').title = message.text;
       $('status').classList.toggle('error', !!message.error);
+      if(message.reconnect)connection.reopen();
     } else if (message.type === 'tabs') {
       $('tabs').replaceChildren(...message.tabs.map(tab => {
         const option = document.createElement('option');
@@ -106,8 +101,9 @@ function connectSocket(url){
       if (message.canopy === 'ready' || message.canopy === 'nav') latestPageMessage = message;
       post(message);
     }
-  };
-}
+  },
+});
+function connect(){connection.reconnect();}
 function answerDialog(accept) {
   send({ type: 'dialog', pageId: dialogPage, accept, text: $('dialog-text').value });
   $('dialog').close();
@@ -123,18 +119,21 @@ window.addEventListener('message', event => {
   if (parentOrigin && event.origin !== parentOrigin) return;
   parentOrigin = event.origin;
   if(remote&&event.data.canopy==='remote-stream-ticket'){
-    requestingTicket=false;
-    try{const target=new URL(event.data.url);if(!['wss:','ws:'].includes(target.protocol)||target.username||target.password)throw Error();if(socket&&socket.readyState<2)return;connectSocket(target.href);}catch{$('status').textContent='Workspace stream connection is unavailable';}return;
+    if(event.data.sessionId===bridgeSessionId)connection.ticket(event.data.url,event.data.requestId);return;
+  }
+  if(remote&&event.data.canopy==='remote-stream-ticket-error'){
+    if(event.data.sessionId===bridgeSessionId)connection.ticketFailed(event.data.requestId);return;
   }
   if (event.data.canopy === 'stream-init') {
     wanted = !!event.data.visible;
-    if(remote)connect();
-    if (event.data.url) send({ canopy: 'navigate', url: event.data.url });
+    bridgeSessionId=event.data.sessionId||bridgeSessionId;
+    connection.setVisible(wanted&&!document.hidden);
+    if (event.data.url&&event.data.url!==latestPageMessage?.url) send({ canopy: 'navigate', url: event.data.url });
     visibility();
     if (latestPageMessage) post(latestPageMessage);
     return;
   }
-  if (event.data.canopy === 'stream-visible') { wanted = !!event.data.visible; visibility(); return; }
+  if (event.data.canopy === 'stream-visible') { wanted = !!event.data.visible; connection.setVisible(wanted&&!document.hidden);visibility();if(wanted)resize();return; }
   send(event.data);
 });
 const modifiers = event => (event.altKey ? 1 : 0) | (event.ctrlKey ? 2 : 0) | (event.metaKey ? 4 : 0) | (event.shiftKey ? 8 : 0);
@@ -187,6 +186,8 @@ typing.addEventListener('blur', () => {
   heldKeys.clear();
 });
 typing.addEventListener('paste', event => { event.preventDefault(); send({ type: 'text', text: event.clipboardData.getData('text/plain') }); });
-document.addEventListener('visibilitychange', visibility);
+document.addEventListener('visibilitychange',()=>{connection.setVisible(wanted&&!document.hidden);visibility();if(!document.hidden)resize();});
+window.addEventListener('online',()=>connection.connect());
+window.addEventListener('pagehide',()=>connection.dispose());
 new ResizeObserver(resize).observe($('screen'));
-connect();
+connection.connect();

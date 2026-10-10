@@ -70,7 +70,7 @@ export class ScreencastLifecycle {
       catch (error) { if (this.fault) throw error; }
     }
     if (!this.shouldRun()) return;
-    await this.command('Page.startScreencast', { format: 'jpeg', quality: 75, maxWidth: 1920, maxHeight: 1200, everyNthFrame: 1 });
+    await this.command('Page.startScreencast', { format: 'jpeg', quality: 90, maxWidth: 3840, maxHeight: 2400, everyNthFrame: 1 });
     this.running = true;
     if (!this.shouldRun()) await this.stopNow();
   }
@@ -135,4 +135,81 @@ export class FrameGate {
     if (pending) this.offer(pending.send, pending.frame);
   }
   reset() { this.busy = false; this.pending = undefined; }
+}
+
+/** Bounded socket/ticket recovery shared by local and workspace viewers.
+ * Only navigation is replayable: stale clicks and keystrokes are never queued. */
+export class ViewerConnection {
+  constructor({remote=false,url,requestTicket,onReady=()=>{},onMessage=()=>{},onDisconnect=()=>{},onReopen=()=>false,WebSocketImpl=globalThis.WebSocket,setTimer=(fn,delay)=>setTimeout(fn,delay),clearTimer=timer=>clearTimeout(timer),timeoutMs=15_000}={}) {
+    Object.assign(this,{remote,url,requestTicket,onReady,onMessage,onDisconnect,onReopen,WebSocketImpl,setTimer,clearTimer,timeoutMs});
+    this.visible=true;this.ready=false;this.failures=0;this.phase='idle';this.socket=null;this.disposed=false;this.ticketSequence=0;
+  }
+  clearTimers(){this.clearTimer(this.retryTimer);this.clearTimer(this.timeoutTimer);this.retryTimer=this.timeoutTimer=undefined;}
+  setVisible(visible){
+    this.visible=visible;
+    if(!visible){this.clearTimer(this.retryTimer);this.retryTimer=undefined;}
+    this.send({type:'visible',visible});
+    if(visible&&!this.ready)this.connect();
+  }
+  connect(){
+    if(this.disposed||!this.visible||this.phase!=='idle')return;
+    this.clearTimer(this.retryTimer);this.retryTimer=undefined;
+    if(this.remote){
+      this.phase='ticket';this.pendingTicket=++this.ticketSequence;
+      this.timeoutTimer=this.setTimer(()=>this.fail('Workspace stream ticket timed out'),this.timeoutMs);
+      if(this.requestTicket?.(this.pendingTicket)===false){this.clearTimers();this.phase='idle';}
+    }else this.open(this.url);
+  }
+  ticket(url,requestId=this.pendingTicket){
+    if(this.phase!=='ticket'||this.disposed||requestId!==this.pendingTicket)return;
+    try{const target=new URL(url);if(!['ws:','wss:'].includes(target.protocol)||target.username||target.password)throw Error();this.open(target.href);}
+    catch{this.fail('Workspace stream connection is unavailable');}
+  }
+  ticketFailed(requestId=this.pendingTicket){if(this.phase==='ticket'&&requestId===this.pendingTicket)this.fail('Workspace stream ticket is unavailable');}
+  open(url){
+    this.clearTimers();this.phase='socket';this.ready=false;
+    const socket=this.socket=new this.WebSocketImpl(url);
+    this.timeoutTimer=this.setTimer(()=>this.fail('Preview connection timed out'),this.timeoutMs);
+    const initialize=()=>{
+      if(this.socket!==socket||this.ready||this.disposed)return;
+      this.clearTimer(this.timeoutTimer);this.timeoutTimer=undefined;
+      this.ready=true;this.failures=0;this.phase='ready';
+      this.onReady();
+      if(this.pendingNavigation){const message=this.pendingNavigation;this.pendingNavigation=undefined;this.send(message);}
+    };
+    socket.onopen=()=>{if(!this.remote)initialize();};
+    socket.onmessage=event=>{
+      if(this.socket!==socket||this.disposed)return;
+      let message;try{message=JSON.parse(event.data);}catch{return;}
+      if(this.remote)initialize();
+      Promise.resolve(this.onMessage(message,socket)).catch(()=>{if(this.socket===socket)this.fail('Preview stream interrupted');});
+    };
+    socket.onerror=()=>{if(this.socket===socket)this.fail('Preview connection interrupted');};
+    socket.onclose=()=>{if(this.socket===socket)this.fail('Preview disconnected; reconnecting…');};
+  }
+  fail(reason){
+    if(this.disposed)return;
+    this.clearTimers();const socket=this.socket;this.socket=null;this.ready=false;this.phase='idle';socket?.close();
+    this.onDisconnect(reason);this.failures++;
+    if(!this.visible)return;
+    if(this.failures>=3&&this.onReopen()!==false){this.phase='reopening';return;}
+    this.retryTimer=this.setTimer(()=>{this.retryTimer=undefined;this.connect();},Math.min(500*2**Math.min(this.failures-1,5),10_000));
+  }
+  reconnect(){
+    if(this.disposed)return;
+    this.clearTimers();const socket=this.socket;this.socket=null;this.ready=false;this.phase='idle';this.failures=0;socket?.close();this.connect();
+  }
+  reopen(){if(this.onReopen()!==false){this.clearTimers();const socket=this.socket;this.socket=null;socket?.close();this.phase='reopening';this.ready=false;}else this.reconnect();}
+  send(message){
+    if(this.ready&&this.socket?.readyState===1){this.socket.send(JSON.stringify(message));return true;}
+    if(message.canopy==='navigate'){this.pendingNavigation=message;this.connect();}
+    return false;
+  }
+  dispose(){this.disposed=true;this.clearTimers();const socket=this.socket;this.socket=null;this.ready=false;socket?.close();}
+}
+
+/** Match physical display pixels without unbounded retina allocations. */
+export function streamPixelRatio(width,height,ratio=1){
+ const size=viewportSize(width,height),requested=Number(ratio);
+ return Math.max(1,Math.min(Number.isFinite(requested)?requested:1,2,3840/size.width,2400/size.height));
 }
