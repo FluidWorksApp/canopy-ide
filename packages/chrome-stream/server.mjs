@@ -229,7 +229,7 @@ export async function startBridge(config, connectBrowser = config.workspace?()=>
       return;
     }
     if (!active) throw new Error('Connect Chrome before interacting with the page.');
-    const { page, session } = active;
+    const { page, session, frames } = active;
     if (message.type === 'mouse') {
       if (!['mouseMoved', 'mousePressed', 'mouseReleased', 'mouseWheel'].includes(message.event)) return;
       await session.send('Input.dispatchMouseEvent', {
@@ -264,7 +264,7 @@ export async function startBridge(config, connectBrowser = config.workspace?()=>
       // Playwright's screenshot helper restores its context's DPR and would
       // undo the workspace compositor override. Headless CDP capture keeps it.
       const image = config.workspace
-        ? Buffer.from((await active.frames.command('Page.captureScreenshot',{format:'png',fromSurface:true})).data,'base64')
+        ? Buffer.from((await frames.enqueue(()=>frames.command('Page.captureScreenshot',{format:'png',fromSurface:true}))).data,'base64')
         : await page.screenshot({ type: 'png' });
       send({ canopy: 'capture-result', id: message.id, image: image.toString('base64'), width: image.readUInt32BE(16), height: image.readUInt32BE(20) });
     } else if (['mode', 'sync', 'region', 'agent'].includes(message.canopy)) {

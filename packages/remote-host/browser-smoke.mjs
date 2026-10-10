@@ -21,7 +21,7 @@ try{
  // frame-refresh timer. Repeated visible hints must not start CDP twice.
  for(let i=0;i<8;i++)ws.send(JSON.stringify({type:'visible',visible:true}));
  ws.send(JSON.stringify({type:'visible',visible:false}));ws.send(JSON.stringify({type:'visible',visible:true}));
- ws.send(JSON.stringify({canopy:'capture',id:'shot'}));const capture=await wait(m=>m.canopy==='capture-result'&&m.id==='shot');assert.ok(capture.image?.startsWith('iVBOR'));assert.ok(capture.width>0);assert.deepEqual(messages.filter(m=>m.type==='status'&&m.error),[],'Repeated visibility must not start an already active CDP stream');
+ ws.send(JSON.stringify({canopy:'capture',id:'shot'}));const capture=await wait(m=>m.canopy==='capture-result'&&m.id==='shot');assert.ok(capture.image?.startsWith('iVBOR'),capture.error??'Capture returned no PNG image');assert.ok(capture.width>0);assert.deepEqual(messages.filter(m=>m.type==='status'&&m.error),[],'Repeated visibility must not start an already active CDP stream');
  const next=url.replace('/first','/second');ws.send(JSON.stringify({canopy:'navigate',url:next}));await wait(m=>m.canopy==='nav'&&m.url===next);messages.length=0;
  ws.send(JSON.stringify({canopy:'navigate',delta:-1}));await wait(m=>m.canopy==='nav'&&m.url===url);messages.length=0;
  ws.send(JSON.stringify({canopy:'navigate',delta:0}));await wait(m=>m.canopy==='nav'&&m.url===url);
