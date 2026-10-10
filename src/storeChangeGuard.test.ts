@@ -36,7 +36,7 @@ const read = (f: string) => readFileSync(join(SRC, f), "utf8");
 const STORES = [
   {
     id: "mesh",
-    file: "mesh.rs",
+    file: "../../crates/canopy-core/src/mesh.rs",
     variant: "Mesh",
     module: "meshLinks.ts",
     boundary: "record",
@@ -46,11 +46,24 @@ const STORES = [
   },
   {
     id: "notes",
-    file: "notes.rs",
+    file: "../../crates/canopy-core/src/notes.rs",
     variant: "Notes",
     module: "notes.ts",
     boundary: "write_meta",
-    delete_boundaries: ["notes_delete"],
+    delete_boundaries: ["delete"],
+  },
+  {
+    // Not on the coalesced channel: the desktop routes it to the immediate
+    // `research:changed` event its panel listens for. Every write command
+    // announces through `changed`, which calls this on success.
+    id: "research",
+    file: "../../crates/canopy-core/src/research.rs",
+    variant: "Research",
+    module: "research.ts",
+    boundary: "announce",
+    delete_boundaries: [],
+    // Calling either of these is announcing, one hop removed.
+    announcers: ["announce", "changed"],
   },
   {
     id: "provenance",
@@ -136,7 +149,7 @@ describe("the store change channel", () => {
           body,
           `${store.file}: ${fn} is ${store.id}'s write boundary and must call change::pulse, ` +
             `or a write by an agent or the portal reaches no open surface`,
-        ).toContain("change::pulse");
+        ).toContain(store.file.startsWith("../../crates/") ? "self.events.publish" : "change::pulse");
       }
     }
   });
@@ -144,7 +157,7 @@ describe("the store change channel", () => {
   it("pulses with the record's own ids, never derived from the path", () => {
     // Deriving scope from directory components is correct until a layout
     // changes, and then it is silently wrong. Every record carries both ids.
-    const body = fnBody(read("notes.rs"), "write_meta") ?? "";
+    const body = fnBody(read("../../crates/canopy-core/src/notes.rs"), "write_meta") ?? "";
     expect(body).toContain("meta.project_id");
     expect(body).toContain("meta.id");
     expect(body).not.toContain("file_name()");
@@ -177,18 +190,58 @@ describe("the store change channel", () => {
     }
   });
 
+  it("reaches change::pulse from every canopy-core store", () => {
+    // A core store publishes to an injected sink, so its write boundary alone
+    // proves nothing: a no-op sink, or one that names the wrong store, is the
+    // same silent panel. Check the desktop's sink and that each store gets it.
+    const change = read("change.rs");
+    const publish = fnBody(change.slice(change.indexOf("for DesktopEvents")), "publish") ?? "";
+    expect(publish).toContain("match change.store.into()");
+    expect(publish).toContain("Route::Pulse(store) => pulse(store, &change.scope, &change.id)");
+    expect(publish).toContain("app.emit(crate::research::RESEARCH_CHANGED, &change.scope)");
+    // Every core store has a route of its own, and only research leaves the
+    // channel — a second store mapped to Route::Research would be announced
+    // to the research panel and to nobody who shows it.
+    const events = read("../../crates/canopy-core/src/events.rs");
+    const coreEnum = events.slice(events.indexOf("pub enum Store"));
+    const coreVariants = [
+      ...coreEnum.slice(0, coreEnum.indexOf("}")).matchAll(/^\s{4}(\w+),/gm),
+    ].map((m) => m[1]);
+    expect(coreVariants.length).toBeGreaterThan(0);
+    const routes = fnBody(change.slice(change.indexOf("for Route")), "from") ?? "";
+    for (const variant of coreVariants) {
+      const arm = new RegExp(`canopy_core::events::Store::${variant} => Route::(\\w+)(\\(Store::(\\w+)\\))?`);
+      const found = arm.exec(routes);
+      expect(found, `change.rs routes no canopy_core Store::${variant}`).toBeTruthy();
+      if (variant === "Research") expect(found![1]).toBe("Research");
+      else expect([found![1], found![3]]).toEqual(["Pulse", variant]);
+    }
+    for (const store of STORES.filter((s) => s.file.startsWith("../../crates/"))) {
+      const desktop = stripComments(read(`${store.id}.rs`));
+      expect(desktop, `${store.id}.rs must hand its core store the desktop sink`).toContain(
+        "crate::change::DesktopEvents",
+      );
+      expect(desktop).not.toContain("NoopEventSink");
+    }
+  });
+
   it("never pulses from a function the read path can reach", () => {
     // A pulse inside a read is a loop: change -> refetch -> read -> change.
     // It paces itself on the settle window and never stops.
     const readVerbs = ["_list", "_get", "_search", "_due", "_for_", "_all", "read_"];
+    // canopy-core stores are methods, so their reads are bare verbs.
+    const coreReads = /^(list|get|search|due|for_|all|index_docs|dir$|root$)/;
     for (const store of STORES) {
       const src = stripComments(read(store.file));
       for (const m of src.matchAll(/(^|\s)fn\s+(\w+)\s*[(<]/gm)) {
         const name = m[2];
-        if (!readVerbs.some((v) => name.includes(v))) continue;
+        if (!readVerbs.some((v) => name.includes(v)) && !coreReads.test(name)) continue;
         const body = fnBody(src, name) ?? "";
+        const announcers = "announcers" in store ? store.announcers : [];
         expect(
-          body.includes("change::pulse"),
+          body.includes("change::pulse") ||
+            body.includes("self.events.publish") ||
+            announcers.some((a) => body.includes(`self.${a}(`)),
           `${store.file}: ${name} looks like a read but pulses — that is a refetch loop`,
         ).toBe(false);
       }

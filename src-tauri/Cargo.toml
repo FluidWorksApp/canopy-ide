@@ -5,10 +5,16 @@ description = "Local-first, memory-light, vibe-coding-first IDE"
 authors = ["Cause Connect Pte Ltd <sam@fluidwords.app>"]
 license = "MIT"
 edition = "2021"
-rust-version = "1.77.2"
+rust-version.workspace = true
 # The crate ships two binaries (the app + the hook helper), so `cargo run` —
 # which `tauri dev` uses — must be told which one is the app.
 default-run = "canopy"
+
+[workspace]
+members = ["../crates/canopy-core", "../crates/canopy-service"]
+
+[workspace.package]
+rust-version = "1.82"
 
 [lib]
 name = "app_lib"
@@ -47,6 +53,7 @@ dictation = [
 ]
 
 [dependencies]
+canopy-core = { path = "../crates/canopy-core" }
 # io-util: the MCP client reads its stdio servers a line at a time (AsyncBufReadExt).
 # rt-multi-thread: Tauri already builds its shared runtime multi-threaded, but
 # `blocking::io` names `tokio::task::block_in_place`, which only exists behind

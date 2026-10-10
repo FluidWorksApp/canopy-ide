@@ -1,7 +1,7 @@
 import type {ChatMessage} from './client';
-import {validChatMessage as valid,sameChatMessage} from './messageSchema';
+import {validChatMessage as valid,sameChatMessage,hasControl} from './messageSchema';
 let database:Promise<IDBDatabase>|undefined;
-const scope=(account:string,team:string)=>{if([account,team].some(value=>typeof value!=='string'||!value||value.length>256||/[\x00-\x1f]/.test(value)))throw Error('Invalid chat history scope');return JSON.stringify([account,team]);};
+const scope=(account:string,team:string)=>{if([account,team].some(value=>typeof value!=='string'||!value||value.length>256||hasControl(value,false)))throw Error('Invalid chat history scope');return JSON.stringify([account,team]);};
 function open(){return database??=new Promise<IDBDatabase>((resolve,reject)=>{const r=indexedDB.open('canopy-chat-history',1);r.onupgradeneeded=()=>{r.result.createObjectStore('keys');r.result.createObjectStore('messages',{keyPath:'id'}).createIndex('scope','scope');};r.onsuccess=()=>{r.result.onversionchange=()=>{r.result.close();database=undefined;};resolve(r.result);};r.onerror=()=>{database=undefined;reject(r.error);};r.onblocked=()=>{database=undefined;reject(Error('Close other Canopy windows to update chat history'));};});}
 async function key(account:string){
  const db=await open();const existing=await new Promise<CryptoKey|undefined>((resolve,reject)=>{const r=db.transaction('keys').objectStore('keys').get(account);r.onsuccess=()=>resolve(r.result);r.onerror=()=>reject(r.error);});if(existing)return existing;

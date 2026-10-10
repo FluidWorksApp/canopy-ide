@@ -11,6 +11,7 @@ import { offerFileTo } from "./TeamPanel";
 import { Button } from "./ui";
 import { basename } from "../paths";
 import { PullRequestIcon } from "./icons";
+import {LinkifiedText} from './LinkifiedText';
 
 const prRequest = (text: string) => {
   const lines = text.split("\n");
@@ -176,7 +177,7 @@ export function ChatView({ peer, title, relay, onNotice }: ChatViewProps) {
                 <span className="chat-pr-open">Open PR</span>
               </button>
             ) : (
-              <div className="chat-msg-text">{m.text}</div>
+              <div className="chat-msg-text"><LinkifiedText text={m.text}/></div>
             )}
           </div>
         ))}

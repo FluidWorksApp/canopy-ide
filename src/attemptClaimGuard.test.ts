@@ -8,14 +8,13 @@ const read = (path: string) => readFileSync(join(process.cwd(), path), "utf8");
 describe("attempt-scoped claim lifecycle", () => {
   it("stores durable run and attempt identity on claims", () => {
     const context = read("src-tauri/src/context.rs");
-    const claim = context.slice(
-      context.indexOf("pub struct Claim"),
-      context.indexOf("pub struct Refusal"),
-    );
+    const models = read("crates/canopy-core/src/claims.rs");
+    const claim = models.slice(models.indexOf("pub struct Claim"), models.indexOf("pub struct Refusal"));
+    expect(context).toContain("pub use canopy_core::claims::{Claim, Refusal}");
     expect(claim).toContain("pub run_id: Option<String>");
     expect(claim).toContain("pub attempt_id: Option<String>");
     expect(context).toContain("crate::mesh::ClaimStore");
-    expect(read("src-tauri/src/mesh.rs")).toContain("PRAGMA journal_mode = WAL");
+    expect(read("crates/canopy-core/src/mesh.rs")).toContain("PRAGMA journal_mode = WAL");
   });
 
   it("releases only after durable settlement succeeds", () => {

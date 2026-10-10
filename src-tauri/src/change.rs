@@ -107,6 +107,41 @@ pub struct StoreChange {
     pub id: String,
 }
 
+/// Where a canopy-core store's changes surface on the desktop. Research keeps
+/// the immediate `research:changed` event its panel already listens for; every
+/// other store joins this channel.
+enum Route {
+    Pulse(Store),
+    Research,
+}
+
+impl From<canopy_core::events::Store> for Route {
+    fn from(store: canopy_core::events::Store) -> Self {
+        match store {
+            canopy_core::events::Store::Mesh => Route::Pulse(Store::Mesh),
+            canopy_core::events::Store::Notes => Route::Pulse(Store::Notes),
+            canopy_core::events::Store::Research => Route::Research,
+        }
+    }
+}
+
+/// The desktop's sink for every canopy-core store: each change is pulsed on
+/// the store it names, through the same coalescing as desktop-owned stores.
+pub struct DesktopEvents;
+
+impl canopy_core::events::EventSink for DesktopEvents {
+    fn publish(&self, change: canopy_core::events::StoreChange) {
+        match change.store.into() {
+            Route::Pulse(store) => pulse(store, &change.scope, &change.id),
+            Route::Research => {
+                if let Some(app) = APP.get() {
+                    let _ = app.emit(crate::research::RESEARCH_CHANGED, &change.scope);
+                }
+            }
+        }
+    }
+}
+
 #[derive(Clone, serde::Serialize)]
 pub struct StoreChangeEntry {
     sequence: u64,

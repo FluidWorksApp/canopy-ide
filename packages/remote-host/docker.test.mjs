@@ -154,3 +154,73 @@ test('failed fresh release lookup cannot mutate a stopped workspace',async()=>{
  await assert.rejects(host.ensure({...workspace,memberId:'member'},{resume:true}));
  assert.equal(lookups,2,'member resume also requires fresh base-image authority');
 });
+
+const serviceContainer=host=>({
+  Config:{Labels:{'canopy.workspace':'alice'},Image:'canopy-workspace:0.1.0',User:'1000:1000',Env:[`CANOPY_RUNNER_TOKEN=${host.token('alice')}`,'CANOPY_ACCOUNTS=']},
+  HostConfig:{Memory:2048*1048576,MemorySwap:3584*1048576,NanoCpus:2e9,RestartPolicy:{Name:'on-failure',MaximumRetryCount:3},PidsLimit:8192,CapDrop:['ALL'],CapAdd:[],NetworkMode:'canopy-net-alice',SecurityOpt:['no-new-privileges:true']},
+  Mounts:[{Type:'volume',Destination:'/workspace',Name:'canopy-project-alice',RW:true},{Type:'volume',Destination:'/home/agent',Name:'canopy-home-alice',RW:true},
+    {Type:'bind',Source:'/run/canopy-service/ws/alice',Destination:'/run/canopy-ctx',Mode:'',RW:false,Propagation:'rprivate'}],
+  State:{Running:true},NetworkSettings:{Networks:{'canopy-net-alice':{IPAddress:'172.18.0.2'}},Ports:{'8080/tcp':[{HostIp:'127.0.0.1',HostPort:'45000'}]}},
+});
+
+test('a new owner runtime binds only its own service socket directory, read-only, once the service prepared it',async()=>{
+  for(const [prepared,expectMount] of [[async()=>true,true],[async()=>false,false],[async()=>{throw Error('down');},false]]){
+    const calls=[];let inspections=0;
+    const docker=async args=>{calls.push(args);
+      if(args[0]==='inspect'&&inspections++===0)throw Object.assign(Error('missing'),{missingResource:true});
+      if(args[0]==='network'&&args[1]==='inspect')throw Object.assign(Error('missing'),{missingResource:true});
+      if(args[0]==='inspect')return {stdout:JSON.stringify([{NetworkSettings:{Networks:{'canopy-net-alice':{IPAddress:'172.18.0.2'}},Ports:{'8080/tcp':[{HostIp:'127.0.0.1',HostPort:'45000'}]}}}])};
+      return {stdout:''};};
+    const seen=[];const host=new DockerWorkspaces({secret:'test',docker,log:()=>{},serviceMount:async workspace=>{seen.push(workspace.id);return prepared();}});
+    const runtime=await host.ensure({id:'alice',memoryMiB:2048,cpus:2,accounts:[]});
+    const run=calls.find(args=>args[0]==='run');
+    const binds=run.filter(arg=>/type=bind/.test(arg));
+    assert.deepEqual(seen,['alice']);
+    if(expectMount){assert.deepEqual(binds,['type=bind,source=/run/canopy-service/ws/alice,target=/run/canopy-ctx,readonly,bind-propagation=rprivate']);assert.equal(runtime.harness,true);}
+    else{assert.deepEqual(binds,[]);assert.equal(runtime.harness,undefined);}
+    assert.equal(run.at(-1),'canopy-workspace:0.1.0','the image stays the final argument');
+  }
+});
+
+test('member runtimes never receive or request the service mount',async()=>{
+  let asked=false,inspections=0;const calls=[];
+  const docker=async args=>{calls.push(args);
+    if(args[0]==='inspect'&&inspections++===0)throw Object.assign(Error('missing'),{missingResource:true});
+    if(args[0]==='network'&&args[1]==='inspect')throw Object.assign(Error('missing'),{missingResource:true});
+    if(args[0]==='ps')return {stdout:''};
+    if(args[0]==='volume')return {stdout:JSON.stringify([{Name:args[2],Driver:'local',Labels:{}}])};
+    if(args[0]==='inspect')return {stdout:JSON.stringify([{NetworkSettings:{Networks:{'canopy-net-member-x':{IPAddress:'172.18.0.3'}},Ports:{'8080/tcp':[{HostIp:'127.0.0.1',HostPort:'45001'}]}}}])};
+    return {stdout:''};};
+  const host=new DockerWorkspaces({secret:'test',docker,serviceMount:async()=>{asked=true;return true;}});
+  await host.ensure({id:'member-x',parentWorkspaceId:'alice',memberId:'m',memoryMiB:1024,cpus:1,accounts:[]});
+  assert.equal(asked,false);assert.ok(!calls.find(a=>a[0]==='run').some(arg=>/type=bind/.test(arg)));
+});
+
+test('drift checks accept exactly the service mount and detect a missing or different one',async()=>{
+  let current;const host=new DockerWorkspaces({secret:'test',docker:async()=>({stdout:JSON.stringify([current])})});
+  const workspace={id:'alice',memoryMiB:2048,cpus:2,accounts:[]};
+  current=serviceContainer(host);assert.equal((await host.ensure(workspace)).harness,true);
+  current=serviceContainer(host);current.Mounts.pop();
+  const legacy=await host.ensure(workspace);assert.ok(legacy.url);assert.equal(legacy.harness,undefined,'a container that predates the service is detected as having no harness');
+  for(const change of [
+    c=>{c.Mounts[2].Source='/run/canopy-service/ws/bob';},
+    c=>{c.Mounts[2].Source='/run/canopy-service';},
+    c=>{c.Mounts[2].RW=true;},
+    c=>{c.Mounts[2].Type='volume';c.Mounts[2].Name='canopy-ctx';},
+    c=>{c.Mounts[2].Propagation='rshared';},
+    c=>{c.Mounts.push({...c.Mounts[2]});},
+    c=>{c.Mounts.push({Type:'bind',Source:'/var/run/docker.sock',Destination:'/var/run/docker.sock',RW:true});},
+    c=>{c.Mounts.push({Type:'bind',Source:'/run/canopy-service/ws/alice',Destination:'/home/agent/ctx',RW:false});},
+  ]){current=serviceContainer(host);change(current);await assert.rejects(host.ensure(workspace),/differs/);}
+  current=serviceContainer(host);
+  await assert.rejects(host.ensure({...workspace,id:'alice',parentWorkspaceId:'owner',memberId:'m'}),/differs/,'a member runtime may never carry a service mount');
+});
+
+test('migration recovery treats the service mount as the only allowed bind',async()=>{
+  const {verifyServiceMount,volumeMounts}=await import('./service-mount.mjs');
+  const mount={Type:'bind',Source:'/run/canopy-service/ws/alice',Destination:'/run/canopy-ctx',RW:false};
+  assert.equal(verifyServiceMount({id:'alice'},[mount]),true);
+  assert.equal(verifyServiceMount({id:'alice'},[]),false);
+  assert.throws(()=>verifyServiceMount({id:'other'},[mount]),/differs/);
+  assert.deepEqual(volumeMounts([mount,{Type:'volume',Destination:'/workspace'}]),[{Type:'volume',Destination:'/workspace'}]);
+});

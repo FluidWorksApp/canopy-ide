@@ -798,7 +798,8 @@ export interface AgentUiOp {
     | "remember"
     // Mesh jobs, open to every agent: where a job can go, and sending one.
     | "mesh_targets"
-    | "mesh_submit";
+    | "mesh_submit"
+    | "mesh_message_cloud";
   route: string;
   /** Agent terminal that initiated the operation, when there is one. For
    *  mesh_submit the bridge stamps it from the caller's credential. */
@@ -809,6 +810,8 @@ export interface AgentUiOp {
    *  optionally, which of their devices. */
   member?: string | null;
   device?: string | null;
+  targetPtyId?: number | null;
+  replyTo?: string | null;
   path?: string | null;
   line?: number | null;
   column?: number | null;
@@ -4840,3 +4843,25 @@ export async function ptyStopAndWait(id: number): Promise<void> {
 }
 
 export const chromeStreamTicket = (sessionId:string) => invoke<string>('chrome_stream_ticket',{sessionId});
+
+// ---------- Slack (the hub on canopyide.dev; docs/slack-hub-protocol.md) ----------
+
+export interface SlackHubStatus {
+  configured: boolean;
+  installs: { team: string; teamName: string }[];
+  linked: { team: string; teamName: string; slackUser: string }[];
+}
+export type SlackHubItem =
+  | {
+      id: string;
+      kind: "message";
+      senderLabel: string;
+      senderRole: "me" | "teammate";
+      channelType: "im" | "channel";
+      text: string;
+      created: number;
+    }
+  | { id: string; kind: "answer"; proposalId: string; accepted: boolean; by: string };
+/** One action against the account's Slack hub, with the signed-in device's credential. */
+export const slackHub = <T>(action: string, body: Record<string, unknown> = {}) =>
+  invoke<T>("canopy_account_request", { route: "/api/slack", body: { action, ...body } });

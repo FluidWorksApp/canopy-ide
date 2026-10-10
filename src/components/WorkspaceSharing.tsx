@@ -9,7 +9,7 @@ import './workspaceSharing.css';
 export type Level='view'|'edit';
 export type Subject={type:'person'|'team'|'everyone';id:string;name?:string;email?:string};
 export type Share={subject:Subject;level:Level;projects:boolean;sessions:boolean;agents:boolean;git:boolean;via:string[]};
-type Listing={organizationId:string|null;organizationName:string|null;people:{id:string;name:string;email:string}[];teams:{id:string;name:string}[];shares:Share[]};
+type Listing={organizationId:string|null;organizationName:string|null;people:{id:string;name:string;email:string}[];teams:{id:string;name:string}[];shares:Share[];teamDelivery?:boolean};
 type Draft={subject:Subject|null;level:Level;projects:boolean;sessions:boolean;agents:boolean;git:boolean};
 const request=<T,>(body:Record<string,unknown>)=>invoke<T>('canopy_account_request',{route:'/api/teams',body});
 export const SWITCHES=[
@@ -64,6 +64,10 @@ export function WorkspaceSharing({workspaceId,workspaceName}:{workspaceId:string
    <ShareControls share={draft} disabled={busy} onChange={next=>setDraft({...draft,...next})}/>
    <footer><Button type="button" disabled={busy} onClick={()=>setDraft(null)}>Cancel</Button><Button variant="accent" type="submit" disabled={busy||!draft.subject||!draft.projects&&!draft.sessions}>{busy?'Sharing…':'Share'}</Button></footer>
   </form>}
+  {typeof listing?.teamDelivery==='boolean'&&<label className="workspace-share-switch workspace-team-delivery" title="Off by default. When on, agents of people this workspace is shared with (with Agent sessions on) can message and hand jobs to the agents running here, without asking you each time.">
+   <input type="checkbox" checked={listing.teamDelivery} disabled={busy} onChange={e=>void act({action:'workspace-team-delivery-set',enabled:e.target.checked},e.target.checked?'Teammates’ agents can now message your agents.':'Teammates’ agents can no longer message your agents.')}/>
+   <span>Let granted teammates’ agents message my agents</span>
+  </label>}
   {listing?.organizationId&&<ul className="workspace-share-list" aria-label="Shared with">
    {shares.map(share=><li key={subjectKey(share.subject)} className="workspace-share-row">
     <span className="workspace-share-identity"><strong>{share.subject.name}</strong><small>{share.subject.type==='team'?'Team':share.subject.type==='everyone'?'Current and future members':share.subject.email}{share.via.length?` · also via team ${share.via.join(', ')}`:''}</small></span>

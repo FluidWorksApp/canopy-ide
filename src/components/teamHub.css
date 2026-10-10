@@ -78,9 +78,29 @@ button.team-row{cursor:pointer;}button.team-row:hover:not(:disabled){background:
 .account-chat-input .btn-icon{flex:none;width:26px;border-radius:var(--r-sm);background:var(--accent);color:var(--on-accent)}
 .account-chat-input .btn-icon:hover:not(:disabled){background:color-mix(in srgb,var(--accent) 88%,var(--text));color:var(--on-accent)}
 .account-chat-input .btn-icon:disabled{background:color-mix(in srgb,var(--text) 10%,transparent);color:var(--text-muted);cursor:not-allowed}
+.account-chat.is-dropping .account-chat-transcript{outline:2px dashed var(--accent);outline-offset:-6px;border-radius:var(--r-md)}
+.account-chat-file{margin-top:4px;padding:4px 8px;border:1px solid var(--border);border-radius:var(--r-sm);background:var(--bg-raised);font-size:var(--fs-xs);max-width:360px}
+.account-chat-file-row{display:flex;align-items:center;gap:6px;min-width:0;color:var(--text-muted)}
+.account-chat-file-name{color:var(--text);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0}
+.account-chat-file-size{flex:none;white-space:nowrap}
+.account-chat-file-state{flex:none;margin-left:auto;white-space:nowrap}
+.account-chat-file-state .account-chat-action{display:inline-flex;align-items:center;gap:3px}
+.account-chat-file[data-state=unavailable] .account-chat-file-state,.account-chat-file[data-state=failed] .account-chat-file-state{color:var(--warn)}
+.account-chat-thumb{display:block;padding:0;margin:2px 0 4px;border:0;background:none;cursor:pointer;border-radius:var(--r-xs)}
+.account-chat-thumb img{display:block;max-width:240px;max-height:180px;border-radius:var(--r-xs)}
+.account-chat-thumb:focus-visible{outline:none;box-shadow:var(--ring)}
+.account-chat-pending{list-style:none;margin:0 0 var(--sp-1);padding:0;display:flex;flex-wrap:wrap;gap:4px}
+.account-chat-pending li{display:inline-flex;align-items:center;gap:4px;max-width:240px;padding:1px 2px 1px 8px;border:1px solid var(--border);border-radius:var(--r-sm);font-size:var(--fs-xs);color:var(--text-muted);background:var(--bg-raised)}
+.account-chat-pending li span{color:var(--text);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0}
+.account-chat-pending button{border:0;background:none;color:inherit;font:inherit;line-height:1;padding:2px 4px;cursor:pointer;border-radius:var(--r-xs)}
+.account-chat-pending button:hover{color:var(--text)}
+.account-chat-input .account-chat-attach.btn-icon{background:transparent;color:var(--text-muted);margin-left:calc(-1 * var(--sp-2));font-size:13px}
+.account-chat-input .account-chat-attach.btn-icon:hover:not(:disabled){background:color-mix(in srgb,var(--text) 8%,transparent);color:var(--text)}
 .account-chat-hint{display:block;margin-top:4px;font-size:10px;color:var(--text-muted)}
 .account-chat-hint kbd{font-family:inherit;font-size:10px;padding:0 3px;border:1px solid var(--border);border-radius:3px}
 /* Unread messages: a count pill at the row's end and a bolder name. */
 .team-row.is-unread .team-row-text strong{font-weight:650;}
 .team-unread{flex:0 0 auto;min-width:16px;height:16px;padding:0 5px;display:inline-grid;place-items:center;border-radius:999px;background:var(--accent);color:var(--on-accent);font-size:10px;font-weight:700;line-height:1;font-variant-numeric:tabular-nums;}
 .team-hub-picker-dot{flex:0 0 auto;width:7px;height:7px;border-radius:50%;background:var(--accent);}
+.account-chat .linkified-link {color:inherit;text-decoration:underline;text-underline-offset:2px;overflow-wrap:anywhere;cursor:pointer;}
+.account-chat .linkified-link:hover {color:var(--accent);}
