@@ -65,6 +65,12 @@ export class TerminalAttachmentQueue {
     this.flush(attachment.projectId);
   }
 
+  /** Current live attachments, including ones whose project view is asleep. */
+  attachments(projectId:string):TerminalAttachment[]{
+    return [...this.pending.values(),...[...this.committed.values()].map(entry=>entry.attachment)]
+      .filter(attachment=>attachment.projectId===projectId);
+  }
+
   subscribe(projectId: string, consumer: Consumer): () => void {
     const listeners = this.consumers.get(projectId) ?? new Set<Consumer>();
     listeners.add(consumer);

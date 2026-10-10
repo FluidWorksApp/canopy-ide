@@ -118,7 +118,7 @@ interface TermProps {
    *  agent (it stays controllable from the phone). */
   attachId?: number;
   killAttachedOnClose?: boolean;
-  onSpawned: (ptyId: number, name?: string) => void;
+  onSpawned: (ptyId: number, name?: string, sessionGeneration?: number) => void;
   onExited: (event: ipc.PtyExit) => void;
   onTitle?: (title: string) => void;
   /** The program in this terminal asked for attention — see the OSC handlers. */
@@ -711,13 +711,16 @@ export const Term = forwardRef<TermHandle, TermProps>(function Term(
     // Once the pty (fresh or attached) is bound: adopt its grid and announce
     // the id. Exit listening is installed before either spawn path, so a
     // command that fails immediately cannot disappear between spawn and listen.
-    const bound = (id: number, geom: { cols: number; rows: number; name?: string }) => {
+    const bound = (
+      id: number,
+      geom: { cols: number; rows: number; name?: string; session_generation?: number },
+    ) => {
       ptyIdRef.current = id;
       el.dataset.ptyId = String(id);
       applyGeometry(geom);
       if (!hasBound) {
         hasBound = true;
-        onSpawnedRef.current(id, geom.name);
+        onSpawnedRef.current(id, geom.name, geom.session_generation);
       }
       const early = earlyExits.get(id);
       if (early) {

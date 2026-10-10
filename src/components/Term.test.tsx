@@ -144,6 +144,18 @@ const events = {
 };
 
 describe("Term spawn failure", () => {
+  it("reports the native session lifetime when a new terminal binds", async () => {
+    mockCommands({
+      ...events,
+      pty_renderer_register: () => ({generation: 1, sessions: []}),
+      pty_detach_desktop: () => undefined,
+      pty_spawn: () => ({id:91,session_generation:42,name:"Native label",cols:80,rows:24,generation:3}),
+    });
+    await (await import("../ipc")).ptyRendererRegister();
+    const onSpawned = vi.fn();
+    render(<Term cwd="/w/site" active streaming={false} onSpawned={onSpawned} onExited={vi.fn()} />);
+    await waitFor(() => expect(onSpawned).toHaveBeenCalledWith(91,"Native label",42));
+  });
   it("marks the tab exited/failed when the shell-run spawn is refused", async () => {
     mockCommands({
       ...events,
@@ -346,8 +358,8 @@ describe("Term recovered attachment", () => {
     );
 
     await waitFor(() => expect(attach).toHaveBeenCalledTimes(2));
-    expect(onSpawned).toHaveBeenCalledWith(77, undefined);
-    expect(onSpawned).toHaveBeenCalledWith(88, undefined);
+    expect(onSpawned).toHaveBeenCalledWith(77, undefined, undefined);
+    expect(onSpawned).toHaveBeenCalledWith(88, undefined, undefined);
     expect(calls).toEqual(["attach:77", "attach:88", "exits"]);
   });
 });
