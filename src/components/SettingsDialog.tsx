@@ -1693,7 +1693,7 @@ export function SettingsDialog({ onClose, initialTab = "appearance" }: SettingsD
                 </Item>
                 <Item
                   name="Team messages"
-                  desc="Notify you when a teammate messages you or your team's channel while that conversation isn't on screen. Unread counts show in Teams either way."
+                  desc="Show in-app and system notifications when a teammate messages you or your team's channel while that conversation isn't on screen. Unread counts show in Teams either way."
                 >
                   <Checkbox
                     checked={s.teamMessageNotifications}

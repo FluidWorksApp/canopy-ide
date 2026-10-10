@@ -242,7 +242,10 @@ export function shouldReachOS(item: AttentionItem, focused: boolean): boolean {
   // reminder that launchd fired (src-tauri/src/remind.rs), which is delivered
   // whether or not Canopy is even running.
   if (item.osHandled) return false;
-  if (focused) return false;
+  // Team-message producers already suppress the conversation the user is
+  // reading. A posted team notice is unread even when another Canopy surface
+  // has focus, so it must still reach the system notification centre.
+  if (focused && item.source !== "team") return false;
   if (ashMayInterrupt(ashStateFor(item))) return true;
   return (
     item.source === "team" ||

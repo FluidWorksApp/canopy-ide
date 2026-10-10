@@ -16,7 +16,7 @@ type Dependencies={
 const firstLine=(text:string)=>{const line=text.split(/\r?\n/).map(l=>l.trim()).find(Boolean)??'';return line.length>120?`${line.slice(0,119)}…`:line;};
 
 /** What a teammate's message posts to the attention queue (the bell, the corner
- * card and, when Canopy is in the background, the system banner). */
+ * card and the system banner, even while working elsewhere in Canopy). */
 export function teamMessageAttention(event:TeamMessageEvent,options:{previews:boolean;teamName?:string}):AttentionInput{
  const {team,user,message}=event,key=conversationKey(message,user),peer=key===CHANNEL?null:key;
  const sender=event.senderName?.trim()||'A teammate';

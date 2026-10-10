@@ -3,7 +3,7 @@ vi.mock('@tauri-apps/api/core',()=>({invoke:vi.fn()}));
 import {startTeamMessageNotifications,teamMessageAttention} from './notifications';
 import type {TeamMessageEvent} from './session';
 import {followLink,formatDeepLink,parseDeepLink,type DeepLink} from '../deepLinks';
-import type {AttentionInput} from '../attention';
+import {shouldReachOS,type AttentionInput} from '../attention';
 
 const dm:TeamMessageEvent={team:'core',user:'me',senderName:'Ada',message:{id:'m1',sender:'ada',recipient:'me',text:'Can you review?\nDetails below',created:1}};
 const channel:TeamMessageEvent={team:'core',user:'me',senderName:'Sam',message:{id:'m2',sender:'sam',recipient:null,text:'Deploying now',created:2}};
@@ -56,4 +56,13 @@ it('opens that conversation when the notification is clicked',()=>{
 
 it('leaves relay chat links unchanged',()=>{
  expect(followLink(parseDeepLink('canopy://chat')!,ctx)).toEqual({do:'chat',peer:null,name:'Team'});
+});
+
+it('routes unread team messages to system notifications while working elsewhere in Canopy',()=>{
+ const {post,arrive}=harness({focused:true,shown:false});
+ arrive(dm);arrive(channel);
+ expect(post).toHaveBeenCalledTimes(2);
+ for(const [input] of post.mock.calls){
+  expect(shouldReachOS({...input,id:'notification',ts:Date.now()},true)).toBe(true);
+ }
 });

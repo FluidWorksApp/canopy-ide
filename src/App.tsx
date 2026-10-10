@@ -269,7 +269,8 @@ function publishScopes(state: WorkspaceState) {
 
 export default function App() {
   useEffect(() => startBackgroundTeams(), []);
-  // Teammates' messages reach the bell, and the OS when Canopy is in the background.
+  // Unread teammates' messages reach the bell and the OS, including while
+  // working elsewhere in Canopy; the conversation being read stays quiet.
   useEffect(() => startTeamMessageNotifications(), []);
   const [ws, setWs] = useState<WorkspaceState>(emptyWorkspace);
   const [loaded, setLoaded] = useState(false);

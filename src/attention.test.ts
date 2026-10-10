@@ -134,7 +134,13 @@ describe("toast lifetime", () => {
 });
 
 describe("routing to the OS", () => {
-  it("never leaves the app while Canopy is focused", () => {
+  it("routes team notices to the OS even while Canopy is focused", () => {
+    expect(shouldReachOS(item({ source: "team", tone: "info" }), true)).toBe(true);
+    expect(shouldReachOS(item({ source: "team", tone: "info" }), false)).toBe(true);
+    expect(shouldReachOS(item({ source: "team", osHandled: true }), true)).toBe(false);
+  });
+
+  it("keeps non-team notices in the app while Canopy is focused", () => {
     expect(shouldReachOS(item({ kind: "question" }), true)).toBe(false);
     expect(shouldReachOS(item({ tone: "error" }), true)).toBe(false);
   });
