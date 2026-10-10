@@ -179,7 +179,6 @@ import {
   agentModelSwitchFor,
   announceCliInstallsChanged,
   binName,
-  SHELL_PATTERN,
   currentPlatform,
   PREREQS,
   restoreCommand,
@@ -1529,13 +1528,10 @@ const ProjectViewBody = memo(function ProjectViewBody({
   const idleWatch = useRef(
     new Map<number, { busy: boolean; idle: number; flagged: boolean }>(),
   );
-  // A plain shell that an agent ran inside of is classified as an agent only
-  // while that process lives (see agentPtyIds in the render). Once the agent
-  // exits, the still-open shell would silently demote into the SHELLS rail and
-  // bump its count "by itself". Track ptys that have hosted an agent and, once
-  // the agent has been gone two ticks (guards a stats-sampling blip), close the
-  // tab instead of letting it reappear as a shell.
-  const agentLife = useRef(new Map<number, number>());
+  // Stats are observations, never terminal lifecycle authority. A CLI may
+  // hand the foreground back to its shell while waiting or switching tools;
+  // even repeated missing agent hints must preserve the tab and its scrollback.
+  // rememberAgentPtys keeps its agent identity until the actual tab is closed.
   const visibleRef = useRef(visible);
   const vibeSessionRef = useRef<ReturnType<typeof createVibeBuilderSession> | null>(null);
   visibleRef.current = visible;
@@ -1570,34 +1566,6 @@ const ProjectViewBody = memo(function ProjectViewBody({
       });
       for (const s of mine) {
         const hasAgent = !!identifyAgent(s.agent_hint);
-        if (hasAgent) {
-          agentLife.current.set(s.id, 0);
-        } else if (agentLife.current.has(s.id)) {
-          // The agent is gone. If the user has since put this shell to real
-          // work — a server, a build, any non-shell/non-agent process still
-          // running — it's a working shell now, not a spent agent shell:
-          // stop tracking it and never auto-close it out from under them.
-          const hasRealWork = s.procs.some((p) => !SHELL_PATTERN.test(p.name));
-          if (hasRealWork) {
-            agentLife.current.delete(s.id);
-          } else {
-            const gone = (agentLife.current.get(s.id) ?? 0) + 1;
-            if (gone >= 2) {
-              agentLife.current.delete(s.id);
-              const tab = tabsRef.current.find(
-                (t): t is TermSubTab =>
-                  t.type === "terminal" && t.ptyId === s.id,
-              );
-              // A launched agent tab (command matches) or a run stays put; only
-              // an idle plain shell that hosted a now-exited agent gets closed.
-              if (tab && !tab.run && !agentIdForCommand(tab.command)) {
-                closeTabRef.current(tab.id);
-              }
-            } else {
-              agentLife.current.set(s.id, gone);
-            }
-          }
-        }
         if (!hasAgent) {
           idleWatch.current.delete(s.id);
           continue;
