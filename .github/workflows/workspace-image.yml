@@ -73,7 +73,8 @@ jobs:
           cargo +stable build --locked --release --manifest-path crates/canopy-service/Cargo.toml -p canopy-service --bin canopy-serviced --target "$TARGET"
           mkdir -p service-bin
           install -m 0755 "src-tauri/target/$TARGET/release/canopy-serviced" "service-bin/canopy-serviced-linux-${{ matrix.arch }}"
-          file "service-bin/canopy-serviced-linux-${{ matrix.arch }}" | grep -q 'statically linked'
+          # x86_64 musl produces static PIE; both formats are self-contained.
+          file "service-bin/canopy-serviced-linux-${{ matrix.arch }}" | grep -Eq 'statically linked|static-pie linked'
           sha256sum "service-bin/canopy-serviced-linux-${{ matrix.arch }}"
       - uses: actions/upload-artifact@v4
         with:
