@@ -111,7 +111,12 @@ export class ContainerCompanionRunner{
   if(cli!=null&&!COMPANION_CLIS.includes(cli))throw Error(`${cli} has no verified companion runner`);
   Object.assign(this,{workspace,inspect,cli,spawn,ceilingMs,log});
   this.state=new CompanionState(stateFile);this.systemPrompt=companionBrief({name});
-  this.proc=null;this.chain=Promise.resolve();this.closed=false;
+  this.proc=null;this.chain=Promise.resolve();this.saves=Promise.resolve();this.closed=false;
+ }
+ /** Saves run one after another, so two never race on the file; never throws. */
+ persist(){
+  this.saves=this.saves.then(()=>this.state.save()).catch(error=>this.log(`Slack companion state save failed: ${message(error)}`));
+  return this.saves;
  }
  container(){return containerName(this.workspace);}
  /** Running and unpaused, or the turn is refused. Never starts it. */
@@ -156,7 +161,7 @@ export class ContainerCompanionRunner{
    const msg=parse(line);
    // Marked on init, as companionSession.ts marks it on `ready`: the session
    // exists from here, so the next launch must resume rather than re-create it.
-   if(msg?.type==='system'&&msg.subtype==='init'&&!s.ran){s.ran=true;proc.saving=this.state.save().catch(error=>this.log(`Slack companion state save failed: ${message(error)}`));}
+   if(msg?.type==='system'&&msg.subtype==='init'&&!s.ran){s.ran=true;this.persist();}
    const turn=proc.turn;if(!msg||!turn)return;
    if(msg.type==='assistant')for(const b of msg.message?.content??[])if(b?.type==='text'&&b.text)turn.text+=b.text;
    if(msg.type==='result'){proc.turn=null;if(msg.is_error)turn.fail(Error(msg.result||'The agent ended the turn with an error.'));else turn.done(typeof msg.result==='string'&&msg.result.trim()?msg.result:turn.text);}
@@ -174,14 +179,14 @@ export class ContainerCompanionRunner{
     proc.turn={text:'',done:v=>{clearTimeout(timer);resolve(v);},fail:e=>{clearTimeout(timer);reject(e);}};
     proc.child.stdin.write(JSON.stringify({type:'user',message:{role:'user',content:[{type:'text',text:prompt}]}})+'\n');
    });
-   await proc.saving;
+   await this.saves;
    return {text};
   }catch(error){
    // The transcript behind the id is gone: forget it and meet again, once.
    const why=message(error)+proc.stderr;
    if(heal&&(proc.resumed?CONVERSATION_GONE.test(why):ID_IN_USE.test(why))){
     stop(proc.child);if(this.proc===proc)this.proc=null;
-    state.claude={sessionId:randomUUID(),ran:false};await this.state.save().catch(()=>{});
+    state.claude={sessionId:randomUUID(),ran:false};await this.persist();
     return this.claudeTurn(prompt,state,false);
    }
    throw error;
@@ -209,10 +214,10 @@ export class ContainerCompanionRunner{
    child.on('error',error=>{failed??=message(error);});
    child.on('close',()=>{clearTimeout(timer);resolve();});
   });
-  if(minted){state.codex={threadId:minted};await this.state.save().catch(error=>this.log(`Slack companion state save failed: ${message(error)}`));}
+  if(minted){state.codex={threadId:minted};await this.persist();}
   if(failed||!completed){
    const reason=failed??(stderr.trim().slice(0,STDERR_KEEP)||'codex exited without starting the turn');
-   if(heal&&threadId&&CONVERSATION_GONE.test(reason+stderr)){delete state.codex;await this.state.save().catch(()=>{});return this.codexTurn(prompt,state,false);}
+   if(heal&&threadId&&CONVERSATION_GONE.test(reason+stderr)){delete state.codex;await this.persist();return this.codexTurn(prompt,state,false);}
    throw Error(reason);
   }
   return {text:replies.join('\n\n')};
@@ -221,5 +226,6 @@ export class ContainerCompanionRunner{
   this.closed=true;
   const proc=this.proc;this.proc=null;
   if(proc&&!proc.exited){proc.turn?.fail(Error('the workspace companion stopped'));proc.turn=null;stop(proc.child);}
+  return this.saves;
  }
 }

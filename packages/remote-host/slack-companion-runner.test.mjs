@@ -42,26 +42,32 @@ test('docker exec runs as the agent user in /workspace and never starts anything
 // A scripted `docker` binary: `command -v` probes answer from `installed`,
 // everything else becomes a fake process the test drives.
 function fakeDocker({installed=['claude']}={}){
- const procs=[];
+ const procs=[],waiters=new Set();
+ // Re-checked on the events that can satisfy a wait (a spawn, a stdin line),
+ // so a test awaits the event itself instead of polling the loop.
+ const poke=()=>{for(const w of [...waiters])if(w.pred()){waiters.delete(w);w.resolve();}};
+ const when=pred=>new Promise(resolve=>{waiters.add({pred,resolve});poke();});
  const spawn=(command,args,options)=>{
   assert.equal(command,'docker');
   const child=new EventEmitter();
   child.args=args;child.options=options;child.stdout=new PassThrough();child.stderr=new PassThrough();child.killed=false;child.written=[];
   child.stdin=options.stdio[0]==='pipe'?Object.assign(new PassThrough(),{}):null;
-  child.stdin?.on('data',d=>child.written.push(...String(d).split('\n').filter(Boolean).map(l=>JSON.parse(l))));
+  child.stdin?.on('data',d=>{child.written.push(...String(d).split('\n').filter(Boolean).map(l=>JSON.parse(l)));poke();});
   child.stdin?.on('finish',()=>{child.stdinEnded=true;});
   child.kill=()=>{child.killed=true;setImmediate(()=>{child.emit('exit',null);child.emit('close',null);});};
   child.say=obj=>child.stdout.write(JSON.stringify(obj)+'\n');
-  child.end=(code=0)=>{child.stdout.end();child.stderr.end();setImmediate(()=>{child.emit('exit',code);child.emit('close',code);});};
+  child.end=(code=0)=>{
+   let open=2;const done=()=>{if(--open===0){child.emit('exit',code);child.emit('close',code);}};
+   child.stdout.once('end',done);child.stderr.once('end',done);child.stdout.end();child.stderr.end();
+   child.stderr.resume();
+  };
   const probe=args.at(-1);
   if(args.at(-2)?.includes('command -v')){setImmediate(()=>child.emit('exit',installed.includes(probe)?0:1));return child;}
-  procs.push(child);return child;
+  procs.push(child);poke();return child;
  };
- return {spawn,procs};
+ return {spawn,procs,when};
 }
 const tick=()=>new Promise(r=>setImmediate(r));
-// Time-bounded, not tick-bounded: the heal paths wait on real file writes.
-async function until(fn,ms=10_000){const end=Date.now()+ms;while(Date.now()<end){if(fn())return;await new Promise(r=>setTimeout(r,2));}throw Error('timed out');}
 async function stateFile(){const dir=await mkdtemp(path.join(tmpdir(),'slack-companion-'));return {dir,file:path.join(dir,'state',`${workspace.id}.json`)};}
 
 test('claude: one long-lived process, one turn at a time, resumed after a restart',async t=>{
@@ -69,7 +75,7 @@ test('claude: one long-lived process, one turn at a time, resumed after a restar
  const docker=fakeDocker();
  const runner=new ContainerCompanionRunner({workspace,inspect:async()=>running,stateFile:file,spawn:docker.spawn});
  const first=runner.runTurn({prompt:'one'}),second=runner.runTurn({prompt:'two'});
- await until(()=>docker.procs[0]?.written.length===1);
+ await docker.when(()=>docker.procs[0]?.written.length===1);
  const proc=docker.procs[0];
  assert.ok(proc.args.includes('-i')&&proc.args.includes('--session-id'));
  assert.deepEqual(proc.written[0],{type:'user',message:{role:'user',content:[{type:'text',text:'one'}]}});
@@ -79,23 +85,24 @@ test('claude: one long-lived process, one turn at a time, resumed after a restar
  proc.say({type:'assistant',message:{content:[{type:'text',text:'partial'}]}});
  proc.say({type:'result',result:'answer one'});
  assert.deepEqual(await first,{text:'answer one'});
- await until(()=>proc.written.length===2);
+ await docker.when(()=>proc.written.length===2);
  proc.say({type:'result',is_error:true,result:'rate limited'});
  await assert.rejects(second,/rate limited/);
  assert.equal(docker.procs.length,1,'the process outlives its turns');
  const saved=JSON.parse(await readFile(file,'utf8'));
  assert.equal(saved.claude.ran,true);
- runner.close();await tick();
+ await runner.close();
+ await new Promise(r=>proc.stdin.writableFinished?r():proc.stdin.once('finish',r));
  assert.ok(proc.stdinEnded&&proc.killed,'closing ends stdin so claude exits inside the container');
  // A host restart resumes the same conversation.
  const again=new ContainerCompanionRunner({workspace,inspect:async()=>running,stateFile:file,spawn:docker.spawn});
  const third=again.runTurn({prompt:'three'});
- await until(()=>docker.procs[1]?.written.length===1);
+ await docker.when(()=>docker.procs[1]?.written.length===1);
  assert.equal(docker.procs[1].args[docker.procs[1].args.indexOf('--resume')+1],saved.claude.sessionId);
  docker.procs[1].say({type:'assistant',message:{content:[{type:'text',text:'from deltas'}]}});
  docker.procs[1].say({type:'result',result:''});
  assert.deepEqual(await third,{text:'from deltas'});
- again.close();
+ await again.close();
 });
 
 test('claude: a session that came up is resumed next time, even if its turn never finished',async t=>{
@@ -103,17 +110,16 @@ test('claude: a session that came up is resumed next time, even if its turn neve
  const docker=fakeDocker();
  const runner=new ContainerCompanionRunner({workspace,inspect:async()=>running,stateFile:file,spawn:docker.spawn});
  const turn=runner.runTurn({prompt:'hi'});
- await until(()=>docker.procs[0]?.written.length===1);
+ await docker.when(()=>docker.procs[0]?.written.length===1);
  docker.procs[0].say({type:'system',subtype:'init'});
- await until(()=>runner.state.value.claude?.ran===true);
  docker.procs[0].end(1);
  await assert.rejects(turn);
  const next=runner.runTurn({prompt:'again'});
- await until(()=>docker.procs[1]?.written.length===1);
+ await docker.when(()=>docker.procs[1]?.written.length===1);
  assert.ok(docker.procs[1].args.includes('--resume'));
  docker.procs[1].say({type:'result',result:'ok'});
  assert.deepEqual(await next,{text:'ok'});
- runner.close();
+ await runner.close();
 });
 
 test('claude: an id Claude already holds is replaced and the turn re-run once',async t=>{
@@ -122,15 +128,15 @@ test('claude: an id Claude already holds is replaced and the turn re-run once',a
  const runner=new ContainerCompanionRunner({workspace,inspect:async()=>running,stateFile:file,spawn:docker.spawn});
  await runner.state.load();runner.state.value.claude={sessionId:'taken',ran:false};
  const turn=runner.runTurn({prompt:'hi'});
- await until(()=>docker.procs[0]);
- docker.procs[0].stderr.write('Error: Session ID taken is already in use.\n');await tick();
+ await docker.when(()=>docker.procs[0]);
+ docker.procs[0].stderr.write('Error: Session ID taken is already in use.\n');
  docker.procs[0].end(1);
- await until(()=>docker.procs[1]?.written.length===1);
+ await docker.when(()=>docker.procs[1]?.written.length===1);
  const at=docker.procs[1].args.indexOf('--session-id');
  assert.ok(at>0);assert.notEqual(docker.procs[1].args[at+1],'taken');
  docker.procs[1].say({type:'result',result:'fresh'});
  assert.deepEqual(await turn,{text:'fresh'});
- runner.close();
+ await runner.close();
 });
 
 test('claude: a vanished conversation is forgotten and the turn re-run once',async t=>{
@@ -139,14 +145,14 @@ test('claude: a vanished conversation is forgotten and the turn re-run once',asy
  const runner=new ContainerCompanionRunner({workspace,inspect:async()=>running,stateFile:file,spawn:docker.spawn});
  await runner.state.load();runner.state.value.claude={sessionId:'old',ran:true};
  const turn=runner.runTurn({prompt:'hi'});
- await until(()=>docker.procs[0]);
- docker.procs[0].stderr.write('No conversation found with session ID: old\n');await tick();
+ await docker.when(()=>docker.procs[0]);
+ docker.procs[0].stderr.write('No conversation found with session ID: old\n');
  docker.procs[0].end(1);
- await until(()=>docker.procs[1]?.written.length===1);
+ await docker.when(()=>docker.procs[1]?.written.length===1);
  assert.ok(docker.procs[1].args.includes('--session-id'));
  docker.procs[1].say({type:'result',result:'fresh'});
  assert.deepEqual(await turn,{text:'fresh'});
- runner.close();
+ await runner.close();
 });
 
 test('codex: one process per turn without stdin, resumed by the thread id it reported',async t=>{
@@ -154,7 +160,7 @@ test('codex: one process per turn without stdin, resumed by the thread id it rep
  const docker=fakeDocker({installed:['codex']});
  const runner=new ContainerCompanionRunner({workspace,inspect:async()=>running,stateFile:file,spawn:docker.spawn});
  const first=runner.runTurn({prompt:'status?'});
- await until(()=>docker.procs[0]);
+ await docker.when(()=>docker.procs[0]);
  const p=docker.procs[0];
  assert.equal(p.options.stdio[0],'ignore');
  assert.ok(!p.args.includes('-i'));
@@ -164,13 +170,13 @@ test('codex: one process per turn without stdin, resumed by the thread id it rep
  p.say({type:'item.completed',item:{type:'agent_message',text:'All green.'}});p.say({type:'turn.completed'});p.end();
  assert.deepEqual(await first,{text:'All green.'});
  const second=runner.runTurn({prompt:'and now?'});
- await until(()=>docker.procs[1]);
+ await docker.when(()=>docker.procs[1]);
  const q=docker.procs[1];
  assert.deepEqual(q.args.slice(q.args.indexOf('codex')+1,-1),['exec','resume','th-9','--json','--skip-git-repo-check','-c','sandbox_mode="read-only"']);
  q.say({type:'turn.failed',error:{message:'usage limit'}});q.end(1);
  await assert.rejects(second,/usage limit/);
  const third=runner.runTurn({prompt:'?'});
- await until(()=>docker.procs[2]);
+ await docker.when(()=>docker.procs[2]);
  docker.procs[2].stderr.write('error: unexpected argument\n');docker.procs[2].end(2);
  await assert.rejects(third,/unexpected argument/,'a launch that never spoke JSON reports its stderr');
  assert.deepEqual(JSON.parse(await readFile(file,'utf8')),{codex:{threadId:'th-9'}});
@@ -237,7 +243,7 @@ test('end to end: a leased Slack message runs one turn in the container and is a
   createCompanion:options=>(companion=new SlackCompanion({...options,sleep:async()=>{}}),Object.assign(companion,{start(){}}))});
  assert.equal(await host.check(),'on');
  await companion.tick();await companion.tick();
- await until(()=>docker.procs[0]?.written.length===1);
+ await docker.when(()=>docker.procs[0]?.written.length===1);
  const sent=docker.procs[0].written[0].message.content[0].text;
  assert.match(sent,/^\[Slack: from Olive, the owner of this Canopy, in a direct message\.[^\n]*\]\n\nwhat is dirty\?$/);
  docker.procs[0].say({type:'result',result:'Two files on `main` in api.'});
