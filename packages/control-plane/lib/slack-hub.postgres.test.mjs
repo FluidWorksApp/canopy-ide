@@ -26,6 +26,7 @@ test('real Postgres Slack hub: OAuth, routing matrix, leases, replies and approv
  const require=createRequire(process.env.CANOPY_SYNTHETIC_PG_PACKAGE_JSON??new URL('../../../package.json',import.meta.url));const {Pool}=require('pg');const pool=new Pool({connectionString});const db=await pool.connect();
  try{await db.query('BEGIN');await db.query(await readFile(new URL('../slack-hub-schema.sql',import.meta.url),'utf8'));
  await db.query(await readFile(new URL('../slack-hub-schema.sql',import.meta.url),'utf8'));// idempotent
+ for(let i=0;i<2;i++)await db.query(await readFile(new URL('../slack-companion-host-schema.sql',import.meta.url),'utf8'));
  const [owner,alice,bob,carol]=[randomUUID(),randomUUID(),randomUUID(),randomUUID()],ws='ws-'+randomUUID();
  for(const [id,name] of [[owner,'Olive Owner'],[alice,'Alice'],[bob,'Bob'],[carol,'Carol']])await db.query('INSERT INTO "user"(id,name,email) VALUES($1,$2,$3)',[id,name,id+'@example.invalid']);
  await db.query("INSERT INTO workspace(id,owner_id,name,state,desired_state,generation) VALUES($1,$2,'Synthetic slack','ready','running',1)",[ws,owner]);
@@ -55,7 +56,7 @@ test('real Postgres Slack hub: OAuth, routing matrix, leases, replies and approv
  const cancelled=stateOf((await act(carol,{action:'link-url'})).url);
  await assert.rejects(()=>completeOAuth(db,config,{state:cancelled.state,error:'access_denied'},opts),/cancelled/);
  await assert.rejects(()=>completeOAuth(db,config,{state:cancelled.state,code:'c'},opts),e=>e.code===400);
- assert.deepEqual(await act(owner,{action:'status'}),{configured:true,installs:[{team:TEAM,teamName:'Synthetic Team'}],linked:[{team:TEAM,teamName:'Synthetic Team',slackUser:SLACK.owner}]});
+ assert.deepEqual(await act(owner,{action:'status'}),{configured:true,installs:[{team:TEAM,teamName:'Synthetic Team'}],linked:[{team:TEAM,teamName:'Synthetic Team',slackUser:SLACK.owner}],workspaceCompanion:null});
  assert.deepEqual((await act(alice,{action:'status'})).installs,[]);
 
  // --- Routing matrix.

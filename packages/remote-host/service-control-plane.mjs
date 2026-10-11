@@ -4,10 +4,10 @@ import path from 'node:path';
 import {validId} from './policy.mjs';
 // The host's control-plane credential (managedSession.key) also authorizes the
 // Canopy service's control-plane calls: access snapshots, host device
-// registration and the daemon's relay polling. Each token is purpose-bound by
+// registration, the daemon's relay polling and the Slack companion's hub calls. Each token is purpose-bound by
 // `kind` and lives at most two minutes. Shape matches runtime-policy tokens.
 export const RELAY_CREDENTIAL_DIR='/run/canopy-relay';
-export const HOST_CREDENTIAL_KINDS=new Set(['workspace-access-snapshot','peer-host-registration','peer-relay']);
+export const HOST_CREDENTIAL_KINDS=new Set(['workspace-access-snapshot','peer-host-registration','peer-relay','slack-companion']);
 export function hostCredential(managed,kind,workspace,{now=Date.now,ttlSeconds=120}={}){
  if(!HOST_CREDENTIAL_KINDS.has(kind))throw Error('Unknown host credential purpose');
  if(typeof managed?.key!=='string'||managed.key.length<32||workspace?.id!==managed.workspaceId||!Number.isSafeInteger(workspace.generation??0))throw Error('Host credential unavailable');
@@ -30,10 +30,20 @@ async function boundedJson(response,max){
 }
 export function serviceControlPlane(config,{fetchImpl=fetch,now=Date.now,timeoutMs=10000}={}){
  const managed=config.managedSession;if(!managed)return undefined;
- const snapshotUrl=endpoint(managed,'accessSnapshotUrl','/api/workspace-access-snapshot'),peersUrl=endpoint(managed,'peersUrl','/api/peers');
+ const snapshotUrl=endpoint(managed,'accessSnapshotUrl','/api/workspace-access-snapshot'),peersUrl=endpoint(managed,'peersUrl','/api/peers'),slackUrl=endpoint(managed,'slackHostUrl','/api/slack-host');
  if(!snapshotUrl&&!peersUrl)return undefined;
  return {
   origin:(snapshotUrl??peersUrl).origin,
+  /** One Slack hub host action (docs/slack-hub-protocol.md §7) for the
+   *  workspace's owner. Errors carry the HTTP status and the hub's message. */
+  async slackHub(workspace,action,input={}){
+   if(!slackUrl)throw Error('The Slack hub is not configured');
+   const response=await fetchImpl(slackUrl.href,{method:'POST',headers:{authorization:'Bearer '+hostCredential(managed,'slack-companion',workspace,{now}),'content-type':'application/json'},body:JSON.stringify({...input,action}),redirect:'error',signal:AbortSignal.timeout(timeoutMs)});
+   let body;try{body=await boundedJson(response,262144);}catch(error){if(response.ok)throw error;body={};}
+   if(!response.ok)throw Object.assign(Error(typeof body?.error==='string'?body.error.slice(0,300):`Slack hub refused (${response.status})`),{status:response.status});
+   if(!body||typeof body!=='object'||Array.isArray(body))throw Error('Invalid Slack hub response');
+   return body;
+  },
   /** The signed snapshot exactly as the control plane issued it. The service,
    *  not this process, verifies the signature and revision. */
   async accessSnapshot(workspace){

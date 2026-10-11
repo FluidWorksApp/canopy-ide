@@ -7,9 +7,9 @@ import {workspaceAccess,allowsWorkspaceAccess} from './workspace-access.mjs';
 const fail=(code,message)=>{throw Object.assign(Error(message),{code});};
 export const NOT_CONFIGURED='Slack is not configured';
 export const BOT_SCOPES=['app_mentions:read','chat:write','im:history','im:read','im:write','users:read'];
-export const SIGNATURE_WINDOW_S=300,STATE_TTL_MS=10*60*1000,LEASE_SECONDS=120,APPROVAL_MINUTES=15,MAX_UNDELIVERED=200,POLL_LIMIT=20,MAX_TEXT=8000,MAX_REPLY=39000,UNLINKED_NOTICE_HOURS=6;
+export const SIGNATURE_WINDOW_S=300,STATE_TTL_MS=10*60*1000,LEASE_SECONDS=120,APPROVAL_MINUTES=15,MAX_UNDELIVERED=200,POLL_LIMIT=20,MAX_TEXT=8000,MAX_REPLY=39000,UNLINKED_NOTICE_HOURS=6,DESKTOP_QUIET_SECONDS=30;
 export const UNLINKED_TEXT='Link your Slack in Canopy (Settings → Companion → Slack) to talk to your companion here.';
-const ITEM_ID=/^[A-Za-z0-9_-]{8,64}$/,SLACK_USER=/^[UW][A-Z0-9]{2,32}$/,SLACK_TEAM=/^[A-Z0-9]{2,32}$/,SLACK_CHANNEL=/^[CDG][A-Z0-9]{2,32}$/,SLACK_TS=/^\d{1,12}\.\d{1,8}$/,NONCE=/^[A-Za-z0-9_-]{22,64}$/;
+const ITEM_ID=/^[A-Za-z0-9_-]{8,64}$/,SLACK_USER=/^[UW][A-Z0-9]{2,32}$/,SLACK_TEAM=/^[A-Z0-9]{2,32}$/,SLACK_CHANNEL=/^[CDG][A-Z0-9]{2,32}$/,SLACK_TS=/^\d{1,12}\.\d{1,8}$/,NONCE=/^[A-Za-z0-9_-]{22,64}$/,WORKSPACE_ID=/^ws-[a-f0-9-]{36}$/;
 const newId=()=>randomBytes(16).toString('base64url');
 
 // CANOPY_SLACK_TOKEN_KEY never leaves the control plane, so the OAuth state
@@ -278,7 +278,7 @@ export async function receiveEvent(db,config,body,{now=Date.now()}={}){
 const str=(v,max)=>typeof v==='string'&&v.length>0&&v.length<=max;
 async function ownItem(db,userId,id){
  if(!ITEM_ID.test(id??''))fail(400,'Invalid Slack item');
- const row=(await db.query("SELECT id,team_id,channel_id,channel_type,thread_ts,replied_at FROM slack_inbox WHERE id=$1 AND target_user_id=$2 AND kind='message' AND expires_at>now() FOR UPDATE",[id,userId])).rows[0];
+ const row=(await db.query("SELECT id,team_id,channel_id,channel_type,thread_ts,replied_at,lease_owner FROM slack_inbox WHERE id=$1 AND target_user_id=$2 AND kind='message' AND expires_at>now() FOR UPDATE",[id,userId])).rows[0];
  if(!row)fail(404,'That Slack message is no longer available');
  return row;
 }
@@ -296,13 +296,65 @@ function approvalBlocks(summary,approvalId){
  return blocks;
 }
 const resolvedBlocks=(summary,note)=>[...approvalBlocks(summary,null),{type:'context',elements:[{type:'mrkdwn',text:note}]}];
+const validReply=input=>{if(!str(input.text,MAX_REPLY))fail(400,'Replies must be 1 to 39000 characters');};
+function validApproval(input){
+ if(!ITEM_ID.test(input.proposalId??''))fail(400,'Invalid proposal');
+ const project=input.project??null,detail=input.detail??null;
+ if(!str(input.summary,300)||project!==null&&!str(project,128)||detail!==null&&!str(detail,2000))fail(400,'Invalid approval request');
+ return {project,detail};
+}
+// Transaction required; `item` is ownItem's locked row.
+async function postReply(db,config,slack,item,text){
+ if(item.replied_at)fail(409,'That Slack message was already answered');
+ const token=await teamToken(db,config,item.team_id);
+ try{await slack.api('chat.postMessage',{token,body:{channel:item.channel_id,text,...(item.thread_ts?{thread_ts:item.thread_ts}:{})}});}
+ catch{fail(502,'Slack did not accept the reply. Try again.');}
+ await db.query('UPDATE slack_inbox SET replied_at=now(),acked_at=coalesce(acked_at,now()) WHERE id=$1',[item.id]);
+ return {posted:true};
+}
+// Transaction required. `requestedBy` null = a desktop; else the workspace host.
+async function postApproval(db,config,slack,userId,item,input,requestedBy){
+ const {project,detail}=validApproval(input);
+ if((await db.query('SELECT 1 FROM slack_approval WHERE target_user_id=$1 AND proposal_id=$2',[userId,input.proposalId])).rowCount)fail(409,'That approval was already posted');
+ const owner=(await db.query('SELECT slack_user_id FROM slack_identity WHERE user_id=$1 AND team_id=$2',[userId,item.team_id])).rows[0]?.slack_user_id;
+ const summary=`*Approval needed* from ${ownerMention(owner)}\n${escapeSlack(input.summary)}`+(project?`\nProject: ${escapeSlack(project)}`:'')+(detail?`\n>${escapeSlack(detail).replace(/\n/g,'\n>')}`:'');
+ const token=await teamToken(db,config,item.team_id),approvalId=newId();
+ let posted;
+ try{posted=await slack.api('chat.postMessage',{token,body:{channel:item.channel_id,text:`Approval needed: ${input.summary}`.slice(0,300),blocks:approvalBlocks(summary,approvalId),...(item.thread_ts?{thread_ts:item.thread_ts}:{})}});}
+ catch{fail(502,'Slack did not accept the approval. Try again.');}
+ if(typeof posted?.ts!=='string')fail(502,'Slack did not accept the approval. Try again.');
+ await db.query(`INSERT INTO slack_approval(id,proposal_id,inbox_id,target_user_id,team_id,channel_id,message_ts,summary,expires_at,requested_by) VALUES($1,$2,$3,$4,$5,$6,$7,$8,now()+make_interval(mins=>$9),$10)`,
+ [approvalId,input.proposalId,item.id,userId,item.team_id,typeof posted.channel==='string'?posted.channel:item.channel_id,posted.ts,summary,APPROVAL_MINUTES,requestedBy]);
+ return {posted:true};
+}
+// Transaction required. `requestedBy` undefined = any of the user's approvals.
+async function cancelApproval(db,config,slack,userId,proposalId,accepted,requestedBy){
+ const a=(await db.query(`UPDATE slack_approval SET resolution=$3,resolved_by='canopy',resolved_at=now() WHERE target_user_id=$1 AND proposal_id=$2 AND resolution IS NULL AND ($4::text IS NULL OR requested_by=$4) RETURNING team_id,channel_id,message_ts,summary`,[userId,proposalId,accepted?'approved':'denied',requestedBy??null])).rows[0];
+ if(a){
+  const install=await installation(db,config,a.team_id);
+  if(install)await runEffects(slack,[{type:'update',token:install.token,channel:a.channel_id,ts:a.message_ts,text:accepted?'Approved in Canopy':'Denied in Canopy',blocks:resolvedBlocks(a.summary,accepted?'Approved in Canopy':'Denied in Canopy')}]);
+ }
+ return {};
+}
 // Transaction required. `deviceId` owns poll leases; every action is scoped to user.id.
 export async function slackAction(db,config,{user,deviceId},input,{slack,redirectUri,now=Date.now()}){
  const action=input?.action;
  if(action==='status'){
   const installs=(await db.query('SELECT team_id,team_name FROM slack_installation WHERE installed_by=$1 ORDER BY team_name,team_id',[user.id])).rows.map(r=>({team:r.team_id,teamName:r.team_name}));
   const linked=(await db.query('SELECT i.team_id,i.slack_user_id,s.team_name FROM slack_identity i LEFT JOIN slack_installation s ON s.team_id=i.team_id WHERE i.user_id=$1 ORDER BY s.team_name,i.team_id',[user.id])).rows.map(r=>({team:r.team_id,teamName:r.team_name??r.team_id,slackUser:r.slack_user_id}));
-  return {configured:true,installs,linked};
+  const companion=(await db.query('SELECT id,name FROM workspace WHERE owner_id=$1 AND slack_companion AND deleted_at IS NULL',[user.id])).rows[0];
+  return {configured:true,installs,linked,workspaceCompanion:companion?{workspaceId:companion.id,name:companion.name}:null};
+ }
+ if(action==='workspace-companion'){
+  if(typeof input.enabled!=='boolean'||!WORKSPACE_ID.test(input.workspaceId??''))fail(400,'Invalid workspace');
+  await db.query('SELECT pg_advisory_xact_lock(hashtext($1))',['slack_companion:'+user.id]);
+  const w=(await db.query('SELECT id,owner_id,name FROM workspace WHERE id=$1 AND deleted_at IS NULL FOR UPDATE',[input.workspaceId])).rows[0];
+  if(!w)fail(404,'Workspace not found');
+  if(w.owner_id!==user.id)fail(403,'Only the workspace owner can choose where Slack is answered');
+  if(input.enabled)await db.query('UPDATE workspace SET slack_companion=false WHERE owner_id=$1 AND slack_companion AND id<>$2',[user.id,w.id]);
+  await db.query('UPDATE workspace SET slack_companion=$2 WHERE id=$1',[w.id,input.enabled]);
+  await db.query('INSERT INTO workspace_access_audit(workspace_id,actor_id,action,subject_id) VALUES($1,$2,$3,NULL)',[w.id,user.id,`slack-companion-${input.enabled?'on':'off'}`]);
+  return {workspaceCompanion:input.enabled?{workspaceId:w.id,name:w.name}:null};
  }
  if(action==='install-url'||action==='link-url')return startOAuth(db,config,user.id,action==='install-url'?'install':'link',{redirectUri,now});
  if(action==='unlink'){
@@ -312,6 +364,9 @@ export async function slackAction(db,config,{user,deviceId},input,{slack,redirec
  }
  if(action==='poll'){
   if(!str(deviceId,128))fail(400,'Invalid device');
+  // Arbitration (§7): a workspace host stays off new items while this is fresh.
+  await db.query(`INSERT INTO slack_desktop_presence(user_id,device_id,last_poll_at) VALUES($1,$2,now())
+  ON CONFLICT(user_id) DO UPDATE SET device_id=EXCLUDED.device_id,last_poll_at=now() WHERE slack_desktop_presence.last_poll_at<now()-interval '5 seconds' OR slack_desktop_presence.device_id<>EXCLUDED.device_id`,[user.id,deviceId]);
   await db.query('DELETE FROM slack_inbox WHERE target_user_id=$1 AND expires_at<=now()',[user.id]);
   const rows=(await db.query(`UPDATE slack_inbox SET lease_owner=$2,lease_expires_at=now()+make_interval(secs=>$3)
   WHERE id IN (SELECT id FROM slack_inbox WHERE target_user_id=$1 AND acked_at IS NULL AND expires_at>now() AND (lease_expires_at IS NULL OR lease_expires_at<=now() OR lease_owner=$2)
@@ -327,42 +382,79 @@ export async function slackAction(db,config,{user,deviceId},input,{slack,redirec
   return {acknowledged:n};
  }
  if(action==='reply'){
-  if(!str(input.text,MAX_REPLY))fail(400,'Replies must be 1 to 39000 characters');
-  const item=await ownItem(db,user.id,input.id);
-  if(item.replied_at)fail(409,'That Slack message was already answered');
-  const token=await teamToken(db,config,item.team_id);
-  try{await slack.api('chat.postMessage',{token,body:{channel:item.channel_id,text:input.text,...(item.thread_ts?{thread_ts:item.thread_ts}:{})}});}
-  catch{fail(502,'Slack did not accept the reply. Try again.');}
-  await db.query('UPDATE slack_inbox SET replied_at=now(),acked_at=coalesce(acked_at,now()) WHERE id=$1',[item.id]);
-  return {posted:true};
+  validReply(input);
+  return postReply(db,config,slack,await ownItem(db,user.id,input.id),input.text);
  }
  if(action==='approval'){
-  if(!ITEM_ID.test(input.proposalId??''))fail(400,'Invalid proposal');
-  const project=input.project??null,detail=input.detail??null;
-  if(!str(input.summary,300)||project!==null&&!str(project,128)||detail!==null&&!str(detail,2000))fail(400,'Invalid approval request');
-  const item=await ownItem(db,user.id,input.id);
-  if((await db.query('SELECT 1 FROM slack_approval WHERE target_user_id=$1 AND proposal_id=$2',[user.id,input.proposalId])).rowCount)fail(409,'That approval was already posted');
-  const owner=(await db.query('SELECT slack_user_id FROM slack_identity WHERE user_id=$1 AND team_id=$2',[user.id,item.team_id])).rows[0]?.slack_user_id;
-  const summary=`*Approval needed* from ${ownerMention(owner)}\n${escapeSlack(input.summary)}`+(project?`\nProject: ${escapeSlack(project)}`:'')+(detail?`\n>${escapeSlack(detail).replace(/\n/g,'\n>')}`:'');
-  const token=await teamToken(db,config,item.team_id),approvalId=newId();
-  let posted;
-  try{posted=await slack.api('chat.postMessage',{token,body:{channel:item.channel_id,text:`Approval needed: ${input.summary}`.slice(0,300),blocks:approvalBlocks(summary,approvalId),...(item.thread_ts?{thread_ts:item.thread_ts}:{})}});}
-  catch{fail(502,'Slack did not accept the approval. Try again.');}
-  if(typeof posted?.ts!=='string')fail(502,'Slack did not accept the approval. Try again.');
-  await db.query(`INSERT INTO slack_approval(id,proposal_id,inbox_id,target_user_id,team_id,channel_id,message_ts,summary,expires_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,now()+make_interval(mins=>$9))`,
-  [approvalId,input.proposalId,item.id,user.id,item.team_id,typeof posted.channel==='string'?posted.channel:item.channel_id,posted.ts,summary,APPROVAL_MINUTES]);
-  return {posted:true};
+  validApproval(input);
+  return postApproval(db,config,slack,user.id,await ownItem(db,user.id,input.id),input,null);
  }
  if(action==='approval-cancel'){
   if(!ITEM_ID.test(input.proposalId??'')||typeof input.accepted!=='boolean')fail(400,'Invalid proposal');
-  const a=(await db.query(`UPDATE slack_approval SET resolution=$3,resolved_by='canopy',resolved_at=now() WHERE target_user_id=$1 AND proposal_id=$2 AND resolution IS NULL RETURNING team_id,channel_id,message_ts,summary`,[user.id,input.proposalId,input.accepted?'approved':'denied'])).rows[0];
-  if(a){
-   const install=await installation(db,config,a.team_id);
-   if(install)await runEffects(slack,[{type:'update',token:install.token,channel:a.channel_id,ts:a.message_ts,text:input.accepted?'Approved in Canopy':'Denied in Canopy',blocks:resolvedBlocks(a.summary,input.accepted?'Approved in Canopy':'Denied in Canopy')}]);
-  }
-  return {};
+  return cancelApproval(db,config,slack,user.id,input.proposalId,input.accepted,undefined);
  }
  fail(400,'Unknown Slack action');
+}
+
+// ---- Workspace host API (§7) ----
+export const hostLeaseOwner=workspaceId=>'workspace:'+workspaceId;
+const HOST_ACTIONS=['status','poll','ack','reply','approval','approval-status','approval-cancel'];
+// Transaction required. `workspace` is currentHostWorkspace(db,claims) for a
+// 'slack-companion' host credential: generation-fenced, so a replaced VM is
+// refused before this runs. Acts only for workspace.owner_id. The host never
+// approves: it may post an approval, read its result, or withdraw it as denied.
+export async function hostSlackAction(db,config,workspace,input,{slack}){
+ const action=input?.action;
+ if(!HOST_ACTIONS.includes(action))fail(400,'Unknown Slack action');
+ if(action==='ack'&&(!Array.isArray(input.ids)||input.ids.length>100||input.ids.some(id=>typeof id!=='string'||!ITEM_ID.test(id))))fail(400,'Invalid Slack items');
+ if(action==='reply'){validReply(input);if(!ITEM_ID.test(input.id??''))fail(400,'Invalid Slack item');}
+ if(action==='approval'){validApproval(input);if(!ITEM_ID.test(input.id??''))fail(400,'Invalid Slack item');}
+ if(action==='approval-status'&&!ITEM_ID.test(input.proposalId??''))fail(400,'Invalid proposal');
+ if(action==='approval-cancel'&&(!ITEM_ID.test(input.proposalId??'')||input.accepted!==false))fail(400,'A workspace can only withdraw an approval as denied');
+ if(!WORKSPACE_ID.test(workspace?.id??'')||typeof workspace.owner_id!=='string'||!workspace.owner_id)fail(403,'Host is not current for this workspace');
+ const userId=workspace.owner_id,leaseOwner=hostLeaseOwner(workspace.id);
+ // Withdrawing is cleanup and stays allowed after the owner switches this off.
+ if(action==='approval-cancel')return cancelApproval(db,config,slack,userId,input.proposalId,false,leaseOwner);
+ const enabled=(await db.query('SELECT slack_companion FROM workspace WHERE id=$1 AND owner_id=$2 AND deleted_at IS NULL',[workspace.id,userId])).rows[0]?.slack_companion===true;
+ const desktopActive=async()=>(await db.query('SELECT 1 FROM slack_desktop_presence WHERE user_id=$1 AND last_poll_at>now()-make_interval(secs=>$2)',[userId,DESKTOP_QUIET_SECONDS])).rowCount>0;
+ if(action==='status')return {enabled,desktopActive:await desktopActive(),quietSeconds:DESKTOP_QUIET_SECONDS};
+ if(action==='poll'&&!enabled)return {enabled:false,deferred:null,items:[]};
+ if(!enabled)fail(403,'Answering Slack from this workspace is off');
+ if(action==='poll'){
+  await db.query('DELETE FROM slack_inbox WHERE target_user_id=$1 AND expires_at<=now()',[userId]);
+  // One statement: a new lease needs no desktop poll within the quiet window;
+  // leases this host already holds are renewed either way. Messages only —
+  // the host reads its approvals through approval-status.
+  const rows=(await db.query(`UPDATE slack_inbox SET lease_owner=$2,lease_expires_at=now()+make_interval(secs=>$3)
+  WHERE id IN (SELECT id FROM slack_inbox WHERE target_user_id=$1 AND kind='message' AND acked_at IS NULL AND expires_at>now()
+   AND ((lease_owner=$2 AND lease_expires_at>now()) OR ((lease_expires_at IS NULL OR lease_expires_at<=now())
+    AND NOT EXISTS(SELECT 1 FROM slack_desktop_presence p WHERE p.user_id=$1 AND p.last_poll_at>now()-make_interval(secs=>$5))))
+   ORDER BY created_at,id LIMIT $4 FOR UPDATE SKIP LOCKED)
+  RETURNING id,kind,payload,created_at`,[userId,leaseOwner,LEASE_SECONDS,POLL_LIMIT,DESKTOP_QUIET_SECONDS])).rows;
+  rows.sort((a,b)=>a.created_at-b.created_at||(a.id<b.id?-1:1));
+  return {enabled:true,deferred:await desktopActive()?'desktop-active':null,items:rows.map(r=>({...r.payload,id:r.id,kind:r.kind}))};
+ }
+ if(action==='ack'){
+  const n=(await db.query('UPDATE slack_inbox SET acked_at=now() WHERE target_user_id=$1 AND id=ANY($2) AND acked_at IS NULL AND lease_owner=$3',[userId,input.ids,leaseOwner])).rowCount;
+  return {acknowledged:n};
+ }
+ if(action==='approval-status'){
+  const a=(await db.query('SELECT id,resolution,team_id,channel_id,message_ts,summary,expires_at<=now() AS expired FROM slack_approval WHERE target_user_id=$1 AND proposal_id=$2 AND requested_by=$3 FOR UPDATE',[userId,input.proposalId,leaseOwner])).rows[0];
+  if(!a)fail(404,'That approval is no longer available');
+  if(!a.resolution&&a.expired){
+   await db.query("UPDATE slack_approval SET resolution='expired',resolved_at=now() WHERE id=$1",[a.id]);
+   const install=await installation(db,config,a.team_id);
+   if(install)await runEffects(slack,[{type:'update',token:install.token,channel:a.channel_id,ts:a.message_ts,text:'Expired; treated as denied',blocks:resolvedBlocks(a.summary,'Expired; treated as denied')}]);
+   return {resolution:'expired',accepted:false};
+  }
+  return {resolution:a.resolution??'pending',accepted:a.resolution==='approved'};
+ }
+ // reply / approval: only on an item this host holds. A lease that lapsed and
+ // was taken by a desktop is that desktop's to answer.
+ const item=await ownItem(db,userId,input.id);
+ if(item.lease_owner!==leaseOwner)fail(409,'Another Canopy is answering that Slack message');
+ if(action==='reply')return postReply(db,config,slack,item,input.text);
+ return postApproval(db,config,slack,userId,item,input,leaseOwner);
 }
 
 // ---- Approvals (§5) ----
@@ -387,13 +479,13 @@ export async function receiveInteraction(db,config,p){
  const install=await installation(db,config,a.team_id);
  if(a.expired){
   await db.query("UPDATE slack_approval SET resolution='expired',resolved_at=now() WHERE id=$1",[a.id]);
-  await enqueue(db,config,{target:a.target_user_id,kind:'answer',payload:{proposalId:a.proposal_id,accepted:false,by:'expiry',created:Date.now()}},effects);
+  if(!a.requested_by)await enqueue(db,config,{target:a.target_user_id,kind:'answer',payload:{proposalId:a.proposal_id,accepted:false,by:'expiry',created:Date.now()}},effects);
   if(install)effects.push({type:'update',token:install.token,channel:a.channel_id,ts:a.message_ts,text:'Expired; treated as denied',blocks:resolvedBlocks(a.summary,'Expired; treated as denied')});
   return {effects,outcome:'expired'};
  }
  const accepted=act.action_id==='canopy_approve';
  await db.query('UPDATE slack_approval SET resolution=$2,resolved_by=$3,resolved_at=now() WHERE id=$1',[a.id,accepted?'approved':'denied',presser]);
- await enqueue(db,config,{target:a.target_user_id,kind:'answer',payload:{proposalId:a.proposal_id,accepted,by:label(owner),created:Date.now()}},effects);
+ if(!a.requested_by)await enqueue(db,config,{target:a.target_user_id,kind:'answer',payload:{proposalId:a.proposal_id,accepted,by:label(owner),created:Date.now()}},effects);
  const note=`${accepted?'Approved':'Denied'} by <@${presser}>`;
  if(install)effects.push({type:'update',token:install.token,channel:a.channel_id,ts:a.message_ts,text:note,blocks:resolvedBlocks(a.summary,note)});
  return {effects,outcome:accepted?'approved':'denied'};
