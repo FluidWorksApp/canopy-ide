@@ -22,7 +22,7 @@ async function setup(handler){
   if(call.path.endsWith('/query'))return {notes:[{id:'n1'}]};
   return {};
  }));
- const config={workspaces:[{id:'a',name:'A',accounts:[],memoryMiB:1024,cpus:1}],principals:[{id:'owner',tokenSha256:digest('owner'),workspaces:['a'],scope:'drive'},{id:'viewer',tokenSha256:digest('viewer'),workspaces:['a'],scope:'view'}]};
+ const config={workspaces:[{id:'a',name:'A',ownerUserId:'user-a',accounts:[],memoryMiB:1024,cpus:1}],principals:[{id:'owner',tokenSha256:digest('owner'),workspaces:['a'],scope:'drive'},{id:'viewer',tokenSha256:digest('viewer'),workspaces:['a'],scope:'view'}]};
  const harness=new ServiceHarness({admin:new ServiceAdmin({socketPath:fake.socketPath,timeoutMs:500}),config,tokenFor:()=>secret,log:()=>{}});
  const gateway=createGateway({config,harness,workspaces:{open:async()=>({url:runnerUrl,token:secret,harness:true})}});
  const url=await listen(gateway);

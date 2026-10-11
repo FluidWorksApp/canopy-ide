@@ -116,3 +116,34 @@ test('access snapshots switched off on the control plane (503) log once and back
  assert.equal(asked,7,'any other failure keeps the normal cadence');
  assert.deepEqual(logs.slice(1),['Access snapshot refresh failed for alice: Access snapshot refused (500)']);
 });
+
+test('a host config without an owner id never calls the service and says so once',async()=>{
+ const admin=fakeAdmin(),logs=[],workspace={id:'bob',name:'Bob'};
+ const harness=new ServiceHarness({admin,config:{workspaces:[workspace],managedSession:{workspaceId:'bob',ownerUserId:null}},tokenFor:()=>'runner-token',log:m=>logs.push(m)});
+ assert.equal(await harness.prepareMount(workspace),false);
+ for(let i=0;i<5;i++)assert.equal((await harness.attach(workspace,runtime)).reason,'no-owner');
+ assert.equal(await harness.prepareMount(workspace),false);
+ const minted=await harness.mint(workspace,runtime,{requestId:'request-1'});
+ assert.equal(minted.harness,null);assert.equal(minted.state.reason,'no-owner');
+ assert.equal(admin.calls.length,0,'the service is never asked to register a null owner');
+ assert.equal(logs.length,1);assert.match(logs[0],/no-owner for bob: The host configuration has no workspace owner id/);
+ assert.equal(harness.status('bob').reason,'no-owner');
+ assert.equal(await new ServiceHarness({admin,config:{workspaces:[workspace]},tokenFor:()=>'t',log:()=>{}}).prepareMount({...workspace,ownerUserId:' '}),false,'a blank owner is no owner');
+ assert.equal(admin.calls.length,0);
+});
+
+test('an unavailable state is logged when it changes, not on every report',async()=>{
+ const logs=[],fail=new Set(),admin=fakeAdmin({fail}),harness=make(admin,{log:m=>logs.push(m),intervalMs:0}),workspace=config.workspaces[0];
+ for(let i=0;i<5;i++)assert.equal((await harness.attach(workspace,{...runtime,harness:undefined})).reason,'no-mount');
+ assert.equal(logs.length,1);assert.doesNotMatch(logs[0],/predates/);
+ fail.add('register');
+ for(let i=0;i<3;i++)assert.equal((await harness.attach(workspace,runtime)).reason,'unavailable');
+ assert.equal(logs.length,2,'a changed reason logs again');
+ fail.delete('register');
+ assert.deepEqual(await harness.attach(workspace,runtime),{available:true});
+ assert.equal(logs.length,2);
+ fail.add('register');
+ await harness.attach(workspace,runtime);await harness.attach(workspace,runtime);
+ assert.equal(logs.length,3,'failing again after recovery logs again');
+ assert.equal(harness.status('alice').reason,'unavailable');
+});

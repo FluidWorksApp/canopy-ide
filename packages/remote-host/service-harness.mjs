@@ -4,6 +4,7 @@ import {serviceMountSource} from './service-mount.mjs';
 // harness environment" and is reported, never blocks a terminal.
 const unavailable=(reason,message)=>({available:false,reason,message});
 const REQUEST_ID=/^[a-zA-Z0-9:-]{8,128}$/;
+const noOwner=()=>unavailable('no-owner','The host configuration has no workspace owner id; agents start without harness tools until the control plane supplies it');
 export class ServiceHarness{
  constructor({admin,config,controlPlane,tokenFor,inspect,listSessions,now=Date.now,log=message=>console.warn(message),intervalMs=30_000,accessIntervalMs=60_000,relayIntervalMs=60_000,accessBackoffMs=15*60_000}){
   Object.assign(this,{admin,config,controlPlane,tokenFor,inspect,listSessions,now,log,intervalMs,accessIntervalMs,relayIntervalMs,accessBackoffMs});
@@ -14,15 +15,21 @@ export class ServiceHarness{
  }
  workspace(id){return this.config.workspaces.find(w=>w.id===id);}
  eligible(workspace){return !!workspace&&!workspace.memberId&&!workspace.parentWorkspaceId;}
+ owner(workspace){const id=workspace.ownerUserId??this.config.managedSession?.ownerUserId;return typeof id==='string'&&id.trim()?id:null;}
  registration(workspace,runnerUrl){
-  return {name:workspace.name??workspace.id,ownerUserId:workspace.ownerUserId??this.config.managedSession?.ownerUserId??null,runnerUrl,runnerToken:this.tokenFor(workspace.id)};
+  return {name:workspace.name??workspace.id,ownerUserId:this.owner(workspace),runnerUrl,runnerToken:this.tokenFor(workspace.id)};
  }
- report(id,state){this.states.set(id,state);if(!state.available)this.log(`Canopy service ${state.reason} for ${id}: ${state.message}`);return state;}
+ report(id,state){
+  const previous=this.states.get(id);this.states.set(id,state);
+  if(!state.available&&(!previous||previous.available||previous.reason!==state.reason||previous.message!==state.message))this.log(`Canopy service ${state.reason} for ${id}: ${state.message}`);
+  return state;
+ }
  status(id){return this.states.get(id)??unavailable('not-registered','The workspace runtime has not registered with the Canopy service yet');}
  /** Before `docker run`: the service creates the socket directory the
   *  container will bind. The runner URL is unknown until it starts. */
  async prepareMount(workspace){
   if(!this.eligible(workspace))return false;
+  if(!this.owner(workspace)){this.report(workspace.id,noOwner());return false;}
   try{
    const result=await this.admin.registerWorkspace(workspace.id,this.registration(workspace,null));
    if(result?.agentSocketDir!==serviceMountSource(workspace.id))throw Error('The service answered with an unexpected socket directory');
@@ -32,7 +39,8 @@ export class ServiceHarness{
  /** Called whenever the gateway holds a live runtime for a workspace. */
  async attach(workspace,runtime){
   if(!this.eligible(workspace))return this.status(workspace?.id);
-  if(!runtime?.harness)return this.report(workspace.id,unavailable('no-mount','This workspace container predates the Canopy service; it gains agent tools when it is next recreated'));
+  if(!this.owner(workspace))return this.report(workspace.id,noOwner());
+  if(!runtime?.harness)return this.report(workspace.id,unavailable('no-mount','This workspace container has no Canopy service mount; it gains agent tools when it is next recreated'));
   const current=this.workspaces.get(workspace.id);
   if(current&&current.runnerUrl===runtime.url&&current.runnerToken===runtime.token&&this.now()-current.registeredAt<this.intervalMs&&this.states.get(workspace.id)?.available)return this.states.get(workspace.id);
   try{

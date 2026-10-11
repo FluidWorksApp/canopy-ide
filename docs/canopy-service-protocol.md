@@ -80,11 +80,13 @@ The gateway is the only admin client. It authenticates IDE users with its
 existing workspace access checks and passes `actor` (user id) on actions.
 Only owner runtimes get the socket mount and credentials; member and
 collaboration runtimes are separate containers without it. A container created
-before the service existed keeps running without the mount (reported as
-`no-mount`) until it is next recreated; any other `/run/canopy-ctx` mount is
-configuration drift. When the service cannot be reached, a spawn proceeds
-without harness environment and its response carries
-`harness:{available:false, reason, message}`.
+without the mount (before the service existed, or while registration failed)
+keeps running without it (reported as `no-mount`) until it is next recreated;
+any other `/run/canopy-ctx` mount is configuration drift. A host config with no
+workspace owner id is never registered (reported as `no-owner`). When the
+service cannot be reached, a spawn proceeds without harness environment and its
+response carries `harness:{available:false, reason, message}`. Each change of
+reported state is logged once, not every report.
 
 The admin client bounds every call (5 s; 15 s for query/actions; 4 MiB
 responses) and reports `unavailable`, `timeout`, `rejected` (with the service's
