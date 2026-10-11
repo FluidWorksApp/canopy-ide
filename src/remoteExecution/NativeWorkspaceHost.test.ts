@@ -27,6 +27,15 @@ it('hears the desktop context bridge, which answers the companion\'s tools',asyn
  expect(desktop.listen).toHaveBeenCalledTimes(4);
  host.dispose();expect(release).toHaveBeenCalledTimes(4);
 });
+it('drops a desktop terminal\'s ops, whose pty ids would alias workspace sessions',async()=>{
+ const {host,desktop}=setup();
+ let fire:((event:HostEvent<unknown>)=>void)|undefined;
+ vi.mocked(desktop.listen).mockImplementation(async(_event,handler)=>{fire=handler as never;return()=>{};});
+ const got:unknown[]=[];await host.listen('agent:action',event=>got.push(event.payload));
+ fire!({event:'agent:action',id:1,payload:{kind:'close_session',ptyId:3}});
+ fire!({event:'agent:action',id:2,payload:{kind:'open_file',path:'/workspace/a.ts',ptyId:null}});
+ expect(got).toEqual([{kind:'open_file',path:'/workspace/a.ts',ptyId:null}]);host.dispose();
+});
 it('keeps workspace channels on the workspace: a desktop channel is only made for desktop commands',async()=>{
  const {host,desktop}=setup();
  await host.invoke('pty_spawn',{cwd:'/workspace',onData:host.channel()}).catch(()=>{});

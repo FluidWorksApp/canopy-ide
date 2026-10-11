@@ -44,8 +44,7 @@ export interface PromptInput {
   tools: string[];
   /** Which CLI is carrying it, for the one line about what it is running as. */
   cliName: string;
-  /** The projects live in a cloud workspace, not on the computer running the
-   *  CLI, so its own file tools cannot open their paths. */
+  /** The projects live in a cloud workspace the CLI's file tools cannot reach. */
   remote?: boolean;
 }
 

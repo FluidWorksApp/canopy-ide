@@ -1649,8 +1649,7 @@ export async function checkInstalledClis(): Promise<Record<string, boolean>> {
   return (await probeInstalledClis()) ?? {};
 }
 
-/** The CLIs on the computer showing the IDE. The companion runs there in
- *  every mode, so in a cloud workspace it must not pick a CLI from the VM. */
+/** The CLIs on the computer showing the IDE, where the companion runs. */
 export async function checkDesktopClis(): Promise<Record<string, boolean>> {
   try {
     return await invokeDesktop<Record<string, boolean>>("which_check", {

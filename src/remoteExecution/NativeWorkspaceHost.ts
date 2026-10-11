@@ -28,15 +28,14 @@ for(const command of ['notes_list','notes_due','notes_get','notes_create','notes
 // the answer; the answers then act on the workspace through this host.
 export const COMPANION_DESKTOP_COMMANDS=['companion_spawn','companion_write','companion_kill','companion_status','companion_store_read','companion_store_write','companion_save_attachment','companion_dispatch_origin','companion_open_requests','context_publish','context_remove','context_tools','context_agent_spawn_ready','browser_result','webview_snapshot'] as const;
 for(const command of COMPANION_DESKTOP_COMMANDS)LOCAL_UI.add(command);
-// The bridge's requests to this window, and the companion's replies.
+// The bridge's requests to this window, and the companion's replies. An op from
+// a terminal on this computer is dropped: its pty id would alias a VM session's.
 export const COMPANION_DESKTOP_EVENTS=['agent:ui','agent:action','agent:browser','companion:reply'] as const;
 // The signed-in account, crash reports and the remote portal belong to this
 // computer; the workspace has none of them.
 for(const command of ['canopy_account_request','report_crash','send_crash','crash_issue_draft','file_crash_issue','remote_status','remote_enable','remote_disable','remote_qr','remote_rotate_pin','remote_socket_metrics'])LOCAL_UI.add(command);
 /** Whether a command runs on the computer showing the IDE in remote mode. */
 export const isDesktopLocal=(command:string)=>LOCAL_UI.has(command);
-/** A channel made for this host. Workspace streams call `onmessage` directly;
- * a desktop command gets a native channel forwarding to it. */
 class WorkspaceChannel<T> implements HostChannel<T>{onmessage:(message:T)=>void=()=>{};}
 // Recovery reads share routes with background polls; they must not wait in that lane.
 const INTERACTIVE=1;
@@ -332,7 +331,7 @@ export class NativeWorkspaceHost implements Host {
   }
   async listen<T>(event:string,handler:(event:HostEvent<T>)=>void):Promise<UnlistenFn>{
     if(this.disposed)throw Error('Workspace disconnected');
-    if(['remote:upload-progress','menu','deep-link','memory:pressure','window:fullscreen','clipboard:changed','clipboard:blocked','dictation:progress','dictation:partial','dictation:level',...COMPANION_DESKTOP_EVENTS].includes(event)){const release=await this.desktop.listen<T>(event,value=>{if(!this.disposed)handler(value);});if(this.disposed){release();return()=>{};}const cancel=()=>{this.desktopListeners.delete(cancel);release();};this.desktopListeners.add(cancel);return cancel;}
+    if(['remote:upload-progress','menu','deep-link','memory:pressure','window:fullscreen','clipboard:changed','clipboard:blocked','dictation:progress','dictation:partial','dictation:level',...COMPANION_DESKTOP_EVENTS].includes(event)){const companionOnly=event.startsWith('agent:');const release=await this.desktop.listen<T>(event,value=>{if(this.disposed)return;if(companionOnly&&(value.payload as {ptyId?:unknown}|null)?.ptyId!=null)return;handler(value);});if(this.disposed){release();return()=>{};}const cancel=()=>{this.desktopListeners.delete(cancel);release();};this.desktopListeners.add(cancel);return cancel;}
     const list=this.listeners.get(event)??new Set();this.listeners.set(event,list);list.add(handler as (event:HostEvent<unknown>)=>void);this.beginPoll();return ()=>{list.delete(handler as (event:HostEvent<unknown>)=>void);};
   }
   channel<T>():HostChannel<T>{return new WorkspaceChannel<T>();}

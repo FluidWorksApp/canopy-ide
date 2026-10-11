@@ -126,11 +126,7 @@ export interface CompanionLaunch {
   authority: CompanionAuthority;
 }
 
-/** The directories the companion's own CLI is granted. In a cloud workspace
- *  every project path names the VM, and the CLI runs on this computer: an
- *  --add-dir for a path that does not exist here grants nothing and can stop
- *  the CLI from starting, so none are passed and canopy_* tools carry its
- *  reach instead. */
+/** In a cloud workspace the roots are VM paths the desktop CLI cannot open. */
 export function companionLaunchRoots(
   projects: { roots: string[] }[],
   remoteWorkspace: boolean,
