@@ -142,6 +142,7 @@ import { companionToolNames } from "./companionTools";
 import {
   AGENT_CLIS_CHANGED_EVENT,
   CLI_INSTALLS_CHANGED_EVENT,
+  checkDesktopClis,
   checkInstalledClis,
   remoteCliMetadata,
 } from "./projects";
@@ -3077,7 +3078,7 @@ export default function App() {
   // time a launch argument changed.
   const launchCompanion = useCallback(
     () =>
-      checkInstalledClis().then((installed) =>
+      checkDesktopClis().then((installed) =>
         startCompanion({
           projects: companionProjectsRef.current,
           installed: (bin) => Boolean(installed[bin]),

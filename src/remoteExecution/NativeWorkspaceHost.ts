@@ -22,6 +22,22 @@ for(const command of ['chrome_extension_token_status','chrome_extension_token_se
 // (it answered "does not support notes_create"). Attaching a file stays with the
 // workspace: its path names a workspace file this computer cannot read.
 for(const command of ['notes_list','notes_due','notes_get','notes_create','notes_update','notes_add_attachment','notes_set_status','notes_link','notes_read_file','notes_read_image','notes_dir','notes_remind','notes_search','notes_delete'])LOCAL_UI.add(command);
+// The companion floats over the app and belongs to no project, so its CLI runs
+// on the computer showing the IDE in every mode. Its canopy_* tools reach the
+// desktop's context bridge, which publishes ops to this window and waits for
+// the answer; the answers then act on the workspace through this host.
+export const COMPANION_DESKTOP_COMMANDS=['companion_spawn','companion_write','companion_kill','companion_status','companion_store_read','companion_store_write','companion_save_attachment','companion_dispatch_origin','companion_open_requests','context_publish','context_remove','context_tools','context_agent_spawn_ready','browser_result','webview_snapshot'] as const;
+for(const command of COMPANION_DESKTOP_COMMANDS)LOCAL_UI.add(command);
+// The bridge's requests to this window, and the companion's replies.
+export const COMPANION_DESKTOP_EVENTS=['agent:ui','agent:action','agent:browser','companion:reply'] as const;
+// The signed-in account, crash reports and the remote portal belong to this
+// computer; the workspace has none of them.
+for(const command of ['canopy_account_request','report_crash','send_crash','crash_issue_draft','file_crash_issue','remote_status','remote_enable','remote_disable','remote_qr','remote_rotate_pin','remote_socket_metrics'])LOCAL_UI.add(command);
+/** Whether a command runs on the computer showing the IDE in remote mode. */
+export const isDesktopLocal=(command:string)=>LOCAL_UI.has(command);
+/** A channel made for this host. Workspace streams call `onmessage` directly;
+ * a desktop command gets a native channel forwarding to it. */
+class WorkspaceChannel<T> implements HostChannel<T>{onmessage:(message:T)=>void=()=>{};}
 // Recovery reads share routes with background polls; they must not wait in that lane.
 const INTERACTIVE=1;
 const quote = (value: string) => `'${value.replaceAll("'", "'\\''")}'`;
@@ -119,7 +135,12 @@ export class NativeWorkspaceHost implements Host {
     const meta=this.metadata[String(session.id)] ?? {};
     return {id:session.id,session_generation:session.id,pid:null,cwd:meta.cwd??'/workspace',title:meta.title??session.title,name:meta.name,cols:session.cols,rows:session.rows,kind:'desktop',project_id:meta.projectId??`remote-${this.connection.workspaceId}`,run:meta.run??session.kind==='build',command:meta.command,run_command_id:meta.runCommandId,generation:1,replay_start:0,replay_end:0};
   }
-  private async desktopCall<T>(command:string,args:Args={}){if(this.disposed)throw Error('Workspace disconnected');const result=await this.desktop.invoke<T>(command,args);if(this.disposed)throw Error('Workspace disconnected');return result;}
+  private desktopArgs(args:Args){
+    let out=args;
+    for(const [key,value] of Object.entries(args))if(value instanceof WorkspaceChannel){const channel=this.desktop.channel<unknown>();channel.onmessage=message=>value.onmessage(message);out={...out,[key]:channel};}
+    return out;
+  }
+  private async desktopCall<T>(command:string,args:Args={}){if(this.disposed)throw Error('Workspace disconnected');const result=await this.desktop.invoke<T>(command,this.desktopArgs(args));if(this.disposed)throw Error('Workspace disconnected');return result;}
   private async native<T>(command: string,args: Args={},priority?: number) {
     const result=await this.call<{result:T}>('/native',{command,args},priority);return result.result;
   }
@@ -311,9 +332,10 @@ export class NativeWorkspaceHost implements Host {
   }
   async listen<T>(event:string,handler:(event:HostEvent<T>)=>void):Promise<UnlistenFn>{
     if(this.disposed)throw Error('Workspace disconnected');
-    if(['remote:upload-progress','menu','deep-link','memory:pressure','window:fullscreen','clipboard:changed','clipboard:blocked','dictation:progress','dictation:partial','dictation:level'].includes(event)){const release=await this.desktop.listen<T>(event,value=>{if(!this.disposed)handler(value);});if(this.disposed){release();return()=>{};}const cancel=()=>{this.desktopListeners.delete(cancel);release();};this.desktopListeners.add(cancel);return cancel;}
+    if(['remote:upload-progress','menu','deep-link','memory:pressure','window:fullscreen','clipboard:changed','clipboard:blocked','dictation:progress','dictation:partial','dictation:level',...COMPANION_DESKTOP_EVENTS].includes(event)){const release=await this.desktop.listen<T>(event,value=>{if(!this.disposed)handler(value);});if(this.disposed){release();return()=>{};}const cancel=()=>{this.desktopListeners.delete(cancel);release();};this.desktopListeners.add(cancel);return cancel;}
     const list=this.listeners.get(event)??new Set();this.listeners.set(event,list);list.add(handler as (event:HostEvent<unknown>)=>void);this.beginPoll();return ()=>{list.delete(handler as (event:HostEvent<unknown>)=>void);};
   }
-  channel<T>():HostChannel<T>{return {onmessage:()=>{}};}
+  channel<T>():HostChannel<T>{return new WorkspaceChannel<T>();}
+  invokeDesktop<T>(command:string,args:Args={}):Promise<T>{return this.desktopCall<T>(command,args);}
   dispose(){this.disposed=true;this.harness?.stop();this.harness=undefined;for(const release of [...this.desktopListeners]){try{release();}catch{/* Disposed handlers stay inert even if native teardown fails. */}}this.desktopListeners.clear();window.removeEventListener('canopy:account-changed',this.onAccountChanged);clearTimeout(this.heartbeat);for(const input of this.inputs.values())input.dispose();this.inputs.clear();clearTimeout(this.poll);for(const id of this.streams.keys())this.detach(id);this.listeners.clear();}
 }

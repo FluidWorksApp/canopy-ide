@@ -16,6 +16,7 @@ vi.mock("./ipc", () => ({
 vi.mock("./companion", () => ({
   actionPolicy: () => "confirm",
   companionCli: () => ({ id: "codex", name: "Codex", bin: "codex" }),
+  companionLaunchRoots: () => [],
   companionModelForCli: () => "",
   companionSessionId: () => "session-1",
   forgetCompanionSession: () => {},
