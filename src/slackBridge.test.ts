@@ -240,7 +240,7 @@ describe("a request handed to an agent", () => {
       await vi.waitFor(() => expect(deps.ack).toHaveBeenCalled());
       vi.advanceTimersByTime(HOLD_LIMIT_MS);
       await bridge.idle();
-      expect(deps.reply).toHaveBeenCalledWith("item-0006", "I've asked Fern.");
+      expect(deps.reply).toHaveBeenCalledWith("item-0006", "I've asked Fern.\n\n(No answer came back from the agent in time.)");
       expect(bridge.followUp("slack:item-0006", "late", "late", "Fern")).toBe(false);
     } finally {
       vi.useRealTimers();

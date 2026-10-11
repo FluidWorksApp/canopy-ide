@@ -158,7 +158,7 @@ export function createSlackBridge(deps: SlackBridgeDeps) {
         if (!h) return;
         held.delete(item.id);
         queue = queue.then(async () => {
-          await quietly("reply", deps.reply(item.id, h.answer));
+          await quietly("reply", deps.reply(item.id, `${h.answer}\n\n(No answer came back from the agent in time.)`));
         });
       }, HOLD_LIMIT_MS);
       held.set(item.id, { item, answer, rounds, timer });
