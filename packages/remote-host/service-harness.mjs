@@ -5,11 +5,12 @@ import {serviceMountSource} from './service-mount.mjs';
 const unavailable=(reason,message)=>({available:false,reason,message});
 const REQUEST_ID=/^[a-zA-Z0-9:-]{8,128}$/;
 export class ServiceHarness{
- constructor({admin,config,controlPlane,tokenFor,inspect,listSessions,now=Date.now,log=message=>console.warn(message),intervalMs=30_000,accessIntervalMs=60_000,relayIntervalMs=60_000}){
-  Object.assign(this,{admin,config,controlPlane,tokenFor,inspect,listSessions,now,log,intervalMs,accessIntervalMs,relayIntervalMs});
-  this.workspaces=new Map(); // id -> {runnerUrl, runnerToken, registeredAt, accessAt, relayAt, hostRegistered, state}
+ constructor({admin,config,controlPlane,tokenFor,inspect,listSessions,now=Date.now,log=message=>console.warn(message),intervalMs=30_000,accessIntervalMs=60_000,relayIntervalMs=60_000,accessBackoffMs=15*60_000}){
+  Object.assign(this,{admin,config,controlPlane,tokenFor,inspect,listSessions,now,log,intervalMs,accessIntervalMs,relayIntervalMs,accessBackoffMs});
+  this.workspaces=new Map(); // id -> {runnerUrl, runnerToken, registeredAt, accessAt, accessRetryAt, relayAt, hostRegistered, state}
   this.terminals=new Map();  // `${ws}\n${requestId}` -> {workspaceId, requestId, sessionId}
   this.states=new Map();     // id -> availability report
+  this.refreshFailures=new Map(); // `${ws}\n${kind}` -> last logged refresh failure
  }
  workspace(id){return this.config.workspaces.find(w=>w.id===id);}
  eligible(workspace){return !!workspace&&!workspace.memberId&&!workspace.parentWorkspaceId;}
@@ -46,6 +47,7 @@ export class ServiceHarness{
   const known=this.workspaces.delete(id);
   for(const [key,entry] of this.terminals)if(entry.workspaceId===id)this.terminals.delete(key);
   this.states.delete(id);
+  for(const key of this.refreshFailures.keys())if(key.startsWith(`${id}\n`))this.refreshFailures.delete(key);
   if(known)await this.admin.deregisterWorkspace(id).catch(error=>this.log(`Canopy service deregistration failed for ${id}: ${error.message}`));
  }
  /** Mint a terminal credential before the runner spawns. null = degrade. */
@@ -84,20 +86,22 @@ export class ServiceHarness{
   const live=new Set(sessions.filter(s=>s?.exitCode==null).map(s=>s.id));
   for(const entry of [...this.terminals.values()])if(entry.workspaceId===workspaceId&&entry.sessionId!=null&&!live.has(entry.sessionId))await this.revoke(workspaceId,entry.requestId);
  }
+ refreshFailed(id,kind,message){const key=`${id}\n${kind}`;if(this.refreshFailures.get(key)===message)return;this.refreshFailures.set(key,message);this.log(message);}
  async refreshAuthority(workspace,{force=false}={}){
   const entry=this.workspaces.get(workspace.id);if(!entry||!this.controlPlane||this.config.managedSession?.workspaceId!==workspace.id)return;
   const at=this.now();
   if(force||!entry.relayAt||at-entry.relayAt>=this.relayIntervalMs){
-   try{await this.controlPlane.writeRelayCredential(workspace);entry.relayAt=at;}catch(error){this.log(`Relay credential refresh failed: ${error.message}`);}
+   try{await this.controlPlane.writeRelayCredential(workspace);entry.relayAt=at;this.refreshFailures.delete(`${workspace.id}\nrelay`);}catch(error){this.refreshFailed(workspace.id,'relay',`Relay credential refresh failed: ${error.message}`);}
   }
   // The control plane issues no snapshot until this host's device is registered.
   if(!entry.hostRegistered){
    try{await this.controlPlane.registerHost(workspace,await this.admin.device());entry.hostRegistered=true;}
    catch(error){this.log(`Host device registration failed: ${error.message}`);}
   }
-  if(force||!entry.accessAt||at-entry.accessAt>=this.accessIntervalMs){
-   try{await this.admin.putAccess(workspace.id,await this.controlPlane.accessSnapshot(workspace));entry.accessAt=at;}
-   catch(error){this.log(`Access snapshot refresh failed for ${workspace.id}: ${error.message}`);}
+  // A 503 means the control plane has access snapshots switched off; ask rarely.
+  if(force||(!(entry.accessRetryAt>at)&&(!entry.accessAt||at-entry.accessAt>=this.accessIntervalMs))){
+   try{await this.admin.putAccess(workspace.id,await this.controlPlane.accessSnapshot(workspace));entry.accessAt=at;entry.accessRetryAt=undefined;this.refreshFailures.delete(`${workspace.id}\naccess`);}
+   catch(error){if(error.status===503)entry.accessRetryAt=at+this.accessBackoffMs;this.refreshFailed(workspace.id,'access',`Access snapshot refresh failed for ${workspace.id}: ${error.message}`);}
   }
  }
  /** Periodic: deregister stopped runtimes, heal a restarted service, refresh

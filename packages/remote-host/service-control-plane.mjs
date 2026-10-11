@@ -40,7 +40,7 @@ export function serviceControlPlane(config,{fetchImpl=fetch,now=Date.now,timeout
    if(!snapshotUrl)throw Error('Access snapshots are not configured');
    const url=new URL(snapshotUrl);url.searchParams.set('workspace',workspace.id);
    const response=await fetchImpl(url.href,{headers:{authorization:'Bearer '+hostCredential(managed,'workspace-access-snapshot',workspace,{now})},redirect:'error',signal:AbortSignal.timeout(timeoutMs)});
-   if(!response.ok){await response.body?.cancel();throw Error(`Access snapshot refused (${response.status})`);}
+   if(!response.ok){await response.body?.cancel();throw Object.assign(Error(`Access snapshot refused (${response.status})`),{status:response.status});}
    const snapshot=await boundedJson(response,65536);
    if(!snapshot||typeof snapshot!=='object'||Array.isArray(snapshot))throw Error('Invalid access snapshot');
    return snapshot;

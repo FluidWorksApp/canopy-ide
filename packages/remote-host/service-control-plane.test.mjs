@@ -31,7 +31,7 @@ test('snapshots and host registration go to the control-plane origin with their 
  assert.deepEqual(JSON.parse(requests[1].options.body),{action:'register-host',deviceId:'dev',keys:{agreement:{kty:'EC'},signing:{kty:'EC'}},workspaceIds:['ws-a']});
  assert.equal(claimsOf(requests[1].options.headers.authorization.slice(7)).kind,'peer-host-registration');
  const denied=serviceControlPlane({managedSession:managed},{fetchImpl:async()=>new Response('{}',{status:403})});
- await assert.rejects(denied.accessSnapshot(workspace),/refused \(403\)/);
+ await assert.rejects(denied.accessSnapshot(workspace),error=>error.message==='Access snapshot refused (403)'&&error.status===403);
  const huge=serviceControlPlane({managedSession:managed},{fetchImpl:async()=>new Response('x'.repeat(70000),{status:200})});
  await assert.rejects(huge.accessSnapshot(workspace),/too large/);
  assert.equal(serviceControlPlane({}),undefined);
