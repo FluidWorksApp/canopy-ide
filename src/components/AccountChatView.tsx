@@ -1,11 +1,13 @@
-import {useEffect,useId,useLayoutEffect,useMemo,useRef,useState,useSyncExternalStore,type DragEvent} from 'react';
+import {useEffect,useId,useLayoutEffect,useMemo,useRef,useState,useSyncExternalStore,type DragEvent,type MouseEvent} from 'react';
 import {teamSession,type DeliveryState,type AttachmentState,type TeamSession} from '../teamMessaging/session';
 import type {Attachment,ChatMessage} from '../teamMessaging/client';
 import {formatBytes} from '../teamMessaging/files';
 import {MAX_ATTACHMENTS,MAX_ATTACHMENT_BYTES} from '../teamMessaging/messageSchema';
 import {showConversation} from '../teamMessaging/unread';
 import {Button} from './ui';
-import {DocumentIcon,DownloadIcon,InfoIcon,LockIcon,SendIcon} from './icons';
+import {CheckIcon,CopyIcon,DocumentIcon,DownloadIcon,InfoIcon,LockIcon,SendIcon} from './icons';
+import {ContextMenu,useContextMenu,type MenuItem} from './ContextMenu';
+import {registerSelectAll} from '../selectAll';
 import {isSendKey} from './chatComposerKeys';
 import './teamHub.css';
 import {LinkifiedText} from './LinkifiedText';
@@ -16,6 +18,8 @@ const GROUP_MS=5*60_000;
 const MAX_LINES=6;
 /** How close to the newest message counts as having it in view. */
 const READ_SLACK_PX=48;
+/** How long a copy button shows that it copied. */
+const COPIED_MS=1500;
 const STORAGE_NOTE='End-to-end encrypted. Pending deliveries survive restarting the IDE and expire after five minutes. The latest 500 messages per team are saved encrypted on this device. Files go directly between devices and are never uploaded: the sender\'s device keeps them for 7 days, yours for 30.';
 /** Images up to this size are pulled and previewed without a click. */
 const AUTO_IMAGE_BYTES=10*1024*1024;
@@ -104,6 +108,19 @@ export function AccountChatView({conversation,active=true}:{conversation:Account
  }
  const act=(work:()=>unknown)=>{try{void Promise.resolve(work()).catch(()=>{});}catch{/* the message status already shows the failure */}};
  const senderName=(id:string)=>id===userId?'You':members[id]||(peer?name:`Former member (${id.slice(0,8)})`);
+ const menu=useContextMenu(),[copied,setCopied]=useState<string>(),copiedTimer=useRef<number>(undefined);
+ useEffect(()=>()=>window.clearTimeout(copiedTimer.current),[]);
+ const copy=(text:string,id:string)=>void navigator.clipboard.writeText(text).then(()=>{setCopied(id);window.clearTimeout(copiedTimer.current);copiedTimer.current=window.setTimeout(()=>setCopied(undefined),COPIED_MS);}).catch(()=>{});
+ // Select All inside the transcript selects the conversation, not the app.
+ useEffect(()=>{const el=log.current;return el?registerSelectAll(el,()=>window.getSelection()?.selectAllChildren(el)):undefined;},[]);
+ const transcriptMenu=(e:MouseEvent<HTMLDivElement>)=>{
+  const sel=window.getSelection(),picked=sel&&!sel.isCollapsed&&log.current?.contains(sel.anchorNode)?sel.toString():'';
+  const id=(e.target as HTMLElement).closest<HTMLElement>('[data-message]')?.dataset.message,text=visible.find(m=>m.id===id)?.text;
+  const items:MenuItem[]=[];
+  if(picked.trim())items.push({label:'Copy',onClick:()=>copy(picked,'selection')});
+  if(id&&text)items.push({label:'Copy message',onClick:()=>copy(text,id)});
+  if(items.length)menu.open(e,items);
+ };
  const hasFiles=(e:DragEvent)=>[...e.dataTransfer.types].includes('Files');
  return <section className={`account-chat${dropping?' is-dropping':''}`} aria-label={`Chat with ${name}`}
   onDragOver={e=>{if(!hasFiles(e))return;e.preventDefault();setDropping(true);}} onDragLeave={e=>{if(e.currentTarget===e.target)setDropping(false);}}
@@ -114,7 +131,7 @@ export function AccountChatView({conversation,active=true}:{conversation:Account
    <small role="status" className={`account-chat-status${connected?' is-connected':''}`} title={status}>{connected?<><LockIcon size={12}/>Encrypted</>:status}</small>
    <span className="account-chat-info" tabIndex={0} role="img" aria-label={STORAGE_NOTE} title={STORAGE_NOTE}><InfoIcon size={14}/></span>
   </header>
-  <div className="account-chat-transcript" role="log" aria-label="Messages" ref={log}>
+  <div className="account-chat-transcript" role="log" aria-label="Messages" ref={log} tabIndex={-1} onContextMenu={transcriptMenu}>
    {!visible.length&&<div className="account-chat-empty"><LockIcon size={16}/><p>Say hello to {name}. Messages are end-to-end encrypted.</p></div>}
    {visible.map((m,i)=>{
     const prev=visible[i-1],own=m.sender===userId;
@@ -125,7 +142,8 @@ export function AccountChatView({conversation,active=true}:{conversation:Account
     const receipt=state?DELIVERY_LABEL[state]:delivered&&m.id===lastOwn?'Delivered':'';
     return <div key={m.id} className={`account-chat-row${own?' own':''}`}>
      {newDay&&<div className="account-chat-day" role="separator"><span>{dayLabel(m.created)}</span></div>}
-     <article className={`account-chat-msg${own?' own':''}${grouped?' grouped':''}${pending?' pending':''}${failed?' failed':''}`} data-delivery={delivered?'delivered':state}>
+     <article className={`account-chat-msg${own?' own':''}${grouped?' grouped':''}${pending?' pending':''}${failed?' failed':''}`} data-delivery={delivered?'delivered':state} data-message={m.id}>
+      {m.text&&<button type="button" className={`account-chat-copy${copied===m.id?' is-copied':''}`} aria-label={copied===m.id?'Copied':'Copy message'} title={copied===m.id?'Copied':'Copy message'} onMouseDown={e=>e.preventDefault()} onClick={()=>copy(m.text,m.id)}>{copied===m.id?<><CheckIcon size={12}/>Copied</>:<CopyIcon size={12}/>}</button>}
       {!grouped&&<header><strong>{senderName(m.sender)}</strong><time dateTime={new Date(m.created).toISOString()}>{time(m.created)}</time></header>}
       {m.text&&<p title={time(m.created)}><LinkifiedText text={m.text}/></p>}
       {m.attachments?.map(file=><AttachmentChip key={file.id} session={session} message={m} file={file} own={own} state={attachments[file.id]} sender={senderName(m.sender)}/>)}
@@ -134,6 +152,7 @@ export function AccountChatView({conversation,active=true}:{conversation:Account
     </div>;
    })}
   </div>
+  {menu.menu&&<ContextMenu x={menu.menu.x} y={menu.menu.y} items={menu.menu.items} onClose={menu.close}/>}
   <form className="account-chat-composer" onSubmit={e=>{e.preventDefault();void send();}}>
    {error&&<p role="alert">{error}</p>}
    {files.length>0&&<ul className="account-chat-pending" aria-label="Attachments">{files.map((f,i)=><li key={`${f.name}:${i}`}><span title={f.name}>{f.name}</span> · {formatBytes(f.size)}<button type="button" aria-label={`Remove ${f.name}`} onClick={()=>setFiles(current=>current.filter((_,j)=>j!==i))}>×</button></li>)}</ul>}

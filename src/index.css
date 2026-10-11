@@ -15416,7 +15416,8 @@ textarea,
 .docx-body,
 .json-view,
 .sheet-view,
-.notebook {
+.notebook,
+.account-chat-transcript {
   -webkit-user-select: text;
   user-select: text;
   cursor: auto;
