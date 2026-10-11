@@ -1,4 +1,4 @@
-import {hibernateWorkspaceProjects,type HibernateProgressListener} from './remoteExecution/hibernateWorkspace';
+import {hibernateWorkspaceProjects,type ConfirmOthers,type HibernateProgressListener} from './remoteExecution/hibernateWorkspace';
 import {activeWorkspace} from './remoteExecution/workspace';
 import {startBackgroundTeams} from "./teamMessaging/background";
 import {startTeamMessageNotifications} from "./teamMessaging/notifications";
@@ -1837,7 +1837,7 @@ export default function App() {
     [notify, update, stopIfNoProjects],
   );
 
-  const hibernateWorkspace = useCallback(async (onProgress?:HibernateProgressListener) => {
+  const hibernateWorkspace = useCallback(async (onProgress?:HibernateProgressListener,confirmOthers?:ConfirmOthers) => {
     if(workspaceHibernationBatch.current)throw Error("Workspace hibernation is already running.");
     workspaceHibernationBatch.current=true;
     workspaceHibernationEpoch.current++;
@@ -1862,7 +1862,7 @@ export default function App() {
         window.addEventListener(HIBERNATED_EVENT, listener);
         window.dispatchEvent(new CustomEvent(HIBERNATE_EVENT, {detail: {projectId: id}}));
       });
-    }, id => releaseProjectRef.current(id, [],()=>!workspaceHibernationBatch.current||workspaceHibernationEpoch.current!==batchEpoch), () => ids.length===wsRef.current.openIds.length && ids.every(id=>wsRef.current.openIds.includes(id)&&isHibernating(id)),onProgress);
+    }, id => releaseProjectRef.current(id, [],()=>!workspaceHibernationBatch.current||workspaceHibernationEpoch.current!==batchEpoch), () => ids.length===wsRef.current.openIds.length && ids.every(id=>wsRef.current.openIds.includes(id)&&isHibernating(id)),onProgress,confirmOthers);
     notify('Workspace hibernated. Compute is stopped; wake a project to resume it.', 'success');
     } finally {workspaceHibernationBatch.current=false;}
   }, [notify]);

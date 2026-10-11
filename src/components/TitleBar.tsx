@@ -1,4 +1,4 @@
-import type {HibernateProgressListener} from '../remoteExecution/hibernateWorkspace';
+import type {ConfirmOthers,HibernateProgressListener} from '../remoteExecution/hibernateWorkspace';
 import { WorkspaceSelector } from "../remoteExecution/WorkspaceSelector";
 import {
   memo,
@@ -91,7 +91,7 @@ interface TitleBarProps {
   onSelectProject: (id: string) => void;
   onCloseProject: (id: string) => void;
   onHibernateProject: (id: string) => void;
-  onHibernateWorkspace?: (onProgress?:HibernateProgressListener) => Promise<void>;
+  onHibernateWorkspace?: (onProgress?:HibernateProgressListener,confirmOthers?:ConfirmOthers) => Promise<void>;
   onWakeProject: (id: string) => void;
   onToggleVibe: (id: string) => void;
   onEditProject: (p: Project) => void;

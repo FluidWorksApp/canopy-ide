@@ -113,3 +113,11 @@ export function takeStopSwitchNotice(now=Date.now()):StopSwitchNotice|null{
  }catch{return null;}
 }
 export function dismissStopSwitchNotice(){try{localStorage.removeItem(noticeKey);}catch{/* Optional. */}}
+/** A member's own session stop: the workspace keeps running, so nothing is followed. */
+const memberStopKey='canopy:workspace-member-stop:v1';
+export function saveMemberStopNotice(name:string){try{localStorage.setItem(memberStopKey,JSON.stringify({name,at:Date.now()}));}catch{/* Optional. */}}
+export function takeMemberStopNotice(now=Date.now()):string|null{
+ try{const raw=localStorage.getItem(memberStopKey);if(!raw)return null;localStorage.removeItem(memberStopKey);const notice=JSON.parse(raw) as {name?:unknown;at?:unknown};
+  return typeof notice?.name==='string'&&typeof notice.at==='number'&&now-notice.at<STOP_WATCH_LIMIT_MS?notice.name:null;
+ }catch{return null;}
+}

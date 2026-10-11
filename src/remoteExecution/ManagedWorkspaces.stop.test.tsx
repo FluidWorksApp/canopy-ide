@@ -113,3 +113,24 @@ it('restores the live connection when a connected stop is rejected',async()=>{
  expect(mocks.switchMode).not.toHaveBeenCalled();
  expect(takeStopSwitchNotice()).toBeNull();
 });
+
+it('asks before stopping other connected people and resends with confirmOthers and a new request key',async()=>{
+ const server=setup();let stops=0;server.stop=async()=>{if(++stops===1)throw JSON.stringify({error:'Other people are connected to this workspace. Hibernating stops their sessions too.',code:'others-connected',others:2,status:409});return {accepted:true};};
+ render(<ManagedWorkspaces/>);await act(async()=>{});
+ await requestStop();
+ expect(screen.getByText('2 other people are connected. Hibernating stops their sessions too.')).toBeTruthy();
+ expect(screen.queryByText(/"code"/)).toBeNull();
+ fireEvent.click(screen.getByRole('button',{name:'Hibernate anyway'}));await act(async()=>{});
+ const calls=mocks.invoke.mock.calls.filter(([,args])=>args?.body?.action==='hibernate').map(([,args])=>args);
+ expect(calls).toHaveLength(2);expect(calls[0].body).not.toHaveProperty('confirmOthers');expect(calls[0].detailedErrors).toBe(true);
+ expect(calls[1].body).toEqual(expect.objectContaining({confirmOthers:true,confirmInterrupt:true}));expect(calls[1].body.requestKey).not.toBe(calls[0].body.requestKey);
+ expect(badge()).toBe('Stopping…');
+});
+it('a member is never offered a workspace stop',async()=>{
+ setup();const original=mocks.invoke.getMockImplementation()!;
+ mocks.invoke.mockImplementation(async(command,args)=>{const result=await original(command,args);return args?.route==='/api/workspaces'?{workspaces:result.workspaces.map((w:object)=>({...w,canDelete:false,access:{owner:false,canManageAccess:false,canStop:true,canConnect:true}}))}:result;});
+ render(<ManagedWorkspaces/>);await act(async()=>{});
+ const more=screen.queryByLabelText('More actions for Machine Works');if(more)fireEvent.click(more);
+ expect(screen.queryByRole('button',{name:/Stop workspace/})).toBeNull();
+ expect(mocks.invoke.mock.calls.some(([,args])=>args?.body?.action==='hibernate')).toBe(false);
+});

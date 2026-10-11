@@ -90,6 +90,7 @@ fn account_http_client() -> Result<&'static reqwest::Client, String> {
 pub async fn canopy_account_request(
     route: String,
     body: Option<serde_json::Value>,
+    detailed_errors: Option<bool>,
 ) -> Result<serde_json::Value, String> {
     if !matches!(
         route.as_str(),
@@ -130,6 +131,17 @@ pub async fn canopy_account_request(
     let mut value: serde_json::Value =
         serde_json::from_slice(&bytes).map_err(|_| "Canopy returned an invalid response")?;
     if !status.is_success() {
+        // Opt-in callers branch on a machine-readable code (e.g. a 409 that
+        // needs confirmation); everyone else keeps the plain message.
+        if detailed_errors == Some(true) {
+            if let Some(object) = value.as_object_mut() {
+                object.insert("status".into(), status.as_u16().into());
+                if !object.get("error").is_some_and(|v| v.is_string()) {
+                    object.insert("error".into(), "Account request failed".into());
+                }
+                return Err(value.to_string());
+            }
+        }
         return Err(value
             .get("error")
             .and_then(|v| v.as_str())
