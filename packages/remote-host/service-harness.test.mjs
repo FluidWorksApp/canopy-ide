@@ -81,3 +81,38 @@ test('reconcile deregisters a stopped runtime, heals a restarted service, refres
  assert.deepEqual(admin.calls.at(-1),['deregister','alice']);
  assert.equal(harness.workspaces.size,0);
 });
+
+const settle=()=>new Promise(resolve=>setImmediate(resolve));
+test('a relay refresh failure is logged when it starts or changes, not on every retry',async()=>{
+ const logs=[];let relayError='ENOENT: no such file or directory, mkdir \'/run/canopy-relay/alice\'',writes=0;
+ const controlPlane={writeRelayCredential:async()=>{writes++;if(relayError)throw Error(relayError);},accessSnapshot:async()=>({payload:'p',signature:'s'}),registerHost:async()=>{}};
+ const harness=make(fakeAdmin(),{controlPlane,log:m=>logs.push(m),accessIntervalMs:0,relayIntervalMs:0}),workspace=config.workspaces[0];
+ await harness.attach(workspace,runtime);await settle();
+ for(let i=0;i<3;i++)await harness.refreshAuthority(workspace);
+ assert.equal(writes,4,'a failing refresh keeps retrying');
+ assert.deepEqual(logs,['Relay credential refresh failed: ENOENT: no such file or directory, mkdir \'/run/canopy-relay/alice\'']);
+ relayError='EACCES: permission denied';await harness.refreshAuthority(workspace);await harness.refreshAuthority(workspace);
+ assert.equal(logs.length,2,'a changed message logs again');
+ relayError=null;await harness.refreshAuthority(workspace);
+ relayError='EACCES: permission denied';await harness.refreshAuthority(workspace);
+ assert.equal(logs.length,3,'failing again after a success logs again');
+});
+
+test('access snapshots switched off on the control plane (503) log once and back off',async()=>{
+ const logs=[];let clock=0,status=503,asked=0;
+ const controlPlane={writeRelayCredential:async()=>{},registerHost:async()=>{},accessSnapshot:async()=>{asked++;if(status)throw Object.assign(Error(`Access snapshot refused (${status})`),{status});return {payload:'p',signature:'s'};}};
+ const harness=make(fakeAdmin(),{controlPlane,now:()=>clock,log:m=>logs.push(m),accessIntervalMs:60_000,accessBackoffMs:900_000}),workspace=config.workspaces[0];
+ await harness.attach(workspace,runtime);await settle();
+ assert.equal(asked,1);
+ for(clock=60_000;clock<900_000;clock+=60_000)await harness.refreshAuthority(workspace);
+ assert.equal(asked,1,'not retried before the backoff elapses');
+ clock=900_000;await harness.refreshAuthority(workspace);
+ assert.equal(asked,2,'retried after it');
+ assert.deepEqual(logs,['Access snapshot refresh failed for alice: Access snapshot refused (503)']);
+ status=0;clock=1_800_000;await harness.refreshAuthority(workspace);assert.equal(asked,3);
+ clock=1_860_000;await harness.refreshAuthority(workspace);assert.equal(asked,4,'a success resumes the normal cadence');
+ status=500;
+ for(let i=0;i<3;i++){clock+=60_000;await harness.refreshAuthority(workspace);}
+ assert.equal(asked,7,'any other failure keeps the normal cadence');
+ assert.deepEqual(logs.slice(1),['Access snapshot refresh failed for alice: Access snapshot refused (500)']);
+});
