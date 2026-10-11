@@ -54,7 +54,7 @@ button.team-row{cursor:pointer;}button.team-row:hover:not(:disabled){background:
 .account-chat-row.own{align-items:flex-end}
 .account-chat-day{align-self:stretch;display:flex;align-items:center;gap:var(--sp-2);margin:var(--sp-3) 0 var(--sp-1);font-size:var(--fs-xs);color:var(--text-muted)}
 .account-chat-day::before,.account-chat-day::after{content:"";flex:1;height:1px;background:var(--border)}
-.account-chat-msg{max-width:min(640px,80%);margin-top:var(--sp-2);padding:6px 10px;background:color-mix(in srgb,var(--text) 6%,transparent);border-radius:var(--r-md);border-top-left-radius:var(--r-xs)}
+.account-chat-msg{position:relative;max-width:min(640px,80%);margin-top:var(--sp-2);padding:6px 10px;background:color-mix(in srgb,var(--text) 6%,transparent);border-radius:var(--r-md);border-top-left-radius:var(--r-xs)}
 .account-chat-msg.grouped{margin-top:2px;border-top-left-radius:var(--r-md)}
 .account-chat-msg.own{background:color-mix(in srgb,var(--accent) 16%,transparent);border-radius:var(--r-md);border-top-right-radius:var(--r-xs)}
 .account-chat-msg.own.grouped{border-top-right-radius:var(--r-md)}
@@ -68,13 +68,20 @@ button.team-row{cursor:pointer;}button.team-row:hover:not(:disabled){background:
 .account-chat-msg time,.account-chat-msg small{font-size:10px;color:var(--text-muted)}
 .account-chat-msg small{display:block;text-align:right;margin-top:2px}
 .account-chat-msg p{margin:0;white-space:pre-wrap;overflow-wrap:anywhere;line-height:var(--lh-ui)}
+.account-chat-transcript:focus{outline:none}
+.account-chat-transcript :is(button,.account-chat-day,.account-chat-empty,small,.account-chat-file-size,.account-chat-file-state){-webkit-user-select:none;user-select:none}
+.account-chat-copy{position:absolute;top:-10px;inset-inline-end:6px;display:inline-flex;align-items:center;gap:3px;height:20px;padding:0 5px;border:1px solid var(--border);border-radius:var(--r-sm);background:var(--bg-raised);color:var(--text-muted);font:inherit;font-size:10px;cursor:pointer;opacity:0;transition:opacity var(--dur-fast) var(--ease-out)}
+.account-chat-msg:hover .account-chat-copy,.account-chat-copy:focus-visible,.account-chat-copy.is-copied{opacity:1}
+.account-chat-copy:hover{color:var(--text)}
+.account-chat-copy.is-copied{color:var(--accent)}
+.account-chat-copy:focus-visible{outline:1px solid var(--accent);outline-offset:1px}
 .account-chat-empty{margin:auto;display:flex;align-items:center;gap:var(--sp-2);color:var(--text-muted);font-size:var(--fs-sm)}
 .account-chat-empty p{margin:0}
 .account-chat-composer{padding:var(--sp-2) var(--sp-4) var(--sp-2);border-top:1px solid var(--border)}
 .account-chat-composer [role=alert]{margin:0 0 var(--sp-2);font-size:var(--fs-xs);color:var(--warn)}
 .account-chat-input{display:flex;align-items:flex-end;gap:var(--sp-1);padding:4px 4px 4px var(--sp-3);border:1px solid var(--border);border-radius:var(--r-md);background:var(--bg-raised);transition:border-color var(--dur-fast) var(--ease-out),box-shadow var(--dur-fast) var(--ease-out)}
 .account-chat-input:focus-within{border-color:var(--accent);box-shadow:var(--ring)}
-.account-chat-input textarea{flex:1;min-width:0;resize:none;border:0;outline:none;background:transparent;color:var(--text);font:inherit;line-height:20px;padding:3px 0;margin:0;overflow-y:auto;box-sizing:content-box;height:20px}
+.account-chat-input textarea{flex:1;min-width:0;resize:none;border:0;outline:none;background:transparent;color:var(--text);font:inherit;line-height:20px;padding:3px 0;margin:0;overflow-y:auto;box-sizing:border-box;height:26px;min-height:0}
 .account-chat-input .btn-icon{flex:none;width:26px;border-radius:var(--r-sm);background:var(--accent);color:var(--on-accent)}
 .account-chat-input .btn-icon:hover:not(:disabled){background:color-mix(in srgb,var(--accent) 88%,var(--text));color:var(--on-accent)}
 .account-chat-input .btn-icon:disabled{background:color-mix(in srgb,var(--text) 10%,transparent);color:var(--text-muted);cursor:not-allowed}
@@ -96,7 +103,7 @@ button.team-row{cursor:pointer;}button.team-row:hover:not(:disabled){background:
 .account-chat-pending button:hover{color:var(--text)}
 .account-chat-input .account-chat-attach.btn-icon{background:transparent;color:var(--text-muted);margin-left:calc(-1 * var(--sp-2));font-size:13px}
 .account-chat-input .account-chat-attach.btn-icon:hover:not(:disabled){background:color-mix(in srgb,var(--text) 8%,transparent);color:var(--text)}
-.account-chat-hint{display:block;margin-top:4px;font-size:10px;color:var(--text-muted)}
+.account-chat-hint{display:block;margin-top:4px;padding-inline-start:calc(1px + var(--sp-3) - var(--sp-2) + 26px + var(--sp-1));font-size:10px;color:var(--text-muted)}
 .account-chat-hint kbd{font-family:inherit;font-size:10px;padding:0 3px;border:1px solid var(--border);border-radius:3px}
 /* Unread messages: a count pill at the row's end and a bolder name. */
 .team-row.is-unread .team-row-text strong{font-weight:650;}

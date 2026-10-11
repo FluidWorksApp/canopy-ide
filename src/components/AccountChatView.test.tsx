@@ -191,3 +191,31 @@ it('renders links in team messages as clickable links',()=>{
   const link=screen.getByRole('link',{name:'https://claude.com/resources/webinars/x'});expect(link.getAttribute('href')).toBe('https://claude.com/resources/webinars/x');
  }finally{mock.snapshot.messages=previous;}
 });
+it('copies a message\'s full text from its Copy button and shows that it copied',async()=>{
+ const writeText=vi.fn(async(_text:string)=>{});
+ Object.defineProperty(navigator,'clipboard',{value:{writeText},configurable:true});
+ render(<AccountChatView conversation={channel}/>);
+ fireEvent.click(screen.getByRole('button',{name:'Copy message'}));
+ expect(writeText).toHaveBeenCalledWith('Hello team');
+ await waitFor(()=>expect(screen.getByRole('button',{name:'Copied'}).textContent).toBe('Copied'));
+});
+it('keeps the composer focused when a message is copied by mouse',()=>{
+ render(<AccountChatView conversation={channel}/>);
+ expect(fireEvent.mouseDown(screen.getByRole('button',{name:'Copy message'}))).toBe(false);
+});
+it('offers Copy message on right-click of a message',async()=>{
+ const writeText=vi.fn(async(_text:string)=>{});
+ Object.defineProperty(navigator,'clipboard',{value:{writeText},configurable:true});
+ render(<AccountChatView conversation={channel}/>);
+ fireEvent.contextMenu(screen.getByText('Hello team'));
+ const row=[...document.querySelectorAll<HTMLButtonElement>('.ctx-item')].find(b=>b.textContent==='Copy message');
+ expect(row).toBeTruthy();fireEvent.click(row!);
+ expect(writeText).toHaveBeenCalledWith('Hello team');
+});
+it('makes the transcript a selectable surface that Select All can target',()=>{
+ render(<AccountChatView conversation={channel}/>);
+ const log=screen.getByRole('log',{name:'Messages'});
+ expect(log.classList.contains('account-chat-transcript')).toBe(true);
+ expect(log.tabIndex).toBe(-1);
+ expect(screen.getByText('Hello team').closest('.account-chat-transcript')).toBe(log);
+});
