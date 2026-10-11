@@ -48,6 +48,7 @@ pub const SUPPORTED_TOOLS: &[&str] = &[
     "canopy_browser_type",
     "canopy_claim",
     "canopy_close_session",
+    "canopy_companion_reply",
     "canopy_component_files",
     "canopy_confirm",
     "canopy_definition",
