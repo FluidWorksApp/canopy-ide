@@ -44,6 +44,8 @@ import {hostStorage as createHostStorage} from './host-storage.mjs';
 import {ServiceAdmin} from './service-admin.mjs';
 import {ServiceHarness} from './service-harness.mjs';
 import {serviceControlPlane} from './service-control-plane.mjs';
+import {SlackCompanionHost} from './slack-companion.mjs';
+import {ContainerCompanionRunner} from './slack-companion-runner.mjs';
 import {harnessAction,harnessFailure,harnessQuery,pipeHarnessStream} from './service-routes.mjs';
 import {InputLedger,SocketInput,TERMINAL_INPUT_PROTOCOL,BINARY_TERMINAL_INPUT_PROTOCOL,forwardInput,inputKey,sequencedInput} from './terminal-input.mjs';
 
@@ -538,7 +540,11 @@ if (process.argv[1] === new URL(import.meta.url).pathname) {
   const sharingAttest=config.managedSession?new SharingAttest({config,host:workspaces,authorizeRuntime:authority}):undefined;
   const sharedCatalog=config.managedSession?new SharedCatalog({directory:path.join(state,'shared-catalog')}):undefined;
   const server = createGateway({ config, workspaces, harness, renewMember:memberRenewal(config), credentialVault, sharedAccounts, credentialTickets, sharingAttest, sharedCatalog, elasticMemory, elasticCpu, supervisor, authorizeMember:memberAuthority(config.managedSession?.authorizationUrl), authorizeRuntime:authority, origins: (process.env.CANOPY_HOST_ORIGINS ?? '').split(',').filter(Boolean) });
-  server.on('close', () => { elasticMemory.stop(); elasticCpu.stop(); });
+  // Slack answered from this workspace while the owner's desktop is offline
+  // (docs/slack-hub-protocol.md §7). Off unless the owner opted in.
+  const slackCompanion=config.managedSession?new SlackCompanionHost({config,controlPlane:serviceControlPlane(config),inspect:workspace=>workspaces.inspectRuntime(workspace),
+    createRunner:workspace=>new ContainerCompanionRunner({workspace,inspect:w=>workspaces.inspectRuntime(w),stateFile:path.join(state,'slack-companion',`${workspace.id}.json`)})}):null;
+  server.on('close', () => { elasticMemory.stop(); elasticCpu.stop(); slackCompanion?.close(); });
   if(process.env.CANOPY_RESOURCE_ADMISSION_LOCK)console.log('Canopy resource admission protocol '+RESOURCE_ADMISSION_PROTOCOL);
-  server.listen(Number(process.env.PORT ?? 8787), '127.0.0.1', () => { elasticMemory.start(); elasticCpu.start(); supervisor.start(); harness?.start(); console.log('Canopy remote host listening on loopback'); });
+  server.listen(Number(process.env.PORT ?? 8787), '127.0.0.1', () => { elasticMemory.start(); elasticCpu.start(); supervisor.start(); harness?.start(); slackCompanion?.start(); console.log('Canopy remote host listening on loopback'); });
 }
