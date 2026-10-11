@@ -270,7 +270,9 @@ signature before parsing. The daemon's verify keys are `{"<kid>":"<base64 raw
 (no auth) returns exactly that map, and
 `node scripts/access-signing-public-key.mjs` prints it from
 `CANOPY_ACCESS_SIGNING_KEY`/`CANOPY_ACCESS_SIGNING_KID` (website repo).
-`expiresAt - issuedAt` is 15 minutes; refresh every 5 minutes. `projects` is
+`expiresAt - issuedAt` is 15 minutes; refresh every 5 minutes. Each refresh
+is signed afresh, so an unchanged `revision` arrives with a new `issuedAt`
+and `expiresAt`; §7 says how the service accepts it. `projects` is
 `"all"` or the sorted project ids where a single grant allows
 `sessions:interact`. `revision` is `workspace.access_revision`, bumped by
 database triggers on every grant, team/organization membership, ownership,
@@ -322,9 +324,16 @@ What `canopy-serviced` does where the sections above leave a choice open.
   `claim_history` and `access` `get`. Actions need `actor`. A second `answer`
   gets 409 with the winning `resolution`.
 - **Access.** A bad signature, an unknown `kid`, or a different
-  `workspaceId`/`serviceDevice` gets 400. A lower revision, or the same
-  revision with a different payload, gets 409. Resending the same revision and
-  payload is idempotent. The snapshot is persisted in `ws/<ws>/access.json`.
+  `workspaceId`/`serviceDevice` gets 400. A lower revision gets 409. A higher
+  revision replaces the held snapshot. The control plane re-signs the same
+  revision on every refresh, so for an equal revision the service compares
+  the grant: every field except `issuedAt`, `expiresAt` and `kid`. A
+  different grant is equivocation and gets 409. The same grant with a later
+  `issuedAt` and a later `expiresAt` replaces the held snapshot, which is how
+  validity moves forward. Any other same-grant resend, including the
+  identical payload, an older issue or one that would not extend expiry,
+  answers 200 with the held revision and changes nothing. The snapshot is
+  persisted in `ws/<ws>/access.json`.
   With no snapshot, only the owner is delivered.
 - **Relay.** The service polls each registered workspace with that
   workspace's own credential. It trusts the poll row's `sender` keys only when

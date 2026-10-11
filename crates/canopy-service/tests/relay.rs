@@ -330,6 +330,17 @@ async fn relay_authority_matrix_dedupe_and_jobs() {
     .await;
     assert_eq!(status, 200, "{reply}");
     assert_eq!(reply["revision"], 2);
+    // The control plane's next refresh re-signs revision 2 later: accepted.
+    let mut refresh = snapshot(&host_id, 2, now() + DAY + 60_000, false);
+    refresh["issuedAt"] = (now() + 60_000).into();
+    let (status, reply) = access(signed(&signing_key, &refresh)).await;
+    assert_eq!(status, 200, "{reply}");
+    assert_eq!(reply["revision"], 2);
+    // Revision 2 granting something else: refused.
+    let mut equivocation = refresh.clone();
+    equivocation["issuedAt"] = (now() + 120_000).into();
+    equivocation["teamDelivery"] = true.into();
+    assert_eq!(access(signed(&signing_key, &equivocation)).await.0, 409);
     assert_eq!(
         access(signed(
             &signing_key,
