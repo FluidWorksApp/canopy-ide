@@ -1,10 +1,11 @@
 import {act,cleanup,fireEvent,render,screen,within} from '@testing-library/react';
 import {afterEach,beforeEach,expect,it,vi} from 'vitest';
-const mocks=vi.hoisted(()=>({invoke:vi.fn(),switchMode:vi.fn(),active:null as null|{connection:Record<string,unknown>;connectionClientId:string;client:{workspace:ReturnType<typeof vi.fn>};setProjectIdle:ReturnType<typeof vi.fn>}}));
+const mocks=vi.hoisted(()=>({invoke:vi.fn(),switchMode:vi.fn(),post:vi.fn(),active:null as null|{connection:Record<string,unknown>;connectionClientId:string;client:{workspace:ReturnType<typeof vi.fn>};setProjectIdle:ReturnType<typeof vi.fn>}}));
 vi.mock('@tauri-apps/api/core',()=>({invoke:mocks.invoke}));
 vi.mock('../executionMode',()=>({canSwitchExecutionMode:()=>true,setExecutionMode:mocks.switchMode}));
 vi.mock('./workspace',()=>({activeWorkspace:()=>mocks.active}));
 vi.mock('../links',()=>({openLink:vi.fn()}));
+vi.mock('../attention',()=>({postAttention:mocks.post}));
 vi.mock('./RemoteDesktop',()=>({RemoteDesktop:()=>null}));
 vi.mock('./LocalProjectImport',()=>({LocalProjectImport:()=>null}));
 vi.mock('../components/AccountSettings',()=>({AccountSettings:()=>null}));
@@ -127,4 +128,12 @@ it('owner hibernation answers the others prompt for the project workflow, and ca
  await act(async()=>{fireEvent.click(screen.getAllByRole('button',{name:/Hibernate workspace/}).at(-1)!);});
  await act(async()=>{fireEvent.click(screen.getByRole('button',{name:'Hibernate anyway'}));});
  expect(answers).toEqual([false,true]);
+});
+
+it('after the reload, the local workspace says the member session stopped once',async()=>{
+ localStorage.setItem('canopy:workspace-member-stop:v1',JSON.stringify({name:'Shared',at:Date.now()}));
+ render(<WorkspaceSelector/>);await act(async()=>{});
+ expect(mocks.post).toHaveBeenCalledOnce();
+ expect(mocks.post).toHaveBeenCalledWith(expect.objectContaining({kind:'fyi',tone:'success',title:'Your session stopped. Shared keeps running for its owner.'}));
+ expect(localStorage.getItem('canopy:workspace-member-stop:v1')).toBeNull();
 });

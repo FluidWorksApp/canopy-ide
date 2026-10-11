@@ -45,7 +45,8 @@ export function WorkspaceSelector({ onboarding = false,onHibernateWorkspace }: {
   const [othersPrompt,setOthersPrompt]=useState<{others:number;answer:(confirmed:boolean)=>void}|null>(null);
   const askOthers:ConfirmOthers=others=>new Promise(resolve=>setOthersPrompt({others,answer:resolve}));
   const member=!!active&&(isMemberConnection(active.connection)||managed.find(w=>w.id===active.connection.workspaceId)?.access?.owner===false);
-  useEffect(()=>{if(active)return;const name=takeMemberStopNotice();if(name)postAttention({kind:'fyi',tone:'success',source:'app',title:`Your session stopped. ${name} keeps running for its owner.`});},[]);
+  const [memberStopName]=useState(()=>active?null:takeMemberStopNotice());
+  useEffect(()=>{if(memberStopName)postAttention({kind:'fyi',tone:'success',source:'app',title:`Your session stopped. ${memberStopName} keeps running for its owner.`});},[memberStopName]);
   const [forgetConfirm,setForgetConfirm]=useState(false);
   const accountRemovalEpoch=useRef(0);
   const [accountRemoval,setAccountRemoval]=useState<ManagedWorkspace|null>(null),[accountRemovalName,setAccountRemovalName]=useState('');
