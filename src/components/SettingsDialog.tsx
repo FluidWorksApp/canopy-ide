@@ -51,7 +51,7 @@ import { drawWave } from "../waveStyles";
 import { useEscape, useEscapeLayer } from "../useEscape";
 import { TRACKERS, setTrackerKey, trackerKey } from "../trackers";
 import * as ipc from "../ipc";
-import { slackStatusChanged } from "../slackLive";
+import { SlackSettings } from "./SlackSettings";
 import { VaultSettings } from "./VaultSettings";
 import { PlaywrightTokenSetting } from "./PlaywrightTokenSetting";
 import { availableMonoFonts, fontLabel, fontStack } from "../fonts";
@@ -352,198 +352,107 @@ function CompanionSettings({
   const authority = COMPANION_AUTHORITIES.find((a) => a.id === s.companionAuthority);
 
   return (
-    <Item
-      name={`${name} as a companion`}
-      tag="Starts an agent"
-      desc={`A floating assistant across every project, with its own chat and session.`}
-    >
-      <Row>
-        <Switch
-          checked={s.companionEnabled}
-          onChange={(v) => patch({ companionEnabled: v })}
-          aria-label={`Enable ${name} as a companion`}
-        />
-        <span className="set-hint">
-          {s.companionEnabled
-            ? `Notices arrive from ${name}.${chosen ? ` ${tierNote(chosen.id)}` : ""}`
-            : "Off."}
-        </span>
-      </Row>
+    <>
+      <Item
+        name={`${name} as a companion`}
+        tag="Starts an agent"
+        desc={`A floating assistant across every project, with its own chat and session.`}
+      >
+        <Row>
+          <Switch
+            checked={s.companionEnabled}
+            onChange={(v) => patch({ companionEnabled: v })}
+            aria-label={`Enable ${name} as a companion`}
+          />
+          <span className="set-item-desc">
+            {s.companionEnabled
+              ? `Notices arrive from ${name}.${chosen ? ` ${tierNote(chosen.id)}` : ""}`
+              : "Off."}
+          </span>
+        </Row>
 
-      {s.companionEnabled && (
-        <>
-          <Row className="set-gap">
-            <Field label="Name">
-              <TextInput
-                width="sm"
-                value={s.companionName}
-                placeholder={mascotDef(s.mascot).label}
-                aria-label="Companion name"
-                onChange={(e) => patch({ companionName: e.target.value })}
-              />
-            </Field>
-            <Field label="Agent">
-              <Select
-                width="sm"
-                value={chosen?.id ?? ""}
-                aria-label="Companion agent"
-                onChange={(e) => patch({ companionCli: e.target.value, companionModel: "" })}
-              >
-                {usable.length === 0 && <option value="">None installed</option>}
-                {usable.map((c) => (
-                  <option key={c.id} value={c.id}>
-                    {c.name}
-                  </option>
-                ))}
-              </Select>
-            </Field>
-            <Field label="Model">
-              {models?.kind === "inline" ? (
+        {s.companionEnabled && (
+          <>
+            <Row className="set-gap">
+              <Field label="Name">
+                <TextInput
+                  width="sm"
+                  value={s.companionName}
+                  placeholder={mascotDef(s.mascot).label}
+                  aria-label="Companion name"
+                  onChange={(e) => patch({ companionName: e.target.value })}
+                />
+              </Field>
+              <Field label="Agent">
                 <Select
-                  width="md"
-                  value={s.companionModel}
-                  aria-label="Companion model"
-                  onChange={(e) => patch({ companionModel: e.target.value })}
+                  width="sm"
+                  value={chosen?.id ?? ""}
+                  aria-label="Companion agent"
+                  onChange={(e) => patch({ companionCli: e.target.value, companionModel: "" })}
                 >
-                  <option value="">{chosen?.name ?? "Agent"} default</option>
-                  {models.choices.map((m) => (
-                    <option key={m.id} value={m.id}>
-                      {m.label} — {m.hint}
+                  {usable.length === 0 && <option value="">None installed</option>}
+                  {usable.map((c) => (
+                    <option key={c.id} value={c.id}>
+                      {c.name}
                     </option>
                   ))}
                 </Select>
-              ) : (
-                // A CLI whose catalogue is per-account has no list Canopy can
-                // be right about (see agentModels.ts), so it is not offered one.
-                <span className="set-hint">{chosen ? "Chosen by the agent" : "—"}</span>
-              )}
-            </Field>
-            <Field label="It may">
-              <span className="set-inline">
-                <Segmented
-                  options={COMPANION_AUTHORITIES.map((a) => ({ id: a.id, label: a.label }))}
-                  value={s.companionAuthority}
-                  onChange={(id) => patch({ companionAuthority: id })}
-                  aria-label="What the companion may do"
-                />
-                <span className="set-hint">{authority?.note}</span>
-              </span>
-            </Field>
-            <Field label=" ">
-              <Button
-                onClick={() => {
-                  if (!chosen) return;
-                  forgetCompanionSession(chosen.id);
-                  clearRun(chosen.id);
-                  clearCompanionView();
-                  // Clearing only the conversation would leave a "new"
-                  // companion that still knows you.
-                  void forgetAllMemories();
-                }}
-                disabled={!chosen}
-                title={`Forget everything ${name} knows. Not undoable.`}
-              >
-                Start over
-              </Button>
-            </Field>
-          </Row>
-          <SlackSettings companion={name} />
-        </>
-      )}
-    </Item>
-  );
-}
-
-/** The companion in Slack, through Canopy's one Slack app (the hub on
- *  canopyide.dev). Adding it to a Slack workspace and linking a Slack identity
- *  both happen in the browser, started from this signed-in Canopy, so the hub
- *  knows the identity is really this account's. No token ever reaches here. */
-function SlackSettings({ companion }: { companion: string }) {
-  const [status, setStatus] = useState<ipc.SlackHubStatus | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  const [busy, setBusy] = useState(false);
-  const linkedCount = useRef(0);
-  const refresh = useCallback(() => {
-    void ipc
-      .slackHub<ipc.SlackHubStatus>("status")
-      .then((next) => {
-        // A link finished in the browser: start answering without waiting
-        // for the poller's next idle check.
-        if (next.linked.length !== linkedCount.current) slackStatusChanged();
-        linkedCount.current = next.linked.length;
-        setStatus(next);
-        setError(null);
-      })
-      .catch((err) => setError(String(err)));
-  }, []);
-  useEffect(() => {
-    refresh();
-    // The browser round-trip finishes outside this window; look again when
-    // the user comes back to it.
-    window.addEventListener("focus", refresh);
-    return () => window.removeEventListener("focus", refresh);
-  }, [refresh]);
-  const open = async (action: "install-url" | "link-url") => {
-    setBusy(true);
-    try {
-      const { url } = await ipc.slackHub<{ url: string }>(action);
-      if (!/^https:\/\/(canopyide\.dev|slack\.com)\//.test(url)) throw new Error("Canopy returned an unexpected link");
-      const { openUrl } = await import("@tauri-apps/plugin-opener");
-      await openUrl(url);
-    } catch (err) {
-      setError(String(err));
-    } finally {
-      setBusy(false);
-    }
-  };
-  const unlink = async () => {
-    setBusy(true);
-    try {
-      await ipc.slackHub("unlink");
-      slackStatusChanged();
-      refresh();
-    } catch (err) {
-      setError(String(err));
-    } finally {
-      setBusy(false);
-    }
-  };
-  const linked = status?.linked ?? [];
-  const state = error
-    ? error
-    : !status
-      ? "Checking…"
-      : !status.configured
-        ? "Slack is not available yet."
-        : linked.length
-          ? `Linked as you in ${linked.map((l) => l.teamName).join(", ")}. DM or mention ${companion} there.`
-          : "Not linked.";
-
-  return (
-    <div className="set-gap">
-      <div className="set-item-desc">
-        <strong>Slack.</strong> Talk to {companion} from Slack while Canopy is signed in. Teammates you've given
-        session access can mention you and {companion} together; only you can approve what it changes.
-      </div>
-      <Row>
-        <span className="set-hint">{state}</span>
-      </Row>
-      {status?.configured && (
-        <Row>
-          <Button onClick={() => void open("install-url")} disabled={busy} title="Add Canopy to a Slack workspace and link yourself">
-            Add to Slack
-          </Button>
-          <Button onClick={() => void open("link-url")} disabled={busy} title="Canopy is already in your Slack workspace: link your Slack identity">
-            Link my Slack
-          </Button>
-          {linked.length > 0 && (
-            <Button onClick={() => void unlink()} disabled={busy}>
-              Unlink
-            </Button>
-          )}
-        </Row>
-      )}
-    </div>
+              </Field>
+              <Field label="Model">
+                {models?.kind === "inline" ? (
+                  <Select
+                    width="md"
+                    value={s.companionModel}
+                    aria-label="Companion model"
+                    onChange={(e) => patch({ companionModel: e.target.value })}
+                  >
+                    <option value="">{chosen?.name ?? "Agent"} default</option>
+                    {models.choices.map((m) => (
+                      <option key={m.id} value={m.id}>
+                        {m.label} — {m.hint}
+                      </option>
+                    ))}
+                  </Select>
+                ) : (
+                  // A CLI whose catalogue is per-account has no list Canopy can
+                  // be right about (see agentModels.ts), so it is not offered one.
+                  <span className="set-item-desc">{chosen ? "Chosen by the agent" : "—"}</span>
+                )}
+              </Field>
+              <Field label="It may">
+                <span className="set-inline">
+                  <Segmented
+                    options={COMPANION_AUTHORITIES.map((a) => ({ id: a.id, label: a.label }))}
+                    value={s.companionAuthority}
+                    onChange={(id) => patch({ companionAuthority: id })}
+                    aria-label="What the companion may do"
+                  />
+                  <span className="set-item-desc">{authority?.note}</span>
+                </span>
+              </Field>
+              <Field label=" ">
+                <Button
+                  onClick={() => {
+                    if (!chosen) return;
+                    forgetCompanionSession(chosen.id);
+                    clearRun(chosen.id);
+                    clearCompanionView();
+                    // Clearing only the conversation would leave a "new"
+                    // companion that still knows you.
+                    void forgetAllMemories();
+                  }}
+                  disabled={!chosen}
+                  title={`Forget everything ${name} knows. Not undoable.`}
+                >
+                  Start over
+                </Button>
+              </Field>
+            </Row>
+          </>
+        )}
+      </Item>
+      {s.companionEnabled && <SlackSettings companion={name} />}
+    </>
   );
 }
 
