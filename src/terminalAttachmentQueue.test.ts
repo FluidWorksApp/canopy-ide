@@ -21,6 +21,16 @@ const attachment = (
 });
 
 describe("TerminalAttachmentQueue", () => {
+  it("knows which boot-snapshot lifetimes were already routed or have exited", () => {
+    const queue = new TerminalAttachmentQueue();
+    expect(queue.hasSeen(attachment(7))).toBe(false);
+    queue.enqueue(attachment(7, "project-b"));
+    expect(queue.hasSeen(attachment(7))).toBe(true);
+    queue.discard(8, 108);
+    expect(queue.hasSeen(attachment(8))).toBe(true);
+    expect(queue.hasSeen(attachment(9))).toBe(false);
+  });
+
   it("holds recovery until a slow ProjectView mounts and reoffers after that owner unmounts", () => {
     const queue = new TerminalAttachmentQueue();
     const consume = vi.fn();

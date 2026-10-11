@@ -34,8 +34,8 @@ export class RemoteExecutionClient {
   private readonly token: string;
   private readonly resolveToken?: () => Promise<string>;
   constructor(endpoint: string, token: string, resolveToken?: () => Promise<string>) { this.endpoint = remoteEndpoint(endpoint); this.token = token; this.resolveToken = resolveToken; }
-  async request<T>(route: string, args?: unknown): Promise<T> {
-    return requestQueue(this.endpoint).run(requestPriority(route,args),()=>this.performRequest<T>(route,args));
+  async request<T>(route: string, args?: unknown, priority=requestPriority(route,args)): Promise<T> {
+    return requestQueue(this.endpoint).run(priority,()=>this.performRequest<T>(route,args));
   }
   private async performRequest<T>(route: string, args?: unknown, retries=0): Promise<T> {
     const id=route.match(/^\/workspaces\/([a-z][a-z0-9-]*)(?:\/|$)/)?.[1];
@@ -60,9 +60,9 @@ export class RemoteExecutionClient {
     return result as T;
   }
   list() { return this.request<{ principal: string; scope: "view" | "drive" | "admin"; workspaces: RemoteWorkspace[] }>("/workspaces"); }
-  workspace<T>(id: string, route: string, args?: unknown) {
+  workspace<T>(id: string, route: string, args?: unknown, priority?: number) {
     if (!/^[a-z][a-z0-9-]{0,47}$/.test(id)) return Promise.reject(new Error("Invalid workspace"));
-    return this.request<T>(`/workspaces/${id}${route}`, args);
+    return this.request<T>(`/workspaces/${id}${route}`, args, priority);
   }
   /** A long-lived workspace response (an SSE stream) with this client's credential; outside the request queue and its timeout. */
   async open(id: string, route: string, signal: AbortSignal): Promise<Response> {

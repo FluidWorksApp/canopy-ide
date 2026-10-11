@@ -32,6 +32,8 @@ export class TerminalAttachmentQueue {
     string,
     { attachment: TerminalAttachment; consumer: Consumer }
   >();
+  /** Lifetimes already routed or exited; bounded, this renderer only. */
+  private readonly seen = new Set<string>();
   private readonly metrics = {
     enqueued: 0,
     acknowledged: 0,
@@ -49,6 +51,7 @@ export class TerminalAttachmentQueue {
   enqueue(attachment: TerminalAttachment) {
     this.metrics.enqueued += 1;
     const key = this.key(attachment);
+    this.see(key);
     const committed = this.committed.get(key);
     if (committed) {
       // Snapshot reconciliation may refresh presentation metadata, but the
@@ -158,7 +161,19 @@ export class TerminalAttachmentQueue {
     this.pending.delete(key);
     this.offered.delete(key);
     this.committed.delete(key);
+    this.see(key);
     this.metrics.discarded += 1;
+  }
+
+  /** Routed to some project, or exited, since this renderer booted. A boot
+   * snapshot entry that is neither is still on its way to its project. */
+  hasSeen(attachment: Pick<TerminalAttachment, "ptyId" | "sessionGeneration">) {
+    return this.seen.has(this.key(attachment));
+  }
+
+  private see(key: string) {
+    this.seen.add(key);
+    if (this.seen.size > 4096) this.seen.delete(this.seen.values().next().value!);
   }
 
   private flush(projectId: string) {

@@ -1,5 +1,10 @@
 import { activeWorkspace } from "../../remoteExecution/workspace";
-import { rememberedLiveTerminal, recoverLiveGroups } from "../../terminalRecovery";
+import {
+  hostLiveTerminals,
+  rememberedLiveTerminal,
+  recoverLiveGroups,
+  withoutLiveSessions,
+} from "../../terminalRecovery";
 import {subscribeTeamUnread,getTeamUnread,getUnreadSummary} from "../../teamMessaging/session";
 import {isReadOnlyHost,isRemoteHost} from "../../host";
 import { AgentIntegrationWarning } from "../AgentIntegrationWarning";
@@ -555,6 +560,7 @@ import {
 import { TerminalMemoryFlyout } from "../TerminalMemoryFlyout";
 import { getVibePreviewAttemptTabId } from "../../vibePreviewContext";
 import {
+  projectForTerminalCwd,
   terminalAttachmentQueue,
   type TerminalAttachment,
 } from "../../terminalAttachmentQueue";
@@ -1378,8 +1384,8 @@ const ProjectViewBody = memo(function ProjectViewBody({
   const expectedRecoveredTabs = useRef(new Set<string>());
   const restoredLiveGroups = useRef(new Set<string>());
   const terminalRecoveryComplete = useRef(false);
-  const recoveryNativeSessions = useRef<ipc.PtySummary[]>([]);
-  const [thisInstance, setThisInstance] = useState<string | null>(null);
+  const recoveryNativeSessions = useRef<ipc.PtySummary[]>(ipc.rendererPtySessions());
+  const [thisInstance, setThisInstance] = useState<string | null>(ipc.rendererInstanceId);
   const thisInstanceRef = useRef(thisInstance);
   thisInstanceRef.current = thisInstance;
   const tabsRef = useRef(tabs);
@@ -2630,6 +2636,9 @@ const ProjectViewBody = memo(function ProjectViewBody({
     ) => Promise<{ delivered: boolean; note: string; [key: string]: unknown }>
   >(async () => ({ delivered: false, note: "PR routing is not ready." }));
   useEffect(() => {
+    // A remote handshake already answered both; asking again queued recovery
+    // behind every other request to a loaded host.
+    if (ipc.rendererInstanceId()) return;
     let cancelled = false;
     let retry: ReturnType<typeof setTimeout> | undefined;
     const load = () => void Promise.all([ipc.instanceId(), ipc.rendererPtySessionsLive()]).then(([id, sessions]) => {
@@ -2777,9 +2786,48 @@ const ProjectViewBody = memo(function ProjectViewBody({
     setRememberedLayouts(memory.terminalGroups);
   }, [tabs.length, visible, project.id, terminalMemoryScope]);
 
+  const hostLive = useMemo(() => {
+    const live = [
+      ...terminalAttachmentQueue.attachments(project.id),
+      ...recoveryNativeSessions.current
+        .filter(
+          (s) =>
+            s.kind !== "detached" &&
+            !terminalAttachmentQueue.hasSeen({ ptyId: s.id, sessionGeneration: s.session_generation }) &&
+            (s.project_id === project.id ||
+              projectForTerminalCwd([project], s.cwd) === project.id),
+        )
+        .map((s) => ({
+          ptyId: s.id,
+          sessionGeneration: s.session_generation,
+          cwd: s.cwd,
+          name: s.name ?? undefined,
+          title: s.title,
+        })),
+    ];
+    const attached = new Set(
+      tabs.flatMap((t) =>
+        t.type === "terminal" ? [t.attachId ?? t.ptyId ?? -1] : [],
+      ),
+    );
+    return hostLiveTerminals(
+      { terminals: remembered, terminalGroups: rememberedLayouts },
+      live,
+      attached,
+      thisInstance,
+    );
+    // `restorable`: the queue is re-read on each digest poll.
+  }, [project, tabs, thisInstance, remembered, rememberedLayouts, restorable]);
   const resumeCards = useMemo(
-    () => terminalResumeCards(remembered, rememberedLayouts, restorable),
-    [remembered, rememberedLayouts, restorable],
+    () =>
+      hostLive.decided
+        ? withoutLiveSessions(
+            terminalResumeCards(remembered, rememberedLayouts, restorable),
+            hostLive,
+            thisInstance,
+          )
+        : [],
+    [remembered, rememberedLayouts, restorable, hostLive, thisInstance],
   );
 
   const reopenTerminal = useCallback(
@@ -13464,6 +13512,23 @@ const ProjectViewBody = memo(function ProjectViewBody({
                 </button>
               ))}
             </div>
+            {hostLive.reconnecting.length > 0 && (
+              <div className="resume-block" aria-live="polite">
+                <div className="resume-head">
+                  <span>
+                    Reconnecting
+                    <span className="badge">{hostLive.reconnecting.length} terminals</span>
+                  </span>
+                </div>
+                {hostLive.reconnecting.map((t) => (
+                  <div key={t.ptyId} className="resume-row resume-reconnecting">
+                    <TerminalIcon size={13} />
+                    <span className="resume-prompt">{t.name}</span>
+                    <span className="resume-age">reconnecting…</span>
+                  </div>
+                ))}
+              </div>
+            )}
             {resumeCards.length > 0 && (
               <div className="resume-block">
                 <div className="resume-head">

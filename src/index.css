@@ -7391,6 +7391,29 @@ body.dragging-tab * {
   background: var(--bg-alt);
 }
 
+.term-container[data-reconnecting="true"]::after {
+  content: "Reconnecting…";
+  position: absolute;
+  top: 8px;
+  right: 12px;
+  z-index: 400;
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: 11px;
+  color: var(--text-dim);
+  background: var(--bg);
+  border: 1px solid var(--border);
+  pointer-events: none;
+  opacity: 0;
+  animation: term-reconnecting-in 160ms ease 600ms forwards;
+}
+
+@keyframes term-reconnecting-in {
+  to {
+    opacity: 1;
+  }
+}
+
 /* "Open link" (plus the chord, when one is required) over a hovered terminal
    link. The app tooltip's bubble, but placed
    imperatively — xterm owns this surface and reports hover through callbacks,
