@@ -98,9 +98,12 @@ export function SlackSettings({ companion }: { companion: string }) {
     </Button>
   );
 
+
   return (
-    <div className="set-gap">
-      <div className="set-item-name">Slack</div>
+    <div className="set-item">
+      <div className="set-item-head">
+        <span className="set-item-name">Slack</span>
+      </div>
       <div className="set-item-desc">
         Talk to {companion} from Slack while Canopy is signed in. Teammates you've given session access can
         mention you and {companion} together; only you can approve what it changes.
@@ -116,9 +119,7 @@ export function SlackSettings({ companion }: { companion: string }) {
             {error}
           </div>
         )}
-      </div>
-      {ready && (
-        <>
+        {ready && (
           <div className="set-item-control set-inline">
             {isLinked ? (
               <>
@@ -139,13 +140,11 @@ export function SlackSettings({ companion }: { companion: string }) {
               </>
             )}
           </div>
-          {!isLinked && !installedNotLinked && (
-            <div className="set-item-desc set-note">
-              Already in a workspace with Canopy? Link my Slack instead.
-            </div>
-          )}
-        </>
-      )}
+        )}
+        {ready && !isLinked && !installedNotLinked && (
+          <div className="set-item-desc set-note">Already in a workspace with Canopy? Link my Slack instead.</div>
+        )}
+      </div>
     </div>
   );
 }

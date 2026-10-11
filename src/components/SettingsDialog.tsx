@@ -352,105 +352,107 @@ function CompanionSettings({
   const authority = COMPANION_AUTHORITIES.find((a) => a.id === s.companionAuthority);
 
   return (
-    <Item
-      name={`${name} as a companion`}
-      tag="Starts an agent"
-      desc={`A floating assistant across every project, with its own chat and session.`}
-    >
-      <Row>
-        <Switch
-          checked={s.companionEnabled}
-          onChange={(v) => patch({ companionEnabled: v })}
-          aria-label={`Enable ${name} as a companion`}
-        />
-        <span className="set-hint">
-          {s.companionEnabled
-            ? `Notices arrive from ${name}.${chosen ? ` ${tierNote(chosen.id)}` : ""}`
-            : "Off."}
-        </span>
-      </Row>
+    <>
+      <Item
+        name={`${name} as a companion`}
+        tag="Starts an agent"
+        desc={`A floating assistant across every project, with its own chat and session.`}
+      >
+        <Row>
+          <Switch
+            checked={s.companionEnabled}
+            onChange={(v) => patch({ companionEnabled: v })}
+            aria-label={`Enable ${name} as a companion`}
+          />
+          <span className="set-item-desc">
+            {s.companionEnabled
+              ? `Notices arrive from ${name}.${chosen ? ` ${tierNote(chosen.id)}` : ""}`
+              : "Off."}
+          </span>
+        </Row>
 
-      {s.companionEnabled && (
-        <>
-          <Row className="set-gap">
-            <Field label="Name">
-              <TextInput
-                width="sm"
-                value={s.companionName}
-                placeholder={mascotDef(s.mascot).label}
-                aria-label="Companion name"
-                onChange={(e) => patch({ companionName: e.target.value })}
-              />
-            </Field>
-            <Field label="Agent">
-              <Select
-                width="sm"
-                value={chosen?.id ?? ""}
-                aria-label="Companion agent"
-                onChange={(e) => patch({ companionCli: e.target.value, companionModel: "" })}
-              >
-                {usable.length === 0 && <option value="">None installed</option>}
-                {usable.map((c) => (
-                  <option key={c.id} value={c.id}>
-                    {c.name}
-                  </option>
-                ))}
-              </Select>
-            </Field>
-            <Field label="Model">
-              {models?.kind === "inline" ? (
+        {s.companionEnabled && (
+          <>
+            <Row className="set-gap">
+              <Field label="Name">
+                <TextInput
+                  width="sm"
+                  value={s.companionName}
+                  placeholder={mascotDef(s.mascot).label}
+                  aria-label="Companion name"
+                  onChange={(e) => patch({ companionName: e.target.value })}
+                />
+              </Field>
+              <Field label="Agent">
                 <Select
-                  width="md"
-                  value={s.companionModel}
-                  aria-label="Companion model"
-                  onChange={(e) => patch({ companionModel: e.target.value })}
+                  width="sm"
+                  value={chosen?.id ?? ""}
+                  aria-label="Companion agent"
+                  onChange={(e) => patch({ companionCli: e.target.value, companionModel: "" })}
                 >
-                  <option value="">{chosen?.name ?? "Agent"} default</option>
-                  {models.choices.map((m) => (
-                    <option key={m.id} value={m.id}>
-                      {m.label} — {m.hint}
+                  {usable.length === 0 && <option value="">None installed</option>}
+                  {usable.map((c) => (
+                    <option key={c.id} value={c.id}>
+                      {c.name}
                     </option>
                   ))}
                 </Select>
-              ) : (
-                // A CLI whose catalogue is per-account has no list Canopy can
-                // be right about (see agentModels.ts), so it is not offered one.
-                <span className="set-hint">{chosen ? "Chosen by the agent" : "—"}</span>
-              )}
-            </Field>
-            <Field label="It may">
-              <span className="set-inline">
-                <Segmented
-                  options={COMPANION_AUTHORITIES.map((a) => ({ id: a.id, label: a.label }))}
-                  value={s.companionAuthority}
-                  onChange={(id) => patch({ companionAuthority: id })}
-                  aria-label="What the companion may do"
-                />
-                <span className="set-hint">{authority?.note}</span>
-              </span>
-            </Field>
-            <Field label=" ">
-              <Button
-                onClick={() => {
-                  if (!chosen) return;
-                  forgetCompanionSession(chosen.id);
-                  clearRun(chosen.id);
-                  clearCompanionView();
-                  // Clearing only the conversation would leave a "new"
-                  // companion that still knows you.
-                  void forgetAllMemories();
-                }}
-                disabled={!chosen}
-                title={`Forget everything ${name} knows. Not undoable.`}
-              >
-                Start over
-              </Button>
-            </Field>
-          </Row>
-          <SlackSettings companion={name} />
-        </>
-      )}
-    </Item>
+              </Field>
+              <Field label="Model">
+                {models?.kind === "inline" ? (
+                  <Select
+                    width="md"
+                    value={s.companionModel}
+                    aria-label="Companion model"
+                    onChange={(e) => patch({ companionModel: e.target.value })}
+                  >
+                    <option value="">{chosen?.name ?? "Agent"} default</option>
+                    {models.choices.map((m) => (
+                      <option key={m.id} value={m.id}>
+                        {m.label} — {m.hint}
+                      </option>
+                    ))}
+                  </Select>
+                ) : (
+                  // A CLI whose catalogue is per-account has no list Canopy can
+                  // be right about (see agentModels.ts), so it is not offered one.
+                  <span className="set-item-desc">{chosen ? "Chosen by the agent" : "—"}</span>
+                )}
+              </Field>
+              <Field label="It may">
+                <span className="set-inline">
+                  <Segmented
+                    options={COMPANION_AUTHORITIES.map((a) => ({ id: a.id, label: a.label }))}
+                    value={s.companionAuthority}
+                    onChange={(id) => patch({ companionAuthority: id })}
+                    aria-label="What the companion may do"
+                  />
+                  <span className="set-item-desc">{authority?.note}</span>
+                </span>
+              </Field>
+              <Field label=" ">
+                <Button
+                  onClick={() => {
+                    if (!chosen) return;
+                    forgetCompanionSession(chosen.id);
+                    clearRun(chosen.id);
+                    clearCompanionView();
+                    // Clearing only the conversation would leave a "new"
+                    // companion that still knows you.
+                    void forgetAllMemories();
+                  }}
+                  disabled={!chosen}
+                  title={`Forget everything ${name} knows. Not undoable.`}
+                >
+                  Start over
+                </Button>
+              </Field>
+            </Row>
+          </>
+        )}
+      </Item>
+      {s.companionEnabled && <SlackSettings companion={name} />}
+    </>
   );
 }
 
