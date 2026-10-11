@@ -22,6 +22,7 @@ export const AGENT_HOME='/home/agent';
 export const TURN_CEILING_MS=5*60_000;
 const STDERR_KEEP=2000,LINE_MAX=8*1024*1024;
 const CONVERSATION_GONE=/no rollout found|no conversation found|thread .{0,40}not found|session .{0,40}not found/i;
+const ID_IN_USE=/already in use/i;
 const message=error=>String(error?.message??error).slice(0,300);
 // Killing the docker client alone can leave the CLI running in the container;
 // closing its stdin is what ends a stream-json Claude.
@@ -152,7 +153,11 @@ export class ContainerCompanionRunner{
   const proc={child,resumed:s.ran,turn:null,stderr:'',exited:false};
   child.stderr.setEncoding('utf8');child.stderr.on('data',t=>{if(proc.stderr.length<STDERR_KEEP)proc.stderr+=t;});
   lines(child.stdout,line=>{
-   const msg=parse(line),turn=proc.turn;if(!msg||!turn)return;
+   const msg=parse(line);
+   // Marked on init, as companionSession.ts marks it on `ready`: the session
+   // exists from here, so the next launch must resume rather than re-create it.
+   if(msg?.type==='system'&&msg.subtype==='init'&&!s.ran){s.ran=true;proc.saving=this.state.save().catch(error=>this.log(`Slack companion state save failed: ${message(error)}`));}
+   const turn=proc.turn;if(!msg||!turn)return;
    if(msg.type==='assistant')for(const b of msg.message?.content??[])if(b?.type==='text'&&b.text)turn.text+=b.text;
    if(msg.type==='result'){proc.turn=null;if(msg.is_error)turn.fail(Error(msg.result||'The agent ended the turn with an error.'));else turn.done(typeof msg.result==='string'&&msg.result.trim()?msg.result:turn.text);}
   });
@@ -169,11 +174,12 @@ export class ContainerCompanionRunner{
     proc.turn={text:'',done:v=>{clearTimeout(timer);resolve(v);},fail:e=>{clearTimeout(timer);reject(e);}};
     proc.child.stdin.write(JSON.stringify({type:'user',message:{role:'user',content:[{type:'text',text:prompt}]}})+'\n');
    });
-   if(!state.claude.ran){state.claude.ran=true;await this.state.save().catch(error=>this.log(`Slack companion state save failed: ${message(error)}`));}
+   await proc.saving;
    return {text};
   }catch(error){
    // The transcript behind the id is gone: forget it and meet again, once.
-   if(heal&&proc.resumed&&CONVERSATION_GONE.test(message(error)+proc.stderr)){
+   const why=message(error)+proc.stderr;
+   if(heal&&(proc.resumed?CONVERSATION_GONE.test(why):ID_IN_USE.test(why))){
     stop(proc.child);if(this.proc===proc)this.proc=null;
     state.claude={sessionId:randomUUID(),ran:false};await this.state.save().catch(()=>{});
     return this.claudeTurn(prompt,state,false);

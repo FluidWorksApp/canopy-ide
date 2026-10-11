@@ -97,6 +97,41 @@ test('claude: one long-lived process, one turn at a time, resumed after a restar
  again.close();
 });
 
+test('claude: a session that came up is resumed next time, even if its turn never finished',async t=>{
+ const {dir,file}=await stateFile();t.after(()=>rm(dir,{recursive:true,force:true}));
+ const docker=fakeDocker();
+ const runner=new ContainerCompanionRunner({workspace,inspect:async()=>running,stateFile:file,spawn:docker.spawn});
+ const turn=runner.runTurn({prompt:'hi'});
+ await until(()=>docker.procs[0]?.written.length===1);
+ docker.procs[0].say({type:'system',subtype:'init'});
+ await until(()=>runner.state.value.claude?.ran===true);
+ docker.procs[0].end(1);
+ await assert.rejects(turn);
+ const next=runner.runTurn({prompt:'again'});
+ await until(()=>docker.procs[1]?.written.length===1);
+ assert.ok(docker.procs[1].args.includes('--resume'));
+ docker.procs[1].say({type:'result',result:'ok'});
+ assert.deepEqual(await next,{text:'ok'});
+ runner.close();
+});
+
+test('claude: an id Claude already holds is replaced and the turn re-run once',async t=>{
+ const {dir,file}=await stateFile();t.after(()=>rm(dir,{recursive:true,force:true}));
+ const docker=fakeDocker();
+ const runner=new ContainerCompanionRunner({workspace,inspect:async()=>running,stateFile:file,spawn:docker.spawn});
+ await runner.state.load();runner.state.value.claude={sessionId:'taken',ran:false};
+ const turn=runner.runTurn({prompt:'hi'});
+ await until(()=>docker.procs[0]);
+ docker.procs[0].stderr.write('Error: Session ID taken is already in use.\n');await tick();
+ docker.procs[0].end(1);
+ await until(()=>docker.procs[1]?.written.length===1);
+ const at=docker.procs[1].args.indexOf('--session-id');
+ assert.ok(at>0);assert.notEqual(docker.procs[1].args[at+1],'taken');
+ docker.procs[1].say({type:'result',result:'fresh'});
+ assert.deepEqual(await turn,{text:'fresh'});
+ runner.close();
+});
+
 test('claude: a vanished conversation is forgotten and the turn re-run once',async t=>{
  const {dir,file}=await stateFile();t.after(()=>rm(dir,{recursive:true,force:true}));
  const docker=fakeDocker();
