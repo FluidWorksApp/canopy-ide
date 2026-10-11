@@ -206,18 +206,73 @@ export function sessionAddress(
   return tab?.nativeName ?? liveName ?? tab?.userName;
 }
 
+/** The names a conversation keeps for life: the user's, the agent's own, and
+ *  the opening prompt. Everything else is re-derived from whatever is running
+ *  now. Losing any of these three on a rebuild is the bug this exists for — an
+ *  empty prompt slot is an open door, and the next message the user sends
+ *  walks through it. */
+export type DurableNames = Pick<TabNames, "userName" | "agentName" | "promptName">;
+
+/** A tab's durable names, only the ones it holds. */
+export function durableNames(tab: TabNames): DurableNames {
+  return {
+    ...(tab.userName ? { userName: tab.userName } : {}),
+    ...(tab.agentName ? { agentName: tab.agentName } : {}),
+    ...(tab.promptName ? { promptName: tab.promptName } : {}),
+  };
+}
+
+/**
+ * A rebuilt tab taking back the names its conversation had — after a
+ * reconnect, a recreated container, a host or app restart. Returns the patch,
+ * or null.
+ *
+ * The user's name comes back only into an empty slot: a name already on the
+ * tab is the user's latest word and nothing remembered outranks it. The
+ * agent's likewise. The prompt name is the exception, because its rule is "the
+ * first one wins": a remembered opening prompt is older than anything the
+ * rebuilt tab can hold, so it replaces whatever stand-in landed there first.
+ */
+export function adoptDurableNames(
+  tab: NamedTab,
+  stored: DurableNames | undefined,
+): Partial<TabNames> | null {
+  if (!stored) return null;
+  const user = clean(stored.userName);
+  const agent = clean(stored.agentName);
+  const prompt = clean(stored.promptName);
+  const patch: Partial<TabNames> = {
+    ...(user && !tab.userName ? { userName: user } : {}),
+    ...(agent && !tab.agentName ? { agentName: agent } : {}),
+    ...(prompt && !tab.micro && prompt !== tab.promptName ? { promptName: prompt } : {}),
+  };
+  return Object.keys(patch).length ? patch : null;
+}
+
+/** What names a session when the message in hand may not be its first: the
+ *  prompt that opened it, as the session digest retained it. `working_on` and
+ *  the newest prompt are deliberately not candidates — they are what the
+ *  session is doing now, and a tab named after them is renamed by every
+ *  message. Injected payloads (`<task-notification>…`) identify nothing. */
+export function openingPrompt(
+  digest: { first_prompt?: string; prompts?: string[] } | undefined,
+  fallback?: string,
+): string | undefined {
+  const human = (p: unknown): p is string =>
+    typeof p === "string" && p.trim().length > 0 && !p.trimStart().startsWith("<");
+  if (human(digest?.first_prompt)) return digest.first_prompt;
+  return (digest?.prompts ?? []).find(human) ?? fallback;
+}
+
 /** A tab's names as they go into a snapshot (hibernation, remembered
  *  terminals). `title` stays the display name so an older build reading this
- *  store still shows something sensible; `userName` is what a restore actually
- *  re-asserts. */
+ *  store still shows something sensible; the durable slots are what a restore
+ *  actually re-asserts. */
 export function snapshotNames(
   tab: NamedTab,
   opts: { agent?: boolean; agentLabel?: string } = {},
-): { title: string; userName?: string } {
-  return {
-    title: tabName(tab, opts),
-    ...(tab.userName ? { userName: tab.userName } : {}),
-  };
+): { title: string } & DurableNames {
+  return { title: tabName(tab, opts), ...durableNames(tab) };
 }
 
 /** The inverse: a snapshot's names as tab slots.
@@ -225,14 +280,16 @@ export function snapshotNames(
  *  `renamed` is read for snapshots written before this module existed, where a
  *  user's choice and a generated label shared the `title` field and the flag
  *  was the only thing telling them apart. Nothing writes `renamed` any more. */
-export function adoptSnapshotNames(snapshot: {
-  title?: string;
-  userName?: string;
-  renamed?: boolean;
-}): TabNames {
+export function adoptSnapshotNames(
+  snapshot: { title?: string; renamed?: boolean } & DurableNames,
+): TabNames {
   const user = clean(snapshot.userName) ?? (snapshot.renamed ? clean(snapshot.title) : undefined);
+  const agent = clean(snapshot.agentName);
+  const prompt = clean(snapshot.promptName);
   return {
     ...(user ? { userName: user } : {}),
+    ...(agent ? { agentName: agent } : {}),
+    ...(prompt ? { promptName: prompt } : {}),
     ...(clean(snapshot.title) ? { launchTitle: clean(snapshot.title) } : {}),
   };
 }
