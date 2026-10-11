@@ -4803,6 +4803,35 @@ export const companionWrite = (line: string) =>
 
 export const companionKill = () => invoke<void>("companion_kill");
 
+/** An agent's answer to a companion request (`canopy_companion_reply`), or —
+ *  with `expired` — the news that it went unanswered. Attributed to the agent
+ *  the request was sent to; never the owner speaking. */
+export interface CompanionReplyEvent {
+  requestId: string;
+  ptyId: number;
+  terminalName: string | null;
+  cwd: string;
+  /** What the dispatching turn set: null for the owner's own chat, otherwise
+   *  an opaque label such as `slack:<item id>`. */
+  origin: string | null;
+  expired: boolean;
+  text: string | null;
+}
+
+export const onCompanionReply = (
+  cb: (e: CompanionReplyEvent) => void,
+): Promise<UnlistenFn> =>
+  listen<CompanionReplyEvent>("companion:reply", (event) => cb(event.payload));
+
+/** Where the turn about to be sent came from, so a request it mints knows
+ *  whose conversation the answer belongs to. */
+export const companionDispatchOrigin = (origin: string | null) =>
+  invoke<void>("companion_dispatch_origin", { origin });
+
+/** The requests still waiting on an agent for one origin. */
+export const companionOpenRequests = (origin: string) =>
+  invoke<string[]>("companion_open_requests", { origin });
+
 /** Freeze one chat attachment under `~/.canopy/companion/attachments`. */
 export const companionSaveAttachment = (name: string, base64: string) =>
   invoke<string>("companion_save_attachment", { name, base64 });

@@ -92,6 +92,10 @@ IDE the user is watching, and their results stay inspectable:\n\
   be able to find again -> canopy_mesh_send (persistent, by message id); \
   what you've sent and received, or a message id someone gave you -> \
   canopy_mesh\n\
+- A message tagged \"[canopy: message from the Canopy companion, request cr_…]\" \
+  -> answer it with canopy_companion_reply and that requestId, not \
+  canopy_message_agent (the companion has no terminal, and whoever asked it, \
+  possibly on Slack, only hears what you reply there)\n\
 - Work that belongs in another workspace, on your other machine, or with a \
   teammate -> canopy_mesh_targets, then canopy_mesh_submit with a complete \
   brief. A teammate approves before it runs; its steps come back to you as \
@@ -199,6 +203,25 @@ mod tests {
         assert!(prompt.contains("call canopy_name_task"));
         assert!(prompt.contains("short `title` and one-line `description`"));
         assert!(prompt.contains("answer lead pings promptly"));
+    }
+
+    #[test]
+    fn companion_requests_are_answered_through_the_reply_tool() {
+        let prompt = mcp_instructions();
+        let line = prompt
+            .lines()
+            .find(|l| l.contains("message from the Canopy companion, request"))
+            .expect("a routing line for companion requests");
+        assert!(line.contains("canopy_companion_reply"));
+        assert!(
+            line.contains("not"),
+            "steers away from canopy_message_agent: {line}"
+        );
+        assert!(
+            prompt.contains("canopy_companion_reply and that requestId, not canopy_message_agent")
+        );
+        // Only clients with the MCP tools are told about it.
+        assert!(!SESSION_CONTEXT.contains("canopy_companion_reply"));
     }
 
     #[test]

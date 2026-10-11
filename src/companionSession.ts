@@ -58,7 +58,11 @@ export interface CompanionTool {
 
 export interface CompanionMessage {
   id: string;
-  who: "you" | "ash";
+  /** "agent" is a coding agent answering a request the companion sent it —
+   *  shown as that agent, never as the owner having said it. */
+  who: "you" | "ash" | "agent";
+  /** For "agent": who it was, as the panel labels it. */
+  from?: string;
   text: string;
   /** Tools this reply ran, in order. Rendered as chips above the prose so the
    *  answer can be read without them, but where it came from is visible. */
@@ -585,20 +589,39 @@ export async function sendToCompanion(
   const prompt = `${body}${files}`.trim();
   const wire = spot ? `${spotlightEnvelope(spot)}\n\n${prompt}` : prompt;
   try {
+    await setOrigin(null);
     await transport.send(wire);
   } catch (err) {
     set({ status: "ready", error: String(err) });
   }
 }
 
-/** A turn asked from outside the panel (Slack), answered back there. Waits for
- *  the companion to be free rather than interleaving with the user's own turn,
- *  and resolves with the reply once the turn ends. No spotlight envelope: the
- *  person asking is not the one looking at this window. */
+/** Tell the bridge which conversation the next turn belongs to, so a request
+ *  it mints records where its answer goes. Never fatal: a turn that could not
+ *  label itself still runs, and its requests answer locally. */
+async function setOrigin(origin: string | null): Promise<void> {
+  await ipc.companionDispatchOrigin(origin).catch(() => {});
+}
+
+export interface AskOptions {
+  timeoutMs?: number;
+  /** The conversation this turn belongs to (`slack:<item id>`); absent is the
+   *  owner's own chat. */
+  origin?: string | null;
+  /** Set when the turn is an agent's reply rather than a person asking: the
+   *  transcript shows it as that agent. */
+  from?: string;
+}
+
+/** A turn asked from outside the panel (Slack, or an agent answering a
+ *  companion request), answered back there. Waits for the companion to be free
+ *  rather than interleaving with the user's own turn, and resolves with the
+ *  reply once the turn ends. No spotlight envelope: the person asking is not
+ *  the one looking at this window. */
 export async function askCompanion(
   shown: string,
   wire: string,
-  { timeoutMs = 10 * 60_000 }: { timeoutMs?: number } = {},
+  { timeoutMs = 10 * 60_000, origin = null, from }: AskOptions = {},
 ): Promise<{ text: string; failed: boolean }> {
   const until = (done: () => boolean) =>
     new Promise<void>((resolve, reject) => {
@@ -624,11 +647,12 @@ export async function askCompanion(
     error: null,
     messages: [
       ...state.messages.slice(-(MAX_COMPANION_MESSAGES - 2)),
-      { id: nextId(), who: "you", text: shown },
+      from ? { id: nextId(), who: "agent", from, text: shown } : { id: nextId(), who: "you", text: shown },
       { id: replyId, who: "ash", text: "" },
     ],
   });
   try {
+    await setOrigin(origin);
     await transport.send(wire);
   } catch (err) {
     set({ status: "ready", error: String(err) });
