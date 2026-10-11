@@ -41,6 +41,20 @@ pub struct AccessSnapshot {
     pub principals: Vec<Principal>,
 }
 
+impl AccessSnapshot {
+    /// Whether two snapshots grant the same access, ignoring when they were
+    /// issued, when they expire and which key signed them.
+    pub fn same_authority(&self, other: &AccessSnapshot) -> bool {
+        let grant = |s: &AccessSnapshot| AccessSnapshot {
+            kid: String::new(),
+            issued_at: 0,
+            expires_at: 0,
+            ..s.clone()
+        };
+        grant(self) == grant(other)
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct SignedSnapshot {
     pub payload: String,

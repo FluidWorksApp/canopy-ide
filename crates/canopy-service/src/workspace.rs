@@ -175,6 +175,12 @@ impl Workspace {
     }
 
     /// Accept a verified snapshot unless it rolls back the persisted one.
+    ///
+    /// The control plane re-signs the same revision on every refresh with a
+    /// later `issuedAt`/`expiresAt`. A re-issue that grants exactly what the
+    /// held one does replaces it, so validity moves forward; a stale or
+    /// non-extending one is ignored. The same revision granting anything
+    /// else is equivocation and is refused.
     pub fn store_access(
         &self,
         signed: SignedSnapshot,
@@ -192,17 +198,21 @@ impl Workspace {
                 ));
             }
             if snapshot.revision == old.revision {
-                return if old_signed.payload == signed.payload {
-                    Ok(old.revision)
-                } else {
-                    Err((
+                if old_signed.payload == signed.payload {
+                    return Ok(old.revision);
+                }
+                if !old.same_authority(&snapshot) {
+                    return Err((
                         409,
                         format!(
                             "a different snapshot already holds revision {}",
                             old.revision
                         ),
-                    ))
-                };
+                    ));
+                }
+                if snapshot.issued_at <= old.issued_at || snapshot.expires_at <= old.expires_at {
+                    return Ok(old.revision);
+                }
             }
         }
         let bytes = serde_json::to_vec(&(&signed, &snapshot)).map_err(|e| (500, e.to_string()))?;
@@ -662,4 +672,178 @@ fn apply_claim(
     });
     prune_claims(claims);
     (200, format!("Claimed {} path(s).", paths.len()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::relay::access::tests::{sign, snapshot};
+    use crate::relay::access::{decide, verify, Decision, Principal};
+
+    const MIN: u64 = 60 * 1000;
+
+    struct Fixture {
+        _dir: tempfile::TempDir,
+        ws: Arc<Workspace>,
+        key: ed25519_dalek::SigningKey,
+        keys: HashMap<String, ed25519_dalek::VerifyingKey>,
+    }
+
+    impl Fixture {
+        fn new() -> Self {
+            let dir = tempfile::tempdir().unwrap();
+            let registration = Registration {
+                name: "ws1".into(),
+                owner_user_id: "owner".into(),
+                runner_url: None,
+                runner_token: None,
+            };
+            let events = Arc::new(EventLog::new("test".into()));
+            let ws = Workspace::open(dir.path(), "ws1", registration, events).unwrap();
+            let key = ed25519_dalek::SigningKey::from_bytes(&[7u8; 32]);
+            let keys = HashMap::from([("k1".to_string(), key.verifying_key())]);
+            Self {
+                _dir: dir,
+                ws,
+                key,
+                keys,
+            }
+        }
+
+        fn put(&self, snapshot: &AccessSnapshot) -> Result<u64, (u16, String)> {
+            let (signed, verified) =
+                verify(&sign(&self.key, snapshot), &self.keys, "ws1", "dev").unwrap();
+            self.ws.store_access(signed, verified)
+        }
+    }
+
+    /// The control plane's refresh: same grant, issued later, 15 minutes long.
+    fn issued(revision: u64, at: u64) -> AccessSnapshot {
+        AccessSnapshot {
+            issued_at: at,
+            ..snapshot(revision, at + 15 * MIN, true)
+        }
+    }
+
+    #[test]
+    fn a_reissue_of_the_same_grant_extends_validity() {
+        let f = Fixture::new();
+        assert_eq!(f.put(&issued(1, 0)), Ok(1));
+        assert_eq!(f.put(&issued(1, 5 * MIN)), Ok(1));
+        assert_eq!(f.ws.access().unwrap().expires_at, 20 * MIN);
+        assert_eq!(f.put(&issued(1, 10 * MIN)), Ok(1));
+        assert_eq!(f.ws.access().unwrap().expires_at, 25 * MIN);
+        // Past the first snapshot's expiry, the refreshed one still delivers.
+        assert_eq!(
+            decide("owner", f.ws.access().as_ref(), "granted", 22 * MIN),
+            Decision::Deliver
+        );
+        // The extension is what a restart reloads.
+        let raw = std::fs::read(f.ws.dir.join("access.json")).unwrap();
+        let (_, persisted): (SignedSnapshot, AccessSnapshot) =
+            serde_json::from_slice(&raw).unwrap();
+        assert_eq!(persisted.expires_at, 25 * MIN);
+    }
+
+    #[test]
+    fn a_reissue_signed_by_a_rotated_key_is_still_a_refresh() {
+        let f = Fixture::new();
+        assert_eq!(f.put(&issued(1, 0)), Ok(1));
+        let rotated = ed25519_dalek::SigningKey::from_bytes(&[8u8; 32]);
+        let keys = HashMap::from([
+            ("k1".to_string(), f.key.verifying_key()),
+            ("k2".to_string(), rotated.verifying_key()),
+        ]);
+        let next = AccessSnapshot {
+            kid: "k2".into(),
+            ..issued(1, 5 * MIN)
+        };
+        let (signed, verified) = verify(&sign(&rotated, &next), &keys, "ws1", "dev").unwrap();
+        assert_eq!(f.ws.store_access(signed, verified), Ok(1));
+        assert_eq!(f.ws.access().unwrap().kid, "k2");
+    }
+
+    #[test]
+    fn the_same_revision_granting_anything_else_is_refused() {
+        let f = Fixture::new();
+        assert_eq!(f.put(&issued(1, 0)), Ok(1));
+        let mut more = issued(1, 5 * MIN);
+        more.principals.push(Principal {
+            user_id: "intruder".into(),
+            sessions_interact: true,
+            projects: "all".into(),
+        });
+        let mut wider = issued(1, 5 * MIN);
+        wider.principals[1].sessions_interact = true;
+        let mut narrower = issued(1, 5 * MIN);
+        narrower.principals[0].projects = serde_json::json!(["p1"]);
+        let closed = AccessSnapshot {
+            team_delivery: false,
+            ..issued(1, 5 * MIN)
+        };
+        let new_owner = AccessSnapshot {
+            owner_user_id: "someone".into(),
+            ..issued(1, 5 * MIN)
+        };
+        for changed in [more, wider, narrower, closed, new_owner] {
+            let (status, message) = f.put(&changed).unwrap_err();
+            assert_eq!(status, 409);
+            assert!(message.contains("already holds revision 1"), "{message}");
+        }
+        assert_eq!(f.ws.access().unwrap(), issued(1, 0));
+    }
+
+    #[test]
+    fn an_older_or_non_extending_reissue_is_ignored_quietly() {
+        let f = Fixture::new();
+        assert_eq!(f.put(&issued(1, 10 * MIN)), Ok(1));
+        assert_eq!(f.put(&issued(1, 5 * MIN)), Ok(1));
+        let same_issue_shorter = AccessSnapshot {
+            expires_at: 11 * MIN,
+            ..issued(1, 10 * MIN)
+        };
+        assert_eq!(f.put(&same_issue_shorter), Ok(1));
+        let later_but_shorter = AccessSnapshot {
+            expires_at: 20 * MIN,
+            ..issued(1, 12 * MIN)
+        };
+        assert_eq!(f.put(&later_but_shorter), Ok(1));
+        assert_eq!(f.ws.access().unwrap(), issued(1, 10 * MIN));
+    }
+
+    #[test]
+    fn revisions_still_move_forward_only() {
+        let f = Fixture::new();
+        assert_eq!(f.put(&issued(2, 0)), Ok(2));
+        let (status, message) = f.put(&issued(1, 5 * MIN)).unwrap_err();
+        assert_eq!(status, 409);
+        assert!(message.contains("older than the accepted 2"), "{message}");
+        // A higher revision may grant something else and needs no later issue.
+        let changed = AccessSnapshot {
+            team_delivery: false,
+            ..issued(3, 0)
+        };
+        assert_eq!(f.put(&changed), Ok(3));
+        assert!(!f.ws.access().unwrap().team_delivery);
+    }
+
+    #[test]
+    fn an_expired_grant_comes_back_when_a_refresh_lands() {
+        let f = Fixture::new();
+        assert_eq!(f.put(&issued(1, 0)), Ok(1));
+        let now = 16 * MIN;
+        assert!(matches!(
+            decide("owner", f.ws.access().as_ref(), "granted", now),
+            Decision::Refuse(r) if r.contains("expired")
+        ));
+        assert_eq!(f.put(&issued(1, 15 * MIN)), Ok(1));
+        assert_eq!(
+            decide("owner", f.ws.access().as_ref(), "granted", now),
+            Decision::Deliver
+        );
+        assert!(matches!(
+            decide("owner", f.ws.access().as_ref(), "granted", 30 * MIN),
+            Decision::Refuse(r) if r.contains("expired")
+        ));
+    }
 }
