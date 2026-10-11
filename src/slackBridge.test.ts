@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { createSlackBridge, slackEnvelope } from "./slackBridge";
+import { HOLD_LIMIT_MS, MAX_FOLLOW_UPS, createSlackBridge, slackEnvelope, slackFollowUpEnvelope } from "./slackBridge";
 import type { SlackHubItem } from "./ipc";
 
 function setup(ask?: (shown: string, wire: string) => Promise<{ text: string; failed: boolean }>) {
@@ -34,7 +34,9 @@ describe("requests from the Slack hub", () => {
     const { bridge, deps } = setup();
     bridge.receive([message("item-0001", "what is failing in CI?")]);
     await bridge.idle();
-    expect(deps.ask).toHaveBeenCalledWith("Slack · Sam: what is failing in CI?", expect.stringContaining("the owner of this Canopy"));
+    expect(deps.ask).toHaveBeenCalledWith("Slack · Sam: what is failing in CI?", expect.stringContaining("the owner of this Canopy"), {
+      origin: "slack:item-0001",
+    });
     expect(deps.reply).toHaveBeenCalledWith("item-0001", "done");
   });
 
@@ -122,6 +124,127 @@ describe("approvals in Slack", () => {
     bridge.receive([{ id: "answer-002", kind: "answer", proposalId: "proposal-x", accepted: true, by: "Sam" }]);
     finish();
     await bridge.idle();
+  });
+});
+
+// The bug this exists for: a Slack request the companion handed to an agent
+// got "I've asked Fern" posted as the thread's one reply, and Fern's answer had
+// nowhere to go.
+describe("a request handed to an agent", () => {
+  type Ask = (shown: string, wire: string, opts?: { origin?: string; from?: string }) => Promise<{ text: string; failed: boolean }>;
+  function delegating(answers: string[], open: () => string[]) {
+    let turn = 0;
+    const ask = vi.fn<Ask>(async () => ({ text: answers[Math.min(turn++, answers.length - 1)], failed: false }));
+    const deps = {
+      companionName: () => "Ash",
+      ask,
+      reply: vi.fn(async () => {}),
+      approval: vi.fn(async () => {}),
+      cancel: vi.fn(async () => {}),
+      newId: () => "proposal-1",
+      openRequests: vi.fn(async () => open()),
+      ack: vi.fn(async () => {}),
+    };
+    return { bridge: createSlackBridge(deps), deps };
+  }
+
+  it("holds the thread's one reply until the agent answers, then posts the follow-up's answer", async () => {
+    let open = ["cr_1"];
+    const { bridge, deps } = delegating(["I've asked Fern.", "Fern says CI is green."], () => open);
+    bridge.receive([message("item-0001", "is CI green?")]);
+    await bridge.idle();
+    expect(deps.reply).not.toHaveBeenCalled();
+    expect(deps.ack).toHaveBeenCalledWith("item-0001");
+
+    open = [];
+    expect(bridge.followUp("slack:item-0001", "green", "[canopy: reply from Fern …]\n\ngreen", "Fern · terminal 7")).toBe(true);
+    await bridge.idle();
+    const [shown, wire, opts] = deps.ask.mock.calls[1];
+    expect(shown).toBe("green");
+    expect(wire).toBe(`${slackFollowUpEnvelope({ senderLabel: "Sam", senderRole: "me" })}\n\n[canopy: reply from Fern …]\n\ngreen`);
+    expect(opts).toEqual({ origin: "slack:item-0001", from: "Fern · terminal 7" });
+    expect(deps.reply).toHaveBeenCalledTimes(1);
+    expect(deps.reply).toHaveBeenCalledWith("item-0001", "Fern says CI is green.");
+  });
+
+  it("waits for every request the turn made", async () => {
+    let open = ["cr_1", "cr_2"];
+    const { bridge, deps } = delegating(["Asked both.", "One is in.", "Both are in."], () => open);
+    bridge.receive([message("item-0002", "status?")]);
+    await bridge.idle();
+    open = ["cr_2"];
+    bridge.followUp("slack:item-0002", "a", "a", "Fern · terminal 7");
+    await bridge.idle();
+    expect(deps.reply).not.toHaveBeenCalled();
+    open = [];
+    bridge.followUp("slack:item-0002", "b", "b", "Moss · terminal 8");
+    await bridge.idle();
+    expect(deps.reply).toHaveBeenCalledTimes(1);
+    expect(deps.reply).toHaveBeenCalledWith("item-0002", "Both are in.");
+  });
+
+  it("still finishes in the thread when the agent answers before the turn has ended", async () => {
+    let release!: () => void;
+    let turn = 0;
+    const { deps } = setup(async () => {
+      if (turn++ === 0) {
+        await new Promise<void>((r) => (release = r));
+        return { text: "I've asked Fern.", failed: false };
+      }
+      return { text: "Fern says done.", failed: false };
+    });
+    const withOpen = createSlackBridge({ ...deps, openRequests: async () => [] });
+    withOpen.receive([message("item-0003", "do it")]);
+    await flush();
+    // The request is already answered by the time the turn ends, so the
+    // bridge's open list is empty — the queued follow-up is what holds it.
+    expect(withOpen.followUp("slack:item-0003", "done", "done", "Fern · terminal 7")).toBe(true);
+    release();
+    await withOpen.idle();
+    await withOpen.idle();
+    expect(deps.reply).toHaveBeenCalledTimes(1);
+    expect(deps.reply).toHaveBeenCalledWith("item-0003", "Fern says done.");
+  });
+
+  it("does not claim a reply whose thread it is not holding", () => {
+    const { bridge } = delegating(["x"], () => []);
+    expect(bridge.followUp("slack:item-nope", "a", "a", "Fern")).toBe(false);
+    expect(bridge.followUp("chat", "a", "a", "Fern")).toBe(false);
+  });
+
+  it("posts once when nothing was handed off, exactly as before", async () => {
+    const { bridge, deps } = delegating(["Here you go."], () => []);
+    bridge.receive([message("item-0004", "hi")]);
+    await bridge.idle();
+    expect(deps.reply).toHaveBeenCalledWith("item-0004", "Here you go.");
+    expect(deps.ack).not.toHaveBeenCalled();
+  });
+
+  it("answers anyway after a bounded number of follow-ups", async () => {
+    const { bridge, deps } = delegating(["again"], () => ["cr_forever"]);
+    bridge.receive([message("item-0005", "loop")]);
+    await bridge.idle();
+    for (let i = 0; i < MAX_FOLLOW_UPS; i++) {
+      expect(bridge.followUp("slack:item-0005", "r", "r", "Fern")).toBe(true);
+      await bridge.idle();
+    }
+    expect(deps.reply).toHaveBeenCalledTimes(1);
+    expect(bridge.followUp("slack:item-0005", "r", "r", "Fern")).toBe(false);
+  });
+
+  it("never leaves a thread unanswered when the expiry never arrives", async () => {
+    vi.useFakeTimers();
+    try {
+      const { bridge, deps } = delegating(["I've asked Fern."], () => ["cr_1"]);
+      bridge.receive([message("item-0006", "hello")]);
+      await vi.waitFor(() => expect(deps.ack).toHaveBeenCalled());
+      vi.advanceTimersByTime(HOLD_LIMIT_MS);
+      await bridge.idle();
+      expect(deps.reply).toHaveBeenCalledWith("item-0006", "I've asked Fern.\n\n(No answer came back from the agent in time.)");
+      expect(bridge.followUp("slack:item-0006", "late", "late", "Fern")).toBe(false);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
 

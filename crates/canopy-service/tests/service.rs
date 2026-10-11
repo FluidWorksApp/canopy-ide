@@ -137,6 +137,11 @@ async fn the_credential_is_the_caller_and_everything_else_is_503() {
             Some(serde_json::json!({"kind":"spawn_agent"})),
             "not-implemented",
         ),
+        (
+            "/ctx/action",
+            Some(serde_json::json!({"kind":"companion_reply","requestId":"cr_x","text":"hi"})),
+            "not-implemented",
+        ),
     ] {
         let method = if body.is_some() { "POST" } else { "GET" };
         let (status, reply) = daemon.agent(WS, &ada, method, path, body).await;

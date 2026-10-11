@@ -136,7 +136,7 @@ import { AboutDialog } from "./components/AboutDialog";
 import { Dictation } from "./components/Dictation";
 import { Companion } from "./components/Companion";
 import { startCompanion, stopCompanion, subscribeCompanion } from "./companionSession";
-import { slackConfirm, startSlack } from "./slackLive";
+import { slackConfirm, startCompanionReplies, startSlack } from "./slackLive";
 import { remoteCompanionSnapshot } from "./remoteCompanion";
 import { companionToolNames } from "./companionTools";
 import {
@@ -3093,6 +3093,9 @@ export default function App() {
   // Slack requests arrive from the hub on canopyide.dev for the signed-in
   // account; with nothing linked this only checks every few minutes.
   useEffect(() => startSlack(), []);
+  // An agent answering a companion request: back into its Slack thread, or a
+  // turn in the companion's panel.
+  useEffect(() => startCompanionReplies(), []);
   startCompanionRef.current = launchCompanion;
 
   const companionOn = useSyncExternalStore(

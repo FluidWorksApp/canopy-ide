@@ -1,7 +1,11 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 const hub = vi.fn();
-vi.mock("./ipc", () => ({ slackHub: (...args: unknown[]) => hub(...args) }));
+vi.mock("./ipc", () => ({
+  slackHub: (...args: unknown[]) => hub(...args),
+  companionOpenRequests: async () => [],
+  onCompanionReply: async () => () => {},
+}));
 let finish: (() => void) | null = null;
 vi.mock("./companionSession", () => ({
   askCompanion: () => new Promise((r) => (finish = () => r({ text: "ok", failed: false }))),

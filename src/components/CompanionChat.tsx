@@ -231,7 +231,9 @@ export function CompanionChat({
         )}
         {state.messages.map((m, i) => (
           <div key={m.id} className={`companion-msg companion-msg-${m.who}`}>
-            <span className="companion-who">{m.who === "you" ? "you" : name.toLowerCase()}</span>
+            <span className="companion-who">
+              {m.who === "you" ? "you" : m.who === "agent" ? (m.from ?? "agent") : name.toLowerCase()}
+            </span>
             <div className="companion-body">
               {(m.tools ?? []).length > 0 && (
                 <ToolTrail

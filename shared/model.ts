@@ -142,7 +142,11 @@ export interface AgentRow {
 /** One companion exchange, projected for the portal: prose and provenance,
  *  no attachments (their paths are desktop-local and useless on a phone). */
 export interface RemoteCompanionMessage {
-  who: 'you' | 'ash'
+  /** 'agent' is a coding agent's answer to a companion request — never the
+   *  owner speaking. */
+  who: 'you' | 'ash' | 'agent'
+  /** For 'agent': which one, as the desktop labels it. */
+  from?: string
   text: string
   failed?: boolean
   /** Names of tools the reply ran, for the provenance chips. */

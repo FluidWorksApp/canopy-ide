@@ -57,6 +57,7 @@ const SUPPORTED_ACTIONS: &[&str] = &[
     "message_agent",
     "message_agent_start",
     "mesh_send",
+    "companion_reply",
 ];
 
 const SUPPORTED_TOOLS: &[&str] = &[
@@ -74,6 +75,7 @@ const SUPPORTED_TOOLS: &[&str] = &[
     "canopy_browser_type",
     "canopy_claim",
     "canopy_close_session",
+    "canopy_companion_reply",
     "canopy_component_files",
     "canopy_confirm",
     "canopy_definition",
@@ -199,6 +201,9 @@ pub struct ContextBridge {
     /// so neither the user nor the receiving agent could tell that another
     /// agent had reached in.
     mesh: crate::mesh::MeshStore,
+    /// The companion's outstanding requests to agents — the only way an agent
+    /// can answer something that has no terminal. See companion_requests.rs.
+    companion_requests: crate::companion_requests::CompanionRequests,
 }
 
 #[derive(Clone, Debug, serde::Deserialize)]
@@ -334,6 +339,7 @@ impl Default for ContextBridge {
             mesh_scopes: Mutex::new(Vec::new()),
             worktree_roots: Mutex::new(HashMap::new()),
             mesh: crate::mesh::load_messages(),
+            companion_requests: crate::companion_requests::CompanionRequests::default(),
         }
     }
 }
@@ -833,6 +839,27 @@ pub fn context_publish(
 #[tauri::command]
 pub fn context_remove(state: tauri::State<'_, ContextBridge>, project_id: String) {
     state.snapshots.lock().unwrap().remove(&project_id);
+}
+
+/// Where the companion turn about to be sent came from: `None` for the owner's
+/// own chat, otherwise an opaque label (Slack sends `slack:<item id>`). Set by
+/// the frontend immediately before each turn, so any request the turn mints
+/// records which conversation its answer belongs to.
+#[tauri::command]
+pub fn companion_dispatch_origin(
+    state: tauri::State<'_, ContextBridge>,
+    origin: Option<String>,
+) -> Result<(), String> {
+    state.companion_requests.set_origin(origin)
+}
+
+/// The companion requests still waiting on an answer for one origin.
+#[tauri::command]
+pub fn companion_open_requests(
+    state: tauri::State<'_, ContextBridge>,
+    origin: String,
+) -> Vec<String> {
+    state.companion_requests.open_for(&origin, now_ms())
 }
 
 /// Which canopy_* tools the user switched off (Settings → Agents). Published on
@@ -2454,7 +2481,12 @@ fn human_bytes(n: u64) -> String {
 /// thing it could establish — and anything carried in the message inherited the
 /// user's authority by default. Both delivery routes use this, or the one that
 /// doesn't becomes the way around it.
-fn sender_tag(app: &tauri::AppHandle, who: &Caller) -> String {
+///
+/// `request` is the companion request minted for this dispatch, if any: the
+/// companion has no terminal to be answered in, so the id is the address an
+/// agent replies to. Named here rather than appended at call sites so every
+/// route carries it the same way.
+fn sender_tag(app: &tauri::AppHandle, who: &Caller, request: Option<&str>) -> String {
     match who.agent() {
         Some(a) => {
             let name = app
@@ -2472,7 +2504,173 @@ fn sender_tag(app: &tauri::AppHandle, who: &Caller) -> String {
                 ),
             }
         }
+        None => companion_tag(request),
+    }
+}
+
+/// The companion's half of `sender_tag`, pure so its wording can be pinned.
+fn companion_tag(request: Option<&str>) -> String {
+    match request {
+        Some(id) => format!(
+            "[canopy: message from the Canopy companion, request {id}. Answer it with \
+             canopy_companion_reply (requestId \"{id}\") once you have the answer, not \
+             canopy_message_agent: the companion has no terminal. One reply closes it; it \
+             expires in {} minutes.]",
+            crate::companion_requests::REQUEST_TTL_MS / 60_000
+        ),
         None => "[canopy: message from the Canopy companion]".to_string(),
+    }
+}
+
+/// Mint the reply address for a companion dispatch, or `None` when there is
+/// nobody to answer (an agent caller) or no way to (a CLI without Canopy's
+/// MCP tools, which would read an instruction it cannot follow). The expiry
+/// is armed here so no route can mint without one.
+fn mint_companion_request(
+    app: &tauri::AppHandle,
+    who: &Caller,
+    target_id: u32,
+    target_cwd: &str,
+    target_agent: Option<&str>,
+) -> Option<String> {
+    if !matches!(who, Caller::Root) || !agent_has_mesh_reader(target_agent) {
+        return None;
+    }
+    let name = app
+        .state::<crate::pty::PtyManager>()
+        .get(target_id)
+        .map(|session| session.name.lock().unwrap().clone());
+    let bridge = app.state::<ContextBridge>();
+    let (request, evicted) = bridge.companion_requests.mint(
+        target_id,
+        crate::pty::instance_token(),
+        name,
+        target_cwd.to_string(),
+        now_ms(),
+    );
+    for gone in &evicted {
+        emit_companion_reply(app, gone, None);
+    }
+    let sweep = app.clone();
+    tauri::async_runtime::spawn(async move {
+        // Just past the deadline, so the sweep it wakes for has something to
+        // find. Answered requests are skipped by the sweep itself.
+        let wait = crate::companion_requests::REQUEST_TTL_MS + 250;
+        tokio::time::sleep(std::time::Duration::from_millis(wait)).await;
+        let bridge = sweep.state::<ContextBridge>();
+        for due in bridge.companion_requests.expire_due(now_ms()) {
+            emit_companion_reply(&sweep, &due, None);
+        }
+    });
+    Some(request.id)
+}
+
+/// What the companion is told about the request it just minted.
+fn companion_request_note(request: Option<&str>) -> String {
+    let Some(id) = request else {
+        return String::new();
+    };
+    format!(
+        "This is companion request {id}: the agent answers it with canopy_companion_reply, and \
+         the answer arrives in this conversation as a reply from that agent — within {} \
+         minutes, or you are told it went unanswered — so there is no need to poll \
+         canopy_server_output. If this turn came from Slack, Canopy holds the Slack reply until \
+         then and posts the answer you give to the agent's reply instead.",
+        crate::companion_requests::REQUEST_TTL_MS / 60_000
+    )
+}
+
+/// Hand the companion an agent's answer — or, with `text` None, the news that
+/// the request went unanswered. One event for both, so the frontend cannot
+/// handle one and forget the other.
+fn emit_companion_reply(
+    app: &tauri::AppHandle,
+    request: &crate::companion_requests::CompanionRequest,
+    text: Option<&str>,
+) {
+    let _ = app.emit(
+        "companion:reply",
+        serde_json::json!({
+            "requestId": request.id,
+            "ptyId": request.pty_id,
+            "terminalName": request.agent_name,
+            "cwd": request.cwd,
+            "origin": request.origin,
+            "expired": text.is_none(),
+            "text": text,
+        }),
+    );
+}
+
+/// Longest answer an agent can hand the companion in one reply. Room for a
+/// real report; bounded so one reply cannot own the companion's context.
+const MAX_COMPANION_REPLY: usize = 16 * 1024;
+
+/// What an agent's reply may carry into the companion's turn: line breaks
+/// and tabs survive (it is read, not typed), every other control byte goes.
+fn sanitize_reply(text: &str) -> String {
+    let cleaned: String = text
+        .chars()
+        .map(|c| {
+            if c.is_control() && c != '\n' && c != '\t' {
+                ' '
+            } else {
+                c
+            }
+        })
+        .collect();
+    let trimmed = cleaned.trim();
+    if trimmed.len() <= MAX_COMPANION_REPLY {
+        return trimmed.to_string();
+    }
+    let mut end = MAX_COMPANION_REPLY;
+    while !trimmed.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{} … [truncated]", &trimmed[..end])
+}
+
+/// A refused companion reply, in the same register as `severed_refusal`: what
+/// happened, and what to do instead, so the agent neither retries into a wall
+/// nor assumes it was heard.
+fn companion_reply_refusal(
+    refusal: &crate::companion_requests::Refusal,
+    id: &str,
+) -> (StatusCode, String) {
+    use crate::companion_requests::Refusal;
+    let minutes = crate::companion_requests::REQUEST_TTL_MS / 60_000;
+    match refusal {
+        Refusal::Unknown => (
+            StatusCode::NOT_FOUND,
+            format!(
+                "No open companion request {id}: check the id against the \"[canopy: message \
+                 from the Canopy companion, request …]\" tag. Requests last {minutes} minutes \
+                 and do not survive an app restart; if it is gone, tell the user in your own \
+                 session instead."
+            ),
+        ),
+        Refusal::WrongCaller { pty_id } => (
+            StatusCode::FORBIDDEN,
+            format!(
+                "Companion request {id} was not sent to your terminal {pty_id}. Only the \
+                 terminal it was typed into can answer it."
+            ),
+        ),
+        Refusal::Expired => (
+            StatusCode::GONE,
+            format!(
+                "Companion request {id} expired after {minutes} minutes unanswered, and the \
+                 companion has been told. Your answer was not delivered; put it in your own \
+                 session, or reach the user with canopy_notify."
+            ),
+        ),
+        Refusal::Answered => (
+            StatusCode::CONFLICT,
+            format!(
+                "Companion request {id} was already answered; one reply closes it. Anything \
+                 further belongs in your own session, or with the user via canopy_notify."
+            ),
+        ),
     }
 }
 
@@ -2828,6 +3026,9 @@ struct Action {
     reply_to: Option<String>,
     #[serde(rename = "ref")]
     mesh_ref: Option<crate::mesh::MeshRef>,
+    /// companion_reply: the request id the companion's tag named.
+    #[serde(rename = "requestId")]
+    request_id: Option<String>,
 }
 
 const MAX_AGENT_SPAWN_DEPTH: u8 = 2;
@@ -3261,7 +3462,7 @@ async fn action(
                     child_pty_id: None,
                 },
             );
-            let delivered = format!("{} {body}", sender_tag(&app, &who));
+            let delivered = format!("{} {body}", sender_tag(&app, &who, None));
             let _ = app.emit(
                 "agent:action",
                 serde_json::json!({
@@ -3536,7 +3737,15 @@ async fn action(
                             Ok(record) => record,
                             Err(severed) => return severed_refusal(&severed),
                         };
-                        let line = format!("{} {routed}", sender_tag(&app, &who));
+                        let request = mint_companion_request(
+                            &app,
+                            &who,
+                            target_id,
+                            &target.cwd,
+                            record.to_agent.as_deref(),
+                        );
+                        let line =
+                            format!("{} {routed}", sender_tag(&app, &who, request.as_deref()));
                         if let Err(e) = deliver_line(
                             &app,
                             target_id,
@@ -3544,15 +3753,19 @@ async fn action(
                             record.id.clone(),
                             &line,
                         ) {
+                            if let Some(r) = &request {
+                                snaps.companion_requests.cancel(r);
+                            }
                             return (StatusCode::BAD_REQUEST, e);
                         }
                         snaps.mesh.note_delivery(&record.id, &line);
                         (
                             StatusCode::OK,
                             format!(
-                                "Sent to the agent for {pr} as mesh message {}. {}",
+                                "Sent to the agent for {pr} as mesh message {}. {} {}",
                                 record.id,
-                                data.get("note").and_then(|v| v.as_str()).unwrap_or("")
+                                data.get("note").and_then(|v| v.as_str()).unwrap_or(""),
+                                companion_request_note(request.as_deref()),
                             )
                             .trim()
                             .to_string(),
@@ -3623,6 +3836,15 @@ async fn action(
                     "message_agent needs text with something in it".into(),
                 );
             }
+            // Minted before the record so the mesh entry can name it: the
+            // whole exchange is then one canopy_mesh refKind query away.
+            let request = mint_companion_request(
+                &app,
+                &who,
+                id,
+                &target_cwd,
+                agent_meta(&app, id).1.as_deref(),
+            );
             let record = match snaps.mesh.record(new_message(
                 &app,
                 &who,
@@ -3634,27 +3856,46 @@ async fn action(
                 body.clone(),
                 Vec::new(),
                 None,
-                None,
+                request.as_ref().map(|r| crate::mesh::MeshRef {
+                    kind: "companion-request".into(),
+                    id: r.clone(),
+                }),
             )) {
                 Ok(record) => record,
-                Err(severed) => return severed_refusal(&severed),
+                Err(severed) => {
+                    if let Some(r) = &request {
+                        snaps.companion_requests.cancel(r);
+                    }
+                    return severed_refusal(&severed);
+                }
             };
             // The receiving agent is told where this came from. Without it a
             // message is indistinguishable from the user typing, so "another
             // agent asked me to do this" was not a thing the target could
             // establish — and anything carried in the message inherited the
             // user's authority by default.
-            let line = format!("{} {body}", sender_tag(&app, &who));
+            let line = format!("{} {body}", sender_tag(&app, &who, request.as_deref()));
             if let Err(e) = deliver_line(&app, id, target_cwd, record.id.clone(), &line) {
+                if let Some(r) = &request {
+                    snaps.companion_requests.cancel(r);
+                }
                 return (StatusCode::BAD_REQUEST, e);
             }
-            format!(
-                "Sent to terminal {id} as mesh message {rid}, tagged as coming from you. It \
-                 answers in its own session — read its reply with canopy_server_output({id}). \
-                 The send is on the mesh: canopy_mesh keeps it, and a reply can name it via \
-                 replyTo.",
-                rid = record.id
-            )
+            if request.is_some() {
+                format!(
+                    "Sent to terminal {id} as mesh message {rid}. {}",
+                    companion_request_note(request.as_deref()),
+                    rid = record.id
+                )
+            } else {
+                format!(
+                    "Sent to terminal {id} as mesh message {rid}, tagged as coming from you. It \
+                     answers in its own session — read its reply with canopy_server_output({id}). \
+                     The send is on the mesh: canopy_mesh keeps it, and a reply can name it via \
+                     replyTo.",
+                    rid = record.id
+                )
+            }
         }
         "mesh_send" => {
             let Some(id) = act.pty_id else {
@@ -3727,15 +3968,30 @@ async fn action(
             // The full body lives on the mesh; what lands in the terminal is a
             // one-line notice carrying the id, so the target knows to look —
             // and a 40-line handoff stops arriving as 40 keystroke lines.
-            let notice = format!("{} {}", sender_tag(&app, &who), mesh_notice_for(&record));
+            let request =
+                mint_companion_request(&app, &who, id, &target_cwd, record.to_agent.as_deref());
+            let notice = format!(
+                "{} {}",
+                sender_tag(&app, &who, request.as_deref()),
+                mesh_notice_for(&record)
+            );
             if let Err(e) = deliver_line(&app, id, target_cwd, record.id.clone(), &notice) {
+                if let Some(r) = &request {
+                    snaps.companion_requests.cancel(r);
+                }
                 return (StatusCode::BAD_REQUEST, e);
             }
             // A failed first PTY write means nothing was delivered. Record the
             // concrete notice only after that write succeeds; `submitted`
             // remains the separate truth about the delayed Return.
             snaps.mesh.note_delivery(&record.id, &notice);
-            if agent_has_mesh_reader(record.to_agent.as_deref()) {
+            if request.is_some() {
+                format!(
+                    "Sent mesh message {rid} to terminal {id}. {}",
+                    companion_request_note(request.as_deref()),
+                    rid = record.id,
+                )
+            } else if agent_has_mesh_reader(record.to_agent.as_deref()) {
                 format!(
                     "Sent mesh message {rid} to terminal {id}: a one-line notice with the id was \
                      typed into its session, and the full message ({}between you on the mesh). It \
@@ -3754,6 +4010,50 @@ async fn action(
                      bounded body and shared file paths were typed inline.",
                     record.id
                 )
+            }
+        }
+        "companion_reply" => {
+            // The terminal credential is the identity; the request id only
+            // says which question this answers. Anything without a terminal —
+            // the companion itself, a structured attempt — has nothing to
+            // answer with.
+            let Some(agent) = who.agent() else {
+                return (
+                    StatusCode::FORBIDDEN,
+                    "Only the agent terminal a companion request was sent to can answer it.".into(),
+                );
+            };
+            let Some(id) = act.request_id.as_deref().map(str::trim) else {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    "companion_reply needs requestId — the id in the companion's tag".into(),
+                );
+            };
+            if !crate::companion_requests::valid_id(id) {
+                return companion_reply_refusal(
+                    &crate::companion_requests::Refusal::Unknown,
+                    "(malformed)",
+                );
+            }
+            let body = sanitize_reply(act.text.as_deref().unwrap_or_default());
+            if body.is_empty() {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    "companion_reply needs text with something in it".into(),
+                );
+            }
+            match snaps
+                .companion_requests
+                .answer(id, agent.pty_id, &agent.instance, now_ms())
+            {
+                Ok(request) => {
+                    emit_companion_reply(&app, &request, Some(&body));
+                    format!(
+                        "Delivered to the companion as your answer to request {id}. The request \
+                         is now closed; it relays your answer to whoever asked."
+                    )
+                }
+                Err(refusal) => return companion_reply_refusal(&refusal, id),
             }
         }
         other => return (StatusCode::BAD_REQUEST, format!("unknown action: {other}")),
@@ -5783,6 +6083,99 @@ mod tests {
         assert!(body.contains("terminal 9"), "got: {body}");
         assert!(body.contains("terminal 3"), "got: {body}");
         assert!(body.contains("disconnected"), "got: {body}");
+    }
+
+    #[test]
+    fn a_companion_dispatch_tag_names_its_request_and_the_reply_tool() {
+        let id = "cr_0123456789abcdef0123456789abcdef";
+        let tag = companion_tag(Some(id));
+        assert!(tag.starts_with("[canopy: message from the Canopy companion, request cr_0123"));
+        assert!(tag.contains(&format!("requestId \"{id}\"")), "got: {tag}");
+        assert!(tag.contains("canopy_companion_reply"), "got: {tag}");
+        assert!(tag.contains("not canopy_message_agent"), "got: {tag}");
+        assert!(tag.ends_with(']'));
+        // No request: the old tag, unchanged.
+        assert_eq!(
+            companion_tag(None),
+            "[canopy: message from the Canopy companion]"
+        );
+        // The note the companion gets back names the same id.
+        assert!(companion_request_note(Some(id)).contains(id));
+        assert!(companion_request_note(None).is_empty());
+    }
+
+    #[test]
+    fn a_refused_companion_reply_says_why_and_what_to_do() {
+        use crate::companion_requests::Refusal;
+        let id = "cr_0123456789abcdef0123456789abcdef";
+        let (status, body) = companion_reply_refusal(&Refusal::Unknown, id);
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert!(
+            body.contains(id) && body.contains("No open companion request"),
+            "got: {body}"
+        );
+        let (status, body) = companion_reply_refusal(&Refusal::WrongCaller { pty_id: 4 }, id);
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert!(body.contains("not sent to your terminal 4"), "got: {body}");
+        let (status, body) = companion_reply_refusal(&Refusal::Expired, id);
+        assert_eq!(status, StatusCode::GONE);
+        assert!(
+            body.contains("expired") && body.contains("not delivered"),
+            "got: {body}"
+        );
+        let (status, body) = companion_reply_refusal(&Refusal::Answered, id);
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert!(body.contains("already answered"), "got: {body}");
+    }
+
+    #[test]
+    fn a_companion_reply_keeps_its_lines_and_loses_control_bytes() {
+        assert_eq!(
+            sanitize_reply("  done\n\tall green\x1b[2J\x03 "),
+            "done\n\tall green [2J"
+        );
+        let long = "é".repeat(MAX_COMPANION_REPLY);
+        let cut = sanitize_reply(&long);
+        assert!(cut.ends_with("[truncated]"));
+        assert!(cut.len() <= MAX_COMPANION_REPLY + 20);
+    }
+
+    /// The bridge's own mint/answer path, end to end through the store it
+    /// owns: the dispatched terminal is heard, any other is refused.
+    #[test]
+    fn only_the_dispatched_terminal_answers_through_the_bridge_store() {
+        use crate::companion_requests::Refusal;
+        let bridge = ContextBridge::default();
+        bridge
+            .companion_requests
+            .set_origin(Some("slack:item-0001".into()))
+            .unwrap();
+        let (request, _) = bridge.companion_requests.mint(
+            7,
+            crate::pty::instance_token(),
+            Some("Fern".into()),
+            "/repo".into(),
+            now_ms(),
+        );
+        assert!(companion_tag(Some(&request.id)).contains(&request.id));
+        assert_eq!(
+            bridge.companion_requests.answer(
+                &request.id,
+                8,
+                crate::pty::instance_token(),
+                now_ms()
+            ),
+            Err(Refusal::WrongCaller { pty_id: 8 })
+        );
+        let answered = bridge
+            .companion_requests
+            .answer(&request.id, 7, crate::pty::instance_token(), now_ms())
+            .unwrap();
+        assert_eq!(answered.origin.as_deref(), Some("slack:item-0001"));
+        assert!(bridge
+            .companion_requests
+            .open_for("slack:item-0001", now_ms())
+            .is_empty());
     }
 
     /// The half that is easy to get backwards. The monitor classifies on a

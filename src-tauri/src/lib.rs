@@ -15,6 +15,7 @@ mod cli;
 mod client_mode;
 mod clipboard;
 mod companion;
+mod companion_requests;
 mod containment;
 mod context;
 mod crash;
@@ -989,6 +990,8 @@ pub fn run() {
             cleanup::cleanup_disk,
             context::context_publish,
             context::context_remove,
+            context::companion_dispatch_origin,
+            context::companion_open_requests,
             context::context_tools,
             context::context_claims,
             context::context_claim_history,

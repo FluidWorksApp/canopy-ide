@@ -3195,6 +3195,8 @@ fn tools_list() -> serde_json::Value {
     // think across projects. An ordinary coding agent never sees these exist.
     if is_companion_session() {
         tools.extend(companion_tool_defs());
+    } else {
+        tools.extend(companion_reply_tool_defs());
     }
     // canopy_job_done is on by default everywhere (reporting an outcome is
     // core product), and inside a micro-task session (CANOPY_MICRO_TASK=1 on
@@ -3432,6 +3434,19 @@ fn mesh_tool_defs() -> Vec<serde_json::Value> {
             }, "required": ["brief"], "additionalProperties": false }
         }),
     ]
+}
+
+/// The reply half of a companion dispatch. Coding agents only: the companion
+/// is the one asking, and has nothing to answer.
+fn companion_reply_tool_defs() -> Vec<serde_json::Value> {
+    vec![serde_json::json!({
+        "name": "canopy_companion_reply",
+        "description": "Answer a message from the Canopy companion. A message tagged \"[canopy: message from the Canopy companion, request cr_…]\" came from the companion, which has no terminal — canopy_message_agent cannot reach it, and an answer left only in your own session never gets back to whoever asked it (possibly someone on Slack). Call this once, when you have the answer, with that requestId and the answer as text (multi-line is fine). Only the terminal the request was sent to can answer it; one reply closes the request, and it expires 10 minutes after it was sent.",
+        "inputSchema": { "type": "object", "properties": {
+            "requestId": { "type": "string", "description": "The request id from the companion's tag, e.g. cr_3f9a…" },
+            "text": { "type": "string", "description": "Your answer, in full. It is relayed to whoever asked the companion" }
+        }, "required": ["requestId", "text"], "additionalProperties": false }
+    })]
 }
 
 fn notes_tool_defs() -> Vec<serde_json::Value> {
@@ -4865,6 +4880,24 @@ fn call_tool(name: &str, args: &serde_json::Value) -> Result<ToolOutput, String>
                 "items": args.get("items"),
                 "replyTo": args.get("replyTo"),
                 "ref": args.get("ref"),
+            })))
+        }
+        "canopy_companion_reply" => {
+            let request = args
+                .get("requestId")
+                .and_then(|v| v.as_str())
+                .filter(|v| !v.trim().is_empty())
+                .ok_or("missing required argument: requestId (from the companion's tag)")?;
+            let body = args
+                .get("text")
+                .and_then(|v| v.as_str())
+                .ok_or("missing required argument: text")?;
+            // Who is answering is the bridge's call, from this terminal's own
+            // credential; nothing here names a caller.
+            text(ctx_post(serde_json::json!({
+                "kind": "companion_reply",
+                "requestId": request,
+                "text": body,
             })))
         }
         "canopy_mesh_targets" => text(ui_op("mesh_targets", &serde_json::json!({}), 25)),
@@ -7184,6 +7217,31 @@ mod tests {
         };
         assert_eq!(hint("canopy_notes"), true);
         assert_eq!(hint("canopy_notes_write"), false);
+    }
+
+    #[test]
+    fn the_companion_reply_tool_takes_a_request_and_an_answer() {
+        let defs = companion_reply_tool_defs();
+        assert_eq!(defs.len(), 1);
+        let tool = &defs[0];
+        assert_eq!(tool["name"], "canopy_companion_reply");
+        assert_eq!(
+            tool["inputSchema"]["required"],
+            serde_json::json!(["requestId", "text"])
+        );
+        let about = tool["description"].as_str().unwrap();
+        assert!(
+            about.contains("canopy_message_agent cannot reach it"),
+            "{about}"
+        );
+        // It names no caller: who answers is the bridge's call, from the
+        // terminal's own credential.
+        let props = tool["inputSchema"]["properties"].as_object().unwrap();
+        assert!(!props.contains_key("ptyId"));
+        // Answering takes nothing from anyone, and it is not a read either.
+        assert!(!READ_ONLY_TOOLS.contains(&"canopy_companion_reply"));
+        assert!(!DESTRUCTIVE_TOOLS.contains(&"canopy_companion_reply"));
+        assert!(!COMPANION_MUTATING_TOOLS.contains(&"canopy_companion_reply"));
     }
 
     #[test]

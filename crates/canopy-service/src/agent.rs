@@ -431,7 +431,8 @@ async fn action(State(state): State<AgentState>, headers: HeaderMap, body: Bytes
         | "stop_server"
         | "restart_server"
         | "spawn_agent"
-        | "message_agent_start" => unavailable(
+        | "message_agent_start"
+        | "companion_reply" => unavailable(
             "not-implemented",
             &format!("{} is not served by this cloud service yet.", act.kind),
         ),

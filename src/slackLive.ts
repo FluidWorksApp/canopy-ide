@@ -3,10 +3,17 @@
 // replies handed back. Kept apart from slackBridge.ts so the rules there stay
 // testable without Tauri.
 
-import { slackHub, type SlackHubItem, type SlackHubStatus } from "./ipc";
+import {
+  companionOpenRequests,
+  onCompanionReply,
+  slackHub,
+  type SlackHubItem,
+  type SlackHubStatus,
+} from "./ipc";
 import { askCompanion } from "./companionSession";
 import { companionName } from "./companion";
 import { createSlackBridge, type SlackBridge, type SlackProposal } from "./slackBridge";
+import { createCompanionReplies } from "./companionReplies";
 
 const POLL_MS = 3_000;
 /** Signed out, Slack not set up on canopyide.dev, or nothing linked: look
@@ -22,8 +29,10 @@ export function startSlack(): () => void {
   if (bridge) return () => {};
   const live = createSlackBridge({
     companionName,
-    ask: askCompanion,
+    ask: (shown, wire, opts) => askCompanion(shown, wire, opts),
     reply: (id, text) => slackHub("reply", { id, text }).then(() => {}),
+    openRequests: (origin) => companionOpenRequests(origin),
+    ack: (id) => slackHub("ack", { ids: [id] }).then(() => {}),
     // `summary`, not `action`: the hub's dispatcher owns that field name.
     approval: (id, proposalId, p) =>
       slackHub("approval", { id, proposalId, summary: p.action, project: p.project ?? null, detail: p.detail ?? null }).then(() => {}),
@@ -81,4 +90,26 @@ export function slackStatusChanged(): void {
 /** The approval question in Slack too, when the companion is answering there. */
 export function slackConfirm(p: SlackProposal) {
   return bridge?.confirm(p) ?? null;
+}
+
+/** Agents' answers to the companion's requests: a Slack-born request finishes
+ *  in its thread through the bridge above, anything else is a turn in the
+ *  companion's own panel. Lives here because only this module holds the
+ *  bridge. Returns the stop. */
+export function startCompanionReplies(): () => void {
+  const replies = createCompanionReplies({
+    slackFollowUp: (origin, shown, wire, from) => bridge?.followUp(origin, shown, wire, from) ?? false,
+    observe: (shown, wire, from) => askCompanion(shown, wire, { from }),
+    log: (message) => console.warn(message),
+  });
+  let stopped = false;
+  let unlisten: (() => void) | null = null;
+  void onCompanionReply((e) => replies.handle(e)).then((off) => {
+    if (stopped) off();
+    else unlisten = off;
+  });
+  return () => {
+    stopped = true;
+    unlisten?.();
+  };
 }

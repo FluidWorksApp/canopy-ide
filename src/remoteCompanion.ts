@@ -24,6 +24,7 @@ export function remoteCompanionSnapshot(): RemoteCompanion {
     error: s.error,
     messages: s.messages.slice(-REMOTE_COMPANION_MESSAGES).map((m) => ({
       who: m.who,
+      ...(m.from ? { from: m.from } : {}),
       text: m.text.length > REMOTE_COMPANION_TEXT ? `${m.text.slice(0, REMOTE_COMPANION_TEXT)}…` : m.text,
       ...(m.failed ? { failed: true } : {}),
       ...(m.tools?.length ? { tools: m.tools.map((t) => t.name) } : {}),
