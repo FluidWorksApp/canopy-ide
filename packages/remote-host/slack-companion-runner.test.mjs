@@ -60,7 +60,8 @@ function fakeDocker({installed=['claude']}={}){
  return {spawn,procs};
 }
 const tick=()=>new Promise(r=>setImmediate(r));
-async function until(fn){for(let i=0;i<200;i++){if(fn())return;await tick();}throw Error('timed out');}
+// Time-bounded, not tick-bounded: the heal paths wait on real file writes.
+async function until(fn,ms=10_000){const end=Date.now()+ms;while(Date.now()<end){if(fn())return;await new Promise(r=>setTimeout(r,2));}throw Error('timed out');}
 async function stateFile(){const dir=await mkdtemp(path.join(tmpdir(),'slack-companion-'));return {dir,file:path.join(dir,'state',`${workspace.id}.json`)};}
 
 test('claude: one long-lived process, one turn at a time, resumed after a restart',async t=>{
