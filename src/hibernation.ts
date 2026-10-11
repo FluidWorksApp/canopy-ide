@@ -48,6 +48,10 @@ export interface TerminalSnapshot {
    *  from stores written before that module existed. */
   userName?: string;
   renamed?: boolean;
+  /** The agent's own name and the opening prompt: without them a rebuilt
+   *  tab's prompt slot is empty and the next message becomes its name. */
+  agentName?: string;
+  promptName?: string;
   icon?: string;
   run?: boolean;
   componentId?: string;

@@ -145,4 +145,11 @@ describe("snapshots", () => {
     });
     expect(adoptSnapshotNames({ title: "zsh" }).userName).toBeUndefined();
   });
+
+  it("a restored tab is not renamed by the next message the user sends", () => {
+    const before = { promptName: "fix the ledger import", nativeName: "Moss" };
+    const back = adoptSnapshotNames(snapshotNames(before, { agent: true }));
+    const after = { ...back, ...namePatch(back, "prompt", "pls see where you left it") };
+    expect(tabName(after, { agent: true })).toBe("fix the ledger import");
+  });
 });

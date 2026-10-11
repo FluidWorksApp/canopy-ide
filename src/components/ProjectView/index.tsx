@@ -403,8 +403,12 @@ import {
   sessionAddress,
   snapshotNames,
   adoptSnapshotNames,
+  adoptDurableNames,
+  durableNames,
+  openingPrompt,
   isUserNamed,
 } from "../../tabName";
+import { rememberSessionNames, rememberedSessionNames } from "../../sessionNames";
 import { renameSession, reassertSessionName, onSessionRenamed } from "../../sessionRename";
 import {
   modelCommandLine,
@@ -1363,6 +1367,8 @@ const ProjectViewBody = memo(function ProjectViewBody({
   const workspaceConnection = activeWorkspace()?.connection;
   const terminalMemoryScope = workspaceConnection
     ? `workspace:${workspaceConnection.workspaceId}` : "local";
+  const terminalMemoryScopeRef = useRef(terminalMemoryScope);
+  terminalMemoryScopeRef.current = terminalMemoryScope;
   // Keep the pre-recovery snapshot until all live panes have committed. An
   // intermediate one-pane render must never replace the complete saved mux.
   const [terminalRecoveryMemory] = useState(() =>
@@ -7687,24 +7693,86 @@ const ProjectViewBody = memo(function ProjectViewBody({
       );
       if (tab && d.event === "UserPromptSubmit" && d.prompt) {
         const baseline = promptTaskIdentity(d.prompt);
-        // The opening request, as a stand-in until the agent names the work
-        // itself. Only the first one ever lands: namePatch keeps later messages
-        // out of the slot, and a micro-task's durable launch label out of
-        // reach. Nothing here can touch a name the user typed — that is a
-        // different slot, and this caller has no way to reach it.
-        const name = namePatch(tab, "prompt", baseline.title);
-        // The focus line follows the same rule, yielding to the agent's own
-        // description as soon as canopy_name_task publishes one.
+        // A tab rebuilt after a reconnect, a recreated container or a restart
+        // has an empty prompt slot, so "only the first lands" would let this
+        // message in. The conversation's own names come back first, and the
+        // stand-in is the prompt that opened the session — never this one.
+        const restored = d.sessionId
+          ? adoptDurableNames(tab, rememberedSessionNames(terminalMemoryScopeRef.current, d.sessionId))
+          : null;
+        const current = { ...tab, ...restored };
+        const opening = d.sessionId
+          ? openingPrompt(wsDigestsRef.current.find((x) => x.session_id === d.sessionId), d.prompt)
+          : d.prompt;
+        // Only the first one ever lands: namePatch keeps later messages out of
+        // the slot, and a micro-task's durable launch label out of reach.
+        // Nothing here can touch a name the user typed — that is a different
+        // slot, and this caller has no way to reach it.
+        const name = namePatch(
+          current, "prompt", promptTaskIdentity(opening).title ?? baseline.title,
+        );
+        // The focus line follows the latest message, yielding to the agent's
+        // own description as soon as canopy_name_task publishes one.
         const description =
-          baseline.description && !tab.agentName && !tab.micro
+          baseline.description && !current.agentName && !tab.micro
             ? { description: baseline.description }
             : undefined;
-        if (name || description) patchTabRaw(tab.id, { ...description, ...name });
+        if (restored || name || description)
+          patchTabRaw(tab.id, { ...description, ...restored, ...name });
       }
       if (tab && tab.id === activeTabIdRef.current && visibleRef.current)
         attentionRef.current(d.pty, { t: "focus", at: e.ts, visible: true }, cli);
     }
   }, [projectEvents]);
+
+  // A conversation's names belong to the conversation, not to the pty showing
+  // it. In a remote workspace the pty, the instance and the container all
+  // change under a running conversation — reconnects, recreated containers,
+  // host and app restarts — and a tab matched by pty came back with empty
+  // slots, so the next message the user sent became its name. The session id
+  // survives all of those. The first time a terminal binds to a session here it
+  // takes back what that session was called (or, with nothing remembered, the
+  // prompt that opened it); from then on what it is called is what the session
+  // is remembered by. Saving waits for that first adoption, or a freshly
+  // rebuilt, empty tab would erase the very record it is about to read.
+  const namesBoundTo = useRef(new Map<string, string>());
+  const namesSaved = useRef(new Map<string, string>());
+  useEffect(() => {
+    const scope = terminalMemoryScope;
+    const adopt = new Map<string, Partial<TermSubTab>>();
+    for (const t of tabs) {
+      if (t.type !== "terminal" || t.ptyId == null) continue;
+      const sid = liveSessionByPty.get(t.ptyId);
+      if (!sid) continue;
+      const key = JSON.stringify([scope, sid]);
+      if (namesBoundTo.current.get(t.id) !== key) {
+        namesBoundTo.current.set(t.id, key);
+        const restored = adoptDurableNames(t, rememberedSessionNames(scope, sid));
+        const seeded = namePatch(
+          { ...t, ...restored },
+          "prompt",
+          promptTaskIdentity(openingPrompt(wsDigests.find((d) => d.session_id === sid))).title,
+        );
+        if (restored || seeded) {
+          adopt.set(t.id, { ...restored, ...seeded });
+          const user = restored?.userName;
+          if (user) void reassertSessionName(t.ptyId, user).catch(() => {});
+          continue;
+        }
+      }
+      const names = durableNames(t);
+      const saved = JSON.stringify(names);
+      if (namesSaved.current.get(key) === saved) continue;
+      namesSaved.current.set(key, saved);
+      rememberSessionNames(scope, sid, names);
+    }
+    if (adopt.size)
+      setTabs((prev) =>
+        prev.map((tab) =>
+          tab.type === "terminal" && adopt.has(tab.id) ? { ...tab, ...adopt.get(tab.id) } : tab,
+        ),
+      );
+  }, [tabs, liveSessionByPty, wsDigests, terminalMemoryScope]);
 
   /** Every session that is up, and how to reach it: its terminal here, or null
    *  when it is running somewhere this window cannot type into.
