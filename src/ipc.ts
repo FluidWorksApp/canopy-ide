@@ -4882,6 +4882,12 @@ export interface SlackHubStatus {
   configured: boolean;
   installs: { team: string; teamName: string }[];
   linked: { team: string; teamName: string; slackUser: string }[];
+  /** The owner's workspace that answers Slack while no desktop is polling. */
+  workspaceCompanion?: SlackWorkspaceCompanion | null;
+}
+export interface SlackWorkspaceCompanion {
+  workspaceId: string;
+  name: string;
 }
 export type SlackHubItem =
   | {

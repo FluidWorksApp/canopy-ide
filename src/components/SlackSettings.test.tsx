@@ -14,7 +14,8 @@ afterEach(() => {
 
 const team = { team: "T1", teamName: "Acme" };
 const hub = (status: unknown) =>
-  mocks.invoke.mockImplementation(async (_cmd: string, args: { body: { action: string } }) => {
+  mocks.invoke.mockImplementation(async (_cmd: string, args: { route?: string; body: { action: string } }) => {
+    if (args?.route !== "/api/slack") return args?.route === "/api/workspaces" ? { workspaces: [] } : null;
     const { action } = args.body;
     if (action === "status") {
       if (status instanceof Error) throw status;
@@ -25,7 +26,11 @@ const hub = (status: unknown) =>
     return {};
   });
 const buttons = () => screen.queryAllByRole("button").map((b) => b.textContent);
-const action = () => mocks.invoke.mock.calls.map((c) => c[1].body.action).filter((a) => a !== "status");
+const action = () =>
+  mocks.invoke.mock.calls
+    .filter((c) => c[1]?.route === "/api/slack")
+    .map((c) => c[1].body.action)
+    .filter((a) => a !== "status");
 
 it("offers nothing while Slack isn't available", async () => {
   hub({ configured: false, installs: [], linked: [] });
@@ -87,4 +92,19 @@ it("keeps the status and actions when an action fails", async () => {
   expect((await screen.findByRole("alert")).textContent).toContain("no browser");
   expect(screen.getByRole("status").textContent).toBe("Not linked.");
   expect(buttons()).toEqual(["Add to Slack", "Link my Slack"]);
+});
+
+it("offers the workspace opt-in inside the Slack row for an owned workspace", async () => {
+  mocks.invoke.mockImplementation(async (_cmd: string, args: { route?: string; body: { action: string } }) => {
+    if (args?.route === "/api/workspaces")
+      return { workspaces: [{ id: "own-1", name: "Box", state: "ready", memory_max_mib: 1, cpu_max: 1, access: { owner: true, canManageAccess: true, canStop: true, canConnect: true } }] };
+    if (args?.route !== "/api/slack") return null;
+    if (args.body.action === "status") return { configured: true, installs: [], linked: [team], workspaceCompanion: { workspaceId: "own-1", name: "Box" } };
+    return {};
+  });
+  render(<SlackSettings companion="Jarvis" />);
+  const toggle = await screen.findByRole("switch", { name: "Answer Slack from my workspace when my desktop is offline" });
+  expect(toggle.getAttribute("aria-checked")).toBe("true");
+  expect(toggle.closest(".set-item")?.querySelector(".set-item-name")?.textContent).toBe("Slack");
+  expect(document.querySelector(".set-hint")).toBeNull();
 });

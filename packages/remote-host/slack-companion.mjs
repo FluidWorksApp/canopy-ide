@@ -112,3 +112,59 @@ export class SlackCompanion{
  close(){this.closed=true;clearTimeout(this.timer);this.timer=undefined;}
  idle(){return this.queue;}
 }
+
+export const HOST_CHECK_MS=60_000;
+/** Whether this host answers Slack at all, re-decided every minute: only for
+ *  a managed workspace whose owner opted in on the control plane and whose
+ *  container is already running. A stopped container is waited for, never
+ *  started. `createRunner(workspace)` returns the turn runner
+ *  ({runTurn, close}); `createCompanion` is the SlackCompanion constructor. */
+export class SlackCompanionHost{
+ constructor({config,controlPlane,inspect,createRunner,createCompanion=options=>new SlackCompanion(options),checkMs=HOST_CHECK_MS,log=text=>console.warn(text)}){
+  Object.assign(this,{config,controlPlane,inspect,createRunner,createCompanion,checkMs,log});
+  this.current=null;this.state=null;this.timer=undefined;this.closed=false;
+ }
+ report(state,text){
+  if(this.state===state)return;this.state=state;
+  this.log(`Slack companion host ${state}${text?': '+text:''}`);
+ }
+ workspace(){
+  const id=this.config.managedSession?.workspaceId;
+  return id?this.config.workspaces.find(w=>w.id===id)??null:null;
+ }
+ /** One decision. Returns what it decided, for tests and logs. */
+ async check(){
+  if(this.closed)return 'closed';
+  const workspace=this.workspace();
+  if(!this.config.managedSession||!this.controlPlane?.slackHub||!workspace){this.stop();this.report('off','not a managed workspace');return 'unmanaged';}
+  if(['stopped','deleted'].includes(workspace.desiredState??workspace.desired_state)){this.stop();this.report('waiting','the workspace is stopped');return 'stopped';}
+  let inspected;
+  try{inspected=await this.inspect(workspace);}catch(error){this.stop();this.report('waiting',message(error));return 'stopped';}
+  if(inspected?.State?.Running!==true||inspected.State.Paused){this.stop();this.report('waiting','the workspace is not running');return 'stopped';}
+  let status;
+  try{status=await this.controlPlane.slackHub(workspace,'status');}
+  catch(error){this.report('unavailable',message(error));return 'unavailable';}
+  if(status?.enabled!==true){this.stop();this.report('off','the owner has not chosen this workspace to answer Slack');return 'off';}
+  // A replaced generation signs with a different credential: start over.
+  const key=`${workspace.id}:${workspace.generation??0}`;
+  if(this.current?.key!==key){
+   this.stop();
+   const runner=this.createRunner(workspace);
+   const companion=this.createCompanion({controlPlane:this.controlPlane,workspace,runTurn:turn=>runner.runTurn(turn),log:this.log});
+   this.current={key,runner,companion};companion.start();
+  }
+  this.report('on');
+  return 'on';
+ }
+ stop(){
+  const current=this.current;this.current=null;
+  if(!current)return;
+  current.companion.close();current.runner.close();
+ }
+ start(){
+  if(this.timer||this.closed)return;
+  const loop=async()=>{if(this.closed)return;await this.check().catch(error=>this.report('unavailable',message(error)));if(!this.closed){this.timer=setTimeout(loop,this.checkMs);this.timer.unref?.();}};
+  this.timer=setTimeout(loop,0);this.timer.unref?.();
+ }
+ close(){this.closed=true;clearTimeout(this.timer);this.timer=undefined;this.stop();}
+}

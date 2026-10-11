@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { Button } from "./ui";
 import * as ipc from "../ipc";
 import { slackStatusChanged } from "../slackLive";
+import { SlackWorkspaceCompanion } from "./SlackWorkspaceCompanion";
 
 /** The companion in Slack, through Canopy's one Slack app (the hub on
  *  canopyide.dev). Adding it to a Slack workspace and linking a Slack identity
@@ -144,6 +145,7 @@ export function SlackSettings({ companion }: { companion: string }) {
         {ready && !isLinked && !installedNotLinked && (
           <div className="set-item-desc set-note">Already in a workspace with Canopy? Link my Slack instead.</div>
         )}
+        {ready && <SlackWorkspaceCompanion current={status?.workspaceCompanion ?? null} onChange={refresh} />}
       </div>
     </div>
   );
