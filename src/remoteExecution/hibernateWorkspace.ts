@@ -1,7 +1,7 @@
 import {invoke} from '@tauri-apps/api/core';
 import {canSwitchExecutionMode} from '../executionMode';
 import {activeWorkspace} from './workspace';
-import {isAccountWorkspace} from './accountWorkspace';
+import {accountErrorMessage,accountRequestError,isAccountWorkspace,othersConnected} from './accountWorkspace';
 import {connectionKey,reportWorkspaceLifecycle} from './connectionState';
 import type {ManagedWorkspace} from './ManagedWorkspaces';
 import {savePhaseLabel} from './storageStatus';
@@ -56,7 +56,9 @@ export async function waitForWorkspaceStopped(workspaceId:string,onProgress?:Hib
  check();throw Error(accepted?'Shutdown is taking longer than expected. Projects are saved; compute has not been confirmed stopped.':'The shutdown response was delayed and acceptance could not be confirmed. Projects are saved; check its status in Workspaces before requesting another shutdown.');
  }finally{fence.close();}
 }
-export async function hibernateWorkspaceProjects(projectIds:string[],snapshot:(id:string)=>Promise<void>,release:(id:string)=>Promise<void>,projectsUnchanged:()=>boolean=()=>true,onProgress?:HibernateProgressListener){
+export type ConfirmOthers=(others:number)=>Promise<boolean>;
+export class HibernateCancelled extends Error{constructor(){super('Hibernation cancelled. Projects are saved and the workspace keeps running; wake a project to continue.');}}
+export async function hibernateWorkspaceProjects(projectIds:string[],snapshot:(id:string)=>Promise<void>,release:(id:string)=>Promise<void>,projectsUnchanged:()=>boolean=()=>true,onProgress?:HibernateProgressListener,confirmOthers?:ConfirmOthers){
  const fence=shutdownFence();
  try{
  const workspace=activeWorkspace();
@@ -81,12 +83,26 @@ export async function hibernateWorkspaceProjects(projectIds:string[],snapshot:(i
  if(activeWorkspace()!==workspace)throw Error('Workspace changed while saving projects');
  if(!projectsUnchanged()||!canSwitchExecutionMode())throw Error('Projects changed while saving. Review the open projects and workspace status before retrying.');
  fence.check();workspace.setProjectIdle(true);publish('stopping-compute');
- const requestKey=crypto.randomUUID(),deadline=Date.now()+120000;
+ let deadline=Date.now()+120000,confirmedOthers=false;
  let accepted=false,operationId:string|undefined;
- try{
-  const result=await bounded(invoke<{accepted:boolean;operation?:{id?:string}}>('canopy_account_request',{route:'/api/operations',body:{workspaceId:workspace.connection.workspaceId,action:'hibernate',confirmInterrupt:true,requestKey}}),'Shutdown request did not respond. Projects are saved; checking its current status.');
-  fence.check();if(result?.accepted!==true)throw Error('Workspace shutdown was not accepted; it may still be running');accepted=true;operationId=result.operation?.id;
- }catch(error){fence.check();if(!transientObservation(error))throw error;}
+ for(;;){
+  try{
+   const result=await bounded(invoke<{accepted:boolean;operation?:{id?:string}}>('canopy_account_request',{route:'/api/operations',body:{workspaceId:workspace.connection.workspaceId,action:'hibernate',confirmInterrupt:true,requestKey:crypto.randomUUID(),clientId:workspace.connectionClientId,...(confirmedOthers?{confirmOthers:true}:{})},detailedErrors:true}),'Shutdown request did not respond. Projects are saved; checking its current status.');
+   fence.check();if(result?.accepted!==true)throw Error('Workspace shutdown was not accepted; it may still be running');accepted=true;operationId=result.operation?.id;
+  }catch(error){
+   fence.check();
+   // Asking needs the snapshots first, so the question comes after projects are
+   // saved; compute keeps running until the owner confirms.
+   const others=confirmedOthers?null:othersConnected(error);
+   if(others!==null){
+    workspace.setProjectIdle(false);
+    if(!confirmOthers||!await confirmOthers(others))throw new HibernateCancelled();
+    fence.check();workspace.setProjectIdle(true);confirmedOthers=true;deadline=Date.now()+120000;continue;
+   }
+   if(!transientObservation(error))throw accountRequestError(error)?Error(accountErrorMessage(error)):error;
+  }
+  break;
+ }
  if(accepted){publish('stopping-compute',true);reportWorkspaceLifecycle(key,'stopping');}
  await waitForWorkspaceStopped(workspace.connection.workspaceId,progress=>publish(progress.phase,progress.shutdownAccepted),key,{accepted,deadline,operationId,checkCurrent:()=>fence.check()});
  }finally{fence.close();}

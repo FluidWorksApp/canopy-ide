@@ -1,6 +1,8 @@
 import {workspaceTabs as buildWorkspaceTabs,workspaceTabId,type SavedWorkspaceTab,type WorkspaceTab} from './workspaceTabs';
 import {WorkspaceHibernateProgress,type HibernateOperation} from './WorkspaceHibernateProgress';
-import {waitForWorkspaceStopped,type HibernateProgressListener} from './hibernateWorkspace';
+import {HibernateCancelled,waitForWorkspaceStopped,type ConfirmOthers,type HibernateProgressListener} from './hibernateWorkspace';
+import {accountErrorMessage,isAccountWorkspace,isMemberConnection,othersConnected,othersConnectedMessage} from './accountWorkspace';
+import {postAttention} from '../attention';
 import {WorkspaceOwnerTools} from './WorkspaceOwnerTools';
 import {WorkspaceSharing} from "../components/WorkspaceSharing";
 import {SharedSessionsPanel} from "../components/SharedSessionsPanel";
@@ -26,18 +28,24 @@ import {connectionLabel,useConnectionState} from './connectionState';
 import {WorkspaceMenu,type WorkspaceMenuRow} from './WorkspaceMenu';
 import {AccountSync} from './AccountSync';
 import {workspaceStatus} from './WorkspaceHero';
-import {dismissStopSwitchNotice,markStopRequested,saveStopSwitchNotice,takeStopSwitchNotice,useWorkspaceLifecycle,workspaceLifecycle} from './workspaceLifecycle';
+import {dismissStopSwitchNotice,markStopRequested,saveMemberStopNotice,saveStopSwitchNotice,takeMemberStopNotice,takeStopSwitchNotice,useWorkspaceLifecycle,workspaceLifecycle} from './workspaceLifecycle';
 import {WorkspaceStopNotice} from './WorkspaceStopNotice';
 import {connectionKey,reportWorkspaceLifecycle} from './connectionState';
 
-export function WorkspaceSelector({ onboarding = false,onHibernateWorkspace }: { onboarding?: boolean;onHibernateWorkspace?:(onProgress?:HibernateProgressListener)=>Promise<void> }) {
+export function WorkspaceSelector({ onboarding = false,onHibernateWorkspace }: { onboarding?: boolean;onHibernateWorkspace?:(onProgress?:HibernateProgressListener,confirmOthers?:ConfirmOthers)=>Promise<void> }) {
   const active = activeWorkspace();
   const [managed,setManaged]=useState<ManagedWorkspace[]>(()=>peekWorkspaceList()?.workspaces.filter(w=>w.provider==='lightsail')??[]);
-  useEffect(()=>{const changed=()=>{accountRemovalEpoch.current++;hibernateRun.current++;hibernateTask.current=false;setHibernateOperation(null);setHibernateConfirm(false);setStoppingVm(false);setManaged([]);setAccountRemoval(null);setAccountRemovalName('');setBusy(false);};window.addEventListener('canopy:account-changed',changed);return()=>window.removeEventListener('canopy:account-changed',changed);},[]);
+  useEffect(()=>{const changed=()=>{accountRemovalEpoch.current++;hibernateRun.current++;hibernateTask.current=false;setHibernateOperation(null);setHibernateConfirm(false);setMemberStopConfirm(false);setOthersPrompt(previous=>{previous?.answer(false);return null;});setStoppingVm(false);setManaged([]);setAccountRemoval(null);setAccountRemovalName('');setBusy(false);};window.addEventListener('canopy:account-changed',changed);return()=>window.removeEventListener('canopy:account-changed',changed);},[]);
   useWorkspaceLifecycle(managed);
   // Only shown on the local workspace, after leaving a workspace that stops.
   const [stopNotice,setStopNotice]=useState(()=>active?null:takeStopSwitchNotice());
   const [stopConfirm,setStopConfirm]=useState(false);
+  const [memberStopConfirm,setMemberStopConfirm]=useState(false),[memberStopError,setMemberStopError]=useState('');
+  // Owner shutdowns the server refused because other people are connected.
+  const [othersPrompt,setOthersPrompt]=useState<{others:number;answer:(confirmed:boolean)=>void}|null>(null);
+  const askOthers:ConfirmOthers=others=>new Promise(resolve=>setOthersPrompt({others,answer:resolve}));
+  const member=!!active&&(isMemberConnection(active.connection)||managed.find(w=>w.id===active.connection.workspaceId)?.access?.owner===false);
+  useEffect(()=>{if(active)return;const name=takeMemberStopNotice();if(name)postAttention({kind:'fyi',tone:'success',source:'app',title:`Your session stopped. ${name} keeps running for its owner.`});},[]);
   const [forgetConfirm,setForgetConfirm]=useState(false);
   const accountRemovalEpoch=useRef(0);
   const [accountRemoval,setAccountRemoval]=useState<ManagedWorkspace|null>(null),[accountRemovalName,setAccountRemovalName]=useState('');
@@ -75,20 +83,32 @@ export function WorkspaceSelector({ onboarding = false,onHibernateWorkspace }: {
     setStoppingVm(true);setError('');setHibernateConfirm(false);setOpen(false);setProgress(null);setHibernateMinimized(false);
     setHibernateOperation(previous=>({workspaceId:target,name,startedAt:Date.now(),progress:checkExisting?previous?.progress??{phase:'stopping-compute',shutdownAccepted:true}:{phase:'saving-projects',shutdownAccepted:false}}));
     const onProgress:HibernateProgressListener=progress=>{if(run===hibernateRun.current)setHibernateOperation(previous=>previous?{...previous,progress:{...previous.progress,...progress},error:undefined}:previous);};
-    try{if(checkExisting)await waitForWorkspaceStopped(target,onProgress,undefined,{accepted:hibernateOperation?.progress.shutdownAccepted??false});else await onHibernateWorkspace(onProgress);
+    try{if(checkExisting)await waitForWorkspaceStopped(target,onProgress,undefined,{accepted:hibernateOperation?.progress.shutdownAccepted??false});else await onHibernateWorkspace(onProgress,askOthers);
       if(run!==hibernateRun.current)return;
       setHibernateOperation(previous=>previous?{...previous,progress:{...previous.progress,phase:'completed',shutdownAccepted:true}}:previous);setNotice('Workspace hibernated. Compute is stopped.');
-    }catch(error){if(run===hibernateRun.current)setHibernateOperation(previous=>previous?{...previous,error:String(error)}:previous);}
+    }catch(error){if(run!==hibernateRun.current)return;if(error instanceof HibernateCancelled){setHibernateOperation(null);setNotice(error.message);}else setHibernateOperation(previous=>previous?{...previous,error:String(error)}:previous);}
     finally{if(run===hibernateRun.current){hibernateTask.current=false;setStoppingVm(false);}}
   }
-  async function stopVm(){
+  async function stopVm(confirmOthers=false){
     if(!active||!canSwitchExecutionMode()){setError('Save or close unsaved files before stopping this workspace.');setStopConfirm(false);return;}
     setStoppingVm(true);setError('');
     const {workspaceId,workspaceName,endpoint:host}=active.connection,key=connectionKey(host,workspaceId);
     // The connection drops as compute stops: that is intended, not a fault.
     reportWorkspaceLifecycle(key,'stopping');
-    try{await invoke('canopy_account_request',{route:'/api/operations',body:{workspaceId,action:'hibernate',confirmInterrupt:true,requestKey:crypto.randomUUID()}});markStopRequested(workspaceId);saveStopSwitchNotice({workspaceId,name:workspaceName,at:Date.now()});setStopConfirm(false);setNotice('Workspace is stopping. Files and setup are saved.');await setExecutionMode('local');}
-    catch(error){reportWorkspaceLifecycle(key,null);setError(String(error));setStopConfirm(false);}
+    try{await invoke('canopy_account_request',{route:'/api/operations',body:{workspaceId,action:'hibernate',confirmInterrupt:true,requestKey:crypto.randomUUID(),clientId:active.connectionClientId,...(confirmOthers?{confirmOthers:true}:{})},detailedErrors:true});markStopRequested(workspaceId);saveStopSwitchNotice({workspaceId,name:workspaceName,at:Date.now()});setStopConfirm(false);setNotice('Workspace is stopping. Files and setup are saved.');await setExecutionMode('local');}
+    catch(error){reportWorkspaceLifecycle(key,null);setStopConfirm(false);const others=confirmOthers?null:othersConnected(error);
+      if(others!==null)setOthersPrompt({others,answer:confirmed=>{if(confirmed)void stopVm(true);}});else setError(accountErrorMessage(error));}
+    finally{setStoppingVm(false);}
+  }
+  // A member stops only their own runtime; the owner's compute keeps running.
+  async function stopMemberSession(){
+    if(!active||!canSwitchExecutionMode()){setMemberStopError('Save or close unsaved files before stopping your session.');return;}
+    setStoppingVm(true);setMemberStopError('');
+    const {workspaceId,workspaceName}=active.connection;
+    try{const result=await invoke<{accepted?:boolean}>('canopy_account_request',{route:'/api/operations',body:{workspaceId,action:'member-stop',clientId:active.connectionClientId}});
+      if(result?.accepted!==true)throw Error('Your session was not stopped. Try again.');
+      setMemberStopConfirm(false);saveMemberStopNotice(workspaceName);await setExecutionMode('local');}
+    catch(error){setMemberStopError(error instanceof Error?error.message:String(error));}
     finally{setStoppingVm(false);}
   }
   const activeId=active?workspaceTabId({id:`${active.connection.endpoint}/${active.connection.workspaceId}`,endpoint:active.connection.endpoint,workspaceId:active.connection.workspaceId,workspaceName:active.connection.workspaceName},managed):'local';
@@ -204,11 +224,14 @@ export function WorkspaceSelector({ onboarding = false,onHibernateWorkspace }: {
     {accountRemoval&&createPortal(<Dialog title={`Remove ${accountRemoval.name} connection?`} body="Remove this saved connection from your Canopy account. The VM keeps running until you stop it separately. Its disks, files, setup and usage history stay untouched." onDismiss={()=>{if(!busy)setAccountRemoval(null);}} actions={[{label:'Keep connection',onClick:()=>setAccountRemoval(null)},{label:busy?'Removing…':'Remove connection',disabled:busy||accountRemovalName!==accountRemoval.name,onClick:()=>void removeAccountConnection()}]}><label>Type the workspace name to confirm<TextInput aria-label="Workspace name confirmation" width="full" autoComplete="off" value={accountRemovalName} disabled={busy} onChange={event=>setAccountRemovalName(event.target.value)}/></label>{error&&<p role="alert">{error}</p>}</Dialog>,document.body)}
     {forgetConfirm&&createPortal(<Dialog title={`Remove ${selected?.workspaceName??'workspace'} connection?`} body="Remove this saved connection from this Mac. The workspace and its files stay on the remote host. This does not stop or delete the VM." onDismiss={()=>{if(!busy)setForgetConfirm(false);}} actions={[{label:'Cancel',onClick:()=>setForgetConfirm(false)},{label:busy?'Removing…':'Remove connection',onClick:()=>{if(!busy)void forgetConnection();}}]}/>,document.body)}
     {hibernateConfirm&&createPortal(<Dialog title={`Hibernate ${active?.connection.workspaceName??'workspace'}?`} body="Save all open projects, then stop this workspace’s compute. Running agents, terminals and jobs—including those used by other connected people—will stop. Files and account settings stay saved. Wake a project to start the workspace again." onDismiss={()=>{if(!stoppingVm)setHibernateConfirm(false);}} actions={[{label:'Cancel',onClick:()=>setHibernateConfirm(false)},{label:'Hibernate workspace',primary:true,onClick:()=>{if(!stoppingVm)void hibernateVm();}}]}/>,document.body)}
+    {memberStopConfirm&&createPortal(<Dialog title={`Stop your session in ${active?.connection.workspaceName??'this workspace'}?`} body={<>Your agents, terminals and jobs in this workspace will stop. The workspace keeps running for its owner and other connected people. Canopy will return to your local workspace.{memberStopError&&<p className="workspace-feedback error" role="alert">{memberStopError}</p>}</>} onDismiss={()=>{if(!stoppingVm)setMemberStopConfirm(false);}} actions={[{label:'Cancel',onClick:()=>setMemberStopConfirm(false)},{label:stoppingVm?'Stopping…':'Stop my session',primary:true,onClick:()=>{if(!stoppingVm)void stopMemberSession();}}]}/>,document.body)}
+    {othersPrompt&&createPortal(<Dialog title="Other people are connected" body={othersConnectedMessage(othersPrompt.others)} onDismiss={()=>{othersPrompt.answer(false);setOthersPrompt(null);}} actions={[{label:'Cancel',onClick:()=>{othersPrompt.answer(false);setOthersPrompt(null);}},{label:'Hibernate anyway',primary:true,onClick:()=>{othersPrompt.answer(true);setOthersPrompt(null);}}]}/>,document.body)}
     {stopConfirm&&createPortal(<Dialog title={`Stop ${active?.connection.workspaceName??'workspace'}?`} body="Running agents, terminals and jobs will stop. Your files and setup will be saved. Canopy will return to your local workspace." onDismiss={()=>{if(!stoppingVm)setStopConfirm(false);}} actions={[{label:'Cancel',onClick:()=>setStopConfirm(false)},{label:stoppingVm?'Stopping…':'Stop workspace',primary:true,onClick:()=>{if(!stoppingVm)void stopVm();}}]}/>,document.body)}
     {!onboarding && <div className="workspace-header-group" aria-label="Execution workspace">
       <Button className="workspace-choice" aria-haspopup="menu" aria-expanded={menuOpen} onClick={event => {menuAnchor.current=event.currentTarget;setMenuError('');setPanelMounted(true);setMenuOpen(value=>!value);}} title={active?`${active.connection.workspaceName} · ${connectionLabel(connectionState)}`:'Select workspace'}><span className={`workspace-location ${active ? connectionState.phase : ''}`} aria-label={active ? connectionLabel(connectionState) : 'Local'}>{active ? '●' : '⌂'}</span><span className="workspace-name">{active?.connection.workspaceName ?? 'Local workspace'}</span>{active&&connectionState.phase!=='connected'&&<span className="workspace-header-state">{connectionState.phase==='authentication-error'?'Sign in':connectionState.phase==='hibernated'?'Hibernated':connectionState.phase==='stopping'?'Stopping…':connectionState.phase==='connecting'?'Connecting…':'Reconnecting'}</span>}<span aria-hidden="true">⌄</span></Button>
       {active && <Button variant="ghost" icon onClick={() => setDesktop(true)} title={`Open ${active.connection.workspaceName} desktop`} aria-label="Open remote desktop"><DesktopIcon size={14}/></Button>}
-      {active&&onHibernateWorkspace&&<Button variant="ghost" icon disabled={stoppingVm||['stopping','hibernated'].includes(connectionState.phase)} onClick={()=>setHibernateConfirm(true)} title="Hibernate workspace — save all projects and stop compute" aria-label="Hibernate workspace">❄</Button>}
+      {active&&!member&&onHibernateWorkspace&&<Button variant="ghost" icon disabled={stoppingVm||['stopping','hibernated'].includes(connectionState.phase)} onClick={()=>setHibernateConfirm(true)} title="Hibernate workspace — save all projects and stop compute" aria-label="Hibernate workspace">❄</Button>}
+      {active&&member&&isAccountWorkspace(active.connection)&&<Button variant="ghost" icon disabled={stoppingVm||['stopping','hibernated'].includes(connectionState.phase)} onClick={()=>{setMemberStopError('');setMemberStopConfirm(true);}} title="Stop my session — the workspace keeps running for its owner" aria-label="Stop my session">❄</Button>}
       {browserRequest && <Button variant="ghost" icon onClick={()=>{openLink(browserRequest,true);pendingBrowser.current=null;setBrowserRequest(null);}} title="Remote CLI sign-in needs your browser" aria-label="Open browser ↗">↗</Button>}
     </div>}
     {stopNotice&&!active&&!onboarding&&createPortal(<WorkspaceStopNotice notice={stopNotice} onDetails={()=>{setSelectedId(`managed:${stopNotice.workspaceId}`);setSection('overview');setOpen(true);}} onDismiss={()=>{dismissStopSwitchNotice();setStopNotice(null);}}/>,document.body)}
@@ -228,7 +251,7 @@ export function WorkspaceSelector({ onboarding = false,onHibernateWorkspace }: {
           {!['connected','stopping','hibernated'].includes(connectionState.phase)&&<div className="workspace-feedback error" role="status"><span>{connectionLabel(connectionState)}. {connectionState.phase==='authentication-error'?'Reconnect with an updated access token.':'Your files remain on the VM. Waiting for the host connection.'}</span><Button size="sm" disabled={busy} onClick={()=>{setBusy(true);void active.client.workspace(active.connection.workspaceId,'/open',{resume:true}).catch(e=>setError(String(e))).finally(()=>setBusy(false));}}>Retry now</Button></div>}
           <section className="workspace-card"><header><h3>Personal accounts</h3><p className="workspace-description">Sync agent accounts from this Mac, then pick which one new agents in {active.connection.workspaceName} launch as.</p></header><AccountSync workspaceName={active.connection.workspaceName}/></section>
           <section className="workspace-card"><header><h3>Git</h3></header><div className="workspace-action-row"><div><strong>GitHub & Git</strong><small>Repository access and commit identity</small></div><Button disabled={busy} onClick={()=>void runSetup('execution_remote_import_git')}>Connect GitHub</Button></div>{notice&&<p className="workspace-feedback" role="status">✓ {notice}</p>}</section>
-          <section className="workspace-card workspace-utilities"><header><h3>Workspace tools</h3></header><div className="workspace-inline-actions"><Button onClick={()=>{setOpen(false);setDesktop(true);}}><DesktopIcon size={14}/> Open desktop</Button>{onHibernateWorkspace&&<Button disabled={stoppingVm||['stopping','hibernated'].includes(connectionState.phase)} onClick={()=>setHibernateConfirm(true)}>Hibernate workspace</Button>}{!managedSelection&&active.connection.workspaceId==='shoaib-work'&&<Button disabled={stoppingVm} onClick={()=>setStopConfirm(true)}>Stop workspace</Button>}</div><LocalProjectImport/>
+          <section className="workspace-card workspace-utilities"><header><h3>Workspace tools</h3></header><div className="workspace-inline-actions"><Button onClick={()=>{setOpen(false);setDesktop(true);}}><DesktopIcon size={14}/> Open desktop</Button>{member?isAccountWorkspace(active.connection)&&<Button disabled={stoppingVm||['stopping','hibernated'].includes(connectionState.phase)} onClick={()=>{setMemberStopError('');setMemberStopConfirm(true);}}>Stop my session</Button>:<>{onHibernateWorkspace&&<Button disabled={stoppingVm||['stopping','hibernated'].includes(connectionState.phase)} onClick={()=>setHibernateConfirm(true)}>Hibernate workspace</Button>}{!managedSelection&&active.connection.workspaceId==='shoaib-work'&&<Button disabled={stoppingVm} onClick={()=>setStopConfirm(true)}>Stop workspace</Button>}</>}</div><LocalProjectImport/>
           <details><summary>Browser sign-in</summary><p>Open a CLI sign-in link on this Mac, or use this workspace’s browser for a localhost callback.</p><label>Sign-in URL<TextInput width="full" type="url" autoComplete="off" placeholder="https://…" value={signInLink} onChange={e=>setSignInLink(e.target.value)}/></label><div className="workspace-inline-actions"><Button disabled={!/^https:\/\//i.test(signInLink)} onClick={()=>{openLink(signInLink,true);setSignInLink('');}}>Open on this Mac</Button><Button disabled={busy||!/^https:\/\//i.test(signInLink)} onClick={()=>{setBusy(true);setError('');void active.client.workspace(active.connection.workspaceId,'/desktop',{}).then(()=>active.client.workspace(active.connection.workspaceId,'/native',{command:'workspace_browser_open',args:{url:signInLink}})).then(()=>{setOpen(false);setDesktop(true);setSignInLink('');}).catch(e=>setError(String(e))).finally(()=>setBusy(false));}}>Open in {active.connection.workspaceName}</Button></div></details></section>
         </>:!selected?<p className="workspace-description">Projects, agent sign-ins and Git settings use this Mac. Open or create projects from the project tabs.</p>:null}
       </section>
