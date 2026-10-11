@@ -81,7 +81,7 @@ and `app_mention`; the bot's own messages are dropped.
 
 | `action` | Body | Result |
 | --- | --- | --- |
-| `status` | — | `{configured, installs:[{team, teamName}], linked:[{team, teamName, slackUser}]}` |
+| `status` | — | `{configured, installs:[{team, teamName}], linked:[{team, teamName, slackUser}], workspaceCompanion:{workspaceId, name}\|null}` |
 | `install-url` / `link-url` | — | `{url}` |
 | `unlink` | `{team?}` | `{unlinked:n}` |
 | `poll` | — | `{items:[...]}` ≤ 20, oldest first; each leased for 120 s to this device |
@@ -89,6 +89,9 @@ and `app_mention`; the bot's own messages are dropped.
 | `reply` | `{id, text}` | `{posted:true}` — posts in the item's thread (≤ 39 000 chars); acks the item; a second reply is 409 |
 | `approval` | `{id, proposalId, summary, project?, detail?}` | `{posted:true}` — Approve/Deny buttons in the item's thread |
 | `approval-cancel` | `{proposalId, accepted}` | `{}` — answered in Canopy; the Slack message says so |
+| `workspace-companion` | `{workspaceId, enabled}` | `{workspaceCompanion}` — owner only; §7 |
+
+`poll` also records the desktop's presence (§7).
 
 `ack` only stops redelivery: `reply` and `approval` keep working on an acked
 item until it expires (24 h). `approval` fields: `summary` 1–300 chars (it is
@@ -117,3 +120,55 @@ One companion turn at a time, after the user's own; a `[Slack: …]` envelope
 naming the sender and whether they are the owner; no IDE spotlight; Slack
 approval races the panel's chip and the first answer wins; a turn that ends
 with a question open cancels it as denied.
+
+## 7. Answering from the workspace VM
+
+The owner may let one of their workspaces answer Slack while no desktop is
+polling. Off by default; `workspace-companion {workspaceId, enabled:true}`
+(owner only) turns it on for that workspace and off for the owner's others
+(`workspace.slack_companion`, at most one per owner). In the IDE it is the
+switch "Answer Slack from my workspace when my desktop is offline" under
+Settings → Companion → Slack.
+
+**Arbitration.** Every desktop `poll` records `slack_desktop_presence`
+(per user, refreshed at most every 5 s). A workspace host may take a **new**
+lease only when that row is older than **30 s** (`DESKTOP_QUIET_SECONDS`: ten
+missed 3 s desktop polls), checked inside the same `UPDATE` that leases. It
+renews leases it already holds either way. Leases stay exclusive in both
+directions (nobody takes a live lease another poller holds), and `reply` is
+still one per message (409 after the first), so a desktop and a VM can never
+both answer one Slack message. A host lease that lapses is not re-taken while
+a desktop is present.
+
+**Host API: `POST /api/slack-host`** with a `slack-companion` host credential
+(`hostCredential`, ≤ 120 s, generation-fenced: a replaced VM is refused). It
+acts for `workspace.owner_id` of the credential's workspace only.
+
+| `action` | Body | Result |
+| --- | --- | --- |
+| `status` | — | `{enabled, desktopActive, quietSeconds}` |
+| `poll` | — | `{enabled, deferred:"desktop-active"\|null, items}` — `kind:"message"` only, leased 120 s to `workspace:<id>`; `{enabled:false, items:[]}` when off |
+| `ack` | `{ids}` | `{acknowledged:n}` — only items this host holds |
+| `reply` | `{id, text}` | `{posted:true}` — only an item this host holds (else 409) |
+| `approval` | `{id, proposalId, summary, project?, detail?}` | `{posted:true}` — the same owner-only buttons |
+| `approval-status` | `{proposalId}` | `{resolution:"pending"\|"approved"\|"denied"\|"expired", accepted}` |
+| `approval-cancel` | `{proposalId, accepted:false}` | `{}` — withdraw as denied; `accepted:true` is refused |
+
+Everything but `status`, `poll` and `approval-cancel` is 403 while the
+workspace is switched off. `install-url`, `link-url`, `unlink` and
+`workspace-companion` do not exist here.
+
+**Approvals.** The host never approves. A press on a host approval is checked
+exactly as in §5 (the owner's own linked identity) but queues no
+`kind:"answer"` item: the host reads it through `approval-status`. Unanswered
+for 15 minutes, `approval-status` marks it expired (denied) and the Slack
+message says "Expired; treated as denied". A host turn that ends with a
+question open withdraws it as denied.
+
+**Host side** (`packages/remote-host/slack-companion.mjs`): polls every 5 s
+while answering (which renews its leases during a long turn), 15 s while the
+desktop is active, 5 min while switched off; backs off on failures to 5 min
+and logs each state change once. One turn at a time with the §6 envelope.
+Turns that delegate to an agent use the companion reply contract
+(`[canopy: message from the Canopy companion, request <id>]` +
+`canopy_companion_reply`), never a channel of their own.

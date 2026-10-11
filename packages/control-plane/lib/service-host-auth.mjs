@@ -1,6 +1,6 @@
 import {createHmac,timingSafeEqual} from 'node:crypto';
 const fail=(code,message)=>{throw Object.assign(Error(message),{code});};
-export const SERVICE_HOST_KINDS=['workspace-access-snapshot','peer-host-registration','peer-relay'];
+export const SERVICE_HOST_KINDS=['workspace-access-snapshot','peer-host-registration','peer-relay','slack-companion'];
 // Same token shape as the runtime-policy credential, keyed by the workspace
 // secret the managed host already holds. `kind` binds a token to one purpose.
 export function verifyServiceHostToken(token,keyForWorkspace,kind,now=Date.now()){
