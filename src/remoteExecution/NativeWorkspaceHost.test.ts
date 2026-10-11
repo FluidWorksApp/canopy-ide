@@ -371,3 +371,62 @@ it.each(['different-account','expired'])('refreshes a saved connection with %s a
   expect(fetcher.mock.calls[0][1].headers.authorization).toBe('Bearer renewed');
  }finally{host.dispose();}
 });
+
+function deferredFetch(){
+ const pending:Array<{url:string;command?:string;resolve:()=>void}>=[];
+ const fetcher=vi.fn().mockImplementation((url:string,options:RequestInit)=>{
+  const command=JSON.parse(String(options.body||'{}')).command as string|undefined;
+  const body=url.endsWith('/ticket')?{ticket:'t-'+pending.length}:url.endsWith('/sessions')?[{id:7,title:'agent',cols:80,rows:24,exitCode:null}]:{result:command==='instance_id'?'remote-alice':command==='pty_metadata_get'?{'7':{cwd:'/workspace/app',name:'Where are we at?'}}:null};
+  return new Promise(resolve=>pending.push({url,command,resolve:()=>resolve({ok:true,json:async()=>body})}));
+ });
+ vi.stubGlobal('fetch',fetcher);
+ const settle=async()=>{for(let i=0;i<10;i++)await Promise.resolve();};
+ return {pending,fetcher,settle};
+}
+it('asks for metadata, sessions and the instance together on the boot handshake',async()=>{
+ const desktop={kind:'native',invoke:vi.fn().mockResolvedValue({generation:3}),listen:vi.fn(),channel:vi.fn()} as unknown as Host;
+ const host=new NativeWorkspaceHost(connection,desktop);
+ const {pending,fetcher,settle}=deferredFetch();
+ const registration=host.invoke<{generation:number;instance?:string;sessions:Array<{id:number;cwd:string}>}>('pty_renderer_register');
+ await settle();
+ expect(pending.map(p=>p.command??p.url.split('/').at(-1)).sort()).toEqual(['instance_id','pty_metadata_get','sessions']);
+ pending.forEach(p=>p.resolve());
+ const result=await registration;
+ expect(result).toMatchObject({generation:3,instance:'remote-alice',sessions:[{id:7,cwd:'/workspace/app'}]});
+ const calls=fetcher.mock.calls.length;
+ expect(await host.invoke('instance_id')).toBe('remote-alice');
+ expect(fetcher.mock.calls.length).toBe(calls);
+ host.dispose();
+});
+it('attaches remote terminals in parallel and joins a retry onto the pending ticket',async()=>{
+ const {host}=setup();
+ const {pending,settle}=deferredFetch();
+ vi.stubGlobal('WebSocket',class {close(){}});
+ const first=host.invoke('pty_attach_desktop',{id:7});
+ const other=host.invoke('pty_attach_desktop',{id:8});
+ await settle();
+ expect(pending.filter(p=>p.url.endsWith('/ticket'))).toHaveLength(2);
+ const retry=host.invoke('pty_attach_desktop',{id:7});
+ await settle();
+ expect(pending.filter(p=>p.url.endsWith('/ticket'))).toHaveLength(2);
+ for(let i=0;i<5;i++){pending.forEach(p=>p.resolve());await settle();}
+ await Promise.allSettled([first,other,retry]);
+ host.dispose();
+});
+it('completes the boot handshake while a poll backlog is being turned away',async()=>{
+ const {requestQueue}=await import('./requestQueue');
+ const endpoint='http://127.0.0.1:8799',queue=requestQueue(endpoint),releases:Array<()=>void>=[];
+ const stalled=Array.from({length:4},()=>queue.run(1,()=>new Promise<void>(r=>releases.push(r))));
+ await Promise.resolve();
+ const polls=Array.from({length:24},()=>queue.run(0,async()=>'poll'));
+ const desktop={kind:'native',invoke:vi.fn().mockResolvedValue({generation:3}),listen:vi.fn(),channel:vi.fn()} as unknown as Host;
+ const host=new NativeWorkspaceHost({...connection,endpoint},desktop);
+ const {pending,settle}=deferredFetch();
+ const registration=host.invoke<{instance?:string}>('pty_renderer_register');
+ await settle();
+ releases.forEach(r=>r());
+ for(let i=0;i<5;i++){pending.forEach(p=>p.resolve());await settle();}
+ await expect(registration).resolves.toMatchObject({instance:'remote-alice'});
+ await Promise.all([...stalled,...polls]);
+ host.dispose();
+});

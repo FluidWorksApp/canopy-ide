@@ -22,6 +22,8 @@ for(const command of ['chrome_extension_token_status','chrome_extension_token_se
 // (it answered "does not support notes_create"). Attaching a file stays with the
 // workspace: its path names a workspace file this computer cannot read.
 for(const command of ['notes_list','notes_due','notes_get','notes_create','notes_update','notes_add_attachment','notes_set_status','notes_link','notes_read_file','notes_read_image','notes_dir','notes_remind','notes_search','notes_delete'])LOCAL_UI.add(command);
+// Recovery reads share routes with background polls; they must not wait in that lane.
+const INTERACTIVE=1;
 const quote = (value: string) => `'${value.replaceAll("'", "'\\''")}'`;
 
 /** Immutable execution ownership for one renderer. Every execution/file request
@@ -111,18 +113,29 @@ export class NativeWorkspaceHost implements Host {
       this.heartbeat=setTimeout(()=>void tick(),0);
     }
   }
-  private async call<T>(route: string, args?: unknown) {if(this.disposed)throw Error('Workspace disconnected');const result=await this.client.workspace<T>(this.connection.workspaceId,route,args);if(this.disposed)throw Error('Workspace disconnected');return result;}
+  private async call<T>(route: string, args?: unknown, priority?: number) {if(this.disposed)throw Error('Workspace disconnected');const result=await this.client.workspace<T>(this.connection.workspaceId,route,args,priority);if(this.disposed)throw Error('Workspace disconnected');return result;}
   private emit(event: string, payload: unknown) { this.listeners.get(event)?.forEach(handler => handler({event,id:0,payload})); }
   private summary(session: RemoteSession) {
     const meta=this.metadata[String(session.id)] ?? {};
     return {id:session.id,session_generation:session.id,pid:null,cwd:meta.cwd??'/workspace',title:meta.title??session.title,name:meta.name,cols:session.cols,rows:session.rows,kind:'desktop',project_id:meta.projectId??`remote-${this.connection.workspaceId}`,run:meta.run??session.kind==='build',command:meta.command,run_command_id:meta.runCommandId,generation:1,replay_start:0,replay_end:0};
   }
   private async desktopCall<T>(command:string,args:Args={}){if(this.disposed)throw Error('Workspace disconnected');const result=await this.desktop.invoke<T>(command,args);if(this.disposed)throw Error('Workspace disconnected');return result;}
-  private async native<T>(command: string,args: Args={}) {
-    const result=await this.call<{result:T}>('/native',{command,args});return result.result;
+  private async native<T>(command: string,args: Args={},priority?: number) {
+    const result=await this.call<{result:T}>('/native',{command,args},priority);return result.result;
   }
-  private async sessions() {
-    const sessions=await this.call<RemoteSession[]>('/sessions');
+  private instance?: Promise<string>;
+  private instanceId(){
+    if(!this.instance){const pending=this.native<string>('instance_id',{},INTERACTIVE);this.instance=pending;pending.catch(()=>{if(this.instance===pending)this.instance=undefined;});}
+    return this.instance;
+  }
+  private tickets=new Map<number,Promise<string>>();
+  private ticket(id:number){
+    let pending=this.tickets.get(id);
+    if(!pending){pending=this.client.streamUrl(this.connection.workspaceId,`/sessions/${id}/stream`).finally(()=>{if(this.tickets.get(id)===pending)this.tickets.delete(id);});this.tickets.set(id,pending);}
+    return pending;
+  }
+  private async sessions(priority?: number) {
+    const sessions=await this.call<RemoteSession[]>('/sessions',undefined,priority);
     for(const session of sessions){
       const old=this.known.get(session.id);
       if(old?.exitCode==null && session.exitCode!=null && old){const stream=this.streams.get(session.id);if(stream){stream.pendingExit=session.exitCode;this.deliver(stream);}else this.emit('pty:exit',{id:session.id,session_generation:session.id,exit_code:session.exitCode});}
@@ -148,7 +161,7 @@ export class NativeWorkspaceHost implements Host {
     const retry=()=>{if(stream.closed)return;clearTimeout(stream.handshake);reportStream(stateKey,id,false);if(workspaceLifecyclePhase(stateKey)){stream.retry=setTimeout(parked,2000);return;}const delay=Math.min(30_000,1000*2**Math.min(failures++,5))+Math.random()*500;stream.retry=setTimeout(()=>void connect(),delay);};
     const connect=async()=>{
       try{
-        const url=await this.client.streamUrl(this.connection.workspaceId,`/sessions/${id}/stream`);
+        const url=await this.ticket(id);
         if(stream.closed)return;
         const socket=new WebSocket(url);stream.socket=socket;
         stream.handshake=setTimeout(()=>{if(stream.socket===socket&&socket.readyState===WebSocket.CONNECTING)socket.close();},10_000);
@@ -237,10 +250,16 @@ export class NativeWorkspaceHost implements Host {
     if(command==='environment_identity')value=`${this.connection.endpoint}/${this.connection.workspaceId}`;
     else if(command==='pty_renderer_register'){
       // Keep the Mac watchdog alive, but never adopt its local processes.
-      const registration=await this.desktop.invoke<{generation:number}>('pty_renderer_register');this.rendererGeneration=registration.generation;
-      this.metadata=await this.native<Record<string,Args>>('pty_metadata_get');this.beginPoll();
-      value={generation:this.rendererGeneration,sessions:(await this.sessions()).filter(s=>s.exitCode==null).map(s=>this.summary(s))};
-    }else if(command==='pty_renderer_sessions')value=(await this.sessions()).filter(s=>s.exitCode==null).map(s=>this.summary(s));
+      const [registration,metadata,sessions,instance]=await Promise.all([
+        this.desktop.invoke<{generation:number}>('pty_renderer_register'),
+        this.native<Record<string,Args>>('pty_metadata_get',{},INTERACTIVE),
+        this.sessions(INTERACTIVE),
+        this.instanceId().catch(()=>undefined),
+      ]);
+      this.rendererGeneration=registration.generation;this.metadata=metadata;this.beginPoll();
+      value={generation:this.rendererGeneration,instance,sessions:sessions.filter(s=>s.exitCode==null).map(s=>this.summary(s))};
+    }else if(command==='pty_renderer_sessions')value=(await this.sessions(INTERACTIVE)).filter(s=>s.exitCode==null).map(s=>this.summary(s));
+    else if(command==='instance_id')value=await this.instanceId();
     else if(['pty_spawn','pty_spawn_attached_argv','pty_spawn_argv','pty_spawn_detached'].includes(command)){
       const cwd=String(args.cwd??'/workspace');if(cwd!=='/workspace'&&!cwd.startsWith('/workspace/'))throw Error('Choose a directory in the remote workspace');
       const env=(args.env??[]) as [string,string][];
@@ -271,7 +290,7 @@ export class NativeWorkspaceHost implements Host {
       // The session list is a background poll; under load it queued behind
       // other polls and pushed the attach past its deadline. Use the copy the
       // poll already keeps, and only ask when this session isn't known yet.
-      const session=this.known.get(Number(args.id))??(await this.sessions()).find(s=>s.id===args.id);if(!session)throw Error('Remote session not found');value={cols:session.cols,rows:session.rows,generation:stream.generation,replay_start:0,replay_end:0};}
+      const session=this.known.get(Number(args.id))??(await this.sessions(INTERACTIVE)).find(s=>s.id===args.id);if(!session)throw Error('Remote session not found');value={cols:session.cols,rows:session.rows,generation:stream.generation,replay_start:0,replay_end:0};}
     else if(command==='pty_read_desktop'){const stream=this.streams.get(Number(args.id));if(!stream||stream.generation!==args.generation)throw Error('Remote terminal attachment ended');const frame=this.take(stream);value=frame?{...frame,bytes:[...frame.bytes]}:null;}
     else if(command==='pty_detach_desktop'){const stream=this.streams.get(Number(args.id));if(stream && (args.generation==null||stream.generation===args.generation))this.detach(Number(args.id));}
     else if(command==='pty_ack'){const stream=this.streams.get(Number(args.id));if(stream && stream.generation===args.generation){stream.busy=false;this.deliver(stream);}value=null;}

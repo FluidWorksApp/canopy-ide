@@ -738,6 +738,7 @@ export const Term = forwardRef<TermHandle, TermProps>(function Term(
       streamGeneration = generation;
       streamAttached = true;
       el.dataset.streamAttached = "true";
+      delete el.dataset.reconnecting;
       bound(id, geom);
       const pending = streamLedger.takePendingAck(epoch);
       if (pending > 0) {
@@ -756,6 +757,7 @@ export const Term = forwardRef<TermHandle, TermProps>(function Term(
       streamGeneration = null;
       streamAttached = false;
       el.dataset.streamAttached = "false";
+      delete el.dataset.reconnecting;
       streamConnecting = false;
       clearTimeout(attachRetryTimer);
       attachRetryTimer = undefined;
@@ -780,6 +782,7 @@ export const Term = forwardRef<TermHandle, TermProps>(function Term(
       const id = ptyIdRef.current;
       if (disposed || processExited || id == null || streamAttached || streamConnecting) return;
       streamConnecting = true;
+      if (attachIdRef.current != null) el.dataset.reconnecting = "true";
       const epoch = ++streamEpoch;
       let attachTimeout: ReturnType<typeof setTimeout> | undefined;
       try {

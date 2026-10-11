@@ -179,6 +179,8 @@ export interface PtySummary extends PtyGeometry {
 export interface RendererRegistration {
   generation: number;
   sessions: PtySummary[];
+  /** Answered with the handshake by a remote workspace; local asks `instanceId`. */
+  instance?: string;
 }
 
 export interface PtyChunk {
@@ -243,6 +245,7 @@ export async function ptyRendererRegister(): Promise<RendererRegistration> {
 
 /** Snapshot returned by the boot handshake, consumed idempotently by App. */
 export const rendererPtySessions = (): PtySummary[] => renderer?.sessions ?? [];
+export const rendererInstanceId = (): string | null => renderer?.instance ?? null;
 
 /** Current native sessions, read only after pty:spawned has a listener. The
  * listener + snapshot order makes a spawn racing renderer hydration appear in
