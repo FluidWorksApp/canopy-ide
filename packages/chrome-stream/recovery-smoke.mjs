@@ -7,6 +7,7 @@ import {join} from 'node:path';
 import {randomUUID} from 'node:crypto';
 import {chromium} from 'playwright-core';
 import {WebSocketServer} from 'ws';
+import {streamPixelRatio} from './protocol.mjs';
 const {BrowserStreams}=await import(process.env.CANOPY_BROWSER_STREAMS_MODULE??new URL('../remote-host/browser-streams.mjs',import.meta.url).href);
 const home=await mkdtemp(join(tmpdir(),'canopy-preview-recovery-'));
 const registry=new BrowserStreams({home,script:process.env.CANOPY_BROWSER_STREAM_SCRIPT??new URL('../remote-host/chrome-stream/server.mjs',import.meta.url).pathname});
@@ -63,9 +64,10 @@ try{
  const context=await qa.newContext({deviceScaleFactor:2,viewport:{width:1400,height:900}}),page=await context.newPage();
  page.on('pageerror',error=>console.error('Viewer error:',error.stack));await page.goto(origin+'/viewer');
  const waitReady=async()=>{await page.waitForFunction(()=>window.replies.some(m=>m.canopy==='ready'&&m.url.includes('/fixture')),{},{timeout:20_000});return page.frames().find(f=>f.url().includes('/chrome-stream/viewer.html'));};
- let viewer=await waitReady();await viewer.waitForFunction(()=>{const c=document.getElementById('canvas');return !c.hidden&&c.width>=2600;},{},{timeout:20_000});
- const pixels=await viewer.evaluate(()=>{const c=document.getElementById('canvas'),r=c.getBoundingClientRect();return {pixels:c.width,css:r.width,viewport:c.dataset.viewportWidth};});
- assert.ok(pixels.pixels>=pixels.css*1.8,JSON.stringify(pixels));console.log('PASS retina stream:',JSON.stringify(pixels));
+ let viewer=await waitReady();await viewer.waitForFunction(()=>{const c=document.getElementById('canvas');return !c.hidden&&c.width>Number(c.dataset.viewportWidth)*1.2;},{},{timeout:20_000});
+ const pixels=await viewer.evaluate(()=>{const c=document.getElementById('canvas'),r=c.getBoundingClientRect();return {pixels:c.width,css:r.width,viewport:Number(c.dataset.viewportWidth),viewportHeight:Number(c.dataset.viewportHeight)};});
+ // Density above 1× within the workspace pixel budget, never canvas upscaling of a 1× frame.
+ assert.ok(Math.abs(pixels.pixels-pixels.viewport*streamPixelRatio(pixels.viewport,pixels.viewportHeight,2))<=2,JSON.stringify(pixels));console.log('PASS retina stream:',JSON.stringify(pixels));
  const point=await page.evaluate(()=>window.op('(()=>{const r=document.querySelector("#click").getBoundingClientRect();return {x:r.x+r.width/2,y:r.y+r.height/2};})()'));
  await viewer.locator('#canvas').click({position:point});
  assert.equal(await page.evaluate(()=>window.op('document.querySelector("#click").textContent')),'Clicked');
@@ -85,7 +87,7 @@ try{
  const captureId=randomUUID();await page.evaluate(id=>window.command({canopy:'capture',id}),captureId);
  await page.waitForFunction(id=>window.replies.some(m=>m.canopy==='capture-result'&&m.id===id),captureId,{timeout:12000});
  const capture=await page.evaluate(id=>window.replies.find(m=>m.canopy==='capture-result'&&m.id===id),captureId),png=Buffer.from(capture.image,'base64');
- assert.equal(capture.width,png.readUInt32BE(16));assert.equal(capture.height,png.readUInt32BE(20));assert.ok(capture.width>=2600);
+ assert.equal(capture.width,png.readUInt32BE(16));assert.equal(capture.height,png.readUInt32BE(20));assert.equal(capture.width,pixels.pixels);
  console.log('PASS screenshot dimensions match physical pixels');
 
  await page.evaluate(()=>window.op('document.cookie="preview=retained; Max-Age=3600"; localStorage.setItem("preview","retained"); document.querySelector("#entry").focus(); true'));

@@ -54,8 +54,11 @@ test('explicit reconnect replaces an open socket and disposal cancels all retrie
  assert.equal(old.readyState,3);assert.equal(f.sockets.length,2);f.connection.dispose();f.tick(60_000);assert.equal(f.tasks.size,0);assert.equal(f.sockets.length,2);
 });
 test('physical pixel density is bounded without changing CSS pointer coordinates',()=>{
- assert.equal(streamPixelRatio(1600,1000,2),2);
- assert.equal(streamPixelRatio(2560,1600,3),1.5);
+ assert.equal(streamPixelRatio(900,800,2),1.75);
+ assert.equal(streamPixelRatio(700,600,2),2);
+ assert.equal(streamPixelRatio(1930,1025,2),1);
+ assert.equal(streamPixelRatio(2560,1600,3),1);
+ assert.equal(streamPixelRatio(900,800,1),1);
  for(const ratio of [NaN,Infinity,-1,undefined])assert.equal(streamPixelRatio(1280,720,ratio),1);
 });
 
