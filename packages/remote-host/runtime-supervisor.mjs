@@ -6,9 +6,12 @@ import {runtimeReady} from './runtime-readiness.mjs';
 
 // Host-owned state, never mounted into developer containers. Recovery reservations
 // are durable before Docker runs, including when Docker fails or the host crashes.
+// A busy VM (builds, heavy agents) can leave the service slow for minutes, and
+// recovery kills the container. Only a long run of consecutive failures counts.
+const probeUnderLoad=runtime=>runtimeReady(runtime,{timeoutMs:10000});
 export class RuntimeSupervisor{
- constructor({directory,host,authorize=async()=>false,probe=runtimeReady,now=Date.now,thresholdMs=30000,cooldownMs=60000,maxAttempts=3}){
-  Object.assign(this,{directory,host,authorize,probe,now,thresholdMs,cooldownMs,maxAttempts});this.failures=new Map();this.status=new Map();
+ constructor({directory,host,authorize=async()=>false,probe=probeUnderLoad,now=Date.now,thresholdMs=300000,minFailures=20,cooldownMs=60000,maxAttempts=3,budgetResetMs=3600000}){
+  Object.assign(this,{directory,host,authorize,probe,now,thresholdMs,minFailures,cooldownMs,maxAttempts,budgetResetMs});this.failures=new Map();this.status=new Map();
  }
  async budget(workspace,key){
   const path=join(this.directory,workspace.id+'.json');let file;
@@ -17,7 +20,9 @@ export class RuntimeSupervisor{
    if(!info.isFile()||info.size>4096)throw Error('Invalid recovery state');
    const value=JSON.parse(await file.readFile('utf8'));
    if(value.version!==1||value.workspaceId!==workspace.id||!/^[a-f0-9]{64}$/.test(value.key??'')||!Number.isSafeInteger(value.attempts)||value.attempts<0||value.attempts>this.maxAttempts||!Number.isFinite(value.lastAttemptAt)||value.lastAttemptAt<0)throw Error('Invalid recovery state');
-   return value.key===key?value:{version:1,workspaceId:workspace.id,key,attempts:0,lastAttemptAt:0};
+   // A recovered container keeps its id, so attempts lapse after a quiet hour
+   // instead of exhausting the workspace for good.
+   return value.key===key&&this.now()-value.lastAttemptAt<this.budgetResetMs?value:{version:1,workspaceId:workspace.id,key,attempts:0,lastAttemptAt:0};
   }catch(error){if(error.code==='ENOENT')return {version:1,workspaceId:workspace.id,key,attempts:0,lastAttemptAt:0};throw error;}
   finally{await file?.close();}
  }
@@ -38,7 +43,7 @@ export class RuntimeSupervisor{
   const key=createHash('sha256').update(JSON.stringify([current.Id,workspace])).digest('hex'),now=this.now();
   let failure=this.failures.get(workspace.id);
   if(!failure||failure.key!==key){failure={key,since:now,count:0};this.failures.set(workspace.id,failure);}failure.count++;
-  if(failure.count<3||now-failure.since<this.thresholdMs)return 'unresponsive';
+  if(failure.count<this.minFailures||now-failure.since<this.thresholdMs)return 'unresponsive';
   const budget=await this.budget(workspace,key);
   if(budget.attempts>=this.maxAttempts)return 'recovery-exhausted';
   if(budget.attempts&&now-budget.lastAttemptAt<this.cooldownMs)return 'cooldown';

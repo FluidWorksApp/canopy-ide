@@ -5,7 +5,7 @@ const workspace={id:'owner',accounts:[],memoryMiB:1024,cpus:1},containerId='a'.r
 async function fixture(run){
  const directory=await mkdtemp(join(tmpdir(),'canopy-runtime-recovery-'));let now=0,allowed=true,running=true,healthy=false,attempts=0,failRecovery=false;
  const host={runtimes:new Map(),inspectRuntime:async()=>({Id:containerId,State:{Running:running}}),recoverRuntime:async(w,id,{authorize,reserve})=>{assert.equal(id,containerId);if(!running||!await authorize())return false;await reserve();attempts++;if(failRecovery)throw Error('Docker failed');return true;}};
- const options={directory,host,authorize:async()=>allowed,probe:async()=>healthy,now:()=>now,thresholdMs:10,cooldownMs:20};
+ const options={directory,host,authorize:async()=>allowed,probe:async()=>healthy,now:()=>now,thresholdMs:10,minFailures:3,cooldownMs:20};
  const observe=async supervisor=>{await supervisor.observe(workspace,{});now+=10;await supervisor.observe(workspace,{});now+=10;return supervisor.observe(workspace,{});};
  try{await run({directory,host,options,observe,get attempts(){return attempts;},set allowed(v){allowed=v;},set running(v){running=v;},set healthy(v){healthy=v;},set failRecovery(v){failRecovery=v;},advance:ms=>now+=ms});}
  finally{await rm(directory,{recursive:true,force:true});}
@@ -34,12 +34,30 @@ test('trusted host rechecks stopped, changed or revoked containers before restar
  id=containerId;allowed=false;assert.equal(await host.recoverRuntime(workspace,containerId,options),false);
  assert.equal(reservations,0);assert.equal(calls.some(args=>['restart','kill'].includes(args[0])),false);
 });
-test('host restart reserves before mutation and refreshes endpoint without replacing container or volumes',async()=>{
- const calls=[],runtime={url:'http://127.0.0.1:45000',token:'runtime'};
- const host=new DockerWorkspaces({secret:'test',docker:async args=>{calls.push(args[0]);return {stdout:JSON.stringify([{Id:containerId,Config:{Labels:{'canopy.workspace':'owner'}},HostConfig:{RestartPolicy:{Name:'on-failure',MaximumRetryCount:3}},State:{Running:true}}])};}});
+test('host restart reserves before mutation, starts the same container and refreshes endpoint without replacing container or volumes',async()=>{
+ const calls=[],runtime={url:'http://127.0.0.1:45000',token:'runtime'};let running=true;
+ const host=new DockerWorkspaces({secret:'test',docker:async args=>{calls.push(args[0]);if(args[0]==='kill')running=false;if(args[0]==='start')running=true;return {stdout:JSON.stringify([{Id:containerId,Config:{Labels:{'canopy.workspace':'owner'}},HostConfig:{RestartPolicy:{Name:'on-failure',MaximumRetryCount:3}},State:{Running:running}}])};}});
  host.ensure=async w=>{assert.equal(w,workspace);calls.push('refresh');return runtime;};
  assert.equal(await host.recoverRuntime(workspace,containerId,{authorize:async()=>true,reserve:async()=>calls.push('reserve')}),true);
-  assert.deepEqual(calls,['inspect','reserve','kill','inspect','refresh']);assert.deepEqual(host.runtimes.get('owner').runtime,runtime);
- assert.equal(calls.some(value=>['run','rm','volume','start'].includes(value)),false);
+  assert.deepEqual(calls,['inspect','reserve','kill','inspect','start','inspect','refresh']);assert.deepEqual(host.runtimes.get('owner').runtime,runtime);
+ assert.equal(calls.some(value=>['run','rm','volume','restart'].includes(value)),false);
  host.migrationCleanupRequired.add('owner');await assert.rejects(host.recoverRuntime(workspace,containerId,{authorize:async()=>true,reserve:async()=>assert.fail('Must not reserve during migration')}),/migration requires recovery/);
 });
+test('defaults tolerate five minutes of a slow service and a stalled host before recovery',async()=>{
+ const directory=await mkdtemp(join(tmpdir(),'canopy-runtime-recovery-'));let now=0,attempts=0;
+ const host={runtimes:new Map(),inspectRuntime:async()=>({Id:containerId,State:{Running:true}}),recoverRuntime:async(w,id,{reserve})=>{await reserve();attempts++;return true;}};
+ try{
+  const supervisor=new RuntimeSupervisor({directory,host,authorize:async()=>true,probe:async()=>false,now:()=>now});
+  for(;now<300000;now+=5000)assert.equal(await supervisor.observe(workspace,{}),'unresponsive');
+  assert.equal(attempts,0);
+  assert.equal(await supervisor.observe(workspace,{}),'recovering');assert.equal(attempts,1);
+  const stalled=new RuntimeSupervisor({directory,host,authorize:async()=>true,probe:async()=>false,now:()=>now});
+  for(let i=0;i<5;i++){now+=600000;assert.equal(await stalled.observe(workspace,{}),'unresponsive');}
+  assert.equal(attempts,1);
+ }finally{await rm(directory,{recursive:true,force:true});}
+});
+test('recovery attempts lapse after a quiet hour so a recovered workspace is never exhausted for good',()=>fixture(async f=>{
+ for(let i=0;i<3;i++){assert.equal(await f.observe(new RuntimeSupervisor(f.options)),'recovering');f.advance(20);}
+ assert.equal(await f.observe(new RuntimeSupervisor(f.options)),'recovery-exhausted');
+ f.advance(3600000);assert.equal(await f.observe(new RuntimeSupervisor(f.options)),'recovering');assert.equal(f.attempts,4);
+}));
