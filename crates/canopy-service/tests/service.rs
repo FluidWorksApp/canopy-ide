@@ -655,6 +655,35 @@ async fn the_stream_snapshots_replays_and_changes_epoch() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn a_terminal_bound_while_reconcile_is_in_flight_is_not_revoked() {
+    let daemon = Daemon::start().await;
+    let runner = FakeRunner::start().await;
+    // Registering starts a reconcile; its session list is taken now, empty,
+    // and answered only after the terminal below has bound.
+    runner.hold_sessions(Duration::from_millis(400));
+    daemon.register(WS, Some(&runner)).await;
+    let (_ada, ada_pty) = daemon
+        .terminal(WS, &runner, "req-ada-01", "Ada", 11, 1011)
+        .await;
+    tokio::time::sleep(Duration::from_millis(800)).await;
+    let (_, terminals) = daemon
+        .admin(
+            "POST",
+            &format!("/admin/workspaces/{WS}/query"),
+            Some(serde_json::json!({"store":"terminals","action":"list"})),
+        )
+        .await;
+    let ada = terminals["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|t| t["ptyId"] == ada_pty)
+        .unwrap()
+        .clone();
+    assert!(ada["revokedMs"].is_null(), "{ada}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn a_delivery_cut_by_a_restart_is_reported_uncertain_never_replayed() {
     let mut daemon = Daemon::start().await;
     let runner = FakeRunner::start().await;
