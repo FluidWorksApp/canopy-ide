@@ -22,6 +22,15 @@ for(const command of ['chrome_extension_token_status','chrome_extension_token_se
 // (it answered "does not support notes_create"). Attaching a file stays with the
 // workspace: its path names a workspace file this computer cannot read.
 for(const command of ['notes_list','notes_due','notes_get','notes_create','notes_update','notes_add_attachment','notes_set_status','notes_link','notes_read_file','notes_read_image','notes_dir','notes_remind','notes_search','notes_delete'])LOCAL_UI.add(command);
+// The companion is one desktop-wide agent: its CLI login, ~/.canopy/companion
+// home and context bridge all live on the computer showing the IDE. The
+// workspace host has no companion (it answered "does not support
+// companion_spawn"), and it reaches workspace projects through canopy_* tools.
+// Account requests carry this computer's sign-in to canopyide.dev; the
+// workspace has no handler for them. The workspace UI calls Tauri directly,
+// but ipc.ts callers (the Slack hub's polling and replies) come through here.
+LOCAL_UI.add('canopy_account_request');
+for(const command of ['companion_spawn','companion_write','companion_kill','companion_status','companion_store_read','companion_store_write','companion_save_attachment'])LOCAL_UI.add(command);
 // Recovery reads share routes with background polls; they must not wait in that lane.
 const INTERACTIVE=1;
 const quote = (value: string) => `'${value.replaceAll("'", "'\\''")}'`;
@@ -234,6 +243,9 @@ export class NativeWorkspaceHost implements Host {
     if(command==='spot_stage_drop_images'){await this.call('/resources');return this.desktopCall<T>('execution_remote_stage_images',{...args,workspaceId:this.connection.workspaceId,endpoint:this.connection.endpoint});}
     if(command==='execution_remote_upload')return this.desktopCall<T>(command,{...args,workspaceId:this.connection.workspaceId,endpoint:this.connection.endpoint});
     if(command==='execution_remote_upload_cancel')return this.desktopCall<T>(command,args);
+    // This host's channels are inert placeholders; output from a desktop
+    // process needs a real desktop channel relayed to the caller's.
+    if(command==='companion_spawn'){const sink=args.onData as HostChannel<unknown>;const relay=this.desktop.channel<unknown>();relay.onmessage=message=>sink.onmessage(message);return this.desktopCall<T>(command,{...args,onData:relay});}
     if(LOCAL_UI.has(command))return this.desktopCall<T>(command,args);
     if(this.readOnly&&!READ_ONLY_NATIVE.has(command)&&!['environment_identity','pty_renderer_register','pty_renderer_sessions','pty_stats'].includes(command))throw Error('This workspace is read-only');
     if(command==='git_clone'){

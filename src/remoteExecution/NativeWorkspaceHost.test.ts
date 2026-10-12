@@ -37,6 +37,26 @@ it('keeps the scratchpad on the viewing computer, but attaches workspace files t
  expect(fetcher.mock.calls.at(-1)![0]).toContain('/workspaces/alice/native');
  host.dispose();
 });
+it('runs the companion on the viewing computer and relays its output',async()=>{
+ const {host,desktop,fetcher}=setup();
+ const relay={onmessage:(_:unknown)=>{}};vi.mocked(desktop.channel).mockReturnValue(relay);
+ const seen:unknown[]=[];const onData={onmessage:(message:unknown)=>seen.push(message)};
+ await host.invoke('companion_spawn',{command:'codex',args:['exec'],keepStdin:false,onData});
+ await host.invoke('companion_kill');
+ expect(desktop.invoke).toHaveBeenCalledWith('companion_spawn',{command:'codex',args:['exec'],keepStdin:false,onData:relay});
+ expect(desktop.invoke).toHaveBeenCalledWith('companion_kill',{});
+ relay.onmessage({kind:'line',text:'{}'});
+ expect(seen).toEqual([{kind:'line',text:'{}'}]);
+ expect(fetcher).not.toHaveBeenCalled();host.dispose();
+});
+it('sends account requests such as the Slack hub poll from the viewing computer',async()=>{
+ const {host,desktop,fetcher}=setup();
+ vi.mocked(desktop.invoke).mockResolvedValue({items:[]});
+ const args={route:'/api/slack',body:{action:'poll'}};
+ expect(await host.invoke('canopy_account_request',args)).toEqual({items:[]});
+ expect(desktop.invoke).toHaveBeenCalledWith('canopy_account_request',args);
+ expect(fetcher).not.toHaveBeenCalled();host.dispose();
+});
 const connection = {endpoint:'http://127.0.0.1:8787',token:'synthetic-token',workspaceId:'alice',workspaceName:'Alice'};
 function setup() {
   const desktop = {kind:'native',invoke:vi.fn(),listen:vi.fn(),channel:vi.fn()} as unknown as Host;

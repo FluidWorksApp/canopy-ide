@@ -2633,11 +2633,42 @@ fn is_canopy_table(line: &str) -> bool {
     parts == ["mcp_servers", "canopy"]
 }
 
+/// What the hook reads from its own environment. Codex starts stdio MCP
+/// servers with a dozen core variables and nothing else (see `bridge_env` in
+/// canopy_hook.rs), so without this list the helper learns the bridge address
+/// only by reading its ancestors' environments — which a macOS companion turn
+/// was seen failing as "this session isn't running inside a Canopy terminal".
+/// `env_vars` hands them over by name; codex skips any that are unset.
+const CODEX_FORWARDED_ENV: &[&str] = &[
+    "CANOPY_CTX_PORT",
+    "CANOPY_CTX_TOKEN",
+    "CANOPY_CTX_SOCKET",
+    "CANOPY_PTY",
+    "CANOPY_INSTANCE",
+    "CANOPY_PROFILE",
+    "CANOPY_RUN_ID",
+    "CANOPY_ATTEMPT_ID",
+    "CANOPY_MICRO_TASK",
+    "CANOPY_VIBE",
+    "CANOPY_RESEARCH",
+    "CANOPY_RESEARCH_DIR",
+    "CANOPY_COMPANION",
+    "CANOPY_COMPANION_AUTHORITY",
+    "CANOPY_COMPANION_POLICY",
+];
+
 fn codex_toml_with_canopy(existing: &str, helper: &str) -> Result<Option<String>, String> {
     let header = "[mcp_servers.canopy]";
     // `{:?}` gives a quoted, escaped string — valid TOML for a Windows path's
     // backslashes as much as a POSIX one's.
-    let wanted = format!("{header}\ncommand = {helper:?}\nargs = [\"--mcp\"]");
+    let forwarded = CODEX_FORWARDED_ENV
+        .iter()
+        .map(|name| format!("{name:?}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let wanted = format!(
+        "{header}\ncommand = {helper:?}\nargs = [\"--mcp\"]\nenv_vars = [{forwarded}]"
+    );
     // A `canopy` key written inline under `[mcp_servers]` is a server we did
     // not write (we only ever emit the section form). Appending our section
     // beside it would be a duplicate key — a TOML parse error that breaks
@@ -2673,13 +2704,13 @@ fn codex_toml_with_canopy(existing: &str, helper: &str) -> Result<Option<String>
                     .into(),
             );
         }
-        // Everything in the section that isn't one of the two keys we write is
+        // Everything in the section that isn't one of the keys we write is
         // the user's — `env`, `startup_timeout_ms` and `tool_timeout_sec` are
         // all real codex options, and setup runs on every launch, so replacing
         // the table wholesale deleted them again each time the app started.
         let extras = lines[start + 1..end].iter().filter(|line| {
             let key = line.split('=').next().unwrap_or("").trim();
-            !key.is_empty() && key != "command" && key != "args"
+            !key.is_empty() && key != "command" && key != "args" && key != "env_vars"
         });
         let replacement: Vec<String> = wanted
             .lines()
@@ -5217,6 +5248,40 @@ mod integration_tests {
             "an unchanged config must not be rewritten"
         );
         assert_eq!(codex_mcp_state(&out), "ours");
+    }
+
+    /// Codex hands a stdio MCP server none of the app's variables, so the
+    /// registration names them. An existing registration from before this is
+    /// upgraded once, keeps the user's own options, and then settles.
+    #[test]
+    fn codex_registration_forwards_the_bridge_environment() {
+        let existing = concat!(
+            "[mcp_servers.canopy]\n",
+            "command = \"/h/.canopy/bin/canopy-hook\"\n",
+            "args = [\"--mcp\"]\n",
+            "tool_timeout_sec = 120\n",
+        );
+        let out = codex_toml_with_canopy(existing, "/h/.canopy/bin/canopy-hook")
+            .unwrap()
+            .expect("a registration without env_vars is upgraded");
+        let line = out
+            .lines()
+            .find(|line| line.starts_with("env_vars = "))
+            .unwrap_or_else(|| panic!("no env_vars: {out}"));
+        for name in [
+            "CANOPY_CTX_PORT",
+            "CANOPY_CTX_TOKEN",
+            "CANOPY_CTX_SOCKET",
+            "CANOPY_COMPANION_POLICY",
+        ] {
+            assert!(line.contains(&format!("\"{name}\"")), "{line}");
+        }
+        assert_eq!(out.matches("env_vars").count(), 1, "{out}");
+        assert!(out.contains("tool_timeout_sec = 120"), "{out}");
+        assert_eq!(
+            codex_toml_with_canopy(&out, "/h/.canopy/bin/canopy-hook").unwrap(),
+            None
+        );
     }
 
     /// A section that points somewhere else is not ours to rewrite.
