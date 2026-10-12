@@ -57,6 +57,18 @@ try{
  assert.equal(metadata[shell.id].interrupted.reason,'no-agent');
  assert.equal(await resume.observe(workspace,view.runtimes.get(id).runtime),'watching');
  assert.equal((await call('/sessions')).filter(s=>s.exitCode==null).length,1,'resumed exactly once');
+
+ // An intentional stop, then the owner resuming the workspace: the agent that
+ // was running when it was closed comes back too.
+ const second=JSON.stringify({agent:'claude',canopy_pty:resumed.id,session_id:conversation,cwd:'/workspace/app',hook_event_name:'SessionStart',source:'resume',transcript_path:`/home/agent/.claude/projects/-workspace-app/${conversation}.jsonl`});
+ await asAgent('sh','-c',`printf '%s\\n' '${second}' >> /home/agent/.canopy/agent-events.jsonl`);
+ assert.equal(await resume.observe(workspace,view.runtimes.get(id).runtime),'watching');
+ await docker(['stop','--time','5',name]);
+ assert.ok(await waitForRuntimeReady(await host.open(workspace,{resume:true})));
+ assert.equal(await resume.observe(workspace,view.runtimes.get(id).runtime),'resumed');
+ const reopened=(await call('/sessions')).filter(s=>s.exitCode==null);
+ assert.equal(reopened.length,1);
+ assert.deepEqual(await launch(reopened[0].id),['/workspace/app',`--resume ${conversation} --permission-mode auto --dangerously-skip-permissions`,''],'after a stop and resume');
  console.log('agent resume smoke: PASS');
 }finally{
  await rm(state,{recursive:true,force:true});
