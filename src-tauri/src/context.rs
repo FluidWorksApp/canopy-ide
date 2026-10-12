@@ -996,7 +996,9 @@ pub fn browser_result(state: tauri::State<'_, ContextBridge>, id: u64, ok: bool,
 /// so canopy_mesh can list the whole job, and announced in its terminal the
 /// way any mesh message is. Only the frontend calls this — it is the layer
 /// that hears from the other workspace or machine — and it can only name the
-/// terminal the bridge stamped on the submission, in this app run.
+/// terminal the bridge stamped on the submission, in this app run. With
+/// `ref_kind` "relay" it is instead a cloud workspace agent's reply to a
+/// message that terminal sent, tagged with that message's id.
 #[tauri::command]
 pub fn context_mesh_job_update(
     app: tauri::AppHandle,
@@ -1004,7 +1006,13 @@ pub fn context_mesh_job_update(
     instance: String,
     job_id: String,
     text: String,
+    ref_kind: Option<String>,
 ) -> Result<String, String> {
+    let relay = match ref_kind.as_deref() {
+        None | Some("job") => false,
+        Some("relay") => true,
+        Some(other) => return Err(format!("unknown mesh update kind {other}")),
+    };
     if instance != crate::pty::instance_token() {
         return Err("the submitting terminal belongs to an earlier Canopy run".into());
     }
@@ -1034,12 +1042,19 @@ pub fn context_mesh_job_update(
             Vec::new(),
             None,
             Some(crate::mesh::MeshRef {
-                kind: "job".into(),
+                kind: if relay { "relay" } else { "job" }.into(),
                 id: job_id.to_string(),
             }),
         ))
         .map_err(|_| "the mesh refused this job update".to_string())?;
-    let notice = format!("[canopy: mesh job {job_id}] {}", mesh_notice_for(&record));
+    let notice = if relay {
+        format!(
+            "[canopy: cloud workspace reply to {job_id}] {}",
+            mesh_notice_for(&record)
+        )
+    } else {
+        format!("[canopy: mesh job {job_id}] {}", mesh_notice_for(&record))
+    };
     deliver_line(&app, pty_id, target_cwd, record.id.clone(), &notice)?;
     bridge.mesh.note_delivery(&record.id, &notice);
     Ok(record.id)
@@ -4557,18 +4572,22 @@ async fn ui_op(
     // The terminal a mesh job reports back to. Taken from the credential, never
     // the body: every later step of the job is typed into this terminal.
     let mut submitter: Option<u32> = None;
+    let mut from_name: Option<String> = None;
     let deadline = match op.op.as_str() {
         "mesh_targets" => UI_OP_TIMEOUT,
         "mesh_message_cloud" => {
-            if who.agent().is_none() {
+            let Some(agent) = who.agent() else {
                 return (
                     StatusCode::FORBIDDEN,
                     "Only a Canopy agent terminal can message a cloud workspace's agents.".into(),
                 );
-            }
+            };
             if op.prompt.as_deref().map_or(true, |t| t.trim().is_empty()) {
                 return (StatusCode::BAD_REQUEST, "a mesh message needs text".into());
             }
+            // The agent's reply is typed into this terminal.
+            submitter = Some(agent.pty_id);
+            from_name = agent_meta(&app, agent.pty_id).0;
             std::time::Duration::from_secs(30)
         }
         "mesh_submit" => {
@@ -4702,52 +4721,53 @@ async fn ui_op(
     let (tx, rx) = tokio::sync::oneshot::channel();
     bridge.pending.lock().unwrap().insert(id, tx);
 
-    let _ = app.emit(
-        "agent:ui",
-        serde_json::json!({
-            "id": id,
-            "op": op.op,
-            "route": op.cwd.clone().unwrap_or_default(),
-            "ptyId": submitter.or(op.pty_id),
-            "instance": crate::pty::instance_token(),
-            "member": op.member,
-            "device": op.device,
-            "path": op.path,
-            "line": op.line,
-            "column": op.column,
-            "symbol": op.symbol,
-            "query": op.query,
-            "waitMs": op.wait_ms,
-            "question": op.question,
-            "options": op.options,
-            "vaultOp": op.vault_op,
-            "entryId": op.entry_id,
-            "project": op.project,
-            "action": op.action,
-            "detail": op.detail,
-            "why": op.why,
-            "dir": op.dir,
-            "prompt": op.prompt,
-            "label": op.label,
-            "agent": op.agent,
-            "limit": op.limit,
-            "fact": op.fact,
-            "about": op.about,
-            "forget": op.forget,
-            "repo": op.repo,
-            "number": op.number,
-            "includeDiff": op.include_diff,
-            "includeLogs": op.include_logs,
-            "body": op.body,
-            "review": op.review,
-            "reviewers": op.reviewers,
-            "threadId": op.thread_id,
-            "resolved": op.resolved,
-            "method": op.method,
-            "enable": op.enable,
-            "deleteBranch": op.delete_branch,
-        }),
-    );
+    let mut payload = serde_json::json!({
+        "id": id,
+        "op": op.op,
+        "route": op.cwd.clone().unwrap_or_default(),
+        "ptyId": submitter.or(op.pty_id),
+        "instance": crate::pty::instance_token(),
+        "member": op.member,
+        "device": op.device,
+        "path": op.path,
+        "line": op.line,
+        "column": op.column,
+        "symbol": op.symbol,
+        "query": op.query,
+        "waitMs": op.wait_ms,
+        "question": op.question,
+        "options": op.options,
+        "vaultOp": op.vault_op,
+        "entryId": op.entry_id,
+        "project": op.project,
+        "action": op.action,
+        "detail": op.detail,
+        "why": op.why,
+        "dir": op.dir,
+        "prompt": op.prompt,
+        "label": op.label,
+        "agent": op.agent,
+        "limit": op.limit,
+        "fact": op.fact,
+        "about": op.about,
+        "forget": op.forget,
+        "repo": op.repo,
+        "number": op.number,
+        "includeDiff": op.include_diff,
+        "includeLogs": op.include_logs,
+        "body": op.body,
+        "review": op.review,
+        "reviewers": op.reviewers,
+        "threadId": op.thread_id,
+        "resolved": op.resolved,
+        "method": op.method,
+        "enable": op.enable,
+        "deleteBranch": op.delete_branch,
+    });
+    if let Some(name) = from_name {
+        payload["fromName"] = name.into();
+    }
+    let _ = app.emit("agent:ui", payload);
 
     match tokio::time::timeout(deadline, rx).await {
         Ok(Ok((true, data))) => (StatusCode::OK, body_text(data)),

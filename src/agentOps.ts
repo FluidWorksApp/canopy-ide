@@ -712,6 +712,8 @@ export async function runUiOp(op: ipc.AgentUiOp, ctx: UiOpContext): Promise<unkn
         agent: op.agent,
         ptyId: op.targetPtyId,
         ...(op.replyTo ? { replyTo: op.replyTo } : {}),
+        origin: op.ptyId != null && op.instance ? { ptyId: op.ptyId, instance: op.instance } : null,
+        fromName: op.fromName,
       });
     case "pr_details":
       return prDetails(op, ctx);

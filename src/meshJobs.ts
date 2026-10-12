@@ -29,6 +29,13 @@
 // status the service sends while this window is closed still reaches the
 // submitting terminal after a restart, if it is still open.
 //
+// The same service answers who is running there (a roster request inside a
+// `mesh` envelope), so canopy_mesh_targets lists each cloud workspace's live
+// agents, and whether its service has checked in lately. A message sent to one
+// of those agents is recorded durably under its id; the agent's answer comes
+// back as a `mesh` envelope naming it in `replyTo`, from the host device the
+// message went to, and is typed into the terminal that sent it.
+//
 // Person-device jobs keep the in-memory state: a restart forgets their pending
 // approvals and in-flight runs, and their 5-minute envelope window means a peer
 // offline that long misses a status update. Both are stated in what submit returns.
@@ -43,6 +50,8 @@ import {
   type JobState,
   type JobStatus,
   type MeshMessage,
+  type RosterAgent,
+  type RosterRequest,
 } from "./teamMessaging/jobSchema";
 import type { TeamJobEvent, TeamJobSender } from "./teamMessaging/session";
 
@@ -58,6 +67,7 @@ export interface JobSession {
   hosts?(): Device[];
   submitWorkspaceJob?(job: JobRequest, workspace: string): Promise<Device>;
   sendWorkspaceMessage?(message: MeshMessage, workspace: string): Promise<Device>;
+  requestWorkspaceRoster?(request: RosterRequest, workspace: string): Promise<Device>;
   sendJobStatus(status: JobStatus, device: string): Promise<void>;
 }
 
@@ -81,10 +91,36 @@ export interface MeshJobDeps {
   resolve: (attentionId: string, how: "answered" | "withdrawn" | "dismissed") => void;
   now: () => number;
   newId: () => string;
-  /** Cloud workspaces of this account, by control-plane id and name. */
-  cloudWorkspaces?: () => { id: string; name: string }[];
+  /** Cloud workspaces of this account, by control-plane id and name, with the
+   *  control plane's lifecycle state when known. */
+  cloudWorkspaces?: () => { id: string; name: string; state?: string }[];
+  /** Brings `cloudWorkspaces` up to date when it is missing or stale. */
+  refreshCloudWorkspaces?: () => Promise<unknown>;
   /** Durable record of jobs sent to cloud workspaces. */
   remoteJobs?: RemoteJobStore;
+  /** Durable record of agent messages sent to cloud workspaces, for their replies. */
+  remoteMessages?: RemoteMessageStore;
+  /** Type a cloud agent's reply into the terminal that messaged it, tagged
+   *  ref {kind: "relay", id: messageId} (ipc.meshRelayReply). */
+  reportReply?: (ptyId: number, instance: string, messageId: string, text: string) => Promise<unknown>;
+}
+
+/** An agent message sent to a cloud workspace, kept while a reply may come. */
+export interface RemoteMessage {
+  messageId: string;
+  ptyId: number;
+  instance: string;
+  workspace: string;
+  workspaceName: string;
+  agent: string;
+  team: string;
+  device: string;
+  expires: number;
+}
+export interface RemoteMessageStore {
+  load(): RemoteMessage[];
+  put(message: RemoteMessage): void;
+  remove(messageId: string): void;
 }
 
 /** A job sent to a cloud workspace's service, kept until its final status. */
@@ -107,16 +143,16 @@ export interface RemoteJobStore {
 const REMOTE_JOB_LIMIT = 200;
 const WORKSPACE_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 /** localStorage is enough: a few hundred small records, read once at startup. */
-export function localRemoteJobs(key = "canopy:mesh-remote-jobs:v1", storage: () => Storage = () => localStorage): RemoteJobStore {
-  const read = (): RemoteJob[] => {
+function localRecords<T extends { ptyId: number; expires: number }>(key: string, id: (row: T) => unknown, storage: () => Storage) {
+  const read = (): T[] => {
     try {
       const rows = JSON.parse(storage().getItem(key) ?? "[]");
-      return Array.isArray(rows) ? rows.filter((r) => r && typeof r.jobId === "string" && Number.isSafeInteger(r.ptyId)) : [];
+      return Array.isArray(rows) ? rows.filter((r) => r && typeof id(r) === "string" && Number.isSafeInteger(r.ptyId)) : [];
     } catch {
       return [];
     }
   };
-  const write = (rows: RemoteJob[]) => {
+  const write = (rows: T[]) => {
     try {
       storage().setItem(key, JSON.stringify(rows.slice(-REMOTE_JOB_LIMIT)));
     } catch {
@@ -125,9 +161,15 @@ export function localRemoteJobs(key = "canopy:mesh-remote-jobs:v1", storage: () 
   };
   return {
     load: () => read().filter((r) => r.expires > Date.now()),
-    put: (job) => write([...read().filter((r) => r.jobId !== job.jobId && r.expires > Date.now()), job]),
-    remove: (jobId) => write(read().filter((r) => r.jobId !== jobId)),
+    put: (row: T) => write([...read().filter((r) => id(r) !== id(row) && r.expires > Date.now()), row]),
+    remove: (rowId: string) => write(read().filter((r) => id(r) !== rowId)),
   };
+}
+export function localRemoteJobs(key = "canopy:mesh-remote-jobs:v1", storage: () => Storage = () => localStorage): RemoteJobStore {
+  return localRecords<RemoteJob>(key, (r) => r.jobId, storage);
+}
+export function localRemoteMessages(key = "canopy:mesh-remote-messages:v1", storage: () => Storage = () => localStorage): RemoteMessageStore {
+  return localRecords<RemoteMessage>(key, (r) => r.messageId, storage);
 }
 
 /** A job someone else sent this account, waiting on the user. */
@@ -162,7 +204,20 @@ const MAX_INBOX = 20;
 /** Who "me" is when an agent targets this account's other machine. */
 const SELF = new Set(["me", "self", "myself", "my machine", "my other machine"]);
 
+/** How long canopy_mesh_targets waits on a service's roster, and reuses one. */
+const ROSTER_WAIT_MS = 8_000;
+const ROSTER_FRESH_MS = 15_000;
+const CLOUD_LIST_WAIT_MS = 5_000;
+
 const oneLine = (text: string) => text.replace(/\s+/g, " ").trim();
+const errorText = (err: unknown) => (err instanceof Error ? err.message : String(err));
+function bounded<T>(work: Promise<T>, ms: number, why: string): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const late = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new Error(why)), ms);
+  });
+  return Promise.race([work, late]).finally(() => clearTimeout(timer));
+}
 const clip = (text: string, n: number) => (text.length > n ? `${text.slice(0, n - 1)}…` : text);
 
 export function jobTitle(title: string | null | undefined, brief: string): string {
@@ -217,6 +272,11 @@ export function createMeshJobs(deps: MeshJobDeps) {
   for (const r of deps.remoteJobs?.load() ?? []) {
     outgoing.set(r.jobId, { ptyId: r.ptyId, instance: r.instance, title: r.title, team: r.team, device: r.device, target: r.target, workspace: r.workspace });
   }
+  const sentMessages = new Map<string, RemoteMessage>();
+  for (const m of deps.remoteMessages?.load() ?? []) sentMessages.set(m.messageId, m);
+  type RosterWait = { workspace: string; team: string; device?: string; resolve: (agents: RosterAgent[]) => void; reject: (err: Error) => void };
+  const rosterWaits = new Map<string, RosterWait>();
+  const rosters = new Map<string, { at: number; agents: RosterAgent[] }>();
   const runs = new Map<string, RunOrigin>();
   const seen = new Set<string>();
   let inbox: IncomingJob[] = [];
@@ -250,7 +310,69 @@ export function createMeshJobs(deps: MeshJobDeps) {
 
   // ---- targets -------------------------------------------------------------
 
-  function targets() {
+  /** The newest host device serving a cloud workspace, and the team it is on. */
+  function hostOf(workspace: string) {
+    let best: { host: Device; team: string } | undefined;
+    for (const s of deps.sessions()) {
+      for (const h of s.hosts?.() ?? []) {
+        if (!h.workspaceIds?.includes(workspace)) continue;
+        if (!best || Date.parse(h.last_seen_at ?? "") > Date.parse(best.host.last_seen_at ?? "")) best = { host: h, team: s.team };
+      }
+    }
+    return best;
+  }
+
+  /** Who is running in a cloud workspace, asked of its service over the relay. */
+  async function roster(cloud: { id: string; name: string }): Promise<RosterAgent[]> {
+    const cached = rosters.get(cloud.id);
+    if (cached && deps.now() - cached.at < ROSTER_FRESH_MS) return cached.agents;
+    const errors: string[] = [];
+    for (const s of deps.sessions()) {
+      if (!s.requestWorkspaceRoster) continue;
+      const id = deps.newId();
+      let wait!: RosterWait;
+      const answered = new Promise<RosterAgent[]>((resolve, reject) => {
+        wait = { workspace: cloud.id, team: s.team, resolve, reject };
+      });
+      rosterWaits.set(id, wait);
+      try {
+        const host = await s.requestWorkspaceRoster({ id, created: deps.now() }, cloud.id);
+        wait.device = host.id;
+        const agents = await bounded(
+          answered,
+          ROSTER_WAIT_MS,
+          `${cloud.name}'s Canopy service didn't answer within ${ROSTER_WAIT_MS / 1000}s — it may be busy, or older than agent listing.`,
+        );
+        rosters.set(cloud.id, { at: deps.now(), agents });
+        return agents;
+      } catch (err) {
+        errors.push(errorText(err));
+      } finally {
+        rosterWaits.delete(id);
+      }
+    }
+    throw new Error(errors[0] ?? `Sign in to a Canopy team to reach cloud workspace ${cloud.name}.`);
+  }
+
+  async function cloudTarget(w: { id: string; name: string; state?: string }) {
+    const found = hostOf(w.id);
+    const online = found ? deviceOnline(found.host, deps.now()) : false;
+    const base = { id: w.id, name: w.name, state: w.state ?? null, reachable: !!found, online, lastSeen: found?.host.last_seen_at ?? null };
+    if (!found) return { ...base, agents: null, note: "No Canopy service is registered for this workspace yet, or you no longer have access to it." };
+    if (!online) return { ...base, agents: null, note: "Its Canopy service hasn't checked in for over a minute: the workspace is stopped or its host is down. Jobs and messages wait for it up to 7 days." };
+    try {
+      return { ...base, agents: await roster(w) };
+    } catch (err) {
+      return { ...base, agents: null, note: errorText(err) };
+    }
+  }
+
+  async function targets() {
+    if (deps.refreshCloudWorkspaces) {
+      await bounded(deps.refreshCloudWorkspaces(), CLOUD_LIST_WAIT_MS, "workspace list").catch(() => {
+        /* the last known list still answers */
+      });
+    }
     const sessions = deps.sessions();
     const machines: { device: string; team: string; online: boolean; lastSeen: string | null }[] = [];
     const people = new Map<
@@ -282,15 +404,11 @@ export function createMeshJobs(deps: MeshJobDeps) {
     }
     return {
       workspaces: deps.workspaces().map((w) => w.name),
-      cloudWorkspaces: (deps.cloudWorkspaces?.() ?? []).map((w) => ({
-        id: w.id,
-        name: w.name,
-        reachable: sessions.some((s) => s.hosts?.().some((h) => h.workspaceIds?.includes(w.id))),
-      })),
+      cloudWorkspaces: await Promise.all((deps.cloudWorkspaces?.() ?? []).map(cloudTarget)),
       myMachines: machines,
       teammates: [...people.values()],
       note: sessions.length
-        ? "canopy_mesh_submit with workspace (this window), member \"me\" (your other machine), or a teammate's name or id. Jobs to a teammate wait for their approval; only online members can receive one."
+        ? "canopy_mesh_submit with workspace (this window, or a cloud workspace by name with `agent`), member \"me\" (your other machine), or a teammate's name or id. Jobs to a teammate wait for their approval; only online members can receive one. A cloud workspace lists its live agents; message one with canopy_mesh_send workspace + agent, and its reply arrives in this terminal."
         : "Not signed in to a Canopy team, so only this window's workspaces are reachable. Sign in under Settings → Account to reach other machines and teammates.",
     };
   }
@@ -355,20 +473,50 @@ export function createMeshJobs(deps: MeshJobDeps) {
   }
 
   /** An agent message to an agent in a cloud workspace, through its service. */
-  async function message(req: { workspace: string; text: string; agent?: string | null; ptyId?: number | null; replyTo?: string }) {
+  async function message(req: {
+    workspace: string;
+    text: string;
+    agent?: string | null;
+    ptyId?: number | null;
+    replyTo?: string;
+    /** The sending terminal, stamped by the bridge; replies are typed into it. */
+    origin?: Origin | null;
+    fromName?: string | null;
+  }) {
     const cloud = cloudWorkspace(req.workspace);
     if (!cloud) throw new Error(`No cloud workspace called "${req.workspace}".`);
     const text = (req.text ?? "").trim();
     if (!text) throw new Error("A message needs text.");
     const target = req.ptyId != null ? { ptyId: req.ptyId } : req.agent?.trim() ? { name: req.agent.trim() } : null;
     if (!target) throw new Error("Name the agent to message (its name or ptyId).");
-    const msg: MeshMessage = { id: deps.newId(), text, target, created: deps.now(), ...(req.replyTo ? { replyTo: req.replyTo } : {}) };
+    const fromName = clip(oneLine(req.fromName ?? ""), 60);
+    const msg: MeshMessage = {
+      id: deps.newId(),
+      text,
+      target,
+      created: deps.now(),
+      ...(req.replyTo ? { replyTo: req.replyTo } : {}),
+      ...(fromName ? { from: { name: fromName } } : {}),
+    };
     const errors: string[] = [];
     for (const s of deps.sessions()) {
       if (!s.sendWorkspaceMessage) continue;
       try {
-        await s.sendWorkspaceMessage(msg, cloud.id);
-        return { messageId: msg.id, status: "sent", workspace: cloud.name };
+        const host = await s.sendWorkspaceMessage(msg, cloud.id);
+        const agent = "ptyId" in target ? `terminal ${target.ptyId}` : target.name;
+        if (req.origin) {
+          const record: RemoteMessage = { messageId: msg.id, ...req.origin, workspace: cloud.id, workspaceName: cloud.name, agent, team: s.team, device: host.id, expires: deps.now() + WORKSPACE_TTL_MS };
+          sentMessages.set(msg.id, record);
+          deps.remoteMessages?.put(record);
+        }
+        return {
+          messageId: msg.id,
+          status: "sent",
+          workspace: cloud.name,
+          note: req.origin
+            ? `Sent to ${agent} in ${cloud.name} through its Canopy service. Its reply arrives in this terminal as a mesh notice tagged ref {kind: "relay", id: "${msg.id}"} (canopy_mesh history refKind "relay" lists them). A refusal or failed delivery arrives the same way.`
+            : `Sent to ${agent} in ${cloud.name} through its Canopy service.`,
+        };
       } catch (err) {
         errors.push(err instanceof Error ? err.message : String(err));
       }
@@ -474,10 +622,44 @@ export function createMeshJobs(deps: MeshJobDeps) {
     return started;
   }
 
+  const reply = (sent: RemoteMessage, text: string) =>
+    (deps.reportReply ?? deps.report)(sent.ptyId, sent.instance, sent.messageId, text).catch(() => {
+      /* the sending terminal has gone; nobody is left to tell */
+    });
+  /** Only the host device a message went to, on its team and for its workspace, speaks for it. */
+  const fromHostOf = (sent: { device?: string; team: string; workspace: string }, event: TeamJobEvent) =>
+    (!sent.device || sent.device === event.sender.device) && sent.team === event.team && sent.workspace === event.workspace;
+
   function receive(event: TeamJobEvent) {
-    if (event.kind === "mesh" || event.kind === "mesh-status") {
-      if (event.kind === "mesh-status")
-        deps.post({ kind: "fyi", tone: "warn", source: "team", title: `A cloud workspace refused an agent message: ${event.status.detail}`, where: { kind: "panel", panel: "team" } });
+    if (event.kind === "roster") {
+      const wait = rosterWaits.get(event.roster.requestId);
+      if (wait && fromHostOf(wait, event)) wait.resolve(event.roster.agents);
+      return;
+    }
+    if (event.kind === "mesh") {
+      const sent = event.message.replyTo ? sentMessages.get(event.message.replyTo) : undefined;
+      // A message no terminal here is waiting on has nowhere to go.
+      if (!sent || !fromHostOf(sent, event)) return;
+      const name = clip(oneLine(event.message.from?.name ?? ""), 60);
+      const who = name && name !== sent.agent ? `${name} (${sent.agent})` : sent.agent;
+      void reply(sent, `${who} in ${sent.workspaceName} replied to your message ${sent.messageId}:\n\n${event.message.text}`);
+      return;
+    }
+    if (event.kind === "mesh-status") {
+      const wait = rosterWaits.get(event.status.messageId);
+      if (wait && fromHostOf(wait, event)) {
+        wait.reject(new Error(`${event.status.detail}`));
+        return;
+      }
+      const sent = sentMessages.get(event.status.messageId);
+      if (sent && fromHostOf(sent, event)) {
+        const how = event.status.state === "failed" ? "could not be delivered" : "was refused";
+        void reply(sent, `Your message ${sent.messageId} to ${sent.agent} in ${sent.workspaceName} ${how}: ${event.status.detail}`);
+        sentMessages.delete(sent.messageId);
+        deps.remoteMessages?.remove(sent.messageId);
+        return;
+      }
+      deps.post({ kind: "fyi", tone: "warn", source: "team", title: `A cloud workspace refused an agent message: ${event.status.detail}`, where: { kind: "panel", panel: "team" } });
       return;
     }
     if (event.kind === "job-status") {
