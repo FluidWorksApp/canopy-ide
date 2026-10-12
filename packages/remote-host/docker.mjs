@@ -195,13 +195,17 @@ export class DockerWorkspaces {
       if(!current||current.Id!==containerId||!current.State?.Running||current.State.Paused||current.State.Restarting)return false;
       if(current.HostConfig?.RestartPolicy?.Name!=='on-failure'||current.HostConfig.RestartPolicy.MaximumRetryCount!==3)throw Error('Runtime restart policy requires update');
       await reserve();
-      // Kill refuses an already-exited container. Unlike `docker restart`, it
-      // cannot resurrect an intentional exit racing the observation. The bounded
-      // daemon policy performs recovery; this path never manually starts compute.
+      // Kill refuses an already-exited container, so a successful kill proves
+      // this path stopped a running one: an intentional exit racing the
+      // observation is never resurrected. Docker counts a kill as a manual stop
+      // and skips the restart policy, so the same container is started here.
       await this.docker(['kill','--signal','SIGKILL',`canopy-ws-${workspace.id}`]);
       this.runtimes.delete(workspace.id);
       let after=await this.inspectRuntime(workspace);const deadline=Date.now()+10000;
-      while(after?.Id===containerId&&!after.State?.Running&&Date.now()<deadline){await new Promise(resolve=>setTimeout(resolve,250));after=await this.inspectRuntime(workspace);}
+      while(after?.Id===containerId&&after.State?.Running&&Date.now()<deadline){await new Promise(resolve=>setTimeout(resolve,250));after=await this.inspectRuntime(workspace);}
+      if(after?.Id!==containerId||after.State?.Running!==false)throw Error('Runtime recovery could not be confirmed');
+      await this.docker(['start',`canopy-ws-${workspace.id}`]);
+      after=await this.inspectRuntime(workspace);
       if(after?.Id!==containerId||after.State?.Running!==true)throw Error('Runtime recovery could not be confirmed');
       const runtime=await this.ensure(workspace);
       this.runtimes.set(workspace.id,{workspace,runtime,fingerprint:JSON.stringify([workspace,false]),checkedAt:Date.now()});
