@@ -132,7 +132,7 @@ export class NativeWorkspaceHost implements Host {
   private emit(event: string, payload: unknown) { this.listeners.get(event)?.forEach(handler => handler({event,id:0,payload})); }
   private summary(session: RemoteSession) {
     const meta=this.metadata[String(session.id)] ?? {};
-    return {id:session.id,session_generation:session.id,pid:null,cwd:meta.cwd??'/workspace',title:meta.title??session.title,name:meta.name,cols:session.cols,rows:session.rows,kind:'desktop',project_id:meta.projectId??`remote-${this.connection.workspaceId}`,run:meta.run??session.kind==='build',command:meta.command,run_command_id:meta.runCommandId,generation:1,replay_start:0,replay_end:0};
+    return {id:session.id,session_generation:session.id,pid:null,cwd:meta.cwd??'/workspace',title:meta.title??session.title,name:meta.name,cols:session.cols,rows:session.rows,kind:'desktop',project_id:meta.projectId??`remote-${this.connection.workspaceId}`,run:meta.run??session.kind==='build',command:meta.command,run_command_id:meta.runCommandId,resumed_from:typeof meta.resumedFrom==='number'?meta.resumedFrom:null,generation:1,replay_start:0,replay_end:0};
   }
   private desktopArgs(args:Args){
     let out=args;
@@ -156,6 +156,13 @@ export class NativeWorkspaceHost implements Host {
   }
   private async sessions(priority?: number) {
     const sessions=await this.call<RemoteSession[]>('/sessions',undefined,priority);
+    // The host resumes agents after a workspace restart. Those terminals were
+    // not spawned here, so they are announced like any other new session.
+    const appeared=this.known.size?sessions.filter(session=>session.exitCode==null&&!this.known.has(session.id)):[];
+    if(appeared.length){
+      try{this.metadata={...this.metadata,...await this.native<Record<string,Args>>('pty_metadata_get',{},priority)};}catch{/* Retried on the next poll. */}
+    }
+    for(const session of appeared.filter(session=>this.metadata[String(session.id)]?.resumedFrom!=null))this.emit('pty:spawned',this.summary(session));
     for(const session of sessions){
       const old=this.known.get(session.id);
       if(old?.exitCode==null && session.exitCode!=null && old){const stream=this.streams.get(session.id);if(stream){stream.pendingExit=session.exitCode;this.deliver(stream);}else this.emit('pty:exit',{id:session.id,session_generation:session.id,exit_code:session.exitCode});}

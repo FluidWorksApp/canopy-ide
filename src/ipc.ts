@@ -172,6 +172,8 @@ export interface PtySummary extends PtyGeometry {
   run?: boolean;
   command?: string | null;
   run_command_id?: string | null;
+  /** A remote host resumed this agent after a restart; the terminal it replaces. */
+  resumed_from?: number | null;
   replay_start: number;
   replay_end: number;
 }
@@ -579,6 +581,7 @@ export interface PtySpawned {
   run?: boolean;
   command?: string | null;
   run_command_id?: string | null;
+  resumed_from?: number | null;
 }
 export const onPtySpawned = (
   cb: (e: PtySpawned) => void,

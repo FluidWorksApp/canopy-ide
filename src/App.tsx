@@ -2126,6 +2126,7 @@ export default function App() {
         recovered: restored,
         // Desktop-owned sessions were previously killed by their tab.
         killOnClose: "kind" in e && e.kind === "desktop",
+        resumedFrom: e.resumed_from ?? undefined,
       });
       routedTerminalIdentities.current.add(identity);
     };
