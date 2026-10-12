@@ -255,3 +255,13 @@ describe("the brief", () => {
     expect(buildCompanionPrompt(base)).not.toContain("canopy_editor_state");
   });
 });
+
+describe("in a cloud workspace", () => {
+  it("does not promise file tools that cannot open the workspace's paths", () => {
+    const local = buildCompanionPrompt(base);
+    const remote = buildCompanionPrompt({ ...base, remote: true });
+    expect(local).toContain("`Read`, `Grep` and `Glob` reach every project");
+    expect(remote).not.toContain("`Read`, `Grep` and `Glob` reach every project");
+    expect(remote).toContain("cloud workspace");
+  });
+});

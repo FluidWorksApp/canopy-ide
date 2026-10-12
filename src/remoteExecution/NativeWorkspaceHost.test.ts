@@ -2,6 +2,52 @@ import { afterEach, expect, it, vi } from 'vitest';
 import type { Host, HostEvent } from '../host/contract';
 import { NativeWorkspaceHost } from './NativeWorkspaceHost';
 afterEach(() => vi.unstubAllGlobals());
+it('runs the companion CLI on the viewing computer and streams its output back through a native channel',async()=>{
+ const {host,desktop,fetcher}=setup();
+ const native={onmessage:(_:unknown)=>{}};
+ vi.mocked(desktop.channel).mockReturnValue(native as never);
+ vi.mocked(desktop.invoke).mockResolvedValue(undefined);
+ const seen:unknown[]=[];
+ const onData=host.channel<unknown>();onData.onmessage=m=>seen.push(m);
+ await host.invoke('companion_spawn',{command:'codex',args:['exec'],keepStdin:false,onData});
+ expect(desktop.invoke).toHaveBeenCalledWith('companion_spawn',{command:'codex',args:['exec'],keepStdin:false,onData:native});
+ native.onmessage({kind:'line',text:'{"type":"thread.started"}'});
+ expect(seen).toEqual([{kind:'line',text:'{"type":"thread.started"}'}]);
+ const rest=['companion_write','companion_kill','companion_status','companion_store_read','companion_store_write','companion_save_attachment','companion_dispatch_origin','companion_open_requests','context_publish','context_remove','context_tools','browser_result','webview_snapshot','canopy_account_request','send_crash'];
+ for(const command of rest)await host.invoke(command,{});
+ expect(vi.mocked(desktop.invoke).mock.calls.map(([command])=>command)).toEqual(['companion_spawn',...rest]);
+ expect(fetcher).not.toHaveBeenCalled();host.dispose();
+});
+it('hears the desktop context bridge, which answers the companion\'s tools',async()=>{
+ const {host,desktop}=setup();
+ const release=vi.fn();vi.mocked(desktop.listen).mockResolvedValue(release);
+ for(const event of ['agent:ui','agent:action','agent:browser','companion:reply'])await host.listen(event,()=>{});
+ expect(vi.mocked(desktop.listen).mock.calls.map(([event])=>event)).toEqual(['agent:ui','agent:action','agent:browser','companion:reply']);
+ await host.listen('pty:exit',()=>{});
+ expect(desktop.listen).toHaveBeenCalledTimes(4);
+ host.dispose();expect(release).toHaveBeenCalledTimes(4);
+});
+it('drops a desktop terminal\'s ops, whose pty ids would alias workspace sessions',async()=>{
+ const {host,desktop}=setup();
+ let fire:((event:HostEvent<unknown>)=>void)|undefined;
+ vi.mocked(desktop.listen).mockImplementation(async(_event,handler)=>{fire=handler as never;return()=>{};});
+ const got:unknown[]=[];await host.listen('agent:action',event=>got.push(event.payload));
+ fire!({event:'agent:action',id:1,payload:{kind:'close_session',ptyId:3}});
+ fire!({event:'agent:action',id:2,payload:{kind:'open_file',path:'/workspace/a.ts',ptyId:null}});
+ expect(got).toEqual([{kind:'open_file',path:'/workspace/a.ts',ptyId:null}]);host.dispose();
+});
+it('keeps workspace channels on the workspace: a desktop channel is only made for desktop commands',async()=>{
+ const {host,desktop}=setup();
+ await host.invoke('pty_spawn',{cwd:'/workspace',onData:host.channel()}).catch(()=>{});
+ expect(desktop.channel).not.toHaveBeenCalled();host.dispose();
+});
+it('asks the viewing computer when a desktop-level feature says so',async()=>{
+ const {host,desktop,fetcher}=setup();
+ vi.mocked(desktop.invoke).mockResolvedValue({codex:true});
+ expect(await host.invokeDesktop('which_check',{commands:['codex']})).toEqual({codex:true});
+ expect(desktop.invoke).toHaveBeenCalledWith('which_check',{commands:['codex']});
+ expect(fetcher).not.toHaveBeenCalled();host.dispose();
+});
 it('opens and closes public browser previews on the viewing computer',async()=>{
  const {host,desktop,fetcher}=setup();
  vi.mocked(desktop.invoke).mockResolvedValue('http://127.0.0.1:9000/viewer');

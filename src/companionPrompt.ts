@@ -44,6 +44,8 @@ export interface PromptInput {
   tools: string[];
   /** Which CLI is carrying it, for the one line about what it is running as. */
   cliName: string;
+  /** The projects live in a cloud workspace the CLI's file tools cannot reach. */
+  remote?: boolean;
 }
 
 const AUTHORITY_BRIEF: Record<CompanionAuthority, string> = {
@@ -287,7 +289,13 @@ export function buildCompanionPrompt(input: PromptInput): string {
     "not in your hands — this is what you are, not a restriction to work around,",
     "and the code that changes the user's repos is written by a coding agent in a",
     "checkout, on a branch, in a session they can watch. You read everything:",
-    "`Read`, `Grep` and `Glob` reach every project, open or closed.",
+    ...(input.remote
+      ? [
+          "These projects live in a cloud workspace, not on the computer you run on:",
+          "`Read`, `Grep` and `Glob` cannot open their paths. Read them through your",
+          "canopy_* tools, which act on that workspace.",
+        ]
+      : ["`Read`, `Grep` and `Glob` reach every project, open or closed."]),
     "",
     "So when the answer is a change to the code: do not offer to make it, and",
     "do not apologise for a limitation. Say precisely what should change and where,",

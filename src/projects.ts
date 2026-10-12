@@ -2,7 +2,7 @@
 // or more labeled component directories (frontend, backend, ...). The whole
 // workspace (projects, which are open, which is active) persists via the Rust
 // core to ~/.canopy/projects.json.
-import { invoke } from "./host";
+import { invoke, invokeDesktop } from "./host";
 import type { CustomMicroTask } from "./microTasks";
 import { getSettings, updateSettings } from "./settings";
 import { checkoutKey } from "./paths";
@@ -1647,6 +1647,17 @@ export const SHELL_PATTERN = /^-?(zsh|bash|sh|fish|dash|tcsh|csh|ksh|nu|pwsh|pow
 
 export async function checkInstalledClis(): Promise<Record<string, boolean>> {
   return (await probeInstalledClis()) ?? {};
+}
+
+/** The CLIs on the computer showing the IDE, where the companion runs. */
+export async function checkDesktopClis(): Promise<Record<string, boolean>> {
+  try {
+    return await invokeDesktop<Record<string, boolean>>("which_check", {
+      commands: AGENT_CLIS.map((c) => c.bin),
+    });
+  } catch {
+    return {};
+  }
 }
 
 /** The same probe, but `null` when it could not answer (the login shell never
