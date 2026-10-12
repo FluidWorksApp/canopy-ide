@@ -13,6 +13,7 @@ use canopy_service::{Config, Running, StartOptions};
 use futures_util::future::BoxFuture;
 use http_body_util::BodyExt;
 use std::path::{Path as FsPath, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -32,6 +33,9 @@ pub struct RunnerState {
     pub sessions: Mutex<Vec<(u64, u32, bool)>>,
     pub writes: Mutex<Vec<Write>>,
     pub browser: Mutex<Vec<serde_json::Value>>,
+    /// Holds `GET /sessions` this long after taking the list, so a bind can
+    /// land while the answer is in flight.
+    pub sessions_delay_ms: AtomicU64,
 }
 
 pub struct FakeRunner {
@@ -67,6 +71,8 @@ impl FakeRunner {
                                 })
                             })
                             .collect();
+                        let delay = s.sessions_delay_ms.load(Ordering::SeqCst);
+                        tokio::time::sleep(Duration::from_millis(delay)).await;
                         (StatusCode::OK, Json(serde_json::json!(list)))
                     },
                 ),
@@ -125,6 +131,12 @@ impl FakeRunner {
 
     pub fn add_session(&self, id: u64, pid: u32) {
         self.state.sessions.lock().unwrap().push((id, pid, false));
+    }
+
+    pub fn hold_sessions(&self, delay: Duration) {
+        self.state
+            .sessions_delay_ms
+            .store(delay.as_millis() as u64, Ordering::SeqCst);
     }
 
     pub fn writes_to(&self, session: u64) -> Vec<Write> {
