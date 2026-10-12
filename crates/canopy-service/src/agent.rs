@@ -612,7 +612,121 @@ fn target_by_id(ws: &Workspace, id: u32) -> Result<TerminalRecord, Response> {
     })
 }
 
+/// The desktop's own mesh caps a relayed message's text at 16 KB.
+const MAX_RELAY_TEXT: usize = 16 * 1024;
+
+/// `ptyId 0` answers a message that arrived over the team mesh: the reply goes
+/// back through the relay to the device that sent it, found from the local
+/// record that message became — never from anything in the body.
+fn reply_over_relay(ws: &Arc<Workspace>, who: &TerminalRecord, act: Action) -> Response {
+    let Some(reply_to) = act
+        .reply_to
+        .as_deref()
+        .map(str::trim)
+        .filter(|r| !r.is_empty())
+    else {
+        return reply(
+            400,
+            "ptyId 0 answers a message that came over the team mesh: pass its id as replyTo              (from the notice, or canopy_mesh history). To message an agent here, use its ptyId              from canopy_agents.",
+        );
+    };
+    let Some(text) = act.text.as_deref().map(str::trim).filter(|t| !t.is_empty()) else {
+        return reply(400, "mesh_send needs text");
+    };
+    if text.len() > MAX_RELAY_TEXT {
+        return reply(
+            400,
+            format!(
+                "a reply over the team mesh is capped at {} KB — summarize, or put the detail in                  the repository and name the path",
+                MAX_RELAY_TEXT / 1024
+            ),
+        );
+    }
+    if act.items.as_ref().is_some_and(|items| !items.is_empty()) {
+        return reply(
+            400,
+            "files in this workspace can't travel over the team mesh — name their paths in the              text instead",
+        );
+    }
+    let route = match ws.ledger.reply_route(reply_to) {
+        Ok(Some(route)) => route,
+        Ok(None) => {
+            return reply(
+                404,
+                format!(
+                    "replyTo \"{reply_to}\" is not a message that came over the team mesh (or it                      is more than 7 days old). ptyId 0 only answers those; message agents here by                      their ptyId."
+                ),
+            )
+        }
+        Err(error) => return reply(500, error),
+    };
+    let message_id = crate::util::uuid_v4();
+    let mut message = serde_json::json!({
+        "id": message_id,
+        "text": text,
+        "target": { "ptyId": 0 },
+        "replyTo": route.item_id,
+        "created": now_ms(),
+    });
+    if let Some(name) = who.name.as_deref() {
+        message["from"] = serde_json::json!({ "name": crate::workspace::clip(name, 60) });
+    }
+    let local = ws.mesh.record(NewMessage {
+        from_pty_id: Some(who.pty_id),
+        from_cwd: Some(WORKSPACE_ROOT.into()),
+        from_name: who.name.clone(),
+        from_agent: who.agent.clone(),
+        from_task: task_of(who),
+        to_pty_id: 0,
+        to_cwd: None,
+        to_name: Some(format!("{} over the team mesh", route.sender_user)),
+        to_agent: None,
+        to_task: None,
+        text: text.to_string(),
+        items: Vec::new(),
+        reply_to: Some(reply_to.to_string()),
+        reference: Some(MeshRef {
+            kind: "relay".into(),
+            id: route.item_id.clone(),
+        }),
+        instance: Some(ws.instance.clone()),
+        at_ms: now_ms(),
+    });
+    let Ok(local) = local else {
+        return reply(403, "The workspace owner disconnected this pair.");
+    };
+    let payload = serde_json::json!({ "kind": "mesh", "message": message });
+    let queued = ws.ledger.transaction(|tx| {
+        crate::ledger::Ledger::push_outbox(
+            tx,
+            crate::ledger::NewOutbox {
+                team: &route.team,
+                to_user: &route.sender_user,
+                to_device: &route.sender_device,
+                kind: "mesh",
+                payload: &payload,
+                expires_ms: now_ms() + crate::workspace::STATUS_LIFETIME_MS,
+            },
+        )
+    });
+    if let Err(error) = queued {
+        return reply(500, format!("could not queue the reply: {error}"));
+    }
+    ws.events.publish("mesh", "outbox", &local.id);
+    reply(
+        200,
+        format!(
+            "Reply {rid} queued for {to} over the team mesh, threaded under their message. It is              sent within seconds and waits on the encrypted relay for up to 7 days if their              Canopy is offline.",
+            rid = local.id,
+            to = route.sender_user,
+        ),
+    )
+}
+
 async fn mesh_send(ws: &Arc<Workspace>, who: &TerminalRecord, act: Action) -> Response {
+    if act.pty_id == Some(0) {
+        return reply_over_relay(ws, who, act);
+    }
     let Some(id) = act.pty_id else {
         return reply(
             400,
@@ -724,6 +838,12 @@ async fn message_agent(ws: &Arc<Workspace>, who: &TerminalRecord, act: Action) -
     };
     if act.pty_id.is_some() && act.name.is_some() {
         return reply(400, "message_agent accepts either ptyId or name, not both");
+    }
+    if act.pty_id == Some(0) {
+        return reply(
+            400,
+            "To answer a message that came over the team mesh, use canopy_mesh_send with ptyId 0              and replyTo set to that message's id.",
+        );
     }
     let target = if let Some(id) = act.pty_id {
         match target_by_id(ws, id) {

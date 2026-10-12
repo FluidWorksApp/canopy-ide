@@ -4,8 +4,8 @@ import {startBackgroundTeams} from "./teamMessaging/background";
 import {startTeamMessageNotifications} from "./teamMessaging/notifications";
 import {liveTeamSessions,subscribeTeamJobs} from "./teamMessaging/session";
 import {teamName} from "./teamMessaging/unread";
-import {createMeshJobs,localRemoteJobs,type MeshJobs} from "./meshJobs";
-import {peekWorkspaceList} from "./remoteExecution/workspaceListCache";
+import {createMeshJobs,localRemoteJobs,localRemoteMessages,type MeshJobs} from "./meshJobs";
+import {peekWorkspaceList,refreshWorkspaceList,restoreWorkspaceList} from "./remoteExecution/workspaceListCache";
 import {MeshJobInbox} from "./components/MeshJobInbox";
 import {ensureProjectWorkspace,ProjectWorkspaceProgress} from "./remoteExecution/projectWorkspace";
 import {stopIdleProjectWorkspace} from "./remoteExecution/projectIdle";
@@ -847,8 +847,16 @@ export default function App() {
     resolve: resolveAttention,
     now: Date.now,
     newId: () => crypto.randomUUID(),
-    cloudWorkspaces: () => (peekWorkspaceList()?.workspaces ?? []).map((w) => ({ id: w.id, name: w.name })),
+    cloudWorkspaces: () => (peekWorkspaceList()?.workspaces ?? []).map((w) => ({ id: w.id, name: w.name, state: w.state })),
+    // The list is otherwise filled only when a workspace panel opens; agents
+    // asking where work can go must not depend on that.
+    refreshCloudWorkspaces: async () => {
+      const cached = peekWorkspaceList() ?? (await restoreWorkspaceList());
+      if (!cached || Date.now() - cached.at > 60_000) await refreshWorkspaceList();
+    },
     remoteJobs: localRemoteJobs(),
+    remoteMessages: localRemoteMessages(),
+    reportReply: ipc.meshRelayReply,
   });
   const meshJobs = meshJobsRef.current;
   useEffect(() => subscribeTeamJobs((event) => meshJobs.receive(event)), [meshJobs]);

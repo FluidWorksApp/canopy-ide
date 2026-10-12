@@ -31,14 +31,39 @@ export function validJobStatus(value:unknown):value is JobStatus{
 
 export const clipDetail=(text:string)=>text.length>MAX_JOB_DETAIL?`${text.slice(0,MAX_JOB_DETAIL-1)}…`:text;
 
-/** An agent message to a workspace's service, and the service's refusal of one. */
-export type MeshMessage={id:string;text:string;target:AgentTarget;replyTo?:string;created:number};
-export type MeshStatus={messageId:string;state:'refused';detail:string;created:number};
+/** An agent message to a workspace's service, and the service's refusal of one.
+ *  `from.name` is the sending agent's display name, shown to the receiver; a
+ *  reply from a service names `replyTo`, and its `target` is `{ptyId:0}`. A
+ *  `failed` status means it was admitted but could not be delivered. */
+export type MeshMessage={id:string;text:string;target:AgentTarget;replyTo?:string;created:number;from?:{name:string}};
+export type MeshStatus={messageId:string;state:'refused'|'failed';detail:string;created:number};
 export const MAX_MESH_TEXT=16*1024;
+const MAX_FROM_NAME=60;
 export function validMeshMessage(value:unknown):value is MeshMessage{
  return isRecord(value)&&typeof value.id==='string'&&/^[A-Za-z0-9-]{8,64}$/.test(value.id)&&typeof value.text==='string'&&value.text.trim().length>0&&bytes(value.text)<=MAX_MESH_TEXT&&
-  validTarget(value.target)&&(value.replyTo===undefined||typeof value.replyTo==='string'&&value.replyTo.length<=64)&&Number.isSafeInteger(value.created);
+  validTarget(value.target)&&(value.replyTo===undefined||typeof value.replyTo==='string'&&value.replyTo.length<=64)&&Number.isSafeInteger(value.created)&&
+  (value.from===undefined||isRecord(value.from)&&typeof value.from.name==='string'&&value.from.name.length<=MAX_FROM_NAME);
 }
 export function validMeshStatus(value:unknown):value is MeshStatus{
- return isRecord(value)&&typeof value.messageId==='string'&&/^[A-Za-z0-9-]{8,64}$/.test(value.messageId)&&value.state==='refused'&&typeof value.detail==='string'&&value.detail.length<=MAX_JOB_DETAIL&&Number.isSafeInteger(value.created);
+ return isRecord(value)&&typeof value.messageId==='string'&&/^[A-Za-z0-9-]{8,64}$/.test(value.messageId)&&(value.state==='refused'||value.state==='failed')&&typeof value.detail==='string'&&value.detail.length<=MAX_JOB_DETAIL&&Number.isSafeInteger(value.created);
+}
+
+/** Who is running in a cloud workspace: asked of its service, answered with
+ *  the same agents its own canopy_agents lists (protocol §6.1). */
+export type RosterRequest={id:string;created:number};
+export type RosterAgent={ptyId:number;name:string|null;agent:string|null;task:string|null;status:{title:string|null;description:string|null}|null;closing:boolean};
+export type Roster={requestId:string;agents:RosterAgent[];created:number};
+const MAX_ROSTER=50;
+const optText=(value:unknown,n:number)=>value===null||value===undefined||typeof value==='string'&&value.length<=n;
+export function validRosterRequest(value:unknown):value is RosterRequest{
+ return isRecord(value)&&jobId(value.id)&&Number.isSafeInteger(value.created);
+}
+function validRosterAgent(value:unknown):value is RosterAgent{
+ if(!isRecord(value)||!Number.isSafeInteger(value.ptyId)||(value.ptyId as number)<1)return false;
+ const status=value.status;
+ return optText(value.name,80)&&optText(value.agent,40)&&optText(value.task,200)&&(value.closing===undefined||typeof value.closing==='boolean')&&
+  (status===null||status===undefined||isRecord(status)&&optText(status.title,120)&&optText(status.description,200));
+}
+export function validRoster(value:unknown):value is Roster{
+ return isRecord(value)&&jobId(value.requestId)&&Array.isArray(value.agents)&&value.agents.length<=MAX_ROSTER&&value.agents.every(validRosterAgent)&&Number.isSafeInteger(value.created);
 }

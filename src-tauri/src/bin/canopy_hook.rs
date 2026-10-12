@@ -3401,7 +3401,7 @@ fn mesh_tool_defs() -> Vec<serde_json::Value> {
             "description": "Send another agent a first-class mesh message: the full body is recorded under a stable id — multi-line is fine, it is fetched, not typed — and the target's terminal gets a one-line notice carrying that id so it knows to look. Prefer this over canopy_message_agent whenever the message is more than one line, shares files, answers an earlier message, or should be findable later; use canopy_message_agent for a quick one-liner. `items` shares files by absolute path (a screenshot, a log, a diff) which the receiver opens with its own tools. `replyTo` threads it under the message it answers. `ref` ({kind, id}) tags it to a task, PR or attempt so canopy_mesh can list the whole conversation about that thing in one query. The notice still interrupts the target exactly like canopy_message_agent — check canopy_agents first, and only agent sessions can be messaged. Sends are recorded whether or not the notice landed; the record's `submitted` says which.",
             "inputSchema": { "type": "object", "properties": {
                 "ptyId": { "type": "integer", "description": "Terminal id of the agent to message (from canopy_agents). Must be an agent session, not a shell or a run" },
-                "workspace": { "type": "string", "description": "A cloud workspace by name (from canopy_mesh_targets): the message goes to its Canopy service, which delivers it even while this machine is offline. Name the agent there with `agent` or `ptyId`" },
+                "workspace": { "type": "string", "description": "A cloud workspace by name (from canopy_mesh_targets, which lists its agents): the message goes to its Canopy service, which delivers it even while this machine is offline. Name the agent there with `agent` or `ptyId`. Its reply arrives in this terminal as a mesh notice tagged ref {kind: \"relay\", id}" },
                 "agent": { "type": "string", "description": "With `workspace`: the agent's name in that cloud workspace" },
                 "text": { "type": "string", "description": "The message, in full — multi-line markdown is fine. The target reads it from the mesh; only a one-line preview is typed" },
                 "items": { "type": "array", "items": { "type": "object", "properties": {
@@ -3418,7 +3418,7 @@ fn mesh_tool_defs() -> Vec<serde_json::Value> {
         }),
         serde_json::json!({
             "name": "canopy_mesh_targets",
-            "description": "Where a mesh job can go: the user's other workspaces in this Canopy window, this account's other signed-in machines, and teammates on the user's Canopy teams, each marked online or not. Call this before canopy_mesh_submit to pick a target by name.",
+            "description": "Where a mesh job or message can go: the user's other workspaces in this Canopy window; their cloud workspaces, each with whether its Canopy service is online and the agents running there (name, ptyId, CLI, task); this account's other signed-in machines; and teammates on the user's Canopy teams, each marked online or not. Call this before canopy_mesh_submit, or before canopy_mesh_send to a cloud workspace, to pick a target by name.",
             "inputSchema": { "type": "object", "properties": {}, "additionalProperties": false }
         }),
         serde_json::json!({

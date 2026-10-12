@@ -48,6 +48,16 @@ pub struct InboxRow {
     pub payload: String,
 }
 
+/// Who a message that arrived over the team mesh came from, kept under the
+/// local mesh record it became so an agent's reply can travel back.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ReplyRoute {
+    pub item_id: String,
+    pub team: String,
+    pub sender_user: String,
+    pub sender_device: String,
+}
+
 pub struct NewOutbox<'a> {
     pub team: &'a str,
     pub to_user: &'a str,
@@ -95,7 +105,11 @@ impl Ledger {
                  to_user TEXT NOT NULL, to_device TEXT NOT NULL, kind TEXT NOT NULL,
                  payload TEXT NOT NULL, created_ms INTEGER NOT NULL,
                  expires_ms INTEGER NOT NULL, attempts INTEGER NOT NULL DEFAULT 0,
-                 sent_ms INTEGER, last_error TEXT);",
+                 sent_ms INTEGER, last_error TEXT);
+             CREATE TABLE IF NOT EXISTS reply_routes (
+                 mesh_id TEXT PRIMARY KEY, item_id TEXT NOT NULL, team TEXT NOT NULL,
+                 sender_user TEXT NOT NULL, sender_device TEXT NOT NULL,
+                 expires_ms INTEGER NOT NULL);",
         )
         .map_err(|e| e.to_string())?;
         let ledger = Self { db: Mutex::new(db) };
@@ -113,6 +127,11 @@ impl Ledger {
         db.execute(
             "DELETE FROM outbox WHERE (sent_ms IS NOT NULL AND sent_ms < ?1) OR expires_ms < ?1",
             [now.saturating_sub(INBOX_GRACE_MS) as i64],
+        )
+        .map_err(|e| e.to_string())?;
+        db.execute(
+            "DELETE FROM reply_routes WHERE expires_ms < ?1",
+            [now as i64],
         )
         .map_err(|e| e.to_string())?;
         db.execute(
@@ -445,6 +464,48 @@ impl Ledger {
         db.query_row("SELECT state FROM jobs WHERE key = ?1", [key], |row| {
             row.get(0)
         })
+        .optional()
+        .map_err(|e| e.to_string())
+    }
+
+    pub fn insert_reply_route(
+        &self,
+        mesh_id: &str,
+        route: &ReplyRoute,
+        expires_ms: u64,
+    ) -> Result<(), String> {
+        let db = self.db.lock().unwrap();
+        db.execute(
+            "INSERT OR REPLACE INTO reply_routes(mesh_id, item_id, team, sender_user,
+                 sender_device, expires_ms) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![
+                mesh_id,
+                route.item_id,
+                route.team,
+                route.sender_user,
+                route.sender_device,
+                expires_ms as i64
+            ],
+        )
+        .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    pub fn reply_route(&self, mesh_id: &str) -> Result<Option<ReplyRoute>, String> {
+        let db = self.db.lock().unwrap();
+        db.query_row(
+            "SELECT item_id, team, sender_user, sender_device FROM reply_routes
+             WHERE mesh_id = ?1 AND expires_ms >= ?2",
+            params![mesh_id, now_ms() as i64],
+            |row| {
+                Ok(ReplyRoute {
+                    item_id: row.get(0)?,
+                    team: row.get(1)?,
+                    sender_user: row.get(2)?,
+                    sender_device: row.get(3)?,
+                })
+            },
+        )
         .optional()
         .map_err(|e| e.to_string())
     }

@@ -8,7 +8,7 @@ pub mod crypto;
 pub mod device;
 pub mod transport;
 
-use crate::ledger::{InboxRow, Ledger, NewOutbox};
+use crate::ledger::{InboxRow, Ledger, NewOutbox, ReplyRoute};
 use crate::meshtext::mesh_notice_for;
 use crate::service::Service;
 use crate::util::now_ms;
@@ -22,6 +22,9 @@ use transport::{PollRow, RelayTransport, TransportError};
 
 const MAX_TITLE: usize = 120;
 const MAX_BRIEF: usize = 16 * 1024;
+/// A roster answers inside one 32 KB envelope, so it lists at most this many
+/// agents with their text fields clipped.
+const MAX_ROSTER: usize = 50;
 
 fn log(ws: &str, message: &str) {
     eprintln!("canopy-serviced: {ws}: relay: {message}");
@@ -68,6 +71,63 @@ pub async fn poll_workspace(
         }
     }
     true
+}
+
+fn valid_item_id(id: &str) -> bool {
+    (8..=64).contains(&id.len()) && id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
+}
+
+fn clip_opt(value: &Option<String>, n: usize) -> serde_json::Value {
+    value
+        .as_deref()
+        .map(|v| serde_json::Value::from(clip(v, n)))
+        .unwrap_or(serde_json::Value::Null)
+}
+
+/// The workspace's live agents, as `/ctx/snapshot` lists them to its own
+/// agents: what a team device asking `roster-request` is told.
+pub fn roster_agents(ws: &Workspace) -> Vec<serde_json::Value> {
+    let mut agents: Vec<_> = ws
+        .terminals
+        .all()
+        .into_iter()
+        .filter(|t| t.live() && t.session_id.is_some())
+        .collect();
+    agents.sort_by_key(|t| std::cmp::Reverse(t.bound_ms.unwrap_or(t.minted_ms)));
+    agents
+        .into_iter()
+        .take(MAX_ROSTER)
+        .map(|t| {
+            let status = t.status.as_ref().map(|s| {
+                serde_json::json!({
+                    "title": s.get("title").and_then(|v| v.as_str()).map(|v| clip(v, 120)),
+                    "description": s.get("description").and_then(|v| v.as_str()).map(|v| clip(v, 200)),
+                })
+            });
+            serde_json::json!({
+                "ptyId": t.pty_id,
+                "name": clip_opt(&t.name, 80),
+                "agent": clip_opt(&t.agent, 40),
+                "task": clip_opt(&t.task, 200),
+                "status": status,
+                "closing": t.close_requested_ms.is_some(),
+            })
+        })
+        .collect()
+}
+
+fn roster_payload(ws: &Workspace, request_id: &str) -> serde_json::Value {
+    serde_json::json!({
+        "kind": "roster",
+        "roster": { "requestId": request_id, "agents": roster_agents(ws), "created": now_ms() }
+    })
+}
+
+/// A display name the sender chose for itself; typed into a terminal, so it
+/// is flattened and bounded like any other typed text.
+fn sender_label(message: &serde_json::Value) -> Option<String> {
+    let name = crate::meshtext::sanitize_message(message["from"]["name"].as_str()?);
+    (!name.is_empty()).then(|| clip(&name, 60))
 }
 
 fn refusal_payload(kind: &str, id: &str, reason: &str) -> (&'static str, serde_json::Value) {
@@ -164,12 +224,18 @@ fn admit(service: &Arc<Service>, ws: &Arc<Workspace>, row: &PollRow) -> Admissio
             };
             (id, problem)
         }
+        ("mesh", Some("roster-request")) => {
+            let id = payload["request"]["id"]
+                .as_str()
+                .unwrap_or_default()
+                .to_string();
+            let problem = (!valid_item_id(&id)).then_some("roster request needs an id");
+            (id, problem)
+        }
         ("job", Some("job")) => {
             let job = &payload["job"];
             let id = job["id"].as_str().unwrap_or_default().to_string();
-            let valid_id = (8..=64).contains(&id.len())
-                && id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-');
-            let problem = if !valid_id {
+            let problem = if !valid_item_id(&id) {
                 Some("job needs an id")
             } else if job["title"].as_str().is_none_or(|t| t.len() > MAX_TITLE)
                 || job["brief"]
@@ -204,9 +270,13 @@ fn admit(service: &Arc<Service>, ws: &Arc<Workspace>, row: &PollRow) -> Admissio
     };
     let ignored = problem == Some("ignored") || item_id.is_empty();
     let job_key = (kind == "job").then(|| format!("{}:{}", from.user, item_id));
+    // A roster request is answered here and never reaches a terminal.
+    let roster = (kind == "mesh" && payload["kind"] == "roster-request")
+        .then(|| roster_payload(ws, &item_id));
     let committed = ws.ledger.transaction(|tx| {
         let (decision_label, reason, state) = match (&decision, ignored) {
             (_, true) => ("ignore", problem, "ignored"),
+            (Decision::Deliver, false) if roster.is_some() => ("deliver", None, "answered"),
             (Decision::Deliver, false) => ("deliver", None, "accepted"),
             (Decision::Refuse(reason), false) => ("refuse", Some(reason.as_str()), "refused"),
         };
@@ -252,6 +322,7 @@ fn admit(service: &Arc<Service>, ws: &Arc<Workspace>, row: &PollRow) -> Admissio
             Decision::Deliver if job_key.is_some() => {
                 ("job-status", status("accepted", "Accepted by the workspace host."))
             }
+            Decision::Deliver if roster.is_some() => ("mesh", roster.clone().unwrap()),
             Decision::Deliver => return Ok(()),
             Decision::Refuse(reason) => {
                 if let Some(key) = job_key.as_deref() {
@@ -280,7 +351,7 @@ fn admit(service: &Arc<Service>, ws: &Arc<Workspace>, row: &PollRow) -> Admissio
         return Admission::Keep;
     }
     ws.events.publish("mesh", "inbox", &envelope.id);
-    if !ignored && decision == Decision::Deliver {
+    if !ignored && decision == Decision::Deliver && roster.is_none() {
         let row = InboxRow {
             replay_id: opened.replay_id,
             kind,
@@ -381,10 +452,10 @@ async fn hand_off(ws: Arc<Workspace>, row: InboxRow) {
     let record = ws.mesh.record(NewMessage {
         from_pty_id: None,
         from_cwd: None,
-        from_name: Some(format!(
-            "{} (team device {})",
-            row.sender_user, row.sender_device
-        )),
+        from_name: Some(match sender_label(body) {
+            Some(label) => format!("{label} ({} over the team mesh)", row.sender_user),
+            None => format!("{} (team device {})", row.sender_user, row.sender_device),
+        }),
         from_agent: None,
         from_task: None,
         to_pty_id: target.pty_id,
@@ -411,11 +482,32 @@ async fn hand_off(ws: Arc<Workspace>, row: InboxRow) {
     } else {
         "a message".to_string()
     };
-    let line = format!(
-        "[canopy: {what} from {} over the team mesh] {}",
-        row.sender_user,
+    let who = match sender_label(body) {
+        Some(label) => format!("{label} ({})", row.sender_user),
+        None => row.sender_user.clone(),
+    };
+    let mut line = format!(
+        "[canopy: {what} from {who} over the team mesh] {}",
         mesh_notice_for(&record)
     );
+    if !is_job {
+        let route = ReplyRoute {
+            item_id: item_id.clone(),
+            team: row.team.clone(),
+            sender_user: row.sender_user.clone(),
+            sender_device: row.sender_device.clone(),
+        };
+        match ws
+            .ledger
+            .insert_reply_route(&record.id, &route, now_ms() + STATUS_LIFETIME_MS)
+        {
+            Ok(()) => line.push_str(&format!(
+                " — answer it with canopy_mesh_send ptyId 0 replyTo \"{}\"",
+                record.id
+            )),
+            Err(error) => log(&ws.id, &format!("reply route for {}: {error}", record.id)),
+        }
+    }
     match ws
         .deliver(
             target.pty_id,

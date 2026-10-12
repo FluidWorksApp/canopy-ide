@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
-import { createMeshJobs, localRemoteJobs, needsApproval, pickWorkspace, type JobSession, type MeshJobDeps, type RemoteJob } from "./meshJobs";
+import { createMeshJobs, localRemoteJobs, localRemoteMessages, needsApproval, pickWorkspace, type JobSession, type MeshJobDeps, type RemoteJob, type RemoteMessage } from "./meshJobs";
 import type { Device } from "./teamMessaging/client";
-import type { JobRequest, JobStatus } from "./teamMessaging/jobSchema";
+import type { JobRequest, JobStatus, RosterAgent, RosterRequest } from "./teamMessaging/jobSchema";
 import type { TeamJobEvent } from "./teamMessaging/session";
 
 const NOW = 1_800_000_000_000;
@@ -171,9 +171,9 @@ describe("receiving a job", () => {
 });
 
 describe("targets", () => {
-  it("lists workspaces, this account's other machines and teammates with who is online", () => {
+  it("lists workspaces, this account's other machines and teammates with who is online", async () => {
     const { jobs } = setup();
-    const t = jobs.targets();
+    const t = await jobs.targets();
     expect(t.workspaces).toEqual(["api", "web"]);
     expect(t.myMachines).toEqual([{ device: "me-desktop", team: "Core", online: true, lastSeen: seen(1000) }]);
     expect(t.teammates.map((p) => [p.name, p.online])).toEqual([["Bob", true], ["Cara", false]]);
@@ -200,7 +200,7 @@ describe("jobs for a cloud workspace", () => {
     expect(result).toMatchObject({ status: "sent", workspace: "cloud-api", device: "host-1" });
     expect(submitWorkspaceJob).toHaveBeenCalledWith(expect.objectContaining({ workspace: WS, target: { name: "reviewer" } }), WS);
     expect(store.rows()).toHaveLength(1);
-    expect(jobs.targets().cloudWorkspaces).toEqual([{ id: WS, name: "cloud-api", reachable: true }]);
+    expect((await jobs.targets()).cloudWorkspaces).toMatchObject([{ id: WS, name: "cloud-api", reachable: true, online: true, agents: null }]);
 
     const restarted = setup({ cloudWorkspaces: cloud, remoteJobs: store }, s);
     restarted.jobs.receive(status("started", result.jobId, { workspace: "ws-other" }));
@@ -240,5 +240,82 @@ describe("jobs for a cloud workspace", () => {
     expect(localRemoteJobs("k", () => storage).load()).toEqual([row]);
     store.remove("job-1234");
     expect(store.load()).toEqual([]);
+  });
+
+  describe("its agents and their replies", () => {
+    const reviewer: RosterAgent = { ptyId: 7, name: "reviewer", agent: "claude", task: "Review #12", status: null, closing: false };
+    const rosterEvent = (requestId: string, agents: RosterAgent[], over: Partial<TeamJobEvent> = {}): TeamJobEvent =>
+      ({ kind: "roster", team: "t1", user: "alice", workspace: WS, sender: { user: "alice", device: "host-1" }, roster: { requestId, agents, created: NOW }, ...over }) as TeamJobEvent;
+    const reply = (replyTo: string, over: Partial<TeamJobEvent> = {}): TeamJobEvent =>
+      ({ kind: "mesh", team: "t1", user: "alice", workspace: WS, sender: { user: "alice", device: "host-1" }, message: { id: "reply-0001", text: "Two parser fixes.\nSee src/parse.rs.", target: { ptyId: 0 }, replyTo, created: NOW, from: { name: "reviewer" } }, ...over }) as TeamJobEvent;
+    const memoryMessages = () => {
+      let rows: RemoteMessage[] = [];
+      return { load: () => rows, put: (r: RemoteMessage) => { rows = [...rows.filter((x) => x.messageId !== r.messageId), r]; }, remove: (id: string) => { rows = rows.filter((x) => x.messageId !== id); }, rows: () => rows };
+    };
+
+    it("lists a cloud workspace's live agents from its service and reuses a fresh answer", async () => {
+      let jobs!: ReturnType<typeof createMeshJobs>;
+      const requestWorkspaceRoster = vi.fn(async (req: RosterRequest) => {
+        // A forged answer from another device first: ignored.
+        setTimeout(() => jobs.receive(rosterEvent(req.id, [{ ...reviewer, name: "impostor" }], { sender: { user: "bob", device: "bob-1" } })), 0);
+        setTimeout(() => jobs.receive(rosterEvent(req.id, [reviewer])), 5);
+        return host;
+      });
+      const refreshCloudWorkspaces = vi.fn(async () => {});
+      ({ jobs } = setup({ cloudWorkspaces: () => [{ id: WS, name: "cloud-api", state: "ready" }], refreshCloudWorkspaces }, session({ hosts: () => [host], requestWorkspaceRoster })));
+      const [cloudApi] = (await jobs.targets()).cloudWorkspaces;
+      expect(cloudApi).toEqual({ id: WS, name: "cloud-api", state: "ready", reachable: true, online: true, lastSeen: seen(1000), agents: [reviewer] });
+      await jobs.targets();
+      expect(requestWorkspaceRoster).toHaveBeenCalledTimes(1);
+      expect(refreshCloudWorkspaces).toHaveBeenCalledTimes(2);
+    });
+
+    it("says why there is no list: a stale host, or a service that refused", async () => {
+      const stale = { ...host, last_seen_at: seen(120_000) };
+      const requestWorkspaceRoster = vi.fn(async () => stale);
+      const quiet = setup({ cloudWorkspaces: cloud }, session({ hosts: () => [stale], requestWorkspaceRoster }));
+      expect((await quiet.jobs.targets()).cloudWorkspaces[0]).toMatchObject({ online: false, agents: null, note: expect.stringContaining("hasn't checked in") });
+      expect(requestWorkspaceRoster).not.toHaveBeenCalled();
+
+      let jobs!: ReturnType<typeof createMeshJobs>;
+      const refusing = vi.fn(async (req: RosterRequest) => {
+        setTimeout(() => jobs.receive({ kind: "mesh-status", team: "t1", user: "alice", workspace: WS, sender: { user: "alice", device: "host-1" }, status: { messageId: req.id, state: "refused", detail: "teammate delivery is off", created: NOW } }), 0);
+        return host;
+      });
+      ({ jobs } = setup({ cloudWorkspaces: cloud }, session({ hosts: () => [host], requestWorkspaceRoster: refusing })));
+      expect((await jobs.targets()).cloudWorkspaces[0]).toMatchObject({ online: true, agents: null, note: "teammate delivery is off" });
+    });
+
+    it("types an agent's reply into the terminal that messaged it, even after a restart", async () => {
+      const store = memoryMessages();
+      const sendWorkspaceMessage = vi.fn(async () => host);
+      const s = session({ hosts: () => [host], sendWorkspaceMessage });
+      const first = setup({ cloudWorkspaces: cloud, remoteMessages: store }, s);
+      const sent = await first.jobs.message({ workspace: "cloud-api", text: "what changed?", agent: "reviewer", origin, fromName: "Jarvis" });
+      expect(sent.note).toContain(`ref {kind: "relay", id: "${sent.messageId}"}`);
+      expect(sendWorkspaceMessage).toHaveBeenCalledWith(expect.objectContaining({ from: { name: "Jarvis" } }), WS);
+      expect(store.rows()).toHaveLength(1);
+
+      const reportReply = vi.fn(async () => "m9");
+      const { jobs } = setup({ cloudWorkspaces: cloud, remoteMessages: store, reportReply }, s);
+      jobs.receive(reply(sent.messageId, { sender: { user: "alice", device: "bob-1" } }));
+      jobs.receive(reply(sent.messageId, { workspace: "ws-other" }));
+      jobs.receive(reply("not-a-message-we-sent"));
+      expect(reportReply).not.toHaveBeenCalled();
+      jobs.receive(reply(sent.messageId));
+      expect(reportReply).toHaveBeenCalledWith(7, "inst", sent.messageId, `reviewer in cloud-api replied to your message ${sent.messageId}:\n\nTwo parser fixes.\nSee src/parse.rs.`);
+
+      jobs.receive({ kind: "mesh-status", team: "t1", user: "alice", workspace: WS, sender: { user: "alice", device: "host-1" }, status: { messageId: sent.messageId, state: "failed", detail: "No running agent called reviewer.", created: NOW } });
+      expect(reportReply).toHaveBeenLastCalledWith(7, "inst", sent.messageId, expect.stringContaining("could not be delivered: No running agent called reviewer."));
+      expect(store.rows()).toHaveLength(0);
+    });
+
+    it("persists sent messages in local storage", () => {
+      const data = new Map<string, string>();
+      const storage = { getItem: (k: string) => data.get(k) ?? null, setItem: (k: string, v: string) => void data.set(k, v) } as Storage;
+      const row: RemoteMessage = { messageId: "msg-1234", ptyId: 1, instance: "i", workspace: WS, workspaceName: "cloud-api", agent: "reviewer", team: "t1", device: "host-1", expires: Date.now() + 1000 };
+      localRemoteMessages("k", () => storage).put(row);
+      expect(localRemoteMessages("k", () => storage).load()).toEqual([row]);
+    });
   });
 });
