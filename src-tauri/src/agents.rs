@@ -2666,9 +2666,8 @@ fn codex_toml_with_canopy(existing: &str, helper: &str) -> Result<Option<String>
         .map(|name| format!("{name:?}"))
         .collect::<Vec<_>>()
         .join(", ");
-    let wanted = format!(
-        "{header}\ncommand = {helper:?}\nargs = [\"--mcp\"]\nenv_vars = [{forwarded}]"
-    );
+    let wanted =
+        format!("{header}\ncommand = {helper:?}\nargs = [\"--mcp\"]\nenv_vars = [{forwarded}]");
     // A `canopy` key written inline under `[mcp_servers]` is a server we did
     // not write (we only ever emit the section form). Appending our section
     // beside it would be a duplicate key — a TOML parse error that breaks

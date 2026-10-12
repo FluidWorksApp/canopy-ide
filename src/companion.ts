@@ -126,6 +126,14 @@ export interface CompanionLaunch {
   authority: CompanionAuthority;
 }
 
+/** In a cloud workspace the roots are VM paths the desktop CLI cannot open. */
+export function companionLaunchRoots(
+  projects: { roots: string[] }[],
+  remoteWorkspace: boolean,
+): string[] {
+  return remoteWorkspace ? [] : projects.flatMap((p) => p.roots);
+}
+
 const BUILTIN_WRITERS = ["Edit", "Write", "NotebookEdit", "Bash", "KillShell"];
 
 export function companionRunnerLaunch(

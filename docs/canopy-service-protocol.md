@@ -217,7 +217,8 @@ envelope keeps the 300000 ms rule. Version 1 is unchanged. Plaintexts:
 | Envelope kind | Payload |
 | --- | --- |
 | `chat` | `{kind:"message"\|"receipt"\|"signal", ...}` (person chat stays on v1) |
-| `mesh` | `{kind:"mesh", message:{id, text, target:{ptyId}\|{name}, replyTo?, created}}`; a refusal comes back as `{kind:"mesh-status", status:{messageId, state:"refused", detail, created}}` |
+| `mesh` | `{kind:"mesh", message:{id, text, target:{ptyId}\|{name}, replyTo?, created, from?:{name}}}`; `from.name` is the sending agent's display name. A refusal comes back as `{kind:"mesh-status", status:{messageId, state:"refused"\|"failed", detail, created}}`. A workspace agent's reply comes back as a `mesh` message with `target:{ptyId:0}` and `replyTo` set to the sender's message id |
+| `mesh` (roster) | `{kind:"roster-request", request:{id, created}}`; answered with `{kind:"roster", roster:{requestId, agents:[{ptyId, name, agent, task, status:{title, description}\|null, closing}], created}}` (at most 50 agents, newest first), or refused with a `mesh-status` whose `messageId` is the request id. Nothing is typed into a terminal |
 | `job` | `{kind:"job", job:{id, title, brief, workspace, created, target?:{ptyId}\|{name}}}` |
 | `job-status` | `{kind:"job-status", status:{jobId, state, detail, created}}`; a refused job is `state:"declined"` |
 
@@ -346,7 +347,15 @@ What `canopy-serviced` does where the sections above leave a choice open.
   `accepted` (admission), `started` (Return submitted), `done`/`blocked`
   (`job_done`) and `failed`. A locally `uncertain` delivery goes out as
   `failed` with an explanation. A mesh message that was admitted but could not
-  be delivered is answered with `mesh-status` `state:"failed"`. Outgoing
+  be delivered is answered with `mesh-status` `state:"failed"`. A delivered
+  message's local record is kept in `reply_routes` (7 days) with its sender's
+  team, user, device and message id, and its notice ends with how to answer:
+  `canopy_mesh_send ptyId 0 replyTo "<record id>"`. `mesh_send` with `ptyId: 0`
+  is that answer: the route comes from the record, never the body, the reply is
+  recorded locally with ref `{kind:"relay", id:<sender's message id>}` and
+  queued as a `mesh` envelope to the sender's device (text ≤ 16 KB, no items).
+  A `roster-request` gets the same access decision as a message and is
+  answered from the outbox without a delivery. Outgoing
   envelopes are v2 from `{user: ownerUserId, device: host}` with
   `to.workspace` set to this workspace. Outbox rows retry until 7 days.
   `GET /admin/device?workspace=<id>&created=<ms>` adds the `register-host`

@@ -15,8 +15,13 @@ export function installHost(connection: Host): () => void {
 
 export const isReadOnlyHost = () => host.readOnly===true;
 export const isRemoteHost = () => host.kind === "socket";
+/** Execution is on a workspace VM; unlike the portal, whose host is the desktop. */
+export const isWorkspaceHost = () => typeof host.invokeDesktop === "function";
 export const invoke = <T>(command: string, args?: Record<string, unknown>): Promise<T> =>
   args === undefined ? host.invoke<T>(command) : host.invoke<T>(command, args);
+/** The computer showing the IDE, even while execution is remote. */
+export const invokeDesktop = <T>(command: string, args?: Record<string, unknown>): Promise<T> =>
+  host.invokeDesktop ? host.invokeDesktop<T>(command, args) : invoke<T>(command, args);
 export const listen = <T>(event: string, handler: (event: HostEvent<T>) => void): Promise<UnlistenFn> =>
   host.listen(event, handler);
 export const createChannel = <T>(): HostChannel<T> => host.channel<T>();

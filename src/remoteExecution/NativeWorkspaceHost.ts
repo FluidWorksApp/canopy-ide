@@ -22,15 +22,21 @@ for(const command of ['chrome_extension_token_status','chrome_extension_token_se
 // (it answered "does not support notes_create"). Attaching a file stays with the
 // workspace: its path names a workspace file this computer cannot read.
 for(const command of ['notes_list','notes_due','notes_get','notes_create','notes_update','notes_add_attachment','notes_set_status','notes_link','notes_read_file','notes_read_image','notes_dir','notes_remind','notes_search','notes_delete'])LOCAL_UI.add(command);
-// The companion is one desktop-wide agent: its CLI login, ~/.canopy/companion
-// home and context bridge all live on the computer showing the IDE. The
-// workspace host has no companion (it answered "does not support
-// companion_spawn"), and it reaches workspace projects through canopy_* tools.
-// Account requests carry this computer's sign-in to canopyide.dev; the
-// workspace has no handler for them. The workspace UI calls Tauri directly,
-// but ipc.ts callers (the Slack hub's polling and replies) come through here.
-LOCAL_UI.add('canopy_account_request');
-for(const command of ['companion_spawn','companion_write','companion_kill','companion_status','companion_store_read','companion_store_write','companion_save_attachment'])LOCAL_UI.add(command);
+// The companion floats over the app and belongs to no project, so its CLI runs
+// on the computer showing the IDE in every mode. Its canopy_* tools reach the
+// desktop's context bridge, which publishes ops to this window and waits for
+// the answer; the answers then act on the workspace through this host.
+export const COMPANION_DESKTOP_COMMANDS=['companion_spawn','companion_write','companion_kill','companion_status','companion_store_read','companion_store_write','companion_save_attachment','companion_dispatch_origin','companion_open_requests','context_publish','context_remove','context_tools','context_agent_spawn_ready','browser_result','webview_snapshot'] as const;
+for(const command of COMPANION_DESKTOP_COMMANDS)LOCAL_UI.add(command);
+// The bridge's requests to this window, and the companion's replies. An op from
+// a terminal on this computer is dropped: its pty id would alias a VM session's.
+export const COMPANION_DESKTOP_EVENTS=['agent:ui','agent:action','agent:browser','companion:reply'] as const;
+// The signed-in account, crash reports and the remote portal belong to this
+// computer; the workspace has none of them.
+for(const command of ['canopy_account_request','report_crash','send_crash','crash_issue_draft','file_crash_issue','remote_status','remote_enable','remote_disable','remote_qr','remote_rotate_pin','remote_socket_metrics'])LOCAL_UI.add(command);
+/** Whether a command runs on the computer showing the IDE in remote mode. */
+export const isDesktopLocal=(command:string)=>LOCAL_UI.has(command);
+class WorkspaceChannel<T> implements HostChannel<T>{onmessage:(message:T)=>void=()=>{};}
 // Recovery reads share routes with background polls; they must not wait in that lane.
 const INTERACTIVE=1;
 const quote = (value: string) => `'${value.replaceAll("'", "'\\''")}'`;
@@ -128,7 +134,12 @@ export class NativeWorkspaceHost implements Host {
     const meta=this.metadata[String(session.id)] ?? {};
     return {id:session.id,session_generation:session.id,pid:null,cwd:meta.cwd??'/workspace',title:meta.title??session.title,name:meta.name,cols:session.cols,rows:session.rows,kind:'desktop',project_id:meta.projectId??`remote-${this.connection.workspaceId}`,run:meta.run??session.kind==='build',command:meta.command,run_command_id:meta.runCommandId,generation:1,replay_start:0,replay_end:0};
   }
-  private async desktopCall<T>(command:string,args:Args={}){if(this.disposed)throw Error('Workspace disconnected');const result=await this.desktop.invoke<T>(command,args);if(this.disposed)throw Error('Workspace disconnected');return result;}
+  private desktopArgs(args:Args){
+    let out=args;
+    for(const [key,value] of Object.entries(args))if(value instanceof WorkspaceChannel){const channel=this.desktop.channel<unknown>();channel.onmessage=message=>value.onmessage(message);out={...out,[key]:channel};}
+    return out;
+  }
+  private async desktopCall<T>(command:string,args:Args={}){if(this.disposed)throw Error('Workspace disconnected');const result=await this.desktop.invoke<T>(command,this.desktopArgs(args));if(this.disposed)throw Error('Workspace disconnected');return result;}
   private async native<T>(command: string,args: Args={},priority?: number) {
     const result=await this.call<{result:T}>('/native',{command,args},priority);return result.result;
   }
@@ -243,9 +254,6 @@ export class NativeWorkspaceHost implements Host {
     if(command==='spot_stage_drop_images'){await this.call('/resources');return this.desktopCall<T>('execution_remote_stage_images',{...args,workspaceId:this.connection.workspaceId,endpoint:this.connection.endpoint});}
     if(command==='execution_remote_upload')return this.desktopCall<T>(command,{...args,workspaceId:this.connection.workspaceId,endpoint:this.connection.endpoint});
     if(command==='execution_remote_upload_cancel')return this.desktopCall<T>(command,args);
-    // This host's channels are inert placeholders; output from a desktop
-    // process needs a real desktop channel relayed to the caller's.
-    if(command==='companion_spawn'){const sink=args.onData as HostChannel<unknown>;const relay=this.desktop.channel<unknown>();relay.onmessage=message=>sink.onmessage(message);return this.desktopCall<T>(command,{...args,onData:relay});}
     if(LOCAL_UI.has(command))return this.desktopCall<T>(command,args);
     if(this.readOnly&&!READ_ONLY_NATIVE.has(command)&&!['environment_identity','pty_renderer_register','pty_renderer_sessions','pty_stats'].includes(command))throw Error('This workspace is read-only');
     if(command==='git_clone'){
@@ -323,9 +331,10 @@ export class NativeWorkspaceHost implements Host {
   }
   async listen<T>(event:string,handler:(event:HostEvent<T>)=>void):Promise<UnlistenFn>{
     if(this.disposed)throw Error('Workspace disconnected');
-    if(['remote:upload-progress','menu','deep-link','memory:pressure','window:fullscreen','clipboard:changed','clipboard:blocked','dictation:progress','dictation:partial','dictation:level'].includes(event)){const release=await this.desktop.listen<T>(event,value=>{if(!this.disposed)handler(value);});if(this.disposed){release();return()=>{};}const cancel=()=>{this.desktopListeners.delete(cancel);release();};this.desktopListeners.add(cancel);return cancel;}
+    if(['remote:upload-progress','menu','deep-link','memory:pressure','window:fullscreen','clipboard:changed','clipboard:blocked','dictation:progress','dictation:partial','dictation:level',...COMPANION_DESKTOP_EVENTS].includes(event)){const companionOnly=event.startsWith('agent:');const release=await this.desktop.listen<T>(event,value=>{if(this.disposed)return;if(companionOnly&&(value.payload as {ptyId?:unknown}|null)?.ptyId!=null)return;handler(value);});if(this.disposed){release();return()=>{};}const cancel=()=>{this.desktopListeners.delete(cancel);release();};this.desktopListeners.add(cancel);return cancel;}
     const list=this.listeners.get(event)??new Set();this.listeners.set(event,list);list.add(handler as (event:HostEvent<unknown>)=>void);this.beginPoll();return ()=>{list.delete(handler as (event:HostEvent<unknown>)=>void);};
   }
-  channel<T>():HostChannel<T>{return {onmessage:()=>{}};}
+  channel<T>():HostChannel<T>{return new WorkspaceChannel<T>();}
+  invokeDesktop<T>(command:string,args:Args={}):Promise<T>{return this.desktopCall<T>(command,args);}
   dispose(){this.disposed=true;this.harness?.stop();this.harness=undefined;for(const release of [...this.desktopListeners]){try{release();}catch{/* Disposed handlers stay inert even if native teardown fails. */}}this.desktopListeners.clear();window.removeEventListener('canopy:account-changed',this.onAccountChanged);clearTimeout(this.heartbeat);for(const input of this.inputs.values())input.dispose();this.inputs.clear();clearTimeout(this.poll);for(const id of this.streams.keys())this.detach(id);this.listeners.clear();}
 }

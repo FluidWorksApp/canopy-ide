@@ -2,7 +2,7 @@ import {validChatMessage,UUID,MAX_ATTACHMENTS} from './messageSchema';
 import {chatFileStore,prepareFile,sha256,bytesOf,type FileStore,type FileRecord,type PreparedFile} from './files';
 import {open,seal,registration,MessageReplayError,type Envelope,type EnvelopeKind,type PublicIdentity,type Address} from './crypto';
 import {deviceIdentity,rememberMessage,messageOutbox,type MessageOutbox,type PendingEnvelope,type DeviceIdentity} from './store';
-import {validJobRequest,validJobStatus,validMeshMessage,validMeshStatus,type JobRequest,type JobStatus,type MeshMessage,type MeshStatus} from './jobSchema';
+import {validJobRequest,validJobStatus,validMeshMessage,validMeshStatus,validRoster,validRosterRequest,type JobRequest,type JobStatus,type MeshMessage,type MeshStatus,type Roster,type RosterRequest} from './jobSchema';
 /** `last_seen_at` is bumped by every poll the device makes, so it is the
  * directory's only "online" signal. */
 export type Device={id:string;user_id:string;public_keys:PublicIdentity;last_seen_at?:string|null;kind?:'user'|'host';workspaceIds?:string[]};
@@ -11,7 +11,7 @@ export type Attachment={id:string;name:string;size:number;type:string;sha256:str
 export type ChatMessage={id:string;sender:string;recipient:string|null;text:string;created:number;attachments?:Attachment[]};
 export type UnavailableReason='offline'|'expired'|'denied';
 type Payload={kind:'message';message:ChatMessage}|{kind:'receipt';id:string}|{kind:'signal';description:RTCSessionDescriptionInit}|{kind:'job';job:JobRequest}|{kind:'job-status';status:JobStatus}
- |{kind:'mesh';message:MeshMessage}|{kind:'mesh-status';status:MeshStatus}|{kind:'file-request';attachmentId:string;messageId:string}|{kind:'file-unavailable';attachmentId:string;reason:UnavailableReason};
+ |{kind:'mesh';message:MeshMessage}|{kind:'mesh-status';status:MeshStatus}|{kind:'roster-request';request:RosterRequest}|{kind:'roster';roster:Roster}|{kind:'file-request';attachmentId:string;messageId:string}|{kind:'file-unavailable';attachmentId:string;reason:UnavailableReason};
 /** A pull the sender could not (or would not) serve. */
 export class AttachmentUnavailable extends Error{readonly reason:UnavailableReason;constructor(reason:UnavailableReason){super(reason==='offline'?'The sender is not directly connected':reason==='denied'?'This file was not shared with you':'This file is no longer available');this.reason=reason;}}
 export type AttachmentState={state:'downloading';received:number;total:number}|{state:'available'}|{state:'unavailable';reason:UnavailableReason}|{state:'failed';detail:string};
@@ -26,7 +26,7 @@ const REASONS:UnavailableReason[]=['offline','denied','expired'];
 type Download={meta:Attachment;messageId:string;devices:Set<string>;replies:Map<string,UnavailableReason>;channel?:RTCDataChannel;timer?:ReturnType<typeof setTimeout>;promise:Promise<Blob>;resolve:(blob:Blob)=>void;reject:(error:Error)=>void;progress:Set<(received:number,total:number)=>void>};
 const isArrayBuffer=(value:unknown):value is ArrayBuffer=>Object.prototype.toString.call(value)==='[object ArrayBuffer]';
 /** The envelope kind each payload must travel under (protocol §6.1). */
-const ENVELOPE_KIND:Record<Payload['kind'],EnvelopeKind>={message:'chat',receipt:'chat',signal:'chat',job:'job','job-status':'job-status',mesh:'mesh','mesh-status':'mesh','file-request':'chat','file-unavailable':'chat'};
+const ENVELOPE_KIND:Record<Payload['kind'],EnvelopeKind>={message:'chat',receipt:'chat',signal:'chat',job:'job','job-status':'job-status',mesh:'mesh','mesh-status':'mesh','roster-request':'mesh',roster:'mesh','file-request':'chat','file-unavailable':'chat'};
 export type PeerRequest=<T>(body:unknown)=>Promise<T>;
 /** A device polls every 2s; one quiet for longer than this is not online. */
 export const DEVICE_ONLINE_MS=60_000;
@@ -43,6 +43,8 @@ type Options={members?:(members:{id:string;name:string}[])=>void;request:PeerReq
  /** An agent message from a workspace's service (host device), or its refusal of one this account sent. */
  mesh?:(message:MeshMessage,sender:Device,workspace:string)=>void;
  meshStatus?:(status:MeshStatus,sender:Device,workspace:string)=>void;
+ /** A workspace service's answer to a roster request this device sent. */
+ roster?:(roster:Roster,sender:Device,workspace:string)=>void;
  /** Message ids with ciphertext still waiting in the restored outbox. */
  pending?:(messageIds:string[])=>void;
  /** A message's last pending delivery expired or became undeliverable. */
@@ -233,6 +235,11 @@ export class PeerClient {
   if(!validMeshMessage(message))throw Error('Invalid message');
   const host=await this.hostFor(workspace);await this.deliverWorkspace(host,workspace,{kind:'mesh',message});return host;
  }
+ /** Asks a cloud workspace's service which agents are running there. */
+ async sendWorkspaceRosterRequest(request:RosterRequest,workspace:string):Promise<Device>{
+  if(!validRosterRequest(request))throw Error('Invalid roster request');
+  const host=await this.hostFor(workspace);await this.deliverWorkspace(host,workspace,{kind:'roster-request',request});return host;
+ }
  /** Reports a job's progress to the device that submitted it. */
  async sendJobStatus(status:JobStatus,device:string){
   if(!validJobStatus(status))throw Error('Invalid job status');
@@ -266,6 +273,7 @@ export class PeerClient {
    else if(payload.kind==='job-status'){this.validateTimed(payload.status,validJobStatus,envelope);this.options.jobStatus?.(payload.status,sender,workspace);}
    else if(payload.kind==='mesh'&&workspace){this.validateTimed(payload.message,validMeshMessage,envelope);this.options.mesh?.(payload.message,sender,workspace);}
    else if(payload.kind==='mesh-status'&&workspace){this.validateTimed(payload.status,validMeshStatus,envelope);this.options.meshStatus?.(payload.status,sender,workspace);}
+   else if(payload.kind==='roster'&&workspace&&sender.kind==='host'){this.validateTimed(payload.roster,validRoster,envelope);this.options.roster?.(payload.roster,sender,workspace);}
    else if(payload.kind==='file-request')await this.serveFile(payload,sender);
    else if(payload.kind==='file-unavailable')this.fileUnavailable(payload,sender);
    else throw Error('Unknown peer message');

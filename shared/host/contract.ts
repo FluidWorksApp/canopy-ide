@@ -17,6 +17,8 @@ export interface Host {
   invoke<T>(command: string, args?: Record<string, unknown>): Promise<T>;
   listen<T>(event: string, handler: (event: HostEvent<T>) => void): Promise<UnlistenFn>;
   channel<T>(): HostChannel<T>;
+  /** The computer showing the IDE, when it is not the execution host. */
+  invokeDesktop?<T>(command: string, args?: Record<string, unknown>): Promise<T>;
 }
 
 export interface HostHandshake {

@@ -4,6 +4,7 @@ import {
   actionPolicy,
   clampSpot,
   companionCli,
+  companionLaunchRoots,
   companionName,
   companionModelForCli,
   companionRunnerLaunch,
@@ -23,6 +24,7 @@ import {
   type CompanionLaunch,
 } from "./companion";
 import { getSettings, updateSettings } from "./settings";
+import { CODEX_RUNNER } from "./structuredRunners";
 import {
   STRUCTURED_RUNNERS,
   permissionArgs as runnerPermissionArgs,
@@ -480,5 +482,23 @@ describe("a tool call, written for a reader", () => {
     const prose = toolDetail("select:mcp__canopy__canopy_show_diff,mcp__canopy__canopy_editor_state");
     expect(prose.startsWith("select:")).toBe(true);
     expect(prose.endsWith("…")).toBe(true);
+  });
+});
+
+describe("companionLaunchRoots", () => {
+  const projects = [{ roots: ["/Users/me/a", "/Users/me/b"] }, { roots: ["/Users/me/c"] }];
+
+  it("grants every project root when the projects are on this computer", () => {
+    expect(companionLaunchRoots(projects, false)).toEqual(["/Users/me/a", "/Users/me/b", "/Users/me/c"]);
+  });
+
+  it("grants none in a cloud workspace, whose paths name the VM", () => {
+    const vm = [{ roots: ["/workspace/coraa", "/workspace/numbers"] }];
+    expect(companionLaunchRoots(vm, true)).toEqual([]);
+    const launch = companionRunnerLaunch({
+      bin: "codex", sessionId: "", systemPrompt: "B", roots: companionLaunchRoots(vm, true), model: "", authority: "read",
+    });
+    expect(launch.additionalDirectories).toEqual([]);
+    expect(CODEX_RUNNER.args(launch).join(" ")).not.toContain("/workspace");
   });
 });

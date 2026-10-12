@@ -489,3 +489,126 @@ async fn relay_authority_matrix_dedupe_and_jobs() {
     let queued = daemon.relay.0.queue.lock().unwrap().len();
     assert_eq!(daemon.relay.0.acked.lock().unwrap().len(), queued);
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn roster_requests_and_replies_travel_back_over_the_relay() {
+    let daemon = Daemon::start().await;
+    let runner = FakeRunner::start().await;
+    daemon.register(WS, Some(&runner)).await;
+    let (reviewer, _) = daemon
+        .terminal(WS, &runner, "req-rev-001", "reviewer", 7, 7007)
+        .await;
+    let (_, device) = daemon.admin("GET", "/admin/device", None).await;
+    let relay = Relay {
+        daemon: &daemon,
+        host: (
+            device["deviceId"].as_str().unwrap().to_string(),
+            serde_json::from_value::<PublicIdentity>(device["keys"].clone()).unwrap(),
+        ),
+    };
+    let owner = Peer::new("owner");
+    let stranger = Peer::new("stranger");
+    for peer in [&owner, &stranger] {
+        daemon
+            .relay
+            .0
+            .directory
+            .lock()
+            .unwrap()
+            .push(DirectoryDevice {
+                id: peer.device.clone(),
+                user_id: peer.user.clone(),
+                public_keys: peer.public(),
+                kind: Some("user".into()),
+            });
+    }
+    let roster =
+        |id: &str| serde_json::json!({"kind":"roster-request","request":{"id":id,"created":now()}});
+
+    // The owner asks who is here: answered with the live agents, nothing typed.
+    relay.enqueue(
+        &owner,
+        &owner.seal(&relay.host, "mesh", roster("roster-0001")),
+    );
+    relay.tick().await;
+    let answer = relay.replies(&owner).pop().expect("a roster");
+    assert_eq!(answer["kind"], "roster");
+    assert_eq!(answer["roster"]["requestId"], "roster-0001");
+    let agents = answer["roster"]["agents"].as_array().unwrap();
+    assert_eq!(agents.len(), 1);
+    assert_eq!(agents[0]["ptyId"], 7);
+    assert_eq!(agents[0]["name"], "reviewer");
+    assert_eq!(agents[0]["agent"], "claude");
+    assert!(runner.writes_to(7).is_empty());
+
+    // Someone without access is refused under the request's id.
+    relay.enqueue(
+        &stranger,
+        &stranger.seal(&relay.host, "mesh", roster("roster-0002")),
+    );
+    relay.tick().await;
+    let refused = relay.replies(&stranger).pop().unwrap();
+    assert_eq!(refused["kind"], "mesh-status");
+    assert_eq!(refused["status"]["messageId"], "roster-0002");
+    assert_eq!(refused["status"]["state"], "refused");
+
+    // A message names its sending agent, and the notice says how to answer.
+    let message = serde_json::json!({"kind":"mesh","message":{"id":"desk-msg-0001","text":"what changed in the parser?","target":{"name":"reviewer"},"from":{"name":"Jarvis\u{1b}[2J"},"created":now()}});
+    relay.enqueue(&owner, &owner.seal(&relay.host, "mesh", message));
+    relay.tick().await;
+    support::wait_until("notice typed", Duration::from_secs(5), || {
+        runner.writes_to(7).len() == 2
+    })
+    .await;
+    let typed = runner.writes_to(7)[0].data.clone();
+    assert!(
+        typed.starts_with("[canopy: a message from Jarvis [2J (owner) over the team mesh]"),
+        "{typed}"
+    );
+    let hint = "answer it with canopy_mesh_send ptyId 0 replyTo \"";
+    let local = typed
+        .split(hint)
+        .nth(1)
+        .expect(&typed)
+        .trim_end_matches('"')
+        .to_string();
+    assert!(local.starts_with('m'), "{local}");
+
+    let send =
+        |body: serde_json::Value| daemon.agent(WS, &reviewer, "POST", "/ctx/action", Some(body));
+    // ptyId 0 without replyTo, or naming a local message, is refused.
+    assert_eq!(
+        send(serde_json::json!({"kind":"mesh_send","ptyId":0,"text":"hi"}))
+            .await
+            .0,
+        400
+    );
+    assert_eq!(
+        send(serde_json::json!({"kind":"mesh_send","ptyId":0,"replyTo":"m999","text":"hi"}))
+            .await
+            .0,
+        404
+    );
+    assert_eq!(
+        send(serde_json::json!({"kind":"message_agent","ptyId":0,"text":"hi"}))
+            .await
+            .0,
+        400
+    );
+
+    // The reply goes back to the device that asked, threaded under its id.
+    let (status, body) = send(serde_json::json!({"kind":"mesh_send","ptyId":0,"replyTo":local,"text":"Two parser fixes.\nSee src/parse.rs."})).await;
+    assert_eq!(status, 200, "{body}");
+    relay.tick().await;
+    let back = relay.replies(&owner).pop().unwrap();
+    assert_eq!(back["kind"], "mesh");
+    assert_eq!(back["message"]["replyTo"], "desk-msg-0001");
+    assert_eq!(
+        back["message"]["text"],
+        "Two parser fixes.\nSee src/parse.rs."
+    );
+    assert_eq!(back["message"]["target"]["ptyId"], 0);
+    assert_eq!(back["message"]["from"]["name"], "reviewer");
+    assert!(relay.replies(&stranger).iter().all(|r| r["kind"] != "mesh"));
+    assert_eq!(runner.writes_to(7).len(), 2);
+}

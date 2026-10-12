@@ -805,7 +805,8 @@ export interface AgentUiOp {
     | "mesh_message_cloud";
   route: string;
   /** Agent terminal that initiated the operation, when there is one. For
-   *  mesh_submit the bridge stamps it from the caller's credential. */
+   *  mesh_submit and mesh_message_cloud the bridge stamps it from the
+   *  caller's credential. */
   ptyId?: number | null;
   /** The app run that terminal belongs to. */
   instance?: string | null;
@@ -815,6 +816,8 @@ export interface AgentUiOp {
   device?: string | null;
   targetPtyId?: number | null;
   replyTo?: string | null;
+  /** mesh_message_cloud: the sending terminal's name, from the bridge. */
+  fromName?: string | null;
   path?: string | null;
   line?: number | null;
   column?: number | null;
@@ -873,6 +876,11 @@ export const onAgentUi = (cb: (op: AgentUiOp) => void): Promise<UnlistenFn> =>
  *  with the mesh message id. */
 export const meshJobUpdate = (ptyId: number, instance: string, jobId: string, text: string) =>
   invoke<string>("context_mesh_job_update", { ptyId, instance, jobId, text });
+
+/** A cloud workspace agent's answer, typed into the terminal that messaged it
+ *  and kept on the mesh tagged ref {kind: "relay", id: messageId}. */
+export const meshRelayReply = (ptyId: number, instance: string, messageId: string, text: string) =>
+  invoke<string>("context_mesh_job_update", { ptyId, instance, jobId: messageId, text, refKind: "relay" });
 
 /** Which canopy_* tools are switched off (Settings → Agents), pushed to the
  *  bridge so the sidecar can hide them from the agent entirely. */

@@ -15,6 +15,7 @@ import * as ipc from "./ipc";
 import {
   actionPolicy,
   companionCli,
+  companionLaunchRoots,
   companionModelForCli,
   companionSessionId,
   forgetCompanionSession,
@@ -32,6 +33,7 @@ import {
 } from "./companionTransport";
 import type { StructuredRunnerEvent } from "./structuredEvents";
 import { getSettings, updateSettings } from "./settings";
+import { isWorkspaceHost } from "./host";
 import { shellBin, shellQuote } from "./projects";
 
 export type CompanionStatus =
@@ -356,7 +358,8 @@ export async function startCompanion(
       return;
     }
 
-    const roots = opts.projects.flatMap((p) => p.roots);
+    const remote = isWorkspaceHost();
+    const roots = companionLaunchRoots(opts.projects, remote);
     const authority: CompanionAuthority = s.companionAuthority;
     const sessionId = companionSessionId(cli.id);
     const systemPrompt = buildCompanionPrompt({
@@ -364,6 +367,7 @@ export async function startCompanion(
       authority,
       tools: opts.tools,
       cliName: cli.name,
+      remote,
     });
     const launch: CompanionLaunch = {
       bin: cli.bin,

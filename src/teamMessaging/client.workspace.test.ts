@@ -4,7 +4,7 @@ import {afterEach,beforeAll,expect,it,vi} from 'vitest';
 import {waitFor} from '@testing-library/react';
 import {PeerClient,type Device,type PeerRequest} from './client';
 import {createIdentity,publicIdentity,seal,open,type Envelope,type Identity} from './crypto';
-import type {JobStatus} from './jobSchema';
+import type {JobStatus,MeshMessage,MeshStatus,Roster} from './jobSchema';
 beforeAll(()=>vi.stubGlobal('crypto',webcrypto));
 const clients:PeerClient[]=[];afterEach(()=>{clients.splice(0).forEach(c=>c.stop());});
 const WS='ws-22222222-2222-4222-8222-222222222222',aliceId='aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa',hostId='cccccccc-cccc-4ccc-8ccc-cccccccccccc';
@@ -17,12 +17,12 @@ async function setup(){
   if(b.action==='poll')return {envelopes:inbox.splice(0)} as T;
   if(b.action==='relay'){relayed.push(b as never);return {queued:true} as T;}
   return {} as T;});
- const statuses:{status:JobStatus;workspace?:string}[]=[],chats:unknown[]=[];
- const client=new PeerClient({user:'alice',team:'team',identity:async()=>({id:aliceId,keys:alice}),outbox:{load:async()=>[],put:async()=>{},remove:async()=>{}},request:request as PeerRequest,remember:async()=>true,rtc:()=>{throw Error('no direct');},message:m=>chats.push(m),receipt:()=>{},status:()=>{},jobStatus:(status,_s,workspace)=>statuses.push({status,workspace})});
+ const statuses:{status:JobStatus;workspace?:string}[]=[],chats:unknown[]=[],rosters:{roster:Roster;workspace:string}[]=[],meshes:(MeshMessage|MeshStatus)[]=[];
+ const client=new PeerClient({user:'alice',team:'team',identity:async()=>({id:aliceId,keys:alice}),outbox:{load:async()=>[],put:async()=>{},remove:async()=>{}},request:request as PeerRequest,remember:async()=>true,rtc:()=>{throw Error('no direct');},message:m=>chats.push(m),receipt:()=>{},status:()=>{},jobStatus:(status,_s,workspace)=>statuses.push({status,workspace}),roster:(roster,_s,workspace)=>rosters.push({roster,workspace}),mesh:m=>meshes.push(m),meshStatus:m=>meshes.push(m)});
  clients.push(client);await client.start();
  const from={team:'team',user:'owner',device:hostId},to={team:'team',user:'alice',device:aliceId};
  const reply=async(payload:unknown,v2:{kind:'job-status'|'mesh'|'chat'|'job';workspace?:string}|null)=>{const e=await seal(host,await publicIdentity(alice),from,to,JSON.stringify(payload),Date.now(),v2?{version:2,...v2}:undefined);inbox.push({id:crypto.randomUUID(),envelope:e});};
- return {alice,host,client,relayed,statuses,chats,reply};
+ return {alice,host,client,relayed,statuses,chats,rosters,meshes,reply};
 }
 it('sends workspace jobs as v2 to the host and accepts its job status only for that workspace',async()=>{
  const {alice,host,client,relayed,statuses,chats,reply}=await setup();
@@ -43,4 +43,25 @@ it('sends workspace jobs as v2 to the host and accepts its job status only for t
  await reply({kind:'job-status',status},{kind:'job-status',workspace:WS});
  await waitFor(()=>expect(statuses).toHaveLength(1),{timeout:5000});
  expect(statuses[0]).toEqual({status,workspace:WS});expect(chats).toHaveLength(0);
+},10000);
+
+it('asks the host for its roster inside a mesh envelope and accepts only its answer',async()=>{
+ const {alice,host,client,relayed,rosters,meshes,reply}=await setup();
+ const request={id:'roster-12345678',created:Date.now()};
+ expect((await client.sendWorkspaceRosterRequest(request,WS)).id).toBe(hostId);
+ expect(relayed[0].envelope).toMatchObject({version:2,kind:'mesh',to:{workspace:WS,device:hostId}});
+ const opened=await open(host as Identity,await publicIdentity(alice),{team:'team',user:'alice',device:aliceId},{team:'team',user:'owner',device:hostId},relayed[0].envelope,async()=>true);
+ expect(JSON.parse(opened)).toEqual({kind:'roster-request',request});
+ const roster={requestId:request.id,agents:[{ptyId:7,name:'reviewer',agent:'claude',task:null,status:null,closing:false}],created:Date.now()};
+ await reply({kind:'roster',roster},{kind:'job-status',workspace:WS});
+ await reply({kind:'roster',roster:{...roster,agents:[{ptyId:0,name:'x'}]}},{kind:'mesh',workspace:WS});
+ await reply({kind:'roster',roster},{kind:'mesh',workspace:'ws-33333333-3333-4333-8333-333333333333'});
+ await reply({kind:'roster',roster},{kind:'mesh',workspace:WS});
+ const answer={id:'reply-12345678',text:'done',target:{ptyId:0},replyTo:'msg-12345678',created:Date.now(),from:{name:'reviewer'}};
+ await reply({kind:'mesh',message:answer},{kind:'mesh',workspace:WS});
+ const failed={messageId:'msg-12345678',state:'failed',detail:'No running agent called reviewer.',created:Date.now()};
+ await reply({kind:'mesh-status',status:failed},{kind:'mesh',workspace:WS});
+ await waitFor(()=>expect(meshes).toHaveLength(2),{timeout:5000});
+ expect(rosters).toEqual([{roster,workspace:WS}]);
+ expect(meshes).toEqual([answer,failed]);
 },10000);
