@@ -10,7 +10,8 @@ let connected = false;
 let frameWidth = 1280;
 let frameHeight = 720;
 let composing = false;
-let decodingSocket;
+let drawing = false;
+let nextFrame;
 let dialogPage;
 let resizeTimer;
 let latestPageMessage;
@@ -20,7 +21,7 @@ if(remote)$('welcome').textContent='Connecting to your workspace browser…';
 const heldKeys = new Map();
 const post = message => { if (parentOrigin) parent.postMessage(message, parentOrigin === 'null' ? '*' : parentOrigin); };
 const send = message => connection.send(message);
-function visibility() { send({ type: 'visible', visible: wanted && !document.hidden }); }
+function visibility() { send({ type: 'visible', visible: wanted && !document.hidden, coalesce: true }); }
 function resize() {
   layout();
   clearTimeout(resizeTimer);
@@ -41,6 +42,37 @@ function layout() {
   canvas.style.width = `${fit.width}px`;
   canvas.style.height = `${fit.height}px`;
 }
+const base64Bytes = Uint8Array.fromBase64 ? data => Uint8Array.fromBase64(data) : data => {
+  const text = atob(data), bytes = new Uint8Array(text.length);
+  for (let i = 0; i < text.length; i++) bytes[i] = text.charCodeAt(i);
+  return bytes;
+};
+async function decodeJpeg(data) {
+  const blob = new Blob([base64Bytes(data)], { type: 'image/jpeg' });
+  // Decodes off the main thread, so pointer input is not held behind a frame.
+  if (globalThis.createImageBitmap) return createImageBitmap(blob);
+  const url = URL.createObjectURL(blob), image = new Image();
+  try { image.src = url; await image.decode(); return image; } finally { URL.revokeObjectURL(url); }
+}
+async function drawFrame(message, sourceSocket) {
+  const image = await decodeJpeg(message.data);
+  try {
+    if (connection.socket !== sourceSocket || !connection.ready) return;
+    const width = image.naturalWidth ?? image.width, height = image.naturalHeight ?? image.height;
+    // Resizing a canvas reallocates and clears it; only do so when the shape changes.
+    if (canvas.width !== width || canvas.height !== height) { canvas.width = width; canvas.height = height; }
+    context.drawImage(image, 0, 0);
+  } finally { image.close?.(); }
+  frameWidth = message.width;
+  frameHeight = message.height;
+  canvas.dataset.viewportWidth = frameWidth;
+  canvas.dataset.viewportHeight = frameHeight;
+  canvas.hidden = false;
+  layout();
+  $('welcome').hidden = true;
+  connected = true;
+  $('status').textContent = 'Connected to Chrome'; $('status').classList.remove('error');
+}
 const connection=new ViewerConnection({
   remote,url:`${location.origin.replace('http:', 'ws:')}${location.pathname}socket`,
   requestTicket:requestId=>{if(!parentOrigin||!bridgeSessionId)return false;post({canopy:'remote-stream-ticket-request',sessionId:bridgeSessionId,requestId});},
@@ -49,32 +81,21 @@ const connection=new ViewerConnection({
   onReopen:()=>{if(!parentOrigin||!bridgeSessionId)return false;post({canopy:'stream-reopen',sessionId:bridgeSessionId});},
   onMessage:async(message,sourceSocket)=>{
     if (message.type === 'frame') {
-      if (decodingSocket===sourceSocket) { send({ type: 'ack' }); return; }
-      decodingSocket = sourceSocket;
-      const bytes = Uint8Array.from(atob(message.data), c => c.charCodeAt(0));
-      const url = URL.createObjectURL(new Blob([bytes], { type: 'image/jpeg' }));
-      const image = new Image();
-      try {
-        image.src = url;
-        await image.decode();
-        if(connection.socket!==sourceSocket||!connection.ready)return;
-        canvas.width = image.naturalWidth;
-        canvas.height = image.naturalHeight;
-        context.drawImage(image, 0, 0);
-        frameWidth = message.width;
-        frameHeight = message.height;
-        canvas.dataset.viewportWidth = frameWidth;
-        canvas.dataset.viewportHeight = frameHeight;
-        canvas.hidden = false;
-        layout();
-        $('welcome').hidden = true;
-        connected = true;
-        $('status').textContent='Connected to Chrome';$('status').classList.remove('error');
-      } finally {
-        URL.revokeObjectURL(url);
-        if(decodingSocket===sourceSocket)decodingSocket=undefined;
-        if(connection.socket===sourceSocket)send({ type: 'ack' });
+      // A frame that arrives mid-decode replaces the queued one but is never
+      // dropped itself: the bridge filters repeats of what it last sent, so a
+      // discarded newest frame would leave the preview frozen on a stale one.
+      if (drawing) {
+        if (nextFrame?.socket === connection.socket) send({ type: 'ack' });
+        nextFrame = { message, socket: sourceSocket };
+        return;
       }
+      drawing = true;
+      try {
+        for (let frame = { message, socket: sourceSocket }; frame; frame = nextFrame, nextFrame = undefined) {
+          try { await drawFrame(frame.message, frame.socket); }
+          finally { if (connection.socket === frame.socket) send({ type: 'ack' }); }
+        }
+      } finally { drawing = false; nextFrame = undefined; }
     } else if (message.type === 'status') {
       $('status').textContent = message.text;
       $('status').title = message.text;

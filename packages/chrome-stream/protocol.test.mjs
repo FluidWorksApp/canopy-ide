@@ -17,6 +17,18 @@ test('slow consumers never accumulate decoded frames', () => {
   gate.offer(frame => delivered.push(frame), 10000);
   assert.deepEqual(delivered, [0, 9999, 10000]);
 });
+test('a pipelined gate keeps two frames in flight and still coalesces the rest', () => {
+  const gate = new FrameGate(2);
+  const delivered = [];
+  for (let i = 0; i < 100; i++) gate.offer(frame => delivered.push(frame), i);
+  assert.deepEqual(delivered, [0, 1]);
+  gate.ack();
+  assert.deepEqual(delivered, [0, 1, 99]);
+  gate.ack(); gate.ack(); gate.ack();
+  gate.offer(frame => delivered.push(frame), 100);
+  gate.offer(frame => delivered.push(frame), 101);
+  assert.deepEqual(delivered, [0, 1, 99, 100, 101]);
+});
 test('untrusted iframe sizes cannot allocate enormous Chrome viewports', () => {
   assert.deepEqual(viewportSize(Infinity, -100), { width: 2560, height: 160 });
   assert.deepEqual(viewportSize(900.3, 650.9), { width: 900, height: 651 });

@@ -36,10 +36,14 @@ to reopen the bridge with the same tab profile and latest URL. Refresh survives
 socket reconnects; mouse and keyboard events are never replayed. A reconnect
 receives a fresh frame even when the page's pixels have not changed.
 
-Workspace previews match the viewing display's pixel density up to 2×, capped
-at 3840×2400 physical pixels. An explicit compositor viewport preserves CSS
-layout and pointer coordinates while avoiding canvas upscaling on retina
-screens. JPEG quality is 90. Screenshots report their actual PNG dimensions.
+Workspace previews match the viewing display's pixel density up to 2× within
+a budget of about one 1080p screen of physical pixels (`STREAM_PIXEL_BUDGET`):
+the workspace has no GPU, so every frame is composited and JPEG-encoded on the
+CPU and cost follows pixel count. A full-width pane renders at 1×; a narrower
+one gets more density. An explicit compositor viewport preserves CSS layout and
+pointer coordinates. Workspace JPEG quality is 80 (local Chrome keeps 90), and
+a viewer that coalesces frames gets two in flight to hide the network round
+trip. Screenshots report their actual PNG dimensions.
 Controls have a separate bounded queue, so a slow navigation or agent operation
 cannot hold pointer and keyboard input. Picker mode changes remain ordered with
 the input that depends on them; a later navigation cancels an earlier load.

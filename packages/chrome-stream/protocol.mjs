@@ -24,8 +24,8 @@ export const FRAME_POLL_MS = 200;
  * A timed-out command has an unknown remote outcome: fence this session rather
  * than starting again while the old request may still complete in Chromium. */
 export class ScreencastLifecycle {
-  constructor(session, shouldRun, { timeoutMs = 10_000 } = {}) {
-    Object.assign(this, { session, shouldRun, timeoutMs });
+  constructor(session, shouldRun, { timeoutMs = 10_000, quality = 90 } = {}) {
+    Object.assign(this, { session, shouldRun, timeoutMs, quality });
     this.running = false;
     this.queue = Promise.resolve();
     this.fault = null;
@@ -70,7 +70,7 @@ export class ScreencastLifecycle {
       catch (error) { if (this.fault) throw error; }
     }
     if (!this.shouldRun()) return;
-    await this.command('Page.startScreencast', { format: 'jpeg', quality: 90, maxWidth: 3840, maxHeight: 2400, everyNthFrame: 1 });
+    await this.command('Page.startScreencast', { format: 'jpeg', quality: this.quality, maxWidth: 3840, maxHeight: 2400, everyNthFrame: 1 });
     this.running = true;
     if (!this.shouldRun()) await this.stopNow();
   }
@@ -116,25 +116,29 @@ export function fitContain(frame, box) {
   return { width: Math.round(width * scale), height: Math.round(height * scale) };
 }
 
-// At most one frame is being decoded by the viewer; intermediate frames are
-// replaced with the latest pending frame. Chrome is acknowledged independently, including while
-// the iframe is hidden. There is no unbounded image queue on either side.
+// At most `limit` frames are unacknowledged by the viewer; intermediate frames
+// are replaced with the latest pending frame. A limit above one hides the
+// network round trip: the next frame is already on the wire while the viewer
+// draws, and the viewer coalesces to the newest. Chrome is acknowledged
+// independently, including while the iframe is hidden. There is no unbounded
+// image queue on either side.
 export class FrameGate {
-  busy = false;
+  inFlight = 0;
   pending;
+  constructor(limit = 1) { this.limit = limit; }
   offer(send, frame) {
-    if (this.busy) { this.pending = { send, frame }; return false; }
-    this.busy = true;
+    if (this.inFlight >= this.limit) { this.pending = { send, frame }; return false; }
+    this.inFlight++;
     send(frame);
     return true;
   }
   ack() {
-    this.busy = false;
+    this.inFlight = Math.max(0, this.inFlight - 1);
     const pending = this.pending;
     this.pending = undefined;
     if (pending) this.offer(pending.send, pending.frame);
   }
-  reset() { this.busy = false; this.pending = undefined; }
+  reset() { this.inFlight = 0; this.pending = undefined; }
 }
 
 /** Bounded socket/ticket recovery shared by local and workspace viewers.
@@ -208,8 +212,18 @@ export class ViewerConnection {
   dispose(){this.disposed=true;this.clearTimers();const socket=this.socket;this.socket=null;this.ready=false;socket?.close();}
 }
 
-/** Match physical display pixels without unbounded retina allocations. */
+/** Physical pixels a workspace preview may render and encode per frame.
+ *  The workspace has no GPU: Chromium composites in software and JPEG-encodes
+ *  each frame on one browser thread, so cost follows pixel count. Measured on
+ *  an 8-core workspace with a 1930×1025 pane while scrolling: 2× held ~10
+ *  frames/s at ~190% CPU (240 KB frames); 1× held ~20 frames/s at ~145%
+ *  (95 KB). About one 1080p screen keeps a full-width pane at 1×; a narrower
+ *  pane spends the same budget on density instead. */
+export const STREAM_PIXEL_BUDGET = 2_300_000;
+
+/** Match physical display pixels where the budget allows, in quarter steps. */
 export function streamPixelRatio(width,height,ratio=1){
  const size=viewportSize(width,height),requested=Number(ratio);
- return Math.max(1,Math.min(Number.isFinite(requested)?requested:1,2,3840/size.width,2400/size.height));
+ const limit=Math.min(Number.isFinite(requested)?requested:1,2,Math.sqrt(STREAM_PIXEL_BUDGET/(size.width*size.height)));
+ return Math.max(1,Math.floor(limit*4)/4);
 }

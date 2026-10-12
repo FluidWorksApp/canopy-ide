@@ -41,6 +41,7 @@ export async function startBridge(config, connectBrowser = config.workspace?()=>
   let sentData;
   const pages = new Map();
   const ownedPages = new Set();
+  // One frame in flight until the viewer says it coalesces (see 'visible').
   const gate = new FrameGate();
   const send = message => {
     if (viewer?.readyState === 1) viewer.send(JSON.stringify(message));
@@ -106,7 +107,9 @@ export async function startBridge(config, connectBrowser = config.workspace?()=>
     ownedPages.add(page);
     if (closing || page.isClosed()) return;
     const entry = { id: ++serial, page, session: config.workspace?await page.context().newCDPSession(page):pageSession(page) };
-    entry.frames = new ScreencastLifecycle(entry.session, () => entry === active && visible && !closing && viewer?.readyState === 1);
+    // Workspace frames cross the internet from a GPU-less VM; at 1× quality
+    // 80 measured about a fifth smaller than 90.
+    entry.frames = new ScreencastLifecycle(entry.session, () => entry === active && visible && !closing && viewer?.readyState === 1, { quality: config.workspace ? 80 : 90 });
     pages.set(entry.id, entry);
     page.setDefaultTimeout(10_000);
     page.setDefaultNavigationTimeout(30_000);
@@ -189,6 +192,11 @@ export async function startBridge(config, connectBrowser = config.workspace?()=>
     if (message.type === 'ack') return gate.ack();
     if (message.type === 'connect') return connect();
     if (message.type === 'visible') {
+      // A workspace viewer is a network round trip away, so keep a second
+      // frame on the wire — but only for a viewer that keeps the newest frame
+      // arriving mid-decode. An older viewer drops it, which with two in
+      // flight would routinely freeze it on a stale picture.
+      if (config.workspace && message.coalesce) gate.limit = 2;
       const resuming=!!message.visible&&!visible;
       visible = !!message.visible;
       if(resuming){sentData=undefined;nextRefreshAt=0;refreshDelay=0;}
@@ -301,6 +309,7 @@ export async function startBridge(config, connectBrowser = config.workspace?()=>
   wss.on('connection', ws => {
     clearTimeout(idleTimer);
     viewer = ws;
+    gate.limit = 1;
     // The new viewer has not acknowledged the old socket's last picture.
     // Identical pixels must still be delivered to restore its input controls.
     sentData=undefined;lastFrameAt=0;nextRefreshAt=0;refreshDelay=0;
