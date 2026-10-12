@@ -116,11 +116,25 @@ pub fn roster_agents(ws: &Workspace) -> Vec<serde_json::Value> {
         .collect()
 }
 
+/// Under the relay's 32 000-byte envelope payload, with room for the request id.
+const MAX_ROSTER_BYTES: usize = 30_000;
+
+/// The roster answer, dropping the oldest agents until it fits one envelope.
+fn fit_roster(mut agents: Vec<serde_json::Value>, request_id: &str) -> serde_json::Value {
+    loop {
+        let payload = serde_json::json!({
+            "kind": "roster",
+            "roster": { "requestId": request_id, "agents": agents, "created": now_ms() }
+        });
+        if agents.is_empty() || payload.to_string().len() <= MAX_ROSTER_BYTES {
+            return payload;
+        }
+        agents.pop();
+    }
+}
+
 fn roster_payload(ws: &Workspace, request_id: &str) -> serde_json::Value {
-    serde_json::json!({
-        "kind": "roster",
-        "roster": { "requestId": request_id, "agents": roster_agents(ws), "created": now_ms() }
-    })
+    fit_roster(roster_agents(ws), request_id)
 }
 
 /// A display name the sender chose for itself; typed into a terminal, so it
@@ -619,5 +633,28 @@ pub async fn flush_outbox(
                 let _ = ws.ledger.outbox_result(row.id, Some(&error));
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_full_roster_still_fits_one_envelope() {
+        let long = "x".repeat(200);
+        let agents: Vec<_> = (1..=MAX_ROSTER as u32)
+            .map(|id| {
+                serde_json::json!({
+                    "ptyId": id, "name": &long[..80], "agent": &long[..40], "task": long,
+                    "status": {"title": &long[..120], "description": long}, "closing": false,
+                })
+            })
+            .collect();
+        let payload = fit_roster(agents, "roster-0001");
+        assert!(payload.to_string().len() <= MAX_ROSTER_BYTES);
+        let kept = payload["roster"]["agents"].as_array().unwrap();
+        assert!(!kept.is_empty() && kept.len() < MAX_ROSTER);
+        assert_eq!(kept[0]["ptyId"], 1);
     }
 }
