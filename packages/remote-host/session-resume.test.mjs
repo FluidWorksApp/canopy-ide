@@ -6,7 +6,7 @@ import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import {createRunner} from './runner.mjs';
 import {ServiceHarness} from './service-harness.mjs';
-import {SessionResume,resumePlan,keptFlags,foldEvents,parseProcesses,agentArgv,runnerCommand,PROCESS_SCRIPT} from './session-resume.mjs';
+import {SessionResume,resumePlan,keptFlags,foldEvents,parseProcesses,agentArgv,runnerCommand,PROCESS_SCRIPT,titleText,terminalDescription} from './session-resume.mjs';
 
 const secret='s'.repeat(64);
 const CONVERSATION='0fc2faf8-f255-43bf-8927-fcb18a615f3d';
@@ -75,6 +75,7 @@ function fakeAdmin({down=false}={}){
   async mintTerminal(id,body){calls.push(['mint',body.requestId,body.agent]);return {token:'credential-'+'t'.repeat(24)};},
   async bindTerminal(id,requestId,body){calls.push(['bind',requestId,body.sessionId]);return {};},
   async revokeTerminal(id,requestId){calls.push(['revoke',requestId]);return {};},
+  async describeTerminal(id,requestId,body){calls.push(['describe',requestId,body]);return {};},
   async putAccess(){return {};},async device(){return {};},
  };
 }
@@ -135,7 +136,7 @@ test('after a container restart the running agent comes back with its conversati
   assert.match(resumed.command,new RegExp(`cd '/workspace/app' && env 'CANOPY_SESSION_REQUEST_ID=resume-${agentTerminal.id}-\\d+' claude --resume ${CONVERSATION} --permission-mode auto --dangerously-skip-permissions; exec /bin/bash -l$`));
   assert.equal(resumed.env.CANOPY_CTX_SOCKET,'/run/canopy-ctx/ctx.sock','the resumed agent is inside a Canopy terminal');
   assert.equal(resumed.env.CANOPY_CTX_TOKEN,'credential-'+'t'.repeat(24));
-  const order=f.admin.calls.filter(c=>c[0]!=='register').map(c=>c[0]);
+  const order=f.admin.calls.filter(c=>['mint','bind','revoke'].includes(c[0])).map(c=>c[0]);
   assert.deepEqual(order,['mint','bind'],'minted before the spawn, bound after it');
   const newId=f.admin.calls.find(c=>c[0]==='bind')[2];
   assert.deepEqual(f.native.metadata[String(newId)],{cwd:'/workspace/app',projectId:'p1',title:'✳ Fix checkout',name:'checkout',command:`claude --resume ${CONVERSATION} --permission-mode auto --dangerously-skip-permissions`,requestId:`resume-${agentTerminal.id}-1791794270`,run:false,resumedFrom:agentTerminal.id});
@@ -204,4 +205,42 @@ test('members and stopped workspaces are left alone',async()=>{
   f.resume.config.workspaces[0].desiredState='stopped';
   assert.equal(await f.resume.observe(f.workspace,f.runtime),'ineligible');
  }finally{await f.cleanup();}
+});
+
+test('tab titles become the roster task; shells and agent names do not',()=>{
+ assert.equal(titleText('✳ Fix checkout','/bin/bash'),'Fix checkout');
+ assert.equal(titleText('◑ SignImplementation'),'SignImplementation');
+ for(const shell of ['/bin/bash','bash','~/w','claude','✳ codex','',undefined])assert.equal(titleText(shell,'/bin/bash'),undefined,String(shell));
+ assert.deepEqual(terminalDescription({agent:'claude',ended:false},{name:'XLs',title:'✳ Classify ledgers',command:'/bin/bash'}),{agent:'claude',name:'XLs',task:'Classify ledgers'});
+ assert.deepEqual(terminalDescription(undefined,{title:'✳ Fix checkout'}),{agent:'',name:'Fix checkout',task:''});
+ assert.deepEqual(terminalDescription({agent:'codex',ended:true},{}),{agent:'',name:'',task:''});
+});
+
+test('live terminals are described to the Canopy service once per change',async()=>{
+ const f=await fixture();
+ try{
+  const terminal=await f.desktopSpawn({requestId:'desktop-1',command:'/bin/bash'},{cwd:'/workspace/app',projectId:'p1',title:'✳ Fix checkout',name:'checkout',command:'/bin/bash',requestId:'desktop-1'});
+  f.native.events.push(event(terminal.id,{hook_event_name:'UserPromptSubmit'}));
+  await f.resume.observe(f.workspace,f.runtime);
+  const described=()=>f.admin.calls.filter(c=>c[0]==='describe');
+  assert.deepEqual(described(),[['describe','desktop-1',{agent:'claude',name:'checkout',task:'Fix checkout'}]]);
+  await f.resume.observe(f.workspace,f.runtime);
+  assert.equal(described().length,1,'unchanged, not sent again');
+  f.native.metadata[String(terminal.id)].title='✳ Ship refunds';
+  await f.resume.observe(f.workspace,f.runtime);
+  assert.deepEqual(described().at(-1)[2],{agent:'claude',name:'checkout',task:'Ship refunds'});
+ }finally{await f.cleanup();}
+});
+
+test('event reading starts within the recent tail and catches up when far behind',async()=>{
+ const asked=[];const native={agent_events_poll:args=>{asked.push(args.cursor);return args.cursor==null?{cursor:'7:100000000',lines:[]}:{cursor:args.cursor,lines:[]};}};
+ const resume=new SessionResume({directory:'/nonexistent',host:{},config:{workspaces:[]},log:()=>{}});
+ resume.native=async(runtime,command,args)=>native[command](args);
+ const state={cursor:null,agents:{}};
+ await resume.readEvents({},state);
+ assert.equal(state.cursor,`7:${100000000-8*1024*1024}`);
+ state.cursor='7:99999000';await resume.readEvents({},state);
+ assert.equal(state.cursor,'7:99999000','a near cursor is kept');
+ state.cursor='3:50';await resume.readEvents({},state);
+ assert.equal(state.cursor,`7:${100000000-8*1024*1024}`,'a rotated file restarts within the tail');
 });

@@ -35,7 +35,7 @@ pub fn router(service: Arc<Service>) -> Router {
         .route("/admin/workspaces/:ws/terminals/:request/bind", post(bind))
         .route(
             "/admin/workspaces/:ws/terminals/:request",
-            axum::routing::delete(revoke),
+            axum::routing::delete(revoke).patch(describe),
         )
         .route("/admin/workspaces/:ws/access", put(put_access))
         .route("/admin/workspaces/:ws/stream", get(stream))
@@ -205,6 +205,45 @@ async fn bind(
             ws.events
                 .publish("mesh", "terminals", &record.pty_id.to_string());
             json(200, serde_json::json!({ "ptyId": record.pty_id }))
+        }
+        Err((status, message)) => error(status, message),
+    }
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DescribeBody {
+    agent: Option<String>,
+    name: Option<String>,
+    task: Option<String>,
+}
+
+async fn describe(
+    State(service): Svc,
+    Path((ws, request)): Path<(String, String)>,
+    body: Bytes,
+) -> Response {
+    let ws = match workspace(&service, &ws) {
+        Ok(ws) => ws,
+        Err(response) => return response,
+    };
+    let req: DescribeBody = match parse(&body) {
+        Ok(req) => req,
+        Err(response) => return response,
+    };
+    match ws
+        .terminals
+        .describe(&request, req.agent, req.name, req.task)
+    {
+        Ok((record, changed)) => {
+            if changed {
+                ws.events
+                    .publish("mesh", "terminals", &record.pty_id.to_string());
+            }
+            json(
+                200,
+                serde_json::json!({ "ptyId": record.pty_id, "changed": changed }),
+            )
         }
         Err((status, message)) => error(status, message),
     }

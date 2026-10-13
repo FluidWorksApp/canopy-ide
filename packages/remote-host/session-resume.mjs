@@ -14,7 +14,7 @@ import {randomUUID} from 'node:crypto';
 // record and never re-run: a build or a typed command may not be safe twice.
 const STATE_VERSION=1;
 const ROOT='/workspace',HOME='/home/agent';
-const MAX_LIVE=64,MAX_AGENTS=256,MAX_ARGS=64,MAX_ARG=4096,EVENT_PAGES=16;
+const MAX_LIVE=64,MAX_AGENTS=256,MAX_ARGS=64,MAX_ARG=4096,EVENT_PAGES=40,EVENT_TAIL=8*1024*1024;
 const SESSION_ID=/^[A-Za-z0-9][A-Za-z0-9-]{7,127}$/;
 const quote=value=>`'${String(value).replaceAll("'",`'\\''`)}'`;
 const plainPath=value=>typeof value==='string'&&value.length<=4096&&!/[\0-\x1f\x7f]/.test(value)&&!value.split('/').includes('..');
@@ -147,6 +147,21 @@ export function agentArgv(processes,rootPid,agent){
  return null;
 }
 
+/** A tab title as the agent's task: the CLI's working glyph dropped, a bare
+ *  shell or command name ignored. */
+export function titleText(title,command){
+ if(typeof title!=='string'||/^\s*(\/|~)/.test(title))return undefined;
+ const text=title.replace(/^[^\p{L}\p{N}]+/u,'').trim();
+ if(!text||text===command||/^(bash|zsh|sh|fish|login)$/i.test(text)||RESUMABLE_AGENTS.includes(text.toLowerCase()))return undefined;
+ return text;
+}
+/** What the Canopy service's roster should say about one live terminal. */
+export function terminalDescription(agent,metadata){
+ const task=titleText(metadata?.title,metadata?.command);
+ const name=typeof metadata?.name==='string'&&metadata.name.trim()?metadata.name.trim():task;
+ return {agent:agent&&!agent.ended?agent.agent:'',name:name??'',task:task&&task!==name?task:''};
+}
+
 export class SessionResume{
  constructor({directory,host,harness,config,fetch:fetchImpl=fetch,now=Date.now,log=message=>console.warn(message),intervalMs=15000,serviceWaitMs=300000}){
   Object.assign(this,{directory,host,harness,config,fetch:fetchImpl,now,log,intervalMs,serviceWaitMs});
@@ -185,8 +200,15 @@ export class SessionResume{
   return !!current&&!['stopped','deleted'].includes(current.desiredState??current.desired_state);
  }
  async readEvents(runtime,state){
+  // Only recent history matters: start (or catch up) within the last
+  // EVENT_TAIL bytes. A cursor-less poll reads nothing and reports the end.
+  const end=await this.native(runtime,'agent_events_poll',{cursor:null});
+  const [ino,size]=String(end?.cursor??'').split(':');
+  if(/^\d+$/.test(size??'')){
+   const [at,offset]=String(state.cursor??'').split(':');
+   if(at!==ino||!/^\d+$/.test(offset??'')||Number(size)-Number(offset)>EVENT_TAIL)state.cursor=`${ino}:${Math.max(0,Number(size)-EVENT_TAIL)}`;
+  }
   for(let page=0;page<EVENT_PAGES;page++){
-   // A first read starts at the beginning: the cursor format is the reader's own.
    const result=await this.native(runtime,'agent_events_poll',{cursor:state.cursor??'start:0'});
    if(!result||typeof result.cursor!=='string'||!Array.isArray(result.lines))return;
    const advanced=result.cursor!==state.cursor;
@@ -282,8 +304,26 @@ export class SessionResume{
   }
   await this.observeArgv(workspace,state,sessions).catch(()=>{});
   state.live=Object.fromEntries(sessions.filter(s=>s.exitCode==null&&Number.isSafeInteger(s.id)).slice(-MAX_LIVE).map(s=>[s.id,{kind:s.kind??'terminal',accountId:s.accountId??null}]));
+  await this.describe(workspace,runtime,state).catch(error=>this.log(`Agent roster update failed for ${workspace.id}: ${error.message}`));
   await this.save(state);
   return outcome;
+ }
+ /** Tell the Canopy service which agent each live terminal runs and what it is
+  *  called: a desktop terminal is minted as a shell before the agent starts. */
+ async describe(workspace,runtime,state){
+  if(!this.harness?.admin?.describeTerminal||!runtime.harness||!Object.keys(state.live).length)return;
+  const metadata=await this.native(runtime,'pty_metadata_get')??{};
+  const sent=state.described??{};
+  for(const id of Object.keys(state.live)){
+   const requestId=metadata[id]?.requestId;
+   if(typeof requestId!=='string'||!/^[a-zA-Z0-9:-]{8,128}$/.test(requestId))continue;
+   const next=terminalDescription(state.agents[id],metadata[id]),key=JSON.stringify([requestId,next]);
+   if(sent[id]===key)continue;
+   try{await this.harness.admin.describeTerminal(workspace.id,requestId,next);sent[id]=key;}
+   catch(error){if(error.status===404||error.status===409)sent[id]=key;else throw error;}
+  }
+  for(const id of Object.keys(sent))if(!state.live[id])delete sent[id];
+  state.described=sent;
  }
  async checkAll(){
   if(this.checking)return this.checking;

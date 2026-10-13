@@ -209,6 +209,51 @@ impl TerminalRegistry {
         Ok(out)
     }
 
+    /// What the host learned about a terminal after it was minted: the agent
+    /// it runs, its tab name and its task. Only fields present change; an empty
+    /// string clears one. Returns whether anything changed.
+    pub fn describe(
+        &self,
+        request_id: &str,
+        agent: Option<String>,
+        name: Option<String>,
+        task: Option<String>,
+    ) -> Result<(TerminalRecord, bool), (u16, String)> {
+        let mut file = self.inner.lock().unwrap();
+        let record = file
+            .terminals
+            .iter_mut()
+            .find(|t| t.request_id == request_id)
+            .ok_or((404, "no terminal credential for that requestId".to_string()))?;
+        if record.revoked_ms.is_some() {
+            return Err((409, "that terminal credential was revoked".into()));
+        }
+        let clean = |value: String, max: usize| {
+            let text: String = value.chars().filter(|c| !c.is_control()).collect();
+            let text = text.trim();
+            (!text.is_empty()).then(|| text.chars().take(max).collect::<String>())
+        };
+        let mut changed = false;
+        for (slot, value, max) in [
+            (&mut record.agent, agent, 40),
+            (&mut record.name, name, 80),
+            (&mut record.task, task, 200),
+        ] {
+            if let Some(value) = value {
+                let next = clean(value, max);
+                if *slot != next {
+                    *slot = next;
+                    changed = true;
+                }
+            }
+        }
+        let out = record.clone();
+        if changed {
+            self.persist(&file).map_err(|e| (500, e))?;
+        }
+        Ok((out, changed))
+    }
+
     /// End a credential. Returns the record when this call ended it.
     pub fn revoke(&self, request_id: &str, how: &str) -> Option<TerminalRecord> {
         let mut file = self.inner.lock().unwrap();
@@ -403,6 +448,68 @@ mod tests {
             })
             .ok()
             .unwrap()
+    }
+
+    #[test]
+    fn describe_fills_in_what_mint_did_not_know_and_survives_reopen() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("terminals.json");
+        let registry = TerminalRegistry::open(path.clone(), "remote-w".into());
+        let (_, record) = registry
+            .mint(MintRequest {
+                request_id: "req-00010".into(),
+                agent: None,
+                name: None,
+                task: None,
+            })
+            .ok()
+            .unwrap();
+        assert_eq!((record.agent, record.name), (None, None));
+        let (described, changed) = registry
+            .describe(
+                "req-00010",
+                Some("claude".into()),
+                Some(" XLs\u{7}".into()),
+                Some("x".repeat(300)),
+            )
+            .unwrap();
+        assert!(changed);
+        assert_eq!(described.agent.as_deref(), Some("claude"));
+        assert_eq!(
+            described.name.as_deref(),
+            Some("XLs"),
+            "trimmed, control characters dropped"
+        );
+        assert_eq!(described.task.as_ref().unwrap().chars().count(), 200);
+        let (_, again) = registry
+            .describe("req-00010", Some("claude".into()), None, None)
+            .unwrap();
+        assert!(!again, "an unchanged description writes nothing");
+        let (cleared, _) = registry
+            .describe("req-00010", None, Some(String::new()), None)
+            .unwrap();
+        assert_eq!(
+            (cleared.agent.as_deref(), cleared.name),
+            (Some("claude"), None),
+            "only fields sent change"
+        );
+        let reopened = TerminalRegistry::open(path, "remote-w".into());
+        assert_eq!(reopened.all()[0].agent.as_deref(), Some("claude"));
+        assert_eq!(
+            registry
+                .describe("req-missing", None, None, None)
+                .unwrap_err()
+                .0,
+            404
+        );
+        registry.revoke("req-00010", "test");
+        assert_eq!(
+            registry
+                .describe("req-00010", Some("codex".into()), None, None)
+                .unwrap_err()
+                .0,
+            409
+        );
     }
 
     #[test]
