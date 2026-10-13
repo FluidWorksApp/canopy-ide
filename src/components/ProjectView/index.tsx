@@ -144,6 +144,7 @@ import {
   reloadPlan,
   reloading,
   reloadSummary,
+  noReloadNotice,
   type ReloadItem,
 } from "../../accountSwitch";
 import {
@@ -818,6 +819,8 @@ const ProjectViewBody = memo(function ProjectViewBody({
       onNoticeRaw(text, kind, { projectId: project.id, ...opts }),
     [onNoticeRaw, project.id],
   );
+  const onNoticeRef = useRef(onNotice);
+  onNoticeRef.current = onNotice;
   // Which engine preview tabs run on — it decides how a backgrounded preview
   // has to be hidden, which is a layout question, so it belongs up here.
   const browserEngine = useBrowserEngine();
@@ -1139,14 +1142,14 @@ const ProjectViewBody = memo(function ProjectViewBody({
             ),
             profile: to,
           });
-          // Nothing this account can take over — say nothing rather than open
-          // a dialog whose only answer is "no".
-          if (reloading(plan).length === 0) return;
-          setReloadAsk({
-            profile: to,
-            label: profilesRef.current.find((p) => p.id === to)?.label ?? to,
-            plan,
-          });
+          const label = profilesRef.current.find((p) => p.id === to)?.label ?? to;
+          // Nothing this account can take over: no dialog whose only answer is
+          // "no", but say why, or the switch looks like a lost confirmation.
+          if (reloading(plan).length === 0) {
+            onNoticeRef.current(noReloadNotice(plan, label), "info");
+            return;
+          }
+          setReloadAsk({ profile: to, label, plan });
         })
         .catch(() => {});
     };
@@ -13878,36 +13881,6 @@ const ProjectViewBody = memo(function ProjectViewBody({
           onClose={compMenu.close}
         />
       )}
-      {reloadAsk && (
-        <Dialog
-          variant="accent"
-          title={`Reload agents as ${reloadAsk.label}?`}
-          body="Restart the eligible agents with this account. Claude and Codex continue the same conversation after their current process stops. Credentials stay separate. Agents without a verified conversation or sign-in are left running."
-          meta={`${reloading(reloadAsk.plan).length} of ${reloadAsk.plan.length} agents in this project`}
-          dismissLabel="Leave them"
-          onDismiss={() => setReloadAsk(null)}
-          actions={[
-            {
-              label: `Reload ${reloading(reloadAsk.plan).length}`,
-              primary: true,
-              onClick: () => void runReload(reloadAsk),
-            },
-          ]}
-        >
-          <div className="reload-plan">
-            {reloadAsk.plan.map((item) => (
-              <div
-                key={item.agent.tabId}
-                className={`reload-row ${item.action ? "" : "reload-row-skip"}`}
-              >
-                <AgentIcon id={item.agent.agentId} size={13} />
-                <span className="reload-agent">{item.agent.label}</span>
-                <span className="reload-what">{reloadSummary(item)}</span>
-              </div>
-            ))}
-          </div>
-        </Dialog>
-      )}
       {rootCreate && (
         <Dialog
           variant="accent"
@@ -14612,6 +14585,39 @@ const ProjectViewBody = memo(function ProjectViewBody({
         pending={[...pendingAgentCloses.values()]}
         onRestore={restorePendingAgentClose}
       />
+      {/* A profile switch comes from the status bar, not the side panel. Inside
+          sidePanel this was off-screen whenever the panel was closed (overlay
+          slides it out, docked collapses it, zen and vibe never mount it). */}
+      {reloadAsk && (
+        <Dialog
+          variant="accent"
+          title={`Reload agents as ${reloadAsk.label}?`}
+          body="Restart the eligible agents with this account. Claude and Codex continue the same conversation after their current process stops. Credentials stay separate. Agents without a verified conversation or sign-in are left running."
+          meta={`${reloading(reloadAsk.plan).length} of ${reloadAsk.plan.length} agents in this project`}
+          dismissLabel="Leave them"
+          onDismiss={() => setReloadAsk(null)}
+          actions={[
+            {
+              label: `Reload ${reloading(reloadAsk.plan).length}`,
+              primary: true,
+              onClick: () => void runReload(reloadAsk),
+            },
+          ]}
+        >
+          <div className="reload-plan">
+            {reloadAsk.plan.map((item) => (
+              <div
+                key={item.agent.tabId}
+                className={`reload-row ${item.action ? "" : "reload-row-skip"}`}
+              >
+                <AgentIcon id={item.agent.agentId} size={13} />
+                <span className="reload-agent">{item.agent.label}</span>
+                <span className="reload-what">{reloadSummary(item)}</span>
+              </div>
+            ))}
+          </div>
+        </Dialog>
+      )}
       {/* This action starts in the editor's empty state, so its confirmation
           must not live in sidePanel: overlay mode slides that whole subtree
           off-screen when the sidebar is closed. */}

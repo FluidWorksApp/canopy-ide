@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { envReachesProfile, reloadPlan, reloadSummary, reloading, type OpenAgent } from "./accountSwitch";
+import { envReachesProfile, noReloadNotice, reloadPlan, reloadSummary, reloading, type OpenAgent } from "./accountSwitch";
 import type { AccountStatus } from "./ipc";
 const open = (over: Partial<OpenAgent> = {}): OpenAgent => ({
   tabId: "t1", agentId: "claude", cwd: "/repo", label: "Claude",
@@ -44,5 +44,20 @@ describe("account environment", () => {
     expect(envReachesProfile("default",[])).toBe(true);
     expect(envReachesProfile("work",[])).toBe(false);
     expect(envReachesProfile("work",[["CLAUDE_CONFIG_DIR","/work/.claude"]])).toBe(true);
+  });
+});
+
+describe("noReloadNotice", () => {
+  it("says why nothing moved, so a quiet switch is not a lost confirmation", () => {
+    const agent = (label: string) => ({ tabId: label, agentId: "claude", cwd: "/repo", label });
+    const plan = [
+      { agent: agent("Fix checkout"), action: null, reason: "not-signed-in" as const },
+      { agent: agent("Docs"), action: null, reason: "session-unavailable" as const },
+    ];
+    expect(noReloadNotice(plan, "VJ")).toBe(
+      "No running agent moved to VJ. Fix checkout: no login in this account — left as is; Docs: conversation not identified yet — left as is.",
+    );
+    const many = Array.from({ length: 5 }, (_, i) => ({ agent: agent(`a${i}`), action: null, reason: "single-account" as const }));
+    expect(noReloadNotice(many, "VJ")).toMatch(/, and 2 more\.$/);
   });
 });

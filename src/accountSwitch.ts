@@ -108,3 +108,11 @@ export function reloadSummary(item: ReloadItem): string {
     ? item.action.sourceProfile ? "continues this conversation with the selected account" : "reopens this account's session here"
     : "starts fresh here";
 }
+
+/** Said when a switch moves no agent, so a switch that asks nothing is not
+ *  mistaken for a confirmation that never appeared. */
+export function noReloadNotice(plan: ReloadItem[], label: string): string {
+  const shown = plan.slice(0, 3).map((item) => `${item.agent.label}: ${reloadSummary(item)}`);
+  const more = plan.length > 3 ? `, and ${plan.length - 3} more` : "";
+  return `No running agent moved to ${label}. ${shown.join("; ")}${more}.`;
+}
