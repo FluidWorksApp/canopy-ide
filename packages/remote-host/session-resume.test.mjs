@@ -6,7 +6,7 @@ import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import {createRunner} from './runner.mjs';
 import {ServiceHarness} from './service-harness.mjs';
-import {SessionResume,resumePlan,keptFlags,foldEvents,parseProcesses,agentArgv,runnerCommand,PROCESS_SCRIPT,titleText,terminalDescription} from './session-resume.mjs';
+import {SessionResume,resumePlan,keptFlags,foldEvents,parseProcesses,agentArgv,runnerCommand,PROCESS_SCRIPT,titleText,terminalDescription,agentActivity} from './session-resume.mjs';
 
 const secret='s'.repeat(64);
 const CONVERSATION='0fc2faf8-f255-43bf-8927-fcb18a615f3d';
@@ -223,12 +223,18 @@ test('live terminals are described to the Canopy service once per change',async(
   f.native.events.push(event(terminal.id,{hook_event_name:'UserPromptSubmit'}));
   await f.resume.observe(f.workspace,f.runtime);
   const described=()=>f.admin.calls.filter(c=>c[0]==='describe');
-  assert.deepEqual(described(),[['describe','desktop-1',{agent:'claude',name:'checkout',task:'Fix checkout'}]]);
+  assert.deepEqual(described(),[['describe','desktop-1',{agent:'claude',name:'checkout',task:'Fix checkout',activity:{title:'working',description:''}}]]);
   await f.resume.observe(f.workspace,f.runtime);
   assert.equal(described().length,1,'unchanged, not sent again');
   f.native.metadata[String(terminal.id)].title='✳ Ship refunds';
   await f.resume.observe(f.workspace,f.runtime);
-  assert.deepEqual(described().at(-1)[2],{agent:'claude',name:'checkout',task:'Ship refunds'});
+  assert.deepEqual(described().at(-1)[2],{agent:'claude',name:'checkout',task:'Ship refunds',activity:{title:'working',description:''}});
+  f.native.events.push(event(terminal.id,{hook_event_name:'UserPromptSubmit',prompt:'fix the totals'}),event(terminal.id,{hook_event_name:'PreToolUse',tool_name:'Bash'}));
+  await f.resume.observe(f.workspace,f.runtime);
+  assert.deepEqual(described().at(-1)[2].activity,{title:'working · Bash',description:'Last asked: fix the totals'});
+  f.native.events.push(event(terminal.id,{hook_event_name:'Stop'}));
+  await f.resume.observe(f.workspace,f.runtime);
+  assert.deepEqual(described().at(-1)[2].activity,{title:'idle, waiting for you',description:'Last asked: fix the totals'});
  }finally{await f.cleanup();}
 });
 
@@ -243,4 +249,13 @@ test('event reading starts within the recent tail and catches up when far behind
  assert.equal(state.cursor,'7:99999000','a near cursor is kept');
  state.cursor='3:50';await resume.readEvents({},state);
  assert.equal(state.cursor,`7:${100000000-8*1024*1024}`,'a rotated file restarts within the tail');
+});
+
+test('activity reads the last hook event; injected notices are not prompts',()=>{
+ const agents={};
+ foldEvents(agents,[event(7,{hook_event_name:'UserPromptSubmit',prompt:'ship it'}),event(7,{hook_event_name:'UserPromptSubmit',prompt:'<task-notification>x'}),event(7,{hook_event_name:'Notification'})]);
+ assert.deepEqual(agentActivity(agents[7]),{title:'waiting for input',description:'Last asked: ship it'});
+ foldEvents(agents,[event(7,{hook_event_name:'SessionEnd',reason:'exit'})]);
+ assert.equal(agentActivity(agents[7]).title,'ended');
+ assert.deepEqual(agentActivity(undefined),{title:'',description:''});
 });

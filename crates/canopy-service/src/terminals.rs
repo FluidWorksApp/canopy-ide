@@ -57,6 +57,10 @@ pub struct TerminalRecord {
     /// `close_session` asked; the gateway owns stopping the session.
     #[serde(default)]
     pub close_requested_ms: Option<u64>,
+    /// What the host observes the agent doing (from its hook events), shown
+    /// in the roster until the agent names its own status.
+    #[serde(default)]
+    pub activity: Option<serde_json::Value>,
 }
 
 impl TerminalRecord {
@@ -168,6 +172,7 @@ impl TerminalRegistry {
                     status: None,
                     job_done: None,
                     close_requested_ms: None,
+                    activity: None,
                 };
                 file.terminals.push(record.clone());
                 record
@@ -218,6 +223,7 @@ impl TerminalRegistry {
         agent: Option<String>,
         name: Option<String>,
         task: Option<String>,
+        activity: Option<(String, String)>,
     ) -> Result<(TerminalRecord, bool), (u16, String)> {
         let mut file = self.inner.lock().unwrap();
         let record = file
@@ -245,6 +251,16 @@ impl TerminalRegistry {
                     *slot = next;
                     changed = true;
                 }
+            }
+        }
+        if let Some((title, description)) = activity {
+            let title = clean(title, 120);
+            let description = clean(description, 200);
+            let next = (title.is_some() || description.is_some())
+                .then(|| serde_json::json!({ "title": title, "description": description }));
+            if record.activity != next {
+                record.activity = next;
+                changed = true;
             }
         }
         let out = record.clone();
@@ -471,6 +487,7 @@ mod tests {
                 Some("claude".into()),
                 Some(" XLs\u{7}".into()),
                 Some("x".repeat(300)),
+                Some(("working · Bash".into(), "fix the totals".into())),
             )
             .unwrap();
         assert!(changed);
@@ -481,12 +498,16 @@ mod tests {
             "trimmed, control characters dropped"
         );
         assert_eq!(described.task.as_ref().unwrap().chars().count(), 200);
+        assert_eq!(
+            described.activity,
+            Some(serde_json::json!({"title": "working · Bash", "description": "fix the totals"}))
+        );
         let (_, again) = registry
-            .describe("req-00010", Some("claude".into()), None, None)
+            .describe("req-00010", Some("claude".into()), None, None, None)
             .unwrap();
         assert!(!again, "an unchanged description writes nothing");
         let (cleared, _) = registry
-            .describe("req-00010", None, Some(String::new()), None)
+            .describe("req-00010", None, Some(String::new()), None, None)
             .unwrap();
         assert_eq!(
             (cleared.agent.as_deref(), cleared.name),
@@ -497,7 +518,7 @@ mod tests {
         assert_eq!(reopened.all()[0].agent.as_deref(), Some("claude"));
         assert_eq!(
             registry
-                .describe("req-missing", None, None, None)
+                .describe("req-missing", None, None, None, None)
                 .unwrap_err()
                 .0,
             404
@@ -505,7 +526,7 @@ mod tests {
         registry.revoke("req-00010", "test");
         assert_eq!(
             registry
-                .describe("req-00010", Some("codex".into()), None, None)
+                .describe("req-00010", Some("codex".into()), None, None, None)
                 .unwrap_err()
                 .0,
             409

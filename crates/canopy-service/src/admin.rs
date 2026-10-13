@@ -216,6 +216,16 @@ struct DescribeBody {
     agent: Option<String>,
     name: Option<String>,
     task: Option<String>,
+    activity: Option<ActivityBody>,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ActivityBody {
+    #[serde(default)]
+    title: String,
+    #[serde(default)]
+    description: String,
 }
 
 async fn describe(
@@ -231,10 +241,13 @@ async fn describe(
         Ok(req) => req,
         Err(response) => return response,
     };
-    match ws
-        .terminals
-        .describe(&request, req.agent, req.name, req.task)
-    {
+    match ws.terminals.describe(
+        &request,
+        req.agent,
+        req.name,
+        req.task,
+        req.activity.map(|a| (a.title, a.description)),
+    ) {
         Ok((record, changed)) => {
             if changed {
                 ws.events

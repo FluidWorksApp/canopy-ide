@@ -97,6 +97,20 @@ export function runnerCommand(plan,requestId){
  return `cd ${quote(plan.cwd)} && env ${env} ${plan.command}; exec /bin/bash -l`;
 }
 
+/** A prompt the user typed, not an injected notice (those start with '<'). */
+const humanPrompt=text=>typeof text==='string'&&text.trim()&&!text.trimStart().startsWith('<')?text.replace(/\s+/g,' ').trim():undefined;
+/** What the agent is doing, from its last hook event: the roster's status
+ *  until the agent names its own. */
+export function agentActivity(agent){
+ if(!agent)return {title:'',description:''};
+ const event=agent.lastEvent;
+ const title=agent.ended||event==='SessionEnd'?'ended'
+  :event==='Stop'||event==='SubagentStop'?'idle, waiting for you'
+  :event==='Notification'?'waiting for input'
+  :event==='PreToolUse'||event==='PostToolUse'?`working${agent.lastTool?` · ${agent.lastTool}`:''}`
+  :event==='UserPromptSubmit'||event==='SessionStart'?'working':'';
+ return {title,description:agent.prompt?`Last asked: ${agent.prompt}`:''};
+}
 /** Latest agent state per terminal from hook events (agent-events.jsonl lines). */
 export function foldEvents(agents,lines){
  for(const line of lines){
@@ -113,6 +127,9 @@ export function foldEvents(agents,lines){
    transcriptPath:typeof event.transcript_path==='string'?event.transcript_path:changed?undefined:previous?.transcriptPath,
    permissionMode:typeof event.permission_mode==='string'?event.permission_mode:changed?undefined:previous?.permissionMode,
    argv:changed?undefined:previous?.argv,
+   lastEvent:event.hook_event_name,
+   lastTool:typeof event.tool_name==='string'?event.tool_name:['PreToolUse','PostToolUse'].includes(event.hook_event_name)?previous?.lastTool:undefined,
+   prompt:humanPrompt(event.prompt)??(changed?undefined:previous?.prompt),
    // A container stop can end the CLI with reason "other"; only a session the
    // user closed (exit, /clear, logout) is finished.
    ended:event.hook_event_name==='SessionEnd'&&event.reason!=='other'};
@@ -317,7 +334,7 @@ export class SessionResume{
   for(const id of Object.keys(state.live)){
    const requestId=metadata[id]?.requestId;
    if(typeof requestId!=='string'||!/^[a-zA-Z0-9:-]{8,128}$/.test(requestId))continue;
-   const next=terminalDescription(state.agents[id],metadata[id]),key=JSON.stringify([requestId,next]);
+   const next={...terminalDescription(state.agents[id],metadata[id]),activity:agentActivity(state.agents[id])},key=JSON.stringify([requestId,next]);
    if(sent[id]===key)continue;
    try{await this.harness.admin.describeTerminal(workspace.id,requestId,next);sent[id]=key;}
    catch(error){if(error.status===404||error.status===409)sent[id]=key;else throw error;}
