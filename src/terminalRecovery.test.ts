@@ -229,3 +229,21 @@ it("cold resume cards retain legacy mux captions when tree order differs from st
   expect(cards).toHaveLength(1);
   expect(cards[0].group && tabName(cards[0].group)).toBe("First");
 });
+
+it("a remote agent resumed after a workspace restart takes its predecessor's tab", () => {
+  rememberTerminals("project", rows, { mux: group }, "remote:A");
+  const memory = rememberedTerminalState("project", "remote:A");
+  const resumed = rememberedLiveTerminal(
+    memory,
+    { ptyId: 9, sessionGeneration: 9, cwd: "/repo", resumedFrom: 2 },
+    "backend",
+  );
+  expect(resumed).toBeUndefined();
+  const remote = rememberedLiveTerminal(
+    { ...memory, terminals: memory.terminals.map((t) => t.tabId === "b" ? { ...t, sessionGeneration: 2 } : t) },
+    { ptyId: 9, sessionGeneration: 9, cwd: "/repo", resumedFrom: 2 },
+    "backend",
+  );
+  expect(remote?.tabId).toBe("b");
+  expect(rememberedLiveTerminal(memory, { ptyId: 9, sessionGeneration: 9, cwd: "/repo" }, "backend")).toBeUndefined();
+});

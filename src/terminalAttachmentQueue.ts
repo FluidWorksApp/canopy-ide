@@ -17,6 +17,8 @@ export interface TerminalAttachment {
   activate: boolean;
   recovered: boolean;
   killOnClose: boolean;
+  /** The terminal this one resumed after a workspace restart. */
+  resumedFrom?: number;
 }
 
 type Consumer = (attachment: TerminalAttachment) => void;

@@ -476,3 +476,26 @@ it('completes the boot handshake while a poll backlog is being turned away',asyn
  await Promise.all([...stalled,...polls]);
  host.dispose();
 });
+it('announces an agent the host resumed after a workspace restart, and nothing else it did not spawn',async()=>{
+ vi.useFakeTimers();const {host,fetcher}=setup();const spawned=vi.fn();
+ let sessions:Array<{id:number;title:string;cols:number;rows:number;exitCode:number|null;accountId:null}>=[{id:4,title:'bash',cols:120,rows:40,exitCode:null,accountId:null}];
+ const metadata:Record<string,unknown>={4:{cwd:'/workspace/app',projectId:'p1',title:'✳ Fix checkout',command:'/bin/bash'}};
+ fetcher.mockImplementation(async(url:string,options:RequestInit)=>{
+  const body=JSON.parse(String(options.body||'{}'));
+  if(url.endsWith('/sessions'))return {ok:true,json:async()=>sessions};
+  return {ok:true,json:async()=>({result:body.command==='pty_metadata_get'?metadata:null})};
+ });
+ try{
+  await host.listen('pty:spawned',spawned);
+  await vi.advanceTimersByTimeAsync(3000);
+  expect(spawned).not.toHaveBeenCalled();
+  sessions=[{...sessions[0],exitCode:-1},{id:9,title:'cd',cols:120,rows:40,exitCode:null,accountId:null},{id:10,title:'cd',cols:120,rows:40,exitCode:null,accountId:null}];
+  metadata[9]={cwd:'/workspace/app',projectId:'p1',title:'✳ Fix checkout',command:'claude --resume 0fc2faf8-f255-43bf-8927-fcb18a615f3d',resumedFrom:4};
+  metadata[10]={cwd:'/workspace',projectId:'p1',title:'other',command:'/bin/bash'};
+  await vi.advanceTimersByTimeAsync(3000);
+  expect(spawned).toHaveBeenCalledOnce();
+  expect(spawned.mock.calls[0][0].payload).toEqual(expect.objectContaining({id:9,session_generation:9,cwd:'/workspace/app',project_id:'p1',title:'✳ Fix checkout',command:'claude --resume 0fc2faf8-f255-43bf-8927-fcb18a615f3d',resumed_from:4}));
+  await vi.advanceTimersByTimeAsync(3000);
+  expect(spawned).toHaveBeenCalledOnce();
+ }finally{host.dispose();vi.useRealTimers();}
+});

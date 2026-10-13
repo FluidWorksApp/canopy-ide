@@ -230,6 +230,11 @@ impl Service {
         }
         let sessions: Vec<serde_json::Value> = response.json_value().await?;
         for record in ws.terminals.all().into_iter().filter(|t| t.live()) {
+            // Bound after the list was asked for: absent because it is new,
+            // not because it ended. The next reconcile judges it.
+            if record.bound_ms.is_some_and(|bound| bound >= now) {
+                continue;
+            }
             let keep = match (record.session_id, record.pid) {
                 (Some(session), Some(pid)) => sessions.iter().any(|s| {
                     s.get("id").and_then(|v| v.as_u64()) == Some(session)

@@ -66,11 +66,20 @@ the desktop portal's grants. Full parity requires moving those service handlers
 out of Tauri AppHandle ownership and negotiating them as server capabilities.
 
 PTYS survive a client disconnect and a gateway restart. They do not survive
-workspace-container or VM termination. Bounded acceptance receipts and session metadata survive runner restarts;
-unfinished work is reported as interrupted without an automatic respawn. An
-SSH deployment script installs the portable systemd host. Full event replay,
-failover, credential-vault UI, cross-host routing and automatic CLI resume after
-VM restart require additional milestones. The current config does
+workspace-container or VM termination. Bounded acceptance receipts and session metadata survive runner restarts.
+After a container restart (hang recovery, a resumed crash, a VM reboot) the
+host resumes the agents that were running (`session-resume.mjs`): it records
+the live terminals, each one's agent, conversation id and launch flags while
+they run, then starts `claude --resume <id>` / `codex resume <id>` through the
+same mint, spawn and bind sequence as a desktop spawn, so resumed agents keep
+their Canopy tools. It waits for the Canopy service before respawning and never
+starts an agent without its credential. Builds, plain commands, account-pool
+and shared-project sessions are marked interrupted on their terminal record and
+are not re-run. The desktop puts a resumed agent back in its predecessor's tab.
+A resumed agent waits at its prompt; it does not continue the task unprompted.
+An SSH deployment script installs the portable systemd host. Full event replay,
+failover, credential-vault UI and cross-host routing require additional
+milestones. The current config does
 not implement hostile-tenant isolation or public signup.
 
 Acceptance evidence must distinguish synthetic protocol tests, real Linux

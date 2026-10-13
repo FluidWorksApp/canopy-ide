@@ -21,15 +21,19 @@ export function rememberedLiveTerminal(
   attachment: Pick<
     TerminalAttachment,
     "ptyId" | "sessionGeneration" | "cwd" | "name"
-  >,
+  > & Partial<Pick<TerminalAttachment, "resumedFrom">>,
   instance: string,
 ): RememberedTerminal | undefined {
   const matches = memory.terminals.filter((t) => {
     if (t.ptyId != null)
       return (
-        t.ptyId === attachment.ptyId &&
-        t.sessionGeneration === attachment.sessionGeneration &&
-        t.instance === instance
+        t.instance === instance &&
+        ((t.ptyId === attachment.ptyId &&
+          t.sessionGeneration === attachment.sessionGeneration) ||
+          // A remote agent the host resumed takes its predecessor's tab.
+          (attachment.resumedFrom != null &&
+            t.ptyId === attachment.resumedFrom &&
+            t.sessionGeneration === attachment.resumedFrom))
       );
     return (
       !!attachment.name &&
