@@ -4,6 +4,7 @@ import {quarantineImageUpgrades} from './image-upgrade.mjs';
 import {quarantineInterruptedMigrations} from './migration-startup.mjs';
 import {runtimeReady} from './runtime-readiness.mjs';
 import {RuntimeSupervisor} from './runtime-supervisor.mjs';
+import {SessionResume} from './session-resume.mjs';
 import {Readable} from 'node:stream';
 import {pipeline} from 'node:stream/promises';
 import {AgentCliSessions} from './agent-cli-sessions.mjs';
@@ -534,6 +535,8 @@ if (process.argv[1] === new URL(import.meta.url).pathname) {
   const elasticMemory = new ElasticMemory({registry:config.workspaces,docker:workspaces});
   const elasticCpu = new ElasticCpu({registry:config.workspaces,docker:workspaces});
   const supervisor=new RuntimeSupervisor({directory:path.join(state,'runtime-recovery'),host:workspaces});
+  // Agents running when the container restarted come back with their conversation.
+  const sessionResume=process.env.CANOPY_AGENT_RESUME==='off'?null:new SessionResume({directory:path.join(state,'session-resume'),host:workspaces,harness,config});
   // Members run inside the workspace's capacity slice. A container created
   // before it existed joins it now, while it is stopped after boot.
   if(config.managedSession)await adoptCapacityGroup({config,host:workspaces,directory:path.join(state,'migrations'),configPath:process.env.CANOPY_HOST_CONFIG??'./host.json',authorizeRuntime:authority}).catch(error=>console.warn(`Capacity group adoption skipped: ${error.message}`));
@@ -544,7 +547,7 @@ if (process.argv[1] === new URL(import.meta.url).pathname) {
   // (docs/slack-hub-protocol.md §7). Off unless the owner opted in.
   const slackCompanion=config.managedSession?new SlackCompanionHost({config,controlPlane:serviceControlPlane(config),inspect:workspace=>workspaces.inspectRuntime(workspace),
     createRunner:workspace=>new ContainerCompanionRunner({workspace,inspect:w=>workspaces.inspectRuntime(w),stateFile:path.join(state,'slack-companion',`${workspace.id}.json`)})}):null;
-  server.on('close', () => { elasticMemory.stop(); elasticCpu.stop(); slackCompanion?.close(); });
+  server.on('close', () => { elasticMemory.stop(); elasticCpu.stop(); slackCompanion?.close(); sessionResume?.close(); });
   if(process.env.CANOPY_RESOURCE_ADMISSION_LOCK)console.log('Canopy resource admission protocol '+RESOURCE_ADMISSION_PROTOCOL);
-  server.listen(Number(process.env.PORT ?? 8787), '127.0.0.1', () => { elasticMemory.start(); elasticCpu.start(); supervisor.start(); harness?.start(); slackCompanion?.start(); console.log('Canopy remote host listening on loopback'); });
+  server.listen(Number(process.env.PORT ?? 8787), '127.0.0.1', () => { elasticMemory.start(); elasticCpu.start(); supervisor.start(); sessionResume?.start(); harness?.start(); slackCompanion?.start(); console.log('Canopy remote host listening on loopback'); });
 }

@@ -1943,7 +1943,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
       name?: string,
       presentation?: Pick<
         TerminalAttachment,
-        "run" | "command" | "componentId" | "runCommandId" | "sessionGeneration" | "recovered"
+        "run" | "command" | "componentId" | "runCommandId" | "sessionGeneration" | "recovered" | "resumedFrom"
       >,
     ): string => {
       const existing = tabsRef.current.find(
@@ -1953,10 +1953,53 @@ const ProjectViewBody = memo(function ProjectViewBody({
         if (activate) setActiveTabId(existing.id);
         return existing.id;
       }
+      // A remote host resumed this agent after a workspace restart: it takes
+      // the place, names and pane of the tab its predecessor left behind.
+      const resumedFrom = presentation?.resumedFrom;
+      const predecessor = resumedFrom != null
+        ? tabsRef.current.find(
+            (t): t is TermSubTab =>
+              t.type === "terminal" && t.ptyId === resumedFrom &&
+              (t.sessionGeneration == null || t.sessionGeneration === resumedFrom),
+          )
+        : undefined;
+      if (predecessor) {
+        const id = tabId();
+        const group = predecessor.paneGroup ? terminalGroupsRef.current[predecessor.paneGroup] : undefined;
+        if (group) {
+          terminalGroupsRef.current = {
+            ...terminalGroupsRef.current,
+            [group.id]: {
+              ...group,
+              root: swapLeaves(group.root, predecessor.id, id),
+              activeTabId: group.activeTabId === predecessor.id ? id : group.activeTabId,
+              ...(group.zoomedTabId === predecessor.id ? { zoomedTabId: id } : {}),
+            },
+          };
+          setTerminalGroups(terminalGroupsRef.current);
+        }
+        setTabs((prev) => prev.map((tab) => tab.id !== predecessor.id ? tab : {
+          id,
+          type: "terminal",
+          cwd,
+          nativeName: name,
+          launchTitle: title || undefined,
+          ...durableNames(predecessor),
+          paneGroup: predecessor.paneGroup,
+          ptyId,
+          sessionGeneration: presentation?.sessionGeneration,
+          attachId: ptyId,
+          killAttachedOnClose: killOnClose || undefined,
+          icon: predecessor.icon ?? icon,
+          command: presentation?.command,
+        }));
+        if (activate || activeTabIdRef.current === predecessor.id) setActiveTabId(id);
+        return id;
+      }
       const saved = presentation && thisInstanceRef.current
         ? rememberedLiveTerminal(
             terminalRecoveryMemory,
-            { ptyId, sessionGeneration: presentation.sessionGeneration, cwd, name },
+            { ptyId, sessionGeneration: presentation.sessionGeneration, cwd, name, resumedFrom },
             thisInstanceRef.current,
           )
         : undefined;
