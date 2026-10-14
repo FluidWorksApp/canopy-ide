@@ -69,6 +69,7 @@ workspace name supplied at registration, its root `/workspace`.
 | `DELETE /admin/workspaces/{ws}` | — | closes the agent socket; stores are kept |
 | `POST /admin/workspaces/{ws}/terminals` | `{requestId, agent?, name?, task?}` | `{token}` — minted before spawn |
 | `POST /admin/workspaces/{ws}/terminals/{requestId}/bind` | `{sessionId, pid}` | `{}` — after the runner returns |
+| `PATCH /admin/workspaces/{ws}/terminals/{requestId}` | `{agent?, name?, task?, activity?: {title, description}}` | `{ptyId, changed}` — what the host learned after mint (the agent typed into a shell, the tab name); only fields sent change, `""` clears one |
 | `DELETE /admin/workspaces/{ws}/terminals/{requestId}` | — | revokes the credential (terminal exit) |
 | `PUT /admin/workspaces/{ws}/access` | signed access snapshot (§6) | `{revision}`; rejects rollback and bad signatures |
 | `GET /admin/workspaces/{ws}/stream?cursor=<epoch>:<seq>` | — | SSE, §5 |

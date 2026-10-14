@@ -30,6 +30,7 @@ import {agentWorkspaceAt} from './agent-workspace.mjs';
 import {workspaceActivity} from './activity.mjs';
 import {sessionProcessReader} from './session-processes.mjs';
 import {McpRegistry} from './mcp-servers.mjs';
+import {gitHistory} from './git-history.mjs';
 const sessionProcesses=sessionProcessReader();
 const workspaceMetrics=metricsReader();
 const execute=promisify(execFile);
@@ -48,6 +49,18 @@ async function scopedFile(value,create=false){
 }
 
 const cloneJobs=new CloneJobs({scoped});
+// History reads go through the same safe inspection as git_status, with room
+// for a capped patch: `partial` keeps what fit, `allowDiffExit` accepts
+// `git diff --no-index` reporting a difference.
+const history=gitHistory({git:async(argv,cwd,{maxBuffer=1024*1024,partial=false,allowDiffExit=false}={})=>{
+ const options={allowedRoot:ROOT,cwd:await scoped(cwd),timeout:30000,maxBuffer,env:{...process.env,HOME,GIT_TERMINAL_PROMPT:'0'}};
+ try{const {stdout}=await safeGitRead(execute,argv,options);return partial?{stdout,partial:false}:stdout;}
+ catch(error){
+  if(partial&&error.code==='ERR_CHILD_PROCESS_STDIO_MAXBUFFER'&&typeof error.stdout==='string')return {stdout:error.stdout,partial:true};
+  if(allowDiffExit&&error.code===1&&typeof error.stdout==='string')return error.stdout;
+  throw Error(String(error.stderr||error.message||'Git inspection failed').slice(0,4096));
+ }
+}});
 const mcpRegistry=new McpRegistry({home:HOME,workspace:ROOT,scoped,profiles});
 let children=0;
 let metadataWrites=Promise.resolve();
@@ -187,6 +200,18 @@ export async function nativeInvoke(command,args={}){
     await run('git',['clone','--',url,destination],parent,300000);return {path:destination,name};
   }
   if(['git_stage','git_unstage'].includes(command)){const files=args.paths;if(!Array.isArray(files)||!files.length||files.length>512)throw Error('Choose files');const repo=await scoped(args.repo);for(const file of files){const candidate=path.resolve(repo,file);if(candidate!==repo&&!candidate.startsWith(repo+'/'))throw Error('File outside repository');await scoped(candidate,true);}await run('git',[command==='git_stage'?'add':'reset',...(command==='git_unstage'?['HEAD']:[]),'--',...files],repo);return;}
+  if(command==='git_commit_detail')return history.commitDetail(args);
+  if(command==='git_commit_patch')return history.commitPatch(args);
+  if(command==='git_branch_commits')return history.branchCommits(args);
+  if(command==='git_branch_patch')return history.branchPatch(args);
+  if(command==='git_commit_paths'){
+   if(typeof args.message!=='string'||!args.message.trim())throw Error('commit message is empty');
+   const files=args.paths;if(!Array.isArray(files)||!files.length||files.length>512||files.some(file=>typeof file!=='string'))throw Error('no paths were selected for the checkpoint');
+   const repo=await scoped(args.repo);for(const file of files){const candidate=path.resolve(repo,file);if(candidate!==repo&&!candidate.startsWith(repo+'/'))throw Error('File outside repository');await scoped(candidate,true);}
+   await run('git',['add','--',...files],repo);
+   const out=await run('git',['commit','--only','-m',args.message,'--',...files],repo,15000,args.gitIdentity?gitIdentityEnvironment(args.gitIdentity):{});
+   return out.split('\n')[0]||'committed';
+  }
   if(command==='git_commit')return run('git',['commit',...(args.amend?['--amend']:[]),'-m',String(args.message)],args.repo,15000,args.gitIdentity?gitIdentityEnvironment(args.gitIdentity):{});
   if(command==='git_fetch')return run('git',['fetch','--prune'],args.repo,300000);
   if(command==='git_pull')return run('git',['pull','--ff-only'],args.repo,300000);
