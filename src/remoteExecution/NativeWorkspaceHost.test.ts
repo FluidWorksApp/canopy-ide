@@ -543,3 +543,25 @@ it('a workspace disconnected by an account change asks for sign-in and its retry
   expect(reload).toHaveBeenCalledTimes(1);expect(fetcher).not.toHaveBeenCalled();
  }finally{host.dispose();}
 });
+it('ends a restored tab whose session the workspace no longer has, instead of reconnecting forever',async()=>{
+ const {host,fetcher}=setup();
+ const sockets:Array<{closed:boolean}>=[];
+ vi.stubGlobal('WebSocket',class {closed=false;constructor(){sockets.push(this);}close(){this.closed=true;}});
+ let live=[{id:7,title:'shell',cols:80,rows:24,exitCode:null}];
+ fetcher.mockImplementation(async(url:string)=>Response.json(url.endsWith('/ticket')?{ticket:'synthetic-ticket'}:url.endsWith('/sessions')?live:{result:null}));
+ const key=connectionKey(connection.endpoint,connection.workspaceId);
+ const {result}=renderHook(()=>useConnectionState(key));
+ const exited=vi.fn();await host.listen('pty:exit',event=>exited(event.payload));
+ await expect(host.invoke('pty_attach_desktop',{id:9})).rejects.toThrow('no pty session 9');
+ expect(sockets[0].closed).toBe(true);
+ await host.invoke('pty_renderer_sessions');
+ expect(result.current.phase).toBe('connected');
+ // A runtime recreated under an attached tab drops its session from the list.
+ await host.invoke('pty_attach_desktop',{id:7});
+ live=[];
+ await host.invoke('pty_renderer_sessions');
+ expect(sockets[1].closed).toBe(true);
+ expect(exited).toHaveBeenCalledWith({id:7,session_generation:7,exit_code:null});
+ expect(result.current.phase).toBe('connected');
+ host.dispose();
+});

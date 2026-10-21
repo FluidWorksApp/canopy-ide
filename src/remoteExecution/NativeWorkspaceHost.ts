@@ -168,6 +168,7 @@ export class NativeWorkspaceHost implements Host {
     return pending;
   }
   private async sessions(priority?: number) {
+    const listed=new Set(this.known.keys());
     const sessions=await this.call<RemoteSession[]>('/sessions',undefined,priority);
     // The host resumes agents after a workspace restart. Those terminals were
     // not spawned here, so they are announced like any other new session.
@@ -181,6 +182,10 @@ export class NativeWorkspaceHost implements Host {
       if(old?.exitCode==null && session.exitCode!=null && old){const stream=this.streams.get(session.id);if(stream){stream.pendingExit=session.exitCode;this.deliver(stream);}else this.emit('pty:exit',{id:session.id,session_generation:session.id,exit_code:session.exitCode});}
       this.known.set(session.id,session);
     }
+    // A recreated runtime has none of its predecessor's terminals. A stream to
+    // one would retry forever and hold the whole workspace at Reconnecting.
+    const live=new Set(sessions.map(session=>session.id));
+    for(const id of listed)if(!live.has(id)&&this.known.get(id)?.exitCode==null)this.ended(id);
     return sessions;
   }
   private beginPoll() {
@@ -241,6 +246,7 @@ export class NativeWorkspaceHost implements Host {
     frame.set([0x43,0x50,0x54,0x32,(data.gap?1:0)|(data.reset?2:0)]);
     view.setUint16(6,data.cols,true);view.setBigUint64(8,BigInt(data.start),true);view.setBigUint64(16,BigInt(data.end),true);view.setUint16(24,data.rows,true);frame.set(data.bytes,32);stream.channel.onmessage(frame.buffer);
   }
+  private ended(id:number){this.known.delete(id);if(this.streams.has(id))this.detach(id);this.emit('pty:exit',{id,session_generation:id,exit_code:null});}
   private detach(id:number){const stream=this.streams.get(id);if(!stream)return;stream.closed=true;const input=this.inputs.get(id);if(stream.socket)input?.closed(stream.socket);if(input?.idle)this.inputs.delete(id);clearTimeout(stream.retry);clearTimeout(stream.handshake);stream.socket?.close();this.streams.delete(id);reportStream(connectionKey(this.connection.endpoint,this.connection.workspaceId),id,null);}
   /** One ordered input queue per remote PTY; its stream socket carries it
    * once the gateway announces socket input, HTTP otherwise. */
@@ -326,11 +332,15 @@ export class NativeWorkspaceHost implements Host {
       // The caller already owns the tab. Emitting pty:spawned here races its
       // spawn response and makes App attach a second tab to this same PTY.
       value={...this.summary(session),generation:stream?.generation??null};
-    }else if(command==='pty_attach_desktop'){const stream=await this.attach(Number(args.id));
+    }else if(command==='pty_attach_desktop'){const id=Number(args.id),stream=await this.attach(id);
       // The session list is a background poll; under load it queued behind
       // other polls and pushed the attach past its deadline. Use the copy the
       // poll already keeps, and only ask when this session isn't known yet.
-      const session=this.known.get(Number(args.id))??(await this.sessions(INTERACTIVE)).find(s=>s.id===args.id);if(!session)throw Error('Remote session not found');value={cols:session.cols,rows:session.rows,generation:stream.generation,replay_start:0,replay_end:0};}
+      const session=this.known.get(id)??(await this.sessions(INTERACTIVE)).find(s=>s.id===id);
+      // A restored tab can name a session the workspace no longer has. Answer
+      // like the native host so the tab ends instead of retrying forever.
+      if(!session){if(this.streams.get(id)===stream)this.detach(id);throw Error(`no pty session ${id}`);}
+      value={cols:session.cols,rows:session.rows,generation:stream.generation,replay_start:0,replay_end:0};}
     else if(command==='pty_read_desktop'){const stream=this.streams.get(Number(args.id));if(!stream||stream.generation!==args.generation)throw Error('Remote terminal attachment ended');const frame=this.take(stream);value=frame?{...frame,bytes:[...frame.bytes]}:null;}
     else if(command==='pty_detach_desktop'){const stream=this.streams.get(Number(args.id));if(stream && (args.generation==null||stream.generation===args.generation))this.detach(Number(args.id));}
     else if(command==='pty_ack'){const stream=this.streams.get(Number(args.id));if(stream && stream.generation===args.generation){stream.busy=false;this.deliver(stream);}value=null;}
