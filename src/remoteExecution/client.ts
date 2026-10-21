@@ -40,8 +40,12 @@ export class RemoteExecutionClient {
   private async performRequest<T>(route: string, args?: unknown, retries=0): Promise<T> {
     const id=route.match(/^\/workspaces\/([a-z][a-z0-9-]*)(?:\/|$)/)?.[1];
     const key=id?connectionKey(this.endpoint,id):null;
-    let response:Response;
-    try { const token = this.resolveToken ? await this.resolveToken() : this.token;
+    let response:Response,token:string;
+    // A credential that cannot be issued is not a lost connection: say so
+    // instead of showing a reconnect that never reaches the network.
+    try { token = this.resolveToken ? await this.resolveToken() : this.token; }
+    catch(error) { if(key)reportConnection(key,/disconnected|sign.?in|unauthori[sz]ed|forbidden|credential|access|\b40[13]\b/i.test(String(error))?'authentication-error':'reconnecting');throw error; }
+    try {
       response = await fetch(`${this.endpoint}/v1${route}`, {
       method: args === undefined ? "GET" : "POST", redirect:"error",
       headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },

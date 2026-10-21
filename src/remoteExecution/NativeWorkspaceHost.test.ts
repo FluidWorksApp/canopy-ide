@@ -1,6 +1,8 @@
 import { afterEach, expect, it, vi } from 'vitest';
 import type { Host, HostEvent } from '../host/contract';
 import { NativeWorkspaceHost } from './NativeWorkspaceHost';
+import { renderHook } from '@testing-library/react';
+import { connectionKey, useConnectionState } from './connectionState';
 afterEach(() => vi.unstubAllGlobals());
 it('runs the companion CLI on the viewing computer and streams its output back through a native channel',async()=>{
  const {host,desktop,fetcher}=setup();
@@ -498,4 +500,46 @@ it('announces an agent the host resumed after a workspace restart, and nothing e
   await vi.advanceTimersByTimeAsync(3000);
   expect(spawned).toHaveBeenCalledOnce();
  }finally{host.dispose();vi.useRealTimers();}
+});
+it('retrying an idle member connection renews its expired credential instead of resending it',async()=>{
+ const managed={...connection,endpoint:'https://alice.workspaces.canopyide.dev',token:'expired'};
+ const invoke=vi.fn().mockResolvedValue({connection:{...managed,token:'renewed'},expiresAt:new Date(Date.now()+120000).toISOString()});
+ const desktop={kind:'native',invoke,listen:vi.fn(),channel:vi.fn()} as unknown as Host;
+ const fetcher=vi.fn().mockImplementation(async()=>Response.json({}));vi.stubGlobal('fetch',fetcher);
+ const host=new NativeWorkspaceHost(managed,desktop);
+ try{
+  host.setProjectIdle(true);
+  await host.client.workspace('alice','/sessions');
+  expect(fetcher.mock.calls[0][1].headers.authorization).toBe('Bearer expired');
+  await host.reconnect();
+  expect(invoke).toHaveBeenCalledWith('canopy_account_request',expect.objectContaining({route:'/api/operations'}));
+  expect(fetcher.mock.calls[1][0]).toMatch(/\/open$/);expect(fetcher.mock.calls[1][1].headers.authorization).toBe('Bearer renewed');
+ }finally{host.dispose();}
+});
+it('a failed saved-credential check is retried rather than failing every later request',async()=>{
+ const managed={...connection,endpoint:'https://alice.workspaces.canopyide.dev',credentialAccountKey:'account',expiresAt:new Date(Date.now()+120000).toISOString()};
+ const invoke=vi.fn().mockRejectedValueOnce(Error('Keychain unavailable')).mockResolvedValue('account');
+ const desktop={kind:'native',invoke,listen:vi.fn(),channel:vi.fn()} as unknown as Host;
+ const fetcher=vi.fn().mockImplementation(async()=>Response.json({}));vi.stubGlobal('fetch',fetcher);
+ const host=new NativeWorkspaceHost(managed,desktop);
+ try{
+  await expect(host.client.workspace('alice','/sessions')).rejects.toThrow('Keychain unavailable');
+  await host.client.workspace('alice','/sessions');
+  expect(fetcher).toHaveBeenCalledTimes(1);expect(fetcher.mock.calls[0][1].headers.authorization).toBe('Bearer synthetic-token');
+ }finally{host.dispose();}
+});
+it('a workspace disconnected by an account change asks for sign-in and its retry reopens the workspace',async()=>{
+ const reload=vi.fn();vi.stubGlobal('location',{...window.location,reload});
+ const managed={...connection,endpoint:'https://alice.workspaces.canopyide.dev'};
+ const desktop={kind:'native',invoke:vi.fn(),listen:vi.fn(),channel:vi.fn()} as unknown as Host;
+ const fetcher=vi.fn();vi.stubGlobal('fetch',fetcher);
+ const host=new NativeWorkspaceHost(managed,desktop);
+ const {result}=renderHook(()=>useConnectionState(connectionKey(managed.endpoint,'alice')));
+ try{
+  window.dispatchEvent(new Event('canopy:account-changed'));
+  await expect(host.client.workspace('alice','/sessions')).rejects.toThrow('disconnected');
+  expect(result.current.phase).toBe('authentication-error');
+  await host.reconnect();
+  expect(reload).toHaveBeenCalledTimes(1);expect(fetcher).not.toHaveBeenCalled();
+ }finally{host.dispose();}
 });

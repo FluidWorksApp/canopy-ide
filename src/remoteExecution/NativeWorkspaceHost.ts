@@ -6,6 +6,7 @@ import { RemoteExecutionClient, type RemoteSession } from './client';
 import {connectionKey,reportConnection,reportStream,workspaceLifecyclePhase} from './connectionState';
 import {saveRemoteContextImage} from './saveContextImage';
 import {TerminalInput} from './terminalInput';
+import {canSwitchExecutionMode} from '../executionMode';
 
 export interface WorkspaceConnection { endpoint: string; token: string; workspaceId: string; workspaceName: string; scope?: 'view'|'drive'; clientId?: string; expiresAt?: string; credentialAccountKey?: string }
 type Args = Record<string, unknown>;
@@ -58,6 +59,16 @@ export class NativeWorkspaceHost implements Host {
   private heartbeat?: ReturnType<typeof setTimeout>;
   private get stopping(){return !!workspaceLifecyclePhase(connectionKey(this.connection.endpoint,this.connection.workspaceId));}
   setProjectIdle(idle:boolean){this.projectIdle=idle;if(!idle)this.tokenFreshUntil=0;}
+  /** An explicit retry. An idle member connection holds an expired token and a
+   * disposed adapter can never send again, so retrying either must renew. */
+  async reconnect(){
+    if(this.disposed){
+      if(!canSwitchExecutionMode())throw Error('Save or close unsaved files, then retry to reconnect.');
+      window.location.reload();return;
+    }
+    this.setProjectIdle(false);
+    await this.client.workspace(this.connection.workspaceId,'/open',{resume:true});
+  }
   readonly client: RemoteExecutionClient;
   private rendererGeneration = 1;
   private nextStreamGeneration = 1;
@@ -80,13 +91,15 @@ export class NativeWorkspaceHost implements Host {
     const managed = connection.endpoint === `https://${connection.workspaceId}.workspaces.canopyide.dev`;
     let refreshing: Promise<string> | undefined;
     let savedFreshness: Promise<void> | undefined;
+    // A failed check must not be memoized: every later request would fail on it
+    // without ever reaching the network, leaving the workspace stuck reconnecting.
     const checkSavedFreshness = () => savedFreshness ??= (async () => {
       const expires=Date.parse(connection.expiresAt??'');
       if(!connection.credentialAccountKey||!Number.isFinite(expires)||expires-60_000<=Date.now())return;
       const key=await this.desktop.invoke<string|null>('canopy_account_cache_key');
       if(this.disposed)throw Error('Workspace disconnected');
       if(key===connection.credentialAccountKey)this.tokenFreshUntil=expires-60_000;
-    })();
+    })().catch(error=>{savedFreshness=undefined;throw error;});
     const resolveToken = async () => {
       if(this.disposed)throw Error('Workspace disconnected. Reopen it from your account.');
       await checkSavedFreshness();
