@@ -7,6 +7,7 @@ import {connectionKey,reportConnection,reportStream,workspaceLifecyclePhase} fro
 import {saveRemoteContextImage} from './saveContextImage';
 import {TerminalInput} from './terminalInput';
 import {canSwitchExecutionMode} from '../executionMode';
+import {remoteDiagnostic} from './remoteDiagnostic';
 
 export interface WorkspaceConnection { endpoint: string; token: string; workspaceId: string; workspaceName: string; scope?: 'view'|'drive'; clientId?: string; expiresAt?: string; credentialAccountKey?: string }
 type Args = Record<string, unknown>;
@@ -203,7 +204,7 @@ export class NativeWorkspaceHost implements Host {
     // An intentionally stopping or hibernated workspace is not reconnected;
     // the stream parks without network attempts until that state is cleared.
     const parked=()=>{if(stream.closed)return;if(workspaceLifecyclePhase(stateKey)){stream.retry=setTimeout(parked,2000);return;}void connect();};
-    const retry=()=>{if(stream.closed)return;clearTimeout(stream.handshake);reportStream(stateKey,id,false);if(workspaceLifecyclePhase(stateKey)){stream.retry=setTimeout(parked,2000);return;}const delay=Math.min(30_000,1000*2**Math.min(failures++,5))+Math.random()*500;stream.retry=setTimeout(()=>void connect(),delay);};
+    const retry=()=>{if(stream.closed)return;remoteDiagnostic('terminal-stream-retry');clearTimeout(stream.handshake);reportStream(stateKey,id,false);if(workspaceLifecyclePhase(stateKey)){stream.retry=setTimeout(parked,2000);return;}const delay=Math.min(30_000,1000*2**Math.min(failures++,5))+Math.random()*500;stream.retry=setTimeout(()=>void connect(),delay);};
     const connect=async()=>{
       try{
         const url=await this.ticket(id);
@@ -224,7 +225,7 @@ export class NativeWorkspaceHost implements Host {
             failures=0;
             const bytes=Uint8Array.from(atob(message.b64),c=>c.charCodeAt(0));
             const reset=message.t==='snapshot' && message.reset===true;
-            if(message.t==='snapshot'){stream.frames=[];stream.queuedBytes=0;stream.receivedSnapshot=true;const exitCode=message.exitCode??this.known.get(id)?.exitCode;if(exitCode!=null)stream.pendingExit=exitCode;}
+            if(message.t==='snapshot'){if(!stream.receivedSnapshot)remoteDiagnostic('terminal-stream-live');stream.frames=[];stream.queuedBytes=0;stream.receivedSnapshot=true;const exitCode=message.exitCode??this.known.get(id)?.exitCode;if(exitCode!=null)stream.pendingExit=exitCode;}
             const frame:OutputFrame={bytes,start:message.start??stream.cursor,end:message.end??(stream.cursor+bytes.length),gap:message.gap??(message.t==='snapshot'&&!reset),reset,cols:message.cols??0,rows:message.rows??0};
             stream.cursor=frame.end;
             if(stream.queuedBytes+bytes.length>512*1024 || stream.frames.length>=1024){stream.frames=[];stream.queuedBytes=0;socket.close();return;}

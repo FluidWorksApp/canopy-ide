@@ -317,7 +317,7 @@ export function createGateway({ config, workspaces, origins = [], elasticMemory,
       if(principal.memberId&&principal.scope==='view'&&operation==='/sessions')return json(response,200,[]);
       const opening=operation==='/open'&&request.method==='POST'?await body(request,4096):{};
       if(opening.resume===true&&(!principal.memberId||principal.scope!=='view'))authorize(config,principal,workspaceId,'drive');
-      const runtime = await openRuntime(workspace,principal,request.headers.authorization,projectAccess,{resume:opening.resume===true||!!principal.memberId});
+      const runtime = await openRuntime(workspace,principal,request.headers.authorization,projectAccess,{resume:opening.resume===true||!!principal.memberId,...(principal.memberId&&opening.resume!==true?{reuse:true}:{})});
       if(harness&&!principal.memberId)void harness.attach(workspace,runtime).catch(()=>{});
       if (operation === '/open') {
         if(!await runtimeReady(runtime))throw Error('Workspace services are not responding yet');
@@ -407,7 +407,10 @@ export function createGateway({ config, workspaces, origins = [], elasticMemory,
   server.maxConnections = 128;
   server.requestTimeout = 30_000;
   server.headersTimeout = 10_000;
-  const streams = new Map();
+  const streams = new Map(),streamWarnings=new Map();
+  // A refused or broken stream used to leave no trace on the host. Messages are
+  // fixed reasons (never tickets or tokens), each logged at most once a minute.
+  const streamWarning=message=>{const now=Date.now();if(now-(streamWarnings.get(message)??0)<60000)return;if(streamWarnings.size>=64)streamWarnings.clear();streamWarnings.set(message,now);console.warn(message);};
   server.on('upgrade', async (request, socket, head) => {
     let release;
     try {
@@ -484,10 +487,10 @@ export function createGateway({ config, workspaces, origins = [], elasticMemory,
         });
         client.on('close', () => { upstream.close(); release(); });
         upstream.on('close', () => client.close());
-        upstream.on('error', () => client.close(1011));
+        upstream.on('error', error => { streamWarning(`Stream upstream failed for ${principal.memberId?'member':'owner'} ${grant.stream==='/desktop/ws'?'desktop':'terminal'}: ${error.code??error.message}`); client.close(1011); });
         client.on('error', () => upstream.close());
       });
-    } catch { release?.(); socket.destroy(); }
+    } catch (error) { release?.(); socket.destroy(); streamWarning(`Stream refused: ${String(error?.message??error).slice(0,120)}`); }
   });
   server.on('close',()=>{sharedSessions.close();leases.close();cliSessions?.close();supervisor?.close();harness?.close();});
   return server;

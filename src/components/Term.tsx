@@ -20,6 +20,7 @@ import { openFileLink, openLink } from "../links";
 import { matchesModifierClick } from "../shortcuts";
 import * as ipc from "../ipc";
 import { isRemoteHost } from "../host";
+import { remoteDiagnostic } from "../remoteExecution/remoteDiagnostic";
 import { getSettings, type Settings } from "../settings";
 import { terminalTheme } from "../terminalThemes";
 import {
@@ -820,6 +821,7 @@ export const Term = forwardRef<TermHandle, TermProps>(function Term(
         attachFailureCount = 0;
       } catch (err) {
         if (!disposed && epoch === streamEpoch && streamingRef.current) {
+          if (isRemoteHost()) remoteDiagnostic("terminal-attach-failed");
           if (/no pty session \d+/.test(String(err))) {
             finishProcess({ id, session_generation: ipc.rendererSessionGeneration(), exit_code: null, requested: false });
             const output = await ipc.ptyOutput(id, 8000);

@@ -2,6 +2,7 @@ import { useEffect, useRef, useState, useImperativeHandle, type Ref } from "reac
 import type { RemoteExecutionClient } from "./client";
 import { Button } from '../components/ui';
 import './workspace.css';
+import { remoteDiagnostic } from './remoteDiagnostic';
 import { CloseIcon, RestartIcon } from '../components/icons';
 
 export type RemoteDesktopCapture = { capture(): {png:string;cssWidth:number} };
@@ -40,10 +41,10 @@ export function RemoteDesktop({ client, workspaceId, workspaceName, onClose, pre
         connection.current = rfb;
         rfb.scaleViewport = true;
         rfb.background = 'var(--bg-deep)';
-        rfb.addEventListener("connect", () => { if (!disposed) { connected.current=true;setStatus("Connected"); } });
-        rfb.addEventListener("disconnect", () => { if (!disposed) {connected.current=false;setStatus("Desktop disconnected; agents keep running");} });
+        rfb.addEventListener("connect", () => { if (!disposed) { connected.current=true;setStatus("Connected");remoteDiagnostic('desktop-connected'); } });
+        rfb.addEventListener("disconnect", () => { if (!disposed) {connected.current=false;setStatus("Desktop disconnected; agents keep running");remoteDiagnostic('desktop-disconnected');} });
         disconnect = () => rfb.disconnect();
-      } catch (error) { if (!disposed) setStatus(String(error)); }
+      } catch (error) { if (!disposed) { setStatus(String(error)); remoteDiagnostic('desktop-failed'); } }
     })();
     return () => { disposed = true; connected.current=false; disconnect?.(); connection.current = null; };
   }, [client, workspaceId, attempt, previewUrl]);
