@@ -6,7 +6,7 @@
   },
   "aider": "0.86.2",
   "bun": "1.3.14",
-  "cursor": "2026.10.01-e373342",
+  "cursor": "2026.10.22-27dcf5f",
   "grok": "1.0.46",
   "agy": {
     "arm64": {
@@ -23,7 +23,7 @@
   "installers": {
     "cursor": {
       "url": "https://cursor.com/install",
-      "sha256": "dd6677f33cb7efa34809557b1c6df3a11e389b76ce4e56ce5751db13dd7260e6"
+      "sha256": "dfbe4fe13e722dea83a56c3eeeb5a0cc3260cf26df1fdd50befd9b6ef5c6c38d"
     },
     "grok": {
       "url": "https://x.ai/cli/install.sh",
