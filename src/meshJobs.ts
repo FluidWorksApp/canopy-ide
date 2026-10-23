@@ -142,6 +142,8 @@ export interface RemoteJobStore {
 }
 const REMOTE_JOB_LIMIT = 200;
 const WORKSPACE_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+/** How long a mesh send's id is remembered, so a retry of a timed-out send is answered once. */
+const SEND_RETRY_MS = 10 * 60 * 1000;
 /** localStorage is enough: a few hundred small records, read once at startup. */
 function localRecords<T extends { ptyId: number; expires: number }>(key: string, id: (row: T) => unknown, storage: () => Storage) {
   const read = (): T[] => {
@@ -472,8 +474,27 @@ export function createMeshJobs(deps: MeshJobDeps) {
     throw new Error(errors[0] ?? `Sign in to a Canopy team to reach cloud workspace ${cloud.name}.`);
   }
 
+  // A send whose answer the bridge stopped waiting for may still be in flight
+  // or delivered. A retry with its id gets that first attempt's outcome rather
+  // than a second delivery; a send that failed may be tried again.
+  const sends = new Map<string, { at: number; result: Promise<unknown> }>();
+  function once<T>(requestId: string | null | undefined, run: (id: string) => Promise<T>): Promise<T> {
+    if (!requestId) return run(deps.newId());
+    for (const [key, entry] of sends) if (deps.now() - entry.at > SEND_RETRY_MS) sends.delete(key);
+    const prior = sends.get(requestId);
+    if (prior) return prior.result as Promise<T>;
+    const result = run(requestId);
+    sends.set(requestId, { at: deps.now(), result });
+    result.catch(() => sends.delete(requestId));
+    return result;
+  }
+
   /** An agent message to an agent in a cloud workspace, through its service. */
-  async function message(req: {
+  function message(req: Parameters<typeof sendMessage>[0] & { requestId?: string | null }) {
+    return once(req.requestId, (id) => sendMessage(req, id));
+  }
+
+  async function sendMessage(req: {
     workspace: string;
     text: string;
     agent?: string | null;
@@ -482,7 +503,7 @@ export function createMeshJobs(deps: MeshJobDeps) {
     /** The sending terminal, stamped by the bridge; replies are typed into it. */
     origin?: Origin | null;
     fromName?: string | null;
-  }) {
+  }, id: string) {
     const cloud = cloudWorkspace(req.workspace);
     if (!cloud) throw new Error(`No cloud workspace called "${req.workspace}".`);
     const text = (req.text ?? "").trim();
@@ -491,7 +512,7 @@ export function createMeshJobs(deps: MeshJobDeps) {
     if (!target) throw new Error("Name the agent to message (its name or ptyId).");
     const fromName = clip(oneLine(req.fromName ?? ""), 60);
     const msg: MeshMessage = {
-      id: deps.newId(),
+      id,
       text,
       target,
       created: deps.now(),
@@ -524,7 +545,11 @@ export function createMeshJobs(deps: MeshJobDeps) {
     throw new Error(errors[0] ?? `Sign in to a Canopy team to reach cloud workspace ${cloud.name}.`);
   }
 
-  async function submit(req: {
+  function submit(req: Parameters<typeof submitJob>[0] & { requestId?: string | null }) {
+    return once(req.requestId, (id) => submitJob(req, id));
+  }
+
+  async function submitJob(req: {
     brief: string;
     title?: string | null;
     workspace?: string | null;
@@ -534,13 +559,12 @@ export function createMeshJobs(deps: MeshJobDeps) {
     instance?: string | null;
     /** The agent in a cloud workspace that takes the job; the service picks when absent. */
     agent?: string | null;
-  }) {
+  }, id: string) {
     const brief = (req.brief ?? "").trim();
     if (!brief) throw new Error("A job needs a brief.");
     if (new TextEncoder().encode(brief).length > MAX_JOB_BRIEF) throw new Error("A job brief is capped at 16 KB.");
     if (req.ptyId == null || !req.instance) throw new Error("Only a Canopy agent terminal can submit a mesh job.");
     const origin: Origin = { ptyId: req.ptyId, instance: req.instance };
-    const id = deps.newId();
     const title = jobTitle(req.title, brief);
     const workspace = (req.workspace ?? "").trim() || null;
     const member = (req.member ?? "").trim();

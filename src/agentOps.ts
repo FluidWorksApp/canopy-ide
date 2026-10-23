@@ -704,6 +704,7 @@ export async function runUiOp(op: ipc.AgentUiOp, ctx: UiOpContext): Promise<unkn
         ptyId: op.ptyId,
         instance: op.instance,
         agent: op.agent,
+        requestId: op.requestId,
       });
     case "mesh_message_cloud":
       return needMeshJobs(ctx).message({
@@ -714,6 +715,7 @@ export async function runUiOp(op: ipc.AgentUiOp, ctx: UiOpContext): Promise<unkn
         ...(op.replyTo ? { replyTo: op.replyTo } : {}),
         origin: op.ptyId != null && op.instance ? { ptyId: op.ptyId, instance: op.instance } : null,
         fromName: op.fromName,
+        requestId: op.requestId,
       });
     case "pr_details":
       return prDetails(op, ctx);

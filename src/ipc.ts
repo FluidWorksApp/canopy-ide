@@ -819,6 +819,9 @@ export interface AgentUiOp {
   device?: string | null;
   targetPtyId?: number | null;
   replyTo?: string | null;
+  /** mesh_message_cloud / mesh_submit: the send's id, minted by the bridge. A
+   *  retry with the same id is answered by the first attempt. */
+  requestId?: string | null;
   /** mesh_message_cloud: the sending terminal's name, from the bridge. */
   fromName?: string | null;
   path?: string | null;
