@@ -388,6 +388,16 @@ fn js_log(level: String, message: String) {
                 | "startup-stage:connected"
         ) {
             log::info!(target: "canopy::watchdog::startup", "{message}");
+        } else if matches!(
+            message.as_str(),
+            "remote-stage:terminal-attach-failed"
+                | "remote-stage:terminal-stream-retry"
+                | "remote-stage:terminal-stream-live"
+                | "remote-stage:desktop-connected"
+                | "remote-stage:desktop-disconnected"
+                | "remote-stage:desktop-failed"
+        ) {
+            log::info!(target: "canopy::watchdog::remote", "{message}");
         }
         return;
     }
