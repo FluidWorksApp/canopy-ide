@@ -11,7 +11,7 @@ import {remoteDiagnostic} from './remoteDiagnostic';
 
 export interface WorkspaceConnection { endpoint: string; token: string; workspaceId: string; workspaceName: string; scope?: 'view'|'drive'; clientId?: string; expiresAt?: string; credentialAccountKey?: string }
 type Args = Record<string, unknown>;
-type Stream = { id:number; receivedSnapshot:boolean; pendingExit?:number; socket?: WebSocket; generation: number; cursor: number; frames:OutputFrame[]; queuedBytes:number; busy:boolean; retry?: ReturnType<typeof setTimeout>; handshake?: ReturnType<typeof setTimeout>; channel?: HostChannel<ArrayBuffer>; closed: boolean };
+type Stream = { id:number; receivedSnapshot:boolean; pendingExit?:number; socket?: WebSocket; generation: number; cursor: number; frames:OutputFrame[]; queuedBytes:number; busy:boolean; retry?: ReturnType<typeof setTimeout>; kick?: ()=>void; kickedAt?: number; handshake?: ReturnType<typeof setTimeout>; channel?: HostChannel<ArrayBuffer>; closed: boolean };
 const LOCAL_UI = new Set(['js_log','watchdog_ack','watchdog_incidents','memory_info','selftest_config','set_shortcut_profile','notify_native','set_window_zoom','window_zoom','crash_pending','crash_clear','crash_upload','take_pending_crash','dictation_supported','remote_set_theme','remote_set_clis','remote_set_companion','remote_set_hibernated','remote_set_attention','execution_mode_get','execution_mode_set','execution_remote_get','execution_remote_set']);
 // The clipboard and microphone belong to the computer displaying the IDE.
 // Remote execution must not redirect their native services into the VM.
@@ -187,6 +187,7 @@ export class NativeWorkspaceHost implements Host {
     // one would retry forever and hold the whole workspace at Reconnecting.
     const live=new Set(sessions.map(session=>session.id));
     for(const id of listed)if(!live.has(id)&&this.known.get(id)?.exitCode==null)this.ended(id);
+    for(const stream of this.streams.values())if(stream.kick&&live.has(stream.id))stream.kick();
     return sessions;
   }
   private beginPoll() {
@@ -204,8 +205,13 @@ export class NativeWorkspaceHost implements Host {
     // An intentionally stopping or hibernated workspace is not reconnected;
     // the stream parks without network attempts until that state is cleared.
     const parked=()=>{if(stream.closed)return;if(workspaceLifecyclePhase(stateKey)){stream.retry=setTimeout(parked,2000);return;}void connect();};
-    const retry=()=>{if(stream.closed)return;remoteDiagnostic('terminal-stream-retry');clearTimeout(stream.handshake);reportStream(stateKey,id,false);if(workspaceLifecyclePhase(stateKey)){stream.retry=setTimeout(parked,2000);return;}const delay=Math.min(30_000,1000*2**Math.min(failures++,5))+Math.random()*500;stream.retry=setTimeout(()=>void connect(),delay);};
+    const retry=()=>{if(stream.closed)return;remoteDiagnostic('terminal-stream-retry');clearTimeout(stream.handshake);reportStream(stateKey,id,false);if(workspaceLifecyclePhase(stateKey)){stream.retry=setTimeout(parked,2000);return;}const delay=Math.min(30_000,1000*2**Math.min(failures++,5))+Math.random()*500;stream.retry=setTimeout(()=>void connect(),delay);
+      // The backoff guards against a workspace that isn't answering. Once the
+      // session poll shows it is, a waiting terminal reconnects then instead of
+      // sitting out up to 30s; at most once per 10s, so a refusal cannot spin.
+      stream.kick=()=>{if(stream.closed||workspaceLifecyclePhase(stateKey)||Date.now()-(stream.kickedAt??0)<10_000)return;stream.kickedAt=Date.now();clearTimeout(stream.retry);stream.kick=undefined;void connect();};};
     const connect=async()=>{
+      stream.kick=undefined;
       try{
         const url=await this.ticket(id);
         if(stream.closed)return;
