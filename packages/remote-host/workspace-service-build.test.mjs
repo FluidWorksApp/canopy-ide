@@ -5,7 +5,7 @@ import {mkdtempSync,readFileSync,writeFileSync,rmSync} from 'node:fs';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 
-test('workflow accepts static and static PIE service binaries and rejects dynamic linking',()=>{
+test('workflow accepts static and static PIE service binaries and rejects dynamic linking',{skip:process.platform!=='linux'},()=>{
  const workflow=readFileSync(new URL('../../.github/workflows/workspace-image.yml',import.meta.url),'utf8');
  const guard=workflow.split('\n').find(line=>line.trim().startsWith('file "service-bin/'));
  assert.ok(guard,'Missing static service release check');

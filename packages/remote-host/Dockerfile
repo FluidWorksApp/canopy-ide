@@ -3,20 +3,14 @@ WORKDIR /build
 COPY hook-build/ ./
 RUN cargo build --locked --release --manifest-path packages/agent-hook/Cargo.toml
 
-# Split agents.lock.json into one fragment per CLI, so each CLI layer below is
-# keyed only by its own version: bumping one CLI re-pulls only its layer.
+# Split agents.lock.json into one fragment per tool, so each tool's layer below
+# is keyed only by its own pin: bumping one tool re-pulls only its layer.
 FROM node:22-bookworm-slim AS agent-locks
 COPY agents.lock.json /tmp/agents.lock.json
 RUN node -e '\
 const fs=require("fs"),lock=JSON.parse(fs.readFileSync("/tmp/agents.lock.json","utf8"));\
-const out=(name,value)=>fs.writeFileSync(`/locks/${name}.json`,JSON.stringify(value));\
-fs.mkdirSync("/locks");\
-const npmNames={"@ampcode/cli":"amp","opencode-ai":"opencode","@oh-my-pi/pi-coding-agent":"omp"};\
-const unknown=Object.keys(lock.npm).filter(name=>!npmNames[name]);\
-if(unknown.length)throw Error("Add a Dockerfile layer for npm CLI: "+unknown.join(", "));\
-for(const [name,file] of Object.entries(npmNames))out("npm-"+file,{[name]:lock.npm[name]});\
-out("bun",{bun:lock.bun});out("aider",{aider:lock.aider});out("agy",{agy:lock.agy});out("cursor",lock.cursor);\
-out("grok",{installer:lock.installers.grok,version:lock.grok});'
+fs.mkdirSync("/locks");fs.copyFileSync("/tmp/agents.lock.json","/locks/all.json");\
+for(const [name,tool] of Object.entries(lock))fs.writeFileSync(`/locks/${name}.json`,JSON.stringify({[name]:tool}));'
 
 FROM node:22-bookworm-slim
 # Layers run from least to most frequently changed.
@@ -28,28 +22,34 @@ RUN bash /tmp/install-native-build.sh && rm /tmp/install-native-build.sh
 COPY --from=hook-builder /build/packages/agent-hook/target/release/canopy-hook /usr/local/bin/canopy-hook
 WORKDIR /opt/canopy
 COPY install-agents.sh /usr/local/lib/canopy/install-agents.sh
-# One layer per agent CLI.
+# One layer per tool, in agents.lock.json order (agents-lock.test.mjs checks both agree).
 COPY --from=agent-locks /locks/bun.json /tmp/locks/
-RUN bash /usr/local/lib/canopy/install-agents.sh bun /tmp/locks/bun.json
+RUN bash /usr/local/lib/canopy/install-agents.sh /tmp/locks/bun.json
 COPY --from=agent-locks /locks/aider.json /tmp/locks/
-RUN bash /usr/local/lib/canopy/install-agents.sh aider /tmp/locks/aider.json
+RUN bash /usr/local/lib/canopy/install-agents.sh /tmp/locks/aider.json
 COPY --from=agent-locks /locks/agy.json /tmp/locks/
-RUN bash /usr/local/lib/canopy/install-agents.sh agy /tmp/locks/agy.json
+RUN bash /usr/local/lib/canopy/install-agents.sh /tmp/locks/agy.json
 COPY --from=agent-locks /locks/cursor.json /tmp/locks/
-RUN bash /usr/local/lib/canopy/install-agents.sh cursor /tmp/locks/cursor.json
+RUN bash /usr/local/lib/canopy/install-agents.sh /tmp/locks/cursor.json
 COPY --from=agent-locks /locks/grok.json /tmp/locks/
-RUN bash /usr/local/lib/canopy/install-agents.sh grok /tmp/locks/grok.json
-COPY --from=agent-locks /locks/npm-opencode.json /tmp/locks/
-RUN bash /usr/local/lib/canopy/install-agents.sh npm /tmp/locks/npm-opencode.json
-COPY --from=agent-locks /locks/npm-omp.json /tmp/locks/
-# oh-my-pi is ~725 MB compressed: ship a pinned launcher, install on first use.
-RUN bash /usr/local/lib/canopy/install-agents.sh lazy-npm /tmp/locks/npm-omp.json omp
-COPY --from=agent-locks /locks/npm-amp.json /tmp/locks/
-RUN bash /usr/local/lib/canopy/install-agents.sh npm /tmp/locks/npm-amp.json
-RUN npm install -g --cache /tmp/npm-cache --no-audit --no-fund typescript-language-server@5.3.0 typescript@5.9.3 && rm -rf /tmp/npm-cache
-RUN npm install -g --cache /tmp/npm-cache --no-audit --no-fund @openai/codex@0.160.0 && rm -rf /tmp/npm-cache
-RUN npm install -g --cache /tmp/npm-cache --no-audit --no-fund @anthropic-ai/claude-code@2.1.287 && rm -rf /tmp/npm-cache
-RUN bash /usr/local/lib/canopy/install-agents.sh verify && rm -rf /tmp/locks
+RUN bash /usr/local/lib/canopy/install-agents.sh /tmp/locks/grok.json
+COPY --from=agent-locks /locks/opencode.json /tmp/locks/
+RUN bash /usr/local/lib/canopy/install-agents.sh /tmp/locks/opencode.json
+# oh-my-pi is ~725 MB compressed: the lock ships it as a lazy launcher.
+COPY --from=agent-locks /locks/omp.json /tmp/locks/
+RUN bash /usr/local/lib/canopy/install-agents.sh /tmp/locks/omp.json
+COPY --from=agent-locks /locks/amp.json /tmp/locks/
+RUN bash /usr/local/lib/canopy/install-agents.sh /tmp/locks/amp.json
+COPY --from=agent-locks /locks/typescript.json /tmp/locks/
+RUN bash /usr/local/lib/canopy/install-agents.sh /tmp/locks/typescript.json
+COPY --from=agent-locks /locks/typescript-language-server.json /tmp/locks/
+RUN bash /usr/local/lib/canopy/install-agents.sh /tmp/locks/typescript-language-server.json
+COPY --from=agent-locks /locks/codex.json /tmp/locks/
+RUN bash /usr/local/lib/canopy/install-agents.sh /tmp/locks/codex.json
+COPY --from=agent-locks /locks/claude.json /tmp/locks/
+RUN bash /usr/local/lib/canopy/install-agents.sh /tmp/locks/claude.json
+COPY --from=agent-locks /locks/all.json /tmp/locks/
+RUN bash /usr/local/lib/canopy/install-agents.sh verify /tmp/locks/all.json && rm -rf /tmp/locks
 # Canopy's own runtime and code change most often.
 COPY package.json package-lock.json ./
 RUN npm ci --omit=dev --cache /tmp/npm-cache --no-audit --no-fund && rm -rf /tmp/npm-cache
