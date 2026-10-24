@@ -1,6 +1,8 @@
 import { afterEach, expect, it, vi } from 'vitest';
 import type { Host, HostEvent } from '../host/contract';
 import { NativeWorkspaceHost } from './NativeWorkspaceHost';
+import { renderHook } from '@testing-library/react';
+import { connectionKey, useConnectionState } from './connectionState';
 afterEach(() => vi.unstubAllGlobals());
 it('runs the companion CLI on the viewing computer and streams its output back through a native channel',async()=>{
  const {host,desktop,fetcher}=setup();
@@ -368,6 +370,34 @@ it('parks terminal reconnects and heartbeats while the workspace is intentionall
  }finally{host.dispose();reportWorkspaceLifecycle(key,null);vi.useRealTimers();}
 });
 
+it('reconnects a waiting terminal as soon as the workspace answers, not after its backoff',async()=>{
+ vi.useFakeTimers();vi.setSystemTime(1000000);
+ const invoke=vi.fn().mockImplementation(async(command:string)=>command==='canopy_account_request'?{connection,expiresAt:new Date(Date.now()+3600000).toISOString()}:undefined);
+ const desktop={kind:'native',invoke,listen:vi.fn(),channel:vi.fn()} as unknown as Host;
+ class Socket {static CONNECTING=0;static all:Socket[]=[];readyState=0;onopen?:()=>void;onclose?:()=>void;onmessage?:()=>void;onerror?:()=>void;constructor(){Socket.all.push(this);}close(){this.onclose?.();}}
+ vi.stubGlobal('WebSocket',Socket);
+ const shell={id:7,title:'shell',cols:40,rows:10,exitCode:null};
+ const fetcher=vi.fn().mockImplementation(async(url:string,options:RequestInit)=>({ok:true,json:async()=>url.endsWith('/ticket')?{ticket:'synthetic-ticket'}:url.endsWith('/sessions')?(options.method==='POST'?shell:[shell]):{result:null}}));
+ vi.stubGlobal('fetch',fetcher);
+ const host=new NativeWorkspaceHost(connection,desktop);
+ try{
+  await host.invoke('pty_spawn_attached_argv',{cwd:'/workspace',argv:['bash'],onData:{onmessage:vi.fn()}});
+  // Four failed attempts push the backoff past 8s.
+  for(const wait of [1600,2600,4600]){Socket.all.at(-1)!.close();await vi.advanceTimersByTimeAsync(wait);}
+  Socket.all.at(-1)!.close();
+  const before=Socket.all.length;
+  await vi.advanceTimersByTimeAsync(1000);
+  expect(Socket.all).toHaveLength(before);
+  // The session poll gets an answer: the terminal reconnects now.
+  await host.invoke('pty_renderer_sessions');await vi.advanceTimersByTimeAsync(0);
+  expect(Socket.all).toHaveLength(before+1);
+  // A refusal right after does not turn the poll into a 3s retry loop.
+  Socket.all.at(-1)!.close();
+  await host.invoke('pty_renderer_sessions');await vi.advanceTimersByTimeAsync(0);
+  expect(Socket.all).toHaveLength(before+1);
+ }finally{host.dispose();vi.useRealTimers();}
+});
+
 it('sends keystrokes over the stream socket once the gateway offers it and falls back to HTTP across a reconnect',async()=>{
  const {host,fetcher}=setup();
  class Socket {
@@ -498,4 +528,68 @@ it('announces an agent the host resumed after a workspace restart, and nothing e
   await vi.advanceTimersByTimeAsync(3000);
   expect(spawned).toHaveBeenCalledOnce();
  }finally{host.dispose();vi.useRealTimers();}
+});
+it('retrying an idle member connection renews its expired credential instead of resending it',async()=>{
+ const managed={...connection,endpoint:'https://alice.workspaces.canopyide.dev',token:'expired'};
+ const invoke=vi.fn().mockResolvedValue({connection:{...managed,token:'renewed'},expiresAt:new Date(Date.now()+120000).toISOString()});
+ const desktop={kind:'native',invoke,listen:vi.fn(),channel:vi.fn()} as unknown as Host;
+ const fetcher=vi.fn().mockImplementation(async()=>Response.json({}));vi.stubGlobal('fetch',fetcher);
+ const host=new NativeWorkspaceHost(managed,desktop);
+ try{
+  host.setProjectIdle(true);
+  await host.client.workspace('alice','/sessions');
+  expect(fetcher.mock.calls[0][1].headers.authorization).toBe('Bearer expired');
+  await host.reconnect();
+  expect(invoke).toHaveBeenCalledWith('canopy_account_request',expect.objectContaining({route:'/api/operations'}));
+  expect(fetcher.mock.calls[1][0]).toMatch(/\/open$/);expect(fetcher.mock.calls[1][1].headers.authorization).toBe('Bearer renewed');
+ }finally{host.dispose();}
+});
+it('a failed saved-credential check is retried rather than failing every later request',async()=>{
+ const managed={...connection,endpoint:'https://alice.workspaces.canopyide.dev',credentialAccountKey:'account',expiresAt:new Date(Date.now()+120000).toISOString()};
+ const invoke=vi.fn().mockRejectedValueOnce(Error('Keychain unavailable')).mockResolvedValue('account');
+ const desktop={kind:'native',invoke,listen:vi.fn(),channel:vi.fn()} as unknown as Host;
+ const fetcher=vi.fn().mockImplementation(async()=>Response.json({}));vi.stubGlobal('fetch',fetcher);
+ const host=new NativeWorkspaceHost(managed,desktop);
+ try{
+  await expect(host.client.workspace('alice','/sessions')).rejects.toThrow('Keychain unavailable');
+  await host.client.workspace('alice','/sessions');
+  expect(fetcher).toHaveBeenCalledTimes(1);expect(fetcher.mock.calls[0][1].headers.authorization).toBe('Bearer synthetic-token');
+ }finally{host.dispose();}
+});
+it('a workspace disconnected by an account change asks for sign-in and its retry reopens the workspace',async()=>{
+ const reload=vi.fn();vi.stubGlobal('location',{...window.location,reload});
+ const managed={...connection,endpoint:'https://alice.workspaces.canopyide.dev'};
+ const desktop={kind:'native',invoke:vi.fn(),listen:vi.fn(),channel:vi.fn()} as unknown as Host;
+ const fetcher=vi.fn();vi.stubGlobal('fetch',fetcher);
+ const host=new NativeWorkspaceHost(managed,desktop);
+ const {result}=renderHook(()=>useConnectionState(connectionKey(managed.endpoint,'alice')));
+ try{
+  window.dispatchEvent(new Event('canopy:account-changed'));
+  await expect(host.client.workspace('alice','/sessions')).rejects.toThrow('disconnected');
+  expect(result.current.phase).toBe('authentication-error');
+  await host.reconnect();
+  expect(reload).toHaveBeenCalledTimes(1);expect(fetcher).not.toHaveBeenCalled();
+ }finally{host.dispose();}
+});
+it('ends a restored tab whose session the workspace no longer has, instead of reconnecting forever',async()=>{
+ const {host,fetcher}=setup();
+ const sockets:Array<{closed:boolean}>=[];
+ vi.stubGlobal('WebSocket',class {closed=false;constructor(){sockets.push(this);}close(){this.closed=true;}});
+ let live=[{id:7,title:'shell',cols:80,rows:24,exitCode:null}];
+ fetcher.mockImplementation(async(url:string)=>Response.json(url.endsWith('/ticket')?{ticket:'synthetic-ticket'}:url.endsWith('/sessions')?live:{result:null}));
+ const key=connectionKey(connection.endpoint,connection.workspaceId);
+ const {result}=renderHook(()=>useConnectionState(key));
+ const exited=vi.fn();await host.listen('pty:exit',event=>exited(event.payload));
+ await expect(host.invoke('pty_attach_desktop',{id:9})).rejects.toThrow('no pty session 9');
+ expect(sockets[0].closed).toBe(true);
+ await host.invoke('pty_renderer_sessions');
+ expect(result.current.phase).toBe('connected');
+ // A runtime recreated under an attached tab drops its session from the list.
+ await host.invoke('pty_attach_desktop',{id:7});
+ live=[];
+ await host.invoke('pty_renderer_sessions');
+ expect(sockets[1].closed).toBe(true);
+ expect(exited).toHaveBeenCalledWith({id:7,session_generation:7,exit_code:null});
+ expect(result.current.phase).toBe('connected');
+ host.dispose();
 });

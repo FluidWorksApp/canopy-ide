@@ -47,7 +47,7 @@
   },
   "cursor": {
     "kind": "archive",
-    "version": "2026.10.01-e373342",
+    "version": "2026.10.22-27dcf5f",
     "format": "tar.gz",
     "strip": 1,
     "bin": {
@@ -56,11 +56,11 @@
     "platforms": {
       "amd64": {
         "url": "https://downloads.cursor.com/lab/{version}/linux/x64/agent-cli-package.tar.gz",
-        "sha512": "917e0612fe3be0bff0ed1729d274ca7502e82c7bfeba96d85c967eb23db566b1a830db131464701b20f826193247d45d24a73fa0ede2d0cd6f07354581f9172c"
+        "sha512": "f0e75456b08e0e823a8046242ab7ff44b4db91d9a937fb182ebeaa448855bc1f2ae7987808c5c75d4907c8d99331fcb185402663e672f415c629323235d1a643"
       },
       "arm64": {
         "url": "https://downloads.cursor.com/lab/{version}/linux/arm64/agent-cli-package.tar.gz",
-        "sha512": "3e61aff30ba5d0787f7d6b5ce760c9eb24b6f7310f4fd1dffead1eac23fdad0e82395c14b489930b3d754e52db68ed7307a1006a76bcc79c5d43a941d3de6354"
+        "sha512": "8c8718527da21e8a0012d4de9649ae20f5e5fb4d95c50b13383e44b5b8d5110c89b83f59264f1dbc8cfa7292f0b29494a390e0a17ec1935d473cd602994d7a6c"
       }
     }
   },

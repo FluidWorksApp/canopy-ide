@@ -224,6 +224,26 @@ describe("jobs for a cloud workspace", () => {
     await expect(jobs.message({ workspace: "elsewhere", text: "hi", agent: "a" })).rejects.toThrow(/No cloud workspace/);
   });
 
+  it("answers a retried send from its first attempt instead of delivering it twice", async () => {
+    let release!: () => void;
+    const sendWorkspaceMessage = vi.fn(() => new Promise<typeof host>((resolve) => { release = () => resolve(host); }));
+    const { jobs } = setup({ cloudWorkspaces: cloud }, session({ hosts: () => [host], sendWorkspaceMessage }));
+    // The bridge gave up on the first attempt while its relay POST was still out.
+    const first = jobs.message({ workspace: "cloud-api", text: "task", agent: "reviewer", requestId: "req-1" });
+    const retry = jobs.message({ workspace: "cloud-api", text: "task", agent: "reviewer", requestId: "req-1" });
+    release();
+    await expect(retry).resolves.toMatchObject({ messageId: "req-1", status: "sent" });
+    await expect(first).resolves.toMatchObject({ messageId: "req-1" });
+    await jobs.message({ workspace: "cloud-api", text: "task", agent: "reviewer", requestId: "req-1" });
+    expect(sendWorkspaceMessage).toHaveBeenCalledTimes(1);
+    // A send that failed may be tried again under the same id.
+    const failing = vi.fn(async () => { throw new Error("relay down"); });
+    const other = setup({ cloudWorkspaces: cloud }, session({ hosts: () => [host], sendWorkspaceMessage: failing }));
+    await expect(other.jobs.message({ workspace: "cloud-api", text: "t", agent: "a", requestId: "req-2" })).rejects.toThrow("relay down");
+    await expect(other.jobs.message({ workspace: "cloud-api", text: "t", agent: "a", requestId: "req-2" })).rejects.toThrow("relay down");
+    expect(failing).toHaveBeenCalledTimes(2);
+  });
+
   it("ignores jobs that claim to come from a cloud service", () => {
     const { jobs, deps } = setup({ cloudWorkspaces: cloud });
     jobs.receive({ ...incoming("alice"), workspace: WS });

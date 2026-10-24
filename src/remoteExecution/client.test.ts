@@ -26,6 +26,12 @@ it("native connection policy permits TLS hosts and forwarded loopback streams", 
     expect(connect).not.toMatch(/(?:^| )http:(?: |$)/);
   }
 });
+it("the main window keeps running while it is hidden", () => {
+  // WebKit suspends a hidden web view by default. A suspended window stops its
+  // heartbeat, so the watchdog reloads it and every remote terminal drops.
+  const config = JSON.parse(readFileSync("src-tauri/tauri.conf.json", "utf8"));
+  expect(config.app.windows[0].backgroundThrottling).toBe("disabled");
+});
 it('retries only admission rejection and never repeats an admitted mutation after failure',async()=>{
  const fetcher=vi.fn().mockResolvedValueOnce(new Response(JSON.stringify({error:'Too many pending operations'}),{status:429})).mockResolvedValueOnce(new Response(JSON.stringify({saved:true}),{status:200}));
  vi.stubGlobal('fetch',fetcher);const client=new RemoteExecutionClient('https://admission.example','token');

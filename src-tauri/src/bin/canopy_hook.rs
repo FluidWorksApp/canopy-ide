@@ -3410,6 +3410,7 @@ fn mesh_tool_defs() -> Vec<serde_json::Value> {
                     "note": { "type": "string", "description": "What the receiver should know about it" }
                 }, "required": ["path"], "additionalProperties": false }, "description": "Files to share with the message (max 8)" },
                 "replyTo": { "type": "string", "description": "The mesh message id this answers" },
+                "requestId": { "type": "string", "description": "Only when retrying a send that timed out: the requestId that error gave you. The same id is never delivered twice; omit it on a first send" },
                 "ref": { "type": "object", "properties": {
                     "kind": { "type": "string", "description": "What the id names: task, pr, attempt, …" },
                     "id": { "type": "string" }
@@ -3430,7 +3431,8 @@ fn mesh_tool_defs() -> Vec<serde_json::Value> {
                 "workspace": { "type": "string", "description": "The target workspace by name (from canopy_mesh_targets). Required for a job in this window; for another machine, optional — the receiver picks when omitted" },
                 "member": { "type": "string", "description": "Send to another machine: \"me\" (this account's other machine) or a teammate's name or id" },
                 "device": { "type": "string", "description": "A specific device id from canopy_mesh_targets, when the member has several online" },
-                "agent": { "type": "string", "description": "For a cloud workspace: the name of a running agent there to hand the job to; omitted starts a new one" }
+                "agent": { "type": "string", "description": "For a cloud workspace: the name of a running agent there to hand the job to; omitted starts a new one" },
+                "requestId": { "type": "string", "description": "Only when retrying a send that timed out: the requestId that error gave you. The same id is never delivered twice; omit it on a first send" }
             }, "required": ["brief"], "additionalProperties": false }
         }),
     ]
@@ -4859,8 +4861,9 @@ fn call_tool(name: &str, args: &serde_json::Value) -> Result<ToolOutput, String>
                     "agent": agent,
                     "targetPtyId": target,
                     "replyTo": args.get("replyTo"),
+                    "requestId": args.get("requestId"),
                 }),
-                35,
+                95,
             ))
         }
         "canopy_mesh_send" => {
@@ -4925,8 +4928,9 @@ fn call_tool(name: &str, args: &serde_json::Value) -> Result<ToolOutput, String>
                     "member": arg("member"),
                     "device": arg("device"),
                     "agent": arg("agent"),
+                    "requestId": arg("requestId"),
                 }),
-                95,
+                155,
             ))
         }
         "canopy_claim" => {

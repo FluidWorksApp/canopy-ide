@@ -212,15 +212,18 @@ export class DockerWorkspaces {
       return true;
     });
   }
-  async open(workspace,{resume=false,authorize}={}) {
+  async open(workspace,{resume=false,reuse=false,authorize}={}) {
     if(this.idleReserved?.(workspace.parentWorkspaceId??workspace.id))throw Error('Workspace idle shutdown is reserved. Retry after it finishes.');
     if(this.migrationCleanupRequired.has(workspace.parentWorkspaceId??workspace.id))throw Error('Workspace migration requires recovery');
     // A changed grant must bypass both the short cache and an in-flight open.
     const fingerprint = JSON.stringify([workspace,resume]);
     const cached=this.runtimes.get(workspace.id);
-    if(!resume&&cached&&cached.fingerprint===fingerprint&&Date.now()-cached.checkedAt<2000)return cached.runtime;
+    // An explicit resume always checks Docker: snapshot preparation stops containers
+    // without clearing this cache. `reuse` is the gateway's implicit resume on every
+    // member request, which may take a runtime an open proved running moments ago.
+    if((!resume||reuse)&&cached&&[JSON.stringify([workspace,false]),JSON.stringify([workspace,true])].includes(cached.fingerprint)&&Date.now()-cached.checkedAt<2000)return cached.runtime;
     const pending=this.pending.get(workspace.id);
-    if(pending && pending.fingerprint!==fingerprint){await pending.promise.catch(()=>{});return this.open(workspace,{resume,authorize});}
+    if(pending && pending.fingerprint!==fingerprint){await pending.promise.catch(()=>{});return this.open(workspace,{resume,reuse,authorize});}
     if (!this.pending.has(workspace.id)) {
       const opening = this.withResourceLock(async()=>{if(this.authorizeAdmission&&!await this.authorizeAdmission(workspace)||authorize&&!await authorize())throw Error('Workspace admission changed');return this.ensure(workspace,{resume});}).then(runtime=>{this.runtimes.set(workspace.id,{workspace,runtime,fingerprint,checkedAt:Date.now()});return runtime;}).finally(() => this.pending.delete(workspace.id));
       this.pending.set(workspace.id, {promise:opening,fingerprint});
@@ -339,7 +342,9 @@ export class DockerWorkspaces {
           JSON.stringify(volumeMounts(existing.Mounts).map(m => [m.Destination, m.Name, m.RW]).sort()) !==
             JSON.stringify([['/workspace', projectVolume, projectWritable], ['/home/agent', `canopy-home-${storageId}`, true], ...workspace.accounts.map(id => [`/accounts/${id}`, `canopy-account-${id}`, false]), ...projects, ...(hasScratch?[['/scratch',scratch.name,true]]:[])].sort())) throw new Error('Workspace container configuration differs; administrator action required');
       if(!existing.State.Running&&!resume)throw Error('Workspace runtime is stopped. Resume the workspace to continue');
-      if(hasScratch)await prepareScratchVolume(workspace,{root:this.scratchRoot,docker:this.docker,image});
+      // A running container already has its scratch mount, and scratch is only
+      // cleared once containers are stopped; prepare it again only before a start.
+      if(hasScratch&&!existing.State.Running)await prepareScratchVolume(workspace,{root:this.scratchRoot,docker:this.docker,image});
       if(release&&existing.Image!==release.imageId){
         try{return await upgradeRuntimeImage(workspace,existing,release,{docker:this.docker,journal:imageUpgradeJournal(this.upgradeDirectory,workspace.id),launch:reference=>this.ensure(workspace,{releaseImage:reference}),verify:waitForRuntimeReady});}
         catch(error){this.runtimes.delete(workspace.id);if(!error.imageUpgradeRolledBack)this.migrationCleanupRequired.add(workspace.id);throw error;}

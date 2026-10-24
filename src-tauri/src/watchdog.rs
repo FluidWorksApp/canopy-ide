@@ -44,6 +44,11 @@ const MAX_RELOADS: usize = 3;
 /// …within this window. Beyond that the renderer death is not transient and
 /// reloading is just churn; the watchdog stops and logs instead.
 const RELOAD_WINDOW: Duration = Duration::from_secs(10 * 60);
+/// A page that stalls again this soon after a reload was not fixed by it: the
+/// replacement re-ran the same long work and froze in the same place. Another
+/// reload only restarts that work and drops every remote terminal again, so a
+/// heartbeat stall this close to the last reload waits instead.
+const RELOAD_DID_NOT_HELP: Duration = Duration::from_secs(45 + 30);
 /// Native termination and heartbeat can report the same failure. One reload is
 /// enough; suppress duplicate initiators while the replacement page boots.
 const INCIDENTS_MAX: usize = 128;
@@ -255,6 +260,17 @@ impl WatchdogState {
                 drop(recovery);
                 self.record(reason, detail, "rate_limited");
                 self.log_reload_decision(reason, "rate_limited", generation, detail, now);
+                return ReloadDecision::RateLimited;
+            }
+            // Only a stall: a renderer that died still needs a new page.
+            if reason == "heartbeat_stall"
+                && recovery.reloads_ms.back().is_some_and(|at| {
+                    now.saturating_sub(*at) < RELOAD_DID_NOT_HELP.as_millis() as u64
+                })
+            {
+                drop(recovery);
+                self.record(reason, detail, "reload_did_not_help");
+                self.log_reload_decision(reason, "reload_did_not_help", generation, detail, now);
                 return ReloadDecision::RateLimited;
             }
             recovery.reloads_ms.push_back(now);
@@ -775,6 +791,31 @@ mod tests {
             .incidents()
             .iter()
             .any(|incident| incident.outcome == "suppressed_during_recovery"));
+    }
+
+    #[test]
+    fn a_stall_right_after_a_reload_waits_instead_of_reloading_again() {
+        let state = WatchdogState::default();
+        state.renderer_registered(3);
+        assert_eq!(
+            state.request_reload_with("heartbeat_stall", 19_000, || Ok(())),
+            ReloadDecision::Started
+        );
+        // The replacement page froze again; its grace has just run out.
+        state.recovery.lock().unwrap().grace_until_ms = 0;
+        assert_eq!(
+            state.request_reload_with("heartbeat_stall", 52_000, || Ok(())),
+            ReloadDecision::RateLimited
+        );
+        assert!(state
+            .incidents()
+            .iter()
+            .any(|incident| incident.outcome == "reload_did_not_help"));
+        // A dead renderer still gets a new page.
+        assert_eq!(
+            state.request_reload_with("native_termination", 0, || Ok(())),
+            ReloadDecision::Started
+        );
     }
 
     #[cfg(target_os = "macos")]
