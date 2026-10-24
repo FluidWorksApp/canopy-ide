@@ -6,10 +6,12 @@ import { RemoteExecutionClient, type RemoteSession } from './client';
 import {connectionKey,reportConnection,reportStream,workspaceLifecyclePhase} from './connectionState';
 import {saveRemoteContextImage} from './saveContextImage';
 import {TerminalInput} from './terminalInput';
+import {canSwitchExecutionMode} from '../executionMode';
+import {remoteDiagnostic} from './remoteDiagnostic';
 
 export interface WorkspaceConnection { endpoint: string; token: string; workspaceId: string; workspaceName: string; scope?: 'view'|'drive'; clientId?: string; expiresAt?: string; credentialAccountKey?: string }
 type Args = Record<string, unknown>;
-type Stream = { id:number; receivedSnapshot:boolean; pendingExit?:number; socket?: WebSocket; generation: number; cursor: number; frames:OutputFrame[]; queuedBytes:number; busy:boolean; retry?: ReturnType<typeof setTimeout>; handshake?: ReturnType<typeof setTimeout>; channel?: HostChannel<ArrayBuffer>; closed: boolean };
+type Stream = { id:number; receivedSnapshot:boolean; pendingExit?:number; socket?: WebSocket; generation: number; cursor: number; frames:OutputFrame[]; queuedBytes:number; busy:boolean; retry?: ReturnType<typeof setTimeout>; kick?: ()=>void; kickedAt?: number; handshake?: ReturnType<typeof setTimeout>; channel?: HostChannel<ArrayBuffer>; closed: boolean };
 const LOCAL_UI = new Set(['js_log','watchdog_ack','watchdog_incidents','memory_info','selftest_config','set_shortcut_profile','notify_native','set_window_zoom','window_zoom','crash_pending','crash_clear','crash_upload','take_pending_crash','dictation_supported','remote_set_theme','remote_set_clis','remote_set_companion','remote_set_hibernated','remote_set_attention','execution_mode_get','execution_mode_set','execution_remote_get','execution_remote_set']);
 // The clipboard and microphone belong to the computer displaying the IDE.
 // Remote execution must not redirect their native services into the VM.
@@ -58,6 +60,16 @@ export class NativeWorkspaceHost implements Host {
   private heartbeat?: ReturnType<typeof setTimeout>;
   private get stopping(){return !!workspaceLifecyclePhase(connectionKey(this.connection.endpoint,this.connection.workspaceId));}
   setProjectIdle(idle:boolean){this.projectIdle=idle;if(!idle)this.tokenFreshUntil=0;}
+  /** An explicit retry. An idle member connection holds an expired token and a
+   * disposed adapter can never send again, so retrying either must renew. */
+  async reconnect(){
+    if(this.disposed){
+      if(!canSwitchExecutionMode())throw Error('Save or close unsaved files, then retry to reconnect.');
+      window.location.reload();return;
+    }
+    this.setProjectIdle(false);
+    await this.client.workspace(this.connection.workspaceId,'/open',{resume:true});
+  }
   readonly client: RemoteExecutionClient;
   private rendererGeneration = 1;
   private nextStreamGeneration = 1;
@@ -80,13 +92,15 @@ export class NativeWorkspaceHost implements Host {
     const managed = connection.endpoint === `https://${connection.workspaceId}.workspaces.canopyide.dev`;
     let refreshing: Promise<string> | undefined;
     let savedFreshness: Promise<void> | undefined;
+    // A failed check must not be memoized: every later request would fail on it
+    // without ever reaching the network, leaving the workspace stuck reconnecting.
     const checkSavedFreshness = () => savedFreshness ??= (async () => {
       const expires=Date.parse(connection.expiresAt??'');
       if(!connection.credentialAccountKey||!Number.isFinite(expires)||expires-60_000<=Date.now())return;
       const key=await this.desktop.invoke<string|null>('canopy_account_cache_key');
       if(this.disposed)throw Error('Workspace disconnected');
       if(key===connection.credentialAccountKey)this.tokenFreshUntil=expires-60_000;
-    })();
+    })().catch(error=>{savedFreshness=undefined;throw error;});
     const resolveToken = async () => {
       if(this.disposed)throw Error('Workspace disconnected. Reopen it from your account.');
       await checkSavedFreshness();
@@ -155,6 +169,7 @@ export class NativeWorkspaceHost implements Host {
     return pending;
   }
   private async sessions(priority?: number) {
+    const listed=new Set(this.known.keys());
     const sessions=await this.call<RemoteSession[]>('/sessions',undefined,priority);
     // The host resumes agents after a workspace restart. Those terminals were
     // not spawned here, so they are announced like any other new session.
@@ -168,6 +183,11 @@ export class NativeWorkspaceHost implements Host {
       if(old?.exitCode==null && session.exitCode!=null && old){const stream=this.streams.get(session.id);if(stream){stream.pendingExit=session.exitCode;this.deliver(stream);}else this.emit('pty:exit',{id:session.id,session_generation:session.id,exit_code:session.exitCode});}
       this.known.set(session.id,session);
     }
+    // A recreated runtime has none of its predecessor's terminals. A stream to
+    // one would retry forever and hold the whole workspace at Reconnecting.
+    const live=new Set(sessions.map(session=>session.id));
+    for(const id of listed)if(!live.has(id)&&this.known.get(id)?.exitCode==null)this.ended(id);
+    for(const stream of this.streams.values())if(stream.kick&&live.has(stream.id))stream.kick();
     return sessions;
   }
   private beginPoll() {
@@ -185,8 +205,13 @@ export class NativeWorkspaceHost implements Host {
     // An intentionally stopping or hibernated workspace is not reconnected;
     // the stream parks without network attempts until that state is cleared.
     const parked=()=>{if(stream.closed)return;if(workspaceLifecyclePhase(stateKey)){stream.retry=setTimeout(parked,2000);return;}void connect();};
-    const retry=()=>{if(stream.closed)return;clearTimeout(stream.handshake);reportStream(stateKey,id,false);if(workspaceLifecyclePhase(stateKey)){stream.retry=setTimeout(parked,2000);return;}const delay=Math.min(30_000,1000*2**Math.min(failures++,5))+Math.random()*500;stream.retry=setTimeout(()=>void connect(),delay);};
+    const retry=()=>{if(stream.closed)return;remoteDiagnostic('terminal-stream-retry');clearTimeout(stream.handshake);reportStream(stateKey,id,false);if(workspaceLifecyclePhase(stateKey)){stream.retry=setTimeout(parked,2000);return;}const delay=Math.min(30_000,1000*2**Math.min(failures++,5))+Math.random()*500;stream.retry=setTimeout(()=>void connect(),delay);
+      // The backoff guards against a workspace that isn't answering. Once the
+      // session poll shows it is, a waiting terminal reconnects then instead of
+      // sitting out up to 30s; at most once per 10s, so a refusal cannot spin.
+      stream.kick=()=>{if(stream.closed||workspaceLifecyclePhase(stateKey)||Date.now()-(stream.kickedAt??0)<10_000)return;stream.kickedAt=Date.now();clearTimeout(stream.retry);stream.kick=undefined;void connect();};};
     const connect=async()=>{
+      stream.kick=undefined;
       try{
         const url=await this.ticket(id);
         if(stream.closed)return;
@@ -206,7 +231,7 @@ export class NativeWorkspaceHost implements Host {
             failures=0;
             const bytes=Uint8Array.from(atob(message.b64),c=>c.charCodeAt(0));
             const reset=message.t==='snapshot' && message.reset===true;
-            if(message.t==='snapshot'){stream.frames=[];stream.queuedBytes=0;stream.receivedSnapshot=true;const exitCode=message.exitCode??this.known.get(id)?.exitCode;if(exitCode!=null)stream.pendingExit=exitCode;}
+            if(message.t==='snapshot'){if(!stream.receivedSnapshot)remoteDiagnostic('terminal-stream-live');stream.frames=[];stream.queuedBytes=0;stream.receivedSnapshot=true;const exitCode=message.exitCode??this.known.get(id)?.exitCode;if(exitCode!=null)stream.pendingExit=exitCode;}
             const frame:OutputFrame={bytes,start:message.start??stream.cursor,end:message.end??(stream.cursor+bytes.length),gap:message.gap??(message.t==='snapshot'&&!reset),reset,cols:message.cols??0,rows:message.rows??0};
             stream.cursor=frame.end;
             if(stream.queuedBytes+bytes.length>512*1024 || stream.frames.length>=1024){stream.frames=[];stream.queuedBytes=0;socket.close();return;}
@@ -228,6 +253,7 @@ export class NativeWorkspaceHost implements Host {
     frame.set([0x43,0x50,0x54,0x32,(data.gap?1:0)|(data.reset?2:0)]);
     view.setUint16(6,data.cols,true);view.setBigUint64(8,BigInt(data.start),true);view.setBigUint64(16,BigInt(data.end),true);view.setUint16(24,data.rows,true);frame.set(data.bytes,32);stream.channel.onmessage(frame.buffer);
   }
+  private ended(id:number){this.known.delete(id);if(this.streams.has(id))this.detach(id);this.emit('pty:exit',{id,session_generation:id,exit_code:null});}
   private detach(id:number){const stream=this.streams.get(id);if(!stream)return;stream.closed=true;const input=this.inputs.get(id);if(stream.socket)input?.closed(stream.socket);if(input?.idle)this.inputs.delete(id);clearTimeout(stream.retry);clearTimeout(stream.handshake);stream.socket?.close();this.streams.delete(id);reportStream(connectionKey(this.connection.endpoint,this.connection.workspaceId),id,null);}
   /** One ordered input queue per remote PTY; its stream socket carries it
    * once the gateway announces socket input, HTTP otherwise. */
@@ -313,11 +339,15 @@ export class NativeWorkspaceHost implements Host {
       // The caller already owns the tab. Emitting pty:spawned here races its
       // spawn response and makes App attach a second tab to this same PTY.
       value={...this.summary(session),generation:stream?.generation??null};
-    }else if(command==='pty_attach_desktop'){const stream=await this.attach(Number(args.id));
+    }else if(command==='pty_attach_desktop'){const id=Number(args.id),stream=await this.attach(id);
       // The session list is a background poll; under load it queued behind
       // other polls and pushed the attach past its deadline. Use the copy the
       // poll already keeps, and only ask when this session isn't known yet.
-      const session=this.known.get(Number(args.id))??(await this.sessions(INTERACTIVE)).find(s=>s.id===args.id);if(!session)throw Error('Remote session not found');value={cols:session.cols,rows:session.rows,generation:stream.generation,replay_start:0,replay_end:0};}
+      const session=this.known.get(id)??(await this.sessions(INTERACTIVE)).find(s=>s.id===id);
+      // A restored tab can name a session the workspace no longer has. Answer
+      // like the native host so the tab ends instead of retrying forever.
+      if(!session){if(this.streams.get(id)===stream)this.detach(id);throw Error(`no pty session ${id}`);}
+      value={cols:session.cols,rows:session.rows,generation:stream.generation,replay_start:0,replay_end:0};}
     else if(command==='pty_read_desktop'){const stream=this.streams.get(Number(args.id));if(!stream||stream.generation!==args.generation)throw Error('Remote terminal attachment ended');const frame=this.take(stream);value=frame?{...frame,bytes:[...frame.bytes]}:null;}
     else if(command==='pty_detach_desktop'){const stream=this.streams.get(Number(args.id));if(stream && (args.generation==null||stream.generation===args.generation))this.detach(Number(args.id));}
     else if(command==='pty_ack'){const stream=this.streams.get(Number(args.id));if(stream && stream.generation===args.generation){stream.busy=false;this.deliver(stream);}value=null;}

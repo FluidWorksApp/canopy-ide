@@ -4542,6 +4542,32 @@ struct UiOp {
     target_pty_id: Option<u32>,
     #[serde(rename = "replyTo")]
     reply_to: Option<String>,
+    /// mesh_message_cloud / mesh_submit: the send's id. A retry that reuses it
+    /// is answered by the first attempt instead of being delivered again.
+    #[serde(rename = "requestId")]
+    request_id: Option<String>,
+}
+
+/// The mesh sends below reach the network through every team session, each a
+/// directory lookup and an encrypted relay POST of up to 20s. Their deadlines
+/// outlast that so a send is not reported as failed and then delivered.
+const MESH_MESSAGE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(90);
+const MESH_SUBMIT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(150);
+
+/// A caller-supplied send id, or a fresh one. Ids are opaque tokens the
+/// frontend uses as the message/job id, so only a short safe alphabet passes.
+fn mesh_request_id(supplied: Option<&str>) -> Result<String, String> {
+    match supplied.map(str::trim).filter(|s| !s.is_empty()) {
+        Some(id) if id.len() <= 64 && id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') => {
+            Ok(id.to_string())
+        }
+        Some(_) => Err("requestId must be the id a timed-out send returned".into()),
+        None => {
+            let mut bytes = [0u8; 16];
+            getrandom::getrandom(&mut bytes).map_err(|e| e.to_string())?;
+            Ok(bytes.iter().map(|b| format!("{b:02x}")).collect())
+        }
+    }
 }
 
 /// The longest job brief the mesh carries. A team envelope holds 32 KB of
@@ -4573,6 +4599,7 @@ async fn ui_op(
     // the body: every later step of the job is typed into this terminal.
     let mut submitter: Option<u32> = None;
     let mut from_name: Option<String> = None;
+    let mut request_id: Option<String> = None;
     let deadline = match op.op.as_str() {
         "mesh_targets" => UI_OP_TIMEOUT,
         "mesh_message_cloud" => {
@@ -4588,7 +4615,11 @@ async fn ui_op(
             // The agent's reply is typed into this terminal.
             submitter = Some(agent.pty_id);
             from_name = agent_meta(&app, agent.pty_id).0;
-            std::time::Duration::from_secs(30)
+            request_id = match mesh_request_id(op.request_id.as_deref()) {
+                Ok(id) => Some(id),
+                Err(e) => return (StatusCode::BAD_REQUEST, e),
+            };
+            MESH_MESSAGE_TIMEOUT
         }
         "mesh_submit" => {
             let Some(agent) = who.agent() else {
@@ -4612,9 +4643,13 @@ async fn ui_op(
                 );
             }
             submitter = Some(agent.pty_id);
+            request_id = match mesh_request_id(op.request_id.as_deref()) {
+                Ok(id) => Some(id),
+                Err(e) => return (StatusCode::BAD_REQUEST, e),
+            };
             // Starting a local job waits on a launch (bounded at 60s by the
-            // frontend); a remote one only on the encrypted send.
-            std::time::Duration::from_secs(90)
+            // frontend); a remote one on the encrypted send.
+            MESH_SUBMIT_TIMEOUT
         }
         "diagnostics" | "tickets" => UI_OP_TIMEOUT,
         // Shells out to GitHub once per repo, and for a caller that is in no
@@ -4764,6 +4799,10 @@ async fn ui_op(
         "enable": op.enable,
         "deleteBranch": op.delete_branch,
     });
+    // Set apart from the literal above, which is at serde_json's macro limit.
+    payload["targetPtyId"] = serde_json::json!(op.target_pty_id);
+    payload["replyTo"] = serde_json::json!(op.reply_to);
+    payload["requestId"] = serde_json::json!(request_id);
     if let Some(name) = from_name {
         payload["fromName"] = name.into();
     }
@@ -4782,6 +4821,15 @@ async fn ui_op(
                 .lock()
                 .unwrap()
                 .remove(&id);
+            if let Some(request) = &request_id {
+                return (
+                    StatusCode::GATEWAY_TIMEOUT,
+                    format!(
+                        "The send did not confirm within {}s, so its outcome is unknown: it may still be delivered, and a reply or job update would arrive in this terminal tagged with id {request}. Do not send it again as new. To retry, pass requestId \"{request}\" — the same id is never delivered twice.",
+                        deadline.as_secs()
+                    ),
+                );
+            }
             let why = if op.op == "pr_action" {
                 "The GitHub action did not finish in time. Its outcome is unknown — inspect the pull request before deciding whether to try anything again."
             } else if op.op == "ask" || op.op == "vault" || op.op == "confirm" {
@@ -5384,6 +5432,17 @@ fn strip_ansi(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn mesh_request_ids_are_minted_or_safely_reused() {
+        let fresh = mesh_request_id(None).unwrap();
+        assert_eq!(fresh.len(), 32);
+        assert_ne!(fresh, mesh_request_id(Some("  ")).unwrap());
+        assert_eq!(mesh_request_id(Some(" 3f2a-91 ")).unwrap(), "3f2a-91");
+        for bad in ["a b", "../x", "id\"x", &"a".repeat(65)] {
+            assert!(mesh_request_id(Some(bad)).is_err(), "{bad}");
+        }
+    }
 
     fn task_detail(status: &str, metadata: serde_json::Value) -> crate::tasks::TaskEnvelopeDetail {
         crate::tasks::TaskEnvelopeDetail {

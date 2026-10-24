@@ -98,7 +98,8 @@ pub fn roster_agents(ws: &Workspace) -> Vec<serde_json::Value> {
         .into_iter()
         .take(MAX_ROSTER)
         .map(|t| {
-            let status = t.status.as_ref().map(|s| {
+            // The agent's own status wins; otherwise what the host observed.
+            let status = t.status.as_ref().or(t.activity.as_ref()).map(|s| {
                 serde_json::json!({
                     "title": s.get("title").and_then(|v| v.as_str()).map(|v| clip(v, 120)),
                     "description": s.get("description").and_then(|v| v.as_str()).map(|v| clip(v, 200)),

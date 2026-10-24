@@ -80,6 +80,30 @@ test('fresh managed runtimes get scratch defaults and exact mount validation; le
  assert.equal(e.calls.slice(before).some(args=>['run','stop','rm'].includes(args[0])),false);
 });
 
+test('scratch is prepared before a runtime starts, not on every check of a running one',async t=>{
+ const root=await fixture(t),e=engine(),host=new DockerWorkspaces({secret:'test',scratchRoot:root,docker:e.docker});
+ const helpers=()=>e.calls.filter(args=>args[0]==='run'&&args.includes('/scratch')).length;
+ await host.ensure(workspace);assert.equal(helpers(),1);
+ // Each member request checks its runtime; a helper container per check saturated the host lock.
+ await host.ensure(workspace);await host.ensure(workspace,{resume:true});assert.equal(helpers(),1);
+ e.current.State.Running=false;
+ await host.ensure(workspace,{resume:true});
+ assert.equal(helpers(),2);assert.ok(e.calls.some(args=>args[0]==='start'));
+});
+
+test('a member request reuses the runtime an open just proved running; an explicit resume still checks',async t=>{
+ const root=await fixture(t),e=engine(),host=new DockerWorkspaces({secret:'test',scratchRoot:root,docker:e.docker});
+ await host.open(workspace,{resume:true});
+ let before=e.calls.length;
+ await host.open(workspace,{resume:true,reuse:true});await host.open(workspace);
+ assert.equal(e.calls.length,before);
+ before=e.calls.length;await host.open(workspace,{resume:true});assert.ok(e.calls.length>before);
+ // A changed grant still bypasses the cache, and a stop clears it so the member's resume starts the runtime.
+ before=e.calls.length;await host.open({...workspace,projectMounts:[]},{resume:true,reuse:true});assert.ok(e.calls.length>before);
+ host.runtimes.delete(workspace.id);e.current.State.Running=false;
+ await host.open(workspace,{resume:true,reuse:true});assert.ok(e.calls.some(args=>args[0]==='start'));
+});
+
 test('terminal environment uses scratch for temp/caches and isolates Cargo outputs per session',async t=>{
  const root=await fixture(t),env=await initializeScratch({CANOPY_SCRATCH_DIR:root});
  assert.equal(env.TMPDIR,root);assert.equal(env.NPM_CONFIG_CACHE,path.join(root,'cache/npm'));
