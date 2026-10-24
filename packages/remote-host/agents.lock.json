@@ -6,7 +6,18 @@
   },
   "aider": "0.86.2",
   "bun": "1.3.14",
-  "cursor": "2026.10.22-27dcf5f",
+  "cursor": {
+    "arm64": {
+      "version": "2026.10.22-27dcf5f",
+      "url": "https://downloads.cursor.com/lab/2026.10.22-27dcf5f/linux/arm64/agent-cli-package.tar.gz",
+      "sha512": "8c8718527da21e8a0012d4de9649ae20f5e5fb4d95c50b13383e44b5b8d5110c89b83f59264f1dbc8cfa7292f0b29494a390e0a17ec1935d473cd602994d7a6c"
+    },
+    "amd64": {
+      "version": "2026.10.22-27dcf5f",
+      "url": "https://downloads.cursor.com/lab/2026.10.22-27dcf5f/linux/x64/agent-cli-package.tar.gz",
+      "sha512": "f0e75456b08e0e823a8046242ab7ff44b4db91d9a937fb182ebeaa448855bc1f2ae7987808c5c75d4907c8d99331fcb185402663e672f415c629323235d1a643"
+    }
+  },
   "grok": "1.0.46",
   "agy": {
     "arm64": {
@@ -21,10 +32,6 @@
     }
   },
   "installers": {
-    "cursor": {
-      "url": "https://cursor.com/install",
-      "sha256": "dfbe4fe13e722dea83a56c3eeeb5a0cc3260cf26df1fdd50befd9b6ef5c6c38d"
-    },
     "grok": {
       "url": "https://x.ai/cli/install.sh",
       "sha256": "7fd6fdc75d9418b2e58356726fcbf1ae849416f773925da07d0ccc7a60d3e791"

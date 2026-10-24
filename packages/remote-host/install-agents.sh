@@ -59,21 +59,29 @@ LAUNCHER
     tar -xzf "$scratch/agy.tar.gz" -C "$scratch" antigravity
     install -m 0755 "$scratch/antigravity" /usr/local/bin/agy
     ;;
-  cursor|grok)
-    # Official installers put companion files beside their executable. Give each
-    # one an isolated, root-owned installation home, outside agent credential homes.
-    curl -fSL --retry 3 "$(jq -r '.installer.url' "$lock")" -o "$scratch/$component.sh"
-    printf '%s  %s\n' "$(jq -r '.installer.sha256' "$lock")" "$scratch/$component.sh" | sha256sum --check -
-    install -d "/opt/canopy/vendor/$component"
-    if [[ $component == cursor ]]; then
-      HOME=/opt/canopy/vendor/cursor bash "$scratch/cursor.sh"
-      ln -sf /opt/canopy/vendor/cursor/.local/bin/cursor-agent /usr/local/bin/cursor-agent
-    else
-      HOME=/opt/canopy/vendor/grok GROK_BIN_DIR=/opt/canopy/vendor/grok/bin bash "$scratch/grok.sh" "$(jq -r .version "$lock")"
-      ln -sf /opt/canopy/vendor/grok/bin/grok /usr/local/bin/grok
-    fi
+  cursor)
+    # The versioned package the official installer would fetch, pinned by digest:
+    # cursor.com/install is rewritten upstream without a version change, so a
+    # pinned installer checksum broke image builds day to day. Same layout the
+    # installer creates, in an isolated root-owned home.
+    curl -fSL --retry 3 "$(jq -r --arg arch "$arch" '.[$arch].url' "$lock")" -o "$scratch/cursor.tar.gz"
+    printf '%s  %s\n' "$(jq -r --arg arch "$arch" '.[$arch].sha512' "$lock")" "$scratch/cursor.tar.gz" | sha512sum --check -
+    cursor_home="/opt/canopy/vendor/cursor/.local/share/cursor-agent/versions/$(jq -r --arg arch "$arch" '.[$arch].version' "$lock")"
+    install -d "$cursor_home" /opt/canopy/vendor/cursor/.local/bin
+    tar --strip-components=1 -xzf "$scratch/cursor.tar.gz" -C "$cursor_home"
+    ln -sf "$cursor_home/cursor-agent" /opt/canopy/vendor/cursor/.local/bin/cursor-agent
+    ln -sf /opt/canopy/vendor/cursor/.local/bin/cursor-agent /usr/local/bin/cursor-agent
+    ;;
+  grok)
+    # The official installer puts companion files beside its executable. Give it
+    # an isolated, root-owned installation home, outside agent credential homes.
+    curl -fSL --retry 3 "$(jq -r '.installer.url' "$lock")" -o "$scratch/grok.sh"
+    printf '%s  %s\n' "$(jq -r '.installer.sha256' "$lock")" "$scratch/grok.sh" | sha256sum --check -
+    install -d /opt/canopy/vendor/grok
+    HOME=/opt/canopy/vendor/grok GROK_BIN_DIR=/opt/canopy/vendor/grok/bin bash "$scratch/grok.sh" "$(jq -r .version "$lock")"
+    ln -sf /opt/canopy/vendor/grok/bin/grok /usr/local/bin/grok
     # Installer download caches are not part of the tool.
-    rm -rf "/opt/canopy/vendor/$component/.cache" "/opt/canopy/vendor/$component/.npm"
+    rm -rf /opt/canopy/vendor/grok/.cache /opt/canopy/vendor/grok/.npm
     ;;
   verify)
     command -v omp

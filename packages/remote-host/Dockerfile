@@ -15,8 +15,8 @@ const npmNames={"@ampcode/cli":"amp","opencode-ai":"opencode","@oh-my-pi/pi-codi
 const unknown=Object.keys(lock.npm).filter(name=>!npmNames[name]);\
 if(unknown.length)throw Error("Add a Dockerfile layer for npm CLI: "+unknown.join(", "));\
 for(const [name,file] of Object.entries(npmNames))out("npm-"+file,{[name]:lock.npm[name]});\
-out("bun",{bun:lock.bun});out("aider",{aider:lock.aider});out("agy",{agy:lock.agy});\
-for(const cli of ["cursor","grok"])out(cli,{installer:lock.installers[cli],version:lock[cli]});'
+out("bun",{bun:lock.bun});out("aider",{aider:lock.aider});out("agy",{agy:lock.agy});out("cursor",lock.cursor);\
+out("grok",{installer:lock.installers.grok,version:lock.grok});'
 
 FROM node:22-bookworm-slim
 # Layers run from least to most frequently changed.
