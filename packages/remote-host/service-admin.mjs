@@ -51,6 +51,7 @@ export class ServiceAdmin{
  async deregisterWorkspace(id){return this.call('DELETE',`/admin/workspaces/${ws(id)}`);}
  async mintTerminal(id,{requestId,agent,name,task}){rid(requestId);return this.call('POST',`/admin/workspaces/${ws(id)}/terminals`,{requestId,...(agent?{agent}:{}),...(name?{name}:{}),...(task?{task}:{})});}
  async bindTerminal(id,requestId,{sessionId,pid}){return this.call('POST',`/admin/workspaces/${ws(id)}/terminals/${rid(requestId)}/bind`,{sessionId,pid});}
+ async describeTerminal(id,requestId,{agent,name,task,activity}){return this.call('PATCH',`/admin/workspaces/${ws(id)}/terminals/${rid(requestId)}`,{...(agent!==undefined?{agent}:{}),...(name!==undefined?{name}:{}),...(task!==undefined?{task}:{}),...(activity!==undefined?{activity}:{})});}
  async revokeTerminal(id,requestId){return this.call('DELETE',`/admin/workspaces/${ws(id)}/terminals/${rid(requestId)}`);}
  async putAccess(id,snapshot){return this.call('PUT',`/admin/workspaces/${ws(id)}/access`,snapshot);}
  async query(id,body){return this.call('POST',`/admin/workspaces/${ws(id)}/query`,body,{timeoutMs:Math.max(this.timeoutMs,15000)});}

@@ -5,6 +5,7 @@ import {quarantineInterruptedMigrations} from './migration-startup.mjs';
 import {runtimeReady} from './runtime-readiness.mjs';
 import {RuntimeSupervisor} from './runtime-supervisor.mjs';
 import {SessionResume} from './session-resume.mjs';
+import {adoptRunning} from './adopt-running.mjs';
 import {Readable} from 'node:stream';
 import {pipeline} from 'node:stream/promises';
 import {AgentCliSessions} from './agent-cli-sessions.mjs';
@@ -552,5 +553,6 @@ if (process.argv[1] === new URL(import.meta.url).pathname) {
     createRunner:workspace=>new ContainerCompanionRunner({workspace,inspect:w=>workspaces.inspectRuntime(w),stateFile:path.join(state,'slack-companion',`${workspace.id}.json`)})}):null;
   server.on('close', () => { elasticMemory.stop(); elasticCpu.stop(); slackCompanion?.close(); sessionResume?.close(); });
   if(process.env.CANOPY_RESOURCE_ADMISSION_LOCK)console.log('Canopy resource admission protocol '+RESOURCE_ADMISSION_PROTOCOL);
-  server.listen(Number(process.env.PORT ?? 8787), '127.0.0.1', () => { elasticMemory.start(); elasticCpu.start(); supervisor.start(); sessionResume?.start(); harness?.start(); slackCompanion?.start(); console.log('Canopy remote host listening on loopback'); });
+  server.listen(Number(process.env.PORT ?? 8787), '127.0.0.1', () => { elasticMemory.start(); elasticCpu.start(); supervisor.start(); sessionResume?.start(); harness?.start(); slackCompanion?.start(); console.log('Canopy remote host listening on loopback');
+    void adoptRunning({config,host:workspaces,harness,authorize:config.managedSession?workspace=>Boolean(authority)&&authority(workspace):undefined}).then(ids=>{if(ids.length)console.log(`Adopted running workspaces: ${ids.join(', ')}`);}); });
 }
