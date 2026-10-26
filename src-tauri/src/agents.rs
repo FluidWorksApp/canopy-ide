@@ -826,7 +826,10 @@ pub fn setup_agent_in(agent: &str, cfg: &str, home: &str) -> Result<SetupReport,
             ("hooks", setup_opencode_plugin(cfg, home)),
             ("mcp", setup_opencode_mcp(cfg, home)),
         ],
-        crate::agent_cli::IntegrationAdapter::Omp => vec![("hooks", setup_omp_hook(cfg, home))],
+        crate::agent_cli::IntegrationAdapter::Omp => vec![
+            ("hooks", setup_omp_hook(cfg, home)),
+            ("mcp", setup_omp_mcp(cfg, home)),
+        ],
         crate::agent_cli::IntegrationAdapter::Amp => vec![
             ("hooks", setup_amp_plugin(cfg, home)),
             ("mcp", setup_amp_mcp(cfg, home)),
@@ -888,7 +891,7 @@ fn hooks_config_path(agent: &str, cfg: &str, home: &str) -> Option<String> {
         "claude" => format!("{cfg}/.claude/settings.json"),
         "codex" => format!("{cfg}/.codex/hooks.json"),
         "aider" => format!("{cfg}/.aider.conf.yml"),
-        "agy" => format!("{cfg}/.gemini/antigravity-cli/hooks.json"),
+        "agy" => agy_hooks_path(cfg).to_string_lossy().into_owned(),
         "opencode" => format!("{cfg}/.config/opencode/plugin/canopy.ts"),
         "omp" => format!("{cfg}/.omp/agent/extensions/canopy.ts"),
         // AMP_SETTINGS_FILE relocates settings, not plugin discovery. One
@@ -978,10 +981,7 @@ fn hooks_are_ours_in(agent: &str, cfg: &str, home: &str) -> bool {
             .ok()
             .and_then(|v| v.get("canopy").cloned())
             .is_some_and(|hooks| {
-                complete(
-                    &hooks,
-                    &["PostToolUse", "PreInvocation", "PostInvocation", "Stop"],
-                )
+                complete(&hooks, AGY_HOOK_EVENTS)
             }),
         "opencode" => [
             "chat.message",
@@ -1665,92 +1665,65 @@ export default function canopyBridge(amp) {
     )
 }
 
-/// Antigravity CLI hooks: register the helper for all five of its events in
-/// ~/.gemini/antigravity-cli/hooks.json, under our own named group so
-/// reinstalls replace it and user-authored groups are never touched. Also
-/// best-effort enables its OSC 9 `notifications` setting — Canopy's terminals
-/// already parse OSC 9, so that alone surfaces "waiting for you" and
+/// Antigravity CLI hooks, under our own `canopy` hook name so reinstalls replace
+/// it and user-authored hooks are never touched.
+///
+/// The file that agy reads is `~/.gemini/config/hooks.json`. Its docs say
+/// "Hooks in `~/.gemini/antigravity-cli/settings.json` aren't loaded", and the
+/// 1.0.8 changelog moved `/hooks` from `~/.gemini/antigravity-cli/hooks.json` to
+/// that shared file. The old file is still written while an authenticated run
+/// has not yet proved that 1.2.x ignores it (the 1.2.14 binary still names the
+/// path once), and only when agy has already created that directory.
+///
+/// Registered events, all present in the 1.2.14 binary's hook caller:
+/// SessionStart, PreInvocation, PostInvocation and Stop take a flat handler
+/// list; PostToolUse is grouped by tool matcher. PreToolUse is deliberately
+/// absent: it sits in agy's approval path, and an observer must never grant a
+/// tool. The helper answers `{}` there for old installs, but no run has shown
+/// what agy makes of an empty verdict, so registering it is left until one has.
+///
+/// Also best-effort enables agy's OSC 9 `notifications` setting — Canopy's
+/// terminals already parse OSC 9, so that alone surfaces "waiting for you" and
 /// "finished" the moment it's on.
 fn setup_agy_hooks(cfg: &str, home: &str) -> Result<String, String> {
     let helper = require_helper(home, "hooks not installed")?;
-    let dir = std::path::PathBuf::from(cfg)
+    // `--agent agy` makes the helper normalize agy's camelCase protojson events.
+    let command = format!("{} --agent agy", sh_quote(&helper.to_string_lossy()));
+    let group = agy_hook_group(&command);
+    let changed = upsert_agy_hook_group(&agy_hooks_path(cfg), &group)?;
+
+    // Legacy location, kept until proven dead. A failure here must not fail the
+    // step: the shared file above is the one agy documents.
+    let legacy_dir = std::path::PathBuf::from(cfg)
         .join(".gemini")
         .join("antigravity-cli");
-    // No directory means the CLI has never run — nothing to configure yet, and
-    // creating it ourselves could fight its first-run setup.
-    if !dir.exists() {
-        return Err("Antigravity CLI not initialized yet — run `agy` once first".into());
-    }
-    let path = dir.join("hooks.json");
-    let mut hooks: serde_json::Value = if path.exists() {
-        let raw = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
-        serde_json::from_str(&raw)
-            .map_err(|e| format!("{} is not valid JSON: {e}", path.display()))?
-    } else {
-        serde_json::json!({})
-    };
-    // `--agent agy` makes the helper normalize agy's event names and answer
-    // PreToolUse with an allow verdict (its required stdout contract).
-    let command = format!("{} --agent agy", sh_quote(&helper.to_string_lossy()));
-    let tool_entry = || {
-        serde_json::json!([{
-            "matcher": "*",
-            "hooks": [{ "type": "command", "command": command, "timeout": 10 }]
-        }])
-    };
-    // Antigravity 1.1.x uses grouped handlers only for tool events. Lifecycle
-    // events are a flat handler list; wrapping those in matcher/hooks objects
-    // is accepted as JSON but never invoked.
-    let lifecycle_entry = || {
-        serde_json::json!([{
-            "type": "command", "command": command, "timeout": 10
-        }])
-    };
-    let group = serde_json::json!({
-        "PostToolUse": tool_entry(),
-        "PreInvocation": lifecycle_entry(),
-        "PostInvocation": lifecycle_entry(),
-        "Stop": lifecycle_entry(),
-    });
-    let obj = hooks.as_object_mut().ok_or("hooks.json is not an object")?;
-    let already = obj.get("canopy") == Some(&group);
-    if !already {
-        obj.insert("canopy".into(), group);
-        std::fs::write(
-            &path,
-            serde_json::to_string_pretty(&hooks).map_err(|e| e.to_string())?,
-        )
-        .map_err(|e| e.to_string())?;
+    if legacy_dir.is_dir() {
+        if let Err(e) = upsert_agy_hook_group(&legacy_dir.join("hooks.json"), &group) {
+            log::warn!("agy legacy hooks.json not updated: {e}");
+        }
     }
 
     // OSC 9 notifications: off by default in agy; flipping it costs nothing
     // and Canopy already listens. Best-effort — a failure here shouldn't fail
     // the hook install that already succeeded.
-    let settings_path = dir.join("settings.json");
-    let notif = (|| -> Result<bool, String> {
-        let mut settings: serde_json::Value = if settings_path.exists() {
-            serde_json::from_str(
-                &std::fs::read_to_string(&settings_path).map_err(|e| e.to_string())?,
-            )
-            .map_err(|e| e.to_string())?
-        } else {
-            serde_json::json!({})
-        };
-        let obj = settings.as_object_mut().ok_or("not an object")?;
-        if obj.get("notifications") == Some(&serde_json::json!(true)) {
-            return Ok(false);
-        }
-        obj.insert("notifications".into(), serde_json::json!(true));
-        std::fs::write(
-            &settings_path,
-            serde_json::to_string_pretty(&settings).map_err(|e| e.to_string())?,
-        )
-        .map_err(|e| e.to_string())?;
-        Ok(true)
-    })()
-    .unwrap_or(false);
+    let settings_path = legacy_dir.join("settings.json");
+    let notif = legacy_dir.is_dir()
+        && (|| -> Result<bool, String> {
+            let mut settings = read_json_config(&settings_path)?;
+            let obj = settings.as_object_mut().ok_or("not an object")?;
+            if obj.get("notifications") == Some(&serde_json::json!(true)) {
+                return Ok(false);
+            }
+            obj.insert("notifications".into(), serde_json::json!(true));
+            write_config_atomic(
+                &settings_path,
+                &serde_json::to_string_pretty(&settings).map_err(|e| e.to_string())?,
+            )?;
+            Ok(true)
+        })()
+        .unwrap_or(false);
 
-    if already && !notif {
+    if !changed && !notif {
         return Ok("Antigravity hooks already set up".into());
     }
     Ok(format!(
@@ -1761,6 +1734,67 @@ fn setup_agy_hooks(cfg: &str, home: &str) -> Result<String, String> {
             ""
         }
     ))
+}
+
+/// The file agy loads global hooks from. Profile-aware through `cfg`, like the
+/// MCP registry beside it in `.gemini/config/`.
+fn agy_hooks_path(cfg: &str) -> std::path::PathBuf {
+    std::path::PathBuf::from(cfg).join(".gemini/config/hooks.json")
+}
+
+/// The events Canopy registers under its `canopy` hook name. Kept beside the
+/// installer so the ownership check reads the same list.
+const AGY_HOOK_EVENTS: &[&str] = &[
+    "SessionStart",
+    "PostToolUse",
+    "PreInvocation",
+    "PostInvocation",
+    "Stop",
+];
+
+fn agy_hook_group(command: &str) -> serde_json::Value {
+    // Grouped handlers only for tool events. Lifecycle events are a flat
+    // handler list; wrapping those in matcher/hooks objects is accepted as JSON
+    // but never invoked.
+    let handler = serde_json::json!({ "type": "command", "command": command, "timeout": 10 });
+    let mut group = serde_json::Map::new();
+    for event in AGY_HOOK_EVENTS {
+        let entry = if *event == "PostToolUse" {
+            serde_json::json!([{ "matcher": "*", "hooks": [handler.clone()] }])
+        } else {
+            serde_json::json!([handler.clone()])
+        };
+        group.insert((*event).into(), entry);
+    }
+    serde_json::Value::Object(group)
+}
+
+/// Put our hook group into one agy hooks file, leaving every other named hook
+/// alone. The user's `"enabled": false` on our group is theirs and survives;
+/// any other key in the group is ours and is replaced, so an event an older
+/// Canopy registered (PreToolUse, Notification) is dropped. Returns whether
+/// the file changed.
+fn upsert_agy_hook_group(
+    path: &std::path::Path,
+    group: &serde_json::Value,
+) -> Result<bool, String> {
+    let mut hooks = read_json_config(path)?;
+    let obj = hooks
+        .as_object_mut()
+        .ok_or_else(|| format!("{} is not an object", path.display()))?;
+    let mut want = group.clone();
+    if let Some(enabled) = obj.get("canopy").and_then(|g| g.get("enabled")).cloned() {
+        want["enabled"] = enabled;
+    }
+    if obj.get("canopy") == Some(&want) {
+        return Ok(false);
+    }
+    obj.insert("canopy".into(), want);
+    write_config_atomic(
+        path,
+        &serde_json::to_string_pretty(&hooks).map_err(|e| e.to_string())?,
+    )?;
+    Ok(true)
 }
 
 /// Substrings identifying a hook entry as one of ours, across every version we
@@ -2762,6 +2796,28 @@ fn setup_agy_mcp(cfg: &str, home: &str) -> Result<String, String> {
     Ok(registered_msg(changed, "agy"))
 }
 
+/// oh-my-pi has had a native MCP client since before 18.1, reading
+/// `~/.omp/agent/mcp.json` (pi-coding-agent src/discovery/builtin.ts: the
+/// user-level `mcp.json` under getAgentDir(), which defaults to ~/.omp/agent)
+/// with the same `mcpServers` map Claude uses (src/mcp/types.ts,
+/// MCPConfigFile). Until this existed omp got only the system-prompt bootstrap
+/// and none of Canopy's tools.
+///
+/// Deduplication against the copies omp imports from `~/.claude.json` and the
+/// Codex TOML is omp's own: servers are merged by name with the native provider
+/// at priority 100 over claude (80) and codex (70), so registering `canopy`
+/// here replaces those imports rather than running a second helper.
+fn setup_omp_mcp(cfg: &str, home: &str) -> Result<String, String> {
+    let helper = require_helper(home, "MCP server not registered")?;
+    let changed = upsert_json_mcp(
+        std::path::PathBuf::from(cfg).join(".omp/agent/mcp.json"),
+        "mcpServers",
+        canopy_mcp_command(&helper),
+        is_canopy_mcp_entry,
+    )?;
+    Ok(registered_msg(changed, "omp"))
+}
+
 fn setup_opencode_mcp(cfg: &str, home: &str) -> Result<String, String> {
     let helper = require_helper(home, "MCP server not registered")?;
     // OpenCode takes the command as an argv array rather than a string.
@@ -2909,6 +2965,7 @@ fn json_mcp_registry(
         "opencode" => (root.join(".config/opencode/opencode.json"), "mcp"),
         "amp" => (root.join(".config/amp/settings.json"), "amp.mcpServers"),
         "cursor" => (root.join(".cursor/mcp.json"), "mcpServers"),
+        "omp" => (root.join(".omp/agent/mcp.json"), "mcpServers"),
         _ => return None,
     })
 }
@@ -5345,7 +5402,7 @@ mod integration_tests {
             report.summary
         );
         assert!(
-            home.join(".gemini/antigravity-cli/hooks.json").exists(),
+            home.join(".gemini/config/hooks.json").exists(),
             "the hooks step's side effects must have happened"
         );
     }
@@ -5511,6 +5568,43 @@ mod integration_tests {
         );
     }
 
+    /// omp's native MCP client reads ~/.omp/agent/mcp.json. Registering there
+    /// is a sibling-preserving, idempotent upsert like every other JSON
+    /// registry, and the health check reads the same file.
+    #[test]
+    fn omp_gets_the_native_mcp_registration_it_never_had() {
+        let home = scratch_home("omp-mcp");
+        let h = home.to_str().unwrap();
+        let path = home.join(".omp/agent/mcp.json");
+        write(
+            &path,
+            r#"{"$schema":"x","mcpServers":{"github":{"command":"gh-mcp"}},"disabledServers":["noisy"]}"#,
+        );
+        assert_eq!(mcp_state("omp", h, h), "missing");
+        let report = setup_agent("omp", h).unwrap();
+        assert!(report.ok, "{report:?}");
+        assert_eq!(report.steps.len(), 2);
+        assert_eq!(mcp_state("omp", h, h), "ours");
+        let cfg = read_json_config(&path).unwrap();
+        assert_eq!(cfg["mcpServers"]["github"]["command"], "gh-mcp");
+        assert_eq!(cfg["disabledServers"][0], "noisy");
+        assert_eq!(cfg["mcpServers"]["canopy"]["args"][0], "--mcp");
+        let before = std::fs::read_to_string(&path).unwrap();
+        setup_agent("omp", h).unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), before);
+
+        // A `canopy` server the user wrote is theirs.
+        let other = scratch_home("omp-mcp-foreign");
+        let oh = other.to_str().unwrap();
+        write(
+            &other.join(".omp/agent/mcp.json"),
+            r#"{"mcpServers":{"canopy":{"command":"/opt/acme/canopy"}}}"#,
+        );
+        let report = setup_agent("omp", oh).unwrap();
+        assert!(!report.ok);
+        assert_eq!(mcp_state("omp", oh, oh), "foreign");
+    }
+
     #[test]
     fn amp_plugin_reads_current_event_fields_and_signals_progress() {
         let home = scratch_home("amp-events");
@@ -5527,7 +5621,7 @@ mod integration_tests {
     fn antigravity_uses_grouped_tool_hooks_and_flat_lifecycle_hooks() {
         let home = scratch_home("agy-shapes");
         setup_agent("agy", home.to_str().unwrap()).unwrap();
-        let raw = std::fs::read_to_string(home.join(".gemini/antigravity-cli/hooks.json")).unwrap();
+        let raw = std::fs::read_to_string(home.join(".gemini/config/hooks.json")).unwrap();
         let cfg: serde_json::Value = serde_json::from_str(&raw).unwrap();
         let canopy = &cfg["canopy"];
         assert!(
@@ -5535,9 +5629,78 @@ mod integration_tests {
             "an observer must not grant tools"
         );
         assert!(canopy["PostToolUse"][0]["hooks"].is_array());
-        assert_eq!(canopy["PreInvocation"][0]["type"], "command");
-        assert!(canopy["PreInvocation"][0].get("hooks").is_none());
-        assert_eq!(canopy["Stop"][0]["type"], "command");
+        for flat in ["SessionStart", "PreInvocation", "PostInvocation", "Stop"] {
+            assert_eq!(canopy[flat][0]["type"], "command", "{flat}");
+            assert!(canopy[flat][0].get("hooks").is_none(), "{flat}");
+        }
+    }
+
+    /// agy reads global hooks from ~/.gemini/config/hooks.json — a file the
+    /// user's own `/hooks` edits and plugins share. Our named hook goes in
+    /// beside theirs; the old antigravity-cli file is still written while agy
+    /// has created that directory, and its absence is not an error.
+    #[test]
+    fn antigravity_hooks_land_in_the_shared_config_file_beside_the_users() {
+        let home = scratch_home("agy-shared-hooks");
+        let h = home.to_str().unwrap();
+        let shared = home.join(".gemini/config/hooks.json");
+        write(
+            &shared,
+            r#"{"lint-checker":{"PostToolUse":[{"matcher":"run_command","hooks":[{"type":"command","command":"./lint.sh"}]}]},
+                "canopy":{"enabled":false,"PreToolUse":[{"matcher":"*","hooks":[{"type":"command","command":"/old/canopy-hook --agent agy"}]}]}}"#,
+        );
+        let report = setup_agent("agy", h).unwrap();
+        assert!(report.ok, "{report:?}");
+        let cfg = read_json_config(&shared).unwrap();
+        assert_eq!(
+            cfg["lint-checker"]["PostToolUse"][0]["hooks"][0]["command"],
+            "./lint.sh",
+            "a user's named hook must survive"
+        );
+        assert_eq!(cfg["canopy"]["enabled"], false, "the user's switch-off is theirs");
+        assert!(
+            cfg["canopy"].get("PreToolUse").is_none(),
+            "an event an older Canopy registered is ours to drop"
+        );
+        assert!(hooks_are_ours("agy", h));
+        let legacy = read_json_config(&home.join(".gemini/antigravity-cli/hooks.json")).unwrap();
+        for event in AGY_HOOK_EVENTS {
+            assert_eq!(legacy["canopy"][*event], cfg["canopy"][*event], "{event}");
+        }
+
+        // A second pass rewrites neither file.
+        let before = std::fs::read_to_string(&shared).unwrap();
+        let again = setup_agent("agy", h).unwrap();
+        assert!(again.steps[0].message.contains("already set up"), "{again:?}");
+        assert_eq!(std::fs::read_to_string(&shared).unwrap(), before);
+
+        // No legacy directory: nothing is created there and the step still succeeds.
+        let fresh = scratch_home("agy-no-legacy");
+        std::fs::remove_dir_all(fresh.join(".gemini/antigravity-cli")).unwrap();
+        let report = setup_agent("agy", fresh.to_str().unwrap()).unwrap();
+        assert!(report.ok, "{report:?}");
+        assert!(fresh.join(".gemini/config/hooks.json").exists());
+        assert!(!fresh.join(".gemini/antigravity-cli").exists());
+    }
+
+    /// A machine set up by a build that only wrote the deprecated file reads as
+    /// "hooks missing", and the launch repair writes the shared one.
+    #[test]
+    fn a_legacy_only_antigravity_install_is_moved_to_the_shared_file() {
+        let home = scratch_home("agy-migrate");
+        let h = home.to_str().unwrap();
+        setup_agent("agy", h).unwrap();
+        heal_integrations_in(h, "1.0.0", &only_agy_installed());
+        std::fs::remove_file(home.join(".gemini/config/hooks.json")).unwrap();
+        assert_eq!(hooks_state("agy", h, h), "missing");
+
+        let report = heal_integrations_in(h, "1.0.0", &only_agy_installed());
+        assert!(
+            report.repaired.iter().any(|r| r.contains("hooks missing")),
+            "{:?}",
+            report.repaired
+        );
+        assert_eq!(hooks_state("agy", h, h), "ours");
     }
 
     #[test]
@@ -5793,7 +5956,7 @@ mod integration_tests {
         let h = home.to_str().unwrap();
         setup_agent("agy", h).unwrap();
         heal_integrations_in(h, "1.2.3", &only_agy_installed());
-        let hooks = home.join(".gemini/antigravity-cli/hooks.json");
+        let hooks = home.join(".gemini/config/hooks.json");
         let before = std::fs::metadata(&hooks).unwrap().modified().unwrap();
 
         let report = heal_integrations_in(h, "1.2.3", &only_agy_installed());
@@ -5929,7 +6092,7 @@ mod integration_tests {
         setup_agent("agy", h).unwrap();
         heal_integrations_in(h, "1.0.0", &only_agy_installed());
         // Something (an older template, a user edit) left a stale hook file.
-        write(&home.join(".gemini/antigravity-cli/hooks.json"), "{}");
+        write(&home.join(".gemini/config/hooks.json"), "{}");
 
         let report = heal_integrations_in(h, "1.0.1", &only_agy_installed());
         assert!(report.upgraded);

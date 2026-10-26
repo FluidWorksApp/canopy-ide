@@ -148,7 +148,9 @@ pub fn install_context(home: impl AsRef<Path>) -> Result<PathBuf, String> {
     Ok(path)
 }
 
-/// omp's per-run settings overlay for task launches. `--approval-mode=write`
+/// omp's per-run settings overlay for launches in its automatic mode — every
+/// Canopy omp launch carrying `--approval-mode=write`, interactive tabs as well
+/// as tasks (see `unattended` in src/projects.ts). `--approval-mode=write`
 /// alone prompts for every bash/eval/task call, so a task stalls on its first
 /// command; this allows those tools while omp's own critical-pattern list
 /// (rm -rf /, sudo rm, curl|sh, mkfs, …) still prompts — only `yolo` skips it.
