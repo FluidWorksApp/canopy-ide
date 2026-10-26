@@ -56,7 +56,9 @@ export function messageOutbox(account:string,team:string):MessageOutbox {
  return {
   async load(){const database=await db();return new Promise((resolve,reject)=>{
    const tx=database.transaction('outbox','readwrite',{durability:'strict'}),store=tx.objectStore('outbox');let rows:PendingEnvelope[]=[];
-   const request=store.index('scope').getAll(scope);request.onsuccess=()=>{for(const row of request.result){if(row.envelope.expires<=Date.now())store.delete(row.id);else rows.push({envelope:row.envelope,messageId:row.messageId});}};
+   // Expired rows are deleted, but still returned once: the client reports them
+   // as undelivered (a v3 recipient can be backfilled) and never retries them.
+   const request=store.index('scope').getAll(scope);request.onsuccess=()=>{for(const row of request.result){if(row.envelope.expires<=Date.now())store.delete(row.id);rows.push({envelope:row.envelope,messageId:row.messageId});}};
    tx.oncomplete=()=>resolve(rows);tx.onabort=()=>reject(tx.error??Error('Pending delivery could not be restored'));
   });},
   async put(row){if(row.envelope.from.user!==account||row.envelope.from.team!==team||typeof row.messageId!=='string')throw Error('Invalid pending delivery scope');

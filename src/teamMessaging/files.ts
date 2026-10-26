@@ -14,7 +14,9 @@ export type FileRecord={id:string;meta:Attachment;messageId:string;
  blob?:Blob;created:number};
 export type FileStore={get:(id:string)=>Promise<FileRecord|undefined>;put:(row:FileRecord)=>Promise<void>;
  /** Inserts only when absent: a later message cannot repoint an existing record. */
- add:(row:FileRecord)=>Promise<void>;prune:(now?:number)=>Promise<void>};
+ add:(row:FileRecord)=>Promise<void>;prune:(now?:number)=>Promise<void>;
+ /** Deletes one record and its bytes (a received file whose message was deleted). */
+ remove?:(id:string)=>Promise<void>};
 /** Sender copies serve pulls for a week; pulled copies stay for a month. */
 export const SENT_FILE_MS=7*86_400_000,RECEIVED_FILE_MS=30*86_400_000;
 const stale=(row:FileRecord,now:number)=>now-row.created>(row.origin==='sent'?SENT_FILE_MS:RECEIVED_FILE_MS);
@@ -31,6 +33,7 @@ export function chatFileStore(account:string,team:string):FileStore {
  return {
   async get(id){const db=await open();return new Promise((resolve,reject)=>{const r=db.transaction('files').objectStore('files').get(key(id));r.onsuccess=()=>{const row=r.result as (FileRecord&{key:string;scope:string})|undefined;if(!row)return resolve(undefined);const {key:_k,scope:_s,...rest}=row;resolve(rest);};r.onerror=()=>reject(r.error);});},
   put:row=>write(row,false),add:row=>write(row,true),
+  async remove(id){const db=await open();await new Promise<void>((resolve,reject)=>{const tx=db.transaction('files','readwrite',{durability:'strict'});tx.objectStore('files').delete(key(id));tx.oncomplete=()=>resolve();tx.onabort=()=>reject(tx.error);});},
   async prune(now=Date.now()){const db=await open();await new Promise<void>((resolve,reject)=>{
    const tx=db.transaction('files','readwrite'),cursor=tx.objectStore('files').index('scope').openCursor(scope);
    cursor.onsuccess=()=>{const c=cursor.result;if(!c)return;if(stale(c.value as FileRecord,now))c.delete();c.continue();};

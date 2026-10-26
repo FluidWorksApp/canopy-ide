@@ -78,6 +78,51 @@ export async function loadChatEvents(account:string,team:string):Promise<ChatMes
  }));
  return events.filter((m):m is ChatMessage=>!!m).sort((a,b)=>a.created-b.created||a.id.localeCompare(b.id));
 }
+/** Removes one saved event (an edit of a message that was then deleted). Missing rows are ignored. */
+export async function forgetChatEvent(account:string,team:string,eventId:string){
+ scope(account,team);const db=await open();
+ await new Promise<void>((resolve,reject)=>{const tx=db.transaction('events','readwrite',{durability:'strict'});tx.objectStore('events').delete(JSON.stringify([account,team,eventId]));tx.oncomplete=()=>resolve();tx.onabort=()=>reject(tx.error??Error('Event could not be removed'));});
+}
+/** Local bookkeeping kept beside the events, each kind under its own scope so
+ * neither `loadChatEvents` nor the events cap ever sees it:
+ * - ledger: deliveries that expired unconfirmed, to backfill when the device returns
+ * - tombstone: ids of deleted messages, so a late copy cannot bring one back */
+export type ChatRecordKind='ledger'|'tombstone';
+/** Records kept per kind, account and team; the oldest go first. */
+export const MAX_CHAT_RECORDS=2000;
+const recordScope=(account:string,team:string,kind:ChatRecordKind)=>{scope(account,team);if(kind!=='ledger'&&kind!=='tombstone')throw Error('Invalid chat record kind');return JSON.stringify([account,team,kind]);};
+const recordId=(account:string,team:string,kind:ChatRecordKind,key:string)=>{if(typeof key!=='string'||!key||key.length>1024)throw Error('Invalid chat record key');return JSON.stringify([account,team,kind,key]);};
+/** Saves (or replaces) one record, encrypted like a message. `created` orders the cap. */
+export async function saveChatRecord(account:string,team:string,kind:ChatRecordKind,recordKey:string,value:unknown,created=Date.now()){
+ const recordScopeId=recordScope(account,team,kind),id=recordId(account,team,kind,recordKey),iv=crypto.getRandomValues(new Uint8Array(12));
+ const plain=JSON.stringify({key:recordKey,value});if(plain.length>64_000)throw Error('Chat record is too large');
+ const ciphertext=await crypto.subtle.encrypt({name:'AES-GCM',iv,additionalData:aad(id)},await key(account),new TextEncoder().encode(plain));
+ const db=await open();
+ await new Promise<void>((resolve,reject)=>{
+  const tx=db.transaction('events','readwrite',{durability:'strict'}),store=tx.objectStore('events');
+  store.put({id,scope:recordScopeId,created,iv,ciphertext});
+  const r=store.index('scope').getAll(recordScopeId);r.onsuccess=()=>{const rows=r.result as Row[];rows.sort((a,b)=>b.created-a.created||a.id.localeCompare(b.id));for(const row of rows.slice(MAX_CHAT_RECORDS))store.delete(row.id);};
+  tx.oncomplete=()=>resolve();tx.onabort=()=>reject(tx.error??Error('Chat record could not be saved'));
+ });
+}
+/** Every record of a kind, by key. A row that no longer decrypts or parses is skipped. */
+export async function loadChatRecords(account:string,team:string,kind:ChatRecordKind):Promise<Record<string,unknown>>{
+ const recordScopeId=recordScope(account,team,kind),db=await open(),localKey=await key(account);
+ const rows=await new Promise<Row[]>((resolve,reject)=>{const r=db.transaction('events').objectStore('events').index('scope').getAll(recordScopeId);r.onsuccess=()=>resolve(r.result);r.onerror=()=>reject(r.error);});
+ const out:Record<string,unknown>={};
+ for(const row of rows){
+  try{
+   const decoded=await crypto.subtle.decrypt({name:'AES-GCM',iv:new Uint8Array(row.iv),additionalData:aad(row.id)},localKey,row.ciphertext);
+   const parsed=JSON.parse(new TextDecoder().decode(decoded)) as {key?:unknown;value?:unknown};
+   if(typeof parsed?.key==='string'&&row.id===recordId(account,team,kind,parsed.key))out[parsed.key]=parsed.value;
+  }catch{/* skipped */}
+ }
+ return out;
+}
+export async function forgetChatRecords(account:string,team:string,kind:ChatRecordKind,keys:string[]){
+ recordScope(account,team,kind);if(!keys.length)return;const db=await open();
+ await new Promise<void>((resolve,reject)=>{const tx=db.transaction('events','readwrite',{durability:'strict'}),store=tx.objectStore('events');for(const k of keys)store.delete(recordId(account,team,kind,k));tx.oncomplete=()=>resolve();tx.onabort=()=>reject(tx.error??Error('Chat record could not be removed'));});
+}
 /** Removes one of the account's own messages, used when the sender discards or
  * resends a message that was never delivered. Missing rows are ignored. */
 export async function forgetChatMessage(account:string,team:string,messageId:string){
@@ -91,9 +136,17 @@ export async function loadChatHistory(account:string,team:string):Promise<ChatMe
  return messages.sort((a,b)=>a.created-b.created||a.id.localeCompare(b.id));
 }
 
-export type ChatReadState={unreadIds:string[];receipts:Record<string,string[]>};
+/** `reads` (v3): read watermarks, the newest message of this account's that a
+ * teammate has read in a conversation, keyed JSON [reader, conversation].
+ * `readSent`: the watermarks this account last sent, keyed JSON [author,
+ * conversation], re-sent when that author's device comes online. Both optional,
+ * so state saved by 0.4.10 still loads. */
+export type ChatReadState={unreadIds:string[];receipts:Record<string,string[]>;reads?:Record<string,string>;readSent?:Record<string,string>};
 const stateWrites=new Map<string,Promise<void>>();
-function validState(value:ChatReadState){return value&&Array.isArray(value.unreadIds)&&value.unreadIds.length<=500&&value.unreadIds.every(id=>typeof id==='string')&&value.receipts&&typeof value.receipts==='object'&&!Array.isArray(value.receipts)&&Object.keys(value.receipts).length<=500&&Object.values(value.receipts).every(users=>Array.isArray(users)&&users.length<=512&&users.every(user=>typeof user==='string'));}
+/** Entries kept in each watermark map. */
+export const MAX_WATERMARKS=1000;
+const validWatermarks=(value:unknown)=>value===undefined||(!!value&&typeof value==='object'&&!Array.isArray(value)&&Object.keys(value).length<=MAX_WATERMARKS&&Object.entries(value).every(([k,id])=>k.length<=600&&typeof id==='string'&&id.length<=64));
+function validState(value:ChatReadState){return value&&Array.isArray(value.unreadIds)&&value.unreadIds.length<=500&&value.unreadIds.every(id=>typeof id==='string')&&value.receipts&&typeof value.receipts==='object'&&!Array.isArray(value.receipts)&&Object.keys(value.receipts).length<=500&&Object.values(value.receipts).every(users=>Array.isArray(users)&&users.length<=512&&users.every(user=>typeof user==='string'))&&validWatermarks(value.reads)&&validWatermarks(value.readSent);}
 export function saveChatReadState(account:string,team:string,state:ChatReadState):Promise<void>{
  if(!validState(state))return Promise.reject(Error('Invalid chat read state'));
  const id='state:'+scope(account,team),serialized=JSON.stringify(state);
