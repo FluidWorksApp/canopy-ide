@@ -133,6 +133,11 @@ export const getSnapshot = board.get;
 export const rowFor = (repo: string, number: number): ipc.PrRow | undefined =>
   board.get().byRepo.get(repo)?.find((r) => r.number === number);
 
+/** The component paths of every open project, as App last declared them —
+ *  what a view outside any one project (team chat) can resolve a repo against. */
+export const watchedPaths = (): string[] =>
+  declared ? (JSON.parse(declared) as string[]) : [];
+
 /** Test seam: drop everything, including the once-only listener flag. */
 export function __reset(): void {
   board.reset();

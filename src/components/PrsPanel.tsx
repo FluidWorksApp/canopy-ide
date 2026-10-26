@@ -42,6 +42,7 @@ import {
 } from "../prDashboard";
 import { cached as cachedProvenance, load as loadProvenance, PROVENANCE_EVENT } from "../provenance";
 import "./PrsDashboard.css";
+import { buildPrCard, buildReviewRequest, shareWith } from "../shareCards";
 
 interface PrsPanelProps {
   /** This project's repos. The panel shows these and nothing else — a PR queue
@@ -245,6 +246,18 @@ export function PrsPanel({ localRepos, onOpen, page = false, onOpenAll, onQuickT
             },
           ]
         : []),
+      { separator: true },
+      {
+        label: "Send PR to…",
+        hint: "team chat",
+        onClick: () => shareWith(async () => ({ kind: "share", card: await buildPrCard(row.repo, pr) })),
+      },
+      {
+        label: "Request review in Canopy…",
+        hint: "team chat",
+        onClick: () =>
+          shareWith(async () => ({ kind: "review", card: await buildReviewRequest(row.repo, pr) })),
+      },
       peers.length > 0
         ? {
             label: "Send to",

@@ -80,13 +80,13 @@ describe('chat event wire format',()=>{
  it('parses a reaction event and drops malformed or unknown extensions',()=>{
   expect(eventOf(reaction())).toEqual({type:'reaction',target:T,emoji:'👍',op:'add'});
   const base=reaction();
-  for(const event of [{...base.event as object,extra:1},{type:'reaction',target:'nope',emoji:'👍',op:'add'},{type:'reaction',target:T,emoji:'hello',op:'add'},{type:'reaction',target:T,emoji:'👍',op:'toggle'},{type:'edit',target:T,text:'x'},null,'reaction',[]]){
+  for(const event of [{...base.event as object,extra:1},{type:'reaction',target:'nope',emoji:'👍',op:'add'},{type:'reaction',target:T,emoji:'hello',op:'add'},{type:'reaction',target:T,emoji:'👍',op:'toggle'},{type:'edit',target:T,text:'  '},{type:'delete',target:T,text:'x'},{type:'pin',target:T},null,'reaction',[]]){
    const m={...base,event};
    expect(eventOf(m)).toBeUndefined();
    // Still a valid message: it shows as its text rather than failing.
    expect(validChatMessage(m)).toBe(true);
   }
-  expect(unknownExtension({...base,event:{type:'edit'}})).toBe(true);expect(unknownExtension(base)).toBe(false);
+  expect(unknownExtension({...base,event:{type:'pin'}})).toBe(true);expect(unknownExtension(base)).toBe(false);
   expect(parseExtensions({...base,v:'2' as unknown as number})).toEqual({event:eventOf(base)});
  });
  it('accepts single emoji (including sequences) and refuses text',()=>{
@@ -97,7 +97,7 @@ describe('chat event wire format',()=>{
   const e=reaction();
   expect(sameChatMessage(e,JSON.parse(JSON.stringify({...e,event:{op:'add',emoji:'👍',target:T,type:'reaction'}})))).toBe(true);
   expect(sameChatMessage(e,{...e,event:{type:'reaction',target:T,emoji:'🎉',op:'add'}})).toBe(false);
-  expect(sameChatMessage(e,{...e,v:3})).toBe(false);
+  expect(sameChatMessage(e,{...e,v:CHAT_VERSION+1})).toBe(false);
  });
  it('scopes an event like its target and quotes it in the fallback text',()=>{
   expect(eventRecipient(channelTarget,'me')).toBeNull();

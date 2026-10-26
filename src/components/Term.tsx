@@ -30,7 +30,8 @@ import {
   terminalFileLinks,
 } from "../terminalLinks";
 import { matches, matchesChord, resolve } from "../shortcuts";
-import { ContextMenu, useContextMenu } from "./ContextMenu";
+import { ContextMenu, useContextMenu, type MenuItem } from "./ContextMenu";
+import { buildTerminalCard, shareWith } from "../shareCards";
 import {
   osc52Copy,
   readClipboardText,
@@ -209,9 +210,28 @@ export const Term = forwardRef<TermHandle, TermProps>(function Term(
   const openMenu = (e: ReactMouseEvent) => {
     const term = termRef.current;
     if (!term) return;
+    const selected = term.hasSelection() ? term.getSelection() : "";
+    // Text to read and copy on the other end — a card never runs anything.
+    const sendOutput: MenuItem[] = [
+      { separator: true },
+      {
+        label: "Send output to…",
+        hint: "team chat",
+        disabled: !selected.trim(),
+        onClick: () =>
+          shareWith(async () => ({
+            kind: "share",
+            card: buildTerminalCard(
+              runCommand ?? (cwd ? `Terminal in ${cwd.split(/[\\/]/).filter(Boolean).pop() ?? cwd}` : "Terminal output"),
+              selected,
+              runCommand,
+            ),
+          })),
+      },
+    ];
     menu.open(
       e,
-      terminalMenuItems({
+      [...terminalMenuItems({
         hasSelection: term.hasSelection(),
         mouseTracking: term.modes.mouseTrackingMode !== "none",
         copy: () => void copySelection(),
@@ -224,7 +244,7 @@ export const Term = forwardRef<TermHandle, TermProps>(function Term(
           term.clear();
           term.focus();
         },
-      }),
+      }), ...sendOutput],
     );
   };
 

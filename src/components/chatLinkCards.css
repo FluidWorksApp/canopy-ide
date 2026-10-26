@@ -1,0 +1,26 @@
+/* Team chat: preview cards for PR / issue / commit links (ChatLinkCards.tsx). */
+.chat-link-cards{display:flex;flex-direction:column;gap:4px;margin:6px 0 2px}
+.chat-link-card{display:flex;align-items:stretch;min-width:0;max-width:420px;border:1px solid var(--border);border-radius:var(--r-sm);background:var(--bg-raised);overflow:hidden}
+.chat-link-card-main{display:flex;align-items:flex-start;gap:8px;flex:1;min-width:0;padding:6px 8px;border:0;background:none;color:var(--text);font:inherit;text-align:start;cursor:pointer}
+.chat-link-card-main:hover{background:color-mix(in srgb,var(--text) 5%,transparent)}
+.chat-link-card-main:focus-visible,.chat-link-card-browser:focus-visible{outline:1px solid var(--accent);outline-offset:-1px}
+.chat-link-card-icon{display:inline-flex;flex:0 0 auto;margin-top:2px;color:var(--text-muted)}
+.chat-link-card[data-state="open"] .chat-link-card-icon{color:var(--ok)}
+.chat-link-card[data-state="merged"] .chat-link-card-icon{color:var(--accent)}
+.chat-link-card[data-state="closed"] .chat-link-card-icon{color:var(--danger)}
+.chat-link-card-body{display:flex;flex-direction:column;gap:1px;min-width:0}
+.chat-link-card-head{display:flex;align-items:center;gap:6px;min-width:0;font-size:10.5px;color:var(--text-muted)}
+.chat-link-card-ref{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0}
+.chat-link-card-state{flex:0 0 auto;font-size:9.5px;letter-spacing:.03em;text-transform:uppercase}
+.chat-link-card-state.is-open{color:var(--ok)}
+.chat-link-card-state.is-draft{color:var(--text-muted)}
+.chat-link-card-state.is-merged{color:var(--accent)}
+.chat-link-card-state.is-closed{color:var(--danger)}
+.chat-link-card-title{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0;font-weight:500}
+.chat-link-card[aria-busy="true"] .chat-link-card-title{color:var(--text-muted)}
+.chat-link-card-meta{display:flex;flex-wrap:wrap;gap:2px 8px;font-size:10.5px;color:var(--text-muted)}
+.chat-link-card-checks.is-pass{color:var(--ok)}
+.chat-link-card-checks.is-fail{color:var(--danger)}
+.chat-link-card-checks.is-pending{color:var(--warn)}
+.chat-link-card-browser{display:inline-flex;align-items:center;justify-content:center;flex:0 0 auto;width:28px;border:0;border-inline-start:1px solid var(--border);background:none;color:var(--text-muted);cursor:pointer}
+.chat-link-card-browser:hover{color:var(--text);background:color-mix(in srgb,var(--text) 5%,transparent)}

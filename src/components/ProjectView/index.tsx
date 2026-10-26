@@ -494,7 +494,16 @@ import {
   type OpenFileDetail,
   type OpenUrlDetail,
 } from "../../links";
-import { pathInRepo, resolveGitLink } from "../../gitLinks";
+import { pathInRepo, resolveGitLink, type GitLinkAction } from "../../gitLinks";
+import {
+  OPEN_GIT_LINK_EVENT,
+  OPEN_SHARE_ACTION_EVENT,
+  ipcGitLinkLookups,
+  routeGitLinkElsewhere,
+  type OpenGitLinkDetail,
+  type OpenShareActionDetail,
+  type ShareOpen,
+} from "../../gitLinkRouting";
 import { previewAgentTarget, serverForUrl } from "../../preview";
 import { TRACKERS, ticketBranch, ticketContext, ticketResearchQuestion, ticketTaskLabel, ticketWorktree } from "../../trackers";
 import { prConflictContext, prReviewContext } from "../../prs";
@@ -6454,20 +6463,12 @@ const ProjectViewBody = memo(function ProjectViewBody({
    *  fork's PR, a commit never fetched, a path on a branch we don't have — and
    *  the caller shows the page instead. resolveGitLink decides; this only
    *  supplies the lookups and opens what comes back. */
-  const openGitLink = useCallback(
-    async (url: string): Promise<boolean> => {
-      const action = await resolveGitLink(url, {
-        repos: componentsRef.current.map((component) => component.path),
-        remoteUrl: (repo) => ipc.gitRemoteUrl(repo),
-        prs: (repo) => ipc.ghPrList(repo),
-        issues: (repo) => ipc.ghIssueList(repo),
-        commit: (repo, hash) => ipc.gitCommitDetail(repo, hash),
-        fileExists: (repo, path) => {
-          const full = pathInRepo(repo, path);
-          return full ? ipc.fsStat(full).then((s) => !s.is_dir) : Promise.resolve(false);
-        },
-      });
-      if (!action) return false;
+  /** Opens a link's or a share card's resolved target. A file is opened only
+   *  after Rust has resolved every symlink and found it still inside the repo
+   *  (fs_repo_path): a symlink in a checkout must not let a teammate's link
+   *  open a file outside it. */
+  const openGitTarget = useCallback(
+    async (action: GitLinkAction | ShareOpen): Promise<boolean> => {
       switch (action.do) {
         case "pr":
           openPr(action.repo, action.pr);
@@ -6489,6 +6490,11 @@ const ProjectViewBody = memo(function ProjectViewBody({
           // checkout it named (see safeRepoPath in gitLinks.ts).
           const path = pathInRepo(action.repo, action.path);
           if (!path) return false;
+          const contained = await ipc
+            .fsRepoPath(action.repo, action.path)
+            .then(() => true)
+            .catch(() => false);
+          if (!contained) return false;
           const line = action.line;
           await openFileRef.current(path);
           if (line)
@@ -6503,6 +6509,28 @@ const ProjectViewBody = memo(function ProjectViewBody({
     },
     [openPr, openTicket, openCommit],
   );
+  const openGitLink = useCallback(
+    async (url: string): Promise<boolean> => {
+      const action = await resolveGitLink(
+        url,
+        ipcGitLinkLookups(componentsRef.current.map((component) => component.path)),
+      );
+      return action ? openGitTarget(action) : false;
+    },
+    [openGitTarget],
+  );
+
+  // App routed a share card from team chat here: the card already resolved to
+  // a checkout in this project. Not gated on `visible`, like OPEN_GIT_LINK.
+  useEffect(() => {
+    const onShare = (e: Event) => {
+      const d = (e as CustomEvent<OpenShareActionDetail>).detail;
+      if (!d?.action || d.projectId !== project.id) return;
+      void openGitTarget(d.action).catch(() => false);
+    };
+    window.addEventListener(OPEN_SHARE_ACTION_EVENT, onShare);
+    return () => window.removeEventListener(OPEN_SHARE_ACTION_EVENT, onShare);
+  }, [project.id, openGitTarget]);
 
   // A link the user clicked, from anywhere in the app: main.tsx delegates every
   // anchor through links.ts, which asks here first when Settings → Browser says
@@ -6522,18 +6550,42 @@ const ProjectViewBody = memo(function ProjectViewBody({
   useEffect(() => {
     if (!visible) return;
     const onUrl = (e: Event) => {
-      const url = (e as CustomEvent<OpenUrlDetail>).detail?.url;
+      const { url, anyProject } = (e as CustomEvent<OpenUrlDetail>).detail ?? {};
       if (!url) return;
       e.preventDefault();
       void openGitLink(url)
         .catch(() => false)
         .then((opened) => {
-          if (!opened) openPreview(url);
+          if (opened) return;
+          // Team chat belongs to no project: another open project with this
+          // repo may open it natively (gitLinkRouting.ts). Otherwise, or if
+          // none can, the page — exactly as before.
+          const fallback = () => openPreview(url);
+          if (anyProject && routeGitLinkElsewhere(url, project.id, fallback)) return;
+          fallback();
         });
     };
     window.addEventListener(OPEN_URL_EVENT, onUrl);
     return () => window.removeEventListener(OPEN_URL_EVENT, onUrl);
-  }, [visible, openGitLink, openPreview]);
+  }, [visible, openGitLink, openPreview, project.id]);
+
+  // App routed a chat link here after checking this project can open it
+  // natively. Not gated on `visible`: App has just switched to this project
+  // and the flag may not have caught up. If the answer changed in between,
+  // the page opens here instead — still never swallowed.
+  useEffect(() => {
+    const onGitLink = (e: Event) => {
+      const d = (e as CustomEvent<OpenGitLinkDetail>).detail;
+      if (!d?.url || d.projectId !== project.id) return;
+      void openGitLink(d.url)
+        .catch(() => false)
+        .then((opened) => {
+          if (!opened) openPreview(d.url);
+        });
+    };
+    window.addEventListener(OPEN_GIT_LINK_EVENT, onGitLink);
+    return () => window.removeEventListener(OPEN_GIT_LINK_EVENT, onGitLink);
+  }, [project.id, openGitLink, openPreview]);
 
   useEffect(() => {
     if (!visible) return;

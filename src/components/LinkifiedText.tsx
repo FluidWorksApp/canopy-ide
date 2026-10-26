@@ -19,8 +19,13 @@ export function linkParts(text:string):{text:string;href?:string}[]{
 }
 
 /** Message text with clickable links. Clicks go through openLink (http(s)
- *  only); Cmd/Ctrl-click opens the system browser. Text is never HTML. */
-export function LinkifiedText({text}:{text:string}){
- const open=(event:MouseEvent<HTMLAnchorElement>,href:string)=>{event.preventDefault();openLink(href,event.metaKey||event.ctrlKey);};
+ *  only); Cmd/Ctrl-click opens the system browser. Text is never HTML.
+ *  `anyProject`: the text belongs to no one project (team chat), so a PR,
+ *  commit or issue link may open in whichever open project has that repo. */
+export function LinkifiedText({text,anyProject=false}:{text:string;anyProject?:boolean}){
+ const open=(event:MouseEvent<HTMLAnchorElement>,href:string)=>{
+  event.preventDefault();const external=event.metaKey||event.ctrlKey;
+  if(anyProject)openLink(href,external,{anyProject});else openLink(href,external);
+ };
  return <>{linkParts(text).map((part,index)=>part.href?<a key={index} href={part.href} className="linkified-link" rel="noreferrer noopener" onClick={event=>open(event,part.href!)}>{part.text}</a>:<Fragment key={index}>{part.text}</Fragment>)}</>;
 }

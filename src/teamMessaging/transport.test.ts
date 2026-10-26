@@ -55,3 +55,50 @@ it('real HTTP relay delivers only ciphertext across restart and retries failed l
   revoked.add('alice');await expect(alice.send('Revoked message','bob')).rejects.toThrow('revoked');expect(pending.size).toBe(0);
  }finally{clients.forEach(c=>c.stop());server.closeAllConnections();await new Promise<void>(resolve=>server.close(()=>resolve()));}
 },15000);
+it('real HTTP relay carries v3 replies, mentions, edits, deletes, read receipts and backfill only as ciphertext',async()=>{
+ const devices=new Map<string,Device>(),queues=new Map<string,{id:string;envelope:Envelope}[]>(),wire:string[]=[];
+ const server=createServer(async(req,res)=>{
+  try{
+   let raw='';for await(const chunk of req)raw+=chunk;wire.push(raw);
+   const body=JSON.parse(raw),user=String(req.headers['x-test-user']);let result:unknown={};
+   if(body.action==='register')devices.set(body.deviceId,{id:body.deviceId,user_id:user,public_keys:registrationProof(user,body)});
+   else if(body.action==='directory')result={devices:[...devices.values()],members:[{id:'alice',name:'Alice'},{id:'bob',name:'Bob'}]};
+   else if(body.action==='poll')result={envelopes:queues.get(body.deviceId)??[]};
+   else if(body.action==='ack')queues.set(body.deviceId,(queues.get(body.deviceId)??[]).filter(row=>!body.ids.includes(row.id)));
+   else if(body.action==='relay'){const from=devices.get(body.deviceId)!,to=devices.get(body.recipientDevice)!;const envelope=relayEnvelope(body,user,from,to) as Envelope;const queue=queues.get(to.id)??[];queue.push({id:crypto.randomUUID(),envelope});queues.set(to.id,queue);}
+   else throw Error('Unsupported request');
+   res.writeHead(200,{'content-type':'application/json'});res.end(JSON.stringify(result));
+  }catch(error){res.writeHead(403,{'content-type':'application/json'});res.end(JSON.stringify({error:String(error)}));}
+ });
+ await new Promise<void>((resolve,reject)=>{server.once('error',reject);server.listen(0,'127.0.0.1',resolve);});
+ const address=server.address();if(!address||typeof address==='string')throw Error('No loopback address');
+ const url=`http://127.0.0.1:${address.port}`;
+ const received:ChatMessage[]=[],reads:string[]=[];
+ const ids={alice:'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa',bob:'bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb'};
+ async function endpoint(user:'alice'|'bob'){
+  const keys=await createIdentity(),seen=new Set<string>();
+  const client=new PeerClient({team:'team',user,identity:async()=>({id:ids[user],keys}),outbox:{load:async()=>[],put:async()=>{},remove:async()=>{}},
+   request:async<T,>(body:unknown)=>{const response=await fetch(url,{method:'POST',headers:{'x-test-user':user},body:JSON.stringify(body)});const result=await response.json();if(!response.ok)throw Error(result.error);return result as T;},
+   remember:async id=>{if(seen.has(id))return false;seen.add(id);return true;},rtc:()=>{throw Error('No direct RTC in this Node fixture');},
+   message:m=>{if(user==='bob')received.push(m);},receipt:()=>{},read:id=>{if(user==='alice')reads.push(id);},status:()=>{}});
+  clients.push(client);await client.start();return client;
+ }
+ try{
+  const bob=await endpoint('bob'),alice=await endpoint('alice');
+  const root=await alice.send('Synthetic thread root',null);
+  await eventually(()=>received.some(m=>m.id===root.id));
+  // Bob's client learned from that message that Alice speaks v3.
+  await bob.sendReadReceipt(root.id,'alice');await eventually(()=>reads.includes(root.id));
+  const reply=await alice.send('Synthetic reply SECRET-REPLY',null,{id:crypto.randomUUID(),created:Date.now()},[],{thread:{root:root.id},mentions:['bob'],mentionsAll:true});
+  // Alice learns Bob's version from his read receipt; events and backfill need it.
+  const edit:ChatMessage={id:crypto.randomUUID(),sender:'alice',recipient:null,text:'✎ edited: SECRET-EDIT',created:Date.now(),v:3,event:{type:'edit',target:root.id,text:'SECRET-EDIT'}};
+  const del:ChatMessage={id:crypto.randomUUID(),sender:'alice',recipient:null,text:'🗑 Deleted a message',created:Date.now(),v:3,event:{type:'delete',target:reply.id}};
+  expect(await alice.sendEvent(edit)).toMatchObject({devices:1});expect(await alice.sendEvent(del)).toMatchObject({devices:1});
+  const old:ChatMessage={id:crypto.randomUUID(),sender:'alice',recipient:'bob',text:'SECRET-BACKFILL',created:Date.now()-3_600_000,v:3};
+  expect(await alice.backfill(ids.bob,old)).toBe(true);
+  await eventually(()=>[reply.id,edit.id,del.id,old.id].every(id=>received.some(m=>m.id===id)));
+  expect(received.find(m=>m.id===reply.id)).toMatchObject({thread:{root:root.id},mentions:['bob'],mentionsAll:true});
+  const all=wire.join('');
+  for(const secret of ['SECRET-REPLY','SECRET-EDIT','SECRET-BACKFILL','Synthetic thread root',root.id,reply.id,'"thread"','"mentions"','mentionsAll','"backfill"','"read"','"edit"','"delete"'])expect(all).not.toContain(secret);
+ }finally{clients.forEach(c=>c.stop());server.closeAllConnections();await new Promise<void>(resolve=>server.close(()=>resolve()));}
+},20000);

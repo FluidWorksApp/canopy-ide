@@ -23,6 +23,14 @@ export const OPEN_FILE_EVENT = "canopy:open-file";
 
 export interface OpenUrlDetail {
   url: string;
+  /** The link came from text that belongs to no one project (team chat). A PR,
+   *  commit or issue the project in front can't open natively may then switch
+   *  to another open project that has the repo — see gitLinkRouting.ts. */
+  anyProject?: boolean;
+}
+
+export interface OpenLinkOptions {
+  anyProject?: boolean;
 }
 
 export interface OpenFileDetail {
@@ -37,7 +45,11 @@ function toOsBrowser(url: string) {
 
 /** Follow a link the user clicked. Safe to call with anything — a non-http
  *  scheme is dropped, not forwarded. */
-export function openLink(href: string, external = false) {
+export function openLink(
+  href: string,
+  external = false,
+  options: OpenLinkOptions = {},
+) {
   if (!/^https?:\/\//i.test(href)) return;
   // Provider logins must leave the preview and return to the owning VM.
   if (/^https:\/\/(auth\.openai\.com|claude\.ai|console\.anthropic\.com|platform\.claude\.com)\//i.test(href) && new URL(href).searchParams.has('redirect_uri')) {
@@ -54,7 +66,7 @@ export function openLink(href: string, external = false) {
   if (!external) {
     const claimed = !window.dispatchEvent(
       new CustomEvent<OpenUrlDetail>(OPEN_URL_EVENT, {
-        detail: { url: href },
+        detail: options.anyProject ? { url: href, anyProject: true } : { url: href },
         cancelable: true,
       }),
     );

@@ -7,6 +7,10 @@ import {invoke} from '@tauri-apps/api/core';
 import {Button,Select,TextInput} from './ui';
 import {AccountSettings} from './AccountSettings';
 import {SettingsIcon} from './icons';
+import {ContextMenu,useContextMenu} from './ContextMenu';
+import {isMuted,setMuted} from '../teamMessaging/notifications';
+import {getSettings,subscribeSettings} from '../settings';
+import './chatThread.css';
 import {avatarTone,displayName,initials,secondaryEmail,type Person} from './teamHubPeople';
 import './teamHub.css';
 type Team={id:string;name:string;role:string;organization_id?:string|null};
@@ -37,9 +41,13 @@ function Avatar({person}:{person:Person}){
 function SkeletonRows({count}:{count:number}){
  return <div className="team-skeleton" aria-hidden="true">{Array.from({length:count},(_,i)=><div key={i} className="team-row team-row-skeleton"><span className="team-skel-avatar"/><span className="team-skel-line" style={{width:`${62-i*9}%`}}/></div>)}</div>;
 }
-function UnreadPill({count,label}:{count:number;label:string}){
- if(count<=0)return null;
- return <span className="team-unread" aria-label={`${count} unread ${label}`} title={`${count} unread`}>{badgeLabel(count)}</span>;
+/** Unread count, grey when the conversation is muted; a red "@" when some of it names you. */
+function UnreadPill({count,label,mentions=0,muted=false}:{count:number;label:string;mentions?:number;muted?:boolean}){
+ return <>
+  {mentions>0&&<span className="team-mention" aria-label={`${mentions} ${mentions===1?'mention':'mentions'} of you ${label}`} title={`${mentions} ${mentions===1?'message mentions':'messages mention'} you`}>@</span>}
+  {count>0&&<span className={`team-unread${muted?' is-muted':''}`} aria-label={`${count} unread ${label}${muted?' (muted)':''}`} title={`${count} unread${muted?' · muted':''}`}>{badgeLabel(count)}</span>}
+  {muted&&count<=0&&<span className="team-muted-mark" role="img" aria-label="Muted" title="Muted">🔕</span>}
+ </>;
 }
 function AccountIcon(){
  return <svg aria-hidden="true" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="8" r="3.6"/><path d="M5 20a7 7 0 0 1 14 0"/></svg>;
@@ -116,6 +124,11 @@ export function TeamHub({onOpenChat}:{onOpenChat?:(conversation:AccountConversat
  const here=unreadFor(selected);
  const elsewhere=teams.reduce((sum,t)=>t.id===selected?sum:sum+unreadFor(t.id).total,0);
  const others=members.filter(m=>m.id!==selfId);
+ // Mutes are a local setting; re-render when it changes.
+ const mutedKeys=useSyncExternalStore(subscribeSettings,()=>getSettings().teamMutedConversations);
+ const mutedHere=(peer:string|null)=>isMuted(selected,peer,{teamMutedConversations:mutedKeys});
+ const rowMenu=useContextMenu();
+ const openRowMenu=(e:React.MouseEvent,peer:string|null)=>{const muted=mutedHere(peer),teamId=selected;rowMenu.open(e,[{label:muted?'Unmute conversation':'Mute conversation',onClick:()=>setMuted(teamId,peer,!muted)}]);};
 
  return <section className="team-hub" aria-label="Teams" aria-busy={firstLoad||refreshing}>
   <header className="team-hub-head">
@@ -162,14 +175,15 @@ export function TeamHub({onOpenChat}:{onOpenChat?:(conversation:AccountConversat
 
   {team&&!manage&&<nav className="team-directory" aria-label="Conversations">
    <h3 className="team-hub-section">Channel</h3>
-   <button className={`team-row${here.channel?' is-unread':''}`} disabled={!onOpenChat} onClick={()=>onOpenChat?.({teamId:selected,userId:selfId,peer:null,name:team.name})}><span aria-hidden="true" className="team-avatar team-avatar-channel">#</span><span className="team-row-text"><strong>{team.name}</strong><small>Everyone in this team</small></span><UnreadPill count={here.channel} label="in the channel"/></button>
+   <button className={`team-row${here.channel&&!mutedHere(null)?' is-unread':''}`} disabled={!onOpenChat} onContextMenu={e=>openRowMenu(e,null)} onClick={()=>onOpenChat?.({teamId:selected,userId:selfId,peer:null,name:team.name})}><span aria-hidden="true" className="team-avatar team-avatar-channel">#</span><span className="team-row-text"><strong>{team.name}</strong><small>Everyone in this team</small></span><UnreadPill count={here.channel} label="in the channel" mentions={here.mentions?.channel} muted={mutedHere(null)}/></button>
    <h3 className="team-hub-section">People{detail&&<span> · {members.length}</span>}</h3>
    {!detail?(peopleError?null:<SkeletonRows count={3}/>):<>
     {self&&<div className="team-row team-row-self"><Avatar person={self}/><span className="team-row-text"><strong>{displayName(self)} <em>(you)</em></strong>{secondaryEmail(self)&&<small>{secondaryEmail(self)}</small>}</span>{self.role!=='member'&&<span className="team-role">{self.role}</span>}</div>}
-    {others.map(m=>{const n=here.peers[m.id]??0;return <button key={m.id} className={`team-row${n?' is-unread':''}`} disabled={!onOpenChat} onClick={()=>onOpenChat?.({teamId:selected,userId:selfId,peer:m.id,name:displayName(m),email:m.email})}><Avatar person={m}/><span className="team-row-text"><strong>{displayName(m)}</strong>{secondaryEmail(m)&&<small>{secondaryEmail(m)}</small>}</span>{m.role!=='member'&&<span className="team-role">{m.role}</span>}<UnreadPill count={n} label={`from ${displayName(m)}`}/></button>;})}
+    {others.map(m=>{const n=here.peers[m.id]??0,muted=mutedHere(m.id);return <button key={m.id} className={`team-row${n&&!muted?' is-unread':''}`} disabled={!onOpenChat} onContextMenu={e=>openRowMenu(e,m.id)} onClick={()=>onOpenChat?.({teamId:selected,userId:selfId,peer:m.id,name:displayName(m),email:m.email})}><Avatar person={m}/><span className="team-row-text"><strong>{displayName(m)}</strong>{secondaryEmail(m)&&<small>{secondaryEmail(m)}</small>}</span>{m.role!=='member'&&<span className="team-role">{m.role}</span>}<UnreadPill count={n} label={`from ${displayName(m)}`} mentions={here.mentions?.peers[m.id]} muted={muted}/></button>;})}
     {!others.length&&<p className="team-hub-muted">No teammates yet.{team.role!=='member'?' Invite people from Manage.':''}</p>}
    </>}
    {!onOpenChat&&<p className="team-hub-muted">Open Teams in the sidebar to start a conversation.</p>}
   </nav>}
+  {rowMenu.menu&&<ContextMenu x={rowMenu.menu.x} y={rowMenu.menu.y} items={rowMenu.menu.items} onClose={rowMenu.close}/>}
  </section>;
 }

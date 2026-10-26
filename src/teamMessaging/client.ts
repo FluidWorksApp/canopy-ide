@@ -1,8 +1,8 @@
-import {validChatMessage,UUID,MAX_ATTACHMENTS} from './messageSchema';
+import {validChatMessage,UUID,MAX_ATTACHMENTS,type MessageExtensions} from './messageSchema';
 import {chatFileStore,prepareFile,sha256,bytesOf,type FileStore,type FileRecord,type PreparedFile} from './files';
 import {open,seal,registration,MessageReplayError,type Envelope,type EnvelopeKind,type PublicIdentity,type Address} from './crypto';
 import {deviceIdentity,rememberMessage,messageOutbox,type MessageOutbox,type PendingEnvelope,type DeviceIdentity} from './store';
-import {CHAT_VERSION,eventOf,unknownExtension} from './chatEvents';
+import {BACKFILL_MS,BACKFILL_SKEW_MS,CHAT_VERSION,EDITS_VERSION,eventOf,eventVersion,parseMentions,parseThread,unknownExtension} from './chatEvents';
 import {PeerVersions,localVersionStore,type VersionStore} from './peerVersions';
 import {validJobRequest,validJobStatus,validMeshMessage,validMeshStatus,validRoster,validRosterRequest,type JobRequest,type JobStatus,type MeshMessage,type MeshStatus,type Roster,type RosterRequest} from './jobSchema';
 /** `last_seen_at` is bumped by every poll the device makes, so it is the
@@ -10,11 +10,16 @@ import {validJobRequest,validJobStatus,validMeshMessage,validMeshStatus,validRos
 export type Device={id:string;user_id:string;public_keys:PublicIdentity;last_seen_at?:string|null;kind?:'user'|'host';workspaceIds?:string[]};
 /** File metadata only: the bytes never ride in a message or through the relay. */
 export type Attachment={id:string;name:string;size:number;type:string;sha256:string};
-/** `v` and `event` are chat protocol v2 extensions (see chatEvents.ts): unchecked
- * here, parsed leniently by `parseExtensions`, ignored by v1 clients. */
-export type ChatMessage={id:string;sender:string;recipient:string|null;text:string;created:number;attachments?:Attachment[];v?:number;event?:unknown};
+/** `v` and `event` (v2), `thread`, `mentions` and `mentionsAll` (v3) are chat
+ * protocol extensions (see chatEvents.ts): unchecked here, parsed leniently by
+ * `parseExtensions`, ignored by older clients. */
+export type ChatMessage={id:string;sender:string;recipient:string|null;text:string;created:number;attachments?:Attachment[];v?:number;event?:unknown;card?:unknown;mentions?:unknown;thread?:unknown;mentionsAll?:unknown};
 export type UnavailableReason='offline'|'expired'|'denied';
-type Payload={kind:'message';message:ChatMessage}|{kind:'receipt';id:string}|{kind:'signal';description:RTCSessionDescriptionInit;caps?:{chat?:number}}|{kind:'job';job:JobRequest}|{kind:'job-status';status:JobStatus}
+/** `backfill` (v3): a message its author re-sends after the original delivery
+ * expired, so it may be older than the usual five-minute window. `read` (v3):
+ * a read receipt, a watermark naming the newest message of the recipient's that
+ * the sender has read; a plain receipt confirms delivery of one message. */
+type Payload={kind:'message';message:ChatMessage;backfill?:boolean}|{kind:'receipt';id:string;read?:boolean;caps?:{chat?:number}}|{kind:'signal';description:RTCSessionDescriptionInit;caps?:{chat?:number}}|{kind:'job';job:JobRequest}|{kind:'job-status';status:JobStatus}
  |{kind:'mesh';message:MeshMessage}|{kind:'mesh-status';status:MeshStatus}|{kind:'roster-request';request:RosterRequest}|{kind:'roster';roster:Roster}|{kind:'file-request';attachmentId:string;messageId:string}|{kind:'file-unavailable';attachmentId:string;reason:UnavailableReason};
 /** A pull the sender could not (or would not) serve. */
 export class AttachmentUnavailable extends Error{readonly reason:UnavailableReason;constructor(reason:UnavailableReason){super(reason==='offline'?'The sender is not directly connected':reason==='denied'?'This file was not shared with you':'This file is no longer available');this.reason=reason;}}
@@ -38,12 +43,20 @@ const CAPS={chat:CHAT_VERSION};
 export type PeerRequest=<T>(body:unknown)=>Promise<T>;
 /** A device polls every 2s; one quiet for longer than this is not online. */
 export const DEVICE_ONLINE_MS=60_000;
+/** Retry delays of an undelivered envelope, in seconds; the last one repeats. */
+export const RETRY_STEPS=[5,10,20,40,60];
+/** When to retry an envelope for the `attempt`th time (0 = the first retry):
+ * the step for that attempt with ±20% jitter, never after the envelope expires. */
+export function nextRetryAt(attempt:number,now:number,expires:number,random:()=>number=Math.random){
+ const step=RETRY_STEPS[Math.min(Math.max(0,attempt),RETRY_STEPS.length-1)]*1000;
+ return Math.min(expires,now+Math.round(step*(0.8+0.4*random())));
+}
 export const deviceOnline=(device:Device,now=Date.now())=>{
  // A directory that predates `last_seen_at` cannot say; it does not refuse.
  if(device.last_seen_at==null)return true;
  const seen=Date.parse(device.last_seen_at);return Number.isFinite(seen)&&now-seen<=DEVICE_ONLINE_MS;
 };
-type Options={members?:(members:{id:string;name:string}[])=>void;request:PeerRequest;team:string;user:string;message:(message:ChatMessage)=>void;receipt:(id:string,user:string)=>void;status:(value:string)=>void;identity?:()=>Promise<DeviceIdentity>;remember?:typeof rememberMessage;rtc?:(config:RTCConfiguration)=>RTCPeerConnection;outbox?:MessageOutbox;persist?:(message:ChatMessage)=>Promise<void>;
+type Options={members?:(members:{id:string;name:string}[])=>void;request:PeerRequest;team:string;user:string;message:(message:ChatMessage,meta?:{backfill?:boolean})=>void;receipt:(id:string,user:string)=>void;status:(value:string)=>void;identity?:()=>Promise<DeviceIdentity>;remember?:typeof rememberMessage;rtc?:(config:RTCConfiguration)=>RTCPeerConnection;outbox?:MessageOutbox;persist?:(message:ChatMessage)=>Promise<void>;
  /** A mesh job from a team device, or this account's other device. */
  job?:(job:JobRequest,sender:Device)=>void;
  /** A step of a job this device submitted, from the device running it. */
@@ -64,7 +77,17 @@ type Options={members?:(members:{id:string;name:string}[])=>void;request:PeerReq
  /** Progress and outcome of each attachment pull. */
  attachment?:(event:AttachmentEvent)=>void;
  /** Where learned device chat versions are kept between runs (default: localStorage). */
- versions?:VersionStore};
+ versions?:VersionStore;
+ /** The next automatic retry of a message's pending deliveries. */
+ retrying?:(messageId:string,at:number)=>void;
+ /** A read receipt: `user` (the authenticated sender) has read up to message `id`. */
+ read?:(id:string,user:string)=>void;
+ /** A delivery to a v3 device expired unconfirmed: the author may backfill it later. */
+ undelivered?:(messageId:string,device:Device)=>void;
+ /** A teammate's device came online (or was first seen online) on a directory refresh. */
+ online?:(device:Device)=>void;
+ /** Random source for retry jitter (tests). */
+ random?:()=>number};
 /** Client-chosen identity for an optimistic message: the same id is kept in the
  * encrypted history and the pending-delivery queue, so echoes and restarts reconcile. */
 export type MessageDraft={id:string;created:number};
@@ -79,7 +102,12 @@ export class PeerClient {
  private options:Options;
  private outbox:MessageOutbox;
  private pending=new Map<string,PendingEnvelope>();
- private attempted=new Map<string,number>();
+ /** Per pending envelope: retries made, and when the next one is due. */
+ private retries=new Map<string,{attempts:number;next:number}>();
+ /** Envelopes found expired in the outbox at start, reported once the directory says who they were for. */
+ private expiredAtStart:PendingEnvelope[]=[];
+ /** Teammate devices online at the last directory refresh. */
+ private onlineDevices=new Set<string>();
  private files:FileStore;
  private downloads=new Map<string,Download>();
  private serving=0;
@@ -95,6 +123,8 @@ export class PeerClient {
   void this.files.prune().catch(()=>{/* retention retries next start */});
   for(const row of await this.outbox.load()){
    if(row.envelope.from.device!==this.identity.id||row.envelope.from.user!==this.options.user||row.envelope.from.team!==this.options.team||row.envelope.to.team!==this.options.team)continue;
+   // Expired while the IDE was closed: not retried, but a v3 recipient may be backfilled.
+   if(row.envelope.expires<=Date.now()){if(this.expiredAtStart.length<500)this.expiredAtStart.push(row);continue;}
    this.pending.set(row.envelope.id,row);
    const users=this.sent.get(row.messageId)??new Set<string>();users.add(row.envelope.to.user);this.sent.set(row.messageId,users);
   }
@@ -115,6 +145,10 @@ export class PeerClient {
   for(const [id,peer] of this.peers)if(!next.has(id)||JSON.stringify(next.get(id)?.public_keys)!==JSON.stringify(this.devices.get(id)?.public_keys)){peer.pc.close();this.peers.delete(id);}
   this.options.members?.(members);
   this.devices=next;this.iceServers=iceServers;this.directoryAt=Date.now();
+  const online=new Set(devices.filter(d=>d.user_id!==this.options.user&&deviceOnline(d)).map(d=>d.id)),arrived=[...online].filter(id=>!this.onlineDevices.has(id));
+  this.onlineDevices=online;
+  if(this.expiredAtStart.length){const rows=this.expiredAtStart.splice(0);for(const row of rows)this.reportUndelivered(row);}
+  for(const id of arrived){try{this.options.online?.(next.get(id)!);}catch{/* a listener never breaks the directory */}}
   // Stable initiator avoids simultaneous offers from the two devices.
   for(const d of devices)if(d.id!==this.identity!.id&&this.identity!.id<d.id&&!this.peers.has(d.id))void this.offer(d,iceServers).catch(()=>{/* encrypted relay remains available */});
  }
@@ -129,7 +163,7 @@ export class PeerClient {
    for(const row of envelopes){try{await this.receive(row.envelope);acknowledged.push(row.id);}catch(error){if(String(error).includes('Message replay refused'))acknowledged.push(row.id);else this.options.status('A message could not be verified.');}}
    if(acknowledged.length)await this.request({action:'ack',ids:acknowledged});
    if(!this.stopped)this.options.status('Connected · end-to-end encrypted');
-  }catch(error){this.directoryAt=0;this.closePeers();if(!this.stopped)this.options.status(String(error));}
+  }catch(error){this.directoryAt=0;this.closePeers();this.onlineDevices.clear();if(!this.stopped)this.options.status(String(error));}
   finally{if(!this.stopped)this.timer=setTimeout(()=>void this.poll(),2000);}
  }
  private async deliver(device:Device,payload:Payload,relayOnly=false){
@@ -138,7 +172,7 @@ export class PeerClient {
   if(this.stopped)throw Error('Team connection closed');
   if(payload.kind==='message'){
    const row={envelope,messageId:payload.message.id};await this.outbox.put(row);
-   this.pending.set(envelope.id,row);this.attempted.set(envelope.id,Date.now());
+   this.pending.set(envelope.id,row);this.schedule(envelope.id,0);
   }
   await this.transmit(device,envelope,payload.kind==='message'?payload.message.id:undefined,relayOnly);
  }
@@ -158,9 +192,10 @@ export class PeerClient {
   const discard:string[]=[];
   for(const [id,row]of this.pending){
    const device=this.devices.get(row.envelope.to.device);
-   if(row.envelope.expires<=Date.now()||!device||device.user_id!==row.envelope.to.user){discard.push(id);continue;}
-   if(Date.now()-(this.attempted.get(id)??0)<5000)continue;
-   this.attempted.set(id,Date.now());
+   if(row.envelope.expires<=Date.now()||!device||device.user_id!==row.envelope.to.user){discard.push(id);if(row.envelope.expires<=Date.now())this.reportUndelivered(row);continue;}
+   const retry=this.retries.get(id);
+   if(retry&&Date.now()<retry.next)continue;
+   this.schedule(id,retry?retry.attempts+1:0);
    if(await this.transmit(device,row.envelope,row.messageId).then(()=>true,()=>false))this.options.relayed?.(row.messageId);
   }
   if(discard.length){
@@ -169,7 +204,28 @@ export class PeerClient {
    for(const messageId of messages)if(![...this.pending.values()].some(row=>row.messageId===messageId))this.options.expired?.(messageId);
   }
  }
- private forgetPending(ids:string[]){for(const id of ids){this.pending.delete(id);this.attempted.delete(id);const prior=this.fallbacks.get(id);if(prior)clearTimeout(prior.timer);this.fallbacks.delete(id);}}
+ /** Sets when envelope `id` is next retried and tells the session the message's next retry. */
+ private schedule(id:string,attempts:number){
+  const row=this.pending.get(id);if(!row)return;
+  this.retries.set(id,{attempts,next:nextRetryAt(attempts,Date.now(),row.envelope.expires,this.options.random)});
+  const due=[...this.pending].filter(([,r])=>r.messageId===row.messageId).map(([key])=>this.retries.get(key)?.next).filter((at):at is number=>at!==undefined);
+  try{this.options.retrying?.(row.messageId,Math.min(...due));}catch{/* advisory */}
+ }
+ /** An expired delivery to a device that understands backfill. */
+ private reportUndelivered(row:PendingEnvelope){
+  const device=this.devices.get(row.envelope.to.device);
+  if(!device||device.user_id!==row.envelope.to.user||this.chatCapability(device.id)<EDITS_VERSION)return;
+  try{this.options.undelivered?.(row.messageId,device);}catch{/* the ledger is best effort */}
+ }
+ /** Retries every pending delivery of a message now, outside the backoff schedule. */
+ async retryNow(messageId:string){
+  let any=false;
+  for(const [id,row] of this.pending)if(row.messageId===messageId){this.retries.set(id,{attempts:this.retries.get(id)?.attempts??0,next:0});any=true;}
+  if(!any||this.stopped)return false;
+  if(Date.now()-this.directoryAt>10000)await this.directory();
+  await this.retryPending();return true;
+ }
+ private forgetPending(ids:string[]){for(const id of ids){this.pending.delete(id);this.retries.delete(id);const prior=this.fallbacks.get(id);if(prior)clearTimeout(prior.timer);this.fallbacks.delete(id);}}
  /** Drops every pending delivery of a message the sender discarded. */
  async discard(messageId:string){
   const ids=[...this.pending].filter(([,row])=>row.messageId===messageId).map(([id])=>id);
@@ -179,7 +235,7 @@ export class PeerClient {
 
  /** `files` may be raw files or ones already hashed by `prepareFile` (so an
   * optimistic copy and this send carry the same attachment ids). */
- async send(text:string,recipient:string|null,draft?:MessageDraft,files:(PreparedFile|(Blob&{name?:string}))[]=[]):Promise<SendResult>{
+ async send(text:string,recipient:string|null,draft?:MessageDraft,files:(PreparedFile|(Blob&{name?:string}))[]=[],ext?:MessageExtensions):Promise<SendResult>{
   if(files.length>MAX_ATTACHMENTS)throw Error(`Attach up to ${MAX_ATTACHMENTS} files per message`);
   if((!text.trim()&&!files.length)||new TextEncoder().encode(text).length>16000)throw Error('Write a message under 16 KB');
   if(this.fallbacks.size>=500)throw Error('Wait for pending messages to finish sending');
@@ -192,7 +248,9 @@ export class PeerClient {
   const devices=[...this.devices.values()].filter(d=>d.user_id!==this.options.user&&(!recipient||d.user_id===recipient));
   if(!devices.length)throw Error('No recipient devices are registered yet. Ask your teammate to sign in to Canopy.');
   const prepared=await Promise.all(files.map(file=>'meta' in file?file:prepareFile(file)));
-  const message:ChatMessage={id:draft?.id??crypto.randomUUID(),sender:this.options.user,recipient,text,created:draft?.created??Date.now(),...(prepared.length?{attachments:prepared.map(p=>p.meta)}:{}),v:CHAT_VERSION};
+  // A thread, mentions and @channel must be well formed; a card is checked by its own schema.
+  if((ext?.thread!==undefined&&!parseThread(ext.thread))||(ext?.mentions!==undefined&&!parseMentions(ext.mentions))||(ext?.mentionsAll!==undefined&&(ext.mentionsAll!==true||recipient!==null)))throw Error('Invalid message');
+  const message:ChatMessage={id:draft?.id??crypto.randomUUID(),sender:this.options.user,recipient,text,created:draft?.created??Date.now(),...(prepared.length?{attachments:prepared.map(p=>p.meta)}:{}),v:CHAT_VERSION,...ext};
   if(!validChatMessage(message))throw Error('Invalid message');
   if(new TextEncoder().encode(JSON.stringify({kind:'message',message})).length>32000)throw Error('This message is too large after encoding. Split it into smaller messages.');
   // Bytes stay on this device; only the metadata travels in the sealed message.
@@ -206,19 +264,33 @@ export class PeerClient {
   if(outcomes.every(result=>result.status==='rejected')&&!queued)throw Error('Message could not be saved or sent. Try again.');
   this.options.message(message);return {id:message.id,queued:outcomes.every(result=>result.status==='rejected'),partial:outcomes.some(result=>result.status==='rejected')};
  }
+ /** The chat protocol version a team device is known to speak; 1 when unknown. */
+ chatCapability(deviceId:string){const device=this.devices.get(deviceId);return device?this.versions.get(device.id,device.public_keys):1;}
  /** Whether a device is known to speak chat protocol v2 (understands `event`). */
- speaksEvents(deviceId:string){const device=this.devices.get(deviceId);return !!device&&this.versions.get(device.id,device.public_keys)>=2;}
+ speaksEvents(deviceId:string){return this.chatCapability(deviceId)>=2;}
  private learnVersion(device:Device,version:unknown){this.versions.learn(device.id,device.public_keys,version);}
- /** Sends a chat event (a reaction now; edits and deletes later) as a chat
-  * message, so it shares the message path's queue, retries and receipts. Only
-  * devices known to speak v2 receive it: a v1 client would show its fallback
-  * text as a new message. Resolves to the number of devices it went to. */
+ /** Teammates in a conversation (the channel, or one person) with at least one
+  * device not known to speak `minChat`: they would not get a change sent at that version. */
+ usersBelow(minChat:number,recipient:string|null){
+  return [...new Set([...this.devices.values()].filter(d=>d.user_id!==this.options.user&&(!recipient||d.user_id===recipient)&&this.chatCapability(d.id)<minChat).map(d=>d.user_id))];
+ }
+ /** Sends a chat event as a chat message, so it shares the message path's
+  * queue, retries and receipts. Only devices known to understand its type
+  * receive it (reactions: v2, edits and deletes: v3): an older client would
+  * show its fallback text as a new message. Resolves to the number of devices it went to. */
  async sendEvent(message:ChatMessage):Promise<{id:string;devices:number;queued:boolean}>{
-  if(!validChatMessage(message)||!eventOf(message)||message.sender!==this.options.user||message.v!==CHAT_VERSION)throw Error('Invalid chat event');
+  const event=validChatMessage(message)?eventOf(message):undefined;
+  if(!event||message.sender!==this.options.user||message.v!==CHAT_VERSION)throw Error('Invalid chat event');
+  return this.sendToCapable(eventVersion(event),message);
+ }
+ /** Sends a message of this account only to the conversation's devices known
+  * to speak at least `minChat`. Same queue, retries and receipts as `send`. */
+ async sendToCapable(minChat:number,message:ChatMessage):Promise<{id:string;devices:number;queued:boolean}>{
+  if(!validChatMessage(message)||message.sender!==this.options.user||!Number.isSafeInteger(minChat))throw Error('Invalid chat event');
   if(new TextEncoder().encode(JSON.stringify({kind:'message',message})).length>32000)throw Error('This event is too large after encoding.');
   if(this.fallbacks.size>=500)throw Error('Wait for pending messages to finish sending');
   try{await this.directory();}catch(error){if(!this.devices.size||navigator.onLine!==false)throw error;this.directoryAt=0;this.closePeers();}
-  const devices=[...this.devices.values()].filter(d=>d.user_id!==this.options.user&&(!message.recipient||d.user_id===message.recipient)&&this.speaksEvents(d.id));
+  const devices=[...this.devices.values()].filter(d=>d.user_id!==this.options.user&&(!message.recipient||d.user_id===message.recipient)&&this.chatCapability(d.id)>=minChat);
   await this.options.persist?.(message);
   if(devices.length){
    this.sent.set(message.id,new Set(devices.map(d=>d.user_id)));if(this.sent.size>500)this.sent.delete(this.sent.keys().next().value!);
@@ -228,6 +300,28 @@ export class PeerClient {
   }
   this.options.message(message);
   return {id:message.id,devices:devices.length,queued:[...this.pending.values()].some(row=>row.messageId===message.id)};
+ }
+ /** Tells `user`'s v3 devices (or just `deviceId`) that this account has read up
+  * to their message `id`. Never queued: a lost receipt is re-sent when the
+  * device next comes online. Resolves to the number of devices it went to. */
+ async sendReadReceipt(id:string,user:string,deviceId?:string){
+  if(typeof id!=='string'||!UUID.test(id)||user===this.options.user||this.stopped||!this.identity||Date.now()-this.directoryAt>10000)return 0;
+  const devices=[...this.devices.values()].filter(d=>d.user_id===user&&(!deviceId||d.id===deviceId)&&this.chatCapability(d.id)>=EDITS_VERSION);
+  const sent=await Promise.allSettled(devices.map(d=>this.deliver(d,{kind:'receipt',id,read:true,caps:CAPS})));
+  return sent.filter(r=>r.status==='fulfilled').length;
+ }
+ /** Re-sends this account's own `message` to one v3 device whose earlier delivery
+  * expired. The receiver accepts it up to seven days old. */
+ async backfill(deviceId:string,message:ChatMessage){
+  const device=this.devices.get(deviceId);
+  if(!device||device.user_id===this.options.user||this.chatCapability(device.id)<EDITS_VERSION)return false;
+  if(!validChatMessage(message)||message.sender!==this.options.user||(message.recipient!==null&&message.recipient!==device.user_id)||Date.now()-message.created>BACKFILL_MS)return false;
+  // A delivery of it to that device is already under way.
+  if([...this.pending.values()].some(row=>row.messageId===message.id&&row.envelope.to.device===device.id))return false;
+  if(new TextEncoder().encode(JSON.stringify({kind:'message',message,backfill:true})).length>32000)return false;
+  const users=this.sent.get(message.id)??new Set<string>();users.add(device.user_id);this.sent.set(message.id,users);if(this.sent.size>500)this.sent.delete(this.sent.keys().next().value!);
+  await this.deliver(device,{kind:'message',message,backfill:true});
+  return true;
  }
  /** This team's devices as of the last directory refresh, this one included. */
  directoryDevices():Device[]{return [...this.devices.values()];}
@@ -291,11 +385,11 @@ export class PeerClient {
    try{text=await open(this.identity!.keys,sender.public_keys,this.address(sender.id,sender.user_id),this.address(this.identity!.id),envelope,this.options.remember??rememberMessage,Date.now(),async decoded=>{
     if(this.stopped||Date.now()-this.directoryAt>10000||!this.currentSender(sender))throw Error('Team access expired');
     const payload=JSON.parse(decoded) as Payload;
-    if(payload.kind==='message'){this.validateMessage(payload.message,sender,envelope);await this.options.persist?.(payload.message);
+    if(payload.kind==='message'){this.validateMessage(payload.message,sender,envelope,payload.backfill===true);await this.options.persist?.(payload.message);
      // Remember which device holds the bytes, so a later pull asks only it.
      for(const meta of payload.message.attachments??[])await this.files.add({id:meta.id,meta,messageId:payload.message.id,origin:'received',allowedUsers:[],device:sender.id,created:Date.now()}).catch(()=>{});}
    });}
-   catch(error){if(error instanceof MessageReplayError){if(sender.kind==='host')return;const prior=JSON.parse(error.plaintext) as Payload;if(prior.kind==='message'){this.validateMessage(prior.message,sender,envelope);await this.deliver(sender,{kind:'receipt',id:prior.message.id});return;}if(prior.kind==='receipt'){await this.acceptReceipt(prior.id,sender);return;}
+   catch(error){if(error instanceof MessageReplayError){if(sender.kind==='host')return;const prior=JSON.parse(error.plaintext) as Payload;if(prior.kind==='message'){this.validateMessage(prior.message,sender,envelope,prior.backfill===true);await this.deliver(sender,{kind:'receipt',id:prior.message.id});return;}if(prior.kind==='receipt'){if(prior.read!==true)await this.acceptReceipt(prior.id,sender);return;}
     // The same job arriving twice (direct channel and relay) acts once.
     if(prior.kind==='job'||prior.kind==='job-status'||prior.kind==='file-request'||prior.kind==='file-unavailable')return;
     if(!known(prior))return;}throw error;}
@@ -307,11 +401,17 @@ export class PeerClient {
    if(!known(payload)&&sender.kind!=='host'&&(envelope.version===1||envelope.kind==='chat')){console.debug('Ignored an unknown peer payload kind');return;}
    const workspace=this.routed(envelope,sender,payload);
    if(payload.kind==='message'){
-    const m=payload.message;this.validateMessage(m,sender,envelope);this.learnVersion(sender,m.v);
+    const m=payload.message,backfill=payload.backfill===true;this.validateMessage(m,sender,envelope,backfill);this.learnVersion(sender,m.v);
     // An event this client cannot read arrives as the plain message it falls back to.
     if(unknownExtension(m))console.debug('Showing a chat event of an unknown type as its text');
-    this.options.message(m);await this.deliver(sender,{kind:'receipt',id:m.id});
-   }else if(payload.kind==='receipt'){await this.acceptReceipt(payload.id,sender);}
+    this.options.message(m,backfill?{backfill}:undefined);await this.deliver(sender,{kind:'receipt',id:m.id});
+   }else if(payload.kind==='receipt'){
+    this.learnVersion(sender,payload.caps?.chat);
+    // A read receipt names a message of this account's; the session checks it
+    // against its own history, so it does not depend on this run's `sent` map.
+    if(payload.read===true){if(typeof payload.id!=='string'||!UUID.test(payload.id))throw Error('Invalid receipt');this.options.read?.(payload.id,sender.user_id);}
+    else await this.acceptReceipt(payload.id,sender);
+   }
    else if(payload.kind==='signal'){this.learnVersion(sender,payload.caps?.chat);await this.signal(sender,payload.description);}
    else if(payload.kind==='job'){this.validateTimed(payload.job,validJobRequest,envelope);this.options.job?.(payload.job,sender);}
    else if(payload.kind==='job-status'){this.validateTimed(payload.status,validJobStatus,envelope);this.options.jobStatus?.(payload.status,sender,workspace);}
@@ -329,7 +429,7 @@ export class PeerClient {
   // Storage failure keeps the queue intact; an authenticated duplicate receipt
   // can retry this cleanup after restarting without rerendering the message.
   await this.outbox.remove(delivered);
-  for(const key of delivered){this.pending.delete(key);this.attempted.delete(key);}
+  for(const key of delivered){this.pending.delete(key);this.retries.delete(key);}
   for(const [key,pending]of this.fallbacks)if(pending.message===id&&pending.user===sender.user_id){clearTimeout(pending.timer);this.fallbacks.delete(key);}
   this.options.receipt(id,sender.user_id);
  }
@@ -344,12 +444,24 @@ export class PeerClient {
   return workspace;
  }
  private currentSender(sender:Device){const current=this.devices.get(sender.id)??this.hosts.get(sender.id);return current?.user_id===sender.user_id&&JSON.stringify(current.public_keys)===JSON.stringify(sender.public_keys);}
- private validateMessage(m:ChatMessage,sender:Device,envelope:Envelope){
-  if(!validChatMessage(m)||m.sender!==sender.user_id||(m.recipient!==null&&m.recipient!==this.options.user)||typeof m.text!=='string'||new TextEncoder().encode(m.text).length>16000||!Number.isSafeInteger(m.created)||m.created<envelope.created-300000||m.created>envelope.expires)throw Error('Invalid peer message');
+ /** `backfill`: the author re-sending its own message after an expired
+  * delivery, which may be up to seven days older than its envelope. */
+ private validateMessage(m:ChatMessage,sender:Device,envelope:Envelope,backfill=false){
+  if(!validChatMessage(m)||m.sender!==sender.user_id||(m.recipient!==null&&m.recipient!==this.options.user)||typeof m.text!=='string'||new TextEncoder().encode(m.text).length>16000||!Number.isSafeInteger(m.created))throw Error('Invalid peer message');
+  const fresh=backfill?m.created>=envelope.created-BACKFILL_MS&&m.created<=envelope.created+BACKFILL_SKEW_MS:m.created>=envelope.created-300000&&m.created<=envelope.expires;
+  if(!fresh)throw Error('Invalid peer message');
  }
  /** Same freshness rule as a chat message: created inside the envelope's window. */
  private validateTimed<T extends {created:number}>(value:unknown,valid:(value:unknown)=>value is T,envelope:Envelope){
   if(!valid(value)||value.created<envelope.created-300000||value.created>envelope.expires)throw Error('Invalid peer message');
+ }
+ /** Deletes this device's pulled copies of a deleted message's attachments.
+  * Only received copies of that very message; sent copies stay governed by retention. */
+ async forgetReceivedFiles(message:ChatMessage){
+  for(const meta of message.attachments??[]){
+   const record=await this.files.get(meta.id).catch(()=>undefined);
+   if(record&&record.origin==='received'&&record.messageId===message.id)await this.files.remove?.(meta.id).catch(()=>{});
+  }
  }
  /** This device's stored copy of an attachment, if any. */
  async localFile(id:string){return (await this.files.get(id).catch(()=>undefined))?.blob;}

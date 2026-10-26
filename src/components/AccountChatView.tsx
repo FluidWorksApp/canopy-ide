@@ -1,5 +1,5 @@
 import {useEffect,useId,useLayoutEffect,useMemo,useRef,useState,useSyncExternalStore,type DragEvent,type MouseEvent} from 'react';
-import {teamSession,type DeliveryState,type AttachmentState,type TeamSession} from '../teamMessaging/session';
+import {teamSession,type AttachmentState,type TeamSession} from '../teamMessaging/session';
 import type {Attachment,ChatMessage} from '../teamMessaging/client';
 import {formatBytes} from '../teamMessaging/files';
 import {MAX_ATTACHMENTS,MAX_ATTACHMENT_BYTES} from '../teamMessaging/messageSchema';
@@ -10,9 +10,16 @@ import {ContextMenu,useContextMenu,type MenuItem} from './ContextMenu';
 import {registerSelectAll} from '../selectAll';
 import {isSendKey} from './chatComposerKeys';
 import './teamHub.css';
-import {LinkifiedText} from './LinkifiedText';
 import {AddReactionButton,MessageReactions,ReactionPicker} from './MessageReactions';
 import {reactionChips} from '../teamMessaging/reactions';
+import {ChatLinkCards} from './ChatLinkCards';
+import {ChatThreadPane,ConfirmDelete,DeliveryLine,InlineEditor,MentionList,MessageActions,MessageText,ThreadLine} from './ChatThreadPane';
+import {mentionsFor,useMentionSuggestions} from './chatMessageHelpers';
+import {mentionsUser,threadRoot,threadSummaries} from '../teamMessaging/unread';
+import {isMuted,setMuted} from '../teamMessaging/notifications';
+import {getSettings,subscribeSettings} from '../settings';
+import {ChatCard} from './ChatCard';
+import {cardCaption,cardOf} from '../teamMessaging/cardSchema';
 export type AccountConversation={teamId:string;userId:string;peer:string|null;name:string;email?:string};
 /** Consecutive messages from one sender within this window share one header. */
 const GROUP_MS=5*60_000;
@@ -48,8 +55,6 @@ function AttachmentChip({session,message,file,own,state,sender}:{session:TeamSes
   <div className="account-chat-file-row"><DocumentIcon size={13}/><span className="account-chat-file-name" title={file.name}>{file.name}</span><span className="account-chat-file-size">{formatBytes(file.size)}</span>{status&&<span className="account-chat-file-state">{status}</span>}</div>
  </div>;
 }
-/** Status copy under your own messages; a receipt shows "Delivered" on the latest one. */
-const DELIVERY_LABEL:Record<DeliveryState,string>={sending:'Sending…',sent:'Awaiting delivery',queued:'Saved on this device',waiting:'Waiting for connection',failed:'Not sent',expired:'Not delivered · expired'};
 const time=(t:number)=>new Date(t).toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'});
 const dayKey=(t:number)=>new Date(t).toDateString();
 /** Whether `el` is a field the user may be typing in right now (on screen and editable). */
@@ -65,7 +70,10 @@ export function AccountChatView({conversation,active=true}:{conversation:Account
  const {teamId,userId,peer,name,email}=conversation;
  const session=useMemo(()=>teamSession(teamId,userId),[teamId,userId]);
  useEffect(()=>session.retain(),[session]);
- const {messages,members,receipts,status,restoredIds,delivery={},attachments={},reactions={},undeliveredReactions={}}=useSyncExternalStore(session.subscribe,session.getSnapshot);
+ const {messages,members,receipts,status,restoredIds,delivery={},attachments={},reactions={},undeliveredReactions={},edits={},deleted={},unreadIds=[]}=useSyncExternalStore(session.subscribe,session.getSnapshot);
+ // Threads, edits and deletes (0.4.11): the open thread, the message being edited, the one being deleted.
+ const [thread,setThread]=useState<string>(),[editing,setEditing]=useState<string>(),[confirming,setConfirming]=useState<string>();
+ const muted=useSyncExternalStore(subscribeSettings,()=>isMuted(teamId,peer,getSettings()));
   // On screen: notifications for this conversation stay quiet while the window is focused.
  useEffect(()=>active?showConversation(teamId,userId,peer):undefined,[active,teamId,userId,peer]);
  const [draft,setDraft]=useState(''),[error,setError]=useState('');
@@ -88,8 +96,17 @@ export function AccountChatView({conversation,active=true}:{conversation:Account
   setError(big?`${big.name} is larger than 100 MB`:empty?`${empty.name} is empty`:'');
   setFiles(current=>{const next=[...current,...list.filter(f=>f.size&&f.size<=MAX_ATTACHMENT_BYTES)];if(next.length>MAX_ATTACHMENTS)setError(`Attach up to ${MAX_ATTACHMENTS} files per message`);return next.slice(0,MAX_ATTACHMENTS);});
  };
- const visible=messages.filter(m=>peer===null?m.recipient===null:(m.sender===peer&&m.recipient===userId)||(m.sender===userId&&m.recipient===peer));
- const lastOwn=visible.findLast(m=>m.sender===userId)?.id;
+ const conversationMessages=messages.filter(m=>peer===null?m.recipient===null:(m.sender===peer&&m.recipient===userId)||(m.sender===userId&&m.recipient===peer));
+ // Thread replies live in the thread pane; one whose root is not on this device stays in line.
+ const findMessage=(id:string)=>conversationMessages.find(m=>m.id===id);
+ const visible=conversationMessages.filter(m=>{const root=threadRoot(m,findMessage);return !root||!findMessage(root);});
+ const threads=useMemo(()=>threadSummaries(conversationMessages,unreadIds,userId),[messages,unreadIds,userId]);// eslint-disable-line react-hooks/exhaustive-deps
+ const lastOwn=visible.findLast(m=>m.sender===userId&&!deleted[m.id])?.id;
+ const editable=(m:ChatMessage|undefined)=>!!m&&m.sender===userId&&!deleted[m.id]&&!!(edits[m.id]?.text??m.text);
+ const startEdit=(id:string)=>{setConfirming(undefined);setEditing(id);};
+ const saveEdit=(id:string,text:string)=>{setEditing(undefined);setError('');session.edit(id,text).catch((e:unknown)=>setError(e instanceof Error?e.message:String(e)));input.current?.focus();};
+ const confirmDelete=(id:string)=>{setConfirming(undefined);setError('');session.remove(id).catch((e:unknown)=>setError(e instanceof Error?e.message:String(e)));};
+ const mention=useMentionSuggestions(draft,setDraft,input,members,userId,peer),mentionListId=useId();
  const connected=status.startsWith('Connected');
  // Grow the composer with its content: one line at rest, capped at MAX_LINES.
  useLayoutEffect(()=>{
@@ -119,9 +136,9 @@ export function AccountChatView({conversation,active=true}:{conversation:Account
  function send(){
   const text=draft,attached=files;if(!text.trim()&&!attached.length)return;
   setDraft('');setFiles([]);setError('');input.current?.focus();
-  (attached.length?session.send(text,peer,attached):session.send(text,peer)).catch((e:unknown)=>{setError(e instanceof Error?e.message:String(e));setDraft(current=>current||text);setFiles(current=>current.length?current:attached);});
+  const {mentions,mentionsAll}=mentionsFor(text,members,userId,peer),options={...(mentions?{mentions}:{}),...(mentionsAll?{mentionsAll}:{})};
+  (mentions||mentionsAll?session.send(text,peer,attached,options):attached.length?session.send(text,peer,attached):session.send(text,peer)).catch((e:unknown)=>{setError(e instanceof Error?e.message:String(e));setDraft(current=>current||text);setFiles(current=>current.length?current:attached);});
  }
- const act=(work:()=>unknown)=>{try{void Promise.resolve(work()).catch(()=>{});}catch{/* the message status already shows the failure */}};
  const senderName=(id:string)=>id===userId?'You':members[id]||(peer?name:`Former member (${id.slice(0,8)})`);
  const menu=useContextMenu(),[copied,setCopied]=useState<string>(),copiedTimer=useRef<number>(undefined);
  useEffect(()=>()=>window.clearTimeout(copiedTimer.current),[]);
@@ -130,20 +147,24 @@ export function AccountChatView({conversation,active=true}:{conversation:Account
  useEffect(()=>{const el=log.current;return el?registerSelectAll(el,()=>window.getSelection()?.selectAllChildren(el)):undefined;},[]);
  const transcriptMenu=(e:MouseEvent<HTMLDivElement>)=>{
   const sel=window.getSelection(),picked=sel&&!sel.isCollapsed&&log.current?.contains(sel.anchorNode)?sel.toString():'';
-  const id=(e.target as HTMLElement).closest<HTMLElement>('[data-message]')?.dataset.message,text=visible.find(m=>m.id===id)?.text;
+  const id=(e.target as HTMLElement).closest<HTMLElement>('[data-message]')?.dataset.message,target=visible.find(m=>m.id===id),text=target&&!deleted[target.id]?edits[target.id]?.text??target.text:undefined;
   const items:MenuItem[]=[];
   if(picked.trim())items.push({label:'Copy',onClick:()=>copy(picked,'selection')});
   if(id&&text)items.push({label:'Copy message',onClick:()=>copy(text,id)});
+  if(id&&target&&!deleted[id])items.push({label:'Reply in thread',onClick:()=>setThread(threadRoot(target,findMessage)??id)});
+  if(id&&editable(target))items.push({label:'Edit message',onClick:()=>startEdit(id)});
+  if(id&&target?.sender===userId&&!deleted[id])items.push({label:'Delete message…',onClick:()=>{setEditing(undefined);setConfirming(id);}});
   if(items.length)menu.open(e,items);
  };
  const hasFiles=(e:DragEvent)=>[...e.dataTransfer.types].includes('Files');
- return <section ref={root} className={`account-chat${dropping?' is-dropping':''}`} aria-label={`Chat with ${name}`}
+ return <section ref={root} className={`account-chat${dropping?' is-dropping':''}${thread?' has-thread':''}`} aria-label={`Chat with ${name}`}
   onDragOver={e=>{if(!hasFiles(e))return;e.preventDefault();setDropping(true);}} onDragLeave={e=>{if(e.currentTarget===e.target)setDropping(false);}}
   onDrop={e=>{if(!hasFiles(e))return;e.preventDefault();setDropping(false);addFiles([...e.dataTransfer.files]);}}>
   <header className="account-chat-header">
    <span aria-hidden="true" className="team-avatar">{peer?name.slice(0,1).toUpperCase():'#'}</span>
    <div className="account-chat-title"><h2>{name}</h2><span>{peer?(email||'Direct message'):'Everyone in this team'}</span></div>
    <small role="status" className={`account-chat-status${connected?' is-connected':''}`} title={status}>{connected?<><LockIcon size={12}/>Encrypted</>:status}</small>
+   <Button size="sm" variant="ghost" icon className="chat-mute" aria-pressed={muted} aria-label={muted?'Unmute conversation':'Mute conversation'} title={muted?'Muted: no notifications except mentions of you. Click to unmute.':'Mute notifications for this conversation'} onClick={()=>setMuted(teamId,peer,!muted)}>{muted?'🔕':'🔔'}</Button>
    <span className="account-chat-info" tabIndex={0} role="img" aria-label={STORAGE_NOTE} title={STORAGE_NOTE}><InfoIcon size={14}/></span>
   </header>
   <div className="account-chat-transcript" role="log" aria-label="Messages" ref={log} tabIndex={-1} onContextMenu={transcriptMenu}>
@@ -152,20 +173,27 @@ export function AccountChatView({conversation,active=true}:{conversation:Account
     const prev=visible[i-1],own=m.sender===userId;
     const newDay=!prev||dayKey(prev.created)!==dayKey(m.created);
     const grouped=!newDay&&prev.sender===m.sender&&m.created-prev.created<GROUP_MS;
-    const delivered=own&&!!receipts[m.id]?.length,state=own&&!delivered?delivery[m.id]?.state??(restoredIds?.includes(m.id)?'queued':'sent'):undefined;
+    const isDeleted=!!deleted[m.id],text=isDeleted?'':edits[m.id]?.text??m.text,summary=threads[m.id],orphan=threadRoot(m,findMessage);
+    const delivered=own&&!!receipts[m.id]?.length,state=own&&!delivered&&!isDeleted?delivery[m.id]?.state??(restoredIds?.includes(m.id)?'queued':'sent'):undefined;
     const failed=state==='failed'||state==='expired'||state==='waiting',pending=!!state&&!failed;
-    const receipt=state?DELIVERY_LABEL[state]:delivered&&m.id===lastOwn?'Delivered':'';
+    const card=isDeleted?undefined:cardOf(m),caption=card?cardCaption(text,card):text;
     return <div key={m.id} className={`account-chat-row${own?' own':''}`}>
      {newDay&&<div className="account-chat-day" role="separator"><span>{dayLabel(m.created)}</span></div>}
-     <article className={`account-chat-msg${own?' own':''}${grouped?' grouped':''}${pending?' pending':''}${failed?' failed':''}`} data-delivery={delivered?'delivered':state} data-message={m.id}>
-      {m.text&&<button type="button" className={`account-chat-copy${copied===m.id?' is-copied':''}`} aria-label={copied===m.id?'Copied':'Copy message'} title={copied===m.id?'Copied':'Copy message'} onMouseDown={e=>e.preventDefault()} onClick={()=>copy(m.text,m.id)}>{copied===m.id?<><CheckIcon size={12}/>Copied</>:<CopyIcon size={12}/>}</button>}
+     <article className={`account-chat-msg${own?' own':''}${grouped?' grouped':''}${pending?' pending':''}${failed?' failed':''}${!isDeleted&&mentionsUser(m,userId)?' mentions-me':''}`} data-delivery={delivered?'delivered':state} data-message={m.id}>
+      {text&&<button type="button" className={`account-chat-copy${copied===m.id?' is-copied':''}`} aria-label={copied===m.id?'Copied':'Copy message'} title={copied===m.id?'Copied':'Copy message'} onMouseDown={e=>e.preventDefault()} onClick={()=>copy(text,m.id)}>{copied===m.id?<><CheckIcon size={12}/>Copied</>:<CopyIcon size={12}/>}</button>}
       {!grouped&&<header><strong>{senderName(m.sender)}</strong><time dateTime={new Date(m.created).toISOString()}>{time(m.created)}</time></header>}
-      {m.text&&<p title={time(m.created)}><LinkifiedText text={m.text}/></p>}
-      <AddReactionButton open={reacting===m.id} controls={pickerId} className={m.text?'beside-copy':undefined} onToggle={()=>setReacting(current=>current===m.id?undefined:m.id)}/>
-      {m.attachments?.map(file=><AttachmentChip key={file.id} session={session} message={m} file={file} own={own} state={attachments[file.id]} sender={senderName(m.sender)}/>)}
-      <MessageReactions chips={reactionChips(reactions,m.id,userId)} undelivered={undeliveredReactions[m.id]} name={senderName} onToggle={emoji=>react(m.id,emoji)}
-       picker={reacting===m.id?<ReactionPicker id={pickerId} onPick={emoji=>{closePicker(m.id);react(m.id,emoji);}} onClose={()=>closePicker(m.id)} onDismiss={()=>setReacting(undefined)}/>:undefined}/>
-      {receipt&&<small title={state?delivery[m.id]?.detail:undefined}>{receipt}{failed&&<> · <button type="button" className="account-chat-action" onClick={()=>act(()=>session.retry(m.id))}>Retry</button> · <button type="button" className="account-chat-action" onClick={()=>act(()=>session.discard(m.id))}>Discard</button></>}</small>}
+      {orphan&&<button type="button" className="chat-orphan account-chat-action" onClick={()=>setThread(orphan)}>Reply to a message not on this device</button>}
+      {editing===m.id?<InlineEditor initial={text} onSave={value=>saveEdit(m.id,value)} onCancel={()=>{setEditing(undefined);input.current?.focus();}}/>:<MessageText text={caption} deleted={isDeleted} editedAt={edits[m.id]?.created}/>}
+      {!isDeleted&&<AddReactionButton open={reacting===m.id} controls={pickerId} className={text?'beside-copy':undefined} onToggle={()=>setReacting(current=>current===m.id?undefined:m.id)}/>}
+      {!isDeleted&&editing!==m.id&&<MessageActions onReply={()=>setThread(orphan??m.id)} onEdit={editable(m)?()=>startEdit(m.id):undefined} onDelete={own?()=>{setEditing(undefined);setConfirming(m.id);}:undefined}/>}
+      {text&&!card&&<ChatLinkCards text={text}/>}
+      {card&&<ChatCard message={m} userId={userId} messages={visible} name={senderName} onReply={(reply,ext)=>session.send(reply,peer,[],ext)}/>}
+      {!isDeleted&&m.attachments?.map(file=><AttachmentChip key={file.id} session={session} message={m} file={file} own={own} state={attachments[file.id]} sender={senderName(m.sender)}/>)}
+      {!isDeleted&&<MessageReactions chips={reactionChips(reactions,m.id,userId)} undelivered={undeliveredReactions[m.id]} name={senderName} onToggle={emoji=>react(m.id,emoji)}
+       picker={reacting===m.id?<ReactionPicker id={pickerId} onPick={emoji=>{closePicker(m.id);react(m.id,emoji);}} onClose={()=>closePicker(m.id)} onDismiss={()=>setReacting(undefined)}/>:undefined}/>}
+      {summary&&<ThreadLine replies={summary.replies} last={summary.last} unread={summary.unread} onOpen={()=>setThread(m.id)}/>}
+      {confirming===m.id&&<ConfirmDelete older={session.olderRecipients(peer).map(senderName)} onConfirm={()=>confirmDelete(m.id)} onCancel={()=>setConfirming(undefined)}/>}
+      {own&&!isDeleted&&<DeliveryLine session={session} message={m} latest={m.id===lastOwn} state={state} detail={state?delivery[m.id]?.detail:undefined} delivered={delivered} name={senderName} dm={peer!==null}/>}
      </article>
     </div>;
    })}
@@ -173,14 +201,20 @@ export function AccountChatView({conversation,active=true}:{conversation:Account
   {menu.menu&&<ContextMenu x={menu.menu.x} y={menu.menu.y} items={menu.menu.items} onClose={menu.close}/>}
   <form className="account-chat-composer" onSubmit={e=>{e.preventDefault();void send();}}>
    {error&&<p role="alert">{error}</p>}
+   <MentionList id={mentionListId} {...mention} onPick={mention.pick}/>
    {files.length>0&&<ul className="account-chat-pending" aria-label="Attachments">{files.map((f,i)=><li key={`${f.name}:${i}`}><span title={f.name}>{f.name}</span> · {formatBytes(f.size)}<button type="button" aria-label={`Remove ${f.name}`} onClick={()=>setFiles(current=>current.filter((_,j)=>j!==i))}>×</button></li>)}</ul>}
    <div className="account-chat-input">
     <input ref={picker} type="file" multiple hidden aria-hidden="true" tabIndex={-1} onChange={e=>{addFiles([...(e.target.files??[])]);e.currentTarget.value='';}}/>
     <Button type="button" variant="ghost" icon className="account-chat-attach" aria-label="Attach files" title="Attach files · sent directly between devices, never uploaded" onClick={()=>picker.current?.click()}>📎</Button>
-    <textarea ref={input} rows={1} aria-label="Message" aria-describedby={hintId} placeholder={`Message ${name}…`} value={draft} onChange={e=>setDraft(e.target.value)} onPaste={e=>{const pasted=[...(e.clipboardData?.files??[])];if(!pasted.length)return;e.preventDefault();addFiles(pasted);}} onKeyDown={e=>{if(isSendKey(e)){e.preventDefault();void send();}}} maxLength={16000}/>
+    <textarea ref={input} rows={1} aria-label="Message" aria-describedby={hintId} placeholder={`Message ${name}…`} value={draft} onChange={e=>{setDraft(e.target.value);mention.track();}} onSelect={mention.track} aria-controls={mention.suggestions.length?mentionListId:undefined} onPaste={e=>{const pasted=[...(e.clipboardData?.files??[])];if(!pasted.length)return;e.preventDefault();addFiles(pasted);}}
+     onKeyDown={e=>{if(mention.onKeyDown(e))return;
+      // Up in an empty message box edits your last message.
+      if(e.key==='ArrowUp'&&!draft&&!files.length&&!e.shiftKey&&!e.altKey&&!e.metaKey&&!e.ctrlKey&&lastOwn&&editable(visible.find(m=>m.id===lastOwn))){e.preventDefault();startEdit(lastOwn);return;}
+      if(isSendKey(e)){e.preventDefault();void send();}}} maxLength={16000}/>
     <Button type="submit" variant="accent" icon aria-label="Send" title="Send (Enter)" disabled={!draft.trim()&&!files.length}><SendIcon size={14}/></Button>
    </div>
    <small id={hintId} className="account-chat-hint"><kbd>Enter</kbd> to send · <kbd>Shift</kbd>+<kbd>Enter</kbd> for a new line</small>
   </form>
+  {thread&&<ChatThreadPane session={session} root={thread} peer={peer} userId={userId} name={senderName} active={active} onClose={()=>{setThread(undefined);input.current?.focus();}}/>}
  </section>;
 }
