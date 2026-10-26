@@ -1780,14 +1780,10 @@ fn setup_agy_hooks(cfg: &str, home: &str) -> Result<String, String> {
     ))
 }
 
-/// The file agy loads global hooks from. Profile-aware through `cfg`, like the
-/// MCP registry beside it in `.gemini/config/`.
-fn agy_hooks_path(cfg: &str) -> std::path::PathBuf {
-    std::path::PathBuf::from(cfg).join(".gemini/config/hooks.json")
-}
-
-/// The events Canopy registers under its `canopy` hook name. Kept beside the
-/// installer so the ownership check reads the same list.
+/// The events Canopy registers under its `canopy` hook name. Kept directly
+/// after the installer: the ownership check reads the same list, and
+/// src/agentFidelityGuard.test.ts reads the installer's text through to the
+/// next `fn`.
 const AGY_HOOK_EVENTS: &[&str] = &[
     "SessionStart",
     "PostToolUse",
@@ -1795,6 +1791,12 @@ const AGY_HOOK_EVENTS: &[&str] = &[
     "PostInvocation",
     "Stop",
 ];
+
+/// The file agy loads global hooks from. Profile-aware through `cfg`, like the
+/// MCP registry beside it in `.gemini/config/`.
+fn agy_hooks_path(cfg: &str) -> std::path::PathBuf {
+    std::path::PathBuf::from(cfg).join(".gemini/config/hooks.json")
+}
 
 fn agy_hook_group(command: &str) -> serde_json::Value {
     // Grouped handlers only for tool events. Lifecycle events are a flat
