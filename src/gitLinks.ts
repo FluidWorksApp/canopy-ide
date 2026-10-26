@@ -19,6 +19,13 @@
 // that lands on the wrong thing is worse than one that opens a web page.
 import type * as ipc from "./ipc";
 import { repoLabel } from "./prs";
+import {
+  cardUrl,
+  validCardPath,
+  validRepo,
+  type Card,
+  type RepoRef,
+} from "./teamMessaging/cardSchema";
 
 /** What a git-host URL is about. `slug` is the host's own `owner/name` —
  *  matched against a checkout's origin, never used as a path. */
@@ -249,5 +256,145 @@ export async function resolveGitLink(
       const here = await or(look.fileExists(repo, link.path), false);
       return here ? { do: "file", repo, path: link.path, line: link.line } : null;
     }
+  }
+}
+
+// ---------- share cards ----------
+// A teammate's share card (teamMessaging/cardSchema.ts) names a repository by
+// host and `owner/name`, never by a path, and its subject by number, full
+// commit id and repo-relative path. Resolving one is the same question as a
+// link — is that thing here? — asked a little more strictly: the whole slug and
+// the host must match, and a file must survive a Rust containment check that
+// follows symlinks before anything is offered.
+
+/** `{host, slug}` for an origin URL — ssh, scp-style or https, with or without
+ *  `.git` — or null when it is not a URL a card can name (no origin, a local
+ *  path, an odd host). Credentials and ssh ports are dropped: a card never
+ *  carries either. */
+export function repoRefFromRemote(remoteUrl: string): RepoRef | null {
+  const raw = remoteUrl.trim().replace(/\/+$/, "").replace(/\.git$/i, "");
+  if (!raw) return null;
+  let host = "";
+  let path = "";
+  const scp = /^(?:[^@/\s]+@)?([^:/\s]+):(?!\/)(.+)$/.exec(raw);
+  if (/^[a-z][a-z0-9+.-]*:\/\//i.test(raw)) {
+    let url: URL;
+    try {
+      url = new URL(raw);
+    } catch {
+      return null;
+    }
+    if (!/^(https?|ssh|git|git\+ssh|ssh\+git):$/.test(url.protocol)) return null;
+    host = url.hostname.toLowerCase();
+    // A web port is part of where the web page is; an ssh port is not.
+    if (url.port && /^https?:$/.test(url.protocol)) host += `:${url.port}`;
+    path = url.pathname;
+  } else if (scp) {
+    host = scp[1].toLowerCase();
+    path = scp[2];
+  } else {
+    return null;
+  }
+  const slug = path.split("/").filter(Boolean).join("/").replace(/\.git$/i, "");
+  const ref = { host, slug };
+  return validRepo(ref) ? ref : null;
+}
+
+/** Is this checkout's origin the repo a card names? The whole slug, case-
+ *  insensitively, and the host — except for an ssh alias (`work:owner/repo`
+ *  through ~/.ssh/config), whose "host" is not a hostname at all. */
+export function remoteMatchesRepo(remoteUrl: string, repo: RepoRef): boolean {
+  const here = repoRefFromRemote(remoteUrl);
+  if (!here) return false;
+  if (here.slug.toLowerCase() !== repo.slug.toLowerCase()) return false;
+  return here.host === repo.host || !here.host.includes(".");
+}
+
+/** What a card's buttons do here. `web` means no checkout (or nothing in it)
+ *  answers: open the canonical page on the host. `none` means the card is its
+ *  own content (terminal output, a report about no PR). */
+export type ShareAction =
+  | { do: "pr"; repo: string; pr: ipc.PrInfo }
+  | { do: "commit"; repo: string; commit: ipc.CommitDetail }
+  | {
+      do: "file";
+      repo: string;
+      path: string;
+      line?: number;
+      /** The commit the card was shared at. */
+      rev: string;
+      /** This checkout's HEAD ("" when unknown). */
+      head: string;
+      /** The working copy has the file, inside the repo. */
+      exists: boolean;
+    }
+  | { do: "web"; url: string; host: string; repo?: string }
+  | { do: "none" };
+
+export interface ShareCardLookups extends GitLinkLookups {
+  /** This checkout's HEAD, full id. */
+  head(repo: string): Promise<string>;
+  /** The file's real path when it exists and stays inside the repo after
+   *  every symlink (fs_repo_path); rejects otherwise. */
+  containedPath(repo: string, path: string): Promise<string>;
+}
+
+/** The checkout whose origin is the card's repo, or null. */
+export async function repoForRef(
+  ref: RepoRef,
+  look: Pick<GitLinkLookups, "repos" | "remoteUrl">,
+): Promise<string | null> {
+  for (const repo of look.repos) {
+    if (remoteMatchesRepo(await or(look.remoteUrl(repo), ""), ref)) return repo;
+  }
+  return null;
+}
+
+/** What to open for a share card, having checked it is really here. Never
+ *  opens anything itself; the card's buttons act on the answer. */
+export async function resolveShareCard(
+  card: Card,
+  look: ShareCardLookups,
+): Promise<ShareAction> {
+  const ref = "repo" in card ? card.repo : undefined;
+  const web = (repo?: string): ShareAction => {
+    const url = cardUrl(card);
+    return url && ref ? { do: "web", url, host: ref.host, ...(repo ? { repo } : {}) } : { do: "none" };
+  };
+  if (!ref) return { do: "none" };
+  const repo = await repoForRef(ref, look);
+  if (!repo) return web();
+  const asPr = async (number: number): Promise<ShareAction | null> => {
+    const pr = (await or(look.prs(repo), [])).find((p) => p.number === number);
+    return pr ? { do: "pr", repo, pr } : null;
+  };
+  switch (card.type) {
+    case "pr":
+    case "review-request":
+    case "review-outcome":
+      return (await asPr(card.number)) ?? web(repo);
+    case "report":
+      return card.pr ? ((await asPr(card.pr)) ?? web(repo)) : { do: "none" };
+    case "diff": {
+      if (card.pr) {
+        const pr = await asPr(card.pr);
+        if (pr) return pr;
+      }
+      const commit = await look.commit(repo, card.head).catch(() => null);
+      return commit ? { do: "commit", repo, commit } : web(repo);
+    }
+    case "file": {
+      // cardSchema validated the path on arrival; check again before the disk
+      // is touched, then let Rust resolve symlinks and hold it to the repo.
+      if (!validCardPath(card.path) || !pathInRepo(repo, card.path)) return web(repo);
+      const exists = await look
+        .containedPath(repo, card.path)
+        .then(() => true)
+        .catch(() => false);
+      const head = await or(look.head(repo), "");
+      return { do: "file", repo, path: card.path, line: card.lines?.start, rev: card.rev, head, exists };
+    }
+    case "terminal":
+      return { do: "none" };
   }
 }

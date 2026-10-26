@@ -224,6 +224,17 @@ export function cardText(card:Card,note=''):string{
  return parts.join('\n');
 }
 
+/** What to show above a card: the sender's note when the text is exactly the
+ *  generated fallback for this card (the card says the rest), otherwise the
+ *  whole text — a text that says something other than its card is shown as
+ *  sent, never hidden behind it. */
+export function cardCaption(text:string,card:Card):string{
+ const generated=cardText(card);
+ if(text===generated)return '';
+ if(text.endsWith(`\n${generated}`))return text.slice(0,-generated.length-1);
+ return text;
+}
+
 // ---------- the message ----------
 /** The optional fields a card message adds to a chat message. `mentions` and
  *  `thread` belong to the messaging engine; a card only sets them. */

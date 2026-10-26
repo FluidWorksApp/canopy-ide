@@ -86,6 +86,56 @@ export function routeGitLinkElsewhere(
   );
 }
 
+// ---------- share cards ----------
+// A card in team chat has already resolved to a checkout (resolveShareCard)
+// when its button is clicked, so the question is only *which open project*
+// holds that checkout. ChatCard → App (ROUTE) → the project → ProjectView
+// (OPEN), on the same 80ms hand-off as a link.
+
+/** ChatCard → App: open this resolved card in the project that has `repo`. */
+export const ROUTE_SHARE_ACTION_EVENT = "canopy:route-share-action";
+/** App → one ProjectView: open this resolved card. */
+export const OPEN_SHARE_ACTION_EVENT = "canopy:open-share-action";
+
+/** The native things a card can open in a project. */
+export type ShareOpen =
+  | { do: "pr"; repo: string; pr: ipc.PrInfo }
+  | { do: "commit"; repo: string; commit: ipc.CommitDetail }
+  | { do: "file"; repo: string; path: string; line?: number };
+
+export interface RouteShareActionDetail {
+  action: ShareOpen;
+  /** Runs when no open project holds the checkout any more. */
+  fallback: () => void;
+}
+export interface OpenShareActionDetail {
+  projectId: string;
+  action: ShareOpen;
+}
+
+/** The open project holding `repo` (a component path), preferring the one in
+ *  front. */
+export function projectForRepo(
+  repo: string,
+  projects: readonly RoutableProject[],
+  activeId?: string | null,
+): string | null {
+  const holds = (p: RoutableProject) => p.repos.includes(repo);
+  const active = projects.find((p) => p.id === activeId && holds(p));
+  return (active ?? projects.find(holds))?.id ?? null;
+}
+
+/** ChatCard side: ask App to open a resolved card. False when nothing is
+ *  listening — the caller then shows the page instead. */
+export function routeShareAction(action: ShareOpen, fallback: () => void): boolean {
+  return !window.dispatchEvent(
+    new CustomEvent<RouteShareActionDetail>(ROUTE_SHARE_ACTION_EVENT, {
+      detail: { action, fallback },
+      cancelable: true,
+    }),
+  );
+}
+
 /** The lookups openGitLink has always used, for any set of checkouts — one
  *  copy, so the project in front and App's cross-project question can never
  *  disagree about whether a link is "here". */
