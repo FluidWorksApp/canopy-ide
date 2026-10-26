@@ -165,6 +165,7 @@ import {
   inspectFleetRoute,
   type FleetRouteSnapshot,
 } from "../../fleetSnapshot";
+import { chosenBrainId, resolveBrain } from "../../brain";
 import {
   pickLaunchCli,
   startCommandParked,
@@ -10667,10 +10668,12 @@ const ProjectViewBody = memo(function ProjectViewBody({
   if (vibeOwnedPreviewId.current && !vibePreview) vibeOwnedPreviewId.current = null;
   const vibePreviewIdRef = useRef<string | null>(null);
   vibePreviewIdRef.current = vibePreview?.id ?? null;
-  const vibePrimaryCli = pickLaunchCli(
-    undefined,
-    (bin) => Boolean(installed[bin]),
-  );
+  const vibePrimaryCli = resolveBrain((bin) => Boolean(installed[bin]));
+  // Read at creation by the bootstrap session below, which deliberately does
+  // not rebuild when detection settles: recreating it would stop a turn that
+  // may already be running.
+  const vibePrimaryCliRef = useRef(vibePrimaryCli);
+  vibePrimaryCliRef.current = vibePrimaryCli;
   const vibeComponentId = vibeComponent?.id ?? null;
   const vibeComponentLabel = vibeComponent?.label ?? null;
   const vibeComponentPath = vibeComponent?.path ?? null;
@@ -10720,8 +10723,11 @@ const ProjectViewBody = memo(function ProjectViewBody({
             projectName: project.name,
             componentId: vibeComponentId,
             componentPath: vibeComponentPath,
-            cliId: vibePrimaryCli?.id ?? getSettings().defaultAgent,
-            cliBin: vibePrimaryCli?.bin ?? getSettings().defaultAgent,
+            // The fallbacks only run while the registry is empty, when the id
+            // is the only name there is; the session resolves the bin through
+            // the registry first and reaches cliBin only when that fails.
+            cliId: vibePrimaryCli?.id ?? chosenBrainId(),
+            cliBin: vibePrimaryCli?.bin ?? chosenBrainId(),
             checkCommand: vibeCheckCommand,
             checkCaveat: vibeCheckCaveat,
             siblingPaths: components
@@ -10761,9 +10767,13 @@ const ProjectViewBody = memo(function ProjectViewBody({
     const components = bootstrapComponents.current;
     const component = components[0];
     if (!vibe || vibeTarget.kind !== "needs-setup" || !bootstrapState?.empty || !component) return null;
+    // The same brain as the Build session above, not the raw setting: the
+    // setting names a CLI whether or not it is installed, and its id is not
+    // its binary once the person has rebound it.
+    const brain = vibePrimaryCliRef.current;
     return createVibeBuilderSession({
       projectId: project.id, projectName: project.name, componentId: component.id, componentPath: component.path,
-      cliId: getSettings().defaultAgent, cliBin: getSettings().defaultAgent,
+      cliId: brain?.id ?? chosenBrainId(), cliBin: brain?.bin ?? chosenBrainId(),
       projectComponents: components, siblingPaths: components.slice(1).map((item) => item.path),
       previewTabId: () => null, recoverRoute: recoverVibeRoute,
       onBootstrapReady: async () => {
