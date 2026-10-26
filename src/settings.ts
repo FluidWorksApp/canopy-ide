@@ -427,6 +427,14 @@ export interface Settings {
    *  `canopy_spawn_agent`. On by default; turning it off removes the tool from
    *  the bridge contract and rejects calls from already-initialized clients. */
   agentsMaySpawn: boolean;
+  /** Connect Claude Code to Canopy as its IDE, the way it connects to VS Code:
+   *  proposed edits open as a diff to accept, tweak or reject, the editor
+   *  selection reaches the prompt, and the CLI reads diagnostics off Canopy's
+   *  language servers. On by default. Off starts no server, writes no lock and
+   *  adds nothing to the terminal's env; Claude then uses Canopy's MCP editor
+   *  tools like every other CLI. Takes effect for terminals started after the
+   *  change — a running CLI keeps the connection it was launched with. */
+  claudeIdeIntegration: boolean;
   /** Show attention items outside the notification centre: corner cards,
    * companion notices, native banners, and the remote companion channel. Off
    * is a presentation preference only — every item stays in the shared queue
@@ -608,6 +616,7 @@ export const DEFAULTS: Settings = {
   customMicroTasks: [],
   agentAskForAttention: false,
   agentsMaySpawn: true,
+  claudeIdeIntegration: true,
   notificationPopupsEnabled: true,
   teamMessageNotifications: true,
   teamMessagePreviews: true,

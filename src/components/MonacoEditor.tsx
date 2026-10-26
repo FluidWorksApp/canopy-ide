@@ -6,6 +6,7 @@ import { useEffect, useRef } from "react";
 import { monaco } from "../monaco-setup";
 import { getSettings, THEME_CHANGE_EVENT } from "../settings";
 import { setCaret, truncateSelection } from "../editorState";
+import { claudeEditorHooks } from "../claudeEditorHooks";
 import {
   editorViewState,
   rememberEditorViewState,
@@ -93,6 +94,20 @@ export function MonacoEditor({
       !readOnlyRef.current&&saveRef.current(),
     );
     editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyA,selectAll);
+    // "Add to Claude": an @-mention of this file and the selected lines in the
+    // prompt of the Claude Code session working on it (claudeIde.ts). The
+    // chord is Claude's own VS Code binding, so the muscle memory carries.
+    const addToClaude = editor.addAction({
+      id: "canopy.addToClaude",
+      label: "Add to Claude",
+      contextMenuGroupId: "navigation",
+      contextMenuOrder: 1.5,
+      keybindings: [monaco.KeyMod.CtrlCmd | monaco.KeyMod.Alt | monaco.KeyCode.KeyK],
+      run: async (ed) => {
+        const current = ed.getModel();
+        if (current) await claudeEditorHooks()?.addToClaude(current, ed.getSelection());
+      },
+    });
     // Read through the ref, so a tab that isn't collaborating pays for one
     // dead callback rather than the subscription being torn down and rebuilt
     // every time the parent re-renders.
@@ -102,6 +117,9 @@ export function MonacoEditor({
       // Same event feeds the agent tools: where the caret is, and what is
       // highlighted, is the context behind every "fix this".
       const head = e.selection.getPosition();
+      // A Claude Code session on this file sees the selection too; an empty
+      // one tells it which file is in front of the user.
+      claudeEditorHooks()?.selection(m, e.selection);
       setCaret({
         path: m.uri.path,
         line: head.lineNumber,
@@ -129,6 +147,7 @@ export function MonacoEditor({
       }
       window.removeEventListener(THEME_CHANGE_EVENT, onSettingsChange);
       releaseSelectAll();
+      addToClaude.dispose();
       cursorSub.dispose();
       editor.dispose();
       editorRef.current = null;
@@ -147,6 +166,9 @@ export function MonacoEditor({
     }
     const pos = editor.getPosition();
     setCaret({ path: model.uri.path, line: pos?.lineNumber ?? 1, column: pos?.column ?? 1 });
+    // A file coming to the front is "the user opened it" to Claude Code.
+    const selection = editor.getSelection();
+    if (selection) claudeEditorHooks()?.selection(model, selection);
     const sub = model.onDidChangeContent(() => dirtyRef.current(true));
     // An agent that says "look at line 340" (canopy_open_file) reaches the
     // editor here: the tab may already have been open, so this can't ride on

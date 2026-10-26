@@ -877,6 +877,35 @@ export interface AgentUiOp {
 export const onAgentUi = (cb: (op: AgentUiOp) => void): Promise<UnlistenFn> =>
   listen<AgentUiOp>("agent:ui", (event) => cb(event.payload));
 
+/** Claude Code's IDE protocol (claude_ide.rs): what a Claude agent tab's CLI
+ *  needs from the window — a diff answered, diagnostics read off Monaco, its
+ *  connection coming and going. One event, discriminated by `kind`. */
+export const onClaudeIde = (
+  cb: (event: import("./claudeIde").ClaudeIdeEvent) => void,
+): Promise<UnlistenFn> =>
+  listen<import("./claudeIde").ClaudeIdeEvent>("claude-ide", (event) => cb(event.payload));
+/** Accept a Claude diff with the final contents (the user's edit, if any),
+ *  or reject it. Rejects when the CLI is no longer waiting — the user
+ *  answered in the terminal first. */
+export const claudeIdeResolveDiff = (
+  ptyId: number,
+  tabName: string,
+  accept: boolean,
+  contents?: string,
+) => invoke<void>("claude_ide_resolve_diff", { ptyId, tabName, accept, contents });
+export const claudeIdeReply = (requestId: number, data: unknown) =>
+  invoke<void>("claude_ide_reply", { requestId, data }).catch(() => {});
+/** Resolves with how many Claude sessions received the selection. */
+export const claudeIdeSelection = (path: string, params: unknown) =>
+  invoke<number>("claude_ide_selection", { path, params });
+/** Resolves with the terminal whose prompt got the mention. */
+export const claudeIdeAtMention = (opts: {
+  path: string;
+  lineStart?: number;
+  lineEnd?: number;
+  prefer?: number;
+}) => invoke<number>("claude_ide_at_mention", opts);
+
 /** Report one step of a mesh job to the terminal that submitted it: kept on
  *  the mesh under ref {kind: "job"} and announced in that terminal. Resolves
  *  with the mesh message id. */

@@ -87,6 +87,7 @@ import { remoteAttentionSnapshot } from "./remoteAttention";
 import { useAttention } from "./useAttention";
 import { NotificationCenter } from "./components/NotificationCenter";
 import { runUiOp, type CompanionOps, type WorkspaceProject } from "./agentOps";
+import { startClaudeIdeBridge } from "./claudeIdeBridge";
 import { workspaceAgents, workspaceGit, workspaceSearch } from "./companionWorkspace";
 import { companionName, summonCompanion } from "./companion";
 import type { CompanionProposal } from "./companionSession";
@@ -2653,6 +2654,10 @@ export default function App() {
       });
     return () => un?.();
   }, [prepareProjectForAgentAction]);
+
+  // Claude Code's IDE link: diffs, diagnostics and the editor's selection
+  // between this window and each Claude agent tab's CLI (claudeIdeBridge.ts).
+  useEffect(() => startClaudeIdeBridge(), []);
 
   // The ops only this window can answer (canopy_diagnostics, canopy_references,
   // canopy_definition, canopy_tickets, canopy_reviews, canopy_ask_user). Unlike

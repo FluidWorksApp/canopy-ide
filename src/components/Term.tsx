@@ -36,6 +36,7 @@ import { terminalCompactionProtected } from "../terminalGroups";
 import { registerTerminalPressureShedder } from "../rendererPressureRelief";
 import { registerTerminalWindowEvents } from "../terminalWindowEvents";
 import { terminalKeyBlocked } from "../useEscape";
+import { claudeIdeLaunchEnv } from "../claudeIde";
 
 /** Quote a dropped path for the shell, the way iTerm2/Terminal.app do. Paths
  *  that are pure safe chars pass through bare; anything else is single-quoted,
@@ -909,6 +910,14 @@ export const Term = forwardRef<TermHandle, TermProps>(function Term(
 
       try {
         const spawnEpoch = streamEpoch;
+        // Decided at spawn rather than stored on the tab: whether this launch
+        // gets a Claude Code IDE server depends on the setting *now*, and a
+        // restored tab must not carry a marker from a launch long gone.
+        const ideEnv = claudeIdeLaunchEnv({
+          command: initialCommand,
+          runCommand,
+          root: workspacePath ?? cwd,
+        });
         const spawnOpts = {
             // 0 tells Rust to fall back to 80x24; the first resize once the tab is
             // visible corrects it.
@@ -917,7 +926,7 @@ export const Term = forwardRef<TermHandle, TermProps>(function Term(
             cwd,
             highWater: settings.ptyHighWater,
             runCommand,
-            env,
+            env: ideEnv.length ? [...(env ?? []), ...ideEnv] : env,
             runId,
             attemptId,
             projectId,

@@ -13,9 +13,10 @@
 // "none": it means the IDE must not promise the feature, not that the CLI
 // lacks it.
 //
-// Nothing reads this yet. It exists now so the research that fills it in has a
-// typed place to land, and so the first surface built on it cannot quietly
-// assume Claude's shape for every CLI.
+// The first reader is the Claude Code IDE link (claudeIde.ts), which serves
+// `ideProtocol` only where it is native. The ledger exists so the research
+// that fills it in has a typed place to land, and so a surface built on it
+// cannot quietly assume Claude's shape for every CLI.
 
 /** How far a harness supports one feature.
  *
@@ -93,9 +94,9 @@ const CLAUDE_RUNNER_STAMP =
   "src/structuredRunners.ts CLAUDE_RUNNER.verification (Claude Code 2.1.226, `claude --help`, 2026-08-09)";
 
 /** Claude Code, filled only from what the repo has already stamped. Rewind,
- *  the IDE protocol, subagents and compaction are left unknown on purpose:
- *  they may well exist, but no file here records them being checked, and a
- *  surface that trusted a remembered flag would fail in front of the person. */
+ *  subagents and compaction are left unknown on purpose: they may well exist,
+ *  but no file here records them being checked, and a surface that trusted a
+ *  remembered flag would fail in front of the person. */
 const CLAUDE_CODE: HarnessCapabilities = {
   ...allUnknown(),
   headlessStructuredRun: {
@@ -107,6 +108,11 @@ const CLAUDE_CODE: HarnessCapabilities = {
     support: "native",
     note: "`--permission-mode plan`.",
     source: `${CLAUDE_RUNNER_STAMP}; flags.planMode`,
+  },
+  ideProtocol: {
+    support: "native",
+    note: "Lock file + loopback WebSocket (MCP over `ws`, subprotocol `mcp`): openDiff/close_tab/closeAllDiffTabs, getDiagnostics, selection_changed, at_mentioned. Interactive TUI only — `-p` runs never connect. executeCode's shape is unverified.",
+    source: "research_notes/Harness capability parity matrix/claude_ide_protocol_capture.md (Claude Code 2.1.310, wire capture, 2026-10-26)",
   },
   sessionsResumeFork: {
     support: "partial",

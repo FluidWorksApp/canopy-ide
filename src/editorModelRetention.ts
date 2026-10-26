@@ -343,6 +343,14 @@ export function updateEditorModelOwner(
   return true;
 }
 
+/** Whether a tab (rather than only an agent lease) holds this model. A model
+ *  nobody is editing can be refreshed from disk behind the scenes; one a tab
+ *  owns has unsaved edits and its own disk-change review to respect. */
+export function hasEditorModelOwner(key: string): boolean {
+  for (const owner of owners.values()) if (owner.key === key) return true;
+  return false;
+}
+
 export function removeEditorModelOwner(ownerId: string): void {
   const previous = owners.get(ownerId);
   if (!previous) return;
