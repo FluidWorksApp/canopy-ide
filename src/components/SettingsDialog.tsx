@@ -1580,6 +1580,21 @@ export function SettingsDialog({ onClose, initialTab = "appearance" }: SettingsD
                   />
                 </Item>
                 <Item
+                  name="Claude Code editor link"
+                  desc="Let Claude Code use Canopy as its IDE: diffs to review, your selection, and live diagnostics."
+                >
+                  <Checkbox
+                    checked={s.claudeIdeIntegration}
+                    onChange={(v) => patch({ claudeIdeIntegration: v })}
+                    label="Connect Claude Code to the editor"
+                    hint={
+                      s.claudeIdeIntegration
+                        ? "New Claude tabs open proposed edits as a diff here and see what you select. Running tabs keep their current setting."
+                        : "Claude uses Canopy's MCP editor tools instead. Running tabs keep their current setting."
+                    }
+                  />
+                </Item>
+                <Item
                   name="Memory monitoring prompts"
                   desc="Choose whether terminal memory warnings and allowance decisions appear while you work."
                 >

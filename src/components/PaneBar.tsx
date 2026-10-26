@@ -39,6 +39,7 @@ import { claimOwnerName } from "../claims";
 import { tabName } from "../tabName";
 import { Button } from "./ui";
 import { badgeLabel } from "../teamMessaging/unread";
+import { ClaudeIdeBadge } from "./ClaudeIdeBadge";
 import { nextTickMs, PREVIEW_TICK_MS } from "../tabPreview";
 import {
   TabPreviewShot,
@@ -666,6 +667,7 @@ function PaneBarImpl({
                       {profileLabels?.[tab.profile] ?? tab.profile}
                     </span>
                   )}
+                  {tab.type === "terminal" && <ClaudeIdeBadge ptyId={tab.ptyId} />}
                   {tab.type === "terminal" && Boolean(tab.multiplexCount && tab.multiplexCount > 1) && (
                     <span className="tab-multiplex-count" title={`${tab.multiplexCount} panes`}>
                       {tab.multiplexCount}

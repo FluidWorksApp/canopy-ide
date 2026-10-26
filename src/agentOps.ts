@@ -76,8 +76,9 @@ const rootFor = (path: string, roots: string[]): string | null =>
 
 /** Make sure the file is a live model the language server has been told about.
  *  Opening the model is what triggers didOpen, which is what makes the server
- *  produce diagnostics for a file the user never opened. */
-async function prime(path: string, roots: string[]): Promise<{ root: string; text: string }> {
+ *  produce diagnostics for a file the user never opened. Also how Claude
+ *  Code's getDiagnostics baseline warms a file (claudeIdeBridge.ts). */
+export async function prime(path: string, roots: string[]): Promise<{ root: string; text: string }> {
   const root = rootFor(path, roots);
   if (!root) throw new Error(`${path} isn't inside any open Canopy project`);
   const existing = monaco.editor.getModel(monaco.Uri.file(path));

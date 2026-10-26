@@ -532,6 +532,9 @@ import { ClaimView } from "../ClaimView";
 import { claimOwnerPty } from "../../claims";
 import { ChatView } from "../ChatView";
 import { Coachmark } from "../Coachmark";
+import { ClaudeDiffDock } from "../ClaudeDiffDock";
+import { noteActiveTerminal } from "../../claudeIde";
+import { CLAUDE_MENTIONED_EVENT } from "../../claudeIdeBridge";
 import { shouldShowTip, markTipSeen, type CoachTip } from "../../coachmarks";
 import { ActivityRail } from "../ActivityRail";
 import { PaneBar } from "../PaneBar";
@@ -6116,6 +6119,32 @@ const ProjectViewBody = memo(function ProjectViewBody({
     window.addEventListener("canopy:start-session", onStart);
     return () => window.removeEventListener("canopy:start-session", onStart);
   }, [project.id, startMicroTask]);
+
+  // Claude Code's IDE link (claudeIde.ts). "Add to Claude" prefers the
+  // terminal the user last had in front of them, so the active one is noted;
+  // and once a mention lands, the terminal it went to comes forward, since
+  // the next thing the user does is type the rest of the prompt there.
+  const activeTerminalPty = useMemo(() => {
+    const tab = tabs.find((t) => t.id === activeTabId);
+    return tab?.type === "terminal" ? tab.ptyId : null;
+  }, [tabs, activeTabId]);
+  useEffect(() => {
+    if (visible && activeTerminalPty != null) noteActiveTerminal(activeTerminalPty);
+  }, [visible, activeTerminalPty]);
+  useEffect(() => {
+    const onMentioned = (e: Event) => {
+      const ptyId = (e as CustomEvent<{ ptyId: number }>).detail?.ptyId;
+      const tab = tabsRef.current.find((t) => t.type === "terminal" && t.ptyId === ptyId);
+      if (tab) setActiveTabId(tab.id);
+    };
+    window.addEventListener(CLAUDE_MENTIONED_EVENT, onMentioned);
+    return () => window.removeEventListener(CLAUDE_MENTIONED_EVENT, onMentioned);
+  }, []);
+  const terminalPtys = useMemo(
+    () =>
+      tabs.flatMap((t) => (t.type === "terminal" && t.ptyId != null ? [t.ptyId] : [])),
+    [tabs],
+  );
 
   // The tail of a deep link (deepLinks.ts): App resolved the project and
   // opened it, and this lands on the actual thing — the terminal an agent was
@@ -14791,6 +14820,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
           }}
         />
       )}
+      <ClaudeDiffDock ptyIds={terminalPtys} onNotice={onNotice} />
       {coachTip && visible && (
         <Coachmark
           targetSelector={COACH_TIPS[coachTip].selector}

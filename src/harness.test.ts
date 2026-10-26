@@ -34,10 +34,13 @@ describe("harness capabilities", () => {
     expect(harnessSupport("claude", "usageReporting")).toBe("native");
     // Resume is verified; fork is not.
     expect(harnessSupport("claude", "sessionsResumeFork")).toBe("partial");
+    // The IDE protocol, from the 2.1.310 wire capture.
+    expect(harnessSupport("claude", "ideProtocol")).toBe("native");
+    expect(harnessCapabilities("claude").ideProtocol.source).toMatch(/claude_ide_protocol_capture\.md/);
   });
 
   it("leaves Claude Code's unchecked features unknown", () => {
-    for (const feature of ["checkpointsRewind", "ideProtocol", "subagents", "compaction"] as const) {
+    for (const feature of ["checkpointsRewind", "subagents", "compaction"] as const) {
       expect(harnessSupport("claude", feature)).toBe("unknown");
     }
   });

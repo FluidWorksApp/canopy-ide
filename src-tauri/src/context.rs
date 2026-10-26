@@ -534,7 +534,7 @@ impl ContextBridge {
 /// over loopback to processes Canopy started, so this is defence in depth
 /// rather than a live hole — but a byte-by-byte `==` on a credential is worth
 /// no argument.
-fn constant_time_eq(a: &str, b: &str) -> bool {
+pub(crate) fn constant_time_eq(a: &str, b: &str) -> bool {
     let (a, b) = (a.as_bytes(), b.as_bytes());
     if a.len() != b.len() {
         return false;
