@@ -21,6 +21,14 @@ const exec = promisify(execFile);
 const ROOT = '/workspace';
 const OUTPUT_CAP = 512 * 1024;
 
+/** The self-updating CLIs' "no background update" switches, which the image
+ *  sets (Dockerfile ENV) so agents.lock.json's pinned builds stay the ones
+ *  that run. Sessions get an explicit env rather than the runner's, so these
+ *  are carried across by name — only when the image actually set them. */
+export const PINNED_CLI_ENV_KEYS = ['DISABLE_AUTOUPDATER', 'GROK_DISABLE_AUTOUPDATER', 'AGY_CLI_DISABLE_AUTO_UPDATE'];
+export const pinnedCliEnv = environment => Object.fromEntries(
+  PINNED_CLI_ENV_KEYS.filter(key => typeof environment?.[key] === 'string').map(key => [key, environment[key]]));
+
 export async function scopedPath(value, writing = false) {
   if (typeof value !== 'string' || value.includes('\0')) throw new Error('Invalid path');
   const candidate = path.resolve(ROOT, value);
@@ -108,7 +116,7 @@ export function createRunner({ secret, spawnPty, accounts = [], workspaceId = 'w
       const pty = spawnPty('/bin/bash', ['-lc', 'export PATH="'+(sharedBin?sharedBin+':':'')+'/home/agent/.local/bin:$PATH" NPM_CONFIG_PREFIX=/home/agent/.local; '+args.command], { name: 'xterm-256color', cols, rows, cwd: ROOT,
         env: { CANOPY:'1', CANOPY_PTY:String(id), CANOPY_INSTANCE:'remote-'+workspaceId, PATH: process.env.PATH, HOME: accountHome, USER: 'agent', NPM_CONFIG_PREFIX:'/home/agent/.local', TERM: 'xterm-256color',
           CANOPY_BROWSER_QUEUE:'/home/agent/.canopy/browser-requests',BROWSER:'/opt/canopy/open-url.mjs',GH_CANOPY_BROWSER_QUEUE:'/home/agent/.canopy/browser-requests', LANG: 'C.UTF-8', DISPLAY: ':99', CODEX_HOME: `${accountHome}/.codex`,
-          CLAUDE_CONFIG_DIR: `${accountHome}/.claude`, CANOPY_WORKSPACE_ID: workspaceId, CANOPY_SESSION_REQUEST_ID:args.requestId,...scratchEnv,...gitEnvironment,...harnessEnv } });
+          CLAUDE_CONFIG_DIR: `${accountHome}/.claude`, CANOPY_WORKSPACE_ID: workspaceId, CANOPY_SESSION_REQUEST_ID:args.requestId,...pinnedCliEnv(environment),...scratchEnv,...gitEnvironment,...harnessEnv } });
       const session = { id, pty, kind: args.kind ?? 'terminal', title: args.command.slice(0, 80), cols, rows, accountId: args.accountId ?? null, output: Buffer.alloc(0), exitCode: null };
       sessions.set(id, session);
       pty.onData(text => {
