@@ -89,6 +89,7 @@ impl CliUpdateOutcome {
 
 /// Language runtimes and shells a CLI is commonly launched *through*: for
 /// these the program's identity is the next argument (`node …/bin/codex`).
+#[cfg_attr(not(unix), allow(dead_code))]
 fn is_runtime(name: &str) -> bool {
     matches!(
         name,
@@ -96,6 +97,7 @@ fn is_runtime(name: &str) -> bool {
     ) || name.starts_with("python")
 }
 
+#[cfg_attr(not(unix), allow(dead_code))]
 fn base_name(token: &str) -> &str {
     let name = token.rsplit(['/', '\\']).next().unwrap_or(token);
     name.strip_suffix(".exe").unwrap_or(name)
@@ -106,6 +108,7 @@ fn base_name(token: &str) -> &str {
 /// install directory (cursor-agent's `versions/<v>/`). A binary that sits
 /// directly in a `bin/` directory has no such root — `/usr/local/bin` would
 /// match every tool on the machine.
+#[cfg_attr(not(unix), allow(dead_code))]
 fn install_root(canonical: &str) -> Option<String> {
     let path = canonical.replace('\\', "/");
     if let Some(at) = path.find("/node_modules/") {
@@ -129,6 +132,7 @@ fn install_root(canonical: &str) -> Option<String> {
 /// script a runtime was handed — and by anything executing from inside its
 /// install root (the native binary a node shim spawns, a versioned build).
 /// Never by substring: `ampere` is not `amp`.
+#[cfg_attr(not(unix), allow(dead_code))]
 pub(crate) fn cli_in_use(ps_args: &str, bin: &str, canonical: Option<&str>) -> bool {
     let name = base_name(bin);
     if name.is_empty() {
@@ -161,6 +165,7 @@ pub(crate) fn cli_in_use(ps_args: &str, bin: &str, canonical: Option<&str>) -> b
 }
 
 /// Last `max` characters of `text`, on a char boundary.
+#[cfg_attr(not(unix), allow(dead_code))]
 fn tail(text: &str, max: usize) -> String {
     let text = text.trim();
     if text.len() <= max {
@@ -244,7 +249,7 @@ async fn run_update(bin: &str, command: &str, timeout_secs: u64) -> CliUpdateOut
     // `-ww`: unlimited width, or long node command lines lose the very path
     // that identifies them. `-ax`: every process of every terminal, not only
     // Canopy's — a session in another terminal app breaks just the same.
-    let mut ps = tokio::process::Command::new("ps");
+    let mut ps = tokio::process::Command::new(crate::procenv::resolve_command("ps"));
     ps.args(["-axww", "-o", "args="]).kill_on_drop(true);
     let listing = tokio::time::timeout(
         Duration::from_secs(10),
