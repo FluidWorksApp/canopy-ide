@@ -144,6 +144,9 @@ pub enum DiffVerdict {
 #[derive(Debug, Clone)]
 pub struct Launch {
     pub port: u16,
+    /// The lock's token. The CLI reads it from the lock, so only the tests
+    /// (playing the CLI) need it handed back.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub token: String,
 }
 
@@ -614,7 +617,7 @@ async fn dispatch(hub: Arc<Hub>, session: Arc<Session>, message: Value) -> Optio
     let params = message.get("params").cloned().unwrap_or(Value::Null);
     // `id` 0 is a real id — initialize uses it.
     let Some(id) = message.get("id").cloned().filter(|id| !id.is_null()) else {
-        notification(&hub, &session, &method, &params);
+        notification(&hub, &session, &method);
         return None;
     };
     let result = match method.as_str() {
@@ -650,7 +653,7 @@ async fn dispatch(hub: Arc<Hub>, session: Arc<Session>, message: Value) -> Optio
     Some(result_response(id, result))
 }
 
-fn notification(hub: &Hub, session: &Session, method: &str, params: &Value) {
+fn notification(hub: &Hub, session: &Session, method: &str) {
     // The CLI's own pid comes with it; the socket is already bound to this PTY
     // by being this PTY's server, so the connection itself is the news.
     if method == "ide_connected" {
@@ -660,7 +663,6 @@ fn notification(hub: &Hub, session: &Session, method: &str, params: &Value) {
             connected: true,
         });
     }
-    let _ = params;
 }
 
 enum ToolReply {
