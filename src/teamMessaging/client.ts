@@ -163,7 +163,7 @@ export class PeerClient {
    for(const row of envelopes){try{await this.receive(row.envelope);acknowledged.push(row.id);}catch(error){if(String(error).includes('Message replay refused'))acknowledged.push(row.id);else this.options.status('A message could not be verified.');}}
    if(acknowledged.length)await this.request({action:'ack',ids:acknowledged});
    if(!this.stopped)this.options.status('Connected · end-to-end encrypted');
-  }catch(error){this.directoryAt=0;this.closePeers();if(!this.stopped)this.options.status(String(error));}
+  }catch(error){this.directoryAt=0;this.closePeers();this.onlineDevices.clear();if(!this.stopped)this.options.status(String(error));}
   finally{if(!this.stopped)this.timer=setTimeout(()=>void this.poll(),2000);}
  }
  private async deliver(device:Device,payload:Payload,relayOnly=false){
