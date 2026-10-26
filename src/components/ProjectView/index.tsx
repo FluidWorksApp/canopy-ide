@@ -200,7 +200,6 @@ import {
 } from "../../projects";
 import {
   workflowAgentForStep,
-  workflowAgentPrompt,
   workflowAgentSelection,
 } from "../../workflowAgents";
 import {
@@ -355,6 +354,19 @@ import {
 import { workflowGet } from "../../workflowRuns";
 import { executeWorkflowGitOp } from "../../workflowGitOps";
 import { waitForWorkflowAttempt } from "../../workflowAttempt";
+import {
+  prepareWorkflowRunDir,
+  readVerdictFile,
+  type WorkflowRunFilesIo,
+} from "../../workflowRunFiles";
+import {
+  EGM_SPEC_WORKFLOW_DEFINITION,
+  EGM_WORKFLOW_ID,
+  egmResearchTrigger,
+  installEgmResources,
+  isDesignSpec,
+  specPathFor,
+} from "../../egm/egmWorkflow";
 import { record as recordProvenance } from "../../provenance";
 import { resolveAgentForPr, type PrAgent } from "../../agentForPr";
 import { cached as provenanceCached, parsePrUrl } from "../../provenance";
@@ -671,6 +683,15 @@ const DOC_STACK_ICONS: Record<string, ReactNode> = {
 };
 
 const decoder = new TextDecoder();
+
+/** Workflow run folders and EGM resources live inside the project, so the
+ *  ordinary scoped fs commands reach them. */
+const workflowRunFilesIo: WorkflowRunFilesIo = {
+  exists: (path) => ipc.fsStat(path).then(() => true, () => false),
+  create: (path) => ipc.fsCreateFile(path),
+  write: (path, content) => ipc.fsWriteFile(path, content),
+  read: (path, maxBytes) => ipc.fsReadText(path, maxBytes),
+};
 
 /** How a doc tab's host is hidden when it isn't the front tab.
  *
@@ -4549,19 +4570,32 @@ const ProjectViewBody = memo(function ProjectViewBody({
             snapshotFor: (next) => snapshotFor(next.cli, next.profileId),
           };
         },
-        launchAgent: async ({ step, reservation }) => {
+        launchAgent: async ({ step, reservation, prompt, runDir, workflowRunId }) => {
           const block = workflowAgentForStep(definition, step);
           const selection = workflowAgentSelection(block);
           const requestedCli = block?.type && block.type !== "inherit" ? block.type : inheritedCli.id;
+          // The run folder exists before any step needs it: a read-only step
+          // may write nowhere else, so it has to be there to be written to.
+          try {
+            await prepareWorkflowRunDir(worktreePath, workflowRunId, workflowRunFilesIo);
+          } catch (error) {
+            await settleAttempt({ attemptId: reservation.attempt.attemptId, state: "failed" })
+              .catch(() => {});
+            return { ok: false, failureText: `workflow run folder could not be prepared: ${String(error)}` };
+          }
+          const writes = step.capabilities.includes("workspace-write");
           const task: MicroTaskDef<{ dir: string }> = {
             id: `workflow-${definition.id}-${step.id}`,
             label: step.name,
             icon: "◇",
             placeholder: "",
             cwd: (payload) => payload.dir,
-            buildContext: () => workflowAgentPrompt(block, step),
+            buildContext: () => prompt,
             runLabel: () => `${definition.name} · ${step.name}`,
-            effect: step.capabilities.includes("workspace-write") ? "pushes" : "reads",
+            effect: writes ? "pushes" : "reads",
+            // A step without workspace-write is held to it: canopy_hook refuses
+            // edit-tool writes outside the run folder (CANOPY_WRITE_ROOT).
+            env: () => (writes ? [] : [["CANOPY_WRITE_ROOT", runDir]]),
           };
           const started = await startMicroTask(
             task,
@@ -4579,6 +4613,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
           }
           return waitForWorkflowAttempt(reservation.attempt.attemptId);
         },
+        readVerdict: (path) => readVerdictFile(path, workflowRunFilesIo),
         runGitOp: (step) => executeWorkflowGitOp(step, worktreePath),
       };
       return {
@@ -4596,7 +4631,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
   );
 
   const runWorkflowDefinition = useCallback(
-    async (definition: WorkflowDefinition) => {
+    async (definition: WorkflowDefinition, request?: string) => {
       const runtime = await workflowRuntime(definition);
       const run = startWorkflow(
         definition,
@@ -4604,7 +4639,9 @@ const ProjectViewBody = memo(function ProjectViewBody({
           kind: "manual",
           eventId: crypto.randomUUID(),
           occurredAt: Date.now(),
-          payload: { source: "workflow-view" },
+          // What the person typed into the Run box reaches prompts as
+          // {{trigger.request}}.
+          payload: { source: "workflow-view", ...(request ? { request } : {}) },
         },
         runtime.context,
         runtime.deps,
@@ -4714,6 +4751,82 @@ const ProjectViewBody = memo(function ProjectViewBody({
     await ipc.fsCreateFile(path);
     await ipc.fsWriteFile(path, `${JSON.stringify(STARTER_WORKFLOW_DEFINITION, null, 2)}\n`);
   }, [project.components, roots]);
+
+  /** Put the Elephant-Goldfish spec workflow and the personas and standards it
+   *  reads into the project. Never overwrites: an existing definition or
+   *  resource is the project's own copy. Returns the definition to run — the
+   *  project's, when it has a valid one. */
+  const ensureEgmWorkflow = useCallback(async (): Promise<WorkflowDefinition> => {
+    const projectRoot = roots[0] ?? project.components[0]?.path;
+    if (!projectRoot) throw new Error("This project has no component root");
+    const root = projectRoot.replace(/[\\/]+$/, "");
+    await installEgmResources(root, {
+      exists: workflowRunFilesIo.exists,
+      create: (path) => ipc.fsCreateFile(path),
+      write: (path, content) => ipc.fsWriteFile(path, content),
+    });
+    const path = `${root}/.canopy/workflows/${EGM_WORKFLOW_ID}.json`;
+    if (!(await workflowRunFilesIo.exists(path))) {
+      await ipc.fsCreateFile(path);
+      await ipc.fsWriteFile(path, `${JSON.stringify(EGM_SPEC_WORKFLOW_DEFINITION, null, 2)}\n`);
+      return EGM_SPEC_WORKFLOW_DEFINITION;
+    }
+    const catalog = await loadWorkflowDefinitions(projectRoot, {
+      projectRoot,
+      componentRoots: new Set(roots),
+    });
+    if (!catalog.ok) throw new Error(catalog.errors[0] ?? "the workflow catalog is invalid");
+    return catalog.definitions.find((definition) => definition.id === EGM_WORKFLOW_ID)
+      ?? EGM_SPEC_WORKFLOW_DEFINITION;
+  }, [project.components, roots]);
+
+  const createEgmWorkflow = useCallback(async () => {
+    await ensureEgmWorkflow();
+  }, [ensureEgmWorkflow]);
+
+  /** Research → spec: draft `docs/designs/<slug>.md` from a finding and put it
+   *  through the Goldfish review. The entry keeps its status; the linked spec
+   *  is what "Implement this" builds against (research.implementContext). */
+  const writeResearchSpec = useCallback(
+    async (entry: ipc.ResearchDetail) => {
+      const projectRoot = roots[0] ?? project.components[0]?.path;
+      if (!projectRoot) return;
+      const root = projectRoot.replace(/[\\/]+$/, "");
+      try {
+        const definition = await ensureEgmWorkflow();
+        const linked = entry.links.files.find(isDesignSpec);
+        const specPath = linked
+          ? linked.startsWith(`${root}/`) ? linked.slice(root.length + 1) : linked
+          : specPathFor(entry.title);
+        if (!linked) {
+          await researchLinkEntry({ projectId: project.id, id: entry.id, files: [`${root}/${specPath}`] });
+        }
+        await ipc.researchUpdate({
+          projectId: project.id,
+          id: entry.id,
+          append:
+            `Started the Elephant-Goldfish spec workflow: the spec goes to \`${specPath}\` and is ` +
+            `reviewed by fresh Goldfish reviewers before it is approved.`,
+        }).catch(() => {});
+        const runtime = await workflowRuntime(definition);
+        openWorkflows();
+        void startWorkflow(
+          definition,
+          {
+            kind: "manual",
+            eventId: crypto.randomUUID(),
+            occurredAt: Date.now(),
+            payload: egmResearchTrigger(entry, specPath),
+          },
+          runtime.context,
+          runtime.deps,
+        ).catch((error) => onNotice(`Spec workflow stopped: ${String(error)}`, "error"));
+      } catch (err) {
+        onNotice(`Couldn't start the spec workflow: ${String(err)}`, "error");
+      }
+    },
+    [ensureEgmWorkflow, onNotice, openWorkflows, project.components, project.id, roots, workflowRuntime],
+  );
 
   const saveWorkflowDefinition = useCallback(async (definition: WorkflowDefinition) => {
     const projectRoot = roots[0] ?? project.components[0]?.path;
@@ -12291,6 +12404,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
               sendTicketToAgent(target, implementContext(entry))
             }
             onRaisePr={(entry) => void raiseResearchPr(entry)}
+            onWriteSpec={(entry) => void writeResearchSpec(entry)}
             // Continuing works on the same entry rather than opening a new
             // one — the point is to go further on this question, not to ask it
             // again — so the steer is passed through as the run's user context.
@@ -12522,6 +12636,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
             onAnswer={answerWorkflowDecision}
             onResume={resumeWorkflow}
             onCreateStarter={createStarterWorkflow}
+            onCreateEgm={createEgmWorkflow}
             onSave={saveWorkflowDefinition}
           />
         );

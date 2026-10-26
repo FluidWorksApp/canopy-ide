@@ -1399,36 +1399,57 @@ export const CanopyBridge = async ({ directory }) => {
         }
       } catch {}
     },
-    // The research harness. Only a session Canopy launched as a research run
-    // has CANOPY_RESEARCH_DIR, so every other session returns on the first
-    // line and pays nothing — this sits in front of every tool call and must
-    // not be felt. Throwing is how an OpenCode plugin refuses a tool, and the
-    // message is what the agent reads, so it names the tool to use instead.
+    // The research harness, and the read-only workflow step gate. Only a
+    // session Canopy launched as a research run has CANOPY_RESEARCH_DIR, and
+    // only a read-only workflow step has CANOPY_WRITE_ROOT, so every other
+    // session returns on the first line and pays nothing — this sits in front
+    // of every tool call and must not be felt. Throwing is how an OpenCode
+    // plugin refuses a tool, and the message is what the agent reads, so it
+    // names where the write belongs instead.
     "tool.execute.before": async (input, output) => {
       try {
         const entry = process.env.CANOPY_RESEARCH_DIR
-        if (!entry) return
+        const root = process.env.CANOPY_WRITE_ROOT
+        if (!entry && !root) return
         const tool = String(input?.tool ?? "")
         if (!/^(write|edit|multiedit|notebookedit|patch)$/i.test(tool)) return
         const args = output?.args ?? {}
-        const path = String(args.filePath ?? args.file_path ?? args.path ?? "")
-        if (!/\.(md|markdown|txt|rst|org|adoc)$/i.test(path)) return
-        if (path === entry || path.startsWith(entry + "/")) return
+        const raw = String(args.filePath ?? args.file_path ?? args.path ?? "")
+        // Judge a path by where it lands: `<root>/../src` is not inside root.
+        const parts = []
+        for (const part of raw.replace(/\\/g, "/").split("/")) {
+          if (part === "" || part === ".") continue
+          if (part === "..") parts.pop()
+          else parts.push(part)
+        }
+        const path = (raw.startsWith("/") ? "/" : "") + parts.join("/")
+        const inside = (base) => Boolean(base) && (path === base || path.startsWith(base + "/"))
         const home = process.env.HOME ?? ""
         for (const p of [".claude", ".codex", ".gemini", ".config"]) {
-          if (home && path.startsWith(home + "/" + p + "/")) return
+          if (home && inside(home + "/" + p)) return
         }
-        throw new Error(
-          `Canopy research harness: ${path} is outside this research entry, and ` +
-            `research written outside it is lost when the session ends. Use the ` +
-            `canopy_research_write tool instead — action "append" for findings, ` +
-            `action "source" for long raw material. If you genuinely need a file ` +
-            `on disk, write it under ${entry}/sources/ .`,
-        )
+        if (entry && /\.(md|markdown|txt|rst|org|adoc)$/i.test(path) && !inside(entry)) {
+          throw new Error(
+            `Canopy research harness: ${path} is outside this research entry, and ` +
+              `research written outside it is lost when the session ends. Use the ` +
+              `canopy_research_write tool instead — action "append" for findings, ` +
+              `action "source" for long raw material. If you genuinely need a file ` +
+              `on disk, write it under ${entry}/sources/ .`,
+          )
+        }
+        if (root && !inside(root.replace(/\/+$/, ""))) {
+          throw new Error(
+            `Canopy workflow: this step is read-only, so ${path} cannot be written. ` +
+              `The only place this step may write is ${root} — put your report and verdict there.`,
+          )
+        }
       } catch (e) {
         // Our own refusal must reach the agent; anything else (a shape we did
         // not expect) must not break the session.
-        if (e instanceof Error && e.message.startsWith("Canopy research harness:")) throw e
+        if (
+          e instanceof Error &&
+          (e.message.startsWith("Canopy research harness:") || e.message.startsWith("Canopy workflow:"))
+        ) throw e
       }
     },
     "tool.execute.after": async (input) => {
@@ -2652,6 +2673,7 @@ const CODEX_FORWARDED_ENV: &[&str] = &[
     "CANOPY_VIBE",
     "CANOPY_RESEARCH",
     "CANOPY_RESEARCH_DIR",
+    "CANOPY_WRITE_ROOT",
     "CANOPY_COMPANION",
     "CANOPY_COMPANION_AUTHORITY",
     "CANOPY_COMPANION_POLICY",
@@ -5428,6 +5450,23 @@ mod integration_tests {
         let env_at = hook.find("CANOPY_RESEARCH_DIR").unwrap();
         let throw_at = hook.find("throw new Error").unwrap();
         assert!(env_at < throw_at);
+    }
+
+    #[test]
+    fn opencodes_plugin_confines_a_read_only_workflow_step() {
+        let home = scratch_home("opencode-write-root");
+        setup_agent("opencode", home.to_str().unwrap()).unwrap();
+        let src = std::fs::read_to_string(home.join(".config/opencode/plugin/canopy.ts")).unwrap();
+        let hook = src.split("tool.execute.before").nth(1).unwrap();
+        assert!(hook.contains("CANOPY_WRITE_ROOT"));
+        assert!(hook.contains("Canopy workflow:"));
+        // Both env reads come before any work, so an unconfined session pays
+        // for nothing.
+        let root_at = hook.find("CANOPY_WRITE_ROOT").unwrap();
+        let early_return = hook.find("if (!entry && !root) return").unwrap();
+        assert!(root_at < early_return);
+        // The refusal has to escape the catch-all that protects the session.
+        assert!(hook.contains(r#"e.message.startsWith("Canopy workflow:")"#));
     }
 
     #[test]

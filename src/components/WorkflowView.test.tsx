@@ -168,4 +168,52 @@ describe("WorkflowView", () => {
     expect(onCreateStarter).toHaveBeenCalledOnce();
     expect(await screen.findByRole("button", { name: "Run" })).toBeInTheDocument();
   });
+
+  it("hands a typed run request to the run, and offers the spec workflow", async () => {
+    const onRun = vi.fn();
+    const onCreateEgm = vi.fn().mockResolvedValue(undefined);
+    render(
+      <WorkflowView
+        projectId="project-1"
+        projectName="Canopy"
+        projectRoot="/repo"
+        componentRoots={["/repo"]}
+        onRun={onRun}
+        onAnswer={vi.fn()}
+        onResume={vi.fn()}
+        onCreateStarter={vi.fn()}
+        onCreateEgm={onCreateEgm}
+        onSave={vi.fn()}
+      />,
+    );
+    const request = await screen.findByRole("textbox", { name: "Run request" });
+    fireEvent.change(request, { target: { value: "  the tiers spec  " } });
+    fireEvent.click(screen.getByRole("button", { name: "Run" }));
+    await vi.waitFor(() => expect(onRun).toHaveBeenCalledWith(definition, "the tiers spec"));
+
+    fireEvent.click(screen.getByRole("button", { name: "Add spec workflow" }));
+    await vi.waitFor(() => expect(onCreateEgm).toHaveBeenCalledOnce());
+  });
+
+  it("offers the spec-driven workflow from an empty catalog", async () => {
+    mocks.loadWorkflowDefinitions.mockReset().mockResolvedValue({ ok: true, definitions: [] });
+    mocks.refreshWorkflowRuns.mockResolvedValue([]);
+    const onCreateEgm = vi.fn().mockResolvedValue(undefined);
+    render(
+      <WorkflowView
+        projectId="project-1"
+        projectName="Canopy"
+        projectRoot="/repo"
+        componentRoots={["/repo"]}
+        onRun={vi.fn()}
+        onAnswer={vi.fn()}
+        onResume={vi.fn()}
+        onCreateStarter={vi.fn()}
+        onCreateEgm={onCreateEgm}
+        onSave={vi.fn()}
+      />,
+    );
+    fireEvent.click(await screen.findByRole("button", { name: "Create spec-driven workflow" }));
+    await vi.waitFor(() => expect(onCreateEgm).toHaveBeenCalledOnce());
+  });
 });

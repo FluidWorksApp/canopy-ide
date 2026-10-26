@@ -625,13 +625,21 @@ fn real_main() -> Result<(), Box<dyn std::error::Error>> {
     // Computed once here because both the verdict arms below and the Stop
     // relocation need it.
     let research_dir = research_entry_dir();
+    // A read-only workflow step may write only inside its run directory. Same
+    // arms as the research gate, so it reaches exactly the CLIs that one does.
+    let write_root = write_root();
     let research_denial_for = |event: &serde_json::Value| -> Option<String> {
-        let dir = research_dir.as_ref()?;
         if hook_event != "PreToolUse" {
             return None;
         }
         let path = edited_path(event)?;
-        denied_research_write(path, dir, &home()).then(|| research_denial(path, dir))
+        if let Some(dir) = research_dir.as_ref() {
+            if denied_research_write(path, dir, &home()) {
+                return Some(research_denial(path, dir));
+            }
+        }
+        let root = write_root.as_ref()?;
+        denied_root_write(path, root, &home()).then(|| root_denial(path, root))
     };
 
     match agent_override.as_deref() {
@@ -2121,6 +2129,90 @@ fn research_denial(path: &str, entry_dir: &std::path::Path) -> String {
          - action \"source\" for long raw material — file dumps, logs, fetched pages\n\n\
          If you genuinely need a file on disk, write it under {}/sources/ .",
         entry_dir.display()
+    )
+}
+
+// ---- the read-only step gate ----------------------------------------------
+//
+// A workflow step that was not granted `workspace-write` is launched with
+// CANOPY_WRITE_ROOT set to its run directory. Its edit tools may write there —
+// that is where a reviewer leaves its report and verdict — and nowhere else in
+// the project. Unlike the research gate this is not about prose: a reviewer
+// that "fixes" the code it was asked to judge has stopped being a reviewer, so
+// every extension is in scope.
+//
+// The honest gap is the same as the research gate's: a shell redirect is not an
+// edit tool and is not seen here. The step's brief says so plainly; this stops
+// the common case, which is an agent reaching for Edit.
+
+/// The one directory this session may write to, when it is confined.
+fn write_root() -> Option<std::path::PathBuf> {
+    std::env::var("CANOPY_WRITE_ROOT")
+        .ok()
+        .filter(|s| !s.trim().is_empty())
+        .map(std::path::PathBuf::from)
+}
+
+/// Lexically normalize a path for prefix comparison: one slash style, no `.`
+/// segments, `..` applied — so `<root>/../src/main.rs` is judged by where it
+/// lands, not by how it starts. Case-folded on Windows, where the filesystem is.
+fn lexical(path: &str) -> String {
+    let unified = path.replace('\\', "/");
+    let rooted = unified.starts_with('/');
+    let mut parts: Vec<&str> = Vec::new();
+    for part in unified.split('/') {
+        match part {
+            "" | "." => {}
+            ".." => {
+                // A drive letter is the floor on Windows, `/` elsewhere.
+                if parts.last().is_some_and(|last| !last.ends_with(':')) {
+                    parts.pop();
+                }
+            }
+            other => parts.push(other),
+        }
+    }
+    let joined = format!("{}{}", if rooted { "/" } else { "" }, parts.join("/"));
+    if cfg!(windows) {
+        joined.to_ascii_lowercase()
+    } else {
+        joined
+    }
+}
+
+/// Whether an edit-tool write should be refused for a confined session.
+/// Allowed: inside the root, and the agent CLIs' private directories (a plan
+/// file or memory note is the agent's bookkeeping, not a change to the project).
+/// A relative path is refused — it cannot be shown to be inside the root.
+fn denied_root_write(path: &str, root: &std::path::Path, home: &str) -> bool {
+    let target = lexical(path);
+    if !target.starts_with('/') && !target.chars().nth(1).is_some_and(|c| c == ':') {
+        return true;
+    }
+    let under = |base: &str| {
+        let base = lexical(base);
+        !base.is_empty() && (target == base || target.starts_with(&format!("{base}/")))
+    };
+    if under(&root.to_string_lossy()) {
+        return false;
+    }
+    if !home.is_empty() {
+        for private in [".claude", ".codex", ".gemini", ".config"] {
+            if under(&format!("{home}/{private}")) {
+                return false;
+            }
+        }
+    }
+    true
+}
+
+fn root_denial(path: &str, root: &std::path::Path) -> String {
+    format!(
+        "Canopy workflow: this step is read-only, so {path} cannot be written. It was \
+         not granted workspace-write — reviewing or reporting on the project is the \
+         job, changing it is not.\n\n\
+         The only place this step may write is {} — put your report and verdict there.",
+        root.display()
     )
 }
 
@@ -7448,6 +7540,57 @@ mod tests {
             &entry,
             home
         ));
+    }
+
+    #[test]
+    fn a_read_only_step_writes_only_inside_its_run_directory() {
+        let root = std::path::PathBuf::from("/repo/.canopy/workflow-runs/run-7");
+        let home = "/Users/dev";
+        let denied = |p: &str| denied_root_write(p, &root, home);
+
+        // The report and the verdict are the step's whole output.
+        assert!(!denied(
+            "/repo/.canopy/workflow-runs/run-7/reports/r1/critic.md"
+        ));
+        assert!(!denied(
+            "/repo/.canopy/workflow-runs/run-7/verdicts/critic.r1.json"
+        ));
+
+        // Every project file is off limits, code included — a reviewer that
+        // fixes what it was asked to judge has stopped reviewing.
+        assert!(denied("/repo/src/App.tsx"));
+        assert!(denied("/repo/docs/designs/tiers.md"));
+        assert!(denied("/repo/.canopy/workflow-runs/run-8/verdicts/x.json"));
+        assert!(denied("/repo/.canopy/workflow-runs/run-7-old/report.md"));
+
+        // Climbing out with `..` is judged by where it lands.
+        assert!(denied(
+            "/repo/.canopy/workflow-runs/run-7/../../../src/main.rs"
+        ));
+        assert!(!denied(
+            "/repo/.canopy/workflow-runs/run-7/./reports/../verdicts/a.json"
+        ));
+
+        // A path that cannot be placed is refused rather than guessed at.
+        assert!(denied("notes.md"));
+
+        // The agent's own bookkeeping is not the project.
+        assert!(!denied("/Users/dev/.claude/plans/plan.md"));
+    }
+
+    #[test]
+    fn the_write_root_gate_is_inert_unless_a_step_sets_it() {
+        std::env::remove_var("CANOPY_WRITE_ROOT");
+        assert!(write_root().is_none());
+        std::env::set_var("CANOPY_WRITE_ROOT", "  ");
+        assert!(write_root().is_none(), "blank is not a root");
+        std::env::remove_var("CANOPY_WRITE_ROOT");
+        let msg = root_denial(
+            "/repo/src/a.rs",
+            std::path::Path::new("/repo/.canopy/workflow-runs/r"),
+        );
+        assert!(msg.contains("read-only"), "{msg}");
+        assert!(msg.contains("/repo/.canopy/workflow-runs/r"), "{msg}");
     }
 
     #[test]

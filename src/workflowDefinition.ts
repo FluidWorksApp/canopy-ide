@@ -81,6 +81,13 @@ export interface WorkflowAgentStep extends WorkflowStepBase {
   prompt: string;
   acceptance?: string[];
   attemptCap?: number;
+  /** Outcomes the agent reports itself, instead of plain `success`. A reviewer
+   *  that finished its job and found problems is not a failed attempt — and
+   *  must not be retried on another route as if it were — so it says which it
+   *  was (see workflowPrompt.verdictProtocol) and the run routes on that. A
+   *  step with verdicts exits on each of them and on `failure`, never on
+   *  `success`. */
+  verdicts?: string[];
 }
 
 export interface WorkflowGateStep extends WorkflowStepBase {
@@ -245,6 +252,10 @@ const MAX_STEPS = 128;
 const MAX_EDGES = 512;
 const MAX_ROUNDS = 16;
 const MAX_AGENTS = 64;
+const MAX_VERDICTS = 8;
+/** Outcome names the executor already owns; a verdict reusing one would make
+ *  "the agent said so" and "the attempt ended so" indistinguishable. */
+const RESERVED_OUTCOMES = new Set(["success", "failure", "pass", "fail"]);
 const record = (value: unknown): Record<string, unknown> | null =>
   value !== null && typeof value === "object" && !Array.isArray(value)
     ? (value as Record<string, unknown>)
@@ -344,6 +355,9 @@ function expectedOutcomes(step: WorkflowStep): string[] {
       : [];
   }
   if (step.kind === "gate" || step.kind === "watch") return ["pass", "fail"];
+  if (step.kind === "agent" && Array.isArray(step.verdicts) && step.verdicts.length > 0) {
+    return [...step.verdicts.filter((verdict) => typeof verdict === "string"), "failure"];
+  }
   return ["success", "failure"];
 }
 
@@ -449,7 +463,7 @@ export function validateWorkflowDefinition(
     const kind = step.kind;
     const specific =
       kind === "agent"
-        ? ["agent", "prompt", "acceptance", "attemptCap"]
+        ? ["agent", "prompt", "acceptance", "attemptCap", "verdicts"]
         : kind === "gate"
           ? ["evidence"]
           : kind === "watch"
@@ -490,6 +504,18 @@ export function validateWorkflowDefinition(
       if (step.acceptance !== undefined && !strings(step.acceptance)) errors.push(`${at}.acceptance is invalid`);
       if (step.attemptCap !== undefined && (!Number.isInteger(step.attemptCap) || Number(step.attemptCap) < 1 || Number(step.attemptCap) > 8)) {
         errors.push(`${at}.attemptCap must be between 1 and 8`);
+      }
+      if (step.verdicts !== undefined) {
+        if (!strings(step.verdicts) || step.verdicts.length === 0 || step.verdicts.length > MAX_VERDICTS) {
+          errors.push(`${at}.verdicts must list between 1 and ${MAX_VERDICTS} outcomes`);
+        } else {
+          const seen = new Set<string>();
+          for (const verdict of step.verdicts) {
+            if (!ID.test(verdict) || RESERVED_OUTCOMES.has(verdict)) errors.push(`${at}.verdicts contains an invalid outcome ${verdict}`);
+            else if (seen.has(verdict)) errors.push(`${at}.verdicts contains a duplicate outcome ${verdict}`);
+            seen.add(verdict);
+          }
+        }
       }
     } else if (kind === "gate") {
       const evidence = record(step.evidence);
@@ -609,6 +635,11 @@ export function validateWorkflowDefinition(
     const actual = new Set(edges.filter((edge) => edge.from === step.id).map((edge) => edge.on));
     for (const outcome of expectedOutcomes(step)) {
       if (!actual.has(outcome)) errors.push(`step ${step.id} has no ${outcome} exit`);
+    }
+    // A verdict step never ends in plain success, so that exit is a path no
+    // run can take — and almost always a sign the author meant a verdict.
+    if (step.kind === "agent" && Array.isArray(step.verdicts) && step.verdicts.length > 0 && actual.has("success")) {
+      errors.push(`step ${step.id} declares verdicts and cannot also exit on success`);
     }
   }
 

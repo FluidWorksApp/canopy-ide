@@ -299,3 +299,80 @@ it("delivers only later events for the waiting issue", async () => {
   expect((await deliverWorkflowEvent(run.runId, event, context, deps))?.state).toBe("settled");
   expect(await deliverWorkflowEvent(run.runId, event, context, deps)).toBeNull();
 });
+
+describe("verdict steps", () => {
+  const reviewed: WorkflowDefinition = {
+    ...definition,
+    id: "reviewed",
+    start: "review",
+    steps: [
+      {
+        id: "review",
+        name: "Review",
+        kind: "agent",
+        prompt: "Review {{trigger.request}}; write to {{run.dir}}/reports/r{{round}}.md",
+        capabilities: ["workspace-read"],
+        verdicts: ["clean", "findings"],
+      },
+      {
+        id: "fix",
+        name: "Fix",
+        kind: "agent",
+        prompt: "Fix it",
+        capabilities: ["workspace-read", "workspace-write"],
+      },
+    ],
+    edges: [
+      { from: "review", on: "clean", to: "$completed" },
+      { from: "review", on: "findings", to: "fix" },
+      { from: "review", on: "failure", to: "$failed" },
+      { from: "fix", on: "success", to: "$completed" },
+      { from: "fix", on: "failure", to: "$failed" },
+    ],
+  };
+  const context = { projectId: "project", componentId: "component", worktreePath: "/repo" };
+  const trigger = {
+    kind: "manual" as const,
+    eventId: "manual-1",
+    occurredAt: 1,
+    payload: { request: "the tiers spec" },
+  };
+
+  it("renders the brief, appends the verdict protocol, and routes on the verdict", async () => {
+    const { deps } = harness();
+    const readVerdict = vi.fn(async () => '{"verdict":"findings"}');
+    deps.readVerdict = readVerdict;
+    const settled = await startWorkflow(reviewed, trigger, context, deps);
+
+    const first = vi.mocked(deps.launchAgent).mock.calls[0][0];
+    expect(first.runDir).toBe("/repo/.canopy/workflow-runs/workflow-1");
+    expect(first.round).toBe(0);
+    expect(first.prompt).toContain("Review the tiers spec; write to /repo/.canopy/workflow-runs/workflow-1/reports/r0.md");
+    expect(first.prompt).toContain("/repo/.canopy/workflow-runs/workflow-1/verdicts/review.r0.json");
+    expect(readVerdict).toHaveBeenCalledWith("/repo/.canopy/workflow-runs/workflow-1/verdicts/review.r0.json");
+    expect(vi.mocked(deps.launchAgent).mock.calls[1][0].step.id).toBe("fix");
+    expect(settled).toMatchObject({ state: "settled", run: { status: "completed" } });
+    expect(settled.run.edges.map((edge) => edge.outcome)).toEqual(["findings", "success"]);
+  });
+
+  it("fails without retrying when the agent finished but left no usable verdict", async () => {
+    for (const source of [null, '{"verdict":"invented"}']) {
+      const { deps } = harness();
+      deps.readVerdict = vi.fn(async () => source);
+      const settled = await startWorkflow(reviewed, trigger, context, deps);
+      expect(settled).toMatchObject({ state: "settled", run: { status: "failed" } });
+      expect(deps.launchAgent).toHaveBeenCalledTimes(1);
+      expect(deps.reserveAttempt).not.toHaveBeenCalled();
+    }
+  });
+
+  it("routes a reconciled completed attempt on its verdict too", async () => {
+    const { deps } = harness();
+    deps.readVerdict = vi.fn(async () => '{"verdict":"clean"}');
+    const run = await deps.createRun({ projectId: "project", definitionId: reviewed.id, definitionVersion: "1", definitionHash: "hash", definition: reviewed, triggerKind: "manual", trigger, startStepId: "review", steps: reviewed.steps.map((step) => ({ id: step.id, kind: step.kind })) });
+    await deps.recordStep({ runId: run.runId, stepId: "review", state: "running", attemptId: "attempt-1" });
+    const settled = await continueWorkflow(run.runId, context, deps);
+    expect(settled).toMatchObject({ state: "settled", run: { status: "completed" } });
+    expect(deps.launchAgent).not.toHaveBeenCalled();
+  });
+});

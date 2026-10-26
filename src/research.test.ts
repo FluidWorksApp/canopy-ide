@@ -158,6 +158,27 @@ describe("the handoff to an implementing agent", () => {
     expect(ctx).toContain("canopy_research get");
   });
 
+  it("builds against a linked design spec instead of re-deciding the design", () => {
+    const plain = implementContext(entry());
+    expect(plain).not.toContain("design spec");
+    const ctx = implementContext(entry({
+      links: {
+        tickets: [],
+        prs: [],
+        branches: [],
+        files: ["/repo/src/index.ts", "/repo/docs/designs/index-staleness.md"],
+        supersedes: [],
+        superseded_by: null,
+      },
+    }));
+    expect(ctx).toContain("/repo/docs/designs/index-staleness.md");
+    expect(ctx).toContain("Detailed Implementation Plan");
+    expect(ctx).toContain("Approved");
+    // Still the finding, still the loop-closing instructions.
+    expect(ctx).toContain("Ingest on write as well as on open.");
+    expect(ctx).toContain("canopy_research_write");
+  });
+
   it("makes linking the PR non-optional, because the loop closes on it", () => {
     const ctx = implementContext(entry());
     expect(ctx).toContain("canopy_research_write");
