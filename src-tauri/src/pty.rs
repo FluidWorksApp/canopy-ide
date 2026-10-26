@@ -1730,7 +1730,7 @@ impl PtyManager {
         // to land in the CLAUDE_CONFIG_DIR this child will actually have.
         let claude_ide_root = extra_env
             .iter()
-            .find(|(k, _)| k == crate::claude_ide::LAUNCH_MARKER)
+            .find(|(k, _)| k == CLAUDE_IDE_MARKER)
             .map(|(_, root)| root.clone())
             .filter(|_| kind == SessionKind::Desktop);
         let claude_lock_dir = claude_ide_root.as_ref().and_then(|_| {
@@ -1749,10 +1749,7 @@ impl PtyManager {
         for (k, v) in extra_env {
             if matches!(
                 k.as_str(),
-                "CANOPY_RUN_ID"
-                    | "CANOPY_ATTEMPT_ID"
-                    | OMP_TASK_MARKER
-                    | crate::claude_ide::LAUNCH_MARKER
+                "CANOPY_RUN_ID" | "CANOPY_ATTEMPT_ID" | OMP_TASK_MARKER | CLAUDE_IDE_MARKER
             ) {
                 continue;
             }
@@ -2769,6 +2766,9 @@ fn canopy_aider_context(
 /// Env key the frontend sets on an omp task terminal (see projects.ts
 /// `unattendedEnv`). Consumed here, never passed through to the shell.
 const OMP_TASK_MARKER: &str = "CANOPY_OMP_TASK_OVERLAY";
+/// A Claude Code tab's request for an IDE server (claude_ide.rs), consumed
+/// like the omp marker above.
+const CLAUDE_IDE_MARKER: &str = crate::claude_ide::LAUNCH_MARKER;
 
 /// Canopy's omp task overlay, only when it is actually on disk.
 fn canopy_omp_task_overlay(home: Option<&str>) -> Option<std::path::PathBuf> {
@@ -3175,6 +3175,89 @@ mod tests {
             "detached PTY never ran its command with the given env"
         );
         assert!(tail.contains("DETACHED_1"), "tail was: {tail}");
+    }
+
+    #[test]
+    fn a_claude_tab_gets_its_ide_server_in_env_and_lock_and_loses_both_on_exit() {
+        use tauri::Manager;
+        struct Quiet;
+        impl crate::claude_ide::IdeUi for Quiet {
+            fn emit(&self, _: crate::claude_ide::UiEvent) {}
+        }
+        let app = tauri::test::mock_app();
+        app.manage(crate::claude_ide::ClaudeIde::new(std::sync::Arc::new(Quiet)));
+        let config = std::env::temp_dir().join(format!("canopy-pty-ide-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&config);
+        let env = |root: &str| {
+            Some(vec![
+                ("CLAUDE_CONFIG_DIR".to_string(), config.to_string_lossy().to_string()),
+                (CLAUDE_IDE_MARKER.to_string(), root.to_string()),
+            ])
+        };
+        let probe = "echo \"IDE=${CLAUDE_CODE_SSE_PORT:-none}:${CLAUDE_CODE_IDE_SKIP_AUTO_INSTALL:-none}:${CANOPY_CLAUDE_IDE:-unset}:END\"; sleep 20";
+        let pm = PtyManager::default();
+        let renderer = pm.register_renderer();
+        let desktop = pm
+            .spawn_bound(
+                app.handle().clone(),
+                120,
+                40,
+                Some("/tmp".into()),
+                None,
+                None,
+                Some(RunSpec::Shell(probe.into())),
+                SessionKind::Desktop,
+                Some(DesktopSink {
+                    renderer_generation: renderer.generation,
+                    channel: Channel::new(|_| Ok(())),
+                }),
+                env("/w/app"),
+                None,
+                None,
+                None,
+            )
+            .expect("desktop spawn");
+        assert!(wait_for(&pm, desktop.id, ":END", Duration::from_secs(8)));
+        let tail = String::from_utf8_lossy(&pm.scrollback_tail(desktop.id, 64 * 1024).unwrap()).into_owned();
+        let line = tail.lines().find(|l| l.starts_with("IDE=")).expect("probe line").to_string();
+        let port: u16 = line["IDE=".len()..].split(':').next().unwrap().parse().expect("a port");
+        // The marker is consumed; the child sees only the CLI's variables.
+        assert!(line.ends_with(":1:unset:END"), "{line}");
+        // The lock is in the PTY's own CLAUDE_CONFIG_DIR, naming the component.
+        let lock_path = config.join("ide").join(format!("{port}.lock"));
+        let lock: serde_json::Value = serde_json::from_slice(&std::fs::read(&lock_path).unwrap()).unwrap();
+        assert_eq!(lock["workspaceFolders"], serde_json::json!(["/w/app"]));
+        assert_eq!(lock["pid"], std::process::id());
+
+        // A PTY no desktop tab owns gets nothing, marker or not.
+        let detached = pm
+            .spawn(
+                app.handle().clone(),
+                120,
+                40,
+                Some("/tmp".into()),
+                None,
+                None,
+                Some(RunSpec::Shell(probe.into())),
+                SessionKind::Detached,
+                None,
+                env("/w/app"),
+                None,
+            )
+            .expect("detached spawn");
+        assert!(wait_for(&pm, detached.id, ":END", Duration::from_secs(8)));
+        let tail = String::from_utf8_lossy(&pm.scrollback_tail(detached.id, 64 * 1024).unwrap()).into_owned();
+        assert!(tail.contains("IDE=none:none:unset:END"), "{tail}");
+        assert_eq!(std::fs::read_dir(config.join("ide")).unwrap().count(), 1);
+
+        let _ = pm.kill(detached.id);
+        let _ = pm.kill(desktop.id);
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while lock_path.exists() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        assert!(!lock_path.exists(), "the lock must go with the terminal");
+        let _ = std::fs::remove_dir_all(&config);
     }
 
     #[test]
