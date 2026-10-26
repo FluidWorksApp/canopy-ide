@@ -16,7 +16,7 @@ test('the launch argv is exactly the desktop companion argv (structuredRunners.t
  const launch=companionLaunch({bin:'claude',sessionId:'11111111-2222-4333-8444-555555555555',systemPrompt:brief});
  assert.deepEqual(launch.policy,{systemPromptAppend:brief,permissionMode:'bypassPermissions',disallowedTools:['Edit','Write','NotebookEdit','Bash','KillShell'],model:'',sessionId:'11111111-2222-4333-8444-555555555555',cwd:'/workspace',authority:'read-only'});
  const tail=['--append-system-prompt',brief,'--add-dir','/workspace','--permission-mode','bypassPermissions','--disallowedTools','Edit','Write','NotebookEdit','Bash','KillShell'];
- const head=['-p','--input-format','stream-json','--output-format','stream-json','--include-partial-messages','--verbose'];
+ const head=['-p','--input-format','stream-json','--output-format','stream-json','--include-partial-messages','--verbose','--replay-user-messages'];
  assert.deepEqual(launchArgs('claude',launch),[...head,'--session-id','11111111-2222-4333-8444-555555555555',...tail]);
  assert.deepEqual(launchArgs('claude',launch,{resume:true}),[...head,'--resume','11111111-2222-4333-8444-555555555555',...tail]);
  assert.deepEqual(launchArgs('claude',companionLaunch({bin:'claude',sessionId:'s',systemPrompt:brief,model:'opus'})).slice(-10,-8),['--model','opus']);
