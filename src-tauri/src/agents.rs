@@ -1003,6 +1003,7 @@ fn hooks_are_ours_in(agent: &str, cfg: &str, home: &str) -> bool {
             "agent_end",
             "session_shutdown",
             "event?.toolName",
+            "tool_input: event?.isError ? {} : (event?.input ?? {})",
             "let pending = Promise.resolve()",
         ]
         .iter()
@@ -1574,12 +1575,16 @@ export default function canopyBridge(pi) {
   on("session_shutdown", (_event, ctx) =>
     send({ ...base(ctx), hook_event_name: "SessionEnd", canopy_signal: "session-end" }),
   )
+  // The tool's own input rides along so Canopy's edit journal can attribute
+  // omp's write/edit calls (ToolResultEventBase.input); a failed call edited
+  // nothing and sends none.
   on("tool_result", (event, ctx) =>
     send({
       ...base(ctx),
       hook_event_name: "PostToolUse",
       canopy_signal: "turn-progress",
       tool_name: event?.toolName ?? "",
+      tool_input: event?.isError ? {} : (event?.input ?? {}),
     }),
   )
   on("tool_approval_requested", (event, ctx) =>
