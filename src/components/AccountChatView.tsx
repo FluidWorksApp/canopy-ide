@@ -13,6 +13,7 @@ import './teamHub.css';
 import {LinkifiedText} from './LinkifiedText';
 import {AddReactionButton,MessageReactions,ReactionPicker} from './MessageReactions';
 import {reactionChips} from '../teamMessaging/reactions';
+import {ChatLinkCards} from './ChatLinkCards';
 export type AccountConversation={teamId:string;userId:string;peer:string|null;name:string;email?:string};
 /** Consecutive messages from one sender within this window share one header. */
 const GROUP_MS=5*60_000;
@@ -160,8 +161,9 @@ export function AccountChatView({conversation,active=true}:{conversation:Account
      <article className={`account-chat-msg${own?' own':''}${grouped?' grouped':''}${pending?' pending':''}${failed?' failed':''}`} data-delivery={delivered?'delivered':state} data-message={m.id}>
       {m.text&&<button type="button" className={`account-chat-copy${copied===m.id?' is-copied':''}`} aria-label={copied===m.id?'Copied':'Copy message'} title={copied===m.id?'Copied':'Copy message'} onMouseDown={e=>e.preventDefault()} onClick={()=>copy(m.text,m.id)}>{copied===m.id?<><CheckIcon size={12}/>Copied</>:<CopyIcon size={12}/>}</button>}
       {!grouped&&<header><strong>{senderName(m.sender)}</strong><time dateTime={new Date(m.created).toISOString()}>{time(m.created)}</time></header>}
-      {m.text&&<p title={time(m.created)}><LinkifiedText text={m.text}/></p>}
+      {m.text&&<p title={time(m.created)}><LinkifiedText text={m.text} anyProject/></p>}
       <AddReactionButton open={reacting===m.id} controls={pickerId} className={m.text?'beside-copy':undefined} onToggle={()=>setReacting(current=>current===m.id?undefined:m.id)}/>
+      {m.text&&<ChatLinkCards text={m.text}/>}
       {m.attachments?.map(file=><AttachmentChip key={file.id} session={session} message={m} file={file} own={own} state={attachments[file.id]} sender={senderName(m.sender)}/>)}
       <MessageReactions chips={reactionChips(reactions,m.id,userId)} undelivered={undeliveredReactions[m.id]} name={senderName} onToggle={emoji=>react(m.id,emoji)}
        picker={reacting===m.id?<ReactionPicker id={pickerId} onPick={emoji=>{closePicker(m.id);react(m.id,emoji);}} onClose={()=>closePicker(m.id)} onDismiss={()=>setReacting(undefined)}/>:undefined}/>

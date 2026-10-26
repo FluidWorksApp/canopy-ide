@@ -85,6 +85,23 @@ describe("openLink", () => {
     expect(claimed.urls).toEqual(["http://localhost:4321/"]);
     claimed.stop();
   });
+
+  it("marks a team-chat link anyProject only when asked, so other callers are unchanged", async () => {
+    const details: unknown[] = [];
+    const on = (e: Event) => {
+      details.push((e as CustomEvent).detail);
+      e.preventDefault();
+    };
+    window.addEventListener(OPEN_URL_EVENT, on);
+    openLink("https://github.com/acme/api/pull/12");
+    openLink("https://github.com/acme/api/pull/12", false, { anyProject: true });
+    await settled();
+    window.removeEventListener(OPEN_URL_EVENT, on);
+    expect(details).toEqual([
+      { url: "https://github.com/acme/api/pull/12" },
+      { url: "https://github.com/acme/api/pull/12", anyProject: true },
+    ]);
+  });
 });
 
 describe("openFileLink", () => {

@@ -1,7 +1,7 @@
 import {render,screen,fireEvent,cleanup} from '@testing-library/react';
 import {afterEach,it,expect,vi} from 'vitest';
-const opened=vi.hoisted(()=>[] as [string,boolean][]);
-vi.mock('../links',()=>({openLink:(href:string,external:boolean)=>opened.push([href,external])}));
+const opened=vi.hoisted(()=>[] as unknown[][]);
+vi.mock('../links',()=>({openLink:(...args:unknown[])=>opened.push(args)}));
 import {LinkifiedText,linkParts} from './LinkifiedText';
 afterEach(()=>{cleanup();opened.length=0;});
 it('finds http(s) links and leaves trailing punctuation as text',()=>{
@@ -15,4 +15,10 @@ it('renders clickable links that open through openLink, Cmd-click externally, an
  fireEvent.click(link);fireEvent.click(link,{metaKey:true});
  expect(opened).toEqual([['https://example.com/a',false],['https://example.com/a',true]]);
  expect(screen.getByText(/<b>bold<\/b>/)).toBeInTheDocument();
+});
+it('asks for any-project routing only when the text belongs to no project (team chat)',()=>{
+ render(<div><LinkifiedText text={'https://github.com/acme/api/pull/12'} anyProject/></div>);
+ const link=screen.getByRole('link');
+ fireEvent.click(link);fireEvent.click(link,{ctrlKey:true});
+ expect(opened).toEqual([['https://github.com/acme/api/pull/12',false,{anyProject:true}],['https://github.com/acme/api/pull/12',true,{anyProject:true}]]);
 });

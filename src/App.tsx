@@ -66,6 +66,14 @@ import {
   type DeepLink,
 } from "./deepLinks";
 import {
+  OPEN_GIT_LINK_EVENT,
+  ROUTE_GIT_LINK_EVENT,
+  ipcGitLinkLookups,
+  projectForGitLink,
+  type OpenGitLinkDetail,
+  type RouteGitLinkDetail,
+} from "./gitLinkRouting";
+import {
   attentionItems,
   badgeFor,
   buildAttentionItems,
@@ -2328,6 +2336,42 @@ export default function App() {
     window.addEventListener("canopy:follow-deep-link", follow);
     return () => window.removeEventListener("canopy:follow-deep-link", follow);
   }, [followDeepLink]);
+
+  // A team-chat link to a PR, commit, issue or file that the project in front
+  // couldn't open: ask the other open projects, switch to the first that can,
+  // and hand it the URL. Same 80ms hand-off as followDeepLink, for the same
+  // reason — a woken project has only just mounted its listener.
+  useEffect(() => {
+    const route = (event: Event) => {
+      const d = (event as CustomEvent<RouteGitLinkDetail>).detail;
+      if (!d?.url) return;
+      event.preventDefault();
+      const state = wsRef.current;
+      const projects = state.openIds
+        .filter((id) => id !== d.from)
+        .map((id) => state.projects.find((p) => p.id === id))
+        .filter((p): p is Project => !!p)
+        .map((p) => ({ id: p.id, repos: p.components.map((c) => c.path) }));
+      void projectForGitLink(d.url, projects, ipcGitLinkLookups)
+        .catch(() => null)
+        .then(async (projectId) => {
+          if (!projectId) return d.fallback();
+          await openForActionRef.current(projectId);
+          window.setTimeout(
+            () =>
+              window.dispatchEvent(
+                new CustomEvent<OpenGitLinkDetail>(OPEN_GIT_LINK_EVENT, {
+                  detail: { projectId, url: d.url },
+                }),
+              ),
+            80,
+          );
+        })
+        .catch(() => d.fallback());
+    };
+    window.addEventListener(ROUTE_GIT_LINK_EVENT, route);
+    return () => window.removeEventListener(ROUTE_GIT_LINK_EVENT, route);
+  }, []);
 
   // The same link, delivered by a cold start. A reminder's banner is posted by
   // launchd while Canopy is closed (src-tauri/src/remind.rs), so clicking it
