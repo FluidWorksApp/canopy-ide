@@ -605,6 +605,16 @@ fn real_main() -> Result<(), Box<dyn std::error::Error>> {
         raw = serde_json::to_string(&event).unwrap_or_default();
     }
 
+    // Read the payload first, then drop: exiting with stdin unread can surface
+    // as a broken-pipe line in the CLI that ran us.
+    if foreign_hook_run_by_grok(
+        agent_override.as_deref(),
+        std::env::var("GROK_SESSION_ID").ok().as_deref(),
+        std::env::var("GROK_HOOK_EVENT").ok().as_deref(),
+    ) {
+        return Ok(());
+    }
+
     normalize_event(&mut event, agent_override.as_deref().unwrap_or("claude"));
 
     if event["agent"].as_str() == Some("grok") && event["subagent_type"].is_string() {
@@ -730,6 +740,30 @@ fn real_main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
     Ok(())
+}
+
+/// Grok loads Claude's and Cursor's hook files by default, so Canopy's own
+/// `canopy-hook` (bare, `--agent claude` or `--agent cursor`) also runs inside
+/// grok sessions, where it would stamp grok's events as another CLI's and —
+/// beside the native `--agent grok` hooks — record each one twice. Canopy's
+/// PTYs export GROK_CLAUDE_HOOKS_ENABLED=0 / GROK_CURSOR_HOOKS_ENABLED=0 to stop
+/// that at the source; this is the backstop for a terminal where the user set
+/// them back, or a grok started outside Canopy's env.
+///
+/// Grok's hook runner injects GROK_SESSION_ID and GROK_HOOK_EVENT into every
+/// hook process it spawns (grok 1.0.46 embedded docs, "Runner-injected
+/// variables"). Requiring both keeps a real Claude session that merely
+/// inherited one of them from an enclosing grok from being silenced. The
+/// native grok hooks already deliver the event, so the copy is dropped rather
+/// than retagged.
+fn foreign_hook_run_by_grok(
+    agent_override: Option<&str>,
+    grok_session_id: Option<&str>,
+    grok_hook_event: Option<&str>,
+) -> bool {
+    agent_override != Some("grok")
+        && grok_session_id.is_some_and(|v| !v.is_empty())
+        && grok_hook_event.is_some_and(|v| !v.is_empty())
 }
 
 fn safe_session_id(id: &str) -> bool {
@@ -1362,20 +1396,19 @@ fn update_digest(
     }
 
     // Which files this session is touching — the thing peers most need, since
-    // it's how they avoid colliding on the same code.
-    if let Some(path_touched) = event["tool_input"]["file_path"].as_str() {
-        let rel = path_touched
+    // it's how they avoid colliding on the same code. Same per-CLI edit-tool
+    // map as the journal below.
+    for record in edit_records(agent, event) {
+        let rel = record
+            .path
             .strip_prefix(&format!("{cwd}/"))
-            .unwrap_or(path_touched)
+            .unwrap_or(&record.path)
             .to_string();
-        let tool = event["tool_name"].as_str().unwrap_or("");
-        if matches!(tool, "Edit" | "Write" | "NotebookEdit" | "MultiEdit") {
-            if let Some(arr) = digest["files"].as_array_mut() {
-                if !arr.iter().any(|v| v.as_str() == Some(rel.as_str())) {
-                    arr.push(serde_json::json!(rel));
-                    while arr.len() > MAX_FILES {
-                        arr.remove(0);
-                    }
+        if let Some(arr) = digest["files"].as_array_mut() {
+            if !arr.iter().any(|v| v.as_str() == Some(rel.as_str())) {
+                arr.push(serde_json::json!(rel));
+                while arr.len() > MAX_FILES {
+                    arr.remove(0);
                 }
             }
         }
@@ -1406,49 +1439,293 @@ fn cap(s: &str, max: usize) -> String {
     format!("{cut}\n…(truncated)")
 }
 
+/// One file edit read out of a tool call: the file, plus the before/after text
+/// the agent authored when the tool's input carries it.
+#[derive(Debug, Clone, PartialEq)]
+struct EditRecord {
+    path: String,
+    old: Option<String>,
+    new: Option<String>,
+}
+
+/// The files a tool call edits, per CLI. Claude's tool names (Edit, Write,
+/// MultiEdit, NotebookEdit with `file_path`) are recognised from every CLI, as
+/// before — Claude itself, and OpenCode's plugin, which normalizes to them.
+/// Other CLIs' native edit tools are mapped only where their name and input
+/// shape were confirmed against the shipped binary or source:
+///
+/// - codex `apply_patch`: the patch body is in `tool_input.command` (a string,
+///   or the `["apply_patch", body]` argv the model emits); file paths come out
+///   of its `*** Add/Update/Delete File:` and `*** Move to:` headers.
+/// - grok `search_replace` (grok 1.0.46 SearchReplaceInput: a path field plus
+///   old_string, new_string, replace_all). The path field's name is not in the
+///   binary's strings, so `file_path`, `path` and `target_file` are accepted.
+/// - omp `write` (`path`, `content`) and `edit` (omp 18.4.10 edit/schemas.ts:
+///   `path` with old_string/new_string or `edits[]`, or an `input` holding an
+///   apply_patch body). Hashline and other path-less `input` modes are skipped.
+/// - agy (1.2.14 tool examples and arg structs): write_to_file {TargetFile,
+///   CodeContent}, replace_file_content {TargetFile, TargetContent,
+///   ReplacementContent}, multi_replace_file_content {TargetFile,
+///   ReplacementChunks[]}, edit_file {TargetFile, CodeEdit} (CodeEdit is a
+///   sketch with `{{...}}` elisions, so only its path is kept).
+///
+/// Amp, Cursor and Aider edit tools are unverified and fall through to
+/// nothing, which is today's behaviour. Native tools count only on
+/// PostToolUse: their edit has happened by then.
+fn edit_records(agent: &str, event: &serde_json::Value) -> Vec<EditRecord> {
+    let tool = event["tool_name"].as_str().unwrap_or("");
+    let input = &event["tool_input"];
+    let cwd = event["cwd"].as_str().unwrap_or("");
+    let s = |v: &serde_json::Value| v.as_str().map(str::to_string);
+    let rec = |path: &str, old: Option<String>, new: Option<String>| EditRecord {
+        path: resolve_edit_path(path, cwd),
+        old,
+        new,
+    };
+    match tool {
+        "Edit" | "Write" | "MultiEdit" | "NotebookEdit" => {
+            let Some(path) = input["file_path"]
+                .as_str()
+                .or_else(|| input["notebook_path"].as_str())
+                .filter(|p| !p.is_empty())
+            else {
+                return vec![];
+            };
+            return match tool {
+                "Edit" => vec![rec(path, s(&input["old_string"]), s(&input["new_string"]))],
+                "MultiEdit" => input["edits"]
+                    .as_array()
+                    .map(|edits| {
+                        edits
+                            .iter()
+                            .map(|e| rec(path, s(&e["old_string"]), s(&e["new_string"])))
+                            .collect()
+                    })
+                    .unwrap_or_default(),
+                "Write" => vec![rec(path, None, s(&input["content"]))],
+                _ => vec![rec(path, None, s(&input["new_source"]))],
+            };
+        }
+        _ => {}
+    }
+    if event["hook_event_name"].as_str() != Some("PostToolUse") {
+        return vec![];
+    }
+    let first_path = |keys: &[&str]| {
+        keys.iter()
+            .find_map(|k| input[*k].as_str().filter(|p| !p.is_empty()))
+            .map(str::to_string)
+    };
+    match (agent, tool) {
+        ("codex", "apply_patch") => patch_body(input)
+            .map(|body| apply_patch_records(&body, cwd))
+            .unwrap_or_default(),
+        ("grok", "search_replace") => first_path(&["file_path", "path", "target_file"])
+            .map(|p| vec![rec(&p, s(&input["old_string"]), s(&input["new_string"]))])
+            .unwrap_or_default(),
+        ("omp", "write") => first_path(&["path"])
+            .map(|p| vec![rec(&p, None, s(&input["content"]))])
+            .unwrap_or_default(),
+        ("omp", "edit") => {
+            if let Some(p) = first_path(&["path"]) {
+                if input["edits"].is_array() {
+                    // Patch mode: each entry is an op with a diff, not text.
+                    return vec![rec(&p, None, None)];
+                }
+                return vec![rec(&p, s(&input["old_string"]), s(&input["new_string"]))];
+            }
+            patch_body(input)
+                .map(|body| apply_patch_records(&body, cwd))
+                .unwrap_or_default()
+        }
+        ("agy", "write_to_file") => first_path(&["TargetFile"])
+            .map(|p| vec![rec(&p, None, s(&input["CodeContent"]))])
+            .unwrap_or_default(),
+        ("agy", "replace_file_content") => first_path(&["TargetFile"])
+            .map(|p| {
+                vec![rec(
+                    &p,
+                    s(&input["TargetContent"]),
+                    s(&input["ReplacementContent"]),
+                )]
+            })
+            .unwrap_or_default(),
+        ("agy", "multi_replace_file_content") => first_path(&["TargetFile"])
+            .map(|p| match input["ReplacementChunks"].as_array() {
+                Some(chunks) if !chunks.is_empty() => chunks
+                    .iter()
+                    .map(|c| rec(&p, s(&c["TargetContent"]), s(&c["ReplacementContent"])))
+                    .collect(),
+                _ => vec![rec(&p, None, None)],
+            })
+            .unwrap_or_default(),
+        ("agy", "edit_file") => first_path(&["TargetFile"])
+            .map(|p| vec![rec(&p, None, None)])
+            .unwrap_or_default(),
+        _ => vec![],
+    }
+}
+
+/// A relative path is relative to the session's working directory; the journal
+/// reader canonicalizes what it is given, so it must be absolute.
+fn resolve_edit_path(path: &str, cwd: &str) -> String {
+    if cwd.is_empty() || std::path::Path::new(path).is_absolute() {
+        path.to_string()
+    } else {
+        std::path::Path::new(cwd)
+            .join(path)
+            .to_string_lossy()
+            .into_owned()
+    }
+}
+
+/// The apply_patch body in a tool input: a string field, or the argv form
+/// `["apply_patch", "<body>"]`.
+fn patch_body(input: &serde_json::Value) -> Option<String> {
+    let is_patch = |s: &str| s.contains("*** Begin Patch");
+    for key in ["command", "input", "patch"] {
+        match &input[key] {
+            serde_json::Value::String(s) if is_patch(s) => return Some(s.clone()),
+            serde_json::Value::Array(items) => {
+                if let Some(s) = items
+                    .iter()
+                    .filter_map(|v| v.as_str())
+                    .find(|s| is_patch(s))
+                {
+                    return Some(s.to_string());
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+/// Split an apply_patch body into per-hunk records. Update hunks give their
+/// context and `-` lines as the old text and context and `+` lines as the new;
+/// an added file's `+` lines are its new text; a deleted file keeps only its
+/// path. `*** Move to:` re-points the file's records at the destination.
+fn apply_patch_records(body: &str, cwd: &str) -> Vec<EditRecord> {
+    #[derive(PartialEq)]
+    enum Kind {
+        Add,
+        Update,
+        Delete,
+    }
+    struct File {
+        kind: Kind,
+        path: String,
+        hunks: Vec<(Vec<String>, Vec<String>)>,
+    }
+    let mut files: Vec<File> = Vec::new();
+    for line in body.lines() {
+        let header = |prefix: &str| line.strip_prefix(prefix).map(|p| p.trim().to_string());
+        if let Some(p) = header("*** Add File:") {
+            files.push(File {
+                kind: Kind::Add,
+                path: p,
+                hunks: vec![(vec![], vec![])],
+            });
+        } else if let Some(p) = header("*** Update File:") {
+            files.push(File {
+                kind: Kind::Update,
+                path: p,
+                hunks: vec![],
+            });
+        } else if let Some(p) = header("*** Delete File:") {
+            files.push(File {
+                kind: Kind::Delete,
+                path: p,
+                hunks: vec![],
+            });
+        } else if let Some(p) = header("*** Move to:") {
+            if let Some(f) = files.last_mut() {
+                f.path = p;
+            }
+        } else if line.starts_with("*** ") {
+            // Begin/End Patch, End of File.
+        } else if let Some(f) = files.last_mut() {
+            if f.kind == Kind::Delete {
+                continue;
+            }
+            if line.starts_with("@@") {
+                f.hunks.push((vec![], vec![]));
+                continue;
+            }
+            if f.hunks.is_empty() {
+                f.hunks.push((vec![], vec![]));
+            }
+            let hunk = f.hunks.last_mut().expect("pushed above");
+            match line.chars().next() {
+                Some('+') => hunk.1.push(line[1..].to_string()),
+                Some('-') => hunk.0.push(line[1..].to_string()),
+                Some(' ') => {
+                    hunk.0.push(line[1..].to_string());
+                    hunk.1.push(line[1..].to_string());
+                }
+                // A blank context line some models emit without its space.
+                None => {
+                    hunk.0.push(String::new());
+                    hunk.1.push(String::new());
+                }
+                _ => {}
+            }
+        }
+    }
+    let mut out = Vec::new();
+    for f in files {
+        if f.path.is_empty() {
+            continue;
+        }
+        let path = resolve_edit_path(&f.path, cwd);
+        let hunks: Vec<_> = f
+            .hunks
+            .into_iter()
+            .filter(|(o, n)| !o.is_empty() || !n.is_empty())
+            .collect();
+        if hunks.is_empty() {
+            out.push(EditRecord {
+                path,
+                old: None,
+                new: None,
+            });
+            continue;
+        }
+        for (old, new) in hunks {
+            let join = |v: Vec<String>| (!v.is_empty()).then(|| v.join("\n"));
+            out.push(EditRecord {
+                path: path.clone(),
+                old: if f.kind == Kind::Add { None } else { join(old) },
+                new: join(new),
+            });
+        }
+    }
+    out
+}
+
 /// Append this edit to the session's change journal (`<id>.edits.jsonl`), one
 /// record per (sub)edit: the before/after text the agent authored, plus the
 /// file and a timestamp. Append-only so concurrent readers never see a partial
 /// record; entirely best-effort, so any failure is swallowed rather than
-/// breaking the hook. Only Claude-style edit tools carry old/new — a CLI that
-/// reports just a path still lands in the digest `files` list above.
+/// breaking the hook. Only records carrying text are journaled — a tool that
+/// reports just a path still lands in the digest `files` list.
 fn append_edit_journal(session_id: &str, agent: &str, event: &serde_json::Value) {
     let tool = event["tool_name"].as_str().unwrap_or("");
-    if !matches!(tool, "Edit" | "Write" | "MultiEdit" | "NotebookEdit") {
-        return;
-    }
-    let ti = &event["tool_input"];
-    let Some(abs) = ti["file_path"]
-        .as_str()
-        .or_else(|| ti["notebook_path"].as_str())
-    else {
-        return;
-    };
     let ts = now_secs();
-    let mk = |old: Option<&str>, new: Option<&str>| {
-        serde_json::json!({
-            "ts": ts,
-            "agent": agent,
-            "path": abs,
-            "tool": tool,
-            "old": old.map(|s| cap(s, MAX_EDIT_CHARS)),
-            "new": new.map(|s| cap(s, MAX_EDIT_CHARS)),
+    let records: Vec<serde_json::Value> = edit_records(agent, event)
+        .into_iter()
+        .filter(|r| r.old.is_some() || r.new.is_some())
+        .map(|r| {
+            serde_json::json!({
+                "ts": ts,
+                "agent": agent,
+                "path": r.path,
+                "tool": tool,
+                "old": r.old.map(|s| cap(&s, MAX_EDIT_CHARS)),
+                "new": r.new.map(|s| cap(&s, MAX_EDIT_CHARS)),
+            })
         })
-    };
-    let mut records: Vec<serde_json::Value> = Vec::new();
-    match tool {
-        "Edit" => records.push(mk(ti["old_string"].as_str(), ti["new_string"].as_str())),
-        "MultiEdit" => {
-            if let Some(edits) = ti["edits"].as_array() {
-                for e in edits {
-                    records.push(mk(e["old_string"].as_str(), e["new_string"].as_str()));
-                }
-            }
-        }
-        "Write" => records.push(mk(None, ti["content"].as_str())),
-        "NotebookEdit" => records.push(mk(None, ti["new_source"].as_str())),
-        _ => {}
-    }
+        .collect();
     if records.is_empty() {
         return;
     }
@@ -6935,6 +7212,246 @@ mod tests {
         let out = tail_of_named("wall-of-tools", &lines, 4);
         assert_eq!(out.len(), 2);
         assert_eq!(out[1]["text"], "Running it.");
+    }
+
+    // ---- grok running other CLIs' hooks ------------------------------------
+
+    #[test]
+    fn a_claude_or_cursor_hook_run_by_grok_is_dropped() {
+        let sid = Some("019a-grok-session");
+        let ev = Some("post_tool_use");
+        // What grok's compatibility scan runs: Canopy's Claude hook (bare or
+        // `--agent claude`) and its Cursor hook, with grok's runner variables.
+        assert!(foreign_hook_run_by_grok(None, sid, ev));
+        assert!(foreign_hook_run_by_grok(Some("claude"), sid, ev));
+        assert!(foreign_hook_run_by_grok(Some("cursor"), sid, ev));
+        // Grok's own hooks are the ones that count.
+        assert!(!foreign_hook_run_by_grok(Some("grok"), sid, ev));
+        // A real Claude session: no grok runner around it, or only one
+        // inherited variable, is never silenced.
+        assert!(!foreign_hook_run_by_grok(None, None, None));
+        assert!(!foreign_hook_run_by_grok(Some("claude"), sid, None));
+        assert!(!foreign_hook_run_by_grok(Some("claude"), None, ev));
+        assert!(!foreign_hook_run_by_grok(Some("claude"), Some(""), ev));
+    }
+
+    // ---- per-CLI edit tools ------------------------------------------------
+
+    fn rec(path: &str, old: Option<&str>, new: Option<&str>) -> EditRecord {
+        EditRecord {
+            path: path.into(),
+            old: old.map(str::to_string),
+            new: new.map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn codex_apply_patch_names_every_file_in_its_body() {
+        let patch = "*** Begin Patch\n*** Update File: src/a.ts\n@@ function f() {\n const x = 1;\n-return x;\n+return x + 1;\n@@ export\n-old tail\n+new tail\n*** Add File: notes/b.md\n+# Title\n+body\n*** Delete File: /w/c.txt\n*** Update File: d.ts\n*** Move to: e.ts\n@@\n-x\n+y\n*** End Patch";
+        let event = serde_json::json!({
+            "session_id": "019a", "cwd": "/w", "hook_event_name": "PostToolUse",
+            "model": "gpt-5.5", "tool_name": "apply_patch", "tool_use_id": "call_1",
+            "tool_input": { "command": patch },
+            "tool_response": "Success. Updated the following files:\nM src/a.ts",
+        });
+        assert_eq!(
+            edit_records("codex", &event),
+            vec![
+                rec(
+                    "/w/src/a.ts",
+                    Some("const x = 1;\nreturn x;"),
+                    Some("const x = 1;\nreturn x + 1;")
+                ),
+                rec("/w/src/a.ts", Some("old tail"), Some("new tail")),
+                rec("/w/notes/b.md", None, Some("# Title\nbody")),
+                rec("/w/c.txt", None, None),
+                rec("/w/e.ts", Some("x"), Some("y")),
+            ]
+        );
+        // The argv form the model emits, and nothing before the edit happened.
+        let argv = serde_json::json!({
+            "cwd": "/w", "hook_event_name": "PostToolUse", "tool_name": "apply_patch",
+            "tool_input": { "command": ["apply_patch", "*** Begin Patch\n*** Add File: x.rs\n+fn main() {}\n*** End Patch"] },
+        });
+        assert_eq!(
+            edit_records("codex", &argv),
+            vec![rec("/w/x.rs", None, Some("fn main() {}"))]
+        );
+        let mut pre = event.clone();
+        pre["hook_event_name"] = serde_json::json!("PreToolUse");
+        assert!(edit_records("codex", &pre).is_empty());
+    }
+
+    #[test]
+    fn grok_search_replace_is_an_edit_after_normalization() {
+        let mut event = serde_json::json!({
+            "hookEventName": "post_tool_use", "hook_event_name": "PostToolUse",
+            "sessionId": "g-1", "cwd": "/w", "workspaceRoot": "/w",
+            "toolName": "search_replace", "toolUseId": "t1",
+            "toolInput": { "file_path": "src/lib.rs", "old_string": "a", "new_string": "b", "replace_all": false },
+        });
+        normalize_event(&mut event, "grok");
+        assert_eq!(
+            edit_records("grok", &event),
+            vec![rec("/w/src/lib.rs", Some("a"), Some("b"))]
+        );
+        // The same tool name from another CLI is not assumed to mean the same.
+        assert!(edit_records("amp", &event).is_empty());
+    }
+
+    #[test]
+    fn omp_write_and_edit_shapes_are_recognised() {
+        let ev = |tool: &str, input: serde_json::Value| {
+            serde_json::json!({
+                "cwd": "/w", "agent": "omp", "session_id": "o1",
+                "hook_event_name": "PostToolUse", "canopy_signal": "turn-progress",
+                "tool_name": tool, "tool_input": input,
+            })
+        };
+        assert_eq!(
+            edit_records(
+                "omp",
+                &ev(
+                    "write",
+                    serde_json::json!({ "path": "a.txt", "content": "hi" })
+                )
+            ),
+            vec![rec("/w/a.txt", None, Some("hi"))]
+        );
+        assert_eq!(
+            edit_records(
+                "omp",
+                &ev(
+                    "edit",
+                    serde_json::json!({ "path": "/abs/b.ts", "old_string": "x", "new_string": "y" })
+                )
+            ),
+            vec![rec("/abs/b.ts", Some("x"), Some("y"))]
+        );
+        assert_eq!(
+            edit_records(
+                "omp",
+                &ev(
+                    "edit",
+                    serde_json::json!({ "path": "c.py", "edits": [{ "op": "update", "diff": "-a\n+b" }] })
+                )
+            ),
+            vec![rec("/w/c.py", None, None)]
+        );
+        assert_eq!(
+            edit_records(
+                "omp",
+                &ev(
+                    "edit",
+                    serde_json::json!({ "input": "*** Begin Patch\n*** Update File: d.go\n@@\n-p\n+q\n*** End Patch" })
+                )
+            ),
+            vec![rec("/w/d.go", Some("p"), Some("q"))]
+        );
+        // Hashline input names no path we can read: unknown, so nothing.
+        assert!(edit_records(
+            "omp",
+            &ev("edit", serde_json::json!({ "input": "@@ a.ts\n12ab|x" }))
+        )
+        .is_empty());
+        assert!(
+            edit_records("omp", &ev("read", serde_json::json!({ "path": "a.txt" }))).is_empty()
+        );
+    }
+
+    #[test]
+    fn antigravity_file_tools_are_recognised_from_its_tool_call() {
+        let ev = |name: &str, args: serde_json::Value| {
+            let mut e = serde_json::json!({
+                "hook_event_name": "PostToolUse", "conversationId": "c-1",
+                "workspacePaths": ["/w"], "stepIdx": 4, "modelName": "gemini-3",
+                "toolCall": { "name": name, "args": args },
+            });
+            normalize_event(&mut e, "agy");
+            e
+        };
+        assert_eq!(
+            edit_records(
+                "agy",
+                &ev(
+                    "write_to_file",
+                    serde_json::json!({ "TargetFile": "/w/a.json", "CodeContent": "{}" })
+                )
+            ),
+            vec![rec("/w/a.json", None, Some("{}"))]
+        );
+        assert_eq!(
+            edit_records(
+                "agy",
+                &ev(
+                    "replace_file_content",
+                    serde_json::json!({ "TargetFile": "/w/b.go", "TargetContent": "x", "ReplacementContent": "y" })
+                )
+            ),
+            vec![rec("/w/b.go", Some("x"), Some("y"))]
+        );
+        assert_eq!(
+            edit_records(
+                "agy",
+                &ev(
+                    "multi_replace_file_content",
+                    serde_json::json!({ "TargetFile": "/w/c.go", "ReplacementChunks": [
+                { "TargetContent": "1", "ReplacementContent": "2" },
+                { "TargetContent": "3", "ReplacementContent": "4" }
+            ] })
+                )
+            ),
+            vec![
+                rec("/w/c.go", Some("1"), Some("2")),
+                rec("/w/c.go", Some("3"), Some("4"))
+            ]
+        );
+        assert_eq!(
+            edit_records(
+                "agy",
+                &ev(
+                    "edit_file",
+                    serde_json::json!({ "TargetFile": "/w/d.go", "CodeEdit": "{{...}}\nx\n{{...}}" })
+                )
+            ),
+            vec![rec("/w/d.go", None, None)]
+        );
+        assert!(edit_records(
+            "agy",
+            &ev("run_command", serde_json::json!({ "CommandLine": "ls" }))
+        )
+        .is_empty());
+    }
+
+    #[test]
+    fn claude_shaped_edits_are_unchanged_and_unknown_tools_stay_blind() {
+        let edit = serde_json::json!({
+            "hook_event_name": "PostToolUse", "cwd": "/w", "tool_name": "Edit",
+            "tool_input": { "file_path": "/w/a.ts", "old_string": "a", "new_string": "b" },
+        });
+        assert_eq!(
+            edit_records("claude", &edit),
+            vec![rec("/w/a.ts", Some("a"), Some("b"))]
+        );
+        let multi = serde_json::json!({
+            "tool_name": "MultiEdit",
+            "tool_input": { "file_path": "/w/a.ts", "edits": [
+                { "old_string": "1", "new_string": "2" }, { "old_string": "3", "new_string": "4" }
+            ] },
+        });
+        assert_eq!(edit_records("claude", &multi).len(), 2);
+        // Unverified CLIs (Amp, Cursor) keep today's behaviour: nothing.
+        for (agent, tool) in [
+            ("amp", "edit_file"),
+            ("cursor", "edit_file"),
+            ("cursor", "apply_patch"),
+        ] {
+            let e = serde_json::json!({
+                "hook_event_name": "PostToolUse", "cwd": "/w", "tool_name": tool,
+                "tool_input": { "path": "a.ts", "command": "*** Begin Patch\n*** Add File: a\n+x\n*** End Patch" },
+            });
+            assert!(edit_records(agent, &e).is_empty(), "{agent} {tool}");
+        }
     }
 
     // ---- pushed diagnostics ----------------------------------------------

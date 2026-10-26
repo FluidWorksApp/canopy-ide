@@ -88,7 +88,7 @@ const codexMode = (authority: StructuredRunnerAuthority): string =>
 /** Authority for `codex exec`, where it is a first-class flag.
  *
  *  `-s/--sandbox <read-only|workspace-write|danger-full-access>`, verified
- *  against `codex exec --help` (0.147.0) on 2026-08-09. Never the third value,
+ *  against `codex exec --help` (0.147.0 on 2026-08-09; 0.162.1 on 2026-10-26). Never the third value,
  *  and never
  *  `--dangerously-bypass-approvals-and-sandbox`: a task Canopy launched
  *  unattended is the last thing that should be running outside the sandbox. */
@@ -181,8 +181,12 @@ export function codexResumeSandbox(
   ];
 }
 
-/** Claude print/resume argv, re-verified against Claude Code 2.1.226's local
- *  `--help` on 2026-08-09. Claude has no OS workspace boundary equivalent to
+/** Claude print/resume argv, re-verified against Claude Code 2.1.310's local
+ *  `--help` on 2026-10-26 (first verified at 2.1.226 on 2026-08-09). Every
+ *  flag below, and `--permission-mode`/`--allowedTools`/`--disallowedTools`,
+ *  is still listed. Since 2.1.302 `-p` defaults to Manual mode; every caller
+ *  passes an explicit permissionMode, so that change does not reach Build.
+ *  Claude has no OS workspace boundary equivalent to
  *  Codex's sandbox: allowed/disallowed tool flags govern which tools may be
  *  attempted, but they do not confine Edit/Write paths. The existing Bash
  *  destructive-command hook is a separate safety gate, not filesystem
@@ -191,8 +195,8 @@ export const CLAUDE_RUNNER: StructuredRunner = {
   tier: "structured",
   dialect: "claude",
   verification: {
-    cliVersion: "2.1.226",
-    checkedOn: "2026-08-09",
+    cliVersion: "2.1.310",
+    checkedOn: "2026-10-26",
     source: "claude --help",
     flags: {
       structuredJson: true,
@@ -240,8 +244,12 @@ export const CLAUDE_RUNNER: StructuredRunner = {
   ],
 };
 
-/** `codex exec`, re-verified against codex-cli 0.147.0's local `exec --help`
- *  and `exec resume --help` on 2026-08-09.
+/** `codex exec`, re-verified against codex-cli 0.162.1's local `exec --help`
+ *  and `exec resume --help` on 2026-10-26 (first verified at 0.147.0 on
+ *  2026-08-09): `--json`, `--skip-git-repo-check`, `-C`, `--add-dir`, `-m`,
+ *  `-s` on exec; resume still rejects `-s` ("unexpected argument"); and the
+ *  three `-c` keys used below are accepted under `--strict-config`, which
+ *  refuses an unknown key.
  *
  *  No permission flags, and not for want of looking: Claude's `--allowedTools`
  *  has no counterpart here. Codex draws the line with the sandbox instead of a
@@ -259,8 +267,8 @@ export const CODEX_RUNNER: StructuredRunner = {
   tier: "oneshot",
   dialect: "codex",
   verification: {
-    cliVersion: "0.147.0",
-    checkedOn: "2026-08-09",
+    cliVersion: "0.162.1",
+    checkedOn: "2026-10-26",
     source: "codex exec --help; codex exec resume --help",
     flags: {
       structuredJson: true,

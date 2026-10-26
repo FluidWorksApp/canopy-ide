@@ -1361,8 +1361,12 @@ export const BUILTIN_AGENT_CLIS: AgentCliDef[] = [
     // session (always-ask|write|yolo)`. `write` is the middle rung — writes go
     // through, the rest still asks — and `yolo` is `--auto-approve` by another
     // name, which is the rung above. Pinned rather than left alone because
-    // `always-ask` is a configurable default, and a task that inherits it stops
-    // on its first edit.
+    // omp's own default is the permissive end, not `always-ask`:
+    // `tools.approvalMode` falls back to `yolo` when unset (omp 18.4.10
+    // src/tools/approval.ts; docs/approval-mode.md), so a bare `omp` would
+    // auto-approve every tool, shell included. Like every CLI's automatic mode
+    // this rides on all Canopy launches (fresh, prompted, restored, remote).
+    // omp forces its own subagents to `yolo` whatever this says.
     unattended: "--approval-mode=write",
     // `write` still prompts for every bash/eval/task call. The marker asks the
     // PTY layer to add Canopy's overlay (~/.canopy/omp-task-approval.yml)

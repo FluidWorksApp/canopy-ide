@@ -30,8 +30,8 @@ const workspaceConfig = (args: readonly string[]) =>
 describe("structured runner sandbox policy", () => {
   it("pins dated capability evidence for every launchable Build runner", () => {
     expect(STRUCTURED_RUNNERS.claude.verification).toMatchObject({
-      cliVersion: "2.1.226",
-      checkedOn: "2026-08-09",
+      cliVersion: "2.1.310",
+      checkedOn: "2026-10-26",
       flags: {
         structuredJson: true,
         systemPrompt: true,
@@ -41,8 +41,8 @@ describe("structured runner sandbox policy", () => {
       },
     });
     expect(STRUCTURED_RUNNERS.codex.verification).toMatchObject({
-      cliVersion: "0.147.0",
-      checkedOn: "2026-08-09",
+      cliVersion: "0.162.1",
+      checkedOn: "2026-10-26",
       flags: {
         structuredJson: true,
         systemPrompt: false,
