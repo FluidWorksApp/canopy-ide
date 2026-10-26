@@ -471,6 +471,18 @@ export interface Settings {
   /** Include the first line of a teammate's message in its notification. Off
    *  shows only who wrote, so message text never appears in banners or the bell. */
   teamMessagePreviews: boolean;
+  /** Read receipts in team chat, reciprocal: on tells teammates (on Canopy
+   *  0.4.11 or later) when you have read their messages and shows when they
+   *  have read yours; off does neither. */
+  teamReadReceipts: boolean;
+  /** Notify about messages that name you (@you), review requests to you and
+   *  replies to your messages even when team message notifications are off or
+   *  the conversation is muted. @channel does not count. */
+  teamMentionNotifications: boolean;
+  /** Muted conversations, as `${teamId}:${peerId}` or `${teamId}:#` for a
+   *  team's channel. Muted ones still count unread, in grey, and never notify
+   *  except for the personal cases above. Kept on this device only. */
+  teamMutedConversations: string[];
   /** Show the terminal memory warning flyout and governor decision card. The
    *  governor continues measuring in the background when this is off; only its
    *  user-facing prompts and attention items are suppressed. On by default so
@@ -647,6 +659,9 @@ export const DEFAULTS: Settings = {
   notificationPopupsEnabled: true,
   teamMessageNotifications: true,
   teamMessagePreviews: true,
+  teamReadReceipts: true,
+  teamMentionNotifications: true,
+  teamMutedConversations: [],
   terminalMemoryPromptsEnabled: true,
   disabledTools: [],
   autoImportMarkdownResearch: true,
@@ -770,6 +785,14 @@ export function getSettings(): Settings {
     // established storage keys for the two remaining browsing options.
     if (value.browserEngine !== "proxy" && value.browserEngine !== "chrome")
       value.browserEngine = "proxy";
+    if (
+      !Array.isArray(value.teamMutedConversations) ||
+      !value.teamMutedConversations.every(
+        (key) => typeof key === "string" && key.length <= 600,
+      )
+    )
+      value.teamMutedConversations = [];
+    else value.teamMutedConversations = value.teamMutedConversations.slice(-500);
   } catch {
     value = { ...DEFAULTS };
   }

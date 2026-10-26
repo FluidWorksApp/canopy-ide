@@ -112,7 +112,7 @@ it('toggles your own reaction, sends it to the conversation and restores it afte
  await first.session.react(T1,'👍');
  const sent=mocks.sendEvent.mock.calls[0][0] as any;
  // A direct message's reaction goes to the other person, as a v2 event message.
- expect(sent).toMatchObject({sender:'me',recipient:'ada',v:2,event:{type:'reaction',target:T1,emoji:'👍',op:'add'}});
+ expect(sent).toMatchObject({sender:'me',recipient:'ada',v:3,event:{type:'reaction',target:T1,emoji:'👍',op:'add'}});
  expect(sent.text).toContain('👍');
  expect(first.session.getSnapshot().reactions[T1]).toBeDefined();
  await first.session.react(T1,'👍');
