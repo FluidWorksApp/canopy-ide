@@ -1723,6 +1723,10 @@ impl PtyManager {
         }
         let caller_set_aider_read = extra_env.iter().any(|(k, _)| k == "AIDER_READ");
         let marks_omp_task = extra_env.iter().any(|(k, _)| k == OMP_TASK_MARKER);
+        let grok_switches = grok_foreign_hook_env(
+            |key| extra_env.iter().any(|(k, _)| k == key),
+            |key| std::env::var_os(key).is_some(),
+        );
         for (k, v) in extra_env {
             if matches!(
                 k.as_str(),
@@ -1743,6 +1747,9 @@ impl PtyManager {
         // #5" from another's — which silently binds one agent's digest to another's
         // terminal in the panel. This tag makes the pairing unambiguous.
         cmd.env("CANOPY_INSTANCE", instance_token());
+        for (key, value) in grok_switches {
+            cmd.env(key, value);
+        }
         // Aider has no MCP client or system-prompt hook. Its documented
         // AIDER_READ channel adds a read-only conventions file without
         // creating a fake opening user turn. Scope it to Canopy's PTYs and
@@ -2699,6 +2706,36 @@ fn canopy_aider_context(
     path.is_file().then_some(path)
 }
 
+/// Grok scans `~/.claude/settings.json` and `~/.cursor/hooks.json` for hooks
+/// by default, and Canopy installs its own Claude and Cursor hooks in exactly
+/// those files. Left alone, a grok session in a Canopy terminal runs
+/// `canopy-hook --agent claude` (and `--agent cursor`) beside its native
+/// `--agent grok` hooks, so its events are stamped as another CLI's and fire
+/// twice. These are grok's documented per-vendor switches (`[compat.claude]
+/// hooks` / `[compat.cursor] hooks`, env > config.toml > default); verified
+/// with `grok inspect --json` on grok 1.0.46, where `=0` turns each Claude hook
+/// to `compatibilityStatus: "disabled"`. Only hooks: grok already dedupes
+/// Canopy's MCP server by name (its config.toml entry wins), and turning off
+/// the MCP scan would also hide the user's other Claude servers from grok.
+/// Scoped to Canopy's PTYs; no other CLI reads these keys.
+const GROK_FOREIGN_HOOK_SWITCHES: &[(&str, &str)] = &[
+    ("GROK_CLAUDE_HOOKS_ENABLED", "0"),
+    ("GROK_CURSOR_HOOKS_ENABLED", "0"),
+];
+
+/// The grok compatibility switches to export, skipping any the caller or the
+/// user's own environment already set — an explicit choice survives.
+fn grok_foreign_hook_env(
+    caller_set: impl Fn(&str) -> bool,
+    inherited: impl Fn(&str) -> bool,
+) -> Vec<(&'static str, &'static str)> {
+    GROK_FOREIGN_HOOK_SWITCHES
+        .iter()
+        .copied()
+        .filter(|(key, _)| !caller_set(key) && !inherited(key))
+        .collect()
+}
+
 /// Env key the frontend sets on an omp task terminal (see projects.ts
 /// `unattendedEnv`). Consumed here, never passed through to the shell.
 const OMP_TASK_MARKER: &str = "CANOPY_OMP_TASK_OVERLAY";
@@ -2824,6 +2861,27 @@ mod tests {
         std::fs::remove_file(path).unwrap();
         std::fs::remove_dir(home.join(".canopy")).unwrap();
         std::fs::remove_dir(home).unwrap();
+    }
+
+    #[test]
+    fn grok_in_a_canopy_terminal_skips_canopys_claude_and_cursor_hooks() {
+        let none = |_: &str| false;
+        assert_eq!(
+            grok_foreign_hook_env(none, none),
+            vec![
+                ("GROK_CLAUDE_HOOKS_ENABLED", "0"),
+                ("GROK_CURSOR_HOOKS_ENABLED", "0")
+            ]
+        );
+        // A value the caller passed, or the user exported, is theirs.
+        assert_eq!(
+            grok_foreign_hook_env(|k| k == "GROK_CLAUDE_HOOKS_ENABLED", none),
+            vec![("GROK_CURSOR_HOOKS_ENABLED", "0")]
+        );
+        assert_eq!(
+            grok_foreign_hook_env(none, |k| k == "GROK_CURSOR_HOOKS_ENABLED"),
+            vec![("GROK_CLAUDE_HOOKS_ENABLED", "0")]
+        );
     }
 
     #[test]

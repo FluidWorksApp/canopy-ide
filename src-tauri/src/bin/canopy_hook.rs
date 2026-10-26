@@ -605,6 +605,16 @@ fn real_main() -> Result<(), Box<dyn std::error::Error>> {
         raw = serde_json::to_string(&event).unwrap_or_default();
     }
 
+    // Read the payload first, then drop: exiting with stdin unread can surface
+    // as a broken-pipe line in the CLI that ran us.
+    if foreign_hook_run_by_grok(
+        agent_override.as_deref(),
+        std::env::var("GROK_SESSION_ID").ok().as_deref(),
+        std::env::var("GROK_HOOK_EVENT").ok().as_deref(),
+    ) {
+        return Ok(());
+    }
+
     normalize_event(&mut event, agent_override.as_deref().unwrap_or("claude"));
 
     if event["agent"].as_str() == Some("grok") && event["subagent_type"].is_string() {
@@ -730,6 +740,30 @@ fn real_main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
     Ok(())
+}
+
+/// Grok loads Claude's and Cursor's hook files by default, so Canopy's own
+/// `canopy-hook` (bare, `--agent claude` or `--agent cursor`) also runs inside
+/// grok sessions, where it would stamp grok's events as another CLI's and —
+/// beside the native `--agent grok` hooks — record each one twice. Canopy's
+/// PTYs export GROK_CLAUDE_HOOKS_ENABLED=0 / GROK_CURSOR_HOOKS_ENABLED=0 to stop
+/// that at the source; this is the backstop for a terminal where the user set
+/// them back, or a grok started outside Canopy's env.
+///
+/// Grok's hook runner injects GROK_SESSION_ID and GROK_HOOK_EVENT into every
+/// hook process it spawns (grok 1.0.46 embedded docs, "Runner-injected
+/// variables"). Requiring both keeps a real Claude session that merely
+/// inherited one of them from an enclosing grok from being silenced. The
+/// native grok hooks already deliver the event, so the copy is dropped rather
+/// than retagged.
+fn foreign_hook_run_by_grok(
+    agent_override: Option<&str>,
+    grok_session_id: Option<&str>,
+    grok_hook_event: Option<&str>,
+) -> bool {
+    agent_override != Some("grok")
+        && grok_session_id.is_some_and(|v| !v.is_empty())
+        && grok_hook_event.is_some_and(|v| !v.is_empty())
 }
 
 fn safe_session_id(id: &str) -> bool {
@@ -6935,6 +6969,27 @@ mod tests {
         let out = tail_of_named("wall-of-tools", &lines, 4);
         assert_eq!(out.len(), 2);
         assert_eq!(out[1]["text"], "Running it.");
+    }
+
+    // ---- grok running other CLIs' hooks ------------------------------------
+
+    #[test]
+    fn a_claude_or_cursor_hook_run_by_grok_is_dropped() {
+        let sid = Some("019a-grok-session");
+        let ev = Some("post_tool_use");
+        // What grok's compatibility scan runs: Canopy's Claude hook (bare or
+        // `--agent claude`) and its Cursor hook, with grok's runner variables.
+        assert!(foreign_hook_run_by_grok(None, sid, ev));
+        assert!(foreign_hook_run_by_grok(Some("claude"), sid, ev));
+        assert!(foreign_hook_run_by_grok(Some("cursor"), sid, ev));
+        // Grok's own hooks are the ones that count.
+        assert!(!foreign_hook_run_by_grok(Some("grok"), sid, ev));
+        // A real Claude session: no grok runner around it, or only one
+        // inherited variable, is never silenced.
+        assert!(!foreign_hook_run_by_grok(None, None, None));
+        assert!(!foreign_hook_run_by_grok(Some("claude"), sid, None));
+        assert!(!foreign_hook_run_by_grok(Some("claude"), None, ev));
+        assert!(!foreign_hook_run_by_grok(Some("claude"), Some(""), ev));
     }
 
     // ---- pushed diagnostics ----------------------------------------------
