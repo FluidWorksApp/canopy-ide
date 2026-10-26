@@ -593,3 +593,45 @@ it('ends a restored tab whose session the workspace no longer has, instead of re
  expect(result.current.phase).toBe('connected');
  host.dispose();
 });
+
+it('asks the workspace for a Claude IDE server as a request field, never as child env', async () => {
+  const {host,fetcher}=setup();
+  const {CLAUDE_IDE_MARKER:shared}=await import('../claudeIde');
+  const {CLAUDE_IDE_MARKER}=await import('./NativeWorkspaceHost');
+  expect(CLAUDE_IDE_MARKER).toBe(shared);
+  await host.invoke('pty_spawn',{cwd:'/workspace/projects/app',env:[['CANOPY_CLAUDE_IDE','/workspace/projects/app'],['CLAUDE_CONFIG_DIR','/home/agent/.canopy/profiles/work/.claude']]});
+  const body=JSON.parse(fetcher.mock.calls.find(([url])=>String(url).endsWith('/sessions'))![1].body);
+  expect(body.claudeIde).toEqual({root:'/workspace/projects/app',configDir:'/home/agent/.canopy/profiles/work/.claude'});
+  expect(body.command).not.toContain('CANOPY_CLAUDE_IDE');
+  expect(body.command).toContain("'CLAUDE_CONFIG_DIR=/home/agent/.canopy/profiles/work/.claude'");
+  fetcher.mockClear();
+  await host.invoke('pty_spawn',{cwd:'/workspace',env:[['KEY','v']]});
+  expect(JSON.parse(fetcher.mock.calls.find(([url])=>String(url).endsWith('/sessions'))![1].body)).not.toHaveProperty('claudeIde');
+  host.dispose();
+});
+
+it('hands Claude IDE events from a terminal stream to the window, keyed by that terminal', async()=>{
+ const {host,fetcher}=setup();
+ class Socket {
+  static all:Socket[]=[];onmessage?: (event:{data:string})=>void;onclose?:()=>void;closed=false;
+  constructor(){Socket.all.push(this);}close(){this.closed=true;}sendFrame(value:unknown){this.onmessage?.({data:JSON.stringify(value)});}
+ }
+ vi.stubGlobal('WebSocket',Socket);
+ fetcher.mockImplementation(async(url:string,options:RequestInit)=>({ok:true,json:async()=>url.endsWith('/ticket')?{ticket:'synthetic-ticket'}:url.endsWith('/sessions')&&options.method==='GET'?[{id:7,title:'shell',cols:40,rows:10,exitCode:null}]:url.endsWith('/sessions')?{id:7,title:'shell',cols:40,rows:10,exitCode:null}:{result:3}}));
+ const seen:unknown[]=[];await host.listen('claude-ide',event=>seen.push(event.payload));
+ const channel={onmessage:vi.fn()};
+ await host.invoke('pty_spawn_attached_argv',{cwd:'/workspace',argv:['bash'],onData:channel});
+ const socket=Socket.all[0];
+ socket.sendFrame({t:'snapshot',b64:btoa('screen'),start:0,end:0,reset:true,cols:40,rows:10});
+ socket.sendFrame({t:'ide',event:{kind:'diff',ptyId:99,tabName:'tab',path:'/workspace/a.py',contents:'x'}});
+ socket.sendFrame({t:'ide',event:{kind:'connection',ptyId:7,root:'/workspace',connected:true}});
+ socket.sendFrame({t:'ide',event:null});
+ expect(seen).toEqual([{kind:'diff',ptyId:7,tabName:'tab',path:'/workspace/a.py',contents:'x'},{kind:'connection',ptyId:7,root:'/workspace',connected:true}]);
+ // IDE frames are not terminal output.
+ expect(channel.onmessage).toHaveBeenCalledTimes(1);
+ // The window's answers go to the VM's native commands.
+ expect(await host.invoke('claude_ide_selection',{path:'/workspace/a.py',params:{text:''}})).toBe(3);
+ const native=fetcher.mock.calls.filter(([url])=>String(url).endsWith('/native')).map(([,options])=>JSON.parse(String(options.body)));
+ expect(native.at(-1)).toEqual({command:'claude_ide_selection',args:{path:'/workspace/a.py',params:{text:''}}});
+ host.dispose();
+});

@@ -31,6 +31,7 @@ import {workspaceActivity} from './activity.mjs';
 import {sessionProcessReader} from './session-processes.mjs';
 import {McpRegistry} from './mcp-servers.mjs';
 import {gitHistory} from './git-history.mjs';
+import {claudeIde,claudeIdeCommand} from './claude-ide.mjs';
 const sessionProcesses=sessionProcessReader();
 const workspaceMetrics=metricsReader();
 const execute=promisify(execFile);
@@ -79,6 +80,9 @@ async function saveMetadata(file,value){await mkdir(HOME+'/.canopy',{recursive:t
 const CLIS=['claude','codex','amp','aider','agy','opencode','omp','cursor-agent','grok'];
 export async function nativeInvoke(command,args={}){
   if(command.startsWith('fs_upload_'))return uploads.invoke(command,args);
+  // The desktop's answers to the Claude Code IDE servers of this workspace's
+  // terminals (claude-ide.mjs), which live in this same process.
+  if(command.startsWith('claude_ide_')){const handled=claudeIdeCommand(claudeIde,command,args);if(handled.handled)return handled.value;}
   if(command==='session_process_stats'){
     if(!Array.isArray(args.sessions)||args.sessions.length>32)throw Error('Invalid session inventory');
     return sessionProcesses(args.sessions);
@@ -251,7 +255,7 @@ export async function nativeInvoke(command,args={}){
 export function startNativeServer(){
   const secret=process.env.CANOPY_RUNNER_TOKEN;if(!secret)throw Error('Workspace authentication required');
   const expected=Buffer.from('Bearer '+secret);
-  const screens=terminalScreens(secret);
+  const screens=terminalScreens(secret,{replay:id=>claudeIde.replay(id)});
   const authorized=request=>{const auth=Buffer.from(request.headers.authorization??'');return auth.length===expected.length&&timingSafeEqual(auth,expected);};
   const server=http.createServer(async(request,response)=>{if(!authorized(request))return json(response,401,{error:'Unauthorized'});try{const input=await body(request);const resize=request.url.match(/^\/sessions\/(\d+)\/resize$/);if(resize)return json(response,200,await screens.resize(Number(resize[1]),input.cols,input.rows));if(request.url!=='/native')throw Error('Unknown workspace operation');return json(response,200,{result:(await nativeInvoke(input.command,input.args))??null});}catch(error){return json(response,400,{error:error.message});}});
   const wss=new WebSocketServer({noServer:true,maxPayload:256000,perMessageDeflate:false});

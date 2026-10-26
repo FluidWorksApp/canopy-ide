@@ -76,9 +76,9 @@ describe("claudeIdeLaunchEnv", () => {
     expect(claudeIdeLaunchEnv({ root: "/w" })).toEqual([]);
   });
 
-  it("gives a remote workspace no env at all", () => {
-    // The server would be on the desktop and claude on the VM: a port that
-    // can only fail. Until the server moves to the remote host, nothing.
+  it("gives the phone portal no env at all", () => {
+    // The portal drives the desktop's own terminals from another screen; the
+    // window that would show their diffs is not the one in front of the user.
     const uninstall = installHost({
       kind: "socket",
       invoke: vi.fn(),
@@ -87,6 +87,26 @@ describe("claudeIdeLaunchEnv", () => {
     } as unknown as Host);
     try {
       expect(claudeIdeLaunchEnv(claude)).toEqual([]);
+    } finally {
+      uninstall();
+    }
+  });
+
+  it("asks a remote workspace for a server on the VM, beside claude", () => {
+    // The workspace host turns the marker into a /sessions request field;
+    // packages/remote-host/claude-ide.mjs serves it in claude's PID namespace.
+    const uninstall = installHost({
+      kind: "socket",
+      invoke: vi.fn(),
+      invokeDesktop: vi.fn(),
+      listen: vi.fn(),
+      channel: vi.fn(),
+    } as unknown as Host);
+    try {
+      expect(claudeIdeLaunchEnv({ command: "claude", root: "/workspace/projects/app" })).toEqual([
+        [CLAUDE_IDE_MARKER, "/workspace/projects/app"],
+      ]);
+      expect(claudeIdeLaunchEnv({ command: "claude -p hi", root: "/workspace/projects/app" })).toEqual([]);
     } finally {
       uninstall();
     }

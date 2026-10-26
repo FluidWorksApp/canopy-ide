@@ -31,7 +31,7 @@ export class TerminalScreen {
   snapshot(){return this.enqueue(0,()=>({t:'snapshot',reset:true,gap:false,b64:this.serialize(),start:this.end,end:this.end,cols:this.term.cols,rows:this.term.rows}));}
   dispose(){this.disposed=true;this.mouseModes.dispose();this.term.dispose();}
 }
-export function terminalScreens(secret){
+export function terminalScreens(secret,{replay=()=>[]}={}){
   const screens=new Map();
   function get(id){
     let entry=screens.get(id);if(entry)return entry;
@@ -46,6 +46,9 @@ export function terminalScreens(secret){
       try{
         const message=JSON.parse(raw);
         if(message.t==='exit'){void screen.enqueue(0,()=>send(message));return;}
+        // Claude Code IDE events (claude-ide.mjs) are not terminal output:
+        // straight to the viewers, outside the screen's parse queue.
+        if(message.t==='ide'){send(message);return;}
         if(!['snapshot','data'].includes(message.t))return;
         const bytes=Buffer.from(message.b64,'base64');
         if(message.t==='snapshot')entry.summary=message;
@@ -62,6 +65,8 @@ export function terminalScreens(secret){
       if(client.readyState!==1)return;
       const frame={...entry.summary,t:'snapshot',reset:true,gap:false,b64:entry.screen.serialize(),start:entry.screen.end,end:entry.screen.end,cols:entry.screen.term.cols,rows:entry.screen.term.rows};
       client.send(JSON.stringify(frame));entry.clients.add(client);client.once('close',()=>entry.clients.delete(client));
+      // What this viewer missed: a connected CLI and the diffs it waits on.
+      for(const event of replay(id))client.send(JSON.stringify({t:'ide',event}));
     });},
     async resize(id,cols,rows){
       if(!Number.isInteger(cols)||!Number.isInteger(rows)||cols<1||cols>512||rows<1||rows>256)throw Error('Invalid terminal geometry');

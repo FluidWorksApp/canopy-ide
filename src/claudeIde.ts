@@ -28,9 +28,10 @@ export const CLAUDE_IDE_MARKER = "CANOPY_CLAUDE_IDE";
  *  the tab's shell. A run tab or micro-task hands its command to the shell as
  *  `runCommand` instead, and nobody is at its terminal to answer a diff; a
  *  headless `-p` run never connects at all (verified), so it is never asked.
- *  Remote workspaces are excluded until the server can run on the VM, in the
- *  same PID namespace as `claude` — a desktop port in a VM's env is a
- *  connection that can only fail. */
+ *  In a remote workspace the server runs on the VM, beside `claude` (the
+ *  workspace host carries the marker to packages/remote-host/claude-ide.mjs).
+ *  The phone portal is left out: its terminals are the desktop's, but the
+ *  window that would answer their diffs is not the one being driven. */
 export function claudeIdeLaunchEnv(launch: {
   command?: string;
   runCommand?: string;
@@ -41,10 +42,10 @@ export function claudeIdeLaunchEnv(launch: {
 }): [string, string][] {
   if (!launch.command || launch.runCommand) return [];
   if (!getSettings().claudeIdeIntegration) return [];
-  if (isRemoteHost() || isWorkspaceHost()) return [];
+  if (isRemoteHost() && !isWorkspaceHost()) return [];
   const cli = agentIdForCommand(launch.command);
-  // Only a harness that serves the IDE protocol natively gets the marker; the
-  // capability record, not a vendor id, decides.
+  // The ledger is the gate: only Claude Code's entry marks `ideProtocol`
+  // native, and that entry is this protocol (harness.ts). No vendor id here.
   if (!cli || harnessSupport(cli, "ideProtocol") !== "native") return [];
   if (/(^|\s)(-p|--print)(\s|$)/.test(launch.command)) return [];
   return [[CLAUDE_IDE_MARKER, claudeIdeRoot(launch.root, launch.cwd)]];
