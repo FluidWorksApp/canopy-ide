@@ -144,8 +144,10 @@ import {
   CLI_INSTALLS_CHANGED_EVENT,
   checkDesktopClis,
   checkInstalledClis,
+  nativeUpdateOffEnv,
   remoteCliMetadata,
 } from "./projects";
+import { useCliAutoUpdater } from "./cliAutoUpdate";
 import { TooltipLayer } from "./components/TooltipLayer";
 import { Onboarding } from "./components/Onboarding";
 import { Welcome } from "./components/Welcome";
@@ -551,6 +553,8 @@ export default function App() {
     [],
   );
   useNoteReminders(projectNameFor);
+  // Settings → Agents → "Keep agent CLIs up to date" (cliAutoUpdate.ts).
+  useCliAutoUpdater();
   // The `Notify` seam, threaded through nearly every component. The opts bag
   // is how a plain notice stops being anonymous: a caller names the project it
   // speaks for (by id or by any path inside it) and where a click should land,
@@ -1423,6 +1427,12 @@ export default function App() {
       void ipc.ptySetNameTheme(settings.sessionNameTheme).catch((err) =>
         console.warn("failed to apply session name theme", err),
       );
+      // Auto-update off also means the self-updating CLIs stop updating
+      // themselves: their documented variables go into every agent process
+      // the desktop starts (terminals, structured runs, the companion).
+      void ipc
+        .cliSetNativeUpdateEnv(nativeUpdateOffEnv(settings.autoUpdateClis))
+        .catch((err) => console.warn("failed to apply CLI auto-update setting", err));
     };
     sync();
     return subscribeSettings(sync);

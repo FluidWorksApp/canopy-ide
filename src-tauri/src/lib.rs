@@ -12,6 +12,7 @@ mod change;
 mod chrome_stream;
 mod cleanup;
 mod cli;
+mod cli_update;
 mod client_mode;
 mod clipboard;
 mod companion;
@@ -926,6 +927,8 @@ pub fn run() {
             agents::which_check,
             agents::model_catalog,
             agents::cli_versions,
+            cli_update::cli_run_update,
+            cli_update::cli_set_native_update_env,
             agents::setup_agent_hooks,
             agents::agent_hooks_installed,
             agents::agent_integration_health,

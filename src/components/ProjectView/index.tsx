@@ -198,6 +198,7 @@ import {
   shellBin,
   type AgentLaunchOptions,
   updateCommand,
+  updateCommandFor,
 } from "../../projects";
 import {
   workflowAgentForStep,
@@ -9215,7 +9216,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
       if (!cwd) return;
       // Route to the command matched to the install source (e.g. `brew upgrade`);
       // fall back to the CLI's own updater when the source is a plain registry.
-      const cmd = cliUpdates[cli.bin]?.updateCmd ?? updateCommand(cli);
+      const cmd = updateCommandFor(cli, cliUpdates[cli.bin]);
       // Nothing to run: an entry with neither an updater nor an installer (a
       // custom CLI) never badges an update in the first place, so this is the
       // belt to that brace rather than a state a user can reach.

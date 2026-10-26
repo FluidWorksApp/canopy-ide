@@ -1723,6 +1723,12 @@ impl PtyManager {
         }
         let caller_set_aider_read = extra_env.iter().any(|(k, _)| k == "AIDER_READ");
         let marks_omp_task = extra_env.iter().any(|(k, _)| k == OMP_TASK_MARKER);
+        // Settings → Agents → "Keep agent CLIs up to date" switched off: the
+        // CLIs that update themselves (claude, grok, agy) are told not to.
+        // Before the caller's own variables, so an explicit launch env wins.
+        for (k, v) in crate::cli_update::native_update_env() {
+            cmd.env(k, v);
+        }
         for (k, v) in extra_env {
             if matches!(
                 k.as_str(),

@@ -1,6 +1,6 @@
 // Typed feature API shared by IDE clients. Host adapters carry commands,
 // events and channels; native work (PTYs, LSP, files) remains in the Rust core.
-import { createChannel, invoke } from "./host";
+import { createChannel, invoke, invokeDesktop } from "./host";
 import { startRendererHeartbeat } from "./rendererHeartbeat";
 import { isRemoteHost, listen as hostListen, type UnlistenFn } from "./host";
 import type { HostEvent } from "./host/contract";
@@ -340,6 +340,11 @@ export const ptySetName = (id: number, name: string) =>
   invoke<string>("pty_set_name", { id, name });
 export const ptySetNameTheme = (theme: string) =>
   invoke<void>("pty_set_name_theme", { theme });
+/** The variables that switch self-updating CLIs' background updaters off
+ *  (empty = leave them alone), for every agent process the desktop starts.
+ *  Always the desktop: a remote workspace keeps its image's pinned CLIs. */
+export const cliSetNativeUpdateEnv = (env: [string, string][]) =>
+  invokeDesktop<void>("cli_set_native_update_env", { env });
 
 /** Spawn a detached PTY from an argv array, with no shell anywhere in the path.
  *  `argv[0]` is the program; every later element stays exactly one argument,
