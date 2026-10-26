@@ -133,3 +133,4 @@ button.team-row{cursor:pointer;}button.team-row:hover:not(:disabled){background:
 .account-chat-picker-custom input{width:84px;height:24px;padding:0 6px;border:1px solid var(--border);border-radius:var(--r-sm);background:var(--bg);color:var(--text);font:inherit;font-size:var(--fs-xs)}
 .account-chat-picker-custom input[aria-invalid=true]{border-color:var(--warn)}
 .account-chat-picker-custom button:disabled{opacity:.5;cursor:default;text-decoration:none}
+.account-chat-reaction.is-undelivered{border-style:dashed;border-color:var(--warn);background:var(--bg-raised);opacity:.8}

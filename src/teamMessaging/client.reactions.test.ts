@@ -7,7 +7,7 @@ import {createIdentity,publicIdentity,seal,type Identity} from './crypto';
 import {CHAT_VERSION,reactionText} from './chatEvents';
 import {registrationProof,relayEnvelope} from '../../packages/control-plane/lib/peer-messaging.mjs';
 beforeAll(()=>vi.stubGlobal('crypto',webcrypto));
-const clients:PeerClient[]=[];afterEach(()=>{clients.splice(0).forEach(c=>c.stop());});
+const clients:PeerClient[]=[];afterEach(()=>{clients.splice(0).forEach(c=>c.stop());localStorage.clear();});
 
 /** An in-memory control plane: the real relay validation, a queue, acks. */
 function harness(){
@@ -94,3 +94,20 @@ it('acknowledges and ignores a payload kind from a newer client, without a messa
  expect(h.got.messages.get('alice')).toEqual([]);
  expect(h.got.statuses.get('alice')!.filter(s=>s.includes('could not be verified'))).toEqual([]);
 },10000);
+
+it('remembers which devices speak v2 across a restart, until a device is re-keyed',async()=>{
+ const h=harness();const alice=await h.endpoint('alice',ALICE);const bob=await h.endpoint('bob',BOB);
+ const sent=await bob.send('Ship it?',null);
+ await waitFor(()=>expect(h.got.messages.get('alice')!.map(m=>m.id)).toContain(sent.id),{timeout:4000});
+ expect(alice.speaksEvents(BOB)).toBe(true);
+ const target=h.got.messages.get('alice')![0];
+ // Restart: a fresh client for the same account and team knows before any traffic.
+ alice.stop();
+ const restarted=await h.endpoint('alice',ALICE);
+ expect(restarted.speaksEvents(BOB)).toBe(true);
+ expect(await restarted.sendEvent(reactionTo(target))).toMatchObject({devices:1});
+ // Bob's device re-registers with new keys (a reinstall, maybe an older build): unknown again.
+ bob.stop();await h.endpoint('bob',BOB);
+ await waitFor(()=>expect(restarted.speaksEvents(BOB)).toBe(false),{timeout:6000});
+ expect(await restarted.sendEvent(reactionTo(target,'👀'))).toMatchObject({devices:0});
+},20000);

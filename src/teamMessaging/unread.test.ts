@@ -138,3 +138,21 @@ it('applies a reaction that arrives before its message once the message lands',a
  // Unread counts the message, never the reaction.
  expect(session.unread().channel).toBe(1);
 });
+
+it('marks your reaction not delivered when no device in the conversation speaks v2, until it reaches someone',async()=>{
+ const {session,events}=await open('undelivered');
+ events.message({...msg(T1,'ada',null),id:T1});
+ mocks.sendEvent.mockImplementationOnce(async(m:{id:string})=>({id:m.id,devices:0,queued:false}));
+ await session.react(T1,'👍');
+ expect(session.getSnapshot().undeliveredReactions).toEqual({[T1]:['👍']});
+ // Still shown as yours: only its delivery is in question.
+ expect(Object.values(session.getSnapshot().reactions[T1]).filter(e=>e.on).map(e=>e.emoji)).toEqual(['👍']);
+ mocks.sendEvent.mockImplementationOnce(async(m:{id:string})=>({id:m.id,devices:0,queued:false}));
+ await session.react(T1,'🎉');
+ expect(session.getSnapshot().undeliveredReactions).toEqual({[T1]:['👍','🎉']});
+ // Removing it clears the warning, and a delivered one never shows it.
+ await session.react(T1,'👍');
+ expect(session.getSnapshot().undeliveredReactions).toEqual({[T1]:['🎉']});
+ await session.react(T1,'✅');
+ expect(session.getSnapshot().undeliveredReactions).toEqual({[T1]:['🎉']});
+});

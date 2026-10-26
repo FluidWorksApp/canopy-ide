@@ -20,11 +20,11 @@ export type DeliveryState='sending'|'sent'|'queued'|'waiting'|'failed'|'expired'
 export type Delivery={state:DeliveryState;detail?:string};
 export type SendOutcome={id:string;delivery?:Delivery};
 export type {AttachmentState};
-type Snapshot={unreadIds:string[];restoredIds:string[];members:Record<string,string>;messages:ChatMessage[];receipts:Record<string,string[]>;delivery:Record<string,Delivery>;attachments:Record<string,AttachmentState>;reactions:ReactionState;status:string};
+type Snapshot={unreadIds:string[];restoredIds:string[];members:Record<string,string>;messages:ChatMessage[];receipts:Record<string,string[]>;delivery:Record<string,Delivery>;attachments:Record<string,AttachmentState>;reactions:ReactionState;undeliveredReactions:Record<string,string[]>;status:string};
 /** Peers refuse messages created more than five minutes before their envelope. */
 const STALE_MS=4*60_000;
 const reason=(error:unknown)=>error instanceof Error?error.message:String(error);
-const empty=(status:string):Snapshot=>({unreadIds:[],restoredIds:[],members:{},messages:[],receipts:{},delivery:{},attachments:{},reactions:{},status});
+const empty=(status:string):Snapshot=>({unreadIds:[],restoredIds:[],members:{},messages:[],receipts:{},delivery:{},attachments:{},reactions:{},undeliveredReactions:{},status});
 // One transport per account/team, shared by all conversation tabs in this IDE.
 const sessions=new Map<string,TeamSession>();
 const unreadListeners=new Set<()=>void>();
@@ -181,7 +181,14 @@ export class TeamSession {
   this.applyEvents([event]);
   const saved=saveChatEvent(this.user,this.team,event).catch(()=>this.update({status:'Reactions could not be saved on this device.'}));
   await this.ready.catch(()=>{});await saved;if(this.invalid)return;
-  await this.client.sendEvent(event);
+  const result=await this.client.sendEvent(event);if(this.invalid)return;
+  // Nobody in the conversation is known to run a Canopy with reactions: say so on
+  // the chip instead of looking sent. Cleared by a later delivery or by removing it.
+  const emojis=(this.snapshot.undeliveredReactions[messageId]??[]).filter(e=>e!==emoji);
+  if(op==='add'&&result.devices===0)emojis.push(emoji);
+  const {[messageId]:_prior,...others}=this.snapshot.undeliveredReactions;
+  const undeliveredReactions=emojis.length?{...others,[messageId]:emojis}:others;
+  if(JSON.stringify(undeliveredReactions)!==JSON.stringify(this.snapshot.undeliveredReactions))this.update({undeliveredReactions});
  }
  private update(change:Partial<Snapshot>){if(this.invalid)return;this.snapshot={...this.snapshot,...change};this.listeners.forEach(fn=>fn());unreadListeners.forEach(fn=>fn());}
  markRead(peer:string|null){

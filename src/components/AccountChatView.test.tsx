@@ -1,6 +1,6 @@
 import {render,screen,fireEvent,waitFor,cleanup} from '@testing-library/react';
 import {afterEach,beforeEach,it,expect,vi} from 'vitest';
-const mock=vi.hoisted(()=>({attachment:vi.fn(async(..._args:unknown[])=>new Blob(['x'])),markRead:vi.fn(),send:vi.fn(async(..._args:unknown[])=>({id:'new'})),retry:vi.fn(async(..._args:unknown[])=>({id:'retried'})),discard:vi.fn(),react:vi.fn(async(..._args:unknown[])=>{}),snapshot:{members:{ada:'Ada Lovelace'},messages:[{id:'m',sender:'ada',recipient:null,text:'Hello team',created:1}],receipts:{},status:'Connected · end-to-end encrypted'} as {members:Record<string,string>;messages:{id:string;sender:string;recipient:string|null;text:string;created:number;attachments?:{id:string;name:string;size:number;type:string;sha256:string}[]}[];receipts:Record<string,string[]>;delivery?:Record<string,{state:string;detail?:string}>;attachments?:Record<string,Record<string,unknown>>;reactions?:Record<string,Record<string,{sender:string;emoji:string;on:boolean;created:number;id:string}>>;status:string}}));
+const mock=vi.hoisted(()=>({attachment:vi.fn(async(..._args:unknown[])=>new Blob(['x'])),markRead:vi.fn(),send:vi.fn(async(..._args:unknown[])=>({id:'new'})),retry:vi.fn(async(..._args:unknown[])=>({id:'retried'})),discard:vi.fn(),react:vi.fn(async(..._args:unknown[])=>{}),snapshot:{members:{ada:'Ada Lovelace'},messages:[{id:'m',sender:'ada',recipient:null,text:'Hello team',created:1}],receipts:{},status:'Connected · end-to-end encrypted'} as {members:Record<string,string>;messages:{id:string;sender:string;recipient:string|null;text:string;created:number;attachments?:{id:string;name:string;size:number;type:string;sha256:string}[]}[];receipts:Record<string,string[]>;delivery?:Record<string,{state:string;detail?:string}>;attachments?:Record<string,Record<string,unknown>>;reactions?:Record<string,Record<string,{sender:string;emoji:string;on:boolean;created:number;id:string}>>;undeliveredReactions?:Record<string,string[]>;status:string}}));
 vi.mock('../teamMessaging/session',()=>({teamSession:()=>({retain:()=>()=>{},markRead:mock.markRead,subscribe:()=>()=>{},getSnapshot:()=>mock.snapshot,send:mock.send,attachment:mock.attachment,retry:mock.retry,discard:mock.discard,react:mock.react})}));
 import {AccountChatView} from './AccountChatView';
 beforeEach(()=>{mock.attachment.mockClear();mock.markRead.mockClear();mock.send.mockClear();mock.retry.mockClear();mock.discard.mockClear();mock.react.mockClear();});
@@ -303,3 +303,18 @@ it('does not take focus on later updates, or from a field the user is typing in 
  expect(document.activeElement).toBe(other);
  other.blur();other.remove();
 });
+
+it('flags your own reaction that no teammate could receive',()=>withReactions(()=>{
+ const prior=mock.snapshot.undeliveredReactions;
+ mock.snapshot.undeliveredReactions={m:['👍','🎉']};
+ try{
+  render(<AccountChatView conversation={channel}/>);
+  const thumbs=screen.getByRole('button',{name:/^👍 2 reactions/});
+  expect(thumbs.classList.contains('is-undelivered')).toBe(true);
+  expect(thumbs.title).toBe('You and Ada Lovelace reacted with 👍. Not delivered: teammates need Canopy 0.4.10 or later to see reactions');
+  expect(thumbs.getAttribute('aria-label')).toContain('Not delivered');
+  // Someone else's reaction is never flagged, even if listed.
+  const party=screen.getByRole('button',{name:/^🎉 1 reaction/});
+  expect(party.classList.contains('is-undelivered')).toBe(false);expect(party.title).not.toContain('Not delivered');
+ }finally{mock.snapshot.undeliveredReactions=prior;}
+}));

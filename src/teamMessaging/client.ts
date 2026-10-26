@@ -3,6 +3,7 @@ import {chatFileStore,prepareFile,sha256,bytesOf,type FileStore,type FileRecord,
 import {open,seal,registration,MessageReplayError,type Envelope,type EnvelopeKind,type PublicIdentity,type Address} from './crypto';
 import {deviceIdentity,rememberMessage,messageOutbox,type MessageOutbox,type PendingEnvelope,type DeviceIdentity} from './store';
 import {CHAT_VERSION,eventOf,unknownExtension} from './chatEvents';
+import {PeerVersions,localVersionStore,type VersionStore} from './peerVersions';
 import {validJobRequest,validJobStatus,validMeshMessage,validMeshStatus,validRoster,validRosterRequest,type JobRequest,type JobStatus,type MeshMessage,type MeshStatus,type Roster,type RosterRequest} from './jobSchema';
 /** `last_seen_at` is bumped by every poll the device makes, so it is the
  * directory's only "online" signal. */
@@ -61,7 +62,9 @@ type Options={members?:(members:{id:string;name:string}[])=>void;request:PeerReq
  /** Local-only attachment bytes: sent copies to serve, pulled copies to keep. */
  files?:FileStore;
  /** Progress and outcome of each attachment pull. */
- attachment?:(event:AttachmentEvent)=>void};
+ attachment?:(event:AttachmentEvent)=>void;
+ /** Where learned device chat versions are kept between runs (default: localStorage). */
+ versions?:VersionStore};
 /** Client-chosen identity for an optimistic message: the same id is kept in the
  * encrypted history and the pending-delivery queue, so echoes and restarts reconcile. */
 export type MessageDraft={id:string;created:number};
@@ -80,9 +83,10 @@ export class PeerClient {
  private files:FileStore;
  private downloads=new Map<string,Download>();
  private serving=0;
- /** Chat protocol version per device, learned from its signals and messages. Unknown means v1. */
- private chatVersions=new Map<string,number>();
- constructor(options:Options){this.options=options;this.outbox=options.outbox??messageOutbox(options.user,options.team);this.files=options.files??chatFileStore(options.user,options.team);}
+ /** Chat protocol version per device, learned from its signals and messages and
+  * remembered across restarts. Unknown means v1. */
+ private versions:PeerVersions;
+ constructor(options:Options){this.options=options;this.outbox=options.outbox??messageOutbox(options.user,options.team);this.files=options.files??chatFileStore(options.user,options.team);this.versions=new PeerVersions(options.versions??localVersionStore(options.user,options.team));}
  private address(device:string,user=this.options.user):Address{return {team:this.options.team,user,device};}
  private async request<T>(body:Record<string,unknown>){if(this.stopped)throw Error('Team connection closed');return this.options.request<T>({...body,teamId:this.options.team,deviceId:this.identity!.id});}
  async start(){
@@ -203,8 +207,8 @@ export class PeerClient {
   this.options.message(message);return {id:message.id,queued:outcomes.every(result=>result.status==='rejected'),partial:outcomes.some(result=>result.status==='rejected')};
  }
  /** Whether a device is known to speak chat protocol v2 (understands `event`). */
- speaksEvents(deviceId:string){return (this.chatVersions.get(deviceId)??1)>=2;}
- private learnVersion(device:Device,version:unknown){if(Number.isSafeInteger(version)&&(version as number)>(this.chatVersions.get(device.id)??1))this.chatVersions.set(device.id,version as number);}
+ speaksEvents(deviceId:string){const device=this.devices.get(deviceId);return !!device&&this.versions.get(device.id,device.public_keys)>=2;}
+ private learnVersion(device:Device,version:unknown){this.versions.learn(device.id,device.public_keys,version);}
  /** Sends a chat event (a reaction now; edits and deletes later) as a chat
   * message, so it shares the message path's queue, retries and receipts. Only
   * devices known to speak v2 receive it: a v1 client would show its fallback

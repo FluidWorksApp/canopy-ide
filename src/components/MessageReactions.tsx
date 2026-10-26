@@ -31,13 +31,16 @@ export function ReactionPicker({id,onPick,onClose,onDismiss}:{id:string;onPick:(
  </div>;
 }
 /** Grouped reactions under a message: one button per emoji, yours highlighted. */
-export function MessageReactions({chips,name,onToggle,picker}:{chips:ReactionChip[];name:(id:string)=>string;onToggle:(emoji:string)=>void;picker?:ReactNode}){
+/** Shown on your own reaction when no device in the conversation could receive it. */
+const UNDELIVERED_NOTE='Not delivered: teammates need Canopy 0.4.10 or later to see reactions';
+export function MessageReactions({chips,name,onToggle,picker,undelivered=[]}:{chips:ReactionChip[];name:(id:string)=>string;onToggle:(emoji:string)=>void;picker?:ReactNode;undelivered?:readonly string[]}){
  if(!chips.length&&!picker)return null;
  return <div className="account-chat-reactions" role="group" aria-label="Reactions">
   {chips.map(chip=>{
    const who=reactorNames(chip.users,name),action=chip.mine?'remove your reaction':'add your reaction';
-   return <button key={chip.emoji} type="button" className={`account-chat-reaction${chip.mine?' is-mine':''}`} aria-pressed={chip.mine}
-    aria-label={`${chip.emoji} ${chip.count} ${chip.count===1?'reaction':'reactions'} from ${who}; ${action}`} title={`${who} reacted with ${chip.emoji}`}
+   const lost=chip.mine&&undelivered.includes(chip.emoji),note=lost?`. ${UNDELIVERED_NOTE}`:'';
+   return <button key={chip.emoji} type="button" className={`account-chat-reaction${chip.mine?' is-mine':''}${lost?' is-undelivered':''}`} aria-pressed={chip.mine}
+    aria-label={`${chip.emoji} ${chip.count} ${chip.count===1?'reaction':'reactions'} from ${who}; ${action}${note}`} title={`${who} reacted with ${chip.emoji}${note}`}
     onMouseDown={e=>e.preventDefault()} onClick={()=>onToggle(chip.emoji)}>
     <span aria-hidden="true">{chip.emoji}</span><span className="account-chat-reaction-count" aria-hidden="true">{chip.count}</span>
    </button>;

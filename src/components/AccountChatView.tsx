@@ -65,7 +65,7 @@ export function AccountChatView({conversation,active=true}:{conversation:Account
  const {teamId,userId,peer,name,email}=conversation;
  const session=useMemo(()=>teamSession(teamId,userId),[teamId,userId]);
  useEffect(()=>session.retain(),[session]);
- const {messages,members,receipts,status,restoredIds,delivery={},attachments={},reactions={}}=useSyncExternalStore(session.subscribe,session.getSnapshot);
+ const {messages,members,receipts,status,restoredIds,delivery={},attachments={},reactions={},undeliveredReactions={}}=useSyncExternalStore(session.subscribe,session.getSnapshot);
   // On screen: notifications for this conversation stay quiet while the window is focused.
  useEffect(()=>active?showConversation(teamId,userId,peer):undefined,[active,teamId,userId,peer]);
  const [draft,setDraft]=useState(''),[error,setError]=useState('');
@@ -163,7 +163,7 @@ export function AccountChatView({conversation,active=true}:{conversation:Account
       {m.text&&<p title={time(m.created)}><LinkifiedText text={m.text}/></p>}
       <AddReactionButton open={reacting===m.id} controls={pickerId} className={m.text?'beside-copy':undefined} onToggle={()=>setReacting(current=>current===m.id?undefined:m.id)}/>
       {m.attachments?.map(file=><AttachmentChip key={file.id} session={session} message={m} file={file} own={own} state={attachments[file.id]} sender={senderName(m.sender)}/>)}
-      <MessageReactions chips={reactionChips(reactions,m.id,userId)} name={senderName} onToggle={emoji=>react(m.id,emoji)}
+      <MessageReactions chips={reactionChips(reactions,m.id,userId)} undelivered={undeliveredReactions[m.id]} name={senderName} onToggle={emoji=>react(m.id,emoji)}
        picker={reacting===m.id?<ReactionPicker id={pickerId} onPick={emoji=>{closePicker(m.id);react(m.id,emoji);}} onClose={()=>closePicker(m.id)} onDismiss={()=>setReacting(undefined)}/>:undefined}/>
       {receipt&&<small title={state?delivery[m.id]?.detail:undefined}>{receipt}{failed&&<> · <button type="button" className="account-chat-action" onClick={()=>act(()=>session.retry(m.id))}>Retry</button> · <button type="button" className="account-chat-action" onClick={()=>act(()=>session.discard(m.id))}>Discard</button></>}</small>}
      </article>
