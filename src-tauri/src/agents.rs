@@ -980,9 +980,7 @@ fn hooks_are_ours_in(agent: &str, cfg: &str, home: &str) -> bool {
         "agy" => serde_json::from_str::<serde_json::Value>(&raw)
             .ok()
             .and_then(|v| v.get("canopy").cloned())
-            .is_some_and(|hooks| {
-                complete(&hooks, AGY_HOOK_EVENTS)
-            }),
+            .is_some_and(|hooks| complete(&hooks, AGY_HOOK_EVENTS)),
         "opencode" => [
             "chat.message",
             "case \"message.updated\"",
@@ -5394,10 +5392,18 @@ mod integration_tests {
             second.steps[0].message.contains("already set up"),
             "{second:?}"
         );
-        assert_eq!(std::fs::read(&path).unwrap(), first, "second generation drifted");
+        assert_eq!(
+            std::fs::read(&path).unwrap(),
+            first,
+            "second generation drifted"
+        );
         heal_integrations_in(h, "1.0.0", &HashMap::new());
         heal_integrations_in(h, "1.0.1", &HashMap::new());
-        assert_eq!(std::fs::read(&path).unwrap(), first, "an upgrade pass drifted");
+        assert_eq!(
+            std::fs::read(&path).unwrap(),
+            first,
+            "an upgrade pass drifted"
+        );
         assert_eq!(
             std::fs::metadata(&path).unwrap().modified().unwrap(),
             first_mtime,
@@ -5427,7 +5433,9 @@ mod integration_tests {
         let cfg = read_json_config(&path).unwrap();
         let stop = cfg["hooks"]["Stop"].as_array().unwrap();
         assert_eq!(stop.len(), 2, "{stop:?}");
-        assert!(stop[0].to_string().contains(&*helper_path_in(h).to_string_lossy()));
+        assert!(stop[0]
+            .to_string()
+            .contains(&*helper_path_in(h).to_string_lossy()));
         assert_eq!(stop[1]["hooks"][0]["command"], "say done");
         assert_eq!(hooks_state("codex", h, h), "ours");
     }
@@ -5802,11 +5810,13 @@ mod integration_tests {
         assert!(report.ok, "{report:?}");
         let cfg = read_json_config(&shared).unwrap();
         assert_eq!(
-            cfg["lint-checker"]["PostToolUse"][0]["hooks"][0]["command"],
-            "./lint.sh",
+            cfg["lint-checker"]["PostToolUse"][0]["hooks"][0]["command"], "./lint.sh",
             "a user's named hook must survive"
         );
-        assert_eq!(cfg["canopy"]["enabled"], false, "the user's switch-off is theirs");
+        assert_eq!(
+            cfg["canopy"]["enabled"], false,
+            "the user's switch-off is theirs"
+        );
         assert!(
             cfg["canopy"].get("PreToolUse").is_none(),
             "an event an older Canopy registered is ours to drop"
@@ -5820,7 +5830,10 @@ mod integration_tests {
         // A second pass rewrites neither file.
         let before = std::fs::read_to_string(&shared).unwrap();
         let again = setup_agent("agy", h).unwrap();
-        assert!(again.steps[0].message.contains("already set up"), "{again:?}");
+        assert!(
+            again.steps[0].message.contains("already set up"),
+            "{again:?}"
+        );
         assert_eq!(std::fs::read_to_string(&shared).unwrap(), before);
 
         // No legacy directory: nothing is created there and the step still succeeds.

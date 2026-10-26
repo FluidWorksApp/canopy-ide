@@ -1554,13 +1554,7 @@ fn edit_records(agent: &str, event: &serde_json::Value) -> Vec<EditRecord> {
             .map(|p| match input["ReplacementChunks"].as_array() {
                 Some(chunks) if !chunks.is_empty() => chunks
                     .iter()
-                    .map(|c| {
-                        rec(
-                            &p,
-                            s(&c["TargetContent"]),
-                            s(&c["ReplacementContent"]),
-                        )
-                    })
+                    .map(|c| rec(&p, s(&c["TargetContent"]), s(&c["ReplacementContent"])))
                     .collect(),
                 _ => vec![rec(&p, None, None)],
             })
@@ -1593,7 +1587,11 @@ fn patch_body(input: &serde_json::Value) -> Option<String> {
         match &input[key] {
             serde_json::Value::String(s) if is_patch(s) => return Some(s.clone()),
             serde_json::Value::Array(items) => {
-                if let Some(s) = items.iter().filter_map(|v| v.as_str()).find(|s| is_patch(s)) {
+                if let Some(s) = items
+                    .iter()
+                    .filter_map(|v| v.as_str())
+                    .find(|s| is_patch(s))
+                {
                     return Some(s.to_string());
                 }
             }
@@ -1623,11 +1621,23 @@ fn apply_patch_records(body: &str, cwd: &str) -> Vec<EditRecord> {
     for line in body.lines() {
         let header = |prefix: &str| line.strip_prefix(prefix).map(|p| p.trim().to_string());
         if let Some(p) = header("*** Add File:") {
-            files.push(File { kind: Kind::Add, path: p, hunks: vec![(vec![], vec![])] });
+            files.push(File {
+                kind: Kind::Add,
+                path: p,
+                hunks: vec![(vec![], vec![])],
+            });
         } else if let Some(p) = header("*** Update File:") {
-            files.push(File { kind: Kind::Update, path: p, hunks: vec![] });
+            files.push(File {
+                kind: Kind::Update,
+                path: p,
+                hunks: vec![],
+            });
         } else if let Some(p) = header("*** Delete File:") {
-            files.push(File { kind: Kind::Delete, path: p, hunks: vec![] });
+            files.push(File {
+                kind: Kind::Delete,
+                path: p,
+                hunks: vec![],
+            });
         } else if let Some(p) = header("*** Move to:") {
             if let Some(f) = files.last_mut() {
                 f.path = p;
@@ -1674,7 +1684,11 @@ fn apply_patch_records(body: &str, cwd: &str) -> Vec<EditRecord> {
             .filter(|(o, n)| !o.is_empty() || !n.is_empty())
             .collect();
         if hunks.is_empty() {
-            out.push(EditRecord { path, old: None, new: None });
+            out.push(EditRecord {
+                path,
+                old: None,
+                new: None,
+            });
             continue;
         }
         for (old, new) in hunks {
@@ -7243,7 +7257,11 @@ mod tests {
         assert_eq!(
             edit_records("codex", &event),
             vec![
-                rec("/w/src/a.ts", Some("const x = 1;\nreturn x;"), Some("const x = 1;\nreturn x + 1;")),
+                rec(
+                    "/w/src/a.ts",
+                    Some("const x = 1;\nreturn x;"),
+                    Some("const x = 1;\nreturn x + 1;")
+                ),
                 rec("/w/src/a.ts", Some("old tail"), Some("new tail")),
                 rec("/w/notes/b.md", None, Some("# Title\nbody")),
                 rec("/w/c.txt", None, None),
@@ -7255,7 +7273,10 @@ mod tests {
             "cwd": "/w", "hook_event_name": "PostToolUse", "tool_name": "apply_patch",
             "tool_input": { "command": ["apply_patch", "*** Begin Patch\n*** Add File: x.rs\n+fn main() {}\n*** End Patch"] },
         });
-        assert_eq!(edit_records("codex", &argv), vec![rec("/w/x.rs", None, Some("fn main() {}"))]);
+        assert_eq!(
+            edit_records("codex", &argv),
+            vec![rec("/w/x.rs", None, Some("fn main() {}"))]
+        );
         let mut pre = event.clone();
         pre["hook_event_name"] = serde_json::json!("PreToolUse");
         assert!(edit_records("codex", &pre).is_empty());
@@ -7270,7 +7291,10 @@ mod tests {
             "toolInput": { "file_path": "src/lib.rs", "old_string": "a", "new_string": "b", "replace_all": false },
         });
         normalize_event(&mut event, "grok");
-        assert_eq!(edit_records("grok", &event), vec![rec("/w/src/lib.rs", Some("a"), Some("b"))]);
+        assert_eq!(
+            edit_records("grok", &event),
+            vec![rec("/w/src/lib.rs", Some("a"), Some("b"))]
+        );
         // The same tool name from another CLI is not assumed to mean the same.
         assert!(edit_records("amp", &event).is_empty());
     }
@@ -7285,24 +7309,54 @@ mod tests {
             })
         };
         assert_eq!(
-            edit_records("omp", &ev("write", serde_json::json!({ "path": "a.txt", "content": "hi" }))),
+            edit_records(
+                "omp",
+                &ev(
+                    "write",
+                    serde_json::json!({ "path": "a.txt", "content": "hi" })
+                )
+            ),
             vec![rec("/w/a.txt", None, Some("hi"))]
         );
         assert_eq!(
-            edit_records("omp", &ev("edit", serde_json::json!({ "path": "/abs/b.ts", "old_string": "x", "new_string": "y" }))),
+            edit_records(
+                "omp",
+                &ev(
+                    "edit",
+                    serde_json::json!({ "path": "/abs/b.ts", "old_string": "x", "new_string": "y" })
+                )
+            ),
             vec![rec("/abs/b.ts", Some("x"), Some("y"))]
         );
         assert_eq!(
-            edit_records("omp", &ev("edit", serde_json::json!({ "path": "c.py", "edits": [{ "op": "update", "diff": "-a\n+b" }] }))),
+            edit_records(
+                "omp",
+                &ev(
+                    "edit",
+                    serde_json::json!({ "path": "c.py", "edits": [{ "op": "update", "diff": "-a\n+b" }] })
+                )
+            ),
             vec![rec("/w/c.py", None, None)]
         );
         assert_eq!(
-            edit_records("omp", &ev("edit", serde_json::json!({ "input": "*** Begin Patch\n*** Update File: d.go\n@@\n-p\n+q\n*** End Patch" }))),
+            edit_records(
+                "omp",
+                &ev(
+                    "edit",
+                    serde_json::json!({ "input": "*** Begin Patch\n*** Update File: d.go\n@@\n-p\n+q\n*** End Patch" })
+                )
+            ),
             vec![rec("/w/d.go", Some("p"), Some("q"))]
         );
         // Hashline input names no path we can read: unknown, so nothing.
-        assert!(edit_records("omp", &ev("edit", serde_json::json!({ "input": "@@ a.ts\n12ab|x" }))).is_empty());
-        assert!(edit_records("omp", &ev("read", serde_json::json!({ "path": "a.txt" }))).is_empty());
+        assert!(edit_records(
+            "omp",
+            &ev("edit", serde_json::json!({ "input": "@@ a.ts\n12ab|x" }))
+        )
+        .is_empty());
+        assert!(
+            edit_records("omp", &ev("read", serde_json::json!({ "path": "a.txt" }))).is_empty()
+        );
     }
 
     #[test]
@@ -7317,25 +7371,56 @@ mod tests {
             e
         };
         assert_eq!(
-            edit_records("agy", &ev("write_to_file", serde_json::json!({ "TargetFile": "/w/a.json", "CodeContent": "{}" }))),
+            edit_records(
+                "agy",
+                &ev(
+                    "write_to_file",
+                    serde_json::json!({ "TargetFile": "/w/a.json", "CodeContent": "{}" })
+                )
+            ),
             vec![rec("/w/a.json", None, Some("{}"))]
         );
         assert_eq!(
-            edit_records("agy", &ev("replace_file_content", serde_json::json!({ "TargetFile": "/w/b.go", "TargetContent": "x", "ReplacementContent": "y" }))),
+            edit_records(
+                "agy",
+                &ev(
+                    "replace_file_content",
+                    serde_json::json!({ "TargetFile": "/w/b.go", "TargetContent": "x", "ReplacementContent": "y" })
+                )
+            ),
             vec![rec("/w/b.go", Some("x"), Some("y"))]
         );
         assert_eq!(
-            edit_records("agy", &ev("multi_replace_file_content", serde_json::json!({ "TargetFile": "/w/c.go", "ReplacementChunks": [
+            edit_records(
+                "agy",
+                &ev(
+                    "multi_replace_file_content",
+                    serde_json::json!({ "TargetFile": "/w/c.go", "ReplacementChunks": [
                 { "TargetContent": "1", "ReplacementContent": "2" },
                 { "TargetContent": "3", "ReplacementContent": "4" }
-            ] }))),
-            vec![rec("/w/c.go", Some("1"), Some("2")), rec("/w/c.go", Some("3"), Some("4"))]
+            ] })
+                )
+            ),
+            vec![
+                rec("/w/c.go", Some("1"), Some("2")),
+                rec("/w/c.go", Some("3"), Some("4"))
+            ]
         );
         assert_eq!(
-            edit_records("agy", &ev("edit_file", serde_json::json!({ "TargetFile": "/w/d.go", "CodeEdit": "{{...}}\nx\n{{...}}" }))),
+            edit_records(
+                "agy",
+                &ev(
+                    "edit_file",
+                    serde_json::json!({ "TargetFile": "/w/d.go", "CodeEdit": "{{...}}\nx\n{{...}}" })
+                )
+            ),
             vec![rec("/w/d.go", None, None)]
         );
-        assert!(edit_records("agy", &ev("run_command", serde_json::json!({ "CommandLine": "ls" }))).is_empty());
+        assert!(edit_records(
+            "agy",
+            &ev("run_command", serde_json::json!({ "CommandLine": "ls" }))
+        )
+        .is_empty());
     }
 
     #[test]
@@ -7344,7 +7429,10 @@ mod tests {
             "hook_event_name": "PostToolUse", "cwd": "/w", "tool_name": "Edit",
             "tool_input": { "file_path": "/w/a.ts", "old_string": "a", "new_string": "b" },
         });
-        assert_eq!(edit_records("claude", &edit), vec![rec("/w/a.ts", Some("a"), Some("b"))]);
+        assert_eq!(
+            edit_records("claude", &edit),
+            vec![rec("/w/a.ts", Some("a"), Some("b"))]
+        );
         let multi = serde_json::json!({
             "tool_name": "MultiEdit",
             "tool_input": { "file_path": "/w/a.ts", "edits": [
@@ -7353,7 +7441,11 @@ mod tests {
         });
         assert_eq!(edit_records("claude", &multi).len(), 2);
         // Unverified CLIs (Amp, Cursor) keep today's behaviour: nothing.
-        for (agent, tool) in [("amp", "edit_file"), ("cursor", "edit_file"), ("cursor", "apply_patch")] {
+        for (agent, tool) in [
+            ("amp", "edit_file"),
+            ("cursor", "edit_file"),
+            ("cursor", "apply_patch"),
+        ] {
             let e = serde_json::json!({
                 "hook_event_name": "PostToolUse", "cwd": "/w", "tool_name": tool,
                 "tool_input": { "path": "a.ts", "command": "*** Begin Patch\n*** Add File: a\n+x\n*** End Patch" },
