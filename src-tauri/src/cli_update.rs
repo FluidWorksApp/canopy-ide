@@ -36,7 +36,10 @@ fn native_env_slot() -> &'static RwLock<Vec<(String, String)>> {
 /// The variables every agent process should carry so the CLIs' own updaters
 /// stay off. Empty while auto-update is on.
 pub(crate) fn native_update_env() -> Vec<(String, String)> {
-    native_env_slot().read().map(|env| env.clone()).unwrap_or_default()
+    native_env_slot()
+        .read()
+        .map(|env| env.clone())
+        .unwrap_or_default()
 }
 
 fn env_name_ok(name: &str) -> bool {
@@ -228,7 +231,10 @@ async fn run_update(bin: &str, command: &str, timeout_secs: u64) -> CliUpdateOut
     which
         .args([
             "-lc",
-            &format!("command -v {} 2>/dev/null", crate::agents::sh_quote(&target)),
+            &format!(
+                "command -v {} 2>/dev/null",
+                crate::agents::sh_quote(&target)
+            ),
         ])
         .kill_on_drop(true);
     let resolved = tokio::time::timeout(
@@ -261,7 +267,11 @@ async fn run_update(bin: &str, command: &str, timeout_secs: u64) -> CliUpdateOut
         // promise the update cannot pull files out from under a session.
         return CliUpdateOutcome::new("deferred", "could not list running processes");
     };
-    if cli_in_use(&String::from_utf8_lossy(&listing.stdout), bin, Some(&canonical)) {
+    if cli_in_use(
+        &String::from_utf8_lossy(&listing.stdout),
+        bin,
+        Some(&canonical),
+    ) {
         return CliUpdateOutcome::new("deferred", format!("{bin} is running"));
     }
 
@@ -294,7 +304,11 @@ async fn run_update(bin: &str, command: &str, timeout_secs: u64) -> CliUpdateOut
             } else {
                 CliUpdateOutcome::new(
                     "failed",
-                    format!("`{command}` exited with {}: {}", out.status, tail(&text, 600)),
+                    format!(
+                        "`{command}` exited with {}: {}",
+                        out.status,
+                        tail(&text, 600)
+                    ),
                 )
             }
         }
@@ -311,7 +325,10 @@ async fn run_update(bin: &str, command: &str, timeout_secs: u64) -> CliUpdateOut
 async fn run_update(_bin: &str, _command: &str, _timeout_secs: u64) -> CliUpdateOutcome {
     // The version probe (cli_versions) is unix-only too, so nothing schedules
     // this on Windows yet; answer rather than pretend.
-    CliUpdateOutcome::new("deferred", "automatic CLI updates are not supported on this platform")
+    CliUpdateOutcome::new(
+        "deferred",
+        "automatic CLI updates are not supported on this platform",
+    )
 }
 
 #[cfg(test)]
@@ -341,7 +358,11 @@ ampere --serve
     #[test]
     fn a_runtime_launched_cli_is_found_by_its_script() {
         assert!(cli_in_use("node /home/u/.local/bin/codex\n", "codex", None));
-        assert!(cli_in_use("python3 /opt/aider/bin/aider --yes-always\n", "aider", None));
+        assert!(cli_in_use(
+            "python3 /opt/aider/bin/aider --yes-always\n",
+            "aider",
+            None
+        ));
     }
 
     #[test]
@@ -349,7 +370,8 @@ ampere --serve
         let only_child = "/home/u/.local/lib/node_modules/@openai/codex/node_modules/x/bin/codex-native --flag\n";
         let canonical = "/home/u/.local/lib/node_modules/@openai/codex/bin/codex.js";
         assert!(cli_in_use(only_child, "codex", Some(canonical)));
-        let cursor = "/opt/cursor/versions/2026.10.01/node /opt/cursor/versions/2026.10.01/index.js\n";
+        let cursor =
+            "/opt/cursor/versions/2026.10.01/node /opt/cursor/versions/2026.10.01/index.js\n";
         assert!(cli_in_use(
             cursor,
             "cursor-agent",
@@ -360,11 +382,23 @@ ampere --serve
     #[test]
     fn near_misses_are_not_the_cli() {
         // `amp` appears only as a substring and as an editor's argument.
-        assert!(!cli_in_use(PS, "amp", Some("/usr/local/lib/node_modules/@ampcode/cli/bin/amp")));
+        assert!(!cli_in_use(
+            PS,
+            "amp",
+            Some("/usr/local/lib/node_modules/@ampcode/cli/bin/amp")
+        ));
         assert!(!cli_in_use(PS, "opencode", None));
         // A bare binary in a bin/ directory must not make every tool there "in use".
-        assert!(!cli_in_use("/usr/local/bin/omp-other\n", "agy", Some("/usr/local/bin/agy")));
-        assert!(cli_in_use("/usr/local/bin/agy\n", "agy", Some("/usr/local/bin/agy")));
+        assert!(!cli_in_use(
+            "/usr/local/bin/omp-other\n",
+            "agy",
+            Some("/usr/local/bin/agy")
+        ));
+        assert!(cli_in_use(
+            "/usr/local/bin/agy\n",
+            "agy",
+            Some("/usr/local/bin/agy")
+        ));
     }
 
     #[test]
@@ -421,11 +455,18 @@ ampere --serve
     fn python_detection_refuses_to_guess() {
         // `env python3` names no particular environment.
         assert_eq!(
-            python_update_command("/usr/local/bin/aider", Some("#!/usr/bin/env python3"), "aider-chat"),
+            python_update_command(
+                "/usr/local/bin/aider",
+                Some("#!/usr/bin/env python3"),
+                "aider-chat"
+            ),
             None
         );
         // A native binary has no shebang.
-        assert_eq!(python_update_command("/usr/local/bin/aider", None, "aider-chat"), None);
+        assert_eq!(
+            python_update_command("/usr/local/bin/aider", None, "aider-chat"),
+            None
+        );
         // A package name that could carry shell syntax never reaches a command.
         assert_eq!(
             python_update_command("/x/pipx/venvs/a/bin/a", None, "aider;rm -rf ~"),
@@ -436,7 +477,9 @@ ampere --serve
     #[test]
     fn native_update_env_is_validated_and_replaceable() {
         assert!(cli_set_native_update_env(vec![("PATH;x".into(), "1".into())]).is_err());
-        assert!(cli_set_native_update_env(vec![("DISABLE_AUTOUPDATER".into(), "1\n".into())]).is_err());
+        assert!(
+            cli_set_native_update_env(vec![("DISABLE_AUTOUPDATER".into(), "1\n".into())]).is_err()
+        );
         cli_set_native_update_env(vec![("DISABLE_AUTOUPDATER".into(), "1".into())]).unwrap();
         assert_eq!(
             native_update_env(),

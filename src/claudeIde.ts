@@ -43,7 +43,9 @@ export function claudeIdeLaunchEnv(launch: {
   if (!getSettings().claudeIdeIntegration) return [];
   if (isRemoteHost() || isWorkspaceHost()) return [];
   const cli = agentIdForCommand(launch.command);
-  if (cli !== "claude" || harnessSupport(cli, "ideProtocol") !== "native") return [];
+  // Only a harness that serves the IDE protocol natively gets the marker; the
+  // capability record, not a vendor id, decides.
+  if (!cli || harnessSupport(cli, "ideProtocol") !== "native") return [];
   if (/(^|\s)(-p|--print)(\s|$)/.test(launch.command)) return [];
   return [[CLAUDE_IDE_MARKER, claudeIdeRoot(launch.root, launch.cwd)]];
 }
