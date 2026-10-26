@@ -15,7 +15,7 @@ type Stream = { id:number; receivedSnapshot:boolean; pendingExit?:number; socket
 const LOCAL_UI = new Set(['js_log','watchdog_ack','watchdog_incidents','memory_info','selftest_config','set_shortcut_profile','notify_native','set_window_zoom','window_zoom','crash_pending','crash_clear','crash_upload','take_pending_crash','dictation_supported','remote_set_theme','remote_set_clis','remote_set_companion','remote_set_hibernated','remote_set_attention','execution_mode_get','execution_mode_set','execution_remote_get','execution_remote_set']);
 // The clipboard and microphone belong to the computer displaying the IDE.
 // Remote execution must not redirect their native services into the VM.
-for(const command of ['clipboard_image_png','clipboard_watch_set','clipboard_recent','clipboard_read','clipboard_forget','clipboard_clear','clipboard_status','dictation_models','dictation_status','dictation_download','dictation_delete_model','dictation_start','dictation_stop','dictation_cancel'])LOCAL_UI.add(command);
+for(const command of ['clipboard_image_png','clipboard_write_text','clipboard_read_text','clipboard_watch_set','clipboard_recent','clipboard_read','clipboard_forget','clipboard_clear','clipboard_status','dictation_models','dictation_status','dictation_download','dictation_delete_model','dictation_start','dictation_stop','dictation_cancel'])LOCAL_UI.add(command);
 // The Playwright extension token unlocks this computer's Chrome, which is the
 // one the desktop's Chrome bridge connects to; it never belongs in the VM.
 for(const command of ['chrome_extension_token_status','chrome_extension_token_set','chrome_extension_token_clear','chrome_extension_open_status'])LOCAL_UI.add(command);

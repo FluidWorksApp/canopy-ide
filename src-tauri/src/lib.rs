@@ -752,6 +752,8 @@ pub fn run() {
             clipboard::clipboard_recent,
             clipboard::clipboard_read,
             clipboard::clipboard_image_png,
+            clipboard::clipboard_write_text,
+            clipboard::clipboard_read_text,
             clipboard::clipboard_forget,
             clipboard::clipboard_clear,
             clipboard::clipboard_status,

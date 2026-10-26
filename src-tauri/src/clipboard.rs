@@ -253,6 +253,17 @@ mod pb {
         })
     }
 
+    /// Replace the pasteboard's contents with plain text. `Some(true)` only
+    /// when AppKit accepted the string.
+    pub fn write_string(text: &str) -> Option<bool> {
+        guarded("setString:forType:", || {
+            let ty = unsafe { NSPasteboardTypeString };
+            let pb = NSPasteboard::generalPasteboard();
+            pb.clearContents();
+            pb.setString_forType(&objc2_foundation::NSString::from_str(text), ty)
+        })
+    }
+
     /// macOS 15+. Guarded by `respondsToSelector` rather than a version check:
     /// Canopy's minimum is 10.15, and an unrecognised selector is a crash, not
     /// a None.
@@ -303,6 +314,9 @@ mod pb {
     }
     pub fn read_string() -> Option<Option<String>> {
         Some(None)
+    }
+    pub fn write_string(_text: &str) -> Option<bool> {
+        None
     }
     pub fn access_behavior() -> Option<String> {
         Some(String::new())
@@ -1166,6 +1180,43 @@ mod tests {
         // …and the row is still there, which is the whole point.
         assert_eq!(recent(&conn, 50).unwrap().len(), 1);
     }
+}
+
+/// Largest string a terminal may put on the clipboard: a copied selection or an
+/// OSC 52 write (which src/terminalClipboard.ts already caps lower, at 1 MB).
+const MAX_WRITE_BYTES: usize = 4 * 1024 * 1024;
+
+/// Put text on the system clipboard of the computer showing the IDE.
+///
+/// The webview's `navigator.clipboard.writeText` needs transient user
+/// activation in WKWebView, and an OSC 52 copy arrives in terminal *output* —
+/// a remote program's request, with no gesture anywhere near it. So the write
+/// happens here. Off macOS this reports unsupported and the caller falls back
+/// to the webview's clipboard, which is what those platforms already used.
+#[tauri::command]
+pub fn clipboard_write_text(text: String) -> Result<(), String> {
+    if text.len() > MAX_WRITE_BYTES {
+        return Err("Text is too large for the clipboard".into());
+    }
+    if !pb::SUPPORTED {
+        return Err("unsupported".into());
+    }
+    match pb::write_string(&text) {
+        Some(true) => Ok(()),
+        _ => Err("Cannot write to the clipboard".into()),
+    }
+}
+
+/// Read plain text for an explicit Paste from a Canopy menu. A menu click is
+/// not a native paste, so WKWebView's `navigator.clipboard.readText` would
+/// raise its own "Paste" confirmation bubble; reading here keeps it one click.
+/// Never recorded in clipboard history.
+#[tauri::command]
+pub fn clipboard_read_text() -> Result<Option<String>, String> {
+    if !pb::SUPPORTED {
+        return Err("unsupported".into());
+    }
+    pb::read_string().ok_or_else(|| "Cannot read the clipboard".to_string())
 }
 
 /// Explicit user-triggered image paste; never retained in clipboard history.

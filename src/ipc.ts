@@ -4876,6 +4876,12 @@ export const gitCloneCancel=(id:string)=>invoke('git_clone_cancel',{id});
 export const profilePrepareSession = (agent: string, sessionId: string, sourceProfile: string, targetProfile: string) => invoke<void>("profile_prepare_session", { agent, sessionId, sourceProfile, targetProfile });
 
 export const clipboardImagePng = () => invoke<string | null>("clipboard_image_png");
+/** Plain text onto the clipboard of the computer showing the IDE. Native, so it
+ *  needs no user gesture (an OSC 52 copy has none). Rejects off macOS; callers
+ *  fall back to the webview clipboard — see terminalClipboard.ts. */
+export const clipboardWriteText = (text: string) => invoke<void>("clipboard_write_text", { text });
+/** Plain text from that clipboard, for an explicit menu Paste. */
+export const clipboardReadText = () => invoke<string | null>("clipboard_read_text");
 
 /** Account transfer must wait for transcript writers to exit before copying. */
 export async function ptyStopAndWait(id: number): Promise<void> {
