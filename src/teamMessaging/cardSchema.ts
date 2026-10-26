@@ -17,7 +17,10 @@
 // dropped and the message is shown as its text.
 import type {ChatMessage} from './client';
 import {UUID,hasControl} from './messageSchema';
-import {safeRepoPath} from '../gitLinks';
+/** safeRepoPath's segment rules (gitLinks.ts), restated here so the wire
+ *  schema has no import cycle with gitLinks: no empty, `.`, `..` or `.git`
+ *  segment, no slash or backslash inside one, and no drive letter first. */
+const safeSegments=(segments:readonly string[])=>segments.length>0&&segments.every(s=>!!s&&s!=='.'&&s!=='..'&&!s.includes('\\')&&s.toLowerCase()!=='.git')&&!/^[a-z]:/i.test(segments[0]);
 
 /** A repository as both ends can name it: the git host and its `owner/name`
  *  (or a nested group path), read from the sender's `origin`. */
@@ -105,7 +108,7 @@ export function validCardPath(value:unknown):value is string{
  if(typeof value!=='string'||!value||bytes(value)>LIMITS.pathBytes)return false;
  if(!safeLine(value,LIMITS.pathBytes)||/%(?:2e|2f|5c|00)/i.test(value))return false;
  if(value.startsWith('/')||value.endsWith('/'))return false;
- return safeRepoPath(value.split('/'))===value;
+ return safeSegments(value.split('/'));
 }
 const validLines=(value:unknown,withSide:boolean):boolean=>{
  if(!isObject(value)||!exact(value,withSide?['start','end','side']:['start','end']))return false;
@@ -173,7 +176,14 @@ export function parseCard(value:unknown):Card|undefined{
 }
 const fits=(card:Card)=>cardBytes(card)<=LIMITS.cardBytes?card:undefined;
 /** The card a message carries, if this client understands it. */
-export const cardOf=(m:Pick<ChatMessage,'card'>)=>m.card===undefined?undefined:parseCard(m.card);
+const parsed=new WeakMap<object,Card|undefined>();
+/** Parsed once per card object: a chat view asks on every render. */
+export function cardOf(m:Pick<ChatMessage,'card'>):Card|undefined{
+ const raw=m.card;
+ if(!raw||typeof raw!=='object')return raw===undefined?undefined:parseCard(raw);
+ if(parsed.has(raw))return parsed.get(raw);
+ const card=parseCard(raw);parsed.set(raw,card);return card;
+}
 
 // ---------- canonical URLs and fallback text ----------
 const short=(sha:string)=>sha.slice(0,7);
