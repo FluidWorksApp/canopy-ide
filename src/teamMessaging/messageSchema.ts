@@ -26,3 +26,9 @@ export const canonicalExtensions=(m:ChatMessage)=>JSON.stringify(canonical(Objec
 export function sameChatMessage(a:ChatMessage,b:ChatMessage):boolean {
  return ['id','sender','recipient','text','created'].every(field=>a[field as keyof ChatMessage]===b[field as keyof ChatMessage])&&sameAttachments(a.attachments,b.attachments)&&canonicalExtensions(a)===canonicalExtensions(b);
 }
+/** Optional fields an ordinary visible message may carry beyond its text: a
+ * share card (cardSchema.ts), mentions and a thread. Never `event` — events go
+ * through sendEvent. */
+export type MessageExtensions={card?:unknown;mentions?:unknown;thread?:unknown};
+/** The extension fields of a message, for resending it unchanged. */
+export const extensionsOf=(m:ChatMessage):MessageExtensions|undefined=>{const ext:MessageExtensions={};if(m.card!==undefined)ext.card=m.card;if(m.mentions!==undefined)ext.mentions=m.mentions;if(m.thread!==undefined)ext.thread=m.thread;return Object.keys(ext).length?ext:undefined;};

@@ -2,9 +2,9 @@ import {loadChatHistory,saveChatMessage,forgetChatMessage,loadChatReadState,save
 import {CHAT_VERSION,eventOf,eventRecipient,reactionText,validEmoji} from './chatEvents';
 import {applyEvent,drainPending,hasReacted,nextReactionTime,EMPTY_OVERLAY,type EventOverlay,type ReactionState} from './reactions';
 import {invoke} from '@tauri-apps/api/core';
-import {PeerClient,AttachmentUnavailable,extensionsOf,type MessageExtensions,type Attachment,type AttachmentState,type ChatMessage,type Device} from './client';
+import {PeerClient,AttachmentUnavailable,type Attachment,type AttachmentState,type ChatMessage,type Device} from './client';
 import {prepareFile} from './files';
-import {MAX_ATTACHMENTS} from './messageSchema';
+import {MAX_ATTACHMENTS,extensionsOf,type MessageExtensions} from './messageSchema';
 import type {JobRequest,JobStatus,MeshMessage,MeshStatus,Roster,RosterRequest} from './jobSchema';
 import {countUnread,type ConversationUnread} from './unread';
 
@@ -276,7 +276,7 @@ export class TeamSession {
    if(Date.now()-message.created>STALE_MS){this.setDelivery(message.id,{state:'failed',detail:'Sending took too long.'});return outcome();}
    try{
     const files=await Promise.all((message.attachments??[]).map(async meta=>{const blob=this.blobs.get(meta.id)??await this.client.localFile(meta.id);if(!blob)throw Error(`${meta.name} is no longer on this device`);return {meta,blob};}));
-    const draft={id:message.id,created:message.created},ext=extensionsOf(message),result=await (files.length||ext?this.client.send(message.text,message.recipient,draft,files,ext):this.client.send(message.text,message.recipient,draft));
+    const draft={id:message.id,created:message.created},ext=extensionsOf(message),result=await (ext?this.client.send(message.text,message.recipient,draft,files,ext):files.length?this.client.send(message.text,message.recipient,draft,files):this.client.send(message.text,message.recipient,draft));
     // The transport now holds the bytes in local storage; drop the in-memory copy.
     for(const f of files)this.blobs.delete(f.meta.id);
     if(this.discarded.has(message.id)){void this.client.discard(message.id).catch(()=>{});void forgetChatMessage(this.user,this.team,message.id).catch(()=>{});return outcome();}

@@ -1,4 +1,4 @@
-import {validChatMessage,UUID,MAX_ATTACHMENTS} from './messageSchema';
+import {validChatMessage,UUID,MAX_ATTACHMENTS,type MessageExtensions} from './messageSchema';
 import {chatFileStore,prepareFile,sha256,bytesOf,type FileStore,type FileRecord,type PreparedFile} from './files';
 import {open,seal,registration,MessageReplayError,type Envelope,type EnvelopeKind,type PublicIdentity,type Address} from './crypto';
 import {deviceIdentity,rememberMessage,messageOutbox,type MessageOutbox,type PendingEnvelope,type DeviceIdentity} from './store';
@@ -68,12 +68,6 @@ type Options={members?:(members:{id:string;name:string}[])=>void;request:PeerReq
 /** Client-chosen identity for an optimistic message: the same id is kept in the
  * encrypted history and the pending-delivery queue, so echoes and restarts reconcile. */
 export type MessageDraft={id:string;created:number};
-/** Optional fields an ordinary visible message may carry beyond its text: a
- * share card (cardSchema.ts), mentions and a thread. Never `event` — events go
- * through sendEvent. */
-export type MessageExtensions={card?:unknown;mentions?:unknown;thread?:unknown};
-/** The extension fields of a message, for resending it unchanged. */
-export const extensionsOf=(m:ChatMessage):MessageExtensions|undefined=>{const ext:MessageExtensions={};if(m.card!==undefined)ext.card=m.card;if(m.mentions!==undefined)ext.mentions=m.mentions;if(m.thread!==undefined)ext.thread=m.thread;return Object.keys(ext).length?ext:undefined;};
 export type SendResult={id:string;queued:boolean;partial:boolean};
 export class PeerClient {
  private identity?:DeviceIdentity;private devices=new Map<string,Device>();private hosts=new Map<string,Device>();private peers=new Map<string,{pc:RTCPeerConnection;channel?:RTCDataChannel}>();
