@@ -19,6 +19,7 @@ import { lastHumanPrompt } from "../agentSessions";
 import { ashFor } from "../ash";
 import { Mascot } from "./Mascot";
 import { AgentRuntime } from "./AgentRuntime";
+import { TurnTimeline } from "./TurnTimeline";
 import { LIFE_META, agentLife, type Life } from "../../shared/agentLife";
 import { AgentIcon, GitBranchIcon, RestartIcon } from "./icons";
 import { sessionCost } from "../pricing";
@@ -105,6 +106,8 @@ interface AgentWorkspaceViewProps {
   savedTasks?: CustomMicroTask[];
   /** Run a brief typed right here, once, saving nothing. */
   onRunOneOff?: (brief: string, dir: string) => void;
+  /** The project is in the Build lens: plain-language rollback wording. */
+  builderLens?: boolean;
 }
 
 /** A review comment the user attached to a diff line, held as a draft until
@@ -546,6 +549,7 @@ export function AgentWorkspaceView({
   // project, which re-renders this, so the menu can't go stale.
   savedTasks = [],
   onRunOneOff,
+  builderLens = false,
 }: AgentWorkspaceViewProps) {
   const { switchTo, openThere } = useBranchSwitch();
   const [taskMenu, setTaskMenu] = useState(false);
@@ -1687,6 +1691,18 @@ export function AgentWorkspaceView({
             </div>
           )}
         </div>
+      )}
+
+      {/* Turn rollback: a point per turn, undoable through a diff preview. */}
+      {sessionId && (
+        <TurnTimeline
+          cwd={cwd}
+          sessionId={sessionId}
+          agent={agent}
+          builder={builderLens}
+          refreshKey={digest?.updated}
+          onNotice={onNotice}
+        />
       )}
 
       {/* What the agent said it edited — its own report, capped by the hook.

@@ -26,6 +26,14 @@ algorithm (`algo/algo.go`), compiled into the frontend bundle. Copyright (c)
 2013-2026 Junegunn Choi; MIT text in the appendix; source:
 <https://github.com/junegunn/fzf>.
 
+**Elephant-Goldfish Model — Apache-2.0.** `src/egm/vendor/` holds an
+unmodified copy of reviewer personas, document standards and a design-doc
+template from Google's Elephant-Goldfish Model at commit `3d0b348`, compiled
+into the frontend bundle and written into a project's `.canopy/egm/` folder,
+with its LICENSE, when the spec workflow is created. Copyright 2026 Google LLC;
+Apache-2.0 text in the appendix; source:
+<https://github.com/google/elephant-goldfish-model>.
+
 **jschardet 3.1.4 — LGPL-2.1-or-later.** Pulled in transitively by
 `@codingame/monaco-vscode-api` for character-set detection, and included in the
 distributed application. The LGPL permits this without affecting Canopy's own

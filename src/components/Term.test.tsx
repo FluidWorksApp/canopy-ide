@@ -7,10 +7,22 @@
 // pty I was told about" guard — so a synthetic exit that the consumer would
 // drop is a failure here too.
 import { describe, expect, it, vi } from "vitest";
-import { render, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { mockCommands } from "../test/setup";
 import { groupServers, type ServerComponent } from "../servers";
 import type { TermSubTab } from "./ProjectView/helpers";
+
+/** The most recent mock Terminal, for the clipboard tests to drive. */
+const xterm = vi.hoisted(() => ({
+  last: null as null | {
+    options: Record<string, unknown>;
+    selection: string;
+    modes: { mouseTrackingMode: string };
+    osc: Map<number, (data: string) => boolean>;
+    keyHandler?: (ev: KeyboardEvent) => boolean;
+    pasted: string[];
+  },
+}));
 
 vi.mock("@xterm/xterm", () => {
   class Terminal {
@@ -18,8 +30,16 @@ vi.mock("@xterm/xterm", () => {
     cols = 80;
     rows = 24;
     unicode = { activeVersion: "" };
+    selection = "";
+    pasted: string[] = [];
+    modes = { mouseTrackingMode: "none" };
+    osc = new Map<number, (data: string) => boolean>();
+    keyHandler?: (ev: KeyboardEvent) => boolean;
     parser = {
-      registerOscHandler: () => ({ dispose() {} }),
+      registerOscHandler: (id: number, handler: (data: string) => boolean) => {
+        this.osc.set(id, handler);
+        return { dispose() {} };
+      },
       registerCsiHandler: () => ({ dispose() {} }),
       registerEscHandler: () => ({ dispose() {} }),
     };
@@ -37,12 +57,16 @@ vi.mock("@xterm/xterm", () => {
     }
     constructor(opts?: object) {
       Object.assign(this.options, opts);
+      xterm.last = this;
     }
     loadAddon() {}
     registerLinkProvider() {
       return { dispose() {} };
     }
-    attachCustomKeyEventHandler() {}
+    attachCustomKeyEventHandler(handler: (ev: KeyboardEvent) => boolean) {
+      this.keyHandler = handler;
+    }
+    selectAll() {}
     open() {}
     refresh() {}
     resize() {}
@@ -51,16 +75,18 @@ vi.mock("@xterm/xterm", () => {
     }
     writeln() {}
     input() {}
-    paste() {}
+    paste(text: string) {
+      this.pasted.push(text);
+    }
     focus() {}
     clear() {}
     reset() {}
     dispose() {}
     hasSelection() {
-      return false;
+      return this.selection !== "";
     }
     getSelection() {
-      return "";
+      return this.selection;
     }
     onData() {
       return { dispose() {} };
@@ -361,5 +387,98 @@ describe("Term recovered attachment", () => {
     expect(onSpawned).toHaveBeenCalledWith(77, undefined, undefined);
     expect(onSpawned).toHaveBeenCalledWith(88, undefined, undefined);
     expect(calls).toEqual(["attach:77", "attach:88", "exits"]);
+  });
+});
+
+describe("Term clipboard", () => {
+  const b64 = (text: string) => btoa(String.fromCharCode(...new TextEncoder().encode(text)));
+  const keydown = (init: Partial<KeyboardEvent>) =>
+    ({ type: "keydown", isComposing: false, keyCode: 0, preventDefault() {}, metaKey: false, ctrlKey: false, altKey: false, shiftKey: false, ...init }) as KeyboardEvent;
+  const chordEvent = async (id: string) => {
+    const { resolve } = await import("../shortcuts");
+    const c = resolve(id)!;
+    return keydown({ code: c.code!, metaKey: c.meta, ctrlKey: c.ctrl, altKey: c.alt, shiftKey: c.shift });
+  };
+  /** A mounted terminal whose clipboard writes are recorded. */
+  const mount = () => {
+    const written: string[] = [];
+    mockCommands({
+      ...events,
+      pty_spawn: () => {
+        throw new Error("not needed here");
+      },
+      clipboard_write_text: (args: Record<string, unknown>) => void written.push(String(args.text)),
+      clipboard_read_text: () => "from the clipboard",
+      notify_native: () => undefined,
+    });
+    const view = render(<Term cwd="/w/site" active streaming={false} onSpawned={vi.fn()} onExited={vi.fn()} />);
+    return { written, view, term: xterm.last! };
+  };
+
+  it("lets Option-drag force a selection while a TUI owns the mouse", () => {
+    const { term, view } = mount();
+    expect(term.options.macOptionClickForcesSelection).toBe(true);
+    view.unmount();
+  });
+
+  it("puts an OSC 52 write on the clipboard after the user's input, and never answers a query", async () => {
+    const { term, written, view } = mount();
+    const osc52 = term.osc.get(52)!;
+    // Replayed output with no input from the user: dropped.
+    expect(osc52(`c;${b64("stale")}`)).toBe(true);
+    term.keyHandler!(keydown({ code: "KeyY", key: "y" }));
+    expect(osc52("c;?")).toBe(true);
+    expect(osc52(`c;${b64("copied in the remote TUI")}`)).toBe(true);
+    await waitFor(() => expect(written).toEqual(["copied in the remote TUI"]));
+    view.unmount();
+  });
+
+  it("copies the xterm selection on the copy chord, and passes the key through without one", async () => {
+    const { term, written, view } = mount();
+    const copy = await chordEvent("term-copy");
+    expect(term.keyHandler!(copy)).toBe(true);
+    term.selection = "selected text";
+    expect(term.keyHandler!(copy)).toBe(false);
+    await waitFor(() => expect(written).toEqual(["selected text"]));
+    view.unmount();
+  });
+
+  it("validates WebKit's Copy command only while xterm holds a selection", () => {
+    const { term, view } = mount();
+    const el = view.container.querySelector(".term-container")!;
+    const before = () => {
+      const ev = new Event("beforecopy", { bubbles: true, cancelable: true });
+      el.dispatchEvent(ev);
+      return ev.defaultPrevented;
+    };
+    expect(before()).toBe(false);
+    term.selection = "x";
+    expect(before()).toBe(true);
+    view.unmount();
+  });
+
+  it("opens Canopy's terminal menu with a working Copy and Paste", async () => {
+    const { term, written, view } = mount();
+    const el = view.container.querySelector(".term-container")!;
+    term.selection = "menu copy";
+    fireEvent.contextMenu(el);
+    const copy = screen.getByText("Copy").closest("button")!;
+    expect(copy.disabled).toBe(false);
+    fireEvent.click(copy);
+    await waitFor(() => expect(written).toEqual(["menu copy"]));
+
+    fireEvent.contextMenu(el);
+    fireEvent.click(screen.getByText("Paste").closest("button")!);
+    await waitFor(() => expect(term.pasted).toEqual(["from the clipboard"]));
+    view.unmount();
+  });
+
+  it("disables Copy and explains the modifier-drag when a TUI owns the mouse", () => {
+    const { term, view } = mount();
+    term.modes.mouseTrackingMode = "any";
+    fireEvent.contextMenu(view.container.querySelector(".term-container")!);
+    expect(screen.getByText("Copy").closest("button")!.disabled).toBe(true);
+    expect(screen.getByText(/drag to select text/)).toBeTruthy();
+    view.unmount();
   });
 });

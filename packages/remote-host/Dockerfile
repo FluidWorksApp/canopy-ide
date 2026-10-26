@@ -53,11 +53,19 @@ RUN bash /usr/local/lib/canopy/install-agents.sh verify /tmp/locks/all.json && r
 # Canopy's own runtime and code change most often.
 COPY package.json package-lock.json ./
 RUN npm ci --omit=dev --cache /tmp/npm-cache --no-audit --no-fund && rm -rf /tmp/npm-cache
-COPY runner-harness.mjs agent-browser.mjs terminal-input.mjs terminal-mouse-modes.mjs workspace-file-paths.mjs scratch-environment.mjs browser-streams.mjs opencode-usage.mjs shared-git-launch.mjs shared-agent-launch.mjs git-identity.mjs activity.mjs agent-workspace.mjs agent-usage.mjs runner.mjs http.mjs history.mjs language.mjs native.mjs git-read.mjs git-history.mjs terminal-screen.mjs agent-accounts.mjs profiles.mjs workspace-metrics.mjs open-url.mjs git-source.mjs git-clone.mjs file-write.mjs file-upload.mjs file-search.mjs session-processes.mjs session-digests.mjs session-transfer.mjs agent-integrations.mjs agent-events.mjs agent-mcp.mjs mcp-servers.mjs ./
+COPY runner-harness.mjs agent-browser.mjs terminal-input.mjs terminal-mouse-modes.mjs workspace-file-paths.mjs scratch-environment.mjs browser-streams.mjs opencode-usage.mjs shared-git-launch.mjs shared-agent-launch.mjs git-identity.mjs activity.mjs agent-workspace.mjs agent-usage.mjs runner.mjs http.mjs history.mjs language.mjs native.mjs git-read.mjs git-history.mjs terminal-screen.mjs agent-accounts.mjs profiles.mjs workspace-metrics.mjs open-url.mjs git-source.mjs git-clone.mjs file-write.mjs file-upload.mjs file-search.mjs session-processes.mjs session-digests.mjs session-transfer.mjs agent-integrations.mjs agent-events.mjs agent-mcp.mjs mcp-servers.mjs claude-ide.mjs clipboard-shims.mjs ./
 COPY chrome-stream/ ./chrome-stream/
 RUN chmod 755 /opt/canopy/open-url.mjs && ln -sf /opt/canopy/open-url.mjs /usr/local/bin/xdg-open
 RUN usermod --login agent --home /home/agent --move-home node && groupmod --new-name agent node && mkdir /workspace && chown agent:agent /workspace
 ENV NPM_CONFIG_PREFIX="/home/agent/.local"
+# agents.lock.json pins every CLI by version and checksum; the CLIs that update
+# themselves in the background would otherwise replace the pinned build inside
+# the persistent home (Claude Code was seen at 2.1.310 over a 2.1.287 pin).
+# These are each CLI's own "no background update" switch — a manual update
+# still works. The desktop's "Keep agent CLIs up to date" setting never
+# reaches a workspace; image releases are its update path (see src/projects.ts
+# AgentCliAutoUpdate for the per-CLI evidence).
+ENV DISABLE_AUTOUPDATER="1" GROK_DISABLE_AUTOUPDATER="1" AGY_CLI_DISABLE_AUTO_UPDATE="true"
 ENV PATH="/home/agent/.local/bin:/usr/local/bin:/usr/bin:/bin"
 USER 1000:1000
 EXPOSE 8080

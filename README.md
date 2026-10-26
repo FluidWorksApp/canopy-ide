@@ -89,6 +89,11 @@ process teardown; React owns the project workspace and presentation.
   reminders, and links. Research jobs preserve findings and sources without
   changing code. Background tasks report progress and leave searchable history;
   code-changing custom tasks hand work off through an isolated draft PR.
+- **Spec before you build.** A researched finding can become a design spec in
+  `docs/designs/` that fresh, read-only reviewers audit against written
+  standards before an agent implements it — Google's
+  [Elephant-Goldfish Model](https://github.com/google/elephant-goldfish-model)
+  as a built-in workflow. See [the design](./docs/egm-spec-stage.md).
 - **Preview what agents build.** Open detected dev servers, inspect console and
   network activity, annotate elements, and capture viewport, full-page, or
   region screenshots. Agents can drive previews through scoped browser tools.

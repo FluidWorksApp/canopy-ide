@@ -165,6 +165,7 @@ import {
   inspectFleetRoute,
   type FleetRouteSnapshot,
 } from "../../fleetSnapshot";
+import { chosenBrainId, resolveBrain } from "../../brain";
 import {
   pickLaunchCli,
   startCommandParked,
@@ -197,10 +198,10 @@ import {
   shellBin,
   type AgentLaunchOptions,
   updateCommand,
+  updateCommandFor,
 } from "../../projects";
 import {
   workflowAgentForStep,
-  workflowAgentPrompt,
   workflowAgentSelection,
 } from "../../workflowAgents";
 import {
@@ -355,6 +356,19 @@ import {
 import { workflowGet } from "../../workflowRuns";
 import { executeWorkflowGitOp } from "../../workflowGitOps";
 import { waitForWorkflowAttempt } from "../../workflowAttempt";
+import {
+  prepareWorkflowRunDir,
+  readVerdictFile,
+  type WorkflowRunFilesIo,
+} from "../../workflowRunFiles";
+import {
+  EGM_SPEC_WORKFLOW_DEFINITION,
+  EGM_WORKFLOW_ID,
+  egmResearchTrigger,
+  installEgmResources,
+  isDesignSpec,
+  specPathFor,
+} from "../../egm/egmWorkflow";
 import { record as recordProvenance } from "../../provenance";
 import { resolveAgentForPr, type PrAgent } from "../../agentForPr";
 import { cached as provenanceCached, parsePrUrl } from "../../provenance";
@@ -467,6 +481,7 @@ import { CommitView } from "../CommitView";
 import { ReviewView, type ReviewPayload } from "../ReviewView";
 import { BranchView } from "../BranchView";
 import { AgentWorkspaceView } from "../AgentWorkspaceView";
+import { CliVersionFloor } from "../CliVersionFloor";
 import { AgentBrowserPip, pipOwnerVisible } from "../AgentBrowserPip";
 import { BROWSER_INPUT_EVENT, PreviewView } from "../PreviewView";
 import DeviceView from "../DeviceView";
@@ -530,6 +545,9 @@ import { ClaimView } from "../ClaimView";
 import { claimOwnerPty } from "../../claims";
 import { ChatView } from "../ChatView";
 import { Coachmark } from "../Coachmark";
+import { ClaudeDiffDock } from "../ClaudeDiffDock";
+import { noteActiveTerminal } from "../../claudeIde";
+import { CLAUDE_MENTIONED_EVENT } from "../../claudeIdeBridge";
 import { shouldShowTip, markTipSeen, type CoachTip } from "../../coachmarks";
 import { ActivityRail } from "../ActivityRail";
 import { PaneBar } from "../PaneBar";
@@ -671,6 +689,15 @@ const DOC_STACK_ICONS: Record<string, ReactNode> = {
 };
 
 const decoder = new TextDecoder();
+
+/** Workflow run folders and EGM resources live inside the project, so the
+ *  ordinary scoped fs commands reach them. */
+const workflowRunFilesIo: WorkflowRunFilesIo = {
+  exists: (path) => ipc.fsStat(path).then(() => true, () => false),
+  create: (path) => ipc.fsCreateFile(path),
+  write: (path, content) => ipc.fsWriteFile(path, content),
+  read: (path, maxBytes) => ipc.fsReadText(path, maxBytes),
+};
 
 /** How a doc tab's host is hidden when it isn't the front tab.
  *
@@ -4549,19 +4576,32 @@ const ProjectViewBody = memo(function ProjectViewBody({
             snapshotFor: (next) => snapshotFor(next.cli, next.profileId),
           };
         },
-        launchAgent: async ({ step, reservation }) => {
+        launchAgent: async ({ step, reservation, prompt, runDir, workflowRunId }) => {
           const block = workflowAgentForStep(definition, step);
           const selection = workflowAgentSelection(block);
           const requestedCli = block?.type && block.type !== "inherit" ? block.type : inheritedCli.id;
+          // The run folder exists before any step needs it: a read-only step
+          // may write nowhere else, so it has to be there to be written to.
+          try {
+            await prepareWorkflowRunDir(worktreePath, workflowRunId, workflowRunFilesIo);
+          } catch (error) {
+            await settleAttempt({ attemptId: reservation.attempt.attemptId, state: "failed" })
+              .catch(() => {});
+            return { ok: false, failureText: `workflow run folder could not be prepared: ${String(error)}` };
+          }
+          const writes = step.capabilities.includes("workspace-write");
           const task: MicroTaskDef<{ dir: string }> = {
             id: `workflow-${definition.id}-${step.id}`,
             label: step.name,
             icon: "◇",
             placeholder: "",
             cwd: (payload) => payload.dir,
-            buildContext: () => workflowAgentPrompt(block, step),
+            buildContext: () => prompt,
             runLabel: () => `${definition.name} · ${step.name}`,
-            effect: step.capabilities.includes("workspace-write") ? "pushes" : "reads",
+            effect: writes ? "pushes" : "reads",
+            // A step without workspace-write is held to it: canopy_hook refuses
+            // edit-tool writes outside the run folder (CANOPY_WRITE_ROOT).
+            env: () => (writes ? [] : [["CANOPY_WRITE_ROOT", runDir]]),
           };
           const started = await startMicroTask(
             task,
@@ -4579,6 +4619,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
           }
           return waitForWorkflowAttempt(reservation.attempt.attemptId);
         },
+        readVerdict: (path) => readVerdictFile(path, workflowRunFilesIo),
         runGitOp: (step) => executeWorkflowGitOp(step, worktreePath),
       };
       return {
@@ -4596,7 +4637,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
   );
 
   const runWorkflowDefinition = useCallback(
-    async (definition: WorkflowDefinition) => {
+    async (definition: WorkflowDefinition, request?: string) => {
       const runtime = await workflowRuntime(definition);
       const run = startWorkflow(
         definition,
@@ -4604,7 +4645,9 @@ const ProjectViewBody = memo(function ProjectViewBody({
           kind: "manual",
           eventId: crypto.randomUUID(),
           occurredAt: Date.now(),
-          payload: { source: "workflow-view" },
+          // What the person typed into the Run box reaches prompts as
+          // {{trigger.request}}.
+          payload: { source: "workflow-view", ...(request ? { request } : {}) },
         },
         runtime.context,
         runtime.deps,
@@ -4714,6 +4757,82 @@ const ProjectViewBody = memo(function ProjectViewBody({
     await ipc.fsCreateFile(path);
     await ipc.fsWriteFile(path, `${JSON.stringify(STARTER_WORKFLOW_DEFINITION, null, 2)}\n`);
   }, [project.components, roots]);
+
+  /** Put the Elephant-Goldfish spec workflow and the personas and standards it
+   *  reads into the project. Never overwrites: an existing definition or
+   *  resource is the project's own copy. Returns the definition to run — the
+   *  project's, when it has a valid one. */
+  const ensureEgmWorkflow = useCallback(async (): Promise<WorkflowDefinition> => {
+    const projectRoot = roots[0] ?? project.components[0]?.path;
+    if (!projectRoot) throw new Error("This project has no component root");
+    const root = projectRoot.replace(/[\\/]+$/, "");
+    await installEgmResources(root, {
+      exists: workflowRunFilesIo.exists,
+      create: (path) => ipc.fsCreateFile(path),
+      write: (path, content) => ipc.fsWriteFile(path, content),
+    });
+    const path = `${root}/.canopy/workflows/${EGM_WORKFLOW_ID}.json`;
+    if (!(await workflowRunFilesIo.exists(path))) {
+      await ipc.fsCreateFile(path);
+      await ipc.fsWriteFile(path, `${JSON.stringify(EGM_SPEC_WORKFLOW_DEFINITION, null, 2)}\n`);
+      return EGM_SPEC_WORKFLOW_DEFINITION;
+    }
+    const catalog = await loadWorkflowDefinitions(projectRoot, {
+      projectRoot,
+      componentRoots: new Set(roots),
+    });
+    if (!catalog.ok) throw new Error(catalog.errors[0] ?? "the workflow catalog is invalid");
+    return catalog.definitions.find((definition) => definition.id === EGM_WORKFLOW_ID)
+      ?? EGM_SPEC_WORKFLOW_DEFINITION;
+  }, [project.components, roots]);
+
+  const createEgmWorkflow = useCallback(async () => {
+    await ensureEgmWorkflow();
+  }, [ensureEgmWorkflow]);
+
+  /** Research → spec: draft `docs/designs/<slug>.md` from a finding and put it
+   *  through the Goldfish review. The entry keeps its status; the linked spec
+   *  is what "Implement this" builds against (research.implementContext). */
+  const writeResearchSpec = useCallback(
+    async (entry: ipc.ResearchDetail) => {
+      const projectRoot = roots[0] ?? project.components[0]?.path;
+      if (!projectRoot) return;
+      const root = projectRoot.replace(/[\\/]+$/, "");
+      try {
+        const definition = await ensureEgmWorkflow();
+        const linked = entry.links.files.find(isDesignSpec);
+        const specPath = linked
+          ? linked.startsWith(`${root}/`) ? linked.slice(root.length + 1) : linked
+          : specPathFor(entry.title);
+        if (!linked) {
+          await researchLinkEntry({ projectId: project.id, id: entry.id, files: [`${root}/${specPath}`] });
+        }
+        await ipc.researchUpdate({
+          projectId: project.id,
+          id: entry.id,
+          append:
+            `Started the Elephant-Goldfish spec workflow: the spec goes to \`${specPath}\` and is ` +
+            `reviewed by fresh Goldfish reviewers before it is approved.`,
+        }).catch(() => {});
+        const runtime = await workflowRuntime(definition);
+        openWorkflows();
+        void startWorkflow(
+          definition,
+          {
+            kind: "manual",
+            eventId: crypto.randomUUID(),
+            occurredAt: Date.now(),
+            payload: egmResearchTrigger(entry, specPath),
+          },
+          runtime.context,
+          runtime.deps,
+        ).catch((error) => onNotice(`Spec workflow stopped: ${String(error)}`, "error"));
+      } catch (err) {
+        onNotice(`Couldn't start the spec workflow: ${String(err)}`, "error");
+      }
+    },
+    [ensureEgmWorkflow, onNotice, openWorkflows, project.components, project.id, roots, workflowRuntime],
+  );
 
   const saveWorkflowDefinition = useCallback(async (definition: WorkflowDefinition) => {
     const projectRoot = roots[0] ?? project.components[0]?.path;
@@ -6114,6 +6233,32 @@ const ProjectViewBody = memo(function ProjectViewBody({
     window.addEventListener("canopy:start-session", onStart);
     return () => window.removeEventListener("canopy:start-session", onStart);
   }, [project.id, startMicroTask]);
+
+  // Claude Code's IDE link (claudeIde.ts). "Add to Claude" prefers the
+  // terminal the user last had in front of them, so the active one is noted;
+  // and once a mention lands, the terminal it went to comes forward, since
+  // the next thing the user does is type the rest of the prompt there.
+  const activeTerminalPty = useMemo(() => {
+    const tab = tabs.find((t) => t.id === activeTabId);
+    return tab?.type === "terminal" ? tab.ptyId : null;
+  }, [tabs, activeTabId]);
+  useEffect(() => {
+    if (visible && activeTerminalPty != null) noteActiveTerminal(activeTerminalPty);
+  }, [visible, activeTerminalPty]);
+  useEffect(() => {
+    const onMentioned = (e: Event) => {
+      const ptyId = (e as CustomEvent<{ ptyId: number }>).detail?.ptyId;
+      const tab = tabsRef.current.find((t) => t.type === "terminal" && t.ptyId === ptyId);
+      if (tab) setActiveTabId(tab.id);
+    };
+    window.addEventListener(CLAUDE_MENTIONED_EVENT, onMentioned);
+    return () => window.removeEventListener(CLAUDE_MENTIONED_EVENT, onMentioned);
+  }, []);
+  const terminalPtys = useMemo(
+    () =>
+      tabs.flatMap((t) => (t.type === "terminal" && t.ptyId != null ? [t.ptyId] : [])),
+    [tabs],
+  );
 
   // The tail of a deep link (deepLinks.ts): App resolved the project and
   // opened it, and this lands on the actual thing — the terminal an agent was
@@ -9214,7 +9359,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
       if (!cwd) return;
       // Route to the command matched to the install source (e.g. `brew upgrade`);
       // fall back to the CLI's own updater when the source is a plain registry.
-      const cmd = cliUpdates[cli.bin]?.updateCmd ?? updateCommand(cli);
+      const cmd = updateCommandFor(cli, cliUpdates[cli.bin]);
       // Nothing to run: an entry with neither an updater nor an installer (a
       // custom CLI) never badges an update in the first place, so this is the
       // belt to that brace rather than a state a user can reach.
@@ -10667,10 +10812,12 @@ const ProjectViewBody = memo(function ProjectViewBody({
   if (vibeOwnedPreviewId.current && !vibePreview) vibeOwnedPreviewId.current = null;
   const vibePreviewIdRef = useRef<string | null>(null);
   vibePreviewIdRef.current = vibePreview?.id ?? null;
-  const vibePrimaryCli = pickLaunchCli(
-    undefined,
-    (bin) => Boolean(installed[bin]),
-  );
+  const vibePrimaryCli = resolveBrain((bin) => Boolean(installed[bin]));
+  // Read at creation by the bootstrap session below, which deliberately does
+  // not rebuild when detection settles: recreating it would stop a turn that
+  // may already be running.
+  const vibePrimaryCliRef = useRef(vibePrimaryCli);
+  vibePrimaryCliRef.current = vibePrimaryCli;
   const vibeComponentId = vibeComponent?.id ?? null;
   const vibeComponentLabel = vibeComponent?.label ?? null;
   const vibeComponentPath = vibeComponent?.path ?? null;
@@ -10720,8 +10867,11 @@ const ProjectViewBody = memo(function ProjectViewBody({
             projectName: project.name,
             componentId: vibeComponentId,
             componentPath: vibeComponentPath,
-            cliId: vibePrimaryCli?.id ?? getSettings().defaultAgent,
-            cliBin: vibePrimaryCli?.bin ?? getSettings().defaultAgent,
+            // The fallbacks only run while the registry is empty, when the id
+            // is the only name there is; the session resolves the bin through
+            // the registry first and reaches cliBin only when that fails.
+            cliId: vibePrimaryCli?.id ?? chosenBrainId(),
+            cliBin: vibePrimaryCli?.bin ?? chosenBrainId(),
             checkCommand: vibeCheckCommand,
             checkCaveat: vibeCheckCaveat,
             siblingPaths: components
@@ -10761,9 +10911,13 @@ const ProjectViewBody = memo(function ProjectViewBody({
     const components = bootstrapComponents.current;
     const component = components[0];
     if (!vibe || vibeTarget.kind !== "needs-setup" || !bootstrapState?.empty || !component) return null;
+    // The same brain as the Build session above, not the raw setting: the
+    // setting names a CLI whether or not it is installed, and its id is not
+    // its binary once the person has rebound it.
+    const brain = vibePrimaryCliRef.current;
     return createVibeBuilderSession({
       projectId: project.id, projectName: project.name, componentId: component.id, componentPath: component.path,
-      cliId: getSettings().defaultAgent, cliBin: getSettings().defaultAgent,
+      cliId: brain?.id ?? chosenBrainId(), cliBin: brain?.bin ?? chosenBrainId(),
       projectComponents: components, siblingPaths: components.slice(1).map((item) => item.path),
       previewTabId: () => null, recoverRoute: recoverVibeRoute,
       onBootstrapReady: async () => {
@@ -12190,6 +12344,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
             cwd={tab.cwd}
             sessionId={tab.sessionId}
             digest={tab.digest}
+            builderLens={vibe}
             onOpenCommit={openCommit}
             onOpenPr={openPr}
             onOpenPrNumber={(r, n, u) => void openPrByNumber(r, n, u)}
@@ -12291,6 +12446,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
               sendTicketToAgent(target, implementContext(entry))
             }
             onRaisePr={(entry) => void raiseResearchPr(entry)}
+            onWriteSpec={(entry) => void writeResearchSpec(entry)}
             // Continuing works on the same entry rather than opening a new
             // one — the point is to go further on this question, not to ask it
             // again — so the steer is passed through as the run's user context.
@@ -12522,6 +12678,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
             onAnswer={answerWorkflowDecision}
             onResume={resumeWorkflow}
             onCreateStarter={createStarterWorkflow}
+            onCreateEgm={createEgmWorkflow}
             onSave={saveWorkflowDefinition}
           />
         );
@@ -13554,6 +13711,9 @@ const ProjectViewBody = memo(function ProjectViewBody({
                     >
                       ⇡ {cliUpdates[cli.bin]?.latest}
                     </span>
+                  )}
+                  {installed[cli.bin] && (
+                    <CliVersionFloor cliId={cli.id} installed={cliUpdates[cli.bin]?.installed} />
                   )}
                 </button>
               ))}
@@ -14780,6 +14940,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
           }}
         />
       )}
+      <ClaudeDiffDock ptyIds={terminalPtys} onNotice={onNotice} />
       {coachTip && visible && (
         <Coachmark
           targetSelector={COACH_TIPS[coachTip].selector}

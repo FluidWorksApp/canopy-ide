@@ -699,6 +699,16 @@ export interface AgentCli {
    */
   update?: string;
 
+  /** PyPI distribution that ships a Python CLI (`aider-chat`). Lets the
+   *  version probe name the venv-owned upgrade (pipx / uv / that venv's pip)
+   *  instead of a `python3 -m pip` that may write somewhere else entirely. */
+  pipPackage?: string;
+
+  /** How this CLI is kept current while Settings → Agents → "Keep agent CLIs
+   *  up to date" is on — see AgentCliAutoUpdate. Absent (a custom CLI) means
+   *  Canopy knows no safe unattended route and never tries one. */
+  autoUpdate?: AgentCliAutoUpdate;
+
   /**
    * The CLI's own "never stop to ask permission" flag, when it has one.
    * Appended to every launch — fresh, prompted, and resumed — while
@@ -744,6 +754,33 @@ export interface AgentCli {
 
   /** Verified interactive model control, when this CLI exposes one. */
   modelSwitch?: ModelSwitch;
+}
+
+/**
+ * Who keeps a CLI up to date, and on what evidence.
+ *
+ * "native": the CLI updates itself in the background. Canopy leaves that
+ * alone while the setting is on (running `update` as well would only race
+ * it), and while it is off sets `disableEnv` in every agent process it
+ * starts. The exception is an install a package manager owns (Homebrew),
+ * which native updaters do not touch: that one Canopy upgrades itself.
+ *
+ * "canopy": Canopy runs the install-matched command — the package manager
+ * that owns the PATH winner when the probe can tell (brew / npm / pnpm /
+ * pipx / uv / the venv's pip), else the CLI's own `update` — about once a
+ * day, only when outdated (or when there is no registry to ask), and never
+ * while the CLI is running. Never `install`: re-running an installer
+ * unattended can put a second copy somewhere else on PATH.
+ *
+ * Only a *documented* "don't update" variable belongs in `disableEnv`, with
+ * the evidence grade in `verification.source`; a CLI whose off-switch is a
+ * user config file (amp.updates.mode, codex check_for_update_on_startup)
+ * gets none — Canopy never rewrites a CLI's own settings file.
+ */
+export interface AgentCliAutoUpdate {
+  mechanism: "native" | "canopy";
+  disableEnv?: readonly (readonly [string, string])[];
+  verification: { cliVersion: string; checkedOn: string; source: string };
 }
 
 export interface AgentCliCapabilities {
@@ -896,6 +933,21 @@ export const BUILTIN_AGENT_CLIS: AgentCliDef[] = [
     // the structured runner that consumes the flags.
     // Verified: `claude update` self-updates both the npm and native installs.
     update: "claude update",
+    // Native and npm installs update themselves in the background; Homebrew
+    // and WinGet installs do not (Canopy runs `brew upgrade` for those).
+    // `DISABLE_AUTOUPDATER` stops only the background check — `claude update`
+    // still works — which is exactly the "off" the setting means. Not
+    // `DISABLE_UPDATES`: that also blocks the user's own manual update.
+    autoUpdate: {
+      mechanism: "native",
+      disableEnv: [["DISABLE_AUTOUPDATER", "1"]],
+      verification: {
+        cliVersion: "2.1.310",
+        checkedOn: "2026-10-26",
+        source:
+          "docs: code.claude.com/docs/en/setup (Auto-updates, Disable auto-updates); `claude update --help`",
+      },
+    },
     // Verified: `-r, --resume [value]  Resume a conversation by session ID`.
     resume: (id, bin) => `${bin} --resume ${id}`,
     // Verified: claude takes the opening prompt as a positional argument and
@@ -957,6 +1009,20 @@ export const BUILTIN_AGENT_CLIS: AgentCliDef[] = [
     install: "npm install -g @openai/codex",
     pkgs: ["npm:@openai/codex"],
     latestUrl: "https://registry.npmjs.org/@openai/codex/latest",
+    // Verified against codex-cli 0.162.1 on 2026-10-26: `codex --help` lists
+    // `update  Update Codex to the latest version`, and the binary routes it by
+    // install method (npm / bun / pnpm / `brew upgrade --cask codex` /
+    // standalone installer). Preferred over `install`, which as an updater
+    // would put an npm copy beside a brew or standalone one.
+    update: "codex update",
+    autoUpdate: {
+      mechanism: "canopy",
+      verification: {
+        cliVersion: "0.162.1",
+        checkedOn: "2026-10-26",
+        source: "`codex --help`; `codex update --help`; install-method routing from binary strings",
+      },
+    },
     // Registry argv re-verified against codex-cli 0.147.0 local help on
     // 2026-08-09 (`codex --help`, `exec --help`, and `exec resume --help`).
     // Verified: `codex resume <SESSION_ID>` — subcommand, id is positional and
@@ -1036,6 +1102,17 @@ export const BUILTIN_AGENT_CLIS: AgentCliDef[] = [
     pkgs: ["npm:@ampcode/cli", "npm:@sourcegraph/amp"],
     latestUrl: "https://registry.npmjs.org/@ampcode/cli/latest",
     update: "amp update",
+    // Amp's own checking is `amp.updates.mode` in its settings file ("warn" /
+    // "disabled" / "auto") — a user setting Canopy leaves alone, so there is
+    // no disableEnv here.
+    autoUpdate: {
+      mechanism: "canopy",
+      verification: {
+        cliVersion: "0.0.1790913650",
+        checkedOn: "2026-10-26",
+        source: "`amp update --help` (update|up, --porcelain); `amp --help` settings (amp.updates.mode)",
+      },
+    },
     // Verified: `amp threads continue <threadId>`; thread ids look like T-<uuid>.
     resume: (id, bin) => `${bin} threads continue ${id}`,
     // No skipPermissions, verified against the owner's manual: today's Amp
@@ -1069,6 +1146,21 @@ export const BUILTIN_AGENT_CLIS: AgentCliDef[] = [
     // distribution name, which nothing on disk states.
     pkgs: ["py:aider"],
     latestUrl: "https://pypi.org/pypi/aider-chat/json",
+    pipPackage: "aider-chat",
+    // No `update`: `aider --upgrade` asks "Run pip install?" before it does
+    // anything, so it cannot run unattended. What it then runs is
+    // `<its own python> -m pip install --upgrade --upgrade-strategy
+    // only-if-needed aider-chat` (aider/utils.py get_pip_install), and the
+    // version probe derives exactly that from the console script's shebang —
+    // or `pipx upgrade` / `uv tool upgrade` when one of those owns the venv.
+    autoUpdate: {
+      mechanism: "canopy",
+      verification: {
+        cliVersion: "0.86.2",
+        checkedOn: "2026-10-26",
+        source: "`aider --help` (--upgrade); aider/versioncheck.py install_upgrade + utils.py get_pip_install",
+      },
+    },
     // Registry flags (`--read`, `--restore-chat-history`, `--yes-always`, and
     // `--notifications-command`) re-verified together against aider 0.86.2
     // local --help on 2026-08-09. This reconciles the launcher and notification
@@ -1115,6 +1207,21 @@ export const BUILTIN_AGENT_CLIS: AgentCliDef[] = [
     },
     modelSwitch: MODEL_SWITCH.agy,
     install: "curl -fsSL https://antigravity.google/cli/install.sh | bash",
+    // A background auto-updater ships in the binary (updater/auto_updater.go;
+    // changelog: "Fixed a background auto-updater double-spawn race"), and
+    // `agy --help` lists an `update` subcommand. The off-switch name comes
+    // from the binary's strings beside "Auto-update disabled via environment
+    // variable %s" — no published doc names it yet, so this is the weakest
+    // stamp in the registry. Setting an unknown variable is harmless if wrong.
+    autoUpdate: {
+      mechanism: "native",
+      disableEnv: [["AGY_CLI_DISABLE_AUTO_UPDATE", "true"]],
+      verification: {
+        cliVersion: "1.2.14",
+        checkedOn: "2026-10-26",
+        source: "binary strings + `agy changelog` (not vendor docs); `agy --help` lists `update`",
+      },
+    },
     // Registry flags re-verified against Antigravity 1.1.11 local --help on
     // 2026-08-09 (`--conversation`, permission bypass, mode, model, add-dir,
     // sandbox, and stream-json output).
@@ -1158,6 +1265,14 @@ export const BUILTIN_AGENT_CLIS: AgentCliDef[] = [
     latestUrl: "https://registry.npmjs.org/opencode-ai/latest",
     // Verified: `opencode upgrade` self-updates regardless of install method.
     update: "opencode upgrade",
+    autoUpdate: {
+      mechanism: "canopy",
+      verification: {
+        cliVersion: "1.18.34",
+        checkedOn: "2026-10-26",
+        source: "`opencode upgrade --help` (-m curl|npm|pnpm|bun|brew|choco|scoop; detected when omitted)",
+      },
+    },
     // Verified: `-s, --session <id>` = "session id to continue". Treat the id as
     // opaque — enumerate via `opencode session list --format json`.
     resume: (id, bin) => `${bin} --session ${id}`,
@@ -1221,6 +1336,19 @@ export const BUILTIN_AGENT_CLIS: AgentCliDef[] = [
     },
     modelSwitch: MODEL_SWITCH.omp,
     install: "curl -fsSL https://omp.sh/install | sh",
+    // Verified against omp 18.4.10 `omp update --help` on 2026-10-26. It picks
+    // its route from the executable's path — nix (refuses), brew, mise, bun,
+    // npm, else the installer's binary (download, SHA-256 check, rollback) —
+    // per can1357/oh-my-pi update-cli.ts resolveUpdateMethod.
+    update: "omp update",
+    autoUpdate: {
+      mechanism: "canopy",
+      verification: {
+        cliVersion: "18.4.10",
+        checkedOn: "2026-10-26",
+        source: "`omp update --help`; github.com/can1357/oh-my-pi update-cli.ts",
+      },
+    },
     // Also published as a Homebrew formula (can1357/tap) and scoped npm CLI.
     pkgs: ["brew:omp", "npm:@oh-my-pi/pi-coding-agent"],
     // Verified: `-r, --resume=<value>  Resume a session (by ID prefix, path...)`.
@@ -1233,8 +1361,12 @@ export const BUILTIN_AGENT_CLIS: AgentCliDef[] = [
     // session (always-ask|write|yolo)`. `write` is the middle rung — writes go
     // through, the rest still asks — and `yolo` is `--auto-approve` by another
     // name, which is the rung above. Pinned rather than left alone because
-    // `always-ask` is a configurable default, and a task that inherits it stops
-    // on its first edit.
+    // omp's own default is the permissive end, not `always-ask`:
+    // `tools.approvalMode` falls back to `yolo` when unset (omp 18.4.10
+    // src/tools/approval.ts; docs/approval-mode.md), so a bare `omp` would
+    // auto-approve every tool, shell included. Like every CLI's automatic mode
+    // this rides on all Canopy launches (fresh, prompted, restored, remote).
+    // omp forces its own subagents to `yolo` whatever this says.
     unattended: "--approval-mode=write",
     // `write` still prompts for every bash/eval/task call. The marker asks the
     // PTY layer to add Canopy's overlay (~/.canopy/omp-task-approval.yml)
@@ -1269,6 +1401,17 @@ export const BUILTIN_AGENT_CLIS: AgentCliDef[] = [
     modelSwitch: MODEL_SWITCH.cursor,
     install: "curl https://cursor.com/install -fsS | bash",
     update: "cursor-agent update",
+    // Cursor's own auto-update switches are undocumented (reverse-engineered
+    // config keys / hidden flags), so nothing here relies on them: Canopy
+    // runs the documented updater and sets no disableEnv.
+    autoUpdate: {
+      mechanism: "canopy",
+      verification: {
+        cliVersion: "2026.10.01-e373342",
+        checkedOn: "2026-10-26",
+        source: "`cursor-agent update --help` (Update Cursor Agent to the latest version)",
+      },
+    },
     resume: (id, bin) => `${bin} --resume ${id}`,
     prompt: (text, bin) => `${bin} ${shellQuote(text)}`,
     skipPermissions: "--force",
@@ -1297,6 +1440,19 @@ export const BUILTIN_AGENT_CLIS: AgentCliDef[] = [
     modelSwitch: MODEL_SWITCH.grok,
     install: "curl -fsSL https://x.ai/cli/install.sh | bash",
     update: "grok update",
+    // Grok's user guide: `cli.auto_update` — "Check for CLI updates on launch.
+    // Also GROK_DISABLE_AUTOUPDATER to suppress" — and its version-pinning
+    // section bounds what "the CLI may auto-update to".
+    autoUpdate: {
+      mechanism: "native",
+      disableEnv: [["GROK_DISABLE_AUTOUPDATER", "1"]],
+      verification: {
+        cliVersion: "1.0.46",
+        checkedOn: "2026-10-26",
+        source:
+          "docs: ~/.grok/docs/user-guide/26-config-reference.md (cli.auto_update), 05-configuration.md; `grok update --help`",
+      },
+    },
     resume: (id, bin) => `${bin} --resume ${id}`,
     prompt: (text, bin) => `${bin} ${shellQuote(text)}`,
     skipPermissions: "--always-approve",
@@ -1770,7 +1926,11 @@ const cmpVersions = (a: string, b: string): number => {
  * launcher doesn't hammer npm/PyPI. CLIs without a `latestUrl` never flag an
  * update — unknown is unknown.
  */
-export async function checkCliUpdates(): Promise<Record<string, CliUpdate>> {
+export async function checkCliUpdates(
+  /** Which machine to probe. The launcher asks the execution host; the
+   *  auto-updater always asks the desktop (see cliAutoUpdate.ts). */
+  call: typeof invoke = invoke,
+): Promise<Record<string, CliUpdate>> {
   let cached: { at: number; latest: Record<string, string> } | null = null;
   try {
     cached = JSON.parse(localStorage.getItem(LATEST_CACHE_KEY) ?? "null");
@@ -1784,7 +1944,7 @@ export async function checkCliUpdates(): Promise<Record<string, CliUpdate>> {
     cached.latest != null &&
     Date.now() - cached.at < LATEST_TTL_MS;
   try {
-    const res = await invoke<
+    const res = await call<
       Record<
         string,
         {
@@ -1808,6 +1968,7 @@ export async function checkCliUpdates(): Promise<Record<string, CliUpdate>> {
         // is its own. Probing it anyway would badge a sanctioned install as out
         // of date and offer to overwrite it with a public release.
         latestUrl: fresh || c.rebound ? null : (c.latestUrl ?? null),
+        pythonPackage: c.pipPackage ?? null,
       })),
     });
     const latest: Record<string, string> = fresh ? cached!.latest : {};
@@ -1841,6 +2002,30 @@ export async function checkCliUpdates(): Promise<Record<string, CliUpdate>> {
 /** The command that updates `cli` — its self-updater when verified, else its
  *  installer (idempotent for npm -g and pip -U). */
 export const updateCommand = (cli: AgentCli) => cli.update ?? cli.install;
+
+/** The command a *person* runs to update `cli` from the badge: the one
+ *  matched to its install source when the probe found one (`brew upgrade
+ *  claude-code`, a venv's pip), else the self-updater, else the installer —
+ *  which is acceptable here because it runs in a visible tab. */
+export const updateCommandFor = (cli: AgentCli, probed?: CliUpdate) =>
+  probed?.updateCmd ?? updateCommand(cli);
+
+/** The command Canopy may run for `cli` *unattended*: install-matched, else
+ *  the CLI's own updater — never the installer, which run blind can put a
+ *  second copy somewhere else on PATH. Undefined means no safe route. */
+export const autoUpdateCommand = (cli: AgentCli, probed?: CliUpdate) =>
+  probed?.updateCmd ?? cli.update;
+
+/** The variables that switch off every self-updating CLI's background
+ *  updater, or none while the user wants CLIs kept current (`enabled`). Read
+ *  from the built-in registry so a rebound binary is covered too: "off"
+ *  means off for whatever build of Claude Code is installed. */
+export function nativeUpdateOffEnv(enabled: boolean): [string, string][] {
+  if (enabled) return [];
+  return BUILTIN_AGENT_CLIS.flatMap((d) =>
+    (d.autoUpdate?.disableEnv ?? []).map(([k, v]) => [k, v] as [string, string]),
+  );
+}
 
 /** `command` with `cli`'s skip-permissions flag appended — only while the
  *  dangerouslySkipPermissions setting is on and the CLI has a verified flag.

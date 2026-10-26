@@ -40,6 +40,7 @@ import { TaskProgress } from "./TaskProgress";
 import { RESEARCH_STEPS, stepsDone } from "../microTasks";
 import { usePrLinkStates } from "../prLinkState";
 import { Button } from "./ui";
+import { isDesignSpec } from "../egm/specPath";
 
 /** One array identity for "this entry has no linked PRs", so the hook below is
  *  not handed a fresh empty array on every render. */
@@ -54,6 +55,9 @@ interface ResearchViewProps {
   onSendImplement?: (target: AgentTarget, entry: ipc.ResearchDetail) => void;
   /** Publish implementation that was recorded as a local commit without a PR. */
   onRaisePr?: (entry: ipc.ResearchDetail) => void;
+  /** Turn the finding into a reviewed design spec before anyone builds it
+   *  (the Elephant-Goldfish spec workflow). */
+  onWriteSpec?: (entry: ipc.ResearchDetail) => void;
   /** Agent terminals open in this project — the "send it there" targets. */
   agentTargets?: AgentTarget[];
   /** Which agent CLIs are on PATH. */
@@ -79,6 +83,7 @@ export function ResearchView({
   onImplement,
   onSendImplement,
   onRaisePr,
+  onWriteSpec,
   agentTargets,
   installed,
   onContinue,
@@ -234,6 +239,8 @@ export function ResearchView({
   if (!entry) return <div className="research-view" />;
 
   const moves = NEXT_STATUSES[entry.status] ?? [];
+  /** A linked docs/designs spec, if this finding has been specified. */
+  const spec = entry.links.files.find(isDesignSpec);
   const localImplementation = entry.history.find(
     (h) =>
       h.to === "researched" &&
@@ -561,6 +568,7 @@ export function ResearchView({
                   <button className="research-link" onClick={() => onOpenFile?.(f)}>
                     {f}
                   </button>
+                  {isDesignSpec(f) && <span className="research-source-meta">design spec</span>}
                 </li>
               ))}
             </ul>
@@ -607,10 +615,25 @@ export function ResearchView({
       {moves.includes("implementing") && onImplement && (
         <div className="research-actions">
           <span className="research-actions-note">
-            Starts an agent on a branch of its own. The pull request it raises is
-            what marks this implemented.
+            {spec
+              ? <>Starts an agent on a branch of its own, building against the spec. The pull request it raises is what marks this implemented.</>
+              : <>Starts an agent on a branch of its own. The pull request it raises is what marks this implemented.</>}
           </span>
           <span className="status-spacer" />
+          {onWriteSpec && (
+            <Button
+              size="sm"
+              variant="ghost"
+              title={
+                spec
+                  ? "Run the spec through the Elephant-Goldfish review again"
+                  : "Draft docs/designs/… from this finding and have fresh, read-only reviewers audit it before anything is built"
+              }
+              onClick={() => onWriteSpec(entry)}
+            >
+              {spec ? "Review spec" : "Write spec"}
+            </Button>
+          )}
           <AgentLaunchButton
             label="Implement this"
             agentTargets={agentTargets ?? []}

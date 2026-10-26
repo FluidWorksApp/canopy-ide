@@ -1712,6 +1712,7 @@ impl PtyManager {
         // The account a terminal runs under is the launch's own choice. An
         // account inherited from whatever started Canopy would put a
         // "Default" tab on a named profile's login.
+        let mut cleared_account_vars = Vec::new();
         if let Some(home) = dirs_home() {
             for key in crate::profiles::inherited_account_vars_to_clear(
                 &home,
@@ -1719,14 +1720,46 @@ impl PtyManager {
                 &extra_env,
             ) {
                 cmd.env_remove(key);
+                cleared_account_vars.push(key);
             }
         }
+        // A Claude Code agent tab asks for its own IDE server (claude_ide.rs).
+        // Only a desktop-owned terminal gets one: the server runs here, and a
+        // PTY Canopy Remote or a micro-task owns has nobody to show a diff to.
+        // Resolved before the env loop moves `extra_env`, because the lock has
+        // to land in the CLAUDE_CONFIG_DIR this child will actually have.
+        let claude_ide_root = extra_env
+            .iter()
+            .find(|(k, _)| k == CLAUDE_IDE_MARKER)
+            .map(|(_, root)| root.clone())
+            .filter(|_| kind == SessionKind::Desktop);
+        let claude_lock_dir = claude_ide_root.as_ref().and_then(|_| {
+            crate::claude_ide::lock_dir(
+                extra_env
+                    .iter()
+                    .find(|(k, _)| k == "CLAUDE_CONFIG_DIR")
+                    .map(|(_, v)| v.as_str()),
+                std::env::var("CLAUDE_CONFIG_DIR").ok(),
+                cleared_account_vars.contains(&"CLAUDE_CONFIG_DIR"),
+                dirs_home().as_deref(),
+            )
+        });
         let caller_set_aider_read = extra_env.iter().any(|(k, _)| k == "AIDER_READ");
         let marks_omp_task = extra_env.iter().any(|(k, _)| k == OMP_TASK_MARKER);
+        // Settings → Agents → "Keep agent CLIs up to date" switched off: the
+        // CLIs that update themselves (claude, grok, agy) are told not to.
+        // Before the caller's own variables, so an explicit launch env wins.
+        for (k, v) in crate::cli_update::native_update_env() {
+            cmd.env(k, v);
+        }
+        let grok_switches = grok_foreign_hook_env(
+            |key| extra_env.iter().any(|(k, _)| k == key),
+            |key| std::env::var_os(key).is_some(),
+        );
         for (k, v) in extra_env {
             if matches!(
                 k.as_str(),
-                "CANOPY_RUN_ID" | "CANOPY_ATTEMPT_ID" | OMP_TASK_MARKER
+                "CANOPY_RUN_ID" | "CANOPY_ATTEMPT_ID" | OMP_TASK_MARKER | CLAUDE_IDE_MARKER
             ) {
                 continue;
             }
@@ -1743,6 +1776,9 @@ impl PtyManager {
         // #5" from another's — which silently binds one agent's digest to another's
         // terminal in the panel. This tag makes the pairing unambiguous.
         cmd.env("CANOPY_INSTANCE", instance_token());
+        for (key, value) in grok_switches {
+            cmd.env(key, value);
+        }
         // Aider has no MCP client or system-prompt hook. Its documented
         // AIDER_READ channel adds a read-only conventions file without
         // creating a fake opening user turn. Scope it to Canopy's PTYs and
@@ -1805,6 +1841,36 @@ impl PtyManager {
                 cmd.env("CANOPY_CTX_TOKEN", token);
             }
         }
+        // The IDE server is bound before the child exists so its port is in
+        // the child's environment from the first instruction, and it keeps
+        // that port and token for the PTY's whole life: the CLI reconnects
+        // only with the credentials it cached. Best-effort — a terminal that
+        // cannot get a server still runs Claude, just without the editor link.
+        let claude_ide = claude_ide_root
+            .zip(claude_lock_dir)
+            .and_then(|(root, lock_dir)| {
+                let ide = app.try_state::<crate::claude_ide::ClaudeIde>()?;
+                let root = if root.trim().is_empty() {
+                    cwd.clone()
+                } else {
+                    root
+                };
+                match ide.open(id, &root, &lock_dir, std::process::id()) {
+                    Ok((launch, serve)) => {
+                        tauri::async_runtime::spawn(serve);
+                        Some(launch)
+                    }
+                    Err(e) => {
+                        log::warn!("{e}");
+                        None
+                    }
+                }
+            });
+        if let Some(launch) = &claude_ide {
+            for (key, value) in launch.env() {
+                cmd.env(key, value);
+            }
+        }
         cmd.cwd(&cwd);
 
         // Platform containment is prepared before spawn. A supported backend
@@ -1814,11 +1880,19 @@ impl PtyManager {
         let prepared_containment =
             if let Some(containment) = app.try_state::<crate::containment::ContainmentManager>() {
                 let host = host.expect("the production app manages both governor and containment");
-                Some(containment.prepare(
-                    id,
-                    crate::governor::base_allowance(host.total_bytes),
-                    &mut cmd,
-                )?)
+                Some(
+                    containment
+                        .prepare(
+                            id,
+                            crate::governor::base_allowance(host.total_bytes),
+                            &mut cmd,
+                        )
+                        .inspect_err(|_| {
+                            if let Some(ide) = app.try_state::<crate::claude_ide::ClaudeIde>() {
+                                ide.close(id);
+                            }
+                        })?,
+                )
             } else {
                 None
             };
@@ -1832,6 +1906,9 @@ impl PtyManager {
         let retire = || {
             if let Some(ctx) = app.try_state::<crate::context::ContextBridge>() {
                 ctx.retire_agent(id);
+            }
+            if let Some(ide) = app.try_state::<crate::claude_ide::ClaudeIde>() {
+                ide.close(id);
             }
         };
         let mut child = match pair.slave.spawn_command(cmd) {
@@ -2120,6 +2197,10 @@ impl PtyManager {
                     // against every other agent until a human noticed the row
                     // and pressed Release.
                     crate::context::release_claims_for_pty(&app, session.id);
+                    // Its Claude Code IDE server and lock go with it.
+                    if let Some(ide) = app.try_state::<crate::claude_ide::ClaudeIde>() {
+                        ide.close(session.id);
+                    }
                     let event = PtyExit {
                         id: session.id,
                         session_generation: session.session_generation,
@@ -2699,9 +2780,42 @@ fn canopy_aider_context(
     path.is_file().then_some(path)
 }
 
+/// Grok scans `~/.claude/settings.json` and `~/.cursor/hooks.json` for hooks
+/// by default, and Canopy installs its own Claude and Cursor hooks in exactly
+/// those files. Left alone, a grok session in a Canopy terminal runs
+/// `canopy-hook --agent claude` (and `--agent cursor`) beside its native
+/// `--agent grok` hooks, so its events are stamped as another CLI's and fire
+/// twice. These are grok's documented per-vendor switches (`[compat.claude]
+/// hooks` / `[compat.cursor] hooks`, env > config.toml > default); verified
+/// with `grok inspect --json` on grok 1.0.46, where `=0` turns each Claude hook
+/// to `compatibilityStatus: "disabled"`. Only hooks: grok already dedupes
+/// Canopy's MCP server by name (its config.toml entry wins), and turning off
+/// the MCP scan would also hide the user's other Claude servers from grok.
+/// Scoped to Canopy's PTYs; no other CLI reads these keys.
+const GROK_FOREIGN_HOOK_SWITCHES: &[(&str, &str)] = &[
+    ("GROK_CLAUDE_HOOKS_ENABLED", "0"),
+    ("GROK_CURSOR_HOOKS_ENABLED", "0"),
+];
+
+/// The grok compatibility switches to export, skipping any the caller or the
+/// user's own environment already set — an explicit choice survives.
+fn grok_foreign_hook_env(
+    caller_set: impl Fn(&str) -> bool,
+    inherited: impl Fn(&str) -> bool,
+) -> Vec<(&'static str, &'static str)> {
+    GROK_FOREIGN_HOOK_SWITCHES
+        .iter()
+        .copied()
+        .filter(|(key, _)| !caller_set(key) && !inherited(key))
+        .collect()
+}
+
 /// Env key the frontend sets on an omp task terminal (see projects.ts
 /// `unattendedEnv`). Consumed here, never passed through to the shell.
 const OMP_TASK_MARKER: &str = "CANOPY_OMP_TASK_OVERLAY";
+/// A Claude Code tab's request for an IDE server (claude_ide.rs), consumed
+/// like the omp marker above.
+const CLAUDE_IDE_MARKER: &str = crate::claude_ide::LAUNCH_MARKER;
 
 /// Canopy's omp task overlay, only when it is actually on disk.
 fn canopy_omp_task_overlay(home: Option<&str>) -> Option<std::path::PathBuf> {
@@ -2824,6 +2938,27 @@ mod tests {
         std::fs::remove_file(path).unwrap();
         std::fs::remove_dir(home.join(".canopy")).unwrap();
         std::fs::remove_dir(home).unwrap();
+    }
+
+    #[test]
+    fn grok_in_a_canopy_terminal_skips_canopys_claude_and_cursor_hooks() {
+        let none = |_: &str| false;
+        assert_eq!(
+            grok_foreign_hook_env(none, none),
+            vec![
+                ("GROK_CLAUDE_HOOKS_ENABLED", "0"),
+                ("GROK_CURSOR_HOOKS_ENABLED", "0")
+            ]
+        );
+        // A value the caller passed, or the user exported, is theirs.
+        assert_eq!(
+            grok_foreign_hook_env(|k| k == "GROK_CLAUDE_HOOKS_ENABLED", none),
+            vec![("GROK_CURSOR_HOOKS_ENABLED", "0")]
+        );
+        assert_eq!(
+            grok_foreign_hook_env(none, |k| k == "GROK_CURSOR_HOOKS_ENABLED"),
+            vec![("GROK_CLAUDE_HOOKS_ENABLED", "0")]
+        );
     }
 
     #[test]
@@ -3108,6 +3243,106 @@ mod tests {
             "detached PTY never ran its command with the given env"
         );
         assert!(tail.contains("DETACHED_1"), "tail was: {tail}");
+    }
+
+    #[test]
+    fn a_claude_tab_gets_its_ide_server_in_env_and_lock_and_loses_both_on_exit() {
+        use tauri::Manager;
+        struct Quiet;
+        impl crate::claude_ide::IdeUi for Quiet {
+            fn emit(&self, _: crate::claude_ide::UiEvent) {}
+        }
+        let app = tauri::test::mock_app();
+        app.manage(crate::claude_ide::ClaudeIde::new(std::sync::Arc::new(
+            Quiet,
+        )));
+        let config = std::env::temp_dir().join(format!("canopy-pty-ide-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&config);
+        let env = |root: &str| {
+            Some(vec![
+                (
+                    "CLAUDE_CONFIG_DIR".to_string(),
+                    config.to_string_lossy().to_string(),
+                ),
+                (CLAUDE_IDE_MARKER.to_string(), root.to_string()),
+            ])
+        };
+        let probe = "echo \"IDE=${CLAUDE_CODE_SSE_PORT:-none}:${CLAUDE_CODE_IDE_SKIP_AUTO_INSTALL:-none}:${CANOPY_CLAUDE_IDE:-unset}:END\"; sleep 20";
+        let pm = PtyManager::default();
+        let renderer = pm.register_renderer();
+        let desktop = pm
+            .spawn_bound(
+                app.handle().clone(),
+                120,
+                40,
+                Some("/tmp".into()),
+                None,
+                None,
+                Some(RunSpec::Shell(probe.into())),
+                SessionKind::Desktop,
+                Some(DesktopSink {
+                    renderer_generation: renderer.generation,
+                    channel: Channel::new(|_| Ok(())),
+                }),
+                env("/w/app"),
+                None,
+                None,
+                None,
+            )
+            .expect("desktop spawn");
+        assert!(wait_for(&pm, desktop.id, ":END", Duration::from_secs(8)));
+        let tail = String::from_utf8_lossy(&pm.scrollback_tail(desktop.id, 64 * 1024).unwrap())
+            .into_owned();
+        let line = tail
+            .lines()
+            .find(|l| l.starts_with("IDE="))
+            .expect("probe line")
+            .to_string();
+        let port: u16 = line["IDE=".len()..]
+            .split(':')
+            .next()
+            .unwrap()
+            .parse()
+            .expect("a port");
+        // The marker is consumed; the child sees only the CLI's variables.
+        assert!(line.ends_with(":1:unset:END"), "{line}");
+        // The lock is in the PTY's own CLAUDE_CONFIG_DIR, naming the component.
+        let lock_path = config.join("ide").join(format!("{port}.lock"));
+        let lock: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&lock_path).unwrap()).unwrap();
+        assert_eq!(lock["workspaceFolders"], serde_json::json!(["/w/app"]));
+        assert_eq!(lock["pid"], std::process::id());
+
+        // A PTY no desktop tab owns gets nothing, marker or not.
+        let detached = pm
+            .spawn(
+                app.handle().clone(),
+                120,
+                40,
+                Some("/tmp".into()),
+                None,
+                None,
+                Some(RunSpec::Shell(probe.into())),
+                SessionKind::Detached,
+                None,
+                env("/w/app"),
+                None,
+            )
+            .expect("detached spawn");
+        assert!(wait_for(&pm, detached.id, ":END", Duration::from_secs(8)));
+        let tail = String::from_utf8_lossy(&pm.scrollback_tail(detached.id, 64 * 1024).unwrap())
+            .into_owned();
+        assert!(tail.contains("IDE=none:none:unset:END"), "{tail}");
+        assert_eq!(std::fs::read_dir(config.join("ide")).unwrap().count(), 1);
+
+        let _ = pm.kill(detached.id);
+        let _ = pm.kill(desktop.id);
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while lock_path.exists() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        assert!(!lock_path.exists(), "the lock must go with the terminal");
+        let _ = std::fs::remove_dir_all(&config);
     }
 
     #[test]

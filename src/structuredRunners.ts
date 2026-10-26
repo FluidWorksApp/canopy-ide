@@ -64,7 +64,21 @@ export interface StructuredRunner {
   };
   args(o: StructuredRunnerLaunch): string[];
   resumeArgs(o: StructuredRunnerLaunch): string[];
+  /** Environment every session of this CLI is started with, under the
+   *  caller's own `env` (an explicit caller value wins). */
+  sessionEnv?: readonly (readonly [string, string])[];
 }
+
+/** Claude's permission mode when a caller left it empty. From 2.1.302 a bare
+ *  `claude -p` already starts in Manual (anything needing approval is denied
+ *  unless a PermissionRequest hook or prompt tool answers), so naming it keeps
+ *  today's behaviour while making every launch say what it runs under. */
+export const CLAUDE_DEFAULT_PERMISSION_MODE = "manual";
+
+/** Claude Code's SDK file checkpointing, which makes each prompt's replayed
+ *  uuid a `--rewind-files` target. Verified live against 2.1.310 on
+ *  2026-10-26: without it the rewind fails "File rewinding is not enabled". */
+export const CLAUDE_FILE_CHECKPOINT_ENV = "CLAUDE_CODE_ENABLE_SDK_FILE_CHECKPOINTING";
 
 export function permissionArgs(
   policy: Pick<StructuredRunnerPolicy, "permissionMode" | "allowedTools" | "disallowedTools">,
@@ -82,13 +96,23 @@ export function permissionArgs(
   ];
 }
 
+/** Claude's permission flags, never without an explicit `--permission-mode`. */
+export function claudePermissionArgs(
+  policy: Pick<StructuredRunnerPolicy, "permissionMode" | "allowedTools" | "disallowedTools">,
+): string[] {
+  return permissionArgs({
+    ...policy,
+    permissionMode: policy.permissionMode || CLAUDE_DEFAULT_PERMISSION_MODE,
+  });
+}
+
 const codexMode = (authority: StructuredRunnerAuthority): string =>
   authority === "workspace-write" ? "workspace-write" : "read-only";
 
 /** Authority for `codex exec`, where it is a first-class flag.
  *
  *  `-s/--sandbox <read-only|workspace-write|danger-full-access>`, verified
- *  against `codex exec --help` (0.147.0) on 2026-08-09. Never the third value,
+ *  against `codex exec --help` (0.147.0 on 2026-08-09; 0.162.1 on 2026-10-26). Never the third value,
  *  and never
  *  `--dangerously-bypass-approvals-and-sandbox`: a task Canopy launched
  *  unattended is the last thing that should be running outside the sandbox. */
@@ -181,19 +205,24 @@ export function codexResumeSandbox(
   ];
 }
 
-/** Claude print/resume argv, re-verified against Claude Code 2.1.226's local
- *  `--help` on 2026-08-09. Claude has no OS workspace boundary equivalent to
- *  Codex's sandbox: allowed/disallowed tool flags govern which tools may be
- *  attempted, but they do not confine Edit/Write paths. The existing Bash
+/** Claude print/resume argv, re-verified against Claude Code 2.1.310's local
+ *  `--help` on 2026-10-26 (first verified at 2.1.226 on 2026-08-09). Every
+ *  flag below, and `--permission-mode`/`--allowedTools`/`--disallowedTools`,
+ *  is still listed. Since 2.1.302 `-p` defaults to Manual mode; every caller
+ *  passes an explicit permissionMode, so that change does not reach Build.
+ *  The checkpoint path — `--replay-user-messages` plus the file-checkpoint
+ *  env — was exercised live the same day. Claude has no OS workspace boundary
+ *  equivalent to Codex's sandbox: allowed/disallowed tool flags govern which
+ *  tools may be attempted, but they do not confine Edit/Write paths. The existing Bash
  *  destructive-command hook is a separate safety gate, not filesystem
  *  containment. */
 export const CLAUDE_RUNNER: StructuredRunner = {
   tier: "structured",
   dialect: "claude",
   verification: {
-    cliVersion: "2.1.226",
-    checkedOn: "2026-08-09",
-    source: "claude --help",
+    cliVersion: "2.1.310",
+    checkedOn: "2026-10-26",
+    source: "claude --help; live stream-json run with --replay-user-messages and --rewind-files",
     flags: {
       structuredJson: true,
       systemPrompt: true,
@@ -203,8 +232,12 @@ export const CLAUDE_RUNNER: StructuredRunner = {
     },
     caveats: [
       "No OS-backed workspace boundary; Edit/Write paths are not confined by the runner flags.",
+      "--permission-mode is always passed (manual when the caller names none): 2.1.302+ defaults -p to Manual.",
+      "Replayed prompts carry the uuid --rewind-files takes; native rewind covers Write/Edit/NotebookEdit only.",
     ],
   },
+  // Turns each prompt's replayed uuid into a restorable checkpoint.
+  sessionEnv: [[CLAUDE_FILE_CHECKPOINT_ENV, "true"]],
   args: (o) => [
     "-p",
     "--input-format",
@@ -214,13 +247,15 @@ export const CLAUDE_RUNNER: StructuredRunner = {
     "--include-partial-messages",
     // Required by Claude whenever print mode emits stream-json.
     "--verbose",
+    // Echo each prompt back with its uuid: the turn's checkpoint id.
+    "--replay-user-messages",
     "--session-id",
     o.policy.sessionId,
     "--append-system-prompt",
     o.policy.systemPromptAppend,
     ...(o.additionalDirectories ?? []).flatMap((dir) => ["--add-dir", dir]),
     ...(o.policy.model ? ["--model", o.policy.model] : []),
-    ...permissionArgs(o.policy),
+    ...claudePermissionArgs(o.policy),
   ],
   resumeArgs: (o) => [
     "-p",
@@ -230,18 +265,23 @@ export const CLAUDE_RUNNER: StructuredRunner = {
     "stream-json",
     "--include-partial-messages",
     "--verbose",
+    "--replay-user-messages",
     "--resume",
     o.policy.sessionId,
     "--append-system-prompt",
     o.policy.systemPromptAppend,
     ...(o.additionalDirectories ?? []).flatMap((dir) => ["--add-dir", dir]),
     ...(o.policy.model ? ["--model", o.policy.model] : []),
-    ...permissionArgs(o.policy),
+    ...claudePermissionArgs(o.policy),
   ],
 };
 
-/** `codex exec`, re-verified against codex-cli 0.147.0's local `exec --help`
- *  and `exec resume --help` on 2026-08-09.
+/** `codex exec`, re-verified against codex-cli 0.162.1's local `exec --help`
+ *  and `exec resume --help` on 2026-10-26 (first verified at 0.147.0 on
+ *  2026-08-09): `--json`, `--skip-git-repo-check`, `-C`, `--add-dir`, `-m`,
+ *  `-s` on exec; resume still rejects `-s` ("unexpected argument"); and the
+ *  three `-c` keys used below are accepted under `--strict-config`, which
+ *  refuses an unknown key.
  *
  *  No permission flags, and not for want of looking: Claude's `--allowedTools`
  *  has no counterpart here. Codex draws the line with the sandbox instead of a
@@ -259,8 +299,8 @@ export const CODEX_RUNNER: StructuredRunner = {
   tier: "oneshot",
   dialect: "codex",
   verification: {
-    cliVersion: "0.147.0",
-    checkedOn: "2026-08-09",
+    cliVersion: "0.162.1",
+    checkedOn: "2026-10-26",
     source: "codex exec --help; codex exec resume --help",
     flags: {
       structuredJson: true,

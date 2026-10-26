@@ -137,6 +137,50 @@ describe("ResearchView", () => {
     expect(screen.queryByRole("button", { name: "Implement this" })).toBeNull();
   });
 
+  it("offers to spec a finding before it is built, and says when it has been", async () => {
+    mockCommands({ research_get: () => detail() });
+    const onWriteSpec = vi.fn();
+    const { unmount } = render(
+      <ResearchView
+        projectId="p1"
+        researchId="0007-index-staleness"
+        onImplement={vi.fn()}
+        onWriteSpec={onWriteSpec}
+        installed={{ claude: true }}
+      />,
+    );
+    await userEvent.click(await screen.findByRole("button", { name: "Write spec" }));
+    expect(onWriteSpec).toHaveBeenCalledWith(expect.objectContaining({ id: "0007-index-staleness" }));
+    unmount();
+
+    // Once a docs/designs spec is linked, the action re-runs its review and the
+    // implement note says the build follows the spec.
+    mockCommands({
+      research_get: () => detail({
+        links: {
+          tickets: [],
+          prs: [],
+          branches: [],
+          files: ["/repo/docs/designs/index-staleness.md"],
+          supersedes: [],
+          superseded_by: null,
+        },
+      }),
+    });
+    render(
+      <ResearchView
+        projectId="p1"
+        researchId="0007-index-staleness"
+        onImplement={vi.fn()}
+        onWriteSpec={onWriteSpec}
+        installed={{ claude: true }}
+      />,
+    );
+    expect(await screen.findByRole("button", { name: "Review spec" })).toBeInTheDocument();
+    expect(screen.getByText(/building against the spec/)).toBeInTheDocument();
+    expect(screen.getByText("design spec")).toBeInTheDocument();
+  });
+
   it("offers one Raise PR link for an implementation left in a local commit", async () => {
     mockCommands({
       research_get: () =>

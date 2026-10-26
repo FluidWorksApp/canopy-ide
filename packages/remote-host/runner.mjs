@@ -17,9 +17,19 @@ import {gitIdentityEnvironment} from './git-identity.mjs';
 import { analyze } from './language.mjs';
 import {harnessEnvironment} from './runner-harness.mjs';
 import {AgentBrowser} from './agent-browser.mjs';
+import {claudeIde as defaultClaudeIde, lockDir as claudeIdeLockDir} from './claude-ide.mjs';
+import {CLIPBOARD_BIN, installClipboardShims} from './clipboard-shims.mjs';
 const exec = promisify(execFile);
 const ROOT = '/workspace';
 const OUTPUT_CAP = 512 * 1024;
+
+/** The self-updating CLIs' "no background update" switches, which the image
+ *  sets (Dockerfile ENV) so agents.lock.json's pinned builds stay the ones
+ *  that run. Sessions get an explicit env rather than the runner's, so these
+ *  are carried across by name — only when the image actually set them. */
+export const PINNED_CLI_ENV_KEYS = ['DISABLE_AUTOUPDATER', 'GROK_DISABLE_AUTOUPDATER', 'AGY_CLI_DISABLE_AUTO_UPDATE'];
+export const pinnedCliEnv = environment => Object.fromEntries(
+  PINNED_CLI_ENV_KEYS.filter(key => typeof environment?.[key] === 'string').map(key => [key, environment[key]]));
 
 export async function scopedPath(value, writing = false) {
   if (typeof value !== 'string' || value.includes('\0')) throw new Error('Invalid path');
@@ -36,7 +46,7 @@ export async function scopedPath(value, writing = false) {
   return resolved;
 }
 
-export function createRunner({ secret, spawnPty, accounts = [], workspaceId = 'workspace', historyFile = null, environment = process.env, browser = null }) {
+export function createRunner({ secret, spawnPty, accounts = [], workspaceId = 'workspace', historyFile = null, environment = process.env, browser = null, claudeIde = defaultClaudeIde }) {
   if (!secret || secret.length < 32) throw new Error('Runner secret required');
   const sessions = new Map();
   const receipts = new Map();
@@ -66,6 +76,11 @@ export function createRunner({ secret, spawnPty, accounts = [], workspaceId = 'w
   const broadcast = (session, message) => {
     for (const socket of sockets) if (socket.sessionId === session.id) sendBounded(socket, message);
   };
+  // Claude Code's IDE protocol (claude-ide.mjs): what the desktop has to act
+  // on travels the session's own terminal stream, so it reaches exactly the
+  // windows showing that terminal.
+  claudeIde.emit = event => { const session = sessions.get(event.ptyId); if (session) broadcast(session, { t: 'ide', event }); };
+  claudeIde.lastInput = id => sessions.get(id)?.lastInputAt ?? 0;
   async function spawnSession(args) {
     await ready;
     if (typeof args.requestId !== 'string' || !/^[a-zA-Z0-9:-]{8,128}$/.test(args.requestId)) throw new Error('Spawn request id required');
@@ -78,6 +93,7 @@ export function createRunner({ secret, spawnPty, accounts = [], workspaceId = 'w
     if (typeof args.command !== 'string' || !args.command.trim() || args.command.length > 8192) throw new Error('Command required');
     if (args.kind && !['terminal', 'build'].includes(args.kind)) throw new Error('Invalid session kind');
     if (args.accountId && !accounts.includes(args.accountId)) throw new Error('Account not granted to workspace');
+    const ideRequest = args.claudeIde == null ? null : claudeIdeRequest(args.claudeIde);
     const gitEnvironment=args.gitIdentity?gitIdentityEnvironment(args.gitIdentity):{};
     const harnessEnv=harnessEnvironment(args.harness);
     // Reserve before awaiting credential I/O, so a retry cannot race a spawn.
@@ -105,10 +121,23 @@ export function createRunner({ secret, spawnPty, accounts = [], workspaceId = 'w
       const sharedBin=args.sharedAgents?await prepareSharedAgentLaunch(accountHome,args.requestId,args.sharedAgents):null;
       const scratchEnv=await scratchSessionEnv(args.requestId,environment);
       const cols = 120, rows = 40;
-      const pty = spawnPty('/bin/bash', ['-lc', 'export PATH="'+(sharedBin?sharedBin+':':'')+'/home/agent/.local/bin:$PATH" NPM_CONFIG_PREFIX=/home/agent/.local; '+args.command], { name: 'xterm-256color', cols, rows, cwd: ROOT,
+      // A Claude Code tab gets its IDE server before it starts: the CLI looks
+      // for the lock only during its first 30 s. A server that cannot start
+      // costs the tab its IDE features, never the terminal.
+      let ide = null;
+      if (ideRequest) {
+        try { ide = await claudeIde.open(id, { root: ideRequest.root, lockDir: claudeIdeLockDir(ideRequest.configDir, accountHome) }); }
+        catch (error) { console.warn(`Claude IDE server for session ${id} unavailable: ${error.message}`); }
+      }
+      // Clipboard shims first, so a CLI's `xclip` copy reaches the desktop as
+      // OSC 52 on the terminal recorded here (clipboard-shims.mjs).
+      let pty;
+      try {
+      pty = spawnPty('/bin/bash', ['-lc', 'export PATH="'+(sharedBin?sharedBin+':':'')+CLIPBOARD_BIN+':/home/agent/.local/bin:$PATH" NPM_CONFIG_PREFIX=/home/agent/.local; canopy_tty=$(tty 2>/dev/null) && export CANOPY_TTY="$canopy_tty"; unset canopy_tty; '+args.command], { name: 'xterm-256color', cols, rows, cwd: ROOT,
         env: { CANOPY:'1', CANOPY_PTY:String(id), CANOPY_INSTANCE:'remote-'+workspaceId, PATH: process.env.PATH, HOME: accountHome, USER: 'agent', NPM_CONFIG_PREFIX:'/home/agent/.local', TERM: 'xterm-256color',
           CANOPY_BROWSER_QUEUE:'/home/agent/.canopy/browser-requests',BROWSER:'/opt/canopy/open-url.mjs',GH_CANOPY_BROWSER_QUEUE:'/home/agent/.canopy/browser-requests', LANG: 'C.UTF-8', DISPLAY: ':99', CODEX_HOME: `${accountHome}/.codex`,
-          CLAUDE_CONFIG_DIR: `${accountHome}/.claude`, CANOPY_WORKSPACE_ID: workspaceId, CANOPY_SESSION_REQUEST_ID:args.requestId,...scratchEnv,...gitEnvironment,...harnessEnv } });
+          CLAUDE_CONFIG_DIR: `${accountHome}/.claude`, CANOPY_WORKSPACE_ID: workspaceId, CANOPY_SESSION_REQUEST_ID:args.requestId,...pinnedCliEnv(environment),...scratchEnv,...gitEnvironment,...harnessEnv,...ide?.env } });
+      } catch (error) { claudeIde.close(id); throw error; }
       const session = { id, pty, kind: args.kind ?? 'terminal', title: args.command.slice(0, 80), cols, rows, accountId: args.accountId ?? null, output: Buffer.alloc(0), exitCode: null };
       sessions.set(id, session);
       pty.onData(text => {
@@ -117,7 +146,7 @@ export function createRunner({ secret, spawnPty, accounts = [], workspaceId = 'w
           : Buffer.concat([session.output.subarray(Math.max(0, session.output.length + chunk.length - OUTPUT_CAP)), chunk]);
         broadcast(session, { t: 'data', b64: chunk.toString('base64') });
       });
-      pty.onExit(event => { session.exitCode = event.exitCode; broadcast(session, { t: 'exit', exitCode: event.exitCode }); void persist().catch(() => {}); });
+      pty.onExit(event => { claudeIde.close(id); session.exitCode = event.exitCode; broadcast(session, { t: 'exit', exitCode: event.exitCode }); void persist().catch(() => {}); });
       resolve(summarize(session));
     } catch (error) { reject(error); } finally { pendingSpawns--; }
     return result;
@@ -202,7 +231,7 @@ export function createRunner({ secret, spawnPty, accounts = [], workspaceId = 'w
         // Service delivery names the child it addressed; a replaced or exited
         // terminal must not receive a message meant for its predecessor.
         if (args.expectPid != null && (!Number.isSafeInteger(args.expectPid) || args.expectPid !== session.pty.pid)) return json(response, 409, { error: 'Terminal generation changed', pid: session.pty.pid ?? null });
-        if (match[2] === 'input' || match[2] === 'input-binary') { if (typeof args.data !== 'string') throw new Error('Invalid input'); session.pty.write(decodeTerminalInput(args.data,match[2]==='input-binary'?'latin1':undefined)); }
+        if (match[2] === 'input' || match[2] === 'input-binary') { if (typeof args.data !== 'string') throw new Error('Invalid input'); session.pty.write(decodeTerminalInput(args.data,match[2]==='input-binary'?'latin1':undefined)); session.lastInputAt = Date.now(); }
         if (match[2] === 'resize') {
           if (!Number.isInteger(args.cols) || args.cols < 1 || args.cols > 512 || !Number.isInteger(args.rows) || args.rows < 1 || args.rows > 256) throw new Error('Invalid geometry');
           session.pty.resize(args.cols, args.rows); session.cols = args.cols; session.rows = args.rows;
@@ -223,6 +252,7 @@ export function createRunner({ secret, spawnPty, accounts = [], workspaceId = 'w
       wss.handleUpgrade(request, socket, head, ws => {
         ws.sessionId = session.id; sockets.add(ws);
         sendBounded(ws, { t: 'snapshot', b64: session.output.toString('base64'), ...summarize(session) });
+        for (const event of claudeIde.replay(session.id)) sendBounded(ws, { t: 'ide', event });
         ws.on('close', () => sockets.delete(ws));
       });
     } else if (route === '/desktop/ws' && desktop) {
@@ -237,12 +267,25 @@ export function createRunner({ secret, spawnPty, accounts = [], workspaceId = 'w
       });
     } else socket.destroy();
   });
-  server.on('close', () => { for (const ws of sockets) ws.close(); void browser?.close(); });
+  server.on('close', () => { for (const ws of sockets) ws.close(); claudeIde.closeAll(); void browser?.close(); });
   return server;
+}
+
+/** A launch's request for a Claude Code IDE server: the folder the session is
+ *  scoped to and, when the launch names a profile, its CLAUDE_CONFIG_DIR. */
+function claudeIdeRequest(value) {
+  const root = value?.root, configDir = value?.configDir;
+  const inside = typeof root === 'string' && !root.includes('\0') && (root === ROOT || root.startsWith(`${ROOT}/`)) && !root.split('/').includes('..');
+  if (!inside) throw new Error('Claude IDE folder must be in the workspace');
+  if (configDir != null && (typeof configDir !== 'string' || configDir.length > 4096)) throw new Error('Invalid Claude config directory');
+  return { root, configDir: configDir ?? null };
 }
 
 if (process.argv[1] === new URL(import.meta.url).pathname) {
   Object.assign(process.env,await initializeScratch());
+  // Terminal clipboard shims. A failure leaves terminals with the image's own
+  // clipboard tools, which is how they worked before.
+  await installClipboardShims().catch(error => console.warn(`Clipboard shims unavailable: ${error.message}`));
   startNativeServer();
   const { spawn } = await import('node-pty');
   createRunner({ browser: new AgentBrowser({ home: '/home/agent' }), secret: process.env.CANOPY_RUNNER_TOKEN, spawnPty: spawn, accounts: (process.env.CANOPY_ACCOUNTS ?? '').split(',').filter(Boolean), workspaceId: process.env.CANOPY_WORKSPACE_ID, historyFile: '/home/agent/.canopy/session-history.json' })

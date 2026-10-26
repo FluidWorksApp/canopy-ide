@@ -1,6 +1,6 @@
 // Typed feature API shared by IDE clients. Host adapters carry commands,
 // events and channels; native work (PTYs, LSP, files) remains in the Rust core.
-import { createChannel, invoke } from "./host";
+import { createChannel, invoke, invokeDesktop } from "./host";
 import { startRendererHeartbeat } from "./rendererHeartbeat";
 import { isRemoteHost, listen as hostListen, type UnlistenFn } from "./host";
 import type { HostEvent } from "./host/contract";
@@ -340,6 +340,11 @@ export const ptySetName = (id: number, name: string) =>
   invoke<string>("pty_set_name", { id, name });
 export const ptySetNameTheme = (theme: string) =>
   invoke<void>("pty_set_name_theme", { theme });
+/** The variables that switch self-updating CLIs' background updaters off
+ *  (empty = leave them alone), for every agent process the desktop starts.
+ *  Always the desktop: a remote workspace keeps its image's pinned CLIs. */
+export const cliSetNativeUpdateEnv = (env: [string, string][]) =>
+  invokeDesktop<void>("cli_set_native_update_env", { env });
 
 /** Spawn a detached PTY from an argv array, with no shell anywhere in the path.
  *  `argv[0]` is the program; every later element stays exactly one argument,
@@ -876,6 +881,39 @@ export interface AgentUiOp {
 }
 export const onAgentUi = (cb: (op: AgentUiOp) => void): Promise<UnlistenFn> =>
   listen<AgentUiOp>("agent:ui", (event) => cb(event.payload));
+
+/** Claude Code's IDE protocol (claude_ide.rs): what a Claude agent tab's CLI
+ *  needs from the window — a diff answered, diagnostics read off Monaco, its
+ *  connection coming and going. One event, discriminated by `kind`. */
+export const onClaudeIde = (
+  cb: (event: import("./claudeIde").ClaudeIdeEvent) => void,
+): Promise<UnlistenFn> =>
+  listen<import("./claudeIde").ClaudeIdeEvent>("claude-ide", (event) => cb(event.payload));
+/** Accept a Claude diff with the final contents (the user's edit, if any),
+ *  or reject it. Rejects when the CLI is no longer waiting — the user
+ *  answered in the terminal first. */
+export const claudeIdeResolveDiff = (
+  ptyId: number,
+  tabName: string,
+  accept: boolean,
+  contents?: string,
+) => invoke<void>("claude_ide_resolve_diff", { ptyId, tabName, accept, contents });
+/** The terminals whose CLI is attached right now, for a freshly loaded window
+ *  that missed their `connection` events. */
+export const claudeIdeConnections = () =>
+  invoke<{ ptyId: number; root: string }[]>("claude_ide_connections");
+export const claudeIdeReply = (requestId: number, data: unknown) =>
+  invoke<void>("claude_ide_reply", { requestId, data }).catch(() => {});
+/** Resolves with how many Claude sessions received the selection. */
+export const claudeIdeSelection = (path: string, params: unknown) =>
+  invoke<number>("claude_ide_selection", { path, params });
+/** Resolves with the terminal whose prompt got the mention. */
+export const claudeIdeAtMention = (opts: {
+  path: string;
+  lineStart?: number;
+  lineEnd?: number;
+  prefer?: number;
+}) => invoke<number>("claude_ide_at_mention", opts);
 
 /** Report one step of a mesh job to the terminal that submitted it: kept on
  *  the mesh under ref {kind: "job"} and announced in that terminal. Resolves
@@ -3738,6 +3776,104 @@ export interface AgentEdit {
 export const agentEdits = (repo: string | null, sessionId: string) =>
   invoke<AgentEdit[]>("agent_edits", { repo, sessionId });
 
+// ---------- turn rollback (src-tauri/src/turn_rollback.rs) ----------
+
+/** One hidden-ref snapshot of the whole working tree. */
+export interface TurnSnapRef {
+  ref: string;
+  commit: string;
+  tree: string;
+  ts_ms: number;
+}
+
+export interface TurnPoint {
+  n: number;
+  /** The tree as the turn started (UserPromptSubmit). */
+  start: TurnSnapRef | null;
+  /** The tree as the turn ended (Stop). */
+  end: TurnSnapRef | null;
+  prompt: string | null;
+  /** The start snapshot may already hold some of the turn's own edits. */
+  late: boolean;
+  /** Claude's native checkpoint id for this turn (headless sessions). */
+  native_uuid: string | null;
+}
+
+export interface TurnRestorePoint {
+  ref: string;
+  ts_ms: number;
+  target: string | null;
+}
+
+export interface TurnList {
+  /** False outside a git work tree — rollback needs git. */
+  git: boolean;
+  root: string | null;
+  shared: boolean;
+  peers: string[];
+  turns: TurnPoint[];
+  restores: TurnRestorePoint[];
+}
+
+export type TurnScope = "auto" | "session" | "all";
+
+export interface TurnChange {
+  path: string;
+  status: "add" | "modify" | "delete";
+}
+
+export interface TurnPreview {
+  changes: TurnChange[];
+  excluded: string[];
+  scoped: boolean;
+  shared: boolean;
+  patch: string;
+  truncated: boolean;
+}
+
+export interface TurnRestoreOutcome {
+  written: string[];
+  deleted: string[];
+  excluded: string[];
+  failed: string[];
+  redo_ref: string;
+  native: { attempted: boolean; ok: boolean; message: string };
+}
+
+export interface TurnSnapshotOutcome {
+  taken: boolean;
+  ref: string | null;
+  n: number | null;
+  late: boolean;
+  note: string | null;
+}
+
+export const turnSnapshot = (o: {
+  cwd: string;
+  sessionId: string;
+  kind: "start" | "end";
+  prompt?: string;
+  observedMs: number;
+}) => invoke<TurnSnapshotOutcome>("turn_snapshot", o);
+export const turnList = (cwd: string, sessionId: string) =>
+  invoke<TurnList>("turn_list", { cwd, sessionId });
+export const turnPreview = (
+  cwd: string,
+  sessionId: string,
+  target: string,
+  scope: TurnScope,
+) => invoke<TurnPreview>("turn_preview", { cwd, sessionId, target, scope });
+export const turnRestore = (o: {
+  cwd: string;
+  sessionId: string;
+  target: string;
+  scope: TurnScope;
+  claudeBin?: string | null;
+  nativeUuid?: string | null;
+}) => invoke<TurnRestoreOutcome>("turn_restore", o);
+export const turnNativeCheckpoint = (sessionId: string, uuid: string) =>
+  invoke<void>("turn_native_checkpoint", { sessionId, uuid });
+
 export const gitWorktrees = (repo: string) =>
   invoke<WorktreeInfo[]>("git_worktrees", { repo });
 export const gitWorktreeAdd = (
@@ -4876,6 +5012,12 @@ export const gitCloneCancel=(id:string)=>invoke('git_clone_cancel',{id});
 export const profilePrepareSession = (agent: string, sessionId: string, sourceProfile: string, targetProfile: string) => invoke<void>("profile_prepare_session", { agent, sessionId, sourceProfile, targetProfile });
 
 export const clipboardImagePng = () => invoke<string | null>("clipboard_image_png");
+/** Plain text onto the clipboard of the computer showing the IDE. Native, so it
+ *  needs no user gesture (an OSC 52 copy has none). Rejects off macOS; callers
+ *  fall back to the webview clipboard — see terminalClipboard.ts. */
+export const clipboardWriteText = (text: string) => invoke<void>("clipboard_write_text", { text });
+/** Plain text from that clipboard, for an explicit menu Paste. */
+export const clipboardReadText = () => invoke<string | null>("clipboard_read_text");
 
 /** Account transfer must wait for transcript writers to exit before copying. */
 export async function ptyStopAndWait(id: number): Promise<void> {

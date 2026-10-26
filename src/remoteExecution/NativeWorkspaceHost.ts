@@ -8,6 +8,7 @@ import {saveRemoteContextImage} from './saveContextImage';
 import {TerminalInput} from './terminalInput';
 import {canSwitchExecutionMode} from '../executionMode';
 import {remoteDiagnostic} from './remoteDiagnostic';
+import type {ClaudeIdeEvent} from '../claudeIde';
 
 export interface WorkspaceConnection { endpoint: string; token: string; workspaceId: string; workspaceName: string; scope?: 'view'|'drive'; clientId?: string; expiresAt?: string; credentialAccountKey?: string }
 type Args = Record<string, unknown>;
@@ -15,7 +16,7 @@ type Stream = { id:number; receivedSnapshot:boolean; pendingExit?:number; socket
 const LOCAL_UI = new Set(['js_log','watchdog_ack','watchdog_incidents','memory_info','selftest_config','set_shortcut_profile','notify_native','set_window_zoom','window_zoom','crash_pending','crash_clear','crash_upload','take_pending_crash','dictation_supported','remote_set_theme','remote_set_clis','remote_set_companion','remote_set_hibernated','remote_set_attention','execution_mode_get','execution_mode_set','execution_remote_get','execution_remote_set']);
 // The clipboard and microphone belong to the computer displaying the IDE.
 // Remote execution must not redirect their native services into the VM.
-for(const command of ['clipboard_image_png','clipboard_watch_set','clipboard_recent','clipboard_read','clipboard_forget','clipboard_clear','clipboard_status','dictation_models','dictation_status','dictation_download','dictation_delete_model','dictation_start','dictation_stop','dictation_cancel'])LOCAL_UI.add(command);
+for(const command of ['clipboard_image_png','clipboard_write_text','clipboard_read_text','clipboard_watch_set','clipboard_recent','clipboard_read','clipboard_forget','clipboard_clear','clipboard_status','dictation_models','dictation_status','dictation_download','dictation_delete_model','dictation_start','dictation_stop','dictation_cancel'])LOCAL_UI.add(command);
 // The Playwright extension token unlocks this computer's Chrome, which is the
 // one the desktop's Chrome bridge connects to; it never belongs in the VM.
 for(const command of ['chrome_extension_token_status','chrome_extension_token_set','chrome_extension_token_clear','chrome_extension_open_status'])LOCAL_UI.add(command);
@@ -41,6 +42,9 @@ export const isDesktopLocal=(command:string)=>LOCAL_UI.has(command);
 class WorkspaceChannel<T> implements HostChannel<T>{onmessage:(message:T)=>void=()=>{};}
 // Recovery reads share routes with background polls; they must not wait in that lane.
 const INTERACTIVE=1;
+/** claudeIde.ts CLAUDE_IDE_MARKER, spelled out so the host does not load the
+ *  IDE module's settings and harness graph before it is installed. */
+export const CLAUDE_IDE_MARKER='CANOPY_CLAUDE_IDE';
 const quote = (value: string) => `'${value.replaceAll("'", "'\\''")}'`;
 
 /** Immutable execution ownership for one renderer. Every execution/file request
@@ -227,6 +231,11 @@ export class NativeWorkspaceHost implements Host {
             if(message.t==='input-ack'){this.inputs.get(id)?.acknowledge(message.id,message.seq);return;}
             if(message.t==='input-error'){this.inputs.get(id)?.rejected(message.id,message.error);return;}
             if(message.t==='exit'){stream.pendingExit=message.exitCode;this.deliver(stream);return;}
+            // Claude Code's IDE server for this terminal runs on the VM
+            // (claude-ide.mjs); its UI events ride this stream. The pty id is
+            // this stream's, whatever the frame says.
+            // A view-only window cannot answer a diff, so it is not shown one.
+            if(message.t==='ide'){if(!this.readOnly&&message.event&&typeof message.event.kind==='string')this.emit('claude-ide',{...message.event,ptyId:id} as ClaudeIdeEvent);return;}
             if(!['snapshot','data'].includes(message.t))return;
             failures=0;
             const bytes=Uint8Array.from(atob(message.b64),c=>c.charCodeAt(0));
@@ -318,10 +327,16 @@ export class NativeWorkspaceHost implements Host {
       const env=(args.env??[]) as [string,string][];
       if(env.some(([key])=>!/^[_A-Za-z][_A-Za-z0-9]*$/.test(key)))throw Error('Invalid environment variable');
       const accountId=env.find(([key])=>key==='CANOPY_ACCOUNT_POOL')?.[1];
+      // A Claude Code tab's request for an IDE server (claudeIde.ts). The
+      // workspace serves it beside claude, so it travels as a request field,
+      // never as an env var the child would see; the lock follows the
+      // profile's config dir when the launch sets one.
+      const ideRoot=env.find(([key])=>key===CLAUDE_IDE_MARKER)?.[1];
+      const claudeIde=ideRoot?{root:ideRoot,configDir:env.find(([key])=>key==='CLAUDE_CONFIG_DIR')?.[1]??null}:undefined;
       const requested=Array.isArray(args.argv)?(args.argv as string[]).map(quote).join(' '):String(args.runCommand??args.command??args.shell??'/bin/bash');
       const requestId=crypto.randomUUID();
-      const commandLine=`cd ${quote(cwd)} && env ${[...env.filter(([key])=>!['CANOPY_ACCOUNT_POOL','CANOPY_SESSION_REQUEST_ID'].includes(key)),['CANOPY_SESSION_REQUEST_ID',requestId]].map(([key,val])=>quote(key+'='+val)).join(' ')} ${requested}`;
-      const session=await this.call<RemoteSession>('/sessions',{command:commandLine,kind:args.runCommand?'build':'terminal',accountId,requestId,projectId:args.projectId});
+      const commandLine=`cd ${quote(cwd)} && env ${[...env.filter(([key])=>!['CANOPY_ACCOUNT_POOL','CANOPY_SESSION_REQUEST_ID',CLAUDE_IDE_MARKER].includes(key)),['CANOPY_SESSION_REQUEST_ID',requestId]].map(([key,val])=>quote(key+'='+val)).join(' ')} ${requested}`;
+      const session=await this.call<RemoteSession>('/sessions',{command:commandLine,kind:args.runCommand?'build':'terminal',accountId,requestId,projectId:args.projectId,...(claudeIde?{claudeIde}:{})});
       if(Number(args.cols)>0 && Number(args.rows)>0){
         try{await this.call(`/sessions/${session.id}/resize`,{cols:args.cols,rows:args.rows});session.cols=Number(args.cols);session.rows=Number(args.rows);}
         catch(error){
@@ -355,7 +370,10 @@ export class NativeWorkspaceHost implements Host {
     else if(command==='pty_write'){await this.write(Number(args.id),String(args.data));}
     else if(command==='pty_resize'){await this.call(`/sessions/${args.id}/resize`,{cols:args.cols,rows:args.rows});value={cols:args.cols,rows:args.rows};}
     else if(command==='pty_kill'){await this.call(`/sessions/${args.id}/stop`,{});}
-    else if(['pty_set_name_theme'].includes(command))value=null;
+    else if(['pty_set_name_theme','cli_set_native_update_env'].includes(command))value=null;
+    // Answers to a Claude Code IDE server on the VM. A diagnostics reply has
+    // the CLI's 500 ms window to make, so it never queues behind polls.
+    else if(command.startsWith('claude_ide_'))value=await this.native(command,args,INTERACTIVE);
     else if(command==='pty_set_title'||command==='pty_set_name'){const key=command==='pty_set_name'?'name':'title';this.metadata[String(args.id)]={...this.metadata[String(args.id)],[key]:args[key]};await this.native('pty_metadata_set',{id:args.id,value:this.metadata[String(args.id)]});value=args[key];}
     else if(command==='pty_stats'&&this.readOnly)value=[];
     else if(command==='pty_stats'){

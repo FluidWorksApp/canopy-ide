@@ -6,7 +6,7 @@
 // attached panel carries the full CLI list. Flattening it would bury the
 // common case under seven rarely-picked options.
 import { AGENT_CLIS } from "./projects";
-import { getSettings } from "./settings";
+import { installedBrain } from "./brain";
 import type { MenuItem } from "./components/ContextMenu";
 import type { AgentTarget } from "./components/TicketsPanel";
 import { AgentIcon, AgentsIcon } from "./components/icons";
@@ -37,8 +37,7 @@ export function agentMenuItems(opts: {
 
   const installedClis = AGENT_CLIS.filter((c) => installed[c.bin]);
   // "default" only means something if that CLI is installed here.
-  const preferred =
-    (installedClis.find((c) => c.id === getSettings().defaultAgent) ?? installedClis[0])?.id ?? "";
+  const preferred = installedBrain((bin) => Boolean(installed[bin]))?.id ?? "";
   // Nothing detected on PATH: still list everything rather than an empty
   // panel — detection can lag a fresh install, and the launcher handles
   // installing them.

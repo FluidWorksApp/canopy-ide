@@ -204,6 +204,13 @@ const GLOBAL_REGISTRIES: &[Registry] = &[
         dialect: Dialect::Claude,
     },
     Registry {
+        agent: "omp",
+        label: "oh-my-pi",
+        rel: ".omp/agent/mcp.json",
+        key: "mcpServers",
+        dialect: Dialect::Claude,
+    },
+    Registry {
         agent: "windsurf",
         label: "Windsurf",
         rel: ".codeium/windsurf/mcp_config.json",

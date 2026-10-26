@@ -1565,6 +1565,51 @@ export function SettingsDialog({ onClose, initialTab = "appearance" }: SettingsD
                   />
                 </Item>
                 <Item
+                  name="CLI updates"
+                  desc="Keep the agent CLIs installed on this computer current. Remote workspaces keep the versions their image pins."
+                >
+                  <Checkbox
+                    checked={s.autoUpdateClis}
+                    onChange={(v) => patch({ autoUpdateClis: v })}
+                    label="Keep agent CLIs up to date automatically"
+                    hint={
+                      s.autoUpdateClis
+                        ? "Claude Code, Grok and Antigravity update themselves; Canopy updates the others about once a day, the way each was installed, and never while one is running."
+                        : "Canopy updates nothing, and asks Claude Code, Grok and Antigravity to stop updating themselves in agents started from now on."
+                    }
+                  />
+                </Item>
+                <Item
+                  name="Claude Code editor link"
+                  desc="Let Claude Code use Canopy as its IDE: diffs to review, your selection, and live diagnostics."
+                >
+                  <Checkbox
+                    checked={s.claudeIdeIntegration}
+                    onChange={(v) => patch({ claudeIdeIntegration: v })}
+                    label="Connect Claude Code to the editor"
+                    hint={
+                      s.claudeIdeIntegration
+                        ? "New Claude tabs open proposed edits as a diff here and see what you select. Running tabs keep their current setting."
+                        : "Claude uses Canopy's MCP editor tools instead. Running tabs keep their current setting."
+                    }
+                  />
+                </Item>
+                <Item
+                  name="Turn rollback"
+                  desc="Save a hidden snapshot of the checkout at every agent turn so you can undo a turn from the agent's tab."
+                >
+                  <Checkbox
+                    checked={s.turnRollback}
+                    onChange={(v) => patch({ turnRollback: v })}
+                    label="Snapshot each agent turn"
+                    hint={
+                      s.turnRollback
+                        ? "Claude Code turns in git checkouts get “Undo this turn” and “Back to here”. Your branches, index and commits are never touched."
+                        : "No new snapshots are taken. Ones already saved stay restorable until they age out."
+                    }
+                  />
+                </Item>
+                <Item
                   name="Memory monitoring prompts"
                   desc="Choose whether terminal memory warnings and allowance decisions appear while you work."
                 >

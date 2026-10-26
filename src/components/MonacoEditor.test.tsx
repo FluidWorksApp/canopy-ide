@@ -1,7 +1,7 @@
 import {render} from '@testing-library/react';import {expect,it,vi} from 'vitest';
 import {MonacoEditor} from './MonacoEditor';import type {monaco} from '../monaco-setup';
 const mocks=vi.hoisted(()=>({focus:vi.fn(),model:null as unknown,command:vi.fn(),selection:vi.fn()}));
-vi.mock('../monaco-setup',()=>({monaco:{KeyMod:{CtrlCmd:1},KeyCode:{KeyS:2,KeyA:4},editor:{create:()=>({setModel:(model:unknown)=>{mocks.model=model;},getModel:()=>mocks.model,focus:mocks.focus,setSelection:mocks.selection,addCommand:mocks.command,getPosition:()=>null,saveViewState:()=>null,restoreViewState:vi.fn(),updateOptions:vi.fn(),onDidChangeCursorSelection:()=>({dispose:vi.fn()}),dispose:vi.fn()})}}}));
+vi.mock('../monaco-setup',()=>({monaco:{KeyMod:{CtrlCmd:1,Alt:8},KeyCode:{KeyS:2,KeyA:4,KeyK:16},editor:{create:()=>({setModel:(model:unknown)=>{mocks.model=model;},getModel:()=>mocks.model,focus:mocks.focus,setSelection:mocks.selection,addCommand:mocks.command,getPosition:()=>null,getSelection:()=>null,addAction:()=>({dispose:vi.fn()}),saveViewState:()=>null,restoreViewState:vi.fn(),updateOptions:vi.fn(),onDidChangeCursorSelection:()=>({dispose:vi.fn()}),dispose:vi.fn()})}}}));
 vi.mock('../settings',()=>({getSettings:()=>({}),THEME_CHANGE_EVENT:'theme'}));
 vi.mock('../editorState',()=>({setCaret:vi.fn(),truncateSelection:vi.fn()}));
 vi.mock('../editorViewState',()=>({editorViewState:()=>null,rememberEditorViewState:vi.fn()}));

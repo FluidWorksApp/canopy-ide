@@ -10,8 +10,10 @@ mod bounded_file;
 mod browser;
 mod change;
 mod chrome_stream;
+mod claude_ide;
 mod cleanup;
 mod cli;
+mod cli_update;
 mod client_mode;
 mod clipboard;
 mod companion;
@@ -63,6 +65,7 @@ mod sync;
 mod sysaudio;
 mod tasks;
 mod tunnel;
+mod turn_rollback;
 mod vault;
 mod vault_kdbx;
 mod watchdog;
@@ -564,6 +567,11 @@ pub fn run() {
             // Before anything writes a store: the change channel needs a handle
             // to speak on, and a write that happens first would be silent.
             change::install(app.handle().clone());
+            // Claude Code's IDE servers emit to the window, so the hub needs a
+            // handle before the first agent PTY asks for one.
+            app.manage(claude_ide::ClaudeIde::new(std::sync::Arc::new(
+                claude_ide::TauriUi(app.handle().clone()),
+            )));
 
             // ONNX Runtime is loaded dynamically on every platform (Cargo.toml
             // builds ort with `load-dynamic`). Point ort at the libonnxruntime
@@ -752,6 +760,8 @@ pub fn run() {
             clipboard::clipboard_recent,
             clipboard::clipboard_read,
             clipboard::clipboard_image_png,
+            clipboard::clipboard_write_text,
+            clipboard::clipboard_read_text,
             clipboard::clipboard_forget,
             clipboard::clipboard_clear,
             clipboard::clipboard_status,
@@ -871,6 +881,11 @@ pub fn run() {
             git::agent_workspace,
             git::agent_workspace_at,
             git::agent_edits,
+            turn_rollback::turn_snapshot,
+            turn_rollback::turn_list,
+            turn_rollback::turn_preview,
+            turn_rollback::turn_restore,
+            turn_rollback::turn_native_checkpoint,
             git::git_worktree_add,
             git::git_worktree_add_pr,
             git::git_worktree_bootstrap,
@@ -924,6 +939,8 @@ pub fn run() {
             agents::which_check,
             agents::model_catalog,
             agents::cli_versions,
+            cli_update::cli_run_update,
+            cli_update::cli_set_native_update_env,
             agents::setup_agent_hooks,
             agents::agent_hooks_installed,
             agents::agent_integration_health,
@@ -1013,6 +1030,11 @@ pub fn run() {
             context::context_mesh_job_update,
             context::context_agent_spawn_ready,
             context::browser_result,
+            claude_ide::claude_ide_resolve_diff,
+            claude_ide::claude_ide_reply,
+            claude_ide::claude_ide_connections,
+            claude_ide::claude_ide_selection,
+            claude_ide::claude_ide_at_mention,
             snapshot::webview_snapshot,
             snapshot::browser_snapshot,
             snapshot::browser_frame,
@@ -1060,6 +1082,11 @@ pub fn run() {
                 app.state::<std::sync::Arc<watchdog::WatchdogState>>()
                     .app_exit_cleanup_returned(pty_cleanup.requested, pty_cleanup.force_signals);
                 app.state::<lsp::LspManager>().kill_all();
+                // ... and no Claude Code IDE lock naming a pid that is about
+                // to be gone.
+                if let Some(ide) = app.try_state::<claude_ide::ClaudeIde>() {
+                    ide.close_all();
+                }
                 // ... and no relay socket either.
                 app.state::<relay::RelayManager>().shutdown();
                 // ... and stop the remote-access server.

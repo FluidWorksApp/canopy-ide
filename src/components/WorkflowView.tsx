@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Button, Select } from "./ui";
+import { EGM_WORKFLOW_ID } from "../egm/egmWorkflow";
 import {
   loadWorkflowDefinitions,
   validateWorkflowDefinition,
@@ -19,10 +20,14 @@ interface WorkflowViewProps {
   projectName: string;
   projectRoot: string;
   componentRoots: string[];
-  onRun: (definition: WorkflowDefinition) => Promise<void> | void;
+  /** `request` is the optional note typed beside Run; prompts read it as
+   *  {{trigger.request}}. */
+  onRun: (definition: WorkflowDefinition, request?: string) => Promise<void> | void;
   onAnswer: (runId: string, response: string) => Promise<void> | void;
   onResume: (runId: string) => Promise<void> | void;
   onCreateStarter: () => Promise<void>;
+  /** Add the Elephant-Goldfish spec workflow (and the personas it reads). */
+  onCreateEgm?: () => Promise<void>;
   onSave: (definition: WorkflowDefinition) => Promise<void>;
 }
 
@@ -47,6 +52,7 @@ export function WorkflowView({
   onAnswer,
   onResume,
   onCreateStarter,
+  onCreateEgm,
   onSave,
 }: WorkflowViewProps) {
   const [definitions, setDefinitions] = useState<WorkflowDefinition[]>([]);
@@ -61,6 +67,7 @@ export function WorkflowView({
   const [pending, setPending] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
   const [creatingStarter, setCreatingStarter] = useState(false);
+  const [request, setRequest] = useState("");
 
   const selectDefinition = useCallback((definition: WorkflowDefinition) => {
     setEditingId(definition.id);
@@ -134,6 +141,13 @@ export function WorkflowView({
   const activeCount = useMemo(() => runs.filter((run) => !terminal.has(run.status)).length, [runs]);
   const dirty = Boolean(draft && JSON.stringify(draft) !== savedDraft);
   const canRun = Boolean(draft?.triggers.some((trigger) => trigger.kind === "manual"));
+  const hasEgm = definitions.some((definition) => definition.id === EGM_WORKFLOW_ID);
+  const createEgm = () => void act(async () => {
+    if (!onCreateEgm) return;
+    setCreatingStarter(true);
+    try { await onCreateEgm(); await reloadCatalog(EGM_WORKFLOW_ID); }
+    finally { setCreatingStarter(false); }
+  });
   const currentHuman = selectedRun?.definition.steps.find(
     (step) => step.id === selectedRun.currentStepId && step.kind === "human",
   );
@@ -200,6 +214,17 @@ export function WorkflowView({
           >
             {creatingStarter ? "Creating…" : "Create workflow canvas"}
           </Button>
+          {onCreateEgm && (
+            <>
+              <span>
+                Or start spec-first: an Elephant drafts a design spec and fresh, read-only Goldfish
+                reviewers audit it before anything is built (Google's Elephant-Goldfish Model).
+              </span>
+              <Button size="sm" disabled={creatingStarter} onClick={createEgm}>
+                Create spec-driven workflow
+              </Button>
+            </>
+          )}
         </div>
       ) : draft && (
         <>
@@ -216,16 +241,42 @@ export function WorkflowView({
             </Select>
             <span className="workflow-editor-version">{draft.id} · v{draft.version}</span>
             <span className="status-spacer" />
+            {onCreateEgm && !hasEgm && (
+              <Button
+                size="sm"
+                variant="ghost"
+                disabled={creatingStarter}
+                title="Adds the Elephant-Goldfish spec workflow and the personas it reads under .canopy/"
+                onClick={createEgm}
+              >Add spec workflow</Button>
+            )}
             {dirty && <span className="workflow-unsaved">Unsaved changes</span>}
             <Button size="sm" variant="ghost" onClick={() => void reloadCatalog(editingId ?? undefined)}>Discard</Button>
             <Button size="sm" variant="accent" disabled={!dirty || pending} onClick={() => void act(save)}>
               {pending ? "Saving…" : "Save workflow"}
             </Button>
+            {canRun && (
+              <input
+                className="workflow-run-request"
+                aria-label="Run request"
+                placeholder="What should this run work on? (optional)"
+                value={request}
+                onChange={(event) => setRequest(event.target.value)}
+              />
+            )}
             <Button
               size="sm"
               disabled={!canRun || dirty || pending}
               title={!canRun ? "Add a manual event to run this from the canvas" : dirty ? "Save before running" : "Run workflow"}
-              onClick={() => void act(async () => { setPending(true); try { await onRun(draft); } finally { setPending(false); } })}
+              onClick={() => void act(async () => {
+                setPending(true);
+                try {
+                  const note = request.trim();
+                  if (note) await onRun(draft, note);
+                  else await onRun(draft);
+                  setRequest("");
+                } finally { setPending(false); }
+              })}
             >Run</Button>
           </div>
           {actionError && <div className="workflow-inline-error" role="alert">{actionError}</div>}

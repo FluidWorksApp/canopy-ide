@@ -10,6 +10,7 @@
 import * as ipc from "./ipc";
 import { subscribeRemoteHarness, withRemote } from "./remoteExecution/harnessStores";
 import { refreshPrLinks } from "./prLinkState";
+import { isDesignSpec } from "./egm/specPath";
 
 export type ResearchStatus = ipc.ResearchStatus;
 
@@ -324,8 +325,17 @@ export async function reconcileMerged(projectId: string): Promise<number> {
  *  the document here would spend the budget the tiers exist to protect, and the
  *  agent can call `canopy_research get` if it wants the rest. */
 export function implementContext(entry: ipc.ResearchDetail): string {
+  // A finding that went through the spec stage is built from the spec, not the
+  // paragraph: the spec is where the design decisions were made and reviewed,
+  // and an implementer re-deciding them from the digest undoes that review.
+  const spec = entry.links.files.find(isDesignSpec);
   const parts = [
     `Implement research ${entry.id}: "${entry.title}".`,
+    spec &&
+      `A reviewed design spec exists for this at ${spec}. Read it first and implement exactly its` +
+        ` Detailed Implementation Plan; where the spec and the finding below disagree, the spec wins.` +
+        ` If its Status line is not "Approved", or the plan cannot be followed as written, stop and say so` +
+        ` on the entry rather than deciding the design yourself.`,
     entry.digest && `Finding: ${entry.digest}`,
     entry.recommendation && `Recommendation: ${entry.recommendation}`,
     entry.open_questions.length

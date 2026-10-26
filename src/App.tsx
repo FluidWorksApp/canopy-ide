@@ -52,6 +52,7 @@ import {
   applyVibeTargetSelection,
   type VibeTargetSelection,
 } from "./vibeTargetInference";
+import { observeTurnEvents } from "./turnRollback";
 import {
   derivePending,
   parseAgentEvent,
@@ -87,6 +88,7 @@ import { remoteAttentionSnapshot } from "./remoteAttention";
 import { useAttention } from "./useAttention";
 import { NotificationCenter } from "./components/NotificationCenter";
 import { runUiOp, type CompanionOps, type WorkspaceProject } from "./agentOps";
+import { startClaudeIdeBridge } from "./claudeIdeBridge";
 import { workspaceAgents, workspaceGit, workspaceSearch } from "./companionWorkspace";
 import { companionName, summonCompanion } from "./companion";
 import type { CompanionProposal } from "./companionSession";
@@ -144,8 +146,10 @@ import {
   CLI_INSTALLS_CHANGED_EVENT,
   checkDesktopClis,
   checkInstalledClis,
+  nativeUpdateOffEnv,
   remoteCliMetadata,
 } from "./projects";
+import { useCliAutoUpdater } from "./cliAutoUpdate";
 import { TooltipLayer } from "./components/TooltipLayer";
 import { Onboarding } from "./components/Onboarding";
 import { Welcome } from "./components/Welcome";
@@ -551,6 +555,8 @@ export default function App() {
     [],
   );
   useNoteReminders(projectNameFor);
+  // Settings → Agents → "Keep agent CLIs up to date" (cliAutoUpdate.ts).
+  useCliAutoUpdater();
   // The `Notify` seam, threaded through nearly every component. The opts bag
   // is how a plain notice stops being anonymous: a caller names the project it
   // speaks for (by id or by any path inside it) and where a click should land,
@@ -1017,14 +1023,15 @@ export default function App() {
         // raw line at every consumer was a measurable main-thread cost, as was
         // one setState per line — the bridge batches each 500ms window.
         const ts = Date.now();
+        const parsed = raws.map((raw) => ({ ts, data: parseAgentEvent(raw) }));
+        // Turn boundaries become rollback snapshots — taken app-side, off
+        // this event, so the blocking UserPromptSubmit hook never waits on git.
+        observeTurnEvents(parsed.map((p) => p.data), ts);
         setAgentEvents((prev) =>
           // Not a bare slice: the cap is app-wide and one of this list's
           // consumers is per-pty, so a busy project used to evict a quiet
           // terminal's only session stamp.
-          trimAgentEvents(
-            [...prev, ...raws.map((raw) => ({ ts, data: parseAgentEvent(raw) }))],
-            200,
-          ),
+          trimAgentEvents([...prev, ...parsed], 200),
         );
       }),
       ipc.onRelayState(setRelayStatus),
@@ -1423,6 +1430,12 @@ export default function App() {
       void ipc.ptySetNameTheme(settings.sessionNameTheme).catch((err) =>
         console.warn("failed to apply session name theme", err),
       );
+      // Auto-update off also means the self-updating CLIs stop updating
+      // themselves: their documented variables go into every agent process
+      // the desktop starts (terminals, structured runs, the companion).
+      void ipc
+        .cliSetNativeUpdateEnv(nativeUpdateOffEnv(settings.autoUpdateClis))
+        .catch((err) => console.warn("failed to apply CLI auto-update setting", err));
     };
     sync();
     return subscribeSettings(sync);
@@ -2653,6 +2666,10 @@ export default function App() {
       });
     return () => un?.();
   }, [prepareProjectForAgentAction]);
+
+  // Claude Code's IDE link: diffs, diagnostics and the editor's selection
+  // between this window and each Claude agent tab's CLI (claudeIdeBridge.ts).
+  useEffect(() => startClaudeIdeBridge(), []);
 
   // The ops only this window can answer (canopy_diagnostics, canopy_references,
   // canopy_definition, canopy_tickets, canopy_reviews, canopy_ask_user). Unlike

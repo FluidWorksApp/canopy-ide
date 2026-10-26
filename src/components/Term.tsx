@@ -9,6 +9,7 @@ import {
   useEffect,
   useImperativeHandle,
   useRef,
+  type MouseEvent as ReactMouseEvent,
 } from "react";
 import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
@@ -28,7 +29,14 @@ import {
   opensLink,
   terminalFileLinks,
 } from "../terminalLinks";
-import { matchesChord, resolve } from "../shortcuts";
+import { matches, matchesChord, resolve } from "../shortcuts";
+import { ContextMenu, useContextMenu } from "./ContextMenu";
+import {
+  osc52Copy,
+  readClipboardText,
+  terminalMenuItems,
+  writeClipboardText,
+} from "../terminalClipboard";
 import { TerminalStreamLedger } from "../terminalStreamLedger";
 import { terminalRetentionRegistry } from "../terminalRetention";
 import { TerminalCompactionController } from "../terminalCompaction";
@@ -36,6 +44,7 @@ import { terminalCompactionProtected } from "../terminalGroups";
 import { registerTerminalPressureShedder } from "../rendererPressureRelief";
 import { registerTerminalWindowEvents } from "../terminalWindowEvents";
 import { terminalKeyBlocked } from "../useEscape";
+import { claudeIdeLaunchEnv } from "../claudeIde";
 
 /** Quote a dropped path for the shell, the way iTerm2/Terminal.app do. Paths
  *  that are pure safe chars pass through bare; anything else is single-quoted,
@@ -176,6 +185,48 @@ export const Term = forwardRef<TermHandle, TermProps>(function Term(
   const releaseMemoryRef = useRef<() => "compacting" | "purged" | "unavailable">(
     () => "unavailable",
   );
+  const menu = useContextMenu();
+
+  // Copy and paste that never depend on WebKit validating a DOM selection —
+  // xterm's selection is not one (see terminalClipboard.ts). Refs only, so the
+  // mount-once effect can call the first render's copies safely.
+  const copySelection = async () => {
+    const term = termRef.current;
+    const text = term?.getSelection() ?? "";
+    if (!term || !text) return;
+    if (!(await writeClipboardText(text))) {
+      void ipc.notifyNative("Copy failed", "Canopy could not write to the clipboard.");
+    }
+    term.focus();
+  };
+  const pasteClipboard = async () => {
+    const text = await readClipboardText();
+    const term = termRef.current;
+    if (!term || !text) return;
+    term.paste(text);
+    term.focus();
+  };
+  const openMenu = (e: ReactMouseEvent) => {
+    const term = termRef.current;
+    if (!term) return;
+    menu.open(
+      e,
+      terminalMenuItems({
+        hasSelection: term.hasSelection(),
+        mouseTracking: term.modes.mouseTrackingMode !== "none",
+        copy: () => void copySelection(),
+        paste: () => void pasteClipboard(),
+        selectAll: () => {
+          term.selectAll();
+          term.focus();
+        },
+        clear: () => {
+          term.clear();
+          term.focus();
+        },
+      }),
+    );
+  };
 
   const captureText = (maxChars = 8000) => {
     const term = termRef.current;
@@ -258,6 +309,11 @@ export const Term = forwardRef<TermHandle, TermProps>(function Term(
       cursorStyle: settings.terminalCursorStyle,
       cursorBlink: settings.terminalCursorBlink,
       macOptionIsMeta: true,
+      // A TUI with mouse tracking on (Claude Code, vim, tmux) receives every
+      // plain drag, so xterm makes no selection of its own. Off a Mac,
+      // Shift-drag already forces one; on a Mac xterm's default leaves NO
+      // gesture that does. Option-drag is the iTerm2/Terminal.app convention.
+      macOptionClickForcesSelection: true,
       minimumContrastRatio,
       theme: themeFor(settings),
     });
@@ -517,6 +573,31 @@ export const Term = forwardRef<TermHandle, TermProps>(function Term(
       return chord && chord.code ? [{ chord, seq }] : [];
     });
     const releaseSelectAll=registerSelectAll(el,()=>term.selectAll());
+    // When the user last gave this terminal input themselves — a key, a
+    // click, a paste. Gates OSC 52 (see osc52Copy). Deliberately not onData:
+    // xterm also emits that for its own automatic replies to terminal
+    // queries, which program output (including replayed output) triggers.
+    let lastUserInputAt = Number.NEGATIVE_INFINITY;
+    let lastPasteEventAt = 0;
+    const noteUserInput = () => {
+      lastUserInputAt = performance.now();
+    };
+    const notePaste = () => {
+      lastPasteEventAt += 1;
+      noteUserInput();
+    };
+    el.addEventListener("mousedown", noteUserInput, true);
+    el.addEventListener("mouseup", noteUserInput, true);
+    el.addEventListener("paste", notePaste, true);
+    // WebKit enables Edit > Copy (and the Cmd+C key equivalent that goes
+    // through it) only for a DOM selection, or when a `beforecopy` handler
+    // cancels. xterm never answers `beforecopy`, so its own copy handler was
+    // unreachable from the menu. Cancelling here, only while xterm holds a
+    // selection, is what validates the command.
+    const onBeforeCopy = (event: Event) => {
+      if (term.hasSelection()) event.preventDefault();
+    };
+    el.addEventListener("beforecopy", onBeforeCopy, true);
     let imagePastePending = false;
     term.attachCustomKeyEventHandler((ev) => {
       // An overlay is open over this terminal: nothing typed goes to the pty.
@@ -534,6 +615,26 @@ export const Term = forwardRef<TermHandle, TermProps>(function Term(
       // handler, so returning false here would skip it and strand the
       // composition, making the next keypress behave as if Option were held.
       if (ev.isComposing || ev.keyCode === 229) return true;
+      noteUserInput();
+      // Copy only with a selection: without one the key is the program's
+      // (and off a Mac, plain Ctrl+C is SIGINT and never matches this chord).
+      if (matches(ev, "term-copy") && term.hasSelection()) {
+        ev.preventDefault();
+        void copySelection();
+        return false;
+      }
+      // Ctrl+Shift+V off macOS; on a Mac Cmd+V stays the native paste event.
+      // The webview may already turn this chord into a native paste event —
+      // the better path, since it carries images too — so the default is left
+      // alone, and the clipboard is read only when no paste event follows.
+      // Returning false keeps xterm from encoding the key as ^V.
+      if (matches(ev, "term-paste")) {
+        const before = lastPasteEventAt;
+        requestAnimationFrame(() => {
+          if (!disposed && lastPasteEventAt === before) void pasteClipboard();
+        });
+        return false;
+      }
       if (isRemoteHost() && matchesChord(ev, { code: "KeyV", ctrl: true, meta: false, alt: false, shift: false })) {
         ev.preventDefault();
         if (!imagePastePending) {
@@ -909,6 +1010,15 @@ export const Term = forwardRef<TermHandle, TermProps>(function Term(
 
       try {
         const spawnEpoch = streamEpoch;
+        // Decided at spawn rather than stored on the tab: whether this launch
+        // gets a Claude Code IDE server depends on the setting *now*, and a
+        // restored tab must not carry a marker from a launch long gone.
+        const ideEnv = claudeIdeLaunchEnv({
+          command: initialCommand,
+          runCommand,
+          root: workspacePath,
+          cwd,
+        });
         const spawnOpts = {
             // 0 tells Rust to fall back to 80x24; the first resize once the tab is
             // visible corrects it.
@@ -917,7 +1027,7 @@ export const Term = forwardRef<TermHandle, TermProps>(function Term(
             cwd,
             highWater: settings.ptyHighWater,
             runCommand,
-            env,
+            env: ideEnv.length ? [...(env ?? []), ...ideEnv] : env,
             runId,
             attemptId,
             projectId,
@@ -1019,6 +1129,17 @@ export const Term = forwardRef<TermHandle, TermProps>(function Term(
         const body = (parts[2] ?? parts[1] ?? "").trim();
         if (body) onNotify?.(body);
         return false;
+      }),
+      // OSC 52: a program asking to set the clipboard. For anything running
+      // in a remote workspace this is the ONLY route to the clipboard of the
+      // computer showing the IDE. Writes only — a `?` query is refused, since
+      // answering it would hand the clipboard to whatever program asked — and
+      // only shortly after the user's own input. Consumed (true): nothing
+      // downstream has a use for the payload.
+      term.parser.registerOscHandler(52, (data) => {
+        const text = osc52Copy(data, performance.now() - lastUserInputAt);
+        if (text) void writeClipboardText(text);
+        return true;
       }),
       term.parser.registerOscHandler(99, (data) => {
         // <metadata>:<body>. Kitty splits long bodies across several sequences
@@ -1141,6 +1262,10 @@ export const Term = forwardRef<TermHandle, TermProps>(function Term(
       streamVisibilityRef.current = null;
       syncNowRef.current = null;
       el.removeEventListener('paste', onImagePaste, true);
+      el.removeEventListener("mousedown", noteUserInput, true);
+      el.removeEventListener("mouseup", noteUserInput, true);
+      el.removeEventListener("paste", notePaste, true);
+      el.removeEventListener("beforecopy", onBeforeCopy, true);
       releaseSelectAll();
       term.dispose();
       termRef.current = null;
@@ -1161,5 +1286,19 @@ export const Term = forwardRef<TermHandle, TermProps>(function Term(
     if (active) termRef.current?.focus();
   }, [active]);
 
-  return <div className="term-container" ref={containerRef} />;
+  // Canopy's own menu, not the webview's: WebKit's Copy validates against the
+  // DOM and so is greyed out over xterm's selection.
+  return (
+    <>
+      <div className="term-container" ref={containerRef} onContextMenu={openMenu} />
+      {menu.menu && (
+        <ContextMenu
+          x={menu.menu.x}
+          y={menu.menu.y}
+          items={menu.menu.items}
+          onClose={menu.close}
+        />
+      )}
+    </>
+  );
 });

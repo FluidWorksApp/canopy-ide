@@ -3,6 +3,7 @@ import { useEscapeLayer } from "../useEscape";
 import * as clipboardStore from "../clipboardStore";
 import * as ipc from "../ipc";
 import { insertTextAtCursor } from "../insertText";
+import { writeClipboardText } from "../terminalClipboard";
 import { getSettings, subscribeSettings, updateSettings } from "../settings";
 import { format, matches, resolve } from "../shortcuts";
 import { ClipboardIcon } from "./icons";
@@ -91,7 +92,9 @@ export function ClipboardHistory({ visible }: { visible: boolean }) {
     void ipc
       .clipboardRead(clip.id)
       .then(async (text) => {
-        await navigator.clipboard.writeText(text).catch(() => {});
+        // Native write: by now the keypress's user activation is spent, and
+        // WKWebView refuses navigator.clipboard without one.
+        await writeClipboardText(text);
         insertTextAtCursor(text, insertionTarget);
       })
       .catch(() => {
