@@ -865,6 +865,52 @@
         "windows": null,
         "linux": null
       }
+    },
+    {
+      "id": "term-copy",
+      "label": "Terminal: copy selection",
+      "surface": "terminal",
+      "scoped": true,
+      "chord": {
+        "mods": [
+          "Mod"
+        ],
+        "key": "KeyC"
+      },
+      "platform": {
+        "windows": {
+          "mods": [
+            "Mod",
+            "Shift"
+          ],
+          "key": "KeyC"
+        },
+        "linux": {
+          "mods": [
+            "Mod",
+            "Shift"
+          ],
+          "key": "KeyC"
+        }
+      },
+      "note": "Only while the terminal has a selection; otherwise the key passes through. Off macOS plain Ctrl+C is SIGINT, so copy is Ctrl+Shift+C as in every terminal emulator."
+    },
+    {
+      "id": "term-paste",
+      "label": "Terminal: paste",
+      "surface": "terminal",
+      "scoped": true,
+      "chord": {
+        "mods": [
+          "Mod",
+          "Shift"
+        ],
+        "key": "KeyV"
+      },
+      "platform": {
+        "macos": null
+      },
+      "note": "Off macOS plain Ctrl+V is the shell's quoted-insert, so terminal paste is Ctrl+Shift+V. macOS needs no entry: Cmd+V is the native Edit > Paste, which xterm already receives as a paste event."
     }
   ]
 }
