@@ -77,7 +77,7 @@ import {
   postAttention,
   resolveAttention,
   resolveAttentionByKey,
-  shouldReachOS,
+  createOsBridge,
   subscribeAttention,
   targetOf,
   toastMs,
@@ -644,18 +644,18 @@ export default function App() {
   // caller gets routing and a deep-linked click by posting — not by remembering
   // to also call something.
   //
-  // Keyed on ids already sent, because a question re-derived from a hook event
-  // stream updates its item in place and must not re-notify each time.
-  const notifiedIds = useRef(new Set<string>());
+  // `createOsBridge` keys on ids already considered: a question re-derived from
+  // a hook event stream updates its item in place and must not re-notify each
+  // time, and what the store held at launch was announced by the launch that
+  // posted it.
+  const osBridge = useRef<ReturnType<typeof createOsBridge> | null>(null);
   useEffect(() => {
-    for (const item of attention) {
-      if (notifiedIds.current.has(item.id)) continue;
-      notifiedIds.current.add(item.id);
-      // Count notices seen while delivery is disabled so switching the setting
-      // back on does not unleash a backlog of stale system banners. The item
-      // itself remains untouched in the notification centre.
-      if (!notificationPopupsEnabled) continue;
-      if (!shouldReachOS(item, document.hasFocus())) continue;
+    osBridge.current ??= createOsBridge(attention);
+    const send = osBridge.current(attention, {
+      enabled: notificationPopupsEnabled,
+      focused: document.hasFocus(),
+    });
+    for (const item of send) {
       const { title, body } = osPayload(item);
       void ipc
         .notifyNative(

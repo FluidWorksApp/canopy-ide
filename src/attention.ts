@@ -254,6 +254,33 @@ export function shouldReachOS(item: AttentionItem, focused: boolean): boolean {
   );
 }
 
+/** The OS bridge's memory: which items it has already considered, so an item
+ *  updated in place (a question re-derived from a hook event stream) is not
+ *  announced again. Seeded with what the store held when the app started:
+ *  those were announced, or not, by the launch that posted them. Without the
+ *  seed, every stored team message — which may reach the OS while focused —
+ *  came back as a system banner on each launch.
+ *
+ *  Returns the items to send now. Items seen while delivery is disabled are
+ *  remembered too, so turning popups back on does not unleash a backlog of
+ *  stale banners; the items themselves stay in the notification centre. */
+export function createOsBridge(stored: readonly AttentionItem[]) {
+  const seen = new Set(stored.map((item) => item.id));
+  return (
+    items: readonly AttentionItem[],
+    options: { enabled: boolean; focused: boolean },
+  ): AttentionItem[] => {
+    const send: AttentionItem[] = [];
+    for (const item of items) {
+      if (seen.has(item.id)) continue;
+      seen.add(item.id);
+      if (options.enabled && shouldReachOS(item, options.focused))
+        send.push(item);
+    }
+    return send;
+  };
+}
+
 /** The native banner's title. Was hand-written per call site — `"Canopy — Team"`,
  *  `"Canopy — Task"` — which is how they drifted. */
 const SOURCE_TITLE: Record<AttentionSource, string> = {
