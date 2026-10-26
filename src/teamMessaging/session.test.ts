@@ -1,7 +1,7 @@
 import {it,expect,vi} from 'vitest';
 const mocks=vi.hoisted(()=>({start:vi.fn(async()=>{}),stop:vi.fn(),send:vi.fn(async()=>({id:'sent'})),options:[] as any[]}));
 vi.mock('./client',()=>({PeerClient:class{constructor(options:unknown){mocks.options.push(options);}start=mocks.start;stop=mocks.stop;send=mocks.send;}}));
-vi.mock('./history',()=>({loadChatHistory:vi.fn(async()=>[]),saveChatMessage:vi.fn(async()=>{}),loadChatReadState:vi.fn(async()=>({unreadIds:[],receipts:{}})),saveChatReadState:vi.fn(async()=>{})}));
+vi.mock('./history',()=>({loadChatHistory:vi.fn(async()=>[]),saveChatMessage:vi.fn(async()=>{}),loadChatReadState:vi.fn(async()=>({unreadIds:[],receipts:{}})),saveChatReadState:vi.fn(async()=>{}),loadChatEvents:vi.fn(async()=>[]),saveChatEvent:vi.fn(async()=>{})}));
 vi.mock('@tauri-apps/api/core',()=>({invoke:vi.fn(async()=>({user:{id:'bob'}}))}));
 import {teamSession,clearTeamSessions} from './session';
 it('shares transport across tabs and clears transcript on account sign-out',async()=>{

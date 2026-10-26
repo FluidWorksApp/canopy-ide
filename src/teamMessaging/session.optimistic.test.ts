@@ -6,7 +6,7 @@ const mocks=vi.hoisted(()=>({
  start:vi.fn(async()=>{}),
 }));
 vi.mock('./client',()=>({PeerClient:class{constructor(options:unknown){mocks.options.push(options);}start=mocks.start;stop=vi.fn();send=mocks.send;discard=mocks.discard;}}));
-vi.mock('./history',()=>({loadChatHistory:vi.fn(async()=>[]),saveChatMessage:vi.fn(async()=>{}),forgetChatMessage:vi.fn(async()=>{}),loadChatReadState:vi.fn(async()=>({unreadIds:[],receipts:{}})),saveChatReadState:vi.fn(async()=>{})}));
+vi.mock('./history',()=>({loadChatHistory:vi.fn(async()=>[]),saveChatMessage:vi.fn(async()=>{}),forgetChatMessage:vi.fn(async()=>{}),loadChatReadState:vi.fn(async()=>({unreadIds:[],receipts:{}})),saveChatReadState:vi.fn(async()=>{}),loadChatEvents:vi.fn(async()=>[]),saveChatEvent:vi.fn(async()=>{})}));
 vi.mock('@tauri-apps/api/core',()=>({invoke:vi.fn(async()=>({user:{id:'me'}}))}));
 import {teamSession,clearTeamSessions} from './session';
 import * as history from './history';

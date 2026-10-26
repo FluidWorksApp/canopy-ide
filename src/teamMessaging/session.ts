@@ -1,4 +1,6 @@
-import {loadChatHistory,saveChatMessage,forgetChatMessage,loadChatReadState,saveChatReadState} from './history';
+import {loadChatHistory,saveChatMessage,forgetChatMessage,loadChatReadState,saveChatReadState,loadChatEvents,saveChatEvent} from './history';
+import {CHAT_VERSION,eventOf,eventRecipient,reactionText,validEmoji} from './chatEvents';
+import {applyEvent,drainPending,hasReacted,nextReactionTime,EMPTY_OVERLAY,type EventOverlay,type ReactionState} from './reactions';
 import {invoke} from '@tauri-apps/api/core';
 import {PeerClient,AttachmentUnavailable,type Attachment,type AttachmentState,type ChatMessage,type Device} from './client';
 import {prepareFile} from './files';
@@ -18,11 +20,11 @@ export type DeliveryState='sending'|'sent'|'queued'|'waiting'|'failed'|'expired'
 export type Delivery={state:DeliveryState;detail?:string};
 export type SendOutcome={id:string;delivery?:Delivery};
 export type {AttachmentState};
-type Snapshot={unreadIds:string[];restoredIds:string[];members:Record<string,string>;messages:ChatMessage[];receipts:Record<string,string[]>;delivery:Record<string,Delivery>;attachments:Record<string,AttachmentState>;status:string};
+type Snapshot={unreadIds:string[];restoredIds:string[];members:Record<string,string>;messages:ChatMessage[];receipts:Record<string,string[]>;delivery:Record<string,Delivery>;attachments:Record<string,AttachmentState>;reactions:ReactionState;status:string};
 /** Peers refuse messages created more than five minutes before their envelope. */
 const STALE_MS=4*60_000;
 const reason=(error:unknown)=>error instanceof Error?error.message:String(error);
-const empty=(status:string):Snapshot=>({unreadIds:[],restoredIds:[],members:{},messages:[],receipts:{},delivery:{},attachments:{},status});
+const empty=(status:string):Snapshot=>({unreadIds:[],restoredIds:[],members:{},messages:[],receipts:{},delivery:{},attachments:{},reactions:{},status});
 // One transport per account/team, shared by all conversation tabs in this IDE.
 const sessions=new Map<string,TeamSession>();
 const unreadListeners=new Set<()=>void>();
@@ -70,14 +72,20 @@ export class TeamSession {
  constructor(team:string,user:string){
   this.team=team;this.user=user;
   this.client=new PeerClient({team,user,request:body=>invoke('canopy_account_request',{route:'/api/peers',body}),
-   persist:message=>saveChatMessage(this.user,this.team,message),
+   // Events (reactions) are saved apart from messages, outside the 500-message cap.
+   persist:message=>eventOf(message)?saveChatEvent(this.user,this.team,message):saveChatMessage(this.user,this.team,message),
    members:members=>this.update({members:Object.fromEntries(members.map(m=>[m.id,m.name]))}),
    message:message=>{
     if(this.invalid||this.discarded.has(message.id))return;
+    // An event changes an earlier message; it is not a message itself, so it
+    // never joins the transcript or unreadIds and never reaches the message
+    // listeners: no unread badge, no notification.
+    if(eventOf(message)){this.applyEvents([message]);return;}
     // Own messages (including echoes from this account's other devices) and
     // repeats of a message already shown never count as unread.
     const fresh=!this.snapshot.messages.some(m=>m.id===message.id),incoming=fresh&&message.sender!==this.user;
     this.update({unreadIds:incoming?[...this.snapshot.unreadIds.slice(-499),message.id]:this.snapshot.unreadIds,messages:fresh?[...this.snapshot.messages.slice(-499),message]:this.snapshot.messages});this.persistReadState();
+    if(fresh)this.drainEvents();
     if(incoming){const event={team:this.team,user:this.user,message,senderName:this.snapshot.members[message.sender]};messageListeners.forEach(fn=>{try{fn(event);}catch{/* a listener never breaks delivery */}});}
    },
    job:(job,sender)=>this.emitJob(sender,{kind:'job',job}),
@@ -111,6 +119,8 @@ export class TeamSession {
    this.receiptsRestored=restored;
    this.update({messages:[...history,...live].slice(-500),restoredIds:[...ids],unreadIds:[...new Set([...state.unreadIds.filter(id=>ids.has(id)),...this.snapshot.unreadIds])],receipts:{...Object.fromEntries(Object.entries(state.receipts).filter(([id])=>ids.has(id))),...this.snapshot.receipts}});
   }catch{this.update({status:'Local history could not be restored.'});}
+  try{const events=await loadChatEvents(this.user,this.team);if(this.invalid)return;this.applyEvents(events);}
+  catch{this.update({status:'Local reactions could not be restored.'});}
   if(!this.invalid)await this.client.start().catch(e=>this.update({status:String(e)}));
  }
  private emitJob(sender:Device,body:{kind:'job';job:JobRequest}|{kind:'job-status';status:JobStatus}|{kind:'mesh';message:MeshMessage}|{kind:'mesh-status';status:MeshStatus}|{kind:'roster';roster:Roster},workspace?:string){
@@ -149,6 +159,30 @@ export class TeamSession {
   const state={unreadIds:this.snapshot.unreadIds,receipts:Object.fromEntries(Object.entries(this.snapshot.receipts).filter(([id])=>ids.has(id)))};
   void saveChatReadState(this.user,this.team,state).catch(()=>this.update({status:'Read status could not be saved on this device.'}));
  }
+ /** Reactions and other events laid over the messages; waiting events sit in `overlay.pending`. */
+ private overlay:EventOverlay=EMPTY_OVERLAY;
+ private find=(id:string)=>this.snapshot.messages.find(m=>m.id===id);
+ private setOverlay(next:EventOverlay){if(next===this.overlay)return;const changed=next.reactions!==this.overlay.reactions;this.overlay=next;if(changed)this.update({reactions:next.reactions});}
+ private applyEvents(events:ChatMessage[]){
+  if(this.invalid)return;let next=this.overlay;
+  for(const event of events)next=applyEvent(next,event,this.find);
+  this.setOverlay(next);
+ }
+ private drainEvents(){if(!this.invalid)this.setOverlay(drainPending(this.overlay,this.find));}
+ /** Adds `emoji` to a message, or removes it when this account already has it
+  * there. Shown at once, saved, then sent to the conversation's devices that
+  * understand reactions. Rejects only when it could not be sent at all. */
+ async react(messageId:string,emoji:string){
+  if(this.invalid)throw Error('Sign in again to react');
+  if(!validEmoji(emoji))throw Error('Pick a single emoji');
+  const target=this.find(messageId);if(!target)throw Error('This message is not in the conversation');
+  const op=hasReacted(this.snapshot.reactions,messageId,this.user,emoji)?'remove':'add';
+  const event:ChatMessage={id:crypto.randomUUID(),sender:this.user,recipient:eventRecipient(target,this.user),text:reactionText(emoji,op,target),created:nextReactionTime(this.snapshot.reactions,messageId,this.user,emoji),v:CHAT_VERSION,event:{type:'reaction',target:messageId,emoji,op}};
+  this.applyEvents([event]);
+  const saved=saveChatEvent(this.user,this.team,event).catch(()=>this.update({status:'Reactions could not be saved on this device.'}));
+  await this.ready.catch(()=>{});await saved;if(this.invalid)return;
+  await this.client.sendEvent(event);
+ }
  private update(change:Partial<Snapshot>){if(this.invalid)return;this.snapshot={...this.snapshot,...change};this.listeners.forEach(fn=>fn());unreadListeners.forEach(fn=>fn());}
  markRead(peer:string|null){
   const ids=new Set(this.snapshot.messages.filter(m=>peer===null?m.recipient===null:m.sender===peer&&m.recipient===this.user).map(m=>m.id));
@@ -166,7 +200,7 @@ export class TeamSession {
   let released=false;return()=>{if(released)return;released=true;this.refs--;const closing=++this.releaseGeneration;queueMicrotask(()=>{if(this.refs===0&&closing===this.releaseGeneration)this.clear('Conversation closed.');});};
  }
  clear(status='Signed out. Sign in again to open this conversation.'){
-  this.invalid=true;this.client.stop();this.snapshot=empty(status);this.saves.clear();
+  this.invalid=true;this.client.stop();this.snapshot=empty(status);this.overlay=EMPTY_OVERLAY;this.saves.clear();
   if(sessions.get(`${this.user}:${this.team}`)===this)sessions.delete(`${this.user}:${this.team}`);
   this.listeners.forEach(fn=>fn());unreadListeners.forEach(fn=>fn());
  }
@@ -220,7 +254,7 @@ export class TeamSession {
  private append(text:string,recipient:string|null,attachments?:Attachment[]):ChatMessage{
   // Strictly increasing timestamps keep rapid sends in order after a restart.
   const last=this.snapshot.messages.findLast(m=>m.sender===this.user)?.created??0;
-  const message:ChatMessage={id:crypto.randomUUID(),sender:this.user,recipient,text,created:Math.max(Date.now(),last+1),...(attachments?.length?{attachments}:{})};
+  const message:ChatMessage={id:crypto.randomUUID(),sender:this.user,recipient,text,created:Math.max(Date.now(),last+1),...(attachments?.length?{attachments}:{}),v:CHAT_VERSION};
   this.update({messages:[...this.snapshot.messages.slice(-499),message],delivery:{...this.snapshot.delivery,[message.id]:{state:'sending'}}});
   // The encrypted local copy (with this id) is written right away, so a restart
   // keeps the message and the transport's own save reconciles with it.

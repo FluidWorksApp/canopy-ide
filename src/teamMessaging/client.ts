@@ -2,15 +2,18 @@ import {validChatMessage,UUID,MAX_ATTACHMENTS} from './messageSchema';
 import {chatFileStore,prepareFile,sha256,bytesOf,type FileStore,type FileRecord,type PreparedFile} from './files';
 import {open,seal,registration,MessageReplayError,type Envelope,type EnvelopeKind,type PublicIdentity,type Address} from './crypto';
 import {deviceIdentity,rememberMessage,messageOutbox,type MessageOutbox,type PendingEnvelope,type DeviceIdentity} from './store';
+import {CHAT_VERSION,eventOf,unknownExtension} from './chatEvents';
 import {validJobRequest,validJobStatus,validMeshMessage,validMeshStatus,validRoster,validRosterRequest,type JobRequest,type JobStatus,type MeshMessage,type MeshStatus,type Roster,type RosterRequest} from './jobSchema';
 /** `last_seen_at` is bumped by every poll the device makes, so it is the
  * directory's only "online" signal. */
 export type Device={id:string;user_id:string;public_keys:PublicIdentity;last_seen_at?:string|null;kind?:'user'|'host';workspaceIds?:string[]};
 /** File metadata only: the bytes never ride in a message or through the relay. */
 export type Attachment={id:string;name:string;size:number;type:string;sha256:string};
-export type ChatMessage={id:string;sender:string;recipient:string|null;text:string;created:number;attachments?:Attachment[]};
+/** `v` and `event` are chat protocol v2 extensions (see chatEvents.ts): unchecked
+ * here, parsed leniently by `parseExtensions`, ignored by v1 clients. */
+export type ChatMessage={id:string;sender:string;recipient:string|null;text:string;created:number;attachments?:Attachment[];v?:number;event?:unknown};
 export type UnavailableReason='offline'|'expired'|'denied';
-type Payload={kind:'message';message:ChatMessage}|{kind:'receipt';id:string}|{kind:'signal';description:RTCSessionDescriptionInit}|{kind:'job';job:JobRequest}|{kind:'job-status';status:JobStatus}
+type Payload={kind:'message';message:ChatMessage}|{kind:'receipt';id:string}|{kind:'signal';description:RTCSessionDescriptionInit;caps?:{chat?:number}}|{kind:'job';job:JobRequest}|{kind:'job-status';status:JobStatus}
  |{kind:'mesh';message:MeshMessage}|{kind:'mesh-status';status:MeshStatus}|{kind:'roster-request';request:RosterRequest}|{kind:'roster';roster:Roster}|{kind:'file-request';attachmentId:string;messageId:string}|{kind:'file-unavailable';attachmentId:string;reason:UnavailableReason};
 /** A pull the sender could not (or would not) serve. */
 export class AttachmentUnavailable extends Error{readonly reason:UnavailableReason;constructor(reason:UnavailableReason){super(reason==='offline'?'The sender is not directly connected':reason==='denied'?'This file was not shared with you':'This file is no longer available');this.reason=reason;}}
@@ -27,6 +30,10 @@ type Download={meta:Attachment;messageId:string;devices:Set<string>;replies:Map<
 const isArrayBuffer=(value:unknown):value is ArrayBuffer=>Object.prototype.toString.call(value)==='[object ArrayBuffer]';
 /** The envelope kind each payload must travel under (protocol §6.1). */
 const ENVELOPE_KIND:Record<Payload['kind'],EnvelopeKind>={message:'chat',receipt:'chat',signal:'chat',job:'job','job-status':'job-status',mesh:'mesh','mesh-status':'mesh','roster-request':'mesh',roster:'mesh','file-request':'chat','file-unavailable':'chat'};
+/** A payload kind this client understands. */
+const known=(payload:unknown)=>{const kind=(payload as {kind?:unknown})?.kind;return typeof kind==='string'&&Object.hasOwn(ENVELOPE_KIND,kind);};
+/** What this client advertises in its WebRTC offers and answers; v1 clients ignore it. */
+const CAPS={chat:CHAT_VERSION};
 export type PeerRequest=<T>(body:unknown)=>Promise<T>;
 /** A device polls every 2s; one quiet for longer than this is not online. */
 export const DEVICE_ONLINE_MS=60_000;
@@ -73,6 +80,8 @@ export class PeerClient {
  private files:FileStore;
  private downloads=new Map<string,Download>();
  private serving=0;
+ /** Chat protocol version per device, learned from its signals and messages. Unknown means v1. */
+ private chatVersions=new Map<string,number>();
  constructor(options:Options){this.options=options;this.outbox=options.outbox??messageOutbox(options.user,options.team);this.files=options.files??chatFileStore(options.user,options.team);}
  private address(device:string,user=this.options.user):Address{return {team:this.options.team,user,device};}
  private async request<T>(body:Record<string,unknown>){if(this.stopped)throw Error('Team connection closed');return this.options.request<T>({...body,teamId:this.options.team,deviceId:this.identity!.id});}
@@ -179,7 +188,7 @@ export class PeerClient {
   const devices=[...this.devices.values()].filter(d=>d.user_id!==this.options.user&&(!recipient||d.user_id===recipient));
   if(!devices.length)throw Error('No recipient devices are registered yet. Ask your teammate to sign in to Canopy.');
   const prepared=await Promise.all(files.map(file=>'meta' in file?file:prepareFile(file)));
-  const message:ChatMessage={id:draft?.id??crypto.randomUUID(),sender:this.options.user,recipient,text,created:draft?.created??Date.now(),...(prepared.length?{attachments:prepared.map(p=>p.meta)}:{})};
+  const message:ChatMessage={id:draft?.id??crypto.randomUUID(),sender:this.options.user,recipient,text,created:draft?.created??Date.now(),...(prepared.length?{attachments:prepared.map(p=>p.meta)}:{}),v:CHAT_VERSION};
   if(!validChatMessage(message))throw Error('Invalid message');
   if(new TextEncoder().encode(JSON.stringify({kind:'message',message})).length>32000)throw Error('This message is too large after encoding. Split it into smaller messages.');
   // Bytes stay on this device; only the metadata travels in the sealed message.
@@ -192,6 +201,29 @@ export class PeerClient {
   const queued=[...this.pending.values()].some(row=>row.messageId===message.id);
   if(outcomes.every(result=>result.status==='rejected')&&!queued)throw Error('Message could not be saved or sent. Try again.');
   this.options.message(message);return {id:message.id,queued:outcomes.every(result=>result.status==='rejected'),partial:outcomes.some(result=>result.status==='rejected')};
+ }
+ /** Whether a device is known to speak chat protocol v2 (understands `event`). */
+ speaksEvents(deviceId:string){return (this.chatVersions.get(deviceId)??1)>=2;}
+ private learnVersion(device:Device,version:unknown){if(Number.isSafeInteger(version)&&(version as number)>(this.chatVersions.get(device.id)??1))this.chatVersions.set(device.id,version as number);}
+ /** Sends a chat event (a reaction now; edits and deletes later) as a chat
+  * message, so it shares the message path's queue, retries and receipts. Only
+  * devices known to speak v2 receive it: a v1 client would show its fallback
+  * text as a new message. Resolves to the number of devices it went to. */
+ async sendEvent(message:ChatMessage):Promise<{id:string;devices:number;queued:boolean}>{
+  if(!validChatMessage(message)||!eventOf(message)||message.sender!==this.options.user||message.v!==CHAT_VERSION)throw Error('Invalid chat event');
+  if(new TextEncoder().encode(JSON.stringify({kind:'message',message})).length>32000)throw Error('This event is too large after encoding.');
+  if(this.fallbacks.size>=500)throw Error('Wait for pending messages to finish sending');
+  try{await this.directory();}catch(error){if(!this.devices.size||navigator.onLine!==false)throw error;this.directoryAt=0;this.closePeers();}
+  const devices=[...this.devices.values()].filter(d=>d.user_id!==this.options.user&&(!message.recipient||d.user_id===message.recipient)&&this.speaksEvents(d.id));
+  await this.options.persist?.(message);
+  if(devices.length){
+   this.sent.set(message.id,new Set(devices.map(d=>d.user_id)));if(this.sent.size>500)this.sent.delete(this.sent.keys().next().value!);
+   const outcomes=await Promise.allSettled(devices.map(d=>this.deliver(d,{kind:'message',message})));
+   const queued=[...this.pending.values()].some(row=>row.messageId===message.id);
+   if(outcomes.every(result=>result.status==='rejected')&&!queued)throw Error('Could not be sent. Try again.');
+  }
+  this.options.message(message);
+  return {id:message.id,devices:devices.length,queued:[...this.pending.values()].some(row=>row.messageId===message.id)};
  }
  /** This team's devices as of the last directory refresh, this one included. */
  directoryDevices():Device[]{return [...this.devices.values()];}
@@ -261,14 +293,22 @@ export class PeerClient {
    });}
    catch(error){if(error instanceof MessageReplayError){if(sender.kind==='host')return;const prior=JSON.parse(error.plaintext) as Payload;if(prior.kind==='message'){this.validateMessage(prior.message,sender,envelope);await this.deliver(sender,{kind:'receipt',id:prior.message.id});return;}if(prior.kind==='receipt'){await this.acceptReceipt(prior.id,sender);return;}
     // The same job arriving twice (direct channel and relay) acts once.
-    if(prior.kind==='job'||prior.kind==='job-status'||prior.kind==='file-request'||prior.kind==='file-unavailable')return;}throw error;}
+    if(prior.kind==='job'||prior.kind==='job-status'||prior.kind==='file-request'||prior.kind==='file-unavailable')return;
+    if(!known(prior))return;}throw error;}
    if(this.stopped||Date.now()-this.directoryAt>10000||!this.currentSender(sender))return;
-   const payload=JSON.parse(text) as Payload,workspace=this.routed(envelope,sender,payload);
+   const payload=JSON.parse(text) as Payload;
+   // Forward compatible: a person's device may send a payload kind from a newer
+   // protocol. It is authenticated; acknowledge and ignore it, without a
+   // verification error and without showing anything.
+   if(!known(payload)&&sender.kind!=='host'&&(envelope.version===1||envelope.kind==='chat')){console.debug('Ignored an unknown peer payload kind');return;}
+   const workspace=this.routed(envelope,sender,payload);
    if(payload.kind==='message'){
-    const m=payload.message;this.validateMessage(m,sender,envelope);
+    const m=payload.message;this.validateMessage(m,sender,envelope);this.learnVersion(sender,m.v);
+    // An event this client cannot read arrives as the plain message it falls back to.
+    if(unknownExtension(m))console.debug('Showing a chat event of an unknown type as its text');
     this.options.message(m);await this.deliver(sender,{kind:'receipt',id:m.id});
    }else if(payload.kind==='receipt'){await this.acceptReceipt(payload.id,sender);}
-   else if(payload.kind==='signal')await this.signal(sender,payload.description);
+   else if(payload.kind==='signal'){this.learnVersion(sender,payload.caps?.chat);await this.signal(sender,payload.description);}
    else if(payload.kind==='job'){this.validateTimed(payload.job,validJobRequest,envelope);this.options.job?.(payload.job,sender);}
    else if(payload.kind==='job-status'){this.validateTimed(payload.status,validJobStatus,envelope);this.options.jobStatus?.(payload.status,sender,workspace);}
    else if(payload.kind==='mesh'&&workspace){this.validateTimed(payload.message,validMeshMessage,envelope);this.options.mesh?.(payload.message,sender,workspace);}
@@ -435,7 +475,7 @@ export class PeerClient {
  }
  private async offer(device:Device,iceServers:RTCIceServer[]){
   const {pc,attach}=this.connection(device,iceServers);attach(pc.createDataChannel('canopy-im-v1',{ordered:true}));
-  try{await pc.setLocalDescription(await pc.createOffer());await this.gathered(pc);if(pc.localDescription&&!this.stopped)await this.deliver(device,{kind:'signal',description:pc.localDescription.toJSON()},true);}catch(error){pc.close();this.peers.delete(device.id);throw error;}
+  try{await pc.setLocalDescription(await pc.createOffer());await this.gathered(pc);if(pc.localDescription&&!this.stopped)await this.deliver(device,{kind:'signal',description:pc.localDescription.toJSON(),caps:CAPS},true);}catch(error){pc.close();this.peers.delete(device.id);throw error;}
  }
  private async signal(device:Device,description:RTCSessionDescriptionInit){
   if(!description||!['offer','answer'].includes(description.type)||typeof description.sdp!=='string'||description.sdp.length>20000)throw Error('Invalid peer offer');
@@ -443,7 +483,7 @@ export class PeerClient {
    if(device.id>this.identity!.id)return;
    this.peers.get(device.id)?.pc.close();const {pc}=this.connection(device);
    await pc.setRemoteDescription(description);await pc.setLocalDescription(await pc.createAnswer());await this.gathered(pc);
-   if(pc.localDescription)await this.deliver(device,{kind:'signal',description:pc.localDescription.toJSON()},true);
+   if(pc.localDescription)await this.deliver(device,{kind:'signal',description:pc.localDescription.toJSON(),caps:CAPS},true);
   }else{const pc=this.peers.get(device.id)?.pc;if(pc?.signalingState==='have-local-offer')await pc.setRemoteDescription(description);}
  }
 }
