@@ -47,7 +47,7 @@ import type { Component, ComponentRole, RunCommand, VibeConfig } from "./project
 import type { RepairProblem } from "./vibeRepair";
 import type { VibeRepairTaskInput, VibeRepairTaskResult } from "./vibeRepairSession";
 import { DEFAULT_PROFILE, launchEnvSync, launchProfile } from "./profiles";
-import { getSettings } from "./settings";
+import { chosenBrainId } from "./brain";
 import { grantFor } from "./workspaceAuthority";
 import {
   failoverDecision,
@@ -749,7 +749,7 @@ async function reviewGitCheckpoint(args: {
  *  are candidates — a route whose family we cannot name cannot be ranked. */
 async function listNativeRoutes(): Promise<RouteCandidate[]> {
   const installed = await checkInstalledClis();
-  const preferred = getSettings().defaultAgent;
+  const preferred = chosenBrainId();
   // rankFleet is deliberately stable within a health tier. Put the person's
   // preferred agent first here, at the only native candidate source, so Build
   // turns, project discovery, and repair all share the same primary route.

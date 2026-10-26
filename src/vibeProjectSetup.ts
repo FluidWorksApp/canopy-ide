@@ -6,7 +6,7 @@ import {
 } from "./projects";
 import { CANOPY_MCP_ALLOWANCE } from "./agentTools";
 import { launchEnvSync } from "./profiles";
-import { getSettings } from "./settings";
+import { chosenBrainId } from "./brain";
 import * as ipc from "./ipc";
 import { DEFAULT_VIBE_BUILDER_DEPS } from "./vibeBuilderSession";
 import type { BuilderSession } from "./vibeBuilderSessionTypes";
@@ -1503,7 +1503,7 @@ export const DEFAULT_VIBE_PROJECT_SETUP_SESSION_DEPS: VibeProjectSetupSessionDep
   observe: observeVibeSetupRepository,
   run: (input, validation) => runVibeProjectSetupTask({
     ...input,
-    preferredCli: getSettings().defaultAgent,
+    preferredCli: chosenBrainId(),
     validateOutput: async (output) => {
       const result = validateVibeSetupProposal(output, await confirmCitedPaths(output, validation));
       // The rules that rejected it. Without them "invalid-output" says only

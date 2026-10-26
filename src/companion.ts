@@ -25,6 +25,7 @@ import {
   structuredRunnerFor,
   type AgentCli,
 } from "./projects";
+import { installedBrain } from "./brain";
 import { mascotDef } from "./mascots";
 import { getSettings, updateSettings } from "./settings";
 import type { StructuredRunnerLaunch } from "./structuredRunners";
@@ -191,9 +192,8 @@ export function companionModelForCli(cliId: string, stored: string): string {
  *  The order is the user's, and nothing else gets a vote:
  *
  *    1. what they picked for the companion
- *    2. their default agent, so someone who never opened this screen gets the
- *       CLI they already use
- *    3. whatever is installed
+ *    2. the brain (brain.ts) — their chosen CLI, so someone who never opened
+ *       this screen gets the one they already use — else whatever is installed
  *
  *  Deliberately NOT ranked by whether Canopy has a verified runner for the CLI.
  *  A tier is a statement about which flags were checked against which binary —
@@ -207,11 +207,8 @@ export function companionCli(
   const s = getSettings();
   const usable = AGENT_CLIS.filter((c) => installed(c.bin));
   if (usable.length === 0) return null;
-  return (
-    usable.find((c) => c.id === s.companionCli) ??
-    usable.find((c) => c.id === s.defaultAgent) ??
-    usable[0]
-  );
+  // `usable` is non-empty here, so the brain is always an installed CLI.
+  return usable.find((c) => c.id === s.companionCli) ?? installedBrain(installed);
 }
 
 /** The companion's conversation with this CLI, minted once and then kept.

@@ -25,14 +25,13 @@
 
 import * as ipc from "./ipc";
 import {
-  AGENT_CLIS,
   agentCliFor,
   startCommand,
   type AgentCli,
   type AgentLaunchOptions,
   type UnattendedContext,
 } from "./projects";
-import { getSettings } from "./settings";
+import { resolveBrain } from "./brain";
 
 /**
  * Which CLI a launch runs on.
@@ -54,25 +53,15 @@ import { getSettings } from "./settings";
  * than in what's installed: a caller naming a CLI that isn't here should get
  * "Unknown agent", not a silent substitution.
  *
- * Otherwise: the user's default agent if it is installed on this machine, else
- * the first CLI that is. Falling through to the registry — the default again,
- * then its first entry — only when nothing at all is detected, so the choice
- * never silently endorses a vendor that isn't even present.
+ * Otherwise: the brain (brain.ts) — the user's chosen CLI if it is installed on
+ * this machine, else the first CLI that is, never a vendor that isn't present.
  */
 export function pickLaunchCli(
   requested: string | undefined,
   installed: (bin: string) => boolean,
 ): AgentCli | undefined {
   if (requested) return agentCliFor(requested);
-  const here = AGENT_CLIS.filter((c) => installed(c.bin));
-  const preferred = getSettings().defaultAgent;
-  const preferredCli = agentCliFor(preferred);
-  return (
-    here.find((c) => c === preferredCli) ??
-    here[0] ??
-    preferredCli ??
-    AGENT_CLIS[0]
-  );
+  return resolveBrain(installed);
 }
 
 /** Darwin's MAX_CANON: the most a canonical-mode tty will hold for one line

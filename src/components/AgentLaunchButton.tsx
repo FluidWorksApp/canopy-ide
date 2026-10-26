@@ -4,7 +4,7 @@
 // fresh CLI in a worktree) and either an agent or task primary action.
 import { useState } from "react";
 import { AGENT_CLIS } from "../projects";
-import { getSettings } from "../settings";
+import { resolveBrain } from "../brain";
 import { agentMenuItems } from "../agentMenu";
 import { ContextMenu, useContextMenu, type MenuItem } from "./ContextMenu";
 import { AgentsIcon, TasksIcon } from "./icons";
@@ -67,15 +67,11 @@ export function AgentLaunchButton({
 }: AgentLaunchButtonProps) {
   const menu = useContextMenu();
   const [, force] = useState(0);
-  // The CLI the primary action starts: the default IF it is installed here,
-  // else the first that is. Falling through to the registry's first entry only
-  // when nothing is detected keeps the button from silently endorsing one
-  // vendor on a machine where it isn't even present.
-  const installedClis = AGENT_CLIS.filter((c) => installed[c.bin]);
+  // The CLI the primary action starts: the brain, resolved the same way every
+  // other launcher resolves it (brain.ts). `AGENT_CLIS[0]` only covers an empty
+  // registry, so the button always has something to render.
   const preferredCli =
-    installedClis.find((c) => c.id === getSettings().defaultAgent) ??
-    installedClis[0] ??
-    AGENT_CLIS[0];
+    resolveBrain((bin) => Boolean(installed[bin])) ?? AGENT_CLIS[0];
 
   const openMenu = (e: React.MouseEvent) => {
     // ContextMenu items are built once at open; bump a counter so a change in
