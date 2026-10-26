@@ -12,7 +12,7 @@ export type Device={id:string;user_id:string;public_keys:PublicIdentity;last_see
 export type Attachment={id:string;name:string;size:number;type:string;sha256:string};
 /** `v` and `event` are chat protocol v2 extensions (see chatEvents.ts): unchecked
  * here, parsed leniently by `parseExtensions`, ignored by v1 clients. */
-export type ChatMessage={id:string;sender:string;recipient:string|null;text:string;created:number;attachments?:Attachment[];v?:number;event?:unknown};
+export type ChatMessage={id:string;sender:string;recipient:string|null;text:string;created:number;attachments?:Attachment[];v?:number;event?:unknown;card?:unknown;mentions?:unknown;thread?:unknown};
 export type UnavailableReason='offline'|'expired'|'denied';
 type Payload={kind:'message';message:ChatMessage}|{kind:'receipt';id:string}|{kind:'signal';description:RTCSessionDescriptionInit;caps?:{chat?:number}}|{kind:'job';job:JobRequest}|{kind:'job-status';status:JobStatus}
  |{kind:'mesh';message:MeshMessage}|{kind:'mesh-status';status:MeshStatus}|{kind:'roster-request';request:RosterRequest}|{kind:'roster';roster:Roster}|{kind:'file-request';attachmentId:string;messageId:string}|{kind:'file-unavailable';attachmentId:string;reason:UnavailableReason};
@@ -68,6 +68,12 @@ type Options={members?:(members:{id:string;name:string}[])=>void;request:PeerReq
 /** Client-chosen identity for an optimistic message: the same id is kept in the
  * encrypted history and the pending-delivery queue, so echoes and restarts reconcile. */
 export type MessageDraft={id:string;created:number};
+/** Optional fields an ordinary visible message may carry beyond its text: a
+ * share card (cardSchema.ts), mentions and a thread. Never `event` — events go
+ * through sendEvent. */
+export type MessageExtensions={card?:unknown;mentions?:unknown;thread?:unknown};
+/** The extension fields of a message, for resending it unchanged. */
+export const extensionsOf=(m:ChatMessage):MessageExtensions|undefined=>{const ext:MessageExtensions={};if(m.card!==undefined)ext.card=m.card;if(m.mentions!==undefined)ext.mentions=m.mentions;if(m.thread!==undefined)ext.thread=m.thread;return Object.keys(ext).length?ext:undefined;};
 export type SendResult={id:string;queued:boolean;partial:boolean};
 export class PeerClient {
  private identity?:DeviceIdentity;private devices=new Map<string,Device>();private hosts=new Map<string,Device>();private peers=new Map<string,{pc:RTCPeerConnection;channel?:RTCDataChannel}>();
@@ -179,7 +185,7 @@ export class PeerClient {
 
  /** `files` may be raw files or ones already hashed by `prepareFile` (so an
   * optimistic copy and this send carry the same attachment ids). */
- async send(text:string,recipient:string|null,draft?:MessageDraft,files:(PreparedFile|(Blob&{name?:string}))[]=[]):Promise<SendResult>{
+ async send(text:string,recipient:string|null,draft?:MessageDraft,files:(PreparedFile|(Blob&{name?:string}))[]=[],ext?:MessageExtensions):Promise<SendResult>{
   if(files.length>MAX_ATTACHMENTS)throw Error(`Attach up to ${MAX_ATTACHMENTS} files per message`);
   if((!text.trim()&&!files.length)||new TextEncoder().encode(text).length>16000)throw Error('Write a message under 16 KB');
   if(this.fallbacks.size>=500)throw Error('Wait for pending messages to finish sending');
@@ -192,7 +198,7 @@ export class PeerClient {
   const devices=[...this.devices.values()].filter(d=>d.user_id!==this.options.user&&(!recipient||d.user_id===recipient));
   if(!devices.length)throw Error('No recipient devices are registered yet. Ask your teammate to sign in to Canopy.');
   const prepared=await Promise.all(files.map(file=>'meta' in file?file:prepareFile(file)));
-  const message:ChatMessage={id:draft?.id??crypto.randomUUID(),sender:this.options.user,recipient,text,created:draft?.created??Date.now(),...(prepared.length?{attachments:prepared.map(p=>p.meta)}:{}),v:CHAT_VERSION};
+  const message:ChatMessage={id:draft?.id??crypto.randomUUID(),sender:this.options.user,recipient,text,created:draft?.created??Date.now(),...(prepared.length?{attachments:prepared.map(p=>p.meta)}:{}),v:CHAT_VERSION,...ext};
   if(!validChatMessage(message))throw Error('Invalid message');
   if(new TextEncoder().encode(JSON.stringify({kind:'message',message})).length>32000)throw Error('This message is too large after encoding. Split it into smaller messages.');
   // Bytes stay on this device; only the metadata travels in the sealed message.

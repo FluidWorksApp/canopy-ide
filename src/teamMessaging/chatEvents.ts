@@ -1,5 +1,6 @@
 import type {ChatMessage} from './client';
 import {UUID,hasControl} from './messageSchema';
+import {parseCard,type Card} from './cardSchema';
 
 /** Chat protocol version this client speaks. v2 adds the optional `v` and
  * `event` fields to a chat message; v1 clients (0.4.10 and earlier) ignore
@@ -13,7 +14,7 @@ export const CHAT_VERSION=2;
 export type ReactionEvent={type:'reaction';target:string;emoji:string;op:'add'|'remove'};
 export type ChatEvent=ReactionEvent;
 /** The fields v2 adds to a chat message. */
-export type ChatExtensions={v?:number;event?:ChatEvent};
+export type ChatExtensions={v?:number;event?:ChatEvent;card?:Card};
 
 const PICTOGRAPHIC=/\p{Extended_Pictographic}|\p{Regional_Indicator}|⃣/u;
 /** A single short emoji: a modified client cannot turn reactions into free text. */
@@ -38,6 +39,7 @@ export function parseExtensions(m:ChatMessage):ChatExtensions{
  if(Number.isSafeInteger(m.v)&&(m.v as number)>0)out.v=m.v;
  const event=m.event===undefined?undefined:parseEvent(m.event);
  if(event)out.event=event;
+ const card=m.card===undefined?undefined:parseCard(m.card);if(card)out.card=card;
  return out;
 }
 export const eventOf=(m:ChatMessage)=>parseExtensions(m).event;

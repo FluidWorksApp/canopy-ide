@@ -2,7 +2,7 @@ import {loadChatHistory,saveChatMessage,forgetChatMessage,loadChatReadState,save
 import {CHAT_VERSION,eventOf,eventRecipient,reactionText,validEmoji} from './chatEvents';
 import {applyEvent,drainPending,hasReacted,nextReactionTime,EMPTY_OVERLAY,type EventOverlay,type ReactionState} from './reactions';
 import {invoke} from '@tauri-apps/api/core';
-import {PeerClient,AttachmentUnavailable,type Attachment,type AttachmentState,type ChatMessage,type Device} from './client';
+import {PeerClient,AttachmentUnavailable,extensionsOf,type MessageExtensions,type Attachment,type AttachmentState,type ChatMessage,type Device} from './client';
 import {prepareFile} from './files';
 import {MAX_ATTACHMENTS} from './messageSchema';
 import type {JobRequest,JobStatus,MeshMessage,MeshStatus,Roster,RosterRequest} from './jobSchema';
@@ -215,18 +215,18 @@ export class TeamSession {
   * saves and delivers it in the background. Rejects only when the message was
   * not accepted at all (signed out or invalid text); delivery problems are
   * reported through `delivery` on the snapshot instead. */
- send(text:string,peer:string|null,files:(Blob&{name?:string})[]=[]):Promise<SendOutcome>{
+ send(text:string,peer:string|null,files:(Blob&{name?:string})[]=[],ext?:MessageExtensions):Promise<SendOutcome>{
   if(this.invalid)return Promise.reject(Error('Sign in again to send messages'));
   if(files.length>MAX_ATTACHMENTS)return Promise.reject(Error(`Attach up to ${MAX_ATTACHMENTS} files per message`));
-  const problem=this.problem(text,peer);if(problem&&!(files.length&&problem==='Write a message first'))return Promise.reject(Error(problem));
-  if(!files.length)return this.dispatch(this.append(text,peer));
+  const problem=this.problem(text,peer,undefined,ext);if(problem&&!(files.length&&problem==='Write a message first'))return Promise.reject(Error(problem));
+  if(!files.length)return this.dispatch(this.append(text,peer,undefined,ext));
   // Hashing runs before the optimistic copy so it already carries the metadata
   // the recipients will verify the bytes against.
   return Promise.all(files.map(file=>prepareFile(file))).then(prepared=>{
    if(this.invalid)throw Error('Sign in again to send messages');
-   const attachments=prepared.map(p=>p.meta),problem=this.problem(text,peer,attachments);if(problem)throw Error(problem);
+   const attachments=prepared.map(p=>p.meta),problem=this.problem(text,peer,attachments,ext);if(problem)throw Error(problem);
    for(const p of prepared)this.blobs.set(p.meta.id,p.blob);
-   return this.dispatch(this.append(text,peer,attachments));
+   return this.dispatch(this.append(text,peer,attachments,ext));
   });
  }
  /** The bytes of an attachment: this device's copy, or pulled from the sender's
@@ -243,7 +243,7 @@ export class TeamSession {
  /** Sends a failed, expired or waiting message again as a new message at the end of the conversation. */
  retry(id:string):Promise<SendOutcome>{
   const message=this.resendable(id);if(!message)return Promise.reject(Error('This message cannot be resent'));
-  this.drop(id,false);return this.dispatch(this.append(message.text,message.recipient,message.attachments));
+  this.drop(id,false);return this.dispatch(this.append(message.text,message.recipient,message.attachments,extensionsOf(message)));
  }
  /** Removes a message that was not delivered from this device. */
  discard(id:string){if(this.resendable(id))this.drop(id);}
@@ -251,17 +251,17 @@ export class TeamSession {
   const message=this.snapshot.messages.find(m=>m.id===id),state=this.snapshot.delivery[id]?.state;
   return !this.invalid&&message?.sender===this.user&&(state==='failed'||state==='expired'||state==='waiting')?message:undefined;
  }
- private problem(text:string,peer:string|null,attachments?:Attachment[]){
+ private problem(text:string,peer:string|null,attachments?:Attachment[],ext?:MessageExtensions){
   const bytes=(value:string)=>new TextEncoder().encode(value).length;
   if(!text.trim()&&!attachments?.length)return 'Write a message first';
   if(bytes(text)>16000)return 'Write a message under 16 KB';
-  if(bytes(JSON.stringify({kind:'message',message:{id:crypto.randomUUID(),sender:this.user,recipient:peer,text,created:Date.now(),attachments}}))>32000)return 'This message is too large after encoding. Split it into smaller messages.';
+  if(bytes(JSON.stringify({kind:'message',message:{id:crypto.randomUUID(),sender:this.user,recipient:peer,text,created:Date.now(),attachments,v:CHAT_VERSION,...ext}}))>32000)return 'This message is too large after encoding. Split it into smaller messages.';
   return '';
  }
- private append(text:string,recipient:string|null,attachments?:Attachment[]):ChatMessage{
+ private append(text:string,recipient:string|null,attachments?:Attachment[],ext?:MessageExtensions):ChatMessage{
   // Strictly increasing timestamps keep rapid sends in order after a restart.
   const last=this.snapshot.messages.findLast(m=>m.sender===this.user)?.created??0;
-  const message:ChatMessage={id:crypto.randomUUID(),sender:this.user,recipient,text,created:Math.max(Date.now(),last+1),...(attachments?.length?{attachments}:{}),v:CHAT_VERSION};
+  const message:ChatMessage={id:crypto.randomUUID(),sender:this.user,recipient,text,created:Math.max(Date.now(),last+1),...(attachments?.length?{attachments}:{}),v:CHAT_VERSION,...ext};
   this.update({messages:[...this.snapshot.messages.slice(-499),message],delivery:{...this.snapshot.delivery,[message.id]:{state:'sending'}}});
   // The encrypted local copy (with this id) is written right away, so a restart
   // keeps the message and the transport's own save reconciles with it.
@@ -276,7 +276,7 @@ export class TeamSession {
    if(Date.now()-message.created>STALE_MS){this.setDelivery(message.id,{state:'failed',detail:'Sending took too long.'});return outcome();}
    try{
     const files=await Promise.all((message.attachments??[]).map(async meta=>{const blob=this.blobs.get(meta.id)??await this.client.localFile(meta.id);if(!blob)throw Error(`${meta.name} is no longer on this device`);return {meta,blob};}));
-    const draft={id:message.id,created:message.created},result=await (files.length?this.client.send(message.text,message.recipient,draft,files):this.client.send(message.text,message.recipient,draft));
+    const draft={id:message.id,created:message.created},ext=extensionsOf(message),result=await (files.length||ext?this.client.send(message.text,message.recipient,draft,files,ext):this.client.send(message.text,message.recipient,draft));
     // The transport now holds the bytes in local storage; drop the in-memory copy.
     for(const f of files)this.blobs.delete(f.meta.id);
     if(this.discarded.has(message.id)){void this.client.discard(message.id).catch(()=>{});void forgetChatMessage(this.user,this.team,message.id).catch(()=>{});return outcome();}
