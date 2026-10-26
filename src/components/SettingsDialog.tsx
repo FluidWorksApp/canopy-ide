@@ -1665,6 +1665,22 @@ export function SettingsDialog({ onClose, initialTab = "appearance" }: SettingsD
                         : "Shows only who wrote; message text stays in the encrypted conversation."
                     }
                   />
+                  <Checkbox
+                    checked={s.teamMentionNotifications}
+                    onChange={(v) => patch({ teamMentionNotifications: v })}
+                    label="Always notify me when I'm mentioned"
+                    hint="Mentions of you, review requests to you and replies to your messages notify even in muted conversations or with team notifications off. @channel doesn't count."
+                  />
+                  <Checkbox
+                    checked={s.teamReadReceipts}
+                    onChange={(v) => patch({ teamReadReceipts: v })}
+                    label="Send and show read receipts"
+                    hint={
+                      s.teamReadReceipts
+                        ? "Teammates on Canopy 0.4.11 or later see when you've read their messages, and you see when they've read yours."
+                        : "Off: teammates don't see when you've read their messages, and you don't see when they've read yours."
+                    }
+                  />
                 </Item>
                 <Item
                   name="Default agent"

@@ -1,0 +1,38 @@
+/* Threads, edits, deletes, mentions and delivery details in team chat. */
+.account-chat.has-thread{position:relative}
+.account-chat.has-thread>.account-chat-transcript,.account-chat.has-thread>.account-chat-composer{margin-inline-end:min(380px,45%)}
+.chat-thread-pane{position:absolute;top:0;bottom:0;inset-inline-end:0;width:min(380px,45%);display:flex;flex-direction:column;min-height:0;border-inline-start:1px solid var(--border);background:var(--bg)}
+.chat-thread-head{display:flex;align-items:center;justify-content:space-between;gap:var(--sp-2);min-height:48px;padding:0 var(--sp-3);border-bottom:1px solid var(--border);box-sizing:border-box}
+.chat-thread-log{flex:1;min-height:0;overflow:auto;padding:var(--sp-3);display:flex;flex-direction:column}
+.chat-thread-log .account-chat-msg{max-width:100%}
+.chat-thread-count{margin:var(--sp-3) 0 var(--sp-1);font-size:var(--fs-xs);color:var(--text-muted);border-bottom:1px solid var(--border);padding-bottom:2px}
+.chat-thread-missing{margin:0;font-style:italic;color:var(--text-muted);font-size:var(--fs-sm)}
+.chat-thread-line{display:inline-flex;align-items:center;gap:6px;margin-top:4px;padding:0;border:0;background:none;color:var(--accent);font:inherit;font-size:var(--fs-xs);cursor:pointer}
+.chat-thread-line:hover{text-decoration:underline}
+.chat-thread-line:focus-visible{outline:1px solid var(--accent);outline-offset:1px;border-radius:var(--r-xs)}
+.chat-new-replies{padding:1px 6px;border-radius:999px;background:var(--accent);color:var(--on-accent);font-weight:600}
+.chat-orphan{display:block;font-size:10px;color:var(--text-muted);font-style:italic;margin-bottom:2px}
+.chat-msg-actions{position:absolute;top:-10px;inset-inline-end:66px;display:inline-flex;gap:2px;opacity:0;transition:opacity var(--dur-fast) var(--ease-out)}
+.account-chat-msg:hover .chat-msg-actions,.chat-msg-actions:focus-within{opacity:1}
+.chat-msg-actions button{display:inline-grid;place-items:center;min-width:22px;height:20px;padding:0 4px;border:1px solid var(--border);border-radius:var(--r-sm);background:var(--bg-raised);color:var(--text-muted);font:inherit;font-size:11px;line-height:1;cursor:pointer}
+.chat-msg-actions button:hover{color:var(--text)}
+.chat-msg-actions button:focus-visible{outline:1px solid var(--accent);outline-offset:1px}
+.chat-deleted{font-style:italic;color:var(--text-muted)}
+.chat-edited{font-size:10px;color:var(--text-muted);cursor:help}
+.account-chat-msg.mentions-me{box-shadow:inset 3px 0 0 var(--warn)}
+.chat-inline-edit textarea{width:100%;box-sizing:border-box;min-height:28px;resize:none;padding:4px 6px;border:1px solid var(--accent);border-radius:var(--r-sm);background:var(--bg-raised);color:var(--text);font:inherit;line-height:var(--lh-ui)}
+.chat-inline-edit small{text-align:left}
+.chat-confirm{display:flex;flex-wrap:wrap;align-items:center;gap:var(--sp-2);margin-top:4px;padding:6px 8px;border:1px solid var(--danger,var(--warn));border-radius:var(--r-sm);background:var(--bg-raised);font-size:var(--fs-xs)}
+.chat-confirm span{flex:1 1 200px}
+.chat-mention-list{list-style:none;margin:0 0 4px;padding:2px;border:1px solid var(--border);border-radius:var(--r-sm);background:var(--bg-raised);max-height:180px;overflow:auto}
+.chat-mention-list button{display:block;width:100%;text-align:left;padding:3px 8px;border:0;background:none;color:var(--text);font:inherit;font-size:var(--fs-sm);border-radius:var(--r-xs);cursor:pointer}
+.chat-mention-list [aria-selected="true"] button,.chat-mention-list button:hover{background:color-mix(in srgb,var(--accent) 18%,transparent)}
+.team-unread.is-muted{background:color-mix(in srgb,var(--text-muted) 55%,transparent);color:var(--bg)}
+.team-mention{flex:0 0 auto;min-width:16px;height:16px;display:inline-grid;place-items:center;border-radius:999px;background:var(--danger,#d64545);color:#fff;font-size:10px;font-weight:700;line-height:1}
+.team-muted-mark{flex:0 0 auto;font-size:10px;opacity:.6}
+.chat-mute{display:inline-grid;place-items:center;color:var(--text-muted)}
+.chat-mute[aria-pressed="true"]{color:var(--warn)}
+@media (max-width:640px){
+ .chat-thread-pane{width:100%}
+ .account-chat.has-thread>.account-chat-transcript,.account-chat.has-thread>.account-chat-composer{margin-inline-end:0;visibility:hidden}
+}
