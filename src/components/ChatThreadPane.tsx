@@ -104,7 +104,7 @@ export function ChatThreadPane({session,root,peer,userId,name,active,onClose,ren
  const send=()=>{
   const text=draft;if(!text.trim())return;setDraft('');setError('');
   const {mentions,mentionsAll}=mentionsFor(text,members,userId,peer);
-  session.send(text,peer,[],{thread:root,...(mentions?{mentions}:{}),...(mentionsAll?{mentionsAll}:{})}).catch((e:unknown)=>{setError(e instanceof Error?e.message:String(e));setDraft(current=>current||text);});
+  session.send(text,peer,[],{thread:{root},...(mentions?{mentions}:{}),...(mentionsAll?{mentionsAll}:{})}).catch((e:unknown)=>{setError(e instanceof Error?e.message:String(e));setDraft(current=>current||text);});
  };
  const show=(m:ChatMessage)=>renderMessage?renderMessage(m):<article key={m.id} className={`account-chat-msg${m.sender===userId?' own':''}`} data-message={m.id}>
   <header><strong>{name(m.sender)}</strong><time dateTime={new Date(m.created).toISOString()}>{time(m.created)}</time></header>

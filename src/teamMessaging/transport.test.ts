@@ -89,7 +89,7 @@ it('real HTTP relay carries v3 replies, mentions, edits, deletes, read receipts 
   await eventually(()=>received.some(m=>m.id===root.id));
   // Bob's client learned from that message that Alice speaks v3.
   await bob.sendReadReceipt(root.id,'alice');await eventually(()=>reads.includes(root.id));
-  const reply=await alice.send('Synthetic reply SECRET-REPLY',null,{id:crypto.randomUUID(),created:Date.now(),thread:{root:root.id},mentions:['bob'],mentionsAll:true});
+  const reply=await alice.send('Synthetic reply SECRET-REPLY',null,{id:crypto.randomUUID(),created:Date.now()},[],{thread:{root:root.id},mentions:['bob'],mentionsAll:true});
   // Alice learns Bob's version from his read receipt; events and backfill need it.
   const edit:ChatMessage={id:crypto.randomUUID(),sender:'alice',recipient:null,text:'✎ edited: SECRET-EDIT',created:Date.now(),v:3,event:{type:'edit',target:root.id,text:'SECRET-EDIT'}};
   const del:ChatMessage={id:crypto.randomUUID(),sender:'alice',recipient:null,text:'🗑 Deleted a message',created:Date.now(),v:3,event:{type:'delete',target:reply.id}};

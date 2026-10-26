@@ -1,10 +1,10 @@
 import {loadChatHistory,saveChatMessage,forgetChatMessage,loadChatReadState,saveChatReadState,loadChatEvents,saveChatEvent,forgetChatEvent,saveChatRecord,loadChatRecords,forgetChatRecords} from './history';
-import {BACKFILL_MS,CHAT_VERSION,EDITS_VERSION,DELETE_TEXT,MAX_TEXT_BYTES,editText,eventOf,eventRecipient,parseExtensions,parseMentions,reactionText,validEmoji} from './chatEvents';
+import {BACKFILL_MS,CHAT_VERSION,EDITS_VERSION,DELETE_TEXT,MAX_TEXT_BYTES,editText,eventOf,eventRecipient,parseThread,parseMentions,reactionText,validEmoji} from './chatEvents';
 import {applyEvent,drainPending,hasReacted,newer,nextReactionTime,EMPTY_OVERLAY,type DeleteEntry,type EditEntry,type EventOverlay,type ReactionState} from './reactions';
 import {invoke} from '@tauri-apps/api/core';
-import {PeerClient,AttachmentUnavailable,type Attachment,type AttachmentState,type ChatMessage,type Device,type MessageDraft} from './client';
+import {PeerClient,AttachmentUnavailable,type Attachment,type AttachmentState,type ChatMessage,type Device} from './client';
 import {prepareFile} from './files';
-import {MAX_ATTACHMENTS} from './messageSchema';
+import {MAX_ATTACHMENTS,extensionsOf,type MessageExtensions} from './messageSchema';
 import type {JobRequest,JobStatus,MeshMessage,MeshStatus,Roster,RosterRequest} from './jobSchema';
 import {conversationKey,countUnread,threadRoot,type ConversationUnread} from './unread';
 import {getSettings} from '../settings';
@@ -24,9 +24,7 @@ export type {AttachmentState};
 /** Who a message whose delivery expired is still waiting for, and until when
  * it will be re-sent to them (backfill) once one of their devices is online. */
 export type Awaiting={users:string[];until:number};
-/** Options of a new message: a reply in `thread` (a root message id) and the
- * people it names. */
-export type SendOptions={thread?:string;mentions?:string[];mentionsAll?:boolean};
+
 type Snapshot={unreadIds:string[];restoredIds:string[];members:Record<string,string>;messages:ChatMessage[];receipts:Record<string,string[]>;delivery:Record<string,Delivery>;attachments:Record<string,AttachmentState>;reactions:ReactionState;undeliveredReactions:Record<string,string[]>;status:string;
  /** Latest edit per message id. */
  edits:Record<string,EditEntry>;
@@ -272,7 +270,8 @@ export class TeamSession {
   const messages=fresh?(backfill&&late?insertSorted(this.snapshot.messages,message):[...this.snapshot.messages,message]).slice(-500):this.snapshot.messages;
   this.update({unreadIds:incoming?[...this.snapshot.unreadIds.slice(-499),message.id]:this.snapshot.unreadIds,messages});this.persistReadState();
   if(fresh)this.drainEvents();
-  if(!incoming)return;
+  // A delete that arrived first has already removed it: nothing to announce.
+  if(!incoming||this.snapshot.deleted[message.id])return;
   if(backfill){this.queueBackfillSummary(message);return;}
   this.emitMessage(message);
  }
@@ -375,7 +374,7 @@ export class TeamSession {
   * account follows stay unread until that thread is opened (`markThreadRead`). */
  markRead(peer:string|null){
   const inConversation=(m:ChatMessage)=>peer===null?m.recipient===null:m.sender===peer&&m.recipient===this.user;
-  this.clearUnread(m=>inConversation(m)&&!threadRoot(m,this.find));
+  this.clearUnread(m=>{if(!inConversation(m))return false;const root=threadRoot(m,this.find);return !root||!this.find(root);});
  }
  /** Marks the replies of one thread read. */
  markThreadRead(root:string){this.clearUnread(m=>threadRoot(m,this.find)===root);}
@@ -518,11 +517,11 @@ export class TeamSession {
   * saves and delivers it in the background. Rejects only when the message was
   * not accepted at all (signed out or invalid text); delivery problems are
   * reported through `delivery` on the snapshot instead. */
- send(text:string,peer:string|null,files:(Blob&{name?:string})[]=[],options:SendOptions={}):Promise<SendOutcome>{
+ send(text:string,peer:string|null,files:(Blob&{name?:string})[]=[],ext?:MessageExtensions):Promise<SendOutcome>{
   if(this.invalid)return Promise.reject(Error('Sign in again to send messages'));
   if(files.length>MAX_ATTACHMENTS)return Promise.reject(Error(`Attach up to ${MAX_ATTACHMENTS} files per message`));
-  let extras:Extras;
-  try{extras=this.extras(peer,options);}catch(error){return Promise.reject(error);}
+  let extras:MessageExtensions|undefined;
+  try{extras=this.extras(peer,ext);}catch(error){return Promise.reject(error);}
   const problem=this.problem(text,peer,undefined,extras);if(problem&&!(files.length&&problem==='Write a message first'))return Promise.reject(Error(problem));
   if(!files.length)return this.dispatch(this.append(text,peer,undefined,extras));
   // Hashing runs before the optimistic copy so it already carries the metadata
@@ -536,20 +535,22 @@ export class TeamSession {
  }
  /** Checks and normalizes reply and mention options: a reply's root is in the
   * same conversation, and a reply to a reply joins the first message's thread. */
- private extras(peer:string|null,options:SendOptions):Extras{
-  const out:Extras={};
-  if(options.thread!==undefined){
-   const root=this.find(options.thread);
+ private extras(peer:string|null,ext?:MessageExtensions):MessageExtensions|undefined{
+  if(!ext)return undefined;
+  const out:MessageExtensions={};
+  if(ext.card!==undefined)out.card=ext.card;
+  if(ext.thread!==undefined){
+   const ref=parseThread(ext.thread),root=ref&&this.find(ref.root);
    const sameConversation=(m:ChatMessage)=>peer===null?m.recipient===null:m.recipient!==null&&[m.sender,m.recipient].sort().join('\u0000')===[this.user,peer].sort().join('\u0000');
    if(!root||!sameConversation(root))throw Error('Reply to a message in this conversation');
    out.thread={root:threadRoot(root,this.find)??root.id};
   }
-  if(options.mentions?.length){
-   const known=options.mentions.filter(id=>id!==this.user&&(id in this.snapshot.members||id===peer));
+  if(Array.isArray(ext.mentions)&&ext.mentions.length){
+   const known=ext.mentions.filter((id):id is string=>typeof id==='string'&&id!==this.user&&(id in this.snapshot.members||id===peer));
    const mentions=parseMentions([...new Set(known)].slice(0,50));if(mentions)out.mentions=mentions;
   }
-  if(options.mentionsAll&&peer===null)out.mentionsAll=true;
-  return out;
+  if(ext.mentionsAll===true&&peer===null)out.mentionsAll=true;
+  return Object.keys(out).length?out:undefined;
  }
  /** The bytes of an attachment: this device's copy, or pulled from the sender's
   * device over a direct connection. State changes land in `attachments`. */
@@ -565,8 +566,7 @@ export class TeamSession {
  /** Sends a failed, expired or waiting message again as a new message at the end of the conversation. */
  retry(id:string):Promise<SendOutcome>{
   const message=this.resendable(id);if(!message)return Promise.reject(Error('This message cannot be resent'));
-  const {thread,mentions,mentionsAll}=parseExtensions(message);
-  this.drop(id,false);return this.dispatch(this.append(message.text,message.recipient,message.attachments,{...(thread?{thread}:{}),...(mentions?{mentions}:{}),...(mentionsAll?{mentionsAll}:{})}));
+  this.drop(id,false);return this.dispatch(this.append(message.text,message.recipient,message.attachments,extensionsOf(message)));
  }
  /** Retries a queued message's deliveries now instead of at its next scheduled retry. */
  async retryNow(id:string){
@@ -580,16 +580,16 @@ export class TeamSession {
   const message=this.snapshot.messages.find(m=>m.id===id),state=this.snapshot.delivery[id]?.state;
   return !this.invalid&&message?.sender===this.user&&(state==='failed'||state==='expired'||state==='waiting')?message:undefined;
  }
- private problem(text:string,peer:string|null,attachments?:Attachment[],extras:Extras={}){
+ private problem(text:string,peer:string|null,attachments?:Attachment[],ext?:MessageExtensions){
   if(!text.trim()&&!attachments?.length)return 'Write a message first';
   if(bytes(text)>16000)return 'Write a message under 16 KB';
-  if(bytes(JSON.stringify({kind:'message',message:{id:crypto.randomUUID(),sender:this.user,recipient:peer,text,created:Date.now(),attachments,v:CHAT_VERSION,...extras}}))>32000)return 'This message is too large after encoding. Split it into smaller messages.';
+  if(bytes(JSON.stringify({kind:'message',message:{id:crypto.randomUUID(),sender:this.user,recipient:peer,text,created:Date.now(),attachments,v:CHAT_VERSION,...ext}}))>32000)return 'This message is too large after encoding. Split it into smaller messages.';
   return '';
  }
- private append(text:string,recipient:string|null,attachments?:Attachment[],extras:Extras={}):ChatMessage{
+ private append(text:string,recipient:string|null,attachments?:Attachment[],ext?:MessageExtensions):ChatMessage{
   // Strictly increasing timestamps keep rapid sends in order after a restart.
   const last=this.snapshot.messages.findLast(m=>m.sender===this.user)?.created??0;
-  const message:ChatMessage={id:crypto.randomUUID(),sender:this.user,recipient,text,created:Math.max(Date.now(),last+1),...(attachments?.length?{attachments}:{}),v:CHAT_VERSION,...extras};
+  const message:ChatMessage={id:crypto.randomUUID(),sender:this.user,recipient,text,created:Math.max(Date.now(),last+1),...(attachments?.length?{attachments}:{}),v:CHAT_VERSION,...ext};
   this.update({messages:[...this.snapshot.messages.slice(-499),message],delivery:{...this.snapshot.delivery,[message.id]:{state:'sending'}}});
   // The encrypted local copy (with this id) is written right away, so a restart
   // keeps the message and the transport's own save reconciles with it.
@@ -604,9 +604,7 @@ export class TeamSession {
    if(Date.now()-message.created>STALE_MS){this.setDelivery(message.id,{state:'failed',detail:'Sending took too long.'});return outcome();}
    try{
     const files=await Promise.all((message.attachments??[]).map(async meta=>{const blob=this.blobs.get(meta.id)??await this.client.localFile(meta.id);if(!blob)throw Error(`${meta.name} is no longer on this device`);return {meta,blob};}));
-    const {thread,mentions,mentionsAll}=parseExtensions(message);
-    const draft:MessageDraft={id:message.id,created:message.created,...(thread?{thread}:{}),...(mentions?{mentions}:{}),...(mentionsAll?{mentionsAll}:{})};
-    const result=await (files.length?this.client.send(message.text,message.recipient,draft,files):this.client.send(message.text,message.recipient,draft));
+    const draft={id:message.id,created:message.created},ext=extensionsOf(message),result=await (ext?this.client.send(message.text,message.recipient,draft,files,ext):files.length?this.client.send(message.text,message.recipient,draft,files):this.client.send(message.text,message.recipient,draft));
     // The transport now holds the bytes in local storage; drop the in-memory copy.
     for(const f of files)this.blobs.delete(f.meta.id);
     if(this.discarded.has(message.id)){void this.client.discard(message.id).catch(()=>{});void forgetChatMessage(this.user,this.team,message.id).catch(()=>{});return outcome();}
@@ -633,7 +631,7 @@ export class TeamSession {
  }
 
 }
-type Extras={thread?:{root:string};mentions?:string[];mentionsAll?:true};
+
 export function teamSession(team:string,user:string){const key=`${user}:${team}`;let session=sessions.get(key);if(!session){session=new TeamSession(team,user);sessions.set(key,session);}return session;}
 
 /** Every team transport this IDE holds open (the background keeps one per team). */

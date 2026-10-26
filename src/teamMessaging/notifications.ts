@@ -25,18 +25,20 @@ export function setMuted(team:string,peer:string|null,muted:boolean){
 }
 
 const firstLine=(text:string)=>{const line=text.split(/\r?\n/).map(l=>l.trim()).find(Boolean)??'';return line.length>120?`${line.slice(0,119)}…`:line;};
-/** A review request card naming this account among its reviewers. Cards are
- * defined elsewhere (and may be absent or malformed), so this only reads. */
-export function reviewRequestFor(message:unknown,user:string){
+/** A review request card to this account: card type 'review-request' with this
+ * account among its mentions (the reviewers), or in a `reviewers` list. Cards
+ * are defined elsewhere (and may be absent or malformed), so this only reads. */
+export function reviewRequestFor(message:TeamMessageEvent['message'],user:string){
  const card=(message as {card?:unknown})?.card as {type?:unknown;reviewers?:unknown}|undefined;
- return !!card&&typeof card==='object'&&card.type==='review-request'&&Array.isArray(card.reviewers)&&card.reviewers.some(r=>r===user||(typeof r==='object'&&r!==null&&(r as {id?:unknown}).id===user));
+ if(!card||typeof card!=='object'||card.type!=='review-request')return false;
+ return mentionsUser(message,user)||(Array.isArray(card.reviewers)&&card.reviewers.some(r=>r===user||(typeof r==='object'&&r!==null&&(r as {id?:unknown}).id===user)));
 }
 /** Why a message is for this account personally, if it is: those still notify
  * in a muted conversation and, with Mention notifications on, when team
  * message notifications are off. @channel is not personal. */
 export function personalReason(event:TeamMessageEvent):'mention'|'review'|'reply'|undefined{
- if(mentionsUser(event.message,event.user))return 'mention';
  if(reviewRequestFor(event.message,event.user))return 'review';
+ if(mentionsUser(event.message,event.user))return 'mention';
  if(event.replyToOwn)return 'reply';
  return undefined;
 }

@@ -23,7 +23,7 @@ it('keeps a muted conversation quiet, except for a personal mention, a review re
  arrive(channel({mentionsAll:true}));
  expect(post).not.toHaveBeenCalled();
  arrive(channel({mentions:['me']}));
- arrive(channel({card:{type:'review-request',reviewers:['me']}} as never));
+ arrive(channel({card:{type:'review-request'},mentions:['me']} as never));
  arrive(channel({},{replyToOwn:true}));
  expect(post.mock.calls.map(([i])=>i.title)).toEqual(['Ada mentioned you in #Core: Deploying now','Ada asked you for a review: Deploying now','Ada replied to your message: Deploying now']);
  // Someone else's mention, or a malformed card, is not personal.

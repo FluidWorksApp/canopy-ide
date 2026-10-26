@@ -186,14 +186,29 @@ describe('threads and unread',()=>{
   expect(session.unread().channel).toBe(2);
   session.markRead(null);expect(session.getSnapshot().unreadIds).toEqual([reply.id]);
   session.markThreadRead(root.id);expect(session.getSnapshot().unreadIds).toEqual([]);
+  // A reply whose root is not on this device is read with the conversation.
+  const orphan=message({sender:'ada',thread:{root:uuid()}});events.message(orphan);
+  expect(session.unread().channel).toBe(1);session.markRead(null);expect(session.getSnapshot().unreadIds).toEqual([]);
+ });
+ it('does not announce a message whose delete arrived first',async()=>{
+  const {session,events}=await open();
+  const heard:TeamMessageEvent[]=[];const stop=subscribeTeamMessages(e=>heard.push(e));
+  const target=message({sender:'ada'});events.message(del(target));events.message(target);
+  expect(heard).toEqual([]);expect(session.getSnapshot().deleted[target.id]).toBeDefined();expect(session.unread().total).toBe(0);
+  stop();
  });
  it('sends a reply into the root\'s thread, flattening a reply to a reply',async()=>{
   const {session,events}=await open();
   const root=message({sender:'ada'}),reply=message({sender:'sam',thread:{root:root.id}});events.message(root);events.message(reply);
-  void session.send('me too',null,[],{thread:reply.id,mentions:['ada','stranger','me']}).catch(()=>{});
+  void session.send('me too',null,[],{thread:{root:reply.id},mentions:['ada','stranger','me']}).catch(()=>{});
   const sent=session.getSnapshot().messages.at(-1)!;
   expect(sent).toMatchObject({text:'me too',thread:{root:root.id},mentions:['ada']});
   const dm=message({sender:'ada',recipient:'me'});events.message(dm);
-  await expect(session.send('x',null,[],{thread:dm.id})).rejects.toThrow('Reply to a message in this conversation');
+  await expect(session.send('x',null,[],{thread:{root:dm.id}})).rejects.toThrow('Reply to a message in this conversation');
+  // The transport stub fails the send; a retry keeps the reply's thread and mentions.
+  await flush();await flush();
+  expect(session.getSnapshot().delivery[sent.id]?.state).toMatch(/^(failed|waiting)$/);
+  const again=await session.retry(sent.id);
+  expect(session.getSnapshot().messages.find(m=>m.id===again.id)).toMatchObject({text:'me too',thread:{root:root.id},mentions:['ada']});
  });
 });

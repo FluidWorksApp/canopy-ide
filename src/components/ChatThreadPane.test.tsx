@@ -33,7 +33,7 @@ it('keeps replies in the thread pane and sends a reply into the root thread',asy
  await waitFor(()=>expect(mock.markThreadRead).toHaveBeenCalledWith(R));
  const reply=within(pane).getByRole('textbox',{name:'Reply'});
  fireEvent.change(reply,{target:{value:'On it @Ada Lovelace'}});fireEvent.keyDown(reply,{key:'Enter'});
- await waitFor(()=>expect(mock.send).toHaveBeenCalledWith('On it @Ada Lovelace',null,[],{thread:R,mentions:['ada']}));
+ await waitFor(()=>expect(mock.send).toHaveBeenCalledWith('On it @Ada Lovelace',null,[],{thread:{root:R},mentions:['ada']}));
 });
 
 it('edits your last message with Up in an empty box, and deletes after naming who keeps it',async()=>{

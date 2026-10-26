@@ -53,7 +53,8 @@ export function countUnread(messages:readonly ChatMessage[],unreadIds:readonly s
   if(!unread.has(m.id)||m.sender===user)continue;
   if(m.recipient!==null&&m.recipient!==user)continue;
   const root=threadRoot(m,find);
-  if(root&&!(followed??=followedThreads(messages,user,find)).has(root))continue;
+  // A reply whose root is not on this device shows in line, so it counts like any message.
+  if(root&&find(root)&&!(followed??=followedThreads(messages,user,find)).has(root))continue;
   const mention=mentionsUser(m,user);
   if(m.recipient===null){channel++;if(mention)mentionChannel++;}
   else{peers[m.sender]=(peers[m.sender]??0)+1;if(mention)mentionPeers[m.sender]=(mentionPeers[m.sender]??0)+1;}

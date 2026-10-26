@@ -1,8 +1,8 @@
-import {validChatMessage,UUID,MAX_ATTACHMENTS} from './messageSchema';
+import {validChatMessage,UUID,MAX_ATTACHMENTS,type MessageExtensions} from './messageSchema';
 import {chatFileStore,prepareFile,sha256,bytesOf,type FileStore,type FileRecord,type PreparedFile} from './files';
 import {open,seal,registration,MessageReplayError,type Envelope,type EnvelopeKind,type PublicIdentity,type Address} from './crypto';
 import {deviceIdentity,rememberMessage,messageOutbox,type MessageOutbox,type PendingEnvelope,type DeviceIdentity} from './store';
-import {BACKFILL_MS,BACKFILL_SKEW_MS,CHAT_VERSION,EDITS_VERSION,eventOf,eventVersion,parseMentions,parseThread,unknownExtension,type ThreadRef} from './chatEvents';
+import {BACKFILL_MS,BACKFILL_SKEW_MS,CHAT_VERSION,EDITS_VERSION,eventOf,eventVersion,parseMentions,parseThread,unknownExtension} from './chatEvents';
 import {PeerVersions,localVersionStore,type VersionStore} from './peerVersions';
 import {validJobRequest,validJobStatus,validMeshMessage,validMeshStatus,validRoster,validRosterRequest,type JobRequest,type JobStatus,type MeshMessage,type MeshStatus,type Roster,type RosterRequest} from './jobSchema';
 /** `last_seen_at` is bumped by every poll the device makes, so it is the
@@ -13,7 +13,7 @@ export type Attachment={id:string;name:string;size:number;type:string;sha256:str
 /** `v` and `event` (v2), `thread`, `mentions` and `mentionsAll` (v3) are chat
  * protocol extensions (see chatEvents.ts): unchecked here, parsed leniently by
  * `parseExtensions`, ignored by older clients. */
-export type ChatMessage={id:string;sender:string;recipient:string|null;text:string;created:number;attachments?:Attachment[];v?:number;event?:unknown;thread?:unknown;mentions?:unknown;mentionsAll?:unknown};
+export type ChatMessage={id:string;sender:string;recipient:string|null;text:string;created:number;attachments?:Attachment[];v?:number;event?:unknown;card?:unknown;mentions?:unknown;thread?:unknown;mentionsAll?:unknown};
 export type UnavailableReason='offline'|'expired'|'denied';
 /** `backfill` (v3): a message its author re-sends after the original delivery
  * expired, so it may be older than the usual five-minute window. `read` (v3):
@@ -90,7 +90,7 @@ type Options={members?:(members:{id:string;name:string}[])=>void;request:PeerReq
  random?:()=>number};
 /** Client-chosen identity for an optimistic message: the same id is kept in the
  * encrypted history and the pending-delivery queue, so echoes and restarts reconcile. */
-export type MessageDraft={id:string;created:number;thread?:ThreadRef;mentions?:string[];mentionsAll?:true};
+export type MessageDraft={id:string;created:number};
 export type SendResult={id:string;queued:boolean;partial:boolean};
 export class PeerClient {
  private identity?:DeviceIdentity;private devices=new Map<string,Device>();private hosts=new Map<string,Device>();private peers=new Map<string,{pc:RTCPeerConnection;channel?:RTCDataChannel}>();
@@ -235,7 +235,7 @@ export class PeerClient {
 
  /** `files` may be raw files or ones already hashed by `prepareFile` (so an
   * optimistic copy and this send carry the same attachment ids). */
- async send(text:string,recipient:string|null,draft?:MessageDraft,files:(PreparedFile|(Blob&{name?:string}))[]=[]):Promise<SendResult>{
+ async send(text:string,recipient:string|null,draft?:MessageDraft,files:(PreparedFile|(Blob&{name?:string}))[]=[],ext?:MessageExtensions):Promise<SendResult>{
   if(files.length>MAX_ATTACHMENTS)throw Error(`Attach up to ${MAX_ATTACHMENTS} files per message`);
   if((!text.trim()&&!files.length)||new TextEncoder().encode(text).length>16000)throw Error('Write a message under 16 KB');
   if(this.fallbacks.size>=500)throw Error('Wait for pending messages to finish sending');
@@ -248,9 +248,9 @@ export class PeerClient {
   const devices=[...this.devices.values()].filter(d=>d.user_id!==this.options.user&&(!recipient||d.user_id===recipient));
   if(!devices.length)throw Error('No recipient devices are registered yet. Ask your teammate to sign in to Canopy.');
   const prepared=await Promise.all(files.map(file=>'meta' in file?file:prepareFile(file)));
-  const thread=draft?.thread===undefined?undefined:parseThread(draft.thread),mentions=draft?.mentions===undefined?undefined:parseMentions(draft.mentions);
-  if((draft?.thread!==undefined&&!thread)||(draft?.mentions!==undefined&&!mentions)||(draft?.mentionsAll!==undefined&&(draft.mentionsAll!==true||recipient!==null)))throw Error('Invalid message');
-  const message:ChatMessage={id:draft?.id??crypto.randomUUID(),sender:this.options.user,recipient,text,created:draft?.created??Date.now(),...(prepared.length?{attachments:prepared.map(p=>p.meta)}:{}),v:CHAT_VERSION,...(thread?{thread}:{}),...(mentions?{mentions}:{}),...(draft?.mentionsAll?{mentionsAll:true as const}:{})};
+  // A thread, mentions and @channel must be well formed; a card is checked by its own schema.
+  if((ext?.thread!==undefined&&!parseThread(ext.thread))||(ext?.mentions!==undefined&&!parseMentions(ext.mentions))||(ext?.mentionsAll!==undefined&&(ext.mentionsAll!==true||recipient!==null)))throw Error('Invalid message');
+  const message:ChatMessage={id:draft?.id??crypto.randomUUID(),sender:this.options.user,recipient,text,created:draft?.created??Date.now(),...(prepared.length?{attachments:prepared.map(p=>p.meta)}:{}),v:CHAT_VERSION,...ext};
   if(!validChatMessage(message))throw Error('Invalid message');
   if(new TextEncoder().encode(JSON.stringify({kind:'message',message})).length>32000)throw Error('This message is too large after encoding. Split it into smaller messages.');
   // Bytes stay on this device; only the metadata travels in the sealed message.
