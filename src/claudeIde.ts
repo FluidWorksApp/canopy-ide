@@ -43,7 +43,9 @@ export function claudeIdeLaunchEnv(launch: {
   if (!getSettings().claudeIdeIntegration) return [];
   if (isRemoteHost() || isWorkspaceHost()) return [];
   const cli = agentIdForCommand(launch.command);
-  if (cli !== "claude" || harnessSupport(cli, "ideProtocol") !== "native") return [];
+  // The ledger, not a vendor name, decides: only a CLI whose IDE protocol is
+  // verified native gets the lock-file link.
+  if (!cli || harnessSupport(cli, "ideProtocol") !== "native") return [];
   if (/(^|\s)(-p|--print)(\s|$)/.test(launch.command)) return [];
   return [[CLAUDE_IDE_MARKER, claudeIdeRoot(launch.root, launch.cwd)]];
 }

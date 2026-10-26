@@ -61,6 +61,9 @@ export interface HarnessCapability {
   /** Where the evidence lives: a repo path plus the stamp it carries. Required
    *  in spirit for anything but `unknown`. */
   source?: string;
+  /** What Canopy layers on top of (or instead of) the native part, when it
+   *  owns one — the half of the feature that does not depend on the CLI. */
+  canopyLayer?: string;
 }
 
 export type HarnessCapabilities = Record<HarnessFeature, HarnessCapability>;
@@ -91,14 +94,20 @@ function allUnknown(): HarnessCapabilities {
 }
 
 const CLAUDE_RUNNER_STAMP =
-  "src/structuredRunners.ts CLAUDE_RUNNER.verification (Claude Code 2.1.226, `claude --help`, 2026-08-09)";
+  "src/structuredRunners.ts CLAUDE_RUNNER.verification (Claude Code 2.1.310, `claude --help` + live run, 2026-10-26)";
 
-/** Claude Code, filled only from what the repo has already stamped. Rewind,
- *  subagents and compaction are left unknown on purpose: they may well exist,
- *  but no file here records them being checked, and a surface that trusted a
+/** Claude Code, filled only from what the repo has already stamped. Subagents
+ *  and compaction are left unknown on purpose: they may well exist, but no
+ *  file here records them being checked, and a surface that trusted a
  *  remembered flag would fail in front of the person. */
 const CLAUDE_CODE: HarnessCapabilities = {
   ...allUnknown(),
+  checkpointsRewind: {
+    support: "partial",
+    note: "Files only, and only what Write/Edit/NotebookEdit touched: `CLAUDE_CODE_ENABLE_SDK_FILE_CHECKPOINTING=true claude -p --resume <id> --rewind-files <uuid>`, keyed on the replayed prompt's uuid, printed \"Files rewound to state at message <uuid>\" and restored the file; a Bash-created file was left behind. Conversation rewind is interactive-only.",
+    source: `${CLAUDE_RUNNER_STAMP}; src-tauri/src/turn_rollback.rs native_rewind`,
+    canopyLayer: "Turn snapshots on UserPromptSubmit/Stop into refs/canopy/turns/<session>/<n> (temp index, user's git state untouched), restored after the native rewind to cover Bash, subagent and external edits; scoped by the edit journal on shared checkouts.",
+  },
   headlessStructuredRun: {
     support: "native",
     note: "stream-json in and out over a long-lived process (structured tier). No OS-backed workspace boundary: tool flags gate which tools run, not which paths they touch.",
@@ -156,4 +165,56 @@ export function harnessSupport(
   feature: HarnessFeature,
 ): HarnessSupport {
   return harnessCapabilities(cliId)[feature].support;
+}
+
+/** The oldest version of a harness Canopy's launches are written for, with
+ *  the behaviour that makes it the floor. Separate from the feature ledger:
+ *  a floor is a property of the binary, not of any one feature. */
+export interface HarnessMinVersion {
+  version: string;
+  why: string;
+  source: string;
+}
+
+export const HARNESS_MIN_VERSION: Readonly<Record<string, HarnessMinVersion>> = {
+  claude: {
+    version: "2.1.302",
+    why: "From 2.1.302 `claude -p` starts in Manual permission mode; Canopy names the mode on every launch and assumes that behaviour.",
+    source: "research_notes/Harness capability parity matrix/claude_code.md §1 (code.claude.com/docs/en/headless)",
+  },
+};
+
+/** First x.y.z in a version string — `--version` output such as
+ *  "2.1.310 (Claude Code)" included. */
+function parseVersion(s: string): number[] | null {
+  const m = /(\d+)\.(\d+)\.(\d+)/.exec(s);
+  return m ? m.slice(1, 4).map(Number) : null;
+}
+
+/** A sentence for the person when the installed harness is older than its
+ *  floor; null when it is new enough, has no floor, or the version is
+ *  unknown (an unknown version is not evidence of an old one). */
+export function harnessVersionWarning(
+  cliId: string,
+  installed: string | null | undefined,
+): string | null {
+  const floor = HARNESS_MIN_VERSION[cliId];
+  if (!floor || !installed) return null;
+  const have = parseVersion(installed);
+  const need = parseVersion(floor.version);
+  if (!have || !need) return null;
+  for (let i = 0; i < 3; i++) {
+    if (have[i] > need[i]) return null;
+    if (have[i] < need[i]) {
+      return `${have.join(".")} is older than ${floor.version}, the oldest version Canopy supports. ${floor.why}`;
+    }
+  }
+  return null;
+}
+
+/** Whether Canopy snapshots this CLI's turns for rollback: true exactly when
+ *  its ledger entry names a Canopy layer for checkpoints, i.e. its turn-start
+ *  and turn-end hooks are wired to the snapshot store. */
+export function supportsTurnRollback(cliId: string): boolean {
+  return !!harnessCapabilities(cliId).checkpointsRewind.canopyLayer;
 }

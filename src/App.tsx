@@ -52,6 +52,7 @@ import {
   applyVibeTargetSelection,
   type VibeTargetSelection,
 } from "./vibeTargetInference";
+import { observeTurnEvents } from "./turnRollback";
 import {
   derivePending,
   parseAgentEvent,
@@ -1018,14 +1019,15 @@ export default function App() {
         // raw line at every consumer was a measurable main-thread cost, as was
         // one setState per line — the bridge batches each 500ms window.
         const ts = Date.now();
+        const parsed = raws.map((raw) => ({ ts, data: parseAgentEvent(raw) }));
+        // Turn boundaries become rollback snapshots — taken app-side, off
+        // this event, so the blocking UserPromptSubmit hook never waits on git.
+        observeTurnEvents(parsed.map((p) => p.data), ts);
         setAgentEvents((prev) =>
           // Not a bare slice: the cap is app-wide and one of this list's
           // consumers is per-pty, so a busy project used to evict a quiet
           // terminal's only session stamp.
-          trimAgentEvents(
-            [...prev, ...raws.map((raw) => ({ ts, data: parseAgentEvent(raw) }))],
-            200,
-          ),
+          trimAgentEvents([...prev, ...parsed], 200),
         );
       }),
       ipc.onRelayState(setRelayStatus),

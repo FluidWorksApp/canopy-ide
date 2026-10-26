@@ -1837,7 +1837,11 @@ impl PtyManager {
             .zip(claude_lock_dir)
             .and_then(|(root, lock_dir)| {
                 let ide = app.try_state::<crate::claude_ide::ClaudeIde>()?;
-                let root = if root.trim().is_empty() { cwd.clone() } else { root };
+                let root = if root.trim().is_empty() {
+                    cwd.clone()
+                } else {
+                    root
+                };
                 match ide.open(id, &root, &lock_dir, std::process::id()) {
                     Ok((launch, serve)) => {
                         tauri::async_runtime::spawn(serve);
@@ -3185,12 +3189,17 @@ mod tests {
             fn emit(&self, _: crate::claude_ide::UiEvent) {}
         }
         let app = tauri::test::mock_app();
-        app.manage(crate::claude_ide::ClaudeIde::new(std::sync::Arc::new(Quiet)));
+        app.manage(crate::claude_ide::ClaudeIde::new(std::sync::Arc::new(
+            Quiet,
+        )));
         let config = std::env::temp_dir().join(format!("canopy-pty-ide-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&config);
         let env = |root: &str| {
             Some(vec![
-                ("CLAUDE_CONFIG_DIR".to_string(), config.to_string_lossy().to_string()),
+                (
+                    "CLAUDE_CONFIG_DIR".to_string(),
+                    config.to_string_lossy().to_string(),
+                ),
                 (CLAUDE_IDE_MARKER.to_string(), root.to_string()),
             ])
         };
@@ -3218,14 +3227,25 @@ mod tests {
             )
             .expect("desktop spawn");
         assert!(wait_for(&pm, desktop.id, ":END", Duration::from_secs(8)));
-        let tail = String::from_utf8_lossy(&pm.scrollback_tail(desktop.id, 64 * 1024).unwrap()).into_owned();
-        let line = tail.lines().find(|l| l.starts_with("IDE=")).expect("probe line").to_string();
-        let port: u16 = line["IDE=".len()..].split(':').next().unwrap().parse().expect("a port");
+        let tail = String::from_utf8_lossy(&pm.scrollback_tail(desktop.id, 64 * 1024).unwrap())
+            .into_owned();
+        let line = tail
+            .lines()
+            .find(|l| l.starts_with("IDE="))
+            .expect("probe line")
+            .to_string();
+        let port: u16 = line["IDE=".len()..]
+            .split(':')
+            .next()
+            .unwrap()
+            .parse()
+            .expect("a port");
         // The marker is consumed; the child sees only the CLI's variables.
         assert!(line.ends_with(":1:unset:END"), "{line}");
         // The lock is in the PTY's own CLAUDE_CONFIG_DIR, naming the component.
         let lock_path = config.join("ide").join(format!("{port}.lock"));
-        let lock: serde_json::Value = serde_json::from_slice(&std::fs::read(&lock_path).unwrap()).unwrap();
+        let lock: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&lock_path).unwrap()).unwrap();
         assert_eq!(lock["workspaceFolders"], serde_json::json!(["/w/app"]));
         assert_eq!(lock["pid"], std::process::id());
 
@@ -3246,7 +3266,8 @@ mod tests {
             )
             .expect("detached spawn");
         assert!(wait_for(&pm, detached.id, ":END", Duration::from_secs(8)));
-        let tail = String::from_utf8_lossy(&pm.scrollback_tail(detached.id, 64 * 1024).unwrap()).into_owned();
+        let tail = String::from_utf8_lossy(&pm.scrollback_tail(detached.id, 64 * 1024).unwrap())
+            .into_owned();
         assert!(tail.contains("IDE=none:none:unset:END"), "{tail}");
         assert_eq!(std::fs::read_dir(config.join("ide")).unwrap().count(), 1);
 

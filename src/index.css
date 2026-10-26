@@ -28914,3 +28914,133 @@ a.btn-sm {
 }
 .chat-msg-text .linkified-link {color:inherit;text-decoration:underline;text-underline-offset:2px;overflow-wrap:anywhere;cursor:pointer;}
 .chat-msg-text .linkified-link:hover {color:var(--accent);}
+
+/* ---------- turn rollback timeline (TurnTimeline.tsx) ---------- */
+.aw-turns {
+  padding: 8px 14px 0;
+}
+.aw-turns .ticket-state-head {
+  padding-left: 0;
+}
+.aw-turns-redo {
+  margin-left: auto;
+}
+.aw-turns-note {
+  color: var(--text-dim);
+  font-size: 11px;
+  margin: 6px 0;
+}
+.aw-turns-scope {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--text-dim);
+  margin: 4px 0;
+}
+.aw-turns-list {
+  list-style: none;
+  margin: 4px 0 0;
+  padding: 0;
+  border-left: 1px solid var(--border);
+}
+.aw-turn {
+  position: relative;
+  display: flex;
+  gap: 8px;
+  padding: 4px 0 8px 12px;
+}
+.aw-turn-dot {
+  position: absolute;
+  left: -4px;
+  top: 9px;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--text-dim);
+}
+.aw-turn-running .aw-turn-dot {
+  background: var(--accent);
+}
+.aw-turn-body {
+  min-width: 0;
+  flex: 1;
+}
+.aw-turn-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+}
+.aw-turn-n {
+  font-weight: 600;
+}
+.aw-turn-time {
+  color: var(--text-dim);
+  font-size: 11px;
+}
+.aw-turn-prompt {
+  color: var(--text-dim);
+  font-size: 12px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.aw-turn-actions {
+  display: flex;
+  gap: 6px;
+  margin-top: 4px;
+}
+.aw-turns-modal {
+  width: min(860px, 92vw);
+}
+.aw-turns-caveat {
+  color: var(--warn);
+  font-size: 12px;
+}
+.aw-turns-error {
+  color: var(--danger);
+  font-size: 12px;
+}
+.aw-turns-files {
+  list-style: none;
+  padding: 0;
+  margin: 0 0 8px;
+  font-size: 12px;
+}
+.aw-turns-files li {
+  display: flex;
+  gap: 8px;
+  align-items: baseline;
+  padding: 1px 0;
+}
+.aw-turns-st {
+  min-width: 52px;
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--text-dim);
+}
+.aw-turns-st-add {
+  color: var(--ok);
+}
+.aw-turns-st-delete {
+  color: var(--danger);
+}
+.aw-turns-diff {
+  margin: 6px 0;
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  overflow: hidden;
+}
+
+/* A CLI installed below the version Canopy's launches assume. */
+.cli-floor {
+  font-size: 10px;
+  color: var(--warn);
+  border: 1px solid var(--warn);
+  border-radius: var(--r-sm);
+  corner-shape: squircle;
+  padding: 0 6px;
+  white-space: nowrap;
+}

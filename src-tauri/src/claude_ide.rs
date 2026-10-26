@@ -261,8 +261,12 @@ impl ClaudeIde {
             transport: "ws",
             auth_token: token.clone(),
         };
-        let lock_path = write_lock(lock_dir, port, &lock)
-            .map_err(|e| format!("claude ide: cannot write lock in {}: {e}", lock_dir.display()))?;
+        let lock_path = write_lock(lock_dir, port, &lock).map_err(|e| {
+            format!(
+                "claude ide: cannot write lock in {}: {e}",
+                lock_dir.display()
+            )
+        })?;
         let (shutdown, mut stopped) = watch::channel(false);
         let session = Arc::new(Session {
             pty_id,
@@ -331,8 +335,15 @@ impl ClaudeIde {
     /// The user answered a diff in Canopy. `Err` when it is no longer pending —
     /// answered in the terminal first, which is the race this protocol has by
     /// design, so the caller just closes its view.
-    pub fn resolve_diff(&self, pty_id: u32, tab_name: &str, verdict: DiffVerdict) -> Result<(), String> {
-        let session = self.session(pty_id).ok_or("this terminal has no Claude Code connection")?;
+    pub fn resolve_diff(
+        &self,
+        pty_id: u32,
+        tab_name: &str,
+        verdict: DiffVerdict,
+    ) -> Result<(), String> {
+        let session = self
+            .session(pty_id)
+            .ok_or("this terminal has no Claude Code connection")?;
         let pending = session.diffs.lock().unwrap().remove(tab_name);
         let Some(tx) = pending else {
             return Err("Claude Code is no longer waiting on this change".into());
@@ -655,7 +666,10 @@ async fn dispatch(hub: Arc<Hub>, session: Arc<Session>, message: Value) -> Optio
         "tools/list" => json!({"tools": tools()}),
         "tools/call" => {
             let name = params.get("name").and_then(Value::as_str).unwrap_or("");
-            let args = params.get("arguments").cloned().unwrap_or_else(|| json!({}));
+            let args = params
+                .get("arguments")
+                .cloned()
+                .unwrap_or_else(|| json!({}));
             return match tool_call(&hub, &session, name, &args).await {
                 ToolReply::Result(result) => Some(result_response(id, result)),
                 ToolReply::Error(code, message) => Some(error_response(id, code, &message)),
@@ -717,7 +731,9 @@ async fn tool_call(hub: &Arc<Hub>, session: &Arc<Session>, name: &str, args: &Va
             // No timeout: the CLI holds this open for as long as the user
             // takes, and so do we.
             match rx.await {
-                Ok(DiffVerdict::Accept(text)) => ToolReply::Result(text_content(&["FILE_SAVED", &text])),
+                Ok(DiffVerdict::Accept(text)) => {
+                    ToolReply::Result(text_content(&["FILE_SAVED", &text]))
+                }
                 Ok(DiffVerdict::Reject) => ToolReply::Result(text_content(&["DIFF_REJECTED"])),
                 Err(_) => ToolReply::Abandoned,
             }
@@ -773,12 +789,19 @@ async fn tool_call(hub: &Arc<Hub>, session: &Arc<Session>, name: &str, args: &Va
 
 /// One UI round trip with a deadline. `None` when the UI did not answer in
 /// time; the pending entry is removed so a late answer goes nowhere.
-async fn ask_ui(hub: &Arc<Hub>, deadline: Duration, event: impl FnOnce(u64) -> UiEvent) -> Option<Value> {
+async fn ask_ui(
+    hub: &Arc<Hub>,
+    deadline: Duration,
+    event: impl FnOnce(u64) -> UiEvent,
+) -> Option<Value> {
     let request_id = hub.next_id.fetch_add(1, Ordering::Relaxed);
     let (tx, rx) = oneshot::channel();
     hub.requests.lock().unwrap().insert(request_id, tx);
     hub.ui.emit(event(request_id));
-    let answer = tokio::time::timeout(deadline, rx).await.ok().and_then(Result::ok);
+    let answer = tokio::time::timeout(deadline, rx)
+        .await
+        .ok()
+        .and_then(Result::ok);
     hub.requests.lock().unwrap().remove(&request_id);
     answer
 }
@@ -865,8 +888,14 @@ fn shape_diagnostic(d: &Value) -> Option<Value> {
         _ => "Hint",
     };
     let position = |p: Option<&Value>| {
-        let line = p.and_then(|p| p.get("line")).and_then(Value::as_u64).unwrap_or(0);
-        let character = p.and_then(|p| p.get("character")).and_then(Value::as_u64).unwrap_or(0);
+        let line = p
+            .and_then(|p| p.get("line"))
+            .and_then(Value::as_u64)
+            .unwrap_or(0);
+        let character = p
+            .and_then(|p| p.get("character"))
+            .and_then(Value::as_u64)
+            .unwrap_or(0);
         json!({"line": line, "character": character})
     };
     let range = d.get("range");
@@ -979,7 +1008,11 @@ pub fn claude_ide_reply(state: tauri::State<'_, ClaudeIde>, request_id: u64, dat
 /// The editor selection changed. `params` is the CLI's `selection_changed`
 /// shape, built by the frontend; this only routes it.
 #[tauri::command]
-pub fn claude_ide_selection(state: tauri::State<'_, ClaudeIde>, path: String, params: Value) -> usize {
+pub fn claude_ide_selection(
+    state: tauri::State<'_, ClaudeIde>,
+    path: String,
+    params: Value,
+) -> usize {
     state.notify_selection(&path, params)
 }
 
@@ -1025,7 +1058,14 @@ mod tests {
     impl Recorder {
         async fn wait_for(&self, pred: impl Fn(&UiEvent) -> bool) -> UiEvent {
             for _ in 0..200 {
-                if let Some(e) = self.events.lock().unwrap().iter().find(|e| pred(e)).cloned() {
+                if let Some(e) = self
+                    .events
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .find(|e| pred(e))
+                    .cloned()
+                {
                     return e;
                 }
                 tokio::time::sleep(Duration::from_millis(10)).await;
@@ -1049,17 +1089,30 @@ mod tests {
         launch
     }
 
-    type Ws = tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
+    type Ws = tokio_tungstenite::WebSocketStream<
+        tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+    >;
 
-    async fn connect(launch: &Launch, token: &str) -> Result<(Ws, tungstenite::handshake::client::Response), tungstenite::Error> {
-        let mut request = format!("ws://127.0.0.1:{}/", launch.port).into_client_request().unwrap();
-        request.headers_mut().insert("sec-websocket-protocol", "mcp".parse().unwrap());
-        request.headers_mut().insert(AUTH_HEADER, token.parse().unwrap());
+    async fn connect(
+        launch: &Launch,
+        token: &str,
+    ) -> Result<(Ws, tungstenite::handshake::client::Response), tungstenite::Error> {
+        let mut request = format!("ws://127.0.0.1:{}/", launch.port)
+            .into_client_request()
+            .unwrap();
+        request
+            .headers_mut()
+            .insert("sec-websocket-protocol", "mcp".parse().unwrap());
+        request
+            .headers_mut()
+            .insert(AUTH_HEADER, token.parse().unwrap());
         tokio_tungstenite::connect_async(request).await
     }
 
     async fn send(ws: &mut Ws, frame: Value) {
-        ws.send(tungstenite::Message::Text(frame.to_string().into())).await.unwrap();
+        ws.send(tungstenite::Message::Text(frame.to_string().into()))
+            .await
+            .unwrap();
     }
 
     async fn recv(ws: &mut Ws) -> Value {
@@ -1159,7 +1212,10 @@ mod tests {
         }
         let (_ws, response) = connect(&launch, &launch.token).await.unwrap();
         assert_eq!(
-            response.headers().get("sec-websocket-protocol").and_then(|v| v.to_str().ok()),
+            response
+                .headers()
+                .get("sec-websocket-protocol")
+                .and_then(|v| v.to_str().ok()),
             Some("mcp")
         );
         ide.close_all();
@@ -1191,13 +1247,31 @@ mod tests {
             json!({"tools": {"listChanged": true}, "prompts": {"listChanged": true}, "logging": {}})
         );
         assert_eq!(init["result"]["serverInfo"]["name"], "canopy");
-        send(&mut ws, json!({"jsonrpc": "2.0", "method": "notifications/initialized"})).await;
-        send(&mut ws, json!({"jsonrpc": "2.0", "method": "ide_connected", "params": {"pid": 77}})).await;
+        send(
+            &mut ws,
+            json!({"jsonrpc": "2.0", "method": "notifications/initialized"}),
+        )
+        .await;
+        send(
+            &mut ws,
+            json!({"jsonrpc": "2.0", "method": "ide_connected", "params": {"pid": 77}}),
+        )
+        .await;
         assert_eq!(
-            recorder.wait_for(|e| matches!(e, UiEvent::Connection { .. })).await,
-            UiEvent::Connection { pty_id: 9, root: "/w/app".into(), connected: true }
+            recorder
+                .wait_for(|e| matches!(e, UiEvent::Connection { .. }))
+                .await,
+            UiEvent::Connection {
+                pty_id: 9,
+                root: "/w/app".into(),
+                connected: true
+            }
         );
-        send(&mut ws, json!({"jsonrpc": "2.0", "id": 1, "method": "tools/list"})).await;
+        send(
+            &mut ws,
+            json!({"jsonrpc": "2.0", "id": 1, "method": "tools/list"}),
+        )
+        .await;
         let list = recv(&mut ws).await;
         let names: Vec<&str> = list["result"]["tools"]
             .as_array()
@@ -1205,12 +1279,33 @@ mod tests {
             .iter()
             .map(|t| t["name"].as_str().unwrap())
             .collect();
-        assert_eq!(names, ["getDiagnostics", "openDiff", "close_tab", "closeAllDiffTabs", "executeCode"]);
-        send(&mut ws, json!({"jsonrpc": "2.0", "id": 2, "method": "prompts/list"})).await;
+        assert_eq!(
+            names,
+            [
+                "getDiagnostics",
+                "openDiff",
+                "close_tab",
+                "closeAllDiffTabs",
+                "executeCode"
+            ]
+        );
+        send(
+            &mut ws,
+            json!({"jsonrpc": "2.0", "id": 2, "method": "prompts/list"}),
+        )
+        .await;
         assert_eq!(recv(&mut ws).await["result"], json!({"prompts": []}));
-        send(&mut ws, json!({"jsonrpc": "2.0", "id": 3, "method": "ping"})).await;
+        send(
+            &mut ws,
+            json!({"jsonrpc": "2.0", "id": 3, "method": "ping"}),
+        )
+        .await;
         assert_eq!(recv(&mut ws).await["result"], json!({}));
-        send(&mut ws, json!({"jsonrpc": "2.0", "id": 4, "method": "openFile", "params": {}})).await;
+        send(
+            &mut ws,
+            json!({"jsonrpc": "2.0", "id": 4, "method": "openFile", "params": {}}),
+        )
+        .await;
         assert_eq!(recv(&mut ws).await["error"]["code"], -32601);
         send(&mut ws, call(5, "executeCode", json!({"code": "1"}))).await;
         let exec = recv(&mut ws).await;
@@ -1223,12 +1318,20 @@ mod tests {
     }
 
     async fn pending_diff(recorder: &Recorder, ws: &mut Ws, id: u64, tab: &str) {
-        send(ws, call(id, "openDiff", json!({
-            "old_file_path": "/w/app/hello.py",
-            "new_file_path": "/w/app/hello.py",
-            "new_file_contents": "proposed\n",
-            "tab_name": tab,
-        }))).await;
+        send(
+            ws,
+            call(
+                id,
+                "openDiff",
+                json!({
+                    "old_file_path": "/w/app/hello.py",
+                    "new_file_path": "/w/app/hello.py",
+                    "new_file_contents": "proposed\n",
+                    "tab_name": tab,
+                }),
+            ),
+        )
+        .await;
         let tab = tab.to_string();
         recorder
             .wait_for(|e| matches!(e, UiEvent::Diff { tab_name, .. } if *tab_name == tab))
@@ -1244,7 +1347,13 @@ mod tests {
         let (mut ws, _) = connect(&launch, &launch.token).await.unwrap();
 
         // Accept with the user's edit: FILE_SAVED plus the final contents.
-        pending_diff(&recorder, &mut ws, 10, "✻ [Claude Code] hello.py (aaaaaa) ⧉").await;
+        pending_diff(
+            &recorder,
+            &mut ws,
+            10,
+            "✻ [Claude Code] hello.py (aaaaaa) ⧉",
+        )
+        .await;
         assert_eq!(
             recorder.events.lock().unwrap().last().unwrap(),
             &UiEvent::Diff {
@@ -1254,8 +1363,12 @@ mod tests {
                 contents: "proposed\n".into(),
             }
         );
-        ide.resolve_diff(5, "✻ [Claude Code] hello.py (aaaaaa) ⧉", DiffVerdict::Accept("edited\n".into()))
-            .unwrap();
+        ide.resolve_diff(
+            5,
+            "✻ [Claude Code] hello.py (aaaaaa) ⧉",
+            DiffVerdict::Accept("edited\n".into()),
+        )
+        .unwrap();
         let accepted = recv(&mut ws).await;
         assert_eq!(accepted["id"], 10);
         assert_eq!(texts(&accepted), ["FILE_SAVED", "edited\n"]);
@@ -1280,9 +1393,19 @@ mod tests {
             .wait_for(|e| matches!(e, UiEvent::DiffClosed { tab_name, .. } if tab_name == "tab-c"))
             .await;
         // Too late from the UI side: refused, and still nothing on the wire.
-        assert!(ide.resolve_diff(5, "tab-c", DiffVerdict::Accept("x".into())).is_err());
-        send(&mut ws, json!({"jsonrpc": "2.0", "id": 15, "method": "ping"})).await;
-        assert_eq!(recv(&mut ws).await["id"], 15, "openDiff 12 must never be answered");
+        assert!(ide
+            .resolve_diff(5, "tab-c", DiffVerdict::Accept("x".into()))
+            .is_err());
+        send(
+            &mut ws,
+            json!({"jsonrpc": "2.0", "id": 15, "method": "ping"}),
+        )
+        .await;
+        assert_eq!(
+            recv(&mut ws).await["id"],
+            15,
+            "openDiff 12 must never be answered"
+        );
 
         // closeAllDiffTabs drops whatever is pending and says how many.
         pending_diff(&recorder, &mut ws, 16, "tab-d").await;
@@ -1290,7 +1413,9 @@ mod tests {
         let all = recv(&mut ws).await;
         assert_eq!(all["id"], 17);
         assert_eq!(texts(&all), ["CLOSED_1_DIFF_TABS"]);
-        recorder.wait_for(|e| matches!(e, UiEvent::DiffsCleared { pty_id: 5 })).await;
+        recorder
+            .wait_for(|e| matches!(e, UiEvent::DiffsCleared { pty_id: 5 }))
+            .await;
 
         ide.close_all();
         let _ = std::fs::remove_dir_all(dir);
@@ -1304,8 +1429,21 @@ mod tests {
         let launch = open(&ide, 6, "/w/app", &dir);
         let (mut ws, _) = connect(&launch, &launch.token).await.unwrap();
 
-        send(&mut ws, call(20, "getDiagnostics", json!({"uri": "file:///w/app/a%20b.ts"}))).await;
-        let UiEvent::Diagnostics { request_id, uri, root, .. } = recorder
+        send(
+            &mut ws,
+            call(
+                20,
+                "getDiagnostics",
+                json!({"uri": "file:///w/app/a%20b.ts"}),
+            ),
+        )
+        .await;
+        let UiEvent::Diagnostics {
+            request_id,
+            uri,
+            root,
+            ..
+        } = recorder
             .wait_for(|e| matches!(e, UiEvent::Diagnostics { .. }))
             .await
         else {
@@ -1332,7 +1470,11 @@ mod tests {
 
         // Nobody answers: `[]` inside the CLI's 500 ms, not an error.
         let started = std::time::Instant::now();
-        send(&mut ws, call(21, "getDiagnostics", json!({"uri": "file:///w/app/x.ts"}))).await;
+        send(
+            &mut ws,
+            call(21, "getDiagnostics", json!({"uri": "file:///w/app/x.ts"})),
+        )
+        .await;
         let response = recv(&mut ws).await;
         assert!(started.elapsed() < Duration::from_millis(500));
         assert_eq!(texts(&response), ["[]"]);
@@ -1355,11 +1497,27 @@ mod tests {
         assert_eq!(all.as_array().unwrap().len(), 2, "only file:// entries");
         assert_eq!(all[0]["diagnostics"][0]["severity"], "Warning");
         assert_eq!(all[0]["diagnostics"][1]["severity"], "Hint");
-        assert_eq!(all[0]["diagnostics"][1]["range"]["start"], json!({"line": 0, "character": 0}));
-        assert_eq!(all[0]["diagnostics"].as_array().unwrap().len(), 2, "a diagnostic needs a message");
-        assert_eq!(shape_diagnostics(Some("file:///w/b.ts"), answer.clone()), json!([{"uri": "file:///w/b.ts", "diagnostics": []}]));
-        assert_eq!(shape_diagnostics(Some("file:///w/zzz.ts"), answer), json!([]));
-        assert_eq!(shape_diagnostics(Some("file:///w/a.ts"), Value::Null), json!([]));
+        assert_eq!(
+            all[0]["diagnostics"][1]["range"]["start"],
+            json!({"line": 0, "character": 0})
+        );
+        assert_eq!(
+            all[0]["diagnostics"].as_array().unwrap().len(),
+            2,
+            "a diagnostic needs a message"
+        );
+        assert_eq!(
+            shape_diagnostics(Some("file:///w/b.ts"), answer.clone()),
+            json!([{"uri": "file:///w/b.ts", "diagnostics": []}])
+        );
+        assert_eq!(
+            shape_diagnostics(Some("file:///w/zzz.ts"), answer),
+            json!([])
+        );
+        assert_eq!(
+            shape_diagnostics(Some("file:///w/a.ts"), Value::Null),
+            json!([])
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -1388,23 +1546,51 @@ mod tests {
         }
         assert_eq!(ide.notify_selection("/w/repo/README.md", json!({})), 1);
         assert_eq!(recv(&mut ws_outer).await["method"], "selection_changed");
-        assert_eq!(ide.notify_selection("/w/repository/x", json!({})), 0, "segment-wise");
+        assert_eq!(
+            ide.notify_selection("/w/repository/x", json!({})),
+            0,
+            "segment-wise"
+        );
         let mut connected = ide.connections();
         connected.sort();
         assert_eq!(
             connected,
-            [(1, "/w/repo".to_string()), (2, "/w/repo/pkg".to_string()), (3, "/w/repo/pkg/".to_string())],
+            [
+                (1, "/w/repo".to_string()),
+                (2, "/w/repo/pkg".to_string()),
+                (3, "/w/repo/pkg/".to_string())
+            ],
             "pty 4 never connected"
         );
 
         // Mention: the preferred terminal when eligible, else the latest typed in.
-        let pty = ide.at_mention("/w/repo/pkg/x.ts", Some(0), Some(1), None, |p| if p == 3 { 50 } else { 10 }).unwrap();
+        let pty = ide
+            .at_mention("/w/repo/pkg/x.ts", Some(0), Some(1), None, |p| {
+                if p == 3 {
+                    50
+                } else {
+                    10
+                }
+            })
+            .unwrap();
         assert_eq!(pty, 3);
         let frame = recv(&mut ws_b).await;
-        assert_eq!(frame, json!({"jsonrpc": "2.0", "method": "at_mentioned", "params": {"filePath": "/w/repo/pkg/x.ts", "lineStart": 0, "lineEnd": 1}}));
-        assert_eq!(ide.at_mention("/w/repo/pkg/x.ts", None, None, Some(2), |_| 0).unwrap(), 2);
-        assert_eq!(recv(&mut ws_a).await["params"], json!({"filePath": "/w/repo/pkg/x.ts"}));
-        assert!(ide.at_mention("/elsewhere/x", None, None, None, |_| 0).is_err());
+        assert_eq!(
+            frame,
+            json!({"jsonrpc": "2.0", "method": "at_mentioned", "params": {"filePath": "/w/repo/pkg/x.ts", "lineStart": 0, "lineEnd": 1}})
+        );
+        assert_eq!(
+            ide.at_mention("/w/repo/pkg/x.ts", None, None, Some(2), |_| 0)
+                .unwrap(),
+            2
+        );
+        assert_eq!(
+            recv(&mut ws_a).await["params"],
+            json!({"filePath": "/w/repo/pkg/x.ts"})
+        );
+        assert!(ide
+            .at_mention("/elsewhere/x", None, None, None, |_| 0)
+            .is_err());
         ide.close_all();
         let _ = std::fs::remove_dir_all(dir);
     }
@@ -1418,13 +1604,27 @@ mod tests {
         let (mut ws, _) = connect(&launch, &launch.token).await.unwrap();
         pending_diff(&recorder, &mut ws, 1, "t").await;
         drop(ws);
-        recorder.wait_for(|e| matches!(e, UiEvent::DiffsCleared { pty_id: 8 })).await;
         recorder
-            .wait_for(|e| matches!(e, UiEvent::Connection { connected: false, .. }))
+            .wait_for(|e| matches!(e, UiEvent::DiffsCleared { pty_id: 8 }))
+            .await;
+        recorder
+            .wait_for(|e| {
+                matches!(
+                    e,
+                    UiEvent::Connection {
+                        connected: false,
+                        ..
+                    }
+                )
+            })
             .await;
         // Same port, same token: the CLI's cached credentials still work.
         let (mut ws, _) = connect(&launch, &launch.token).await.unwrap();
-        send(&mut ws, json!({"jsonrpc": "2.0", "id": 2, "method": "ping"})).await;
+        send(
+            &mut ws,
+            json!({"jsonrpc": "2.0", "id": 2, "method": "ping"}),
+        )
+        .await;
         assert_eq!(recv(&mut ws).await["result"], json!({}));
         // Ending the session closes the socket.
         ide.close(8);
@@ -1458,9 +1658,16 @@ mod tests {
     #[ignore = "drives a real claude; run by hand"]
     fn live_harness() {
         use std::io::{BufRead, Write};
-        let out = PathBuf::from(std::env::var("CLAUDE_IDE_HARNESS_DIR").expect("CLAUDE_IDE_HARNESS_DIR"));
+        let out =
+            PathBuf::from(std::env::var("CLAUDE_IDE_HARNESS_DIR").expect("CLAUDE_IDE_HARNESS_DIR"));
         let root = std::env::var("CLAUDE_IDE_HARNESS_ROOT").expect("CLAUDE_IDE_HARNESS_ROOT");
-        let lock_dir = lock_dir(None, std::env::var("CLAUDE_CONFIG_DIR").ok(), false, std::env::var("HOME").ok().as_deref()).unwrap();
+        let lock_dir = lock_dir(
+            None,
+            std::env::var("CLAUDE_CONFIG_DIR").ok(),
+            false,
+            std::env::var("HOME").ok().as_deref(),
+        )
+        .unwrap();
         std::fs::create_dir_all(&out).unwrap();
 
         struct Scripted {
@@ -1470,16 +1677,34 @@ mod tests {
         }
         impl IdeUi for Scripted {
             fn emit(&self, event: UiEvent) {
-                let _ = writeln!(self.log.lock().unwrap(), "{}", serde_json::to_string(&event).unwrap());
+                let _ = writeln!(
+                    self.log.lock().unwrap(),
+                    "{}",
+                    serde_json::to_string(&event).unwrap()
+                );
                 let _ = self.tx.send(event);
             }
             fn frame(&self, _pty: u32, inbound: bool, text: &str) {
-                let _ = writeln!(self.frames.lock().unwrap(), "{}", json!({"t": crate::pty::now_ms(), "dir": if inbound { "in" } else { "out" }, "frame": serde_json::from_str::<Value>(text).unwrap_or(Value::Null)}));
+                let _ = writeln!(
+                    self.frames.lock().unwrap(),
+                    "{}",
+                    json!({"t": crate::pty::now_ms(), "dir": if inbound { "in" } else { "out" }, "frame": serde_json::from_str::<Value>(text).unwrap_or(Value::Null)})
+                );
             }
         }
-        let append = |name: &str| std::fs::OpenOptions::new().create(true).append(true).open(out.join(name)).unwrap();
+        let append = |name: &str| {
+            std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(out.join(name))
+                .unwrap()
+        };
         let (tx, mut rx) = mpsc::unbounded_channel();
-        let ide = ClaudeIde::new(Arc::new(Scripted { tx, log: Mutex::new(append("events.jsonl")), frames: Mutex::new(append("frames.jsonl")) }));
+        let ide = ClaudeIde::new(Arc::new(Scripted {
+            tx,
+            log: Mutex::new(append("events.jsonl")),
+            frames: Mutex::new(append("frames.jsonl")),
+        }));
         let rt = tokio::runtime::Runtime::new().unwrap();
         let (launch, serve) = {
             let _guard = rt.enter();
@@ -1487,7 +1712,11 @@ mod tests {
         };
         rt.spawn(serve);
         std::fs::write(out.join("port"), launch.port.to_string()).unwrap();
-        eprintln!("claude ide harness on port {} (lock in {})", launch.port, lock_dir.display());
+        eprintln!(
+            "claude ide harness on port {} (lock in {})",
+            launch.port,
+            lock_dir.display()
+        );
 
         let pending = Arc::new(Mutex::new(Vec::<(String, String)>::new()));
         let responder = {
@@ -1538,9 +1767,14 @@ mod tests {
                 continue;
             };
             for line in std::io::BufReader::new(file).lines().map_while(Result::ok) {
-                let Ok(cmd) = serde_json::from_str::<Value>(&line) else { continue };
+                let Ok(cmd) = serde_json::from_str::<Value>(&line) else {
+                    continue;
+                };
                 if let Some(sel) = cmd.get("select") {
-                    let n = ide.notify_selection(sel["path"].as_str().unwrap_or(""), sel["params"].clone());
+                    let n = ide.notify_selection(
+                        sel["path"].as_str().unwrap_or(""),
+                        sel["params"].clone(),
+                    );
                     eprintln!("selection_changed -> {n} session(s)");
                 } else if let Some(m) = cmd.get("mention") {
                     let r = ide.at_mention(
@@ -1553,7 +1787,11 @@ mod tests {
                     eprintln!("at_mentioned -> {r:?}");
                 } else if let Some(verdict) = cmd.get("diff").and_then(Value::as_str) {
                     for (tab, contents) in pending.lock().unwrap().drain(..) {
-                        let v = if verdict == "reject" { DiffVerdict::Reject } else { DiffVerdict::Accept(contents) };
+                        let v = if verdict == "reject" {
+                            DiffVerdict::Reject
+                        } else {
+                            DiffVerdict::Accept(contents)
+                        };
                         eprintln!("diff {tab} -> {:?}", ide.resolve_diff(1, &tab, v));
                     }
                 }

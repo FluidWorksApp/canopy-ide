@@ -3771,6 +3771,104 @@ export interface AgentEdit {
 export const agentEdits = (repo: string | null, sessionId: string) =>
   invoke<AgentEdit[]>("agent_edits", { repo, sessionId });
 
+// ---------- turn rollback (src-tauri/src/turn_rollback.rs) ----------
+
+/** One hidden-ref snapshot of the whole working tree. */
+export interface TurnSnapRef {
+  ref: string;
+  commit: string;
+  tree: string;
+  ts_ms: number;
+}
+
+export interface TurnPoint {
+  n: number;
+  /** The tree as the turn started (UserPromptSubmit). */
+  start: TurnSnapRef | null;
+  /** The tree as the turn ended (Stop). */
+  end: TurnSnapRef | null;
+  prompt: string | null;
+  /** The start snapshot may already hold some of the turn's own edits. */
+  late: boolean;
+  /** Claude's native checkpoint id for this turn (headless sessions). */
+  native_uuid: string | null;
+}
+
+export interface TurnRestorePoint {
+  ref: string;
+  ts_ms: number;
+  target: string | null;
+}
+
+export interface TurnList {
+  /** False outside a git work tree — rollback needs git. */
+  git: boolean;
+  root: string | null;
+  shared: boolean;
+  peers: string[];
+  turns: TurnPoint[];
+  restores: TurnRestorePoint[];
+}
+
+export type TurnScope = "auto" | "session" | "all";
+
+export interface TurnChange {
+  path: string;
+  status: "add" | "modify" | "delete";
+}
+
+export interface TurnPreview {
+  changes: TurnChange[];
+  excluded: string[];
+  scoped: boolean;
+  shared: boolean;
+  patch: string;
+  truncated: boolean;
+}
+
+export interface TurnRestoreOutcome {
+  written: string[];
+  deleted: string[];
+  excluded: string[];
+  failed: string[];
+  redo_ref: string;
+  native: { attempted: boolean; ok: boolean; message: string };
+}
+
+export interface TurnSnapshotOutcome {
+  taken: boolean;
+  ref: string | null;
+  n: number | null;
+  late: boolean;
+  note: string | null;
+}
+
+export const turnSnapshot = (o: {
+  cwd: string;
+  sessionId: string;
+  kind: "start" | "end";
+  prompt?: string;
+  observedMs: number;
+}) => invoke<TurnSnapshotOutcome>("turn_snapshot", o);
+export const turnList = (cwd: string, sessionId: string) =>
+  invoke<TurnList>("turn_list", { cwd, sessionId });
+export const turnPreview = (
+  cwd: string,
+  sessionId: string,
+  target: string,
+  scope: TurnScope,
+) => invoke<TurnPreview>("turn_preview", { cwd, sessionId, target, scope });
+export const turnRestore = (o: {
+  cwd: string;
+  sessionId: string;
+  target: string;
+  scope: TurnScope;
+  claudeBin?: string | null;
+  nativeUuid?: string | null;
+}) => invoke<TurnRestoreOutcome>("turn_restore", o);
+export const turnNativeCheckpoint = (sessionId: string, uuid: string) =>
+  invoke<void>("turn_native_checkpoint", { sessionId, uuid });
+
 export const gitWorktrees = (repo: string) =>
   invoke<WorktreeInfo[]>("git_worktrees", { repo });
 export const gitWorktreeAdd = (
