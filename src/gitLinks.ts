@@ -60,6 +60,43 @@ function lineFromHash(hash: string): number | undefined {
   return Number.isFinite(n) && n > 0 ? n : undefined;
 }
 
+// Control characters, and the bidi overrides/isolates that make a name render
+// as something it isn't (U+202A–U+202E, U+2066–U+2069).
+// eslint-disable-next-line no-control-regex
+const UNSAFE_CHARS = /[\u0000-\u001f\u007f‪-‮⁦-⁩]/;
+
+/** A blob link's path, joined from already-decoded segments — or null when any
+ *  segment could step outside the checkout or hide what it is.
+ *
+ *  Segments are decoded one by one (`decode`), so `..%2F..%2Fetc%2Fhosts` is a
+ *  single segment that *becomes* `../../etc/hosts`; the WHATWG parser's own
+ *  dot-segment handling never saw it. A teammate's link must not be able to
+ *  open a file outside the repo it names, so this refuses rather than repairs:
+ *  `.`/`..`, an embedded `/` or `\`, control and bidi characters, a drive
+ *  letter, and anything inside `.git`. Null means "open the page instead". */
+export function safeRepoPath(segments: readonly string[]): string | null {
+  if (segments.length === 0) return null;
+  for (const seg of segments) {
+    if (!seg || seg === "." || seg === "..") return null;
+    if (seg.includes("/") || seg.includes("\\")) return null;
+    if (UNSAFE_CHARS.test(seg)) return null;
+    if (seg.toLowerCase() === ".git") return null;
+  }
+  if (/^[a-z]:/i.test(segments[0])) return null;
+  return segments.join("/");
+}
+
+/** `repo/path`, only when `path` is a plain relative path that stays inside
+ *  `repo` — the last check before anything on disk is touched. */
+export function pathInRepo(repo: string, path: string): string | null {
+  if (!path || path.startsWith("/") || path.startsWith("\\")) return null;
+  const rel = safeRepoPath(path.split("/"));
+  if (!rel) return null;
+  const root = repo.replace(/[/\\]+$/, "");
+  if (!root) return null;
+  return `${root}/${rel}`;
+}
+
 /** What this URL is about, or null for every URL that is not one of these four
  *  things — a repo's home page, a wiki, a release, anything on another site.
  *  Null is the ordinary answer, not a failure: the caller opens a page. */
@@ -110,7 +147,7 @@ export function parseGitLink(href: string): GitLink | null {
       // indistinguishable from the path here, so the first segment is taken as
       // the ref and the guess degrades honestly: the path won't exist on disk
       // and the caller opens the page instead of the wrong file.
-      const path = rest.slice(1).join("/");
+      const path = safeRepoPath(rest.slice(1));
       if (!path) return null;
       return { kind: "file", slug, path, line: lineFromHash(url.hash) };
     }
@@ -206,6 +243,9 @@ export async function resolveGitLink(
       return commit ? { do: "commit", repo, commit } : null;
     }
     case "file": {
+      // parseGitLink already refused unsafe paths; a GitLink can also be built
+      // by hand, so check again before the lookup touches the disk.
+      if (!pathInRepo(repo, link.path)) return null;
       const here = await or(look.fileExists(repo, link.path), false);
       return here ? { do: "file", repo, path: link.path, line: link.line } : null;
     }

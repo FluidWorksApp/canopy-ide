@@ -17,6 +17,12 @@ export function validChatMessage(message:ChatMessage):boolean {
  return !!message&&typeof message.id==='string'&&UUID.test(message.id)&&identity(message.sender)&&(message.recipient===null||identity(message.recipient))&&typeof message.text==='string'&&new TextEncoder().encode(message.text).length<=16000&&Number.isSafeInteger(message.created)&&message.created>0&&validAttachments(message.attachments);
 }
 const sameAttachments=(a:ChatMessage['attachments']=[],b:ChatMessage['attachments']=[])=>a.length===b.length&&a.every((x,i)=>(['id','name','size','type','sha256'] as const).every(field=>x[field]===b[i][field]));
+/** Fields every chat message version shares; anything else (v2's `v` and
+ * `event`) is an extension, which validChatMessage deliberately leaves alone. */
+const CORE=new Set(['id','sender','recipient','text','created','attachments']);
+const canonical=(value:unknown):unknown=>Array.isArray(value)?value.map(canonical):value&&typeof value==='object'?Object.fromEntries(Object.keys(value).sort().map(key=>[key,canonical((value as Record<string,unknown>)[key])])):value;
+/** Stable JSON of every extension field, whatever the key order. */
+export const canonicalExtensions=(m:ChatMessage)=>JSON.stringify(canonical(Object.fromEntries(Object.entries(m).filter(([key,value])=>!CORE.has(key)&&value!==undefined))));
 export function sameChatMessage(a:ChatMessage,b:ChatMessage):boolean {
- return ['id','sender','recipient','text','created'].every(field=>a[field as keyof ChatMessage]===b[field as keyof ChatMessage])&&sameAttachments(a.attachments,b.attachments);
+ return ['id','sender','recipient','text','created'].every(field=>a[field as keyof ChatMessage]===b[field as keyof ChatMessage])&&sameAttachments(a.attachments,b.attachments)&&canonicalExtensions(a)===canonicalExtensions(b);
 }

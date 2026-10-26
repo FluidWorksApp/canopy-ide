@@ -494,7 +494,7 @@ import {
   type OpenFileDetail,
   type OpenUrlDetail,
 } from "../../links";
-import { resolveGitLink } from "../../gitLinks";
+import { pathInRepo, resolveGitLink } from "../../gitLinks";
 import { previewAgentTarget, serverForUrl } from "../../preview";
 import { TRACKERS, ticketBranch, ticketContext, ticketResearchQuestion, ticketTaskLabel, ticketWorktree } from "../../trackers";
 import { prConflictContext, prReviewContext } from "../../prs";
@@ -6462,8 +6462,10 @@ const ProjectViewBody = memo(function ProjectViewBody({
         prs: (repo) => ipc.ghPrList(repo),
         issues: (repo) => ipc.ghIssueList(repo),
         commit: (repo, hash) => ipc.gitCommitDetail(repo, hash),
-        fileExists: (repo, path) =>
-          ipc.fsStat(`${repo.replace(/\/+$/, "")}/${path}`).then((s) => !s.is_dir),
+        fileExists: (repo, path) => {
+          const full = pathInRepo(repo, path);
+          return full ? ipc.fsStat(full).then((s) => !s.is_dir) : Promise.resolve(false);
+        },
       });
       if (!action) return false;
       switch (action.do) {
@@ -6483,7 +6485,10 @@ const ProjectViewBody = memo(function ProjectViewBody({
           });
           return true;
         case "file": {
-          const path = `${action.repo.replace(/\/+$/, "")}/${action.path}`;
+          // Contained or nothing: a link may never open a file outside the
+          // checkout it named (see safeRepoPath in gitLinks.ts).
+          const path = pathInRepo(action.repo, action.path);
+          if (!path) return false;
           const line = action.line;
           await openFileRef.current(path);
           if (line)

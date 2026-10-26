@@ -1,8 +1,16 @@
 import type {ChatMessage} from './client';
 import {validChatMessage as valid,sameChatMessage,hasControl} from './messageSchema';
+import {eventOf} from './chatEvents';
 let database:Promise<IDBDatabase>|undefined;
 const scope=(account:string,team:string)=>{if([account,team].some(value=>typeof value!=='string'||!value||value.length>256||hasControl(value,false)))throw Error('Invalid chat history scope');return JSON.stringify([account,team]);};
-function open(){return database??=new Promise<IDBDatabase>((resolve,reject)=>{const r=indexedDB.open('canopy-chat-history',1);r.onupgradeneeded=()=>{r.result.createObjectStore('keys');r.result.createObjectStore('messages',{keyPath:'id'}).createIndex('scope','scope');};r.onsuccess=()=>{r.result.onversionchange=()=>{r.result.close();database=undefined;};resolve(r.result);};r.onerror=()=>{database=undefined;reject(r.error);};r.onblocked=()=>{database=undefined;reject(Error('Close other Canopy windows to update chat history'));};});}
+function open(){return database??=new Promise<IDBDatabase>((resolve,reject)=>{const r=indexedDB.open('canopy-chat-history',2);r.onupgradeneeded=event=>{
+ // v1: keys and messages. v2 (chat protocol v2): events, changes to earlier
+ // messages (reactions now; edits and deletes later), kept apart from the
+ // 500-message cap so a busy conversation never loses its reactions first.
+ const db=r.result;
+ if(event.oldVersion<1){db.createObjectStore('keys');db.createObjectStore('messages',{keyPath:'id'}).createIndex('scope','scope');}
+ if(event.oldVersion<2)db.createObjectStore('events',{keyPath:'id'}).createIndex('scope','scope');
+};r.onsuccess=()=>{r.result.onversionchange=()=>{r.result.close();database=undefined;};resolve(r.result);};r.onerror=()=>{database=undefined;reject(r.error);};r.onblocked=()=>{database=undefined;reject(Error('Close other Canopy windows to update chat history'));};});}
 async function key(account:string){
  const db=await open();const existing=await new Promise<CryptoKey|undefined>((resolve,reject)=>{const r=db.transaction('keys').objectStore('keys').get(account);r.onsuccess=()=>resolve(r.result);r.onerror=()=>reject(r.error);});if(existing)return existing;
  const candidate=await crypto.subtle.generateKey({name:'AES-GCM',length:256},false,['encrypt','decrypt']);
@@ -35,6 +43,40 @@ export async function saveChatMessage(account:string,team:string,message:ChatMes
   if(existing.id!==id||existing.scope!==scope(account,team)||existing.created!==original.created||!valid(original)||!sameChatMessage(original,message))throw Error('Message identity conflicts with saved history');
  }
 
+}
+/** Events kept per account and team; the oldest go first. */
+export const MAX_CHAT_EVENTS=2000;
+/** Saves a chat event message (one carrying a known `event`) encrypted like a
+ * message, in the events store. Saving the same event twice is a no-op; a
+ * different event under the same id is refused, as for messages. */
+export async function saveChatEvent(account:string,team:string,message:ChatMessage){
+ scope(account,team);
+ if(!valid(message)||!eventOf(message)||(message.sender!==account&&message.recipient!==null&&message.recipient!==account))throw Error('Invalid chat event');
+ const id=JSON.stringify([account,team,message.id]),iv=crypto.getRandomValues(new Uint8Array(12));
+ const ciphertext=await crypto.subtle.encrypt({name:'AES-GCM',iv,additionalData:aad(id)},await key(account),new TextEncoder().encode(JSON.stringify(message)));
+ const db=await open();
+ const existing=await new Promise<Row|undefined>((resolve,reject)=>{
+  const tx=db.transaction('events','readwrite',{durability:'strict'}),store=tx.objectStore('events');let duplicate:Row|undefined;
+  const insert=store.add({id,scope:scope(account,team),created:message.created,iv,ciphertext});
+  insert.onerror=e=>{if(insert.error?.name!=='ConstraintError')return;e.preventDefault();e.stopPropagation();const prior=store.get(id);prior.onsuccess=()=>{duplicate=prior.result;if(!duplicate)tx.abort();};};
+  insert.onsuccess=()=>{const r=store.index('scope').getAll(scope(account,team));r.onsuccess=()=>{const rows=r.result as Row[];rows.sort((a,b)=>b.created-a.created||a.id.localeCompare(b.id));for(const row of rows.slice(MAX_CHAT_EVENTS))store.delete(row.id);};};
+  tx.oncomplete=()=>resolve(duplicate);tx.onabort=()=>reject(tx.error??Error('Event could not be saved'));
+ });
+ if(existing){
+  const decoded=await crypto.subtle.decrypt({name:'AES-GCM',iv:new Uint8Array(existing.iv),additionalData:aad(id)},await key(account),existing.ciphertext);
+  if(!sameChatMessage(JSON.parse(new TextDecoder().decode(decoded)) as ChatMessage,message))throw Error('Event identity conflicts with saved history');
+ }
+}
+/** This account's saved events for a team, oldest first. A row that no longer
+ * parses is skipped rather than failing the whole conversation. */
+export async function loadChatEvents(account:string,team:string):Promise<ChatMessage[]>{
+ const db=await open(),localKey=await key(account);
+ const rows=await new Promise<Row[]>((resolve,reject)=>{const r=db.transaction('events').objectStore('events').index('scope').getAll(scope(account,team));r.onsuccess=()=>resolve(r.result);r.onerror=()=>reject(r.error);});
+ const events=await Promise.all(rows.map(async row=>{
+  try{const decoded=await crypto.subtle.decrypt({name:'AES-GCM',iv:new Uint8Array(row.iv),additionalData:aad(row.id)},localKey,row.ciphertext);const m=JSON.parse(new TextDecoder().decode(decoded)) as ChatMessage;
+   return valid(m)&&eventOf(m)&&row.id===JSON.stringify([account,team,m.id])&&row.created===m.created?m:undefined;}catch{return undefined;}
+ }));
+ return events.filter((m):m is ChatMessage=>!!m).sort((a,b)=>a.created-b.created||a.id.localeCompare(b.id));
 }
 /** Removes one of the account's own messages, used when the sender discards or
  * resends a message that was never delivered. Missing rows are ignored. */

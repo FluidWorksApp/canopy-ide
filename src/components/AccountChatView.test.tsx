@@ -1,9 +1,9 @@
 import {render,screen,fireEvent,waitFor,cleanup} from '@testing-library/react';
 import {afterEach,beforeEach,it,expect,vi} from 'vitest';
-const mock=vi.hoisted(()=>({attachment:vi.fn(async(..._args:unknown[])=>new Blob(['x'])),markRead:vi.fn(),send:vi.fn(async(..._args:unknown[])=>({id:'new'})),retry:vi.fn(async(..._args:unknown[])=>({id:'retried'})),discard:vi.fn(),snapshot:{members:{ada:'Ada Lovelace'},messages:[{id:'m',sender:'ada',recipient:null,text:'Hello team',created:1}],receipts:{},status:'Connected · end-to-end encrypted'} as {members:Record<string,string>;messages:{id:string;sender:string;recipient:string|null;text:string;created:number;attachments?:{id:string;name:string;size:number;type:string;sha256:string}[]}[];receipts:Record<string,string[]>;delivery?:Record<string,{state:string;detail?:string}>;attachments?:Record<string,Record<string,unknown>>;status:string}}));
-vi.mock('../teamMessaging/session',()=>({teamSession:()=>({retain:()=>()=>{},markRead:mock.markRead,subscribe:()=>()=>{},getSnapshot:()=>mock.snapshot,send:mock.send,attachment:mock.attachment,retry:mock.retry,discard:mock.discard})}));
+const mock=vi.hoisted(()=>({attachment:vi.fn(async(..._args:unknown[])=>new Blob(['x'])),markRead:vi.fn(),send:vi.fn(async(..._args:unknown[])=>({id:'new'})),retry:vi.fn(async(..._args:unknown[])=>({id:'retried'})),discard:vi.fn(),react:vi.fn(async(..._args:unknown[])=>{}),snapshot:{members:{ada:'Ada Lovelace'},messages:[{id:'m',sender:'ada',recipient:null,text:'Hello team',created:1}],receipts:{},status:'Connected · end-to-end encrypted'} as {members:Record<string,string>;messages:{id:string;sender:string;recipient:string|null;text:string;created:number;attachments?:{id:string;name:string;size:number;type:string;sha256:string}[]}[];receipts:Record<string,string[]>;delivery?:Record<string,{state:string;detail?:string}>;attachments?:Record<string,Record<string,unknown>>;reactions?:Record<string,Record<string,{sender:string;emoji:string;on:boolean;created:number;id:string}>>;undeliveredReactions?:Record<string,string[]>;status:string}}));
+vi.mock('../teamMessaging/session',()=>({teamSession:()=>({retain:()=>()=>{},markRead:mock.markRead,subscribe:()=>()=>{},getSnapshot:()=>mock.snapshot,send:mock.send,attachment:mock.attachment,retry:mock.retry,discard:mock.discard,react:mock.react})}));
 import {AccountChatView} from './AccountChatView';
-beforeEach(()=>{mock.attachment.mockClear();mock.markRead.mockClear();mock.send.mockClear();mock.retry.mockClear();mock.discard.mockClear();});
+beforeEach(()=>{mock.attachment.mockClear();mock.markRead.mockClear();mock.send.mockClear();mock.retry.mockClear();mock.discard.mockClear();mock.react.mockClear();});
 afterEach(cleanup);
 const channel={teamId:'engineering',userId:'me',peer:null,name:'Engineering'};
 const box=()=>screen.getByRole('textbox',{name:'Message'});
@@ -219,3 +219,102 @@ it('makes the transcript a selectable surface that Select All can target',()=>{
  expect(log.tabIndex).toBe(-1);
  expect(screen.getByText('Hello team').closest('.account-chat-transcript')).toBe(log);
 });
+
+const entry=(sender:string,emoji:string,created:number,on=true)=>({sender,emoji,on,created,id:`e-${sender}-${created}`});
+function withReactions(run:()=>void|Promise<void>){
+ const prior=mock.snapshot.reactions;
+ mock.snapshot.reactions={m:{a:entry('ada','👍',1),b:entry('me','👍',2),c:entry('ada','🎉',3),d:entry('grace','👀',4,false)}};
+ return Promise.resolve(run()).finally(()=>{mock.snapshot.reactions=prior;});
+}
+it('groups reactions under a message as labelled buttons, with yours pressed',()=>withReactions(()=>{
+ render(<AccountChatView conversation={channel}/>);
+ const group=screen.getByRole('group',{name:'Reactions'});
+ const thumbs=screen.getByRole('button',{name:/^👍 2 reactions from You and Ada Lovelace; remove your reaction$/});
+ expect(group.contains(thumbs)).toBe(true);
+ expect(thumbs.getAttribute('aria-pressed')).toBe('true');expect(thumbs.classList.contains('is-mine')).toBe(true);
+ expect(thumbs.textContent).toBe('👍2');expect(thumbs.title).toBe('You and Ada Lovelace reacted with 👍');
+ const party=screen.getByRole('button',{name:/^🎉 1 reaction from Ada Lovelace; add your reaction$/});
+ expect(party.getAttribute('aria-pressed')).toBe('false');
+ // A removed reaction leaves no chip.
+ expect(screen.queryByRole('button',{name:/^👀/})).toBeNull();
+ fireEvent.click(thumbs);expect(mock.react).toHaveBeenCalledWith('m','👍');
+ fireEvent.click(party);expect(mock.react).toHaveBeenCalledWith('m','🎉');
+ // Clicking a chip keeps focus where it was, like Copy.
+ expect(fireEvent.mouseDown(thumbs)).toBe(false);
+}));
+it('adds a reaction from the quick set or any typed emoji, and closes on Escape',async()=>{
+ render(<AccountChatView conversation={channel}/>);
+ const add=screen.getByRole('button',{name:'Add reaction'});
+ expect(add.getAttribute('aria-expanded')).toBe('false');
+ fireEvent.click(add);
+ const picker=screen.getByRole('dialog',{name:'Add reaction'});
+ expect(add.getAttribute('aria-expanded')).toBe('true');
+ expect(document.activeElement).toBe(screen.getByRole('button',{name:'React with 👍'}));
+ for(const emoji of ['👍','❤️','😂','🎉','👀','✅'])expect(screen.getByRole('button',{name:`React with ${emoji}`})).toBeTruthy();
+ fireEvent.click(screen.getByRole('button',{name:'React with 🎉'}));
+ expect(mock.react).toHaveBeenCalledWith('m','🎉');
+ expect(screen.queryByRole('dialog')).toBeNull();expect(document.activeElement).toBe(add);
+ fireEvent.click(add);
+ const field=screen.getByRole('textbox',{name:'Any emoji'}),submit=screen.getByRole('button',{name:'Add'});
+ fireEvent.change(field,{target:{value:'hello'}});
+ expect((submit as HTMLButtonElement).disabled).toBe(true);expect(field.getAttribute('aria-invalid')).toBe('true');
+ fireEvent.change(field,{target:{value:' 🦄 '}});fireEvent.click(submit);
+ expect(mock.react).toHaveBeenLastCalledWith('m','🦄');
+ fireEvent.click(add);
+ const escaped=fireEvent.keyDown(screen.getByRole('dialog',{name:'Add reaction'}),{key:'Escape'});
+ expect(escaped).toBe(false);
+ expect(screen.queryByRole('dialog')).toBeNull();expect(document.activeElement).toBe(add);
+ expect(picker.isConnected).toBe(false);
+});
+it('shows a reaction that could not be sent',async()=>{
+ mock.react.mockRejectedValueOnce(Error('Could not be sent. Try again.'));
+ render(<AccountChatView conversation={channel}/>);
+ fireEvent.click(screen.getByRole('button',{name:'Add reaction'}));
+ fireEvent.click(screen.getByRole('button',{name:'React with 👍'}));
+ expect((await screen.findByRole('alert')).textContent).toBe('Could not be sent. Try again.');
+});
+
+it('puts the cursor in the message box when the conversation opens',()=>{
+ render(<AccountChatView conversation={channel}/>);
+ expect(document.activeElement).toBe(box());
+});
+it('focuses the message box again on switching back to the conversation or to another one',()=>{
+ const outside=document.createElement('button');document.body.append(outside);
+ const {rerender}=render(<AccountChatView conversation={channel} active/>);
+ outside.focus();
+ rerender(<AccountChatView conversation={channel} active={false}/>);
+ expect(document.activeElement).toBe(outside);
+ rerender(<AccountChatView conversation={channel} active/>);
+ expect(document.activeElement).toBe(box());
+ outside.focus();
+ rerender(<AccountChatView conversation={{...channel,peer:'ada',name:'Ada Lovelace'}} active/>);
+ expect(document.activeElement).toBe(box());
+ outside.remove();
+});
+it('does not take focus on later updates, or from a field the user is typing in elsewhere',()=>{
+ const other=document.createElement('input');document.body.append(other);
+ // jsdom lays nothing out: give this field a box so it counts as on screen.
+ other.getClientRects=()=>[{}] as unknown as DOMRectList;
+ const {rerender}=render(<AccountChatView conversation={channel} active={false}/>);
+ other.focus();
+ rerender(<AccountChatView conversation={channel} active={false}/>);
+ expect(document.activeElement).toBe(other);
+ rerender(<AccountChatView conversation={channel} active/>);
+ expect(document.activeElement).toBe(other);
+ other.blur();other.remove();
+});
+
+it('flags your own reaction that no teammate could receive',()=>withReactions(()=>{
+ const prior=mock.snapshot.undeliveredReactions;
+ mock.snapshot.undeliveredReactions={m:['👍','🎉']};
+ try{
+  render(<AccountChatView conversation={channel}/>);
+  const thumbs=screen.getByRole('button',{name:/^👍 2 reactions/});
+  expect(thumbs.classList.contains('is-undelivered')).toBe(true);
+  expect(thumbs.title).toBe('You and Ada Lovelace reacted with 👍. Not delivered: teammates need Canopy 0.4.10 or later to see reactions');
+  expect(thumbs.getAttribute('aria-label')).toContain('Not delivered');
+  // Someone else's reaction is never flagged, even if listed.
+  const party=screen.getByRole('button',{name:/^🎉 1 reaction/});
+  expect(party.classList.contains('is-undelivered')).toBe(false);expect(party.title).not.toContain('Not delivered');
+ }finally{mock.snapshot.undeliveredReactions=prior;}
+}));

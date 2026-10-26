@@ -6,6 +6,7 @@ import {
   badgeFor,
   buildAttentionItems,
   clearAttentionHistory,
+  createOsBridge,
   dismissToast,
   forProject,
   liveToasts,
@@ -130,6 +131,41 @@ describe("toast lifetime", () => {
     expect(outstandingQuestions([asked]).map((x) => x.id)).toEqual(["b"]);
     expect(badgeFor([asked])).toEqual({ count: 1, urgency: "high" });
     expect(shouldReachOS(asked, false)).toBe(true);
+  });
+});
+
+describe("the OS bridge", () => {
+  const on = { enabled: true, focused: true };
+
+  it("sends a teammate's message that arrives after launch, even while focused", () => {
+    const send = createOsBridge([]);
+    const message = item({ id: "m1", source: "team" });
+    expect(send([message], on)).toEqual([message]);
+  });
+
+  it("does not replay messages already stored when the app started", () => {
+    // Team notices reach the OS while focused, so an unseeded bridge re-sent
+    // every stored one as a system banner on each launch.
+    const stored = [item({ id: "old", source: "team" })];
+    const send = createOsBridge(stored);
+    const fresh = item({ id: "new", source: "team" });
+    expect(send(stored, on)).toEqual([]);
+    expect(send([fresh, ...stored], on)).toEqual([fresh]);
+  });
+
+  it("announces an item once, however often it is updated in place", () => {
+    const send = createOsBridge([]);
+    const away = { enabled: true, focused: false };
+    const asked = item({ id: "q", kind: "question" });
+    expect(send([asked], away)).toEqual([asked]);
+    expect(send([{ ...asked, title: "again" }], away)).toEqual([]);
+  });
+
+  it("does not release a backlog when popups are switched back on", () => {
+    const send = createOsBridge([]);
+    const message = item({ id: "m1", source: "team" });
+    expect(send([message], { ...on, enabled: false })).toEqual([]);
+    expect(send([message], on)).toEqual([]);
   });
 });
 

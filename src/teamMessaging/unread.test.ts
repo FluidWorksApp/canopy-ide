@@ -1,6 +1,6 @@
 import {afterEach,expect,it,vi} from 'vitest';
-const mocks=vi.hoisted(()=>({options:[] as any[],store:new Map<string,unknown>(),history:new Map<string,unknown[]>()}));
-vi.mock('./client',()=>({PeerClient:class{constructor(options:unknown){mocks.options.push(options);}start=vi.fn(async()=>{});stop=vi.fn();send=vi.fn();discard=vi.fn(async()=>{});}}));
+const mocks=vi.hoisted(()=>({options:[] as any[],store:new Map<string,unknown>(),history:new Map<string,unknown[]>(),events:new Map<string,unknown[]>(),sendEvent:vi.fn(async(m:{id:string})=>({id:m.id,devices:1,queued:false}))}));
+vi.mock('./client',()=>({PeerClient:class{constructor(options:unknown){mocks.options.push(options);}start=vi.fn(async()=>{});stop=vi.fn();send=vi.fn();discard=vi.fn(async()=>{});sendEvent=mocks.sendEvent;}}));
 // An in-memory stand-in for the encrypted IndexedDB store, so a "restart"
 // (dropping every session and opening again) reads back what was saved.
 vi.mock('./history',()=>({
@@ -9,6 +9,8 @@ vi.mock('./history',()=>({
  forgetChatMessage:vi.fn(async()=>{}),
  loadChatReadState:vi.fn(async(account:string,team:string)=>structuredClone(mocks.store.get(`${account}:${team}`)??{unreadIds:[],receipts:{}})),
  saveChatReadState:vi.fn(async(account:string,team:string,state:unknown)=>{mocks.store.set(`${account}:${team}`,structuredClone(state));}),
+ loadChatEvents:vi.fn(async(account:string,team:string)=>structuredClone(mocks.events.get(`${account}:${team}`)??[])),
+ saveChatEvent:vi.fn(async(account:string,team:string,message:{id:string})=>{const key=`${account}:${team}`,rows=mocks.events.get(key)??[];if(!rows.some((m:any)=>m.id===message.id))mocks.events.set(key,[...rows,structuredClone(message)]);}),
 }));
 const me=vi.hoisted(()=>({id:'me'}));
 vi.mock('@tauri-apps/api/core',()=>({invoke:vi.fn(async()=>({user:{id:me.id}}))}));
@@ -21,7 +23,7 @@ async function open(team:string,user='me'){
  return {session,release,events:mocks.options.at(-1)};
 }
 const msg=(id:string,sender:string,recipient:string|null,text='hi')=>({id,sender,recipient,text,created:++n});
-afterEach(()=>{clearTeamSessions();mocks.store.clear();mocks.history.clear();me.id='me';});
+afterEach(()=>{clearTeamSessions();mocks.store.clear();mocks.history.clear();mocks.events.clear();mocks.sendEvent.mockClear();me.id='me';});
 
 it('counts incoming channel messages and DMs per conversation',async()=>{
  const {session,events}=await open('core');
@@ -86,4 +88,71 @@ it('labels counts with a 9+ cap and keys conversations from your side',()=>{
  expect(conversationKey({sender:'ada',recipient:null},'me')).toBe(CHANNEL);
  expect(conversationKey({sender:'ada',recipient:'me'},'me')).toBe('ada');
  expect(conversationKey({sender:'me',recipient:'ada'},'me')).toBe('ada');
+});
+
+const T1='11111111-1111-4111-8111-111111111111',T2='22222222-2222-4222-8222-222222222222';
+const reactionEvent=(target:string,sender:string,recipient:string|null,emoji='👍',op:'add'|'remove'='add',created=++n)=>({id:crypto.randomUUID(),sender,recipient,text:`${emoji} reacted to "hi"`,created,v:2,event:{type:'reaction',target,emoji,op}});
+
+it('folds a teammate\'s reaction onto its message without an unread count, a notification or a new message',async()=>{
+ const {session,events}=await open('reactions');const heard=vi.fn();const stop=subscribeTeamMessages(heard);
+ events.message({...msg(T1,'me',null),id:T1});
+ events.message({...msg(T2,'ada','me'),id:T2});session.markRead('ada');heard.mockClear();
+ const before=session.unread();
+ events.message(reactionEvent(T1,'ada',null,'🎉'));events.message(reactionEvent(T2,'ada','me','👀'));
+ expect(session.getSnapshot().messages.map(m=>m.id)).toEqual([T1,T2]);
+ expect(session.unread()).toEqual(before);expect(session.getSnapshot().unreadIds).toEqual([]);expect(getTeamUnread()).toBe(0);
+ expect(heard).not.toHaveBeenCalled();
+ expect(Object.keys(session.getSnapshot().reactions)).toEqual([T1,T2]);
+ stop();
+});
+
+it('toggles your own reaction, sends it to the conversation and restores it after a restart',async()=>{
+ const first=await open('flip');
+ first.events.message({...msg(T1,'ada','me'),id:T1});
+ await first.session.react(T1,'👍');
+ const sent=mocks.sendEvent.mock.calls[0][0] as any;
+ // A direct message's reaction goes to the other person, as a v2 event message.
+ expect(sent).toMatchObject({sender:'me',recipient:'ada',v:2,event:{type:'reaction',target:T1,emoji:'👍',op:'add'}});
+ expect(sent.text).toContain('👍');
+ expect(first.session.getSnapshot().reactions[T1]).toBeDefined();
+ await first.session.react(T1,'👍');
+ expect((mocks.sendEvent.mock.calls[1][0] as any).event.op).toBe('remove');
+ await first.session.react(T1,'🎉');
+ expect(first.session.getSnapshot().messages).toHaveLength(1);
+ await expect(first.session.react(T1,'not emoji')).rejects.toThrow('single emoji');
+ await expect(first.session.react(T2,'👍')).rejects.toThrow('not in the conversation');
+ // The transport saves the target message before handing it over; then restart.
+ await first.events.persist({...msg(T1,'ada','me'),id:T1});
+ clearTeamSessions();
+ const second=await open('flip');await flush();
+ const r=second.session.getSnapshot().reactions[T1];
+ expect(Object.values(r).filter(e=>e.on).map(e=>e.emoji)).toEqual(['🎉']);
+});
+
+it('applies a reaction that arrives before its message once the message lands',async()=>{
+ const {session,events}=await open('early');
+ events.message(reactionEvent(T1,'ada',null,'✅'));
+ expect(session.getSnapshot().reactions).toEqual({});
+ events.message({...msg(T1,'ada',null),id:T1});
+ expect(Object.values(session.getSnapshot().reactions[T1]).map(e=>e.emoji)).toEqual(['✅']);
+ // Unread counts the message, never the reaction.
+ expect(session.unread().channel).toBe(1);
+});
+
+it('marks your reaction not delivered when no device in the conversation speaks v2, until it reaches someone',async()=>{
+ const {session,events}=await open('undelivered');
+ events.message({...msg(T1,'ada',null),id:T1});
+ mocks.sendEvent.mockImplementationOnce(async(m:{id:string})=>({id:m.id,devices:0,queued:false}));
+ await session.react(T1,'👍');
+ expect(session.getSnapshot().undeliveredReactions).toEqual({[T1]:['👍']});
+ // Still shown as yours: only its delivery is in question.
+ expect(Object.values(session.getSnapshot().reactions[T1]).filter(e=>e.on).map(e=>e.emoji)).toEqual(['👍']);
+ mocks.sendEvent.mockImplementationOnce(async(m:{id:string})=>({id:m.id,devices:0,queued:false}));
+ await session.react(T1,'🎉');
+ expect(session.getSnapshot().undeliveredReactions).toEqual({[T1]:['👍','🎉']});
+ // Removing it clears the warning, and a delivered one never shows it.
+ await session.react(T1,'👍');
+ expect(session.getSnapshot().undeliveredReactions).toEqual({[T1]:['🎉']});
+ await session.react(T1,'✅');
+ expect(session.getSnapshot().undeliveredReactions).toEqual({[T1]:['🎉']});
 });

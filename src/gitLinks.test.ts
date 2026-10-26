@@ -5,6 +5,7 @@ import { describe, expect, it } from "vitest";
 import type * as ipc from "./ipc";
 import {
   parseGitLink,
+  pathInRepo,
   remoteMatchesSlug,
   resolveGitLink,
   type GitLinkLookups,
@@ -227,5 +228,76 @@ describe("remoteMatchesSlug", () => {
 
   it("compares a nested group on its last two segments, as an origin carries them", () => {
     expect(remoteMatchesSlug("git@gitlab.com:acme/team/api.git", "acme/team/api")).toBe(true);
+  });
+});
+
+// A blob link from a teammate must never open a file outside the checkout it
+// names. Segments are percent-decoded one at a time, so an encoded separator
+// becomes part of a single segment after the URL parser's own dot-segment
+// handling has already run — that is the hole these close.
+describe("blob paths that could leave the repo", () => {
+  const blob = (tail: string) => `https://github.com/acme/agent/blob/main/${tail}`;
+  it.each([
+    ["../a (encoded separator)", "..%2Fa"],
+    ["../../etc/hosts", "..%2F..%2Fetc%2Fhosts"],
+    ["a/../b", "a%2F..%2Fb"],
+    ["a\\b", "a%5Cb"],
+    ["..\\..\\x", "..%5C..%5Cx"],
+    ["/abs", "%2Fetc%2Fhosts"],
+    ["C:/x", "C:/x"],
+    ["C:%2Fx", "C:%2Fx"],
+    [".git/config", ".git/config"],
+    [".GIT/config", ".GIT/config"],
+    ["nested .git", "src/.git/HEAD"],
+    ["NUL", "a%00b"],
+    ["control char", "a%0Ab"],
+    ["U+202E", "evil%E2%80%AEtxt.ts"],
+    ["U+2066", "a%E2%81%A6b"],
+  ])("refuses %s", (_name, tail) => {
+    expect(parseGitLink(blob(tail))).toBeNull();
+  });
+
+  it.each(["%2e%2e/%2e%2e/etc/hosts", "src/%2e%2e/%2e%2e/%2e%2e/x", "./%2e/a.ts"])(
+    "never yields a dot segment for %s (the URL parser folds %%2e%%2e itself)",
+    (tail) => {
+      const link = parseGitLink(blob(tail));
+      if (link === null) return;
+      expect(link.kind).toBe("file");
+      if (link.kind !== "file") return;
+      expect(link.path.split("/")).not.toContain("..");
+      expect(link.path.startsWith("/")).toBe(false);
+    },
+  );
+
+  it("still reads ordinary paths, including dotfiles and spaces", () => {
+    expect(parseGitLink(blob(".github/workflows/ci.yml"))).toMatchObject({ path: ".github/workflows/ci.yml" });
+    expect(parseGitLink(blob("docs/my%20notes.md"))).toMatchObject({ path: "docs/my notes.md" });
+    expect(parseGitLink(blob("src/..hidden/a.ts"))).toMatchObject({ path: "src/..hidden/a.ts" });
+  });
+
+  it("pathInRepo joins only contained relative paths", () => {
+    expect(pathInRepo("/work/agent/", "src/a.ts")).toBe("/work/agent/src/a.ts");
+    for (const bad of ["../a", "a/../b", "a\\b", "/abs", "C:/x", ".git/config", "a\u0000b", "a\u202eb", "", "a//b"]) {
+      expect(pathInRepo("/work/agent", bad)).toBeNull();
+    }
+  });
+
+  it("resolveGitLink never asks the disk about a traversal", async () => {
+    const asked: string[] = [];
+    const look: GitLinkLookups = {
+      repos: ["/work/agent"],
+      remoteUrl: async () => "git@github.com:acme/agent.git",
+      prs: async () => [],
+      issues: async () => [],
+      commit: async () => {
+        throw new Error("no");
+      },
+      fileExists: async (_repo, path) => {
+        asked.push(path);
+        return true;
+      },
+    };
+    await expect(resolveGitLink(blob("..%2F..%2Fetc%2Fhosts"), look)).resolves.toBeNull();
+    expect(asked).toEqual([]);
   });
 });

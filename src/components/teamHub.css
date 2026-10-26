@@ -111,3 +111,26 @@ button.team-row{cursor:pointer;}button.team-row:hover:not(:disabled){background:
 .team-hub-picker-dot{flex:0 0 auto;width:7px;height:7px;border-radius:50%;background:var(--accent);}
 .account-chat .linkified-link {color:inherit;text-decoration:underline;text-underline-offset:2px;overflow-wrap:anywhere;cursor:pointer;}
 .account-chat .linkified-link:hover {color:var(--accent);}
+/* Reactions: a hover button beside Copy opens the picker; chips sit under the message. */
+.account-chat-react{position:absolute;top:-10px;inset-inline-end:6px;display:inline-flex;align-items:center;height:20px;padding:0 5px;border:1px solid var(--border);border-radius:var(--r-sm);background:var(--bg-raised);color:var(--text-muted);font:inherit;font-size:11px;line-height:1;cursor:pointer;opacity:0;transition:opacity var(--dur-fast) var(--ease-out)}
+.account-chat-react.beside-copy{inset-inline-end:36px}
+.account-chat-msg:hover .account-chat-react,.account-chat-react:focus-visible,.account-chat-react.is-open{opacity:1}
+.account-chat-copy.is-copied~.account-chat-react:not(:focus-visible){opacity:0}
+.account-chat-react:hover{color:var(--text)}
+.account-chat-react:focus-visible{outline:1px solid var(--accent);outline-offset:1px}
+.account-chat-reactions{display:flex;flex-wrap:wrap;align-items:center;gap:4px;margin-top:4px}
+.account-chat-reaction{display:inline-flex;align-items:center;gap:4px;height:22px;padding:0 7px;border:1px solid var(--border);border-radius:999px;background:var(--bg-raised);color:var(--text-muted);font:inherit;font-size:var(--fs-xs);line-height:1;cursor:pointer}
+.account-chat-reaction:hover{border-color:var(--text-muted);color:var(--text)}
+.account-chat-reaction.is-mine{border-color:var(--accent);background:color-mix(in srgb,var(--accent) 18%,var(--bg-raised));color:var(--text)}
+.account-chat-reaction:focus-visible{outline:1px solid var(--accent);outline-offset:1px}
+.account-chat-reaction-count{font-variant-numeric:tabular-nums;font-weight:600}
+.account-chat-picker{display:flex;flex-wrap:wrap;align-items:center;gap:6px;padding:4px 6px;border:1px solid var(--border);border-radius:var(--r-md);background:var(--bg-raised);box-shadow:0 4px 12px color-mix(in srgb,#000 18%,transparent)}
+.account-chat-picker-quick{display:flex;gap:2px}
+.account-chat-picker-quick button{width:28px;height:28px;padding:0;border:0;border-radius:var(--r-sm);background:none;font-size:16px;line-height:1;cursor:pointer}
+.account-chat-picker-quick button:hover,.account-chat-picker-quick button:focus-visible{background:color-mix(in srgb,var(--text) 10%,transparent);outline:none}
+.account-chat-picker-quick button:focus-visible{box-shadow:0 0 0 1px var(--accent)}
+.account-chat-picker-custom{display:flex;align-items:center;gap:4px}
+.account-chat-picker-custom input{width:84px;height:24px;padding:0 6px;border:1px solid var(--border);border-radius:var(--r-sm);background:var(--bg);color:var(--text);font:inherit;font-size:var(--fs-xs)}
+.account-chat-picker-custom input[aria-invalid=true]{border-color:var(--warn)}
+.account-chat-picker-custom button:disabled{opacity:.5;cursor:default;text-decoration:none}
+.account-chat-reaction.is-undelivered{border-style:dashed;border-color:var(--warn);background:var(--bg-raised);opacity:.8}

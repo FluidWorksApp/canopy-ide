@@ -18,6 +18,17 @@
 //! fire-and-forget plugin behaviour (same crate the plugin itself uses), so a
 //! notification still shows, it just can't be routed. Nothing calls a
 //! platform-specific API from the frontend — `notify_native` is the one door.
+//!
+//! Whether something may interrupt while Canopy is in front is the frontend's
+//! call (`shouldReachOS` in `src/attention.ts`): a teammate's message does,
+//! everything else waits for the window to lose focus. macOS has its own rule
+//! — `NSUserNotificationCenter` files a notification from the frontmost app
+//! straight into Notification Center without a banner unless its delegate
+//! answers `shouldPresentNotification:` with YES — and mac_notification_sys's
+//! delegate does not implement that method. So without
+//! `present_while_frontmost`, a bundled Canopy that is in front silently
+//! swallowed every banner the frontend asked for. (A dev build posts as
+//! Terminal, which is usually not frontmost, so dev builds could still show it.)
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 use tauri::{AppHandle, Emitter, Manager};
@@ -74,6 +85,7 @@ fn post_macos(app: AppHandle, title: String, body: String, target: Option<String
     // `set_application` is a process-wide `Once` inside mac_notification_sys —
     // first caller wins, later ones are a no-op error we don't care about.
     let _ = mac_notification_sys::set_application(&ident);
+    present_while_frontmost();
 
     let waiting = WAITERS.load(Ordering::Relaxed) < MAX_WAITERS;
     if waiting {
@@ -102,6 +114,62 @@ fn post_macos(app: AppHandle, title: String, body: String, target: Option<String
     });
 }
 
+/// Teach mac_notification_sys's `NotificationCenterDelegate` to answer
+/// `userNotificationCenter:shouldPresentNotification:` with YES, so a banner
+/// shows even while Canopy is the frontmost app. macOS only asks when it has
+/// already decided not to present, so this never adds a banner the frontend
+/// did not request — the decision of who may interrupt stays in
+/// `shouldReachOS`. Added at runtime because the delegate class lives inside
+/// the crate's Objective-C; skipped if a future crate version implements it.
+#[cfg(target_os = "macos")]
+fn present_while_frontmost() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        use objc2::runtime::{AnyClass, AnyObject, Bool, Imp, Sel};
+        use objc2::{sel, Encode};
+
+        extern "C-unwind" fn should_present(
+            _this: *mut AnyObject,
+            _cmd: Sel,
+            _center: *mut AnyObject,
+            _notification: *mut AnyObject,
+        ) -> Bool {
+            Bool::YES
+        }
+
+        let Some(cls) = AnyClass::get(c"NotificationCenterDelegate") else {
+            return;
+        };
+        let selector = sel!(userNotificationCenter:shouldPresentNotification:);
+        if cls.responds_to(selector) {
+            return;
+        }
+        // BOOL, self, _cmd, center, notification.
+        let Ok(types) = std::ffi::CString::new(format!("{}@:@@", Bool::ENCODING)) else {
+            return;
+        };
+        // SAFETY: the function matches the selector's signature and the type
+        // string just built for it; `class_addMethod` copies the string.
+        unsafe {
+            let imp: Imp = std::mem::transmute(
+                should_present
+                    as extern "C-unwind" fn(
+                        *mut AnyObject,
+                        Sel,
+                        *mut AnyObject,
+                        *mut AnyObject,
+                    ) -> Bool,
+            );
+            objc2::ffi::class_addMethod(
+                cls as *const AnyClass as *mut AnyClass,
+                selector,
+                imp,
+                types.as_ptr(),
+            );
+        }
+    });
+}
+
 /// Raise the window and hand the target to the frontend router.
 ///
 /// The window, not the webview window — once a preview tab adds a child webview
@@ -122,4 +190,25 @@ fn activate(app: &AppHandle, target: Option<&str>) {
 /// canopy://…` invocation). Same door as a notification click.
 pub fn open_link(app: &AppHandle, target: &str) {
     activate(app, Some(target));
+}
+
+#[cfg(all(test, target_os = "macos"))]
+mod tests {
+    use super::present_while_frontmost;
+    use objc2::runtime::AnyClass;
+    use objc2::sel;
+
+    /// The delegate mac_notification_sys installs must let banners through
+    /// while Canopy is frontmost; without it a focused app never shows one.
+    #[test]
+    fn delegate_presents_while_frontmost() {
+        let cls = AnyClass::get(c"NotificationCenterDelegate")
+            .expect("mac_notification_sys links its delegate class");
+        let selector = sel!(userNotificationCenter:shouldPresentNotification:);
+        // The crate's delegate lacks it — the root cause. If a future version
+        // implements it, this fails and the runtime hook can go.
+        assert!(!cls.responds_to(selector));
+        present_while_frontmost();
+        assert!(cls.responds_to(selector));
+    }
 }
