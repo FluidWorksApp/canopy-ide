@@ -398,6 +398,20 @@ impl ClaudeIde {
         Ok(session.pty_id)
     }
 
+    /// The terminals with a CLI attached right now, and the folder each
+    /// serves. The UI learns this from `Connection` events; a reloaded window
+    /// missed them, and asks.
+    pub fn connections(&self) -> Vec<(u32, String)> {
+        self.hub
+            .sessions
+            .lock()
+            .unwrap()
+            .values()
+            .filter(|s| s.connected())
+            .map(|s| (s.pty_id, s.root.clone()))
+            .collect()
+    }
+
     fn session(&self, pty_id: u32) -> Option<Arc<Session>> {
         self.hub.sessions.lock().unwrap().get(&pty_id).cloned()
     }
@@ -946,6 +960,16 @@ pub fn claude_ide_resolve_diff(
     state.resolve_diff(pty_id, &tab_name, verdict)
 }
 
+/// Which terminals have a CLI attached, for a window that has just loaded.
+#[tauri::command]
+pub fn claude_ide_connections(state: tauri::State<'_, ClaudeIde>) -> Vec<Value> {
+    state
+        .connections()
+        .into_iter()
+        .map(|(pty_id, root)| json!({"ptyId": pty_id, "root": root}))
+        .collect()
+}
+
 /// The UI's answer to a `claude-ide` diagnostics request.
 #[tauri::command]
 pub fn claude_ide_reply(state: tauri::State<'_, ClaudeIde>, request_id: u64, data: Value) {
@@ -1365,6 +1389,13 @@ mod tests {
         assert_eq!(ide.notify_selection("/w/repo/README.md", json!({})), 1);
         assert_eq!(recv(&mut ws_outer).await["method"], "selection_changed");
         assert_eq!(ide.notify_selection("/w/repository/x", json!({})), 0, "segment-wise");
+        let mut connected = ide.connections();
+        connected.sort();
+        assert_eq!(
+            connected,
+            [(1, "/w/repo".to_string()), (2, "/w/repo/pkg".to_string()), (3, "/w/repo/pkg/".to_string())],
+            "pty 4 never connected"
+        );
 
         // Mention: the preferred terminal when eligible, else the latest typed in.
         let pty = ide.at_mention("/w/repo/pkg/x.ts", Some(0), Some(1), None, |p| if p == 3 { 50 } else { 10 }).unwrap();

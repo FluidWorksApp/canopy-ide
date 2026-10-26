@@ -8,7 +8,12 @@ const mocks = vi.hoisted(() => {
   class FakeModel {
     listeners = new Set<() => void>();
     disposed = false;
-    constructor(public value: string, public key: string) {}
+    value: string;
+    key: string;
+    constructor(value: string, key: string) {
+      this.value = value;
+      this.key = key;
+    }
     getValue() {
       return this.value;
     }

@@ -893,6 +893,10 @@ export const claudeIdeResolveDiff = (
   accept: boolean,
   contents?: string,
 ) => invoke<void>("claude_ide_resolve_diff", { ptyId, tabName, accept, contents });
+/** The terminals whose CLI is attached right now, for a freshly loaded window
+ *  that missed their `connection` events. */
+export const claudeIdeConnections = () =>
+  invoke<{ ptyId: number; root: string }[]>("claude_ide_connections");
 export const claudeIdeReply = (requestId: number, data: unknown) =>
   invoke<void>("claude_ide_reply", { requestId, data }).catch(() => {});
 /** Resolves with how many Claude sessions received the selection. */

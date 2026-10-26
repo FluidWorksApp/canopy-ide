@@ -1021,6 +1021,7 @@ pub fn run() {
             context::browser_result,
             claude_ide::claude_ide_resolve_diff,
             claude_ide::claude_ide_reply,
+            claude_ide::claude_ide_connections,
             claude_ide::claude_ide_selection,
             claude_ide::claude_ide_at_mention,
             snapshot::webview_snapshot,

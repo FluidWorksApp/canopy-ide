@@ -34,8 +34,10 @@ export const CLAUDE_IDE_MARKER = "CANOPY_CLAUDE_IDE";
 export function claudeIdeLaunchEnv(launch: {
   command?: string;
   runCommand?: string;
-  /** The component the tab belongs to; the terminal's cwd otherwise. */
+  /** The component the tab belongs to, if known. */
   root?: string;
+  /** Where the terminal starts. */
+  cwd?: string;
 }): [string, string][] {
   if (!launch.command || launch.runCommand) return [];
   if (!getSettings().claudeIdeIntegration) return [];
@@ -43,7 +45,19 @@ export function claudeIdeLaunchEnv(launch: {
   const cli = agentIdForCommand(launch.command);
   if (cli !== "claude" || harnessSupport(cli, "ideProtocol") !== "native") return [];
   if (/(^|\s)(-p|--print)(\s|$)/.test(launch.command)) return [];
-  return [[CLAUDE_IDE_MARKER, launch.root ?? ""]];
+  return [[CLAUDE_IDE_MARKER, claudeIdeRoot(launch.root, launch.cwd)]];
+}
+
+/** The folder a session is scoped to: the lock's `workspaceFolders`, and what
+ *  a selection or a mention is routed by. The component when the terminal
+ *  runs inside it; the terminal's own cwd when it doesn't — an agent in a
+ *  worktree sits beside the component (`<repo>-wt-…`), and every file it
+ *  touches is under the worktree, never under the component it came from. */
+export function claudeIdeRoot(root: string | undefined, cwd: string | undefined): string {
+  const r = (root ?? "").replace(/[\\/]+$/, "");
+  if (!cwd) return r;
+  if (r && (cwd === r || cwd.startsWith(`${r}/`) || cwd.startsWith(`${r}\\`))) return r;
+  return cwd;
 }
 
 // ---- what Rust tells us ------------------------------------------------------

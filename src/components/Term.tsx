@@ -916,7 +916,8 @@ export const Term = forwardRef<TermHandle, TermProps>(function Term(
         const ideEnv = claudeIdeLaunchEnv({
           command: initialCommand,
           runCommand,
-          root: workspacePath ?? cwd,
+          root: workspacePath,
+          cwd,
         });
         const spawnOpts = {
             // 0 tells Rust to fall back to 80x24; the first resize once the tab is

@@ -15,12 +15,7 @@ vi.mock("./agentOps", () => ({ prime: vi.fn() }));
 vi.mock("./monaco-setup", () => ({
   monaco: {
     Range: class {
-      constructor(
-        public startLineNumber: number,
-        public startColumn: number,
-        public endLineNumber: number,
-        public endColumn: number,
-      ) {}
+      constructor(..._bounds: number[]) {}
     },
   },
 }));

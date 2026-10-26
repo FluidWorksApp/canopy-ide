@@ -4,6 +4,7 @@ import {
   EMPTY_STATE,
   applyClaudeIdeEvent,
   claudeIdeLaunchEnv,
+  claudeIdeRoot,
   claudeIdeState,
   debounced,
   diffsForPtys,
@@ -44,6 +45,16 @@ describe("claudeIdeLaunchEnv", () => {
     expect(claudeIdeLaunchEnv({ command: "/opt/bin/claude", root: "/w" })).toEqual([
       [CLAUDE_IDE_MARKER, "/w"],
     ]);
+  });
+
+  it("scopes a worktree session to the worktree, not the component beside it", () => {
+    expect(claudeIdeRoot("/w/app", "/w/app/packages/ui")).toBe("/w/app");
+    expect(claudeIdeRoot("/w/app/", "/w/app")).toBe("/w/app");
+    expect(claudeIdeRoot("/w/app", "/w/app-wt-fix-login")).toBe("/w/app-wt-fix-login");
+    expect(claudeIdeRoot(undefined, "/w/scratch")).toBe("/w/scratch");
+    expect(
+      claudeIdeLaunchEnv({ command: "claude", root: "/w/app", cwd: "/w/app-wt-x" }),
+    ).toEqual([[CLAUDE_IDE_MARKER, "/w/app-wt-x"]]);
   });
 
   it("adds nothing when the setting is off", () => {

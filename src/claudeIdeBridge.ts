@@ -160,6 +160,16 @@ export function startClaudeIdeBridge(): () => void {
       else unlisten = off;
     })
     .catch(() => {});
+  // A reloaded window starts with an empty store while the CLIs it lost
+  // track of are still attached; ask once, after the listener is up.
+  void ipc
+    .claudeIdeConnections()
+    .then((live) => {
+      if (disposed) return;
+      for (const { ptyId, root } of live)
+        applyClaudeIdeEvent({ kind: "connection", ptyId, root, connected: true });
+    })
+    .catch(() => {});
   return () => {
     disposed = true;
     uninstall();
