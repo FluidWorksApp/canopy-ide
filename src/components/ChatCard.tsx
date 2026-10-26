@@ -31,7 +31,7 @@ export interface ChatCardDeps{
  openExternal(url:string):void;
  copy(text:string):Promise<void>;
 }
-export const ipcChatCardDeps=():ChatCardDeps=>({
+const ipcChatCardDeps=():ChatCardDeps=>({
  lookups:{
   repos:watchedPaths(),
   remoteUrl:repo=>ipc.gitRemoteUrl(repo),

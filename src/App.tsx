@@ -149,6 +149,7 @@ import { HelpDialog } from "./components/HelpDialog";
 import { AskDialog } from "./components/AskDialog";
 import { AboutDialog } from "./components/AboutDialog";
 import { Dictation } from "./components/Dictation";
+import { ShareDialogHost } from "./components/ShareDialog";
 import { Companion } from "./components/Companion";
 import { startCompanion, stopCompanion, subscribeCompanion } from "./companionSession";
 import { slackConfirm, startCompanionReplies, startSlack } from "./slackLive";
@@ -4195,6 +4196,7 @@ export default function App() {
         />
       )}
       <Dictation notify={notify} />
+      <ShareDialogHost />
       {/* Last, and once: every `title` in the app is drawn by this one bubble
           instead of the webview's native grey box. */}
       <TooltipLayer />

@@ -54,6 +54,7 @@ import { TASK_HISTORY_EVENT, taskRuns, type TaskRun } from "../taskHistory";
 import { RaisedBy } from "./RaisedBy";
 import type { PrAgent } from "../agentForPr";
 import { repoLabel } from "../prs";
+import { buildDiffCard, buildPrCard, buildReportCard, buildReviewRequest, shareWith } from "../shareCards";
 import {
   actionable,
   alreadyPosted,
@@ -1977,6 +1978,43 @@ export function PrView({
   };
 
   /** The long tail: real actions, just not ones worth a permanent button. */
+  // ---- share to team chat (ShareDialog) -----------------------------------
+  /** This PR as gh lists it now — the head and base commit ids a card pins. */
+  const freshPr = async (): Promise<ipc.PrInfo> =>
+    (await ipc.ghPrList(repo).catch(() => [])).find((p) => p.number === pr.number) ?? pr;
+  const sharePr = () =>
+    shareWith(async () => ({ kind: "share", card: await buildPrCard(repo, await freshPr()) }));
+  const requestCanopyReview = () =>
+    shareWith(async () => ({ kind: "review", card: await buildReviewRequest(repo, await freshPr()) }));
+  // The full PR diff, never the "since last review" delta: a card names the
+  // PR's base and head, so its patch must be the one between them.
+  const patchRef = useRef(patch);
+  patchRef.current = patch;
+  const shareFileMenu = useCallback(
+    (path: string, e: React.MouseEvent) =>
+      moreMenu.open(e, [
+        {
+          label: "Send this file's diff to…",
+          hint: "team chat",
+          onClick: () =>
+            shareWith(async () => {
+              const filePatch = splitPatch(patchRef.current ?? "").find((f) => f.path === path)?.patch ?? "";
+              const fresh = (await ipc.ghPrList(repo).catch(() => [])).find((p) => p.number === pr.number) ?? pr;
+              const { card, warning } = await buildDiffCard(repo, fresh, path, filePatch);
+              return { kind: "share", card, ...(warning ? { warning } : {}) };
+            }),
+        },
+      ]),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [repo, pr],
+  );
+  /** The agent's review map, as a plain-text report card. */
+  const shareReport = () =>
+    shareWith(async () => ({
+      kind: "share",
+      card: await buildReportCard("Canopy review agent", `Review map for #${pr.number}: ${pr.title}`, map ?? "", repo, pr.number),
+    }));
+
   const openMoreMenu = (e: React.MouseEvent) => {
     const items: MenuItem[] = [
       {
@@ -2006,6 +2044,10 @@ export function PrView({
         label: "Refresh conversation",
         onClick: () => void refreshConv(),
       },
+      { label: "Send PR to…", hint: "team chat", onClick: sharePr },
+      ...(livePr.state === "OPEN"
+        ? [{ label: "Request review in Canopy…", hint: "team chat", onClick: requestCanopyReview }]
+        : []),
       {
         label: "Open on GitHub",
         onClick: () =>
@@ -2263,6 +2305,13 @@ export function PrView({
             active={!!railTask}
             title={railTask ? rail.label : `${rail.label} finished`}
             elapsed={railElapsed}
+            actions={
+              !railTask && map ? (
+                <Button size="sm" variant="ghost" onClick={shareReport}>
+                  Share report
+                </Button>
+              ) : undefined
+            }
           />
         )}
       </div>
@@ -2299,6 +2348,11 @@ export function PrView({
                     title="Have an agent read it again"
                     onClick={() => launch(prReviewTask, reviewPayload())}>
                     {reviewBusy ? "Reviewing…" : "Review again"}
+                  </Button>
+                  <Button size="sm" variant="ghost"
+                    title="Send this report to team chat as plain text"
+                    onClick={shareReport}>
+                    Share report
                   </Button>
                 </div>
                 <Markdown text={map ?? ""} />
@@ -2762,6 +2816,7 @@ export function PrView({
             onRef={onFileRef}
             renderExtendLine={renderExtendLine}
             onAddDraft={addDraft}
+            onShare={shareFileMenu}
           />
         ))}
 
@@ -3450,6 +3505,7 @@ const PrFileCard = memo(function PrFileCard({
   onRef,
   renderExtendLine,
   onAddDraft,
+  onShare,
 }: {
   f: FilePatch;
   open: boolean;
@@ -3470,13 +3526,25 @@ const PrFileCard = memo(function PrFileCard({
   onRef: (path: string, el: HTMLDivElement | null) => void;
   renderExtendLine: (p: { data: LineData }) => ReactNode;
   onAddDraft: (d: DraftComment) => void;
+  /** Right-click on the file head: share this file's diff to team chat. */
+  onShare?: (path: string, e: React.MouseEvent) => void;
 }) {
   return (
     <div
       className={`pr-file ${viewed ? "is-viewed" : ""}`}
       ref={(el) => onRef(f.path, el)}
     >
-      <div className="pr-file-head">
+      <div
+        className="pr-file-head"
+        onContextMenu={
+          onShare
+            ? (e) => {
+                e.preventDefault();
+                onShare(f.path, e);
+              }
+            : undefined
+        }
+      >
         <span className="pr-file-chevron" onClick={() => onToggle(f.path)}>
           {open ? "▾" : "▸"}
         </span>
