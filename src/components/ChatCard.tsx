@@ -26,16 +26,31 @@ export interface ChatCardDeps{
  ghPrReview(repo:string,number:number,action:'approve'|'request-changes',body?:string):Promise<string>;
  revCount(repo:string,from:string,to:string):Promise<number>;
  showAt(repo:string,sha:string,path:string):Promise<string>;
+ /** The open PRs as gh lists them right now — never cached; a review is
+  *  checked against the live head. */
+ livePrs(repo:string):Promise<ipc.PrInfo[]>;
  /** Opens a resolved target in the project holding it; false when none does. */
  open(action:ShareOpen,fallback:()=>void):boolean;
  openExternal(url:string):void;
  copy(text:string):Promise<void>;
 }
-const ipcChatCardDeps=():ChatCardDeps=>({
+/** A conversation full of PR cards would otherwise run `gh pr list` once per
+ *  card; resolving shares one answer per repo for a short while. */
+const PR_CACHE_MS=30_000;
+const prCache=new Map<string,{at:number;list:Promise<ipc.PrInfo[]>}>();
+function cachedPrs(repo:string){
+ const hit=prCache.get(repo);
+ if(hit&&Date.now()-hit.at<PR_CACHE_MS)return hit.list;
+ const list=ipc.ghPrList(repo);prCache.set(repo,{at:Date.now(),list});
+ list.catch(()=>prCache.delete(repo));
+ return list;
+}
+let ipcDeps:ChatCardDeps|undefined;
+const ipcChatCardDeps=():ChatCardDeps=>ipcDeps??=({
  lookups:{
-  repos:watchedPaths(),
+  get repos(){return watchedPaths();},
   remoteUrl:repo=>ipc.gitRemoteUrl(repo),
-  prs:repo=>ipc.ghPrList(repo),
+  prs:cachedPrs,
   issues:repo=>ipc.ghIssueList(repo),
   commit:(repo,hash)=>ipc.gitCommitDetail(repo,hash),
   fileExists:(repo,path)=>ipc.fsRepoPath(repo,path).then(()=>true),
@@ -46,6 +61,7 @@ const ipcChatCardDeps=():ChatCardDeps=>({
  ghPrReview:(repo,number,action,body)=>ipc.ghPrReview(repo,number,action,body),
  revCount:(repo,from,to)=>ipc.gitRevCount(repo,from,to),
  showAt:(repo,sha,path)=>ipc.gitShowAt(repo,sha,path),
+ livePrs:repo=>{prCache.delete(repo);return ipc.ghPrList(repo);},
  open:(action,fallback)=>routeShareAction(action,fallback),
  openExternal:url=>openInOsBrowser(url),
  copy:text=>navigator.clipboard.writeText(text),
@@ -136,7 +152,7 @@ function ReviewControls({card,request,action,deps,onReply}:{card:ReviewRequestCa
   setBusy(true);setError('');
   try{
    // The head now, not the one in the request: a review is of what is there.
-   const live=(await deps.lookups.prs(repo)).find(p=>p.number===card.number);
+   const live=(await deps.livePrs(repo)).find(p=>p.number===card.number);
    if(!live)throw Error(`#${card.number} is no longer open.`);
    const head=live.head_sha||undefined;
    if(head&&head!==card.head&&head!==confirmedHead){

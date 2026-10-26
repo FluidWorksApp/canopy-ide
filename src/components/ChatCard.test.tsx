@@ -12,8 +12,9 @@ const pr=(head=A)=>({number:12,title:'Fix',head_sha:head}) as ipc.PrInfo;
 function deps(over:Partial<Omit<ChatCardDeps,'lookups'>>&{here?:boolean;lookups?:Partial<ChatCardDeps['lookups']>}={}):ChatCardDeps&{calls:Record<string,unknown[][]>}{
  const calls:Record<string,unknown[][]>={open:[],external:[],review:[],copy:[]};
  const {here=true,lookups,...rest}=over;
- return {calls,
-  lookups:{repos:here?['/work/api']:[],remoteUrl:async()=>'git@github.com:acme/api.git',prs:async()=>[pr()],issues:async()=>[],commit:async()=>({hash:B,short:'bbbbbbb',subject:'s'}) as ipc.CommitDetail,fileExists:async()=>true,head:async()=>A,containedPath:async(r,p)=>`${r}/${p}`,...lookups},
+ const look:ChatCardDeps['lookups']={repos:here?['/work/api']:[],remoteUrl:async()=>'git@github.com:acme/api.git',prs:async()=>[pr()],issues:async()=>[],commit:async()=>({hash:B,short:'bbbbbbb',subject:'s'}) as ipc.CommitDetail,fileExists:async()=>true,head:async()=>A,containedPath:async(r,p)=>`${r}/${p}`,...lookups};
+ return {calls,livePrs:repo=>look.prs(repo),
+  lookups:look,
   ghAvailable:async()=>true,
   ghPrReview:async(...args)=>{calls.review.push(args);return 'ok';},
   revCount:async()=>3,
@@ -130,7 +131,7 @@ describe('review requests',()=>{
   await waitFor(()=>expect(d.calls.review).toEqual([['/work/api',12,'request-changes','Add a test']]));
  });
  it('warns when the head moved and asks again',async()=>{
-  const d=deps({lookups:{prs:async()=>[pr(N)]}}),replies:unknown[][]=[];
+  const d=deps({livePrs:async()=>[pr(N)]}),replies:unknown[][]=[];
   view(request,d,{onReply:async(...a)=>{replies.push(a);}});
   fireEvent.click(await screen.findByRole('button',{name:'Approve…'}));
   fireEvent.click(screen.getByRole('button',{name:'Approve'}));

@@ -21,7 +21,7 @@ const loadDirectory=()=>invoke<{teams?:Team[];selfId:string}>('canopy_account_re
  *  looks like without a checkout, and its buttons do nothing. */
 const PREVIEW_DEPS:ChatCardDeps={
  lookups:{repos:[],remoteUrl:async()=>'',prs:async()=>[],issues:async()=>[],commit:async()=>{throw Error('preview');},fileExists:async()=>false,head:async()=>'',containedPath:async()=>{throw Error('preview');}},
- ghAvailable:async()=>false,ghPrReview:async()=>{throw Error('preview');},revCount:async()=>0,showAt:async()=>{throw Error('preview');},
+ ghAvailable:async()=>false,ghPrReview:async()=>{throw Error('preview');},revCount:async()=>0,livePrs:async()=>[],showAt:async()=>{throw Error('preview');},
  open:()=>true,openExternal:()=>{},copy:async()=>{},
 };
 
