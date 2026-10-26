@@ -38,6 +38,13 @@ import type {
   WorkflowStepRecordInput,
 } from "./workflowRun";
 import { workflowAgentForStep, workflowAgentPrompt } from "./workflowAgents";
+import {
+  parseVerdict,
+  renderWorkflowPrompt,
+  verdictPath,
+  verdictProtocol,
+  workflowRunDir,
+} from "./workflowPrompt";
 
 export interface WorkflowExecutionContext {
   projectId: string;
@@ -59,6 +66,14 @@ export interface WorkflowAgentLaunch {
   /** Existing managed runner/spawn paths consume these durable ids. */
   taskRunId: string;
   attemptId: string;
+  /** The brief exactly as reserved: block prompt + step prompt, placeholders
+   *  rendered, verdict protocol appended. The launcher sends this, not the
+   *  template, so the ledger and the agent agree on what it was told. */
+  prompt: string;
+  /** This run's artifact directory (workflowPrompt.workflowRunDir). */
+  runDir: string;
+  /** How many times this step has been entered in this run. */
+  round: number;
 }
 
 export interface WorkflowAgentResult {
@@ -78,6 +93,9 @@ export interface WorkflowExecutorDeps {
   taskGetForAttempt: typeof taskGetForAttempt;
   routeFor(step: WorkflowAgentStep, selected?: SelectedRoute): WorkflowRoutePlan;
   launchAgent(input: WorkflowAgentLaunch): Promise<WorkflowAgentResult>;
+  /** Read a verdict file, or null when there is none. Only verdict steps use
+   *  it; without it they settle as failed rather than guess an outcome. */
+  readVerdict?(path: string): Promise<string | null>;
   runGitOp(step: WorkflowGitOpStep, run: WorkflowRunDetail): Promise<{ ok: boolean }>;
 }
 
@@ -163,6 +181,21 @@ async function advance(
   });
 }
 
+/** Where a completed attempt goes. A plain step succeeded. A verdict step
+ *  succeeded only at running; what it found is its verdict file, and a missing
+ *  or undeclared verdict is a failure — the agent ran and did not report, which
+ *  another route would not fix, so it is not retried. */
+async function completedOutcome(
+  step: WorkflowAgentStep,
+  path: string,
+  deps: WorkflowExecutorDeps,
+): Promise<string> {
+  const verdicts = step.verdicts ?? [];
+  if (verdicts.length === 0) return "success";
+  const source = deps.readVerdict ? await deps.readVerdict(path).catch(() => null) : null;
+  return parseVerdict(source, verdicts) ?? "failure";
+}
+
 async function executeAgent(
   initialRun: WorkflowRunDetail,
   step: WorkflowAgentStep,
@@ -170,6 +203,9 @@ async function executeAgent(
   deps: WorkflowExecutorDeps,
 ): Promise<WorkflowRunDetail> {
   const previousStep = initialRun.steps.find((candidate) => candidate.id === step.id);
+  const round = previousStep?.round ?? 0;
+  const runDir = workflowRunDir(context.worktreePath, initialRun.runId);
+  const verdictFile = verdictPath(runDir, step.id, round);
   const previousId = previousStep?.attemptIds.at(-1);
   if (previousId) {
     const evidence = await deps.taskGetForAttempt(previousId);
@@ -177,7 +213,9 @@ async function executeAgent(
     const sameRound = metadata?.round === previousStep?.round || (metadata?.round == null && previousStep?.round === 0);
     if (sameRound) {
       const attempt = evidence?.attempts.find((candidate) => candidate.attemptId === previousId);
-      if (attempt?.state === "completed") return advance(initialRun, step, "success", deps);
+      if (attempt?.state === "completed") {
+        return advance(initialRun, step, await completedOutcome(step, verdictFile, deps), deps);
+      }
       // An interrupted or still-active attempt may already have changed external
       // state. A Resume click cannot turn uncertainty into a fresh execution.
       if (!attempt || !["failed", "cancelled"].includes(attempt.state)) throw new Error("Reconcile the existing workflow attempt before resuming this step.");
@@ -186,7 +224,16 @@ async function executeAgent(
     }
   }
   const agentBlock = workflowAgentForStep(initialRun.definition, step);
-  const prompt = workflowAgentPrompt(agentBlock, step);
+  const scope = {
+    runId: initialRun.runId,
+    runDir,
+    round,
+    trigger: initialRun.trigger.payload ?? {},
+  };
+  const rendered = renderWorkflowPrompt(workflowAgentPrompt(agentBlock, step), scope);
+  const prompt = step.verdicts?.length
+    ? `${rendered}\n\n${verdictProtocol(verdictFile, step.verdicts)}`
+    : rendered;
   const firstPlan = deps.routeFor(step);
   const attemptCap = step.attemptCap ?? 3;
   const metadata = {
@@ -195,7 +242,7 @@ async function executeAgent(
       definitionId: initialRun.definitionId,
       definitionVersion: initialRun.definitionVersion,
       stepId: step.id,
-      round: previousStep?.round ?? 0,
+      round,
       capabilities: [...step.capabilities],
       constraints: step.constraints ?? initialRun.definition.constraints,
       agentBlockId: agentBlock?.id ?? null,
@@ -209,7 +256,7 @@ async function executeAgent(
     componentId: context.componentId,
     worktreePath: context.worktreePath,
     goal: prompt,
-    acceptance: step.acceptance ?? [],
+    acceptance: (step.acceptance ?? []).map((line) => renderWorkflowPrompt(line, scope)),
     taskClasses: { workflow: step.id },
     contextSummary: `Workflow ${initialRun.definitionId}@${initialRun.definitionVersion}${agentBlock ? ` using ${agentBlock.name}` : ""}`,
     riskClass: step.capabilities.includes("workspace-write") ? "reversible" : "read-only",
@@ -240,8 +287,11 @@ async function executeAgent(
       reservation,
       taskRunId: reservation.envelope.runId,
       attemptId: reservation.attempt.attemptId,
+      prompt,
+      runDir,
+      round,
     });
-    if (result.ok) return advance(run, step, "success", deps);
+    if (result.ok) return advance(run, step, await completedOutcome(step, verdictFile, deps), deps);
 
     const decision = failoverDecision({
       evidence: { agent: plan.route.cli, text: result.failureText ?? "workflow agent attempt failed" },

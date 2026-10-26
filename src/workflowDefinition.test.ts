@@ -316,3 +316,49 @@ describe("workflow definition loading and triggers", () => {
     expect(denied).toMatchObject({ ok: false });
   });
 });
+
+describe("verdict steps", () => {
+  const withVerdicts = (verdicts: string[], edges: WorkflowDefinition["edges"]) => {
+    const definition = valid();
+    definition.steps = [{ ...definition.steps[0], verdicts } as WorkflowDefinition["steps"][number]];
+    definition.edges = edges;
+    return definition;
+  };
+
+  it("routes on each declared verdict and on failure", () => {
+    const definition = withVerdicts(["clean", "findings"], [
+      { from: "review", on: "clean", to: "$completed" },
+      { from: "review", on: "findings", to: "$failed" },
+      { from: "review", on: "failure", to: "$failed" },
+    ]);
+    expect(validateWorkflowDefinition(definition, context).ok).toBe(true);
+  });
+
+  it("requires an exit for every verdict and refuses a success exit", () => {
+    const missing = validateWorkflowDefinition(withVerdicts(["clean", "findings"], [
+      { from: "review", on: "clean", to: "$completed" },
+      { from: "review", on: "failure", to: "$failed" },
+    ]), context);
+    expect(missing.ok ? [] : missing.errors).toContain("step review has no findings exit");
+
+    const success = validateWorkflowDefinition(withVerdicts(["clean"], [
+      { from: "review", on: "clean", to: "$completed" },
+      { from: "review", on: "success", to: "$completed" },
+      { from: "review", on: "failure", to: "$failed" },
+    ]), context);
+    expect(success.ok ? [] : success.errors).toContain(
+      "step review declares verdicts and cannot also exit on success",
+    );
+  });
+
+  it("rejects verdicts that collide with the executor's own outcomes", () => {
+    for (const verdicts of [["success"], ["failure"], ["clean", "clean"], [], ["Bad Name"]]) {
+      const result = validateWorkflowDefinition(withVerdicts(verdicts, [
+        { from: "review", on: "failure", to: "$failed" },
+        { from: "review", on: "success", to: "$completed" },
+      ]), context);
+      expect(result.ok, JSON.stringify(verdicts)).toBe(false);
+      expect((result.ok ? [] : result.errors).some((error) => error.includes("verdicts"))).toBe(true);
+    }
+  });
+});

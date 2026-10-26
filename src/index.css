@@ -8558,6 +8558,20 @@ body.dragging-tab * {
   background: color-mix(in srgb, var(--bg-raised) 92%, transparent);
 }
 .workflow-editor-toolbar .select-wrap { min-width: 210px; }
+.workflow-run-request {
+  flex: 0 1 260px;
+  min-width: 140px;
+  height: 28px;
+  padding: 0 9px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-md, 6px);
+  background: var(--bg);
+  color: var(--text);
+  font: inherit;
+  font-size: 12px;
+}
+.workflow-run-request::placeholder { color: var(--text-faint); }
+.workflow-run-request:focus-visible { outline: none; border-color: var(--border-strong); }
 .workflow-editor-version,
 .workflow-unsaved {
   color: var(--text-faint);
