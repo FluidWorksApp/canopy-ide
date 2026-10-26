@@ -10,6 +10,21 @@ import {
   type StructuredRunnerLaunch,
 } from "./structuredRunners";
 import { streamsStructured, structuredRunnerFor } from "./projects";
+import { recordNativeCheckpoint } from "./turnRollback";
+
+/** The caller's env plus whatever the runner needs every session to carry.
+ *  The caller's own value wins: an explicit setting is never overridden. */
+export function withSessionEnv(
+  env: [string, string][] | undefined,
+  sessionEnv: readonly (readonly [string, string])[] | undefined,
+): [string, string][] | undefined {
+  if (!sessionEnv?.length) return env;
+  const own = new Set((env ?? []).map(([k]) => k));
+  return [
+    ...sessionEnv.filter(([k]) => !own.has(k)).map(([k, v]) => [k, v] as [string, string]),
+    ...(env ?? []),
+  ];
+}
 
 export interface ProjectRunnerTransport {
   send(text: string): Promise<void>;
@@ -52,10 +67,11 @@ export class StructuredTransport implements ProjectRunnerTransport {
     host: StructuredRunnerHost,
     process: ProjectRunnerProcess,
     dialect: StructuredDialect = "claude",
+    onCheckpoint?: (uuid: string) => void,
   ) {
     this.attemptId = attemptId;
     this.process = process;
-    this.parser = new StructuredEventParser(host, { dialect });
+    this.parser = new StructuredEventParser(host, { dialect, onCheckpoint });
   }
 
   handleLine(raw: string): void {
@@ -250,7 +266,12 @@ export async function startStructured(
   cliId: string,
   launch: StructuredRunnerLaunch,
   host: StructuredRunnerHost,
-  opts: { resume: boolean; process: ProjectRunnerProcess },
+  opts: {
+    resume: boolean;
+    process: ProjectRunnerProcess;
+    /** Where a Claude checkpoint id goes; defaults to the rollback store. */
+    onCheckpoint?: (sessionId: string, uuid: string) => void;
+  },
 ): Promise<ProjectRunnerTransport> {
   if (!attemptId) throw new Error("A structured runner requires an attempt id");
   const runner = structuredRunnerFor(cliId);
@@ -275,11 +296,14 @@ export async function startStructured(
       launch,
     );
   }
+  const sessionId = launch.policy.sessionId;
   const transport = new StructuredTransport(
     attemptId,
     host,
     opts.process,
     runner.dialect,
+    (uuid) =>
+      (opts.onCheckpoint ?? recordNativeCheckpoint)(sessionId, uuid),
   );
   const args = opts.resume ? runner.resumeArgs(launch) : runner.args(launch);
   await opts.process.spawn(
@@ -288,7 +312,7 @@ export async function startStructured(
       command: launch.bin,
       args,
       cwd: launch.policy.cwd,
-      env: launch.env,
+      env: withSessionEnv(launch.env, runner.sessionEnv),
     },
     (out) => {
       if (out.kind === "line") transport.handleLine(out.text);

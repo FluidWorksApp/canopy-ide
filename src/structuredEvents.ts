@@ -77,6 +77,11 @@ interface StreamMessage {
   timestamp_ms?: number;
   model_call_id?: string;
   tool_call?: Record<string, { args?: Record<string, unknown> }>;
+  /** Claude: every transcript line's id. On a replayed user prompt
+   *  (`--replay-user-messages`, `isReplay: true`) it is the checkpoint id
+   *  `--rewind-files` takes — verified against 2.1.310 on 2026-10-26. */
+  uuid?: string;
+  isReplay?: boolean;
 }
 
 /** What the CLI says when a tool call needed a permission it never got.
@@ -118,6 +123,9 @@ export class StructuredEventParser {
   private dialect: StructuredDialect;
   /** Codex reports the thread id it minted; Canopy never gets to choose one. */
   private onThread: ((threadId: string) => void) | undefined;
+  /** Claude reports a file-checkpoint id per prompt (turn rollback). A side
+   *  channel rather than an event kind: no host renders it. */
+  private onCheckpoint: ((uuid: string) => void) | undefined;
   /** Codex item ids already announced from `item.started`, so the matching
    *  `item.completed` does not put the same shell command in the trail twice. */
   private announced = new Set<string>();
@@ -127,11 +135,13 @@ export class StructuredEventParser {
     opts?: {
       dialect?: StructuredDialect;
       onThread?: (threadId: string) => void;
+      onCheckpoint?: (uuid: string) => void;
     },
   ) {
     this.host = host;
     this.dialect = opts?.dialect ?? "claude";
     this.onThread = opts?.onThread;
+    this.onCheckpoint = opts?.onCheckpoint;
   }
 
   beginTurn(): void {
@@ -334,6 +344,15 @@ export class StructuredEventParser {
       // refusal for want of permission is the one outcome Canopy has to act on
       // itself, because the session it spawned cannot.
       case "user":
+        // The prompt itself, echoed back by `--replay-user-messages`: its
+        // uuid is the checkpoint `--rewind-files` restores to.
+        if (
+          msg.isReplay &&
+          msg.uuid &&
+          (msg.message?.content ?? []).some((b) => b.type === "text")
+        ) {
+          this.onCheckpoint?.(msg.uuid);
+        }
         for (const block of msg.message?.content ?? []) {
           if (block.type !== "tool_result") continue;
           const denied = DENIED.exec(resultText(block.content));

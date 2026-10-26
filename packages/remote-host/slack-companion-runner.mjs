@@ -33,8 +33,8 @@ const stop=child=>{try{child.stdin?.end();}catch{}child.kill('SIGKILL');};
 export function companionLaunch({bin,sessionId,systemPrompt,roots=[WORKSPACE_ROOT],model='',cwd=WORKSPACE_ROOT}){
  return {bin,policy:{systemPromptAppend:systemPrompt,permissionMode:'bypassPermissions',disallowedTools:BUILTIN_WRITERS,model,sessionId,cwd,authority:'read-only'},additionalDirectories:roots};
 }
-const permissionArgs=p=>[...(p.permissionMode?['--permission-mode',p.permissionMode]:[]),...(p.allowedTools?.length?['--allowedTools',...p.allowedTools]:[]),...(p.disallowedTools.length?['--disallowedTools',...p.disallowedTools]:[])];
-const claudeArgs=(o,resume)=>['-p','--input-format','stream-json','--output-format','stream-json','--include-partial-messages','--verbose',resume?'--resume':'--session-id',o.policy.sessionId,'--append-system-prompt',o.policy.systemPromptAppend,...(o.additionalDirectories??[]).flatMap(d=>['--add-dir',d]),...(o.policy.model?['--model',o.policy.model]:[]),...permissionArgs(o.policy)];
+const permissionArgs=p=>['--permission-mode',p.permissionMode||'manual',...(p.allowedTools?.length?['--allowedTools',...p.allowedTools]:[]),...(p.disallowedTools.length?['--disallowedTools',...p.disallowedTools]:[])];
+const claudeArgs=(o,resume)=>['-p','--input-format','stream-json','--output-format','stream-json','--include-partial-messages','--verbose','--replay-user-messages',resume?'--resume':'--session-id',o.policy.sessionId,'--append-system-prompt',o.policy.systemPromptAppend,...(o.additionalDirectories??[]).flatMap(d=>['--add-dir',d]),...(o.policy.model?['--model',o.policy.model]:[]),...permissionArgs(o.policy)];
 // Read-only authority only: the workspace-write config keys never apply here.
 const codexArgs=(o,resume)=>resume
  ?['exec','resume',o.policy.sessionId,'--json','--skip-git-repo-check',...(o.policy.model?['-m',o.policy.model]:[]),'-c','sandbox_mode="read-only"']

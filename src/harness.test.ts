@@ -2,8 +2,10 @@ import { describe, expect, it } from "vitest";
 import {
   HARNESS_CAPABILITIES,
   HARNESS_FEATURES,
+  HARNESS_MIN_VERSION,
   harnessCapabilities,
   harnessSupport,
+  harnessVersionWarning,
 } from "./harness";
 import { BUILTIN_AGENT_CLIS } from "./projects";
 import { CLAUDE_RUNNER } from "./structuredRunners";
@@ -40,9 +42,34 @@ describe("harness capabilities", () => {
   });
 
   it("leaves Claude Code's unchecked features unknown", () => {
-    for (const feature of ["checkpointsRewind", "subagents", "compaction"] as const) {
+    for (const feature of ["subagents", "compaction"] as const) {
       expect(harnessSupport("claude", feature)).toBe("unknown");
     }
+  });
+
+  it("records Claude's file rewind as partial, with the Canopy layer beside it", () => {
+    const cap = harnessCapabilities("claude").checkpointsRewind;
+    expect(cap.support).toBe("partial");
+    expect(cap.note).toMatch(/--rewind-files/);
+    expect(cap.canopyLayer).toMatch(/refs\/canopy\/turns/);
+    expect(CLAUDE_RUNNER.sessionEnv).toContainEqual([
+      "CLAUDE_CODE_ENABLE_SDK_FILE_CHECKPOINTING",
+      "true",
+    ]);
+  });
+
+  it("warns about a Claude older than the 2.1.302 floor, and only then", () => {
+    expect(HARNESS_MIN_VERSION.claude.version).toBe("2.1.302");
+    expect(harnessVersionWarning("claude", "2.1.301 (Claude Code)")).toMatch(/older than 2\.1\.302/);
+    expect(harnessVersionWarning("claude", "2.0.999")).toMatch(/older/);
+    expect(harnessVersionWarning("claude", "2.1.302")).toBeNull();
+    expect(harnessVersionWarning("claude", "2.1.310 (Claude Code)")).toBeNull();
+    expect(harnessVersionWarning("claude", "3.0.0")).toBeNull();
+    // Unknown is not old.
+    expect(harnessVersionWarning("claude", undefined)).toBeNull();
+    expect(harnessVersionWarning("claude", "nightly")).toBeNull();
+    // No floor, no warning.
+    expect(harnessVersionWarning("codex", "0.0.1")).toBeNull();
   });
 
   it("claims nothing for any other CLI while research is in progress", () => {

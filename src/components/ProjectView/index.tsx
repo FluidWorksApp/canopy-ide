@@ -469,6 +469,7 @@ import { CommitView } from "../CommitView";
 import { ReviewView, type ReviewPayload } from "../ReviewView";
 import { BranchView } from "../BranchView";
 import { AgentWorkspaceView } from "../AgentWorkspaceView";
+import { CliVersionFloor } from "../CliVersionFloor";
 import { AgentBrowserPip, pipOwnerVisible } from "../AgentBrowserPip";
 import { BROWSER_INPUT_EVENT, PreviewView } from "../PreviewView";
 import DeviceView from "../DeviceView";
@@ -12230,6 +12231,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
             cwd={tab.cwd}
             sessionId={tab.sessionId}
             digest={tab.digest}
+            builderLens={vibe}
             onOpenCommit={openCommit}
             onOpenPr={openPr}
             onOpenPrNumber={(r, n, u) => void openPrByNumber(r, n, u)}
@@ -13594,6 +13596,9 @@ const ProjectViewBody = memo(function ProjectViewBody({
                     >
                       ⇡ {cliUpdates[cli.bin]?.latest}
                     </span>
+                  )}
+                  {installed[cli.bin] && (
+                    <CliVersionFloor cliId={cli.id} installed={cliUpdates[cli.bin]?.installed} />
                   )}
                 </button>
               ))}

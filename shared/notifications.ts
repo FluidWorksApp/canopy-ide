@@ -120,6 +120,13 @@ export interface PendingItem {
   questions?: PendingQuestion[];
 }
 
+/** Which CLI a hook event came from. canopy-hook stamps `agent` for every CLI
+ *  it fronts except the one whose contract is its default, so an empty value
+ *  names that one. */
+export function eventAgentId(d: Pick<AgentEventData, "agent">): string {
+  return d.agent || "claude";
+}
+
 /** Parse one raw hook line into the projection the app keeps. Done once, at
  *  ingest — everything downstream reads fields off `entry.data`. */
 export function parseAgentEvent(raw: string): AgentEventData | null {

@@ -454,6 +454,12 @@ export interface Settings {
    *  tools like every other CLI. Takes effect for terminals started after the
    *  change — a running CLI keeps the connection it was launched with. */
   claudeIdeIntegration: boolean;
+  /** Snapshot the working tree at every agent turn boundary (into hidden git
+   *  refs; the index, branches and HEAD are never touched) so a turn can be
+   *  undone from the agent's tab. On by default. Off takes no new snapshots;
+   *  existing ones stay restorable until retention prunes them. Claude Code
+   *  only for now, and only in git checkouts. */
+  turnRollback: boolean;
   /** Show attention items outside the notification centre: corner cards,
    * companion notices, native banners, and the remote companion channel. Off
    * is a presentation preference only — every item stays in the shared queue
@@ -637,6 +643,7 @@ export const DEFAULTS: Settings = {
   agentsMaySpawn: true,
   autoUpdateClis: true,
   claudeIdeIntegration: true,
+  turnRollback: true,
   notificationPopupsEnabled: true,
   teamMessageNotifications: true,
   teamMessagePreviews: true,

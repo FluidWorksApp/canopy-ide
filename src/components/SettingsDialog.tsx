@@ -1595,6 +1595,21 @@ export function SettingsDialog({ onClose, initialTab = "appearance" }: SettingsD
                   />
                 </Item>
                 <Item
+                  name="Turn rollback"
+                  desc="Save a hidden snapshot of the checkout at every agent turn so you can undo a turn from the agent's tab."
+                >
+                  <Checkbox
+                    checked={s.turnRollback}
+                    onChange={(v) => patch({ turnRollback: v })}
+                    label="Snapshot each agent turn"
+                    hint={
+                      s.turnRollback
+                        ? "Claude Code turns in git checkouts get “Undo this turn” and “Back to here”. Your branches, index and commits are never touched."
+                        : "No new snapshots are taken. Ones already saved stay restorable until they age out."
+                    }
+                  />
+                </Item>
+                <Item
                   name="Memory monitoring prompts"
                   desc="Choose whether terminal memory warnings and allowance decisions appear while you work."
                 >

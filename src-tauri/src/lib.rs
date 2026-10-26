@@ -65,6 +65,7 @@ mod sync;
 mod sysaudio;
 mod tasks;
 mod tunnel;
+mod turn_rollback;
 mod vault;
 mod vault_kdbx;
 mod watchdog;
@@ -880,6 +881,11 @@ pub fn run() {
             git::agent_workspace,
             git::agent_workspace_at,
             git::agent_edits,
+            turn_rollback::turn_snapshot,
+            turn_rollback::turn_list,
+            turn_rollback::turn_preview,
+            turn_rollback::turn_restore,
+            turn_rollback::turn_native_checkpoint,
             git::git_worktree_add,
             git::git_worktree_add_pr,
             git::git_worktree_bootstrap,
