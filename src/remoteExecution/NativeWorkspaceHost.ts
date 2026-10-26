@@ -355,7 +355,7 @@ export class NativeWorkspaceHost implements Host {
     else if(command==='pty_write'){await this.write(Number(args.id),String(args.data));}
     else if(command==='pty_resize'){await this.call(`/sessions/${args.id}/resize`,{cols:args.cols,rows:args.rows});value={cols:args.cols,rows:args.rows};}
     else if(command==='pty_kill'){await this.call(`/sessions/${args.id}/stop`,{});}
-    else if(['pty_set_name_theme'].includes(command))value=null;
+    else if(['pty_set_name_theme','cli_set_native_update_env'].includes(command))value=null;
     else if(command==='pty_set_title'||command==='pty_set_name'){const key=command==='pty_set_name'?'name':'title';this.metadata[String(args.id)]={...this.metadata[String(args.id)],[key]:args[key]};await this.native('pty_metadata_set',{id:args.id,value:this.metadata[String(args.id)]});value=args[key];}
     else if(command==='pty_stats'&&this.readOnly)value=[];
     else if(command==='pty_stats'){

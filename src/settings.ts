@@ -427,6 +427,25 @@ export interface Settings {
    *  `canopy_spawn_agent`. On by default; turning it off removes the tool from
    *  the bridge contract and rejects calls from already-initialized clients. */
   agentsMaySpawn: boolean;
+  /** Keep the installed agent CLIs current without being asked (see
+   *  cliAutoUpdate.ts). On by default: an out-of-date CLI is how a new model,
+   *  a fixed hook or a security fix quietly fails to reach anyone, and the
+   *  update badge alone relied on someone noticing it.
+   *
+   *  On means: CLIs that update themselves (Claude Code, Grok, Antigravity)
+   *  are left to do so, and Canopy runs every other installed CLI's
+   *  install-matched updater about once a day — never while that CLI is
+   *  running. Off means Canopy runs nothing *and* tells the self-updating ones
+   *  to stop (each one's documented variable, put into every agent process).
+   *
+   *  Desktop-local only. Remote workspaces follow the image's
+   *  agents.lock.json, which pins exact versions with checksums; Canopy never
+   *  updates or un-pins a CLI there.
+   *
+   *  This reaches existing installs too: nobody has the key stored yet, and
+   *  stored settings win over defaults only once a key exists (see
+   *  getSettings) — so whoever turns it off stays off. */
+  autoUpdateClis: boolean;
   /** Show attention items outside the notification centre: corner cards,
    * companion notices, native banners, and the remote companion channel. Off
    * is a presentation preference only — every item stays in the shared queue
@@ -608,6 +627,7 @@ export const DEFAULTS: Settings = {
   customMicroTasks: [],
   agentAskForAttention: false,
   agentsMaySpawn: true,
+  autoUpdateClis: true,
   notificationPopupsEnabled: true,
   teamMessageNotifications: true,
   teamMessagePreviews: true,

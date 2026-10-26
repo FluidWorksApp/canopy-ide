@@ -58,6 +58,14 @@ COPY chrome-stream/ ./chrome-stream/
 RUN chmod 755 /opt/canopy/open-url.mjs && ln -sf /opt/canopy/open-url.mjs /usr/local/bin/xdg-open
 RUN usermod --login agent --home /home/agent --move-home node && groupmod --new-name agent node && mkdir /workspace && chown agent:agent /workspace
 ENV NPM_CONFIG_PREFIX="/home/agent/.local"
+# agents.lock.json pins every CLI by version and checksum; the CLIs that update
+# themselves in the background would otherwise replace the pinned build inside
+# the persistent home (Claude Code was seen at 2.1.310 over a 2.1.287 pin).
+# These are each CLI's own "no background update" switch — a manual update
+# still works. The desktop's "Keep agent CLIs up to date" setting never
+# reaches a workspace; image releases are its update path (see src/projects.ts
+# AgentCliAutoUpdate for the per-CLI evidence).
+ENV DISABLE_AUTOUPDATER="1" GROK_DISABLE_AUTOUPDATER="1" AGY_CLI_DISABLE_AUTO_UPDATE="true"
 ENV PATH="/home/agent/.local/bin:/usr/local/bin:/usr/bin:/bin"
 USER 1000:1000
 EXPOSE 8080

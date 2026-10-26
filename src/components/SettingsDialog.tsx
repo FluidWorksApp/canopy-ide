@@ -1565,6 +1565,21 @@ export function SettingsDialog({ onClose, initialTab = "appearance" }: SettingsD
                   />
                 </Item>
                 <Item
+                  name="CLI updates"
+                  desc="Keep the agent CLIs installed on this computer current. Remote workspaces keep the versions their image pins."
+                >
+                  <Checkbox
+                    checked={s.autoUpdateClis}
+                    onChange={(v) => patch({ autoUpdateClis: v })}
+                    label="Keep agent CLIs up to date automatically"
+                    hint={
+                      s.autoUpdateClis
+                        ? "Claude Code, Grok and Antigravity update themselves; Canopy updates the others about once a day, the way each was installed, and never while one is running."
+                        : "Canopy updates nothing, and asks Claude Code, Grok and Antigravity to stop updating themselves in agents started from now on."
+                    }
+                  />
+                </Item>
+                <Item
                   name="Memory monitoring prompts"
                   desc="Choose whether terminal memory warnings and allowance decisions appear while you work."
                 >

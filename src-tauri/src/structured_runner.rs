@@ -158,6 +158,8 @@ pub async fn structured_runner_spawn(
     if let Some(path) = crate::procenv::child_path() {
         cmd.env("PATH", path);
     }
+    // Native CLI updaters off while the user's auto-update setting is off.
+    cmd.envs(crate::cli_update::native_update_env());
     cmd.env("CANOPY", "1");
     if let Some(ctx) = app.try_state::<crate::context::ContextBridge>() {
         let mut bridge = ctx.mint_attempt(&cwd, &binding);

@@ -4357,7 +4357,7 @@ pub async fn plan_usage(session_id: Option<String>) -> Result<Vec<PlanUsage>, St
 /// Single-quote a string for a POSIX shell. Airtight for arbitrary content:
 /// inside single quotes the shell interprets nothing, and the only character
 /// that can end the quoting is escaped by closing, escaping, and reopening.
-fn sh_quote(s: &str) -> String {
+pub(crate) fn sh_quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', r"'\''"))
 }
 
@@ -4374,7 +4374,7 @@ fn sh_quote(s: &str) -> String {
 ///
 /// A leading `~/` is expanded here because it is inside quotes by the time the
 /// shell sees it, where tilde expansion does not happen.
-fn probe_target(raw: &str) -> Option<String> {
+pub(crate) fn probe_target(raw: &str) -> Option<String> {
     let s = raw.trim();
     if s.is_empty() || s.chars().any(char::is_control) {
         return None;
@@ -4655,6 +4655,11 @@ pub struct CliVersionQuery {
     /// None both for registry-less CLIs and when its latest-cache is fresh.
     #[serde(rename = "latestUrl")]
     pub latest_url: Option<String>,
+    /// PyPI distribution that ships the CLI (`aider-chat`), for a Python CLI.
+    /// The console script names the interpreter that owns it, so the upgrade
+    /// can target that environment instead of whatever `python3` is on PATH.
+    #[serde(rename = "pythonPackage", default)]
+    pub python_package: Option<String>,
 }
 
 /// First `x.y[.z…]` token in `s` where every dot-segment is numeric. Hand
@@ -4714,6 +4719,61 @@ fn node_package_manager(path: &str) -> Option<&'static str> {
     } else {
         None
     }
+}
+
+/// The upgrade route for a Python console script, from where it lives and the
+/// interpreter its shebang names. pipx and uv keep each tool in its own venv
+/// and must do the upgrade themselves (pipx records the spec, uv pins the
+/// interpreter); anything else is upgraded with the exact command aider's own
+/// `--upgrade` runs — `<sys.executable> -m pip install --upgrade
+/// --upgrade-strategy only-if-needed aider-chat` (aider/utils.py
+/// get_pip_install, read from aider 0.86.2 on 2026-10-26) — minus aider's
+/// interactive "Run pip install?" confirm. Using the shebang interpreter is
+/// what keeps that inside the tool's venv rather than a system `python3`. A
+/// relative shebang (`/usr/bin/env python3`) names no specific environment, so
+/// it yields nothing rather than a guess.
+pub(crate) fn python_update_command(
+    path: &str,
+    shebang: Option<&str>,
+    package: &str,
+) -> Option<(&'static str, String)> {
+    if package.is_empty()
+        || !package
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || "._-".contains(c))
+    {
+        return None;
+    }
+    let path = path.replace('\\', "/");
+    if path.contains("/pipx/venvs/") {
+        return Some(("pipx", format!("pipx upgrade {package}")));
+    }
+    if path.contains("/uv/tools/") {
+        return Some(("uv", format!("uv tool upgrade {package}")));
+    }
+    let interpreter = shebang?.strip_prefix("#!")?.split_whitespace().next()?;
+    let name = interpreter.rsplit('/').next().unwrap_or("");
+    if !interpreter.starts_with('/') || !name.starts_with("python") {
+        return None;
+    }
+    Some((
+        "pip",
+        format!(
+            "{} -m pip install --upgrade --upgrade-strategy only-if-needed {package}",
+            sh_quote(interpreter)
+        ),
+    ))
+}
+
+/// First line of a file when it is a `#!` line — read with a small cap, so a
+/// native binary is never slurped just to learn it has no shebang.
+fn read_shebang(path: &str) -> Option<String> {
+    use std::io::Read;
+    let mut head = [0u8; 512];
+    let n = std::fs::File::open(path).ok()?.read(&mut head).ok()?;
+    let text = String::from_utf8_lossy(&head[..n]);
+    text.starts_with("#!")
+        .then(|| text.lines().next().unwrap_or("").to_string())
 }
 
 fn node_update_command(manager: &str, package: &str) -> Option<String> {
@@ -4823,6 +4883,15 @@ pub async fn cli_versions(queries: Vec<CliVersionQuery>) -> HashMap<String, CliV
                                 .npm_package
                                 .as_deref()
                                 .and_then(|pkg| node_update_command(manager, pkg));
+                        } else if let (Some(path), Some(pkg)) =
+                            (canonical.as_deref(), q.python_package.as_deref())
+                        {
+                            if let Some((manager, update)) =
+                                python_update_command(path, read_shebang(path).as_deref(), pkg)
+                            {
+                                v.managed_by = Some(manager.into());
+                                v.update = Some(update);
+                            }
                         }
                     }
                 }
