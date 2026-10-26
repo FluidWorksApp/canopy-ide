@@ -314,6 +314,85 @@ pub(crate) fn check_scope(
     }
 }
 
+// ---------- repo-scoped containment ----------
+//
+// `check_scope` canonicalizes the deepest *existing* ancestor and appends the
+// rest, which is right for a file about to be created and wrong for a file a
+// teammate named: a symlink inside the repo (`docs -> /home/me`) canonicalizes
+// to somewhere else entirely, and the workspace roots may well include that
+// place too. A path that arrived in a share card or a blob link is therefore
+// held to the repo it names, after every symlink on the way is resolved.
+
+/// A repo-relative path as a teammate may name one: plain `/`-separated
+/// segments, nothing absolute, no `.`/`..`, no backslash or drive letter, no
+/// percent-encoded dot/slash/backslash, nothing inside `.git`, and no control
+/// or bidi characters. The same rules as `safeRepoPath`/`validCardPath` in the
+/// frontend, checked again here because the frontend is not a trust boundary.
+pub(crate) fn valid_repo_rel(rel: &str) -> bool {
+    if rel.is_empty() || rel.len() > 1024 || rel.starts_with('/') {
+        return false;
+    }
+    if rel.chars().any(|c| {
+        c.is_control()
+            || c == '\\'
+            || ('\u{202a}'..='\u{202e}').contains(&c)
+            || ('\u{2066}'..='\u{2069}').contains(&c)
+    }) {
+        return false;
+    }
+    let lower = rel.to_ascii_lowercase();
+    if ["%2e", "%2f", "%5c", "%00"]
+        .iter()
+        .any(|p| lower.contains(p))
+    {
+        return false;
+    }
+    let segments: Vec<&str> = rel.split('/').collect();
+    let first = segments[0].as_bytes();
+    if first.len() >= 2 && first[0].is_ascii_alphabetic() && first[1] == b':' {
+        return false;
+    }
+    segments
+        .iter()
+        .all(|s| !s.is_empty() && *s != "." && *s != ".." && !s.eq_ignore_ascii_case(".git"))
+}
+
+/// `repo/rel`, canonical, only when it exists and — every symlink resolved —
+/// is still inside the canonical `repo`. No ancestor fallback: a path that does
+/// not exist is refused, so nothing about it can be resolved later elsewhere.
+pub(crate) fn contained_in_repo(repo: &Path, rel: &str) -> Result<PathBuf, String> {
+    if !valid_repo_rel(rel) {
+        return Err("invalid repo path".into());
+    }
+    let root = repo
+        .canonicalize()
+        .map_err(|e| format!("repo not found: {e}"))?;
+    let full = root
+        .join(rel)
+        .canonicalize()
+        .map_err(|_| "file not found in this checkout".to_string())?;
+    if full.starts_with(&root) && full != root {
+        Ok(full)
+    } else {
+        Err("path leaves the repository".into())
+    }
+}
+
+/// The real location of a repo-relative file, for opening a shared or linked
+/// file: workspace-scoped like every fs command, then held to `repo` itself.
+#[tauri::command]
+pub fn fs_repo_path(
+    state: State<'_, WorkspaceManager>,
+    repo: String,
+    path: String,
+) -> Result<String, String> {
+    let root = check_scope(&state, Path::new(&repo))?;
+    let full = contained_in_repo(&root, &path)?;
+    // Re-scoped after resolution, so the answer is a path the workspace allows.
+    check_scope(&state, &full)?;
+    Ok(full.to_string_lossy().into_owned())
+}
+
 #[tauri::command]
 pub async fn workspace_add(
     app: AppHandle,
@@ -1336,6 +1415,72 @@ mod tests {
     fn write(path: &Path, text: &str) {
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(path, text).unwrap();
+    }
+
+    #[test]
+    fn repo_rel_paths_refuse_traversal_and_disguises() {
+        for ok in [
+            "a",
+            "src/a.ts",
+            ".github/ci.yml",
+            "dir with space/x",
+            "ünï/文件.md",
+        ] {
+            assert!(valid_repo_rel(ok), "{ok}");
+        }
+        for bad in [
+            "",
+            "../a",
+            "a/../b",
+            "a\\b",
+            "/abs",
+            "C:/x",
+            "c:x",
+            "%2e%2e/a",
+            "a%2Fb",
+            "a%5cb",
+            ".git/config",
+            "a/.GIT/HEAD",
+            "a\u{0}b",
+            "a\u{202e}b",
+            "a\u{1b}[31m",
+            "a\u{85}b",
+            "./a",
+            "a//b",
+            "a/",
+        ] {
+            assert!(!valid_repo_rel(bad), "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn repo_containment_follows_symlinks_and_refuses_escapes() {
+        let base = std::env::temp_dir().join(format!(
+            "canopy-contain-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        std::fs::remove_dir_all(&base).ok();
+        let repo = base.join("repo");
+        let outside = base.join("outside");
+        write(&repo.join("src/a.ts"), "a");
+        write(&outside.join("secret.txt"), "s");
+        assert!(contained_in_repo(&repo, "src/a.ts").is_ok());
+        // Missing files are refused outright rather than half-resolved.
+        assert!(contained_in_repo(&repo, "src/missing.ts").is_err());
+        assert!(contained_in_repo(&repo, "../outside/secret.txt").is_err());
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(&outside, repo.join("docs")).unwrap();
+            std::os::unix::fs::symlink(outside.join("secret.txt"), repo.join("link.txt")).unwrap();
+            std::os::unix::fs::symlink(repo.join("src/a.ts"), repo.join("inner.ts")).unwrap();
+            let err = contained_in_repo(&repo, "docs/secret.txt").unwrap_err();
+            assert!(err.contains("leaves"), "{err}");
+            assert!(contained_in_repo(&repo, "link.txt").is_err());
+            // A symlink that stays inside the repo is fine.
+            assert!(contained_in_repo(&repo, "inner.ts").is_ok());
+        }
+        std::fs::remove_dir_all(&base).ok();
     }
 
     fn workspace(label: &str) -> String {
