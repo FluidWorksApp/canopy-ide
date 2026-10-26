@@ -1734,6 +1734,11 @@ pub struct PrInfo {
     pub checks: String,
     /// Human count for a tooltip, e.g. "3/4 checks passed" ("" when none).
     pub checks_summary: String,
+    /// Full object id of the head commit ("" when gh did not say) — what a
+    /// review request pins, and what a reviewer re-checks before submitting.
+    pub head_sha: String,
+    /// Full object id of the base branch tip ("" when gh did not say).
+    pub base_sha: String,
 }
 
 /// Collapse gh's `statusCheckRollup` (a mix of CheckRun and StatusContext
@@ -1900,7 +1905,7 @@ pub async fn gh_pr_list(
     let mut cmd = gh_in(&top);
     cmd.args([
         "pr", "list", "--limit", "50", "--state", "open", "--json",
-        "number,title,author,headRefName,baseRefName,isDraft,state,url,createdAt,updatedAt,reviewDecision,additions,deletions,mergeable,statusCheckRollup",
+        "number,title,author,headRefName,baseRefName,headRefOid,baseRefOid,isDraft,state,url,createdAt,updatedAt,reviewDecision,additions,deletions,mergeable,statusCheckRollup",
     ]);
     let out = run_net(&mut cmd)?;
     let v: serde_json::Value =
@@ -1938,6 +1943,8 @@ pub async fn gh_pr_list(
                         mergeable: p["mergeable"].as_str().unwrap_or("UNKNOWN").to_string(),
                         checks,
                         checks_summary,
+                        head_sha: full_sha(p["headRefOid"].as_str()),
+                        base_sha: full_sha(p["baseRefOid"].as_str()),
                     }
                 })
                 .collect()
@@ -2147,6 +2154,153 @@ pub async fn gh_pr_review(
         "--approve" => format!("Approved #{number}"),
         "--request-changes" => format!("Requested changes on #{number}"),
         _ => format!("Commented on #{number}"),
+    })
+}
+
+// ---------- share cards ----------
+//
+// A teammate's share card names a commit and a repo-relative path. Both are
+// untrusted input that the frontend has already validated; they are validated
+// again here because this is where they become arguments to git.
+
+/// A full object id: SHA-1 (40) or SHA-256 (64) lowercase hex. Never an
+/// abbreviation, a ref name or anything git could read as an option.
+pub(crate) fn is_full_sha(s: &str) -> bool {
+    (s.len() == 40 || s.len() == 64)
+        && s.bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+}
+
+fn full_sha(s: Option<&str>) -> String {
+    let s = s.unwrap_or("").trim().to_ascii_lowercase();
+    if is_full_sha(&s) {
+        s
+    } else {
+        String::new()
+    }
+}
+
+/// Largest blob `git_show_at` hands back. A shared file is for reading a few
+/// lines of; a multi-megabyte one is not what a card points at.
+const SHOW_AT_MAX: u64 = 4 * 1024 * 1024;
+
+/// One file as it was at `sha` — the read-only "View at abc1234" behind a file
+/// card whose commit is not what this checkout has. Reads the object database
+/// only (`cat-file blob <sha>:<path>`): no working tree, no textconv or filters,
+/// and a symlink in that tree comes back as its target string, not followed.
+fn show_at(top: &Path, sha: &str, path: &str) -> Result<String, String> {
+    if !is_full_sha(sha) {
+        return Err("invalid commit id".into());
+    }
+    if !crate::fsx::valid_repo_rel(path) {
+        return Err("invalid repo path".into());
+    }
+    let object = format!("{sha}:{path}");
+    let kind = run(git(top).args(["cat-file", "-t", "--", &object]))
+        .map_err(|_| format!("{} is not in this checkout at {}", path, &sha[..7]))?;
+    if kind.trim() != "blob" {
+        return Err(format!("{path} is not a file at {}", &sha[..7]));
+    }
+    let size: u64 = run(git(top).args(["cat-file", "-s", "--", &object]))?
+        .trim()
+        .parse()
+        .map_err(|_| "git returned an unexpected size".to_string())?;
+    if size > SHOW_AT_MAX {
+        return Err(format!("{path} is too large to show ({size} bytes)"));
+    }
+    let out = blocking::io(|| {
+        command_output_capped(
+            git(top).args(["cat-file", "blob", &object]),
+            PROCESS_STREAM_MAX,
+        )
+    })?;
+    if !out.status.success() {
+        return Err(String::from_utf8_lossy(&out.stderr).trim().to_string());
+    }
+    if out.stdout.contains(&0) {
+        return Err(format!("{path} is a binary file"));
+    }
+    Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+}
+
+#[tauri::command]
+pub async fn git_show_at(
+    state: State<'_, WorkspaceManager>,
+    repo: String,
+    sha: String,
+    path: String,
+) -> Result<String, String> {
+    let top = repo_path(&state, &repo)?;
+    show_at(&top, &sha, &path)
+}
+
+/// Commits reachable from `to` but not from `from` — how far a PR's head moved
+/// since a review was requested. Fails when either commit is not here.
+#[tauri::command]
+pub async fn git_rev_count(
+    state: State<'_, WorkspaceManager>,
+    repo: String,
+    from: String,
+    to: String,
+) -> Result<u32, String> {
+    if !is_full_sha(&from) || !is_full_sha(&to) {
+        return Err("invalid commit id".into());
+    }
+    let top = repo_path(&state, &repo)?;
+    run(git(&top).args(["rev-list", "--count", &format!("{from}..{to}"), "--"]))?
+        .trim()
+        .parse()
+        .map_err(|_| "git returned an unexpected count".to_string())
+}
+
+/// What the sender needs to build a repo card for a file or directory: its
+/// checkout's toplevel, the path relative to it, HEAD's full id, the origin
+/// URL ("" when there is none — repo cards are refused then) and whether the
+/// file differs from HEAD (the shared lines may then not match the commit).
+#[derive(Serialize)]
+pub struct ShareContext {
+    pub root: String,
+    pub rel: String,
+    pub head: String,
+    pub origin: String,
+    pub dirty: bool,
+}
+
+#[tauri::command]
+pub async fn git_share_context(
+    state: State<'_, WorkspaceManager>,
+    path: String,
+) -> Result<ShareContext, String> {
+    let target = check_scope(&state, Path::new(&path))?;
+    let dir = if target.is_dir() {
+        target.clone()
+    } else {
+        target
+            .parent()
+            .map(Path::to_path_buf)
+            .ok_or("invalid path")?
+    };
+    let top = PathBuf::from(run(git(&dir).args(["rev-parse", "--show-toplevel"]))?.trim());
+    let top = check_scope(&state, &top)?;
+    let rel = target
+        .strip_prefix(&top)
+        .map(|p| p.to_string_lossy().replace('\\', "/"))
+        .unwrap_or_default();
+    let head = full_sha(Some(run(git(&top).args(["rev-parse", "HEAD"]))?.trim()));
+    let origin = run(git(&top).args(["remote", "get-url", "origin"]))
+        .map(|s| s.trim().to_string())
+        .unwrap_or_default();
+    let dirty = !rel.is_empty()
+        && !run(git(&top).args(["status", "--porcelain", "--", &rel]))
+            .unwrap_or_default()
+            .trim()
+            .is_empty();
+    Ok(ShareContext {
+        root: top.to_string_lossy().into_owned(),
+        rel,
+        head,
+        origin,
+        dirty,
     })
 }
 
@@ -5576,6 +5730,80 @@ mod tests {
     }
 
     use super::*;
+
+    #[test]
+    fn full_shas_only() {
+        assert!(is_full_sha(&"a".repeat(40)));
+        assert!(is_full_sha(&"0".repeat(64)));
+        for bad in [
+            "",
+            "abc1234",
+            &"A".repeat(40),
+            &"g".repeat(40),
+            &"a".repeat(41),
+            "--output=x",
+            "HEAD",
+        ] {
+            assert!(!is_full_sha(bad), "{bad}");
+        }
+        assert_eq!(full_sha(Some(&"AB".repeat(20))), "ab".repeat(20));
+        assert_eq!(full_sha(Some("abc")), "");
+        assert_eq!(full_sha(None), "");
+    }
+
+    #[test]
+    fn show_at_reads_one_blob_and_revalidates_its_inputs() {
+        let dir = std::env::temp_dir().join(format!(
+            "canopy-show-at-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::create_dir_all(dir.join("src")).unwrap();
+        let g = |args: &[&str]| {
+            run(git(&dir)
+                .args([
+                    "-c",
+                    "user.name=t",
+                    "-c",
+                    "user.email=t@t",
+                    "-c",
+                    "commit.gpgsign=false",
+                ])
+                .args(args))
+            .unwrap()
+        };
+        g(&["init", "-q"]);
+        std::fs::write(dir.join("src/a.ts"), "one\n").unwrap();
+        g(&["add", "."]);
+        g(&["commit", "-q", "-m", "one"]);
+        let first = g(&["rev-parse", "HEAD"]).trim().to_string();
+        std::fs::write(dir.join("src/a.ts"), "two\n").unwrap();
+        g(&["commit", "-q", "-am", "two"]);
+
+        assert_eq!(show_at(&dir, &first, "src/a.ts").unwrap(), "one\n");
+        // Inputs are checked here, not trusted from the frontend.
+        assert!(show_at(&dir, &first[..7], "src/a.ts").is_err());
+        assert!(show_at(&dir, "HEAD", "src/a.ts").is_err());
+        for bad in [
+            "../a",
+            "src/../src/a.ts",
+            "/etc/passwd",
+            ".git/config",
+            "src\\a.ts",
+            "%2e%2e/a",
+        ] {
+            assert!(
+                show_at(&dir, &first, bad).unwrap_err().contains("invalid"),
+                "{bad}"
+            );
+        }
+        // A tree or a missing path is not a file to show.
+        assert!(show_at(&dir, &first, "src").is_err());
+        assert!(show_at(&dir, &first, "src/missing.ts").is_err());
+        assert!(show_at(&dir, &"f".repeat(40), "src/a.ts").is_err());
+        std::fs::remove_dir_all(&dir).ok();
+    }
 
     #[test]
     fn stacked_merge_error_is_the_only_cli_failure_that_falls_back() {

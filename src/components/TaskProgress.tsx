@@ -18,9 +18,11 @@ interface Props {
   /** How long it has been going. A node, not a string, so the counter can tick
    *  itself without re-rendering whatever drew the rail. */
   elapsed?: React.ReactNode;
+  /** Controls for the finished run — e.g. "Share report". */
+  actions?: React.ReactNode;
 }
 
-export function TaskProgress({ steps, done, active, title, elapsed }: Props) {
+export function TaskProgress({ steps, done, active, title, elapsed, actions }: Props) {
   const finished = new Set(done);
   // The step in flight is the first one not reported yet — and only while the
   // task is alive. A dead run showing a pulsing "Finding problems" would be the
@@ -34,6 +36,7 @@ export function TaskProgress({ steps, done, active, title, elapsed }: Props) {
       <div className="task-progress-head">
         <span className="task-progress-title">{title}</span>
         {elapsed && <span className="task-progress-time">{elapsed}</span>}
+        {actions}
       </div>
       <div
         className="task-bar"

@@ -7,6 +7,7 @@ import { monaco } from "../monaco-setup";
 import { getSettings, THEME_CHANGE_EVENT } from "../settings";
 import { setCaret, truncateSelection } from "../editorState";
 import { claudeEditorHooks } from "../claudeEditorHooks";
+import { buildFileCard, shareWith } from "../shareCards";
 import {
   editorViewState,
   rememberEditorViewState,
@@ -108,6 +109,36 @@ export function MonacoEditor({
         if (current) await claudeEditorHooks()?.addToClaude(current, ed.getSelection());
       },
     });
+    // "Share lines…": the selected lines (or the caret's line) as a file card
+    // in team chat, pinned to the commit checked out (shareCards.ts). Only for
+    // files on disk; the dialog refuses a repo without an origin.
+    const shareLines = editor.addAction({
+      id: "canopy.shareLines",
+      label: "Share lines…",
+      contextMenuGroupId: "navigation",
+      contextMenuOrder: 1.6,
+      run: (ed) => {
+        const current = ed.getModel();
+        const selection = ed.getSelection();
+        if (!current || !selection || current.uri.scheme !== "file") return;
+        const start = selection.startLineNumber;
+        // A selection ending at column 1 of a line doesn't include that line.
+        const end =
+          selection.endLineNumber > start && selection.endColumn === 1
+            ? selection.endLineNumber - 1
+            : selection.endLineNumber;
+        const text = current.getValueInRange({
+          startLineNumber: start,
+          startColumn: 1,
+          endLineNumber: end,
+          endColumn: current.getLineMaxColumn(end),
+        });
+        shareWith(async () => {
+          const { card, warning } = await buildFileCard(current.uri.fsPath, start, end, text);
+          return { kind: "share", card, ...(warning ? { warning } : {}) };
+        });
+      },
+    });
     // Read through the ref, so a tab that isn't collaborating pays for one
     // dead callback rather than the subscription being torn down and rebuilt
     // every time the parent re-renders.
@@ -148,6 +179,7 @@ export function MonacoEditor({
       window.removeEventListener(THEME_CHANGE_EVENT, onSettingsChange);
       releaseSelectAll();
       addToClaude.dispose();
+      shareLines.dispose();
       cursorSub.dispose();
       editor.dispose();
       editorRef.current = null;

@@ -18,6 +18,8 @@ import {mentionsFor,useMentionSuggestions} from './chatMessageHelpers';
 import {mentionsUser,threadRoot,threadSummaries} from '../teamMessaging/unread';
 import {isMuted,setMuted} from '../teamMessaging/notifications';
 import {getSettings,subscribeSettings} from '../settings';
+import {ChatCard} from './ChatCard';
+import {cardCaption,cardOf} from '../teamMessaging/cardSchema';
 export type AccountConversation={teamId:string;userId:string;peer:string|null;name:string;email?:string};
 /** Consecutive messages from one sender within this window share one header. */
 const GROUP_MS=5*60_000;
@@ -174,16 +176,18 @@ export function AccountChatView({conversation,active=true}:{conversation:Account
     const isDeleted=!!deleted[m.id],text=isDeleted?'':edits[m.id]?.text??m.text,summary=threads[m.id],orphan=threadRoot(m,findMessage);
     const delivered=own&&!!receipts[m.id]?.length,state=own&&!delivered&&!isDeleted?delivery[m.id]?.state??(restoredIds?.includes(m.id)?'queued':'sent'):undefined;
     const failed=state==='failed'||state==='expired'||state==='waiting',pending=!!state&&!failed;
+    const card=isDeleted?undefined:cardOf(m),caption=card?cardCaption(text,card):text;
     return <div key={m.id} className={`account-chat-row${own?' own':''}`}>
      {newDay&&<div className="account-chat-day" role="separator"><span>{dayLabel(m.created)}</span></div>}
      <article className={`account-chat-msg${own?' own':''}${grouped?' grouped':''}${pending?' pending':''}${failed?' failed':''}${!isDeleted&&mentionsUser(m,userId)?' mentions-me':''}`} data-delivery={delivered?'delivered':state} data-message={m.id}>
       {text&&<button type="button" className={`account-chat-copy${copied===m.id?' is-copied':''}`} aria-label={copied===m.id?'Copied':'Copy message'} title={copied===m.id?'Copied':'Copy message'} onMouseDown={e=>e.preventDefault()} onClick={()=>copy(text,m.id)}>{copied===m.id?<><CheckIcon size={12}/>Copied</>:<CopyIcon size={12}/>}</button>}
       {!grouped&&<header><strong>{senderName(m.sender)}</strong><time dateTime={new Date(m.created).toISOString()}>{time(m.created)}</time></header>}
       {orphan&&<button type="button" className="chat-orphan account-chat-action" onClick={()=>setThread(orphan)}>Reply to a message not on this device</button>}
-      {editing===m.id?<InlineEditor initial={text} onSave={value=>saveEdit(m.id,value)} onCancel={()=>{setEditing(undefined);input.current?.focus();}}/>:<MessageText text={text} deleted={isDeleted} editedAt={edits[m.id]?.created}/>}
+      {editing===m.id?<InlineEditor initial={text} onSave={value=>saveEdit(m.id,value)} onCancel={()=>{setEditing(undefined);input.current?.focus();}}/>:<MessageText text={caption} deleted={isDeleted} editedAt={edits[m.id]?.created}/>}
       {!isDeleted&&<AddReactionButton open={reacting===m.id} controls={pickerId} className={text?'beside-copy':undefined} onToggle={()=>setReacting(current=>current===m.id?undefined:m.id)}/>}
       {!isDeleted&&editing!==m.id&&<MessageActions onReply={()=>setThread(orphan??m.id)} onEdit={editable(m)?()=>startEdit(m.id):undefined} onDelete={own?()=>{setEditing(undefined);setConfirming(m.id);}:undefined}/>}
-      {text&&<ChatLinkCards text={text}/>}
+      {text&&!card&&<ChatLinkCards text={text}/>}
+      {card&&<ChatCard message={m} userId={userId} messages={visible} name={senderName} onReply={(reply,ext)=>session.send(reply,peer,[],ext)}/>}
       {!isDeleted&&m.attachments?.map(file=><AttachmentChip key={file.id} session={session} message={m} file={file} own={own} state={attachments[file.id]} sender={senderName(m.sender)}/>)}
       {!isDeleted&&<MessageReactions chips={reactionChips(reactions,m.id,userId)} undelivered={undeliveredReactions[m.id]} name={senderName} onToggle={emoji=>react(m.id,emoji)}
        picker={reacting===m.id?<ReactionPicker id={pickerId} onPick={emoji=>{closePicker(m.id);react(m.id,emoji);}} onClose={()=>closePicker(m.id)} onDismiss={()=>setReacting(undefined)}/>:undefined}/>}

@@ -67,11 +67,16 @@ import {
 } from "./deepLinks";
 import {
   OPEN_GIT_LINK_EVENT,
+  OPEN_SHARE_ACTION_EVENT,
   ROUTE_GIT_LINK_EVENT,
+  ROUTE_SHARE_ACTION_EVENT,
   ipcGitLinkLookups,
   projectForGitLink,
+  projectForRepo,
   type OpenGitLinkDetail,
+  type OpenShareActionDetail,
   type RouteGitLinkDetail,
+  type RouteShareActionDetail,
 } from "./gitLinkRouting";
 import {
   attentionItems,
@@ -144,6 +149,7 @@ import { HelpDialog } from "./components/HelpDialog";
 import { AskDialog } from "./components/AskDialog";
 import { AboutDialog } from "./components/AboutDialog";
 import { Dictation } from "./components/Dictation";
+import { ShareDialogHost } from "./components/ShareDialog";
 import { Companion } from "./components/Companion";
 import { startCompanion, stopCompanion, subscribeCompanion } from "./companionSession";
 import { slackConfirm, startCompanionReplies, startSlack } from "./slackLive";
@@ -2373,6 +2379,36 @@ export default function App() {
     return () => window.removeEventListener(ROUTE_GIT_LINK_EVENT, route);
   }, []);
 
+  // A share card in team chat that resolved to a checkout: switch to the open
+  // project holding it (the one in front if it does) and hand the card over.
+  useEffect(() => {
+    const route = (event: Event) => {
+      const d = (event as CustomEvent<RouteShareActionDetail>).detail;
+      if (!d?.action) return;
+      event.preventDefault();
+      const state = wsRef.current;
+      const projects = state.openIds
+        .map((id) => state.projects.find((p) => p.id === id))
+        .filter((p): p is Project => !!p)
+        .map((p) => ({ id: p.id, repos: p.components.map((c) => c.path) }));
+      const projectId = projectForRepo(d.action.repo, projects, state.activeId);
+      if (!projectId) return d.fallback();
+      void openForActionRef.current(projectId).then(() =>
+        window.setTimeout(
+          () =>
+            window.dispatchEvent(
+              new CustomEvent<OpenShareActionDetail>(OPEN_SHARE_ACTION_EVENT, {
+                detail: { projectId, action: d.action },
+              }),
+            ),
+          80,
+        ),
+      );
+    };
+    window.addEventListener(ROUTE_SHARE_ACTION_EVENT, route);
+    return () => window.removeEventListener(ROUTE_SHARE_ACTION_EVENT, route);
+  }, []);
+
   // The same link, delivered by a cold start. A reminder's banner is posted by
   // launchd while Canopy is closed (src-tauri/src/remind.rs), so clicking it
   // launches the app with `canopy://note?…` in argv — there was no process to
@@ -4160,6 +4196,7 @@ export default function App() {
         />
       )}
       <Dictation notify={notify} />
+      <ShareDialogHost />
       {/* Last, and once: every `title` in the app is drawn by this one bubble
           instead of the webview's native grey box. */}
       <TooltipLayer />

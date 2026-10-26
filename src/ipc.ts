@@ -3566,6 +3566,10 @@ export interface PrInfo {
   checks: string;
   /** Human count for a tooltip, e.g. "3/4 checks passed" ("" when none). */
   checks_summary: string;
+  /** Full head commit id ("" or absent when gh did not say). */
+  head_sha?: string;
+  /** Full base branch tip id ("" or absent when gh did not say). */
+  base_sha?: string;
 }
 
 export interface WorktreeInfo {
@@ -3936,6 +3940,33 @@ export const ghPrDiff = (repo: string, number: number) =>
   invoke<string>("gh_pr_diff", { repo, number });
 export const ghPrBody = (repo: string, number: number) =>
   invoke<string>("gh_pr_body", { repo, number });
+/** One file as it was at a full commit id — read from git's object store, never
+ *  the working tree. Rust re-validates both the id and the repo-relative path. */
+export const gitShowAt = (repo: string, sha: string, path: string) =>
+  invoke<string>("git_show_at", { repo, sha, path });
+/** Commits in `to` that `from` lacks (both full ids, both present here). */
+export const gitRevCount = (repo: string, from: string, to: string) =>
+  invoke<number>("git_rev_count", { repo, from, to });
+export interface ShareContext {
+  /** Checkout toplevel, absolute. */
+  root: string;
+  /** The path relative to `root`, `/`-separated ("" for the root itself). */
+  rel: string;
+  /** HEAD's full id ("" on an unborn branch). */
+  head: string;
+  /** origin's URL, "" when there is no origin. */
+  origin: string;
+  /** The file differs from HEAD. */
+  dirty: boolean;
+}
+/** What a share card needs to know about the checkout a file lives in. */
+export const gitShareContext = (path: string) =>
+  invoke<ShareContext>("git_share_context", { path });
+/** A repo-relative file's real path, refused when it does not exist or when
+ *  any symlink on the way leads out of `repo`. Use before opening a file a
+ *  link or a teammate's card named. */
+export const fsRepoPath = (repo: string, path: string) =>
+  invoke<string>("fs_repo_path", { repo, path });
 export const ghPrReview = (
   repo: string,
   number: number,

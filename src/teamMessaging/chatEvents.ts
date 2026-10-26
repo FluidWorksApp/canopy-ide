@@ -1,5 +1,6 @@
 import type {ChatMessage} from './client';
 import {UUID,hasControl} from './messageSchema';
+import {parseCard,type Card} from './cardSchema';
 
 /** Chat protocol version this client speaks.
  * - v1 (0.4.9 and earlier): plain messages.
@@ -24,7 +25,7 @@ export type ChatEvent=ReactionEvent|EditEvent|DeleteEvent;
 /** A reply in a thread: `root` is the first message of the thread. */
 export type ThreadRef={root:string};
 /** The fields v2 and v3 add to a chat message. */
-export type ChatExtensions={v?:number;event?:ChatEvent;thread?:ThreadRef;mentions?:string[];mentionsAll?:true};
+export type ChatExtensions={v?:number;event?:ChatEvent;thread?:ThreadRef;mentions?:string[];mentionsAll?:true;card?:Card};
 /** The lowest chat version a device needs to receive an event of this type. */
 export const eventVersion=(event:ChatEvent)=>event.type==='reaction'?REACTIONS_VERSION:EDITS_VERSION;
 
@@ -88,6 +89,7 @@ export function parseExtensions(m:ChatMessage):ChatExtensions{
  const mentions=m.mentions===undefined?undefined:parseMentions(m.mentions);
  if(mentions)out.mentions=mentions;
  if(m.mentionsAll===true&&m.recipient===null)out.mentionsAll=true;
+ const card=m.card===undefined?undefined:parseCard(m.card);if(card)out.card=card;
  return out;
 }
 export const eventOf=(m:ChatMessage)=>parseExtensions(m).event;
