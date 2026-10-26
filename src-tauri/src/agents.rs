@@ -3356,6 +3356,15 @@ fn setup_codex_hooks(cfg: &str, home: &str, bridge: &str) -> Result<String, Stri
     // No PreToolUse: we observe, and a hook there sits in the approval path.
     // PermissionRequest is registered observe-only (no stdout = no decision)
     // purely so the blocked-on-approval moment reaches the pending cards.
+    //
+    // Byte stability matters more here than for any other CLI: Codex skips a
+    // non-managed hook until its content hash is trusted through `/hooks`
+    // (HookStateToml.trusted_hash), and this runs on every launch. So the entry
+    // carries nothing that varies between Canopy versions or launches (no
+    // version, no timestamp — only the helper path, which is stable per home),
+    // an entry already in place is never moved, and the file is rewritten only
+    // when its content would actually change. serde_json is built without
+    // `preserve_order`, so the serialized key order is sorted and repeatable.
     for event in [
         "SessionStart",
         "UserPromptSubmit",
@@ -3368,22 +3377,32 @@ fn setup_codex_hooks(cfg: &str, home: &str, bridge: &str) -> Result<String, Stri
         let Some(arr) = list.as_array_mut() else {
             continue;
         };
-        if arr.iter().any(|e| e == &want) {
+        let ours = |e: &serde_json::Value| {
+            let s = e.to_string();
+            MARKERS.iter().any(|m| s.contains(m))
+        };
+        let owned: Vec<usize> = (0..arr.len()).filter(|&i| ours(&arr[i])).collect();
+        if owned.len() == 1 && arr[owned[0]] == want {
             continue;
         }
-        arr.retain(|e| {
-            let s = e.to_string();
-            !MARKERS.iter().any(|m| s.contains(m))
-        });
-        arr.push(want.clone());
+        // Replace in place, keeping the slot (and so its neighbours' order);
+        // drop any further copies an older install stacked beside it.
+        match owned.first() {
+            Some(&first) => {
+                arr[first] = want.clone();
+                for &i in owned.iter().skip(1).rev() {
+                    arr.remove(i);
+                }
+            }
+            None => arr.push(want.clone()),
+        }
         changed += 1;
     }
     if changed > 0 {
-        std::fs::write(
+        write_config_atomic(
             &path,
-            serde_json::to_string_pretty(&settings).map_err(|e| e.to_string())?,
-        )
-        .map_err(|e| e.to_string())?;
+            &serde_json::to_string_pretty(&settings).map_err(|e| e.to_string())?,
+        )?;
     }
     match (changed, notify) {
         (0, Ok(_)) => Ok("Codex hooks already set up".into()),
@@ -5304,6 +5323,67 @@ mod integration_tests {
             "an unchanged config must not be rewritten"
         );
         assert_eq!(codex_mcp_state(&out), "ours");
+    }
+
+    /// Codex trusts each non-managed hook by content hash, and any change
+    /// un-trusts it until the user runs `/hooks` again. Setup runs on every
+    /// launch and on every upgrade, so two generations — and an upgrade pass —
+    /// must leave the file byte-for-byte as it was, without touching it.
+    #[test]
+    fn codex_hooks_file_is_byte_stable_across_generations() {
+        let home = scratch_home("codex-hooks-stable");
+        let h = home.to_str().unwrap();
+        let path = home.join(".codex/hooks.json");
+        // The user's own hook sits before ours in one event.
+        write(
+            &path,
+            r#"{"hooks":{"Stop":[{"hooks":[{"type":"command","command":"say done"}]}]}}"#,
+        );
+        setup_agent("codex", h).unwrap();
+        let first = std::fs::read(&path).unwrap();
+        let first_mtime = std::fs::metadata(&path).unwrap().modified().unwrap();
+
+        let second = setup_agent("codex", h).unwrap();
+        assert!(
+            second.steps[0].message.contains("already set up"),
+            "{second:?}"
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), first, "second generation drifted");
+        heal_integrations_in(h, "1.0.0", &HashMap::new());
+        heal_integrations_in(h, "1.0.1", &HashMap::new());
+        assert_eq!(std::fs::read(&path).unwrap(), first, "an upgrade pass drifted");
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().modified().unwrap(),
+            first_mtime,
+            "an unchanged hooks file must not be rewritten"
+        );
+        let cfg = read_json_config(&path).unwrap();
+        assert_eq!(cfg["hooks"]["Stop"][0]["hooks"][0]["command"], "say done");
+        assert!(cfg["hooks"]["Stop"][1].to_string().contains("canopy-hook"));
+    }
+
+    /// A stale entry of ours (an old helper path) is replaced where it stands,
+    /// so the user's entries keep their order, and stacked copies collapse to
+    /// one.
+    #[test]
+    fn a_stale_codex_hook_is_replaced_in_place() {
+        let home = scratch_home("codex-hooks-in-place");
+        let h = home.to_str().unwrap();
+        let path = home.join(".codex/hooks.json");
+        let stale = r#"{"hooks":[{"type":"command","command":"'/old/.canopy/bin/canopy-hook' --agent codex"}]}"#;
+        write(
+            &path,
+            &format!(
+                r#"{{"hooks":{{"Stop":[{stale},{{"hooks":[{{"type":"command","command":"say done"}}]}},{stale}]}}}}"#
+            ),
+        );
+        setup_agent("codex", h).unwrap();
+        let cfg = read_json_config(&path).unwrap();
+        let stop = cfg["hooks"]["Stop"].as_array().unwrap();
+        assert_eq!(stop.len(), 2, "{stop:?}");
+        assert!(stop[0].to_string().contains(&*helper_path_in(h).to_string_lossy()));
+        assert_eq!(stop[1]["hooks"][0]["command"], "say done");
+        assert_eq!(hooks_state("codex", h, h), "ours");
     }
 
     /// Codex hands a stdio MCP server none of the app's variables, so the
