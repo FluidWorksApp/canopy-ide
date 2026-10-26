@@ -1712,6 +1712,7 @@ impl PtyManager {
         // The account a terminal runs under is the launch's own choice. An
         // account inherited from whatever started Canopy would put a
         // "Default" tab on a named profile's login.
+        let mut cleared_account_vars = Vec::new();
         if let Some(home) = dirs_home() {
             for key in crate::profiles::inherited_account_vars_to_clear(
                 &home,
@@ -1719,14 +1720,39 @@ impl PtyManager {
                 &extra_env,
             ) {
                 cmd.env_remove(key);
+                cleared_account_vars.push(key);
             }
         }
+        // A Claude Code agent tab asks for its own IDE server (claude_ide.rs).
+        // Only a desktop-owned terminal gets one: the server runs here, and a
+        // PTY Canopy Remote or a micro-task owns has nobody to show a diff to.
+        // Resolved before the env loop moves `extra_env`, because the lock has
+        // to land in the CLAUDE_CONFIG_DIR this child will actually have.
+        let claude_ide_root = extra_env
+            .iter()
+            .find(|(k, _)| k == crate::claude_ide::LAUNCH_MARKER)
+            .map(|(_, root)| root.clone())
+            .filter(|_| kind == SessionKind::Desktop);
+        let claude_lock_dir = claude_ide_root.as_ref().and_then(|_| {
+            crate::claude_ide::lock_dir(
+                extra_env
+                    .iter()
+                    .find(|(k, _)| k == "CLAUDE_CONFIG_DIR")
+                    .map(|(_, v)| v.as_str()),
+                std::env::var("CLAUDE_CONFIG_DIR").ok(),
+                cleared_account_vars.contains(&"CLAUDE_CONFIG_DIR"),
+                dirs_home().as_deref(),
+            )
+        });
         let caller_set_aider_read = extra_env.iter().any(|(k, _)| k == "AIDER_READ");
         let marks_omp_task = extra_env.iter().any(|(k, _)| k == OMP_TASK_MARKER);
         for (k, v) in extra_env {
             if matches!(
                 k.as_str(),
-                "CANOPY_RUN_ID" | "CANOPY_ATTEMPT_ID" | OMP_TASK_MARKER
+                "CANOPY_RUN_ID"
+                    | "CANOPY_ATTEMPT_ID"
+                    | OMP_TASK_MARKER
+                    | crate::claude_ide::LAUNCH_MARKER
             ) {
                 continue;
             }
@@ -1805,6 +1831,32 @@ impl PtyManager {
                 cmd.env("CANOPY_CTX_TOKEN", token);
             }
         }
+        // The IDE server is bound before the child exists so its port is in
+        // the child's environment from the first instruction, and it keeps
+        // that port and token for the PTY's whole life: the CLI reconnects
+        // only with the credentials it cached. Best-effort — a terminal that
+        // cannot get a server still runs Claude, just without the editor link.
+        let claude_ide = claude_ide_root
+            .zip(claude_lock_dir)
+            .and_then(|(root, lock_dir)| {
+                let ide = app.try_state::<crate::claude_ide::ClaudeIde>()?;
+                let root = if root.trim().is_empty() { cwd.clone() } else { root };
+                match ide.open(id, &root, &lock_dir, std::process::id()) {
+                    Ok((launch, serve)) => {
+                        tauri::async_runtime::spawn(serve);
+                        Some(launch)
+                    }
+                    Err(e) => {
+                        log::warn!("{e}");
+                        None
+                    }
+                }
+            });
+        if let Some(launch) = &claude_ide {
+            for (key, value) in launch.env() {
+                cmd.env(key, value);
+            }
+        }
         cmd.cwd(&cwd);
 
         // Platform containment is prepared before spawn. A supported backend
@@ -1814,11 +1866,19 @@ impl PtyManager {
         let prepared_containment =
             if let Some(containment) = app.try_state::<crate::containment::ContainmentManager>() {
                 let host = host.expect("the production app manages both governor and containment");
-                Some(containment.prepare(
-                    id,
-                    crate::governor::base_allowance(host.total_bytes),
-                    &mut cmd,
-                )?)
+                Some(
+                    containment
+                        .prepare(
+                            id,
+                            crate::governor::base_allowance(host.total_bytes),
+                            &mut cmd,
+                        )
+                        .inspect_err(|_| {
+                            if let Some(ide) = app.try_state::<crate::claude_ide::ClaudeIde>() {
+                                ide.close(id);
+                            }
+                        })?,
+                )
             } else {
                 None
             };
@@ -1832,6 +1892,9 @@ impl PtyManager {
         let retire = || {
             if let Some(ctx) = app.try_state::<crate::context::ContextBridge>() {
                 ctx.retire_agent(id);
+            }
+            if let Some(ide) = app.try_state::<crate::claude_ide::ClaudeIde>() {
+                ide.close(id);
             }
         };
         let mut child = match pair.slave.spawn_command(cmd) {
@@ -2120,6 +2183,10 @@ impl PtyManager {
                     // against every other agent until a human noticed the row
                     // and pressed Release.
                     crate::context::release_claims_for_pty(&app, session.id);
+                    // Its Claude Code IDE server and lock go with it.
+                    if let Some(ide) = app.try_state::<crate::claude_ide::ClaudeIde>() {
+                        ide.close(session.id);
+                    }
                     let event = PtyExit {
                         id: session.id,
                         session_generation: session.session_generation,
