@@ -985,6 +985,8 @@ fn hooks_are_ours_in(agent: &str, cfg: &str, home: &str) -> bool {
             }),
         "opencode" => [
             "chat.message",
+            "case \"message.updated\"",
+            "firstSight(",
             "file.edited",
             "tool_input: normalizeToolInput(input?.args)",
             "canopy_signal: \"turn-start\"",
@@ -1346,9 +1348,23 @@ export const CanopyBridge = async ({ directory }) => {
     }
     return input
   }
+  // One turn-start per user message. `chat.message` (present in 1.18.34 but
+  // missing from the plugin docs) carries the prompt text; `message.updated`
+  // with role "user" is the documented bus event and the fallback if the hook
+  // ever goes away. Both see the same message id, and message.updated repeats
+  // for one message, so the id is remembered whichever arrives first.
+  const promptSeen = new Set()
+  const firstSight = (id) => {
+    if (!id) return true
+    if (promptSeen.has(id)) return false
+    promptSeen.add(id)
+    if (promptSeen.size > 500) promptSeen.delete(promptSeen.values().next().value)
+    return true
+  }
   return {
     "chat.message": async (input, output) => {
       try {
+        if (!firstSight(output?.message?.id ?? input?.messageID)) return
         const prompt = output?.parts
           ?.filter((part) => part?.type === "text" && !part?.synthetic)
           .map((part) => part.text)
@@ -1375,6 +1391,31 @@ export const CanopyBridge = async ({ directory }) => {
           case "session.idle":
             send({ ...base(event), hook_event_name: "Stop", canopy_signal: "turn-end" })
             break
+          case "message.updated": {
+            const info = event?.properties?.info
+            if (info?.role !== "user" || !info?.id || promptSeen.has(info.id)) break
+            // Only a message created just now starts a turn; an old one being
+            // updated (summaries, reverts) must not.
+            const created = Number(info?.time?.created ?? 0)
+            if (!created || Date.now() - created > 60000) break
+            // chat.message normally lands first and carries the text; give it
+            // a beat before sending the text-less fallback.
+            setTimeout(() => {
+              if (!firstSight(info.id)) return
+              send({
+                session_id: info.sessionID ?? sid(event),
+                cwd: directory,
+                agent: "opencode",
+                hook_event_name: "UserPromptSubmit",
+                canopy_signal: "turn-start",
+                prompt: "",
+                model: info?.model?.providerID
+                  ? `${info.model.providerID}/${info.model.modelID}`
+                  : "",
+              })
+            }, 250)
+            break
+          }
           case "permission.asked":
             // The signal, not a sentence. This used to re-encode a structural
             // event as prose that the helper then re-parsed — and the title is
@@ -5579,6 +5620,29 @@ mod integration_tests {
         assert!(src.contains("canopy_signal: \"turn-start\""));
         assert!(src.contains("canopy_signal: \"turn-progress\""));
         assert!(src.contains("canopy_signal: \"turn-end\""));
+    }
+
+    /// `chat.message` is absent from OpenCode's plugin docs, so the prompt
+    /// boundary also comes from the documented `message.updated` bus event,
+    /// role "user" — once per message id, whichever of the two lands first.
+    #[test]
+    fn opencodes_plugin_falls_back_to_message_updated_for_the_prompt() {
+        let home = scratch_home("opencode-message-updated");
+        let h = home.to_str().unwrap();
+        setup_agent("opencode", h).unwrap();
+        let src = std::fs::read_to_string(home.join(".config/opencode/plugin/canopy.ts")).unwrap();
+        assert!(src.contains("case \"message.updated\""));
+        assert!(src.contains("info?.role !== \"user\""));
+        assert!(src.contains("if (!firstSight(output?.message?.id ?? input?.messageID)) return"));
+        assert!(src.contains("if (!firstSight(info.id)) return"));
+        assert!(hooks_are_ours("opencode", h));
+        // A plugin from before the fallback reads as missing, so it is rewritten.
+        let path = home.join(".config/opencode/plugin/canopy.ts");
+        let old = src
+            .replace("case \"message.updated\"", "case \"x\"")
+            .replace("firstSight(", "seen(");
+        std::fs::write(&path, old).unwrap();
+        assert!(!hooks_are_ours("opencode", h));
     }
 
     #[test]
