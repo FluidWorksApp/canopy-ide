@@ -1,0 +1,18 @@
+/* Settings → Account → Links (ReadableLinksSettings.tsx). Rows read like the
+   usage list above them: one bordered list, a line per link. */
+.readable-links{display:flex;flex-direction:column;gap:8px}
+.readable-links-head{display:flex;align-items:center;justify-content:space-between;gap:8px}
+.readable-links-head h4{margin:0;font-size:13px;color:var(--text-muted);font-weight:600}
+.readable-links .set-desc{margin:0}
+.readable-links-empty{margin:0;font-size:13px;color:var(--text-muted)}
+.readable-links-list{list-style:none;margin:0;padding:0;border:1px solid var(--border);border-radius:10px}
+.readable-links-list li{display:flex;flex-wrap:wrap;align-items:center;gap:8px 12px;padding:10px 14px;font-size:13px}
+.readable-links-list li+li{border-top:1px solid var(--border)}
+.readable-links-what{display:flex;flex-direction:column;gap:2px;flex:1 1 240px;min-width:0}
+.readable-links-what strong{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.readable-links-what small{color:var(--text-muted);overflow-wrap:anywhere}
+.readable-links-what code{font-size:12px;color:var(--text-dim);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.readable-links-kind{font-size:11px;letter-spacing:.04em;text-transform:uppercase;color:var(--text-muted)}
+.readable-links-actions{display:flex;flex-wrap:wrap;align-items:center;gap:4px}
+.readable-links-actions>span{font-size:12px;color:var(--text-muted);margin-right:4px}
+.readable-links-error{margin:0;font-size:13px;color:var(--danger)}

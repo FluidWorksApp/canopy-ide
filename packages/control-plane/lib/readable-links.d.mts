@@ -17,5 +17,7 @@ type Grant = {role: string; permissions?: unknown};
 export function maySeeSession(grants: Grant[], projectId: string): boolean;
 type Db = {query(sql: string, args?: unknown[]): Promise<{rows: Record<string, unknown>[]}>};
 type User = {id: string; name?: string; email?: string};
-export function resolveReadableLink(db: Db, user: User, input: {url: string; origin?: string}): Promise<{link: {url: string; kind: LinkKind; target: Record<string, unknown>}}>;
+export type LinkAbout = {teamName: string | null; activity: 'opened' | 'shared'; activityAt: string | null};
+export function resolveReadableLink(db: Db, user: User, input: {url: string; origin?: string}): Promise<{link: {url: string; kind: LinkKind; target: Record<string, unknown>; about: LinkAbout}}>;
+export function listReadableLinks(db: Db, user: User, options?: {origin?: string; limit?: number}): Promise<{links: {url: string; kind: LinkKind; target: Record<string, unknown>; about: LinkAbout; createdAt: string | null; mine: boolean; canRevoke: boolean}[]}>;
 export function readableLinkAction(db: Db, user: User, input: Record<string, unknown>): Promise<Record<string, unknown>>;

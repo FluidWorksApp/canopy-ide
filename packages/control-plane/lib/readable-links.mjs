@@ -7,6 +7,8 @@ import {invitationPublicOrigin} from './invitation-url.mjs';
 //   <team>/<workspace>                    a workspace
 //   <team>/<workspace>/s/<slug>           a shared agent session
 //   <team>/t/<general|dm>/<word-slug>     a team chat message, plan or handoff
+// Actions: ensure (copy a link), resolve (open one), list (Settings → Links)
+// and revoke.
 // A namespace is a team (or, for a personal workspace, a person). A link is a
 // name, never a credential: resolving it re-checks the viewer's current access
 // (workspace grants, session sharing, team membership) every time, so sending
@@ -198,11 +200,46 @@ async function authorizedView(db,user,row){
  }
  return null;
 }
+const iso=value=>value==null?null:new Date(value).toISOString();
+/** What someone who may open the link can be told about it besides its
+ * target: the team whose namespace holds it, and when it was last active
+ * (a workspace's last connection, else when the link was made). Never any
+ * message or session contents. */
+async function linkAbout(db,row,allowed){
+ if(row.kind==='message')return {teamName:allowed.view.teamName,activity:'shared',activityAt:iso(row.created_at)};
+ const teamName=row.namespace_team?(await db.query('SELECT name FROM team WHERE id=$1',[row.namespace_team])).rows[0]?.name??null:null;
+ const connected=(await db.query('SELECT last_connected_at FROM workspace WHERE id=$1',[row.target?.workspaceId])).rows[0]?.last_connected_at??null;
+ return connected?{teamName,activity:'opened',activityAt:iso(connected)}:{teamName,activity:'shared',activityAt:iso(row.created_at)};
+}
+/** Revoking needs the link's creator, the workspace owner, or an owner or
+ * admin of the team whose namespace holds it. */
+async function mayRevoke(db,user,row,allowed){
+ if(row.created_by===user.id||allowed.owner)return true;
+ const teamRole=allowed.teamRole??(row.namespace_team?(await teamMember(db,row.namespace_team,user.id))?.role:null);
+ return ['owner','admin'].includes(teamRole);
+}
 export async function resolveReadableLink(db,user,input){
  const row=await lookup(db,input),allowed=await authorizedView(db,user,row);
  if(!allowed)fail(404,'Link not found');
  if(row.revoked_at)fail(410,'This link was revoked');
- return {link:{url:readableUrl(row.namespace,row.path,input.origin),kind:row.kind,target:allowed.view}};
+ return {link:{url:readableUrl(row.namespace,row.path,input.origin),kind:row.kind,target:allowed.view,about:await linkAbout(db,row,allowed)}};
+}
+/** The live links this person manages: the ones they made, the ones on
+ * workspaces they own, and the ones in namespaces of teams they own or
+ * administer. Each is re-checked against current access, so a link to
+ * something they can no longer open is left out. */
+export async function listReadableLinks(db,user,{origin=linkOrigin(),limit=200}={}){
+ const rows=(await db.query(`SELECT l.*,n.team_id AS namespace_team FROM readable_link l JOIN link_namespace n ON n.handle=l.namespace
+ WHERE l.revoked_at IS NULL AND (l.created_by=$1
+  OR l.workspace_id IN (SELECT id FROM workspace WHERE owner_id=$1 AND deleted_at IS NULL)
+  OR n.team_id IN (SELECT team_id FROM active_team_member WHERE user_id=$1 AND removed_at IS NULL AND role IN ('owner','admin')))
+ ORDER BY l.created_at DESC LIMIT $2`,[user.id,limit])).rows;
+ const links=[];
+ for(const row of rows){
+  const allowed=await authorizedView(db,user,row);if(!allowed)continue;
+  links.push({url:readableUrl(row.namespace,row.path,origin),kind:row.kind,target:allowed.view,about:await linkAbout(db,row,allowed),createdAt:iso(row.created_at),mine:row.created_by===user.id,canRevoke:await mayRevoke(db,user,row,allowed)});
+ }
+ return {links};
 }
 // The HTTP caller (POST /api/links) authenticates with principal(), checks
 // mayMutate() for ensure/revoke, and wraps each action in a transaction.
@@ -214,13 +251,13 @@ export async function readableLinkAction(db,user,input={}){
   return {link:{url:readableUrl(link.namespace,link.path,origin),kind:input.kind,created:link.created}};
  }
  if(input.action==='resolve')return resolveReadableLink(db,user,{...input,origin});
+ if(input.action==='list')return listReadableLinks(db,user,{origin});
  if(input.action==='revoke'){
   const row=await lookup(db,{...input,origin}),allowed=await authorizedView(db,user,row);
   if(!allowed)fail(404,'Link not found');
   if(row.revoked_at)return {revoked:true};
   // Admins of the team whose namespace holds the link may tidy it up.
-  const teamRole=allowed.teamRole??(row.namespace_team?(await teamMember(db,row.namespace_team,user.id))?.role:null);
-  if(row.created_by!==user.id&&!allowed.owner&&!['owner','admin'].includes(teamRole))fail(403,'Only the person who made this link, the workspace owner or a team admin can revoke it');
+  if(!(await mayRevoke(db,user,row,allowed)))fail(403,'Only the person who made this link, the workspace owner or a team admin can revoke it');
   await db.query('UPDATE readable_link SET revoked_at=now(),revoked_by=$2 WHERE id=$1 AND revoked_at IS NULL',[row.id,user.id]);
   return {revoked:true};
  }
