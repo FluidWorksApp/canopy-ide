@@ -10,6 +10,7 @@
 //    image has no SDK. So it is answered from the VM's files instead: the
 //    modules settings.gradle includes, which are apps, their application ids,
 //    and the APKs their builds have already produced — what a run needs.
+import { basename } from "../paths";
 type Call = <T>(command: string, args: Record<string, unknown>) => Promise<T>;
 
 export const isWorkspacePath = (path: unknown): path is string =>
@@ -34,7 +35,7 @@ const encode = (bytes: Uint8Array) => {
 
 /** Copy a VM file to this computer's staging directory; resolves with its local path. */
 export async function stageWorkspaceApk(native: Call, desktop: Call, path: string): Promise<string> {
-  const base = path.split("/").pop() ?? "app.apk";
+  const base = basename(path) || "app.apk";
   const ext = /\.apks$/i.test(base) ? "apks" : "apk";
   const name = `${crypto.randomUUID()}.${ext}`;
   let offset = 0;
