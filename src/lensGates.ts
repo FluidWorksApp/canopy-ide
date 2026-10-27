@@ -4,10 +4,12 @@
 // agent's write into it — in either lens — until the owner approves.
 //
 // Three things decide the gate:
-//  * the owner. The hook can't tell whose session it is checking, but the
-//    policy file is this computer's, written by this computer's signed-in
-//    person: on the owner's own machine the gate is simply not published, so
-//    the owner's sessions are the exception.
+//  * the owner. Every terminal carries the signed-in team member who started
+//    it (`CANOPY_MEMBER`, ipc.ts), and the gate lists the owner in
+//    `exceptMembers`, so the hook lets the owner's own sessions through and
+//    stops everyone else's — on one computer or in a cloud workspace several
+//    people share. (A claim made before ownership carried an account id is
+//    matched by name and simply not published on its owner's computer.)
 //  * the patterns: the layer map's globs (the person can edit them).
 //  * approvals. When the owner approves a `layer-approval` card in team chat
 //    (lensApprovals.ts), its files become the gate's `exceptFiles` for a day,
@@ -65,6 +67,8 @@ export interface PolicyGateWire {
   rule: string;
   scope: "project" | "team";
   gate: unknown;
+  /** Team members whose own sessions the gate doesn't stop (gates.rs). */
+  exceptMembers?: string[];
 }
 
 /** The rule text an agent is quoted when the gate stops it. */
@@ -105,15 +109,23 @@ export function layerGates(
     const globs = map.globs[layer] ?? [];
     if (!claim || globs.length === 0) continue;
     const ownerId = claim.data.ownerId ?? null;
-    // The owner's own sessions are the exception.
-    if (isMe(me, { id: ownerId, name: claim.data.owner })) continue;
+    // The owner's own sessions are the exception: by account id when the
+    // claim has one; an older name-only claim isn't published on its owner's
+    // computer at all.
+    if (!ownerId && isMe(me, { name: claim.data.owner })) continue;
     const gate = normalizeGate({
       type: "deny-path-write",
       globs,
       exceptFiles: approvedFiles(layer, ownerId, approvals, now),
     });
     if (!gate) continue;
-    out.push({ id: layerGateId(layer), rule: layerRuleText(layer, claim.data.owner), scope: "team", gate });
+    out.push({
+      id: layerGateId(layer),
+      rule: layerRuleText(layer, claim.data.owner),
+      scope: "team",
+      gate,
+      ...(ownerId ? { exceptMembers: [ownerId] } : {}),
+    });
   }
   return out;
 }

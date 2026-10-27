@@ -332,6 +332,28 @@ function ChangesSection({
     };
   }, [items, root, me]);
 
+  // Files already sent for approval (waiting, or approved within the day)
+  // don't ask again.
+  const [asked, setAsked] = useState<LayerApprovalData[]>([]);
+  const [approvalTick, setApprovalTick] = useState(0);
+  useEffect(() => subscribeLayerApprovals(() => setApprovalTick((t) => t + 1)), []);
+  useEffect(() => {
+    let live = true;
+    void layerApprovals(root).then((all) => {
+      const now = Date.now();
+      if (live) {
+        setAsked(
+          all
+            .map((e) => e.data)
+            .filter((d) => d.status !== "rejected" && now - (d.decidedAt ?? d.requestedAt) < APPROVAL_TTL_MS),
+        );
+      }
+    });
+    return () => {
+      live = false;
+    };
+  }, [root, approvalTick]);
+
   const blocked = useMemo(() => blockedHits(root, owners), [root, owners, notices]); // eslint-disable-line react-hooks/exhaustive-deps
   const shown = useMemo(() => {
     const by = new Map<OwnedLayer, OwnedLayerHit & { attempted?: string[] }>();
@@ -339,8 +361,13 @@ function ChangesSection({
       const prev = by.get(h.layer);
       by.set(h.layer, prev ? { ...prev, files: [...new Set([...prev.files, ...h.files])] } : h);
     }
-    return [...by.values()];
-  }, [blocked, hits]);
+    return [...by.values()]
+      .map((h) => {
+        const covered = new Set(asked.filter((a) => a.layer === h.layer).flatMap((a) => a.files));
+        return { ...h, files: h.files.filter((f) => !covered.has(f)) };
+      })
+      .filter((h) => h.files.length);
+  }, [blocked, hits, asked]);
 
   return (
     <div className="builder-lens-body">

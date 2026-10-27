@@ -105,6 +105,29 @@ pub struct PolicyGate {
     #[serde(default = "default_scope")]
     pub scope: String,
     pub gate: Gate,
+    /// Team members (Canopy account ids) whose own sessions this gate doesn't
+    /// stop: a layer's owner (src/lensGates.ts). A session says whose it is
+    /// with `CANOPY_MEMBER`, stamped at spawn by the app it was started from.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub except_members: Vec<String>,
+}
+
+impl PolicyGate {
+    /// Whether this gate checks a session started by `member`.
+    pub fn applies_to(&self, member: Option<&str>) -> bool {
+        match member.map(str::trim).filter(|m| !m.is_empty()) {
+            Some(m) => !self.except_members.iter().any(|e| e == m),
+            None => true,
+        }
+    }
+}
+
+impl Policy {
+    /// The policy as one session sees it: gates that exempt its member dropped.
+    pub fn for_member(mut self, member: Option<&str>) -> Self {
+        self.gates.retain(|g| g.applies_to(member));
+        self
+    }
 }
 
 fn default_scope() -> String {
@@ -2270,6 +2293,7 @@ mod tests {
                     rule: rule.into(),
                     scope: "team".into(),
                     gate,
+                    except_members: vec![],
                 })
                 .collect(),
             ..Default::default()
@@ -2295,6 +2319,35 @@ mod tests {
             &evaluate(Some(p), a, &ctx(&CLEAN), None),
             p.trifecta_blocks(),
         )
+    }
+
+    #[test]
+    fn an_owner_s_own_sessions_pass_their_layer_gate() {
+        let mut p = policy(vec![(
+            "Data is owned by Sam",
+            Gate::DenyPathWrite {
+                globs: vec!["db/**".into()],
+                except_files: vec![],
+            },
+        )]);
+        p.gates[0].except_members = vec!["u-sam".into()];
+        let sam = p.clone().for_member(Some("u-sam"));
+        assert_eq!(eval(&sam, &write("/home/u/repo/db/a.sql")), Outcome::Allow);
+        let alex = p.clone().for_member(Some("u-alex"));
+        assert_eq!(
+            eval(&alex, &write("/home/u/repo/db/a.sql")),
+            Outcome::Blocked
+        );
+        // A session that doesn't say whose it is is checked.
+        let nobody = p.clone().for_member(None);
+        assert_eq!(
+            eval(&nobody, &write("/home/u/repo/db/a.sql")),
+            Outcome::Blocked
+        );
+        assert_eq!(
+            eval(&p.for_member(Some(" ")), &write("/home/u/repo/db/a.sql")),
+            Outcome::Blocked
+        );
     }
 
     #[test]

@@ -62,14 +62,28 @@ describe("owned layers compile into gates", () => {
         rule: expect.stringContaining("Data is owned by Sam"),
         scope: "team",
         gate: { type: "deny-path-write", globs: ["prisma/**"] },
+        exceptMembers: ["u-sam"],
       },
     ]);
     expect(layerOfGateId(gates[0].id)).toBe("data");
     expect(layerOfGateId("some-rule")).toBeNull();
   });
 
-  it("is not published on the owner's own computer: their sessions are the exception", async () => {
-    expect(layerGates(MAP, await owners(), [], sam)).toEqual([]);
+  it("exempts the owner's own sessions by account, wherever the policy is written", async () => {
+    // Published on the owner's computer too: a cloud workspace's policy is
+    // shared, and the hook tells sessions apart by CANOPY_MEMBER.
+    expect(layerGates(MAP, await owners(), [], sam)[0].exceptMembers).toEqual(["u-sam"]);
+  });
+
+  it("an older name-only claim isn't published on its owner's computer", async () => {
+    await fakeLedger.appendLedger("/repo", {
+      kind: "rule",
+      ref: { kind: "lens-layer", id: "data" },
+      data: { type: "layer-owner", layer: "data", owner: "Sam" },
+    });
+    const o = await layerOwners("/repo");
+    expect(layerGates(MAP, o, [], sam)).toEqual([]);
+    expect(layerGates(MAP, o, [], alex)[0]).not.toHaveProperty("exceptMembers");
   });
 
   it("is enforced when nobody is signed in (no one here is the owner)", async () => {

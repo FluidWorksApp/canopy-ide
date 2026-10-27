@@ -2416,7 +2416,11 @@ fn gate_check(
     {
         return None;
     }
-    let loaded = gates::load_policy(&home, cwd_path);
+    // Gates that exempt this session's team member (a layer owner's own
+    // agents) don't check it.
+    let member = std::env::var("CANOPY_MEMBER").ok();
+    let loaded = gates::load_policy(&home, cwd_path)
+        .map(|(root, policy)| (root, policy.for_member(member.as_deref())));
     let taint_ids = gate_taint_ids(session_id);
     let tainted = gates::is_tainted(&home, &taint_ids);
     let top = gates::worktree_top(cwd_path);

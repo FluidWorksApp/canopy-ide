@@ -120,6 +120,7 @@ import { builderRoot, defaultLens, initialLensConfig, projectLens, toggleProject
 import { startLensSteps } from "./lensSteps";
 import { setBrainProjectResolver } from "./brainMeter";
 import { startLensApprovals } from "./lensApprovals";
+import { teamIdentity } from "./teamIdentity";
 import {
   dismissTerminalMemoryPromptsForWindow,
   subscribeTerminalMemoryPromptVisibility,
@@ -966,6 +967,9 @@ export default function App() {
         }),
     });
     const stopApprovals = startLensApprovals();
+    // Who is signed in, early: terminals carry it (ipc.ts withMember) so a
+    // layer owner's own agents pass their layer's gate.
+    void teamIdentity();
     return () => {
       stop();
       stopSteps();
