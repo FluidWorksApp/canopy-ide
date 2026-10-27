@@ -57,7 +57,7 @@ import {
 import { observeTurnEvents } from "./turnRollback";
 import { observeAgentTurns } from "./agentTurns";
 import { startAwareness } from "./awareness/engine";
-import { setCloudRosterProvider } from "./awareness/roster";
+import { setCloudNoteSender, setCloudRosterProvider } from "./awareness/roster";
 import { isWorkspaceHost } from "./host";
 import { startCloudSync } from "./remoteExecution/cloudSync";
 import { WorkspaceHooksNotice } from "./remoteExecution/WorkspaceHooksNotice";
@@ -941,18 +941,35 @@ export default function App() {
   useEffect(() => {
     setCloudRosterProvider(async () =>
       (await meshJobs.targets()).cloudWorkspaces.map((w) => ({
+        id: w.id,
         name: w.name,
         online: w.online,
-        agents: w.agents?.map((a) => ({ ptyId: a.ptyId, name: a.name, agent: a.agent, task: a.status?.title ?? a.task })) ?? null,
+        agents:
+          w.agents?.map((a) => ({
+            ptyId: a.ptyId,
+            name: a.name,
+            agent: a.agent,
+            task: a.status?.title ?? a.task,
+            repo: a.repo ?? null,
+            root: a.root ?? null,
+            files: a.files ?? [],
+          })) ?? null,
         ...("note" in w && w.note ? { note: w.note } : {}),
       })),
     );
+    // Awareness notes for agents in other cloud workspaces travel as mesh
+    // messages through each workspace's service.
+    setCloudNoteSender(async (workspace, ptyId, text) =>
+      (await meshJobs.message({ workspace, ptyId, text, fromName: "Canopy workspace" })).messageId,
+    );
     const stop = startAwareness({
       roots: () => wsRef.current.projects.flatMap((p) => p.components.map((c) => c.path)),
+      currentWorkspace: () => (isWorkspaceHost() ? (activeWorkspace()?.connection.workspaceId ?? null) : null),
     });
     return () => {
       stop();
       setCloudRosterProvider(null);
+      setCloudNoteSender(null);
     };
   }, [meshJobs]);
   // A cloud workspace keeps Rules, agent hooks and team memory in step with

@@ -17,8 +17,6 @@ export function statusLine(s: AwarenessState): string {
       return "When an agent finishes a change, the agents it affects are told.";
     case "off":
       return "Agents aren't told about each other's changes. Turn it on to start.";
-    case "remote":
-      return "Not available in cloud workspaces yet. The board still shows what is running.";
     case "paused":
       return PAUSED[s.reason] ?? "The last change note failed. Canopy will try again on the next change.";
   }

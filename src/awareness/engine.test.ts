@@ -207,3 +207,48 @@ describe("handleTurn", () => {
     expect(c.claim).not.toHaveBeenCalled();
   });
 });
+
+describe("cloud workspaces", () => {
+  it("runs when the IDE is on a cloud workspace, giving the brain no workspace path", async () => {
+    const c = makeDeps({ remote: () => true });
+    await handleTurn(turn);
+    expect(c.ask).toHaveBeenCalledTimes(1);
+    expect(c.ask.mock.calls[0][0].cwd).toBe("");
+    expect(c.deliver).toHaveBeenCalled();
+    expect(c.claim).toHaveBeenCalled();
+    expect(awarenessStatus()).toEqual({ state: "on" });
+  });
+
+  it("tells an agent in another cloud workspace on the same repository, through its service", async () => {
+    const deliverCloud = vi.fn(async () => "msg-1");
+    const c = makeDeps({
+      digests: async () => [],
+      origin: async () => "git@github.com:Acme/Shop.git",
+      currentWorkspace: () => "ws-here",
+      cloud: async () => [
+        {
+          id: "ws-cara",
+          name: "cara-cloud",
+          online: true,
+          agents: [
+            { ptyId: 7, name: "Cara's agent", agent: "cli-c", task: "Checkout flow", repo: "https://github.com/acme/shop", root: "/workspace/shop", files: [{ path: "src/cart.ts", ts: NOW - 60_000 }] },
+            { ptyId: 8, name: "Other repo", agent: "cli-c", task: null, repo: "https://github.com/acme/other", root: "/workspace/other", files: [{ path: "src/cart.ts", ts: NOW }] },
+          ],
+        },
+        // The workspace this IDE runs against: its agents are already local.
+        { id: "ws-here", name: "here", online: true, agents: [{ ptyId: 9, name: "dup", agent: null, task: null, repo: "https://github.com/acme/shop", root: "/workspace/shop", files: [{ path: "src/cart.ts", ts: NOW }] }] },
+      ],
+      deliverCloud,
+    } as Partial<AwarenessDeps>);
+    await handleTurn(turn);
+    expect(c.ask).toHaveBeenCalledTimes(1);
+    expect(c.ask.mock.calls[0][0].prompt).toContain("Cara's agent in cara-cloud");
+    expect(deliverCloud).toHaveBeenCalledTimes(1);
+    const [workspace, pty, text] = deliverCloud.mock.calls[0] as unknown as [string, number, string];
+    expect([workspace, pty]).toEqual(["ws-cara", 7]);
+    expect(text).toContain("/workspace/shop/src/cart.ts");
+    expect(c.deliver.mock.calls.filter(([pty]) => pty === 7)).toHaveLength(0);
+    const entry = c.append.mock.calls.map(([, d]) => d as { data: { to: { workspace?: string } } }).find((d) => d.data.to.workspace);
+    expect(entry?.data.to).toMatchObject({ ptyId: 7, workspace: "ws-cara" });
+  });
+});

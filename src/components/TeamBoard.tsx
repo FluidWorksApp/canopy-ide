@@ -372,7 +372,7 @@ export function TeamBoard({ active, allProjects, onJumpToPty, tabNames }: TeamBo
         ) : (
           <ul className="tb-feed">
             {cloud.map((w) => (
-              <li key={w.name} className="tb-feed-item">
+              <li key={w.id ?? w.name} className="tb-feed-item">
                 <div className="tb-feed-head">
                   <strong>{w.name}</strong>
                   <span className="acp-dim">{w.online ? "online" : "offline"}</span>
@@ -381,6 +381,12 @@ export function TeamBoard({ active, allProjects, onJumpToPty, tabNames }: TeamBo
                   w.agents.map((a) => (
                     <p key={a.ptyId} className="tb-feed-note">
                       {a.name ?? `agent #${a.ptyId}`}{a.agent ? ` (${a.agent})` : ""}: {a.task ?? "no task named"}
+                      {a.files?.length ? (
+                        <span className="acp-dim">
+                          {" "}· edited {a.files.slice(0, 3).map((f) => f.path).join(", ")}
+                          {a.files.length > 3 ? ` +${a.files.length - 3}` : ""}
+                        </span>
+                      ) : null}
                     </p>
                   ))
                 ) : (

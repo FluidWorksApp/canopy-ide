@@ -42,15 +42,43 @@ export function subscribeAwarenessRoster(cb: () => void): () => void {
   };
 }
 
-/** A cloud workspace's live agents, as meshJobs.targets reports them. */
+/** A cloud workspace's live agents, as meshJobs.targets reports them. A
+ *  current workspace service also says which repository each agent works in
+ *  (its origin URL), its checkout, and the files it edited lately (from the
+ *  host's view of its hook events), so awareness can tell it about changes. */
 export interface CloudRoster {
+  /** Control-plane workspace id. */
+  id?: string;
   name: string;
   online: boolean;
-  agents: { ptyId: number; name: string | null; agent: string | null; task: string | null }[] | null;
+  agents:
+    | {
+        ptyId: number;
+        name: string | null;
+        agent: string | null;
+        task: string | null;
+        repo?: string | null;
+        root?: string | null;
+        /** Repo-relative, newest first; `ts` in ms. */
+        files?: { path: string; ts: number }[];
+      }[]
+    | null;
   note?: string;
 }
 
 let cloudProvider: (() => Promise<CloudRoster[]>) | null = null;
+let cloudSender: ((workspace: string, ptyId: number, text: string) => Promise<string>) | null = null;
+
+/** App wires this to the mesh-jobs coordinator: a message to one agent in a
+ *  cloud workspace, through that workspace's service. Resolves with its id. */
+export function setCloudNoteSender(fn: ((workspace: string, ptyId: number, text: string) => Promise<string>) | null): void {
+  cloudSender = fn;
+}
+
+export async function sendCloudNote(workspace: string, ptyId: number, text: string): Promise<string> {
+  if (!cloudSender) throw new Error("Not signed in to a Canopy team, so cloud workspaces can't be reached.");
+  return cloudSender(workspace, ptyId, text);
+}
 
 /** App wires this to the mesh-jobs coordinator once. */
 export function setCloudRosterProvider(fn: (() => Promise<CloudRoster[]>) | null): void {
@@ -71,4 +99,5 @@ export function resetAwarenessRosterForTests(): void {
   byProject.clear();
   listeners.clear();
   cloudProvider = null;
+  cloudSender = null;
 }

@@ -22,10 +22,17 @@
 //     claim on it for the finishing agent through the existing claim store and
 //     warns both. Deterministic, so it works without a brain.
 //
+// Cloud workspaces: when the IDE runs against one, the same steps reach the
+// VM's agents through the workspace — digests, journals, churn and checkouts
+// from its host, claims and note delivery through its Canopy service
+// (harnessCommands.ts) — while the brain and the ledger stay on this computer.
+// Agents in OTHER cloud workspaces on the same repository (this account's or a
+// teammate's, matched by origin remote) are peers too: their files come from
+// the workspace service's roster and their notes go through the cross-
+// workspace mesh (cloudPeers.ts, meshJobs.message).
+//
 // Off switch: Settings → "Tell agents about each other's changes"
-// (`awarenessEnabled`). Desktop only for now: in a cloud workspace the claim
-// store, mesh and ledger this needs live on the desktop while the agents run
-// in the VM, so it stays off there and says so on the board.
+// (`awarenessEnabled`).
 
 import * as ipc from "../ipc";
 import { askBrain, type BrainAnswer, type BrainRequest } from "../brainCall";
@@ -46,7 +53,8 @@ import {
   type AwarenessRisk,
   type AwarenessVerdict,
 } from "./notes";
-import { rosterEntry } from "./roster";
+import { cloudRosters, rosterEntry, sendCloudNote, type CloudRoster } from "./roster";
+import { cloudPeersFor, repoKey } from "./cloudPeers";
 
 /** A journal edit this old no longer counts as "recently edited". */
 export const RECENT_MS = 30 * 60_000;
@@ -59,7 +67,7 @@ const CACHE_MAX = 500;
 /** The `data` of an `awareness` ledger entry. */
 export interface AwarenessData {
   kind: "note" | "hotspot";
-  to: { sessionId: string; ptyId: number; name: string; task: string | null };
+  to: { sessionId: string; ptyId: number; name: string; task: string | null; workspace?: string };
   from: { sessionId: string; ptyId: number | null; name: string; cli: string };
   note: string;
   risk: AwarenessRisk;
@@ -77,11 +85,12 @@ export interface AwarenessData {
 export type AwarenessState =
   | { state: "on" }
   | { state: "off" }
-  | { state: "remote" }
   | { state: "paused"; reason: string; at: number };
 
 export interface AwarenessDeps {
   enabled(): boolean;
+  /** The IDE runs against a cloud workspace: the brain, which runs here,
+   *  gets no workspace path to read. */
   remote(): boolean;
   roots(): string[];
   instance(): Promise<string>;
@@ -97,6 +106,15 @@ export interface AwarenessDeps {
   references(root: string, symbols: string[]): Promise<{ symbol: string; files: string[] }[]>;
   ask<T>(req: BrainRequest<T>): Promise<BrainAnswer<T>>;
   deliver(ptyId: number, instance: string, noteId: string, text: string): Promise<string>;
+  /** The repository's origin remote, for finding cloud agents on it. */
+  origin(repo: string): Promise<string | null>;
+  /** Cloud workspaces' rosters; null when no team session can ask. */
+  cloud(): Promise<CloudRoster[] | null>;
+  /** The cloud workspace this IDE runs against, if any (its agents are
+   *  already local peers). */
+  currentWorkspace(): string | null;
+  /** A note to an agent in a cloud workspace, through its service. */
+  deliverCloud(workspace: string, ptyId: number, text: string): Promise<string>;
   claim(ptyId: number, paths: string[], owner: string, note: string): Promise<string>;
   append<D>(root: string, draft: LedgerDraft<D>): Promise<LedgerEntry<D>>;
   post(input: AttentionInput): string;
@@ -119,6 +137,10 @@ const defaultDeps: AwarenessDeps = {
   references: (root, symbols) => referenceFiles(root, symbols),
   ask: (req) => askBrain(req),
   deliver: (ptyId, instance, noteId, text) => ipc.meshAwareness(ptyId, instance, noteId, text),
+  origin: (repo) => ipc.gitRemoteUrl(repo).then((u) => u || null),
+  cloud: () => cloudRosters(),
+  currentWorkspace: () => null,
+  deliverCloud: (workspace, ptyId, text) => sendCloudNote(workspace, ptyId, text),
   claim: (ptyId, paths, owner, note) => ipc.contextHotspotClaim(ptyId, paths, owner, note),
   append: (root, draft) => appendLedger(root, draft),
   post: (input) => postAttention(input),
@@ -141,7 +163,6 @@ function setStatus(next: AwarenessState): void {
 /** Whether awareness is running, and if not, why — as of the last turn. */
 export function awarenessStatus(): AwarenessState {
   if (!deps.enabled()) return { state: "off" };
-  if (deps.remote()) return { state: "remote" };
   return status;
 }
 
@@ -267,7 +288,21 @@ async function gatherPeers(turn: AgentTurnEnd, checkouts: string[]): Promise<Pee
       claims: held,
     });
   }
-  return peers;
+  return [...peers, ...(await cloudPeers(turn))];
+}
+
+/** Agents in other cloud workspaces on this repository. Asked only when the
+ *  repository has an origin remote to match them by. */
+async function cloudPeers(turn: AgentTurnEnd): Promise<PeerAgent[]> {
+  try {
+    const repo = repoKey(await deps.origin(turn.cwd));
+    if (!repo) return [];
+    const rosters = await deps.cloud();
+    return rosters ? cloudPeersFor(rosters, repo, deps.currentWorkspace()) : [];
+  } catch {
+    // No remote, no team session, a roster that didn't answer: local only.
+    return [];
+  }
 }
 
 // ---------------------------------------------------------------- delivery
@@ -280,7 +315,7 @@ interface Origin {
 
 async function tell(
   origin: Origin,
-  to: { sessionId: string; ptyId: number; name: string; task: string | null; cwd: string },
+  to: { sessionId: string; ptyId: number; name: string; task: string | null; cwd: string; cloud?: PeerAgent["cloud"] },
   body: {
     kind: AwarenessData["kind"];
     note: string;
@@ -296,19 +331,21 @@ async function tell(
   const { turn } = origin;
   const instance = await deps.instance().catch(() => "");
   // The receiving agent resolves files in its own checkout.
-  const top = topOf(to.cwd, origin.checkouts);
+  const top = to.cloud ? to.cloud.root : topOf(to.cwd, origin.checkouts);
   const refs = body.files.slice(0, 6).map((f) => `${top}/${f}`);
   const text = `${body.text}${refs.length ? ` Files: ${refs.join(", ")}` : ""}`;
   let messageId: string | undefined;
   let error: string | undefined;
   try {
-    messageId = await deps.deliver(to.ptyId, instance, body.noteId.slice(0, 64), text);
+    messageId = to.cloud
+      ? await deps.deliverCloud(to.cloud.workspace, to.ptyId, text)
+      : await deps.deliver(to.ptyId, instance, body.noteId.slice(0, 64), text);
   } catch (e) {
     error = String(e instanceof Error ? e.message : e);
   }
   const data: AwarenessData = {
     kind: body.kind,
-    to: { sessionId: to.sessionId, ptyId: to.ptyId, name: to.name, task: to.task },
+    to: { sessionId: to.sessionId, ptyId: to.ptyId, name: to.name, task: to.task, ...(to.cloud ? { workspace: to.cloud.workspace } : {}) },
     from: { sessionId: turn.sessionId, ptyId: turn.ptyId, name: origin.name, cli: turn.cli },
     note: body.note,
     risk: body.risk,
@@ -424,7 +461,9 @@ async function notePass(
       feature: "awareness",
       tier: "background",
       json: true,
-      cwd: turn.cwd,
+      // The brain runs on this computer; a workspace path means nothing here,
+      // and the prompt carries the diff.
+      cwd: deps.remote() ? "" : turn.cwd,
       prompt: buildNotePrompt({
         from: { name: origin.name, cli: turn.cli },
         prompt: turn.prompt,
@@ -480,10 +519,6 @@ export async function handleTurn(turn: AgentTurnEnd): Promise<void> {
       setStatus({ state: "off" });
       return;
     }
-    if (deps.remote()) {
-      setStatus({ state: "remote" });
-      return;
-    }
     if (!turn.filesTouched.length) return;
     const checkouts = await checkoutsOf(turn.root, turn.cwd);
     const touched = [
@@ -522,9 +557,10 @@ export async function handleTurn(turn: AgentTurnEnd): Promise<void> {
 let chain: Promise<void> = Promise.resolve();
 
 /** Start listening for turn ends. `roots` lists the open projects'
- *  directories (where session digests are looked for). Returns a stop. */
-export function startAwareness(opts: { roots: () => string[] }): () => void {
-  deps = { ...deps, roots: opts.roots };
+ *  directories (where session digests are looked for); `currentWorkspace`
+ *  names the cloud workspace this IDE runs against. Returns a stop. */
+export function startAwareness(opts: { roots: () => string[]; currentWorkspace?: () => string | null }): () => void {
+  deps = { ...deps, roots: opts.roots, ...(opts.currentWorkspace ? { currentWorkspace: opts.currentWorkspace } : {}) };
   return onAgentTurnEnd((turn) => {
     chain = chain.then(() => handleTurn(turn));
   });

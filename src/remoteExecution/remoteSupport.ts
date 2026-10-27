@@ -24,10 +24,6 @@ unsupported("The built-in native browser", [
 // Showing a VM path in this computer's file manager cannot work; the menu
 // items that offer it are hidden in a workspace (isRemoteUnsupported).
 unsupported("Reveal in file manager", ["fs_reveal"]);
-// Agent awareness (src/awareness) runs on the desktop, beside the claim store
-// and mesh it writes to, and switches itself off in a cloud workspace (the
-// board says so); its hotspot claim is never sent to a workspace.
-unsupported("Agent awareness hotspot claims", ["context_hotspot_claim"]);
 export const UNSUPPORTED_REMOTE: ReadonlySet<string> = new Set(Object.keys(UNSUPPORTED));
 export const isRemoteUnsupported = (command: string) => Object.hasOwn(UNSUPPORTED, command);
 export const remoteUnsupportedMessage = (command: string) =>

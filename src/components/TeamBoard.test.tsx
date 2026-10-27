@@ -165,6 +165,5 @@ describe("TeamBoard", () => {
   it("says plainly why agents are not being told", () => {
     expect(statusLine({ state: "off" })).toMatch(/aren't told/);
     expect(statusLine({ state: "paused", reason: "no-brain", at: 0 })).toMatch(/No brain is connected/);
-    expect(statusLine({ state: "remote" })).toMatch(/cloud workspaces/);
   });
 });

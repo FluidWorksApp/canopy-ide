@@ -134,6 +134,10 @@ export async function harnessCommand(command: string, args: Args, io: HarnessIo)
       // A job submitted from this computer (the companion) answers there.
       if (args.instance !== io.instance) return io.desktop("context_mesh_job_update", args);
       return (await io.action<{ id: string }>("mesh_job_update", defined({ ptyId: args.ptyId, instance: args.instance, jobId: args.jobId, text: args.text, refKind: args.refKind }))).id;
+    case "context_hotspot_claim":
+      // Agent awareness claims a hotspot for the agent that just edited it, in
+      // the store the workspace's agents claim through (context.rs twin).
+      return (await io.action<{ message: string }>("hotspot_claim", { ptyId: args.ptyId, paths: args.paths, owner: args.owner, note: args.note ?? null })).message;
   }
   throw Error(`Unknown harness command ${command}`);
 }

@@ -51,9 +51,12 @@ export function validMeshStatus(value:unknown):value is MeshStatus{
 /** Who is running in a cloud workspace: asked of its service, answered with
  *  the same agents its own canopy_agents lists (protocol §6.1). */
 export type RosterRequest={id:string;created:number};
-export type RosterAgent={ptyId:number;name:string|null;agent:string|null;task:string|null;status:{title:string|null;description:string|null}|null;closing:boolean};
+/** `repo` (its origin remote), `root` (its checkout) and `files` (repo-relative,
+ *  newest first, `ts` in ms) come from a current service; awareness matches
+ *  cloud agents to a repository by them. */
+export type RosterAgent={ptyId:number;name:string|null;agent:string|null;task:string|null;status:{title:string|null;description:string|null}|null;closing:boolean;repo?:string|null;root?:string|null;files?:{path:string;ts:number}[]};
 export type Roster={requestId:string;agents:RosterAgent[];created:number};
-const MAX_ROSTER=50;
+const MAX_ROSTER=50,MAX_ROSTER_FILES=20;
 const optText=(value:unknown,n:number)=>value===null||value===undefined||typeof value==='string'&&value.length<=n;
 export function validRosterRequest(value:unknown):value is RosterRequest{
  return isRecord(value)&&jobId(value.id)&&Number.isSafeInteger(value.created);
@@ -62,7 +65,9 @@ function validRosterAgent(value:unknown):value is RosterAgent{
  if(!isRecord(value)||!Number.isSafeInteger(value.ptyId)||(value.ptyId as number)<1)return false;
  const status=value.status;
  return optText(value.name,80)&&optText(value.agent,40)&&optText(value.task,200)&&(value.closing===undefined||typeof value.closing==='boolean')&&
-  (status===null||status===undefined||isRecord(status)&&optText(status.title,120)&&optText(status.description,200));
+  (status===null||status===undefined||isRecord(status)&&optText(status.title,120)&&optText(status.description,200))&&
+  optText(value.repo,300)&&optText(value.root,300)&&
+  (value.files===undefined||Array.isArray(value.files)&&value.files.length<=MAX_ROSTER_FILES&&value.files.every(f=>isRecord(f)&&typeof f.path==='string'&&f.path.length<=300&&Number.isSafeInteger(f.ts)));
 }
 export function validRoster(value:unknown):value is Roster{
  return isRecord(value)&&jobId(value.requestId)&&Array.isArray(value.agents)&&value.agents.length<=MAX_ROSTER&&value.agents.every(validRosterAgent)&&Number.isSafeInteger(value.created);

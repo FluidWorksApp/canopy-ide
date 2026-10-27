@@ -6,7 +6,7 @@ import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import {createRunner} from './runner.mjs';
 import {ServiceHarness} from './service-harness.mjs';
-import {SessionResume,resumePlan,keptFlags,foldEvents,parseProcesses,agentArgv,runnerCommand,PROCESS_SCRIPT,titleText,terminalDescription,agentActivity} from './session-resume.mjs';
+import {SessionResume,resumePlan,keptFlags,foldEvents,editedPaths,parseProcesses,agentArgv,runnerCommand,PROCESS_SCRIPT,titleText,terminalDescription,agentActivity} from './session-resume.mjs';
 
 const secret='s'.repeat(64);
 const CONVERSATION='0fc2faf8-f255-43bf-8927-fcb18a615f3d';
@@ -258,4 +258,28 @@ test('activity reads the last hook event; injected notices are not prompts',()=>
  foldEvents(agents,[event(7,{hook_event_name:'SessionEnd',reason:'exit'})]);
  assert.equal(agentActivity(agents[7]).title,'ended');
  assert.deepEqual(agentActivity(undefined),{title:'',description:''});
+});
+
+test('the roster learns which files each agent wrote, relative to its checkout, and its repository',async()=>{
+ assert.deepEqual(editedPaths({hook_event_name:'PostToolUse',tool_name:'Edit',cwd:'/workspace/api',tool_input:{file_path:'src/a.ts'}}),['/workspace/api/src/a.ts']);
+ assert.deepEqual(editedPaths({hook_event_name:'PostToolUse',tool_name:'apply_patch',cwd:'/workspace/api',tool_input:{command:['apply_patch','*** Begin Patch\n*** Update File: src/b.ts\n*** Add File: /workspace/api/c.ts\n*** End Patch']}}),['/workspace/api/src/b.ts','/workspace/api/c.ts']);
+ assert.deepEqual(editedPaths({hook_event_name:'PreToolUse',tool_name:'Edit',tool_input:{file_path:'/x'}}),[]);
+ assert.deepEqual(editedPaths({hook_event_name:'PostToolUse',tool_name:'Bash',tool_input:{command:'rm x'}}),[]);
+ const agents={};
+ const ev=(file,extra={})=>JSON.stringify({canopy_pty:3,hook_event_name:'PostToolUse',tool_name:'Write',session_id:'s1',cwd:'/workspace/api',tool_input:{file_path:file},...extra});
+ foldEvents(agents,[ev('/workspace/api/a.ts'),ev('/workspace/api/b.ts')],1000);
+ foldEvents(agents,[ev('/workspace/api/a.ts')],2000);
+ assert.deepEqual(agents[3].edited,[{path:'/workspace/api/a.ts',ts:2000},{path:'/workspace/api/b.ts',ts:1000}]);
+ const natives=[];
+ const resume=new SessionResume({directory:'/tmp/none',host:{},harness:null,config:{},now:()=>5000});
+ resume.native=async(_runtime,command,args)=>{natives.push(command);return command==='git_repos'?[{path:'/workspace/api'}]:command==='git_remote_url'?'git@github.com:acme/api.git':null;};
+ assert.deepEqual(await resume.workInfo({},agents[3]),{repo:'git@github.com:acme/api.git',root:'/workspace/api',files:[{path:'a.ts',ts:2000},{path:'b.ts',ts:1000}]});
+ await resume.workInfo({},agents[3]);
+ assert.deepEqual(natives,['git_repos','git_remote_url'],'the repository is looked up once, then cached');
+ // A service from before the work fields: described without them, once refused.
+ const sent=[];
+ resume.harness={admin:{async describeTerminal(_id,_rid,body){sent.push(body);if('files' in body){const e=new Error('invalid request body: unknown field `files`');e.status=400;throw e;}return {};}}};
+ await resume.describeOne('w','req-12345678',{agent:'x',files:[],repo:null,root:'/workspace/api'});
+ await resume.describeOne('w','req-12345678',{agent:'x',files:[],repo:null,root:'/workspace/api'});
+ assert.deepEqual(sent,[{agent:'x',files:[],repo:null,root:'/workspace/api'},{agent:'x'},{agent:'x'}]);
 });

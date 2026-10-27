@@ -26,6 +26,10 @@ export interface PeerAgent {
   recent: { path: string; ts: number }[];
   /** Repo-relative paths it holds a claim on (files or directories). */
   claims: string[];
+  /** Set for an agent in a cloud workspace (this account's or a teammate's),
+   *  reached through that workspace's Canopy service rather than a terminal
+   *  here. `root` is its checkout in that workspace. */
+  cloud?: { workspace: string; workspaceName: string; root: string };
 }
 
 /** Why a file counts, strongest first. */

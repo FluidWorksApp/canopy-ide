@@ -60,3 +60,15 @@ describe("workspace research and mesh commands", () => {
     expect(calls).toContainEqual(["action", "claim_release", { ownerKey: "k" }]);
   });
 });
+
+describe("agent awareness in a workspace", () => {
+  it("claims a hotspot and types a note through the service", async () => {
+    const { value, calls } = io({ hotspot_claim: { ok: true, message: "Claimed 1 path(s)." }, mesh_job_update: { id: "m4" } });
+    expect(await harnessCommand("context_hotspot_claim", { ptyId: 2, paths: ["/workspace/src/routes.ts"], owner: "Ana", note: "hot" }, value)).toBe("Claimed 1 path(s).");
+    expect(await harnessCommand("context_mesh_job_update", { ptyId: 3, instance: "remote-alice", jobId: "aw-1", text: "Heads-up", refKind: "awareness" }, value)).toBe("m4");
+    expect(calls).toEqual([
+      ["action", "hotspot_claim", { ptyId: 2, paths: ["/workspace/src/routes.ts"], owner: "Ana", note: "hot" }],
+      ["action", "mesh_job_update", { ptyId: 3, instance: "remote-alice", jobId: "aw-1", text: "Heads-up", refKind: "awareness" }],
+    ]);
+  });
+});
