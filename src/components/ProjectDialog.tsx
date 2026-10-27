@@ -15,11 +15,13 @@ import {DirectoryPicker} from "../remoteExecution/DirectoryPicker";
 
 interface ProjectDialogProps {
   existing?: Project;
+  /** Open on the clone step with this URL filled in. */
+  initialCloneUrl?: string;
   onSave: (project: Project) => void | Promise<void>;
   onCancel: () => void;
 }
 
-export function ProjectDialog({ existing, onSave, onCancel }: ProjectDialogProps) {
+export function ProjectDialog({ existing, initialCloneUrl, onSave, onCancel }: ProjectDialogProps) {
   const [saving,setSaving]=useState(false);
   const [name, setName] = useState(existing?.name ?? "");
   const [components, setComponents] = useState<Component[]>(
@@ -32,8 +34,8 @@ export function ProjectDialog({ existing, onSave, onCancel }: ProjectDialogProps
   const [vibeRunCommandId, setVibeRunCommandId] = useState(
     knownVibe?.runCommandId ?? "",
   );
-  const [cloneOpen, setCloneOpen] = useState(false);
-  const [cloneUrl, setCloneUrl] = useState("");
+  const [cloneOpen, setCloneOpen] = useState(!!initialCloneUrl);
+  const [cloneUrl, setCloneUrl] = useState(initialCloneUrl ?? "");
   const [cloning, setCloning] = useState(false);
   const [cloneProgress,setCloneProgress]=useState<ipc.GitCloneProgress|null>(null);
   const [cloneCancelling,setCloneCancelling]=useState(false);

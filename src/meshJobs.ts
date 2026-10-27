@@ -11,8 +11,10 @@
 //    machines it is a `job` payload on the account-bound, end-to-end encrypted
 //    team channel (teamMessaging), which already proves who sent it.
 //  - Authority. The rule is the user's: a job from the same account runs on
-//    its own; a job from anyone else waits for the receiving user to approve
-//    it. "Same account" is the envelope's server-authenticated sender, never a
+//    its own (in the checkout of the repository it carries, jobScope.ts — one
+//    with no repository, or one not checked out here, waits for the user to
+//    say where); a job from anyone else waits for the receiving user to
+//    approve it. "Same account" is the envelope's server-authenticated sender, never a
 //    field the sender wrote — the brief is about to be handed to an agent that
 //    can edit files, so this check is the whole security story.
 //
@@ -41,12 +43,15 @@
 // offline that long misses a status update. Both are stated in what submit returns.
 
 import type { AttentionInput } from "./attention";
+import { originMatches, place, repoFullName, scopeBrief, type Checkout, type Placement } from "./jobScope";
 import type { Device } from "./teamMessaging/client";
 import { deviceOnline } from "./teamMessaging/client";
+import { repoRefFromRemote } from "./gitLinks";
 import {
   clipDetail,
   MAX_JOB_BRIEF,
   type JobRequest,
+  type JobScope,
   type JobState,
   type JobStatus,
   type MeshMessage,
@@ -81,8 +86,13 @@ export interface StartedJob {
 export interface MeshJobDeps {
   /** The user's workspaces in this window, by name. */
   workspaces: () => { name: string }[];
-  /** Launch an agent on a brief in a workspace (App's startSession). */
-  start: (req: { project: string; prompt: string; label: string }) => Promise<StartedJob>;
+  /** Launch an agent on a brief (App's startSession): in a project by name,
+   *  or in a component directory. */
+  start: (req: { project?: string; dir?: string; prompt: string; label: string }) => Promise<StartedJob>;
+  /** Every component of the user's projects with its checkout's origin, for
+   *  matching an incoming job's repository. Absent: no job ever matches, so
+   *  every one waits for the user to pick. */
+  checkouts?: () => Promise<Checkout[]>;
   sessions: () => JobSession[];
   teamName: (team: string) => string | undefined;
   /** Type a job step into the submitting terminal (ipc.meshJobUpdate). */
@@ -183,11 +193,18 @@ export interface IncomingJob {
   account: string;
   sender: TeamJobSender;
   /** Whether it came from this same account's other machine. Such a job only
-   *  lands here when no workspace could be picked for it automatically. */
+   *  lands here when it carries no repository, or one not checked out here. */
   sameAccount: boolean;
   received: number;
+  /** Where it runs, by the repository it carries (jobScope.ts). */
+  placement: Placement;
   attentionId?: string;
 }
+
+/** Where a job is run: a component directory a match found, or a project the
+ *  user picked. `label` is what the user and the submitter are told. */
+export type JobWhere = { dir: string; label: string } | { project: string; label?: string };
+const whereLabel = (where: JobWhere) => where.label ?? ("project" in where ? where.project : where.dir);
 
 /** Where a submitted job's updates go. */
 interface Origin {
@@ -231,8 +248,10 @@ export function needsApproval(sender: TeamJobSender, account: string): boolean {
   return sender.user !== account;
 }
 
-/** The workspace a job lands in when nobody picks: the one it names, else the
- *  only one there is. Null means a person has to choose. */
+/** The workspace in this window an agent named for a job it starts here: the
+ *  one it names, else the only one there is. Null means it named none of them.
+ *  Only for this window's own submits — a job from another machine is placed
+ *  by its repository (jobScope.ts), never by a name. */
 export function pickWorkspace(
   requested: string | null,
   workspaces: { name: string }[],
@@ -245,9 +264,11 @@ export function pickWorkspace(
 /** The brief an incoming job's agent is started with: who asked, then the job
  *  itself. The provenance line is ours, so the agent knows where the work came
  *  from and that canopy_job_done is how its answer travels back. */
-export function incomingBrief(job: JobRequest, from: string): string {
+export function incomingBrief(job: JobRequest, from: string, placement: Placement = { kind: "none" }): string {
+  const scope = scopeBrief(job.scope, placement);
   return (
     `Mesh job ${job.id} from ${from}: ${job.title}. ${job.brief}\n\n` +
+    (scope ? `${scope}\n\n` : "") +
     "When you finish, or if you are blocked, call canopy_job_done — its summary is sent back to whoever submitted this job."
   );
 }
@@ -448,10 +469,18 @@ export function createMeshJobs(deps: MeshJobDeps) {
     return (deps.cloudWorkspaces?.() ?? []).find((w) => w.id.toLowerCase() === key || w.name.toLowerCase() === key);
   }
 
-  async function submitRemote(req: { id: string; title: string; brief: string; origin: Origin; cloud: { id: string; name: string }; agent?: string | null }) {
-    const { id, title, brief, origin, cloud } = req;
+  async function submitRemote(req: { id: string; title: string; brief: string; origin: Origin; cloud: { id: string; name: string }; agent?: string | null; scope?: JobScope }) {
+    const { id, title, origin, cloud, scope } = req;
     const agent = req.agent?.trim();
-    const job: JobRequest = { id, title, brief, workspace: cloud.id, created: deps.now(), ...(agent ? { target: { name: agent } } : {}) };
+    // A cloud workspace hands the job to a named agent already running there,
+    // so there is no project to pick: the repository travels in the brief
+    // that agent reads (an older service ignores the scope field), and the
+    // submitter is warned when that agent is known to be on another one.
+    const where = scopeBrief(scope, { kind: "none" });
+    const scoped = where ? `${req.brief}\n\n${where}` : req.brief;
+    const brief = new TextEncoder().encode(scoped).length <= MAX_JOB_BRIEF ? scoped : req.brief;
+    const job: JobRequest = { id, title, brief, workspace: cloud.id, created: deps.now(), ...(agent ? { target: { name: agent } } : {}), ...(scope ? { scope } : {}) };
+    const elsewhere = scope && agent ? cloudAgentElsewhere(cloud.id, agent, scope) : null;
     const errors: string[] = [];
     for (const s of deps.sessions()) {
       if (!s.submitWorkspaceJob) continue;
@@ -465,13 +494,23 @@ export function createMeshJobs(deps: MeshJobDeps) {
           status: "sent",
           workspace: cloud.name,
           device: device.id,
-          note: `Sent to the Canopy service of cloud workspace ${cloud.name}. It waits on the encrypted relay for up to 7 days while that workspace is stopped. The service runs it for the workspace owner's account, or for a granted teammate only when the owner allows teammates' agents; otherwise it is refused and you hear why. Updates arrive here as mesh notices tagged ref {kind: "job", id: "${id}"}.`,
+          note: `Sent to the Canopy service of cloud workspace ${cloud.name}. It waits on the encrypted relay for up to 7 days while that workspace is stopped. The service runs it for the workspace owner's account, or for a granted teammate only when the owner allows teammates' agents; otherwise it is refused and you hear why. Updates arrive here as mesh notices tagged ref {kind: "job", id: "${id}"}.${elsewhere ? ` Note: ${agent} there is working in ${elsewhere}, not ${repoFullName(scope!.repos[0])}.` : ""}`,
         };
       } catch (err) {
         errors.push(err instanceof Error ? err.message : String(err));
       }
     }
     throw new Error(errors[0] ?? `Sign in to a Canopy team to reach cloud workspace ${cloud.name}.`);
+  }
+
+  /** The repository a cloud agent was last seen working in, when that is
+   *  known and is not the job's. Only from a roster already fetched. */
+  function cloudAgentElsewhere(workspace: string, agent: string, scope: JobScope): string | null {
+    const known = rosters.get(workspace)?.agents.find((a) => (a.name ?? "").toLowerCase() === agent.toLowerCase());
+    if (!known?.repo) return null;
+    const ref = repoRefFromRemote(known.repo);
+    if (!ref) return null;
+    return originMatches(known.repo, scope.repos[0]) ? null : ref.slug;
   }
 
   // A send whose answer the bridge stopped waiting for may still be in flight
@@ -559,6 +598,8 @@ export function createMeshJobs(deps: MeshJobDeps) {
     instance?: string | null;
     /** The agent in a cloud workspace that takes the job; the service picks when absent. */
     agent?: string | null;
+    /** The repositories the job is about (jobScope.buildScope). */
+    scope?: JobScope | null;
   }, id: string) {
     const brief = (req.brief ?? "").trim();
     if (!brief) throw new Error("A job needs a brief.");
@@ -568,13 +609,14 @@ export function createMeshJobs(deps: MeshJobDeps) {
     const title = jobTitle(req.title, brief);
     const workspace = (req.workspace ?? "").trim() || null;
     const member = (req.member ?? "").trim();
+    const scope = req.scope ?? undefined;
 
     // This window: the same account by definition, so it simply starts.
     if (!member) {
       if (!workspace) throw new Error("Name the workspace to run the job in (see canopy_mesh_targets).");
       const named = pickWorkspace(workspace, deps.workspaces());
       const cloud = named ? undefined : cloudWorkspace(workspace);
-      if (cloud) return submitRemote({ id, title, brief, origin, cloud, agent: req.agent });
+      if (cloud) return submitRemote({ id, title, brief, origin, cloud, agent: req.agent, scope });
       if (!named) {
         throw new Error(
           `No workspace called "${workspace}" — the workspaces are: ${deps.workspaces().map((w) => w.name).join(", ")}`,
@@ -597,7 +639,8 @@ export function createMeshJobs(deps: MeshJobDeps) {
 
     const sessions = deps.sessions();
     const who = resolveMember(member, sessions);
-    const job: JobRequest = { id, title, brief, workspace, created: deps.now() };
+    const job: JobRequest = { id, title, brief, workspace, created: deps.now(), ...(scope ? { scope } : {}) };
+    const repo = scope ? repoFullName(scope.repos[0]) : null;
     const errors: string[] = [];
     // Any team the two accounts share carries it; the first that reaches an
     // online device wins, so the job is never delivered twice.
@@ -614,8 +657,8 @@ export function createMeshJobs(deps: MeshJobDeps) {
           to: target,
           device: device.id,
           note: who.self
-            ? `Sent to your other machine; it starts there on its own${workspace ? ` in ${workspace}` : ""}. Updates arrive here as mesh notices tagged ref {kind: "job", id: "${id}"}.`
-            : `Sent to ${who.name}. It waits for them to approve it in Canopy; their decision and the job's outcome arrive here as mesh notices tagged ref {kind: "job", id: "${id}"}. An approval that never comes is a "no" — do not resubmit unprompted.`,
+            ? `Sent to your other machine. ${repo ? `It starts there on its own in the project whose repository is ${repo}; if none is open there, it waits for the user to choose one.` : "No repository is attached (this terminal is not in a checkout with an origin, and no repo was named), so it waits there for the user to choose a project."} Updates arrive here as mesh notices tagged ref {kind: "job", id: "${id}"}.`
+            : `Sent to ${who.name}. It waits for them to approve it in Canopy${repo ? `, in their checkout of ${repo}` : ""}; their decision and the job's outcome arrive here as mesh notices tagged ref {kind: "job", id: "${id}"}. An approval that never comes is a "no" — do not resubmit unprompted.`,
         };
       } catch (err) {
         errors.push(err instanceof Error ? err.message : String(err));
@@ -626,16 +669,21 @@ export function createMeshJobs(deps: MeshJobDeps) {
 
   // ---- receiving -----------------------------------------------------------
 
-  async function run(incoming: IncomingJob, workspace: string) {
+  async function run(incoming: IncomingJob, where: JobWhere) {
     const { job, team, account, sender } = incoming;
     const from = incoming.sameAccount
       ? "this account's other machine"
       : `${sender.name ?? "a teammate"} (your Canopy teammate)`;
+    // A component a repository match found starts by its directory; a project
+    // the user picked by its name. The placement only shapes the brief when
+    // the job really runs in a checkout of its repository.
+    const matched = "dir" in where ? incoming.placement : ({ kind: "none" } as const);
+    const prompt = incomingBrief(job, from, matched);
     let started: StartedJob;
     try {
-      started = await deps.start({ project: workspace, prompt: incomingBrief(job, from), label: job.title });
+      started = await deps.start({ ...("dir" in where ? { dir: where.dir } : { project: where.project }), prompt, label: job.title });
     } catch (err) {
-      started = { started: false, project: workspace, note: String(err instanceof Error ? err.message : err) };
+      started = { started: false, project: whereLabel(where), note: String(err instanceof Error ? err.message : err) };
     }
     if (!started.started) {
       await sendStatus(team, account, sender.device, job.id, "failed", started.note);
@@ -711,10 +759,29 @@ export function createMeshJobs(deps: MeshJobDeps) {
       sender: event.sender,
       sameAccount,
       received: deps.now(),
+      placement: { kind: "none" },
     };
-    const workspace = sameAccount ? pickWorkspace(job.workspace, deps.workspaces()) : null;
-    if (workspace) {
-      void run(incoming, workspace).then((started) =>
+    void locate(job.scope).then((placement) => admit({ ...incoming, placement }));
+  }
+
+  /** Match a job's repository against this machine's checkouts. A failed
+   *  lookup is "not here": the user is asked rather than a guess made. */
+  async function locate(scope: JobScope | undefined): Promise<Placement> {
+    if (!scope || !deps.checkouts) return scope ? { kind: "missing", repo: scope.repos[0] } : { kind: "none" };
+    const checkouts = await deps.checkouts().catch(() => [] as Checkout[]);
+    return place(scope, checkouts);
+  }
+
+  /** Run a located job, or hold it for the user. Only a job from this same
+   *  account whose repository is checked out here runs on its own; one with
+   *  no repository, or one this machine does not have, waits for the user to
+   *  say where — it never silently runs in some other project. */
+  function admit(incoming: IncomingJob) {
+    const { job, sameAccount, placement } = incoming;
+    const event = { team: incoming.team, user: incoming.account, sender: incoming.sender };
+    const best = placement.kind === "matched" ? placement.choices[0] : null;
+    if (sameAccount && best) {
+      void run(incoming, { dir: best.dir, label: best.project }).then((started) =>
         deps.post({
           kind: "fyi",
           tone: started.started ? "info" : "warn",
@@ -737,7 +804,7 @@ export function createMeshJobs(deps: MeshJobDeps) {
       tone: "info",
       source: "team",
       title: sameAccount
-        ? `Choose a workspace for a job from your other machine: ${job.title}`
+        ? `Choose a project for a job from your other machine: ${job.title}`
         : `${sender} wants your agent to: ${job.title}`,
       body: "Review it in the job inbox before anything runs.",
       where: { kind: "panel", panel: "team" },
@@ -755,12 +822,29 @@ export function createMeshJobs(deps: MeshJobDeps) {
     return item;
   }
 
-  async function approve(jobId: string, workspace: string) {
+  async function approve(jobId: string, where: JobWhere) {
     const item = take(jobId);
     if (!item) throw new Error("That job is no longer waiting.");
     if (item.attentionId) deps.resolve(item.attentionId, "answered");
-    if (!item.sameAccount) await sendStatus(item.team, item.account, item.sender.device, jobId, "accepted", `Approved to run in ${workspace}.`);
-    return run(item, workspace);
+    if (!item.sameAccount) await sendStatus(item.team, item.account, item.sender.device, jobId, "accepted", `Approved to run in ${whereLabel(where)}.`);
+    return run(item, where);
+  }
+
+  /** Match the waiting jobs that found no checkout again — after the user
+   *  opened or cloned a project. A job that now matches shows where it will
+   *  run; it still waits for the user's approval, since they are looking at it. */
+  async function relocate() {
+    const waiting = inbox.filter((i) => i.placement.kind === "missing");
+    if (!waiting.length) return;
+    const found = await Promise.all(waiting.map((i) => locate(i.job.scope)));
+    let moved = false;
+    inbox = inbox.map((i) => {
+      const at = waiting.indexOf(i);
+      if (at < 0 || found[at].kind !== "matched") return i;
+      moved = true;
+      return { ...i, placement: found[at] };
+    });
+    if (moved) changed();
   }
 
   async function decline(jobId: string, reason = "") {
@@ -791,6 +875,7 @@ export function createMeshJobs(deps: MeshJobDeps) {
     receive,
     approve,
     decline,
+    relocate,
     runEnded,
     inbox: () => inbox,
     subscribe: (fn: () => void) => {

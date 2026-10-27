@@ -853,6 +853,14 @@ export interface AgentUiOp {
   requestId?: string | null;
   /** mesh_message_cloud: the sending terminal's name, from the bridge. */
   fromName?: string | null;
+  /** mesh_submit: repositories the agent named (`owner/name` or a clone URL),
+   *  where it should run first. */
+  repos?: string[] | null;
+  /** mesh_submit: the submitting terminal's own checkout, read by the bridge
+   *  from the credential's directory: origin's URL as git has it, the folder
+   *  inside the repo, and the branch. Reduced to host + `owner/name` before
+   *  it leaves this machine. */
+  senderRepo?: { origin: string; path: string; branch: string } | null;
   path?: string | null;
   line?: number | null;
   column?: number | null;

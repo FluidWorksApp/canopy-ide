@@ -98,7 +98,9 @@ IDE the user is watching, and their results stay inspectable:\n\
   possibly on Slack, only hears what you reply there)\n\
 - Work that belongs in another workspace, on your other machine, or with a \
   teammate -> canopy_mesh_targets, then canopy_mesh_submit with a complete \
-  brief. A teammate approves before it runs; its steps come back to you as \
+  brief. It carries your checkout's repository so it runs in the receiver's \
+  copy of it (pass repo/repos when the work is in another repository). A \
+  teammate approves before it runs; its steps come back to you as \
   mesh notices tagged ref kind \"job\"\n\
 - Telling a colleague something, or passing them work they can hand to their \
   own agent -> canopy_team_people, then canopy_team_send to a teammate or the \

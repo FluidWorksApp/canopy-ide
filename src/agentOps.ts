@@ -30,6 +30,7 @@ import { TRACKERS } from "./trackers";
 import { readBoundedFile } from "./boundedFileRead";
 import { sizeLimitFor } from "./fileOpen";
 import type { MeshJobs } from "./meshJobs";
+import { buildScope } from "./jobScope";
 import type { AgentChat } from "./teamMessaging/agentChat";
 import { rendererIoBudget } from "./ioBudget";
 import {
@@ -718,6 +719,9 @@ export async function runUiOp(op: ipc.AgentUiOp, ctx: UiOpContext): Promise<unkn
         instance: op.instance,
         agent: op.agent,
         requestId: op.requestId,
+        // The project the job belongs to, by repository: the ones the agent
+        // named, else its own checkout's (read by the bridge, not the agent).
+        scope: buildScope(op.senderRepo, op.repos ?? []),
       });
     case "mesh_message_cloud":
       return needMeshJobs(ctx).message({
