@@ -32,7 +32,7 @@ diff --git a/src/sum.ts b/src/sum.ts
 `;
 
 function fakeRun(opts: { testOut?: ReceiptCheckRun; changed?: string; patch?: string } = {}) {
-  return vi.fn(async (_cwd: string, argv: string[]): Promise<ReceiptCheckRun> => {
+  return vi.fn(async (_cwd: string, argv: string[], _opts?: unknown): Promise<ReceiptCheckRun> => {
     const cmd = argv.join(" ");
     if (cmd === "git rev-parse --show-toplevel") return ok("/repo\n");
     if (cmd === "git branch --show-current") return ok("feat/sum\n");

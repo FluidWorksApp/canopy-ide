@@ -46,7 +46,9 @@ export type HandoffCard={type:'handoff';v:1;title:string;agent:string;session:st
  *  not opened. */
 export type PlanRisk='low'|'medium'|'high';
 export type PlanCardSize='tiny'|'small'|'large';
-export type PlanCard={type:'plan';v:1;plan:string;goal:string;decisions?:{q:string;a:string}[];acceptance:string[];wontDo?:string[];risk:PlanRisk;size:PlanCardSize};
+/** `approvers`: the teammates the author named; only their approval counts.
+ *  A card without any (an older Canopy's) cannot be approved from chat. */
+export type PlanCard={type:'plan';v:1;plan:string;goal:string;decisions?:{q:string;a:string}[];acceptance:string[];wontDo?:string[];risk:PlanRisk;size:PlanCardSize;approvers?:string[]};
 export type PlanOutcome='approved'|'changes-requested';
 /** A teammate's answer to a plan card, posted in the card's thread. */
 export type PlanOutcomeCard={type:'plan-outcome';v:1;request:string;plan:string;outcome:PlanOutcome};
@@ -203,14 +205,16 @@ export function parseCard(value:unknown):Card|undefined{
     return fits({type:'handoff',...base,title:c.title,agent:c.agent,session:c.session,packet:c.packet,...(c.dir!==undefined?{dir:c.dir as string}:{}),...(c.repo?{repo:repoCopy(c.repo as RepoRef)}:{}),...(c.truncated!==undefined?{truncated:c.truncated as boolean}:{})});
    }
    case 'plan':{
-    if(!exact(c,['type','v','plan','goal','decisions','acceptance','wontDo','risk','size'])||typeof c.plan!=='string'||!PLAN_ID.test(c.plan)||!safeLine(c.goal,LIMITS.planGoal))return undefined;
+    if(!exact(c,['type','v','plan','goal','decisions','acceptance','wontDo','risk','size','approvers'])||typeof c.plan!=='string'||!PLAN_ID.test(c.plan)||!safeLine(c.goal,LIMITS.planGoal))return undefined;
     if(c.risk!=='low'&&c.risk!=='medium'&&c.risk!=='high')return undefined;
     if(c.size!=='tiny'&&c.size!=='small'&&c.size!=='large')return undefined;
     if(!planItems(c.acceptance,LIMITS.planChecks)||(c.wontDo!==undefined&&!planItems(c.wontDo,LIMITS.planWontDo)))return undefined;
     const d=c.decisions;
     if(d!==undefined&&!(Array.isArray(d)&&d.length<=LIMITS.planDecisions&&d.every(x=>isObject(x)&&exact(x,['q','a'])&&planItem(x.q)&&planItem(x.a))))return undefined;
     const decisions=(d as {q:string;a:string}[]|undefined)?.map(x=>({q:x.q,a:x.a}));
-    return fits({type:'plan',...base,plan:c.plan,goal:c.goal,...(decisions?{decisions}:{}),acceptance:[...c.acceptance as string[]],...(c.wontDo!==undefined?{wontDo:[...c.wontDo as string[]]}:{}),risk:c.risk,size:c.size});
+    const a=c.approvers;
+    if(a!==undefined&&!(Array.isArray(a)&&a.length>0&&a.length<=LIMITS.reviewers&&a.every(validIdentity)&&new Set(a).size===a.length))return undefined;
+    return fits({type:'plan',...base,plan:c.plan,goal:c.goal,...(decisions?{decisions}:{}),acceptance:[...c.acceptance as string[]],...(c.wontDo!==undefined?{wontDo:[...c.wontDo as string[]]}:{}),risk:c.risk,size:c.size,...(a!==undefined?{approvers:[...a as string[]]}:{})});
    }
    case 'plan-outcome':{
     if(!exact(c,['type','v','request','plan','outcome'])||typeof c.request!=='string'||!UUID.test(c.request)||typeof c.plan!=='string'||!PLAN_ID.test(c.plan)||!PLAN_OUTCOMES.includes(c.outcome as PlanOutcome))return undefined;
@@ -383,15 +387,17 @@ export function foldOutcomes(request:ChatMessage,messages:readonly ChatMessage[]
 
 // ---------- plan outcomes ----------
 export type FoldedPlanOutcome={by:string;outcome:PlanOutcome;created:number;id:string};
-/** The latest answer per teammate to a plan card, last-writer-wins by
+/** The latest answer per named approver to a plan card, last-writer-wins by
  *  (created, id). Only replies in the card's own thread count, only for the
- *  plan it named, and never the author's own (a plan is approved by someone
- *  else, or locally by its author before launch). */
+ *  plan it named, only from the approvers the card names, and never the
+ *  author's own (a plan is approved by someone else, or locally by its author
+ *  before launch). Anyone else in the thread is commenting, not deciding. */
 export function foldPlanOutcomes(request:ChatMessage,messages:readonly ChatMessage[]):FoldedPlanOutcome[]{
  const req=cardOf(request);if(req?.type!=='plan')return [];
+ const approvers=req.approvers??[];
  const latest=new Map<string,FoldedPlanOutcome>();
  for(const m of messages){
-  if(m.id===request.id||m.sender===request.sender||!sameConversation(m,request))continue;
+  if(m.id===request.id||m.sender===request.sender||!approvers.includes(m.sender)||!sameConversation(m,request))continue;
   const thread=m.thread as {root?:unknown}|undefined;
   if(!thread||thread.root!==request.id)continue;
   const c=cardOf(m);

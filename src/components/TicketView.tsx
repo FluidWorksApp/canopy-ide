@@ -4,6 +4,7 @@
 // the two things you do with a ticket you're reading are understand it and
 // hand it to an agent.
 import { useEffect, useState } from "react";
+import { completeTicketPlans } from "../plans/planStore";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import * as ipc from "../ipc";
 import { heldBadge } from "../branchSwitch";
@@ -119,6 +120,8 @@ export function TicketView({
     try {
       await ipc.ghIssueSetState(repo, number, open);
       setDetail((prev) => prev && { ...prev, state: open ? "open" : "closed" });
+      // Closing the ticket is the person saying the work is done: so is its plan.
+      if (!open) void completeTicketPlans(ticket.id).catch(() => {});
       emit(open ? "issue.reopened" : "issue.closed", {
         previousState: detail?.state ?? ticket.state,
         state: open ? "open" : "closed",
@@ -143,6 +146,7 @@ export function TicketView({
       const nextName = next?.name ?? detail.state;
       const wasClosed = /^(?:done|closed|completed|cancell?ed)$/i.test(detail.state);
       const isClosed = /^(?:done|closed|completed|cancell?ed)$/i.test(nextName);
+      if (isClosed && !wasClosed) void completeTicketPlans(ticket.id).catch(() => {});
       emit(isClosed ? "issue.closed" : wasClosed ? "issue.reopened" : "issue.updated", {
         previousState: detail.state,
         state: nextName,

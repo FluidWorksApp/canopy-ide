@@ -8,7 +8,7 @@ import type * as ipc from "./ipc";
 import { cleanupLine, detachedPushLine } from "./prs";
 import type { ReviewPolicy } from "./prPolicy";
 import { format } from "./shortcuts";
-import { latestReceiptFor } from "./receipts/store";
+import { hydrateLatestReceipts, latestReceiptFor } from "./receipts/store";
 import { receiptOneLine } from "./receipts/markdown";
 
 /** A task that edits files can't run in the shared checkout — other agents live
@@ -90,6 +90,9 @@ export interface MicroTaskDef<P> {
   steps?: readonly TaskStep[];
   /** Where those milestones are appended. Required alongside `steps`. */
   progressPath?(payload: P): string;
+  /** Loads what `buildContext` (synchronous) reads, before it runs. Raise PR
+   *  uses it to pull the branch's stored receipt from the ledger. */
+  prepare?(payload: P): Promise<void>;
 }
 
 export type TaskEffect = "reads" | "posts" | "pushes";
@@ -317,6 +320,9 @@ export const raisePrTask: MicroTaskDef<RaisePrPayload> = {
     "on a branch tab, or beside a research history event that records a local implementation",
   cwd: (p) => p.worktree ?? p.repo,
   env: (p) => (p.research ? [["CANOPY_RESEARCH", p.research.entryId]] : []),
+  // The receipt comes from the ledger, so one filed before a restart (or by
+  // another window) still travels with the PR.
+  prepare: (p) => hydrateLatestReceipts(p.worktree ?? p.repo),
   buildContext(p, userQuery) {
     const query = oneLine(userQuery);
     if (p.research) {

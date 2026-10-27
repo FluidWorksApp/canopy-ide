@@ -108,6 +108,8 @@ type Repair = NonNullable<VibeBuilderSessionDeps["repair"]>;
 function harness(repair: Repair) {
   const deps: VibeBuilderSessionDeps = {
     ...DEFAULT_VIBE_BUILDER_DEPS,
+    // Selftests send requests as typed: no brain call to plan them.
+    plan: undefined,
     reserve: vi.fn(async () => reservation()),
     startAttempt: vi.fn(async () => reservation().attempt),
     writeArtifact: vi.fn(async ({ kind }) => ({
