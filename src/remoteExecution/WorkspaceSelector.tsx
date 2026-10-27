@@ -157,9 +157,19 @@ export function WorkspaceSelector({ onboarding = false,onHibernateWorkspace }: {
     const detail=(event as CustomEvent<ShowWorkspaceDetail>).detail;if(!detail?.workspaceId)return;
     const id=detail.workspaceId,known=peekWorkspaceList()?.workspaces.some(w=>w.id===id);
     setPanelMounted(true);
-    if(detail.connect&&known&&activeWorkspace()?.connection.workspaceId!==id){setOpenRequest({id,nonce:Date.now()});return;}
+    const showDetails=()=>{setSelectedId(`managed:${id}`);setSection('overview');setOpen(true);};
     if(detail.connect&&activeWorkspace()?.connection.workspaceId===id)return;
-    setSelectedId(`managed:${id}`);setSection('overview');setOpen(true);
+    // A link can arrive before this window has listed workspaces (a cold
+    // start from the browser): ask anyway, and ManagedWorkspaces connects as
+    // soon as its list has it. Only if the account really doesn't list it
+    // does the panel open, to say so.
+    if(detail.connect){
+     setOpenRequest({id,nonce:Date.now()});
+     const missing=()=>{setError('Your account doesn’t list this workspace. Ask its owner to share it with you, then open the link again.');setOpen(true);};
+     if(!known)void refreshWorkspaceList().then(result=>{if(!result.workspaces.some(w=>w.id===id))missing();},missing);
+     return;
+    }
+    showDetails();
    };
    window.addEventListener(SHOW_WORKSPACE_EVENT,show);return()=>window.removeEventListener(SHOW_WORKSPACE_EVENT,show);
   },[]);

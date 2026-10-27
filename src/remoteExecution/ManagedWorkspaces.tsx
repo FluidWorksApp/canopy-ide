@@ -17,7 +17,7 @@ import {accountErrorMessage,othersConnected,othersConnectedMessage} from './acco
 import {creditExhaustedFromError,type CreditExhausted} from '../credits';
 import {CreditExhaustedNotice} from '../components/CreditNotice';
 import {postAttention} from '../attention';
-export type ManagedWorkspace={id:string;name:string;provider?:string;state:string;storage_gib?:number|null;storage_mode?:'disk'|'snapshot'|null;canGrowStorage?:boolean;canChangePackage?:boolean;plan_id?:string|null;storage_used_bytes?:number|string|null;canDelete?:boolean;canRemoveConnection?:boolean;canStop?:boolean;access?:{owner:boolean;canManageAccess:boolean;canStop:boolean;canConnect:boolean;canResume?:boolean;connectionUnavailable?:string};memory_max_mib:number;cpu_max:number;operation?:{phase:string;status:string;action?:string;target_storage_gib?:number|null;last_error?:string|null;bootstrap_mode?:'cold'|'prebuilt'|'user-snapshot'|null;save_progress?:string|null;bootstrap_report?:{stage:string;status:string;sequence?:number;startedAt?:number;receivedAt?:string;reason?:'disk-full';freeGB?:number;neededGB?:number;copiedBytes?:number;totalBytes?:number}|null;retry_replaces_host?:boolean}};
+export type ManagedWorkspace={id:string;name:string;provider?:string;state:string;storage_gib?:number|null;storage_mode?:'disk'|'snapshot'|null;canGrowStorage?:boolean;canChangePackage?:boolean;plan_id?:string|null;storage_used_bytes?:number|string|null;canDelete?:boolean;canRemoveConnection?:boolean;canStop?:boolean;access?:{owner:boolean;canManageAccess:boolean;canStop:boolean;canConnect:boolean;canResume?:boolean;connectionUnavailable?:string;connectionPending?:boolean};memory_max_mib:number;cpu_max:number;operation?:{phase:string;status:string;action?:string;target_storage_gib?:number|null;last_error?:string|null;bootstrap_mode?:'cold'|'prebuilt'|'user-snapshot'|null;save_progress?:string|null;bootstrap_report?:{stage:string;status:string;sequence?:number;startedAt?:number;receivedAt?:string;reason?:'disk-full';freeGB?:number;neededGB?:number;copiedBytes?:number;totalBytes?:number}|null;retry_replaces_host?:boolean}};
 const startupSteps=['Starting machine','Connecting saved files','Starting services','Checking connection','Ready'];
 const reportStages:Record<string,string>={packages:'Installing host tools',storage:'Connecting saved files','migrating-files':'Moving your files',artifact:'Downloading the workspace runtime',image:'Preparing the workspace image','host-services':'Starting workspace services'};
 export function workspaceStartupProblem(w:ManagedWorkspace){
@@ -29,6 +29,15 @@ export function workspaceStartupProblem(w:ManagedWorkspace){
 }
 // Once the host is starting its services, readiness is seconds away: the server
 // checks it as soon as the host reports in, so look every second, not every 5.
+/** A teammate's workspace that is running but whose host has not yet proven
+ *  member isolation for this start (the server re-checks after every start or
+ *  resize). Worth waiting for, unlike sharing that is off or failed. Older
+ *  servers only send the sentence, so fall back to it. */
+export function waitingForSharing(w:ManagedWorkspace){
+ const access=w.access;if(!access||access.owner!==false||access.canConnect!==false)return false;
+ return access.connectionPending??/getting ready/i.test(access.connectionUnavailable??'');
+}
+const SHARING_WAIT='The workspace is running. Waiting for it to finish getting ready for teammates…';
 function startupPollDelay(w:ManagedWorkspace){return w.operation?.bootstrap_report?.stage==='host-services'||w.operation?.phase==='connecting-workspace'?1000:5000;}
 // A retained disk moving to snapshot storage: "Moving your files… 12.3 / 40.0 GB".
 function migrationProgress(report:{copiedBytes?:number;totalBytes?:number}){const gb=(n:number)=>(n/1e9).toFixed(1);return Number.isSafeInteger(report.copiedBytes)&&Number.isSafeInteger(report.totalBytes)&&(report.totalBytes as number)>0?`Moving your files… ${gb(report.copiedBytes as number)} / ${gb(report.totalBytes as number)} GB`:'Moving your files…';}
@@ -98,7 +107,7 @@ export function ManagedWorkspaces({workspaceId,onList,showAccount=true,showList=
  useEffect(()=>{if(!openRequest||handledOpen.current===openRequest.nonce)return;const w=workspaces.find(item=>item.id===openRequest.id)??peekWorkspaceList()?.workspaces.find(item=>item.id===openRequest.id);if(!w)return;handledOpen.current=openRequest.nonce;void connect(w,true);},[openRequest,workspaces]);
  async function connect(w:ManagedWorkspace,fromSwitcher=false){
   const fail=()=>{if(fromSwitcher)failedCallback.current?.(w.id);};
-  if(w.access?.canConnect===false&&w.access.canResume!==true){setMessage(w.access.connectionUnavailable??'You cannot open or resume this workspace.');fail();return;}
+  if(w.access?.canConnect===false&&w.access.canResume!==true&&!waitingForSharing(w)){setMessage(w.access.connectionUnavailable??'You cannot open or resume this workspace.');fail();return;}
   if(!canSwitchExecutionMode()){setMessage('Save or close unsaved files before changing workspace.');fail();return;}
   const lifecycle=workspaceLifecycle(w);
   if(lifecycle==='stopping'||lifecycle==='deleting'){setMessage(lifecycle==='stopping'?'This workspace is still stopping. Resume it once it has stopped.':'This workspace is being deleted.');fail();return;}
@@ -125,9 +134,23 @@ export function ManagedWorkspaces({workspaceId,onList,showAccount=true,showList=
     const problem=workspaceStartupProblem(latest);if(problem)throw Error(problem);
     if(advanceError&&/sign.?in|401|403/i.test(String(advanceError)))throw advanceError;
     setStartup({workspace:latest,name:w.name,step:stepFor(latest)});
+    if(latest.state==='ready'&&latest.access?.owner===false&&latest.access.canConnect===false){
+     // A member: the owner's machine is up, but sharing is only ready once the
+     // host proves member isolation again. Wait for that; stop on off/failed.
+     if(!waitingForSharing(latest))throw Error(latest.access.connectionUnavailable??'You cannot open this workspace.');
+     setMessage(SHARING_WAIT);await new Promise(resolve=>setTimeout(resolve,5000));continue;
+    }
     if(latest.state==='ready'){
      setMessage('Connecting securely to your workspace…');
-     const clientId=crypto.randomUUID();const {connection:issued,expiresAt}=await request<{connection:WorkspaceConnection;expiresAt?:string}>('/api/operations',{workspaceId:w.id,action:'connect',clientId});const connection={...issued,clientId};
+     const clientId=crypto.randomUUID();let issuedConnection:{connection:WorkspaceConnection;expiresAt?:string};
+     try{issuedConnection=await request<{connection:WorkspaceConnection;expiresAt?:string}>('/api/operations',{workspaceId:w.id,action:'connect',clientId});}
+     catch(error){
+      // The list said ready but the host's proof lapsed in between (a restart
+      // racing this click): keep waiting rather than failing the open.
+      if(latest.access?.owner===false&&/getting ready/i.test(String(error))){setMessage(SHARING_WAIT);await new Promise(resolve=>setTimeout(resolve,5000));continue;}
+      throw error;
+     }
+     const {connection:issued,expiresAt}=issuedConnection;const connection={...issued,clientId};
      if(connection.workspaceId!==w.id||connection.endpoint!==`https://${w.id}.workspaces.canopyide.dev`)throw Error('Invalid managed connection');
      await new RemoteExecutionClient(connection.endpoint,connection.token).workspace(w.id,'/open',{resume:connection.scope!=='view'});
      if(current!==generation.current)return;
