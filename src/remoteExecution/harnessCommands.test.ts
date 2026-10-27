@@ -101,4 +101,15 @@ describe("agent awareness in a workspace", () => {
       ["action", "mesh_job_update", { ptyId: 3, instance: "remote-alice", jobId: "aw-1", text: "Heads-up", refKind: "awareness" }],
     ]);
   });
+  it("syncs team memory and its proposals through the service", async () => {
+    const { value, calls } = io({ "memory.proposals": { items: [{ memoryId: "mem-1" }] }, memory_sync: { ok: true, entries: 1 } });
+    expect(await harnessCommand("workspace_memory_sync", { root: "/workspace/api", entries: [{ id: "e1" }] }, value)).toEqual({ ok: true, entries: 1 });
+    expect(await harnessCommand("workspace_memory_proposals", {}, value)).toEqual([{ memoryId: "mem-1" }]);
+    await harnessCommand("workspace_memory_ack", { ids: ["mem-1"] }, value);
+    expect(calls).toEqual([
+      ["action", "memory_sync", { root: "/workspace/api", entries: [{ id: "e1" }] }],
+      ["query", "memory", "proposals", undefined],
+      ["action", "memory_ack", { ids: ["mem-1"] }],
+    ]);
+  });
 });

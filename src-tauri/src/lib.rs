@@ -776,6 +776,7 @@ pub fn run() {
             android::android_logcat,
             android::android_describe,
             android::android_run,
+            android::android_stage_file,
             clipboard::clipboard_watch_set,
             clipboard::clipboard_recent,
             clipboard::clipboard_read,

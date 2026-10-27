@@ -183,6 +183,14 @@ export async function harnessCommand(command: string, args: Args, io: HarnessIo)
       // Agent awareness claims a hotspot for the agent that just edited it, in
       // the store the workspace's agents claim through (context.rs twin).
       return (await io.action<{ message: string }>("hotspot_claim", { ptyId: args.ptyId, paths: args.paths, owner: args.owner, note: args.note ?? null })).message;
+    // Team memory: the ledger is on this computer, so memorySync.ts copies
+    // what agents may be told to the service and takes their proposals back.
+    case "workspace_memory_sync":
+      return io.action("memory_sync", { root: args.root, entries: args.entries });
+    case "workspace_memory_proposals":
+      return items(await io.query("memory", "proposals"));
+    case "workspace_memory_ack":
+      return io.action("memory_ack", { ids: args.ids });
   }
   throw Error(`Unknown harness command ${command}`);
 }

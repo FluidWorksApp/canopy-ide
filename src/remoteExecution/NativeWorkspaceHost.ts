@@ -4,6 +4,7 @@ import type { Host, HostChannel, HostEvent, UnlistenFn } from '../host/contract'
 import { nativeHost } from '../host/native';
 import { RemoteExecutionClient, type RemoteSession } from './client';
 import {workspaceReceiptCheck} from './receiptCheck';
+import {wantsWorkspaceAndroid,workspaceAndroid} from './androidBridge';
 import {pollGovernorEvents} from './governorEvents';
 import {connectionKey,reportConnection,reportStream,workspaceLifecyclePhase} from './connectionState';
 import {saveRemoteContextImage} from './saveContextImage';
@@ -54,7 +55,7 @@ for(const command of BRAIN_DESKTOP_COMMANDS)LOCAL_UI.add(command);
 for(const command of ['vault_status','vault_create','vault_unlock','vault_lock','vault_change_passphrase','vault_list','vault_matches','vault_save','vault_delete','vault_reveal','vault_read','vault_fill','vault_import_kdbx','vault_approvals','vault_approve','vault_revoke'])LOCAL_UI.add(command);
 // Android phones and emulators are attached to this computer, and the VM image
 // has no Android SDK, so device tools act on this computer's devices.
-for(const command of ['android_sdk_status','android_devices','android_avds','android_emulator_start','android_emulator_stop','android_screencap','android_ui_dump','android_layout','android_foreground','android_tap','android_text','android_swipe','android_key','android_logcat','android_run','android_describe'])LOCAL_UI.add(command);
+for(const command of ['android_sdk_status','android_devices','android_avds','android_emulator_start','android_emulator_stop','android_screencap','android_ui_dump','android_layout','android_foreground','android_tap','android_text','android_swipe','android_key','android_logcat','android_run','android_describe','android_stage_file'])LOCAL_UI.add(command);
 // The LAN relay is hosted by the desktop app between people's computers; its
 // file offers use this computer's dialogs and paths. Its status goes with it.
 for(const command of ['relay_status','relay_host_start','relay_host_stop','relay_regenerate_code','relay_connect','relay_disconnect','relay_send_chat','relay_send_collab','relay_send_command','relay_offer_file','relay_accept_file'])LOCAL_UI.add(command);
@@ -329,6 +330,8 @@ export class NativeWorkspaceHost implements Host {
     if(command==='spot_stage_drop_images'){await this.call('/resources');return this.desktopCall<T>('execution_remote_stage_images',{...args,workspaceId:this.connection.workspaceId,endpoint:this.connection.endpoint});}
     if(command==='execution_remote_upload')return this.desktopCall<T>(command,{...args,workspaceId:this.connection.workspaceId,endpoint:this.connection.endpoint});
     if(command==='execution_remote_upload_cancel')return this.desktopCall<T>(command,args);
+    // A device here, the project in the VM: android_run stages the VM's APK here first (androidBridge.ts).
+    if(wantsWorkspaceAndroid(command,args))return await workspaceAndroid(command,args,(name,body)=>this.native(name,body),(name,body)=>this.desktopCall(name,body)) as T;
     if(LOCAL_UI.has(command))return this.desktopCall<T>(command,args);
     // Deliberately absent from a cloud workspace: say so without a round trip.
     if(isRemoteUnsupported(command))throw Error(remoteUnsupportedMessage(command));
