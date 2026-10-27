@@ -30,3 +30,6 @@ export function useConnectionState(key:string){return useSyncExternalStore(liste
 // Failed concurrent requests are not reconnect attempts. Avoid presenting an
 // inflated retry counter as if it described the transport supervisor.
 export const connectionLabel=(state:ConnectionState)=>state.phase==='hibernated'?'Hibernated':state.phase==='stopping'?'Stopping workspace…':state.phase==='connected'?'Connected':state.phase==='authentication-error'?'Sign-in required':state.phase==='reconnecting'?'Connection lost · reconnecting…':'Connecting…';
+/** Outside React: the current state of one connection, and every change. */
+export const connectionStateOf=(key:string)=>states.get(key)??initial;
+export function subscribeConnectionStates(listener:()=>void){listeners.add(listener);return()=>{listeners.delete(listener);};}
