@@ -7,6 +7,7 @@ mod android;
 mod app_footprint;
 mod blocking;
 mod bounded_file;
+mod brain;
 mod browser;
 mod change;
 mod chrome_stream;
@@ -34,6 +35,7 @@ mod fsx;
 mod git;
 mod governor;
 mod instructions;
+mod ledger;
 mod lsp;
 mod maintenance;
 mod mcp;
@@ -559,6 +561,7 @@ pub fn run() {
         .manage(clipboard::Clipboard::default())
         .manage(companion::CompanionManager::default())
         .manage(structured_runner::StructuredRunnerManager::default())
+        .manage(brain::BrainCalls::default())
         .manage(tasks::TaskStore::default())
         .manage(workflow::WorkflowStore::default())
         .manage(cli::pending_from_env())
@@ -676,6 +679,12 @@ pub fn run() {
             structured_runner::structured_runner_spawn,
             structured_runner::structured_runner_write,
             structured_runner::structured_runner_kill,
+            brain::brain_call,
+            brain::brain_kill,
+            ledger::ledger_append,
+            ledger::ledger_query,
+            ledger::ledger_root,
+            ledger::ledger_update_status,
             tasks::task_reserve,
             tasks::task_attempt_reserve,
             tasks::task_attempt_start,

@@ -381,3 +381,166 @@ export function encodeStructuredUserMessage(text: string): string {
     message: { role: "user", content: [{ type: "text", text }] },
   });
 }
+
+// ------------------------------------------------------------ run summary
+
+/** What one headless run ended with: the answer, whether it failed, and what
+ *  it cost. The streaming parser above turns a run into chat events; a brain
+ *  call (brainCall.ts) wants none of that, only the verdict and the meter, so
+ *  this reads the same lines for a different question. */
+export interface StructuredRunSummary {
+  /** A terminal line (Claude/Cursor `result`, Codex `turn.*`) was seen. */
+  done: boolean;
+  text: string;
+  isError: boolean;
+  errorMessage: string | null;
+  /** Null where the CLI does not report a price (Codex). */
+  costUsd: number | null;
+  /** Every prompt token the model read — fresh plus cache writes and reads —
+   *  because that is what a plan's usage limit counts. */
+  inputTokens: number | null;
+  outputTokens: number | null;
+  durationMs: number | null;
+  model: string | null;
+  /** The CLI itself said the account is throttled (not inferred from prose). */
+  rateLimited: boolean;
+}
+
+const num = (v: unknown): number | null =>
+  typeof v === "number" && Number.isFinite(v) ? v : null;
+
+const sumTokens = (...parts: unknown[]): number | null => {
+  const known = parts.map(num).filter((n): n is number => n !== null);
+  return known.length ? known.reduce((a, b) => a + b, 0) : null;
+};
+
+interface SummaryLine {
+  type?: string;
+  subtype?: string;
+  model?: string;
+  result?: string;
+  is_error?: boolean;
+  total_cost_usd?: number;
+  duration_ms?: number;
+  usage?: Record<string, unknown>;
+  modelUsage?: Record<string, unknown>;
+  errors?: unknown[];
+  message?: { content?: { type?: string; text?: string }[] } | string;
+  rate_limit_info?: { status?: string };
+  item?: { type?: string; text?: string };
+  error?: { message?: string };
+}
+
+/** Folds one run's stdout lines into a StructuredRunSummary. */
+export class StructuredRunCollector {
+  private dialect: StructuredDialect;
+  private assistantText: string[] = [];
+  readonly summary: StructuredRunSummary = {
+    done: false,
+    text: "",
+    isError: false,
+    errorMessage: null,
+    costUsd: null,
+    inputTokens: null,
+    outputTokens: null,
+    durationMs: null,
+    model: null,
+    rateLimited: false,
+  };
+
+  constructor(dialect: StructuredDialect) {
+    this.dialect = dialect;
+  }
+
+  handleLine(raw: string): void {
+    let msg: SummaryLine;
+    try {
+      msg = JSON.parse(raw) as SummaryLine;
+    } catch {
+      return;
+    }
+    if (!msg || typeof msg !== "object") return;
+    if (this.dialect === "codex") this.codex(msg);
+    else this.resultDialect(msg);
+  }
+
+  /** Claude and Cursor both end with a `result` line carrying the answer. */
+  private resultDialect(msg: SummaryLine): void {
+    const s = this.summary;
+    switch (msg.type) {
+      case "system":
+        if (msg.subtype === "init" && msg.model) s.model = msg.model;
+        return;
+      case "assistant":
+        // Kept only as a fallback for a `result` that arrives without text.
+        if (typeof msg.message === "object") {
+          for (const block of msg.message?.content ?? []) {
+            if (block.type === "text" && block.text) this.assistantText.push(block.text);
+          }
+        }
+        return;
+      case "rate_limit_event":
+        // `allowed` / `allowed_warning` are informational; only a rejection
+        // means this call was refused for quota.
+        if (msg.rate_limit_info?.status === "rejected") s.rateLimited = true;
+        return;
+      case "result": {
+        s.done = true;
+        s.text = typeof msg.result === "string" && msg.result
+          ? msg.result
+          : this.assistantText.join("\n");
+        s.isError = Boolean(msg.is_error) || (msg.subtype ?? "success") !== "success";
+        if (s.isError) {
+          const errors = (msg.errors ?? []).filter((e): e is string => typeof e === "string");
+          s.errorMessage = s.text || errors.join("; ") || msg.subtype || "The agent ended with an error.";
+        }
+        s.costUsd = num(msg.total_cost_usd);
+        s.durationMs = num(msg.duration_ms);
+        const u = msg.usage ?? {};
+        s.inputTokens = sumTokens(
+          u.input_tokens,
+          u.cache_creation_input_tokens,
+          u.cache_read_input_tokens,
+        );
+        s.outputTokens = num(u.output_tokens);
+        if (!s.model && msg.modelUsage) s.model = Object.keys(msg.modelUsage)[0] ?? null;
+        return;
+      }
+      default:
+        return;
+    }
+  }
+
+  private codex(msg: SummaryLine): void {
+    const s = this.summary;
+    switch (msg.type) {
+      case "item.completed":
+        if (msg.item?.type === "agent_message" && msg.item.text) {
+          this.assistantText.push(msg.item.text);
+          s.text = msg.item.text;
+        }
+        return;
+      case "turn.completed": {
+        s.done = true;
+        const u = msg.usage ?? {};
+        // Codex reports cached input inside input_tokens already.
+        s.inputTokens = num(u.input_tokens);
+        s.outputTokens = num(u.output_tokens);
+        return;
+      }
+      case "turn.failed":
+        s.done = true;
+        s.isError = true;
+        s.errorMessage = msg.error?.message || "The agent ended the turn with an error.";
+        return;
+      // A top-level `error` line (not an `error` item — see codexItem) is a
+      // stream-level failure such as a refused request; the turn.failed that
+      // usually follows carries the verdict, this the wording.
+      case "error":
+        if (typeof msg.message === "string" && msg.message) s.errorMessage = msg.message;
+        return;
+      default:
+        return;
+    }
+  }
+}

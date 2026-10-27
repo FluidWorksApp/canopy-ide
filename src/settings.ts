@@ -446,6 +446,20 @@ export interface Settings {
    *  stored settings win over defaults only once a key exists (see
    *  getSettings) — so whoever turns it off stays off. */
   autoUpdateClis: boolean;
+  /** Model for the brain's main-tier headless calls (brainCall.ts). Empty =
+   *  the CLI's own default, which is what the person already pays for. */
+  brainModel: string;
+  /** Model for background brain calls — the ones no one is waiting on. Empty
+   *  = the brain's runner's cheap alias (`backgroundModel` in
+   *  structuredRunners.ts), else the CLI default. */
+  brainBackgroundModel: string;
+  /** Daily cap, in USD, across every brain feature; null = no cap. Checked
+   *  before each call against today's metered spend (brainMeter.ts). Calls
+   *  whose CLI reports no price meter as $0 and are never capped by this. */
+  brainDailyBudgetUsd: number | null;
+  /** Per-feature daily caps in USD, keyed by brain feature tag. A feature with
+   *  no entry is capped only by the daily total. */
+  brainFeatureBudgetsUsd: Record<string, number>;
   /** Connect Claude Code to Canopy as its IDE, the way it connects to VS Code:
    *  proposed edits open as a diff to accept, tweak or reject, the editor
    *  selection reaches the prompt, and the CLI reads diagnostics off Canopy's
@@ -654,6 +668,10 @@ export const DEFAULTS: Settings = {
   agentAskForAttention: false,
   agentsMaySpawn: true,
   autoUpdateClis: true,
+  brainModel: "",
+  brainBackgroundModel: "",
+  brainDailyBudgetUsd: null,
+  brainFeatureBudgetsUsd: {},
   claudeIdeIntegration: true,
   turnRollback: true,
   notificationPopupsEnabled: true,
@@ -742,6 +760,19 @@ const boundedScrollback = (value: unknown): number => {
   );
 };
 
+const budgetUsd = (value: unknown): number | null =>
+  typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : null;
+
+const featureBudgets = (value: unknown): Record<string, number> => {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return {};
+  const out: Record<string, number> = {};
+  for (const [feature, cap] of Object.entries(value)) {
+    const usd = budgetUsd(cap);
+    if (usd !== null) out[feature] = usd;
+  }
+  return out;
+};
+
 const KEY = "canopy.settings";
 
 /** Parsed-settings cache, keyed on the raw stored string: getSettings is
@@ -793,6 +824,13 @@ export function getSettings(): Settings {
     )
       value.teamMutedConversations = [];
     else value.teamMutedConversations = value.teamMutedConversations.slice(-500);
+    // Budgets gate spending, so a hand-edited or corrupt value must fail
+    // towards "no cap" rather than towards a NaN that compares false forever
+    // or a negative that blocks every call.
+    value.brainDailyBudgetUsd = budgetUsd(value.brainDailyBudgetUsd);
+    value.brainFeatureBudgetsUsd = featureBudgets(value.brainFeatureBudgetsUsd);
+    if (typeof value.brainModel !== "string") value.brainModel = "";
+    if (typeof value.brainBackgroundModel !== "string") value.brainBackgroundModel = "";
   } catch {
     value = { ...DEFAULTS };
   }

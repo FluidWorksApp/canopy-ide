@@ -64,6 +64,17 @@ export interface StructuredRunner {
   };
   args(o: StructuredRunnerLaunch): string[];
   resumeArgs(o: StructuredRunnerLaunch): string[];
+  /** Complete argv — prompt included — for ONE read-only question that ends
+   *  with its answer: a headless brain call (brainCall.ts). Only needed where
+   *  `args` cannot do that by appending the prompt, i.e. a structured-tier CLI
+   *  whose `args` expect the prompt on stdin. A oneshot-tier runner without
+   *  this gets `args(...)` plus the prompt (see `brainArgs`). */
+  oneshotArgs?(o: StructuredRunnerLaunch, prompt: string): string[];
+  /** A cheaper model alias for background brain calls, when the CLI has a
+   *  stable one. Absent = background calls use the CLI's default too. Lives
+   *  here rather than in feature code because which alias is cheap is a fact
+   *  about this vendor's catalogue. */
+  backgroundModel?: string;
   /** Environment every session of this CLI is started with, under the
    *  caller's own `env` (an explicit caller value wins). */
   sessionEnv?: readonly (readonly [string, string])[];
@@ -257,6 +268,31 @@ export const CLAUDE_RUNNER: StructuredRunner = {
     ...(o.policy.model ? ["--model", o.policy.model] : []),
     ...claudePermissionArgs(o.policy),
   ],
+  // A brain call: one question, one answer, no trace. Verified against
+  // Claude Code 2.1.311's `--help` and a live run on 2026-10-27: the prompt as
+  // the final argv value with stdin closed answers and exits; `plan` refuses
+  // edits; `--no-session-persistence` keeps judgment calls out of the
+  // person's resume list; `--strict-mcp-config` with no `--mcp-config` starts
+  // no MCP servers (faster, and a judgment call has no business calling
+  // tools that act). `--` ends the variadic `--disallowedTools` list, which
+  // would otherwise swallow the prompt as a tool name.
+  oneshotArgs: (o, prompt) => [
+    "-p",
+    "--output-format",
+    "stream-json",
+    "--verbose",
+    "--no-session-persistence",
+    "--strict-mcp-config",
+    ...(o.policy.systemPromptAppend
+      ? ["--append-system-prompt", o.policy.systemPromptAppend]
+      : []),
+    ...(o.additionalDirectories ?? []).flatMap((dir) => ["--add-dir", dir]),
+    ...(o.policy.model ? ["--model", o.policy.model] : []),
+    ...claudePermissionArgs(o.policy),
+    "--",
+    prompt,
+  ],
+  backgroundModel: "haiku",
   resumeArgs: (o) => [
     "-p",
     "--input-format",
@@ -413,3 +449,28 @@ export const streamsStructured = (cliId: string): boolean =>
     STRUCTURED_RUNNERS[cliId]?.verification.cliVersion &&
     STRUCTURED_RUNNERS[cliId]?.verification.checkedOn,
   );
+
+/** Writing tools a brain call never gets, on CLIs that take a tool denylist.
+ *  Belt and braces under `plan`: the brain answers questions, it does not act. */
+export const BRAIN_DISALLOWED_TOOLS = ["Edit", "Write", "NotebookEdit", "Bash", "KillShell"] as const;
+
+/** Argv for one read-only brain question on this runner, or null when the
+ *  runner has no verified way to take a prompt and end with its answer.
+ *
+ *  The brief rides in the system prompt where the CLI has a verified flag for
+ *  it, and is prepended to the prompt everywhere else — the same rule the
+ *  companion's oneshot transport follows. */
+export function brainArgs(
+  runner: StructuredRunner,
+  launch: StructuredRunnerLaunch,
+  prompt: string,
+): string[] | null {
+  const brief = launch.policy.systemPromptAppend;
+  if (runner.oneshotArgs) {
+    if (runner.verification.flags.systemPrompt) return runner.oneshotArgs(launch, prompt);
+    const bare = { ...launch, policy: { ...launch.policy, systemPromptAppend: "" } };
+    return runner.oneshotArgs(bare, brief ? `${brief}\n\n---\n\n${prompt}` : prompt);
+  }
+  if (runner.tier !== "oneshot") return null;
+  return [...runner.args(launch), brief ? `${brief}\n\n---\n\n${prompt}` : prompt];
+}

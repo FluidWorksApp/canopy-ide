@@ -53,6 +53,7 @@ import {
   type VibeTargetSelection,
 } from "./vibeTargetInference";
 import { observeTurnEvents } from "./turnRollback";
+import { observeAgentTurns } from "./agentTurns";
 import {
   derivePending,
   parseAgentEvent,
@@ -1041,6 +1042,9 @@ export default function App() {
         // Turn boundaries become rollback snapshots — taken app-side, off
         // this event, so the blocking UserPromptSubmit hook never waits on git.
         observeTurnEvents(parsed.map((p) => p.data), ts);
+        // The same boundaries, enriched (root, files touched) for features
+        // that subscribe through agentTurns.ts.
+        observeAgentTurns(parsed.map((p) => p.data), ts);
         setAgentEvents((prev) =>
           // Not a bare slice: the cap is app-wide and one of this list's
           // consumers is per-pty, so a busy project used to evict a quiet

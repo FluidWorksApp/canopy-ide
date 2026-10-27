@@ -4945,6 +4945,78 @@ export const structuredRunnerWrite = (
 export const structuredRunnerKill = (attemptId: string, controlToken: string) =>
   invoke<void>("structured_runner_kill", { attemptId, controlToken });
 
+// ------------------------------------------------------------- brain calls
+
+/** One read-only, one-shot run of the brain CLI (src-tauri/src/brain.rs).
+ *  Output arrives on `onData` and ends with `exit`; `callId` is minted by the
+ *  caller and is what `brainKill` stops. Use `askBrain` (brainCall.ts) rather
+ *  than this — it owns argv, parsing, metering and the budget gate. */
+export async function brainCallSpawn(
+  callId: string,
+  opts: {
+    command: string;
+    args: string[];
+    cwd: string;
+    env?: [string, string][];
+    timeoutMs?: number;
+  },
+  onData: (out: StructuredRunnerOut) => void,
+): Promise<void> {
+  const channel = createChannel<StructuredRunnerOut>();
+  channel.onmessage = onData;
+  return invoke("brain_call", { callId, ...opts, onData: channel });
+}
+
+/** Stop a brain call. Idempotent: a call that already ended is not an error. */
+export const brainKill = (callId: string) => invoke<void>("brain_kill", { callId });
+
+// ------------------------------------------------------------------ ledger
+
+/** Wire shape of a ledger entry (src-tauri/src/ledger.rs). ledger.ts owns
+ *  the typed view; this is just what crosses the bridge. */
+export interface LedgerEntryWire {
+  id: string;
+  kind: string;
+  ts: number;
+  root: string;
+  author: { kind: string; name: string; sessionId?: string; cli?: string; ptyId?: number };
+  scope: string;
+  subject?: string;
+  ref?: { kind: string; id: string };
+  data: unknown;
+  expiresAt?: number;
+  supersedes?: string;
+  status?: string;
+}
+
+export interface LedgerQueryWire {
+  kinds?: string[];
+  refKind?: string;
+  refId?: string;
+  sinceTs?: number;
+  limit?: number;
+}
+
+export const ledgerAppend = (
+  root: string,
+  entry: Omit<LedgerEntryWire, "id" | "ts" | "root"> & { id?: string; ts?: number; root?: string },
+) => invoke<LedgerEntryWire>("ledger_append", { root, entry });
+
+export const ledgerQuery = (root: string, query: LedgerQueryWire) =>
+  invoke<LedgerEntryWire[]>("ledger_query", { root, query });
+
+/** The canonical repository root `path` files under (its main checkout). */
+export const ledgerRoot = (path: string) => invoke<string>("ledger_root", { path });
+
+export const ledgerUpdateStatus = (root: string, id: string, status: string) =>
+  invoke<LedgerEntryWire>("ledger_update_status", { root, id, status });
+
+/** Every appended entry, from any window or writer. */
+export const onLedgerAppended = (
+  cb: (entry: LedgerEntryWire) => void,
+): Promise<UnlistenFn> =>
+  listen<LedgerEntryWire>("ledger-appended", (e) => cb(e.payload));
+
 // ---------------------------------------------------------------- companion
 
 /** One thing the companion's CLI said. `line` is a raw stdout line — expected
