@@ -18,6 +18,7 @@ import {
   startCommandParked,
   unattendedContextFor,
 } from "./agentSeed";
+import { planEnvForCommand } from "./plans/planLaunch";
 import { AGENT_CLIS } from "./projects";
 import { updateSettings } from "./settings";
 
@@ -117,6 +118,14 @@ describe("startCommandParked", () => {
     expect(start?.command).toContain("-m 'gpt-5.6-sol'");
     expect(start?.command).toContain("model_reasoning_effort=\"high\"");
     expect(start?.command).toContain("/repo/.canopy/spot/brief-1.md");
+  });
+
+  it("notes a planned brief's command — even a parked one — so its launch sets CANOPY_PLAN_ID", async () => {
+    const planned = `[Canopy plan pl-abc-def123] Goal: g. ${long}`;
+    const start = await startCommandParked("claude", planned, "/repo");
+    expect(start?.command).not.toContain("pl-abc-def123");
+    expect(planEnvForCommand(start!.command)).toEqual([["CANOPY_PLAN_ID", "pl-abc-def123"]]);
+    expect(planEnvForCommand("claude 'unplanned'")).toEqual([]);
   });
 
   it("keeps the brief whole — nothing is trimmed to fit", async () => {

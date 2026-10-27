@@ -12,8 +12,9 @@ import { revisePlan } from "./planStore";
 const line = (s: string, n: number = LIMITS.planItem) => cleanLine(s, n);
 const lines = (xs: string[], max: number) => xs.map((x) => line(x)).filter(Boolean).slice(0, max);
 
-/** The card for a plan, clipped to what the wire schema accepts. */
-export function buildPlanCard(plan: PlanData): PlanCard {
+/** The card for a plan, clipped to what the wire schema accepts (the
+ *  approvers are added by the share dialog). */
+export function buildPlanCard(plan: PlanData): Omit<PlanCard, "approvers"> {
   const decisions = plan.decisions
     .map((d) => ({ q: line(d.question), a: line(d.answer || d.recommended || "Undecided") }))
     .filter((d) => d.q && d.a)
@@ -32,8 +33,18 @@ export function buildPlanCard(plan: PlanData): PlanCard {
   };
 }
 
-/** Open the share dialog with this plan; remembers that it was shared. */
-export function sharePlan(plan: PlanData): void {
-  openShareDialog({ kind: "share", card: buildPlanCard(plan) });
-  void revisePlan(plan.dir, plan.planId, () => ({ data: { sharedAt: Date.now() } })).catch(() => {});
+/** Open the share dialog with this plan. The author picks who may approve
+ *  it; once sent, the plan remembers them — an approval from anyone else in
+ *  chat is a comment, not an approval (planStore.applyChatApproval). */
+export function sharePlan(plan: PlanData, onShared?: (approvers: string[]) => void): void {
+  openShareDialog({
+    kind: "plan",
+    card: buildPlanCard(plan),
+    onSent: (approvers) => {
+      onShared?.(approvers);
+      void revisePlan(plan.dir, plan.planId, (cur) => ({
+        data: { sharedAt: Date.now(), approvers: [...new Set([...(cur.data.approvers ?? []), ...approvers])] },
+      })).catch(() => {});
+    },
+  });
 }

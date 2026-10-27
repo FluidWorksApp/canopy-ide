@@ -35,6 +35,10 @@ export interface AgentTurnStart {
   /** Canonical repo root (see ledger.ts); the cwd when git cannot say. */
   root: string;
   prompt?: string;
+  /** The Canopy plan the session was launched to carry out — carried
+   *  explicitly on every hook event (CANOPY_PLAN_ID → `canopy_plan_id`),
+   *  never inferred from the folder or the time. */
+  planId?: string;
   startedAt: number;
 }
 
@@ -53,11 +57,29 @@ export interface AgentTurnEnd extends AgentTurnStart {
   lastMessage?: string;
 }
 
+/** The agent's CLI said its session is over (SessionEnd). */
+export interface AgentSessionEnd {
+  sessionId: string;
+  cwd: string;
+  ptyId: number | null;
+  planId?: string;
+}
+
 type StartListener = (turn: AgentTurnStart) => void;
 type EndListener = (turn: AgentTurnEnd) => void;
+type SessionEndListener = (e: AgentSessionEnd) => void;
 
 const startListeners = new Set<StartListener>();
 const endListeners = new Set<EndListener>();
+const sessionEndListeners = new Set<SessionEndListener>();
+
+/** Fires when an agent session ends. Returns an unsubscribe. */
+export function onAgentSessionEnd(cb: SessionEndListener): () => void {
+  sessionEndListeners.add(cb);
+  return () => {
+    sessionEndListeners.delete(cb);
+  };
+}
 
 /** Fires after an agent's turn begins. Returns an unsubscribe. */
 export function onAgentTurnStart(cb: StartListener): () => void {
@@ -145,6 +167,13 @@ export function observeAgentTurns(
 ): void {
   for (const e of events) {
     if (!e || !e.sessionId || !e.cwd) continue;
+    if (e.event === "SessionEnd") {
+      const ended: AgentSessionEnd = { sessionId: e.sessionId, cwd: e.cwd, ptyId: e.pty, ...(e.planId ? { planId: e.planId } : {}) };
+      // After the session's pending turn events, so a last Stop lands first.
+      const prev = chains.get(e.sessionId) ?? Promise.resolve();
+      void prev.catch(() => {}).then(() => emit(sessionEndListeners, ended));
+      continue;
+    }
     if (e.event !== "UserPromptSubmit" && e.event !== "Stop") continue;
     const event = e;
     const sessionId = e.sessionId;
@@ -169,6 +198,7 @@ async function start(e: AgentEventData, at: number): Promise<void> {
     cwd: e.cwd,
     root: await rootOf(e.cwd),
     ...(e.prompt ? { prompt: e.prompt } : {}),
+    ...(e.planId ? { planId: e.planId } : {}),
     startedAt: at,
   };
   open.set(e.sessionId, turn);
@@ -192,6 +222,7 @@ async function end(e: AgentEventData, at: number): Promise<void> {
     cwd: e.cwd,
     root,
     ...(began?.prompt ? { prompt: began.prompt } : {}),
+    ...((began?.planId ?? e.planId) ? { planId: began?.planId ?? e.planId } : {}),
     startedAt,
     endedAt: at,
     filesTouched: filesInWindow(edits, startedAt, at),
@@ -205,6 +236,7 @@ async function end(e: AgentEventData, at: number): Promise<void> {
 export function resetAgentTurnsForTests(): void {
   startListeners.clear();
   endListeners.clear();
+  sessionEndListeners.clear();
   open.clear();
   lastEnd.clear();
   chains.clear();
