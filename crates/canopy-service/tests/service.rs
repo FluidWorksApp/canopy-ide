@@ -813,3 +813,268 @@ async fn notes_and_research_are_served_from_core_and_reach_the_stream() {
     assert_eq!(snapshot["stores"]["notes"].as_array().unwrap().len(), 1);
     assert_eq!(snapshot["stores"]["research"].as_array().unwrap().len(), 1);
 }
+
+async fn act(daemon: &Daemon, body: serde_json::Value) -> (u16, serde_json::Value) {
+    daemon
+        .admin(
+            "POST",
+            &format!("/admin/workspaces/{WS}/actions"),
+            Some(body),
+        )
+        .await
+}
+
+async fn ask_research(
+    daemon: &Daemon,
+    action: &str,
+    args: serde_json::Value,
+) -> (u16, serde_json::Value) {
+    daemon
+        .admin(
+            "POST",
+            &format!("/admin/workspaces/{WS}/query"),
+            Some(serde_json::json!({"store":"research","action":action,"args":args})),
+        )
+        .await
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_research_panel_is_served_with_file_contents_the_host_read() {
+    let daemon = Daemon::start().await;
+    let runner = FakeRunner::start().await;
+    daemon.register(WS, Some(&runner)).await;
+
+    // The sweep: the host lists Markdown, the service picks what to adopt.
+    let (status, plan) = ask_research(
+        &daemon,
+        "sweep_plan",
+        serde_json::json!({"paths":["/workspace/docs/spike.md","/workspace/README.md","/elsewhere/x.md"]}),
+    )
+    .await;
+    assert_eq!(status, 200, "{plan}");
+    assert_eq!(
+        plan["candidates"],
+        serde_json::json!(["/workspace/docs/spike.md"])
+    );
+    assert_eq!(plan["matched"], 1);
+
+    let (status, entry) = act(
+        &daemon,
+        serde_json::json!({"kind":"research_write","actor":"owner","action":"import_text",
+            "path":"/workspace/docs/spike.md","text":"# Spike\n\nUse the queue.\n"}),
+    )
+    .await;
+    assert_eq!(status, 200, "{entry}");
+    assert_eq!(entry["title"], "Spike");
+    let id = entry["id"].as_str().unwrap().to_string();
+    let (_, plan) = ask_research(
+        &daemon,
+        "sweep_plan",
+        serde_json::json!({"paths":["/workspace/docs/spike.md"]}),
+    )
+    .await;
+    assert_eq!(plan["candidates"], serde_json::json!([]));
+
+    let (status, found) = ask_research(
+        &daemon,
+        "for_file",
+        serde_json::json!({"path":"/workspace/docs/spike.md"}),
+    )
+    .await;
+    assert_eq!(status, 200);
+    assert_eq!(found["id"], id.as_str());
+    let (_, missing) = ask_research(
+        &daemon,
+        "for_file",
+        serde_json::json!({"path":"/workspace/other.md"}),
+    )
+    .await;
+    assert!(missing["id"].is_null());
+
+    let (status, source) = act(
+        &daemon,
+        serde_json::json!({"kind":"research_write","actor":"owner","action":"source",
+            "id": id,"title":"log","text":"raw capture"}),
+    )
+    .await;
+    assert_eq!(status, 200, "{source}");
+    let (status, read) = ask_research(
+        &daemon,
+        "read_file",
+        serde_json::json!({"id": id, "path": source["file"]}),
+    )
+    .await;
+    assert_eq!(status, 200, "{read}");
+    assert_eq!(read["text"], "raw capture");
+    let (status, _) = ask_research(
+        &daemon,
+        "read_file",
+        serde_json::json!({"id": id, "path": "../../access.json"}),
+    )
+    .await;
+    assert_eq!(status, 400);
+
+    // Delete is the user's: an agent's op has no such action.
+    let (ada, _) = daemon
+        .terminal(WS, &runner, "req-ada-01", "Ada", 11, 1011)
+        .await;
+    let (status, _) = daemon
+        .agent(
+            WS,
+            &ada,
+            "POST",
+            "/ctx/research",
+            Some(serde_json::json!({"action":"delete","cwd":"/workspace","id": id})),
+        )
+        .await;
+    assert_eq!(status, 400);
+    let (status, deleted) = act(
+        &daemon,
+        serde_json::json!({"kind":"research_write","actor":"owner","action":"delete","id": id}),
+    )
+    .await;
+    assert_eq!(status, 200, "{deleted}");
+    assert_eq!(deleted["ok"], true);
+    let (_, rows) = ask_research(&daemon, "list", serde_json::json!({})).await;
+    assert!(rows["items"].as_array().unwrap().is_empty());
+    let (status, _) = act(
+        &daemon,
+        serde_json::json!({"kind":"research_write","actor":"owner","action":"delete","id": id}),
+    )
+    .await;
+    assert_eq!(status, 400);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_control_panel_releases_claims_severs_pairs_and_reports_jobs() {
+    let daemon = Daemon::start().await;
+    let runner = FakeRunner::start().await;
+    daemon.register(WS, Some(&runner)).await;
+    let (ada, ada_pty) = daemon
+        .terminal(WS, &runner, "req-ada-01", "Ada", 11, 1011)
+        .await;
+    let (_bob, bob_pty) = daemon
+        .terminal(WS, &runner, "req-bob-01", "Bob", 12, 1012)
+        .await;
+
+    let (status, _) = daemon
+        .agent(
+            WS,
+            &ada,
+            "POST",
+            "/ctx/claims",
+            Some(serde_json::json!({"action":"claim","paths":["src/auth"],"owner":"ada"})),
+        )
+        .await;
+    assert_eq!(status, 200);
+    let query = |store: &'static str, action: &'static str, args: serde_json::Value| {
+        let daemon = &daemon;
+        async move {
+            daemon
+                .admin(
+                    "POST",
+                    &format!("/admin/workspaces/{WS}/query"),
+                    Some(serde_json::json!({"store":store,"action":action,"args":args})),
+                )
+                .await
+        }
+    };
+    let (_, held) = query("mesh", "claims", serde_json::json!({})).await;
+    let owner_key = held["items"][0]["owner_key"].as_str().unwrap().to_string();
+    // History by path is normalized as the claim was.
+    let (_, history) = query("claims", "history", serde_json::json!({"path":"src/auth"})).await;
+    assert_eq!(history["items"].as_array().unwrap().len(), 1);
+
+    let (status, released) = act(
+        &daemon,
+        serde_json::json!({"kind":"claim_release","actor":"owner","ownerKey": owner_key}),
+    )
+    .await;
+    assert_eq!(status, 200, "{released}");
+    assert_eq!(released["released"], 1);
+    let (_, held) = query("mesh", "claims", serde_json::json!({})).await;
+    assert!(held["items"].as_array().unwrap().is_empty());
+    let (_, history) = query("claims", "history", serde_json::json!({})).await;
+    assert_eq!(history["items"][0]["released_by"], "canopy");
+
+    // Sever, and the agents' send between the pair is refused; reconnect.
+    let (status, pairs) = act(
+        &daemon,
+        serde_json::json!({"kind":"mesh_sever","actor":"owner","a": bob_pty,"b": ada_pty,"severed": true}),
+    )
+    .await;
+    assert_eq!(status, 200, "{pairs}");
+    assert_eq!(pairs["items"].as_array().unwrap().len(), 1);
+    assert_eq!(pairs["items"][0]["a"], ada_pty.min(bob_pty));
+    let (status, _) = daemon
+        .agent(
+            WS,
+            &ada,
+            "POST",
+            "/ctx/action",
+            Some(serde_json::json!({"kind":"mesh_send","ptyId": bob_pty,"text":"hi"})),
+        )
+        .await;
+    assert_eq!(status, 404);
+    let (_, pairs) = act(
+        &daemon,
+        serde_json::json!({"kind":"mesh_sever","actor":"owner","a": ada_pty,"b": bob_pty,"severed": false}),
+    )
+    .await;
+    assert!(pairs["items"].as_array().unwrap().is_empty());
+
+    // A job step reaches the terminal that submitted it and is kept on the mesh.
+    let instance = format!("remote-{WS}");
+    let (status, _) = act(
+        &daemon,
+        serde_json::json!({"kind":"mesh_job_update","actor":"owner","ptyId": ada_pty,
+            "instance":"remote-other","jobId":"j1","text":"approved"}),
+    )
+    .await;
+    assert_eq!(status, 400);
+    let (status, update) = act(
+        &daemon,
+        serde_json::json!({"kind":"mesh_job_update","actor":"owner","ptyId": ada_pty,
+            "instance": instance,"jobId":"j1","text":"approved"}),
+    )
+    .await;
+    assert_eq!(status, 200, "{update}");
+    let id = update["id"].as_str().unwrap().to_string();
+    support::wait_until("job notice", Duration::from_secs(5), || {
+        runner.writes_to(11).len() == 2
+    })
+    .await;
+    assert!(runner.writes_to(11)[0]
+        .data
+        .starts_with("[canopy: mesh job j1]"));
+    let kept = daemon
+        .service()
+        .workspace(WS)
+        .unwrap()
+        .mesh
+        .get(&id)
+        .unwrap();
+    assert_eq!(kept.reference.as_ref().unwrap().kind, "job");
+    assert_eq!(kept.from_pty_id, None);
+    let (status, update) = act(
+        &daemon,
+        serde_json::json!({"kind":"mesh_job_update","actor":"owner","ptyId": ada_pty,
+            "instance": instance,"jobId":"m9","text":"done here","refKind":"relay"}),
+    )
+    .await;
+    assert_eq!(status, 200, "{update}");
+    support::wait_until("relay notice", Duration::from_secs(5), || {
+        runner.writes_to(11).len() == 4
+    })
+    .await;
+    assert!(runner.writes_to(11)[2]
+        .data
+        .starts_with("[canopy: cloud workspace reply to m9]"));
+    let (status, _) = act(
+        &daemon,
+        serde_json::json!({"kind":"mesh_job_update","actor":"owner","ptyId": 99,
+            "instance": instance,"jobId":"j2","text":"x"}),
+    )
+    .await;
+    assert_eq!(status, 404);
+}

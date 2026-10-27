@@ -10,6 +10,7 @@ import {canSwitchExecutionMode} from '../executionMode';
 import {remoteDiagnostic} from './remoteDiagnostic';
 import type {ClaudeIdeEvent} from '../claudeIde';
 import {HOST_PROTOCOL} from '../../packages/remote-host/native-commands.mjs';
+import {harnessCommand,isHarnessCommand} from './harnessCommands';
 import {HOST_OUTDATED_EVENT,hostOutdatedMessage,isRemoteUnsupported,outdatedHostCommand,remoteUnsupportedMessage} from './remoteSupport';
 
 export interface WorkspaceConnection { endpoint: string; token: string; workspaceId: string; workspaceName: string; scope?: 'view'|'drive'; clientId?: string; expiresAt?: string; credentialAccountKey?: string }
@@ -322,6 +323,14 @@ export class NativeWorkspaceHost implements Host {
     if(LOCAL_UI.has(command))return this.desktopCall<T>(command,args);
     // Deliberately absent from a cloud workspace: say so without a round trip.
     if(isRemoteUnsupported(command))throw Error(remoteUnsupportedMessage(command));
+    // Research, claims and the mesh live in the workspace's canopy-service.
+    if(isHarnessCommand(command))return await harnessCommand(command,args,{
+      query:(store,action,body={})=>this.call('/harness/query',{store,action,args:body},INTERACTIVE),
+      action:(kind,body)=>this.call('/harness/actions',{...body,kind},INTERACTIVE),
+      native:(name,body)=>this.native(name,body),
+      desktop:(name,body)=>this.desktopCall(name,body),
+      instance:`remote-${this.connection.workspaceId}`,
+    }) as T;
     if(this.readOnly&&!READ_ONLY_NATIVE.has(command)&&!['environment_identity','pty_renderer_register','pty_renderer_sessions','pty_stats'].includes(command))throw Error('This workspace is read-only');
     if(command==='git_clone'){
       let job=await this.native<{id:string;state:string;path:string;name:string;error?:string}>('git_clone_start',args);

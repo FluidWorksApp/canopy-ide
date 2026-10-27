@@ -297,13 +297,21 @@ impl Workspace {
     }
 
     pub fn release_claims_for(&self, record: &TerminalRecord, how: &str) {
-        let key = record.key(&self.instance);
-        if let Ok(((), true)) = self.claims.mutate(|claims| {
-            let n = end_claims(claims, &key, now_ms(), how);
-            ((), n > 0)
-        }) {
+        let _ = self.release_claims_of(&record.key(&self.instance), how);
+    }
+
+    /// End every claim held under one owner key — the user's escape hatch for
+    /// an agent that died holding one (desktop `context_release_claim`).
+    /// Returns how many ended.
+    pub fn release_claims_of(&self, owner_key: &str, how: &str) -> Result<usize, String> {
+        let (n, _) = self.claims.mutate(|claims| {
+            let n = end_claims(claims, owner_key, now_ms(), how);
+            (n, n > 0)
+        })?;
+        if n > 0 {
             self.events.publish("mesh", "claims", "");
         }
+        Ok(n)
     }
 
     // ---- terminals ----------------------------------------------------

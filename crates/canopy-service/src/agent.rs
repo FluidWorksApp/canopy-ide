@@ -533,7 +533,7 @@ fn task_named(ws: &Arc<Workspace>, who: &TerminalRecord, act: Action) -> Respons
     )
 }
 
-fn task_of(t: &TerminalRecord) -> Option<String> {
+pub(crate) fn task_of(t: &TerminalRecord) -> Option<String> {
     t.status
         .as_ref()
         .and_then(|s| s.get("title"))
