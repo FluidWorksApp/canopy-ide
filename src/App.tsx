@@ -118,6 +118,7 @@ import { personaBinding } from "./personaBinding";
 import { getSettings, subscribeSettings, THEME_CHANGE_EVENT } from "./settings";
 import { builderRoot, defaultLens, initialLensConfig, projectLens, toggleProjectLens } from "./projectLens";
 import { startLensSteps } from "./lensSteps";
+import { setBrainProjectResolver } from "./brainMeter";
 import { startLensApprovals } from "./lensApprovals";
 import {
   dismissTerminalMemoryPromptsForWindow,
@@ -891,20 +892,25 @@ export default function App() {
   // once; reads projects through refs at call time.
   const projectIdentityRef = useRef(projectIdentity);
   projectIdentityRef.current = projectIdentity;
-  useEffect(
-    () =>
-      installOutcomes({
-        projectFor: (cwd) => {
-          const p = projectIdentityRef.current(cwd);
-          return p.projectId ? { id: p.projectId, name: p.projectName ?? "" } : null;
-        },
-        isPrototype: (cwd) => {
-          const id = projectIdentityRef.current(cwd).projectId;
-          return !!wsRef.current.projects.find((p) => p.id === id)?.vibe?.enabled;
-        },
-      }),
-    [],
-  );
+  useEffect(() => {
+    const projectFor = (cwd: string) => {
+      const p = projectIdentityRef.current(cwd);
+      return p.projectId ? { id: p.projectId, name: p.projectName ?? "" } : null;
+    };
+    // Canopy's own brain spend is recorded per project too (brainMeter.ts).
+    setBrainProjectResolver(projectFor);
+    const stop = installOutcomes({
+      projectFor,
+      isPrototype: (cwd) => {
+        const id = projectIdentityRef.current(cwd).projectId;
+        return !!wsRef.current.projects.find((p) => p.id === id)?.vibe?.enabled;
+      },
+    });
+    return () => {
+      stop();
+      setBrainProjectResolver(null);
+    };
+  }, []);
   // Mesh jobs across workspaces, this account's machines and teammates
   // (meshJobs.ts). One coordinator for the window's lifetime: it holds the
   // approval inbox and which runs report back to which submitter, and every

@@ -10,9 +10,10 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { AGENT_CLIS } from "../projects";
 import { basename } from "../paths";
 import { getSettings, SETTINGS_CHANGE_EVENT } from "../settings";
-import { brainSpendByFeature, subscribeBrainMeter } from "../brainMeter";
+import { brainSpendByFeatureUnder, subscribeBrainMeter } from "../brainMeter";
 import { reconcileOutcomes, groupReport, type OutcomesReport } from "../outcomes/reconcile";
-import { realReconcileDeps } from "../outcomes";
+import { outcomesReconcileDeps } from "../outcomes";
+import { keepReport, lastReport } from "../outcomes/cache";
 import { attributeSpend } from "../outcomes/attribution";
 import { loadInsight, type InsightOutcome } from "../outcomes/insight";
 import { fmtUsd } from "../outcomes/budgets";
@@ -59,7 +60,7 @@ export interface OutcomesPanelProps {
 export function OutcomesPanel({
   repos,
   visible = true,
-  reconcile = (root, since) => reconcileOutcomes(realReconcileDeps, root, since),
+  reconcile = (root, since) => reconcileOutcomes(outcomesReconcileDeps, root, since),
   insight = loadInsight,
 }: OutcomesPanelProps) {
   const [repo, setRepo] = useState(repos[0] ?? "");
@@ -83,14 +84,24 @@ export function OutcomesPanel({
     return () => window.removeEventListener(SETTINGS_CHANGE_EVENT, sync);
   }, []);
 
+  const [recounting, setRecounting] = useState(false);
   const refreshNumbers = useCallback(() => {
     if (!repo) return () => {};
     let live = true;
     setLoadError(null);
+    // The last count shows at once; the recount (git reads cached and
+    // incremental, outcomes/cache.ts) replaces it when it lands.
+    const cached = lastReport(repo, Number(days));
+    setReport(cached);
+    setRecounting(true);
     reconcileRef
       .current(repo, Date.now() - Number(days) * DAY)
-      .then((r) => live && setReport(r))
-      .catch((e) => live && setLoadError(String(e)));
+      .then((r) => {
+        keepReport(repo, Number(days), r);
+        if (live) setReport(r);
+      })
+      .catch((e) => live && setLoadError(String(e)))
+      .finally(() => live && setRecounting(false));
     return () => {
       live = false;
     };
@@ -105,10 +116,11 @@ export function OutcomesPanel({
   // Canopy's own spend over the same window as the report. `brainTick` is the
   // meter's change signal: the meter is read synchronously from storage.
   const reportSince = report?.sinceMs;
+  // Only the calls made about this repository: what the brain cost here.
   const brainByFeature = useMemo(
-    () => brainSpendByFeature(reportSince ?? Date.now() - Number(days) * DAY),
+    () => brainSpendByFeatureUnder(repo, reportSince ?? Date.now() - Number(days) * DAY),
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [reportSince, days, brainTick],
+    [repo, reportSince, days, brainTick],
   );
   const attribution = useMemo(
     () =>
@@ -175,8 +187,14 @@ export function OutcomesPanel({
     <div className="side-panel outcomes-panel">
       <div className="side-panel-head">
         <span>Outcomes</span>
-        <Button size="sm" variant="ghost" onClick={() => refreshNumbers()} title="Recount from the ledger and git history">
-          Recount
+        <Button
+          size="sm"
+          variant="ghost"
+          disabled={recounting}
+          onClick={() => refreshNumbers()}
+          title="Recount from the ledger and git history"
+        >
+          {recounting && report ? "Recounting…" : "Recount"}
         </Button>
       </div>
       <div className="outcomes-controls">
@@ -311,11 +329,14 @@ export function OutcomesPanel({
                   </li>
                 ))}
               </ul>
-              <div className="stats-section-head" title="What Canopy's own background intelligence spent on your brain's plan, per feature">
-                Canopy's brain, by feature
+              <div
+                className="stats-section-head"
+                title="What Canopy's own intelligence spent on your brain's plan for this project, per feature"
+              >
+                Canopy's brain in this project{attribution.canopyUsd > 0 ? ` · ${fmtUsd(attribution.canopyUsd)}` : ""}
               </div>
               {attribution.canopy.length === 0 ? (
-                <p className="stats-note">Canopy's brain has not been used in this period.</p>
+                <p className="stats-note">Canopy's brain hasn't worked on this project in this period.</p>
               ) : (
                 <ul className="outcomes-attr" aria-label="Canopy brain spend by feature">
                   {attribution.canopy.slice(0, 8).map((c) => (

@@ -121,6 +121,68 @@ describe("reconcile on a real git repository", () => {
     }
   });
 
+  it("sees rebase and squash merges by content, and GitHub's word when content can't tell", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "canopy-outcomes-"));
+    try {
+      git(dir, "init", "-q", "-b", "main");
+      writeFileSync(join(dir, "a.ts"), "one\n");
+      writeFileSync(join(dir, "b.ts"), "one\n");
+      writeFileSync(join(dir, "c.ts"), "one\n");
+      git(dir, "add", ".");
+      git(dir, "commit", "-qm", "init");
+      const base = git(dir, "rev-parse", "HEAD").trim();
+      // PR 7: two commits, rebase-merged (replayed onto main, no "#7").
+      git(dir, "checkout", "-qb", "feat-7");
+      writeFileSync(join(dir, "a.ts"), "one\ntwo\n");
+      git(dir, "commit", "-qam", "Add two");
+      writeFileSync(join(dir, "a.ts"), "one\ntwo\nthree\n");
+      git(dir, "commit", "-qam", "Add three");
+      const pr7 = git(dir, "diff", `${base}...feat-7`);
+      // PR 8: squash-merged under a subject that doesn't name it.
+      git(dir, "checkout", "-q", "main");
+      git(dir, "checkout", "-qb", "feat-8");
+      writeFileSync(join(dir, "b.ts"), "one\nb1\n");
+      git(dir, "commit", "-qam", "b1");
+      writeFileSync(join(dir, "b.ts"), "one\nb2\n");
+      git(dir, "commit", "-qam", "b2");
+      const pr8 = git(dir, "diff", `${base}...feat-8`);
+      git(dir, "checkout", "-q", "main");
+      writeFileSync(join(dir, "c.ts"), "one\nunrelated\n");
+      git(dir, "commit", "-qam", "Unrelated work");
+      git(dir, "cherry-pick", "feat-7~1", "feat-7");
+      git(dir, "merge", "--squash", "-q", "feat-8");
+      git(dir, "commit", "-qm", "Tidy b");
+
+      const now = Date.now();
+      const ledger: LedgerEntry[] = ["s7", "s8", "s9", "s10"].map((sid) =>
+        entry("spend", spend(sid, [["x.ts", now - DAY]]), { ref: { kind: "session", id: sid } }),
+      );
+      const openedSec = Math.floor((now - 2 * 3_600_000) / 1000);
+      const deps = gitDeps(dir, ledger, {
+        s7: [{ pr_number: 7, at: openedSec }],
+        s8: [{ pr_number: 8, at: openedSec }],
+        s9: [{ pr_number: 9, at: openedSec }],
+        s10: [{ pr_number: 10, at: openedSec }],
+      });
+      const { fingerprint } = await import("./patchId");
+      deps.prFingerprint = async (_r, n) => (n === 7 ? fingerprint(pr7) : n === 8 ? fingerprint(pr8) : null);
+      deps.prState = async (_r, n) => (n === 9 ? "MERGED" : n === 10 ? "OPEN" : null);
+
+      const report = await gatherOutcomes(deps, dir, now - 30 * DAY);
+      const by = new Map(report.outcomes.map((o) => [o.sessionId, o]));
+      expect(by.get("s7")).toMatchObject({ merged: true, mergedPrs: [7] });
+      expect(by.get("s7")!.reviewHours).toBeGreaterThan(1);
+      expect(by.get("s8")).toMatchObject({ merged: true, mergedPrs: [8] });
+      // GitHub says merged but no content matched: merged, review time unknown.
+      expect(by.get("s9")).toMatchObject({ merged: true, mergedPrs: [9] });
+      expect(by.get("s9")!.reviewHours).toBeUndefined();
+      expect(by.get("s10")).toMatchObject({ merged: false });
+      expect(report.mergedInWindow).toBe(2);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it("says git is unavailable rather than reporting zero", async () => {
     const deps = gitDeps("/nonexistent", [], {});
     deps.gitLog = async () => {

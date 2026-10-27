@@ -4,15 +4,19 @@
 // Everything here is local: the ledger (spend, receipts, plans), the
 // checkout's own git history (reverts, merge commits) and the provenance
 // store (which session raised which PR). No GitHub round trip and nothing
-// leaves the machine — "local-first, no telemetry" is the point of the panel.
-// The price is that a PR merged on GitHub counts once the checkout has fetched
-// it, and a rebase-merge (no "#12" in any subject) is not seen as merged.
+// leaves the machine — "local-first, no telemetry" is the point of the panel —
+// except, when the GitHub CLI is there, a PR's own state for the PRs agent
+// sessions raised. A merge counts from a "#12" in a commit subject, or — for
+// rebase and squash merges whose subjects say nothing — from the PR's content
+// matching a run of commits on the base (patchId.ts), or from GitHub saying
+// MERGED.
 //
 // Writing outcomes back to the ledger is what lets `outcomesFor` (the
 // autonomy view's input) answer from the ledger alone, cheaply and without
 // git.
 
 import type { LedgerDraft, LedgerEntry, LedgerQuery } from "../ledger";
+import { findLanding, fingerprint, type Fingerprint } from "./patchId";
 import {
   aggregate,
   filesFromPatch,
@@ -53,6 +57,60 @@ export interface ReconcileDeps {
   provenance(sessionId: string): Promise<{ pr_number: number; at: number }[]>;
   /** When a PR the watcher still holds was opened (ms), if it holds it. */
   prOpened?(repo: string, number: number): number | null;
+  /** GitHub's state for a PR ("OPEN", "MERGED", "CLOSED"); null when gh
+   *  can't say. */
+  prState?(repo: string, number: number): Promise<string | null>;
+  /** The PR's content fingerprint (its diff); null when unknown. */
+  prFingerprint?(repo: string, number: number): Promise<Fingerprint | null>;
+  /** A commit's content fingerprint. Defaults to fingerprinting commitPatch. */
+  commitFingerprint?(repo: string, hash: string): Promise<Fingerprint>;
+}
+
+/** Linked PRs checked against GitHub and by content per run. */
+const MAX_PR_CHECKS = 20;
+/** Commits after a PR opened that its content is matched against. */
+const MAX_LANDING_COMMITS = 150;
+const DAY_MS = 24 * 60 * 60 * 1000;
+
+/** PRs agent sessions raised that no commit subject marks as merged: ask
+ *  GitHub, and look for where their content landed. Adds what it finds to
+ *  `merged` (merge time, or NaN when only GitHub knows it merged). */
+export async function landedPrs(
+  deps: ReconcileDeps,
+  root: string,
+  log: readonly { hash: string; subject: string; date: string }[],
+  linked: readonly { prNumber: number; openedAt: number | null }[],
+  merged: Map<number, number>,
+): Promise<void> {
+  const pending = linked.filter((e) => !merged.has(e.prNumber)).slice(0, MAX_PR_CHECKS);
+  if (!pending.length) return;
+  const oldestFirst = [...log].reverse().filter((c) => !/^Merge (pull request|branch) /.test(c.subject));
+  for (const e of pending) {
+    const state = deps.prState ? await deps.prState(root, e.prNumber).catch(() => null) : null;
+    if (state === "CLOSED") continue;
+    const pr = deps.prFingerprint ? await deps.prFingerprint(root, e.prNumber).catch(() => null) : null;
+    if (state === "OPEN") continue;
+    let landedAt: number | null = null;
+    if (pr?.size) {
+      const since = (e.openedAt ?? 0) - DAY_MS;
+      const window = oldestFirst.filter((c) => !Number.isFinite(Date.parse(c.date)) || Date.parse(c.date) >= since).slice(-MAX_LANDING_COMMITS);
+      const commits: { hash: string; date: string; fp: Fingerprint }[] = [];
+      for (const c of window) {
+        const fp = deps.commitFingerprint
+          ? await deps.commitFingerprint(root, c.hash).catch(() => new Map() as Fingerprint)
+          : fingerprint(await deps.commitPatch(root, c.hash).catch(() => ""));
+        commits.push({ hash: c.hash, date: c.date, fp });
+      }
+      const hit = findLanding(pr, commits);
+      if (hit) {
+        const iso = await deps.commitDate(root, hit.last.hash).catch(() => null);
+        const ts = Date.parse(iso ?? hit.last.date);
+        landedAt = Number.isFinite(ts) ? ts : NaN;
+      }
+    }
+    if (landedAt !== null) merged.set(e.prNumber, landedAt);
+    else if (state === "MERGED") merged.set(e.prNumber, NaN);
+  }
 }
 
 export interface OutcomesReport {
@@ -138,6 +196,16 @@ export async function gatherOutcomes(
       );
     }),
   );
+
+  // Rebase and squash merges whose subjects carry no "#12".
+  if (!gitUnavailable) {
+    const byPr = new Map<number, { prNumber: number; openedAt: number | null }>();
+    for (const [sid, list] of edges) {
+      const first = allSpends.find((s) => s.sessionId === sid)?.firstTs ?? null;
+      for (const e of list) if (!byPr.has(e.prNumber)) byPr.set(e.prNumber, { prNumber: e.prNumber, openedAt: e.openedAt ?? first });
+    }
+    await landedPrs(deps, root, log, [...byPr.values()], merged).catch(() => undefined);
+  }
 
   // The log has day-resolution dates; time-in-review in hours needs the real
   // merge time, so read it for the PRs a session is linked to.

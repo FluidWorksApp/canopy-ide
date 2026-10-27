@@ -26,6 +26,10 @@ vi.mock("../brainMeter", () => ({
     "commit-message": { calls: 3, failures: 0, costUsd: 0.12, inputTokens: 1, outputTokens: 1 },
     "session-title": { calls: 5, failures: 1, costUsd: 0.004, inputTokens: 1, outputTokens: 1 },
   })),
+  brainSpendByProject: vi.fn(() => [
+    { id: "p1", name: "Shop", calls: 6, costUsd: 0.11 },
+    { id: "", name: "Not about a project", calls: 2, costUsd: 0.014 },
+  ]),
 }));
 
 import * as status from "../brainStatus";
@@ -54,6 +58,9 @@ describe("BrainChip", () => {
     expect(rows[1]).toHaveTextContent(/Commit messages\s*3\s*\$0\.12/);
     expect(rows[2]).toHaveTextContent(/Session names\s*5\s*<\$0\.01/);
     expect(rows[3]).toHaveTextContent(/All features\s*8\s*\$0\.12/);
+    // And per project.
+    const byProject = within(pop).getByRole("table", { name: "Canopy's spend today by project" });
+    expect(within(byProject).getAllByRole("row")[1]).toHaveTextContent(/Shop\s*6\s*\$0\.11/);
   });
 
   it("edits the daily and per-feature budgets", async () => {
