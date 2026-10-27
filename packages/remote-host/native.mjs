@@ -28,6 +28,7 @@ import {WorkspaceUploads} from './file-upload.mjs';
 import {listWorkspaceFiles,searchWorkspaceFiles} from './file-search.mjs';
 import {agentWorkspaceCommands} from './agent-workspace.mjs';
 import {gitOpsCommands} from './git-ops.mjs';
+import {workspaceMiscCommands} from './workspace-misc.mjs';
 import {workspaceActivity} from './activity.mjs';
 import {sessionProcessReader} from './session-processes.mjs';
 import {McpRegistry} from './mcp-servers.mjs';
@@ -95,6 +96,8 @@ const familyContext={run,scoped,execute,home:HOME,root:ROOT,
  // Store mutations wake the IDE's caches through store_changes, as change::pulse does.
  pulse:(store,scope,id)=>{changeCursor++;changes.push({sequence:changeCursor,change:{store,scope:scope??ROOT,id:id??''}});if(changes.length>1024)changes.shift();}};
 familyContext.changed=familyContext.pulse;
+// Hooks and MCP for one CLI inside one profile root (profiles.rs root_for).
+familyContext.setupAgent=async(agent,id)=>{const profile=(await profiles.list()).find(p=>p.id===String(id??''));if(!profile)throw Error('Unknown profile');return profile.id==='default'?integrations.setup(agent):new AgentIntegrations(profile.root).setup(agent);};
 const taskStore=taskStoreFor(familyContext);
 // A structured runner may only run the current attempt, in the worktree its task reserved.
 familyContext.authorize=async(attemptId,cwd)=>{
@@ -106,7 +109,7 @@ familyContext.authorize=async(attemptId,cwd)=>{
 };
 const channels=new ChannelHub();
 export const NATIVE_FAMILIES=Object.assign({},...[
- workspaceToolsCommands,workspaceCleanupCommands,lspCommands,githubCommands,taskStoreCommands,workflowStoreCommands,structuredRunnerCommands,turnsCommands,provenanceCommands,gitOpsCommands,agentWorkspaceCommands,
+ workspaceToolsCommands,workspaceCleanupCommands,lspCommands,githubCommands,taskStoreCommands,workflowStoreCommands,structuredRunnerCommands,turnsCommands,provenanceCommands,gitOpsCommands,agentWorkspaceCommands,workspaceMiscCommands,
 ].map(family=>family(familyContext)));
 const FAMILIES=NATIVE_FAMILIES;
 const CLIS=['claude','codex','amp','aider','agy','opencode','omp','cursor-agent','grok'];
@@ -119,6 +122,10 @@ export async function nativeInvoke(command,args={}){
   if(command==='task_spawn_binding')return taskStore.spawnBinding(args.runId??null,args.attemptId??null);
   if(command==='task_mark_spawned'){await taskStore.markSpawned(args.binding);return;}
   if(command==='task_mark_launch_failed'){await taskStore.markLaunchFailed(args.binding);return;}
+  if(command==='pty_output'){
+   const id=Number(args.id);if(!Number.isInteger(id)||id<0)return null;
+   try{const response=await fetch(`http://127.0.0.1:8080/sessions/${id}/output`,{method:'POST',headers:{authorization:`Bearer ${process.env.CANOPY_RUNNER_TOKEN??''}`,'content-type':'application/json'},body:JSON.stringify({max:args.max??null}),signal:AbortSignal.timeout(5000)});if(!response.ok)return null;return (await response.json()).text??null;}catch{return null;}
+  }
   if(command==='channel_poll')return channels.poll(args.ids,args.wait);
   if(command==='channel_drop'){channels.drop(args.ids);return;}
   if(Object.hasOwn(FAMILIES,command)){
@@ -200,6 +207,11 @@ export async function nativeInvoke(command,args={}){
   if(command==='store_save'){const parsed=JSON.parse(args.data);if(!Array.isArray(parsed.projects))throw Error('Invalid projects');for(const project of parsed.projects)for(const component of project.components??[])await scoped(component.path);await saveMetadata('ide-projects.json',parsed);return;}
   if(command==='fs_read_dir'){const directory=await scoped(target);const entries=await readdir(directory,{withFileTypes:true});if(entries.length>4096)throw Error('Directory too large');return entries.map(e=>({name:e.name,path:path.join(directory,e.name),is_dir:e.isDirectory(),is_symlink:e.isSymbolicLink()}));}
   if(command==='fs_read_file'){const bytes=await boundedRead(await scopedFile(target),Math.min(args.maxBytes??1048576,1048576));return {b64:bytes.toString('base64')};}
+  // A bounded slice of a file, for reads larger than one answer (a note image).
+  if(command==='fs_read_range'){
+   const offset=Number(args.offset??0),length=Math.min(Number(args.length??1048576),1048576);if(!Number.isSafeInteger(offset)||offset<0||!Number.isSafeInteger(length)||length<0)throw Error('Invalid file range');
+   const handle=await open(await scopedFile(target),'r');try{const size=(await handle.stat()).size;const bytes=Buffer.alloc(Math.max(0,Math.min(length,size-offset)));const {bytesRead}=await handle.read(bytes,0,bytes.length,offset);return {b64:bytes.subarray(0,bytesRead).toString('base64'),size};}finally{await handle.close();}
+  }
   if(command==='fs_write_file'||command==='fs_create_file'){const text=command==='fs_create_file'?'':args.content;if(typeof text!=='string'||Buffer.byteLength(text)>1048576)throw Error('Invalid file content');const destination=await scopedFile(target,true);if(command==='fs_create_file')await writeFile(destination,text,{flag:'wx',mode:0o600});else await writeWorkspaceFile(destination,text);return target;}
   if(command==='fs_create_dir'){await mkdir(await scoped(target,true));return target;}
   if(command==='fs_trash'){

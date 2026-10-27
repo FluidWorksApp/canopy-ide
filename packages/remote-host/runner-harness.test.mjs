@@ -58,3 +58,15 @@ test('POST /browser runs the op on the workspace browser and maps its failures',
  try{const response=await call(none.url,'/browser',{op:'snapshot'});assert.equal(response.status,503);assert.equal((await response.json()).reason,'not-implemented');}
  finally{await stop(none.server);}
 });
+
+test('POST /sessions/:id/output returns the tail of what a terminal printed',async()=>{
+ let emit;
+ const {server,url}=await start({spawnPty:()=>({pid:801,onData(fn){emit=fn;},onExit(){},kill(){},resize(){},write(){}})});
+ try{
+  const {id}=await (await call(url,'/sessions',{requestId:'request-out',command:'bash'})).json();
+  emit('hello ');emit('world');
+  assert.deepEqual(await (await call(url,`/sessions/${id}/output`,{max:5})).json(),{text:'world'});
+  assert.deepEqual(await (await call(url,`/sessions/${id}/output`,{})).json(),{text:'hello world'});
+  assert.deepEqual(await (await call(url,'/sessions/999/output',{})).json(),{text:null});
+ }finally{await stop(server);}
+});

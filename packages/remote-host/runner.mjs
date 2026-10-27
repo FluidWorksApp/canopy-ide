@@ -191,6 +191,10 @@ export function createRunner({ secret, spawnPty, accounts = [], workspaceId = 'w
       await ready;
       if (request.method === 'POST' && route === '/native') { const input = await body(request); return json(response, 200, {result: (await nativeInvoke(input.command, input.args)) ?? null}); }
       if (request.method === 'POST' && route === '/language/analyze') return json(response, 200, await analyze(await body(request), scopedPath));
+      // The tail of a terminal's output, for pty_output (agents and the IDE read
+      // what a run printed). Raw bytes, like the desktop's scrollback tail.
+      const output = request.method === 'POST' && route.match(/^\/sessions\/(\d+)\/output$/);
+      if (output) { const session = sessions.get(Number(output[1])); const { max } = await body(request); const limit = Math.max(0, Math.min(Number.isInteger(max) ? max : 64 * 1024, OUTPUT_CAP)); return json(response, 200, { text: session ? session.output.subarray(Math.max(0, session.output.length - limit)).toString('utf8') : null }); }
       if (request.method === 'GET' && route === '/sessions') return json(response, 200, [...sessions.values()].map(summarize));
       if (request.method === 'POST' && route === '/sessions') return json(response, 200, await spawnSession(await body(request, 16 * 1024)));
       if (request.method === 'POST' && route === '/desktop') return json(response, 200, await startDesktop());

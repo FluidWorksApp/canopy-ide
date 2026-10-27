@@ -39,9 +39,26 @@ export const COMPANION_DESKTOP_EVENTS=['agent:ui','agent:action','agent:browser'
 // The signed-in account, crash reports and the remote portal belong to this
 // computer; the workspace has none of them.
 for(const command of ['canopy_account_request','report_crash','send_crash','crash_issue_draft','file_crash_issue','remote_status','remote_enable','remote_disable','remote_qr','remote_rotate_pin','remote_socket_metrics'])LOCAL_UI.add(command);
+// The person's credential vault is theirs, on this computer, and fills pages
+// shown here; it never moves into a workspace.
+for(const command of ['vault_status','vault_create','vault_unlock','vault_lock','vault_change_passphrase','vault_list','vault_matches','vault_save','vault_delete','vault_reveal','vault_read','vault_fill','vault_import_kdbx','vault_approvals','vault_approve','vault_revoke'])LOCAL_UI.add(command);
+// Android phones and emulators are attached to this computer, and the VM image
+// has no Android SDK, so device tools act on this computer's devices.
+for(const command of ['android_sdk_status','android_devices','android_avds','android_emulator_start','android_emulator_stop','android_screencap','android_ui_dump','android_layout','android_foreground','android_tap','android_text','android_swipe','android_key','android_logcat','android_run','android_describe'])LOCAL_UI.add(command);
+// The LAN relay is hosted by the desktop app between people's computers; its
+// file offers use this computer's dialogs and paths. Its status goes with it.
+for(const command of ['relay_status','relay_host_start','relay_host_stop','relay_regenerate_code','relay_connect','relay_disconnect','relay_send_chat','relay_send_collab','relay_send_command','relay_offer_file','relay_accept_file'])LOCAL_UI.add(command);
+// Public links expose this computer's own portal port (tunnel.rs); Linear is a
+// plain HTTPS API called with a key from this computer's settings.
+for(const command of ['tunnel_start','tunnel_stop','tunnel_status','linear_issues','linear_issue_detail','linear_issue_set_state','linear_issue_comment'])LOCAL_UI.add(command);
+// This app's own diagnostics, self-test harness, `canopy` launcher, and
+// workspace files chosen in this computer's save/open dialogs.
+for(const command of ['process_capture_metrics','snapshot_capture_metrics','browser_close_metrics','browser_pressure_reload_metrics','selftest_checkpoint','selftest_checkpoint_save','selftest_finish','selftest_reload_renderer','selftest_spawn_remote','selftest_store_contains','cli_install_shim','workspace_export','workspace_import'])LOCAL_UI.add(command);
+/** Desktop events that belong to the commands above. */
+const DESKTOP_EVENTS=['relay:state','relay:chat','relay:command','relay:collab','relay:transfer','relay:transfer-progress','tunnel:state'];
 /** Commands this adapter answers itself (below) rather than passing to the
  *  host by name: terminals, browser streams, uploads and clone progress. */
-export const WORKSPACE_ADAPTER_COMMANDS=['spot_save_context_image','spot_stage_drop_images','chrome_stream_ticket','chrome_stream_close','chrome_stream_open','execution_remote_upload','execution_remote_upload_cancel','git_clone','environment_identity','pty_renderer_register','pty_renderer_sessions','instance_id','pty_spawn','pty_spawn_attached_argv','pty_spawn_argv','pty_spawn_detached','pty_attach_desktop','pty_read_desktop','pty_detach_desktop','pty_ack','pty_write_binary','pty_write','pty_resize','pty_kill','pty_set_name_theme','cli_set_native_update_env','pty_set_title','pty_set_name','pty_stats'] as const;
+export const WORKSPACE_ADAPTER_COMMANDS=['spot_save_context_image','notes_attach_file','spot_stage_drop_images','chrome_stream_ticket','chrome_stream_close','chrome_stream_open','execution_remote_upload','execution_remote_upload_cancel','git_clone','browser_supported','environment_identity','pty_renderer_register','pty_renderer_sessions','instance_id','pty_spawn','pty_spawn_attached_argv','pty_spawn_argv','pty_spawn_detached','pty_attach_desktop','pty_read_desktop','pty_detach_desktop','pty_ack','pty_write_binary','pty_write','pty_resize','pty_kill','pty_set_name_theme','cli_set_native_update_env','pty_set_title','pty_set_name','pty_stats'] as const;
 /** Whether a command runs on the computer showing the IDE in remote mode. */
 export const isDesktopLocal=(command:string)=>LOCAL_UI.has(command);
 class WorkspaceChannel<T> implements HostChannel<T>{onmessage:(message:T)=>void=()=>{};}
@@ -298,6 +315,7 @@ export class NativeWorkspaceHost implements Host {
       }
       return this.desktopCall<T>(command,args);
     }
+    if(command==='notes_attach_file')return await this.attachWorkspaceFile(args) as T;
     if(command==='spot_stage_drop_images'){await this.call('/resources');return this.desktopCall<T>('execution_remote_stage_images',{...args,workspaceId:this.connection.workspaceId,endpoint:this.connection.endpoint});}
     if(command==='execution_remote_upload')return this.desktopCall<T>(command,{...args,workspaceId:this.connection.workspaceId,endpoint:this.connection.endpoint});
     if(command==='execution_remote_upload_cancel')return this.desktopCall<T>(command,args);
@@ -316,7 +334,9 @@ export class NativeWorkspaceHost implements Host {
         job=await this.native('git_clone_status',{id:job.id});
       }
     }
-    if(command==='environment_identity')value=`${this.connection.endpoint}/${this.connection.workspaceId}`;
+    // Workspace previews stream a VM browser; the native webview never applies.
+    if(command==='browser_supported')value=false;
+    else if(command==='environment_identity')value=`${this.connection.endpoint}/${this.connection.workspaceId}`;
     else if(command==='pty_renderer_register'){
       // Keep the Mac watchdog alive, but never adopt its local processes.
       const [registration,metadata,sessions,instance]=await Promise.all([
@@ -400,6 +420,26 @@ export class NativeWorkspaceHost implements Host {
     if(command==='fs_read_file' && value && typeof value==='object' && 'b64' in value) return Uint8Array.from(atob(String(value.b64)), c=>c.charCodeAt(0)).buffer as T;
     return value as T;
   }
+  /** Notes live on this computer and the file in the workspace: read it from
+   * the workspace in slices and attach the bytes, with notes.rs attach_file's
+   * kind, title, extension and size rules. */
+  private async attachWorkspaceFile(args:Args){
+    const path=String(args.path??'');const name=path.split('/').pop()??'';const dot=name.lastIndexOf('.');
+    const ext=dot>0?name.slice(dot+1).toLowerCase():'';
+    const kind=typeof args.kind==='string'?args.kind:['png','jpg','jpeg','gif','webp','bmp'].includes(ext)?'image':'artifact';
+    const image=kind==='image',limit=image?16*1024*1024:512*1024;
+    const parts:Uint8Array[]=[];let offset=0,size=0;
+    try{
+      do{const slice=await this.native<{b64:string;size:number}>('fs_read_range',{path,offset,length:1024*1024});size=slice.size;
+        if(size>limit)throw Error(`file is ${size} bytes; the limit is ${limit}`);
+        const bytes=Uint8Array.from(atob(slice.b64),c=>c.charCodeAt(0));if(!bytes.length)break;parts.push(bytes);offset+=bytes.length;}while(offset<size);
+    }catch(error){throw Error(`could not read ${path}: ${String(error).replace(/^Error: /,'')}`);}
+    const bytes=new Uint8Array(offset);let at=0;for(const part of parts){bytes.set(part,at);at+=part.length;}
+    const stem=dot>0?name.slice(0,dot):name;
+    const title=(typeof args.title==='string'&&args.title.trim())||stem||(image?'image':'capture');
+    let data='';if(image){let binary='';for(let i=0;i<bytes.length;i+=0x8000)binary+=String.fromCharCode(...bytes.subarray(i,i+0x8000));data=btoa(binary);}else data=new TextDecoder().decode(bytes);
+    return this.desktopCall('notes_add_attachment',{projectId:args.projectId,id:args.id,kind,title,data,ext:ext||(image?'png':'txt')});
+  }
   /** A host command, with an older host told apart from a missing feature: a
    * newer app asking a workspace that still runs last month's host gets one
    * plain "restart or update the workspace" instead of "does not support". */
@@ -454,7 +494,7 @@ export class NativeWorkspaceHost implements Host {
   }
   async listen<T>(event:string,handler:(event:HostEvent<T>)=>void):Promise<UnlistenFn>{
     if(this.disposed)throw Error('Workspace disconnected');
-    if(['remote:upload-progress','menu','deep-link','memory:pressure','window:fullscreen','clipboard:changed','clipboard:blocked','dictation:progress','dictation:partial','dictation:level',...COMPANION_DESKTOP_EVENTS].includes(event)){const companionOnly=event.startsWith('agent:');const release=await this.desktop.listen<T>(event,value=>{if(this.disposed)return;if(companionOnly&&(value.payload as {ptyId?:unknown}|null)?.ptyId!=null)return;handler(value);});if(this.disposed){release();return()=>{};}const cancel=()=>{this.desktopListeners.delete(cancel);release();};this.desktopListeners.add(cancel);return cancel;}
+    if(['remote:upload-progress','menu','deep-link','memory:pressure','window:fullscreen','clipboard:changed','clipboard:blocked','dictation:progress','dictation:partial','dictation:level',...COMPANION_DESKTOP_EVENTS,...DESKTOP_EVENTS].includes(event)){const companionOnly=event.startsWith('agent:');const release=await this.desktop.listen<T>(event,value=>{if(this.disposed)return;if(companionOnly&&(value.payload as {ptyId?:unknown}|null)?.ptyId!=null)return;handler(value);});if(this.disposed){release();return()=>{};}const cancel=()=>{this.desktopListeners.delete(cancel);release();};this.desktopListeners.add(cancel);return cancel;}
     const list=this.listeners.get(event)??new Set();this.listeners.set(event,list);list.add(handler as (event:HostEvent<unknown>)=>void);this.beginPoll();return ()=>{list.delete(handler as (event:HostEvent<unknown>)=>void);};
   }
   channel<T>():HostChannel<T>{return new WorkspaceChannel<T>();}

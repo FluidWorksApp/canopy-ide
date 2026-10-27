@@ -80,9 +80,11 @@ it('keeps the scratchpad on the viewing computer, but attaches workspace files t
  expect(desktop.invoke).toHaveBeenCalledWith('notes_create',note);
  expect(desktop.invoke).toHaveBeenCalledWith('notes_list',{projectId:'p_1',status:null,limit:50});
  expect(fetcher).not.toHaveBeenCalled();
+ fetcher.mockImplementation(async()=>({ok:true,json:async()=>({result:{b64:btoa('hi'),size:2}})}));
  await host.invoke('notes_attach_file',{projectId:'p_1',id:'n1',path:'/workspace/a.txt'});
  expect(desktop.invoke).not.toHaveBeenCalledWith('notes_attach_file',expect.anything());
  expect(fetcher.mock.calls.at(-1)![0]).toContain('/workspaces/alice/native');
+ expect(desktop.invoke).toHaveBeenCalledWith('notes_add_attachment',{projectId:'p_1',id:'n1',kind:'artifact',title:'a',data:'hi',ext:'txt'});
  host.dispose();
 });
 const connection = {endpoint:'http://127.0.0.1:8787',token:'synthetic-token',workspaceId:'alice',workspaceName:'Alice'};
@@ -684,4 +686,23 @@ it('streams a workspace command\'s channel output back from the host',async()=>{
  expect(sent.args.onMessage.__canopyChannel).toMatch(/^[0-9a-f-]{36}$/);
  await vi.waitFor(()=>expect(seen).toEqual(['{"id":1}','{"id":2}']));
  expect(polls).toBe(2);await vi.waitFor(()=>expect(exits).toEqual([3]));host.dispose();
+});
+it('attaches a workspace file to a note kept on this computer',async()=>{
+ const {host,desktop,fetcher}=setup();
+ const reads:Array<{offset:number}>=[];
+ fetcher.mockImplementation(async(_url:string,options:RequestInit)=>{const body=JSON.parse(String(options.body||'{}'));
+  if(body.command==='fs_read_range'){reads.push(body.args);return {ok:true,json:async()=>({result:{b64:body.args.offset===0?btoa('PNG'):'',size:3}})};}
+  return {ok:true,json:async()=>({result:null})};});
+ vi.mocked(desktop.invoke).mockResolvedValue({file:'attachments/01-shot.png'});
+ await host.invoke('notes_attach_file',{projectId:'p',id:'n1',path:'/workspace/.canopy/spot/shot.png'});
+ expect(reads).toEqual([{path:'/workspace/.canopy/spot/shot.png',offset:0,length:1048576}]);
+ expect(desktop.invoke).toHaveBeenCalledWith('notes_add_attachment',{projectId:'p',id:'n1',kind:'image',title:'shot',data:btoa('PNG'),ext:'png'});
+ host.dispose();
+});
+it('keeps relay, vault and device tools on this computer and says the workspace has no native browser',async()=>{
+ const {host,desktop,fetcher}=setup();vi.mocked(desktop.invoke).mockResolvedValue({role:'off'});
+ for(const command of ['relay_status','vault_list','android_devices','tunnel_status','linear_issues'])await host.invoke(command,{});
+ expect(vi.mocked(desktop.invoke).mock.calls.map(([c])=>c)).toEqual(['relay_status','vault_list','android_devices','tunnel_status','linear_issues']);
+ expect(await host.invoke('browser_supported')).toBe(false);
+ expect(fetcher).not.toHaveBeenCalled();host.dispose();
 });

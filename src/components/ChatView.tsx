@@ -159,7 +159,7 @@ export function ChatView({ peer, title, relay, onNotice }: ChatViewProps) {
               <div
                 className="chat-file"
                 title={m.file.path ?? m.file.name}
-                onClick={() => m.file?.path && void ipc.fsReveal(m.file.path)}
+                onClick={() => m.file?.path && void ipc.fsRevealDesktop(m.file.path)}
               >
                 <span className="chat-file-icon">📎</span>
                 <span className="chat-file-name">{m.file.name}</span>

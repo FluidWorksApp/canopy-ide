@@ -12,31 +12,18 @@ const unsupported = (feature: string, commands: string[]) => {
   for (const command of commands) UNSUPPORTED[command] = feature;
 };
 // The embedded native webview lives in the desktop window and can only load
-// pages this computer can reach; workspace previews stream a browser running
-// in the VM instead (chrome_stream_open → workspace_chrome_stream_open).
+// pages this computer can reach. A workspace replaces it: previews stream a
+// browser running in the VM (chrome_stream_open → workspace_chrome_stream_open)
+// and browser_supported answers false, so these are never sent; refusing them
+// keeps a stray call from reaching either machine.
 unsupported("The built-in native browser", [
   "browser_open", "browser_close", "browser_navigate", "browser_set_bounds", "browser_set_visible",
   "browser_command", "browser_run_op", "browser_snapshot", "browser_frame", "browser_here",
   "browser_painted", "browser_clear_data",
 ]);
-// Showing a VM path in this computer's file manager cannot work.
+// Showing a VM path in this computer's file manager cannot work; the menu
+// items that offer it are hidden in a workspace (isRemoteUnsupported).
 unsupported("Reveal in file manager", ["fs_reveal"]);
-// The desktop's per-terminal memory budgets have no equivalent: one cgroup
-// limit covers the whole workspace (terminal_governor_status says monitor_only).
-unsupported("Per-terminal memory budgets", [
-  "terminal_governor_grant", "terminal_governor_stop", "terminal_governor_remember_default",
-  "terminal_governor_set_memory_maximum",
-]);
-// Peer-to-peer LAN sessions are hosted by the desktop app; a workspace is
-// shared through its own members and links instead (relay_status reports off).
-unsupported("LAN relay sessions", [
-  "relay_host_start", "relay_host_stop", "relay_connect", "relay_disconnect", "relay_regenerate_code",
-  "relay_send_chat", "relay_send_collab", "relay_send_command", "relay_offer_file", "relay_accept_file",
-]);
-// Building and installing needs the Android SDK next to the project; the VM
-// image has none, and the devices are attached to the person's computer.
-unsupported("Running Android apps", ["android_run", "android_describe"]);
-
 export const UNSUPPORTED_REMOTE: ReadonlySet<string> = new Set(Object.keys(UNSUPPORTED));
 export const isRemoteUnsupported = (command: string) => Object.hasOwn(UNSUPPORTED, command);
 export const remoteUnsupportedMessage = (command: string) =>
