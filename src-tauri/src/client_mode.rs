@@ -191,7 +191,7 @@ pub async fn canopy_account_request(
     Ok(value)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn execution_remote_get(
     app: tauri::AppHandle,
     state: tauri::State<RemoteConnectionState>,
@@ -212,7 +212,7 @@ pub fn execution_remote_get(
     Ok(current.clone())
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn execution_remote_set(
     app: tauri::AppHandle,
     state: tauri::State<RemoteConnectionState>,
@@ -304,6 +304,9 @@ fn connection_id(c: &RemoteConnection) -> String {
     format!("{}/{}", c.endpoint.trim_end_matches('/'), c.workspace_id)
 }
 const SAVED_SERVICE: &str = "app.causeconnect.canopy.remote-workspaces";
+// Every command that reaches the saved connections is `#[tauri::command(async)]`:
+// a sync command runs on the main thread, and the credential store can wait on
+// a keyring unlock prompt (test: credential_store_commands_stay_off_the_main_thread).
 fn saved_connections() -> Result<Vec<RemoteConnection>, String> {
     match crate::secure_store::get(SAVED_SERVICE, "saved") {
         Ok(Some(bytes)) => serde_json::from_slice(&bytes)
@@ -332,7 +335,7 @@ pub struct SavedWorkspace {
     workspace_id: String,
     workspace_name: String,
 }
-#[tauri::command]
+#[tauri::command(async)]
 pub fn execution_remote_list() -> Result<Vec<SavedWorkspace>, String> {
     Ok(saved_connections()?
         .into_iter()
@@ -344,7 +347,7 @@ pub fn execution_remote_list() -> Result<Vec<SavedWorkspace>, String> {
         })
         .collect())
 }
-#[tauri::command]
+#[tauri::command(async)]
 pub fn execution_remote_forget(
     app: tauri::AppHandle,
     state: tauri::State<RemoteConnectionState>,
@@ -368,7 +371,7 @@ pub fn execution_remote_forget(
     Ok(())
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn execution_remote_activate(
     app: tauri::AppHandle,
     state: tauri::State<RemoteConnectionState>,
@@ -1261,5 +1264,56 @@ mod account_import_tests {
             "codex",
             &serde_json::json!({"OPENAI_API_KEY":"synthetic-key"})
         ));
+    }
+}
+
+#[cfg(test)]
+mod credential_thread_tests {
+    /// Sync Tauri commands run on the main (UI) thread. Anything that reads or
+    /// writes the credential store may block on D-Bus or a keyring prompt, so
+    /// it must be an async command (or `command(async)`, which Tauri runs on
+    /// its async runtime instead).
+    #[test]
+    fn credential_store_commands_stay_off_the_main_thread() {
+        let source = include_str!("client_mode.rs");
+        let lines: Vec<&str> = source.lines().collect();
+        let callers = [
+            "saved_connections()",
+            "save_connections(",
+            "account_token()",
+        ];
+        let mut checked = 0;
+        for (i, line) in lines.iter().enumerate() {
+            if !(line.starts_with("pub fn ") || line.starts_with("pub async fn ")) {
+                continue;
+            }
+            let attribute = lines[..i]
+                .iter()
+                .rev()
+                .find(|l| !l.trim_start().starts_with("//"))
+                .copied()
+                .unwrap_or("");
+            if !attribute.starts_with("#[tauri::command") {
+                continue;
+            }
+            let body: String = lines[i..]
+                .iter()
+                .take_while(|l| **l != "}")
+                .copied()
+                .collect::<Vec<_>>()
+                .join("\n");
+            if !callers.iter().any(|c| body.contains(c)) {
+                continue;
+            }
+            checked += 1;
+            assert!(
+                line.starts_with("pub async fn ") || attribute == "#[tauri::command(async)]",
+                "{line} touches the credential store on the main thread"
+            );
+        }
+        assert!(
+            checked >= 6,
+            "expected the credential-store commands, found {checked}"
+        );
     }
 }
