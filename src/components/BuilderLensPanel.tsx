@@ -20,6 +20,7 @@ import { gateNotices, leadFinding, subscribeGateNotices } from "../gates/events"
 import { isActiveGate, loadRules, republishPolicy } from "../gates/rules";
 import { layerApprovals, layerOfGateId, APPROVAL_TTL_MS, type LayerApprovalData } from "../lensGates";
 import { requestLayerApproval, subscribeLayerApprovals } from "../lensApprovals";
+import { shareLayerClaim, subscribeClaimSync } from "../lensClaimSync";
 import { peekTeamIdentity, subscribeTeamIdentity, teamIdentity, type TeamIdentity } from "../teamIdentity";
 import {
   RISK_LABEL,
@@ -257,6 +258,8 @@ function ChangesSection({
   const stepsVersion = useSyncExternalStore(subscribeLensSteps, lensStepsVersion);
   const steps = useMemo(() => lensSteps(root), [root, stepsVersion]); // eslint-disable-line react-hooks/exhaustive-deps
   const notices = useSyncExternalStore(subscribeGateNotices, gateNotices);
+  const [syncTick, setSyncTick] = useState(0);
+  useEffect(() => subscribeClaimSync(() => setSyncTick((t) => t + 1)), []);
 
   // Saved versions come from git; refreshed whenever a turn ends.
   useEffect(() => {
@@ -330,7 +333,7 @@ function ChangesSection({
     return () => {
       live = false;
     };
-  }, [items, root, me]);
+  }, [items, root, me, syncTick]);
 
   // Files already sent for approval (waiting, or approved within the day)
   // don't ask again.
@@ -979,11 +982,16 @@ function LayersSection({ project, root }: { project: BuilderLensPanelProps["proj
 
   // Ownership is enforced (lensGates.ts), so every change to it republishes
   // the policy the hook reads.
+  // A teammate's claim or release, applied here by lensClaimSync.
+  useEffect(() => subscribeClaimSync(() => void layerOwners(root).then(setOwners)), [root]);
+  // Ownership is shared with the team (lensClaimSync.ts) so every teammate's
+  // Canopy enforces it.
   const claim = async (layer: OwnedLayer) => {
     if (!me) return;
-    await claimLayer(root, layer, me).catch(() => undefined);
+    const entry = await claimLayer(root, layer, me).catch(() => null);
     setOwners(await layerOwners(root));
     await republishPolicy(root).catch(() => undefined);
+    if (entry) void shareLayerClaim(root, "claim", entry);
   };
   const release = async (layer: OwnedLayer) => {
     const c = owners[layer];
@@ -991,6 +999,7 @@ function LayersSection({ project, root }: { project: BuilderLensPanelProps["proj
     await releaseLayer(root, c).catch(() => undefined);
     setOwners(await layerOwners(root));
     await republishPolicy(root).catch(() => undefined);
+    void shareLayerClaim(root, "release", c);
   };
   const saveGlobs = async (layer: OwnedLayer) => {
     const next = await saveLayerGlobs(root, layer, draft.split(/\n|,/).map((g) => g.trim()));
@@ -1042,7 +1051,7 @@ function LayersSection({ project, root }: { project: BuilderLensPanelProps["proj
       {me ? (
         <p className="builder-lens-note">
           You’re signed in as {me.name}. Agents can’t change a layer someone else owns until its owner approves;
-          your own agents can.
+          your own agents can. What you own is shared with your team, so their Canopy enforces it too.
         </p>
       ) : (
         known && (

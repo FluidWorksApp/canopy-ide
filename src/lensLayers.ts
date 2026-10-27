@@ -269,6 +269,9 @@ export interface LayerOwnerRule {
   /** The owner's team identity. Absent on claims made before ownership was
    *  tied to the signed-in account; those match by name. */
   ownerId?: string;
+  /** Stable id of this claim across the team (lensClaimSync.ts): the same on
+   *  every teammate's machine, so a re-announcement applies once. */
+  claimId?: string;
 }
 
 export type LayerOwners = Partial<Record<OwnedLayer, LedgerEntry<LayerOwnerRule>>>;
@@ -297,7 +300,12 @@ export async function layerOwners(root: string): Promise<LayerOwners> {
 }
 
 /** Claim a layer as the signed-in person. */
-export async function claimLayer(root: string, layer: OwnedLayer, me: TeamIdentity): Promise<LedgerEntry<LayerOwnerRule>> {
+export async function claimLayer(
+  root: string,
+  layer: OwnedLayer,
+  me: TeamIdentity,
+  claimId: string = crypto.randomUUID(),
+): Promise<LedgerEntry<LayerOwnerRule>> {
   const name = me.name.trim().slice(0, 80) || me.email;
   return appendLedger<LayerOwnerRule>(root, {
     kind: "rule",
@@ -305,7 +313,7 @@ export async function claimLayer(root: string, layer: OwnedLayer, me: TeamIdenti
     scope: "team",
     subject: `${name} owns ${LAYER_LABEL[layer]}`,
     ref: { kind: OWNER_REF_KIND, id: layer },
-    data: { type: "layer-owner", layer, owner: name, ownerId: me.id },
+    data: { type: "layer-owner", layer, owner: name, ownerId: me.id, claimId },
     status: "active",
   });
 }

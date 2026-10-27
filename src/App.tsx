@@ -122,6 +122,7 @@ import { builderRoot, defaultLens, initialLensConfig, projectLens, toggleProject
 import { startLensSteps } from "./lensSteps";
 import { setBrainProjectResolver } from "./brainMeter";
 import { startLensApprovals } from "./lensApprovals";
+import { startLensClaimSync } from "./lensClaimSync";
 import { teamIdentity } from "./teamIdentity";
 import {
   dismissTerminalMemoryPromptsForWindow,
@@ -982,6 +983,10 @@ export default function App() {
         }),
     });
     const stopApprovals = startLensApprovals();
+    // Layer claims shared with the team, so every teammate enforces them.
+    const stopClaims = startLensClaimSync({
+      roots: () => wsRef.current.projects.flatMap((p) => p.components.map((c) => c.path)),
+    });
     // Who is signed in, early: terminals carry it (ipc.ts withMember) so a
     // layer owner's own agents pass their layer's gate.
     void teamIdentity();
@@ -989,6 +994,7 @@ export default function App() {
       stop();
       stopSteps();
       stopApprovals();
+      stopClaims();
       setCloudRosterProvider(null);
     };
   }, [meshJobs]);

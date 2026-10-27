@@ -8,7 +8,8 @@ vi.mock('./history',()=>({
 }));
 vi.mock('@tauri-apps/api/core',()=>({invoke:vi.fn(async()=>({user:{id:'me'}}))}));
 vi.mock('../settings',()=>({getSettings:()=>({})}));
-import {teamSession,clearTeamSessions,subscribeLiveEvents,subscribeTeamMessages,type TeamLiveEvent} from './session';
+import {teamSession,clearTeamSessions,subscribeLayerEvents,subscribeLiveEvents,subscribeTeamMessages,type TeamLayerEvent,type TeamLiveEvent} from './session';
+import {LAYER_VERSION} from './layerEvents';
 import {CHAT_VERSION} from './chatEvents';
 import {LIVE_VERSION} from './liveEvents';
 import type {ChatMessage} from './client';
@@ -41,5 +42,22 @@ describe('live session traffic in a team session',()=>{
   await session.sendLive('ana',room,{op:'leave'});
   expect(mocks.sendToCapable.mock.calls.map(c=>c[0])).toEqual([LIVE_VERSION]);
   release();
+ });
+ it('routes layer ownership events to their listeners, saying whether the sender is a team member, and sends them team-wide',async()=>{
+  const session=teamSession('team-layer','me');const release=session.retain();await flush();await flush();
+  const events=mocks.options.at(-1);events.members([{id:'me',name:'Me'},{id:'sam',name:'Sam'}]);
+  const got:TeamLayerEvent[]=[],messages:unknown[]=[];
+  const stop=subscribeLayerEvents(e=>got.push(e)),stopMessages=subscribeTeamMessages(e=>messages.push(e));
+  const layer={type:'layer',target:room,op:'claim',layer:'data',repo:{host:'github.com',slug:'acme/shop'},owner:'Sam',at:1} as const;
+  const m:ChatMessage={id:'7c9e6679-7425-40de-944b-e07fc1f90ae8',sender:'sam',recipient:null,text:'Sam now owns Data',created:Date.now(),v:CHAT_VERSION,event:layer};
+  await events.persist(m);events.message(m);
+  events.message({...m,id:'7c9e6679-7425-40de-944b-e07fc1f90ae9',sender:'mallory'});
+  expect(got.map(e=>[e.sender,e.member,e.senderName])).toEqual([['sam',true,'Sam'],['mallory',false,undefined]]);
+  expect(got[0].event).toEqual(layer);
+  expect(session.getSnapshot().messages).toEqual([]);expect(messages).toEqual([]);expect(mocks.saveChatMessage).not.toHaveBeenCalled();
+  await session.sendLayer({target:room,op:'release',layer:'data',repo:{host:'github.com',slug:'acme/shop'},owner:'Me',at:2});
+  expect(mocks.sendToCapable.mock.calls.at(-1)![0]).toBe(LAYER_VERSION);
+  expect(mocks.sendToCapable.mock.calls.at(-1)![1]).toMatchObject({recipient:null,event:{type:'layer',op:'release'}});
+  stop();stopMessages();release();
  });
 });
