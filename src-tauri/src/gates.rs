@@ -3573,6 +3573,13 @@ mod tests {
         let other = action_key("/repo", "dropdb other");
         std::fs::rename(&path, approval_path(&home, &other)).unwrap();
         assert!(!consume_once(&home, &other, 2_000));
+        // Pinned to node's createHmac over the same message
+        // (packages/remote-host/gates.test.mjs): the VM's gates.mjs mints what
+        // this verifies.
+        assert_eq!(
+            token_mac(&[7u8; 32], &"ab".repeat(16), 1234),
+            "dced8a3f781ebf3c15fe658548bbf14e1a979de9250060fd6bbc95ee54e837d3"
+        );
         // The real thing still works, and the key is the owner's alone.
         grant_once(&home, &key, 1_000).unwrap();
         assert!(consume_once(&home, &key, 2_000));

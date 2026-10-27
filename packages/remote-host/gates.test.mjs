@@ -46,5 +46,6 @@ test('token MAC is RFC 4231 HMAC-SHA256 over the same message as gates.rs',async
  const {createHmac}=await import('node:crypto');
  assert.equal(createHmac('sha256','Jefe').update('what do ya want for nothing?').digest('hex'),'5bdcc146bf60754e6a042426089575c75a003f089d2739839dec58b964ec3843');
  const secret=Buffer.alloc(32,7);
- assert.equal(tokenMac(secret,'ab'.repeat(16),1234),createHmac('sha256',secret).update(`canopy-approve-once\n${'ab'.repeat(16)}\n1234`).digest('hex'));
+ // The same literal gates.rs approve_once_tokens_must_be_signed_by_the_app pins.
+ assert.equal(tokenMac(secret,'ab'.repeat(16),1234),'dced8a3f781ebf3c15fe658548bbf14e1a979de9250060fd6bbc95ee54e837d3');
 });
