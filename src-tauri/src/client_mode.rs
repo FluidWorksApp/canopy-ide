@@ -26,6 +26,10 @@ pub struct RemoteConnectionState(pub Mutex<Option<RemoteConnection>>);
 // The account device token, in the OS credential store on every desktop
 // platform (secure_store.rs): Keychain, Credential Manager or Secret Service.
 const ACCOUNT_SERVICE: &str = "app.causeconnect.canopy.account";
+/// What an account request says when canopyide.dev doesn't have the route yet
+/// (a newer app talking to a server that hasn't been updated). The frontend
+/// matches this exact text (src/accountErrors.ts).
+pub(crate) const NOT_ON_SERVER_YET: &str = "not-on-server-yet";
 fn account_token() -> Result<Option<String>, String> {
     match crate::secure_store::get(ACCOUNT_SERVICE, "device") {
         Ok(Some(bytes)) => String::from_utf8(bytes)
@@ -140,8 +144,14 @@ pub async fn canopy_account_request(
         .bytes()
         .await
         .map_err(|_| "Canopy returned an invalid response")?;
-    let mut value: serde_json::Value =
-        serde_json::from_slice(&bytes).map_err(|_| "Canopy returned an invalid response")?;
+    let mut value: serde_json::Value = match serde_json::from_slice(&bytes) {
+        Ok(value) => value,
+        // A route the server doesn't have yet answers with the host's own 404
+        // page, not JSON. Say so plainly: the feature needs a newer server, and
+        // callers turn this into words for their feature (NOT_ON_SERVER_YET).
+        Err(_) if status == reqwest::StatusCode::NOT_FOUND => return Err(NOT_ON_SERVER_YET.into()),
+        Err(_) => return Err("Canopy returned an invalid response".into()),
+    };
     if !status.is_success() {
         // Opt-in callers branch on a machine-readable code (e.g. a 409 that
         // needs confirmation); everyone else keeps the plain message.
@@ -1273,6 +1283,17 @@ mod credential_thread_tests {
     /// writes the credential store may block on D-Bus or a keyring prompt, so
     /// it must be an async command (or `command(async)`, which Tauri runs on
     /// its async runtime instead).
+    /// The frontend turns this exact text into "not available on Canopy's
+    /// server yet" (src/accountErrors.ts); the two copies must agree.
+    #[test]
+    fn not_on_server_yet_matches_the_frontend() {
+        let frontend = include_str!("../../src/accountErrors.ts");
+        assert!(frontend.contains(&format!(
+            "export const NOT_ON_SERVER_YET = \"{}\";",
+            super::NOT_ON_SERVER_YET
+        )));
+    }
+
     #[test]
     fn credential_store_commands_stay_off_the_main_thread() {
         let source = include_str!("client_mode.rs");

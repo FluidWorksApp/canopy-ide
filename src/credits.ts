@@ -1,4 +1,5 @@
 import {invoke} from '@tauri-apps/api/core';
+import {serverFeatureError} from './accountErrors';
 import {postAttention} from './attention';
 import {subscribeWorkspaceList} from './remoteExecution/workspaceListCache';
 
@@ -65,14 +66,14 @@ export const openAccountSettings=()=>window.dispatchEvent(new CustomEvent('canop
 /** Ask Canopy support for more credit. The server rate-limits to one a day and
  * answers a repeat with the open request. */
 export async function requestMoreCredit(note?:string){
- return request<{requested:boolean;duplicate?:boolean;requestedAt?:string;emailed?:boolean}>('/api/credits',{action:'request-credit',...(note?.trim()?{note:note.trim().slice(0,1000)}:{})});
+ return request<{requested:boolean;duplicate?:boolean;requestedAt?:string;emailed?:boolean}>('/api/credits',{action:'request-credit',...(note?.trim()?{note:note.trim().slice(0,1000)}:{})}).catch((error:unknown)=>{throw serverFeatureError(error,'Requesting credit');});
 }
 
 export type CheckoutStart={url:string;sessionId:string;amountUsd:string;expiresAt?:string|null};
 /** Start a Stripe Checkout for `amountUsd`. The server answers 503 when Add
  * funds isn't configured; the balance is credited by its webhook, not here. */
 export async function startCheckout(amountUsd:number){
- return request<CheckoutStart>('/api/credits',{action:'checkout',amountUsd:amountUsd.toFixed(2)});
+ return request<CheckoutStart>('/api/credits',{action:'checkout',amountUsd:amountUsd.toFixed(2)}).catch((error:unknown)=>{throw serverFeatureError(error,'Add funds');});
 }
 /** Read the balance until the checkout `sessionId` shows up as a credited
  * purchase. Resolves with the credits that include it, or null when `signal`
