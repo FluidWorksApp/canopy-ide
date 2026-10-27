@@ -646,26 +646,9 @@ mod tests {
     }
 
     fn git_in(dir: &std::path::Path, args: &[&str]) -> String {
-        let out = std::process::Command::new("git")
-            .arg("-C")
-            .arg(dir)
-            .args([
-                "-c",
-                "user.name=T",
-                "-c",
-                "user.email=t@t",
-                "-c",
-                "commit.gpgSign=false",
-            ])
-            .args(args)
-            .output()
-            .unwrap();
-        assert!(
-            out.status.success(),
-            "git {args:?}: {}",
-            String::from_utf8_lossy(&out.stderr)
-        );
-        String::from_utf8_lossy(&out.stdout).trim().to_string()
+        // The bounded runner, like production code (process_capture's guard).
+        crate::turn_rollback::run(crate::turn_rollback::git(dir).args(args))
+            .unwrap_or_else(|e| panic!("git {args:?}: {e}"))
     }
 
     fn scratch_repo(tag: &str) -> std::path::PathBuf {
