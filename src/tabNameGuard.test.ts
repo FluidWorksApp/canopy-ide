@@ -29,6 +29,7 @@ const SRC = join(process.cwd(), "src");
 const SLOTS = [
   "userName",
   "agentName",
+  "brainName",
   "promptName",
   "nativeName",
   "oscTitle",

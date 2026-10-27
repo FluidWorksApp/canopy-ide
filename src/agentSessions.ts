@@ -14,6 +14,14 @@ import * as ipc from "./ipc";
 import { basename } from "./paths";
 import { identifyAgent, observeForLearning, type AgentIdentity } from "./agentIdentity";
 import type { TabName } from "./agentDisplayName";
+import { brainMayName, openingPrompt } from "./tabName";
+import {
+  brainSessionTitle,
+  cachedSessionTitle,
+  promptKey,
+  subscribeBrainSessionTitles,
+  worthTitling,
+} from "./brainSessionTitle";
 import { POLICY, agentLife } from "../shared/agentLife";
 import type { Life } from "../shared/agentLife";
 import { ptyEvidenceFor, useFirstSeen } from "./agentLifeStore";
@@ -37,10 +45,39 @@ export const lastHumanPrompt = (prompts?: string[]) =>
 export const workingOnNow = (
   row: SessionRow,
   tabNames?: Map<number, TabName>,
-) =>
-  row.digest?.working_on ??
-  tabNames?.get(row.session.id)?.description ??
-  lastHumanPrompt(row.digest?.prompts);
+) => {
+  const tab = tabNames?.get(row.session.id);
+  // The tab's description is the agent's own word once it has named its run,
+  // and a heuristic off the latest message until then — so the brain's
+  // summary of the opening prompt (brainSessionTitle.ts) sits between the two.
+  const agentSpoke = tab ? !brainMayName(tab) : false;
+  return (
+    row.digest?.working_on ??
+    (agentSpoke ? tab?.description : undefined) ??
+    (cachedSessionTitle(openingPrompt(row.digest))?.summary || undefined) ??
+    tab?.description ??
+    lastHumanPrompt(row.digest?.prompts)
+  );
+};
+
+/** Ask the brain for one-line summaries of the listed sessions that have no
+ *  agent-published focus, and re-render as they land. Bounded to the first
+ *  dozen rows; each opening prompt is asked about once, ever (cached). */
+export function useBrainSessionSummaries(rows: SessionRow[]): void {
+  const [, bump] = useState(0);
+  useEffect(() => subscribeBrainSessionTitles(() => bump((n) => n + 1)), []);
+  const wanted = rows
+    .filter((r) => !r.digest?.working_on && !r.digest?.micro)
+    .map((r) => openingPrompt(r.digest))
+    .filter(worthTitling)
+    .slice(0, 12);
+  const key = wanted.map(promptKey).join(",");
+  useEffect(() => {
+    for (const p of wanted) void brainSessionTitle(p);
+    // `key` is the content of `wanted`; the array itself is new every render.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [key]);
+}
 
 /** Pair each terminal (by the PTY `surface` id the hook recorded from our spawn
  *  env) with the newest digest tagged for this app launch — an exact identity,

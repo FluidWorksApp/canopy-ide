@@ -51,6 +51,8 @@ export interface TerminalSnapshot {
   /** The agent's own name and the opening prompt: without them a rebuilt
    *  tab's prompt slot is empty and the next message becomes its name. */
   agentName?: string;
+  /** The brain's title for the opening prompt (see tabName.ts). */
+  brainName?: string;
   promptName?: string;
   icon?: string;
   run?: boolean;

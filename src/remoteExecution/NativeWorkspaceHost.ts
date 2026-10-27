@@ -35,6 +35,10 @@ for(const command of ['brain_call','brain_kill','ledger_append','ledger_query','
 // the answer; the answers then act on the workspace through this host.
 export const COMPANION_DESKTOP_COMMANDS=['companion_spawn','companion_write','companion_kill','companion_status','companion_store_read','companion_store_write','companion_save_attachment','companion_dispatch_origin','companion_open_requests','context_publish','context_remove','context_tools','context_agent_spawn_ready','browser_result','webview_snapshot'] as const;
 for(const command of COMPANION_DESKTOP_COMMANDS)LOCAL_UI.add(command);
+// The brain (brainCall.ts) is the CLI the person signed in to on this computer,
+// like the companion's: its headless calls run here in every mode, and the
+// features that use it put what it needs in the prompt rather than a VM path.
+for(const command of ['brain_call','brain_kill'])LOCAL_UI.add(command);
 // The bridge's requests to this window, and the companion's replies. An op from
 // a terminal on this computer is dropped: its pty id would alias a VM session's.
 export const COMPANION_DESKTOP_EVENTS=['agent:ui','agent:action','agent:browser','companion:reply'] as const;

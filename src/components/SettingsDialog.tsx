@@ -3,6 +3,9 @@
 // long labels into slivers and pushed wide control groups out of the modal).
 // Skins render as rich choices — a palette is a thing you look at, not a word
 // you read.
+import { BrainConnectPanel } from "./BrainConnect";
+import { BrainSpendTable } from "./BrainChip";
+import { BrainAutomation, BrainExceptions } from "./BrainSettings";
 import { accountSummary, cliLoginText, signedInClis } from "../accountState";
 import {
   Fragment,
@@ -449,6 +452,7 @@ function CompanionSettings({
                 </Button>
               </Field>
             </Row>
+            <BrainExceptions only="Companion" />
           </>
         )}
       </Item>
@@ -1529,6 +1533,29 @@ export function SettingsDialog({ onClose, initialTab = "appearance" }: SettingsD
 
             {tab === "agents" && (
               <>
+                {/* First, because everything smart in Canopy runs on it. The
+                    same panel as the first-run step and the chip's dialog. */}
+                <Item
+                  name="Brain"
+                  desc="The agent CLI you're signed in to that powers every smart feature: commit messages, session names, the companion, reviews, Build."
+                >
+                  <BrainConnectPanel onTerminalOpened={onClose} />
+                </Item>
+                <Item
+                  name="Brain spending"
+                  desc="What Canopy's own features spent on your plan today, by feature. A feature over its daily cap pauses until tomorrow; leave a cap blank for none."
+                >
+                  <BrainSpendTable />
+                </Item>
+                <Item
+                  name="Features not using your brain"
+                  desc="Overrides you chose for one feature. Everything else follows the brain."
+                >
+                  <BrainExceptions />
+                </Item>
+                <Item name="Automatic brain work" desc="Small background calls the brain makes on its own.">
+                  <BrainAutomation />
+                </Item>
                 <Item
                   name="Fleet readiness"
                   desc="What can launch now, composed from install, account, plan, and integration signals."
@@ -1791,7 +1818,7 @@ export function SettingsDialog({ onClose, initialTab = "appearance" }: SettingsD
                 </Item>
                 <Item
                   name="Default agent"
-                  desc="What the Start button launches; pick another per ticket."
+                  desc="What the Start button launches; pick another per ticket. It is also your brain when it can be one (see Brain above)."
                 >
                   {/* Chips, not cards: picking a CLI is a one-line choice, and
                       the card grid took half the page to say it. */}

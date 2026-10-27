@@ -490,6 +490,11 @@ export interface Settings {
   /** Let the brain write a weekly insight over the Outcomes panel's numbers
    *  (at most once a day, background model). Off = numbers only. */
   outcomesInsight: boolean;
+  /** Let the brain title agent tabs whose agent never named its own task, and
+   *  write the one-line summary the Agents views show for a session. One cheap
+   *  background call per opening prompt, cached by its text
+   *  (brainSessionTitle.ts). Off = the prompt's first words, as before. */
+  brainSessionTitles: boolean;
   /** Connect Claude Code to Canopy as its IDE, the way it connects to VS Code:
    *  proposed edits open as a diff to accept, tweak or reject, the editor
    *  selection reaches the prompt, and the CLI reads diagnostics off Canopy's
@@ -722,6 +727,7 @@ export const DEFAULTS: Settings = {
   builderSessionCapUsd: 10,
   budgetPauseAtLimit: true,
   outcomesInsight: true,
+  brainSessionTitles: true,
   claudeIdeIntegration: true,
   turnRollback: true,
   memoryAutoExtract: true,
@@ -911,6 +917,7 @@ export function getSettings(): Settings {
       value[key] = Number.isFinite(days) && days >= 1 ? Math.min(Math.round(days), 3650) : DEFAULTS[key];
     }
     if (value.memoryQuarantine !== "skip") value.memoryQuarantine = "quarantine";
+    if (typeof value.brainSessionTitles !== "boolean") value.brainSessionTitles = true;
   } catch {
     value = { ...DEFAULTS };
   }

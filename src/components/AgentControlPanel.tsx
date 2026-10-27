@@ -20,7 +20,12 @@ import { basename } from "../paths";
 import { LIFE_META } from "../../shared/agentLife";
 import type { Life } from "../../shared/agentLife";
 import { agentDisplayName, type TabName } from "../agentDisplayName";
-import { useAgentSessions, workingOnNow, type SessionRow } from "../agentSessions";
+import {
+  useAgentSessions,
+  useBrainSessionSummaries,
+  workingOnNow,
+  type SessionRow,
+} from "../agentSessions";
 import {
   checkoutKey,
   deriveEdges,
@@ -145,6 +150,7 @@ export function AgentControlPanel({
     stats,
     liveSessionIds: [],
   });
+  useBrainSessionSummaries(active ? agentSessions : []);
 
   const [instance, setInstance] = useState<string | null>(null);
   useEffect(() => {

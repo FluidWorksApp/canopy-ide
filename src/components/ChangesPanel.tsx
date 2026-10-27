@@ -10,6 +10,13 @@ import { WindowedList } from "./WindowedList";
 import { Button } from "./ui";
 import { matches, withShortcut } from "../shortcuts";
 import { basename } from "../paths";
+import {
+  suggestCommitMessage,
+  suggestFailure,
+  type CommitSuggestion,
+} from "../brainCommitMessage";
+import { useBrainBlocked } from "../brainConnect";
+import { ConnectBrainCta } from "./BrainConnect";
 
 /** Must match .change-row's CSS height — the windowing spacers are the scrollbar. */
 const ROW_H = 26;
@@ -51,6 +58,9 @@ interface ChangesPanelProps {
   /** Throw one file's changes away — restored from HEAD, or deleted when it's
    *  untracked. The panel confirms first; this is called on yes. */
   onDiscard?: (repo: string, file: FileChange) => void;
+  /** Ask the brain for a commit message for what is staged. Defaults to the
+   *  real brain call; injectable so tests can stand in for it. */
+  onSuggestMessage?: (repo: string, files: string[]) => Promise<CommitSuggestion>;
   /** Removes the outer sidebar role when this is the Changes subview of the
    * combined Source control panel. It still owns its own scrolling region. */
   embedded?: boolean;
@@ -93,6 +103,7 @@ export function ChangesPanel({
   onUnstage,
   onCommit,
   onDiscard,
+  onSuggestMessage = suggestCommitMessage,
   embedded = false,
 }: ChangesPanelProps) {
   /** One message per repo: a project with two components has two working trees
@@ -110,6 +121,23 @@ export function ChangesPanel({
   } | null>(null);
   const setMessage = (repo: string, text: string) =>
     setMessages((m) => ({ ...m, [repo]: text }));
+  // The brain's commit message. One repo at a time: it is a main-tier call
+  // someone is waiting on, and two at once would race for the same plan.
+  const brainBlocked = useBrainBlocked();
+  const [suggesting, setSuggesting] = useState<string | null>(null);
+  const [suggestNote, setSuggestNote] = useState<Record<string, string>>({});
+  const suggest = (g: ChangeGroup) => {
+    const files = g.files.filter((f) => f.staged && !f.conflicted).map((f) => f.path);
+    if (files.length === 0 || suggesting) return;
+    setSuggesting(g.repo);
+    setSuggestNote((n) => ({ ...n, [g.repo]: "" }));
+    void onSuggestMessage(g.repo, files)
+      .then((r) => {
+        if (r.ok) setMessage(g.repo, r.message);
+        else setSuggestNote((n) => ({ ...n, [g.repo]: suggestFailure(r) }));
+      })
+      .finally(() => setSuggesting(null));
+  };
   const commit = (repo: string) => {
     const text = (messages[repo] ?? "").trim();
     if (!text || !onCommit) return;
@@ -268,6 +296,14 @@ export function ChangesPanel({
                     onClick={() => commit(g.repo)}>
                     Commit {stagedIn(g) > 0 ? stagedIn(g) : ""}
                   </Button>
+                  {!brainBlocked && (
+                    <Button size="sm"
+                      disabled={stagedIn(g) === 0 || suggesting !== null}
+                      title="Have your brain read the staged diff and write the message"
+                      onClick={() => suggest(g)}>
+                      {suggesting === g.repo ? "Writing…" : "Suggest message"}
+                    </Button>
+                  )}
                   {unstagedIn(g).length > 0 && onStage && (
                     <Button size="sm"
                       onClick={() =>
@@ -291,6 +327,16 @@ export function ChangesPanel({
                     </Button>
                   )}
                 </div>
+              </div>
+            )}
+            {onCommit && brainBlocked && stagedIn(g) > 0 && (
+              <div className="change-commit-note">
+                <ConnectBrainCta what="Suggesting a commit message" />
+              </div>
+            )}
+            {onCommit && suggestNote[g.repo] && (
+              <div className="change-commit-note" role="status">
+                {suggestNote[g.repo]}
               </div>
             )}
             {/* Windowed: a rebase or generated-file churn can put thousands of
