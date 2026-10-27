@@ -23,6 +23,11 @@ export type SessionDocRequest =
       onResume?: () => void;
       /** The command that resume runs, shown in the packet. */
       resumeCommand?: string | null;
+      /** The agent's terminal, when the caller knows it (an agent tab). */
+      ptyId?: number;
+      /** Type a message into this session's agent (the agent tab's own
+       *  door), for teammates who join it live. */
+      messageAgent?: (text: string) => Promise<{ delivered: boolean; note: string }>;
     }
   | {
       kind: "received";
@@ -34,7 +39,24 @@ export type SessionDocRequest =
       from?: string;
       dir?: string;
       repo?: RepoRef;
-    };
+      /** The sender's session is still running and open to join. */
+      live?: LiveJoin;
+    }
+  | ({ kind: "join" } & LiveJoin);
+
+/** Joining a teammate's running agent session (src/liveSession). */
+export interface LiveJoin {
+  /** The team whose encrypted chat carries the session's traffic. */
+  team: string;
+  /** The owner's account id. */
+  owner: string;
+  ownerName?: string;
+  room: string;
+  title: string;
+  agent: string;
+  /** A cloud workspace terminal the owner shares with the session. */
+  terminal?: { workspace: string; publication: string };
+}
 
 export const OPEN_SESSION_DOC_EVENT = "canopy:open-session-doc";
 

@@ -376,7 +376,9 @@ export async function resolveShareCard(
     case "report":
       return card.pr ? ((await asPr(card.pr)) ?? web(repo)) : { do: "none" };
     case "handoff":
-      // A hand-off names its repo for context only; "Take over" is its action.
+    case "live-session":
+      // A hand-off or live session names its repo for context only; "Take
+      // over" and "Join" are their actions.
       return { do: "none" };
     case "diff": {
       if (card.pr) {

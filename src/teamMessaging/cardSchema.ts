@@ -39,7 +39,16 @@ export type ReviewOutcomeCard={type:'review-outcome';v:1;request:string;repo:Rep
  *  ran on, and its id, so the recipient can see which conversation it was. The
  *  recipient's "Take over" starts a fresh agent of their own from the packet;
  *  nothing about the sender's machine is named beyond the directory's name. */
-export type HandoffCard={type:'handoff';v:1;title:string;agent:string;session:string;packet:string;dir?:string;repo?:RepoRef;truncated?:boolean};
+export type HandoffCard={type:'handoff';v:1;title:string;agent:string;session:string;packet:string;dir?:string;repo?:RepoRef;truncated?:boolean;
+ /** The session is still running and its owner lets teammates join it: the
+  *  live room's id (liveEvents.ts), for "Join live" beside "Take over". */
+ room?:string};
+/** An agent session that is running now, which teammates in the conversation
+ *  may join: watch its turns as they happen, see who else is watching, and ask
+ *  the owner to pass a message to the agent (src/liveSession). `room` is the
+ *  owner's live room id; the owner's Canopy checks every join against the
+ *  conversation the card was posted in. */
+export type LiveSessionCard={type:'live-session';v:1;room:string;title:string;agent:string;dir?:string;repo?:RepoRef};
 /** A plan an agent will work from (src/plans/plan.ts), shared before the work
  *  starts so teammates can comment and approve. `plan` is the plan's id on the
  *  sender's machine — an opaque token, never a path. No repo: a plan is read,
@@ -50,7 +59,7 @@ export type PlanCard={type:'plan';v:1;plan:string;goal:string;decisions?:{q:stri
 export type PlanOutcome='approved'|'changes-requested';
 /** A teammate's answer to a plan card, posted in the card's thread. */
 export type PlanOutcomeCard={type:'plan-outcome';v:1;request:string;plan:string;outcome:PlanOutcome};
-export type Card=PrCard|FileCard|DiffCard|TerminalCard|ReportCard|ReviewRequestCard|ReviewOutcomeCard|HandoffCard|PlanCard|PlanOutcomeCard;
+export type Card=PrCard|FileCard|DiffCard|TerminalCard|ReportCard|ReviewRequestCard|ReviewOutcomeCard|HandoffCard|LiveSessionCard|PlanCard|PlanOutcomeCard;
 export type CardType=Card['type'];
 
 // ---------- limits ----------
@@ -198,9 +207,13 @@ export function parseCard(value:unknown):Card|undefined{
     return fits({type:'review-outcome',...base,request:c.request,repo:repoCopy(c.repo),number:c.number,outcome:c.outcome as ReviewOutcome,...(c.head?{head:c.head as string}:{})});
    }
    case 'handoff':{
-    if(!exact(c,['type','v','title','agent','session','packet','dir','repo','truncated'])||!title(c.title)||!safeLine(c.agent,64)||typeof c.session!=='string'||!SESSION_ID.test(c.session)||!safeBlock(c.packet,LIMITS.packetBytes)||!optional(c.dir,(v):v is string=>safeLine(v,200)&&!/[\\/]/.test(v))||!optional(c.repo,validRepo))return undefined;
+    if(!exact(c,['type','v','title','agent','session','packet','dir','repo','truncated','room'])||!optional(c.room,(v):v is string=>typeof v==='string'&&UUID.test(v))||!title(c.title)||!safeLine(c.agent,64)||typeof c.session!=='string'||!SESSION_ID.test(c.session)||!safeBlock(c.packet,LIMITS.packetBytes)||!optional(c.dir,(v):v is string=>safeLine(v,200)&&!/[\\/]/.test(v))||!optional(c.repo,validRepo))return undefined;
     if(c.truncated!==undefined&&typeof c.truncated!=='boolean')return undefined;
-    return fits({type:'handoff',...base,title:c.title,agent:c.agent,session:c.session,packet:c.packet,...(c.dir!==undefined?{dir:c.dir as string}:{}),...(c.repo?{repo:repoCopy(c.repo as RepoRef)}:{}),...(c.truncated!==undefined?{truncated:c.truncated as boolean}:{})});
+    return fits({type:'handoff',...base,title:c.title,agent:c.agent,session:c.session,packet:c.packet,...(c.dir!==undefined?{dir:c.dir as string}:{}),...(c.repo?{repo:repoCopy(c.repo as RepoRef)}:{}),...(c.truncated!==undefined?{truncated:c.truncated as boolean}:{}),...(c.room!==undefined?{room:c.room as string}:{})});
+   }
+   case 'live-session':{
+    if(!exact(c,['type','v','room','title','agent','dir','repo'])||typeof c.room!=='string'||!UUID.test(c.room)||!title(c.title)||!safeLine(c.agent,64)||!optional(c.dir,(v):v is string=>safeLine(v,200)&&!/[\\/]/.test(v))||!optional(c.repo,validRepo))return undefined;
+    return fits({type:'live-session',...base,room:c.room,title:c.title,agent:c.agent,...(c.dir!==undefined?{dir:c.dir as string}:{}),...(c.repo?{repo:repoCopy(c.repo as RepoRef)}:{})});
    }
    case 'plan':{
     if(!exact(c,['type','v','plan','goal','decisions','acceptance','wontDo','risk','size'])||typeof c.plan!=='string'||!PLAN_ID.test(c.plan)||!safeLine(c.goal,LIMITS.planGoal))return undefined;
@@ -248,7 +261,7 @@ export function cardUrl(card:Card):string|undefined{
   case 'file':return blobUrl(card.repo,card.rev,card.path,card.lines);
   case 'diff':return card.pr?`${prUrl(card.repo,card.pr)}${isGitLab(card.repo.host)?'/diffs':'/files'}`:compareUrl(card.repo,card.base,card.head);
   case 'report':return card.repo&&card.pr?prUrl(card.repo,card.pr):undefined;
-  case 'terminal':case 'handoff':case 'plan':case 'plan-outcome':return undefined;
+  case 'terminal':case 'handoff':case 'live-session':case 'plan':case 'plan-outcome':return undefined;
  }
 }
 const linesLabel=(l?:LineRange)=>l?(l.start===l.end?`:${l.start}`:`:${l.start}-${l.end}`):'';
@@ -265,6 +278,7 @@ export function cardSummary(card:Card):string{
   case 'review-request':return `Review requested: ${card.repo.slug}#${card.number} · head ${short(card.head)}: ${card.title}`;
   case 'review-outcome':return `${OUTCOME_ICON[card.outcome]} ${OUTCOME_LABEL[card.outcome]} ${card.repo.slug}#${card.number} (via Canopy)`;
   case 'handoff':return `Handoff: ${card.title}${card.repo?` (${card.repo.slug})`:''}`;
+  case 'live-session':return `Live agent session: ${card.title}${card.repo?` (${card.repo.slug})`:''} — open it in Canopy 0.5 or later to join`;
   case 'plan':return `Plan for review (${card.risk} risk, ${card.size}): ${card.goal}`;
   case 'plan-outcome':return card.outcome==='approved'?'✅ Approved the plan (via Canopy)':'🔁 Asked for changes to the plan (via Canopy)';
  }
