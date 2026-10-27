@@ -4,7 +4,7 @@
 // IDE says plainly instead of reporting a missing feature. Bump HOST_PROTOCOL
 // whenever commands are added, so a desktop can tell a stale host up front.
 // native-commands.test.mjs keeps this list equal to what native.mjs handles.
-export const HOST_PROTOCOL=3;
+export const HOST_PROTOCOL=4;
 export const NATIVE_PREFIXES=['fs_upload_','claude_ide_','gates_'];
 export const NATIVE_COMMANDS=new Set([
  // Files, projects and the workspace itself.

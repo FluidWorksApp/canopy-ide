@@ -98,25 +98,64 @@ The workspace image (`packages/remote-host/Dockerfile`) already has `gh` and `gi
 
 ## Known differences from the desktop
 
-**Not on the desktop's footing**
-- **`research_update` with `body`.** Replacing a whole write-up has no service op; no
-  current caller sends it.
-- **`research_import` size.** Imports are limited to about 250 KB, the gateway's
-  harness action body cap.
-- **`research_dir`.** Answers `""`, because the entry directory is on the service host.
-  Workspace agents record findings through the `canopy_research` tools.
-- **Per-terminal memory budgets.** A workspace monitors no terminal individually: one
-  cgroup limit covers it. `terminal_governor_grant`, `_stop` and `_remember_default`
-  answer as the desktop does for an unmonitored terminal. The per-CLI maximums are still
-  stored.
-- **`structured_runner_spawn`.** Does not mint a context-bridge credential for the
-  runner. VM terminals get theirs from the gateway's harness grant.
-
-**Fewer events**
-- **`cleanup:progress`.** Not emitted, so CleanupDialog shows the final result only. In a
-  workspace it defaults to deleting rather than trashing, because the VM's trash is never
+**Brought onto the desktop's footing**
+- **Research.** `research_update` with `body` replaces the write-up through the service's
+  user-only `replace` action (no agent op reaches it). `research_import` sends a file larger
+  than one harness action (the gateway caps a body at 256 KiB) in `import_chunk` pieces the
+  service joins, up to the store's own 512 KB limit. `research_dir` answers a real
+  directory in the VM, `~/.canopy/research/<id>` (host `research_entry_dir`), so a run's
+  prose gate and progress file work; what the run writes there is copied into the entry as
+  sources the next time the IDE reads it (`research_entry_files`).
+- **Per-terminal memory budgets.** `terminal-governor.mjs` applies `governor.rs`'s policy to
+  each terminal's process-tree RSS, sampled every 2 s: the same allowances, warn/ask/clear
+  thresholds and dwell, 512 MiB / 1 GiB grants, stop, remembered per-CLI defaults and
+  maximums, and incidents. The adapter drains `terminal_governor_events` into
+  `terminal:governor`. It reports `monitor_only`: the container has no writable cgroup
+  subtree for a per-terminal `memory.high`, so the workspace's own limit stays the only
+  hard cap.
+- **`structured_runner_spawn`.** The gateway mints a context-bridge credential per attempt
+  (`runner-<attempt>`), the host puts it in the runner's environment like an agent
+  terminal's, a failed spawn or `structured_runner_kill` revokes it, and the service keeps
+  it while `structured_runner_live` lists the attempt.
+- **`cleanup:progress`.** The adapter names a channel for `cleanup_scan`; the host sends
+  one message per checkout and the adapter emits them as `cleanup:progress`. In a workspace
+  cleanup still defaults to deleting rather than trashing, because the VM's trash is never
   emptied.
-- **`pr_watch` provenance rows.** Not written in a workspace (the host has no PR watcher).
+- **`pr_watch` provenance rows.** The host watches the projects named by `pr_watch_set`
+  (`pr-observer.mjs`, every 3 minutes while the IDE is focused, 15 otherwise, and on
+  `pr_watch_now`): `provenance_observe` lists the repository's PRs with `gh`, records a
+  `pr_watch` edge for each new one a session's branch produced, and reports when each
+  opened and merged, which Outcomes uses for merges and time in review.
+- **Shared-account sessions.** Their HOME is a per-session copy of the account; its
+  `.canopy` event bus, digests, edit journals, Rules policy, research bindings and
+  workflow runs are linked to the workspace's own (`account-homes.mjs`), so turns,
+  provenance, awareness and gates see them. Spot search also reads their transcripts.
+- **Proof receipts.** A check runs as a host job (`receipt_check_start`, long-polled with
+  `receipt_check_status`), so it gets the desktop's 10/5-minute limits instead of the
+  gateway's request timeout; an older host falls back to `receipt_run_check`. The turn's
+  start and end snapshots come from the host's `turn_list`.
+- **Agent awareness.** Runs in a workspace: digests, journals, churn (`git_churn`) and
+  checkouts from the host, `context_hotspot_claim` and notes (`context_mesh_job_update`,
+  `refKind: "awareness"`) through the service. The host tells the service each agent's
+  origin remote, checkout and recently written files (from its hook events), and the
+  roster carries them, so awareness on any machine can tell an agent in another cloud
+  workspace on the same repository over the mesh.
+- **Rules on connect.** Each connect and reconnect writes every open project's policy with
+  `gates_policy_write`; when `agent_integration_health` reports an installed CLI's hooks
+  missing (Claude Code's PreToolUse matchers included), the workspace offers **Update agent
+  hooks** (`setup_agent_hooks`).
+- **Team memory.** The ledger stays on the desktop. Each connect, and each change to a
+  memory, sends the approved, unexpired entries to the workspace's canopy-service
+  (`memory_sync`), which answers `canopy_memory` from that copy with the desktop's rules
+  (`canopy-core` `memory`). `canopy_memory_propose` validates like the desktop and queues
+  the proposal; the IDE pulls the queue (`workspace_memory_proposals`, every minute and on
+  connect), files each as `proposed` in the ledger and acknowledges it (`memory_ack`).
+- **Android with the project in the VM.** `android_run` with a `/workspace` APK reads it
+  from the VM in slices, stages it here (`android_stage_file`) and runs it on this
+  computer's device. `android_describe` on a `/workspace` project answers from its Gradle
+  files (modules, application ids, APKs already built), because the SDK that evaluates the
+  build is on this computer and the VM image has none; build in the workspace first.
+  Agents running in the VM still can't drive devices (`canopy_device_*` stay laptop-only).
 
 **Narrower than the desktop on purpose**
 - **Paths stay in `/workspace`.** `scoped()` keeps every path there (and in
@@ -147,7 +186,7 @@ Counts: **(a) 11 · (b) 62 · (c) 148 · (d) 13 · test 2**.
 | `agent_edits` | c | Host: `agent-workspace.mjs` (mirrors git.rs) |
 | `agent_workspace` | c | Host: `agent-workspace.mjs` (mirrors git.rs) |
 | `android_avds` | b | LOCAL_UI: Devices and emulators are attached to the person's computer; the VM image has no Android SDK. |
-| `android_describe` | b | LOCAL_UI: Devices and emulators are attached to the person's computer; the VM image has no Android SDK. |
+| `android_describe` | b | LOCAL_UI; a `/workspace` project is described from its Gradle files (androidBridge.ts). |
 | `android_devices` | b | LOCAL_UI: Devices and emulators are attached to the person's computer; the VM image has no Android SDK. |
 | `android_emulator_start` | b | LOCAL_UI: Devices and emulators are attached to the person's computer; the VM image has no Android SDK. |
 | `android_emulator_stop` | b | LOCAL_UI: Devices and emulators are attached to the person's computer; the VM image has no Android SDK. |
@@ -155,7 +194,7 @@ Counts: **(a) 11 · (b) 62 · (c) 148 · (d) 13 · test 2**.
 | `android_key` | b | LOCAL_UI: Devices and emulators are attached to the person's computer; the VM image has no Android SDK. |
 | `android_layout` | b | LOCAL_UI: Devices and emulators are attached to the person's computer; the VM image has no Android SDK. |
 | `android_logcat` | b | LOCAL_UI: Devices and emulators are attached to the person's computer; the VM image has no Android SDK. |
-| `android_run` | b | LOCAL_UI: Devices and emulators are attached to the person's computer; the VM image has no Android SDK. |
+| `android_run` | b | LOCAL_UI; a `/workspace` APK is staged on this computer first (androidBridge.ts). |
 | `android_screencap` | b | LOCAL_UI: Devices and emulators are attached to the person's computer; the VM image has no Android SDK. |
 | `android_sdk_status` | b | LOCAL_UI: Devices and emulators are attached to the person's computer; the VM image has no Android SDK. |
 | `android_swipe` | b | LOCAL_UI: Devices and emulators are attached to the person's computer; the VM image has no Android SDK. |
@@ -295,7 +334,7 @@ Counts: **(a) 11 · (b) 62 · (c) 148 · (d) 13 · test 2**.
 | `relay_send_collab` | b | LOCAL_UI: LAN relay between desktops; status and relay:* events forwarded from the desktop. |
 | `relay_send_command` | b | LOCAL_UI: LAN relay between desktops; status and relay:* events forwarded from the desktop. |
 | `research_delete` | c | canopy-service via /harness/query or /harness/actions (src/remoteExecution/harnessCommands.ts) |
-| `research_dir` | c | canopy-service via /harness/query or /harness/actions (src/remoteExecution/harnessCommands.ts) |
+| `research_dir` | c | Host `research_entry_dir`: the entry's directory in the VM (harnessCommands.ts) |
 | `research_for_file` | c | canopy-service via /harness/query or /harness/actions (src/remoteExecution/harnessCommands.ts) |
 | `research_get` | c | canopy-service via /harness/query or /harness/actions (src/remoteExecution/harnessCommands.ts) |
 | `research_import` | c | canopy-service via /harness/query or /harness/actions (src/remoteExecution/harnessCommands.ts) |
