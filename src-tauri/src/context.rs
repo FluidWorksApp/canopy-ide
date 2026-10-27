@@ -127,6 +127,8 @@ const SUPPORTED_TOOLS: &[&str] = &[
     "canopy_start_session",
     "canopy_stop_server",
     "canopy_symbols",
+    "canopy_team_people",
+    "canopy_team_send",
     "canopy_tickets",
     "canopy_vault_fill",
     "canopy_vault_list",
@@ -1096,6 +1098,10 @@ pub fn context_mesh_job_update(
         None | Some("job") => "job",
         Some("relay") => "relay",
         Some("awareness") => "awareness",
+        // The user handing an agent a Teams chat message ("Send to agent"):
+        // `job_id` is the chat message's id, so every forward of one message
+        // lists together.
+        Some("team-chat") => "team-chat",
         Some(other) => return Err(format!("unknown mesh update kind {other}")),
     };
     if instance != crate::pty::instance_token() {
@@ -1135,6 +1141,10 @@ pub fn context_mesh_job_update(
     let notice = match kind {
         "relay" => format!(
             "[canopy: cloud workspace reply to {job_id}] {}",
+            mesh_notice_for(&record)
+        ),
+        "team-chat" => format!(
+            "[canopy: from the user, via Teams chat] {}",
             mesh_notice_for(&record)
         ),
         "awareness" => format!(
@@ -4757,6 +4767,9 @@ fn mesh_request_id(supplied: Option<&str>) -> Result<String, String> {
 /// The longest job brief the mesh carries. A team envelope holds 32 KB of
 /// payload, and the brief shares it with the job's routing fields.
 const MAX_MESH_JOB_BRIEF: usize = 16 * 1024;
+/// A Teams chat message's text limit in bytes (teamMessaging's 16000), less
+/// room for the line naming the agent that sent it.
+const MAX_TEAM_MESSAGE: usize = 15_500;
 
 const UI_OP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20);
 /// PR reads shell out to GitHub and failing logs may require several downloads.
@@ -4785,7 +4798,39 @@ async fn ui_op(
     let mut from_name: Option<String> = None;
     let mut request_id: Option<String> = None;
     let deadline = match op.op.as_str() {
-        "mesh_targets" => UI_OP_TIMEOUT,
+        "mesh_targets" | "team_people" => UI_OP_TIMEOUT,
+        // Posts into the user's encrypted Teams chat, as the user. Only an
+        // agent terminal may, so the message can say which agent wrote it.
+        "team_send" => {
+            let Some(agent) = who.agent() else {
+                return (
+                    StatusCode::FORBIDDEN,
+                    "Only a Canopy agent terminal can post in Teams chat.".into(),
+                );
+            };
+            let text = op.prompt.as_deref().unwrap_or_default();
+            if text.trim().is_empty() {
+                return (StatusCode::BAD_REQUEST, "team_send needs text".into());
+            }
+            if text.len() > MAX_TEAM_MESSAGE {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    format!(
+                        "a Teams message is capped at {} KB — share the detail as a file or split it",
+                        MAX_TEAM_MESSAGE / 1000
+                    ),
+                );
+            }
+            if op.member.as_deref().map_or(true, |m| m.trim().is_empty()) {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    "team_send needs `to`: a teammate, or \"channel\"".into(),
+                );
+            }
+            // The agent named in the message's footer is this terminal's.
+            submitter = Some(agent.pty_id);
+            std::time::Duration::from_secs(30)
+        }
         "mesh_message_cloud" => {
             let Some(agent) = who.agent() else {
                 return (

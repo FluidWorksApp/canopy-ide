@@ -3734,6 +3734,7 @@ const COMPANION_MUTATING_TOOLS: &[&str] = &[
     "canopy_message_agent",
     "canopy_mesh_send",
     "canopy_mesh_submit",
+    "canopy_team_send",
     "canopy_claim",
     "canopy_notes_write",
     "canopy_research_write",
@@ -3932,6 +3933,7 @@ const READ_ONLY_TOOLS: &[&str] = &[
     "canopy_agents",
     "canopy_mesh",
     "canopy_mesh_targets",
+    "canopy_team_people",
     "canopy_research",
     "canopy_notes",
     "canopy_memory",
@@ -4084,6 +4086,20 @@ fn mesh_tool_defs() -> Vec<serde_json::Value> {
                 "agent": { "type": "string", "description": "For a cloud workspace: the name of a running agent there to hand the job to; omitted starts a new one" },
                 "requestId": { "type": "string", "description": "Only when retrying a send that timed out: the requestId that error gave you. The same id is never delivered twice; omit it on a first send" }
             }, "required": ["brief"], "additionalProperties": false }
+        }),
+        serde_json::json!({
+            "name": "canopy_team_people",
+            "description": "The user's Canopy teams: each team's channel and its people (name, email, id), the ones canopy_team_send can message.",
+            "inputSchema": { "type": "object", "properties": {}, "additionalProperties": false }
+        }),
+        serde_json::json!({
+            "name": "canopy_team_send",
+            "description": "Post a message in the user's Canopy Teams chat, as the user and marked as sent by an agent: a direct message to a teammate, or the team's channel. End-to-end encrypted, like the user typing it. The recipient can hand it to one of their agents or run it as a task from the chat, so write it to stand alone. Not for agents — that is canopy_mesh_send.",
+            "inputSchema": { "type": "object", "properties": {
+                "to": { "type": "string", "description": "A teammate's name, email or id from canopy_team_people, or \"channel\" for everyone in the team" },
+                "text": { "type": "string", "description": "The message, in full; multi-line is fine (15 KB max)" },
+                "team": { "type": "string", "description": "Team name or id, when the user is in more than one" }
+            }, "required": ["to", "text"], "additionalProperties": false }
         }),
     ]
 }
@@ -4868,6 +4884,13 @@ fn describe_action(name: &str, args: &serde_json::Value) -> (String, Option<Stri
             },
             arg("brief").map(|b| b.chars().take(240).collect()),
         ),
+        "canopy_team_send" => (
+            match arg("to").as_deref().map(str::trim) {
+                Some("channel") | None => "Post in the team channel".into(),
+                Some(to) => format!("Message {to} in Teams"),
+            },
+            arg("text").map(|t| t.chars().take(240).collect()),
+        ),
         "canopy_stop_server" => ("Stop a server".into(), arg("ptyId")),
         "canopy_restart_server" => ("Restart a server".into(), arg("ptyId")),
         "canopy_spawn_agent" => (
@@ -5605,6 +5628,25 @@ fn call_tool(name: &str, args: &serde_json::Value) -> Result<ToolOutput, String>
             })))
         }
         "canopy_mesh_targets" => text(ui_op("mesh_targets", &serde_json::json!({}), 25)),
+        "canopy_team_people" => text(ui_op("team_people", &serde_json::json!({}), 25)),
+        "canopy_team_send" => {
+            let arg = |k: &str| args.get(k).and_then(|v| v.as_str()).map(str::trim);
+            let to = arg("to")
+                .filter(|t| !t.is_empty())
+                .ok_or("missing required argument: to (a teammate from canopy_team_people, or \"channel\")")?;
+            let body = args
+                .get("text")
+                .and_then(|v| v.as_str())
+                .filter(|t| !t.trim().is_empty())
+                .ok_or("missing required argument: text")?;
+            // Mapped onto the bridge's existing vocabulary: who in `member`,
+            // the message in `prompt`, the team in `label`.
+            text(ui_op(
+                "team_send",
+                &serde_json::json!({ "member": to, "prompt": body, "label": arg("team") }),
+                35,
+            ))
+        }
         "canopy_mesh_submit" => {
             let arg = |k: &str| args.get(k).and_then(|v| v.as_str()).map(str::trim);
             let brief = arg("brief")
