@@ -3,9 +3,13 @@
 // remembered per-CLI defaults and maximums, incidents) over the resident set of
 // each agent terminal's process tree, as session-processes.mjs measures it.
 //
-// Like the desktop, this is a budget, not a cage: it measures, warns, asks the
-// person for more room, and stops a terminal when they say so. The workspace's
-// own cgroup limit remains the only hard boundary, and the capability says so.
+// It measures, warns, asks the person for more room, and stops a terminal when
+// they say so. Where the workspace's cgroup tree was delegated to it
+// (cgroup-delegate.mjs), each terminal also runs in its own cgroup
+// (cgroup-sessions.mjs): measured with memory.current, held at its allowance
+// with memory.high (raised on a grant) and capped at the agent's maximum with
+// memory.max. Where it was not, or the kernel refused, the capability says
+// exactly why and the workspace's own limit stays the only hard boundary.
 // The IDE has no push channel to a workspace, so state changes queue as events
 // the adapter drains (terminal_governor_events) into "terminal:governor".
 import {mkdir,readFile,rename,writeFile} from 'node:fs/promises';
@@ -37,8 +41,15 @@ export function cliKeyOf(hint){
 export const CAPABILITY={platform:'linux',enforcement:'monitor_only',measurement:'resident_set_sum',hard_limit:false,pause:false,soft_limit:false,dynamic_raise:false,mechanism:'none',
  detail:'Each terminal\'s memory is the resident set of its process tree in this workspace. Canopy warns, asks before a terminal grows past its allowance, and can stop it; the workspace\'s own memory limit is the only hard boundary.'};
 
+/** The capability while terminal cgroups are in force. */
+export const cgroupCapability=detail=>({platform:'linux',enforcement:'soft_limit',measurement:'cgroup_v2_memory_current',hard_limit:true,pause:false,soft_limit:true,dynamic_raise:true,mechanism:'cgroup_v2_memory_high',
+ detail:`${detail}: memory.high holds a terminal at its allowance and rises when you grant more; memory.max stops it at the agent's maximum when one is set.`});
+/** Monitor-only, saying why limits are not in force. */
+export const monitorCapability=reason=>reason?{...CAPABILITY,detail:`${CAPABILITY.detail} Per-terminal limits are off: ${reason}.`}:CAPABILITY;
+
 export class TerminalGovernor{
  constructor({defaultsFile,now=Date.now}){
+  this.capability=CAPABILITY;
   this.defaultsFile=defaultsFile;this.now=now;
   this.sessions=new Map();this.incidentsRing=[];this.completedStops=[];this.nextRequest=0;
   this.hostTotal=0;this.hostAvailable=0;this.reserve=0;this.aggregate=0;
@@ -156,7 +167,7 @@ export class TerminalGovernor{
    }
   }
  }
- snapshot(capability=CAPABILITY){
+ snapshot(capability=this.capability){
   return {capability,host_total_bytes:this.hostTotal,host_available_bytes:this.hostAvailable,protected_reserve_bytes:this.reserve,aggregate_terminal_bytes:this.aggregate,grantable_headroom_bytes:this.headroom(),fallback_policy:FALLBACK_POLICY,sessions:[...this.sessions.values()].sort((a,b)=>a.id-b.id).map(s=>this.status(s))};
  }
  incidents(){return this.incidentsRing.map(i=>({...i}));}
@@ -228,11 +239,35 @@ export async function workspaceMemory(read=file=>readFile(file,'utf8')){
 
 /** Sample every `intervalMs` (unref'd) once started; `sample()` returns the
  *  live terminals as {id, bytes, cliKey}. A failed sample is skipped. */
-export function governorSampler({governor,sample,memory=workspaceMemory,intervalMs=2000}){
+export function governorSampler({governor,sample,memory=workspaceMemory,intervalMs=2000,cgroups=null}){
  let timer=null,busy=false;
  const tick=async()=>{
   if(busy)return;busy=true;
-  try{const [observations,host]=await Promise.all([sample(),memory()]);await governor.observe(observations,host.total,host.available);}
+  try{
+   const [observations,host]=await Promise.all([sample(),memory()]);
+   const state=cgroups?await cgroups.probe():null;
+   if(state?.active){
+    try{
+     // Each terminal's tree into its own cgroup, measured as the kernel
+     // charges it (cache included), as the desktop does under memory.high.
+     for(const o of observations){
+      await cgroups.place(o.id,o.pids??[]);
+      const charged=await cgroups.sample(o.id);
+      if(charged)o.bytes=charged.current;
+     }
+     await governor.observe(observations,host.total,host.available);
+     for(const s of governor.snapshot().sessions)if(s.state!=='exited')await cgroups.limit(s.id,s.allowance_bytes,s.max_allowance_bytes);
+     await cgroups.prune(new Set(observations.map(o=>o.id)));
+     governor.capability=cgroupCapability(state.detail);
+    }catch(error){
+     governor.capability=monitorCapability(`a terminal cgroup failed (${error.code??error.message})`);
+     cgroups.checkedAt=0;cgroups.state={active:false,detail:String(error.message)};
+    }
+   }else{
+    await governor.observe(observations,host.total,host.available);
+    if(cgroups)governor.capability=monitorCapability(state?.detail);
+   }
+  }
   catch{/* The runner or /proc may be momentarily unavailable. */}
   finally{busy=false;}
  };

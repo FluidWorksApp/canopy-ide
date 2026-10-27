@@ -265,6 +265,17 @@ export class DockerWorkspaces {
     }
     return runtime;
   }
+  /** Hand the container's own cgroup tree to its runner for per-terminal
+   *  memory limits: one fixed image script, as root, for this process only
+   *  (the container stays unprivileged). Skipped for a container in the host's
+   *  cgroup namespace; a refusal is recorded in the container for the governor
+   *  to report, and never blocks the workspace. */
+  async delegateCgroups(name,inspected){
+    if(inspected?.State?.Running!==true)return;
+    if(inspected.HostConfig?.CgroupnsMode!=='private')return;
+    try{await this.docker(['exec','--privileged','--user','0',name,'node','/opt/canopy/cgroup-delegate.mjs']);}
+    catch(error){this.log(`Terminal memory limits unavailable for ${name}: ${String(error.stderr??error.message).trim().slice(0,300)}`);}
+  }
   async ensureRuntime(workspace,{resume=false,releaseImage}={},state={}) {
     if(this.idleReserved?.(workspace.parentWorkspaceId??workspace.id))throw Error('Workspace idle shutdown is reserved. Retry after it finishes.');
     if(this.migrationCleanupRequired.has(workspace.parentWorkspaceId??workspace.id))throw Error('Workspace migration requires recovery');
@@ -385,6 +396,9 @@ export class DockerWorkspaces {
         ...(this.releaseChannel?['--label',`canopy.image-channel=${this.releaseChannel}`]:[]),
         ...(workspace.storageId?['--label',`canopy.member-storage=${workspace.storageId}`]:[]),
         ...(workspace.cgroupParent?['--cgroup-parent',workspace.cgroupParent]:[]),
+        // Its own cgroup namespace, so terminal cgroups can be delegated to it
+        // without exposing anything above the container (cgroup-delegate.mjs).
+        '--cgroupns', 'private',
         '--network', network, '--init', '--restart', 'on-failure:3', '--user', '1000:1000',
         '--memory', `${workspace.memoryMiB}m`, '--memory-swap', `${memorySwapMiB(workspace,workspace.memoryMiB)}m`,
         '--cpus', String(workspace.cpus), '--pids-limit', String(pidsLimit(workspace)), '--cap-drop', 'ALL',
@@ -398,6 +412,7 @@ export class DockerWorkspaces {
         ...(harness?serviceMountArgs(workspace):[]), image]);
     }
     const inspected = JSON.parse((await this.docker(['inspect', name])).stdout)[0];
+    await this.delegateCgroups(name,inspected);
     const port = inspected.NetworkSettings.Ports?.['8080/tcp']?.[0];
     if (port?.HostIp !== '127.0.0.1' || !/^\d+$/.test(port.HostPort)) throw new Error('Workspace endpoint is not private');
     const address = inspected.NetworkSettings.Networks?.[`canopy-net-${workspace.id}`]?.IPAddress;
