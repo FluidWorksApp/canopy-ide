@@ -20,6 +20,7 @@
 .chat-deleted{font-style:italic;color:var(--text-muted)}
 .chat-edited{font-size:10px;color:var(--text-muted);cursor:help}
 .account-chat-msg.mentions-me{box-shadow:inset 3px 0 0 var(--warn)}
+.account-chat-msg.is-linked{box-shadow:inset 3px 0 0 var(--accent);background:color-mix(in srgb,var(--accent) 10%,transparent);transition:background .6s}
 .chat-inline-edit textarea{width:100%;box-sizing:border-box;min-height:28px;resize:none;padding:4px 6px;border:1px solid var(--accent);border-radius:var(--r-sm);background:var(--bg-raised);color:var(--text);font:inherit;line-height:var(--lh-ui)}
 .chat-inline-edit small{text-align:left}
 .chat-confirm{display:flex;flex-wrap:wrap;align-items:center;gap:var(--sp-2);margin-top:4px;padding:6px 8px;border:1px solid var(--danger,var(--warn));border-radius:var(--r-sm);background:var(--bg-raised);font-size:var(--fs-xs)}

@@ -24,6 +24,7 @@ import { heldBadge, heldBranches } from "./branchSwitch";
 import { getSnapshot as clipboardSnapshot } from "./clipboardStore";
 import { rendererIoBudget } from "./ioBudget";
 import { agentCliFor } from "./projects";
+import { parseReadableLink } from "./readableLinkParse";
 
 /** What Enter does on a row — ProjectView owns the dispatch, this names it. */
 export type SpotAction =
@@ -779,7 +780,26 @@ export interface SpotSource {
   rows: (q: SpotQuery) => SpotRow[] | Promise<SpotRow[]>;
 }
 
+/** A pasted readable Canopy link (https://canopyide.dev/<team>/...) is a
+ *  place to go, not text to search: offer to open it. The app resolves it for
+ *  the signed-in account (readableLinks.ts) through the deep-link router. */
+export function readableLinkRows(query: string): SpotRow[] {
+  const link = parseReadableLink(query);
+  if (!link) return [];
+  const what = link.kind === "workspace" ? "workspace" : link.kind === "session" ? "shared session" : "team message";
+  return [{
+    id: `canopy-link:${link.url}`,
+    group: "Canopy link",
+    kind: "link",
+    title: `Open ${what}`,
+    detail: link.url.replace(/^https:\/\//, ""),
+    score: -1,
+    action: { type: "custom", run: () => void window.dispatchEvent(new CustomEvent("canopy:follow-deep-link", { detail: { url: link.url } })) },
+  }];
+}
+
 const SOURCES: SpotSource[] = [
+  { id: "canopy-link", group: "Canopy link", blurb: "Open a pasted canopyide.dev link to a workspace, shared session or team message.", timing: "instant", composing: true, rows: (q) => readableLinkRows(q.query) },
   { id: "actions", group: "Actions", blurb: "The launcher entries, and running what you typed as a one-shot task.", timing: "instant", composing: true, rows: (q) => actionRows(q.query, q.ctx, q.attachments) },
   { id: "tabs", group: "Open Tabs", blurb: "Everything open in this project's tab strip.", timing: "instant", rows: (q) => tabRows(q.query, q.ctx) },
   // High, and above Files on purpose: what you copied a minute ago is the thing

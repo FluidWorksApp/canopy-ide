@@ -8,6 +8,7 @@ import {Button} from './ui';
 import {CheckIcon,CopyIcon,DocumentIcon,DownloadIcon,InfoIcon,LockIcon,SendIcon} from './icons';
 import {ContextMenu,useContextMenu,type MenuItem} from './ContextMenu';
 import {registerSelectAll} from '../selectAll';
+import {copyReadableLink} from '../readableLinks';
 import {isSendKey} from './chatComposerKeys';
 import './teamHub.css';
 import {AddReactionButton,MessageReactions,ReactionPicker} from './MessageReactions';
@@ -20,7 +21,8 @@ import {isMuted,setMuted} from '../teamMessaging/notifications';
 import {getSettings,subscribeSettings} from '../settings';
 import {ChatCard} from './ChatCard';
 import {cardCaption,cardOf} from '../teamMessaging/cardSchema';
-export type AccountConversation={teamId:string;userId:string;peer:string|null;name:string;email?:string};
+/** `focusMessage`: a message to bring into view, from a readable message link. */
+export type AccountConversation={teamId:string;userId:string;peer:string|null;name:string;email?:string;focusMessage?:string};
 /** Consecutive messages from one sender within this window share one header. */
 const GROUP_MS=5*60_000;
 /** The composer grows with its text up to this many lines, then scrolls. */
@@ -67,7 +69,7 @@ function dayLabel(t:number){
  return new Date(t).toLocaleDateString([],{weekday:'short',month:'short',day:'numeric'});
 }
 export function AccountChatView({conversation,active=true}:{conversation:AccountConversation;active?:boolean}){
- const {teamId,userId,peer,name,email}=conversation;
+ const {teamId,userId,peer,name,email,focusMessage}=conversation;
  const session=useMemo(()=>teamSession(teamId,userId),[teamId,userId]);
  useEffect(()=>session.retain(),[session]);
  const {messages,members,receipts,status,restoredIds,delivery={},attachments={},reactions={},undeliveredReactions={},edits={},deleted={},unreadIds=[]}=useSyncExternalStore(session.subscribe,session.getSnapshot);
@@ -143,6 +145,15 @@ export function AccountChatView({conversation,active=true}:{conversation:Account
  const menu=useContextMenu(),[copied,setCopied]=useState<string>(),copiedTimer=useRef<number>(undefined);
  useEffect(()=>()=>window.clearTimeout(copiedTimer.current),[]);
  const copy=(text:string,id:string)=>void navigator.clipboard.writeText(text).then(()=>{setCopied(id);window.clearTimeout(copiedTimer.current);copiedTimer.current=window.setTimeout(()=>setCopied(undefined),COPIED_MS);}).catch(()=>{});
+ // Opened from a message link: bring that message into view once it is in
+ // the transcript (history loads after mount), and mark it briefly.
+ const focused=useRef<string>(undefined);
+ useEffect(()=>{
+  if(!focusMessage||focused.current===focusMessage)return;
+  const el=log.current?.querySelector<HTMLElement>(`[data-message="${focusMessage.replace(/[^A-Za-z0-9-]/g,'')}"]`);if(!el)return;
+  focused.current=focusMessage;el.scrollIntoView?.({block:'center'});el.classList.add('is-linked');
+  const timer=window.setTimeout(()=>el.classList.remove('is-linked'),2400);return()=>window.clearTimeout(timer);
+ },[focusMessage,messages.length]);
  // Select All inside the transcript selects the conversation, not the app.
  useEffect(()=>{const el=log.current;return el?registerSelectAll(el,()=>window.getSelection()?.selectAllChildren(el)):undefined;},[]);
  const transcriptMenu=(e:MouseEvent<HTMLDivElement>)=>{
@@ -151,6 +162,9 @@ export function AccountChatView({conversation,active=true}:{conversation:Account
   const items:MenuItem[]=[];
   if(picked.trim())items.push({label:'Copy',onClick:()=>copy(picked,'selection')});
   if(id&&text)items.push({label:'Copy message',onClick:()=>copy(text,id)});
+  // A readable link to this message (ids only; the text stays encrypted on
+  // members' devices). Teammates open it into this conversation.
+  if(id&&target&&!deleted[id])items.push({label:'Copy link',onClick:()=>void copyReadableLink({kind:'message',teamId,peer,messageId:id}).then(()=>{setCopied(id);window.clearTimeout(copiedTimer.current);copiedTimer.current=window.setTimeout(()=>setCopied(undefined),COPIED_MS);}).catch((e:unknown)=>setError(e instanceof Error?e.message:String(e)))});
   if(id&&target&&!deleted[id])items.push({label:'Reply in thread',onClick:()=>setThread(threadRoot(target,findMessage)??id)});
   if(id&&editable(target))items.push({label:'Edit message',onClick:()=>startEdit(id)});
   if(id&&target?.sender===userId&&!deleted[id])items.push({label:'Delete message…',onClick:()=>{setEditing(undefined);setConfirming(id);}});

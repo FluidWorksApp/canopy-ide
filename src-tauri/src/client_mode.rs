@@ -103,6 +103,7 @@ pub async fn canopy_account_request(
             | "/api/teams"
             | "/api/peers"
             | "/api/slack"
+            | "/api/links"
     ) {
         return Err("Invalid account request".into());
     }

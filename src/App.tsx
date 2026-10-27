@@ -1,6 +1,7 @@
 import {hibernateWorkspaceProjects,type ConfirmOthers,type HibernateProgressListener} from './remoteExecution/hibernateWorkspace';
 import {activeWorkspace} from './remoteExecution/workspace';
 import {startBackgroundTeams} from "./teamMessaging/background";
+import {openReadableLink} from "./readableLinks";
 import {startTeamMessageNotifications} from "./teamMessaging/notifications";
 import {liveTeamSessions,subscribeTeamJobs} from "./teamMessaging/session";
 import {teamName} from "./teamMessaging/unread";
@@ -2317,9 +2318,19 @@ export default function App() {
   // list goes down the identical path as clicking the OS banner for the same
   // item. Two routers would drift, and the fallback chain is the part worth
   // having exactly once.
+  const followDeepLinkRef = useRef<(link: DeepLink | null) => Promise<void>>(async () => {});
   const followDeepLink = useCallback(
     async (link: DeepLink | null) => {
       if (!link || link.kind === "app") return;
+      // A readable Canopy link names something in the account (a workspace,
+      // a shared session, a team message), not in a project: the control
+      // plane resolves it for this account first, then it routes from there.
+      if (link.kind === "link") {
+        await openReadableLink(link.url, { follow: (next) => followDeepLinkRef.current(next) }).catch((err) =>
+          notify(String(err).replace(/^Error:\s*/, ""), "error"),
+        );
+        return;
+      }
       const state = wsRef.current;
       // Team surfaces (chat, transfers, the inbox) are global but rendered
       // inside a project, so they carry no project hint and are perfectly
@@ -2376,6 +2387,9 @@ export default function App() {
     },
     [notify],
   );
+  useEffect(() => {
+    followDeepLinkRef.current = followDeepLink;
+  }, [followDeepLink]);
   useEffect(() => {
     if (!loaded) return;
     let un: (() => void) | undefined;

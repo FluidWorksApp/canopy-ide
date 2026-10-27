@@ -53,7 +53,12 @@ function AccountIcon(){
  return <svg aria-hidden="true" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="8" r="3.6"/><path d="M5 20a7 7 0 0 1 14 0"/></svg>;
 }
 
-export function TeamHub({onOpenChat}:{onOpenChat?:(conversation:AccountConversation)=>void}){
+/** `unavailable`: teams could not be loaded for another reason (offline, no
+ *  route to Canopy), which also leaves an account-less fallback useful. */
+export type TeamAccountState='unknown'|'signed-in'|'signed-out'|'unavailable';
+/** `onAccount`: whether a Canopy account is signed in, so the panel around
+ *  this can keep the no-account fallback (join codes) out of a signed-in flow. */
+export function TeamHub({onOpenChat,onAccount}:{onOpenChat?:(conversation:AccountConversation)=>void;onAccount?:(state:TeamAccountState)=>void}){
  const [epoch,setEpoch]=useState(cacheEpoch);
  const [directory,setDirectory]=useState<Directory|null>(cache.directory);
  const [details,setDetails]=useState<Record<string,Detail>>(cache.details);
@@ -116,6 +121,8 @@ export function TeamHub({onOpenChat}:{onOpenChat?:(conversation:AccountConversat
  const firstLoad=!directory&&listLoading&&!listError;
  const refreshing=!!directory&&(listLoading||(!!detail&&detailLoading===selected));
  const signedOut=!directory&&!!listError&&/sign in/i.test(listError);
+ const accountState:TeamAccountState=directory?'signed-in':signedOut?'signed-out':listError&&!listLoading?'unavailable':'unknown';
+ useEffect(()=>{onAccount?.(accountState);},[accountState,onAccount]);
  const peopleError=detailError?.team===selected?detailError.text:'';
  const shownError=directory?(listError||peopleError):'';
  const self=members.find(m=>m.id===selfId);
