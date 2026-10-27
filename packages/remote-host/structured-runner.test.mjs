@@ -38,3 +38,16 @@ test('long lines are cut at the limit and marked',()=>{
  split.push(Buffer.from('abcdefg\nhi'));split.push(Buffer.from('\n'));split.end();
  assert.deepEqual(lines,[['abcd',true],['hi\n',false]]);
 });
+test('a runner gets the context-bridge credential the gateway minted, and is listed while it runs',async()=>{
+ const {root,hub,commands}=await setup();
+ const token='k'.repeat(24);
+ const script="console.log(JSON.stringify({socket:process.env.CANOPY_CTX_SOCKET,token:process.env.CANOPY_CTX_TOKEN}));setInterval(()=>{},1000);";
+ const started=await commands.structured_runner_spawn({attemptId:'a4',controlToken:'t',command:process.execPath,args:['-e',script],cwd:root,keepStdin:false,onData:hub.open(id(4)),harness:{token}});
+ assert.ok(Number.isSafeInteger(started.pid));
+ assert.deepEqual(await commands.structured_runner_live(),['a4']);
+ const first=(await hub.poll([id(4)],3000))[id(4)].messages[0];
+ assert.deepEqual(JSON.parse(first.text),{socket:'/run/canopy-ctx/ctx.sock',token});
+ await commands.structured_runner_kill({attemptId:'a4',controlToken:'t'});
+ assert.deepEqual(await commands.structured_runner_live(),[]);
+ await assert.rejects(commands.structured_runner_spawn({attemptId:'a5',controlToken:'t',command:process.execPath,args:[],cwd:root,harness:{token:'short'}}),/Invalid harness credential/);
+});

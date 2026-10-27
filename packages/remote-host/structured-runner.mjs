@@ -2,9 +2,13 @@
 // code (src-tauri/src/structured_runner.rs). Lines go to the caller's channel
 // as {kind:'line'|'stderr'|'exit'}; stdin stays open for follow-up turns when
 // asked. The task store authorizes each attempt: it must be running and its
-// cwd must be the worktree the task reserved.
+// cwd must be the worktree the task reserved. Like the desktop's mint_attempt,
+// the runner gets a context-bridge credential: the gateway mints one for the
+// attempt (`harness`) and the Canopy service keeps it while
+// structured_runner_live still lists the attempt.
 import {spawn} from 'node:child_process';
 import {stat,realpath} from 'node:fs/promises';
+import {harnessEnvironment} from './runner-harness.mjs';
 const STDERR_KEEP=8*1024,STDOUT_LINE_MAX=1024*1024;
 const validId=id=>typeof id==='string'&&id.length>0&&id.length<=128&&/^[A-Za-z0-9_-]+$/.test(id);
 export const STRUCTURED_RUNNER_READ_ONLY=[];
@@ -19,7 +23,7 @@ export function structuredRunnerCommands({home,scoped,authorize}){
  const check=(attemptId,controlToken)=>{const run=running.get(attemptId);if(!run)throw Error(`structured runner attempt is not running: ${attemptId}`);if(run.controlToken!==controlToken)throw Error('structured runner control token does not match the attempt');return run;};
  const killGroup=run=>{try{process.kill(-run.child.pid,'SIGKILL');}catch{try{run.child.kill('SIGKILL');}catch{}}};
  return {
-  structured_runner_spawn:async({attemptId,controlToken,command,args=[],cwd,env,keepStdin,onData})=>{
+  structured_runner_spawn:async({attemptId,controlToken,command,args=[],cwd,env,keepStdin,onData,harness})=>{
    if(!validId(attemptId))throw Error('a structured runner requires a valid attempt id');
    if(!validId(controlToken))throw Error('a structured runner requires a valid control token');
    if(typeof command!=='string'||!command||command.includes('\0'))throw Error('a structured runner requires a command');
@@ -29,7 +33,8 @@ export function structuredRunnerCommands({home,scoped,authorize}){
    if(running.has(attemptId))throw Error(`structured runner attempt is already active: ${attemptId}`);
    const extra=Array.isArray(env)?env:[];
    if(extra.some(pair=>!Array.isArray(pair)||!/^[_A-Za-z][_A-Za-z0-9]*$/.test(String(pair[0]))||typeof pair[1]!=='string'))throw Error('Invalid environment variable');
-   const child=spawn(command,args,{cwd:directory,stdio:['pipe','pipe','pipe'],detached:true,env:{...process.env,HOME:home,CANOPY:'1',...Object.fromEntries(extra)}});
+   const bridge=harnessEnvironment(harness??null);
+   const child=spawn(command,args,{cwd:directory,stdio:['pipe','pipe','pipe'],detached:true,env:{...process.env,HOME:home,CANOPY:'1',...bridge,...Object.fromEntries(extra)}});
    try{await new Promise((resolve,reject)=>{child.once('spawn',resolve);child.once('error',reject);});}
    catch(error){throw Error(`could not start \`${command}\`: ${error.message} — Canopy could not find it on this machine's PATH`);}
    if(keepStdin===false)child.stdin.end();child.stdin.on('error',()=>{});
@@ -44,7 +49,11 @@ export function structuredRunnerCommands({home,scoped,authorize}){
    const finish=()=>{if(!exited||streams>0)return;if(running.get(attemptId)===run){running.delete(attemptId);send({kind:'exit',code});}onData?.close();};
    child.on('exit',status=>{code=status;exited=true;killGroup(run);finish();});
    onData?.onClose(()=>{if(running.get(attemptId)===run){running.delete(attemptId);killGroup(run);}});
+   return {pid:child.pid??null};
   },
+  /** Attempts whose runner is still running: the service keeps their
+   *  context-bridge credentials while they are listed. */
+  structured_runner_live:async()=>[...running.keys()],
   structured_runner_write:async({attemptId,controlToken,line})=>{
    const run=check(attemptId,controlToken);
    if(!run.stdin)throw Error(`structured runner ${attemptId} takes its prompt at launch, not on stdin`);

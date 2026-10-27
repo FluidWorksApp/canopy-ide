@@ -28,7 +28,7 @@ export const NATIVE_COMMANDS=new Set([
  // Workflow runs.
  'workflow_run_create','workflow_step_record','workflow_run_advance','workflow_run_resume','workflow_run_list','workflow_run_get',
  // Structured agent runners.
- 'structured_runner_spawn','structured_runner_write','structured_runner_kill',
+ 'structured_runner_spawn','structured_runner_write','structured_runner_kill','structured_runner_live',
  // Undo-turn snapshots.
  'turn_snapshot','turn_list','turn_preview','turn_restore','turn_native_checkpoint',
  // Pull request provenance.

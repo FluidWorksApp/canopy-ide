@@ -24,6 +24,7 @@ import {IdleAttestation} from './idle-attestation.mjs';
 import {runtimeAuthority} from './runtime-authority.mjs';
 import {memberAuthority} from './member-authority.mjs';
 import {authorizeNativeRead} from './readonly-native.mjs';
+import {runnerRequestId} from './runner-harness.mjs';
 import {memberRuntime} from './member-runtime.mjs';
 import {memberRenewal} from './member-renewal.mjs';
 import {MemberLeases} from './member-leases.mjs';
@@ -339,6 +340,14 @@ export function createGateway({ config, workspaces, origins = [], elasticMemory,
         else if(harness)harnessState={available:false,reason:'member-runtime',message:'Agent tools run in the workspace owner\'s runtime only'};
         if(cliSessions&&payload?.projectId){const launch=await cliSessions.prepare(workspace,principal,payload.projectId,payload.requestId);if(Object.keys(launch).length)payload.sharedAgents=launch;}
       }
+      // A structured runner gets a context-bridge credential, as an agent
+      // terminal does (structured-runner.mjs, the desktop's mint_attempt).
+      let runnerRequest=null;
+      if(operation==='/native'&&payload?.command==='structured_runner_spawn'&&harness&&!principal.memberId){
+        if(Object.hasOwn(payload.args??{},'harness'))throw Error('Agent harness credentials are service-managed');
+        runnerRequest=runnerRequestId(payload.args?.attemptId);
+        if(runnerRequest){const minted=await harness.mint(workspace,runtime,{requestId:runnerRequest,name:'Structured runner'});if(minted.harness)payload.args={...payload.args,harness:minted.harness};else runnerRequest=null;}
+      }
       const sessionInput=request.method==='POST'&&operation.match(/^\/sessions\/(\d+)\/input$/);
       if(sessionInput&&(Object.hasOwn(payload??{},'seq')||Object.hasOwn(payload??{},'id'))){
         // Same queue identity and ledger as socket input: a resend applies once.
@@ -360,6 +369,7 @@ export function createGateway({ config, workspaces, origins = [], elasticMemory,
         body: payload === undefined ? undefined : JSON.stringify(payload), signal: AbortSignal.timeout(operation === "/native" ? nativeTimeoutMs(payload?.command) : 15_000) });
       if(operation==='/sessions'&&request.method==='POST'&&!result.ok)cliSessions?.discard(workspace.id,principal.memberId??'owner',payload.requestId);
       if(operation==='/sessions'&&request.method==='POST'&&!result.ok&&payload.harness)await harness.revoke(workspace.id,payload.requestId);
+      if(runnerRequest&&!result.ok)await harness.revoke(workspace.id,runnerRequest);
       const reader = result.body.getReader(); const chunks = []; let length = 0;
       while (true) {
         const { done, value } = await reader.read(); if (done) break;
@@ -373,6 +383,7 @@ export function createGateway({ config, workspaces, origins = [], elasticMemory,
         if(operation==='/sessions'&&request.method==='POST'&&payload.harness)await harness.bind(workspace.id,payload.requestId,output);
         const stopped=operation.match(/^\/sessions\/(\d+)\/stop$/);if(stopped)await harness.revokeSession(workspace.id,Number(stopped[1]));
         if(operation==='/sessions'&&request.method==='GET')await harness.observeSessions(workspace.id,output);
+        if(operation==='/native'&&payload?.command==='structured_runner_kill'){const done=runnerRequestId(payload.args?.attemptId);if(done)await harness.revoke(workspace.id,done);}
       }
       if(operation==='/sessions'&&request.method==='POST'&&result.ok&&harnessState&&output&&typeof output==='object')output.harness=harnessState.available?{available:true}:{available:false,reason:harnessState.reason,message:harnessState.message};
       if(result.ok&&cliSessions){

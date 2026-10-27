@@ -107,3 +107,16 @@ test('the harness stream is ticketed, passes SSE through, and revocation cuts it
   assert.equal((await fetch(`${t.url}/v1/workspaces/a/harness/stream`)).status,401);
  }finally{await t.close();}
 });
+
+test('a structured runner is minted a context-bridge credential, revoked when its spawn fails',async()=>{
+ const t=await setup();
+ try{
+  // No task reserved this attempt, so the host refuses the spawn itself.
+  const response=await t.request('owner','/native',{command:'structured_runner_spawn',args:{attemptId:'att_1',controlToken:'ct',command:'claude',cwd:'/workspace'}});
+  assert.notEqual(response.status,200);
+  const minted=t.fake.calls.find(c=>c.method==='POST'&&c.path==='/admin/workspaces/a/terminals');
+  assert.equal(minted.body.requestId,'runner-att:1');
+  assert.ok(t.fake.calls.some(c=>c.method==='DELETE'&&c.path==='/admin/workspaces/a/terminals/runner-att%3A1'));
+  assert.equal((await t.request('owner','/native',{command:'structured_runner_spawn',args:{attemptId:'att_2',harness:{token:'forged-credential-0000'}}})).status,400,'a client cannot supply a credential');
+ }finally{await t.close();}
+});
