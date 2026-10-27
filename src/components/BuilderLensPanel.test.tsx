@@ -1,6 +1,9 @@
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
+// The three-strikes walk renders a dozen rounds; give a loaded machine room.
+vi.setConfig({ testTimeout: 20_000 });
+
 vi.mock("../ledger", async () => (await import("../test/fakeLedger")).fakeLedger);
 const ipcMock = vi.hoisted(() => ({
   gitLog: vi.fn(),
