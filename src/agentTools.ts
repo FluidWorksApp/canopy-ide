@@ -134,6 +134,16 @@ export const AGENT_TOOL_GROUPS: AgentToolGroup[] = [
         note: "Workspaces, own machines and teammates a job can go to",
       },
       {
+        name: "canopy_team_send",
+        label: "Teams chat",
+        note: "Post in your Teams chat as you, marked as agent-written",
+      },
+      {
+        name: "canopy_team_people",
+        label: "Team people",
+        note: "Your teams and the people an agent can message",
+      },
+      {
         name: "canopy_mesh",
         label: "Mesh history",
         note: "Its own sent and received messages, by id",
@@ -155,6 +165,22 @@ export const AGENT_TOOL_GROUPS: AgentToolGroup[] = [
         name: "canopy_notes_write",
         label: "Park a note",
         note: "Capture a side-observation instead of chasing it",
+      },
+    ],
+  },
+  {
+    id: "memory",
+    label: "Team memory",
+    blurb:
+      "Decisions, constraints, conventions and facts a person on the team approved. An " +
+      "agent checks it before deciding something durable, and can propose a new entry — " +
+      "which waits for a person's approval before any agent is told it.",
+    tools: [
+      { name: "canopy_memory", label: "Check memory", note: "Approved, unexpired entries relevant to a question" },
+      {
+        name: "canopy_memory_propose",
+        label: "Propose memory",
+        note: "Suggest an entry; it lands for review, never approved automatically",
       },
     ],
   },

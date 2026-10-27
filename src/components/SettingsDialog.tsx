@@ -3,6 +3,10 @@
 // long labels into slivers and pushed wide control groups out of the modal).
 // Skins render as rich choices — a palette is a thing you look at, not a word
 // you read.
+import { RulesSettings, type RulesSettingsProject } from "./RulesSettings";
+import { BrainConnectPanel } from "./BrainConnect";
+import { BrainSpendTable } from "./BrainChip";
+import { BrainAutomation, BrainExceptions } from "./BrainSettings";
 import { accountSummary, cliLoginText, signedInClis } from "../accountState";
 import {
   Fragment,
@@ -47,6 +51,7 @@ import { clearCompanionView, clearRun } from "../companionSession";
 import { forgetAllMemories } from "../companionMemory";
 import { Mascot } from "./Mascot";
 import { Button, Checkbox, Field, Radio, Row, Segmented, Select, Stepper, Switch, TextInput } from "./ui";
+import "./receipts.css";
 import { drawWave } from "../waveStyles";
 import { useEscape, useEscapeLayer } from "../useEscape";
 import { TRACKERS, setTrackerKey, trackerKey } from "../trackers";
@@ -87,6 +92,7 @@ import {
 } from "../fleetSnapshot";
 import { FleetReadinessPanel } from "./FleetReadinessPanel";
 import { AgentMemorySettings } from "./AgentMemorySettings";
+import { MemorySettings } from "./MemorySettings";
 import {OrganizationSettings} from "./OrganizationSettings";
 import { AccountSettings } from "./AccountSettings";
 import {
@@ -135,11 +141,16 @@ export type SettingsTab =
   | "browser"
   | "remote"
   | "vault"
-  | "privacy";
+  | "privacy"
+  | "rules";
 
 interface SettingsDialogProps {
   onClose: () => void;
   initialTab?: SettingsTab;
+  /** Every project, for the Rules tab (RulesSettings.tsx). */
+  projects?: readonly RulesSettingsProject[];
+  /** Open one project's Rules panel. */
+  onOpenRules?: (projectId: string, cwd: string) => void;
 }
 
 /** Ordered, and grouped by what you came here to change: how it looks, what
@@ -157,6 +168,7 @@ const TABS: { id: SettingsTab; label: string; group: string }[] = [
   { id: "editor", label: "Editor", group: "Look" },
   { id: "terminal", label: "Terminal", group: "Look" },
   { id: "agents", label: "Agents", group: "Agents" },
+  { id: "rules", label: "Rules", group: "Agents" },
   { id: "mascot", label: "Mascot", group: "Agents" },
   { id: "dictation", label: "Dictation", group: "Agents" },
   { id: "spotsearch", label: "SpotSearch", group: "Agents" },
@@ -448,6 +460,7 @@ function CompanionSettings({
                 </Button>
               </Field>
             </Row>
+            <BrainExceptions only="Companion" />
           </>
         )}
       </Item>
@@ -1194,7 +1207,7 @@ function CustomClis({
  *  advertise a key the handler does not answer. */
 const SECTION_MOD = resolve("settings-section")!;
 
-export function SettingsDialog({ onClose, initialTab = "appearance" }: SettingsDialogProps) {
+export function SettingsDialog({ onClose, initialTab = "appearance", projects = [], onOpenRules }: SettingsDialogProps) {
   // "vault" is still a valid deep-link target (agentOps and the status bar
   // both open it by name); it now lands on the tab the vault lives in.
   const [tab, setTab] = useState<SettingsTab>(
@@ -1412,6 +1425,17 @@ export function SettingsDialog({ onClose, initialTab = "appearance" }: SettingsD
           <div className="settings-content">
             {tab === "account" && <Item name="Accounts" desc="Your balance and workspace usage."><AccountSettings onTeams={()=>setTab("teams")} onWorkspaces={()=>{onClose();window.dispatchEvent(new Event("canopy:open-workspaces"));}} /></Item>}
             {tab === "teams" && <OrganizationSettings />}
+            {tab === "rules" && (
+              <Item name="Rules" desc="Team rules across your projects, and which agent CLIs enforce them.">
+                <RulesSettings
+                  projects={projects}
+                  onOpen={(id, cwd) => {
+                    onClose();
+                    onOpenRules?.(id, cwd);
+                  }}
+                />
+              </Item>
+            )}
             {tab === "appearance" && (
               <>
                 <Item
@@ -1528,6 +1552,29 @@ export function SettingsDialog({ onClose, initialTab = "appearance" }: SettingsD
 
             {tab === "agents" && (
               <>
+                {/* First, because everything smart in Canopy runs on it. The
+                    same panel as the first-run step and the chip's dialog. */}
+                <Item
+                  name="Brain"
+                  desc="The agent CLI you're signed in to that powers every smart feature: commit messages, session names, the companion, reviews, Build."
+                >
+                  <BrainConnectPanel onTerminalOpened={onClose} />
+                </Item>
+                <Item
+                  name="Brain spending"
+                  desc="What Canopy's own features spent on your plan today, by feature. A feature over its daily cap pauses until tomorrow; leave a cap blank for none."
+                >
+                  <BrainSpendTable />
+                </Item>
+                <Item
+                  name="Features not using your brain"
+                  desc="Overrides you chose for one feature. Everything else follows the brain."
+                >
+                  <BrainExceptions />
+                </Item>
+                <Item name="Automatic brain work" desc="Small background calls the brain makes on its own.">
+                  <BrainAutomation />
+                </Item>
                 <Item
                   name="Fleet readiness"
                   desc="What can launch now, composed from install, account, plan, and integration signals."
@@ -1564,6 +1611,68 @@ export function SettingsDialog({ onClose, initialTab = "appearance" }: SettingsD
                     }
                   />
                 </Item>
+                {/* Plans and review (src/plans, src/review): the brain plans
+                    dispatched work and writes the review's intent summary. */}
+                <Item
+                  name="Plan before an agent starts"
+                  desc="When you hand work to an agent, the brain writes a short plan first. Small, low-risk work starts right away with the plan shown; anything riskier waits for your approval."
+                >
+                  <Checkbox
+                    checked={s.planBeforeDispatch}
+                    onChange={(v) => patch({ planBeforeDispatch: v })}
+                    label="Plan dispatched work first"
+                    hint={
+                      s.planBeforeDispatch
+                        ? "Uses your brain's plan once per task you start."
+                        : "Agents start straight from what you typed."
+                    }
+                  />
+                </Item>
+                <Item
+                  name="Intent & evidence review"
+                  desc="Reviewing an agent's changes or a pull request opens on the plan, what changed against it, the proof receipt and a risk map, before the diff."
+                >
+                  <Checkbox
+                    checked={s.reviewAutoSummary}
+                    onChange={(v) => patch({ reviewAutoSummary: v })}
+                    label="Summarize changes against the plan when the review opens"
+                    hint={
+                      s.reviewAutoSummary
+                        ? "One brain call per new diff; the same diff is never summarized twice."
+                        : "The review shows a button to ask for the summary."
+                    }
+                  />
+                  <Stepper
+                    aria-label="Most changed lines per reviewable slice"
+                    suffix="lines"
+                    value={s.reviewSliceBudgetLines}
+                    min={50}
+                    max={5000}
+                    step={50}
+                    onChange={(v) => patch({ reviewSliceBudgetLines: v })}
+                  />
+                </Item>
+                <Item
+                  name="Agent awareness"
+                  desc="When an agent finishes a change, the other agents working on the same code are told what changed and why it matters to them."
+                >
+                  <Checkbox
+                    checked={s.awarenessEnabled}
+                    onChange={(v) => patch({ awarenessEnabled: v })}
+                    label="Tell agents about each other's changes"
+                    hint={
+                      s.awarenessEnabled
+                        ? "Your brain writes each note in the background, and busy shared files get a claim so two agents don't write them at once. Edit a project's hotspot list on the Agents page, board view."
+                        : "Agents work without hearing about each other's changes, and no brain calls are made for it."
+                    }
+                  />
+                </Item>
+                <Item
+                  name="Team memory"
+                  desc="Decisions, constraints and conventions your agents are told, each approved by a person and kept only until it expires."
+                >
+                  <MemorySettings s={s} patch={patch} />
+                </Item>
                 <Item
                   name="CLI updates"
                   desc="Keep the agent CLIs installed on this computer current. Remote workspaces keep the versions their image pins."
@@ -1576,6 +1685,91 @@ export function SettingsDialog({ onClose, initialTab = "appearance" }: SettingsD
                       s.autoUpdateClis
                         ? "Claude Code, Grok and Antigravity update themselves; Canopy updates the others about once a day, the way each was installed, and never while one is running."
                         : "Canopy updates nothing, and asks Claude Code, Grok and Antigravity to stop updating themselves in agents started from now on."
+                    }
+                  />
+                </Item>
+                {/* Spend & outcomes (src/outcomes): session budgets and the
+                    brain's weekly insight in the Outcomes panel. */}
+                <Item
+                  name="Session budget"
+                  desc="Default dollar budget for each agent session. Warns at 80% and pauses the agent at 100%. A session's own budget (in its tab, or “Budget $5” in a prompt) or its plan's budget wins. Empty for none."
+                >
+                  <TextInput
+                    type="number"
+                    width="xs"
+                    aria-label="Default session budget in dollars"
+                    min={0}
+                    step={1}
+                    placeholder="None"
+                    value={s.sessionBudgetUsd ?? ""}
+                    onChange={(e) => {
+                      const raw = e.target.value.trim();
+                      const v = Number(raw);
+                      patch({ sessionBudgetUsd: raw === "" || !Number.isFinite(v) || v <= 0 ? null : v });
+                    }}
+                  />
+                </Item>
+                <Item
+                  name="Prototype session cap"
+                  desc="Dollar cap for agent sessions in Build (prototype) projects when no other budget applies, so a prototype left running overnight cannot run up a bill. Empty for none."
+                >
+                  <TextInput
+                    type="number"
+                    width="xs"
+                    aria-label="Prototype session cap in dollars"
+                    min={0}
+                    step={1}
+                    placeholder="None"
+                    value={s.builderSessionCapUsd ?? ""}
+                    onChange={(e) => {
+                      const raw = e.target.value.trim();
+                      const v = Number(raw);
+                      patch({ builderSessionCapUsd: raw === "" || !Number.isFinite(v) || v <= 0 ? null : v });
+                    }}
+                  />
+                </Item>
+                <Item
+                  name="At the budget"
+                  desc="What happens when an agent session reaches its budget."
+                >
+                  <Checkbox
+                    checked={s.budgetPauseAtLimit}
+                    onChange={(v) => patch({ budgetPauseAtLimit: v })}
+                    label="Pause the agent (press Esc in its terminal)"
+                    hint={
+                      s.budgetPauseAtLimit
+                        ? "Canopy stops the agent's current step and asks you to raise the budget. Nothing is lost; tell it to continue."
+                        : "Canopy only warns. The agent keeps going."
+                    }
+                  />
+                </Item>
+                <Item
+                  name="Spend & outcomes"
+                  desc="The Outcomes panel counts spend, merges, reverts and rework on this computer. Nothing is sent to Canopy."
+                >
+                  <Checkbox
+                    checked={s.outcomesInsight}
+                    onChange={(v) => patch({ outcomesInsight: v })}
+                    label="Let the brain write a weekly insight from the numbers"
+                    hint={
+                      s.outcomesInsight
+                        ? "At most once a day, on the brain's cheaper model. It sees totals only, never code."
+                        : "The panel shows the numbers only."
+                    }
+                  />
+                </Item>
+                <Item
+                  name="Builder lens summaries"
+                  desc="In the Builder lens, explain each saved step and the project's layers in plain words."
+                >
+                  <Checkbox
+                    checked={s.lensAutoSummaries}
+                    onChange={(v) => patch({ lensAutoSummaries: v })}
+                    label="Summarise changes automatically"
+                    hint={
+                      s.lensAutoSummaries
+                        ? "Your connected agent writes a short summary of each step in the background, once per step."
+                        : "Steps show what you asked for; the layer map is made only when you ask."
                     }
                   />
                 </Item>
@@ -1608,6 +1802,73 @@ export function SettingsDialog({ onClose, initialTab = "appearance" }: SettingsD
                         : "No new snapshots are taken. Ones already saved stay restorable until they age out."
                     }
                   />
+                </Item>
+                {/* Session documents (src/sessionDoc). */}
+                <Item
+                  name="Session documents"
+                  desc="An agent session opened as a document: goal, turns, files, decisions, and a hand-off packet for whoever continues it."
+                >
+                  <Checkbox
+                    checked={s.sessionDocAutoSummary}
+                    onChange={(v) => patch({ sessionDocAutoSummary: v })}
+                    label="Write a summary when a session document opens"
+                    hint={
+                      s.sessionDocAutoSummary
+                        ? "The brain reads the session in the background (the cheaper model) the first time you open it and after each new turn."
+                        : "Summaries are written only when you press “Write summary”."
+                    }
+                  />
+                  <Checkbox
+                    checked={s.commitSessionTrailers}
+                    onChange={(v) => patch({ commitSessionTrailers: v })}
+                    label="Add Agent-Session trailers to commits"
+                    hint={
+                      s.commitSessionTrailers
+                        ? "Commits from the Changes panel name each agent session whose edits they include, so a line can be traced back to its session."
+                        : "Commits are made exactly as you write them."
+                    }
+                  />
+                </Item>
+                <Item
+                  name="Proof receipts"
+                  desc="After an agent finishes, Canopy re-runs the project's tests itself — not in the agent's terminal — checks for tests the agent changed and packages that don't exist, and asks the brain whether the work matches the request."
+                >
+                  <span className="rc-settings">
+                    <Segmented<"auto" | "manual" | "off">
+                      aria-label="When to verify agent turns"
+                      options={[
+                        { id: "auto", label: "After every turn" },
+                        { id: "manual", label: "When I ask" },
+                        { id: "off", label: "Off" },
+                      ]}
+                      value={s.receiptMode}
+                      onChange={(receiptMode) => patch({ receiptMode })}
+                    />
+                    <span className="set-item-desc">
+                      {s.receiptMode === "auto"
+                        ? "Turns that changed files are verified in the background on the brain's cheaper model. Finished agents show ✓ Proven, ◐ Partial, ✗ Unproven or ⚠ Tests changed."
+                        : s.receiptMode === "manual"
+                          ? "Nothing runs on its own. Open an agent's receipt badge and choose Verify now."
+                          : "No checks run and no receipt badges are shown."}
+                    </span>
+                    {Object.entries(s.receiptCommands).map(([root, lines]) => (
+                      <span key={root} className="set-item-desc">
+                        <code>{root.split(/[\\/]/).pop()}</code>: {lines.join(" · ")}{" "}
+                        <Button
+                          size="sm"
+                          variant="ghost"
+                          title={`Forget the check commands set for ${root}`}
+                          onClick={() => {
+                            const next = { ...s.receiptCommands };
+                            delete next[root];
+                            patch({ receiptCommands: next });
+                          }}
+                        >
+                          Use detected checks
+                        </Button>
+                      </span>
+                    ))}
+                  </span>
                 </Item>
                 <Item
                   name="Memory monitoring prompts"
@@ -1684,7 +1945,7 @@ export function SettingsDialog({ onClose, initialTab = "appearance" }: SettingsD
                 </Item>
                 <Item
                   name="Default agent"
-                  desc="What the Start button launches; pick another per ticket."
+                  desc="What the Start button launches; pick another per ticket. It is also your brain when it can be one (see Brain above)."
                 >
                   {/* Chips, not cards: picking a CLI is a one-line choice, and
                       the card grid took half the page to say it. */}

@@ -1,0 +1,314 @@
+// "An agent turn just started / just ended" — one subscription for features.
+//
+// The signal already exists: every agent CLI with Canopy's hooks reports
+// UserPromptSubmit (turn start) and Stop (turn end) through canopy-hook →
+// ~/.canopy/agent-events.jsonl → the app's hook bridge → `agent:events`, and
+// App.tsx parses each batch once. Turn rollback (turnRollback.ts) snapshots
+// off the same two events. This file adds nothing to that pipe; it listens to
+// the parsed batch (App.tsx calls `observeAgentTurns` beside
+// `observeTurnEvents`) and enriches the end with what features need:
+//
+//  * `root` — the repo's canonical root (main checkout), the same key the
+//    ledger files entries under, so a turn-end handler can write straight in;
+//  * `filesTouched` — from the agent's own change journal
+//    (`~/.canopy/sessions/<id>.edits.jsonl`, written by canopy-hook on every
+//    edit tool call), so it is attributed even on a checkout other agents
+//    share. Bash-made changes are not in the journal; diff the turn-rollback
+//    snapshots for those.
+//
+// Brain calls never appear here: brain.rs strips CANOPY* from their env, which
+// is what arms canopy-hook in the first place.
+
+import * as ipc from "./ipc";
+import { eventAgentId, type AgentEventData } from "../shared/notifications";
+
+export interface AgentTurnStart {
+  /** `<sessionId>:<startedAt>` — stable for the turn, shared by its end. */
+  turnId: string;
+  /** The terminal the agent runs in; null when its hooks cannot carry the
+   *  stamp (codex). */
+  ptyId: number | null;
+  sessionId: string;
+  /** Agent registry id. */
+  cli: string;
+  cwd: string;
+  /** Canonical repo root (see ledger.ts); the cwd when git cannot say. */
+  root: string;
+  prompt?: string;
+  /** The Canopy plan the session was launched to carry out — carried
+   *  explicitly on every hook event (CANOPY_PLAN_ID → `canopy_plan_id`),
+   *  never inferred from the folder or the time. */
+  planId?: string;
+  startedAt: number;
+}
+
+export interface AgentTurnEnd extends AgentTurnStart {
+  /** Paths the agent's edit tools changed during the turn — relative to the
+   *  checkout `cwd` is in when Canopy has that workspace open, absolute
+   *  otherwise. */
+  filesTouched: string[];
+  endedAt: number;
+  /** The start was not observed (the app opened mid-turn), so `startedAt` is
+   *  the session's previous turn end, or `endedAt` when there is none, and
+   *  `filesTouched` covers that window. */
+  partial?: boolean;
+  /** The agent's own closing words for the turn, when its Stop hook carries
+   *  them — a claim, which proof receipts show beside (never as) evidence. */
+  lastMessage?: string;
+}
+
+/** An agent session is over: its CLI reported SessionEnd, or the terminal it
+ *  ran in exited. Fires once per session, after its pending turn events. */
+export interface AgentSessionEnd {
+  sessionId: string;
+  ptyId: number | null;
+  cli: string;
+  cwd: string;
+  root: string;
+  endedAt: number;
+  /** What said so. */
+  via: "session-end" | "process-exit";
+  /** The plan the session worked under, when its events named one (plans
+   *  close an interactive plan at session end). */
+  planId?: string;
+}
+
+type StartListener = (turn: AgentTurnStart) => void;
+type EndListener = (turn: AgentTurnEnd) => void;
+type SessionEndListener = (end: AgentSessionEnd) => void;
+
+const startListeners = new Set<StartListener>();
+const endListeners = new Set<EndListener>();
+const sessionEndListeners = new Set<SessionEndListener>();
+
+/** Fires when an agent session ends. Returns an unsubscribe. */
+export function onAgentSessionEnd(cb: SessionEndListener): () => void {
+  sessionEndListeners.add(cb);
+  return () => {
+    sessionEndListeners.delete(cb);
+  };
+}
+
+/** Fires after an agent's turn begins. Returns an unsubscribe. */
+export function onAgentTurnStart(cb: StartListener): () => void {
+  startListeners.add(cb);
+  return () => {
+    startListeners.delete(cb);
+  };
+}
+
+/** Fires after an agent's turn ends, with what it touched. Returns an
+ *  unsubscribe. */
+export function onAgentTurnEnd(cb: EndListener): () => void {
+  endListeners.add(cb);
+  return () => {
+    endListeners.delete(cb);
+  };
+}
+
+// ---------------------------------------------------------------- plumbing
+
+export interface AgentTurnDeps {
+  root(cwd: string): Promise<string>;
+  edits(cwd: string, sessionId: string): Promise<{ ts: number; path: string }[]>;
+}
+
+const defaultDeps: AgentTurnDeps = {
+  root: (cwd) => ipc.ledgerRoot(cwd),
+  edits: (cwd, sessionId) => ipc.agentEdits(cwd, sessionId),
+};
+let deps: AgentTurnDeps = defaultDeps;
+
+/** Tests only: swap the lookups. Null restores the real ones. */
+export function setAgentTurnDepsForTests(next: AgentTurnDeps | null): void {
+  deps = next ?? defaultDeps;
+}
+
+/** Per session: the open turn, and when the last one ended. */
+const open = new Map<string, AgentTurnStart>();
+const lastEnd = new Map<string, number>();
+/** What a session-end needs to say, by session, from its latest event; and
+ *  which session each terminal is running, for a process exit. */
+const known = new Map<string, Omit<AgentSessionEnd, "endedAt" | "via">>();
+const sessionByPty = new Map<number, string>();
+const ended = new Set<string>();
+/** Per-session chain, so a short turn's start is announced before its end
+ *  even though each waits on an async root lookup. */
+const chains = new Map<string, Promise<unknown>>();
+const roots = new Map<string, Promise<string>>();
+
+function rootOf(cwd: string): Promise<string> {
+  let hit = roots.get(cwd);
+  if (!hit) {
+    hit = deps.root(cwd).catch(() => cwd);
+    roots.set(cwd, hit);
+  }
+  return hit;
+}
+
+function emit<T>(listeners: Set<(t: T) => void>, turn: T): void {
+  for (const cb of listeners) {
+    try {
+      cb(turn);
+    } catch {
+      // One feature's bug must not cost the others their event.
+    }
+  }
+}
+
+/** Journal timestamps are whole seconds; a turn's window is in ms. One second
+ *  of slack on each side, because the observed time is the hook bridge's
+ *  batch time (up to ~500ms after the hook ran). */
+export function filesInWindow(
+  edits: readonly { ts: number; path: string }[],
+  startedAt: number,
+  endedAt: number,
+): string[] {
+  const from = Math.floor(startedAt / 1000) - 1;
+  const to = Math.ceil(endedAt / 1000) + 1;
+  const seen = new Set<string>();
+  for (const e of edits) {
+    if (e.path && e.ts >= from && e.ts <= to) seen.add(e.path);
+  }
+  return [...seen];
+}
+
+/** Called by App.tsx with each parsed hook-bridge batch. */
+export function observeAgentTurns(
+  events: readonly (AgentEventData | null)[],
+  observedMs: number = Date.now(),
+): void {
+  for (const e of events) {
+    if (!e || !e.sessionId || !e.cwd) continue;
+    remember(e);
+    if (e.event !== "UserPromptSubmit" && e.event !== "Stop" && e.event !== "SessionEnd") continue;
+    const event = e;
+    const sessionId = e.sessionId;
+    const prev = chains.get(sessionId) ?? Promise.resolve();
+    const next = prev
+      .catch(() => {})
+      .then(() =>
+        event.event === "UserPromptSubmit"
+          ? start(event, observedMs)
+          : event.event === "Stop"
+            ? end(event, observedMs)
+            : sessionEnd(sessionId, observedMs, "session-end"),
+      )
+      .catch(() => {});
+    chains.set(sessionId, next);
+    void next.finally(() => {
+      if (chains.get(sessionId) === next) chains.delete(sessionId);
+    });
+  }
+}
+
+function remember(e: AgentEventData): void {
+  const prev = known.get(e.sessionId);
+  known.set(e.sessionId, {
+    sessionId: e.sessionId,
+    ptyId: e.pty ?? prev?.ptyId ?? null,
+    cli: eventAgentId(e) || prev?.cli || "",
+    cwd: e.cwd,
+    root: prev?.root ?? e.cwd,
+    ...((e.planId ?? prev?.planId) ? { planId: e.planId ?? prev?.planId } : {}),
+  });
+  if (e.pty != null) sessionByPty.set(e.pty, e.sessionId);
+  // A resumed session that takes a new prompt can end again.
+  if (e.event === "UserPromptSubmit") ended.delete(e.sessionId);
+}
+
+async function sessionEnd(sessionId: string, at: number, via: AgentSessionEnd["via"]): Promise<void> {
+  const info = known.get(sessionId);
+  if (!info || ended.has(sessionId)) return;
+  ended.add(sessionId);
+  open.delete(sessionId);
+  const root = await rootOf(info.cwd);
+  emit(sessionEndListeners, { ...info, root, endedAt: at, via });
+}
+
+/** A terminal exited: whatever agent session it was running is over. */
+export function observeAgentPtyExit(ptyId: number, at: number = Date.now()): void {
+  const sessionId = sessionByPty.get(ptyId);
+  if (!sessionId) return;
+  sessionByPty.delete(ptyId);
+  const prev = chains.get(sessionId) ?? Promise.resolve();
+  const next = prev
+    .catch(() => {})
+    .then(() => sessionEnd(sessionId, at, "process-exit"))
+    .catch(() => {});
+  chains.set(sessionId, next);
+}
+
+/** Feed terminal exits in (installOutcomes does, once). Returns a stop. */
+export function watchAgentSessionExits(
+  onExit: (cb: (e: { id: number }) => void) => Promise<() => void> = ipc.onPtyExit,
+): () => void {
+  let stop: (() => void) | null = null;
+  let stopped = false;
+  void onExit((e) => observeAgentPtyExit(e.id)).then((un) => {
+    if (stopped) un();
+    else stop = un;
+  });
+  return () => {
+    stopped = true;
+    stop?.();
+  };
+}
+
+async function start(e: AgentEventData, at: number): Promise<void> {
+  const turn: AgentTurnStart = {
+    turnId: `${e.sessionId}:${at}`,
+    ptyId: e.pty,
+    sessionId: e.sessionId,
+    cli: eventAgentId(e),
+    cwd: e.cwd,
+    root: await rootOf(e.cwd),
+    ...(e.prompt ? { prompt: e.prompt } : {}),
+    ...(e.planId ? { planId: e.planId } : {}),
+    startedAt: at,
+  };
+  open.set(e.sessionId, turn);
+  emit(startListeners, turn);
+}
+
+async function end(e: AgentEventData, at: number): Promise<void> {
+  const began = open.get(e.sessionId);
+  open.delete(e.sessionId);
+  const startedAt = began?.startedAt ?? lastEnd.get(e.sessionId) ?? at;
+  lastEnd.set(e.sessionId, at);
+  const root = began?.root ?? (await rootOf(e.cwd));
+  // The cwd, not the root: the journal relativises paths to the checkout the
+  // agent works in, which for a linked worktree is not the main checkout.
+  const edits = await deps.edits(e.cwd, e.sessionId).catch(() => []);
+  const turn: AgentTurnEnd = {
+    turnId: began?.turnId ?? `${e.sessionId}:${startedAt}`,
+    ptyId: e.pty ?? began?.ptyId ?? null,
+    sessionId: e.sessionId,
+    cli: eventAgentId(e),
+    cwd: e.cwd,
+    root,
+    ...(began?.prompt ? { prompt: began.prompt } : {}),
+    ...((began?.planId ?? e.planId) ? { planId: began?.planId ?? e.planId } : {}),
+    startedAt,
+    endedAt: at,
+    filesTouched: filesInWindow(edits, startedAt, at),
+    ...(began ? {} : { partial: true }),
+    ...(e.lastAssistantMessage ? { lastMessage: e.lastAssistantMessage.slice(0, 4000) } : {}),
+  };
+  emit(endListeners, turn);
+}
+
+/** Tests only. */
+export function resetAgentTurnsForTests(): void {
+  startListeners.clear();
+  endListeners.clear();
+  sessionEndListeners.clear();
+  known.clear();
+  sessionByPty.clear();
+  ended.clear();
+  open.clear();
+  lastEnd.clear();
+  chains.clear();
+  roots.clear();
+  deps = defaultDeps;
+}

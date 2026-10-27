@@ -54,6 +54,10 @@ export interface AgentEventData {
    *  CLIs whose plugin fires an explicit signal; the rest are mapped from the
    *  event name. Nothing anywhere re-derives meaning from `message`. */
   signal?: string;
+  /** A shell tool call's command line, clipped — read by team memory's
+   *  untrusted-content rule (memoryLedger.ts), which needs to tell
+   *  `gh issue view` from `npm test`. Tool events only. */
+  toolCommand?: string;
   /** codex's turn-complete carries the agent's last words. */
   lastAssistantMessage?: string;
   transcriptPath?: string;
@@ -61,6 +65,34 @@ export interface AgentEventData {
   model?: string;
   /** AskUserQuestion payload, when this event is its PreToolUse. */
   questions?: PendingQuestion[];
+  /** The Canopy plan this session was launched to carry out (CANOPY_PLAN_ID,
+   *  stamped by canopy-hook as `canopy_plan_id`). */
+  planId?: string;
+  /** A Rules-panel gate or the irreversible-action gate acted on this tool
+   *  call (canopy-hook `gate_check`, stamped as `canopy_gate`). */
+  gate?: GateStamp;
+}
+
+/** What canopy-hook decided about one tool call. See src/gates/events.ts. */
+export interface GateStamp {
+  id: string;
+  /** blocked | needs-approval | allowed-once | warned | refused */
+  status: string;
+  /** The approve-once key for exactly this action. */
+  key: string;
+  root: string;
+  tool: string;
+  /** The command line, or `write:<path>` / `read:<path>` / `fetch:<url>`. */
+  action: string;
+  findings: {
+    kind: "self-protect" | "rule" | "irreversible" | "trifecta";
+    ruleId?: string;
+    ruleText?: string;
+    class: string;
+    label: string;
+  }[];
+  /** What the agent was told, empty when it was not refused. */
+  reason: string;
 }
 
 export interface AgentEventEntry {
@@ -164,10 +196,35 @@ export function parseAgentEvent(raw: string): AgentEventData | null {
   const last = parsed.last_assistant_message ?? parsed["last-assistant-message"];
   if (typeof last === "string" && last.trim())
     data.lastAssistantMessage = last.trim();
+  if (event === "PostToolUse" || event === "PreToolUse") {
+    const command = (parsed.tool_input as { command?: unknown } | undefined)?.command;
+    if (typeof command === "string" && command) data.toolCommand = command.slice(0, 400);
+  }
+  if (typeof parsed.canopy_plan_id === "string" && /^pl-[a-z0-9]{1,16}-[a-z0-9]{1,16}$/.test(parsed.canopy_plan_id))
+    data.planId = parsed.canopy_plan_id;
   if (typeof parsed.transcript_path === "string")
     data.transcriptPath = parsed.transcript_path;
   if (typeof parsed.model === "string" && parsed.model.trim())
     data.model = parsed.model.trim();
+  const gate = parsed.canopy_gate as Partial<GateStamp> | undefined;
+  if (
+    gate &&
+    typeof gate === "object" &&
+    typeof gate.id === "string" &&
+    typeof gate.status === "string" &&
+    typeof gate.key === "string"
+  ) {
+    data.gate = {
+      id: gate.id,
+      status: gate.status,
+      key: gate.key,
+      root: String(gate.root ?? ""),
+      tool: String(gate.tool ?? tool),
+      action: String(gate.action ?? ""),
+      findings: Array.isArray(gate.findings) ? gate.findings : [],
+      reason: String(gate.reason ?? ""),
+    };
+  }
   if (event === "PreToolUse" && tool === "AskUserQuestion") {
     const input = parsed.tool_input as { questions?: unknown[] } | undefined;
     data.questions = Array.isArray(input?.questions)

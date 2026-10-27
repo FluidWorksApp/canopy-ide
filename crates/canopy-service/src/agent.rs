@@ -40,6 +40,8 @@ pub fn router(state: AgentState) -> Router {
         .route("/ctx/mesh", post(mesh_op))
         .route("/ctx/notes", post(notes_op))
         .route("/ctx/research", post(research_op))
+        .route("/ctx/memory", post(memory_op))
+        .route("/ctx/device", post(device_op))
         .route("/ctx/action", post(action))
         .route("/ctx/ask", post(ask))
         .route("/ctx/ui", post(ui_op))
@@ -345,6 +347,97 @@ async fn research_op(State(state): State<AgentState>, headers: HeaderMap, body: 
 }
 
 #[derive(serde::Deserialize)]
+struct MemoryReq {
+    op: String,
+    #[serde(default)]
+    cwd: Option<String>,
+    #[serde(default)]
+    project: Option<String>,
+    #[serde(flatten)]
+    rest: serde_json::Value,
+}
+
+/// Team memory, as the desktop's `/ctx/memory`: retrieval answers from the
+/// copy the desktop synced (crate::memory); a proposal is queued for the
+/// desktop's ledger and never served from here.
+/// `canopy_device_*`: the devices are on the person's computer, so the op is
+/// relayed to the IDE that has this workspace open (device.rs), which runs it
+/// with the desktop's own device route and answers with its status and body.
+async fn device_op(State(state): State<AgentState>, headers: HeaderMap, body: Bytes) -> Response {
+    let Some(who) = caller(&state, &headers) else {
+        return unauthorized();
+    };
+    let op: serde_json::Value = match parse(&body) {
+        Ok(op) => op,
+        Err(response) => return response,
+    };
+    let Some(name) = op.get("op").and_then(|o| o.as_str()).map(str::to_string) else {
+        return reply(400, "a device op needs op");
+    };
+    let relay = &state.workspace.device;
+    if !relay.connected(now_ms()) {
+        return unavailable("no-ide", crate::device::NO_IDE);
+    }
+    let (id, answer) = relay.submit(op, who.pty_id);
+    match tokio::time::timeout(crate::device::op_timeout(&name), answer).await {
+        Ok(Ok(answer)) => {
+            if answer.status == 200 {
+                (
+                    StatusCode::OK,
+                    [("content-type", "application/json")],
+                    answer.body,
+                )
+                    .into_response()
+            } else {
+                reply(answer.status, answer.body)
+            }
+        }
+        _ => {
+            relay.cancel(&id);
+            unavailable(
+                "timeout",
+                "The Canopy IDE that has this workspace open didn't run the device op in time. \
+                 Check that it is still open and the device is still attached.",
+            )
+        }
+    }
+}
+
+async fn memory_op(State(state): State<AgentState>, headers: HeaderMap, body: Bytes) -> Response {
+    let Some(who) = caller(&state, &headers) else {
+        return unauthorized();
+    };
+    let req: MemoryReq = match parse(&body) {
+        Ok(req) => req,
+        Err(response) => return response,
+    };
+    if !state.workspace.names_this_project(req.project.as_deref()) {
+        return other_project();
+    }
+    let ws = state.workspace.clone();
+    let out = tokio::task::spawn_blocking(move || match req.op.as_str() {
+        "query" => serde_json::from_value::<canopy_core::memory::MemoryQuery>(req.rest)
+            .map_err(|e| e.to_string())
+            .map(|q| ws.memory.query(&q, now_ms())),
+        "propose" => {
+            let p: canopy_core::memory::Proposal =
+                serde_json::from_value(req.rest).map_err(|e| e.to_string())?;
+            // No stream event: an IDE that predates memory would read an
+            // unknown store as a broken stream. The desktop polls proposals.
+            ws.memory
+                .propose(&p, who.pty_id, who.name.clone(), req.cwd, now_ms())
+        }
+        other => Err(format!("unknown memory op \"{other}\"")),
+    })
+    .await;
+    match out {
+        Ok(Ok(value)) => json(200, value),
+        Ok(Err(text)) => reply(400, text),
+        Err(_) => reply(500, "the memory handler failed"),
+    }
+}
+
+#[derive(serde::Deserialize)]
 struct MeshItemReq {
     path: String,
     kind: Option<String>,
@@ -533,7 +626,7 @@ fn task_named(ws: &Arc<Workspace>, who: &TerminalRecord, act: Action) -> Respons
     )
 }
 
-fn task_of(t: &TerminalRecord) -> Option<String> {
+pub(crate) fn task_of(t: &TerminalRecord) -> Option<String> {
     t.status
         .as_ref()
         .and_then(|s| s.get("title"))
@@ -1025,6 +1118,14 @@ async fn ui_op(State(state): State<AgentState>, headers: HeaderMap, body: Bytes)
             Err(error) => reply(400, error.to_string()),
         },
         "vault" => unavailable("laptop-only", "The vault stays on the laptop."),
+        // Teams chat is sent by the user's own device, which holds their chat
+        // keys: the workspace's device never speaks as a person.
+        "team_people" | "team_send" => unavailable(
+            "laptop-only",
+            "Teams chat is posted from the user's own Canopy app, which holds their chat keys; \
+             an agent in a cloud workspace cannot post as the user. Tell the user what to send \
+             and to whom, or use canopy_mesh_submit for work.",
+        ),
         "open_project" => unavailable(
             "no-ide",
             "open_project needs the Canopy IDE, and none is attached to this cloud workspace.",
@@ -1091,7 +1192,6 @@ async fn fallback(State(state): State<AgentState>, headers: HeaderMap, uri: Uri)
     }
     let path = uri.path();
     let (reason, what) = match path {
-        "/ctx/device" => ("laptop-only", "Device tools run only on the laptop."),
         "/ctx/editor" | "/ctx/annotations" => (
             "no-ide",
             "This needs the Canopy IDE, and none is attached to this cloud workspace.",

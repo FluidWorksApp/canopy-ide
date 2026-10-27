@@ -2,7 +2,9 @@
 // events and channels; native work (PTYs, LSP, files) remains in the Rust core.
 import { createChannel, invoke, invokeDesktop } from "./host";
 import { startRendererHeartbeat } from "./rendererHeartbeat";
-import { isRemoteHost, listen as hostListen, type UnlistenFn } from "./host";
+import { peekTeamIdentity } from "./teamIdentity";
+import { settleLocalBrowserOp } from "./browserLocalOps";
+import { isRemoteHost, isWorkspaceHost, listen as hostListen, type UnlistenFn } from "./host";
 import type { HostEvent } from "./host/contract";
 import type { ShortcutProfile } from "./shortcuts";
 import type {
@@ -273,6 +275,16 @@ const browserRendererGeneration = (): number => renderer?.generation ?? 0;
  * generation, so a stale-generation filter never drops the synthetic exit. */
 export const rendererSessionGeneration = (): number => renderer?.generation ?? 0;
 
+/** Every terminal says which signed-in team member started it
+ *  (`CANOPY_MEMBER`), so a gate that exempts a layer's owner (lensGates.ts)
+ *  can tell the owner's own agents from everyone else's. Nothing is added
+ *  while signed out, or when the launch already says. */
+function withMember<T extends { env?: [string, string][] }>(opts: T): T {
+  const member = peekTeamIdentity()?.id;
+  if (!member || opts.env?.some(([k]) => k === "CANOPY_MEMBER")) return opts;
+  return { ...opts, env: [...(opts.env ?? []), ["CANOPY_MEMBER", member]] };
+}
+
 export async function ptySpawn(
   opts: {
     cols: number;
@@ -304,7 +316,7 @@ export async function ptySpawn(
   // number[] below Tauri's internal direct-execute threshold — handle both.
   channel.onmessage = (data) => onData(decodePtyChunk(data));
   return invoke("pty_spawn", {
-    ...opts,
+    ...withMember(opts),
     rendererGeneration: rendererGeneration(),
     onData: channel,
   });
@@ -362,7 +374,7 @@ export const ptySpawnArgv = (opts: {
   projectId?: string;
   componentId?: string;
   workspacePath?: string;
-}) => invoke<SpawnResult>("pty_spawn_argv", opts);
+}) => invoke<SpawnResult>("pty_spawn_argv", withMember(opts));
 
 /** An argv-native process whose output is streamed into a visible terminal. */
 export async function ptySpawnAttachedArgv(
@@ -385,7 +397,7 @@ export async function ptySpawnAttachedArgv(
   const channel = createChannel<ArrayBuffer | number[]>();
   channel.onmessage = (data) => onData(decodePtyChunk(data));
   return invoke<SpawnResult>("pty_spawn_attached_argv", {
-    ...opts,
+    ...withMember(opts),
     rendererGeneration: rendererGeneration(),
     onData: channel,
   });
@@ -405,7 +417,7 @@ export const ptySpawnDetached = (opts: {
   projectId?: string;
   componentId?: string;
   workspacePath?: string;
-}) => invoke<SpawnResult>("pty_spawn_detached", opts);
+}) => invoke<SpawnResult>("pty_spawn_detached", withMember(opts));
 
 /** The tail of a PTY's raw output, escape sequences and all — the transcript of
  *  a run with no xterm buffer to read. Feed it through renderPtyText (ptyText.ts)
@@ -758,6 +770,9 @@ export interface AgentBrowserOp {
   lines?: number | null;
   clear?: boolean | null;
   max?: number | null;
+  /** Set only by the workspace's own ops (browserLocalOps.ts): no pip, no
+   *  claiming the tab for an agent. */
+  quiet?: boolean;
 }
 export const onAgentBrowser = (
   cb: (op: AgentBrowserOp) => void,
@@ -765,9 +780,13 @@ export const onAgentBrowser = (
   listen<AgentBrowserOp>("agent:browser", (event) => cb(event.payload));
 /** Answer a browser op: `data` (any JSON value) becomes the tool's result. */
 export const browserResult = (id: number, ok: boolean, data: unknown) =>
-  // Never rejects: a dropped answer would leave the agent's tool call hanging
-  // to its timeout with no trace of why, so failures are logged, not thrown.
-  invoke<void>("browser_result", {
+  // A negative id is the workspace asking its own preview (browserLocalOps.ts),
+  // never a bridge request.
+  settleLocalBrowserOp(id, ok, data)
+    ? Promise.resolve()
+    : // Never rejects: a dropped answer would leave the agent's tool call hanging
+      // to its timeout with no trace of why, so failures are logged, not thrown.
+      invoke<void>("browser_result", {
     id,
     ok,
     data: JSON.stringify(data ?? null),
@@ -810,7 +829,11 @@ export interface AgentUiOp {
     // Mesh jobs, open to every agent: where a job can go, and sending one.
     | "mesh_targets"
     | "mesh_submit"
-    | "mesh_message_cloud";
+    | "mesh_message_cloud"
+    // Teams chat, open to every agent: who is on the user's teams, and
+    // posting a message there as the user.
+    | "team_people"
+    | "team_send";
   route: string;
   /** Agent terminal that initiated the operation, when there is one. For
    *  mesh_submit and mesh_message_cloud the bridge stamps it from the
@@ -925,6 +948,41 @@ export const meshJobUpdate = (ptyId: number, instance: string, jobId: string, te
  *  and kept on the mesh tagged ref {kind: "relay", id: messageId}. */
 export const meshRelayReply = (ptyId: number, instance: string, messageId: string, text: string) =>
   invoke<string>("context_mesh_job_update", { ptyId, instance, jobId: messageId, text, refKind: "relay" });
+
+/** One team's people, with emails, from the account directory. */
+export const teamMembers = (teamId: string) =>
+  invoke<{ members?: { id: string; name: string; email?: string; role?: string }[] }>(
+    "canopy_account_request",
+    { route: "/api/teams", body: { action: "detail", teamId } },
+  ).then((detail) => detail.members ?? null);
+
+/** Hand an agent something from Teams chat ("Send to agent" on a message):
+ *  kept on the mesh as a message from the user under ref {kind: "team-chat",
+ *  id: the chat message's id}, so every forward of one message lists
+ *  together, and announced in that agent's terminal. The same door as a mesh
+ *  job step, so it reaches agents in a cloud workspace too. Resolves with the
+ *  mesh message id. */
+export const forwardToAgent = (ptyId: number, instance: string, messageId: string, text: string) =>
+  invoke<string>("context_mesh_job_update", { ptyId, instance, jobId: messageId, text, refKind: "team-chat" });
+
+/** The workspace telling an agent what another agent just changed
+ *  (src/awareness): kept on the mesh under ref {kind: "awareness", id} and
+ *  typed into that terminal like any mesh message. */
+export const meshAwareness = (ptyId: number, instance: string, noteId: string, text: string) =>
+  invoke<string>("context_mesh_job_update", { ptyId, instance, jobId: noteId, text, refKind: "awareness" });
+
+/** Take a hotspot claim on an agent's behalf (context.rs). Rejects with the
+ *  holder's name when another agent already holds one of the paths. */
+export const contextHotspotClaim = (ptyId: number, paths: string[], owner: string, note: string) =>
+  invoke<string>("context_hotspot_claim", { ptyId, paths, owner, note });
+
+/** How often each file changed lately (awareness.rs), most-changed first. */
+export interface ChurnRow {
+  path: string;
+  commits: number;
+}
+export const gitChurn = (repo: string, days?: number) =>
+  invoke<ChurnRow[]>("git_churn", { repo, days });
 
 /** Which canopy_* tools are switched off (Settings → Agents), pushed to the
  *  bridge so the sidecar can hide them from the agent entirely. */
@@ -2233,6 +2291,11 @@ export const fsRename = (from: string, to: string) =>
 /** Moves to the OS trash — recoverable, unlike an unlink. */
 export const fsTrash = (path: string) => invoke<void>("fs_trash", { path });
 export const fsReveal = (path: string) => invoke<void>("fs_reveal", { path });
+/** Whether a project path can be shown in this computer's file manager: not
+ *  when the project lives in a cloud workspace. */
+export const canRevealProjectPaths = () => !isWorkspaceHost();
+/** A path on this computer (a relay download), shown even from a workspace. */
+export const fsRevealDesktop = (path: string) => invokeDesktop<void>("fs_reveal", { path });
 export const fsDuplicate = (path: string) =>
   invoke<string>("fs_duplicate", { path });
 
@@ -2606,6 +2669,12 @@ export const provenanceForSession = (sessionId: string) =>
 
 /** Adopt the history already on disk. `prs` comes from the PR watcher the
  *  frontend already holds, so this needs no network of its own. */
+/** A Linux workspace's PR watcher pass (host provenance.mjs): every PR for the
+ *  repository with when it opened and merged (ms), recording an observed edge
+ *  for each new one a session raised. Workspace host only. */
+export interface ObservedPr { number: number; url: string; branch: string; createdAt: number | null; mergedAt: number | null }
+export const provenanceObserve = (repo: string) =>
+  invoke<{ repo: string; prs: ObservedPr[]; recorded: number }>("provenance_observe", { repo });
 export const provenanceBackfill = (
   repo: string,
   prs: { number: number; url: string; branch: string }[],
@@ -4323,6 +4392,86 @@ export const sessionDigests = (roots?: string[]) =>
 export const sessionForget = (sessionId: string) =>
   invoke<void>("session_forget", { sessionId });
 
+// ---------- session documents (src-tauri/src/session_doc.rs) ----------
+
+/** One message from an agent CLI's own transcript. `message` = a store that
+ *  does not say who wrote it. Tool calls and injected context are skipped. */
+export interface TranscriptLine {
+  role: "user" | "assistant" | "message";
+  text: string;
+}
+
+/** The end of one conversation's transcript, oldest first: at most
+ *  `maxBytes` read from the file's end. Empty when the CLI keeps no transcript
+ *  Canopy can read. `roots` find the per-project stores. */
+export const sessionTranscriptTail = (args: {
+  sessionId: string;
+  agent: string;
+  roots: string[];
+  profile?: string | null;
+  maxBytes?: number;
+}) =>
+  invoke<TranscriptLine[]>("session_transcript_tail", {
+    sessionId: args.sessionId,
+    agent: args.agent,
+    roots: args.roots,
+    profile: args.profile ?? null,
+    maxBytes: args.maxBytes ?? null,
+  });
+
+// ---------- session activity (src-tauri/src/session_activity.rs) ----------
+
+/** One subagent a session spawned, read from its transcript. */
+export interface SubagentRun {
+  id: string;
+  agent_id: string | null;
+  description: string;
+  kind: string | null;
+  status: "running" | "done" | "failed" | "stopped";
+  background: boolean;
+  started_ms: number | null;
+  ended_ms: number | null;
+  duration_ms: number | null;
+  tokens: number | null;
+  tool_uses: number | null;
+  result: string | null;
+}
+
+export interface SessionActivity {
+  subagents: SubagentRun[];
+  /** The context the latest reply was given, in tokens. */
+  context: { model: string | null; tokens: number; at_ms: number | null } | null;
+  compactions: { at_ms: number | null; trigger: string; pre_tokens: number | null; post_tokens: number | null }[];
+}
+
+/** A session's subagents and context use; null when its CLI's transcript
+ *  does not record them, or there is no transcript to read. */
+export const sessionActivity = (args: { sessionId: string; agent: string; roots: string[]; profile?: string | null }) =>
+  invoke<SessionActivity | null>("session_activity", {
+    sessionId: args.sessionId,
+    agent: args.agent,
+    roots: args.roots,
+    profile: args.profile ?? null,
+  });
+
+/** Compact a session headlessly inside a cloud workspace, where it lives
+ *  (packages/remote-host/session-compact.mjs). Served by the workspace host
+ *  only: on this computer contextCompaction.ts runs the CLI itself. */
+export const sessionCompact = (args: {
+  agent: string;
+  sessionId: string;
+  cwd: string;
+  instructions: string;
+  profile?: string | null;
+}) =>
+  invoke<{
+    ok: boolean;
+    preTokens?: number | null;
+    postTokens?: number | null;
+    message?: string;
+    contextWindows?: Record<string, number>;
+  }>("session_compact", { ...args, profile: args.profile ?? null });
+
 // ---------- team relay ----------
 
 export interface RelayMember {
@@ -4945,6 +5094,78 @@ export const structuredRunnerWrite = (
 export const structuredRunnerKill = (attemptId: string, controlToken: string) =>
   invoke<void>("structured_runner_kill", { attemptId, controlToken });
 
+// ------------------------------------------------------------- brain calls
+
+/** One read-only, one-shot run of the brain CLI (src-tauri/src/brain.rs).
+ *  Output arrives on `onData` and ends with `exit`; `callId` is minted by the
+ *  caller and is what `brainKill` stops. Use `askBrain` (brainCall.ts) rather
+ *  than this — it owns argv, parsing, metering and the budget gate. */
+export async function brainCallSpawn(
+  callId: string,
+  opts: {
+    command: string;
+    args: string[];
+    cwd: string;
+    env?: [string, string][];
+    timeoutMs?: number;
+  },
+  onData: (out: StructuredRunnerOut) => void,
+): Promise<void> {
+  const channel = createChannel<StructuredRunnerOut>();
+  channel.onmessage = onData;
+  return invoke("brain_call", { callId, ...opts, onData: channel });
+}
+
+/** Stop a brain call. Idempotent: a call that already ended is not an error. */
+export const brainKill = (callId: string) => invoke<void>("brain_kill", { callId });
+
+// ------------------------------------------------------------------ ledger
+
+/** Wire shape of a ledger entry (src-tauri/src/ledger.rs). ledger.ts owns
+ *  the typed view; this is just what crosses the bridge. */
+export interface LedgerEntryWire {
+  id: string;
+  kind: string;
+  ts: number;
+  root: string;
+  author: { kind: string; name: string; sessionId?: string; cli?: string; ptyId?: number };
+  scope: string;
+  subject?: string;
+  ref?: { kind: string; id: string };
+  data: unknown;
+  expiresAt?: number;
+  supersedes?: string;
+  status?: string;
+}
+
+export interface LedgerQueryWire {
+  kinds?: string[];
+  refKind?: string;
+  refId?: string;
+  sinceTs?: number;
+  limit?: number;
+}
+
+export const ledgerAppend = (
+  root: string,
+  entry: Omit<LedgerEntryWire, "id" | "ts" | "root"> & { id?: string; ts?: number; root?: string },
+) => invoke<LedgerEntryWire>("ledger_append", { root, entry });
+
+export const ledgerQuery = (root: string, query: LedgerQueryWire) =>
+  invoke<LedgerEntryWire[]>("ledger_query", { root, query });
+
+/** The canonical repository root `path` files under (its main checkout). */
+export const ledgerRoot = (path: string) => invoke<string>("ledger_root", { path });
+
+export const ledgerUpdateStatus = (root: string, id: string, status: string) =>
+  invoke<LedgerEntryWire>("ledger_update_status", { root, id, status });
+
+/** Every appended entry, from any window or writer. */
+export const onLedgerAppended = (
+  cb: (entry: LedgerEntryWire) => void,
+): Promise<UnlistenFn> =>
+  listen<LedgerEntryWire>("ledger-appended", (e) => cb(e.payload));
+
 // ---------------------------------------------------------------- companion
 
 /** One thing the companion's CLI said. `line` is a raw stdout line — expected
@@ -5090,3 +5311,64 @@ export type SlackHubItem =
 /** One action against the account's Slack hub, with the signed-in device's credential. */
 export const slackHub = <T>(action: string, body: Record<string, unknown> = {}) =>
   invoke<T>("canopy_account_request", { route: "/api/slack", body: { action, ...body } });
+
+// ----------------------------------------------------------- proof receipts
+
+/** One verification command's outcome (src-tauri/src/receipt.rs; in a Linux
+ *  workspace, packages/remote-host/receipt-check.mjs). A non-zero exit is a
+ *  result, not a rejection; `timedOut` runs were killed, never "failed". */
+export interface ReceiptCheckRun {
+  code: number | null;
+  stdout: string;
+  stderr: string;
+  stdoutTruncated: boolean;
+  stderrTruncated: boolean;
+  timedOut: boolean;
+  durationMs: number;
+  spawnError: string | null;
+}
+
+/** Run one command outside every agent's terminal. Output keeps the tail
+ *  (the summary line) unless `head` asks for the start (a diff). */
+export const receiptRunCheck = (
+  cwd: string,
+  argv: string[],
+  opts: { timeoutMs?: number; keepBytes?: number; head?: boolean; env?: [string, string][] } = {},
+) => invoke<ReceiptCheckRun>("receipt_run_check", { cwd, argv, ...opts });
+
+/** A throwaway copy of a checkout for a receipt's checks (receipt.rs
+ *  `receipt_isolate`; in a Linux workspace, receipt-check.mjs). */
+export interface ReceiptIsolatedTree {
+  dir: string;
+  tree: string;
+  linked: string[];
+  env: [string, string][];
+}
+
+/** Export `rev` (a turn snapshot), or the working tree as it is now, into a
+ *  copy the next agent turn cannot touch. */
+export const receiptIsolate = (cwd: string, rev?: string | null) =>
+  invoke<ReceiptIsolatedTree>("receipt_isolate", { cwd, rev: rev ?? null });
+
+/** Delete a copy `receiptIsolate` made. */
+export const receiptRelease = (dir: string) => invoke<void>("receipt_release", { dir });
+
+// ---- rules compiled into gates (src-tauri/src/gates_commands.rs; in a Linux
+// workspace, packages/remote-host/gates.mjs, because the hook that reads the
+// policy runs there) ----
+
+/** One approved gate as the hook reads it. `gate` is src/gates/dsl.ts `Gate`. */
+export interface GatePolicyWire {
+  trifecta: "warn" | "block";
+  gates: { id: string; rule: string; scope: "project" | "team"; gate: unknown; exceptMembers?: string[] }[];
+  guidance: string[];
+}
+
+export const gatesPolicyWrite = (cwd: string, policy: GatePolicyWire) =>
+  invoke<string>("gates_policy_write", { cwd, policy });
+
+export const gatesPolicyRead = (cwd: string) =>
+  invoke<(GatePolicyWire & { root: string; updatedAt: number }) | null>("gates_policy_read", { cwd });
+
+/** Mint the approve-once token the hook stamped on a blocked action. */
+export const gatesAllowOnce = (key: string) => invoke<void>("gates_allow_once", { key });

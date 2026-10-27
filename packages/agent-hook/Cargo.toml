@@ -15,6 +15,13 @@ path = "../../src-tauri/src/bin/canopy_hook.rs"
 [dependencies]
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
+# Team-rule gates (src-tauri/src/gates.rs, shared with the app): matching,
+# the policy file's root hash and approve-once token ids.
+globset = "0.4"
+regex = "1"
+sha2 = "0.10"
+hex = "0.4"
+getrandom = "0.2"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 mac-notification-sys = "0.6"

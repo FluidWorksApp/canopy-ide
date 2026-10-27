@@ -1,11 +1,15 @@
 import {hibernateWorkspaceProjects,type ConfirmOthers,type HibernateProgressListener} from './remoteExecution/hibernateWorkspace';
 import {activeWorkspace} from './remoteExecution/workspace';
 import {startBackgroundTeams} from "./teamMessaging/background";
+import {openReadableLink} from "./readableLinks";
 import {startTeamMessageNotifications} from "./teamMessaging/notifications";
 import {liveTeamSessions,subscribeTeamJobs} from "./teamMessaging/session";
+import {createAgentChat} from "./teamMessaging/agentChat";
+import {setChatHandoff} from "./teamMessaging/chatHandoff";
 import {teamName} from "./teamMessaging/unread";
 import {createMeshJobs,localRemoteJobs,localRemoteMessages,type MeshJobs} from "./meshJobs";
 import {peekWorkspaceList,refreshWorkspaceList,restoreWorkspaceList} from "./remoteExecution/workspaceListCache";
+import { HOST_OUTDATED_EVENT } from "./remoteExecution/remoteSupport";
 import {MeshJobInbox} from "./components/MeshJobInbox";
 import {ensureProjectWorkspace,ProjectWorkspaceProgress} from "./remoteExecution/projectWorkspace";
 import {stopIdleProjectWorkspace} from "./remoteExecution/projectIdle";
@@ -53,6 +57,16 @@ import {
   type VibeTargetSelection,
 } from "./vibeTargetInference";
 import { observeTurnEvents } from "./turnRollback";
+import { observeAgentTurns } from "./agentTurns";
+import { startAwareness } from "./awareness/engine";
+import { setCloudNoteSender, setCloudRosterProvider } from "./awareness/roster";
+import { isWorkspaceHost } from "./host";
+import { startCloudSync } from "./remoteExecution/cloudSync";
+import { WorkspaceHooksNotice } from "./remoteExecution/WorkspaceHooksNotice";
+import { installOutcomes } from "./outcomes";
+import { observeMemoryEvents, startMemory } from "./memoryExtract";
+import { startReceiptEngine } from "./receipts/engine";
+import { observeGateEvents, openRules } from "./gates/events";
 import {
   derivePending,
   parseAgentEvent,
@@ -107,6 +121,12 @@ import { companionName, summonCompanion } from "./companion";
 import type { CompanionProposal } from "./companionSession";
 import { personaBinding } from "./personaBinding";
 import { getSettings, subscribeSettings, THEME_CHANGE_EVENT } from "./settings";
+import { builderRoot, defaultLens, initialLensConfig, projectLens, toggleProjectLens } from "./projectLens";
+import { startLensSteps } from "./lensSteps";
+import { setBrainProjectResolver } from "./brainMeter";
+import { startLensApprovals } from "./lensApprovals";
+import { startLensClaimSync } from "./lensClaimSync";
+import { teamIdentity } from "./teamIdentity";
 import {
   dismissTerminalMemoryPromptsForWindow,
   subscribeTerminalMemoryPromptVisibility,
@@ -147,9 +167,15 @@ import { ProjectManager } from "./components/ProjectManager";
 import { SettingsDialog } from "./components/SettingsDialog";
 import { HelpDialog } from "./components/HelpDialog";
 import { AskDialog } from "./components/AskDialog";
+import { PlanGateHost } from "./components/PlanGateHost";
+import { notePlanQuestionAnswered } from "./plans/planStore";
 import { AboutDialog } from "./components/AboutDialog";
 import { Dictation } from "./components/Dictation";
 import { ShareDialogHost } from "./components/ShareDialog";
+import { SessionDocHost } from "./sessionDoc/SessionDocView";
+import { LiveRoomsHost } from "./liveSession/LiveRoomControls";
+import { startLiveRooms } from "./liveSession/live";
+import { registerSessionLauncher } from "./sessionDoc/launcher";
 import { Companion } from "./components/Companion";
 import { startCompanion, stopCompanion, subscribeCompanion } from "./companionSession";
 import { slackConfirm, startCompanionReplies, startSlack } from "./slackLive";
@@ -166,6 +192,8 @@ import {
 import { useCliAutoUpdater } from "./cliAutoUpdate";
 import { TooltipLayer } from "./components/TooltipLayer";
 import { Onboarding } from "./components/Onboarding";
+import { BrainConnectHost } from "./components/BrainConnect";
+import { openBrainConnect } from "./brainConnect";
 import { Welcome } from "./components/Welcome";
 import { Dialog } from "./components/Dialog";
 import { TerminalGovernorCard } from "./components/TerminalGovernorDialog";
@@ -198,6 +226,7 @@ import {
   useHeldModifier,
 } from "./useHeldModifier";
 import { commandHeld, matches, terminalOwnsCtrl } from "./shortcuts";
+import { startCreditWatcher } from "./credits";
 import {
   checkForUpdateAnyChannel,
   installUpdate,
@@ -236,6 +265,14 @@ function saveRelayChat(label: string, msgs: ipc.RelayChatMsg[]) {
   }
 }
 
+/** Agents posting in Teams chat (canopy_team_people / canopy_team_send).
+ *  Window-wide like the team transports it sends through. */
+const agentChat = createAgentChat({
+  sessions: liveTeamSessions,
+  teamName,
+  people: (teamId) => ipc.teamMembers(teamId),
+});
+
 /** Ops that answer without a project to answer about.
  *
  *  `ask` is a background agent's question, whose cwd may be a worktree Canopy
@@ -267,6 +304,9 @@ const PROJECTLESS_OPS = new Set([
   "mesh_targets",
   "mesh_submit",
   "mesh_message_cloud",
+  // Teams chat names people and teams, never a place.
+  "team_people",
+  "team_send",
 ]);
 
 /** Ticket for one companion-requested session launch, so the ProjectView that
@@ -291,6 +331,8 @@ export default function App() {
   // Unread teammates' messages reach the bell and the OS, including while
   // working elsewhere in Canopy; the conversation being read stays quiet.
   useEffect(() => startTeamMessageNotifications(), []);
+  // Proof receipts: the workspace re-verifies agent turns (src/receipts/).
+  useEffect(() => startReceiptEngine(), []);
   const [ws, setWs] = useState<WorkspaceState>(emptyWorkspace);
   const [loaded, setLoaded] = useState(false);
   const [workspaceLoadError, setWorkspaceLoadError] = useState<string | null>(null);
@@ -571,6 +613,9 @@ export default function App() {
   useNoteReminders(projectNameFor);
   // Settings → Agents → "Keep agent CLIs up to date" (cliAutoUpdate.ts).
   useCliAutoUpdater();
+  // Team memory: brain extraction after agent turns, review of agent
+  // proposals (memoryExtract.ts). Settings gate each run, not the arming.
+  useEffect(() => startMemory(), []);
   // The `Notify` seam, threaded through nearly every component. The opts bag
   // is how a plain notice stops being anonymous: a caller names the project it
   // speaks for (by id or by any path inside it) and where a click should land,
@@ -614,6 +659,16 @@ export default function App() {
     return () => {
       cancelled = true;
     };
+  }, [notify]);
+  // A workspace host older than this app: said once, as one notice, rather
+  // than as a "does not support" toast from every feature that touches it.
+  useEffect(() => {
+    const outdated = (event: Event) => {
+      const { message } = (event as CustomEvent<{ message: string }>).detail;
+      notify(message, "error", { dedupe: HOST_OUTDATED_EVENT });
+    };
+    window.addEventListener(HOST_OUTDATED_EVENT, outdated);
+    return () => window.removeEventListener(HOST_OUTDATED_EVENT, outdated);
   }, [notify]);
   // A micro-task in flight when Canopy last quit has no terminal to come back
   // to — its tab is ephemeral and never restored — so it can never report.
@@ -852,6 +907,30 @@ export default function App() {
 
   const wsRef = useRef(ws);
   wsRef.current = ws;
+  // Spend & outcomes (src/outcomes): per-session spend records, session
+  // budgets (warn at 80%, pause at 100%) and the outcome ledger. Installed
+  // once; reads projects through refs at call time.
+  const projectIdentityRef = useRef(projectIdentity);
+  projectIdentityRef.current = projectIdentity;
+  useEffect(() => {
+    const projectFor = (cwd: string) => {
+      const p = projectIdentityRef.current(cwd);
+      return p.projectId ? { id: p.projectId, name: p.projectName ?? "" } : null;
+    };
+    // Canopy's own brain spend is recorded per project too (brainMeter.ts).
+    setBrainProjectResolver(projectFor);
+    const stop = installOutcomes({
+      projectFor,
+      isPrototype: (cwd) => {
+        const id = projectIdentityRef.current(cwd).projectId;
+        return !!wsRef.current.projects.find((p) => p.id === id)?.vibe?.enabled;
+      },
+    });
+    return () => {
+      stop();
+      setBrainProjectResolver(null);
+    };
+  }, []);
   // Mesh jobs across workspaces, this account's machines and teammates
   // (meshJobs.ts). One coordinator for the window's lifetime: it holds the
   // approval inbox and which runs report back to which submitter, and every
@@ -881,6 +960,71 @@ export default function App() {
   });
   const meshJobs = meshJobsRef.current;
   useEffect(() => subscribeTeamJobs((event) => meshJobs.receive(event)), [meshJobs]);
+  // Every agent knows what every other agent just did (src/awareness): one
+  // engine for the window, on every agent turn end. The board asks the mesh
+  // coordinator who is running in the cloud workspaces.
+  useEffect(() => {
+    setCloudRosterProvider(async () =>
+      (await meshJobs.targets()).cloudWorkspaces.map((w) => ({
+        id: w.id,
+        name: w.name,
+        online: w.online,
+        agents:
+          w.agents?.map((a) => ({
+            ptyId: a.ptyId,
+            name: a.name,
+            agent: a.agent,
+            task: a.status?.title ?? a.task,
+            repo: a.repo ?? null,
+            root: a.root ?? null,
+            files: a.files ?? [],
+          })) ?? null,
+        ...("note" in w && w.note ? { note: w.note } : {}),
+      })),
+    );
+    // Awareness notes for agents in other cloud workspaces travel as mesh
+    // messages through each workspace's service.
+    setCloudNoteSender(async (workspace, ptyId, text) =>
+      (await meshJobs.message({ workspace, ptyId, text, fromName: "Canopy workspace" })).messageId,
+    );
+    const stop = startAwareness({
+      roots: () => wsRef.current.projects.flatMap((p) => p.components.map((c) => c.path)),
+      currentWorkspace: () => (isWorkspaceHost() ? (activeWorkspace()?.connection.workspaceId ?? null) : null),
+    });
+    // Builder-lens steps and their summaries (src/lensSteps.ts), and owners'
+    // answers to layer approvals (src/lensApprovals.ts): app-wide, so neither
+    // depends on a panel being open.
+    const stopSteps = startLensSteps({
+      roots: () =>
+        wsRef.current.projects.flatMap((p) => {
+          const builder = projectLens(p) === "builder" ? builderRoot(p) : null;
+          return p.components.map((c) => ({ root: c.path, builder: c.path === builder }));
+        }),
+    });
+    const stopApprovals = startLensApprovals();
+    // Layer claims shared with the team, so every teammate enforces them.
+    const stopClaims = startLensClaimSync({
+      roots: () => wsRef.current.projects.flatMap((p) => p.components.map((c) => c.path)),
+    });
+    // Who is signed in, early: terminals carry it (ipc.ts withMember) so a
+    // layer owner's own agents pass their layer's gate.
+    void teamIdentity();
+    return () => {
+      stop();
+      stopSteps();
+      stopApprovals();
+      stopClaims();
+      setCloudRosterProvider(null);
+      setCloudNoteSender(null);
+    };
+  }, [meshJobs]);
+  // A cloud workspace keeps Rules, agent hooks and team memory in step with
+  // this computer on every connect (remoteExecution/cloudSync.ts).
+  const cloudWorkspace = isWorkspaceHost();
+  useEffect(
+    () => startCloudSync(() => wsRef.current.projects.flatMap((p) => p.components.map((c) => c.path))),
+    [],
+  );
   // One press can reach us from both the menu accelerator and the webview key
   // handler; without this they'd cancel each other and focus mode would look
   // stuck. First one wins, the echo inside the window is ignored.
@@ -899,10 +1043,7 @@ export default function App() {
       id: newProjectId(),
       name,
       components: [{ id: newComponentId(), label: name, path: dir, commands: [] }],
-      vibe: {
-        version: 1,
-        enabled: getSettings().defaultProjectLens === "build",
-      },
+      vibe: initialLensConfig(defaultLens()),
     });
   }, []);
 
@@ -1041,6 +1182,14 @@ export default function App() {
         // Turn boundaries become rollback snapshots — taken app-side, off
         // this event, so the blocking UserPromptSubmit hook never waits on git.
         observeTurnEvents(parsed.map((p) => p.data), ts);
+        // The same boundaries, enriched (root, files touched) for features
+        // that subscribe through agentTurns.ts.
+        observeAgentTurns(parsed.map((p) => p.data), ts);
+        // Team memory: final messages, untrusted reads, session ends.
+        observeMemoryEvents(parsed.map((p) => p.data));
+        // What a team rule or the irreversible-action gate stopped, for the
+        // cards over the agent's terminal and the approve-once question.
+        observeGateEvents(parsed.map((p) => p.data), ts);
         setAgentEvents((prev) =>
           // Not a bare slice: the cap is app-wide and one of this list's
           // consumers is per-pty, so a busy project used to evict a quiet
@@ -1406,9 +1555,22 @@ export default function App() {
     void applyZoom(loadZoom());
     // The status bar's 🎨 button (and anything else outside App) opens
     // Settings at a specific tab through this event.
-    const openSettings = (e: Event) =>
-      setSettingsOpen({ tab: (e as CustomEvent).detail?.tab });
+    const openSettings = (e: Event) => {
+      const tab = (e as CustomEvent).detail?.tab;
+      // The rules editor belongs to a project (its rules live in that repo's
+      // ledger): a request naming a path opens that project's Rules panel;
+      // one from anywhere else lands on Settings → Rules, which lists them all.
+      const cwd = (e as CustomEvent).detail?.cwd;
+      if (tab === "rules" && cwd) {
+        openRules({ cwd });
+        return;
+      }
+      setSettingsOpen({ tab });
+    };
     window.addEventListener("canopy:open-settings", openSettings);
+    // Warns once per crossing when the account balance runs low or out while
+    // managed workspaces are in use (credits.ts).
+    const stopCreditWatcher = startCreditWatcher();
     void ipc.hookBridgePath().then(setHookPath);
     // A relay may already be live (hot reload in dev, a future auto-start) —
     // ask rather than assume "off".
@@ -1420,6 +1582,7 @@ export default function App() {
       cancelled = true;
       window.removeEventListener("keydown", keys);
       window.removeEventListener("canopy:open-settings", openSettings);
+      stopCreditWatcher();
       if (zoomHideTimer.current !== null)
         window.clearTimeout(zoomHideTimer.current);
       subs.forEach((s) => void s.then((fn) => fn()));
@@ -2262,9 +2425,19 @@ export default function App() {
   // list goes down the identical path as clicking the OS banner for the same
   // item. Two routers would drift, and the fallback chain is the part worth
   // having exactly once.
+  const followDeepLinkRef = useRef<(link: DeepLink | null) => Promise<void>>(async () => {});
   const followDeepLink = useCallback(
     async (link: DeepLink | null) => {
       if (!link || link.kind === "app") return;
+      // A readable Canopy link names something in the account (a workspace,
+      // a shared session, a team message), not in a project: the control
+      // plane resolves it for this account first, then it routes from there.
+      if (link.kind === "link") {
+        await openReadableLink(link.url, { follow: (next) => followDeepLinkRef.current(next) }).catch((err) =>
+          notify(String(err).replace(/^Error:\s*/, ""), "error"),
+        );
+        return;
+      }
       const state = wsRef.current;
       // Team surfaces (chat, transfers, the inbox) are global but rendered
       // inside a project, so they carry no project hint and are perfectly
@@ -2321,6 +2494,9 @@ export default function App() {
     },
     [notify],
   );
+  useEffect(() => {
+    followDeepLinkRef.current = followDeepLink;
+  }, [followDeepLink]);
   useEffect(() => {
     if (!loaded) return;
     let un: (() => void) | undefined;
@@ -2825,7 +3001,18 @@ export default function App() {
                       ? { kind: "terminal", ptyId: op.ptyId, path: op.route }
                       : { kind: "project", path: op.route },
                 });
-                setAsk({ id: op.id, attentionId, question, options, resolve });
+                setAsk({
+                  id: op.id,
+                  attentionId,
+                  question,
+                  options,
+                  // An answer to an agent running a plan is a decision the
+                  // plan did not foresee: it goes on the plan (plans/planStore).
+                  resolve: (answer) => {
+                    resolve(answer);
+                    void notePlanQuestionAnswered({ ptyId: op.ptyId, route: op.route, question, options, answer }).catch(() => {});
+                  },
+                });
               }),
             // The companion's cross-project handlers, read through a ref so
             // this long-lived listener always calls the current ones without
@@ -2835,6 +3022,9 @@ export default function App() {
             // as though it were all of them.
             ...(companionOpsRef.current ?? {}),
             meshJobs: meshJobsRef.current ?? undefined,
+            teamChat: agentChat,
+            agentLabel: async (ptyId: number) =>
+              (await ipc.ptyStats()).find((s) => s.id === ptyId)?.name ?? null,
             // The page an agent's browser ops are driving, for the vault ops.
             // The tab id comes from the activeView channel; the URL comes from
             // the page itself, because a redirect (every login flow has one)
@@ -2967,12 +3157,8 @@ export default function App() {
     (id: string) => {
       const project = wsRef.current.projects.find((p) => p.id === id);
       if (!project) return;
-      void saveProject({
-        ...project,
-        vibe: project.vibe
-          ? { ...project.vibe, enabled: project.vibe.enabled !== true }
-          : { version: 1, enabled: true },
-      });
+      // Only the lens bit flips; sessions, files and setup stay put.
+      void saveProject(toggleProjectLens(project));
     },
     [saveProject],
   );
@@ -3022,7 +3208,7 @@ export default function App() {
   );
   const [notifOpen, setNotifOpen] = useState(false);
   const activeBuildMode =
-    ws.projects.find((project) => project.id === ws.activeId)?.vibe?.enabled === true;
+    projectLens(ws.projects.find((project) => project.id === ws.activeId)) === "builder";
   const visibleAttention = useMemo(
     () => (activeBuildMode ? buildAttentionItems(attention) : attention),
     [activeBuildMode, attention],
@@ -3372,6 +3558,43 @@ export default function App() {
   );
   const startSessionRef = useRef(startSession);
   startSessionRef.current = startSession;
+  // Live sessions this window opens to teammates hear joiners and turns.
+  useEffect(() => startLiveRooms(), []);
+  // Teams chat → agent: "Run as task" and "Send to agent" on a message
+  // (teamMessaging/chatHandoff.ts). Everything is read at click time.
+  useEffect(
+    () =>
+      setChatHandoff({
+        projects: () => wsRef.current.projects.map((p) => p.name),
+        agents: async () =>
+          (await ipc.ptyStats())
+            .filter((s) => s.agent_hint)
+            .map((s) => ({
+              ptyId: s.id,
+              name: s.name || s.title || `Terminal ${s.id}`,
+              cli: s.agent_hint?.bin,
+              project: wsRef.current.projects.find((p) =>
+                p.components.some((c) => s.cwd === c.path || s.cwd.startsWith(c.path + "/")),
+              )?.name,
+            })),
+        startTask: (project, prompt, label) =>
+          startSessionRef.current({ project, prompt, label }),
+        sendToAgent: async (ptyId, text, messageId) =>
+          ipc.forwardToAgent(ptyId, await ipc.instanceId(), messageId, text),
+      }),
+    [],
+  );
+  // Session documents start "Continue in a new agent" through the same door
+  // (sessionDoc/launcher.ts).
+  useEffect(
+    () =>
+      registerSessionLauncher({
+        start: (req) => startSessionRef.current(req),
+        projects: () =>
+          wsRef.current.projects.map((p) => ({ name: p.name, dirs: p.components.map((c) => c.path) })),
+      }),
+    [],
+  );
   const companionOpsRef = useRef<CompanionOps | null>(null);
   companionOpsRef.current = useMemo(
     () =>
@@ -3735,6 +3958,7 @@ export default function App() {
       {zen && <div className="zen-hotzone" />}
       {/* Transient zoom level, shown ~1s after Cmd +/-/0. */}
       {zoomPct !== null && <div className="zoom-indicator">{zoomPct}%</div>}
+      {cloudWorkspace && <WorkspaceHooksNotice />}
       {memPressure && (
         <div
           className={`mem-banner ${memPressure.level === 2 ? "critical" : "warning"}`}
@@ -4027,7 +4251,7 @@ export default function App() {
           notices={deliveredToasts}
           onDismissNotice={dismissToast}
           onFollowNotice={(item) => void followAttention(item)}
-          onInstallCli={() => setSettingsOpen({ tab: "agents" })}
+          onInstallCli={openBrainConnect}
           onRetry={() => void launchCompanion()}
           proposal={proposal}
           onAnswerProposal={(accepted) => {
@@ -4146,6 +4370,8 @@ export default function App() {
 
       <MeshJobInbox jobs={meshJobs} workspaces={ws.projects.map((p) => p.name)} />
 
+      <PlanGateHost />
+
       {ask && (
         <AskDialog
           question={ask.question}
@@ -4170,6 +4396,12 @@ export default function App() {
         <SettingsDialog
           initialTab={settingsOpen.tab}
           onClose={() => setSettingsOpen(null)}
+          projects={ws.projects.map((p) => ({ id: p.id, name: p.name, roots: p.components.map((c) => c.path) }))}
+          onOpenRules={(id, cwd) => {
+            // Bring the project to the front first; its view listens for the
+            // open-rules event once it is mounted.
+            void openProject(id).then(() => setTimeout(() => openRules({ cwd }), 120));
+          }}
         />
       )}
       {helpOpen && (
@@ -4197,6 +4429,11 @@ export default function App() {
       )}
       <Dictation notify={notify} />
       <ShareDialogHost />
+      {/* The brain's connection: probes at start, re-checks after a sign-in,
+          and opens "Connect your brain" for the chip and every call to action. */}
+      <BrainConnectHost />
+      <SessionDocHost />
+      <LiveRoomsHost />
       {/* Last, and once: every `title` in the app is drawn by this one bubble
           instead of the webview's native grey box. */}
       <TooltipLayer />

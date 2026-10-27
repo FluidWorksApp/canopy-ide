@@ -1,4 +1,5 @@
 import { activeWorkspace } from "../../remoteExecution/workspace";
+import { publishAwarenessRoster } from "../../awareness/roster";
 import {
   hostLiveTerminals,
   rememberedLiveTerminal,
@@ -27,6 +28,7 @@ import {
   type ReactNode,
 } from "react";
 import { Panel, PanelGroup } from "react-resizable-panels";
+import { commitMessageWithSessions } from "../../sessionDoc/trailers";
 import * as ipc from "../../ipc";
 import { EditorDiskState } from "../../editorDiskState";
 import { format, matches, matchesModifierClick } from "../../shortcuts";
@@ -166,6 +168,8 @@ import {
   type FleetRouteSnapshot,
 } from "../../fleetSnapshot";
 import { chosenBrainId, resolveBrain } from "../../brain";
+import { TERMINAL_EXITED_EVENT } from "../../brainConnect";
+import { requestBrainTabName } from "../../brainSessionTitle";
 import {
   pickLaunchCli,
   startCommandParked,
@@ -293,6 +297,8 @@ import { TasksPanel, type RunningMicroTask } from "../TasksPanel";
 import { NotesPanel } from "../NotesPanel";
 import { NoteView } from "../NoteView";
 import { ResearchPanel } from "../ResearchPanel";
+import { MemoryPanel } from "../MemoryPanel";
+import { useMemoryReviewCount } from "../../useMemories";
 import { ResearchImportCta } from "../ResearchImportCta";
 import { ResearchView } from "../ResearchView";
 import {
@@ -320,6 +326,9 @@ import {
 import { TaskHistoryView } from "../TaskHistoryView";
 import { WorkflowView } from "../WorkflowView";
 import { InstructionsView } from "../InstructionsView";
+import { GateNotices } from "../GateNotices";
+import { rulesFocus } from "../../gates/focus";
+import { OPEN_RULES_EVENT, registerRulesEditor } from "../../gates/events";
 import {
   adoptTaskReservation,
   endAbandonedRun,
@@ -452,6 +461,7 @@ import {
 import { GitPanel } from "../GitPanel";
 import { TicketsPanel, type AgentTarget } from "../TicketsPanel";
 import { PrsPanel } from "../PrsPanel";
+import { OutcomesPanel } from "../OutcomesPanel";
 import { ServersPanel } from "../ServersPanel";
 import {
   IntegrationsPanel,
@@ -561,6 +571,8 @@ import { shouldShowTip, markTipSeen, type CoachTip } from "../../coachmarks";
 import { ActivityRail } from "../ActivityRail";
 import { PaneBar } from "../PaneBar";
 import { VibeBuilderPane } from "../VibeBuilderPane";
+import { projectLens } from "../../projectLens";
+import { BuilderLensPanel } from "../BuilderLensPanel";
 import {
   createVibeBuilderSession,
   type VibeManagedProcessFailureInput,
@@ -654,6 +666,9 @@ import {
   statusContextRoot,
 } from "./helpers";
 import { Button } from "../ui";
+import { dispatchWithPlan, restoreWaitingPlans, type PlanResumer } from "../../plans/planGate";
+import { PLAN_ENV, planEnvForCommand } from "../../plans/planLaunch";
+import { armPlanTracking, expectRun } from "../../plans/planStore";
 import {
   documentResourceActive,
   shouldReuseInactiveDocumentPane,
@@ -915,7 +930,9 @@ const ProjectViewBody = memo(function ProjectViewBody({
   }, []);
   const [sideWidth, setSideWidth] = useState(SIDE_DEFAULT_W);
   const sideWidthRef = useRef(SIDE_DEFAULT_W);
-  const vibe = project.vibe?.enabled === true;
+  // The builder lens. Named `vibe` for the guard tests and history; it only
+  // decides what is shown — sessions, runs and files are the same either way.
+  const vibe = projectLens(project) === "builder";
   const [buildSettingsOpen, setBuildSettingsOpen] = useState(false);
   const [vibeSetupAttempt, setVibeSetupAttempt] = useState(0);
   const vibeTarget = resolveVibeTarget(project);
@@ -1366,6 +1383,8 @@ const ProjectViewBody = memo(function ProjectViewBody({
   );
   const termHandles = useRef(new Map<string, TermHandle | null>());
   const livePtyByTab = useRef(new Map<string, number>());
+  /** Tab id → the `then` marker its opener asked to hear back on exit. */
+  const exitMarkers = useRef(new Map<string, string>());
   const vibeServerHealth = useRef(new Map<string, VibeServerHealthState>());
   const openVibeServerIncident = useRef(new Set<string>());
   const [vibeVerifiedReadinessPtys, setVibeVerifiedReadinessPtys] = useState<Set<number>>(
@@ -1710,6 +1729,8 @@ const ProjectViewBody = memo(function ProjectViewBody({
     [project.components, worktreeEnv],
   );
   const roots = useMemo(() => components.map((c) => c.path), [components]);
+  // Team memory waiting on a person (MemoryPanel.tsx) — the rail's badge.
+  const memoryBadge = useMemoryReviewCount(roots);
   const rootsKey = roots.join("\n");
   // Cmd+T's listener is registered once; without this it closes over the
   // components from mount and opens shells in the main checkout even after a
@@ -1900,6 +1921,8 @@ const ProjectViewBody = memo(function ProjectViewBody({
         ...accountEnv,
         ...unattendedEnvFor(command),
       ];
+      // Planned work: the plan id rides in the agent's env (planLaunch.ts).
+      if (!env.some(([k]) => k === PLAN_ENV)) env.push(...planEnvForCommand(command));
       // The account is what the process is actually given, not what a caller
       // remembered: the badge, the plan chip and a later restore all read it.
       const accountProfile = tabAccount({
@@ -2327,7 +2350,12 @@ const ProjectViewBody = memo(function ProjectViewBody({
 
   const openAccountChat = useCallback((conversation: AccountConversation) => {
     const existing = tabsRef.current.find(t => t.type === "chat" && t.accountConversation?.teamId === conversation.teamId && t.accountConversation?.userId === conversation.userId && t.peer === conversation.peer);
-    if (existing) { setActiveTabId(existing.id); return; }
+    if (existing) {
+      // A message link into an open conversation: carry the message to focus.
+      if (conversation.focusMessage) setTabs(prev => prev.map(t => t.id === existing.id && t.type === "chat" && t.accountConversation ? {...t, accountConversation:{...t.accountConversation, focusMessage:conversation.focusMessage}} : t));
+      setActiveTabId(existing.id);
+      return;
+    }
     const id = tabId();
     setTabs(prev => [...prev, {id, type:"chat", peer:conversation.peer, name:conversation.name, accountConversation:conversation}]);
     setActiveTabId(id);
@@ -3179,17 +3207,11 @@ const ProjectViewBody = memo(function ProjectViewBody({
     return repos[0]?.path ?? null;
   }, []);
 
-  /** Create or reuse the ticket's worktree and start an agent in it. The one
-   *  implementation both the Issues panel and the ticket tab call. */
-  const startTicketWork = useCallback(
-    async (ticket: ipc.TicketInfo, requestedRepo: string, agentId?: string) => {
-      const repo = requestedRepo || await ticketRepo();
-      if (!repo) {
-        onNotice("No git repository in this project.");
-        return;
-      }
-      // The chosen agent, else the user's default — one rule, shared with every
-      // other launcher, and never a hardcoded vendor name (see pickLaunchCli).
+  /** The second half of starting work on a ticket: the agent, in the
+   *  ticket's worktree, on `seed` (planned or not). Also what a plan approved
+   *  after a restart resumes through (restoreWaitingPlans). */
+  const continueTicketWork = useCallback(
+    async (ticket: ipc.TicketInfo, repo: string, agentId: string, seed: string, planId?: string) => {
       const installedHere = getInstalled();
       const cli = pickLaunchCli(agentId, (bin) => Boolean(installedHere[bin]));
       if (!cli) {
@@ -3197,9 +3219,14 @@ const ProjectViewBody = memo(function ProjectViewBody({
         return;
       }
       const agent = cli.id;
+      // The agent runs in the ticket's worktree, which is usually outside the
+      // repo's directory: wait for its run there too.
+      const expectIn = (dir: string) => {
+        if (planId) void expectRun(planId, dir).catch(() => {});
+      };
       // Parked in `repo` rather than the workspace, which does not exist yet:
       // the pointer is an absolute path, so it reads the same from either.
-      const start = await startCommandParked(agent, ticketContext(ticket), repo);
+      const start = await startCommandParked(agent, seed, repo);
       if (!start) {
         onNotice(`Unknown agent "${agent}".`);
         return;
@@ -3210,10 +3237,11 @@ const ProjectViewBody = memo(function ProjectViewBody({
       const existing = ticketWorktree(ticket, worktrees);
       const title = `${ticket.id} · ${cli.name}`;
       if (existing) {
+        expectIn(existing.path);
         const id = addTerminal(existing.path, start.command, title, cli.icon);
         setTicketWorktrees(worktrees);
         if (id && start.typePrompt)
-          pendingTerminalPrompts.current.set(id, ticketContext(ticket));
+          pendingTerminalPrompts.current.set(id, seed);
         return;
       }
       // The funnel owns where a workspace goes and what to do when git won't
@@ -3236,11 +3264,61 @@ const ProjectViewBody = memo(function ProjectViewBody({
       );
       if (r.kind !== "settled") return; // already asked and answered on screen
       setTicketWorktrees(await ipc.gitWorktrees(repo).catch(() => worktrees));
+      expectIn(r.path);
       const id = addTerminal(r.path, start.command, title, cli.icon);
       if (id && start.typePrompt)
-        pendingTerminalPrompts.current.set(id, ticketContext(ticket));
+        pendingTerminalPrompts.current.set(id, seed);
     },
-    [ticketRepo, addTerminal, onNotice, getInstalled, switchTo],
+    [addTerminal, onNotice, getInstalled, switchTo],
+  );
+
+  /** Create or reuse the ticket's worktree and start an agent in it. The one
+   *  implementation both the Issues panel and the ticket tab call. */
+  const startTicketWork = useCallback(
+    async (ticket: ipc.TicketInfo, requestedRepo: string, agentId?: string) => {
+      const repo = requestedRepo || await ticketRepo();
+      if (!repo) {
+        onNotice("No git repository in this project.");
+        return;
+      }
+      // The chosen agent, else the user's default — one rule, shared with every
+      // other launcher, and never a hardcoded vendor name (see pickLaunchCli).
+      const installedHere = getInstalled();
+      const cli = pickLaunchCli(agentId, (bin) => Boolean(installedHere[bin]));
+      if (!cli) {
+        onNotice(`Unknown agent "${agentId}".`);
+        return;
+      }
+      const agent = cli.id;
+      // The ticket is dispatched work like any other: plan it first. The plan
+      // runs against the repo (the workspace may not exist yet) and folds into
+      // the seed; "Start without a plan" or no brain seeds the ticket as-is.
+      let seed = ticketContext(ticket);
+      let proceed = false;
+      let planId: string | undefined;
+      // An interactive session: its plan stays in progress across turns and
+      // is done when the ticket is, the session ends, or a receipt proves it.
+      // `resume` lets an approval that arrives after a restart still start it.
+      await dispatchWithPlan(
+        {
+          request: seed,
+          dir: repo,
+          label: `${ticket.id} · ${cli.name}`,
+          source: "ticket",
+          mode: "interactive",
+          ticketId: ticket.id,
+          resume: { kind: "ticket-work", payload: { ticket, repo, agentId: agent } },
+        },
+        (planned, id) => {
+          seed = planned;
+          planId = id;
+          proceed = true;
+        },
+      );
+      if (!proceed) return;
+      await continueTicketWork(ticket, repo, agent, seed, planId);
+    },
+    [ticketRepo, onNotice, getInstalled, continueTicketWork],
   );
 
   /** Put a PR's head in a workspace of its own (reusing one already holding it)
@@ -3461,6 +3539,29 @@ const ProjectViewBody = memo(function ProjectViewBody({
     },
     [patchTabRaw],
   );
+
+  // "Edit rule" / "Open rules" from anywhere outside this view (a card, a
+  // notification, `canopy:open-settings` with tab "rules") for a path inside
+  // this project, or — with no path — when this project is the one in front.
+  useEffect(() => {
+    const on = (e: Event) => {
+      const d = (e as CustomEvent<{ cwd: string; ruleId?: string }>).detail;
+      if (!d) return;
+      // No path (Settings → rules from outside any project): the project in front.
+      const mine = d.cwd
+        ? roots.some((r) => d.cwd === r || d.cwd.startsWith(`${r}/`))
+        : visible;
+      if (!mine) return;
+      openInstructions(rulesFocus(d.ruleId));
+    };
+    window.addEventListener(OPEN_RULES_EVENT, on);
+    // Lets the builder lens's "Team rules" know this project's panel exists.
+    const unregister = registerRulesEditor(() => roots);
+    return () => {
+      window.removeEventListener(OPEN_RULES_EVENT, on);
+      unregister();
+    };
+  }, [roots, openInstructions, visible]);
 
   /** Open the agents page, or focus it if it's already up. One per project:
    *  it is a view of this project's sessions, so a second would be a copy. */
@@ -4026,6 +4127,8 @@ const ProjectViewBody = memo(function ProjectViewBody({
       // the path when the task was not isolated here, so a task launched in a
       // workspace that already existed is granted it too.
       const sandbox = unattendedContextFor(dir, isolatedFrom);
+      // Whatever the (synchronous) brief reads from storage, loaded first.
+      if (def.prepare) await def.prepare(payload).catch(() => {});
       const brief = def.buildContext(payload, userQuery, env);
       const seed = oneLine(
         `${brief} ${progressBrief(def, payload)} ${microTaskProtocol()}`,
@@ -4112,6 +4215,8 @@ const ProjectViewBody = memo(function ProjectViewBody({
       const extraEnv: [string, string][] = [
         ...fleet.env,
         ...(def.env?.(payload) ?? []),
+        // Planned work carries its plan id (plans/planLaunch.ts).
+        ...planEnvForCommand(start.command),
       ];
       // Which research entry this run is for, taken from the env the task
       // already declares rather than from a second channel — so the launcher
@@ -4516,9 +4621,20 @@ const ProjectViewBody = memo(function ProjectViewBody({
    *  lifecycle as a saved one, no entry in the registry. The context builder
    *  already folded the user's words in, so nothing more is passed. A label is
    *  only given where the surface has a better one than the brief's own head. */
+  // Dispatched work is planned first (plans/planGate.ts): tiny low-risk work
+  // starts at once with its plan shown, anything riskier waits for approval.
+  // A re-run passes `plan: false` — its stored brief already carries one.
   const runAdhocTask = useCallback(
-    (brief: string, dir: string, label?: string) => {
-      void startMicroTask(adhocTaskDef(brief, label), { dir }, "");
+    (brief: string, dir: string, label?: string, opts?: { plan?: boolean }) => {
+      const name = label ?? adhocLabel(brief.replace(/\s+/g, " ").trim());
+      const launch = (planned: string) =>
+        startMicroTask(adhocTaskDef(planned, name), { dir }, "");
+      if (opts?.plan === false) void launch(brief);
+      else
+        void dispatchWithPlan(
+          { request: brief, dir, label: name, source: "task", mode: "one-shot", resume: { kind: "adhoc", payload: { dir, label: name } } },
+          launch,
+        );
     },
     [startMicroTask],
   );
@@ -4894,10 +5010,19 @@ const ProjectViewBody = memo(function ProjectViewBody({
           `${ticketContext(ticket)} Implement it end-to-end and verify the changes. ` +
           `Leave the completed work in this worktree; do not commit or open a pull request ` +
           `unless the ticket explicitly asks for it.`;
-        await startMicroTask(
-          adhocTaskDef(brief, ticketTaskLabel(ticket)),
-          { dir },
-          "",
+        const workDir = dir;
+        await dispatchWithPlan(
+          {
+            request: brief,
+            dir: workDir,
+            label: ticketTaskLabel(ticket),
+            source: "ticket",
+            mode: "one-shot",
+            ticketId: ticket.id,
+            resume: { kind: "adhoc", payload: { dir: workDir, label: ticketTaskLabel(ticket) } },
+          },
+          (planned) =>
+            startMicroTask(adhocTaskDef(planned, ticketTaskLabel(ticket)), { dir: workDir }, ""),
         );
       } catch (err) {
         onNotice(`Couldn't start task: ${String(err)}`, "error");
@@ -4905,6 +5030,25 @@ const ProjectViewBody = memo(function ProjectViewBody({
     },
     [onNotice, startMicroTask, switchTo, ticketRepo],
   );
+
+  // Plans that were waiting for approval when Canopy last closed come back
+  // (tucked in the corner), and an approval — here or in team chat, even one
+  // given while Canopy was closed — still starts their agent.
+  const planResumers = useRef<Record<string, PlanResumer>>({});
+  planResumers.current = {
+    adhoc: (brief, _planId, p) =>
+      startMicroTask(adhocTaskDef(brief, typeof p.label === "string" ? p.label : undefined), { dir: String(p.dir ?? "") }, ""),
+    "ticket-work": (brief, planId, p) =>
+      continueTicketWork(p.ticket as ipc.TicketInfo, String(p.repo ?? ""), String(p.agentId ?? ""), brief, planId),
+  };
+  useEffect(() => {
+    armPlanTracking();
+    if (project.readOnly) return;
+    void restoreWaitingPlans(
+      project.components.map((c) => c.path),
+      (kind) => planResumers.current[kind],
+    );
+  }, [project.components, project.readOnly]);
 
   /** Carry a finished task's conversation on as an ordinary agent session.
    *
@@ -5661,18 +5805,30 @@ const ProjectViewBody = memo(function ProjectViewBody({
         // account's config dir, or the login lands on the default one.
         env?: [string, string][];
         profile?: string;
+        // The brain's connect flow (brainConnect.ts): an install runs as a
+        // self-closing chore, a sign-in carries a `then` marker that comes back
+        // on canopy:terminal-exited, and `handled` tells the opener a project
+        // took it (with none open, it shows the command to run by hand).
+        run?: "chore";
+        then?: string;
+        handled?: boolean;
       };
       const first = componentsRef.current[0];
-      if (d?.command && first)
-        addTerminal(
+      if (d?.command && first) {
+        const id = addTerminal(
           first.path,
           d.command,
           d.title ?? d.command,
-          "⚙",
-          false,
+          d.run === "chore" ? "⬇" : "⚙",
+          d.run ?? false,
           d.env,
           d.profile,
         );
+        if (id) {
+          d.handled = true;
+          if (d.then) exitMarkers.current.set(id, d.then);
+        }
+      }
     };
     window.addEventListener("canopy:run-command", runCommand);
     window.addEventListener("menu:close-tab", closeTabHandler);
@@ -6407,7 +6563,18 @@ const ProjectViewBody = memo(function ProjectViewBody({
         projectId: string;
         op: ipc.AgentBrowserOp;
       };
-      if (d?.projectId !== project.id) return;
+      // projectId null: the workspace's own op (browserLocalOps.ts), routed
+      // by folder — answered by the project that holds it.
+      const route = (d?.op?.route ?? "").replace(/\\/g, "/");
+      const ours =
+        d?.projectId === project.id ||
+        (d?.projectId == null &&
+          !!route &&
+          project.components.some((c) => {
+            const p = c.path.replace(/\\/g, "/").replace(/\/+$/, "");
+            return route === p || route.startsWith(`${p}/`);
+          }));
+      if (!ours) return;
       const op = d.op;
       const previews = tabsRef.current.filter(
         (t): t is PreviewSubTab => t.type === "preview",
@@ -6433,12 +6600,12 @@ const ProjectViewBody = memo(function ProjectViewBody({
         // An agent navigating an empty picker is creating the session just as
         // surely as open_preview does. Never overwrite an existing preview's
         // provenance merely because another agent later drives its page.
-        if (tab.initiatorPtyId == null && op.ptyId != null) {
+        if (!op.quiet && tab.initiatorPtyId == null && op.ptyId != null) {
           patchTabRaw(tab.id, { initiatorPtyId: op.ptyId } as Partial<SubTab>);
         }
-        if (op.ptyId != null) showBrowserPip(tab.id, op.ptyId);
+        if (!op.quiet && op.ptyId != null) showBrowserPip(tab.id, op.ptyId);
         dispatchBrowserOp(tab.id, op);
-      } else if (attemptTabId === undefined && op.op === "navigate" && op.url) {
+      } else if (!op.quiet && attemptTabId === undefined && op.op === "navigate" && op.url) {
         const id = openPreview(op.url, op.ptyId, false);
         if (op.ptyId != null) showBrowserPip(id, op.ptyId);
         dispatchBrowserOp(id, op);
@@ -6455,7 +6622,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
     window.addEventListener("canopy:agent-browser", onBrowserOp);
     return () =>
       window.removeEventListener("canopy:agent-browser", onBrowserOp);
-  }, [project.id, openPreview, patchTabRaw, showBrowserPip]);
+  }, [project.id, project.components, openPreview, patchTabRaw, showBrowserPip]);
 
   /** A pull request, commit, issue or file on a git host, opened as the tab
    *  Canopy already has for it rather than as a page of github.com. False for
@@ -8015,6 +8182,17 @@ const ProjectViewBody = memo(function ProjectViewBody({
             : undefined;
         if (restored || name || description)
           patchTabRaw(tab.id, { ...description, ...restored, ...name });
+        // The first prompt named it; the brain titles the work properly if the
+        // agent hasn't by the end of a short grace (brainSessionTitle.ts).
+        if (name)
+          requestBrainTabName({
+            prompt: opening,
+            tab: () =>
+              tabsRef.current.find(
+                (t): t is TermSubTab => t.type === "terminal" && t.id === tab.id,
+              ),
+            apply: (patch) => patchTabRaw(tab.id, patch),
+          });
       }
       if (tab && tab.id === activeTabIdRef.current && visibleRef.current)
         attentionRef.current(d.pty, { t: "focus", at: e.ts, visible: true }, cli);
@@ -10986,6 +11164,17 @@ const ProjectViewBody = memo(function ProjectViewBody({
   useEffect(() => () => { void bootstrapSession?.stop(); }, [bootstrapSession]);
   vibeSessionRef.current = vibeSession ?? bootstrapSession;
   useEffect(() => () => void vibeSession?.stop(), [vibeSession]);
+  // A Build request whose plan waited for approval across a restart goes to
+  // the Build session once there is one again.
+  useEffect(() => {
+    if (!vibeSession || project.readOnly) return;
+    const send = (brief: string, _planId: string, p: Record<string, unknown>) =>
+      vibeSession.send(String(p.message ?? ""), { planned: brief });
+    void restoreWaitingPlans(
+      project.components.map((c) => c.path),
+      (kind) => (kind === "build" ? send : undefined),
+    );
+  }, [vibeSession, project.components, project.readOnly]);
   vibeServerWatch.current =
     vibeSession
       ? vibeRequiredRuns
@@ -11753,6 +11942,16 @@ const ProjectViewBody = memo(function ProjectViewBody({
       if (snapshot !== lastContextRef.current) {
         lastContextRef.current = snapshot;
         void ipc.contextPublish(project.id, snapshot);
+        publishAwarenessRoster(
+          project.id,
+          agentTargets.map((a) => ({
+            ptyId: a.ptyId,
+            name: a.name ?? a.title,
+            agent: a.agentId || null,
+            title: a.title || null,
+            description: a.description ?? null,
+          })),
+        );
       }
     };
     publishContextRef.current = publish;
@@ -12401,6 +12600,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
             cwd={tab.cwd}
             sessionId={tab.sessionId}
             digest={tab.digest}
+            ptyId={tab.ptyId}
             builderLens={vibe}
             onOpenCommit={openCommit}
             onOpenPr={openPr}
@@ -12717,7 +12917,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
             // (a branch tab, a PR), which is long gone — but the brief that
             // payload produced was recorded, and it says everything.
             onRunAgain={(run: TaskRun) =>
-              runAdhocTask(run.brief, run.cwd, run.label)
+              runAdhocTask(run.brief, run.cwd, run.label, { plan: false })
             }
             onContinueSession={continueTaskSession}
             onOpenFile={(path) => void openFile(path)}
@@ -13467,6 +13667,13 @@ const ProjectViewBody = memo(function ProjectViewBody({
                   if (livePtyByTab.current.get(tab.id) !== event.id) return;
                   livePtyByTab.current.delete(tab.id);
                   const code = event.exit_code;
+                  const then = exitMarkers.current.get(tab.id);
+                  if (then) {
+                    exitMarkers.current.delete(tab.id);
+                    window.dispatchEvent(
+                      new CustomEvent(TERMINAL_EXITED_EVENT, { detail: { then, code } }),
+                    );
+                  }
                   if (tab.spawnedTask) {
                     void settleAttempt({
                       attemptId: tab.spawnedTask.attemptId,
@@ -13577,6 +13784,12 @@ const ProjectViewBody = memo(function ProjectViewBody({
                     />
                   );
                 })}
+              {/* What a team rule or the irreversible-action gate just stopped
+                  in this agent, with Allow once / Approve once (gates/events.ts). */}
+              <GateNotices
+                ptyId={tab.ptyId}
+                onEditRule={(ruleId) => openInstructions(rulesFocus(ruleId))}
+              />
             </div>
             );
           })}
@@ -13949,6 +14162,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
                         cwd={agentTermWs.cwd}
                         sessionId={agentTermWs.sessionId}
                         digest={agentTermWs.digest}
+                        ptyId={agentTermWs.ptyId ?? undefined}
                         onOpenCommit={openCommit}
                         onOpenPr={openPr}
                         onOpenTerminal={(cwd, label) =>
@@ -14087,8 +14301,9 @@ const ProjectViewBody = memo(function ProjectViewBody({
           .catch((err) => onNotice(String(err), "error"))
       }
       onCommit={(repo, message) =>
-        ipc
-          .gitCommit(repo, message, false)
+        // Agent-Session trailers when the setting is on (sessionDoc/trailers.ts).
+        commitMessageWithSessions(repo, message)
+          .then((m) => ipc.gitCommit(repo, m, false))
           .then((msg) => {
             onNotice(msg, "success");
             void refreshChanges();
@@ -14559,6 +14774,14 @@ const ProjectViewBody = memo(function ProjectViewBody({
           onOpenAll={() => openCollectionPage("research-list")}
         />
       ))}
+      {sidePane("memory", () => (
+        <MemoryPanel
+          roots={roots}
+          onOpenSession={({ ptyId }) => {
+            if (ptyId != null) jumpToPty(ptyId);
+          }}
+        />
+      ))}
       {sidePane("agents", () => (
         <AgentsPanel
           visible={sideTab === "agents" && visible && sideOpen}
@@ -14601,6 +14824,12 @@ const ProjectViewBody = memo(function ProjectViewBody({
           onOpen={openMcpServer}
         />
       ))}
+      {sidePane("outcomes", () => (
+        <OutcomesPanel
+          repos={repoPaths}
+          visible={sideTab === "outcomes" && visible && sideOpen}
+        />
+      ))}
     </div>
   );
 
@@ -14624,6 +14853,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
             serversBadge={serversRunning}
             prsBadge={prsBadge}
             tasksBadge={runningMicro.length}
+            memoryBadge={memoryBadge}
             pendingCount={pending.length}
             urgentCount={urgentCount}
             teamBadge={teamBadge}
@@ -14763,6 +14993,9 @@ const ProjectViewBody = memo(function ProjectViewBody({
           />
         )}
         <aside className="vibe-chat-placeholder" aria-label="Build chat">
+          {/* Builder lens tools: plain-language history, diagnose-first
+              repair, layers and owners. Edits only through the Build session. */}
+          {vibe && <BuilderLensPanel project={project} session={vibeSession ?? null} />}
           <VibeBuilderPane
             project={project}
             phase={

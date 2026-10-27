@@ -19,6 +19,7 @@ import { BUILT_IN_HEADING } from "../taskMenu";
 import {
   completedTaskRuns,
   runIcon,
+  runReceiptDir,
   runTitle,
   TASK_HISTORY_EVENT,
   type TaskRun,
@@ -28,6 +29,7 @@ import { Mascot } from "./Mascot";
 import { PlayIcon, StopIcon, TrashIcon } from "./icons";
 import { Button } from "./ui";
 import { matches } from "../shortcuts";
+import { ReceiptBadge } from "./ReceiptBadge";
 
 /** A task in flight. Detached runs (the usual kind) carry a `ptyId` and no tab —
  *  this row is the only place they appear, so it has to say what a tab would
@@ -326,6 +328,12 @@ export function TasksPanel({
                 {r.title}
                 {r.note && <span className="task-note-inline">{r.note}</span>}
               </span>
+              {/* A task wrapping up is not done until the workspace's receipt
+                  says so. Quiet when there is none: read-only tasks change no
+                  files and get no receipt. */}
+              {r.ptyId != null && r.state !== "working" && (
+                <ReceiptBadge ptyId={r.ptyId} quietWhenUnverified />
+              )}
               <Button icon
                 title="Stop this task"
                 onClick={() => onStop(r)}>
@@ -378,6 +386,12 @@ export function TasksPanel({
                   <span className="task-note-inline">{r.summary}</span>
                 )}
               </span>
+              {/* Finished work keeps its proof: the run's session id is on
+                  the history row, so its receipt is found after the tab and
+                  the terminal are long gone. */}
+              {r.sessionId && (
+                <ReceiptBadge sessionId={r.sessionId} cwd={runReceiptDir(r)} cli={r.agent} quietWhenUnverified />
+              )}
               {r.url && (
                 <Button icon
                   title={`Open ${r.url}`}

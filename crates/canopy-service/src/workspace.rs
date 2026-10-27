@@ -49,6 +49,10 @@ pub struct Workspace {
     pub terminals: Arc<TerminalRegistry>,
     pub runner_terminals: RunnerTerminals,
     pub ledger: Ledger,
+    /// Team memory synced from the desktop, and agents' queued proposals.
+    pub memory: crate::memory::MemoryStore,
+    /// Android device ops relayed to the IDE that has this workspace open.
+    pub device: crate::device::DeviceRelay,
     access: Mutex<Option<(SignedSnapshot, AccessSnapshot)>>,
     queues: Mutex<HashMap<u32, Arc<tokio::sync::Mutex<()>>>>,
     pub socket: tokio::sync::Mutex<Option<SocketServer>>,
@@ -69,7 +73,15 @@ impl Workspace {
         events: Arc<EventLog>,
     ) -> Result<Arc<Self>, String> {
         let dir = state_dir.join("ws").join(id);
-        for sub in ["mesh", "notes", "research", "attention", "inbox", "keys"] {
+        for sub in [
+            "mesh",
+            "notes",
+            "research",
+            "attention",
+            "inbox",
+            "keys",
+            "memory",
+        ] {
             crate::util::create_dir_mode(&dir.join(sub), 0o700).map_err(|e| e.to_string())?;
         }
         let _ = crate::util::set_mode(&dir, 0o700);
@@ -98,6 +110,8 @@ impl Workspace {
             claims: ClaimStore::load(Some(dir.join("mesh/claims.sqlite")), instance.clone()),
             attention: AttentionStore::open(dir.join("attention"), events.clone()),
             ledger: Ledger::open(&dir.join("inbox/service.sqlite"))?,
+            memory: crate::memory::MemoryStore::open(dir.join("memory")),
+            device: crate::device::DeviceRelay::default(),
             runner_terminals: RunnerTerminals {
                 registry: terminals.clone(),
                 runner: runner.clone(),
@@ -265,9 +279,14 @@ impl Workspace {
         let now = now_ms();
         let result = self.claims.mutate(|claims| {
             let reply = match action {
-                "release" => {
+                "release" if paths.is_empty() => {
                     let n = end_claims(claims, &key, now, "agent");
                     (200, format!("Released {n} claim(s)."))
+                }
+                // With paths, only those are let go; the rest stay held.
+                "release" => {
+                    let r = canopy_core::claims::release_paths(claims, &key, &paths, now, &id);
+                    (200, canopy_core::claims::partial_release_message(&r))
                 }
                 "claim" => apply_claim(
                     claims,
@@ -296,14 +315,100 @@ impl Workspace {
         }
     }
 
+    /// Agent awareness's claim on a hotspot for the agent that just edited it
+    /// (desktop `context_hotspot_claim`): added to whatever that terminal
+    /// already holds, under its own identity, refused like any claim when
+    /// another agent holds the path.
+    pub fn hotspot_claim(
+        &self,
+        pty_id: u32,
+        paths: Vec<String>,
+        owner: &str,
+        note: Option<String>,
+    ) -> (u16, String) {
+        let Some(who) = self.terminals.by_pty(pty_id) else {
+            return (404, format!("terminal {pty_id} has exited"));
+        };
+        let wanted: Vec<String> = paths
+            .iter()
+            .map(|p| crate::meshtext::normalize_claim_path(p, Some(WORKSPACE_ROOT)))
+            .filter(|p| p.starts_with('/') && p != "/")
+            .collect();
+        if wanted.is_empty() {
+            return (400, "a hotspot claim needs absolute paths".into());
+        }
+        let key = who.key(&self.instance);
+        let id = match self.claims.next_id() {
+            Ok(id) => id,
+            Err(error) => return (500, error),
+        };
+        let now = now_ms();
+        let result = self.claims.mutate(|claims| {
+            let mine: Vec<&Claim> = claims
+                .iter()
+                .filter(|c| c.released_at_ms.is_none() && c.owner_key == key)
+                .collect();
+            let mut held: Vec<String> = mine.iter().flat_map(|c| c.paths.clone()).collect();
+            let covered = |p: &String| {
+                held.iter().any(|h| {
+                    let h = h.trim_end_matches('/');
+                    p == h || p.starts_with(&format!("{h}/"))
+                })
+            };
+            if wanted.iter().all(covered) {
+                return ((200, "Already held.".to_string()), false);
+            }
+            let display = mine
+                .first()
+                .map(|c| c.owner.clone())
+                .unwrap_or_else(|| owner.to_string());
+            let note = mine.first().and_then(|c| c.note.clone()).or(note);
+            for p in &wanted {
+                if !held.contains(p) {
+                    held.push(p.clone());
+                }
+            }
+            let reply = apply_claim(
+                claims,
+                &held,
+                note,
+                &who,
+                &key,
+                &display,
+                now,
+                &id,
+                &self.instance,
+            );
+            let changed = reply.0 == 200;
+            (reply, changed)
+        });
+        match result {
+            Ok((reply, changed)) => {
+                if changed {
+                    self.events.publish("mesh", "claims", "");
+                }
+                reply
+            }
+            Err(error) => (500, error),
+        }
+    }
+
     pub fn release_claims_for(&self, record: &TerminalRecord, how: &str) {
-        let key = record.key(&self.instance);
-        if let Ok(((), true)) = self.claims.mutate(|claims| {
-            let n = end_claims(claims, &key, now_ms(), how);
-            ((), n > 0)
-        }) {
+        let _ = self.release_claims_of(&record.key(&self.instance), how);
+    }
+
+    /// End every claim held under one owner key — the user's escape hatch for
+    /// an agent that died holding one (desktop `context_release_claim`).
+    /// Returns how many ended.
+    pub fn release_claims_of(&self, owner_key: &str, how: &str) -> Result<usize, String> {
+        let (n, _) = self.claims.mutate(|claims| {
+            let n = end_claims(claims, owner_key, now_ms(), how);
+            (n, n > 0)
+        })?;
+        if n > 0 {
             self.events.publish("mesh", "claims", "");
         }
+        Ok(n)
     }
 
     // ---- terminals ----------------------------------------------------

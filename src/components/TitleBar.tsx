@@ -21,6 +21,7 @@ import type { TabDrag } from "../tabDrag";
 // class is simply absent — nothing changes there.
 import { IS_MAC } from "../platform";
 import { Button } from "./ui";
+import { projectLens } from "../projectLens";
 import { CAPTURE_MODES, captureModeLabel } from "../pageCapture";
 import {
   getVibePreviewContext,
@@ -237,7 +238,7 @@ function TitleBarImpl({
   const fullscreen = useMacFullscreen();
   const menu = useContextMenu();
   const activeProject = openProjects.find((project) => project.id === activeId);
-  const buildMode = activeProject?.vibe?.enabled === true;
+  const buildMode = projectLens(activeProject) === "builder";
   const chooseProject = (id: string) =>
     openProjects.some((project) => project.id === id)
       ? onSelectProject(id)
@@ -352,12 +353,12 @@ function TitleBarImpl({
         <button
           type="button"
           className="project-mode-toggle"
-          aria-label={`Switch to ${buildMode ? "Engineer" : "Build"} mode`}
+          aria-label={`Switch to the ${buildMode ? "Engineer" : "Builder"} lens`}
           aria-pressed={buildMode}
-          title={`Switch ${activeProject.name} to ${buildMode ? "Engineer" : "Build"} mode`}
+          title={`Look at ${activeProject.name} through the ${buildMode ? "Engineer" : "Builder"} lens. Same project, same sessions, same files — only the view changes.`}
           onClick={() => onToggleVibe(activeProject.id)}
         >
-          <span className={buildMode ? "active" : ""}>Build</span>
+          <span className={buildMode ? "active" : ""}>Builder</span>
           <span className="project-mode-arrow" aria-hidden>
             ⇄
           </span>

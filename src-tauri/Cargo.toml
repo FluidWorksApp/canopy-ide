@@ -1,6 +1,6 @@
 [package]
 name = "canopy"
-version = "0.4.11"
+version = "0.5.0"
 description = "Local-first, memory-light, vibe-coding-first IDE"
 authors = ["Cause Connect Pte Ltd <sam@fluidwords.app>"]
 license = "MIT"
@@ -151,6 +151,10 @@ getrandom = "0.2"
 # a teammate across sessions.
 ed25519-dalek = "2"
 hex = "0.4"
+# Rules compiled into gates (gates.rs): globs for protected paths and linear-time
+# regexes for command patterns. Both already in the tree via `ignore`.
+globset = "0.4"
+regex = "1"
 # Voice dictation: local ASR (Parakeet / SenseVoice / Moonshine) via ONNX
 # Runtime. All of `dictation`-feature-gated (optional): cpal captures the mic,
 # rubato resamples to the model's 16 kHz, reqwest streams the one-time model
@@ -180,6 +184,10 @@ tauri-plugin-updater = "2.10.1"
 tauri-plugin-process = "2.3.1"
 tauri-plugin-opener = "2"
 tauri-plugin-single-instance = "2"
+# Registers canopy:// with the OS so a browser's "Open in Canopy" launches the
+# app (or reaches the running one). URLs are routed in Rust (cli.rs), so the
+# plugin's JavaScript API and its permissions are not needed.
+tauri-plugin-deep-link = "2.4"
 # Native notifications for team-relay activity while the app is unfocused
 tauri-plugin-notification = "2"
 
@@ -200,11 +208,18 @@ windows-core = "0.61"
 # snapshot.rs: CapturePreview writes its PNG into a COM memory stream; these
 # features name the stream constructor and IStream itself. Same windows 0.61
 # webview2-com-sys already resolves to, so again names, not weight.
-windows = { version = "0.61", features = ["Win32_Foundation", "Win32_Security", "Win32_System_Com", "Win32_System_Com_StructuredStorage", "Win32_System_JobObjects", "Win32_System_Threading"] }
+windows = { version = "0.61", features = ["Win32_Foundation", "Win32_Security", "Win32_Security_Credentials", "Win32_System_Com", "Win32_System_Com_StructuredStorage", "Win32_System_JobObjects", "Win32_System_Threading"] }
 # The capture comes back as a whole-view frame; cropping the asked-for rect out
 # of it, capping the width and re-encoding all happen in Rust because neither
 # CapturePreview nor WebKitGTK's snapshot takes a rect the way WKWebView does.
 image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
+
+# secure_store.rs: the account token and saved workspace connections live in
+# the freedesktop Secret Service. Plain session (no crypto features): the
+# secret only crosses the local session bus. Built on the libdbus `dbus` crate
+# tao already links, so this adds one small crate, not a second D-Bus stack.
+[target.'cfg(all(unix, not(target_os = "macos")))'.dependencies]
+dbus-secret-service = { version = "4.1", default-features = false }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 # snapshot.rs: webkit_web_view_get_snapshot on the WebKitWebView behind wry.

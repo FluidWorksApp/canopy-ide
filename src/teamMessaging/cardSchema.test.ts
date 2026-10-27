@@ -1,5 +1,5 @@
 import {describe,expect,it} from 'vitest';
-import {LIMITS,cardDraft,cardText,cardUrl,foldOutcomes,parseCard,secretKinds,stripAnsi,validCardPath,type Card} from './cardSchema';
+import {LIMITS,cardDraft,cardText,cardUrl,foldLayerApproval,foldOutcomes,parseCard,secretKinds,stripAnsi,validCardPath,type Card} from './cardSchema';
 import {parseExtensions} from './chatEvents';
 import type {ChatMessage} from './client';
 import {v1ValidChatMessage,v1Renders,v1ValidateMessage} from './fixtures/v1Schema';
@@ -169,5 +169,38 @@ describe('foldOutcomes',()=>{
    outcome('66666666-6666-4666-8666-666666666666','u2',6,'approved',{recipient:'me'}),
   ]);
   expect(folded).toEqual([]);
+ });
+});
+
+describe('layer approval cards',()=>{
+ const request:Card={type:'layer-approval',v:1,approval:'la-abc123',layer:'data',owner:'u-sam',project:'Shop',files:['prisma/schema.prisma','prisma/seed.ts'],summary:'What was asked for: add a phone number\n+phone String',repo};
+ const msg=(over:Partial<ChatMessage>):ChatMessage=>({id:UUID1,sender:'u-alex',recipient:'u-sam',text:'',created:1,...over} as ChatMessage);
+ it('round-trips and rejects what a modified client might send',()=>{
+  expect(parseCard(JSON.parse(JSON.stringify(request)))).toEqual(request);
+  expect(parseCard({...request,approval:'../etc'})).toBeUndefined();
+  expect(parseCard({...request,layer:'view'})).toBeUndefined();
+  expect(parseCard({...request,files:['/etc/passwd']})).toBeUndefined();
+  expect(parseCard({...request,files:[]})).toBeUndefined();
+  expect(parseCard({...request,files:Array.from({length:LIMITS.approvalFiles+1},(_,i)=>`f${i}.ts`)})).toBeUndefined();
+  expect(parseCard({...request,summary:'x‮y'})).toBeUndefined();
+  expect(parseCard({...request,path:'/x'})).toBeUndefined();
+  const outcome={type:'layer-approval-outcome',v:1,request:UUID1,approval:'la-abc123',outcome:'approved'};
+  expect(parseCard(outcome)).toEqual(outcome);
+  expect(parseCard({...outcome,outcome:'maybe'})).toBeUndefined();
+  expect(parseCard({...outcome,request:'not-a-uuid'})).toBeUndefined();
+ });
+ it('falls back to text that names the files, and has no URL',()=>{
+  const text=cardText(request);
+  expect(text).toContain('Approval needed: Data change in Shop (2 files)');
+  expect(text).toContain('- prisma/schema.prisma');
+  expect(cardUrl(request)).toBeUndefined();
+ });
+ it('folds only the owner’s answer in the request’s thread',()=>{
+  const req=msg({card:request});
+  const answer=(sender:string,outcome:string,created:number,thread=UUID1)=>msg({id:`3333333${created}-3333-4333-8333-333333333333`,sender,recipient:'u-alex',created,thread:{root:thread},card:{type:'layer-approval-outcome',v:1,request:UUID1,approval:'la-abc123',outcome}});
+  expect(foldLayerApproval(req,[req])).toBeUndefined();
+  expect(foldLayerApproval(req,[req,answer('u-mallory','approved',2)])).toBeUndefined();
+  expect(foldLayerApproval(req,[req,answer('u-sam','approved',2,UUID2)])).toBeUndefined();
+  expect(foldLayerApproval(req,[req,answer('u-sam','approved',2),answer('u-sam','rejected',3)])?.outcome).toBe('rejected');
  });
 });

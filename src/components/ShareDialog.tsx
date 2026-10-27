@@ -11,6 +11,7 @@ import {CardError,LIMITS,cardDraft,cardFreeText,secretKinds,type Card,type CardD
 import {OPEN_SHARE_DIALOG_EVENT,type ShareRequest} from '../shareCards';
 import {ChatCard,type ChatCardDeps} from './ChatCard';
 import {Button,Select} from './ui';
+import {useEscape} from '../useEscape';
 import './chatCard.css';
 
 type Team={id:string;name:string};
@@ -34,6 +35,7 @@ export interface ShareDialogProps{
 
 export function ShareDialog({request,onClose,directory=loadDirectory}:ShareDialogProps){
  const [dir,setDir]=useState<Directory>(),[dirError,setDirError]=useState('');
+ const to=request.kind==='share'?request.to:undefined;
  const [teamId,setTeamId]=useState(''),[peer,setPeer]=useState<string|null>(null),[note,setNote]=useState('');
  const [reviewers,setReviewers]=useState<string[]>([]),[error,setError]=useState(''),[sending,setSending]=useState(false);
  useEffect(()=>{
@@ -42,12 +44,17 @@ export function ShareDialog({request,onClose,directory=loadDirectory}:ShareDialo
   void directory().then(d=>{if(!live)return;setDir(d);setTeamId(t=>t||d.teams[0]?.id||'');},(e:unknown)=>{if(live)setDirError(e instanceof Error?e.message:String(e));});
   return()=>{live=false;};
  },[directory,request.kind]);
- useEffect(()=>{const onKey=(e:KeyboardEvent)=>{if(e.key==='Escape')onClose();};window.addEventListener('keydown',onKey);return()=>window.removeEventListener('keydown',onKey);},[onClose]);
+ // On the overlay stack, so Escape closes this dialog and only this dialog —
+ // not the session document or panel it was opened from (useEscape.ts).
+ useEscape(onClose);
  const session=useMemo(()=>dir&&teamId?teamSession(teamId,dir.selfId):undefined,[dir,teamId]);
  useEffect(()=>session?.retain(),[session]);
  const snapshot=useSyncExternalStore(session?.subscribe??noopSubscribe,session?.getSnapshot??emptySnapshot);
  const members=Object.entries(snapshot.members??{}).filter(([id])=>id!==dir?.selfId).sort((a,b)=>a[1].localeCompare(b[1]));
  const name=(id:string)=>snapshot.members?.[id]??id.slice(0,8);
+ // Addressed to one teammate (a layer owner): open on them once they load.
+ const toMember=!!to&&members.some(([id])=>id===to);
+ useEffect(()=>{if(toMember)setPeer(to!);},[toMember,to,teamId]);
  // A direct message can only ask the person it goes to.
  const candidates=peer?members.filter(([id])=>id===peer):members;
  useEffect(()=>{setReviewers(current=>{const next=current.filter(r=>candidates.some(([id])=>id===r));return peer&&!next.length?[peer]:next;});},[peer,candidates.length]);// eslint-disable-line react-hooks/exhaustive-deps
@@ -60,9 +67,14 @@ export function ShareDialog({request,onClose,directory=loadDirectory}:ShareDialo
     const card:Card={...request.card,reviewers};
     return {draft:cardDraft(card,note,{mentions:reviewers})};
    }
-   return {draft:cardDraft(request.card,note)};
+   if(request.kind==='plan'){
+    if(!reviewers.length)return {problem:'Choose who can approve it.'};
+    const card:Card={...request.card,approvers:reviewers};
+    return {draft:cardDraft(card,note,{mentions:reviewers})};
+   }
+   return {draft:cardDraft(request.card,note,to&&peer===to?{mentions:[to]}:{})};
   }catch(e){return {problem:e instanceof CardError?e.message:String(e)};}
- },[request,note,reviewers]);
+ },[request,note,reviewers,to,peer]);
  const draft=built.draft;
  const secrets=useMemo(()=>draft?secretKinds(`${cardFreeText(draft.ext.card)}\n${note}`):[],[draft,note]);
  const preview=useMemo(():ChatMessage|undefined=>draft&&dir?{id:'00000000-0000-4000-8000-000000000000',sender:dir.selfId,recipient:peer,text:draft.text,created:Date.now(),...draft.ext}:undefined,[draft,dir,peer]);
@@ -70,11 +82,11 @@ export function ShareDialog({request,onClose,directory=loadDirectory}:ShareDialo
  async function send(){
   if(!session||!draft)return;
   setSending(true);setError('');
-  try{await session.send(draft.text,peer,[],draft.ext);onClose();}
+  try{await session.send(draft.text,peer,[],draft.ext);if(request.kind==='share')request.onSent?.(teamId,peer);else if(request.kind==='plan')request.onSent?.(reviewers);onClose();}
   catch(e){setError(e instanceof Error?e.message:String(e));}
   finally{setSending(false);}
  }
- const title=request.kind==='review'?'Request review in Canopy':request.kind==='error'?"Can't share this":'Send to team chat';
+ const title=request.kind==='review'?'Request review in Canopy':request.kind==='plan'?'Ask the team to approve this plan':request.kind==='error'?"Can't share this":'Send to team chat';
  return <div className="share-dialog-backdrop" onMouseDown={e=>{if(e.target===e.currentTarget)onClose();}}>
   <div className="share-dialog" role="dialog" aria-modal="true" aria-label={title}>
    <h2>{title}</h2>
@@ -88,6 +100,11 @@ export function ShareDialog({request,onClose,directory=loadDirectory}:ShareDialo
       {members.map(([id,n])=><option key={id} value={id}>{n}</option>)}
      </Select></label>
     </div>}
+    {to&&dir&&dir.teams.length>0&&members.length>0&&!toMember&&<p className="share-dialog-warning" role="note">The person this is for isn't in this team. Pick a team you share with them.</p>}
+    {request.kind==='plan'&&<fieldset className="share-dialog-reviewers" aria-label="Approvers">
+     <legend>Who can approve it (everyone else in the conversation can comment)</legend>
+     {candidates.length?candidates.map(([id,n])=><label key={id}><input type="checkbox" checked={reviewers.includes(id)} disabled={!!peer} onChange={e=>setReviewers(cur=>e.target.checked?[...cur,id].slice(0,LIMITS.reviewers):cur.filter(r=>r!==id))}/>{n}</label>):<small>No teammates to ask yet.</small>}
+    </fieldset>}
     {request.kind==='review'&&<fieldset className="share-dialog-reviewers" aria-label="Reviewers">
      {candidates.length?candidates.map(([id,n])=><label key={id}><input type="checkbox" checked={reviewers.includes(id)} disabled={!!peer} onChange={e=>setReviewers(cur=>e.target.checked?[...cur,id].slice(0,LIMITS.reviewers):cur.filter(r=>r!==id))}/>{n}</label>):<small>No teammates to ask yet.</small>}
     </fieldset>}

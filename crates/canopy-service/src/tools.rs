@@ -5,19 +5,14 @@
 //! never appears or disappears as an IDE attaches; availability is answered
 //! per call. A test pins it to `src-tauri/src/context.rs`.
 
-/// Never served by a cloud service: devices and the vault stay on the laptop.
+/// Never served by a cloud service: the vault and team chat stay on the
+/// person's own devices. (Android devices are relayed to the IDE: device.rs.)
 pub const LAPTOP_ONLY_TOOLS: &[&str] = &[
-    "canopy_device_describe",
-    "canopy_device_key",
-    "canopy_device_list",
-    "canopy_device_logcat",
-    "canopy_device_run",
-    "canopy_device_screenshot",
-    "canopy_device_snapshot",
-    "canopy_device_start",
-    "canopy_device_swipe",
-    "canopy_device_tap",
-    "canopy_device_type",
+    // Teams chat is end-to-end encrypted with keys only the user's own devices
+    // hold, and a message there speaks as the user: the workspace's device
+    // never may.
+    "canopy_team_people",
+    "canopy_team_send",
     "canopy_vault_fill",
     "canopy_vault_list",
     "canopy_vault_read",
@@ -67,6 +62,8 @@ pub const SUPPORTED_TOOLS: &[&str] = &[
     "canopy_editor_state",
     "canopy_hover",
     "canopy_job_done",
+    "canopy_memory",
+    "canopy_memory_propose",
     "canopy_mesh",
     "canopy_mesh_send",
     "canopy_mesh_submit",
@@ -98,6 +95,8 @@ pub const SUPPORTED_TOOLS: &[&str] = &[
     "canopy_start_session",
     "canopy_stop_server",
     "canopy_symbols",
+    "canopy_team_people",
+    "canopy_team_send",
     "canopy_tickets",
     "canopy_vault_fill",
     "canopy_vault_list",

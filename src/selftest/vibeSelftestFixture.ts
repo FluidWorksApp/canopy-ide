@@ -151,6 +151,8 @@ export function createVibeSelftestFixture(projectDir: string): {
 
   const deps: VibeBuilderSessionDeps = {
       ...DEFAULT_VIBE_BUILDER_DEPS,
+      // Selftests send requests as typed: no brain call to plan them.
+      plan: undefined,
       runner,
       listRoutes: async () => trace.mode === "unusable"
         ? [{ ...route("claude", "anthropic"), state: { agent: "claude", profile: "selftest", kind: "unusable", reasons: ["signed-out"] } }]

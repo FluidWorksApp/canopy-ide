@@ -1,0 +1,3 @@
+.copy-link{display:inline-flex;flex-direction:column;align-items:flex-start;gap:2px;min-width:0}
+.copy-link .ui-button svg,.copy-link button svg{margin-right:4px}
+.copy-link-error{color:var(--danger);font-size:var(--fs-xs);max-width:28ch}

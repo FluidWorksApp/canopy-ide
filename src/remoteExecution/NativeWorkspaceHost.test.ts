@@ -4,6 +4,20 @@ import { NativeWorkspaceHost } from './NativeWorkspaceHost';
 import { renderHook } from '@testing-library/react';
 import { connectionKey, useConnectionState } from './connectionState';
 afterEach(() => vi.unstubAllGlobals());
+it('runs brain calls and the ledger on the viewing computer, streaming the brain\'s output back',async()=>{
+ const {host,desktop,fetcher}=setup();
+ const native={onmessage:(_:unknown)=>{}};
+ vi.mocked(desktop.channel).mockReturnValue(native as never);
+ vi.mocked(desktop.invoke).mockResolvedValue(undefined);
+ const seen:unknown[]=[];
+ const onData=host.channel<unknown>();onData.onmessage=m=>seen.push(m);
+ await host.invoke('brain_call',{callId:'c1',command:'brain',args:['-p'],cwd:'',onData});
+ expect(desktop.invoke).toHaveBeenCalledWith('brain_call',{callId:'c1',command:'brain',args:['-p'],cwd:'',onData:native});
+ native.onmessage({kind:'line',text:'{"type":"result"}'});
+ expect(seen).toEqual([{kind:'line',text:'{"type":"result"}'}]);
+ for(const command of ['brain_kill','ledger_append','ledger_query','ledger_root','ledger_update_status'])await host.invoke(command,{});
+ expect(fetcher).not.toHaveBeenCalled();host.dispose();
+});
 it('runs the companion CLI on the viewing computer and streams its output back through a native channel',async()=>{
  const {host,desktop,fetcher}=setup();
  const native={onmessage:(_:unknown)=>{}};
@@ -80,9 +94,11 @@ it('keeps the scratchpad on the viewing computer, but attaches workspace files t
  expect(desktop.invoke).toHaveBeenCalledWith('notes_create',note);
  expect(desktop.invoke).toHaveBeenCalledWith('notes_list',{projectId:'p_1',status:null,limit:50});
  expect(fetcher).not.toHaveBeenCalled();
+ fetcher.mockImplementation(async()=>({ok:true,json:async()=>({result:{b64:btoa('hi'),size:2}})}));
  await host.invoke('notes_attach_file',{projectId:'p_1',id:'n1',path:'/workspace/a.txt'});
  expect(desktop.invoke).not.toHaveBeenCalledWith('notes_attach_file',expect.anything());
  expect(fetcher.mock.calls.at(-1)![0]).toContain('/workspaces/alice/native');
+ expect(desktop.invoke).toHaveBeenCalledWith('notes_add_attachment',{projectId:'p_1',id:'n1',kind:'artifact',title:'a',data:'hi',ext:'txt'});
  host.dispose();
 });
 const connection = {endpoint:'http://127.0.0.1:8787',token:'synthetic-token',workspaceId:'alice',workspaceName:'Alice'};
@@ -634,4 +650,104 @@ it('hands Claude IDE events from a terminal stream to the window, keyed by that 
  const native=fetcher.mock.calls.filter(([url])=>String(url).endsWith('/native')).map(([,options])=>JSON.parse(String(options.body)));
  expect(native.at(-1)).toEqual({command:'claude_ide_selection',args:{path:'/workspace/a.py',params:{text:''}}});
  host.dispose();
+});
+it('tells an older workspace host apart from a missing feature, and says so once',async()=>{
+ const {host,fetcher}=setup();
+ fetcher.mockImplementation(async(_url:string,options:RequestInit)=>{const {command}=JSON.parse(String(options.body||'{}'));return {ok:false,status:400,json:async()=>({error:`The Linux workspace does not support ${command} yet`})};});
+ const seen:string[]=[];const heard=(event:Event)=>seen.push((event as CustomEvent<{message:string}>).detail.message);
+ window.addEventListener('canopy:workspace-host-outdated',heard);
+ await expect(host.invoke('git_status',{repo:'/workspace'})).rejects.toThrow('This workspace is running an older Canopy host. Restart or update the workspace to use this Git action.');
+ await expect(host.invoke('host_capabilities')).rejects.toThrow(/older Canopy host/);
+ // A command no current host serves keeps the host's own answer.
+ await expect(host.invoke('frobnicate')).rejects.toThrow('The Linux workspace does not support frobnicate yet');
+ expect(seen).toEqual(['This workspace is running an older Canopy host. Restart or update the workspace to use this Git action.']);
+ window.removeEventListener('canopy:workspace-host-outdated',heard);host.dispose();
+});
+it('refuses features a cloud workspace does not offer without a round trip',async()=>{
+ const {host,desktop,fetcher}=setup();
+ await expect(host.invoke('fs_reveal',{path:'/workspace/a.ts'})).rejects.toThrow("Reveal in file manager isn't available in a cloud workspace.");
+ expect(fetcher).not.toHaveBeenCalled();expect(desktop.invoke).not.toHaveBeenCalled();host.dispose();
+});
+it('checks the host protocol once after boot and reports a stale host',async()=>{
+ vi.useFakeTimers();
+ try{
+  const desktop={kind:'native',invoke:vi.fn().mockResolvedValue({generation:1}),listen:vi.fn(),channel:vi.fn()} as unknown as Host;
+  const host=new NativeWorkspaceHost(connection,desktop);
+  const fetcher=vi.fn().mockImplementation(async(url:string,options:RequestInit)=>{const {command}=JSON.parse(String(options.body||'{}'));
+   if(command==='host_capabilities')return {ok:true,json:async()=>({result:{protocol:1,commands:[]}})};
+   return {ok:true,json:async()=>url.endsWith('/sessions')?[]:{result:command==='pty_metadata_get'?{}:'remote-alice'}};});
+  vi.stubGlobal('fetch',fetcher);
+  const seen:unknown[]=[];const heard=(event:Event)=>seen.push((event as CustomEvent).detail);
+  window.addEventListener('canopy:workspace-host-outdated',heard);
+  await host.invoke('pty_renderer_register');
+  expect(fetcher.mock.calls.some(([,o])=>String(o.body).includes('host_capabilities'))).toBe(false);
+  await vi.advanceTimersByTimeAsync(10_000);
+  expect(seen).toEqual([{command:null,message:'This workspace is running an older Canopy host. Restart or update the workspace to use everything in this version of Canopy.'}]);
+  window.removeEventListener('canopy:workspace-host-outdated',heard);host.dispose();
+ }finally{vi.useRealTimers();}
+});
+it('streams a workspace command\'s channel output back from the host',async()=>{
+ const {host,fetcher}=setup();
+ let polls=0;
+ fetcher.mockImplementation(async(_url:string,options:RequestInit)=>{const body=JSON.parse(String(options.body||'{}'));
+  if(body.command==='lsp_start')return {ok:true,json:async()=>({result:3})};
+  if(body.command==='channel_poll'){polls++;const id=body.args.ids[0];return {ok:true,json:async()=>({result:{[id]:polls===1?{messages:['{"id":1}'],closed:false}:{messages:['{"id":2}'],closed:true}}})};}
+  return {ok:true,json:async()=>({result:null})};});
+ const seen:unknown[]=[];const channel=host.channel<string>();channel.onmessage=m=>seen.push(m);
+ const exits:unknown[]=[];await host.listen('lsp:exit',event=>exits.push(event.payload));
+ expect(await host.invoke('lsp_start',{command:'tsserver',args:[],root:'/workspace',onMessage:channel})).toBe(3);
+ const sent=fetcher.mock.calls.map(([,o])=>JSON.parse(String(o.body))).find(b=>b.command==='lsp_start');
+ expect(sent.args.onMessage.__canopyChannel).toMatch(/^[0-9a-f-]{36}$/);
+ await vi.waitFor(()=>expect(seen).toEqual(['{"id":1}','{"id":2}']));
+ expect(polls).toBe(2);await vi.waitFor(()=>expect(exits).toEqual([3]));host.dispose();
+});
+it('turns the host\'s cleanup scan progress into cleanup:progress events',async()=>{
+ const {host,fetcher}=setup();
+ let polls=0;
+ fetcher.mockImplementation(async(_url:string,options:RequestInit)=>{const body=JSON.parse(String(options.body||'{}'));
+  if(body.command==='cleanup_scan')return {ok:true,json:async()=>({result:{workspaces:[],targets:[]}})};
+  if(body.command==='channel_poll'){polls++;const id=body.args.ids[0];return {ok:true,json:async()=>({result:{[id]:{messages:[{workspace:'/workspace/a',done:1,total:1}],closed:true}}})};}
+  return {ok:true,json:async()=>({result:null})};});
+ const seen:unknown[]=[];await host.listen('cleanup:progress',event=>seen.push(event.payload));
+ expect(await host.invoke('cleanup_scan',{roots:['/workspace/a'],busy:[],asleep:[]})).toEqual({workspaces:[],targets:[]});
+ const sent=fetcher.mock.calls.map(([,o])=>JSON.parse(String(o.body))).find(b=>b.command==='cleanup_scan');
+ expect(sent.args.onProgress.__canopyChannel).toMatch(/^[0-9a-f-]{36}$/);
+ await vi.waitFor(()=>expect(seen).toEqual([{workspace:'/workspace/a',done:1,total:1}]));
+ expect(polls).toBe(1);host.dispose();
+});
+it('attaches a workspace file to a note kept on this computer',async()=>{
+ const {host,desktop,fetcher}=setup();
+ const reads:Array<{offset:number}>=[];
+ fetcher.mockImplementation(async(_url:string,options:RequestInit)=>{const body=JSON.parse(String(options.body||'{}'));
+  if(body.command==='fs_read_range'){reads.push(body.args);return {ok:true,json:async()=>({result:{b64:body.args.offset===0?btoa('PNG'):'',size:3}})};}
+  return {ok:true,json:async()=>({result:null})};});
+ vi.mocked(desktop.invoke).mockResolvedValue({file:'attachments/01-shot.png'});
+ await host.invoke('notes_attach_file',{projectId:'p',id:'n1',path:'/workspace/.canopy/spot/shot.png'});
+ expect(reads).toEqual([{path:'/workspace/.canopy/spot/shot.png',offset:0,length:1048576}]);
+ expect(desktop.invoke).toHaveBeenCalledWith('notes_add_attachment',{projectId:'p',id:'n1',kind:'image',title:'shot',data:btoa('PNG'),ext:'png'});
+ host.dispose();
+});
+it('keeps relay, vault and device tools on this computer and says the workspace has no native browser',async()=>{
+ const {host,desktop,fetcher}=setup();vi.mocked(desktop.invoke).mockResolvedValue({role:'off'});
+ for(const command of ['relay_status','vault_list','android_devices','tunnel_status','linear_issues'])await host.invoke(command,{});
+ expect(vi.mocked(desktop.invoke).mock.calls.map(([c])=>c)).toEqual(['relay_status','vault_list','android_devices','tunnel_status','linear_issues']);
+ expect(await host.invoke('browser_supported')).toBe(false);
+ expect(fetcher).not.toHaveBeenCalled();host.dispose();
+});
+it('lets a viewer read research and claims but refuses its writes before the gateway',async()=>{
+ const desktop={kind:'native',invoke:vi.fn(),listen:vi.fn(),channel:vi.fn()} as unknown as Host;
+ const viewer=new NativeWorkspaceHost({...connection,scope:'view'},desktop),fetcher=vi.fn().mockResolvedValue({ok:true,json:async()=>({items:[{id:'r1'}]})});vi.stubGlobal('fetch',fetcher);
+ expect(await viewer.invoke('research_list',{projectId:'p'})).toEqual([{id:'r1'}]);
+ expect(String(fetcher.mock.calls[0][0])).toContain('/harness/query');
+ fetcher.mockClear();
+ for(const command of ['research_set_status','context_release_claim','context_mesh_sever'])await expect(viewer.invoke(command,{})).rejects.toThrow('read-only');
+ expect(fetcher).not.toHaveBeenCalled();viewer.dispose();
+});
+it('reports an older workspace service as an older host, once',async()=>{
+ const {host,fetcher}=setup();
+ fetcher.mockImplementation(async(url:string)=>String(url).endsWith('/harness/actions')?{ok:false,status:400,json:async()=>({error:'Invalid harness action'})}:{ok:false,status:400,json:async()=>({error:'no query read_file on store research'})});
+ const seen:unknown[]=[];const heard=(event:Event)=>seen.push((event as CustomEvent).detail.command);window.addEventListener('canopy:workspace-host-outdated',heard);
+ await expect(host.invoke('context_release_claim',{ownerKey:'k'})).rejects.toThrow(/older Canopy host/);
+ await expect(host.invoke('research_read_file',{projectId:'p',id:'r',path:'a'})).rejects.toThrow('This workspace is running an older Canopy host. Restart or update the workspace to use research.');
+ expect(seen).toEqual(['context_release_claim']);window.removeEventListener('canopy:workspace-host-outdated',heard);host.dispose();
 });

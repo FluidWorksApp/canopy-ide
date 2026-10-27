@@ -111,8 +111,22 @@ export function agentActivity(agent){
   :event==='UserPromptSubmit'||event==='SessionStart'?'working':'';
  return {title,description:agent.prompt?`Last asked: ${agent.prompt}`:''};
 }
-/** Latest agent state per terminal from hook events (agent-events.jsonl lines). */
-export function foldEvents(agents,lines){
+const EDIT_TOOLS=new Set(['Write','Edit','MultiEdit','NotebookEdit','apply_patch','write_file','edit_file','replace']);
+const MAX_EDITED=20;
+/** Files one edit-tool call wrote, absolute: a file path field, or the
+ *  targets of an apply_patch body (Codex). */
+export function editedPaths(event){
+ if(event?.hook_event_name!=='PostToolUse'||!EDIT_TOOLS.has(event.tool_name))return [];
+ const input=event.tool_input??{},cwd=typeof event.cwd==='string'?event.cwd:'';
+ const named=[input.file_path,input.notebook_path,input.path].filter(p=>typeof p==='string'&&p.trim());
+ const patch=Array.isArray(input.command)?input.command.join('\n'):typeof input.command==='string'?input.command:typeof input.patch==='string'?input.patch:'';
+ for(const m of patch.matchAll(/^\*\*\* (?:Add|Update|Delete) File: (.+)$/gm))named.push(m[1].trim());
+ return [...new Set(named.map(p=>p.startsWith('/')?p:cwd?`${cwd.replace(/\/+$/,'')}/${p.replace(/^\.\//,'')}`:null).filter(Boolean))];
+}
+/** Latest agent state per terminal from hook events (agent-events.jsonl lines).
+ *  `edited` keeps the files the agent wrote, newest first, with when they were
+ *  folded in (ms): what the workspace roster tells awareness. */
+export function foldEvents(agents,lines,now=Date.now()){
  for(const line of lines){
   let event;try{event=JSON.parse(line);}catch{continue;}
   const pty=Number(event?.canopy_pty);
@@ -132,7 +146,10 @@ export function foldEvents(agents,lines){
    prompt:humanPrompt(event.prompt)??(changed?undefined:previous?.prompt),
    // A container stop can end the CLI with reason "other"; only a session the
    // user closed (exit, /clear, logout) is finished.
-   ended:event.hook_event_name==='SessionEnd'&&event.reason!=='other'};
+   ended:event.hook_event_name==='SessionEnd'&&event.reason!=='other',
+   edited:changed?[]:previous?.edited??[]};
+  const wrote=editedPaths(event);
+  if(wrote.length)agents[pty].edited=[...wrote.map(path=>({path,ts:now})),...agents[pty].edited.filter(e=>!wrote.includes(e.path))].slice(0,MAX_EDITED);
  }
  const keys=Object.keys(agents).map(Number).sort((a,b)=>a-b);
  for(const key of keys.slice(0,Math.max(0,keys.length-MAX_AGENTS)))delete agents[key];
@@ -334,13 +351,44 @@ export class SessionResume{
   for(const id of Object.keys(state.live)){
    const requestId=metadata[id]?.requestId;
    if(typeof requestId!=='string'||!/^[a-zA-Z0-9:-]{8,128}$/.test(requestId))continue;
-   const next={...terminalDescription(state.agents[id],metadata[id]),activity:agentActivity(state.agents[id])},key=JSON.stringify([requestId,next]);
+   const next={...terminalDescription(state.agents[id],metadata[id]),activity:agentActivity(state.agents[id]),...await this.workInfo(runtime,state.agents[id])},key=JSON.stringify([requestId,next]);
    if(sent[id]===key)continue;
-   try{await this.harness.admin.describeTerminal(workspace.id,requestId,next);sent[id]=key;}
+   try{await this.describeOne(workspace.id,requestId,next);sent[id]=key;}
    catch(error){if(error.status===404||error.status===409)sent[id]=key;else throw error;}
   }
   for(const id of Object.keys(sent))if(!state.live[id])delete sent[id];
   state.described=sent;
+ }
+ /** An older service refuses fields it doesn't know (deny_unknown_fields):
+  *  describe without the work fields rather than not at all. */
+ async describeOne(workspaceId,requestId,next){
+  const {files,repo,root,...base}=next;
+  if(!this.workFieldsRefused&&(files!==undefined||repo!==undefined||root!==undefined)){
+   try{return await this.harness.admin.describeTerminal(workspaceId,requestId,next);}
+   catch(error){if(error.status!==400||!/unknown field/.test(String(error.message)))throw error;this.workFieldsRefused=true;}
+  }
+  return this.harness.admin.describeTerminal(workspaceId,requestId,base);
+ }
+ /** Which repository an agent works in and what it edited there, relative to
+  *  its checkout: awareness on other machines matches agents by origin remote. */
+ async workInfo(runtime,agent){
+  if(!agent?.cwd||agent.ended)return {};
+  this.repos??=new Map();
+  let info=this.repos.get(agent.cwd);
+  if(!info||this.now()-info.at>5*60_000){
+   try{
+    const [found]=await this.native(runtime,'git_repos',{components:[agent.cwd]})??[];
+    const root=typeof found?.path==='string'?found.path:null;
+    const repo=root?await this.native(runtime,'git_remote_url',{repo:root}).catch(()=>null):null;
+    info={at:this.now(),root,repo:typeof repo==='string'&&repo?repo.slice(0,300):null};
+   }catch{info={at:this.now(),root:null,repo:null};}
+   this.repos.set(agent.cwd,info);
+   if(this.repos.size>200)this.repos.delete(this.repos.keys().next().value);
+  }
+  if(!info.root)return {};
+  const prefix=info.root.replace(/\/+$/,'')+'/';
+  const files=(agent.edited??[]).filter(e=>e.path.startsWith(prefix)).map(e=>({path:e.path.slice(prefix.length).slice(0,300),ts:e.ts}));
+  return {repo:info.repo,root:info.root.slice(0,300),files};
  }
  async checkAll(){
   if(this.checking)return this.checking;

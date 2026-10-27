@@ -299,6 +299,136 @@ impl CoreHarness {
     }
 }
 
+/// An import's pieces are joined here, beside (never inside) the research
+/// store, before the store adopts the file.
+const IMPORT_UPLOADS: &str = "research-imports";
+/// No import grows past the store's own source limit (research.rs SOURCE_MAX),
+/// plus room for the last piece.
+const IMPORT_MAX_BYTES: u64 = 512 * 1024 + 256 * 1024;
+/// A piece never finished is dropped after this long.
+const IMPORT_STALE_SECS: u64 = 60 * 60;
+
+impl CoreHarness {
+    fn replace_write_up(&self, ctx: &HarnessContext, body: &serde_json::Value) -> HarnessReply {
+        let text = |key: &str| body.get(key).and_then(|v| v.as_str()).map(str::to_string);
+        let list = |key: &str| {
+            body.get(key)
+                .and_then(|v| serde_json::from_value::<Vec<String>>(v.clone()).ok())
+        };
+        let Some(id) = text("id").filter(|id| !id.is_empty()) else {
+            return HarnessReply {
+                status: 400,
+                body: "replace needs the entry's id".into(),
+            };
+        };
+        let (_, research) = self.stores(ctx);
+        reply_of(
+            research
+                .update(
+                    ctx.project_id.clone(),
+                    id,
+                    text("title"),
+                    text("digest"),
+                    text("recommendation"),
+                    list("open_questions"),
+                    list("tags"),
+                    None,
+                    Some(text("text").unwrap_or_default()),
+                )
+                .and_then(|s| serde_json::to_value(s).map_err(|e| e.to_string())),
+        )
+    }
+
+    /// One piece of a large import: appended to its upload, and on the last
+    /// piece the whole text is imported as `import_text` would.
+    fn import_chunk(&self, ctx: &HarnessContext, mut body: serde_json::Value) -> HarnessReply {
+        let bad = |message: &str| HarnessReply {
+            status: 400,
+            body: message.to_string(),
+        };
+        let upload = body
+            .get("upload")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .to_string();
+        if upload.len() < 8
+            || upload.len() > 64
+            || !upload
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'-')
+        {
+            return bad("import_chunk needs an upload id");
+        }
+        let Some(offset) = body.get("offset").and_then(|v| v.as_u64()) else {
+            return bad("import_chunk needs the piece's offset");
+        };
+        let text = body
+            .get("text")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .to_string();
+        let done = body.get("done").and_then(|v| v.as_bool()).unwrap_or(false);
+        let dir = ctx.research_dir.with_file_name(IMPORT_UPLOADS);
+        if let Err(error) = std::fs::create_dir_all(&dir) {
+            return HarnessReply {
+                status: 500,
+                body: error.to_string(),
+            };
+        }
+        sweep_stale_uploads(&dir);
+        let part = dir.join(format!("{upload}.part"));
+        let had = std::fs::read_to_string(&part).unwrap_or_default();
+        // Offsets count characters, as the IDE slices the text.
+        if had.chars().count() as u64 != offset {
+            let _ = std::fs::remove_file(&part);
+            return bad("import_chunk pieces arrived out of order; import the file again");
+        }
+        if (had.len() + text.len()) as u64 > IMPORT_MAX_BYTES {
+            let _ = std::fs::remove_file(&part);
+            return bad("that file is larger than research imports take (512 KB)");
+        }
+        let joined = had + &text;
+        if !done {
+            return match std::fs::write(&part, &joined) {
+                Ok(()) => HarnessReply {
+                    status: 200,
+                    body: serde_json::json!({ "received": joined.chars().count() }).to_string(),
+                },
+                Err(error) => HarnessReply {
+                    status: 500,
+                    body: error.to_string(),
+                },
+            };
+        }
+        let _ = std::fs::remove_file(&part);
+        if let Some(object) = body.as_object_mut() {
+            object.insert("action".into(), "import_text".into());
+            object.insert("text".into(), joined.into());
+            for key in ["upload", "offset", "done"] {
+                object.remove(key);
+            }
+        }
+        self.run(ctx, HarnessStore::Research, body, None)
+    }
+}
+
+fn sweep_stale_uploads(dir: &std::path::Path) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let old = entry
+            .metadata()
+            .and_then(|m| m.modified())
+            .ok()
+            .and_then(|t| t.elapsed().ok())
+            .is_some_and(|age| age.as_secs() > IMPORT_STALE_SECS);
+        if old {
+            let _ = std::fs::remove_file(entry.path());
+        }
+    }
+}
+
 impl Harness for CoreHarness {
     fn agent_op(
         &self,
@@ -328,6 +458,34 @@ impl Harness for CoreHarness {
                     body: serde_json::json!({ "error": error }).to_string(),
                 },
             },
+            // The panel's own readers, which the agent's op never had.
+            "read_file" | "for_file" | "sweep_plan" if store == HarnessStore::Research => {
+                let (_, research) = self.stores(ctx);
+                let text = |key: &str| {
+                    args.get(key)
+                        .and_then(|v| v.as_str())
+                        .unwrap_or_default()
+                        .to_string()
+                };
+                let strings = |key: &str| {
+                    args.get(key)
+                        .and_then(|v| serde_json::from_value::<Vec<String>>(v.clone()).ok())
+                        .unwrap_or_default()
+                };
+                let project = ctx.project_id.clone();
+                reply_of(match action {
+                    "read_file" => research
+                        .read_file(project, text("id"), text("path"))
+                        .map(|text| serde_json::json!({ "text": text })),
+                    "for_file" => research
+                        .for_file(project, text("path"))
+                        .map(|id| serde_json::json!({ "id": id })),
+                    // Roots are the workspace's, never the caller's.
+                    _ => research
+                        .sweep_plan(project, vec![ctx.project_root.clone()], strings("paths"))
+                        .and_then(|plan| serde_json::to_value(plan).map_err(|e| e.to_string())),
+                })
+            }
             "get" | "search" => {
                 let mut body = args;
                 if !body.is_object() {
@@ -355,6 +513,32 @@ impl Harness for CoreHarness {
             object.remove("kind");
             object.remove("actor");
             object.entry("by").or_insert_with(|| actor.into());
+        }
+        if store == HarnessStore::Research {
+            match body.get("action").and_then(|a| a.as_str()) {
+                // Replacing the whole write-up is a person's edit in the
+                // panel; the agent op only ever appends.
+                Some("replace") => return self.replace_write_up(ctx, &body),
+                // An import too large for one harness action, in pieces.
+                Some("import_chunk") => return self.import_chunk(ctx, body),
+                _ => {}
+            }
+        }
+        // Deleting is the user's alone: it is not an op, so no agent reaches it.
+        if store == HarnessStore::Research
+            && body.get("action").and_then(|a| a.as_str()) == Some("delete")
+        {
+            let id = body
+                .get("id")
+                .and_then(|i| i.as_str())
+                .unwrap_or_default()
+                .to_string();
+            let (_, research) = self.stores(ctx);
+            return reply_of(
+                research
+                    .delete(ctx.project_id.clone(), id)
+                    .map(|()| serde_json::json!({ "ok": true })),
+            );
         }
         self.run(ctx, store, body, None)
     }

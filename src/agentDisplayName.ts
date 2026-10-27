@@ -86,6 +86,7 @@ export function tabNamesByPty(
     out.set(t.ptyId, {
       userName: t.userName,
       agentName: t.agentName,
+      brainName: t.brainName,
       promptName: t.promptName,
       nativeName: t.nativeName,
       oscTitle: t.oscTitle,

@@ -5,7 +5,20 @@ import {sharedSessionClient} from '../remoteExecution/sharedSessionClient';
 import type {RemoteExecutionClient} from '../remoteExecution/client';
 import {Button} from './ui';
 import './sharedSessions.css';
-type Publication={id:string;projectId:string;title:string;mode:'view'|'interact';expiresAt:number;collaborative?:boolean};
+import {CopyLinkButton} from './CopyLinkButton';
+import {SHARED_SESSION_FOCUS_EVENT,takePendingSession} from '../readableLinks';
+import {openSessionDoc} from '../sessionDoc/events';
+import {liveTeamSessions} from '../teamMessaging/session';
+/** `room`: the terminal belongs to a live agent session its owner opened to
+ * teammates (src/liveSession), which a viewer can join. */
+type Publication={id:string;projectId:string;title:string;mode:'view'|'interact';expiresAt:number;collaborative?:boolean;room?:{id:string;owner:string;team:string}};
+/** Join the live session a shared terminal belongs to, when this account is
+ * in the owner's team and is not the owner. */
+function joinLive(workspaceId:string,p:Publication){
+ const room=p.room,team=room&&liveTeamSessions().find(s=>s.team===room.team);
+ if(!room||!team||team.user===room.owner)return undefined;
+ return()=>openSessionDoc({kind:'join',team:room.team,owner:room.owner,ownerName:team.members()[room.owner],room:room.id,title:p.title,agent:'agent',terminal:{workspace:workspaceId,publication:p.id}});
+}
 type Session={id:number;title:string;exitCode:number|null};
 export function SharedSessionsPanel({workspaceId,owner,projects}:{workspaceId:string;owner:boolean;projects?:{id:string;name:string}[]}){
  const [rows,setRows]=useState<Publication[]>([]),[local,setLocal]=useState<Session[]>([]),[selected,setSelected]=useState<Publication|null>(null),[open,setOpen]=useState(false),[loading,setLoading]=useState(false),[busy,setBusy]=useState(false),[error,setError]=useState('');
@@ -13,9 +26,15 @@ export function SharedSessionsPanel({workspaceId,owner,projects}:{workspaceId:st
  const [viewClient,setViewClient]=useState<RemoteExecutionClient|null>(null);
  const host=activeWorkspace(),client=host?.connection.workspaceId===workspaceId?host.client:viewClient;
  useEffect(()=>{const reset=()=>{epoch.current++;setViewClient(null);setRows([]);setLocal([]);setCatalog([]);setSelected(null);setOpen(false);setProject('');setSession('');setTitle('');setAck(false);setError('');setBusy(false);setLoading(false);};reset();window.addEventListener('canopy:account-changed',reset);return()=>{epoch.current++;window.removeEventListener('canopy:account-changed',reset);};},[workspaceId]);
+ // A shared session link opens this panel on its session (readableLinks.ts).
+ const wanted=useRef<string|null>(null);
+ useEffect(()=>{const focus=()=>{const id=takePendingSession(workspaceId);if(id){wanted.current=id;setOpen(true);}};focus();window.addEventListener(SHARED_SESSION_FOCUS_EVENT,focus);return()=>window.removeEventListener(SHARED_SESSION_FOCUS_EVENT,focus);},[workspaceId]);
  async function connectViewing(){const current=epoch.current;setBusy(true);setError('');try{const next=await sharedSessionClient(workspaceId,()=>current===epoch.current);if(current===epoch.current)setViewClient(next);}catch(e){if(current===epoch.current)setError(String(e));}finally{if(current===epoch.current)setBusy(false);}}
+ // Signed in is enough: opening the panel connects for viewing by itself
+ // (viewing never starts the workspace). The button remains for a retry.
+ useEffect(()=>{if(open&&!client&&!busy&&!error)void connectViewing();},[open,client]);
  const projectChoices=projects??catalog;
- async function refresh(){if(!client)return;const current=epoch.current;setLoading(true);try{const result=await client.workspace<{sessions:Publication[]}>(workspaceId,'/shared-sessions');if(current!==epoch.current)return;setRows(result.sessions);setSelected(old=>old?result.sessions.find(p=>p.id===old.id)??null:null);if(!projects){const data=await client.workspace<{projects:{id:string;name:string}[]}>(workspaceId,'/projects');if(current===epoch.current)setCatalog(data.projects);}if(owner&&client===host?.client){const sessions=await client.workspace<Session[]>(workspaceId,'/sessions');if(current===epoch.current)setLocal(sessions.filter(s=>s.exitCode==null));}if(current===epoch.current)setError('');}catch{if(current===epoch.current){setSelected(null);setRows([]);setError('Shared sessions are unavailable or your access has changed.');}}finally{if(current===epoch.current)setLoading(false);}}
+ async function refresh(){if(!client)return;const current=epoch.current;setLoading(true);try{const result=await client.workspace<{sessions:Publication[]}>(workspaceId,'/shared-sessions');if(current!==epoch.current)return;setRows(result.sessions);const want=wanted.current?result.sessions.find(p=>p.id===wanted.current):undefined;const missing=!!wanted.current&&!want;wanted.current=null;setSelected(old=>want??(old?result.sessions.find(p=>p.id===old.id)??null:null));if(!projects){const data=await client.workspace<{projects:{id:string;name:string}[]}>(workspaceId,'/projects');if(current===epoch.current)setCatalog(data.projects);}if(owner&&client===host?.client){const sessions=await client.workspace<Session[]>(workspaceId,'/sessions');if(current===epoch.current)setLocal(sessions.filter(s=>s.exitCode==null));}if(current===epoch.current)setError(missing?"That shared session has ended, or it isn't shared with you.":'');}catch{if(current===epoch.current){setSelected(null);setRows([]);setError('Shared sessions are unavailable or your access has changed.');}}finally{if(current===epoch.current)setLoading(false);}}
  useEffect(()=>{if(!open||!client)return;void refresh();const timer=setInterval(()=>void refresh(),5000);return()=>clearInterval(timer);},[open,client,workspaceId,owner]);
  async function action(body:unknown){if(!client)return;const current=epoch.current;setBusy(true);setError('');try{const result=await client.workspace<{sessions:Publication[]}>(workspaceId,'/shared-sessions',body);if(current===epoch.current){setRows(result.sessions);setSelected(old=>old?result.sessions.find(p=>p.id===old.id)??null:null);setAck(false);}}catch(e){if(current===epoch.current)setError(String(e));}finally{if(current===epoch.current)setBusy(false);}}
  return <details className="shared-sessions-panel" open={open} onToggle={e=>setOpen(e.currentTarget.open)}><summary>Shared sessions</summary><div className="shared-sessions-content">
@@ -23,7 +42,7 @@ export function SharedSessionsPanel({workspaceId,owner,projects}:{workspaceId:st
    <header><p>Let teammates watch or join a terminal in this workspace.</p><Button size="sm" variant="ghost" disabled={loading||busy} title="Refresh shared sessions" aria-label="Refresh sessions" onClick={()=>void refresh()}>↻</Button></header>
    {loading&&!rows.length&&<p role="status">Loading shared sessions…</p>}{error&&<p role="alert">{error}</p>}
    {!loading&&!rows.length&&!error&&<p className="shared-session-empty">Nothing shared yet. Your terminals stay private until you share one.</p>}
-   {rows.map(p=><div className="shared-session-row" key={p.id}><Button size="sm" onClick={()=>setSelected(p)}>{p.title}</Button><span>{p.mode==='interact'?'Can interact':'View only'} · {projectChoices.find(item=>item.id===p.projectId)?.name??p.projectId}</span>{owner&&<Button size="sm" variant="danger" disabled={busy} onClick={()=>void action({action:'revoke',id:p.id})}>{p.collaborative?'Stop sharing and shell':'Stop sharing'}</Button>}</div>)}
+   {rows.map(p=><div className="shared-session-row" key={p.id}><Button size="sm" onClick={()=>setSelected(p)}>{p.title}</Button><span>{p.mode==='interact'?'Can interact':'View only'} · {projectChoices.find(item=>item.id===p.projectId)?.name??p.projectId}</span><CopyLinkButton target={{kind:'session',workspaceId,projectId:p.projectId,publicationId:p.id,title:p.title}}/>{(()=>{const join=joinLive(workspaceId,p);return join?<Button size="sm" variant="accent" title="Watch this agent session live with its owner and ask them to pass messages to the agent" onClick={join}>Join</Button>:null;})()}{owner&&<Button size="sm" variant="danger" disabled={busy} onClick={()=>void action({action:'revoke',id:p.id})}>{p.collaborative?'Stop sharing and shell':'Stop sharing'}</Button>}</div>)}
    {selected&&<section className="shared-session-preview"><header><strong>{selected.title} · {selected.mode==='interact'?'Collaborative shell':'View only'}</strong><Button size="sm" onClick={()=>setSelected(null)}>Close terminal</Button></header><RemoteTerminal key={selected.id} client={client} workspaceId={workspaceId} sessionId={0} sharedSessionId={selected.id} writable={selected.mode==='interact'}/></section>}
    {owner&&<form onSubmit={e=>e.preventDefault()} className="shared-session-form">
     <div className="shared-session-line"><span className="shared-session-label">Share with</span><select aria-label="Project" value={project} onChange={e=>setProject(e.target.value)}><option value="">Choose a project</option>{projectChoices.map(p=><option key={p.id} value={p.id}>{p.name}</option>)}</select><small>Members with access to this project can see it.</small></div>

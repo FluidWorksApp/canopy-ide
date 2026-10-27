@@ -5,6 +5,7 @@
 import { invoke, invokeDesktop } from "./host";
 import type { CustomMicroTask } from "./microTasks";
 import { getSettings, updateSettings } from "./settings";
+import { defaultLens, withProjectLens } from "./projectLens";
 import { checkoutKey } from "./paths";
 import { currentPlatform, type Platform } from "./shortcuts";
 import { SESSION_ID_TOKEN, type RemoteCli } from "../shared/model";
@@ -423,13 +424,7 @@ export function normalizeProjectStructure(project: Project): Project {
  * changes never override an individual project's selection. */
 export function adoptDefaultProjectLens(project: Project): Project {
   if (project.vibe) return project;
-  return {
-    ...project,
-    vibe: {
-      version: 1,
-      enabled: getSettings().defaultProjectLens === "build",
-    },
-  };
+  return withProjectLens(project, defaultLens());
 }
 
 /** State-level migration seam, mirroring adoptLegacyCustomTasks: stable

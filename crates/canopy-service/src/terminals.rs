@@ -17,6 +17,8 @@ use std::time::Duration;
 pub const WORKSPACE_ROOT: &str = "/workspace";
 /// Ended terminals kept for the IDE's history.
 const MAX_ENDED: usize = 200;
+/// Recent files a terminal's roster entry carries.
+pub const MAX_WORK_FILES: usize = 20;
 /// A credential never bound to a session is abandoned after this long.
 pub const UNBOUND_TTL_MS: u64 = 10 * 60 * 1000;
 pub const RUNNER_WRITE_TIMEOUT: Duration = Duration::from_secs(5);
@@ -61,6 +63,12 @@ pub struct TerminalRecord {
     /// in the roster until the agent names its own status.
     #[serde(default)]
     pub activity: Option<serde_json::Value>,
+    /// What the host observes the agent working on (its hook events): the
+    /// repository's origin remote, its checkout, and the files it wrote there
+    /// lately (repo-relative, newest first). The roster carries these so
+    /// agent awareness on another machine can match and tell it.
+    #[serde(default)]
+    pub work: Option<serde_json::Value>,
 }
 
 impl TerminalRecord {
@@ -173,6 +181,7 @@ impl TerminalRegistry {
                     job_done: None,
                     close_requested_ms: None,
                     activity: None,
+                    work: None,
                 };
                 file.terminals.push(record.clone());
                 record
@@ -268,6 +277,52 @@ impl TerminalRegistry {
             self.persist(&file).map_err(|e| (500, e))?;
         }
         Ok((out, changed))
+    }
+
+    /// The repository, checkout and recent files the host observed for a
+    /// terminal. Bounded here whatever the host sends. Returns whether it
+    /// changed.
+    pub fn describe_work(
+        &self,
+        request_id: &str,
+        repo: Option<String>,
+        root: Option<String>,
+        files: Vec<(String, u64)>,
+    ) -> Result<bool, (u16, String)> {
+        let mut file = self.inner.lock().unwrap();
+        let record = file
+            .terminals
+            .iter_mut()
+            .find(|t| t.request_id == request_id)
+            .ok_or((404, "no terminal credential for that requestId".to_string()))?;
+        if record.revoked_ms.is_some() {
+            return Err((409, "that terminal credential was revoked".into()));
+        }
+        let text = |v: Option<String>| {
+            v.map(|v| {
+                v.chars()
+                    .filter(|c| !c.is_control())
+                    .take(300)
+                    .collect::<String>()
+            })
+            .filter(|v| !v.trim().is_empty())
+        };
+        let files: Vec<serde_json::Value> = files
+            .into_iter()
+            .filter(|(path, _)| !path.is_empty() && !path.starts_with('/') && !path.contains(".."))
+            .take(MAX_WORK_FILES)
+            .map(|(path, ts)| {
+                serde_json::json!({ "path": path.chars().take(300).collect::<String>(), "ts": ts })
+            })
+            .collect();
+        let next =
+            Some(serde_json::json!({ "repo": text(repo), "root": text(root), "files": files }));
+        if record.work == next {
+            return Ok(false);
+        }
+        record.work = next;
+        self.persist(&file).map_err(|e| (500, e))?;
+        Ok(true)
     }
 
     /// End a credential. Returns the record when this call ended it.

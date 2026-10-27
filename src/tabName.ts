@@ -32,6 +32,10 @@ export interface TabNames {
   userName?: string;
   /** What the agent called its own run, via `canopy_name_task`. */
   agentName?: string;
+  /** The brain's short title for the opening prompt (brainSessionTitle.ts),
+   *  for an agent that never named its own run. Better than the prompt's first
+   *  forty-eight characters, never better than the agent's own word. */
+  brainName?: string;
   /** The opening prompt, standing in until the agent names the work itself. */
   promptName?: string;
   /** The generated session label the native core assigns at spawn. Meaningful
@@ -48,11 +52,12 @@ export interface TabNames {
 
 /** Who is writing. The argument exists so a caller states its authority rather
  *  than picking a field and thereby implying one. */
-export type NameAuthor = "user" | "agent" | "prompt" | "native" | "osc" | "launch";
+export type NameAuthor = "user" | "agent" | "brain" | "prompt" | "native" | "osc" | "launch";
 
 const SLOT: Record<NameAuthor, keyof TabNames> = {
   user: "userName",
   agent: "agentName",
+  brain: "brainName",
   prompt: "promptName",
   native: "nativeName",
   osc: "oscTitle",
@@ -125,13 +130,14 @@ export interface NamedTab extends TabNames {
  *
  *  1. the user — always, unfiltered, from wherever they typed it
  *  2. the agent's own name for its run
- *  3. the opening prompt, until the agent supplies better
- *  4. a configured run command's name — the user named that in project
+ *  3. the brain's title for the opening prompt, when the agent gave none
+ *  4. the opening prompt, until the agent or the brain supplies better
+ *  5. a configured run command's name — the user named that in project
  *     settings, so it outranks whatever the shell paints over it. This is what
  *     stopped a dev server's chip from decaying into `/bin/zsh`.
- *  5. the generated session label, for agents only
- *  6. the OSC title, when it says something the tab does not already say
- *  7. the launch title, then the directory, then a last resort
+ *  6. the generated session label, for agents only
+ *  7. the OSC title, when it says something the tab does not already say
+ *  8. the launch title, then the directory, then a last resort
  */
 export function tabName(
   tab: NamedTab,
@@ -141,6 +147,7 @@ export function tabName(
   return (
     tab.userName ??
     tab.agentName ??
+    tab.brainName ??
     tab.promptName ??
     (tab.run ? tab.launchTitle : undefined) ??
     (agent ? tab.nativeName : undefined) ??
@@ -176,9 +183,17 @@ export function namePatch(
   // names the tab and every message after it is conversation. A micro-task
   // already carries a durable launch label and its brief is a paragraph.
   if (author === "prompt" && (tab.promptName || tab.micro)) return null;
+  // The brain only fills in for an agent that said nothing: a name the user
+  // typed or the agent chose is already better than any summary of the prompt.
+  if (author === "brain" && !brainMayName(tab)) return null;
   if (value === tab[slot]) return null;
   return { [slot]: value };
 }
+
+/** Whether the brain may title this tab: nobody with more authority has named
+ *  it, and it isn't a managed one-shot (whose launch label is durable). */
+export const brainMayName = (tab: NamedTab): boolean =>
+  !tab.userName && !tab.agentName && !tab.micro;
 
 /** True when the user has named this tab. The question every restore path has
  *  to ask, and the reason `renamed` existed — but read off the slot that holds
@@ -211,13 +226,14 @@ export function sessionAddress(
  *  now. Losing any of these three on a rebuild is the bug this exists for — an
  *  empty prompt slot is an open door, and the next message the user sends
  *  walks through it. */
-export type DurableNames = Pick<TabNames, "userName" | "agentName" | "promptName">;
+export type DurableNames = Pick<TabNames, "userName" | "agentName" | "brainName" | "promptName">;
 
 /** A tab's durable names, only the ones it holds. */
 export function durableNames(tab: TabNames): DurableNames {
   return {
     ...(tab.userName ? { userName: tab.userName } : {}),
     ...(tab.agentName ? { agentName: tab.agentName } : {}),
+    ...(tab.brainName ? { brainName: tab.brainName } : {}),
     ...(tab.promptName ? { promptName: tab.promptName } : {}),
   };
 }
@@ -240,10 +256,12 @@ export function adoptDurableNames(
   if (!stored) return null;
   const user = clean(stored.userName);
   const agent = clean(stored.agentName);
+  const brain = clean(stored.brainName);
   const prompt = clean(stored.promptName);
   const patch: Partial<TabNames> = {
     ...(user && !tab.userName ? { userName: user } : {}),
     ...(agent && !tab.agentName ? { agentName: agent } : {}),
+    ...(brain && !tab.brainName && !tab.micro ? { brainName: brain } : {}),
     ...(prompt && !tab.micro && prompt !== tab.promptName ? { promptName: prompt } : {}),
   };
   return Object.keys(patch).length ? patch : null;
@@ -285,10 +303,12 @@ export function adoptSnapshotNames(
 ): TabNames {
   const user = clean(snapshot.userName) ?? (snapshot.renamed ? clean(snapshot.title) : undefined);
   const agent = clean(snapshot.agentName);
+  const brain = clean(snapshot.brainName);
   const prompt = clean(snapshot.promptName);
   return {
     ...(user ? { userName: user } : {}),
     ...(agent ? { agentName: agent } : {}),
+    ...(brain ? { brainName: brain } : {}),
     ...(prompt ? { promptName: prompt } : {}),
     ...(clean(snapshot.title) ? { launchTitle: clean(snapshot.title) } : {}),
   };

@@ -2,7 +2,7 @@ import {ServiceAdminError} from './service-admin.mjs';
 // IDE -> gateway -> canopy-serviced harness routes. The gateway authorizes the
 // user and names the actor; the service owns every store and its policy.
 const NAME=/^[a-z][a-z0-9_-]{0,31}$/;
-export const HARNESS_ACTIONS=new Set(['answer','attention_ack','notes_write','research_write']);
+export const HARNESS_ACTIONS=new Set(['answer','attention_ack','notes_write','research_write','claim_release','mesh_sever','mesh_job_update','hotspot_claim','memory_sync','memory_ack','device_answer']);
 const plainObject=value=>!!value&&typeof value==='object'&&!Array.isArray(value);
 export function harnessQuery(admin,workspaceId,input){
  if(!plainObject(input)||Object.keys(input).some(k=>!['store','action','args'].includes(k))||!NAME.test(input.store??'')||!NAME.test(input.action??'')||input.args!==undefined&&!plainObject(input.args))throw Error('Invalid harness query');

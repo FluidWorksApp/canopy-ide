@@ -94,6 +94,8 @@ const SUPPORTED_TOOLS: &[&str] = &[
     "canopy_editor_state",
     "canopy_hover",
     "canopy_job_done",
+    "canopy_memory",
+    "canopy_memory_propose",
     "canopy_mesh",
     "canopy_mesh_send",
     "canopy_mesh_submit",
@@ -125,6 +127,8 @@ const SUPPORTED_TOOLS: &[&str] = &[
     "canopy_start_session",
     "canopy_stop_server",
     "canopy_symbols",
+    "canopy_team_people",
+    "canopy_team_send",
     "canopy_tickets",
     "canopy_vault_fill",
     "canopy_vault_list",
@@ -580,6 +584,7 @@ pub fn start(app: tauri::AppHandle) {
             .route("/ctx/mesh", post(mesh_op))
             .route("/ctx/research", post(research_op))
             .route("/ctx/notes", post(notes_op))
+            .route("/ctx/memory", post(memory_op))
             .route("/ctx/mcp-task", post(mcp_task_op))
             .route("/ctx/tools", get(tools))
             .with_state(app.clone());
@@ -936,6 +941,56 @@ pub fn context_release_claim(app: tauri::AppHandle, owner_key: String) {
     });
 }
 
+/// A claim Canopy takes on an agent's behalf. The workspace saw the agent touch
+/// a hotspot file (a registry, a route table, a config — see
+/// src/awareness/hotspots.ts) that another live agent touched or claimed
+/// minutes ago, and writes to hotspots are single-threaded by claim. The
+/// agent's own held paths are carried over, because a new claim supersedes the
+/// holder's old ones. `Ok` with the message when taken or already held; `Err`
+/// naming the holder when another agent has it — the refusal is then recorded
+/// on that claim like any other, which is the conflict history hotspot
+/// inference reads back.
+#[tauri::command]
+pub fn context_hotspot_claim(
+    app: tauri::AppHandle,
+    pty_id: u32,
+    paths: Vec<String>,
+    owner: String,
+    note: Option<String>,
+) -> Result<String, String> {
+    if app.state::<crate::pty::PtyManager>().get(pty_id).is_none() {
+        return Err(format!("terminal {pty_id} has exited"));
+    }
+    let paths: Vec<String> = paths
+        .iter()
+        .map(|p| normalize_claim_path(p, None))
+        .filter(|p| p.starts_with('/') && p != "/")
+        .collect();
+    if paths.is_empty() {
+        return Err("a hotspot claim needs absolute paths".into());
+    }
+    let instance = crate::pty::instance_token().to_string();
+    let key = format!("pty:{instance}:{pty_id}");
+    let id = app.state::<ContextBridge>().claims.next_id()?;
+    let holder = ClaimIdentity {
+        key,
+        display: owner,
+        pty_id: Some(pty_id),
+        instance: Some(instance),
+        run_id: None,
+        attempt_id: None,
+        process_started_at: crate::mesh::current_process_started_at(),
+    };
+    let reply = with_claims(&app, |claims| {
+        hotspot_claim(claims, &holder, &paths, note, now_ms(), &id)
+    });
+    match reply {
+        Some(ClaimReply::Ok(msg)) => Ok(msg),
+        Some(ClaimReply::Conflict(msg)) | Some(ClaimReply::Bad(msg)) => Err(msg),
+        None => Err("the claim store isn't available".into()),
+    }
+}
+
 /// Every kept agent-to-agent message, oldest first — the evidence that used to
 /// exist nowhere, and now outlives the app run (see mesh.rs).
 #[tauri::command]
@@ -1008,9 +1063,17 @@ pub fn context_mesh_job_update(
     text: String,
     ref_kind: Option<String>,
 ) -> Result<String, String> {
-    let relay = match ref_kind.as_deref() {
-        None | Some("job") => false,
-        Some("relay") => true,
+    // "awareness" is the workspace telling an agent what another agent just
+    // changed (src/awareness): same store, same two-write delivery as a job
+    // step, so the receiving agent reads it like any mesh message.
+    let kind = match ref_kind.as_deref() {
+        None | Some("job") => "job",
+        Some("relay") => "relay",
+        Some("awareness") => "awareness",
+        // The user handing an agent a Teams chat message ("Send to agent"):
+        // `job_id` is the chat message's id, so every forward of one message
+        // lists together.
+        Some("team-chat") => "team-chat",
         Some(other) => return Err(format!("unknown mesh update kind {other}")),
     };
     if instance != crate::pty::instance_token() {
@@ -1042,18 +1105,25 @@ pub fn context_mesh_job_update(
             Vec::new(),
             None,
             Some(crate::mesh::MeshRef {
-                kind: if relay { "relay" } else { "job" }.into(),
+                kind: kind.into(),
                 id: job_id.to_string(),
             }),
         ))
         .map_err(|_| "the mesh refused this job update".to_string())?;
-    let notice = if relay {
-        format!(
+    let notice = match kind {
+        "relay" => format!(
             "[canopy: cloud workspace reply to {job_id}] {}",
             mesh_notice_for(&record)
-        )
-    } else {
-        format!("[canopy: mesh job {job_id}] {}", mesh_notice_for(&record))
+        ),
+        "team-chat" => format!(
+            "[canopy: from the user, via Teams chat] {}",
+            mesh_notice_for(&record)
+        ),
+        "awareness" => format!(
+            "[canopy workspace: another agent's change touches your work] {}",
+            mesh_notice_for(&record)
+        ),
+        _ => format!("[canopy: mesh job {job_id}] {}", mesh_notice_for(&record)),
     };
     deliver_line(&app, pty_id, target_cwd, record.id.clone(), &notice)?;
     bridge.mesh.note_delivery(&record.id, &notice);
@@ -1602,6 +1672,120 @@ async fn notes_op(
     }
 }
 
+// ---- team memory ---------------------------------------------------------
+//
+// Just-in-time retrieval from the ledger (memory_tool.rs has the rules): an
+// agent asks before deciding, and hears only what a person approved. A
+// proposal lands as "proposed" — the Memory panel is where it becomes memory,
+// and the frontend quarantines it there if this session read untrusted
+// content (memoryExtract.ts), which this side cannot see.
+
+#[derive(serde::Deserialize)]
+struct MemoryReq {
+    op: String,
+    #[serde(default)]
+    cwd: String,
+    #[serde(default)]
+    project: Option<String>,
+    #[serde(flatten)]
+    rest: serde_json::Value,
+}
+
+async fn memory_op(
+    State(app): State<tauri::AppHandle>,
+    headers: HeaderMap,
+    Json(req): Json<MemoryReq>,
+) -> (StatusCode, String) {
+    let Some(who) = caller(&app, &headers) else {
+        return (StatusCode::UNAUTHORIZED, "bad token".into());
+    };
+    // The same scoping as notes: the project named, else the one the caller
+    // runs in. Memory is per repository, so the ledger is keyed by that
+    // project's checkout rather than by whatever directory was passed.
+    // The hook's live cwd (an agent that moved into a worktree is there now),
+    // else where its terminal started.
+    let cwd = if req.cwd.is_empty() {
+        who.cwd().unwrap_or_default().to_string()
+    } else {
+        req.cwd.clone()
+    };
+    let Some((_, _, roots)) = project_for_request(&app, req.project.as_deref(), &cwd) else {
+        return (
+            StatusCode::BAD_REQUEST,
+            format!(
+                "Team memory belongs to a project, and this call named none Canopy has open{}. \
+                 Pass `project` with the project's name, or run from inside one of its directories.",
+                scope_hint(req.project.as_deref(), &cwd)
+            ),
+        );
+    };
+    // The caller's own checkout when it is in this project (a worktree folds
+    // to the same ledger), else the project's first component.
+    let root = if req.project.is_none() && !cwd.is_empty() {
+        cwd
+    } else {
+        roots.into_iter().next().unwrap_or(cwd)
+    };
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+    let pty_id = who.agent().map(|a| a.pty_id);
+    let result = tauri::async_runtime::spawn_blocking(move || match req.op.as_str() {
+        "query" => {
+            let q: crate::memory_tool::MemoryQuery =
+                serde_json::from_value(req.rest).map_err(|e| e.to_string())?;
+            let entries = crate::ledger::query(
+                &root,
+                &crate::ledger::LedgerQuery {
+                    kinds: Some(vec!["memory".into()]),
+                    limit: Some(5000),
+                    ..Default::default()
+                },
+            )?;
+            Ok(crate::memory_tool::select(&entries, &q, now))
+        }
+        "propose" => {
+            let p: crate::memory_tool::Proposal =
+                serde_json::from_value(req.rest).map_err(|e| e.to_string())?;
+            let mut entry = crate::memory_tool::proposal_entry(&p, pty_id, now)?;
+            // Stamped on arrival: the hook marked this terminal when it read
+            // a web page, a browser or an issue thread (gates.rs taint).
+            let taint = pty_id.and_then(|id| {
+                let home = std::env::var("HOME").ok()?;
+                let tid = crate::gates::pty_taint_id(
+                    Some(crate::pty::instance_token()),
+                    Some(&id.to_string()),
+                )?;
+                crate::gates::is_tainted(&home, &[tid])
+            });
+            crate::memory_tool::quarantine_if_tainted(&mut entry, taint);
+            let status = entry.status.clone().unwrap_or_else(|| "proposed".into());
+            let stored = crate::ledger::append_and_emit(&app, &root, entry)?;
+            Ok(serde_json::json!({
+                "id": stored.data.get("memoryId"),
+                "status": status,
+                "note": if status == "quarantined" {
+                    "Recorded, and quarantined: this session read content from outside the team \
+                     (a web page, browser or issue thread). A person must approve it anyway in \
+                     Canopy's Memory panel before any agent is told it."
+                } else {
+                    "Recorded as a proposal. A person reviews it in Canopy's Memory panel; \
+                     it is not served to any agent until they approve it."
+                },
+            }))
+        }
+        other => Err(format!("unknown memory op \"{other}\"")),
+    })
+    .await
+    .map_err(|e| e.to_string())
+    .and_then(|r| r);
+    match result {
+        Ok(value) => (StatusCode::OK, value.to_string()),
+        Err(text) => (StatusCode::BAD_REQUEST, text),
+    }
+}
+
 /// Tool switches plus the running bridge's exact capability contract. A hook
 /// built after the app can now suppress tools this process cannot service
 /// instead of advertising calls that are guaranteed to 404.
@@ -1981,9 +2165,12 @@ fn apply_claim(
             // only those. Keyed by the display string, as it was, an agent
             // could end anyone's claims simply by naming them — and two agents
             // in one checkout ended each other's without meaning to, because
-            // they shared a name.
-            let n = end_claims(claims, &who.key, now, "agent");
-            ClaimReply::Ok(format!("Released {n} claim(s)."))
+            // they shared a name. With paths, only those are let go.
+            if req.paths.is_empty() {
+                let n = end_claims(claims, &who.key, now, "agent");
+                return ClaimReply::Ok(format!("Released {n} claim(s)."));
+            }
+            release_paths(claims, who, &req.paths, now, id)
         }
         "claim" => {
             if req.paths.is_empty() {
@@ -2076,6 +2263,78 @@ fn apply_claim(
         }
         other => ClaimReply::Bad(format!("unknown claim action: {other}")),
     }
+}
+
+/// `canopy_claim release` with paths: let go of those, keep the rest
+/// (canopy_core::claims::release_paths has the rules).
+fn release_paths(
+    claims: &mut Vec<Claim>,
+    who: &ClaimIdentity,
+    release: &[String],
+    now: u64,
+    id: &str,
+) -> ClaimReply {
+    let r = canopy_core::claims::release_paths(claims, &who.key, release, now, id);
+    if r.dropped > 0 {
+        prune_claims(claims);
+    }
+    ClaimReply::Ok(canopy_core::claims::partial_release_message(&r))
+}
+
+/// The claim Canopy takes for an agent that touched a hotspot another live
+/// agent is also on. The agent's own held paths are carried over (a new claim
+/// supersedes the holder's old ones), and the rules are `apply_claim`'s, so a
+/// path someone else holds is refused and recorded against them. Returns the
+/// reply and whether the store changed.
+fn hotspot_claim(
+    claims: &mut Vec<Claim>,
+    holder: &ClaimIdentity,
+    paths: &[String],
+    note: Option<String>,
+    now: u64,
+    id: &str,
+) -> (ClaimReply, bool) {
+    let mine: Vec<&Claim> = claims
+        .iter()
+        .filter(|c| c.released_at_ms.is_none() && c.owner_key == holder.key)
+        .collect();
+    let mut held: Vec<String> = mine.iter().flat_map(|c| c.paths.clone()).collect();
+    let covered = |p: &String| {
+        held.iter().any(|h| {
+            let h = h.trim_end_matches('/');
+            p == h || p.starts_with(&format!("{h}/"))
+        })
+    };
+    if paths.iter().all(covered) {
+        return (ClaimReply::Ok("Already held.".into()), false);
+    }
+    let who = ClaimIdentity {
+        key: holder.key.clone(),
+        display: mine
+            .first()
+            .map(|c| c.owner.clone())
+            .unwrap_or_else(|| holder.display.clone()),
+        pty_id: holder.pty_id,
+        instance: holder.instance.clone(),
+        run_id: mine.first().and_then(|c| c.run_id.clone()),
+        attempt_id: mine.first().and_then(|c| c.attempt_id.clone()),
+        process_started_at: holder.process_started_at,
+    };
+    let note = mine.first().and_then(|c| c.note.clone()).or(note);
+    for p in paths {
+        if !held.contains(p) {
+            held.push(p.clone());
+        }
+    }
+    let req = ClaimReq {
+        action: "claim".into(),
+        paths: held,
+        owner: who.display.clone(),
+        note,
+    };
+    let reply = apply_claim(claims, &req, &who, now, id);
+    let changed = !matches!(reply, ClaimReply::Bad(_));
+    (reply, changed)
 }
 
 /// End every claim this identity still holds, and say how. Returns how many,
@@ -4177,8 +4436,25 @@ async fn device(
     if !authorized(&app, &headers) {
         return (StatusCode::UNAUTHORIZED, "bad token".into());
     }
+    match run_device_op(op).await {
+        Ok(value) => (StatusCode::OK, value.to_string()),
+        Err(e) => (StatusCode::BAD_REQUEST, e),
+    }
+}
+
+/// A device op for an agent in a cloud workspace: its Canopy service relays
+/// the op to the IDE that has the workspace open, and the IDE runs it here,
+/// on the computer the devices are attached to (remoteExecution/deviceRelay.ts).
+#[tauri::command]
+pub async fn context_device_op(op: serde_json::Value) -> Result<serde_json::Value, String> {
+    let op: DeviceOp = serde_json::from_value(op).map_err(|e| format!("invalid device op: {e}"))?;
+    run_device_op(op).await
+}
+
+/// One `canopy_device_*` op against this computer's Android tooling.
+async fn run_device_op(op: DeviceOp) -> Result<serde_json::Value, String> {
     let dir = op.project_dir.clone();
-    let bad = |e: String| (StatusCode::BAD_REQUEST, e);
+    let bad = |e: String| -> Result<serde_json::Value, String> { Err(e) };
 
     // Ops that address the SDK rather than one device resolve no serial.
     if op.op == "list" {
@@ -4194,25 +4470,18 @@ async fn device(
         // Absent cmdline-tools this simply has no emulators to report, which is
         // already said in `missing` — no reason to fail the whole listing.
         let avds = crate::android::android_avds(dir.clone()).unwrap_or_default();
-        return (
-            StatusCode::OK,
-            serde_json::json!({
-                "devices": devices,
-                "emulators": avds,
-                "missing": status.missing,
-            })
-            .to_string(),
-        );
+        return Ok(serde_json::json!({
+            "devices": devices,
+            "emulators": avds,
+            "missing": status.missing,
+        }));
     }
     if op.op == "emulator_start" {
         let Some(name) = op.name.clone() else {
             return bad("emulator_start needs a name (from canopy_device_list)".into());
         };
         return match crate::android::android_emulator_start(dir, name).await {
-            Ok(serial) => (
-                StatusCode::OK,
-                serde_json::json!({ "serial": serial }).to_string(),
-            ),
+            Ok(serial) => Ok(serde_json::json!({ "serial": serial })),
             Err(e) => bad(e),
         };
     }
@@ -4221,10 +4490,7 @@ async fn device(
             return bad("describe needs a projectDir".into());
         };
         return match crate::android::android_describe(project).await {
-            Ok(out) => (
-                StatusCode::OK,
-                serde_json::json!({ "describe": out }).to_string(),
-            ),
+            Ok(out) => Ok(serde_json::json!({ "describe": out })),
             Err(e) => bad(e),
         };
     }
@@ -4303,10 +4569,7 @@ async fn device(
         other => Err(format!("unknown device op: {other}")),
     };
 
-    match result {
-        Ok(v) => (StatusCode::OK, v.to_string()),
-        Err(e) => bad(e),
-    }
+    result
 }
 
 async fn browser(
@@ -4573,6 +4836,9 @@ fn mesh_request_id(supplied: Option<&str>) -> Result<String, String> {
 /// The longest job brief the mesh carries. A team envelope holds 32 KB of
 /// payload, and the brief shares it with the job's routing fields.
 const MAX_MESH_JOB_BRIEF: usize = 16 * 1024;
+/// A Teams chat message's text limit in bytes (teamMessaging's 16000), less
+/// room for the line naming the agent that sent it.
+const MAX_TEAM_MESSAGE: usize = 15_500;
 
 const UI_OP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20);
 /// PR reads shell out to GitHub and failing logs may require several downloads.
@@ -4601,7 +4867,39 @@ async fn ui_op(
     let mut from_name: Option<String> = None;
     let mut request_id: Option<String> = None;
     let deadline = match op.op.as_str() {
-        "mesh_targets" => UI_OP_TIMEOUT,
+        "mesh_targets" | "team_people" => UI_OP_TIMEOUT,
+        // Posts into the user's encrypted Teams chat, as the user. Only an
+        // agent terminal may, so the message can say which agent wrote it.
+        "team_send" => {
+            let Some(agent) = who.agent() else {
+                return (
+                    StatusCode::FORBIDDEN,
+                    "Only a Canopy agent terminal can post in Teams chat.".into(),
+                );
+            };
+            let text = op.prompt.as_deref().unwrap_or_default();
+            if text.trim().is_empty() {
+                return (StatusCode::BAD_REQUEST, "team_send needs text".into());
+            }
+            if text.len() > MAX_TEAM_MESSAGE {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    format!(
+                        "a Teams message is capped at {} KB — share the detail as a file or split it",
+                        MAX_TEAM_MESSAGE / 1000
+                    ),
+                );
+            }
+            if op.member.as_deref().map_or(true, |m| m.trim().is_empty()) {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    "team_send needs `to`: a teammate, or \"channel\"".into(),
+                );
+            }
+            // The agent named in the message's footer is this terminal's.
+            submitter = Some(agent.pty_id);
+            std::time::Duration::from_secs(30)
+        }
         "mesh_message_cloud" => {
             let Some(agent) = who.agent() else {
                 return (
@@ -5714,6 +6012,87 @@ mod tests {
             .iter()
             .filter(|c| c.released_at_ms.is_none())
             .collect()
+    }
+
+    fn hotspot(
+        claims: &mut Vec<Claim>,
+        w: &ClaimIdentity,
+        paths: &[&str],
+        now: u64,
+        id: &str,
+    ) -> (ClaimReply, bool) {
+        let paths: Vec<String> = paths.iter().map(|p| p.to_string()).collect();
+        hotspot_claim(claims, w, &paths, Some("Canopy: hotspot".into()), now, id)
+    }
+
+    #[test]
+    fn a_hotspot_claim_carries_over_what_the_agent_already_holds() {
+        let (mut claims, alice) = (Vec::new(), named("alice"));
+        ok(claim(&mut claims, &alice, &["/w/src/a.ts"], 100, "c1"));
+        let (reply, changed) = hotspot(&mut claims, &alice, &["/w/src/routes.ts"], 200, "c2");
+        assert!(changed);
+        ok(reply);
+        let live = held(&claims);
+        assert_eq!(live.len(), 1, "the new claim supersedes the old one");
+        assert_eq!(live[0].id, "c2");
+        assert_eq!(
+            live[0].paths,
+            vec!["/w/src/a.ts".to_string(), "/w/src/routes.ts".into()]
+        );
+        // The agent's own note wins over Canopy's.
+        assert_eq!(live[0].note.as_deref(), Some("alice's work"));
+    }
+
+    #[test]
+    fn a_hotspot_already_covered_is_not_claimed_again() {
+        let (mut claims, alice) = (Vec::new(), named("alice"));
+        ok(claim(&mut claims, &alice, &["/w/src"], 100, "c1"));
+        let (reply, changed) = hotspot(&mut claims, &alice, &["/w/src/routes.ts"], 200, "c2");
+        assert!(!changed);
+        assert_eq!(ok(reply), "Already held.");
+        assert_eq!(held(&claims)[0].id, "c1");
+    }
+
+    #[test]
+    fn a_hotspot_someone_else_holds_is_refused_and_recorded_against_them() {
+        let (mut claims, alice, bob) = (Vec::new(), named("alice"), named("bob"));
+        ok(claim(&mut claims, &bob, &["/w/src/routes.ts"], 100, "c1"));
+        let (reply, changed) = hotspot(&mut claims, &alice, &["/w/src/routes.ts"], 200, "c2");
+        assert!(changed, "a refusal is a write");
+        assert!(conflict(reply).contains("bob"));
+        assert_eq!(claims[0].refusals.len(), 1);
+        assert_eq!(claims[0].refusals[0].owner, "alice");
+        assert_eq!(held(&claims).len(), 1);
+    }
+
+    #[test]
+    fn a_hotspot_claim_with_no_prior_claim_uses_the_given_owner_and_note() {
+        let (mut claims, alice) = (Vec::new(), named("alice"));
+        let (reply, _) = hotspot(&mut claims, &alice, &["/w/package.json"], 200, "c1");
+        ok(reply);
+        assert_eq!(held(&claims)[0].owner, "alice");
+        assert_eq!(held(&claims)[0].note.as_deref(), Some("Canopy: hotspot"));
+    }
+
+    #[test]
+    fn releasing_a_hotspot_path_keeps_the_agents_other_claims() {
+        let (mut claims, alice) = (Vec::new(), named("alice"));
+        ok(claim(&mut claims, &alice, &["/w/src/a.ts"], 100, "c1"));
+        ok(hotspot(&mut claims, &alice, &["/w/src/routes.ts"], 200, "c2").0);
+        let msg = ok(apply_claim(
+            &mut claims,
+            &claim_req("release", "alice", &["/w/src/routes.ts"]),
+            &alice,
+            300,
+            "c3",
+        ));
+        assert_eq!(msg, "Released 1 path(s); still holding 1.");
+        let live = held(&claims);
+        assert_eq!(live.len(), 1);
+        assert_eq!(live[0].paths, vec!["/w/src/a.ts".to_string()]);
+        // A bare release still lets go of everything.
+        ok(release(&mut claims, &alice, 400));
+        assert!(held(&claims).is_empty());
     }
 
     #[test]

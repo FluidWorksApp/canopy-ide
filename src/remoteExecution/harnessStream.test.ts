@@ -64,4 +64,6 @@ it('sends user actions and queries through the gateway routes',async()=>{
  await stream.action('answer',{id:'q1',answer:'yes'});await stream.query('research','list');
  expect(t.workspace).toHaveBeenCalledWith(WS,'/harness/actions',{kind:'answer',id:'q1',answer:'yes'});
  expect(t.workspace).toHaveBeenCalledWith(WS,'/harness/query',{store:'research',action:'list',args:{}});
+ await stream.action('mesh_sever',{a:1,b:2,severed:true});
+ expect(t.workspace).toHaveBeenCalledWith(WS,'/harness/actions',{kind:'mesh_sever',a:1,b:2,severed:true});
 });

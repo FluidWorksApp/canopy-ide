@@ -3,7 +3,21 @@ import path from 'node:path';
 import {randomUUID} from 'node:crypto';
 import {WorkspaceProfiles} from './profiles.mjs';
 import {installMcp,mcpStatus} from './agent-mcp.mjs';
+import {GATED_CLIS,installGates,gatesInstalled,installGatedMcp,gatedMcpStatus} from './agent-gates.mjs';
+// Every CLI the workspace image ships that Canopy hooks (agent-gates.mjs has the rest).
+export const HOOKED_CLIS=['claude','codex',...Object.keys(GATED_CLIS)];
+const binaryOf=agent=>GATED_CLIS[agent]??agent;
 const EVENTS=['SessionStart','UserPromptSubmit','Stop','SessionEnd','PostToolUse','PermissionRequest'];
+// Claude's PreToolUse, narrowed by matcher exactly as the desktop installs it
+// (WRITE_TOOLS_MATCHER and GATE_TOOLS_MATCHER in src-tauri/src/agents.rs): the
+// research write gate and the Rules panel's compiled gates both decide before
+// a tool runs, and a hook that is not registered is a gate that never runs.
+// Codex's PreToolUse deny contract is Claude's (learn.chatgpt.com/docs/hooks);
+// its matcher is CODEX_GATE_MATCHER in agents.rs, in one entry.
+export const CLAUDE_PRE_TOOL=['Write|Edit|MultiEdit|NotebookEdit','Bash|Read|WebFetch|mcp__canopy__canopy_vault_fill|mcp__canopy__canopy_vault_read'];
+export const CODEX_PRE_TOOL=['^Bash$|^apply_patch$|^Edit$|^Write$|mcp__canopy__canopy_vault_fill|mcp__canopy__canopy_vault_read'];
+const PRE_TOOL={claude:CLAUDE_PRE_TOOL,codex:CODEX_PRE_TOOL};
+const hasPreTool=(value,matcher,command)=>value.hooks?.PreToolUse?.some(entry=>entry.matcher===matcher&&entry.hooks?.some(hook=>hook.type==='command'&&hook.command===command));
 const quote=value=>`'${value.replaceAll("'","'\\''")}'`;
 const ourStatusLine=command=>typeof command==='string'&&command.includes('canopy-hook')&&command.includes('--statusline');
 // The command a Canopy statusLine is passing through to (the `--passthrough 'cmd'`
@@ -25,23 +39,50 @@ export function claudeStatusLine(settings,helper,profile){
 export class AgentIntegrations {
  constructor(home,helper='/usr/local/bin/canopy-hook',searchPath=process.env.PATH??''){this.home=home;this.helper=helper;this.searchPath=searchPath;this.queue=Promise.resolve();}
  async cliInstalled(agent){
-  if(!['claude','codex'].includes(agent))return false;
+  if(!HOOKED_CLIS.includes(agent))return false;
   for(const directory of this.searchPath.split(path.delimiter).filter(p=>path.isAbsolute(p))){
-   const candidate=path.join(directory,agent);
+   const candidate=path.join(directory,binaryOf(agent));
    try{await access(candidate,constants.X_OK);if((await stat(candidate)).isFile())return true;}catch{}
   }
   return false;
  }
  async settings(root,agent){const file=path.join(root,agent==='claude'?'.claude/settings.json':'.codex/hooks.json');let value;try{value=JSON.parse(await readFile(file,'utf8'));}catch(e){if(e.code!=='ENOENT')throw e;value={};}if(!value||Array.isArray(value)||typeof value!=='object')throw Error('Agent settings must be an object');return {file,value};}
  command(agent){return `'${this.helper.replaceAll("'","'\\''")}' --agent ${agent}`;}
- async installed(agent){if(!['claude','codex'].includes(agent))return false;try{await access(this.helper,constants.X_OK);for(const profile of await new WorkspaceProfiles(this.home).list()){const {value}=await this.settings(profile.root,agent);if(!EVENTS.every(event=>value.hooks?.[event]?.some(entry=>entry.hooks?.some(hook=>hook.type==='command'&&hook.command===this.command(agent)))))return false;
+ async installed(agent){if(GATED_CLIS[agent])return this.gatedInstalled(agent);if(!['claude','codex'].includes(agent))return false;try{await access(this.helper,constants.X_OK);for(const profile of await new WorkspaceProfiles(this.home).list()){const {value}=await this.settings(profile.root,agent);if(!EVENTS.every(event=>value.hooks?.[event]?.some(entry=>entry.hooks?.some(hook=>hook.type==='command'&&hook.command===this.command(agent)))))return false;
+  if(!PRE_TOOL[agent].every(matcher=>hasPreTool(value,matcher,this.command(agent))))return false;
   // Without the status line the plan chip stays empty; reporting it missing
   // is what offers existing workspaces the one-click setup again.
   if(agent==='claude'&&value.statusLine?.command!==claudeStatusLine(value,this.helper,profile.id).command)return false;}return true;}catch{return false;}}
- async health(agent){const states=await Promise.all((await new WorkspaceProfiles(this.home).list()).map(p=>mcpStatus(p.root,agent,this.helper)));return {agent,cli_installed:await this.cliInstalled(agent),hooks:await this.installed(agent)?'ours':'missing',mcp:states.every(s=>s==='ours')?'ours':states.find(s=>s!=='ours')??'missing'};}
+ async gatedInstalled(agent){
+  try{await access(this.helper,constants.X_OK);}catch{return false;}
+  const profiles=new WorkspaceProfiles(this.home);
+  for(const profile of await profiles.list())if(!await gatesInstalled(agent,await profiles.root(profile.id),this.home,this.helper))return false;
+  return true;
+ }
+ async health(agent){if(GATED_CLIS[agent]){const profiles=new WorkspaceProfiles(this.home);const states=[];for(const p of await profiles.list())states.push(await gatedMcpStatus(agent,await profiles.root(p.id),this.helper));return {agent,cli_installed:await this.cliInstalled(agent),hooks:await this.installed(agent)?'ours':'missing',mcp:states.every(s=>s==='ours')?'ours':states.find(s=>s!=='ours')??'missing'};}const states=await Promise.all((await new WorkspaceProfiles(this.home).list()).map(p=>mcpStatus(p.root,agent,this.helper)));return {agent,cli_installed:await this.cliInstalled(agent),hooks:await this.installed(agent)?'ours':'missing',mcp:states.every(s=>s==='ours')?'ours':states.find(s=>s!=='ours')??'missing'};}
+ /** Cursor, Grok, OpenCode, oh-my-pi, Amp and Antigravity: lifecycle hooks and
+  *  the Rules gate, per profile, as the desktop installs them. */
+ async installGated(agent){
+  await access(this.helper,constants.X_OK);
+  const profiles=new WorkspaceProfiles(this.home),steps=[];
+  for(const profile of await profiles.list()){
+   const root=await profiles.root(profile.id);
+   // Amp's plugin lives in the home and serves every profile; its MCP
+   // registry is per profile.
+   if(!(agent==='amp'&&steps.some(s=>s.step.endsWith(': hooks')))){
+    try{steps.push({step:profile.id+': hooks',ok:true,message:await installGates(agent,root,this.home,this.helper)});}
+    catch(error){steps.push({step:profile.id+': hooks',ok:false,message:String(error.message??error)});}
+   }
+   try{steps.push({step:profile.id+': MCP',ok:true,message:await installGatedMcp(agent,root,this.helper)});}
+   catch(error){steps.push({step:profile.id+': MCP',ok:false,message:String(error.message??error)});}
+  }
+  const failed=steps.filter(step=>!step.ok);
+  return {agent,ok:failed.length===0,steps,summary:failed.length?failed.map(step=>step.step+': '+step.message).join('; '):steps.map(step=>step.message).filter((m,i,all)=>all.indexOf(m)===i).join('; ')};
+ }
  setup(agent){const work=this.queue.then(()=>this.install(agent));this.queue=work.catch(()=>{});return work;}
  async install(agent){
-  if(!['claude','codex'].includes(agent))throw Error('Automatic integration is supported for Claude and Codex');
+  if(GATED_CLIS[agent])return this.installGated(agent);
+  if(!['claude','codex'].includes(agent))throw Error(`Automatic integration isn't available for ${agent}`);
   await access(this.helper,constants.X_OK);
   const profiles=new WorkspaceProfiles(this.home);const steps=[];
   for(const profile of await profiles.list()){
@@ -49,6 +90,7 @@ export class AgentIntegrations {
    const root=await profiles.root(profile.id);const {file,value}=await this.settings(root,agent);
    value.hooks??={};if(!value.hooks||Array.isArray(value.hooks)||typeof value.hooks!=='object')throw Error('Agent hooks must be an object');
    for(const event of EVENTS){const entries=value.hooks[event]??[];if(!Array.isArray(entries))throw Error(`Invalid ${event} hooks; existing settings preserved`);const command=this.command(agent);if(!entries.some(entry=>entry.hooks?.some(hook=>hook.command===command)))entries.push({hooks:[{type:'command',command}]});value.hooks[event]=entries;}
+   {const command=this.command(agent);const pre=value.hooks.PreToolUse??[];if(!Array.isArray(pre))throw Error('Invalid PreToolUse hooks; existing settings preserved');for(const matcher of PRE_TOOL[agent])if(!hasPreTool({hooks:{PreToolUse:pre}},matcher,command))pre.push({matcher,hooks:[{type:'command',command}]});value.hooks.PreToolUse=pre;}
    if(agent==='claude')value.statusLine=claudeStatusLine(value,this.helper,profile.id);
    await profiles.directory(path.dirname(file));const temporary=file+'.'+randomUUID()+'.next';await writeFile(temporary,JSON.stringify(value,null,2)+'\n',{mode:0o600,flag:'wx'});await rename(temporary,file);
    steps.push({step:profile.id+": hooks",ok:true,message:"Hooks installed"});

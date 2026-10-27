@@ -1,6 +1,7 @@
 import {initializeScratch,scratchSessionEnv} from './scratch-environment.mjs';
 import {decodeTerminalInput,BINARY_TERMINAL_INPUT_PROTOCOL} from './terminal-input.mjs';
 import {prepareSharedAgentLaunch} from './shared-agent-launch.mjs';
+import {linkSharedCanopyState} from './account-homes.mjs';
 import { nativeInvoke, startNativeServer } from "./native.mjs";
 import http from 'node:http';
 import net from 'node:net';
@@ -117,6 +118,8 @@ export function createRunner({ secret, spawnPty, accounts = [], workspaceId = 'w
         let template = `/accounts/${args.accountId}`;
         try { template = await realpath(`${template}/current`); } catch (error) { if (error.code !== 'ENOENT') throw error; }
         await cp(template, accountHome, { recursive: true, dereference: true });
+        // Hook output (events, digests, journals, policy) lands where the host reads it.
+        await linkSharedCanopyState(accountHome);
       }
       const sharedBin=args.sharedAgents?await prepareSharedAgentLaunch(accountHome,args.requestId,args.sharedAgents):null;
       const scratchEnv=await scratchSessionEnv(args.requestId,environment);
@@ -191,6 +194,10 @@ export function createRunner({ secret, spawnPty, accounts = [], workspaceId = 'w
       await ready;
       if (request.method === 'POST' && route === '/native') { const input = await body(request); return json(response, 200, {result: (await nativeInvoke(input.command, input.args)) ?? null}); }
       if (request.method === 'POST' && route === '/language/analyze') return json(response, 200, await analyze(await body(request), scopedPath));
+      // The tail of a terminal's output, for pty_output (agents and the IDE read
+      // what a run printed). Raw bytes, like the desktop's scrollback tail.
+      const output = request.method === 'POST' && route.match(/^\/sessions\/(\d+)\/output$/);
+      if (output) { const session = sessions.get(Number(output[1])); const { max } = await body(request); const limit = Math.max(0, Math.min(Number.isInteger(max) ? max : 64 * 1024, OUTPUT_CAP)); return json(response, 200, { text: session ? session.output.subarray(Math.max(0, session.output.length - limit)).toString('utf8') : null }); }
       if (request.method === 'GET' && route === '/sessions') return json(response, 200, [...sessions.values()].map(summarize));
       if (request.method === 'POST' && route === '/sessions') return json(response, 200, await spawnSession(await body(request, 16 * 1024)));
       if (request.method === 'POST' && route === '/desktop') return json(response, 200, await startDesktop());

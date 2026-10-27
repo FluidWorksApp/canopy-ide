@@ -1,5 +1,7 @@
 import {loadChatHistory,saveChatMessage,forgetChatMessage,loadChatReadState,saveChatReadState,loadChatEvents,saveChatEvent,forgetChatEvent,saveChatRecord,loadChatRecords,forgetChatRecords} from './history';
-import {BACKFILL_MS,CHAT_VERSION,EDITS_VERSION,DELETE_TEXT,MAX_TEXT_BYTES,editText,eventOf,eventRecipient,parseThread,parseMentions,reactionText,validEmoji} from './chatEvents';
+import {BACKFILL_MS,CHAT_VERSION,EDITS_VERSION,DELETE_TEXT,MAX_TEXT_BYTES,editText,eventOf,eventRecipient,isLayerEvent,isLiveEvent,parseThread,parseMentions,reactionText,validEmoji} from './chatEvents';
+import {LIVE_VERSION,liveText,type LiveEvent,type LiveOp} from './liveEvents';
+import {LAYER_VERSION,layerText,type LayerEvent} from './layerEvents';
 import {applyEvent,drainPending,hasReacted,newer,nextReactionTime,EMPTY_OVERLAY,type DeleteEntry,type EditEntry,type EventOverlay,type ReactionState} from './reactions';
 import {invoke} from '@tauri-apps/api/core';
 import {PeerClient,AttachmentUnavailable,type Attachment,type AttachmentState,type ChatMessage,type Device} from './client';
@@ -86,6 +88,17 @@ export type TeamJobSender={user:string;device:string;name?:string};
 export type TeamJobEvent={team:string;user:string;sender:TeamJobSender;workspace?:string}&({kind:'job';job:JobRequest}|{kind:'job-status';status:JobStatus}|{kind:'mesh';message:MeshMessage}|{kind:'mesh-status';status:MeshStatus}|{kind:'roster';roster:Roster});
 const jobListeners=new Set<(event:TeamJobEvent)=>void>();
 export const subscribeTeamJobs=(listener:(event:TeamJobEvent)=>void)=>{jobListeners.add(listener);return()=>{jobListeners.delete(listener);};};
+/** A live session event from a teammate (liveEvents.ts): `sender` is the
+ * account the envelope authenticated, `senderName` the directory's name for it. */
+export type TeamLiveEvent={team:string;user:string;sender:string;senderName?:string;event:LiveEvent};
+const liveListeners=new Set<(event:TeamLiveEvent)=>void>();
+export const subscribeLiveEvents=(listener:(event:TeamLiveEvent)=>void)=>{liveListeners.add(listener);return()=>{liveListeners.delete(listener);};};
+/** A layer ownership claim or release from a teammate (layerEvents.ts).
+ *  `sender` is the account the transport authenticated; `member` says whether
+ *  the team's directory lists them. */
+export type TeamLayerEvent={team:string;user:string;sender:string;senderName?:string;member:boolean;event:LayerEvent};
+const layerListeners=new Set<(event:TeamLayerEvent)=>void>();
+export const subscribeLayerEvents=(listener:(event:TeamLayerEvent)=>void)=>{layerListeners.add(listener);return()=>{layerListeners.delete(listener);};};
 export class TeamSession {
  private listeners=new Set<()=>void>();
  private client:PeerClient;
@@ -121,9 +134,11 @@ export class TeamSession {
  constructor(team:string,user:string){
   this.team=team;this.user=user;
   this.client=new PeerClient({team,user,request:body=>invoke('canopy_account_request',{route:'/api/peers',body}),
-   // Events (reactions, edits, deletes) are saved apart from messages, outside
-   // the 500-message cap. A deleted message is never saved again.
-   persist:message=>eventOf(message)?saveChatEvent(this.user,this.team,message):this.tombstoned(message)?Promise.resolve():saveChatMessage(this.user,this.team,message),
+   // Events (reactions, edits, deletes) are saved apart from messages,
+   // outside the 500-message cap. A deleted message is never saved again, and
+   // live session traffic is never saved at all: it is presence and requests,
+   // only meaningful while the session runs.
+   persist:message=>{const e=eventOf(message);return isLiveEvent(e)||isLayerEvent(e)?Promise.resolve():e?saveChatEvent(this.user,this.team,message):this.tombstoned(message)?Promise.resolve():saveChatMessage(this.user,this.team,message);},
    members:members=>this.update({members:Object.fromEntries(members.map(m=>[m.id,m.name]))}),
    message:(message,meta)=>this.receive(message,meta?.backfill===true),
    job:(job,sender)=>this.emitJob(sender,{kind:'job',job}),
@@ -198,6 +213,39 @@ export class TeamSession {
  members(){return this.snapshot.members;}
  devices(){return this.invalid?[]:this.client.directoryDevices();}
  deviceId(){return this.client.deviceId();}
+ private emitLayer(sender:string,event:LayerEvent){
+  if(this.invalid)return;
+  const e:TeamLayerEvent={team:this.team,user:this.user,sender,senderName:this.snapshot.members[sender],member:sender in this.snapshot.members,event};
+  layerListeners.forEach(fn=>{try{fn(e);}catch{/* a listener never breaks delivery */}});
+ }
+ /** Tells the whole team (its devices that understand it) that this account
+  *  claimed or let go of a layer. Resolves to the number of devices. */
+ async sendLayer(event:Omit<LayerEvent,'type'>):Promise<number>{
+  if(this.invalid)throw Error('Sign in again to reach your team');
+  const e:LayerEvent={type:'layer',...event};
+  const message:ChatMessage={id:crypto.randomUUID(),sender:this.user,recipient:null,text:layerText(e),created:Date.now(),v:CHAT_VERSION,event:e};
+  await this.ready.catch(()=>{});if(this.invalid)return 0;
+  return (await this.client.sendToCapable(LAYER_VERSION,message)).devices;
+ }
+ private emitLive(sender:string,event:LiveEvent){
+  if(this.invalid)return;
+  const e:TeamLiveEvent={team:this.team,user:this.user,sender,senderName:this.snapshot.members[sender],event};
+  liveListeners.forEach(fn=>{try{fn(e);}catch{/* a listener never breaks delivery */}});
+ }
+ /** Sends a live session event to one teammate's devices that understand it
+  * (chat v4). `reachAll`: when none of theirs is known to, send it to all of
+  * them — a first join, whose fallback text reads as a request to join.
+  * Resolves to the number of devices it went to. */
+ async sendLive(peer:string,room:string,op:LiveOp,reachAll=false):Promise<number>{
+  if(this.invalid)throw Error('Sign in again to reach this session');
+  if(peer===this.user)throw Error('That is this account');
+  const event={type:'live',target:room,...op} as LiveEvent;
+  const message:ChatMessage={id:crypto.randomUUID(),sender:this.user,recipient:peer,text:liveText(event),created:Date.now(),v:CHAT_VERSION,event};
+  await this.ready.catch(()=>{});if(this.invalid)return 0;
+  const sent=await this.client.sendToCapable(LIVE_VERSION,message);
+  if(sent.devices||!reachAll)return sent.devices;
+  return (await this.client.sendToCapable(1,{...message,id:crypto.randomUUID()})).devices;
+ }
  async submitJob(job:JobRequest,recipient:string,device?:string){
   if(this.invalid)throw Error('Sign in again to submit jobs');
   await this.ready;return this.client.sendJob(job,recipient,device);
@@ -245,7 +293,7 @@ export class TeamSession {
  private applyEvents(events:ChatMessage[]){
   if(this.invalid)return;let next=this.overlay;
   for(const event of events){
-   const e=eventOf(event);
+   const e=eventOf(event);if(isLiveEvent(e)||isLayerEvent(e))continue;
    if(e?.type==='edit'){const ids=this.editEvents.get(e.target)??new Set<string>();ids.add(event.id);this.editEvents.set(e.target,ids);}
    if(event.sender===this.user&&this.ownEvents.size<2000)this.ownEvents.set(event.id,event);
    next=applyEvent(next,event,this.find);
@@ -260,7 +308,13 @@ export class TeamSession {
   // An event changes an earlier message; it is not a message itself, so it
   // never joins the transcript or unreadIds and never reaches the message
   // listeners: no unread badge, no notification.
-  if(eventOf(message)){this.applyEvents([message]);return;}
+  const event=eventOf(message);
+  // Live session traffic goes to its own listeners (src/liveSession), never
+  // to the transcript or the event overlay. This account's own sends echo
+  // back here and are dropped.
+  if(isLiveEvent(event)){if(message.sender!==this.user)this.emitLive(message.sender,event);return;}
+  if(isLayerEvent(event)){if(message.sender!==this.user)this.emitLayer(message.sender,event);return;}
+  if(event){this.applyEvents([message]);return;}
   // A deleted message stays deleted, whether its copy arrives late or backfilled.
   if(this.tombstoned(message))return;
   // Own messages (including echoes from this account's other devices) and

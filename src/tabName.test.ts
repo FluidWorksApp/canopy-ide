@@ -5,6 +5,8 @@ import {
   isUserNamed,
   snapshotNames,
   adoptSnapshotNames,
+  adoptDurableNames,
+  durableNames,
 } from "./tabName";
 
 describe("tabName", () => {
@@ -151,5 +153,25 @@ describe("snapshots", () => {
     const back = adoptSnapshotNames(snapshotNames(before, { agent: true }));
     const after = { ...back, ...namePatch(back, "prompt", "pls see where you left it") };
     expect(tabName(after, { agent: true })).toBe("fix the ledger import");
+  });
+});
+
+describe("the brain's title", () => {
+  it("sits between the agent's own name and the opening prompt", () => {
+    expect(tabName({ promptName: "ok so the thing", brainName: "Fix login loop" })).toBe("Fix login loop");
+    expect(tabName({ agentName: "Login bug", brainName: "Fix login loop" })).toBe("Login bug");
+    expect(tabName({ userName: "mine", brainName: "Fix login loop" })).toBe("mine");
+  });
+
+  it("may only be written while nobody with more authority has named the tab", () => {
+    expect(namePatch({ promptName: "p" }, "brain", "Fix login loop")).toEqual({ brainName: "Fix login loop" });
+    expect(namePatch({ agentName: "a" }, "brain", "Fix login loop")).toBeNull();
+    expect(namePatch({ userName: "u" }, "brain", "Fix login loop")).toBeNull();
+    expect(namePatch({ micro: {} }, "brain", "Fix login loop")).toBeNull();
+  });
+
+  it("survives a rebuild with the conversation's other names", () => {
+    expect(durableNames({ brainName: "Fix login loop", oscTitle: "zsh" })).toEqual({ brainName: "Fix login loop" });
+    expect(adoptDurableNames({}, { brainName: "Fix login loop" })).toEqual({ brainName: "Fix login loop" });
   });
 });

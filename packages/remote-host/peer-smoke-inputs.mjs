@@ -1,5 +1,5 @@
 import path from 'node:path';
-export const peerSmokeSources=['src/teamMessaging/client.ts','src/teamMessaging/crypto.ts','src/teamMessaging/store.ts','src/teamMessaging/history.ts','src/teamMessaging/messageSchema.ts','src/teamMessaging/jobSchema.ts','src/teamMessaging/files.ts','src/teamMessaging/chatEvents.ts','src/teamMessaging/peerVersions.ts','src/teamMessaging/cardSchema.ts'];
+export const peerSmokeSources=['src/teamMessaging/client.ts','src/teamMessaging/crypto.ts','src/teamMessaging/store.ts','src/teamMessaging/history.ts','src/teamMessaging/messageSchema.ts','src/teamMessaging/jobSchema.ts','src/teamMessaging/files.ts','src/teamMessaging/chatEvents.ts','src/teamMessaging/peerVersions.ts','src/teamMessaging/cardSchema.ts','src/teamMessaging/liveEvents.ts','src/teamMessaging/layerEvents.ts'];
 export const peerSmokeRelaySources=['packages/control-plane/lib/peer-messaging.mjs','packages/control-plane/lib/workspace-access.mjs','packages/control-plane/lib/team-policy.mjs'];
 export function peerSmokeBridge(name){if(!/^canopy-peer-smoke-[a-f0-9]{10}$/.test(name))throw Error("Invalid peer bridge name");return "cpv"+name.slice(-10);}
 export function peerSmokeFirewallRules(name){const bridge=peerSmokeBridge(name);return [["DOCKER-USER","-i",bridge,"!","-o",bridge,"-j","DROP"],["INPUT","-i",bridge,"-j","DROP"]];}

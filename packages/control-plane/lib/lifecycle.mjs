@@ -1,3 +1,4 @@
+import {assertComputeAllowed} from './credit-policy.mjs';
 export class LifecycleError extends Error {
  constructor(code, message) { super(message); this.code = code; }
 }
@@ -20,6 +21,11 @@ export async function requestOperation(client, userId, workspaceId, input, {requ
   if(previous.workspace_id!==workspaceId||previous.action!==input.action||(previous.target_plan_id??null)!==(input.planId??null)||(previous.context?.requesterId??previous.owner_id)!==requesterId)throw new LifecycleError(409,'Request identifier already used');
   return previous;
  }
+ // Credit cutoff: starts, retries and resizes are refused at or below it
+ // (credit-policy.mjs). Stop and delete always proceed. The deployed lifecycle
+ // also passes usdPerHour (the plan's rate) so a start needs one billing
+ // interval above the cutoff; this copy has no rate table, so only the cutoff applies.
+ await assertComputeAllowed(client,userId,input.action,{shared:requesterId!==userId});
  validateOperation(workspace,input);
  if(input.action==='resume'&&workspace.state==='ready'&&workspace.desired_state==='running')return {id:null,workspace_id:workspaceId,owner_id:userId,action:'resume',generation:workspace.generation,status:'succeeded',phase:'complete',noop:true,context:{requesterId}};
  const active=await client.query("SELECT id FROM workspace_operation WHERE workspace_id=$1 AND status IN('pending','running')",[workspaceId]);

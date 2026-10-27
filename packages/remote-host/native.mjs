@@ -4,7 +4,7 @@ import {safeGitRead,GIT_READ_COMMANDS} from './git-read.mjs';
 import {gitIdentityEnvironment} from './git-identity.mjs';
 // Native IDE command boundary for a Linux workspace. Files and subprocesses
 // never escape the selected container; no host Docker/cloud credential API.
-import {readFile,writeFile,open,readdir,stat,mkdir,rename,cp,unlink,rm,lstat} from 'node:fs/promises';
+import {readFile,writeFile,open,readdir,stat,mkdir,rename,cp,unlink,rm,lstat,realpath} from 'node:fs/promises';
 import {execFile,spawn} from 'node:child_process';
 import {promisify} from 'node:util';
 import path from 'node:path';
@@ -14,9 +14,13 @@ import {body,json} from './http.mjs';
 import {WebSocketServer} from 'ws';
 import {terminalScreens} from './terminal-screen.mjs';
 import {WorkspaceProfiles} from './profiles.mjs';
-import {AgentIntegrations} from './agent-integrations.mjs';
+import {AgentIntegrations,HOOKED_CLIS} from './agent-integrations.mjs';
 import {readAgentEvents} from './agent-events.mjs';
 import {sessionDigestReader} from './session-digests.mjs';
+import {sessionTranscriptTail} from './session-transcript.mjs';
+import {sessionActivity} from './session-activity.mjs';
+import {sessionCompactCommand} from './session-compact.mjs';
+import {storeDigestReader,withStoreDigests} from './session-store-digests.mjs';
 import {prepareSession} from './session-transfer.mjs';
 import {importAgentAccounts,importAccountProfiles} from './agent-accounts.mjs';
 import {CloneJobs} from './git-clone.mjs';
@@ -26,20 +30,44 @@ import {metricsReader} from './workspace-metrics.mjs';
 import {writeWorkspaceFile} from './file-write.mjs';
 import {WorkspaceUploads} from './file-upload.mjs';
 import {listWorkspaceFiles,searchWorkspaceFiles} from './file-search.mjs';
-import {agentWorkspaceAt} from './agent-workspace.mjs';
+import {agentWorkspaceCommands} from './agent-workspace.mjs';
+import {gitOpsCommands} from './git-ops.mjs';
+import {workspaceMiscCommands} from './workspace-misc.mjs';
+import {TerminalGovernor,governorSampler,cliKeyOf} from './terminal-governor.mjs';
+import {SessionCgroups} from './cgroup-sessions.mjs';
+import {mcpClientCommands} from './mcp-client.mjs';
+import {spotIndexCommands} from './spot-index.mjs';
 import {workspaceActivity} from './activity.mjs';
 import {sessionProcessReader} from './session-processes.mjs';
 import {McpRegistry} from './mcp-servers.mjs';
 import {gitHistory} from './git-history.mjs';
 import {claudeIde,claudeIdeCommand} from './claude-ide.mjs';
+import {receiptIsolate,receiptRelease,receiptRunCheck,receiptCheckStart,receiptCheckStatus} from './receipt-check.mjs';
+import {workspaceToolsCommands} from './workspace-tools.mjs';
+import {workspaceCleanupCommands} from './workspace-cleanup.mjs';
+import {lspCommands} from './lsp.mjs';
+import {githubCommands} from './github.mjs';
+import {taskStoreCommands,taskStoreFor} from './task-store.mjs';
+import {workflowStoreCommands} from './workflow-store.mjs';
+import {structuredRunnerCommands} from './structured-runner.mjs';
+import {turnsCommands} from './turns.mjs';
+import {provenanceCommands} from './provenance.mjs';
+import {PrObserver} from './pr-observer.mjs';
+import {researchMirrorCommands} from './research-mirror.mjs';
+import {ChannelHub,isChannelArg} from './channels.mjs';
+import {HOST_PROTOCOL,NATIVE_COMMANDS,NATIVE_PREFIXES} from './native-commands.mjs';
+import {WorkspaceGates} from './gates.mjs';
 const sessionProcesses=sessionProcessReader();
 const workspaceMetrics=metricsReader();
 const execute=promisify(execFile);
 const ROOT='/workspace', HOME='/home/agent', STORE=HOME+'/.canopy/ide-projects.json';
 const browsers=new BrowserStreams({home:HOME});
 const profiles=new WorkspaceProfiles(HOME);
+const sessionCompact=sessionCompactCommand({home:HOME,scoped:value=>scoped(value),profileEnv:(agent,id)=>profiles.env(agent,id)});
 const integrations=new AgentIntegrations(HOME);
 const sessionDigests=sessionDigestReader(HOME);
+// Every other CLI's own store (omp, gemini, agy, opencode, aider), as the desktop's stores.rs digests.
+const storeDigests=storeDigestReader(HOME,{scoped:value=>scoped(value)});
 const uploads=new WorkspaceUploads(ROOT);
 const agentUsage=agentUsageReader(HOME);
 export async function scoped(value,create=false){
@@ -77,17 +105,85 @@ async function run(bin,argv,cwd=ROOT,timeout=15000,environment={}){
 async function boundedRead(file,limit=1048576){const handle=await open(file,'r');try{const bytes=Buffer.alloc(limit+1);let length=0;while(length<=limit){const result=await handle.read(bytes,length,bytes.length-length,null);if(!result.bytesRead)break;length+=result.bytesRead;}if(length>limit)throw Error('File exceeds editor limit');return bytes.subarray(0,length);}finally{await handle.close();}}
 async function metadata(file,fallback){try{return JSON.parse((await boundedRead(HOME+'/.canopy/'+file)).toString('utf8'));}catch(error){if(error.code==='ENOENT')return fallback;throw error;}}
 async function saveMetadata(file,value){await mkdir(HOME+'/.canopy',{recursive:true,mode:0o700});const target=HOME+'/.canopy/'+file;const temporary=target+'.'+randomUUID()+'.next';const data=JSON.stringify(value);if(Buffer.byteLength(data)>1048576)throw Error('Workspace metadata limit reached');await writeFile(temporary,data,{mode:0o600,flag:'wx'});await rename(temporary,target);changeCursor++;changes.push({sequence:changeCursor,change:{store:file,scope:ROOT,id:''}});if(changes.length>1024)changes.shift();}
+// Command families ported from the desktop's Rust commands, one module each.
+// Each takes the same containment helpers as the commands below.
+const familyContext={run,scoped,execute,home:HOME,root:ROOT,mcpRegistry,
+ // Store mutations wake the IDE's caches through store_changes, as change::pulse does.
+ pulse:(store,scope,id)=>{changeCursor++;changes.push({sequence:changeCursor,change:{store,scope:scope??ROOT,id:id??''}});if(changes.length>1024)changes.shift();}};
+familyContext.changed=familyContext.pulse;
+// Hooks and MCP for one CLI inside one profile root (profiles.rs root_for).
+familyContext.setupAgent=async(agent,id)=>{const profile=(await profiles.list()).find(p=>p.id===String(id??''));if(!profile)throw Error('Unknown profile');return profile.id==='default'?integrations.setup(agent):new AgentIntegrations(profile.root).setup(agent);};
+// Per-terminal memory budgets (terminal-governor.mjs): the runner's live
+// sessions, each measured as its process tree's resident set by a reader of
+// its own (session_process_stats keeps its CPU deltas apart).
+{
+ const runnerFetch=(route,init={})=>fetch(`http://127.0.0.1:8080${route}`,{...init,headers:{authorization:`Bearer ${process.env.CANOPY_RUNNER_TOKEN??''}`,'content-type':'application/json'},signal:AbortSignal.timeout(5000)});
+ const measure=sessionProcessReader();
+ familyContext.terminalGovernor=new TerminalGovernor({defaultsFile:HOME+'/.canopy/terminal-governor-defaults.json'});
+ familyContext.governorSampler=governorSampler({governor:familyContext.terminalGovernor,sample:async()=>{
+  const response=await runnerFetch('/sessions');if(!response.ok)throw Error('runner sessions unavailable');
+  const meta=await metadata('ide-terminals.json',{});
+  const sessions=(await response.json()).filter(x=>x.exitCode==null).slice(0,32).map(x=>({...x,requestId:meta[String(x.id)]?.requestId}));
+  return (await measure(sessions)).map(stat=>({id:stat.id,bytes:stat.total_mem_bytes,cliKey:cliKeyOf(stat.agent_hint),pids:stat.procs.map(p=>p.pid)}));
+ },cgroups:new SessionCgroups()});
+ // Terminal cgroups and their limits hold whether or not an IDE is watching.
+ familyContext.governorSampler.start();
+ familyContext.stopSession=async id=>{const response=await runnerFetch(`/sessions/${id}/stop`,{method:'POST',body:'{}'});if(!response.ok)throw Error(`the workspace refused to stop terminal ${id}`);};
+}
+const taskStore=taskStoreFor(familyContext);
+// A structured runner may only run the current attempt, in the worktree its task reserved.
+familyContext.authorize=async(attemptId,cwd)=>{
+ const detail=await taskStore.getForAttempt(attemptId);const attempt=detail?.attempts.find(a=>a.attemptId===attemptId);
+ if(!attempt)throw Error('task attempt not found');
+ if(attempt.state!=='running')throw Error(`structured runner attempt is ${attempt.state}, not running`);
+ let expected;try{expected=await realpath(detail.envelope.worktreePath);}catch(error){throw Error(`reserved task workspace is invalid: ${error.message}`);}
+ if(expected!==cwd)throw Error('structured runner cwd does not match its reserved task workspace');
+};
+const channels=new ChannelHub();
+export const NATIVE_FAMILIES=Object.assign({},...[
+ workspaceToolsCommands,workspaceCleanupCommands,lspCommands,githubCommands,taskStoreCommands,workflowStoreCommands,structuredRunnerCommands,turnsCommands,provenanceCommands,gitOpsCommands,agentWorkspaceCommands,workspaceMiscCommands,mcpClientCommands,spotIndexCommands,researchMirrorCommands,
+].map(family=>family(familyContext)));
+const FAMILIES=NATIVE_FAMILIES;
+// PR-watcher provenance rows (prwatch.rs): the IDE names the projects with pr_watch_set.
+const prObserver=new PrObserver({observe:repo=>FAMILIES.provenance_observe({repo})});
+familyContext.prObserver=prObserver;
+// The Rules panel's approved gates and approve-once tokens, written where this
+// workspace's canopy-hook reads them (gates.mjs).
+const workspaceGates=new WorkspaceGates({home:HOME,run:(bin,argv,cwd)=>run(bin,argv,cwd)});
 const CLIS=['claude','codex','amp','aider','agy','opencode','omp','cursor-agent','grok'];
 export async function nativeInvoke(command,args={}){
   if(command.startsWith('fs_upload_'))return uploads.invoke(command,args);
+  if(command.startsWith('gates_'))return workspaceGates.invoke(command,args);
   // The desktop's answers to the Claude Code IDE servers of this workspace's
   // terminals (claude-ide.mjs), which live in this same process.
   if(command.startsWith('claude_ide_')){const handled=claudeIdeCommand(claudeIde,command,args);if(handled.handled)return handled.value;}
+  // Managed task spawns (pty.rs spawn_binding/mark_spawned/mark_launch_failed).
+  if(command==='task_spawn_binding')return taskStore.spawnBinding(args.runId??null,args.attemptId??null);
+  if(command==='task_mark_spawned'){await taskStore.markSpawned(args.binding);return;}
+  if(command==='task_mark_launch_failed'){await taskStore.markLaunchFailed(args.binding);return;}
+  if(command==='pty_output'){
+   const id=Number(args.id);if(!Number.isInteger(id)||id<0)return null;
+   try{const response=await fetch(`http://127.0.0.1:8080/sessions/${id}/output`,{method:'POST',headers:{authorization:`Bearer ${process.env.CANOPY_RUNNER_TOKEN??''}`,'content-type':'application/json'},body:JSON.stringify({max:args.max??null}),signal:AbortSignal.timeout(5000)});if(!response.ok)return null;return (await response.json()).text??null;}catch{return null;}
+  }
+  if(command==='channel_poll')return channels.poll(args.ids,args.wait);
+  if(command==='channel_drop'){channels.drop(args.ids);return;}
+  if(Object.hasOwn(FAMILIES,command)){
+   // A desktop Channel arrives as its name; the command gets a sender.
+   const opened=[];const input={...args};for(const [key,value] of Object.entries(input))if(isChannelArg(value)){input[key]=channels.open(value.__canopyChannel);opened.push(input[key]);}
+   try{return await FAMILIES[command](input);}catch(error){for(const channel of opened)channel.close(String(error?.message??error));throw error;}
+  }
+  // Lets a newer desktop see what this runtime can do before it asks.
+  if(command==='host_capabilities')return {protocol:HOST_PROTOCOL,commands:[...NATIVE_COMMANDS],prefixes:NATIVE_PREFIXES};
   if(command==='session_process_stats'){
     if(!Array.isArray(args.sessions)||args.sessions.length>32)throw Error('Invalid session inventory');
     return sessionProcesses(args.sessions);
   }
-  if(command==='agent_workspace_at')return agentWorkspaceAt(args,{run,scoped});
+  // Proof receipts: the workspace re-runs checks itself (src/receipts/).
+  if(command==='receipt_run_check')return receiptRunCheck(args,{scoped,home:HOME});
+  if(command==='receipt_check_start')return receiptCheckStart(args,{scoped,home:HOME});
+  if(command==='receipt_check_status')return receiptCheckStatus(args);
+  if(command==='receipt_isolate')return receiptIsolate(args,{scoped,home:HOME});
+  if(command==='receipt_release')return receiptRelease(args,{scoped});
   if(command==='workspace_activity')return workspaceActivity();
   if(command==='workspace_metrics')return workspaceMetrics();
   if(command==='workspace_browser_request'){
@@ -116,14 +212,8 @@ export async function nativeInvoke(command,args={}){
   if(command==='cli_take_pending_open'||command==='cli_take_pending_link'||command==='agent_health_report')return null;
   if(command==='instance_id')return 'remote-'+(process.env.CANOPY_WORKSPACE_ID??'workspace');
   if(command==='relay_status')return {role:'off',code:null,port:null,ips:[],addr:null,self_id:null,name:null,visibility:null,public_ip:null,members:[]};
-  if(['notes_list','notes_due','research_list','task_list_history'].includes(command))return metadata(command+'.json',[]);
-  if(['context_tools','context_publish','set_context_scopes','pr_watch_set'].includes(command)){await saveMetadata(command+'.json',args);return;}
-  if(command==='terminal_governor_status'){
-    const limit=Number(await readFile('/sys/fs/cgroup/memory.max','utf8'));
-    const used=Number(await readFile('/sys/fs/cgroup/memory.current','utf8'));
-    if(!Number.isFinite(limit)||!Number.isFinite(used))throw Error('Workspace memory measurement unavailable');
-    return {capability:{platform:'linux',enforcement:'monitor_only',measurement:'workspace cgroup memory.current',hard_limit:true,pause:false,soft_limit:false,dynamic_raise:false,mechanism:'Docker cgroup memory.max',detail:'The hard limit covers this entire workspace, including agents and its desktop. Per-agent budgets are unavailable.'},host_total_bytes:limit,host_available_bytes:Math.max(0,limit-used),protected_reserve_bytes:0,aggregate_terminal_bytes:used,grantable_headroom_bytes:0,fallback_policy:'notify_natively_and_refuse_automatic_grant_pause_or_stop',sessions:[]};
-  }
+  if(['notes_list','notes_due','research_list'].includes(command))return metadata(command+'.json',[]);
+  if(['context_tools','context_publish','set_context_scopes','pr_watch_set'].includes(command)){await saveMetadata(command+'.json',args);if(command==='pr_watch_set')prObserver.watch(args.paths,args.focused);return;}
 
   if(command==='workspace_browser_open'||command==='workspace_preview_open'){
     const raw=String(args.url??'');if(raw.length>8192)throw Error('Sign-in URL too long');
@@ -156,6 +246,11 @@ export async function nativeInvoke(command,args={}){
   if(command==='store_save'){const parsed=JSON.parse(args.data);if(!Array.isArray(parsed.projects))throw Error('Invalid projects');for(const project of parsed.projects)for(const component of project.components??[])await scoped(component.path);await saveMetadata('ide-projects.json',parsed);return;}
   if(command==='fs_read_dir'){const directory=await scoped(target);const entries=await readdir(directory,{withFileTypes:true});if(entries.length>4096)throw Error('Directory too large');return entries.map(e=>({name:e.name,path:path.join(directory,e.name),is_dir:e.isDirectory(),is_symlink:e.isSymbolicLink()}));}
   if(command==='fs_read_file'){const bytes=await boundedRead(await scopedFile(target),Math.min(args.maxBytes??1048576,1048576));return {b64:bytes.toString('base64')};}
+  // A bounded slice of a file, for reads larger than one answer (a note image).
+  if(command==='fs_read_range'){
+   const offset=Number(args.offset??0),length=Math.min(Number(args.length??1048576),1048576);if(!Number.isSafeInteger(offset)||offset<0||!Number.isSafeInteger(length)||length<0)throw Error('Invalid file range');
+   const handle=await open(await scopedFile(target),'r');try{const size=(await handle.stat()).size;const bytes=Buffer.alloc(Math.max(0,Math.min(length,size-offset)));const {bytesRead}=await handle.read(bytes,0,bytes.length,offset);return {b64:bytes.subarray(0,bytesRead).toString('base64'),size};}finally{await handle.close();}
+  }
   if(command==='fs_write_file'||command==='fs_create_file'){const text=command==='fs_create_file'?'':args.content;if(typeof text!=='string'||Buffer.byteLength(text)>1048576)throw Error('Invalid file content');const destination=await scopedFile(target,true);if(command==='fs_create_file')await writeFile(destination,text,{flag:'wx',mode:0o600});else await writeWorkspaceFile(destination,text);return target;}
   if(command==='fs_create_dir'){await mkdir(await scoped(target,true));return target;}
   if(command==='fs_trash'){
@@ -193,6 +288,8 @@ export async function nativeInvoke(command,args={}){
   if(command==='profile_accounts'){if(String(args.id).startsWith('pool-')){await nativeInvoke('profile_env',args);return CLIS.map(agent=>({agent,state:'unknown',account:null}));}return profiles.accounts(args.id);}
   if(command==='git_head_content'){const file=await scoped(args.path);const directory=path.dirname(file);try{const repo=(await run('git',['rev-parse','--show-toplevel'],directory)).trim();return await run('git',['show','HEAD:'+path.relative(repo,file)],repo);}catch{return null;}}
   if(command==='git_log'){const limit=Math.max(1,Math.min(200,Number(args.limit)||40));return (await run('git',['log',`-${limit}`,'--format=%H%x1f%h%x1f%an%x1f%aI%x1f%s%x1f%D'],target)).trimEnd().split('\n').filter(Boolean).map(row=>{const [hash,short,author,date,subject,refs]=row.split('\x1f');return {hash,short,author,date,subject,refs};});}
+  // Churn for hotspot inference (src/awareness/hotspots.ts), same shape as awareness.rs.
+  if(command==='git_churn'){const days=Math.max(1,Math.min(365,Number(args.days)||30));const counts=new Map();for(const line of (await run('git',['log',`--since=${days}.days`,'--no-merges','--name-only','--pretty=format:','-n','2000'],target)).split('\n')){const file=line.trim();if(file)counts.set(file,(counts.get(file)||0)+1);}return [...counts].map(([path,commits])=>({path,commits})).sort((a,b)=>b.commits-a.commits||a.path.localeCompare(b.path)).slice(0,200);}
   if(command==='git_checkout'){try{await run('git',['check-ref-format','--branch',String(args.branch)],target);const message=await run('git',['checkout',...(args.create?['-b']:[]),String(args.branch)],target);return {kind:'switched',message,path:null};}catch(error){return {kind:'failed',summary:'Could not switch branch',detail:error.message};}}
   if(command==='git_clone_start')return cloneJobs.start(args.parent,args.url);
   if(command==='git_clone_status')return cloneJobs.status(args.id);
@@ -233,12 +330,15 @@ export async function nativeInvoke(command,args={}){
   if(command==='agent_usage')return agentUsage.usage();
   if(command==='plan_usage'){await agentUsage.usage();return agentUsage.plans(args.sessionId??null);}
   if(command==='profile_prepare_session')return prepareSession(HOME,args);
-  if(command==='session_digests')return sessionDigests();
+  if(command==='session_digests')return withStoreDigests(await sessionDigests(),await storeDigests(args.roots).catch(()=>[]));
+  if(command==='session_transcript_tail')return sessionTranscriptTail(HOME,args,{scoped});
+  if(command==='session_activity')return sessionActivity(HOME,args);
+  if(command==='session_compact')return sessionCompact(args);
   if(command==='workspace_chrome_stream_open')return browsers.open(args);
   if(command==='workspace_chrome_stream_close'){await browsers.close(args.id);return;}
   if(command==='mcp_servers')return mcpRegistry.servers(args.projectDirs??[]);
   if(command==='mcp_update_sources')return mcpRegistry.update(args.projectDirs??[],args.changes);
-  if(command==='agent_integration_health')return Promise.all(['claude','codex'].map(agent=>integrations.health(agent)));
+  if(command==='agent_integration_health')return Promise.all(HOOKED_CLIS.map(agent=>integrations.health(agent)));
   if(command==='agent_session_summaries'||command==='session_history'||command==='pr_watch_list')return [];
   if(command==='agent_events_poll')return readAgentEvents(HOME+'/.canopy/agent-events.jsonl',args.cursor);
   if(command==='hook_bridge_path')return HOME+'/.canopy/agent-events.jsonl';

@@ -224,3 +224,46 @@ test('migration recovery treats the service mount as the only allowed bind',asyn
   assert.throws(()=>verifyServiceMount({id:'other'},[mount]),/differs/);
   assert.deepEqual(volumeMounts([mount,{Type:'volume',Destination:'/workspace'}]),[{Type:'volume',Destination:'/workspace'}]);
 });
+
+test('a workspace gets its own cgroup namespace, and its cgroup tree is delegated by one root exec, never by privileging the container', async () => {
+  const calls = []; let inspections = 0;
+  const docker = async args => {
+    calls.push(args);
+    if(args[0]==='volume')return {stdout:JSON.stringify([{Name:args[2],Driver:'local',Labels:{'canopy.workspace':'alice'}}])};
+    if (args[0] === 'inspect' && inspections++ === 0) throw Object.assign(new Error('missing'), { stderr: 'error: no such object' });
+    if (args[0] === 'network' && args[1] === 'inspect') throw Object.assign(new Error('missing'), { stderr: 'Error response from daemon: network example not found' });
+    if (args[0] === 'inspect') return { stdout: JSON.stringify([{ State:{Running:true}, HostConfig:{CgroupnsMode:'private'}, NetworkSettings: { Networks: {'canopy-net-alice': {IPAddress: '172.18.0.2'}}, Ports: { '8080/tcp': [{ HostIp: '127.0.0.1', HostPort: '45000' }] } } }]) };
+    if (args[0] === 'exec') throw Object.assign(new Error('exec failed'), { stderr: 'permission denied' });
+    return { stdout: '' };
+  };
+  const logs=[];
+  const host = new DockerWorkspaces({ secret: 'test', docker, log:m=>logs.push(m) });
+  await host.open({ id: 'alice', memoryMiB: 2048, cpus: 2, accounts: [] });
+  const run = calls.find(args => args[0] === 'run');
+  assert.equal(run[run.indexOf('--cgroupns')+1],'private');
+  assert.ok(!run.includes('--privileged'),'the container itself is never privileged');
+  assert.deepEqual(calls.find(args=>args[0]==='exec'),['exec','--privileged','--user','0','canopy-ws-alice','node','/opt/canopy/cgroup-delegate.mjs']);
+  assert.match(logs.join('\n'),/Terminal memory limits unavailable for canopy-ws-alice: permission denied/,'a refusal never blocks the workspace');
+});
+
+test('when AppArmor denies the mount, an unconfined one-shot helper enters the workspace\'s namespaces instead', async () => {
+  const calls = []; let inspections = 0;
+  const docker = async args => {
+    calls.push(args);
+    if(args[0]==='volume')return {stdout:JSON.stringify([{Name:args[2],Driver:'local',Labels:{'canopy.workspace':'alice'}}])};
+    if (args[0] === 'inspect' && inspections++ === 0) throw Object.assign(new Error('missing'), { stderr: 'error: no such object' });
+    if (args[0] === 'network' && args[1] === 'inspect') throw Object.assign(new Error('missing'), { stderr: 'Error response from daemon: network example not found' });
+    if (args[0] === 'inspect') return { stdout: JSON.stringify([{ Config:{Image:'canopy-workspace:test'}, State:{Running:true}, HostConfig:{CgroupnsMode:'private'}, NetworkSettings: { Networks: {'canopy-net-alice': {IPAddress: '172.18.0.2'}}, Ports: { '8080/tcp': [{ HostIp: '127.0.0.1', HostPort: '45000' }] } } }]) };
+    if (args[0] === 'exec') return {stdout:JSON.stringify({ok:false,step:'mount a writable cgroup2',error:'EACCES: permission denied'})+'\n'};
+    if (args[0] === 'run' && args.includes('nsenter')) return {stdout:JSON.stringify({ok:true,root:'/run/canopy-cgroup'})+'\n'};
+    return { stdout: '' };
+  };
+  const logs=[];
+  const host = new DockerWorkspaces({ secret: 'test', docker, log:m=>logs.push(m) });
+  await host.open({ id: 'alice', memoryMiB: 2048, cpus: 2, accounts: [] });
+  const helper=calls.find(args=>args[0]==='run'&&args.includes('nsenter'));
+  assert.deepEqual(helper,['run','--rm','--privileged','--security-opt','apparmor=unconfined','--pid','container:canopy-ws-alice','--network','none','--user','0','--entrypoint','nsenter','canopy-workspace:test','-t','1','-m','-C','--','env','CANOPY_CGROUP_NSENTER=1','node','/opt/canopy/cgroup-delegate.mjs']);
+  const workspace=calls.find(args=>args[0]==='run'&&!args.includes('nsenter'));
+  assert.ok(!workspace.includes('apparmor=unconfined'),'the workspace container keeps its profile');
+  assert.deepEqual(logs.filter(l=>/memory limits/.test(l)),[]);
+});

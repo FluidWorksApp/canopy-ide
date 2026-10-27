@@ -114,6 +114,8 @@ import {
   shouldAutoReview,
   type ReviewPolicy,
 } from "../prPolicy";
+import { IntentEvidenceView } from "./IntentEvidenceView";
+import { resolveAgentForPr } from "../agentForPr";
 // NB: PR diffs arrive as real patches from `gh pr diff`, so they go straight
 // into the renderer. Working-tree diffs (components/DiffView.tsx) have to build
 // their patch first — see the note there about Monaco's diff not computing.
@@ -1592,6 +1594,39 @@ export function PrView({
     () => files.reduce((n, f) => n + f.changed, 0),
     [files],
   );
+  // Intent & evidence (IntentEvidenceView): the sessions that raised this PR,
+  // whose plan and receipt the review opens on; and the risk map's order,
+  // which the file list below follows.
+  const [prSessions, setPrSessions] = useState<ipc.ProvenanceEdge[]>([]);
+  useEffect(() => {
+    let live = true;
+    setPrSessions([]);
+    void Promise.resolve()
+      .then(() => ipc.provenanceForPr(repo, pr.number))
+      .then((edges) => live && setPrSessions([...(edges ?? [])].sort((a, b) => b.at - a.at)))
+      .catch(() => {});
+    return () => {
+      live = false;
+    };
+  }, [repo, pr.number]);
+  const [riskPaths, setRiskPaths] = useState<string[]>([]);
+  const riskFiles = useMemo(() => {
+    if (!riskPaths.length) return files;
+    const rank = new Map(riskPaths.map((p, i) => [p, i]));
+    return [...files].sort((a, b) => (rank.get(a.path) ?? riskPaths.length) - (rank.get(b.path) ?? riskPaths.length));
+  }, [files, riskPaths]);
+  /** "Ask the agent to split this": only a raiser still running here can be
+   *  typed to; anything else says where to go instead. */
+  const askRaiser = useCallback(
+    (text: string) => {
+      const to = resolveAgentForPr(prSessions, { live: liveSessions ?? new Map(), dirExists: () => false });
+      if (to.kind !== "live" || !onSendToRaiser)
+        return { delivered: false, note: "The agent that raised this PR isn't running here. Paste the request into its tab." };
+      onSendToRaiser(to, text);
+      return { delivered: true, note: "Sent to the agent." };
+    },
+    [prSessions, liveSessions, onSendToRaiser],
+  );
   const totalAdd = useMemo(
     () => files.reduce((n, f) => n + f.additions, 0),
     [files],
@@ -2319,6 +2354,14 @@ export function PrView({
       <div className="pr-body">
         <div className="pr-overview">
           <div className="pr-overview-main">
+            <IntentEvidenceView
+              cwd={repo}
+              sessionIds={prSessions.map((e) => e.session_id)}
+              patch={patch}
+              onOpenFile={jumpToFile}
+              onRiskOrder={setRiskPaths}
+              onAskAgent={askRaiser}
+            />
             {descLoading ? (
               /* Wearing .pr-description itself, so the card that arrives is
                  the card that was already there — same border, same padding,
@@ -2795,7 +2838,7 @@ export function PrView({
           </div>
         )}
 
-        {files.map((f) => (
+        {riskFiles.map((f) => (
           <PrFileCard
             key={f.path}
             f={f}

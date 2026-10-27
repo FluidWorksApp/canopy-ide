@@ -17,6 +17,7 @@ import {
   type Card,
   type DiffCard,
   type FileCard,
+  type PlanCard,
   type PrCard,
   type RepoRef,
   type ReportCard,
@@ -28,8 +29,20 @@ export class ShareError extends Error {}
 
 /** What the entry points open the share dialog with. */
 export type ShareRequest =
-  | { kind: "share"; card: Card; warning?: string }
+  | {
+      kind: "share";
+      card: Card;
+      warning?: string;
+      /** Told where the card went once it is sent: a live-session card's
+       *  owner lets that conversation's people join (src/liveSession). */
+      onSent?: (team: string, peer: string | null) => void;
+      /** A teammate's account id: opens addressed to them, and mentions them. */
+      to?: string;
+    }
   | { kind: "review"; card: Omit<ReviewRequestCard, "reviewers"> }
+  /** A plan for approval: the dialog asks who may approve it, like reviewers
+   *  for a review request, and reports them back once it is sent. */
+  | { kind: "plan"; card: Omit<PlanCard, "approvers">; onSent?: (approvers: string[]) => void }
   | { kind: "error"; message: string };
 
 export const OPEN_SHARE_DIALOG_EVENT = "canopy:open-share-dialog";

@@ -30,6 +30,8 @@ import {AccountSync} from './AccountSync';
 import {workspaceStatus} from './WorkspaceHero';
 import {dismissStopSwitchNotice,markStopRequested,saveMemberStopNotice,saveStopSwitchNotice,takeMemberStopNotice,takeStopSwitchNotice,useWorkspaceLifecycle,workspaceLifecycle} from './workspaceLifecycle';
 import {WorkspaceStopNotice} from './WorkspaceStopNotice';
+import {SHOW_WORKSPACE_EVENT,type ShowWorkspaceDetail} from '../readableLinks';
+import {CopyLinkButton} from '../components/CopyLinkButton';
 import {connectionKey,reportWorkspaceLifecycle} from './connectionState';
 
 export function WorkspaceSelector({ onboarding = false,onHibernateWorkspace }: { onboarding?: boolean;onHibernateWorkspace?:(onProgress?:HibernateProgressListener,confirmOthers?:ConfirmOthers)=>Promise<void> }) {
@@ -147,6 +149,30 @@ export function WorkspaceSelector({ onboarding = false,onHibernateWorkspace }: {
   const [menuOpen,setMenuOpen]=useState(false),[menuBusy,setMenuBusy]=useState<string|null>(null),[menuError,setMenuError]=useState('');
   const [openRequest,setOpenRequest]=useState<{id:string;nonce:number}|null>(null);
   useEffect(()=>{const show=()=>setOpen(true);window.addEventListener('canopy:open-workspaces',show);return()=>window.removeEventListener('canopy:open-workspaces',show);},[]);
+  // A readable Canopy link (readableLinks.ts) asks to open a workspace, or to
+  // show it (a shared session link lands on its Overview). Opening goes through
+  // the same background resume-and-connect as picking it from the menu.
+  useEffect(()=>{
+   const show=(event:Event)=>{
+    const detail=(event as CustomEvent<ShowWorkspaceDetail>).detail;if(!detail?.workspaceId)return;
+    const id=detail.workspaceId,known=peekWorkspaceList()?.workspaces.some(w=>w.id===id);
+    setPanelMounted(true);
+    const showDetails=()=>{setSelectedId(`managed:${id}`);setSection('overview');setOpen(true);};
+    if(detail.connect&&activeWorkspace()?.connection.workspaceId===id)return;
+    // A link can arrive before this window has listed workspaces (a cold
+    // start from the browser): ask anyway, and ManagedWorkspaces connects as
+    // soon as its list has it. Only if the account really doesn't list it
+    // does the panel open, to say so.
+    if(detail.connect){
+     setOpenRequest({id,nonce:Date.now()});
+     const missing=()=>{setError('Your account doesn’t list this workspace. Ask its owner to share it with you, then open the link again.');setOpen(true);};
+     if(!known)void refreshWorkspaceList().then(result=>{if(!result.workspaces.some(w=>w.id===id))missing();},missing);
+     return;
+    }
+    showDetails();
+   };
+   window.addEventListener(SHOW_WORKSPACE_EVENT,show);return()=>window.removeEventListener(SHOW_WORKSPACE_EVENT,show);
+  },[]);
   const [desktop, setDesktop] = useState(false);
   const [endpoint, setEndpoint] = useState(active?.connection.endpoint ?? 'http://127.0.0.1:8787');
   const [token, setToken] = useState(active?.connection.token ?? '');
@@ -220,7 +246,7 @@ export function WorkspaceSelector({ onboarding = false,onHibernateWorkspace }: {
     catch(error){setMenuError(String(error));}finally{setMenuBusy(null);}
   }
   return <>
-    {menuOpen&&!onboarding&&<WorkspaceMenu anchor={menuAnchor.current} rows={menuRows} busyId={menuBusy} error={menuError} onClose={()=>setMenuOpen(false)} onPick={row=>void pick(row)} onNew={()=>{setMenuOpen(false);setError('');setOpen(true);setAdding(true);}} onManage={()=>{setMenuOpen(false);setSelectedId(activeId);setOpen(true);}}/>}
+    {menuOpen&&!onboarding&&<WorkspaceMenu linkWorkspaceId={active&&isAccountWorkspace(active.connection)?active.connection.workspaceId:undefined} anchor={menuAnchor.current} rows={menuRows} busyId={menuBusy} error={menuError} onClose={()=>setMenuOpen(false)} onPick={row=>void pick(row)} onNew={()=>{setMenuOpen(false);setError('');setOpen(true);setAdding(true);}} onManage={()=>{setMenuOpen(false);setSelectedId(activeId);setOpen(true);}}/>}
     {hibernateOperation&&createPortal(<WorkspaceHibernateProgress operation={hibernateOperation} minimized={hibernateMinimized} onMinimize={()=>setHibernateMinimized(true)} onExpand={()=>setHibernateMinimized(false)} onRetry={()=>void hibernateVm(hibernateOperation.progress.phase==='stopping-compute')} onDismiss={()=>{if(!stoppingVm)setHibernateOperation(null);}}/>,document.body)}
     {accountRemoval&&createPortal(<Dialog title={`Remove ${accountRemoval.name} connection?`} body="Remove this saved connection from your Canopy account. The VM keeps running until you stop it separately. Its disks, files, setup and usage history stay untouched." onDismiss={()=>{if(!busy)setAccountRemoval(null);}} actions={[{label:'Keep connection',onClick:()=>setAccountRemoval(null)},{label:busy?'Removing…':'Remove connection',disabled:busy||accountRemovalName!==accountRemoval.name,onClick:()=>void removeAccountConnection()}]}><label>Type the workspace name to confirm<TextInput aria-label="Workspace name confirmation" width="full" autoComplete="off" value={accountRemovalName} disabled={busy} onChange={event=>setAccountRemovalName(event.target.value)}/></label>{error&&<p role="alert">{error}</p>}</Dialog>,document.body)}
     {forgetConfirm&&createPortal(<Dialog title={`Remove ${selected?.workspaceName??'workspace'} connection?`} body="Remove this saved connection from this Mac. The workspace and its files stay on the remote host. This does not stop or delete the VM." onDismiss={()=>{if(!busy)setForgetConfirm(false);}} actions={[{label:'Cancel',onClick:()=>setForgetConfirm(false)},{label:busy?'Removing…':'Remove connection',onClick:()=>{if(!busy)void forgetConnection();}}]}/>,document.body)}
@@ -245,6 +271,7 @@ export function WorkspaceSelector({ onboarding = false,onHibernateWorkspace }: {
       {managedSelection&&section==='overview'&&<div className="workspace-overview"><div className="workspace-overview-copy"><h3>{selectedLifecycle==='error'?'Preparation needs attention':selectedLifecycle==='stopping'?'Workspace is stopping':selectedActive?'Your active workspace':selectedLifecycle==='stopped'?'Workspace is stopped':'Ready when you are'}</h3><p>{selectedLifecycle==='error'?'Preparation stopped before the workspace was ready. Retry to recover, or use More to stop it. Your saved files are kept.':selectedLifecycle==='stopping'?'Compute is shutting down. Files and setup are saved. You can resume it once it has stopped.':selectedLifecycle==='stopped'?'Compute is off. Resume this workspace to return to your projects. Files and setup stay saved.':'Projects, terminals and agents run together in this workspace.'}</p></div><button type="button" className="workspace-overview-access" onClick={()=>setSection('access')}><span><strong>Manage access</strong><small>Teams, people and workspace permissions</small></span><span aria-hidden="true">→</span></button></div>}
       {managedSelection&&section==='tools'&&managedSelection.access?.owner===true&&<WorkspaceOwnerTools key={managedSelection.id} workspaceId={managedSelection.id}/>}
       {managedSelection&&section==='tools'&&!selectedActive&&<p className="workspace-section-hint">Open this workspace to connect your personal accounts, import projects or use its desktop.</p>}
+      {managedSelection&&section==='overview'&&<div className="workspace-share-link"><div><strong>Link for teammates</strong><small>Anyone with access opens this workspace from it. Nothing to generate.</small></div><CopyLinkButton target={{kind:'workspace',workspaceId:managedSelection.id}}/></div>}
       {managedSelection&&section==='overview'&&<SharedSessionsPanel key={'sessions-'+managedSelection.id} workspaceId={managedSelection.id} owner={managedSelection.access?.owner===true}/>}
       <section id="workspace-controls" role="tabpanel" aria-labelledby={`workspace-tab-${workspaceTabs.findIndex(workspace=>workspace.id===resolvedSelectedId)}`} className="workspace-detail" hidden={!!managedSelection&&section!=='tools'}>
         {!selectedManagedId&&<div className="workspace-detail-heading"><div><strong>{selected?.workspaceName??'Local workspace'}</strong><small>{selected?'Remote workspace · files and processes run here':'This Mac · files and processes run on this device'}</small></div><span className="workspace-selected">{selectedActive?(active?connectionLabel(connectionState):'Active'):'Not active'}</span></div>}

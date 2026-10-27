@@ -12,6 +12,7 @@ import type { BrowserEngine } from "./browserBounds";
 import type { MascotId } from "./mascots";
 import type { CaptureMode } from "./pageCapture";
 import { IS_MAC } from "./platform";
+import { lensFromStoredDefault, storedDefaultFor } from "./lensMigration";
 import { DEFAULT_AGENT_CLI_ID } from "../shared/agentCliIdentity";
 import { SKINS, type SkinId } from "./skins/registry";
 import {
@@ -446,6 +447,81 @@ export interface Settings {
    *  stored settings win over defaults only once a key exists (see
    *  getSettings) — so whoever turns it off stays off. */
   autoUpdateClis: boolean;
+  /** Builder lens: let the brain summarise each saved step in plain words and
+   *  map the project's layers on its own (background tier, cached per step).
+   *  Off = titles fall back to the request text and the map waits for a click. */
+  lensAutoSummaries: boolean;
+  /** Model for the brain's main-tier headless calls (brainCall.ts). Empty =
+   *  the CLI's own default, which is what the person already pays for. */
+  brainModel: string;
+  /** Model for background brain calls — the ones no one is waiting on. Empty
+   *  = the brain's runner's cheap alias (`backgroundModel` in
+   *  structuredRunners.ts), else the CLI default. */
+  brainBackgroundModel: string;
+  /** Daily cap, in USD, across every brain feature; null = no cap. Checked
+   *  before each call against today's metered spend (brainMeter.ts). Calls
+   *  whose CLI reports no price meter as $0 and are never capped by this. */
+  brainDailyBudgetUsd: number | null;
+  /** Per-feature daily caps in USD, keyed by brain feature tag. A feature with
+   *  no entry is capped only by the daily total. */
+  brainFeatureBudgetsUsd: Record<string, number>;
+  /** "Tell agents about each other's changes" (src/awareness). On by default:
+   *  when an agent finishes a turn, Canopy works out which other live agents
+   *  on the same repository it may have affected, asks the brain (background
+   *  tier) to write each a short note, and types it into their terminal as a
+   *  mesh message; hotspot files touched by two agents get a claim. Off means
+   *  none of that runs and no brain calls are made for it. */
+  awarenessEnabled: boolean;
+  /** Per-repository hotspot override, keyed by the repo's canonical root (the
+   *  main checkout, see ledger.ts). Repo-relative paths or directory prefixes;
+   *  when present for a repo it replaces the inferred list entirely. */
+  awarenessHotspots: Record<string, string[]>;
+  /** Default budget, in USD, for every agent session; null = no cap. A
+   *  session's own budget ("Budget $5" in its prompt or header) or its plan's
+   *  budget overrides it. Warns at 80%, pauses at 100% (outcomes/budgets.ts). */
+  sessionBudgetUsd: number | null;
+  /** Cap, in USD, for agent sessions in a Build-lens (prototype) project when
+   *  no other budget applies — so a prototype left running overnight cannot
+   *  run up a large bill. null = no cap. */
+  builderSessionCapUsd: number | null;
+  /** At 100% of its budget, press Esc in the agent's terminal to pause it.
+   *  Off = warn only. */
+  budgetPauseAtLimit: boolean;
+  /** Let the brain write a weekly insight over the Outcomes panel's numbers
+   *  (at most once a day, background model). Off = numbers only. */
+  outcomesInsight: boolean;
+  /** Let the brain title agent tabs whose agent never named its own task, and
+   *  write the one-line summary the Agents views show for a session. One cheap
+   *  background call per opening prompt, cached by its text
+   *  (brainSessionTitle.ts). Off = the prompt's first words, as before. */
+  brainSessionTitles: boolean;
+  /** Proof receipts (src/receipts/): "auto" re-runs the project's checks after
+   *  every agent turn that changed files and asks the brain for a verdict;
+   *  "manual" only on "Verify now"; "off" hides receipts entirely. */
+  receiptMode: "auto" | "manual" | "off";
+  /** Per-project check commands, keyed by the repo's canonical root (the
+   *  ledger root). A project with an entry runs exactly these, one shell line
+   *  each, instead of what Canopy detects from its manifests. */
+  receiptCommands: Record<string, string[]>;
+  /** Session documents (src/sessionDoc): when one opens and has no current
+   *  written summary, ask the brain for one on the background tier. Off = the
+   *  summary is written only when the person presses the button. */
+  sessionDocAutoSummary: boolean;
+  /** Commits made from Canopy's Changes panel get an `Agent-Session:` trailer
+   *  for each agent session whose journaled edits are in the commit — the
+   *  session-to-lines provenance a reviewer can follow back. Off by default:
+   *  it changes what lands in other people's history. */
+  commitSessionTrailers: boolean;
+  /** Plans (src/plans): work dispatched to an agent through Canopy gets a
+   *  brain-written plan first — shown inline for tiny low-risk work, held for
+   *  approval otherwise. Off = agents start straight from the brief. */
+  planBeforeDispatch: boolean;
+  /** Intent & evidence review (src/review): ask the brain for the
+   *  plan-deviation summary as soon as the view opens. Off = a button asks. */
+  reviewAutoSummary: boolean;
+  /** Most changed lines one reviewable slice may carry before the review view
+   *  says so and offers to ask the agent to split it. */
+  reviewSliceBudgetLines: number;
   /** Connect Claude Code to Canopy as its IDE, the way it connects to VS Code:
    *  proposed edits open as a diff to accept, tweak or reject, the editor
    *  selection reaches the prompt, and the CLI reads diagnostics off Canopy's
@@ -460,6 +536,25 @@ export interface Settings {
    *  existing ones stay restorable until retention prunes them. Claude Code
    *  only for now, and only in git checkouts. */
   turnRollback: boolean;
+  /** Team memory (memoryExtract.ts): after agent turns, ask the brain on the
+   *  background tier for 0–3 durable decisions/constraints/conventions/facts
+   *  and file them in the ledger as *proposed* — never served to agents until
+   *  a person approves them in the Memory panel. */
+  memoryAutoExtract: boolean;
+  /** Days a new memory lives before it must be reconfirmed. Facts go stale
+   *  fastest; decisions, constraints and conventions share the longer clock. */
+  memoryFactExpiryDays: number;
+  memoryDecisionExpiryDays: number;
+  /** What happens to memories from a session that read untrusted content
+   *  (web pages, the browser, tickets, PR comments): "quarantine" files them
+   *  behind an explicit approval, "skip" never extracts from such a session. */
+  memoryQuarantine: "quarantine" | "skip";
+  /** Rewrite the instruction file's generated "Team memory" section whenever
+   *  memory is approved or changes (memoryInstructionSync.ts). null = on for
+   *  a project once someone has used "Update the instruction file" there. */
+  memoryInstructionAutoUpdate: boolean | null;
+  /** Per ledger root, the instruction file that section was last written to. */
+  memoryInstructionFiles: Record<string, string>;
   /** Show attention items outside the notification centre: corner cards,
    * companion notices, native banners, and the remote companion channel. Off
    * is a presentation preference only — every item stays in the shared queue
@@ -654,8 +749,33 @@ export const DEFAULTS: Settings = {
   agentAskForAttention: false,
   agentsMaySpawn: true,
   autoUpdateClis: true,
+  lensAutoSummaries: true,
+  brainModel: "",
+  brainBackgroundModel: "",
+  brainDailyBudgetUsd: null,
+  brainFeatureBudgetsUsd: {},
+  awarenessEnabled: true,
+  awarenessHotspots: {},
+  sessionBudgetUsd: null,
+  builderSessionCapUsd: 10,
+  budgetPauseAtLimit: true,
+  outcomesInsight: true,
+  brainSessionTitles: true,
+  receiptMode: "auto",
+  receiptCommands: {},
+  sessionDocAutoSummary: true,
+  commitSessionTrailers: false,
+  planBeforeDispatch: true,
+  reviewAutoSummary: true,
+  reviewSliceBudgetLines: 400,
   claudeIdeIntegration: true,
   turnRollback: true,
+  memoryAutoExtract: true,
+  memoryFactExpiryDays: 90,
+  memoryDecisionExpiryDays: 180,
+  memoryQuarantine: "quarantine",
+  memoryInstructionAutoUpdate: null,
+  memoryInstructionFiles: {},
   notificationPopupsEnabled: true,
   teamMessageNotifications: true,
   teamMessagePreviews: true,
@@ -742,6 +862,31 @@ const boundedScrollback = (value: unknown): number => {
   );
 };
 
+const budgetUsd = (value: unknown): number | null =>
+  typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : null;
+
+/** Hand-edited check commands must stay strings: they reach a shell. */
+function receiptCommands(value: unknown): Record<string, string[]> {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return {};
+  const out: Record<string, string[]> = {};
+  for (const [root, lines] of Object.entries(value as Record<string, unknown>)) {
+    if (!Array.isArray(lines)) continue;
+    const kept = lines.filter((l): l is string => typeof l === "string" && !!l.trim()).slice(0, 8);
+    if (kept.length) out[root] = kept;
+  }
+  return out;
+}
+
+const featureBudgets = (value: unknown): Record<string, number> => {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return {};
+  const out: Record<string, number> = {};
+  for (const [feature, cap] of Object.entries(value)) {
+    const usd = budgetUsd(cap);
+    if (usd !== null) out[feature] = usd;
+  }
+  return out;
+};
+
 const KEY = "canopy.settings";
 
 /** Parsed-settings cache, keyed on the raw stored string: getSettings is
@@ -750,6 +895,17 @@ const KEY = "canopy.settings";
  *  something else touches the key — tests do. Also makes the returned object
  *  identity-stable between writes. */
 let settingsCache: { raw: string | null; value: Settings } | null = null;
+
+/** A hand-edited override must not crash inference: keep string lists only. */
+function hotspotOverrides(raw: unknown): Record<string, string[]> {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return {};
+  const out: Record<string, string[]> = {};
+  for (const [root, list] of Object.entries(raw as Record<string, unknown>)) {
+    if (!Array.isArray(list)) continue;
+    out[root] = list.filter((p): p is string => typeof p === "string" && !!p.trim()).slice(0, 100);
+  }
+  return out;
+}
 
 export function getSettings(): Settings {
   const raw = localStorage.getItem(KEY);
@@ -793,6 +949,39 @@ export function getSettings(): Settings {
     )
       value.teamMutedConversations = [];
     else value.teamMutedConversations = value.teamMutedConversations.slice(-500);
+    // Budgets gate spending, so a hand-edited or corrupt value must fail
+    // towards "no cap" rather than towards a NaN that compares false forever
+    // or a negative that blocks every call.
+    value.brainDailyBudgetUsd = budgetUsd(value.brainDailyBudgetUsd);
+    value.brainFeatureBudgetsUsd = featureBudgets(value.brainFeatureBudgetsUsd);
+    value.sessionBudgetUsd = budgetUsd(value.sessionBudgetUsd);
+    value.builderSessionCapUsd = budgetUsd(value.builderSessionCapUsd);
+    if (!["auto", "manual", "off"].includes(value.receiptMode)) value.receiptMode = "auto";
+    value.receiptCommands = receiptCommands(value.receiptCommands);
+    if (typeof value.brainModel !== "string") value.brainModel = "";
+    if (typeof value.brainBackgroundModel !== "string") value.brainBackgroundModel = "";
+    // The old Build/Engineer mode setting is now the default *lens*. Keep its
+    // stored name and spelling, but fold every value it has held ("build",
+    // "builder", true, junk) onto the two the app understands.
+    value.defaultProjectLens = storedDefaultFor(lensFromStoredDefault(stored.defaultProjectLens ?? DEFAULTS.defaultProjectLens));
+    if (typeof value.awarenessEnabled !== "boolean") value.awarenessEnabled = true;
+    value.awarenessHotspots = hotspotOverrides(value.awarenessHotspots);
+    // An expiry is a safety property (stale memory stops being served), so a
+    // corrupt value falls back to the default rather than to "never".
+    for (const key of ["memoryFactExpiryDays", "memoryDecisionExpiryDays"] as const) {
+      const days = Number(value[key]);
+      value[key] = Number.isFinite(days) && days >= 1 ? Math.min(Math.round(days), 3650) : DEFAULTS[key];
+    }
+    if (value.memoryQuarantine !== "skip") value.memoryQuarantine = "quarantine";
+    if (typeof value.memoryInstructionAutoUpdate !== "boolean") value.memoryInstructionAutoUpdate = null;
+    if (!value.memoryInstructionFiles || typeof value.memoryInstructionFiles !== "object" || Array.isArray(value.memoryInstructionFiles))
+      value.memoryInstructionFiles = {};
+    if (typeof value.brainSessionTitles !== "boolean") value.brainSessionTitles = true;
+    if (
+      !Number.isFinite(value.reviewSliceBudgetLines) ||
+      value.reviewSliceBudgetLines < 20
+    )
+      value.reviewSliceBudgetLines = DEFAULTS.reviewSliceBudgetLines;
   } catch {
     value = { ...DEFAULTS };
   }

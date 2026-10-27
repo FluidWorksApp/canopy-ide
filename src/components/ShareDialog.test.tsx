@@ -62,8 +62,36 @@ it('asks for reviewers and mentions them on a review request',async()=>{
  expect(ext.card.reviewers).toEqual(['carol']);expect(ext.mentions).toEqual(['carol']);
 });
 
+it('asks who can approve a plan, names them on the card and reports them back',async()=>{
+ const onSent=vi.fn();
+ const card={type:'plan' as const,v:1 as const,plan:'pl-abc-def123',goal:'Paginate orders',acceptance:['npm test passes'],risk:'high' as const,size:'small' as const};
+ render(<ShareDialog request={{kind:'plan',card,onSent}} onClose={()=>{}} directory={directory}/>);
+ await screen.findByRole('checkbox',{name:'Bob'});
+ expect(screen.getByText('Choose who can approve it.')).toBeTruthy();
+ fireEvent.click(screen.getByRole('checkbox',{name:'Bob'}));
+ fireEvent.click(screen.getByRole('button',{name:'Send'}));
+ await waitFor(()=>expect(sent).toHaveLength(1));
+ const [,,,ext]=sent[0] as [string,null,unknown,{card:{approvers:string[]};mentions:string[]}];
+ expect(ext.card.approvers).toEqual(['bob']);expect(ext.mentions).toEqual(['bob']);
+ expect(onSent).toHaveBeenCalledWith(['bob']);
+});
+
 it('shows why something cannot be shared',()=>{
  render(<ShareDialog request={{kind:'error',message:'This checkout has no origin on a git host.'}} onClose={()=>{}} directory={directory}/>);
  expect(screen.getByRole('alert').textContent).toContain('no origin');
  expect(screen.queryByRole('button',{name:'Send'})).toBeNull();
+});
+
+it('Escape closes the share dialog, not the surface it was opened from',async()=>{
+ // The session document (and every other opener) sits on the Escape stack;
+ // the dialog opens over it and must be the one layer the key reaches.
+ const {useEscape}=await import('../useEscape');
+ const docClose=vi.fn(),dialogClose=vi.fn();
+ function Doc(){useEscape(docClose);return <div>document</div>;}
+ const card:Card={type:'pr',v:1,repo,number:12,title:'Fix the cache'};
+ render(<><Doc/><ShareDialog request={{kind:'share',card}} onClose={dialogClose} directory={directory}/></>);
+ await screen.findByRole('option',{name:'Bob'});
+ fireEvent.keyDown(window,{key:'Escape'});
+ expect(dialogClose).toHaveBeenCalledTimes(1);
+ expect(docClose).not.toHaveBeenCalled();
 });

@@ -375,6 +375,12 @@ export async function resolveShareCard(
       return (await asPr(card.number)) ?? web(repo);
     case "report":
       return card.pr ? ((await asPr(card.pr)) ?? web(repo)) : { do: "none" };
+    case "handoff":
+    case "live-session":
+    case "layer-approval":
+      // These name their repo for context only; their own buttons ("Take
+      // over", "Join", "Approve") are their actions.
+      return { do: "none" };
     case "diff": {
       if (card.pr) {
         const pr = await asPr(card.pr);
@@ -395,6 +401,9 @@ export async function resolveShareCard(
       return { do: "file", repo, path: card.path, line: card.lines?.start, rev: card.rev, head, exists };
     }
     case "terminal":
+    case "plan":
+    case "plan-outcome":
+    case "layer-approval-outcome":
       return { do: "none" };
   }
 }

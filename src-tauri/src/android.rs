@@ -747,14 +747,118 @@ pub async fn android_run(
     serial: String,
 ) -> Result<String, String> {
     tauri::async_runtime::spawn_blocking(move || {
-        let sdk = sdk_or_err(Some(&project_dir))?;
-        run(Command::new(cli_or_err(&sdk)?)
-            .args([
-                "run",
-                &format!("--apks={apk}"),
-                &format!("--device={serial}"),
-            ])
-            .current_dir(&project_dir))
+        let sdk = sdk_or_err(local_dir(&project_dir))?;
+        let mut cmd = Command::new(cli_or_err(&sdk)?);
+        cmd.args([
+            "run",
+            &format!("--apks={apk}"),
+            &format!("--device={serial}"),
+        ]);
+        // A project that lives in a cloud workspace has no directory here;
+        // its APK was staged on this computer (android_stage_file), and
+        // installing it needs only the device and the SDK.
+        if let Some(dir) = local_dir(&project_dir) {
+            cmd.current_dir(dir);
+        }
+        run(&mut cmd)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// The project directory when it exists on this computer. A cloud
+/// workspace's path (`/workspace/…`) does not, and must neither pin the SDK
+/// nor be the working directory.
+fn local_dir(project_dir: &str) -> Option<&str> {
+    (!project_dir.is_empty() && Path::new(project_dir).is_dir()).then_some(project_dir)
+}
+
+// ---------- staging files from a cloud workspace ----------
+
+/// An APK built in a cloud workspace is copied here, in slices, before it is
+/// installed on a device attached to this computer.
+const STAGE_DIR: &str = "canopy-android-stage";
+const STAGE_MAX_BYTES: u64 = 1024 * 1024 * 1024;
+const STAGE_KEEP_SECS: u64 = 24 * 60 * 60;
+
+fn stage_name_ok(name: &str) -> bool {
+    let lower = name.to_ascii_lowercase();
+    (5..=128).contains(&name.len())
+        && (lower.ends_with(".apk") || lower.ends_with(".apks"))
+        && !name.starts_with('.')
+        && name
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.'))
+}
+
+/// Write one slice of a staged file under `dir`. The first slice (offset 0)
+/// starts the file afresh and clears day-old leftovers; each later slice must
+/// land exactly at the current end. Returns the file's path once `done`.
+pub fn stage_slice(
+    dir: &Path,
+    name: &str,
+    offset: u64,
+    bytes: &[u8],
+    done: bool,
+) -> Result<Option<PathBuf>, String> {
+    use std::io::Write;
+    if !stage_name_ok(name) {
+        return Err(format!("not a stageable APK name: {name}"));
+    }
+    if offset.saturating_add(bytes.len() as u64) > STAGE_MAX_BYTES {
+        return Err("that APK is larger than 1 GB; Canopy won't copy it here".into());
+    }
+    std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+    let path = dir.join(name);
+    if offset == 0 {
+        if let Ok(entries) = std::fs::read_dir(dir) {
+            for entry in entries.flatten() {
+                let old = entry
+                    .metadata()
+                    .ok()
+                    .and_then(|m| m.modified().ok())
+                    .and_then(|t| t.elapsed().ok())
+                    .is_some_and(|age| age.as_secs() > STAGE_KEEP_SECS);
+                if old {
+                    let _ = std::fs::remove_file(entry.path());
+                }
+            }
+        }
+        let _ = std::fs::remove_file(&path);
+    } else {
+        let have = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+        if have != offset {
+            return Err(format!(
+                "staging {name} lost its place (have {have} bytes, slice starts at {offset})"
+            ));
+        }
+    }
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+        .map_err(|e| e.to_string())?;
+    file.write_all(bytes).map_err(|e| e.to_string())?;
+    Ok(done.then_some(path))
+}
+
+/// Copy one slice of a cloud workspace's APK to this computer (see
+/// `stage_slice`); resolves with the local path once the last slice lands.
+#[tauri::command]
+pub async fn android_stage_file(
+    name: String,
+    offset: u64,
+    b64: String,
+    done: bool,
+) -> Result<Option<String>, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        use base64::Engine;
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(b64.as_bytes())
+            .map_err(|e| format!("invalid slice: {e}"))?;
+        let dir = std::env::temp_dir().join(STAGE_DIR);
+        stage_slice(&dir, &name, offset, &bytes, done)
+            .map(|p| p.map(|p| p.to_string_lossy().to_string()))
     })
     .await
     .map_err(|e| e.to_string())?
@@ -889,5 +993,43 @@ mod tests {
         assert!(!is_keyevent_name("back"));
         assert!(!is_keyevent_name("BACK; rm -rf /"));
         assert!(!is_keyevent_name(""));
+    }
+    #[test]
+    fn a_cloud_workspace_path_is_not_a_local_project() {
+        assert_eq!(local_dir("/workspace/definitely-not-here-xyz"), None);
+        assert_eq!(local_dir(""), None);
+        let here = std::env::temp_dir();
+        let here = here.to_str().unwrap();
+        assert_eq!(local_dir(here), Some(here));
+    }
+
+    #[test]
+    fn stages_an_apk_in_order_and_refuses_bad_names_and_gaps() {
+        let dir = std::env::temp_dir().join(format!("canopy-stage-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(
+            stage_slice(&dir, "a1b2.apk", 0, b"PK", false).unwrap(),
+            None
+        );
+        assert!(
+            stage_slice(&dir, "a1b2.apk", 5, b"x", false).is_err(),
+            "a gap is refused"
+        );
+        let path = stage_slice(&dir, "a1b2.apk", 2, b"zz", true)
+            .unwrap()
+            .unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), b"PKzz");
+        assert!(path.starts_with(&dir));
+        for bad in [
+            "../x.apk", "a/b.apk", "a\\b.apk", "x.exe", ".apk", "evil..sh",
+        ] {
+            assert!(stage_slice(&dir, bad, 0, b"x", true).is_err(), "{bad}");
+        }
+        // Starting again replaces the old copy.
+        let again = stage_slice(&dir, "a1b2.apk", 0, b"Q", true)
+            .unwrap()
+            .unwrap();
+        assert_eq!(std::fs::read(&again).unwrap(), b"Q");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

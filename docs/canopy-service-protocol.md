@@ -46,10 +46,12 @@ Same paths, request bodies and response shapes as the desktop bridge
 credential>`. The service serves:
 
 `GET /ctx/identity`, `GET /ctx/tools`, `GET|POST /ctx/claims`, `POST /ctx/mesh`,
-`POST /ctx/notes`, `POST /ctx/research`, `POST /ctx/action` for kinds
+`POST /ctx/notes`, `POST /ctx/research`, `POST /ctx/memory` (team memory, from
+the copy the desktop syncs; proposals queue for the desktop's ledger), `POST /ctx/action` for kinds
 `job_done`, `task_named`, `notify`, `mesh_send`, `message_agent` (ptyId/name
 targets only), `close_session`; `POST /ctx/ask` (ask_user/confirm, §5);
-`POST /ctx/browser` (forwarded to the runner, §4).
+`POST /ctx/browser` (forwarded to the runner, §4); `POST /ctx/device` (the
+desktop's device-op body, relayed to the IDE, §5.1).
 
 Every other route or action kind answers **503** with body
 `{"error":"unavailable","reason":"no-ide"|"laptop-only"|"not-implemented","message":"..."}`
@@ -74,7 +76,7 @@ workspace name supplied at registration, its root `/workspace`.
 | `PUT /admin/workspaces/{ws}/access` | signed access snapshot (§6) | `{revision}`; rejects rollback and bad signatures |
 | `GET /admin/workspaces/{ws}/stream?cursor=<epoch>:<seq>` | — | SSE, §5 |
 | `POST /admin/workspaces/{ws}/query` | `{store, action, args}` | same JSON the desktop's Tauri command returns for that store/action (reads only) |
-| `POST /admin/workspaces/{ws}/actions` | `{kind, ...}` with the acting user in `actor` | user actions: `answer` (ask_user), `attention_ack`, `notes_write`, `research_write` |
+| `POST /admin/workspaces/{ws}/actions` | `{kind, ...}` with the acting user in `actor` | user actions: `answer` (ask_user), `attention_ack`, `notes_write`, `research_write`; `memory_sync` `{root, entries}` replaces the synced team-memory copy (only approved, in-date memory entries are kept) and `memory_ack` `{ids}` drops proposals the desktop has recorded (query `memory` `list` / `proposals` reads them) |
 | `GET /admin/device` | — | `{deviceId, keys:{agreement,signing}}` public JWKs of this host's relay device |
 
 The gateway is the only admin client. It authenticates IDE users with its
@@ -165,6 +167,20 @@ title, body, choices?, deadlineMs?, createdMs, resolution?:{answer, actor, atMs}
 | {expired:true}}`. `POST /ctx/ask` creates a question and blocks up to its
 deadline (default 10 min, max 1 h) then returns `{answer}` or
 `{expired:true,message:"no user present"}`. Timeout is never confirmation.
+
+### 5.1 Android device ops
+
+Devices are attached to the person's computer, so `POST /ctx/device` (the
+`canopy_device_*` tools, same body as the desktop's route) is queued for the IDE
+that has the workspace open. The IDE long-polls admin query `device`/`pending`
+(`args.wait` ≤ 10 s; asking is also its presence) and gets
+`{items:[{id, op, ptyId, createdMs}]}`; it runs each op on the desktop and
+answers with action `device_answer` `{id, status, chunk, offset, done}`, in
+pieces whose `offset` is the byte length joined so far (answers up to 24 MiB).
+The agent gets that status and body. With no IDE polling in the last 30 s the
+agent gets 503 `no-ide`; an op not answered within 60 s (600 s for
+`emulator_start`, `run`, `describe`) gets 503 `timeout`. The gateway lets only
+the owner's drive-scope IDE poll or answer. Ops are not persisted.
 
 ## 6. Relay v2 and authority (phase 3)
 
@@ -298,7 +314,7 @@ What `canopy-serviced` does where the sections above leave a choice open.
   terminal's claims.
 - **Agent API.** `/ctx/identity` adds `workspace` and `project`. In
   `/ctx/tools`, `supportedTools` is the desktop list verbatim (a test pins it
-  to `context.rs`). `disabled` holds the laptop-only device and vault tools,
+  to `context.rs`). `disabled` holds the vault and team-chat tools,
   and `supportedActions` lists the kinds in §2. `POST /ctx/ui` with
   `op:"ask"|"confirm"` is served the same as `/ctx/ask`, so an unchanged hook
   works. Every other `/ctx/ui` op answers 503. The ask body is

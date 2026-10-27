@@ -17,7 +17,7 @@ const STDOUT_LINE_MAX: usize = 1024 * 1024;
 /// Drain one line completely while retaining at most `max` bytes. Stopping at
 /// the cap would leave the pipe full and deadlock the child, so oversize input
 /// is consumed and represented by an explicit marker.
-async fn capped_line<R: AsyncBufRead + Unpin>(
+pub(crate) async fn capped_line<R: AsyncBufRead + Unpin>(
     reader: &mut R,
     max: usize,
 ) -> std::io::Result<Option<(Vec<u8>, bool)>> {

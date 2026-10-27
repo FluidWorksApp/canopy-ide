@@ -4,12 +4,14 @@ import type {Attachment,ChatMessage} from '../teamMessaging/client';
 import {formatBytes} from '../teamMessaging/files';
 import {MAX_ATTACHMENTS,MAX_ATTACHMENT_BYTES} from '../teamMessaging/messageSchema';
 import {showConversation} from '../teamMessaging/unread';
-import {Button} from './ui';
+import {Button,Select} from './ui';
 import {CheckIcon,CopyIcon,DocumentIcon,DownloadIcon,InfoIcon,LockIcon,SendIcon} from './icons';
 import {ContextMenu,useContextMenu,type MenuItem} from './ContextMenu';
 import {registerSelectAll} from '../selectAll';
+import {copyReadableLink} from '../readableLinks';
 import {isSendKey} from './chatComposerKeys';
 import './teamHub.css';
+import {handoffBrief,handoffLabel,useChatHandoff,type ChatHandoff,type HandoffAgent,type HandoffSource} from '../teamMessaging/chatHandoff';
 import {AddReactionButton,MessageReactions,ReactionPicker} from './MessageReactions';
 import {reactionChips} from '../teamMessaging/reactions';
 import {ChatLinkCards} from './ChatLinkCards';
@@ -20,7 +22,8 @@ import {isMuted,setMuted} from '../teamMessaging/notifications';
 import {getSettings,subscribeSettings} from '../settings';
 import {ChatCard} from './ChatCard';
 import {cardCaption,cardOf} from '../teamMessaging/cardSchema';
-export type AccountConversation={teamId:string;userId:string;peer:string|null;name:string;email?:string};
+/** `focusMessage`: a message to bring into view, from a readable message link. */
+export type AccountConversation={teamId:string;userId:string;peer:string|null;name:string;email?:string;focusMessage?:string};
 /** Consecutive messages from one sender within this window share one header. */
 const GROUP_MS=5*60_000;
 /** The composer grows with its text up to this many lines, then scrolls. */
@@ -55,6 +58,44 @@ function AttachmentChip({session,message,file,own,state,sender}:{session:TeamSes
   <div className="account-chat-file-row"><DocumentIcon size={13}/><span className="account-chat-file-name" title={file.name}>{file.name}</span><span className="account-chat-file-size">{formatBytes(file.size)}</span>{status&&<span className="account-chat-file-state">{status}</span>}</div>
  </div>;
 }
+/** Hand a message to an agent: start a task on it in a workspace, or pass it
+ * to an agent already running. The click is the approval. */
+function Handoff({handoff,source}:{handoff:ChatHandoff;source:HandoffSource}){
+ const [mode,setMode]=useState<'task'|'agent'|null>(null),[busy,setBusy]=useState(false),[result,setResult]=useState<{ok:boolean;text:string}|null>(null);
+ const projects=handoff.projects(),[project,setProject]=useState('');
+ const [agents,setAgents]=useState<HandoffAgent[]|null>(null),[agent,setAgent]=useState('');
+ const open=(next:'task'|'agent')=>{
+  setResult(null);if(mode===next){setMode(null);return;}setMode(next);
+  if(next==='task')setProject(p=>p||projects[0]||'');
+  else{setAgents(null);void handoff.agents().then(list=>{setAgents(list);setAgent(a=>list.some(x=>String(x.ptyId)===a)?a:list[0]?String(list[0].ptyId):'');}).catch(()=>setAgents([]));}
+ };
+ const go=async()=>{
+  setBusy(true);
+  try{
+   if(mode==='task'){const r=await handoff.startTask(project,handoffBrief(source),handoffLabel(source));setResult({ok:r.started,text:r.started?`Task started in ${r.project}.`:r.note});if(r.started)setMode(null);}
+   else if(mode==='agent'){const target=agents?.find(a=>String(a.ptyId)===agent);if(!target)return;await handoff.sendToAgent(target.ptyId,handoffBrief(source),source.id??'chat');setResult({ok:true,text:`Sent to ${target.name}.`});setMode(null);}
+  }catch(e){setResult({ok:false,text:e instanceof Error?e.message:String(e)});}
+  finally{setBusy(false);}
+ };
+ return <div className="account-chat-handoff">
+  <div className="account-chat-handoff-actions">
+   <button type="button" className="account-chat-action" aria-expanded={mode==='task'} onClick={()=>open('task')} disabled={!projects.length} title={projects.length?'Start a new agent on this message':'Open a workspace first'}>Run as task</button>
+   <span aria-hidden="true"> · </span>
+   <button type="button" className="account-chat-action" aria-expanded={mode==='agent'} onClick={()=>open('agent')}>Send to agent</button>
+  </div>
+  {mode==='task'&&<div className="account-chat-handoff-pick">
+   <Select size="sm" aria-label="Workspace" value={project} onChange={e=>setProject(e.target.value)}>{projects.map(p=><option key={p} value={p}>{p}</option>)}</Select>
+   <Button size="sm" variant="accent" disabled={busy||!project} onClick={()=>void go()}>{busy?'Starting…':'Start task'}</Button>
+  </div>}
+  {mode==='agent'&&<div className="account-chat-handoff-pick">
+   {agents===null?<span>Finding agents…</span>:!agents.length?<span>No agents running. Use Run as task instead.</span>:<>
+    <Select size="sm" aria-label="Agent" value={agent} onChange={e=>setAgent(e.target.value)}>{agents.map(a=><option key={a.ptyId} value={String(a.ptyId)}>{a.name}{a.project?` · ${a.project}`:''}{a.cli?` (${a.cli})`:''}</option>)}</Select>
+    <Button size="sm" variant="accent" disabled={busy||!agent} onClick={()=>void go()}>{busy?'Sending…':'Send'}</Button>
+   </>}
+  </div>}
+  {result&&<span role="status" className={`account-chat-handoff-result${result.ok?'':' failed'}`}>{result.text}</span>}
+ </div>;
+}
 const time=(t:number)=>new Date(t).toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'});
 const dayKey=(t:number)=>new Date(t).toDateString();
 /** Whether `el` is a field the user may be typing in right now (on screen and editable). */
@@ -67,7 +108,8 @@ function dayLabel(t:number){
  return new Date(t).toLocaleDateString([],{weekday:'short',month:'short',day:'numeric'});
 }
 export function AccountChatView({conversation,active=true}:{conversation:AccountConversation;active?:boolean}){
- const {teamId,userId,peer,name,email}=conversation;
+ const {teamId,userId,peer,name,email,focusMessage}=conversation;
+ const handoff=useChatHandoff();
  const session=useMemo(()=>teamSession(teamId,userId),[teamId,userId]);
  useEffect(()=>session.retain(),[session]);
  const {messages,members,receipts,status,restoredIds,delivery={},attachments={},reactions={},undeliveredReactions={},edits={},deleted={},unreadIds=[]}=useSyncExternalStore(session.subscribe,session.getSnapshot);
@@ -143,6 +185,15 @@ export function AccountChatView({conversation,active=true}:{conversation:Account
  const menu=useContextMenu(),[copied,setCopied]=useState<string>(),copiedTimer=useRef<number>(undefined);
  useEffect(()=>()=>window.clearTimeout(copiedTimer.current),[]);
  const copy=(text:string,id:string)=>void navigator.clipboard.writeText(text).then(()=>{setCopied(id);window.clearTimeout(copiedTimer.current);copiedTimer.current=window.setTimeout(()=>setCopied(undefined),COPIED_MS);}).catch(()=>{});
+ // Opened from a message link: bring that message into view once it is in
+ // the transcript (history loads after mount), and mark it briefly.
+ const focused=useRef<string>(undefined);
+ useEffect(()=>{
+  if(!focusMessage||focused.current===focusMessage)return;
+  const el=log.current?.querySelector<HTMLElement>(`[data-message="${focusMessage.replace(/[^A-Za-z0-9-]/g,'')}"]`);if(!el)return;
+  focused.current=focusMessage;el.scrollIntoView?.({block:'center'});el.classList.add('is-linked');
+  const timer=window.setTimeout(()=>el.classList.remove('is-linked'),2400);return()=>window.clearTimeout(timer);
+ },[focusMessage,messages.length]);
  // Select All inside the transcript selects the conversation, not the app.
  useEffect(()=>{const el=log.current;return el?registerSelectAll(el,()=>window.getSelection()?.selectAllChildren(el)):undefined;},[]);
  const transcriptMenu=(e:MouseEvent<HTMLDivElement>)=>{
@@ -151,6 +202,9 @@ export function AccountChatView({conversation,active=true}:{conversation:Account
   const items:MenuItem[]=[];
   if(picked.trim())items.push({label:'Copy',onClick:()=>copy(picked,'selection')});
   if(id&&text)items.push({label:'Copy message',onClick:()=>copy(text,id)});
+  // A readable link to this message (ids only; the text stays encrypted on
+  // members' devices). Teammates open it into this conversation.
+  if(id&&target&&!deleted[id])items.push({label:'Copy link',onClick:()=>void copyReadableLink({kind:'message',teamId,peer,messageId:id}).then(()=>{setCopied(id);window.clearTimeout(copiedTimer.current);copiedTimer.current=window.setTimeout(()=>setCopied(undefined),COPIED_MS);}).catch((e:unknown)=>setError(e instanceof Error?e.message:String(e)))});
   if(id&&target&&!deleted[id])items.push({label:'Reply in thread',onClick:()=>setThread(threadRoot(target,findMessage)??id)});
   if(id&&editable(target))items.push({label:'Edit message',onClick:()=>startEdit(id)});
   if(id&&target?.sender===userId&&!deleted[id])items.push({label:'Delete message…',onClick:()=>{setEditing(undefined);setConfirming(id);}});
@@ -187,8 +241,9 @@ export function AccountChatView({conversation,active=true}:{conversation:Account
       {!isDeleted&&<AddReactionButton open={reacting===m.id} controls={pickerId} className={text?'beside-copy':undefined} onToggle={()=>setReacting(current=>current===m.id?undefined:m.id)}/>}
       {!isDeleted&&editing!==m.id&&<MessageActions onReply={()=>setThread(orphan??m.id)} onEdit={editable(m)?()=>startEdit(m.id):undefined} onDelete={own?()=>{setEditing(undefined);setConfirming(m.id);}:undefined}/>}
       {text&&!card&&<ChatLinkCards text={text}/>}
-      {card&&<ChatCard message={m} userId={userId} messages={visible} name={senderName} onReply={(reply,ext)=>session.send(reply,peer,[],ext)}/>}
+      {card&&<ChatCard message={m} userId={userId} teamId={teamId} messages={visible} name={senderName} onReply={(reply,ext)=>session.send(reply,peer,[],ext)}/>}
       {!isDeleted&&m.attachments?.map(file=><AttachmentChip key={file.id} session={session} message={m} file={file} own={own} state={attachments[file.id]} sender={senderName(m.sender)}/>)}
+      {handoff&&!isDeleted&&!card&&text.trim()&&!pending&&<Handoff handoff={handoff} source={{id:m.id,sender:own?'You':senderName(m.sender),where:peer?`direct message with ${name}`:`#${name}`,text,files:m.attachments?.map(a=>a.name)}}/>}
       {!isDeleted&&<MessageReactions chips={reactionChips(reactions,m.id,userId)} undelivered={undeliveredReactions[m.id]} name={senderName} onToggle={emoji=>react(m.id,emoji)}
        picker={reacting===m.id?<ReactionPicker id={pickerId} onPick={emoji=>{closePicker(m.id);react(m.id,emoji);}} onClose={()=>closePicker(m.id)} onDismiss={()=>setReacting(undefined)}/>:undefined}/>}
       {summary&&<ThreadLine replies={summary.replies} last={summary.last} unread={summary.unread} onOpen={()=>setThread(m.id)}/>}

@@ -6,10 +6,20 @@ import {Button} from './ui';
 import {FilesIcon,TeamIcon} from './icons';
 import {IconClock} from '../../shared/icons';
 import {openInOsBrowser} from '../links';
+import {AddFunds,CreditBanner,RequestCreditButton} from './CreditNotice';
+import {ReadableLinksSettings} from './ReadableLinksSettings';
+import {observeCredits,statusOf,usd,type Credits,type WorkspaceUsage} from '../credits';
 type User={email:string;name:string};
 // Amounts are US dollars. `balance` (credits, 1 = 1 cent) is only sent by
 // servers from before the dollar migration; the app outlives server deploys.
-type Credits={balanceUsd?:string;assignedUsd?:string;balance?:string;paymentsEnabled?:boolean};
+/** Spend per workspace over the last 30 days. Newer servers send it; older
+ * ones send metered sessions, which carry the same per-workspace amounts. */
+function workspaceUsage(credits:Credits|null):WorkspaceUsage[]{
+ if(credits?.usageByWorkspace)return credits.usageByWorkspace;
+ const since=Date.now()-30*86_400_000,totals=new Map<string,WorkspaceUsage>();
+ for(const s of credits?.sessions??[]){const at=s.ended_at??s.started_at;if(!at||new Date(at).getTime()<since)continue;const key=s.workspace_id;const row=totals.get(key)??{workspace_id:key,workspace_name:s.workspace_name,usd:'0',last_at:at};row.usd=String(Number(row.usd)+Number(s.consumed_usd||0));if(at>row.last_at)row.last_at=at;totals.set(key,row);}
+ return [...totals.values()].filter(row=>Number(row.usd)>0).sort((a,b)=>Number(b.usd)-Number(a.usd));
+}
 const dollars=(value:unknown)=>{if(value==null||value==='')return '—';const n=Number(value);return Number.isFinite(n)?new Intl.NumberFormat('en-US',{style:'currency',currency:'USD'}).format(n):'—';};
 let accountCache:{user:User;credits:Credits|null}|null=null;
 let cacheEpoch=0;
@@ -29,7 +39,7 @@ export function AccountSettings({onTeams,onWorkspaces}:{onTeams?:()=>void;onWork
  const [loading,setLoading]=useState(true);
  const [balanceStale,setBalanceStale]=useState(false);
  const [balanceRefreshing,setBalanceRefreshing]=useState(false);
- useEffect(()=>{if(!user)return;let stopped=false;let pending=false;const remembered=rememberedBalance(user.email);setCredits(current=>current??remembered);setBalanceRefreshing(true);const refresh=async()=>{if(pending||document.hidden)return;pending=true;const epoch=cacheEpoch;try{const next=await request<Credits>('/api/credits');if(!stopped&&epoch===cacheEpoch){setCredits(next);rememberBalance(user.email,next);if(accountCache?.user.email===user.email)accountCache={user,credits:next};setBalanceStale(false);}}catch{if(!stopped&&epoch===cacheEpoch)setBalanceStale(true);}finally{pending=false;if(!stopped)setBalanceRefreshing(false);}};void refresh();const timer=setInterval(()=>void refresh(),10000);window.addEventListener('focus',refresh);return()=>{stopped=true;clearInterval(timer);window.removeEventListener('focus',refresh);};},[user?.email]);
+ useEffect(()=>{if(!user)return;let stopped=false;let pending=false;const remembered=rememberedBalance(user.email);setCredits(current=>current??remembered);setBalanceRefreshing(true);const refresh=async()=>{if(pending||document.hidden)return;pending=true;const epoch=cacheEpoch;try{const next=await request<Credits>('/api/credits');if(!stopped&&epoch===cacheEpoch){setCredits(next);rememberBalance(user.email,next);observeCredits(next);if(accountCache?.user.email===user.email)accountCache={user,credits:next};setBalanceStale(false);}}catch{if(!stopped&&epoch===cacheEpoch)setBalanceStale(true);}finally{pending=false;if(!stopped)setBalanceRefreshing(false);}};void refresh();const timer=setInterval(()=>void refresh(),10000);window.addEventListener('focus',refresh);return()=>{stopped=true;clearInterval(timer);window.removeEventListener('focus',refresh);};},[user?.email]);
  useEffect(()=>{
   let alive=true;
   const refresh=async()=>{
@@ -83,8 +93,15 @@ export function AccountSettings({onTeams,onWorkspaces}:{onTeams?:()=>void;onWork
    <Button icon variant="ghost" className="account-header-action" aria-label="Sign out" title="Sign out" disabled={busy} onClick={()=>{setBusy(true);void request('/api/device',{action:'revoke'}).then(()=>{clearTeamSessions();window.dispatchEvent(new Event('canopy:account-changed'));setUser(null);setCredits(null);setMessage('Signed out.');}).catch(error=>setMessage(String(error))).finally(()=>setBusy(false));}}><svg aria-hidden="true" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"><path d="M9 4H4v16h5M14 7l5 5-5 5M8 12h11"/></svg><span className="account-action-tooltip">Sign out</span></Button></nav>}</header>
   {loading&&user&&<p role="status">Refreshing your account…</p>}
   {user?<>
-   <div className="account-balance"><span>Available balance <small>USD</small></span><strong>{credits?dollars(credits.balanceUsd??(credits.balance==null?null:Number(credits.balance)/100)):<span className="account-balance-loading" role="status"><span className="account-shimmer account-skeleton-amount"/>Loading balance…</span>}</strong><p>{balanceStale ? "Balance could not refresh. Showing the last available amount." : balanceRefreshing&&credits ? "Updating…" : "Shared across your workspaces. Usage is charged per minute."}</p>{credits?.paymentsEnabled===false&&<small>Adding funds is not available during preview.</small>}</div>
+   <div className="account-balance"><span>Available balance <small>USD</small></span><strong>{credits?dollars(credits.balanceUsd??(credits.balance==null?null:Number(credits.balance)/100)):<span className="account-balance-loading" role="status"><span className="account-shimmer account-skeleton-amount"/>Loading balance…</span>}</strong><p>{balanceStale ? "Balance could not refresh. Showing the last available amount." : balanceRefreshing&&credits ? "Updating…" : "Shared across your workspaces. Usage is charged per minute."}</p>
+    {/* Add funds when the server has payments configured; otherwise credit is
+        restored by request (below) and granted by Canopy. */}
+    {credits?.paymentsEnabled===true&&credits.purchase?.enabled&&<AddFunds options={credits.purchase} onCredits={next=>{setCredits(next);rememberBalance(user.email,next);if(accountCache?.user.email===user.email)accountCache={user,credits:next};}}/>}
+    {credits&&(credits.paymentsEnabled!==true||statusOf(credits)!=='ok')&&<RequestCreditButton lastRequestedAt={credits.lastCreditRequestAt}/>}</div>
+   <CreditBanner credits={credits}/>
+   {(()=>{const usage=workspaceUsage(credits).slice(0,6);return usage.length?<section className="account-usage" aria-label="Recent usage by workspace"><h4>Last 30 days by workspace</h4><ul>{usage.map(row=><li key={row.workspace_id??'none'}><span>{row.workspace_name??'Workspace'}</span><small>{new Date(row.last_at).toLocaleDateString(undefined,{month:'short',day:'numeric'})}</small><strong>{usd(Number(row.usd))}</strong></li>)}</ul></section>:null;})()}
 
+   <ReadableLinksSettings/>
   </>:<div className="set-inline"><Button disabled={busy} onClick={()=>void signIn()}>{busy?'Waiting for sign-in…':'Sign in or create account'}</Button>{busy&&<Button onClick={()=>{generation.current++;setBusy(false);setCode('');setMessage('Sign-in cancelled.');}}>Cancel</Button>}</div>}
   {code&&<p>Request code: <strong>{code}</strong></p>}
   {message&&<p role="status" aria-live="polite">{message}</p>}

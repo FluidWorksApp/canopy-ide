@@ -1,7 +1,7 @@
 {
   "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
   "productName": "Canopy",
-  "version": "0.4.11",
+  "version": "0.5.0",
   "identifier": "app.causeconnect.canopy",
   "build": {
     "frontendDist": "../dist",
@@ -66,11 +66,20 @@
       "deb": {
         "depends": [
           "libasound2"
-        ]
+        ],
+        "desktopTemplate": "linux.desktop.hbs"
+      },
+      "rpm": {
+        "desktopTemplate": "linux.desktop.hbs"
       }
     }
   },
   "plugins": {
+    "deep-link": {
+      "desktop": {
+        "schemes": ["canopy"]
+      }
+    },
     "updater": {
       "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IERBNzgwMDkzNjE1MjNGNzMKUldSelAxSmhrd0I0MnFXeDc1MUhINWI1Mm1JTDdiT2RSMnZrSkxvVnVzTHUyb08xc2l1NjN1WkkK",
       "endpoints": [

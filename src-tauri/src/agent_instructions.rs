@@ -100,6 +100,10 @@ IDE the user is watching, and their results stay inspectable:\n\
   teammate -> canopy_mesh_targets, then canopy_mesh_submit with a complete \
   brief. A teammate approves before it runs; its steps come back to you as \
   mesh notices tagged ref kind \"job\"\n\
+- Telling a colleague something, or passing them work they can hand to their \
+  own agent -> canopy_team_people, then canopy_team_send to a teammate or the \
+  team channel. It posts in the user's Teams chat as the user, marked as \
+  agent-written; only send what the user asked you to\n\
 - If available, delegating a bounded, independent slice -> canopy_spawn_agent with a complete \
   brief. The child has no memory of this conversation; it opens as a pane beside \
   you, and autoClose: true makes it a one-shot that reports and closes itself. \
@@ -118,6 +122,11 @@ IDE the user is watching, and their results stay inspectable:\n\
   survives, and chasing it is how you deliver the wrong change. Search \
   canopy_notes first so the same observation is not recorded twice. This is not \
   a progress log — do not narrate the work you were asked to do into it.\n\
+- About to decide something durable (a library or pattern, how data is \
+  secured, a naming or layout convention, a deploy constraint) -> check team \
+  memory with canopy_memory first: entries there were approved by a person on \
+  the team, with the reason. A durable, non-obvious decision this work made -> \
+  canopy_memory_propose (it waits for a person's approval; never task progress).\n\
 \n\
 At the start of a new session, call canopy_project for component paths, \
 configured run commands, terminal ids, and listening ports. If it shows other \
@@ -224,6 +233,19 @@ mod tests {
         );
         // Only clients with the MCP tools are told about it.
         assert!(!SESSION_CONTEXT.contains("canopy_companion_reply"));
+    }
+
+    #[test]
+    fn agents_are_told_to_check_team_memory_before_deciding() {
+        let prompt = mcp_instructions();
+        let line = prompt
+            .lines()
+            .find(|l| l.contains("check team"))
+            .expect("a routing line for team memory");
+        assert!(line.contains("decide something durable"));
+        assert!(prompt.contains("memory with canopy_memory first"));
+        assert!(prompt.contains("canopy_memory_propose"));
+        assert!(!SESSION_CONTEXT.contains("canopy_memory"));
     }
 
     #[test]

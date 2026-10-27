@@ -153,3 +153,60 @@ it('shows the specific disk-full startup failure instead of a generic image-stag
  expect(workspaceStartupProblem(w)).toBe(message);
  expect(workspaceStartupProblem({...w,operation:{...w.operation,last_error:'Workspace startup failed during image. Saved files are retained.'}})).toBe('Preparing the workspace image failed. Your saved files are retained. Retry preparation, or stop the workspace to keep compute off.');
 });
+it('a credit refusal shows the balance and how to get credit instead of a generic error',async()=>{
+ setup();vi.useRealTimers();
+ const refusal=JSON.stringify({error:'Your Canopy balance is −$64.48. Workspaces pause at −$10.00, so this workspace can’t start until credit is added. Your files are kept.',code:'credit_exhausted',balanceUsd:'-64.480000',cutoffUsd:'-10',shared:false,status:402});
+ const base=mocks.invoke.getMockImplementation()!;
+ mocks.invoke.mockImplementation(async(command,args)=>{if(args?.body?.action==='resume'){expect(args.detailedErrors).toBe(true);throw refusal;}if(args?.route==='/api/credits')return {requested:true};return base(command,args);});
+ render(<ManagedWorkspaces/>);await act(async()=>{});
+ fireEvent.click(screen.getByRole('button',{name:'Resume workspace'}));await act(async()=>{});
+ expect(screen.getByText('Workspace paused: out of credit')).toBeTruthy();
+ expect(screen.getByText(/Your balance is −\$64\.48\. Workspaces can’t start at or below −\$10\.00/)).toBeTruthy();
+ expect(screen.queryByText(/credit_exhausted|\{"error"/)).toBeNull();
+ fireEvent.click(screen.getByRole('button',{name:'Request more credit'}));await act(async()=>{});
+ expect(mocks.invoke).toHaveBeenCalledWith('canopy_account_request',{route:'/api/credits',body:{action:'request-credit'}});
+ expect(screen.getByText(/Request sent/)).toBeTruthy();
+});
+it('other detailed resume errors still show their plain message',async()=>{
+ setup();vi.useRealTimers();const base=mocks.invoke.getMockImplementation()!;
+ mocks.invoke.mockImplementation(async(command,args)=>{if(args?.body?.action==='resume')throw JSON.stringify({error:'A workspace operation is already in progress',status:409});return base(command,args);});
+ render(<ManagedWorkspaces/>);await act(async()=>{});
+ fireEvent.click(screen.getByRole('button',{name:'Resume workspace'}));await act(async()=>{});
+ expect(screen.getByText('A workspace operation is already in progress')).toBeTruthy();expect(screen.queryByText(/out of credit/)).toBeNull();
+});
+// A teammate resuming or opening a shared workspace: the owner's machine is
+// up, but the server only issues member credentials once the host has proven
+// member isolation for this start. The IDE waits for that instead of failing.
+function memberSetup(sharing:{pending:boolean}){
+ const control=setup(),original=mocks.invoke.getMockImplementation()!;let ready=false;
+ mocks.invoke.mockImplementation(async(command,args)=>{
+  if(args?.body?.action==='connect'&&!ready)throw 'Sharing is getting ready after the workspace started. Try again in a minute.';
+  const result=await original(command,args);
+  return args?.route==='/api/workspaces'?{workspaces:result.workspaces.map((w:{state:string})=>({...w,canDelete:false,canStop:false,access:{owner:false,canManageAccess:false,canStop:false,canResume:true,canConnect:w.state==='ready'&&ready,...(w.state==='ready'&&!ready?{connectionUnavailable:sharing.pending?'Sharing is getting ready after the workspace started. Try again in a minute.':'Sharing isn’t ready on this workspace: The workspace host needs an update to share. The owner can retry from Access.',connectionPending:sharing.pending}:{})}}))}:result;
+ });
+ return {...control,share:()=>{ready=true;}};
+}
+it('a member waits for the shared workspace to finish getting ready, then connects by itself',async()=>{
+ const control=memberSetup({pending:true});render(<ManagedWorkspaces/>);await act(async()=>{});
+ fireEvent.click(screen.getByRole('button',{name:'Resume workspace'}));await act(async()=>{});
+ control.ready();await act(async()=>{await vi.advanceTimersByTimeAsync(5000);});
+ expect(screen.getByText(/Waiting for it to finish getting ready for teammates/)).toBeTruthy();
+ expect(mocks.invoke.mock.calls.some(([,args])=>args?.body?.action==='connect')).toBe(false);
+ await act(async()=>{await vi.advanceTimersByTimeAsync(15000);});expect(mocks.switchMode).not.toHaveBeenCalled();
+ control.share();await act(async()=>{await vi.advanceTimersByTimeAsync(5000);});
+ expect(mocks.invoke).toHaveBeenCalledWith('canopy_account_request',expect.objectContaining({body:expect.objectContaining({action:'connect',workspaceId:'ws-test'})}));
+ expect(mocks.switchMode).toHaveBeenCalledWith('remote');
+});
+it('a member is told why when sharing failed, instead of waiting forever',async()=>{
+ const control=memberSetup({pending:false});render(<ManagedWorkspaces/>);await act(async()=>{});
+ fireEvent.click(screen.getByRole('button',{name:'Resume workspace'}));await act(async()=>{});
+ control.ready();await act(async()=>{await vi.advanceTimersByTimeAsync(5000);});
+ expect(screen.getByText(/needs an update to share/)).toBeTruthy();
+ expect(mocks.invoke.mock.calls.some(([,args])=>args?.body?.action==='connect')).toBe(false);expect(mocks.switchMode).not.toHaveBeenCalled();
+});
+it('a member opening a running workspace whose sharing is getting ready is not turned away',async()=>{
+ const control=memberSetup({pending:true});control.ready();render(<ManagedWorkspaces openRequest={{id:'ws-test',nonce:1}}/>);await act(async()=>{});
+ expect(screen.queryByText(/Try again in a minute/)).toBeNull();
+ control.share();await act(async()=>{await vi.advanceTimersByTimeAsync(5000);});
+ expect(mocks.switchMode).toHaveBeenCalledWith('remote');
+});

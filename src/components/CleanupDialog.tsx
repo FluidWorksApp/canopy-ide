@@ -18,6 +18,7 @@
 // the Trash is emptied, which the footer says out loud.
 import { useEffect, useMemo, useRef, useState } from "react";
 import * as ipc from "../ipc";
+import { isWorkspaceHost } from "../host";
 import { basename } from "../paths";
 import {
   bytesOf,
@@ -66,7 +67,9 @@ export function CleanupDialog({
   const [error, setError] = useState<string | null>(null);
   const [progress, setProgress] = useState<ipc.CleanupProgress | null>(null);
   const [selected, setSelected] = useState<Set<string>>(new Set());
-  const [trash, setTrash] = useState(true);
+  // A workspace's trash is a folder on the VM that nothing ever empties, so
+  // there the space only comes back if the build output is deleted outright.
+  const [trash, setTrash] = useState(() => !isWorkspaceHost());
   const [running, setRunning] = useState(false);
   const [outcome, setOutcome] = useState<ipc.CleanupOutcome | null>(null);
   // Guards the async scan against a dialog that closed while it ran.

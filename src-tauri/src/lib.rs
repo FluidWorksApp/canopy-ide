@@ -5,8 +5,10 @@ mod agentid;
 mod agents;
 mod android;
 mod app_footprint;
+mod awareness;
 mod blocking;
 mod bounded_file;
+mod brain;
 mod browser;
 mod change;
 mod chrome_stream;
@@ -31,13 +33,17 @@ mod remote_upload;
 #[path = "dictation_stub.rs"]
 mod dictation;
 mod fsx;
+mod gates;
+mod gates_commands;
 mod git;
 mod governor;
 mod instructions;
+mod ledger;
 mod lsp;
 mod maintenance;
 mod mcp;
 mod mcp_client;
+mod memory_tool;
 mod mesh;
 mod notes;
 mod notify;
@@ -50,11 +56,15 @@ mod provenance;
 mod prwatch;
 mod pty;
 mod punch;
+mod receipt;
 mod relay;
 mod remind;
 mod remote;
 mod research;
+mod secure_store;
 mod selftest;
+mod session_activity;
+mod session_doc;
 mod session_transfer;
 mod shortcuts;
 mod snapshot;
@@ -520,6 +530,9 @@ pub fn run() {
             }
         })
         .plugin(tauri_plugin_dialog::init())
+        // canopy:// registered with the OS (tauri.conf.json plugins.deep-link);
+        // cli::install_deep_links routes what it delivers.
+        .plugin(tauri_plugin_deep_link::init())
         // Self-update (see plugins.updater in tauri.conf.json) and the restart
         // that has to follow an install.
         .plugin(tauri_plugin_updater::Builder::new().build())
@@ -559,6 +572,7 @@ pub fn run() {
         .manage(clipboard::Clipboard::default())
         .manage(companion::CompanionManager::default())
         .manage(structured_runner::StructuredRunnerManager::default())
+        .manage(brain::BrainCalls::default())
         .manage(tasks::TaskStore::default())
         .manage(workflow::WorkflowStore::default())
         .manage(cli::pending_from_env())
@@ -567,6 +581,7 @@ pub fn run() {
             // Before anything writes a store: the change channel needs a handle
             // to speak on, and a write that happens first would be silent.
             change::install(app.handle().clone());
+            cli::install_deep_links(app);
             // Claude Code's IDE servers emit to the window, so the hub needs a
             // handle before the first agent PTY asks for one.
             app.manage(claude_ide::ClaudeIde::new(std::sync::Arc::new(
@@ -676,6 +691,20 @@ pub fn run() {
             structured_runner::structured_runner_spawn,
             structured_runner::structured_runner_write,
             structured_runner::structured_runner_kill,
+            brain::brain_call,
+            brain::brain_kill,
+            ledger::ledger_append,
+            ledger::ledger_query,
+            ledger::ledger_root,
+            ledger::ledger_update_status,
+            receipt::receipt_run_check,
+            receipt::receipt_isolate,
+            receipt::receipt_release,
+            session_doc::session_transcript_tail,
+            session_activity::session_activity,
+            gates_commands::gates_policy_write,
+            gates_commands::gates_policy_read,
+            gates_commands::gates_allow_once,
             tasks::task_reserve,
             tasks::task_attempt_reserve,
             tasks::task_attempt_start,
@@ -756,6 +785,7 @@ pub fn run() {
             android::android_logcat,
             android::android_describe,
             android::android_run,
+            android::android_stage_file,
             clipboard::clipboard_watch_set,
             clipboard::clipboard_recent,
             clipboard::clipboard_read,
@@ -1032,6 +1062,9 @@ pub fn run() {
             context::context_mesh_severed,
             context::context_mesh_sever,
             context::context_mesh_job_update,
+            context::context_hotspot_claim,
+            context::context_device_op,
+            awareness::git_churn,
             context::context_agent_spawn_ready,
             context::browser_result,
             claude_ide::claude_ide_resolve_diff,

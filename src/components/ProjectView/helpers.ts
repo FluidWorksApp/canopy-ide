@@ -21,9 +21,11 @@ export type SideTab =
   | "tasks"
   | "notes"
   | "research"
+  | "memory"
   | "agents"
   | "team"
-  | "tools";
+  | "tools"
+  | "outcomes";
 
 export interface TermSubTab extends TabNames {
   id: string;

@@ -20,9 +20,19 @@ import { ashFor } from "../ash";
 import { Mascot } from "./Mascot";
 import { AgentRuntime } from "./AgentRuntime";
 import { TurnTimeline } from "./TurnTimeline";
+import { ReceiptBadge } from "./ReceiptBadge";
+import { openSessionDoc } from "../sessionDoc/events";
+import { resolveSessionId } from "../sessionDoc/resolveSession";
+import { SubagentTree } from "./SubagentTree";
+import { ContextControls } from "./ContextControls";
+import { useCompaction } from "../useCompaction";
+import { refreshSessionActivity, useSessionActivity } from "../sessionActivity";
+import { compactHeadless } from "../contextCompaction";
+import { activeWorkspace } from "../remoteExecution/workspace";
 import { LIFE_META, agentLife, type Life } from "../../shared/agentLife";
 import { AgentIcon, GitBranchIcon, RestartIcon } from "./icons";
 import { sessionCost } from "../pricing";
+import { SessionBudgetChip } from "./SessionBudgetChip";
 import {
   addressPrCommentsTask,
   raisePrTask,
@@ -41,6 +51,7 @@ import { PROVENANCE_EVENT } from "../provenance";
 import { agentGitTrail } from "../agentGitTrail";
 import { sizeLimitFor } from "../fileOpen";
 import { type IoBudget, rendererIoBudget } from "../ioBudget";
+import { IntentEvidenceView } from "./IntentEvidenceView";
 
 const fmtCost = (n: number) =>
   n >= 100 ? `$${fixedNumber(n, 0)}` : `$${fixedNumber(n, 2)}`;
@@ -70,6 +81,9 @@ interface AgentWorkspaceViewProps {
   sessionId?: string;
   /** The hook digest, when there is one: last prompt, state, reported files. */
   digest?: ipc.SessionDigest;
+  /** The terminal running this agent, when it is live here. Lets a session
+   *  with no hook id be found in its CLI's own store (resolveSession.ts). */
+  ptyId?: number;
   onOpenCommit: (
     repo: string,
     commit: { hash: string; short: string; subject: string },
@@ -132,7 +146,10 @@ interface DraftComment {
   selected: boolean;
 }
 
-type Pane = "edits" | "uncommitted" | "diff";
+// "intent" is the Intent & evidence view (IntentEvidenceView): plan →
+// deviations → receipt → risk map. It opens first; the diff panes are its
+// drill-down.
+type Pane = "intent" | "edits" | "uncommitted" | "diff";
 
 // The single-file shape we hand DiffView — one file's hunks plus its name on
 // each side, and optionally the full before/after text (which the viewer needs
@@ -314,6 +331,28 @@ export const sameMap = (a: Map<string, string>, b: Map<string, string>) =>
  * renderer-memory fan-out. Keep the familiar editor per-file ceiling, then add
  * a much smaller aggregate budget for this derived view: Monaco remains the
  * place to open a large file deliberately. */
+/** What the changes pane shows. A failed or impossible patch read must end in
+ *  something said plainly: a Linux workspace on an older host answers
+ *  git_branch_patch with an error, and this used to leave the pane on
+ *  "Reading this agent's changes…" forever. */
+export type ChangesPaneState = "loading" | "error" | "unavailable" | "ready" | "none";
+export function changesPaneState({ repo, ws, wsErr, pane, patch, patchErr }: {
+  repo: string | null | undefined;
+  ws: Pick<ipc.AgentWorkspace, "branch" | "detached" | "on_base"> | null;
+  wsErr: string | null;
+  pane: string | null;
+  patch: unknown;
+  patchErr: string | null;
+}): ChangesPaneState {
+  if (!ws) return !wsErr && repo ? "loading" : "none";
+  if (!pane) return "none";
+  if (patch) return "ready";
+  if (patchErr) return "error";
+  // The fetch below never starts for these, so waiting would never end.
+  if (!ws.branch || (pane === "diff" && (ws.detached || ws.on_base))) return "unavailable";
+  return "loading";
+}
+
 export const AGENT_FILE_READ_CONCURRENCY = 3;
 export const AGENT_FILE_MAX_BYTES = sizeLimitFor("code");
 export const AGENT_FILE_TOTAL_BYTES = 16 * 1024 * 1024;
@@ -533,6 +572,7 @@ export function AgentWorkspaceView({
   cwd,
   sessionId,
   digest,
+  ptyId,
   onOpenCommit,
   onOpenPr,
   onOpenPrNumber,
@@ -560,6 +600,7 @@ export function AgentWorkspaceView({
   const [wsErr, setWsErr] = useState<string | null>(null);
   const [pane, setPane] = useState<Pane | null>(null);
   const [patch, setPatch] = useState<ipc.CommitPatch | null>(null);
+  const [patchErr, setPatchErr] = useState<string | null>(null);
   const [split, setSplit] = useState(true);
   const [remote, setRemote] = useState("");
   // undefined = still looking, null = looked and none.
@@ -570,6 +611,25 @@ export function AgentWorkspaceView({
   const [edits, setEdits] = useState<ipc.AgentEdit[]>([]);
   // Manual refresh: the small icon in the header bumps this to re-read all.
   const [tick, setTick] = useState(0);
+  // A CLI without Canopy hooks never names its session; find it in the CLI's
+  // own store by folder, terminal and start time, so the session document is
+  // still one click away.
+  const [found, setFound] = useState<ipc.SessionDigest | null>(null);
+  useEffect(() => {
+    setFound(null);
+  }, [agent, cwd, ptyId, sessionId]);
+  useEffect(() => {
+    if (sessionId) return;
+    let live = true;
+    void resolveSessionId({ agent, cwd, ptyId }).then((d) => live && d && setFound(d));
+    return () => {
+      live = false;
+    };
+    // Refresh, and the workspace's own polls, look again: a terminal that has
+    // not written its first turn yet has no session to find until it does.
+  }, [agent, cwd, ptyId, sessionId, digest?.updated, tick, ws?.updated]);
+  const docSessionId = sessionId ?? found?.session_id;
+  const docDigest = digest ?? found ?? undefined;
 
   // Review comments the user is drafting on the diff, to send to the agent.
   // Keyed to the session (falling back to agent+cwd) and mirrored to
@@ -751,13 +811,12 @@ export function AgentWorkspaceView({
   // Open on this agent's own edits when we have them — that's the per-agent
   // view the shared-checkout tree can't give. Otherwise fall back to whichever
   // tree pane has content. Set once, on first load.
+  //
+  // Intent & evidence comes first whenever there is anything to review: the
+  // reviewer judges plan, deviations and proof before reading lines.
   useEffect(() => {
     if (pane) return;
-    if (edits.length > 0) setPane("edits");
-    else if (ws)
-      setPane(
-        ws.dirty > 0 || ws.on_base || ws.detached ? "uncommitted" : "diff",
-      );
+    if (edits.length > 0 || ws) setPane("intent");
   }, [edits, ws, pane]);
 
   useEffect(() => {
@@ -828,12 +887,14 @@ export function AgentWorkspaceView({
   // or branch shows something else, a poll shows the same thing again.
   useEffect(() => {
     setPatch(null);
+    setPatchErr(null);
   }, [pane, ws?.branch, ws?.workdir, ws?.isolated]);
   useEffect(() => {
     let live = true;
     if (!repo || !ws?.branch || !pane) return;
-    // The edits pane is journal-only — no git patch to fetch.
-    if (pane === "edits") return;
+    // The edits pane is journal-only — no git patch to fetch. The intent pane
+    // reads its own (below).
+    if (pane === "edits" || pane === "intent") return;
     if (pane === "diff" && (ws.detached || ws.on_base)) return;
     void ipc
       .gitBranchPatch(
@@ -842,10 +903,18 @@ export function AgentWorkspaceView({
         ws.isolated ? ws.workdir : null,
         pane === "uncommitted",
       )
-      .then(
-        (p) => live && setPatch((prev) => (prev?.patch === p.patch ? prev : p)),
-      )
-      .catch((e) => live && onNotice(String(e), "error"));
+      .then((p) => {
+        if (!live) return;
+        setPatchErr(null);
+        setPatch((prev) => (prev?.patch === p.patch ? prev : p));
+      })
+      .catch((e) => {
+        if (!live) return;
+        // Said in the pane as well as the toast: the toast fades, and the pane
+        // would otherwise keep promising a diff that is not coming.
+        setPatchErr(String(e));
+        onNotice(String(e), "error");
+      });
     return () => {
       live = false;
     };
@@ -893,6 +962,35 @@ export function AgentWorkspaceView({
   };
   const working = lifecycle === "working";
   const cost = usage ? sessionCost(usage) : null;
+  // Subagents and context use, from the session's transcript; polled fast
+  // while it works (sessionActivity.ts).
+  const activityKey = useMemo(
+    () =>
+      docSessionId
+        ? { agent, sessionId: docSessionId, cwd: docDigest?.resume_cwd || cwd, profile: docDigest?.profile ?? null }
+        : null,
+    [agent, docSessionId, cwd, docDigest?.resume_cwd, docDigest?.profile],
+  );
+  const activity = useSessionActivity(activityKey, { fast: working });
+  const compaction = useCompaction({
+    agent,
+    sessionId: docSessionId,
+    cwd: docDigest?.resume_cwd || cwd,
+    live: ptyId != null && lifecycle !== "ended",
+    lifeState: lifecycle,
+    remote: !!activeWorkspace(),
+    profile: docDigest?.profile ?? null,
+    activity,
+    refresh: () => activityKey && refreshSessionActivity(activityKey),
+    deps: {
+      type: (text) => {
+        if (ptyId == null) return;
+        void ipc.ptyWrite(ptyId, text);
+        window.setTimeout(() => void ipc.ptyWrite(ptyId, "\r"), 350);
+      },
+      headless: compactHeadless,
+    },
+  });
   const touched = ws?.touched?.length ? ws.touched : (digest?.files ?? []);
   const branchable = !!ws?.branch && !ws.detached && !ws.on_base;
   /** Hand the typed brief to a fresh one-shot agent and put the menu away.
@@ -927,10 +1025,53 @@ export function AgentWorkspaceView({
   // checkout and are deliberately not shown here.
   const isolated = !!ws?.isolated;
   const mine = isolated ? files : files.filter((f) => isAgentFile(f.path));
+  const changesState = changesPaneState({ repo, ws, wsErr, pane, patch, patchErr });
   // Whether we can attribute at all: an isolated worktree, a journal, or a
   // reported list. Without any of these a shared-checkout diff is an
   // undifferentiated tree we won't pass off as this agent's.
   const canAttribute = isolated || agentPaths.size > 0;
+
+  // The diff the Intent & evidence view reviews: this agent's own journaled
+  // edits when it has them (accurate on a shared checkout), else its files in
+  // the working tree / branch diff, else nothing it can be credited with.
+  const journalPatch = useMemo(
+    () =>
+      edits
+        .filter((e) => e.present)
+        .map((e) => `diff --git a/${e.path} b/${e.path}\n${editToHunk(e.path, e.old, e.new)}`)
+        .join("\n"),
+    [edits],
+  );
+  const [intentGitPatch, setIntentGitPatch] = useState<string | null>(null);
+  const intentUncommitted = !!ws && (ws.dirty > 0 || !branchable);
+  useEffect(() => {
+    let live = true;
+    if (pane !== "intent" || journalPatch || !repo || !ws?.branch) return;
+    void ipc
+      .gitBranchPatch(repo, ws.branch, ws.isolated ? ws.workdir : null, intentUncommitted)
+      .then((p) => live && setIntentGitPatch(p.patch))
+      .catch(() => live && setIntentGitPatch(""));
+    return () => {
+      live = false;
+    };
+  }, [pane, journalPatch, repo, ws?.branch, ws?.workdir, ws?.isolated, intentUncommitted, tick]);
+  const intentPatch = journalPatch
+    ? journalPatch
+    : intentGitPatch == null
+      ? null
+      : (isolated ? splitPatch(intentGitPatch) : splitPatch(intentGitPatch).filter((f) => isAgentFile(f.path)))
+          .map((f) => f.patch)
+          .join("\n");
+  /** The order the risk map put files in; the diff panes follow it. */
+  const [riskPaths, setRiskPaths] = useState<string[]>([]);
+  const byRisk = <T,>(list: T[], pathOf: (t: T) => string): T[] => {
+    if (!riskPaths.length) return list;
+    const rank = (p: string) => {
+      const i = riskPaths.findIndex((r) => r === p || r.endsWith(`/${p}`) || p.endsWith(`/${r}`));
+      return i < 0 ? riskPaths.length : i;
+    };
+    return [...list].sort((a, b) => rank(pathOf(a)) - rank(pathOf(b)));
+  };
 
   // Journal edits grouped by file, newest file last, preserving edit order.
   const editsByFile = useMemo(() => {
@@ -966,6 +1107,18 @@ export function AgentWorkspaceView({
     files.find((f) => f.path === t)?.path ??
     files.find((f) => basename(f.path) === basename(t))?.path ??
     null;
+  /** Risk map → diff: switch to the pane that shows this file and scroll to it
+   *  once it has rendered (a git pane loads its patch first). */
+  const drillInto = (path: string) => {
+    setPane(edits.length > 0 ? "edits" : intentUncommitted ? "uncommitted" : "diff");
+    let tries = 0;
+    const attempt = () => {
+      const hit = [...fileRefs.current.keys()].find((k) => k === path || k.endsWith(`/${path}`) || path.endsWith(`/${k}`));
+      if (hit) scrollToFile(hit);
+      else if (++tries < 20) window.setTimeout(attempt, 100);
+    };
+    window.setTimeout(attempt, 50);
+  };
   const scrollToFile = (path: string) => {
     const el = fileRefs.current.get(path);
     if (!el) return;
@@ -1483,6 +1636,26 @@ export function AgentWorkspaceView({
               )}
             </div>
           )}
+          {/* The session as a readable document, with Hand off (sessionDoc/). */}
+          {docSessionId && (
+            <Button size="sm"
+              title="Read this session as a document — goal, turns, files, decisions — and hand it off"
+              onClick={() =>
+                openSessionDoc({
+                  kind: "session",
+                  sessionId: docSessionId,
+                  agent,
+                  cwd: docDigest?.resume_cwd || cwd,
+                  repo,
+                  digest: docDigest,
+                  live: ptyId != null ? life.state !== "ended" : docDigest?.state !== "ended",
+                  ...(ptyId != null ? { ptyId } : {}),
+                  ...(onMessageAgent ? { messageAgent: onMessageAgent } : {}),
+                })
+              }>
+              Open as document
+            </Button>
+          )}
           <Button icon className="aw-refresh"
             title="Refresh — re-read this agent's changes"
             aria-label="Refresh"
@@ -1511,6 +1684,11 @@ export function AgentWorkspaceView({
               >
                 {st.label}
               </span>
+            )}
+            {/* Whether that finished turn is *proven*: the workspace's own
+                re-run of the checks, not the agent's account of them. */}
+            {sessionId && lifecycle !== "working" && lifecycle !== "waiting" && (
+              <ReceiptBadge sessionId={sessionId} cwd={cwd} cli={agent} />
             )}
             {/* Working time, next to what that work cost: how long this run has
                 been going and how much the session has done in total. */}
@@ -1542,6 +1720,10 @@ export function AgentWorkspaceView({
               <span className="aw-stat" title="Assistant turns">
                 {usage.turns} {usage.turns === 1 ? "turn" : "turns"}
               </span>
+            )}
+            {/* Per-session budget: warns at 80%, pauses the agent at 100%. */}
+            {(sessionId ?? usage?.session_id) && (
+              <SessionBudgetChip sessionId={(sessionId ?? usage?.session_id)!} cost={cost} />
             )}
           </div>
         )}
@@ -1693,7 +1875,14 @@ export function AgentWorkspaceView({
         </div>
       )}
 
-      {/* Turn rollback: a point per turn, undoable through a diff preview. */}
+      {/* The subagents this session spawned, live (SubagentTree.tsx). */}
+      <SubagentTree activityKey={activityKey} live={working} />
+
+      {/* How full its context is, and Compact now (ContextControls.tsx). */}
+      {docSessionId && <ContextControls activity={activity} compaction={compaction} />}
+
+      {/* Turn rollback: a point per turn, undoable through a diff preview,
+          with the context controls on each turn. */}
       {sessionId && (
         <TurnTimeline
           cwd={cwd}
@@ -1702,6 +1891,9 @@ export function AgentWorkspaceView({
           builder={builderLens}
           refreshKey={digest?.updated}
           onNotice={onNotice}
+          onSummarize={
+            compaction.supported ? (kind, turn) => compaction.ask({ kind, turn }) : undefined
+          }
         />
       )}
 
@@ -1779,6 +1971,14 @@ export function AgentWorkspaceView({
 
       {(ws || edits.length > 0) && (
         <div className="branch-panes">
+          <Button
+            size="sm"
+            variant={pane === "intent" ? "accent" : "default"}
+            title="The plan, what changed against it, the proof receipt and a risk map — before the diff"
+            onClick={() => setPane("intent")}
+          >
+            Intent & evidence
+          </Button>
           {edits.length > 0 && (
             <Button
               size="sm"
@@ -1807,7 +2007,7 @@ export function AgentWorkspaceView({
               All changes vs base
             </Button>
           )}
-          {pane !== "edits" && patch && files.length > 0 && (
+          {pane !== "edits" && pane !== "intent" && patch && files.length > 0 && (
             <>
               <span className="loose-ahead">+{patch.insertions}</span>
               <span className="loose-dirty">−{patch.deletions}</span>
@@ -1899,13 +2099,25 @@ export function AgentWorkspaceView({
             hunk, so even a file two agents co-edited shows only what THIS one
             did. A superseded edit (a later write replaced it) is kept but
             greyed, because it's still a true record of what the agent did. */}
+        {pane === "intent" && (
+          <IntentEvidenceView
+            cwd={repo ?? cwd}
+            sessionIds={sessionId ? [sessionId] : []}
+            patch={intentPatch}
+            paused={lifecycle === "working" || lifecycle === "starting"}
+            onOpenFile={drillInto}
+            onRiskOrder={setRiskPaths}
+            onAskAgent={onMessageAgent}
+          />
+        )}
+
         {pane === "edits" &&
           (editsByFile.length === 0 ? (
             <div className="tree-empty">
               No edits recorded for this agent yet.
             </div>
           ) : (
-            editsByFile.map((g) => {
+            byRisk(editsByFile, (g) => g.path).map((g) => {
               // One real diff for the whole file when every edit can be placed in
               // the current content — real line numbers and gaps between edits,
               // like a normal file diff. Otherwise fall back to per-edit fragments
@@ -1913,7 +2125,11 @@ export function AgentWorkspaceView({
               const content = fileContents.get(g.path);
               const merged = mergedEdits.get(g.path) ?? null;
               return (
-                <div key={g.path} className="pr-file">
+                <div
+                  key={g.path}
+                  className={`pr-file ${flashPath === g.path ? "pr-file-flash" : ""}`}
+                  ref={(el) => onFileRef(g.path, el)}
+                >
                   <FileName
                     path={g.path}
                     count={g.items.length}
@@ -1989,16 +2205,27 @@ export function AgentWorkspaceView({
         {/* Only this agent's own files — never the rest of a shared checkout.
             When none can be attributed, we say so plainly rather than pass the
             whole tree off as this agent's work. */}
-        {pane !== "edits" &&
+        {pane !== "edits" && pane !== "intent" &&
           // One loading state, not two. This was "Loading workspace…" and then
           // "Loading diff…" — two one-line messages of different widths
           // replacing each other and then being replaced by the diff, so the
           // pane visibly stepped through three layouts on the way in. It holds
           // a fixed block of space now, so what arrives fills it instead of
           // shoving it around.
-          ((!ws && !wsErr && repo) || (ws && !patch && pane) ? (
+          (changesState === "loading" ? (
             <div className="tree-empty aw-loading">Reading this agent's changes…</div>
-          ) : !ws || !patch ? null : mine.length === 0 ? (
+          ) : changesState === "error" ? (
+            <div className="tree-empty aw-loading" role="alert">
+              Couldn't read this agent's changes: {patchErr}
+              <div className="aw-note">Refresh to try again.</div>
+            </div>
+          ) : changesState === "unavailable" ? (
+            <div className="tree-empty">
+              {ws?.branch
+                ? "There is no diff against the base branch for a detached or base-branch checkout."
+                : "This agent's checkout has no branch, so there is no branch diff to show."}
+            </div>
+          ) : changesState !== "ready" || !patch ? null : mine.length === 0 ? (
             <div className="tree-empty">
               No changes by this agent{pane === "uncommitted" ? " yet" : ""}.
               {!canAttribute && (
@@ -2011,9 +2238,9 @@ export function AgentWorkspaceView({
               )}
             </div>
           ) : (
-            mine.map(renderFile)
+            byRisk(mine, (f) => f.path).map(renderFile)
           ))}
-        {patch?.truncated && pane !== "edits" && (
+        {patch?.truncated && pane !== "edits" && pane !== "intent" && (
           <div className="tree-empty">
             Diff truncated at 2 MB — use <code>git diff</code> for the whole
             thing.

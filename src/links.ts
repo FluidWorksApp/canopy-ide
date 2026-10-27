@@ -18,6 +18,8 @@
 
 /** Asked of whichever project view is in front. Cancelling it means "I have
  *  taken this URL"; nobody cancelling means there was no view to take it. */
+import { parseReadableLink } from "./readableLinkParse";
+
 export const OPEN_URL_EVENT = "canopy:open-url";
 export const OPEN_FILE_EVENT = "canopy:open-file";
 
@@ -63,6 +65,13 @@ export function openLink(
     return;
   }
   if (/^https:\/\/github\.com\/login\/device(?:[/?#]|$)/i.test(href)) {toOsBrowser(href);return;}
+  // A readable Canopy link names a workspace, shared session or team message
+  // in the account: the app resolves it (readableLinks.ts) instead of showing
+  // the website's "Open in Canopy" page. Cmd/Ctrl-click still goes to the browser.
+  if (!external && parseReadableLink(href)) {
+    window.dispatchEvent(new CustomEvent("canopy:follow-deep-link", { detail: { url: href } }));
+    return;
+  }
   if (!external) {
     const claimed = !window.dispatchEvent(
       new CustomEvent<OpenUrlDetail>(OPEN_URL_EVENT, {

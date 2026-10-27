@@ -323,6 +323,12 @@ export interface VibeBuilderSessionDeps {
   now(): number;
   sessionId(): string;
   sleep(ms: number): Promise<void>;
+  /** Plan a Build request before the agent gets it (plans/planGate.ts, the
+   *  same blast-radius gate as every other dispatch). Resolves with the brief
+   *  to send — the plan folded in, or the request as typed when planning is
+   *  off or skipped — or null when the person chose not to start it. Absent
+   *  means "send as typed" (tests, selftests). */
+  plan?(request: { message: string; dir: string; label: string }): Promise<string | null>;
 }
 
 function randomId(): string {
@@ -963,6 +969,28 @@ async function nativeAbstractionContext(
 }
 
 export const DEFAULT_VIBE_BUILDER_DEPS: VibeBuilderSessionDeps = {
+  // Dynamic: planGate → ledger/brain is a heavy graph this module's selftests
+  // never need.
+  plan: async ({ message, dir, label }) => {
+    const { dispatchWithPlan } = await import("./plans/planGate");
+    let brief: string | null = null;
+    await dispatchWithPlan(
+      {
+        request: message,
+        dir,
+        label,
+        source: "build",
+        // Build chat is one long conversation: its plan is done when a receipt
+        // proves it or the session ends, not when this turn does.
+        mode: "interactive",
+        resume: { kind: "build", payload: { dir, message } },
+      },
+      (planned) => {
+        brief = planned;
+      },
+    );
+    return brief;
+  },
   abstractionContext: nativeAbstractionContext,
   runAbstraction: (argv, cwd, ownership) =>
     runAbstractionPlan(argv, cwd, {
@@ -1535,11 +1563,42 @@ export class VibeBuilderSession implements BuilderSession {
       sent = resolve;
       failed = reject;
     });
-    const queued = this.sendQueue.then(() =>
-      this.runTurn(message, sent, failed, options?.context),
-    );
+    const queued = this.sendQueue.then(async () => {
+      // Build requests are dispatched work too: planned first, and a risky
+      // one waits for the person's approval before the agent sees it.
+      const brief = options?.planned ?? (await this.planTurn(message));
+      if (brief === null) {
+        this.present(
+          { kind: "idle" },
+          {
+            id: `vibe-plan-dropped-${this.deps.now()}`,
+            kind: "notice",
+            prompt: "Not started.",
+            detail: `You chose not to start: "${message}"`,
+          },
+        );
+        sent();
+        return;
+      }
+      return this.runTurn(message, sent, failed, options?.context, brief);
+    });
     this.sendQueue = queued.catch(() => {});
     return accepted;
+  }
+
+  /** The brief for a plain Build turn: planned when a planner is wired. */
+  private async planTurn(message: string): Promise<string | null> {
+    if (!this.deps.plan) return message;
+    try {
+      return await this.deps.plan({
+        message,
+        dir: this.options.componentPath,
+        label: `Build · ${this.options.projectName}`,
+      });
+    } catch {
+      // Planning must never be the reason work did not start.
+      return message;
+    }
   }
 
   /** Preflight a service link, then give the original request to the agent.
@@ -2254,11 +2313,13 @@ export class VibeBuilderSession implements BuilderSession {
     sent: () => void,
     failed: (error: unknown) => void,
     context?: string,
+    /** What the agent is sent: the planned brief, or the message itself. */
+    brief: string = message,
   ): Promise<void> {
     const evidence = context?.trim();
     const agentMessage = evidence
-      ? `${message}\n\nLive preview context:\n${evidence}`
-      : message;
+      ? `${brief}\n\nLive preview context:\n${evidence}`
+      : brief;
     const turnEpoch = ++this.turnEpoch;
     try {
       if (this.verifying) await this.verifying;

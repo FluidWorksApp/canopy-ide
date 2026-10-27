@@ -21,16 +21,21 @@ import { LIFE_META, NO_ATTENTION, bucketFor, reclaimable, silenceLabel } from ".
 import type { Attention, LifeState } from "../../shared/agentLife";
 import { ashFor } from "../ash";
 import { markRestored } from "../restorable";
+import { openSessionDoc } from "../sessionDoc/events";
+import { SubagentTree } from "./SubagentTree";
 import {
   lastHumanPrompt,
   useAgentSessions,
+  useBrainSessionSummaries,
   workingOnNow,
   type SessionRow,
 } from "../agentSessions";
 import { claimOwnerName } from "../claims";
 import { IntegrationsList, useIntegrations } from "./AgentIntegrations";
 import { AgentControlPanel, type ControlPanelMode } from "./AgentControlPanel";
+import { TeamBoard } from "./TeamBoard";
 import { PendingCard } from "./PendingCard";
+import { ReceiptBadge } from "./ReceiptBadge";
 import { Mascot } from "./Mascot";
 import { AgentRuntime } from "./AgentRuntime";
 import { AgentNameEditor } from "./AgentNameEditor";
@@ -208,6 +213,7 @@ export function AgentsView({
   );
   const { agentSessions, termSessions, restorable, shared, claims, forget, lifeOf } =
     useAgentSessions({ visible: active, roots, stats, liveSessionIds });
+  useBrainSessionSummaries(active ? agentSessions : []);
   const integrations = useIntegrations(active);
   const settings = getSettings();
 
@@ -263,7 +269,7 @@ export function AgentsView({
 
   // Cards is this page as it has always been; graph and table are the control
   // panel — two views of one app-wide dataset (see AgentControlPanel).
-  const [mode, setMode] = useState<"cards" | ControlPanelMode>("cards");
+  const [mode, setMode] = useState<"cards" | ControlPanelMode | "board">("cards");
 
   // The archive is the one list here long enough to need finding things in.
   const [query, setQuery] = useState("");
@@ -331,6 +337,17 @@ export function AgentsView({
             <span className={`agv-card-state ${st.cls}`} title={stTitle}>
               {st.label}
             </span>
+            {/* A finished turn is only "done" once the workspace's receipt says
+                so; the agent's own word is not evidence. */}
+            {agent && (life.state === "idle" || life.state === "ended") && (
+              <ReceiptBadge
+                sessionId={digest?.session_id}
+                ptyId={s.id}
+                cwd={s.cwd}
+                cli={agent.id ?? ""}
+                quietWhenUnverified={life.state === "ended"}
+              />
+            )}
           </div>
           <span className="agv-spacer" />
           <AgentRuntime timing={digest} live={life.state === "working"} />
@@ -393,6 +410,15 @@ export function AgentsView({
         <p className={`agv-task ${task ? "" : "agv-task-none"}`}>
           {task ?? "No prompt recorded for this session yet."}
         </p>
+
+        {/* The subagents it spawned, live: a count that opens into the list. */}
+        {agent?.id && digest?.session_id && (
+          <SubagentTree
+            compact
+            live={life.state === "working"}
+            activityKey={{ agent: agent.id, sessionId: digest.session_id, cwd: s.cwd, profile: digest.profile ?? null }}
+          />
+        )}
 
         {/* Numbers on one line, actions on the other. They used to share a
             wrapping row, so a session with tokens and a cost pushed its own
@@ -478,7 +504,7 @@ export function AgentsView({
             role="group"
             aria-label="How to show the agents"
           >
-            {(["cards", "graph", "table"] as const).map((m) => (
+            {(["cards", "graph", "table", "board"] as const).map((m) => (
               <button
                 key={m}
                 className={`agv-mode ${mode === m ? "agv-mode-on" : ""}`}
@@ -487,7 +513,9 @@ export function AgentsView({
                     ? "This project's agents, as cards"
                     : m === "graph"
                       ? "Every agent in Canopy as a live graph — who talks to whom"
-                      : "Every agent in Canopy as a table"
+                      : m === "board"
+                        ? "The team board: what every agent is doing, what it holds, and what it was told about the others' changes"
+                        : "Every agent in Canopy as a table"
                 }
                 onClick={() => setMode(m)}
               >
@@ -545,7 +573,16 @@ export function AgentsView({
         )}
       </header>
 
-      {mode !== "cards" ? (
+      {mode === "board" ? (
+        <div className="agv-body">
+          <TeamBoard
+            active={active}
+            allProjects={allProjects ?? [{ name: projectName, roots }]}
+            onJumpToPty={onJumpToPty}
+            tabNames={tabNames}
+          />
+        </div>
+      ) : mode !== "cards" ? (
         <div className="agv-body acp-body">
           <AgentControlPanel
             active={active}
@@ -765,6 +802,27 @@ export function AgentsView({
                         }}
                       >
                         <RestartIcon size={12} /> Restore
+                      </Button>
+                      <Button
+                        size="sm"
+                        variant="ghost"
+                        title="Read this session as a document and hand it off"
+                        onClick={() =>
+                          openSessionDoc({
+                            kind: "session",
+                            sessionId: d.session_id,
+                            agent: agentId,
+                            cwd: runIn,
+                            digest: d,
+                            resumeCommand: cmd,
+                            onResume: () => {
+                              markRestored(d.session_id);
+                              onRestore?.(runIn, cmd, agentId, agentId);
+                            },
+                          })
+                        }
+                      >
+                        Document
                       </Button>
                       <Button
                         icon

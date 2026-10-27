@@ -68,6 +68,12 @@ test('harness query needs view, actions need drive and carry the authenticated a
   assert.equal((await t.request('owner','/harness/actions',{kind:'answer',id:'q1',answer:'yes',actor:'someone-else'})).status,200);
   const action=t.fake.calls.find(c=>c.path==='/admin/workspaces/a/actions');assert.deepEqual(action.body,{kind:'answer',id:'q1',answer:'yes',actor:'owner'});
   assert.equal((await t.request('owner','/harness/actions',{kind:'delete_everything'})).status,400);
+  // The control panel's writes reach the service under the same actor rule.
+  for(const body of [{kind:'claim_release',ownerKey:'pty:remote-a:3'},{kind:'mesh_sever',a:1,b:2,severed:true},{kind:'mesh_job_update',ptyId:3,instance:'remote-a',jobId:'j1',text:'done'}]){
+   assert.equal((await t.request('owner','/harness/actions',body)).status,200);
+   assert.deepEqual(t.fake.calls.filter(c=>c.path==='/admin/workspaces/a/actions').at(-1).body,{...body,actor:'owner'});
+   assert.equal((await t.request('viewer','/harness/actions',body)).status,403);
+  }
   assert.equal((await fetch(t.url+'/v1/workspaces/a/harness/query',{method:'POST',body:'{}'})).status,401);
  }finally{await t.close();}
 });
@@ -99,5 +105,33 @@ test('the harness stream is ticketed, passes SSE through, and revocation cuts it
   assert.equal(upstreamClosed,true,'the service subscription is released too');
   const bearer=await fetch(`${t.url}/v1/workspaces/a/harness/stream`,{headers:{authorization:'Bearer owner'}});assert.equal(bearer.status,200);await bearer.body.cancel();
   assert.equal((await fetch(`${t.url}/v1/workspaces/a/harness/stream`)).status,401);
+ }finally{await t.close();}
+});
+
+test('a structured runner is minted a context-bridge credential, revoked when its spawn fails',async()=>{
+ const t=await setup();
+ try{
+  // No task reserved this attempt, so the host refuses the spawn itself.
+  const response=await t.request('owner','/native',{command:'structured_runner_spawn',args:{attemptId:'att_1',controlToken:'ct',command:'claude',cwd:'/workspace'}});
+  assert.notEqual(response.status,200);
+  const minted=t.fake.calls.find(c=>c.method==='POST'&&c.path==='/admin/workspaces/a/terminals');
+  assert.equal(minted.body.requestId,'runner-att:1');
+  assert.ok(t.fake.calls.some(c=>c.method==='DELETE'&&c.path==='/admin/workspaces/a/terminals/runner-att%3A1'));
+  assert.equal((await t.request('owner','/native',{command:'structured_runner_spawn',args:{attemptId:'att_2',harness:{token:'forged-credential-0000'}}})).status,400,'a client cannot supply a credential');
+ }finally{await t.close();}
+});
+
+test('only the owner\'s driving IDE takes or answers device ops',async()=>{
+ const t=await setup(call=>{
+  if(call.path.endsWith('/query'))return {items:[]};
+  if(call.method==='PUT')return {agentSocketDir:'/run/canopy-service/ws/a'};
+  return {ok:true};
+ });
+ try{
+  assert.equal((await t.request('viewer','/harness/query',{store:'device',action:'pending',args:{wait:10}})).status,403);
+  assert.equal((await t.request('owner','/harness/query',{store:'device',action:'pending',args:{wait:10}})).status,200);
+  const answered=await t.request('owner','/harness/actions',{kind:'device_answer',id:'dev-1',status:200,chunk:'{}',offset:0,done:true});
+  assert.equal(answered.status,200);
+  assert.ok(t.fake.calls.some(c=>c.path.endsWith('/actions')&&c.body.kind==='device_answer'&&c.body.actor));
  }finally{await t.close();}
 });

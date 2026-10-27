@@ -1,6 +1,6 @@
 // Share cards: a pull request, lines of a file, a diff, terminal output or an
 // agent's report, sent from Canopy into team chat — plus PR review requests and
-// their outcomes.
+// their outcomes, and agent plans shared for the team to approve (src/plans).
 //
 // A card rides on an ordinary, visible chat message as the optional `card`
 // field. The message's `text` is the human-readable fallback (a summary line and
@@ -34,7 +34,43 @@ export type ReportCard={type:'report';v:1;agent:string;title:string;body:string;
 export type ReviewRequestCard={type:'review-request';v:1;repo:RepoRef;number:number;title:string;head:string;reviewers:string[]};
 export type ReviewOutcome='approved'|'changes-requested'|'commented';
 export type ReviewOutcomeCard={type:'review-outcome';v:1;request:string;repo:RepoRef;number:number;outcome:ReviewOutcome;head?:string};
-export type Card=PrCard|FileCard|DiffCard|TerminalCard|ReportCard|ReviewRequestCard|ReviewOutcomeCard;
+/** A session handed off to a teammate: the packet's markdown (rendered as
+ *  plain text on the other side — it is untrusted), which agent CLI the session
+ *  ran on, and its id, so the recipient can see which conversation it was. The
+ *  recipient's "Take over" starts a fresh agent of their own from the packet;
+ *  nothing about the sender's machine is named beyond the directory's name. */
+export type HandoffCard={type:'handoff';v:1;title:string;agent:string;session:string;packet:string;dir?:string;repo?:RepoRef;truncated?:boolean;
+ /** The session is still running and its owner lets teammates join it: the
+  *  live room's id (liveEvents.ts), for "Join live" beside "Take over". */
+ room?:string};
+/** An agent session that is running now, which teammates in the conversation
+ *  may join: watch its turns as they happen, see who else is watching, and ask
+ *  the owner to pass a message to the agent (src/liveSession). `room` is the
+ *  owner's live room id; the owner's Canopy checks every join against the
+ *  conversation the card was posted in. */
+export type LiveSessionCard={type:'live-session';v:1;room:string;title:string;agent:string;dir?:string;repo?:RepoRef};
+/** A plan an agent will work from (src/plans/plan.ts), shared before the work
+ *  starts so teammates can comment and approve. `plan` is the plan's id on the
+ *  sender's machine — an opaque token, never a path. No repo: a plan is read,
+ *  not opened. */
+export type PlanRisk='low'|'medium'|'high';
+export type PlanCardSize='tiny'|'small'|'large';
+/** `approvers`: the teammates the author named; only their approval counts.
+ *  A card without any (an older Canopy's) cannot be approved from chat. */
+export type PlanCard={type:'plan';v:1;plan:string;goal:string;decisions?:{q:string;a:string}[];acceptance:string[];wontDo?:string[];risk:PlanRisk;size:PlanCardSize;approvers?:string[]};
+export type PlanOutcome='approved'|'changes-requested';
+/** A teammate's answer to a plan card, posted in the card's thread. */
+export type PlanOutcomeCard={type:'plan-outcome';v:1;request:string;plan:string;outcome:PlanOutcome};
+/** A change to a layer someone owns (src/lensGates.ts), sent to the owner for
+ *  approval — no pull request needed. `approval` is the request's id on the
+ *  sender's machine (an opaque token), `owner` the owner's team identity, and
+ *  `files` repo-relative paths. The summary is plain text the owner reads. */
+export type LayerName='data'|'auth'|'deploy'|'integration';
+export type LayerApprovalCard={type:'layer-approval';v:1;approval:string;layer:LayerName;owner:string;project:string;files:string[];summary:string;repo?:RepoRef};
+export type LayerApprovalOutcome='approved'|'rejected';
+/** The owner's answer, posted in the request's thread. */
+export type LayerApprovalOutcomeCard={type:'layer-approval-outcome';v:1;request:string;approval:string;outcome:LayerApprovalOutcome};
+export type Card=PrCard|FileCard|DiffCard|TerminalCard|ReportCard|ReviewRequestCard|ReviewOutcomeCard|HandoffCard|LiveSessionCard|PlanCard|PlanOutcomeCard|LayerApprovalCard|LayerApprovalOutcomeCard;
 export type CardType=Card['type'];
 
 // ---------- limits ----------
@@ -46,6 +82,12 @@ export const LIMITS={
  /** How much of terminal output / a report goes into the fallback text. */
  excerptBytes:1024,
  reviewers:20,maxLine:1_000_000,maxSpan:2000,maxNumber:1_000_000_000,slug:200,
+ /** A handoff packet's markdown. Under cardBytes with room for the rest. */
+ packetBytes:11*1024,
+ /** Plan cards: a goal, up to 8 decisions, 12 checks and 8 exclusions. */
+ planGoal:400,planItem:300,planDecisions:8,planChecks:12,planWontDo:8,
+ /** Layer approvals: files named, and the plain-text summary of the change. */
+ approvalFiles:60,approvalSummaryBytes:8*1024,
 } as const;
 const bytes=(value:string)=>new TextEncoder().encode(value).length;
 export const cardBytes=(card:Card)=>bytes(JSON.stringify(card));
@@ -121,8 +163,19 @@ const isObject=(value:unknown):value is Record<string,unknown>=>!!value&&typeof 
 const exact=(value:object,keys:string[])=>Object.keys(value).every(key=>keys.includes(key));
 const optional=<T,>(value:unknown,check:(v:unknown)=>v is T)=>value===undefined||check(value);
 const OUTCOMES:readonly ReviewOutcome[]=['approved','changes-requested','commented'];
+const PLAN_OUTCOMES:readonly PlanOutcome[]=['approved','changes-requested'];
+/** src/plans/plan.ts PLAN_ID, restated so the wire schema imports nothing. */
+const PLAN_ID=/^pl-[a-z0-9]{1,16}-[a-z0-9]{1,16}$/;
+const planItem=(v:unknown):v is string=>safeLine(v,LIMITS.planItem);
+const planItems=(v:unknown,max:number,min=0):v is string[]=>Array.isArray(v)&&v.length>=min&&v.length<=max&&v.every(planItem);
 const title=(v:unknown):v is string=>safeLine(v,LIMITS.title);
 const repoCopy=(r:RepoRef):RepoRef=>({host:r.host,slug:r.slug});
+/** An agent CLI's conversation id: uuid-like, never a path. */
+const SESSION_ID=/^[A-Za-z0-9_-]{1,128}$/;
+/** src/lensApprovals.ts APPROVAL_ID, restated so the wire schema imports nothing. */
+export const APPROVAL_ID=/^la-[a-z0-9]{4,32}$/;
+const LAYERS:readonly LayerName[]=['data','auth','deploy','integration'];
+export const LAYER_WORDS:Record<LayerName,string>={data:'Data',auth:'Sign-in & accounts',deploy:'Going live',integration:'Connected services'};
 
 /** A well formed card of a type this client knows — a fresh object holding only
  *  the known fields — or undefined. Never throws. */
@@ -170,6 +223,41 @@ export function parseCard(value:unknown):Card|undefined{
     if(!exact(c,['type','v','request','repo','number','outcome','head'])||typeof c.request!=='string'||!UUID.test(c.request)||!validRepo(c.repo)||!validNumber(c.number)||!OUTCOMES.includes(c.outcome as ReviewOutcome)||!optional(c.head,validSha))return undefined;
     return fits({type:'review-outcome',...base,request:c.request,repo:repoCopy(c.repo),number:c.number,outcome:c.outcome as ReviewOutcome,...(c.head?{head:c.head as string}:{})});
    }
+   case 'handoff':{
+    if(!exact(c,['type','v','title','agent','session','packet','dir','repo','truncated','room'])||!optional(c.room,(v):v is string=>typeof v==='string'&&UUID.test(v))||!title(c.title)||!safeLine(c.agent,64)||typeof c.session!=='string'||!SESSION_ID.test(c.session)||!safeBlock(c.packet,LIMITS.packetBytes)||!optional(c.dir,(v):v is string=>safeLine(v,200)&&!/[\\/]/.test(v))||!optional(c.repo,validRepo))return undefined;
+    if(c.truncated!==undefined&&typeof c.truncated!=='boolean')return undefined;
+    return fits({type:'handoff',...base,title:c.title,agent:c.agent,session:c.session,packet:c.packet,...(c.dir!==undefined?{dir:c.dir as string}:{}),...(c.repo?{repo:repoCopy(c.repo as RepoRef)}:{}),...(c.truncated!==undefined?{truncated:c.truncated as boolean}:{}),...(c.room!==undefined?{room:c.room as string}:{})});
+   }
+   case 'live-session':{
+    if(!exact(c,['type','v','room','title','agent','dir','repo'])||typeof c.room!=='string'||!UUID.test(c.room)||!title(c.title)||!safeLine(c.agent,64)||!optional(c.dir,(v):v is string=>safeLine(v,200)&&!/[\\/]/.test(v))||!optional(c.repo,validRepo))return undefined;
+    return fits({type:'live-session',...base,room:c.room,title:c.title,agent:c.agent,...(c.dir!==undefined?{dir:c.dir as string}:{}),...(c.repo?{repo:repoCopy(c.repo as RepoRef)}:{})});
+   }
+   case 'plan':{
+    if(!exact(c,['type','v','plan','goal','decisions','acceptance','wontDo','risk','size','approvers'])||typeof c.plan!=='string'||!PLAN_ID.test(c.plan)||!safeLine(c.goal,LIMITS.planGoal))return undefined;
+    if(c.risk!=='low'&&c.risk!=='medium'&&c.risk!=='high')return undefined;
+    if(c.size!=='tiny'&&c.size!=='small'&&c.size!=='large')return undefined;
+    if(!planItems(c.acceptance,LIMITS.planChecks)||(c.wontDo!==undefined&&!planItems(c.wontDo,LIMITS.planWontDo)))return undefined;
+    const d=c.decisions;
+    if(d!==undefined&&!(Array.isArray(d)&&d.length<=LIMITS.planDecisions&&d.every(x=>isObject(x)&&exact(x,['q','a'])&&planItem(x.q)&&planItem(x.a))))return undefined;
+    const decisions=(d as {q:string;a:string}[]|undefined)?.map(x=>({q:x.q,a:x.a}));
+    const a=c.approvers;
+    if(a!==undefined&&!(Array.isArray(a)&&a.length>0&&a.length<=LIMITS.reviewers&&a.every(validIdentity)&&new Set(a).size===a.length))return undefined;
+    return fits({type:'plan',...base,plan:c.plan,goal:c.goal,...(decisions?{decisions}:{}),acceptance:[...c.acceptance as string[]],...(c.wontDo!==undefined?{wontDo:[...c.wontDo as string[]]}:{}),risk:c.risk,size:c.size,...(a!==undefined?{approvers:[...a as string[]]}:{})});
+   }
+   case 'plan-outcome':{
+    if(!exact(c,['type','v','request','plan','outcome'])||typeof c.request!=='string'||!UUID.test(c.request)||typeof c.plan!=='string'||!PLAN_ID.test(c.plan)||!PLAN_OUTCOMES.includes(c.outcome as PlanOutcome))return undefined;
+    return fits({type:'plan-outcome',...base,request:c.request,plan:c.plan,outcome:c.outcome as PlanOutcome});
+   }
+   case 'layer-approval':{
+    if(!exact(c,['type','v','approval','layer','owner','project','files','summary','repo'])||typeof c.approval!=='string'||!APPROVAL_ID.test(c.approval)||!LAYERS.includes(c.layer as LayerName)||!validIdentity(c.owner)||!title(c.project)||!safeBlock(c.summary,LIMITS.approvalSummaryBytes)||!optional(c.repo,validRepo))return undefined;
+    const f=c.files;
+    if(!Array.isArray(f)||!f.length||f.length>LIMITS.approvalFiles||!f.every(validCardPath))return undefined;
+    return fits({type:'layer-approval',...base,approval:c.approval,layer:c.layer as LayerName,owner:c.owner,project:c.project,files:[...new Set(f as string[])],summary:c.summary,...(c.repo?{repo:repoCopy(c.repo as RepoRef)}:{})});
+   }
+   case 'layer-approval-outcome':{
+    if(!exact(c,['type','v','request','approval','outcome'])||typeof c.request!=='string'||!UUID.test(c.request)||typeof c.approval!=='string'||!APPROVAL_ID.test(c.approval)||(c.outcome!=='approved'&&c.outcome!=='rejected'))return undefined;
+    return fits({type:'layer-approval-outcome',...base,request:c.request,approval:c.approval,outcome:c.outcome});
+   }
    default:return undefined;
   }
  }catch{return undefined;}
@@ -202,7 +290,7 @@ export function cardUrl(card:Card):string|undefined{
   case 'file':return blobUrl(card.repo,card.rev,card.path,card.lines);
   case 'diff':return card.pr?`${prUrl(card.repo,card.pr)}${isGitLab(card.repo.host)?'/diffs':'/files'}`:compareUrl(card.repo,card.base,card.head);
   case 'report':return card.repo&&card.pr?prUrl(card.repo,card.pr):undefined;
-  case 'terminal':return undefined;
+  case 'terminal':case 'handoff':case 'live-session':case 'plan':case 'plan-outcome':case 'layer-approval':case 'layer-approval-outcome':return undefined;
  }
 }
 const linesLabel=(l?:LineRange)=>l?(l.start===l.end?`:${l.start}`:`:${l.start}-${l.end}`):'';
@@ -218,7 +306,22 @@ export function cardSummary(card:Card):string{
   case 'report':return `Report from ${card.agent}: ${card.title}`;
   case 'review-request':return `Review requested: ${card.repo.slug}#${card.number} · head ${short(card.head)}: ${card.title}`;
   case 'review-outcome':return `${OUTCOME_ICON[card.outcome]} ${OUTCOME_LABEL[card.outcome]} ${card.repo.slug}#${card.number} (via Canopy)`;
+  case 'handoff':return `Handoff: ${card.title}${card.repo?` (${card.repo.slug})`:''}`;
+  case 'live-session':return `Live agent session: ${card.title}${card.repo?` (${card.repo.slug})`:''} — open it in Canopy 0.5 or later to join`;
+  case 'plan':return `Plan for review (${card.risk} risk, ${card.size}): ${card.goal}`;
+  case 'plan-outcome':return card.outcome==='approved'?'✅ Approved the plan (via Canopy)':'🔁 Asked for changes to the plan (via Canopy)';
+  case 'layer-approval':return `Approval needed: ${LAYER_WORDS[card.layer]} change in ${card.project} (${card.files.length} file${card.files.length===1?'':'s'})`;
+  case 'layer-approval-outcome':return card.outcome==='approved'?'✅ Approved the change (via Canopy)':'⛔ Rejected the change (via Canopy)';
  }
+}
+/** A plan card's body as plain text: what a client without cards shows, and
+ *  what the secret check reads. */
+export function planText(card:PlanCard):string{
+ const out:string[]=[];
+ if(card.decisions?.length)out.push('Decisions:',...card.decisions.map(d=>`- ${d.q} → ${d.a}`));
+ if(card.acceptance.length)out.push('Done when:',...card.acceptance.map(a=>`- ${a}`));
+ if(card.wontDo?.length)out.push('Won\'t do:',...card.wontDo.map(w=>`- ${w}`));
+ return out.join('\n');
 }
 const excerpt=(value:string)=>{const {text,clipped}=clipBytes(value,LIMITS.excerptBytes);return clipped?`${text}…`:text;};
 /** What a client that does not know cards shows: the optional note, the
@@ -230,6 +333,12 @@ export function cardText(card:Card,note=''):string{
  parts.push(cardSummary(card));
  if(card.type==='terminal'){if(card.command)parts.push(`$ ${card.command}`);parts.push(excerpt(card.output));}
  if(card.type==='report')parts.push(excerpt(card.body));
+ // The whole packet, not an excerpt: a teammate on an older Canopy must still
+ // be able to take the work over by reading it.
+ if(card.type==='handoff')parts.push(card.packet);
+ if(card.type==='plan')parts.push(excerpt(planText(card)));
+ // The files in full: an owner on an older Canopy still sees what they'd approve.
+ if(card.type==='layer-approval')parts.push(['Files:',...card.files.map(f=>`- ${f}`)].join('\n'),excerpt(card.summary));
  const url=cardUrl(card);if(url)parts.push(url);
  return parts.join('\n');
 }
@@ -287,6 +396,9 @@ export function cardFreeText(card:Card):string{
   case 'report':return card.body;
   case 'file':return card.snippet??'';
   case 'diff':return card.patch;
+  case 'handoff':return card.packet;
+  case 'plan':return `${card.goal}\n${planText(card)}`;
+  case 'layer-approval':return card.summary;
   default:return '';
  }
 }
@@ -315,4 +427,48 @@ export function foldOutcomes(request:ChatMessage,messages:readonly ChatMessage[]
   latest.set(m.sender,{reviewer:m.sender,outcome:c.outcome,...(c.head?{head:c.head}:{}),created:m.created,id:m.id});
  }
  return req.reviewers.flatMap(r=>latest.get(r)??[]);
+}
+
+// ---------- plan outcomes ----------
+export type FoldedPlanOutcome={by:string;outcome:PlanOutcome;created:number;id:string};
+/** The latest answer per named approver to a plan card, last-writer-wins by
+ *  (created, id). Only replies in the card's own thread count, only for the
+ *  plan it named, only from the approvers the card names, and never the
+ *  author's own (a plan is approved by someone else, or locally by its author
+ *  before launch). Anyone else in the thread is commenting, not deciding. */
+export function foldPlanOutcomes(request:ChatMessage,messages:readonly ChatMessage[]):FoldedPlanOutcome[]{
+ const req=cardOf(request);if(req?.type!=='plan')return [];
+ const approvers=req.approvers??[];
+ const latest=new Map<string,FoldedPlanOutcome>();
+ for(const m of messages){
+  if(m.id===request.id||m.sender===request.sender||!approvers.includes(m.sender)||!sameConversation(m,request))continue;
+  const thread=m.thread as {root?:unknown}|undefined;
+  if(!thread||thread.root!==request.id)continue;
+  const c=cardOf(m);
+  if(c?.type!=='plan-outcome'||c.request!==request.id||c.plan!==req.plan)continue;
+  const prev=latest.get(m.sender);
+  if(prev&&(prev.created>m.created||(prev.created===m.created&&prev.id>m.id)))continue;
+  latest.set(m.sender,{by:m.sender,outcome:c.outcome,created:m.created,id:m.id});
+ }
+ return [...latest.values()].sort((a,b)=>a.created-b.created);
+}
+
+// ---------- layer approvals ----------
+export type FoldedLayerApproval={outcome:LayerApprovalOutcome;created:number;id:string};
+/** The owner's latest answer to a layer-approval card, last-writer-wins by
+ *  (created, id). Only replies in the card's own thread count, only from the
+ *  owner it named, and only for the approval it carries. */
+export function foldLayerApproval(request:ChatMessage,messages:readonly ChatMessage[]):FoldedLayerApproval|undefined{
+ const req=cardOf(request);if(req?.type!=='layer-approval')return undefined;
+ let latest:FoldedLayerApproval|undefined;
+ for(const m of messages){
+  if(m.id===request.id||m.sender!==req.owner||!sameConversation(m,request))continue;
+  const thread=m.thread as {root?:unknown}|undefined;
+  if(!thread||thread.root!==request.id)continue;
+  const c=cardOf(m);
+  if(c?.type!=='layer-approval-outcome'||c.request!==request.id||c.approval!==req.approval)continue;
+  if(latest&&(latest.created>m.created||(latest.created===m.created&&latest.id>m.id)))continue;
+  latest={outcome:c.outcome,created:m.created,id:m.id};
+ }
+ return latest;
 }

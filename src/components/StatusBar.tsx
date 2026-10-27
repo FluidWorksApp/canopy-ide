@@ -36,6 +36,7 @@ import { setBounded } from "../boundedMap";
 import * as ipc from "../ipc";
 import { estimateCost, sessionCost } from "../pricing";
 import { chipLabel, planFor, planTone, tooltip } from "../planUsage";
+import { BrainChip } from "./BrainChip";
 import { accountSummary } from "../accountState";
 import {
   loadFlags,
@@ -1461,6 +1462,9 @@ export const StatusBar = memo(function StatusBar({
           {chipLabel(plan)}
         </span>
       )}
+      {/* The brain: which CLI powers Canopy's features, whether it answers, and
+          what those features spent on the plan beside it today. */}
+      <BrainChip />
       {/* Beside the plan chip: that headroom belongs to this account. Hidden
           until a second account exists — one account is not a choice. */}
       <AccountSwitcher />

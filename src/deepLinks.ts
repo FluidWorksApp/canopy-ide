@@ -18,6 +18,8 @@
 //   canopy://task?run=8b2d…&id=p1                      one completed task
 //   canopy://pr?number=1341&path=/Users/me/src/api    a pull request's tab
 //   canopy://project?id=p1                            the project itself
+//   canopy://link?url=https%3A%2F%2Fcanopyide.dev%2Facme%2Fapi
+//                                                     a readable Canopy link
 //   canopy://app                                      nothing in particular
 //
 // The note target is the one composed *outside* the app: a reminder's launchd
@@ -38,6 +40,7 @@
 // lands somewhere honest instead of failing silently.
 
 import type { SideTab } from "./components/ProjectView/helpers";
+import { parseReadableLink } from "./readableLinkParse";
 
 const SIDE_TABS: readonly SideTab[] = [
   "files",
@@ -51,6 +54,7 @@ const SIDE_TABS: readonly SideTab[] = [
   "agents",
   "team",
   "tools",
+  "outcomes",
 ];
 
 /** Hints for finding the project a target belongs to. Both are optional and
@@ -76,6 +80,8 @@ export type DeepLink =
       team?: string;
       account?: string;
       name?: string;
+      /** A message to bring into view (from a readable message link). */
+      message?: string;
     } & ProjectHint)
   | ({ kind: "file"; path: string; line?: number } & ProjectHint)
   /** A scratchpad note, by store id (`nnnn-slug`). */
@@ -90,7 +96,11 @@ export type DeepLink =
    *  same string `openPr` keys tabs on — and `url` is the escape hatch: a PR
    *  that has merged or closed since the notification went out has no native
    *  tab any more, and the browser is the only true answer left. */
-  | ({ kind: "pr"; number: number; url?: string; repo?: string } & ProjectHint);
+  | ({ kind: "pr"; number: number; url?: string; repo?: string } & ProjectHint)
+  /** A readable Canopy link (readableLinks.ts), in canonical https form. It
+   *  names a workspace, shared session or team message that only the control
+   *  plane can resolve, so it is followed asynchronously and never by guessing. */
+  | ({ kind: "link"; url: string } & ProjectHint);
 
 export const DEEP_LINK_SCHEME = "canopy:";
 
@@ -107,7 +117,9 @@ export function formatDeepLink(link: DeepLink): string {
     q.set("team", link.team);
     q.set("account", link.account);
     if (link.name) q.set("label", link.name);
+    if (link.message) q.set("message", link.message);
   }
+  if (link.kind === "link") q.set("url", link.url);
   if (link.kind === "file" && link.line != null) q.set("line", String(link.line));
   // `note`, not `id` — `id` is already the project hint on every kind, and a
   // link that spelled the note with it would be a link that can never carry
@@ -132,6 +144,9 @@ export function formatDeepLink(link: DeepLink): string {
  *  that is missing what its kind needs — a malformed link is dropped rather
  *  than half-followed, and the caller falls back to raising the window. */
 export function parseDeepLink(raw: string): DeepLink | null {
+  // A readable link pasted or opened as-is is as good as its canopy:// form.
+  const readable = parseReadableLink(raw);
+  if (readable) return { kind: "link", url: readable.url };
   let url: URL;
   try {
     url = new URL(raw);
@@ -172,14 +187,19 @@ export function parseDeepLink(raw: string): DeepLink | null {
       const team = p.get("team");
       const account = p.get("account");
       const name = p.get("label");
+      const message = p.get("message");
       return {
         kind: "chat",
         peer: p.get("peer"),
         ...(team && account
-          ? { team, account, ...(name ? { name } : {}) }
+          ? { team, account, ...(name ? { name } : {}), ...(message ? { message } : {}) }
           : {}),
         ...hint,
       };
+    }
+    case "link": {
+      const target = parseReadableLink(p.get("url") ?? "");
+      return target ? { kind: "link", url: target.url } : null;
     }
     case "note": {
       const noteId = p.get("note");
@@ -244,6 +264,7 @@ export type DeepLinkAction =
         userId: string;
         peer: string | null;
         name: string;
+        focusMessage?: string;
       };
     }
   | { do: "file"; path: string; line?: number }
@@ -273,6 +294,10 @@ export function followLink(
   ctx: FollowContext,
 ): DeepLinkAction {
   switch (link.kind) {
+    // Resolved by the app against the account before any project is involved
+    // (App.tsx); nothing in a project can follow it.
+    case "link":
+      return { do: "nothing" };
     case "panel":
       // Changes is now the first subview of Source control. Keep accepting old
       // notification URLs, but never route them to the retired rail entry.
@@ -307,6 +332,7 @@ export function followLink(
             userId: link.account,
             peer,
             name: link.name || (peer === null ? "Team" : "Direct message"),
+            ...(link.message ? { focusMessage: link.message } : {}),
           },
         };
       if (peer === null) return { do: "chat", peer, name: "Team" };
