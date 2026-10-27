@@ -2,6 +2,7 @@
 // events and channels; native work (PTYs, LSP, files) remains in the Rust core.
 import { createChannel, invoke, invokeDesktop } from "./host";
 import { startRendererHeartbeat } from "./rendererHeartbeat";
+import { settleLocalBrowserOp } from "./browserLocalOps";
 import { isRemoteHost, isWorkspaceHost, listen as hostListen, type UnlistenFn } from "./host";
 import type { HostEvent } from "./host/contract";
 import type { ShortcutProfile } from "./shortcuts";
@@ -758,6 +759,9 @@ export interface AgentBrowserOp {
   lines?: number | null;
   clear?: boolean | null;
   max?: number | null;
+  /** Set only by the workspace's own ops (browserLocalOps.ts): no pip, no
+   *  claiming the tab for an agent. */
+  quiet?: boolean;
 }
 export const onAgentBrowser = (
   cb: (op: AgentBrowserOp) => void,
@@ -765,9 +769,13 @@ export const onAgentBrowser = (
   listen<AgentBrowserOp>("agent:browser", (event) => cb(event.payload));
 /** Answer a browser op: `data` (any JSON value) becomes the tool's result. */
 export const browserResult = (id: number, ok: boolean, data: unknown) =>
-  // Never rejects: a dropped answer would leave the agent's tool call hanging
-  // to its timeout with no trace of why, so failures are logged, not thrown.
-  invoke<void>("browser_result", {
+  // A negative id is the workspace asking its own preview (browserLocalOps.ts),
+  // never a bridge request.
+  settleLocalBrowserOp(id, ok, data)
+    ? Promise.resolve()
+    : // Never rejects: a dropped answer would leave the agent's tool call hanging
+      // to its timeout with no trace of why, so failures are logged, not thrown.
+      invoke<void>("browser_result", {
     id,
     ok,
     data: JSON.stringify(data ?? null),
@@ -5308,8 +5316,25 @@ export interface ReceiptCheckRun {
 export const receiptRunCheck = (
   cwd: string,
   argv: string[],
-  opts: { timeoutMs?: number; keepBytes?: number; head?: boolean } = {},
+  opts: { timeoutMs?: number; keepBytes?: number; head?: boolean; env?: [string, string][] } = {},
 ) => invoke<ReceiptCheckRun>("receipt_run_check", { cwd, argv, ...opts });
+
+/** A throwaway copy of a checkout for a receipt's checks (receipt.rs
+ *  `receipt_isolate`; in a Linux workspace, receipt-check.mjs). */
+export interface ReceiptIsolatedTree {
+  dir: string;
+  tree: string;
+  linked: string[];
+  env: [string, string][];
+}
+
+/** Export `rev` (a turn snapshot), or the working tree as it is now, into a
+ *  copy the next agent turn cannot touch. */
+export const receiptIsolate = (cwd: string, rev?: string | null) =>
+  invoke<ReceiptIsolatedTree>("receipt_isolate", { cwd, rev: rev ?? null });
+
+/** Delete a copy `receiptIsolate` made. */
+export const receiptRelease = (dir: string) => invoke<void>("receipt_release", { dir });
 
 // ---- rules compiled into gates (src-tauri/src/gates_commands.rs; in a Linux
 // workspace, packages/remote-host/gates.mjs, because the hook that reads the

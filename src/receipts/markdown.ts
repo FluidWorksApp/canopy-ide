@@ -51,6 +51,17 @@ export function receiptMarkdown(r: ReceiptData & { ts?: number }): string {
     out.push("");
     out.push(`**New packages:** ${r.packages.map((p) => `${p.name} (${p.status === "exists" ? "exists" : p.status === "unknown" ? "UNKNOWN — not on the registry" : "not checked"})`).join(", ")}`);
   }
+  if (r.verdict?.acceptance?.length) {
+    out.push("");
+    out.push("**The plan's checks for done**");
+    for (const a of r.verdict.acceptance)
+      out.push(`- ${a.met === true ? "✓" : a.met === false ? "✗" : "?"} ${a.item}${a.evidence ? ` — ${a.evidence}` : ""}`);
+  }
+  if (r.preview) {
+    out.push("");
+    out.push(`**Preview:** ${r.preview.summary}`);
+    for (const c of r.preview.changes) out.push(`- ${c}`);
+  }
   if (r.verdict?.gaps.length) {
     out.push("");
     out.push("**Gaps**");
@@ -67,6 +78,10 @@ export function receiptOneLine(r: ReceiptData): string {
   if (review.length) parts.push(`tests changed by the agent: ${review.map((t) => t.path).join(", ")}`);
   const unknown = r.packages.filter((p) => p.status === "unknown");
   if (unknown.length) parts.push(`unknown packages: ${unknown.map((p) => p.name).join(", ")}`);
+  if (r.verdict?.acceptance?.length) {
+    const met = r.verdict.acceptance.filter((a) => a.met === true).length;
+    parts.push(`plan checks met: ${met} of ${r.verdict.acceptance.length}`);
+  }
   if (r.verdict?.did) parts.push(`did: ${r.verdict.did}`);
   return parts.join(" · ").replace(/\s+/g, " ").slice(0, 1500);
 }
@@ -85,6 +100,7 @@ export function tellAgentMessage(r: ReceiptData): string {
   }
   for (const t of r.tamper.filter((f) => f.severity === "review")) facts.push(`${t.path} was modified (${t.detail.replace(/\.$/, "")})`);
   for (const p of r.packages.filter((x) => x.status === "unknown")) facts.push(`package "${p.name}" does not exist on the ${p.ecosystem} registry`);
+  for (const a of (r.verdict?.acceptance ?? []).filter((x) => x.met === false).slice(0, 3)) facts.push(`plan check not met: ${a.item}`);
   if (r.verdict?.gaps.length) facts.push(...r.verdict.gaps.slice(0, 3));
   const body = facts.length ? facts.join("; ") : `status ${STATUS_META[r.status].label.toLowerCase()}`;
   return `Workspace verification (re-run by Canopy, not by you): ${body}. Please fix the cause and do not change tests to make them pass.`

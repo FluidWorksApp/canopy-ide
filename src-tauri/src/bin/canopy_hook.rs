@@ -1098,6 +1098,20 @@ fn authenticated_task_identity() -> Option<(String, String)> {
     ))
 }
 
+/// `pl-<base36>-<base36>`, as src/plans/plan.ts mints them.
+fn plan_id_shaped(id: &str) -> bool {
+    let mut parts = id.split('-');
+    let ok = |p: Option<&str>| {
+        p.is_some_and(|p| {
+            !p.is_empty()
+                && p.len() <= 16
+                && p.bytes()
+                    .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit())
+        })
+    };
+    parts.next() == Some("pl") && ok(parts.next()) && ok(parts.next()) && parts.next().is_none()
+}
+
 fn publish_to_bus(raw: &str, event: &serde_json::Value, task: Option<&(String, String)>) {
     use std::io::Write;
     let dir = format!("{}/.canopy", home());
@@ -1110,6 +1124,15 @@ fn publish_to_bus(raw: &str, event: &serde_json::Value, task: Option<&(String, S
             if let Ok(n) = pty.parse::<u64>() {
                 map.insert("canopy_pty".into(), serde_json::json!(n));
             }
+        }
+        // The plan this session was launched to carry out. A label for the
+        // IDE to link plan and session by, never an authority: shape-checked
+        // and passed through as is.
+        if let Some(plan) = std::env::var("CANOPY_PLAN_ID")
+            .ok()
+            .filter(|id| plan_id_shaped(id))
+        {
+            map.insert("canopy_plan_id".into(), serde_json::json!(plan));
         }
         if let Some((run_id, attempt_id)) = task {
             map.insert("canopy_run_id".into(), serde_json::json!(run_id));
@@ -7024,6 +7047,16 @@ mod tests {
         ] {
             assert!(gate_fallback(silent).is_none(), "{silent:?}");
         }
+    }
+
+    #[test]
+    fn plan_ids_are_shape_checked_before_they_are_stamped() {
+        assert!(plan_id_shaped("pl-mg1x2y3-ab12cd"));
+        assert!(!plan_id_shaped("pl-"));
+        assert!(!plan_id_shaped("pl-ABC-def"));
+        assert!(!plan_id_shaped("pl-a-b-c"));
+        assert!(!plan_id_shaped("xx-a-b"));
+        assert!(!plan_id_shaped("pl-a-b\n{}"));
     }
 
     #[test]

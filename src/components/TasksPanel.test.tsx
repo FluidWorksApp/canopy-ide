@@ -3,7 +3,9 @@ import { describe, expect, it, vi } from "vitest";
 import { fireEvent, render, screen } from "@testing-library/react";
 import { TasksPanel, type RunningMicroTask } from "./TasksPanel";
 import type { CustomMicroTask } from "../microTasks";
-import type { TaskRun } from "../taskHistory";
+import { runReceiptDir, type TaskRun } from "../taskHistory";
+import { resetReceiptsForTests, setReceipt } from "../receipts/store";
+import { sampleReceipt } from "../receipts/fixtures";
 
 // A micro-task runs with no tab now, so this panel is the whole of it: if a row
 // doesn't say what the task is doing, or its buttons act on the wrong run,
@@ -169,5 +171,20 @@ describe("a finished run wears the name the agent gave it", () => {
     seed(finished());
     panel();
     expect(screen.getByText(/Can you please help in setting…/)).toBeTruthy();
+  });
+
+  it("shows a finished run's receipt, found by the session id on its row", () => {
+    resetReceiptsForTests();
+    setReceipt(sampleReceipt({ sessionId: "sess-done", ptyId: null }));
+    seed(finished({ sessionId: "sess-done" }));
+    panel();
+    expect(screen.getByRole("button", { name: /Contradicted/ })).toBeTruthy();
+    resetReceiptsForTests();
+  });
+
+  it("reads a throwaway worktree's receipt from the repository it was made from", () => {
+    expect(runReceiptDir({ cwd: "/code/app-wt-fix-1", ephemeralCwd: true })).toBe("/code/app");
+    expect(runReceiptDir({ cwd: "C:\\code\\app-wt-fix-1", ephemeralCwd: true })).toBe("C:\\code\\app");
+    expect(runReceiptDir({ cwd: "/code/app-wt-fix-1" })).toBe("/code/app-wt-fix-1");
   });
 });

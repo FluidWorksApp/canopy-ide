@@ -16,8 +16,8 @@ vi.mock("../ipc", () => ({
   gitLog: vi.fn(async () => [{ hash: "base0", short: "base0", author: "", date: "", subject: "init", refs: "" }]),
 }));
 
-import { approvePlan, dispatchWithPlan, dropPlan, planGateItems, resetPlanGateForTests, skipPlanning } from "./planGate";
-import { applyChatApproval, resetPlanStoreForTests } from "./planStore";
+import { approvePlan, dispatchWithPlan, dropPlan, planGateItems, resetPlanGateForTests, restoreWaitingPlans, skipPlanning } from "./planGate";
+import { applyChatApproval, resetPlanStoreForTests, revisePlan } from "./planStore";
 import { updateSettings } from "../settings";
 import type { PlanData } from "./plan";
 
@@ -104,7 +104,13 @@ describe("dispatchWithPlan", () => {
     const done = dispatchWithPlan({ request: "x", dir: "/repo", source: "task" }, launch);
     await vi.waitFor(() => expect(planGateItems()[0]?.phase).toBe("approval"));
     const item = planGateItems()[0] as Extract<ReturnType<typeof planGateItems>[number], { phase: "approval" }>;
-    await applyChatApproval(item.entry.data.planId, "Dana");
+    // Shared with Dana as the approver; Eve, also in the conversation, can
+    // only comment — her "approve" starts nothing.
+    await revisePlan("/repo", item.entry.data.planId, () => ({ data: { approvers: ["u-dana"] } }));
+    await applyChatApproval(item.entry.data.planId, { id: "u-eve", name: "Eve" });
+    await flush();
+    expect(launch).not.toHaveBeenCalled();
+    await applyChatApproval(item.entry.data.planId, { id: "u-dana", name: "Dana" });
     await done;
     expect(launch).toHaveBeenCalledTimes(1);
     // What the teammate approved is the plan as shared: open decisions at
@@ -157,5 +163,64 @@ describe("dispatchWithPlan", () => {
     await dispatchWithPlan({ request: "raw", dir: "/repo", source: "task" }, launch);
     expect(launch).toHaveBeenCalledWith("raw");
     expect(askBrain).not.toHaveBeenCalled();
+  });
+});
+
+describe("a plan waiting for approval across a restart", () => {
+  const waiting = async () => {
+    askBrain.mockResolvedValue(reply({ risk: "high", touches: ["src/auth/login.ts"] }));
+    const launch = vi.fn();
+    void dispatchWithPlan(
+      { request: "fix login", dir: "/repo", source: "task", resume: { kind: "adhoc", payload: { dir: "/repo", label: "Login" } } },
+      launch,
+    );
+    await vi.waitFor(() => expect(planGateItems()[0]?.phase).toBe("approval"));
+    const planId = (planGateItems()[0] as Extract<ReturnType<typeof planGateItems>[number], { phase: "approval" }>).entry.data.planId;
+    // The window closes: everything in memory is gone, the ledger and this
+    // machine's record of which plans it made are not.
+    resetPlanGateForTests();
+    resetPlanStoreForTests();
+    return { planId, launch };
+  };
+
+  it("records how to launch it, and launches through the resumer when a teammate approves after the restart", async () => {
+    const { planId, launch } = await waiting();
+    expect((ledger.heads().find((r) => r.kind === "plan")!.data as PlanData).launch).toEqual({ kind: "adhoc", payload: { dir: "/repo", label: "Login" } });
+    const resume = vi.fn();
+    await restoreWaitingPlans(["/repo"], (kind) => (kind === "adhoc" ? resume : undefined));
+    const item = planGateItems()[0];
+    expect(item).toMatchObject({ phase: "approval", waiting: true });
+    await revisePlan("/repo", planId, () => ({ data: { approvers: ["u-dana"] } }));
+    await applyChatApproval(planId, { id: "u-dana", name: "Dana" });
+    await vi.waitFor(() => expect(resume).toHaveBeenCalledTimes(1));
+    expect(resume.mock.calls[0][0]).toContain(`[Canopy plan ${planId}`);
+    expect(resume.mock.calls[0][0]).toContain("Task: fix login");
+    expect(resume.mock.calls[0][1]).toBe(planId);
+    expect(resume.mock.calls[0][2]).toEqual({ dir: "/repo", label: "Login" });
+    expect(launch).not.toHaveBeenCalled();
+    expect((ledger.heads().find((r) => r.kind === "plan")!.data as PlanData).launchedAt).toBeTypeOf("number");
+    // A second restart does not start it again.
+    resetPlanGateForTests();
+    await restoreWaitingPlans(["/repo"], () => resume);
+    await flush();
+    expect(resume).toHaveBeenCalledTimes(1);
+  });
+
+  it("launches a plan approved while Canopy was closed as soon as it reopens", async () => {
+    const { planId } = await waiting();
+    await revisePlan("/repo", planId, () => ({ data: { approvers: ["u-dana"] } }));
+    await applyChatApproval(planId, { id: "u-dana", name: "Dana" });
+    const resume = vi.fn();
+    await restoreWaitingPlans(["/repo"], () => resume);
+    await vi.waitFor(() => expect(resume).toHaveBeenCalledTimes(1));
+    expect(planGateItems()).toEqual([]);
+  });
+
+  it("leaves a teammate's plan, made on another computer, alone", async () => {
+    await waiting();
+    localStorage.removeItem("canopy:plan-dirs");
+    const resume = vi.fn();
+    await restoreWaitingPlans(["/repo"], () => resume);
+    expect(planGateItems()).toEqual([]);
   });
 });

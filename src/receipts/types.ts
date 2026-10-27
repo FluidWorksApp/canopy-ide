@@ -86,12 +86,23 @@ export interface PackageCheck {
 
 export type BrainVerdictKind = "proven" | "partial" | "unproven" | "contradicted";
 
+/** One of the linked plan's acceptance checks, as the brain judged it from
+ *  the evidence. `met: null` — the evidence says neither way. */
+export interface AcceptanceResult {
+  item: string;
+  met: boolean | null;
+  evidence: string;
+}
+
 export interface BrainVerdict {
   verdict: BrainVerdictKind;
   asked: string;
   did: string;
   evidence: string[];
   gaps: string[];
+  /** Present when the run had a plan with acceptance checks: one entry per
+   *  check, in the plan's order. */
+  acceptance?: AcceptanceResult[];
 }
 
 /** What the person sees. tests-changed outranks proven/partial because a pass
@@ -120,6 +131,12 @@ export interface ReceiptData {
   /** What the diff was taken against: the turn's start snapshot or HEAD. */
   base: string;
   checks: CheckResult[];
+  /** Where the checks ran: a throwaway copy of the snapshot (`tree`), or —
+   *  only when no copy could be made — the live checkout, and why. */
+  ranIn?: { kind: "copy"; tree: string; linked?: string[] } | { kind: "live"; why: string };
+  /** The plan this run carried out, when it had one; its acceptance checks
+   *  are what the verdict reports on. */
+  plan?: { planId: string; goal: string; acceptance: string[] };
   tamper: TamperFlag[];
   packages: PackageCheck[];
   verdict: BrainVerdict | null;
@@ -132,6 +149,35 @@ export interface ReceiptData {
   costUsd: number | null;
   startedAt: number;
   endedAt: number;
+  /** The project's preview photographed before and after the turn, when one
+   *  was open (receipts/preview.ts). Absent when there was no preview. */
+  preview?: ReceiptPreview;
+}
+
+/** One photograph of the preview page, small enough to live in the ledger. */
+export interface PreviewShot {
+  /** A JPEG `data:` URL, scaled down to fit the entry. */
+  image: string;
+  width: number;
+  height: number;
+  url: string;
+  title?: string;
+  at: number;
+}
+
+/** Before/after evidence from the preview the turn affected. */
+export interface ReceiptPreview {
+  /** The page's address after the turn (before, when that is all we have). */
+  url: string;
+  before?: PreviewShot;
+  after?: PreviewShot;
+  /** What visibly changed, in plain words: from the page's own text and
+   *  controls read before and after, not from guessing at the pixels. */
+  changes: string[];
+  /** One sentence: what the photographs show. Also what the brain is told. */
+  summary: string;
+  /** Why a half is missing, when one is. */
+  note?: string;
 }
 
 /** A stored receipt: the ledger entry's id and time with its data. */

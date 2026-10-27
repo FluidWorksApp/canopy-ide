@@ -10,6 +10,7 @@ import {
   dismissGateItem,
   dropPlan,
   planGateItems,
+  setPlanWaiting,
   skipPlanning,
   subscribePlanGate,
   type GateItem,
@@ -24,8 +25,8 @@ const INLINE_MS = 20_000;
 
 export function PlanGateHost() {
   const items = useSyncExternalStore(subscribePlanGate, planGateItems, planGateItems);
-  const approval = items.find((i): i is Extract<GateItem, { phase: "approval" }> => i.phase === "approval");
-  const corner = items.filter((i) => i.phase !== "approval");
+  const approval = items.find((i): i is Extract<GateItem, { phase: "approval" }> => i.phase === "approval" && !i.waiting);
+  const corner = items.filter((i) => i.phase !== "approval" || i.waiting);
   if (!items.length) return null;
   return (
     <>
@@ -52,7 +53,10 @@ export function PlanGateHost() {
               status={approval.entry.status}
               onApprove={(edits) => approvePlan(approval.id, edits)}
               onDrop={() => dropPlan(approval.id)}
-              onShare={() => sharePlan(approval.entry.data)}
+              // Once it is with the team, the dialog steps aside: the agent
+              // starts when an approver says yes, here or after a restart.
+              onShare={() => sharePlan(approval.entry.data, () => setPlanWaiting(approval.id, true))}
+              onWait={() => setPlanWaiting(approval.id, true)}
             />
           </div>
         </div>
@@ -61,7 +65,7 @@ export function PlanGateHost() {
   );
 }
 
-function CornerItem({ item }: { item: Exclude<GateItem, { phase: "approval" }> }) {
+function CornerItem({ item }: { item: GateItem }) {
   const [open, setOpen] = useState(false);
   // Inline plans leave on their own unless the person opened one to read it.
   useEffect(() => {
@@ -78,6 +82,20 @@ function CornerItem({ item }: { item: Exclude<GateItem, { phase: "approval" }> }
         <Button size="sm" variant="ghost" onClick={() => skipPlanning(item.id)}>
           Start without a plan
         </Button>
+      </div>
+    );
+  if (item.phase === "approval")
+    return (
+      <div className="plan-gate-item">
+        <div className="plan-gate-row">
+          <span className="plan-gate-text">
+            <strong>Waiting for approval:</strong> {item.entry.data.goal}
+            {item.entry.data.approvers?.length ? " · shared with the team" : ""}
+          </span>
+          <Button size="sm" variant="ghost" onClick={() => setPlanWaiting(item.id, false)}>
+            Open plan
+          </Button>
+        </div>
       </div>
     );
   if (item.phase === "note")

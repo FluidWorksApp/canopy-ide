@@ -81,6 +81,9 @@ export interface BuilderSendOptions {
    * words so intent routing and the visible transcript never mistake page
    * copy for a request to install, link, or deploy something. */
   context?: string;
+  /** The agent's brief when this request was already planned (a plan approved
+   *  after a restart): sent as is, without planning it again. */
+  planned?: string;
 }
 
 /** The presentation boundary. Execution and persistence stay behind it. */

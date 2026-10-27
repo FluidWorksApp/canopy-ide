@@ -19,6 +19,7 @@ import { BUILT_IN_HEADING } from "../taskMenu";
 import {
   completedTaskRuns,
   runIcon,
+  runReceiptDir,
   runTitle,
   TASK_HISTORY_EVENT,
   type TaskRun,
@@ -385,6 +386,12 @@ export function TasksPanel({
                   <span className="task-note-inline">{r.summary}</span>
                 )}
               </span>
+              {/* Finished work keeps its proof: the run's session id is on
+                  the history row, so its receipt is found after the tab and
+                  the terminal are long gone. */}
+              {r.sessionId && (
+                <ReceiptBadge sessionId={r.sessionId} cwd={runReceiptDir(r)} cli={r.agent} quietWhenUnverified />
+              )}
               {r.url && (
                 <Button icon
                   title={`Open ${r.url}`}
