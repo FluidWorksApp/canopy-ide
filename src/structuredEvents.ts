@@ -375,6 +375,14 @@ export class StructuredEventParser {
   }
 }
 
+/** A user message whose content is the bare string, which is how a
+ *  slash command (`/compact …`) has to arrive for the CLI to run it rather
+ *  than show it to the model — verified with Claude Code 2.1.311 over
+ *  `--input-format stream-json --resume` on 2026-10-27. */
+export function encodeStructuredCommand(text: string): string {
+  return JSON.stringify({ type: "user", message: { role: "user", content: text } });
+}
+
 export function encodeStructuredUserMessage(text: string): string {
   return JSON.stringify({
     type: "user",
@@ -404,6 +412,11 @@ export interface StructuredRunSummary {
   model: string | null;
   /** The CLI itself said the account is throttled (not inferred from prose). */
   rateLimited: boolean;
+  /** Each model's context window, where the CLI reports one (Claude's
+   *  `result.modelUsage[model].contextWindow`). Read by contextWindow.ts. */
+  contextWindows?: Record<string, number>;
+  /** The run compacted its conversation (Claude's system/compact_boundary). */
+  compacted?: { preTokens: number | null; postTokens: number | null };
 }
 
 const num = (v: unknown): number | null =>
@@ -424,6 +437,7 @@ interface SummaryLine {
   duration_ms?: number;
   usage?: Record<string, unknown>;
   modelUsage?: Record<string, unknown>;
+  compact_metadata?: { pre_tokens?: unknown; post_tokens?: unknown };
   errors?: unknown[];
   message?: { content?: { type?: string; text?: string }[] } | string;
   rate_limit_info?: { status?: string };
@@ -470,6 +484,10 @@ export class StructuredRunCollector {
     switch (msg.type) {
       case "system":
         if (msg.subtype === "init" && msg.model) s.model = msg.model;
+        if (msg.subtype === "compact_boundary") {
+          const m = msg.compact_metadata ?? {};
+          s.compacted = { preTokens: num(m.pre_tokens), postTokens: num(m.post_tokens) };
+        }
         return;
       case "assistant":
         // Kept only as a fallback for a `result` that arrives without text.
@@ -504,6 +522,10 @@ export class StructuredRunCollector {
         );
         s.outputTokens = num(u.output_tokens);
         if (!s.model && msg.modelUsage) s.model = Object.keys(msg.modelUsage)[0] ?? null;
+        for (const [model, use] of Object.entries(msg.modelUsage ?? {})) {
+          const window = num((use as { contextWindow?: unknown } | null)?.contextWindow);
+          if (window && window > 0) (s.contextWindows ??= {})[model] = window;
+        }
         return;
       }
       default:

@@ -558,6 +558,53 @@ fn transcript_tail_in(
     Vec::new()
 }
 
+/// The transcript file whose subagents and context use a session's live
+/// state is read from (session_activity.rs), for the CLIs whose transcript
+/// records them. Claude Code's does: each Task/Agent call, its result or its
+/// background launch and the notification it finished with, every reply's
+/// token usage, and each compaction. Verified against Claude Code 2.1.311
+/// transcripts on 2026-10-27. Other CLIs: None.
+pub fn activity_transcript(
+    agent: &str,
+    session_id: &str,
+    roots: &[String],
+    profile: Option<&str>,
+) -> Option<PathBuf> {
+    match agent {
+        "claude" => {}
+        _ => return None,
+    }
+    if session_id.is_empty() || session_id.contains(['/', '\\']) {
+        return None;
+    }
+    // Remembered per session: the walk stats every transcript on the machine,
+    // and a running session's activity is polled every few seconds.
+    static FOUND: std::sync::LazyLock<
+        std::sync::Mutex<std::collections::HashMap<String, PathBuf>>,
+    > = std::sync::LazyLock::new(Default::default);
+    let key = format!("{agent}/{session_id}");
+    if let Some(p) = FOUND.lock().unwrap().get(&key) {
+        if p.exists() {
+            return Some(p.clone());
+        }
+    }
+    let files = source_files(roots, &|a| a == agent);
+    let stem_is = |f: &&SourceFile| {
+        f.path
+            .file_stem()
+            .map(|s| s.to_string_lossy() == session_id)
+            == Some(true)
+    };
+    let found = files
+        .iter()
+        .filter(stem_is)
+        .find(|f| profile.is_none_or(|p| f.profile == p))
+        .or_else(|| files.iter().find(stem_is))
+        .map(|f| f.path.clone())?;
+    FOUND.lock().unwrap().insert(key, found.clone());
+    Some(found)
+}
+
 /// Whole lines from the last `max_bytes` of a file. A partial first line (the
 /// read started mid-line) is dropped.
 fn read_tail(path: &Path, max_bytes: u64) -> Vec<String> {

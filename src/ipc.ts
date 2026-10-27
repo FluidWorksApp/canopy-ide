@@ -4374,6 +4374,41 @@ export const sessionTranscriptTail = (args: {
     maxBytes: args.maxBytes ?? null,
   });
 
+// ---------- session activity (src-tauri/src/session_activity.rs) ----------
+
+/** One subagent a session spawned, read from its transcript. */
+export interface SubagentRun {
+  id: string;
+  agent_id: string | null;
+  description: string;
+  kind: string | null;
+  status: "running" | "done" | "failed" | "stopped";
+  background: boolean;
+  started_ms: number | null;
+  ended_ms: number | null;
+  duration_ms: number | null;
+  tokens: number | null;
+  tool_uses: number | null;
+  result: string | null;
+}
+
+export interface SessionActivity {
+  subagents: SubagentRun[];
+  /** The context the latest reply was given, in tokens. */
+  context: { model: string | null; tokens: number; at_ms: number | null } | null;
+  compactions: { at_ms: number | null; trigger: string; pre_tokens: number | null; post_tokens: number | null }[];
+}
+
+/** A session's subagents and context use; null when its CLI's transcript
+ *  does not record them, or there is no transcript to read. */
+export const sessionActivity = (args: { sessionId: string; agent: string; roots: string[]; profile?: string | null }) =>
+  invoke<SessionActivity | null>("session_activity", {
+    sessionId: args.sessionId,
+    agent: args.agent,
+    roots: args.roots,
+    profile: args.profile ?? null,
+  });
+
 // ---------- team relay ----------
 
 export interface RelayMember {

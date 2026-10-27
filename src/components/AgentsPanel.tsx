@@ -20,6 +20,7 @@ import {
 import { ashFor } from "../ash";
 import { markRestored } from "../restorable";
 import { openSessionDoc } from "../sessionDoc/events";
+import { SubagentTree } from "./SubagentTree";
 import { lastHumanPrompt, useAgentSessions } from "../agentSessions";
 import { claimOwnerName } from "../claims";
 import { AGENT_LABELS, IntegrationsList, useIntegrations } from "./AgentIntegrations";
@@ -718,6 +719,14 @@ export function AgentsPanel({
           ))}
         </div>
         {task && <div className="agent-task">{task}</div>}
+        {/* The subagents it spawned, live: a count that opens into the list. */}
+        {agent?.id && digest?.session_id && (
+          <SubagentTree
+            compact
+            live={shown === "working"}
+            activityKey={{ agent: agent.id, sessionId: digest.session_id, cwd: s.cwd, profile: digest.profile ?? null }}
+          />
+        )}
         <div className="agent-stats">
           <span>{fixedNumber(s.total_cpu, 0)}% cpu</span>
           <span>{fmtMem(s.total_mem_bytes)}</span>

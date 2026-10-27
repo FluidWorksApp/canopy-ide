@@ -23,6 +23,12 @@ import { TurnTimeline } from "./TurnTimeline";
 import { ReceiptBadge } from "./ReceiptBadge";
 import { openSessionDoc } from "../sessionDoc/events";
 import { resolveSessionId } from "../sessionDoc/resolveSession";
+import { SubagentTree } from "./SubagentTree";
+import { ContextControls } from "./ContextControls";
+import { useCompaction } from "../useCompaction";
+import { refreshSessionActivity, useSessionActivity } from "../sessionActivity";
+import { compactHeadless } from "../contextCompaction";
+import { activeWorkspace } from "../remoteExecution/workspace";
 import { LIFE_META, agentLife, type Life } from "../../shared/agentLife";
 import { AgentIcon, GitBranchIcon, RestartIcon } from "./icons";
 import { sessionCost } from "../pricing";
@@ -952,6 +958,34 @@ export function AgentWorkspaceView({
   };
   const working = lifecycle === "working";
   const cost = usage ? sessionCost(usage) : null;
+  // Subagents and context use, from the session's transcript; polled fast
+  // while it works (sessionActivity.ts).
+  const activityKey = useMemo(
+    () =>
+      docSessionId
+        ? { agent, sessionId: docSessionId, cwd: docDigest?.resume_cwd || cwd, profile: docDigest?.profile ?? null }
+        : null,
+    [agent, docSessionId, cwd, docDigest?.resume_cwd, docDigest?.profile],
+  );
+  const activity = useSessionActivity(activityKey, { fast: working });
+  const compaction = useCompaction({
+    agent,
+    sessionId: docSessionId,
+    cwd: docDigest?.resume_cwd || cwd,
+    live: ptyId != null && lifecycle !== "ended",
+    lifeState: lifecycle,
+    remote: !!activeWorkspace(),
+    activity,
+    refresh: () => activityKey && refreshSessionActivity(activityKey),
+    deps: {
+      type: (text) => {
+        if (ptyId == null) return;
+        void ipc.ptyWrite(ptyId, text);
+        window.setTimeout(() => void ipc.ptyWrite(ptyId, "\r"), 350);
+      },
+      headless: compactHeadless,
+    },
+  });
   const touched = ws?.touched?.length ? ws.touched : (digest?.files ?? []);
   const branchable = !!ws?.branch && !ws.detached && !ws.on_base;
   /** Hand the typed brief to a fresh one-shot agent and put the menu away.
@@ -1834,7 +1868,14 @@ export function AgentWorkspaceView({
         </div>
       )}
 
-      {/* Turn rollback: a point per turn, undoable through a diff preview. */}
+      {/* The subagents this session spawned, live (SubagentTree.tsx). */}
+      <SubagentTree activityKey={activityKey} live={working} />
+
+      {/* How full its context is, and Compact now (ContextControls.tsx). */}
+      {docSessionId && <ContextControls activity={activity} compaction={compaction} />}
+
+      {/* Turn rollback: a point per turn, undoable through a diff preview,
+          with the context controls on each turn. */}
       {sessionId && (
         <TurnTimeline
           cwd={cwd}
@@ -1843,6 +1884,9 @@ export function AgentWorkspaceView({
           builder={builderLens}
           refreshKey={digest?.updated}
           onNotice={onNotice}
+          onSummarize={
+            compaction.supported ? (kind, turn) => compaction.ask({ kind, turn }) : undefined
+          }
         />
       )}
 
