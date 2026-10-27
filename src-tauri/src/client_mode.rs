@@ -55,8 +55,19 @@ fn forget_account_token() -> Result<(), String> {
     })
 }
 
+/// The credential store can block: a D-Bus round trip, or a keyring unlock
+/// prompt the person has to answer. Keep that off the async workers.
+async fn blocking_store<T: Send + 'static>(
+    call: impl FnOnce() -> Result<T, String> + Send + 'static,
+) -> Result<T, String> {
+    tauri::async_runtime::spawn_blocking(call)
+        .await
+        .map_err(|_| "Account storage unavailable".to_string())?
+}
+
 // Display caches are namespaced by the local device credential without exposing it.
-#[tauri::command]
+// Off the main thread: reading the credential store can wait on a keyring.
+#[tauri::command(async)]
 pub fn canopy_account_cache_key() -> Result<Option<String>, String> {
     use sha2::{Digest, Sha256};
     Ok(account_token()?.map(|token| {
@@ -117,7 +128,7 @@ pub async fn canopy_account_request(
     } else {
         client.get(url)
     };
-    if let Some(token) = account_token()? {
+    if let Some(token) = blocking_store(account_token).await? {
         request = request.bearer_auth(token);
     }
     let response = request
@@ -161,7 +172,8 @@ pub async fn canopy_account_request(
         {
             return Err("Invalid account credential".into());
         }
-        store_account_token(token)?;
+        let token = token.to_string();
+        blocking_store(move || store_account_token(&token)).await?;
         value
             .as_object_mut()
             .ok_or("Invalid sign-in response")?
@@ -174,7 +186,7 @@ pub async fn canopy_account_request(
             .and_then(|v| v.as_str())
             == Some("revoke")
     {
-        forget_account_token()?;
+        blocking_store(forget_account_token).await?;
     }
     Ok(value)
 }

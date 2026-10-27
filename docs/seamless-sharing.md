@@ -33,7 +33,12 @@ Other findings:
   handler", "website `tests/organizations.integration.mjs`"; `auth.mjs` reads
   `VERCEL_URL`). No workflow in this repo deploys it, and control-plane tests
   are not in CI here; postgres tests skip unless `CANOPY_SYNTHETIC_DATABASE_URL`
-  points at the validation database.
+  points at the validation database. The website keeps its own copies under
+  `lib/canopy/`, and those are what is deployed. The readable-link modules are
+  kept identical in both repositories. The member-sharing modules are not:
+  the website's `workspace-sharing.mjs` (attested readiness per start) and its
+  `member-connection.mjs`, `member-resume.mjs` and `workspace-discovery.mjs`
+  replaced the `sharing_generation` gate that the copies here still use.
 - **Sign-in state in the desktop.** The account device token lives in the OS
   credential store (`client_mode.rs` `account_token`, item
   `app.causeconnect.canopy.account`). Every account call goes through

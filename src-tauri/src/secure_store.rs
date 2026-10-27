@@ -302,7 +302,7 @@ mod linux {
                 attributes(service, account),
                 secret,
                 true,
-                "application/octet-stream",
+                "text/plain",
             )
             .map(|_| ())
             .map_err(ss_err)
