@@ -380,6 +380,7 @@ fn worth_parsing(line: &str) -> bool {
 }
 
 /// Fold transcript lines into the activity — the whole parser, for tests.
+#[cfg(test)]
 pub fn activity_from_lines<'a>(lines: impl IntoIterator<Item = &'a str>) -> SessionActivity {
     let mut st = State::default();
     for line in lines {
