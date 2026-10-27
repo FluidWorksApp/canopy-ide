@@ -311,13 +311,20 @@ export async function askBrain<T = unknown>(req: BrainRequest<T>): Promise<Brain
   }
   let answer: BrainAnswer<T>;
   let collector: StructuredRunCollector | null = null;
+  let cwdMissing = false;
   try {
     const run = await runOnce(cli, runner.dialect, args, req);
     collector = run.collector;
+    cwdMissing = run.end === "spawn-failed" && !!req.cwd && /cwd does not exist/i.test(run.spawnError ?? "");
     answer = interpret<T>(run, req, started);
   } finally {
     if (tier === "background") releaseBackground();
   }
+  // In a cloud workspace the project path names a directory in the VM, but the
+  // brain is the CLI on this computer, where that path doesn't exist. Features
+  // put what the brain needs in the prompt, so ask again from home rather than
+  // fail — once, and without metering a call that never started.
+  if (cwdMissing) return askBrain<T>({ ...req, cwd: "" });
   const s = collector?.summary;
   recordBrainCall({
     feature: req.feature,

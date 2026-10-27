@@ -70,6 +70,19 @@ afterEach(() => {
 });
 
 describe("askBrain", () => {
+  it("asks again from home when the project path is a cloud workspace's, absent here", async () => {
+    spawnMock.mockImplementationOnce(async () => {
+      throw new Error("brain call cwd does not exist: /workspace/app");
+    });
+    scripted([line(result()), { kind: "exit", code: 0 }]);
+    const answer = await askBrain({ feature: "plan", prompt: "hi", cwd: "/workspace/app" });
+    expect(answer.ok).toBe(true);
+    expect(spawnMock).toHaveBeenCalledTimes(2);
+    expect(spawnMock.mock.calls[1][1]).toMatchObject({ cwd: "" });
+    // The call that never started is not metered.
+    expect(brainSpend().calls).toBe(1);
+  });
+
   it("runs the brain one-shot and read-only, and reads the result line", async () => {
     scripted([
       line(JSON.stringify({ type: "system", subtype: "init", model: "claude-haiku-5-5" })),
