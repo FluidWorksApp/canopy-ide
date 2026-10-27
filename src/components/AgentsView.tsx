@@ -30,6 +30,7 @@ import {
 import { claimOwnerName } from "../claims";
 import { IntegrationsList, useIntegrations } from "./AgentIntegrations";
 import { AgentControlPanel, type ControlPanelMode } from "./AgentControlPanel";
+import { TeamBoard } from "./TeamBoard";
 import { PendingCard } from "./PendingCard";
 import { Mascot } from "./Mascot";
 import { AgentRuntime } from "./AgentRuntime";
@@ -263,7 +264,7 @@ export function AgentsView({
 
   // Cards is this page as it has always been; graph and table are the control
   // panel — two views of one app-wide dataset (see AgentControlPanel).
-  const [mode, setMode] = useState<"cards" | ControlPanelMode>("cards");
+  const [mode, setMode] = useState<"cards" | ControlPanelMode | "board">("cards");
 
   // The archive is the one list here long enough to need finding things in.
   const [query, setQuery] = useState("");
@@ -478,7 +479,7 @@ export function AgentsView({
             role="group"
             aria-label="How to show the agents"
           >
-            {(["cards", "graph", "table"] as const).map((m) => (
+            {(["cards", "graph", "table", "board"] as const).map((m) => (
               <button
                 key={m}
                 className={`agv-mode ${mode === m ? "agv-mode-on" : ""}`}
@@ -487,7 +488,9 @@ export function AgentsView({
                     ? "This project's agents, as cards"
                     : m === "graph"
                       ? "Every agent in Canopy as a live graph — who talks to whom"
-                      : "Every agent in Canopy as a table"
+                      : m === "board"
+                        ? "The team board: what every agent is doing, what it holds, and what it was told about the others' changes"
+                        : "Every agent in Canopy as a table"
                 }
                 onClick={() => setMode(m)}
               >
@@ -545,7 +548,16 @@ export function AgentsView({
         )}
       </header>
 
-      {mode !== "cards" ? (
+      {mode === "board" ? (
+        <div className="agv-body">
+          <TeamBoard
+            active={active}
+            allProjects={allProjects ?? [{ name: projectName, roots }]}
+            onJumpToPty={onJumpToPty}
+            tabNames={tabNames}
+          />
+        </div>
+      ) : mode !== "cards" ? (
         <div className="agv-body acp-body">
           <AgentControlPanel
             active={active}

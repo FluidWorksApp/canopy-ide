@@ -1,4 +1,5 @@
 import { activeWorkspace } from "../../remoteExecution/workspace";
+import { publishAwarenessRoster } from "../../awareness/roster";
 import {
   hostLiveTerminals,
   rememberedLiveTerminal,
@@ -11757,6 +11758,16 @@ const ProjectViewBody = memo(function ProjectViewBody({
       if (snapshot !== lastContextRef.current) {
         lastContextRef.current = snapshot;
         void ipc.contextPublish(project.id, snapshot);
+        publishAwarenessRoster(
+          project.id,
+          agentTargets.map((a) => ({
+            ptyId: a.ptyId,
+            name: a.name ?? a.title,
+            agent: a.agentId || null,
+            title: a.title || null,
+            description: a.description ?? null,
+          })),
+        );
       }
     };
     publishContextRef.current = publish;

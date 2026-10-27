@@ -54,6 +54,8 @@ import {
 } from "./vibeTargetInference";
 import { observeTurnEvents } from "./turnRollback";
 import { observeAgentTurns } from "./agentTurns";
+import { startAwareness } from "./awareness/engine";
+import { setCloudRosterProvider } from "./awareness/roster";
 import {
   derivePending,
   parseAgentEvent,
@@ -883,6 +885,26 @@ export default function App() {
   });
   const meshJobs = meshJobsRef.current;
   useEffect(() => subscribeTeamJobs((event) => meshJobs.receive(event)), [meshJobs]);
+  // Every agent knows what every other agent just did (src/awareness): one
+  // engine for the window, on every agent turn end. The board asks the mesh
+  // coordinator who is running in the cloud workspaces.
+  useEffect(() => {
+    setCloudRosterProvider(async () =>
+      (await meshJobs.targets()).cloudWorkspaces.map((w) => ({
+        name: w.name,
+        online: w.online,
+        agents: w.agents?.map((a) => ({ ptyId: a.ptyId, name: a.name, agent: a.agent, task: a.status?.title ?? a.task })) ?? null,
+        ...("note" in w && w.note ? { note: w.note } : {}),
+      })),
+    );
+    const stop = startAwareness({
+      roots: () => wsRef.current.projects.flatMap((p) => p.components.map((c) => c.path)),
+    });
+    return () => {
+      stop();
+      setCloudRosterProvider(null);
+    };
+  }, [meshJobs]);
   // One press can reach us from both the menu accelerator and the webview key
   // handler; without this they'd cancel each other and focus mode would look
   // stuck. First one wins, the echo inside the window is ignored.

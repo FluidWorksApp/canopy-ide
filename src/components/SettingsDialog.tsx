@@ -1565,6 +1565,21 @@ export function SettingsDialog({ onClose, initialTab = "appearance" }: SettingsD
                   />
                 </Item>
                 <Item
+                  name="Agent awareness"
+                  desc="When an agent finishes a change, the other agents working on the same code are told what changed and why it matters to them."
+                >
+                  <Checkbox
+                    checked={s.awarenessEnabled}
+                    onChange={(v) => patch({ awarenessEnabled: v })}
+                    label="Tell agents about each other's changes"
+                    hint={
+                      s.awarenessEnabled
+                        ? "Your brain writes each note in the background, and busy shared files get a claim so two agents don't write them at once. Edit a project's hotspot list on the Agents page, board view."
+                        : "Agents work without hearing about each other's changes, and no brain calls are made for it."
+                    }
+                  />
+                </Item>
+                <Item
                   name="CLI updates"
                   desc="Keep the agent CLIs installed on this computer current. Remote workspaces keep the versions their image pins."
                 >

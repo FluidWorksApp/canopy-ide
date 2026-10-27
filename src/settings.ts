@@ -465,6 +465,17 @@ export interface Settings {
   /** Per-feature daily caps in USD, keyed by brain feature tag. A feature with
    *  no entry is capped only by the daily total. */
   brainFeatureBudgetsUsd: Record<string, number>;
+  /** "Tell agents about each other's changes" (src/awareness). On by default:
+   *  when an agent finishes a turn, Canopy works out which other live agents
+   *  on the same repository it may have affected, asks the brain (background
+   *  tier) to write each a short note, and types it into their terminal as a
+   *  mesh message; hotspot files touched by two agents get a claim. Off means
+   *  none of that runs and no brain calls are made for it. */
+  awarenessEnabled: boolean;
+  /** Per-repository hotspot override, keyed by the repo's canonical root (the
+   *  main checkout, see ledger.ts). Repo-relative paths or directory prefixes;
+   *  when present for a repo it replaces the inferred list entirely. */
+  awarenessHotspots: Record<string, string[]>;
   /** Connect Claude Code to Canopy as its IDE, the way it connects to VS Code:
    *  proposed edits open as a diff to accept, tweak or reject, the editor
    *  selection reaches the prompt, and the CLI reads diagnostics off Canopy's
@@ -678,6 +689,8 @@ export const DEFAULTS: Settings = {
   brainBackgroundModel: "",
   brainDailyBudgetUsd: null,
   brainFeatureBudgetsUsd: {},
+  awarenessEnabled: true,
+  awarenessHotspots: {},
   claudeIdeIntegration: true,
   turnRollback: true,
   notificationPopupsEnabled: true,
@@ -788,6 +801,17 @@ const KEY = "canopy.settings";
  *  identity-stable between writes. */
 let settingsCache: { raw: string | null; value: Settings } | null = null;
 
+/** A hand-edited override must not crash inference: keep string lists only. */
+function hotspotOverrides(raw: unknown): Record<string, string[]> {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return {};
+  const out: Record<string, string[]> = {};
+  for (const [root, list] of Object.entries(raw as Record<string, unknown>)) {
+    if (!Array.isArray(list)) continue;
+    out[root] = list.filter((p): p is string => typeof p === "string" && !!p.trim()).slice(0, 100);
+  }
+  return out;
+}
+
 export function getSettings(): Settings {
   const raw = localStorage.getItem(KEY);
   if (settingsCache && settingsCache.raw === raw) return settingsCache.value;
@@ -841,6 +865,8 @@ export function getSettings(): Settings {
     // stored name and spelling, but fold every value it has held ("build",
     // "builder", true, junk) onto the two the app understands.
     value.defaultProjectLens = storedDefaultFor(lensFromStoredDefault(stored.defaultProjectLens ?? DEFAULTS.defaultProjectLens));
+    if (typeof value.awarenessEnabled !== "boolean") value.awarenessEnabled = true;
+    value.awarenessHotspots = hotspotOverrides(value.awarenessHotspots);
   } catch {
     value = { ...DEFAULTS };
   }
