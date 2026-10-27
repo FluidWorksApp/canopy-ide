@@ -49,6 +49,18 @@ export function MemorySettings({
           onChange={(v) => patch({ memoryDecisionExpiryDays: v })}
         />
       </div>
+      <Checkbox
+        checked={s.memoryInstructionAutoUpdate !== false}
+        onChange={(v) => patch({ memoryInstructionAutoUpdate: v })}
+        label="Keep the instruction file's Team memory section up to date"
+        hint={
+          s.memoryInstructionAutoUpdate === false
+            ? "The section changes only when you press “Update the instruction file” in the Memory panel."
+            : Object.keys(s.memoryInstructionFiles).length
+              ? "Every approval, edit or rejection rewrites the section in the file you last updated. Nothing outside its markers changes."
+              : "Starts once you use “Update the instruction file” in a project's Memory panel; after that, every approval rewrites the section."
+        }
+      />
       <Radio
         name="memory-quarantine"
         checked={s.memoryQuarantine === "quarantine"}

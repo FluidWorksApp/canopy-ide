@@ -18,6 +18,7 @@
 // ports and build locks), and a session's turns that end while its job waits
 // fold into one.
 
+import { pickTurnSnapshots } from "../turnDiff";
 import * as ipc from "../ipc";
 import { askBrain, type BrainAnswer } from "../brainCall";
 import { appendLedger, type LedgerEntry } from "../ledger";
@@ -123,21 +124,16 @@ async function turnSnapshots(t: VerifyTarget): Promise<{ start: string; end: str
   try {
     const end = t.endedAt ?? deps.now();
     let list = await deps.turnList(t.cwd, t.sessionId);
-    if (!list.git) return null;
-    // The snapshot is stamped when canopy-hook ran; the turn event is
-    // observed up to a batch later. Closest start inside the turn wins.
-    const hit = [...list.turns]
-      .filter((p) => p.start && p.start.ts_ms >= t.startedAt! - 15_000 && p.start.ts_ms <= end + 2_000)
-      .sort((a, b) => Math.abs(a.start!.ts_ms - t.startedAt!) - Math.abs(b.start!.ts_ms - t.startedAt!))[0];
-    if (hit?.start && !hit.end) {
+    const hit = pickTurnSnapshots(list, t.startedAt, end);
+    if (hit && !hit.end) {
       // The end snapshot is taken from the same hook batch that announced
       // the turn's end, so it can land a moment after us. Ask once more.
       await new Promise((r) => setTimeout(r, SNAPSHOT_RETRY_MS));
       list = await deps.turnList(t.cwd, t.sessionId);
-      const again = list.turns.find((p) => p.start?.commit === hit.start!.commit);
-      return { start: hit.start.commit, end: again?.end?.commit ?? null };
+      const again = list.turns.find((p) => p.start?.commit === hit.start);
+      return { start: hit.start, end: again?.end?.commit ?? null };
     }
-    return hit?.start ? { start: hit.start.commit, end: hit.end?.commit ?? null } : null;
+    return hit;
   } catch {
     return null;
   }

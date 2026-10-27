@@ -1485,9 +1485,11 @@ export default function App() {
     const openSettings = (e: Event) => {
       const tab = (e as CustomEvent).detail?.tab;
       // The rules editor belongs to a project (its rules live in that repo's
-      // ledger), so "Settings → rules" opens the front project's Rules panel.
-      if (tab === "rules") {
-        openRules({ cwd: (e as CustomEvent).detail?.cwd ?? "" });
+      // ledger): a request naming a path opens that project's Rules panel;
+      // one from anywhere else lands on Settings → Rules, which lists them all.
+      const cwd = (e as CustomEvent).detail?.cwd;
+      if (tab === "rules" && cwd) {
+        openRules({ cwd });
         return;
       }
       setSettingsOpen({ tab });
@@ -4291,6 +4293,12 @@ export default function App() {
         <SettingsDialog
           initialTab={settingsOpen.tab}
           onClose={() => setSettingsOpen(null)}
+          projects={ws.projects.map((p) => ({ id: p.id, name: p.name, roots: p.components.map((c) => c.path) }))}
+          onOpenRules={(id, cwd) => {
+            // Bring the project to the front first; its view listens for the
+            // open-rules event once it is mounted.
+            void openProject(id).then(() => setTimeout(() => openRules({ cwd }), 120));
+          }}
         />
       )}
       {helpOpen && (

@@ -277,6 +277,23 @@ pub fn proposal_entry(p: &Proposal, pty_id: Option<u32>, now: u64) -> Result<Led
     })
 }
 
+/// Quarantine a proposal at the moment it is written when the terminal that
+/// sent it has read content nobody on the team wrote (gates.rs taint markers:
+/// a web page, a browser, an issue or review thread). The panel then shows it
+/// as Quarantined from the start, and nothing ever serves it in between.
+pub fn quarantine_if_tainted(entry: &mut LedgerEntry, source: Option<String>) {
+    let Some(source) = source.filter(|s| !s.trim().is_empty()) else {
+        return;
+    };
+    entry.status = Some("quarantined".into());
+    if let Some(map) = entry.data.as_object_mut() {
+        map.insert(
+            "untrusted".into(),
+            serde_json::json!([format!("read untrusted content ({})", source.trim())]),
+        );
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -585,5 +602,22 @@ mod tests {
         )
         .unwrap();
         assert_eq!(fact.expires_at, Some(NOW + 90 * DAY_MS));
+    }
+
+    #[test]
+    fn proposals_from_a_tainted_terminal_arrive_quarantined() {
+        let p = Proposal {
+            kind: "fact".into(),
+            text: "The staging database is reset nightly".into(),
+            ..Default::default()
+        };
+        let mut clean = proposal_entry(&p, Some(3), NOW).unwrap();
+        quarantine_if_tainted(&mut clean, None);
+        assert_eq!(clean.status.as_deref(), Some("proposed"));
+        let mut tainted = proposal_entry(&p, Some(3), NOW).unwrap();
+        quarantine_if_tainted(&mut tainted, Some("WebFetch".into()));
+        assert_eq!(tainted.status.as_deref(), Some("quarantined"));
+        assert_eq!(tainted.data["untrusted"][0], "read untrusted content (WebFetch)");
+        assert!(!servable(&tainted, NOW + 1));
     }
 }

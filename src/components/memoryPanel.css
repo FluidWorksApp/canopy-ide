@@ -195,6 +195,17 @@
   margin: 0;
 }
 
+.memory-add {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 6px 10px 10px;
+}
+
+.memory-add .memory-error {
+  margin: 0;
+}
+
 .memory-settings {
   display: flex;
   flex-direction: column;
