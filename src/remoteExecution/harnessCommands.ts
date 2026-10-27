@@ -22,7 +22,8 @@ export const HARNESS_COMMANDS = [
   "research_delete", "research_import", "research_sweep", "research_dir",
   "context_claims", "context_claim_history", "context_claim_history_for_path",
   "context_messages", "context_mesh_severed", "context_release_claim", "context_mesh_sever",
-  "context_mesh_job_update",
+  "context_mesh_job_update", "context_hotspot_claim",
+  "workspace_memory_sync", "workspace_memory_proposals", "workspace_memory_ack",
 ] as const;
 const HANDLED = new Set<string>(HARNESS_COMMANDS);
 /** The ones that only read: a view-only member may ask these. */
