@@ -5,6 +5,7 @@ import { nativeHost } from '../host/native';
 import { RemoteExecutionClient, type RemoteSession } from './client';
 import {connectionKey,reportConnection,reportStream,workspaceLifecyclePhase} from './connectionState';
 import {saveRemoteContextImage} from './saveContextImage';
+import {basename} from '../paths';
 import {TerminalInput} from './terminalInput';
 import {canSwitchExecutionMode} from '../executionMode';
 import {remoteDiagnostic} from './remoteDiagnostic';
@@ -439,7 +440,7 @@ export class NativeWorkspaceHost implements Host {
    * the workspace in slices and attach the bytes, with notes.rs attach_file's
    * kind, title, extension and size rules. */
   private async attachWorkspaceFile(args:Args){
-    const path=String(args.path??'');const name=path.split('/').pop()??'';const dot=name.lastIndexOf('.');
+    const path=String(args.path??'');const name=basename(path);const dot=name.lastIndexOf('.');
     const ext=dot>0?name.slice(dot+1).toLowerCase():'';
     const kind=typeof args.kind==='string'?args.kind:['png','jpg','jpeg','gif','webp','bmp'].includes(ext)?'image':'artifact';
     const image=kind==='image',limit=image?16*1024*1024:512*1024;
