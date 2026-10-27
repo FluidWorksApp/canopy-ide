@@ -3,7 +3,14 @@
 // then proven by the transcript's own compaction record, not assumed.
 import { useCallback, useEffect, useRef, useState } from "react";
 import type * as ipc from "./ipc";
-import { compactCommand, compactHeadless, compactPlan, type CompactPlan, type CompactScope } from "./contextCompaction";
+import {
+  compactCommand,
+  compactHeadless,
+  compactInstructions,
+  compactPlan,
+  type CompactPlan,
+  type CompactScope,
+} from "./contextCompaction";
 
 /** How long a typed compaction may take to show up in the transcript. */
 const SENT_TIMEOUT_MS = 3 * 60 * 1000;
@@ -42,6 +49,8 @@ export function useCompaction(o: {
   live: boolean;
   lifeState: string;
   remote: boolean;
+  /** The account the session ran under (its digest's profile). */
+  profile?: string | null;
   activity: ipc.SessionActivity | null;
   deps: CompactionDeps;
   /** Read the activity again (after sending). */
@@ -77,7 +86,9 @@ export function useCompaction(o: {
       if (p.route === "terminal") return deliver(command);
       if (p.route === "wait") return setState({ phase: "queued", command });
       setState({ phase: "running" });
-      void o.deps.headless({ agent: o.agent, sessionId: o.sessionId!, cwd: o.cwd, command }).then((r) => {
+      void o.deps
+        .headless({ agent: o.agent, sessionId: o.sessionId!, cwd: o.cwd, command, instructions: compactInstructions(scope), profile: o.profile })
+        .then((r) => {
         setState(
           r.ok
             ? { phase: "done", pre: r.preTokens ?? null, post: r.postTokens ?? null }
