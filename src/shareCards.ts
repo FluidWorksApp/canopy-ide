@@ -17,6 +17,7 @@ import {
   type Card,
   type DiffCard,
   type FileCard,
+  type PlanCard,
   type PrCard,
   type RepoRef,
   type ReportCard,
@@ -37,6 +38,9 @@ export type ShareRequest =
       onSent?: (team: string, peer: string | null) => void;
     }
   | { kind: "review"; card: Omit<ReviewRequestCard, "reviewers"> }
+  /** A plan for approval: the dialog asks who may approve it, like reviewers
+   *  for a review request, and reports them back once it is sent. */
+  | { kind: "plan"; card: Omit<PlanCard, "approvers">; onSent?: (approvers: string[]) => void }
   | { kind: "error"; message: string };
 
 export const OPEN_SHARE_DIALOG_EVENT = "canopy:open-share-dialog";

@@ -46,6 +46,10 @@
 .intent-sev.is-high{border-color:var(--danger);color:var(--danger)}
 .intent-sev.is-medium{border-color:var(--warn,#c90);color:var(--warn,#c90)}
 .intent-sev.is-low{color:var(--text-muted)}
+.intent-accept{font-weight:600}
+.intent-accept.is-met{color:var(--ok)}
+.intent-accept.is-unmet{color:var(--danger)}
+.intent-accept.is-unknown{color:var(--text-muted)}
 .intent-receipt{display:flex;flex-direction:column;gap:4px;font-size:12.5px}
 .intent-verdict{font-weight:600}
 .intent-verdict.is-proven{color:var(--ok)}

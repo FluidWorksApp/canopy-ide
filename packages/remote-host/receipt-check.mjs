@@ -7,7 +7,9 @@
 // failing suite's output is the evidence we need most), caps output at 1 MB by
 // failing, and shares a four-slot pool with git, so a three-minute test run
 // would starve every panel. Checks get their own single slot here.
-import {spawn} from 'node:child_process';
+import {execFile,spawn} from 'node:child_process';
+import {copyFile,lstat,mkdir,readFile,readdir,rm,stat,symlink,unlink as unlinkFile,writeFile} from 'node:fs/promises';
+import path from 'node:path';
 import {randomUUID} from 'node:crypto';
 
 const DEFAULT_TIMEOUT=5*60*1000, CEILING=20*60*1000;
@@ -45,6 +47,12 @@ async function runOne(args,{scoped,env,home}){
  // session to the hooks. CI=1 keeps every runner we parse out of watch mode.
  const childEnv=Object.fromEntries(Object.entries(env).filter(([key])=>!key.startsWith('CANOPY')));
  Object.assign(childEnv,{CI:'1',NO_COLOR:'1',FORCE_COLOR:'0',GIT_TERMINAL_PROMPT:'0'},home?{HOME:home}:{});
+ // What an isolated copy asks for (a build cache shared with the live
+ // checkout); never a CANOPY* key.
+ for(const pair of Array.isArray(args.env)?args.env.slice(0,16):[]){
+  const [key,value]=Array.isArray(pair)?pair:[];
+  if(typeof key==='string'&&typeof value==='string'&&key&&!key.startsWith('CANOPY')&&!/[=\0]/.test(key))childEnv[key]=value;
+ }
  const started=Date.now();
  return new Promise(resolve=>{
   let child;
@@ -67,6 +75,106 @@ async function runOne(args,{scoped,env,home}){
 }
 
 function result(r){return {code:null,stdout:'',stderr:'',stdoutTruncated:false,stderrTruncated:false,timedOut:false,durationMs:0,spawnError:null,...r};}
+
+// ------------------------------------------------------------- isolation
+// The twin of receipt.rs `receipt_isolate` / `receipt_release`: checks run in
+// a throwaway export of the turn's snapshot (or of the working tree as it is
+// now), never in the live checkout the agent's next turn is editing. The copy
+// sits under the checkout's git directory, inside the workspace scope, where
+// no snapshot or `git status` looks; installed dependency folders are linked
+// in from the live checkout. An export, not `git worktree add`, so it never
+// shows up in a worktree list.
+
+const LINK_NAMES=new Set(['node_modules','.venv','venv','bower_components']);
+const MAX_LINKS=400,ORPHAN_MS=6*60*60*1000,COPIES='canopy-receipts';
+const GIT_SCRUB=['GIT_DIR','GIT_WORK_TREE','GIT_INDEX_FILE','GIT_OBJECT_DIRECTORY','GIT_ALTERNATE_OBJECT_DIRECTORIES','GIT_NAMESPACE','GIT_COMMON_DIR','GIT_PREFIX'];
+let copySeq=0;
+
+function gitRun(cwd,argv,{env=process.env,home,extra={},timeout=120000}={}){
+ const childEnv={...env,GIT_TERMINAL_PROMPT:'0',...(home?{HOME:home}:{})};
+ for(const key of GIT_SCRUB)delete childEnv[key];
+ Object.assign(childEnv,extra);
+ return new Promise((resolve,reject)=>execFile('git',['-C',cwd,'-c','core.fsmonitor=false','-c','core.splitIndex=false',...argv],{env:childEnv,timeout,maxBuffer:16*1024*1024},(error,stdout,stderr)=>error?reject(Error(String(stderr||error.message).trim().slice(0,2000))):resolve(String(stdout).trim())));
+}
+
+const validRev=rev=>typeof rev==='string'&&/^[0-9a-f]{7,64}$/i.test(rev);
+const exists=async p=>{try{await lstat(p);return true;}catch{return false;}};
+
+async function removeCopy(copy){
+ try{for(const rel of (await readFile(copy+'.links','utf8')).split('\n').filter(Boolean))await unlinkFile(path.join(copy,rel)).catch(()=>{});}catch{}
+ await rm(copy,{recursive:true,force:true});
+ for(const extra of ['.links','.index','.index.lock'])await rm(copy+extra,{force:true});
+}
+
+async function sweepOrphans(base){
+ let entries=[];try{entries=await readdir(base,{withFileTypes:true});}catch{return;}
+ for(const entry of entries){
+  if(!entry.isDirectory())continue;
+  const full=path.join(base,entry.name);
+  try{if(Date.now()-(await stat(full)).mtimeMs>ORPHAN_MS)await removeCopy(full);}catch{}
+ }
+}
+
+/** Write the working tree (tracked + untracked, not ignored) into a tree id
+ *  through a temporary index seeded from a copy of the user's. */
+async function worktreeTree(top,index,opts){
+ const userIndex=path.resolve(top,await gitRun(top,['rev-parse','--git-path','index'],opts));
+ let seeded=false;try{await copyFile(userIndex,index);seeded=true;}catch{}
+ if(!seeded){const head=await gitRun(top,['rev-parse','--verify','-q','HEAD^{commit}'],opts).catch(()=>'');if(head)await gitRun(top,['read-tree',head],{...opts,extra:{GIT_INDEX_FILE:index}});}
+ await gitRun(top,['add','-A','--',':/'],{...opts,extra:{GIT_INDEX_FILE:index},timeout:300000});
+ return gitRun(top,['write-tree'],{...opts,extra:{GIT_INDEX_FILE:index}});
+}
+
+export async function receiptIsolate(args,{scoped,env=process.env,home}){
+ const cwd=await scoped(String(args?.cwd??''));
+ const rev=args?.rev??null;
+ if(rev!=null&&!validRev(rev))throw Error('not a snapshot id');
+ const opts={env,home};
+ const top=await gitRun(cwd,['rev-parse','--show-toplevel'],opts);
+ const gitDir=await gitRun(top,['rev-parse','--absolute-git-dir'],opts);
+ const base=path.join(gitDir,COPIES);
+ await scoped(base,true).catch(()=>{throw Error('the checkout\'s git folder is outside this workspace');});
+ await mkdir(base,{recursive:true});
+ await sweepOrphans(base);
+ const copy=path.join(base,`${process.pid}-${Date.now()}-${copySeq++}`);
+ const index=copy+'.index';
+ let tree;
+ try{
+  tree=rev??await worktreeTree(top,copy+'.snapshot-index',opts);
+ }finally{await rm(copy+'.snapshot-index',{force:true});}
+ try{
+  await mkdir(copy,{recursive:true});
+  await gitRun(top,['read-tree',tree],{...opts,extra:{GIT_INDEX_FILE:index}});
+  await gitRun(top,['checkout-index','-a','-f','--prefix',copy+'/'],{...opts,extra:{GIT_INDEX_FILE:index},timeout:300000});
+ }catch(error){await removeCopy(copy);throw Error(`could not copy the checkout: ${error.message}`);}
+ finally{await rm(index,{force:true});}
+ const ignored=await gitRun(top,['ls-files','--others','--ignored','--exclude-standard','--directory'],opts).catch(()=>'');
+ const linked=[];
+ for(const line of ignored.split('\n')){
+  if(linked.length>=MAX_LINKS)break;
+  const rel=line.trim().replace(/\/+$/,'');
+  if(!rel||rel.split('/').includes('..')||!LINK_NAMES.has(rel.split('/').pop()))continue;
+  const source=path.join(top,rel),target=path.join(copy,rel);
+  try{
+   if(!(await stat(source)).isDirectory()||!(await stat(path.dirname(target))).isDirectory()||await exists(target))continue;
+   await symlink(source,target,'dir');linked.push(rel);
+  }catch{}
+ }
+ await writeFile(copy+'.links',linked.join('\n'));
+ const envOut=[];
+ if(!env.CARGO_TARGET_DIR&&await exists(path.join(top,'Cargo.toml'))){
+  const live=path.join(top,'target');
+  try{if((await stat(live)).isDirectory())envOut.push(['CARGO_TARGET_DIR',live]);}catch{}
+ }
+ return {dir:copy,tree,linked,env:envOut};
+}
+
+export async function receiptRelease(args,{scoped}){
+ const dir=await scoped(String(args?.dir??''));
+ if(path.basename(path.dirname(dir))!==COPIES||dir.includes('..'))throw Error('not a receipt copy');
+ await removeCopy(dir);
+ return null;
+}
 
 // A check can run for up to CEILING (20 minutes), longer than the gateway
 // holds a request open (nativeTimeoutMs). So the IDE starts it as a job and

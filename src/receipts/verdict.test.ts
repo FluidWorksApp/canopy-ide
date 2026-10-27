@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { DIFF_SUMMARY_MAX, brainNote, buildVerdictPrompt, validateVerdict } from "./verdict";
+import { DIFF_SUMMARY_MAX, brainNote, buildVerdictPrompt, readAcceptance, validateVerdict, validateVerdictFor } from "./verdict";
 import type { CheckResult } from "./types";
 
 const failing: CheckResult = {
@@ -66,5 +66,35 @@ describe("brainNote", () => {
     expect(brainNote("no-brain")).toMatch(/No brain connected/);
     expect(brainNote("over-budget")).toMatch(/budget/);
     expect(brainNote("weird")).toMatch(/could not be asked/);
+  });
+});
+
+describe("acceptance checks", () => {
+  const items = ["npm test passes", "The page shows the total"];
+  it("matches answers by number or wording, in the plan's order, and fills the gaps", () => {
+    expect(
+      readAcceptance(
+        [
+          { item: "The page shows the total", met: true, evidence: "seen in the preview" },
+          { item: 9, met: true, evidence: "stray" },
+        ],
+        items,
+      ),
+    ).toEqual([
+      { item: "npm test passes", met: null, evidence: "The brain did not report on this check." },
+      { item: "The page shows the total", met: true, evidence: "seen in the preview" },
+    ]);
+  });
+  it("reads proven with an unshown check as partial; without a plan, validates as before", () => {
+    const raw = { verdict: "proven", asked: "a", did: "d", evidence: [], gaps: [], acceptance: [{ item: 1, met: true, evidence: "4 passed" }] };
+    expect(validateVerdictFor(items)(raw)).toMatchObject({ verdict: "partial", acceptance: [{ met: true }, { met: null }] });
+    expect(validateVerdictFor(undefined)(raw)).not.toHaveProperty("acceptance");
+    const all = { ...raw, acceptance: [{ item: 1, met: true, evidence: "x" }, { item: 2, met: true, evidence: "y" }] };
+    expect(validateVerdictFor(items)(all)).toMatchObject({ verdict: "proven" });
+  });
+  it("puts the numbered checks in the prompt and asks for one answer each", () => {
+    const p = buildVerdictPrompt({ asked: "x", diffSummary: "", filesTouched: [], checks: [], tamper: [], packages: [], acceptance: items });
+    expect(p).toContain("1. npm test passes");
+    expect(p).toContain("proven requires every acceptance check met");
   });
 });

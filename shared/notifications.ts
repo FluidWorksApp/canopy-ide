@@ -65,6 +65,9 @@ export interface AgentEventData {
   model?: string;
   /** AskUserQuestion payload, when this event is its PreToolUse. */
   questions?: PendingQuestion[];
+  /** The Canopy plan this session was launched to carry out (CANOPY_PLAN_ID,
+   *  stamped by canopy-hook as `canopy_plan_id`). */
+  planId?: string;
   /** A Rules-panel gate or the irreversible-action gate acted on this tool
    *  call (canopy-hook `gate_check`, stamped as `canopy_gate`). */
   gate?: GateStamp;
@@ -197,6 +200,8 @@ export function parseAgentEvent(raw: string): AgentEventData | null {
     const command = (parsed.tool_input as { command?: unknown } | undefined)?.command;
     if (typeof command === "string" && command) data.toolCommand = command.slice(0, 400);
   }
+  if (typeof parsed.canopy_plan_id === "string" && /^pl-[a-z0-9]{1,16}-[a-z0-9]{1,16}$/.test(parsed.canopy_plan_id))
+    data.planId = parsed.canopy_plan_id;
   if (typeof parsed.transcript_path === "string")
     data.transcriptPath = parsed.transcript_path;
   if (typeof parsed.model === "string" && parsed.model.trim())

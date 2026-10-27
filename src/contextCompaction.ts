@@ -13,7 +13,10 @@
 //     end; a session waiting on a question or a permission is left alone.
 //   - a session with no live terminal is resumed headlessly by the CLI's
 //     verified runner (structuredRunners.ts compactArgs), which compacts and
-//     exits. That run is not a Canopy agent: no hooks, no turn snapshot.
+//     exits — on this computer, or in a cloud workspace inside the workspace
+//     itself, where the session lives (the host's session_compact,
+//     packages/remote-host/session-compact.mjs). That run is not a Canopy
+//     agent: no hooks, no turn snapshot.
 
 import * as ipc from "./ipc";
 import { agentCliFor, structuredRunnerFor } from "./projects";
@@ -65,7 +68,8 @@ export function compactPlan(o: {
   /** A terminal here is running the session. */
   live: boolean;
   lifeState?: string;
-  /** In a cloud workspace (the CLI and its sessions are on the host). */
+  /** In a cloud workspace (the CLI and its sessions are on the host; the
+   *  headless run happens there). */
   remote?: boolean;
 }): CompactPlan {
   if (!HARNESS_COMPACT_COMMAND[o.agent] || harnessSupport(o.agent, "compaction") === "unknown") {
@@ -76,20 +80,15 @@ export function compactPlan(o: {
     if (o.lifeState === "waiting") {
       return { route: "unavailable", why: "The agent is waiting for your answer — answer it first." };
     }
-    if (o.lifeState === "ended") return o.remote ? remoteNote() : runnerOr();
+    if (o.lifeState === "ended") return runnerOr();
     return { route: "wait", why: "Sends when the agent finishes this turn — never mid-turn." };
   }
-  return o.remote ? remoteNote() : runnerOr();
+  return runnerOr();
 
   function runnerOr(): CompactPlan {
     return structuredRunnerFor(o.agent)?.compactArgs
       ? { route: "runner" }
       : { route: "unavailable", why: "Open the session in a terminal to compact it." };
-  }
-  function remoteNote(): CompactPlan {
-    // The headless runner is this computer's CLI; a cloud workspace's session
-    // lives on the workspace host. Its terminal is how to reach it.
-    return { route: "unavailable", why: "Reopen this session in a terminal to compact it." };
   }
 }
 
@@ -104,8 +103,21 @@ const COMPACT_TIMEOUT_MS = 5 * 60 * 1000;
 
 /** Resume `sessionId` headlessly and compact it. Never throws. */
 export async function compactHeadless(
-  o: { agent: string; sessionId: string; cwd: string; command: string },
-  deps: { spawn: typeof ipc.brainCallSpawn; kill: typeof ipc.brainKill } = {
+  o: {
+    agent: string;
+    sessionId: string;
+    cwd: string;
+    /** The full text: the compaction command and its instructions. */
+    command: string;
+    /** Just the instructions — what a cloud workspace's host is sent. */
+    instructions?: string;
+    profile?: string | null;
+  },
+  deps: {
+    spawn: typeof ipc.brainCallSpawn;
+    kill: typeof ipc.brainKill;
+    remote?: typeof ipc.sessionCompact;
+  } = {
     spawn: ipc.brainCallSpawn,
     kill: ipc.brainKill,
   },
@@ -113,7 +125,24 @@ export async function compactHeadless(
   const runner = structuredRunnerFor(o.agent);
   const bin = agentCliFor(o.agent)?.bin;
   if (!runner?.compactArgs || !bin) return { ok: false, message: "This agent's CLI cannot compact a session headlessly." };
-  if (activeWorkspace()) return { ok: false, message: "Reopen this session in a terminal to compact it." };
+  if (deps.remote || activeWorkspace()) {
+    // The session lives in the workspace: compact it there.
+    try {
+      const r = await (deps.remote ?? ipc.sessionCompact)({
+        agent: o.agent,
+        sessionId: o.sessionId,
+        cwd: o.cwd,
+        instructions: o.instructions ?? "",
+        profile: o.profile ?? null,
+      });
+      noteContextWindows(r.contextWindows);
+      return r.ok
+        ? { ok: true, preTokens: r.preTokens ?? null, postTokens: r.postTokens ?? null }
+        : { ok: false, message: r.message ?? "The compaction failed." };
+    } catch (e) {
+      return { ok: false, message: String(e instanceof Error ? e.message : e) };
+    }
+  }
   const args = runner.compactArgs(
     {
       bin,

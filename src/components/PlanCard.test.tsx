@@ -114,7 +114,7 @@ describe("PlanGateHost", () => {
     expect(dialog).toHaveTextContent("Before the agent starts · Orders");
     await userEvent.click(screen.getByRole("button", { name: "Share plan to team" }));
     expect(openShareDialog).toHaveBeenCalledWith(
-      expect.objectContaining({ kind: "share", card: expect.objectContaining({ type: "plan", goal: "Show orders in pages" }) }),
+      expect.objectContaining({ kind: "plan", card: expect.objectContaining({ type: "plan", goal: "Show orders in pages" }) }),
     );
     await userEvent.click(screen.getByRole("radio", { name: "Infinite scroll" }));
     await userEvent.click(screen.getByRole("button", { name: "Approve & start" }));
@@ -125,6 +125,26 @@ describe("PlanGateHost", () => {
     expect(brief).toContain("(1) npm test passes");
     expect(brief).toContain("Out of scope, do not do: Change the API");
     expect(screen.queryByRole("dialog")).toBeNull();
+  }, 30_000);
+
+  it("steps the dialog aside once the plan is shared, keeping the agent waiting in the corner", async () => {
+    askBrain.mockResolvedValue({ ok: true, text: "", costUsd: 0, inputTokens: 1, outputTokens: 1, value: { ...plan, risk: "high" } });
+    const launch = vi.fn();
+    render(<PlanGateHost />);
+    act(() => {
+      void dispatchWithPlan({ request: "paginate orders", dir: "/repo", source: "task", label: "Orders" }, launch);
+    });
+    await screen.findByRole("dialog", { name: /Approve the plan/ });
+    await userEvent.click(screen.getByRole("button", { name: "Share plan to team" }));
+    const req = openShareDialog.mock.calls[0][0] as { onSent: (approvers: string[]) => void };
+    act(() => req.onSent(["u-dana"]));
+    expect(screen.queryByRole("dialog")).toBeNull();
+    expect(screen.getByText(/Waiting for approval:/)).toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "Open plan" }));
+    expect(await screen.findByRole("dialog", { name: /Approve the plan/ })).toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "Wait for approval" }));
+    expect(screen.queryByRole("dialog")).toBeNull();
+    expect(launch).not.toHaveBeenCalled();
   }, 30_000);
 
   it("shows an inline plan in the corner for small work and lets the person open it", async () => {

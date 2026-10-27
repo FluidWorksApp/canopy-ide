@@ -52,3 +52,34 @@ test('a long check runs as a job the IDE long-polls',async()=>{
  assert.deepEqual(status,{state:'failed',error:'Invalid check command'});
  await assert.rejects(receiptCheckStatus({id:'nope'}),/No such check/);
 });
+
+test('isolate exports the working tree under the git dir, links dependencies, and release removes only the copy',async()=>{
+ const {execFileSync}=await import('node:child_process');
+ const {mkdir,readFile,writeFile,stat}=await import('node:fs/promises');
+ const repo=path.join(dir,'repo');await mkdir(repo,{recursive:true});
+ const git=(...a)=>execFileSync('git',['-C',repo,'-c','user.name=T','-c','user.email=t@t','-c','commit.gpgSign=false',...a]).toString().trim();
+ git('init','-q');await writeFile(path.join(repo,'.gitignore'),'node_modules/\n');await writeFile(path.join(repo,'a.txt'),'committed\n');git('add','-A');git('commit','-q','-m','init');
+ const head=git('rev-parse','HEAD');
+ await writeFile(path.join(repo,'a.txt'),'edited\n');await writeFile(path.join(repo,'new.txt'),'untracked\n');
+ await mkdir(path.join(repo,'node_modules/dep'),{recursive:true});await writeFile(path.join(repo,'node_modules/dep/index.js'),'x');
+ const {receiptIsolate,receiptRelease}=await import('./receipt-check.mjs');
+ const copy=await receiptIsolate({cwd:repo},{scoped});
+ assert.ok(copy.dir.startsWith(path.join(repo,'.git','canopy-receipts')));
+ assert.equal(await readFile(path.join(copy.dir,'a.txt'),'utf8'),'edited\n');
+ assert.equal(await readFile(path.join(copy.dir,'new.txt'),'utf8'),'untracked\n');
+ assert.deepEqual(copy.linked,['node_modules']);
+ assert.equal(await readFile(path.join(copy.dir,'node_modules/dep/index.js'),'utf8'),'x');
+ assert.doesNotMatch(git('status','--porcelain'),/canopy-receipts/);
+ const atHead=await receiptIsolate({cwd:repo,rev:head},{scoped});
+ assert.equal(await readFile(path.join(atHead.dir,'a.txt'),'utf8'),'committed\n');
+ await assert.rejects(receiptIsolate({cwd:repo,rev:'--output=x'},{scoped}),/snapshot id/);
+ await assert.rejects(receiptRelease({dir:repo},{scoped}),/not a receipt copy/);
+ await receiptRelease({dir:copy.dir},{scoped});await receiptRelease({dir:atHead.dir},{scoped});
+ await assert.rejects(stat(copy.dir));
+ assert.equal(await readFile(path.join(repo,'node_modules/dep/index.js'),'utf8'),'x');
+});
+
+test('a check gets the env the isolated copy asks for, never a CANOPY key',async()=>{
+ const r=await receiptRunCheck({cwd:dir,argv:['/bin/sh','-c','echo "$CARGO_TARGET_DIR|$CANOPY_X"'],env:[['CARGO_TARGET_DIR','/t'],['CANOPY_X','1']]},{scoped});
+ assert.equal(r.stdout.trim(),'/t|');
+});

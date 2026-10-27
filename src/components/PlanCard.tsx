@@ -22,6 +22,8 @@ export interface PlanCardProps {
   onApprove?: (edits: { decisions: PlanDecision[]; acceptance: string[] }) => void | Promise<void>;
   onDrop?: () => void;
   onShare?: () => void;
+  /** Step the approval dialog aside and keep the agent waiting. */
+  onWait?: () => void;
 }
 
 const OWN = "__own__";
@@ -33,7 +35,7 @@ const RISK_LABEL: Record<PlanData["risk"], string> = {
 };
 const SIZE_LABEL: Record<PlanData["size"], string> = { tiny: "Tiny", small: "Small", large: "Large" };
 
-export function PlanCard({ plan, mode, status, onApprove, onDrop, onShare }: PlanCardProps) {
+export function PlanCard({ plan, mode, status, onApprove, onDrop, onShare, onWait }: PlanCardProps) {
   const editable = mode === "approval";
   // Each decision starts on its recommendation so approving is one click when
   // the brain guessed right — but the choice is on screen, not hidden.
@@ -208,6 +210,11 @@ export function PlanCard({ plan, mode, status, onApprove, onDrop, onShare }: Pla
           {onShare && (
             <Button onClick={onShare} title="Post this plan in team chat for comments and approval">
               Share plan to team
+            </Button>
+          )}
+          {editable && onWait && (
+            <Button variant="ghost" onClick={onWait} title="Keep the agent waiting for approval without holding the screen">
+              Wait for approval
             </Button>
           )}
           {editable && onDrop && (

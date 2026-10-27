@@ -32,6 +32,7 @@ import {
   type UnattendedContext,
 } from "./projects";
 import { resolveBrain } from "./brain";
+import { notePlanCommand, planIdOfBrief } from "./plans/planLaunch";
 
 /**
  * Which CLI a launch runs on.
@@ -152,16 +153,25 @@ export async function startCommandParked(
    *  its sandbox denies every `git add`. See UnattendedContext. */
   ctx?: UnattendedContext,
 ): Promise<{ command: string; typePrompt: boolean } | null> {
+  // Planned work carries its plan id in the agent's env (plans/planLaunch.ts):
+  // whatever command line comes out of here — the whole brief, or a pointer to
+  // the file it was parked in — is noted against that plan, so the terminal
+  // launcher sets CANOPY_PLAN_ID on it.
+  const planId = planIdOfBrief(seed);
+  const noted = <T extends { command: string } | null>(s: T): T => {
+    if (s) notePlanCommand(s.command, planId);
+    return s;
+  };
   const start = startCommand(agentId, seed, options, ctx);
   // typePrompt means the CLI takes no prompt argument: it launches bare and the
   // text is typed into its TUI once it is up, which is raw mode and has no such
   // limit. Only a prompt that has to survive the SHELL is at risk here.
-  if (!start || start.typePrompt || fitsOnOneLine(start.command)) return start;
+  if (!start || start.typePrompt || fitsOnOneLine(start.command)) return noted(start);
   try {
     const path = await ipc.spotSaveContextText(dir, seed);
-    return startCommand(agentId, briefPointer(path), options, ctx) ?? start;
+    return noted(startCommand(agentId, briefPointer(path), options, ctx) ?? start);
   } catch (err) {
     void ipc.jsLog("warn", `agent: could not park a ${byteLength(seed)}-byte brief: ${String(err)}`);
-    return start;
+    return noted(start);
   }
 }

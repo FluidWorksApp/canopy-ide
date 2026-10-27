@@ -37,6 +37,13 @@ describe("cross-connector event projection", () => {
     });
   });
 
+  it("keeps the plan id canopy-hook stamps from CANOPY_PLAN_ID, shape-checked", () => {
+    const planned = entry({ session_id: "s", cwd: "/repo", hook_event_name: "Stop", canopy_plan_id: "pl-abc-def123" }).data;
+    expect(planned?.planId).toBe("pl-abc-def123");
+    const forged = entry({ session_id: "s", cwd: "/repo", hook_event_name: "Stop", canopy_plan_id: "../../x" }).data;
+    expect(forged?.planId).toBeUndefined();
+  });
+
   it("reads the native Codex stop message field", () => {
     const data = entry({
       session_id: "thr-1",

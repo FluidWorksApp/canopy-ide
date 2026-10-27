@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { onTurnEnd, resetReceiptEngineForTests, scheduleVerify, setReceiptEngineDepsForTests, verifyTurn, type VerifyTarget } from "./engine";
+import { inCopy, onTurnEnd, resetReceiptEngineForTests, scheduleVerify, setReceiptEngineDepsForTests, verifyTurn, type VerifyTarget } from "./engine";
 import { receiptFor, resetReceiptsForTests, latestReceiptFor } from "./store";
 import { updateSettings } from "../settings";
 import type { ReceiptCheckRun } from "../ipc";
@@ -32,7 +32,7 @@ diff --git a/src/sum.ts b/src/sum.ts
 `;
 
 function fakeRun(opts: { testOut?: ReceiptCheckRun; changed?: string; patch?: string } = {}) {
-  return vi.fn(async (_cwd: string, argv: string[]): Promise<ReceiptCheckRun> => {
+  return vi.fn(async (_cwd: string, argv: string[], _opts?: unknown): Promise<ReceiptCheckRun> => {
     const cmd = argv.join(" ");
     if (cmd === "git rev-parse --show-toplevel") return ok("/repo\n");
     if (cmd === "git branch --show-current") return ok("feat/sum\n");
@@ -61,6 +61,8 @@ const target: VerifyTarget = {
 
 let appended: ReceiptData[] = [];
 const askBrain = vi.fn();
+const isolate = vi.fn(async (_cwd: string, rev?: string | null) => ({ dir: "/repo/.git/canopy-receipts/c1", tree: rev ?? "tree9", linked: ["node_modules"], env: [] as [string, string][] }));
+const release = vi.fn(async () => {});
 
 beforeEach(() => {
   resetReceiptsForTests();
@@ -68,8 +70,14 @@ beforeEach(() => {
   appended = [];
   askBrain.mockReset();
   updateSettings({ receiptMode: "auto", receiptCommands: { "/repo": ["npm test -- --run"] } });
+  isolate.mockClear();
+  release.mockClear();
   setReceiptEngineDepsForTests({
     run: fakeRun(),
+    isolate,
+    release,
+    plan: async () => null,
+    preview: async () => null,
     readText: async (path) => {
       if (path === "/repo/package.json") return JSON.stringify({ dependencies: { react: "1", "left-padz": "1" } });
       throw new Error("no file");
@@ -221,6 +229,75 @@ describe("verifyTurn", () => {
     const again = await verifyTurn(target);
     expect(askBrain).toHaveBeenCalledTimes(1);
     expect(again!.costUsd).toBeNull();
+  });
+});
+
+describe("isolation", () => {
+  it("runs the checks in a throwaway copy of the turn's end snapshot, then deletes it", async () => {
+    askBrain.mockResolvedValue({ ok: false, reason: "no-brain", message: "" });
+    const run = fakeRun();
+    const turnList = vi.fn(async () => ({ git: true, turns: [{ n: 1, start: { ref: "a", commit: "snapA", tree: "t", ts_ms: 1000 }, end: { ref: "b", commit: "snapB", tree: "t", ts_ms: 5000 } }] }));
+    isolate.mockResolvedValueOnce({ dir: "/repo/.git/canopy-receipts/c1", tree: "snapB", linked: ["node_modules"], env: [["CARGO_TARGET_DIR", "/repo/target"]] });
+    setReceiptEngineDepsForTests({ run, turnList: turnList as never });
+    const r = await verifyTurn(target);
+    expect(isolate).toHaveBeenCalledWith("/repo", "snapB");
+    const check = run.mock.calls.find(([, argv]) => argv[0] === "/bin/sh")!;
+    expect(check[0]).toBe("/repo/.git/canopy-receipts/c1");
+    expect(check[2]).toMatchObject({ env: [["CARGO_TARGET_DIR", "/repo/target"]] });
+    // Git reads still look at the live checkout; only the checks moved.
+    expect(run.mock.calls.filter(([, argv]) => argv[0] === "git").every(([cwd]) => cwd === "/repo")).toBe(true);
+    expect(release).toHaveBeenCalledWith("/repo/.git/canopy-receipts/c1");
+    expect(r!.ranIn).toEqual({ kind: "copy", tree: "snapB", linked: ["node_modules"] });
+  });
+
+  it("a check in a subfolder runs in the same subfolder of the copy", () => {
+    expect(inCopy("/repo", "/repo/web", "/c")).toBe("/c/web");
+    expect(inCopy("/repo", "/repo", "/c")).toBe("/c");
+    expect(inCopy("C:\\repo", "C:\\repo\\web\\app", "C:/repo/.git/canopy-receipts/1")).toBe("C:/repo/.git/canopy-receipts/1/web/app");
+  });
+
+  it("says so when no copy could be made, and still files the receipt", async () => {
+    askBrain.mockResolvedValue({ ok: false, reason: "no-brain", message: "" });
+    isolate.mockRejectedValueOnce(new Error("disk full"));
+    const r = await verifyTurn(target);
+    expect(r!.ranIn).toEqual({ kind: "live", why: "disk full" });
+    expect(release).not.toHaveBeenCalled();
+    expect(r!.checks[0].outcome).toBe("passed");
+  });
+});
+
+describe("plan acceptance", () => {
+  it("asks the brain about each acceptance check and never calls proven with one unmet", async () => {
+    askBrain.mockImplementation(async (req: { validate: (v: unknown) => unknown }) => ({
+      ok: true,
+      text: "",
+      costUsd: 0,
+      value: req.validate({
+        verdict: "proven",
+        asked: "Fix sum",
+        did: "Changed - to +",
+        evidence: ["4 passed"],
+        gaps: [],
+        acceptance: [
+          { item: 1, met: true, evidence: "npm test: 4 passed" },
+          { item: 2, met: false, evidence: "No changelog entry in the diff" },
+        ],
+      }),
+    }));
+    const plan = vi.fn(async () => ({ planId: "pl-a-b", goal: "Sum adds", acceptance: ["npm test passes", "CHANGELOG mentions the fix"] }));
+    setReceiptEngineDepsForTests({ run: fakeRun({ changed: "src/sum.ts\n", patch: "" }), plan });
+    const r = await verifyTurn({ ...target, planId: "pl-a-b" });
+    expect(plan).toHaveBeenCalledWith("/repo", "s1", "pl-a-b");
+    const prompt = askBrain.mock.calls[0][0].prompt as string;
+    expect(prompt).toContain("1. npm test passes");
+    expect(prompt).toContain("2. CHANGELOG mentions the fix");
+    expect(r!.plan).toEqual({ planId: "pl-a-b", goal: "Sum adds", acceptance: ["npm test passes", "CHANGELOG mentions the fix"] });
+    expect(r!.verdict!.verdict).toBe("partial");
+    expect(r!.verdict!.acceptance).toEqual([
+      { item: "npm test passes", met: true, evidence: "npm test: 4 passed" },
+      { item: "CHANGELOG mentions the fix", met: false, evidence: "No changelog entry in the diff" },
+    ]);
+    expect(r!.status).toBe("partial");
   });
 });
 

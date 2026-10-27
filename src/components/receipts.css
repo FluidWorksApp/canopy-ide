@@ -69,3 +69,19 @@
 .rc-commands { display: flex; flex-direction: column; gap: var(--sp-1); width: 100%; }
 .rc-label { font-size: var(--fs-sm); color: var(--text-dim); }
 .rc-settings { display: flex; flex-direction: column; align-items: flex-start; gap: var(--sp-2); }
+
+/* Preview before/after: two thumbnails side by side, one opens full width. */
+.rc-shots { display: flex; flex-wrap: wrap; gap: var(--sp-2); margin-top: var(--sp-2); }
+.rc-shot { margin: 0; display: flex; flex-direction: column; gap: var(--sp-1); flex: 1 1 160px; min-width: 0; max-width: 280px; }
+.rc-shot-large { max-width: none; flex-basis: 100%; margin-top: var(--sp-2); }
+.rc-shot figcaption { font-size: var(--fs-xs); color: var(--text-dim); overflow-wrap: anywhere; }
+.rc-shot-button { display: block; padding: 0; border: 1px solid var(--border); border-radius: var(--r-xs); background: var(--bg-deep); cursor: zoom-in; overflow: hidden; }
+.rc-shot-large .rc-shot-button { cursor: zoom-out; }
+.rc-shot-button:focus-visible { outline: none; box-shadow: var(--ring); }
+.rc-shot-button img { display: block; width: 100%; height: auto; }
+.rc-accept{margin:0;padding-left:4px;list-style:none;font-size:12px}
+.rc-accept li{margin:2px 0;overflow-wrap:anywhere}
+.rc-accept li.is-met>span[aria-hidden]{color:var(--ok)}
+.rc-accept li.is-unmet>span[aria-hidden]{color:var(--danger)}
+.rc-accept li.is-unknown>span[aria-hidden]{color:var(--text-muted)}
+.rc-visually-hidden{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap}

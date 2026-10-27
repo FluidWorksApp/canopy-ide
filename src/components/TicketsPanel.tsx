@@ -23,6 +23,7 @@ import { ContextMenu, useContextMenu } from "./ContextMenu";
 import { PlayIcon, TrackerIcon } from "./icons";
 import { Button, TextInput } from "./ui";
 import { diffIssueWorkflowEvents } from "../issueWorkflowEvents";
+import { completeTicketPlans } from "../plans/planStore";
 import type { WorkflowTriggerProvenance } from "../workflowDefinition";
 
 export interface AgentTarget {
@@ -170,6 +171,9 @@ export function TicketsPanel({
             WORKFLOW_BASELINES.set(baselineKey, list);
             if (previous && workflowEventRef.current) {
               for (const event of diffIssueWorkflowEvents(previous, list, p.id, repo)) {
+                // A ticket closed anywhere (the tracker, a teammate) finishes
+                // the plans this machine is running for it.
+                if (event.kind === "issue.closed") void completeTicketPlans(String(event.payload.issueId ?? "")).catch(() => {});
                 void Promise.resolve(workflowEventRef.current(event)).catch(() => {});
               }
             }

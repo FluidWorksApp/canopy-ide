@@ -6,6 +6,7 @@ import type { AgentEventData } from "../shared/notifications";
 import {
   filesInWindow,
   observeAgentTurns,
+  onAgentSessionEnd,
   onAgentTurnEnd,
   onAgentTurnStart,
   resetAgentTurnsForTests,
@@ -126,6 +127,22 @@ describe("agent turns", () => {
     await flush();
     await flush();
     expect(order).toEqual(["start", "end"]);
+  });
+
+  it("carries the plan id the session was launched with, and announces the session's end after its last turn", async () => {
+    const starts: AgentTurnStart[] = [];
+    const order: string[] = [];
+    onAgentTurnStart((t) => starts.push(t));
+    onAgentTurnEnd((t) => order.push(`end:${t.planId}`));
+    onAgentSessionEnd((e) => order.push(`session:${e.planId}`));
+    observeAgentTurns(
+      [ev("UserPromptSubmit", { planId: "pl-a-b", prompt: "Read /tmp/brief.md" }), ev("Stop", { planId: "pl-a-b" }), ev("SessionEnd", { planId: "pl-a-b" })],
+      1_000,
+    );
+    await flush();
+    await flush();
+    expect(starts[0].planId).toBe("pl-a-b");
+    expect(order).toEqual(["end:pl-a-b", "session:pl-a-b"]);
   });
 
   it("windows journal seconds against turn milliseconds", () => {
