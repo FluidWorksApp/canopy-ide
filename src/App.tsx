@@ -58,6 +58,9 @@ import { observeTurnEvents } from "./turnRollback";
 import { observeAgentTurns } from "./agentTurns";
 import { startAwareness } from "./awareness/engine";
 import { setCloudRosterProvider } from "./awareness/roster";
+import { isWorkspaceHost } from "./host";
+import { startCloudSync } from "./remoteExecution/cloudSync";
+import { WorkspaceHooksNotice } from "./remoteExecution/WorkspaceHooksNotice";
 import { installOutcomes } from "./outcomes";
 import { observeMemoryEvents, startMemory } from "./memoryExtract";
 import { startReceiptEngine } from "./receipts/engine";
@@ -952,6 +955,13 @@ export default function App() {
       setCloudRosterProvider(null);
     };
   }, [meshJobs]);
+  // A cloud workspace keeps Rules, agent hooks and team memory in step with
+  // this computer on every connect (remoteExecution/cloudSync.ts).
+  const cloudWorkspace = isWorkspaceHost();
+  useEffect(
+    () => startCloudSync(() => wsRef.current.projects.flatMap((p) => p.components.map((c) => c.path))),
+    [],
+  );
   // One press can reach us from both the menu accelerator and the webview key
   // handler; without this they'd cancel each other and focus mode would look
   // stuck. First one wins, the echo inside the window is ignored.
@@ -3854,6 +3864,7 @@ export default function App() {
       {zen && <div className="zen-hotzone" />}
       {/* Transient zoom level, shown ~1s after Cmd +/-/0. */}
       {zoomPct !== null && <div className="zoom-indicator">{zoomPct}%</div>}
+      {cloudWorkspace && <WorkspaceHooksNotice />}
       {memPressure && (
         <div
           className={`mem-banner ${memPressure.level === 2 ? "critical" : "warning"}`}
