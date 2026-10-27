@@ -303,7 +303,7 @@ export async function nativeInvoke(command,args={}){
   if(command==='plan_usage'){await agentUsage.usage();return agentUsage.plans(args.sessionId??null);}
   if(command==='profile_prepare_session')return prepareSession(HOME,args);
   if(command==='session_digests')return sessionDigests();
-  if(command==='session_transcript_tail')return sessionTranscriptTail(HOME,args);
+  if(command==='session_transcript_tail')return sessionTranscriptTail(HOME,args,{scoped});
   if(command==='workspace_chrome_stream_open')return browsers.open(args);
   if(command==='workspace_chrome_stream_close'){await browsers.close(args.id);return;}
   if(command==='mcp_servers')return mcpRegistry.servers(args.projectDirs??[]);
