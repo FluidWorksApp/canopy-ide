@@ -33,6 +33,7 @@ import {
   isSpend,
   sessionOfRef,
   type OutcomeData,
+  type PlanLike,
   type ReceiptLike,
   type SpendData,
 } from "./types";
@@ -65,6 +66,8 @@ export interface OutcomesReport {
   mergedInWindow: number;
   /** git could not be read — merges and reverts are unknown, not zero. */
   gitUnavailable: boolean;
+  /** Plan id → its title, so spend by plan reads as words. */
+  planTitles: Map<string, string>;
 }
 
 /** Read everything and compute; writes nothing. */
@@ -76,10 +79,20 @@ export async function gatherOutcomes(
   // A session edited before the window can still be reworked inside it, so
   // spend is read a rework window further back than what is reported.
   const lookback = sinceMs - 7 * 24 * 60 * 60 * 1000;
-  const [spendRows, receiptRows] = await Promise.all([
+  const [spendRows, receiptRows, planRows] = await Promise.all([
     deps.query<SpendData>(root, { kinds: ["spend"], sinceTs: lookback, limit: 5000 }).catch(() => []),
     deps.query<ReceiptLike>(root, { kinds: ["receipt"], sinceTs: sinceMs, limit: 5000 }).catch(() => []),
+    deps.query<PlanLike>(root, { kinds: ["plan"], sinceTs: lookback, limit: 1000 }).catch(() => []),
   ]);
+  // A spend record keeps the plan id it first saw; a status change gives the
+  // plan a new head id, so file the title under every id in the chain.
+  const planTitles = new Map<string, string>();
+  for (const p of planRows) {
+    const title = (typeof p.data?.title === "string" && p.data.title.trim()) || p.subject;
+    if (!title) continue;
+    planTitles.set(p.id, title);
+    if (p.supersedes) planTitles.set(p.supersedes, title);
+  }
   const allSpends = latestSpends(spendRows.filter(isSpend).map((e) => e.data));
 
   let gitUnavailable = false;
@@ -153,6 +166,7 @@ export async function gatherOutcomes(
     receipts: receiptFacts(receiptRows, sessionOfRef),
     mergedInWindow: [...merged.values()].filter((t) => t >= sinceMs).length,
     gitUnavailable,
+    planTitles,
   };
 }
 

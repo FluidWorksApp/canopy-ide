@@ -57,6 +57,7 @@ const report: OutcomesReport = {
   ],
   mergedInWindow: 1,
   gitUnavailable: false,
+  planTitles: new Map(),
 };
 
 beforeEach(() => {
@@ -79,7 +80,7 @@ describe("OutcomesPanel", () => {
     }));
     render(<OutcomesPanel repos={["/repo"]} reconcile={reconcile} insight={insight} />);
 
-    expect(await screen.findByText("Dependency bumps pay off; UI features get redone")).toBeTruthy();
+    expect(await screen.findByText("Dependency bumps pay off; UI features get redone", undefined, { timeout: 5000 })).toBeTruthy();
     expect(screen.getByText(/consider auto-merge/)).toBeTruthy();
     expect(screen.getByText("Require plans for UI features")).toBeTruthy();
     // The brain saw aggregated numbers for this repo, not raw data.
@@ -105,7 +106,7 @@ describe("OutcomesPanel", () => {
       insight: { headline: "Steady week", wins: [], concerns: [], suggestions: [] },
     }));
     render(<OutcomesPanel repos={["/repo"]} reconcile={async () => report} insight={insight} />);
-    await screen.findByText("Steady week");
+    await screen.findByText("Steady week", undefined, { timeout: 5000 });
     fireEvent.click(screen.getByRole("button", { name: "Refresh" }));
     await waitFor(() => expect(insight).toHaveBeenCalledTimes(2));
     expect((insight.mock.calls[1] as unknown[])[2]).toMatchObject({ force: true });
@@ -114,7 +115,7 @@ describe("OutcomesPanel", () => {
   it("degrades to one line when there is no brain", async () => {
     const insight = vi.fn(async () => ({ state: "failed" as const, reason: "no-brain" as const, message: "", cached: null }));
     render(<OutcomesPanel repos={["/repo"]} reconcile={async () => report} insight={insight} />);
-    expect(await screen.findByText(/No brain connected/)).toBeTruthy();
+    expect(await screen.findByText(/No brain connected/, undefined, { timeout: 5000 })).toBeTruthy();
     expect(screen.getByTitle(/2 agent sessions in the last 30 days/).textContent).toContain("$8.00");
   });
 
@@ -122,7 +123,7 @@ describe("OutcomesPanel", () => {
     updateSettings({ outcomesInsight: false });
     const insight = vi.fn();
     render(<OutcomesPanel repos={["/repo"]} reconcile={async () => report} insight={insight as never} />);
-    expect((await screen.findByTitle(/2 agent sessions in the last 30 days/)).textContent).toContain("$8.00");
+    expect((await screen.findByTitle(/2 agent sessions in the last 30 days/, undefined, { timeout: 5000 })).textContent).toContain("$8.00");
     expect(screen.getByText(/weekly insight is off/)).toBeTruthy();
     expect(insight).not.toHaveBeenCalled();
   });

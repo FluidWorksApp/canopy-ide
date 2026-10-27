@@ -100,6 +100,7 @@ describe("reconcile on a real git repository", () => {
         entry("spend", spend("sB", [["b.ts", edited]], { taskClass: "deps", costUsd: 1 }), { ref: { kind: "session", id: "sB" } }),
         entry("spend", spend("sC", [["b.ts", edited + DAY]], { taskClass: "deps", costUsd: 1 }), { ref: { kind: "session", id: "sC" } }),
         entry("receipt", { verdict: "proven" }, { ref: { kind: "turn", id: "sB:123" } }),
+        entry("plan", { title: "Bump deps" }, { id: "p2", supersedes: "p1" }),
       ];
       const openedSec = Math.floor((now - 10 * 3_600_000) / 1000);
       const deps = gitDeps(dir, ledger, { sB: [{ pr_number: 8, at: openedSec }] });
@@ -114,6 +115,7 @@ describe("reconcile on a real git repository", () => {
       expect(report.receipts).toEqual([expect.objectContaining({ sessionId: "sB", verdict: "proven" })]);
       expect(report.mergedInWindow).toBe(2);
       expect(report.gitUnavailable).toBe(false);
+      expect(report.planTitles.get("p1")).toBe("Bump deps");
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

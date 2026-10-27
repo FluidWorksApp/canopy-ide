@@ -113,7 +113,12 @@ export function OutcomesPanel({
   const attribution = useMemo(
     () =>
       report
-        ? attributeSpend(report.spends, { sinceMs: report.sinceMs, cliName, brainByFeature })
+        ? attributeSpend(report.spends, {
+            sinceMs: report.sinceMs,
+            cliName,
+            brainByFeature,
+            planTitles: report.planTitles,
+          })
         : null,
     [report, brainByFeature],
   );
