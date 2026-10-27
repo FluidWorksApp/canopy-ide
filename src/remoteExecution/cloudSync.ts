@@ -6,6 +6,7 @@ import { activeWorkspace } from "./workspace";
 import { onWorkspaceConnect, startWorkspaceSync } from "./workspaceSync";
 import { checkWorkspaceHooks, pushWorkspacePolicies } from "./workspaceRules";
 import { startMemorySync, syncWorkspaceMemory } from "./memorySync";
+import { workspaceDeviceRelay } from "./deviceRelay";
 
 export function startCloudSync(roots: () => string[]): () => void {
   const ws = activeWorkspace();
@@ -15,6 +16,7 @@ export function startCloudSync(roots: () => string[]): () => void {
     onWorkspaceConnect("hooks", () => checkWorkspaceHooks()),
     onWorkspaceConnect("memory", syncWorkspaceMemory),
     startMemorySync(roots),
+    workspaceDeviceRelay(ws),
   ];
   const stop = startWorkspaceSync({ endpoint: ws.connection.endpoint, workspaceId: ws.connection.workspaceId, roots });
   return () => {

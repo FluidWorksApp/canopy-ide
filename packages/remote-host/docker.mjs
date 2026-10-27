@@ -273,8 +273,21 @@ export class DockerWorkspaces {
   async delegateCgroups(name,inspected){
     if(inspected?.State?.Running!==true)return;
     if(inspected.HostConfig?.CgroupnsMode!=='private')return;
-    try{await this.docker(['exec','--privileged','--user','0',name,'node','/opt/canopy/cgroup-delegate.mjs']);}
-    catch(error){this.log(`Terminal memory limits unavailable for ${name}: ${String(error.stderr??error.message).trim().slice(0,300)}`);}
+    const parse=out=>{try{return JSON.parse(String(out?.stdout??'').trim().split('\n').pop());}catch{return null;}};
+    let status;
+    try{status=parse(await this.docker(['exec','--privileged','--user','0',name,'node','/opt/canopy/cgroup-delegate.mjs']));}
+    catch(error){this.log(`Terminal memory limits unavailable for ${name}: ${String(error.stderr??error.message).trim().slice(0,300)}`);return;}
+    // The container's AppArmor profile (docker-default) denies mount even to a
+    // privileged exec. Then a one-shot helper, unconfined but sharing only the
+    // workspace's pid namespace and no network, enters the container's mount
+    // and cgroup namespaces and runs the same script; the workspace container
+    // itself keeps its profile, capabilities and seccomp.
+    if(status&&!status.ok&&status.step==='mount a writable cgroup2'&&/EACCES|EPERM|permission denied/i.test(String(status.error))){
+     const image=inspected.Config?.Image??inspected.Image;
+     try{status=parse(await this.docker(['run','--rm','--privileged','--security-opt','apparmor=unconfined','--pid',`container:${name}`,'--network','none','--user','0','--entrypoint','nsenter',image,'-t','1','-m','-C','--','env','CANOPY_CGROUP_NSENTER=1','node','/opt/canopy/cgroup-delegate.mjs']));}
+     catch(error){this.log(`Terminal memory limits unavailable for ${name}: ${String(error.stderr??error.message).trim().slice(0,300)}`);return;}
+    }
+    if(status&&!status.ok)this.log(`Terminal memory limits unavailable for ${name}: the kernel refused to ${status.step}: ${status.error}`);
   }
   async ensureRuntime(workspace,{resume=false,releaseImage}={},state={}) {
     if(this.idleReserved?.(workspace.parentWorkspaceId??workspace.id))throw Error('Workspace idle shutdown is reserved. Retry after it finishes.');

@@ -107,12 +107,19 @@ The workspace image (`packages/remote-host/Dockerfile`) already has `gh` and `gi
   prose gate and progress file work; what the run writes there is copied into the entry as
   sources the next time the IDE reads it (`research_entry_files`).
 - **Per-terminal memory budgets.** `terminal-governor.mjs` applies `governor.rs`'s policy to
-  each terminal's process-tree RSS, sampled every 2 s: the same allowances, warn/ask/clear
-  thresholds and dwell, 512 MiB / 1 GiB grants, stop, remembered per-CLI defaults and
-  maximums, and incidents. The adapter drains `terminal_governor_events` into
-  `terminal:governor`. It reports `monitor_only`: the container has no writable cgroup
-  subtree for a per-terminal `memory.high`, so the workspace's own limit stays the only
-  hard cap.
+  each terminal: the same allowances, warn/ask/clear thresholds and dwell, 512 MiB / 1 GiB
+  grants, stop, remembered per-CLI defaults and maximums, and incidents, sampled every 2 s
+  whether or not an IDE is connected. Workspaces run with `--cgroupns private`; on every
+  start the gateway delegates the container's cgroup v2 tree to the runner
+  (`cgroup-delegate.mjs`, one root exec — or, when the container's AppArmor profile denies
+  the mount, an unconfined one-shot `nsenter` helper sharing only its pid namespace; the
+  workspace container itself stays unprivileged). Each terminal then runs in
+  `sessions/<id>` (`cgroup-sessions.mjs`), measured by `memory.current`, held at its
+  allowance by `memory.high` (raised on a grant) and stopped at a CLI's maximum by
+  `memory.max` (`soft_limit`, `cgroup_v2_memory_high`). It falls back to measuring and
+  asking only when the kernel has no cgroup v2, the container shares the host's cgroup
+  namespace, or the kernel refuses a delegation step; the capability's detail names the
+  step and errno. The adapter drains `terminal_governor_events` into `terminal:governor`.
 - **`structured_runner_spawn`.** The gateway mints a context-bridge credential per attempt
   (`runner-<attempt>`), the host puts it in the runner's environment like an agent
   terminal's, a failed spawn or `structured_runner_kill` revokes it, and the service keeps
@@ -162,7 +169,12 @@ The workspace image (`packages/remote-host/Dockerfile`) already has `gh` and `gi
   computer's device. `android_describe` on a `/workspace` project answers from its Gradle
   files (modules, application ids, APKs already built), because the SDK that evaluates the
   build is on this computer and the VM image has none; build in the workspace first.
-  Agents running in the VM still can't drive devices (`canopy_device_*` stay laptop-only).
+- **Devices for agents in the VM.** `canopy_device_*` are no longer laptop-only. The
+  service queues each `/ctx/device` op (`device.rs`); the owner's IDE that has the
+  workspace open long-polls them (`device`/`pending`), runs each with the desktop's own
+  device code (`context_device_op`, staging workspace APKs first; `deviceRelay.ts`) and
+  answers in pieces (`device_answer`). With no such IDE open, the agent is told to open
+  the workspace in Canopy on the computer the device is attached to.
 
 **Narrower than the desktop on purpose**
 - **Paths stay in `/workspace`.** `scoped()` keeps every path there (and in

@@ -222,8 +222,12 @@ export function createGateway({ config, workspaces, origins = [], elasticMemory,
         if(request.method!=='POST')throw Error('Unsupported method');
         if(!harness)return json(response,503,{error:'unavailable',reason:'not-installed',message:'This host does not run the Canopy service'});
         try{
-          if(operation==='/harness/query')return json(response,200,await harnessQuery(harness.admin,workspace.id,await body(request,65536)));
-          return json(response,200,await harnessAction(harness.admin,workspace.id,await body(request,262144),harnessActor(principal)));
+          const input=await body(request,operation==='/harness/query'?65536:262144);
+          // Device ops run on the owner's own computer: only their driving IDE
+          // takes or answers them (canopy-service device.rs).
+          if((input?.store==='device'||input?.kind==='device_answer')&&(principal.memberId||principal.scope==='view'))throw Error('Forbidden');
+          if(operation==='/harness/query')return json(response,200,await harnessQuery(harness.admin,workspace.id,input));
+          return json(response,200,await harnessAction(harness.admin,workspace.id,input,harnessActor(principal)));
         }catch(error){const failure=harnessFailure(error);if(failure)return json(response,failure.status,failure.body);throw error;}
       }
       if(operation==='/shared-sessions'){

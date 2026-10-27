@@ -34,6 +34,7 @@ import {agentWorkspaceCommands} from './agent-workspace.mjs';
 import {gitOpsCommands} from './git-ops.mjs';
 import {workspaceMiscCommands} from './workspace-misc.mjs';
 import {TerminalGovernor,governorSampler,cliKeyOf} from './terminal-governor.mjs';
+import {SessionCgroups} from './cgroup-sessions.mjs';
 import {mcpClientCommands} from './mcp-client.mjs';
 import {spotIndexCommands} from './spot-index.mjs';
 import {workspaceActivity} from './activity.mjs';
@@ -123,8 +124,10 @@ familyContext.setupAgent=async(agent,id)=>{const profile=(await profiles.list())
   const response=await runnerFetch('/sessions');if(!response.ok)throw Error('runner sessions unavailable');
   const meta=await metadata('ide-terminals.json',{});
   const sessions=(await response.json()).filter(x=>x.exitCode==null).slice(0,32).map(x=>({...x,requestId:meta[String(x.id)]?.requestId}));
-  return (await measure(sessions)).map(stat=>({id:stat.id,bytes:stat.total_mem_bytes,cliKey:cliKeyOf(stat.agent_hint)}));
- }});
+  return (await measure(sessions)).map(stat=>({id:stat.id,bytes:stat.total_mem_bytes,cliKey:cliKeyOf(stat.agent_hint),pids:stat.procs.map(p=>p.pid)}));
+ },cgroups:new SessionCgroups()});
+ // Terminal cgroups and their limits hold whether or not an IDE is watching.
+ familyContext.governorSampler.start();
  familyContext.stopSession=async id=>{const response=await runnerFetch(`/sessions/${id}/stop`,{method:'POST',body:'{}'});if(!response.ok)throw Error(`the workspace refused to stop terminal ${id}`);};
 }
 const taskStore=taskStoreFor(familyContext);

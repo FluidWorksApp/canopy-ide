@@ -1063,6 +1063,7 @@ pub fn run() {
             context::context_mesh_sever,
             context::context_mesh_job_update,
             context::context_hotspot_claim,
+            context::context_device_op,
             awareness::git_churn,
             context::context_agent_spawn_ready,
             context::browser_result,

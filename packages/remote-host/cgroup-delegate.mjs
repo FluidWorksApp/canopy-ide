@@ -31,12 +31,15 @@ const RUNNER_UID=1000,RUNNER_GID=1000;
 const defaultMount=target=>new Promise((resolve,reject)=>execFile('/bin/mount',['-t','cgroup2','-o','rw,nosuid,nodev,noexec','cgroup2',target],error=>error?reject(error):resolve()));
 
 /** Run every step; resolves with the status written (never throws). */
-export async function delegate({root=DELEGATED_ROOT,statusFile=STATUS_FILE,mount=defaultMount,read=f=>readFile(f,'utf8'),uid=RUNNER_UID,gid=RUNNER_GID,own=chown,now=Date.now}={}){
+export async function delegate({entered=process.env.CANOPY_CGROUP_NSENTER==='1',root=DELEGATED_ROOT,statusFile=STATUS_FILE,mount=defaultMount,read=f=>readFile(f,'utf8'),uid=RUNNER_UID,gid=RUNNER_GID,own=chown,now=Date.now}={}){
  let step='check the cgroup namespace';
  const done=async status=>{await writeFile(statusFile,JSON.stringify({...status,at:now()})).catch(()=>{});return status;};
  try{
   const self=(await read('/proc/self/cgroup')).trim();
-  if(self!=='0::/')return done({ok:false,step,error:`this container shares the host's cgroup namespace (${self.slice(0,120)}); recreate the workspace to enable per-terminal limits`});
+  // Run through nsenter from the gateway's helper (docker.mjs), this process
+  // entered the container's cgroup namespace without being in its tree, so
+  // its own path reads outside the root; the gateway checked the mode.
+  if(self!=='0::/'&&!entered)return done({ok:false,step,error:`this container shares the host's cgroup namespace (${self.slice(0,120)}); recreate the workspace to enable per-terminal limits`});
   step='mount a writable cgroup2';
   await mkdir(root,{recursive:true,mode:0o755});
   let mounted=false;try{await read(path.join(root,'cgroup.controllers'));mounted=true;}catch{}
