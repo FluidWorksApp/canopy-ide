@@ -30,7 +30,7 @@ id = "generic-api-key"
 description = "Synthetic lifecycle idempotency UUID"
 condition = "AND"
 regexTarget = "secret"
-paths = ['''^packages/control-plane/lifecycle\.test\.mjs$''']
+paths = ['''^packages/control-plane/lifecycle\.test\.mjs$''', '''^packages/control-plane/lib/credit-policy\.test\.mjs$''']
 regexes = ['''^f9b67dc0-f389-4ddb-b6c9-bb9aff258e67$''']
 
 [[rules.allowlists]]
