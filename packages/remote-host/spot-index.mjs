@@ -1,3 +1,4 @@
+import {accountHomes} from './account-homes.mjs';
 import {readFile,writeFile,appendFile,rename,mkdir,readdir,stat,lstat,rm,open,readlink,truncate} from 'node:fs/promises';
 import path from 'node:path';
 import {createHash,randomUUID} from 'node:crypto';
@@ -63,7 +64,11 @@ const hasExt=(p,x)=>path.extname(p)==='.'+x;
 const exists=async p=>{try{await stat(p);return true;}catch{return false;}};
 const sha256=s=>createHash('sha256').update(s).digest('hex');
 
-async function configRoots(home){try{return (await new WorkspaceProfiles(home).list()).map(p=>[p.id,p.root]);}catch{return [['default',home]];}}
+async function configRoots(home){
+ let roots;try{roots=(await new WorkspaceProfiles(home).list()).map(p=>[p.id,p.root]);}catch{roots=[['default',home]];}
+ // Shared-account sessions keep their transcripts in their own home.
+ return [...roots,...(await accountHomes(home)).map(root=>['account',root])];
+}
 
 async function sourceFiles(home,roots,wanted,scopedRoot){
  const out=[],push=(agent,file,layout)=>out.push({agent,path:file,layout});

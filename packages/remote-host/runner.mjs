@@ -1,6 +1,7 @@
 import {initializeScratch,scratchSessionEnv} from './scratch-environment.mjs';
 import {decodeTerminalInput,BINARY_TERMINAL_INPUT_PROTOCOL} from './terminal-input.mjs';
 import {prepareSharedAgentLaunch} from './shared-agent-launch.mjs';
+import {linkSharedCanopyState} from './account-homes.mjs';
 import { nativeInvoke, startNativeServer } from "./native.mjs";
 import http from 'node:http';
 import net from 'node:net';
@@ -117,6 +118,8 @@ export function createRunner({ secret, spawnPty, accounts = [], workspaceId = 'w
         let template = `/accounts/${args.accountId}`;
         try { template = await realpath(`${template}/current`); } catch (error) { if (error.code !== 'ENOENT') throw error; }
         await cp(template, accountHome, { recursive: true, dereference: true });
+        // Hook output (events, digests, journals, policy) lands where the host reads it.
+        await linkSharedCanopyState(accountHome);
       }
       const sharedBin=args.sharedAgents?await prepareSharedAgentLaunch(accountHome,args.requestId,args.sharedAgents):null;
       const scratchEnv=await scratchSessionEnv(args.requestId,environment);
