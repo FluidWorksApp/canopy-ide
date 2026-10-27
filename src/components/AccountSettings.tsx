@@ -6,7 +6,7 @@ import {Button} from './ui';
 import {FilesIcon,TeamIcon} from './icons';
 import {IconClock} from '../../shared/icons';
 import {openInOsBrowser} from '../links';
-import {CreditBanner,RequestCreditButton} from './CreditNotice';
+import {AddFunds,CreditBanner,RequestCreditButton} from './CreditNotice';
 import {observeCredits,statusOf,usd,type Credits,type WorkspaceUsage} from '../credits';
 type User={email:string;name:string};
 // Amounts are US dollars. `balance` (credits, 1 = 1 cent) is only sent by
@@ -92,10 +92,10 @@ export function AccountSettings({onTeams,onWorkspaces}:{onTeams?:()=>void;onWork
    <Button icon variant="ghost" className="account-header-action" aria-label="Sign out" title="Sign out" disabled={busy} onClick={()=>{setBusy(true);void request('/api/device',{action:'revoke'}).then(()=>{clearTeamSessions();window.dispatchEvent(new Event('canopy:account-changed'));setUser(null);setCredits(null);setMessage('Signed out.');}).catch(error=>setMessage(String(error))).finally(()=>setBusy(false));}}><svg aria-hidden="true" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"><path d="M9 4H4v16h5M14 7l5 5-5 5M8 12h11"/></svg><span className="account-action-tooltip">Sign out</span></Button></nav>}</header>
   {loading&&user&&<p role="status">Refreshing your account…</p>}
   {user?<>
-   <div className="account-balance"><span>Available balance <small>USD</small></span><strong>{credits?dollars(credits.balanceUsd??(credits.balance==null?null:Number(credits.balance)/100)):<span className="account-balance-loading" role="status"><span className="account-shimmer account-skeleton-amount"/>Loading balance…</span>}</strong><p>{balanceStale ? "Balance could not refresh. Showing the last available amount." : balanceRefreshing&&credits ? "Updating…" : "Shared across your workspaces. Usage is charged per minute."}</p>{credits?.paymentsEnabled===false&&<small>Adding funds is not available during preview.</small>}
-    {/* Extension point: when a payment provider is integrated the server sends
-        paymentsEnabled:true and an "Add funds" action belongs here. Until then
-        credit is restored by request (below) and granted by Canopy. */}
+   <div className="account-balance"><span>Available balance <small>USD</small></span><strong>{credits?dollars(credits.balanceUsd??(credits.balance==null?null:Number(credits.balance)/100)):<span className="account-balance-loading" role="status"><span className="account-shimmer account-skeleton-amount"/>Loading balance…</span>}</strong><p>{balanceStale ? "Balance could not refresh. Showing the last available amount." : balanceRefreshing&&credits ? "Updating…" : "Shared across your workspaces. Usage is charged per minute."}</p>
+    {/* Add funds when the server has payments configured; otherwise credit is
+        restored by request (below) and granted by Canopy. */}
+    {credits?.paymentsEnabled===true&&credits.purchase?.enabled&&<AddFunds options={credits.purchase} onCredits={next=>{setCredits(next);rememberBalance(user.email,next);if(accountCache?.user.email===user.email)accountCache={user,credits:next};}}/>}
     {credits&&(credits.paymentsEnabled!==true||statusOf(credits)!=='ok')&&<RequestCreditButton lastRequestedAt={credits.lastCreditRequestAt}/>}</div>
    <CreditBanner credits={credits}/>
    {(()=>{const usage=workspaceUsage(credits).slice(0,6);return usage.length?<section className="account-usage" aria-label="Recent usage by workspace"><h4>Last 30 days by workspace</h4><ul>{usage.map(row=><li key={row.workspace_id??'none'}><span>{row.workspace_name??'Workspace'}</span><small>{new Date(row.last_at).toLocaleDateString(undefined,{month:'short',day:'numeric'})}</small><strong>{usd(Number(row.usd))}</strong></li>)}</ul></section>:null;})()}
