@@ -812,18 +812,28 @@ pub struct FsGit;
 
 impl GitProbe for FsGit {
     fn dirty(&self, top: &Path) -> (bool, bool) {
-        let out = std::process::Command::new("git")
+        use std::io::Read;
+        // Bounded read (process_capture.rs forbids unbounded capture): the
+        // first few KB of porcelain answer both questions.
+        let child = std::process::Command::new("git")
             .args(["status", "--porcelain=v1", "--untracked-files=normal"])
             .current_dir(top)
             .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::null())
-            .output();
-        let Ok(out) = out else {
+            .spawn();
+        let Ok(mut child) = child else {
             // Unknown is treated as dirty: the cost of asking is one click, the
             // cost of guessing clean is someone's afternoon.
             return (true, true);
         };
-        let text = String::from_utf8_lossy(&out.stdout);
+        let mut buf = Vec::new();
+        if let Some(out) = child.stdout.take() {
+            let _ = out.take(64 * 1024).read_to_end(&mut buf);
+        }
+        let _ = child.kill();
+        let _ = child.wait();
+        let text = String::from_utf8_lossy(&buf);
         let tracked = text
             .lines()
             .any(|l| !l.starts_with("??") && !l.trim().is_empty());
