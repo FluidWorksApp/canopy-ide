@@ -25,7 +25,7 @@ import {
   structuredRunnerFor,
   type AgentCli,
 } from "./projects";
-import { installedBrain, resolveBrain } from "./brain";
+import { resolveBrain } from "./brain";
 import { mascotDef } from "./mascots";
 import { getSettings, updateSettings } from "./settings";
 import type { StructuredRunnerLaunch } from "./structuredRunners";
