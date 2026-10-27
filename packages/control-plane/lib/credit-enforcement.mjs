@@ -7,7 +7,7 @@
 // Paths that touch only the account (notices, grants) lock only the account.
 import {randomUUID} from 'node:crypto';
 import {requestOperation} from './lifecycle.mjs';
-import {CREDIT_POLICY,CUTOFF_USD,LOW_USD,NOTICE_LEVELS,amountToRestoreUsd,computeAllowed,creditStatus,enforcementMode,noticeLevels} from './credit-policy.mjs';
+import {CREDIT_POLICY,CUTOFF_USD,LOW_USD,NOTICE_LEVELS,amountToRestoreUsd,computeAllowed,creditStatus,enforcementMode,noticeLevels,pausedStorageBilling,purchaseEnabled} from './credit-policy.mjs';
 import {creditNoticeEmail,creditRequestEmail} from './credit-email.mjs';
 
 const severity=level=>NOTICE_LEVELS.indexOf(level);
@@ -47,6 +47,11 @@ export async function pauseWorkspaceForCredit(client,ownerId,workspaceId,{balanc
  if(!w||w.owner_id!==ownerId||w.deleted_at||w.desired_state!=='running')return 'already-stopping';
  const active=(await client.query("SELECT action FROM workspace_operation WHERE workspace_id=$1 AND status IN('pending','running')",[workspaceId])).rows[0];
  if(active&&['hibernate','delete'].includes(active.action))return 'already-stopping';
+ // Any other operation in flight finishes first; the next sweep pauses the
+ // workspace. The worker meters (and so reaches this hook) while it holds that
+ // operation's session advisory lock, which a nested hibernate request would
+ // re-acquire and supersede under the worker's feet.
+ if(active)return 'deferred';
  await client.query('SAVEPOINT credit_pause');
  try{
   const operation=await request(client,ownerId,workspaceId,{action:'hibernate',confirmInterrupt:true,requestKey:randomUUID()});
@@ -74,6 +79,24 @@ export async function enforceAfterDebit(client,{userId,workspaceId},{env=process
  const notices=await syncCreditNotices(client,userId,balance,{env});
  const paused=mode==='enforce'&&workspaceId&&!computeAllowed(balance)?await pauseWorkspaceForCredit(client,userId,workspaceId,{balanceUsd:balance}):null;
  return {balanceUsd:balance,status:creditStatus(balance),notices,paused};
+}
+
+/** Whether saved-storage metering should skip this owner right now: with
+ * CANOPY_PAUSED_STORAGE_BILLING=hold, while the account is paused for credit
+ * (enforce mode, balance at or below the cutoff). Locks the account row, so
+ * call it where the metering would lock it (after the workspace row). */
+export async function storageChargeHeld(client,userId,{env=process.env}={}){
+ if(pausedStorageBilling(env)!=='hold'||enforcementMode(env)!=='enforce')return false;
+ const row=(await client.query('SELECT balance_usd::text balance FROM credit_account WHERE user_id=$1 FOR UPDATE',[userId])).rows[0];
+ return !computeAllowed(row?.balance??'0');
+}
+
+/** When a workspace's running time stops being charged because a credit pause
+ * was requested for it: the creation time of its pending credit-pause
+ * hibernate, or null. Metering bills up to this moment and not the minute or
+ * two the hibernate takes to stop compute. */
+export async function creditPauseRequestedAt(client,workspaceId){
+ return (await client.query("SELECT created_at FROM workspace_operation WHERE workspace_id=$1 AND action='hibernate' AND status IN('pending','running') AND context ? 'creditPause' ORDER BY created_at LIMIT 1",[workspaceId])).rows[0]?.created_at??null;
 }
 
 async function inTransaction(pool,work){
@@ -114,7 +137,7 @@ export async function enforceCreditPolicy(pool,{env=process.env,send=null,accoun
    }catch(error){log?.warn?.('Credit pause failed for one workspace',error?.message);}
   }
  }
- if(send)result.emailed=await deliverCreditNotices(pool,{send,accountUrl,supportEmail,log});
+ if(send)result.emailed=await deliverCreditNotices(pool,{send,accountUrl,supportEmail,addFunds:purchaseEnabled(env),log});
  return result;
 }
 
@@ -122,7 +145,7 @@ export async function enforceCreditPolicy(pool,{env=process.env,send=null,accoun
  * ten-minute lease so concurrent crons never send one notice twice; a failed
  * send is retried up to five times. Notices older than three days are not sent
  * (the account page and the next crossing still show the state). */
-export async function deliverCreditNotices(pool,{send,accountUrl,supportEmail,limit=20,log=console}){
+export async function deliverCreditNotices(pool,{send,accountUrl,supportEmail,addFunds=false,limit=20,log=console}){
  if(typeof send!=='function')return 0;
  const claimed=(await pool.query(`UPDATE credit_notice n SET claimed_at=now(),delivery_attempts=n.delivery_attempts+1 FROM "user" u
   WHERE u.id=n.user_id AND n.id IN (SELECT id FROM credit_notice WHERE delivery='pending' AND cleared_at IS NULL AND delivery_attempts<5 AND created_at>now()-interval '3 days' AND (claimed_at IS NULL OR claimed_at<now()-interval '10 minutes') ORDER BY created_at LIMIT $1 FOR UPDATE SKIP LOCKED)
@@ -130,7 +153,7 @@ export async function deliverCreditNotices(pool,{send,accountUrl,supportEmail,li
  let sent=0;
  for(const notice of claimed){
   try{
-   await send({to:notice.email,...creditNoticeEmail({level:notice.level,balanceUsd:notice.balance,...(accountUrl?{accountUrl}:{}),supportEmail})});
+   await send({to:notice.email,...creditNoticeEmail({level:notice.level,balanceUsd:notice.balance,...(accountUrl?{accountUrl}:{}),supportEmail,addFunds})});
    await pool.query("UPDATE credit_notice SET delivery='sent',sent_at=now(),last_error=NULL WHERE id=$1 AND delivery='pending'",[notice.id]);sent++;
   }catch(error){
    const message=String(error?.message??error).slice(0,200);
@@ -152,13 +175,19 @@ export function creditMailer({sendEmail,from}){
 export function recordingMailer(){const sent=[];const send=async message=>{sent.push(message);return {messageId:`recorded-${sent.length}`};};send.sent=sent;return send;}
 
 const DECIMAL=/^-?\d{1,7}(?:\.\d{1,6})?$/;
-/** Admin credit grant (or a negative correction). Writes one ledger row and
- * moves the balance under the account lock; replaying the same requestKey is a
- * no-op. Clears notices the new balance recovers past and closes open credit
- * requests. It never starts a workspace: the user resumes when ready. */
-export async function grantCredit(client,{userId,amountUsd,reason,actor,requestKey=randomUUID(),maxUsd=10000}){
+// Ledger event-key prefixes: an operator or admin grant, and a payment (the
+// request key is the payment provider's checkout id, credit-purchase.mjs).
+const GRANT_SOURCES=Object.freeze({admin:{prefix:'admin-grant',label:'Credit grant'},purchase:{prefix:'purchase',label:'Funds added'}});
+/** Admin credit grant (or a negative correction), or a payment's credit
+ * (`source:'purchase'`). Writes one ledger row and moves the balance under the
+ * account lock; replaying the same requestKey is a no-op. Clears notices the
+ * new balance recovers past and closes open credit requests. It never starts a
+ * workspace: the user resumes when ready. */
+export async function grantCredit(client,{userId,amountUsd,reason,actor,requestKey=randomUUID(),maxUsd=10000,source='admin'}){
+ const origin=GRANT_SOURCES[source];if(!origin)throw Object.assign(Error('Unknown credit source'),{code:400});
  const amount=String(amountUsd??'').trim();
  if(!DECIMAL.test(amount)||Number(amount)===0||Math.abs(Number(amount))>maxUsd)throw Object.assign(Error(`Choose a non-zero amount up to $${maxUsd} with at most six decimal places`),{code:400});
+ if(source==='purchase'&&Number(amount)<0)throw Object.assign(Error('A payment adds credit'),{code:400});
  if(typeof reason!=='string'||!reason.trim()||reason.length>200)throw Object.assign(Error('Give a reason of at most 200 characters'),{code:400});
  if(typeof actor!=='string'||!actor.trim()||actor.length>200)throw Object.assign(Error('Record who is granting the credit'),{code:400});
  if(typeof requestKey!=='string'||!/^[\w:.-]{8,120}$/.test(requestKey))throw Object.assign(Error('Invalid request key'),{code:400});
@@ -166,8 +195,8 @@ export async function grantCredit(client,{userId,amountUsd,reason,actor,requestK
  if(!user)throw Object.assign(Error('User not found'),{code:404});
  await client.query('INSERT INTO credit_account(user_id) VALUES($1) ON CONFLICT DO NOTHING',[userId]);
  await client.query('SELECT user_id FROM credit_account WHERE user_id=$1 FOR UPDATE',[userId]);
- const eventKey=`admin-grant:${requestKey}`;const kind=Number(amount)>0?'grant':'adjustment';
- const inserted=(await client.query('INSERT INTO credit_ledger(user_id,event_key,kind,amount_usd,description,actor) VALUES($1,$2,$3,$4::numeric,$5,$6) ON CONFLICT(event_key) DO NOTHING RETURNING amount_usd::text amount',[userId,eventKey,kind,amount,`${kind==='grant'?'Credit grant':'Balance correction'}: ${reason.trim()}`,actor.trim()])).rows[0];
+ const eventKey=`${origin.prefix}:${requestKey}`;const kind=Number(amount)>0?'grant':'adjustment';
+ const inserted=(await client.query('INSERT INTO credit_ledger(user_id,event_key,kind,amount_usd,description,actor) VALUES($1,$2,$3,$4::numeric,$5,$6) ON CONFLICT(event_key) DO NOTHING RETURNING amount_usd::text amount',[userId,eventKey,kind,amount,`${kind==='grant'?origin.label:'Balance correction'}: ${reason.trim()}`,actor.trim()])).rows[0];
  let applied=false;
  if(inserted){await client.query('UPDATE credit_account SET balance_usd=balance_usd+$2::numeric,updated_at=now() WHERE user_id=$1',[userId,amount]);applied=true;}
  else{
@@ -206,6 +235,9 @@ export async function creditSummary(db,userId,{env=process.env}={}){
  const recentDebits=(await db.query("SELECT l.occurred_at,l.amount_usd::text amount_usd,l.quantity::text quantity,l.workspace_id,COALESCE(w.name,l.workspace_id) workspace_name,l.description FROM credit_ledger l LEFT JOIN workspace w ON w.id=l.workspace_id WHERE l.user_id=$1 AND l.kind='usage' ORDER BY l.occurred_at DESC LIMIT 25",[userId])).rows;
  const usageByWorkspace=(await db.query("SELECT l.workspace_id,COALESCE(max(w.name),l.workspace_id) workspace_name,(-sum(l.amount_usd))::text usd,max(l.occurred_at) last_at FROM credit_ledger l LEFT JOIN workspace w ON w.id=l.workspace_id WHERE l.user_id=$1 AND l.kind='usage' AND l.occurred_at>now()-interval '30 days' GROUP BY l.workspace_id ORDER BY sum(l.amount_usd) ASC LIMIT 20",[userId])).rows;
  const lastRequest=(await db.query('SELECT created_at FROM credit_request WHERE user_id=$1 ORDER BY created_at DESC LIMIT 1',[userId])).rows[0]?.created_at??null;
+ // Recent payments, so the desktop can tell when the checkout it opened has
+ // been credited (`reference` is the checkout id).
+ const purchases=(await db.query("SELECT substr(event_key,10) reference,amount_usd::text amount_usd,occurred_at FROM credit_ledger WHERE user_id=$1 AND kind='grant' AND event_key LIKE 'purchase:%' ORDER BY occurred_at DESC LIMIT 5",[userId])).rows;
  const mode=enforcementMode(env);
- return {balanceUsd:balance,status:creditStatus(balance),computeAllowed:mode!=='enforce'||computeAllowed(balance),amountToRestoreUsd:amountToRestoreUsd(balance),policy:CREDIT_POLICY,enforcement:mode,recentDebits,usageByWorkspace,lastCreditRequestAt:lastRequest,creditRequestsEnabled:Boolean(env.CANOPY_SUPPORT_EMAIL)};
+ return {balanceUsd:balance,status:creditStatus(balance),computeAllowed:mode!=='enforce'||computeAllowed(balance),amountToRestoreUsd:amountToRestoreUsd(balance),policy:CREDIT_POLICY,enforcement:mode,pausedStorageBilling:pausedStorageBilling(env),recentDebits,usageByWorkspace,purchases,lastCreditRequestAt:lastRequest,creditRequestsEnabled:Boolean(env.CANOPY_SUPPORT_EMAIL)};
 }
