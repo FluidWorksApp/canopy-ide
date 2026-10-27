@@ -166,6 +166,33 @@ describe("verifyTurn", () => {
     expect(r!.status).toBe("tests-changed");
   });
 
+  it("in a cloud workspace, reads the host's turn snapshots and gives checks their full time", async () => {
+    askBrain.mockResolvedValue({ ok: false, reason: "no-brain", message: "" });
+    const timeouts: (number | undefined)[] = [];
+    const run = vi.fn(async (_cwd: string, argv: string[], opts?: { timeoutMs?: number }): Promise<ReceiptCheckRun> => {
+      const cmd = argv.join(" ");
+      if (cmd === "git rev-parse --show-toplevel") return ok("/workspace/repo\n");
+      if (cmd === "git branch --show-current") return ok("main\n");
+      if (cmd.startsWith("git ls-files")) return ok("");
+      if (cmd === "git diff --name-only snapA snapB") return ok("src/a.ts\n");
+      if (cmd.startsWith("git diff --no-color")) return ok("");
+      if (argv[0] === "/bin/sh") {
+        timeouts.push(opts?.timeoutMs);
+        return ok("1 passed in 0.01s\n");
+      }
+      return ok("", 1);
+    });
+    const turnList = vi.fn(async () => ({ git: true, turns: [{ n: 1, start: { ref: "a", commit: "snapA", tree: "t", ts_ms: 1000 }, end: { ref: "b", commit: "snapB", tree: "t", ts_ms: 5000 } }] }));
+    updateSettings({ receiptCommands: { "/workspace/repo": ["npm test"] } });
+    setReceiptEngineDepsForTests({ run, turnList: turnList as never, remote: () => true });
+    const r = await verifyTurn({ ...target, cwd: "/workspace/repo", root: "/workspace/repo", filesTouched: [] });
+    expect(turnList).toHaveBeenCalled();
+    expect(r!.base).toBe("turn start (snapA)");
+    expect(r!.filesTouched).toEqual(["src/a.ts"]);
+    expect(timeouts[0]).toBe(10 * 60 * 1000);
+    expect(askBrain.mock.calls[0][0].cwd).toBe("");
+  });
+
   it("asks for the end snapshot once more when it has not landed yet", async () => {
     askBrain.mockResolvedValue({ ok: false, reason: "no-brain", message: "" });
     const turns = [

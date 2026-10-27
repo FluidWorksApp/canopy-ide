@@ -3,6 +3,7 @@ import {takeOutputBatch,type OutputFrame} from './outputBatch';
 import type { Host, HostChannel, HostEvent, UnlistenFn } from '../host/contract';
 import { nativeHost } from '../host/native';
 import { RemoteExecutionClient, type RemoteSession } from './client';
+import {workspaceReceiptCheck} from './receiptCheck';
 import {connectionKey,reportConnection,reportStream,workspaceLifecyclePhase} from './connectionState';
 import {saveRemoteContextImage} from './saveContextImage';
 import {basename} from '../paths';
@@ -345,6 +346,8 @@ export class NativeWorkspaceHost implements Host {
       catch(error){if(!isOutdatedHarnessError(error))throw error;this.hostOutdated(command);throw Error(hostOutdatedMessage(command));}
     }
     if(this.readOnly&&!READ_ONLY_NATIVE.has(command)&&!['environment_identity','pty_renderer_register','pty_renderer_sessions','pty_stats'].includes(command))throw Error('This workspace is read-only');
+    // A proof-receipt check outlasts one gateway request: run it as a host job.
+    if(command==='receipt_run_check')return await workspaceReceiptCheck((name,body)=>this.native(name,body),args,()=>this.disposed) as T;
     if(command==='git_clone'){
       let job=await this.native<{id:string;state:string;path:string;name:string;error?:string}>('git_clone_start',args);
       while(true){

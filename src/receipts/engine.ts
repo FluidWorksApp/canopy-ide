@@ -88,7 +88,6 @@ export function setReceiptEngineDepsForTests(next: Partial<EngineDeps> | null): 
 
 const TEST_TIMEOUT_MS = 10 * 60 * 1000;
 const CHECK_TIMEOUT_MS = 5 * 60 * 1000;
-const REMOTE_TIMEOUT_MS = 300 * 1000;
 let SNAPSHOT_RETRY_MS = 2000;
 const MAX_FILES = 200;
 const PATCH_KEEP = 256 * 1024;
@@ -117,9 +116,11 @@ function relativeTo(top: string, path: string): string {
 
 /** The turn-rollback snapshots taken when this turn started and ended:
  *  whole-tree commits (tracked and untracked), so diffing the two is exactly
- *  what the turn changed — Bash edits and new files included. */
+ *  what the turn changed — Bash edits and new files included. In a Linux
+ *  workspace the host takes them (turns.mjs) and answers turn_list the same
+ *  way. */
 async function turnSnapshots(t: VerifyTarget): Promise<{ start: string; end: string | null } | null> {
-  if (t.startedAt == null || deps.remote()) return null;
+  if (t.startedAt == null) return null;
   try {
     const end = t.endedAt ?? deps.now();
     let list = await deps.turnList(t.cwd, t.sessionId);
@@ -210,10 +211,9 @@ async function runCheck(spec: CheckSpec, dir: string): Promise<CheckResult> {
   const base = { id: spec.id, label: spec.label, kind: spec.kind, command };
   try {
     const r = await deps.run(dir, spec.argv, {
-      // A Linux workspace answers over HTTP that gives up at 330 s
-      // (remoteExecution/client.ts); stop the check first so it reads
-      // "timed out" rather than as a dropped connection.
-      timeoutMs: Math.min(spec.kind === "test" ? TEST_TIMEOUT_MS : CHECK_TIMEOUT_MS, deps.remote() ? REMOTE_TIMEOUT_MS : Infinity),
+      // In a Linux workspace the check runs as a host job the adapter polls
+      // (remoteExecution/receiptCheck.ts), so it gets the same time as here.
+      timeoutMs: spec.kind === "test" ? TEST_TIMEOUT_MS : CHECK_TIMEOUT_MS,
       keepBytes: 64 * 1024,
     });
     const combined = [r.stdout, r.stderr].filter(Boolean).join("\n");

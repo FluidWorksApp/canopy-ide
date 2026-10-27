@@ -37,7 +37,7 @@ import {sessionProcessReader} from './session-processes.mjs';
 import {McpRegistry} from './mcp-servers.mjs';
 import {gitHistory} from './git-history.mjs';
 import {claudeIde,claudeIdeCommand} from './claude-ide.mjs';
-import {receiptRunCheck} from './receipt-check.mjs';
+import {receiptRunCheck,receiptCheckStart,receiptCheckStatus} from './receipt-check.mjs';
 import {workspaceToolsCommands} from './workspace-tools.mjs';
 import {workspaceCleanupCommands} from './workspace-cleanup.mjs';
 import {lspCommands} from './lsp.mjs';
@@ -150,6 +150,8 @@ export async function nativeInvoke(command,args={}){
   }
   // Proof receipts: the workspace re-runs checks itself (src/receipts/).
   if(command==='receipt_run_check')return receiptRunCheck(args,{scoped,home:HOME});
+  if(command==='receipt_check_start')return receiptCheckStart(args,{scoped,home:HOME});
+  if(command==='receipt_check_status')return receiptCheckStatus(args);
   if(command==='workspace_activity')return workspaceActivity();
   if(command==='workspace_metrics')return workspaceMetrics();
   if(command==='workspace_browser_request'){

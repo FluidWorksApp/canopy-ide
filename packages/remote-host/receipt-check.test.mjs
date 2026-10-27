@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import {mkdtemp} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
 import path from 'node:path';
-import {receiptRunCheck,capture} from './receipt-check.mjs';
+import {receiptRunCheck,receiptCheckStart,receiptCheckStatus,capture} from './receipt-check.mjs';
 
 const dir=await mkdtemp(path.join(tmpdir(),'receipt-'));
 const scoped=async value=>{if(!value.startsWith(dir))throw Error('Path outside selected workspace');return value;};
@@ -40,4 +40,15 @@ test('capture keeps the tail by default and the head on request',()=>{
  assert.deepEqual(t.done(),{text:'ghij',truncated:true});
  const h=capture(4,false);h.push(Buffer.from('abcdef'));h.push(Buffer.from('gh'));
  assert.deepEqual(h.done(),{text:'abcd',truncated:true});
+});
+
+test('a long check runs as a job the IDE long-polls',async()=>{
+ const {id}=receiptCheckStart({cwd:dir,argv:['/bin/sh','-c','sleep 0.3; echo done']},{scoped});
+ assert.deepEqual(await receiptCheckStatus({id}),{state:'running'});
+ let status=await receiptCheckStatus({id,wait:5000});
+ assert.equal(status.state,'done');assert.equal(status.result.code,0);assert.match(status.result.stdout,/done/);
+ const bad=receiptCheckStart({cwd:dir,argv:[]},{scoped});
+ status=await receiptCheckStatus({id:bad.id,wait:2000});
+ assert.deepEqual(status,{state:'failed',error:'Invalid check command'});
+ await assert.rejects(receiptCheckStatus({id:'nope'}),/No such check/);
 });

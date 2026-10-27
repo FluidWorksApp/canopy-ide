@@ -8,6 +8,7 @@
 // failing, and shares a four-slot pool with git, so a three-minute test run
 // would starve every panel. Checks get their own single slot here.
 import {spawn} from 'node:child_process';
+import {randomUUID} from 'node:crypto';
 
 const DEFAULT_TIMEOUT=5*60*1000, CEILING=20*60*1000;
 const DEFAULT_KEEP=64*1024, MAX_KEEP=1024*1024;
@@ -66,3 +67,29 @@ async function runOne(args,{scoped,env,home}){
 }
 
 function result(r){return {code:null,stdout:'',stderr:'',stdoutTruncated:false,stderrTruncated:false,timedOut:false,durationMs:0,spawnError:null,...r};}
+
+// A check can run for up to CEILING (20 minutes), longer than the gateway
+// holds a request open (nativeTimeoutMs). So the IDE starts it as a job and
+// long-polls for the answer; receipt_run_check stays for short checks and
+// older desktops.
+const jobs=new Map();
+const JOB_KEEP=10*60*1000, POLL_MAX=10_000;
+function pruneJobs(now=Date.now()){for(const [id,job] of jobs)if(job.state!=='running'&&now-job.touched>JOB_KEEP)jobs.delete(id);}
+export function receiptCheckStart(args,opts){
+ pruneJobs();
+ const id=randomUUID(),job={state:'running',result:null,error:null,touched:Date.now(),waiters:new Set()};
+ jobs.set(id,job);
+ const finish=()=>{job.touched=Date.now();for(const wake of job.waiters)wake();job.waiters.clear();};
+ receiptRunCheck(args,opts).then(result=>{job.state='done';job.result=result;finish();},error=>{job.state='failed';job.error=String(error?.message??error);finish();});
+ return {id};
+}
+/** The job's state, waiting up to `wait` ms (≤ 10 s) for it to finish. A
+ *  finished job keeps its answer for ten minutes after it was last asked. */
+export async function receiptCheckStatus(args){
+ const job=jobs.get(String(args?.id??''));
+ if(!job)throw Error('No such check (it finished long ago, or the workspace restarted)');
+ job.touched=Date.now();
+ const wait=Math.min(POLL_MAX,Math.max(0,Number(args?.wait)||0));
+ if(job.state==='running'&&wait>0)await new Promise(resolve=>{const timer=setTimeout(()=>{job.waiters.delete(done);resolve();},wait);const done=()=>{clearTimeout(timer);resolve();};job.waiters.add(done);});
+ return job.state==='running'?{state:'running'}:job.state==='done'?{state:'done',result:job.result}:{state:'failed',error:job.error};
+}
