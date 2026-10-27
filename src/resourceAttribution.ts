@@ -86,7 +86,7 @@ export function attributeUsage(
       ({
         key,
         kind: mine ? "you" : s.owner ? "teammate" : "unknown",
-        label: mine ? "You" : s.owner ? s.owner.name : "Terminals from older versions",
+        label: mine ? "You" : s.owner ? s.owner.name : "Other terminals",
         memoryBytes: 0,
         cpusUsed: 0,
         terminals: 0,

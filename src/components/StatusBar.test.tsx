@@ -761,6 +761,12 @@ describe("shared workspace availability", () => {
   expect(chip.querySelector('.res-low,.res-critical')).toBeNull();
  });
 
+ it("leads with what is in use when none of the terminals are yours", async () => {
+  feed(ws({sessions:[{id:3,memoryBytes:3*GB,cpusUsed:1,owner:{id:'u-ada',name:'Ada'}}]}));
+  render(<StatusBar {...base} events={[]}/>);
+  expect((await screen.findByTitle(/^Cloud workspace:/)).textContent).toBe('8.0 GB in use · 20.8 GB free · 6.0 cores free');
+ });
+
  it("breaks the workspace down by person, with cache apart", async () => {
   feed(ws());
   render(<StatusBar {...base} events={[]}/>);

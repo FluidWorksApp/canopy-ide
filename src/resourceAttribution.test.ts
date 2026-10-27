@@ -35,7 +35,7 @@ describe("attributeUsage", () => {
       ["you", "You", 2, 0.5, 2],
       ["teammate", "Ada", 2, 1, 1],
       ["teammate", "Bo", 0.5, 0.25, 1],
-      ["unknown", "Terminals from older versions", 0.5, 0, 1],
+      ["unknown", "Other terminals", 0.5, 0, 1],
       ["services", "Workspace services", 3, 1.25, 0],
     ]);
   });

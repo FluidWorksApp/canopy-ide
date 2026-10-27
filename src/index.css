@@ -28808,7 +28808,7 @@ a.btn-sm {
 .res-low,.status-model-btn .res-low {color:var(--warn);font-weight:600;}
 .res-critical,.status-model-btn .res-critical {color:var(--danger);font-weight:600;}
 .status-breakdown .bd-resource-table {width:100%;border-collapse:collapse;font-variant-numeric:tabular-nums;}
-.status-breakdown .bd-resource-table caption {text-align:left;}
+.status-breakdown .bd-resource-table caption {display:table-caption;caption-side:top;text-align:left;}
 .status-breakdown .bd-resource-table th,.status-breakdown .bd-resource-table td {padding:3px 0;text-align:right;font-weight:400;white-space:nowrap;}
 .status-breakdown .bd-resource-table th[scope=row],.status-breakdown .bd-resource-table thead th:first-child {text-align:left;white-space:normal;overflow-wrap:anywhere;padding-right:12px;}
 .status-breakdown .bd-resource-table td + td {padding-left:12px;}

@@ -47,7 +47,7 @@ export function peopleRows(ws: Workspace & { workingSetBytes: number }, selfId: 
 /** Chip for a workspace that reports availability: your share and what's
  *  free, e.g. "You 2.4 GB · 20.3 GB free · 6.1 cores free". */
 export function workspaceChip(ws: Workspace & { workingSetBytes: number }, selfId: string, cpuLowStreak: number): ResourceChip {
-  const you = peopleRows(ws, selfId)?.find((r) => r.kind === "you");
+  const you = peopleRows(ws, selfId)?.find((r) => r.kind === "you" && r.terminals > 0);
   const memLevel = memoryAvailability(ws.availableBytes, ws.memoryLimitBytes);
   const cpuLow = cpuLowStreak >= CPU_LOW_SAMPLES;
   const parts: ResourceChip["parts"] = [];
