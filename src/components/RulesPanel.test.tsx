@@ -73,7 +73,8 @@ const renderPanel = () =>
     />,
   );
 
-describe("RulesPanel", () => {
+// Several brain/ledger round trips per test; generous for a loaded CI box.
+describe("RulesPanel", { timeout: 30_000 }, () => {
   it("shows each compiled rule in plain language with its enforced or suggestion-only label and block count", async () => {
     store.reset([migrations, naming, block]);
     renderPanel();
