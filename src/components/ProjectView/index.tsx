@@ -453,6 +453,7 @@ import {
 import { GitPanel } from "../GitPanel";
 import { TicketsPanel, type AgentTarget } from "../TicketsPanel";
 import { PrsPanel } from "../PrsPanel";
+import { OutcomesPanel } from "../OutcomesPanel";
 import { ServersPanel } from "../ServersPanel";
 import {
   IntegrationsPanel,
@@ -14614,6 +14615,12 @@ const ProjectViewBody = memo(function ProjectViewBody({
           rootsKey={rootsKey}
           visible={sideTab === "tools" && visible && sideOpen}
           onOpen={openMcpServer}
+        />
+      ))}
+      {sidePane("outcomes", () => (
+        <OutcomesPanel
+          repos={repoPaths}
+          visible={sideTab === "outcomes" && visible && sideOpen}
         />
       ))}
     </div>

@@ -51,6 +51,7 @@ const SIDE_TABS: readonly SideTab[] = [
   "agents",
   "team",
   "tools",
+  "outcomes",
 ];
 
 /** Hints for finding the project a target belongs to. Both are optional and

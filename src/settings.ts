@@ -476,6 +476,20 @@ export interface Settings {
    *  main checkout, see ledger.ts). Repo-relative paths or directory prefixes;
    *  when present for a repo it replaces the inferred list entirely. */
   awarenessHotspots: Record<string, string[]>;
+  /** Default budget, in USD, for every agent session; null = no cap. A
+   *  session's own budget ("Budget $5" in its prompt or header) or its plan's
+   *  budget overrides it. Warns at 80%, pauses at 100% (outcomes/budgets.ts). */
+  sessionBudgetUsd: number | null;
+  /** Cap, in USD, for agent sessions in a Build-lens (prototype) project when
+   *  no other budget applies — so a prototype left running overnight cannot
+   *  run up a large bill. null = no cap. */
+  builderSessionCapUsd: number | null;
+  /** At 100% of its budget, press Esc in the agent's terminal to pause it.
+   *  Off = warn only. */
+  budgetPauseAtLimit: boolean;
+  /** Let the brain write a weekly insight over the Outcomes panel's numbers
+   *  (at most once a day, background model). Off = numbers only. */
+  outcomesInsight: boolean;
   /** Connect Claude Code to Canopy as its IDE, the way it connects to VS Code:
    *  proposed edits open as a diff to accept, tweak or reject, the editor
    *  selection reaches the prompt, and the CLI reads diagnostics off Canopy's
@@ -691,6 +705,10 @@ export const DEFAULTS: Settings = {
   brainFeatureBudgetsUsd: {},
   awarenessEnabled: true,
   awarenessHotspots: {},
+  sessionBudgetUsd: null,
+  builderSessionCapUsd: 10,
+  budgetPauseAtLimit: true,
+  outcomesInsight: true,
   claudeIdeIntegration: true,
   turnRollback: true,
   notificationPopupsEnabled: true,
@@ -859,6 +877,8 @@ export function getSettings(): Settings {
     // or a negative that blocks every call.
     value.brainDailyBudgetUsd = budgetUsd(value.brainDailyBudgetUsd);
     value.brainFeatureBudgetsUsd = featureBudgets(value.brainFeatureBudgetsUsd);
+    value.sessionBudgetUsd = budgetUsd(value.sessionBudgetUsd);
+    value.builderSessionCapUsd = budgetUsd(value.builderSessionCapUsd);
     if (typeof value.brainModel !== "string") value.brainModel = "";
     if (typeof value.brainBackgroundModel !== "string") value.brainBackgroundModel = "";
     // The old Build/Engineer mode setting is now the default *lens*. Keep its

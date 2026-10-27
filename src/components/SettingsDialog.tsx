@@ -1594,6 +1594,76 @@ export function SettingsDialog({ onClose, initialTab = "appearance" }: SettingsD
                     }
                   />
                 </Item>
+                {/* Spend & outcomes (src/outcomes): session budgets and the
+                    brain's weekly insight in the Outcomes panel. */}
+                <Item
+                  name="Session budget"
+                  desc="Default dollar budget for each agent session. Warns at 80% and pauses the agent at 100%. A session's own budget (in its tab, or “Budget $5” in a prompt) or its plan's budget wins. Empty for none."
+                >
+                  <TextInput
+                    type="number"
+                    width="xs"
+                    aria-label="Default session budget in dollars"
+                    min={0}
+                    step={1}
+                    placeholder="None"
+                    value={s.sessionBudgetUsd ?? ""}
+                    onChange={(e) => {
+                      const raw = e.target.value.trim();
+                      const v = Number(raw);
+                      patch({ sessionBudgetUsd: raw === "" || !Number.isFinite(v) || v <= 0 ? null : v });
+                    }}
+                  />
+                </Item>
+                <Item
+                  name="Prototype session cap"
+                  desc="Dollar cap for agent sessions in Build (prototype) projects when no other budget applies, so a prototype left running overnight cannot run up a bill. Empty for none."
+                >
+                  <TextInput
+                    type="number"
+                    width="xs"
+                    aria-label="Prototype session cap in dollars"
+                    min={0}
+                    step={1}
+                    placeholder="None"
+                    value={s.builderSessionCapUsd ?? ""}
+                    onChange={(e) => {
+                      const raw = e.target.value.trim();
+                      const v = Number(raw);
+                      patch({ builderSessionCapUsd: raw === "" || !Number.isFinite(v) || v <= 0 ? null : v });
+                    }}
+                  />
+                </Item>
+                <Item
+                  name="At the budget"
+                  desc="What happens when an agent session reaches its budget."
+                >
+                  <Checkbox
+                    checked={s.budgetPauseAtLimit}
+                    onChange={(v) => patch({ budgetPauseAtLimit: v })}
+                    label="Pause the agent (press Esc in its terminal)"
+                    hint={
+                      s.budgetPauseAtLimit
+                        ? "Canopy stops the agent's current step and asks you to raise the budget. Nothing is lost; tell it to continue."
+                        : "Canopy only warns. The agent keeps going."
+                    }
+                  />
+                </Item>
+                <Item
+                  name="Spend & outcomes"
+                  desc="The Outcomes panel counts spend, merges, reverts and rework on this computer. Nothing is sent to Canopy."
+                >
+                  <Checkbox
+                    checked={s.outcomesInsight}
+                    onChange={(v) => patch({ outcomesInsight: v })}
+                    label="Let the brain write a weekly insight from the numbers"
+                    hint={
+                      s.outcomesInsight
+                        ? "At most once a day, on the brain's cheaper model. It sees totals only, never code."
+                        : "The panel shows the numbers only."
+                    }
+                  />
+                </Item>
                 <Item
                   name="Builder lens summaries"
                   desc="In the Builder lens, explain each saved step and the project's layers in plain words."

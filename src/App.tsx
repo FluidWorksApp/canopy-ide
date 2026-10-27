@@ -56,6 +56,7 @@ import { observeTurnEvents } from "./turnRollback";
 import { observeAgentTurns } from "./agentTurns";
 import { startAwareness } from "./awareness/engine";
 import { setCloudRosterProvider } from "./awareness/roster";
+import { installOutcomes } from "./outcomes";
 import {
   derivePending,
   parseAgentEvent,
@@ -856,6 +857,25 @@ export default function App() {
 
   const wsRef = useRef(ws);
   wsRef.current = ws;
+  // Spend & outcomes (src/outcomes): per-session spend records, session
+  // budgets (warn at 80%, pause at 100%) and the outcome ledger. Installed
+  // once; reads projects through refs at call time.
+  const projectIdentityRef = useRef(projectIdentity);
+  projectIdentityRef.current = projectIdentity;
+  useEffect(
+    () =>
+      installOutcomes({
+        projectFor: (cwd) => {
+          const p = projectIdentityRef.current(cwd);
+          return p.projectId ? { id: p.projectId, name: p.projectName ?? "" } : null;
+        },
+        isPrototype: (cwd) => {
+          const id = projectIdentityRef.current(cwd).projectId;
+          return !!wsRef.current.projects.find((p) => p.id === id)?.vibe?.enabled;
+        },
+      }),
+    [],
+  );
   // Mesh jobs across workspaces, this account's machines and teammates
   // (meshJobs.ts). One coordinator for the window's lifetime: it holds the
   // approval inbox and which runs report back to which submitter, and every

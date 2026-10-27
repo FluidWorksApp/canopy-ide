@@ -67,6 +67,21 @@ use(answer.value!, answer.costUsd);
   tokens. `costUsd` is null when the CLI reports no price (Codex); such calls
   meter as $0.
 
+## Background routing rule
+
+**Anything Canopy does on its own uses `tier: "background"`.** If no person
+pressed a button and is waiting on the answer — a turn-end check, a periodic
+summary, a digest, a status probe — it is background: the cheaper model
+(`brainBackgroundModel`, else the runner's `backgroundModel`) and the shared
+queue of `BRAIN_BACKGROUND_CONCURRENCY` calls. `"main"` is only for a judgment
+the person explicitly asked for and is watching for. Background features must
+also debounce, cache by content hash, and have a Settings switch.
+
+Audit (feat/r10-outcomes): every `askBrain` caller on the branch is background —
+`brainStatus.ts` (`connect-probe`) and `outcomes/insight.ts` (`outcomes`, the
+weekly insight, including its Refresh button: a cheap model is plenty for
+summarising totals). Feature agents adding callers should keep this list true.
+
 ## brainMeter
 
 ```ts

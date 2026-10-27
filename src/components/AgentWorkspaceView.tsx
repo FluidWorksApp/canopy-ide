@@ -23,6 +23,7 @@ import { TurnTimeline } from "./TurnTimeline";
 import { LIFE_META, agentLife, type Life } from "../../shared/agentLife";
 import { AgentIcon, GitBranchIcon, RestartIcon } from "./icons";
 import { sessionCost } from "../pricing";
+import { SessionBudgetChip } from "./SessionBudgetChip";
 import {
   addressPrCommentsTask,
   raisePrTask,
@@ -1542,6 +1543,10 @@ export function AgentWorkspaceView({
               <span className="aw-stat" title="Assistant turns">
                 {usage.turns} {usage.turns === 1 ? "turn" : "turns"}
               </span>
+            )}
+            {/* Per-session budget: warns at 80%, pauses the agent at 100%. */}
+            {(sessionId ?? usage?.session_id) && (
+              <SessionBudgetChip sessionId={(sessionId ?? usage?.session_id)!} cost={cost} />
             )}
           </div>
         )}
