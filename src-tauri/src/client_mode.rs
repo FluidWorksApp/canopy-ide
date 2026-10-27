@@ -23,36 +23,36 @@ pub struct RemoteConnection {
 #[derive(Default)]
 pub struct RemoteConnectionState(pub Mutex<Option<RemoteConnection>>);
 
-#[cfg(target_os = "macos")]
+// The account device token, in the OS credential store on every desktop
+// platform (secure_store.rs): Keychain, Credential Manager or Secret Service.
+const ACCOUNT_SERVICE: &str = "app.causeconnect.canopy.account";
 fn account_token() -> Result<Option<String>, String> {
-    match security_framework::passwords::get_generic_password(
-        "app.causeconnect.canopy.account",
-        "device",
-    ) {
-        Ok(bytes) => String::from_utf8(bytes)
+    match crate::secure_store::get(ACCOUNT_SERVICE, "device") {
+        Ok(Some(bytes)) => String::from_utf8(bytes)
             .map(Some)
             .map_err(|_| "Account credential is invalid".into()),
-        Err(error) if error.code() == -25300 => Ok(None),
-        Err(_) => Err("Cannot read account credential from Keychain".into()),
+        Ok(None) => Ok(None),
+        Err(_) => Err(format!(
+            "Cannot read account credential from {}",
+            crate::secure_store::store_name()
+        )),
     }
 }
-#[cfg(not(target_os = "macos"))]
-fn account_token() -> Result<Option<String>, String> {
-    Ok(None)
-}
-
-#[cfg(target_os = "macos")]
 fn store_account_token(token: &str) -> Result<(), String> {
-    security_framework::passwords::set_generic_password(
-        "app.causeconnect.canopy.account",
-        "device",
-        token.as_bytes(),
-    )
-    .map_err(|_| "Cannot save account credential to Keychain".into())
+    crate::secure_store::set(ACCOUNT_SERVICE, "device", token.as_bytes()).map_err(|_| {
+        format!(
+            "Cannot save account credential to {}",
+            crate::secure_store::store_name()
+        )
+    })
 }
-#[cfg(not(target_os = "macos"))]
-fn store_account_token(_: &str) -> Result<(), String> {
-    Err("Secure account storage is unavailable on this platform".into())
+fn forget_account_token() -> Result<(), String> {
+    crate::secure_store::delete(ACCOUNT_SERVICE, "device").map_err(|_| {
+        format!(
+            "Cannot remove account credential from {}",
+            crate::secure_store::store_name()
+        )
+    })
 }
 
 // Display caches are namespaced by the local device credential without exposing it.
@@ -174,12 +174,7 @@ pub async fn canopy_account_request(
             .and_then(|v| v.as_str())
             == Some("revoke")
     {
-        #[cfg(target_os = "macos")]
-        security_framework::passwords::delete_generic_password(
-            "app.causeconnect.canopy.account",
-            "device",
-        )
-        .map_err(|_| "Cannot remove account credential from Keychain")?;
+        forget_account_token()?;
     }
     Ok(value)
 }
@@ -296,35 +291,26 @@ pub fn execution_mode_set(app: tauri::AppHandle, mode: String) -> Result<(), Str
 fn connection_id(c: &RemoteConnection) -> String {
     format!("{}/{}", c.endpoint.trim_end_matches('/'), c.workspace_id)
 }
-#[cfg(target_os = "macos")]
+const SAVED_SERVICE: &str = "app.causeconnect.canopy.remote-workspaces";
 fn saved_connections() -> Result<Vec<RemoteConnection>, String> {
-    match security_framework::passwords::get_generic_password(
-        "app.causeconnect.canopy.remote-workspaces",
-        "saved",
-    ) {
-        Ok(bytes) => serde_json::from_slice(&bytes)
+    match crate::secure_store::get(SAVED_SERVICE, "saved") {
+        Ok(Some(bytes)) => serde_json::from_slice(&bytes)
             .map_err(|_| "Saved workspace credentials are invalid".into()),
-        Err(error) if error.code() == -25300 => Ok(vec![]),
-        Err(_) => Err("Cannot read workspace credentials from Keychain".into()),
+        Ok(None) => Ok(vec![]),
+        Err(_) => Err(format!(
+            "Cannot read workspace credentials from {}",
+            crate::secure_store::store_name()
+        )),
     }
 }
-#[cfg(target_os = "macos")]
 fn save_connections(all: &[RemoteConnection]) -> Result<(), String> {
     let bytes = serde_json::to_vec(all).map_err(|_| "Cannot encode workspace credentials")?;
-    security_framework::passwords::set_generic_password(
-        "app.causeconnect.canopy.remote-workspaces",
-        "saved",
-        &bytes,
-    )
-    .map_err(|_| "Cannot save workspace credentials to Keychain".into())
-}
-#[cfg(not(target_os = "macos"))]
-fn saved_connections() -> Result<Vec<RemoteConnection>, String> {
-    Ok(vec![])
-}
-#[cfg(not(target_os = "macos"))]
-fn save_connections(_: &[RemoteConnection]) -> Result<(), String> {
-    Err("Secure workspace storage is unavailable on this platform".into())
+    crate::secure_store::set(SAVED_SERVICE, "saved", &bytes).map_err(|_| {
+        format!(
+            "Cannot save workspace credentials to {}",
+            crate::secure_store::store_name()
+        )
+    })
 }
 #[derive(serde::Serialize)]
 #[serde(rename_all = "camelCase")]

@@ -82,9 +82,9 @@ terms govern use of the model:
 - **SenseVoice Small (int8)** — FunASR MODEL_LICENSE (custom) — <https://github.com/modelscope/FunASR/blob/main/MODEL_LICENSE>, by FunAudioLLM / Alibaba. <https://huggingface.co/FunAudioLLM/SenseVoiceSmall>
 - **Moonshine Base** — MIT, by Useful Sensors. <https://huggingface.co/UsefulSensors/moonshine>
 
-## Rust crates (719)
+## Rust crates (729)
 
-### MIT — 660
+### MIT — 669
 
 - **adler2 2.0.1** — Copyright (C) Jonas Schievink <jonasschievink@gmail.com>
 - **aead 0.5.2** — Copyright (c) 2019 The RustCrypto Project Developers; Copyright (c) 2019 MobileCoin, LLC
@@ -165,6 +165,8 @@ terms govern use of the model:
 - **concurrent-queue 2.5.0** — Copyright Stjepan Glavina, Taiki Endo, John Nunley (per package manifest; the distributed license file carries no copyright line)
 - **const-oid 0.10.2** — Copyright (c) 2020-2026 The RustCrypto Project Developers
 - **const-oid 0.9.6** — Copyright (c) 2020-2022 The RustCrypto Project Developers
+- **const-random 0.1.18** — Copyright (c) 2016 Amanieu d'Antras
+- **const-random-macro 0.1.16** — Copyright (c) 2016 Amanieu d'Antras
 - **cookie 0.18.1** — Copyright (c) 2017 Sergio Benitez; Copyright (c) 2014 Alex Crichton
 - **core-foundation 0.10.1** — Copyright The Servo Project Developers (per package manifest; the distributed license file carries no copyright line)
 - **core-foundation-sys 0.8.7** — Copyright The Servo Project Developers (per package manifest; the distributed license file carries no copyright line)
@@ -179,6 +181,7 @@ terms govern use of the model:
 - **crossbeam-deque 0.8.7** — Copyright (c) 2019 The Crossbeam Project Developers
 - **crossbeam-epoch 0.9.20** — Copyright (c) 2019 The Crossbeam Project Developers
 - **crossbeam-utils 0.8.22** — Copyright (c) 2019 The Crossbeam Project Developers
+- **crunchy 0.2.4** — Copyright 2017-2023 Eira Fransham
 - **crypto-common 0.1.7** — Copyright (c) 2021 RustCrypto Developers
 - **crypto-common 0.2.2** — Copyright (c) 2021-2026 RustCrypto Developers
 - **ctor 0.8.0** — Copyright Matt Mastracci (per package manifest; the distributed license file carries no copyright line)
@@ -194,6 +197,7 @@ terms govern use of the model:
 - **dasp_sample 0.11.0** — Copyright mitchmindtree (per package manifest; the distributed license file carries no copyright line)
 - **data-encoding 2.11.0** — Copyright (c) 2015-2020 Julien Cretin; Copyright (c) 2017-2020 Google Inc
 - **dbus 0.9.12** — Copyright (c) 2014-2018 David Henningsson <diwic@ubuntu.com> and other contributors
+- **dbus-secret-service 4.1.0** — Copyright (c) 2016 secret-service Developers
 - **der 0.7.10** — Copyright (c) 2020-2023 The RustCrypto Project Developers
 - **der 0.8.1** — Copyright (c) 2020-2026 The RustCrypto Project Developers
 - **deranged 0.5.8** — Copyright (c) 2024 Jacob Pratt et al
@@ -211,6 +215,7 @@ terms govern use of the model:
 - **displaydoc 0.2.6** — Copyright Jane Lusby (per package manifest; the distributed license file carries no copyright line)
 - **dlopen2 0.8.2** — Copyright Szymon Wieloch, Ahmed Masud, OpenByte (per package manifest; the distributed license file carries no copyright line)
 - **dlopen2_derive 0.4.3** — Copyright Szymon Wieloch, OpenByte (per package manifest; the distributed license file carries no copyright line)
+- **dlv-list 0.5.2** — Copyright (c) 2022 Scott Godwin
 - **dom_query 0.27.0** — Copyright (c) 2023 Mykola Humanov
 - **downcast-rs 1.2.1** — Copyright (c) 2020 Ashish Myles and contributors
 - **dtoa 1.0.11** — Copyright David Tolnay (per package manifest; the distributed license file carries no copyright line)
@@ -409,6 +414,7 @@ terms govern use of the model:
 - **openssl-macros 0.1.1** — Copyright (c) 2022 Steven Fackler
 - **openssl-probe 0.2.1** — Copyright (c) 2014 Alex Crichton
 - **openssl-sys 0.9.117** — Copyright (c) 2014 Alex Crichton
+- **ordered-multimap 0.7.3** — Copyright (c) 2018 sgodwincs
 - **ordered-stream 0.2.0** — Copyright Daniel De Graaf, Zeeshan Ali Khan (per package manifest; the distributed license file carries no copyright line)
 - **ort 2.0.0-rc.12** — Copyright (c) 2023-2026 pyke.io; Copyright (c) 2020 Nicolas Bigaouette
 - **ort-sys 2.0.0-rc.12** — Copyright (c) 2023-2026 pyke.io; Copyright (c) 2020 Nicolas Bigaouette
@@ -483,6 +489,7 @@ terms govern use of the model:
 - **rubato 0.16.2** — Copyright (c) 2020 Henrik Enquist
 - **rusqlite 0.32.1** — Copyright (c) 2014-2021 The rusqlite developers
 - **rust-argon2 3.0.0** — Copyright (c) 2017 Martijn Rijkeboer <mrr@sru-systems.com>
+- **rust-ini 0.21.3** — Copyright (c) 2014 Y. T. CHUNG
 - **rustc_version 0.4.1** — Copyright (c) 2016 The Rust Project Developers
 - **rustc-hash 2.1.3** — no copyright line in the distributed license file
 - **rustfft 6.4.1** — Copyright (c) 2015 The RustFFT Developers
@@ -561,6 +568,7 @@ terms govern use of the model:
 - **tauri-codegen 2.6.3** — Copyright (c) 2017 - Present Tauri Apps Contributors
 - **tauri-macros 2.6.3** — Copyright (c) 2017 - Present Tauri Apps Contributors
 - **tauri-plugin 2.6.3** — Copyright Tauri Programme within The Commons Conservancy (per package manifest; the distributed license file carries no copyright line)
+- **tauri-plugin-deep-link 2.4.10** — Copyright (c) 2017 - Present Tauri Apps Contributors
 - **tauri-plugin-dialog 2.7.1** — Copyright (c) 2017 - Present Tauri Apps Contributors
 - **tauri-plugin-fs 2.5.1** — Copyright (c) 2017 - Present Tauri Apps Contributors
 - **tauri-plugin-log 2.9.0** — Copyright (c) 2017 - Present Tauri Apps Contributors
@@ -707,6 +715,7 @@ terms govern use of the model:
 - **windows-link 0.1.3** — Copyright (c) Microsoft Corporation
 - **windows-link 0.2.1** — Copyright (c) Microsoft Corporation
 - **windows-numerics 0.2.0** — Copyright (c) Microsoft Corporation
+- **windows-registry 0.5.3** — Copyright (c) Microsoft Corporation
 - **windows-result 0.1.2** — Copyright (c) Microsoft Corporation
 - **windows-result 0.3.4** — Copyright (c) Microsoft Corporation
 - **windows-result 0.4.1** — Copyright (c) Microsoft Corporation
@@ -822,6 +831,11 @@ terms govern use of the model:
 - **brotli 8.0.4** — Copyright (c) 2016 Dropbox, Inc
 - **matchit 0.7.3** — Copyright (c) 2022 Ibraheem Ahmed
 
+### CC0-1.0 — 2
+
+- **notify 8.2.0** — Copyright Félix Saparelli, Daniel Faust, Aron Heinecke (per package manifest; the distributed license file carries no copyright line)
+- **tiny-keccak 2.0.2** — Copyright debris (per package manifest; the distributed license file carries no copyright line)
+
 ### MIT-0 — 2
 
 - **constant_time_eq 0.4.2** — Copyright Cesar Eduardo Barros (per package manifest; the distributed license file carries no copyright line)
@@ -838,10 +852,6 @@ terms govern use of the model:
 ### Apache-2.0 WITH LLVM-exception — 1
 
 - **target-lexicon 0.12.16** — Copyright Dan Gohman (per package manifest; the distributed license file carries no copyright line)
-
-### CC0-1.0 — 1
-
-- **notify 8.2.0** — Copyright Félix Saparelli, Daniel Faust, Aron Heinecke (per package manifest; the distributed license file carries no copyright line)
 
 ### MIT AND Unicode-3.0 — 1
 

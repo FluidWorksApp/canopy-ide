@@ -61,6 +61,7 @@ mod relay;
 mod remind;
 mod remote;
 mod research;
+mod secure_store;
 mod selftest;
 mod session_doc;
 mod session_transfer;
@@ -528,6 +529,9 @@ pub fn run() {
             }
         })
         .plugin(tauri_plugin_dialog::init())
+        // canopy:// registered with the OS (tauri.conf.json plugins.deep-link);
+        // cli::install_deep_links routes what it delivers.
+        .plugin(tauri_plugin_deep_link::init())
         // Self-update (see plugins.updater in tauri.conf.json) and the restart
         // that has to follow an install.
         .plugin(tauri_plugin_updater::Builder::new().build())
@@ -576,6 +580,7 @@ pub fn run() {
             // Before anything writes a store: the change channel needs a handle
             // to speak on, and a write that happens first would be silent.
             change::install(app.handle().clone());
+            cli::install_deep_links(app);
             // Claude Code's IDE servers emit to the window, so the hub needs a
             // handle before the first agent PTY asks for one.
             app.manage(claude_ide::ClaudeIde::new(std::sync::Arc::new(
