@@ -10,6 +10,7 @@ import {
   PullRequestIcon,
   ResearchIcon,
   SettingsIcon,
+  StatsIcon,
   TasksIcon,
   TeamIcon,
 } from "./icons";
@@ -22,6 +23,7 @@ import {
   PixelResearchIcon,
   PixelReviewsIcon,
   PixelSettingsIcon,
+  PixelStatsIcon,
   PixelTasksIcon,
   PixelTeamIcon,
   PixelToolsIcon,
@@ -134,6 +136,12 @@ const RAIL_GROUPS: { id: string; name: string; tabs: RailTab[] }[] = [
         Icon: TeamIcon,
         Pixel: PixelTeamIcon,
         title: "Team — relay, chat, notifications",
+      },
+      {
+        key: "outcomes",
+        Icon: StatsIcon,
+        Pixel: PixelStatsIcon,
+        title: "Outcomes — spend, what merged, what was reworked, and the brain's weekly read",
       },
     ],
   },

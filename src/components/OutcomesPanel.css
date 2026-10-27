@@ -1,0 +1,242 @@
+/* Outcomes panel. Reuses the Statistics panel's tiles and table (stats-*);
+   only the insight card and the two single-series charts are new. Charts are
+   one hue (the accent) on a recessive track: magnitude, not identity, so no
+   legend and no categorical palette. */
+
+.outcomes-controls {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 2px 10px 8px;
+}
+
+.outcomes-insight {
+  margin: 0 10px 10px;
+  padding: 10px 12px;
+  background: var(--bg-raised);
+  border: 1px solid var(--border);
+  border-left: 2px solid var(--accent);
+  border-radius: var(--r-sm);
+}
+
+.outcomes-headline {
+  margin: 0 0 6px;
+  font-size: 13px;
+  font-weight: 650;
+  line-height: 1.35;
+  color: var(--text);
+}
+
+.outcomes-insight-list h4 {
+  margin: 6px 0 2px;
+  font-size: 9px;
+  font-weight: 600;
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+}
+
+.outcomes-insight-list ul {
+  margin: 0;
+  padding-left: 16px;
+  font-size: 12px;
+  line-height: 1.45;
+  color: var(--text);
+}
+
+.outcomes-insight-list.is-ok h4::before,
+.outcomes-insight-list.is-warn h4::before,
+.outcomes-insight-list.is-info h4::before {
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  margin-right: 5px;
+  border-radius: 50%;
+  content: "";
+  vertical-align: 1px;
+}
+.outcomes-insight-list.is-ok h4::before {
+  background: var(--ok);
+}
+.outcomes-insight-list.is-warn h4::before {
+  background: var(--warn);
+}
+.outcomes-insight-list.is-info h4::before {
+  background: var(--accent);
+}
+
+.outcomes-insight-state {
+  margin: 0;
+  font-size: 12px;
+  color: var(--text-dim);
+}
+
+.outcomes-insight-foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-top: 8px;
+  font-size: 10px;
+  color: var(--text-faint);
+}
+
+.outcomes-insight-off {
+  margin: 0 10px 10px;
+}
+
+.outcomes-tiles {
+  padding-top: 0;
+}
+
+.outcomes-group-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.outcomes-row-name {
+  font-weight: 500;
+  text-align: left;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.outcomes-bar-cell {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.outcomes-bar {
+  flex: 0 0 auto;
+  max-width: 60%;
+  height: 8px;
+  border-radius: 0 4px 4px 0;
+  background: var(--accent);
+}
+
+.outcomes-bar-val {
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  color: var(--text-dim);
+}
+
+.outcomes-weeks {
+  display: flex;
+  align-items: flex-end;
+  gap: 2px;
+  height: 84px;
+  padding: 4px 12px 0;
+}
+
+.outcomes-week {
+  display: flex;
+  flex: 1 1 0;
+  flex-direction: column;
+  justify-content: flex-end;
+  align-items: stretch;
+  height: 100%;
+  min-width: 0;
+}
+
+.outcomes-week-bar {
+  border-radius: 4px 4px 0 0;
+  background: var(--accent);
+}
+
+.outcomes-week:hover .outcomes-week-bar {
+  opacity: 0.8;
+}
+
+.outcomes-week-lbl {
+  margin-top: 3px;
+  font-size: 9px;
+  text-align: center;
+  color: var(--text-faint);
+  font-variant-numeric: tabular-nums;
+}
+
+.outcomes-attr {
+  margin: 0;
+  padding: 0 12px 6px;
+  list-style: none;
+  font-size: 12px;
+}
+
+.outcomes-attr li {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding: 3px 0;
+  border-bottom: 1px solid var(--border);
+}
+
+.outcomes-attr li:last-child {
+  border-bottom: none;
+}
+
+.outcomes-attr-name {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text);
+}
+
+.outcomes-error {
+  color: var(--danger);
+}
+
+.outcomes-privacy {
+  margin-top: 8px;
+}
+
+/* The session header's budget chip (SessionBudgetChip). */
+.budget-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.budget-chip.is-warn .budget-chip-btn {
+  color: var(--warn);
+  border-color: var(--warn);
+}
+
+.budget-chip.is-over .budget-chip-btn {
+  color: var(--danger);
+  border-color: var(--danger);
+}
+
+.budget-chip-btn {
+  padding: 0 6px;
+  font: inherit;
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  color: var(--text-dim);
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  cursor: pointer;
+}
+
+.budget-chip-btn:hover,
+.budget-chip-btn:focus-visible {
+  color: var(--text);
+  border-color: var(--border-strong);
+}
+
+.budget-chip-input {
+  width: 64px;
+  padding: 0 4px;
+  font: inherit;
+  font-size: 11px;
+  color: var(--text);
+  background: var(--bg);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--r-sm);
+}

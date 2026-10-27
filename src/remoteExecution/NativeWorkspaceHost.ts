@@ -38,6 +38,10 @@ export const COMPANION_DESKTOP_EVENTS=['agent:ui','agent:action','agent:browser'
 // computer; the workspace has none of them.
 for(const command of ['canopy_account_request','report_crash','send_crash','crash_issue_draft','file_crash_issue','remote_status','remote_enable','remote_disable','remote_qr','remote_rotate_pin','remote_socket_metrics'])LOCAL_UI.add(command);
 /** Whether a command runs on the computer showing the IDE in remote mode. */
+// The ledger (spend, outcomes, plans, receipts) is a desktop store under
+// ~/.canopy/ledger; the remote host has none, so it resolves on the desktop,
+// keyed by the remote path.
+for(const command of ['ledger_append','ledger_query','ledger_update_status','ledger_root'])LOCAL_UI.add(command);
 export const isDesktopLocal=(command:string)=>LOCAL_UI.has(command);
 class WorkspaceChannel<T> implements HostChannel<T>{onmessage:(message:T)=>void=()=>{};}
 // Recovery reads share routes with background polls; they must not wait in that lane.
