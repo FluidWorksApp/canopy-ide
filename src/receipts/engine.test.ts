@@ -215,14 +215,14 @@ describe("scheduling", () => {
     let peak = 0;
     const inner = fakeRun();
     setReceiptEngineDepsForTests({
-      run: async (cwd, argv, opts) => {
+      run: async (cwd, argv) => {
         if (argv[0] === "/bin/sh") {
           active++;
           peak = Math.max(peak, active);
           await new Promise((r) => setTimeout(r, 10));
           active--;
         }
-        return inner(cwd, argv, opts);
+        return inner(cwd, argv);
       },
     });
     await Promise.all([
