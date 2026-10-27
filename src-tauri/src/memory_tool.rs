@@ -617,7 +617,10 @@ mod tests {
         let mut tainted = proposal_entry(&p, Some(3), NOW).unwrap();
         quarantine_if_tainted(&mut tainted, Some("WebFetch".into()));
         assert_eq!(tainted.status.as_deref(), Some("quarantined"));
-        assert_eq!(tainted.data["untrusted"][0], "read untrusted content (WebFetch)");
+        assert_eq!(
+            tainted.data["untrusted"][0],
+            "read untrusted content (WebFetch)"
+        );
         assert!(!servable(&tainted, NOW + 1));
     }
 }

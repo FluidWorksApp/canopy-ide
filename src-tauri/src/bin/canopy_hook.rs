@@ -773,9 +773,9 @@ fn real_main() -> Result<(), Box<dyn std::error::Error>> {
         Some("agy") => {
             if event["agy_event"].as_str() == Some("PreToolUse") {
                 match research_denial_for(&event) {
-                    Some(reason) => print_verdict(
-                        &serde_json::json!({ "decision": "deny", "reason": reason }),
-                    ),
+                    Some(reason) => {
+                        print_verdict(&serde_json::json!({ "decision": "deny", "reason": reason }))
+                    }
                     None => print_verdict(&serde_json::json!({ "decision": "allow" })),
                 }
             }
@@ -919,6 +919,8 @@ fn normalize_event(event: &mut serde_json::Value, agent: &str) {
             ("notificationType", "notification_type"),
             ("promptId", "prompt_id"),
             ("subagentType", "subagent_type"),
+            // Grok's Stop carries the agent's closing words in camelCase.
+            ("lastAssistantMessage", "last_assistant_message"),
         ] {
             if map.get(to).is_none() {
                 if let Some(value) = map.get(from).cloned() {
@@ -2494,7 +2496,8 @@ fn gate_check(
     // Grok register theirs as bare signals; the plugin bridges send no
     // PostToolUse for MCP tools), so a fetch that is let through is marked
     // here too. Marking before it runs is the cautious side.
-    if matches!(outcome, gates::Outcome::Allow | gates::Outcome::Warn) && gates::reads_untrusted(tool)
+    if matches!(outcome, gates::Outcome::Allow | gates::Outcome::Warn)
+        && gates::reads_untrusted(tool)
     {
         gates::mark_tainted(&home, &taint_ids, tool);
     }
@@ -6871,22 +6874,46 @@ mod tests {
     #[test]
     fn every_hooked_cli_gets_the_gate_in_its_own_contract() {
         let cases: Vec<(Option<&str>, serde_json::Value)> = vec![
-            (None, serde_json::json!({"hook_event_name": "PreToolUse", "session_id": "s", "cwd": "/w",
-                "tool_name": "Bash", "tool_input": {"command": "rm -rf ~"}})),
-            (Some("codex"), serde_json::json!({"hook_event_name": "PreToolUse", "session_id": "s", "cwd": "/w",
-                "tool_name": "Bash", "tool_input": {"command": "rm -rf ~"}})),
-            (Some("cursor"), serde_json::json!({"hook_event_name": "preToolUse", "conversation_id": "c",
-                "cwd": "/w", "tool_name": "Shell", "tool_input": {"command": "rm -rf ~", "working_directory": "/w"}})),
-            (Some("grok"), serde_json::json!({"hookEventName": "pre_tool_use", "hook_event_name": "PreToolUse",
-                "sessionId": "g", "cwd": "/w", "toolName": "run_terminal_command", "toolInput": {"command": "rm -rf ~"}})),
-            (Some("agy"), serde_json::json!({"hook_event_name": "PreToolUse", "conversationId": "a",
-                "workspacePaths": ["/w"], "toolCall": {"name": "run_command", "args": {"CommandLine": "rm -rf ~", "Cwd": "/w"}}})),
-            (Some("opencode"), serde_json::json!({"hook_event_name": "PreToolUse", "session_id": "o", "cwd": "/w",
-                "tool_name": "Bash", "tool_input": {"command": "rm -rf ~"}})),
-            (Some("omp"), serde_json::json!({"hook_event_name": "PreToolUse", "session_id": "p", "cwd": "/w",
-                "tool_name": "bash", "tool_input": {"command": "rm -rf ~"}})),
-            (Some("amp"), serde_json::json!({"hook_event_name": "PreToolUse", "session_id": "t", "cwd": "/w",
-                "tool_name": "Bash", "tool_input": {"cmd": "rm -rf ~"}})),
+            (
+                None,
+                serde_json::json!({"hook_event_name": "PreToolUse", "session_id": "s", "cwd": "/w",
+                "tool_name": "Bash", "tool_input": {"command": "rm -rf ~"}}),
+            ),
+            (
+                Some("codex"),
+                serde_json::json!({"hook_event_name": "PreToolUse", "session_id": "s", "cwd": "/w",
+                "tool_name": "Bash", "tool_input": {"command": "rm -rf ~"}}),
+            ),
+            (
+                Some("cursor"),
+                serde_json::json!({"hook_event_name": "preToolUse", "conversation_id": "c",
+                "cwd": "/w", "tool_name": "Shell", "tool_input": {"command": "rm -rf ~", "working_directory": "/w"}}),
+            ),
+            (
+                Some("grok"),
+                serde_json::json!({"hookEventName": "pre_tool_use", "hook_event_name": "PreToolUse",
+                "sessionId": "g", "cwd": "/w", "toolName": "run_terminal_command", "toolInput": {"command": "rm -rf ~"}}),
+            ),
+            (
+                Some("agy"),
+                serde_json::json!({"hook_event_name": "PreToolUse", "conversationId": "a",
+                "workspacePaths": ["/w"], "toolCall": {"name": "run_command", "args": {"CommandLine": "rm -rf ~", "Cwd": "/w"}}}),
+            ),
+            (
+                Some("opencode"),
+                serde_json::json!({"hook_event_name": "PreToolUse", "session_id": "o", "cwd": "/w",
+                "tool_name": "Bash", "tool_input": {"command": "rm -rf ~"}}),
+            ),
+            (
+                Some("omp"),
+                serde_json::json!({"hook_event_name": "PreToolUse", "session_id": "p", "cwd": "/w",
+                "tool_name": "bash", "tool_input": {"command": "rm -rf ~"}}),
+            ),
+            (
+                Some("amp"),
+                serde_json::json!({"hook_event_name": "PreToolUse", "session_id": "t", "cwd": "/w",
+                "tool_name": "Bash", "tool_input": {"cmd": "rm -rf ~"}}),
+            ),
         ];
         for (agent, mut event) in cases {
             let label = agent.unwrap_or("claude");
@@ -6894,7 +6921,12 @@ mod tests {
             assert_eq!(event["hook_event_name"], "PreToolUse", "{label}");
             assert_eq!(event["cwd"], "/w", "{label}");
             let tool = event["tool_name"].as_str().unwrap().to_string();
-            let action = gates::action_from_event(&tool, &event["tool_input"], std::path::Path::new("/w"), vec![]);
+            let action = gates::action_from_event(
+                &tool,
+                &event["tool_input"],
+                std::path::Path::new("/w"),
+                vec![],
+            );
             assert_eq!(action.command.as_deref(), Some("rm -rf ~"), "{label}");
             let ctx = gates::Ctx {
                 cwd: std::path::Path::new("/w"),
@@ -6911,7 +6943,10 @@ mod tests {
             match agent {
                 None | Some("codex") => {
                     assert_eq!(out["hookSpecificOutput"]["permissionDecision"], "deny");
-                    assert_eq!(out["hookSpecificOutput"]["permissionDecisionReason"], reason.as_str());
+                    assert_eq!(
+                        out["hookSpecificOutput"]["permissionDecisionReason"],
+                        reason.as_str()
+                    );
                 }
                 Some("cursor") => {
                     assert_eq!(out["permission"], "deny");
@@ -6932,11 +6967,19 @@ mod tests {
     /// "no objection" on every exit path; the rest are left silent.
     #[test]
     fn gate_fallbacks_are_each_cli_s_no_objection() {
-        let cursor: serde_json::Value = serde_json::from_str(gate_fallback(Some("cursor")).unwrap()).unwrap();
+        let cursor: serde_json::Value =
+            serde_json::from_str(gate_fallback(Some("cursor")).unwrap()).unwrap();
         assert_eq!(cursor["permission"], "allow");
-        let agy: serde_json::Value = serde_json::from_str(gate_fallback(Some("agy")).unwrap()).unwrap();
+        let agy: serde_json::Value =
+            serde_json::from_str(gate_fallback(Some("agy")).unwrap()).unwrap();
         assert_eq!(agy["decision"], "allow", "never auto_approve");
-        for silent in [None, Some("claude"), Some("codex"), Some("grok"), Some("opencode")] {
+        for silent in [
+            None,
+            Some("claude"),
+            Some("codex"),
+            Some("grok"),
+            Some("opencode"),
+        ] {
             assert!(gate_fallback(silent).is_none(), "{silent:?}");
         }
     }

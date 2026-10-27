@@ -1465,9 +1465,16 @@ fn classify_code(code: &str, ctx: &Ctx, depth: u8) -> Option<(String, String)> {
         );
     }
     let spawns = SPAWNS.iter().any(|s| lower.contains(s));
-    let rmtree = ["rmtree", "rmsync", "rm_rf", "remove_tree", "rimraf", "fs.rm("]
-        .iter()
-        .any(|s| lower.contains(s));
+    let rmtree = [
+        "rmtree",
+        "rmsync",
+        "rm_rf",
+        "remove_tree",
+        "rimraf",
+        "fs.rm(",
+    ]
+    .iter()
+    .any(|s| lower.contains(s));
     if !spawns && !rmtree {
         return None;
     }
@@ -3491,7 +3498,11 @@ mod tests {
         std::fs::write(dir.join("reset.sh"), "#!/bin/sh\nset -e\ndropdb shop\n").unwrap();
         std::fs::write(dir.join("ok.sh"), "#!/bin/sh\nnpm test\n").unwrap();
         std::fs::write(dir.join("wipe.sql"), "-- cleanup\nDROP TABLE events;\n").unwrap();
-        std::fs::write(dir.join("job.py"), "import sqlite3\nsqlite3.connect('a.db').execute('drop table t')\n").unwrap();
+        std::fs::write(
+            dir.join("job.py"),
+            "import sqlite3\nsqlite3.connect('a.db').execute('drop table t')\n",
+        )
+        .unwrap();
         let c = Ctx {
             cwd: &dir,
             top: Some(&dir),
@@ -3568,7 +3579,10 @@ mod tests {
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            let mode = std::fs::metadata(key_path(&home)).unwrap().permissions().mode();
+            let mode = std::fs::metadata(key_path(&home))
+                .unwrap()
+                .permissions()
+                .mode();
             assert_eq!(mode & 0o777, 0o600);
         }
         assert!(!key_path(&home).starts_with(policy_dir(&home)));
@@ -3584,9 +3598,15 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(eval(&p, &read_key), Outcome::Refused);
-        assert_eq!(eval(&p, &bash("cat ~/.canopy/keys/gate-approval.key")), Outcome::Refused);
         assert_eq!(
-            eval(&p, &bash("bash <<EOF\ncp x ~/.canopy/policy/approvals/a.json\nEOF")),
+            eval(&p, &bash("cat ~/.canopy/keys/gate-approval.key")),
+            Outcome::Refused
+        );
+        assert_eq!(
+            eval(
+                &p,
+                &bash("bash <<EOF\ncp x ~/.canopy/policy/approvals/a.json\nEOF")
+            ),
             Outcome::Refused
         );
     }
@@ -3594,12 +3614,19 @@ mod tests {
     #[test]
     fn every_cli_s_tool_shape_becomes_one_action() {
         let cwd = Path::new("/w");
-        let act = |tool: &str, input: serde_json::Value| action_from_event(tool, &input, cwd, vec![]);
+        let act =
+            |tool: &str, input: serde_json::Value| action_from_event(tool, &input, cwd, vec![]);
         // Shell, by name and key, across CLIs.
         for (tool, input) in [
             ("Bash", serde_json::json!({"command": "ls"})),
-            ("Shell", serde_json::json!({"command": "ls", "working_directory": "/w"})),
-            ("run_command", serde_json::json!({"CommandLine": "ls", "Cwd": "/w"})),
+            (
+                "Shell",
+                serde_json::json!({"command": "ls", "working_directory": "/w"}),
+            ),
+            (
+                "run_command",
+                serde_json::json!({"CommandLine": "ls", "Cwd": "/w"}),
+            ),
             ("run_terminal_command", serde_json::json!({"command": "ls"})),
             ("bash", serde_json::json!({"command": "ls"})),
             ("Bash", serde_json::json!({"cmd": "ls"})),
@@ -3610,8 +3637,14 @@ mod tests {
         // Writes.
         for (tool, input) in [
             ("Write", serde_json::json!({"file_path": "a.rs"})),
-            ("write_to_file", serde_json::json!({"TargetFile": "/w/a.rs"})),
-            ("replace_file_content", serde_json::json!({"TargetFile": "/w/a.rs"})),
+            (
+                "write_to_file",
+                serde_json::json!({"TargetFile": "/w/a.rs"}),
+            ),
+            (
+                "replace_file_content",
+                serde_json::json!({"TargetFile": "/w/a.rs"}),
+            ),
             ("edit_file", serde_json::json!({"path": "a.rs"})),
             ("create_file", serde_json::json!({"path": "a.rs"})),
             ("edit", serde_json::json!({"path": "a.rs"})),
@@ -3619,7 +3652,11 @@ mod tests {
             ("Delete", serde_json::json!({"path": "a.rs"})),
             ("Edit", serde_json::json!({"filePath": "a.rs"})),
         ] {
-            assert_eq!(act(tool, input).writes, vec![PathBuf::from("/w/a.rs")], "{tool}");
+            assert_eq!(
+                act(tool, input).writes,
+                vec![PathBuf::from("/w/a.rs")],
+                "{tool}"
+            );
         }
         // Reads and fetches.
         assert_eq!(
@@ -3631,7 +3668,12 @@ mod tests {
             vec![PathBuf::from("/w/.env")]
         );
         assert_eq!(
-            act("read_url_content", serde_json::json!({"Url": "https://x.dev"})).url.as_deref(),
+            act(
+                "read_url_content",
+                serde_json::json!({"Url": "https://x.dev"})
+            )
+            .url
+            .as_deref(),
             Some("https://x.dev")
         );
         assert!(reads_untrusted("read_url_content"));

@@ -6109,7 +6109,10 @@ mod integration_tests {
             assert!(hooks_are_ours(agent, h), "{agent}");
         }
         let codex = read_json_config(&home.join(".codex/hooks.json")).unwrap();
-        assert_eq!(codex["hooks"]["PreToolUse"][0]["matcher"], CODEX_GATE_MATCHER);
+        assert_eq!(
+            codex["hooks"]["PreToolUse"][0]["matcher"],
+            CODEX_GATE_MATCHER
+        );
         assert!(codex["hooks"]["PreToolUse"][0]["hooks"][0]["command"]
             .as_str()
             .unwrap()
@@ -6119,29 +6122,53 @@ mod integration_tests {
         assert_eq!(pre["matcher"], CURSOR_GATE_MATCHER);
         let command = pre["command"].as_str().unwrap();
         assert!(command.ends_with("--agent cursor --gate"), "{command}");
-        assert!(!command.contains("--signal"), "a signal would replace the payload");
+        assert!(
+            !command.contains("--signal"),
+            "a signal would replace the payload"
+        );
         let grok = read_json_config(&home.join(".grok/hooks/canopy.json")).unwrap();
         let pre = &grok["hooks"]["PreToolUse"][0];
         assert_eq!(pre["matcher"], GATE_TOOLS_ANY_MATCHER);
-        assert!(!pre["hooks"][0]["command"].as_str().unwrap().contains("--signal"));
+        assert!(!pre["hooks"][0]["command"]
+            .as_str()
+            .unwrap()
+            .contains("--signal"));
         for (file, refusal) in [
-            (".config/opencode/plugin/canopy.ts", "refusal.canopyGate = true"),
-            (".omp/agent/extensions/canopy.ts", "{ block: true, reason: denied }"),
-            (".config/amp/plugins/canopy.ts", "action: \"reject-and-continue\""),
+            (
+                ".config/opencode/plugin/canopy.ts",
+                "refusal.canopyGate = true",
+            ),
+            (
+                ".omp/agent/extensions/canopy.ts",
+                "{ block: true, reason: denied }",
+            ),
+            (
+                ".config/amp/plugins/canopy.ts",
+                "action: \"reject-and-continue\"",
+            ),
         ] {
             let src = std::fs::read_to_string(home.join(file)).unwrap();
             assert!(src.contains("const gate = (obj)"), "{file}");
-            assert!(src.contains("process.env.CANOPY !== \"1\" || !GATE_TOOLS.test"), "{file}");
+            assert!(
+                src.contains("process.env.CANOPY !== \"1\" || !GATE_TOOLS.test"),
+                "{file}"
+            );
             assert!(src.contains(refusal), "{file}");
             assert!(src.contains("hook_event_name: \"PreToolUse\""), "{file}");
         }
         // Re-running changes nothing: Codex re-asks for trust on any change.
         let before = std::fs::read_to_string(home.join(".codex/hooks.json")).unwrap();
         setup_agent("codex", h).unwrap();
-        assert_eq!(std::fs::read_to_string(home.join(".codex/hooks.json")).unwrap(), before);
+        assert_eq!(
+            std::fs::read_to_string(home.join(".codex/hooks.json")).unwrap(),
+            before
+        );
         let before = std::fs::read_to_string(home.join(".cursor/hooks.json")).unwrap();
         setup_agent("cursor", h).unwrap();
-        assert_eq!(std::fs::read_to_string(home.join(".cursor/hooks.json")).unwrap(), before);
+        assert_eq!(
+            std::fs::read_to_string(home.join(".cursor/hooks.json")).unwrap(),
+            before
+        );
     }
 
     #[test]
