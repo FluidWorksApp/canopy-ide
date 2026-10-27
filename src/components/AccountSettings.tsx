@@ -7,6 +7,7 @@ import {FilesIcon,TeamIcon} from './icons';
 import {IconClock} from '../../shared/icons';
 import {openInOsBrowser} from '../links';
 import {AddFunds,CreditBanner,RequestCreditButton} from './CreditNotice';
+import {ReadableLinksSettings} from './ReadableLinksSettings';
 import {observeCredits,statusOf,usd,type Credits,type WorkspaceUsage} from '../credits';
 type User={email:string;name:string};
 // Amounts are US dollars. `balance` (credits, 1 = 1 cent) is only sent by
@@ -100,6 +101,7 @@ export function AccountSettings({onTeams,onWorkspaces}:{onTeams?:()=>void;onWork
    <CreditBanner credits={credits}/>
    {(()=>{const usage=workspaceUsage(credits).slice(0,6);return usage.length?<section className="account-usage" aria-label="Recent usage by workspace"><h4>Last 30 days by workspace</h4><ul>{usage.map(row=><li key={row.workspace_id??'none'}><span>{row.workspace_name??'Workspace'}</span><small>{new Date(row.last_at).toLocaleDateString(undefined,{month:'short',day:'numeric'})}</small><strong>{usd(Number(row.usd))}</strong></li>)}</ul></section>:null;})()}
 
+   <ReadableLinksSettings/>
   </>:<div className="set-inline"><Button disabled={busy} onClick={()=>void signIn()}>{busy?'Waiting for sign-in…':'Sign in or create account'}</Button>{busy&&<Button onClick={()=>{generation.current++;setBusy(false);setCode('');setMessage('Sign-in cancelled.');}}>Cancel</Button>}</div>}
   {code&&<p>Request code: <strong>{code}</strong></p>}
   {message&&<p role="status" aria-live="polite">{message}</p>}

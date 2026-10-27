@@ -1,6 +1,6 @@
 import {afterEach,describe,expect,it,vi} from 'vitest';
 import {mockCommands} from './test/setup';
-import {RESERVED_HANDLES,parseReadableLink,ensureReadableLink,copyReadableLink,openReadableLink,takePendingSession,SHOW_WORKSPACE_EVENT,SHARED_SESSION_FOCUS_EVENT,type ResolvedLink} from './readableLinks';
+import {RESERVED_HANDLES,parseReadableLink,ensureReadableLink,copyReadableLink,openReadableLink,revokeReadableLink,describeLink,takePendingSession,SHOW_WORKSPACE_EVENT,SHARED_SESSION_FOCUS_EVENT,type ResolvedLink} from './readableLinks';
 import {formatDeepLink,parseDeepLink} from './deepLinks';
 import {readableLinkRows} from './spotSources';
 // The control plane is the authority on link shapes; the app must agree.
@@ -99,5 +99,21 @@ describe('links in text',()=>{
   openLink('https://canopyide.dev/acme/t/general/quiet-otter-41');
   expect((seen.mock.calls[0][0] as CustomEvent).detail).toEqual({url:'https://canopyide.dev/acme/t/general/quiet-otter-41'});
   window.removeEventListener('canopy:follow-deep-link',seen);
+ });
+});
+
+describe('managing links',()=>{
+ it('revoking forgets the copied URL, so the next copy makes a new link',async()=>{
+  let n=0;const calls:unknown[]=[];
+  mockCommands({canopy_account_request:(args:Record<string,unknown>)=>{calls.push((args as {body:unknown}).body);const body=(args as {body:{action:string}}).body;return body.action==='revoke'?{revoked:true}:{link:{url:`https://canopyide.dev/acme/api${n++?'-2':''}`}};}});
+  expect(await ensureReadableLink({kind:'workspace',workspaceId:'ws-1'})).toBe('https://canopyide.dev/acme/api');
+  await revokeReadableLink('https://canopyide.dev/acme/api');
+  expect(await ensureReadableLink({kind:'workspace',workspaceId:'ws-1'})).toBe('https://canopyide.dev/acme/api-2');
+  expect(calls.map(c=>(c as {action:string}).action)).toEqual(['ensure','revoke','ensure']);
+ });
+ it('describes a link by name and place, never by message text',()=>{
+  expect(describeLink({url:'u',kind:'session',target:{workspaceId:'w',workspaceName:'API',projectId:'p',publicationId:'x',title:'Fix login'},about:{teamName:'Platform',activity:'shared',activityAt:null}})).toEqual({kind:'Shared session',name:'Fix login',detail:'API · Platform'});
+  expect(describeLink({url:'u',kind:'message',target:{teamId:'t',teamName:'Platform',peer:'carol',peerName:'Carol',messageId:'m',viewer:'alice'}})).toEqual({kind:'Message',name:'Direct message with Carol',detail:'Platform'});
+  expect(describeLink({url:'u',kind:'workspace',target:{workspaceId:'w',name:'API'}})).toEqual({kind:'Workspace',name:'API',detail:''});
  });
 });

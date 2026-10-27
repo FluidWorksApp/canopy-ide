@@ -16,7 +16,7 @@ deploying outside this repository.
 | Team chat, presence, DMs (account) | `src/teamMessaging/background.ts`, `session.ts`, `client.ts`; `packages/control-plane/lib/peer-messaging.mjs` (`/api/peers`); `teams.mjs` (`/api/teams`) | **Nothing.** `startBackgroundTeams()` (App.tsx) already joins every team the account belongs to on sign-in. | Yes |
 | Self-hosted team relay | `src-tauri/src/relay.rs` (`relay_host_start`, `relay_regenerate_code`, `relay_connect`), `src/components/TeamPanel.tsx` `RelayTeamPanel` | Host shares an address/tunnel URL and a 7-digit SPAKE2 join code; others type both. | No |
 | Canopy Remote (drive your own agents from a phone/browser) | `src-tauri/src/portal.rs` (`/remote/auth`, 6-digit PIN), `tunnel.rs` | Enable, share tunnel URL or QR, type the PIN. | No (personal, by design) |
-| Account workspaces (managed VMs) | `src/remoteExecution/ManagedWorkspaces.tsx`, `/api/workspaces`, `/api/operations` (`connect`) | Nothing for owners or people granted access: they appear in the switcher. Member connection issuance is still partly pending (see `docs/product/organizations-teams-workspaces.md`). | Yes |
+| Account workspaces (managed VMs) | `src/remoteExecution/ManagedWorkspaces.tsx`, `/api/workspaces`, `/api/operations` (`connect`) | Nothing for owners or people granted access: they appear in the switcher, and a member's open waits for the owner's host to prove member isolation, then connects. | Yes |
 | Saved remote connections (self-hosted hosts) | `execution_remote_*`, Settings → Remote access | Paste an endpoint and token. | No |
 | Shared agent sessions | `src/components/SharedSessionsPanel.tsx`, gateway `/shared-sessions` (`packages/remote-host/gateway.mjs`), `/api/operations` `shared-session-connect` | Open the workspace's details, open "Shared sessions", **click "View shared sessions"**, pick the session. No way to point a teammate at one session. | Yes, but manual |
 | Workspace sharing "like a document" | `WorkspaceSharing.tsx`, `workspace-team-grants.mjs`, `workspace-person-grants.mjs`, `workspace-organization-grants.mjs` | Grant a team or person a role. No URL to send them. | Yes |
@@ -33,18 +33,27 @@ Other findings:
   handler", "website `tests/organizations.integration.mjs`"; `auth.mjs` reads
   `VERCEL_URL`). No workflow in this repo deploys it, and control-plane tests
   are not in CI here; postgres tests skip unless `CANOPY_SYNTHETIC_DATABASE_URL`
-  points at the validation database.
+  points at the validation database. The website keeps its own copies under
+  `lib/canopy/`, and those are what is deployed. The readable-link modules are
+  kept identical in both repositories. The member-sharing modules are not:
+  the website's `workspace-sharing.mjs` (attested readiness per start) and its
+  `member-connection.mjs`, `member-resume.mjs` and `workspace-discovery.mjs`
+  replaced the `sharing_generation` gate that the copies here still use.
 - **Sign-in state in the desktop.** The account device token lives in the OS
-  credential store (`client_mode.rs` `account_token`, macOS Keychain
+  credential store (`client_mode.rs` `account_token`, item
   `app.causeconnect.canopy.account`). Every account call goes through
   `canopy_account_request` with a fixed route allowlist to
   `https://canopyide.dev`. Settings → Accounts / the Teams panel's account
   button (`AccountSettings.tsx`) shows the email and signs in or out; both emit
   `canopy:account-changed`, which every account-bound cache clears on.
-  Off macOS, `account_token()` returns nothing and `store_account_token`
-  refuses ("Secure account storage is unavailable"), so **desktop account
-  sign-in, and with it everything "seamless when signed in", is macOS-only
-  today**. Linux *workspace* mode is unaffected: there, `canopy_account_request`
+  `secure_store.rs` keeps it, and saved workspace connections, in the macOS
+  Keychain, Windows Credential Manager or the Linux Secret Service (GNOME
+  Keyring, KWallet, KeePassXC). Only on a Linux desktop with no Secret Service
+  does it fall back to a ChaCha20-Poly1305 file under
+  `~/.local/share/app.causeconnect.canopy/credentials` (0600 in a 0700
+  directory, key bound to the machine id and user), and it logs that choice
+  with the path. Sign-in, sign-out and workspace credential renewal behave the
+  same on all three. Linux *workspace* mode is unaffected: there, `canopy_account_request`
   and `clipboard_write_text` are `LOCAL_UI` commands
   (`NativeWorkspaceHost.ts`) that run on the desktop showing the IDE.
 - **End-to-end encryption already rides on the account.** Each device
@@ -57,8 +66,10 @@ Other findings:
   distribution, and removing someone from the team stops it.
 - **Deep links.** `canopy://…` is parsed in `src/deepLinks.ts` and routed in
   `App.tsx` `followDeepLink`. The scheme reaches the app from notifications, in-app
-  cards and the CLI (`canopy 'canopy://…'`, `src-tauri/src/cli.rs`). It is
-  **not registered with the OS** (no deep-link plugin in `tauri.conf.json`).
+  cards and the CLI (`canopy 'canopy://…'`, `src-tauri/src/cli.rs`), and from
+  the browser: `tauri-plugin-deep-link` registers it with the OS
+  (`plugins.deep-link.desktop.schemes` in `tauri.conf.json`), so the website's
+  **Open in Canopy** launches the app, or raises the running one.
 
 ## 2. What is now automatic when signed in
 
@@ -89,6 +100,18 @@ Other findings:
   - a message opens its conversation and scrolls to it, if this device still
     has it in its encrypted history (latest 500 messages); otherwise the
     conversation opens.
+
+  In a browser, the link page shows a signed-in person with access what the
+  link is: the workspace, session or conversation, its team, and when it was
+  last opened or shared (never contents), with **Open in Canopy** and a
+  download link. A workspace or session itself opens in the desktop app.
+- **Managing links**: Settings → Account → Links lists the links you made,
+  plus those on workspaces you own and in teams you own or administer, with
+  Copy, Open and Revoke (revoke shows only where you may).
+- **Teammates' workspaces**: a member opening a workspace link resumes it if
+  their grant can edit, then waits while the owner's host proves member
+  isolation for this start (`connectionPending` from workspace discovery) and
+  connects by itself. Sharing turned off or a failed check shows the reason.
 
 ## 3. URL formats
 
@@ -172,7 +195,9 @@ identity checks in `NativeWorkspaceHost.ts`, `accountWorkspace.ts` and
     - `{action:'ensure', kind:'session', workspaceId, projectId, publicationId, title}`
     - `{action:'ensure', kind:'message', teamId, peer|null, messageId}`
       → `{link:{url, kind, created}}`
-    - `{action:'resolve', url}` → `{link:{url, kind, target}}`
+    - `{action:'resolve', url}` → `{link:{url, kind, target, about}}`, where
+      `about` is `{teamName, activity:'opened'|'shared', activityAt}`
+    - `{action:'list'}` → `{links:[{url, kind, target, about, createdAt, mine, canRevoke}]}`
     - `{action:'revoke', url}` → `{revoked:true}`
 
     The caller wraps each action in a transaction. Namespace rows are locked
@@ -181,14 +206,21 @@ identity checks in `NativeWorkspaceHost.ts`, `accountWorkspace.ts` and
     `sessionSlug`, `workspaceSlug`, `handleCandidate`, `pathKind`,
     `maySeeSession`, `RESERVED_HANDLES`.
 - `packages/control-plane/lib/readable-link-route.mjs`, the framework-free website side:
-  - `linksApi(db, user, body, {mayMutate})` for `POST /api/links`;
+  - `linksApi(db, user, body, {mayMutate})` for `POST /api/links` (`resolve`
+    and `list` read; `ensure` and `revoke` need `mayMutate`);
   - `readableRequestDecision(db, user, url)` for `GET /<team>/<path…>`. It returns
     `302 → /sign-in?next=…` when signed out, `200` with
     `openInApp: canopy://link?url=…`, or `404`/`410`;
-  - `readableLinkPage(decision)`, a minimal escaped HTML page (no script).
+  - `readableLinkPage(decision)`, a minimal escaped HTML page (no script) built
+    from `linkSummary(link)`.
 - `packages/control-plane/lib/readable-words.mjs`, the wordlist.
 - Desktop:
   - `src-tauri/src/client_mode.rs`: `/api/links` added to the account route allowlist.
+  - `src-tauri/src/secure_store.rs`: the per-platform credential store.
+  - `src-tauri/src/cli.rs` `install_deep_links`: OS scheme registration and
+    routing (macOS Apple events wait for the frontend on a cold start; Windows
+    and Linux arrive in argv, through the single-instance plugin when running).
+  - `src/components/ReadableLinksSettings.tsx` (Settings → Account → Links).
   - `src-tauri/src/cli.rs`: `canopy https://canopyide.dev/…` becomes
     `canopy://link?url=…`.
   - `src/readableLinks.ts`, `src/deepLinks.ts` (`link` kind and chat `message`),
@@ -200,8 +232,11 @@ Tests: `readable-words.test.mjs`, `readable-links.test.mjs`,
 `readable-link-route.test.mjs`, `readable-links.postgres.test.mjs` (real
 Postgres; skips without the validation database), `src/readableLinks.test.ts`
 (including parity with the control-plane parser and reserved names),
-`SharedSessionsPanel.links.test.tsx`, `TeamPanel.account.test.tsx`, and
-`cli.rs` `readable_links_become_deep_links`.
+`SharedSessionsPanel.links.test.tsx`, `TeamPanel.account.test.tsx`,
+`ReadableLinksSettings.test.tsx`, `WorkspaceSelector.link.test.tsx`,
+`ManagedWorkspaces.test.tsx` (member waits for sharing), `cli.rs`
+`readable_links_become_deep_links` and `os_links_wait_for_the_frontend_then_route_directly`,
+and `secure_store.rs` file-store tests.
 
 ## 6. To deploy
 
@@ -234,28 +269,13 @@ None of this needs new secrets. These steps are outside this repository.
    - Optional: set `CANOPY_PUBLIC_URL` only if links should use another public
      HTTPS origin. The default is `https://canopyide.dev`, validated by
      `invitationPublicOrigin`.
-3. **Desktop release.** Ship the app with these changes. Older apps reject
-   `/api/links` locally ("Invalid account request") and are otherwise unaffected.
-4. **OS URL scheme (so a browser's "Open in Canopy" launches the app).** Register
-   `canopy://` with the OS: add `tauri-plugin-deep-link` (Cargo + npm), declare
-   `plugins.deep-link.desktop.schemes = ["canopy"]` in `tauri.conf.json`, and
-   forward its URLs into the existing `cli-open`/deep-link path (`cli.rs`
-   `open_forwarded`). On macOS this is the bundle's `CFBundleURLTypes`; on
-   Linux, a `.desktop` `MimeType=x-scheme-handler/canopy`. Until then, readable
-   links work inside the app (SpotSearch, chat, CLI), and the website page shows
-   the link to paste.
-5. **No DNS or certificate changes** are needed for the path form. If team
+3. **Desktop release.** Ship the app with these changes. The installers
+   register `canopy://` (macOS bundle URL types, Windows registry, Linux
+   `.desktop` `MimeType=x-scheme-handler/canopy`); an AppImage registers itself
+   on first run. Older apps reject `/api/links` locally ("Invalid account
+   request") and are otherwise unaffected.
+4. **No DNS or certificate changes** are needed for the path form. If team
    subdomains are wanted later, add a `*.canopyide.dev` record and certificate
    (DNS-01) that point at the website, and 301 `https://<team>.canopyide.dev/<p>`
    to `https://canopyide.dev/<team>/<p>`. Exclude `workspaces` and every
    existing subdomain. The parsers already accept that form.
-
-## 7. Not in this change
-
-- Workspace links open for people the workspace is shared with. Live member
-  runtime issuance is still partly pending, per the product doc. Until that
-  ships, a member may see the workspace without being able to connect.
-- Revocation exists in the API. There is no "Manage links" UI yet: a workspace
-  owner or team admin revokes with `{action:'revoke', url}`.
-- The web portal cannot open a workspace or session in the browser: the
-  readable URL opens the desktop app.

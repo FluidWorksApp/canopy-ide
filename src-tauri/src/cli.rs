@@ -30,12 +30,16 @@ pub struct PendingOpen(pub Mutex<Option<String>>);
 /// written to end.
 pub struct PendingLink(pub Mutex<Option<String>>);
 
+/// Set once the frontend has collected the cold-start link: from then on a
+/// link is delivered as an event instead of waiting in [`PendingLink`].
+pub struct LinkListenerReady(pub std::sync::atomic::AtomicBool);
+
 /// First `canopy://…` argument. The same targets a notification click carries
 /// (see `src/deepLinks.ts`), reachable from a terminal: `canopy
-/// 'canopy://panel?name=tasks'` raises the running app and lands there. Not a
-/// registered URL scheme — macOS won't hand us `open canopy://…` without one —
-/// but the routing is scheme-shaped from end to end, so registering it later
-/// changes only where the string comes in.
+/// 'canopy://panel?name=tasks'` raises the running app and lands there. The
+/// scheme is also registered with the OS ([`install_deep_links`]), so a
+/// browser's "Open in Canopy" arrives here too: in argv on Windows and Linux,
+/// as an Apple event on macOS.
 ///
 /// A readable Canopy link (`https://canopyide.dev/<team>/<workspace>`, see
 /// docs/seamless-sharing.md) counts too: `canopy https://canopyide.dev/acme/api`
@@ -127,8 +131,85 @@ pub fn cli_take_pending_open(state: tauri::State<'_, PendingOpen>) -> Option<Str
 }
 
 #[tauri::command]
-pub fn cli_take_pending_link(state: tauri::State<'_, PendingLink>) -> Option<String> {
-    state.0.lock().unwrap().take()
+pub fn cli_take_pending_link(
+    state: tauri::State<'_, PendingLink>,
+    ready: tauri::State<'_, LinkListenerReady>,
+) -> Option<String> {
+    take_link(&state, &ready)
+}
+
+/// Hand over the cold-start link and mark the frontend as listening.
+fn take_link(pending: &PendingLink, ready: &LinkListenerReady) -> Option<String> {
+    let mut slot = pending.0.lock().unwrap();
+    ready.0.store(true, std::sync::atomic::Ordering::SeqCst);
+    slot.take()
+}
+
+/// Keep `link` for the frontend to collect, or give it back to be routed now
+/// that the frontend listens. The lock orders this against [`take_link`], so a
+/// link arriving during that handover is never lost or routed twice.
+fn hold_or_route(pending: &PendingLink, ready: &LinkListenerReady, link: String) -> Option<String> {
+    let mut slot = pending.0.lock().unwrap();
+    if ready.0.load(std::sync::atomic::Ordering::SeqCst) {
+        return Some(link);
+    }
+    *slot = Some(link);
+    None
+}
+
+/// A `canopy://` URL the OS handed us. Before the frontend has collected the
+/// cold-start link it waits in [`PendingLink`] (an event then would race the
+/// listener and be lost); after, it is routed like a notification click.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub fn deliver_link(app: &AppHandle, link: String) {
+    let routed = hold_or_route(
+        &app.state::<PendingLink>(),
+        &app.state::<LinkListenerReady>(),
+        link,
+    );
+    if let Some(link) = routed {
+        crate::notify::open_link(app, &link);
+    }
+}
+
+/// The URL-scheme half of deep links. Registration itself is static
+/// (`plugins.deep-link.desktop.schemes` in tauri.conf.json): the macOS bundle's
+/// CFBundleURLTypes, the Windows installer's registry keys, and
+/// `MimeType=x-scheme-handler/canopy` in the Linux .desktop file.
+///
+/// - macOS delivers a click as an Apple event, cold start included; that is
+///   what `on_open_url` carries.
+/// - Windows and Linux start a process with the URL in argv: on a cold start
+///   [`pending_link_from_env`] already holds it, and with Canopy running the
+///   single-instance plugin forwards it to [`open_forwarded`]. Routing
+///   `on_open_url` as well would open the link twice, so it is macOS only.
+/// - An AppImage (or a Windows/Linux dev build) has no installer to register
+///   it, so it registers itself at runtime.
+pub fn install_deep_links(app: &mut tauri::App) {
+    app.manage(LinkListenerReady(std::sync::atomic::AtomicBool::new(false)));
+    #[cfg(target_os = "macos")]
+    {
+        use tauri_plugin_deep_link::DeepLinkExt;
+        let handle = app.handle().clone();
+        app.deep_link().on_open_url(move |event| {
+            for url in event.urls() {
+                if url.scheme() == "canopy" {
+                    deliver_link(&handle, url.to_string());
+                }
+            }
+        });
+    }
+    #[cfg(any(windows, target_os = "linux"))]
+    {
+        use tauri_plugin_deep_link::DeepLinkExt;
+        let self_registered = cfg!(debug_assertions)
+            || (cfg!(target_os = "linux") && std::env::var_os("APPIMAGE").is_some());
+        if self_registered {
+            if let Err(error) = app.deep_link().register_all() {
+                log::warn!("deep links: could not register canopy:// ({error})");
+            }
+        }
+    }
 }
 
 /// Put a `canopy` command on PATH.
@@ -218,6 +299,31 @@ fn write_shim(dest: &Path, contents: &str) -> std::io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn os_links_wait_for_the_frontend_then_route_directly() {
+        let pending = PendingLink(Mutex::new(None));
+        let ready = LinkListenerReady(std::sync::atomic::AtomicBool::new(false));
+        // A cold-start Apple event lands before the webview listens: it waits.
+        assert_eq!(hold_or_route(&pending, &ready, "canopy://a".into()), None);
+        // The latest one wins, as a second click before boot finishes means.
+        assert_eq!(hold_or_route(&pending, &ready, "canopy://b".into()), None);
+        assert_eq!(take_link(&pending, &ready).as_deref(), Some("canopy://b"));
+        assert_eq!(take_link(&pending, &ready), None);
+        // Once collected, later links are routed at once, never parked.
+        assert_eq!(
+            hold_or_route(&pending, &ready, "canopy://c".into()).as_deref(),
+            Some("canopy://c")
+        );
+        assert_eq!(take_link(&pending, &ready), None);
+    }
+
+    #[test]
+    fn scheme_links_from_the_os_are_read_from_argv() {
+        // Windows and Linux launch `canopy <url>` for a registered scheme.
+        let args = vec!["canopy".into(), "canopy://link?url=x".into()];
+        assert_eq!(link_from_args(args).as_deref(), Some("canopy://link?url=x"));
+    }
 
     #[test]
     fn readable_links_become_deep_links() {

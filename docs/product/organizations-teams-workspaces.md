@@ -129,6 +129,15 @@ cannot issue credentials for a recreated machine. All 36 control-plane tests pas
 Operational migration tooling, live member runtime provisioning, shared credential
 execution grants and production multi-user verification remain incomplete.
 
+2026-10-27 member connection checkpoint: the website issues member connections
+once the running host attests sharing readiness for the current generation and
+instance (`workspace-sharing.mjs`), and workspace discovery marks
+`connectionPending` while that check runs after a start or resize. The IDE now
+waits for it and connects instead of failing, and a workspace link opened
+before the workspace list loads still connects. Linux and Windows desktops keep
+the account token and saved connections in their own credential stores, so a
+member can connect from all three. See `docs/seamless-sharing.md`.
+
 ### Terminal responsiveness checkpoint — 2026-10-04
 
 Local changes reserve a separate bounded HTTP admission lane for terminal input,
