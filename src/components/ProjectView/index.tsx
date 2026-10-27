@@ -166,6 +166,8 @@ import {
   type FleetRouteSnapshot,
 } from "../../fleetSnapshot";
 import { chosenBrainId, resolveBrain } from "../../brain";
+import { TERMINAL_EXITED_EVENT } from "../../brainConnect";
+import { requestBrainTabName } from "../../brainSessionTitle";
 import {
   pickLaunchCli,
   startCommandParked,
@@ -1366,6 +1368,8 @@ const ProjectViewBody = memo(function ProjectViewBody({
   );
   const termHandles = useRef(new Map<string, TermHandle | null>());
   const livePtyByTab = useRef(new Map<string, number>());
+  /** Tab id → the `then` marker its opener asked to hear back on exit. */
+  const exitMarkers = useRef(new Map<string, string>());
   const vibeServerHealth = useRef(new Map<string, VibeServerHealthState>());
   const openVibeServerIncident = useRef(new Set<string>());
   const [vibeVerifiedReadinessPtys, setVibeVerifiedReadinessPtys] = useState<Set<number>>(
@@ -5661,18 +5665,30 @@ const ProjectViewBody = memo(function ProjectViewBody({
         // account's config dir, or the login lands on the default one.
         env?: [string, string][];
         profile?: string;
+        // The brain's connect flow (brainConnect.ts): an install runs as a
+        // self-closing chore, a sign-in carries a `then` marker that comes back
+        // on canopy:terminal-exited, and `handled` tells the opener a project
+        // took it (with none open, it shows the command to run by hand).
+        run?: "chore";
+        then?: string;
+        handled?: boolean;
       };
       const first = componentsRef.current[0];
-      if (d?.command && first)
-        addTerminal(
+      if (d?.command && first) {
+        const id = addTerminal(
           first.path,
           d.command,
           d.title ?? d.command,
-          "⚙",
-          false,
+          d.run === "chore" ? "⬇" : "⚙",
+          d.run ?? false,
           d.env,
           d.profile,
         );
+        if (id) {
+          d.handled = true;
+          if (d.then) exitMarkers.current.set(id, d.then);
+        }
+      }
     };
     window.addEventListener("canopy:run-command", runCommand);
     window.addEventListener("menu:close-tab", closeTabHandler);
@@ -8015,6 +8031,17 @@ const ProjectViewBody = memo(function ProjectViewBody({
             : undefined;
         if (restored || name || description)
           patchTabRaw(tab.id, { ...description, ...restored, ...name });
+        // The first prompt named it; the brain titles the work properly if the
+        // agent hasn't by the end of a short grace (brainSessionTitle.ts).
+        if (name)
+          requestBrainTabName({
+            prompt: opening,
+            tab: () =>
+              tabsRef.current.find(
+                (t): t is TermSubTab => t.type === "terminal" && t.id === tab.id,
+              ),
+            apply: (patch) => patchTabRaw(tab.id, patch),
+          });
       }
       if (tab && tab.id === activeTabIdRef.current && visibleRef.current)
         attentionRef.current(d.pty, { t: "focus", at: e.ts, visible: true }, cli);
@@ -13467,6 +13494,13 @@ const ProjectViewBody = memo(function ProjectViewBody({
                   if (livePtyByTab.current.get(tab.id) !== event.id) return;
                   livePtyByTab.current.delete(tab.id);
                   const code = event.exit_code;
+                  const then = exitMarkers.current.get(tab.id);
+                  if (then) {
+                    exitMarkers.current.delete(tab.id);
+                    window.dispatchEvent(
+                      new CustomEvent(TERMINAL_EXITED_EVENT, { detail: { then, code } }),
+                    );
+                  }
                   if (tab.spawnedTask) {
                     void settleAttempt({
                       attemptId: tab.spawnedTask.attemptId,

@@ -207,11 +207,11 @@ export function CompanionChat({
         {state.status === "unavailable" && (
           <div className="companion-needs">
             <p>
-              I need an agent CLI to think with — Claude Code, Codex, or any other
-              Canopy knows about. None is installed yet.
+              I run on your brain — the agent CLI you sign in to once for all of
+              Canopy. None is installed yet.
             </p>
             <button className="companion-needs-cta" onClick={onInstall} type="button">
-              Install one
+              Connect your brain
             </button>
           </div>
         )}

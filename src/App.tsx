@@ -167,6 +167,8 @@ import {
 import { useCliAutoUpdater } from "./cliAutoUpdate";
 import { TooltipLayer } from "./components/TooltipLayer";
 import { Onboarding } from "./components/Onboarding";
+import { BrainConnectHost } from "./components/BrainConnect";
+import { openBrainConnect } from "./brainConnect";
 import { Welcome } from "./components/Welcome";
 import { Dialog } from "./components/Dialog";
 import { TerminalGovernorCard } from "./components/TerminalGovernorDialog";
@@ -4031,7 +4033,7 @@ export default function App() {
           notices={deliveredToasts}
           onDismissNotice={dismissToast}
           onFollowNotice={(item) => void followAttention(item)}
-          onInstallCli={() => setSettingsOpen({ tab: "agents" })}
+          onInstallCli={openBrainConnect}
           onRetry={() => void launchCompanion()}
           proposal={proposal}
           onAnswerProposal={(accepted) => {
@@ -4201,6 +4203,9 @@ export default function App() {
       )}
       <Dictation notify={notify} />
       <ShareDialogHost />
+      {/* The brain's connection: probes at start, re-checks after a sign-in,
+          and opens "Connect your brain" for the chip and every call to action. */}
+      <BrainConnectHost />
       {/* Last, and once: every `title` in the app is drawn by this one bubble
           instead of the webview's native grey box. */}
       <TooltipLayer />

@@ -24,6 +24,7 @@ import { markRestored } from "../restorable";
 import {
   lastHumanPrompt,
   useAgentSessions,
+  useBrainSessionSummaries,
   workingOnNow,
   type SessionRow,
 } from "../agentSessions";
@@ -208,6 +209,7 @@ export function AgentsView({
   );
   const { agentSessions, termSessions, restorable, shared, claims, forget, lifeOf } =
     useAgentSessions({ visible: active, roots, stats, liveSessionIds });
+  useBrainSessionSummaries(active ? agentSessions : []);
   const integrations = useIntegrations(active);
   const settings = getSettings();
 

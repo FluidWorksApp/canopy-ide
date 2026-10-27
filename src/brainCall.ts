@@ -22,9 +22,9 @@ import { installedBrain } from "./brain";
 import { overBudget, recordBrainCall } from "./brainMeter";
 import { noteBrainOutcome } from "./brainStatus";
 import {
-  AGENT_CLIS,
   AGENT_CLIS_CHANGED_EVENT,
   CLI_INSTALLS_CHANGED_EVENT,
+  checkDesktopClis,
   streamsStructured,
   structuredRunnerFor,
   type AgentCli,
@@ -140,7 +140,10 @@ if (typeof window !== "undefined") {
 async function installedPredicate(now: number): Promise<(bin: string) => boolean> {
   if (installedOverride) return installedOverride;
   if (!installedCache || now - installedCache.at > INSTALLED_TTL_MS) {
-    const found = await ipc.whichCheck(AGENT_CLIS.map((c) => c.bin)).catch(() => ({}));
+    // The desktop's CLIs: brain calls run on the computer showing the IDE in
+    // every mode (NativeWorkspaceHost routes brain_* there), so a CLI that
+    // exists only inside a cloud workspace cannot be the brain.
+    const found = await checkDesktopClis();
     installedCache = { at: now, found };
   }
   const found = installedCache.found;

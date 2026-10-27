@@ -1,12 +1,19 @@
-// First-run walkthrough. Static, offline, instant — same contract as
-// HelpDialog. A centered carousel of a few slides; Skip is always reachable,
+// First-run walkthrough. A centered carousel of a few slides; Skip is always reachable,
 // Esc closes, and the last slide hands off to "New project" so the very next
 // thing after the intro is the actual entry point. Each slide carries a small
 // animated mock of the *actual* panel it describes — real labels, rows, status
 // colours and buttons, with a cursor that moves in, clicks, and the result
 // reveals — so the copy stays to a title and one line. All CSS-driven, no deps;
 // prefers-reduced-motion stops the motion and shows the resting state.
+//
+// The first slide is the one live step: connecting the brain. Every smart
+// feature runs on one agent CLI the person is already signed in to, so the tour
+// starts by finding it, checking it answers, and fixing it if it doesn't
+// (BrainConnect.tsx). Everything after it is static and offline. Skip still
+// works from the first slide — files and terminals need no brain — and the
+// status-bar chip keeps offering the step until it is done.
 import { useState } from "react";
+import { BrainConnectPanel } from "./BrainConnect";
 import { useEscape } from "../useEscape";
 import { Button, Checkbox, Select } from "./ui";
 import {
@@ -18,7 +25,6 @@ import {
   updateSettings,
 } from "../settings";
 import { currentPlatform, format, SHORTCUT_PROFILES } from "../shortcuts";
-import { AGENT_CLIS } from "../projects";
 
 interface OnboardingProps {
   /** Called when the walkthrough is dismissed any way (Skip, Esc, Done). */
@@ -86,6 +92,26 @@ const PLATFORM_LABEL = PLATFORM === "macos" ? "macOS" : PLATFORM === "windows" ?
 
 const SLIDES: Slide[] = [
   {
+    icon: "✳",
+    title: "Connect your brain",
+    body: "One agent CLI you're already signed in to powers every smart feature in Canopy.",
+    mock: (
+      <Scene chrome="new project" vars={{ "--cx0": "240px", "--cy0": "24px", "--cx1": "78px", "--cy1": "44px" } as React.CSSProperties}>
+        <div className="ob-cards">
+          <div className="ob-card"><Logo bg="#2a2e42" glyph="›_" fg="#c9d1d9" /><span>Shell</span></div>
+          <div className="ob-card sel"><Logo bg="#d97757" glyph="✳" /><span>Claude Code</span></div>
+          <div className="ob-card"><Logo bg="#10a37f" glyph="◇" /><span>Codex CLI</span><span className="ob-card-badge">install</span></div>
+          <div className="ob-card"><Logo bg="#f34e3f" glyph="A" /><span>Amp</span></div>
+          <div className="ob-card"><Logo bg="#3b6fd6" glyph="»" /><span>Aider</span><span className="ob-card-badge">install</span></div>
+        </div>
+        <div className="ob-term ob-reveal">
+          <span className="ob-mono muted">$ claude</span>
+          <span className="ob-mono" style={{ color: "var(--ok)" }}>▍ ready</span>
+        </div>
+      </Scene>
+    ),
+  },
+  {
     icon: "⌨",
     title: "Keep your muscle memory",
     body: "Start with the shortcuts you already know.",
@@ -116,26 +142,6 @@ const SLIDES: Slide[] = [
               shortcuts shown for {PLATFORM_LABEL}
             </span>
           </div>
-        </div>
-      </Scene>
-    ),
-  },
-  {
-    icon: "✳",
-    title: "Agents are the hero",
-    body: "Natively manage your coding CLIs.",
-    mock: (
-      <Scene chrome="new project" vars={{ "--cx0": "240px", "--cy0": "24px", "--cx1": "78px", "--cy1": "44px" } as React.CSSProperties}>
-        <div className="ob-cards">
-          <div className="ob-card"><Logo bg="#2a2e42" glyph="›_" fg="#c9d1d9" /><span>Shell</span></div>
-          <div className="ob-card sel"><Logo bg="#d97757" glyph="✳" /><span>Claude Code</span></div>
-          <div className="ob-card"><Logo bg="#10a37f" glyph="◇" /><span>Codex CLI</span><span className="ob-card-badge">install</span></div>
-          <div className="ob-card"><Logo bg="#f34e3f" glyph="A" /><span>Amp</span></div>
-          <div className="ob-card"><Logo bg="#3b6fd6" glyph="»" /><span>Aider</span><span className="ob-card-badge">install</span></div>
-        </div>
-        <div className="ob-term ob-reveal">
-          <span className="ob-mono muted">$ claude</span>
-          <span className="ob-mono" style={{ color: "var(--ok)" }}>▍ ready</span>
         </div>
       </Scene>
     ),
@@ -311,7 +317,8 @@ export function Onboarding({ onClose, onCreateProject }: OnboardingProps) {
           </div>
           <p className="onboarding-body">{slide.body}</p>
           <div className="onboarding-config">
-            {step === 0 && (
+            {step === 0 && <BrainConnectPanel onTerminalOpened={onClose} />}
+            {step === 1 && (
               <>
                 <span className="onboarding-config-label">Which sounds like you?</span>
                 <div className="onboarding-persona" role="radiogroup" aria-label="Your experience with code">
@@ -343,21 +350,6 @@ export function Onboarding({ onClose, onCreateProject }: OnboardingProps) {
                     <option key={option.id} value={option.id}>
                       {option.label} — {option.description}
                     </option>
-                  ))}
-                </Select>
-              </>
-            )}
-            {step === 1 && (
-              <>
-                <span className="onboarding-config-label">Choose the agent Canopy starts by default</span>
-                <Select
-                  width="lg"
-                  aria-label="Default agent"
-                  value={settings.defaultAgent}
-                  onChange={(e) => patch({ defaultAgent: e.target.value })}
-                >
-                  {AGENT_CLIS.map((cli) => (
-                    <option key={cli.id} value={cli.id}>{cli.name}</option>
                   ))}
                 </Select>
               </>

@@ -460,6 +460,11 @@ export interface Settings {
   /** Per-feature daily caps in USD, keyed by brain feature tag. A feature with
    *  no entry is capped only by the daily total. */
   brainFeatureBudgetsUsd: Record<string, number>;
+  /** Let the brain title agent tabs whose agent never named its own task, and
+   *  write the one-line summary the Agents views show for a session. One cheap
+   *  background call per opening prompt, cached by its text
+   *  (brainSessionTitle.ts). Off = the prompt's first words, as before. */
+  brainSessionTitles: boolean;
   /** Connect Claude Code to Canopy as its IDE, the way it connects to VS Code:
    *  proposed edits open as a diff to accept, tweak or reject, the editor
    *  selection reaches the prompt, and the CLI reads diagnostics off Canopy's
@@ -672,6 +677,7 @@ export const DEFAULTS: Settings = {
   brainBackgroundModel: "",
   brainDailyBudgetUsd: null,
   brainFeatureBudgetsUsd: {},
+  brainSessionTitles: true,
   claudeIdeIntegration: true,
   turnRollback: true,
   notificationPopupsEnabled: true,
@@ -831,6 +837,7 @@ export function getSettings(): Settings {
     value.brainFeatureBudgetsUsd = featureBudgets(value.brainFeatureBudgetsUsd);
     if (typeof value.brainModel !== "string") value.brainModel = "";
     if (typeof value.brainBackgroundModel !== "string") value.brainBackgroundModel = "";
+    if (typeof value.brainSessionTitles !== "boolean") value.brainSessionTitles = true;
   } catch {
     value = { ...DEFAULTS };
   }

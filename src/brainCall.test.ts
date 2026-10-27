@@ -19,6 +19,7 @@ import { brainSpend, recordBrainCall, resetBrainMeterForTests } from "./brainMet
 import { brainConnection, resetBrainConnectionForTests } from "./brainStatus";
 import { agentCliFor } from "./projects";
 import { updateSettings } from "./settings";
+import { mockCommands } from "./test/setup";
 import { CLAUDE_RUNNER, CODEX_RUNNER, brainArgs } from "./structuredRunners";
 
 type Out = ipc.StructuredRunnerOut;
@@ -190,15 +191,16 @@ describe("askBrain", () => {
     expect(spawnMock).not.toHaveBeenCalled();
   });
 
-  it("detects installed CLIs through which_check when no host predicate is set", async () => {
+  it("detects the desktop's installed CLIs through which_check when no host predicate is set", async () => {
     setBrainInstalledPredicate(null);
-    (ipc.whichCheck as unknown as ReturnType<typeof vi.fn>).mockResolvedValueOnce({ [claude.bin]: true });
+    const which = vi.fn(() => ({ [claude.bin]: true }));
+    mockCommands({ which_check: which });
     scripted([line(result())]);
     expect((await askBrain({ feature: "receipt", prompt: "x", cwd: "/r" })).ok).toBe(true);
     // Cached: a second call does not look again.
     scripted([line(result())]);
     await askBrain({ feature: "receipt", prompt: "x", cwd: "/r" });
-    expect(ipc.whichCheck).toHaveBeenCalledTimes(1);
+    expect(which).toHaveBeenCalledTimes(1);
   });
 
   it("times out, kills the call and reports timeout", async () => {

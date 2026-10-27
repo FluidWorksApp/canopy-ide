@@ -94,3 +94,53 @@ describe("discarding", () => {
     expect(screen.getByText(/nothing can bring it back/)).toBeTruthy();
   });
 });
+
+describe("Suggest message", () => {
+  it("puts the brain's message in the commit box", async () => {
+    const onSuggestMessage = vi.fn(async () => ({ ok: true as const, message: "Fix the app header\n\nIt overlapped." }));
+    panel({
+      groups: [group([file({ staged: true, status: "M " })])],
+      onCommit: vi.fn(async () => {}),
+      onSuggestMessage,
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Suggest message" }));
+    expect(onSuggestMessage).toHaveBeenCalledWith("/repo", ["src/app.ts"]);
+    expect(await screen.findByDisplayValue(/Fix the app header/)).toBeTruthy();
+  });
+
+  it("says why when the brain can't answer, and is off with nothing staged", async () => {
+    const onSuggestMessage = vi.fn(async () => ({
+      ok: false as const,
+      reason: "rate-limited" as const,
+      message: "limit",
+    }));
+    panel({
+      groups: [group([file({ staged: true, status: "M " }), file({ path: "b.ts", abs: "/repo/b.ts" })])],
+      onCommit: vi.fn(async () => {}),
+      onSuggestMessage,
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Suggest message" }));
+    expect(await screen.findByText(/rate-limited/)).toBeTruthy();
+  });
+
+  it("is disabled when nothing is staged", () => {
+    panel({ onCommit: vi.fn(async () => {}), onSuggestMessage: vi.fn() });
+    expect((screen.getByRole("button", { name: "Suggest message" }) as HTMLButtonElement).disabled).toBe(true);
+  });
+});
+
+describe("with no brain connected", () => {
+  it("swaps Suggest message for the one Connect your brain call to action", async () => {
+    const { noteBrainOutcome, resetBrainConnectionForTests } = await import("../brainStatus");
+    noteBrainOutcome({ ok: false, reason: "signed-out", message: "Not logged in" }, { id: "x", name: "X" });
+    try {
+      panel({ groups: [group([file({ staged: true, status: "M " })])], onCommit: vi.fn(async () => {}) });
+      expect(screen.queryByRole("button", { name: "Suggest message" })).toBeNull();
+      expect(screen.getByRole("button", { name: "Connect your brain" })).toBeTruthy();
+      // Committing by hand still works without a brain.
+      expect(screen.getByRole("button", { name: /Commit/ })).toBeTruthy();
+    } finally {
+      resetBrainConnectionForTests();
+    }
+  });
+});
