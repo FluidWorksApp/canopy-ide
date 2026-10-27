@@ -26,7 +26,8 @@ import {metricsReader} from './workspace-metrics.mjs';
 import {writeWorkspaceFile} from './file-write.mjs';
 import {WorkspaceUploads} from './file-upload.mjs';
 import {listWorkspaceFiles,searchWorkspaceFiles} from './file-search.mjs';
-import {agentWorkspaceAt} from './agent-workspace.mjs';
+import {agentWorkspaceCommands} from './agent-workspace.mjs';
+import {gitOpsCommands} from './git-ops.mjs';
 import {workspaceActivity} from './activity.mjs';
 import {sessionProcessReader} from './session-processes.mjs';
 import {McpRegistry} from './mcp-servers.mjs';
@@ -105,7 +106,7 @@ familyContext.authorize=async(attemptId,cwd)=>{
 };
 const channels=new ChannelHub();
 export const NATIVE_FAMILIES=Object.assign({},...[
- workspaceToolsCommands,workspaceCleanupCommands,lspCommands,githubCommands,taskStoreCommands,workflowStoreCommands,structuredRunnerCommands,turnsCommands,provenanceCommands,
+ workspaceToolsCommands,workspaceCleanupCommands,lspCommands,githubCommands,taskStoreCommands,workflowStoreCommands,structuredRunnerCommands,turnsCommands,provenanceCommands,gitOpsCommands,agentWorkspaceCommands,
 ].map(family=>family(familyContext)));
 const FAMILIES=NATIVE_FAMILIES;
 const CLIS=['claude','codex','amp','aider','agy','opencode','omp','cursor-agent','grok'];
@@ -131,7 +132,6 @@ export async function nativeInvoke(command,args={}){
     if(!Array.isArray(args.sessions)||args.sessions.length>32)throw Error('Invalid session inventory');
     return sessionProcesses(args.sessions);
   }
-  if(command==='agent_workspace_at')return agentWorkspaceAt(args,{run,scoped});
   if(command==='workspace_activity')return workspaceActivity();
   if(command==='workspace_metrics')return workspaceMetrics();
   if(command==='workspace_browser_request'){
