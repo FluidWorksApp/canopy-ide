@@ -41,6 +41,12 @@ Other findings:
   `https://canopyide.dev`. Settings → Accounts / the Teams panel's account
   button (`AccountSettings.tsx`) shows the email and signs in or out; both emit
   `canopy:account-changed`, which every account-bound cache clears on.
+  Off macOS, `account_token()` returns nothing and `store_account_token`
+  refuses ("Secure account storage is unavailable"), so **desktop account
+  sign-in, and with it everything "seamless when signed in", is macOS-only
+  today**. Linux *workspace* mode is unaffected: there, `canopy_account_request`
+  and `clipboard_write_text` are `LOCAL_UI` commands
+  (`NativeWorkspaceHost.ts`) that run on the desktop showing the IDE.
 - **End-to-end encryption already rides on the account.** Each device
   registers a P-256 agreement and signing key, proven by signature
   (`peer-messaging.mjs` `registrationProof`). The team directory
@@ -59,7 +65,8 @@ Other findings:
 - **Team messaging and presence**: unchanged and already automatic (above).
   What changed is that the join-code relay no longer appears in the signed-in
   flow. The Teams panel shows "No account? Connect with a join code" only when
-  signed out, or while a relay session is already running
+  signed out, when teams can't be loaded at all (an office LAN with no route to
+  Canopy, the relay's original use), or while a relay session is already running
   (`TeamPanel.tsx`, `TeamHub` `onAccount`). Join codes and the Remote PIN
   remain for people without accounts.
 - **Shared sessions**: opening "Shared sessions" connects for viewing by itself
@@ -144,7 +151,8 @@ identity checks in `NativeWorkspaceHost.ts`, `accountWorkspace.ts` and
 - People without access get **404, the same as for a link that doesn't exist**.
   A revoked link returns 410 only to people who could otherwise open it.
 - Creating a link requires the same access as opening it. Revoking requires
-  being its creator, the workspace owner or a team owner/admin.
+  being able to open it, plus being its creator, the workspace owner, or an
+  owner/admin of the team whose namespace holds it.
 - **Message links store ids only** (`teamId`, `messageId`, DM participants).
   Bodies never enter the account database (`teams.mjs` refuses them). The
   message is found in the opener's local encrypted history.
@@ -218,6 +226,11 @@ None of this needs new secrets. These steps are outside this repository.
      `RESERVED_HANDLES` in both `readable-links.mjs` and `src/readableLinks.ts`
      (a test keeps them identical). If a team already holds that handle, rename
      it first.
+   - Pass `origin` matching the deployment. `linksApi` and
+     `readableRequestDecision` default to `https://canopyide.dev`, so on a Vercel
+     preview (`*.vercel.app`) `parseReadableUrl` rejects the preview host unless
+     the adapter passes `{origin: 'https://' + req.headers.host}` there. Only do
+     that for preview deployments: production must keep the canonical origin.
    - Optional: set `CANOPY_PUBLIC_URL` only if links should use another public
      HTTPS origin. The default is `https://canopyide.dev`, validated by
      `invitationPublicOrigin`.

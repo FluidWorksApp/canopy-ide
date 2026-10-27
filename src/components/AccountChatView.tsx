@@ -150,7 +150,7 @@ export function AccountChatView({conversation,active=true}:{conversation:Account
  const focused=useRef<string>(undefined);
  useEffect(()=>{
   if(!focusMessage||focused.current===focusMessage)return;
-  const el=log.current?.querySelector<HTMLElement>(`[data-message="${CSS.escape(focusMessage)}"]`);if(!el)return;
+  const el=log.current?.querySelector<HTMLElement>(`[data-message="${focusMessage.replace(/[^A-Za-z0-9-]/g,'')}"]`);if(!el)return;
   focused.current=focusMessage;el.scrollIntoView?.({block:'center'});el.classList.add('is-linked');
   const timer=window.setTimeout(()=>el.classList.remove('is-linked'),2400);return()=>window.clearTimeout(timer);
  },[focusMessage,messages.length]);

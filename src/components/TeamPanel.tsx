@@ -536,6 +536,6 @@ function RelayTeamPanel({ relay, onOpenChat, onOpenInboxItem, onNotice }: TeamPa
 export function TeamPanel(props: TeamPanelProps){
  const [advanced,setAdvanced]=useState(false),[account,setAccount]=useState<TeamAccountState>('unknown');
  const relayActive=props.relay.status.role!=='off';
- const offerRelay=account==='signed-out'||relayActive||advanced;
+ const offerRelay=account==='signed-out'||account==='unavailable'||relayActive||advanced;
  return <div style={{height:"100%",overflow:"auto"}}>{advanced?<RelayTeamPanel {...props}/>:<TeamHub onOpenChat={props.onOpenAccountChat} onAccount={setAccount}/>}{offerRelay&&<button className="team-input" onClick={()=>setAdvanced(!advanced)}>{advanced?"Back to Teams":relayActive?"Self-hosted relay (connected)":"No account? Connect with a join code"}</button>}</div>;
 }

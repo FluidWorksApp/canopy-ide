@@ -218,7 +218,9 @@ export async function readableLinkAction(db,user,input={}){
   const row=await lookup(db,{...input,origin}),allowed=await authorizedView(db,user,row);
   if(!allowed)fail(404,'Link not found');
   if(row.revoked_at)return {revoked:true};
-  if(row.created_by!==user.id&&!allowed.owner&&!['owner','admin'].includes(allowed.teamRole))fail(403,'Only the person who made this link, the workspace owner or a team admin can revoke it');
+  // Admins of the team whose namespace holds the link may tidy it up.
+  const teamRole=allowed.teamRole??(row.namespace_team?(await teamMember(db,row.namespace_team,user.id))?.role:null);
+  if(row.created_by!==user.id&&!allowed.owner&&!['owner','admin'].includes(teamRole))fail(403,'Only the person who made this link, the workspace owner or a team admin can revoke it');
   await db.query('UPDATE readable_link SET revoked_at=now(),revoked_by=$2 WHERE id=$1 AND revoked_at IS NULL',[row.id,user.id]);
   return {revoked:true};
  }

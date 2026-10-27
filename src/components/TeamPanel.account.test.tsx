@@ -19,3 +19,7 @@ it('a relay session already running stays reachable when signed in',()=>{
  render(<TeamPanel {...props('client')}/>);act(()=>hub.report?.('signed-in'));
  expect(screen.getByRole('button',{name:'Self-hosted relay (connected)'})).toBeInTheDocument();
 });
+it('when teams cannot be loaded at all (offline LAN), the join-code fallback is offered',()=>{
+ render(<TeamPanel {...props()}/>);act(()=>hub.report?.('unavailable'));
+ expect(screen.getByRole('button',{name:'No account? Connect with a join code'})).toBeInTheDocument();
+});

@@ -125,3 +125,9 @@ test('unknown actions and kinds are refused',async()=>{
  await assert.rejects(()=>readableLinkAction(dbWith(()=>[]),user,{action:'list',origin}),e=>e.code===400);
  await assert.rejects(()=>readableLinkAction(dbWith(()=>[]),user,{action:'ensure',kind:'file',origin}),e=>e.code===400);
 });
+test('a team admin can revoke a workspace link in the team namespace',async()=>{
+ const row={id:'l2',namespace:'platform',path:'api',kind:'workspace',target:{workspaceId:'ws-1'},created_by:'bob',revoked_at:null,namespace_team:team};
+ const db=role=>dbWith(sql=>sql.includes('FROM readable_link l JOIN link_namespace')?[row]:sql.startsWith('SELECT owner_id,organization_id FROM workspace')?[{owner_id:'carol',organization_id:null}]:sql.includes('FROM workspace_member')?[{role:'viewer',permissions:{projects:'all'}}]:sql.startsWith('SELECT name,owner_id FROM workspace')?[{name:'API',owner_id:'carol'}]:sql.includes('FROM active_team_member m JOIN team t')?[{role,name:'Platform'}]:[]);
+ await assert.rejects(()=>readableLinkAction(db('member'),user,{action:'revoke',url:'https://canopyide.dev/platform/api',origin}),e=>e.code===403);
+ assert.deepEqual(await readableLinkAction(db('admin'),user,{action:'revoke',url:'https://canopyide.dev/platform/api',origin}),{revoked:true});
+});
