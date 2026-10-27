@@ -87,6 +87,7 @@ export function setReceiptEngineDepsForTests(next: Partial<EngineDeps> | null): 
 
 const TEST_TIMEOUT_MS = 10 * 60 * 1000;
 const CHECK_TIMEOUT_MS = 5 * 60 * 1000;
+const REMOTE_TIMEOUT_MS = 300 * 1000;
 const MAX_FILES = 200;
 const PATCH_KEEP = 256 * 1024;
 
@@ -199,7 +200,10 @@ async function runCheck(spec: CheckSpec, dir: string): Promise<CheckResult> {
   const base = { id: spec.id, label: spec.label, kind: spec.kind, command };
   try {
     const r = await deps.run(dir, spec.argv, {
-      timeoutMs: spec.kind === "test" ? TEST_TIMEOUT_MS : CHECK_TIMEOUT_MS,
+      // A Linux workspace answers over HTTP that gives up at 330 s
+      // (remoteExecution/client.ts); stop the check first so it reads
+      // "timed out" rather than as a dropped connection.
+      timeoutMs: Math.min(spec.kind === "test" ? TEST_TIMEOUT_MS : CHECK_TIMEOUT_MS, deps.remote() ? REMOTE_TIMEOUT_MS : Infinity),
       keepBytes: 64 * 1024,
     });
     const combined = [r.stdout, r.stderr].filter(Boolean).join("\n");

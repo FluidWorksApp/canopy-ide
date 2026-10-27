@@ -127,7 +127,9 @@ pub async fn run_check(
     // find by bare name, so go through cmd the way a terminal would.
     #[cfg(windows)]
     let mut cmd = {
-        let mut c = tokio::process::Command::new("cmd");
+        // %ComSpec% names cmd.exe wherever Windows put it.
+        let shell = std::env::var("ComSpec").unwrap_or_else(|_| "cmd.exe".into());
+        let mut c = tokio::process::Command::new(shell);
         c.arg("/C").arg(&resolved).args(&argv[1..]);
         c
     };
