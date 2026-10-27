@@ -41,6 +41,7 @@ mod lsp;
 mod maintenance;
 mod mcp;
 mod mcp_client;
+mod memory_tool;
 mod mesh;
 mod notes;
 mod notify;

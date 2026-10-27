@@ -294,6 +294,8 @@ import { TasksPanel, type RunningMicroTask } from "../TasksPanel";
 import { NotesPanel } from "../NotesPanel";
 import { NoteView } from "../NoteView";
 import { ResearchPanel } from "../ResearchPanel";
+import { MemoryPanel } from "../MemoryPanel";
+import { useMemoryReviewCount } from "../../useMemories";
 import { ResearchImportCta } from "../ResearchImportCta";
 import { ResearchView } from "../ResearchView";
 import {
@@ -1716,6 +1718,8 @@ const ProjectViewBody = memo(function ProjectViewBody({
     [project.components, worktreeEnv],
   );
   const roots = useMemo(() => components.map((c) => c.path), [components]);
+  // Team memory waiting on a person (MemoryPanel.tsx) — the rail's badge.
+  const memoryBadge = useMemoryReviewCount(roots);
   const rootsKey = roots.join("\n");
   // Cmd+T's listener is registered once; without this it closes over the
   // components from mount and opens shells in the main checkout even after a
@@ -14575,6 +14579,14 @@ const ProjectViewBody = memo(function ProjectViewBody({
           onOpenAll={() => openCollectionPage("research-list")}
         />
       ))}
+      {sidePane("memory", () => (
+        <MemoryPanel
+          roots={roots}
+          onOpenSession={({ ptyId }) => {
+            if (ptyId != null) jumpToPty(ptyId);
+          }}
+        />
+      ))}
       {sidePane("agents", () => (
         <AgentsPanel
           visible={sideTab === "agents" && visible && sideOpen}
@@ -14646,6 +14658,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
             serversBadge={serversRunning}
             prsBadge={prsBadge}
             tasksBadge={runningMicro.length}
+            memoryBadge={memoryBadge}
             pendingCount={pending.length}
             urgentCount={urgentCount}
             teamBadge={teamBadge}

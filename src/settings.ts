@@ -504,6 +504,19 @@ export interface Settings {
    *  existing ones stay restorable until retention prunes them. Claude Code
    *  only for now, and only in git checkouts. */
   turnRollback: boolean;
+  /** Team memory (memoryExtract.ts): after agent turns, ask the brain on the
+   *  background tier for 0–3 durable decisions/constraints/conventions/facts
+   *  and file them in the ledger as *proposed* — never served to agents until
+   *  a person approves them in the Memory panel. */
+  memoryAutoExtract: boolean;
+  /** Days a new memory lives before it must be reconfirmed. Facts go stale
+   *  fastest; decisions, constraints and conventions share the longer clock. */
+  memoryFactExpiryDays: number;
+  memoryDecisionExpiryDays: number;
+  /** What happens to memories from a session that read untrusted content
+   *  (web pages, the browser, tickets, PR comments): "quarantine" files them
+   *  behind an explicit approval, "skip" never extracts from such a session. */
+  memoryQuarantine: "quarantine" | "skip";
   /** Show attention items outside the notification centre: corner cards,
    * companion notices, native banners, and the remote companion channel. Off
    * is a presentation preference only — every item stays in the shared queue
@@ -711,6 +724,10 @@ export const DEFAULTS: Settings = {
   outcomesInsight: true,
   claudeIdeIntegration: true,
   turnRollback: true,
+  memoryAutoExtract: true,
+  memoryFactExpiryDays: 90,
+  memoryDecisionExpiryDays: 180,
+  memoryQuarantine: "quarantine",
   notificationPopupsEnabled: true,
   teamMessageNotifications: true,
   teamMessagePreviews: true,
@@ -887,6 +904,13 @@ export function getSettings(): Settings {
     value.defaultProjectLens = storedDefaultFor(lensFromStoredDefault(stored.defaultProjectLens ?? DEFAULTS.defaultProjectLens));
     if (typeof value.awarenessEnabled !== "boolean") value.awarenessEnabled = true;
     value.awarenessHotspots = hotspotOverrides(value.awarenessHotspots);
+    // An expiry is a safety property (stale memory stops being served), so a
+    // corrupt value falls back to the default rather than to "never".
+    for (const key of ["memoryFactExpiryDays", "memoryDecisionExpiryDays"] as const) {
+      const days = Number(value[key]);
+      value[key] = Number.isFinite(days) && days >= 1 ? Math.min(Math.round(days), 3650) : DEFAULTS[key];
+    }
+    if (value.memoryQuarantine !== "skip") value.memoryQuarantine = "quarantine";
   } catch {
     value = { ...DEFAULTS };
   }

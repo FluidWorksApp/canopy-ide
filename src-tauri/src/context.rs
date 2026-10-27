@@ -94,6 +94,8 @@ const SUPPORTED_TOOLS: &[&str] = &[
     "canopy_editor_state",
     "canopy_hover",
     "canopy_job_done",
+    "canopy_memory",
+    "canopy_memory_propose",
     "canopy_mesh",
     "canopy_mesh_send",
     "canopy_mesh_submit",
@@ -580,6 +582,7 @@ pub fn start(app: tauri::AppHandle) {
             .route("/ctx/mesh", post(mesh_op))
             .route("/ctx/research", post(research_op))
             .route("/ctx/notes", post(notes_op))
+            .route("/ctx/memory", post(memory_op))
             .route("/ctx/mcp-task", post(mcp_task_op))
             .route("/ctx/tools", get(tools))
             .with_state(app.clone());
@@ -1682,6 +1685,102 @@ async fn notes_op(
     );
 
     match out {
+        Ok(value) => (StatusCode::OK, value.to_string()),
+        Err(text) => (StatusCode::BAD_REQUEST, text),
+    }
+}
+
+// ---- team memory ---------------------------------------------------------
+//
+// Just-in-time retrieval from the ledger (memory_tool.rs has the rules): an
+// agent asks before deciding, and hears only what a person approved. A
+// proposal lands as "proposed" — the Memory panel is where it becomes memory,
+// and the frontend quarantines it there if this session read untrusted
+// content (memoryExtract.ts), which this side cannot see.
+
+#[derive(serde::Deserialize)]
+struct MemoryReq {
+    op: String,
+    #[serde(default)]
+    cwd: String,
+    #[serde(default)]
+    project: Option<String>,
+    #[serde(flatten)]
+    rest: serde_json::Value,
+}
+
+async fn memory_op(
+    State(app): State<tauri::AppHandle>,
+    headers: HeaderMap,
+    Json(req): Json<MemoryReq>,
+) -> (StatusCode, String) {
+    let Some(who) = caller(&app, &headers) else {
+        return (StatusCode::UNAUTHORIZED, "bad token".into());
+    };
+    // The same scoping as notes: the project named, else the one the caller
+    // runs in. Memory is per repository, so the ledger is keyed by that
+    // project's checkout rather than by whatever directory was passed.
+    // The hook's live cwd (an agent that moved into a worktree is there now),
+    // else where its terminal started.
+    let cwd = if req.cwd.is_empty() {
+        who.cwd().unwrap_or_default().to_string()
+    } else {
+        req.cwd.clone()
+    };
+    let Some((_, _, roots)) = project_for_request(&app, req.project.as_deref(), &cwd) else {
+        return (
+            StatusCode::BAD_REQUEST,
+            format!(
+                "Team memory belongs to a project, and this call named none Canopy has open{}. \
+                 Pass `project` with the project's name, or run from inside one of its directories.",
+                scope_hint(req.project.as_deref(), &cwd)
+            ),
+        );
+    };
+    // The caller's own checkout when it is in this project (a worktree folds
+    // to the same ledger), else the project's first component.
+    let root = if req.project.is_none() && !cwd.is_empty() {
+        cwd
+    } else {
+        roots.into_iter().next().unwrap_or(cwd)
+    };
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+    let pty_id = who.agent().map(|a| a.pty_id);
+    let result = tauri::async_runtime::spawn_blocking(move || match req.op.as_str() {
+        "query" => {
+            let q: crate::memory_tool::MemoryQuery =
+                serde_json::from_value(req.rest).map_err(|e| e.to_string())?;
+            let entries = crate::ledger::query(
+                &root,
+                &crate::ledger::LedgerQuery {
+                    kinds: Some(vec!["memory".into()]),
+                    limit: Some(5000),
+                    ..Default::default()
+                },
+            )?;
+            Ok(crate::memory_tool::select(&entries, &q, now))
+        }
+        "propose" => {
+            let p: crate::memory_tool::Proposal =
+                serde_json::from_value(req.rest).map_err(|e| e.to_string())?;
+            let entry = crate::memory_tool::proposal_entry(&p, pty_id, now)?;
+            let stored = crate::ledger::append_and_emit(&app, &root, entry)?;
+            Ok(serde_json::json!({
+                "id": stored.data.get("memoryId"),
+                "status": "proposed",
+                "note": "Recorded as a proposal. A person reviews it in Canopy's Memory panel; \
+                         it is not served to any agent until they approve it.",
+            }))
+        }
+        other => Err(format!("unknown memory op \"{other}\"")),
+    })
+    .await
+    .map_err(|e| e.to_string())
+    .and_then(|r| r);
+    match result {
         Ok(value) => (StatusCode::OK, value.to_string()),
         Err(text) => (StatusCode::BAD_REQUEST, text),
     }

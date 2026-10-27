@@ -5,6 +5,7 @@ import {
   GitBranchIcon,
   GlobeIcon,
   IssueIcon,
+  MemoryIcon,
   NoteIcon,
   PlugIcon,
   PullRequestIcon,
@@ -19,6 +20,7 @@ import {
   PixelGitIcon,
   PixelIntegrationsIcon,
   PixelIssuesIcon,
+  PixelMemoryIcon,
   PixelNotesIcon,
   PixelResearchIcon,
   PixelReviewsIcon,
@@ -131,6 +133,14 @@ const RAIL_GROUPS: { id: string; name: string; tabs: RailTab[] }[] = [
         Pixel: PixelResearchIcon,
         title: "Research — what's been investigated, and what shipped from it",
       },
+      // Beside research: memory is what the team decided, research is what it
+      // found out. Its badge counts entries waiting on a person's approval.
+      {
+        key: "memory",
+        Icon: MemoryIcon,
+        Pixel: PixelMemoryIcon,
+        title: "Team memory — decisions and conventions your agents are told",
+      },
       {
         key: "team",
         Icon: TeamIcon,
@@ -177,6 +187,8 @@ interface ActivityRailProps {
   /** PRs waiting on this user, across every open project. */
   prsBadge: number;
   tasksBadge: number;
+  /** Team memory entries waiting for a person's approval. */
+  memoryBadge?: number;
   pendingCount: number;
   urgentCount: number;
   teamBadge: number;
@@ -205,6 +217,7 @@ function ActivityRailImpl({
   serversBadge,
   prsBadge,
   tasksBadge,
+  memoryBadge = 0,
   pendingCount,
   urgentCount,
   teamBadge,
@@ -261,6 +274,11 @@ function ActivityRailImpl({
       )}
       {t.key === "tasks" && tasksBadge > 0 && (
         <span className="rail-badge">{Math.min(tasksBadge, 99)}</span>
+      )}
+      {t.key === "memory" && memoryBadge > 0 && (
+        <span className="rail-badge" data-testid="memory-rail-badge">
+          {Math.min(memoryBadge, 99)}
+        </span>
       )}
       {t.key === "agents" && pendingCount > 0 && (
         <span
