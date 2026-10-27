@@ -30,6 +30,7 @@ import {listWorkspaceFiles,searchWorkspaceFiles} from './file-search.mjs';
 import {agentWorkspaceCommands} from './agent-workspace.mjs';
 import {gitOpsCommands} from './git-ops.mjs';
 import {workspaceMiscCommands} from './workspace-misc.mjs';
+import {TerminalGovernor,governorSampler,cliKeyOf} from './terminal-governor.mjs';
 import {mcpClientCommands} from './mcp-client.mjs';
 import {spotIndexCommands} from './spot-index.mjs';
 import {workspaceActivity} from './activity.mjs';
@@ -105,6 +106,21 @@ const familyContext={run,scoped,execute,home:HOME,root:ROOT,mcpRegistry,
 familyContext.changed=familyContext.pulse;
 // Hooks and MCP for one CLI inside one profile root (profiles.rs root_for).
 familyContext.setupAgent=async(agent,id)=>{const profile=(await profiles.list()).find(p=>p.id===String(id??''));if(!profile)throw Error('Unknown profile');return profile.id==='default'?integrations.setup(agent):new AgentIntegrations(profile.root).setup(agent);};
+// Per-terminal memory budgets (terminal-governor.mjs): the runner's live
+// sessions, each measured as its process tree's resident set by a reader of
+// its own (session_process_stats keeps its CPU deltas apart).
+{
+ const runnerFetch=(route,init={})=>fetch(`http://127.0.0.1:8080${route}`,{...init,headers:{authorization:`Bearer ${process.env.CANOPY_RUNNER_TOKEN??''}`,'content-type':'application/json'},signal:AbortSignal.timeout(5000)});
+ const measure=sessionProcessReader();
+ familyContext.terminalGovernor=new TerminalGovernor({defaultsFile:HOME+'/.canopy/terminal-governor-defaults.json'});
+ familyContext.governorSampler=governorSampler({governor:familyContext.terminalGovernor,sample:async()=>{
+  const response=await runnerFetch('/sessions');if(!response.ok)throw Error('runner sessions unavailable');
+  const meta=await metadata('ide-terminals.json',{});
+  const sessions=(await response.json()).filter(x=>x.exitCode==null).slice(0,32).map(x=>({...x,requestId:meta[String(x.id)]?.requestId}));
+  return (await measure(sessions)).map(stat=>({id:stat.id,bytes:stat.total_mem_bytes,cliKey:cliKeyOf(stat.agent_hint)}));
+ }});
+ familyContext.stopSession=async id=>{const response=await runnerFetch(`/sessions/${id}/stop`,{method:'POST',body:'{}'});if(!response.ok)throw Error(`the workspace refused to stop terminal ${id}`);};
+}
 const taskStore=taskStoreFor(familyContext);
 // A structured runner may only run the current attempt, in the worktree its task reserved.
 familyContext.authorize=async(attemptId,cwd)=>{
@@ -187,12 +203,6 @@ export async function nativeInvoke(command,args={}){
   if(command==='relay_status')return {role:'off',code:null,port:null,ips:[],addr:null,self_id:null,name:null,visibility:null,public_ip:null,members:[]};
   if(['notes_list','notes_due','research_list'].includes(command))return metadata(command+'.json',[]);
   if(['context_tools','context_publish','set_context_scopes','pr_watch_set'].includes(command)){await saveMetadata(command+'.json',args);if(command==='pr_watch_set')prObserver.watch(args.paths,args.focused);return;}
-  if(command==='terminal_governor_status'){
-    const limit=Number(await readFile('/sys/fs/cgroup/memory.max','utf8'));
-    const used=Number(await readFile('/sys/fs/cgroup/memory.current','utf8'));
-    if(!Number.isFinite(limit)||!Number.isFinite(used))throw Error('Workspace memory measurement unavailable');
-    return {capability:{platform:'linux',enforcement:'monitor_only',measurement:'workspace cgroup memory.current',hard_limit:true,pause:false,soft_limit:false,dynamic_raise:false,mechanism:'Docker cgroup memory.max',detail:'The hard limit covers this entire workspace, including agents and its desktop. Per-agent budgets are unavailable.'},host_total_bytes:limit,host_available_bytes:Math.max(0,limit-used),protected_reserve_bytes:0,aggregate_terminal_bytes:used,grantable_headroom_bytes:0,fallback_policy:'notify_natively_and_refuse_automatic_grant_pause_or_stop',sessions:[]};
-  }
 
   if(command==='workspace_browser_open'||command==='workspace_preview_open'){
     const raw=String(args.url??'');if(raw.length>8192)throw Error('Sign-in URL too long');

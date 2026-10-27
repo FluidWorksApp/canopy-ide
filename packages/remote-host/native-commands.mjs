@@ -38,7 +38,7 @@ export const NATIVE_COMMANDS=new Set([
  // Agent changes panel.
  'agent_workspace','agent_edits',
  // Build locks, sessions, profiles, PR watch, memory settings.
- 'build_operation_acquire','build_operation_release','session_forget','profile_setup','pr_watch_now','terminal_governor_incidents','terminal_governor_grant','terminal_governor_stop','terminal_governor_remember_default','terminal_governor_memory_maxima','terminal_governor_set_memory_maximum',
+ 'build_operation_acquire','build_operation_release','session_forget','profile_setup','pr_watch_now','terminal_governor_incidents','terminal_governor_grant','terminal_governor_stop','terminal_governor_remember_default','terminal_governor_memory_maxima','terminal_governor_set_memory_maximum','terminal_governor_events',
  // MCP server connections.
  'mcp_connect','mcp_call_tool','mcp_task_get','mcp_task_update','mcp_task_cancel','mcp_disconnect','mcp_connected',
  // Proof receipts, session documents and change churn (agent awareness).

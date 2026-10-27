@@ -4,6 +4,7 @@ import type { Host, HostChannel, HostEvent, UnlistenFn } from '../host/contract'
 import { nativeHost } from '../host/native';
 import { RemoteExecutionClient, type RemoteSession } from './client';
 import {workspaceReceiptCheck} from './receiptCheck';
+import {pollGovernorEvents} from './governorEvents';
 import {connectionKey,reportConnection,reportStream,workspaceLifecyclePhase} from './connectionState';
 import {saveRemoteContextImage} from './saveContextImage';
 import {basename} from '../paths';
@@ -227,7 +228,7 @@ export class NativeWorkspaceHost implements Host {
   }
   private beginPoll() {
     if(this.poll || this.disposed)return;
-    const tick=async()=>{try{if(this.stopping)return;await this.sessions();if(this.listeners.get('pty:stats')?.size){try{const stats=await this.invoke('pty_stats');if(!this.disposed)this.emit('pty:stats',stats);}catch{/* Keep file refresh working if process inspection is unavailable. */}}if(this.listeners.get('agent:events')?.size){try{const batch=await this.native<{cursor:string|null;lines:string[]}>('agent_events_poll',{cursor:this.agentEventCursor});if(!this.disposed){this.agentEventCursor=batch.cursor;if(batch.lines.length)this.emit('agent:events',batch.lines);}}catch{/* Keep polling after transient hook transport failures. */}}this.emit('git:change',{root:'/workspace'});this.emit('fs:change',{root:'/workspace',paths:[],kind:'other',overflow:true});}catch{/* Disconnection never falls back to native execution. */}finally{if(!this.disposed)this.poll=setTimeout(()=>void tick(),3000);}};
+    const tick=async()=>{try{if(this.stopping)return;await this.sessions();if(this.listeners.get('pty:stats')?.size){try{const stats=await this.invoke('pty_stats');if(!this.disposed)this.emit('pty:stats',stats);}catch{/* Keep file refresh working if process inspection is unavailable. */}}if(!this.readOnly&&this.listeners.get('terminal:governor')?.size){try{this.governorCursor=await pollGovernorEvents((name,body)=>this.native(name,body),this.governorCursor,event=>{if(!this.disposed)this.emit('terminal:governor',event);});}catch{/* Budgets resume on the next poll. */}}if(this.listeners.get('agent:events')?.size){try{const batch=await this.native<{cursor:string|null;lines:string[]}>('agent_events_poll',{cursor:this.agentEventCursor});if(!this.disposed){this.agentEventCursor=batch.cursor;if(batch.lines.length)this.emit('agent:events',batch.lines);}}catch{/* Keep polling after transient hook transport failures. */}}this.emit('git:change',{root:'/workspace'});this.emit('fs:change',{root:'/workspace',paths:[],kind:'other',overflow:true});}catch{/* Disconnection never falls back to native execution. */}finally{if(!this.disposed)this.poll=setTimeout(()=>void tick(),3000);}};
     this.poll=setTimeout(()=>void tick(),3000);
   }
   private async attach(id:number, channel?:HostChannel<ArrayBuffer>) {
@@ -487,6 +488,7 @@ export class NativeWorkspaceHost implements Host {
       if(outdatedHostCommand(error)!==command)throw error;this.hostOutdated(command);throw Error(hostOutdatedMessage(command));
     }
   }
+  private governorCursor:number|null=null;
   private hostChannels=new Map<string,WorkspaceChannel<unknown>>();
   private channelEnded=new Map<string,()=>void>();
   private pumping=false;
