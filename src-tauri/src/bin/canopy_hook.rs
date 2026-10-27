@@ -1641,13 +1641,17 @@ fn edit_records(agent: &str, event: &serde_json::Value) -> Vec<EditRecord> {
 /// A relative path is relative to the session's working directory; the journal
 /// reader canonicalizes what it is given, so it must be absolute.
 fn resolve_edit_path(path: &str, cwd: &str) -> String {
-    if cwd.is_empty() || std::path::Path::new(path).is_absolute() {
+    if cwd.is_empty() || std::path::Path::new(path).is_absolute() || path.starts_with('/') {
         path.to_string()
     } else {
-        std::path::Path::new(cwd)
-            .join(path)
-            .to_string_lossy()
-            .into_owned()
+        // Join in the cwd's own style: Path::join would put a backslash between
+        // a forward-slash cwd (WSL, a cloud workspace, Git Bash) and the path.
+        let sep = if cwd.contains('/') {
+            '/'
+        } else {
+            std::path::MAIN_SEPARATOR
+        };
+        format!("{}{sep}{path}", cwd.trim_end_matches(['/', '\\']))
     }
 }
 
