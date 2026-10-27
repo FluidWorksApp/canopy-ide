@@ -11,6 +11,7 @@ import {CardError,LIMITS,cardDraft,cardFreeText,secretKinds,type Card,type CardD
 import {OPEN_SHARE_DIALOG_EVENT,type ShareRequest} from '../shareCards';
 import {ChatCard,type ChatCardDeps} from './ChatCard';
 import {Button,Select} from './ui';
+import {useEscape} from '../useEscape';
 import './chatCard.css';
 
 type Team={id:string;name:string};
@@ -42,7 +43,9 @@ export function ShareDialog({request,onClose,directory=loadDirectory}:ShareDialo
   void directory().then(d=>{if(!live)return;setDir(d);setTeamId(t=>t||d.teams[0]?.id||'');},(e:unknown)=>{if(live)setDirError(e instanceof Error?e.message:String(e));});
   return()=>{live=false;};
  },[directory,request.kind]);
- useEffect(()=>{const onKey=(e:KeyboardEvent)=>{if(e.key==='Escape')onClose();};window.addEventListener('keydown',onKey);return()=>window.removeEventListener('keydown',onKey);},[onClose]);
+ // On the overlay stack, so Escape closes this dialog and only this dialog —
+ // not the session document or panel it was opened from (useEscape.ts).
+ useEscape(onClose);
  const session=useMemo(()=>dir&&teamId?teamSession(teamId,dir.selfId):undefined,[dir,teamId]);
  useEffect(()=>session?.retain(),[session]);
  const snapshot=useSyncExternalStore(session?.subscribe??noopSubscribe,session?.getSnapshot??emptySnapshot);

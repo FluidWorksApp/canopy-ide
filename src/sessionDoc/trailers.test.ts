@@ -60,6 +60,27 @@ describe("sessionsInCommit", () => {
     );
     expect(found).toEqual([{ agent: "a", sessionId: "wrote" }]);
   });
+
+  it("reads every candidate's journal at once, keeping newest-first order", async () => {
+    // Each read waits until all of them have started: sequential reads would
+    // never get past the first.
+    let started = 0;
+    const gate: { open?: () => void } = {};
+    const allStarted = new Promise<void>((r) => (gate.open = r));
+    const slow: TrailerDeps = {
+      ...deps({}, [d("old", { updated: NOW / 1000 - 600 }), d("new"), d("none")]),
+      edits: async (_repo, sid) => {
+        if (++started === 3) gate.open!();
+        await allStarted;
+        if (sid === "none") throw new Error("journal unreadable");
+        return [e("src/a.ts", true)];
+      },
+    };
+    expect(await sessionsInCommit("/repo", slow)).toEqual([
+      { agent: "a", sessionId: "new" },
+      { agent: "a", sessionId: "old" },
+    ]);
+  });
 });
 
 describe("commitMessageWithSessions", () => {
