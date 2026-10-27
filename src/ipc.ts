@@ -5237,3 +5237,23 @@ export const receiptRunCheck = (
   argv: string[],
   opts: { timeoutMs?: number; keepBytes?: number; head?: boolean } = {},
 ) => invoke<ReceiptCheckRun>("receipt_run_check", { cwd, argv, ...opts });
+
+// ---- rules compiled into gates (src-tauri/src/gates_commands.rs; in a Linux
+// workspace, packages/remote-host/gates.mjs, because the hook that reads the
+// policy runs there) ----
+
+/** One approved gate as the hook reads it. `gate` is src/gates/dsl.ts `Gate`. */
+export interface GatePolicyWire {
+  trifecta: "warn" | "block";
+  gates: { id: string; rule: string; scope: "project" | "team"; gate: unknown }[];
+  guidance: string[];
+}
+
+export const gatesPolicyWrite = (cwd: string, policy: GatePolicyWire) =>
+  invoke<string>("gates_policy_write", { cwd, policy });
+
+export const gatesPolicyRead = (cwd: string) =>
+  invoke<(GatePolicyWire & { root: string; updatedAt: number }) | null>("gates_policy_read", { cwd });
+
+/** Mint the approve-once token the hook stamped on a blocked action. */
+export const gatesAllowOnce = (key: string) => invoke<void>("gates_allow_once", { key });

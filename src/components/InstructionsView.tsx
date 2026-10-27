@@ -25,6 +25,8 @@ import { AgentIcon, BRAND_ICONS, InstructionKindIcon, TrashIcon } from "./icons"
 import { Button } from "./ui";
 import { matches } from "../shortcuts";
 import { basename } from "../paths";
+import { RulesPanel } from "./RulesPanel";
+import { RULES_FOCUS } from "../gates/focus";
 
 /** Display names for agents Canopy doesn't ship a launcher for. Their files
  *  still turn up on disk — a `.cursor/rules` or a `.windsurfrules` is worth
@@ -554,6 +556,26 @@ export function InstructionsView({
           </label>
         </div>
 
+        {/* Rules sit above the files: they are what an instruction file
+            should shrink into, so they are the first thing to look at. */}
+        <div className="instr-group">
+          <div
+            className={`instr-row ${selected?.startsWith(RULES_FOCUS) ? "is-sel" : ""}`}
+            role="button"
+            tabIndex={0}
+            title="Plain-language rules, compiled into checks Canopy enforces"
+            onClick={() => select(RULES_FOCUS)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter" || e.key === " ") select(RULES_FOCUS);
+            }}
+          >
+            <span className="instr-row-icon">
+              <InstructionKindIcon kind="rule" size={14} />
+            </span>
+            <span className="instr-row-label">Rules &amp; gates</span>
+          </div>
+        </div>
+
         {files === null ? (
           <div className="tree-empty">Looking…</div>
         ) : shown.length === 0 ? (
@@ -627,7 +649,14 @@ export function InstructionsView({
       </div>
 
       <div className="instr-doc">
-        {!current ? (
+        {selected?.startsWith(RULES_FOCUS) ? (
+          <RulesPanel
+            roots={roots}
+            files={files}
+            onNotice={onNotice}
+            focusRuleId={selected.slice(RULES_FOCUS.length + 1) || undefined}
+          />
+        ) : !current ? (
           <div className="editor-empty">
             <h2>Agent instructions</h2>
             <p>

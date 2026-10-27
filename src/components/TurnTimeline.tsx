@@ -21,6 +21,8 @@ import {
   timelineWords,
   type TimelineAction,
 } from "../turnRollback";
+import { irreversibleByTurn } from "../gates/timeline";
+import "./gates.css";
 
 interface Props {
   cwd: string;
@@ -69,6 +71,18 @@ export function TurnTimeline({ cwd, sessionId, agent, builder, refreshKey, onNot
   }, [sessionId]);
 
   const entries = useMemo(() => (list ? buildTimeline(list).reverse() : []), [list]);
+  // Turns that ran something a person approved as irreversible. Best effort:
+  // a ledger that can't be read just leaves the marks off.
+  const [irreversible, setIrreversible] = useState<Map<number, string[]>>(new Map());
+  useEffect(() => {
+    let live = true;
+    void irreversibleByTurn(cwd, sessionId, entries)
+      .then((m) => live && setIrreversible(m))
+      .catch(() => {});
+    return () => {
+      live = false;
+    };
+  }, [cwd, sessionId, entries]);
   const lastRestore = list?.restores[list.restores.length - 1];
   const scope: ipc.TurnScope = list?.shared && onlyMine ? "session" : list?.shared ? "all" : "auto";
 
@@ -132,6 +146,14 @@ export function TurnTimeline({ cwd, sessionId, agent, builder, refreshKey, onNot
                 <span className="aw-turn-n">{builder ? `Step ${t.n}` : `Turn ${t.n}`}</span>
                 <span className="aw-turn-time">{clock(t.startedMs ?? t.endedMs)}</span>
                 {t.running && <span className="loose-chip">working</span>}
+                {irreversible.has(t.n) && (
+                  <span
+                    className="loose-chip aw-turn-irreversible"
+                    title={`Approved and run during this turn — restoring files won't reverse it:\n${irreversible.get(t.n)!.join("\n")}`}
+                  >
+                    can't be undone
+                  </span>
+                )}
               </div>
               {t.prompt && (
                 <div className="aw-turn-prompt" title={t.prompt}>

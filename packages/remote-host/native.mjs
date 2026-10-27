@@ -49,6 +49,7 @@ import {turnsCommands} from './turns.mjs';
 import {provenanceCommands} from './provenance.mjs';
 import {ChannelHub,isChannelArg} from './channels.mjs';
 import {HOST_PROTOCOL,NATIVE_COMMANDS,NATIVE_PREFIXES} from './native-commands.mjs';
+import {WorkspaceGates} from './gates.mjs';
 const sessionProcesses=sessionProcessReader();
 const workspaceMetrics=metricsReader();
 const execute=promisify(execFile);
@@ -116,9 +117,13 @@ export const NATIVE_FAMILIES=Object.assign({},...[
  workspaceToolsCommands,workspaceCleanupCommands,lspCommands,githubCommands,taskStoreCommands,workflowStoreCommands,structuredRunnerCommands,turnsCommands,provenanceCommands,gitOpsCommands,agentWorkspaceCommands,workspaceMiscCommands,mcpClientCommands,spotIndexCommands,
 ].map(family=>family(familyContext)));
 const FAMILIES=NATIVE_FAMILIES;
+// The Rules panel's approved gates and approve-once tokens, written where this
+// workspace's canopy-hook reads them (gates.mjs).
+const workspaceGates=new WorkspaceGates({home:HOME,run:(bin,argv,cwd)=>run(bin,argv,cwd)});
 const CLIS=['claude','codex','amp','aider','agy','opencode','omp','cursor-agent','grok'];
 export async function nativeInvoke(command,args={}){
   if(command.startsWith('fs_upload_'))return uploads.invoke(command,args);
+  if(command.startsWith('gates_'))return workspaceGates.invoke(command,args);
   // The desktop's answers to the Claude Code IDE servers of this workspace's
   // terminals (claude-ide.mjs), which live in this same process.
   if(command.startsWith('claude_ide_')){const handled=claudeIdeCommand(claudeIde,command,args);if(handled.handled)return handled.value;}

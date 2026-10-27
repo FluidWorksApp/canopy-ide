@@ -5,7 +5,7 @@
 // whenever commands are added, so a desktop can tell a stale host up front.
 // native-commands.test.mjs keeps this list equal to what native.mjs handles.
 export const HOST_PROTOCOL=3;
-export const NATIVE_PREFIXES=['fs_upload_','claude_ide_'];
+export const NATIVE_PREFIXES=['fs_upload_','claude_ide_','gates_'];
 export const NATIVE_COMMANDS=new Set([
  // Files, projects and the workspace itself.
  'store_load','store_save','store_changes','instance_id','host_capabilities','channel_poll','channel_drop','task_spawn_binding','task_mark_spawned','task_mark_launch_failed','fs_read_dir','fs_read_file','fs_read_range','fs_write_file','fs_create_file','fs_create_dir','fs_trash','fs_rename','fs_duplicate','fs_stat','fs_stat_many','fs_list_files','fs_search','fs_register_roots','fs_unregister_roots','workspace_add','workspace_list','workspace_remove','workspace_register','workspace_unregister','workspace_activity','workspace_metrics','workspace_browser_open','workspace_browser_request','workspace_preview_open','workspace_chrome_stream_open','workspace_chrome_stream_close','desktop_session','which_check','cli_versions','cli_take_pending_open','cli_take_pending_link','oauth_callback','terminal_governor_status','relay_status','session_process_stats','pty_metadata_get','pty_metadata_set','pty_output',
