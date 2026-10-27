@@ -51,6 +51,8 @@ pub struct Workspace {
     pub ledger: Ledger,
     /// Team memory synced from the desktop, and agents' queued proposals.
     pub memory: crate::memory::MemoryStore,
+    /// Android device ops relayed to the IDE that has this workspace open.
+    pub device: crate::device::DeviceRelay,
     access: Mutex<Option<(SignedSnapshot, AccessSnapshot)>>,
     queues: Mutex<HashMap<u32, Arc<tokio::sync::Mutex<()>>>>,
     pub socket: tokio::sync::Mutex<Option<SocketServer>>,
@@ -109,6 +111,7 @@ impl Workspace {
             attention: AttentionStore::open(dir.join("attention"), events.clone()),
             ledger: Ledger::open(&dir.join("inbox/service.sqlite"))?,
             memory: crate::memory::MemoryStore::open(dir.join("memory")),
+            device: crate::device::DeviceRelay::default(),
             runner_terminals: RunnerTerminals {
                 registry: terminals.clone(),
                 runner: runner.clone(),

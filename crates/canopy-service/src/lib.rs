@@ -7,6 +7,7 @@ pub mod admin;
 pub mod agent;
 pub mod attention;
 pub mod config;
+pub mod device;
 pub mod harness;
 pub mod http;
 pub mod ledger;

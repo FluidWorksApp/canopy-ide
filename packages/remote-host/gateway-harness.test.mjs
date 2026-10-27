@@ -120,3 +120,18 @@ test('a structured runner is minted a context-bridge credential, revoked when it
   assert.equal((await t.request('owner','/native',{command:'structured_runner_spawn',args:{attemptId:'att_2',harness:{token:'forged-credential-0000'}}})).status,400,'a client cannot supply a credential');
  }finally{await t.close();}
 });
+
+test('only the owner\'s driving IDE takes or answers device ops',async()=>{
+ const t=await setup(call=>{
+  if(call.path.endsWith('/query'))return {items:[]};
+  if(call.method==='PUT')return {agentSocketDir:'/run/canopy-service/ws/a'};
+  return {ok:true};
+ });
+ try{
+  assert.equal((await t.request('viewer','/harness/query',{store:'device',action:'pending',args:{wait:10}})).status,403);
+  assert.equal((await t.request('owner','/harness/query',{store:'device',action:'pending',args:{wait:10}})).status,200);
+  const answered=await t.request('owner','/harness/actions',{kind:'device_answer',id:'dev-1',status:200,chunk:'{}',offset:0,done:true});
+  assert.equal(answered.status,200);
+  assert.ok(t.fake.calls.some(c=>c.path.endsWith('/actions')&&c.body.kind==='device_answer'&&c.body.actor));
+ }finally{await t.close();}
+});

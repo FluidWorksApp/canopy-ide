@@ -4389,8 +4389,25 @@ async fn device(
     if !authorized(&app, &headers) {
         return (StatusCode::UNAUTHORIZED, "bad token".into());
     }
+    match run_device_op(op).await {
+        Ok(value) => (StatusCode::OK, value.to_string()),
+        Err(e) => (StatusCode::BAD_REQUEST, e),
+    }
+}
+
+/// A device op for an agent in a cloud workspace: its Canopy service relays
+/// the op to the IDE that has the workspace open, and the IDE runs it here,
+/// on the computer the devices are attached to (remoteExecution/deviceRelay.ts).
+#[tauri::command]
+pub async fn context_device_op(op: serde_json::Value) -> Result<serde_json::Value, String> {
+    let op: DeviceOp = serde_json::from_value(op).map_err(|e| format!("invalid device op: {e}"))?;
+    run_device_op(op).await
+}
+
+/// One `canopy_device_*` op against this computer's Android tooling.
+async fn run_device_op(op: DeviceOp) -> Result<serde_json::Value, String> {
     let dir = op.project_dir.clone();
-    let bad = |e: String| (StatusCode::BAD_REQUEST, e);
+    let bad = |e: String| -> Result<serde_json::Value, String> { Err(e) };
 
     // Ops that address the SDK rather than one device resolve no serial.
     if op.op == "list" {
@@ -4406,25 +4423,18 @@ async fn device(
         // Absent cmdline-tools this simply has no emulators to report, which is
         // already said in `missing` — no reason to fail the whole listing.
         let avds = crate::android::android_avds(dir.clone()).unwrap_or_default();
-        return (
-            StatusCode::OK,
-            serde_json::json!({
-                "devices": devices,
-                "emulators": avds,
-                "missing": status.missing,
-            })
-            .to_string(),
-        );
+        return Ok(serde_json::json!({
+            "devices": devices,
+            "emulators": avds,
+            "missing": status.missing,
+        }));
     }
     if op.op == "emulator_start" {
         let Some(name) = op.name.clone() else {
             return bad("emulator_start needs a name (from canopy_device_list)".into());
         };
         return match crate::android::android_emulator_start(dir, name).await {
-            Ok(serial) => (
-                StatusCode::OK,
-                serde_json::json!({ "serial": serial }).to_string(),
-            ),
+            Ok(serial) => Ok(serde_json::json!({ "serial": serial })),
             Err(e) => bad(e),
         };
     }
@@ -4433,10 +4443,7 @@ async fn device(
             return bad("describe needs a projectDir".into());
         };
         return match crate::android::android_describe(project).await {
-            Ok(out) => (
-                StatusCode::OK,
-                serde_json::json!({ "describe": out }).to_string(),
-            ),
+            Ok(out) => Ok(serde_json::json!({ "describe": out })),
             Err(e) => bad(e),
         };
     }
@@ -4515,10 +4522,7 @@ async fn device(
         other => Err(format!("unknown device op: {other}")),
     };
 
-    match result {
-        Ok(v) => (StatusCode::OK, v.to_string()),
-        Err(e) => bad(e),
-    }
+    result
 }
 
 async fn browser(

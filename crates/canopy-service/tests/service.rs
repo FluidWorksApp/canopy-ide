@@ -120,7 +120,8 @@ async fn the_credential_is_the_caller_and_everything_else_is_503() {
         (
             "/ctx/device",
             Some(serde_json::json!({"op":"list"})),
-            "laptop-only",
+            // Relayed to the IDE, and none has this workspace open.
+            "no-ide",
         ),
         (
             "/ctx/ui",

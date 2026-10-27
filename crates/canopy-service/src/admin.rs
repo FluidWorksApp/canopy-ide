@@ -415,6 +415,12 @@ async fn query(State(service): Svc, Path(ws): Path<String>, body: Bytes) -> Resp
                 Err(message) => error(500, message),
             }
         }
+        // The IDE's long poll for device ops (device.rs); asking is also how
+        // it says it is there to run them.
+        ("device", "pending") => {
+            let wait = req.args.get("wait").and_then(|w| w.as_u64()).unwrap_or(0);
+            items(ws.device.poll(std::time::Duration::from_millis(wait)).await)
+        }
         ("attention", "list") => items(ws.attention.list()),
         ("terminals", "list") => items(
             ws.terminals
@@ -555,6 +561,25 @@ async fn actions(State(service): Svc, Path(ws): Path<String>, body: Bytes) -> Re
             items(ws.mesh.severed_pairs())
         }
         "mesh_job_update" => mesh_job_update(&ws, &value).await,
+        // A piece of the IDE's answer to a relayed device op.
+        "device_answer" => {
+            let Some(id) = value.get("id").and_then(|i| i.as_str()) else {
+                return error(400, "device_answer needs id");
+            };
+            let status = value
+                .get("status")
+                .and_then(|s| s.as_u64())
+                .and_then(|s| u16::try_from(s).ok())
+                .filter(|s| (100..600).contains(s))
+                .unwrap_or(200);
+            let chunk = value.get("chunk").and_then(|c| c.as_str()).unwrap_or("");
+            let offset = value.get("offset").and_then(|o| o.as_u64()).unwrap_or(0) as usize;
+            let done = value.get("done").and_then(|d| d.as_bool()).unwrap_or(true);
+            match ws.device.answer(id, status, chunk, offset, done) {
+                Ok(()) => json(200, serde_json::json!({ "ok": true })),
+                Err((status, message)) => error(status, message),
+            }
+        }
         // Agent awareness, run by the IDE: a hotspot claim for the agent that
         // just edited it (desktop context_hotspot_claim).
         "hotspot_claim" => {
