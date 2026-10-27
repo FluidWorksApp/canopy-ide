@@ -13,6 +13,7 @@
 // this meter is the cheap, global, always-on one.
 
 import { getSettings } from "./settings";
+import { basename } from "./paths";
 
 export interface BrainCallRecord {
   feature: string;
@@ -153,7 +154,7 @@ export function brainSpendByProject(sinceMs = 0): ProjectBrainSpend[] {
   for (const r of read()) {
     if (r.ts < sinceMs) continue;
     const id = r.project?.id ?? "";
-    const name = r.project?.name || (r.cwd ? (norm(r.cwd).split("/").pop() ?? r.cwd) : "Not about a project");
+    const name = r.project?.name || (r.cwd ? basename(r.cwd) || r.cwd : "Not about a project");
     const key = id || (r.cwd ? `cwd:${norm(r.cwd)}` : "");
     const g = by.get(key) ?? { id, name, calls: 0, costUsd: 0 };
     g.calls += 1;
