@@ -153,3 +153,24 @@ it('shows the specific disk-full startup failure instead of a generic image-stag
  expect(workspaceStartupProblem(w)).toBe(message);
  expect(workspaceStartupProblem({...w,operation:{...w.operation,last_error:'Workspace startup failed during image. Saved files are retained.'}})).toBe('Preparing the workspace image failed. Your saved files are retained. Retry preparation, or stop the workspace to keep compute off.');
 });
+it('a credit refusal shows the balance and how to get credit instead of a generic error',async()=>{
+ setup();vi.useRealTimers();
+ const refusal=JSON.stringify({error:'Your Canopy balance is −$64.48. Workspaces pause at −$10.00, so this workspace can’t start until credit is added. Your files are kept.',code:'credit_exhausted',balanceUsd:'-64.480000',cutoffUsd:'-10',shared:false,status:402});
+ const base=mocks.invoke.getMockImplementation()!;
+ mocks.invoke.mockImplementation(async(command,args)=>{if(args?.body?.action==='resume'){expect(args.detailedErrors).toBe(true);throw refusal;}if(args?.route==='/api/credits')return {requested:true};return base(command,args);});
+ render(<ManagedWorkspaces/>);await act(async()=>{});
+ fireEvent.click(screen.getByRole('button',{name:'Resume workspace'}));await act(async()=>{});
+ expect(screen.getByText('Workspace paused: out of credit')).toBeTruthy();
+ expect(screen.getByText(/Your balance is −\$64\.48\. Workspaces can’t start at or below −\$10\.00/)).toBeTruthy();
+ expect(screen.queryByText(/credit_exhausted|\{"error"/)).toBeNull();
+ fireEvent.click(screen.getByRole('button',{name:'Request more credit'}));await act(async()=>{});
+ expect(mocks.invoke).toHaveBeenCalledWith('canopy_account_request',{route:'/api/credits',body:{action:'request-credit'}});
+ expect(screen.getByText(/Request sent/)).toBeTruthy();
+});
+it('other detailed resume errors still show their plain message',async()=>{
+ setup();vi.useRealTimers();const base=mocks.invoke.getMockImplementation()!;
+ mocks.invoke.mockImplementation(async(command,args)=>{if(args?.body?.action==='resume')throw JSON.stringify({error:'A workspace operation is already in progress',status:409});return base(command,args);});
+ render(<ManagedWorkspaces/>);await act(async()=>{});
+ fireEvent.click(screen.getByRole('button',{name:'Resume workspace'}));await act(async()=>{});
+ expect(screen.getByText('A workspace operation is already in progress')).toBeTruthy();expect(screen.queryByText(/out of credit/)).toBeNull();
+});

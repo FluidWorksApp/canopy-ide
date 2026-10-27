@@ -7,3 +7,9 @@
    an undefined token and matched the card, so it rendered as an empty box. */
 .account-balance-loading{display:flex;align-items:center;gap:12px;font-size:var(--fs-sm);font-weight:400;color:var(--text-dim)}
 .account-balance .account-shimmer{background:linear-gradient(100deg,var(--border-strong) 25%,color-mix(in srgb,var(--text-dim) 35%,var(--border-strong)) 45%,var(--border-strong) 65%);background-size:200% 100%}
+
+/* Credit status (credits.ts): one banner per threshold, the request action and
+   recent spend per workspace. */
+.credit-banner{padding:14px 16px;border:1px solid color-mix(in srgb,var(--warn) 55%,var(--border));border-radius:10px;background:color-mix(in srgb,var(--warn) 9%,var(--bg))}.credit-banner-error{border-color:color-mix(in srgb,var(--danger) 55%,var(--border));background:color-mix(in srgb,var(--danger) 9%,var(--bg))}.credit-banner strong{display:block;font-size:14px;margin-bottom:4px}.credit-banner p{margin:0;font-size:13px;line-height:1.5;color:var(--text)}.credit-banner-actions{display:flex;flex-wrap:wrap;align-items:center;gap:8px;margin-top:10px}
+.credit-request{display:flex;flex-wrap:wrap;align-items:center;gap:8px;margin-top:10px}.credit-request small{color:var(--text-muted);font-size:12px}
+.account-usage h4{margin:0 0 8px;font-size:13px;color:var(--text-muted);font-weight:600}.account-usage ul{list-style:none;margin:0;padding:0;border:1px solid var(--border);border-radius:10px}.account-usage li{display:flex;align-items:baseline;gap:10px;padding:9px 14px;font-size:13px}.account-usage li+li{border-top:1px solid var(--border)}.account-usage li span{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.account-usage li small{color:var(--text-muted)}.account-usage li strong{font-variant-numeric:tabular-nums}

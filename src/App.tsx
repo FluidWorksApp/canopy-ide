@@ -198,6 +198,7 @@ import {
   useHeldModifier,
 } from "./useHeldModifier";
 import { commandHeld, matches, terminalOwnsCtrl } from "./shortcuts";
+import { startCreditWatcher } from "./credits";
 import {
   checkForUpdateAnyChannel,
   installUpdate,
@@ -1409,6 +1410,9 @@ export default function App() {
     const openSettings = (e: Event) =>
       setSettingsOpen({ tab: (e as CustomEvent).detail?.tab });
     window.addEventListener("canopy:open-settings", openSettings);
+    // Warns once per crossing when the account balance runs low or out while
+    // managed workspaces are in use (credits.ts).
+    const stopCreditWatcher = startCreditWatcher();
     void ipc.hookBridgePath().then(setHookPath);
     // A relay may already be live (hot reload in dev, a future auto-start) —
     // ask rather than assume "off".
@@ -1420,6 +1424,7 @@ export default function App() {
       cancelled = true;
       window.removeEventListener("keydown", keys);
       window.removeEventListener("canopy:open-settings", openSettings);
+      stopCreditWatcher();
       if (zoomHideTimer.current !== null)
         window.clearTimeout(zoomHideTimer.current);
       subs.forEach((s) => void s.then((fn) => fn()));
