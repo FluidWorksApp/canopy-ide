@@ -30,7 +30,9 @@ import { classify, parseOutput, tail } from "./parse";
 import { detectTamper, parseUnifiedDiff } from "./tamper";
 import { manifestKind, newDependencies, plausibleName, registryArgv, registryStatus } from "./packages";
 import { combineStatus, workspaceCeiling } from "./status";
-import { brainNote, buildVerdictPrompt, validateVerdict } from "./verdict";
+import { brainNote, buildVerdictPrompt, validateVerdictFor } from "./verdict";
+import { findPlan, plansForSession } from "../plans/planStore";
+import { previewEvidence, startPreviewEvidence } from "./preview";
 import { followLedger, recordFromEntry, setReceipt, setReceiptError, setVerifying } from "./store";
 import type { BrainVerdict, CheckResult, CheckSpec, PackageCheck, ReceiptData, ReceiptRecord } from "./types";
 
@@ -47,10 +49,18 @@ export interface VerifyTarget {
   startedAt?: number;
   endedAt?: number;
   turnId?: string;
+  /** The plan the session was launched with, when the launch carried one. */
+  planId?: string;
 }
+
+/** What a receipt needs of the plan a run carried out. */
+export type LinkedPlan = NonNullable<ReceiptData["plan"]>;
 
 export interface EngineDeps {
   run: typeof ipc.receiptRunCheck;
+  /** A throwaway copy of the checkout for the checks (see `isolated`). */
+  isolate: typeof ipc.receiptIsolate;
+  release: typeof ipc.receiptRelease;
   readText(path: string): Promise<string>;
   turnList: typeof ipc.turnList;
   askBrain: typeof askBrain;
@@ -58,10 +68,16 @@ export interface EngineDeps {
   platform(): "windows" | "unix";
   remote(): boolean;
   now(): number;
+  /** The plan this session carried out, if any (plans/planStore.ts). */
+  plan(dir: string, sessionId: string, planId?: string): Promise<LinkedPlan | null>;
+  /** The preview before/after the turn (receipts/preview.ts). */
+  preview: typeof previewEvidence;
 }
 
 const defaultDeps: EngineDeps = {
   run: (cwd, argv, opts) => ipc.receiptRunCheck(cwd, argv, opts),
+  isolate: (cwd, rev) => ipc.receiptIsolate(cwd, rev),
+  release: (dir) => ipc.receiptRelease(dir),
   readText: (path) => ipc.fsReadText(path, 256 * 1024),
   turnList: (cwd, sessionId) => ipc.turnList(cwd, sessionId),
   askBrain,
@@ -78,6 +94,12 @@ const defaultDeps: EngineDeps = {
     isWorkspaceHost() ? "unix" : typeof navigator !== "undefined" && /Win/i.test(navigator.platform || navigator.userAgent) ? "windows" : "unix",
   remote: () => isWorkspaceHost(),
   now: () => Date.now(),
+  preview: (t) => previewEvidence(t),
+  plan: async (dir, sessionId, planId) => {
+    const entry = planId ? await findPlan(dir, planId) : (await plansForSession(dir, sessionId))[0];
+    const d = entry?.data;
+    return d?.planId ? { planId: d.planId, goal: d.goal, acceptance: (d.acceptance ?? []).slice(0, 8) } : null;
+  },
 };
 let deps: EngineDeps = defaultDeps;
 
@@ -201,7 +223,41 @@ async function turnPatch(s: Scope): Promise<string> {
   return patch;
 }
 
-async function runCheck(spec: CheckSpec, dir: string): Promise<CheckResult> {
+/** Where the checks run: a throwaway export of the turn's end snapshot (or
+ *  of the working tree as it is now, when there is none), never the live
+ *  checkout — the agent's next turn on a shared checkout would otherwise edit
+ *  files under a running suite, or the suite would read half of that turn.
+ *  receipt.rs / receipt-check.mjs make and delete the copy; dependency folders
+ *  are linked in from the live checkout. */
+interface Isolation {
+  /** The copy's top level, or null when the checks had to run live. */
+  dir: string | null;
+  env: [string, string][];
+  ranIn: NonNullable<ReceiptData["ranIn"]>;
+}
+
+async function isolated(s: Scope): Promise<Isolation> {
+  try {
+    const copy = await deps.isolate(s.top, s.head);
+    return {
+      dir: copy.dir,
+      env: copy.env ?? [],
+      ranIn: { kind: "copy", tree: copy.tree, ...(copy.linked?.length ? { linked: copy.linked.slice(0, 20) } : {}) },
+    };
+  } catch (e) {
+    const why = e instanceof Error ? e.message : String(e);
+    return { dir: null, env: [], ranIn: { kind: "live", why: why.slice(0, 300) } };
+  }
+}
+
+/** The live directory `dir` (inside `top`) as the same place in the copy. */
+export function inCopy(top: string, dir: string, copy: string): string {
+  const rel = relativeTo(top, dir);
+  // The top itself, or (never expected) somewhere outside it: the copy's top.
+  return rel === norm(dir) ? copy : joinPath(copy, rel);
+}
+
+async function runCheck(spec: CheckSpec, dir: string, env: [string, string][] = []): Promise<CheckResult> {
   const command = argvText(spec.argv);
   const base = { id: spec.id, label: spec.label, kind: spec.kind, command };
   try {
@@ -211,6 +267,7 @@ async function runCheck(spec: CheckSpec, dir: string): Promise<CheckResult> {
       // "timed out" rather than as a dropped connection.
       timeoutMs: Math.min(spec.kind === "test" ? TEST_TIMEOUT_MS : CHECK_TIMEOUT_MS, deps.remote() ? REMOTE_TIMEOUT_MS : Infinity),
       keepBytes: 64 * 1024,
+      ...(env.length ? { env } : {}),
     });
     const combined = [r.stdout, r.stderr].filter(Boolean).join("\n");
     const parsed = parseOutput(combined, spec.runner);
@@ -290,18 +347,31 @@ export async function verifyTurn(t: VerifyTarget, manual = false): Promise<Recei
   }
   if (!manual && !s.files.length) return null;
   setVerifying(t.sessionId, t.ptyId);
+  // Photographed first, as close to the turn's end as the receipt gets —
+  // checks can take minutes, and the page is what the turn left.
+  const preview = await deps.preview(t).catch(() => null);
   try {
     const patch = await turnPatch(s);
     const diffs = parseUnifiedDiff(patch);
     const { dir, checks: specs } = await resolveChecks(t, s);
     const checks: CheckResult[] = [];
-    for (const spec of specs) checks.push(await runCheck(spec, dir));
+    const iso: Isolation | null = specs.length ? await isolated(s) : null;
+    try {
+      const runDir = iso?.dir ? inCopy(s.top, dir, iso.dir) : dir;
+      for (const spec of specs) checks.push(await runCheck(spec, runDir, iso?.env ?? []));
+    } finally {
+      if (iso?.dir) await deps.release(iso.dir).catch(() => {});
+    }
     const tamper = detectTamper(s.files, diffs);
     const packages = await packageChecks(s);
     const { ceiling, reasons } = workspaceCeiling(checks, packages);
 
     const asked = (t.prompt ?? "").trim().slice(0, 2000);
     const claim = t.claim?.trim().slice(0, 2000);
+    // The plan the person approved says what "done" means: the verdict
+    // reports on each of its acceptance checks.
+    const plan = await deps.plan(t.root || s.top, t.sessionId, t.planId).catch(() => null);
+    const acceptance = plan?.acceptance.length ? plan.acceptance : undefined;
     const prompt = buildVerdictPrompt({
       asked,
       claim,
@@ -310,6 +380,8 @@ export async function verifyTurn(t: VerifyTarget, manual = false): Promise<Recei
       checks: checks.map(STABLE),
       tamper,
       packages,
+      preview,
+      acceptance,
     });
     let verdict: BrainVerdict | null = null;
     let note: string | undefined;
@@ -329,7 +401,7 @@ export async function verifyTurn(t: VerifyTarget, manual = false): Promise<Recei
         // means nothing there, and the prompt already carries the evidence.
         cwd: deps.remote() ? "" : s.top,
         prompt,
-        validate: validateVerdict,
+        validate: validateVerdictFor(acceptance),
         timeoutMs: 180_000,
       });
       if (answer.ok && answer.value) {
@@ -353,6 +425,8 @@ export async function verifyTurn(t: VerifyTarget, manual = false): Promise<Recei
       filesTouched: s.files,
       base: s.base === "HEAD" ? "HEAD" : `turn start (${s.base.slice(0, 10)})`,
       checks,
+      ...(iso ? { ranIn: iso.ranIn } : {}),
+      ...(plan ? { plan } : {}),
       tamper,
       packages,
       verdict,
@@ -363,6 +437,7 @@ export async function verifyTurn(t: VerifyTarget, manual = false): Promise<Recei
       costUsd,
       startedAt,
       endedAt: deps.now(),
+      ...(preview ? { preview } : {}),
     };
     let record: ReceiptRecord;
     try {
@@ -399,6 +474,7 @@ function fold(into: VerifyTarget, next: VerifyTarget): VerifyTarget {
     ...next,
     filesTouched: [...new Set([...(into.filesTouched ?? []), ...(next.filesTouched ?? [])])],
     startedAt: Math.min(into.startedAt ?? Infinity, next.startedAt ?? Infinity),
+    ...((next.planId ?? into.planId) ? { planId: next.planId ?? into.planId } : {}),
   };
 }
 
@@ -451,6 +527,7 @@ export function reverify(r: ReceiptRecord): Promise<ReceiptRecord | null> {
       prompt: r.asked,
       claim: r.claim,
       filesTouched: r.filesTouched,
+      ...(r.plan ? { planId: r.plan.planId } : {}),
     },
     // Re-checking against HEAD with the receipt's own file list.
     false,
@@ -478,6 +555,7 @@ export function onTurnEnd(turn: AgentTurnEnd): void {
     startedAt: turn.partial ? undefined : turn.startedAt,
     endedAt: turn.endedAt,
     turnId: turn.turnId,
+    ...(turn.planId ? { planId: turn.planId } : {}),
   });
 }
 
@@ -485,7 +563,9 @@ export function onTurnEnd(turn: AgentTurnEnd): void {
 export function startReceiptEngine(): () => void {
   const offTurns = onAgentTurnEnd(onTurnEnd);
   const offLedger = followLedger();
+  const offPreview = startPreviewEvidence();
   return () => {
+    offPreview();
     offTurns();
     offLedger();
   };

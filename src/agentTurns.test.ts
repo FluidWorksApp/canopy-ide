@@ -166,6 +166,22 @@ describe("agent turns", () => {
     stop();
   });
 
+  it("carries the plan id the session was launched with, and announces the session's end after its last turn", async () => {
+    const starts: AgentTurnStart[] = [];
+    const order: string[] = [];
+    onAgentTurnStart((t) => starts.push(t));
+    onAgentTurnEnd((t) => order.push(`end:${t.planId}`));
+    onAgentSessionEnd((e) => order.push(`session:${e.planId}`));
+    observeAgentTurns(
+      [ev("UserPromptSubmit", { planId: "pl-a-b", prompt: "Read /tmp/brief.md" }), ev("Stop", { planId: "pl-a-b" }), ev("SessionEnd", { planId: "pl-a-b" })],
+      1_000,
+    );
+    await flush();
+    await flush();
+    expect(starts[0].planId).toBe("pl-a-b");
+    expect(order).toEqual(["end:pl-a-b", "session:pl-a-b"]);
+  });
+
   it("windows journal seconds against turn milliseconds", () => {
     expect(filesInWindow([{ ts: 9, path: "a" }, { ts: 10, path: "b" }, { ts: 23, path: "c" }], 10_500, 20_200)).toEqual(["a", "b"]);
   });

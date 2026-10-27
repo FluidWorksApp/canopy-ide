@@ -253,6 +253,9 @@ export function IntentEvidenceView({ cwd, sessionIds, patch, paused = false, onO
                 ))}
               </ul>
             )}
+            {plan.data.acceptance.length > 0 && (
+              <AcceptanceList items={plan.data.acceptance} receipt={receipt ?? null} />
+            )}
           </>
         )}
       </section>
@@ -392,7 +395,35 @@ function SummaryBody({ value }: { value: ReviewSummary }) {
   );
 }
 
+/** The plan's acceptance checks, each with what the receipt proved about it:
+ *  the review starts from what was agreed counts as done. */
+function AcceptanceList({ items, receipt }: { items: string[]; receipt: ReceiptView | null }) {
+  const judged = receipt?.acceptance ?? [];
+  const rows = items.map((item, i) => {
+    const hit = judged.find((a) => a.item.trim() === item.trim()) ?? judged[i];
+    return { item, met: hit ? hit.met : undefined, evidence: hit?.evidence ?? "" };
+  });
+  return (
+    <ul className="intent-list" aria-label="What counts as done">
+      {rows.map((r, i) => (
+        <li key={i}>
+          <span
+            className={`intent-accept ${r.met === true ? "is-met" : r.met === false ? "is-unmet" : "is-unknown"}`}
+            aria-label={r.met === true ? "Met" : r.met === false ? "Not met" : r.met === null ? "Not shown either way" : "Not checked yet"}
+          >
+            {r.met === true ? "✓" : r.met === false ? "✗" : "?"}
+          </span>{" "}
+          {r.item}
+          {r.evidence && <span className="intent-muted"> — {r.evidence}</span>}
+          {r.met === undefined && <span className="intent-muted"> — not checked by a receipt yet</span>}
+        </li>
+      ))}
+    </ul>
+  );
+}
+
 function ReceiptBody({ r }: { r: ReceiptView }) {
+  const met = r.acceptance.filter((a) => a.met === true).length;
   return (
     <div className="intent-receipt">
       <span className={`intent-verdict is-${r.verdict ?? "unproven"}`}>
@@ -400,6 +431,11 @@ function ReceiptBody({ r }: { r: ReceiptView }) {
         {r.tampered && <span className="intent-sev is-high"> tamper flags raised</span>}
       </span>
       {r.did && <span>{r.did}</span>}
+      {r.acceptance.length > 0 && (
+        <span className={met === r.acceptance.length ? "" : "intent-muted"}>
+          {met} of {r.acceptance.length} acceptance {r.acceptance.length === 1 ? "check" : "checks"} met
+        </span>
+      )}
       {r.checks.length > 0 && (
         <ul className="intent-list" aria-label="Checks">
           {r.checks.map((c, i) => (

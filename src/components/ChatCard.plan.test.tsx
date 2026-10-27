@@ -29,6 +29,7 @@ const card: PlanCard = {
   wontDo: ["Change the API"],
   risk: "medium",
   size: "small",
+  approvers: ["bob"],
 };
 const deps = {} as ChatCardDeps;
 const msg = (c: PlanCard | PlanOutcomeCard, over: Partial<ChatMessage> = {}): ChatMessage => ({
@@ -62,6 +63,8 @@ describe("plan cards on the wire", () => {
     expect(parseCard({ ...card, extra: 1 })).toBeUndefined();
     expect(parseCard({ ...card, decisions: [{ q: "x" }] })).toBeUndefined();
     expect(parseCard({ ...card, goal: "bad‮goal" })).toBeUndefined();
+    expect(parseCard({ ...card, approvers: [] })).toBeUndefined();
+    expect(parseCard({ ...card, approvers: ["bob", "bob"] })).toBeUndefined();
     expect(parseCard({ type: "plan-outcome", v: 1, request: "nope", plan: card.plan, outcome: "approved" })).toBeUndefined();
   });
 
@@ -82,12 +85,12 @@ describe("plan cards on the wire", () => {
       gate: "inline",
       gateWhy: [],
     });
-    expect(parseCard(built)).toEqual(built);
+    expect(parseCard({ ...built, approvers: ["bob"] })).toEqual({ ...built, approvers: ["bob"] });
     expect(built.decisions).toEqual([{ q: "Q?", a: "R" }]);
-    expect(() => cardDraft(built)).not.toThrow();
+    expect(() => cardDraft({ ...built, approvers: ["bob"] })).not.toThrow();
   });
 
-  it("folds the latest answer per teammate, ignoring the author and other threads", () => {
+  it("folds the latest answer per named approver, ignoring the author, other teammates and other threads", () => {
     const req = msg(card);
     const folded = foldPlanOutcomes(req, [
       req,
@@ -95,6 +98,8 @@ describe("plan cards on the wire", () => {
       outcome(R3, "bob", "approved", 3),
       outcome("44444444-4444-4444-8444-444444444444", "alice", "approved", 4),
       { ...outcome("55555555-5555-4555-8555-555555555555", "carol", "approved", 5), thread: { root: R2 } },
+      // Dave is in the conversation but was not named: a comment, not a decision.
+      outcome("66666666-6666-4666-8666-666666666666", "dave", "approved", 6),
     ]);
     expect(folded.map((f) => [f.by, f.outcome])).toEqual([["bob", "approved"]]);
   });
@@ -130,8 +135,16 @@ describe("plan card in chat", () => {
       />,
     );
     expect(screen.getByText("BOB")).toBeInTheDocument();
-    await waitFor(() => expect(applyChatApproval).toHaveBeenCalledWith(card.plan, "BOB"));
+    await waitFor(() => expect(applyChatApproval).toHaveBeenCalledWith(card.plan, { id: "bob", name: "BOB" }));
     // The author never gets the approve buttons on their own plan.
     expect(screen.queryByRole("button", { name: "Approve plan…" })).toBeNull();
   }, 30_000);
+
+  it("lets other members comment only", () => {
+    const m = msg(card);
+    render(<ChatCard message={m} userId="carol" messages={[m]} name={(id) => id.toUpperCase()} onReply={vi.fn()} deps={deps} />);
+    expect(screen.getByText("Approvers: BOB")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Approve plan…" })).toBeNull();
+    expect(screen.getByText(/Only the approvers can approve this plan/)).toBeInTheDocument();
+  });
 });

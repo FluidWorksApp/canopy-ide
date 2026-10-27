@@ -35,6 +35,10 @@ export interface AgentTurnStart {
   /** Canonical repo root (see ledger.ts); the cwd when git cannot say. */
   root: string;
   prompt?: string;
+  /** The Canopy plan the session was launched to carry out — carried
+   *  explicitly on every hook event (CANOPY_PLAN_ID → `canopy_plan_id`),
+   *  never inferred from the folder or the time. */
+  planId?: string;
   startedAt: number;
 }
 
@@ -54,7 +58,7 @@ export interface AgentTurnEnd extends AgentTurnStart {
 }
 
 /** An agent session is over: its CLI reported SessionEnd, or the terminal it
- *  ran in exited. Fires once per session. */
+ *  ran in exited. Fires once per session, after its pending turn events. */
 export interface AgentSessionEnd {
   sessionId: string;
   ptyId: number | null;
@@ -64,6 +68,9 @@ export interface AgentSessionEnd {
   endedAt: number;
   /** What said so. */
   via: "session-end" | "process-exit";
+  /** The plan the session worked under, when its events named one (plans
+   *  close an interactive plan at session end). */
+  planId?: string;
 }
 
 type StartListener = (turn: AgentTurnStart) => void;
@@ -203,6 +210,7 @@ function remember(e: AgentEventData): void {
     cli: eventAgentId(e) || prev?.cli || "",
     cwd: e.cwd,
     root: prev?.root ?? e.cwd,
+    ...((e.planId ?? prev?.planId) ? { planId: e.planId ?? prev?.planId } : {}),
   });
   if (e.pty != null) sessionByPty.set(e.pty, e.sessionId);
   // A resumed session that takes a new prompt can end again.
@@ -256,6 +264,7 @@ async function start(e: AgentEventData, at: number): Promise<void> {
     cwd: e.cwd,
     root: await rootOf(e.cwd),
     ...(e.prompt ? { prompt: e.prompt } : {}),
+    ...(e.planId ? { planId: e.planId } : {}),
     startedAt: at,
   };
   open.set(e.sessionId, turn);
@@ -279,6 +288,7 @@ async function end(e: AgentEventData, at: number): Promise<void> {
     cwd: e.cwd,
     root,
     ...(began?.prompt ? { prompt: began.prompt } : {}),
+    ...((began?.planId ?? e.planId) ? { planId: began?.planId ?? e.planId } : {}),
     startedAt,
     endedAt: at,
     filesTouched: filesInWindow(edits, startedAt, at),

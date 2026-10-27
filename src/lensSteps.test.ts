@@ -18,7 +18,7 @@ import {
   type LensStepsDeps,
 } from "./lensSteps";
 import { resetLensCheckpointsForTests } from "./lensCheckpoints";
-import { turnSnapshotRange } from "./turnSnapshots";
+import { turnSnapshotRange } from "./turnDiff";
 
 const turn = (over: Partial<AgentTurnEnd> = {}): AgentTurnEnd => ({
   turnId: "s1:1000",

@@ -19,6 +19,7 @@ import {
   removeTaskRun,
   resolveTaskFile,
   runIcon,
+  runReceiptDir,
   runTitle,
   TASK_HISTORY_EVENT,
   tidyOutput,
@@ -38,6 +39,7 @@ import {
 } from "./icons";
 import { Button, Segmented, TextInput } from "./ui";
 import { TaskEvidenceFold } from "./TaskEvidence";
+import { ReceiptBadge } from "./ReceiptBadge";
 import { basename } from "../paths";
 
 const PER_PAGE = 25;
@@ -459,6 +461,16 @@ export function TaskHistoryView({
                               <AgentIcon id={run.agent} size={12} />
                               {agentName(run.agent)}
                             </span>
+                            {/* The workspace's receipt for the run, read from
+                                the ledger by the session id on this row. */}
+                            {run.sessionId && (
+                              <ReceiptBadge
+                                sessionId={run.sessionId}
+                                cwd={runReceiptDir(run)}
+                                cli={run.agent}
+                                quietWhenUnverified
+                              />
+                            )}
                             <span
                               className="task-history-chiplet task-history-path"
                               title={run.cwd}

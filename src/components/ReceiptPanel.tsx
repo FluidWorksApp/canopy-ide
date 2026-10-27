@@ -5,11 +5,11 @@
 //
 // "Agent says" (the agent's own closing words) and "Workspace verified" are
 // separate sections on purpose: the first is the claim, the second the proof.
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Button } from "./ui";
 import { STATUS_META } from "../receipts/status";
 import { checkLine } from "../receipts/markdown";
-import type { CheckResult, ReceiptRecord } from "../receipts/types";
+import type { CheckResult, PreviewShot, ReceiptPreview, ReceiptRecord } from "../receipts/types";
 import type { ReceiptState } from "../receipts/store";
 import "./receipts.css";
 
@@ -55,6 +55,74 @@ function CheckRow({ c }: { c: CheckResult }) {
         </pre>
       </details>
     </li>
+  );
+}
+
+/** Before/after pictures of the preview the turn affected. A thumbnail opens
+ *  to the full stored picture in place; the words under them are what the
+ *  workspace read off the page, and what the brain was told. */
+function PreviewSection({ preview }: { preview: ReceiptPreview }) {
+  const [open, setOpen] = useState<"before" | "after" | null>(null);
+  const shots: { key: "before" | "after"; label: string; shot: PreviewShot }[] = [];
+  if (preview.before) shots.push({ key: "before", label: "Before the turn", shot: preview.before });
+  if (preview.after) shots.push({ key: "after", label: "After the turn", shot: preview.after });
+  const big = shots.find((s) => s.key === open);
+  // Keyboard focus follows the picture between its two sizes.
+  const largeRef = useRef<HTMLButtonElement>(null);
+  useEffect(() => {
+    if (open) largeRef.current?.focus();
+  }, [open]);
+  const alt = (label: string, shot: PreviewShot) =>
+    `${label}: the preview of ${shot.title ? `“${shot.title}” at ` : ""}${shot.url || "the project"}, taken ${new Date(shot.at).toLocaleTimeString()}`;
+  return (
+    <section className="rc-section rc-preview" aria-label="Preview before and after">
+      <h4>Preview</h4>
+      <p>{preview.summary}</p>
+      {shots.length > 0 && !big && (
+        <div className="rc-shots">
+          {shots.map(({ key, label, shot }) => (
+            <figure key={key} className="rc-shot">
+              <button
+                type="button"
+                className="rc-shot-button"
+                onClick={() => setOpen(key)}
+                aria-label={`Enlarge the picture ${label.toLowerCase()}`}
+                title="Show larger"
+              >
+                <img src={shot.image} alt={alt(label, shot)} width={shot.width} height={shot.height} />
+              </button>
+              <figcaption>{label}</figcaption>
+            </figure>
+          ))}
+        </div>
+      )}
+      {big && (
+        <figure className="rc-shot rc-shot-large">
+          <button
+            type="button"
+            ref={largeRef}
+            className="rc-shot-button"
+            onClick={() => setOpen(null)}
+            aria-label={`Show the picture ${big.label.toLowerCase()} smaller`}
+            title="Show smaller"
+          >
+            <img src={big.shot.image} alt={alt(big.label, big.shot)} width={big.shot.width} height={big.shot.height} />
+          </button>
+          <figcaption>
+            {big.label}
+            {big.shot.url ? ` · ${big.shot.url}` : ""}
+          </figcaption>
+        </figure>
+      )}
+      {preview.changes.length > 0 && (
+        <ul className="rc-reasons">
+          {preview.changes.map((c) => (
+            <li key={c}>{c}</li>
+          ))}
+        </ul>
+      )}
+      {preview.note && <div className="rc-note">{preview.note}</div>}
+    </section>
   );
 }
 
@@ -163,7 +231,37 @@ export function ReceiptPanel({
                 ))}
               </ul>
             )}
+            {record.ranIn && (
+              <p className="rc-note">
+                {record.ranIn.kind === "copy"
+                  ? "Checks ran in a separate copy of this turn's files, so the agent's next turn could not change them mid-run."
+                  : `Checks ran in the live folder: a separate copy could not be made (${record.ranIn.why}).`}
+              </p>
+            )}
           </section>
+          {record.plan && record.plan.acceptance.length > 0 && (
+            <section className="rc-section" aria-label="What the plan said counts as done">
+              <h4>Plan's checks for done</h4>
+              <ul className="rc-accept">
+                {record.plan.acceptance.map((item, i) => {
+                  const a = record.verdict?.acceptance?.find((x) => x.item === item) ?? record.verdict?.acceptance?.[i];
+                  const met = a ? a.met : undefined;
+                  return (
+                    <li key={i} className={met === true ? "is-met" : met === false ? "is-unmet" : "is-unknown"}>
+                      <span aria-hidden>{met === true ? "✓" : met === false ? "✗" : "?"}</span>{" "}
+                      <span className="rc-visually-hidden">
+                        {met === true ? "Met: " : met === false ? "Not met: " : "Not shown: "}
+                      </span>
+                      {item}
+                      {a?.evidence && <span className="rc-dim"> — {a.evidence}</span>}
+                      {!a && <span className="rc-dim"> — not judged (no brain verdict)</span>}
+                    </li>
+                  );
+                })}
+              </ul>
+            </section>
+          )}
+          {record.preview && <PreviewSection preview={record.preview} />}
           {review.length > 0 && (
             <section className="rc-section rc-tamper-box">
               <h4>⚠ Test changed by the agent — needs a human look</h4>

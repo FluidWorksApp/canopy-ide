@@ -58,7 +58,20 @@ export interface PlanDraft {
 }
 
 export type PlanStatus = "proposed" | "approved" | "in-progress" | "done" | "dropped";
-export type PlanSource = "task" | "ticket" | "agent";
+export type PlanSource = "task" | "ticket" | "agent" | "build";
+/** one-shot: a task that ends with its run. interactive: a session the person
+ *  keeps talking to — done when they mark the ticket done, the session ends,
+ *  or a receipt proves every acceptance check. */
+export type PlanRunMode = "one-shot" | "interactive";
+
+/** How to launch a waiting plan after a restart: the surface's launch kind
+ *  and what it needs, as JSON. `request` holds the whole request when the
+ *  record's copy was clipped. */
+export interface PlanLaunchSpec {
+  kind: string;
+  payload: Record<string, unknown>;
+  request?: string;
+}
 
 /** The `data` of a `plan` ledger entry. `acceptance` is the field the proof
  *  receipts feature checks a run against — keep the name. */
@@ -86,6 +99,19 @@ export interface PlanData extends PlanDraft {
   /** Commits the run made — the autonomy ledger's revert check reads these. */
   commits?: { sha: string; subject: string }[];
   sharedAt?: number;
+  /** Team-chat user ids the author named when sharing: only they can approve
+   *  the plan from chat. Everyone else in the conversation can comment. */
+  approvers?: string[];
+  mode?: PlanRunMode;
+  /** The ticket this plan is for (ticket dispatches). */
+  ticketId?: string;
+  /** Set on a plan that waits for approval, so a restart can still launch it. */
+  launch?: PlanLaunchSpec;
+  /** When the approved plan's agent was launched — a restart never launches
+   *  the same approval twice. */
+  launchedAt?: number;
+  /** Why the plan was marked done, in plain words. */
+  doneBecause?: string;
 }
 
 // ------------------------------------------------------------------ prompt

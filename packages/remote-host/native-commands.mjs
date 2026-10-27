@@ -4,7 +4,7 @@
 // IDE says plainly instead of reporting a missing feature. Bump HOST_PROTOCOL
 // whenever commands are added, so a desktop can tell a stale host up front.
 // native-commands.test.mjs keeps this list equal to what native.mjs handles.
-export const HOST_PROTOCOL=3;
+export const HOST_PROTOCOL=5;
 export const NATIVE_PREFIXES=['fs_upload_','claude_ide_','gates_'];
 export const NATIVE_COMMANDS=new Set([
  // Files, projects and the workspace itself.
@@ -42,7 +42,7 @@ export const NATIVE_COMMANDS=new Set([
  // MCP server connections.
  'mcp_connect','mcp_call_tool','mcp_task_get','mcp_task_update','mcp_task_cancel','mcp_disconnect','mcp_connected',
  // Proof receipts, session documents and change churn (agent awareness).
- 'receipt_run_check','session_transcript_tail','session_activity','git_churn',
+ 'receipt_run_check','session_transcript_tail','session_activity','session_compact','git_churn','receipt_isolate','receipt_release',
  // Spot search index.
  'spot_ingest','spot_search','spot_index_stats','spot_index_clear','spot_save_context_text',
 ]);
@@ -50,6 +50,6 @@ export const isNativeCommand=command=>typeof command==='string'&&(NATIVE_COMMAND
 /** How long the gateway waits for a command's answer: network Git and GitHub
  *  work, worktree setup and disk scans outlast the default 15 seconds. The
  *  desktop allows 15 seconds more for the trip itself. */
-const LONG_NATIVE=new Set(['receipt_run_check','git_clone','git_fetch','git_pull','git_push','git_worktree_add','git_worktree_add_pr','git_worktree_bootstrap','git_sync_probe','git_sync_apply','git_pr_merge_probe','git_branch_delete_remote','git_share_context','git_work_audit','cleanup_scan','cleanup_run','provenance_backfill']);
+const LONG_NATIVE=new Set(['receipt_run_check','session_compact','git_clone','git_fetch','git_pull','git_push','git_worktree_add','git_worktree_add_pr','git_worktree_bootstrap','git_sync_probe','git_sync_apply','git_pr_merge_probe','git_branch_delete_remote','git_share_context','git_work_audit','cleanup_scan','cleanup_run','provenance_backfill','receipt_isolate']);
 const MCP_CALLS=new Set(['mcp_call_tool','mcp_task_get','mcp_task_update','mcp_task_cancel']);
 export const nativeTimeoutMs=command=>LONG_NATIVE.has(command)?330_000:MCP_CALLS.has(command)?300_000:command==='mcp_connect'?180_000:typeof command==='string'&&command.startsWith('gh_')?135_000:command==='profile_import_git'?45_000:15_000;

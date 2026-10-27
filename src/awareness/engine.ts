@@ -10,7 +10,7 @@
 //     language server, started on demand within a budget, with a whole-word
 //     text search for removed names and as the fallback). The turn's files
 //     are its edit journal plus what turn rollback's snapshots show it changed
-//     through Bash (turnSnapshots.ts), so a `sed -i` counts too.
+//     through Bash (turnDiff.ts), so a `sed -i` counts too.
 //  2. Judgment: ONE background-tier brain call per turn, covering every
 //     overlapping agent (notes.ts). It decides whether the change matters to
 //     each and writes the note. Cached by diff hash per target, so the same
@@ -41,7 +41,7 @@ import { onAgentTurnEnd, type AgentTurnEnd } from "../agentTurns";
 import { computeOverlaps, relOverlap, toRepoRel, type FileOverlap, type Overlap, type PeerAgent } from "./overlap";
 import { CHURN_DAYS, hotspotReason, inferHotspots, type Hotspot } from "./hotspots";
 import { changedIdentifiers, referenceFiles, type ChangedIdentifier, type EditText } from "./symbols";
-import { filesInRange, patchInRange, turnSnapshotRange, type SnapshotRange } from "../turnSnapshots";
+import { filesInRange, patchInRange, turnSnapshotRange, type SnapshotRange } from "../turnDiff";
 import {
   buildDiff,
   buildNotePrompt,

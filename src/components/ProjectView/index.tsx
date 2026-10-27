@@ -666,8 +666,9 @@ import {
   statusContextRoot,
 } from "./helpers";
 import { Button } from "../ui";
-import { dispatchWithPlan } from "../../plans/planGate";
-import { expectRun } from "../../plans/planStore";
+import { dispatchWithPlan, restoreWaitingPlans, type PlanResumer } from "../../plans/planGate";
+import { PLAN_ENV, planEnvForCommand } from "../../plans/planLaunch";
+import { armPlanTracking, expectRun } from "../../plans/planStore";
 import {
   documentResourceActive,
   shouldReuseInactiveDocumentPane,
@@ -1920,6 +1921,8 @@ const ProjectViewBody = memo(function ProjectViewBody({
         ...accountEnv,
         ...unattendedEnvFor(command),
       ];
+      // Planned work: the plan id rides in the agent's env (planLaunch.ts).
+      if (!env.some(([k]) => k === PLAN_ENV)) env.push(...planEnvForCommand(command));
       // The account is what the process is actually given, not what a caller
       // remembered: the badge, the plan chip and a later restore all read it.
       const accountProfile = tabAccount({
@@ -3204,17 +3207,11 @@ const ProjectViewBody = memo(function ProjectViewBody({
     return repos[0]?.path ?? null;
   }, []);
 
-  /** Create or reuse the ticket's worktree and start an agent in it. The one
-   *  implementation both the Issues panel and the ticket tab call. */
-  const startTicketWork = useCallback(
-    async (ticket: ipc.TicketInfo, requestedRepo: string, agentId?: string) => {
-      const repo = requestedRepo || await ticketRepo();
-      if (!repo) {
-        onNotice("No git repository in this project.");
-        return;
-      }
-      // The chosen agent, else the user's default — one rule, shared with every
-      // other launcher, and never a hardcoded vendor name (see pickLaunchCli).
+  /** The second half of starting work on a ticket: the agent, in the
+   *  ticket's worktree, on `seed` (planned or not). Also what a plan approved
+   *  after a restart resumes through (restoreWaitingPlans). */
+  const continueTicketWork = useCallback(
+    async (ticket: ipc.TicketInfo, repo: string, agentId: string, seed: string, planId?: string) => {
       const installedHere = getInstalled();
       const cli = pickLaunchCli(agentId, (bin) => Boolean(installedHere[bin]));
       if (!cli) {
@@ -3222,21 +3219,6 @@ const ProjectViewBody = memo(function ProjectViewBody({
         return;
       }
       const agent = cli.id;
-      // The ticket is dispatched work like any other: plan it first. The plan
-      // runs against the repo (the workspace may not exist yet) and folds into
-      // the seed; "Start without a plan" or no brain seeds the ticket as-is.
-      let seed = ticketContext(ticket);
-      let proceed = false;
-      let planId: string | undefined;
-      await dispatchWithPlan(
-        { request: seed, dir: repo, label: `${ticket.id} · ${cli.name}`, source: "ticket" },
-        (planned, id) => {
-          seed = planned;
-          planId = id;
-          proceed = true;
-        },
-      );
-      if (!proceed) return;
       // The agent runs in the ticket's worktree, which is usually outside the
       // repo's directory: wait for its run there too.
       const expectIn = (dir: string) => {
@@ -3287,7 +3269,56 @@ const ProjectViewBody = memo(function ProjectViewBody({
       if (id && start.typePrompt)
         pendingTerminalPrompts.current.set(id, seed);
     },
-    [ticketRepo, addTerminal, onNotice, getInstalled, switchTo],
+    [addTerminal, onNotice, getInstalled, switchTo],
+  );
+
+  /** Create or reuse the ticket's worktree and start an agent in it. The one
+   *  implementation both the Issues panel and the ticket tab call. */
+  const startTicketWork = useCallback(
+    async (ticket: ipc.TicketInfo, requestedRepo: string, agentId?: string) => {
+      const repo = requestedRepo || await ticketRepo();
+      if (!repo) {
+        onNotice("No git repository in this project.");
+        return;
+      }
+      // The chosen agent, else the user's default — one rule, shared with every
+      // other launcher, and never a hardcoded vendor name (see pickLaunchCli).
+      const installedHere = getInstalled();
+      const cli = pickLaunchCli(agentId, (bin) => Boolean(installedHere[bin]));
+      if (!cli) {
+        onNotice(`Unknown agent "${agentId}".`);
+        return;
+      }
+      const agent = cli.id;
+      // The ticket is dispatched work like any other: plan it first. The plan
+      // runs against the repo (the workspace may not exist yet) and folds into
+      // the seed; "Start without a plan" or no brain seeds the ticket as-is.
+      let seed = ticketContext(ticket);
+      let proceed = false;
+      let planId: string | undefined;
+      // An interactive session: its plan stays in progress across turns and
+      // is done when the ticket is, the session ends, or a receipt proves it.
+      // `resume` lets an approval that arrives after a restart still start it.
+      await dispatchWithPlan(
+        {
+          request: seed,
+          dir: repo,
+          label: `${ticket.id} · ${cli.name}`,
+          source: "ticket",
+          mode: "interactive",
+          ticketId: ticket.id,
+          resume: { kind: "ticket-work", payload: { ticket, repo, agentId: agent } },
+        },
+        (planned, id) => {
+          seed = planned;
+          planId = id;
+          proceed = true;
+        },
+      );
+      if (!proceed) return;
+      await continueTicketWork(ticket, repo, agent, seed, planId);
+    },
+    [ticketRepo, onNotice, getInstalled, continueTicketWork],
   );
 
   /** Put a PR's head in a workspace of its own (reusing one already holding it)
@@ -4096,6 +4127,8 @@ const ProjectViewBody = memo(function ProjectViewBody({
       // the path when the task was not isolated here, so a task launched in a
       // workspace that already existed is granted it too.
       const sandbox = unattendedContextFor(dir, isolatedFrom);
+      // Whatever the (synchronous) brief reads from storage, loaded first.
+      if (def.prepare) await def.prepare(payload).catch(() => {});
       const brief = def.buildContext(payload, userQuery, env);
       const seed = oneLine(
         `${brief} ${progressBrief(def, payload)} ${microTaskProtocol()}`,
@@ -4182,6 +4215,8 @@ const ProjectViewBody = memo(function ProjectViewBody({
       const extraEnv: [string, string][] = [
         ...fleet.env,
         ...(def.env?.(payload) ?? []),
+        // Planned work carries its plan id (plans/planLaunch.ts).
+        ...planEnvForCommand(start.command),
       ];
       // Which research entry this run is for, taken from the env the task
       // already declares rather than from a second channel — so the launcher
@@ -4595,7 +4630,11 @@ const ProjectViewBody = memo(function ProjectViewBody({
       const launch = (planned: string) =>
         startMicroTask(adhocTaskDef(planned, name), { dir }, "");
       if (opts?.plan === false) void launch(brief);
-      else void dispatchWithPlan({ request: brief, dir, label: name, source: "task" }, launch);
+      else
+        void dispatchWithPlan(
+          { request: brief, dir, label: name, source: "task", mode: "one-shot", resume: { kind: "adhoc", payload: { dir, label: name } } },
+          launch,
+        );
     },
     [startMicroTask],
   );
@@ -4973,7 +5012,15 @@ const ProjectViewBody = memo(function ProjectViewBody({
           `unless the ticket explicitly asks for it.`;
         const workDir = dir;
         await dispatchWithPlan(
-          { request: brief, dir: workDir, label: ticketTaskLabel(ticket), source: "ticket" },
+          {
+            request: brief,
+            dir: workDir,
+            label: ticketTaskLabel(ticket),
+            source: "ticket",
+            mode: "one-shot",
+            ticketId: ticket.id,
+            resume: { kind: "adhoc", payload: { dir: workDir, label: ticketTaskLabel(ticket) } },
+          },
           (planned) =>
             startMicroTask(adhocTaskDef(planned, ticketTaskLabel(ticket)), { dir: workDir }, ""),
         );
@@ -4983,6 +5030,25 @@ const ProjectViewBody = memo(function ProjectViewBody({
     },
     [onNotice, startMicroTask, switchTo, ticketRepo],
   );
+
+  // Plans that were waiting for approval when Canopy last closed come back
+  // (tucked in the corner), and an approval — here or in team chat, even one
+  // given while Canopy was closed — still starts their agent.
+  const planResumers = useRef<Record<string, PlanResumer>>({});
+  planResumers.current = {
+    adhoc: (brief, _planId, p) =>
+      startMicroTask(adhocTaskDef(brief, typeof p.label === "string" ? p.label : undefined), { dir: String(p.dir ?? "") }, ""),
+    "ticket-work": (brief, planId, p) =>
+      continueTicketWork(p.ticket as ipc.TicketInfo, String(p.repo ?? ""), String(p.agentId ?? ""), brief, planId),
+  };
+  useEffect(() => {
+    armPlanTracking();
+    if (project.readOnly) return;
+    void restoreWaitingPlans(
+      project.components.map((c) => c.path),
+      (kind) => planResumers.current[kind],
+    );
+  }, [project.components, project.readOnly]);
 
   /** Carry a finished task's conversation on as an ordinary agent session.
    *
@@ -6497,7 +6563,18 @@ const ProjectViewBody = memo(function ProjectViewBody({
         projectId: string;
         op: ipc.AgentBrowserOp;
       };
-      if (d?.projectId !== project.id) return;
+      // projectId null: the workspace's own op (browserLocalOps.ts), routed
+      // by folder — answered by the project that holds it.
+      const route = (d?.op?.route ?? "").replace(/\\/g, "/");
+      const ours =
+        d?.projectId === project.id ||
+        (d?.projectId == null &&
+          !!route &&
+          project.components.some((c) => {
+            const p = c.path.replace(/\\/g, "/").replace(/\/+$/, "");
+            return route === p || route.startsWith(`${p}/`);
+          }));
+      if (!ours) return;
       const op = d.op;
       const previews = tabsRef.current.filter(
         (t): t is PreviewSubTab => t.type === "preview",
@@ -6523,12 +6600,12 @@ const ProjectViewBody = memo(function ProjectViewBody({
         // An agent navigating an empty picker is creating the session just as
         // surely as open_preview does. Never overwrite an existing preview's
         // provenance merely because another agent later drives its page.
-        if (tab.initiatorPtyId == null && op.ptyId != null) {
+        if (!op.quiet && tab.initiatorPtyId == null && op.ptyId != null) {
           patchTabRaw(tab.id, { initiatorPtyId: op.ptyId } as Partial<SubTab>);
         }
-        if (op.ptyId != null) showBrowserPip(tab.id, op.ptyId);
+        if (!op.quiet && op.ptyId != null) showBrowserPip(tab.id, op.ptyId);
         dispatchBrowserOp(tab.id, op);
-      } else if (attemptTabId === undefined && op.op === "navigate" && op.url) {
+      } else if (!op.quiet && attemptTabId === undefined && op.op === "navigate" && op.url) {
         const id = openPreview(op.url, op.ptyId, false);
         if (op.ptyId != null) showBrowserPip(id, op.ptyId);
         dispatchBrowserOp(id, op);
@@ -6545,7 +6622,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
     window.addEventListener("canopy:agent-browser", onBrowserOp);
     return () =>
       window.removeEventListener("canopy:agent-browser", onBrowserOp);
-  }, [project.id, openPreview, patchTabRaw, showBrowserPip]);
+  }, [project.id, project.components, openPreview, patchTabRaw, showBrowserPip]);
 
   /** A pull request, commit, issue or file on a git host, opened as the tab
    *  Canopy already has for it rather than as a page of github.com. False for
@@ -11087,6 +11164,17 @@ const ProjectViewBody = memo(function ProjectViewBody({
   useEffect(() => () => { void bootstrapSession?.stop(); }, [bootstrapSession]);
   vibeSessionRef.current = vibeSession ?? bootstrapSession;
   useEffect(() => () => void vibeSession?.stop(), [vibeSession]);
+  // A Build request whose plan waited for approval across a restart goes to
+  // the Build session once there is one again.
+  useEffect(() => {
+    if (!vibeSession || project.readOnly) return;
+    const send = (brief: string, _planId: string, p: Record<string, unknown>) =>
+      vibeSession.send(String(p.message ?? ""), { planned: brief });
+    void restoreWaitingPlans(
+      project.components.map((c) => c.path),
+      (kind) => (kind === "build" ? send : undefined),
+    );
+  }, [vibeSession, project.components, project.readOnly]);
   vibeServerWatch.current =
     vibeSession
       ? vibeRequiredRuns

@@ -67,6 +67,11 @@ export function ShareDialog({request,onClose,directory=loadDirectory}:ShareDialo
     const card:Card={...request.card,reviewers};
     return {draft:cardDraft(card,note,{mentions:reviewers})};
    }
+   if(request.kind==='plan'){
+    if(!reviewers.length)return {problem:'Choose who can approve it.'};
+    const card:Card={...request.card,approvers:reviewers};
+    return {draft:cardDraft(card,note,{mentions:reviewers})};
+   }
    return {draft:cardDraft(request.card,note,to&&peer===to?{mentions:[to]}:{})};
   }catch(e){return {problem:e instanceof CardError?e.message:String(e)};}
  },[request,note,reviewers,to,peer]);
@@ -77,11 +82,11 @@ export function ShareDialog({request,onClose,directory=loadDirectory}:ShareDialo
  async function send(){
   if(!session||!draft)return;
   setSending(true);setError('');
-  try{await session.send(draft.text,peer,[],draft.ext);if(request.kind==='share')request.onSent?.(teamId,peer);onClose();}
+  try{await session.send(draft.text,peer,[],draft.ext);if(request.kind==='share')request.onSent?.(teamId,peer);else if(request.kind==='plan')request.onSent?.(reviewers);onClose();}
   catch(e){setError(e instanceof Error?e.message:String(e));}
   finally{setSending(false);}
  }
- const title=request.kind==='review'?'Request review in Canopy':request.kind==='error'?"Can't share this":'Send to team chat';
+ const title=request.kind==='review'?'Request review in Canopy':request.kind==='plan'?'Ask the team to approve this plan':request.kind==='error'?"Can't share this":'Send to team chat';
  return <div className="share-dialog-backdrop" onMouseDown={e=>{if(e.target===e.currentTarget)onClose();}}>
   <div className="share-dialog" role="dialog" aria-modal="true" aria-label={title}>
    <h2>{title}</h2>
@@ -96,6 +101,10 @@ export function ShareDialog({request,onClose,directory=loadDirectory}:ShareDialo
      </Select></label>
     </div>}
     {to&&dir&&dir.teams.length>0&&members.length>0&&!toMember&&<p className="share-dialog-warning" role="note">The person this is for isn't in this team. Pick a team you share with them.</p>}
+    {request.kind==='plan'&&<fieldset className="share-dialog-reviewers" aria-label="Approvers">
+     <legend>Who can approve it (everyone else in the conversation can comment)</legend>
+     {candidates.length?candidates.map(([id,n])=><label key={id}><input type="checkbox" checked={reviewers.includes(id)} disabled={!!peer} onChange={e=>setReviewers(cur=>e.target.checked?[...cur,id].slice(0,LIMITS.reviewers):cur.filter(r=>r!==id))}/>{n}</label>):<small>No teammates to ask yet.</small>}
+    </fieldset>}
     {request.kind==='review'&&<fieldset className="share-dialog-reviewers" aria-label="Reviewers">
      {candidates.length?candidates.map(([id,n])=><label key={id}><input type="checkbox" checked={reviewers.includes(id)} disabled={!!peer} onChange={e=>setReviewers(cur=>e.target.checked?[...cur,id].slice(0,LIMITS.reviewers):cur.filter(r=>r!==id))}/>{n}</label>):<small>No teammates to ask yet.</small>}
     </fieldset>}

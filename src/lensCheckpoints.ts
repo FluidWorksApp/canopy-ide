@@ -11,7 +11,7 @@ import { askBrain } from "./brainCall";
 import * as ipc from "./ipc";
 import { appendLedger, queryLedger } from "./ledger";
 import { isLensLayer, type LensLayer } from "./lensLayers";
-import { patchInRange } from "./turnSnapshots";
+import { patchInRange } from "./turnDiff";
 
 export type CheckpointRisk = "low" | "medium" | "high";
 

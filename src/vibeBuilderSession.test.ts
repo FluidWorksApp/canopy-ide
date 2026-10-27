@@ -496,6 +496,30 @@ describe("VibeBuilderSession", () => {
     }));
   });
 
+  it("plans a Build request through the dispatch gate and sends the planned brief", async () => {
+    const plan = vi.fn(async ({ message }: { message: string }) => `[Canopy plan pl-a-b] Goal: g. Task: ${message}`);
+    const h = harness({ plan });
+    await h.session.send("Add a pricing page");
+    expect(plan).toHaveBeenCalledWith(expect.objectContaining({ message: "Add a pricing page" }));
+    expect(h.transport.send).toHaveBeenCalledWith("[Canopy plan pl-a-b] Goal: g. Task: Add a pricing page");
+    // The person's words stay their words in the conversation.
+    expect(h.transcripts).toContainEqual(expect.objectContaining({ kind: "user", body: "Add a pricing page" }));
+  });
+
+  it("does not start a Build request the person chose not to start", async () => {
+    const h = harness({ plan: vi.fn(async () => null) });
+    await h.session.send("Rewrite the billing flow");
+    expect(h.transport.send).not.toHaveBeenCalled();
+  });
+
+  it("sends an already-approved plan's brief without planning it again", async () => {
+    const plan = vi.fn(async () => "never");
+    const h = harness({ plan });
+    await h.session.send("Add a pricing page", { planned: "[Canopy plan pl-a-b] approved brief" });
+    expect(plan).not.toHaveBeenCalled();
+    expect(h.transport.send).toHaveBeenCalledWith("[Canopy plan pl-a-b] approved brief");
+  });
+
   it("puts the verification summary on the run's history row", async () => {
     const h = harness();
     await h.session.send("Make the button blue");

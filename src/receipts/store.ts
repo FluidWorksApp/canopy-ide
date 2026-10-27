@@ -135,6 +135,37 @@ export async function hydrateReceipt(cwd: string, sessionId: string): Promise<vo
   }
 }
 
+const RECENT_TTL = 30_000;
+const hydratedDirs = new Map<string, number>();
+
+/** Load the newest stored receipts for the repository containing `dir` into
+ *  the live view, so the synchronous `latestReceiptFor` (the Raise PR brief)
+ *  finds receipts filed before a restart or by another window. Cheap to call
+ *  again: one ledger read per repository per half minute. */
+export async function hydrateLatestReceipts(dir: string, limit = 60): Promise<void> {
+  if (!dir) return;
+  const at = hydratedDirs.get(dir);
+  if (at != null && Date.now() - at < RECENT_TTL) return;
+  hydratedDirs.set(dir, Date.now());
+  try {
+    const rows = await queryLedger<ReceiptData>(dir, { kinds: ["receipt"], limit });
+    // Oldest first, so per session the newest is the one left standing.
+    for (const entry of [...rows].sort((a, b) => a.ts - b.ts)) {
+      if (!entry.data || typeof entry.data.sessionId !== "string") continue;
+      const record = recordFromEntry(entry);
+      if (!recent.some((r) => r.id === record.id)) {
+        recent.push(record);
+        recent.sort((a, b) => a.ts - b.ts);
+        if (recent.length > 100) recent.splice(0, recent.length - 100);
+      }
+      const cur = bySession.get(record.sessionId);
+      if (!cur || (cur.state === "done" && cur.record.ts < record.ts)) setReceipt(record);
+    }
+  } catch {
+    hydratedDirs.delete(dir);
+  }
+}
+
 /** Receipts appended by another window of the app reach this one too. */
 export function followLedger(): () => void {
   return subscribeLedger("*", (entry) => {
@@ -156,6 +187,7 @@ export function resetReceiptsForTests(): void {
   byPty.clear();
   recent.length = 0;
   hydrated.clear();
+  hydratedDirs.clear();
   lastDone.clear();
   listeners.clear();
   version = 0;

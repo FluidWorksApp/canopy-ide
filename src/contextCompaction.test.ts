@@ -31,10 +31,10 @@ describe("when and how it is delivered", () => {
     expect(compactPlan({ agent: CLAUDE, live: true, lifeState: "waiting" }).route).toBe("unavailable");
   });
 
-  it("resumes a session with no terminal headlessly, except in a cloud workspace", () => {
+  it("resumes a session with no terminal headlessly, on this computer or in its cloud workspace", () => {
     expect(compactPlan({ agent: CLAUDE, live: false }).route).toBe("runner");
     expect(compactPlan({ agent: CLAUDE, live: true, lifeState: "ended" }).route).toBe("runner");
-    expect(compactPlan({ agent: CLAUDE, live: false, remote: true }).route).toBe("unavailable");
+    expect(compactPlan({ agent: CLAUDE, live: false, remote: true }).route).toBe("runner");
   });
 });
 
@@ -57,6 +57,24 @@ describe("compactHeadless", () => {
     expect(kill).toHaveBeenCalled();
     // The CLI's own window report is remembered for the context meter.
     expect(contextWindowFor("model-x")).toBe(1_000_000);
+  });
+
+  it("in a cloud workspace compacts inside the workspace, sending only the instructions", async () => {
+    const spawn = vi.fn();
+    const remote = vi.fn(async () => ({ ok: true, preTokens: 90_000, postTokens: 9_000, contextWindows: { "model-y": 200_000 } }));
+    const r = await compactHeadless(
+      { agent: CLAUDE, sessionId: "s9", cwd: "/workspace/app", command: "/compact keep it", instructions: "keep it", profile: "work" },
+      { spawn, kill: async () => {}, remote } as never,
+    );
+    expect(r).toEqual({ ok: true, preTokens: 90_000, postTokens: 9_000 });
+    expect(spawn).not.toHaveBeenCalled();
+    expect(remote).toHaveBeenCalledWith({ agent: CLAUDE, sessionId: "s9", cwd: "/workspace/app", instructions: "keep it", profile: "work" });
+    expect(contextWindowFor("model-y")).toBe(200_000);
+    const failed = await compactHeadless(
+      { agent: CLAUDE, sessionId: "s9", cwd: "/w", command: "/compact" },
+      { spawn, kill: async () => {}, remote: async () => ({ ok: false, message: "The session's folder is not in this workspace." }) } as never,
+    );
+    expect(failed).toEqual({ ok: false, message: "The session's folder is not in this workspace." });
   });
 
   it("says so when the CLI ends without compacting", async () => {

@@ -19,6 +19,8 @@ import {readAgentEvents} from './agent-events.mjs';
 import {sessionDigestReader} from './session-digests.mjs';
 import {sessionTranscriptTail} from './session-transcript.mjs';
 import {sessionActivity} from './session-activity.mjs';
+import {sessionCompactCommand} from './session-compact.mjs';
+import {storeDigestReader,withStoreDigests} from './session-store-digests.mjs';
 import {prepareSession} from './session-transfer.mjs';
 import {importAgentAccounts,importAccountProfiles} from './agent-accounts.mjs';
 import {CloneJobs} from './git-clone.mjs';
@@ -38,7 +40,7 @@ import {sessionProcessReader} from './session-processes.mjs';
 import {McpRegistry} from './mcp-servers.mjs';
 import {gitHistory} from './git-history.mjs';
 import {claudeIde,claudeIdeCommand} from './claude-ide.mjs';
-import {receiptRunCheck} from './receipt-check.mjs';
+import {receiptIsolate,receiptRelease,receiptRunCheck} from './receipt-check.mjs';
 import {workspaceToolsCommands} from './workspace-tools.mjs';
 import {workspaceCleanupCommands} from './workspace-cleanup.mjs';
 import {lspCommands} from './lsp.mjs';
@@ -57,8 +59,11 @@ const execute=promisify(execFile);
 const ROOT='/workspace', HOME='/home/agent', STORE=HOME+'/.canopy/ide-projects.json';
 const browsers=new BrowserStreams({home:HOME});
 const profiles=new WorkspaceProfiles(HOME);
+const sessionCompact=sessionCompactCommand({home:HOME,scoped:value=>scoped(value),profileEnv:(agent,id)=>profiles.env(agent,id)});
 const integrations=new AgentIntegrations(HOME);
 const sessionDigests=sessionDigestReader(HOME);
+// Every other CLI's own store (omp, gemini, agy, opencode, aider), as the desktop's stores.rs digests.
+const storeDigests=storeDigestReader(HOME,{scoped:value=>scoped(value)});
 const uploads=new WorkspaceUploads(ROOT);
 const agentUsage=agentUsageReader(HOME);
 export async function scoped(value,create=false){
@@ -151,6 +156,8 @@ export async function nativeInvoke(command,args={}){
   }
   // Proof receipts: the workspace re-runs checks itself (src/receipts/).
   if(command==='receipt_run_check')return receiptRunCheck(args,{scoped,home:HOME});
+  if(command==='receipt_isolate')return receiptIsolate(args,{scoped,home:HOME});
+  if(command==='receipt_release')return receiptRelease(args,{scoped});
   if(command==='workspace_activity')return workspaceActivity();
   if(command==='workspace_metrics')return workspaceMetrics();
   if(command==='workspace_browser_request'){
@@ -303,9 +310,10 @@ export async function nativeInvoke(command,args={}){
   if(command==='agent_usage')return agentUsage.usage();
   if(command==='plan_usage'){await agentUsage.usage();return agentUsage.plans(args.sessionId??null);}
   if(command==='profile_prepare_session')return prepareSession(HOME,args);
-  if(command==='session_digests')return sessionDigests();
+  if(command==='session_digests')return withStoreDigests(await sessionDigests(),await storeDigests(args.roots).catch(()=>[]));
   if(command==='session_transcript_tail')return sessionTranscriptTail(HOME,args,{scoped});
   if(command==='session_activity')return sessionActivity(HOME,args);
+  if(command==='session_compact')return sessionCompact(args);
   if(command==='workspace_chrome_stream_open')return browsers.open(args);
   if(command==='workspace_chrome_stream_close'){await browsers.close(args.id);return;}
   if(command==='mcp_servers')return mcpRegistry.servers(args.projectDirs??[]);

@@ -20,7 +20,7 @@ import {
   type CheckpointSummary,
   type LensCheckpoint,
 } from "./lensCheckpoints";
-import { turnSnapshotRange, filesInRange } from "./turnSnapshots";
+import { turnSnapshotRange, filesInRange } from "./turnDiff";
 
 export interface LensStep extends LensCheckpoint {
   kind: "step";

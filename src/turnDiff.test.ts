@@ -30,7 +30,7 @@ describe("turn diff from rollback snapshots", () => {
   });
 
   it("reports every change between the pair, shell-made ones included", async () => {
-    const run = vi.fn(async (..._a: unknown[]) => ({
+    const run = vi.fn(async (_cwd: string, _argv: string[]) => ({
       code: 0,
       stdout: "M\tsrc/a.ts\nA\tdb/seed.sql\nD\tscripts/old.sh\n",
       stderr: "",
