@@ -592,21 +592,6 @@ export function AgentWorkspaceView({
   builderLens = false,
 }: AgentWorkspaceViewProps) {
   const { switchTo, openThere } = useBranchSwitch();
-  // A CLI without Canopy hooks never names its session; find it in the CLI's
-  // own store by folder, terminal and start time, so the session document is
-  // still one click away.
-  const [found, setFound] = useState<ipc.SessionDigest | null>(null);
-  useEffect(() => {
-    setFound(null);
-    if (sessionId) return;
-    let live = true;
-    void resolveSessionId({ agent, cwd, ptyId }).then((d) => live && setFound(d));
-    return () => {
-      live = false;
-    };
-  }, [agent, cwd, ptyId, sessionId, digest?.updated]);
-  const docSessionId = sessionId ?? found?.session_id;
-  const docDigest = digest ?? found ?? undefined;
   const [taskMenu, setTaskMenu] = useState(false);
   /** The one-off brief being typed in the Run task menu, or null when that row
    *  is still just a row. */
@@ -626,6 +611,25 @@ export function AgentWorkspaceView({
   const [edits, setEdits] = useState<ipc.AgentEdit[]>([]);
   // Manual refresh: the small icon in the header bumps this to re-read all.
   const [tick, setTick] = useState(0);
+  // A CLI without Canopy hooks never names its session; find it in the CLI's
+  // own store by folder, terminal and start time, so the session document is
+  // still one click away.
+  const [found, setFound] = useState<ipc.SessionDigest | null>(null);
+  useEffect(() => {
+    setFound(null);
+  }, [agent, cwd, ptyId, sessionId]);
+  useEffect(() => {
+    if (sessionId) return;
+    let live = true;
+    void resolveSessionId({ agent, cwd, ptyId }).then((d) => live && d && setFound(d));
+    return () => {
+      live = false;
+    };
+    // Refresh, and the workspace's own polls, look again: a terminal that has
+    // not written its first turn yet has no session to find until it does.
+  }, [agent, cwd, ptyId, sessionId, digest?.updated, tick, ws?.updated]);
+  const docSessionId = sessionId ?? found?.session_id;
+  const docDigest = digest ?? found ?? undefined;
 
   // Review comments the user is drafting on the diff, to send to the agent.
   // Keyed to the session (falling back to agent+cwd) and mirrored to

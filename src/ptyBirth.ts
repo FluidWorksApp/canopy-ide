@@ -40,9 +40,12 @@ export const ptyBirth = (id: number | null | undefined): PtyBirth | null =>
 /** Start watching (idempotent). */
 export function watchPtyBirths(): void {
   if (watching) return;
-  watching = ipc.onPtyStats((stats) => notePtyStats(stats)).catch(() => {
-    watching = null;
-  });
+  // Never throws: without terminal stats there are just no birth times.
+  watching = Promise.resolve()
+    .then(() => ipc.onPtyStats((stats) => notePtyStats(stats)))
+    .catch(() => {
+      watching = null;
+    });
 }
 
 /** Tests only. */

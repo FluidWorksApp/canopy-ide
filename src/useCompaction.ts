@@ -5,6 +5,9 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import type * as ipc from "./ipc";
 import { compactCommand, compactHeadless, compactPlan, type CompactPlan, type CompactScope } from "./contextCompaction";
 
+/** How long a typed compaction may take to show up in the transcript. */
+const SENT_TIMEOUT_MS = 3 * 60 * 1000;
+
 export type CompactionPhase =
   | { phase: "idle" }
   | { phase: "confirming"; scope: CompactScope }
@@ -94,6 +97,17 @@ export function useCompaction(o: {
       setState({ phase: "failed", message: "Not sent: the agent stopped or is waiting for you. Try again." });
     }
   }, [state, o.live, o.lifeState, deliver]);
+
+  // Typed, but the transcript never shows it happening (the agent didn't take
+  // the command): say so rather than spin forever.
+  useEffect(() => {
+    if (state.phase !== "sent") return;
+    const t = setTimeout(
+      () => setState({ phase: "failed", message: "Nothing happened yet — the agent may not have taken the command. Try again." }),
+      SENT_TIMEOUT_MS,
+    );
+    return () => clearTimeout(t);
+  }, [state]);
 
   // Sent to a terminal: done when the transcript shows a new compaction.
   useEffect(() => {

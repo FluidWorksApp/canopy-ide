@@ -88,7 +88,11 @@ export function ContextControls({
           Waiting for the agent to finish this turn… <Button size="sm" variant="ghost" onClick={compaction.cancel}>Cancel</Button>
         </span>
       )}
-      {state.phase === "sent" && <span className="cx-note" role="status">Sent — compacting…</span>}
+      {state.phase === "sent" && (
+        <span className="cx-note" role="status">
+          Sent — compacting… <Button size="sm" variant="ghost" onClick={compaction.cancel}>Dismiss</Button>
+        </span>
+      )}
       {state.phase === "running" && <span className="cx-note" role="status">Compacting…</span>}
       {state.phase === "done" && (
         <span className="cx-note" role="status">
