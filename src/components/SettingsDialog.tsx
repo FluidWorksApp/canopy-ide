@@ -1580,6 +1580,21 @@ export function SettingsDialog({ onClose, initialTab = "appearance" }: SettingsD
                   />
                 </Item>
                 <Item
+                  name="Builder lens summaries"
+                  desc="In the Builder lens, explain each saved step and the project's layers in plain words."
+                >
+                  <Checkbox
+                    checked={s.lensAutoSummaries}
+                    onChange={(v) => patch({ lensAutoSummaries: v })}
+                    label="Summarise changes automatically"
+                    hint={
+                      s.lensAutoSummaries
+                        ? "Your connected agent writes a short summary of each step in the background, once per step."
+                        : "Steps show what you asked for; the layer map is made only when you ask."
+                    }
+                  />
+                </Item>
+                <Item
                   name="Claude Code editor link"
                   desc="Let Claude Code use Canopy as its IDE: diffs to review, your selection, and live diagnostics."
                 >

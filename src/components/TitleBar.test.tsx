@@ -63,7 +63,7 @@ describe("TitleBar Build shell", () => {
     expect(document.querySelector(".build-browser-controls")).toBeNull();
     expect(screen.queryByRole("textbox", { name: "Preview address" })).toBeNull();
     expect(document.querySelector(".collab-live")).toBeNull();
-    expect(screen.getByRole("button", { name: "Switch to Engineer mode" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Switch to the Engineer lens" })).toBeTruthy();
 
     const bell = screen.getByRole("button", { name: "Notifications" });
     expect(bell.className).toContain("notif-bell-low");

@@ -8,7 +8,7 @@ import { newComponentId, newProjectId, newRunCommandId } from "../projects";
 import { useEscape } from "../useEscape";
 import { FilesIcon } from "./icons";
 import { Button } from "./ui";
-import { getSettings } from "../settings";
+import { defaultLens, initialLensConfig } from "../projectLens";
 import {isRemoteHost} from "../host";
 import {Dialog} from "./Dialog";
 import {DirectoryPicker} from "../remoteExecution/DirectoryPicker";
@@ -366,10 +366,7 @@ export function ProjectDialog({ existing, onSave, onCancel }: ProjectDialogProps
                   : existing
                     ? {}
                     : {
-                        vibe: {
-                          version: 1,
-                          enabled: getSettings().defaultProjectLens === "build",
-                        },
+                        vibe: initialLensConfig(defaultLens()),
                       }),
               }); } finally { setSaving(false); }
             }}>

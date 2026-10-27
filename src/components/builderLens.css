@@ -1,0 +1,250 @@
+/* Builder lens tools (BuilderLensPanel): a compact strip above the Build chat
+   that opens one section at a time, so the chat keeps most of the column. */
+.builder-lens {
+  position: relative;
+  z-index: 3;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 10px 12px 6px;
+  border-bottom: 1px solid var(--border);
+  max-height: 55%;
+  min-height: 0;
+  overflow-y: auto;
+  font-size: var(--fs-sm);
+  color: var(--text);
+}
+
+.builder-lens-tabs {
+  display: flex;
+  gap: 4px;
+  flex-wrap: wrap;
+}
+
+.builder-lens-tab {
+  flex: 1 1 auto;
+  padding: 4px 8px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  background: var(--bg-raised);
+  color: var(--text-dim);
+  font: inherit;
+  cursor: pointer;
+  transition: background var(--dur-fast) var(--ease-out), color var(--dur-fast) var(--ease-out);
+}
+
+.builder-lens-tab:hover,
+.builder-lens-tab.active {
+  color: var(--text);
+  border-color: color-mix(in srgb, var(--accent) 50%, var(--border));
+}
+
+.builder-lens-tab.active {
+  background: color-mix(in srgb, var(--accent) 14%, var(--bg-raised));
+}
+
+.builder-lens-tab:focus-visible,
+.builder-lens-layer-head:focus-visible {
+  outline: 2px solid var(--ring, var(--accent));
+  outline-offset: 1px;
+}
+
+.builder-lens-body {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding-top: 4px;
+}
+
+.builder-lens-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  font-weight: 650;
+}
+
+.builder-lens-note {
+  margin: 0;
+  color: var(--text-dim);
+  font-size: var(--fs-xs);
+}
+
+.builder-lens-notice,
+.builder-lens-owned,
+.builder-lens-strikes,
+.builder-lens-fixing {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px 10px;
+  border-radius: var(--r-sm);
+  border: 1px solid color-mix(in srgb, var(--warn) 45%, var(--border));
+  background: color-mix(in srgb, var(--warn) 9%, var(--bg-raised));
+}
+
+.builder-lens-fixing {
+  border-color: color-mix(in srgb, var(--accent) 40%, var(--border));
+  background: color-mix(in srgb, var(--accent) 8%, var(--bg-raised));
+}
+
+.builder-lens-notice-actions,
+.builder-lens-actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.builder-lens-strikes p,
+.builder-lens-fixing p {
+  margin: 0;
+}
+
+.builder-lens-list,
+.builder-lens-owners,
+.builder-lens-files,
+.builder-lens-evidence {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.builder-lens-evidence {
+  padding-left: 14px;
+  list-style: disc;
+  gap: 2px;
+  color: var(--text-dim);
+}
+
+.builder-lens-item,
+.builder-lens-owner,
+.builder-lens-diagnosis {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 4px;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  background: var(--bg-raised);
+}
+
+.builder-lens-item-head {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  width: 100%;
+}
+
+.builder-lens-item-head > span:not(.builder-lens-chip) {
+  color: var(--text-dim);
+  flex: 1 1 auto;
+}
+
+.builder-lens-item-text {
+  margin: 0;
+  color: var(--text-dim);
+}
+
+.builder-lens-chip {
+  padding: 1px 6px;
+  border-radius: 999px;
+  font-size: var(--fs-xs);
+  border: 1px solid var(--border);
+  color: var(--text-dim);
+}
+
+.builder-lens-chip.layer-data { border-color: color-mix(in srgb, var(--cyan) 50%, var(--border)); }
+.builder-lens-chip.layer-auth,
+.builder-lens-chip.layer-deploy { border-color: color-mix(in srgb, var(--warn) 50%, var(--border)); }
+.builder-lens-chip.layer-view { border-color: color-mix(in srgb, var(--accent) 50%, var(--border)); }
+
+.builder-lens-risk {
+  font-size: var(--fs-xs);
+  color: var(--text-faint);
+}
+
+.builder-lens-risk.risk-high { color: var(--warn); }
+
+.builder-lens-convergence {
+  margin: 0;
+  font-size: var(--fs-xs);
+}
+
+.builder-lens-convergence.conv-agree { color: var(--ok); }
+.builder-lens-convergence.conv-disagree { color: var(--warn); }
+
+.builder-lens-label {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  color: var(--text-dim);
+  font-size: var(--fs-xs);
+}
+
+.builder-lens textarea {
+  width: 100%;
+  box-sizing: border-box;
+  resize: vertical;
+  padding: 6px 8px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  background: var(--bg);
+  color: var(--text);
+  font: inherit;
+}
+
+.builder-lens-layers {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.builder-lens-layer {
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  background: var(--bg-raised);
+}
+
+.builder-lens-layer-head {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+  width: 100%;
+  padding: 8px 10px;
+  border: 0;
+  background: none;
+  color: var(--text);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.builder-lens-layer-head span { color: var(--text-dim); }
+.builder-lens-layer-head small { color: var(--text-faint); font-size: var(--fs-xs); }
+
+.builder-lens-files {
+  padding: 0 10px 8px;
+  gap: 2px;
+  font-size: var(--fs-xs);
+}
+
+.builder-lens-files code { font-family: var(--font-mono); color: var(--text-dim); }
+
+.builder-lens-globs,
+.builder-lens-globs-edit {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  color: var(--text-faint);
+  font-size: var(--fs-xs);
+}
+
+.builder-lens-globs-edit { flex-direction: column; align-items: stretch; }

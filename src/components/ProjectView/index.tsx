@@ -561,6 +561,8 @@ import { shouldShowTip, markTipSeen, type CoachTip } from "../../coachmarks";
 import { ActivityRail } from "../ActivityRail";
 import { PaneBar } from "../PaneBar";
 import { VibeBuilderPane } from "../VibeBuilderPane";
+import { projectLens } from "../../projectLens";
+import { BuilderLensPanel } from "../BuilderLensPanel";
 import {
   createVibeBuilderSession,
   type VibeManagedProcessFailureInput,
@@ -915,7 +917,9 @@ const ProjectViewBody = memo(function ProjectViewBody({
   }, []);
   const [sideWidth, setSideWidth] = useState(SIDE_DEFAULT_W);
   const sideWidthRef = useRef(SIDE_DEFAULT_W);
-  const vibe = project.vibe?.enabled === true;
+  // The builder lens. Named `vibe` for the guard tests and history; it only
+  // decides what is shown — sessions, runs and files are the same either way.
+  const vibe = projectLens(project) === "builder";
   const [buildSettingsOpen, setBuildSettingsOpen] = useState(false);
   const [vibeSetupAttempt, setVibeSetupAttempt] = useState(0);
   const vibeTarget = resolveVibeTarget(project);
@@ -14763,6 +14767,9 @@ const ProjectViewBody = memo(function ProjectViewBody({
           />
         )}
         <aside className="vibe-chat-placeholder" aria-label="Build chat">
+          {/* Builder lens tools: plain-language history, diagnose-first
+              repair, layers and owners. Edits only through the Build session. */}
+          {vibe && <BuilderLensPanel project={project} session={vibeSession ?? null} />}
           <VibeBuilderPane
             project={project}
             phase={

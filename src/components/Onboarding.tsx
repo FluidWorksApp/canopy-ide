@@ -316,8 +316,8 @@ export function Onboarding({ onClose, onCreateProject }: OnboardingProps) {
                 <span className="onboarding-config-label">Which sounds like you?</span>
                 <div className="onboarding-persona" role="radiogroup" aria-label="Your experience with code">
                   {([
-                    ["build", "I build with AI", "Open projects in Build mode"],
-                    ["engineer", "I'm an engineer", "Open projects in Engineer mode"],
+                    ["build", "I build with AI", "Open projects in the Builder lens"],
+                    ["engineer", "I'm an engineer", "Open projects in the Engineer lens"],
                   ] as const).map(([lens, label, hint]) => (
                     <button
                       key={lens}

@@ -12,6 +12,7 @@ import type { BrowserEngine } from "./browserBounds";
 import type { MascotId } from "./mascots";
 import type { CaptureMode } from "./pageCapture";
 import { IS_MAC } from "./platform";
+import { lensFromStoredDefault, storedDefaultFor } from "./lensMigration";
 import { DEFAULT_AGENT_CLI_ID } from "../shared/agentCliIdentity";
 import { SKINS, type SkinId } from "./skins/registry";
 import {
@@ -446,6 +447,10 @@ export interface Settings {
    *  stored settings win over defaults only once a key exists (see
    *  getSettings) — so whoever turns it off stays off. */
   autoUpdateClis: boolean;
+  /** Builder lens: let the brain summarise each saved step in plain words and
+   *  map the project's layers on its own (background tier, cached per step).
+   *  Off = titles fall back to the request text and the map waits for a click. */
+  lensAutoSummaries: boolean;
   /** Model for the brain's main-tier headless calls (brainCall.ts). Empty =
    *  the CLI's own default, which is what the person already pays for. */
   brainModel: string;
@@ -668,6 +673,7 @@ export const DEFAULTS: Settings = {
   agentAskForAttention: false,
   agentsMaySpawn: true,
   autoUpdateClis: true,
+  lensAutoSummaries: true,
   brainModel: "",
   brainBackgroundModel: "",
   brainDailyBudgetUsd: null,
@@ -831,6 +837,10 @@ export function getSettings(): Settings {
     value.brainFeatureBudgetsUsd = featureBudgets(value.brainFeatureBudgetsUsd);
     if (typeof value.brainModel !== "string") value.brainModel = "";
     if (typeof value.brainBackgroundModel !== "string") value.brainBackgroundModel = "";
+    // The old Build/Engineer mode setting is now the default *lens*. Keep its
+    // stored name and spelling, but fold every value it has held ("build",
+    // "builder", true, junk) onto the two the app understands.
+    value.defaultProjectLens = storedDefaultFor(lensFromStoredDefault(stored.defaultProjectLens ?? DEFAULTS.defaultProjectLens));
   } catch {
     value = { ...DEFAULTS };
   }

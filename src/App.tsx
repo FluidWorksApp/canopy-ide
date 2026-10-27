@@ -108,6 +108,7 @@ import { companionName, summonCompanion } from "./companion";
 import type { CompanionProposal } from "./companionSession";
 import { personaBinding } from "./personaBinding";
 import { getSettings, subscribeSettings, THEME_CHANGE_EVENT } from "./settings";
+import { defaultLens, initialLensConfig, projectLens, toggleProjectLens } from "./projectLens";
 import {
   dismissTerminalMemoryPromptsForWindow,
   subscribeTerminalMemoryPromptVisibility,
@@ -900,10 +901,7 @@ export default function App() {
       id: newProjectId(),
       name,
       components: [{ id: newComponentId(), label: name, path: dir, commands: [] }],
-      vibe: {
-        version: 1,
-        enabled: getSettings().defaultProjectLens === "build",
-      },
+      vibe: initialLensConfig(defaultLens()),
     });
   }, []);
 
@@ -2971,12 +2969,8 @@ export default function App() {
     (id: string) => {
       const project = wsRef.current.projects.find((p) => p.id === id);
       if (!project) return;
-      void saveProject({
-        ...project,
-        vibe: project.vibe
-          ? { ...project.vibe, enabled: project.vibe.enabled !== true }
-          : { version: 1, enabled: true },
-      });
+      // Only the lens bit flips; sessions, files and setup stay put.
+      void saveProject(toggleProjectLens(project));
     },
     [saveProject],
   );
@@ -3026,7 +3020,7 @@ export default function App() {
   );
   const [notifOpen, setNotifOpen] = useState(false);
   const activeBuildMode =
-    ws.projects.find((project) => project.id === ws.activeId)?.vibe?.enabled === true;
+    projectLens(ws.projects.find((project) => project.id === ws.activeId)) === "builder";
   const visibleAttention = useMemo(
     () => (activeBuildMode ? buildAttentionItems(attention) : attention),
     [activeBuildMode, attention],
