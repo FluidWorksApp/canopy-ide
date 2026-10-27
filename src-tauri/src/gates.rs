@@ -214,9 +214,7 @@ pub fn canonical_root(cwd: &Path) -> Option<String> {
         Err(_) => gd,
     };
     let common = common.canonicalize().ok()?;
-    common
-        .parent()
-        .map(|p| p.to_string_lossy().to_string())
+    common.parent().map(|p| p.to_string_lossy().to_string())
 }
 
 /// Load the policy that governs `cwd`: the repository's, or — for a folder git
@@ -248,7 +246,10 @@ pub fn load_policy(home: &str, cwd: &Path) -> Option<(String, Policy)> {
 /// Atomic write (temp + rename) so a hook never reads half a policy.
 pub fn write_policy(home: &str, canonical: &str, policy: &Policy) -> Result<PathBuf, String> {
     let path = policy_path(home, canonical);
-    write_atomic(&path, &serde_json::to_vec_pretty(policy).map_err(|e| e.to_string())?)?;
+    write_atomic(
+        &path,
+        &serde_json::to_vec_pretty(policy).map_err(|e| e.to_string())?,
+    )?;
     Ok(path)
 }
 
@@ -281,7 +282,9 @@ fn valid_key(key: &str) -> bool {
 }
 
 fn approval_path(home: &str, key: &str) -> PathBuf {
-    policy_dir(home).join("approvals").join(format!("{key}.json"))
+    policy_dir(home)
+        .join("approvals")
+        .join(format!("{key}.json"))
 }
 
 /// Mint a token: the person said "Approve once" (or "Allow once") in Canopy.
@@ -464,7 +467,15 @@ fn strip_prefix_words(words: &[String]) -> &[String] {
         if is_assign
             || matches!(
                 w,
-                "sudo" | "time" | "nohup" | "exec" | "command" | "env" | "nice" | "doas" | "builtin"
+                "sudo"
+                    | "time"
+                    | "nohup"
+                    | "exec"
+                    | "command"
+                    | "env"
+                    | "nice"
+                    | "doas"
+                    | "builtin"
             )
         {
             i += 1;
@@ -813,7 +824,9 @@ impl GitProbe for FsGit {
             return (true, true);
         };
         let text = String::from_utf8_lossy(&out.stdout);
-        let tracked = text.lines().any(|l| !l.starts_with("??") && !l.trim().is_empty());
+        let tracked = text
+            .lines()
+            .any(|l| !l.starts_with("??") && !l.trim().is_empty());
         let untracked = text.lines().any(|l| l.starts_with("??"));
         (tracked, untracked)
     }
@@ -905,7 +918,10 @@ fn sql_destroys(lower: &str) -> bool {
 pub fn classify_irreversible(command: &str, ctx: &Ctx) -> Option<(String, String)> {
     let lower = command.to_ascii_lowercase();
     if sql_destroys(&lower) {
-        return irreversible("database", "deletes database data that can't be brought back");
+        return irreversible(
+            "database",
+            "deletes database data that can't be brought back",
+        );
     }
     for seg in segments(command) {
         let words = strip_prefix_words(&seg);
@@ -926,9 +942,14 @@ fn classify_segment(words: &[String], ctx: &Ctx) -> Option<(String, String)> {
     let joined = args.join(" ").to_ascii_lowercase();
     match v {
         "rm" => {
-            let recursive = words[1..].iter().take_while(|w| w.starts_with('-')).any(|w| {
-                w == "--recursive" || (!w.starts_with("--") && (w.contains('r') || w.contains('R')))
-            }) || has("--recursive");
+            let recursive = words[1..]
+                .iter()
+                .take_while(|w| w.starts_with('-'))
+                .any(|w| {
+                    w == "--recursive"
+                        || (!w.starts_with("--") && (w.contains('r') || w.contains('R')))
+                })
+                || has("--recursive");
             if !recursive {
                 return None;
             }
@@ -939,7 +960,14 @@ fn classify_segment(words: &[String], ctx: &Ctx) -> Option<(String, String)> {
                 let (word, globbed) = match target.find(['*', '?', '[']) {
                     Some(i) => {
                         let parent = target[..i].rsplit_once('/').map(|(p, _)| p).unwrap_or("");
-                        (if parent.is_empty() { ".".to_string() } else { parent.to_string() }, true)
+                        (
+                            if parent.is_empty() {
+                                ".".to_string()
+                            } else {
+                                parent.to_string()
+                            },
+                            true,
+                        )
                     }
                     None => (target.clone(), false),
                 };
@@ -971,13 +999,20 @@ fn classify_segment(words: &[String], ctx: &Ctx) -> Option<(String, String)> {
             }
             None
         }
-        "pulumi" | "cdk" | "cdktf" | "sst" | "serverless" | "sls" if has("destroy") || has("remove") => {
+        "pulumi" | "cdk" | "cdktf" | "sst" | "serverless" | "sls"
+            if has("destroy") || has("remove") =>
+        {
             irreversible("infra-destroy", "tears down live infrastructure")
         }
-        "eksctl" if has("delete") => irreversible("infra-destroy", "tears down live infrastructure"),
+        "eksctl" if has("delete") => {
+            irreversible("infra-destroy", "tears down live infrastructure")
+        }
         "aws" => {
             if joined.starts_with("s3 rb") || (joined.starts_with("s3 rm") && has("--recursive")) {
-                return irreversible("delete-storage", "deletes a storage bucket or everything in it");
+                return irreversible(
+                    "delete-storage",
+                    "deletes a storage bucket or everything in it",
+                );
             }
             if joined.contains("cloudformation delete-stack")
                 || joined.contains("delete-db-instance")
@@ -987,13 +1022,19 @@ fn classify_segment(words: &[String], ctx: &Ctx) -> Option<(String, String)> {
                 || joined.contains("efs delete-file-system")
                 || joined.contains("ec2 delete-volume")
             {
-                return irreversible("delete-storage", "deletes live cloud resources and their data");
+                return irreversible(
+                    "delete-storage",
+                    "deletes live cloud resources and their data",
+                );
             }
             None
         }
         "gsutil" => {
             if has("rb") || (has("rm") && (has("-r") || has("-R") || has("-rf"))) {
-                return irreversible("delete-storage", "deletes a storage bucket or everything in it");
+                return irreversible(
+                    "delete-storage",
+                    "deletes a storage bucket or everything in it",
+                );
             }
             None
         }
@@ -1004,7 +1045,10 @@ fn classify_segment(words: &[String], ctx: &Ctx) -> Option<(String, String)> {
                 || joined.contains("projects delete")
                 || joined.contains("container clusters delete")
             {
-                return irreversible("delete-storage", "deletes live cloud resources and their data");
+                return irreversible(
+                    "delete-storage",
+                    "deletes live cloud resources and their data",
+                );
             }
             if joined.starts_with("app deploy") || joined.starts_with("run deploy") {
                 return irreversible("deploy", "deploys to production");
@@ -1015,35 +1059,59 @@ fn classify_segment(words: &[String], ctx: &Ctx) -> Option<(String, String)> {
             || joined.contains("storage container delete")
             || joined.contains("storage account delete") =>
         {
-            irreversible("delete-storage", "deletes live cloud resources and their data")
+            irreversible(
+                "delete-storage",
+                "deletes live cloud resources and their data",
+            )
         }
         "docker" | "podman" => {
             if joined.starts_with("volume rm") || joined.starts_with("volume prune") {
-                return irreversible("delete-storage", "deletes container volumes and the data in them");
+                return irreversible(
+                    "delete-storage",
+                    "deletes container volumes and the data in them",
+                );
             }
             if joined.starts_with("system prune") && has("--volumes") {
-                return irreversible("delete-storage", "deletes container volumes and the data in them");
+                return irreversible(
+                    "delete-storage",
+                    "deletes container volumes and the data in them",
+                );
             }
             if (joined.starts_with("compose down") || joined.starts_with("-compose down"))
                 && (has("-v") || has("--volumes"))
             {
-                return irreversible("delete-storage", "deletes container volumes and the data in them");
+                return irreversible(
+                    "delete-storage",
+                    "deletes container volumes and the data in them",
+                );
             }
             None
         }
-        "docker-compose" if has("down") && (has("-v") || has("--volumes")) => {
-            irreversible("delete-storage", "deletes container volumes and the data in them")
-        }
+        "docker-compose" if has("down") && (has("-v") || has("--volumes")) => irreversible(
+            "delete-storage",
+            "deletes container volumes and the data in them",
+        ),
         "kubectl" | "oc" => {
             if has("delete") {
-                let kinds = ["ns", "namespace", "namespaces", "pvc", "pv", "persistentvolumeclaim", "persistentvolume"];
+                let kinds = [
+                    "ns",
+                    "namespace",
+                    "namespaces",
+                    "pvc",
+                    "pv",
+                    "persistentvolumeclaim",
+                    "persistentvolume",
+                ];
                 if args.iter().any(|a| {
                     let k = a.split('/').next().unwrap_or(a);
                     kinds.contains(&k)
                 }) || has("--all")
                     || has("--all-namespaces")
                 {
-                    return irreversible("delete-storage", "deletes a whole cluster namespace or its stored data");
+                    return irreversible(
+                        "delete-storage",
+                        "deletes a whole cluster namespace or its stored data",
+                    );
                 }
             }
             if (has("apply") || has("rollout") || has("set")) && joined.contains("prod") {
@@ -1055,7 +1123,10 @@ fn classify_segment(words: &[String], ctx: &Ctx) -> Option<(String, String)> {
             irreversible("deploy", "removes a production release")
         }
         "fly" | "flyctl" => {
-            if joined.contains("apps destroy") || joined.contains("volumes destroy") || joined.contains("volumes delete") {
+            if joined.contains("apps destroy")
+                || joined.contains("volumes destroy")
+                || joined.contains("volumes delete")
+            {
                 return irreversible("delete-storage", "deletes a live app or its volume");
             }
             if has("deploy") {
@@ -1072,18 +1143,47 @@ fn classify_segment(words: &[String], ctx: &Ctx) -> Option<(String, String)> {
             }
             None
         }
-        "vercel" | "netlify" if has("--prod") || has("--production") || joined.contains("--prod=true") => {
+        "vercel" | "netlify"
+            if has("--prod") || has("--production") || joined.contains("--prod=true") =>
+        {
             irreversible("deploy", "deploys to production")
         }
         "firebase" if has("deploy") => irreversible("deploy", "deploys to production"),
-        "wrangler" if (has("deploy") || has("publish")) && !has("--dry-run") && !joined.contains("--env staging") && !joined.contains("--env dev") => {
+        "wrangler"
+            if (has("deploy") || has("publish"))
+                && !has("--dry-run")
+                && !joined.contains("--env staging")
+                && !joined.contains("--env dev") =>
+        {
             irreversible("deploy", "deploys to production")
         }
-        "eb" if has("deploy") || has("terminate") => irreversible("deploy", "deploys to production"),
+        "eb" if has("deploy") || has("terminate") => {
+            irreversible("deploy", "deploys to production")
+        }
         "railway" if has("up") || has("down") => irreversible("deploy", "deploys to production"),
         "stripe" => {
-            let money = ["charges", "payouts", "refunds", "transfers", "payment_intents", "topups", "invoices", "subscriptions", "transfer_reversals", "application_fees"];
-            let act = ["create", "confirm", "capture", "pay", "cancel", "update", "finalize_invoice", "send_invoice"];
+            let money = [
+                "charges",
+                "payouts",
+                "refunds",
+                "transfers",
+                "payment_intents",
+                "topups",
+                "invoices",
+                "subscriptions",
+                "transfer_reversals",
+                "application_fees",
+            ];
+            let act = [
+                "create",
+                "confirm",
+                "capture",
+                "pay",
+                "cancel",
+                "update",
+                "finalize_invoice",
+                "send_invoice",
+            ];
             if args.iter().any(|a| money.contains(a)) && args.iter().any(|a| act.contains(a)) {
                 return irreversible("money", "moves real money");
             }
@@ -1095,7 +1195,17 @@ fn classify_segment(words: &[String], ctx: &Ctx) -> Option<(String, String)> {
             irreversible("money", "moves real money")
         }
         "curl" | "http" | "https" | "wget" => {
-            let money_api = ["api.stripe.com", "api.paypal.com", "api-m.paypal.com", "api.wise.com", "api.transferwise.com", "connect.squareup.com", "api.plaid.com/transfer", "api.adyen.com", "api.braintreegateway.com"];
+            let money_api = [
+                "api.stripe.com",
+                "api.paypal.com",
+                "api-m.paypal.com",
+                "api.wise.com",
+                "api.transferwise.com",
+                "connect.squareup.com",
+                "api.plaid.com/transfer",
+                "api.adyen.com",
+                "api.braintreegateway.com",
+            ];
             if money_api.iter().any(|h| joined.contains(h)) && is_outbound_write(words) {
                 return irreversible("money", "moves real money");
             }
@@ -1150,7 +1260,10 @@ fn classify_git(words: &[String], ctx: &Ctx) -> Option<(String, String)> {
                 return None;
             }
             if rest.iter().any(|w| w == "--all" || w == "--mirror") {
-                return irreversible("force-push", "overwrites shared history on a protected branch");
+                return irreversible(
+                    "force-push",
+                    "overwrites shared history on a protected branch",
+                );
             }
             let top = ctx.top?;
             let default = ctx.git.default_branch(top);
@@ -1169,11 +1282,20 @@ fn classify_git(words: &[String], ctx: &Ctx) -> Option<(String, String)> {
                     targets.push(b);
                 } else {
                     // Detached or unreadable: we cannot say it isn't protected.
-                    return irreversible("force-push", "overwrites shared history on a protected branch");
+                    return irreversible(
+                        "force-push",
+                        "overwrites shared history on a protected branch",
+                    );
                 }
             }
-            if targets.iter().any(|t| is_protected_branch(t, default.as_deref())) {
-                return irreversible("force-push", "overwrites shared history on a protected branch");
+            if targets
+                .iter()
+                .any(|t| is_protected_branch(t, default.as_deref()))
+            {
+                return irreversible(
+                    "force-push",
+                    "overwrites shared history on a protected branch",
+                );
             }
             None
         }
@@ -1187,7 +1309,12 @@ fn classify_git(words: &[String], ctx: &Ctx) -> Option<(String, String)> {
                 )
             })
         }
-        "clean" if rest.iter().any(|w| w.starts_with('-') && !w.starts_with("--") && w.contains('f')) || rest.iter().any(|w| w == "--force") => {
+        "clean"
+            if rest
+                .iter()
+                .any(|w| w.starts_with('-') && !w.starts_with("--") && w.contains('f'))
+                || rest.iter().any(|w| w == "--force") =>
+        {
             if rest.iter().any(|w| w == "-n" || w == "--dry-run") {
                 return None;
             }
@@ -1218,17 +1345,24 @@ fn confirm_class_matches(class: &str, command: &str, ctx: &Ctx) -> bool {
         let joined = args.join(" ");
         match class {
             "publish" => {
-                (matches!(v, "npm" | "pnpm" | "yarn" | "cargo" | "gem" | "twine" | "poetry" | "flit" | "uv") && args.contains(&"publish"))
+                (matches!(
+                    v,
+                    "npm" | "pnpm" | "yarn" | "cargo" | "gem" | "twine" | "poetry" | "flit" | "uv"
+                ) && args.contains(&"publish"))
                     || (v == "twine" && args.contains(&"upload"))
                     || (v == "gh" && joined.starts_with("release create"))
             }
             "migrate" => {
                 let all = words.join(" ").to_ascii_lowercase();
-                all.contains("migrate") || all.contains("db:migrate") || (v == "alembic" && args.contains(&"upgrade"))
+                all.contains("migrate")
+                    || all.contains("db:migrate")
+                    || (v == "alembic" && args.contains(&"upgrade"))
             }
             "install" => install_targets(words).is_some(),
             "push" => v == "git" && args.contains(&"push"),
-            "deploy-any" => words.iter().any(|w| w.to_ascii_lowercase().contains("deploy")),
+            "deploy-any" => words
+                .iter()
+                .any(|w| w.to_ascii_lowercase().contains("deploy")),
             "network-write" => is_outbound_write(words),
             _ => false,
         }
@@ -1306,35 +1440,70 @@ pub fn is_outbound_write(words: &[String]) -> bool {
         "curl" => {
             args.iter().enumerate().any(|(i, a)| {
                 matches!(*a, "-X" | "--request")
-                    && args
-                        .get(i + 1)
-                        .is_some_and(|m| !m.eq_ignore_ascii_case("get") && !m.eq_ignore_ascii_case("head"))
+                    && args.get(i + 1).is_some_and(|m| {
+                        !m.eq_ignore_ascii_case("get") && !m.eq_ignore_ascii_case("head")
+                    })
             }) || args.iter().any(|a| {
                 a.starts_with("-XPOST")
                     || a.starts_with("-XPUT")
                     || a.starts_with("-XPATCH")
                     || a.starts_with("-XDELETE")
-                    || matches!(*a, "-d" | "--data" | "--data-raw" | "--data-binary" | "--data-urlencode" | "-F" | "--form" | "-T" | "--upload-file" | "--json")
+                    || matches!(
+                        *a,
+                        "-d" | "--data"
+                            | "--data-raw"
+                            | "--data-binary"
+                            | "--data-urlencode"
+                            | "-F"
+                            | "--form"
+                            | "-T"
+                            | "--upload-file"
+                            | "--json"
+                    )
                     || a.starts_with("--data")
             })
         }
-        "wget" => args.iter().any(|a| a.starts_with("--post") || a.starts_with("--method")),
-        "http" | "https" | "xh" => args
-            .first()
-            .is_some_and(|m| matches!(m.to_ascii_uppercase().as_str(), "POST" | "PUT" | "PATCH" | "DELETE")),
+        "wget" => args
+            .iter()
+            .any(|a| a.starts_with("--post") || a.starts_with("--method")),
+        "http" | "https" | "xh" => args.first().is_some_and(|m| {
+            matches!(
+                m.to_ascii_uppercase().as_str(),
+                "POST" | "PUT" | "PATCH" | "DELETE"
+            )
+        }),
         "git" => args.contains(&"push"),
         "gh" => {
             let writes = [
-                "pr create", "pr merge", "pr comment", "pr review", "pr close", "pr edit", "issue create", "issue comment",
-                "issue close", "issue edit", "release create", "release upload", "repo create", "repo delete", "repo edit",
-                "gist create", "secret set", "variable set", "workflow run", "label create",
+                "pr create",
+                "pr merge",
+                "pr comment",
+                "pr review",
+                "pr close",
+                "pr edit",
+                "issue create",
+                "issue comment",
+                "issue close",
+                "issue edit",
+                "release create",
+                "release upload",
+                "repo create",
+                "repo delete",
+                "repo edit",
+                "gist create",
+                "secret set",
+                "variable set",
+                "workflow run",
+                "label create",
             ];
             writes.iter().any(|w| joined.starts_with(w))
                 || (args.first() == Some(&"api")
                     && args.iter().enumerate().any(|(i, a)| {
                         matches!(*a, "-f" | "-F" | "--field" | "--raw-field" | "--input")
                             || (matches!(*a, "-X" | "--method")
-                                && args.get(i + 1).is_some_and(|m| !m.eq_ignore_ascii_case("get")))
+                                && args
+                                    .get(i + 1)
+                                    .is_some_and(|m| !m.eq_ignore_ascii_case("get")))
                     }))
         }
         "scp" | "rsync" | "sftp" => args.iter().any(|a| a.contains(':') && !a.starts_with('-')),
@@ -1356,7 +1525,8 @@ fn host_of(url: &str) -> Option<String> {
 }
 
 fn host_allowed(host: &str, allow: &[String]) -> bool {
-    let local = matches!(host, "localhost" | "127.0.0.1" | "::1" | "0.0.0.0") || host.ends_with(".localhost");
+    let local = matches!(host, "localhost" | "127.0.0.1" | "::1" | "0.0.0.0")
+        || host.ends_with(".localhost");
     local
         || allow.iter().any(|a| {
             let a = a.trim().to_ascii_lowercase();
@@ -1398,8 +1568,15 @@ pub fn is_secret_path(path: &Path) -> bool {
         .file_name()
         .map(|n| n.to_string_lossy().to_ascii_lowercase())
         .unwrap_or_default();
-    let p = path.to_string_lossy().replace('\\', "/").to_ascii_lowercase();
-    (name == ".env" || (name.starts_with(".env.") && !name.ends_with(".example") && !name.ends_with(".sample") && !name.ends_with(".template")))
+    let p = path
+        .to_string_lossy()
+        .replace('\\', "/")
+        .to_ascii_lowercase();
+    (name == ".env"
+        || (name.starts_with(".env.")
+            && !name.ends_with(".example")
+            && !name.ends_with(".sample")
+            && !name.ends_with(".template")))
         || name.ends_with(".pem")
         || name.ends_with(".key")
         || name.ends_with(".p12")
@@ -1426,18 +1603,26 @@ fn reads_secret_in_shell(words: &[String], cwd: &Path, home: &str) -> bool {
     if matches!(v, "printenv" | "env" | "set" | "export") && words.len() == 1 {
         return true;
     }
-    if v == "security" && words.iter().any(|w| w.starts_with("find-") && w.contains("password")) {
+    if v == "security"
+        && words
+            .iter()
+            .any(|w| w.starts_with("find-") && w.contains("password"))
+    {
         return true;
     }
-    words.iter().skip(1).filter(|w| !w.starts_with('-')).any(|w| {
-        resolve(w, cwd, home).is_some_and(|p| is_secret_path(&p))
-    })
+    words
+        .iter()
+        .skip(1)
+        .filter(|w| !w.starts_with('-'))
+        .any(|w| resolve(w, cwd, home).is_some_and(|p| is_secret_path(&p)))
 }
 
 const VAULT_TOOLS: &[&str] = &["canopy_vault_fill", "canopy_vault_read"];
 
 pub fn is_vault_tool(tool: &str) -> bool {
-    VAULT_TOOLS.iter().any(|t| tool == *t || tool.ends_with(&format!("__{t}")))
+    VAULT_TOOLS
+        .iter()
+        .any(|t| tool == *t || tool.ends_with(&format!("__{t}")))
 }
 
 // ---------------------------------------------------------- evaluation
@@ -1501,10 +1686,32 @@ fn shell_write_targets(command: &str, cwd: &Path, home: &str) -> Vec<PathBuf> {
     for seg in segments(command) {
         let words = strip_prefix_words(&seg);
         let v = verb(words);
-        let writer = matches!(v, "rm" | "rmdir" | "mv" | "cp" | "tee" | "touch" | "truncate" | "shred" | "unlink" | "ln" | "install" | "dd" | "chmod" | "chown")
-            || (v == "sed" && words.iter().any(|w| w == "-i" || w.starts_with("-i") || w == "--in-place"))
+        let writer = matches!(
+            v,
+            "rm" | "rmdir"
+                | "mv"
+                | "cp"
+                | "tee"
+                | "touch"
+                | "truncate"
+                | "shred"
+                | "unlink"
+                | "ln"
+                | "install"
+                | "dd"
+                | "chmod"
+                | "chown"
+        ) || (v == "sed"
+            && words
+                .iter()
+                .any(|w| w == "-i" || w.starts_with("-i") || w == "--in-place"))
             || (v == "perl" && words.iter().any(|w| w.starts_with("-pi") || w == "-i"))
-            || (v == "git" && words.iter().skip(1).find(|w| !w.starts_with('-')).is_some_and(|s| matches!(s.as_str(), "rm" | "mv" | "checkout" | "restore")));
+            || (v == "git"
+                && words
+                    .iter()
+                    .skip(1)
+                    .find(|w| !w.starts_with('-'))
+                    .is_some_and(|s| matches!(s.as_str(), "rm" | "mv" | "checkout" | "restore")));
         if !writer {
             continue;
         }
@@ -1520,7 +1727,12 @@ fn shell_write_targets(command: &str, cwd: &Path, home: &str) -> Vec<PathBuf> {
 
 /// Evaluate one action against the built-ins and the approved gates. Pure apart
 /// from the git probe; the hook decides what to print from the result.
-pub fn evaluate(policy: Option<&Policy>, action: &Action, ctx: &Ctx, tainted: Option<&str>) -> Vec<Finding> {
+pub fn evaluate(
+    policy: Option<&Policy>,
+    action: &Action,
+    ctx: &Ctx,
+    tainted: Option<&str>,
+) -> Vec<Finding> {
     let mut findings = Vec::new();
     let policy_root = policy_dir(ctx.home);
     let shell_writes = action
@@ -1549,7 +1761,10 @@ pub fn evaluate(policy: Option<&Policy>, action: &Action, ctx: &Ctx, tainted: Op
     }
 
     let top = ctx.top.unwrap_or(ctx.cwd);
-    let rel_writes: Vec<String> = all_writes.iter().filter_map(|p| relative_to(p, top)).collect();
+    let rel_writes: Vec<String> = all_writes
+        .iter()
+        .filter_map(|p| relative_to(p, top))
+        .collect();
     let segs = action.command.as_deref().map(segments).unwrap_or_default();
 
     if let Some(policy) = policy {
@@ -1574,20 +1789,29 @@ pub fn evaluate(policy: Option<&Policy>, action: &Action, ctx: &Ctx, tainted: Op
                     }
                 }
                 Gate::DenyCommand { patterns } => {
-                    let Some(cmd) = action.command.as_deref() else { continue };
+                    let Some(cmd) = action.command.as_deref() else {
+                        continue;
+                    };
                     let res = compile_patterns(patterns);
                     // Each simple command and the whole line: a pattern for
                     // `git push --force` must match inside `a && git push --force`.
                     let hit = res.iter().any(|re| {
-                        re.is_match(cmd) || segs.iter().any(|s| re.is_match(&strip_prefix_words(s).join(" ")))
+                        re.is_match(cmd)
+                            || segs
+                                .iter()
+                                .any(|s| re.is_match(&strip_prefix_words(s).join(" ")))
                     });
                     if hit {
                         findings.push(rule_finding(g, "runs a command the rule forbids".into()));
                     }
                 }
                 Gate::RequireConfirm { class, patterns } => {
-                    let Some(cmd) = action.command.as_deref() else { continue };
-                    let by_class = class.as_deref().is_some_and(|c| confirm_class_matches(c, cmd, ctx));
+                    let Some(cmd) = action.command.as_deref() else {
+                        continue;
+                    };
+                    let by_class = class
+                        .as_deref()
+                        .is_some_and(|c| confirm_class_matches(c, cmd, ctx));
                     let by_pattern = compile_patterns(patterns).iter().any(|re| re.is_match(cmd));
                     if by_class || by_pattern {
                         findings.push(Finding {
@@ -1603,14 +1827,24 @@ pub fn evaluate(policy: Option<&Policy>, action: &Action, ctx: &Ctx, tainted: Op
                     let allow = matches!(g.gate, Gate::PackageAllowlist { .. });
                     let listed: Vec<String> = names.iter().map(|n| package_name(n)).collect();
                     for seg in &segs {
-                        let Some(pkgs) = install_targets(strip_prefix_words(seg)) else { continue };
+                        let Some(pkgs) = install_targets(strip_prefix_words(seg)) else {
+                            continue;
+                        };
                         let bad: Vec<&String> = pkgs
                             .iter()
-                            .filter(|p| if allow { !listed.contains(p) } else { listed.contains(p) })
+                            .filter(|p| {
+                                if allow {
+                                    !listed.contains(p)
+                                } else {
+                                    listed.contains(p)
+                                }
+                            })
                             .collect();
                         if let Some(first) = bad.first() {
                             let label = if allow {
-                                format!("installs {first}, which isn't on the approved package list")
+                                format!(
+                                    "installs {first}, which isn't on the approved package list"
+                                )
                             } else {
                                 format!("installs {first}, which is on the banned package list")
                             };
@@ -1620,7 +1854,10 @@ pub fn evaluate(policy: Option<&Policy>, action: &Action, ctx: &Ctx, tainted: Op
                     }
                 }
                 Gate::EgressAllowlist { hosts } => {
-                    let mut urls: Vec<String> = segs.iter().flat_map(|s| shell_urls(strip_prefix_words(s))).collect();
+                    let mut urls: Vec<String> = segs
+                        .iter()
+                        .flat_map(|s| shell_urls(strip_prefix_words(s)))
+                        .collect();
                     if let Some(u) = &action.url {
                         urls.push(u.clone());
                     }
@@ -1629,7 +1866,10 @@ pub fn evaluate(policy: Option<&Policy>, action: &Action, ctx: &Ctx, tainted: Op
                         .filter_map(|u| host_of(u))
                         .find(|h| !host_allowed(h, hosts))
                     {
-                        findings.push(rule_finding(g, format!("contacts {host}, which isn't on the allowed list")));
+                        findings.push(rule_finding(
+                            g,
+                            format!("contacts {host}, which isn't on the allowed list"),
+                        ));
                     }
                 }
                 Gate::Unenforceable { .. } => {}
@@ -1654,15 +1894,27 @@ pub fn evaluate(policy: Option<&Policy>, action: &Action, ctx: &Ctx, tainted: Op
     if let Some(source) = tainted {
         let secret = action.reads.iter().any(|p| is_secret_path(p))
             || is_vault_tool(&action.tool)
-            || segs.iter().any(|s| reads_secret_in_shell(strip_prefix_words(s), ctx.cwd, ctx.home));
-        let outbound = segs.iter().any(|s| is_outbound_write(strip_prefix_words(s)));
+            || segs
+                .iter()
+                .any(|s| reads_secret_in_shell(strip_prefix_words(s), ctx.cwd, ctx.home));
+        let outbound = segs
+            .iter()
+            .any(|s| is_outbound_write(strip_prefix_words(s)));
         if secret || outbound {
-            let what = if secret { "reads secrets" } else { "sends data out of this computer" };
+            let what = if secret {
+                "reads secrets"
+            } else {
+                "sends data out of this computer"
+            };
             findings.push(Finding {
                 kind: FindingKind::Trifecta,
                 rule_id: None,
                 rule_text: None,
-                class: if secret { "secret-read".into() } else { "outbound-write".into() },
+                class: if secret {
+                    "secret-read".into()
+                } else {
+                    "outbound-write".into()
+                },
                 label: format!("{what} after this session read untrusted content ({source})"),
             });
         }
@@ -1727,12 +1979,20 @@ fn now_ms() -> u64 {
 /// link ledger.rs — that module emits Tauri events — so this is the same
 /// single-`write_all` O_APPEND line, without the emit. The app picks it up on
 /// its next query; the bus event carries the live notification.
-pub fn append_ledger(home: &str, canonical: &str, mut entry: serde_json::Value) -> Result<String, String> {
+pub fn append_ledger(
+    home: &str,
+    canonical: &str,
+    mut entry: serde_json::Value,
+) -> Result<String, String> {
     use std::io::Write;
     let ts = now_ms();
     let mut bytes = [0u8; 6];
     let _ = getrandom::getrandom(&mut bytes);
-    let id = format!("{ts:013}-{}{:04x}", hex::encode(bytes), std::process::id() & 0xffff);
+    let id = format!(
+        "{ts:013}-{}{:04x}",
+        hex::encode(bytes),
+        std::process::id() & 0xffff
+    );
     entry["id"] = serde_json::json!(id);
     entry["ts"] = serde_json::json!(ts);
     entry["root"] = serde_json::json!(canonical);
@@ -1764,7 +2024,10 @@ pub fn session_context(policy: &Policy) -> Option<String> {
         out.push_str(&format!("- {}\n", g.trim()));
     }
     for g in policy.gates.iter().take(20) {
-        out.push_str(&format!("- {} (enforced: Canopy blocks violations)\n", g.rule.trim()));
+        out.push_str(&format!(
+            "- {} (enforced: Canopy blocks violations)\n",
+            g.rule.trim()
+        ));
     }
     Some(out)
 }
@@ -1790,11 +2053,26 @@ mod tests {
             self.default.map(str::to_string)
         }
     }
-    const CLEAN: FakeGit = FakeGit { tracked: false, untracked: false, branch: Some("feature"), default: Some("main") };
-    const DIRTY: FakeGit = FakeGit { tracked: true, untracked: true, branch: Some("main"), default: Some("main") };
+    const CLEAN: FakeGit = FakeGit {
+        tracked: false,
+        untracked: false,
+        branch: Some("feature"),
+        default: Some("main"),
+    };
+    const DIRTY: FakeGit = FakeGit {
+        tracked: true,
+        untracked: true,
+        branch: Some("main"),
+        default: Some("main"),
+    };
 
     fn ctx<'a>(git: &'a dyn GitProbe) -> Ctx<'a> {
-        Ctx { cwd: Path::new("/home/u/repo/src"), top: Some(Path::new("/home/u/repo")), home: "/home/u", git }
+        Ctx {
+            cwd: Path::new("/home/u/repo/src"),
+            top: Some(Path::new("/home/u/repo")),
+            home: "/home/u",
+            git,
+        }
     }
 
     fn class(cmd: &str, git: &dyn GitProbe) -> Option<String> {
@@ -1820,7 +2098,10 @@ mod tests {
             ("rm -r -f /home/u/repo", "delete-files"),
             ("rm -rf ../*", "delete-files"),
             ("git push -f origin main", "force-push"),
-            ("git push --force-with-lease origin HEAD:master", "force-push"),
+            (
+                "git push --force-with-lease origin HEAD:master",
+                "force-push",
+            ),
             ("git push origin +main", "force-push"),
             ("git push --force origin release/2.0", "force-push"),
             ("git -C . push --force --all", "force-push"),
@@ -1845,7 +2126,10 @@ mod tests {
             ("kubectl apply -f k8s/ --context prod-cluster", "deploy"),
             ("stripe refunds create --charge ch_1", "money"),
             ("stripe payouts create --amount 1000", "money"),
-            ("curl https://api.stripe.com/v1/transfers -u sk_x: -d amount=100", "money"),
+            (
+                "curl https://api.stripe.com/v1/transfers -u sk_x: -d amount=100",
+                "money",
+            ),
             ("cast send 0xabc --value 1ether", "money"),
         ];
         for (cmd, want) in cases {
@@ -1896,27 +2180,57 @@ mod tests {
     #[test]
     fn reset_hard_needs_uncommitted_work() {
         assert_eq!(class("git reset --hard HEAD~3", &CLEAN), None);
-        assert_eq!(class("git reset --hard HEAD~3", &DIRTY).as_deref(), Some("discard-work"));
-        assert_eq!(class("git clean -fdx", &DIRTY).as_deref(), Some("discard-work"));
+        assert_eq!(
+            class("git reset --hard HEAD~3", &DIRTY).as_deref(),
+            Some("discard-work")
+        );
+        assert_eq!(
+            class("git clean -fdx", &DIRTY).as_deref(),
+            Some("discard-work")
+        );
         assert_eq!(class("git clean -fdx", &CLEAN), None);
     }
 
     #[test]
     fn bare_force_push_checks_current_branch() {
         // DIRTY sits on main.
-        assert_eq!(class("git push --force", &DIRTY).as_deref(), Some("force-push"));
+        assert_eq!(
+            class("git push --force", &DIRTY).as_deref(),
+            Some("force-push")
+        );
         // CLEAN sits on a feature branch.
         assert_eq!(class("git push --force", &CLEAN), None);
-        let detached = FakeGit { tracked: false, untracked: false, branch: None, default: None };
-        assert_eq!(class("git push -f", &detached).as_deref(), Some("force-push"));
-        let custom_default = FakeGit { tracked: false, untracked: false, branch: Some("x"), default: Some("dev-main") };
-        assert_eq!(class("git push -f origin dev-main", &custom_default).as_deref(), Some("force-push"));
+        let detached = FakeGit {
+            tracked: false,
+            untracked: false,
+            branch: None,
+            default: None,
+        };
+        assert_eq!(
+            class("git push -f", &detached).as_deref(),
+            Some("force-push")
+        );
+        let custom_default = FakeGit {
+            tracked: false,
+            untracked: false,
+            branch: Some("x"),
+            default: Some("dev-main"),
+        };
+        assert_eq!(
+            class("git push -f origin dev-main", &custom_default).as_deref(),
+            Some("force-push")
+        );
     }
 
     #[test]
     fn rm_at_repo_root_glob() {
         let git = CLEAN;
-        let c = Ctx { cwd: Path::new("/home/u/repo"), top: Some(Path::new("/home/u/repo")), home: "/home/u", git: &git };
+        let c = Ctx {
+            cwd: Path::new("/home/u/repo"),
+            top: Some(Path::new("/home/u/repo")),
+            home: "/home/u",
+            git: &git,
+        };
         assert!(classify_irreversible("rm -rf *", &c).is_some());
         assert!(classify_irreversible("rm -rf .", &c).is_some());
         assert!(classify_irreversible("rm -rf src/*", &c).is_none());
@@ -1928,97 +2242,246 @@ mod tests {
             gates: gates
                 .into_iter()
                 .enumerate()
-                .map(|(i, (rule, gate))| PolicyGate { id: format!("r{i}"), rule: rule.into(), scope: "team".into(), gate })
+                .map(|(i, (rule, gate))| PolicyGate {
+                    id: format!("r{i}"),
+                    rule: rule.into(),
+                    scope: "team".into(),
+                    gate,
+                })
                 .collect(),
             ..Default::default()
         }
     }
 
     fn write(path: &str) -> Action {
-        Action { tool: "Edit".into(), writes: vec![PathBuf::from(path)], ..Default::default() }
+        Action {
+            tool: "Edit".into(),
+            writes: vec![PathBuf::from(path)],
+            ..Default::default()
+        }
     }
     fn bash(cmd: &str) -> Action {
-        Action { tool: "Bash".into(), command: Some(cmd.into()), ..Default::default() }
+        Action {
+            tool: "Bash".into(),
+            command: Some(cmd.into()),
+            ..Default::default()
+        }
     }
     fn eval(p: &Policy, a: &Action) -> Outcome {
-        outcome(&evaluate(Some(p), a, &ctx(&CLEAN), None), p.trifecta_blocks())
+        outcome(
+            &evaluate(Some(p), a, &ctx(&CLEAN), None),
+            p.trifecta_blocks(),
+        )
     }
 
     #[test]
     fn deny_path_write_globs() {
-        let p = policy(vec![("Never touch migrations/", Gate::DenyPathWrite { globs: vec!["migrations/".into()] })]);
-        assert_eq!(eval(&p, &write("/home/u/repo/migrations/0001.sql")), Outcome::Blocked);
-        assert_eq!(eval(&p, &write("/home/u/repo/db/migrations/0001.sql")), Outcome::Blocked);
-        assert_eq!(eval(&p, &write("/home/u/repo/src/migrations.ts")), Outcome::Allow);
+        let p = policy(vec![(
+            "Never touch migrations/",
+            Gate::DenyPathWrite {
+                globs: vec!["migrations/".into()],
+            },
+        )]);
+        assert_eq!(
+            eval(&p, &write("/home/u/repo/migrations/0001.sql")),
+            Outcome::Blocked
+        );
+        assert_eq!(
+            eval(&p, &write("/home/u/repo/db/migrations/0001.sql")),
+            Outcome::Blocked
+        );
+        assert_eq!(
+            eval(&p, &write("/home/u/repo/src/migrations.ts")),
+            Outcome::Allow
+        );
         assert_eq!(eval(&p, &bash("rm db/0001.sql")), Outcome::Allow);
-        assert_eq!(eval(&p, &bash("rm ../migrations/0001.sql")), Outcome::Blocked);
-        assert_eq!(eval(&p, &bash("echo x > ../migrations/new.sql")), Outcome::Blocked);
-        assert_eq!(eval(&p, &bash("cat ../migrations/0001.sql")), Outcome::Allow);
-        let sql = policy(vec![("No SQL edits", Gate::DenyPathWrite { globs: vec!["*.sql".into()] })]);
-        assert_eq!(eval(&sql, &write("/home/u/repo/a/b/c.sql")), Outcome::Blocked);
-        let exact = policy(vec![("Lockfile", Gate::DenyPathWrite { globs: vec!["package-lock.json".into()] })]);
-        assert_eq!(eval(&exact, &write("/home/u/repo/package-lock.json")), Outcome::Blocked);
-        assert_eq!(eval(&exact, &write("/home/u/repo/package.json")), Outcome::Allow);
-        let anchored = policy(vec![("Config", Gate::DenyPathWrite { globs: vec!["config/*.yml".into()] })]);
-        assert_eq!(eval(&anchored, &write("/home/u/repo/config/prod.yml")), Outcome::Blocked);
-        assert_eq!(eval(&anchored, &write("/home/u/repo/config/deep/prod.yml")), Outcome::Allow);
+        assert_eq!(
+            eval(&p, &bash("rm ../migrations/0001.sql")),
+            Outcome::Blocked
+        );
+        assert_eq!(
+            eval(&p, &bash("echo x > ../migrations/new.sql")),
+            Outcome::Blocked
+        );
+        assert_eq!(
+            eval(&p, &bash("cat ../migrations/0001.sql")),
+            Outcome::Allow
+        );
+        let sql = policy(vec![(
+            "No SQL edits",
+            Gate::DenyPathWrite {
+                globs: vec!["*.sql".into()],
+            },
+        )]);
+        assert_eq!(
+            eval(&sql, &write("/home/u/repo/a/b/c.sql")),
+            Outcome::Blocked
+        );
+        let exact = policy(vec![(
+            "Lockfile",
+            Gate::DenyPathWrite {
+                globs: vec!["package-lock.json".into()],
+            },
+        )]);
+        assert_eq!(
+            eval(&exact, &write("/home/u/repo/package-lock.json")),
+            Outcome::Blocked
+        );
+        assert_eq!(
+            eval(&exact, &write("/home/u/repo/package.json")),
+            Outcome::Allow
+        );
+        let anchored = policy(vec![(
+            "Config",
+            Gate::DenyPathWrite {
+                globs: vec!["config/*.yml".into()],
+            },
+        )]);
+        assert_eq!(
+            eval(&anchored, &write("/home/u/repo/config/prod.yml")),
+            Outcome::Blocked
+        );
+        assert_eq!(
+            eval(&anchored, &write("/home/u/repo/config/deep/prod.yml")),
+            Outcome::Allow
+        );
     }
 
     #[test]
     fn protect_tests_defaults() {
-        let p = policy(vec![("Don't edit tests", Gate::ProtectTests { globs: vec![] })]);
-        assert_eq!(eval(&p, &write("/home/u/repo/src/a.test.ts")), Outcome::Blocked);
-        assert_eq!(eval(&p, &write("/home/u/repo/tests/test_x.py")), Outcome::Blocked);
-        assert_eq!(eval(&p, &write("/home/u/repo/src/__tests__/x.js")), Outcome::Blocked);
+        let p = policy(vec![(
+            "Don't edit tests",
+            Gate::ProtectTests { globs: vec![] },
+        )]);
+        assert_eq!(
+            eval(&p, &write("/home/u/repo/src/a.test.ts")),
+            Outcome::Blocked
+        );
+        assert_eq!(
+            eval(&p, &write("/home/u/repo/tests/test_x.py")),
+            Outcome::Blocked
+        );
+        assert_eq!(
+            eval(&p, &write("/home/u/repo/src/__tests__/x.js")),
+            Outcome::Blocked
+        );
         assert_eq!(eval(&p, &write("/home/u/repo/src/a.ts")), Outcome::Allow);
-        assert_eq!(eval(&p, &write("/home/u/repo/src/contest.ts")), Outcome::Allow);
+        assert_eq!(
+            eval(&p, &write("/home/u/repo/src/contest.ts")),
+            Outcome::Allow
+        );
     }
 
     #[test]
     fn deny_command_patterns() {
-        let p = policy(vec![("No publishing", Gate::DenyCommand { patterns: vec![r"^npm\s+publish\b".into()] })]);
+        let p = policy(vec![(
+            "No publishing",
+            Gate::DenyCommand {
+                patterns: vec![r"^npm\s+publish\b".into()],
+            },
+        )]);
         assert_eq!(eval(&p, &bash("npm publish")), Outcome::Blocked);
-        assert_eq!(eval(&p, &bash("npm test && npm publish --tag next")), Outcome::Blocked);
+        assert_eq!(
+            eval(&p, &bash("npm test && npm publish --tag next")),
+            Outcome::Blocked
+        );
         assert_eq!(eval(&p, &bash("FOO=1 npm publish")), Outcome::Blocked);
         assert_eq!(eval(&p, &bash("npm run publish-docs")), Outcome::Allow);
         // An invalid regex is skipped, never a crash or a block.
-        let bad = policy(vec![("broken", Gate::DenyCommand { patterns: vec!["(".into()] })]);
+        let bad = policy(vec![(
+            "broken",
+            Gate::DenyCommand {
+                patterns: vec!["(".into()],
+            },
+        )]);
         assert_eq!(eval(&bad, &bash("anything")), Outcome::Allow);
     }
 
     #[test]
     fn packages() {
-        let deny = policy(vec![("No moment", Gate::PackageDenylist { names: vec!["moment".into()] })]);
+        let deny = policy(vec![(
+            "No moment",
+            Gate::PackageDenylist {
+                names: vec!["moment".into()],
+            },
+        )]);
         assert_eq!(eval(&deny, &bash("npm install moment@2")), Outcome::Blocked);
         assert_eq!(eval(&deny, &bash("pnpm add -D Moment")), Outcome::Blocked);
         assert_eq!(eval(&deny, &bash("npm install")), Outcome::Allow);
         assert_eq!(eval(&deny, &bash("npm install dayjs")), Outcome::Allow);
-        let allow = policy(vec![("Only approved", Gate::PackageAllowlist { names: vec!["requests".into(), "@scope/ui".into()] })]);
-        assert_eq!(eval(&allow, &bash("pip install requests==2.31")), Outcome::Allow);
+        let allow = policy(vec![(
+            "Only approved",
+            Gate::PackageAllowlist {
+                names: vec!["requests".into(), "@scope/ui".into()],
+            },
+        )]);
+        assert_eq!(
+            eval(&allow, &bash("pip install requests==2.31")),
+            Outcome::Allow
+        );
         assert_eq!(eval(&allow, &bash("npm i @scope/ui@1.2.3")), Outcome::Allow);
         assert_eq!(eval(&allow, &bash("pip install leftpad")), Outcome::Blocked);
-        assert_eq!(eval(&allow, &bash("uv pip install leftpad")), Outcome::Blocked);
-        assert_eq!(eval(&allow, &bash("pip install -r requirements.txt")), Outcome::Allow);
+        assert_eq!(
+            eval(&allow, &bash("uv pip install leftpad")),
+            Outcome::Blocked
+        );
+        assert_eq!(
+            eval(&allow, &bash("pip install -r requirements.txt")),
+            Outcome::Allow
+        );
     }
 
     #[test]
     fn egress() {
-        let p = policy(vec![("Only GitHub", Gate::EgressAllowlist { hosts: vec!["*.github.com".into(), "github.com".into()] })]);
-        assert_eq!(eval(&p, &bash("curl -s https://api.github.com/repos")), Outcome::Allow);
-        assert_eq!(eval(&p, &bash("curl http://localhost:3000/health")), Outcome::Allow);
-        assert_eq!(eval(&p, &bash("curl https://evil.example.com/x")), Outcome::Blocked);
+        let p = policy(vec![(
+            "Only GitHub",
+            Gate::EgressAllowlist {
+                hosts: vec!["*.github.com".into(), "github.com".into()],
+            },
+        )]);
+        assert_eq!(
+            eval(&p, &bash("curl -s https://api.github.com/repos")),
+            Outcome::Allow
+        );
+        assert_eq!(
+            eval(&p, &bash("curl http://localhost:3000/health")),
+            Outcome::Allow
+        );
+        assert_eq!(
+            eval(&p, &bash("curl https://evil.example.com/x")),
+            Outcome::Blocked
+        );
         assert_eq!(eval(&p, &bash("wget example.org/file")), Outcome::Blocked);
-        let fetch = Action { tool: "WebFetch".into(), url: Some("https://pastebin.com/raw/x".into()), ..Default::default() };
+        let fetch = Action {
+            tool: "WebFetch".into(),
+            url: Some("https://pastebin.com/raw/x".into()),
+            ..Default::default()
+        };
         assert_eq!(eval(&p, &fetch), Outcome::Blocked);
     }
 
     #[test]
     fn require_confirm_classes() {
-        let p = policy(vec![("Ask before publishing", Gate::RequireConfirm { class: Some("publish".into()), patterns: vec![] })]);
+        let p = policy(vec![(
+            "Ask before publishing",
+            Gate::RequireConfirm {
+                class: Some("publish".into()),
+                patterns: vec![],
+            },
+        )]);
         assert_eq!(eval(&p, &bash("cargo publish")), Outcome::NeedsApproval);
         assert_eq!(eval(&p, &bash("cargo build")), Outcome::Allow);
-        let m = policy(vec![("Ask before migrating", Gate::RequireConfirm { class: Some("migrate".into()), patterns: vec![] })]);
-        assert_eq!(eval(&m, &bash("npx prisma migrate deploy")), Outcome::NeedsApproval);
+        let m = policy(vec![(
+            "Ask before migrating",
+            Gate::RequireConfirm {
+                class: Some("migrate".into()),
+                patterns: vec![],
+            },
+        )]);
+        assert_eq!(
+            eval(&m, &bash("npx prisma migrate deploy")),
+            Outcome::NeedsApproval
+        );
     }
 
     #[test]
@@ -2026,49 +2489,143 @@ mod tests {
         let f = evaluate(None, &bash("terraform destroy"), &ctx(&CLEAN), None);
         assert_eq!(outcome(&f, false), Outcome::NeedsApproval);
         let reason = agent_reason(&f, Outcome::NeedsApproval);
-        assert!(reason.contains("can't be undone") && reason.contains("exactly the same command"), "{reason}");
-        assert_eq!(outcome(&evaluate(None, &bash("ls"), &ctx(&CLEAN), None), false), Outcome::Allow);
+        assert!(
+            reason.contains("can't be undone") && reason.contains("exactly the same command"),
+            "{reason}"
+        );
+        assert_eq!(
+            outcome(&evaluate(None, &bash("ls"), &ctx(&CLEAN), None), false),
+            Outcome::Allow
+        );
     }
 
     #[test]
     fn blocked_reason_quotes_the_rule() {
-        let p = policy(vec![("Never touch migrations/", Gate::DenyPathWrite { globs: vec!["migrations".into()] })]);
-        let f = evaluate(Some(&p), &write("/home/u/repo/migrations/x.sql"), &ctx(&CLEAN), None);
+        let p = policy(vec![(
+            "Never touch migrations/",
+            Gate::DenyPathWrite {
+                globs: vec!["migrations".into()],
+            },
+        )]);
+        let f = evaluate(
+            Some(&p),
+            &write("/home/u/repo/migrations/x.sql"),
+            &ctx(&CLEAN),
+            None,
+        );
         let r = agent_reason(&f, outcome(&f, false));
-        assert!(r.starts_with("Blocked by team rule 'Never touch migrations/'"), "{r}");
+        assert!(
+            r.starts_with("Blocked by team rule 'Never touch migrations/'"),
+            "{r}"
+        );
         assert!(r.contains("migrations/x.sql"), "{r}");
     }
 
     #[test]
     fn self_protection() {
         let home = "/home/u";
-        let c = Ctx { cwd: Path::new("/home/u/repo"), top: Some(Path::new("/home/u/repo")), home, git: &CLEAN };
+        let c = Ctx {
+            cwd: Path::new("/home/u/repo"),
+            top: Some(Path::new("/home/u/repo")),
+            home,
+            git: &CLEAN,
+        };
         let policy_file = policy_dir(home).join("approvals/abc.json");
-        let w = Action { tool: "Write".into(), writes: vec![policy_file], ..Default::default() };
-        assert_eq!(outcome(&evaluate(None, &w, &c, None), false), Outcome::Refused);
-        assert_eq!(outcome(&evaluate(None, &bash("touch ~/.canopy/policy/approvals/x.json"), &c, None), false), Outcome::Refused);
+        let w = Action {
+            tool: "Write".into(),
+            writes: vec![policy_file],
+            ..Default::default()
+        };
+        assert_eq!(
+            outcome(&evaluate(None, &w, &c, None), false),
+            Outcome::Refused
+        );
+        assert_eq!(
+            outcome(
+                &evaluate(
+                    None,
+                    &bash("touch ~/.canopy/policy/approvals/x.json"),
+                    &c,
+                    None
+                ),
+                false
+            ),
+            Outcome::Refused
+        );
     }
 
     #[test]
     fn trifecta_warns_then_blocks() {
-        let read_env = Action { tool: "Read".into(), reads: vec![PathBuf::from("/home/u/repo/.env")], ..Default::default() };
-        let read_example = Action { tool: "Read".into(), reads: vec![PathBuf::from("/home/u/repo/.env.example")], ..Default::default() };
+        let read_env = Action {
+            tool: "Read".into(),
+            reads: vec![PathBuf::from("/home/u/repo/.env")],
+            ..Default::default()
+        };
+        let read_example = Action {
+            tool: "Read".into(),
+            reads: vec![PathBuf::from("/home/u/repo/.env.example")],
+            ..Default::default()
+        };
         let mut p = Policy::default();
         let f = evaluate(Some(&p), &read_env, &ctx(&CLEAN), Some("WebFetch"));
         assert_eq!(outcome(&f, p.trifecta_blocks()), Outcome::Warn);
         p.trifecta = "block".into();
         assert_eq!(outcome(&f, p.trifecta_blocks()), Outcome::Blocked);
-        assert_eq!(outcome(&evaluate(Some(&p), &read_example, &ctx(&CLEAN), Some("WebFetch")), true), Outcome::Allow);
+        assert_eq!(
+            outcome(
+                &evaluate(Some(&p), &read_example, &ctx(&CLEAN), Some("WebFetch")),
+                true
+            ),
+            Outcome::Allow
+        );
         // Untainted sessions read .env freely.
-        assert_eq!(outcome(&evaluate(Some(&p), &read_env, &ctx(&CLEAN), None), true), Outcome::Allow);
-        for cmd in ["git push origin feature", "curl -X POST https://x.io -d a=1", "gh pr create --fill", "cat ../.env", "printenv", "gh api repos/x/y/issues -f title=t"] {
-            assert_eq!(outcome(&evaluate(Some(&p), &bash(cmd), &ctx(&CLEAN), Some("WebFetch")), true), Outcome::Blocked, "{cmd}");
+        assert_eq!(
+            outcome(&evaluate(Some(&p), &read_env, &ctx(&CLEAN), None), true),
+            Outcome::Allow
+        );
+        for cmd in [
+            "git push origin feature",
+            "curl -X POST https://x.io -d a=1",
+            "gh pr create --fill",
+            "cat ../.env",
+            "printenv",
+            "gh api repos/x/y/issues -f title=t",
+        ] {
+            assert_eq!(
+                outcome(
+                    &evaluate(Some(&p), &bash(cmd), &ctx(&CLEAN), Some("WebFetch")),
+                    true
+                ),
+                Outcome::Blocked,
+                "{cmd}"
+            );
         }
-        for cmd in ["curl https://x.io", "gh pr view 3", "git status", "cat README.md"] {
-            assert_eq!(outcome(&evaluate(Some(&p), &bash(cmd), &ctx(&CLEAN), Some("WebFetch")), true), Outcome::Allow, "{cmd}");
+        for cmd in [
+            "curl https://x.io",
+            "gh pr view 3",
+            "git status",
+            "cat README.md",
+        ] {
+            assert_eq!(
+                outcome(
+                    &evaluate(Some(&p), &bash(cmd), &ctx(&CLEAN), Some("WebFetch")),
+                    true
+                ),
+                Outcome::Allow,
+                "{cmd}"
+            );
         }
-        let vault = Action { tool: "mcp__canopy__canopy_vault_fill".into(), ..Default::default() };
-        assert_eq!(outcome(&evaluate(Some(&p), &vault, &ctx(&CLEAN), Some("WebFetch")), true), Outcome::Blocked);
+        let vault = Action {
+            tool: "mcp__canopy__canopy_vault_fill".into(),
+            ..Default::default()
+        };
+        assert_eq!(
+            outcome(
+                &evaluate(Some(&p), &vault, &ctx(&CLEAN), Some("WebFetch")),
+                true
+            ),
+            Outcome::Blocked
+        );
     }
 
     #[test]
@@ -2093,7 +2650,10 @@ mod tests {
         assert!(consume_once(&home, &key, 2_000), "a live token is spent");
         assert!(!consume_once(&home, &key, 2_000), "and only once");
         grant_once(&home, &key, 1_000).unwrap();
-        assert!(!consume_once(&home, &key, 1_000 + APPROVAL_TTL_MS + 1), "an expired token is no approval");
+        assert!(
+            !consume_once(&home, &key, 1_000 + APPROVAL_TTL_MS + 1),
+            "an expired token is no approval"
+        );
         assert!(grant_once(&home, "../../etc/passwd", 0).is_err());
         let _ = std::fs::remove_dir_all(tmp);
     }
@@ -2102,11 +2662,16 @@ mod tests {
     fn taint_roundtrip() {
         let tmp = std::env::temp_dir().join(format!("canopy-taint-test-{}", std::process::id()));
         let home = tmp.to_string_lossy().to_string();
-        let ids = vec!["sess-1".to_string(), pty_taint_id(Some("inst"), Some("4")).unwrap()];
+        let ids = vec![
+            "sess-1".to_string(),
+            pty_taint_id(Some("inst"), Some("4")).unwrap(),
+        ];
         assert!(is_tainted(&home, &ids).is_none());
         mark_tainted(&home, &ids[1..], "WebFetch");
         assert_eq!(is_tainted(&home, &ids).as_deref(), Some("WebFetch"));
-        assert!(taint_path(&home, "../x").map(|p| !p.to_string_lossy().contains("..")).unwrap_or(true));
+        assert!(taint_path(&home, "../x")
+            .map(|p| !p.to_string_lossy().contains(".."))
+            .unwrap_or(true));
         let _ = std::fs::remove_dir_all(tmp);
     }
 
@@ -2119,7 +2684,13 @@ mod tests {
         let p: Policy = serde_json::from_str(raw).unwrap();
         assert_eq!(p.gates.len(), 2);
         assert!(p.trifecta_blocks());
-        assert_eq!(p.gates[1].gate, Gate::RequireConfirm { class: Some("publish".into()), patterns: vec![] });
+        assert_eq!(
+            p.gates[1].gate,
+            Gate::RequireConfirm {
+                class: Some("publish".into()),
+                patterns: vec![]
+            }
+        );
         // An unknown type is not a policy the hook will guess at.
         let bad = r#"{"gates":[{"id":"a","rule":"x","gate":{"type":"run-anything"}}]}"#;
         assert!(serde_json::from_str::<Policy>(bad).is_err());
@@ -2133,14 +2704,25 @@ mod tests {
         let wt = tmp.join("wt");
         std::fs::create_dir_all(main.join(".git/worktrees/wt")).unwrap();
         std::fs::create_dir_all(wt.join("src")).unwrap();
-        std::fs::write(wt.join(".git"), format!("gitdir: {}\n", main.join(".git/worktrees/wt").display())).unwrap();
+        std::fs::write(
+            wt.join(".git"),
+            format!("gitdir: {}\n", main.join(".git/worktrees/wt").display()),
+        )
+        .unwrap();
         std::fs::write(main.join(".git/worktrees/wt/commondir"), "../..\n").unwrap();
         let want = main.canonicalize().unwrap().to_string_lossy().to_string();
         assert_eq!(canonical_root(&main).as_deref(), Some(want.as_str()));
-        assert_eq!(canonical_root(&wt.join("src")).as_deref(), Some(want.as_str()));
+        assert_eq!(
+            canonical_root(&wt.join("src")).as_deref(),
+            Some(want.as_str())
+        );
         assert_eq!(worktree_top(&wt.join("src")).as_deref(), Some(wt.as_path()));
         let home = tmp.join("home").to_string_lossy().to_string();
-        let policy = Policy { version: 1, root: want.clone(), ..Default::default() };
+        let policy = Policy {
+            version: 1,
+            root: want.clone(),
+            ..Default::default()
+        };
         // The env override would redirect every test; keep this one explicit.
         if std::env::var("CANOPY_POLICY_HOME").is_err() {
             write_policy(&home, &want, &policy).unwrap();
@@ -2170,7 +2752,10 @@ mod tests {
         assert_eq!(root_hash(""), "e3b0c44298fc1c149afbf4c8996fb924");
         assert_eq!(package_name("@scope/pkg@1.2"), "@scope/pkg");
         assert_eq!(package_name("Requests>=2"), "requests");
-        assert_eq!(expand_glob("migrations"), vec!["**/migrations", "**/migrations/**"]);
+        assert_eq!(
+            expand_glob("migrations"),
+            vec!["**/migrations", "**/migrations/**"]
+        );
         assert_eq!(expand_glob("src/db/"), vec!["src/db/**"]);
     }
 }

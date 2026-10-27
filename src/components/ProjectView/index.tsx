@@ -320,6 +320,9 @@ import {
 import { TaskHistoryView } from "../TaskHistoryView";
 import { WorkflowView } from "../WorkflowView";
 import { InstructionsView } from "../InstructionsView";
+import { GateNotices } from "../GateNotices";
+import { rulesFocus } from "../../gates/focus";
+import { OPEN_RULES_EVENT } from "../../gates/events";
 import {
   adoptTaskReservation,
   endAbandonedRun,
@@ -3461,6 +3464,24 @@ const ProjectViewBody = memo(function ProjectViewBody({
     },
     [patchTabRaw],
   );
+
+  // "Edit rule" / "Open rules" from anywhere outside this view (a card, a
+  // notification, `canopy:open-settings` with tab "rules") for a path inside
+  // this project, or — with no path — when this project is the one in front.
+  useEffect(() => {
+    const on = (e: Event) => {
+      const d = (e as CustomEvent<{ cwd: string; ruleId?: string }>).detail;
+      if (!d) return;
+      // No path (Settings → rules from outside any project): the project in front.
+      const mine = d.cwd
+        ? roots.some((r) => d.cwd === r || d.cwd.startsWith(`${r}/`))
+        : visible;
+      if (!mine) return;
+      openInstructions(rulesFocus(d.ruleId));
+    };
+    window.addEventListener(OPEN_RULES_EVENT, on);
+    return () => window.removeEventListener(OPEN_RULES_EVENT, on);
+  }, [roots, openInstructions, visible]);
 
   /** Open the agents page, or focus it if it's already up. One per project:
    *  it is a view of this project's sessions, so a second would be a copy. */
@@ -13577,6 +13598,12 @@ const ProjectViewBody = memo(function ProjectViewBody({
                     />
                   );
                 })}
+              {/* What a team rule or the irreversible-action gate just stopped
+                  in this agent, with Allow once / Approve once (gates/events.ts). */}
+              <GateNotices
+                ptyId={tab.ptyId}
+                onEditRule={(ruleId) => openInstructions(rulesFocus(ruleId))}
+              />
             </div>
             );
           })}

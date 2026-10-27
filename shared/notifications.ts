@@ -61,6 +61,31 @@ export interface AgentEventData {
   model?: string;
   /** AskUserQuestion payload, when this event is its PreToolUse. */
   questions?: PendingQuestion[];
+  /** A Rules-panel gate or the irreversible-action gate acted on this tool
+   *  call (canopy-hook `gate_check`, stamped as `canopy_gate`). */
+  gate?: GateStamp;
+}
+
+/** What canopy-hook decided about one tool call. See src/gates/events.ts. */
+export interface GateStamp {
+  id: string;
+  /** blocked | needs-approval | allowed-once | warned | refused */
+  status: string;
+  /** The approve-once key for exactly this action. */
+  key: string;
+  root: string;
+  tool: string;
+  /** The command line, or `write:<path>` / `read:<path>` / `fetch:<url>`. */
+  action: string;
+  findings: {
+    kind: "self-protect" | "rule" | "irreversible" | "trifecta";
+    ruleId?: string;
+    ruleText?: string;
+    class: string;
+    label: string;
+  }[];
+  /** What the agent was told, empty when it was not refused. */
+  reason: string;
 }
 
 export interface AgentEventEntry {
@@ -168,6 +193,25 @@ export function parseAgentEvent(raw: string): AgentEventData | null {
     data.transcriptPath = parsed.transcript_path;
   if (typeof parsed.model === "string" && parsed.model.trim())
     data.model = parsed.model.trim();
+  const gate = parsed.canopy_gate as Partial<GateStamp> | undefined;
+  if (
+    gate &&
+    typeof gate === "object" &&
+    typeof gate.id === "string" &&
+    typeof gate.status === "string" &&
+    typeof gate.key === "string"
+  ) {
+    data.gate = {
+      id: gate.id,
+      status: gate.status,
+      key: gate.key,
+      root: String(gate.root ?? ""),
+      tool: String(gate.tool ?? tool),
+      action: String(gate.action ?? ""),
+      findings: Array.isArray(gate.findings) ? gate.findings : [],
+      reason: String(gate.reason ?? ""),
+    };
+  }
   if (event === "PreToolUse" && tool === "AskUserQuestion") {
     const input = parsed.tool_input as { questions?: unknown[] } | undefined;
     data.questions = Array.isArray(input?.questions)

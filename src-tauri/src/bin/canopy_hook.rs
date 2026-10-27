@@ -632,7 +632,13 @@ fn real_main() -> Result<(), Box<dyn std::error::Error>> {
     // Team rules and the irreversible-action gate. Decided before the bus
     // publish so the verdict rides on the event the app sees — that is how a
     // block reaches the agent's tab without a second channel.
-    let gate = gate_check(&hook_event, &event, &session_id, &cwd, agent_override.as_deref());
+    let gate = gate_check(
+        &hook_event,
+        &event,
+        &session_id,
+        &cwd,
+        agent_override.as_deref(),
+    );
     if let Some(stamp) = gate.as_ref().and_then(|g| g.stamp.clone()) {
         if let Some(map) = event.as_object_mut() {
             map.insert("canopy_gate".into(), stamp);

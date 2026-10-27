@@ -5712,12 +5712,19 @@ mod integration_tests {
         for tool in GATE_TOOLS_MATCHER.split('|') {
             assert!(!WRITE_TOOLS_MATCHER.split('|').any(|m| m == tool), "{tool}");
         }
-        assert!(!GATE_TOOLS_MATCHER.split('|').any(|m| m == "Grep" || m == "Glob"));
+        assert!(!GATE_TOOLS_MATCHER
+            .split('|')
+            .any(|m| m == "Grep" || m == "Glob"));
         // Installing twice is stable: the retain/extend in setup must not stack.
         setup_agent("claude", home.to_str().unwrap()).unwrap();
-        let again: serde_json::Value =
-            serde_json::from_str(&std::fs::read_to_string(home.join(".claude/settings.json")).unwrap()).unwrap();
-        assert_eq!(again["hooks"]["PreToolUse"].as_array().unwrap().len(), pre.len());
+        let again: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(home.join(".claude/settings.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            again["hooks"]["PreToolUse"].as_array().unwrap().len(),
+            pre.len()
+        );
     }
 
     #[test]

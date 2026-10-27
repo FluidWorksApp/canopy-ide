@@ -1,0 +1,253 @@
+/* ---------- Rules & gates ----------
+   The Rules panel (inside the Agent instructions tab) and the blocked-action
+   cards over an agent's terminal. Badges carry the one distinction that
+   matters — enforced or not — so they get the only colour here. */
+
+.gates-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  padding: 18px 22px 28px;
+  max-width: 860px;
+  overflow-y: auto;
+  height: 100%;
+  box-sizing: border-box;
+}
+.gates-head h2 {
+  margin: 0 0 4px;
+  font-size: 15px;
+}
+.gates-lede,
+.gates-section p,
+.gates-coverage {
+  margin: 0;
+  color: var(--text-dim);
+  line-height: 1.5;
+}
+.gates-coverage {
+  font-size: 11px;
+  color: var(--text-faint);
+}
+.gates-root {
+  display: inline-flex;
+  gap: 6px;
+  align-items: center;
+  margin-top: 8px;
+  color: var(--text-dim);
+}
+.gates-add,
+.gates-editor {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.gates-label {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  color: var(--text-dim);
+  font-size: 12px;
+}
+.gates-add textarea,
+.gates-editor textarea {
+  width: 100%;
+  box-sizing: border-box;
+  resize: vertical;
+  background: var(--bg-raised);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 6px 8px;
+  font: inherit;
+}
+.gates-add-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+}
+.gates-list,
+.gates-files,
+.gates-suggestions ul {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.gates-empty {
+  color: var(--text-faint);
+}
+.gates-rule,
+.gates-suggestion {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 10px 12px;
+  background: var(--bg-raised);
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.gates-rule-focus {
+  border-color: var(--accent);
+}
+.gates-rule-head {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  align-items: center;
+}
+.gates-rule-text {
+  font-weight: 600;
+  margin-right: 4px;
+}
+.gates-rule-gate {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: baseline;
+}
+.gates-rule-plain {
+  color: var(--text);
+}
+.gates-rule-origin,
+.gates-hint {
+  color: var(--text-faint);
+  font-size: 11px;
+  margin: 0;
+}
+.gates-rule-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.gate-badge,
+.gate-chip {
+  font-size: 10.5px;
+  line-height: 16px;
+  padding: 0 7px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  color: var(--text-dim);
+  white-space: nowrap;
+}
+.gate-badge-enforced {
+  color: var(--ok);
+  border-color: color-mix(in srgb, var(--ok) 55%, transparent);
+  background: color-mix(in srgb, var(--ok) 12%, transparent);
+}
+.gate-badge-pending {
+  color: var(--warn);
+  border-color: color-mix(in srgb, var(--warn) 55%, transparent);
+}
+.gate-badge-suggestion,
+.gate-badge-guidance {
+  color: var(--text-dim);
+  border-style: dashed;
+}
+.gate-chip-count {
+  color: var(--text);
+}
+.gates-section {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  border-top: 1px solid var(--border);
+  padding-top: 14px;
+}
+.gates-section h3 {
+  margin: 0;
+  font-size: 13px;
+}
+.gates-files > li {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.gates-file-label {
+  font-family: var(--font-mono, monospace);
+  font-size: 12px;
+}
+.gates-suggestion blockquote {
+  margin: 0;
+  padding-left: 8px;
+  border-left: 2px solid var(--border-strong);
+  color: var(--text-dim);
+  font-size: 12px;
+}
+.gates-check {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  color: var(--text-dim);
+  font-size: 12px;
+}
+.gates-error,
+.gate-notice-error {
+  color: var(--danger);
+  font-size: 12px;
+}
+
+/* Cards over the agent's terminal: top-right, out of the prompt's way. */
+.gate-notices {
+  position: absolute;
+  top: 10px;
+  right: 14px;
+  z-index: 19;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  width: min(380px, calc(100% - 28px));
+  pointer-events: none;
+}
+.gate-notice {
+  pointer-events: auto;
+  border: 1px solid var(--border);
+  border-left-width: 3px;
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--bg-raised) 96%, transparent);
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.35);
+  padding: 9px 11px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.gate-notice-block {
+  border-left-color: var(--warn);
+}
+.gate-notice-ask {
+  border-left-color: var(--danger);
+}
+.gate-notice-warn {
+  border-left-color: var(--text-dim);
+}
+.gate-notice-title {
+  font-weight: 600;
+  line-height: 1.35;
+}
+.gate-notice-action {
+  font-size: 11px;
+  color: var(--text-dim);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.gate-notice-note {
+  font-size: 11px;
+  color: var(--text-dim);
+}
+.gate-notice-actions {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+}
+.gate-notice-actions > :last-child[aria-label="Dismiss"] {
+  margin-left: auto;
+}
+
+/* The turn timeline's mark on a turn that ran an approved irreversible action. */
+.aw-turn-irreversible {
+  color: var(--danger);
+  border-color: color-mix(in srgb, var(--danger) 50%, transparent);
+}

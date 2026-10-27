@@ -37,6 +37,10 @@ export const COMPANION_DESKTOP_EVENTS=['agent:ui','agent:action','agent:browser'
 // The signed-in account, crash reports and the remote portal belong to this
 // computer; the workspace has none of them.
 for(const command of ['canopy_account_request','report_crash','send_crash','crash_issue_draft','file_crash_issue','remote_status','remote_enable','remote_disable','remote_qr','remote_rotate_pin','remote_socket_metrics'])LOCAL_UI.add(command);
+// The brain is the CLI signed in on this computer, and the ledger it writes
+// lives beside it; a Linux workspace has neither. (The gates policy is the
+// exception and is NOT here: canopy-hook reads it inside the VM.)
+for(const command of ['brain_call','brain_kill','ledger_append','ledger_query','ledger_root','ledger_update_status'])LOCAL_UI.add(command);
 /** Whether a command runs on the computer showing the IDE in remote mode. */
 export const isDesktopLocal=(command:string)=>LOCAL_UI.has(command);
 class WorkspaceChannel<T> implements HostChannel<T>{onmessage:(message:T)=>void=()=>{};}

@@ -54,6 +54,7 @@ import {
 } from "./vibeTargetInference";
 import { observeTurnEvents } from "./turnRollback";
 import { observeAgentTurns } from "./agentTurns";
+import { observeGateEvents, openRules } from "./gates/events";
 import {
   derivePending,
   parseAgentEvent,
@@ -1045,6 +1046,9 @@ export default function App() {
         // The same boundaries, enriched (root, files touched) for features
         // that subscribe through agentTurns.ts.
         observeAgentTurns(parsed.map((p) => p.data), ts);
+        // What a team rule or the irreversible-action gate stopped, for the
+        // cards over the agent's terminal and the approve-once question.
+        observeGateEvents(parsed.map((p) => p.data), ts);
         setAgentEvents((prev) =>
           // Not a bare slice: the cap is app-wide and one of this list's
           // consumers is per-pty, so a busy project used to evict a quiet
@@ -1410,8 +1414,16 @@ export default function App() {
     void applyZoom(loadZoom());
     // The status bar's 🎨 button (and anything else outside App) opens
     // Settings at a specific tab through this event.
-    const openSettings = (e: Event) =>
-      setSettingsOpen({ tab: (e as CustomEvent).detail?.tab });
+    const openSettings = (e: Event) => {
+      const tab = (e as CustomEvent).detail?.tab;
+      // The rules editor belongs to a project (its rules live in that repo's
+      // ledger), so "Settings → rules" opens the front project's Rules panel.
+      if (tab === "rules") {
+        openRules({ cwd: (e as CustomEvent).detail?.cwd ?? "" });
+        return;
+      }
+      setSettingsOpen({ tab });
+    };
     window.addEventListener("canopy:open-settings", openSettings);
     void ipc.hookBridgePath().then(setHookPath);
     // A relay may already be live (hot reload in dev, a future auto-start) —

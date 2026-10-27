@@ -63,7 +63,10 @@ mod tests {
     #[test]
     fn policy_and_ledger_share_a_key() {
         for root in ["/home/u/repo", "C:\\work\\repo", ""] {
-            assert_eq!(crate::gates::root_hash(root), crate::ledger::root_hash(root));
+            assert_eq!(
+                crate::gates::root_hash(root),
+                crate::ledger::root_hash(root)
+            );
         }
     }
 }
