@@ -1,4 +1,4 @@
-import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 // The three-strikes walk renders a dozen rounds; give a loaded machine room.
@@ -11,7 +11,7 @@ const ipcMock = vi.hoisted(() => ({
   gitCommitPatch: vi.fn(),
   gitDiff: vi.fn(async () => ""),
   browserRunOp: vi.fn(async () => null),
-  gatesPolicyWrite: vi.fn(async () => "/policy.json"),
+  gatesPolicyWrite: vi.fn(async (..._a: unknown[]) => "/policy.json"),
   receiptRunCheck: vi.fn(),
 }));
 /** The git a restore runs, answered like a clean checkout one version ahead. */
@@ -318,7 +318,8 @@ describe("BuilderLensPanel — layers and notices", () => {
     // Ownership is enforced: the policy now carries the layer's gate, with
     // the owner's own sessions exempt.
     await waitFor(() => expect(ipcMock.gatesPolicyWrite).toHaveBeenCalled());
-    const policy = ipcMock.gatesPolicyWrite.mock.calls.at(-1)![1] as { gates: { id: string; exceptMembers?: string[] }[] };
+    const calls = ipcMock.gatesPolicyWrite.mock.calls as unknown as [string, { gates: { id: string; exceptMembers?: string[] }[] }][];
+    const policy = calls[calls.length - 1][1];
     expect(policy.gates).toContainEqual(expect.objectContaining({ id: "lens-layer:auth", exceptMembers: ["u-alex"] }));
   });
 
