@@ -3,6 +3,8 @@ import type { AgentEdit, ProvenanceEdge, SessionDigest, TurnList } from "../ipc"
 import type { LedgerEntry } from "../ledger";
 import { aboutSession, assembleSessionDoc, receiptVerdict, transcriptTail, turnLines } from "./assemble";
 import { loadSessionDoc, type SessionDocDeps } from "./load";
+import { isNativeCommand } from "../../packages/remote-host/native-commands.mjs";
+import { BRAIN_DESKTOP_COMMANDS } from "../remoteExecution/NativeWorkspaceHost";
 
 const SID = "5b1f0c2e-aaaa-bbbb-cccc-000000000001";
 const T0 = 1_760_000_000_000; // ms
@@ -200,5 +202,39 @@ describe("loadSessionDoc", () => {
     expect(loaded.doc.handoffs).toHaveLength(1);
     expect(loaded.doc.transcript).toEqual([{ role: "user", text: "hi" }]);
     expect(loaded.doc.turns.map((t) => t.prompt)).toEqual(digest.prompts);
+    expect(loaded.hostOutdated).toBeUndefined();
   });
+
+  it("tells an older cloud workspace host apart from missing data", async () => {
+    const outdated = async () => {
+      throw new Error("This workspace is running an older Canopy host. Restart or update the workspace to use the turn timeline.");
+    };
+    const deps: SessionDocDeps = {
+      digests: async () => [digest],
+      turns: outdated,
+      edits: async () => edits,
+      ledger: async () => [],
+      provenance: async () => [],
+      transcript: async () => [],
+    };
+    const loaded = await loadSessionDoc({ sessionId: SID, agent: "claude", cwd: "/workspace/app" }, deps);
+    expect(loaded).toMatchObject({ missing: ["turn timeline"], hostOutdated: true });
+  });
+
+  it("in a cloud workspace reads every source from the host, and the ledger here", async () => {
+    // What a session document asks for, and where each question goes: the
+    // workspace host serves the session's own records; the ledger is this
+    // computer's (the brain filed it here).
+    for (const command of [
+      "session_digests",
+      "turn_list",
+      "agent_edits",
+      "provenance_for_session",
+      "session_transcript_tail",
+      "session_activity",
+    ]) {
+      expect(isNativeCommand(command), command).toBe(true);
+    }
+    expect(BRAIN_DESKTOP_COMMANDS).toContain("ledger_query");
+  }, 30_000);
 });

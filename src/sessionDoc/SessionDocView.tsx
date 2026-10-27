@@ -515,7 +515,11 @@ export function SessionDocView({
                 Timeline <span className="badge">{doc.turns.length}</span>
               </h3>
               {doc.turns.length === 0 ? (
-                <p className="sdoc-empty">No turns recorded — this agent's CLI doesn't report turns to Canopy.</p>
+                <p className="sdoc-empty">
+                  {loaded.missing.includes("turn timeline")
+                    ? "The turn timeline couldn't be read."
+                    : "No turns recorded — this agent's CLI doesn't report turns to Canopy."}
+                </p>
               ) : (
                 <ol className="sdoc-turns">
                   {doc.turns.map((t) => (
@@ -639,7 +643,15 @@ export function SessionDocView({
             )}
 
             <footer className="sdoc-foot">
-              {loaded.missing.length > 0 && <span>Not available here: {loaded.missing.join(", ")}.</span>}
+              {loaded.missing.length > 0 &&
+                (loaded.hostOutdated ? (
+                  <span>
+                    Couldn't read {loaded.missing.join(", ")}: this cloud workspace runs an older Canopy host. Restart
+                    or update the workspace to see them.
+                  </span>
+                ) : (
+                  <span>Couldn't read: {loaded.missing.join(", ")}.</span>
+                ))}
               {cloud && (
                 <button
                   type="button"
