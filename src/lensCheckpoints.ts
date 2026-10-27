@@ -100,7 +100,7 @@ export function validateCheckpointSummary(v: unknown): CheckpointSummary | null 
 const REF_KIND = "lens-checkpoint";
 const memory = new Map<string, CheckpointSummary>();
 const inflight = new Map<string, Promise<CheckpointSummary | null>>();
-const cacheKey = (root: string, key: string) => `${root}\0${key}`;
+const cacheKey = (root: string, key: string) => `${root.replace(/\\/g, "/").replace(/\/+$/, "")}\0${key}`;
 
 export function peekCheckpointSummary(root: string, key: string): CheckpointSummary | null {
   return memory.get(cacheKey(root, key)) ?? null;
