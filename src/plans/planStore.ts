@@ -16,7 +16,7 @@
 import * as ipc from "../ipc";
 import { appendLedger, queryLedger, type LedgerEntry } from "../ledger";
 import { onAgentTurnEnd, onAgentTurnStart, type AgentTurnStart } from "../agentTurns";
-import { planIdInPrompt, type PlanData, type PlanDecision, type PlanStatus } from "./plan";
+import { planIdInPrompt, settleWithRecommendations, type PlanData, type PlanDecision, type PlanStatus } from "./plan";
 
 export type PlanEntry = LedgerEntry<PlanData>;
 
@@ -141,6 +141,8 @@ const pending: Pending[] = [];
 /** sessionId → planId, and ptyId → planId, for runs linked in this window. */
 const bySession = new Map<string, string>();
 const byPty = new Map<number, string>();
+/** Plans already linked to a run: a plan has one run. */
+const linked = new Set<string>();
 const PENDING_MS = 10 * 60_000;
 
 const norm = (p: string) => p.replace(/[\\/]+$/, "");
@@ -173,13 +175,18 @@ function claim(turn: AgentTurnStart, now: number): Pending | null {
   if (i < 0 && marked) return { planId: marked, dir: turn.cwd, at: now };
   if (i < 0) i = pending.findIndex((p) => sameDir(p.dir, turn.cwd));
   if (i < 0) return null;
-  return pending.splice(i, 1)[0];
+  const hit = pending.splice(i, 1)[0];
+  // A plan may wait in more than one directory (the repo, then the worktree
+  // the ticket's agent landed in); claimed once, it waits nowhere.
+  for (let j = pending.length - 1; j >= 0; j--) if (pending[j].planId === hit.planId) pending.splice(j, 1);
+  return hit;
 }
 
 export async function linkTurnStart(turn: AgentTurnStart, now = Date.now()): Promise<void> {
   if (bySession.has(turn.sessionId)) return;
   const hit = claim(turn, now);
-  if (!hit) return;
+  if (!hit || linked.has(hit.planId)) return;
+  linked.add(hit.planId);
   bySession.set(turn.sessionId, hit.planId);
   if (turn.ptyId != null) byPty.set(turn.ptyId, hit.planId);
   await revisePlan(hit.dir, hit.planId, (cur) => ({
@@ -275,7 +282,16 @@ export async function applyChatApproval(planId: string, by: string): Promise<Pla
   if (!dir) return null;
   return revisePlan(dir, planId, (cur) =>
     cur.status === "proposed"
-      ? { status: "approved", data: { approvedBy: `${by} (team chat)`, approvedAt: Date.now() } }
+      ? {
+          status: "approved",
+          // The teammate approved the plan as shared, and the card showed each
+          // open decision at its recommendation: that is what was approved.
+          data: {
+            decisions: settleWithRecommendations(cur.data.decisions),
+            approvedBy: `${by} (team chat)`,
+            approvedAt: Date.now(),
+          },
+        }
       : null,
   );
 }
@@ -287,5 +303,6 @@ export function resetPlanStoreForTests(): void {
   pending.length = 0;
   bySession.clear();
   byPty.clear();
+  linked.clear();
   armed = false;
 }

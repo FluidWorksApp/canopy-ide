@@ -40,8 +40,10 @@ export interface DispatchRequest {
   source: PlanSource;
 }
 
-/** Starts the agent with this brief; resolves whether it started. */
-export type Launch = (brief: string) => Promise<boolean | void> | boolean | void;
+/** Starts the agent with this brief; resolves whether it started. `planId` is
+ *  set when the brief carries a plan, so a surface that only learns where the
+ *  agent runs later (a ticket's new worktree) can `expectRun` it there too. */
+export type Launch = (brief: string, planId?: string) => Promise<boolean | void> | boolean | void;
 
 export type GateItem =
   | { id: string; phase: "planning"; req: DispatchRequest }
@@ -136,9 +138,9 @@ export async function dispatchWithPlan(req: DispatchRequest, launch: Launch): Pr
   const id = `gate-${++seq}`;
   const controller = new AbortController();
   let settled = false;
-  const start = async (brief: string) => {
+  const start = async (brief: string, planId?: string) => {
     try {
-      await launch(brief);
+      await (planId ? launch(brief, planId) : launch(brief));
     } catch {
       // The surface reports its own launch failures.
     }
@@ -199,8 +201,10 @@ export async function dispatchWithPlan(req: DispatchRequest, launch: Launch): Pr
     const entry = await persist(data, "approved");
     put({ id, phase: "inline", req, entry });
     handlers.set(id, {});
-    await start(briefFor(data));
-    void expectRun(data.planId, req.dir).catch(() => {});
+    // Expect the run before it starts: HEAD is read before the agent can
+    // commit, and a fast first turn finds the plan already waiting for it.
+    await expectRun(data.planId, req.dir).catch(() => {});
+    await start(briefFor(data), data.planId);
     return;
   }
 
@@ -215,9 +219,9 @@ export async function dispatchWithPlan(req: DispatchRequest, launch: Launch): Pr
     launched = true;
     settled = true;
     remove(id);
-    await start(briefFor(data));
+    await expectRun(data.planId, req.dir).catch(() => {});
+    await start(briefFor(data), data.planId);
     finish();
-    void expectRun(data.planId, req.dir).catch(() => {});
   };
   // Approval can also arrive from team chat (the shared plan card): the
   // ledger hears the status change, and the waiting launch goes ahead.

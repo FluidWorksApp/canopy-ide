@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { memoryLedger } from "./testLedger";
+import { memoryLedger } from "../test/memoryLedger";
 
 const ledger = memoryLedger();
 const askBrain = vi.fn();
@@ -107,6 +107,10 @@ describe("dispatchWithPlan", () => {
     await applyChatApproval(item.entry.data.planId, "Dana");
     await done;
     expect(launch).toHaveBeenCalledTimes(1);
+    // What the teammate approved is the plan as shared: open decisions at
+    // their recommendation, and the agent is told so.
+    expect(launch.mock.calls[0][0]).toContain("Pages or infinite scroll? → Pages");
+    expect(launch.mock.calls[0][1]).toBe(item.entry.data.planId);
     expect(ledger.heads().find((r) => r.kind === "plan")!.data).toMatchObject({ approvedBy: "Dana (team chat)" });
   });
 

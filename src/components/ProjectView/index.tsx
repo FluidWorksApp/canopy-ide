@@ -655,6 +655,7 @@ import {
 } from "./helpers";
 import { Button } from "../ui";
 import { dispatchWithPlan } from "../../plans/planGate";
+import { expectRun } from "../../plans/planStore";
 import {
   documentResourceActive,
   shouldReuseInactiveDocumentPane,
@@ -3203,14 +3204,21 @@ const ProjectViewBody = memo(function ProjectViewBody({
       // the seed; "Start without a plan" or no brain seeds the ticket as-is.
       let seed = ticketContext(ticket);
       let proceed = false;
+      let planId: string | undefined;
       await dispatchWithPlan(
         { request: seed, dir: repo, label: `${ticket.id} · ${cli.name}`, source: "ticket" },
-        (planned) => {
+        (planned, id) => {
           seed = planned;
+          planId = id;
           proceed = true;
         },
       );
       if (!proceed) return;
+      // The agent runs in the ticket's worktree, which is usually outside the
+      // repo's directory: wait for its run there too.
+      const expectIn = (dir: string) => {
+        if (planId) void expectRun(planId, dir).catch(() => {});
+      };
       // Parked in `repo` rather than the workspace, which does not exist yet:
       // the pointer is an absolute path, so it reads the same from either.
       const start = await startCommandParked(agent, seed, repo);
@@ -3224,6 +3232,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
       const existing = ticketWorktree(ticket, worktrees);
       const title = `${ticket.id} · ${cli.name}`;
       if (existing) {
+        expectIn(existing.path);
         const id = addTerminal(existing.path, start.command, title, cli.icon);
         setTicketWorktrees(worktrees);
         if (id && start.typePrompt)
@@ -3250,6 +3259,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
       );
       if (r.kind !== "settled") return; // already asked and answered on screen
       setTicketWorktrees(await ipc.gitWorktrees(repo).catch(() => worktrees));
+      expectIn(r.path);
       const id = addTerminal(r.path, start.command, title, cli.icon);
       if (id && start.typePrompt)
         pendingTerminalPrompts.current.set(id, seed);

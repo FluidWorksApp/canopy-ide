@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { memoryLedger } from "./testLedger";
+import { memoryLedger } from "../test/memoryLedger";
 
 const ledger = memoryLedger();
 let log = [{ hash: "base0", short: "base0", author: "", date: "", subject: "init", refs: "" }];

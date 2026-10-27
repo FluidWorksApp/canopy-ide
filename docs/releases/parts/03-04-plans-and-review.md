@@ -86,6 +86,31 @@ automatic summaries to get a **Summarize against the plan** button instead.
 The same setting sets the most changed lines allowed in one reviewable slice
 (default 400).
 
+### Known limits
+
+- **Build mode isn't planned.** Messages sent while building in Build mode
+  still go straight to the agent; only the dispatch paths listed above are
+  planned.
+- **An approval in chat starts the agent only while the original dispatch is
+  still waiting.** If your Canopy restarted after you shared the plan, a
+  teammate's approval marks the plan approved, but you need to start the work
+  again.
+- **Anyone in the chat can approve.** Any teammate in the conversation can
+  approve a shared plan, and an approval starts the waiting agent on your
+  machine. Review requests are different: only the reviewers they name can
+  answer them.
+- **An agent can occasionally get the wrong plan.** If the plan's id doesn't
+  reach the agent (for example, a very long brief is handed over as a file),
+  Canopy gives the plan to the first agent that starts in the same folder
+  within 10 minutes. That could be a different agent you started yourself.
+- **Long ticket sessions show "done" early.** A ticket started as an
+  interactive agent is marked done when its first turn ends; later turns
+  update its commits.
+- **Summaries wait while the agent works.** While the agent is busy, the
+  review shows a **Summarize against the plan** button instead of summarizing
+  on its own. After a diff changes, Canopy waits for it to stay unchanged for
+  10 seconds before asking the brain again.
+
 ### For other features: what a plan entry contains
 
 - Ledger kind `plan`. Before the agent runs, `ref` is `{kind: "plan", id:

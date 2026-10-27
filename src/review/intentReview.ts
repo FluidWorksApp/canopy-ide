@@ -315,3 +315,9 @@ export function splitRequest(status: SliceStatus, suggestion: string | undefined
     `Please split it into smaller reviewable slices (separate commits or branches, each under ${status.budget} lines) without changing the overall result. ${how}`
   ).replace(/\s+/g, " ");
 }
+
+/** Tests only. */
+export function resetReviewCacheForTests(): void {
+  memory.clear();
+  inflight.clear();
+}

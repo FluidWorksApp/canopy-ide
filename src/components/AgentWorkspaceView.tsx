@@ -1970,6 +1970,7 @@ export function AgentWorkspaceView({
             cwd={repo ?? cwd}
             sessionIds={sessionId ? [sessionId] : []}
             patch={intentPatch}
+            paused={lifecycle === "working" || lifecycle === "starting"}
             onOpenFile={drillInto}
             onRiskOrder={setRiskPaths}
             onAskAgent={onMessageAgent}

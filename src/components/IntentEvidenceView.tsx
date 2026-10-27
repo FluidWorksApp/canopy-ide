@@ -12,9 +12,10 @@
 //
 // Used by the agent workspace (the agent's changes) and the PR tab. The host
 // owns the diff below; this view only orders and points into it.
-import { useEffect, useMemo, useState, useSyncExternalStore } from "react";
+import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { getSettings, subscribeSettings } from "../settings";
 import { plansForSession, type PlanEntry } from "../plans/planStore";
+import { subscribeLedger } from "../ledger";
 import {
   riskOrder,
   sliceStatus,
@@ -44,6 +45,9 @@ export interface IntentEvidenceViewProps {
   onRiskOrder?: (paths: string[]) => void;
   /** Type text into the agent's terminal (the split request). Absent when no
    *  agent can be reached from this surface. */
+  /** The agent is mid-turn and its diff is still moving: summaries wait for
+   *  a click instead of firing on their own. */
+  paused?: boolean;
   onAskAgent?: (
     text: string,
   ) => Promise<{ delivered: boolean; note: string }> | { delivered: boolean; note: string } | void;
@@ -66,6 +70,8 @@ const BRAIN_REASON: Record<string, string> = {
 };
 
 const NO_RISK: ReviewSummary["risk"] = [];
+/** How long a changed diff must sit still before it is summarised again. */
+const SETTLE_MS = 10_000;
 
 const VERDICT_LABEL: Record<string, string> = {
   proven: "Proven",
@@ -74,7 +80,7 @@ const VERDICT_LABEL: Record<string, string> = {
   contradicted: "Contradicted by the evidence",
 };
 
-export function IntentEvidenceView({ cwd, sessionIds, patch, onOpenFile, onRiskOrder, onAskAgent }: IntentEvidenceViewProps) {
+export function IntentEvidenceView({ cwd, sessionIds, patch, paused = false, onOpenFile, onRiskOrder, onAskAgent }: IntentEvidenceViewProps) {
   const settings = useSyncExternalStore(subscribeSettings, getSettings, getSettings);
   const sessionsKey = sessionIds.join(",");
 
@@ -102,9 +108,20 @@ export function IntentEvidenceView({ cwd, sessionIds, patch, onOpenFile, onRiskO
   useEffect(() => {
     let live = true;
     setReceipt(undefined);
-    void latestReceipt(cwd, runSession).then((r) => live && setReceipt(r));
+    const read = () => void latestReceipt(cwd, runSession).then((r) => live && setReceipt(r));
+    read();
+    // The receipts feature writes after the run: show it the moment it lands.
+    let off = () => {};
+    try {
+      off = subscribeLedger(cwd, (e) => {
+        if (e.kind === "receipt") read();
+      });
+    } catch {
+      // No ledger events here (a host without them): the first read stands.
+    }
     return () => {
       live = false;
+      off();
     };
   }, [cwd, runSession]);
 
@@ -112,32 +129,78 @@ export function IntentEvidenceView({ cwd, sessionIds, patch, onOpenFile, onRiskO
 
   // 2. The brain's summary. Cached by plan + diff: the same pair is never
   //    asked twice, and a cached one shows at once.
+  //
+  //    The agent tab re-reads a working agent's edits every few seconds, so
+  //    the diff — and the cache key — keeps moving while it works. Two rules
+  //    keep that from becoming a stream of main-tier calls: the key must sit
+  //    still for SETTLE_MS before a later diff is summarised (the first one
+  //    goes at once), and a call already out is never aborted or doubled —
+  //    when it lands, the newest settled key gets its turn. `paused` (the
+  //    agent is mid-turn) turns automatic summaries into a button.
   const planData = plan?.data ?? null;
   const key = patch && plan !== undefined ? reviewCacheKey(planData, patch) : null;
+  const inputs = useRef({ key, patch, planData, receipt });
+  inputs.current = { key, patch, planData, receipt };
+  const [stableKey, setStableKey] = useState<string | null>(null);
+  useEffect(() => {
+    if (!key || key === stableKey) return;
+    if (stableKey === null || cachedReview(key)) {
+      setStableKey(key);
+      return;
+    }
+    const t = window.setTimeout(() => setStableKey(key), SETTLE_MS);
+    return () => window.clearTimeout(t);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [key]);
+  const stableRef = useRef(stableKey);
+  stableRef.current = stableKey;
+
   const [summary, setSummary] = useState<SummaryState>({ kind: "idle" });
   const [asked, setAsked] = useState(0);
+  const [recheck, setRecheck] = useState(0);
+  const running = useRef<string | null>(null);
+  const unmount = useRef<AbortController | null>(null);
   useEffect(() => {
-    if (!key || !patch || receipt === undefined) return;
-    if (!files.length) return;
-    const hit = cachedReview(key);
+    const c = new AbortController();
+    unmount.current = c;
+    return () => c.abort();
+  }, []);
+  const auto = settings.reviewAutoSummary && !paused;
+  useEffect(() => {
+    if (!stableKey || receipt === undefined || !files.length) return;
+    const hit = cachedReview(stableKey);
     if (hit) {
       setSummary({ kind: "ok", value: hit, cached: true });
       return;
     }
-    if (!settings.reviewAutoSummary && asked === 0) {
+    if (!auto && asked === 0) {
       setSummary({ kind: "idle" });
       return;
     }
-    const controller = new AbortController();
+    if (running.current) return; // lands, then re-checks (below)
+    const inp = inputs.current;
+    if (inp.key !== stableKey || !inp.patch) return; // moved on; the next settle fires
+    running.current = stableKey;
     setSummary({ kind: "loading" });
-    void summarizeChange({ cwd, plan: planData, patch, receiptLine: receiptLine(receipt), signal: controller.signal }).then((a) => {
-      if (controller.signal.aborted) return;
+    void summarizeChange({
+      cwd,
+      plan: inp.planData,
+      patch: inp.patch,
+      receiptLine: receiptLine(inp.receipt ?? null),
+      signal: unmount.current?.signal,
+    }).then((a) => {
+      const asFor = running.current;
+      running.current = null;
+      if (unmount.current?.signal.aborted) return;
+      if (asFor !== stableRef.current) {
+        setRecheck((n) => n + 1);
+        return;
+      }
       if (a.ok && a.value) setSummary({ kind: "ok", value: a.value, cached: !!a.cached });
       else setSummary({ kind: "error", message: a.ok ? BRAIN_REASON["invalid-output"] : (BRAIN_REASON[a.reason] ?? BRAIN_REASON.failed) });
     });
-    return () => controller.abort();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [key, asked, settings.reviewAutoSummary, receipt === undefined]);
+  }, [stableKey, asked, auto, recheck, receipt === undefined]);
 
   // 4. Risk map, and the order the host's diff should follow.
   const brainRisk = summary.kind === "ok" ? summary.value.risk : NO_RISK;

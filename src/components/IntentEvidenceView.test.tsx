@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { cleanup, configure, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { memoryLedger } from "../plans/testLedger";
+import { memoryLedger } from "../test/memoryLedger";
 
 const ledger = memoryLedger();
 const askBrain = vi.fn();
@@ -20,6 +20,7 @@ vi.mock("../ipc", () => ({
 import { IntentEvidenceView } from "./IntentEvidenceView";
 import { updateSettings } from "../settings";
 import { resetEvidenceForTests } from "../review/evidence";
+import { resetReviewCacheForTests } from "../review/intentReview";
 import type { PlanData } from "../plans/plan";
 
 const patch = [
@@ -78,6 +79,7 @@ beforeEach(() => {
   askBrain.mockReset();
   localStorage.clear();
   resetEvidenceForTests();
+  resetReviewCacheForTests();
 });
 afterEach(cleanup);
 
@@ -163,6 +165,27 @@ describe("IntentEvidenceView", () => {
     await userEvent.click(screen.getByRole("button", { name: "Ask the agent to split this" }));
     expect(onAskAgent).toHaveBeenCalledWith(expect.stringContaining("Suggested split: Split the parser from the UI."));
     expect(await screen.findByText("Sent to the agent.")).toBeInTheDocument();
+  }, 30_000);
+
+  it("does not stream brain calls while a working agent's diff keeps moving", async () => {
+    askBrain.mockResolvedValue({ ok: true, text: "", costUsd: 0, inputTokens: 1, outputTokens: 1, value: { summary: "First.", deviations: [], unplanned: [], missing: [], risk: [] } });
+    const { rerender } = render(<IntentEvidenceView cwd="/repo" sessionIds={[]} patch={patch} />);
+    expect(await screen.findByText("First.")).toBeInTheDocument();
+    rerender(<IntentEvidenceView cwd="/repo" sessionIds={[]} patch={`${patch}\n+edit 2`} />);
+    rerender(<IntentEvidenceView cwd="/repo" sessionIds={[]} patch={`${patch}\n+edit 2\n+edit 3`} />);
+    await new Promise((r) => setTimeout(r, 300));
+    // The later diffs wait to settle; the first answer stays on screen.
+    expect(askBrain).toHaveBeenCalledTimes(1);
+    expect(screen.getByText("First.")).toBeInTheDocument();
+  }, 30_000);
+
+  it("waits for a click while the agent is mid-turn", async () => {
+    askBrain.mockResolvedValue({ ok: true, text: "", costUsd: 0, inputTokens: 1, outputTokens: 1, value: { summary: "Asked.", deviations: [], unplanned: [], missing: [], risk: [] } });
+    render(<IntentEvidenceView cwd="/repo" sessionIds={[]} patch={patch} paused />);
+    const button = await screen.findByRole("button", { name: "Summarize against the plan" });
+    expect(askBrain).not.toHaveBeenCalled();
+    await userEvent.click(button);
+    expect(await screen.findByText("Asked.")).toBeInTheDocument();
   }, 30_000);
 
   it("waits for a click when automatic summaries are off", async () => {

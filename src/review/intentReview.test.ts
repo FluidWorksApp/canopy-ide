@@ -16,6 +16,7 @@ import {
   splitRequest,
   summarizeChange,
   validateReview,
+  resetReviewCacheForTests,
 } from "./intentReview";
 import type { PlanData } from "../plans/plan";
 
@@ -60,6 +61,7 @@ const good = {
 beforeEach(() => {
   askBrain.mockReset();
   localStorage.clear();
+  resetReviewCacheForTests();
 });
 
 describe("review prompt", () => {
