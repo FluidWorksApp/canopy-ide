@@ -14,7 +14,7 @@ import {body,json} from './http.mjs';
 import {WebSocketServer} from 'ws';
 import {terminalScreens} from './terminal-screen.mjs';
 import {WorkspaceProfiles} from './profiles.mjs';
-import {AgentIntegrations} from './agent-integrations.mjs';
+import {AgentIntegrations,HOOKED_CLIS} from './agent-integrations.mjs';
 import {readAgentEvents} from './agent-events.mjs';
 import {sessionDigestReader} from './session-digests.mjs';
 import {sessionTranscriptTail} from './session-transcript.mjs';
@@ -327,7 +327,7 @@ export async function nativeInvoke(command,args={}){
   if(command==='workspace_chrome_stream_close'){await browsers.close(args.id);return;}
   if(command==='mcp_servers')return mcpRegistry.servers(args.projectDirs??[]);
   if(command==='mcp_update_sources')return mcpRegistry.update(args.projectDirs??[],args.changes);
-  if(command==='agent_integration_health')return Promise.all(['claude','codex'].map(agent=>integrations.health(agent)));
+  if(command==='agent_integration_health')return Promise.all(HOOKED_CLIS.map(agent=>integrations.health(agent)));
   if(command==='agent_session_summaries'||command==='session_history'||command==='pr_watch_list')return [];
   if(command==='agent_events_poll')return readAgentEvents(HOME+'/.canopy/agent-events.jsonl',args.cursor);
   if(command==='hook_bridge_path')return HOME+'/.canopy/agent-events.jsonl';

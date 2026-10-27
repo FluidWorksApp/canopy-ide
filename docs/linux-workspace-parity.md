@@ -141,9 +141,14 @@ The workspace image (`packages/remote-host/Dockerfile`) already has `gh` and `gi
   roster carries them, so awareness on any machine can tell an agent in another cloud
   workspace on the same repository over the mesh.
 - **Rules on connect.** Each connect and reconnect writes every open project's policy with
-  `gates_policy_write`; when `agent_integration_health` reports an installed CLI's hooks
-  missing (Claude Code's PreToolUse matchers included), the workspace offers **Update agent
-  hooks** (`setup_agent_hooks`).
+  `gates_policy_write`. The host installs Canopy's hooks for every CLI the image ships, as
+  the desktop's installers in `agents.rs` do: Claude Code and Codex (`agent-integrations.mjs`,
+  PreToolUse matchers included) and Cursor, Grok, OpenCode, oh-my-pi, Amp and Antigravity
+  (`agent-gates.mjs`; the OpenCode, oh-my-pi and Amp plugin sources are generated from
+  `agents.rs` into `agent-templates.mjs` by `gen-agent-templates.mjs`, and a test fails when
+  they drift). When `agent_integration_health` reports an installed CLI's hooks missing or
+  out of date, the workspace offers **Update agent hooks** (`setup_agent_hooks`). MCP
+  registration in the VM is still Claude Code and Codex only.
 - **Team memory.** The ledger stays on the desktop. Each connect, and each change to a
   memory, sends the approved, unexpired entries to the workspace's canopy-service
   (`memory_sync`), which answers `canopy_memory` from that copy with the desktop's rules
