@@ -22,7 +22,9 @@ export async function requestOperation(client, userId, workspaceId, input, {requ
   return previous;
  }
  // Credit cutoff: starts, retries and resizes are refused at or below it
- // (credit-policy.mjs). Stop and delete always proceed.
+ // (credit-policy.mjs). Stop and delete always proceed. The deployed lifecycle
+ // also passes usdPerHour (the plan's rate) so a start needs one billing
+ // interval above the cutoff; this copy has no rate table, so only the cutoff applies.
  await assertComputeAllowed(client,userId,input.action,{shared:requesterId!==userId});
  validateOperation(workspace,input);
  if(input.action==='resume'&&workspace.state==='ready'&&workspace.desired_state==='running')return {id:null,workspace_id:workspaceId,owner_id:userId,action:'resume',generation:workspace.generation,status:'succeeded',phase:'complete',noop:true,context:{requesterId}};

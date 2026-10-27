@@ -199,17 +199,57 @@ export function runInProjectTerminal(
 }
 
 /** When a sign-in terminal was last opened, so returning to the window can
- *  re-probe while the person is plausibly mid-login. */
+ *  re-probe while the person is plausibly mid-login. Zero once the sign-in
+ *  tab has closed or the brain answered. */
 let loginStartedAt = 0;
 const LOGIN_WINDOW_MS = 15 * 60 * 1000;
+
+/** While a sign-in tab is open, how often to ask whether it worked. A
+ *  signed-out CLI refuses the probe before calling any model, so a probe that
+ *  fails costs a process start, not a request. The first minutes are when
+ *  sign-in actually finishes; after that the person has wandered off, so the
+ *  checks slow down, and they stop with the sign-in window. */
+const LOGIN_POLL_FAST_MS = 4_000;
+const LOGIN_POLL_SLOW_MS = 30_000;
+const LOGIN_POLL_FAST_FOR_MS = 5 * 60 * 1000;
 
 /** Open a terminal running `cli`'s own sign-in. False when no project is open. */
 export function startBrainSignIn(cli: AgentCli): boolean {
   const ok = runInProjectTerminal(loginCommand(cli.bin), `Sign in to ${cli.name}`, {
     then: BRAIN_RECHECK,
   });
-  if (ok) loginStartedAt = Date.now();
+  if (ok) {
+    loginStartedAt = Date.now();
+    lastLoginPoll = 0;
+  }
   return ok;
+}
+
+/** When the sign-in poll last probed. */
+let lastLoginPoll = 0;
+
+/** One tick of the sign-in poll: probe when a sign-in tab is open, the brain
+ *  still says signed out (or has not been checked since), no probe is
+ *  already running, and the interval for this stage of the wait has passed.
+ *  Exported for tests; initBrainConnect runs it on a timer. */
+export function loginPollTick(now = Date.now()): boolean {
+  if (!loginStartedAt) return false;
+  const waited = now - loginStartedAt;
+  if (waited > LOGIN_WINDOW_MS) {
+    loginStartedAt = 0;
+    return false;
+  }
+  const state = brainConnection().state;
+  if (state === "connected") {
+    loginStartedAt = 0;
+    return false;
+  }
+  if (state === "checking" || state === "missing") return false;
+  const gap = waited < LOGIN_POLL_FAST_FOR_MS ? LOGIN_POLL_FAST_MS : LOGIN_POLL_SLOW_MS;
+  if (now - lastLoginPoll < gap) return false;
+  lastLoginPoll = now;
+  void checkBrainConnection();
+  return true;
 }
 
 /** Run `cli`'s installer in a run tab. False when no project is open or the
@@ -230,7 +270,9 @@ const FOCUS_RECHECK_GAP_MS = 10_000;
  *  - a CLI install landing → check again (brainCall drops its installed cache
  *    on the same event, and registered its listener first, at import);
  *  - the window regaining focus during a recent sign-in → check again, because
- *    the CLI's REPL usually stays open after login and its exit may be hours away.
+ *    the CLI's REPL usually stays open after login and its exit may be hours away;
+ *  - while a sign-in tab is open → check every few seconds (loginPollTick),
+ *    so Connected shows the moment sign-in finishes.
  *
  * The startup probe is one cheap background call per launch — the price of the
  * chip telling the truth instead of "not checked".
@@ -238,7 +280,10 @@ const FOCUS_RECHECK_GAP_MS = 10_000;
 export function initBrainConnect(opts: { probeOnStart?: boolean } = {}): () => void {
   const recheck = () => void checkBrainConnection();
   const onExited = (e: Event) => {
-    if ((e as CustomEvent).detail?.then === BRAIN_RECHECK) recheck();
+    if ((e as CustomEvent).detail?.then !== BRAIN_RECHECK) return;
+    // The sign-in tab is gone: one last check, and the poll stops with it.
+    loginStartedAt = 0;
+    recheck();
   };
   let lastFocusCheck = 0;
   const onFocus = () => {
@@ -252,6 +297,10 @@ export function initBrainConnect(opts: { probeOnStart?: boolean } = {}): () => v
   window.addEventListener(TERMINAL_EXITED_EVENT, onExited);
   window.addEventListener(CLI_INSTALLS_CHANGED_EVENT, recheck);
   window.addEventListener("focus", onFocus);
+  // Sign-in finishing is not an event anything raises — the CLI's REPL stays
+  // open after login — so while a sign-in tab is open, ask on a short timer
+  // and flip to Connected the moment the probe answers.
+  const poll = setInterval(() => loginPollTick(), 1_000);
   const timer =
     opts.probeOnStart === false
       ? undefined
@@ -260,6 +309,7 @@ export function initBrainConnect(opts: { probeOnStart?: boolean } = {}): () => v
         }, STARTUP_PROBE_DELAY_MS);
   return () => {
     if (timer !== undefined) clearTimeout(timer);
+    clearInterval(poll);
     window.removeEventListener(TERMINAL_EXITED_EVENT, onExited);
     window.removeEventListener(CLI_INSTALLS_CHANGED_EVENT, recheck);
     window.removeEventListener("focus", onFocus);
@@ -269,6 +319,7 @@ export function initBrainConnect(opts: { probeOnStart?: boolean } = {}): () => v
 /** Tests only. */
 export function resetBrainConnectForTests(): void {
   loginStartedAt = 0;
+  lastLoginPoll = 0;
 }
 
 /** A feature that runs on something other than the brain, by the person's own

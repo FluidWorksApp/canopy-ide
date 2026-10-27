@@ -821,7 +821,11 @@ export interface AgentUiOp {
     // Mesh jobs, open to every agent: where a job can go, and sending one.
     | "mesh_targets"
     | "mesh_submit"
-    | "mesh_message_cloud";
+    | "mesh_message_cloud"
+    // Teams chat, open to every agent: who is on the user's teams, and
+    // posting a message there as the user.
+    | "team_people"
+    | "team_send";
   route: string;
   /** Agent terminal that initiated the operation, when there is one. For
    *  mesh_submit and mesh_message_cloud the bridge stamps it from the
@@ -936,6 +940,22 @@ export const meshJobUpdate = (ptyId: number, instance: string, jobId: string, te
  *  and kept on the mesh tagged ref {kind: "relay", id: messageId}. */
 export const meshRelayReply = (ptyId: number, instance: string, messageId: string, text: string) =>
   invoke<string>("context_mesh_job_update", { ptyId, instance, jobId: messageId, text, refKind: "relay" });
+
+/** One team's people, with emails, from the account directory. */
+export const teamMembers = (teamId: string) =>
+  invoke<{ members?: { id: string; name: string; email?: string; role?: string }[] }>(
+    "canopy_account_request",
+    { route: "/api/teams", body: { action: "detail", teamId } },
+  ).then((detail) => detail.members ?? null);
+
+/** Hand an agent something from Teams chat ("Send to agent" on a message):
+ *  kept on the mesh as a message from the user under ref {kind: "team-chat",
+ *  id: the chat message's id}, so every forward of one message lists
+ *  together, and announced in that agent's terminal. The same door as a mesh
+ *  job step, so it reaches agents in a cloud workspace too. Resolves with the
+ *  mesh message id. */
+export const forwardToAgent = (ptyId: number, instance: string, messageId: string, text: string) =>
+  invoke<string>("context_mesh_job_update", { ptyId, instance, jobId: messageId, text, refKind: "team-chat" });
 
 /** The workspace telling an agent what another agent just changed
  *  (src/awareness): kept on the mesh under ref {kind: "awareness", id} and
@@ -4383,6 +4403,41 @@ export const sessionTranscriptTail = (args: {
     roots: args.roots,
     profile: args.profile ?? null,
     maxBytes: args.maxBytes ?? null,
+  });
+
+// ---------- session activity (src-tauri/src/session_activity.rs) ----------
+
+/** One subagent a session spawned, read from its transcript. */
+export interface SubagentRun {
+  id: string;
+  agent_id: string | null;
+  description: string;
+  kind: string | null;
+  status: "running" | "done" | "failed" | "stopped";
+  background: boolean;
+  started_ms: number | null;
+  ended_ms: number | null;
+  duration_ms: number | null;
+  tokens: number | null;
+  tool_uses: number | null;
+  result: string | null;
+}
+
+export interface SessionActivity {
+  subagents: SubagentRun[];
+  /** The context the latest reply was given, in tokens. */
+  context: { model: string | null; tokens: number; at_ms: number | null } | null;
+  compactions: { at_ms: number | null; trigger: string; pre_tokens: number | null; post_tokens: number | null }[];
+}
+
+/** A session's subagents and context use; null when its CLI's transcript
+ *  does not record them, or there is no transcript to read. */
+export const sessionActivity = (args: { sessionId: string; agent: string; roots: string[]; profile?: string | null }) =>
+  invoke<SessionActivity | null>("session_activity", {
+    sessionId: args.sessionId,
+    agent: args.agent,
+    roots: args.roots,
+    profile: args.profile ?? null,
   });
 
 // ---------- team relay ----------

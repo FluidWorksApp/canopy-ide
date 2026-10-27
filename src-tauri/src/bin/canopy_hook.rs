@@ -153,10 +153,92 @@ fn main() {
         remind_main();
         return;
     }
+    // `--gate` marks a pre-tool permission hook whose CLI reads a verdict on
+    // every call (Cursor's preToolUse, Antigravity's PreToolUse). Those treat
+    // empty or malformed output as unspecified at best and a block at worst,
+    // so whatever happens below — not a Canopy terminal, a parse failure, a
+    // panic — the call ends with the CLI's own "no objection" unless a
+    // verdict was already printed.
+    let fallback = std::env::args()
+        .any(|a| a == "--gate")
+        .then(|| gate_fallback(arg_value("--agent").as_deref()))
+        .flatten();
     // Any failure exits 0 with no stdout: a hook must never break the session
     // it's attached to.
-    if let Err(_e) = real_main() {
+    let ran = std::panic::catch_unwind(real_main);
+    if let Some(allow) = fallback {
+        if !VERDICT_PRINTED.load(std::sync::atomic::Ordering::SeqCst) {
+            println!("{allow}");
+        }
+    }
+    if !matches!(ran, Ok(Ok(()))) {
         std::process::exit(0);
+    }
+}
+
+/// Set once a PreToolUse verdict has gone to stdout, so `main`'s fallback
+/// never prints a second, contradicting one.
+static VERDICT_PRINTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+fn print_verdict(value: &serde_json::Value) {
+    println!("{value}");
+    VERDICT_PRINTED.store(true, std::sync::atomic::Ordering::SeqCst);
+}
+
+fn arg_value(name: &str) -> Option<String> {
+    let mut args = std::env::args().skip(1);
+    while let Some(a) = args.next() {
+        if a == name {
+            return args.next();
+        }
+    }
+    None
+}
+
+/// The "no objection" a `--gate` hook prints when Canopy has nothing to stop.
+/// Cursor: the allow shape of its own block-git.sh example (cursor.com/docs/
+/// hooks; invalid output on a permission hook blocks the tool). Antigravity:
+/// `allow` "delegates to the next hook or the default policy" — it is
+/// `auto_approve`, not `allow`, that skips agy's prompts
+/// (antigravity.google/docs/hooks, matched against the 1.2.14 binary).
+fn gate_fallback(agent: Option<&str>) -> Option<&'static str> {
+    match agent {
+        Some("cursor") => Some(r#"{"continue":true,"permission":"allow"}"#),
+        Some("agy") => Some(r#"{"decision":"allow"}"#),
+        _ => None,
+    }
+}
+
+/// A gate's deny, in each CLI's own PreToolUse contract (vendor docs, checked
+/// 2026-10-27):
+///   * Claude Code, Codex: `hookSpecificOutput.permissionDecision: "deny"`
+///     (learn.chatgpt.com/docs/hooks documents Codex's as Claude's).
+///   * Cursor: `permission: "deny"` with `agent_message` for the agent and
+///     `user_message` for the person (cursor.com/docs/hooks).
+///   * Grok, Antigravity, and Canopy's own plugin bridges (OpenCode, oh-my-pi,
+///     Amp — the generated plugin turns it into a throw, `{block}` or
+///     `reject-and-continue`): `{decision: "deny", reason}`
+///     (docs.x.ai/build/features/hooks, antigravity.google/docs/hooks).
+/// None for a CLI with no blocking hook (Aider): nothing is evaluated there.
+fn gate_deny_output(agent: Option<&str>, reason: &str) -> Option<serde_json::Value> {
+    match agent {
+        None | Some("claude") | Some("codex") => Some(serde_json::json!({
+            "hookSpecificOutput": {
+                "hookEventName": "PreToolUse",
+                "permissionDecision": "deny",
+                "permissionDecisionReason": reason,
+            }
+        })),
+        Some("cursor") => Some(serde_json::json!({
+            "continue": true,
+            "permission": "deny",
+            "agent_message": reason,
+            "user_message": "Canopy stopped this tool call — see the card on the agent's terminal.",
+        })),
+        Some("grok") | Some("agy") | Some("opencode") | Some("omp") | Some("amp") => {
+            Some(serde_json::json!({ "decision": "deny", "reason": reason }))
+        }
+        _ => None,
     }
 }
 
@@ -672,54 +754,29 @@ fn real_main() -> Result<(), Box<dyn std::error::Error>> {
         denied_root_write(path, root, &home()).then(|| root_denial(path, root))
     };
 
-    // A gate's deny, in the contract of each CLI whose PreToolUse deny shape is
-    // proven: Claude Code (bare on the desktop, `--agent claude` in the Linux
-    // workspace) and agy's decision object. Codex, Cursor and the rest still get
-    // the block recorded and shown — just not refused, because a guessed stdout
-    // contract breaks the session it is attached to.
+    // A gate's deny, in the contract of the CLI that asked (gate_deny_output).
     if let Some(reason) = gate.as_ref().and_then(|g| g.deny.clone()) {
-        match agent_override.as_deref() {
-            None | Some("claude") => {
-                println!(
-                    "{}",
-                    serde_json::json!({
-                        "hookSpecificOutput": {
-                            "hookEventName": "PreToolUse",
-                            "permissionDecision": "deny",
-                            "permissionDecisionReason": reason,
-                        }
-                    })
-                );
-                return Ok(());
-            }
-            Some("agy") if event["agy_event"].as_str() == Some("PreToolUse") => {
-                println!(
-                    "{}",
-                    serde_json::json!({ "decision": "deny", "reason": reason })
-                );
-                return Ok(());
-            }
-            _ => {}
+        if let Some(out) = gate_deny_output(agent_override.as_deref(), &reason) {
+            print_verdict(&out);
+            return Ok(());
         }
     }
 
     match agent_override.as_deref() {
-        // Historical installs registered PreToolUse. Never answer "allow": in
-        // Antigravity that grants the tool and bypasses its normal permission
-        // flow. Current setup no longer registers this observer in the approval
-        // path; an old copy receives an empty decision unless the research gate
-        // explicitly denies the write. Its other events ignore stdout. No peer-context
-        // printing: the hookSpecificOutput contract below is Claude's, and
-        // feeding it to agy would at best be ignored and at worst confuse its
-        // parser.
+        // PreToolUse is registered (with `--gate`) for the Rules panel's gates.
+        // A no-objection answer is `allow`, which agy documents as delegating
+        // to the next hook or its default policy — `auto_approve` is the one
+        // that would skip its prompts, and Canopy never sends it. Its other
+        // events ignore stdout. No peer-context printing: the
+        // hookSpecificOutput contract below is Claude's, and feeding it to agy
+        // would at best be ignored and at worst confuse its parser.
         Some("agy") => {
             if event["agy_event"].as_str() == Some("PreToolUse") {
                 match research_denial_for(&event) {
-                    Some(reason) => println!(
-                        "{}",
-                        serde_json::json!({ "decision": "deny", "reason": reason })
-                    ),
-                    None => println!("{}", serde_json::json!({})),
+                    Some(reason) => {
+                        print_verdict(&serde_json::json!({ "decision": "deny", "reason": reason }))
+                    }
+                    None => print_verdict(&serde_json::json!({ "decision": "allow" })),
                 }
             }
         }
@@ -862,6 +919,8 @@ fn normalize_event(event: &mut serde_json::Value, agent: &str) {
             ("notificationType", "notification_type"),
             ("promptId", "prompt_id"),
             ("subagentType", "subagent_type"),
+            // Grok's Stop carries the agent's closing words in camelCase.
+            ("lastAssistantMessage", "last_assistant_message"),
         ] {
             if map.get(to).is_none() {
                 if let Some(value) = map.get(from).cloned() {
@@ -2357,11 +2416,12 @@ struct GateVerdict {
     stamp: Option<serde_json::Value>,
 }
 
-/// The CLIs whose PreToolUse deny contract is proven (see the deny arm in
-/// `real_main`). Elsewhere a refusal is not delivered, so nothing is evaluated:
-/// recording "blocked" for a command that then ran would be worse than silence.
+/// The CLIs Canopy can refuse a tool call in: exactly those with a deny
+/// contract in `gate_deny_output`. Elsewhere (Aider) a refusal is not
+/// delivered, so nothing is evaluated: recording "blocked" for a command that
+/// then ran would be worse than silence.
 fn gate_enforces(agent: Option<&str>) -> bool {
-    matches!(agent, None | Some("claude") | Some("agy"))
+    gate_deny_output(agent, "").is_some()
 }
 
 fn gate_taint_ids(session_id: &str) -> Vec<String> {
@@ -2414,6 +2474,9 @@ fn gate_check(
         && action.url.is_none()
         && !gates::is_vault_tool(tool)
     {
+        if gates::reads_untrusted(tool) {
+            gates::mark_tainted(&home, &gate_taint_ids(session_id), tool);
+        }
         return None;
     }
     // Gates that exempt this session's team member (a layer owner's own
@@ -2433,6 +2496,15 @@ fn gate_check(
     let policy = loaded.as_ref().map(|(_, p)| p);
     let findings = gates::evaluate(policy, &action, &ctx, tainted.as_deref());
     let outcome = gates::outcome(&findings, policy.is_some_and(|p| p.trifecta_blocks()));
+    // Some CLIs' post-tool hooks carry no tool name to Canopy (Cursor and
+    // Grok register theirs as bare signals; the plugin bridges send no
+    // PostToolUse for MCP tools), so a fetch that is let through is marked
+    // here too. Marking before it runs is the cautious side.
+    if matches!(outcome, gates::Outcome::Allow | gates::Outcome::Warn)
+        && gates::reads_untrusted(tool)
+    {
+        gates::mark_tainted(&home, &taint_ids, tool);
+    }
     if outcome == gates::Outcome::Allow {
         return None;
     }
@@ -3738,6 +3810,7 @@ const COMPANION_MUTATING_TOOLS: &[&str] = &[
     "canopy_message_agent",
     "canopy_mesh_send",
     "canopy_mesh_submit",
+    "canopy_team_send",
     "canopy_claim",
     "canopy_notes_write",
     "canopy_research_write",
@@ -3936,6 +4009,7 @@ const READ_ONLY_TOOLS: &[&str] = &[
     "canopy_agents",
     "canopy_mesh",
     "canopy_mesh_targets",
+    "canopy_team_people",
     "canopy_research",
     "canopy_notes",
     "canopy_memory",
@@ -4088,6 +4162,20 @@ fn mesh_tool_defs() -> Vec<serde_json::Value> {
                 "agent": { "type": "string", "description": "For a cloud workspace: the name of a running agent there to hand the job to; omitted starts a new one" },
                 "requestId": { "type": "string", "description": "Only when retrying a send that timed out: the requestId that error gave you. The same id is never delivered twice; omit it on a first send" }
             }, "required": ["brief"], "additionalProperties": false }
+        }),
+        serde_json::json!({
+            "name": "canopy_team_people",
+            "description": "The user's Canopy teams: each team's channel and its people (name, email, id), the ones canopy_team_send can message.",
+            "inputSchema": { "type": "object", "properties": {}, "additionalProperties": false }
+        }),
+        serde_json::json!({
+            "name": "canopy_team_send",
+            "description": "Post a message in the user's Canopy Teams chat, as the user and marked as sent by an agent: a direct message to a teammate, or the team's channel. End-to-end encrypted, like the user typing it. The recipient can hand it to one of their agents or run it as a task from the chat, so write it to stand alone. Not for agents — that is canopy_mesh_send.",
+            "inputSchema": { "type": "object", "properties": {
+                "to": { "type": "string", "description": "A teammate's name, email or id from canopy_team_people, or \"channel\" for everyone in the team" },
+                "text": { "type": "string", "description": "The message, in full; multi-line is fine (15 KB max)" },
+                "team": { "type": "string", "description": "Team name or id, when the user is in more than one" }
+            }, "required": ["to", "text"], "additionalProperties": false }
         }),
     ]
 }
@@ -4872,6 +4960,13 @@ fn describe_action(name: &str, args: &serde_json::Value) -> (String, Option<Stri
             },
             arg("brief").map(|b| b.chars().take(240).collect()),
         ),
+        "canopy_team_send" => (
+            match arg("to").as_deref().map(str::trim) {
+                Some("channel") | None => "Post in the team channel".into(),
+                Some(to) => format!("Message {to} in Teams"),
+            },
+            arg("text").map(|t| t.chars().take(240).collect()),
+        ),
         "canopy_stop_server" => ("Stop a server".into(), arg("ptyId")),
         "canopy_restart_server" => ("Restart a server".into(), arg("ptyId")),
         "canopy_spawn_agent" => (
@@ -4994,6 +5089,18 @@ fn call_tool(name: &str, args: &serde_json::Value) -> Result<ToolOutput, String>
     // not.
     if let Some(reason) = vault_trifecta_gate(name) {
         return Err(reason);
+    }
+    // The other leg: content a stranger wrote, served by this server. Marked
+    // on the terminal here because not every CLI's post-tool hook carries MCP
+    // tool names, and the memory bridge quarantines a proposal from a
+    // terminal marked this way the moment it arrives.
+    if gates::reads_untrusted(name) {
+        if let Some(id) = gates::pty_taint_id(
+            std::env::var("CANOPY_INSTANCE").ok().as_deref(),
+            std::env::var("CANOPY_PTY").ok().as_deref(),
+        ) {
+            gates::mark_tainted(&home(), &[id], name);
+        }
     }
     // Before anything else: the companion's write gate. Placed at the top of
     // dispatch so no individual tool handler has to remember it, and so a tool
@@ -5609,6 +5716,25 @@ fn call_tool(name: &str, args: &serde_json::Value) -> Result<ToolOutput, String>
             })))
         }
         "canopy_mesh_targets" => text(ui_op("mesh_targets", &serde_json::json!({}), 25)),
+        "canopy_team_people" => text(ui_op("team_people", &serde_json::json!({}), 25)),
+        "canopy_team_send" => {
+            let arg = |k: &str| args.get(k).and_then(|v| v.as_str()).map(str::trim);
+            let to = arg("to")
+                .filter(|t| !t.is_empty())
+                .ok_or("missing required argument: to (a teammate from canopy_team_people, or \"channel\")")?;
+            let body = args
+                .get("text")
+                .and_then(|v| v.as_str())
+                .filter(|t| !t.trim().is_empty())
+                .ok_or("missing required argument: text")?;
+            // Mapped onto the bridge's existing vocabulary: who in `member`,
+            // the message in `prompt`, the team in `label`.
+            text(ui_op(
+                "team_send",
+                &serde_json::json!({ "member": to, "prompt": body, "label": arg("team") }),
+                35,
+            ))
+        }
         "canopy_mesh_submit" => {
             let arg = |k: &str| args.get(k).and_then(|v| v.as_str()).map(str::trim);
             let brief = arg("brief")
@@ -6787,6 +6913,122 @@ fn urlencode(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// One irreversible command, as each CLI delivers it to its pre-tool hook,
+    /// must come out as that CLI's own deny shape. Payloads follow each
+    /// vendor's documented PreToolUse input (see gate_deny_output).
+    #[test]
+    fn every_hooked_cli_gets_the_gate_in_its_own_contract() {
+        let cases: Vec<(Option<&str>, serde_json::Value)> = vec![
+            (
+                None,
+                serde_json::json!({"hook_event_name": "PreToolUse", "session_id": "s", "cwd": "/w",
+                "tool_name": "Bash", "tool_input": {"command": "rm -rf ~"}}),
+            ),
+            (
+                Some("codex"),
+                serde_json::json!({"hook_event_name": "PreToolUse", "session_id": "s", "cwd": "/w",
+                "tool_name": "Bash", "tool_input": {"command": "rm -rf ~"}}),
+            ),
+            (
+                Some("cursor"),
+                serde_json::json!({"hook_event_name": "preToolUse", "conversation_id": "c",
+                "cwd": "/w", "tool_name": "Shell", "tool_input": {"command": "rm -rf ~", "working_directory": "/w"}}),
+            ),
+            (
+                Some("grok"),
+                serde_json::json!({"hookEventName": "pre_tool_use", "hook_event_name": "PreToolUse",
+                "sessionId": "g", "cwd": "/w", "toolName": "run_terminal_command", "toolInput": {"command": "rm -rf ~"}}),
+            ),
+            (
+                Some("agy"),
+                serde_json::json!({"hook_event_name": "PreToolUse", "conversationId": "a",
+                "workspacePaths": ["/w"], "toolCall": {"name": "run_command", "args": {"CommandLine": "rm -rf ~", "Cwd": "/w"}}}),
+            ),
+            (
+                Some("opencode"),
+                serde_json::json!({"hook_event_name": "PreToolUse", "session_id": "o", "cwd": "/w",
+                "tool_name": "Bash", "tool_input": {"command": "rm -rf ~"}}),
+            ),
+            (
+                Some("omp"),
+                serde_json::json!({"hook_event_name": "PreToolUse", "session_id": "p", "cwd": "/w",
+                "tool_name": "bash", "tool_input": {"command": "rm -rf ~"}}),
+            ),
+            (
+                Some("amp"),
+                serde_json::json!({"hook_event_name": "PreToolUse", "session_id": "t", "cwd": "/w",
+                "tool_name": "Bash", "tool_input": {"cmd": "rm -rf ~"}}),
+            ),
+        ];
+        for (agent, mut event) in cases {
+            let label = agent.unwrap_or("claude");
+            normalize_event(&mut event, agent.unwrap_or("claude"));
+            assert_eq!(event["hook_event_name"], "PreToolUse", "{label}");
+            assert_eq!(event["cwd"], "/w", "{label}");
+            let tool = event["tool_name"].as_str().unwrap().to_string();
+            let action = gates::action_from_event(
+                &tool,
+                &event["tool_input"],
+                std::path::Path::new("/w"),
+                vec![],
+            );
+            assert_eq!(action.command.as_deref(), Some("rm -rf ~"), "{label}");
+            let ctx = gates::Ctx {
+                cwd: std::path::Path::new("/w"),
+                top: Some(std::path::Path::new("/w")),
+                home: "/home/u",
+                git: &gates::FsGit,
+            };
+            let findings = gates::evaluate(None, &action, &ctx, None);
+            let outcome = gates::outcome(&findings, false);
+            assert_eq!(outcome, gates::Outcome::NeedsApproval, "{label}");
+            assert!(gate_enforces(agent), "{label}");
+            let reason = gates::agent_reason(&findings, outcome);
+            let out = gate_deny_output(agent, &reason).unwrap();
+            match agent {
+                None | Some("codex") => {
+                    assert_eq!(out["hookSpecificOutput"]["permissionDecision"], "deny");
+                    assert_eq!(
+                        out["hookSpecificOutput"]["permissionDecisionReason"],
+                        reason.as_str()
+                    );
+                }
+                Some("cursor") => {
+                    assert_eq!(out["permission"], "deny");
+                    assert_eq!(out["agent_message"], reason.as_str());
+                }
+                _ => {
+                    assert_eq!(out["decision"], "deny", "{label}");
+                    assert_eq!(out["reason"], reason.as_str(), "{label}");
+                }
+            }
+        }
+        // Aider has no hook that can refuse, so nothing is evaluated for it.
+        assert!(!gate_enforces(Some("aider")));
+        assert!(gate_deny_output(Some("aider"), "x").is_none());
+    }
+
+    /// The CLIs that read a verdict on every pre-tool call get their own
+    /// "no objection" on every exit path; the rest are left silent.
+    #[test]
+    fn gate_fallbacks_are_each_cli_s_no_objection() {
+        let cursor: serde_json::Value =
+            serde_json::from_str(gate_fallback(Some("cursor")).unwrap()).unwrap();
+        assert_eq!(cursor["permission"], "allow");
+        let agy: serde_json::Value =
+            serde_json::from_str(gate_fallback(Some("agy")).unwrap()).unwrap();
+        assert_eq!(agy["decision"], "allow", "never auto_approve");
+        for silent in [
+            None,
+            Some("claude"),
+            Some("codex"),
+            Some("grok"),
+            Some("opencode"),
+        ] {
+            assert!(gate_fallback(silent).is_none(), "{silent:?}");
+        }
+    }
 
     #[test]
     fn modern_results_carry_identity_and_cache_hints_only_in_the_modern_era() {

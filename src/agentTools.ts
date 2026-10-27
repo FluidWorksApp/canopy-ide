@@ -134,6 +134,16 @@ export const AGENT_TOOL_GROUPS: AgentToolGroup[] = [
         note: "Workspaces, own machines and teammates a job can go to",
       },
       {
+        name: "canopy_team_send",
+        label: "Teams chat",
+        note: "Post in your Teams chat as you, marked as agent-written",
+      },
+      {
+        name: "canopy_team_people",
+        label: "Team people",
+        note: "Your teams and the people an agent can message",
+      },
+      {
         name: "canopy_mesh",
         label: "Mesh history",
         note: "Its own sent and received messages, by id",

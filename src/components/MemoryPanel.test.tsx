@@ -35,6 +35,7 @@ vi.mock("../ipc", async (importOriginal) => ({
 import * as ipc from "../ipc";
 import { resetLedgerForTests } from "../ledger";
 import { MemoryPanel } from "./MemoryPanel";
+import { updateSettings } from "../settings";
 
 const DAY = 24 * 60 * 60 * 1000;
 
@@ -69,6 +70,7 @@ beforeEach(() => {
   resetLedgerForTests();
   localStorage.clear();
   vi.clearAllMocks();
+  updateSettings({ memoryInstructionAutoUpdate: null, memoryInstructionFiles: {} });
 });
 
 describe("MemoryPanel", () => {
@@ -196,4 +198,61 @@ describe("MemoryPanel", () => {
     expect(content).toContain("- Use row level security for tenant tables");
     expect(content).toContain("canopy:memory:start");
   });
+
+  it("adds a memory by hand: approved at once, with the person as its author", async () => {
+    render(<MemoryPanel roots={["/repo"]} />);
+    await userEvent.click(await screen.findByRole("button", { name: "+ Add a memory" }));
+    const form = screen.getByRole("form", { name: "Add a memory" });
+    await userEvent.selectOptions(within(form).getByLabelText("Kind of memory"), "constraint");
+    await userEvent.selectOptions(within(form).getByLabelText("Applies to"), "team");
+    await userEvent.type(within(form).getByLabelText("Memory"), "Never call the billing API from a request handler");
+    await userEvent.type(within(form).getByLabelText("Why"), "it times out under load");
+    await userEvent.click(within(form).getByRole("button", { name: "Add — in use now" }));
+    await waitFor(() =>
+      expect(ipc.ledgerAppend).toHaveBeenCalledWith(
+        "/repo",
+        expect.objectContaining({
+          kind: "memory",
+          status: "approved",
+          scope: "team",
+          author: { kind: "human", name: "you" },
+          data: expect.objectContaining({
+            type: "constraint",
+            text: "Never call the billing API from a request handler",
+            why: "it times out under load",
+            source: "human",
+          }),
+        }),
+      ),
+    );
+    expect(await screen.findByText("Never call the billing API from a request handler")).toBeInTheDocument();
+  }, 30_000);
+
+  it("rewrites the instruction file's section on approval once it has been used", async () => {
+    seed({ data: { memoryId: "mem-1", text: "Deploys go out on Tuesdays only" } });
+    render(<MemoryPanel roots={["/repo"]} />);
+    await screen.findByTestId("memory-row");
+    // First use, by hand: remembered for this project.
+    await userEvent.click(screen.getByRole("button", { name: /Update the instruction file/ }));
+    await userEvent.click(await screen.findByRole("button", { name: "Write" }));
+    await waitFor(() => expect(ipc.instructionsWrite).toHaveBeenCalledTimes(1));
+    expect(await screen.findByText(/From now on it follows every approval/)).toBeInTheDocument();
+    // Approving now rewrites it, with the new entry in the section.
+    await userEvent.click(within(screen.getByTestId("memory-row")).getByRole("button", { name: "Approve" }));
+    await waitFor(() => expect(ipc.instructionsWrite).toHaveBeenCalledTimes(2));
+    const [path, , content] = vi.mocked(ipc.instructionsWrite).mock.calls[1];
+    expect(path).toBe("/repo/AGENTS.md");
+    expect(content).toContain("- Deploys go out on Tuesdays only");
+    expect(await screen.findByText(/Updated the Team memory section in AGENTS.md/)).toBeInTheDocument();
+  }, 30_000);
+
+  it("leaves the instruction file alone on approval when that is switched off", async () => {
+    updateSettings({ memoryInstructionAutoUpdate: false, memoryInstructionFiles: { "/repo": "/repo/AGENTS.md" } });
+    seed({ data: { memoryId: "mem-1", text: "Deploys go out on Tuesdays only" } });
+    render(<MemoryPanel roots={["/repo"]} />);
+    await userEvent.click(within(await screen.findByTestId("memory-row")).getByRole("button", { name: "Approve" }));
+    await waitFor(() => expect(ipc.ledgerAppend).toHaveBeenCalled());
+    await new Promise((r) => setTimeout(r, 20));
+    expect(ipc.instructionsWrite).not.toHaveBeenCalled();
+  }, 30_000);
 });

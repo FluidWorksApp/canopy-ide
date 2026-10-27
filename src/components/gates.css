@@ -28,6 +28,16 @@
   font-size: 11px;
   color: var(--text-faint);
 }
+.gates-coverage summary {
+  cursor: pointer;
+}
+.gates-coverage-list {
+  margin: 6px 0 0;
+  padding-left: 16px;
+}
+.gates-coverage-list li {
+  margin: 2px 0;
+}
 .gates-root {
   display: inline-flex;
   gap: 6px;
@@ -250,6 +260,48 @@
 .aw-turn-irreversible {
   color: var(--danger);
   border-color: color-mix(in srgb, var(--danger) 50%, transparent);
+}
+
+/* Settings → Rules (RulesSettings.tsx) */
+.rules-settings {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.rules-settings-list,
+.rules-settings-rules {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+.rules-settings-project {
+  padding: 8px 0;
+  border-bottom: 1px solid var(--border);
+}
+.rules-settings-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.rules-settings-counts {
+  flex: 1;
+  font-size: 11px;
+  color: var(--text-dim);
+}
+.rules-settings-rules li {
+  font-size: 12px;
+  margin-top: 4px;
+  color: var(--text-dim);
+}
+.rules-settings-badge {
+  font-size: 10px;
+  padding: 1px 6px;
+  border-radius: var(--r-xs);
+  border: 1px solid var(--border);
+}
+.rules-settings-enforced {
+  color: var(--accent);
 }
 
 /* A turn's plain-language summary in the turn list (lensSteps.ts). */

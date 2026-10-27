@@ -34,7 +34,9 @@ test('guest retry preserves failed resume generation/context and records actor-b
  const retried=await requestMemberResume(f.db,'alice',f.workspace,{action:'resume',requestKey,planId:'expensive'});assert.equal(retried.generation,4);assert.equal(retried.phase,'attach-storage');assert.equal(retried.context.requesterId,'owner');assert.equal(retried.context.retryRequesterId,'alice');assert.equal(retried.context.retryRequestKey,memberResumeKey(base.id,'alice',requestKey));assert.equal(retried.context.instanceName,'original-partial-instance');assert.equal(retried.context.diskName,'retained-disk');assert.equal(retried.context.bootstrapReport,undefined);assert.equal(retried.context.phaseStartedAt,undefined);assert.equal(f.workspace.generation,4);assert.equal(f.operations.size,0);
  const updates=f.queries.filter(([sql])=>sql.startsWith('UPDATE workspace_operation')).length;await requestMemberResume(f.db,'alice',f.workspace,{action:'resume',requestKey});assert.equal(f.queries.filter(([sql])=>sql.startsWith('UPDATE workspace_operation')).length,updates);assert.equal(memberResumeKey(base.id,'alice',requestKey.toUpperCase()),memberResumeKey(base.id,'alice',requestKey));
 });
-test('a member cannot resume a workspace whose owner is past the credit cutoff, and is not shown the owner balance',async()=>{
+test('a member cannot resume a workspace whose owner is past the credit cutoff, and is not shown the owner balance',async t=>{
+ // Notify is the default; the start gate blocks only in enforce mode.
+ const previous=process.env.CANOPY_CREDIT_ENFORCEMENT;process.env.CANOPY_CREDIT_ENFORCEMENT='enforce';t.after(()=>{if(previous===undefined)delete process.env.CANOPY_CREDIT_ENFORCEMENT;else process.env.CANOPY_CREDIT_ENFORCEMENT=previous;});
  const {db,operations,workspace}=fixture({ownerBalance:'-10.000001'});
  await assert.rejects(requestMemberResume(db,'guest',workspace,{action:'resume',requestKey}),error=>error.code===402&&error.reason==='credit_exhausted'&&error.shared===true&&error.balanceUsd===null&&!/10\.00/.test(error.message.replace('−$10.00',''))&&/owner/.test(error.message));
  assert.equal(operations.size,0);assert.equal(workspace.generation,4);

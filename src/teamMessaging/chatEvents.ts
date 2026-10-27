@@ -1,6 +1,7 @@
 import type {ChatMessage} from './client';
 import {UUID,hasControl} from './messageSchema';
 import {parseCard,type Card} from './cardSchema';
+import {LIVE_VERSION,parseLiveEvent,type LiveEvent} from './liveEvents';
 
 /** Chat protocol version this client speaks.
  * - v1 (0.4.9 and earlier): plain messages.
@@ -8,8 +9,10 @@ import {parseCard,type Card} from './cardSchema';
  *   An event type a v2 client does not know shows as its fallback text, as a
  *   new (notifying) message.
  * - v3 (0.4.11): edit and delete events, `thread`, `mentions`/`mentionsAll`,
- *   read receipts and backfill. Edits and deletes go only to v3 devices. */
-export const CHAT_VERSION=3;
+ *   read receipts and backfill. Edits and deletes go only to v3 devices.
+ * - v4 (0.5.0): live session events (liveEvents.ts) — joining someone's
+ *   running agent session. They go only to v4 devices. */
+export const CHAT_VERSION=4;
 /** Lowest version that understands reactions. */
 export const REACTIONS_VERSION=2;
 /** Lowest version that understands edits, deletes, read receipts and backfill. */
@@ -21,13 +24,16 @@ export const EDITS_VERSION=3;
 export type ReactionEvent={type:'reaction';target:string;emoji:string;op:'add'|'remove'};
 export type EditEvent={type:'edit';target:string;text:string;mentions?:string[]};
 export type DeleteEvent={type:'delete';target:string};
-export type ChatEvent=ReactionEvent|EditEvent|DeleteEvent;
+export type ChatEvent=ReactionEvent|EditEvent|DeleteEvent|LiveEvent;
 /** A reply in a thread: `root` is the first message of the thread. */
 export type ThreadRef={root:string};
 /** The fields v2 and v3 add to a chat message. */
 export type ChatExtensions={v?:number;event?:ChatEvent;thread?:ThreadRef;mentions?:string[];mentionsAll?:true;card?:Card};
 /** The lowest chat version a device needs to receive an event of this type. */
-export const eventVersion=(event:ChatEvent)=>event.type==='reaction'?REACTIONS_VERSION:EDITS_VERSION;
+export const eventVersion=(event:ChatEvent)=>event.type==='reaction'?REACTIONS_VERSION:event.type==='live'?LIVE_VERSION:EDITS_VERSION;
+/** A live session event: traffic between a session's owner and the teammates
+ *  watching it, never a change to a message (session.ts routes it apart). */
+export const isLiveEvent=(event:ChatEvent|undefined):event is LiveEvent=>event?.type==='live';
 
 /** How far back an author may backfill a message, and how far ahead of its
  * envelope a backfilled message may be dated. */
@@ -68,6 +74,7 @@ export function parseEvent(value:unknown):ChatEvent|undefined{
   const mentions=parseMentions(e.mentions);return mentions?{type:'edit',target:e.target,text:e.text,mentions}:undefined;
  }
  if(e.type==='delete')return validTarget(e.target)&&exact(e,['type','target'])?{type:'delete',target:e.target}:undefined;
+ if(e.type==='live')return parseLiveEvent(e);
  return undefined;
 }
 export function parseThread(value:unknown):ThreadRef|undefined{

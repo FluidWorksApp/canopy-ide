@@ -9,6 +9,9 @@ import {requestOperation} from './lifecycle.mjs';
 // plane schema (canopy-website database/ORDER) already applied.
 const connectionString=process.env.CANOPY_SYNTHETIC_DATABASE_URL;
 const enforce={CANOPY_CREDIT_ENFORCEMENT:'enforce'};
+// Notify is the default; this exercises the enforce flow (requestOperation and
+// grantCredit read process.env).
+process.env.CANOPY_CREDIT_ENFORCEMENT='enforce';
 
 test('real Postgres credit enforcement: notices once per crossing, concurrent debits at the cutoff, sweep, start gate, grants and requests',{skip:!connectionString},async()=>{
  const url=new URL(connectionString);assert.equal(url.hostname,'127.0.0.1');assert.equal(url.port,'55461');assert.equal(url.username,'canopy_validation');

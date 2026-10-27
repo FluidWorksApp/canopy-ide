@@ -31,6 +31,7 @@ import {
 } from "./projects";
 import { getSettings } from "./settings";
 import { StructuredRunCollector, type StructuredDialect } from "./structuredEvents";
+import { noteContextWindows } from "./contextWindow";
 import { BRAIN_DISALLOWED_TOOLS, brainArgs } from "./structuredRunners";
 
 /** Which feature is asking. Open-ended (`string & {}`) so a new feature needs
@@ -326,6 +327,7 @@ export async function askBrain<T = unknown>(req: BrainRequest<T>): Promise<Brain
   // fail — once, and without metering a call that never started.
   if (cwdMissing) return askBrain<T>({ ...req, cwd: "" });
   const s = collector?.summary;
+  noteContextWindows(s?.contextWindows);
   recordBrainCall({
     feature: req.feature,
     ts: started,

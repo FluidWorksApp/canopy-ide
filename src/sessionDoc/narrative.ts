@@ -29,6 +29,32 @@ export interface CachedNarrative {
   narrative: SessionNarrative;
   turnKey: string;
   at: number;
+  /** How many turns the session had when this was written — what a live
+   *  document counts against to decide whether it is time to re-ask. */
+  turns?: number;
+}
+
+/** A running session's document re-reads its facts after every turn, but
+ *  asks the brain for a fresh summary at most once per this many turns… */
+export const LIVE_NARRATIVE_EVERY_TURNS = 3;
+/** …or once a turn has ended this long after the last summary. */
+export const LIVE_NARRATIVE_EVERY_MS = 10 * 60 * 1000;
+
+/** Whether `hit` should be replaced by a fresh brain reading of `doc`. A
+ *  past session's summary is due whenever a newer turn exists. A running
+ *  session's moves on every turn, so it is due only every few turns or
+ *  minutes; in between the cached one shows, marked as written earlier. */
+export function narrativeDue(
+  hit: CachedNarrative | null,
+  doc: Pick<SessionDocument, "lastTurnKey" | "turns">,
+  opts: { live?: boolean; now?: number } = {},
+): boolean {
+  if (!hit) return true;
+  if (hit.turnKey === doc.lastTurnKey) return false;
+  if (!opts.live) return true;
+  const since = hit.turns == null ? LIVE_NARRATIVE_EVERY_TURNS : doc.turns.length - hit.turns;
+  const age = (opts.now ?? Date.now()) - hit.at;
+  return since >= LIVE_NARRATIVE_EVERY_TURNS || age >= LIVE_NARRATIVE_EVERY_MS;
 }
 
 // ------------------------------------------------------------ validation
@@ -135,7 +161,14 @@ export function cachedNarrative(sessionId: string): CachedNarrative | null {
   const hit = readAll()[sessionId];
   if (!hit || typeof hit.turnKey !== "string") return null;
   const narrative = validateNarrative(hit.narrative);
-  return narrative ? { narrative, turnKey: hit.turnKey, at: Number(hit.at) || 0 } : null;
+  return narrative
+    ? {
+        narrative,
+        turnKey: hit.turnKey,
+        at: Number(hit.at) || 0,
+        ...(typeof hit.turns === "number" ? { turns: hit.turns } : {}),
+      }
+    : null;
 }
 
 export function storeNarrative(sessionId: string, entry: CachedNarrative): void {
@@ -195,7 +228,12 @@ export function writeNarrative(
   })
     .then((answer) => {
       if (answer.ok && answer.value) {
-        storeNarrative(doc.sessionId, { narrative: answer.value, turnKey: doc.lastTurnKey, at: Date.now() });
+        storeNarrative(doc.sessionId, {
+          narrative: answer.value,
+          turnKey: doc.lastTurnKey,
+          at: Date.now(),
+          turns: doc.turns.length,
+        });
       }
       return answer;
     })

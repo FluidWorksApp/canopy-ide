@@ -22,6 +22,7 @@ import type { Attention, LifeState } from "../../shared/agentLife";
 import { ashFor } from "../ash";
 import { markRestored } from "../restorable";
 import { openSessionDoc } from "../sessionDoc/events";
+import { SubagentTree } from "./SubagentTree";
 import {
   lastHumanPrompt,
   useAgentSessions,
@@ -409,6 +410,15 @@ export function AgentsView({
         <p className={`agv-task ${task ? "" : "agv-task-none"}`}>
           {task ?? "No prompt recorded for this session yet."}
         </p>
+
+        {/* The subagents it spawned, live: a count that opens into the list. */}
+        {agent?.id && digest?.session_id && (
+          <SubagentTree
+            compact
+            live={life.state === "working"}
+            activityKey={{ agent: agent.id, sessionId: digest.session_id, cwd: s.cwd, profile: digest.profile ?? null }}
+          />
+        )}
 
         {/* Numbers on one line, actions on the other. They used to share a
             wrapping row, so a session with tokens and a cost pushed its own

@@ -4,12 +4,17 @@
 // on the computer showing the IDE. Same file format and same key as
 // src-tauri/src/gates.rs (`policy_path`, `grant_once`); a test pins the hash.
 import {mkdir,readFile,writeFile,rename,realpath} from 'node:fs/promises';
-import {createHash,randomUUID} from 'node:crypto';
+import {createHash,createHmac,randomBytes,randomUUID} from 'node:crypto';
 import path from 'node:path';
 
 export const APPROVAL_TTL_MS=10*60*1000;
 const GATE_TYPES=new Set(['deny-path-write','deny-command','require-confirm','protect-tests','package-allowlist','package-denylist','egress-allowlist']);
 export const rootHash=canonical=>createHash('sha256').update(canonical).digest('hex').slice(0,32);
+// Approve-once tokens are signed with a key the hook verifies (gates.rs
+// `grant_once`/`consume_once`): same message, same key file, so a token minted
+// here opens exactly what the desktop's would and a file dropped into the
+// approvals folder by anything else opens nothing.
+export const tokenMac=(secret,key,expiresAt)=>createHmac('sha256',secret).update(`canopy-approve-once\n${key}\n${expiresAt}`).digest('hex');
 
 async function atomic(file,data){
  await mkdir(path.dirname(file),{recursive:true,mode:0o700});
@@ -18,7 +23,13 @@ async function atomic(file,data){
 }
 
 export class WorkspaceGates{
- constructor({home,run}){this.home=home;this.run=run;this.dir=path.join(home,'.canopy','policy');}
+ constructor({home,run}){this.home=home;this.run=run;this.dir=path.join(home,'.canopy','policy');this.keyFile=path.join(home,'.canopy','keys','gate-approval.key');}
+ async signingKey(){
+  try{const key=Buffer.from((await readFile(this.keyFile,'utf8')).trim(),'hex');if(key.length>=32)return key;}catch(e){if(e.code!=='ENOENT')throw e;}
+  await mkdir(path.dirname(this.keyFile),{recursive:true,mode:0o700});
+  try{await writeFile(this.keyFile,randomBytes(32).toString('hex'),{mode:0o600,flag:'wx'});}catch(e){if(e.code!=='EEXIST')throw e;}
+  return Buffer.from((await readFile(this.keyFile,'utf8')).trim(),'hex');
+ }
  // The ledger's canonical root: the parent of the repo's common git dir,
  // exactly as `ledger::canonical_root` computes it on the desktop.
  async canonicalRoot(cwd){
@@ -40,7 +51,8 @@ export class WorkspaceGates{
  async read(cwd){const {file}=await this.policyFile(cwd);try{return JSON.parse(await readFile(file,'utf8'));}catch{return null;}}
  async allowOnce(key){
   if(!/^[0-9a-f]{32}$/.test(String(key)))throw Error('Not an approval key');
-  await atomic(path.join(this.dir,'approvals',key+'.json'),JSON.stringify({expiresAt:Date.now()+APPROVAL_TTL_MS}));
+  const expiresAt=Date.now()+APPROVAL_TTL_MS;
+  await atomic(path.join(this.dir,'approvals',key+'.json'),JSON.stringify({expiresAt,mac:tokenMac(await this.signingKey(),key,expiresAt)}));
  }
  invoke(command,args){
   if(command==='gates_policy_write')return this.write(args.cwd,args.policy);

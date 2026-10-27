@@ -15,8 +15,9 @@ const COPY={
   lead:`Your Canopy balance reached ${formatUsd(balance)}, past the ${cutoff} limit, so we stopped your running workspaces and saved them.`,
   next:`Your files, snapshots, settings and account are kept; nothing was deleted. Workspaces can start again once at least ${formatUsd(amountToRestoreUsd(balance))} of credit is added.`}),
 };
-function moreCredit(supportEmail){
- return `Adding funds isn’t available during the preview. To get more credit, open Canopy, go to Settings → Account and choose Request more credit${supportEmail?`, or email ${supportEmail}`:''}.`;
+function moreCredit(supportEmail,addFunds){
+ if(addFunds)return `Open Canopy, go to Settings → Account and choose Add funds. Stripe emails your receipt, and the balance updates within a minute.${supportEmail?` Questions: ${supportEmail}.`:''}`;
+ return `To get more credit, open Canopy, go to Settings → Account and choose Request more credit${supportEmail?`, or email ${supportEmail}`:''}.`;
 }
 function page({subject,heading,paragraphs,button,footer}){
  const body=paragraphs.map(([text,muted])=>`<p style="font-size:${muted?14:16}px;line-height:1.7;margin:0 0 16px;${muted?'color:#555f4e;':''}">${text}</p>`).join('');
@@ -26,9 +27,9 @@ function page({subject,heading,paragraphs,button,footer}){
 const safeUrl=url=>{const link=new URL(url);if(!['http:','https:'].includes(link.protocol)||link.username||link.password)throw Error('Invalid account URL');return link.href;};
 
 /** Reminder for one notice level: low | zero | final | paused. */
-export function creditNoticeEmail({level,balanceUsd,accountUrl='https://canopyide.dev/workspaces#history',supportEmail}){
+export function creditNoticeEmail({level,balanceUsd,accountUrl='https://canopyide.dev/workspaces#history',supportEmail,addFunds=false}){
  const copy=COPY[level];if(!copy)throw Error('Invalid credit notice level');
- const {subject,heading,lead,next}=copy(balanceUsd);const href=safeUrl(accountUrl);const how=moreCredit(supportEmail);
+ const {subject,heading,lead,next}=copy(balanceUsd);const href=safeUrl(accountUrl);const how=moreCredit(supportEmail,addFunds);
  const footer='You’re receiving this because your Canopy account balance crossed a reminder threshold. Each reminder is sent once per crossing.';
  const text=`CANOPY\n\n${heading}\n\n${lead}\n\nBalance: ${formatUsd(balanceUsd)}\nWorkspaces pause at: ${cutoff}\n\nWhat happens next\n${next}\n\nHow to get more credit\n${how}\n\nSee your usage:\n${href}\n\nThe Canopy team\nhttps://canopyide.dev\n\n${footer}\n`;
  const html=page({subject,heading,paragraphs:[[escapeHtml(lead)],[`Balance: <strong>${escapeHtml(formatUsd(balanceUsd))}</strong><br>Workspaces pause at: <strong>${escapeHtml(cutoff)}</strong>`],[`<strong>What happens next.</strong> ${escapeHtml(next)}`],[`<strong>How to get more credit.</strong> ${escapeHtml(how)}`,true]],button:{href,label:'See your usage'},footer:escapeHtml(footer)});

@@ -28,7 +28,16 @@ export class ShareError extends Error {}
 
 /** What the entry points open the share dialog with. */
 export type ShareRequest =
-  | { kind: "share"; card: Card; warning?: string; /** A teammate's account id: opens addressed to them, and mentions them. */ to?: string }
+  | {
+      kind: "share";
+      card: Card;
+      warning?: string;
+      /** Told where the card went once it is sent: a live-session card's
+       *  owner lets that conversation's people join (src/liveSession). */
+      onSent?: (team: string, peer: string | null) => void;
+      /** A teammate's account id: opens addressed to them, and mentions them. */
+      to?: string;
+    }
   | { kind: "review"; card: Omit<ReviewRequestCard, "reviewers"> }
   | { kind: "error"; message: string };
 

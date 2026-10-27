@@ -333,3 +333,19 @@ describe("agent messages", () => {
     expect(screen.queryByText(/View all/)).toBeNull();
   });
 });
+
+describe("restorable sessions", () => {
+  it("open as a session document from the side panel, like the Agents page", async () => {
+    const { OPEN_SESSION_DOC_EVENT } = await import("../sessionDoc/events");
+    seams.digests = [
+      digest({ session_id: "past-1", surface: "99", state: "ended", prompts: ["Add a login page"] }),
+    ];
+    const opened: unknown[] = [];
+    const listen = (e: Event) => opened.push((e as CustomEvent).detail);
+    window.addEventListener(OPEN_SESSION_DOC_EVENT, listen);
+    panel({ visible: true, stats: [] });
+    await userEvent.click(await screen.findByTitle("Read this session as a document and hand it off"));
+    window.removeEventListener(OPEN_SESSION_DOC_EVENT, listen);
+    expect(opened[0]).toMatchObject({ kind: "session", sessionId: "past-1", agent: "claude", cwd: "/repo" });
+  });
+});

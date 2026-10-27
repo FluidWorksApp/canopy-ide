@@ -1025,6 +1025,14 @@ async fn ui_op(State(state): State<AgentState>, headers: HeaderMap, body: Bytes)
             Err(error) => reply(400, error.to_string()),
         },
         "vault" => unavailable("laptop-only", "The vault stays on the laptop."),
+        // Teams chat is sent by the user's own device, which holds their chat
+        // keys: the workspace's device never speaks as a person.
+        "team_people" | "team_send" => unavailable(
+            "laptop-only",
+            "Teams chat is posted from the user's own Canopy app, which holds their chat keys; \
+             an agent in a cloud workspace cannot post as the user. Tell the user what to send \
+             and to whom, or use canopy_mesh_submit for work.",
+        ),
         "open_project" => unavailable(
             "no-ide",
             "open_project needs the Canopy IDE, and none is attached to this cloud workspace.",

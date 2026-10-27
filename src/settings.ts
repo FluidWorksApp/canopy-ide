@@ -549,6 +549,12 @@ export interface Settings {
    *  (web pages, the browser, tickets, PR comments): "quarantine" files them
    *  behind an explicit approval, "skip" never extracts from such a session. */
   memoryQuarantine: "quarantine" | "skip";
+  /** Rewrite the instruction file's generated "Team memory" section whenever
+   *  memory is approved or changes (memoryInstructionSync.ts). null = on for
+   *  a project once someone has used "Update the instruction file" there. */
+  memoryInstructionAutoUpdate: boolean | null;
+  /** Per ledger root, the instruction file that section was last written to. */
+  memoryInstructionFiles: Record<string, string>;
   /** Show attention items outside the notification centre: corner cards,
    * companion notices, native banners, and the remote companion channel. Off
    * is a presentation preference only — every item stays in the shared queue
@@ -768,6 +774,8 @@ export const DEFAULTS: Settings = {
   memoryFactExpiryDays: 90,
   memoryDecisionExpiryDays: 180,
   memoryQuarantine: "quarantine",
+  memoryInstructionAutoUpdate: null,
+  memoryInstructionFiles: {},
   notificationPopupsEnabled: true,
   teamMessageNotifications: true,
   teamMessagePreviews: true,
@@ -965,6 +973,9 @@ export function getSettings(): Settings {
       value[key] = Number.isFinite(days) && days >= 1 ? Math.min(Math.round(days), 3650) : DEFAULTS[key];
     }
     if (value.memoryQuarantine !== "skip") value.memoryQuarantine = "quarantine";
+    if (typeof value.memoryInstructionAutoUpdate !== "boolean") value.memoryInstructionAutoUpdate = null;
+    if (!value.memoryInstructionFiles || typeof value.memoryInstructionFiles !== "object" || Array.isArray(value.memoryInstructionFiles))
+      value.memoryInstructionFiles = {};
     if (typeof value.brainSessionTitles !== "boolean") value.brainSessionTitles = true;
     if (
       !Number.isFinite(value.reviewSliceBudgetLines) ||

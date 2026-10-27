@@ -3,6 +3,7 @@ import {createServer} from 'node:http';
 import {webcrypto} from 'node:crypto';
 import {afterEach,beforeAll,expect,it,vi} from 'vitest';
 import {PeerClient,type ChatMessage,type Device} from './client';
+import {CHAT_VERSION} from './chatEvents';
 import {createIdentity,type Envelope} from './crypto';
 import type {MessageOutbox,PendingEnvelope} from './store';
 import {registrationProof,relayEnvelope} from '../../packages/control-plane/lib/peer-messaging.mjs';
@@ -91,8 +92,8 @@ it('real HTTP relay carries v3 replies, mentions, edits, deletes, read receipts 
   await bob.sendReadReceipt(root.id,'alice');await eventually(()=>reads.includes(root.id));
   const reply=await alice.send('Synthetic reply SECRET-REPLY',null,{id:crypto.randomUUID(),created:Date.now()},[],{thread:{root:root.id},mentions:['bob'],mentionsAll:true});
   // Alice learns Bob's version from his read receipt; events and backfill need it.
-  const edit:ChatMessage={id:crypto.randomUUID(),sender:'alice',recipient:null,text:'✎ edited: SECRET-EDIT',created:Date.now(),v:3,event:{type:'edit',target:root.id,text:'SECRET-EDIT'}};
-  const del:ChatMessage={id:crypto.randomUUID(),sender:'alice',recipient:null,text:'🗑 Deleted a message',created:Date.now(),v:3,event:{type:'delete',target:reply.id}};
+  const edit:ChatMessage={id:crypto.randomUUID(),sender:'alice',recipient:null,text:'✎ edited: SECRET-EDIT',created:Date.now(),v:CHAT_VERSION,event:{type:'edit',target:root.id,text:'SECRET-EDIT'}};
+  const del:ChatMessage={id:crypto.randomUUID(),sender:'alice',recipient:null,text:'🗑 Deleted a message',created:Date.now(),v:CHAT_VERSION,event:{type:'delete',target:reply.id}};
   expect(await alice.sendEvent(edit)).toMatchObject({devices:1});expect(await alice.sendEvent(del)).toMatchObject({devices:1});
   const old:ChatMessage={id:crypto.randomUUID(),sender:'alice',recipient:'bob',text:'SECRET-BACKFILL',created:Date.now()-3_600_000,v:3};
   expect(await alice.backfill(ids.bob,old)).toBe(true);

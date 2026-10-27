@@ -122,7 +122,7 @@ test('a session link sits under its workspace link',async()=>{
  assert.match(link.url,/^https:\/\/canopyide\.dev\/alice\/api-server\/s\/fix-login-bug-[1-9][0-9]$/);
 });
 test('unknown actions and kinds are refused',async()=>{
- await assert.rejects(()=>readableLinkAction(dbWith(()=>[]),user,{action:'list',origin}),e=>e.code===400);
+ await assert.rejects(()=>readableLinkAction(dbWith(()=>[]),user,{action:'frobnicate',origin}),e=>e.code===400);
  await assert.rejects(()=>readableLinkAction(dbWith(()=>[]),user,{action:'ensure',kind:'file',origin}),e=>e.code===400);
 });
 test('a team admin can revoke a workspace link in the team namespace',async()=>{
@@ -130,4 +130,36 @@ test('a team admin can revoke a workspace link in the team namespace',async()=>{
  const db=role=>dbWith(sql=>sql.includes('FROM readable_link l JOIN link_namespace')?[row]:sql.startsWith('SELECT owner_id,organization_id FROM workspace')?[{owner_id:'carol',organization_id:null}]:sql.includes('FROM workspace_member')?[{role:'viewer',permissions:{projects:'all'}}]:sql.startsWith('SELECT name,owner_id FROM workspace')?[{name:'API',owner_id:'carol'}]:sql.includes('FROM active_team_member m JOIN team t')?[{role,name:'Platform'}]:[]);
  await assert.rejects(()=>readableLinkAction(db('member'),user,{action:'revoke',url:'https://canopyide.dev/platform/api',origin}),e=>e.code===403);
  assert.deepEqual(await readableLinkAction(db('admin'),user,{action:'revoke',url:'https://canopyide.dev/platform/api',origin}),{revoked:true});
+});
+test('a resolved link says which team holds it and when it was last active, never contents',async()=>{
+ const row={id:'l3',namespace:'platform',path:'api',kind:'workspace',target:{workspaceId:'ws-1'},created_by:'bob',created_at:new Date('2026-10-01T00:00:00Z'),revoked_at:null,namespace_team:team};
+ const db=connected=>dbWith(sql=>sql.includes('FROM readable_link l JOIN link_namespace')?[row]:sql.startsWith('SELECT owner_id,organization_id FROM workspace')?[{owner_id:'alice',organization_id:null}]:sql.startsWith('SELECT name,owner_id FROM workspace')?[{name:'API',owner_id:'alice'}]:sql.startsWith('SELECT name FROM team')?[{name:'Platform'}]:sql.startsWith('SELECT last_connected_at FROM workspace')?[{last_connected_at:connected}]:[]);
+ const opened=(await readableLinkAction(db(new Date('2026-10-20T12:00:00Z')),user,{action:'resolve',url:'https://canopyide.dev/platform/api',origin})).link;
+ assert.deepEqual(opened.about,{teamName:'Platform',activity:'opened',activityAt:'2026-10-20T12:00:00.000Z'});
+ const fresh=(await readableLinkAction(db(null),user,{action:'resolve',url:'https://canopyide.dev/platform/api',origin})).link;
+ assert.deepEqual(fresh.about,{teamName:'Platform',activity:'shared',activityAt:'2026-10-01T00:00:00.000Z'});
+ const chat=dbWith(sql=>sql.includes('FROM readable_link l JOIN link_namespace')?[linkRow({target:{teamId:team,messageId:message,participants:null},created_at:'2026-10-02T00:00:00Z'})]:sql.includes('FROM active_team_member m JOIN team t')?[{role:'member',name:'Platform'}]:[]);
+ const message_=(await readableLinkAction(chat,user,{action:'resolve',url:'https://canopyide.dev/platform/t/general/quiet-otter-41',origin})).link;
+ assert.deepEqual(message_.about,{teamName:'Platform',activity:'shared',activityAt:'2026-10-02T00:00:00.000Z'});
+ assert.equal(JSON.stringify(message_).includes('body'),false);
+});
+test('list returns the links a person manages, re-checked, with who may revoke',async()=>{
+ const rows=[
+  {id:'a',namespace:'alice',path:'api-server',kind:'workspace',target:{workspaceId:'ws-1'},created_by:'alice',created_at:'2026-10-03T00:00:00Z',revoked_at:null,namespace_team:null},
+  {id:'b',namespace:'platform',path:'t/general/quiet-otter-41',kind:'message',target:{teamId:team,messageId:message,participants:null},created_by:'bob',created_at:'2026-10-02T00:00:00Z',revoked_at:null,namespace_team:team},
+  // A team link to a workspace Alice can no longer open is left out.
+  {id:'c',namespace:'platform',path:'gone',kind:'workspace',target:{workspaceId:'ws-gone'},created_by:'bob',created_at:'2026-10-01T00:00:00Z',revoked_at:null,namespace_team:team},
+ ];
+ const db=role=>dbWith((sql,args)=>sql.includes('FROM readable_link l JOIN link_namespace n ON n.handle=l.namespace\n WHERE l.revoked_at IS NULL')?rows
+  :sql.startsWith('SELECT owner_id,organization_id FROM workspace')?(args[0]==='ws-1'?[{owner_id:'alice',organization_id:null}]:[])
+  :sql.startsWith('SELECT name,owner_id FROM workspace')?[{name:'API Server',owner_id:'alice'}]
+  :sql.includes('FROM active_team_member m JOIN team t')?[{role,name:'Platform'}]
+  :sql.startsWith('SELECT last_connected_at FROM workspace')?[{last_connected_at:null}]:[]);
+ const listed=(await readableLinkAction(db('admin'),user,{action:'list',origin})).links;
+ assert.deepEqual(listed.map(l=>[l.url,l.kind,l.mine,l.canRevoke]),[['https://canopyide.dev/alice/api-server','workspace',true,true],['https://canopyide.dev/platform/t/general/quiet-otter-41','message',false,true]]);
+ assert.equal(listed[0].target.name,'API Server');assert.equal(listed[1].about.teamName,'Platform');assert.equal(listed[1].createdAt,'2026-10-02T00:00:00.000Z');
+ const asMember=(await readableLinkAction(db('member'),user,{action:'list',origin})).links;
+ assert.deepEqual(asMember.map(l=>l.canRevoke),[true,false]);
+ const query=db('admin');await readableLinkAction(query,user,{action:'list',origin});
+ const sql=query.calls[0].sql;assert.match(sql,/l\.revoked_at IS NULL/);assert.match(sql,/role IN \('owner','admin'\)/);assert.match(sql,/owner_id=\$1/);assert.deepEqual(query.calls[0].args,['alice',200]);
 });

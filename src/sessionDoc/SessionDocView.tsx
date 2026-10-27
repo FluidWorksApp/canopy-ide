@@ -13,6 +13,8 @@
 // anything that looks like a credential.
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { askBrain } from "../brainCall";
+import { onAgentTurnEnd } from "../agentTurns";
+import { watchPtyBirths } from "../ptyBirth";
 import { appendLedger } from "../ledger";
 import { getSettings } from "../settings";
 import { openShareDialog } from "../shareCards";
@@ -33,7 +35,10 @@ import {
   type LaunchResult,
 } from "./launcher";
 import { loadSessionDoc, type LoadedSessionDoc, type SessionDocSource } from "./load";
-import { brainDeclined, cachedNarrative, writeNarrative, type SessionNarrative } from "./narrative";
+import { brainDeclined, cachedNarrative, narrativeDue, writeNarrative, type SessionNarrative } from "./narrative";
+import { LiveRoomPanel } from "../liveSession/LiveRoomPanel";
+import { LiveSessionView } from "../liveSession/LiveSessionView";
+import { liveRooms, seedTurns } from "../liveSession/live";
 import "./sessionDoc.css";
 
 /** Everything the view reaches outside itself, injectable for tests. */
@@ -41,27 +46,35 @@ export interface SessionDocDeps {
   load(src: SessionDocSource): Promise<LoadedSessionDoc>;
   ask: typeof askBrain;
   append: typeof appendLedger;
-  share(card: Awaited<ReturnType<typeof buildHandoffCard>>): void;
+  share(card: Awaited<ReturnType<typeof buildHandoffCard>>, onSent?: (team: string, peer: string | null) => void): void;
   buildCard: typeof buildHandoffCard;
   copy(text: string): Promise<void>;
   launch(req: LaunchRequest): Promise<LaunchResult>;
   agents(): Promise<InstalledAgent[]>;
   projects(): { name: string; dirs: string[] }[];
   autoSummary(): boolean;
+  /** Calls back with the session id whenever an agent turn ends. */
+  onTurnEnd(cb: (sessionId: string) => void): () => void;
 }
 
 const defaultDeps: SessionDocDeps = {
   load: (src) => loadSessionDoc(src),
   ask: askBrain,
   append: appendLedger,
-  share: (card) => openShareDialog({ kind: "share", card }),
+  share: (card, onSent) => openShareDialog({ kind: "share", card, ...(onSent ? { onSent } : {}) }),
   buildCard: buildHandoffCard,
   copy: (text) => navigator.clipboard.writeText(text),
   launch: launchAgent,
   agents: installedAgents,
   projects: launchProjects,
   autoSummary: () => getSettings().sessionDocAutoSummary,
+  onTurnEnd: (cb) => onAgentTurnEnd((turn) => cb(turn.sessionId)),
 };
+
+/** A running session's document also re-reads its facts this often, for CLIs
+ *  whose turns Canopy cannot see end (no hooks). Facts only: the summary
+ *  keeps to its own pace (narrativeDue). */
+const LIVE_RELOAD_MS = 60_000;
 
 /** Where brain calls run. In a cloud workspace the session's directory is on
  *  the workspace host, not on the computer the brain runs on. */
@@ -292,7 +305,13 @@ function HandOffPanel({
           onClick={() =>
             void deps
               .buildCard({ title, agent: doc.agent, sessionId: doc.sessionId, markdown, cwd: doc.cwd, repo: request.repo })
-              .then((card) => deps.share(card))
+              .then((card) => {
+                // A running session someone already opened to teammates: the
+                // person it goes to can join it live as well as take it over.
+                const room = request.live ? liveRooms.forSession(doc.sessionId) : undefined;
+                if (room) deps.share({ ...card, room: room.id }, (team, peer) => liveRooms.allow(room.id, { team, peer }));
+                else deps.share(card);
+              })
           }
         >
           Send to a teammate…
@@ -328,10 +347,27 @@ export function SessionDocView({
   const [narrative, setNarrative] = useState<NarrativeState>({ phase: "idle" });
   const [handingOff, setHandingOff] = useState(false);
   const abort = useRef<AbortController | null>(null);
+  // Bumped when the running session ends a turn: the document re-reads its
+  // facts in place, keeping what it shows until the new reading lands.
+  const [reload, setReload] = useState(0);
+  useEffect(() => {
+    if (!request.live) return;
+    const off = deps.onTurnEnd((sid) => sid === request.sessionId && setReload((n) => n + 1));
+    const timer = window.setInterval(() => setReload((n) => n + 1), LIVE_RELOAD_MS);
+    return () => {
+      off();
+      window.clearInterval(timer);
+    };
+  }, [deps, request.live, request.sessionId]);
+  const firstLoad = useRef(true);
+  useEffect(() => {
+    firstLoad.current = true;
+  }, [deps, request]);
 
   useEffect(() => {
     let live = true;
-    setLoaded(null);
+    if (firstLoad.current) setLoaded(null);
+    firstLoad.current = false;
     void deps
       .load({
         sessionId: request.sessionId,
@@ -346,7 +382,7 @@ export function SessionDocView({
     return () => {
       live = false;
     };
-  }, [deps, request]);
+  }, [deps, request, reload]);
 
   const summarize = useCallback(
     async (doc: SessionDocument, previous?: SessionNarrative) => {
@@ -364,8 +400,13 @@ export function SessionDocView({
 
   // The cached reading when it is for this turn; otherwise a fresh one —
   // automatically when the setting allows, with the stale one shown meanwhile.
+  // A running session re-reads its facts every turn but asks the brain again
+  // only every few turns or minutes (narrativeDue); in between, the cached
+  // reading shows marked as written earlier. Never a second call while one
+  // is still being written.
+  const writing = narrative.phase === "writing";
   useEffect(() => {
-    if (!loaded) return;
+    if (!loaded || writing) return;
     const doc = loaded.doc;
     const hit = cachedNarrative(doc.sessionId);
     if (hit && hit.turnKey === doc.lastTurnKey) {
@@ -373,9 +414,12 @@ export function SessionDocView({
       return;
     }
     const nothingToRead = !doc.turns.length && !doc.transcript.length && !doc.goal.text;
-    if (deps.autoSummary() && !nothingToRead) void summarize(doc, hit?.narrative);
+    const due = narrativeDue(hit, doc, { live: request.live });
+    if (deps.autoSummary() && !nothingToRead && due) void summarize(doc, hit?.narrative);
     else if (hit) setNarrative({ phase: "ready", narrative: hit.narrative, stale: true, at: hit.at });
-  }, [loaded, deps, summarize]);
+    // `writing` is read, not watched: a finished write must not re-run this.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [loaded, deps, summarize, request.live]);
 
   const doc = loaded?.doc;
   const shown =
@@ -427,6 +471,19 @@ export function SessionDocView({
               <HandOffPanel doc={doc} narrative={shown} request={request} branch={loaded?.digest?.branch} deps={deps} />
             )}
 
+            {request.live && (
+              <LiveRoomPanel
+                sessionId={doc.sessionId}
+                title={doc.title}
+                agent={request.agent}
+                cwd={doc.cwd}
+                repo={request.repo}
+                ptyId={request.ptyId}
+                turns={() => seedTurns(doc.turns)}
+                deliver={request.messageAgent}
+              />
+            )}
+
             <section className="sdoc-summary" aria-label="Summary" aria-busy={narrative.phase === "writing"}>
               <div className="sdoc-section-head">
                 <h3>Summary</h3>
@@ -444,7 +501,11 @@ export function SessionDocView({
               {narrative.phase === "writing" && !shown && <p className="sdoc-empty">Reading the session…</p>}
               {narrative.phase === "declined" && <p className="sdoc-state">{narrative.message}</p>}
               {narrative.phase === "ready" && narrative.stale && (
-                <p className="sdoc-state">Written before the latest turn — press Refresh to bring it up to date.</p>
+                <p className="sdoc-state">
+                  {request.live && deps.autoSummary()
+                    ? `Written at ${clock(narrative.at)}, before the latest turn — it is rewritten every few turns while the session runs, or press Refresh.`
+                    : "Written before the latest turn — press Refresh to bring it up to date."}
+                </p>
               )}
               {narrative.phase === "idle" && !shown && (
                 <p className="sdoc-empty">No summary yet. “Write summary” asks your brain to read the session.</p>
@@ -476,7 +537,11 @@ export function SessionDocView({
                 Timeline <span className="badge">{doc.turns.length}</span>
               </h3>
               {doc.turns.length === 0 ? (
-                <p className="sdoc-empty">No turns recorded — this agent's CLI doesn't report turns to Canopy.</p>
+                <p className="sdoc-empty">
+                  {loaded.missing.includes("turn timeline")
+                    ? "The turn timeline couldn't be read."
+                    : "No turns recorded — this agent's CLI doesn't report turns to Canopy."}
+                </p>
               ) : (
                 <ol className="sdoc-turns">
                   {doc.turns.map((t) => (
@@ -600,7 +665,15 @@ export function SessionDocView({
             )}
 
             <footer className="sdoc-foot">
-              {loaded.missing.length > 0 && <span>Not available here: {loaded.missing.join(", ")}.</span>}
+              {loaded.missing.length > 0 &&
+                (loaded.hostOutdated ? (
+                  <span>
+                    Couldn't read {loaded.missing.join(", ")}: this cloud workspace runs an older Canopy host. Restart
+                    or update the workspace to see them.
+                  </span>
+                ) : (
+                  <span>Couldn't read: {loaded.missing.join(", ")}.</span>
+                ))}
               {cloud && (
                 <button
                   type="button"
@@ -626,10 +699,13 @@ export function SessionDocView({
 export function ReceivedHandoffView({
   request,
   onClose,
+  onJoin,
   deps = defaultDeps,
 }: {
   request: Extract<SessionDocRequest, { kind: "received" }>;
   onClose: () => void;
+  /** The sender's session is still running and open to join. */
+  onJoin?: () => void;
   deps?: Pick<SessionDocDeps, "launch" | "agents" | "projects" | "copy">;
 }) {
   useEscape(onClose);
@@ -647,6 +723,11 @@ export function ReceivedHandoffView({
             </div>
           </div>
           <div className="sdoc-head-actions">
+            {onJoin && (
+              <Button size="sm" onClick={onJoin} title="Watch the session as it runs, with whoever else is watching">
+                Join live
+              </Button>
+            )}
             <Button size="sm" variant="ghost" onClick={onClose} aria-label="Close">
               Close
             </Button>
@@ -682,6 +763,8 @@ export function ReceivedHandoffView({
  *  point (mounted once by App). */
 export function SessionDocHost() {
   const [request, setRequest] = useState<SessionDocRequest | null>(null);
+  // Terminal start times, for finding the session of a CLI with no hooks.
+  useEffect(() => watchPtyBirths(), []);
   useEffect(() => {
     const open = (e: Event) => {
       const d = (e as CustomEvent<SessionDocRequest>).detail;
@@ -692,9 +775,15 @@ export function SessionDocHost() {
   }, []);
   const close = useCallback(() => setRequest(null), []);
   if (!request) return null;
-  return request.kind === "session" ? (
-    <SessionDocView key={request.sessionId} request={request} onClose={close} />
-  ) : (
-    <ReceivedHandoffView key={`${request.session}:${request.title}`} request={request} onClose={close} />
+  if (request.kind === "session") return <SessionDocView key={request.sessionId} request={request} onClose={close} />;
+  if (request.kind === "join") return <LiveSessionView key={request.room} join={request} onClose={close} />;
+  const live = request.live;
+  return (
+    <ReceivedHandoffView
+      key={`${request.session}:${request.title}`}
+      request={request}
+      onClose={close}
+      onJoin={live ? () => setRequest({ kind: "join", ...live }) : undefined}
+    />
   );
 }

@@ -4,6 +4,8 @@ import {startBackgroundTeams} from "./teamMessaging/background";
 import {openReadableLink} from "./readableLinks";
 import {startTeamMessageNotifications} from "./teamMessaging/notifications";
 import {liveTeamSessions,subscribeTeamJobs} from "./teamMessaging/session";
+import {createAgentChat} from "./teamMessaging/agentChat";
+import {setChatHandoff} from "./teamMessaging/chatHandoff";
 import {teamName} from "./teamMessaging/unread";
 import {createMeshJobs,localRemoteJobs,localRemoteMessages,type MeshJobs} from "./meshJobs";
 import {peekWorkspaceList,refreshWorkspaceList,restoreWorkspaceList} from "./remoteExecution/workspaceListCache";
@@ -167,6 +169,8 @@ import { AboutDialog } from "./components/AboutDialog";
 import { Dictation } from "./components/Dictation";
 import { ShareDialogHost } from "./components/ShareDialog";
 import { SessionDocHost } from "./sessionDoc/SessionDocView";
+import { LiveRoomsHost } from "./liveSession/LiveRoomControls";
+import { startLiveRooms } from "./liveSession/live";
 import { registerSessionLauncher } from "./sessionDoc/launcher";
 import { Companion } from "./components/Companion";
 import { startCompanion, stopCompanion, subscribeCompanion } from "./companionSession";
@@ -257,6 +261,14 @@ function saveRelayChat(label: string, msgs: ipc.RelayChatMsg[]) {
   }
 }
 
+/** Agents posting in Teams chat (canopy_team_people / canopy_team_send).
+ *  Window-wide like the team transports it sends through. */
+const agentChat = createAgentChat({
+  sessions: liveTeamSessions,
+  teamName,
+  people: (teamId) => ipc.teamMembers(teamId),
+});
+
 /** Ops that answer without a project to answer about.
  *
  *  `ask` is a background agent's question, whose cwd may be a worktree Canopy
@@ -288,6 +300,9 @@ const PROJECTLESS_OPS = new Set([
   "mesh_targets",
   "mesh_submit",
   "mesh_message_cloud",
+  // Teams chat names people and teams, never a place.
+  "team_people",
+  "team_send",
 ]);
 
 /** Ticket for one companion-requested session launch, so the ProjectView that
@@ -1510,9 +1525,11 @@ export default function App() {
     const openSettings = (e: Event) => {
       const tab = (e as CustomEvent).detail?.tab;
       // The rules editor belongs to a project (its rules live in that repo's
-      // ledger), so "Settings → rules" opens the front project's Rules panel.
-      if (tab === "rules") {
-        openRules({ cwd: (e as CustomEvent).detail?.cwd ?? "" });
+      // ledger): a request naming a path opens that project's Rules panel;
+      // one from anywhere else lands on Settings → Rules, which lists them all.
+      const cwd = (e as CustomEvent).detail?.cwd;
+      if (tab === "rules" && cwd) {
+        openRules({ cwd });
         return;
       }
       setSettingsOpen({ tab });
@@ -2972,6 +2989,9 @@ export default function App() {
             // as though it were all of them.
             ...(companionOpsRef.current ?? {}),
             meshJobs: meshJobsRef.current ?? undefined,
+            teamChat: agentChat,
+            agentLabel: async (ptyId: number) =>
+              (await ipc.ptyStats()).find((s) => s.id === ptyId)?.name ?? null,
             // The page an agent's browser ops are driving, for the vault ops.
             // The tab id comes from the activeView channel; the URL comes from
             // the page itself, because a redirect (every login flow has one)
@@ -3505,6 +3525,32 @@ export default function App() {
   );
   const startSessionRef = useRef(startSession);
   startSessionRef.current = startSession;
+  // Live sessions this window opens to teammates hear joiners and turns.
+  useEffect(() => startLiveRooms(), []);
+  // Teams chat → agent: "Run as task" and "Send to agent" on a message
+  // (teamMessaging/chatHandoff.ts). Everything is read at click time.
+  useEffect(
+    () =>
+      setChatHandoff({
+        projects: () => wsRef.current.projects.map((p) => p.name),
+        agents: async () =>
+          (await ipc.ptyStats())
+            .filter((s) => s.agent_hint)
+            .map((s) => ({
+              ptyId: s.id,
+              name: s.name || s.title || `Terminal ${s.id}`,
+              cli: s.agent_hint?.bin,
+              project: wsRef.current.projects.find((p) =>
+                p.components.some((c) => s.cwd === c.path || s.cwd.startsWith(c.path + "/")),
+              )?.name,
+            })),
+        startTask: (project, prompt, label) =>
+          startSessionRef.current({ project, prompt, label }),
+        sendToAgent: async (ptyId, text, messageId) =>
+          ipc.forwardToAgent(ptyId, await ipc.instanceId(), messageId, text),
+      }),
+    [],
+  );
   // Session documents start "Continue in a new agent" through the same door
   // (sessionDoc/launcher.ts).
   useEffect(
@@ -4316,6 +4362,12 @@ export default function App() {
         <SettingsDialog
           initialTab={settingsOpen.tab}
           onClose={() => setSettingsOpen(null)}
+          projects={ws.projects.map((p) => ({ id: p.id, name: p.name, roots: p.components.map((c) => c.path) }))}
+          onOpenRules={(id, cwd) => {
+            // Bring the project to the front first; its view listens for the
+            // open-rules event once it is mounted.
+            void openProject(id).then(() => setTimeout(() => openRules({ cwd }), 120));
+          }}
         />
       )}
       {helpOpen && (
@@ -4347,6 +4399,7 @@ export default function App() {
           and opens "Connect your brain" for the chip and every call to action. */}
       <BrainConnectHost />
       <SessionDocHost />
+      <LiveRoomsHost />
       {/* Last, and once: every `title` in the app is drawn by this one bubble
           instead of the webview's native grey box. */}
       <TooltipLayer />

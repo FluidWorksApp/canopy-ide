@@ -45,3 +45,27 @@ describe('in-app warning',()=>{
   observeCredits({balanceUsd:'-11'});expect(mocks.post.mock.calls[3][0]).toMatchObject({tone:'error',title:'Workspaces paused'});
  });
 });
+
+describe('Add funds',()=>{
+ afterEach(()=>{mocks.invoke.mockReset();vi.useRealTimers();});
+ it('reads the start minimum from a refusal just above the cutoff',()=>{
+  expect(creditExhaustedFromError(JSON.stringify({error:'Your Canopy balance is −$9.95. Workspaces pause at −$10.00, and starting this one needs at least −$9.90',code:'credit_exhausted',balanceUsd:'-9.95',cutoffUsd:'-10',minimumUsd:'-9.90',status:402}))).toMatchObject({balanceUsd:-9.95,minimumUsd:-9.9});
+ });
+ it('names Add funds in the final notice only when payments are configured',()=>{
+  expect(creditBanner({balanceUsd:'-6',paymentsEnabled:true})!.body).toContain('Add funds to keep working');
+  expect(creditBanner({balanceUsd:'-6'})!.body).toContain('Request more credit to keep working');
+ });
+ it('starts a checkout and waits until the server lists its purchase',async()=>{
+  vi.useFakeTimers();
+  const {startCheckout,waitForPurchase}=await import('./credits');
+  mocks.invoke.mockResolvedValueOnce({url:'https://checkout.stripe.com/x',sessionId:'cs_1',amountUsd:'25.00'});
+  expect(await startCheckout(25)).toMatchObject({sessionId:'cs_1'});
+  expect(mocks.invoke).toHaveBeenLastCalledWith('canopy_account_request',{route:'/api/credits',body:{action:'checkout',amountUsd:'25.00'}});
+  mocks.invoke.mockRejectedValueOnce(Error('offline')).mockResolvedValueOnce({balanceUsd:'1',purchases:[]}).mockResolvedValueOnce({balanceUsd:'26',purchases:[{reference:'cs_1',amount_usd:'25',occurred_at:''}]});
+  const seen:string[]=[];const done=waitForPurchase('cs_1',{intervalMs:1000,onCredits:c=>seen.push(c.balanceUsd!)});
+  await vi.advanceTimersByTimeAsync(3000);
+  expect((await done)?.balanceUsd).toBe('26');expect(seen).toEqual(['1','26']);
+  const controller=new AbortController();const stopped=waitForPurchase('cs_2',{intervalMs:1000,signal:controller.signal});controller.abort();await vi.advanceTimersByTimeAsync(1000);
+  expect(await stopped).toBeNull();
+ });
+});
