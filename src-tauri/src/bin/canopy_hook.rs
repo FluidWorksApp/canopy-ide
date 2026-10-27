@@ -3551,24 +3551,7 @@ fn tools_list() -> serde_json::Value {
         .map(|c| c.disabled.as_slice())
         .unwrap_or_default();
 
-    let mut tools = match tool_defs() {
-        serde_json::Value::Array(list) => list,
-        _ => Vec::new(),
-    };
-    tools.extend(research_tool_defs());
-    tools.extend(notes_tool_defs());
-    tools.extend(memory_tool_defs());
-    tools.extend(mesh_tool_defs());
-    tools.extend(session_tool_defs());
-    tools.extend(task_tool_defs());
-    tools.extend(agent_spawn_tool_defs());
-    // The cross-project set, and only for the one session that is allowed to
-    // think across projects. An ordinary coding agent never sees these exist.
-    if is_companion_session() {
-        tools.extend(companion_tool_defs());
-    } else {
-        tools.extend(companion_reply_tool_defs());
-    }
+    let mut tools = static_tool_defs();
     // canopy_job_done is on by default everywhere (reporting an outcome is
     // core product), and inside a micro-task session (CANOPY_MICRO_TASK=1 on
     // the launch command) it survives even the Settings disable list — a
@@ -3620,6 +3603,32 @@ fn tools_list() -> serde_json::Value {
         }
     }
     serde_json::json!({ "tools": tools })
+}
+
+/// Every descriptor this sidecar defines for this session, before the running
+/// bridge's contract and the Settings disable list narrow it. Split out of
+/// `tools_list` so tests can assert what is published without depending on
+/// whichever bridge happens to be running on the machine.
+fn static_tool_defs() -> Vec<serde_json::Value> {
+    let mut tools = match tool_defs() {
+        serde_json::Value::Array(list) => list,
+        _ => Vec::new(),
+    };
+    tools.extend(research_tool_defs());
+    tools.extend(notes_tool_defs());
+    tools.extend(memory_tool_defs());
+    tools.extend(mesh_tool_defs());
+    tools.extend(session_tool_defs());
+    tools.extend(task_tool_defs());
+    tools.extend(agent_spawn_tool_defs());
+    // The cross-project set, and only for the one session that is allowed to
+    // think across projects. An ordinary coding agent never sees these exist.
+    if is_companion_session() {
+        tools.extend(companion_tool_defs());
+    } else {
+        tools.extend(companion_reply_tool_defs());
+    }
+    tools
 }
 
 /// Every MCP-capable coding session keeps the live-status tool. A user can
@@ -7887,10 +7896,11 @@ mod tests {
         assert!(!READ_ONLY_TOOLS.contains(&"canopy_memory_propose"));
         // A companion that may only answer must not write team memory.
         assert!(COMPANION_MUTATING_TOOLS.contains(&"canopy_memory_propose"));
-        let published = tools_list();
-        let listed: Vec<&str> = published["tools"]
-            .as_array()
-            .unwrap()
+        // Asserted against what tools_list() starts from, not its output:
+        // the output intersects with whatever bridge is running on this
+        // machine, which may be an older build without these tools.
+        let published = static_tool_defs();
+        let listed: Vec<&str> = published
             .iter()
             .filter_map(|t| t.get("name").and_then(|n| n.as_str()))
             .collect();
