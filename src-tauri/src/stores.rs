@@ -415,8 +415,19 @@ fn uuid_tail(name: &str) -> Option<String> {
 /// without recall value (their interesting parts end up quoted in the agent's
 /// own words).
 pub fn append_line_text(agent: &str, line: &str) -> Option<String> {
+    append_line_message(agent, line).map(|(_, text)| text)
+}
+
+/// As `append_line_text`, with who wrote it: "user" or "assistant". A session
+/// document has to tell the human's words from the agent's.
+pub fn append_line_message(agent: &str, line: &str) -> Option<(&'static str, String)> {
     let v = serde_json::from_str::<Value>(line).ok()?;
-    let text = match agent {
+    let role_of = |r: &str| match r {
+        "user" => Some("user"),
+        "assistant" => Some("assistant"),
+        _ => None,
+    };
+    let (role, text) = match agent {
         "claude" | "omp" => {
             let ty = v["type"].as_str()?;
             if ty != "user" && ty != "assistant" && ty != "message" {
@@ -424,13 +435,12 @@ pub fn append_line_text(agent: &str, line: &str) -> Option<String> {
             }
             let msg = &v["message"];
             // omp wraps the same shape one level down and names the role there.
-            if ty == "message" {
-                let role = msg["role"].as_str().unwrap_or("");
-                if role != "user" && role != "assistant" {
-                    return None;
-                }
-            }
-            content_text(&msg["content"])?
+            let role = if ty == "message" {
+                role_of(msg["role"].as_str().unwrap_or(""))?
+            } else {
+                role_of(ty)?
+            };
+            (role, content_text(&msg["content"])?)
         }
         "codex" => {
             if v["type"] != "response_item" {
@@ -441,11 +451,8 @@ pub fn append_line_text(agent: &str, line: &str) -> Option<String> {
                 return None;
             }
             // "developer" is codex's own instruction channel, not the user's.
-            let role = p["role"].as_str().unwrap_or("");
-            if role != "user" && role != "assistant" {
-                return None;
-            }
-            content_text(&p["content"])?
+            let role = role_of(p["role"].as_str().unwrap_or(""))?;
+            (role, content_text(&p["content"])?)
         }
         _ => return None,
     };
@@ -453,7 +460,95 @@ pub fn append_line_text(agent: &str, line: &str) -> Option<String> {
     if t.is_empty() || is_injected(t) {
         return None;
     }
-    Some(clip(t))
+    Some((role, clip(t)))
+}
+
+/// The end of one conversation's transcript, oldest first, as (role, text).
+/// Role is "message" for whole-file stores, which do not keep it in a form
+/// `whole_sessions` returns. At most `max_bytes` are read from an append-only
+/// file's end — a long session's transcript can be tens of megabytes, and a
+/// document only needs its last stretch. Empty when no store has the session.
+pub fn transcript_tail(
+    agent: &str,
+    session_id: &str,
+    roots: &[String],
+    profile: Option<&str>,
+    max_bytes: u64,
+) -> Vec<(String, String)> {
+    if session_id.is_empty() || session_id.contains(['/', '\\']) {
+        return Vec::new();
+    }
+    let files = source_files(roots, &|a| a == agent);
+    // The session's own profile first; any other only when that finds nothing
+    // (a digest written before profiles existed names none).
+    let mut ordered: Vec<&SourceFile> = files
+        .iter()
+        .filter(|f| profile.is_none_or(|p| f.profile == p))
+        .collect();
+    ordered.extend(
+        files
+            .iter()
+            .filter(|f| profile.is_some_and(|p| f.profile != p)),
+    );
+    for f in ordered {
+        match f.layout {
+            Layout::Append => {
+                let stem = f
+                    .path
+                    .file_stem()
+                    .map(|s| s.to_string_lossy().to_string())
+                    .unwrap_or_default();
+                if stem != session_id && !stem.ends_with(session_id) {
+                    continue;
+                }
+                let lines = read_tail(&f.path, max_bytes);
+                return lines
+                    .iter()
+                    .filter_map(|l| append_line_message(agent, l))
+                    .map(|(r, t)| (r.to_string(), t))
+                    .collect();
+            }
+            Layout::Whole => {
+                if let Some(s) = whole_sessions(agent, &f.path, roots)
+                    .into_iter()
+                    .find(|s| s.session_id == session_id)
+                {
+                    let n = s.bodies.len();
+                    return s
+                        .bodies
+                        .into_iter()
+                        .skip(n.saturating_sub(400))
+                        .map(|b| ("message".to_string(), b))
+                        .collect();
+                }
+            }
+        }
+    }
+    Vec::new()
+}
+
+/// Whole lines from the last `max_bytes` of a file. A partial first line (the
+/// read started mid-line) is dropped.
+fn read_tail(path: &Path, max_bytes: u64) -> Vec<String> {
+    use std::io::{Read, Seek, SeekFrom};
+    let Ok(mut file) = std::fs::File::open(path) else {
+        return Vec::new();
+    };
+    let len = file.metadata().map(|m| m.len()).unwrap_or(0);
+    let start = len.saturating_sub(max_bytes);
+    if file.seek(SeekFrom::Start(start)).is_err() {
+        return Vec::new();
+    }
+    let mut buf = Vec::new();
+    if file.take(max_bytes).read_to_end(&mut buf).is_err() {
+        return Vec::new();
+    }
+    let text = String::from_utf8_lossy(&buf);
+    let mut lines: Vec<String> = text.lines().map(str::to_string).collect();
+    if start > 0 && !lines.is_empty() {
+        lines.remove(0);
+    }
+    lines
 }
 
 /// A message body from either shape every one of these CLIs uses: a bare
@@ -981,6 +1076,54 @@ mod tests {
             sha256_hex(b""),
             "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
         );
+    }
+
+    #[test]
+    fn messages_keep_who_wrote_them() {
+        let human = r#"{"type":"user","message":{"content":"fix the test"}}"#;
+        let agent = r#"{"type":"assistant","message":{"content":[{"type":"text","text":"Fixed."},{"type":"tool_use"}]}}"#;
+        let tool =
+            r#"{"type":"user","message":{"content":[{"type":"tool_result","content":"ok"}]}}"#;
+        assert_eq!(
+            append_line_message("claude", human),
+            Some(("user", "fix the test".to_string()))
+        );
+        assert_eq!(
+            append_line_message("claude", agent),
+            Some(("assistant", "Fixed.".to_string()))
+        );
+        assert_eq!(append_line_message("claude", tool), None);
+        let dev = r#"{"type":"response_item","payload":{"type":"message","role":"developer","content":[{"type":"input_text","text":"rules"}]}}"#;
+        let reply = r#"{"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"Done"}]}}"#;
+        assert_eq!(append_line_message("codex", dev), None);
+        assert_eq!(
+            append_line_message("codex", reply),
+            Some(("assistant", "Done".to_string()))
+        );
+        // The text-only reader is unchanged by the split.
+        assert_eq!(
+            append_line_text("claude", human).as_deref(),
+            Some("fix the test")
+        );
+    }
+
+    #[test]
+    fn tail_reads_whole_lines_from_the_end() {
+        let path = std::env::temp_dir().join(format!("canopy-tail-{}.jsonl", std::process::id()));
+        std::fs::write(&path, "first line\nsecond line\nthird line\n").unwrap();
+        assert_eq!(
+            read_tail(&path, 1024),
+            vec!["first line", "second line", "third line"]
+        );
+        // 15 bytes from the end lands mid "second line": that partial line is dropped.
+        assert_eq!(read_tail(&path, 15), vec!["third line"]);
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn tail_refuses_ids_that_are_paths() {
+        assert!(transcript_tail("claude", "../etc", &[], None, 1024).is_empty());
+        assert!(transcript_tail("claude", "", &[], None, 1024).is_empty());
     }
 
     #[test]

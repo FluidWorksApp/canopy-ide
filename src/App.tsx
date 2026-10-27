@@ -158,6 +158,8 @@ import { AskDialog } from "./components/AskDialog";
 import { AboutDialog } from "./components/AboutDialog";
 import { Dictation } from "./components/Dictation";
 import { ShareDialogHost } from "./components/ShareDialog";
+import { SessionDocHost } from "./sessionDoc/SessionDocView";
+import { registerSessionLauncher } from "./sessionDoc/launcher";
 import { Companion } from "./components/Companion";
 import { startCompanion, stopCompanion, subscribeCompanion } from "./companionSession";
 import { slackConfirm, startCompanionReplies, startSlack } from "./slackLive";
@@ -3442,6 +3444,17 @@ export default function App() {
   );
   const startSessionRef = useRef(startSession);
   startSessionRef.current = startSession;
+  // Session documents start "Continue in a new agent" through the same door
+  // (sessionDoc/launcher.ts).
+  useEffect(
+    () =>
+      registerSessionLauncher({
+        start: (req) => startSessionRef.current(req),
+        projects: () =>
+          wsRef.current.projects.map((p) => ({ name: p.name, dirs: p.components.map((c) => c.path) })),
+      }),
+    [],
+  );
   const companionOpsRef = useRef<CompanionOps | null>(null);
   companionOpsRef.current = useMemo(
     () =>
@@ -4270,6 +4283,7 @@ export default function App() {
       {/* The brain's connection: probes at start, re-checks after a sign-in,
           and opens "Connect your brain" for the chip and every call to action. */}
       <BrainConnectHost />
+      <SessionDocHost />
       {/* Last, and once: every `title` in the app is drawn by this one bubble
           instead of the webview's native grey box. */}
       <TooltipLayer />

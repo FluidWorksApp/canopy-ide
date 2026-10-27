@@ -375,6 +375,9 @@ export async function resolveShareCard(
       return (await asPr(card.number)) ?? web(repo);
     case "report":
       return card.pr ? ((await asPr(card.pr)) ?? web(repo)) : { do: "none" };
+    case "handoff":
+      // A hand-off names its repo for context only; "Take over" is its action.
+      return { do: "none" };
     case "diff": {
       if (card.pr) {
         const pr = await asPr(card.pr);

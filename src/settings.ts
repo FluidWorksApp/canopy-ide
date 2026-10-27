@@ -503,6 +503,15 @@ export interface Settings {
    *  ledger root). A project with an entry runs exactly these, one shell line
    *  each, instead of what Canopy detects from its manifests. */
   receiptCommands: Record<string, string[]>;
+  /** Session documents (src/sessionDoc): when one opens and has no current
+   *  written summary, ask the brain for one on the background tier. Off = the
+   *  summary is written only when the person presses the button. */
+  sessionDocAutoSummary: boolean;
+  /** Commits made from Canopy's Changes panel get an `Agent-Session:` trailer
+   *  for each agent session whose journaled edits are in the commit — the
+   *  session-to-lines provenance a reviewer can follow back. Off by default:
+   *  it changes what lands in other people's history. */
+  commitSessionTrailers: boolean;
   /** Connect Claude Code to Canopy as its IDE, the way it connects to VS Code:
    *  proposed edits open as a diff to accept, tweak or reject, the editor
    *  selection reaches the prompt, and the CLI reads diagnostics off Canopy's
@@ -738,6 +747,8 @@ export const DEFAULTS: Settings = {
   brainSessionTitles: true,
   receiptMode: "auto",
   receiptCommands: {},
+  sessionDocAutoSummary: true,
+  commitSessionTrailers: false,
   claudeIdeIntegration: true,
   turnRollback: true,
   memoryAutoExtract: true,

@@ -1,0 +1,49 @@
+/* Session documents (SessionDocView.tsx). Below the share dialog (z 1000),
+   which opens on top of a document when a packet is sent to a teammate. */
+.sdoc-backdrop{position:fixed;inset:0;z-index:950;display:flex;align-items:flex-start;justify-content:center;padding:32px 16px;background:rgba(0,0,0,.4);overflow:auto}
+.sdoc{display:flex;flex-direction:column;width:min(820px,100%);border:1px solid var(--border);border-radius:var(--r-md,8px);background:var(--bg-raised);color:var(--text);box-shadow:0 12px 40px rgba(0,0,0,.35)}
+.sdoc-head{display:flex;gap:12px;align-items:flex-start;padding:14px 16px;border-bottom:1px solid var(--border)}
+.sdoc-head-main{flex:1;min-width:0}
+.sdoc-head h2{margin:0 0 4px;font-size:15px;line-height:1.35;overflow-wrap:anywhere}
+.sdoc-head-actions{display:flex;gap:6px;flex-shrink:0}
+.sdoc-meta{display:flex;flex-wrap:wrap;gap:4px 10px;font-size:12px;color:var(--text-muted)}
+.sdoc-private{color:var(--text)}
+.sdoc-body{display:flex;flex-direction:column;gap:16px;padding:14px 16px 16px}
+.sdoc-body h3{display:flex;align-items:center;gap:6px;margin:0 0 6px;font-size:13px}
+.sdoc-body h4{margin:8px 0 4px;font-size:12px;color:var(--text-muted)}
+.sdoc-section-head{display:flex;align-items:center;gap:8px;margin-bottom:6px}
+.sdoc-section-head h3{margin:0}
+.sdoc-spacer{flex:1}
+.sdoc-by{font-size:11px;color:var(--text-muted)}
+.sdoc-empty,.sdoc-note,.sdoc-state{margin:0;font-size:12px;color:var(--text-muted)}
+.sdoc-state{padding:5px 8px;border-radius:var(--r-sm);background:color-mix(in srgb,var(--warn) 12%,transparent);color:var(--text)}
+.sdoc-error{margin:0;font-size:12px;color:var(--danger)}
+.sdoc-summary{padding:10px 12px;border:1px solid var(--border);border-radius:var(--r-sm);background:var(--bg)}
+.sdoc-summary-text,.sdoc-goal{margin:0;font-size:13px;line-height:1.5;white-space:pre-wrap;overflow-wrap:anywhere}
+.sdoc-list{margin:0;padding-left:18px;font-size:12.5px;line-height:1.5}
+.sdoc-list li{margin:2px 0;overflow-wrap:anywhere}
+.sdoc-rejected{font-size:11.5px;color:var(--text-muted)}
+.sdoc-turns{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:6px}
+.sdoc-turn{padding:6px 8px;border-left:2px solid var(--border)}
+.sdoc-turn-head{display:flex;align-items:center;gap:8px;font-size:11px;color:var(--text-muted)}
+.sdoc-turn-n{font-weight:600;color:var(--text)}
+.sdoc-turn-prompt{margin:2px 0 0;font-size:12.5px;white-space:pre-wrap;overflow-wrap:anywhere;max-height:6.5em;overflow:hidden}
+.sdoc-chips{display:flex;flex-wrap:wrap;gap:4px;margin-top:4px}
+.sdoc-chip{padding:1px 6px;border:1px solid var(--border);border-radius:999px;font-family:var(--font-mono,monospace);font-size:10.5px}
+.sdoc-receipt{padding:0 6px;border-radius:999px;font-size:10.5px;border:1px solid var(--border)}
+.sdoc-receipt.is-pass{color:var(--ok);border-color:color-mix(in srgb,var(--ok) 50%,transparent)}
+.sdoc-receipt.is-fail{color:var(--danger);border-color:color-mix(in srgb,var(--danger) 50%,transparent)}
+.sdoc-receipt.is-partial{color:var(--warn);border-color:color-mix(in srgb,var(--warn) 50%,transparent)}
+.sdoc-files{list-style:none;margin:4px 0 0;padding:0;display:flex;flex-direction:column;gap:2px;font-size:12px}
+.sdoc-files li{display:flex;gap:8px;align-items:baseline;overflow-wrap:anywhere}
+.sdoc-files code{font-family:var(--font-mono,monospace);font-size:11.5px}
+.sdoc-handoff{display:flex;flex-direction:column;gap:8px;padding:10px 12px;border:1px dashed var(--accent);border-radius:var(--r-sm)}
+.sdoc-handoff h3{margin:0}
+.sdoc-packet{font-family:var(--font-mono,monospace);font-size:11.5px;padding:6px 8px;border:1px solid var(--border);border-radius:var(--r-sm);background:var(--bg);color:var(--text);resize:vertical}
+.sdoc-packet-read{margin:0;padding:8px;border-radius:var(--r-sm);background:var(--bg);font-family:var(--font-mono,monospace);font-size:11.5px;white-space:pre-wrap;overflow-wrap:anywhere;max-height:50vh;overflow:auto}
+.sdoc-actions{display:flex;flex-wrap:wrap;gap:6px;margin-top:4px}
+.sdoc-continue{display:flex;flex-direction:column;gap:6px}
+.sdoc-row{display:flex;gap:8px;flex-wrap:wrap}
+.sdoc-row>label{flex:1;min-width:180px;display:flex;flex-direction:column;gap:3px;font-size:12px;color:var(--text-muted)}
+.sdoc-foot{display:flex;flex-wrap:wrap;gap:8px 16px;font-size:11px;color:var(--text-muted)}
+.sdoc-link{padding:0;border:0;background:none;color:var(--accent);font:inherit;cursor:pointer;text-decoration:underline}

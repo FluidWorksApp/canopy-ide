@@ -28,6 +28,7 @@ import {
   type ReactNode,
 } from "react";
 import { Panel, PanelGroup } from "react-resizable-panels";
+import { commitMessageWithSessions } from "../../sessionDoc/trailers";
 import * as ipc from "../../ipc";
 import { EditorDiskState } from "../../editorDiskState";
 import { format, matches, matchesModifierClick } from "../../shortcuts";
@@ -14146,8 +14147,9 @@ const ProjectViewBody = memo(function ProjectViewBody({
           .catch((err) => onNotice(String(err), "error"))
       }
       onCommit={(repo, message) =>
-        ipc
-          .gitCommit(repo, message, false)
+        // Agent-Session trailers when the setting is on (sessionDoc/trailers.ts).
+        commitMessageWithSessions(repo, message)
+          .then((m) => ipc.gitCommit(repo, m, false))
           .then((msg) => {
             onNotice(msg, "success");
             void refreshChanges();

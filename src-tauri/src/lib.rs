@@ -60,6 +60,7 @@ mod remind;
 mod remote;
 mod research;
 mod selftest;
+mod session_doc;
 mod session_transfer;
 mod shortcuts;
 mod snapshot;
@@ -689,6 +690,7 @@ pub fn run() {
             ledger::ledger_root,
             ledger::ledger_update_status,
             receipt::receipt_run_check,
+            session_doc::session_transcript_tail,
             tasks::task_reserve,
             tasks::task_attempt_reserve,
             tasks::task_attempt_start,
