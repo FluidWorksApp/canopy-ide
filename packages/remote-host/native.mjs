@@ -32,6 +32,10 @@ import {sessionProcessReader} from './session-processes.mjs';
 import {McpRegistry} from './mcp-servers.mjs';
 import {gitHistory} from './git-history.mjs';
 import {claudeIde,claudeIdeCommand} from './claude-ide.mjs';
+import {workspaceToolsCommands} from './workspace-tools.mjs';
+import {workspaceCleanupCommands} from './workspace-cleanup.mjs';
+import {ChannelHub,isChannelArg} from './channels.mjs';
+import {HOST_PROTOCOL,NATIVE_COMMANDS,NATIVE_PREFIXES} from './native-commands.mjs';
 const sessionProcesses=sessionProcessReader();
 const workspaceMetrics=metricsReader();
 const execute=promisify(execFile);
@@ -77,12 +81,29 @@ async function run(bin,argv,cwd=ROOT,timeout=15000,environment={}){
 async function boundedRead(file,limit=1048576){const handle=await open(file,'r');try{const bytes=Buffer.alloc(limit+1);let length=0;while(length<=limit){const result=await handle.read(bytes,length,bytes.length-length,null);if(!result.bytesRead)break;length+=result.bytesRead;}if(length>limit)throw Error('File exceeds editor limit');return bytes.subarray(0,length);}finally{await handle.close();}}
 async function metadata(file,fallback){try{return JSON.parse((await boundedRead(HOME+'/.canopy/'+file)).toString('utf8'));}catch(error){if(error.code==='ENOENT')return fallback;throw error;}}
 async function saveMetadata(file,value){await mkdir(HOME+'/.canopy',{recursive:true,mode:0o700});const target=HOME+'/.canopy/'+file;const temporary=target+'.'+randomUUID()+'.next';const data=JSON.stringify(value);if(Buffer.byteLength(data)>1048576)throw Error('Workspace metadata limit reached');await writeFile(temporary,data,{mode:0o600,flag:'wx'});await rename(temporary,target);changeCursor++;changes.push({sequence:changeCursor,change:{store:file,scope:ROOT,id:''}});if(changes.length>1024)changes.shift();}
+// Command families ported from the desktop's Rust commands, one module each.
+// Each takes the same containment helpers as the commands below.
+const familyContext={run,scoped,execute,home:HOME,root:ROOT};
+const channels=new ChannelHub();
+export const NATIVE_FAMILIES=Object.assign({},...[
+ workspaceToolsCommands,workspaceCleanupCommands,
+].map(family=>family(familyContext)));
+const FAMILIES=NATIVE_FAMILIES;
 const CLIS=['claude','codex','amp','aider','agy','opencode','omp','cursor-agent','grok'];
 export async function nativeInvoke(command,args={}){
   if(command.startsWith('fs_upload_'))return uploads.invoke(command,args);
   // The desktop's answers to the Claude Code IDE servers of this workspace's
   // terminals (claude-ide.mjs), which live in this same process.
   if(command.startsWith('claude_ide_')){const handled=claudeIdeCommand(claudeIde,command,args);if(handled.handled)return handled.value;}
+  if(command==='channel_poll')return channels.poll(args.ids,args.wait);
+  if(command==='channel_drop'){channels.drop(args.ids);return;}
+  if(Object.hasOwn(FAMILIES,command)){
+   // A desktop Channel arrives as its name; the command gets a sender.
+   const opened=[];const input={...args};for(const [key,value] of Object.entries(input))if(isChannelArg(value)){input[key]=channels.open(value.__canopyChannel);opened.push(input[key]);}
+   try{return await FAMILIES[command](input);}catch(error){for(const channel of opened)channel.close(String(error?.message??error));throw error;}
+  }
+  // Lets a newer desktop see what this runtime can do before it asks.
+  if(command==='host_capabilities')return {protocol:HOST_PROTOCOL,commands:[...NATIVE_COMMANDS],prefixes:NATIVE_PREFIXES};
   if(command==='session_process_stats'){
     if(!Array.isArray(args.sessions)||args.sessions.length>32)throw Error('Invalid session inventory');
     return sessionProcesses(args.sessions);

@@ -1,0 +1,23 @@
+// The native command surface of this host runtime. The desktop imports it too
+// (NativeWorkspaceHost.ts): a command listed here that a workspace answers with
+// "does not support … yet" means the workspace runs an older host, which the
+// IDE says plainly instead of reporting a missing feature. Bump HOST_PROTOCOL
+// whenever commands are added, so a desktop can tell a stale host up front.
+// native-commands.test.mjs keeps this list equal to what native.mjs handles.
+export const HOST_PROTOCOL=2;
+export const NATIVE_PREFIXES=['fs_upload_','claude_ide_'];
+export const NATIVE_COMMANDS=new Set([
+ // Files, projects and the workspace itself.
+ 'store_load','store_save','store_changes','instance_id','host_capabilities','channel_poll','channel_drop','fs_read_dir','fs_read_file','fs_write_file','fs_create_file','fs_create_dir','fs_trash','fs_rename','fs_duplicate','fs_stat','fs_stat_many','fs_list_files','fs_search','fs_register_roots','fs_unregister_roots','workspace_add','workspace_list','workspace_remove','workspace_register','workspace_unregister','workspace_activity','workspace_metrics','workspace_browser_open','workspace_browser_request','workspace_preview_open','workspace_chrome_stream_open','workspace_chrome_stream_close','desktop_session','which_check','cli_versions','cli_take_pending_open','cli_take_pending_link','oauth_callback','terminal_governor_status','relay_status','session_process_stats','pty_metadata_get','pty_metadata_set',
+ // Git.
+ 'git_head_content','git_log','git_checkout','git_clone','git_clone_start','git_clone_status','git_clone_cancel','git_stage','git_unstage','git_commit_detail','git_commit_patch','git_branch_commits','git_branch_patch','git_commit_paths','git_commit','git_fetch','git_pull','git_push','git_repos','git_status','git_repo_status','git_branches','git_worktrees','git_diff','git_remote_url','git_branch_current',
+ // Agents, accounts and their integrations.
+ 'agent_workspace_at','agent_events_poll','agent_health_report','agent_hooks_installed','agent_integration_health','agent_session_summaries','agent_usage','claude_session_stats','opencode_session_stats','plan_usage','hook_bridge_path','setup_agent_hooks','session_digests','session_history','profiles_list','profile_create','profile_delete','profile_env','profile_activate','profile_accounts','profile_import_git','profile_import_credentials','profile_prepare_session','mcp_servers','mcp_update_sources',
+ // Small metadata stores.
+ 'notes_list','notes_due','research_list','task_list_history','context_tools','context_publish','set_context_scopes','pr_watch_set','pr_watch_list',
+ // Agent instructions, model catalogs, readiness probes, processes.
+ 'instructions_scan','instructions_read','instructions_write','model_catalog','probe_http_readiness','kill_process',
+ // Disk cleanup.
+ 'cleanup_scan','cleanup_run','cleanup_disk',
+]);
+export const isNativeCommand=command=>typeof command==='string'&&(NATIVE_COMMANDS.has(command)||NATIVE_PREFIXES.some(prefix=>command.startsWith(prefix)));

@@ -635,3 +635,38 @@ it('hands Claude IDE events from a terminal stream to the window, keyed by that 
  expect(native.at(-1)).toEqual({command:'claude_ide_selection',args:{path:'/workspace/a.py',params:{text:''}}});
  host.dispose();
 });
+it('tells an older workspace host apart from a missing feature, and says so once',async()=>{
+ const {host,fetcher}=setup();
+ fetcher.mockImplementation(async(_url:string,options:RequestInit)=>{const {command}=JSON.parse(String(options.body||'{}'));return {ok:false,status:400,json:async()=>({error:`The Linux workspace does not support ${command} yet`})};});
+ const seen:string[]=[];const heard=(event:Event)=>seen.push((event as CustomEvent<{message:string}>).detail.message);
+ window.addEventListener('canopy:workspace-host-outdated',heard);
+ await expect(host.invoke('git_status',{repo:'/workspace'})).rejects.toThrow('This workspace is running an older Canopy host. Restart or update the workspace to use this Git action.');
+ await expect(host.invoke('host_capabilities')).rejects.toThrow(/older Canopy host/);
+ // A command no current host serves keeps the host's own answer.
+ await expect(host.invoke('frobnicate')).rejects.toThrow('The Linux workspace does not support frobnicate yet');
+ expect(seen).toEqual(['This workspace is running an older Canopy host. Restart or update the workspace to use this Git action.']);
+ window.removeEventListener('canopy:workspace-host-outdated',heard);host.dispose();
+});
+it('refuses features a cloud workspace does not offer without a round trip',async()=>{
+ const {host,desktop,fetcher}=setup();
+ await expect(host.invoke('fs_reveal',{path:'/workspace/a.ts'})).rejects.toThrow("Reveal in file manager isn't available in a cloud workspace.");
+ expect(fetcher).not.toHaveBeenCalled();expect(desktop.invoke).not.toHaveBeenCalled();host.dispose();
+});
+it('checks the host protocol once after boot and reports a stale host',async()=>{
+ vi.useFakeTimers();
+ try{
+  const desktop={kind:'native',invoke:vi.fn().mockResolvedValue({generation:1}),listen:vi.fn(),channel:vi.fn()} as unknown as Host;
+  const host=new NativeWorkspaceHost(connection,desktop);
+  const fetcher=vi.fn().mockImplementation(async(url:string,options:RequestInit)=>{const {command}=JSON.parse(String(options.body||'{}'));
+   if(command==='host_capabilities')return {ok:true,json:async()=>({result:{protocol:1,commands:[]}})};
+   return {ok:true,json:async()=>url.endsWith('/sessions')?[]:{result:command==='pty_metadata_get'?{}:'remote-alice'}};});
+  vi.stubGlobal('fetch',fetcher);
+  const seen:unknown[]=[];const heard=(event:Event)=>seen.push((event as CustomEvent).detail);
+  window.addEventListener('canopy:workspace-host-outdated',heard);
+  await host.invoke('pty_renderer_register');
+  expect(fetcher.mock.calls.some(([,o])=>String(o.body).includes('host_capabilities'))).toBe(false);
+  await vi.advanceTimersByTimeAsync(10_000);
+  expect(seen).toEqual([{command:null,message:'This workspace is running an older Canopy host. Restart or update the workspace to use everything in this version of Canopy.'}]);
+  window.removeEventListener('canopy:workspace-host-outdated',heard);host.dispose();
+ }finally{vi.useRealTimers();}
+});
