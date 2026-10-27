@@ -97,6 +97,8 @@ export class LiveRooms {
    *  prompt does not show twice. */
   private delivered = new Map<string, { text: string; by: string; at: number }[]>();
   private listeners = new Set<() => void>();
+  /** Rooms this instance closed, so a late joiner hears that it ended. */
+  private closed = new Set<string>();
   private deps: RoomDeps;
   constructor(deps: RoomDeps) {
     this.deps = deps;
@@ -209,8 +211,11 @@ export class LiveRooms {
     const { team, sender, event } = e;
     const r = this.room(event.target);
     if (!r) {
-      // A room this Canopy no longer holds (closed, or Canopy restarted).
-      if (event.op === "join" || event.op === "say") this.send(team, sender, event.target, { op: "bye", reason: "ended" });
+      // A room this Canopy closed. Any other unknown room may be held by
+      // another of the owner's devices (they share one account), so stay
+      // silent: a joiner whose owner never answers sees that it went quiet.
+      if (this.closed.has(event.target) && (event.op === "join" || event.op === "say"))
+        this.send(team, sender, event.target, { op: "bye", reason: "ended" });
       return;
     }
     const now = this.deps.now();
@@ -347,6 +352,7 @@ export class LiveRooms {
     for (const v of r.viewers) this.send(v.team, v.id, id, { op: "bye", reason: "ended" });
     for (const q of r.requests) this.send(q.team, q.from, id, { op: "answer", request: q.id, outcome: "declined" });
     this.rooms = this.rooms.filter((x) => x.id !== id);
+    this.closed.add(id);
     this.delivers.delete(r.sessionId);
     this.delivered.delete(r.sessionId);
     this.listeners.forEach((fn) => fn());

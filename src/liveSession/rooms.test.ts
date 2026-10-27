@@ -95,6 +95,11 @@ describe('live rooms',()=>{
   expect(rooms.room(r.id)).toBeUndefined();
   ev('bo',r.id,{op:'join'});expect(sent.at(-1)?.op).toEqual({op:'bye',reason:'ended'});
  });
+ it('stays silent about a room it never held: another of the owner\'s devices may hold it',()=>{
+  ev('ana','0f8fad5b-d9cb-469f-a165-70867728950e',{op:'join'});
+  ev('ana','0f8fad5b-d9cb-469f-a165-70867728950e',{op:'say',request:req(9),text:'hi'});
+  expect(sent).toEqual([]);
+ });
  it('opens to a team that sees the shared terminal',()=>{
   const r=open();rooms.setTerminal(r.id,{workspace:'alice',publication:req(7)},'core');
   ev('bo',r.id,{op:'join'});expect(sent.at(-1)?.op).toMatchObject({op:'state',terminal:{workspace:'alice',publication:req(7)}});
