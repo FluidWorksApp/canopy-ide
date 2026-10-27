@@ -4429,6 +4429,24 @@ export const sessionActivity = (args: { sessionId: string; agent: string; roots:
     profile: args.profile ?? null,
   });
 
+/** Compact a session headlessly inside a cloud workspace, where it lives
+ *  (packages/remote-host/session-compact.mjs). Served by the workspace host
+ *  only: on this computer contextCompaction.ts runs the CLI itself. */
+export const sessionCompact = (args: {
+  agent: string;
+  sessionId: string;
+  cwd: string;
+  instructions: string;
+  profile?: string | null;
+}) =>
+  invoke<{
+    ok: boolean;
+    preTokens?: number | null;
+    postTokens?: number | null;
+    message?: string;
+    contextWindows?: Record<string, number>;
+  }>("session_compact", { ...args, profile: args.profile ?? null });
+
 // ---------- team relay ----------
 
 export interface RelayMember {

@@ -979,6 +979,7 @@ export function AgentWorkspaceView({
     live: ptyId != null && lifecycle !== "ended",
     lifeState: lifecycle,
     remote: !!activeWorkspace(),
+    profile: docDigest?.profile ?? null,
     activity,
     refresh: () => activityKey && refreshSessionActivity(activityKey),
     deps: {
