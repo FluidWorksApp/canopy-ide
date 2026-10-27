@@ -32,6 +32,7 @@ import {sessionProcessReader} from './session-processes.mjs';
 import {McpRegistry} from './mcp-servers.mjs';
 import {gitHistory} from './git-history.mjs';
 import {claudeIde,claudeIdeCommand} from './claude-ide.mjs';
+import {WorkspaceGates} from './gates.mjs';
 const sessionProcesses=sessionProcessReader();
 const workspaceMetrics=metricsReader();
 const execute=promisify(execFile);
@@ -77,9 +78,13 @@ async function run(bin,argv,cwd=ROOT,timeout=15000,environment={}){
 async function boundedRead(file,limit=1048576){const handle=await open(file,'r');try{const bytes=Buffer.alloc(limit+1);let length=0;while(length<=limit){const result=await handle.read(bytes,length,bytes.length-length,null);if(!result.bytesRead)break;length+=result.bytesRead;}if(length>limit)throw Error('File exceeds editor limit');return bytes.subarray(0,length);}finally{await handle.close();}}
 async function metadata(file,fallback){try{return JSON.parse((await boundedRead(HOME+'/.canopy/'+file)).toString('utf8'));}catch(error){if(error.code==='ENOENT')return fallback;throw error;}}
 async function saveMetadata(file,value){await mkdir(HOME+'/.canopy',{recursive:true,mode:0o700});const target=HOME+'/.canopy/'+file;const temporary=target+'.'+randomUUID()+'.next';const data=JSON.stringify(value);if(Buffer.byteLength(data)>1048576)throw Error('Workspace metadata limit reached');await writeFile(temporary,data,{mode:0o600,flag:'wx'});await rename(temporary,target);changeCursor++;changes.push({sequence:changeCursor,change:{store:file,scope:ROOT,id:''}});if(changes.length>1024)changes.shift();}
+// The Rules panel's approved gates and approve-once tokens, written where this
+// workspace's canopy-hook reads them (gates.mjs).
+const workspaceGates=new WorkspaceGates({home:HOME,run:(bin,argv,cwd)=>run(bin,argv,cwd)});
 const CLIS=['claude','codex','amp','aider','agy','opencode','omp','cursor-agent','grok'];
 export async function nativeInvoke(command,args={}){
   if(command.startsWith('fs_upload_'))return uploads.invoke(command,args);
+  if(command.startsWith('gates_'))return workspaceGates.invoke(command,args);
   // The desktop's answers to the Claude Code IDE servers of this workspace's
   // terminals (claude-ide.mjs), which live in this same process.
   if(command.startsWith('claude_ide_')){const handled=claudeIdeCommand(claudeIde,command,args);if(handled.handled)return handled.value;}

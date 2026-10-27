@@ -32,6 +32,8 @@ mod remote_upload;
 #[path = "dictation_stub.rs"]
 mod dictation;
 mod fsx;
+mod gates;
+mod gates_commands;
 mod git;
 mod governor;
 mod instructions;
@@ -685,6 +687,9 @@ pub fn run() {
             ledger::ledger_query,
             ledger::ledger_root,
             ledger::ledger_update_status,
+            gates_commands::gates_policy_write,
+            gates_commands::gates_policy_read,
+            gates_commands::gates_allow_once,
             tasks::task_reserve,
             tasks::task_attempt_reserve,
             tasks::task_attempt_start,

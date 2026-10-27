@@ -1880,6 +1880,15 @@ const MARKERS: &[&str] = &["agent-events.jsonl", "canopy-hook", ".canopy/"];
 /// the gate then does with the event.
 const WRITE_TOOLS_MATCHER: &str = "Write|Edit|MultiEdit|NotebookEdit";
 
+/// The other tools a compiled rule (gates.rs) has an opinion about before they
+/// run: shell commands (irreversible actions, denied commands, package and
+/// egress lists), reads (the trifecta's secret leg), fetches (egress) and the
+/// vault. Write tools are already woken by WRITE_TOOLS_MATCHER, and the same
+/// helper evaluates gates on both, so nothing is listed twice. Grep, Glob and
+/// the rest of the hot path stay unhooked.
+const GATE_TOOLS_MATCHER: &str =
+    "Bash|Read|WebFetch|mcp__canopy__canopy_vault_fill|mcp__canopy__canopy_vault_read";
+
 /// Where the hook helper lives once installed. Hooks reference this stable path
 /// rather than the app bundle, so they keep working across upgrades and don't
 /// break if the app is moved.
@@ -2418,6 +2427,11 @@ fn setup_claude_hooks(cfg: &str, home: &str, bridge: &str) -> Result<String, Str
         ("SubagentStop", None),
         ("PreToolUse", Some("AskUserQuestion")),
         ("PreToolUse", Some(WRITE_TOOLS_MATCHER)),
+        // Team rules and the always-on irreversible-action gate. The cost is a
+        // ~1ms helper start in front of each shell command and read; with no
+        // policy and nothing irreversible it prints nothing and the CLI's own
+        // permission flow proceeds untouched.
+        ("PreToolUse", Some(GATE_TOOLS_MATCHER)),
     ] {
         match wanted.iter_mut().find(|(e, _)| *e == event) {
             Some((_, matchers)) => matchers.push(matcher),
@@ -5680,6 +5694,30 @@ mod integration_tests {
             !pre.iter().any(|e| e["matcher"].is_null()),
             "an unmatched PreToolUse puts the helper in front of every tool call"
         );
+    }
+
+    #[test]
+    fn claude_is_woken_for_shell_and_reads_so_gates_can_run() {
+        let home = scratch_home("claude-gates");
+        setup_agent("claude", home.to_str().unwrap()).unwrap();
+        let raw = std::fs::read_to_string(home.join(".claude/settings.json")).unwrap();
+        let cfg: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        let pre = cfg["hooks"]["PreToolUse"].as_array().unwrap();
+        let matchers: Vec<&str> = pre.iter().filter_map(|e| e["matcher"].as_str()).collect();
+        assert!(matchers.contains(&GATE_TOOLS_MATCHER), "{matchers:?}");
+        for tool in ["Bash", "Read", "WebFetch"] {
+            assert!(GATE_TOOLS_MATCHER.split('|').any(|m| m == tool), "{tool}");
+        }
+        // No tool is woken twice, and the hot read-only tools are not woken.
+        for tool in GATE_TOOLS_MATCHER.split('|') {
+            assert!(!WRITE_TOOLS_MATCHER.split('|').any(|m| m == tool), "{tool}");
+        }
+        assert!(!GATE_TOOLS_MATCHER.split('|').any(|m| m == "Grep" || m == "Glob"));
+        // Installing twice is stable: the retain/extend in setup must not stack.
+        setup_agent("claude", home.to_str().unwrap()).unwrap();
+        let again: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(home.join(".claude/settings.json")).unwrap()).unwrap();
+        assert_eq!(again["hooks"]["PreToolUse"].as_array().unwrap().len(), pre.len());
     }
 
     #[test]

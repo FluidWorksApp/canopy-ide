@@ -37,6 +37,10 @@ use std::process::{Command, ExitStatus, Stdio};
 mod agent_instructions;
 #[path = "../agent_life.rs"]
 mod agent_life;
+// Rules compiled into gates: the policy file the app writes and the evaluator
+// that reads it. Shared source so both sides agree on the format byte for byte.
+#[path = "../gates.rs"]
+mod gates;
 
 const MAX_PROMPTS: usize = 6;
 const MAX_FILES: usize = 14;
@@ -625,6 +629,16 @@ fn real_main() -> Result<(), Box<dyn std::error::Error>> {
     let cwd = event["cwd"].as_str().unwrap_or("").to_string();
     let hook_event = event["hook_event_name"].as_str().unwrap_or("").to_string();
 
+    // Team rules and the irreversible-action gate. Decided before the bus
+    // publish so the verdict rides on the event the app sees — that is how a
+    // block reaches the agent's tab without a second channel.
+    let gate = gate_check(&hook_event, &event, &session_id, &cwd, agent_override.as_deref());
+    if let Some(stamp) = gate.as_ref().and_then(|g| g.stamp.clone()) {
+        if let Some(map) = event.as_object_mut() {
+            map.insert("canopy_gate".into(), stamp);
+        }
+    }
+
     let task = authenticated_task_identity();
     publish_to_bus(&raw, &event, task.as_ref());
     if safe_session_id(&session_id) {
@@ -651,6 +665,37 @@ fn real_main() -> Result<(), Box<dyn std::error::Error>> {
         let root = write_root.as_ref()?;
         denied_root_write(path, root, &home()).then(|| root_denial(path, root))
     };
+
+    // A gate's deny, in the contract of each CLI whose PreToolUse deny shape is
+    // proven: Claude Code (bare on the desktop, `--agent claude` in the Linux
+    // workspace) and agy's decision object. Codex, Cursor and the rest still get
+    // the block recorded and shown — just not refused, because a guessed stdout
+    // contract breaks the session it is attached to.
+    if let Some(reason) = gate.as_ref().and_then(|g| g.deny.clone()) {
+        match agent_override.as_deref() {
+            None | Some("claude") => {
+                println!(
+                    "{}",
+                    serde_json::json!({
+                        "hookSpecificOutput": {
+                            "hookEventName": "PreToolUse",
+                            "permissionDecision": "deny",
+                            "permissionDecisionReason": reason,
+                        }
+                    })
+                );
+                return Ok(());
+            }
+            Some("agy") if event["agy_event"].as_str() == Some("PreToolUse") => {
+                println!(
+                    "{}",
+                    serde_json::json!({ "decision": "deny", "reason": reason })
+                );
+                return Ok(());
+            }
+            _ => {}
+        }
+    }
 
     match agent_override.as_deref() {
         // Historical installs registered PreToolUse. Never answer "allow": in
@@ -707,9 +752,22 @@ fn real_main() -> Result<(), Box<dyn std::error::Error>> {
                 // this, so it always gets the blob; an established one gets it
                 // only when it has actually changed. See `peer_context_changed`.
                 let always = hook_event == "SessionStart";
-                if let Some(context) = peer_context(&session_id, &cwd)
-                    .filter(|c| peer_context_changed(&session_id, c) || always)
-                {
+                let peers = peer_context(&session_id, &cwd)
+                    .filter(|c| peer_context_changed(&session_id, c) || always);
+                // The project's rules, once per session: guidance in a short
+                // list instead of a longer instruction file, plus a note of
+                // which ones Canopy enforces.
+                let rules = always
+                    .then(|| {
+                        gates::load_policy(&home(), std::path::Path::new(&cwd))
+                            .and_then(|(_, p)| gates::session_context(&p))
+                    })
+                    .flatten();
+                let context = match (peers, rules) {
+                    (Some(p), Some(r)) => Some(format!("{r}\n{p}")),
+                    (p, r) => p.or(r),
+                };
+                if let Some(context) = context {
                     let out = serde_json::json!({
                         "hookSpecificOutput": {
                             "hookEventName": hook_event,
@@ -2274,6 +2332,207 @@ fn edit_diagnostics(event: &serde_json::Value) -> Option<String> {
 // must start cleanly in ANY terminal — outside Canopy the tools simply answer
 // that no IDE is around, instead of the process refusing to run (which the
 // agent CLI would surface as a broken MCP server).
+
+// ---- rules compiled into gates ---------------------------------------------
+//
+// The deterministic half of the Rules panel. Pure evaluation in gates.rs against
+// a small JSON policy the app wrote; no brain, no network, no app needed. The
+// cost on a tool call with no policy and nothing irreversible is one directory
+// walk, one hash and a failed open.
+
+struct GateVerdict {
+    /// What the agent is told when the call is refused.
+    deny: Option<String>,
+    /// Stamped on the bus event as `canopy_gate` for the app.
+    stamp: Option<serde_json::Value>,
+}
+
+/// The CLIs whose PreToolUse deny contract is proven (see the deny arm in
+/// `real_main`). Elsewhere a refusal is not delivered, so nothing is evaluated:
+/// recording "blocked" for a command that then ran would be worse than silence.
+fn gate_enforces(agent: Option<&str>) -> bool {
+    matches!(agent, None | Some("claude") | Some("agy"))
+}
+
+fn gate_taint_ids(session_id: &str) -> Vec<String> {
+    let mut ids = Vec::new();
+    if safe_session_id(session_id) && !session_id.is_empty() {
+        ids.push(format!("session-{session_id}"));
+    }
+    if let Some(id) = gates::pty_taint_id(
+        std::env::var("CANOPY_INSTANCE").ok().as_deref(),
+        std::env::var("CANOPY_PTY").ok().as_deref(),
+    ) {
+        ids.push(id);
+    }
+    ids
+}
+
+fn gate_check(
+    hook_event: &str,
+    event: &serde_json::Value,
+    session_id: &str,
+    cwd: &str,
+    agent: Option<&str>,
+) -> Option<GateVerdict> {
+    let tool = event["tool_name"].as_str().filter(|t| !t.is_empty())?;
+    let home = home();
+    // The trifecta's first leg: remember that this session has read content a
+    // stranger wrote. PostToolUse, because a fetch that failed read nothing.
+    if hook_event == "PostToolUse" {
+        if gates::reads_untrusted(tool) {
+            gates::mark_tainted(&home, &gate_taint_ids(session_id), tool);
+        }
+        return None;
+    }
+    if hook_event != "PreToolUse" || !gate_enforces(agent) {
+        return None;
+    }
+    let cwd_path = std::path::Path::new(if cwd.is_empty() { "." } else { cwd });
+    let patch_writes: Vec<String> = patch_body(&event["tool_input"])
+        .map(|body| {
+            apply_patch_records(&body, cwd)
+                .into_iter()
+                .map(|r| r.path)
+                .collect()
+        })
+        .unwrap_or_default();
+    let action = gates::action_from_event(tool, &event["tool_input"], cwd_path, patch_writes);
+    if action.command.is_none()
+        && action.writes.is_empty()
+        && action.reads.is_empty()
+        && action.url.is_none()
+        && !gates::is_vault_tool(tool)
+    {
+        return None;
+    }
+    let loaded = gates::load_policy(&home, cwd_path);
+    let taint_ids = gate_taint_ids(session_id);
+    let tainted = gates::is_tainted(&home, &taint_ids);
+    let top = gates::worktree_top(cwd_path);
+    let ctx = gates::Ctx {
+        cwd: cwd_path,
+        top: top.as_deref(),
+        home: &home,
+        git: &gates::FsGit,
+    };
+    let policy = loaded.as_ref().map(|(_, p)| p);
+    let findings = gates::evaluate(policy, &action, &ctx, tainted.as_deref());
+    let outcome = gates::outcome(&findings, policy.is_some_and(|p| p.trifecta_blocks()));
+    if outcome == gates::Outcome::Allow {
+        return None;
+    }
+    let root = loaded
+        .as_ref()
+        .map(|(r, _)| r.clone())
+        .or_else(|| gates::canonical_root(cwd_path))
+        .unwrap_or_else(|| cwd.to_string());
+    let identity = action.identity();
+    let key = gates::action_key(&root, &identity);
+    // An "Approve once" the person already gave for exactly this. Spent here.
+    let allowed_once = matches!(
+        outcome,
+        gates::Outcome::Blocked | gates::Outcome::NeedsApproval
+    ) && gates::consume_once(&home, &key, now_secs() * 1000);
+    let status = if allowed_once {
+        "allowed-once"
+    } else {
+        match outcome {
+            gates::Outcome::Warn => "warned",
+            gates::Outcome::Blocked => "blocked",
+            gates::Outcome::NeedsApproval => "needs-approval",
+            gates::Outcome::Refused => "refused",
+            gates::Outcome::Allow => "allowed",
+        }
+    };
+    let deny = (!allowed_once
+        && matches!(
+            outcome,
+            gates::Outcome::Blocked | gates::Outcome::NeedsApproval | gates::Outcome::Refused
+        ))
+    .then(|| gates::agent_reason(&findings, outcome));
+    let mut rnd = [0u8; 8];
+    let _ = getrandom::getrandom(&mut rnd);
+    let event_id = hex::encode(rnd);
+    let lead = findings
+        .iter()
+        .find(|f| f.kind == gates::FindingKind::Rule)
+        .or_else(|| findings.first());
+    let shown_action = truncate(&identity, 400);
+    let stamp = serde_json::json!({
+        "id": event_id,
+        "status": status,
+        "key": key,
+        "root": root,
+        "tool": tool,
+        "action": shown_action,
+        "findings": findings,
+        "reason": deny.clone().unwrap_or_default(),
+    });
+    // The durable record, written here rather than by the app so a block is
+    // counted even when no window is open. The app de-duplicates on the
+    // gate-event ref when the same block arrives over the bus.
+    let scope = lead
+        .and_then(|f| f.rule_id.as_ref())
+        .and_then(|id| policy?.gates.iter().find(|g| &g.id == id))
+        .map(|g| g.scope.clone())
+        .filter(|s| s == "team")
+        .unwrap_or_else(|| "project".into());
+    let _ = gates::append_ledger(
+        &home,
+        &root,
+        serde_json::json!({
+            "kind": "rule",
+            "author": {
+                "kind": "workspace",
+                "name": "gates",
+                "sessionId": session_id,
+                "cli": event["agent"].as_str().unwrap_or("claude"),
+            },
+            "scope": scope,
+            "subject": lead.map(|f| f.label.clone()).unwrap_or_default(),
+            "ref": { "kind": "gate-event", "id": event_id },
+            "status": status,
+            "data": {
+                "type": "block",
+                "status": status,
+                "ruleId": lead.and_then(|f| f.rule_id.clone()),
+                "ruleText": lead.and_then(|f| f.rule_text.clone()),
+                "class": lead.map(|f| f.class.clone()),
+                "findingKind": lead.map(|f| f.kind),
+                "label": lead.map(|f| f.label.clone()),
+                "tool": tool,
+                "action": shown_action,
+                "key": key,
+                "sessionId": session_id,
+            },
+        }),
+    );
+    Some(GateVerdict {
+        deny,
+        stamp: Some(stamp),
+    })
+}
+
+/// The MCP half of the trifecta gate, for the vault tools.
+fn vault_trifecta_gate(name: &str) -> Option<String> {
+    if !gates::is_vault_tool(name) {
+        return None;
+    }
+    let home = home();
+    let id = gates::pty_taint_id(
+        std::env::var("CANOPY_INSTANCE").ok().as_deref(),
+        std::env::var("CANOPY_PTY").ok().as_deref(),
+    )?;
+    let source = gates::is_tainted(&home, &[id])?;
+    let (_, policy) = gates::load_policy(&home, std::path::Path::new(&cwd()))?;
+    policy.trifecta_blocks().then(|| {
+        format!(
+            "Blocked by Canopy's untrusted-content rule: this session read content from the web ({source}), \
+             so saved passwords are off for the rest of it. Ask the person to sign in, or start a fresh session."
+        )
+    })
+}
 
 // ---- the research harness -------------------------------------------------
 //
@@ -4671,6 +4930,13 @@ fn companion_gate(name: &str, args: &serde_json::Value) -> Option<Result<ToolOut
 }
 
 fn call_tool(name: &str, args: &serde_json::Value) -> Result<ToolOutput, String> {
+    // Secrets stay out of a session that read untrusted web content, when the
+    // project's policy says so. Checked here as well as in PreToolUse because
+    // this server is the one door every MCP-capable CLI goes through, hooks or
+    // not.
+    if let Some(reason) = vault_trifecta_gate(name) {
+        return Err(reason);
+    }
     // Before anything else: the companion's write gate. Placed at the top of
     // dispatch so no individual tool handler has to remember it, and so a tool
     // added later is gated by being on the mutating list rather than by its

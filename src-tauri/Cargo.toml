@@ -151,6 +151,10 @@ getrandom = "0.2"
 # a teammate across sessions.
 ed25519-dalek = "2"
 hex = "0.4"
+# Rules compiled into gates (gates.rs): globs for protected paths and linear-time
+# regexes for command patterns. Both already in the tree via `ignore`.
+globset = "0.4"
+regex = "1"
 # Voice dictation: local ASR (Parakeet / SenseVoice / Moonshine) via ONNX
 # Runtime. All of `dictation`-feature-gated (optional): cpal captures the mic,
 # rubato resamples to the model's 16 kHz, reqwest streams the one-time model
