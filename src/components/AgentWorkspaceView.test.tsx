@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import { fireEvent, render, screen } from "@testing-library/react";
 import { useState } from "react";
 import {
+  changesPaneState,
   CommentComposer,
   loadAgentFileContents,
   sameJson,
@@ -232,5 +233,27 @@ describe("journal file loading bounds", () => {
 
     expect(read).toHaveBeenCalledTimes(1);
     expect(result.size).toBe(0);
+  });
+});
+
+describe("changes pane state", () => {
+  const ws = { branch: "feat", detached: false, on_base: false };
+  const base = { repo: "/r", ws, wsErr: null, pane: "diff", patch: null, patchErr: null };
+  it("loads while the workspace or its patch is on its way", () => {
+    expect(changesPaneState({ ...base, ws: null })).toBe("loading");
+    expect(changesPaneState(base)).toBe("loading");
+  });
+  it("ends in an error instead of spinning when the patch read fails", () => {
+    expect(changesPaneState({ ...base, patchErr: "The Linux workspace does not support git_branch_patch yet" })).toBe("error");
+  });
+  it("never waits on a fetch that is never started", () => {
+    expect(changesPaneState({ ...base, ws: { ...ws, detached: true } })).toBe("unavailable");
+    expect(changesPaneState({ ...base, ws: { ...ws, on_base: true } })).toBe("unavailable");
+    expect(changesPaneState({ ...base, pane: "uncommitted", ws: { ...ws, branch: null } })).toBe("unavailable");
+  });
+  it("shows the diff once it arrives, and nothing without a repo or pane", () => {
+    expect(changesPaneState({ ...base, patch: { patch: "" } })).toBe("ready");
+    expect(changesPaneState({ ...base, ws: null, repo: null })).toBe("none");
+    expect(changesPaneState({ ...base, pane: null })).toBe("none");
   });
 });
