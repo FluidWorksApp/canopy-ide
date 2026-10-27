@@ -2630,6 +2630,12 @@ export const provenanceForSession = (sessionId: string) =>
 
 /** Adopt the history already on disk. `prs` comes from the PR watcher the
  *  frontend already holds, so this needs no network of its own. */
+/** A Linux workspace's PR watcher pass (host provenance.mjs): every PR for the
+ *  repository with when it opened and merged (ms), recording an observed edge
+ *  for each new one a session raised. Workspace host only. */
+export interface ObservedPr { number: number; url: string; branch: string; createdAt: number | null; mergedAt: number | null }
+export const provenanceObserve = (repo: string) =>
+  invoke<{ repo: string; prs: ObservedPr[]; recorded: number }>("provenance_observe", { repo });
 export const provenanceBackfill = (
   repo: string,
   prs: { number: number; url: string; branch: string }[],

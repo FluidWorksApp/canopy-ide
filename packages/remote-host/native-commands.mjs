@@ -32,7 +32,7 @@ export const NATIVE_COMMANDS=new Set([
  // Undo-turn snapshots.
  'turn_snapshot','turn_list','turn_preview','turn_restore','turn_native_checkpoint',
  // Pull request provenance.
- 'provenance_record','provenance_for_pr','provenance_for_session','provenance_backfill',
+ 'provenance_record','provenance_observe','provenance_for_pr','provenance_for_session','provenance_backfill',
  // Git operations: worktrees, sync, branches, discard.
  'git_checkout_detached','git_branch_release','git_checkout_carry','git_discard','git_operation_quit','git_branch_at','git_branch_delete','git_branch_delete_remote','git_rev_count','git_show_at','git_share_context','git_work_audit','git_worktree_add','git_worktree_add_pr','git_worktree_bootstrap','git_worktree_remove','git_worktree_realign','git_worktree_prune','git_sync_probe','git_sync_apply','git_sync_abort','git_pr_merge_probe','fs_repo_path','fs_snapshot_files',
  // Agent changes panel.
@@ -50,6 +50,6 @@ export const isNativeCommand=command=>typeof command==='string'&&(NATIVE_COMMAND
 /** How long the gateway waits for a command's answer: network Git and GitHub
  *  work, worktree setup and disk scans outlast the default 15 seconds. The
  *  desktop allows 15 seconds more for the trip itself. */
-const LONG_NATIVE=new Set(['receipt_run_check','git_clone','git_fetch','git_pull','git_push','git_worktree_add','git_worktree_add_pr','git_worktree_bootstrap','git_sync_probe','git_sync_apply','git_pr_merge_probe','git_branch_delete_remote','git_share_context','git_work_audit','cleanup_scan','cleanup_run','provenance_backfill']);
+const LONG_NATIVE=new Set(['receipt_run_check','git_clone','git_fetch','git_pull','git_push','git_worktree_add','git_worktree_add_pr','git_worktree_bootstrap','git_sync_probe','git_sync_apply','git_pr_merge_probe','git_branch_delete_remote','git_share_context','git_work_audit','cleanup_scan','cleanup_run','provenance_backfill','provenance_observe']);
 const MCP_CALLS=new Set(['mcp_call_tool','mcp_task_get','mcp_task_update','mcp_task_cancel']);
 export const nativeTimeoutMs=command=>LONG_NATIVE.has(command)?330_000:MCP_CALLS.has(command)?300_000:command==='mcp_connect'?180_000:typeof command==='string'&&command.startsWith('gh_')?135_000:command==='profile_import_git'?45_000:15_000;

@@ -47,6 +47,7 @@ import {workflowStoreCommands} from './workflow-store.mjs';
 import {structuredRunnerCommands} from './structured-runner.mjs';
 import {turnsCommands} from './turns.mjs';
 import {provenanceCommands} from './provenance.mjs';
+import {PrObserver} from './pr-observer.mjs';
 import {ChannelHub,isChannelArg} from './channels.mjs';
 import {HOST_PROTOCOL,NATIVE_COMMANDS,NATIVE_PREFIXES} from './native-commands.mjs';
 import {WorkspaceGates} from './gates.mjs';
@@ -117,6 +118,9 @@ export const NATIVE_FAMILIES=Object.assign({},...[
  workspaceToolsCommands,workspaceCleanupCommands,lspCommands,githubCommands,taskStoreCommands,workflowStoreCommands,structuredRunnerCommands,turnsCommands,provenanceCommands,gitOpsCommands,agentWorkspaceCommands,workspaceMiscCommands,mcpClientCommands,spotIndexCommands,
 ].map(family=>family(familyContext)));
 const FAMILIES=NATIVE_FAMILIES;
+// PR-watcher provenance rows (prwatch.rs): the IDE names the projects with pr_watch_set.
+const prObserver=new PrObserver({observe:repo=>FAMILIES.provenance_observe({repo})});
+familyContext.prObserver=prObserver;
 // The Rules panel's approved gates and approve-once tokens, written where this
 // workspace's canopy-hook reads them (gates.mjs).
 const workspaceGates=new WorkspaceGates({home:HOME,run:(bin,argv,cwd)=>run(bin,argv,cwd)});
@@ -181,7 +185,7 @@ export async function nativeInvoke(command,args={}){
   if(command==='instance_id')return 'remote-'+(process.env.CANOPY_WORKSPACE_ID??'workspace');
   if(command==='relay_status')return {role:'off',code:null,port:null,ips:[],addr:null,self_id:null,name:null,visibility:null,public_ip:null,members:[]};
   if(['notes_list','notes_due','research_list'].includes(command))return metadata(command+'.json',[]);
-  if(['context_tools','context_publish','set_context_scopes','pr_watch_set'].includes(command)){await saveMetadata(command+'.json',args);return;}
+  if(['context_tools','context_publish','set_context_scopes','pr_watch_set'].includes(command)){await saveMetadata(command+'.json',args);if(command==='pr_watch_set')prObserver.watch(args.paths,args.focused);return;}
   if(command==='terminal_governor_status'){
     const limit=Number(await readFile('/sys/fs/cgroup/memory.max','utf8'));
     const used=Number(await readFile('/sys/fs/cgroup/memory.current','utf8'));

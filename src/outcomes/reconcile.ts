@@ -8,6 +8,11 @@
 // The price is that a PR merged on GitHub counts once the checkout has fetched
 // it, and a rebase-merge (no "#12" in any subject) is not seen as merged.
 //
+// A cloud workspace has no PR watcher rows on this computer, so there the
+// workspace host's own watcher pass (provenance_observe) supplies each PR's
+// open and merge times from GitHub — merges (rebase-merges included) and
+// time in review — and records the edges it observes.
+//
 // Writing outcomes back to the ledger is what lets `outcomesFor` (the
 // autonomy view's input) answer from the ledger alone, cheaply and without
 // git.
@@ -53,6 +58,9 @@ export interface ReconcileDeps {
   provenance(sessionId: string): Promise<{ pr_number: number; at: number }[]>;
   /** When a PR the watcher still holds was opened (ms), if it holds it. */
   prOpened?(repo: string, number: number): number | null;
+  /** Every PR of the repository with its open and merge times (ms), when
+   *  something can ask GitHub (a cloud workspace's host). */
+  prHistory?(repo: string): Promise<{ number: number; createdAt: number | null; mergedAt: number | null }[]>;
 }
 
 export interface OutcomesReport {
@@ -118,6 +126,14 @@ export async function gatherOutcomes(
   }
 
   const merged = parseMergedPrs(log);
+  const history = new Map<number, { createdAt: number | null; mergedAt: number | null }>();
+  if (deps.prHistory) {
+    for (const pr of await deps.prHistory(root).catch(() => [])) {
+      history.set(pr.number, pr);
+      // GitHub's merge time is the real one, and sees rebase-merges too.
+      if (pr.mergedAt != null) merged.set(pr.number, pr.mergedAt);
+    }
+  }
   const hashOf = new Map<number, string>();
   for (const c of log) {
     const n = mergedPrOf(c.subject);
@@ -133,7 +149,10 @@ export async function gatherOutcomes(
         s.sessionId,
         rows.map((r) => ({
           prNumber: r.pr_number,
-          openedAt: deps.prOpened?.(root, r.pr_number) ?? (r.at > 0 ? r.at * 1000 : null),
+          openedAt:
+            deps.prOpened?.(root, r.pr_number) ??
+            history.get(r.pr_number)?.createdAt ??
+            (r.at > 0 ? r.at * 1000 : null),
         })),
       );
     }),
@@ -144,7 +163,7 @@ export async function gatherOutcomes(
   const linked = new Set([...edges.values()].flat().map((e) => e.prNumber));
   await Promise.all(
     [...linked]
-      .filter((n) => merged.has(n) && hashOf.has(n))
+      .filter((n) => merged.has(n) && hashOf.has(n) && history.get(n)?.mergedAt == null)
       .slice(0, 50)
       .map(async (n) => {
         const iso = await deps.commitDate(root, hashOf.get(n)!).catch(() => null);

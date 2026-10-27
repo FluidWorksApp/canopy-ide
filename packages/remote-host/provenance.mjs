@@ -138,6 +138,27 @@ export function provenanceCommands(ctx){
    const id=str(sessionId,'sessionId',{max:256});
    return query(e=>e.session_id===id);
   },
+  /** The workspace's PR watcher pass (prwatch.rs attribute_observed): every PR
+   *  on GitHub for this repository, with when it opened and merged, and an
+   *  edge for each new one a session's branch produced (via pr_watch). */
+  async provenance_observe({repo}={}){
+   const dir=await ctx.scoped(str(repo,'repo'));
+   const top=await ctx.scoped((await ctx.run('git',['rev-parse','--show-toplevel'],dir)).trim());
+   const key=await repoKey(top);
+   let rows;
+   try{rows=JSON.parse(await ctx.run('gh',['pr','list','--limit',String(HISTORY_LIMIT),'--state','all','--json','number,url,headRefName,createdAt,mergedAt'],top,120000,{GH_PROMPT_DISABLED:'1'}));}
+   catch(error){throw Error(`GitHub pull requests are unavailable here: ${String(error?.message??error).split('\n')[0]}`);}
+   const ms=v=>{const t=typeof v==='string'&&v?Date.parse(v):NaN;return Number.isFinite(t)?t:null;};
+   const prs=(Array.isArray(rows)?rows:[]).filter(r=>Number.isSafeInteger(r?.number)&&r.number>0&&typeof r.url==='string'&&typeof r.headRefName==='string')
+    .map(r=>({number:r.number,url:r.url,branch:r.headRefName,createdAt:ms(r.createdAt),mergedAt:ms(r.mergedAt)}));
+   const fresh=await locked(async()=>{await sync();return prs.filter(p=>!cache.edges.some(e=>e.repo===key&&e.pr_number===p.number));});
+   let recorded=0;
+   if(fresh.length){
+    const {edges}=await sweep(path.join(ctx.home,'.canopy','sessions'),fresh,await ownedDirs(top),key,'pr_watch');
+    recorded=await locked(async()=>{await sync();let n=0;for(const e of edges)if(await append(e))n++;return n;});
+   }
+   return {repo:key,prs,recorded};
+  },
   async provenance_backfill({repo,prs}={}){
    const dir=await ctx.scoped(str(repo,'repo'));
    const top=await ctx.scoped((await ctx.run('git',['rev-parse','--show-toplevel'],dir)).trim());

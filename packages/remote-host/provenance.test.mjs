@@ -166,3 +166,24 @@ test('backfill with no seeds asks gh, and a gh failure is an empty report',async
 });
 
 test('reads are the read-only half',()=>{assert.deepEqual(PROVENANCE_READ_ONLY,['provenance_for_pr','provenance_for_session']);});
+
+test('the workspace PR watcher records new PRs as observed and reports their open and merge times',async()=>{
+ const t=await setup();
+ try{
+  await digests(t.home,[['s-main','feat/a',t.repo],['s-wt','feat/b',t.wt]]);
+  await rec(t,{prNumber:2,branch:'feat/b',sessionId:'s-wt',via:'job_done'});
+  t.setGh(JSON.stringify([
+   {number:1,url:'https://github.com/o/n/pull/1',headRefName:'feat/a',createdAt:'2026-01-01T00:00:00Z',mergedAt:'2026-01-02T06:00:00Z'},
+   {number:2,url:'https://github.com/o/n/pull/2',headRefName:'feat/b',createdAt:'2026-01-03T00:00:00Z',mergedAt:null},
+  ]));
+  const out=await t.c.provenance_observe({repo:t.wt});
+  assert.equal(out.repo,t.repo);assert.equal(out.recorded,1,'only the PR with no edge yet is swept');
+  assert.deepEqual(out.prs.map(p=>[p.number,p.createdAt,p.mergedAt]),[[1,Date.parse('2026-01-01T00:00:00Z'),Date.parse('2026-01-02T06:00:00Z')],[2,Date.parse('2026-01-03T00:00:00Z'),null]]);
+  const r=await rows(t);
+  assert.deepEqual(r.map(e=>[e.session_id,e.pr_number,e.via]).sort(),[['s-main',1,'pr_watch'],['s-wt',2,'job_done']]);
+  assert.deepEqual(t.gh[0].argv,['pr','list','--limit','200','--state','all','--json','number,url,headRefName,createdAt,mergedAt']);
+  assert.equal((await t.c.provenance_observe({repo:t.repo})).recorded,0);
+  t.setGh(Error('gh: not logged in'));
+  await assert.rejects(t.c.provenance_observe({repo:t.repo}),/GitHub pull requests are unavailable here: gh: not logged in/);
+ }finally{await t.done();}
+});

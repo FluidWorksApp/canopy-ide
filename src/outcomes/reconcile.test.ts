@@ -188,3 +188,30 @@ describe("outcomesFor (autonomy input)", () => {
     expect(query).toHaveBeenCalledWith("/repo", expect.objectContaining({ sinceTs: 0 }));
   });
 });
+
+describe("cloud workspace PR history", () => {
+  it("takes merges and time in review from the workspace's PR watcher, even with no merge commit here", async () => {
+    const now = Date.now();
+    const s = spend("s-cloud", [["src/a.ts", now - 3 * DAY]]);
+    const deps: ReconcileDeps = {
+      query: vi.fn(async (_root: string, q: { kinds?: string[] }) =>
+        [entry("spend", s)].filter((e) => !q.kinds || q.kinds.includes(e.kind)),
+      ) as ReconcileDeps["query"],
+      append: vi.fn() as never,
+      gitLog: async () => [],
+      commitDate: async () => null,
+      commitPatch: async () => "",
+      provenance: async (sid) => (sid === "s-cloud" ? [{ pr_number: 12, at: 0 }] : []),
+      prHistory: async () => [
+        { number: 12, createdAt: now - 2 * DAY, mergedAt: now - 2 * DAY + 5 * 3_600_000 },
+        { number: 13, createdAt: now - DAY, mergedAt: null },
+      ],
+    };
+    const report = await gatherOutcomes(deps, "/workspace/repo", now - 30 * DAY);
+    const o = report.outcomes.find((x) => x.sessionId === "s-cloud")!;
+    expect(o.merged).toBe(true);
+    expect(o.mergedPrs).toEqual([12]);
+    expect(o.reviewHours).toBeCloseTo(5);
+    expect(report.mergedInWindow).toBe(1);
+  });
+});

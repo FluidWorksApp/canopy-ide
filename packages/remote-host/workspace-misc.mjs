@@ -8,7 +8,8 @@ import {mkdir,readFile,rename,unlink,writeFile} from 'node:fs/promises';
 import {randomBytes,randomUUID} from 'node:crypto';
 const MIB=1024*1024,GIB=1024*MIB,STEP=512*MIB,MIN_MAX=512*MIB,MAX_MAX=1024*GIB,DEFAULTS_CAP=64;
 export const WORKSPACE_MISC_READ_ONLY=['terminal_governor_incidents','terminal_governor_memory_maxima'];
-export function workspaceMiscCommands({home,pulse,setupAgent}){
+export function workspaceMiscCommands(ctx){
+ const {home,pulse,setupAgent}=ctx;
  const builds=new Map();
  const defaultsFile=home+'/.canopy/terminal-governor-defaults.json';
  const readMaxima=async()=>{try{const value=JSON.parse(await readFile(defaultsFile,'utf8'));return value&&typeof value.maxima==='object'?value.maxima:{};}catch(error){if(error.code==='ENOENT'||error instanceof SyntaxError)return {};throw error;}};
@@ -30,7 +31,8 @@ export function workspaceMiscCommands({home,pulse,setupAgent}){
    pulse?.('sessions','',id);
   },
   profile_setup:async({agent,id})=>setupAgent(agent,id),
-  pr_watch_now:async()=>{},
+  // A watch pass now: provenance rows for any new PR (pr-observer.mjs).
+  pr_watch_now:async()=>{await ctx.prObserver?.now();},
   terminal_governor_incidents:async()=>[],
   terminal_governor_grant:async({id})=>unmonitored(id),
   terminal_governor_stop:async({id})=>unmonitored(id),

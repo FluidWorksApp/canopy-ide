@@ -14,6 +14,7 @@ import { appendLedger, queryLedger } from "../ledger";
 import { onAgentTurnEnd, onAgentTurnStart } from "../agentTurns";
 import { postAttention, resolveAttentionByKey } from "../attention";
 import { rowFor } from "../prWatchStore";
+import { isWorkspaceHost } from "../host";
 import { createSpendRecorder, planForSession } from "./spend";
 import { ACTIVE_POLL_MS, createBudgetMonitor } from "./budgets";
 import { reconcileOutcomes, type ReconcileDeps } from "./reconcile";
@@ -137,6 +138,9 @@ export const realReconcileDeps: ReconcileDeps = {
     const ts = row ? Date.parse(row.created) : NaN;
     return Number.isFinite(ts) ? ts : null;
   },
+  // A cloud workspace's host watches PRs for provenance and knows when each
+  // opened and merged; the desktop's watcher rows don't cover its checkouts.
+  prHistory: async (repo) => (isWorkspaceHost() ? (await ipc.provenanceObserve(repo)).prs : []),
 };
 
 /** Background reconcile per repository at most this often. */
