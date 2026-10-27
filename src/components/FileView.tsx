@@ -174,9 +174,11 @@ export function FileView(props: FileViewProps) {
           <div className="blocked-file-path">{file.name}</div>
           <div className="blocked-file-detail">{detail}</div>
           <div className="blocked-file-actions">
-            <Button onClick={() => void ipc.fsReveal(file.path)}>
-              Reveal in file manager
-            </Button>
+            {ipc.canRevealProjectPaths() && (
+              <Button onClick={() => void ipc.fsReveal(file.path)}>
+                Reveal in file manager
+              </Button>
+            )}
             {/* Only for size: a binary blob has nothing to show however hard
                 you insist, but "too large" is a judgement call the user is
                 entitled to overrule on their own machine. */}

@@ -2,7 +2,7 @@
 // events and channels; native work (PTYs, LSP, files) remains in the Rust core.
 import { createChannel, invoke, invokeDesktop } from "./host";
 import { startRendererHeartbeat } from "./rendererHeartbeat";
-import { isRemoteHost, listen as hostListen, type UnlistenFn } from "./host";
+import { isRemoteHost, isWorkspaceHost, listen as hostListen, type UnlistenFn } from "./host";
 import type { HostEvent } from "./host/contract";
 import type { ShortcutProfile } from "./shortcuts";
 import type {
@@ -2252,6 +2252,11 @@ export const fsRename = (from: string, to: string) =>
 /** Moves to the OS trash — recoverable, unlike an unlink. */
 export const fsTrash = (path: string) => invoke<void>("fs_trash", { path });
 export const fsReveal = (path: string) => invoke<void>("fs_reveal", { path });
+/** Whether a project path can be shown in this computer's file manager: not
+ *  when the project lives in a cloud workspace. */
+export const canRevealProjectPaths = () => !isWorkspaceHost();
+/** A path on this computer (a relay download), shown even from a workspace. */
+export const fsRevealDesktop = (path: string) => invokeDesktop<void>("fs_reveal", { path });
 export const fsDuplicate = (path: string) =>
   invoke<string>("fs_duplicate", { path });
 

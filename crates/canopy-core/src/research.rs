@@ -661,6 +661,34 @@ pub struct SweepSummary {
     skipped: usize,
 }
 
+/// What `sweep_plan` answers: the paths still to import, and how many paths
+/// qualified at all (`matched` in the sweep summary).
+#[derive(Debug, Serialize)]
+pub struct SweepPlan {
+    pub candidates: Vec<String>,
+    pub matched: usize,
+}
+
+/// A path named by a caller that can see a file this host cannot (a container
+/// path): normalised by text alone, never resolved through this host's disk.
+fn lexical_path(path: &str) -> Result<PathBuf, String> {
+    let raw = Path::new(path.trim());
+    if !raw.is_absolute() {
+        return Err(format!("{path} is not an absolute path"));
+    }
+    let mut out = PathBuf::new();
+    for part in raw.components() {
+        match part {
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                return Err(format!("{path} climbs out with .."));
+            }
+            other => out.push(other.as_os_str()),
+        }
+    }
+    Ok(out)
+}
+
 fn normalized_name(path: &Path) -> Option<String> {
     Some(
         path.file_stem()?
@@ -1713,11 +1741,36 @@ impl ResearchStore {
 
         let text = crate::bounded_file::read_string(&file, SOURCE_MAX)
             .map_err(|error| format!("cannot read {path}: {error}"))?;
+        self.adopt_text(
+            project_id,
+            project_name,
+            roots,
+            &file,
+            &path,
+            &text,
+            instance,
+        )
+    }
+
+    /// The half of an import that runs once the document's text is in hand:
+    /// title, digest, body-or-source, links and the researched transition.
+    /// Shared by a path import and a text import so both adopt identically.
+    #[allow(clippy::too_many_arguments)]
+    fn adopt_text(
+        &self,
+        project_id: String,
+        project_name: Option<String>,
+        roots: Vec<String>,
+        file: &Path,
+        path: &str,
+        text: &str,
+        instance: Option<String>,
+    ) -> Result<Summary, String> {
         if text.trim().is_empty() {
             return Err(format!("{path} is empty — there is nothing to import yet."));
         }
 
-        let title = imported_title(&text, &file);
+        let title = imported_title(text, file);
         let summary = self.start_impl(
             project_id.clone(),
             project_name,
@@ -1734,11 +1787,11 @@ impl ResearchStore {
         let dir = self.entry_dir(&project_id, &summary.id)?;
         let mut meta = read_meta(&dir)?;
 
-        write_imported_content(&dir, &mut meta, &file, &path, &text)?;
+        write_imported_content(&dir, &mut meta, file, path, text)?;
 
-        meta.digest = imported_digest(&text);
+        meta.digest = imported_digest(text);
         meta.tags.push("imported".into());
-        meta.links.files.push(path.clone());
+        meta.links.files.push(path.to_string());
         // Researched, not researching: someone already did this work, and the entry
         // is a record of it rather than a run waiting to finish. Nothing is going
         // to arrive later to move it.
@@ -1808,6 +1861,121 @@ impl ResearchStore {
             self.announce(&project_id);
         }
         Ok(summary)
+    }
+
+    /// Adopt a document whose text the caller read for us — a cloud workspace,
+    /// where the file lives in a container this store cannot see. Everything but
+    /// the read is `import`: the same roots rule, path identity, title, digest and
+    /// limits. The path is normalised by text alone and never touches this disk.
+    #[allow(clippy::too_many_arguments)]
+    pub fn import_text(
+        &self,
+        project_id: String,
+        project_name: Option<String>,
+        roots: Option<Vec<String>>,
+        path: String,
+        text: String,
+        instance: Option<String>,
+    ) -> Result<Summary, String> {
+        let _guard = self.lock.lock().unwrap();
+        let pid = project_id.clone();
+        self.changed(
+            &pid,
+            self.import_text_impl(project_id, project_name, roots, path, text, instance),
+        )
+    }
+
+    fn import_text_impl(
+        &self,
+        project_id: String,
+        project_name: Option<String>,
+        roots: Option<Vec<String>>,
+        path: String,
+        text: String,
+        instance: Option<String>,
+    ) -> Result<Summary, String> {
+        let file = lexical_path(&path)?;
+        let path = file.to_string_lossy().to_string();
+        let roots = roots.unwrap_or_default();
+        if !roots
+            .iter()
+            .filter_map(|root| lexical_path(root).ok())
+            .any(|root| file.starts_with(&root) && file != root)
+        {
+            return Err(format!("{path} is not inside this project"));
+        }
+        if let Some(meta) = self
+            .load_project(&project_id)?
+            .into_iter()
+            .find(|meta| links_file(meta, &path))
+        {
+            return Ok(summarize(&meta));
+        }
+        if text.len() > SOURCE_MAX {
+            return Err(format!(
+                "cannot read {path}: {path} is {} bytes; the read limit is {SOURCE_MAX}",
+                text.len()
+            ));
+        }
+        self.adopt_text(
+            project_id,
+            project_name,
+            roots,
+            &file,
+            &path,
+            &text,
+            instance,
+        )
+    }
+
+    /// `sweep` for a caller that walks the files itself: of the Markdown paths it
+    /// found under `roots`, which are research-like by `sweep`'s rules and not yet
+    /// adopted. The caller then imports each with `import_text`.
+    pub fn sweep_plan(
+        &self,
+        project_id: String,
+        roots: Vec<String>,
+        paths: Vec<String>,
+    ) -> Result<SweepPlan, String> {
+        let roots: Vec<PathBuf> = roots
+            .iter()
+            .filter_map(|root| lexical_path(root).ok())
+            .collect();
+        let mut seen = HashSet::new();
+        for path in paths {
+            let Ok(file) = lexical_path(&path) else {
+                continue;
+            };
+            if !file
+                .extension()
+                .is_some_and(|ext| ext.eq_ignore_ascii_case("md"))
+            {
+                continue;
+            }
+            if roots.iter().any(|root| {
+                file.strip_prefix(root).is_ok_and(|relative| {
+                    !relative.as_os_str().is_empty() && is_auto_import_candidate(relative)
+                })
+            }) {
+                seen.insert(file.to_string_lossy().to_string());
+            }
+        }
+        let matched = seen.len();
+        let adopted: HashSet<String> = self
+            .load_project(&project_id)?
+            .into_iter()
+            .flat_map(|meta| meta.links.files)
+            .map(|path| canonical_path(&path))
+            .collect();
+        let mut candidates: Vec<String> = seen
+            .into_iter()
+            .filter(|path| !adopted.contains(&canonical_path(path)))
+            .collect();
+        candidates.sort();
+        Ok(SweepPlan {
+            candidates,
+            matched,
+        })
     }
 
     /// Where an entry lives on disk. The launcher exports this to a research
@@ -1997,7 +2165,8 @@ pub struct ResearchReq {
     pub files: Option<Vec<String>>,
     #[serde(default)]
     pub supersedes: Option<String>,
-    /// import: the markdown file to adopt.
+    /// import / import_text: the markdown file to adopt. import_text carries
+    /// its contents in `text`.
     #[serde(default)]
     pub path: Option<String>,
 }
@@ -2088,6 +2257,18 @@ pub fn op(
                 req.instance.clone(),
             )
             .and_then(|s| serde_json::to_value(s).map_err(|e| e.to_string())),
+        // An import whose caller read the file: a cloud workspace's agent, whose
+        // paths the service cannot open.
+        "import_text" => store
+            .import_text(
+                project_id,
+                Some(project.name.to_string()),
+                Some(project.roots.to_vec()),
+                req.path.clone().unwrap_or_default(),
+                req.text.clone().unwrap_or_default(),
+                req.instance.clone(),
+            )
+            .and_then(|s| serde_json::to_value(s).map_err(|e| e.to_string())),
         "link" | "supersede" => store
             .link(
                 project_id,
@@ -2101,7 +2282,7 @@ pub fn op(
             .and_then(|d| serde_json::to_value(d).map_err(|e| e.to_string())),
         other => Err(format!(
             "unknown research action: {other} — one of list, search, get, start, digest, \
-             append, source, status, link, import"
+             append, source, status, link, import, import_text"
         )),
     }
 }
@@ -2691,6 +2872,180 @@ mod tests {
         assert_eq!(again.digest, "Stripe stays the ledger.");
         assert_eq!(store.load_project("p1").unwrap().len(), 1);
         assert_eq!(store.for_file("p1".into(), path).unwrap(), Some(s.id));
+    }
+
+    #[test]
+    fn importing_text_adopts_like_a_path_import_without_reading_the_disk() {
+        let store = TempHome::new("import-text");
+        // A container path: nothing exists there on this host.
+        let roots = vec!["/workspace".to_string()];
+        let path = "/workspace/docs/./spike.md".to_string();
+        let s = store
+            .import_text_impl(
+                "p1".into(),
+                Some("ws".into()),
+                Some(roots.clone()),
+                path,
+                "# Queue choice\n\nSQS is enough for now.\n".into(),
+                None,
+            )
+            .unwrap();
+        assert_eq!(s.title, "Queue choice");
+        assert_eq!(s.digest, "SQS is enough for now.");
+        assert_eq!(s.status, "researched");
+        let d = store.get("p1".into(), s.id.clone()).unwrap();
+        assert_eq!(d.links.files, vec!["/workspace/docs/spike.md".to_string()]);
+        assert!(d.summary.tags.contains(&"imported".to_string()));
+        assert!(d.body.contains("SQS is enough"));
+        assert_eq!(
+            store
+                .for_file("p1".into(), "/workspace/docs/spike.md".into())
+                .unwrap(),
+            Some(s.id.clone())
+        );
+
+        // The path is the identity, as with import: a second call is the same entry.
+        let again = store
+            .import_text_impl(
+                "p1".into(),
+                None,
+                Some(roots.clone()),
+                "/workspace/docs/spike.md".into(),
+                "# Changed\n\nOther.\n".into(),
+                None,
+            )
+            .unwrap();
+        assert_eq!(again.id, s.id);
+        assert_eq!(again.title, "Queue choice");
+
+        // No heading: the file name names it.
+        let named = store
+            .import_text_impl(
+                "p1".into(),
+                None,
+                Some(roots.clone()),
+                "/workspace/cache_layer-notes.md".into(),
+                "Redis, behind a flag.".into(),
+                None,
+            )
+            .unwrap();
+        assert_eq!(named.title, "cache layer notes");
+
+        // Too long for the body: kept whole as a source.
+        let long = format!("# Big\n\n{}", "x".repeat(BODY_MAX + 10));
+        let big = store
+            .import_text_impl(
+                "p1".into(),
+                None,
+                Some(roots.clone()),
+                "/workspace/big.md".into(),
+                long.clone(),
+                None,
+            )
+            .unwrap();
+        let d = store.get("p1".into(), big.id.clone()).unwrap();
+        assert_eq!(d.sources.len(), 1);
+        assert_eq!(
+            store
+                .read_file("p1".into(), big.id, d.sources[0].file.clone())
+                .unwrap(),
+            long
+        );
+    }
+
+    #[test]
+    fn importing_text_refuses_what_a_path_import_would() {
+        let store = TempHome::new("import-text-refuse");
+        let roots = Some(vec!["/workspace".to_string()]);
+        let try_import = |path: &str, text: &str| {
+            store.import_text_impl(
+                "p1".into(),
+                None,
+                roots.clone(),
+                path.into(),
+                text.into(),
+                None,
+            )
+        };
+        assert!(try_import("/etc/passwd.md", "# x\n\ny")
+            .unwrap_err()
+            .contains("not inside this project"));
+        assert!(try_import("/workspace", "# x\n\ny")
+            .unwrap_err()
+            .contains("not inside this project"));
+        assert!(try_import("/workspace/../etc/x.md", "# x\n\ny")
+            .unwrap_err()
+            .contains(".."));
+        assert!(try_import("docs/x.md", "# x\n\ny")
+            .unwrap_err()
+            .contains("absolute"));
+        assert!(try_import("/workspace/empty.md", "  \n")
+            .unwrap_err()
+            .contains("empty"));
+        assert!(
+            try_import("/workspace/huge.md", &"x".repeat(SOURCE_MAX + 1))
+                .unwrap_err()
+                .contains("read limit")
+        );
+        assert!(store.load_project("p1").unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_sweep_plan_applies_the_sweep_rules_to_listed_paths() {
+        let store = TempHome::new("sweep-plan");
+        let roots = vec!["/workspace".to_string()];
+        store
+            .import_text_impl(
+                "p1".into(),
+                None,
+                Some(roots.clone()),
+                "/workspace/docs/done.md".into(),
+                "# Done\n\nAlready adopted.\n".into(),
+                None,
+            )
+            .unwrap();
+        let plan = store
+            .sweep_plan(
+                "p1".into(),
+                roots,
+                vec![
+                    "/workspace/docs/done.md".into(),
+                    "/workspace/docs/spike.md".into(),
+                    "/workspace/docs/spike.md".into(),
+                    "/workspace/README.md".into(),
+                    "/workspace/.github/notes.md".into(),
+                    "/workspace/node_modules/x/finding.md".into(),
+                    "/workspace/src/main.rs".into(),
+                    "/elsewhere/finding.md".into(),
+                ],
+            )
+            .unwrap();
+        assert_eq!(plan.matched, 2);
+        assert_eq!(
+            plan.candidates,
+            vec!["/workspace/docs/spike.md".to_string()]
+        );
+    }
+
+    #[test]
+    fn op_imports_text_for_an_agent() {
+        let store = TempHome::new("op-import-text");
+        let roots = vec!["/workspace".to_string()];
+        let project = Project {
+            id: "p1",
+            name: "ws",
+            roots: &roots,
+        };
+        let req: ResearchReq = serde_json::from_value(serde_json::json!({
+            "action": "import_text",
+            "cwd": "/workspace",
+            "path": "/workspace/NOTES.md",
+            "text": "# Notes\n\nA finding.\n",
+        }))
+        .unwrap();
+        let out = op(&store, project, &req).unwrap();
+        assert_eq!(out["title"], "Notes");
+        assert_eq!(out["status"], "researched");
     }
 
     #[test]

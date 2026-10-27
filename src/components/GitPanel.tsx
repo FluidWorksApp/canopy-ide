@@ -622,10 +622,12 @@ export function GitPanel({
           onClick: () => onOpenPreview(`http://localhost:${r.port}`),
         });
       }
-      items.push({
-        label: "Reveal in Finder",
-        onClick: () => void ipc.fsReveal(r.path!).catch(() => {}),
-      });
+      // A workspace checkout is on the VM; this computer's Finder can't show it.
+      if (ipc.canRevealProjectPaths())
+        items.push({
+          label: "Reveal in Finder",
+          onClick: () => void ipc.fsReveal(r.path!).catch(() => {}),
+        });
     }
 
     // Everything about the branch itself — switch, snapshot, tasks, delete —

@@ -328,6 +328,34 @@ impl Harness for CoreHarness {
                     body: serde_json::json!({ "error": error }).to_string(),
                 },
             },
+            // The panel's own readers, which the agent's op never had.
+            "read_file" | "for_file" | "sweep_plan" if store == HarnessStore::Research => {
+                let (_, research) = self.stores(ctx);
+                let text = |key: &str| {
+                    args.get(key)
+                        .and_then(|v| v.as_str())
+                        .unwrap_or_default()
+                        .to_string()
+                };
+                let strings = |key: &str| {
+                    args.get(key)
+                        .and_then(|v| serde_json::from_value::<Vec<String>>(v.clone()).ok())
+                        .unwrap_or_default()
+                };
+                let project = ctx.project_id.clone();
+                reply_of(match action {
+                    "read_file" => research
+                        .read_file(project, text("id"), text("path"))
+                        .map(|text| serde_json::json!({ "text": text })),
+                    "for_file" => research
+                        .for_file(project, text("path"))
+                        .map(|id| serde_json::json!({ "id": id })),
+                    // Roots are the workspace's, never the caller's.
+                    _ => research
+                        .sweep_plan(project, vec![ctx.project_root.clone()], strings("paths"))
+                        .and_then(|plan| serde_json::to_value(plan).map_err(|e| e.to_string())),
+                })
+            }
             "get" | "search" => {
                 let mut body = args;
                 if !body.is_object() {
@@ -355,6 +383,22 @@ impl Harness for CoreHarness {
             object.remove("kind");
             object.remove("actor");
             object.entry("by").or_insert_with(|| actor.into());
+        }
+        // Deleting is the user's alone: it is not an op, so no agent reaches it.
+        if store == HarnessStore::Research
+            && body.get("action").and_then(|a| a.as_str()) == Some("delete")
+        {
+            let id = body
+                .get("id")
+                .and_then(|i| i.as_str())
+                .unwrap_or_default()
+                .to_string();
+            let (_, research) = self.stores(ctx);
+            return reply_of(
+                research
+                    .delete(ctx.project_id.clone(), id)
+                    .map(|()| serde_json::json!({ "ok": true })),
+            );
         }
         self.run(ctx, store, body, None)
     }

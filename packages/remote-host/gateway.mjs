@@ -49,6 +49,7 @@ import {serviceControlPlane} from './service-control-plane.mjs';
 import {SlackCompanionHost} from './slack-companion.mjs';
 import {ContainerCompanionRunner} from './slack-companion-runner.mjs';
 import {harnessAction,harnessFailure,harnessQuery,pipeHarnessStream} from './service-routes.mjs';
+import {nativeTimeoutMs} from './native-commands.mjs';
 import {InputLedger,SocketInput,TERMINAL_INPUT_PROTOCOL,BINARY_TERMINAL_INPUT_PROTOCOL,forwardInput,inputKey,sequencedInput} from './terminal-input.mjs';
 
 export function createGateway({ config, workspaces, origins = [], elasticMemory, elasticCpu, authorizeMember, authorizeRuntime, supervisor, credentialVault, sharedAccounts, credentialTickets, sharingAttest, sharedCatalog, brokerOptions={}, renewMember, now=Date.now, hostStorage=createHostStorage(), harness }) {
@@ -356,7 +357,7 @@ export function createGateway({ config, workspaces, origins = [], elasticMemory,
       }
       const result = await fetch(`${(operation === "/native" || /^\/sessions\/\d+\/resize$/.test(operation)) && runtime.nativeUrl ? runtime.nativeUrl : runtime.url}${operation}`, { method: request.method, redirect:'error',
         headers: { authorization: `Bearer ${runtime.token}`, 'content-type': 'application/json' },
-        body: payload === undefined ? undefined : JSON.stringify(payload), signal: AbortSignal.timeout(operation === "/native" && ["git_clone","git_fetch","git_pull","git_push"].includes(payload?.command) ? 330_000 : payload?.command === "profile_import_git" ? 45_000 : 15_000) });
+        body: payload === undefined ? undefined : JSON.stringify(payload), signal: AbortSignal.timeout(operation === "/native" ? nativeTimeoutMs(payload?.command) : 15_000) });
       if(operation==='/sessions'&&request.method==='POST'&&!result.ok)cliSessions?.discard(workspace.id,principal.memberId??'owner',payload.requestId);
       if(operation==='/sessions'&&request.method==='POST'&&!result.ok&&payload.harness)await harness.revoke(workspace.id,payload.requestId);
       const reader = result.body.getReader(); const chunks = []; let length = 0;

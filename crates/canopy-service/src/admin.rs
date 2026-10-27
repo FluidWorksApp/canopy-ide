@@ -371,7 +371,13 @@ async fn query(State(service): Svc, Path(ws): Path<String>, body: Bytes) -> Resp
         },
         ("mesh", "claim_history") | ("claims", "history") => {
             let result = match req.args.get("path").and_then(|p| p.as_str()) {
-                Some(path) => ws.claims.history_for_path(path),
+                // Stored normalized (Workspace::claim), so look it up the same way.
+                Some(path) => ws
+                    .claims
+                    .history_for_path(&crate::meshtext::normalize_claim_path(
+                        path,
+                        Some(crate::terminals::WORKSPACE_ROOT),
+                    )),
                 None => ws.claims.all_newest(),
             };
             match result {
@@ -482,6 +488,142 @@ async fn actions(State(service): Svc, Path(ws): Path<String>, body: Bytes) -> Re
                 Err(_) => error(500, "the store handler failed"),
             }
         }
+        // The control panel's escape hatch for a claim an agent died holding.
+        "claim_release" => {
+            let Some(owner_key) = value
+                .get("ownerKey")
+                .and_then(|k| k.as_str())
+                .filter(|k| !k.trim().is_empty())
+            else {
+                return error(400, "claim_release needs ownerKey");
+            };
+            match ws.release_claims_of(owner_key, "canopy") {
+                Ok(released) => json(200, serde_json::json!({ "ok": true, "released": released })),
+                Err(message) => error(500, message),
+            }
+        }
+        // Sever or reconnect one pair; answers with the updated list, as the
+        // desktop command does.
+        "mesh_sever" => {
+            let pty = |key: &str| {
+                value
+                    .get(key)
+                    .and_then(|v| v.as_u64())
+                    .and_then(|v| u32::try_from(v).ok())
+            };
+            let (Some(a), Some(b), Some(severed)) = (
+                pty("a"),
+                pty("b"),
+                value.get("severed").and_then(|s| s.as_bool()),
+            ) else {
+                return error(400, "mesh_sever needs a, b and severed");
+            };
+            ws.mesh
+                .set_severed(a, b, &ws.instance, severed, crate::util::now_ms());
+            items(ws.mesh.severed_pairs())
+        }
+        "mesh_job_update" => mesh_job_update(&ws, &value).await,
         other => error(400, format!("unknown action kind {other}")),
     }
+}
+
+/// One step of a mesh job (or a relay reply) reported to the workspace
+/// terminal that submitted it, as desktop `context_mesh_job_update` does for
+/// its own: kept on the mesh under `ref {kind, id}` and announced in that
+/// terminal. From Canopy itself, so no sever applies.
+async fn mesh_job_update(ws: &Arc<Workspace>, value: &serde_json::Value) -> Response {
+    let relay = match value.get("refKind").and_then(|k| k.as_str()) {
+        None | Some("job") => false,
+        Some("relay") => true,
+        Some(other) => return error(400, format!("unknown mesh update kind {other}")),
+    };
+    let Some(pty_id) = value
+        .get("ptyId")
+        .and_then(|v| v.as_u64())
+        .and_then(|v| u32::try_from(v).ok())
+    else {
+        return error(400, "mesh_job_update needs ptyId");
+    };
+    if value.get("instance").and_then(|i| i.as_str()) != Some(ws.instance.as_str()) {
+        return error(
+            400,
+            "the submitting terminal belongs to an earlier Canopy run",
+        );
+    }
+    let job_id = value
+        .get("jobId")
+        .and_then(|j| j.as_str())
+        .unwrap_or_default()
+        .trim();
+    if job_id.is_empty() || job_id.len() > 64 {
+        return error(400, "a job update needs its job id");
+    }
+    let text = value
+        .get("text")
+        .and_then(|t| t.as_str())
+        .unwrap_or_default()
+        .trim();
+    if text.is_empty() {
+        return error(400, "a job update needs text");
+    }
+    let text: String = text.chars().take(crate::meshtext::MAX_MESH_TEXT).collect();
+    if ws.runner_terminals.runner.read().unwrap().url.is_none() {
+        return json(
+            503,
+            serde_json::json!({
+                "error": "unavailable",
+                "reason": "not-ready",
+                "message": "this workspace's container is not running yet",
+            }),
+        );
+    }
+    let Some(target) = ws.terminals.by_pty(pty_id) else {
+        return error(404, format!("terminal {pty_id} has exited"));
+    };
+    let record = ws.mesh.record(canopy_core::mesh::NewMessage {
+        from_pty_id: None,
+        from_cwd: None,
+        from_name: None,
+        from_agent: None,
+        from_task: None,
+        to_pty_id: pty_id,
+        to_cwd: Some(crate::terminals::WORKSPACE_ROOT.into()),
+        to_name: target.name.clone(),
+        to_agent: target.agent.clone(),
+        to_task: crate::agent::task_of(&target),
+        text,
+        items: Vec::new(),
+        reply_to: None,
+        reference: Some(canopy_core::mesh::MeshRef {
+            kind: if relay { "relay" } else { "job" }.into(),
+            id: job_id.to_string(),
+        }),
+        instance: Some(ws.instance.clone()),
+        at_ms: crate::util::now_ms(),
+    });
+    let Ok(record) = record else {
+        return error(403, "the mesh refused this job update");
+    };
+    let notice = if relay {
+        format!(
+            "[canopy: cloud workspace reply to {job_id}] {}",
+            crate::meshtext::mesh_notice_for(&record)
+        )
+    } else {
+        format!(
+            "[canopy: mesh job {job_id}] {}",
+            crate::meshtext::mesh_notice_for(&record)
+        )
+    };
+    if let Err(failure) = ws.deliver(pty_id, &record.id, &notice, None, None).await {
+        return match failure {
+            crate::workspace::SendError::NotReady(message) => json(
+                503,
+                serde_json::json!({ "error": "unavailable", "reason": "not-ready", "message": message }),
+            ),
+            crate::workspace::SendError::Status(status, message) => error(status, message),
+        };
+    }
+    ws.mesh.note_delivery(&record.id, &notice);
+    json(200, serde_json::json!({ "id": record.id }))
 }

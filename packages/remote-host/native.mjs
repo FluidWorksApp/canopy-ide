@@ -4,7 +4,7 @@ import {safeGitRead,GIT_READ_COMMANDS} from './git-read.mjs';
 import {gitIdentityEnvironment} from './git-identity.mjs';
 // Native IDE command boundary for a Linux workspace. Files and subprocesses
 // never escape the selected container; no host Docker/cloud credential API.
-import {readFile,writeFile,open,readdir,stat,mkdir,rename,cp,unlink,rm,lstat} from 'node:fs/promises';
+import {readFile,writeFile,open,readdir,stat,mkdir,rename,cp,unlink,rm,lstat,realpath} from 'node:fs/promises';
 import {execFile,spawn} from 'node:child_process';
 import {promisify} from 'node:util';
 import path from 'node:path';
@@ -27,13 +27,28 @@ import {metricsReader} from './workspace-metrics.mjs';
 import {writeWorkspaceFile} from './file-write.mjs';
 import {WorkspaceUploads} from './file-upload.mjs';
 import {listWorkspaceFiles,searchWorkspaceFiles} from './file-search.mjs';
-import {agentWorkspaceAt} from './agent-workspace.mjs';
+import {agentWorkspaceCommands} from './agent-workspace.mjs';
+import {gitOpsCommands} from './git-ops.mjs';
+import {workspaceMiscCommands} from './workspace-misc.mjs';
+import {mcpClientCommands} from './mcp-client.mjs';
+import {spotIndexCommands} from './spot-index.mjs';
 import {workspaceActivity} from './activity.mjs';
 import {sessionProcessReader} from './session-processes.mjs';
 import {McpRegistry} from './mcp-servers.mjs';
 import {gitHistory} from './git-history.mjs';
 import {claudeIde,claudeIdeCommand} from './claude-ide.mjs';
 import {receiptRunCheck} from './receipt-check.mjs';
+import {workspaceToolsCommands} from './workspace-tools.mjs';
+import {workspaceCleanupCommands} from './workspace-cleanup.mjs';
+import {lspCommands} from './lsp.mjs';
+import {githubCommands} from './github.mjs';
+import {taskStoreCommands,taskStoreFor} from './task-store.mjs';
+import {workflowStoreCommands} from './workflow-store.mjs';
+import {structuredRunnerCommands} from './structured-runner.mjs';
+import {turnsCommands} from './turns.mjs';
+import {provenanceCommands} from './provenance.mjs';
+import {ChannelHub,isChannelArg} from './channels.mjs';
+import {HOST_PROTOCOL,NATIVE_COMMANDS,NATIVE_PREFIXES} from './native-commands.mjs';
 const sessionProcesses=sessionProcessReader();
 const workspaceMetrics=metricsReader();
 const execute=promisify(execFile);
@@ -79,17 +94,55 @@ async function run(bin,argv,cwd=ROOT,timeout=15000,environment={}){
 async function boundedRead(file,limit=1048576){const handle=await open(file,'r');try{const bytes=Buffer.alloc(limit+1);let length=0;while(length<=limit){const result=await handle.read(bytes,length,bytes.length-length,null);if(!result.bytesRead)break;length+=result.bytesRead;}if(length>limit)throw Error('File exceeds editor limit');return bytes.subarray(0,length);}finally{await handle.close();}}
 async function metadata(file,fallback){try{return JSON.parse((await boundedRead(HOME+'/.canopy/'+file)).toString('utf8'));}catch(error){if(error.code==='ENOENT')return fallback;throw error;}}
 async function saveMetadata(file,value){await mkdir(HOME+'/.canopy',{recursive:true,mode:0o700});const target=HOME+'/.canopy/'+file;const temporary=target+'.'+randomUUID()+'.next';const data=JSON.stringify(value);if(Buffer.byteLength(data)>1048576)throw Error('Workspace metadata limit reached');await writeFile(temporary,data,{mode:0o600,flag:'wx'});await rename(temporary,target);changeCursor++;changes.push({sequence:changeCursor,change:{store:file,scope:ROOT,id:''}});if(changes.length>1024)changes.shift();}
+// Command families ported from the desktop's Rust commands, one module each.
+// Each takes the same containment helpers as the commands below.
+const familyContext={run,scoped,execute,home:HOME,root:ROOT,mcpRegistry,
+ // Store mutations wake the IDE's caches through store_changes, as change::pulse does.
+ pulse:(store,scope,id)=>{changeCursor++;changes.push({sequence:changeCursor,change:{store,scope:scope??ROOT,id:id??''}});if(changes.length>1024)changes.shift();}};
+familyContext.changed=familyContext.pulse;
+// Hooks and MCP for one CLI inside one profile root (profiles.rs root_for).
+familyContext.setupAgent=async(agent,id)=>{const profile=(await profiles.list()).find(p=>p.id===String(id??''));if(!profile)throw Error('Unknown profile');return profile.id==='default'?integrations.setup(agent):new AgentIntegrations(profile.root).setup(agent);};
+const taskStore=taskStoreFor(familyContext);
+// A structured runner may only run the current attempt, in the worktree its task reserved.
+familyContext.authorize=async(attemptId,cwd)=>{
+ const detail=await taskStore.getForAttempt(attemptId);const attempt=detail?.attempts.find(a=>a.attemptId===attemptId);
+ if(!attempt)throw Error('task attempt not found');
+ if(attempt.state!=='running')throw Error(`structured runner attempt is ${attempt.state}, not running`);
+ let expected;try{expected=await realpath(detail.envelope.worktreePath);}catch(error){throw Error(`reserved task workspace is invalid: ${error.message}`);}
+ if(expected!==cwd)throw Error('structured runner cwd does not match its reserved task workspace');
+};
+const channels=new ChannelHub();
+export const NATIVE_FAMILIES=Object.assign({},...[
+ workspaceToolsCommands,workspaceCleanupCommands,lspCommands,githubCommands,taskStoreCommands,workflowStoreCommands,structuredRunnerCommands,turnsCommands,provenanceCommands,gitOpsCommands,agentWorkspaceCommands,workspaceMiscCommands,mcpClientCommands,spotIndexCommands,
+].map(family=>family(familyContext)));
+const FAMILIES=NATIVE_FAMILIES;
 const CLIS=['claude','codex','amp','aider','agy','opencode','omp','cursor-agent','grok'];
 export async function nativeInvoke(command,args={}){
   if(command.startsWith('fs_upload_'))return uploads.invoke(command,args);
   // The desktop's answers to the Claude Code IDE servers of this workspace's
   // terminals (claude-ide.mjs), which live in this same process.
   if(command.startsWith('claude_ide_')){const handled=claudeIdeCommand(claudeIde,command,args);if(handled.handled)return handled.value;}
+  // Managed task spawns (pty.rs spawn_binding/mark_spawned/mark_launch_failed).
+  if(command==='task_spawn_binding')return taskStore.spawnBinding(args.runId??null,args.attemptId??null);
+  if(command==='task_mark_spawned'){await taskStore.markSpawned(args.binding);return;}
+  if(command==='task_mark_launch_failed'){await taskStore.markLaunchFailed(args.binding);return;}
+  if(command==='pty_output'){
+   const id=Number(args.id);if(!Number.isInteger(id)||id<0)return null;
+   try{const response=await fetch(`http://127.0.0.1:8080/sessions/${id}/output`,{method:'POST',headers:{authorization:`Bearer ${process.env.CANOPY_RUNNER_TOKEN??''}`,'content-type':'application/json'},body:JSON.stringify({max:args.max??null}),signal:AbortSignal.timeout(5000)});if(!response.ok)return null;return (await response.json()).text??null;}catch{return null;}
+  }
+  if(command==='channel_poll')return channels.poll(args.ids,args.wait);
+  if(command==='channel_drop'){channels.drop(args.ids);return;}
+  if(Object.hasOwn(FAMILIES,command)){
+   // A desktop Channel arrives as its name; the command gets a sender.
+   const opened=[];const input={...args};for(const [key,value] of Object.entries(input))if(isChannelArg(value)){input[key]=channels.open(value.__canopyChannel);opened.push(input[key]);}
+   try{return await FAMILIES[command](input);}catch(error){for(const channel of opened)channel.close(String(error?.message??error));throw error;}
+  }
+  // Lets a newer desktop see what this runtime can do before it asks.
+  if(command==='host_capabilities')return {protocol:HOST_PROTOCOL,commands:[...NATIVE_COMMANDS],prefixes:NATIVE_PREFIXES};
   if(command==='session_process_stats'){
     if(!Array.isArray(args.sessions)||args.sessions.length>32)throw Error('Invalid session inventory');
     return sessionProcesses(args.sessions);
   }
-  if(command==='agent_workspace_at')return agentWorkspaceAt(args,{run,scoped});
   // Proof receipts: the workspace re-runs checks itself (src/receipts/).
   if(command==='receipt_run_check')return receiptRunCheck(args,{scoped,home:HOME});
   if(command==='workspace_activity')return workspaceActivity();
@@ -120,7 +173,7 @@ export async function nativeInvoke(command,args={}){
   if(command==='cli_take_pending_open'||command==='cli_take_pending_link'||command==='agent_health_report')return null;
   if(command==='instance_id')return 'remote-'+(process.env.CANOPY_WORKSPACE_ID??'workspace');
   if(command==='relay_status')return {role:'off',code:null,port:null,ips:[],addr:null,self_id:null,name:null,visibility:null,public_ip:null,members:[]};
-  if(['notes_list','notes_due','research_list','task_list_history'].includes(command))return metadata(command+'.json',[]);
+  if(['notes_list','notes_due','research_list'].includes(command))return metadata(command+'.json',[]);
   if(['context_tools','context_publish','set_context_scopes','pr_watch_set'].includes(command)){await saveMetadata(command+'.json',args);return;}
   if(command==='terminal_governor_status'){
     const limit=Number(await readFile('/sys/fs/cgroup/memory.max','utf8'));
@@ -160,6 +213,11 @@ export async function nativeInvoke(command,args={}){
   if(command==='store_save'){const parsed=JSON.parse(args.data);if(!Array.isArray(parsed.projects))throw Error('Invalid projects');for(const project of parsed.projects)for(const component of project.components??[])await scoped(component.path);await saveMetadata('ide-projects.json',parsed);return;}
   if(command==='fs_read_dir'){const directory=await scoped(target);const entries=await readdir(directory,{withFileTypes:true});if(entries.length>4096)throw Error('Directory too large');return entries.map(e=>({name:e.name,path:path.join(directory,e.name),is_dir:e.isDirectory(),is_symlink:e.isSymbolicLink()}));}
   if(command==='fs_read_file'){const bytes=await boundedRead(await scopedFile(target),Math.min(args.maxBytes??1048576,1048576));return {b64:bytes.toString('base64')};}
+  // A bounded slice of a file, for reads larger than one answer (a note image).
+  if(command==='fs_read_range'){
+   const offset=Number(args.offset??0),length=Math.min(Number(args.length??1048576),1048576);if(!Number.isSafeInteger(offset)||offset<0||!Number.isSafeInteger(length)||length<0)throw Error('Invalid file range');
+   const handle=await open(await scopedFile(target),'r');try{const size=(await handle.stat()).size;const bytes=Buffer.alloc(Math.max(0,Math.min(length,size-offset)));const {bytesRead}=await handle.read(bytes,0,bytes.length,offset);return {b64:bytes.subarray(0,bytesRead).toString('base64'),size};}finally{await handle.close();}
+  }
   if(command==='fs_write_file'||command==='fs_create_file'){const text=command==='fs_create_file'?'':args.content;if(typeof text!=='string'||Buffer.byteLength(text)>1048576)throw Error('Invalid file content');const destination=await scopedFile(target,true);if(command==='fs_create_file')await writeFile(destination,text,{flag:'wx',mode:0o600});else await writeWorkspaceFile(destination,text);return target;}
   if(command==='fs_create_dir'){await mkdir(await scoped(target,true));return target;}
   if(command==='fs_trash'){

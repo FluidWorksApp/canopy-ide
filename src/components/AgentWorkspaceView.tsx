@@ -317,6 +317,28 @@ export const sameMap = (a: Map<string, string>, b: Map<string, string>) =>
  * renderer-memory fan-out. Keep the familiar editor per-file ceiling, then add
  * a much smaller aggregate budget for this derived view: Monaco remains the
  * place to open a large file deliberately. */
+/** What the changes pane shows. A failed or impossible patch read must end in
+ *  something said plainly: a Linux workspace on an older host answers
+ *  git_branch_patch with an error, and this used to leave the pane on
+ *  "Reading this agent's changes…" forever. */
+export type ChangesPaneState = "loading" | "error" | "unavailable" | "ready" | "none";
+export function changesPaneState({ repo, ws, wsErr, pane, patch, patchErr }: {
+  repo: string | null | undefined;
+  ws: Pick<ipc.AgentWorkspace, "branch" | "detached" | "on_base"> | null;
+  wsErr: string | null;
+  pane: string | null;
+  patch: unknown;
+  patchErr: string | null;
+}): ChangesPaneState {
+  if (!ws) return !wsErr && repo ? "loading" : "none";
+  if (!pane) return "none";
+  if (patch) return "ready";
+  if (patchErr) return "error";
+  // The fetch below never starts for these, so waiting would never end.
+  if (!ws.branch || (pane === "diff" && (ws.detached || ws.on_base))) return "unavailable";
+  return "loading";
+}
+
 export const AGENT_FILE_READ_CONCURRENCY = 3;
 export const AGENT_FILE_MAX_BYTES = sizeLimitFor("code");
 export const AGENT_FILE_TOTAL_BYTES = 16 * 1024 * 1024;
@@ -563,6 +585,7 @@ export function AgentWorkspaceView({
   const [wsErr, setWsErr] = useState<string | null>(null);
   const [pane, setPane] = useState<Pane | null>(null);
   const [patch, setPatch] = useState<ipc.CommitPatch | null>(null);
+  const [patchErr, setPatchErr] = useState<string | null>(null);
   const [split, setSplit] = useState(true);
   const [remote, setRemote] = useState("");
   // undefined = still looking, null = looked and none.
@@ -831,6 +854,7 @@ export function AgentWorkspaceView({
   // or branch shows something else, a poll shows the same thing again.
   useEffect(() => {
     setPatch(null);
+    setPatchErr(null);
   }, [pane, ws?.branch, ws?.workdir, ws?.isolated]);
   useEffect(() => {
     let live = true;
@@ -845,10 +869,18 @@ export function AgentWorkspaceView({
         ws.isolated ? ws.workdir : null,
         pane === "uncommitted",
       )
-      .then(
-        (p) => live && setPatch((prev) => (prev?.patch === p.patch ? prev : p)),
-      )
-      .catch((e) => live && onNotice(String(e), "error"));
+      .then((p) => {
+        if (!live) return;
+        setPatchErr(null);
+        setPatch((prev) => (prev?.patch === p.patch ? prev : p));
+      })
+      .catch((e) => {
+        if (!live) return;
+        // Said in the pane as well as the toast: the toast fades, and the pane
+        // would otherwise keep promising a diff that is not coming.
+        setPatchErr(String(e));
+        onNotice(String(e), "error");
+      });
     return () => {
       live = false;
     };
@@ -930,6 +962,7 @@ export function AgentWorkspaceView({
   // checkout and are deliberately not shown here.
   const isolated = !!ws?.isolated;
   const mine = isolated ? files : files.filter((f) => isAgentFile(f.path));
+  const changesState = changesPaneState({ repo, ws, wsErr, pane, patch, patchErr });
   // Whether we can attribute at all: an isolated worktree, a journal, or a
   // reported list. Without any of these a shared-checkout diff is an
   // undifferentiated tree we won't pass off as this agent's.
@@ -2026,9 +2059,20 @@ export function AgentWorkspaceView({
           // pane visibly stepped through three layouts on the way in. It holds
           // a fixed block of space now, so what arrives fills it instead of
           // shoving it around.
-          ((!ws && !wsErr && repo) || (ws && !patch && pane) ? (
+          (changesState === "loading" ? (
             <div className="tree-empty aw-loading">Reading this agent's changes…</div>
-          ) : !ws || !patch ? null : mine.length === 0 ? (
+          ) : changesState === "error" ? (
+            <div className="tree-empty aw-loading" role="alert">
+              Couldn't read this agent's changes: {patchErr}
+              <div className="aw-note">Refresh to try again.</div>
+            </div>
+          ) : changesState === "unavailable" ? (
+            <div className="tree-empty">
+              {ws?.branch
+                ? "There is no diff against the base branch for a detached or base-branch checkout."
+                : "This agent's checkout has no branch, so there is no branch diff to show."}
+            </div>
+          ) : changesState !== "ready" || !patch ? null : mine.length === 0 ? (
             <div className="tree-empty">
               No changes by this agent{pane === "uncommitted" ? " yet" : ""}.
               {!canAttribute && (

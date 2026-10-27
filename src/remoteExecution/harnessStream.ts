@@ -14,6 +14,7 @@ export interface HarnessTransport {
  open(id:string,route:string,signal:AbortSignal):Promise<Response>;
  workspace<T>(id:string,route:string,args?:unknown):Promise<T>;
 }
+export type HarnessActionKind='answer'|'attention_ack'|'notes_write'|'research_write'|'claim_release'|'mesh_sever'|'mesh_job_update';
 type Snapshot={cursor:string;stores:Partial<Record<HarnessStoreName,unknown>>};
 type Change={cursor:string;store:HarnessStoreName;scope?:string;id?:string};
 const CURSOR=/^[A-Za-z0-9_-]{1,64}:\d{1,20}$/;
@@ -73,7 +74,8 @@ export class HarnessStream {
  start(){void this.run();return this;}
  stop(){this.stopped=true;clearTimeout(this.timer);this.controller?.abort();forgetRemoteSource(this.service,this.workspace);}
  query<T>(store:HarnessStoreName,action:string,args:Record<string,unknown>={}){return this.transport.workspace<T>(this.workspace,'/harness/query',{store,action,args});}
- action<T>(kind:'answer'|'attention_ack'|'notes_write'|'research_write',args:Record<string,unknown>){return this.transport.workspace<T>(this.workspace,'/harness/actions',{kind,...args});}
+/** Service admin action kinds; the gateway allowlists the same set (HARNESS_ACTIONS). */
+ action<T>(kind:HarnessActionKind,args:Record<string,unknown>){return this.transport.workspace<T>(this.workspace,'/harness/actions',{kind,...args});}
  private async run(){
   while(!this.stopped){
    try{await this.connect();this.retry=0;}

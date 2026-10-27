@@ -5,10 +5,14 @@ import { nativeHost } from '../host/native';
 import { RemoteExecutionClient, type RemoteSession } from './client';
 import {connectionKey,reportConnection,reportStream,workspaceLifecyclePhase} from './connectionState';
 import {saveRemoteContextImage} from './saveContextImage';
+import {basename} from '../paths';
 import {TerminalInput} from './terminalInput';
 import {canSwitchExecutionMode} from '../executionMode';
 import {remoteDiagnostic} from './remoteDiagnostic';
 import type {ClaudeIdeEvent} from '../claudeIde';
+import {HOST_PROTOCOL} from '../../packages/remote-host/native-commands.mjs';
+import {HARNESS_READS,harnessCommand,isHarnessCommand,isOutdatedHarnessError} from './harnessCommands';
+import {HOST_OUTDATED_EVENT,hostOutdatedMessage,isRemoteUnsupported,outdatedHostCommand,remoteUnsupportedMessage} from './remoteSupport';
 
 export interface WorkspaceConnection { endpoint: string; token: string; workspaceId: string; workspaceName: string; scope?: 'view'|'drive'; clientId?: string; expiresAt?: string; credentialAccountKey?: string }
 type Args = Record<string, unknown>;
@@ -43,6 +47,26 @@ for(const command of ['canopy_account_request','report_crash','send_crash','cras
 // (receipt_run_check is not listed) but judge and record them here.
 export const BRAIN_DESKTOP_COMMANDS=['brain_call','brain_kill','ledger_append','ledger_query','ledger_root','ledger_update_status'] as const;
 for(const command of BRAIN_DESKTOP_COMMANDS)LOCAL_UI.add(command);
+// The person's credential vault is theirs, on this computer, and fills pages
+// shown here; it never moves into a workspace.
+for(const command of ['vault_status','vault_create','vault_unlock','vault_lock','vault_change_passphrase','vault_list','vault_matches','vault_save','vault_delete','vault_reveal','vault_read','vault_fill','vault_import_kdbx','vault_approvals','vault_approve','vault_revoke'])LOCAL_UI.add(command);
+// Android phones and emulators are attached to this computer, and the VM image
+// has no Android SDK, so device tools act on this computer's devices.
+for(const command of ['android_sdk_status','android_devices','android_avds','android_emulator_start','android_emulator_stop','android_screencap','android_ui_dump','android_layout','android_foreground','android_tap','android_text','android_swipe','android_key','android_logcat','android_run','android_describe'])LOCAL_UI.add(command);
+// The LAN relay is hosted by the desktop app between people's computers; its
+// file offers use this computer's dialogs and paths. Its status goes with it.
+for(const command of ['relay_status','relay_host_start','relay_host_stop','relay_regenerate_code','relay_connect','relay_disconnect','relay_send_chat','relay_send_collab','relay_send_command','relay_offer_file','relay_accept_file'])LOCAL_UI.add(command);
+// Public links expose this computer's own portal port (tunnel.rs); Linear is a
+// plain HTTPS API called with a key from this computer's settings.
+for(const command of ['tunnel_start','tunnel_stop','tunnel_status','linear_issues','linear_issue_detail','linear_issue_set_state','linear_issue_comment'])LOCAL_UI.add(command);
+// This app's own diagnostics, self-test harness, `canopy` launcher, and
+// workspace files chosen in this computer's save/open dialogs.
+for(const command of ['process_capture_metrics','snapshot_capture_metrics','browser_close_metrics','browser_pressure_reload_metrics','selftest_checkpoint','selftest_checkpoint_save','selftest_finish','selftest_reload_renderer','selftest_spawn_remote','selftest_store_contains','cli_install_shim','workspace_export','workspace_import'])LOCAL_UI.add(command);
+/** Desktop events that belong to the commands above. */
+const DESKTOP_EVENTS=['relay:state','relay:chat','relay:command','relay:collab','relay:transfer','relay:transfer-progress','tunnel:state'];
+/** Commands this adapter answers itself (below) rather than passing to the
+ *  host by name: terminals, browser streams, uploads and clone progress. */
+export const WORKSPACE_ADAPTER_COMMANDS=['spot_save_context_image','notes_attach_file','spot_stage_drop_images','chrome_stream_ticket','chrome_stream_close','chrome_stream_open','execution_remote_upload','execution_remote_upload_cancel','git_clone','browser_supported','environment_identity','pty_renderer_register','pty_renderer_sessions','instance_id','pty_spawn','pty_spawn_attached_argv','pty_spawn_argv','pty_spawn_detached','pty_attach_desktop','pty_read_desktop','pty_detach_desktop','pty_ack','pty_write_binary','pty_write','pty_resize','pty_kill','pty_set_name_theme','cli_set_native_update_env','pty_set_title','pty_set_name','pty_stats'] as const;
 /** Whether a command runs on the computer showing the IDE in remote mode. */
 export const isDesktopLocal=(command:string)=>LOCAL_UI.has(command);
 class WorkspaceChannel<T> implements HostChannel<T>{onmessage:(message:T)=>void=()=>{};}
@@ -299,10 +323,27 @@ export class NativeWorkspaceHost implements Host {
       }
       return this.desktopCall<T>(command,args);
     }
+    if(command==='notes_attach_file')return await this.attachWorkspaceFile(args) as T;
     if(command==='spot_stage_drop_images'){await this.call('/resources');return this.desktopCall<T>('execution_remote_stage_images',{...args,workspaceId:this.connection.workspaceId,endpoint:this.connection.endpoint});}
     if(command==='execution_remote_upload')return this.desktopCall<T>(command,{...args,workspaceId:this.connection.workspaceId,endpoint:this.connection.endpoint});
     if(command==='execution_remote_upload_cancel')return this.desktopCall<T>(command,args);
     if(LOCAL_UI.has(command))return this.desktopCall<T>(command,args);
+    // Deliberately absent from a cloud workspace: say so without a round trip.
+    if(isRemoteUnsupported(command))throw Error(remoteUnsupportedMessage(command));
+    // Research, claims and the mesh live in the workspace's canopy-service. A
+    // view-only member may read them; a write is refused here, before the
+    // gateway's 403 could read as a lost sign-in.
+    if(isHarnessCommand(command)){
+      if(this.readOnly&&!HARNESS_READS.has(command))throw Error('This workspace is read-only');
+      try{return await harnessCommand(command,args,{
+        query:(store,action,body={})=>this.call('/harness/query',{store,action,args:body},INTERACTIVE),
+        action:(kind,body)=>this.call('/harness/actions',{...body,kind},INTERACTIVE),
+        native:(name,body)=>this.native(name,body),
+        desktop:(name,body)=>this.desktopCall(name,body),
+        instance:`remote-${this.connection.workspaceId}`,
+      }) as T;}
+      catch(error){if(!isOutdatedHarnessError(error))throw error;this.hostOutdated(command);throw Error(hostOutdatedMessage(command));}
+    }
     if(this.readOnly&&!READ_ONLY_NATIVE.has(command)&&!['environment_identity','pty_renderer_register','pty_renderer_sessions','pty_stats'].includes(command))throw Error('This workspace is read-only');
     if(command==='git_clone'){
       let job=await this.native<{id:string;state:string;path:string;name:string;error?:string}>('git_clone_start',args);
@@ -315,7 +356,9 @@ export class NativeWorkspaceHost implements Host {
         job=await this.native('git_clone_status',{id:job.id});
       }
     }
-    if(command==='environment_identity')value=`${this.connection.endpoint}/${this.connection.workspaceId}`;
+    // Workspace previews stream a VM browser; the native webview never applies.
+    if(command==='browser_supported')value=false;
+    else if(command==='environment_identity')value=`${this.connection.endpoint}/${this.connection.workspaceId}`;
     else if(command==='pty_renderer_register'){
       // Keep the Mac watchdog alive, but never adopt its local processes.
       const [registration,metadata,sessions,instance]=await Promise.all([
@@ -324,7 +367,7 @@ export class NativeWorkspaceHost implements Host {
         this.sessions(INTERACTIVE),
         this.instanceId().catch(()=>undefined),
       ]);
-      this.rendererGeneration=registration.generation;this.metadata=metadata;this.beginPoll();
+      this.rendererGeneration=registration.generation;this.metadata=metadata;this.beginPoll();this.scheduleHostVersionCheck();
       value={generation:this.rendererGeneration,instance,sessions:sessions.filter(s=>s.exitCode==null).map(s=>this.summary(s))};
     }else if(command==='pty_renderer_sessions')value=(await this.sessions(INTERACTIVE)).filter(s=>s.exitCode==null).map(s=>this.summary(s));
     else if(command==='instance_id')value=await this.instanceId();
@@ -342,7 +385,16 @@ export class NativeWorkspaceHost implements Host {
       const requested=Array.isArray(args.argv)?(args.argv as string[]).map(quote).join(' '):String(args.runCommand??args.command??args.shell??'/bin/bash');
       const requestId=crypto.randomUUID();
       const commandLine=`cd ${quote(cwd)} && env ${[...env.filter(([key])=>!['CANOPY_ACCOUNT_POOL','CANOPY_SESSION_REQUEST_ID',CLAUDE_IDE_MARKER].includes(key)),['CANOPY_SESSION_REQUEST_ID',requestId]].map(([key,val])=>quote(key+'='+val)).join(' ')} ${requested}`;
-      const session=await this.call<RemoteSession>('/sessions',{command:commandLine,kind:args.runCommand?'build':'terminal',accountId,requestId,projectId:args.projectId,...(claudeIde?{claudeIde}:{})});
+      // A task attempt's terminal: the attempt must be the current reserved
+      // one, and starts (or fails) with the spawn, as pty.rs does.
+      const binding=args.runId!=null||args.attemptId!=null?await this.native<Args|null>('task_spawn_binding',{runId:args.runId??null,attemptId:args.attemptId??null}):null;
+      let session:RemoteSession;
+      try{session=await this.call<RemoteSession>('/sessions',{command:commandLine,kind:args.runCommand?'build':'terminal',accountId,requestId,projectId:args.projectId,...(claudeIde?{claudeIde}:{})});}
+      catch(error){if(binding)await this.native('task_mark_launch_failed',{binding}).catch(()=>{});throw error;}
+      if(binding){
+        try{await this.native('task_mark_spawned',{binding});}
+        catch(error){await this.call(`/sessions/${session.id}/stop`,{}).catch(()=>{});await this.native('task_mark_launch_failed',{binding}).catch(()=>{});throw Error(`spawned PTY but could not start task attempt: ${String(error).replace(/^Error: /,'')}`);}
+      }
       if(Number(args.cols)>0 && Number(args.rows)>0){
         try{await this.call(`/sessions/${session.id}/resize`,{cols:args.cols,rows:args.rows});session.cols=Number(args.cols);session.rows=Number(args.rows);}
         catch(error){
@@ -386,16 +438,88 @@ export class NativeWorkspaceHost implements Host {
       const stats=await this.native<Array<Args&{id:number}>>('session_process_stats',{sessions:(await this.sessions()).filter(session=>session.exitCode==null).map(session=>({...session,requestId:this.metadata[String(session.id)]?.requestId}))});
       value=stats.map(stat=>{const meta=this.metadata[String(stat.id)]??{};return {...stat,cwd:meta.cwd??stat.cwd,title:meta.title??stat.title,name:meta.name};});
     }
-    else value=await this.native(command,args);
+    else value=await this.hostCommand(command,args);
     if(command==='fs_read_file' && value && typeof value==='object' && 'b64' in value) return Uint8Array.from(atob(String(value.b64)), c=>c.charCodeAt(0)).buffer as T;
     return value as T;
   }
+  /** Notes live on this computer and the file in the workspace: read it from
+   * the workspace in slices and attach the bytes, with notes.rs attach_file's
+   * kind, title, extension and size rules. */
+  private async attachWorkspaceFile(args:Args){
+    const path=String(args.path??'');const name=basename(path);const dot=name.lastIndexOf('.');
+    const ext=dot>0?name.slice(dot+1).toLowerCase():'';
+    const kind=typeof args.kind==='string'?args.kind:['png','jpg','jpeg','gif','webp','bmp'].includes(ext)?'image':'artifact';
+    const image=kind==='image',limit=image?16*1024*1024:512*1024;
+    const parts:Uint8Array[]=[];let offset=0,size=0;
+    try{
+      do{const slice=await this.native<{b64:string;size:number}>('fs_read_range',{path,offset,length:1024*1024});size=slice.size;
+        if(size>limit)throw Error(`file is ${size} bytes; the limit is ${limit}`);
+        const bytes=Uint8Array.from(atob(slice.b64),c=>c.charCodeAt(0));if(!bytes.length)break;parts.push(bytes);offset+=bytes.length;}while(offset<size);
+    }catch(error){throw Error(`could not read ${path}: ${String(error).replace(/^Error: /,'')}`);}
+    const bytes=new Uint8Array(offset);let at=0;for(const part of parts){bytes.set(part,at);at+=part.length;}
+    const stem=dot>0?name.slice(0,dot):name;
+    const title=(typeof args.title==='string'&&args.title.trim())||stem||(image?'image':'capture');
+    let data='';if(image){let binary='';for(let i=0;i<bytes.length;i+=0x8000)binary+=String.fromCharCode(...bytes.subarray(i,i+0x8000));data=btoa(binary);}else data=new TextDecoder().decode(bytes);
+    return this.desktopCall('notes_add_attachment',{projectId:args.projectId,id:args.id,kind,title,data,ext:ext||(image?'png':'txt')});
+  }
+  /** A host command, with an older host told apart from a missing feature: a
+   * newer app asking a workspace that still runs last month's host gets one
+   * plain "restart or update the workspace" instead of "does not support". */
+  private async hostCommand<T>(command:string,args:Args){
+    // A Channel argument (LSP output, a runner's lines) is named for the host,
+    // which queues what the command sends; pumpChannels drains it here.
+    const opened:string[]=[];let input=args;
+    for(const [key,value] of Object.entries(args))if(value instanceof WorkspaceChannel){const id=crypto.randomUUID();this.hostChannels.set(id,value as WorkspaceChannel<unknown>);opened.push(id);input={...input,[key]:{__canopyChannel:id}};}
+    if(opened.length)this.pumpChannels();
+    try{
+      const result=await this.native<T>(command,input);
+      // The desktop announces a language server's end as an event; here its
+      // channel closing is that end.
+      if(command==='lsp_start')for(const id of opened)this.channelEnded.set(id,()=>this.emit('lsp:exit',result));
+      return result;
+    }catch(error){
+      for(const id of opened)this.hostChannels.delete(id);
+      if(outdatedHostCommand(error)!==command)throw error;this.hostOutdated(command);throw Error(hostOutdatedMessage(command));
+    }
+  }
+  private hostChannels=new Map<string,WorkspaceChannel<unknown>>();
+  private channelEnded=new Map<string,()=>void>();
+  private pumping=false;
+  private async pumpChannels(){
+    if(this.pumping)return;this.pumping=true;
+    try{
+      while(this.hostChannels.size&&!this.disposed){
+        let batch:Record<string,{messages:unknown[];closed:boolean}>;
+        try{batch=await this.native('channel_poll',{ids:[...this.hostChannels.keys()].slice(0,64),wait:1500},INTERACTIVE);}
+        catch{await new Promise(resolve=>setTimeout(resolve,1000));continue;}
+        for(const [id,{messages,closed}] of Object.entries(batch??{})){
+          const channel=this.hostChannels.get(id);if(!channel)continue;
+          for(const message of messages){try{channel.onmessage(message);}catch{/* One listener's failure never stalls the stream. */}}
+          if(closed){this.hostChannels.delete(id);this.channelEnded.get(id)?.();this.channelEnded.delete(id);}
+        }
+      }
+    }finally{this.pumping=false;}
+  }
+  private outdatedReported=false;
+  private hostOutdated(command?:string){
+    if(this.outdatedReported||this.disposed)return;this.outdatedReported=true;
+    window.dispatchEvent(new CustomEvent(HOST_OUTDATED_EVENT,{detail:{command:command??null,message:hostOutdatedMessage(command)}}));
+  }
+  /** Ask once per connection, so a stale host is reported before anyone hits
+   * it — after boot settles, never competing with the handshake for a lane. */
+  private versionCheck?: ReturnType<typeof setTimeout>;
+  private scheduleHostVersionCheck(){if(!this.versionCheck&&!this.outdatedReported)this.versionCheck=setTimeout(()=>void this.checkHostVersion(),10_000);}
+  private async checkHostVersion(){
+    if(this.disposed)return;
+    try{const capabilities=await this.native<{protocol?:number}>('host_capabilities');if(!(Number(capabilities?.protocol)>=HOST_PROTOCOL))this.hostOutdated();}
+    catch(error){if(/does not support host_capabilities yet/.test(String(error)))this.hostOutdated();}
+  }
   async listen<T>(event:string,handler:(event:HostEvent<T>)=>void):Promise<UnlistenFn>{
     if(this.disposed)throw Error('Workspace disconnected');
-    if(['remote:upload-progress','menu','deep-link','memory:pressure','window:fullscreen','clipboard:changed','clipboard:blocked','dictation:progress','dictation:partial','dictation:level','ledger-appended',...COMPANION_DESKTOP_EVENTS].includes(event)){const companionOnly=event.startsWith('agent:');const release=await this.desktop.listen<T>(event,value=>{if(this.disposed)return;if(companionOnly&&(value.payload as {ptyId?:unknown}|null)?.ptyId!=null)return;handler(value);});if(this.disposed){release();return()=>{};}const cancel=()=>{this.desktopListeners.delete(cancel);release();};this.desktopListeners.add(cancel);return cancel;}
+    if(['remote:upload-progress','menu','deep-link','memory:pressure','window:fullscreen','clipboard:changed','clipboard:blocked','dictation:progress','dictation:partial','dictation:level','ledger-appended',...COMPANION_DESKTOP_EVENTS,...DESKTOP_EVENTS].includes(event)){const companionOnly=event.startsWith('agent:');const release=await this.desktop.listen<T>(event,value=>{if(this.disposed)return;if(companionOnly&&(value.payload as {ptyId?:unknown}|null)?.ptyId!=null)return;handler(value);});if(this.disposed){release();return()=>{};}const cancel=()=>{this.desktopListeners.delete(cancel);release();};this.desktopListeners.add(cancel);return cancel;}
     const list=this.listeners.get(event)??new Set();this.listeners.set(event,list);list.add(handler as (event:HostEvent<unknown>)=>void);this.beginPoll();return ()=>{list.delete(handler as (event:HostEvent<unknown>)=>void);};
   }
   channel<T>():HostChannel<T>{return new WorkspaceChannel<T>();}
   invokeDesktop<T>(command:string,args:Args={}):Promise<T>{return this.desktopCall<T>(command,args);}
-  dispose(){this.disposed=true;this.harness?.stop();this.harness=undefined;for(const release of [...this.desktopListeners]){try{release();}catch{/* Disposed handlers stay inert even if native teardown fails. */}}this.desktopListeners.clear();window.removeEventListener('canopy:account-changed',this.onAccountChanged);clearTimeout(this.heartbeat);for(const input of this.inputs.values())input.dispose();this.inputs.clear();clearTimeout(this.poll);for(const id of this.streams.keys())this.detach(id);this.listeners.clear();}
+  dispose(){const channels=[...this.hostChannels.keys()];this.hostChannels.clear();if(channels.length&&!this.disposed)void this.native('channel_drop',{ids:channels}).catch(()=>{});this.disposed=true;this.harness?.stop();this.harness=undefined;for(const release of [...this.desktopListeners]){try{release();}catch{/* Disposed handlers stay inert even if native teardown fails. */}}this.desktopListeners.clear();window.removeEventListener('canopy:account-changed',this.onAccountChanged);clearTimeout(this.heartbeat);clearTimeout(this.versionCheck);for(const input of this.inputs.values())input.dispose();this.inputs.clear();clearTimeout(this.poll);for(const id of this.streams.keys())this.detach(id);this.listeners.clear();}
 }
