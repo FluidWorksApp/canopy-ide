@@ -146,6 +146,14 @@ describe("assembleSessionDoc", () => {
     expect(bare.turns.every((t) => t.startedAt === null && t.files.length === 0)).toBe(true);
   });
 
+  it("keys a timeline-less session to what was said, not to hook activity", () => {
+    const key = (d: SessionDigest, n = 2) =>
+      assembleSessionDoc({ sessionId: SID, agent: "x", cwd: "/r", digest: d, transcript: Array(n).fill({ role: "user", text: "m" }) }).lastTurnKey;
+    expect(key({ ...digest, updated: 1 })).toBe(key({ ...digest, updated: 999 }));
+    expect(key(digest, 3)).not.toBe(key(digest, 2));
+    expect(key({ ...digest, prompts: [...digest.prompts!, "more"] })).not.toBe(key(digest));
+  });
+
   it("has an honest empty state with nothing at all", () => {
     const empty = assembleSessionDoc({ sessionId: SID, agent: "x", cwd: "/r" });
     expect(empty.goal.source).toBe("none");

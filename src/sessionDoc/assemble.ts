@@ -292,9 +292,13 @@ export function assembleSessionDoc(input: SessionDocInputs): SessionDocument {
   const handoffs = ledger.filter((e) => e.kind === "handoff").sort((a, b) => b.ts - a.ts);
 
   const lastPoint = points[points.length - 1];
+  // Without a timeline, the prompt and message counts stand in for the turn:
+  // they move only when someone says something. Not `digest.updated`, which
+  // moves on every hook event (working, idle) and would spend a brain call on
+  // each reopen of an unchanged session.
   const lastTurnKey = lastPoint
     ? `t${lastPoint.n}:${lastPoint.end?.ts_ms ?? lastPoint.start?.ts_ms ?? 0}`
-    : `d${digest?.updated ?? 0}:${digest?.prompts?.length ?? 0}:${input.transcript?.length ?? 0}`;
+    : `d${digest?.prompts?.length ?? 0}:${digest?.first_prompt ? 1 : 0}:${input.transcript?.length ?? 0}`;
 
   const label = goal.text || [...(digest?.prompts ?? [])].reverse().find(human) || "Agent session";
   return {
