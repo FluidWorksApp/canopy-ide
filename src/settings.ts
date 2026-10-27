@@ -512,6 +512,16 @@ export interface Settings {
    *  session-to-lines provenance a reviewer can follow back. Off by default:
    *  it changes what lands in other people's history. */
   commitSessionTrailers: boolean;
+  /** Plans (src/plans): work dispatched to an agent through Canopy gets a
+   *  brain-written plan first — shown inline for tiny low-risk work, held for
+   *  approval otherwise. Off = agents start straight from the brief. */
+  planBeforeDispatch: boolean;
+  /** Intent & evidence review (src/review): ask the brain for the
+   *  plan-deviation summary as soon as the view opens. Off = a button asks. */
+  reviewAutoSummary: boolean;
+  /** Most changed lines one reviewable slice may carry before the review view
+   *  says so and offers to ask the agent to split it. */
+  reviewSliceBudgetLines: number;
   /** Connect Claude Code to Canopy as its IDE, the way it connects to VS Code:
    *  proposed edits open as a diff to accept, tweak or reject, the editor
    *  selection reaches the prompt, and the CLI reads diagnostics off Canopy's
@@ -749,6 +759,9 @@ export const DEFAULTS: Settings = {
   receiptCommands: {},
   sessionDocAutoSummary: true,
   commitSessionTrailers: false,
+  planBeforeDispatch: true,
+  reviewAutoSummary: true,
+  reviewSliceBudgetLines: 400,
   claudeIdeIntegration: true,
   turnRollback: true,
   memoryAutoExtract: true,
@@ -953,6 +966,11 @@ export function getSettings(): Settings {
     }
     if (value.memoryQuarantine !== "skip") value.memoryQuarantine = "quarantine";
     if (typeof value.brainSessionTitles !== "boolean") value.brainSessionTitles = true;
+    if (
+      !Number.isFinite(value.reviewSliceBudgetLines) ||
+      value.reviewSliceBudgetLines < 20
+    )
+      value.reviewSliceBudgetLines = DEFAULTS.reviewSliceBudgetLines;
   } catch {
     value = { ...DEFAULTS };
   }

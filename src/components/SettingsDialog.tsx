@@ -1593,6 +1593,47 @@ export function SettingsDialog({ onClose, initialTab = "appearance" }: SettingsD
                     }
                   />
                 </Item>
+                {/* Plans and review (src/plans, src/review): the brain plans
+                    dispatched work and writes the review's intent summary. */}
+                <Item
+                  name="Plan before an agent starts"
+                  desc="When you hand work to an agent, the brain writes a short plan first. Small, low-risk work starts right away with the plan shown; anything riskier waits for your approval."
+                >
+                  <Checkbox
+                    checked={s.planBeforeDispatch}
+                    onChange={(v) => patch({ planBeforeDispatch: v })}
+                    label="Plan dispatched work first"
+                    hint={
+                      s.planBeforeDispatch
+                        ? "Uses your brain's plan once per task you start."
+                        : "Agents start straight from what you typed."
+                    }
+                  />
+                </Item>
+                <Item
+                  name="Intent & evidence review"
+                  desc="Reviewing an agent's changes or a pull request opens on the plan, what changed against it, the proof receipt and a risk map, before the diff."
+                >
+                  <Checkbox
+                    checked={s.reviewAutoSummary}
+                    onChange={(v) => patch({ reviewAutoSummary: v })}
+                    label="Summarize changes against the plan when the review opens"
+                    hint={
+                      s.reviewAutoSummary
+                        ? "One brain call per new diff; the same diff is never summarized twice."
+                        : "The review shows a button to ask for the summary."
+                    }
+                  />
+                  <Stepper
+                    aria-label="Most changed lines per reviewable slice"
+                    suffix="lines"
+                    value={s.reviewSliceBudgetLines}
+                    min={50}
+                    max={5000}
+                    step={50}
+                    onChange={(v) => patch({ reviewSliceBudgetLines: v })}
+                  />
+                </Item>
                 <Item
                   name="Agent awareness"
                   desc="When an agent finishes a change, the other agents working on the same code are told what changed and why it matters to them."

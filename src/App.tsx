@@ -157,6 +157,8 @@ import { ProjectManager } from "./components/ProjectManager";
 import { SettingsDialog } from "./components/SettingsDialog";
 import { HelpDialog } from "./components/HelpDialog";
 import { AskDialog } from "./components/AskDialog";
+import { PlanGateHost } from "./components/PlanGateHost";
+import { notePlanQuestionAnswered } from "./plans/planStore";
 import { AboutDialog } from "./components/AboutDialog";
 import { Dictation } from "./components/Dictation";
 import { ShareDialogHost } from "./components/ShareDialog";
@@ -2924,7 +2926,18 @@ export default function App() {
                       ? { kind: "terminal", ptyId: op.ptyId, path: op.route }
                       : { kind: "project", path: op.route },
                 });
-                setAsk({ id: op.id, attentionId, question, options, resolve });
+                setAsk({
+                  id: op.id,
+                  attentionId,
+                  question,
+                  options,
+                  // An answer to an agent running a plan is a decision the
+                  // plan did not foresee: it goes on the plan (plans/planStore).
+                  resolve: (answer) => {
+                    resolve(answer);
+                    void notePlanQuestionAnswered({ ptyId: op.ptyId, route: op.route, question, options, answer }).catch(() => {});
+                  },
+                });
               }),
             // The companion's cross-project handlers, read through a ref so
             // this long-lived listener always calls the current ones without
@@ -4251,6 +4264,8 @@ export default function App() {
       )}
 
       <MeshJobInbox jobs={meshJobs} workspaces={ws.projects.map((p) => p.name)} />
+
+      <PlanGateHost />
 
       {ask && (
         <AskDialog

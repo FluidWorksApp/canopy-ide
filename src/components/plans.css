@@ -1,0 +1,63 @@
+/* Plans (PlanCard.tsx, PlanGateHost.tsx) and the Intent & evidence review (IntentEvidenceView.tsx). */
+.plan-card{display:flex;flex-direction:column;gap:8px;min-width:0;color:var(--text)}
+.plan-card-head{display:flex;flex-wrap:wrap;align-items:center;gap:6px;font-size:11px;color:var(--text-muted)}
+.plan-card-kind{font-size:10px;letter-spacing:.04em;text-transform:uppercase}
+.plan-card-status{margin-left:auto;font-size:11px}
+.plan-chip{padding:1px 7px;border:1px solid var(--border);border-radius:999px;font-size:10.5px;color:var(--text-muted);white-space:nowrap}
+.plan-chip.is-low{border-color:var(--ok);color:var(--ok)}
+.plan-chip.is-medium{border-color:var(--warn,#c90);color:var(--warn,#c90)}
+.plan-chip.is-high{border-color:var(--danger);color:var(--danger)}
+.plan-card-goal{margin:0;font-size:13.5px;font-weight:500;overflow-wrap:anywhere}
+.plan-card-why{margin:0;font-size:12px;color:var(--text-muted)}
+.plan-card-section h4{margin:0 0 3px;font-size:10.5px;font-weight:500;letter-spacing:.04em;text-transform:uppercase;color:var(--text-muted)}
+.plan-card-section ul{margin:0;padding-left:18px;font-size:12.5px}
+.plan-card-section li{margin:2px 0;overflow-wrap:anywhere}
+.plan-decision{margin:0 0 6px;padding:6px 8px;border:1px solid var(--border);border-radius:var(--r-sm)}
+.plan-decision legend{padding:0 4px;font-size:12.5px;display:flex;gap:6px;align-items:center;flex-wrap:wrap}
+.plan-option{display:flex;align-items:center;gap:6px;font-size:12.5px;padding:2px 0;cursor:pointer}
+.plan-rec{font-size:10.5px;color:var(--ok)}
+.plan-own,.plan-check-row input{flex:1;min-width:0;font:inherit;font-size:12.5px;padding:3px 6px;border:1px solid var(--border);border-radius:var(--r-sm);background:var(--bg);color:var(--text)}
+.plan-why{display:block;font-size:11.5px;color:var(--text-muted)}
+.plan-answer{margin:0;font-size:12.5px}
+.plan-check-row{display:flex;gap:4px;align-items:center;margin-bottom:3px}
+.plan-touches{margin:0;font-family:var(--font-mono,monospace);font-size:11.5px;color:var(--text-muted);overflow-wrap:anywhere}
+.plan-card-actions{display:flex;flex-wrap:wrap;gap:6px;align-items:center}
+
+.plan-gate-dialog{width:min(600px,calc(100vw - 32px));max-width:min(600px,calc(100vw - 32px));max-height:calc(100vh - 48px);overflow:auto}
+.plan-gate-stack{position:fixed;right:16px;bottom:40px;z-index:350;display:flex;flex-direction:column;gap:6px;width:min(420px,calc(100vw - 32px))}
+.plan-gate-item{display:flex;flex-direction:column;gap:6px;padding:8px 10px;border:1px solid var(--border);border-radius:var(--r-md,8px);background:var(--bg-raised);box-shadow:0 8px 28px rgba(0,0,0,.3);font-size:12.5px;max-height:70vh;overflow:auto}
+.plan-gate-item[role=status]{flex-direction:row;align-items:center}
+.plan-gate-row{display:flex;align-items:center;gap:6px}
+.plan-gate-text{flex:1;min-width:0;overflow-wrap:anywhere}
+.plan-gate-spinner{width:10px;height:10px;border:2px solid var(--border);border-top-color:var(--accent);border-radius:50%;animation:plan-spin .9s linear infinite;flex:0 0 auto}
+@keyframes plan-spin{to{transform:rotate(360deg)}}
+@media (prefers-reduced-motion:reduce){.plan-gate-spinner{animation:none}}
+
+.intent-view{display:flex;flex-direction:column;gap:12px;padding:10px 12px;min-width:0}
+.intent-step{display:flex;flex-direction:column;gap:6px;padding:8px 10px;border:1px solid var(--border);border-radius:var(--r-sm);background:var(--bg-raised);min-width:0}
+.intent-step.is-agent-made{border-style:dashed}
+.intent-step h3{margin:0;display:flex;align-items:center;gap:6px;font-size:10.5px;font-weight:500;letter-spacing:.04em;text-transform:uppercase;color:var(--text-muted)}
+.intent-step h3 .agent-byline-note{text-transform:none;letter-spacing:0}
+.intent-muted{margin:0;font-size:12px;color:var(--text-muted)}
+.intent-summary{margin:0;font-size:13px;overflow-wrap:anywhere}
+.intent-list{margin:0;padding-left:18px;font-size:12.5px}
+.intent-list li{margin:2px 0;overflow-wrap:anywhere}
+.intent-sev{font-size:10.5px;padding:0 6px;border-radius:999px;border:1px solid var(--border);margin-right:4px}
+.intent-sev.is-high{border-color:var(--danger);color:var(--danger)}
+.intent-sev.is-medium{border-color:var(--warn,#c90);color:var(--warn,#c90)}
+.intent-sev.is-low{color:var(--text-muted)}
+.intent-receipt{display:flex;flex-direction:column;gap:4px;font-size:12.5px}
+.intent-verdict{font-weight:600}
+.intent-verdict.is-proven{color:var(--ok)}
+.intent-verdict.is-partial,.intent-verdict.is-unproven{color:var(--warn,#c90)}
+.intent-verdict.is-contradicted{color:var(--danger)}
+.intent-risk{display:flex;flex-direction:column;gap:2px}
+.intent-risk-row{display:flex;align-items:baseline;gap:8px;width:100%;padding:3px 4px;border:0;border-radius:var(--r-sm);background:none;color:inherit;font:inherit;font-size:12.5px;text-align:left;cursor:pointer}
+.intent-risk-row:hover,.intent-risk-row:focus-visible{background:var(--bg-hover,rgba(127,127,127,.12))}
+.intent-risk-path{font-family:var(--font-mono,monospace);font-size:11.5px;overflow-wrap:anywhere;flex:0 1 auto}
+.intent-risk-why{flex:1;min-width:0;color:var(--text-muted);font-size:11.5px}
+.intent-risk-lines{color:var(--text-muted);font-size:11px;white-space:nowrap}
+.intent-banner{display:flex;flex-wrap:wrap;align-items:center;gap:8px;padding:6px 8px;border:1px solid var(--warn,#c90);border-radius:var(--r-sm);font-size:12.5px}
+.intent-record{font-size:12.5px}
+.intent-record strong{font-weight:600}
+.intent-eligible{color:var(--ok)}

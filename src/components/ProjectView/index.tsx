@@ -666,6 +666,8 @@ import {
   statusContextRoot,
 } from "./helpers";
 import { Button } from "../ui";
+import { dispatchWithPlan } from "../../plans/planGate";
+import { expectRun } from "../../plans/planStore";
 import {
   documentResourceActive,
   shouldReuseInactiveDocumentPane,
@@ -3220,9 +3222,29 @@ const ProjectViewBody = memo(function ProjectViewBody({
         return;
       }
       const agent = cli.id;
+      // The ticket is dispatched work like any other: plan it first. The plan
+      // runs against the repo (the workspace may not exist yet) and folds into
+      // the seed; "Start without a plan" or no brain seeds the ticket as-is.
+      let seed = ticketContext(ticket);
+      let proceed = false;
+      let planId: string | undefined;
+      await dispatchWithPlan(
+        { request: seed, dir: repo, label: `${ticket.id} · ${cli.name}`, source: "ticket" },
+        (planned, id) => {
+          seed = planned;
+          planId = id;
+          proceed = true;
+        },
+      );
+      if (!proceed) return;
+      // The agent runs in the ticket's worktree, which is usually outside the
+      // repo's directory: wait for its run there too.
+      const expectIn = (dir: string) => {
+        if (planId) void expectRun(planId, dir).catch(() => {});
+      };
       // Parked in `repo` rather than the workspace, which does not exist yet:
       // the pointer is an absolute path, so it reads the same from either.
-      const start = await startCommandParked(agent, ticketContext(ticket), repo);
+      const start = await startCommandParked(agent, seed, repo);
       if (!start) {
         onNotice(`Unknown agent "${agent}".`);
         return;
@@ -3233,10 +3255,11 @@ const ProjectViewBody = memo(function ProjectViewBody({
       const existing = ticketWorktree(ticket, worktrees);
       const title = `${ticket.id} · ${cli.name}`;
       if (existing) {
+        expectIn(existing.path);
         const id = addTerminal(existing.path, start.command, title, cli.icon);
         setTicketWorktrees(worktrees);
         if (id && start.typePrompt)
-          pendingTerminalPrompts.current.set(id, ticketContext(ticket));
+          pendingTerminalPrompts.current.set(id, seed);
         return;
       }
       // The funnel owns where a workspace goes and what to do when git won't
@@ -3259,9 +3282,10 @@ const ProjectViewBody = memo(function ProjectViewBody({
       );
       if (r.kind !== "settled") return; // already asked and answered on screen
       setTicketWorktrees(await ipc.gitWorktrees(repo).catch(() => worktrees));
+      expectIn(r.path);
       const id = addTerminal(r.path, start.command, title, cli.icon);
       if (id && start.typePrompt)
-        pendingTerminalPrompts.current.set(id, ticketContext(ticket));
+        pendingTerminalPrompts.current.set(id, seed);
     },
     [ticketRepo, addTerminal, onNotice, getInstalled, switchTo],
   );
@@ -4557,9 +4581,16 @@ const ProjectViewBody = memo(function ProjectViewBody({
    *  lifecycle as a saved one, no entry in the registry. The context builder
    *  already folded the user's words in, so nothing more is passed. A label is
    *  only given where the surface has a better one than the brief's own head. */
+  // Dispatched work is planned first (plans/planGate.ts): tiny low-risk work
+  // starts at once with its plan shown, anything riskier waits for approval.
+  // A re-run passes `plan: false` — its stored brief already carries one.
   const runAdhocTask = useCallback(
-    (brief: string, dir: string, label?: string) => {
-      void startMicroTask(adhocTaskDef(brief, label), { dir }, "");
+    (brief: string, dir: string, label?: string, opts?: { plan?: boolean }) => {
+      const name = label ?? adhocLabel(brief.replace(/\s+/g, " ").trim());
+      const launch = (planned: string) =>
+        startMicroTask(adhocTaskDef(planned, name), { dir }, "");
+      if (opts?.plan === false) void launch(brief);
+      else void dispatchWithPlan({ request: brief, dir, label: name, source: "task" }, launch);
     },
     [startMicroTask],
   );
@@ -4935,10 +4966,11 @@ const ProjectViewBody = memo(function ProjectViewBody({
           `${ticketContext(ticket)} Implement it end-to-end and verify the changes. ` +
           `Leave the completed work in this worktree; do not commit or open a pull request ` +
           `unless the ticket explicitly asks for it.`;
-        await startMicroTask(
-          adhocTaskDef(brief, ticketTaskLabel(ticket)),
-          { dir },
-          "",
+        const workDir = dir;
+        await dispatchWithPlan(
+          { request: brief, dir: workDir, label: ticketTaskLabel(ticket), source: "ticket" },
+          (planned) =>
+            startMicroTask(adhocTaskDef(planned, ticketTaskLabel(ticket)), { dir: workDir }, ""),
         );
       } catch (err) {
         onNotice(`Couldn't start task: ${String(err)}`, "error");
@@ -12791,7 +12823,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
             // (a branch tab, a PR), which is long gone — but the brief that
             // payload produced was recorded, and it says everything.
             onRunAgain={(run: TaskRun) =>
-              runAdhocTask(run.brief, run.cwd, run.label)
+              runAdhocTask(run.brief, run.cwd, run.label, { plan: false })
             }
             onContinueSession={continueTaskSession}
             onOpenFile={(path) => void openFile(path)}

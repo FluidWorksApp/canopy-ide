@@ -16,8 +16,9 @@ import {LinkifiedText} from './LinkifiedText';
 import {Button} from './ui';
 import {CheckIcon,CommitIcon,CopyIcon,DocumentIcon,GlobeIcon} from './icons';
 import type {ChatMessage} from '../teamMessaging/client';
-import {OUTCOME_ICON,OUTCOME_LABEL,cardDraft,cardOf,cardUrl,foldOutcomes,type Card,type CardExtensions,type ReviewOutcome,type ReviewOutcomeCard,type ReviewRequestCard} from '../teamMessaging/cardSchema';
+import {OUTCOME_ICON,OUTCOME_LABEL,cardDraft,cardOf,cardUrl,foldOutcomes,foldPlanOutcomes,type Card,type CardExtensions,type PlanCard,type PlanOutcome,type PlanOutcomeCard,type ReviewOutcome,type ReviewOutcomeCard,type ReviewRequestCard} from '../teamMessaging/cardSchema';
 import {openSessionDoc} from '../sessionDoc/events';
+import {applyChatApproval} from '../plans/planStore';
 import './chatCard.css';
 
 /** Everything a card reaches outside itself, injectable for tests. */
@@ -70,7 +71,7 @@ const ipcChatCardDeps=():ChatCardDeps=>ipcDeps??=({
 
 const short=(sha:string)=>sha.slice(0,7);
 const lines=(l?:{start:number;end:number})=>l?(l.start===l.end?`:${l.start}`:`:${l.start}-${l.end}`):'';
-const KIND:Record<Card['type'],string>={pr:'Pull request',file:'File',diff:'Diff',terminal:'Terminal output',report:'Agent report','review-request':'Review requested','review-outcome':'Review',handoff:'Hand-off'};
+const KIND:Record<Card['type'],string>={pr:'Pull request',file:'File',diff:'Diff',terminal:'Terminal output',report:'Agent report','review-request':'Review requested','review-outcome':'Review',plan:'Plan for review','plan-outcome':'Plan',handoff:'Hand-off'};
 /** Long text blocks start folded to this many lines. */
 const FOLD_LINES=12;
 
@@ -278,6 +279,70 @@ function CardBody({card,message,userId,messages,name,onReply,deps}:{card:Card;me
   case 'review-outcome':return <div className="chat-card is-compact" data-type="review-outcome">
    <span>{OUTCOME_ICON[card.outcome]} {OUTCOME_LABEL[card.outcome]} {card.repo.slug}#{card.number}{card.head?` at ${short(card.head)}`:''}</span>
   </div>;
+  case 'plan':{
+   const own=message.sender===userId;
+   return <div className="chat-card is-agent-made" data-type="plan">
+    {head(<span aria-hidden="true">◇</span>,`${card.risk} risk · ${card.size}`)}
+    <div className="chat-card-title">{card.goal}</div>
+    {card.decisions?.length?<div className="chat-card-plan-section"><small className="chat-card-byline">Decisions</small><ul>{card.decisions.map((d,i)=><li key={i}>{d.q} <strong>→ {d.a}</strong></li>)}</ul></div>:null}
+    {card.acceptance.length?<div className="chat-card-plan-section"><small className="chat-card-byline">Done when</small><ul>{card.acceptance.map((a,i)=><li key={i}>{a}</li>)}</ul></div>:null}
+    {card.wontDo?.length?<div className="chat-card-plan-section"><small className="chat-card-byline">Won't do</small><ul>{card.wontDo.map((w,i)=><li key={i}>{w}</li>)}</ul></div>:null}
+    <PlanOutcomes request={message} messages={messages} name={name} own={own}/>
+    {!own&&<PlanControls card={card} request={message} onReply={onReply}/>}
+   </div>;
+  }
+  case 'plan-outcome':return <div className="chat-card is-compact" data-type="plan-outcome">
+   <span>{card.outcome==='approved'?'✅ Approved the plan':'🔁 Asked for changes to the plan'}</span>
+  </div>;
  }
+}
+/** Approvals already carried to this machine's ledger, so a re-render of the
+ *  conversation does not append the same status change again. */
+const carried=new Set<string>();
+/** The plan card's thread answers: who approved, who asked for changes. The
+ *  author's copy carries the first approval into the plan's ledger entry —
+ *  the round trip that lets a teammate's yes start the waiting agent. */
+function PlanOutcomes({request,messages,name,own}:{request:ChatMessage;messages:readonly ChatMessage[];name:(id:string)=>string;own:boolean}){
+ const card=cardOf(request) as PlanCard;
+ const folded=useMemo(()=>foldPlanOutcomes(request,messages),[request,messages]);
+ const approval=folded.find(f=>f.outcome==='approved');
+ useEffect(()=>{
+  if(!own||!approval||carried.has(card.plan))return;
+  carried.add(card.plan);
+  void applyChatApproval(card.plan,name(approval.by)).catch(()=>carried.delete(card.plan));
+ },[own,approval,card.plan,name]);
+ if(!folded.length)return <p className="chat-card-note">No answers yet. Teammates can approve or comment in the thread.</p>;
+ return <ul className="chat-card-chips" aria-label="Plan answers">
+  {folded.map(f=><li key={f.by} className={`chat-card-chip is-${f.outcome}`}><strong>{name(f.by)}</strong> {f.outcome==='approved'?'✅ Approved':'🔁 Changes asked'}</li>)}
+ </ul>;
+}
+/** Approve / Ask for changes on a teammate's plan: posts a plan-outcome card
+ *  in the plan's thread, with the comment as its note. */
+function PlanControls({card,request,onReply}:{card:PlanCard;request:ChatMessage;onReply?:(text:string,ext:CardExtensions)=>Promise<unknown>}){
+ const [mode,setMode]=useState<PlanOutcome>(),[body,setBody]=useState(''),[done,setDone]=useState(''),[busy,setBusy]=useState(false);
+ if(!onReply)return null;
+ if(done)return <p className="chat-card-note" role="status">{done}</p>;
+ if(!mode)return <div className="chat-card-actions">
+  <Button size="sm" variant="accent" onClick={()=>setMode('approved')}>Approve plan…</Button>
+  <Button size="sm" onClick={()=>setMode('changes-requested')}>Ask for changes…</Button>
+ </div>;
+ const submit=async()=>{
+  if(mode==='changes-requested'&&!body.trim())return;
+  setBusy(true);
+  const outcome:PlanOutcomeCard={type:'plan-outcome',v:1,request:request.id,plan:card.plan,outcome:mode};
+  try{
+   const draft=cardDraft(outcome,body.trim(),{thread:{root:request.id}});
+   await onReply(draft.text,draft.ext);
+   setDone(mode==='approved'?'You approved this plan.':'You asked for changes.');
+  }catch{/* the message's own delivery state shows a failure */}
+  finally{setBusy(false);}
+ };
+ return <div className="chat-card-confirm" role="group" aria-label={mode==='approved'?'Approve plan':'Ask for changes to the plan'}>
+  <textarea aria-label={mode==='approved'?'Comment (optional)':'What should change'} placeholder={mode==='approved'?'Comment (optional)':'What should change (required)'} value={body} onChange={e=>setBody(e.target.value)} rows={2} maxLength={1800}/>
+  <div className="chat-card-actions">
+   <Button size="sm" variant={mode==='approved'?'accent':'danger'} disabled={busy||(mode==='changes-requested'&&!body.trim())} onClick={()=>void submit()}>{busy?'Sending…':mode==='approved'?'Approve':'Ask for changes'}</Button>
+   <Button size="sm" variant="ghost" disabled={busy} onClick={()=>{setMode(undefined);setBody('');}}>Cancel</Button>
+  </div>
+ </div>;
 }
 const numbered=(text:string,start:number)=>{const all=text.split('\n'),width=String(start+all.length-1).length;return all.map((l,i)=>`${String(start+i).padStart(width)}  ${l}`).join('\n');};
