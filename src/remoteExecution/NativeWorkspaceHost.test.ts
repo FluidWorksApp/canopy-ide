@@ -706,3 +706,20 @@ it('keeps relay, vault and device tools on this computer and says the workspace 
  expect(await host.invoke('browser_supported')).toBe(false);
  expect(fetcher).not.toHaveBeenCalled();host.dispose();
 });
+it('lets a viewer read research and claims but refuses its writes before the gateway',async()=>{
+ const desktop={kind:'native',invoke:vi.fn(),listen:vi.fn(),channel:vi.fn()} as unknown as Host;
+ const viewer=new NativeWorkspaceHost({...connection,scope:'view'},desktop),fetcher=vi.fn().mockResolvedValue({ok:true,json:async()=>({items:[{id:'r1'}]})});vi.stubGlobal('fetch',fetcher);
+ expect(await viewer.invoke('research_list',{projectId:'p'})).toEqual([{id:'r1'}]);
+ expect(String(fetcher.mock.calls[0][0])).toContain('/harness/query');
+ fetcher.mockClear();
+ for(const command of ['research_set_status','context_release_claim','context_mesh_sever'])await expect(viewer.invoke(command,{})).rejects.toThrow('read-only');
+ expect(fetcher).not.toHaveBeenCalled();viewer.dispose();
+});
+it('reports an older workspace service as an older host, once',async()=>{
+ const {host,fetcher}=setup();
+ fetcher.mockImplementation(async(url:string)=>String(url).endsWith('/harness/actions')?{ok:false,status:400,json:async()=>({error:'Invalid harness action'})}:{ok:false,status:400,json:async()=>({error:'no query read_file on store research'})});
+ const seen:unknown[]=[];const heard=(event:Event)=>seen.push((event as CustomEvent).detail.command);window.addEventListener('canopy:workspace-host-outdated',heard);
+ await expect(host.invoke('context_release_claim',{ownerKey:'k'})).rejects.toThrow(/older Canopy host/);
+ await expect(host.invoke('research_read_file',{projectId:'p',id:'r',path:'a'})).rejects.toThrow('This workspace is running an older Canopy host. Restart or update the workspace to use research.');
+ expect(seen).toEqual(['context_release_claim']);window.removeEventListener('canopy:workspace-host-outdated',heard);host.dispose();
+});

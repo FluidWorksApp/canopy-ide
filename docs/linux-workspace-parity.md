@@ -32,6 +32,12 @@ host runtime from weeks earlier.
   boot the adapter compares `protocol` with `HOST_PROTOCOL`. A host that doesn't know the
   command at all, or reports a lower protocol, gets the same notice before anyone hits a
   missing command.
+- **Older gateway or service.** The research, claims and mesh commands go to canopy-service,
+  not the host. An older gateway or service refuses a query or action it doesn't know
+  (`Invalid harness action`, `no query … on store …`, `unknown action kind …`). The
+  adapter turns those refusals into the same "older Canopy host" notice.
+- **View-only members.** They can read research and claims. A write is refused in the
+  adapter, so the gateway's 403 never shows the workspace as signed out.
 - **Bump `HOST_PROTOCOL`** in `native-commands.mjs` whenever commands are added.
 - **No more endless spinner.** The agent changes panel (`AgentWorkspaceView`) shows an
   error, or "no diff for a detached/base checkout", instead of "Reading this agent's

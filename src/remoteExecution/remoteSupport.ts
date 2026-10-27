@@ -44,6 +44,7 @@ const FEATURES: [string, string][] = [
   ["instructions_", "agent instructions"],
   ["cleanup_", "disk cleanup"],
   ["agent_", "the agent changes panel"],
+  ["context_", "agent claims and messages"],
 ];
 export const hostFeatureName = (command: string) =>
   FEATURES.find(([prefix]) => command.startsWith(prefix))?.[1] ?? command.replaceAll("_", " ");

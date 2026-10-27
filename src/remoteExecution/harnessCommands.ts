@@ -25,6 +25,15 @@ export const HARNESS_COMMANDS = [
   "context_mesh_job_update",
 ] as const;
 const HANDLED = new Set<string>(HARNESS_COMMANDS);
+/** The ones that only read: a view-only member may ask these. */
+export const HARNESS_READS: ReadonlySet<string> = new Set([
+  "research_list", "research_search", "research_get", "research_read_file", "research_for_file", "research_dir",
+  "context_claims", "context_claim_history", "context_claim_history_for_path", "context_messages", "context_mesh_severed",
+]);
+/** How a workspace whose gateway and service predate a query or action
+ *  refuses it — which means "update the workspace", not a missing feature. */
+export const isOutdatedHarnessError = (error: unknown) =>
+  /Invalid harness action|no query \S+ on|unknown action kind|unknown research action: (?:import_text|delete)\b/.test(String(error));
 export const isHarnessCommand = (command: string) => HANDLED.has(command);
 
 /** The gateway caps a harness action body at 256 KiB. */
