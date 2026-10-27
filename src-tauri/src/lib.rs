@@ -692,6 +692,8 @@ pub fn run() {
             ledger::ledger_root,
             ledger::ledger_update_status,
             receipt::receipt_run_check,
+            receipt::receipt_isolate,
+            receipt::receipt_release,
             session_doc::session_transcript_tail,
             gates_commands::gates_policy_write,
             gates_commands::gates_policy_read,

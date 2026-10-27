@@ -83,6 +83,15 @@ export interface TaskRun {
   askedForUser?: boolean;
 }
 
+/** Where to look up a finished run's proof receipt. A throwaway worktree is
+ *  gone once the run ends, so its receipt is read from the repository it was
+ *  made from (`<repo>-wt-<name>`, the workspace path convention); the ledger
+ *  is keyed by the repository either way. */
+export function runReceiptDir(run: Pick<TaskRun, "cwd" | "ephemeralCwd">): string {
+  if (!run.ephemeralCwd) return run.cwd;
+  return /^(.*)-wt-[^/\\]+$/.exec(run.cwd.replace(/[\\/]+$/, ""))?.[1] ?? run.cwd;
+}
+
 const KEY = "canopy.taskHistory";
 
 /** How many runs to keep. Past this the oldest are dropped. */

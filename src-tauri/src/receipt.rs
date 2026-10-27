@@ -104,6 +104,7 @@ pub async fn run_check(
     timeout_ms: Option<u64>,
     keep: Option<usize>,
     head: bool,
+    env: &[(String, String)],
 ) -> Result<CheckRun, String> {
     let Some(program) = argv.first().filter(|p| !p.trim().is_empty()) else {
         return Err("a check needs a command".into());
@@ -165,6 +166,17 @@ pub async fn run_check(
         .env("NO_COLOR", "1")
         .env("FORCE_COLOR", "0")
         .env("GIT_TERMINAL_PROMPT", "0");
+    // What the isolated copy asks for (a build cache shared with the live
+    // checkout). Never a CANOPY* key: the scrub above is the point.
+    for (key, value) in env {
+        if !key.is_empty()
+            && !key.starts_with("CANOPY")
+            && !key.contains('=')
+            && !key.contains('\0')
+        {
+            cmd.env(key, value);
+        }
+    }
 
     let started = Instant::now();
     let mut child = match cmd.spawn() {
@@ -249,8 +261,274 @@ pub async fn receipt_run_check(
     timeout_ms: Option<u64>,
     keep_bytes: Option<usize>,
     head: Option<bool>,
+    env: Option<Vec<(String, String)>>,
 ) -> Result<CheckRun, String> {
-    run_check(&cwd, &argv, timeout_ms, keep_bytes, head.unwrap_or(false)).await
+    run_check(
+        &cwd,
+        &argv,
+        timeout_ms,
+        keep_bytes,
+        head.unwrap_or(false),
+        &env.unwrap_or_default(),
+    )
+    .await
+}
+
+// ------------------------------------------------------------- isolation
+//
+// Checks never run in the live checkout. The next turn of an agent sharing
+// that checkout would edit files under a running test suite (or the suite
+// would read half of the next turn), so a receipt runs against a throwaway
+// export of exactly the tree it is about: the turn's end snapshot when there
+// is one, else the working tree written through a temporary index (tracked
+// plus untracked, ignored files left out — the same picture turn rollback
+// takes). The copy lives under the checkout's own git directory
+// (`<git-dir>/canopy-receipts/<id>`), which no snapshot, `git status` or
+// file watcher looks into, and which a Linux workspace's path scope allows.
+//
+// It is an export (`read-tree` + `checkout-index`), not `git worktree add`:
+// a registered worktree would show up in every worktree list Canopy draws.
+// Ignored dependency folders (node_modules, a virtualenv) are linked in from
+// the live checkout — reinstalling them per receipt would take longer than
+// the checks — and a Cargo project shares the live target directory, where
+// the copy's crates build under their own hashed names.
+
+/// Ignored folders worth linking into a copy: installed dependencies.
+const LINK_NAMES: &[&str] = &["node_modules", ".venv", "venv", "bower_components"];
+const MAX_LINKS: usize = 400;
+/// A copy older than this is an orphan (the app quit mid-check): swept the
+/// next time a copy is made in that repository.
+const ORPHAN_SECS: u64 = 6 * 60 * 60;
+const COPIES_DIR: &str = "canopy-receipts";
+
+#[derive(Debug, Serialize, Clone, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct IsolatedTree {
+    /// The throwaway copy the checks run in (its top level).
+    pub dir: String,
+    /// The tree it holds: the snapshot commit asked for, or the tree id of
+    /// the working tree as it was read.
+    pub tree: String,
+    /// Dependency folders linked in from the live checkout (repo-relative).
+    pub linked: Vec<String>,
+    /// Environment every check in the copy should get.
+    pub env: Vec<(String, String)>,
+}
+
+fn now_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+/// A snapshot id from the renderer: hex only, so it can never be read as an
+/// option or a revision expression.
+fn valid_rev(rev: &str) -> bool {
+    (7..=64).contains(&rev.len()) && rev.chars().all(|c| c.is_ascii_hexdigit())
+}
+
+#[cfg(unix)]
+fn link_dir(target: &std::path::Path, link: &std::path::Path) -> std::io::Result<()> {
+    std::os::unix::fs::symlink(target, link)
+}
+
+/// A junction: unlike a directory symlink it needs no privilege.
+#[cfg(windows)]
+fn link_dir(target: &std::path::Path, link: &std::path::Path) -> std::io::Result<()> {
+    let shell = std::env::var("ComSpec").unwrap_or_else(|_| "cmd.exe".into());
+    let status = std::process::Command::new(shell)
+        .arg("/C")
+        .arg("mklink")
+        .arg("/J")
+        .arg(link)
+        .arg(target)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .no_console_window()
+        .status()?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(std::io::Error::other("mklink /J failed"))
+    }
+}
+
+/// Remove a link without following it.
+fn unlink(path: &std::path::Path) {
+    if std::fs::remove_file(path).is_err() {
+        // A Windows junction is a directory entry.
+        let _ = std::fs::remove_dir(path);
+    }
+}
+
+fn links_manifest(copy: &std::path::Path) -> std::path::PathBuf {
+    let mut name = copy.as_os_str().to_owned();
+    name.push(".links");
+    std::path::PathBuf::from(name)
+}
+
+/// Delete one copy: its links first (so nothing can follow them into the
+/// live checkout), then the files.
+fn remove_copy(copy: &std::path::Path) {
+    let manifest = links_manifest(copy);
+    if let Ok(list) = std::fs::read_to_string(&manifest) {
+        for rel in list.lines().filter(|l| !l.is_empty()) {
+            unlink(&copy.join(rel));
+        }
+    }
+    let _ = std::fs::remove_dir_all(copy);
+    let _ = std::fs::remove_file(&manifest);
+    let mut index = copy.as_os_str().to_owned();
+    index.push(".index");
+    let _ = std::fs::remove_file(std::path::PathBuf::from(&index));
+    index.push(".lock");
+    let _ = std::fs::remove_file(std::path::PathBuf::from(index));
+}
+
+fn sweep_orphans(base: &std::path::Path) {
+    let Ok(entries) = std::fs::read_dir(base) else {
+        return;
+    };
+    let now = std::time::SystemTime::now();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let Ok(meta) = std::fs::symlink_metadata(&path) else {
+            continue;
+        };
+        if !meta.is_dir() {
+            continue;
+        }
+        let old = meta
+            .modified()
+            .ok()
+            .and_then(|m| now.duration_since(m).ok())
+            .is_some_and(|age| age.as_secs() > ORPHAN_SECS);
+        if old {
+            remove_copy(&path);
+        }
+    }
+}
+
+pub fn isolate(cwd: &str, rev: Option<&str>) -> Result<IsolatedTree, String> {
+    use crate::turn_rollback::{git, run};
+    use std::path::{Path, PathBuf};
+    let top = crate::turn_rollback::toplevel(Path::new(cwd))
+        .ok_or_else(|| format!("{cwd} is not in a git checkout"))?;
+    let git_dir = PathBuf::from(run(git(&top).args(["rev-parse", "--absolute-git-dir"]))?);
+    let base = git_dir.join(COPIES_DIR);
+    std::fs::create_dir_all(&base).map_err(|e| format!("could not make a copy folder: {e}"))?;
+    sweep_orphans(&base);
+    static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let n = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let copy = base.join(format!("{}-{}-{n}", std::process::id(), now_secs()));
+    let tree = match rev {
+        Some(r) if valid_rev(r) => r.to_string(),
+        Some(_) => return Err("not a snapshot id".into()),
+        None => crate::turn_rollback::write_worktree_tree(&top)?,
+    };
+    let mut index = copy.as_os_str().to_owned();
+    index.push(".index");
+    let index = PathBuf::from(index);
+    let exported = (|| -> Result<(), String> {
+        std::fs::create_dir_all(&copy).map_err(|e| e.to_string())?;
+        run(git(&top)
+            .env("GIT_INDEX_FILE", &index)
+            .args(["read-tree", &tree]))?;
+        // Forward slashes: git takes them on every platform, and the prefix
+        // must end in a separator to mean "into this folder".
+        let prefix = format!("{}/", copy.to_string_lossy().replace('\\', "/"));
+        run(git(&top)
+            .env("GIT_INDEX_FILE", &index)
+            .args(["checkout-index", "-a", "-f", "--prefix"])
+            .arg(&prefix))?;
+        Ok(())
+    })();
+    let _ = std::fs::remove_file(&index);
+    if let Err(e) = exported {
+        remove_copy(&copy);
+        return Err(format!("could not copy the checkout: {e}"));
+    }
+
+    let ignored = run(git(&top).args([
+        "ls-files",
+        "--others",
+        "--ignored",
+        "--exclude-standard",
+        "--directory",
+    ]))
+    .unwrap_or_default();
+    let mut linked = Vec::new();
+    for line in ignored.lines() {
+        if linked.len() >= MAX_LINKS {
+            break;
+        }
+        let rel = line.trim().trim_end_matches('/');
+        let name = rel.rsplit('/').next().unwrap_or(rel);
+        if rel.is_empty() || !LINK_NAMES.contains(&name) || rel.split('/').any(|c| c == "..") {
+            continue;
+        }
+        let source = top.join(rel);
+        let target = copy.join(rel);
+        // Only beside something the copy has: a dependency folder of a
+        // package that is not in the tree has nothing to serve.
+        if !source.is_dir() || !target.parent().is_some_and(|p| p.is_dir()) || target.exists() {
+            continue;
+        }
+        if link_dir(&source, &target).is_ok() {
+            linked.push(rel.to_string());
+        }
+    }
+    let _ = std::fs::write(links_manifest(&copy), linked.join("\n"));
+
+    let mut env = Vec::new();
+    let live_target = top.join("target");
+    if top.join("Cargo.toml").is_file()
+        && live_target.is_dir()
+        && std::env::var_os("CARGO_TARGET_DIR").is_none()
+    {
+        env.push((
+            "CARGO_TARGET_DIR".to_string(),
+            live_target.to_string_lossy().into_owned(),
+        ));
+    }
+    Ok(IsolatedTree {
+        dir: copy.to_string_lossy().into_owned(),
+        tree,
+        linked,
+        env,
+    })
+}
+
+/// Delete a copy `isolate` made. Refuses anything that is not one.
+pub fn release(dir: &str) -> Result<(), String> {
+    let path = std::path::Path::new(dir);
+    let in_copies = path
+        .parent()
+        .and_then(|p| p.file_name())
+        .is_some_and(|n| n == COPIES_DIR);
+    if !in_copies || !path.is_absolute() || dir.contains("..") {
+        return Err("not a receipt copy".into());
+    }
+    remove_copy(path);
+    Ok(())
+}
+
+/// Make a throwaway copy of the checkout at `rev` (a turn snapshot) or of the
+/// working tree as it is now, for a receipt's checks to run in.
+#[tauri::command]
+pub async fn receipt_isolate(cwd: String, rev: Option<String>) -> Result<IsolatedTree, String> {
+    tokio::task::spawn_blocking(move || isolate(&cwd, rev.as_deref()))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+/// Delete a copy once its checks are done.
+#[tauri::command]
+pub async fn receipt_release(dir: String) -> Result<(), String> {
+    tokio::task::spawn_blocking(move || release(&dir))
+        .await
+        .map_err(|e| e.to_string())?
 }
 
 #[cfg(all(test, unix))]
@@ -277,6 +555,7 @@ mod tests {
                 Some(10_000),
                 None,
                 false,
+                &[],
             ))
             .unwrap();
         assert_eq!(run.code, Some(3));
@@ -295,6 +574,7 @@ mod tests {
                 Some(300),
                 None,
                 false,
+                &[],
             ))
             .unwrap();
         assert!(run.timed_out);
@@ -312,6 +592,7 @@ mod tests {
                 Some(10_000),
                 Some(1024),
                 false,
+                &[],
             ))
             .unwrap();
         assert!(tail.stdout_truncated);
@@ -324,6 +605,7 @@ mod tests {
                 Some(10_000),
                 Some(1024),
                 true,
+                &[],
             ))
             .unwrap();
         assert!(head.stdout.starts_with("line0"));
@@ -339,6 +621,7 @@ mod tests {
                 Some(1000),
                 None,
                 false,
+                &[],
             ))
             .unwrap();
         assert!(run.spawn_error.is_some());
@@ -353,11 +636,110 @@ mod tests {
                 &argv(&["true"]),
                 None,
                 None,
-                false
+                false,
+                &[]
             ))
             .is_err());
         assert!(rt()
-            .block_on(run_check("/", &[], None, None, false))
+            .block_on(run_check("/", &[], None, None, false, &[]))
             .is_err());
+    }
+
+    fn git_in(dir: &std::path::Path, args: &[&str]) -> String {
+        let out = std::process::Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .args([
+                "-c",
+                "user.name=T",
+                "-c",
+                "user.email=t@t",
+                "-c",
+                "commit.gpgSign=false",
+            ])
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "git {args:?}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    }
+
+    fn scratch_repo(tag: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "canopy-receipt-{tag}-{}-{}",
+            std::process::id(),
+            now_secs()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let dir = std::fs::canonicalize(&dir).unwrap();
+        git_in(&dir, &["init", "-q"]);
+        std::fs::write(dir.join(".gitignore"), "node_modules/\n").unwrap();
+        std::fs::write(dir.join("a.txt"), "committed\n").unwrap();
+        git_in(&dir, &["add", "-A"]);
+        git_in(&dir, &["commit", "-q", "-m", "init"]);
+        dir
+    }
+
+    #[test]
+    fn isolates_the_working_tree_with_untracked_files_and_linked_dependencies() {
+        let repo = scratch_repo("tree");
+        std::fs::write(repo.join("a.txt"), "edited\n").unwrap();
+        std::fs::write(repo.join("new.txt"), "untracked\n").unwrap();
+        std::fs::create_dir_all(repo.join("node_modules/dep")).unwrap();
+        std::fs::write(repo.join("node_modules/dep/index.js"), "x").unwrap();
+        let copy = isolate(repo.to_str().unwrap(), None).unwrap();
+        let dir = std::path::PathBuf::from(&copy.dir);
+        assert!(dir.starts_with(repo.join(".git/canopy-receipts")));
+        assert_eq!(
+            std::fs::read_to_string(dir.join("a.txt")).unwrap(),
+            "edited\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(dir.join("new.txt")).unwrap(),
+            "untracked\n"
+        );
+        assert_eq!(copy.linked, vec!["node_modules".to_string()]);
+        assert_eq!(
+            std::fs::read_to_string(dir.join("node_modules/dep/index.js")).unwrap(),
+            "x"
+        );
+        // The live checkout is not touched: same status as before.
+        let status = git_in(&repo, &["status", "--porcelain"]);
+        assert!(status.contains("a.txt") && status.contains("new.txt"));
+        assert!(!status.contains("canopy-receipts"));
+        // Editing the live tree after the copy leaves the copy as it was.
+        std::fs::write(repo.join("a.txt"), "next turn\n").unwrap();
+        assert_eq!(
+            std::fs::read_to_string(dir.join("a.txt")).unwrap(),
+            "edited\n"
+        );
+        release(&copy.dir).unwrap();
+        assert!(!dir.exists());
+        // Releasing never follows the link into the live dependencies.
+        assert!(repo.join("node_modules/dep/index.js").is_file());
+        let _ = std::fs::remove_dir_all(&repo);
+    }
+
+    #[test]
+    fn isolates_a_snapshot_commit_and_refuses_other_paths() {
+        let repo = scratch_repo("rev");
+        let head = git_in(&repo, &["rev-parse", "HEAD"]);
+        std::fs::write(repo.join("a.txt"), "later\n").unwrap();
+        let copy = isolate(repo.to_str().unwrap(), Some(&head)).unwrap();
+        assert_eq!(copy.tree, head);
+        assert_eq!(
+            std::fs::read_to_string(std::path::Path::new(&copy.dir).join("a.txt")).unwrap(),
+            "committed\n"
+        );
+        assert!(isolate(repo.to_str().unwrap(), Some("--output=x")).is_err());
+        assert!(release(repo.to_str().unwrap()).is_err());
+        assert!(repo.join("a.txt").is_file());
+        release(&copy.dir).unwrap();
+        let _ = std::fs::remove_dir_all(&repo);
     }
 }

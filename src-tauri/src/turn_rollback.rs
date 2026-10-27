@@ -91,7 +91,7 @@ fn now_ms() -> u64 {
 
 /// git, pinned to `root` and scrubbed of anything the parent environment could
 /// use to redirect it at a different index or repository.
-fn git(root: &Path) -> Command {
+pub(crate) fn git(root: &Path) -> Command {
     let mut c = Command::new("git");
     for k in [
         "GIT_DIR",
@@ -166,7 +166,7 @@ fn run_bytes(cmd: &mut Command, stdin: Option<&[u8]>) -> Result<Vec<u8>, String>
     }
 }
 
-fn run(cmd: &mut Command) -> Result<String, String> {
+pub(crate) fn run(cmd: &mut Command) -> Result<String, String> {
     run_bytes(cmd, None).map(|b| String::from_utf8_lossy(&b).trim().to_string())
 }
 
