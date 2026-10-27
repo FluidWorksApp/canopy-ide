@@ -120,6 +120,10 @@ The workspace image (`packages/remote-host/Dockerfile`) already has `gh` and `gi
   asking only when the kernel has no cgroup v2, the container shares the host's cgroup
   namespace, or the kernel refuses a delegation step; the capability's detail names the
   step and errno. The adapter drains `terminal_governor_events` into `terminal:governor`.
+  Trust boundary: the delegation helper runs as root (and, in the AppArmor fallback,
+  unconfined) but executes only the fixed `cgroup-delegate.mjs` from the workspace image,
+  inside the workspace's own mount namespace, so the image's integrity is the boundary.
+  A failed delegation is logged and never blocks the workspace from starting.
 - **`structured_runner_spawn`.** The gateway mints a context-bridge credential per attempt
   (`runner-<attempt>`), the host puts it in the runner's environment like an agent
   terminal's, a failed spawn or `structured_runner_kill` revokes it, and the service keeps
