@@ -8,6 +8,7 @@
 import {access,constants,realpath} from 'node:fs/promises';
 import {existsSync} from 'node:fs';
 import {delimiter,isAbsolute,join} from 'node:path';
+import {parseWorktrees,stripGhNoise,remoteUnreachableFor,repoBusy,switchFailure} from './checkout-errors.mjs';
 
 const NET_TIMEOUT_SECS=120, STREAM_MAX=8*1024*1024, MAX_PATCH_FILES=400;
 export const GITHUB_READ_ONLY=['gh_auth','gh_available','gh_issue_detail','gh_issue_list','gh_pr_body','gh_pr_conversation','gh_pr_diff','gh_pr_diff_since','gh_pr_failing_logs','gh_pr_links','gh_pr_list','gh_pr_reviewer_candidates','gh_pr_state'];
@@ -106,70 +107,9 @@ export function parseAsyncMerge(out,number,verb){
 }
 
 // ---------- checkout outcomes (git.rs CheckoutOutcome & friends) ----------
-// gh_pr_checkout answers with the same outcomes as a plain branch switch, so this
-// is git.rs's switch classification ported verbatim; a git_checkout port will
-// carry the same code.
-export function parseWorktrees(out){
- const list=[];let cur=null;
- for(const line of lines(out)){
-  if(!line.trim()){if(cur)list.push(cur);cur=null;continue;}
-  const at=line.indexOf(' '),key=at<0?line:line.slice(0,at),value=at<0?'':line.slice(at+1);
-  if(key==='worktree'){if(cur)list.push(cur);cur={path:value,name:value.split('/').at(-1),head:'',branch:null,detached:false,bare:false,locked:null,prunable:null,is_main:false,dirty:0};}
-  else if(!cur)continue;
-  else if(key==='HEAD')cur.head=[...value].slice(0,8).join('');
-  else if(key==='branch')cur.branch=value.replace(/^(refs\/heads\/)+/,'');
-  else if(key==='detached')cur.detached=true;
-  else if(key==='bare')cur.bare=true;
-  else if(key==='locked')cur.locked=value||'locked';
-  else if(key==='prunable')cur.prunable=value||'prunable';
- }
- if(cur)list.push(cur);
- list.forEach((w,i)=>{w.is_main=i===0;});
- return list;
-}
-const classifyCheckout=err=>{
- const held=lines(err).find(l=>l.includes('is already used by worktree at'));
- if(held&&held.includes('worktree at '))return {kind:'branch_in_worktree',path:held.slice(held.indexOf('worktree at ')+12).trim().replace(/^'+|'+$/g,'')};
- const ls=lines(err);
- for(let i=0;i<ls.length;i++){
-  if(!ls[i].includes('would be overwritten by'))continue;
-  const files=[];for(let j=i+1;j<ls.length&&/^\s/.test(ls[j])&&ls[j].trim();j++)files.push(ls[j].trim());
-  return {kind:'local_changes',files,untracked:ls[i].includes('untracked')};
- }
- return null;
-};
-const quoted=line=>{const a=line.indexOf("'");if(a<0)return null;const z=line.indexOf("'",a+1);return z<0?null:line.slice(a+1,z);};
-const MID=[['cannot switch branch while merging','merge'],['cannot switch branch while rebasing','rebase'],['cannot switch branch while cherry-picking','cherry-pick'],['cannot switch branch while reverting','revert'],['in the middle of an am session','am'],['you need to resolve your current index first','merge']];
-const classifyExtra=err=>{
- for(const line of lines(err)){
-  const l=line.trim();
-  if(l.includes('refusing to fetch into branch ')&&l.includes(' checked out at '))return {kind:'branch_in_worktree',path:l.slice(l.indexOf(' checked out at ')+16).trim().replace(/^'+|'+$/g,'')};
-  const mid=MID.find(([text])=>l.includes(text));if(mid)return {kind:'mid',op:mid[1]};
-  if(l.includes('a branch named ')&&l.includes(' already exists')){const branch=quoted(l);if(branch!=null)return {kind:'name_taken',branch};}
-  if(l.includes("' already exists")&&!l.includes('a branch named ')){const path=quoted(l);if(path!=null)return {kind:'path_in_use',path};}
-  if(l.includes('pathspec ')&&l.includes(' did not match')){const name=quoted(l);if(name!=null)return {kind:'nothing_called',name};}
-  if(l.includes('invalid reference: '))return {kind:'nothing_called',name:l.slice(l.indexOf('invalid reference: ')+19).trim().replace(/^'+|'+$/g,'')};
-  if(l.includes('cannot remove a locked working tree')||l.includes('cannot move a locked working tree')){const r=l.includes('lock reason: ')?l.slice(l.indexOf('lock reason: ')+13).trim():'';return {kind:'locked',path:'',reason:r||'locked'};}
-  if(l.includes("Unable to create '")&&l.includes("index.lock': File exists"))return {kind:'another_command'};
-  if(['couldn\'t find remote ref pull/','no git remotes found','Could not resolve to a PullRequest','remote unreachable, or it wants credentials','gh auth login'].some(t=>l.includes(t)))return {kind:'remote_unreachable'};
- }
- return null;
-};
-/** gh appends `failed to run git: exit status N` after git's own lines; it comes off the detail only. */
-export function stripGhNoise(err){
- const ls=lines(err);
- while(ls.length){const t=ls.at(-1).trim();if(!t||/^failed to run git: exit status \s*[+-]?\d+\s*$/.test(t))ls.pop();else break;}
- return ls.join('\n').trim();
-}
-const repoBusy=op=>({kind:'repo_busy',operation:op,detail:`git ${op} --quit — the ${op} state is cleared; the working tree is untouched.`});
-export function remoteUnreachableFor(err,pr){
- const detail=stripGhNoise(err),l=detail.toLowerCase();
- const summary=['gh auth login','not logged in','requires authentication','wants credentials','authentication failed'].some(t=>l.includes(t))?"Canopy couldn't reach GitHub with the sign-in it has."
-  :l.includes('no git remotes found')||l.includes('does not appear to be a git repo')?'This project has no remote to fetch from.'
-  :l.includes("couldn't find remote ref")||l.includes('could not resolve to a pullrequest')?`GitHub doesn't have a copy of ${pr!=null?`#${pr}'s changes`:'those changes'} to fetch. A private fork you can't read is the usual reason.`
-  :"Canopy couldn't reach GitHub just now.";
- return {kind:'remote_unreachable',summary,detail};
-}
+// gh_pr_checkout answers with the same outcomes as a plain branch switch;
+// checkout-errors.mjs holds git.rs's switch classification for both.
+export {parseWorktrees,stripGhNoise,remoteUnreachableFor};
 const settled=(message,path,before)=>{
  if(!before.orphan_commits.length)return {kind:'switched',message,path};
  const first=before.orphan_commits[0].split(/\s+/)[0]??'';
@@ -265,22 +205,9 @@ export function githubCommands(ctx){
   try{await git(['rev-parse','--verify','--quiet',`refs/heads/${name}`],top);return false;}catch{return true;}
  };
  const isKnownWorktree=async(top,path)=>{try{for(const w of await scanWorktrees(top))if(await sameDir(w.path,path))return true;}catch{}return false;};
+ // Refusals read as git.rs reads them (checkout-errors.mjs).
  async function switchFailed(top,target,err){
-  const detail=stripGhNoise(err),c=classifyCheckout(err);
-  if(c?.kind==='branch_in_worktree')return {kind:'branch_in_worktree',holder:await holderAt(top,target,c.path)};
-  if(c?.kind==='local_changes')return {kind:'local_changes',files:c.files,untracked:c.untracked,detail};
-  const x=classifyExtra(err);
-  switch(x?.kind){
-   case 'branch_in_worktree':return {kind:'branch_in_worktree',holder:await holderAt(top,target,x.path)};
-   case 'mid':return repoBusy(x.op);
-   case 'another_command':return {kind:'repo_busy',operation:'another-command',detail};
-   case 'name_taken':return {kind:'name_taken',branch:x.branch,detail};
-   case 'nothing_called':return {kind:'nothing_called',name:x.name,can_create:await canCreateBranch(top,x.name),detail};
-   case 'path_in_use':return {kind:'path_in_use',path:x.path,usable:await isKnownWorktree(top,x.path),detail};
-   case 'locked':{const holder=await holderAt(top,target,x.path);holder.locked??=x.reason;return {kind:'branch_in_worktree',holder};}
-   case 'remote_unreachable':return remoteUnreachableFor(err,null);
-   default:return {kind:'failed',summary:`Git couldn't switch to ${target}.`,detail};
-  }
+  return switchFailure(err,target,{holderAt:path=>holderAt(top,target,path),canCreateBranch:name=>canCreateBranch(top,name),isKnownWorktree:path=>isKnownWorktree(top,path)});
  }
  const stashTop=async top=>{try{return (await git(['rev-parse','-q','--verify','refs/stash'],top)).trim()||null;}catch{return null;}};
  // Set the working tree aside, do the thing, put it back; a failed pop leaves the stash, and says so.

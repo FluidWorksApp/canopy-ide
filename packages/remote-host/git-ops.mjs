@@ -8,6 +8,7 @@
 import path from 'node:path';
 import {access,stat,lstat,mkdir,copyFile,rm,realpath,constants} from 'node:fs/promises';
 import {listWorkspaceFiles} from './file-search.mjs';
+import {parseWorktrees,classifyCheckout,classifyExtra,stripGhNoise,remoteUnreachableFor,repoBusy,switchFailure} from './checkout-errors.mjs';
 import {checkedRef} from './git-history.mjs';
 
 export const GIT_OPS_READ_ONLY=['git_rev_count','git_share_context','git_show_at','git_work_audit','git_sync_probe','git_pr_merge_probe','fs_repo_path','fs_snapshot_files'];
@@ -38,66 +39,8 @@ export function validRepoRel(rel){
  if(/^[a-zA-Z]:/.test(segments[0]))return false;
  return segments.every(s=>s&&s!=='.'&&s!=='..'&&s.toLowerCase()!=='.git');
 }
-export function parseWorktrees(out){
- const list=[];let cur=null;
- for(const line of out.split('\n')){
-  if(!line.trim()){if(cur)list.push(cur);cur=null;continue;}
-  const at=line.indexOf(' '),key=at<0?line:line.slice(0,at),value=at<0?'':line.slice(at+1);
-  if(key==='worktree'){if(cur)list.push(cur);cur={path:value,name:value.split('/').at(-1),head:'',branch:null,detached:false,bare:false,locked:null,prunable:null,is_main:false,dirty:0};continue;}
-  if(!cur)continue;
-  if(key==='HEAD')cur.head=value.slice(0,8);
-  else if(key==='branch')cur.branch=value.replace(/^refs\/heads\//,'');
-  else if(key==='detached')cur.detached=true;
-  else if(key==='bare')cur.bare=true;
-  else if(key==='locked')cur.locked=value||'locked';
-  else if(key==='prunable')cur.prunable=value||'prunable';
- }
- if(cur)list.push(cur);
- list.forEach((w,i)=>{w.is_main=i===0;});
- return list;
-}
-export function classifyCheckout(err){
- const held=err.split('\n').find(l=>l.includes('is already used by worktree at'));
- if(held)return {kind:'branch_in_worktree',path:held.slice(held.indexOf('worktree at ')+12).trim().replace(/^'+|'+$/g,'')};
- const lines=err.split('\n');
- for(let i=0;i<lines.length;i++){
-  if(!lines[i].includes('would be overwritten by'))continue;
-  const files=[];for(let j=i+1;j<lines.length&&/^\s/.test(lines[j])&&lines[j].trim();j++)files.push(lines[j].trim());
-  return {kind:'local_changes',files,untracked:lines[i].includes('untracked')};
- }
- return {kind:'unknown'};
-}
-const quoted=line=>{const m=/'([^']*)'/.exec(line);return m?m[1]:null;};
-export function classifyExtra(err){
- for(const raw of err.split('\n')){
-  const l=raw.trim();
-  if(l.includes('refusing to fetch into branch ')&&l.includes(' checked out at '))return {kind:'branch_in_worktree',path:l.split(' checked out at ')[1].trim().replace(/^'+|'+$/g,'')};
-  const op=l.includes('cannot switch branch while merging')?'merge':l.includes('cannot switch branch while rebasing')?'rebase':l.includes('cannot switch branch while cherry-picking')?'cherry-pick':l.includes('cannot switch branch while reverting')?'revert':l.includes('in the middle of an am session')?'am':l.includes('you need to resolve your current index first')?'merge':null;
-  if(op)return {kind:'mid_operation',op};
-  if(l.includes('a branch named ')&&l.includes(' already exists')&&quoted(l)!=null)return {kind:'name_taken',branch:quoted(l)};
-  if(l.includes("' already exists")&&!l.includes('a branch named ')&&quoted(l)!=null)return {kind:'path_in_use',path:quoted(l)};
-  if(l.includes('pathspec ')&&l.includes(' did not match')&&quoted(l)!=null)return {kind:'nothing_called',name:quoted(l)};
-  const invalid=l.indexOf('invalid reference: ');if(invalid>=0)return {kind:'nothing_called',name:l.slice(invalid+19).trim().replace(/^'+|'+$/g,'')};
-  if(l.includes('cannot remove a locked working tree')||l.includes('cannot move a locked working tree')){const at=l.indexOf('lock reason: ');return {kind:'locked_workspace',path:'',reason:at>=0&&l.slice(at+13).trim()||'locked'};}
-  if(l.includes("Unable to create '")&&l.includes("index.lock': File exists"))return {kind:'another_command'};
-  if(l.includes("couldn't find remote ref pull/")||l.includes('no git remotes found')||l.includes('Could not resolve to a PullRequest')||l.includes('remote unreachable, or it wants credentials')||l.includes('gh auth login'))return {kind:'remote_unreachable',summary:l.replace(/^fatal: /,'')};
- }
- return null;
-}
-export function stripGhNoise(err){
- const lines=err.split('\n');
- while(lines.length&&(!lines.at(-1).trim()||/^failed to run git: exit status -?\d+$/.test(lines.at(-1).trim())))lines.pop();
- return lines.join('\n').trim();
-}
-export function remoteUnreachableFor(err,pr=null){
- const detail=stripGhNoise(err),l=detail.toLowerCase();
- const summary=['gh auth login','not logged in','requires authentication','wants credentials','authentication failed'].some(s=>l.includes(s))?"Canopy couldn't reach GitHub with the sign-in it has."
-  :l.includes('no git remotes found')||l.includes('does not appear to be a git repo')?'This project has no remote to fetch from.'
-  :l.includes("couldn't find remote ref")||l.includes('could not resolve to a pullrequest')?`GitHub doesn't have a copy of ${pr==null?'those':`#${pr}'s`} changes to fetch. A private fork you can't read is the usual reason.`
-  :"Canopy couldn't reach GitHub just now.";
- return {kind:'remote_unreachable',summary,detail};
-}
-const repoBusy=op=>({kind:'repo_busy',operation:op,detail:`git ${op} --quit — the ${op} state is cleared; the working tree is untouched.`});
+// The checkout refusal classifier is shared with github.mjs.
+export {parseWorktrees,classifyCheckout,classifyExtra,stripGhNoise,remoteUnreachableFor};
 
 // ---------- git plumbing over ctx ----------
 export function gitTools(ctx){
@@ -199,22 +142,9 @@ export function gitOpsCommands(ctx){
  }
  const canCreateBranch=async(top,name)=>!(await repoState(top)).unborn&&await ok(top,['check-ref-format','--branch',name])&&!await ok(top,['rev-parse','--verify','--quiet',`refs/heads/${name}`]);
  async function isKnownWorktree(top,at){try{for(const w of await scanWorktrees(top))if(await sameDir(w.path,at))return true;}catch{}return false;}
+ // Refusals read as git.rs reads them (checkout-errors.mjs).
  async function switchFailed(top,target,err){
-  const detail=stripGhNoise(err),first=classifyCheckout(err);
-  if(first.kind==='branch_in_worktree')return {kind:'branch_in_worktree',holder:await holderAt(top,target,first.path)};
-  if(first.kind==='local_changes')return {kind:'local_changes',files:first.files,untracked:first.untracked,detail};
-  const extra=classifyExtra(err);
-  switch(extra?.kind){
-   case 'branch_in_worktree':return {kind:'branch_in_worktree',holder:await holderAt(top,target,extra.path)};
-   case 'mid_operation':return repoBusy(extra.op);
-   case 'another_command':return {kind:'repo_busy',operation:'another-command',detail};
-   case 'name_taken':return {kind:'name_taken',branch:extra.branch,detail};
-   case 'nothing_called':return {kind:'nothing_called',name:extra.name,can_create:await canCreateBranch(top,extra.name),detail};
-   case 'path_in_use':return {kind:'path_in_use',path:extra.path,usable:await isKnownWorktree(top,extra.path),detail};
-   case 'locked_workspace':{const holder=await holderAt(top,target,extra.path);holder.locked??=extra.reason;return {kind:'branch_in_worktree',holder};}
-   case 'remote_unreachable':return remoteUnreachableFor(err);
-   default:return {kind:'failed',summary:`Git couldn't switch to ${target}.`,detail};
-  }
+  return switchFailure(err,target,{holderAt:path=>holderAt(top,target,path),canCreateBranch:name=>canCreateBranch(top,name),isKnownWorktree:path=>isKnownWorktree(top,path)});
  }
  // Run a switch; a refusal becomes an outcome, never a thrown error.
  async function attempt(top,argv,dir=top){const r=await exec(dir,argv);return r.code?joinStreams(r.stdout,r.stderr)||'git failed':null;}
