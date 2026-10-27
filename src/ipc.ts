@@ -3,7 +3,7 @@
 import { createChannel, invoke, invokeDesktop } from "./host";
 import { startRendererHeartbeat } from "./rendererHeartbeat";
 import { peekTeamIdentity } from "./teamIdentity";
-import type { SessionUsage } from "./resourceAttribution";
+import type { MachineUsage, SessionUsage } from "./resourceAttribution";
 import { settleLocalBrowserOp } from "./browserLocalOps";
 import { isRemoteHost, isWorkspaceHost, listen as hostListen, type UnlistenFn } from "./host";
 import type { HostEvent } from "./host/contract";
@@ -3087,6 +3087,9 @@ export interface AppStats {
     /** Every live terminal in the workspace, whoever started it; null when
      *  the workspace has no recent measurement. */
     sessions?: SessionUsage[] | null;
+    /** The VM and this workspace's other runtimes (teammates' own
+     *  containers), from the gateway; absent from older gateways. */
+    machine?: MachineUsage | null;
   };
   /** This computer's memory, for the "free" framing on a local desktop. */
   system?: { availableBytes: number; totalBytes: number };
@@ -3133,6 +3136,7 @@ export interface WorkspaceResourceStats {
   cpusUsed?: number | null;
   cpusAvailable?: number | null;
   sessions?: SessionUsage[] | null;
+  machine?: MachineUsage | null;
 }
 
 export function workspaceAppStats(sample: WorkspaceResourceStats | null): AppStats {
@@ -3146,6 +3150,7 @@ export function workspaceAppStats(sample: WorkspaceResourceStats | null): AppSta
         memoryBreakdown: sample!.memoryBreakdown ?? null,
         cpusUsed: sample!.cpusUsed ?? null, cpusAvailable: sample!.cpusAvailable ?? null,
         sessions: Array.isArray(sample!.sessions) ? sample!.sessions : null,
+        machine: sample!.machine ?? null,
       } : {}) } };
 }
 

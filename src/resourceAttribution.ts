@@ -26,9 +26,30 @@ export interface SessionUsage {
   owner: ResourceOwner | null;
 }
 
+/** Another runtime of this workspace on the same VM, as the gateway sees it:
+ *  the main workspace container (shown to members) or a member's own. */
+export interface RuntimeUsage {
+  kind: "workspace" | "member";
+  memberId: string | null;
+  name: string | null;
+  workingSetBytes: number;
+  cpusUsed: number | null;
+}
+
+export interface MachineUsage {
+  memoryTotalBytes: number;
+  memoryAvailableBytes: number;
+  cpus: number;
+  cpusUsed: number | null;
+  cpusAvailable: number | null;
+  runtimes: RuntimeUsage[];
+}
+
 export interface PersonUsage {
   key: string;
-  kind: "you" | "teammate" | "unknown" | "services";
+  /** `runtime`: a teammate's own workspace runtime, or the main workspace
+   *  container, on the same machine. */
+  kind: "you" | "teammate" | "runtime" | "unknown" | "services";
   label: string;
   memoryBytes: number;
   cpusUsed: number | null;
@@ -76,6 +97,7 @@ export function attributeUsage(
   sessions: SessionUsage[],
   totals: { workingSetBytes: number; cpusUsed: number | null },
   selfId: string,
+  runtimes: RuntimeUsage[] = [],
 ): PersonUsage[] {
   const people = new Map<string, PersonUsage>();
   for (const s of sessions) {
@@ -121,6 +143,17 @@ export function attributeUsage(
     cpusUsed: totals.cpusUsed == null ? null : Math.max(0, totals.cpusUsed - termCpu),
     terminals: 0,
   });
+  // Teammates in their own runtimes on this machine come after this
+  // workspace's own rows: they aren't part of its working set.
+  for (const r of runtimes)
+    rows.push({
+      key: r.kind === "workspace" ? "runtime:main" : `runtime:${r.memberId}`,
+      kind: "runtime",
+      label: r.kind === "workspace" ? "Main workspace" : r.name || "Teammate",
+      memoryBytes: Math.max(0, r.workingSetBytes || 0),
+      cpusUsed: r.cpusUsed == null ? null : Math.max(0, r.cpusUsed),
+      terminals: 0,
+    });
   return rows;
 }
 

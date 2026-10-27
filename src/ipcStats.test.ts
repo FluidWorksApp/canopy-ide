@@ -68,8 +68,9 @@ it("adds this computer's free memory to the local app's footprint", async () => 
 
 it("reads a workspace's working set, not memory.current, and keeps older hosts as they were", () => {
   const sessions = [{ id: 1, memoryBytes: 3, cpusUsed: 0.5, owner: null }];
-  const fresh = workspaceAppStats({ cpuPercent: 25, memoryBytes: 21, memoryLimitBytes: 28, cpus: 8, workingSetBytes: 8, availableBytes: 20, reclaimableBytes: 13, cpusUsed: 2, cpusAvailable: 6, sessions });
+  const fresh = workspaceAppStats({ cpuPercent: 25, memoryBytes: 21, memoryLimitBytes: 28, cpus: 8, workingSetBytes: 8, availableBytes: 20, reclaimableBytes: 13, cpusUsed: 2, cpusAvailable: 6, sessions, machine: { memoryTotalBytes: 64, memoryAvailableBytes: 30, cpus: 16, cpusUsed: 1, cpusAvailable: 15, runtimes: [] } });
   expect(fresh.mem_bytes).toBe(8);
+  expect(fresh.workspace?.machine?.memoryAvailableBytes).toBe(30);
   expect(fresh.workspace).toMatchObject({ memoryBytes: 21, workingSetBytes: 8, availableBytes: 20, reclaimableBytes: 13, cpusUsed: 2, cpusAvailable: 6, sessions });
   const older = workspaceAppStats({ cpuPercent: 25, memoryBytes: 21, memoryLimitBytes: 28, cpus: 8 });
   expect(older.mem_bytes).toBe(21);
