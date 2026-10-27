@@ -44,6 +44,9 @@ import {
   withLoadNote,
   type LoadScope,
 } from "../resourceLoad";
+import { nextCpuStreak, selfOwnerId } from "../resourceAttribution";
+import { desktopFree, reportsAvailability, workspaceChip } from "../resourceChip";
+import { WorkspaceResourcesPanel } from "./WorkspaceResources";
 import { Mascot } from "./Mascot";
 import { StatsPanel } from "./StatsPanel";
 import { CleanupDialog } from "./CleanupDialog";
@@ -244,6 +247,9 @@ export const StatusBar = memo(function StatusBar({
   };
   const branchMenu = useContextMenu();
   const [app, setApp] = useState<ipc.AppStats | null>(null);
+  // Consecutive polls with the workspace's CPU nearly all used: the chip only
+  // warns about a sustained shortage, not one busy build step.
+  const [cpuLowStreak, setCpuLowStreak] = useState(0);
   const [stats, setStats] = useState<ipc.ClaudeSessionStats | null>(null);
   const [modelMenu, setModelMenu] = useState(false);
   // The pending switch, held for confirmation. `id` is absent for a picker:
@@ -376,7 +382,10 @@ export const StatusBar = memo(function StatusBar({
   // work nobody can see.
   useEffect(() => {
     if (!visible) return;
-    const sub = ipc.onAppStats(setApp);
+    const sub = ipc.onAppStats((stats) => {
+      setCpuLowStreak((n) => nextCpuStreak(n, stats.workspace?.cpusAvailable, stats.workspace?.cpus));
+      setApp(stats);
+    });
     return () => void sub.then((fn) => fn());
   }, [visible]);
 
@@ -773,6 +782,13 @@ export const StatusBar = memo(function StatusBar({
   const appLoad = app?.workspace
     ? { hot: false, cpu: app.cpu >= 90, mem: !!app.workspace.memoryLimitBytes && app.mem_bytes / app.workspace.memoryLimitBytes >= .85 }
     : app ? loadFlags("app", app.cpu, app.mem_bytes) : null;
+  // A workspace that reports availability says what's free and your share,
+  // warning on availability, never on cache (WorkspaceResources.tsx).
+  const selfId = selfOwnerId();
+  const wsChip = app?.workspace && reportsAvailability(app.workspace)
+    ? workspaceChip(app.workspace, selfId, cpuLowStreak)
+    : null;
+  const freeHere = app && !app.workspace ? desktopFree(app) : null;
 
   // `rev-parse --abbrev-ref HEAD` answers a literal "HEAD" off a branch, which
   // the tray used to print as if it were one. It is the snapshot state the Git
@@ -1017,7 +1033,7 @@ export const StatusBar = memo(function StatusBar({
         <span className="status-item status-res status-model-anchor">
           <button
             className="status-model-btn"
-            title={app.workspace
+            title={wsChip ? wsChip.title : app.workspace
               ? `Remote workspace: ${app.workspace.available ? "agents, shells, builds and desktop" : "resources unavailable"}. CPU is a percentage of the workspace CPU allocation. Click for workspace resources.`
               : withLoadNote(
               `${app.includes_webviews ? "canopy" : "canopy lower bound"}: ` +
@@ -1034,12 +1050,18 @@ export const StatusBar = memo(function StatusBar({
                     `attributed to Canopy in this launch. Activity Monitor shows them ` +
                     `as separate rows; add them to this lower bound for the OS-level Canopy total.`),
               appLoad ? loadNote("app", appLoad) : "",
-            )}
+            ) + (freeHere ? `\n${freeHere.title}` : "")}
             onClick={(e) => {
               anchorMenu(e);
               setBreakdown((v) => !v);
             }}
           >
+            {wsChip ? wsChip.parts.map((part, i) => (
+              <span key={i}>
+                {i > 0 && " · "}
+                <span className={part.className}>{part.text}</span>
+              </span>
+            )) : <>
             <span className={appLoad?.cpu ? "bd-hot" : undefined}>
               {Number.isFinite(app.cpu) ? fixedNumber(app.cpu, 0) : "—"}% cpu
             </span>{" "}
@@ -1047,6 +1069,11 @@ export const StatusBar = memo(function StatusBar({
             <span className={appLoad?.mem ? "bd-hot" : undefined}>
               {Number.isFinite(app.mem_bytes) ? fmtMem(app.mem_bytes) : "—"}
             </span>
+            {freeHere && <>
+              {" "}·{" "}
+              <span className={freeHere.className}>{freeHere.text}</span>
+            </>}
+            </>}
           </button>
           {breakdown && (
             <div
@@ -1055,11 +1082,12 @@ export const StatusBar = memo(function StatusBar({
               onMouseLeave={() => setBreakdown(false)}
             >
               {app.workspace ? <>
+                {reportsAvailability(app.workspace) ? <WorkspaceResourcesPanel ws={app.workspace} selfId={selfId} cpuLowStreak={cpuLowStreak} /> : <>
                 <div className="bd-head"><span>Workspace resources</span></div>
                 <div className="bd-resource-section"><span className="bd-resource-label">Usage now</span><dl className="bd-resource-grid">
                   <dt>RAM</dt><dd>{Number.isFinite(app.mem_bytes)?fmtMem(app.mem_bytes):'—'} <span className="bd-resource-muted">of {app.workspace.memoryLimitBytes?fmtMem(app.workspace.memoryLimitBytes):'—'} allocated</span></dd>
                   <dt>CPU</dt><dd>{Number.isFinite(app.cpu)?`${fixedNumber(app.cpu, 0)}%`:'—'} <span className="bd-resource-muted">of {app.workspace.cpus??'—'} allocated cores</span></dd>
-                </dl></div>
+                </dl></div></>}
                 {(app.workspace.elasticCpu||app.workspace.elasticMemory)&&<div className="bd-resource-section"><span className="bd-resource-label">Automatic scaling · configured range</span><dl className="bd-resource-grid">
                   {app.workspace.elasticMemory&&<><dt>RAM</dt><dd>{fmtMem(app.workspace.elasticMemory.minMiB*1024**2)} – {fmtMem(app.workspace.elasticMemory.maxMiB*1024**2)}</dd></>}
                   {app.workspace.elasticCpu&&<><dt>CPU</dt><dd>{app.workspace.elasticCpu.minCpus} – {app.workspace.elasticCpu.maxCpus} cores</dd></>}
@@ -1067,7 +1095,7 @@ export const StatusBar = memo(function StatusBar({
                 {app.workspace.elasticMemory&&app.workspace.elasticMemory.availableMaxMiB<app.workspace.elasticMemory.maxMiB&&<p className="bd-workspace-note"><strong>RAM available to this workspace: {fmtMem(app.workspace.elasticMemory.availableMaxMiB*1024**2)}.</strong> The VM reserves capacity for its host and other workspaces.</p>}
                 {app.workspace.elasticCpu&&app.workspace.elasticCpu.availableMaxCpus<app.workspace.elasticCpu.maxCpus&&<p className="bd-workspace-note">This VM allows up to {app.workspace.elasticCpu.availableMaxCpus} CPU cores for this workspace.</p>}
                 {(app.workspace.elasticMemory?.status==='update_failed'||app.workspace.elasticCpu?.status==='update_failed')&&<p className="bd-workspace-note" role="status">Allocation update failed. Retrying automatically.</p>}
-                <p className="bd-workspace-note bd-resource-muted">{app.workspace.available?'Usage includes all agents, builds, shells and the desktop. Allocation grows with sustained demand, within the VM’s available capacity.':'Resources unavailable. Reconnecting…'}</p>
+                <p className="bd-workspace-note bd-resource-muted">{!app.workspace.available?'Resources unavailable. Reconnecting…':reportsAvailability(app.workspace)?'Allocation grows with sustained demand, within the VM’s available capacity.':'Usage includes all agents, builds, shells and the desktop. Allocation grows with sustained demand, within the VM’s available capacity.'}</p>
 
               </> : (() => {
                 // Each session lands in the first project whose roots contain
