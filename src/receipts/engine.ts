@@ -80,14 +80,16 @@ const defaultDeps: EngineDeps = {
 };
 let deps: EngineDeps = defaultDeps;
 
-/** Tests only: swap the side effects. Null restores the real ones. */
+/** Tests only: swap some side effects (on top of the current ones). Null
+ *  restores the real ones. */
 export function setReceiptEngineDepsForTests(next: Partial<EngineDeps> | null): void {
-  deps = next ? { ...defaultDeps, ...next } : defaultDeps;
+  deps = next ? { ...deps, ...next } : defaultDeps;
 }
 
 const TEST_TIMEOUT_MS = 10 * 60 * 1000;
 const CHECK_TIMEOUT_MS = 5 * 60 * 1000;
 const REMOTE_TIMEOUT_MS = 300 * 1000;
+let SNAPSHOT_RETRY_MS = 2000;
 const MAX_FILES = 200;
 const PATCH_KEEP = 256 * 1024;
 
@@ -119,14 +121,22 @@ function relativeTo(top: string, path: string): string {
 async function turnSnapshots(t: VerifyTarget): Promise<{ start: string; end: string | null } | null> {
   if (t.startedAt == null || deps.remote()) return null;
   try {
-    const list = await deps.turnList(t.cwd, t.sessionId);
-    if (!list.git) return null;
     const end = t.endedAt ?? deps.now();
+    let list = await deps.turnList(t.cwd, t.sessionId);
+    if (!list.git) return null;
     // The snapshot is stamped when canopy-hook ran; the turn event is
     // observed up to a batch later. Closest start inside the turn wins.
     const hit = [...list.turns]
       .filter((p) => p.start && p.start.ts_ms >= t.startedAt! - 15_000 && p.start.ts_ms <= end + 2_000)
       .sort((a, b) => Math.abs(a.start!.ts_ms - t.startedAt!) - Math.abs(b.start!.ts_ms - t.startedAt!))[0];
+    if (hit?.start && !hit.end) {
+      // The end snapshot is taken from the same hook batch that announced
+      // the turn's end, so it can land a moment after us. Ask once more.
+      await new Promise((r) => setTimeout(r, SNAPSHOT_RETRY_MS));
+      list = await deps.turnList(t.cwd, t.sessionId);
+      const again = list.turns.find((p) => p.start?.commit === hit.start!.commit);
+      return { start: hit.start.commit, end: again?.end?.commit ?? null };
+    }
     return hit?.start ? { start: hit.start.commit, end: hit.end?.commit ?? null } : null;
   } catch {
     return null;
@@ -308,7 +318,10 @@ export async function verifyTurn(t: VerifyTarget, manual = false): Promise<Recei
     let verdict: BrainVerdict | null = null;
     let note: string | undefined;
     let costUsd: number | null = null;
-    const key = await hashOf(prompt);
+    // Timings ("Duration 1.20s", "12ms") differ on every run of the same
+    // evidence; leave them out so a re-verify of an unchanged tree reuses
+    // the verdict.
+    const key = await hashOf(prompt.replace(/\b\d+(?:\.\d+)?\s?(?:ms|s)\b/g, ""));
     const cached = verdictCache.get(key);
     if (cached) verdict = cached.verdict;
     else {
@@ -404,7 +417,11 @@ export function scheduleVerify(target: VerifyTarget, manual = false): Promise<Re
   const done = new Promise<ReceiptRecord | null>((r) => (resolve = r));
   const job: Job = { target, manual, started: false, done, resolve };
   pending.set(target.sessionId, job);
-  const key = target.root || target.cwd;
+  // One verification at a time across every repository: each runs a whole
+  // test suite on a machine the person's agents are already loading, and
+  // the git and registry calls inside share the same few check slots — a
+  // second suite would starve them into silently filing no receipt.
+  const key = "receipts";
   const prev = queues.get(key) ?? Promise.resolve();
   const next = prev
     .catch(() => {})
@@ -480,6 +497,7 @@ export function startReceiptEngine(): () => void {
 
 /** Tests only. */
 export function resetReceiptEngineForTests(): void {
+  SNAPSHOT_RETRY_MS = 0;
   queues.clear();
   pending.clear();
   verdictCache.clear();

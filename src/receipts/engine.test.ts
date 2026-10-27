@@ -166,6 +166,21 @@ describe("verifyTurn", () => {
     expect(r!.status).toBe("tests-changed");
   });
 
+  it("asks for the end snapshot once more when it has not landed yet", async () => {
+    askBrain.mockResolvedValue({ ok: false, reason: "no-brain", message: "" });
+    const turns = [
+      [{ n: 1, start: { ref: "a", commit: "snapA", tree: "t", ts_ms: 1000 }, end: null }],
+      [{ n: 1, start: { ref: "a", commit: "snapA", tree: "t", ts_ms: 1000 }, end: { ref: "b", commit: "snapB", tree: "t", ts_ms: 5000 } }],
+    ];
+    const turnList = vi.fn(async () => ({ git: true, turns: turns.shift() ?? [] }));
+    const run = fakeRun();
+    setReceiptEngineDepsForTests({ run, turnList: turnList as never });
+    const r = await verifyTurn(target);
+    expect(turnList).toHaveBeenCalledTimes(2);
+    expect(run.mock.calls.some(([, argv]) => argv.join(" ") === "git diff --name-only snapA snapB")).toBe(true);
+    expect(r!.base).toBe("turn start (snapA)");
+  });
+
   it("does nothing for a turn that changed no files", async () => {
     setReceiptEngineDepsForTests({ run: fakeRun({ changed: "" }) });
     expect(await verifyTurn({ ...target, filesTouched: [] })).toBeNull();
@@ -192,6 +207,30 @@ describe("scheduling", () => {
     await Promise.all([first, a]);
     expect(appended.map((d) => d.sessionId)).toEqual(["busy", "s1"]);
     expect(appended[1].asked).toBe("second");
+  });
+
+  it("runs one verification at a time, across repositories too", async () => {
+    askBrain.mockResolvedValue({ ok: false, reason: "no-brain", message: "" });
+    let active = 0;
+    let peak = 0;
+    const inner = fakeRun();
+    setReceiptEngineDepsForTests({
+      run: async (cwd, argv, opts) => {
+        if (argv[0] === "/bin/sh") {
+          active++;
+          peak = Math.max(peak, active);
+          await new Promise((r) => setTimeout(r, 10));
+          active--;
+        }
+        return inner(cwd, argv, opts);
+      },
+    });
+    await Promise.all([
+      scheduleVerify({ ...target, sessionId: "a", root: "/repo" }),
+      scheduleVerify({ ...target, sessionId: "b", root: "/other" }),
+    ]);
+    expect(peak).toBe(1);
+    expect(appended.map((d) => d.sessionId)).toEqual(["a", "b"]);
   });
 
   it("only verifies automatically in auto mode", async () => {

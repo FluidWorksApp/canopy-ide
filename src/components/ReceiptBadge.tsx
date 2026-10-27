@@ -4,6 +4,7 @@
 // Unverified, from the workspace's own receipt (src/receipts/). Clicking it
 // opens the receipt.
 import { useEffect, useState, useSyncExternalStore } from "react";
+import { createPortal } from "react-dom";
 import { Dialog } from "./Dialog";
 import { ReceiptPanel } from "./ReceiptPanel";
 import { STATUS_META } from "../receipts/status";
@@ -88,7 +89,9 @@ export function ReceiptBadge({
       >
         <span aria-hidden>{meta.icon}</span> {meta.label}
       </button>
-      {open && (
+      {/* Portaled: the badge lives in table cells and cards whose overflow or
+          transform would otherwise clip a fixed-position dialog. */}
+      {open && createPortal(
         <Dialog
           title="Proof receipt"
           size="lg"
@@ -145,7 +148,8 @@ export function ReceiptBadge({
               </div>
             )}
           </div>
-        </Dialog>
+        </Dialog>,
+        document.body,
       )}
     </span>
   );
