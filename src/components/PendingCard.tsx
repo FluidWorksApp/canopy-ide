@@ -12,6 +12,7 @@ import { Mascot } from "./Mascot";
 import type { PendingItem } from "../notifications";
 import { agentCliFor } from "../projects";
 import { Button } from "./ui";
+import { ReceiptBadge } from "./ReceiptBadge";
 
 /** CLIs whose approval prompt is a numbered/Escape menu we can drive by
  *  synthesising keystrokes. Anything else gets "answer in terminal" instead of
@@ -161,6 +162,15 @@ export function PendingCard({
           <div className="pending-q-text">
             <Mascot state={idle ? "done" : "needs"} size={16} className="pending-ash" />
             {item.message}
+            {/* "Finished" is the agent's claim; the receipt is the evidence. */}
+            {idle && (
+              <ReceiptBadge
+                sessionId={item.sessionId}
+                ptyId={item.pty}
+                cwd={item.cwd}
+                cli={item.agent}
+              />
+            )}
           </div>
           {/* Respond without leaving the surface: Allow types the accept key,
               Deny sends Escape. Only for CLIs whose prompt we can drive by

@@ -495,6 +495,14 @@ export interface Settings {
    *  background call per opening prompt, cached by its text
    *  (brainSessionTitle.ts). Off = the prompt's first words, as before. */
   brainSessionTitles: boolean;
+  /** Proof receipts (src/receipts/): "auto" re-runs the project's checks after
+   *  every agent turn that changed files and asks the brain for a verdict;
+   *  "manual" only on "Verify now"; "off" hides receipts entirely. */
+  receiptMode: "auto" | "manual" | "off";
+  /** Per-project check commands, keyed by the repo's canonical root (the
+   *  ledger root). A project with an entry runs exactly these, one shell line
+   *  each, instead of what Canopy detects from its manifests. */
+  receiptCommands: Record<string, string[]>;
   /** Connect Claude Code to Canopy as its IDE, the way it connects to VS Code:
    *  proposed edits open as a diff to accept, tweak or reject, the editor
    *  selection reaches the prompt, and the CLI reads diagnostics off Canopy's
@@ -728,6 +736,8 @@ export const DEFAULTS: Settings = {
   budgetPauseAtLimit: true,
   outcomesInsight: true,
   brainSessionTitles: true,
+  receiptMode: "auto",
+  receiptCommands: {},
   claudeIdeIntegration: true,
   turnRollback: true,
   memoryAutoExtract: true,
@@ -823,6 +833,18 @@ const boundedScrollback = (value: unknown): number => {
 const budgetUsd = (value: unknown): number | null =>
   typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : null;
 
+/** Hand-edited check commands must stay strings: they reach a shell. */
+function receiptCommands(value: unknown): Record<string, string[]> {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return {};
+  const out: Record<string, string[]> = {};
+  for (const [root, lines] of Object.entries(value as Record<string, unknown>)) {
+    if (!Array.isArray(lines)) continue;
+    const kept = lines.filter((l): l is string => typeof l === "string" && !!l.trim()).slice(0, 8);
+    if (kept.length) out[root] = kept;
+  }
+  return out;
+}
+
 const featureBudgets = (value: unknown): Record<string, number> => {
   if (!value || typeof value !== "object" || Array.isArray(value)) return {};
   const out: Record<string, number> = {};
@@ -902,6 +924,8 @@ export function getSettings(): Settings {
     value.brainFeatureBudgetsUsd = featureBudgets(value.brainFeatureBudgetsUsd);
     value.sessionBudgetUsd = budgetUsd(value.sessionBudgetUsd);
     value.builderSessionCapUsd = budgetUsd(value.builderSessionCapUsd);
+    if (!["auto", "manual", "off"].includes(value.receiptMode)) value.receiptMode = "auto";
+    value.receiptCommands = receiptCommands(value.receiptCommands);
     if (typeof value.brainModel !== "string") value.brainModel = "";
     if (typeof value.brainBackgroundModel !== "string") value.brainBackgroundModel = "";
     // The old Build/Engineer mode setting is now the default *lens*. Keep its

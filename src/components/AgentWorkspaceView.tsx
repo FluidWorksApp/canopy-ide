@@ -20,6 +20,7 @@ import { ashFor } from "../ash";
 import { Mascot } from "./Mascot";
 import { AgentRuntime } from "./AgentRuntime";
 import { TurnTimeline } from "./TurnTimeline";
+import { ReceiptBadge } from "./ReceiptBadge";
 import { LIFE_META, agentLife, type Life } from "../../shared/agentLife";
 import { AgentIcon, GitBranchIcon, RestartIcon } from "./icons";
 import { sessionCost } from "../pricing";
@@ -1512,6 +1513,11 @@ export function AgentWorkspaceView({
               >
                 {st.label}
               </span>
+            )}
+            {/* Whether that finished turn is *proven*: the workspace's own
+                re-run of the checks, not the agent's account of them. */}
+            {sessionId && lifecycle !== "working" && lifecycle !== "waiting" && (
+              <ReceiptBadge sessionId={sessionId} cwd={cwd} cli={agent} />
             )}
             {/* Working time, next to what that work cost: how long this run has
                 been going and how much the session has done in total. */}

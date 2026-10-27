@@ -48,6 +48,9 @@ export interface AgentTurnEnd extends AgentTurnStart {
    *  the session's previous turn end, or `endedAt` when there is none, and
    *  `filesTouched` covers that window. */
   partial?: boolean;
+  /** The agent's own closing words for the turn, when its Stop hook carries
+   *  them — a claim, which proof receipts show beside (never as) evidence. */
+  lastMessage?: string;
 }
 
 type StartListener = (turn: AgentTurnStart) => void;
@@ -193,6 +196,7 @@ async function end(e: AgentEventData, at: number): Promise<void> {
     endedAt: at,
     filesTouched: filesInWindow(edits, startedAt, at),
     ...(began ? {} : { partial: true }),
+    ...(e.lastAssistantMessage ? { lastMessage: e.lastAssistantMessage.slice(0, 4000) } : {}),
   };
   emit(endListeners, turn);
 }

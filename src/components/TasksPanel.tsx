@@ -28,6 +28,7 @@ import { Mascot } from "./Mascot";
 import { PlayIcon, StopIcon, TrashIcon } from "./icons";
 import { Button } from "./ui";
 import { matches } from "../shortcuts";
+import { ReceiptBadge } from "./ReceiptBadge";
 
 /** A task in flight. Detached runs (the usual kind) carry a `ptyId` and no tab —
  *  this row is the only place they appear, so it has to say what a tab would
@@ -326,6 +327,12 @@ export function TasksPanel({
                 {r.title}
                 {r.note && <span className="task-note-inline">{r.note}</span>}
               </span>
+              {/* A task wrapping up is not done until the workspace's receipt
+                  says so. Quiet when there is none: read-only tasks change no
+                  files and get no receipt. */}
+              {r.ptyId != null && r.state !== "working" && (
+                <ReceiptBadge ptyId={r.ptyId} quietWhenUnverified />
+              )}
               <Button icon
                 title="Stop this task"
                 onClick={() => onStop(r)}>

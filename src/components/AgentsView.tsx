@@ -33,6 +33,7 @@ import { IntegrationsList, useIntegrations } from "./AgentIntegrations";
 import { AgentControlPanel, type ControlPanelMode } from "./AgentControlPanel";
 import { TeamBoard } from "./TeamBoard";
 import { PendingCard } from "./PendingCard";
+import { ReceiptBadge } from "./ReceiptBadge";
 import { Mascot } from "./Mascot";
 import { AgentRuntime } from "./AgentRuntime";
 import { AgentNameEditor } from "./AgentNameEditor";
@@ -334,6 +335,17 @@ export function AgentsView({
             <span className={`agv-card-state ${st.cls}`} title={stTitle}>
               {st.label}
             </span>
+            {/* A finished turn is only "done" once the workspace's receipt says
+                so; the agent's own word is not evidence. */}
+            {agent && (life.state === "idle" || life.state === "ended") && (
+              <ReceiptBadge
+                sessionId={digest?.session_id}
+                ptyId={s.id}
+                cwd={s.cwd}
+                cli={agent.id ?? ""}
+                quietWhenUnverified={life.state === "ended"}
+              />
+            )}
           </div>
           <span className="agv-spacer" />
           <AgentRuntime timing={digest} live={life.state === "working"} />

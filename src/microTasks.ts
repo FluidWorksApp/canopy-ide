@@ -8,6 +8,8 @@ import type * as ipc from "./ipc";
 import { cleanupLine, detachedPushLine } from "./prs";
 import type { ReviewPolicy } from "./prPolicy";
 import { format } from "./shortcuts";
+import { latestReceiptFor } from "./receipts/store";
+import { receiptOneLine } from "./receipts/markdown";
 
 /** A task that edits files can't run in the shared checkout — other agents live
  *  there, and switching its branch under them is how you lose an afternoon. A
@@ -361,10 +363,25 @@ export const raisePrTask: MicroTaskDef<RaisePrPayload> = {
         `one-line \`--body\` would flatten the template's headings — then delete the temp file. ` +
         `Do not commit anything and do not change any files in the repo — this branch ships as it ` +
         `is. Pass the created PR's URL to canopy_job_done.` +
+        receiptBrief(p.branch, p.worktree ?? p.repo) +
         (query ? ` The user adds: "${query}".` : ""),
     );
   },
 };
+
+/** Receipts travel with the PR: the latest workspace verification of this
+ *  branch, for the body. Verbatim, because a receipt the agent may reword is
+ *  one more claim — and an unproven one must not quietly become a tick. */
+function receiptBrief(branch: string, path: string): string {
+  const r = latestReceiptFor({ branch, path });
+  if (!r) return "";
+  return (
+    ` Canopy re-ran this project's checks itself, outside your terminal, and recorded a ` +
+    `verification receipt. End the PR body with a "## Verification receipt" section listing ` +
+    `these items as bullets, verbatim — do not reword, drop, or upgrade any of them: ` +
+    `${receiptOneLine(r)}.`
+  );
+}
 
 export interface ReviewPrPayload {
   repo: string;

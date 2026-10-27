@@ -38,6 +38,7 @@ import {
 import { useEscape } from "../useEscape";
 import type { PendingItem } from "../notifications";
 import { Button } from "./ui";
+import { ReceiptBadge } from "./ReceiptBadge";
 import { format, matchesModifierClick } from "../shortcuts";
 
 /** What shared context actually does, in one hover rather than one paragraph.
@@ -615,6 +616,17 @@ export function AgentsPanel({
               anchored to the row's right edge, so a badge over there gets buried
               the moment you hover the very row you're trying to inspect. */}
           {runaway && <span className="runaway-badge">runaway?</span>}
+          {/* "Finished a turn" is the agent's word; the receipt is the
+              workspace's evidence, and it is what this row shows. */}
+          {agent && (shown === "idle" || shown === "ended") && (
+            <ReceiptBadge
+              sessionId={digest?.session_id}
+              ptyId={s.id}
+              cwd={s.cwd}
+              cli={agent.id ?? ""}
+              quietWhenUnverified={shown === "ended"}
+            />
+          )}
           {dir && (
             <span className="agent-dir" title={s.cwd}>
               {dir}

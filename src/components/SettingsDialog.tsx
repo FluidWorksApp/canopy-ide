@@ -50,6 +50,7 @@ import { clearCompanionView, clearRun } from "../companionSession";
 import { forgetAllMemories } from "../companionMemory";
 import { Mascot } from "./Mascot";
 import { Button, Checkbox, Field, Radio, Row, Segmented, Select, Stepper, Switch, TextInput } from "./ui";
+import "./receipts.css";
 import { drawWave } from "../waveStyles";
 import { useEscape, useEscapeLayer } from "../useEscape";
 import { TRACKERS, setTrackerKey, trackerKey } from "../trackers";
@@ -1742,6 +1743,47 @@ export function SettingsDialog({ onClose, initialTab = "appearance" }: SettingsD
                         : "No new snapshots are taken. Ones already saved stay restorable until they age out."
                     }
                   />
+                </Item>
+                <Item
+                  name="Proof receipts"
+                  desc="After an agent finishes, Canopy re-runs the project's tests itself — not in the agent's terminal — checks for tests the agent changed and packages that don't exist, and asks the brain whether the work matches the request."
+                >
+                  <span className="rc-settings">
+                    <Segmented<"auto" | "manual" | "off">
+                      aria-label="When to verify agent turns"
+                      options={[
+                        { id: "auto", label: "After every turn" },
+                        { id: "manual", label: "When I ask" },
+                        { id: "off", label: "Off" },
+                      ]}
+                      value={s.receiptMode}
+                      onChange={(receiptMode) => patch({ receiptMode })}
+                    />
+                    <span className="set-item-desc">
+                      {s.receiptMode === "auto"
+                        ? "Turns that changed files are verified in the background on the brain's cheaper model. Finished agents show ✓ Proven, ◐ Partial, ✗ Unproven or ⚠ Tests changed."
+                        : s.receiptMode === "manual"
+                          ? "Nothing runs on its own. Open an agent's receipt badge and choose Verify now."
+                          : "No checks run and no receipt badges are shown."}
+                    </span>
+                    {Object.entries(s.receiptCommands).map(([root, lines]) => (
+                      <span key={root} className="set-item-desc">
+                        <code>{root.split(/[\\/]/).pop()}</code>: {lines.join(" · ")}{" "}
+                        <Button
+                          size="sm"
+                          variant="ghost"
+                          title={`Forget the check commands set for ${root}`}
+                          onClick={() => {
+                            const next = { ...s.receiptCommands };
+                            delete next[root];
+                            patch({ receiptCommands: next });
+                          }}
+                        >
+                          Use detected checks
+                        </Button>
+                      </span>
+                    ))}
+                  </span>
                 </Item>
                 <Item
                   name="Memory monitoring prompts"

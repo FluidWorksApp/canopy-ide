@@ -1,0 +1,71 @@
+/* Proof receipts: the badge that stands in for "done", and the receipt panel. */
+.rc-wrap { display: inline-flex; min-width: 0; }
+.rc-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 0 6px;
+  height: 18px;
+  border-radius: var(--r-xs);
+  border: 1px solid color-mix(in srgb, currentColor 35%, transparent);
+  background: color-mix(in srgb, currentColor 10%, transparent);
+  font: inherit;
+  font-size: var(--fs-xs);
+  line-height: 1;
+  white-space: nowrap;
+  cursor: pointer;
+  color: var(--text-dim);
+}
+.rc-badge:hover { background: color-mix(in srgb, currentColor 18%, transparent); }
+.rc-badge:focus-visible { outline: none; box-shadow: var(--ring); }
+.rc-proven { color: var(--ok); }
+.rc-partial { color: var(--warn); }
+.rc-unproven { color: var(--danger); }
+.rc-tamper { color: var(--warn); }
+.rc-verifying { color: var(--cyan); }
+.rc-unverified { color: var(--text-faint); }
+.rc-verifying .rc-icon, .rc-badge.rc-verifying span:first-child { animation: rc-pulse 1.2s ease-in-out infinite; }
+@keyframes rc-pulse { 50% { opacity: 0.35; } }
+@media (prefers-reduced-motion: reduce) {
+  .rc-verifying .rc-icon, .rc-badge.rc-verifying span:first-child { animation: none; }
+}
+
+.rc-panel { display: flex; flex-direction: column; gap: var(--sp-3); color: var(--text); font-size: var(--fs-md); }
+.rc-panel.rc-stale .rc-section { opacity: 0.55; }
+.rc-headline { display: flex; align-items: baseline; gap: var(--sp-2); font-size: var(--fs-lg); font-weight: 600; }
+.rc-headline .rc-sub { font-size: var(--fs-xs); font-weight: 400; color: var(--text-dim); font-family: var(--font-mono); }
+.rc-section h4 { margin: var(--sp-2) 0 var(--sp-1); font-size: var(--fs-xs); text-transform: uppercase; letter-spacing: 0.04em; color: var(--text-dim); font-weight: 600; }
+.rc-section p { margin: 0; line-height: var(--lh-ui); }
+.rc-section ul { margin: 0; padding-left: var(--sp-4); }
+.rc-section li { margin: 2px 0; line-height: var(--lh-ui); }
+.rc-claim { border-left: 2px solid var(--border-strong); padding-left: var(--sp-2); color: var(--text-dim); }
+.rc-tamper-box { border: 1px solid color-mix(in srgb, var(--warn) 45%, transparent); background: color-mix(in srgb, var(--warn) 8%, transparent); border-radius: var(--r-sm); padding: var(--sp-2) var(--sp-3); }
+.rc-tamper-box h4 { color: var(--warn); }
+.rc-checks { list-style: none; padding: 0 !important; margin-top: var(--sp-2) !important; }
+.rc-check summary { display: flex; gap: var(--sp-2); align-items: baseline; cursor: pointer; padding: 2px 0; }
+.rc-check summary:focus-visible { outline: none; box-shadow: var(--ring); border-radius: var(--r-xs); }
+.rc-check-mark { font-weight: 700; width: 14px; text-align: center; flex: none; }
+.rc-check-line { font-family: var(--font-mono); font-size: var(--fs-sm); overflow-wrap: anywhere; }
+.rc-output {
+  max-height: 240px;
+  overflow: auto;
+  margin: var(--sp-1) 0 var(--sp-2);
+  padding: var(--sp-2);
+  background: var(--bg-deep);
+  border: 1px solid var(--border);
+  border-radius: var(--r-xs);
+  font-family: var(--font-mono);
+  font-size: var(--fs-xs);
+  line-height: var(--lh-code);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  color: var(--text-dim);
+}
+.rc-note { font-size: var(--fs-sm); color: var(--text-dim); margin: var(--sp-1) 0; }
+.rc-dim { color: var(--text-dim); }
+.rc-empty { color: var(--text-dim); margin: 0; }
+.rc-reasons { color: var(--text); }
+.rc-actions { display: flex; flex-wrap: wrap; gap: var(--sp-2); align-items: center; }
+.rc-commands { display: flex; flex-direction: column; gap: var(--sp-1); width: 100%; }
+.rc-label { font-size: var(--fs-sm); color: var(--text-dim); }
+.rc-settings { display: flex; flex-direction: column; align-items: flex-start; gap: var(--sp-2); }

@@ -54,6 +54,7 @@ mod provenance;
 mod prwatch;
 mod pty;
 mod punch;
+mod receipt;
 mod relay;
 mod remind;
 mod remote;
@@ -687,6 +688,7 @@ pub fn run() {
             ledger::ledger_query,
             ledger::ledger_root,
             ledger::ledger_update_status,
+            receipt::receipt_run_check,
             tasks::task_reserve,
             tasks::task_attempt_reserve,
             tasks::task_attempt_start,
