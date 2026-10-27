@@ -25,6 +25,8 @@ const MAX_BRIEF: usize = 16 * 1024;
 /// A roster answers inside one 32 KB envelope, so it lists at most this many
 /// agents with their text fields clipped.
 const MAX_ROSTER: usize = 50;
+/// Recent files each roster agent carries.
+const ROSTER_FILES: usize = 10;
 
 fn log(ws: &str, message: &str) {
     eprintln!("canopy-serviced: {ws}: relay: {message}");
@@ -105,14 +107,26 @@ pub fn roster_agents(ws: &Workspace) -> Vec<serde_json::Value> {
                     "description": s.get("description").and_then(|v| v.as_str()).map(|v| clip(v, 200)),
                 })
             });
-            serde_json::json!({
+            let mut agent = serde_json::json!({
                 "ptyId": t.pty_id,
                 "name": clip_opt(&t.name, 80),
                 "agent": clip_opt(&t.agent, 40),
                 "task": clip_opt(&t.task, 200),
                 "status": status,
                 "closing": t.close_requested_ms.is_some(),
-            })
+            });
+            // Which repository it works in and what it wrote lately, for agent
+            // awareness on the asking machine (kept short: one envelope).
+            if let Some(work) = t.work.as_ref() {
+                agent["repo"] = work.get("repo").cloned().unwrap_or_default();
+                agent["root"] = work.get("root").cloned().unwrap_or_default();
+                agent["files"] = work
+                    .get("files")
+                    .and_then(|f| f.as_array())
+                    .map(|f| f.iter().take(ROSTER_FILES).cloned().collect())
+                    .unwrap_or_else(|| serde_json::json!([]));
+            }
+            agent
         })
         .collect()
 }

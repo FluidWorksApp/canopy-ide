@@ -307,6 +307,84 @@ impl Workspace {
         }
     }
 
+    /// Agent awareness's claim on a hotspot for the agent that just edited it
+    /// (desktop `context_hotspot_claim`): added to whatever that terminal
+    /// already holds, under its own identity, refused like any claim when
+    /// another agent holds the path.
+    pub fn hotspot_claim(
+        &self,
+        pty_id: u32,
+        paths: Vec<String>,
+        owner: &str,
+        note: Option<String>,
+    ) -> (u16, String) {
+        let Some(who) = self.terminals.by_pty(pty_id) else {
+            return (404, format!("terminal {pty_id} has exited"));
+        };
+        let wanted: Vec<String> = paths
+            .iter()
+            .map(|p| crate::meshtext::normalize_claim_path(p, Some(WORKSPACE_ROOT)))
+            .filter(|p| p.starts_with('/') && p != "/")
+            .collect();
+        if wanted.is_empty() {
+            return (400, "a hotspot claim needs absolute paths".into());
+        }
+        let key = who.key(&self.instance);
+        let id = match self.claims.next_id() {
+            Ok(id) => id,
+            Err(error) => return (500, error),
+        };
+        let now = now_ms();
+        let result = self.claims.mutate(|claims| {
+            let mine: Vec<&Claim> = claims
+                .iter()
+                .filter(|c| c.released_at_ms.is_none() && c.owner_key == key)
+                .collect();
+            let mut held: Vec<String> = mine.iter().flat_map(|c| c.paths.clone()).collect();
+            let covered = |p: &String| {
+                held.iter().any(|h| {
+                    let h = h.trim_end_matches('/');
+                    p == h || p.starts_with(&format!("{h}/"))
+                })
+            };
+            if wanted.iter().all(covered) {
+                return ((200, "Already held.".to_string()), false);
+            }
+            let display = mine
+                .first()
+                .map(|c| c.owner.clone())
+                .unwrap_or_else(|| owner.to_string());
+            let note = mine.first().and_then(|c| c.note.clone()).or(note);
+            for p in &wanted {
+                if !held.contains(p) {
+                    held.push(p.clone());
+                }
+            }
+            let reply = apply_claim(
+                claims,
+                &held,
+                note,
+                &who,
+                &key,
+                &display,
+                now,
+                &id,
+                &self.instance,
+            );
+            let changed = reply.0 == 200;
+            (reply, changed)
+        });
+        match result {
+            Ok((reply, changed)) => {
+                if changed {
+                    self.events.publish("mesh", "claims", "");
+                }
+                reply
+            }
+            Err(error) => (500, error),
+        }
+    }
+
     pub fn release_claims_for(&self, record: &TerminalRecord, how: &str) {
         let _ = self.release_claims_of(&record.key(&self.instance), how);
     }

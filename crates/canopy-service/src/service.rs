@@ -229,7 +229,24 @@ impl Service {
             return Err(format!("runner answered {}", response.status()));
         }
         let sessions: Vec<serde_json::Value> = response.json_value().await?;
+        // Structured runners are no runner session: their host lists them.
+        let runners = if ws
+            .terminals
+            .all()
+            .iter()
+            .any(|t| t.live() && t.request_id.starts_with(RUNNER_PREFIX))
+        {
+            self.live_runners(&url, endpoint.token.as_deref()).await
+        } else {
+            None
+        };
         for record in ws.terminals.all().into_iter().filter(|t| t.live()) {
+            if let Some(attempt) = record.request_id.strip_prefix(RUNNER_PREFIX) {
+                if !keep_runner(attempt, record.minted_ms, now, runners.as_deref()) {
+                    ws.revoke_terminal(&record.request_id, "reconcile");
+                }
+                continue;
+            }
             // Bound after the list was asked for: absent because it is new,
             // not because it ended. The next reconcile judges it.
             if record.bound_ms.is_some_and(|bound| bound >= now) {
@@ -280,6 +297,48 @@ impl Service {
             }
         }
         healthy
+    }
+}
+
+/// Credentials the gateway mints for structured-runner attempts
+/// (runner-harness.mjs runnerRequestId).
+const RUNNER_PREFIX: &str = "runner-";
+const RUNNER_GRACE_MS: u64 = 60_000;
+
+/// Whether a structured runner's credential still has a runner. A spawn still
+/// in flight is not listed yet; a host that cannot list runners (older, or
+/// not answering) leaves the unbound allowance. Request ids spell the
+/// attempt's `_` as `:`.
+fn keep_runner(attempt: &str, minted_ms: u64, now: u64, live: Option<&[String]>) -> bool {
+    let age = now.saturating_sub(minted_ms);
+    match live {
+        Some(live) => age < RUNNER_GRACE_MS || live.iter().any(|a| *a == attempt.replace(':', "_")),
+        None => age < UNBOUND_TTL_MS,
+    }
+}
+
+impl Service {
+    /// The attempts whose structured runner is still running, from the host;
+    /// None when it cannot say (an older host, or no answer).
+    async fn live_runners(&self, url: &str, token: Option<&str>) -> Option<Vec<String>> {
+        let mut request = self
+            .http
+            .post(format!("{}/native", url.trim_end_matches('/')))
+            .timeout(Duration::from_secs(5))
+            .header("content-type", "application/json")
+            .body(
+                serde_json::json!({ "command": "structured_runner_live", "args": {} }).to_string(),
+            );
+        if let Some(token) = token {
+            request = request.bearer_auth(token);
+        }
+        let response = request.send().await.ok()?;
+        if !response.status().is_success() {
+            return None;
+        }
+        let value: serde_json::Value =
+            serde_json::from_slice(&response.bytes().await.ok()?).ok()?;
+        serde_json::from_value(value.get("result")?.clone()).ok()
     }
 }
 
@@ -361,4 +420,26 @@ pub async fn start(config: Config, options: StartOptions) -> Result<Running, Str
         admin: Some(admin),
         tasks,
     })
+}
+
+#[cfg(test)]
+mod runner_credential_tests {
+    use super::*;
+
+    #[test]
+    fn a_runner_credential_lives_while_its_host_lists_the_attempt() {
+        let live = vec!["att_1".to_string()];
+        let now = 10 * 60_000 + RUNNER_GRACE_MS;
+        assert!(keep_runner("att:1", 0, now, Some(&live)));
+        assert!(!keep_runner("att:2", 0, now, Some(&live)), "ended");
+        assert!(
+            keep_runner("att:2", now - 1000, now, Some(&live)),
+            "spawn in flight"
+        );
+        assert!(
+            keep_runner("att:2", now - 1000, now, None),
+            "host can't say yet"
+        );
+        assert!(!keep_runner("att:2", 0, now + UNBOUND_TTL_MS, None));
+    }
 }

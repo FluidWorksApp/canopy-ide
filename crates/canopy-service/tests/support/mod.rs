@@ -36,6 +36,8 @@ pub struct RunnerState {
     /// Holds `GET /sessions` this long after taking the list, so a bind can
     /// land while the answer is in flight.
     pub sessions_delay_ms: AtomicU64,
+    /// What the host's structured_runner_live answers.
+    pub runners: Mutex<Vec<String>>,
 }
 
 pub struct FakeRunner {
@@ -108,6 +110,18 @@ impl FakeRunner {
                             expect_pid: expect,
                         });
                         (StatusCode::OK, Json(serde_json::json!({"ok": true})))
+                    },
+                ),
+            )
+            .route(
+                "/native",
+                post(
+                    |State(s): State<Arc<RunnerState>>, Json(body): Json<serde_json::Value>| async move {
+                        if body["command"] == "structured_runner_live" {
+                            Json(serde_json::json!({ "result": *s.runners.lock().unwrap() }))
+                        } else {
+                            Json(serde_json::json!({ "result": null }))
+                        }
                     },
                 ),
             )

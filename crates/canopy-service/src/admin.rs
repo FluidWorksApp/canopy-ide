@@ -217,6 +217,18 @@ struct DescribeBody {
     name: Option<String>,
     task: Option<String>,
     activity: Option<ActivityBody>,
+    /// What the host observed the agent working on (session-resume.mjs).
+    repo: Option<String>,
+    root: Option<String>,
+    files: Option<Vec<WorkFile>>,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct WorkFile {
+    path: String,
+    #[serde(default)]
+    ts: u64,
 }
 
 #[derive(serde::Deserialize)]
@@ -237,10 +249,22 @@ async fn describe(
         Ok(ws) => ws,
         Err(response) => return response,
     };
-    let req: DescribeBody = match parse(&body) {
+    let mut req: DescribeBody = match parse(&body) {
         Ok(req) => req,
         Err(response) => return response,
     };
+    let work = (req.repo.is_some() || req.root.is_some() || req.files.is_some()).then(|| {
+        (
+            req.repo.clone(),
+            req.root.clone(),
+            req.files
+                .take()
+                .unwrap_or_default()
+                .into_iter()
+                .map(|f| (f.path, f.ts))
+                .collect::<Vec<_>>(),
+        )
+    });
     match ws.terminals.describe(
         &request,
         req.agent,
@@ -248,7 +272,13 @@ async fn describe(
         req.task,
         req.activity.map(|a| (a.title, a.description)),
     ) {
-        Ok((record, changed)) => {
+        Ok((record, mut changed)) => {
+            if let Some((repo, root, files)) = work {
+                match ws.terminals.describe_work(&request, repo, root, files) {
+                    Ok(more) => changed |= more,
+                    Err((status, message)) => return error(status, message),
+                }
+            }
             if changed {
                 ws.events
                     .publish("mesh", "terminals", &record.pty_id.to_string());
@@ -525,6 +555,36 @@ async fn actions(State(service): Svc, Path(ws): Path<String>, body: Bytes) -> Re
             items(ws.mesh.severed_pairs())
         }
         "mesh_job_update" => mesh_job_update(&ws, &value).await,
+        // Agent awareness, run by the IDE: a hotspot claim for the agent that
+        // just edited it (desktop context_hotspot_claim).
+        "hotspot_claim" => {
+            let Some(pty_id) = value
+                .get("ptyId")
+                .and_then(|v| v.as_u64())
+                .and_then(|v| u32::try_from(v).ok())
+            else {
+                return error(400, "hotspot_claim needs ptyId");
+            };
+            let paths: Vec<String> = value
+                .get("paths")
+                .and_then(|p| serde_json::from_value(p.clone()).ok())
+                .unwrap_or_default();
+            let owner = value
+                .get("owner")
+                .and_then(|o| o.as_str())
+                .unwrap_or("Canopy")
+                .chars()
+                .take(200)
+                .collect::<String>();
+            let note = value
+                .get("note")
+                .and_then(|n| n.as_str())
+                .map(|n| n.chars().take(500).collect());
+            match ws.hotspot_claim(pty_id, paths, &owner, note) {
+                (200, message) => json(200, serde_json::json!({ "ok": true, "message": message })),
+                (status, message) => error(status, message),
+            }
+        }
         // The desktop's copy of servable team memory, replacing the last.
         "memory_sync" => {
             let root = value
@@ -562,11 +622,14 @@ async fn actions(State(service): Svc, Path(ws): Path<String>, body: Bytes) -> Re
 /// its own: kept on the mesh under `ref {kind, id}` and announced in that
 /// terminal. From Canopy itself, so no sever applies.
 async fn mesh_job_update(ws: &Arc<Workspace>, value: &serde_json::Value) -> Response {
-    let relay = match value.get("refKind").and_then(|k| k.as_str()) {
-        None | Some("job") => false,
-        Some("relay") => true,
+    // A job step, a relay reply, or an agent-awareness note from the IDE.
+    let kind = match value.get("refKind").and_then(|k| k.as_str()) {
+        None | Some("job") => "job",
+        Some("relay") => "relay",
+        Some("awareness") => "awareness",
         Some(other) => return error(400, format!("unknown mesh update kind {other}")),
     };
+    let relay = kind == "relay";
     let Some(pty_id) = value
         .get("ptyId")
         .and_then(|v| v.as_u64())
@@ -625,7 +688,7 @@ async fn mesh_job_update(ws: &Arc<Workspace>, value: &serde_json::Value) -> Resp
         items: Vec::new(),
         reply_to: None,
         reference: Some(canopy_core::mesh::MeshRef {
-            kind: if relay { "relay" } else { "job" }.into(),
+            kind: kind.into(),
             id: job_id.to_string(),
         }),
         instance: Some(ws.instance.clone()),
@@ -637,6 +700,11 @@ async fn mesh_job_update(ws: &Arc<Workspace>, value: &serde_json::Value) -> Resp
     let notice = if relay {
         format!(
             "[canopy: cloud workspace reply to {job_id}] {}",
+            crate::meshtext::mesh_notice_for(&record)
+        )
+    } else if kind == "awareness" {
+        format!(
+            "[canopy: awareness] {}",
             crate::meshtext::mesh_notice_for(&record)
         )
     } else {
