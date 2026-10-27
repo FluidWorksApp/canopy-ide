@@ -394,6 +394,8 @@ async fn query(State(service): Svc, Path(ws): Path<String>, body: Bytes) -> Resp
                 .collect::<Vec<_>>(),
         ),
         ("access", "get") => json(200, serde_json::json!({ "snapshot": ws.access() })),
+        ("memory", "list") => items(ws.memory.list()),
+        ("memory", "proposals") => items(ws.memory.proposals()),
         (table @ ("deliveries" | "jobs" | "inbox" | "outbox"), "list") => {
             match ws.ledger.list(table, 200) {
                 Ok(rows) => items(rows),
@@ -523,6 +525,34 @@ async fn actions(State(service): Svc, Path(ws): Path<String>, body: Bytes) -> Re
             items(ws.mesh.severed_pairs())
         }
         "mesh_job_update" => mesh_job_update(&ws, &value).await,
+        // The desktop's copy of servable team memory, replacing the last.
+        "memory_sync" => {
+            let root = value
+                .get("root")
+                .and_then(|r| r.as_str())
+                .unwrap_or_default();
+            let Some(entries) = value.get("entries").and_then(|e| e.as_array()) else {
+                return error(400, "memory_sync needs entries");
+            };
+            match ws.memory.sync(root, entries) {
+                Ok(count) => json(200, serde_json::json!({ "ok": true, "entries": count })),
+                Err(message) => error(400, message),
+            }
+        }
+        // Proposals the desktop has taken into its ledger.
+        "memory_ack" => {
+            let Some(ids) = value.get("ids").and_then(|i| i.as_array()) else {
+                return error(400, "memory_ack needs ids");
+            };
+            let ids: Vec<String> = ids
+                .iter()
+                .filter_map(|i| i.as_str().map(str::to_string))
+                .collect();
+            match ws.memory.ack(&ids) {
+                Ok(removed) => json(200, serde_json::json!({ "ok": true, "removed": removed })),
+                Err(message) => error(500, message),
+            }
+        }
         other => error(400, format!("unknown action kind {other}")),
     }
 }

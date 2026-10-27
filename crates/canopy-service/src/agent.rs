@@ -40,6 +40,7 @@ pub fn router(state: AgentState) -> Router {
         .route("/ctx/mesh", post(mesh_op))
         .route("/ctx/notes", post(notes_op))
         .route("/ctx/research", post(research_op))
+        .route("/ctx/memory", post(memory_op))
         .route("/ctx/action", post(action))
         .route("/ctx/ask", post(ask))
         .route("/ctx/ui", post(ui_op))
@@ -342,6 +343,54 @@ async fn notes_op(State(state): State<AgentState>, headers: HeaderMap, body: Byt
 
 async fn research_op(State(state): State<AgentState>, headers: HeaderMap, body: Bytes) -> Response {
     harness_op(state, headers, body, HarnessStore::Research).await
+}
+
+#[derive(serde::Deserialize)]
+struct MemoryReq {
+    op: String,
+    #[serde(default)]
+    cwd: Option<String>,
+    #[serde(default)]
+    project: Option<String>,
+    #[serde(flatten)]
+    rest: serde_json::Value,
+}
+
+/// Team memory, as the desktop's `/ctx/memory`: retrieval answers from the
+/// copy the desktop synced (crate::memory); a proposal is queued for the
+/// desktop's ledger and never served from here.
+async fn memory_op(State(state): State<AgentState>, headers: HeaderMap, body: Bytes) -> Response {
+    let Some(who) = caller(&state, &headers) else {
+        return unauthorized();
+    };
+    let req: MemoryReq = match parse(&body) {
+        Ok(req) => req,
+        Err(response) => return response,
+    };
+    if !state.workspace.names_this_project(req.project.as_deref()) {
+        return other_project();
+    }
+    let ws = state.workspace.clone();
+    let out = tokio::task::spawn_blocking(move || match req.op.as_str() {
+        "query" => serde_json::from_value::<canopy_core::memory::MemoryQuery>(req.rest)
+            .map_err(|e| e.to_string())
+            .map(|q| ws.memory.query(&q, now_ms())),
+        "propose" => {
+            let p: canopy_core::memory::Proposal =
+                serde_json::from_value(req.rest).map_err(|e| e.to_string())?;
+            // No stream event: an IDE that predates memory would read an
+            // unknown store as a broken stream. The desktop polls proposals.
+            ws.memory
+                .propose(&p, who.pty_id, who.name.clone(), req.cwd, now_ms())
+        }
+        other => Err(format!("unknown memory op \"{other}\"")),
+    })
+    .await;
+    match out {
+        Ok(Ok(value)) => json(200, value),
+        Ok(Err(text)) => reply(400, text),
+        Err(_) => reply(500, "the memory handler failed"),
+    }
 }
 
 #[derive(serde::Deserialize)]

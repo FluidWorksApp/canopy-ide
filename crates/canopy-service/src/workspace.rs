@@ -49,6 +49,8 @@ pub struct Workspace {
     pub terminals: Arc<TerminalRegistry>,
     pub runner_terminals: RunnerTerminals,
     pub ledger: Ledger,
+    /// Team memory synced from the desktop, and agents' queued proposals.
+    pub memory: crate::memory::MemoryStore,
     access: Mutex<Option<(SignedSnapshot, AccessSnapshot)>>,
     queues: Mutex<HashMap<u32, Arc<tokio::sync::Mutex<()>>>>,
     pub socket: tokio::sync::Mutex<Option<SocketServer>>,
@@ -69,7 +71,15 @@ impl Workspace {
         events: Arc<EventLog>,
     ) -> Result<Arc<Self>, String> {
         let dir = state_dir.join("ws").join(id);
-        for sub in ["mesh", "notes", "research", "attention", "inbox", "keys"] {
+        for sub in [
+            "mesh",
+            "notes",
+            "research",
+            "attention",
+            "inbox",
+            "keys",
+            "memory",
+        ] {
             crate::util::create_dir_mode(&dir.join(sub), 0o700).map_err(|e| e.to_string())?;
         }
         let _ = crate::util::set_mode(&dir, 0o700);
@@ -98,6 +108,7 @@ impl Workspace {
             claims: ClaimStore::load(Some(dir.join("mesh/claims.sqlite")), instance.clone()),
             attention: AttentionStore::open(dir.join("attention"), events.clone()),
             ledger: Ledger::open(&dir.join("inbox/service.sqlite"))?,
+            memory: crate::memory::MemoryStore::open(dir.join("memory")),
             runner_terminals: RunnerTerminals {
                 registry: terminals.clone(),
                 runner: runner.clone(),

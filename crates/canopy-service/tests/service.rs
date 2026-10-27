@@ -814,6 +814,92 @@ async fn notes_and_research_are_served_from_core_and_reach_the_stream() {
     assert_eq!(snapshot["stores"]["research"].as_array().unwrap().len(), 1);
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn team_memory_is_served_from_the_desktop_copy_and_proposals_queue_for_it() {
+    let daemon = Daemon::start().await;
+    let runner = FakeRunner::start().await;
+    daemon.register(WS, Some(&runner)).await;
+    let (ada, ada_pty) = daemon
+        .terminal(WS, &runner, "req-ada-01", "Ada", 11, 1011)
+        .await;
+    let (status, tools) = daemon.agent(WS, &ada, "GET", "/ctx/tools", None).await;
+    assert_eq!(status, 200);
+    assert!(!tools["disabled"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|t| t == "canopy_memory" || t == "canopy_memory_propose"));
+    let ask = |query: &str| serde_json::json!({"op":"query","cwd":"/workspace","query":query});
+    let (status, empty) = daemon
+        .agent(WS, &ada, "POST", "/ctx/memory", Some(ask("billing")))
+        .await;
+    assert_eq!(status, 200, "{empty}");
+    assert_eq!(empty["matched"], 0);
+
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as u64;
+    let entry = |id: &str, status: &str| {
+        serde_json::json!({
+            "id": format!("e-{id}"), "kind": "memory", "ts": now, "root": "/Users/ash/api",
+            "author": {"kind": "human", "name": "Ash"}, "scope": "project",
+            "data": {"memoryId": id, "type": "constraint", "text": "Billing calls go through the job queue",
+                     "why": "", "confidence": 0.9, "createdAt": now, "source": "human",
+                     "provenance": {"files": ["src/billing.ts"]}},
+            "expiresAt": now + 86_400_000, "status": status,
+        })
+    };
+    let (status, synced) = act(
+        &daemon,
+        serde_json::json!({"kind":"memory_sync","actor":"user-1","root":"/Users/ash/api",
+            "entries":[entry("m1","approved"), entry("m2","quarantined")]}),
+    )
+    .await;
+    assert_eq!(status, 200, "{synced}");
+    assert_eq!(synced["entries"], 1);
+    let (_, found) = daemon
+        .agent(WS, &ada, "POST", "/ctx/memory", Some(ask("billing queue")))
+        .await;
+    assert_eq!(found["matched"], 1);
+    assert_eq!(found["memories"][0]["id"], "m1");
+
+    let (status, refused) = daemon
+        .agent(WS, &ada, "POST", "/ctx/memory", Some(serde_json::json!({"op":"propose","type":"opinion","text":"Tabs beat spaces every time"})))
+        .await;
+    assert_eq!(status, 400, "{refused}");
+    let (status, proposed) = daemon
+        .agent(WS, &ada, "POST", "/ctx/memory", Some(serde_json::json!({"op":"propose","type":"fact","text":"Staging runs in eu-west-1","by":"Ada"})))
+        .await;
+    assert_eq!(status, 200, "{proposed}");
+    assert_eq!(proposed["status"], "proposed");
+    let (_, queued) = daemon
+        .admin(
+            "POST",
+            &format!("/admin/workspaces/{WS}/query"),
+            Some(serde_json::json!({"store":"memory","action":"proposals","args":{}})),
+        )
+        .await;
+    let rows = queued["items"].as_array().unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0]["ptyId"], ada_pty);
+    assert_eq!(rows[0]["memoryId"], proposed["id"]);
+    let (status, _) = act(
+        &daemon,
+        serde_json::json!({"kind":"memory_ack","actor":"user-1","ids":[proposed["id"]]}),
+    )
+    .await;
+    assert_eq!(status, 200);
+    let (_, queued) = daemon
+        .admin(
+            "POST",
+            &format!("/admin/workspaces/{WS}/query"),
+            Some(serde_json::json!({"store":"memory","action":"proposals","args":{}})),
+        )
+        .await;
+    assert!(queued["items"].as_array().unwrap().is_empty());
+}
+
 async fn act(daemon: &Daemon, body: serde_json::Value) -> (u16, serde_json::Value) {
     daemon
         .admin(
