@@ -1,6 +1,6 @@
 // Share cards: a pull request, lines of a file, a diff, terminal output or an
 // agent's report, sent from Canopy into team chat — plus PR review requests and
-// their outcomes.
+// their outcomes, and agent plans shared for the team to approve (src/plans).
 //
 // A card rides on an ordinary, visible chat message as the optional `card`
 // field. The message's `text` is the human-readable fallback (a summary line and
@@ -34,7 +34,17 @@ export type ReportCard={type:'report';v:1;agent:string;title:string;body:string;
 export type ReviewRequestCard={type:'review-request';v:1;repo:RepoRef;number:number;title:string;head:string;reviewers:string[]};
 export type ReviewOutcome='approved'|'changes-requested'|'commented';
 export type ReviewOutcomeCard={type:'review-outcome';v:1;request:string;repo:RepoRef;number:number;outcome:ReviewOutcome;head?:string};
-export type Card=PrCard|FileCard|DiffCard|TerminalCard|ReportCard|ReviewRequestCard|ReviewOutcomeCard;
+/** A plan an agent will work from (src/plans/plan.ts), shared before the work
+ *  starts so teammates can comment and approve. `plan` is the plan's id on the
+ *  sender's machine — an opaque token, never a path. No repo: a plan is read,
+ *  not opened. */
+export type PlanRisk='low'|'medium'|'high';
+export type PlanCardSize='tiny'|'small'|'large';
+export type PlanCard={type:'plan';v:1;plan:string;goal:string;decisions?:{q:string;a:string}[];acceptance:string[];wontDo?:string[];risk:PlanRisk;size:PlanCardSize};
+export type PlanOutcome='approved'|'changes-requested';
+/** A teammate's answer to a plan card, posted in the card's thread. */
+export type PlanOutcomeCard={type:'plan-outcome';v:1;request:string;plan:string;outcome:PlanOutcome};
+export type Card=PrCard|FileCard|DiffCard|TerminalCard|ReportCard|ReviewRequestCard|ReviewOutcomeCard|PlanCard|PlanOutcomeCard;
 export type CardType=Card['type'];
 
 // ---------- limits ----------
@@ -46,6 +56,8 @@ export const LIMITS={
  /** How much of terminal output / a report goes into the fallback text. */
  excerptBytes:1024,
  reviewers:20,maxLine:1_000_000,maxSpan:2000,maxNumber:1_000_000_000,slug:200,
+ /** Plan cards: a goal, up to 8 decisions, 12 checks and 8 exclusions. */
+ planGoal:400,planItem:300,planDecisions:8,planChecks:12,planWontDo:8,
 } as const;
 const bytes=(value:string)=>new TextEncoder().encode(value).length;
 export const cardBytes=(card:Card)=>bytes(JSON.stringify(card));
@@ -121,6 +133,11 @@ const isObject=(value:unknown):value is Record<string,unknown>=>!!value&&typeof 
 const exact=(value:object,keys:string[])=>Object.keys(value).every(key=>keys.includes(key));
 const optional=<T,>(value:unknown,check:(v:unknown)=>v is T)=>value===undefined||check(value);
 const OUTCOMES:readonly ReviewOutcome[]=['approved','changes-requested','commented'];
+const PLAN_OUTCOMES:readonly PlanOutcome[]=['approved','changes-requested'];
+/** src/plans/plan.ts PLAN_ID, restated so the wire schema imports nothing. */
+const PLAN_ID=/^pl-[a-z0-9]{1,16}-[a-z0-9]{1,16}$/;
+const planItem=(v:unknown):v is string=>safeLine(v,LIMITS.planItem);
+const planItems=(v:unknown,max:number,min=0):v is string[]=>Array.isArray(v)&&v.length>=min&&v.length<=max&&v.every(planItem);
 const title=(v:unknown):v is string=>safeLine(v,LIMITS.title);
 const repoCopy=(r:RepoRef):RepoRef=>({host:r.host,slug:r.slug});
 
@@ -170,6 +187,20 @@ export function parseCard(value:unknown):Card|undefined{
     if(!exact(c,['type','v','request','repo','number','outcome','head'])||typeof c.request!=='string'||!UUID.test(c.request)||!validRepo(c.repo)||!validNumber(c.number)||!OUTCOMES.includes(c.outcome as ReviewOutcome)||!optional(c.head,validSha))return undefined;
     return fits({type:'review-outcome',...base,request:c.request,repo:repoCopy(c.repo),number:c.number,outcome:c.outcome as ReviewOutcome,...(c.head?{head:c.head as string}:{})});
    }
+   case 'plan':{
+    if(!exact(c,['type','v','plan','goal','decisions','acceptance','wontDo','risk','size'])||typeof c.plan!=='string'||!PLAN_ID.test(c.plan)||!safeLine(c.goal,LIMITS.planGoal))return undefined;
+    if(c.risk!=='low'&&c.risk!=='medium'&&c.risk!=='high')return undefined;
+    if(c.size!=='tiny'&&c.size!=='small'&&c.size!=='large')return undefined;
+    if(!planItems(c.acceptance,LIMITS.planChecks)||(c.wontDo!==undefined&&!planItems(c.wontDo,LIMITS.planWontDo)))return undefined;
+    const d=c.decisions;
+    if(d!==undefined&&!(Array.isArray(d)&&d.length<=LIMITS.planDecisions&&d.every(x=>isObject(x)&&exact(x,['q','a'])&&planItem(x.q)&&planItem(x.a))))return undefined;
+    const decisions=(d as {q:string;a:string}[]|undefined)?.map(x=>({q:x.q,a:x.a}));
+    return fits({type:'plan',...base,plan:c.plan,goal:c.goal,...(decisions?{decisions}:{}),acceptance:[...c.acceptance as string[]],...(c.wontDo!==undefined?{wontDo:[...c.wontDo as string[]]}:{}),risk:c.risk,size:c.size});
+   }
+   case 'plan-outcome':{
+    if(!exact(c,['type','v','request','plan','outcome'])||typeof c.request!=='string'||!UUID.test(c.request)||typeof c.plan!=='string'||!PLAN_ID.test(c.plan)||!PLAN_OUTCOMES.includes(c.outcome as PlanOutcome))return undefined;
+    return fits({type:'plan-outcome',...base,request:c.request,plan:c.plan,outcome:c.outcome as PlanOutcome});
+   }
    default:return undefined;
   }
  }catch{return undefined;}
@@ -202,7 +233,7 @@ export function cardUrl(card:Card):string|undefined{
   case 'file':return blobUrl(card.repo,card.rev,card.path,card.lines);
   case 'diff':return card.pr?`${prUrl(card.repo,card.pr)}${isGitLab(card.repo.host)?'/diffs':'/files'}`:compareUrl(card.repo,card.base,card.head);
   case 'report':return card.repo&&card.pr?prUrl(card.repo,card.pr):undefined;
-  case 'terminal':return undefined;
+  case 'terminal':case 'plan':case 'plan-outcome':return undefined;
  }
 }
 const linesLabel=(l?:LineRange)=>l?(l.start===l.end?`:${l.start}`:`:${l.start}-${l.end}`):'';
@@ -218,7 +249,18 @@ export function cardSummary(card:Card):string{
   case 'report':return `Report from ${card.agent}: ${card.title}`;
   case 'review-request':return `Review requested: ${card.repo.slug}#${card.number} · head ${short(card.head)}: ${card.title}`;
   case 'review-outcome':return `${OUTCOME_ICON[card.outcome]} ${OUTCOME_LABEL[card.outcome]} ${card.repo.slug}#${card.number} (via Canopy)`;
+  case 'plan':return `Plan for review (${card.risk} risk, ${card.size}): ${card.goal}`;
+  case 'plan-outcome':return card.outcome==='approved'?'✅ Approved the plan (via Canopy)':'🔁 Asked for changes to the plan (via Canopy)';
  }
+}
+/** A plan card's body as plain text: what a client without cards shows, and
+ *  what the secret check reads. */
+export function planText(card:PlanCard):string{
+ const out:string[]=[];
+ if(card.decisions?.length)out.push('Decisions:',...card.decisions.map(d=>`- ${d.q} → ${d.a}`));
+ if(card.acceptance.length)out.push('Done when:',...card.acceptance.map(a=>`- ${a}`));
+ if(card.wontDo?.length)out.push('Won\'t do:',...card.wontDo.map(w=>`- ${w}`));
+ return out.join('\n');
 }
 const excerpt=(value:string)=>{const {text,clipped}=clipBytes(value,LIMITS.excerptBytes);return clipped?`${text}…`:text;};
 /** What a client that does not know cards shows: the optional note, the
@@ -230,6 +272,7 @@ export function cardText(card:Card,note=''):string{
  parts.push(cardSummary(card));
  if(card.type==='terminal'){if(card.command)parts.push(`$ ${card.command}`);parts.push(excerpt(card.output));}
  if(card.type==='report')parts.push(excerpt(card.body));
+ if(card.type==='plan')parts.push(excerpt(planText(card)));
  const url=cardUrl(card);if(url)parts.push(url);
  return parts.join('\n');
 }
@@ -287,6 +330,7 @@ export function cardFreeText(card:Card):string{
   case 'report':return card.body;
   case 'file':return card.snippet??'';
   case 'diff':return card.patch;
+  case 'plan':return `${card.goal}\n${planText(card)}`;
   default:return '';
  }
 }
@@ -315,4 +359,26 @@ export function foldOutcomes(request:ChatMessage,messages:readonly ChatMessage[]
   latest.set(m.sender,{reviewer:m.sender,outcome:c.outcome,...(c.head?{head:c.head}:{}),created:m.created,id:m.id});
  }
  return req.reviewers.flatMap(r=>latest.get(r)??[]);
+}
+
+// ---------- plan outcomes ----------
+export type FoldedPlanOutcome={by:string;outcome:PlanOutcome;created:number;id:string};
+/** The latest answer per teammate to a plan card, last-writer-wins by
+ *  (created, id). Only replies in the card's own thread count, only for the
+ *  plan it named, and never the author's own (a plan is approved by someone
+ *  else, or locally by its author before launch). */
+export function foldPlanOutcomes(request:ChatMessage,messages:readonly ChatMessage[]):FoldedPlanOutcome[]{
+ const req=cardOf(request);if(req?.type!=='plan')return [];
+ const latest=new Map<string,FoldedPlanOutcome>();
+ for(const m of messages){
+  if(m.id===request.id||m.sender===request.sender||!sameConversation(m,request))continue;
+  const thread=m.thread as {root?:unknown}|undefined;
+  if(!thread||thread.root!==request.id)continue;
+  const c=cardOf(m);
+  if(c?.type!=='plan-outcome'||c.request!==request.id||c.plan!==req.plan)continue;
+  const prev=latest.get(m.sender);
+  if(prev&&(prev.created>m.created||(prev.created===m.created&&prev.id>m.id)))continue;
+  latest.set(m.sender,{by:m.sender,outcome:c.outcome,created:m.created,id:m.id});
+ }
+ return [...latest.values()].sort((a,b)=>a.created-b.created);
 }

@@ -460,6 +460,16 @@ export interface Settings {
   /** Per-feature daily caps in USD, keyed by brain feature tag. A feature with
    *  no entry is capped only by the daily total. */
   brainFeatureBudgetsUsd: Record<string, number>;
+  /** Plans (src/plans): work dispatched to an agent through Canopy gets a
+   *  brain-written plan first — shown inline for tiny low-risk work, held for
+   *  approval otherwise. Off = agents start straight from the brief. */
+  planBeforeDispatch: boolean;
+  /** Intent & evidence review (src/review): ask the brain for the
+   *  plan-deviation summary as soon as the view opens. Off = a button asks. */
+  reviewAutoSummary: boolean;
+  /** Most changed lines one reviewable slice may carry before the review view
+   *  says so and offers to ask the agent to split it. */
+  reviewSliceBudgetLines: number;
   /** Connect Claude Code to Canopy as its IDE, the way it connects to VS Code:
    *  proposed edits open as a diff to accept, tweak or reject, the editor
    *  selection reaches the prompt, and the CLI reads diagnostics off Canopy's
@@ -672,6 +682,9 @@ export const DEFAULTS: Settings = {
   brainBackgroundModel: "",
   brainDailyBudgetUsd: null,
   brainFeatureBudgetsUsd: {},
+  planBeforeDispatch: true,
+  reviewAutoSummary: true,
+  reviewSliceBudgetLines: 400,
   claudeIdeIntegration: true,
   turnRollback: true,
   notificationPopupsEnabled: true,
@@ -831,6 +844,11 @@ export function getSettings(): Settings {
     value.brainFeatureBudgetsUsd = featureBudgets(value.brainFeatureBudgetsUsd);
     if (typeof value.brainModel !== "string") value.brainModel = "";
     if (typeof value.brainBackgroundModel !== "string") value.brainBackgroundModel = "";
+    if (
+      !Number.isFinite(value.reviewSliceBudgetLines) ||
+      value.reviewSliceBudgetLines < 20
+    )
+      value.reviewSliceBudgetLines = DEFAULTS.reviewSliceBudgetLines;
   } catch {
     value = { ...DEFAULTS };
   }

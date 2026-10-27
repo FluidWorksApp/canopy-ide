@@ -41,6 +41,7 @@ import { PROVENANCE_EVENT } from "../provenance";
 import { agentGitTrail } from "../agentGitTrail";
 import { sizeLimitFor } from "../fileOpen";
 import { type IoBudget, rendererIoBudget } from "../ioBudget";
+import { IntentEvidenceView } from "./IntentEvidenceView";
 
 const fmtCost = (n: number) =>
   n >= 100 ? `$${fixedNumber(n, 0)}` : `$${fixedNumber(n, 2)}`;
@@ -132,7 +133,10 @@ interface DraftComment {
   selected: boolean;
 }
 
-type Pane = "edits" | "uncommitted" | "diff";
+// "intent" is the Intent & evidence view (IntentEvidenceView): plan →
+// deviations → receipt → risk map. It opens first; the diff panes are its
+// drill-down.
+type Pane = "intent" | "edits" | "uncommitted" | "diff";
 
 // The single-file shape we hand DiffView — one file's hunks plus its name on
 // each side, and optionally the full before/after text (which the viewer needs
@@ -751,13 +755,12 @@ export function AgentWorkspaceView({
   // Open on this agent's own edits when we have them — that's the per-agent
   // view the shared-checkout tree can't give. Otherwise fall back to whichever
   // tree pane has content. Set once, on first load.
+  //
+  // Intent & evidence comes first whenever there is anything to review: the
+  // reviewer judges plan, deviations and proof before reading lines.
   useEffect(() => {
     if (pane) return;
-    if (edits.length > 0) setPane("edits");
-    else if (ws)
-      setPane(
-        ws.dirty > 0 || ws.on_base || ws.detached ? "uncommitted" : "diff",
-      );
+    if (edits.length > 0 || ws) setPane("intent");
   }, [edits, ws, pane]);
 
   useEffect(() => {
@@ -832,8 +835,9 @@ export function AgentWorkspaceView({
   useEffect(() => {
     let live = true;
     if (!repo || !ws?.branch || !pane) return;
-    // The edits pane is journal-only — no git patch to fetch.
-    if (pane === "edits") return;
+    // The edits pane is journal-only — no git patch to fetch. The intent pane
+    // reads its own (below).
+    if (pane === "edits" || pane === "intent") return;
     if (pane === "diff" && (ws.detached || ws.on_base)) return;
     void ipc
       .gitBranchPatch(
@@ -932,6 +936,48 @@ export function AgentWorkspaceView({
   // undifferentiated tree we won't pass off as this agent's.
   const canAttribute = isolated || agentPaths.size > 0;
 
+  // The diff the Intent & evidence view reviews: this agent's own journaled
+  // edits when it has them (accurate on a shared checkout), else its files in
+  // the working tree / branch diff, else nothing it can be credited with.
+  const journalPatch = useMemo(
+    () =>
+      edits
+        .filter((e) => e.present)
+        .map((e) => `diff --git a/${e.path} b/${e.path}\n${editToHunk(e.path, e.old, e.new)}`)
+        .join("\n"),
+    [edits],
+  );
+  const [intentGitPatch, setIntentGitPatch] = useState<string | null>(null);
+  const intentUncommitted = !!ws && (ws.dirty > 0 || !branchable);
+  useEffect(() => {
+    let live = true;
+    if (pane !== "intent" || journalPatch || !repo || !ws?.branch) return;
+    void ipc
+      .gitBranchPatch(repo, ws.branch, ws.isolated ? ws.workdir : null, intentUncommitted)
+      .then((p) => live && setIntentGitPatch(p.patch))
+      .catch(() => live && setIntentGitPatch(""));
+    return () => {
+      live = false;
+    };
+  }, [pane, journalPatch, repo, ws?.branch, ws?.workdir, ws?.isolated, intentUncommitted, tick]);
+  const intentPatch = journalPatch
+    ? journalPatch
+    : intentGitPatch == null
+      ? null
+      : (isolated ? splitPatch(intentGitPatch) : splitPatch(intentGitPatch).filter((f) => isAgentFile(f.path)))
+          .map((f) => f.patch)
+          .join("\n");
+  /** The order the risk map put files in; the diff panes follow it. */
+  const [riskPaths, setRiskPaths] = useState<string[]>([]);
+  const byRisk = <T,>(list: T[], pathOf: (t: T) => string): T[] => {
+    if (!riskPaths.length) return list;
+    const rank = (p: string) => {
+      const i = riskPaths.findIndex((r) => r === p || r.endsWith(`/${p}`) || p.endsWith(`/${r}`));
+      return i < 0 ? riskPaths.length : i;
+    };
+    return [...list].sort((a, b) => rank(pathOf(a)) - rank(pathOf(b)));
+  };
+
   // Journal edits grouped by file, newest file last, preserving edit order.
   const editsByFile = useMemo(() => {
     const groups: { path: string; items: ipc.AgentEdit[] }[] = [];
@@ -966,6 +1012,18 @@ export function AgentWorkspaceView({
     files.find((f) => f.path === t)?.path ??
     files.find((f) => basename(f.path) === basename(t))?.path ??
     null;
+  /** Risk map → diff: switch to the pane that shows this file and scroll to it
+   *  once it has rendered (a git pane loads its patch first). */
+  const drillInto = (path: string) => {
+    setPane(edits.length > 0 ? "edits" : intentUncommitted ? "uncommitted" : "diff");
+    let tries = 0;
+    const attempt = () => {
+      const hit = [...fileRefs.current.keys()].find((k) => k === path || k.endsWith(`/${path}`) || path.endsWith(`/${k}`));
+      if (hit) scrollToFile(hit);
+      else if (++tries < 20) window.setTimeout(attempt, 100);
+    };
+    window.setTimeout(attempt, 50);
+  };
   const scrollToFile = (path: string) => {
     const el = fileRefs.current.get(path);
     if (!el) return;
@@ -1779,6 +1837,14 @@ export function AgentWorkspaceView({
 
       {(ws || edits.length > 0) && (
         <div className="branch-panes">
+          <Button
+            size="sm"
+            variant={pane === "intent" ? "accent" : "default"}
+            title="The plan, what changed against it, the proof receipt and a risk map — before the diff"
+            onClick={() => setPane("intent")}
+          >
+            Intent & evidence
+          </Button>
           {edits.length > 0 && (
             <Button
               size="sm"
@@ -1807,7 +1873,7 @@ export function AgentWorkspaceView({
               All changes vs base
             </Button>
           )}
-          {pane !== "edits" && patch && files.length > 0 && (
+          {pane !== "edits" && pane !== "intent" && patch && files.length > 0 && (
             <>
               <span className="loose-ahead">+{patch.insertions}</span>
               <span className="loose-dirty">−{patch.deletions}</span>
@@ -1899,13 +1965,24 @@ export function AgentWorkspaceView({
             hunk, so even a file two agents co-edited shows only what THIS one
             did. A superseded edit (a later write replaced it) is kept but
             greyed, because it's still a true record of what the agent did. */}
+        {pane === "intent" && (
+          <IntentEvidenceView
+            cwd={repo ?? cwd}
+            sessionIds={sessionId ? [sessionId] : []}
+            patch={intentPatch}
+            onOpenFile={drillInto}
+            onRiskOrder={setRiskPaths}
+            onAskAgent={onMessageAgent}
+          />
+        )}
+
         {pane === "edits" &&
           (editsByFile.length === 0 ? (
             <div className="tree-empty">
               No edits recorded for this agent yet.
             </div>
           ) : (
-            editsByFile.map((g) => {
+            byRisk(editsByFile, (g) => g.path).map((g) => {
               // One real diff for the whole file when every edit can be placed in
               // the current content — real line numbers and gaps between edits,
               // like a normal file diff. Otherwise fall back to per-edit fragments
@@ -1913,7 +1990,11 @@ export function AgentWorkspaceView({
               const content = fileContents.get(g.path);
               const merged = mergedEdits.get(g.path) ?? null;
               return (
-                <div key={g.path} className="pr-file">
+                <div
+                  key={g.path}
+                  className={`pr-file ${flashPath === g.path ? "pr-file-flash" : ""}`}
+                  ref={(el) => onFileRef(g.path, el)}
+                >
                   <FileName
                     path={g.path}
                     count={g.items.length}
@@ -1989,7 +2070,7 @@ export function AgentWorkspaceView({
         {/* Only this agent's own files — never the rest of a shared checkout.
             When none can be attributed, we say so plainly rather than pass the
             whole tree off as this agent's work. */}
-        {pane !== "edits" &&
+        {pane !== "edits" && pane !== "intent" &&
           // One loading state, not two. This was "Loading workspace…" and then
           // "Loading diff…" — two one-line messages of different widths
           // replacing each other and then being replaced by the diff, so the
@@ -2011,9 +2092,9 @@ export function AgentWorkspaceView({
               )}
             </div>
           ) : (
-            mine.map(renderFile)
+            byRisk(mine, (f) => f.path).map(renderFile)
           ))}
-        {patch?.truncated && pane !== "edits" && (
+        {patch?.truncated && pane !== "edits" && pane !== "intent" && (
           <div className="tree-empty">
             Diff truncated at 2 MB — use <code>git diff</code> for the whole
             thing.

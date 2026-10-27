@@ -37,6 +37,9 @@ export const COMPANION_DESKTOP_EVENTS=['agent:ui','agent:action','agent:browser'
 // The signed-in account, crash reports and the remote portal belong to this
 // computer; the workspace has none of them.
 for(const command of ['canopy_account_request','report_crash','send_crash','crash_issue_draft','file_crash_issue','remote_status','remote_enable','remote_disable','remote_qr','remote_rotate_pin','remote_socket_metrics'])LOCAL_UI.add(command);
+// The ledger (src/ledger.ts) is the person's record of plans, receipts and
+// reviews, kept on the computer showing the IDE; the workspace has no store.
+for(const command of ['ledger_append','ledger_query','ledger_root','ledger_update_status'])LOCAL_UI.add(command);
 /** Whether a command runs on the computer showing the IDE in remote mode. */
 export const isDesktopLocal=(command:string)=>LOCAL_UI.has(command);
 class WorkspaceChannel<T> implements HostChannel<T>{onmessage:(message:T)=>void=()=>{};}
@@ -386,7 +389,7 @@ export class NativeWorkspaceHost implements Host {
   }
   async listen<T>(event:string,handler:(event:HostEvent<T>)=>void):Promise<UnlistenFn>{
     if(this.disposed)throw Error('Workspace disconnected');
-    if(['remote:upload-progress','menu','deep-link','memory:pressure','window:fullscreen','clipboard:changed','clipboard:blocked','dictation:progress','dictation:partial','dictation:level',...COMPANION_DESKTOP_EVENTS].includes(event)){const companionOnly=event.startsWith('agent:');const release=await this.desktop.listen<T>(event,value=>{if(this.disposed)return;if(companionOnly&&(value.payload as {ptyId?:unknown}|null)?.ptyId!=null)return;handler(value);});if(this.disposed){release();return()=>{};}const cancel=()=>{this.desktopListeners.delete(cancel);release();};this.desktopListeners.add(cancel);return cancel;}
+    if(['remote:upload-progress','menu','deep-link','memory:pressure','window:fullscreen','clipboard:changed','clipboard:blocked','dictation:progress','dictation:partial','dictation:level','ledger-appended',...COMPANION_DESKTOP_EVENTS].includes(event)){const companionOnly=event.startsWith('agent:');const release=await this.desktop.listen<T>(event,value=>{if(this.disposed)return;if(companionOnly&&(value.payload as {ptyId?:unknown}|null)?.ptyId!=null)return;handler(value);});if(this.disposed){release();return()=>{};}const cancel=()=>{this.desktopListeners.delete(cancel);release();};this.desktopListeners.add(cancel);return cancel;}
     const list=this.listeners.get(event)??new Set();this.listeners.set(event,list);list.add(handler as (event:HostEvent<unknown>)=>void);this.beginPoll();return ()=>{list.delete(handler as (event:HostEvent<unknown>)=>void);};
   }
   channel<T>():HostChannel<T>{return new WorkspaceChannel<T>();}

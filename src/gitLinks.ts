@@ -395,6 +395,8 @@ export async function resolveShareCard(
       return { do: "file", repo, path: card.path, line: card.lines?.start, rev: card.rev, head, exists };
     }
     case "terminal":
+    case "plan":
+    case "plan-outcome":
       return { do: "none" };
   }
 }
