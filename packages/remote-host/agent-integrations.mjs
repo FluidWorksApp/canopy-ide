@@ -8,8 +8,11 @@ const EVENTS=['SessionStart','UserPromptSubmit','Stop','SessionEnd','PostToolUse
 // (WRITE_TOOLS_MATCHER and GATE_TOOLS_MATCHER in src-tauri/src/agents.rs): the
 // research write gate and the Rules panel's compiled gates both decide before
 // a tool runs, and a hook that is not registered is a gate that never runs.
-// Codex gets none — its PreToolUse deny contract is not verified.
+// Codex's PreToolUse deny contract is Claude's (learn.chatgpt.com/docs/hooks);
+// its matcher is CODEX_GATE_MATCHER in agents.rs, in one entry.
 export const CLAUDE_PRE_TOOL=['Write|Edit|MultiEdit|NotebookEdit','Bash|Read|WebFetch|mcp__canopy__canopy_vault_fill|mcp__canopy__canopy_vault_read'];
+export const CODEX_PRE_TOOL=['^Bash$|^apply_patch$|^Edit$|^Write$|mcp__canopy__canopy_vault_fill|mcp__canopy__canopy_vault_read'];
+const PRE_TOOL={claude:CLAUDE_PRE_TOOL,codex:CODEX_PRE_TOOL};
 const hasPreTool=(value,matcher,command)=>value.hooks?.PreToolUse?.some(entry=>entry.matcher===matcher&&entry.hooks?.some(hook=>hook.type==='command'&&hook.command===command));
 const quote=value=>`'${value.replaceAll("'","'\\''")}'`;
 const ourStatusLine=command=>typeof command==='string'&&command.includes('canopy-hook')&&command.includes('--statusline');
@@ -42,7 +45,7 @@ export class AgentIntegrations {
  async settings(root,agent){const file=path.join(root,agent==='claude'?'.claude/settings.json':'.codex/hooks.json');let value;try{value=JSON.parse(await readFile(file,'utf8'));}catch(e){if(e.code!=='ENOENT')throw e;value={};}if(!value||Array.isArray(value)||typeof value!=='object')throw Error('Agent settings must be an object');return {file,value};}
  command(agent){return `'${this.helper.replaceAll("'","'\\''")}' --agent ${agent}`;}
  async installed(agent){if(!['claude','codex'].includes(agent))return false;try{await access(this.helper,constants.X_OK);for(const profile of await new WorkspaceProfiles(this.home).list()){const {value}=await this.settings(profile.root,agent);if(!EVENTS.every(event=>value.hooks?.[event]?.some(entry=>entry.hooks?.some(hook=>hook.type==='command'&&hook.command===this.command(agent)))))return false;
-  if(agent==='claude'&&!CLAUDE_PRE_TOOL.every(matcher=>hasPreTool(value,matcher,this.command(agent))))return false;
+  if(!PRE_TOOL[agent].every(matcher=>hasPreTool(value,matcher,this.command(agent))))return false;
   // Without the status line the plan chip stays empty; reporting it missing
   // is what offers existing workspaces the one-click setup again.
   if(agent==='claude'&&value.statusLine?.command!==claudeStatusLine(value,this.helper,profile.id).command)return false;}return true;}catch{return false;}}
@@ -57,7 +60,7 @@ export class AgentIntegrations {
    const root=await profiles.root(profile.id);const {file,value}=await this.settings(root,agent);
    value.hooks??={};if(!value.hooks||Array.isArray(value.hooks)||typeof value.hooks!=='object')throw Error('Agent hooks must be an object');
    for(const event of EVENTS){const entries=value.hooks[event]??[];if(!Array.isArray(entries))throw Error(`Invalid ${event} hooks; existing settings preserved`);const command=this.command(agent);if(!entries.some(entry=>entry.hooks?.some(hook=>hook.command===command)))entries.push({hooks:[{type:'command',command}]});value.hooks[event]=entries;}
-   if(agent==='claude'){const command=this.command(agent);const pre=value.hooks.PreToolUse??[];if(!Array.isArray(pre))throw Error('Invalid PreToolUse hooks; existing settings preserved');for(const matcher of CLAUDE_PRE_TOOL)if(!hasPreTool({hooks:{PreToolUse:pre}},matcher,command))pre.push({matcher,hooks:[{type:'command',command}]});value.hooks.PreToolUse=pre;}
+   {const command=this.command(agent);const pre=value.hooks.PreToolUse??[];if(!Array.isArray(pre))throw Error('Invalid PreToolUse hooks; existing settings preserved');for(const matcher of PRE_TOOL[agent])if(!hasPreTool({hooks:{PreToolUse:pre}},matcher,command))pre.push({matcher,hooks:[{type:'command',command}]});value.hooks.PreToolUse=pre;}
    if(agent==='claude')value.statusLine=claudeStatusLine(value,this.helper,profile.id);
    await profiles.directory(path.dirname(file));const temporary=file+'.'+randomUUID()+'.next';await writeFile(temporary,JSON.stringify(value,null,2)+'\n',{mode:0o600,flag:'wx'});await rename(temporary,file);
    steps.push({step:profile.id+": hooks",ok:true,message:"Hooks installed"});

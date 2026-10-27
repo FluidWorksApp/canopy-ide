@@ -147,6 +147,9 @@ export interface TurnDigest {
   prompt?: string;
   finalMessage?: string;
   files: string[];
+  /** Changes the edit journal did not see — shell commands, generated or
+   *  deleted files — from the turn's rollback snapshots. */
+  otherChanges?: string[];
 }
 
 const clip = (s: string, n: number) => (s.length > n ? `${s.slice(0, n)}…` : s);
@@ -162,6 +165,10 @@ export function buildExtractionPrompt(turns: readonly TurnDigest[], existing: re
           ? `Files changed: ${t.files.slice(0, 40).join(", ")}${t.files.length > 40 ? ` (+${t.files.length - 40} more)` : ""}`
           : "Files changed: none recorded",
       );
+      if (t.otherChanges?.length)
+        parts.push(
+          `Also changed by shell commands or tools: ${t.otherChanges.slice(0, 40).join(", ")}${t.otherChanges.length > 40 ? ` (+${t.otherChanges.length - 40} more)` : ""}`,
+        );
       return parts.join("\n");
     })
     .join("\n\n");
@@ -378,6 +385,40 @@ export async function reviseMemory(root: string, memoryId: string, patch: Memory
     ...(patch.scope ? { scope: patch.scope, author: head.author } : {}),
     ...(patch.expiresAt !== undefined ? { expiresAt: patch.expiresAt } : {}),
     ...(patch.data?.text ? { subject: clip(patch.data.text, 120) } : {}),
+  });
+}
+
+/** A memory a person wrote down themselves in the Memory panel. They are the
+ *  approval, so it lands approved, with them as its author and source. */
+export async function addMemoryByHand(
+  root: string,
+  m: { type: MemoryType; text: string; why: string; scope: MemoryScope },
+  author = "you",
+): Promise<MemoryEntry> {
+  const text = m.text.trim().replace(/\s+/g, " ");
+  if (text.length < 8) throw new Error("Write the memory itself, in one plain sentence.");
+  if (text.length > 600) throw new Error("That's over 600 characters — a memory is one sentence; put detail in “why”.");
+  if (!MEMORY_TYPES.includes(m.type)) throw new Error("Pick what kind of memory this is.");
+  if (!MEMORY_SCOPES.includes(m.scope)) throw new Error("Pick who it applies to.");
+  const now = Date.now();
+  const data: MemoryData = {
+    memoryId: newMemoryId(),
+    type: m.type,
+    text,
+    why: m.why.trim().slice(0, 600),
+    confidence: 1,
+    createdAt: now,
+    source: "human",
+    provenance: { files: [] },
+  };
+  return appendLedger<MemoryData>(root, {
+    kind: "memory",
+    author: { kind: "human", name: author },
+    scope: m.scope,
+    subject: clip(text, 120),
+    data,
+    expiresAt: expiryFor(m.type, now),
+    status: "approved",
   });
 }
 

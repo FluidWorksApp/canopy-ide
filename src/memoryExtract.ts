@@ -12,9 +12,15 @@
 // untrusted-content rule, memoryLedger.ts `untrustedReason`), and SessionEnd.
 //
 // Agent proposals (canopy_memory_propose) are written by the Rust bridge,
-// which knows nothing about a session's tool history; they are picked up off
-// the ledger here, quarantined when their session read untrusted content, and
-// checked for contradictions like any other new entry.
+// which quarantines them on arrival when the hook marked the agent's terminal
+// as having read untrusted content (gates.rs taint). They are picked up off
+// the ledger here, quarantined too when this window saw the session read
+// something the hook could not mark, and checked for contradictions like any
+// other new entry.
+//
+// Every Canopy window sees the same events, so each extraction and each
+// proposal review first takes a lease in the shared ledger (memoryLease.ts):
+// two windows never extract the same turn.
 
 import { askBrain } from "./brainCall";
 import { onAgentTurnEnd, type AgentTurnEnd } from "./agentTurns";
@@ -37,6 +43,9 @@ import {
   type TurnDigest,
 } from "./memoryLedger";
 import { getSettings } from "./settings";
+import { claimLease } from "./memoryLease";
+import { turnFileChanges, type TurnFileChange } from "./turnDiff";
+import * as ipc from "./ipc";
 import type { AgentEventData } from "../shared/notifications";
 
 export const EXTRACT_WINDOW_MS = 10 * 60 * 1000;
@@ -46,6 +55,10 @@ const MAX_BUFFERED_TURNS = 6;
 
 interface PendingTurn extends TurnDigest {
   turnId: string;
+  startedAt: number;
+  endedAt: number;
+  /** The transcript-tail lookup for a Stop that carried no final message. */
+  pendingMessage?: Promise<string | undefined>;
 }
 
 interface SessionState {
@@ -102,6 +115,14 @@ export function observeMemoryEvents(events: readonly (AgentEventData | null)[]):
   }
 }
 
+/** The agent's closing words: the last assistant line of the transcript. */
+function lastAssistantLine(lines: readonly ipc.TranscriptLine[]): string | undefined {
+  for (let i = lines.length - 1; i >= 0; i--) {
+    if (lines[i].role === "assistant" && lines[i].text.trim()) return lines[i].text.trim().slice(0, 4000);
+  }
+  return undefined;
+}
+
 // --------------------------------------------------------------- deps
 
 export interface MemoryExtractDeps {
@@ -110,6 +131,12 @@ export interface MemoryExtractDeps {
   append: typeof appendMemory;
   revise: typeof reviseMemory;
   now: () => number;
+  /** Take the shared-ledger lease on `key`; false when another window has it. */
+  lease: (root: string, key: string, ttlMs: number) => Promise<boolean>;
+  /** The session's transcript, newest last, for a Stop without a final message. */
+  transcriptTail: (sessionId: string, cli: string, roots: string[]) => Promise<ipc.TranscriptLine[]>;
+  /** What the turn changed on disk between its rollback snapshots. */
+  turnChanges: (t: { cwd: string; sessionId: string; startedAt: number; endedAt: number }) => Promise<TurnFileChange[] | null>;
 }
 
 const realDeps: MemoryExtractDeps = {
@@ -118,6 +145,9 @@ const realDeps: MemoryExtractDeps = {
   append: appendMemory,
   revise: reviseMemory,
   now: () => Date.now(),
+  lease: (root, key, ttlMs) => claimLease(root, key, ttlMs),
+  transcriptTail: (sessionId, agent, roots) => ipc.sessionTranscriptTail({ sessionId, agent, roots, maxBytes: 128 * 1024 }),
+  turnChanges: (t) => turnFileChanges(t),
 };
 let deps = realDeps;
 
@@ -134,12 +164,25 @@ export function onTurnEnd(turn: AgentTurnEnd): void {
   s.cli = turn.cli;
   s.cwd = turn.cwd;
   s.root = turn.root;
-  const finalMessage = s.lastMessage;
+  const finalMessage = s.lastMessage ?? turn.lastMessage;
   s.lastMessage = undefined;
-  // A turn with nothing to say (no prompt seen, no files, no final words)
-  // cannot teach anything; not worth a slot in the prompt.
-  if (!turn.prompt && !finalMessage && turn.filesTouched.length === 0) return;
-  s.turns.push({ turnId: turn.turnId, prompt: turn.prompt, finalMessage, files: turn.filesTouched });
+  // Not every CLI's Stop carries the agent's closing words; its transcript
+  // does. Read now, while the tail is still this turn's.
+  const pendingMessage = finalMessage
+    ? undefined
+    : deps
+        .transcriptTail(turn.sessionId, turn.cli, [...new Set([turn.root, turn.cwd])])
+        .then((lines) => lastAssistantLine(lines))
+        .catch(() => undefined);
+  s.turns.push({
+    turnId: turn.turnId,
+    prompt: turn.prompt,
+    finalMessage,
+    files: turn.filesTouched,
+    startedAt: turn.startedAt,
+    endedAt: turn.endedAt,
+    ...(pendingMessage ? { pendingMessage } : {}),
+  });
   if (s.turns.length > MAX_BUFFERED_TURNS) {
     const dropped = s.turns.splice(0, s.turns.length - MAX_BUFFERED_TURNS);
     s.turns[0].files = [...new Set([...dropped.flatMap((t) => t.files), ...s.turns[0].files])];
@@ -180,7 +223,26 @@ async function extract(sessionId: string): Promise<void> {
   // "skip" means a session that read the outside world never contributes —
   // not even to quarantine.
   if (untrusted.length && settings.memoryQuarantine === "skip") return;
+  // Another Canopy window is extracting this session: it saw these turns too.
+  if (!(await deps.lease(s.root, `session:${sessionId}`, 2 * EXTRACT_WINDOW_MS))) return;
   s.lastExtractAt = deps.now();
+  const cwd = s.cwd;
+  await Promise.all(
+    turns.map(async (t) => {
+      if (t.pendingMessage) {
+        t.finalMessage = await t.pendingMessage;
+        delete t.pendingMessage;
+      }
+      // Bash-made changes, generated files and deletions: the snapshot pair
+      // sees what the edit journal could not.
+      const changes = await deps.turnChanges({ cwd, sessionId, startedAt: t.startedAt, endedAt: t.endedAt }).catch(() => null);
+      if (changes?.length) {
+        const known = new Set(t.files.map((f) => f.replace(/\\/g, "/")));
+        t.otherChanges = changes.filter((c) => !known.has(c.path)).map((c) => (c.status === "modify" ? c.path : `${c.path} (${c.status === "add" ? "new" : "deleted"})`));
+      }
+    }),
+  );
+  if (!turns.some((t) => t.prompt || t.finalMessage || t.files.length || t.otherChanges?.length)) return;
 
   const existing = await deps.list(s.root).catch(() => [] as MemoryEntry[]);
   const live = existing.filter((e) => ["approved", "proposed", "quarantined"].includes(memoryStatus(e)));
@@ -210,7 +272,7 @@ async function extract(sessionId: string): Promise<void> {
           sessionId,
           cli: s.cli,
           turnId: turns[turns.length - 1].turnId,
-          files: [...new Set(turns.flatMap((t) => t.files))].slice(0, 50),
+          files: [...new Set(turns.flatMap((t) => [...t.files, ...(t.otherChanges ?? []).map((f) => f.replace(/ \((new|deleted)\)$/, ""))]))].slice(0, 50),
           ...(turns[turns.length - 1].prompt ? { prompt: turns[turns.length - 1].prompt!.slice(0, 400) } : {}),
         },
         ...(untrusted.length ? { untrusted } : {}),
@@ -253,11 +315,15 @@ export async function reviewProposal(entry: LedgerEntry): Promise<void> {
   if (entry.kind !== "memory" || entry.author.kind !== "agent") return;
   const data = entry.data as MemoryData | undefined;
   if (!data?.memoryId || data.checkedAt || reviewed.has(data.memoryId)) return;
-  if (entry.status && entry.status !== "proposed") return;
+  // Proposed, or quarantined on arrival by the bridge: both still need the
+  // contradiction check.
+  if (entry.status && entry.status !== "proposed" && entry.status !== "quarantined") return;
   reviewed.add(data.memoryId);
+  if (!(await deps.lease(entry.root, `proposal:${data.memoryId}`, EXTRACT_WINDOW_MS))) return;
   const sessionId =
     entry.author.sessionId ?? (entry.author.ptyId != null ? sessionByPty.get(entry.author.ptyId) : undefined);
-  const untrusted = sessionId ? untrustedFor(sessionId) : [];
+  const seen = sessionId ? untrustedFor(sessionId) : [];
+  const untrusted = [...new Set([...(data.untrusted ?? []), ...seen])];
   const existing = await deps.list(entry.root).catch(() => [] as MemoryEntry[]);
   const verdict = await checkContradictions(entry.root, data.text, data.why ?? "", existing);
   await deps
@@ -265,10 +331,10 @@ export async function reviewProposal(entry: LedgerEntry): Promise<void> {
       data: {
         checkedAt: deps.now(),
         ...(verdict ?? {}),
-        ...(untrusted.length ? { untrusted } : {}),
+        ...(seen.length ? { untrusted } : {}),
         ...(sessionId && !data.provenance?.sessionId ? { provenance: { ...data.provenance, sessionId } } : {}),
       },
-      ...(untrusted.length ? { status: "quarantined" as const } : {}),
+      ...(seen.length && entry.status !== "quarantined" ? { status: "quarantined" as const } : {}),
     })
     .catch(() => {});
 }

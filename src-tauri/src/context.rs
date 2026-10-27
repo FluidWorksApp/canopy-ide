@@ -1776,13 +1776,31 @@ async fn memory_op(
         "propose" => {
             let p: crate::memory_tool::Proposal =
                 serde_json::from_value(req.rest).map_err(|e| e.to_string())?;
-            let entry = crate::memory_tool::proposal_entry(&p, pty_id, now)?;
+            let mut entry = crate::memory_tool::proposal_entry(&p, pty_id, now)?;
+            // Stamped on arrival: the hook marked this terminal when it read
+            // a web page, a browser or an issue thread (gates.rs taint).
+            let taint = pty_id.and_then(|id| {
+                let home = std::env::var("HOME").ok()?;
+                let tid = crate::gates::pty_taint_id(
+                    Some(crate::pty::instance_token()),
+                    Some(&id.to_string()),
+                )?;
+                crate::gates::is_tainted(&home, &[tid])
+            });
+            crate::memory_tool::quarantine_if_tainted(&mut entry, taint);
+            let status = entry.status.clone().unwrap_or_else(|| "proposed".into());
             let stored = crate::ledger::append_and_emit(&app, &root, entry)?;
             Ok(serde_json::json!({
                 "id": stored.data.get("memoryId"),
-                "status": "proposed",
-                "note": "Recorded as a proposal. A person reviews it in Canopy's Memory panel; \
-                         it is not served to any agent until they approve it.",
+                "status": status,
+                "note": if status == "quarantined" {
+                    "Recorded, and quarantined: this session read content from outside the team \
+                     (a web page, browser or issue thread). A person must approve it anyway in \
+                     Canopy's Memory panel before any agent is told it."
+                } else {
+                    "Recorded as a proposal. A person reviews it in Canopy's Memory panel; \
+                     it is not served to any agent until they approve it."
+                },
             }))
         }
         other => Err(format!("unknown memory op \"{other}\"")),

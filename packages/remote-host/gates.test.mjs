@@ -1,7 +1,8 @@
 import test from 'node:test';import assert from 'node:assert/strict';
 import {mkdtemp,readFile,mkdir,realpath,rm} from 'node:fs/promises';
 import path from 'node:path';import os from 'node:os';
-import {WorkspaceGates,rootHash} from './gates.mjs';
+import {WorkspaceGates,rootHash,tokenMac} from './gates.mjs';
+import {stat} from 'node:fs/promises';
 
 // Same digest as src-tauri/src/gates.rs root_hash (sha256, first 16 bytes, hex).
 test('root hash matches the Rust policy key',()=>{
@@ -27,7 +28,24 @@ test('policy is written where the VM hook reads it, filtered to the DSL',async()
   await gates.allowOnce('0123456789abcdef0123456789abcdef');
   const token=JSON.parse(await readFile(path.join(home,'.canopy/policy/approvals/0123456789abcdef0123456789abcdef.json'),'utf8'));
   assert.ok(token.expiresAt>Date.now());
+  // Signed with the key the hook verifies, kept outside the policy folder.
+  const keyFile=path.join(home,'.canopy/keys/gate-approval.key');
+  const secret=Buffer.from((await readFile(keyFile,'utf8')).trim(),'hex');
+  assert.equal(secret.length,32);assert.equal((await stat(keyFile)).mode&0o777,0o600);
+  assert.equal(token.mac,tokenMac(secret,'0123456789abcdef0123456789abcdef',token.expiresAt));
+  await gates.allowOnce('0123456789abcdef0123456789abcdef');
+  assert.equal((await readFile(keyFile,'utf8')).trim(),secret.toString('hex'),'one key, reused');
   await assert.rejects(gates.allowOnce('../../etc/passwd'));
   await assert.rejects(gates.write(repo,{}));
  }finally{await rm(home,{recursive:true,force:true});}
+});
+
+// Pins the token MAC to RFC 4231 HMAC-SHA256, the same vector gates.rs
+// `hmac_matches_rfc_4231` checks, so the two signers cannot drift apart.
+test('token MAC is RFC 4231 HMAC-SHA256 over the same message as gates.rs',async()=>{
+ const {createHmac}=await import('node:crypto');
+ assert.equal(createHmac('sha256','Jefe').update('what do ya want for nothing?').digest('hex'),'5bdcc146bf60754e6a042426089575c75a003f089d2739839dec58b964ec3843');
+ const secret=Buffer.alloc(32,7);
+ // The same literal gates.rs approve_once_tokens_must_be_signed_by_the_app pins.
+ assert.equal(tokenMac(secret,'ab'.repeat(16),1234),'dced8a3f781ebf3c15fe658548bbf14e1a979de9250060fd6bbc95ee54e837d3');
 });

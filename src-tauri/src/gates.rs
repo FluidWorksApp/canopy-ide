@@ -287,17 +287,112 @@ fn approval_path(home: &str, key: &str) -> PathBuf {
         .join(format!("{key}.json"))
 }
 
+/// Where the app keeps the key that signs approve-once tokens: beside the
+/// policy store, never inside it, so nothing that may write a token file can
+/// also be the thing that holds the key. `CANOPY_GATE_KEY_HOME` for tests.
+pub fn key_dir(home: &str) -> PathBuf {
+    if let Ok(dir) = std::env::var("CANOPY_GATE_KEY_HOME") {
+        return PathBuf::from(dir);
+    }
+    PathBuf::from(home).join(".canopy").join("keys")
+}
+
+fn key_path(home: &str) -> PathBuf {
+    key_dir(home).join("gate-approval.key")
+}
+
+/// HMAC-SHA256 (RFC 2104) over sha2, which both binaries already link — no new
+/// crate in the hook's lock. Pinned to RFC 4231's vectors in the tests, and to
+/// node's createHmac in packages/remote-host/gates.test.mjs.
+pub fn hmac_sha256(key: &[u8], message: &[u8]) -> [u8; 32] {
+    use sha2::{Digest, Sha256};
+    let mut block = [0u8; 64];
+    if key.len() > 64 {
+        block[..32].copy_from_slice(&Sha256::digest(key));
+    } else {
+        block[..key.len()].copy_from_slice(key);
+    }
+    let mut inner = Sha256::new();
+    inner.update(block.map(|b| b ^ 0x36));
+    inner.update(message);
+    let mut outer = Sha256::new();
+    outer.update(block.map(|b| b ^ 0x5c));
+    outer.update(inner.finalize());
+    outer.finalize().into()
+}
+
+/// The signing key, created on first use: 32 random bytes, hex, readable by
+/// the owner only. The hook only ever reads it; a missing or unreadable key
+/// there makes every token invalid, which fails toward "still asks".
+fn load_key(home: &str, create: bool) -> Option<Vec<u8>> {
+    let path = key_path(home);
+    if let Ok(raw) = std::fs::read_to_string(&path) {
+        let key = hex::decode(raw.trim()).ok()?;
+        return (key.len() >= 32).then_some(key);
+    }
+    if !create {
+        return None;
+    }
+    let mut key = [0u8; 32];
+    getrandom::getrandom(&mut key).ok()?;
+    let dir = path.parent()?;
+    std::fs::create_dir_all(dir).ok()?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700));
+    }
+    let mut open = std::fs::OpenOptions::new();
+    open.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        open.mode(0o600);
+    }
+    match open.open(&path) {
+        Ok(mut f) => {
+            use std::io::Write;
+            f.write_all(hex::encode(key).as_bytes()).ok()?;
+            Some(key.to_vec())
+        }
+        // Another writer won the race: use theirs.
+        Err(_) => load_key(home, false),
+    }
+}
+
+/// What a token signs: the action it opens and when it stops opening it, so a
+/// token can be neither renamed onto another action nor have its expiry
+/// pushed out.
+fn token_mac(key: &[u8], action_key: &str, expires_at: u64) -> String {
+    hex::encode(hmac_sha256(
+        key,
+        format!("canopy-approve-once\n{action_key}\n{expires_at}").as_bytes(),
+    ))
+}
+
+fn macs_equal(a: &str, b: &str) -> bool {
+    a.len() == b.len() && a.bytes().zip(b.bytes()).fold(0u8, |d, (x, y)| d | (x ^ y)) == 0
+}
+
 /// Mint a token: the person said "Approve once" (or "Allow once") in Canopy.
+/// Signed with the app's key, so a file some other process drops into the
+/// approvals folder opens nothing.
 pub fn grant_once(home: &str, key: &str, now_ms: u64) -> Result<(), String> {
     if !valid_key(key) {
         return Err("not an approval key".into());
     }
-    let body = serde_json::json!({ "expiresAt": now_ms + APPROVAL_TTL_MS });
+    let secret = load_key(home, true).ok_or("couldn't create the approval key")?;
+    let expires_at = now_ms + APPROVAL_TTL_MS;
+    let body = serde_json::json!({
+        "expiresAt": expires_at,
+        "mac": token_mac(&secret, key, expires_at),
+    });
     write_atomic(&approval_path(home, key), body.to_string().as_bytes())
 }
 
-/// Spend a token if there is a live one. Removing the file IS the spend, so two
-/// racing hooks cannot both cash one approval: only one `remove_file` succeeds.
+/// Spend a token if there is a live, correctly signed one. Removing the file IS
+/// the spend, so two racing hooks cannot both cash one approval: only one
+/// `remove_file` succeeds. A forged or stale file is removed too.
 pub fn consume_once(home: &str, key: &str, now_ms: u64) -> bool {
     if !valid_key(key) {
         return false;
@@ -309,10 +404,16 @@ pub fn consume_once(home: &str, key: &str, now_ms: u64) -> bool {
     if std::fs::remove_file(&path).is_err() {
         return false;
     }
-    serde_json::from_str::<serde_json::Value>(&raw)
-        .ok()
-        .and_then(|v| v["expiresAt"].as_u64())
-        .is_some_and(|exp| exp > now_ms)
+    let Some(secret) = load_key(home, false) else {
+        return false;
+    };
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(&raw) else {
+        return false;
+    };
+    let (Some(exp), Some(mac)) = (v["expiresAt"].as_u64(), v["mac"].as_str()) else {
+        return false;
+    };
+    exp > now_ms && macs_equal(mac, &token_mac(&secret, key, exp))
 }
 
 // ------------------------------------------------------------------ taint
@@ -343,6 +444,13 @@ pub fn reads_untrusted(tool: &str) -> bool {
         || t.contains("claude-in-chrome")
         || t.contains("puppeteer")
         || t.contains("fetch_url")
+        || t == "read_url_content"
+        || t == "read_web_page"
+        // Text from a tracker or a pull request: whoever filed the issue or
+        // left the comment wrote it (memoryLedger.ts `untrustedReason`).
+        || t.ends_with("canopy_tickets")
+        || t.ends_with("canopy_reviews")
+        || t.ends_with("canopy_pr_details")
 }
 
 /// Mark a session (and its terminal, for the MCP server, which cannot see the
@@ -646,28 +754,59 @@ impl Action {
     }
 }
 
+/// Tool names across the agent CLIs Canopy installs hooks for, lowercased.
+/// The hook hands every CLI's own name straight here, so one table speaks for
+/// all of them: Claude/Codex/Grok `Bash`, Cursor `Shell`, Antigravity
+/// `run_command`, Amp `Bash`/`shell_command`, OpenCode and oh-my-pi `bash`,
+/// Grok's native `run_terminal_command`.
 const SHELL_TOOLS: &[&str] = &[
-    "Bash",
     "bash",
     "shell",
-    "Shell",
     "exec_command",
     "local_shell",
     "run_shell_command",
     "run_terminal_cmd",
+    "run_terminal_command",
     "execute_command",
+    "run_command",
+    "shell_command",
 ];
+/// Writers: Claude's set, Gemini's `replace`/`write_file`, Amp's
+/// `create_file`/`edit_file`, Antigravity's `write_to_file` family, Grok's
+/// `search_replace`, Cursor's `Write`/`Delete`, OpenCode/omp lowercase names.
 const WRITE_TOOLS: &[&str] = &[
-    "Write",
-    "Edit",
-    "MultiEdit",
-    "NotebookEdit",
+    "write",
+    "edit",
+    "multiedit",
+    "notebookedit",
     "write_file",
     "edit_file",
     "replace",
     "create_file",
+    "write_to_file",
+    "replace_file_content",
+    "multi_replace_file_content",
+    "search_replace",
+    "delete",
+    "delete_file",
 ];
-const READ_TOOLS: &[&str] = &["Read", "read_file", "view", "NotebookRead"];
+const READ_TOOLS: &[&str] = &["read", "read_file", "view", "view_file", "notebookread"];
+/// The keys a CLI puts a path under: Claude/Codex/Grok `file_path`, OpenCode
+/// `filePath`, Amp/omp/Cursor `path`, Antigravity `TargetFile`/`AbsolutePath`.
+const PATH_KEYS: &[&str] = &[
+    "file_path",
+    "notebook_path",
+    "path",
+    "filePath",
+    "TargetFile",
+    "AbsolutePath",
+    "target_file",
+];
+
+fn tool_in(list: &[&str], tool: &str) -> bool {
+    let t = tool.to_ascii_lowercase();
+    list.contains(&t.as_str())
+}
 
 fn abs(path: &str, cwd: &Path) -> PathBuf {
     let p = Path::new(path);
@@ -690,27 +829,29 @@ pub fn action_from_event(
         tool: tool.to_string(),
         ..Default::default()
     };
-    if SHELL_TOOLS.contains(&tool) {
-        a.command = input["command"]
-            .as_str()
-            .map(str::to_string)
-            .or_else(|| {
-                input["command"].as_array().map(|parts| {
+    if tool_in(SHELL_TOOLS, tool) {
+        a.command = ["command", "cmd", "CommandLine"]
+            .iter()
+            .find_map(|k| match &input[*k] {
+                serde_json::Value::String(s) => Some(s.clone()),
+                serde_json::Value::Array(parts) => Some(
                     parts
                         .iter()
                         .filter_map(|p| p.as_str())
                         .collect::<Vec<_>>()
-                        .join(" ")
-                })
-            })
-            .or_else(|| input["cmd"].as_str().map(str::to_string));
+                        .join(" "),
+                ),
+                _ => None,
+            });
     }
-    if WRITE_TOOLS.contains(&tool) {
-        for key in ["file_path", "notebook_path", "path", "filePath"] {
-            if let Some(p) = input[key].as_str().filter(|p| !p.is_empty()) {
-                a.writes.push(abs(p, cwd));
-                break;
-            }
+    let first_path = || {
+        PATH_KEYS
+            .iter()
+            .find_map(|k| input[*k].as_str().filter(|p| !p.is_empty()))
+    };
+    if tool_in(WRITE_TOOLS, tool) {
+        if let Some(p) = first_path() {
+            a.writes.push(abs(p, cwd));
         }
     }
     // A patch carried in a shell call is an edit, not a command: its text (a
@@ -721,15 +862,12 @@ pub fn action_from_event(
     for p in patch_writes {
         a.writes.push(abs(&p, cwd));
     }
-    if READ_TOOLS.contains(&tool) {
-        for key in ["file_path", "path", "notebook_path", "filePath"] {
-            if let Some(p) = input[key].as_str().filter(|p| !p.is_empty()) {
-                a.reads.push(abs(p, cwd));
-                break;
-            }
+    if tool_in(READ_TOOLS, tool) {
+        if let Some(p) = first_path() {
+            a.reads.push(abs(p, cwd));
         }
     }
-    if let Some(u) = input["url"].as_str() {
+    if let Some(u) = input["url"].as_str().or_else(|| input["Url"].as_str()) {
         a.url = Some(u.to_string());
     }
     a
@@ -892,7 +1030,10 @@ fn is_protected_branch(name: &str, default: Option<&str>) -> bool {
         || n.starts_with("hotfix/")
 }
 
-fn sql_destroys(lower: &str) -> bool {
+/// SQL (or a datastore's own command) that destroys data. Only meaningful in
+/// text a database client will execute — see `db_client` — so writing a
+/// migration that says DROP TABLE, or grepping for one, is not a deletion.
+fn sql_statement_destroys(lower: &str) -> bool {
     let squash: String = lower.split_whitespace().collect::<Vec<_>>().join(" ");
     [
         "drop table",
@@ -902,6 +1043,18 @@ fn sql_destroys(lower: &str) -> bool {
         "dropdatabase(",
         "flushall",
         "flushdb",
+    ]
+    .iter()
+    .any(|n| squash.contains(n))
+        // `TRUNCATE foo;` without the TABLE keyword is the same statement.
+        || squash.split([' ', ';', '"', '\'']).any(|w| w == "truncate")
+}
+
+/// A framework or CLI command that resets a database on its own, wherever it
+/// appears: these are the command, not text handed to one.
+fn db_tool_destroys(lower: &str) -> bool {
+    let squash: String = lower.split_whitespace().collect::<Vec<_>>().join(" ");
+    [
         "migrate reset",
         "db:drop",
         "db:reset",
@@ -913,9 +1066,449 @@ fn sql_destroys(lower: &str) -> bool {
     ]
     .iter()
     .any(|n| squash.contains(n))
-        || squash.split(' ').any(|w| w == "dropdb")
-        // `TRUNCATE foo;` without the TABLE keyword is the same statement.
-        || squash.contains("truncate ") && (squash.contains("psql") || squash.contains("mysql") || squash.contains("sqlite"))
+        || squash.split(' ').next() == Some("dropdb")
+}
+
+/// Programs that execute the SQL (or datastore commands) they are given, on
+/// argv, stdin or from a file. Matched against every word of a segment so a
+/// client run through a wrapper (`docker exec -i db psql`, `kubectl exec --
+/// mysql`) still counts.
+const DB_CLIENTS: &[&str] = &[
+    "psql",
+    "pgcli",
+    "mysql",
+    "mariadb",
+    "mycli",
+    "sqlite3",
+    "sqlite",
+    "litecli",
+    "duckdb",
+    "mongosh",
+    "mongo",
+    "redis-cli",
+    "valkey-cli",
+    "cqlsh",
+    "clickhouse-client",
+    "sqlcmd",
+    "usql",
+    "snowsql",
+    "cockroach",
+];
+
+fn db_client(words: &[String]) -> bool {
+    words.iter().any(|w| {
+        let base = w.rsplit('/').next().unwrap_or(w);
+        DB_CLIENTS.contains(&base)
+    })
+}
+
+const SHELLS: &[&str] = &["sh", "bash", "zsh", "dash", "ksh", "fish"];
+const INTERPRETERS: &[&str] = &[
+    "python", "python3", "python2", "node", "deno", "bun", "ruby", "perl", "php",
+];
+
+fn is_interpreter(v: &str) -> bool {
+    INTERPRETERS.contains(&v)
+        || (v.starts_with("python3.") && v[8..].bytes().all(|b| b.is_ascii_digit()))
+}
+
+/// Marker a stripped heredoc leaves in the command line, so the simple command
+/// that receives the body can be found after lexing.
+const HEREDOC_MARK: char = '\u{1}';
+
+/// Take heredoc bodies out of a command. Returns the command with each
+/// `<<DELIM` (and `<<-`, quoted delimiters) replaced by a marker word, and the
+/// bodies in marker order. Here-strings (`<<<`) stay where they are: their
+/// text is an ordinary word the lexer already sees.
+pub fn strip_heredocs(command: &str) -> (String, Vec<String>) {
+    let lines: Vec<&str> = command.split('\n').collect();
+    let mut out: Vec<String> = Vec::new();
+    let mut bodies: Vec<String> = Vec::new();
+    let mut i = 0;
+    while i < lines.len() {
+        let line = lines[i];
+        let mut kept = String::new();
+        let mut pending: Vec<(String, bool)> = Vec::new();
+        let chars: Vec<char> = line.chars().collect();
+        let mut j = 0;
+        let (mut single, mut double) = (false, false);
+        while j < chars.len() {
+            let c = chars[j];
+            if c == '\'' && !double {
+                single = !single;
+            } else if c == '"' && !single {
+                double = !double;
+            }
+            let heredoc = !single
+                && !double
+                && c == '<'
+                && chars.get(j + 1) == Some(&'<')
+                && chars.get(j + 2) != Some(&'<')
+                && (j == 0 || chars[j - 1] != '<');
+            if !heredoc {
+                kept.push(c);
+                j += 1;
+                continue;
+            }
+            let mut k = j + 2;
+            let dash = chars.get(k) == Some(&'-');
+            if dash {
+                k += 1;
+            }
+            while chars.get(k).is_some_and(|c| *c == ' ' || *c == '\t') {
+                k += 1;
+            }
+            let mut delim = String::new();
+            let quote = chars.get(k).copied().filter(|c| *c == '\'' || *c == '"');
+            if let Some(q) = quote {
+                k += 1;
+                while let Some(&c) = chars.get(k) {
+                    k += 1;
+                    if c == q {
+                        break;
+                    }
+                    delim.push(c);
+                }
+            } else {
+                while let Some(&c) = chars.get(k) {
+                    if c == '\\' {
+                        k += 1;
+                        continue;
+                    }
+                    if !(c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.')) {
+                        break;
+                    }
+                    delim.push(c);
+                    k += 1;
+                }
+            }
+            // `$((1<<2))` is a shift, not a heredoc.
+            if delim.is_empty() || (quote.is_none() && delim.bytes().all(|b| b.is_ascii_digit())) {
+                kept.push(c);
+                j += 1;
+                continue;
+            }
+            kept.push_str(&format!(" {HEREDOC_MARK}{} ", bodies.len() + pending.len()));
+            pending.push((delim, dash));
+            j = k;
+        }
+        out.push(kept);
+        i += 1;
+        for (delim, dash) in pending {
+            let mut body: Vec<&str> = Vec::new();
+            while i < lines.len() {
+                let l = lines[i];
+                i += 1;
+                let probe = if dash { l.trim_start_matches('\t') } else { l };
+                if probe.trim_end() == delim {
+                    break;
+                }
+                body.push(l);
+            }
+            bodies.push(body.join("\n"));
+        }
+    }
+    (out.join("\n"), bodies)
+}
+
+/// The command split into pipelines (runs of simple commands joined by a
+/// single `|`), each a list of segments of words. `segments` without the
+/// pipe information, for the rules that care what feeds what.
+pub fn pipelines(command: &str) -> Vec<Vec<Vec<String>>> {
+    // Re-lex with `|` kept as its own marker word, then split.
+    let mut marked = String::new();
+    let (mut single, mut double) = (false, false);
+    let chars: Vec<char> = command.chars().collect();
+    let mut i = 0;
+    while i < chars.len() {
+        let c = chars[i];
+        if c == '\\' && !single {
+            marked.push(c);
+            if let Some(&n) = chars.get(i + 1) {
+                marked.push(n);
+            }
+            i += 2;
+            continue;
+        }
+        if c == '\'' && !double {
+            single = !single;
+        } else if c == '"' && !single {
+            double = !double;
+        }
+        let pipe = !single
+            && !double
+            && c == '|'
+            && chars.get(i + 1) != Some(&'|')
+            && (i == 0 || chars[i - 1] != '|');
+        if pipe {
+            marked.push_str(" \u{2} ;");
+        } else {
+            marked.push(c);
+        }
+        i += 1;
+    }
+    let mut out: Vec<Vec<Vec<String>>> = Vec::new();
+    let mut current: Vec<Vec<String>> = Vec::new();
+    for mut seg in segments(&marked) {
+        let piped = seg.last().is_some_and(|w| w == "\u{2}");
+        if piped {
+            seg.pop();
+        }
+        if !seg.is_empty() {
+            current.push(seg);
+        }
+        if !piped && !current.is_empty() {
+            out.push(std::mem::take(&mut current));
+        }
+    }
+    if !current.is_empty() {
+        out.push(current);
+    }
+    out
+}
+
+/// A file a command runs, read for classification: a regular file, capped, so
+/// the hook never stalls on a device or a huge dump.
+fn read_script(word: &str, ctx: &Ctx) -> Option<String> {
+    const MAX: u64 = 256 * 1024;
+    let path = resolve(word, ctx.cwd, ctx.home)?;
+    let meta = std::fs::metadata(&path).ok()?;
+    if !meta.is_file() || meta.len() > MAX {
+        return None;
+    }
+    std::fs::read_to_string(path).ok()
+}
+
+/// What a body of text will be run as.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Body {
+    /// Shell commands: `bash -c '…'`, `sh script.sh`, a heredoc fed to a shell.
+    Shell(String),
+    /// Program text for an interpreter: `python -c`, `python - <<EOF`,
+    /// `node script.js`.
+    Code(String),
+    /// Text a database client executes: its argv, stdin, heredoc or `-f` file.
+    Sql(String),
+}
+
+fn heredoc_index(word: &str) -> Option<usize> {
+    word.strip_prefix(HEREDOC_MARK)?.parse().ok()
+}
+
+/// Every body a command line hands to something that runs it, one level deep.
+/// Best effort, like the lexer: a script built at run time is invisible here.
+pub fn script_bodies(command: &str, ctx: &Ctx) -> Vec<Body> {
+    let (stripped, heredocs) = strip_heredocs(command);
+    let mut out = Vec::new();
+    for pipe in pipelines(&stripped) {
+        // The heredocs this pipeline reads, wherever in it they are attached:
+        // `cat <<EOF | psql` feeds psql as surely as `psql <<EOF`.
+        let feeds: Vec<&String> = pipe
+            .iter()
+            .flatten()
+            .filter_map(|w| heredoc_index(w))
+            .filter_map(|i| heredocs.get(i))
+            .collect();
+        let clean: Vec<Vec<String>> = pipe
+            .iter()
+            .map(|seg| {
+                seg.iter()
+                    .filter(|w| !w.starts_with(HEREDOC_MARK))
+                    .cloned()
+                    .collect()
+            })
+            .collect();
+        if clean.iter().any(|seg| db_client(seg)) {
+            let mut sql: Vec<String> = clean.iter().map(|seg| seg.join(" ")).collect();
+            sql.extend(feeds.iter().map(|f| f.to_string()));
+            for seg in &clean {
+                for (i, w) in seg.iter().enumerate() {
+                    let file = match w.as_str() {
+                        "-f" | "--file" | "<" => seg.get(i + 1).map(String::as_str),
+                        _ => w
+                            .strip_prefix("--file=")
+                            .or_else(|| w.strip_prefix('<').filter(|r| !r.is_empty())),
+                    };
+                    if let Some(text) = file.and_then(|f| read_script(f, ctx)) {
+                        sql.push(text);
+                    }
+                }
+            }
+            out.push(Body::Sql(sql.join("\n")));
+        }
+        for seg in &clean {
+            let words = strip_prefix_words(seg);
+            let v = verb(words);
+            let args = &words[1.min(words.len())..];
+            let flag_body = |flags: &[&str]| -> Option<String> {
+                args.iter()
+                    .position(|a| flags.contains(&a.as_str()))
+                    .and_then(|i| args.get(i + 1).cloned())
+            };
+            let script_arg = || args.iter().find(|a| !a.starts_with('-')).cloned();
+            let shell = SHELLS.contains(&v) || v == "source" || v == ".";
+            if shell {
+                if let Some(body) = flag_body(&["-c", "-lc", "-ic"]) {
+                    out.push(Body::Shell(body));
+                } else if let Some(text) = script_arg().and_then(|f| read_script(&f, ctx)) {
+                    out.push(Body::Shell(text));
+                } else {
+                    out.extend(feeds.iter().map(|f| Body::Shell(f.to_string())));
+                }
+            } else if is_interpreter(v) {
+                if let Some(body) = flag_body(&["-c", "-e", "--eval", "-r"]) {
+                    out.push(Body::Code(body));
+                } else {
+                    match script_arg() {
+                        Some(f) if f != "-" && !f.starts_with(HEREDOC_MARK) => {
+                            if let Some(text) = read_script(&f, ctx) {
+                                out.push(Body::Code(text));
+                            }
+                        }
+                        _ => out.extend(feeds.iter().map(|f| Body::Code(f.to_string()))),
+                    }
+                }
+            } else if v.ends_with(".sh") {
+                if let Some(text) = read_script(&words[0], ctx) {
+                    out.push(Body::Shell(text));
+                }
+            }
+        }
+    }
+    out
+}
+
+/// Libraries that talk to a database from program text.
+const DB_DRIVERS: &[&str] = &[
+    "psycopg",
+    "sqlite3",
+    "pymysql",
+    "mysql.connector",
+    "mysqldb",
+    "sqlalchemy",
+    "pymongo",
+    "redis",
+    "asyncpg",
+    "require('pg')",
+    "require(\"pg\")",
+    "from 'pg'",
+    "from \"pg\"",
+    "better-sqlite3",
+    "mongoose",
+    "mongodb",
+    "knex",
+    "sequelize",
+    "@prisma/client",
+    "activerecord",
+    "dbi->connect",
+    "new pdo",
+];
+
+/// Calls that hand a string to a shell or remove a tree, in program text.
+const SPAWNS: &[&str] = &[
+    "os.system",
+    "subprocess",
+    "popen",
+    "child_process",
+    "execsync",
+    "spawnsync",
+    "exec(",
+    "system(",
+    "shell_exec",
+    "deno.command",
+    "bun.spawn",
+    "$`",
+];
+
+/// String literals in program text, for the shell commands it spawns.
+fn string_literals(code: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut chars = code.chars().peekable();
+    while let Some(c) = chars.next() {
+        if !matches!(c, '\'' | '"' | '`') {
+            continue;
+        }
+        let mut lit = String::new();
+        let mut closed = false;
+        while let Some(d) = chars.next() {
+            if d == '\\' {
+                if let Some(e) = chars.next() {
+                    lit.push(e);
+                }
+                continue;
+            }
+            if d == c {
+                closed = true;
+                break;
+            }
+            if d == '\n' && c != '`' {
+                break;
+            }
+            lit.push(d);
+        }
+        if closed && lit.contains(' ') {
+            out.push(lit);
+        }
+    }
+    out
+}
+
+/// Program text that destroys something: SQL through a driver, a spawned shell
+/// command the classifier would stop, or a recursive delete of a protected
+/// tree (`shutil.rmtree(...)`, `fs.rmSync(..., {recursive})`, `rm_rf`).
+fn classify_code(code: &str, ctx: &Ctx, depth: u8) -> Option<(String, String)> {
+    let lower = code.to_ascii_lowercase();
+    if DB_DRIVERS.iter().any(|d| lower.contains(d)) && sql_statement_destroys(&lower) {
+        return irreversible(
+            "database",
+            "deletes database data that can't be brought back",
+        );
+    }
+    let spawns = SPAWNS.iter().any(|s| lower.contains(s));
+    let rmtree = [
+        "rmtree",
+        "rmsync",
+        "rm_rf",
+        "remove_tree",
+        "rimraf",
+        "fs.rm(",
+    ]
+    .iter()
+    .any(|s| lower.contains(s));
+    if !spawns && !rmtree {
+        return None;
+    }
+    for lit in string_literals(code) {
+        if spawns {
+            if let Some(found) = classify_at(&lit, ctx, depth + 1) {
+                return Some(found);
+            }
+        }
+    }
+    if rmtree {
+        // The path argument of a tree delete: any quoted path-looking literal.
+        let mut chars = code.chars().peekable();
+        while let Some(c) = chars.next() {
+            if !matches!(c, '\'' | '"') {
+                continue;
+            }
+            let lit: String = chars.by_ref().take_while(|d| *d != c).collect();
+            let looks_like_path = lit == "~"
+                || lit == "/"
+                || lit == "."
+                || lit == ".."
+                || lit.starts_with('/')
+                || lit.starts_with("~/")
+                || lit.starts_with("../");
+            if looks_like_path {
+                let words = vec!["rm".to_string(), "-rf".to_string(), lit];
+                if let Some(found) = classify_segment(&words, ctx) {
+                    return Some(found);
+                }
+            }
+        }
+    }
+    None
 }
 
 /// The built-in classifier: every command here costs something no snapshot,
@@ -925,24 +1518,92 @@ fn sql_destroys(lower: &str) -> bool {
 /// list gates a *Build* session's every risky step ("this changes software for
 /// your whole computer"); this one is the short, always-on list of things that
 /// cannot be undone at all, for every session.
+///
+/// It reads past the command line into what the command runs: heredocs,
+/// `bash -c` strings, `sh script.sh` and `python - <<EOF` bodies, and SQL a
+/// database client is fed. A DROP TABLE is a deletion only when a database
+/// client (or a driver in program text) is the one reading it.
 pub fn classify_irreversible(command: &str, ctx: &Ctx) -> Option<(String, String)> {
-    let lower = command.to_ascii_lowercase();
-    if sql_destroys(&lower) {
-        return irreversible(
+    classify_at(command, ctx, 0)
+}
+
+/// How many levels of script-in-script the classifier follows.
+const MAX_DEPTH: u8 = 2;
+
+fn classify_at(command: &str, ctx: &Ctx, depth: u8) -> Option<(String, String)> {
+    let database = || {
+        irreversible(
             "database",
             "deletes database data that can't be brought back",
-        );
-    }
-    for seg in segments(command) {
-        let words = strip_prefix_words(&seg);
+        )
+    };
+    let (stripped, _) = strip_heredocs(command);
+    for seg in segments(&stripped) {
+        let words: Vec<String> = strip_prefix_words(&seg)
+            .iter()
+            .filter(|w| !w.starts_with(HEREDOC_MARK))
+            .cloned()
+            .collect();
         if words.is_empty() {
             continue;
         }
-        if let Some(found) = classify_segment(words, ctx) {
+        if db_tool_destroys(&words.join(" ").to_ascii_lowercase()) {
+            return database();
+        }
+        if let Some(found) = classify_segment(&words, ctx) {
             return Some(found);
         }
     }
+    for body in script_bodies(command, ctx) {
+        match body {
+            Body::Sql(text) => {
+                if sql_statement_destroys(&text.to_ascii_lowercase()) {
+                    return database();
+                }
+            }
+            Body::Shell(text) if depth < MAX_DEPTH => {
+                if let Some(found) = classify_at(&text, ctx, depth + 1) {
+                    return Some(found);
+                }
+            }
+            Body::Code(text) if depth < MAX_DEPTH => {
+                if let Some(found) = classify_code(&text, ctx, depth) {
+                    return Some(found);
+                }
+            }
+            _ => {}
+        }
+    }
     None
+}
+
+/// The command line plus every shell script it runs (recursively, to the same
+/// depth the classifier follows), for the rules that read shell text: denied
+/// command patterns, write targets, package and egress lists.
+pub fn shell_texts(command: &str, ctx: &Ctx) -> Vec<String> {
+    fn walk(command: &str, ctx: &Ctx, depth: u8, out: &mut Vec<String>) {
+        out.push(command.to_string());
+        if depth >= MAX_DEPTH {
+            return;
+        }
+        for body in script_bodies(command, ctx) {
+            match body {
+                Body::Shell(text) => walk(&text, ctx, depth + 1, out),
+                Body::Code(code) => {
+                    let lower = code.to_ascii_lowercase();
+                    if SPAWNS.iter().any(|s| lower.contains(s)) {
+                        for lit in string_literals(&code) {
+                            walk(&lit, ctx, depth + 1, out);
+                        }
+                    }
+                }
+                Body::Sql(_) => {}
+            }
+        }
+    }
+    let mut out = Vec::new();
+    walk(command, ctx, 0, &mut out);
+    out
 }
 
 fn classify_segment(words: &[String], ctx: &Ctx) -> Option<(String, String)> {
@@ -1632,7 +2293,7 @@ const VAULT_TOOLS: &[&str] = &["canopy_vault_fill", "canopy_vault_read"];
 pub fn is_vault_tool(tool: &str) -> bool {
     VAULT_TOOLS
         .iter()
-        .any(|t| tool == *t || tool.ends_with(&format!("__{t}")))
+        .any(|t| tool == *t || tool.ends_with(&format!("_{t}")) || tool.ends_with(&format!(":{t}")))
 }
 
 // ---------------------------------------------------------- evaluation
@@ -1745,20 +2406,34 @@ pub fn evaluate(
 ) -> Vec<Finding> {
     let mut findings = Vec::new();
     let policy_root = policy_dir(ctx.home);
-    let shell_writes = action
+    let key_root = key_dir(ctx.home);
+    // The command line and every script it runs (heredocs fed to a shell,
+    // `bash -c`, `sh x.sh`, shell strings an interpreter spawns).
+    let texts: Vec<String> = action
         .command
         .as_deref()
-        .map(|c| shell_write_targets(c, ctx.cwd, ctx.home))
+        .map(|c| shell_texts(c, ctx))
         .unwrap_or_default();
+    let stripped: Vec<String> = texts.iter().map(|t| strip_heredocs(t).0).collect();
+    let shell_writes: Vec<PathBuf> = stripped
+        .iter()
+        .flat_map(|t| shell_write_targets(t, ctx.cwd, ctx.home))
+        .collect();
     let all_writes: Vec<&PathBuf> = action.writes.iter().chain(shell_writes.iter()).collect();
 
-    // Self-protection: the policy and its approvals are the person's, not the
-    // agent's. Without this an agent could mint its own "approve once".
-    let touches_policy = all_writes.iter().any(|p| p.starts_with(&policy_root))
-        || action
-            .command
-            .as_deref()
-            .is_some_and(|c| c.contains(".canopy/policy") || c.contains("CANOPY_POLICY_HOME"));
+    // Self-protection: the policy, its approvals and the key that signs them
+    // are the person's, not the agent's. Without this an agent could mint its
+    // own "approve once" — and reading the key is as good as writing a token.
+    let touches_policy = all_writes
+        .iter()
+        .any(|p| p.starts_with(&policy_root) || p.starts_with(&key_root))
+        || action.reads.iter().any(|p| p.starts_with(&key_root))
+        || texts.iter().any(|c| {
+            c.contains(".canopy/policy")
+                || c.contains("CANOPY_POLICY_HOME")
+                || c.contains(".canopy/keys")
+                || c.contains("CANOPY_GATE_KEY_HOME")
+        });
     if touches_policy {
         findings.push(Finding {
             kind: FindingKind::SelfProtect,
@@ -1775,7 +2450,16 @@ pub fn evaluate(
         .iter()
         .filter_map(|p| relative_to(p, top))
         .collect();
-    let segs = action.command.as_deref().map(segments).unwrap_or_default();
+    let segs: Vec<Vec<String>> = stripped
+        .iter()
+        .flat_map(|t| segments(t))
+        .map(|seg| {
+            seg.into_iter()
+                .filter(|w| !w.starts_with(HEREDOC_MARK))
+                .collect::<Vec<_>>()
+        })
+        .filter(|seg| !seg.is_empty())
+        .collect();
 
     if let Some(policy) = policy {
         for g in &policy.gates {
@@ -1807,6 +2491,7 @@ pub fn evaluate(
                     // `git push --force` must match inside `a && git push --force`.
                     let hit = res.iter().any(|re| {
                         re.is_match(cmd)
+                            || texts.iter().any(|t| re.is_match(t))
                             || segs
                                 .iter()
                                 .any(|s| re.is_match(&strip_prefix_words(s).join(" ")))
@@ -1822,7 +2507,9 @@ pub fn evaluate(
                     let by_class = class
                         .as_deref()
                         .is_some_and(|c| confirm_class_matches(c, cmd, ctx));
-                    let by_pattern = compile_patterns(patterns).iter().any(|re| re.is_match(cmd));
+                    let by_pattern = compile_patterns(patterns)
+                        .iter()
+                        .any(|re| re.is_match(cmd) || texts.iter().any(|t| re.is_match(t)));
                     if by_class || by_pattern {
                         findings.push(Finding {
                             kind: FindingKind::Irreversible,
@@ -2767,5 +3454,239 @@ mod tests {
             vec!["**/migrations", "**/migrations/**"]
         );
         assert_eq!(expand_glob("src/db/"), vec!["src/db/**"]);
+    }
+
+    #[test]
+    fn sql_in_heredocs_counts_only_when_a_database_client_reads_it() {
+        let cases: &[(&str, Option<&str>)] = &[
+            ("psql mydb <<EOF\nBEGIN;\nDROP TABLE users;\nEOF", Some("database")),
+            ("cat <<'SQL' | psql -U app\nTRUNCATE logs;\nSQL", Some("database")),
+            ("docker exec -i db psql -U app <<-EOF\n\tdrop schema public cascade;\n\tEOF", Some("database")),
+            ("mysql -e \"DROP DATABASE shop\"", Some("database")),
+            ("mongosh --eval 'db.dropDatabase()'", Some("database")),
+            // Writing a migration, or searching for one, deletes nothing.
+            ("cat <<EOF > migrations/0002_drop.sql\nDROP TABLE legacy;\nEOF", None),
+            ("tee down.sql <<EOF\nDROP TABLE x;\nEOF", None),
+            ("grep -ri 'drop table' migrations/", None),
+            ("echo 'DROP TABLE x' >> notes.md", None),
+            // A shell script in a heredoc is a script that runs.
+            ("bash <<'EOF'\ncd /tmp\nrm -rf ~\nEOF", Some("delete-files")),
+            ("sh -c 'git push --force origin main'", Some("force-push")),
+            ("bash -lc \"terraform destroy -auto-approve\"", Some("infra-destroy")),
+            // Program text: a driver running destructive SQL, or a spawned
+            // shell command the classifier would stop.
+            (
+                "python - <<'EOF'\nimport psycopg2\ncur = psycopg2.connect('').cursor()\ncur.execute('DROP TABLE users')\nEOF",
+                Some("database"),
+            ),
+            ("python3 -c \"import os; os.system('rm -rf /')\"", Some("delete-files")),
+            ("node -e \"require('child_process').execSync('git push -f origin main')\"", Some("force-push")),
+            ("python - <<EOF\nimport shutil\nshutil.rmtree('~')\nEOF", Some("delete-files")),
+            ("python - <<EOF\nprint('DROP TABLE is fine to print')\nEOF", None),
+            // An arithmetic shift is not a heredoc.
+            ("echo $((1<<2)) && ls", None),
+        ];
+        for (cmd, want) in cases {
+            assert_eq!(class(cmd, &CLEAN).as_deref(), *want, "{cmd}");
+        }
+    }
+
+    #[test]
+    fn scripts_on_disk_are_read_before_they_run() {
+        let dir = std::env::temp_dir().join(format!("canopy-gates-scripts-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("reset.sh"), "#!/bin/sh\nset -e\ndropdb shop\n").unwrap();
+        std::fs::write(dir.join("ok.sh"), "#!/bin/sh\nnpm test\n").unwrap();
+        std::fs::write(dir.join("wipe.sql"), "-- cleanup\nDROP TABLE events;\n").unwrap();
+        std::fs::write(
+            dir.join("job.py"),
+            "import sqlite3\nsqlite3.connect('a.db').execute('drop table t')\n",
+        )
+        .unwrap();
+        let c = Ctx {
+            cwd: &dir,
+            top: Some(&dir),
+            home: "/home/u",
+            git: &CLEAN,
+        };
+        let cls = |cmd: &str| classify_irreversible(cmd, &c).map(|(k, _)| k);
+        assert_eq!(cls("sh reset.sh").as_deref(), Some("database"));
+        assert_eq!(cls("bash ./reset.sh").as_deref(), Some("database"));
+        assert_eq!(cls("./reset.sh").as_deref(), Some("database"));
+        assert_eq!(cls("sh ok.sh"), None);
+        assert_eq!(cls("psql -f wipe.sql").as_deref(), Some("database"));
+        assert_eq!(cls("psql shop < wipe.sql").as_deref(), Some("database"));
+        assert_eq!(cls("cat wipe.sql"), None);
+        assert_eq!(cls("python3 job.py").as_deref(), Some("database"));
+        // A denied-command rule reads the script too.
+        let p = policy(vec![(
+            "Never drop the shop database",
+            Gate::DenyCommand {
+                patterns: vec!["dropdb\\s+shop".into()],
+            },
+        )]);
+        let a = bash("sh reset.sh");
+        assert_eq!(
+            outcome(&evaluate(Some(&p), &a, &c, None), false),
+            Outcome::Blocked
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn hmac_matches_rfc_4231() {
+        // Test case 2.
+        assert_eq!(
+            hex::encode(hmac_sha256(b"Jefe", b"what do ya want for nothing?")),
+            "5bdcc146bf60754e6a042426089575c75a003f089d2739839dec58b964ec3843"
+        );
+        // Test case 6: a key longer than the block is hashed first.
+        assert_eq!(
+            hex::encode(hmac_sha256(
+                &[0xaa; 131],
+                b"Test Using Larger Than Block-Size Key - Hash Key First"
+            )),
+            "60e431591ee0b67f0d8a26aacbf5b77f8e0bc6213728c5140546040f0ee37f54"
+        );
+    }
+
+    #[test]
+    fn approve_once_tokens_must_be_signed_by_the_app() {
+        let tmp = std::env::temp_dir().join(format!("canopy-gates-hmac-{}", std::process::id()));
+        let home = tmp.to_string_lossy().to_string();
+        let key = action_key("/repo", "dropdb shop");
+        let path = approval_path(&home, &key);
+        // A token some process wrote without the key: refused, and removed.
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, r#"{"expiresAt": 99999999999999}"#).unwrap();
+        assert!(!consume_once(&home, &key, 1_000));
+        assert!(!path.exists());
+        // A real one, whose expiry someone pushed out: refused.
+        grant_once(&home, &key, 1_000).unwrap();
+        let mut v: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        v["expiresAt"] = serde_json::json!(99_999_999_999_999u64);
+        std::fs::write(&path, v.to_string()).unwrap();
+        assert!(!consume_once(&home, &key, 2_000));
+        // A real one renamed onto another action: refused.
+        grant_once(&home, &key, 1_000).unwrap();
+        let other = action_key("/repo", "dropdb other");
+        std::fs::rename(&path, approval_path(&home, &other)).unwrap();
+        assert!(!consume_once(&home, &other, 2_000));
+        // Pinned to node's createHmac over the same message
+        // (packages/remote-host/gates.test.mjs): the VM's gates.mjs mints what
+        // this verifies.
+        assert_eq!(
+            token_mac(&[7u8; 32], &"ab".repeat(16), 1234),
+            "dced8a3f781ebf3c15fe658548bbf14e1a979de9250060fd6bbc95ee54e837d3"
+        );
+        // The real thing still works, and the key is the owner's alone.
+        grant_once(&home, &key, 1_000).unwrap();
+        assert!(consume_once(&home, &key, 2_000));
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(key_path(&home))
+                .unwrap()
+                .permissions()
+                .mode();
+            assert_eq!(mode & 0o777, 0o600);
+        }
+        assert!(!key_path(&home).starts_with(policy_dir(&home)));
+        let _ = std::fs::remove_dir_all(tmp);
+    }
+
+    #[test]
+    fn the_signing_key_is_self_protected() {
+        let p = policy(vec![]);
+        let read_key = Action {
+            tool: "Read".into(),
+            reads: vec![PathBuf::from("/home/u/.canopy/keys/gate-approval.key")],
+            ..Default::default()
+        };
+        assert_eq!(eval(&p, &read_key), Outcome::Refused);
+        assert_eq!(
+            eval(&p, &bash("cat ~/.canopy/keys/gate-approval.key")),
+            Outcome::Refused
+        );
+        assert_eq!(
+            eval(
+                &p,
+                &bash("bash <<EOF\ncp x ~/.canopy/policy/approvals/a.json\nEOF")
+            ),
+            Outcome::Refused
+        );
+    }
+
+    #[test]
+    fn every_cli_s_tool_shape_becomes_one_action() {
+        let cwd = Path::new("/w");
+        let act =
+            |tool: &str, input: serde_json::Value| action_from_event(tool, &input, cwd, vec![]);
+        // Shell, by name and key, across CLIs.
+        for (tool, input) in [
+            ("Bash", serde_json::json!({"command": "ls"})),
+            (
+                "Shell",
+                serde_json::json!({"command": "ls", "working_directory": "/w"}),
+            ),
+            (
+                "run_command",
+                serde_json::json!({"CommandLine": "ls", "Cwd": "/w"}),
+            ),
+            ("run_terminal_command", serde_json::json!({"command": "ls"})),
+            ("bash", serde_json::json!({"command": "ls"})),
+            ("Bash", serde_json::json!({"cmd": "ls"})),
+            ("shell_command", serde_json::json!({"cmd": "ls"})),
+        ] {
+            assert_eq!(act(tool, input).command.as_deref(), Some("ls"), "{tool}");
+        }
+        // Writes.
+        for (tool, input) in [
+            ("Write", serde_json::json!({"file_path": "a.rs"})),
+            (
+                "write_to_file",
+                serde_json::json!({"TargetFile": "/w/a.rs"}),
+            ),
+            (
+                "replace_file_content",
+                serde_json::json!({"TargetFile": "/w/a.rs"}),
+            ),
+            ("edit_file", serde_json::json!({"path": "a.rs"})),
+            ("create_file", serde_json::json!({"path": "a.rs"})),
+            ("edit", serde_json::json!({"path": "a.rs"})),
+            ("search_replace", serde_json::json!({"file_path": "a.rs"})),
+            ("Delete", serde_json::json!({"path": "a.rs"})),
+            ("Edit", serde_json::json!({"filePath": "a.rs"})),
+        ] {
+            assert_eq!(
+                act(tool, input).writes,
+                vec![PathBuf::from("/w/a.rs")],
+                "{tool}"
+            );
+        }
+        // Reads and fetches.
+        assert_eq!(
+            act("view_file", serde_json::json!({"AbsolutePath": "/w/.env"})).reads,
+            vec![PathBuf::from("/w/.env")]
+        );
+        assert_eq!(
+            act("read", serde_json::json!({"path": ".env"})).reads,
+            vec![PathBuf::from("/w/.env")]
+        );
+        assert_eq!(
+            act(
+                "read_url_content",
+                serde_json::json!({"Url": "https://x.dev"})
+            )
+            .url
+            .as_deref(),
+            Some("https://x.dev")
+        );
+        assert!(reads_untrusted("read_url_content"));
+        assert!(reads_untrusted("read_web_page"));
+        assert!(reads_untrusted("webfetch"));
+        assert!(is_vault_tool("canopy_canopy_vault_fill"));
+        assert!(is_vault_tool("mcp__canopy__canopy_vault_read"));
     }
 }

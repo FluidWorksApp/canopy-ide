@@ -193,9 +193,27 @@ fn an_irreversible_command_waits_for_approve_once() {
     let approvals = s.home.join(".canopy/policy/approvals");
     std::fs::create_dir_all(&approvals).unwrap();
     let far = 4_000_000_000_000u64;
+    // A token written by anything that doesn't hold the app's key opens
+    // nothing (and is used up).
     std::fs::write(
         approvals.join(format!("{key}.json")),
         format!("{{\"expiresAt\":{far}}}"),
+    )
+    .unwrap();
+    let forged = s.hook(&[], s.pre("Bash", serde_json::json!({ "command": cmd })));
+    assert_eq!(decision(&forged).map(|d| d.0).as_deref(), Some("deny"));
+    // The app's token, signed with its key (gates.rs grant_once).
+    let secret = [9u8; 32];
+    let keys = s.home.join(".canopy/keys");
+    std::fs::create_dir_all(&keys).unwrap();
+    std::fs::write(keys.join("gate-approval.key"), hex::encode(secret)).unwrap();
+    let mac = hex::encode(hmac_sha256(
+        &secret,
+        format!("canopy-approve-once\n{key}\n{far}").as_bytes(),
+    ));
+    std::fs::write(
+        approvals.join(format!("{key}.json")),
+        serde_json::json!({ "expiresAt": far, "mac": mac }).to_string(),
     )
     .unwrap();
 
@@ -215,7 +233,12 @@ fn an_irreversible_command_waits_for_approve_once() {
         .collect();
     assert_eq!(
         statuses,
-        ["needs-approval", "allowed-once", "needs-approval"]
+        [
+            "needs-approval",
+            "needs-approval",
+            "allowed-once",
+            "needs-approval"
+        ]
     );
 }
 
@@ -232,12 +255,110 @@ fn the_cloud_workspace_claude_dialect_is_enforced_too() {
         Some("deny"),
         "{out}"
     );
-    // A CLI whose deny contract is unverified is never sent one.
+    // Codex speaks Claude's deny contract.
     let codex = s.hook(
         &["--agent", "codex"],
         s.pre("Bash", serde_json::json!({ "command": "dropdb prod" })),
     );
-    assert!(decision(&codex).is_none(), "{codex}");
+    assert_eq!(
+        decision(&codex).map(|d| d.0).as_deref(),
+        Some("deny"),
+        "{codex}"
+    );
+}
+
+/// Each CLI's own payload in, each CLI's own deny out — through the binary.
+#[test]
+fn every_hooked_cli_is_refused_in_its_own_contract() {
+    let s = Sandbox::new("clis");
+    let cwd = s.repo.to_string_lossy().to_string();
+    let parse = |out: &str| serde_json::from_str::<serde_json::Value>(out.trim()).expect(out);
+    // Cursor: preToolUse, `Shell`, permission/agent_message.
+    let cursor = parse(&s.hook(
+        &["--agent", "cursor", "--gate"],
+        serde_json::json!({ "hook_event_name": "preToolUse", "conversation_id": "c1", "cwd": cwd,
+            "tool_name": "Shell", "tool_input": { "command": "dropdb prod" } }),
+    ));
+    assert_eq!(cursor["permission"], "deny");
+    assert!(cursor["agent_message"]
+        .as_str()
+        .unwrap()
+        .contains("can't be undone"));
+    // Cursor, nothing to stop: its own allow shape, never empty output.
+    let fine = parse(&s.hook(
+        &["--agent", "cursor", "--gate"],
+        serde_json::json!({ "hook_event_name": "preToolUse", "conversation_id": "c1", "cwd": cwd,
+            "tool_name": "Shell", "tool_input": { "command": "ls" } }),
+    ));
+    assert_eq!(fine["permission"], "allow");
+    // Antigravity: its tool names and camelCase payload.
+    let agy = parse(&s.hook(
+        &["--agent", "agy", "--gate"],
+        serde_json::json!({ "hook_event_name": "PreToolUse", "conversationId": "a1", "workspacePaths": [cwd],
+            "toolCall": { "name": "run_command", "args": { "CommandLine": "dropdb prod" } } }),
+    ));
+    assert_eq!(agy["decision"], "deny");
+    let agy_ok = parse(&s.hook(
+        &["--agent", "agy", "--gate"],
+        serde_json::json!({ "hook_event_name": "PreToolUse", "conversationId": "a1", "workspacePaths": [cwd],
+            "toolCall": { "name": "run_command", "args": { "CommandLine": "ls" } } }),
+    ));
+    assert_eq!(agy_ok["decision"], "allow", "never auto_approve");
+    // Grok and the plugin bridges: {decision: "deny", reason}.
+    for agent in ["grok", "opencode", "omp", "amp"] {
+        let out = parse(&s.hook(
+            &["--agent", agent],
+            s.pre(
+                "Bash",
+                serde_json::json!({ "cmd": "dropdb prod", "command": "dropdb prod" }),
+            ),
+        ));
+        assert_eq!(out["decision"], "deny", "{agent}");
+        assert!(
+            out["reason"].as_str().unwrap().contains("can't be undone"),
+            "{agent}"
+        );
+    }
+    // Aider has no hook that can refuse: nothing is printed.
+    let aider = s.hook(
+        &["--agent", "aider"],
+        s.pre("Bash", serde_json::json!({ "command": "dropdb prod" })),
+    );
+    assert!(aider.trim().is_empty(), "{aider}");
+}
+
+/// Outside a Canopy terminal the hook does nothing — except answer a
+/// permission hook that reads a verdict on every call.
+#[test]
+fn gate_hooks_answer_even_outside_canopy() {
+    let s = Sandbox::new("outside");
+    let mut cmd = Command::new(hook_bin());
+    cmd.args(["--agent", "cursor", "--gate"])
+        .env_clear()
+        .env("HOME", &s.home)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
+    let mut child = cmd.spawn().unwrap();
+    // Outside Canopy it may exit before reading stdin at all.
+    let _ = child.stdin.take().unwrap().write_all(b"{}");
+    let out = child.wait_with_output().unwrap();
+    let v: serde_json::Value =
+        serde_json::from_str(String::from_utf8_lossy(&out.stdout).trim()).unwrap();
+    assert_eq!(v["permission"], "allow");
+}
+
+fn hmac_sha256(key: &[u8], message: &[u8]) -> [u8; 32] {
+    use sha2::{Digest, Sha256};
+    let mut block = [0u8; 64];
+    block[..key.len()].copy_from_slice(key);
+    let mut inner = Sha256::new();
+    inner.update(block.map(|b| b ^ 0x36));
+    inner.update(message);
+    let mut outer = Sha256::new();
+    outer.update(block.map(|b| b ^ 0x5c));
+    outer.update(inner.finalize());
+    outer.finalize().into()
 }
 
 #[test]

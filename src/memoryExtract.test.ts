@@ -66,6 +66,9 @@ let ask: ReturnType<typeof vi.fn>;
 let append: ReturnType<typeof vi.fn>;
 let revise: ReturnType<typeof vi.fn>;
 let existing: MemoryEntry[];
+let lease: ReturnType<typeof vi.fn>;
+let tail: ReturnType<typeof vi.fn>;
+let changes: ReturnType<typeof vi.fn>;
 
 beforeEach(() => {
   localStorage.clear();
@@ -81,12 +84,18 @@ beforeEach(() => {
   );
   append = vi.fn(async (_root: string, m: NewMemory) => ({ id: "new", data: m }));
   revise = vi.fn(async () => ({}));
+  lease = vi.fn(async () => true);
+  tail = vi.fn(async () => []);
+  changes = vi.fn(async () => null);
   setMemoryExtractDepsForTests({
     ask: ask as never,
     list: async () => existing,
     append: append as never,
     revise: revise as never,
     now: () => now,
+    lease: lease as never,
+    transcriptTail: tail as never,
+    turnChanges: changes as never,
   });
 });
 
@@ -211,6 +220,51 @@ describe("memory extraction after a turn", () => {
   });
 });
 
+describe("what extraction reads and who does it", () => {
+  it("stands aside when another Canopy window holds the session's lease", async () => {
+    lease.mockResolvedValue(false);
+    onTurnEnd(turn());
+    await settle();
+    expect(lease).toHaveBeenCalledWith("/repo", "session:s1", 2 * EXTRACT_WINDOW_MS);
+    expect(ask).not.toHaveBeenCalled();
+    expect(append).not.toHaveBeenCalled();
+  });
+
+  it("reads the agent's final words from the transcript when the Stop carried none", async () => {
+    tail.mockResolvedValue([
+      { role: "user", text: "Lock down tenant data" },
+      { role: "assistant", text: "Every tenant query now goes through RLS." },
+      { role: "user", text: "" },
+    ]);
+    onTurnEnd(turn());
+    await settle();
+    expect(tail).toHaveBeenCalledWith("s1", "agent-x", ["/repo", "/repo/wt"]);
+    expect(ask.mock.calls[0][0].prompt).toContain("Agent's final message: Every tenant query now goes through RLS.");
+  });
+
+  it("does not read the transcript when the Stop said it", async () => {
+    observeMemoryEvents([ev({ event: "Stop", lastAssistantMessage: "Done." })]);
+    onTurnEnd(turn());
+    await settle();
+    expect(tail).not.toHaveBeenCalled();
+  });
+
+  it("includes changes made by shell commands, from the turn's snapshots", async () => {
+    changes.mockResolvedValue([
+      { path: "db/rls.sql", status: "modify" },
+      { path: "db/seed.sql", status: "add" },
+      { path: "scripts/old.sh", status: "delete" },
+    ]);
+    onTurnEnd(turn());
+    await settle();
+    expect(changes).toHaveBeenCalledWith({ cwd: "/repo/wt", sessionId: "s1", startedAt: 100, endedAt: 200 });
+    const prompt = ask.mock.calls[0][0].prompt as string;
+    expect(prompt).toContain("Files changed: db/rls.sql");
+    expect(prompt).toContain("Also changed by shell commands or tools: db/seed.sql (new), scripts/old.sh (deleted)");
+    expect(append.mock.calls[0][1].provenance.files).toEqual(["db/rls.sql", "db/seed.sql", "scripts/old.sh"]);
+  });
+});
+
 describe("agent proposals", () => {
   const proposal = (over: Partial<LedgerEntry> = {}): LedgerEntry => ({
     id: "p1",
@@ -235,6 +289,22 @@ describe("agent proposals", () => {
         data: expect.objectContaining({ untrusted: ["searched the web"], provenance: { files: [], sessionId: "s1" } }),
       }),
     );
+  });
+
+  it("still checks a proposal the bridge quarantined on arrival, keeping its reason", async () => {
+    await reviewProposal(
+      proposal({ status: "quarantined", data: { memoryId: "mem-q", type: "fact", text: "Staging resets nightly", why: "", untrusted: ["read untrusted content (WebFetch)"], provenance: { files: [] } } }),
+    );
+    expect(revise).toHaveBeenCalledTimes(1);
+    const patch = revise.mock.calls[0][2];
+    expect(patch.status).toBeUndefined();
+    expect(patch.data.checkedAt).toBe(now);
+  });
+
+  it("leaves a proposal to the window that holds its lease", async () => {
+    lease.mockResolvedValue(false);
+    await reviewProposal(proposal());
+    expect(revise).not.toHaveBeenCalled();
   });
 
   it("checks a clean proposal once and leaves it proposed", async () => {
