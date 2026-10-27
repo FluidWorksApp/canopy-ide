@@ -1,7 +1,7 @@
 import test from 'node:test';import assert from 'node:assert/strict';
 import {mkdtemp,realpath,writeFile,readFile,mkdir,rm,chmod} from 'node:fs/promises';
 import path from 'node:path';import os from 'node:os';
-import {AgentIntegrations,claudeStatusLine,CLAUDE_PRE_TOOL} from './agent-integrations.mjs';import {WorkspaceProfiles} from './profiles.mjs';
+import {AgentIntegrations,claudeStatusLine,CLAUDE_PRE_TOOL,CODEX_PRE_TOOL} from './agent-integrations.mjs';import {WorkspaceProfiles} from './profiles.mjs';
 test('one-click hooks install across profiles, retain existing hooks, and verify the helper',async()=>{
  const home=await realpath(await mkdtemp(path.join(os.tmpdir(),'canopy-hooks-')));
  try{
@@ -17,6 +17,10 @@ test('one-click hooks install across profiles, retain existing hooks, and verify
   const pre=value.hooks.PreToolUse;assert.deepEqual(pre.map(e=>e.matcher).sort(),[...CLAUDE_PRE_TOOL].sort());
   assert.ok(pre.every(e=>e.hooks[0].command.includes('--agent claude')));
   await integrations.setup('codex');assert.equal(await integrations.installed('codex'),true);
+  // Codex's PreToolUse speaks Claude's deny contract, so the rules reach it too.
+  const codex=JSON.parse(await readFile(home+'/.codex/hooks.json','utf8'));
+  assert.deepEqual(codex.hooks.PreToolUse.map(e=>e.matcher),CODEX_PRE_TOOL);
+  assert.ok(codex.hooks.PreToolUse[0].hooks[0].command.includes('--agent codex'));
   await chmod(helper,0o600);assert.equal(await integrations.installed('codex'),false);
  }finally{await rm(home,{recursive:true,force:true});}
 });

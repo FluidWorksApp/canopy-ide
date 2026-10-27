@@ -974,6 +974,7 @@ fn hooks_are_ours_in(agent: &str, cfg: &str, home: &str) -> bool {
                         "SessionEnd",
                         "PostToolUse",
                         "PermissionRequest",
+                        "PreToolUse",
                     ],
                 )
             }),
@@ -991,6 +992,7 @@ fn hooks_are_ours_in(agent: &str, cfg: &str, home: &str) -> bool {
             "canopy_signal: \"turn-progress\"",
             "canopy_signal: \"turn-end\"",
             "let pending = Promise.resolve()",
+            "const denied = await gate(",
         ]
         .iter()
         .all(|part| raw.contains(part)),
@@ -1003,6 +1005,7 @@ fn hooks_are_ours_in(agent: &str, cfg: &str, home: &str) -> bool {
             "event?.toolName",
             "tool_input: event?.isError ? {} : (event?.input ?? {})",
             "let pending = Promise.resolve()",
+            "on(\"tool_call\"",
         ]
         .iter()
         .all(|part| raw.contains(part)),
@@ -1011,6 +1014,7 @@ fn hooks_are_ours_in(agent: &str, cfg: &str, home: &str) -> bool {
             "event?.message",
             "canopy_signal: \"turn-progress\"",
             "let pending = Promise.resolve()",
+            "on(\"tool.call\"",
         ]
         .iter()
         .all(|part| raw.contains(part)),
@@ -1026,6 +1030,7 @@ fn hooks_are_ours_in(agent: &str, cfg: &str, home: &str) -> bool {
                     &[
                         "sessionStart",
                         "beforeSubmitPrompt",
+                        "preToolUse",
                         "postToolUse",
                         "postToolUseFailure",
                         "stop",
@@ -1042,6 +1047,7 @@ fn hooks_are_ours_in(agent: &str, cfg: &str, home: &str) -> bool {
                     &[
                         "SessionStart",
                         "UserPromptSubmit",
+                        "PreToolUse",
                         "PostToolUse",
                         "PostToolUseFailure",
                         "Stop",
@@ -1091,6 +1097,21 @@ fn setup_cursor_hooks(cfg: &str, home: &str) -> Result<String, String> {
         entries.retain(|entry| !MARKERS.iter().any(|m| entry.to_string().contains(m)));
         entries.push(serde_json::json!({ "command": command(signal), "timeout": 10 }));
     }
+    // The Rules panel's gates. preToolUse is a permission hook: it reads the
+    // whole payload on stdin (so no `--signal`, which would synthesize one),
+    // and `--gate` makes the helper always answer — Cursor treats empty or
+    // malformed output from a permission hook as a block.
+    let gate = hooks
+        .entry("preToolUse")
+        .or_insert_with(|| serde_json::json!([]))
+        .as_array_mut()
+        .ok_or("Cursor hook preToolUse is not an array")?;
+    gate.retain(|entry| !MARKERS.iter().any(|m| entry.to_string().contains(m)));
+    gate.push(serde_json::json!({
+        "command": format!("{} --agent cursor --gate", sh_quote(&helper.to_string_lossy())),
+        "matcher": CURSOR_GATE_MATCHER,
+        "timeout": 10,
+    }));
     let body = serde_json::to_string_pretty(&config).map_err(|e| e.to_string())?;
     let unchanged = std::fs::read_to_string(&path).is_ok_and(|raw| raw == body);
     if !unchanged {
@@ -1117,6 +1138,16 @@ fn setup_grok_hooks(cfg: &str, home: &str) -> Result<String, String> {
         "hooks": {
             "SessionStart": [group("turn-end")],
             "UserPromptSubmit": [group("turn-start")],
+            // The Rules panel's gates: the real payload on stdin (no
+            // `--signal`). Grok fails open, so no `--gate` fallback is needed.
+            "PreToolUse": [{
+                "matcher": GATE_TOOLS_ANY_MATCHER,
+                "hooks": [{
+                    "type": "command",
+                    "command": format!("{} --agent grok", sh_quote(&helper.to_string_lossy())),
+                    "timeout": 10,
+                }],
+            }],
             "PostToolUse": [group("turn-progress")],
             "PostToolUseFailure": [group("turn-progress")],
             "Stop": [group("turn-end")],
@@ -1307,6 +1338,30 @@ import { spawn } from "node:child_process"
 
 const HELPER = "__HELPER__"
 let pending = Promise.resolve()
+// The Rules panel's gates: ask the helper before a tool runs and wait for its
+// verdict ({decision:"deny", reason} or nothing). Only the tools a gate has an
+// opinion about pay the round trip, and anything unexpected — no Canopy
+// terminal, a missing helper, a slow answer — lets the call through.
+const GATE_TOOLS = /^(bash|shell|shell_command|read|write|edit|multiedit|patch|apply_patch|notebookedit|webfetch|web_fetch|fetch|create_file|edit_file|read_web_page)$|canopy_vault_/i
+const gate = (obj) => new Promise((resolve) => {
+  if (process.env.CANOPY !== "1" || !GATE_TOOLS.test(String(obj?.tool_name ?? ""))) return resolve(null)
+  try {
+    const child = spawn(HELPER, ["--agent", "opencode"], { stdio: ["pipe", "pipe", "ignore"] })
+    let out = ""
+    const timer = setTimeout(() => { try { child.kill() } catch {} ; resolve(null) }, 8000)
+    child.stdout.on("data", (chunk) => { out += chunk })
+    child.on("error", () => { clearTimeout(timer); resolve(null) })
+    child.on("close", () => {
+      clearTimeout(timer)
+      try {
+        const verdict = JSON.parse(out.trim().split("\n").pop() || "null")
+        resolve(verdict?.decision === "deny" ? String(verdict.reason || "Blocked by a Canopy rule.") : null)
+      } catch { resolve(null) }
+    })
+    child.stdin.on("error", () => {})
+    child.stdin.end(JSON.stringify({ ...obj, hook_event_name: "PreToolUse" }))
+  } catch { resolve(null) }
+})
 
 const send = (obj) => {
   if (process.env.CANOPY !== "1") return
@@ -1330,6 +1385,9 @@ export const CanopyBridge = async ({ directory }) => {
     write: "Write",
     multiedit: "MultiEdit",
     notebookedit: "NotebookEdit",
+    bash: "Bash",
+    read: "Read",
+    webfetch: "WebFetch",
   })[String(tool ?? "").toLowerCase()] ?? String(tool ?? "")
   const normalizeToolInput = (args) => {
     const input = { ...(args ?? {}) }
@@ -1448,6 +1506,18 @@ export const CanopyBridge = async ({ directory }) => {
     // names where the write belongs instead.
     "tool.execute.before": async (input, output) => {
       try {
+        const denied = await gate({
+          session_id: input?.sessionID ?? "",
+          cwd: directory,
+          agent: "opencode",
+          tool_name: canonicalTool(input?.tool),
+          tool_input: normalizeToolInput(output?.args),
+        })
+        if (denied) {
+          const refusal = new Error(denied)
+          refusal.canopyGate = true
+          throw refusal
+        }
         const entry = process.env.CANOPY_RESEARCH_DIR
         const root = process.env.CANOPY_WRITE_ROOT
         if (!entry && !root) return
@@ -1488,7 +1558,9 @@ export const CanopyBridge = async ({ directory }) => {
         // not expect) must not break the session.
         if (
           e instanceof Error &&
-          (e.message.startsWith("Canopy research harness:") || e.message.startsWith("Canopy workflow:"))
+          (e.canopyGate ||
+            e.message.startsWith("Canopy research harness:") ||
+            e.message.startsWith("Canopy workflow:"))
         ) throw e
       }
     },
@@ -1538,6 +1610,30 @@ import { spawn } from "node:child_process"
 const HELPER = "__HELPER__"
 const CANOPY_CONTEXT = __CANOPY_CONTEXT__
 let pending = Promise.resolve()
+// The Rules panel's gates: ask the helper before a tool runs and wait for its
+// verdict ({decision:"deny", reason} or nothing). Only the tools a gate has an
+// opinion about pay the round trip, and anything unexpected — no Canopy
+// terminal, a missing helper, a slow answer — lets the call through.
+const GATE_TOOLS = /^(bash|shell|shell_command|read|write|edit|multiedit|patch|apply_patch|notebookedit|webfetch|web_fetch|fetch|create_file|edit_file|read_web_page)$|canopy_vault_/i
+const gate = (obj) => new Promise((resolve) => {
+  if (process.env.CANOPY !== "1" || !GATE_TOOLS.test(String(obj?.tool_name ?? ""))) return resolve(null)
+  try {
+    const child = spawn(HELPER, ["--agent", "omp"], { stdio: ["pipe", "pipe", "ignore"] })
+    let out = ""
+    const timer = setTimeout(() => { try { child.kill() } catch {} ; resolve(null) }, 8000)
+    child.stdout.on("data", (chunk) => { out += chunk })
+    child.on("error", () => { clearTimeout(timer); resolve(null) })
+    child.on("close", () => {
+      clearTimeout(timer)
+      try {
+        const verdict = JSON.parse(out.trim().split("\n").pop() || "null")
+        resolve(verdict?.decision === "deny" ? String(verdict.reason || "Blocked by a Canopy rule.") : null)
+      } catch { resolve(null) }
+    })
+    child.stdin.on("error", () => {})
+    child.stdin.end(JSON.stringify({ ...obj, hook_event_name: "PreToolUse" }))
+  } catch { resolve(null) }
+})
 
 const send = (obj) => {
   if (process.env.CANOPY !== "1") return
@@ -1594,6 +1690,17 @@ export default function canopyBridge(pi) {
   on("session_shutdown", (_event, ctx) =>
     send({ ...base(ctx), hook_event_name: "SessionEnd", canopy_signal: "session-end" }),
   )
+  // tool_call can block (ToolCallEventResult {block, reason}, oh-my-pi
+  // 18.4.10 types): the Rules panel's gates, with the reason as the error the
+  // model reads.
+  on("tool_call", async (event, ctx) => {
+    const denied = await gate({
+      ...base(ctx),
+      tool_name: event?.toolName ?? "",
+      tool_input: event?.input ?? {},
+    })
+    return denied ? { block: true, reason: denied } : undefined
+  })
   // The tool's own input rides along so Canopy's edit journal can attribute
   // omp's write/edit calls (ToolResultEventBase.input); a failed call edited
   // nothing and sends none.
@@ -1668,6 +1775,30 @@ import { spawn } from "node:child_process"
 
 const HELPER = "__HELPER__"
 let pending = Promise.resolve()
+// The Rules panel's gates: ask the helper before a tool runs and wait for its
+// verdict ({decision:"deny", reason} or nothing). Only the tools a gate has an
+// opinion about pay the round trip, and anything unexpected — no Canopy
+// terminal, a missing helper, a slow answer — lets the call through.
+const GATE_TOOLS = /^(bash|shell|shell_command|read|write|edit|multiedit|patch|apply_patch|notebookedit|webfetch|web_fetch|fetch|create_file|edit_file|read_web_page)$|canopy_vault_/i
+const gate = (obj) => new Promise((resolve) => {
+  if (process.env.CANOPY !== "1" || !GATE_TOOLS.test(String(obj?.tool_name ?? ""))) return resolve(null)
+  try {
+    const child = spawn(HELPER, ["--agent", "amp"], { stdio: ["pipe", "pipe", "ignore"] })
+    let out = ""
+    const timer = setTimeout(() => { try { child.kill() } catch {} ; resolve(null) }, 8000)
+    child.stdout.on("data", (chunk) => { out += chunk })
+    child.on("error", () => { clearTimeout(timer); resolve(null) })
+    child.on("close", () => {
+      clearTimeout(timer)
+      try {
+        const verdict = JSON.parse(out.trim().split("\n").pop() || "null")
+        resolve(verdict?.decision === "deny" ? String(verdict.reason || "Blocked by a Canopy rule.") : null)
+      } catch { resolve(null) }
+    })
+    child.stdin.on("error", () => {})
+    child.stdin.end(JSON.stringify({ ...obj, hook_event_name: "PreToolUse" }))
+  } catch { resolve(null) }
+})
 
 const send = (obj) => {
   if (process.env.CANOPY !== "1") return
@@ -1706,6 +1837,17 @@ export default function canopyBridge(amp) {
   on("agent.end", (event) =>
     send({ ...base(event), hook_event_name: "Stop", canopy_signal: "turn-end" }),
   )
+  // tool.call returns {action: "allow"} or {action: "reject-and-continue",
+  // message} (`amp plugins show-docs`): the Rules panel's gates, with the
+  // reason as what the agent reads.
+  on("tool.call", async (event) => {
+    const denied = await gate({
+      ...base(event),
+      tool_name: event?.tool ?? "",
+      tool_input: event?.input ?? {},
+    })
+    return denied ? { action: "reject-and-continue", message: denied } : { action: "allow" }
+  })
   on("tool.result", (event) =>
     send({
       ...base(event),
@@ -1807,6 +1949,7 @@ fn setup_agy_hooks(cfg: &str, home: &str) -> Result<String, String> {
 /// next `fn`.
 const AGY_HOOK_EVENTS: &[&str] = &[
     "SessionStart",
+    "PreToolUse",
     "PostToolUse",
     "PreInvocation",
     "PostInvocation",
@@ -1824,9 +1967,19 @@ fn agy_hook_group(command: &str) -> serde_json::Value {
     // handler list; wrapping those in matcher/hooks objects is accepted as JSON
     // but never invoked.
     let handler = serde_json::json!({ "type": "command", "command": command, "timeout": 10 });
+    // PreToolUse sits in agy's approval path, so it only wakes for the tools a
+    // gate has an opinion about, and `--gate` guarantees a verdict on every
+    // exit path ("allow" = defer to agy's own policy, never `auto_approve`).
+    let gate = serde_json::json!({
+        "type": "command",
+        "command": format!("{command} --gate"),
+        "timeout": 10,
+    });
     let mut group = serde_json::Map::new();
     for event in AGY_HOOK_EVENTS {
-        let entry = if *event == "PostToolUse" {
+        let entry = if *event == "PreToolUse" {
+            serde_json::json!([{ "matcher": AGY_GATE_MATCHER, "hooks": [gate.clone()] }])
+        } else if *event == "PostToolUse" {
             serde_json::json!([{ "matcher": "*", "hooks": [handler.clone()] }])
         } else {
             serde_json::json!([handler.clone()])
@@ -1888,6 +2041,24 @@ const WRITE_TOOLS_MATCHER: &str = "Write|Edit|MultiEdit|NotebookEdit";
 /// the rest of the hot path stay unhooked.
 const GATE_TOOLS_MATCHER: &str =
     "Bash|Read|WebFetch|mcp__canopy__canopy_vault_fill|mcp__canopy__canopy_vault_read";
+
+/// Codex's PreToolUse: `Bash` for shell, `apply_patch` (which its matcher also
+/// answers to as `Edit|Write`) for edits, and the vault's MCP tools. Hosted
+/// tools such as web search never reach a hook (learn.chatgpt.com/docs/hooks).
+const CODEX_GATE_MATCHER: &str =
+    "^Bash$|^apply_patch$|^Edit$|^Write$|mcp__canopy__canopy_vault_fill|mcp__canopy__canopy_vault_read";
+
+/// Cursor's preToolUse tool names (cursor.com/docs/hooks): `Shell`, `Write`,
+/// `Read`, `Delete`, and `MCP:<tool>` for MCP tools (the vault, browsers).
+const CURSOR_GATE_MATCHER: &str = "Shell|Write|Read|Delete|WebFetch|MCP";
+
+/// Grok matches Claude's tool names onto its own (docs.x.ai/build/features/
+/// hooks), so one matcher covers shell, edits, reads, fetches and MCP tools.
+const GATE_TOOLS_ANY_MATCHER: &str = "Bash|Edit|Write|MultiEdit|Read|WebFetch|mcp__.*";
+
+/// Antigravity's own tool names (antigravity.google/docs/hooks): shell, the
+/// three writers, file and URL reads, and Canopy's MCP tools.
+const AGY_GATE_MATCHER: &str = "run_command|write_to_file|replace_file_content|multi_replace_file_content|view_file|read_url_content|.*canopy_vault.*|.*browser_.*";
 
 /// Where the hook helper lives once installed. Hooks reference this stable path
 /// rather than the app bundle, so they keep working across upgrades and don't
@@ -3425,7 +3596,14 @@ fn setup_codex_hooks(cfg: &str, home: &str, bridge: &str) -> Result<String, Stri
         serde_json::json!({})
     };
     let command = format!("{} --agent codex", sh_quote(&helper.to_string_lossy()));
-    let want = serde_json::json!({
+    let plain = serde_json::json!({
+        "hooks": [ { "type": "command", "command": command } ]
+    });
+    // The Rules panel's gates: Codex's PreToolUse deny contract is Claude's
+    // (learn.chatgpt.com/docs/hooks), and an empty answer lets the call go on
+    // through Codex's own approval flow, so the hook decides nothing else.
+    let gate = serde_json::json!({
+        "matcher": CODEX_GATE_MATCHER,
         "hooks": [ { "type": "command", "command": command } ]
     });
     let hooks = settings
@@ -3435,8 +3613,8 @@ fn setup_codex_hooks(cfg: &str, home: &str, bridge: &str) -> Result<String, Stri
         .or_insert_with(|| serde_json::json!({}));
     let hooks = hooks.as_object_mut().ok_or("hooks is not an object")?;
     let mut changed = 0;
-    // No PreToolUse: we observe, and a hook there sits in the approval path.
-    // PermissionRequest is registered observe-only (no stdout = no decision)
+    // PreToolUse only denies (never allows), so it cannot widen what Codex's
+    // approval flow lets through. PermissionRequest is registered observe-only (no stdout = no decision)
     // purely so the blocked-on-approval moment reaches the pending cards.
     //
     // Byte stability matters more here than for any other CLI: Codex skips a
@@ -3454,7 +3632,9 @@ fn setup_codex_hooks(cfg: &str, home: &str, bridge: &str) -> Result<String, Stri
         "SessionEnd",
         "PostToolUse",
         "PermissionRequest",
+        "PreToolUse",
     ] {
+        let want = if event == "PreToolUse" { &gate } else { &plain };
         let list = hooks.entry(event).or_insert_with(|| serde_json::json!([]));
         let Some(arr) = list.as_array_mut() else {
             continue;
@@ -3464,7 +3644,7 @@ fn setup_codex_hooks(cfg: &str, home: &str, bridge: &str) -> Result<String, Stri
             MARKERS.iter().any(|m| s.contains(m))
         };
         let owned: Vec<usize> = (0..arr.len()).filter(|&i| ours(&arr[i])).collect();
-        if owned.len() == 1 && arr[owned[0]] == want {
+        if owned.len() == 1 && arr[owned[0]] == *want {
             continue;
         }
         // Replace in place, keeping the slot (and so its neighbours' order);
@@ -5917,6 +6097,53 @@ mod integration_tests {
         assert_eq!(mcp_state("omp", oh, oh), "foreign");
     }
 
+    /// Every CLI with a blocking pre-tool hook gets one registered for the
+    /// Rules panel's gates, in its own config shape.
+    #[test]
+    fn pre_tool_gates_are_registered_for_every_hooked_cli() {
+        let home = scratch_home("gate-hooks");
+        let h = home.to_str().unwrap();
+        for agent in ["codex", "cursor", "grok", "opencode", "omp", "amp"] {
+            let report = setup_agent(agent, h).unwrap();
+            assert!(report.ok, "{agent}: {report:?}");
+            assert!(hooks_are_ours(agent, h), "{agent}");
+        }
+        let codex = read_json_config(&home.join(".codex/hooks.json")).unwrap();
+        assert_eq!(codex["hooks"]["PreToolUse"][0]["matcher"], CODEX_GATE_MATCHER);
+        assert!(codex["hooks"]["PreToolUse"][0]["hooks"][0]["command"]
+            .as_str()
+            .unwrap()
+            .ends_with("--agent codex"));
+        let cursor = read_json_config(&home.join(".cursor/hooks.json")).unwrap();
+        let pre = &cursor["hooks"]["preToolUse"][0];
+        assert_eq!(pre["matcher"], CURSOR_GATE_MATCHER);
+        let command = pre["command"].as_str().unwrap();
+        assert!(command.ends_with("--agent cursor --gate"), "{command}");
+        assert!(!command.contains("--signal"), "a signal would replace the payload");
+        let grok = read_json_config(&home.join(".grok/hooks/canopy.json")).unwrap();
+        let pre = &grok["hooks"]["PreToolUse"][0];
+        assert_eq!(pre["matcher"], GATE_TOOLS_ANY_MATCHER);
+        assert!(!pre["hooks"][0]["command"].as_str().unwrap().contains("--signal"));
+        for (file, refusal) in [
+            (".config/opencode/plugin/canopy.ts", "refusal.canopyGate = true"),
+            (".omp/agent/extensions/canopy.ts", "{ block: true, reason: denied }"),
+            (".config/amp/plugins/canopy.ts", "action: \"reject-and-continue\""),
+        ] {
+            let src = std::fs::read_to_string(home.join(file)).unwrap();
+            assert!(src.contains("const gate = (obj)"), "{file}");
+            assert!(src.contains("process.env.CANOPY !== \"1\" || !GATE_TOOLS.test"), "{file}");
+            assert!(src.contains(refusal), "{file}");
+            assert!(src.contains("hook_event_name: \"PreToolUse\""), "{file}");
+        }
+        // Re-running changes nothing: Codex re-asks for trust on any change.
+        let before = std::fs::read_to_string(home.join(".codex/hooks.json")).unwrap();
+        setup_agent("codex", h).unwrap();
+        assert_eq!(std::fs::read_to_string(home.join(".codex/hooks.json")).unwrap(), before);
+        let before = std::fs::read_to_string(home.join(".cursor/hooks.json")).unwrap();
+        setup_agent("cursor", h).unwrap();
+        assert_eq!(std::fs::read_to_string(home.join(".cursor/hooks.json")).unwrap(), before);
+    }
+
     #[test]
     fn amp_plugin_reads_current_event_fields_and_signals_progress() {
         let home = scratch_home("amp-events");
@@ -5936,10 +6163,14 @@ mod integration_tests {
         let raw = std::fs::read_to_string(home.join(".gemini/config/hooks.json")).unwrap();
         let cfg: serde_json::Value = serde_json::from_str(&raw).unwrap();
         let canopy = &cfg["canopy"];
-        assert!(
-            canopy.get("PreToolUse").is_none(),
-            "an observer must not grant tools"
-        );
+        // The Rules panel's gate: grouped by agy's own tool names, and always
+        // answering (`--gate`) so an empty verdict never reaches agy.
+        let pre = &canopy["PreToolUse"][0];
+        assert_eq!(pre["matcher"], AGY_GATE_MATCHER);
+        assert!(pre["hooks"][0]["command"]
+            .as_str()
+            .unwrap()
+            .ends_with("--agent agy --gate"));
         assert!(canopy["PostToolUse"][0]["hooks"].is_array());
         for flat in ["SessionStart", "PreInvocation", "PostInvocation", "Stop"] {
             assert_eq!(canopy[flat][0]["type"], "command", "{flat}");
@@ -5972,9 +6203,9 @@ mod integration_tests {
             cfg["canopy"]["enabled"], false,
             "the user's switch-off is theirs"
         );
-        assert!(
-            cfg["canopy"].get("PreToolUse").is_none(),
-            "an event an older Canopy registered is ours to drop"
+        assert_eq!(
+            cfg["canopy"]["PreToolUse"][0]["matcher"], AGY_GATE_MATCHER,
+            "an older Canopy's catch-all PreToolUse is replaced by the gate"
         );
         assert!(hooks_are_ours("agy", h));
         let legacy = read_json_config(&home.join(".gemini/antigravity-cli/hooks.json")).unwrap();

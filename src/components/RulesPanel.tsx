@@ -35,6 +35,7 @@ import {
 } from "../gates/rules";
 import { subscribeLedger } from "../ledger";
 import { Button, Segmented } from "./ui";
+import { RuleCoverage } from "./RuleCoverage";
 import "./gates.css";
 
 interface Props {
@@ -394,11 +395,7 @@ export function RulesPanel({ roots, files, onNotice, focusRuleId }: Props) {
 
       <InstructionSuggestions root={root} roots={roots} files={files} onNotice={onNotice} onAdded={() => void reload()} />
 
-      <p className="gates-coverage">
-        Enforced in Claude Code sessions (on this computer and in cloud workspaces) and Antigravity. Other agent CLIs
-        get guidance only: their hooks can't refuse a tool call yet. Egress and shell-path checks are best effort — they
-        read the command line, not everything a program might do.
-      </p>
+      <RuleCoverage />
     </div>
   );
 }

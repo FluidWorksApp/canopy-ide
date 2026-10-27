@@ -153,8 +153,10 @@ The load-bearing pieces every feature hangs off:
   PostInvocation, Stop) to the shared file, and still to the old file while
   that directory exists, until an authenticated run shows 1.2.x ignores it.
 - `PreToolUse` is the documented interception point and returns
-  `{decision: allow|deny|ask|force_ask}`. Canopy does not register it: it sits
-  in the approval path, and what agy does with an empty verdict is unverified.
+  `{decision: allow|auto_approve|deny|ask|force_ask|deny_unless_prior_grant}`.
+  Canopy registers it with `--gate` on agy's own tool names for the Rules
+  panel's gates: it answers `deny` or `allow` ("delegate to the next hook or
+  the default policy"), never `auto_approve`, on every exit path.
 - **OSC 9 notifications (off by default)** — fires when the CLI "requires your
   attention" or finishes; auto-setup enables the setting.
 - Sessions: `~/.gemini/antigravity-cli/` — `conversations/<uuid>.db` (SQLite,

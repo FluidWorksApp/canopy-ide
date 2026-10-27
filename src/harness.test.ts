@@ -72,11 +72,24 @@ describe("harness capabilities", () => {
     expect(harnessVersionWarning("codex", "0.0.1")).toBeNull();
   });
 
-  it("claims nothing for any other CLI while research is in progress", () => {
+  it("claims nothing for any other CLI beyond rule enforcement while research is in progress", () => {
     for (const cli of BUILTIN_AGENT_CLIS.filter((c) => c.id !== "claude")) {
-      for (const feature of HARNESS_FEATURES) {
+      for (const feature of HARNESS_FEATURES.filter((f) => f !== "ruleEnforcement")) {
         expect(harnessSupport(cli.id, feature), `${cli.id}.${feature}`).toBe("unknown");
       }
+    }
+  });
+
+  it("says how rules are enforced for every built-in agent CLI, with a source", () => {
+    for (const cli of BUILTIN_AGENT_CLIS) {
+      const cap = harnessCapabilities(cli.id).ruleEnforcement;
+      expect(cap.support, cli.id).not.toBe("unknown");
+      expect(cap.source, cli.id).toBeTruthy();
+      expect(cap.note, cli.id).toBeTruthy();
+    }
+    expect(harnessSupport("aider", "ruleEnforcement")).toBe("none");
+    for (const id of ["claude", "codex", "cursor", "grok", "agy", "opencode", "omp", "amp"]) {
+      expect(harnessSupport(id, "ruleEnforcement"), id).toBe("native");
     }
   });
 
