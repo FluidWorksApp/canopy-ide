@@ -54,6 +54,7 @@ import {
 } from "./vibeTargetInference";
 import { observeTurnEvents } from "./turnRollback";
 import { observeAgentTurns } from "./agentTurns";
+import { startReceiptEngine } from "./receipts/engine";
 import {
   derivePending,
   parseAgentEvent,
@@ -292,6 +293,8 @@ export default function App() {
   // Unread teammates' messages reach the bell and the OS, including while
   // working elsewhere in Canopy; the conversation being read stays quiet.
   useEffect(() => startTeamMessageNotifications(), []);
+  // Proof receipts: the workspace re-verifies agent turns (src/receipts/).
+  useEffect(() => startReceiptEngine(), []);
   const [ws, setWs] = useState<WorkspaceState>(emptyWorkspace);
   const [loaded, setLoaded] = useState(false);
   const [workspaceLoadError, setWorkspaceLoadError] = useState<string | null>(null);

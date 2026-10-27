@@ -32,6 +32,7 @@ import {sessionProcessReader} from './session-processes.mjs';
 import {McpRegistry} from './mcp-servers.mjs';
 import {gitHistory} from './git-history.mjs';
 import {claudeIde,claudeIdeCommand} from './claude-ide.mjs';
+import {receiptRunCheck} from './receipt-check.mjs';
 const sessionProcesses=sessionProcessReader();
 const workspaceMetrics=metricsReader();
 const execute=promisify(execFile);
@@ -88,6 +89,8 @@ export async function nativeInvoke(command,args={}){
     return sessionProcesses(args.sessions);
   }
   if(command==='agent_workspace_at')return agentWorkspaceAt(args,{run,scoped});
+  // Proof receipts: the workspace re-runs checks itself (src/receipts/).
+  if(command==='receipt_run_check')return receiptRunCheck(args,{scoped,home:HOME});
   if(command==='workspace_activity')return workspaceActivity();
   if(command==='workspace_metrics')return workspaceMetrics();
   if(command==='workspace_browser_request'){

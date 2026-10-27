@@ -1,0 +1,43 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import {mkdtemp} from 'node:fs/promises';
+import {tmpdir} from 'node:os';
+import path from 'node:path';
+import {receiptRunCheck,capture} from './receipt-check.mjs';
+
+const dir=await mkdtemp(path.join(tmpdir(),'receipt-'));
+const scoped=async value=>{if(!value.startsWith(dir))throw Error('Path outside selected workspace');return value;};
+
+test('a failing check returns its exit code and output, not an error',async()=>{
+ const r=await receiptRunCheck({cwd:dir,argv:['/bin/sh','-c','echo out; echo err >&2; exit 3']},{scoped});
+ assert.equal(r.code,3);assert.equal(r.stdout.trim(),'out');assert.equal(r.stderr.trim(),'err');
+ assert.equal(r.timedOut,false);assert.equal(r.spawnError,null);
+});
+
+test('a hung check is timed out, not failed, and its process group is killed',async()=>{
+ const r=await receiptRunCheck({cwd:dir,argv:['/bin/sh','-c','sleep 30 & wait'],timeoutMs:300},{scoped});
+ assert.equal(r.timedOut,true);assert.equal(r.code,null);assert.ok(r.durationMs<10000);
+});
+
+test('the check env is scrubbed of CANOPY* and forced non-interactive',async()=>{
+ const r=await receiptRunCheck({cwd:dir,argv:['/bin/sh','-c','echo "$CANOPY_PTY|$CI"']},{scoped,env:{...process.env,CANOPY_PTY:'7'}});
+ assert.equal(r.stdout.trim(),'|1');
+});
+
+test('a missing program is a spawn error',async()=>{
+ const r=await receiptRunCheck({cwd:dir,argv:['/definitely/not/here']},{scoped});
+ assert.match(r.spawnError,/could not start/);assert.equal(r.code,null);
+});
+
+test('cwd outside the workspace and bad argv are refused',async()=>{
+ await assert.rejects(receiptRunCheck({cwd:'/etc',argv:['true']},{scoped}),/outside/);
+ await assert.rejects(receiptRunCheck({cwd:dir,argv:[]},{scoped}),/Invalid check command/);
+ await assert.rejects(receiptRunCheck({cwd:dir,argv:[1]},{scoped}),/Invalid check command/);
+});
+
+test('capture keeps the tail by default and the head on request',()=>{
+ const t=capture(4,true);t.push(Buffer.from('abcdef'));t.push(Buffer.from('ghij'));
+ assert.deepEqual(t.done(),{text:'ghij',truncated:true});
+ const h=capture(4,false);h.push(Buffer.from('abcdef'));h.push(Buffer.from('gh'));
+ assert.deepEqual(h.done(),{text:'abcd',truncated:true});
+});

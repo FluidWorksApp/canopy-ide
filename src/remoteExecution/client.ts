@@ -49,7 +49,7 @@ export class RemoteExecutionClient {
       response = await fetch(`${this.endpoint}/v1${route}`, {
       method: args === undefined ? "GET" : "POST", redirect:"error",
       headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
-      body: args === undefined ? undefined : JSON.stringify(args), signal: AbortSignal.timeout(route.endsWith("/native") && ["git_clone","git_fetch","git_pull","git_push"].includes(String((args as {command?:string})?.command)) ? 330_000 : 30_000),
+      body: args === undefined ? undefined : JSON.stringify(args), signal: AbortSignal.timeout(route.endsWith("/native") && ["git_clone","git_fetch","git_pull","git_push","receipt_run_check"].includes(String((args as {command?:string})?.command)) ? 330_000 : 30_000),
     });
     } catch(error) { if(key)reportConnection(key,'reconnecting');throw error; }
     if(response.status===429&&retries<2){

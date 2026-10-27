@@ -18,6 +18,7 @@ import * as ipc from "../ipc";
 import { subscribeRemoteHarness, withRemoteMesh } from "../remoteExecution/harnessStores";
 import { basename } from "../paths";
 import { LIFE_META } from "../../shared/agentLife";
+import { ReceiptBadge } from "./ReceiptBadge";
 import type { Life } from "../../shared/agentLife";
 import { agentDisplayName, type TabName } from "../agentDisplayName";
 import { useAgentSessions, workingOnNow, type SessionRow } from "../agentSessions";
@@ -347,6 +348,15 @@ export function AgentControlPanel({
                   <span className={`acp-state ${st.cls}`} title={life.note}>
                     {st.label}
                   </span>
+                  {(life.state === "idle" || life.state === "ended") && row.agent && (
+                    <ReceiptBadge
+                      sessionId={row.digest?.session_id}
+                      ptyId={row.session.id}
+                      cwd={row.session.cwd}
+                      cli={row.agent.id ?? ""}
+                      quietWhenUnverified={life.state === "ended"}
+                    />
+                  )}
                 </td>
                 <td className="acp-prompt">
                   {initialPrompt(row.digest) ?? <em>none recorded</em>}

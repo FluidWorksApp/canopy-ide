@@ -5162,3 +5162,27 @@ export type SlackHubItem =
 /** One action against the account's Slack hub, with the signed-in device's credential. */
 export const slackHub = <T>(action: string, body: Record<string, unknown> = {}) =>
   invoke<T>("canopy_account_request", { route: "/api/slack", body: { action, ...body } });
+
+// ----------------------------------------------------------- proof receipts
+
+/** One verification command's outcome (src-tauri/src/receipt.rs; in a Linux
+ *  workspace, packages/remote-host/receipt-check.mjs). A non-zero exit is a
+ *  result, not a rejection; `timedOut` runs were killed, never "failed". */
+export interface ReceiptCheckRun {
+  code: number | null;
+  stdout: string;
+  stderr: string;
+  stdoutTruncated: boolean;
+  stderrTruncated: boolean;
+  timedOut: boolean;
+  durationMs: number;
+  spawnError: string | null;
+}
+
+/** Run one command outside every agent's terminal. Output keeps the tail
+ *  (the summary line) unless `head` asks for the start (a diff). */
+export const receiptRunCheck = (
+  cwd: string,
+  argv: string[],
+  opts: { timeoutMs?: number; keepBytes?: number; head?: boolean } = {},
+) => invoke<ReceiptCheckRun>("receipt_run_check", { cwd, argv, ...opts });
