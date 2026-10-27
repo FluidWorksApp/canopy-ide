@@ -19,7 +19,7 @@
 
 import * as ipc from "./ipc";
 import { chosenBrainId, installedBrain } from "./brain";
-import { launchEnv } from "./profiles";
+import { brainLaunchEnv } from "./profiles";
 import { overBudget, recordBrainCall } from "./brainMeter";
 import { noteBrainOutcome } from "./brainStatus";
 import {
@@ -326,7 +326,7 @@ export async function askBrain<T = unknown>(req: BrainRequest<T>): Promise<Brain
   let collector: StructuredRunCollector | null = null;
   let cwdMissing = false;
   try {
-    const run = await runOnce(cli, runner.dialect, args, req, await launchEnv(cli.id));
+    const run = await runOnce(cli, runner.dialect, args, req, await brainLaunchEnv(cli.id));
     collector = run.collector;
     cwdMissing = run.end === "spawn-failed" && !!req.cwd && /cwd does not exist/i.test(run.spawnError ?? "");
     answer = interpret<T>(run, req, started);
@@ -407,10 +407,10 @@ function runOnce(
           command: cli.bin,
           args,
           cwd: req.cwd,
-          // The active account (Settings → Accounts), exactly as a terminal
-          // launch of this CLI gets it. Without it the brain ran on the CLI's
-          // default login and config — a different account and model than the
-          // person's sessions use.
+          // The active account (Settings → Accounts) when this computer has
+          // it. Without it the brain ran on the CLI's default login and
+          // config — a different account and model than the person's
+          // sessions use.
           env,
           timeoutMs: timeoutMs + 5_000,
         },

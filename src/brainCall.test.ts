@@ -4,7 +4,8 @@ vi.mock("./ipc", () => ({
   whichCheck: vi.fn(async () => ({})),
   brainCallSpawn: vi.fn(),
   brainKill: vi.fn(async () => {}),
-  profileEnv: vi.fn(async () => [["CODEX_HOME", "/profiles/work/codex"]]),
+  profilesListDesktop: vi.fn(async () => [{ id: "work", label: "Work" }]),
+  profileEnvDesktop: vi.fn(async () => [["CODEX_HOME", "/profiles/work/codex"]]),
 }));
 
 import * as ipc from "./ipc";
@@ -200,8 +201,19 @@ describe("askBrain", () => {
       queueMicrotask(() => onData({ kind: "exit", code: 0 }));
     });
     await askBrain({ feature: "lens", prompt: "x", cwd: "" });
-    expect(ipc.profileEnv).toHaveBeenCalledWith("codex", "work");
+    expect(ipc.profileEnvDesktop).toHaveBeenCalledWith("codex", "work");
     expect(spawnMock.mock.calls[0][1]).toMatchObject({ env: [["CODEX_HOME", "/profiles/work/codex"]] });
+  });
+
+  it("stays on this computer's default login when the account lives elsewhere", async () => {
+    updateSettings({ defaultAgent: "codex", activeProfile: "pool-team" });
+    setBrainInstalledPredicate((bin) => bin === codex.bin);
+    spawnMock.mockImplementationOnce(async (_id: string, _opts: unknown, onData: (o: Out) => void) => {
+      queueMicrotask(() => onData({ kind: "exit", code: 0 }));
+    });
+    await askBrain({ feature: "lens", prompt: "x", cwd: "" });
+    expect(ipc.profileEnvDesktop).not.toHaveBeenCalled();
+    expect(spawnMock.mock.calls[0][1]).toMatchObject({ env: [] });
   });
 
   it("never runs another vendor when the chosen brain isn't installed", async () => {

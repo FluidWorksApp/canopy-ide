@@ -59,6 +59,22 @@ export async function launchEnv(cliId: string): Promise<[string, string][]> {
   }
 }
 
+/** The account env for the brain. The brain is the CLI on this computer in
+ *  every mode, so the active account applies only when this computer has a
+ *  profile by that id; in a cloud workspace the active account usually lives
+ *  on the VM, and pointing the desktop CLI at a VM path would sign it out. */
+export async function brainLaunchEnv(cliId: string): Promise<[string, string][]> {
+  const profile = activeProfile();
+  if (profile === DEFAULT_PROFILE || !supportsProfiles(cliId)) return [];
+  try {
+    const here = await ipc.profilesListDesktop();
+    if (!here.some((p) => p.id === profile)) return [];
+    return await ipc.profileEnvDesktop(cliId, profile);
+  } catch {
+    return [];
+  }
+}
+
 // ---------- the synchronous path ----------
 //
 // Agents launch from ~20 places. Each one remembering to await Rust is how half
