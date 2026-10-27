@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, configure, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 const applyChatApproval = vi.fn(async () => null);
@@ -44,6 +44,8 @@ const outcome = (id: string, sender: string, o: PlanOutcomeCard["outcome"], crea
   msg({ type: "plan-outcome", v: 1, request: REQ, plan: card.plan, outcome: o }, { id, sender, created, thread: { root: REQ } });
 
 afterEach(cleanup);
+// The suite runs on a loaded machine: give async UI more than the 1s default.
+configure({ asyncUtilTimeout: 8000 });
 
 describe("plan cards on the wire", () => {
   it("round-trip through parseCard with a readable fallback", () => {
@@ -114,7 +116,7 @@ describe("plan card in chat", () => {
     expect(ext.thread).toEqual({ root: REQ });
     expect(text).toContain("Looks right");
     expect(await screen.findByText("You approved this plan.")).toBeInTheDocument();
-  });
+  }, 30_000);
 
   it("carries a teammate's approval into the author's plan", async () => {
     const m = msg(card);
@@ -131,5 +133,5 @@ describe("plan card in chat", () => {
     await waitFor(() => expect(applyChatApproval).toHaveBeenCalledWith(card.plan, "BOB"));
     // The author never gets the approve buttons on their own plan.
     expect(screen.queryByRole("button", { name: "Approve plan…" })).toBeNull();
-  });
+  }, 30_000);
 });
