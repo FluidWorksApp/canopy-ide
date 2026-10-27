@@ -22,6 +22,8 @@ import {
   canBeBrain,
   chooseBrain,
   initBrainConnect,
+  loginPollTick,
+  resetBrainConnectForTests,
   parseBudget,
   recommendedBrain,
   runInProjectTerminal,
@@ -136,6 +138,63 @@ describe("terminal flows", () => {
     }
     window.dispatchEvent(new Event(CLI_INSTALLS_CHANGED_EVENT));
     expect(checkMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("checks every few seconds while a sign-in tab is open, and flips the moment it works", () => {
+    vi.useFakeTimers();
+    resetBrainConnectForTests();
+    const take = (e: Event) => ((e as CustomEvent).detail.handled = true);
+    window.addEventListener("canopy:run-command", take);
+    const stop = initBrainConnect({ probeOnStart: false });
+    try {
+      setState({ state: "signed-out", cli: "claude", label: "Claude Code", checkedAt: 1 });
+      startBrainSignIn(claude);
+      vi.advanceTimersByTime(20_000);
+      const fast = checkMock.mock.calls.length;
+      expect(fast).toBeGreaterThanOrEqual(4);
+      expect(fast).toBeLessThanOrEqual(6);
+      // Sign-in finished: the next probe says connected and the polling stops.
+      setState({ state: "connected", cli: "claude", label: "Claude Code", checkedAt: 2 });
+      vi.advanceTimersByTime(60_000);
+      expect(checkMock.mock.calls.length).toBe(fast);
+    } finally {
+      stop();
+      window.removeEventListener("canopy:run-command", take);
+      vi.useRealTimers();
+    }
+  });
+
+  it("slows the sign-in checks down, then stops them with the tab or the window", () => {
+    resetBrainConnectForTests();
+    const take = (e: Event) => ((e as CustomEvent).detail.handled = true);
+    window.addEventListener("canopy:run-command", take);
+    const t0 = Date.now();
+    try {
+      setState({ state: "signed-out", cli: "claude", label: "Claude Code", checkedAt: 1 });
+      startBrainSignIn(claude);
+      // Fast stage: one probe per few seconds, never two at once.
+      expect(loginPollTick(t0 + 4_000)).toBe(true);
+      expect(loginPollTick(t0 + 5_000)).toBe(false);
+      setState({ state: "checking", cli: "claude", label: "Claude Code", checkedAt: 1 });
+      expect(loginPollTick(t0 + 20_000)).toBe(false);
+      setState({ state: "signed-out", cli: "claude", label: "Claude Code", checkedAt: 1 });
+      // Slow stage after five minutes.
+      expect(loginPollTick(t0 + 6 * 60_000)).toBe(true);
+      expect(loginPollTick(t0 + 6 * 60_000 + 10_000)).toBe(false);
+      expect(loginPollTick(t0 + 6 * 60_000 + 31_000)).toBe(true);
+      // The sign-in window closes.
+      expect(loginPollTick(t0 + 16 * 60_000)).toBe(false);
+      expect(loginPollTick(t0 + 17 * 60_000)).toBe(false);
+
+      // And the tab exiting ends it at once.
+      startBrainSignIn(claude);
+      const stop = initBrainConnect({ probeOnStart: false });
+      window.dispatchEvent(new CustomEvent(TERMINAL_EXITED_EVENT, { detail: { then: BRAIN_RECHECK, code: 0 } }));
+      stop();
+      expect(loginPollTick(Date.now() + 10_000)).toBe(false);
+    } finally {
+      window.removeEventListener("canopy:run-command", take);
+    }
   });
 
   it("probes once at start when nobody has", () => {
