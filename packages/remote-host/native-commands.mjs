@@ -39,10 +39,15 @@ export const NATIVE_COMMANDS=new Set([
  'agent_workspace','agent_edits',
  // Build locks, sessions, profiles, PR watch, memory settings.
  'build_operation_acquire','build_operation_release','session_forget','profile_setup','pr_watch_now','terminal_governor_incidents','terminal_governor_grant','terminal_governor_stop','terminal_governor_remember_default','terminal_governor_memory_maxima','terminal_governor_set_memory_maximum',
+ // MCP server connections.
+ 'mcp_connect','mcp_call_tool','mcp_task_get','mcp_task_update','mcp_task_cancel','mcp_disconnect','mcp_connected',
+ // Spot search index.
+ 'spot_ingest','spot_search','spot_index_stats','spot_index_clear','spot_save_context_text',
 ]);
 export const isNativeCommand=command=>typeof command==='string'&&(NATIVE_COMMANDS.has(command)||NATIVE_PREFIXES.some(prefix=>command.startsWith(prefix)));
 /** How long the gateway waits for a command's answer: network Git and GitHub
  *  work, worktree setup and disk scans outlast the default 15 seconds. The
  *  desktop allows 15 seconds more for the trip itself. */
 const LONG_NATIVE=new Set(['git_clone','git_fetch','git_pull','git_push','git_worktree_add','git_worktree_add_pr','git_worktree_bootstrap','git_sync_probe','git_sync_apply','git_pr_merge_probe','git_branch_delete_remote','git_share_context','git_work_audit','cleanup_scan','cleanup_run','provenance_backfill']);
-export const nativeTimeoutMs=command=>LONG_NATIVE.has(command)?330_000:typeof command==='string'&&command.startsWith('gh_')?135_000:command==='profile_import_git'?45_000:15_000;
+const MCP_CALLS=new Set(['mcp_call_tool','mcp_task_get','mcp_task_update','mcp_task_cancel']);
+export const nativeTimeoutMs=command=>LONG_NATIVE.has(command)?330_000:MCP_CALLS.has(command)?300_000:command==='mcp_connect'?180_000:typeof command==='string'&&command.startsWith('gh_')?135_000:command==='profile_import_git'?45_000:15_000;

@@ -29,6 +29,8 @@ import {listWorkspaceFiles,searchWorkspaceFiles} from './file-search.mjs';
 import {agentWorkspaceCommands} from './agent-workspace.mjs';
 import {gitOpsCommands} from './git-ops.mjs';
 import {workspaceMiscCommands} from './workspace-misc.mjs';
+import {mcpClientCommands} from './mcp-client.mjs';
+import {spotIndexCommands} from './spot-index.mjs';
 import {workspaceActivity} from './activity.mjs';
 import {sessionProcessReader} from './session-processes.mjs';
 import {McpRegistry} from './mcp-servers.mjs';
@@ -92,7 +94,7 @@ async function metadata(file,fallback){try{return JSON.parse((await boundedRead(
 async function saveMetadata(file,value){await mkdir(HOME+'/.canopy',{recursive:true,mode:0o700});const target=HOME+'/.canopy/'+file;const temporary=target+'.'+randomUUID()+'.next';const data=JSON.stringify(value);if(Buffer.byteLength(data)>1048576)throw Error('Workspace metadata limit reached');await writeFile(temporary,data,{mode:0o600,flag:'wx'});await rename(temporary,target);changeCursor++;changes.push({sequence:changeCursor,change:{store:file,scope:ROOT,id:''}});if(changes.length>1024)changes.shift();}
 // Command families ported from the desktop's Rust commands, one module each.
 // Each takes the same containment helpers as the commands below.
-const familyContext={run,scoped,execute,home:HOME,root:ROOT,
+const familyContext={run,scoped,execute,home:HOME,root:ROOT,mcpRegistry,
  // Store mutations wake the IDE's caches through store_changes, as change::pulse does.
  pulse:(store,scope,id)=>{changeCursor++;changes.push({sequence:changeCursor,change:{store,scope:scope??ROOT,id:id??''}});if(changes.length>1024)changes.shift();}};
 familyContext.changed=familyContext.pulse;
@@ -109,7 +111,7 @@ familyContext.authorize=async(attemptId,cwd)=>{
 };
 const channels=new ChannelHub();
 export const NATIVE_FAMILIES=Object.assign({},...[
- workspaceToolsCommands,workspaceCleanupCommands,lspCommands,githubCommands,taskStoreCommands,workflowStoreCommands,structuredRunnerCommands,turnsCommands,provenanceCommands,gitOpsCommands,agentWorkspaceCommands,workspaceMiscCommands,
+ workspaceToolsCommands,workspaceCleanupCommands,lspCommands,githubCommands,taskStoreCommands,workflowStoreCommands,structuredRunnerCommands,turnsCommands,provenanceCommands,gitOpsCommands,agentWorkspaceCommands,workspaceMiscCommands,mcpClientCommands,spotIndexCommands,
 ].map(family=>family(familyContext)));
 const FAMILIES=NATIVE_FAMILIES;
 const CLIS=['claude','codex','amp','aider','agy','opencode','omp','cursor-agent','grok'];

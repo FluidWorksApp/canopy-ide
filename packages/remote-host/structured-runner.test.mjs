@@ -13,12 +13,12 @@ async function setup(authorize=async()=>{}){
 async function drain(hub,channel){const got=[];for(let i=0;i<100;i++){const r=(await hub.poll([channel],200))[channel];got.push(...r.messages);if(r.closed)break;}return got;}
 test('an attempt streams lines, keeps stdin for follow-ups, and reports its exit',async()=>{
  const {root,hub,commands}=await setup();
- const script="process.stdin.on('data',d=>{const t=String(d).trim();if(t==='bye'){console.error('done');process.exit(3);}console.log(JSON.stringify({echo:t}));});console.log('{\"ready\":true}');";
+ // Line by line: two writes may arrive in one chunk on a slow start.
+ const script="require('readline').createInterface({input:process.stdin}).on('line',t=>{if(t==='bye'){console.error('done');process.exit(3);}console.log(JSON.stringify({echo:t}));});console.log('{\"ready\":true}');";
  await commands.structured_runner_spawn({attemptId:'a1',controlToken:'t1',command:process.execPath,args:['-e',script],cwd:root,env:[['X','1']],onData:hub.open(id(1))});
  await assert.rejects(commands.structured_runner_spawn({attemptId:'a1',controlToken:'t1',command:process.execPath,args:[],cwd:root,onData:hub.open(id(9))}),/already active: a1/);
  await assert.rejects(commands.structured_runner_write({attemptId:'a1',controlToken:'wrong',line:'x'}),/control token does not match/);
  await commands.structured_runner_write({attemptId:'a1',controlToken:'t1',line:'hi'});
- await new Promise(r=>setTimeout(r,200));
  await commands.structured_runner_write({attemptId:'a1',controlToken:'t1',line:'bye'});
  assert.deepEqual(await drain(hub,id(1)),[{kind:'line',text:'{"ready":true}'},{kind:'line',text:'{"echo":"hi"}'},{kind:'stderr',text:'done'},{kind:'exit',code:3}]);
  await assert.rejects(commands.structured_runner_write({attemptId:'a1',controlToken:'t1',line:'x'}),/not running: a1/);
