@@ -8,7 +8,7 @@
 // a plan from less context beats no plan.
 
 import * as ipc from "../ipc";
-import { queryLedger } from "../ledger";
+import { listMemories } from "../memoryLedger";
 import type { PlanContext } from "./plan";
 
 const STOP = new Set(
@@ -71,8 +71,11 @@ export async function gatherPlanContext(dir: string, request: string): Promise<P
       .map(([p]) => rel(dir, p))
       .slice(0, 40);
   });
-  const memory = queryLedger(dir, { kinds: ["memory"], limit: 10 })
-    .then((rows) => rows.map(memoryLine).filter(Boolean))
+  // Only memories a person approved: the memory kind also holds proposed and
+  // quarantined suggestions (some from sessions that read web pages) and other
+  // features' caches, and none of those may steer a plan.
+  const memory = listMemories(dir)
+    .then((rows) => rows.filter((e) => e.status === "approved").slice(0, 10).map(memoryLine).filter(Boolean))
     .catch(() => [] as string[]);
   return { tree: await tree, relevant: await relevant, memory: await memory };
 }
