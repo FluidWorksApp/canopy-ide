@@ -21,6 +21,7 @@ import { LIFE_META, NO_ATTENTION, bucketFor, reclaimable, silenceLabel } from ".
 import type { Attention, LifeState } from "../../shared/agentLife";
 import { ashFor } from "../ash";
 import { markRestored } from "../restorable";
+import { openSessionDoc } from "../sessionDoc/events";
 import {
   lastHumanPrompt,
   useAgentSessions,
@@ -765,6 +766,27 @@ export function AgentsView({
                         }}
                       >
                         <RestartIcon size={12} /> Restore
+                      </Button>
+                      <Button
+                        size="sm"
+                        variant="ghost"
+                        title="Read this session as a document and hand it off"
+                        onClick={() =>
+                          openSessionDoc({
+                            kind: "session",
+                            sessionId: d.session_id,
+                            agent: agentId,
+                            cwd: runIn,
+                            digest: d,
+                            resumeCommand: cmd,
+                            onResume: () => {
+                              markRestored(d.session_id);
+                              onRestore?.(runIn, cmd, agentId, agentId);
+                            },
+                          })
+                        }
+                      >
+                        Document
                       </Button>
                       <Button
                         icon

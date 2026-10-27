@@ -34,7 +34,13 @@ export type ReportCard={type:'report';v:1;agent:string;title:string;body:string;
 export type ReviewRequestCard={type:'review-request';v:1;repo:RepoRef;number:number;title:string;head:string;reviewers:string[]};
 export type ReviewOutcome='approved'|'changes-requested'|'commented';
 export type ReviewOutcomeCard={type:'review-outcome';v:1;request:string;repo:RepoRef;number:number;outcome:ReviewOutcome;head?:string};
-export type Card=PrCard|FileCard|DiffCard|TerminalCard|ReportCard|ReviewRequestCard|ReviewOutcomeCard;
+/** A session handed off to a teammate: the packet's markdown (rendered as
+ *  plain text on the other side — it is untrusted), which agent CLI the session
+ *  ran on, and its id, so the recipient can see which conversation it was. The
+ *  recipient's "Take over" starts a fresh agent of their own from the packet;
+ *  nothing about the sender's machine is named beyond the directory's name. */
+export type HandoffCard={type:'handoff';v:1;title:string;agent:string;session:string;packet:string;dir?:string;repo?:RepoRef;truncated?:boolean};
+export type Card=PrCard|FileCard|DiffCard|TerminalCard|ReportCard|ReviewRequestCard|ReviewOutcomeCard|HandoffCard;
 export type CardType=Card['type'];
 
 // ---------- limits ----------
@@ -46,6 +52,8 @@ export const LIMITS={
  /** How much of terminal output / a report goes into the fallback text. */
  excerptBytes:1024,
  reviewers:20,maxLine:1_000_000,maxSpan:2000,maxNumber:1_000_000_000,slug:200,
+ /** A handoff packet's markdown. Under cardBytes with room for the rest. */
+ packetBytes:11*1024,
 } as const;
 const bytes=(value:string)=>new TextEncoder().encode(value).length;
 export const cardBytes=(card:Card)=>bytes(JSON.stringify(card));
@@ -123,6 +131,8 @@ const optional=<T,>(value:unknown,check:(v:unknown)=>v is T)=>value===undefined|
 const OUTCOMES:readonly ReviewOutcome[]=['approved','changes-requested','commented'];
 const title=(v:unknown):v is string=>safeLine(v,LIMITS.title);
 const repoCopy=(r:RepoRef):RepoRef=>({host:r.host,slug:r.slug});
+/** An agent CLI's conversation id: uuid-like, never a path. */
+const SESSION_ID=/^[A-Za-z0-9_-]{1,128}$/;
 
 /** A well formed card of a type this client knows — a fresh object holding only
  *  the known fields — or undefined. Never throws. */
@@ -170,6 +180,11 @@ export function parseCard(value:unknown):Card|undefined{
     if(!exact(c,['type','v','request','repo','number','outcome','head'])||typeof c.request!=='string'||!UUID.test(c.request)||!validRepo(c.repo)||!validNumber(c.number)||!OUTCOMES.includes(c.outcome as ReviewOutcome)||!optional(c.head,validSha))return undefined;
     return fits({type:'review-outcome',...base,request:c.request,repo:repoCopy(c.repo),number:c.number,outcome:c.outcome as ReviewOutcome,...(c.head?{head:c.head as string}:{})});
    }
+   case 'handoff':{
+    if(!exact(c,['type','v','title','agent','session','packet','dir','repo','truncated'])||!title(c.title)||!safeLine(c.agent,64)||typeof c.session!=='string'||!SESSION_ID.test(c.session)||!safeBlock(c.packet,LIMITS.packetBytes)||!optional(c.dir,(v):v is string=>safeLine(v,200)&&!/[\\/]/.test(v))||!optional(c.repo,validRepo))return undefined;
+    if(c.truncated!==undefined&&typeof c.truncated!=='boolean')return undefined;
+    return fits({type:'handoff',...base,title:c.title,agent:c.agent,session:c.session,packet:c.packet,...(c.dir!==undefined?{dir:c.dir as string}:{}),...(c.repo?{repo:repoCopy(c.repo as RepoRef)}:{}),...(c.truncated!==undefined?{truncated:c.truncated as boolean}:{})});
+   }
    default:return undefined;
   }
  }catch{return undefined;}
@@ -202,7 +217,7 @@ export function cardUrl(card:Card):string|undefined{
   case 'file':return blobUrl(card.repo,card.rev,card.path,card.lines);
   case 'diff':return card.pr?`${prUrl(card.repo,card.pr)}${isGitLab(card.repo.host)?'/diffs':'/files'}`:compareUrl(card.repo,card.base,card.head);
   case 'report':return card.repo&&card.pr?prUrl(card.repo,card.pr):undefined;
-  case 'terminal':return undefined;
+  case 'terminal':case 'handoff':return undefined;
  }
 }
 const linesLabel=(l?:LineRange)=>l?(l.start===l.end?`:${l.start}`:`:${l.start}-${l.end}`):'';
@@ -218,6 +233,7 @@ export function cardSummary(card:Card):string{
   case 'report':return `Report from ${card.agent}: ${card.title}`;
   case 'review-request':return `Review requested: ${card.repo.slug}#${card.number} · head ${short(card.head)}: ${card.title}`;
   case 'review-outcome':return `${OUTCOME_ICON[card.outcome]} ${OUTCOME_LABEL[card.outcome]} ${card.repo.slug}#${card.number} (via Canopy)`;
+  case 'handoff':return `Handoff: ${card.title}${card.repo?` (${card.repo.slug})`:''}`;
  }
 }
 const excerpt=(value:string)=>{const {text,clipped}=clipBytes(value,LIMITS.excerptBytes);return clipped?`${text}…`:text;};
@@ -230,6 +246,9 @@ export function cardText(card:Card,note=''):string{
  parts.push(cardSummary(card));
  if(card.type==='terminal'){if(card.command)parts.push(`$ ${card.command}`);parts.push(excerpt(card.output));}
  if(card.type==='report')parts.push(excerpt(card.body));
+ // The whole packet, not an excerpt: a teammate on an older Canopy must still
+ // be able to take the work over by reading it.
+ if(card.type==='handoff')parts.push(card.packet);
  const url=cardUrl(card);if(url)parts.push(url);
  return parts.join('\n');
 }
@@ -287,6 +306,7 @@ export function cardFreeText(card:Card):string{
   case 'report':return card.body;
   case 'file':return card.snippet??'';
   case 'diff':return card.patch;
+  case 'handoff':return card.packet;
   default:return '';
  }
 }

@@ -1609,6 +1609,32 @@ export function SettingsDialog({ onClose, initialTab = "appearance" }: SettingsD
                     }
                   />
                 </Item>
+                {/* Session documents (src/sessionDoc). */}
+                <Item
+                  name="Session documents"
+                  desc="An agent session opened as a document: goal, turns, files, decisions, and a hand-off packet for whoever continues it."
+                >
+                  <Checkbox
+                    checked={s.sessionDocAutoSummary}
+                    onChange={(v) => patch({ sessionDocAutoSummary: v })}
+                    label="Write a summary when a session document opens"
+                    hint={
+                      s.sessionDocAutoSummary
+                        ? "The brain reads the session in the background (the cheaper model) the first time you open it and after each new turn."
+                        : "Summaries are written only when you press “Write summary”."
+                    }
+                  />
+                  <Checkbox
+                    checked={s.commitSessionTrailers}
+                    onChange={(v) => patch({ commitSessionTrailers: v })}
+                    label="Add Agent-Session trailers to commits"
+                    hint={
+                      s.commitSessionTrailers
+                        ? "Commits from the Changes panel name each agent session whose edits they include, so a line can be traced back to its session."
+                        : "Commits are made exactly as you write them."
+                    }
+                  />
+                </Item>
                 <Item
                   name="Memory monitoring prompts"
                   desc="Choose whether terminal memory warnings and allowance decisions appear while you work."

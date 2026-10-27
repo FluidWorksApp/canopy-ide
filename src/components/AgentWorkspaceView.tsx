@@ -20,6 +20,7 @@ import { ashFor } from "../ash";
 import { Mascot } from "./Mascot";
 import { AgentRuntime } from "./AgentRuntime";
 import { TurnTimeline } from "./TurnTimeline";
+import { openSessionDoc } from "../sessionDoc/events";
 import { LIFE_META, agentLife, type Life } from "../../shared/agentLife";
 import { AgentIcon, GitBranchIcon, RestartIcon } from "./icons";
 import { sessionCost } from "../pricing";
@@ -1482,6 +1483,24 @@ export function AgentWorkspaceView({
                 </div>
               )}
             </div>
+          )}
+          {/* The session as a readable document, with Hand off (sessionDoc/). */}
+          {sessionId && (
+            <Button size="sm"
+              title="Read this session as a document — goal, turns, files, decisions — and hand it off"
+              onClick={() =>
+                openSessionDoc({
+                  kind: "session",
+                  sessionId,
+                  agent,
+                  cwd: digest?.resume_cwd || cwd,
+                  repo,
+                  digest,
+                  live: digest?.state !== "ended",
+                })
+              }>
+              Open as document
+            </Button>
           )}
           <Button icon className="aw-refresh"
             title="Refresh — re-read this agent's changes"

@@ -17,6 +17,7 @@ import {Button} from './ui';
 import {CheckIcon,CommitIcon,CopyIcon,DocumentIcon,GlobeIcon} from './icons';
 import type {ChatMessage} from '../teamMessaging/client';
 import {OUTCOME_ICON,OUTCOME_LABEL,cardDraft,cardOf,cardUrl,foldOutcomes,type Card,type CardExtensions,type ReviewOutcome,type ReviewOutcomeCard,type ReviewRequestCard} from '../teamMessaging/cardSchema';
+import {openSessionDoc} from '../sessionDoc/events';
 import './chatCard.css';
 
 /** Everything a card reaches outside itself, injectable for tests. */
@@ -69,7 +70,7 @@ const ipcChatCardDeps=():ChatCardDeps=>ipcDeps??=({
 
 const short=(sha:string)=>sha.slice(0,7);
 const lines=(l?:{start:number;end:number})=>l?(l.start===l.end?`:${l.start}`:`:${l.start}-${l.end}`):'';
-const KIND:Record<Card['type'],string>={pr:'Pull request',file:'File',diff:'Diff',terminal:'Terminal output',report:'Agent report','review-request':'Review requested','review-outcome':'Review'};
+const KIND:Record<Card['type'],string>={pr:'Pull request',file:'File',diff:'Diff',terminal:'Terminal output',report:'Agent report','review-request':'Review requested','review-outcome':'Review',handoff:'Hand-off'};
 /** Long text blocks start folded to this many lines. */
 const FOLD_LINES=12;
 
@@ -263,6 +264,17 @@ function CardBody({card,message,userId,messages,name,onReply,deps}:{card:Card;me
     {own||!reviewer?<div className="chat-card-actions"><OpenButtons action={action} card={card} deps={deps}/></div>:<ReviewControls card={card} request={message} action={action} deps={deps} onReply={onReply}/>}
    </div>;
   }
+  case 'handoff':return <div className="chat-card is-agent-made" data-type="handoff">
+   {head(<span aria-hidden="true">⇄</span>,card.repo?card.repo.slug:card.dir??'')}
+   <div className="chat-card-title">{card.title}</div>
+   <small className="chat-card-byline">A {card.agent} session handed off{message.sender===userId?'':` by ${name(message.sender)}`}</small>
+   <TextBlock text={card.packet} label="Hand-off packet"/>
+   {card.truncated&&<small className="chat-card-why">The packet was shortened to fit a chat message.</small>}
+   <div className="chat-card-actions">
+    {message.sender!==userId&&<Button size="sm" variant="accent" onClick={()=>openSessionDoc({kind:'received',title:card.title,agent:card.agent,session:card.session,packet:card.packet,from:name(message.sender),...(card.dir?{dir:card.dir}:{}),...(card.repo?{repo:card.repo}:{})})}>Take over</Button>}
+    <CopyButton text={card.packet} deps={deps} label="Copy packet"/>
+   </div>
+  </div>;
   case 'review-outcome':return <div className="chat-card is-compact" data-type="review-outcome">
    <span>{OUTCOME_ICON[card.outcome]} {OUTCOME_LABEL[card.outcome]} {card.repo.slug}#{card.number}{card.head?` at ${short(card.head)}`:''}</span>
   </div>;

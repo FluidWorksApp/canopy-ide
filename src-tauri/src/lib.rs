@@ -57,6 +57,7 @@ mod remind;
 mod remote;
 mod research;
 mod selftest;
+mod session_doc;
 mod session_transfer;
 mod shortcuts;
 mod snapshot;
@@ -685,6 +686,7 @@ pub fn run() {
             ledger::ledger_query,
             ledger::ledger_root,
             ledger::ledger_update_status,
+            session_doc::session_transcript_tail,
             tasks::task_reserve,
             tasks::task_attempt_reserve,
             tasks::task_attempt_start,

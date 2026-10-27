@@ -460,6 +460,15 @@ export interface Settings {
   /** Per-feature daily caps in USD, keyed by brain feature tag. A feature with
    *  no entry is capped only by the daily total. */
   brainFeatureBudgetsUsd: Record<string, number>;
+  /** Session documents (src/sessionDoc): when one opens and has no current
+   *  written summary, ask the brain for one on the background tier. Off = the
+   *  summary is written only when the person presses the button. */
+  sessionDocAutoSummary: boolean;
+  /** Commits made from Canopy's Changes panel get an `Agent-Session:` trailer
+   *  for each agent session whose journaled edits are in the commit — the
+   *  session-to-lines provenance a reviewer can follow back. Off by default:
+   *  it changes what lands in other people's history. */
+  commitSessionTrailers: boolean;
   /** Connect Claude Code to Canopy as its IDE, the way it connects to VS Code:
    *  proposed edits open as a diff to accept, tweak or reject, the editor
    *  selection reaches the prompt, and the CLI reads diagnostics off Canopy's
@@ -672,6 +681,8 @@ export const DEFAULTS: Settings = {
   brainBackgroundModel: "",
   brainDailyBudgetUsd: null,
   brainFeatureBudgetsUsd: {},
+  sessionDocAutoSummary: true,
+  commitSessionTrailers: false,
   claudeIdeIntegration: true,
   turnRollback: true,
   notificationPopupsEnabled: true,

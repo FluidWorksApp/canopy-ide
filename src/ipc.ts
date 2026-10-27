@@ -4323,6 +4323,33 @@ export const sessionDigests = (roots?: string[]) =>
 export const sessionForget = (sessionId: string) =>
   invoke<void>("session_forget", { sessionId });
 
+// ---------- session documents (src-tauri/src/session_doc.rs) ----------
+
+/** One message from an agent CLI's own transcript. `message` = a store that
+ *  does not say who wrote it. Tool calls and injected context are skipped. */
+export interface TranscriptLine {
+  role: "user" | "assistant" | "message";
+  text: string;
+}
+
+/** The end of one conversation's transcript, oldest first: at most
+ *  `maxBytes` read from the file's end. Empty when the CLI keeps no transcript
+ *  Canopy can read. `roots` find the per-project stores. */
+export const sessionTranscriptTail = (args: {
+  sessionId: string;
+  agent: string;
+  roots: string[];
+  profile?: string | null;
+  maxBytes?: number;
+}) =>
+  invoke<TranscriptLine[]>("session_transcript_tail", {
+    sessionId: args.sessionId,
+    agent: args.agent,
+    roots: args.roots,
+    profile: args.profile ?? null,
+    maxBytes: args.maxBytes ?? null,
+  });
+
 // ---------- team relay ----------
 
 export interface RelayMember {
