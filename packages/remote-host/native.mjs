@@ -26,7 +26,7 @@ import {importAgentAccounts,importAccountProfiles} from './agent-accounts.mjs';
 import {CloneJobs} from './git-clone.mjs';
 import {repositorySource} from './git-source.mjs';
 import {agentUsageReader} from './agent-usage.mjs';
-import {metricsReader} from './workspace-metrics.mjs';
+import {metricsReader,sessionUsage} from './workspace-metrics.mjs';
 import {writeWorkspaceFile} from './file-write.mjs';
 import {WorkspaceUploads} from './file-upload.mjs';
 import {listWorkspaceFiles,searchWorkspaceFiles} from './file-search.mjs';
@@ -59,6 +59,9 @@ import {HOST_PROTOCOL,NATIVE_COMMANDS,NATIVE_PREFIXES} from './native-commands.m
 import {WorkspaceGates} from './gates.mjs';
 const sessionProcesses=sessionProcessReader();
 const workspaceMetrics=metricsReader();
+// The governor's latest measured pass over every live terminal, whoever
+// started it: workspace_metrics attributes usage to people from it.
+let lastSessionPass=null;
 const execute=promisify(execFile);
 const ROOT='/workspace', HOME='/home/agent', STORE=HOME+'/.canopy/ide-projects.json';
 const browsers=new BrowserStreams({home:HOME});
@@ -124,8 +127,8 @@ familyContext.setupAgent=async(agent,id)=>{const profile=(await profiles.list())
   const response=await runnerFetch('/sessions');if(!response.ok)throw Error('runner sessions unavailable');
   const meta=await metadata('ide-terminals.json',{});
   const sessions=(await response.json()).filter(x=>x.exitCode==null).slice(0,32).map(x=>({...x,requestId:meta[String(x.id)]?.requestId}));
-  return (await measure(sessions)).map(stat=>({id:stat.id,bytes:stat.total_mem_bytes,cliKey:cliKeyOf(stat.agent_hint),pids:stat.procs.map(p=>p.pid)}));
- },cgroups:new SessionCgroups()});
+  return (await measure(sessions)).map(stat=>({id:stat.id,bytes:stat.total_mem_bytes,cliKey:cliKeyOf(stat.agent_hint),pids:stat.procs.map(p=>p.pid),cpu:stat.total_cpu,kind:meta[String(stat.id)]?.run?'build':'terminal',meta:meta[String(stat.id)]}));
+ },cgroups:new SessionCgroups(),observed:sessions=>{lastSessionPass={at:Date.now(),sessions};}});
  // Terminal cgroups and their limits hold whether or not an IDE is watching.
  familyContext.governorSampler.start();
  familyContext.stopSession=async id=>{const response=await runnerFetch(`/sessions/${id}/stop`,{method:'POST',body:'{}'});if(!response.ok)throw Error(`the workspace refused to stop terminal ${id}`);};
@@ -185,7 +188,7 @@ export async function nativeInvoke(command,args={}){
   if(command==='receipt_isolate')return receiptIsolate(args,{scoped,home:HOME});
   if(command==='receipt_release')return receiptRelease(args,{scoped});
   if(command==='workspace_activity')return workspaceActivity();
-  if(command==='workspace_metrics')return workspaceMetrics();
+  if(command==='workspace_metrics')return {...await workspaceMetrics(),sessions:sessionUsage(lastSessionPass)};
   if(command==='workspace_browser_request'){
     const directory=HOME+'/.canopy/browser-requests';
     let files;try{files=await readdir(directory);}catch(e){if(e.code==='ENOENT')return null;throw e;}

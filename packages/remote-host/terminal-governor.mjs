@@ -238,8 +238,10 @@ export async function workspaceMemory(read=file=>readFile(file,'utf8')){
 }
 
 /** Sample every `intervalMs` (unref'd) once started; `sample()` returns the
- *  live terminals as {id, bytes, cliKey}. A failed sample is skipped. */
-export function governorSampler({governor,sample,memory=workspaceMemory,intervalMs=2000,cgroups=null}){
+ *  live terminals as {id, bytes, cliKey}. A failed sample is skipped.
+ *  `observed` gets each pass's terminals once measured (cgroup-charged bytes
+ *  and working set when terminals have cgroups). */
+export function governorSampler({governor,sample,memory=workspaceMemory,intervalMs=2000,cgroups=null,observed=null}){
  let timer=null,busy=false;
  const tick=async()=>{
   if(busy)return;busy=true;
@@ -253,7 +255,7 @@ export function governorSampler({governor,sample,memory=workspaceMemory,interval
      for(const o of observations){
       await cgroups.place(o.id,o.pids??[]);
       const charged=await cgroups.sample(o.id);
-      if(charged)o.bytes=charged.current;
+      if(charged){o.bytes=charged.current;o.workingSet=charged.workingSet;}
      }
      await governor.observe(observations,host.total,host.available);
      for(const s of governor.snapshot().sessions)if(s.state!=='exited')await cgroups.limit(s.id,s.allowance_bytes,s.max_allowance_bytes);
@@ -267,6 +269,7 @@ export function governorSampler({governor,sample,memory=workspaceMemory,interval
     await governor.observe(observations,host.total,host.available);
     if(cgroups)governor.capability=monitorCapability(state?.detail);
    }
+   observed?.(observations);
   }
   catch{/* The runner or /proc may be momentarily unavailable. */}
   finally{busy=false;}

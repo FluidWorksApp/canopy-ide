@@ -1,5 +1,5 @@
 import { afterEach, expect, it, vi } from "vitest";
-import { onAppStats, onPtyStats, type AppStats } from "./ipc";
+import { onAppStats, onPtyStats, workspaceAppStats, type AppStats } from "./ipc";
 import { installHost } from "./host";
 import type {Host} from "./host/contract";
 import { mockCommands } from "./test/setup";
@@ -51,4 +51,27 @@ it("samples the selected workspace in the same resource subscription and stops w
  const restore=installHost({kind:"socket",invoke,listen:vi.fn(),channel:vi.fn()} as unknown as Host);
  const readings:AppStats[]=[];let stop:(()=>void)|undefined;
  try{stop=await onAppStats(s=>readings.push(s));await vi.advanceTimersByTimeAsync(0);expect(readings.at(-1)?.workspace?.available).toBe(true);expect(readings.at(-1)?.mem_bytes).toBe(1024);expect(readings.at(-1)?.workspace?.elasticCpu?.maxCpus).toBe(4);unavailable=true;await vi.advanceTimersByTimeAsync(2000);expect(readings.at(-1)?.workspace?.available).toBe(false);stop();stop=undefined;const calls=invoke.mock.calls.length;await vi.advanceTimersByTimeAsync(4000);expect(invoke.mock.calls.length).toBe(calls);}finally{stop?.();restore();}
+});
+
+it("adds this computer's free memory to the local app's footprint", async () => {
+  vi.useFakeTimers();
+  mockCommands({
+    app_stats: () => ({ cpu: 1, mem_bytes: 2, procs: 1, includes_webviews: true }),
+    memory_info: () => ({ level: 0, total_bytes: 16, available_bytes: 5, used_bytes: 11, free_bytes: 1 }),
+  });
+  const readings: AppStats[] = [];
+  const stop = await onAppStats((s) => readings.push(s));
+  await vi.advanceTimersByTimeAsync(0);
+  expect(readings.at(-1)?.system).toEqual({ availableBytes: 5, totalBytes: 16 });
+  stop();
+});
+
+it("reads a workspace's working set, not memory.current, and keeps older hosts as they were", () => {
+  const sessions = [{ id: 1, memoryBytes: 3, cpusUsed: 0.5, owner: null }];
+  const fresh = workspaceAppStats({ cpuPercent: 25, memoryBytes: 21, memoryLimitBytes: 28, cpus: 8, workingSetBytes: 8, availableBytes: 20, reclaimableBytes: 13, cpusUsed: 2, cpusAvailable: 6, sessions });
+  expect(fresh.mem_bytes).toBe(8);
+  expect(fresh.workspace).toMatchObject({ memoryBytes: 21, workingSetBytes: 8, availableBytes: 20, reclaimableBytes: 13, cpusUsed: 2, cpusAvailable: 6, sessions });
+  const older = workspaceAppStats({ cpuPercent: 25, memoryBytes: 21, memoryLimitBytes: 28, cpus: 8 });
+  expect(older.mem_bytes).toBe(21);
+  expect(older.workspace && "workingSetBytes" in older.workspace).toBe(false);
 });

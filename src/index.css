@@ -28802,6 +28802,18 @@ a.btn-sm {
 .status-breakdown .bd-resource-grid dd {text-align:right;font-variant-numeric:tabular-nums;}
 .status-breakdown .bd-resource-muted {color:var(--text-muted);}
 .status-breakdown p.bd-workspace-note {padding:0;margin:10px 0 0;}
+/* Availability, not usage: amber when memory or CPU free is running short,
+   red when memory is nearly gone (WorkspaceResources.tsx). Weight carries the
+   signal as well as colour. */
+.res-low,.status-model-btn .res-low {color:var(--warn);font-weight:600;}
+.res-critical,.status-model-btn .res-critical {color:var(--danger);font-weight:600;}
+.status-breakdown .bd-resource-table {width:100%;border-collapse:collapse;font-variant-numeric:tabular-nums;}
+.status-breakdown .bd-resource-table caption {text-align:left;}
+.status-breakdown .bd-resource-table th,.status-breakdown .bd-resource-table td {padding:3px 0;text-align:right;font-weight:400;white-space:nowrap;}
+.status-breakdown .bd-resource-table th[scope=row],.status-breakdown .bd-resource-table thead th:first-child {text-align:left;white-space:normal;overflow-wrap:anywhere;padding-right:12px;}
+.status-breakdown .bd-resource-table td + td {padding-left:12px;}
+.status-breakdown .bd-resource-table thead th {color:var(--text-muted);font-size:var(--fs-xs);}
+.status-breakdown .bd-resource-you th[scope=row] {font-weight:600;}
 
 .workspace-startup{padding:20px;border:1px solid var(--border);border-radius:8px;margin:16px 0}.workspace-startup ol{list-style:none;padding:0;display:grid;gap:16px;margin:20px 0}.workspace-startup li{display:flex;align-items:center;gap:12px;opacity:.5}.workspace-startup li.current,.workspace-startup li.complete{opacity:1}.workspace-startup li.current{font-weight:700}.workspace-startup li span{display:inline-grid;place-items:center;width:24px;height:24px;border:1px solid currentColor;border-radius:50%}.workspace-startup p{line-height:1.5}
 
