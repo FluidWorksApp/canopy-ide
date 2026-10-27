@@ -113,12 +113,19 @@ The deployed control plane is the website service (Vercel; `lib/canopy/`, `api/`
    if(inserted.rows.length)await enforceAfterDebit(client,{userId:w.owner_id,workspaceId:null});
    ```
 
+   Import it in both files: `import {enforceAfterDebit} from './credit-enforcement.mjs';`. `credits.mjs`'s `debitCredits` has no callers in the deployed service, so it needs no hook. A pause that the lifecycle refuses is deferred to the sweep and never aborts the metering transaction, which debits every running workspace at once.
+
 4. `api/reconcile.ts`, after metering:
 
    ```ts
+   import {enforceCreditPolicy,creditMailer} from '../lib/canopy/credit-enforcement.mjs';
+   import {sendEmail} from '../lib/canopy/email.mjs';
+   // …
    const credit=await enforceCreditPolicy(pool,{send:creditMailer({sendEmail,from:process.env.CANOPY_BILLING_FROM??process.env.CANOPY_AUTH_FROM})});
    // include `credit` in the JSON response
    ```
+
+   The route has `maxDuration: 60`. The sweep handles up to 100 accounts and 100 workspaces and sends up to 20 emails per run; lower `limit` (on `enforceCreditPolicy` and `deliverCreditNotices`) if the cron ever approaches the limit.
 
 5. `api/operations.ts`, in the final `catch`, pass the structured body through so the desktop can show the balance:
 
@@ -132,6 +139,11 @@ The deployed control plane is the website service (Vercel; `lib/canopy/`, `api/`
 6. `api/credits.ts`: spread `await creditSummary(pool,user.id)` into the GET response (keep the existing fields), and accept POST:
 
    ```ts
+   import {mayMutate} from '../lib/canopy/principal.mjs';
+   import {creditSummary,requestMoreCredit,deliverCreditRequest,creditMailer} from '../lib/canopy/credit-enforcement.mjs';
+   import {sendEmail} from '../lib/canopy/email.mjs';
+   // GET: res.json({...existingFields,...await creditSummary(pool,user.id)})
+   // The handler currently answers 405 to anything but GET; handle this first.
    if(req.method==='POST'&&req.body?.action==='request-credit'){
     if(!mayMutate(req,user))return res.status(403).json({error:'Origin not allowed'});
     const client=await pool.connect();let result;

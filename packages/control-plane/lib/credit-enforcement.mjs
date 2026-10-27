@@ -42,20 +42,22 @@ export async function syncCreditNotices(client,userId,balanceUsd,{env=process.en
  * transaction (and normally the workspace and account locks). Uses a savepoint
  * so a refused lifecycle request never aborts the caller's debit. Returns
  * 'requested' | 'already-stopping' | 'deferred'. */
-export async function pauseWorkspaceForCredit(client,ownerId,workspaceId,{balanceUsd}={}){
+export async function pauseWorkspaceForCredit(client,ownerId,workspaceId,{balanceUsd,request=requestOperation,log=console}={}){
  const w=(await client.query('SELECT id,owner_id,desired_state,deleted_at FROM workspace WHERE id=$1 FOR UPDATE',[workspaceId])).rows[0];
  if(!w||w.owner_id!==ownerId||w.deleted_at||w.desired_state!=='running')return 'already-stopping';
  const active=(await client.query("SELECT action FROM workspace_operation WHERE workspace_id=$1 AND status IN('pending','running')",[workspaceId])).rows[0];
  if(active&&['hibernate','delete'].includes(active.action))return 'already-stopping';
  await client.query('SAVEPOINT credit_pause');
  try{
-  const operation=await requestOperation(client,ownerId,workspaceId,{action:'hibernate',confirmInterrupt:true,requestKey:randomUUID()});
+  const operation=await request(client,ownerId,workspaceId,{action:'hibernate',confirmInterrupt:true,requestKey:randomUUID()});
   if(operation?.id)await client.query('UPDATE workspace_operation SET context=context||$2::jsonb WHERE id=$1',[operation.id,JSON.stringify({creditPause:{balanceUsd:balanceUsd==null?null:String(balanceUsd),cutoffUsd:String(CUTOFF_USD)}})]);
   await client.query('RELEASE SAVEPOINT credit_pause');return 'requested';
  }catch(error){
   await client.query('ROLLBACK TO SAVEPOINT credit_pause');
-  // A provider step in progress (409) is retried by the next sweep.
-  if(error?.code===409)return 'deferred';
+  // A refused lifecycle request (a provider step in progress, 409, or any
+  // other lifecycle status) is retried by the next sweep. It must not abort
+  // the caller: metering debits every workspace in one transaction.
+  if(typeof error?.code==='number'){if(error.code!==409)log?.warn?.('Credit pause deferred',error.code,error.message);return 'deferred';}
   throw error;
  }
 }

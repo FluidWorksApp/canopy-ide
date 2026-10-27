@@ -1,7 +1,7 @@
 import test from 'node:test';import assert from 'node:assert/strict';
 import {noticeLevels,creditStatus,computeAllowed,amountToRestoreUsd,enforcementMode,assertComputeAllowed,CreditExhaustedError,formatUsd,CUTOFF_USD} from './credit-policy.mjs';
 import {requestOperation} from './lifecycle.mjs';
-import {enforceAfterDebit,syncCreditNotices,grantCredit} from './credit-enforcement.mjs';
+import {enforceAfterDebit,syncCreditNotices,grantCredit,pauseWorkspaceForCredit} from './credit-enforcement.mjs';
 import {creditNoticeEmail,creditRequestEmail} from './credit-email.mjs';
 
 test('thresholds: low below $5, zero at $0, final at -$5, paused at -$10 inclusive',()=>{
@@ -73,4 +73,10 @@ test('reminder emails carry the exact balance, what happens next and how to get 
 test('credit request email escapes user-provided text and names the grant command',()=>{
  const mail=creditRequestEmail({name:'<b>Sam</b>',email:'sam@example.invalid',balanceUsd:'-64.48',note:'<script>x</script>',requestId:'req-1'});
  assert.match(mail.subject,/sam@example\.invalid.*−\$64\.48/);assert.ok(!mail.html.includes('<script>'));assert.ok(!mail.html.includes('<b>Sam'));assert.match(mail.text,/grant-credit\.mjs --email sam@example\.invalid/);
+});
+test('a refused pause is deferred to the sweep and never aborts the caller (metering debits every workspace in one transaction)',async()=>{
+ const sql=[];const db={query:async text=>{sql.push(text);if(text.startsWith('SELECT id,owner_id'))return {rows:[{id:'w',owner_id:'u',desired_state:'running',deleted_at:null}]};return {rows:[]};}};
+ for(const code of [400,409,410])assert.equal(await pauseWorkspaceForCredit(db,'u','w',{request:async()=>{throw Object.assign(Error('refused'),{code});},log:null}),'deferred');
+ assert.equal(sql.filter(s=>s==='ROLLBACK TO SAVEPOINT credit_pause').length,3);
+ await assert.rejects(pauseWorkspaceForCredit(db,'u','w',{request:async()=>{throw Error('connection lost');},log:null}),/connection lost/);
 });
