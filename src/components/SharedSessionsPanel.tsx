@@ -7,7 +7,18 @@ import {Button} from './ui';
 import './sharedSessions.css';
 import {CopyLinkButton} from './CopyLinkButton';
 import {SHARED_SESSION_FOCUS_EVENT,takePendingSession} from '../readableLinks';
-type Publication={id:string;projectId:string;title:string;mode:'view'|'interact';expiresAt:number;collaborative?:boolean};
+import {openSessionDoc} from '../sessionDoc/events';
+import {liveTeamSessions} from '../teamMessaging/session';
+/** `room`: the terminal belongs to a live agent session its owner opened to
+ * teammates (src/liveSession), which a viewer can join. */
+type Publication={id:string;projectId:string;title:string;mode:'view'|'interact';expiresAt:number;collaborative?:boolean;room?:{id:string;owner:string;team:string}};
+/** Join the live session a shared terminal belongs to, when this account is
+ * in the owner's team and is not the owner. */
+function joinLive(workspaceId:string,p:Publication){
+ const room=p.room,team=room&&liveTeamSessions().find(s=>s.team===room.team);
+ if(!room||!team||team.user===room.owner)return undefined;
+ return()=>openSessionDoc({kind:'join',team:room.team,owner:room.owner,ownerName:team.members()[room.owner],room:room.id,title:p.title,agent:'agent',terminal:{workspace:workspaceId,publication:p.id}});
+}
 type Session={id:number;title:string;exitCode:number|null};
 export function SharedSessionsPanel({workspaceId,owner,projects}:{workspaceId:string;owner:boolean;projects?:{id:string;name:string}[]}){
  const [rows,setRows]=useState<Publication[]>([]),[local,setLocal]=useState<Session[]>([]),[selected,setSelected]=useState<Publication|null>(null),[open,setOpen]=useState(false),[loading,setLoading]=useState(false),[busy,setBusy]=useState(false),[error,setError]=useState('');
@@ -31,7 +42,7 @@ export function SharedSessionsPanel({workspaceId,owner,projects}:{workspaceId:st
    <header><p>Let teammates watch or join a terminal in this workspace.</p><Button size="sm" variant="ghost" disabled={loading||busy} title="Refresh shared sessions" aria-label="Refresh sessions" onClick={()=>void refresh()}>↻</Button></header>
    {loading&&!rows.length&&<p role="status">Loading shared sessions…</p>}{error&&<p role="alert">{error}</p>}
    {!loading&&!rows.length&&!error&&<p className="shared-session-empty">Nothing shared yet. Your terminals stay private until you share one.</p>}
-   {rows.map(p=><div className="shared-session-row" key={p.id}><Button size="sm" onClick={()=>setSelected(p)}>{p.title}</Button><span>{p.mode==='interact'?'Can interact':'View only'} · {projectChoices.find(item=>item.id===p.projectId)?.name??p.projectId}</span><CopyLinkButton target={{kind:'session',workspaceId,projectId:p.projectId,publicationId:p.id,title:p.title}}/>{owner&&<Button size="sm" variant="danger" disabled={busy} onClick={()=>void action({action:'revoke',id:p.id})}>{p.collaborative?'Stop sharing and shell':'Stop sharing'}</Button>}</div>)}
+   {rows.map(p=><div className="shared-session-row" key={p.id}><Button size="sm" onClick={()=>setSelected(p)}>{p.title}</Button><span>{p.mode==='interact'?'Can interact':'View only'} · {projectChoices.find(item=>item.id===p.projectId)?.name??p.projectId}</span><CopyLinkButton target={{kind:'session',workspaceId,projectId:p.projectId,publicationId:p.id,title:p.title}}/>{(()=>{const join=joinLive(workspaceId,p);return join?<Button size="sm" variant="accent" title="Watch this agent session live with its owner and ask them to pass messages to the agent" onClick={join}>Join</Button>:null;})()}{owner&&<Button size="sm" variant="danger" disabled={busy} onClick={()=>void action({action:'revoke',id:p.id})}>{p.collaborative?'Stop sharing and shell':'Stop sharing'}</Button>}</div>)}
    {selected&&<section className="shared-session-preview"><header><strong>{selected.title} · {selected.mode==='interact'?'Collaborative shell':'View only'}</strong><Button size="sm" onClick={()=>setSelected(null)}>Close terminal</Button></header><RemoteTerminal key={selected.id} client={client} workspaceId={workspaceId} sessionId={0} sharedSessionId={selected.id} writable={selected.mode==='interact'}/></section>}
    {owner&&<form onSubmit={e=>e.preventDefault()} className="shared-session-form">
     <div className="shared-session-line"><span className="shared-session-label">Share with</span><select aria-label="Project" value={project} onChange={e=>setProject(e.target.value)}><option value="">Choose a project</option>{projectChoices.map(p=><option key={p.id} value={p.id}>{p.name}</option>)}</select><small>Members with access to this project can see it.</small></div>

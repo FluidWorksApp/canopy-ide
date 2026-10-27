@@ -34,6 +34,9 @@ import {
 } from "./launcher";
 import { loadSessionDoc, type LoadedSessionDoc, type SessionDocSource } from "./load";
 import { brainDeclined, cachedNarrative, writeNarrative, type SessionNarrative } from "./narrative";
+import { LiveRoomPanel } from "../liveSession/LiveRoomPanel";
+import { LiveSessionView } from "../liveSession/LiveSessionView";
+import { liveRooms, seedTurns } from "../liveSession/live";
 import "./sessionDoc.css";
 
 /** Everything the view reaches outside itself, injectable for tests. */
@@ -41,7 +44,7 @@ export interface SessionDocDeps {
   load(src: SessionDocSource): Promise<LoadedSessionDoc>;
   ask: typeof askBrain;
   append: typeof appendLedger;
-  share(card: Awaited<ReturnType<typeof buildHandoffCard>>): void;
+  share(card: Awaited<ReturnType<typeof buildHandoffCard>>, onSent?: (team: string, peer: string | null) => void): void;
   buildCard: typeof buildHandoffCard;
   copy(text: string): Promise<void>;
   launch(req: LaunchRequest): Promise<LaunchResult>;
@@ -54,7 +57,7 @@ const defaultDeps: SessionDocDeps = {
   load: (src) => loadSessionDoc(src),
   ask: askBrain,
   append: appendLedger,
-  share: (card) => openShareDialog({ kind: "share", card }),
+  share: (card, onSent) => openShareDialog({ kind: "share", card, ...(onSent ? { onSent } : {}) }),
   buildCard: buildHandoffCard,
   copy: (text) => navigator.clipboard.writeText(text),
   launch: launchAgent,
@@ -292,7 +295,13 @@ function HandOffPanel({
           onClick={() =>
             void deps
               .buildCard({ title, agent: doc.agent, sessionId: doc.sessionId, markdown, cwd: doc.cwd, repo: request.repo })
-              .then((card) => deps.share(card))
+              .then((card) => {
+                // A running session someone already opened to teammates: the
+                // person it goes to can join it live as well as take it over.
+                const room = request.live ? liveRooms.forSession(doc.sessionId) : undefined;
+                if (room) deps.share({ ...card, room: room.id }, (team, peer) => liveRooms.allow(room.id, { team, peer }));
+                else deps.share(card);
+              })
           }
         >
           Send to a teammate…
@@ -425,6 +434,19 @@ export function SessionDocView({
           <div className="sdoc-body">
             {handingOff && (
               <HandOffPanel doc={doc} narrative={shown} request={request} branch={loaded?.digest?.branch} deps={deps} />
+            )}
+
+            {request.live && (
+              <LiveRoomPanel
+                sessionId={doc.sessionId}
+                title={doc.title}
+                agent={request.agent}
+                cwd={doc.cwd}
+                repo={request.repo}
+                ptyId={request.ptyId}
+                turns={() => seedTurns(doc.turns)}
+                deliver={request.messageAgent}
+              />
             )}
 
             <section className="sdoc-summary" aria-label="Summary" aria-busy={narrative.phase === "writing"}>
@@ -626,10 +648,13 @@ export function SessionDocView({
 export function ReceivedHandoffView({
   request,
   onClose,
+  onJoin,
   deps = defaultDeps,
 }: {
   request: Extract<SessionDocRequest, { kind: "received" }>;
   onClose: () => void;
+  /** The sender's session is still running and open to join. */
+  onJoin?: () => void;
   deps?: Pick<SessionDocDeps, "launch" | "agents" | "projects" | "copy">;
 }) {
   useEscape(onClose);
@@ -647,6 +672,11 @@ export function ReceivedHandoffView({
             </div>
           </div>
           <div className="sdoc-head-actions">
+            {onJoin && (
+              <Button size="sm" onClick={onJoin} title="Watch the session as it runs, with whoever else is watching">
+                Join live
+              </Button>
+            )}
             <Button size="sm" variant="ghost" onClick={onClose} aria-label="Close">
               Close
             </Button>
@@ -692,9 +722,15 @@ export function SessionDocHost() {
   }, []);
   const close = useCallback(() => setRequest(null), []);
   if (!request) return null;
-  return request.kind === "session" ? (
-    <SessionDocView key={request.sessionId} request={request} onClose={close} />
-  ) : (
-    <ReceivedHandoffView key={`${request.session}:${request.title}`} request={request} onClose={close} />
+  if (request.kind === "session") return <SessionDocView key={request.sessionId} request={request} onClose={close} />;
+  if (request.kind === "join") return <LiveSessionView key={request.room} join={request} onClose={close} />;
+  const live = request.live;
+  return (
+    <ReceivedHandoffView
+      key={`${request.session}:${request.title}`}
+      request={request}
+      onClose={close}
+      onJoin={live ? () => setRequest({ kind: "join", ...live }) : undefined}
+    />
   );
 }

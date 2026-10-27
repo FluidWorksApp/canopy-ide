@@ -71,7 +71,7 @@ const ipcChatCardDeps=():ChatCardDeps=>ipcDeps??=({
 
 const short=(sha:string)=>sha.slice(0,7);
 const lines=(l?:{start:number;end:number})=>l?(l.start===l.end?`:${l.start}`:`:${l.start}-${l.end}`):'';
-const KIND:Record<Card['type'],string>={pr:'Pull request',file:'File',diff:'Diff',terminal:'Terminal output',report:'Agent report','review-request':'Review requested','review-outcome':'Review',plan:'Plan for review','plan-outcome':'Plan',handoff:'Hand-off'};
+const KIND:Record<Card['type'],string>={pr:'Pull request',file:'File',diff:'Diff',terminal:'Terminal output',report:'Agent report','review-request':'Review requested','review-outcome':'Review',plan:'Plan for review','plan-outcome':'Plan',handoff:'Hand-off','live-session':'Live session'};
 /** Long text blocks start folded to this many lines. */
 const FOLD_LINES=12;
 
@@ -200,8 +200,10 @@ function OutcomeChips({request,messages,name}:{request:ChatMessage;messages:read
  </ul>;
 }
 
-export function ChatCard({message,userId,messages,name,onReply,deps:given}:{
+export function ChatCard({message,userId,messages,name,onReply,teamId,deps:given}:{
  message:ChatMessage;userId:string;
+ /** The team whose chat this is: a live session card joins through it. */
+ teamId?:string;
  /** The conversation's messages, for folding review outcomes. */
  messages:readonly ChatMessage[];
  name:(id:string)=>string;
@@ -212,10 +214,10 @@ export function ChatCard({message,userId,messages,name,onReply,deps:given}:{
  const card=useMemo(()=>cardOf(message),[message]);
  const deps=useMemo(()=>given??ipcChatCardDeps(),[given]);
  if(!card)return null;
- return <CardBody card={card} message={message} userId={userId} messages={messages} name={name} onReply={onReply} deps={deps}/>;
+ return <CardBody card={card} message={message} userId={userId} messages={messages} name={name} onReply={onReply} teamId={teamId} deps={deps}/>;
 }
 
-function CardBody({card,message,userId,messages,name,onReply,deps}:{card:Card;message:ChatMessage;userId:string;messages:readonly ChatMessage[];name:(id:string)=>string;onReply?:(text:string,ext:CardExtensions)=>Promise<unknown>;deps:ChatCardDeps}){
+function CardBody({card,message,userId,messages,name,onReply,teamId,deps}:{card:Card;message:ChatMessage;userId:string;messages:readonly ChatMessage[];name:(id:string)=>string;onReply?:(text:string,ext:CardExtensions)=>Promise<unknown>;teamId?:string;deps:ChatCardDeps}){
  const action=useResolved(card,deps);
  const [patch,setPatch]=useState(false);
  const head=(icon:React.ReactNode,ref:string)=><div className="chat-card-head"><span className="chat-card-icon">{icon}</span><span className="chat-card-kind">{KIND[card.type]}</span><span className="chat-card-ref" title={ref}>{ref}</span></div>;
@@ -272,10 +274,20 @@ function CardBody({card,message,userId,messages,name,onReply,deps}:{card:Card;me
    <TextBlock text={card.packet} label="Hand-off packet"/>
    {card.truncated&&<small className="chat-card-why">The packet was shortened to fit a chat message.</small>}
    <div className="chat-card-actions">
-    {message.sender!==userId&&<Button size="sm" variant="accent" onClick={()=>openSessionDoc({kind:'received',title:card.title,agent:card.agent,session:card.session,packet:card.packet,from:name(message.sender),...(card.dir?{dir:card.dir}:{}),...(card.repo?{repo:card.repo}:{})})}>Take over</Button>}
+    {message.sender!==userId&&<Button size="sm" variant="accent" onClick={()=>openSessionDoc({kind:'received',title:card.title,agent:card.agent,session:card.session,packet:card.packet,from:name(message.sender),...(card.dir?{dir:card.dir}:{}),...(card.repo?{repo:card.repo}:{}),...(card.room&&teamId?{live:{team:teamId,owner:message.sender,ownerName:name(message.sender),room:card.room,title:card.title,agent:card.agent}}:{})})}>Take over</Button>}
+    {message.sender!==userId&&card.room&&teamId&&<Button size="sm" onClick={()=>openSessionDoc({kind:'join',team:teamId,owner:message.sender,ownerName:name(message.sender),room:card.room!,title:card.title,agent:card.agent})}>Join live</Button>}
     <CopyButton text={card.packet} deps={deps} label="Copy packet"/>
    </div>
   </div>;
+  case 'live-session':{
+   const own=message.sender===userId;
+   return <div className="chat-card is-agent-made" data-type="live-session">
+    {head(<span aria-hidden="true">●</span>,card.repo?card.repo.slug:card.dir??'')}
+    <div className="chat-card-title">{card.title}</div>
+    <small className="chat-card-byline">{own?`Your ${card.agent} session, open to join while it runs`:`${name(message.sender)}'s ${card.agent} session is running. Join to watch it live and ask ${name(message.sender)} to pass a message to the agent.`}</small>
+    {!own&&<div className="chat-card-actions">{teamId?<Button size="sm" variant="accent" onClick={()=>openSessionDoc({kind:'join',team:teamId,owner:message.sender,ownerName:name(message.sender),room:card.room,title:card.title,agent:card.agent})}>Join</Button>:<small className="chat-card-why">Open this conversation in Teams to join.</small>}</div>}
+   </div>;
+  }
   case 'review-outcome':return <div className="chat-card is-compact" data-type="review-outcome">
    <span>{OUTCOME_ICON[card.outcome]} {OUTCOME_LABEL[card.outcome]} {card.repo.slug}#{card.number}{card.head?` at ${short(card.head)}`:''}</span>
   </div>;

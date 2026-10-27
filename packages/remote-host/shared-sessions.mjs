@@ -10,6 +10,12 @@ export async function sessionRuntimeJson(response){
  let length=0;const chunks=[];
  try{while(true){const {done,value}=await reader.read();if(done)break;length+=value.length;if(length>65536){await reader.cancel();throw Error('Session runtime response is too large');}chunks.push(Buffer.from(value));}return JSON.parse(Buffer.concat(chunks).toString());}finally{reader.releaseLock();}
 }
+// A live agent session the published terminal belongs to (src/liveSession in
+// the IDE): the owner's room id, account and team, so a viewer can join it.
+// Opaque to this host; bounded and plain so the list stays safe to render.
+const UUID=/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/;
+const plainId=value=>typeof value==='string'&&value.length>0&&value.length<=256&&!/[\u0000-\u001f\u007f-\u009f\u202a-\u202e\u2066-\u2069]/.test(value);
+export const validRoom=room=>!!room&&typeof room==='object'&&!Array.isArray(room)&&Object.keys(room).length===3&&UUID.test(room.id)&&plainId(room.owner)&&plainId(room.team);
 // Explicit, management-owned publications. Never restore these after a gateway
 // restart: stale terminal IDs must not publish a replacement terminal silently.
 export class SharedSessions {
@@ -25,11 +31,12 @@ export class SharedSessions {
  async stopPending(p){if(p.stopping)return;p.stopping=true;try{await this.stop(p.runtime);this.pendingStops.delete(p.runtime.id);}catch{p.failed=true;}finally{p.stopping=false;}}
  remove(id){const p=this.entries.get(id);this.entries.delete(id);if(p?.runtime){const pending={runtime:p.runtime,stopping:false};this.pendingStops.set(p.runtime.id,pending);return this.stopPending(pending).then(()=>{if(this.pendingStops.has(p.runtime.id))throw Error('Sharing revoked; collaboration shell shutdown is pending. Retry shortly.');});}return Promise.resolve();}
  close(){clearInterval(this.timer);for(const id of this.entries.keys())void this.remove(id).catch(()=>{});}
- publish(workspace,{sessionId,projectId,title,mode,acknowledged}){
+ publish(workspace,{sessionId,projectId,title,mode,acknowledged,room}){
+  if(room!==undefined&&!validRoom(room))throw Error('Invalid session publication');
   if(acknowledged!==true||!Number.isSafeInteger(sessionId)||sessionId<1||!['view','interact'].includes(mode)||typeof title!=='string'||!title.trim()||title.length>80||!(workspace.projectMounts??[]).some(p=>p.id===projectId))throw Error('Invalid session publication');
   this.prune();if(this.entries.size>=128)throw Error('Shared session capacity reached');
   for(const [id,p] of this.entries)if(p.workspaceId===workspace.id&&!p.runtime&&p.sessionId===sessionId)void this.remove(id).catch(()=>{});
-  const entry={id:randomUUID(),workspaceId:workspace.id,sessionId,projectId,title:title.trim(),mode,expiresAt:this.now()+this.maxAgeMs};this.entries.set(entry.id,entry);return {...entry};
+  const entry={id:randomUUID(),workspaceId:workspace.id,sessionId,projectId,title:title.trim(),mode,expiresAt:this.now()+this.maxAgeMs,...(room?{room:{id:room.id,owner:room.owner,team:room.team}}:{})};this.entries.set(entry.id,entry);return {...entry};
  }
  prune(){for(const [id,p] of this.entries)if(p.expiresAt<=this.now())void this.remove(id).catch(()=>{});}
  async revoke(workspaceId,id){const entry=this.entries.get(id);if(!entry||entry.workspaceId!==workspaceId)throw Error('Forbidden');await this.remove(id);}
@@ -50,5 +57,5 @@ export class SharedSessions {
   if(this.entries.get(id)!==p||p.expiresAt<=this.now())throw Error('Forbidden');
   return {...p};
  }
- async list(workspace,principal,bearer){const result=[];if(typeof this.authorizeMember!=='function'||!principal?.memberId||principal.workspaceId!==workspace.id||!Number.isFinite(principal.expiresAt)||principal.expiresAt<=this.now())return result;const current=await this.authorizeMember(principal,bearer);for(const p of this.ownerList(workspace.id)){try{this.resolveAuthorized(workspace,principal,p.id,'view',current);let canInteract=false;try{this.resolveAuthorized(workspace,principal,p.id,'interact',current);canInteract=true;}catch{}result.push({id:p.id,projectId:p.projectId,title:p.title,mode:canInteract?'interact':'view',expiresAt:p.expiresAt});}catch{}}return result;}
+ async list(workspace,principal,bearer){const result=[];if(typeof this.authorizeMember!=='function'||!principal?.memberId||principal.workspaceId!==workspace.id||!Number.isFinite(principal.expiresAt)||principal.expiresAt<=this.now())return result;const current=await this.authorizeMember(principal,bearer);for(const p of this.ownerList(workspace.id)){try{this.resolveAuthorized(workspace,principal,p.id,'view',current);let canInteract=false;try{this.resolveAuthorized(workspace,principal,p.id,'interact',current);canInteract=true;}catch{}result.push({id:p.id,projectId:p.projectId,title:p.title,mode:canInteract?'interact':'view',expiresAt:p.expiresAt,...(p.room?{room:{...p.room}}:{})});}catch{}}return result;}
 }

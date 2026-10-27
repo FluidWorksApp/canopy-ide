@@ -1,0 +1,34 @@
+/* Live sessions (src/liveSession): the joiner's view reuses the session
+   document's layout (sessionDoc.css); these are the parts it adds, plus the
+   owner's corner panel. */
+.live-dot{display:inline-block;width:7px;height:7px;border-radius:50%;background:var(--text-muted);flex:none}
+.live-dot.is-live,.live-host .live-dot{background:var(--ok,#3fb950)}
+.live-muted{font-size:11.5px;color:var(--text-muted)}
+.live-watchers{display:flex;flex-wrap:wrap;gap:6px;align-items:center}
+.live-person{display:inline-flex;align-items:center;gap:5px;padding:2px 8px;border:1px solid var(--border);border-radius:999px;font-size:12px}
+.live-kick{padding:0 2px;border:0;background:none;color:var(--text-muted);font:inherit;cursor:pointer;line-height:1}
+.live-kick:hover,.live-kick:focus-visible{color:var(--danger)}
+.live-toggle{display:flex;flex-wrap:wrap;align-items:center;gap:6px;font-size:12.5px}
+.live-controls{display:flex;flex-direction:column;gap:8px}
+.live-actions{display:flex;flex-wrap:wrap;gap:6px}
+.live-notice{margin:0;font-size:12px;color:var(--text-muted)}
+.live-request{display:flex;flex-direction:column;gap:6px;padding:8px 10px;border:1px solid var(--accent);border-radius:var(--r-sm);background:var(--bg)}
+.live-request-head{font-size:12.5px}
+.live-quote{margin:0;padding:4px 8px;border-left:2px solid var(--border);font-size:12.5px;white-space:pre-wrap;overflow-wrap:anywhere;max-height:10em;overflow:auto}
+.live-textarea{width:100%;box-sizing:border-box;padding:6px 8px;border:1px solid var(--border);border-radius:var(--r-sm);background:var(--bg);color:var(--text);font:inherit;font-size:12.5px;resize:vertical}
+.live-turn.is-reply{border-left-color:var(--accent)}
+.live-turn-text{margin:2px 0 0;font-size:12.5px;white-space:pre-wrap;overflow-wrap:anywhere;max-height:14em;overflow:auto}
+.live-end{list-style:none;height:0}
+.live-terminal{height:320px;border:1px solid var(--border);border-radius:var(--r-sm);overflow:hidden}
+.live-requests{list-style:none;margin:8px 0 0;padding:0;display:flex;flex-direction:column;gap:4px}
+.live-requests li{display:flex;flex-direction:column;gap:1px;padding:4px 8px;border-left:2px solid var(--border)}
+.live-request-text{font-size:12.5px;white-space:pre-wrap;overflow-wrap:anywhere}
+.live-muted.is-declined,.live-muted.is-failed{color:var(--warn)}
+.live-panel{display:flex;flex-direction:column;gap:8px;padding:10px 12px;border:1px solid var(--border);border-radius:var(--r-sm)}
+.live-panel h3{margin:0}
+/* Below the session document (950) and the share dialog (1000). */
+.live-host{position:fixed;right:16px;bottom:16px;z-index:900;display:flex;flex-direction:column;gap:8px;width:min(360px,calc(100vw - 32px));max-height:70vh;overflow:auto}
+.live-host-room{display:flex;flex-direction:column;gap:8px;padding:10px 12px;border:1px solid var(--border);border-radius:var(--r-md,8px);background:var(--bg-raised);color:var(--text);box-shadow:0 8px 28px rgba(0,0,0,.3)}
+.live-host-head{display:flex;align-items:center;gap:6px;padding:0;border:0;background:none;color:inherit;font:inherit;font-size:12.5px;text-align:left;cursor:pointer}
+.live-host-head:focus-visible{outline:none;box-shadow:var(--ring)}
+.live-host-title{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-weight:600}

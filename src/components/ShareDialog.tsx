@@ -70,7 +70,7 @@ export function ShareDialog({request,onClose,directory=loadDirectory}:ShareDialo
  async function send(){
   if(!session||!draft)return;
   setSending(true);setError('');
-  try{await session.send(draft.text,peer,[],draft.ext);onClose();}
+  try{await session.send(draft.text,peer,[],draft.ext);if(request.kind==='share')request.onSent?.(teamId,peer);onClose();}
   catch(e){setError(e instanceof Error?e.message:String(e));}
   finally{setSending(false);}
  }

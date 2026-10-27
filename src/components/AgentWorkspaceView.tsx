@@ -91,6 +91,8 @@ interface AgentWorkspaceViewProps {
   onMessageAgent?: (
     text: string,
   ) => Promise<{ delivered: boolean; note: string; ptyId?: number | null }>;
+  /** The agent's terminal, when this session runs in one here. */
+  ptyId?: number;
   /** Bring the agent's terminal to the front. Called after comments land, so
    *  the review ends where the answer will appear rather than on the diff the
    *  agent is about to change. */
@@ -568,6 +570,7 @@ export function AgentWorkspaceView({
   onOpenTerminal,
   onNotice,
   onMessageAgent,
+  ptyId,
   onFocusAgent,
   onClose,
   onRaisePrTask,
@@ -1590,6 +1593,8 @@ export function AgentWorkspaceView({
                   repo,
                   digest,
                   live: digest?.state !== "ended",
+                  ...(ptyId != null ? { ptyId } : {}),
+                  ...(onMessageAgent ? { messageAgent: onMessageAgent } : {}),
                 })
               }>
               Open as document

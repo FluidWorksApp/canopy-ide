@@ -3,6 +3,7 @@ import {afterEach,beforeEach,it,expect,vi} from 'vitest';
 const mock=vi.hoisted(()=>({attachment:vi.fn(async(..._args:unknown[])=>new Blob(['x'])),markRead:vi.fn(),send:vi.fn(async(..._args:unknown[])=>({id:'new'})),retry:vi.fn(async(..._args:unknown[])=>({id:'retried'})),discard:vi.fn(),react:vi.fn(async(..._args:unknown[])=>{}),snapshot:{members:{ada:'Ada Lovelace'},messages:[{id:'m',sender:'ada',recipient:null,text:'Hello team',created:1}],receipts:{},status:'Connected · end-to-end encrypted'} as {members:Record<string,string>;messages:{id:string;sender:string;recipient:string|null;text:string;created:number;attachments?:{id:string;name:string;size:number;type:string;sha256:string}[]}[];receipts:Record<string,string[]>;delivery?:Record<string,{state:string;detail?:string}>;attachments?:Record<string,Record<string,unknown>>;reactions?:Record<string,Record<string,{sender:string;emoji:string;on:boolean;created:number;id:string}>>;undeliveredReactions?:Record<string,string[]>;status:string}}));
 vi.mock('../teamMessaging/session',()=>({teamSession:()=>({retain:()=>()=>{},markRead:mock.markRead,subscribe:()=>()=>{},getSnapshot:()=>mock.snapshot,send:mock.send,attachment:mock.attachment,retry:mock.retry,discard:mock.discard,react:mock.react})}));
 import {AccountChatView} from './AccountChatView';
+import {setChatHandoff} from '../teamMessaging/chatHandoff';
 beforeEach(()=>{mock.attachment.mockClear();mock.markRead.mockClear();mock.send.mockClear();mock.retry.mockClear();mock.discard.mockClear();mock.react.mockClear();});
 afterEach(cleanup);
 const channel={teamId:'engineering',userId:'me',peer:null,name:'Engineering'};
@@ -318,3 +319,22 @@ it('flags your own reaction that no teammate could receive',()=>withReactions(()
   expect(party.classList.contains('is-undelivered')).toBe(false);expect(party.title).not.toContain('Not delivered');
  }finally{mock.snapshot.undeliveredReactions=prior;}
 }));
+
+it('hands a message to a new task or a running agent, only on a click',async()=>{
+ const startTask=vi.fn(async(project:string)=>({started:true,project,note:''})),sendToAgent=vi.fn(async()=>'m9');
+ const stop=setChatHandoff({projects:()=>['canopy-ide','portal'],agents:async()=>[{ptyId:7,name:'Wren',project:'portal',cli:'claude'}],startTask,sendToAgent});
+ try{
+  render(<AccountChatView conversation={channel}/>);
+  expect(startTask).not.toHaveBeenCalled();expect(sendToAgent).not.toHaveBeenCalled();
+  fireEvent.click(screen.getByRole('button',{name:'Run as task'}));
+  fireEvent.change(screen.getByRole('combobox',{name:'Workspace'}),{target:{value:'portal'}});
+  fireEvent.click(screen.getByRole('button',{name:'Start task'}));
+  await waitFor(()=>expect(startTask).toHaveBeenCalledWith('portal',expect.stringMatching(/^Ada Lovelace sent this in Canopy Teams chat \(#Engineering\)[\s\S]*Hello team/),'Hello team'));
+  expect(await screen.findByText('Task started in portal.')).toBeTruthy();
+  fireEvent.click(screen.getByRole('button',{name:'Send to agent'}));
+  expect(await screen.findByRole('option',{name:'Wren · portal (claude)'})).toBeTruthy();
+  fireEvent.click(screen.getAllByRole('button',{name:'Send'}).find(b=>b.closest('.account-chat-handoff'))!);
+  await waitFor(()=>expect(sendToAgent).toHaveBeenCalledWith(7,expect.stringContaining('Hello team'),'m'));
+  expect(await screen.findByText('Sent to Wren.')).toBeTruthy();
+ }finally{stop();}
+});
