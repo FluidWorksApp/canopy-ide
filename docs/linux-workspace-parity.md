@@ -147,8 +147,10 @@ The workspace image (`packages/remote-host/Dockerfile`) already has `gh` and `gi
   (`agent-gates.mjs`; the OpenCode, oh-my-pi and Amp plugin sources are generated from
   `agents.rs` into `agent-templates.mjs` by `gen-agent-templates.mjs`, and a test fails when
   they drift). When `agent_integration_health` reports an installed CLI's hooks missing or
-  out of date, the workspace offers **Update agent hooks** (`setup_agent_hooks`). MCP
-  registration in the VM is still Claude Code and Codex only.
+  out of date, the workspace offers **Update agent hooks** (`setup_agent_hooks`). The same
+  setup registers the `canopy-hook --mcp` server in each CLI's own registry (Cursor,
+  Antigravity, oh-my-pi and OpenCode JSON, Amp's `amp.mcpServers`, Grok's TOML), as
+  `setup_*_mcp` in `agents.rs` does.
 - **Team memory.** The ledger stays on the desktop. Each connect, and each change to a
   memory, sends the approved, unexpired entries to the workspace's canopy-service
   (`memory_sync`), which answers `canopy_memory` from that copy with the desktop's rules

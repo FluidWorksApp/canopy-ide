@@ -3,7 +3,7 @@ import path from 'node:path';
 import {randomUUID} from 'node:crypto';
 import {WorkspaceProfiles} from './profiles.mjs';
 import {installMcp,mcpStatus} from './agent-mcp.mjs';
-import {GATED_CLIS,installGates,gatesInstalled} from './agent-gates.mjs';
+import {GATED_CLIS,installGates,gatesInstalled,installGatedMcp,gatedMcpStatus} from './agent-gates.mjs';
 // Every CLI the workspace image ships that Canopy hooks (agent-gates.mjs has the rest).
 export const HOOKED_CLIS=['claude','codex',...Object.keys(GATED_CLIS)];
 const binaryOf=agent=>GATED_CLIS[agent]??agent;
@@ -59,17 +59,22 @@ export class AgentIntegrations {
   for(const profile of await profiles.list())if(!await gatesInstalled(agent,await profiles.root(profile.id),this.home,this.helper))return false;
   return true;
  }
- async health(agent){if(GATED_CLIS[agent])return {agent,cli_installed:await this.cliInstalled(agent),hooks:await this.installed(agent)?'ours':'missing',mcp:'unsupported'};const states=await Promise.all((await new WorkspaceProfiles(this.home).list()).map(p=>mcpStatus(p.root,agent,this.helper)));return {agent,cli_installed:await this.cliInstalled(agent),hooks:await this.installed(agent)?'ours':'missing',mcp:states.every(s=>s==='ours')?'ours':states.find(s=>s!=='ours')??'missing'};}
+ async health(agent){if(GATED_CLIS[agent]){const profiles=new WorkspaceProfiles(this.home);const states=[];for(const p of await profiles.list())states.push(await gatedMcpStatus(agent,await profiles.root(p.id),this.helper));return {agent,cli_installed:await this.cliInstalled(agent),hooks:await this.installed(agent)?'ours':'missing',mcp:states.every(s=>s==='ours')?'ours':states.find(s=>s!=='ours')??'missing'};}const states=await Promise.all((await new WorkspaceProfiles(this.home).list()).map(p=>mcpStatus(p.root,agent,this.helper)));return {agent,cli_installed:await this.cliInstalled(agent),hooks:await this.installed(agent)?'ours':'missing',mcp:states.every(s=>s==='ours')?'ours':states.find(s=>s!=='ours')??'missing'};}
  /** Cursor, Grok, OpenCode, oh-my-pi, Amp and Antigravity: lifecycle hooks and
   *  the Rules gate, per profile, as the desktop installs them. */
  async installGated(agent){
   await access(this.helper,constants.X_OK);
   const profiles=new WorkspaceProfiles(this.home),steps=[];
   for(const profile of await profiles.list()){
-   try{steps.push({step:profile.id+': hooks',ok:true,message:await installGates(agent,await profiles.root(profile.id),this.home,this.helper)});}
-   catch(error){steps.push({step:profile.id,ok:false,message:String(error.message??error)});}
-   // Amp's plugin lives in the home and serves every profile.
-   if(agent==='amp')break;
+   const root=await profiles.root(profile.id);
+   // Amp's plugin lives in the home and serves every profile; its MCP
+   // registry is per profile.
+   if(!(agent==='amp'&&steps.some(s=>s.step.endsWith(': hooks')))){
+    try{steps.push({step:profile.id+': hooks',ok:true,message:await installGates(agent,root,this.home,this.helper)});}
+    catch(error){steps.push({step:profile.id+': hooks',ok:false,message:String(error.message??error)});}
+   }
+   try{steps.push({step:profile.id+': MCP',ok:true,message:await installGatedMcp(agent,root,this.helper)});}
+   catch(error){steps.push({step:profile.id+': MCP',ok:false,message:String(error.message??error)});}
   }
   const failed=steps.filter(step=>!step.ok);
   return {agent,ok:failed.length===0,steps,summary:failed.length?failed.map(step=>step.step+': '+step.message).join('; '):steps.map(step=>step.message).filter((m,i,all)=>all.indexOf(m)===i).join('; ')};

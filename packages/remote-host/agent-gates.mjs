@@ -141,3 +141,80 @@ export async function gatesInstalled(agent,root,home,helper){
  }catch{return false;}
  return false;
 }
+
+// ------------------------------------------------------------------ MCP
+// The same `canopy-hook --mcp` server registered in each CLI's own registry,
+// as setup_*_mcp in agents.rs does: a JSON map for Cursor, Antigravity,
+// oh-my-pi and OpenCode, Amp's dotted `amp.mcpServers` key, and Grok's TOML
+// (the Codex section form, edited as text so the user's comments survive).
+export const FORWARDED_ENV=['CANOPY_CTX_PORT','CANOPY_CTX_TOKEN','CANOPY_CTX_SOCKET','CANOPY_PTY','CANOPY_INSTANCE','CANOPY_PROFILE','CANOPY_RUN_ID','CANOPY_ATTEMPT_ID','CANOPY_PLAN_ID','CANOPY_MICRO_TASK','CANOPY_VIBE','CANOPY_RESEARCH','CANOPY_RESEARCH_DIR','CANOPY_WRITE_ROOT','CANOPY_COMPANION','CANOPY_COMPANION_AUTHORITY','CANOPY_COMPANION_POLICY'];
+const isCanopyMcp=entry=>{const c=entry?.command;const cmd=typeof c==='string'?c:Array.isArray(c)&&typeof c[0]==='string'?c[0]:null;return !!cmd&&cmd.includes('canopy-hook');};
+const registered=(changed,agent)=>changed?`Canopy MCP server registered — new ${agent} sessions get canopy_* context tools`:'Canopy MCP server already registered';
+const MCP={
+ cursor:{file:root=>path.join(root,'.cursor/mcp.json'),key:'mcpServers',name:'cursor-agent',want:h=>({command:h,args:['--mcp']})},
+ agy:{file:root=>path.join(root,'.gemini/config/mcp_config.json'),key:'mcpServers',name:'agy',want:h=>({command:h,args:['--mcp']})},
+ omp:{file:root=>path.join(root,'.omp/agent/mcp.json'),key:'mcpServers',name:'omp',want:h=>({command:h,args:['--mcp']})},
+ // OpenCode takes argv; `enabled` stays the user's to set.
+ opencode:{file:root=>path.join(root,'.config/opencode/opencode.json'),key:'mcp',name:'opencode',want:h=>({type:'local',command:[h,'--mcp']})},
+ amp:{file:root=>path.join(root,'.config/amp/settings.json'),key:'amp.mcpServers',name:'amp',want:h=>({command:h,args:['--mcp']}),replace:true},
+};
+
+/** The JSON registries: ours merged over the entry (the user's other keys
+ *  survive); someone else's `canopy` is refused, never overwritten. */
+function mcpJson(config,spec,helper,file){
+ const value=structuredClone(config);
+ if(value[spec.key]==null)value[spec.key]={};
+ const servers=value[spec.key];
+ if(typeof servers!=='object'||Array.isArray(servers))throw Error(`${spec.key} in ${file} is not an object`);
+ const existing=servers.canopy,want=spec.want(helper);
+ if(existing!==undefined&&!isCanopyMcp(existing))throw Error(`${file} already has an MCP server named 'canopy' that Canopy does not own`);
+ servers.canopy=existing&&!spec.replace&&typeof existing==='object'?{...existing,...want}:want;
+ return value;
+}
+
+/** Codex/Grok TOML with our `[mcp_servers.canopy]` section, or null when it
+ *  already says exactly this (agents.rs codex_toml_with_canopy). */
+export function tomlWithCanopy(existing,helper){
+ const header='[mcp_servers.canopy]';
+ const wanted=`${header}\ncommand = ${JSON.stringify(helper)}\nargs = ["--mcp"]\nenv_vars = [${FORWARDED_ENV.map(n=>JSON.stringify(n)).join(', ')}]`;
+ const isCanopyTable=line=>{const t=line.trim();if(!t.startsWith('[')||!t.endsWith(']'))return false;const parts=t.slice(1,-1).split('.').map(p=>p.trim().replace(/^"+|"+$/g,''));return parts.length===2&&parts[0]==='mcp_servers'&&parts[1]==='canopy';};
+ let section='';
+ for(const line of existing.split('\n')){const t=line.trim();if(t.startsWith('['))section=t;else if(section==='[mcp_servers]'&&t.split('=')[0].trim().replace(/^"+|"+$/g,'')==='canopy')throw Error("config.toml defines a 'canopy' server inline under [mcp_servers] that Canopy does not own — remove that line and run setup again");}
+ const lines=existing?existing.split('\n'):[];if(lines.length&&lines.at(-1)==='')lines.pop();
+ const start=lines.findIndex(isCanopyTable);
+ if(start>=0){
+  let end=lines.findIndex((l,i)=>i>start&&l.trimStart().startsWith('['));if(end<0)end=lines.length;
+  const old=lines.slice(start,end).join('\n');
+  if(!old.includes('canopy-hook'))throw Error("config.toml already has an MCP server named 'canopy' that Canopy does not own");
+  const extras=lines.slice(start+1,end).filter(l=>{const k=l.split('=')[0].trim();return k&&!['command','args','env_vars'].includes(k);});
+  const replacement=[...wanted.split('\n'),...extras];
+  if(old.trimEnd()===replacement.join('\n'))return null;
+  lines.splice(start,end-start,...replacement);
+ }else{if(lines.length&&lines.at(-1)!=='')lines.push('');lines.push(...wanted.split('\n'));}
+ return lines.join('\n')+'\n';
+}
+
+export async function installGatedMcp(agent,root,helper){
+ if(agent==='grok'){
+  const file=path.join(root,'.grok/config.toml');
+  const next=tomlWithCanopy((await readText(file))??'',helper);
+  if(next==null)return registered(false,'grok');
+  await writeAtomic(file,next);return registered(true,'grok');
+ }
+ const spec=MCP[agent];if(!spec)throw Error(`No Canopy MCP registration for ${agent}`);
+ const file=spec.file(root),raw=await readText(file),next=pretty(mcpJson(await readJson(file),spec,helper,file));
+ if(raw===next||raw!=null&&JSON.stringify(JSON.parse(raw||'{}'))===JSON.stringify(JSON.parse(next)))return registered(false,spec.name);
+ await writeAtomic(file,next);return registered(true,spec.name);
+}
+
+/** `ours`, `missing`, `foreign` or `unreadable`, as integration health says. */
+export async function gatedMcpStatus(agent,root,helper){
+ try{
+  if(agent==='grok'){const raw=await readText(path.join(root,'.grok/config.toml'));if(raw==null||!raw.includes('[mcp_servers.canopy]'))return 'missing';try{return tomlWithCanopy(raw,helper)==null?'ours':'missing';}catch{return 'foreign';}}
+  const spec=MCP[agent];if(!spec)return 'unsupported';
+  const entry=(await readJson(spec.file(root)))[spec.key]?.canopy;
+  if(entry===undefined)return 'missing';if(!isCanopyMcp(entry))return 'foreign';
+  const want=spec.want(helper);
+  return Object.entries(want).every(([k,v])=>JSON.stringify(entry[k])===JSON.stringify(v))?'ours':'missing';
+ }catch{return 'unreadable';}
+}
