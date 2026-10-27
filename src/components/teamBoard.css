@@ -1,0 +1,172 @@
+/* The live team board (TeamBoard.tsx). Reuses the Agents page's section and
+   table styles; this only adds the board's own pieces. */
+.tb {
+  padding: 0 18px 24px;
+}
+
+.tb-status {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 12px;
+  max-width: 1180px;
+  margin: 16px auto 0;
+  padding: 10px 14px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  corner-shape: squircle;
+  background: var(--bg-raised);
+  font-size: var(--fs-sm);
+}
+
+.tb-status-text {
+  flex: 1;
+  min-width: 220px;
+  color: var(--text-dim);
+}
+
+.tb-switch {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.tb-table tbody tr {
+  cursor: default;
+}
+
+.tb-agent {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--text);
+  font: inherit;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.tb-agent:hover,
+.tb-agent:focus-visible {
+  text-decoration: underline;
+}
+
+.tb-table td > .acp-dim {
+  display: block;
+  margin-top: 2px;
+}
+
+.tb-chip {
+  display: inline-block;
+  margin: 0 4px 3px 0;
+  padding: 1px 7px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  color: var(--text-dim);
+  font-size: var(--fs-xs);
+  white-space: nowrap;
+}
+
+.tb-files {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 2px 8px;
+  font-family: var(--font-mono, monospace);
+  font-size: var(--fs-xs);
+}
+
+.tb-note {
+  max-width: 320px;
+  font-size: var(--fs-xs);
+}
+
+.tb-empty {
+  margin: 0;
+  color: var(--text-faint);
+  font-size: var(--fs-sm);
+}
+
+.tb-feed {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.tb-feed-item {
+  padding: 10px 14px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  corner-shape: squircle;
+  background: var(--bg-raised);
+}
+
+.tb-risk-conflict {
+  border-color: color-mix(in srgb, var(--warn, #d97706) 55%, var(--border));
+}
+
+.tb-feed-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 6px;
+  font-size: var(--fs-sm);
+}
+
+.tb-feed-head .acp-dim {
+  white-space: normal;
+}
+
+.tb-when {
+  margin-left: auto;
+}
+
+.tb-feed-note {
+  margin: 6px 0 0;
+  font-size: var(--fs-sm);
+  line-height: 1.45;
+}
+
+.tb-repo + .tb-repo {
+  margin-top: 14px;
+}
+
+.tb-repo-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.tb-hot-list {
+  display: flex;
+  flex-wrap: wrap;
+}
+
+.tb-edit {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  font-size: var(--fs-sm);
+}
+
+.tb-edit textarea {
+  max-width: 560px;
+  padding: 6px 8px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--r-sm, 4px);
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--font-mono, monospace);
+  font-size: var(--fs-xs);
+}
+
+.tb-edit-actions {
+  display: flex;
+  gap: 6px;
+}

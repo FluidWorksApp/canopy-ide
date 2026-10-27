@@ -5,6 +5,7 @@ mod agentid;
 mod agents;
 mod android;
 mod app_footprint;
+mod awareness;
 mod blocking;
 mod bounded_file;
 mod brain;
@@ -1041,6 +1042,8 @@ pub fn run() {
             context::context_mesh_severed,
             context::context_mesh_sever,
             context::context_mesh_job_update,
+            context::context_hotspot_claim,
+            awareness::git_churn,
             context::context_agent_spawn_ready,
             context::browser_result,
             claude_ide::claude_ide_resolve_diff,

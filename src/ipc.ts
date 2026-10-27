@@ -926,6 +926,25 @@ export const meshJobUpdate = (ptyId: number, instance: string, jobId: string, te
 export const meshRelayReply = (ptyId: number, instance: string, messageId: string, text: string) =>
   invoke<string>("context_mesh_job_update", { ptyId, instance, jobId: messageId, text, refKind: "relay" });
 
+/** The workspace telling an agent what another agent just changed
+ *  (src/awareness): kept on the mesh under ref {kind: "awareness", id} and
+ *  typed into that terminal like any mesh message. */
+export const meshAwareness = (ptyId: number, instance: string, noteId: string, text: string) =>
+  invoke<string>("context_mesh_job_update", { ptyId, instance, jobId: noteId, text, refKind: "awareness" });
+
+/** Take a hotspot claim on an agent's behalf (context.rs). Rejects with the
+ *  holder's name when another agent already holds one of the paths. */
+export const contextHotspotClaim = (ptyId: number, paths: string[], owner: string, note: string) =>
+  invoke<string>("context_hotspot_claim", { ptyId, paths, owner, note });
+
+/** How often each file changed lately (awareness.rs), most-changed first. */
+export interface ChurnRow {
+  path: string;
+  commits: number;
+}
+export const gitChurn = (repo: string, days?: number) =>
+  invoke<ChurnRow[]>("git_churn", { repo, days });
+
 /** Which canopy_* tools are switched off (Settings → Agents), pushed to the
  *  bridge so the sidecar can hide them from the agent entirely. */
 export const contextTools = (disabled: string[], agentsMaySpawn: boolean) =>

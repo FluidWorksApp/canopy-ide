@@ -936,6 +936,84 @@ pub fn context_release_claim(app: tauri::AppHandle, owner_key: String) {
     });
 }
 
+/// A claim Canopy takes on an agent's behalf. The workspace saw the agent touch
+/// a hotspot file (a registry, a route table, a config — see
+/// src/awareness/hotspots.ts) that another live agent touched or claimed
+/// minutes ago, and writes to hotspots are single-threaded by claim. The
+/// agent's own held paths are carried over, because a new claim supersedes the
+/// holder's old ones. `Ok` with the message when taken or already held; `Err`
+/// naming the holder when another agent has it — the refusal is then recorded
+/// on that claim like any other, which is the conflict history hotspot
+/// inference reads back.
+#[tauri::command]
+pub fn context_hotspot_claim(
+    app: tauri::AppHandle,
+    pty_id: u32,
+    paths: Vec<String>,
+    owner: String,
+    note: Option<String>,
+) -> Result<String, String> {
+    if app.state::<crate::pty::PtyManager>().get(pty_id).is_none() {
+        return Err(format!("terminal {pty_id} has exited"));
+    }
+    let paths: Vec<String> = paths
+        .iter()
+        .map(|p| normalize_claim_path(p, None))
+        .filter(|p| p.starts_with('/') && p != "/")
+        .collect();
+    if paths.is_empty() {
+        return Err("a hotspot claim needs absolute paths".into());
+    }
+    let instance = crate::pty::instance_token().to_string();
+    let key = format!("pty:{instance}:{pty_id}");
+    let id = app.state::<ContextBridge>().claims.next_id()?;
+    let reply = with_claims(&app, |claims| {
+        let mine: Vec<&Claim> = claims
+            .iter()
+            .filter(|c| c.released_at_ms.is_none() && c.owner_key == key)
+            .collect();
+        let mut held: Vec<String> = mine.iter().flat_map(|c| c.paths.clone()).collect();
+        let covered = |p: &String| {
+            held.iter().any(|h| {
+                let h = h.trim_end_matches('/');
+                p == h || p.starts_with(&format!("{h}/"))
+            })
+        };
+        if paths.iter().all(covered) {
+            return (ClaimReply::Ok("Already held.".into()), false);
+        }
+        let holder = ClaimIdentity {
+            key: key.clone(),
+            display: mine.first().map(|c| c.owner.clone()).unwrap_or(owner),
+            pty_id: Some(pty_id),
+            instance: Some(instance.clone()),
+            run_id: mine.first().and_then(|c| c.run_id.clone()),
+            attempt_id: mine.first().and_then(|c| c.attempt_id.clone()),
+            process_started_at: crate::mesh::current_process_started_at(),
+        };
+        let note = mine.first().and_then(|c| c.note.clone()).or(note);
+        for p in &paths {
+            if !held.contains(p) {
+                held.push(p.clone());
+            }
+        }
+        let req = ClaimReq {
+            action: "claim".into(),
+            paths: held,
+            owner: holder.display.clone(),
+            note,
+        };
+        let reply = apply_claim(claims, &req, &holder, now_ms(), &id);
+        let changed = !matches!(reply, ClaimReply::Bad(_));
+        (reply, changed)
+    });
+    match reply {
+        Some(ClaimReply::Ok(msg)) => Ok(msg),
+        Some(ClaimReply::Conflict(msg)) | Some(ClaimReply::Bad(msg)) => Err(msg),
+        None => Err("the claim store isn't available".into()),
+    }
+}
+
 /// Every kept agent-to-agent message, oldest first — the evidence that used to
 /// exist nowhere, and now outlives the app run (see mesh.rs).
 #[tauri::command]
@@ -1008,9 +1086,13 @@ pub fn context_mesh_job_update(
     text: String,
     ref_kind: Option<String>,
 ) -> Result<String, String> {
-    let relay = match ref_kind.as_deref() {
-        None | Some("job") => false,
-        Some("relay") => true,
+    // "awareness" is the workspace telling an agent what another agent just
+    // changed (src/awareness): same store, same two-write delivery as a job
+    // step, so the receiving agent reads it like any mesh message.
+    let kind = match ref_kind.as_deref() {
+        None | Some("job") => "job",
+        Some("relay") => "relay",
+        Some("awareness") => "awareness",
         Some(other) => return Err(format!("unknown mesh update kind {other}")),
     };
     if instance != crate::pty::instance_token() {
@@ -1042,18 +1124,21 @@ pub fn context_mesh_job_update(
             Vec::new(),
             None,
             Some(crate::mesh::MeshRef {
-                kind: if relay { "relay" } else { "job" }.into(),
+                kind: kind.into(),
                 id: job_id.to_string(),
             }),
         ))
         .map_err(|_| "the mesh refused this job update".to_string())?;
-    let notice = if relay {
-        format!(
+    let notice = match kind {
+        "relay" => format!(
             "[canopy: cloud workspace reply to {job_id}] {}",
             mesh_notice_for(&record)
-        )
-    } else {
-        format!("[canopy: mesh job {job_id}] {}", mesh_notice_for(&record))
+        ),
+        "awareness" => format!(
+            "[canopy workspace: another agent's change touches your work] {}",
+            mesh_notice_for(&record)
+        ),
+        _ => format!("[canopy: mesh job {job_id}] {}", mesh_notice_for(&record)),
     };
     deliver_line(&app, pty_id, target_cwd, record.id.clone(), &notice)?;
     bridge.mesh.note_delivery(&record.id, &notice);
