@@ -259,6 +259,7 @@
 .workspace-menu-action:hover {color:var(--text);}
 .workspace-menu-sep {height:1px;margin:4px 6px;background:var(--border);}
 .workspace-menu-error {margin:4px 10px;font-size:var(--fs-xs);color:var(--danger);overflow-wrap:anywhere;}
+.workspace-menu-note {margin:4px 10px;font-size:var(--fs-xs);color:var(--text-muted);overflow-wrap:anywhere;}
 
 /* Manage panel: compact, app type scale, list on the left and detail on the right. */
 .workspace-panel {width:min(880px,calc(100vw - 48px));height:auto;min-height:min(420px,calc(100dvh - 100px));max-height:calc(100dvh - 100px);font-family:var(--font-ui);font-size:var(--fs-sm);line-height:1.45;}
@@ -379,3 +380,6 @@
 .workspace-machine-config .workspace-machine-note {color:var(--text-dim);}
 .workspace-machine-config .workspace-inline-actions {margin-top:8px;}
 @media (max-width:560px){.workspace-machine-config .workspace-machine-fields {grid-template-columns:1fr;}}
+.workspace-share-link {display:flex;justify-content:space-between;align-items:center;gap:12px;padding:10px 0;border-top:1px solid var(--border);}
+.workspace-share-link > div {min-width:0;display:flex;flex-direction:column;gap:2px;}
+.workspace-share-link small {color:var(--text-muted);font-size:var(--fs-xs);}

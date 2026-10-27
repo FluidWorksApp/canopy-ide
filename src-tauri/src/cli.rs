@@ -36,10 +36,41 @@ pub struct PendingLink(pub Mutex<Option<String>>);
 /// registered URL scheme — macOS won't hand us `open canopy://…` without one —
 /// but the routing is scheme-shaped from end to end, so registering it later
 /// changes only where the string comes in.
+///
+/// A readable Canopy link (`https://canopyide.dev/<team>/<workspace>`, see
+/// docs/seamless-sharing.md) counts too: `canopy https://canopyide.dev/acme/api`
+/// arrives as `canopy://link?url=…`, and the app resolves it against the
+/// signed-in account before opening anything.
 pub fn link_from_args<I: IntoIterator<Item = String>>(args: I) -> Option<String> {
-    args.into_iter()
-        .skip(1)
-        .find(|a| a.starts_with("canopy://"))
+    args.into_iter().skip(1).find_map(|a| {
+        if a.starts_with("canopy://") {
+            Some(a)
+        } else if is_readable_link(&a) {
+            Some(format!("canopy://link?url={}", percent_encode(&a)))
+        } else {
+            None
+        }
+    })
+}
+
+/// The canonical host only. The app re-validates the path shape and the server
+/// re-checks access, so this just decides that the argument is a link and not
+/// a directory.
+pub fn is_readable_link(arg: &str) -> bool {
+    arg.strip_prefix("https://canopyide.dev/")
+        .is_some_and(|rest| rest.contains('/') && rest.len() <= 300)
+}
+
+fn percent_encode(value: &str) -> String {
+    value
+        .bytes()
+        .map(|b| match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                (b as char).to_string()
+            }
+            _ => format!("%{b:02X}"),
+        })
+        .collect()
 }
 
 /// First non-flag argument that resolves to an existing directory.
@@ -47,7 +78,7 @@ pub fn link_from_args<I: IntoIterator<Item = String>>(args: I) -> Option<String>
 /// `-psn_…`, and future flags shouldn't break path detection.
 pub fn dir_from_args<I: IntoIterator<Item = String>>(args: I, cwd: &Path) -> Option<String> {
     for a in args.into_iter().skip(1) {
-        if a.starts_with('-') || a.starts_with("canopy://") {
+        if a.starts_with('-') || a.starts_with("canopy://") || is_readable_link(&a) {
             continue;
         }
         let p = PathBuf::from(&a);
@@ -187,6 +218,29 @@ fn write_shim(dest: &Path, contents: &str) -> std::io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn readable_links_become_deep_links() {
+        let args = vec![
+            "canopy".into(),
+            "https://canopyide.dev/acme/api/s/fix-login-27".into(),
+        ];
+        assert_eq!(
+            link_from_args(args).as_deref(),
+            Some("canopy://link?url=https%3A%2F%2Fcanopyide.dev%2Facme%2Fapi%2Fs%2Ffix-login-27")
+        );
+        for other in [
+            "https://canopyide.dev/downloads",
+            "https://evil.dev/acme/api",
+            "http://canopyide.dev/acme/api",
+        ] {
+            assert_eq!(link_from_args(vec!["canopy".into(), other.into()]), None);
+        }
+        assert_eq!(
+            link_from_args(vec!["canopy".into(), "canopy://app".into()]).as_deref(),
+            Some("canopy://app")
+        );
+    }
 
     #[test]
     fn picks_first_existing_dir_and_skips_flags() {

@@ -2327,7 +2327,12 @@ const ProjectViewBody = memo(function ProjectViewBody({
 
   const openAccountChat = useCallback((conversation: AccountConversation) => {
     const existing = tabsRef.current.find(t => t.type === "chat" && t.accountConversation?.teamId === conversation.teamId && t.accountConversation?.userId === conversation.userId && t.peer === conversation.peer);
-    if (existing) { setActiveTabId(existing.id); return; }
+    if (existing) {
+      // A message link into an open conversation: carry the message to focus.
+      if (conversation.focusMessage) setTabs(prev => prev.map(t => t.id === existing.id && t.type === "chat" && t.accountConversation ? {...t, accountConversation:{...t.accountConversation, focusMessage:conversation.focusMessage}} : t));
+      setActiveTabId(existing.id);
+      return;
+    }
     const id = tabId();
     setTabs(prev => [...prev, {id, type:"chat", peer:conversation.peer, name:conversation.name, accountConversation:conversation}]);
     setActiveTabId(id);

@@ -1,5 +1,5 @@
 import type {AccountConversation} from "./AccountChatView";
-import {TeamHub} from "./TeamHub";
+import {TeamHub,type TeamAccountState} from "./TeamHub";
 // Team relay side panel: host a relay (your Canopy IS the server, joined with a
 // 7-digit code) or join a teammate's. Hosting is Local or Internet. Local is a
 // direct TCP listener on the LAN. Internet rides the SAME shared endpoint as
@@ -529,7 +529,13 @@ function RelayTeamPanel({ relay, onOpenChat, onOpenInboxItem, onNotice }: TeamPa
   );
 }
 
+/** Signed in, a Canopy account is the whole connection: teams, presence and
+ *  messages join by themselves (teamMessaging/background.ts), so the join-code
+ *  relay is not offered. It stays reachable for people without an account, and
+ *  while a relay session is already running. */
 export function TeamPanel(props: TeamPanelProps){
- const [advanced,setAdvanced]=useState(false);
- return <div style={{height:"100%",overflow:"auto"}}>{advanced?<RelayTeamPanel {...props}/>:<TeamHub onOpenChat={props.onOpenAccountChat}/>}<button className="team-input" onClick={()=>setAdvanced(!advanced)}>{advanced?"Back to Teams":"Advanced: self-hosted relay"}</button></div>;
+ const [advanced,setAdvanced]=useState(false),[account,setAccount]=useState<TeamAccountState>('unknown');
+ const relayActive=props.relay.status.role!=='off';
+ const offerRelay=account==='signed-out'||relayActive||advanced;
+ return <div style={{height:"100%",overflow:"auto"}}>{advanced?<RelayTeamPanel {...props}/>:<TeamHub onOpenChat={props.onOpenAccountChat} onAccount={setAccount}/>}{offerRelay&&<button className="team-input" onClick={()=>setAdvanced(!advanced)}>{advanced?"Back to Teams":relayActive?"Self-hosted relay (connected)":"No account? Connect with a join code"}</button>}</div>;
 }

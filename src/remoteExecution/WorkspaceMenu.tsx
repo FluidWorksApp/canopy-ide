@@ -1,13 +1,18 @@
 import {useEffect,useLayoutEffect,useRef,useState} from 'react';
 import {createPortal} from 'react-dom';
 import {useEscapeLayer} from '../useEscape';
+import {copyReadableLink} from '../readableLinks';
 
 export type WorkspaceMenuRow={id:string;name:string;kind:'local'|'saved'|'managed';detail:string;tone:'running'|'attention'|'quiet'|'danger';active:boolean;disabled?:string};
 
 /** The header switcher: one row per workspace, one click to switch. Anything
  * that needs more than a click (resume progress, sign-in, errors) surfaces in
  * its own popup rather than in this menu. */
-export function WorkspaceMenu({anchor,rows,busyId,error,onPick,onManage,onNew,onClose}:{anchor:HTMLElement|null;rows:WorkspaceMenuRow[];busyId:string|null;error:string;onPick:(row:WorkspaceMenuRow)=>void;onManage:()=>void;onNew:()=>void;onClose:()=>void}){
+/** `linkWorkspaceId`: the active account workspace, offered as one-click
+ *  "Copy workspace link" (readableLinks.ts). */
+export function WorkspaceMenu({anchor,rows,busyId,error,onPick,onManage,onNew,onClose,linkWorkspaceId}:{anchor:HTMLElement|null;rows:WorkspaceMenuRow[];busyId:string|null;error:string;onPick:(row:WorkspaceMenuRow)=>void;onManage:()=>void;onNew:()=>void;onClose:()=>void;linkWorkspaceId?:string}){
+ const [linkState,setLinkState]=useState<{text:string;error:boolean}|null>(null);
+ const copyLink=()=>{if(!linkWorkspaceId)return;setLinkState({text:'Copying…',error:false});void copyReadableLink({kind:'workspace',workspaceId:linkWorkspaceId}).then(url=>setLinkState({text:`Copied ${url.replace(/^https:\/\//,'')}`,error:false})).catch((e:unknown)=>setLinkState({text:e instanceof Error?e.message:String(e),error:true}));};
  const menu=useRef<HTMLDivElement>(null);
  // Escape closes the menu (via the overlay stack, so never the terminal too)
  // and hands focus back to the header button that opened it.
@@ -34,6 +39,8 @@ export function WorkspaceMenu({anchor,rows,busyId,error,onPick,onManage,onNew,on
    <span className="workspace-menu-check" aria-hidden="true">{row.active?'✓':''}</span>
   </button>;})}
   {error&&<p className="workspace-menu-error" role="alert">{error}</p>}
+  {linkWorkspaceId&&<button type="button" role="menuitem" className="workspace-menu-action" onClick={copyLink}><span aria-hidden="true">⧉</span>Copy workspace link</button>}
+  {linkState&&<p className={linkState.error?'workspace-menu-error':'workspace-menu-note'} role={linkState.error?'alert':'status'}>{linkState.text}</p>}
   <div className="workspace-menu-sep" role="separator"/>
   <button type="button" role="menuitem" className="workspace-menu-action" onClick={onNew}><span aria-hidden="true">＋</span>New workspace…</button>
   <button type="button" role="menuitem" className="workspace-menu-action" onClick={onManage}><span aria-hidden="true">⚙</span>Manage workspaces…</button>
