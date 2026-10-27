@@ -9,6 +9,7 @@
 // for its link (idempotent: the same thing always gets the same URL) and the
 // answer is remembered for this account until it changes.
 import {invoke} from '@tauri-apps/api/core';
+import { serverFeatureError } from './accountErrors';
 import {writeClipboardText} from './terminalClipboard';
 import type {DeepLink} from './deepLinks';
 
@@ -30,7 +31,10 @@ export type ResolvedLink = (
 /** A link in Settings → Account → Links. */
 export type ManagedLink = ResolvedLink & {createdAt: string | null; mine: boolean; canRevoke: boolean};
 
-const request = <T,>(body: unknown) => invoke<T>('canopy_account_request', {route: '/api/links', body});
+const request = <T,>(body: unknown) =>
+  invoke<T>('canopy_account_request', {route: '/api/links', body}).catch((error: unknown) => {
+    throw serverFeatureError(error, 'Readable links');
+  });
 export const targetKey = (t: LinkTarget) =>
   t.kind === 'workspace' ? `workspace:${t.workspaceId}` : t.kind === 'session' ? `session:${t.workspaceId}:${t.publicationId}` : `message:${t.teamId}:${t.peer ?? ''}:${t.messageId}`;
 

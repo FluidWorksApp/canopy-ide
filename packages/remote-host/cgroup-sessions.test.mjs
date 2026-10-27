@@ -51,8 +51,11 @@ test('the runner says exactly why limits are off, and places, measures and limit
  await writeFile(path.join(root,'sessions','7','memory.current'),String(GIB/2));
  await writeFile(path.join(root,'sessions','7','memory.events'),'low 0\nhigh 3\nmax 0\noom 0\noom_kill 0\n');
  const governor=new TerminalGovernor({defaultsFile:path.join(base,'defaults.json'),now:()=>1000});
- const sampler=governorSampler({governor,cgroups:cg,memory:async()=>({total:8*GIB,available:6*GIB}),sample:async()=>[{id:7,bytes:1,cliKey:'bin:claude',pids:[41,1]}]});
+ await writeFile(path.join(root,'sessions','7','memory.stat'),`anon ${GIB/8}\nfile ${GIB/4}\ninactive_file ${GIB/4}\n`);
+ let observed=null;
+ const sampler=governorSampler({governor,cgroups:cg,memory:async()=>({total:8*GIB,available:6*GIB}),sample:async()=>[{id:7,bytes:1,cliKey:'bin:claude',pids:[41,1]}],observed:o=>{observed=o;}});
  await sampler.tick();
+ assert.deepEqual(observed.map(o=>[o.id,o.bytes,o.workingSet]),[[7,GIB/2,GIB/4]],'the pass reports each terminal\'s working set, cache it can drop left out');
  assert.equal(await readFile(path.join(root,'sessions','7','cgroup.procs'),'utf8'),'41','pid 1 is never moved');
  assert.equal(await readFile(path.join(root,'sessions','7','memory.high'),'utf8'),String(GIB));
  assert.equal(await readFile(path.join(root,'sessions','7','memory.max'),'utf8'),'max');
@@ -69,8 +72,10 @@ test('without delegation the governor stays monitor-only and says why',async()=>
  const base=await mkdtemp(path.join(tmpdir(),'cg-off-'));
  const cg=new SessionCgroups({root:path.join(base,'none'),statusFile:path.join(base,'none.json'),cgroupFs:path.join(base,'nofs')});
  const governor=new TerminalGovernor({defaultsFile:path.join(base,'d.json')});
- const sampler=governorSampler({governor,cgroups:cg,memory:async()=>({total:8*GIB,available:6*GIB}),sample:async()=>[{id:3,bytes:GIB/4,pids:[]}]});
+ let observed=null;
+ const sampler=governorSampler({governor,cgroups:cg,memory:async()=>({total:8*GIB,available:6*GIB}),sample:async()=>[{id:3,bytes:GIB/4,pids:[]}],observed:o=>{observed=o;}});
  await sampler.tick();
+ assert.deepEqual(observed.map(o=>[o.id,o.bytes,o.workingSet]),[[3,GIB/4,undefined]],'without cgroups the pass carries the resident set');
  const cap=governor.snapshot().capability;
  assert.equal(cap.enforcement,'monitor_only');assert.match(cap.detail,/Per-terminal limits are off: this kernel does not offer cgroup v2/);
 });

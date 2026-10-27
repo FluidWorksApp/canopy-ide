@@ -3,6 +3,7 @@
 import { createChannel, invoke, invokeDesktop } from "./host";
 import { startRendererHeartbeat } from "./rendererHeartbeat";
 import { peekTeamIdentity } from "./teamIdentity";
+import type { MachineUsage, SessionUsage } from "./resourceAttribution";
 import { settleLocalBrowserOp } from "./browserLocalOps";
 import { isRemoteHost, isWorkspaceHost, listen as hostListen, type UnlistenFn } from "./host";
 import type { HostEvent } from "./host/contract";
@@ -852,6 +853,14 @@ export interface AgentUiOp {
   requestId?: string | null;
   /** mesh_message_cloud: the sending terminal's name, from the bridge. */
   fromName?: string | null;
+  /** mesh_submit: repositories the agent named (`owner/name` or a clone URL),
+   *  where it should run first. */
+  repos?: string[] | null;
+  /** mesh_submit: the submitting terminal's own checkout, read by the bridge
+   *  from the credential's directory: origin's URL as git has it, the folder
+   *  inside the repo, and the branch. Reduced to host + `owner/name` before
+   *  it leaves this machine. */
+  senderRepo?: { origin: string; path: string; branch: string } | null;
   path?: string | null;
   line?: number | null;
   column?: number | null;
@@ -2829,7 +2838,7 @@ const pollResourceStats = async () => {
     try {
       const stats = isRemoteHost()
         ? await invoke<WorkspaceResourceStats>("workspace_metrics").then(workspaceAppStats)
-        : await invoke<AppStats | null>("app_stats");
+        : await desktopAppStats();
       if (stats) {
         latestAppStats = stats;
         for (const subscriber of [...appStatsSubscribers]) subscriber(stats);
@@ -3062,8 +3071,45 @@ export interface AppStats {
   core?: AppStatsPart;
   webviews?: AppStatsPart;
   children?: AppStatsPart;
-  /** Remote totals cover the workspace container, rather than the local app. */
-  workspace?: { available: boolean; memoryLimitBytes: number | null; cpus: number | null; elasticMemory?: ElasticWorkspaceMemory | null; elasticCpu?: ElasticWorkspaceCpu | null };
+  /** Remote totals cover the workspace container, rather than the local app.
+   *  `mem_bytes` is then its working set (memory.current less the cache the
+   *  kernel drops on demand) when the workspace reports one. The optional
+   *  fields are absent from workspaces running an older host. */
+  workspace?: {
+    available: boolean;
+    memoryLimitBytes: number | null;
+    cpus: number | null;
+    elasticMemory?: ElasticWorkspaceMemory | null;
+    elasticCpu?: ElasticWorkspaceCpu | null;
+    /** memory.current, cache included. */
+    memoryBytes?: number;
+    workingSetBytes?: number;
+    /** Limit less working set; null without a limit. */
+    availableBytes?: number | null;
+    /** Inactive file cache: freed automatically when anything needs memory. */
+    reclaimableBytes?: number | null;
+    memoryBreakdown?: WorkspaceMemoryBreakdown | null;
+    /** Cores in use, and allocated cores less those. */
+    cpusUsed?: number | null;
+    cpusAvailable?: number | null;
+    /** Every live terminal in the workspace, whoever started it; null when
+     *  the workspace has no recent measurement. */
+    sessions?: SessionUsage[] | null;
+    /** The VM and this workspace's other runtimes (teammates' own
+     *  containers), from the gateway; absent from older gateways. */
+    machine?: MachineUsage | null;
+  };
+  /** This computer's memory, for the "free" framing on a local desktop. */
+  system?: { availableBytes: number; totalBytes: number };
+}
+
+export interface WorkspaceMemoryBreakdown {
+  anonBytes: number;
+  fileBytes: number;
+  shmemBytes: number;
+  kernelBytes: number | null;
+  activeFileBytes: number | null;
+  inactiveFileBytes: number | null;
 }
 
 export interface ElasticWorkspaceCpu {
@@ -3084,19 +3130,48 @@ export interface ElasticWorkspaceMemory {
   sampledAt: number;
 }
 
-interface WorkspaceResourceStats {
+export interface WorkspaceResourceStats {
   cpuPercent: number | null;
   memoryBytes: number;
   memoryLimitBytes: number | null;
   cpus: number | null;
   elasticMemory?: ElasticWorkspaceMemory | null;
   elasticCpu?: ElasticWorkspaceCpu | null;
+  workingSetBytes?: number;
+  availableBytes?: number | null;
+  reclaimableBytes?: number | null;
+  memoryBreakdown?: WorkspaceMemoryBreakdown | null;
+  cpusUsed?: number | null;
+  cpusAvailable?: number | null;
+  sessions?: SessionUsage[] | null;
+  machine?: MachineUsage | null;
 }
 
-function workspaceAppStats(sample: WorkspaceResourceStats | null): AppStats {
-  return { cpu: sample?.cpuPercent ?? NaN, mem_bytes: sample?.memoryBytes ?? NaN,
+export function workspaceAppStats(sample: WorkspaceResourceStats | null): AppStats {
+  const workingSet = typeof sample?.workingSetBytes === "number" ? sample.workingSetBytes : undefined;
+  return { cpu: sample?.cpuPercent ?? NaN, mem_bytes: workingSet ?? sample?.memoryBytes ?? NaN,
     procs: 0, includes_webviews: true,
-    workspace: { available: sample !== null, memoryLimitBytes: sample?.memoryLimitBytes ?? null, cpus: sample?.cpus ?? null, elasticMemory: sample?.elasticMemory ?? null, elasticCpu: sample?.elasticCpu ?? null } };
+    workspace: { available: sample !== null, memoryLimitBytes: sample?.memoryLimitBytes ?? null, cpus: sample?.cpus ?? null, elasticMemory: sample?.elasticMemory ?? null, elasticCpu: sample?.elasticCpu ?? null,
+      ...(workingSet !== undefined ? {
+        memoryBytes: sample!.memoryBytes, workingSetBytes: workingSet,
+        availableBytes: sample!.availableBytes ?? null, reclaimableBytes: sample!.reclaimableBytes ?? null,
+        memoryBreakdown: sample!.memoryBreakdown ?? null,
+        cpusUsed: sample!.cpusUsed ?? null, cpusAvailable: sample!.cpusAvailable ?? null,
+        sessions: Array.isArray(sample!.sessions) ? sample!.sessions : null,
+        machine: sample!.machine ?? null,
+      } : {}) } };
+}
+
+/** The local app's footprint, with this computer's free memory beside it. */
+async function desktopAppStats(): Promise<AppStats | null> {
+  const [stats, memory] = await Promise.all([
+    invoke<AppStats | null>("app_stats"),
+    memoryInfo(),
+  ]);
+  if (!stats) return stats;
+  return memory && memory.total_bytes > 0
+    ? { ...stats, system: { availableBytes: memory.available_bytes, totalBytes: memory.total_bytes } }
+    : stats;
 }
 
 /** Whole-app footprint, sampled every 2s. `includes_webviews` says whether the

@@ -172,6 +172,25 @@ test('member tokens require live authorization and select only their authenticat
  }finally{await close(server);await close(denied);await close(upstream);}
 });
 
+test('workspace metrics carry the machine and this workspace\'s other runtimes, named, to people who share it',async()=>{
+ const {createHmac}=await import('node:crypto');const key='k'.repeat(48);
+ const config={workspaces:[{id:'shared',cgroupParent:'canopy-shared.slice',accounts:['owner'],memoryMiB:1024,cpus:1,projectMounts:[{id:'app',writable:true}]},{id:'other',accounts:[],memoryMiB:1024,cpus:1}],principals:[{id:'managed-account',tokenSha256:'0'.repeat(64),scope:'drive',workspaces:['shared']}],managedSession:{key,workspaceId:'shared'}};
+ const sign=claims=>{const payload=Buffer.from(JSON.stringify({workspaceId:'shared',expires:Math.floor(Date.now()/1000)+120,...claims})).toString('base64url');return 'Bearer '+payload+'.'+createHmac('sha256',key).update(payload).digest('base64url');};
+ const member=memberId=>sign({version:2,memberId,accessVersion:1,scope:'drive'});
+ const upstream=http.createServer(async(req,res)=>{for await(const _ of req);res.setHeader('content-type','application/json');res.end(req.url==='/native'?JSON.stringify({result:{memoryBytes:1}}):'[]');});const upstreamUrl=await listen(upstream);
+ const runtime={open:async()=>({url:upstreamUrl,token:'runtime'})};
+ const asked=[];const machineMetrics={forWorkspace:async(workspace,viewer,members)=>{asked.push({workspace:workspace.id,viewer:viewer.memberId??null,members:members.map(m=>[m.memberId,m.name,m.runtime.parentWorkspaceId])});return {memoryTotalBytes:8,runtimes:[]};}};
+ const server=createGateway({config,workspaces:runtime,machineMetrics,authorizeMember:async p=>({projectAccess:{allRead:false,allWrite:false,selected:[{id:'app',writable:true}]},gitIdentity:{name:p.memberId==='alice'?'Alice Liddell':'Bob',email:p.memberId+'@example.invalid'}})}),url=await listen(server);
+ const metrics=bearer=>fetch(url+'/v1/workspaces/shared/native',{method:'POST',headers:{authorization:bearer,'content-type':'application/json'},body:JSON.stringify({command:'workspace_metrics'})}).then(r=>r.json());
+ try{
+  assert.deepEqual((await metrics(member('alice'))).result.machine,{memoryTotalBytes:8,runtimes:[]});
+  await metrics(member('bob'));
+  assert.deepEqual((await metrics(sign({}))).result.machine,{memoryTotalBytes:8,runtimes:[]});
+  assert.deepEqual(asked.at(-1),{workspace:'shared',viewer:null,members:[['alice','Alice Liddell','shared'],['bob','Bob','shared']]});
+  assert.equal(asked[0].viewer,'alice');
+ }finally{await close(server);await close(upstream);}
+});
+
 test('terminal sessions receive validated member Git defaults without arbitrary environment injection',async()=>{
  const launches=[],secret='x'.repeat(64);
  const server=createRunner({secret,spawnPty:(bin,args,options)=>{launches.push(options);return {onData(){},onExit(){},kill(){},resize(){},write(){}};}}),url=await listen(server);

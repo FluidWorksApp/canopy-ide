@@ -26,7 +26,7 @@ function setup(over: Partial<MeshJobDeps> = {}, s = session()) {
   let n = 0;
   const deps = {
     workspaces: () => [{ name: "api" }, { name: "web" }],
-    start: vi.fn(async (req: { project: string }) => ({ started: true, project: req.project, note: "ok", runId: `run-${++n}` })),
+    start: vi.fn(async (req: { project?: string; dir?: string }) => ({ started: true, project: req.project ?? req.dir ?? "", note: "ok", runId: `run-${++n}` })),
     sessions: () => [s],
     teamName: () => "Core",
     report: vi.fn(async () => "m1"),
@@ -43,6 +43,11 @@ const origin = { ptyId: 7, instance: "inst" };
 const job = (over: Partial<JobRequest> = {}): JobRequest => ({ id: "job-incoming-1", title: "Fix flaky test", brief: "Make test X stable", workspace: null, created: NOW, ...over });
 const incoming = (user: string, j = job(), deviceId = `${user}-1`): TeamJobEvent => ({ kind: "job", team: "t1", user: "alice", sender: { user, device: deviceId, name: user === "alice" ? "Alice" : "Bob" }, job: j });
 const flush = () => new Promise((r) => setTimeout(r, 0));
+const CHECKOUTS = [
+  { project: "api", dir: "/src/api", rel: "", origin: "https://github.com/acme/api.git", main: true },
+  { project: "web", dir: "/src/web", rel: "", origin: "git@github.com:acme/web.git", main: true },
+  { project: "scratch", dir: "/src/scratch", rel: "", origin: "", main: true },
+];
 
 describe("the approval rule", () => {
   it("lets only this same account skip approval", () => {
@@ -90,6 +95,17 @@ describe("submitting a job", () => {
     expect(deps.report).toHaveBeenLastCalledWith(7, "inst", result.jobId, 'Job "Review my PR" (Bob) done.');
   });
 
+  it("carries the job's repository to another machine, and says so", async () => {
+    const { jobs, s } = setup();
+    const scope = { repos: [{ host: "github.com", slug: "acme/api" }], path: "server" };
+    const result = await jobs.submit({ brief: "Fix it", member: "bob", scope, ...origin });
+    expect(s.submitJob).toHaveBeenCalledWith(expect.objectContaining({ scope }), "bob", undefined);
+    expect(result.note).toContain("github.com/acme/api");
+    const bare = await jobs.submit({ brief: "Fix it", member: "me", ...origin });
+    expect(s.submitJob.mock.calls[1][0]).not.toHaveProperty("scope");
+    expect(bare.note).toContain("No repository is attached");
+  });
+
   it("reaches this account's other machine as \"me\"", async () => {
     const { jobs, s } = setup();
     const result = await jobs.submit({ brief: "Run the e2e suite", member: "me", workspace: "api", ...origin });
@@ -114,11 +130,12 @@ describe("receiving a job", () => {
   it("holds a teammate's job for approval — nothing runs until the user says so", async () => {
     const { jobs, deps, s } = setup();
     jobs.receive(incoming("bob", job({ workspace: "api" })));
+    await flush();
     expect(deps.start).not.toHaveBeenCalled();
     expect(jobs.inbox()).toHaveLength(1);
     expect(deps.post).toHaveBeenCalledWith(expect.objectContaining({ kind: "question", title: "Bob wants your agent to: Fix flaky test" }));
 
-    await jobs.approve("job-incoming-1", "web");
+    await jobs.approve("job-incoming-1", { project: "web" });
     expect(jobs.inbox()).toHaveLength(0);
     expect(deps.resolve).toHaveBeenCalledWith("attention-1", "answered");
     expect(deps.start).toHaveBeenCalledWith(expect.objectContaining({ project: "web", prompt: expect.stringContaining("Bob (your Canopy teammate)") }));
@@ -133,31 +150,69 @@ describe("receiving a job", () => {
     const { jobs, deps, s } = setup();
     jobs.receive(incoming("bob"));
     jobs.receive(incoming("bob"));
+    await flush();
     expect(jobs.inbox()).toHaveLength(1);
     await jobs.decline("job-incoming-1");
     expect(s.sendJobStatus).toHaveBeenCalledWith(expect.objectContaining({ state: "declined" }), "bob-1");
     expect(deps.start).not.toHaveBeenCalled();
   });
 
-  it("starts a job from this account's other machine on its own", async () => {
-    const { jobs, deps, s } = setup();
-    jobs.receive(incoming("alice", job({ workspace: "api" }), "me-desktop"));
+  it("starts a job from this account's other machine on its own in the checkout of its repository", async () => {
+    const { jobs, deps, s } = setup({ checkouts: async () => CHECKOUTS });
+    jobs.receive(incoming("alice", job({ workspace: "web", scope: { repos: [{ host: "github.com", slug: "Acme/api" }], path: "server" } }), "me-desktop"));
     await flush();
     expect(jobs.inbox()).toHaveLength(0);
-    expect(deps.start).toHaveBeenCalledWith(expect.objectContaining({ project: "api" }));
+    // The repository decides, not the workspace name the sender passed.
+    expect(deps.start).toHaveBeenCalledWith(expect.objectContaining({ dir: "/src/api" }));
+    expect(vi.mocked(deps.start).mock.calls[0][0]).not.toHaveProperty("project");
+    expect(vi.mocked(deps.start).mock.calls[0][0].prompt).toContain("Repository: github.com/Acme/api");
+    expect(vi.mocked(deps.start).mock.calls[0][0].prompt).toContain("`server` folder");
     expect(s.sendJobStatus).toHaveBeenCalledWith(expect.objectContaining({ state: "started" }), "me-desktop");
   });
 
-  it("asks where to run an own-account job that names no workspace here", () => {
-    const { jobs, deps } = setup();
-    jobs.receive(incoming("alice", job({ workspace: "mobile" }), "me-desktop"));
+  it("holds an own-account job with no repository for the user, even when it names a project here", async () => {
+    const { jobs, deps } = setup({ checkouts: async () => CHECKOUTS });
+    jobs.receive(incoming("alice", job({ workspace: "api" }), "me-desktop"));
+    await flush();
     expect(deps.start).not.toHaveBeenCalled();
-    expect(jobs.inbox()[0]).toMatchObject({ sameAccount: true });
+    expect(jobs.inbox()[0]).toMatchObject({ sameAccount: true, placement: { kind: "none" } });
+    expect(deps.post).toHaveBeenCalledWith(expect.objectContaining({ kind: "question", title: expect.stringContaining("Choose a project") }));
   });
 
-  it("declines on arrival rather than bury a full inbox", () => {
+  it("never auto-runs an own-account job whose repository isn't checked out here", async () => {
+    const { jobs, deps } = setup({ checkouts: async () => CHECKOUTS });
+    jobs.receive(incoming("alice", job({ scope: { repos: [{ host: "github.com", slug: "acme/dashboard" }] } }), "me-desktop"));
+    await flush();
+    expect(deps.start).not.toHaveBeenCalled();
+    expect(jobs.inbox()[0].placement).toEqual({ kind: "missing", repo: { host: "github.com", slug: "acme/dashboard" } });
+  });
+
+  it("still asks a teammate's approval when the repository matches, and runs where it matched", async () => {
+    const { jobs, deps } = setup({ checkouts: async () => CHECKOUTS });
+    jobs.receive(incoming("bob", job({ scope: { repos: [{ host: "github.com", slug: "acme/api" }] } })));
+    await flush();
+    expect(deps.start).not.toHaveBeenCalled();
+    const [item] = jobs.inbox();
+    expect(item.placement).toMatchObject({ kind: "matched", choices: [{ project: "api", dir: "/src/api" }] });
+    await jobs.approve(item.job.id, { dir: "/src/api", label: "api" });
+    expect(deps.start).toHaveBeenCalledWith(expect.objectContaining({ dir: "/src/api" }));
+  });
+
+  it("re-matches a waiting job once its repository is opened here", async () => {
+    let checkouts = CHECKOUTS;
+    const { jobs } = setup({ checkouts: async () => checkouts });
+    jobs.receive(incoming("bob", job({ scope: { repos: [{ host: "github.com", slug: "acme/dashboard" }] } })));
+    await flush();
+    expect(jobs.inbox()[0].placement.kind).toBe("missing");
+    checkouts = [...CHECKOUTS, { project: "dash", dir: "/src/dash", rel: "", origin: "git@github.com:acme/dashboard.git", main: true }];
+    await jobs.relocate();
+    expect(jobs.inbox()[0].placement).toMatchObject({ kind: "matched", choices: [{ project: "dash" }] });
+  });
+
+  it("declines on arrival rather than bury a full inbox", async () => {
     const { jobs, s } = setup();
     for (let i = 0; i < 21; i++) jobs.receive(incoming("bob", job({ id: `job-incoming-${100 + i}` })));
+    await flush();
     expect(jobs.inbox()).toHaveLength(20);
     expect(s.sendJobStatus).toHaveBeenCalledWith(expect.objectContaining({ jobId: "job-incoming-120", state: "declined" }), "bob-1");
   });
@@ -165,7 +220,8 @@ describe("receiving a job", () => {
   it("reports a failed launch back to the sender", async () => {
     const { jobs, s } = setup({ start: vi.fn(async () => ({ started: false, project: "api", note: "No agent CLI installed" })) });
     jobs.receive(incoming("bob"));
-    await jobs.approve("job-incoming-1", "api");
+    await flush();
+    await jobs.approve("job-incoming-1", { project: "api" });
     expect(s.sendJobStatus).toHaveBeenLastCalledWith(expect.objectContaining({ state: "failed", detail: "No agent CLI installed" }), "bob-1");
   });
 });
@@ -209,6 +265,17 @@ describe("jobs for a cloud workspace", () => {
     restarted.jobs.receive(status("refused", result.jobId));
     expect(restarted.deps.report).toHaveBeenCalledWith(7, "inst", result.jobId, expect.stringContaining("refused"));
     expect(store.rows()).toHaveLength(0);
+  });
+
+  it("tells the cloud agent which repository the job is about, and warns when it works in another", async () => {
+    const submitWorkspaceJob = vi.fn(async () => host);
+    const { jobs } = setup({ cloudWorkspaces: cloud }, session({ hosts: () => [host], submitWorkspaceJob }));
+    const scope = { repos: [{ host: "github.com", slug: "acme/api" }, { host: "github.com", slug: "acme/dashboard" }] };
+    const result = await jobs.submit({ brief: "Fix #101", workspace: "cloud-api", agent: "reviewer", scope, ...origin });
+    const sent = submitWorkspaceJob.mock.calls[0] as unknown as [JobRequest];
+    expect(sent[0].scope).toEqual(scope);
+    expect(sent[0].brief).toBe("Fix #101\n\nRepository: github.com/acme/api. It also involves: github.com/acme/dashboard — those are other checkouts, not this one.");
+    expect(result.note).not.toContain("Note:");
   });
 
   it("messages an agent in a cloud workspace through its service", async () => {

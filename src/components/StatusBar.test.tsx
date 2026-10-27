@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { StatusBar } from "./StatusBar";
 import { BranchSwitchProvider } from "../useBranchSwitch";
 import * as ipc from "../ipc";
@@ -742,6 +742,115 @@ describe("the account switcher", () => {
   const {container}=render(<StatusBar {...base} events={[]}/>);
   const chip=await screen.findByTitle(/^Remote workspace:/);expect(chip.closest('.status-res')).toBeTruthy();expect(chip.textContent).toContain('44% cpu');expect(container.querySelector('.workspace-metrics')).toBeNull();fireEvent.click(chip);expect(screen.getByText('Usage now')).toBeTruthy();expect(screen.getByText('of 1 allocated cores')).toBeTruthy();expect(screen.queryByText('Core services')).toBeNull();expect(screen.getByText('Automatic scaling · configured range')).toBeTruthy();expect(screen.getByText('1 – 4 cores')).toBeTruthy();expect(screen.getByText(/This VM allows up to 2 CPU cores/)).toBeTruthy();expect(screen.getByText('3.0 GB – 16.0 GB')).toBeTruthy();expect(screen.getByText(/RAM available to this workspace: 5.5 GB/)).toBeTruthy();
  });
+
+describe("shared workspace availability", () => {
+ const GB=1024**3;
+ const ws=(over:Record<string,unknown>={})=>({cpu:25,mem_bytes:8*GB,procs:0,includes_webviews:true,workspace:{available:true,memoryLimitBytes:28.8*GB,cpus:8,memoryBytes:21*GB,workingSetBytes:8*GB,availableBytes:20.8*GB,reclaimableBytes:13*GB,memoryBreakdown:null,cpusUsed:2,cpusAvailable:6,
+  sessions:[{id:1,memoryBytes:2.4*GB,cpusUsed:0.5,owner:{id:'device:me',name:'Me'}},{id:2,memoryBytes:1*GB,cpusUsed:0.5,owner:{id:'device:me',name:'Me'}},{id:3,memoryBytes:3*GB,cpusUsed:1,owner:{id:'u-ada',name:'Ada'}}],
+  elasticMemory:null,elasticCpu:null,...over}});
+ const feed=(...samples:unknown[])=>vi.mocked(ipc.onAppStats).mockImplementation(async cb=>{for(const sample of samples)cb(sample as never);return ()=>{};});
+ beforeEach(()=>{localStorage.setItem('canopy.resourceOwnerId','device:me');});
+
+ it("shows your share and what is free, not memory.current", async () => {
+  feed(ws());
+  render(<StatusBar {...base} events={[]}/>);
+  const chip=await screen.findByTitle(/^Cloud workspace:/);
+  expect(chip.textContent).toBe('You 3.4 GB · 20.8 GB free · 6.0 cores free');
+  expect(chip.textContent).not.toContain('21.0 GB');
+  expect(chip.getAttribute('title')).toMatch(/20\.8 GB of 28\.8 GB memory free; CPU 6\.0 cores of 8 cores free\..*13\.0 GB of cached files isn't counted as in use/);
+  expect(chip.querySelector('.res-low,.res-critical')).toBeNull();
+ });
+
+ it("leads with what is in use when none of the terminals are yours", async () => {
+  feed(ws({sessions:[{id:3,memoryBytes:3*GB,cpusUsed:1,owner:{id:'u-ada',name:'Ada'}}]}));
+  render(<StatusBar {...base} events={[]}/>);
+  expect((await screen.findByTitle(/^Cloud workspace:/)).textContent).toBe('8.0 GB in use · 20.8 GB free · 6.0 cores free');
+ });
+
+ it("breaks the workspace down by person, with cache apart", async () => {
+  feed(ws());
+  render(<StatusBar {...base} events={[]}/>);
+  fireEvent.click(await screen.findByTitle(/^Cloud workspace:/));
+  const popover=within(document.querySelector('.status-breakdown') as HTMLElement);
+  expect(popover.getByText('Available now')).toBeTruthy();
+  expect(popover.getByText('20.8 GB free')).toBeTruthy();expect(popover.getByText('of 28.8 GB')).toBeTruthy();
+  expect(popover.getByText('6.0 cores free')).toBeTruthy();expect(popover.getByText('of 8 cores')).toBeTruthy();
+  const table=screen.getByRole('table',{name:'Who is using it'});
+  const rows=within(table).getAllByRole('row').slice(1).map(row=>[within(row).getByRole('rowheader').textContent,...within(row).getAllByRole('cell').map(c=>c.textContent)]);
+  expect(rows).toEqual([
+   ['You · 2 terminals','3.4 GB','1.0 core'],
+   ['Ada · 1 terminal','3.0 GB','1.0 core'],
+   ['Workspace services · desktop, browsers, Canopy','1.6 GB','0.0 cores'],
+  ]);
+  expect(screen.getByText('Reclaimable cache — freed automatically when needed')).toBeTruthy();
+  expect(screen.getByText('13.0 GB')).toBeTruthy();
+  expect(screen.queryByText('Usage now')).toBeNull();
+ });
+
+ it("adds this machine and teammates in their own runtimes, when the gateway reports them", async () => {
+  feed(ws({machine:{memoryTotalBytes:64*GB,memoryAvailableBytes:30*GB,cpus:16,cpusUsed:6,cpusAvailable:10,runtimes:[
+   {kind:'workspace',memberId:null,name:null,workingSetBytes:5*GB,cpusUsed:2},
+   {kind:'member',memberId:'m-bo',name:'Bo',workingSetBytes:4*GB,cpusUsed:0.5},
+  ]}}));
+  render(<StatusBar {...base} events={[]}/>);
+  fireEvent.click(await screen.findByTitle(/^Cloud workspace:/));
+  const popover=within(document.querySelector('.status-breakdown') as HTMLElement);
+  expect(popover.getByText('This machine')).toBeTruthy();
+  expect(popover.getByText('30.0 GB free')).toBeTruthy();expect(popover.getByText('of 64.0 GB')).toBeTruthy();
+  expect(popover.getByText('10.0 cores free')).toBeTruthy();expect(popover.getByText('of 16 cores')).toBeTruthy();
+  const rows=within(popover.getByRole('table',{name:'Who is using it'})).getAllByRole('row').slice(1).map(row=>within(row).getByRole('rowheader').textContent);
+  expect(rows).toEqual(['You · 2 terminals','Ada · 1 terminal','Workspace services · desktop, browsers, Canopy','Main workspace · its owner and anyone connected to it','Bo · own workspace on this machine']);
+ });
+
+ it("keeps the workspace-only view when the gateway reports no machine", async () => {
+  feed(ws());
+  render(<StatusBar {...base} events={[]}/>);
+  fireEvent.click(await screen.findByTitle(/^Cloud workspace:/));
+  expect(screen.queryByText('This machine')).toBeNull();
+ });
+
+ it("warns on what is free: amber under 15%, red under 7%, never on cache", async () => {
+  feed(ws({availableBytes:3*GB,reclaimableBytes:25*GB}));
+  const {unmount}=render(<StatusBar {...base} events={[]}/>);
+  expect((await screen.findByText('3.0 GB free')).className).toBe('res-low');
+  unmount();
+  feed(ws({availableBytes:1.5*GB}));
+  render(<StatusBar {...base} events={[]}/>);
+  const free=await screen.findByText('1.5 GB free');
+  expect(free.className).toBe('res-critical');
+  expect(screen.getByTitle(/Memory is nearly full/)).toBeTruthy();
+ });
+
+ it("warns on CPU only when it stays short", async () => {
+  const short=ws({cpusAvailable:0.4,cpusUsed:7.6});
+  feed(short,short,short,short);
+  const {unmount}=render(<StatusBar {...base} events={[]}/>);
+  expect((await screen.findByText('0.4 cores free')).className).toBe('');
+  unmount();
+  feed(short,short,short,short,short);
+  render(<StatusBar {...base} events={[]}/>);
+  expect((await screen.findByText('0.4 cores free')).className).toBe('res-low');
+ });
+
+ it("says what is in use when the workspace has no limit or no per-terminal measurement yet", async () => {
+  feed(ws({memoryLimitBytes:null,availableBytes:null,cpus:null,cpusAvailable:null,sessions:null}));
+  render(<StatusBar {...base} events={[]}/>);
+  const chip=await screen.findByTitle(/^Cloud workspace:/);
+  expect(chip.textContent).toBe('8.0 GB in use · 2.0 cores in use');
+  fireEvent.click(chip);
+  expect(screen.getByText(/Per-person usage appears once the workspace has measured its terminals/)).toBeTruthy();
+  expect(screen.getAllByText('no limit set')).toHaveLength(2);
+ });
+
+ it("on this computer, shows Canopy's footprint beside the memory free", async () => {
+  feed({cpu:12,mem_bytes:1.2*GB,procs:3,includes_webviews:true,system:{availableBytes:1*GB,totalBytes:16*GB}});
+  render(<StatusBar {...base} events={[]}/>);
+  const free=await screen.findByText('1.0 GB free');
+  expect(free.className).toBe('res-critical');
+  expect(free.closest('button')!.textContent).toBe('12% cpu · 1.2 GB · 1.0 GB free');
+  expect(free.closest('button')!.getAttribute('title')).toMatch(/This computer has 1\.0 GB of 16\.0 GB memory free\. Memory is nearly full\./);
+ });
+});
 
 it('shows the exact active Codex session model and totals rather than another account or session',async()=>{
  const row={agent:'codex',session_id:'active-rollout',profile:'work',cwd:'/workspace',title:null,model:'gpt-6.1-sol',input_tokens:100,output_tokens:200,cache_read_tokens:0,cache_creation_tokens:0,cost:null,turns:7,updated:1,supported:true};

@@ -9,6 +9,7 @@ import {pollGovernorEvents} from './governorEvents';
 import {connectionKey,reportConnection,reportStream,workspaceLifecyclePhase} from './connectionState';
 import {saveRemoteContextImage} from './saveContextImage';
 import {basename} from '../paths';
+import {terminalOwner} from '../resourceAttribution';
 import {TerminalInput} from './terminalInput';
 import {canSwitchExecutionMode} from '../executionMode';
 import {remoteDiagnostic} from './remoteDiagnostic';
@@ -393,6 +394,9 @@ export class NativeWorkspaceHost implements Host {
       const claudeIde=ideRoot?{root:ideRoot,configDir:env.find(([key])=>key==='CLAUDE_CONFIG_DIR')?.[1]??null}:undefined;
       const requested=Array.isArray(args.argv)?(args.argv as string[]).map(quote).join(' '):String(args.runCommand??args.command??args.shell??'/bin/bash');
       const requestId=crypto.randomUUID();
+      // Who started it, for the status bar's per-person workspace usage: the
+      // workspace's processes all run as one Linux user.
+      const owner=terminalOwner();
       const commandLine=`cd ${quote(cwd)} && env ${[...env.filter(([key])=>!['CANOPY_ACCOUNT_POOL','CANOPY_SESSION_REQUEST_ID',CLAUDE_IDE_MARKER].includes(key)),['CANOPY_SESSION_REQUEST_ID',requestId]].map(([key,val])=>quote(key+'='+val)).join(' ')} ${requested}`;
       // A task attempt's terminal: the attempt must be the current reserved
       // one, and starts (or fails) with the spawn, as pty.rs does.
@@ -414,7 +418,7 @@ export class NativeWorkspaceHost implements Host {
           Object.assign(session,completed);
         }
       }
-      this.metadata[String(session.id)]={cwd,projectId:args.projectId,title:args.runCommand??requested,run:!!args.runCommand,runCommandId:args.runCommandId,command:requested,requestId};
+      this.metadata[String(session.id)]={cwd,projectId:args.projectId,title:args.runCommand??requested,run:!!args.runCommand,runCommandId:args.runCommandId,command:requested,requestId,owner:await owner};
       await this.native('pty_metadata_set',{id:session.id,value:this.metadata[String(session.id)]});this.known.set(session.id,session);
       const channel=args.onData as HostChannel<ArrayBuffer>|undefined;
       const stream=channel?await this.attach(session.id,channel):null;

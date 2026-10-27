@@ -40,6 +40,7 @@ import { authenticate, authorize, validateConfig, Tickets, authorizeStream } fro
 import { DockerWorkspaces } from './docker.mjs';
 import {ElasticMemory, memoryRange} from './elastic-memory.mjs';
 import {ElasticCpu, cpuRange} from './elastic-cpu.mjs';
+import {MachineMetrics} from './machine-metrics.mjs';
 import { body, json } from './http.mjs';
 import {startReleasePrepull} from './release-prepull.mjs';
 import {PREPULL_RESERVE_BYTES} from './image-retention.mjs';
@@ -53,12 +54,16 @@ import {harnessAction,harnessFailure,harnessQuery,pipeHarnessStream} from './ser
 import {nativeTimeoutMs} from './native-commands.mjs';
 import {InputLedger,SocketInput,TERMINAL_INPUT_PROTOCOL,BINARY_TERMINAL_INPUT_PROTOCOL,forwardInput,inputKey,sequencedInput} from './terminal-input.mjs';
 
-export function createGateway({ config, workspaces, origins = [], elasticMemory, elasticCpu, authorizeMember, authorizeRuntime, supervisor, credentialVault, sharedAccounts, credentialTickets, sharingAttest, sharedCatalog, brokerOptions={}, renewMember, now=Date.now, hostStorage=createHostStorage(), harness }) {
+export function createGateway({ config, workspaces, origins = [], elasticMemory, elasticCpu, machineMetrics = typeof workspaces?.inspectRuntime === 'function' ? new MachineMetrics({ inspect: runtime => workspaces.inspectRuntime(runtime) }) : null, authorizeMember, authorizeRuntime, supervisor, credentialVault, sharedAccounts, credentialTickets, sharingAttest, sharedCatalog, brokerOptions={}, renewMember, now=Date.now, hostStorage=createHostStorage(), harness }) {
   validateConfig(config);
+  // Members' names as the control plane gives them (their Git identity), for
+  // the per-person usage teammates in the same workspace see.
+  const memberNames = new Map();
   const checkMember = async (principal, bearer) => {
     if (!principal.memberId) return;
     const access=authorizeMember&&await authorizeMember(principal,bearer);
     if (!access) throw Error('Forbidden');
+    if (access.gitIdentity?.name) { memberNames.delete(`${principal.workspaceId}\0${principal.memberId}`); memberNames.set(`${principal.workspaceId}\0${principal.memberId}`, access.gitIdentity.name); if (memberNames.size > 1024) memberNames.delete(memberNames.keys().next().value); }
     return access.projectAccess?{...access.projectAccess,...(access.gitIdentity?{gitIdentity:access.gitIdentity}:{})}:undefined;
   };
   const tickets = new Tickets();
@@ -406,6 +411,12 @@ export function createGateway({ config, workspaces, origins = [], elasticMemory,
       if (operation === '/native' && payload?.command === 'workspace_metrics' && output.result) {
         output.result.elasticMemory = elasticMemory?.status(workspace.id) ?? null;
         output.result.elasticCpu = elasticCpu?.status(workspace.id) ?? null;
+        // The VM's totals and this workspace's other runtimes (member
+        // containers), which the workspace's own host can't see.
+        output.result.machine = machineMetrics ? await machineMetrics.forWorkspace(workspace, principal,
+          [...leases.entries.values()].filter(e => !e.stopping && e.runtime.parentWorkspaceId === workspace.id)
+            .map(e => ({ runtime: e.runtime, memberId: e.principal.memberId, name: memberNames.get(`${workspace.id}\0${e.principal.memberId}`) ?? null })),
+        ).catch(() => null) : null;
       }
       if (operation === '/native' && payload?.command === 'terminal_governor_status' && output.result?.capability && memoryRange(workspace).max > workspace.memoryMiB) {
         const allocation = elasticMemory?.status(workspace.id);

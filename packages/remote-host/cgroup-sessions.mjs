@@ -58,13 +58,16 @@ export class SessionCgroups{
    try{await writeFile(path.join(dir,'cgroup.procs'),String(pid));}catch(error){if(error.code!=='ESRCH')throw error;}
   }
  }
- /** memory.current and memory.events of one terminal, or null. */
+ /** memory.current, memory.events and working set of one terminal, or null. */
  async sample(id){
   try{
    const dir=this.dir(id);
    const current=Number((await read(path.join(dir,'memory.current'))).trim());
    const events={};for(const line of (await read(path.join(dir,'memory.events'))).split('\n')){const [k,v]=line.trim().split(' ');if(k)events[k]=Number(v)||0;}
-   return Number.isFinite(current)?{current,events}:null;
+   // Its working set too (cache it can drop on demand left out), for the
+   // status bar's per-person attribution; memory.current stays what limits.
+   const inactive=Number(/^inactive_file\s+(\d+)/m.exec(await read(path.join(dir,'memory.stat')).catch(()=>''))?.[1]);
+   return Number.isFinite(current)?{current,events,workingSet:Number.isFinite(inactive)?Math.max(0,current-inactive):current}:null;
   }catch{return null;}
  }
  /** memory.high at the allowance, memory.max at the maximum (or none). */
