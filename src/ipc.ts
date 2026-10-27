@@ -2,6 +2,7 @@
 // events and channels; native work (PTYs, LSP, files) remains in the Rust core.
 import { createChannel, invoke, invokeDesktop } from "./host";
 import { startRendererHeartbeat } from "./rendererHeartbeat";
+import { peekTeamIdentity } from "./teamIdentity";
 import { settleLocalBrowserOp } from "./browserLocalOps";
 import { isRemoteHost, isWorkspaceHost, listen as hostListen, type UnlistenFn } from "./host";
 import type { HostEvent } from "./host/contract";
@@ -274,6 +275,16 @@ const browserRendererGeneration = (): number => renderer?.generation ?? 0;
  * generation, so a stale-generation filter never drops the synthetic exit. */
 export const rendererSessionGeneration = (): number => renderer?.generation ?? 0;
 
+/** Every terminal says which signed-in team member started it
+ *  (`CANOPY_MEMBER`), so a gate that exempts a layer's owner (lensGates.ts)
+ *  can tell the owner's own agents from everyone else's. Nothing is added
+ *  while signed out, or when the launch already says. */
+function withMember<T extends { env?: [string, string][] }>(opts: T): T {
+  const member = peekTeamIdentity()?.id;
+  if (!member || opts.env?.some(([k]) => k === "CANOPY_MEMBER")) return opts;
+  return { ...opts, env: [...(opts.env ?? []), ["CANOPY_MEMBER", member]] };
+}
+
 export async function ptySpawn(
   opts: {
     cols: number;
@@ -305,7 +316,7 @@ export async function ptySpawn(
   // number[] below Tauri's internal direct-execute threshold — handle both.
   channel.onmessage = (data) => onData(decodePtyChunk(data));
   return invoke("pty_spawn", {
-    ...opts,
+    ...withMember(opts),
     rendererGeneration: rendererGeneration(),
     onData: channel,
   });
@@ -363,7 +374,7 @@ export const ptySpawnArgv = (opts: {
   projectId?: string;
   componentId?: string;
   workspacePath?: string;
-}) => invoke<SpawnResult>("pty_spawn_argv", opts);
+}) => invoke<SpawnResult>("pty_spawn_argv", withMember(opts));
 
 /** An argv-native process whose output is streamed into a visible terminal. */
 export async function ptySpawnAttachedArgv(
@@ -386,7 +397,7 @@ export async function ptySpawnAttachedArgv(
   const channel = createChannel<ArrayBuffer | number[]>();
   channel.onmessage = (data) => onData(decodePtyChunk(data));
   return invoke<SpawnResult>("pty_spawn_attached_argv", {
-    ...opts,
+    ...withMember(opts),
     rendererGeneration: rendererGeneration(),
     onData: channel,
   });
@@ -406,7 +417,7 @@ export const ptySpawnDetached = (opts: {
   projectId?: string;
   componentId?: string;
   workspacePath?: string;
-}) => invoke<SpawnResult>("pty_spawn_detached", opts);
+}) => invoke<SpawnResult>("pty_spawn_detached", withMember(opts));
 
 /** The tail of a PTY's raw output, escape sequences and all — the transcript of
  *  a run with no xterm buffer to read. Feed it through renderPtyText (ptyText.ts)
@@ -5349,7 +5360,7 @@ export const receiptRelease = (dir: string) => invoke<void>("receipt_release", {
 /** One approved gate as the hook reads it. `gate` is src/gates/dsl.ts `Gate`. */
 export interface GatePolicyWire {
   trifecta: "warn" | "block";
-  gates: { id: string; rule: string; scope: "project" | "team"; gate: unknown }[];
+  gates: { id: string; rule: string; scope: "project" | "team"; gate: unknown; exceptMembers?: string[] }[];
   guidance: string[];
 }
 

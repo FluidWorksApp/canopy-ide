@@ -15,6 +15,7 @@
 import * as ipc from "../ipc";
 import { appendLedger, queryLedger, setLedgerStatus, type LedgerEntry } from "../ledger";
 import { isEnforceable, normalizeGate, type Gate } from "./dsl";
+import { currentLayerGates, type PolicyGateWire } from "../lensGates";
 
 export type RuleTag = "enforced" | "guidance";
 export type RuleScope = "project" | "team";
@@ -153,8 +154,12 @@ export const setTrifecta = (cwd: string, mode: "warn" | "block") =>
 /** What the hook reads: approved enforceable gates, and every other rule as a
  *  line of guidance. A rule waiting for approval is still the team's rule, so
  *  it is told to agents meanwhile — just not enforced. */
-export function buildPolicy(set: Pick<RuleSet, "rules" | "trifecta">): ipc.GatePolicyWire {
-  const gates: ipc.GatePolicyWire["gates"] = [];
+export function buildPolicy(
+  set: Pick<RuleSet, "rules" | "trifecta">,
+  layerGates: readonly PolicyGateWire[] = [],
+): ipc.GatePolicyWire {
+  // Owned layers (lensGates.ts) are enforced like any approved rule.
+  const gates: ipc.GatePolicyWire["gates"] = [...layerGates];
   const guidance: string[] = [];
   for (const r of set.rules) {
     if (isActiveGate(r)) {
@@ -169,7 +174,16 @@ export function buildPolicy(set: Pick<RuleSet, "rules" | "trifecta">): ipc.GateP
 /** Write the policy where this project's hook reads it. On a Linux workspace
  *  the host routes this into the VM, where that hook runs. */
 export async function publishPolicy(cwd: string, set: Pick<RuleSet, "rules" | "trifecta">): Promise<void> {
-  await ipc.gatesPolicyWrite(cwd, buildPolicy(set));
+  // Every publish carries the layer-ownership gates too, so saving a written
+  // rule can never drop them (and vice versa).
+  const layers = await currentLayerGates(cwd).catch(() => [] as PolicyGateWire[]);
+  await ipc.gatesPolicyWrite(cwd, buildPolicy(set, layers));
+}
+
+/** Re-read the rules and publish: for changes that aren't a written rule
+ *  (a layer claimed or released, an approval landed). */
+export async function republishPolicy(cwd: string): Promise<void> {
+  await publishPolicy(cwd, await loadRules(cwd));
 }
 
 const STOPPED = new Set(["blocked", "needs-approval", "refused"]);

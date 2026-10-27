@@ -4,8 +4,9 @@
 // exactly what the turn did — Bash edits, generated files and deletions
 // included — where the edit journal only sees the agent's edit tools.
 //
-// Shared by proof receipts (src/receipts/engine.ts) and team memory
-// (src/memoryExtract.ts).
+// Shared by proof receipts (src/receipts/engine.ts), team memory
+// (src/memoryExtract.ts), awareness (src/awareness/engine.ts) and the
+// builder lens's step summaries (src/lensSteps.ts, lensCheckpoints.ts).
 
 import * as ipc from "./ipc";
 
@@ -66,4 +67,90 @@ export async function turnFileChanges(
   } catch {
     return null;
   }
+}
+
+// ------------------------------------------------- ranges and patches
+// The pair itself, the files between it and the patch, for features that
+// read the change rather than list it (awareness, step summaries).
+
+export interface SnapshotRange {
+  /** The tree as the turn started. */
+  from: string;
+  /** The tree as it ended; null when the end snapshot hasn't landed. */
+  to: string | null;
+  /** Another agent works in the same checkout, so the range can hold its
+   *  changes too. */
+  shared: boolean;
+}
+
+export interface SnapshotDeps {
+  turnList(cwd: string, sessionId: string): Promise<ipc.TurnList>;
+  run(cwd: string, argv: string[], opts: { timeoutMs?: number; keepBytes?: number; head?: boolean }): Promise<ipc.ReceiptCheckRun>;
+  sleep(ms: number): Promise<void>;
+}
+
+const defaultDeps: SnapshotDeps = {
+  turnList: (cwd, sessionId) => ipc.turnList(cwd, sessionId),
+  run: (cwd, argv, opts) => ipc.receiptRunCheck(cwd, argv, opts),
+  sleep: (ms) => new Promise((r) => setTimeout(r, ms)),
+};
+
+const END_RETRY_MS = 2000;
+
+/** The snapshot pair for the turn that started at `startedAt` (closest start
+ *  inside the turn wins). Null when there is no git, no snapshot, or any error. */
+export async function turnSnapshotRange(
+  cwd: string,
+  sessionId: string,
+  startedAt: number,
+  endedAt: number,
+  deps: Partial<SnapshotDeps> = {},
+): Promise<SnapshotRange | null> {
+  const d = { ...defaultDeps, ...deps };
+  try {
+    let list = await d.turnList(cwd, sessionId);
+    const pair = pickTurnSnapshots(list, startedAt, endedAt);
+    if (!pair) return null;
+    if (!pair.end) {
+      // The end snapshot is taken from the same hook batch that announced the
+      // turn's end, so it can land a moment after us. Ask once more.
+      await d.sleep(END_RETRY_MS);
+      list = await d.turnList(cwd, sessionId);
+      const again = list.turns.find((p) => p.start?.commit === pair.start);
+      return { from: pair.start, to: again?.end?.commit ?? null, shared: list.shared };
+    }
+    return { from: pair.start, to: pair.end, shared: list.shared };
+  } catch {
+    return null;
+  }
+}
+
+async function git(d: SnapshotDeps, cwd: string, args: string[], keepBytes = 64 * 1024): Promise<string | null> {
+  try {
+    const r = await d.run(cwd, ["git", ...args], { timeoutMs: 20_000, head: true, keepBytes });
+    return r.code === 0 ? r.stdout : null;
+  } catch {
+    return null;
+  }
+}
+
+/** Repo-relative files that differ between the snapshots (or, with no end
+ *  snapshot, between the start and the working tree). */
+export async function filesInRange(cwd: string, range: SnapshotRange, deps: Partial<SnapshotDeps> = {}): Promise<string[]> {
+  const d = { ...defaultDeps, ...deps };
+  const out = await git(d, cwd, ["diff", "--name-only", "--no-renames", range.from, ...(range.to ? [range.to] : [])]);
+  return [...new Set((out ?? "").split("\n").map((l) => l.trim()).filter(Boolean))];
+}
+
+/** The patch between the snapshots, limited to `files` when given. */
+export async function patchInRange(
+  cwd: string,
+  range: SnapshotRange,
+  files: readonly string[] = [],
+  keepBytes = 64 * 1024,
+  deps: Partial<SnapshotDeps> = {},
+): Promise<string> {
+  const d = { ...defaultDeps, ...deps };
+  const args = ["diff", "--no-color", "--no-ext-diff", range.from, ...(range.to ? [range.to] : [])];
+  return (await git(d, cwd, files.length ? [...args, "--", ...files] : args, keepBytes)) ?? "";
 }

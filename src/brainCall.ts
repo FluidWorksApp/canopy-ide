@@ -336,6 +336,7 @@ export async function askBrain<T = unknown>(req: BrainRequest<T>): Promise<Brain
     outputTokens: s?.outputTokens ?? null,
     ok: answer.ok,
     ...(answer.ok ? {} : { reason: answer.reason }),
+    ...(req.cwd ? { cwd: req.cwd } : {}),
   });
   noteBrainOutcome(answer, cli, { probe: isProbe(req) });
   return answer;

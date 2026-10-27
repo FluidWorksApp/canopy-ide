@@ -2502,7 +2502,11 @@ fn gate_check(
         }
         return None;
     }
-    let loaded = gates::load_policy(&home, cwd_path);
+    // Gates that exempt this session's team member (a layer owner's own
+    // agents) don't check it.
+    let member = std::env::var("CANOPY_MEMBER").ok();
+    let loaded = gates::load_policy(&home, cwd_path)
+        .map(|(root, policy)| (root, policy.for_member(member.as_deref())));
     let taint_ids = gate_taint_ids(session_id);
     let tainted = gates::is_tainted(&home, &taint_ids);
     let top = gates::worktree_top(cwd_path);
@@ -4792,11 +4796,11 @@ fn tool_defs() -> serde_json::Value {
         },
         {
             "name": "canopy_claim",
-            "description": "Claim the files you're about to work on so other agents in this checkout see it, and are told (with your note) if they try to take the same ones. Advisory: it doesn't block writes, it stops the collision being invisible. `action: release` drops your own claims; `history` returns the durable claim history overlapping exactly one path. A directory claim covers what's under it, and paths are resolved against your working directory, so relative and absolute spellings collide. Managed-task claims are linked to their attempt and release automatically when it settles or its process dies.",
+            "description": "Claim the files you're about to work on so other agents in this checkout see it, and are told (with your note) if they try to take the same ones. Advisory: it doesn't block writes, it stops the collision being invisible. `action: release` drops your own claims (only `paths`, when you name some — the rest stay held); `history` returns the durable claim history overlapping exactly one path. A directory claim covers what's under it, and paths are resolved against your working directory, so relative and absolute spellings collide. Managed-task claims are linked to their attempt and release automatically when it settles or its process dies.",
             "inputSchema": { "type": "object", "properties": {
                 "paths": { "type": "array", "items": { "type": "string" }, "description": "Absolute file or directory paths you're taking" },
                 "note": { "type": "string", "description": "What you're doing to them — the other agent reads this" },
-                "action": { "type": "string", "enum": ["claim", "release", "history"], "description": "Default claim; release drops your claims; history queries one path" }
+                "action": { "type": "string", "enum": ["claim", "release", "history"], "description": "Default claim; release drops your claims (just `paths` when given); history queries one path" }
             }, "additionalProperties": false }
         },
         {

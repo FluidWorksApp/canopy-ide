@@ -2,8 +2,9 @@
 // ("Go back to when it worked"), the diagnose-first "Something's wrong" flow,
 // and the Data / Logic / View map with layer owners. It reads the same project,
 // sessions and files the engineer lens does — nothing here owns state the
-// engineer lens can't see. All judgment comes from the brain (askBrain); all
-// edits go through the existing Build session.
+// engineer lens can't see. All judgment comes from the brain (askBrain). Fixes
+// go through the Build session; going back to a saved version doesn't need
+// one (lensRestore.ts commits the restored files as a new version).
 import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import * as ipc from "../ipc";
 import type { Project } from "../projects";
@@ -11,9 +12,16 @@ import type { BuilderSession } from "../vibeBuilderSessionTypes";
 import { getSettings, subscribeSettings } from "../settings";
 import { onAgentTurnEnd } from "../agentTurns";
 import { queryLedger } from "../ledger";
-import { buildReportCard, openShareDialog } from "../shareCards";
 import { timelineWords } from "../turnRollback";
 import { builderRoot } from "../projectLens";
+import { lensSteps, lensStepsVersion, subscribeLensSteps } from "../lensSteps";
+import { previewRestore, restoreVersion, type RestorePreview } from "../lensRestore";
+import { gateNotices, leadFinding, subscribeGateNotices } from "../gates/events";
+import { isActiveGate, loadRules, republishPolicy } from "../gates/rules";
+import { layerApprovals, layerOfGateId, APPROVAL_TTL_MS, type LayerApprovalData } from "../lensGates";
+import { requestLayerApproval, subscribeLayerApprovals } from "../lensApprovals";
+import { shareLayerClaim, subscribeClaimSync } from "../lensClaimSync";
+import { peekTeamIdentity, subscribeTeamIdentity, teamIdentity, type TeamIdentity } from "../teamIdentity";
 import {
   RISK_LABEL,
   checkpointTitle,
@@ -30,7 +38,6 @@ import {
   diagnose,
   fixAttempts,
   fixRequest,
-  goBackRequest,
   previewEvidence,
   restartFromPlanRequest,
   settleFixAttempt,
@@ -47,13 +54,12 @@ import {
   cachedLayerMap,
   claimLayer,
   ensureLayerMap,
-  lensIdentity,
   layerOwners,
   ownedLayerHits,
   ownershipNotice,
+  ownsLayer,
   releaseLayer,
   saveLayerGlobs,
-  setLensIdentity,
   teamRulesAvailable,
   type LayerMap,
   type LayerOwners,
@@ -61,7 +67,7 @@ import {
   type OwnedLayerHit,
 } from "../lensLayers";
 import type { LedgerEntry } from "../ledger";
-import { Button, Checkbox, TextInput } from "./ui";
+import { Button, Checkbox } from "./ui";
 import "./builderLens.css";
 
 type Section = "changes" | "wrong" | "layers";
@@ -74,6 +80,20 @@ export interface BuilderLensPanelProps {
 
 const useAutoSummaries = () =>
   useSyncExternalStore(subscribeSettings, () => getSettings().lensAutoSummaries);
+
+/** The signed-in team identity: who "I own this" and "is it mine" mean. */
+function useTeamIdentity(): { me: TeamIdentity | null; known: boolean } {
+  const me = useSyncExternalStore(subscribeTeamIdentity, peekTeamIdentity);
+  const [known, setKnown] = useState(me !== null);
+  useEffect(() => {
+    let live = true;
+    void teamIdentity().then(() => live && setKnown(true));
+    return () => {
+      live = false;
+    };
+  }, [me]);
+  return { me, known };
+}
 
 export function BuilderLensPanel({ project, session }: BuilderLensPanelProps) {
   const root = builderRoot(project);
@@ -121,11 +141,13 @@ export function BuilderLensPanel({ project, session }: BuilderLensPanelProps) {
 
 const dismissKey = (projectId: string) => `canopy.lens.remoteNotice.${projectId}`;
 
-/** A builder lens on a shared repository, before team rules exist, is the
- *  report's warning case. Not a block: a notice with the way to fix it. */
+/** A builder lens on a shared repository with no enforced team rules is the
+ *  report's warning case. Not a block: a notice with the way to fix it. The
+ *  Team rules button is offered when this project's Rules panel is really
+ *  there to open (gates/events.ts registerRulesEditor). */
 function RemoteNotice({ projectId, root }: { projectId: string; root: string }) {
   const [remote, setRemote] = useState(false);
-  const [rules, setRules] = useState(false);
+  const [enforced, setEnforced] = useState(false);
   const [dismissed, setDismissed] = useState(() => {
     try {
       return localStorage.getItem(dismissKey(projectId)) === "1";
@@ -139,24 +161,28 @@ function RemoteNotice({ projectId, root }: { projectId: string; root: string }) 
       (url) => live && setRemote(Boolean(url && url.trim())),
       () => undefined,
     );
-    void teamRulesAvailable(root).then((on) => live && setRules(on));
+    void loadRules(root).then(
+      (set) => live && setEnforced(set.rules.some(isActiveGate)),
+      () => undefined,
+    );
     return () => {
       live = false;
     };
   }, [root]);
-  if (!remote || dismissed) return null;
+  if (!remote || dismissed || enforced) return null;
+  const editor = teamRulesAvailable(root);
   return (
     <div className="builder-lens-notice" role="note">
       <span>
         This project is shared with others through its online repository. Changes made here
-        aren’t checked against team rules yet — ask an engineer to turn them on.
+        aren’t checked against team rules yet — {editor ? "add one, or ask an engineer to." : "ask an engineer to turn them on."}
       </span>
       <span className="builder-lens-notice-actions">
-        {rules && (
+        {editor && (
           <Button
             size="sm"
             onClick={() =>
-              window.dispatchEvent(new CustomEvent("canopy:open-settings", { detail: { tab: "rules" } }))
+              window.dispatchEvent(new CustomEvent("canopy:open-settings", { detail: { tab: "rules", cwd: root } }))
             }
           >
             Team rules
@@ -188,6 +214,26 @@ const sameTree = (root: string, cwd: string) => {
   return cwd === r || cwd.startsWith(`${r}/`);
 };
 
+/** Layers a gate stopped an agent from writing into, from the gate notices
+ *  (the hook's verdicts) for this project: the change that needs approval
+ *  before it can happen at all. */
+function blockedHits(root: string, owners: LayerOwners): (OwnedLayerHit & { attempted: string[] })[] {
+  const by = new Map<OwnedLayer, OwnedLayerHit & { attempted: string[] }>();
+  for (const n of gateNotices()) {
+    if (n.resolved || !sameTree(root, n.cwd) || n.stamp.status !== "blocked") continue;
+    const f = leadFinding(n.stamp);
+    const layer = layerOfGateId(f?.ruleId);
+    const claim = layer ? owners[layer] : undefined;
+    if (!layer || !claim) continue;
+    const file = /\(([^()]+)\)$/.exec(f?.label ?? "")?.[1];
+    const hit = by.get(layer) ?? { layer, owner: claim.data.owner, ownerId: claim.data.ownerId ?? null, files: [], attempted: [] };
+    if (file && !hit.files.includes(file)) hit.files.push(file);
+    hit.attempted.push(n.stamp.action.replace(/^write:/, "change "));
+    by.set(layer, hit);
+  }
+  return [...by.values()].filter((h) => h.files.length);
+}
+
 function ChangesSection({
   project,
   root,
@@ -198,12 +244,22 @@ function ChangesSection({
   session: BuilderSession | null;
 }) {
   const auto = useAutoSummaries();
+  const { me } = useTeamIdentity();
   const [saved, setSaved] = useState<LensCheckpoint[]>([]);
-  const [steps, setSteps] = useState<LensCheckpoint[]>([]);
   const [summaries, setSummaries] = useState<Record<string, CheckpointSummary | null>>({});
   const [hits, setHits] = useState<OwnedLayerHit[]>([]);
+  const [owners, setOwners] = useState<LayerOwners>({});
   const [tick, setTick] = useState(0);
+  const [restoring, setRestoring] = useState<{ sha: string; title: string } | null>(null);
+  const [note, setNote] = useState<string | null>(null);
   const words = timelineWords(true);
+  // Steps are collected app-wide (lensSteps.ts), so turns that ended while
+  // this panel wasn't on screen are here, summaries included.
+  const stepsVersion = useSyncExternalStore(subscribeLensSteps, lensStepsVersion);
+  const steps = useMemo(() => lensSteps(root), [root, stepsVersion]); // eslint-disable-line react-hooks/exhaustive-deps
+  const notices = useSyncExternalStore(subscribeGateNotices, gateNotices);
+  const [syncTick, setSyncTick] = useState(0);
+  useEffect(() => subscribeClaimSync(() => setSyncTick((t) => t + 1)), []);
 
   // Saved versions come from git; refreshed whenever a turn ends.
   useEffect(() => {
@@ -220,20 +276,7 @@ function ChangesSection({
   useEffect(
     () =>
       onAgentTurnEnd((turn) => {
-        if (!sameTree(root, turn.cwd)) return;
-        setSteps((cur) =>
-          [
-            {
-              key: `turn:${turn.turnId}`,
-              kind: "step" as const,
-              goal: turn.prompt?.trim() ?? "",
-              at: turn.endedAt,
-              files: turn.filesTouched,
-            },
-            ...cur.filter((s) => s.key !== `turn:${turn.turnId}`),
-          ].slice(0, 15),
-        );
-        setTick((t) => t + 1);
+        if (sameTree(root, turn.cwd)) setTick((t) => t + 1);
       }),
     [root],
   );
@@ -243,18 +286,19 @@ function ChangesSection({
     [steps, saved],
   );
 
-  // Cached summaries show at once; missing ones are asked for in the
-  // background when the person allows it. summarizeCheckpoint dedupes.
+  // Cached summaries show at once; missing saved-version summaries are asked
+  // for in the background when the person allows it (steps are summarised by
+  // lensSteps as they end). summarizeCheckpoint dedupes.
   useEffect(() => {
     let live = true;
     for (const cp of items) {
-      if (cp.key in summaries) continue;
+      if (summaries[cp.key]) continue;
       const cached = peekCheckpointSummary(root, cp.key);
       if (cached) {
         setSummaries((cur) => ({ ...cur, [cp.key]: cached }));
         continue;
       }
-      if (!auto) continue;
+      if (!auto || cp.key in summaries) continue;
       void summarizeCheckpoint(root, cp).then((s) => {
         if (live) setSummaries((cur) => ({ ...cur, [cp.key]: s }));
       });
@@ -262,42 +306,96 @@ function ChangesSection({
     return () => {
       live = false;
     };
-  }, [items, auto, root]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [items, auto, root, stepsVersion]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // Ownership watch: the newest step's files, or the newest saved version's.
+  // Ownership watch: the newest step's files (or the newest saved version's),
+  // and any write a layer gate stopped.
   useEffect(() => {
     let live = true;
     const newest = items[0];
-    if (!newest) return;
     void (async () => {
-      const [map, owners] = await Promise.all([cachedLayerMap(root), layerOwners(root)]);
-      if (!map || Object.keys(owners).length === 0) return;
-      const files = newest.files.length
-        ? newest.files
-        : newest.sha
-          ? filesInPatch((await ipc.gitCommitPatch(root, newest.sha).catch(() => null))?.patch ?? "")
-          : [];
-      if (live) setHits(ownedLayerHits(root, files, map.globs, owners, lensIdentity()));
+      const [map, current] = await Promise.all([cachedLayerMap(root), layerOwners(root)]);
+      if (!live) return;
+      setOwners(current);
+      if (!map || Object.keys(current).length === 0) {
+        setHits([]);
+        return;
+      }
+      const files = !newest
+        ? []
+        : newest.files.length
+          ? newest.files
+          : newest.sha
+            ? filesInPatch((await ipc.gitCommitPatch(root, newest.sha).catch(() => null))?.patch ?? "")
+            : [];
+      if (live) setHits(ownedLayerHits(root, files, map.globs, current, me));
     })();
     return () => {
       live = false;
     };
-  }, [items, root]);
+  }, [items, root, me, syncTick]);
 
-  const send = (req: { text: string; context: string }) => void session?.send(req.text, { context: req.context });
+  // Files already sent for approval (waiting, or approved within the day)
+  // don't ask again.
+  const [asked, setAsked] = useState<LayerApprovalData[]>([]);
+  const [approvalTick, setApprovalTick] = useState(0);
+  useEffect(() => subscribeLayerApprovals(() => setApprovalTick((t) => t + 1)), []);
+  useEffect(() => {
+    let live = true;
+    void layerApprovals(root).then((all) => {
+      const now = Date.now();
+      if (live) {
+        setAsked(
+          all
+            .map((e) => e.data)
+            .filter((d) => d.status !== "rejected" && now - (d.decidedAt ?? d.requestedAt) < APPROVAL_TTL_MS),
+        );
+      }
+    });
+    return () => {
+      live = false;
+    };
+  }, [root, approvalTick]);
+
+  const blocked = useMemo(() => blockedHits(root, owners), [root, owners, notices]); // eslint-disable-line react-hooks/exhaustive-deps
+  const shown = useMemo(() => {
+    const by = new Map<OwnedLayer, OwnedLayerHit & { attempted?: string[] }>();
+    for (const h of [...blocked, ...hits]) {
+      const prev = by.get(h.layer);
+      by.set(h.layer, prev ? { ...prev, files: [...new Set([...prev.files, ...h.files])] } : h);
+    }
+    return [...by.values()]
+      .map((h) => {
+        const covered = new Set(asked.filter((a) => a.layer === h.layer).flatMap((a) => a.files));
+        return { ...h, files: h.files.filter((f) => !covered.has(f)) };
+      })
+      .filter((h) => h.files.length);
+  }, [blocked, hits, asked]);
 
   return (
     <div className="builder-lens-body">
-      {hits.map((hit) => (
-        <OwnershipBanner key={hit.layer} hit={hit} root={root} projectName={project.name} />
+      {shown.map((hit) => (
+        <OwnershipBanner
+          key={hit.layer}
+          hit={hit}
+          root={root}
+          projectName={project.name}
+          goal={items[0]?.goal ?? ""}
+        />
       ))}
+      <ApprovalStatus root={root} session={session} />
+      {note && (
+        <p className="builder-lens-note" role="status">
+          {note}
+        </p>
+      )}
       <div className="builder-lens-head">{words.title}</div>
       {items.length === 0 ? (
         <p className="builder-lens-note">Saved versions appear here after your first change.</p>
       ) : (
         <ol className="builder-lens-list">
           {items.map((cp) => {
-            const summary = summaries[cp.key] ?? null;
+            const summary = summaries[cp.key] ?? peekCheckpointSummary(root, cp.key);
             const title = checkpointTitle(cp, summary);
             return (
               <li key={cp.key} className="builder-lens-item">
@@ -319,9 +417,8 @@ function ChangesSection({
                   <Button
                     size="sm"
                     variant="ghost"
-                    disabled={!session}
-                    title={session ? `Restore the project to “${title}”` : "Build is still getting ready"}
-                    onClick={() => send(goBackRequest({ sha: cp.sha!, title }))}
+                    title={`See what changes, then restore the project to “${title}”`}
+                    onClick={() => setRestoring({ sha: cp.sha!, title })}
                   >
                     {words.back}
                   </Button>
@@ -331,37 +428,244 @@ function ChangesSection({
           })}
         </ol>
       )}
+      {restoring && (
+        <RestoreDialog
+          root={root}
+          target={restoring}
+          onClose={() => setRestoring(null)}
+          onDone={(message) => {
+            setRestoring(null);
+            setNote(message);
+            setTick((t) => t + 1);
+          }}
+        />
+      )}
     </div>
   );
 }
 
-function OwnershipBanner({ hit, root, projectName }: { hit: OwnedLayerHit; root: string; projectName: string }) {
+const STATUS_WORDS: Record<"restore" | "remove" | "revert", string> = {
+  restore: "bring back",
+  remove: "remove",
+  revert: "change back",
+};
+
+/** "Go back to here": what will change, then the restore itself, committed as
+ *  a new version (lensRestore.ts). Works with or without a Build session. */
+function RestoreDialog({
+  root,
+  target,
+  onClose,
+  onDone,
+  after,
+  confirmLabel,
+}: {
+  root: string;
+  target: { sha: string; title: string };
+  onClose: () => void;
+  onDone: (message: string) => void;
+  /** Runs after a successful restore (Restart from plan sends the rebuild). */
+  after?: () => void;
+  confirmLabel?: string;
+}) {
+  const [preview, setPreview] = useState<RestorePreview | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [showPatch, setShowPatch] = useState(false);
+  useEffect(() => {
+    let live = true;
+    void previewRestore(root, target.sha).then(
+      (p) => live && setPreview(p),
+      (e: unknown) => live && setError(e instanceof Error ? e.message : String(e)),
+    );
+    return () => {
+      live = false;
+    };
+  }, [root, target.sha]);
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape" && !busy) onClose();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [busy, onClose]);
+  const apply = async () => {
+    setBusy(true);
+    setError(null);
+    try {
+      const out = await restoreVersion(root, target.sha, target.title);
+      after?.();
+      onDone(
+        out.commit
+          ? `Back to “${target.title}”: ${out.changed} file${out.changed === 1 ? "" : "s"} restored and saved as a new version${
+              out.savedFirst ? ", after saving your unsaved changes as their own version" : ""
+            }. You can go back from this one too.`
+          : `The project already matches “${target.title}”. Nothing to change.`,
+      );
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+      setBusy(false);
+    }
+  };
+  const count = preview?.changes.length ?? 0;
+  return (
+    <div className="modal-backdrop" onClick={() => !busy && onClose()}>
+      <div
+        className="modal builder-lens-restore"
+        role="dialog"
+        aria-modal="true"
+        aria-label={`Go back to ${target.title}`}
+        onClick={(e) => e.stopPropagation()}
+      >
+        <h3>Go back to “{target.title}”</h3>
+        {error && (
+          <p className="builder-lens-note" role="alert">
+            Couldn’t go back: {error}
+          </p>
+        )}
+        {!preview && !error && <p className="builder-lens-note">Comparing with that version…</p>}
+        {preview && (
+          <>
+            {count === 0 ? (
+              <p className="builder-lens-note">The project already matches this version.</p>
+            ) : (
+              <>
+                <p className="builder-lens-note">
+                  {count} file{count === 1 ? "" : "s"} will change. Nothing is lost: this is saved as a new version
+                  {preview.unsaved ? ", and your unsaved changes are saved as their own version first" : ""}.
+                </p>
+                <ul className="builder-lens-files" aria-label="What changes">
+                  {preview.changes.slice(0, 80).map((c) => (
+                    <li key={c.path}>
+                      <span className={`builder-lens-restore-st st-${c.status}`}>{STATUS_WORDS[c.status]}</span>{" "}
+                      <code>{c.path}</code>
+                    </li>
+                  ))}
+                  {preview.changes.length > 80 && <li className="builder-lens-note">…and {preview.changes.length - 80} more</li>}
+                </ul>
+                {preview.patch && (
+                  <Button size="sm" variant="ghost" aria-expanded={showPatch} onClick={() => setShowPatch((v) => !v)}>
+                    {showPatch ? "Hide the details" : "Show the details"}
+                  </Button>
+                )}
+                {showPatch && (
+                  <pre className="builder-lens-patch" aria-label="Details" tabIndex={0}>
+                    {preview.patch}
+                    {preview.truncated ? "\n… (shortened)" : ""}
+                  </pre>
+                )}
+              </>
+            )}
+          </>
+        )}
+        <div className="modal-actions">
+          <Button disabled={busy} onClick={onClose}>
+            Cancel
+          </Button>
+          <Button variant="accent" disabled={!preview || busy || (count === 0 && !after)} onClick={() => void apply()}>
+            {busy ? "Going back…" : (confirmLabel ?? "Go back")}
+          </Button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function OwnershipBanner({
+  hit,
+  root,
+  projectName,
+  goal,
+}: {
+  hit: OwnedLayerHit & { attempted?: string[] };
+  root: string;
+  projectName: string;
+  goal: string;
+}) {
+  const [state, setState] = useState<{ busy: boolean; error: string | null }>({ busy: false, error: null });
+  const send = async () => {
+    setState({ busy: true, error: null });
+    const diff = (
+      await Promise.all(hit.files.slice(0, 8).map((f) => ipc.gitDiff(root, f, false).catch(() => "")))
+    ).join("\n");
+    const result = await requestLayerApproval({ root, projectName, hit, goal, attempted: hit.attempted, diff }).catch(
+      (e: unknown) => ({ ok: false as const, message: e instanceof Error ? e.message : String(e) }),
+    );
+    setState({ busy: false, error: result.ok ? null : result.message });
+  };
   return (
     <div className="builder-lens-owned" role="status">
-      <span>{ownershipNotice(hit)}</span>
-      <Button
-        size="sm"
-        variant="accent"
-        onClick={() =>
-          void buildReportCard(
-            "Builder",
-            `Approval needed: ${LAYER_LABEL[hit.layer]} change in ${projectName}`,
-            [
-              `${hit.owner}, a builder change touched ${LAYER_LABEL[hit.layer]}, which you own. Please review and approve.`,
-              "",
-              "Files:",
-              ...hit.files.slice(0, 30).map((f) => `- ${f}`),
-            ].join("\n"),
-            root,
-          ).then(
-            (card) => openShareDialog({ kind: "share", card }),
-            (e: unknown) => openShareDialog({ kind: "error", message: String(e instanceof Error ? e.message : e) }),
-          )
-        }
-      >
-        Send for approval
+      <span>
+        {ownershipNotice(hit)}
+        {hit.attempted?.length ? " Build was stopped before changing it." : ""}
+      </span>
+      <Button size="sm" variant="accent" disabled={state.busy} onClick={() => void send()}>
+        {state.busy ? "Preparing…" : "Send for approval"}
       </Button>
+      {state.error && (
+        <span className="builder-lens-note" role="alert">
+          {state.error}
+        </span>
+      )}
     </div>
+  );
+}
+
+/** Approval requests from the last day and where each stands. An approved
+ *  one offers to tell Build it can go ahead. */
+function ApprovalStatus({ root, session }: { root: string; session: BuilderSession | null }) {
+  const [rows, setRows] = useState<LayerApprovalData[]>([]);
+  const [told, setTold] = useState<Set<string>>(new Set());
+  const [tick, setTick] = useState(0);
+  useEffect(() => subscribeLayerApprovals(() => setTick((t) => t + 1)), []);
+  useEffect(() => {
+    let live = true;
+    void layerApprovals(root).then((all) => {
+      if (!live) return;
+      const now = Date.now();
+      setRows(all.map((e) => e.data).filter((d) => now - (d.decidedAt ?? d.requestedAt) < APPROVAL_TTL_MS).slice(0, 5));
+    });
+    return () => {
+      live = false;
+    };
+  }, [root, tick]);
+  if (!rows.length) return null;
+  return (
+    <ul className="builder-lens-approvals" aria-label="Approvals">
+      {rows.map((a) => (
+        <li key={a.approvalId} className={`builder-lens-approval is-${a.status}`}>
+          <span>
+            {a.status === "pending"
+              ? `Waiting for ${a.owner} to approve the ${LAYER_LABEL[a.layer]} change.`
+              : a.status === "approved"
+                ? `${a.decidedBy ?? a.owner} approved the ${LAYER_LABEL[a.layer]} change.`
+                : `${a.decidedBy ?? a.owner} said no to the ${LAYER_LABEL[a.layer]} change${a.note ? `: ${a.note}` : "."}`}
+          </span>
+          {a.status !== "pending" && session && !told.has(a.approvalId) && (
+            <Button
+              size="sm"
+              variant={a.status === "approved" ? "accent" : "default"}
+              onClick={() => {
+                setTold((cur) => new Set(cur).add(a.approvalId));
+                void session.send(
+                  a.status === "approved"
+                    ? `${a.decidedBy ?? a.owner} approved the ${LAYER_LABEL[a.layer]} change. Go ahead.`
+                    : `${a.decidedBy ?? a.owner} didn't approve the ${LAYER_LABEL[a.layer]} change. Find another way.`,
+                  {
+                    context:
+                      a.status === "approved"
+                        ? `The owner approved changes to these files, and they are no longer blocked: ${a.files.join(", ")}. Make the change you were stopped from making, and nothing else in that layer.`
+                        : `The owner rejected changes to: ${a.files.join(", ")}.${a.note ? ` Their reason: ${a.note}.` : ""} Don't edit those files; propose an approach that leaves them alone.`,
+                  },
+                );
+              }}
+            >
+              {a.status === "approved" ? "Tell Build to go ahead" : "Tell Build"}
+            </Button>
+          )}
+        </li>
+      ))}
+    </ul>
   );
 }
 
@@ -465,22 +769,34 @@ function WrongSection({
     if (result === "fixed") setSymptom("");
   };
 
-  const restart = async () => {
-    if (!session) return;
-    const [log, plans] = await Promise.all([
-      ipc.gitLog(root, 40).catch(() => []),
-      queryLedger(root, { kinds: ["plan"], limit: 1 }).catch(() => []),
-    ]);
-    const last = checkpointsFromLog(log)[0] ?? null;
+  // Restart from plan: go back to the last saved version directly (with a
+  // preview), then hand the rebuild to Build when it's there. Without a Build
+  // session the restore still happens; the rebuild waits for it.
+  const [restartTarget, setRestartTarget] = useState<{ sha: string; title: string } | null>(null);
+  const [restartNote, setRestartNote] = useState<string | null>(null);
+  const [rebuildPending, setRebuildPending] = useState<{ sha: string; title: string } | null>(null);
+  const lastCheckpoint = async () => {
+    const log = await ipc.gitLog(root, 40).catch(() => []);
+    const last = checkpointsFromLog(log).find((c) => !c.goal.startsWith("Before going back to")) ?? null;
+    return last?.sha ? { sha: last.sha, title: checkpointTitle(last, peekCheckpointSummary(root, last.key)) } : null;
+  };
+  const sendRebuild = async (checkpoint: { sha: string; title: string } | null, restored: boolean) => {
+    if (!session) return false;
+    const plans = await queryLedger(root, { kinds: ["plan"], limit: 1 }).catch(() => []);
     const plan = plans[0] ? JSON.stringify(plans[0].data).slice(0, 4000) : null;
-    const req = restartFromPlanRequest({
-      symptom,
-      checkpoint: last?.sha ? { sha: last.sha, title: checkpointTitle(last, peekCheckpointSummary(root, last.key)) } : null,
-      plan,
-      tried,
-    });
+    const req = restartFromPlanRequest({ symptom, checkpoint, plan, tried, restored });
     void session.send(req.text, { context: req.context });
-    setPhase({ kind: "idle" });
+    return true;
+  };
+  const restart = async () => {
+    const checkpoint = await lastCheckpoint();
+    if (checkpoint) {
+      setRestartTarget(checkpoint);
+      return;
+    }
+    // No saved version to go back to: rebuild from the plan in place.
+    if (await sendRebuild(null, false)) setPhase({ kind: "idle" });
+    else setRestartNote("There’s no saved version to go back to yet. When Build is ready, ask it to rebuild from the plan.");
   };
 
   const outOfTries = !canTryAnotherFix(strikes);
@@ -533,7 +849,7 @@ function WrongSection({
                 {FIX_STRIKE_LIMIT} fixes for this haven’t worked. Another patch is likely to make it worse —
                 start over from the last version that worked and rebuild from the plan.
               </p>
-              <Button size="sm" variant="accent" disabled={!session} onClick={() => void restart()}>
+              <Button size="sm" variant="accent" onClick={() => void restart()}>
                 Restart from plan
               </Button>
             </div>
@@ -555,6 +871,50 @@ function WrongSection({
             </div>
           )}
         </>
+      )}
+      {restartNote && (
+        <p className="builder-lens-note" role="status">
+          {restartNote}
+        </p>
+      )}
+      {rebuildPending && session && (
+        <div className="builder-lens-actions">
+          <Button
+            size="sm"
+            variant="accent"
+            onClick={() => {
+              const target = rebuildPending;
+              setRebuildPending(null);
+              setRestartNote(null);
+              void sendRebuild(target, true).then(() => setPhase({ kind: "idle" }));
+            }}
+          >
+            Rebuild from the plan
+          </Button>
+        </div>
+      )}
+      {restartTarget && (
+        <RestoreDialog
+          root={root}
+          target={restartTarget}
+          confirmLabel="Go back and restart"
+          onClose={() => setRestartTarget(null)}
+          after={() => {
+            const target = restartTarget;
+            void sendRebuild(target, true).then((sent) => {
+              if (sent) setPhase({ kind: "idle" });
+              else setRebuildPending(target);
+            });
+          }}
+          onDone={(message) => {
+            setRestartTarget(null);
+            setRestartNote(
+              session
+                ? `${message} Build is rebuilding from the plan.`
+                : `${message} When Build is ready, press Rebuild from the plan.`,
+            );
+          }}
+        />
       )}
       {phase.kind === "fixing" && (
         <div className="builder-lens-fixing" role="status">
@@ -582,7 +942,7 @@ function LayersSection({ project, root }: { project: BuilderLensPanelProps["proj
   const [state, setState] = useState<{ busy: boolean; message: string | null }>({ busy: false, message: null });
   const [expanded, setExpanded] = useState<string | null>(null);
   const [owners, setOwners] = useState<LayerOwners>({});
-  const [me, setMe] = useState(() => lensIdentity() ?? "");
+  const { me, known } = useTeamIdentity();
   const [editing, setEditing] = useState<OwnedLayer | null>(null);
   const [draft, setDraft] = useState("");
 
@@ -608,29 +968,44 @@ function LayersSection({ project, root }: { project: BuilderLensPanelProps["proj
       if (cached) setMap(cached);
       else if (auto) void load(false);
     });
-    void layerOwners(root).then((o) => live && setOwners(o));
+    void layerOwners(root).then((o) => {
+      if (!live) return;
+      setOwners(o);
+      // Keep the enforced gates current (an approval's day can run out while
+      // nothing else republishes): only where a layer is owned at all.
+      if (Object.keys(o).length) void republishPolicy(root).catch(() => undefined);
+    });
     return () => {
       live = false;
     };
-  }, [root, auto, load]);
+  }, [root, auto, load, me]);
 
+  // Ownership is enforced (lensGates.ts), so every change to it republishes
+  // the policy the hook reads.
+  // A teammate's claim or release, applied here by lensClaimSync.
+  useEffect(() => subscribeClaimSync(() => void layerOwners(root).then(setOwners)), [root]);
+  // Ownership is shared with the team (lensClaimSync.ts) so every teammate's
+  // Canopy enforces it.
   const claim = async (layer: OwnedLayer) => {
-    const name = me.trim();
-    if (!name) return;
-    setLensIdentity(name);
-    await claimLayer(root, layer, name).catch(() => undefined);
+    if (!me) return;
+    const entry = await claimLayer(root, layer, me).catch(() => null);
     setOwners(await layerOwners(root));
+    await republishPolicy(root).catch(() => undefined);
+    if (entry) void shareLayerClaim(root, "claim", entry);
   };
   const release = async (layer: OwnedLayer) => {
     const c = owners[layer];
     if (!c) return;
     await releaseLayer(root, c).catch(() => undefined);
     setOwners(await layerOwners(root));
+    await republishPolicy(root).catch(() => undefined);
+    void shareLayerClaim(root, "release", c);
   };
   const saveGlobs = async (layer: OwnedLayer) => {
     const next = await saveLayerGlobs(root, layer, draft.split(/\n|,/).map((g) => g.trim()));
     if (next) setMap(next);
     setEditing(null);
+    if (owners[layer]) await republishPolicy(root).catch(() => undefined);
   };
 
   return (
@@ -673,14 +1048,28 @@ function LayersSection({ project, root }: { project: BuilderLensPanelProps["proj
         </div>
       )}
       <div className="builder-lens-head">Who looks after what</div>
-      <label className="builder-lens-label">
-        Your name
-        <TextInput size="sm" width="full" aria-label="Your name" value={me} onChange={(e) => setMe(e.target.value)} />
-      </label>
+      {me ? (
+        <p className="builder-lens-note">
+          You’re signed in as {me.name}. Agents can’t change a layer someone else owns until its owner approves;
+          your own agents can. What you own is shared with your team, so their Canopy enforces it too.
+        </p>
+      ) : (
+        known && (
+          <div className="builder-lens-notice" role="note">
+            <span>Sign in to Canopy to own a layer, so your team knows it’s you.</span>
+            <Button
+              size="sm"
+              onClick={() => window.dispatchEvent(new CustomEvent("canopy:open-settings", { detail: { tab: "account" } }))}
+            >
+              Sign in
+            </Button>
+          </div>
+        )
+      )}
       <ul className="builder-lens-owners">
         {OWNABLE_LAYERS.map((layer) => {
           const owner = owners[layer]?.data.owner ?? null;
-          const mine = owner && me.trim() && owner.toLowerCase() === me.trim().toLowerCase();
+          const mine = ownsLayer(me, owners[layer]);
           const globs = map?.globs[layer] ?? [];
           return (
             <li key={layer} className="builder-lens-owner">
@@ -692,8 +1081,8 @@ function LayersSection({ project, root }: { project: BuilderLensPanelProps["proj
                 ) : (
                   <Button
                     size="sm"
-                    disabled={!me.trim()}
-                    title={me.trim() ? undefined : "Enter your name first"}
+                    disabled={!me || (!!owner && !mine)}
+                    title={!me ? "Sign in to Canopy first" : owner ? `${owner} owns this` : undefined}
                     onClick={() => void claim(layer)}
                   >
                     {`I own ${LAYER_LABEL[layer].toLowerCase()}`}

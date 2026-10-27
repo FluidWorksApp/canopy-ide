@@ -159,6 +159,37 @@ describe("spend records", () => {
     expect(heads).toHaveLength(1);
   });
 
+  it("attributes to the signed-in team member, else the CLI account", () => {
+    const me = { id: "u-ana", name: "Ana", email: "ana@example.test" };
+    expect(buildSpend(turn(), usage({ profile: "work" }), null, null, { me })).toMatchObject({ person: "Ana", personId: "u-ana" });
+    expect(buildSpend(turn(), usage({ profile: "work" }), null, null)).toMatchObject({ person: "work" });
+    expect(personOf("default", null)).toBe("You");
+    // Signed out later: a record that already named the member keeps them.
+    const prev = buildSpend(turn(), usage(), null, null, { me });
+    expect(buildSpend(turn(), usage(), prev, null)).toMatchObject({ person: "Ana", personId: "u-ana" });
+  });
+
+  it("writes a final record when the session ends, and nothing for a session that never took a turn", async () => {
+    const ledger = memoryLedger();
+    let current = usage();
+    const rec = createSpendRecorder({
+      usage: async () => [current],
+      append: ledger.append as never,
+      query: ledger.query as never,
+      identity: async () => ({ id: "u-ana", name: "Ana", email: "a@example.test" }),
+    });
+    await rec.record(turn());
+    current = usage({ cost: 3, turns: 4 });
+    const end = { sessionId: "s1", ptyId: 7, cli: "cli-a", cwd: "/repo", root: "/repo", endedAt: 9000, via: "process-exit" as const };
+    const final = await rec.finish(end);
+    expect(final).toMatchObject({ costUsd: 3, endedAt: 9000, person: "Ana", personId: "u-ana" });
+    expect(ledger.append).toHaveBeenCalledTimes(2);
+    expect((ledger.append.mock.calls[1][1] as LedgerDraft<SpendData>).supersedes).toBe("e1");
+    // Even with no new usage, the end itself is worth writing once.
+    expect(await rec.finish({ ...end, sessionId: "never" })).toBeNull();
+    expect(ledger.append).toHaveBeenCalledTimes(2);
+  });
+
   it("detects meaningful changes only", () => {
     const a = buildSpend(turn(), usage(), null, null);
     expect(spendChanged(a, { ...a })).toBe(false);

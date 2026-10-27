@@ -99,3 +99,27 @@ describe("brain meter", () => {
     expect(cb).toHaveBeenCalledTimes(1);
   });
 });
+
+describe("brain spend per project", () => {
+  it("records the call's directory and project, and totals by both", async () => {
+    const m = await import("./brainMeter");
+    m.resetBrainMeterForTests();
+    m.setBrainProjectResolver((cwd) => (cwd.startsWith("/shop") ? { id: "p1", name: "Shop" } : null));
+    m.recordBrainCall({ feature: "receipts", ts: 10, costUsd: 0.2, inputTokens: 1, outputTokens: 1, ok: true, cwd: "/shop/web" }, 10);
+    m.recordBrainCall({ feature: "lens", ts: 11, costUsd: 0.1, inputTokens: 1, outputTokens: 1, ok: true, cwd: "/shop-wt-fix" }, 11);
+    m.recordBrainCall({ feature: "lens", ts: 12, costUsd: 0.05, inputTokens: 1, outputTokens: 1, ok: true, cwd: "/blog" }, 12);
+    m.recordBrainCall({ feature: "commit-message", ts: 13, costUsd: 0.01, inputTokens: 1, outputTokens: 1, ok: true }, 13);
+    m.setBrainProjectResolver(null);
+    const by = m.brainSpendByProject(0);
+    expect(by.map((r) => [r.name, r.calls])).toEqual([
+      ["Shop", 2],
+      ["blog", 1],
+      ["Not about a project", 1],
+    ]);
+    expect(by[0].costUsd).toBeCloseTo(0.3);
+    // The Outcomes panel's view: calls made in this repository (and its Canopy worktrees).
+    const here = m.brainSpendByFeatureUnder("/shop", 0);
+    expect(Object.keys(here).sort()).toEqual(["lens", "receipts"]);
+    expect(m.callUnder("/shopping", "/shop")).toBe(false);
+  });
+});

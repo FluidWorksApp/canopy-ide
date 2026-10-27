@@ -5,14 +5,17 @@ vi.mock("./ipc", () => ({ ledgerRoot: vi.fn(), agentEdits: vi.fn() }));
 import type { AgentEventData } from "../shared/notifications";
 import {
   filesInWindow,
+  observeAgentPtyExit,
   observeAgentTurns,
   onAgentSessionEnd,
+  watchAgentSessionExits,
   onAgentTurnEnd,
   onAgentTurnStart,
   resetAgentTurnsForTests,
   setAgentTurnDepsForTests,
   type AgentTurnEnd,
   type AgentTurnStart,
+  type AgentSessionEnd,
 } from "./agentTurns";
 
 const ev = (event: string, over: Partial<AgentEventData> = {}): AgentEventData => ({
@@ -127,6 +130,40 @@ describe("agent turns", () => {
     await flush();
     await flush();
     expect(order).toEqual(["start", "end"]);
+  });
+
+  it("announces a session's end once, from SessionEnd or its terminal exiting", async () => {
+    const ends: AgentSessionEnd[] = [];
+    onAgentSessionEnd((e) => ends.push(e));
+    observeAgentTurns([ev("UserPromptSubmit", { agent: "cli-a" })], 1_000);
+    observeAgentTurns([ev("SessionEnd", { agent: "cli-a" })], 2_000);
+    await flush();
+    await flush();
+    expect(ends).toEqual([
+      { sessionId: "s1", ptyId: 7, cli: "cli-a", cwd: "/repo/wt", root: "/repo", endedAt: 2_000, via: "session-end" },
+    ]);
+    // The terminal closing afterwards is the same end, not a second one.
+    observeAgentPtyExit(7, 3_000);
+    await flush();
+    expect(ends).toHaveLength(1);
+  });
+
+  it("treats a terminal exiting as the end of the session it ran", async () => {
+    const ends: AgentSessionEnd[] = [];
+    onAgentSessionEnd((e) => ends.push(e));
+    let fire: ((e: { id: number }) => void) | null = null;
+    const stop = watchAgentSessionExits(async (cb) => {
+      fire = cb;
+      return () => {};
+    });
+    await flush();
+    observeAgentTurns([ev("UserPromptSubmit", { sessionId: "s9", pty: 12 })], 1_000);
+    fire!({ id: 99 });
+    fire!({ id: 12 });
+    await flush();
+    await flush();
+    expect(ends.map((e) => [e.sessionId, e.via])).toEqual([["s9", "process-exit"]]);
+    stop();
   });
 
   it("carries the plan id the session was launched with, and announces the session's end after its last turn", async () => {

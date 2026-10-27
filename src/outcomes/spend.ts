@@ -1,11 +1,12 @@
 // Per-session cost attribution: at every agent turn end, read the session's
 // usage from its own CLI store and keep one `spend` ledger record for it.
 //
-// There is no "session ended" event — a CLI can sit idle for a week and then
-// take another prompt — so the turn end is the closest durable signal. Each
-// write supersedes the session's previous record, so the ledger holds one head
-// per session and a crash loses at most the last turn's delta. A write happens
-// only when the numbers or the files moved; an idle turn end costs nothing.
+// Every turn end writes the running total, and the session's end — its CLI's
+// SessionEnd hook, or its terminal's process exiting (agentTurns.ts
+// `onAgentSessionEnd`) — writes the final one, marked `endedAt`. Each write
+// supersedes the session's previous record, so the ledger holds one head per
+// session. A write happens only when the numbers or the files moved (or the
+// session just ended); an idle turn end costs nothing.
 //
 // The usage store (ipc.agentUsage) is the same one the agent tab's "$12 · 40
 // turns" header reads, so the panel and the header can never disagree.
@@ -13,7 +14,8 @@
 import type * as ipc from "../ipc";
 import type { LedgerDraft, LedgerEntry, LedgerQuery } from "../ledger";
 import { sessionCost } from "../pricing";
-import type { AgentTurnEnd } from "../agentTurns";
+import type { AgentSessionEnd, AgentTurnEnd } from "../agentTurns";
+import type { TeamIdentity } from "../teamIdentity";
 import { planClass, type PlanLike, type SpendData, type TouchedFile } from "./types";
 
 /** Paths kept per session. A spend entry is capped at 256 KiB by the ledger;
@@ -25,6 +27,8 @@ export interface SpendDeps {
   usage(): Promise<ipc.AgentSessionUsage[]>;
   append<D>(root: string, draft: LedgerDraft<D>): Promise<LedgerEntry<D>>;
   query<D>(root: string, q: LedgerQuery): Promise<LedgerEntry<D>[]>;
+  /** The signed-in team member, if any: who the spend is attributed to. */
+  identity?(): Promise<TeamIdentity | null>;
 }
 
 /** Fold a turn's files into what the session already owned: newest ts per
@@ -48,9 +52,10 @@ export function normalizePath(path: string, root: string, cwd: string): string {
   return path.replace(/^\.\//, "");
 }
 
-/** Who a session is attributed to. */
-export const personOf = (profile: string | null | undefined): string =>
-  !profile || profile === "default" ? "You" : profile;
+/** Who a session is attributed to: the team member when signed in, else the
+ *  CLI account it ran under. */
+export const personOf = (profile: string | null | undefined, me?: TeamIdentity | null): string =>
+  me ? me.name : !profile || profile === "default" ? "You" : profile;
 
 /** The spend record for `usage`, folding in what the previous record knew. */
 export function buildSpend(
@@ -58,6 +63,7 @@ export function buildSpend(
   usage: ipc.AgentSessionUsage | null,
   prev: SpendData | null,
   plan: { id: string; data: PlanLike } | null,
+  opts: { me?: TeamIdentity | null; endedAt?: number } = {},
 ): SpendData {
   const files = mergeFiles(
     prev?.files ?? [],
@@ -70,7 +76,9 @@ export function buildSpend(
     sessionId: turn.sessionId,
     cli: turn.cli,
     profile: usage?.profile ?? prev?.profile ?? "default",
-    person: personOf(usage?.profile ?? prev?.profile),
+    // A record that already named a team member keeps them.
+    person: prev?.personId && !opts.me ? prev.person : personOf(usage?.profile ?? prev?.profile, opts.me),
+    ...((opts.me?.id ?? prev?.personId) ? { personId: opts.me?.id ?? prev?.personId } : {}),
     cwd: turn.cwd,
     // Never let a usage read that came back empty roll a session's cost back.
     costUsd: Math.max(cost ?? 0, prev?.costUsd ?? 0),
@@ -86,6 +94,7 @@ export function buildSpend(
     files,
     firstTs: prev?.firstTs ?? turn.startedAt,
     lastTs: Math.max(turn.endedAt, prev?.lastTs ?? 0),
+    ...(opts.endedAt != null ? { endedAt: opts.endedAt } : {}),
   };
 }
 
@@ -97,6 +106,8 @@ export function spendChanged(prev: SpendData | null, next: SpendData): boolean {
     prev.turns !== next.turns ||
     prev.outputTokens !== next.outputTokens ||
     prev.planId !== next.planId ||
+    prev.endedAt !== next.endedAt ||
+    prev.personId !== next.personId ||
     prev.files.length !== next.files.length ||
     next.files.some((f, i) => prev.files[i]?.path !== f.path || prev.files[i]?.ts !== f.ts)
   );
@@ -143,16 +154,20 @@ export function createSpendRecorder(deps: SpendDeps) {
   /** Fold one turn end in. Resolves with the session's current record (written
    *  or not), or null when the ledger could not be reached. */
   async function record(
-    turn: AgentTurnEnd,
+    turn: Pick<AgentTurnEnd, "sessionId" | "cli" | "cwd" | "root" | "filesTouched" | "startedAt" | "endedAt">,
     rows?: ipc.AgentSessionUsage[],
+    endedAt?: number,
   ): Promise<SpendData | null> {
     try {
       const usageRows = rows ?? (await deps.usage().catch(() => []));
       const usage = usageFor(usageRows, turn.sessionId, turn.cli);
       const prevEntry = await previous(turn.root, turn.sessionId);
       const prev = prevEntry?.data ?? null;
+      // A session that never took a turn has nothing to finalise.
+      if (endedAt != null && !prev && !usage) return null;
       const plan = await planForSession(deps, turn.root, turn.sessionId);
-      const next = buildSpend(turn, usage, prev, plan);
+      const me = await (deps.identity?.() ?? Promise.resolve(null)).catch(() => null);
+      const next = buildSpend(turn, usage, prev, plan, { me, endedAt });
       if (!spendChanged(prev, next)) return next;
       const written = await deps.append<SpendData>(turn.root, {
         kind: "spend",
@@ -170,5 +185,16 @@ export function createSpendRecorder(deps: SpendDeps) {
     }
   }
 
-  return { record, forget: () => heads.clear() };
+  /** The session ended: one last usage read, written as its final record. */
+  async function finish(end: AgentSessionEnd, rows?: ipc.AgentSessionUsage[]): Promise<SpendData | null> {
+    const written = await record(
+      { sessionId: end.sessionId, cli: end.cli, cwd: end.cwd, root: end.root, filesTouched: [], startedAt: end.endedAt, endedAt: end.endedAt },
+      rows,
+      end.endedAt,
+    );
+    heads.delete(end.sessionId);
+    return written;
+  }
+
+  return { record, finish, forget: () => heads.clear() };
 }

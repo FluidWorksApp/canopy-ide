@@ -11,6 +11,7 @@ import { askBrain } from "./brainCall";
 import * as ipc from "./ipc";
 import { appendLedger, queryLedger } from "./ledger";
 import { isLensLayer, type LensLayer } from "./lensLayers";
+import { patchInRange } from "./turnDiff";
 
 export type CheckpointRisk = "low" | "medium" | "high";
 
@@ -31,6 +32,9 @@ export interface LensCheckpoint {
   goal: string;
   at: number;
   files: string[];
+  /** For a step: turn rollback's snapshots around it, so its summary reads
+   *  everything it changed (Bash edits too). */
+  range?: { from: string; to: string | null; shared?: boolean };
 }
 
 /** Build's checkpoint commit prefix (vibeBuilderSession: `vibe: ${goal}`). */
@@ -96,7 +100,7 @@ export function validateCheckpointSummary(v: unknown): CheckpointSummary | null 
 const REF_KIND = "lens-checkpoint";
 const memory = new Map<string, CheckpointSummary>();
 const inflight = new Map<string, Promise<CheckpointSummary | null>>();
-const cacheKey = (root: string, key: string) => `${root}\0${key}`;
+const cacheKey = (root: string, key: string) => `${root.replace(/\\/g, "/").replace(/\/+$/, "")}\0${key}`;
 
 export function peekCheckpointSummary(root: string, key: string): CheckpointSummary | null {
   return memory.get(cacheKey(root, key)) ?? null;
@@ -112,6 +116,14 @@ export interface SummaryDeps {
  *  still summarise from the goal alone. */
 async function defaultPatch(root: string, cp: LensCheckpoint): Promise<string> {
   if (cp.sha) return (await ipc.gitCommitPatch(root, cp.sha).catch(() => null))?.patch ?? "";
+  if (cp.range) {
+    // In a checkout another agent shares, only this step's own files.
+    const files = cp.range.shared ? cp.files.slice(0, 40) : [];
+    const patch = cp.range.shared && !files.length
+      ? ""
+      : await patchInRange(root, { from: cp.range.from, to: cp.range.to, shared: !!cp.range.shared }, files, PATCH_BUDGET * 2).catch(() => "");
+    if (patch) return patch;
+  }
   const parts = await Promise.all(
     cp.files.slice(0, 12).map((f) => ipc.gitDiff(root, f, false).catch(() => "")),
   );

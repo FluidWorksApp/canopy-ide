@@ -49,3 +49,5 @@
 .share-dialog-reviewers label{flex-direction:row;align-items:center;gap:4px;color:var(--text)}
 .chat-card-plan-section ul{margin:2px 0 0;padding-left:18px;font-size:12px}
 .chat-card-plan-section li{margin:1px 0}
+.chat-card-files{margin:2px 0;padding:0 0 0 14px;max-height:120px;overflow:auto;font-size:11px}
+.chat-card-files code{word-break:break-all}

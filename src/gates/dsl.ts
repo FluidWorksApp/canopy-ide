@@ -9,7 +9,7 @@
 // protects "/") is rejected before the person is ever asked to approve it.
 
 export type Gate =
-  | { type: "deny-path-write"; globs: string[] }
+  | { type: "deny-path-write"; globs: string[]; exceptFiles?: string[] }
   | { type: "deny-command"; patterns: string[] }
   | { type: "require-confirm"; match?: ConfirmClass; patterns?: string[] }
   | { type: "protect-tests"; globs: string[] }
@@ -76,8 +76,10 @@ const CLASS_WORDS: Record<ConfirmClass, string> = {
 const MAX_ITEMS = 32;
 const MAX_ITEM_LEN = 200;
 
+const MAX_EXCEPT_FILES = 400;
+
 /** Strings only, trimmed, de-duplicated, capped. */
-function strings(v: unknown): string[] | null {
+function strings(v: unknown, max = MAX_ITEMS): string[] | null {
   if (!Array.isArray(v)) return null;
   const out: string[] = [];
   for (const item of v) {
@@ -85,7 +87,7 @@ function strings(v: unknown): string[] | null {
     const s = item.trim();
     if (!s || s.length > MAX_ITEM_LEN || out.includes(s)) continue;
     out.push(s);
-    if (out.length >= MAX_ITEMS) break;
+    if (out.length >= max) break;
   }
   return out;
 }
@@ -123,7 +125,13 @@ export function normalizeGate(raw: unknown): Gate | null {
   switch (g.type) {
     case "deny-path-write": {
       const globs = strings(g.globs)?.filter(sensibleGlob);
-      return globs && globs.length ? { type: "deny-path-write", globs } : null;
+      if (!globs || !globs.length) return null;
+      // Exact repo-relative files a layer owner approved (src/lensGates.ts).
+      // A longer list than other fields allow: an approval can name many.
+      const exceptFiles = (strings(g.exceptFiles, MAX_EXCEPT_FILES) ?? []).filter(
+        (f) => sensibleGlob(f) && !/[*?[\]{}]/.test(f),
+      );
+      return { type: "deny-path-write", globs, ...(exceptFiles.length ? { exceptFiles } : {}) };
     }
     case "protect-tests": {
       // Empty globs are meaningful here: "the usual test places".
@@ -180,7 +188,9 @@ const list = (xs: string[], max = 4) =>
 export function plainLanguage(g: Gate): string {
   switch (g.type) {
     case "deny-path-write":
-      return `Agents can't create, change or delete files matching ${list(g.globs)}.`;
+      return `Agents can't create, change or delete files matching ${list(g.globs)}${
+        g.exceptFiles?.length ? `, except ${list(g.exceptFiles, 3)} (approved)` : ""
+      }.`;
     case "protect-tests":
       return g.globs.length
         ? `Agents can't change or delete test files (${list(g.globs)}).`

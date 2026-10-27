@@ -3,17 +3,20 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 vi.mock("./ledger", async () => (await import("./test/fakeLedger")).fakeLedger);
 
 import { fakeLedger } from "./test/fakeLedger";
+import { registerRulesEditor } from "./gates/events";
 import type { askBrain } from "./brainCall";
 import {
   cachedLayerMap,
   claimLayer,
   ensureLayerMap,
+  expandGlob,
   globToRegExp,
   layerMapPrompt,
   layerOwners,
   matchesAnyGlob,
   ownedLayerHits,
   ownershipNotice,
+  ownsLayer,
   releaseLayer,
   resetLensLayersForTests,
   saveLayerGlobs,
@@ -118,13 +121,20 @@ describe("layer map", () => {
   });
 });
 
+const id = (name: string) => ({ id: `u-${name.toLowerCase()}`, name, email: `${name.toLowerCase()}@example.test` });
+
 describe("layer ownership", () => {
   const globs = validateLayerMap(RAW)!.globs;
 
-  it("claims are rule entries; the newest live claim wins and released ones drop out", async () => {
-    const sam = await claimLayer("/repo", "auth", "Sam");
-    expect(sam).toMatchObject({ kind: "rule", scope: "team", ref: { kind: "lens-layer", id: "auth" }, data: { type: "layer-owner", owner: "Sam" } });
-    await claimLayer("/repo", "data", "Ana");
+  it("claims are rule entries under a team identity; the newest live claim wins and released ones drop out", async () => {
+    const sam = await claimLayer("/repo", "auth", id("Sam"));
+    expect(sam).toMatchObject({
+      kind: "rule",
+      scope: "team",
+      ref: { kind: "lens-layer", id: "auth" },
+      data: { type: "layer-owner", owner: "Sam", ownerId: "u-sam" },
+    });
+    await claimLayer("/repo", "data", id("Ana"));
     expect(Object.keys(await layerOwners("/repo")).sort()).toEqual(["auth", "data"]);
     await releaseLayer("/repo", sam);
     const owners = await layerOwners("/repo");
@@ -138,32 +148,65 @@ describe("layer ownership", () => {
   });
 
   it("matches a builder change to the owned layer and names the owner", async () => {
-    await claimLayer("/repo", "auth", "Sam");
+    await claimLayer("/repo", "auth", id("Sam"));
     const owners = await layerOwners("/repo");
-    const hits = ownedLayerHits("/repo", ["/repo/src/auth/login.ts", "src/pages/index.tsx", "middleware.ts"], globs, owners, "Alex");
-    expect(hits).toEqual([{ layer: "auth", owner: "Sam", files: ["src/auth/login.ts", "middleware.ts"] }]);
-    expect(ownershipNotice(hits[0])).toBe("Sign-in & accounts is owned by Sam — your change will be sent for their approval.");
+    const hits = ownedLayerHits("/repo", ["/repo/src/auth/login.ts", "src/pages/index.tsx", "middleware.ts"], globs, owners, id("Alex"));
+    expect(hits).toEqual([{ layer: "auth", owner: "Sam", ownerId: "u-sam", files: ["src/auth/login.ts", "middleware.ts"] }]);
+    expect(ownershipNotice(hits[0])).toBe("Sign-in & accounts is owned by Sam — changes to it wait for their approval.");
+  });
+
+  it("knows the owner by account id, not by a matching name", async () => {
+    await claimLayer("/repo", "auth", id("Sam"));
+    const owners = await layerOwners("/repo");
+    // Same display name, different account: still someone else's layer.
+    expect(ownedLayerHits("/repo", ["src/auth/x.ts"], globs, owners, { id: "u-other", name: "Sam", email: "s@x.test" })).toHaveLength(1);
+    expect(ownedLayerHits("/repo", ["src/auth/x.ts"], globs, owners, id("Sam"))).toEqual([]);
+    expect(ownsLayer(id("Sam"), owners.auth)).toBe(true);
+  });
+
+  it("falls back to the name for claims made before ownership had an id", async () => {
+    await fakeLedger.appendLedger("/repo", {
+      kind: "rule",
+      ref: { kind: "lens-layer", id: "auth" },
+      data: { type: "layer-owner", layer: "auth", owner: "Sam" },
+    });
+    const owners = await layerOwners("/repo");
+    expect(ownsLayer({ id: "u-x", name: "sam", email: "sam@x.test" }, owners.auth)).toBe(true);
+    expect(ownedLayerHits("/repo", ["src/auth/x.ts"], globs, owners, id("Alex"))[0].ownerId).toBeNull();
   });
 
   it("does not ask owners to approve their own change, nor match unowned layers", async () => {
-    await claimLayer("/repo", "auth", "Sam");
+    await claimLayer("/repo", "auth", id("Sam"));
     const owners = await layerOwners("/repo");
-    expect(ownedLayerHits("/repo", ["src/auth/x.ts"], globs, owners, "sam")).toEqual([]);
     expect(ownedLayerHits("/repo", ["prisma/schema.prisma"], globs, owners, null)).toEqual([]);
     expect(ownedLayerHits("/repo", ["src/auth/x.ts"], { ...globs, auth: [] }, owners, null)).toEqual([]);
   });
 });
 
-describe("team rules detection", () => {
-  it("is off with only layer claims, on once another rule exists", async () => {
-    await claimLayer("/repo", "auth", "Sam");
-    expect(await teamRulesAvailable("/repo")).toBe(false);
-    await fakeLedger.appendLedger("/repo", { kind: "rule", ref: { kind: "gate", id: "g1" }, data: {} });
-    expect(await teamRulesAvailable("/repo")).toBe(true);
+describe("globs read the way the hook reads them", () => {
+  it("expands like gates.rs expand_glob", () => {
+    expect(expandGlob("migrations")).toEqual(["**/migrations", "**/migrations/**"]);
+    expect(expandGlob("src/db/")).toEqual(["src/db/**"]);
+    expect(expandGlob("db/")).toEqual(["**/db/**"]);
+    expect(expandGlob("*.sql")).toEqual(["**/*.sql"]);
+    expect(expandGlob("./prisma/schema.prisma")).toEqual(["prisma/schema.prisma", "prisma/schema.prisma/**"]);
+    expect(expandGlob("src/auth/**")).toEqual(["src/auth/**"]);
   });
 
-  it("is on when a rules setting exists", async () => {
-    localStorage.setItem("canopy.settings", JSON.stringify({ teamRulesEnforced: true }));
-    expect(await teamRulesAvailable("/repo")).toBe(true);
+  it("a bare folder name covers what is inside it, anywhere", () => {
+    expect(matchesAnyGlob("db/migrations/0001.sql", ["migrations"])).toBe(true);
+    expect(matchesAnyGlob("src/migrations.ts", ["migrations"])).toBe(false);
+  });
+});
+
+describe("team rules detection", () => {
+  it("is on only while a project view with the Rules panel holds the path", () => {
+    expect(teamRulesAvailable("/repo")).toBe(false);
+    const off = registerRulesEditor(() => ["/repo"]);
+    expect(teamRulesAvailable("/repo")).toBe(true);
+    expect(teamRulesAvailable("/repo/web")).toBe(true);
+    expect(teamRulesAvailable("/repository")).toBe(false);
+    off();
+    expect(teamRulesAvailable("/repo")).toBe(false);
   });
 });

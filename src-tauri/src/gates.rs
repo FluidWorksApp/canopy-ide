@@ -50,7 +50,13 @@ pub const APPROVAL_TTL_MS: u64 = 10 * 60 * 1000;
 pub enum Gate {
     /// No write (Write/Edit/patch, or a shell writer like rm/mv/tee/>) to a
     /// path matching any glob, relative to the repository's top level.
-    DenyPathWrite { globs: Vec<String> },
+    /// `except_files` are exact repo-relative files let through anyway: a layer
+    /// owner approved a change to them (src/lensGates.ts).
+    DenyPathWrite {
+        globs: Vec<String>,
+        #[serde(rename = "exceptFiles", default, skip_serializing_if = "Vec::is_empty")]
+        except_files: Vec<String>,
+    },
     /// No shell command matching any pattern (Rust `regex` syntax: linear time,
     /// no backreferences or lookaround — the TS validator enforces the same).
     DenyCommand { patterns: Vec<String> },
@@ -99,6 +105,29 @@ pub struct PolicyGate {
     #[serde(default = "default_scope")]
     pub scope: String,
     pub gate: Gate,
+    /// Team members (Canopy account ids) whose own sessions this gate doesn't
+    /// stop: a layer's owner (src/lensGates.ts). A session says whose it is
+    /// with `CANOPY_MEMBER`, stamped at spawn by the app it was started from.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub except_members: Vec<String>,
+}
+
+impl PolicyGate {
+    /// Whether this gate checks a session started by `member`.
+    pub fn applies_to(&self, member: Option<&str>) -> bool {
+        match member.map(str::trim).filter(|m| !m.is_empty()) {
+            Some(m) => !self.except_members.iter().any(|e| e == m),
+            None => true,
+        }
+    }
+}
+
+impl Policy {
+    /// The policy as one session sees it: gates that exempt its member dropped.
+    pub fn for_member(mut self, member: Option<&str>) -> Self {
+        self.gates.retain(|g| g.applies_to(member));
+        self
+    }
 }
 
 fn default_scope() -> String {
@@ -2464,7 +2493,7 @@ pub fn evaluate(
     if let Some(policy) = policy {
         for g in &policy.gates {
             match &g.gate {
-                Gate::DenyPathWrite { globs } | Gate::ProtectTests { globs } => {
+                Gate::DenyPathWrite { globs, .. } | Gate::ProtectTests { globs } => {
                     let defaults: Vec<String>;
                     let globs = if globs.is_empty() && matches!(g.gate, Gate::ProtectTests { .. }) {
                         defaults = DEFAULT_TEST_GLOBS.iter().map(|s| s.to_string()).collect();
@@ -2473,7 +2502,14 @@ pub fn evaluate(
                         globs
                     };
                     let Some(set) = glob_set(globs) else { continue };
-                    if let Some(hit) = rel_writes.iter().find(|r| set.is_match(r.as_str())) {
+                    let except: &[String] = match &g.gate {
+                        Gate::DenyPathWrite { except_files, .. } => except_files,
+                        _ => &[],
+                    };
+                    if let Some(hit) = rel_writes
+                        .iter()
+                        .find(|r| set.is_match(r.as_str()) && !except.iter().any(|e| e == *r))
+                    {
                         let what = if matches!(g.gate, Gate::ProtectTests { .. }) {
                             "changes a test file"
                         } else {
@@ -2944,6 +2980,7 @@ mod tests {
                     rule: rule.into(),
                     scope: "team".into(),
                     gate,
+                    except_members: vec![],
                 })
                 .collect(),
             ..Default::default()
@@ -2972,11 +3009,83 @@ mod tests {
     }
 
     #[test]
+    fn an_owner_s_own_sessions_pass_their_layer_gate() {
+        let mut p = policy(vec![(
+            "Data is owned by Sam",
+            Gate::DenyPathWrite {
+                globs: vec!["db/**".into()],
+                except_files: vec![],
+            },
+        )]);
+        p.gates[0].except_members = vec!["u-sam".into()];
+        let sam = p.clone().for_member(Some("u-sam"));
+        assert_eq!(eval(&sam, &write("/home/u/repo/db/a.sql")), Outcome::Allow);
+        let alex = p.clone().for_member(Some("u-alex"));
+        assert_eq!(
+            eval(&alex, &write("/home/u/repo/db/a.sql")),
+            Outcome::Blocked
+        );
+        // A session that doesn't say whose it is is checked.
+        let nobody = p.clone().for_member(None);
+        assert_eq!(
+            eval(&nobody, &write("/home/u/repo/db/a.sql")),
+            Outcome::Blocked
+        );
+        assert_eq!(
+            eval(&p.for_member(Some(" ")), &write("/home/u/repo/db/a.sql")),
+            Outcome::Blocked
+        );
+    }
+
+    #[test]
+    fn deny_path_write_lets_approved_files_through() {
+        let p = policy(vec![(
+            "Data is owned by Sam",
+            Gate::DenyPathWrite {
+                globs: vec!["db/**".into()],
+                except_files: vec!["db/schema.sql".into()],
+            },
+        )]);
+        assert_eq!(
+            eval(&p, &write("/home/u/repo/db/schema.sql")),
+            Outcome::Allow
+        );
+        assert_eq!(
+            eval(&p, &write("/home/u/repo/db/seed.sql")),
+            Outcome::Blocked
+        );
+        assert_eq!(eval(&p, &bash("echo x > ../db/seed.sql")), Outcome::Blocked);
+    }
+
+    #[test]
+    fn a_policy_without_except_files_still_parses() {
+        let raw = r#"{"type":"deny-path-write","globs":["db/"]}"#;
+        let g: Gate = serde_json::from_str(raw).unwrap();
+        assert_eq!(
+            g,
+            Gate::DenyPathWrite {
+                globs: vec!["db/".into()],
+                except_files: vec![],
+            }
+        );
+        // And an empty exception list is not written back out.
+        assert_eq!(serde_json::to_string(&g).unwrap(), raw);
+        let with: Gate = serde_json::from_str(
+            r#"{"type":"deny-path-write","globs":["db/"],"exceptFiles":["db/a.sql"]}"#,
+        )
+        .unwrap();
+        assert!(
+            matches!(with, Gate::DenyPathWrite { ref except_files, .. } if except_files == &vec!["db/a.sql".to_string()])
+        );
+    }
+
+    #[test]
     fn deny_path_write_globs() {
         let p = policy(vec![(
             "Never touch migrations/",
             Gate::DenyPathWrite {
                 globs: vec!["migrations/".into()],
+                except_files: vec![],
             },
         )]);
         assert_eq!(
@@ -3008,6 +3117,7 @@ mod tests {
             "No SQL edits",
             Gate::DenyPathWrite {
                 globs: vec!["*.sql".into()],
+                except_files: vec![],
             },
         )]);
         assert_eq!(
@@ -3018,6 +3128,7 @@ mod tests {
             "Lockfile",
             Gate::DenyPathWrite {
                 globs: vec!["package-lock.json".into()],
+                except_files: vec![],
             },
         )]);
         assert_eq!(
@@ -3032,6 +3143,7 @@ mod tests {
             "Config",
             Gate::DenyPathWrite {
                 globs: vec!["config/*.yml".into()],
+                except_files: vec![],
             },
         )]);
         assert_eq!(
@@ -3202,6 +3314,7 @@ mod tests {
             "Never touch migrations/",
             Gate::DenyPathWrite {
                 globs: vec!["migrations".into()],
+                except_files: vec![],
             },
         )]);
         let f = evaluate(

@@ -205,6 +205,33 @@ export function dismissNotice(n: GateNotice): void {
   resolve(n.id, "dismissed");
 }
 
+/** Project roots whose view has the Rules panel ready to open — what
+ *  "is there a rules editor for this project?" is answered from. */
+const rulesEditors = new Map<number, () => readonly string[]>();
+let nextEditor = 0;
+
+/** A project view announces it can open the Rules panel for `roots` (it
+ *  listens for OPEN_RULES_EVENT). Returns the unregister. */
+export function registerRulesEditor(roots: () => readonly string[]): () => void {
+  const id = ++nextEditor;
+  rulesEditors.set(id, roots);
+  return () => {
+    rulesEditors.delete(id);
+  };
+}
+
+/** Whether pressing "Team rules" for `path` opens a Rules panel. */
+export function rulesEditorFor(path: string): boolean {
+  const p = path.replace(/\\/g, "/").replace(/\/+$/, "");
+  for (const roots of rulesEditors.values()) {
+    for (const raw of roots()) {
+      const r = raw.replace(/\\/g, "/").replace(/\/+$/, "");
+      if (r && (p === r || p.startsWith(`${r}/`))) return true;
+    }
+  }
+  return false;
+}
+
 /** Ask the project view to open the Rules panel (ProjectView listens). */
 export const OPEN_RULES_EVENT = "canopy:open-rules";
 export function openRules(detail: { cwd: string; ruleId?: string }) {
@@ -213,5 +240,6 @@ export function openRules(detail: { cwd: string; ruleId?: string }) {
 
 export function resetGateNoticesForTests(): void {
   notices = [];
+  rulesEditors.clear();
   listeners.clear();
 }

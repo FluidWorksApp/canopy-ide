@@ -121,7 +121,12 @@ import { companionName, summonCompanion } from "./companion";
 import type { CompanionProposal } from "./companionSession";
 import { personaBinding } from "./personaBinding";
 import { getSettings, subscribeSettings, THEME_CHANGE_EVENT } from "./settings";
-import { defaultLens, initialLensConfig, projectLens, toggleProjectLens } from "./projectLens";
+import { builderRoot, defaultLens, initialLensConfig, projectLens, toggleProjectLens } from "./projectLens";
+import { startLensSteps } from "./lensSteps";
+import { setBrainProjectResolver } from "./brainMeter";
+import { startLensApprovals } from "./lensApprovals";
+import { startLensClaimSync } from "./lensClaimSync";
+import { teamIdentity } from "./teamIdentity";
 import {
   dismissTerminalMemoryPromptsForWindow,
   subscribeTerminalMemoryPromptVisibility,
@@ -907,20 +912,25 @@ export default function App() {
   // once; reads projects through refs at call time.
   const projectIdentityRef = useRef(projectIdentity);
   projectIdentityRef.current = projectIdentity;
-  useEffect(
-    () =>
-      installOutcomes({
-        projectFor: (cwd) => {
-          const p = projectIdentityRef.current(cwd);
-          return p.projectId ? { id: p.projectId, name: p.projectName ?? "" } : null;
-        },
-        isPrototype: (cwd) => {
-          const id = projectIdentityRef.current(cwd).projectId;
-          return !!wsRef.current.projects.find((p) => p.id === id)?.vibe?.enabled;
-        },
-      }),
-    [],
-  );
+  useEffect(() => {
+    const projectFor = (cwd: string) => {
+      const p = projectIdentityRef.current(cwd);
+      return p.projectId ? { id: p.projectId, name: p.projectName ?? "" } : null;
+    };
+    // Canopy's own brain spend is recorded per project too (brainMeter.ts).
+    setBrainProjectResolver(projectFor);
+    const stop = installOutcomes({
+      projectFor,
+      isPrototype: (cwd) => {
+        const id = projectIdentityRef.current(cwd).projectId;
+        return !!wsRef.current.projects.find((p) => p.id === id)?.vibe?.enabled;
+      },
+    });
+    return () => {
+      stop();
+      setBrainProjectResolver(null);
+    };
+  }, []);
   // Mesh jobs across workspaces, this account's machines and teammates
   // (meshJobs.ts). One coordinator for the window's lifetime: it holds the
   // approval inbox and which runs report back to which submitter, and every
@@ -981,8 +991,29 @@ export default function App() {
       roots: () => wsRef.current.projects.flatMap((p) => p.components.map((c) => c.path)),
       currentWorkspace: () => (isWorkspaceHost() ? (activeWorkspace()?.connection.workspaceId ?? null) : null),
     });
+    // Builder-lens steps and their summaries (src/lensSteps.ts), and owners'
+    // answers to layer approvals (src/lensApprovals.ts): app-wide, so neither
+    // depends on a panel being open.
+    const stopSteps = startLensSteps({
+      roots: () =>
+        wsRef.current.projects.flatMap((p) => {
+          const builder = projectLens(p) === "builder" ? builderRoot(p) : null;
+          return p.components.map((c) => ({ root: c.path, builder: c.path === builder }));
+        }),
+    });
+    const stopApprovals = startLensApprovals();
+    // Layer claims shared with the team, so every teammate enforces them.
+    const stopClaims = startLensClaimSync({
+      roots: () => wsRef.current.projects.flatMap((p) => p.components.map((c) => c.path)),
+    });
+    // Who is signed in, early: terminals carry it (ipc.ts withMember) so a
+    // layer owner's own agents pass their layer's gate.
+    void teamIdentity();
     return () => {
       stop();
+      stopSteps();
+      stopApprovals();
+      stopClaims();
       setCloudRosterProvider(null);
       setCloudNoteSender(null);
     };

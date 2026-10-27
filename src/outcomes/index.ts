@@ -11,7 +11,10 @@
 
 import * as ipc from "../ipc";
 import { appendLedger, queryLedger } from "../ledger";
-import { onAgentTurnEnd, onAgentTurnStart } from "../agentTurns";
+import { onAgentSessionEnd, onAgentTurnEnd, onAgentTurnStart, watchAgentSessionExits } from "../agentTurns";
+import { teamIdentity } from "../teamIdentity";
+import { cachedReconcileDeps } from "./cache";
+import { fingerprint } from "./patchId";
 import { postAttention, resolveAttentionByKey } from "../attention";
 import { rowFor } from "../prWatchStore";
 import { isWorkspaceHost } from "../host";
@@ -141,7 +144,22 @@ export const realReconcileDeps: ReconcileDeps = {
   // A cloud workspace's host watches PRs for provenance and knows when each
   // opened and merged; the desktop's watcher rows don't cover its checkouts.
   prHistory: async (repo) => (isWorkspaceHost() ? (await ipc.provenanceObserve(repo)).prs : []),
+  // GitHub, when its CLI is here: a PR's state, and its diff to recognise a
+  // rebase or squash merge by content.
+  prState: async (repo, number) => ((await ghReady()) ? (await ipc.ghPrState(repo, number)) || null : null),
+  prFingerprint: async (repo, number) => ((await ghReady()) ? fingerprint(await ipc.ghPrDiff(repo, number)) : null),
 };
+
+let gh: { at: number; ok: Promise<boolean> } | null = null;
+/** Whether gh is usable, asked at most every ten minutes. */
+function ghReady(): Promise<boolean> {
+  if (!gh || Date.now() - gh.at > 10 * 60_000) gh = { at: Date.now(), ok: ipc.ghAvailable().catch(() => false) };
+  return gh.ok;
+}
+
+/** What the panel and the background reconcile read through: the same IPC,
+ *  with git reads cached and incremental (cache.ts). */
+export const outcomesReconcileDeps: ReconcileDeps = cachedReconcileDeps(realReconcileDeps);
 
 /** Background reconcile per repository at most this often. */
 const RECONCILE_EVERY_MS = 6 * 60 * 60 * 1000;
@@ -155,7 +173,12 @@ export interface InstallDeps {
 }
 
 export function installOutcomes(deps: InstallDeps): () => void {
-  const spend = createSpendRecorder({ usage: ipc.agentUsage, append: appendLedger, query: queryLedger });
+  const spend = createSpendRecorder({
+    usage: ipc.agentUsage,
+    append: appendLedger,
+    query: queryLedger,
+    identity: teamIdentity,
+  });
   const budgets = createBudgetMonitor({
     usage: ipc.agentUsage,
     ptyWrite: (id, data) => ipc.ptyWrite(id, data),
@@ -182,17 +205,29 @@ export function installOutcomes(deps: InstallDeps): () => void {
         const last = lastReconcile.get(t.root) ?? 0;
         if (Date.now() - last > RECONCILE_EVERY_MS) {
           lastReconcile.set(t.root, Date.now());
-          await reconcileOutcomes(realReconcileDeps, t.root, Date.now() - RECONCILE_WINDOW_MS).catch(() => {});
+          await reconcileOutcomes(outcomesReconcileDeps, t.root, Date.now() - RECONCILE_WINDOW_MS).catch(() => {});
         }
       })();
     }, USAGE_SETTLE_MS);
     timers.add(timer);
   });
+  // The session is over (SessionEnd, or its terminal exited): the final
+  // spend write, after the usage store has settled.
+  const offSessionEnd = onAgentSessionEnd((end) => {
+    const timer = setTimeout(() => {
+      timers.delete(timer);
+      void spend.finish(end);
+    }, USAGE_SETTLE_MS);
+    timers.add(timer);
+  });
+  const stopExits = watchAgentSessionExits();
   const poll = setInterval(() => void budgets.tick(), ACTIVE_POLL_MS);
 
   return () => {
     offStart();
     offEnd();
+    offSessionEnd();
+    stopExits();
     clearInterval(poll);
     for (const t of timers) clearTimeout(t);
   };

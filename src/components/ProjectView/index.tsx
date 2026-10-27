@@ -328,7 +328,7 @@ import { WorkflowView } from "../WorkflowView";
 import { InstructionsView } from "../InstructionsView";
 import { GateNotices } from "../GateNotices";
 import { rulesFocus } from "../../gates/focus";
-import { OPEN_RULES_EVENT } from "../../gates/events";
+import { OPEN_RULES_EVENT, registerRulesEditor } from "../../gates/events";
 import {
   adoptTaskReservation,
   endAbandonedRun,
@@ -3555,7 +3555,12 @@ const ProjectViewBody = memo(function ProjectViewBody({
       openInstructions(rulesFocus(d.ruleId));
     };
     window.addEventListener(OPEN_RULES_EVENT, on);
-    return () => window.removeEventListener(OPEN_RULES_EVENT, on);
+    // Lets the builder lens's "Team rules" know this project's panel exists.
+    const unregister = registerRulesEditor(() => roots);
+    return () => {
+      window.removeEventListener(OPEN_RULES_EVENT, on);
+      unregister();
+    };
   }, [roots, openInstructions, visible]);
 
   /** Open the agents page, or focus it if it's already up. One per project:

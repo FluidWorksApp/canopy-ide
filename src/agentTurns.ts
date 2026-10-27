@@ -57,17 +57,25 @@ export interface AgentTurnEnd extends AgentTurnStart {
   lastMessage?: string;
 }
 
-/** The agent's CLI said its session is over (SessionEnd). */
+/** An agent session is over: its CLI reported SessionEnd, or the terminal it
+ *  ran in exited. Fires once per session, after its pending turn events. */
 export interface AgentSessionEnd {
   sessionId: string;
-  cwd: string;
   ptyId: number | null;
+  cli: string;
+  cwd: string;
+  root: string;
+  endedAt: number;
+  /** What said so. */
+  via: "session-end" | "process-exit";
+  /** The plan the session worked under, when its events named one (plans
+   *  close an interactive plan at session end). */
   planId?: string;
 }
 
 type StartListener = (turn: AgentTurnStart) => void;
 type EndListener = (turn: AgentTurnEnd) => void;
-type SessionEndListener = (e: AgentSessionEnd) => void;
+type SessionEndListener = (end: AgentSessionEnd) => void;
 
 const startListeners = new Set<StartListener>();
 const endListeners = new Set<EndListener>();
@@ -119,6 +127,11 @@ export function setAgentTurnDepsForTests(next: AgentTurnDeps | null): void {
 /** Per session: the open turn, and when the last one ended. */
 const open = new Map<string, AgentTurnStart>();
 const lastEnd = new Map<string, number>();
+/** What a session-end needs to say, by session, from its latest event; and
+ *  which session each terminal is running, for a process exit. */
+const known = new Map<string, Omit<AgentSessionEnd, "endedAt" | "via">>();
+const sessionByPty = new Map<number, string>();
+const ended = new Set<string>();
 /** Per-session chain, so a short turn's start is announced before its end
  *  even though each waits on an async root lookup. */
 const chains = new Map<string, Promise<unknown>>();
@@ -167,26 +180,79 @@ export function observeAgentTurns(
 ): void {
   for (const e of events) {
     if (!e || !e.sessionId || !e.cwd) continue;
-    if (e.event === "SessionEnd") {
-      const ended: AgentSessionEnd = { sessionId: e.sessionId, cwd: e.cwd, ptyId: e.pty, ...(e.planId ? { planId: e.planId } : {}) };
-      // After the session's pending turn events, so a last Stop lands first.
-      const prev = chains.get(e.sessionId) ?? Promise.resolve();
-      void prev.catch(() => {}).then(() => emit(sessionEndListeners, ended));
-      continue;
-    }
-    if (e.event !== "UserPromptSubmit" && e.event !== "Stop") continue;
+    remember(e);
+    if (e.event !== "UserPromptSubmit" && e.event !== "Stop" && e.event !== "SessionEnd") continue;
     const event = e;
     const sessionId = e.sessionId;
     const prev = chains.get(sessionId) ?? Promise.resolve();
     const next = prev
       .catch(() => {})
-      .then(() => (event.event === "UserPromptSubmit" ? start(event, observedMs) : end(event, observedMs)))
+      .then(() =>
+        event.event === "UserPromptSubmit"
+          ? start(event, observedMs)
+          : event.event === "Stop"
+            ? end(event, observedMs)
+            : sessionEnd(sessionId, observedMs, "session-end"),
+      )
       .catch(() => {});
     chains.set(sessionId, next);
     void next.finally(() => {
       if (chains.get(sessionId) === next) chains.delete(sessionId);
     });
   }
+}
+
+function remember(e: AgentEventData): void {
+  const prev = known.get(e.sessionId);
+  known.set(e.sessionId, {
+    sessionId: e.sessionId,
+    ptyId: e.pty ?? prev?.ptyId ?? null,
+    cli: eventAgentId(e) || prev?.cli || "",
+    cwd: e.cwd,
+    root: prev?.root ?? e.cwd,
+    ...((e.planId ?? prev?.planId) ? { planId: e.planId ?? prev?.planId } : {}),
+  });
+  if (e.pty != null) sessionByPty.set(e.pty, e.sessionId);
+  // A resumed session that takes a new prompt can end again.
+  if (e.event === "UserPromptSubmit") ended.delete(e.sessionId);
+}
+
+async function sessionEnd(sessionId: string, at: number, via: AgentSessionEnd["via"]): Promise<void> {
+  const info = known.get(sessionId);
+  if (!info || ended.has(sessionId)) return;
+  ended.add(sessionId);
+  open.delete(sessionId);
+  const root = await rootOf(info.cwd);
+  emit(sessionEndListeners, { ...info, root, endedAt: at, via });
+}
+
+/** A terminal exited: whatever agent session it was running is over. */
+export function observeAgentPtyExit(ptyId: number, at: number = Date.now()): void {
+  const sessionId = sessionByPty.get(ptyId);
+  if (!sessionId) return;
+  sessionByPty.delete(ptyId);
+  const prev = chains.get(sessionId) ?? Promise.resolve();
+  const next = prev
+    .catch(() => {})
+    .then(() => sessionEnd(sessionId, at, "process-exit"))
+    .catch(() => {});
+  chains.set(sessionId, next);
+}
+
+/** Feed terminal exits in (installOutcomes does, once). Returns a stop. */
+export function watchAgentSessionExits(
+  onExit: (cb: (e: { id: number }) => void) => Promise<() => void> = ipc.onPtyExit,
+): () => void {
+  let stop: (() => void) | null = null;
+  let stopped = false;
+  void onExit((e) => observeAgentPtyExit(e.id)).then((un) => {
+    if (stopped) un();
+    else stop = un;
+  });
+  return () => {
+    stopped = true;
+    stop?.();
+  };
 }
 
 async function start(e: AgentEventData, at: number): Promise<void> {
@@ -237,6 +303,9 @@ export function resetAgentTurnsForTests(): void {
   startListeners.clear();
   endListeners.clear();
   sessionEndListeners.clear();
+  known.clear();
+  sessionByPty.clear();
+  ended.clear();
   open.clear();
   lastEnd.clear();
   chains.clear();

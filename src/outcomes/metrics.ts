@@ -177,6 +177,7 @@ export function sessionOutcomes(input: {
       sessionId: s.sessionId,
       cli: s.cli,
       person: s.person,
+      ...(s.personId ? { personId: s.personId } : {}),
       taskClass: s.taskClass ?? UNPLANNED,
       costUsd: s.costUsd,
       mergedPrs: [...new Set(mergedEdges.map((e) => e.prNumber))].sort((a, b) => a - b),

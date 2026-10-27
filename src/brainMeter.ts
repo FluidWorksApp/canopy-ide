@@ -13,6 +13,7 @@
 // this meter is the cheap, global, always-on one.
 
 import { getSettings } from "./settings";
+import { basename } from "./paths";
 
 export interface BrainCallRecord {
   feature: string;
@@ -24,6 +25,12 @@ export interface BrainCallRecord {
   ok: boolean;
   /** The failure reason, for a call that did not answer. */
   reason?: string;
+  /** The directory the call ran in (the project it was about); "" or absent
+   *  for calls about no project. */
+  cwd?: string;
+  /** The project that directory belongs to, as Canopy named it when the call
+   *  was made. */
+  project?: { id: string; name: string };
 }
 
 export interface BrainSpend {
@@ -81,13 +88,80 @@ function write(records: BrainCallRecord[]): void {
   if (typeof window !== "undefined") window.dispatchEvent(new Event(BRAIN_METER_EVENT));
 }
 
+type ProjectResolver = (cwd: string) => { id: string; name: string } | null;
+let projectOf: ProjectResolver | null = null;
+
+/** How a call's directory maps to a project (App.tsx sets it from the open
+ *  projects), so spend can be shown per project. */
+export function setBrainProjectResolver(resolve: ProjectResolver | null): void {
+  projectOf = resolve;
+}
+
 /** Record one brain call. askBrain calls this for every outcome that reached
  *  (or was refused before) the CLI. */
 export function recordBrainCall(record: BrainCallRecord, now: number = Date.now()): void {
   const floor = now - MAX_AGE_MS;
   const kept = read().filter((r) => r.ts >= floor);
-  kept.push(record);
+  let project = record.project;
+  if (!project && record.cwd && projectOf) {
+    try {
+      project = projectOf(record.cwd) ?? undefined;
+    } catch {
+      project = undefined;
+    }
+  }
+  kept.push({ ...record, ...(record.cwd ? { cwd: record.cwd } : {}), ...(project ? { project } : {}) });
   write(kept.slice(-MAX_RECORDS));
+}
+
+const norm = (p: string) => p.replace(/\\/g, "/").replace(/\/+$/, "");
+
+/** Whether a call's directory is inside `repo`: the checkout itself, a folder
+ *  in it, or one of its Canopy worktrees (`<repo>-wt-<name>`). */
+export function callUnder(cwd: string | undefined, repo: string): boolean {
+  if (!cwd) return false;
+  const c = norm(cwd);
+  const r = norm(repo);
+  return !!r && (c === r || c.startsWith(`${r}/`) || c.startsWith(`${r}-wt-`));
+}
+
+/** Totals per feature since `sinceMs`, for calls made in `repo` only. */
+export function brainSpendByFeatureUnder(repo: string, sinceMs = 0): Record<string, BrainSpend> {
+  const out: Record<string, BrainSpend> = {};
+  for (const r of read()) {
+    if (r.ts < sinceMs || !callUnder(r.cwd, repo)) continue;
+    const s = (out[r.feature] ??= { calls: 0, failures: 0, costUsd: 0, inputTokens: 0, outputTokens: 0 });
+    s.calls += 1;
+    if (!r.ok) s.failures += 1;
+    s.costUsd += r.costUsd ?? 0;
+    s.inputTokens += r.inputTokens ?? 0;
+    s.outputTokens += r.outputTokens ?? 0;
+  }
+  return out;
+}
+
+export interface ProjectBrainSpend {
+  /** Project id, or "" for calls about no project. */
+  id: string;
+  name: string;
+  calls: number;
+  costUsd: number;
+}
+
+/** Totals per project since `sinceMs`, most expensive first. */
+export function brainSpendByProject(sinceMs = 0): ProjectBrainSpend[] {
+  const by = new Map<string, ProjectBrainSpend>();
+  for (const r of read()) {
+    if (r.ts < sinceMs) continue;
+    const id = r.project?.id ?? "";
+    const name = r.project?.name || (r.cwd ? basename(r.cwd) || r.cwd : "Not about a project");
+    const key = id || (r.cwd ? `cwd:${norm(r.cwd)}` : "");
+    const g = by.get(key) ?? { id, name, calls: 0, costUsd: 0 };
+    g.calls += 1;
+    g.costUsd += r.costUsd ?? 0;
+    by.set(key, g);
+  }
+  return [...by.values()].sort((a, b) => b.costUsd - a.costUsd || b.calls - a.calls);
 }
 
 /** Totals over records matching `feature` (all when omitted) since `sinceMs`. */

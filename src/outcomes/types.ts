@@ -26,9 +26,15 @@ export interface SpendData {
   cli: string;
   /** Which account ran it ("default" for the main login). */
   profile: string;
-  /** Who to attribute it to — the account label, else "You". The ledger is
-   *  per machine, so on one person's computer "person" is mostly the account. */
+  /** Who to attribute it to: the signed-in Canopy team member when there is
+   *  one, else the CLI account label, else "You". */
   person: string;
+  /** The team member's account id, when signed in — what groups one person's
+   *  sessions across computers. */
+  personId?: string;
+  /** When the session ended (its CLI's SessionEnd, or its terminal exiting):
+   *  this record is final. */
+  endedAt?: number;
   cwd: string;
   costUsd: number;
   /** True when the CLI reported its own price; false = estimated from tokens. */
@@ -53,6 +59,7 @@ export interface OutcomeData {
   sessionId: string;
   cli: string;
   person: string;
+  personId?: string;
   taskClass: string;
   costUsd: number;
   /** PR numbers this session raised (provenance) that have merged. */

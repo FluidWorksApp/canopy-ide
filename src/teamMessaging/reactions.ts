@@ -35,7 +35,7 @@ function reduce(overlay:EventOverlay,event:ChatMessage,target:ChatMessage):Event
  const e=eventOf(event);
  // The event must belong to its target's conversation, so nobody can mark a
  // direct conversation they are not part of by naming one of its message ids.
- if(!e||e.type==='live'||e.target!==target.id||!sameConversation(event,target))return overlay;
+ if(!e||e.type==='live'||e.type==='layer'||e.target!==target.id||!sameConversation(event,target))return overlay;
  if(e.type==='reaction'){const reactions=reduceReaction(overlay.reactions,event,target);return reactions===overlay.reactions?overlay:{...overlay,reactions};}
  // Only a message's author edits or deletes it. `sender` was bound to the
  // envelope's authenticated signing account on receipt, never taken on trust.

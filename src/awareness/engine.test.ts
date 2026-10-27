@@ -89,6 +89,9 @@ function makeDeps(over: Partial<AwarenessDeps> = {}) {
     checkouts: async () => ["/repo", "/repo/.wt/ben"],
     churn: async () => [],
     references: async () => [{ symbol: "quote", files: ["/repo/src/cart.ts"] }],
+    snapshot: async () => null,
+    snapshotFiles: async () => [],
+    snapshotPatch: async () => "",
     now: () => NOW,
     ...calls,
     ...over,
@@ -198,6 +201,58 @@ describe("handleTurn", () => {
     expect(c.deliver).not.toHaveBeenCalled();
     expect(c.claim).not.toHaveBeenCalled();
     expect(awarenessStatus()).toEqual({ state: "off" });
+  });
+
+  it("looks up renamed-away names first, marked as removed", async () => {
+    const references = vi.fn(async () => [{ symbol: "quote", files: ["/repo/src/cart.ts"] }]);
+    makeDeps({ references });
+    await handleTurn(turn);
+    expect(references).toHaveBeenCalledWith("/repo", [
+      { symbol: "priceFor", path: "src/pricing.ts", removed: true },
+      { symbol: "quote", path: "src/pricing.ts", removed: false },
+    ]);
+  });
+
+  it("counts what the turn changed through Bash: its files overlap and the brain reads the patch", async () => {
+    const patch = [
+      "diff --git a/src/cart.ts b/src/cart.ts",
+      "--- a/src/cart.ts",
+      "+++ b/src/cart.ts",
+      "@@ -1 +1 @@",
+      "-export function cartTotal() {}",
+      "+export function basketTotal() {}",
+    ].join("\n");
+    const references = vi.fn(async () => []);
+    const snapshotPatch = vi.fn(async () => patch);
+    const c = makeDeps({
+      // Bash only: the journal saw nothing this turn.
+      edits: async () => [],
+      references,
+      snapshot: async () => ({ from: "a", to: "b", shared: false }),
+      snapshotFiles: async () => ["src/cart.ts"],
+      snapshotPatch,
+    });
+    await handleTurn({ ...turn, filesTouched: [] });
+    expect(snapshotPatch).toHaveBeenCalledWith("/repo", { from: "a", to: "b", shared: false }, ["src/cart.ts"]);
+    const req = c.ask.mock.calls[0][0];
+    expect(req.prompt).toContain("src/cart.ts");
+    expect(req.prompt).toContain("Changed through shell commands");
+    expect(references).toHaveBeenCalledWith("/repo", [
+      { symbol: "cartTotal", path: "src/cart.ts", removed: true },
+      { symbol: "basketTotal", path: "src/cart.ts", removed: false },
+    ]);
+  });
+
+  it("in a shared checkout, leaves a file a peer edited during the turn to the peer", async () => {
+    const c = makeDeps({
+      edits: async (_cwd: string, sessionId: string) =>
+        sessionId === "s-ana" ? [] : [edit({ path: "src/cart.ts", ts: 1040, old: "x", new: "y" })],
+      references: async () => [],
+      snapshot: async () => ({ from: "a", to: "b", shared: true }),
+      snapshotFiles: async () => ["src/cart.ts"],
+    });
+    await handleTurn({ ...turn, filesTouched: [] });
+    expect(c.ask).not.toHaveBeenCalled();
   });
 
   it("respects the per-project hotspot override", async () => {

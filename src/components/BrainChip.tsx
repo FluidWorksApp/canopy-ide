@@ -14,6 +14,7 @@ import { placeAboveAnchor, type PopoverPlacement } from "../popoverPlacement";
 import { Button } from "./ui";
 import {
   brainSpendByFeature,
+  brainSpendByProject,
   startOfToday,
   subscribeBrainMeter,
   type BrainSpend,
@@ -155,6 +156,38 @@ export function BrainSpendTable() {
   );
 }
 
+/** Today's brain spend per project: which project Canopy's intelligence
+ *  worked for. */
+export function BrainProjectSpend() {
+  const [tick, setTick] = useState(0);
+  useEffect(() => subscribeBrainMeter(() => setTick((t) => t + 1)), []);
+  const rows = useMemo(() => {
+    void tick;
+    return brainSpendByProject(startOfToday());
+  }, [tick]);
+  if (!rows.length) return null;
+  return (
+    <table className="brain-spend" aria-label="Canopy's spend today by project">
+      <thead>
+        <tr>
+          <th scope="col">Project</th>
+          <th scope="col">Calls</th>
+          <th scope="col">Today</th>
+        </tr>
+      </thead>
+      <tbody>
+        {rows.slice(0, 8).map((r) => (
+          <tr key={r.id || r.name}>
+            <td>{r.name}</td>
+            <td>{r.calls}</td>
+            <td>{usd(r.costUsd)}</td>
+          </tr>
+        ))}
+      </tbody>
+    </table>
+  );
+}
+
 export function BrainChip() {
   const conn = useBrainConnection();
   const text = brainStateText(conn);
@@ -243,6 +276,7 @@ export function BrainChip() {
             )}
             <div className="brain-pop-section">Canopy's spend today</div>
             <BrainSpendTable />
+            <BrainProjectSpend />
             <div className="brain-pop-empty">
               Spend is what Canopy's own features used on your plan — not your agent tabs. A
               feature over its cap pauses until tomorrow.
