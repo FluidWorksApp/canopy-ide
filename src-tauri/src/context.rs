@@ -4809,6 +4809,45 @@ struct UiOp {
     /// is answered by the first attempt instead of being delivered again.
     #[serde(rename = "requestId")]
     request_id: Option<String>,
+    /// mesh_submit: repositories the job is about, as the agent named them
+    /// (`owner/name` or a clone URL); the first is where it should run. The
+    /// frontend parses them; the bridge only bounds how much it forwards.
+    #[serde(default)]
+    repos: Vec<String>,
+}
+
+/// The most repositories one mesh job may name, and how long each name may be.
+const MAX_MESH_JOB_REPOS: usize = 5;
+const MAX_MESH_JOB_REPO_LEN: usize = 300;
+
+/// The repository a mesh job's submitter is working in, read from the
+/// submitting terminal's own directory (the credential's, never the body's):
+/// origin's URL, the folder inside the repo, and the branch. The frontend
+/// reduces the URL to host + `owner/name` before anything leaves the machine,
+/// so no local path is ever sent. None when the directory is not a checkout
+/// with an origin.
+fn sender_repo(cwd: &str) -> Option<serde_json::Value> {
+    let git = |args: &[&str]| -> Option<String> {
+        let mut command = std::process::Command::new("git");
+        command.arg("-C").arg(cwd).args(args);
+        let out = crate::process_capture::output(
+            &mut command,
+            crate::process_capture::DEFAULT_STREAM_MAX,
+        )
+        .ok()?;
+        out.status
+            .success()
+            .then(|| String::from_utf8_lossy(&out.stdout).trim().to_string())
+    };
+    let origin = git(&["remote", "get-url", "origin"]).filter(|o| !o.is_empty())?;
+    let path = git(&["rev-parse", "--show-prefix"]).unwrap_or_default();
+    // Detached HEAD has no branch to name; an unborn one still does.
+    let branch = git(&["symbolic-ref", "--short", "-q", "HEAD"]).unwrap_or_default();
+    Some(serde_json::json!({
+        "origin": origin,
+        "path": path.trim_end_matches('/'),
+        "branch": branch,
+    }))
 }
 
 /// The mesh sends below reach the network through every team session, each a
@@ -4866,6 +4905,7 @@ async fn ui_op(
     let mut submitter: Option<u32> = None;
     let mut from_name: Option<String> = None;
     let mut request_id: Option<String> = None;
+    let mut submitter_repo: Option<serde_json::Value> = None;
     let deadline = match op.op.as_str() {
         "mesh_targets" | "team_people" => UI_OP_TIMEOUT,
         // Posts into the user's encrypted Teams chat, as the user. Only an
@@ -4940,11 +4980,28 @@ async fn ui_op(
                     ),
                 );
             }
+            if op.repos.len() > MAX_MESH_JOB_REPOS
+                || op.repos.iter().any(|r| r.len() > MAX_MESH_JOB_REPO_LEN)
+            {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    format!(
+                        "a job names at most {MAX_MESH_JOB_REPOS} repositories, each as owner/name or its clone URL"
+                    ),
+                );
+            }
             submitter = Some(agent.pty_id);
             request_id = match mesh_request_id(op.request_id.as_deref()) {
                 Ok(id) => Some(id),
                 Err(e) => return (StatusCode::BAD_REQUEST, e),
             };
+            // The project the job belongs to travels with it, so the receiver
+            // can run it in its own checkout of the same repository.
+            let cwd = agent.cwd.clone();
+            submitter_repo = tokio::task::spawn_blocking(move || sender_repo(&cwd))
+                .await
+                .ok()
+                .flatten();
             // Starting a local job waits on a launch (bounded at 60s by the
             // frontend); a remote one on the encrypted send.
             MESH_SUBMIT_TIMEOUT
@@ -5101,6 +5158,10 @@ async fn ui_op(
     payload["targetPtyId"] = serde_json::json!(op.target_pty_id);
     payload["replyTo"] = serde_json::json!(op.reply_to);
     payload["requestId"] = serde_json::json!(request_id);
+    if op.op == "mesh_submit" {
+        payload["repos"] = serde_json::json!(op.repos);
+        payload["senderRepo"] = submitter_repo.unwrap_or(serde_json::Value::Null);
+    }
     if let Some(name) = from_name {
         payload["fromName"] = name.into();
     }
@@ -5740,6 +5801,40 @@ mod tests {
         for bad in ["a b", "../x", "id\"x", &"a".repeat(65)] {
             assert!(mesh_request_id(Some(bad)).is_err(), "{bad}");
         }
+    }
+
+    #[test]
+    fn sender_repo_reads_origin_folder_and_branch_from_the_checkout() {
+        let dir = std::env::temp_dir().join(format!("canopy-sender-repo-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let root = dir.as_path();
+        let git = |args: &[&str]| {
+            let ok = std::process::Command::new("git")
+                .arg("-C")
+                .arg(root)
+                .args(args)
+                .output()
+                .unwrap()
+                .status
+                .success();
+            assert!(ok, "git {args:?}");
+        };
+        git(&["init", "-q", "-b", "feat/x"]);
+        assert!(
+            sender_repo(&root.to_string_lossy()).is_none(),
+            "no origin, no scope"
+        );
+        git(&["remote", "add", "origin", "git@github.com:Acme/api.git"]);
+        let sub = root.join("services/billing");
+        std::fs::create_dir_all(&sub).unwrap();
+        let found = sender_repo(&sub.to_string_lossy()).unwrap();
+        assert_eq!(found["origin"], "git@github.com:Acme/api.git");
+        assert_eq!(found["path"], "services/billing");
+        // An unborn branch still names itself.
+        assert_eq!(found["branch"], "feat/x");
+        assert_eq!(sender_repo(&root.to_string_lossy()).unwrap()["path"], "");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     fn task_detail(status: &str, metadata: serde_json::Value) -> crate::tasks::TaskEnvelopeDetail {

@@ -4183,6 +4183,8 @@ fn mesh_tool_defs() -> Vec<serde_json::Value> {
                 "member": { "type": "string", "description": "Send to another machine: \"me\" (this account's other machine) or a teammate's name or id" },
                 "device": { "type": "string", "description": "A specific device id from canopy_mesh_targets, when the member has several online" },
                 "agent": { "type": "string", "description": "For a cloud workspace: the name of a running agent there to hand the job to; omitted starts a new one" },
+                "repo": { "type": "string", "description": "The repository the job is about, as owner/name (e.g. \"acme/api\") or its clone URL. The receiver runs it in its own checkout of that repository and asks its user where to run it when it has none. Omitted: the repository of this terminal's directory is attached automatically" },
+                "repos": { "type": "array", "items": { "type": "string" }, "maxItems": 5, "description": "Instead of `repo`, when the job spans several repositories: the one it should run in first, then the others it also touches" },
                 "requestId": { "type": "string", "description": "Only when retrying a send that timed out: the requestId that error gave you. The same id is never delivered twice; omit it on a first send" }
             }, "required": ["brief"], "additionalProperties": false }
         }),
@@ -5771,6 +5773,12 @@ fn call_tool(name: &str, args: &serde_json::Value) -> Result<ToolOutput, String>
                         .into(),
                 );
             }
+            // `repo` first, then `repos`: the first named is where it runs.
+            let mut repos: Vec<&str> = arg("repo").into_iter().collect();
+            if let Some(list) = args.get("repos").and_then(|v| v.as_array()) {
+                repos.extend(list.iter().filter_map(|v| v.as_str()).map(str::trim));
+            }
+            repos.retain(|r| !r.is_empty());
             // Mapped onto the bridge's existing start_session vocabulary so the
             // UI op struct grows by only the fields that are actually new.
             text(ui_op(
@@ -5783,6 +5791,7 @@ fn call_tool(name: &str, args: &serde_json::Value) -> Result<ToolOutput, String>
                     "device": arg("device"),
                     "agent": arg("agent"),
                     "requestId": arg("requestId"),
+                    "repos": repos,
                 }),
                 155,
             ))

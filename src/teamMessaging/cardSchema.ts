@@ -136,6 +136,10 @@ export function validRepo(value:unknown):value is RepoRef{
  if(!isObject(value)||!exact(value,['host','slug']))return false;
  const {host,slug}=value as RepoRef;
  if(typeof host!=='string'||!HOST.test(host)||host.startsWith('.')||host.startsWith('-'))return false;
+ return validSlug(slug);
+}
+/** `owner/name` (or a nested group, up to five segments) as a host names it. */
+export function validSlug(slug:unknown):slug is string{
  if(typeof slug!=='string'||slug.length>LIMITS.slug)return false;
  const parts=slug.split('/');
  return parts.length>=2&&parts.length<=5&&parts.every(p=>SEGMENT.test(p)&&p!=='.'&&p!=='..');

@@ -11,6 +11,7 @@ import {createMeshJobs,localRemoteJobs,localRemoteMessages,type MeshJobs} from "
 import {peekWorkspaceList,refreshWorkspaceList,restoreWorkspaceList} from "./remoteExecution/workspaceListCache";
 import { HOST_OUTDATED_EVENT } from "./remoteExecution/remoteSupport";
 import {MeshJobInbox} from "./components/MeshJobInbox";
+import {projectCheckouts} from "./jobScope";
 import {ensureProjectWorkspace,ProjectWorkspaceProgress} from "./remoteExecution/projectWorkspace";
 import {stopIdleProjectWorkspace} from "./remoteExecution/projectIdle";
 import {selectAllFocused} from './selectAll';
@@ -338,7 +339,7 @@ export default function App() {
   const [workspaceLoadError, setWorkspaceLoadError] = useState<string | null>(null);
   const [workspaceLoadAttempt, setWorkspaceLoadAttempt] = useState(0);
   const [dialog, setDialog] = useState<
-    { mode: "new" } | { mode: "edit"; project: Project } | null
+    { mode: "new"; cloneUrl?: string } | { mode: "edit"; project: Project } | null
   >(null);
   const [agentEvents, setAgentEvents] = useState<AgentEventEntry[]>([]);
   // Pending cards the user waved away. Session-scoped on purpose: a dismissed
@@ -940,6 +941,9 @@ export default function App() {
     workspaces: () => wsRef.current.projects.map((p) => ({ name: p.name })),
     // Declared further down; read at call time, long after the first render.
     start: (req) => startSessionRef.current(req),
+    // Every project component and its checkout's origin, so a job from another
+    // machine lands in the checkout of its repository (jobScope.ts).
+    checkouts: () => projectCheckouts(wsRef.current.projects),
     sessions: liveTeamSessions,
     teamName,
     report: ipc.meshJobUpdate,
@@ -3149,6 +3153,9 @@ export default function App() {
     notify("Collaboration ended.");
   }, [notify]);
   const newProject = useCallback(async () => {try{await ensureProjectWorkspace();setDialog({mode:"new"});}catch(error){notify(String(error),"error");}}, [notify]);
+  // A job from another machine names a repository this one has no checkout
+  // of: the same new-project dialog, opened on its clone step.
+  const cloneProject = useCallback(async (cloneUrl: string) => {try{await ensureProjectWorkspace();setDialog({mode:"new",cloneUrl});}catch(error){notify(String(error),"error");}}, [notify]);
   const editProject = useCallback(
     (p: Project) => setDialog({ mode: "edit", project: p }),
     [],
@@ -4368,7 +4375,7 @@ export default function App() {
         />
       )}
 
-      <MeshJobInbox jobs={meshJobs} workspaces={ws.projects.map((p) => p.name)} />
+      <MeshJobInbox jobs={meshJobs} workspaces={ws.projects.map((p) => p.name)} onClone={cloneProject} />
 
       <PlanGateHost />
 
@@ -4387,6 +4394,7 @@ export default function App() {
       {dialog && (
         <ProjectDialog
           existing={dialog.mode === "edit" ? dialog.project : undefined}
+          initialCloneUrl={dialog.mode === "new" ? dialog.cloneUrl : undefined}
           onSave={saveProject}
           onCancel={() => setDialog(null)}
         />

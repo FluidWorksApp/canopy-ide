@@ -1,8 +1,21 @@
 /** Mesh jobs as they cross the encrypted team channel. Who sent one is never
  * read from here: it is the envelope's verified sender device and account. */
+import {validCardPath,validRepo,validSlug} from './cardSchema';
 /** Which agent in the target workspace takes a job or message (protocol §6.1). */
 export type AgentTarget={ptyId:number}|{name:string};
-export type JobRequest={id:string;title:string;brief:string;workspace:string|null;created:number;target?:AgentTarget};
+/** A repository a job is about, as its origin remote names it: host and
+ *  `owner/name`, never a local path. `host` is absent when the sender named
+ *  only `owner/name` and had no checkout of it to take the host from. */
+export type JobRepo={host?:string;slug:string};
+/** Which project a job belongs in, by repository identity alone: the first
+ *  repo is where it runs, the rest are others its brief also touches. `path`
+ *  is the folder inside the first repo the sender worked in (repo-relative,
+ *  never absolute); `branch` the sender's branch there, informational only.
+ *  Optional on the wire: an older sender sends none, an older receiver ignores it. */
+export type JobScope={repos:JobRepo[];path?:string;branch?:string};
+export type JobRequest={id:string;title:string;brief:string;workspace:string|null;created:number;target?:AgentTarget;scope?:JobScope};
+export const MAX_SCOPE_REPOS=5;
+const MAX_SCOPE_BRANCH=200;
 export type JobState='accepted'|'declined'|'refused'|'started'|'done'|'blocked'|'failed'|'interrupted';
 export type JobStatus={jobId:string;state:JobState;detail:string;created:number};
 
@@ -17,7 +30,20 @@ export function validJobRequest(value:unknown):value is JobRequest{
  return isRecord(value)&&jobId(value.id)&&typeof value.title==='string'&&value.title.length<=MAX_JOB_TITLE&&
   typeof value.brief==='string'&&value.brief.trim().length>0&&bytes(value.brief)<=MAX_JOB_BRIEF&&
   (value.workspace===null||typeof value.workspace==='string'&&value.workspace.length<=MAX_JOB_WORKSPACE)&&
-  Number.isSafeInteger(value.created)&&(value.target===undefined||validTarget(value.target));
+  Number.isSafeInteger(value.created)&&(value.target===undefined||validTarget(value.target))&&
+  (value.scope===undefined||validJobScope(value.scope));
+}
+export function validJobRepo(value:unknown):value is JobRepo{
+ if(!isRecord(value))return false;
+ if(value.host===undefined)return Object.keys(value).every(k=>k==='slug')&&validSlug(value.slug);
+ return validRepo(value);
+}
+export function validJobScope(value:unknown):value is JobScope{
+ if(!isRecord(value)||!Object.keys(value).every(k=>k==='repos'||k==='path'||k==='branch'))return false;
+ const {repos,path,branch}=value;
+ return Array.isArray(repos)&&repos.length>=1&&repos.length<=MAX_SCOPE_REPOS&&repos.every(validJobRepo)&&
+  (path===undefined||validCardPath(path)&&bytes(path)<=300)&&
+  (branch===undefined||typeof branch==='string'&&branch.length>0&&branch.length<=MAX_SCOPE_BRANCH&&!/[\s\x00-\x1f\x7f]/.test(branch));
 }
 export function validTarget(value:unknown):value is AgentTarget{
  if(!isRecord(value))return false;const keys=Object.keys(value);
