@@ -34,6 +34,9 @@ interface Props {
    *  if a snapshot event was missed. */
   refreshKey?: number;
   onNotice: Notify;
+  /** Context controls on each turn — the harness's own compaction steered
+   *  to this turn (ContextControls.tsx). Absent where it can't be driven. */
+  onSummarize?: (kind: "from" | "upto", turn: { n: number; prompt: string | null }) => void;
 }
 
 interface Pending {
@@ -44,7 +47,7 @@ interface Pending {
 const clock = (ms: number | null) =>
   ms ? new Date(ms).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) : "";
 
-export function TurnTimeline({ cwd, sessionId, agent, builder, refreshKey, onNotice }: Props) {
+export function TurnTimeline({ cwd, sessionId, agent, builder, refreshKey, onNotice, onSummarize }: Props) {
   const [list, setList] = useState<ipc.TurnList | null>(null);
   const [tick, setTick] = useState(0);
   const [pending, setPending] = useState<Pending | null>(null);
@@ -179,6 +182,26 @@ export function TurnTimeline({ cwd, sessionId, agent, builder, refreshKey, onNot
                   >
                     {words.back}
                   </Button>
+                )}
+                {onSummarize && !t.running && (
+                  <>
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      title="Free up context: condense this turn and everything after it, keep what came before in detail"
+                      onClick={() => onSummarize("from", { n: t.n, prompt: t.prompt ?? null })}
+                    >
+                      Summarize from here
+                    </Button>
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      title="Free up context: condense everything up to this turn, keep what came after in detail"
+                      onClick={() => onSummarize("upto", { n: t.n, prompt: t.prompt ?? null })}
+                    >
+                      Summarize up to here
+                    </Button>
+                  </>
                 )}
               </div>
             </div>

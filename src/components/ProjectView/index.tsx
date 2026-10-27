@@ -12507,6 +12507,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
             cwd={tab.cwd}
             sessionId={tab.sessionId}
             digest={tab.digest}
+            ptyId={tab.ptyId}
             builderLens={vibe}
             onOpenCommit={openCommit}
             onOpenPr={openPr}
@@ -12521,7 +12522,6 @@ const ProjectViewBody = memo(function ProjectViewBody({
                 text,
               })
             }
-            ptyId={tab.ptyId}
             onFocusAgent={jumpToPty}
             onRaisePrTask={
               tab.repo
@@ -14069,6 +14069,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
                         cwd={agentTermWs.cwd}
                         sessionId={agentTermWs.sessionId}
                         digest={agentTermWs.digest}
+                        ptyId={agentTermWs.ptyId ?? undefined}
                         onOpenCommit={openCommit}
                         onOpenPr={openPr}
                         onOpenTerminal={(cwd, label) =>
@@ -14084,7 +14085,6 @@ const ProjectViewBody = memo(function ProjectViewBody({
                             text,
                           })
                         }
-                        ptyId={agentTermWs.ptyId ?? undefined}
                         onFocusAgent={jumpToPty}
                         onClose={() => setWsDrawerOpen(false)}
                         onRaisePrTask={

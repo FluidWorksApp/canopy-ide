@@ -22,6 +22,13 @@ import { AgentRuntime } from "./AgentRuntime";
 import { TurnTimeline } from "./TurnTimeline";
 import { ReceiptBadge } from "./ReceiptBadge";
 import { openSessionDoc } from "../sessionDoc/events";
+import { resolveSessionId } from "../sessionDoc/resolveSession";
+import { SubagentTree } from "./SubagentTree";
+import { ContextControls } from "./ContextControls";
+import { useCompaction } from "../useCompaction";
+import { refreshSessionActivity, useSessionActivity } from "../sessionActivity";
+import { compactHeadless } from "../contextCompaction";
+import { activeWorkspace } from "../remoteExecution/workspace";
 import { LIFE_META, agentLife, type Life } from "../../shared/agentLife";
 import { AgentIcon, GitBranchIcon, RestartIcon } from "./icons";
 import { sessionCost } from "../pricing";
@@ -74,6 +81,9 @@ interface AgentWorkspaceViewProps {
   sessionId?: string;
   /** The hook digest, when there is one: last prompt, state, reported files. */
   digest?: ipc.SessionDigest;
+  /** The terminal running this agent, when it is live here. Lets a session
+   *  with no hook id be found in its CLI's own store (resolveSession.ts). */
+  ptyId?: number;
   onOpenCommit: (
     repo: string,
     commit: { hash: string; short: string; subject: string },
@@ -91,8 +101,6 @@ interface AgentWorkspaceViewProps {
   onMessageAgent?: (
     text: string,
   ) => Promise<{ delivered: boolean; note: string; ptyId?: number | null }>;
-  /** The agent's terminal, when this session runs in one here. */
-  ptyId?: number;
   /** Bring the agent's terminal to the front. Called after comments land, so
    *  the review ends where the answer will appear rather than on the diff the
    *  agent is about to change. */
@@ -564,13 +572,13 @@ export function AgentWorkspaceView({
   cwd,
   sessionId,
   digest,
+  ptyId,
   onOpenCommit,
   onOpenPr,
   onOpenPrNumber,
   onOpenTerminal,
   onNotice,
   onMessageAgent,
-  ptyId,
   onFocusAgent,
   onClose,
   onRaisePrTask,
@@ -603,6 +611,25 @@ export function AgentWorkspaceView({
   const [edits, setEdits] = useState<ipc.AgentEdit[]>([]);
   // Manual refresh: the small icon in the header bumps this to re-read all.
   const [tick, setTick] = useState(0);
+  // A CLI without Canopy hooks never names its session; find it in the CLI's
+  // own store by folder, terminal and start time, so the session document is
+  // still one click away.
+  const [found, setFound] = useState<ipc.SessionDigest | null>(null);
+  useEffect(() => {
+    setFound(null);
+  }, [agent, cwd, ptyId, sessionId]);
+  useEffect(() => {
+    if (sessionId) return;
+    let live = true;
+    void resolveSessionId({ agent, cwd, ptyId }).then((d) => live && d && setFound(d));
+    return () => {
+      live = false;
+    };
+    // Refresh, and the workspace's own polls, look again: a terminal that has
+    // not written its first turn yet has no session to find until it does.
+  }, [agent, cwd, ptyId, sessionId, digest?.updated, tick, ws?.updated]);
+  const docSessionId = sessionId ?? found?.session_id;
+  const docDigest = digest ?? found ?? undefined;
 
   // Review comments the user is drafting on the diff, to send to the agent.
   // Keyed to the session (falling back to agent+cwd) and mirrored to
@@ -935,6 +962,34 @@ export function AgentWorkspaceView({
   };
   const working = lifecycle === "working";
   const cost = usage ? sessionCost(usage) : null;
+  // Subagents and context use, from the session's transcript; polled fast
+  // while it works (sessionActivity.ts).
+  const activityKey = useMemo(
+    () =>
+      docSessionId
+        ? { agent, sessionId: docSessionId, cwd: docDigest?.resume_cwd || cwd, profile: docDigest?.profile ?? null }
+        : null,
+    [agent, docSessionId, cwd, docDigest?.resume_cwd, docDigest?.profile],
+  );
+  const activity = useSessionActivity(activityKey, { fast: working });
+  const compaction = useCompaction({
+    agent,
+    sessionId: docSessionId,
+    cwd: docDigest?.resume_cwd || cwd,
+    live: ptyId != null && lifecycle !== "ended",
+    lifeState: lifecycle,
+    remote: !!activeWorkspace(),
+    activity,
+    refresh: () => activityKey && refreshSessionActivity(activityKey),
+    deps: {
+      type: (text) => {
+        if (ptyId == null) return;
+        void ipc.ptyWrite(ptyId, text);
+        window.setTimeout(() => void ipc.ptyWrite(ptyId, "\r"), 350);
+      },
+      headless: compactHeadless,
+    },
+  });
   const touched = ws?.touched?.length ? ws.touched : (digest?.files ?? []);
   const branchable = !!ws?.branch && !ws.detached && !ws.on_base;
   /** Hand the typed brief to a fresh one-shot agent and put the menu away.
@@ -1581,18 +1636,18 @@ export function AgentWorkspaceView({
             </div>
           )}
           {/* The session as a readable document, with Hand off (sessionDoc/). */}
-          {sessionId && (
+          {docSessionId && (
             <Button size="sm"
               title="Read this session as a document — goal, turns, files, decisions — and hand it off"
               onClick={() =>
                 openSessionDoc({
                   kind: "session",
-                  sessionId,
+                  sessionId: docSessionId,
                   agent,
-                  cwd: digest?.resume_cwd || cwd,
+                  cwd: docDigest?.resume_cwd || cwd,
                   repo,
-                  digest,
-                  live: digest?.state !== "ended",
+                  digest: docDigest,
+                  live: ptyId != null ? life.state !== "ended" : docDigest?.state !== "ended",
                   ...(ptyId != null ? { ptyId } : {}),
                   ...(onMessageAgent ? { messageAgent: onMessageAgent } : {}),
                 })
@@ -1819,7 +1874,14 @@ export function AgentWorkspaceView({
         </div>
       )}
 
-      {/* Turn rollback: a point per turn, undoable through a diff preview. */}
+      {/* The subagents this session spawned, live (SubagentTree.tsx). */}
+      <SubagentTree activityKey={activityKey} live={working} />
+
+      {/* How full its context is, and Compact now (ContextControls.tsx). */}
+      {docSessionId && <ContextControls activity={activity} compaction={compaction} />}
+
+      {/* Turn rollback: a point per turn, undoable through a diff preview,
+          with the context controls on each turn. */}
       {sessionId && (
         <TurnTimeline
           cwd={cwd}
@@ -1828,6 +1890,9 @@ export function AgentWorkspaceView({
           builder={builderLens}
           refreshKey={digest?.updated}
           onNotice={onNotice}
+          onSummarize={
+            compaction.supported ? (kind, turn) => compaction.ask({ kind, turn }) : undefined
+          }
         />
       )}
 

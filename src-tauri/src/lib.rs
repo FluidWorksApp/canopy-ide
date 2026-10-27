@@ -63,6 +63,7 @@ mod remote;
 mod research;
 mod secure_store;
 mod selftest;
+mod session_activity;
 mod session_doc;
 mod session_transfer;
 mod shortcuts;
@@ -698,6 +699,7 @@ pub fn run() {
             ledger::ledger_update_status,
             receipt::receipt_run_check,
             session_doc::session_transcript_tail,
+            session_activity::session_activity,
             gates_commands::gates_policy_write,
             gates_commands::gates_policy_read,
             gates_commands::gates_allow_once,

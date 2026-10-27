@@ -19,6 +19,8 @@ import {
 } from "../../shared/agentLife";
 import { ashFor } from "../ash";
 import { markRestored } from "../restorable";
+import { openSessionDoc } from "../sessionDoc/events";
+import { SubagentTree } from "./SubagentTree";
 import { lastHumanPrompt, useAgentSessions } from "../agentSessions";
 import { claimOwnerName } from "../claims";
 import { AGENT_LABELS, IntegrationsList, useIntegrations } from "./AgentIntegrations";
@@ -28,6 +30,7 @@ import { AgentRuntime } from "./AgentRuntime";
 import {
   AgentIcon,
   DiffIcon,
+  DocumentIcon,
   ExchangeIcon,
   InstructionKindIcon,
   MoonIcon,
@@ -716,6 +719,14 @@ export function AgentsPanel({
           ))}
         </div>
         {task && <div className="agent-task">{task}</div>}
+        {/* The subagents it spawned, live: a count that opens into the list. */}
+        {agent?.id && digest?.session_id && (
+          <SubagentTree
+            compact
+            live={shown === "working"}
+            activityKey={{ agent: agent.id, sessionId: digest.session_id, cwd: s.cwd, profile: digest.profile ?? null }}
+          />
+        )}
         <div className="agent-stats">
           <span>{fixedNumber(s.total_cpu, 0)}% cpu</span>
           <span>{fmtMem(s.total_mem_bytes)}</span>
@@ -1133,6 +1144,29 @@ export function AgentsPanel({
                   >
                     <RestartIcon size={13} />
                     <span className="row-act-label">Restore</span>
+                  </button>
+                  {/* The session as a readable document, with Hand off — the
+                      same entry the Agents page's past sessions offer. */}
+                  <button
+                    className="row-act"
+                    title="Read this session as a document and hand it off"
+                    onClick={() =>
+                      openSessionDoc({
+                        kind: "session",
+                        sessionId: d.session_id,
+                        agent: agentId,
+                        cwd: runIn,
+                        digest: d,
+                        resumeCommand: cmd,
+                        onResume: () => {
+                          markRestored(d.session_id);
+                          onRestore?.(runIn, cmd, agentId, agentId);
+                        },
+                      })
+                    }
+                  >
+                    <DocumentIcon size={13} />
+                    <span className="row-act-label">Document</span>
                   </button>
                   <button
                     className="row-act row-act-del"

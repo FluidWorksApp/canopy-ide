@@ -96,12 +96,24 @@ function allUnknown(): HarnessCapabilities {
 const CLAUDE_RUNNER_STAMP =
   "src/structuredRunners.ts CLAUDE_RUNNER.verification (Claude Code 2.1.310, `claude --help` + live run, 2026-10-26)";
 
-/** Claude Code, filled only from what the repo has already stamped. Subagents
- *  and compaction are left unknown on purpose: they may well exist, but no
- *  file here records them being checked, and a surface that trusted a
- *  remembered flag would fail in front of the person. */
+const ACTIVITY_STAMP =
+  "src-tauri/src/session_activity.rs header (Claude Code 2.1.311 transcripts on disk, 2026-10-27)";
+
+/** Claude Code, filled only from what the repo has already stamped. */
 const CLAUDE_CODE: HarnessCapabilities = {
   ...allUnknown(),
+  subagents: {
+    support: "native",
+    note: "Task/Agent tool calls; background agents report back through task notifications. Read from the transcript, not from hooks.",
+    source: ACTIVITY_STAMP,
+    canopyLayer: "The subagent tree under each session (SubagentTree.tsx), from session_activity.",
+  },
+  compaction: {
+    support: "native",
+    note: "`/compact [instructions]` typed at an idle prompt, or sent as a stream-json user message to `claude -p --resume <id>` (emits system/compact_boundary with pre/post tokens). It always condenses the whole conversation; instructions steer what the summary keeps.",
+    source: `${ACTIVITY_STAMP}; live run of /compact over --input-format stream-json --resume, 2026-10-27`,
+    canopyLayer: "Context controls on the turn timeline (contextCompaction.ts).",
+  },
   checkpointsRewind: {
     support: "partial",
     note: "Files only, and only what Write/Edit/NotebookEdit touched: `CLAUDE_CODE_ENABLE_SDK_FILE_CHECKPOINTING=true claude -p --resume <id> --rewind-files <uuid>`, keyed on the replayed prompt's uuid, printed \"Files rewound to state at message <uuid>\" and restored the file; a Bash-created file was left behind. Conversation rewind is interactive-only.",
@@ -166,6 +178,13 @@ export function harnessSupport(
 ): HarnessSupport {
   return harnessCapabilities(cliId)[feature].support;
 }
+
+/** How to ask a harness to compact its conversation, where `compaction` is
+ *  supported: the command typed at its prompt (or sent as a user message to a
+ *  resumed headless run), followed by optional instructions. */
+export const HARNESS_COMPACT_COMMAND: Readonly<Record<string, string>> = {
+  claude: "/compact",
+};
 
 /** The oldest version of a harness Canopy's launches are written for, with
  *  the behaviour that makes it the floor. Separate from the feature ledger:
