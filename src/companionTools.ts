@@ -143,6 +143,7 @@ export const MUTATING_TOOLS: string[] = [
   "canopy_claim",
   "canopy_notes_write",
   "canopy_research_write",
+  "canopy_memory_propose",
   "canopy_vault_fill",
   "canopy_vault_read",
   "canopy_browser_click",

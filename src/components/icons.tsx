@@ -192,6 +192,16 @@ export function NoteIcon({ size = 18, className }: IconProps) {
   );
 }
 
+/** Team memory: a bookmark — something kept on purpose, to come back to. */
+export function MemoryIcon({ size = 18, className }: IconProps) {
+  return (
+    <svg {...svgProps(size, className)}>
+      <path d="M6.5 4h11a1 1 0 0 1 1 1v15l-6.5-4-6.5 4V5a1 1 0 0 1 1-1z" />
+      <path d="M9.5 8.5h5" />
+    </svg>
+  );
+}
+
 /** Archive: a lidded box. The lid is what separates it from a plain rectangle
  *  at 14px, and from the document mark it sits beside. */
 export function ArchiveIcon({ size = 14, className }: IconProps) {

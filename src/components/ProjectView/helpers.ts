@@ -21,6 +21,7 @@ export type SideTab =
   | "tasks"
   | "notes"
   | "research"
+  | "memory"
   | "agents"
   | "team"
   | "tools";

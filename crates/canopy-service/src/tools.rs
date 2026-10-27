@@ -18,6 +18,10 @@ pub const LAPTOP_ONLY_TOOLS: &[&str] = &[
     "canopy_device_swipe",
     "canopy_device_tap",
     "canopy_device_type",
+    // Team memory is the desktop's ledger (~/.canopy/ledger); a cloud service
+    // has no copy to serve or append to.
+    "canopy_memory",
+    "canopy_memory_propose",
     "canopy_vault_fill",
     "canopy_vault_list",
     "canopy_vault_read",
@@ -67,6 +71,8 @@ pub const SUPPORTED_TOOLS: &[&str] = &[
     "canopy_editor_state",
     "canopy_hover",
     "canopy_job_done",
+    "canopy_memory",
+    "canopy_memory_propose",
     "canopy_mesh",
     "canopy_mesh_send",
     "canopy_mesh_submit",

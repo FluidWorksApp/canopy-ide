@@ -87,6 +87,7 @@ import {
 } from "../fleetSnapshot";
 import { FleetReadinessPanel } from "./FleetReadinessPanel";
 import { AgentMemorySettings } from "./AgentMemorySettings";
+import { MemorySettings } from "./MemorySettings";
 import {OrganizationSettings} from "./OrganizationSettings";
 import { AccountSettings } from "./AccountSettings";
 import {
@@ -1563,6 +1564,12 @@ export function SettingsDialog({ onClose, initialTab = "appearance" }: SettingsD
                         : "The spawn tool is hidden and existing clients are refused."
                     }
                   />
+                </Item>
+                <Item
+                  name="Team memory"
+                  desc="Decisions, constraints and conventions your agents are told, each approved by a person and kept only until it expires."
+                >
+                  <MemorySettings s={s} patch={patch} />
                 </Item>
                 <Item
                   name="CLI updates"

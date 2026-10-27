@@ -3468,6 +3468,7 @@ const COMPANION_MUTATING_TOOLS: &[&str] = &[
     "canopy_claim",
     "canopy_notes_write",
     "canopy_research_write",
+    "canopy_memory_propose",
     "canopy_vault_fill",
     "canopy_vault_read",
     "canopy_browser_click",
@@ -3556,6 +3557,7 @@ fn tools_list() -> serde_json::Value {
     };
     tools.extend(research_tool_defs());
     tools.extend(notes_tool_defs());
+    tools.extend(memory_tool_defs());
     tools.extend(mesh_tool_defs());
     tools.extend(session_tool_defs());
     tools.extend(task_tool_defs());
@@ -3654,6 +3656,7 @@ const READ_ONLY_TOOLS: &[&str] = &[
     "canopy_mesh_targets",
     "canopy_research",
     "canopy_notes",
+    "canopy_memory",
     "canopy_wait_for",
     "canopy_screenshot",
     "canopy_browser_snapshot",
@@ -3855,6 +3858,37 @@ fn notes_tool_defs() -> Vec<serde_json::Value> {
                 "in": { "type": "string", "description": "remind: a delay instead of a time — 45m, 2h, 3d, 1w, 1h30m. Prefer this when the user said \"in an hour\": it needs no timezone and cannot land in the past." },
                 "clear": { "type": "boolean", "description": "remind: true takes the note's reminder off" }
             }, "required": ["action"], "additionalProperties": false }
+        }),
+    ]
+}
+
+/// Team memory: approved decisions, constraints, conventions and facts, with
+/// who recorded them and from which session. Read split from write on the
+/// notes pattern, so a host can auto-approve the reader.
+fn memory_tool_defs() -> Vec<serde_json::Value> {
+    vec![
+        serde_json::json!({
+            "name": "canopy_memory",
+            "description": "Check team memory before deciding anything durable: which library or pattern to use, how data is secured, a convention for naming or layout, a constraint on deploys. Returns only entries a person on the team approved and that have not expired, most relevant first, each with its reason, scope and the session it came from. Follow them unless the user says otherwise; if one looks wrong or stale, tell the user. Scoped to the project you are running in, or the one you name with `project`.",
+            "inputSchema": { "type": "object", "properties": {
+                "query": { "type": "string", "description": "What you are about to decide, in a few words, e.g. \"tenant isolation in queries\" or \"date formatting\". Empty lists the most confident entries" },
+                "scope": { "type": "string", "enum": ["personal", "project", "team", "all"], "description": "personal = this user's own preferences; project = this codebase; team = how the team works anywhere. Default all" },
+                "type": { "type": "string", "enum": ["decision", "constraint", "convention", "fact"], "description": "Only this kind of entry" },
+                "limit": { "type": "integer", "description": "Max entries (default 8, max 30)" },
+                "project": { "type": "string", "description": "Which project, by name. Only needed when you are not running inside it" }
+            }, "additionalProperties": false }
+        }),
+        serde_json::json!({
+            "name": "canopy_memory_propose",
+            "description": "Propose a durable, non-obvious piece of team knowledge that came out of this work: a decision and its reason (\"we chose row-level security over app checks because…\"), a constraint the code must respect, a team convention, or a fact about the environment. It is recorded as a proposal with this session as its source; a person approves it before any agent is told it. Do not propose task progress, what you changed, or anything obvious from the code. Check canopy_memory first so the same thing is not proposed twice.",
+            "inputSchema": { "type": "object", "properties": {
+                "type": { "type": "string", "enum": ["decision", "constraint", "convention", "fact"] },
+                "text": { "type": "string", "description": "The memory, as one plain sentence a non-engineer can follow" },
+                "why": { "type": "string", "description": "The reason, one sentence" },
+                "scope": { "type": "string", "enum": ["personal", "project", "team"], "description": "Default project" },
+                "files": { "type": "array", "items": { "type": "string" }, "description": "Files this is about, relative to the project" },
+                "project": { "type": "string", "description": "Which project, by name. Only needed when you are not running inside it" }
+            }, "required": ["type", "text", "why"], "additionalProperties": false }
         }),
     ]
 }
@@ -4574,6 +4608,7 @@ fn describe_action(name: &str, args: &serde_json::Value) -> (String, Option<Stri
         ),
         "canopy_claim" => ("Claim files".into(), arg("note")),
         "canopy_notes_write" => ("Write to your scratchpad".into(), arg("title")),
+        "canopy_memory_propose" => ("Propose a team memory".into(), arg("text")),
         "canopy_research_write" => ("Record research".into(), arg("title")),
         "canopy_vault_fill" => ("Sign in to a page".into(), arg("entryId")),
         "canopy_vault_read" => ("Read a stored password".into(), arg("entryId")),
@@ -4968,6 +5003,18 @@ fn call_tool(name: &str, args: &serde_json::Value) -> Result<ToolOutput, String>
                 }
             }
             text(notes_op(action, args))
+        }
+        "canopy_memory" => text(memory_op("query", args)),
+        "canopy_memory_propose" => {
+            let has = |k: &str| {
+                args.get(k)
+                    .and_then(|v| v.as_str())
+                    .is_some_and(|t| !t.trim().is_empty())
+            };
+            if !has("type") || !has("text") {
+                return Err("canopy_memory_propose needs `type` and `text` (and `why`)".into());
+            }
+            text(memory_op("propose", args))
         }
         "canopy_vault_list" => {
             let mut body = args.clone();
@@ -6232,6 +6279,28 @@ fn notes_op(action: &str, args: &serde_json::Value) -> Result<String, String> {
     ctx_request_with_timeout(
         "POST",
         "/ctx/notes",
+        Some(body.to_string()),
+        std::time::Duration::from_secs(20),
+    )
+    .map(pretty)
+}
+
+/// A team-memory read or proposal. Scoped like notes: the bridge resolves the
+/// project from our cwd (or a named project); who is proposing comes from the
+/// bridge's credential, not from these arguments.
+fn memory_op(op: &str, args: &serde_json::Value) -> Result<String, String> {
+    let mut body = args.clone();
+    if !body.is_object() {
+        body = serde_json::json!({});
+    }
+    body["op"] = serde_json::json!(op);
+    body["cwd"] = serde_json::json!(cwd());
+    if op == "propose" {
+        body["by"] = serde_json::json!(claim_owner());
+    }
+    ctx_request_with_timeout(
+        "POST",
+        "/ctx/memory",
         Some(body.to_string()),
         std::time::Duration::from_secs(20),
     )
@@ -7805,6 +7874,35 @@ mod tests {
         assert!(!READ_ONLY_TOOLS.contains(&"canopy_notes_write"));
         // Parking a thought takes nothing away from anyone — it only ever adds.
         assert!(!DESTRUCTIVE_TOOLS.contains(&"canopy_notes_write"));
+    }
+
+    #[test]
+    fn memory_tools_are_published_split_read_from_propose() {
+        let names: Vec<String> = memory_tool_defs()
+            .iter()
+            .filter_map(|t| t.get("name").and_then(|n| n.as_str()).map(str::to_string))
+            .collect();
+        assert_eq!(names, ["canopy_memory", "canopy_memory_propose"]);
+        assert!(READ_ONLY_TOOLS.contains(&"canopy_memory"));
+        assert!(!READ_ONLY_TOOLS.contains(&"canopy_memory_propose"));
+        // A companion that may only answer must not write team memory.
+        assert!(COMPANION_MUTATING_TOOLS.contains(&"canopy_memory_propose"));
+        let published = tools_list();
+        let listed: Vec<&str> = published["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|t| t.get("name").and_then(|n| n.as_str()))
+            .collect();
+        assert!(listed.contains(&"canopy_memory"), "{listed:?}");
+        assert!(listed.contains(&"canopy_memory_propose"), "{listed:?}");
+        // Caught before a round trip: a proposal with no text.
+        let err = call_tool(
+            "canopy_memory_propose",
+            &serde_json::json!({ "type": "decision", "text": " " }),
+        )
+        .unwrap_err();
+        assert!(err.contains("needs `type` and `text`"), "{err}");
     }
 
     #[test]

@@ -159,6 +159,22 @@ export const AGENT_TOOL_GROUPS: AgentToolGroup[] = [
     ],
   },
   {
+    id: "memory",
+    label: "Team memory",
+    blurb:
+      "Decisions, constraints, conventions and facts a person on the team approved. An " +
+      "agent checks it before deciding something durable, and can propose a new entry — " +
+      "which waits for a person's approval before any agent is told it.",
+    tools: [
+      { name: "canopy_memory", label: "Check memory", note: "Approved, unexpired entries relevant to a question" },
+      {
+        name: "canopy_memory_propose",
+        label: "Propose memory",
+        note: "Suggest an entry; it lands for review, never approved automatically",
+      },
+    ],
+  },
+  {
     id: "research",
     label: "Research",
     blurb:

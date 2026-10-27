@@ -54,6 +54,7 @@ import {
 } from "./vibeTargetInference";
 import { observeTurnEvents } from "./turnRollback";
 import { observeAgentTurns } from "./agentTurns";
+import { observeMemoryEvents, startMemory } from "./memoryExtract";
 import {
   derivePending,
   parseAgentEvent,
@@ -572,6 +573,9 @@ export default function App() {
   useNoteReminders(projectNameFor);
   // Settings → Agents → "Keep agent CLIs up to date" (cliAutoUpdate.ts).
   useCliAutoUpdater();
+  // Team memory: brain extraction after agent turns, review of agent
+  // proposals (memoryExtract.ts). Settings gate each run, not the arming.
+  useEffect(() => startMemory(), []);
   // The `Notify` seam, threaded through nearly every component. The opts bag
   // is how a plain notice stops being anonymous: a caller names the project it
   // speaks for (by id or by any path inside it) and where a click should land,
@@ -1045,6 +1049,8 @@ export default function App() {
         // The same boundaries, enriched (root, files touched) for features
         // that subscribe through agentTurns.ts.
         observeAgentTurns(parsed.map((p) => p.data), ts);
+        // Team memory: final messages, untrusted reads, session ends.
+        observeMemoryEvents(parsed.map((p) => p.data));
         setAgentEvents((prev) =>
           // Not a bare slice: the cap is app-wide and one of this list's
           // consumers is per-pty, so a busy project used to evict a quiet

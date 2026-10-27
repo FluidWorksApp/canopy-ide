@@ -164,6 +164,16 @@ export const PixelNotesIcon = pixelIcon([
   [0, 7, 1, 1],
 ]);
 
+export const PixelMemoryIcon = pixelIcon([
+  [1, 0, 6, 1],
+  [1, 1, 1, 7],
+  [6, 1, 1, 7],
+  [3, 2, 2, 1],
+  [2, 6, 1, 1],
+  [5, 6, 1, 1],
+  [3, 5, 2, 1],
+]);
+
 export const PixelResearchIcon = pixelIcon([
   [0, 0, 6, 1],
   [0, 1, 1, 6],

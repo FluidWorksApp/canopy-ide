@@ -25,6 +25,10 @@ for(const command of ['chrome_extension_token_status','chrome_extension_token_se
 // (it answered "does not support notes_create"). Attaching a file stays with the
 // workspace: its path names a workspace file this computer cannot read.
 for(const command of ['notes_list','notes_due','notes_get','notes_create','notes_update','notes_add_attachment','notes_set_status','notes_link','notes_read_file','notes_read_image','notes_dir','notes_remind','notes_search','notes_delete'])LOCAL_UI.add(command);
+// The brain and the ledger are this computer's: the brain is the CLI the
+// person signed into here, and the ledger (team memory, plans, receipts) lives
+// in ~/.canopy/ledger beside the notes above.
+for(const command of ['brain_call','brain_kill','ledger_append','ledger_query','ledger_root','ledger_update_status'])LOCAL_UI.add(command);
 // The companion floats over the app and belongs to no project, so its CLI runs
 // on the computer showing the IDE in every mode. Its canopy_* tools reach the
 // desktop's context bridge, which publishes ops to this window and waits for
