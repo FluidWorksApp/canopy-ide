@@ -34,6 +34,13 @@ paths = ['''^packages/control-plane/lifecycle\.test\.mjs$''', '''^packages/contr
 regexes = ['''^f9b67dc0-f389-4ddb-b6c9-bb9aff258e67$''']
 
 [[rules.allowlists]]
+description = "Synthetic approve-once key id in the workspace gates test"
+condition = "AND"
+regexTarget = "secret"
+paths = ['''^packages/remote-host/gates\.test\.mjs$''']
+regexes = ['''^0123456789abcdef0123456789abcdef$''']
+
+[[rules.allowlists]]
 description = "Empty Anthropic environment override, not an API key"
 condition = "AND"
 regexTarget = "secret"
