@@ -214,7 +214,7 @@ describe("handoff card", () => {
     expect(draft.text).toBe(`Can you take this?\nHandoff: X\n${md}`);
     expect(cardText(card)).toContain("1. Do it");
     // The credential check sees the packet.
-    expect(secretKinds(cardFreeText({ ...card, packet: "token ghp_abcdefghijklmnopqrstuvwxyz0123456789" }))).toContain("a GitHub token");
+    expect(secretKinds(cardFreeText({ ...card, packet: `token ghp_${"a1".repeat(18)}` }))).toContain("a GitHub token");
   });
 
   it("refuses malformed handoff cards and clips oversized packets to fit", async () => {
