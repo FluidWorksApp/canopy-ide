@@ -4375,7 +4375,7 @@ export default function App() {
         />
       )}
 
-      <MeshJobInbox jobs={meshJobs} workspaces={ws.projects.map((p) => p.name)} onClone={cloneProject} />
+      <MeshJobInbox jobs={meshJobs} workspaces={ws.projects.map((p) => p.name)} checkoutsKey={ws.projects.flatMap((p) => p.components.map((c) => c.path)).join("\n")} onClone={cloneProject} />
 
       <PlanGateHost />
 

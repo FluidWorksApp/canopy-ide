@@ -150,16 +150,20 @@ function JobCard({
 export function MeshJobInbox({
   jobs,
   workspaces,
+  checkoutsKey,
   onClone,
 }: {
   jobs: MeshJobs;
   workspaces: string[];
+  /** Changes whenever a project or component is added or removed. */
+  checkoutsKey?: string;
   /** Open the new-project dialog on its clone step with this URL. */
   onClone?: (url: string) => void;
 }) {
   const inbox = useSyncExternalStore(jobs.subscribe, jobs.inbox);
-  // A project opened or cloned since a job arrived may be the one it names.
-  const projectsKey = workspaces.join("\n");
+  // A project or component opened or cloned since a job arrived may be the
+  // checkout it names.
+  const projectsKey = `${workspaces.join("\n")}\0${checkoutsKey ?? ""}`;
   useEffect(() => {
     void jobs.relocate();
   }, [jobs, projectsKey]);
