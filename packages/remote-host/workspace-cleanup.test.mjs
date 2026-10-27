@@ -55,7 +55,10 @@ test('cleanup_scan finds ignored artifacts per checkout with the desktop shape',
  const f=await fixture();
  try{
   const app=await project(f);
-  const out=await f.cmds.cleanup_scan({roots:[app,'/etc'],busy:[],asleep:[]});
+  const sent=[];let closed=false;
+  const out=await f.cmds.cleanup_scan({roots:[app,'/etc'],busy:[],asleep:[],onProgress:{send:m=>sent.push(m),close:()=>{closed=true;}}});
+  // cleanup:progress, one per checkout, through the IDE's channel.
+  assert.deepEqual(sent.map(m=>[m.done,m.total]),[[1,2],[2,2]]);assert.equal(sent[0].workspace,app);assert.ok(closed);
   assert.deepEqual(Object.keys(out).sort(),['bytes','recommended_bytes','skipped','targets','truncated','workspaces']);
   assert.match(out.skipped[0],/^\/etc — not in this window's scope/);
   assert.deepEqual(out.workspaces.map(w=>[w.name,w.main,w.branch]),[['app',true,'main'],['feature',false,'feature']]);

@@ -346,6 +346,8 @@ export class NativeWorkspaceHost implements Host {
       catch(error){if(!isOutdatedHarnessError(error))throw error;this.hostOutdated(command);throw Error(hostOutdatedMessage(command));}
     }
     if(this.readOnly&&!READ_ONLY_NATIVE.has(command)&&!['environment_identity','pty_renderer_register','pty_renderer_sessions','pty_stats'].includes(command))throw Error('This workspace is read-only');
+    // The host reports scan progress through a channel; here it is the desktop's cleanup:progress event.
+    if(command==='cleanup_scan'){const progress=new WorkspaceChannel<unknown>();progress.onmessage=payload=>this.emit('cleanup:progress',payload);return await this.hostCommand<T>(command,{...args,onProgress:progress});}
     // A proof-receipt check outlasts one gateway request: run it as a host job.
     if(command==='receipt_run_check')return await workspaceReceiptCheck((name,body)=>this.native(name,body),args,()=>this.disposed) as T;
     if(command==='git_clone'){

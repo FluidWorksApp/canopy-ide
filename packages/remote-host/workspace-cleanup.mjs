@@ -4,8 +4,9 @@ import path from 'node:path';
 // for a Linux workspace: the same allowlist-plus-marker table, the same "git
 // must ignore it" net and the same recommendation rules, confined to
 // /workspace. Desktop's table has no home-cache or macOS-only targets, so
-// nothing is dropped; only the process monitor's busy cwds and the
-// `cleanup:progress` event have no host-side equivalent.
+// nothing is dropped; only the process monitor's busy cwds have no host-side
+// equivalent. `cleanup:progress` goes out through a channel the IDE names
+// (onProgress), one message per checkout scanned.
 
 const A=(name,category,markers,regenerate)=>({name,category,markers,regenerate});
 const PY=['pyproject.toml','requirements.txt','setup.py','setup.cfg'],GRADLE=['build.gradle','build.gradle.kts','settings.gradle','settings.gradle.kts'];
@@ -170,7 +171,7 @@ export function workspaceCleanupCommands(ctx){
   return await read(['rev-parse','--verify','--quiet',upstream],dir)===null?'its remote branch is gone — the work landed':null;
  }
 
- async function scan(roots,busy,asleep){
+ async function scan(roots,busy,asleep,progress=()=>{}){
   const out={workspaces:[],targets:[],bytes:0,recommended_bytes:0,skipped:[],truncated:false};
   const found=await checkouts(roots,out.skipped),all=found.map(c=>c.path),budget={left:DIR_BUDGET};
   for(const checkout of found){
@@ -194,6 +195,7 @@ export function workspaceCleanupCommands(ctx){
     out.targets.push({path:cand,name:artifact.name,rel:path.relative(p,cand),category:artifact.category,bytes:size.bytes,files:size.files,idle_days:built===NEVER?0:built,regenerate:artifact.regenerate,workspace:p,recommended,hold,partial:size.partial});
    }
    out.bytes+=ws.bytes;out.recommended_bytes+=ws.recommended_bytes;out.workspaces.push(ws);
+   progress({workspace:p,done:out.workspaces.length,total:found.length});
   }
   out.truncated=budget.left===0;
   out.targets.sort((a,b)=>a.workspace<b.workspace?-1:a.workspace>b.workspace?1:b.bytes-a.bytes);
@@ -226,15 +228,19 @@ export function workspaceCleanupCommands(ctx){
   await rename(p,path.join(bin,'files',name));
  }
 
+ async function scanCommand(roots,busy,asleep,progress){
+  strArray(roots,'roots');strArray(busy,'busy');strArray(asleep,'asleep');
+  const resolved=[],outOfScope=[];
+  for(const r of roots){try{resolved.push(await ctx.scoped(r));}catch{outOfScope.push(`${r} — not in this window's scope; a sleeping project releases its folders, so wake it to include it`);}}
+  if(!resolved.length)throw Error(roots.length?'nothing to scan — the open projects are all hibernating, and a sleeping project keeps what it expects to wake up to':'no project folders to scan');
+  const out=await scan(resolved,busy,asleep,progress);
+  out.skipped=[...outOfScope,...out.skipped];
+  return out;
+ }
+
  return {
-  cleanup_scan:async({roots,busy=[],asleep=[]}={})=>{
-   strArray(roots,'roots');strArray(busy,'busy');strArray(asleep,'asleep');
-   const resolved=[],outOfScope=[];
-   for(const r of roots){try{resolved.push(await ctx.scoped(r));}catch{outOfScope.push(`${r} — not in this window's scope; a sleeping project releases its folders, so wake it to include it`);}}
-   if(!resolved.length)throw Error(roots.length?'nothing to scan — the open projects are all hibernating, and a sleeping project keeps what it expects to wake up to':'no project folders to scan');
-   const out=await scan(resolved,busy,asleep);
-   out.skipped=[...outOfScope,...out.skipped];
-   return out;
+  cleanup_scan:async({roots,busy=[],asleep=[],onProgress}={})=>{
+   try{return await scanCommand(roots,busy,asleep,p=>onProgress?.send?.(p));}finally{onProgress?.close?.();}
   },
   cleanup_run:async({paths,trash}={})=>{
    strArray(paths,'paths');if(typeof trash!=='boolean')throw Error('invalid trash');

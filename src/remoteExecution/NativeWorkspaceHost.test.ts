@@ -701,6 +701,20 @@ it('streams a workspace command\'s channel output back from the host',async()=>{
  await vi.waitFor(()=>expect(seen).toEqual(['{"id":1}','{"id":2}']));
  expect(polls).toBe(2);await vi.waitFor(()=>expect(exits).toEqual([3]));host.dispose();
 });
+it('turns the host\'s cleanup scan progress into cleanup:progress events',async()=>{
+ const {host,fetcher}=setup();
+ let polls=0;
+ fetcher.mockImplementation(async(_url:string,options:RequestInit)=>{const body=JSON.parse(String(options.body||'{}'));
+  if(body.command==='cleanup_scan')return {ok:true,json:async()=>({result:{workspaces:[],targets:[]}})};
+  if(body.command==='channel_poll'){polls++;const id=body.args.ids[0];return {ok:true,json:async()=>({result:{[id]:{messages:[{workspace:'/workspace/a',done:1,total:1}],closed:true}}})};}
+  return {ok:true,json:async()=>({result:null})};});
+ const seen:unknown[]=[];await host.listen('cleanup:progress',event=>seen.push(event.payload));
+ expect(await host.invoke('cleanup_scan',{roots:['/workspace/a'],busy:[],asleep:[]})).toEqual({workspaces:[],targets:[]});
+ const sent=fetcher.mock.calls.map(([,o])=>JSON.parse(String(o.body))).find(b=>b.command==='cleanup_scan');
+ expect(sent.args.onProgress.__canopyChannel).toMatch(/^[0-9a-f-]{36}$/);
+ await vi.waitFor(()=>expect(seen).toEqual([{workspace:'/workspace/a',done:1,total:1}]));
+ expect(polls).toBe(1);host.dispose();
+});
 it('attaches a workspace file to a note kept on this computer',async()=>{
  const {host,desktop,fetcher}=setup();
  const reads:Array<{offset:number}>=[];
