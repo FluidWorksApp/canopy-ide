@@ -12507,6 +12507,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
             cwd={tab.cwd}
             sessionId={tab.sessionId}
             digest={tab.digest}
+            ptyId={tab.ptyId}
             builderLens={vibe}
             onOpenCommit={openCommit}
             onOpenPr={openPr}
@@ -14068,6 +14069,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
                         cwd={agentTermWs.cwd}
                         sessionId={agentTermWs.sessionId}
                         digest={agentTermWs.digest}
+                        ptyId={agentTermWs.ptyId ?? undefined}
                         onOpenCommit={openCommit}
                         onOpenPr={openPr}
                         onOpenTerminal={(cwd, label) =>

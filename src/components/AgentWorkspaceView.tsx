@@ -22,6 +22,7 @@ import { AgentRuntime } from "./AgentRuntime";
 import { TurnTimeline } from "./TurnTimeline";
 import { ReceiptBadge } from "./ReceiptBadge";
 import { openSessionDoc } from "../sessionDoc/events";
+import { resolveSessionId } from "../sessionDoc/resolveSession";
 import { LIFE_META, agentLife, type Life } from "../../shared/agentLife";
 import { AgentIcon, GitBranchIcon, RestartIcon } from "./icons";
 import { sessionCost } from "../pricing";
@@ -74,6 +75,9 @@ interface AgentWorkspaceViewProps {
   sessionId?: string;
   /** The hook digest, when there is one: last prompt, state, reported files. */
   digest?: ipc.SessionDigest;
+  /** The terminal running this agent, when it is live here. Lets a session
+   *  with no hook id be found in its CLI's own store (resolveSession.ts). */
+  ptyId?: number;
   onOpenCommit: (
     repo: string,
     commit: { hash: string; short: string; subject: string },
@@ -562,6 +566,7 @@ export function AgentWorkspaceView({
   cwd,
   sessionId,
   digest,
+  ptyId,
   onOpenCommit,
   onOpenPr,
   onOpenPrNumber,
@@ -581,6 +586,21 @@ export function AgentWorkspaceView({
   builderLens = false,
 }: AgentWorkspaceViewProps) {
   const { switchTo, openThere } = useBranchSwitch();
+  // A CLI without Canopy hooks never names its session; find it in the CLI's
+  // own store by folder, terminal and start time, so the session document is
+  // still one click away.
+  const [found, setFound] = useState<ipc.SessionDigest | null>(null);
+  useEffect(() => {
+    setFound(null);
+    if (sessionId) return;
+    let live = true;
+    void resolveSessionId({ agent, cwd, ptyId }).then((d) => live && setFound(d));
+    return () => {
+      live = false;
+    };
+  }, [agent, cwd, ptyId, sessionId, digest?.updated]);
+  const docSessionId = sessionId ?? found?.session_id;
+  const docDigest = digest ?? found ?? undefined;
   const [taskMenu, setTaskMenu] = useState(false);
   /** The one-off brief being typed in the Run task menu, or null when that row
    *  is still just a row. */
@@ -1578,18 +1598,18 @@ export function AgentWorkspaceView({
             </div>
           )}
           {/* The session as a readable document, with Hand off (sessionDoc/). */}
-          {sessionId && (
+          {docSessionId && (
             <Button size="sm"
               title="Read this session as a document — goal, turns, files, decisions — and hand it off"
               onClick={() =>
                 openSessionDoc({
                   kind: "session",
-                  sessionId,
+                  sessionId: docSessionId,
                   agent,
-                  cwd: digest?.resume_cwd || cwd,
+                  cwd: docDigest?.resume_cwd || cwd,
                   repo,
-                  digest,
-                  live: digest?.state !== "ended",
+                  digest: docDigest,
+                  live: ptyId != null ? life.state !== "ended" : docDigest?.state !== "ended",
                 })
               }>
               Open as document

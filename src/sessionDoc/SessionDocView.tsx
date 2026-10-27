@@ -14,6 +14,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { askBrain } from "../brainCall";
 import { onAgentTurnEnd } from "../agentTurns";
+import { watchPtyBirths } from "../ptyBirth";
 import { appendLedger } from "../ledger";
 import { getSettings } from "../settings";
 import { openShareDialog } from "../shareCards";
@@ -720,6 +721,8 @@ export function ReceivedHandoffView({
  *  point (mounted once by App). */
 export function SessionDocHost() {
   const [request, setRequest] = useState<SessionDocRequest | null>(null);
+  // Terminal start times, for finding the session of a CLI with no hooks.
+  useEffect(() => watchPtyBirths(), []);
   useEffect(() => {
     const open = (e: Event) => {
       const d = (e as CustomEvent<SessionDocRequest>).detail;
