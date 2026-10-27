@@ -18,6 +18,7 @@ export function WorkspaceResourcesPanel({
   const rows = peopleRows(ws, selfId);
   const memLevel = memoryAvailability(ws.availableBytes, ws.memoryLimitBytes);
   const cpuLow = cpuLowStreak >= CPU_LOW_SAMPLES;
+  const machine = ws.machine;
   return (
     <>
       <div className="bd-head">
@@ -50,6 +51,28 @@ export function WorkspaceResourcesPanel({
           </dd>
         </dl>
       </div>
+      {machine && (
+        <div className="bd-resource-section">
+          <span className="bd-resource-label">This machine</span>
+          <dl className="bd-resource-grid">
+            <dt>Memory</dt>
+            <dd>
+              <span className={availabilityClass(memoryAvailability(machine.memoryAvailableBytes, machine.memoryTotalBytes))}>
+                {fmtBytes(machine.memoryAvailableBytes)} free
+              </span>{" "}
+              <span className="bd-resource-muted">of {fmtBytes(machine.memoryTotalBytes)}</span>
+            </dd>
+            <dt>CPU</dt>
+            <dd>
+              <span>{machine.cpusAvailable != null ? `${fmtCores(machine.cpusAvailable)} free` : "—"}</span>{" "}
+              <span className="bd-resource-muted">of {fmtAllocated(machine.cpus)}</span>
+            </dd>
+          </dl>
+          <p className="bd-workspace-note bd-resource-muted">
+            Everything running on this computer, including teammates' own workspaces.
+          </p>
+        </div>
+      )}
       <div className="bd-resource-section">
         {rows ? (
           <table className="bd-resource-table">
@@ -67,7 +90,12 @@ export function WorkspaceResourcesPanel({
                   <th scope="row">
                     {r.label}
                     {r.kind === "services" && <span className="bd-resource-muted"> · desktop, browsers, Canopy</span>}
-                    {r.kind !== "services" && (
+                    {r.kind === "runtime" && (
+                      <span className="bd-resource-muted">
+                        {r.key === "runtime:main" ? " · its owner and anyone connected to it" : " · own workspace on this machine"}
+                      </span>
+                    )}
+                    {(r.kind === "you" || r.kind === "teammate" || r.kind === "unknown") && (
                       <span className="bd-resource-muted">
                         {" "}
                         · {r.terminals} {r.terminals === 1 ? "terminal" : "terminals"}

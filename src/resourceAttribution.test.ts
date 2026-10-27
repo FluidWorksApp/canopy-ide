@@ -40,6 +40,21 @@ describe("attributeUsage", () => {
     ]);
   });
 
+  it("lists teammates' own runtimes on the machine after this workspace's rows", () => {
+    const rows = attributeUsage([], { workingSetBytes: 2 * GB, cpusUsed: 1 }, "u-me", [
+      { kind: "workspace", memberId: null, name: null, workingSetBytes: 5 * GB, cpusUsed: null },
+      { kind: "member", memberId: "m-bo", name: "Bo", workingSetBytes: 3 * GB, cpusUsed: 0.5 },
+      { kind: "member", memberId: "m-x", name: null, workingSetBytes: GB, cpusUsed: 0 },
+    ]);
+    expect(rows.map((r) => [r.kind, r.label, r.memoryBytes / GB, r.cpusUsed])).toEqual([
+      ["you", "You", 0, 0],
+      ["services", "Workspace services", 2, 1],
+      ["runtime", "Main workspace", 5, null],
+      ["runtime", "Bo", 3, 0.5],
+      ["runtime", "Teammate", 1, 0],
+    ]);
+  });
+
   it("always lists you, and never makes services negative", () => {
     const rows = attributeUsage([{ id: 1, memoryBytes: 9 * GB, cpusUsed: 4, owner: ada }], { workingSetBytes: 8 * GB, cpusUsed: null }, "u-me");
     expect(rows[0]).toMatchObject({ kind: "you", memoryBytes: 0, terminals: 0 });

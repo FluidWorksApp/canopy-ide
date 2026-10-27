@@ -787,6 +787,28 @@ describe("shared workspace availability", () => {
   expect(screen.queryByText('Usage now')).toBeNull();
  });
 
+ it("adds this machine and teammates in their own runtimes, when the gateway reports them", async () => {
+  feed(ws({machine:{memoryTotalBytes:64*GB,memoryAvailableBytes:30*GB,cpus:16,cpusUsed:6,cpusAvailable:10,runtimes:[
+   {kind:'workspace',memberId:null,name:null,workingSetBytes:5*GB,cpusUsed:2},
+   {kind:'member',memberId:'m-bo',name:'Bo',workingSetBytes:4*GB,cpusUsed:0.5},
+  ]}}));
+  render(<StatusBar {...base} events={[]}/>);
+  fireEvent.click(await screen.findByTitle(/^Cloud workspace:/));
+  const popover=within(document.querySelector('.status-breakdown') as HTMLElement);
+  expect(popover.getByText('This machine')).toBeTruthy();
+  expect(popover.getByText('30.0 GB free')).toBeTruthy();expect(popover.getByText('of 64.0 GB')).toBeTruthy();
+  expect(popover.getByText('10.0 cores free')).toBeTruthy();expect(popover.getByText('of 16 cores')).toBeTruthy();
+  const rows=within(popover.getByRole('table',{name:'Who is using it'})).getAllByRole('row').slice(1).map(row=>within(row).getByRole('rowheader').textContent);
+  expect(rows).toEqual(['You · 2 terminals','Ada · 1 terminal','Workspace services · desktop, browsers, Canopy','Main workspace · its owner and anyone connected to it','Bo · own workspace on this machine']);
+ });
+
+ it("keeps the workspace-only view when the gateway reports no machine", async () => {
+  feed(ws());
+  render(<StatusBar {...base} events={[]}/>);
+  fireEvent.click(await screen.findByTitle(/^Cloud workspace:/));
+  expect(screen.queryByText('This machine')).toBeNull();
+ });
+
  it("warns on what is free: amber under 15%, red under 7%, never on cache", async () => {
   feed(ws({availableBytes:3*GB,reclaimableBytes:25*GB}));
   const {unmount}=render(<StatusBar {...base} events={[]}/>);

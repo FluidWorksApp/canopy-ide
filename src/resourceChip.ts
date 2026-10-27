@@ -40,7 +40,7 @@ export const reportsAvailability = (ws: Workspace | undefined): ws is Workspace 
 
 export function peopleRows(ws: Workspace & { workingSetBytes: number }, selfId: string): PersonUsage[] | null {
   return ws.sessions
-    ? attributeUsage(ws.sessions, { workingSetBytes: ws.workingSetBytes, cpusUsed: ws.cpusUsed ?? null }, selfId)
+    ? attributeUsage(ws.sessions, { workingSetBytes: ws.workingSetBytes, cpusUsed: ws.cpusUsed ?? null }, selfId, ws.machine?.runtimes ?? [])
     : null;
 }
 
