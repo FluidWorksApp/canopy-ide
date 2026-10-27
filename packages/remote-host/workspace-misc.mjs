@@ -1,21 +1,20 @@
 // Small desktop commands with a plain workspace meaning (fsx.rs build locks,
 // agents.rs session_forget, profiles.rs profile_setup, prwatch.rs
-// pr_watch_now, governor.rs settings). The workspace watches no terminal's
-// memory one by one — one cgroup limit covers it — so grant/stop/remember
-// answer as the desktop does for a terminal it does not monitor, while the
-// per-CLI maximums are still kept for when a terminal is.
-import {mkdir,readFile,rename,unlink,writeFile} from 'node:fs/promises';
-import {randomBytes,randomUUID} from 'node:crypto';
-const MIB=1024*1024,GIB=1024*MIB,STEP=512*MIB,MIN_MAX=512*MIB,MAX_MAX=1024*GIB,DEFAULTS_CAP=64;
-export const WORKSPACE_MISC_READ_ONLY=['terminal_governor_incidents','terminal_governor_memory_maxima'];
+// pr_watch_now, governor.rs). Per-terminal memory budgets are
+// terminal-governor.mjs: the host samples each terminal's process tree
+// (ctx.governorSampler, started when the IDE first asks) and these commands
+// answer with the desktop's shapes.
+import {unlink} from 'node:fs/promises';
+import {randomBytes} from 'node:crypto';
+import {TerminalGovernor} from './terminal-governor.mjs';
+export const WORKSPACE_MISC_READ_ONLY=['terminal_governor_incidents','terminal_governor_memory_maxima','terminal_governor_status','terminal_governor_events'];
 export function workspaceMiscCommands(ctx){
  const {home,pulse,setupAgent}=ctx;
  const builds=new Map();
- const defaultsFile=home+'/.canopy/terminal-governor-defaults.json';
- const readMaxima=async()=>{try{const value=JSON.parse(await readFile(defaultsFile,'utf8'));return value&&typeof value.maxima==='object'?value.maxima:{};}catch(error){if(error.code==='ENOENT'||error instanceof SyntaxError)return {};throw error;}};
- const listMaxima=maxima=>Object.entries(maxima).map(([cli_key,max_allowance_bytes])=>({cli_key,max_allowance_bytes})).sort((a,b)=>a.cli_key<b.cli_key?-1:a.cli_key>b.cli_key?1:0);
- let writes=Promise.resolve();
- const unmonitored=id=>{throw Error(`no monitored terminal ${id}`);};
+ const governor=ctx.terminalGovernor??new TerminalGovernor({defaultsFile:home+'/.canopy/terminal-governor-defaults.json'});
+ // Sampling starts with the first question from the IDE, and runs from then on.
+ const watching=()=>ctx.governorSampler?.start();
+ const stopSession=ctx.stopSession??(async id=>{throw Error(`terminal ${id} cannot be stopped from here`);});
  return {
   build_operation_acquire:async({key})=>{
    if(typeof key!=='string'||!key||key.length>512||!/^[A-Za-z0-9:\-_.]+$/.test(key))throw Error('Invalid build operation identity');
@@ -33,25 +32,14 @@ export function workspaceMiscCommands(ctx){
   profile_setup:async({agent,id})=>setupAgent(agent,id),
   // A watch pass now: provenance rows for any new PR (pr-observer.mjs).
   pr_watch_now:async()=>{await ctx.prObserver?.now();},
-  terminal_governor_incidents:async()=>[],
-  terminal_governor_grant:async({id})=>unmonitored(id),
-  terminal_governor_stop:async({id})=>unmonitored(id),
-  terminal_governor_remember_default:async({id,confirmed})=>{if(!confirmed)throw Error('remembering a CLI default requires separate confirmation');unmonitored(id);},
-  terminal_governor_memory_maxima:async()=>listMaxima(await readMaxima()),
-  terminal_governor_set_memory_maximum:async({cliKey,maxAllowanceBytes})=>{
-   const key=String(cliKey??'');
-   if(!key||key.length>192||!(key.startsWith('pkg:')||key.startsWith('bin:'))||/[\x00-\x1f\x7f]/.test(key))throw Error('invalid agent CLI identity');
-   const value=maxAllowanceBytes??null;
-   if(value!==null&&!(Number.isSafeInteger(value)&&value>=MIN_MAX&&value<=MAX_MAX&&value%STEP===0))throw Error(`agent allowance maximum must be between ${MIN_MAX} and ${MAX_MAX} bytes`);
-   const next=writes.catch(()=>{}).then(async()=>{
-    const maxima=await readMaxima();
-    if(value===null)delete maxima[key];
-    else{if(!Object.hasOwn(maxima,key)&&Object.keys(maxima).length>=DEFAULTS_CAP)throw Error(`remembered-default store is full (${DEFAULTS_CAP} entries)`);maxima[key]=value;}
-    await mkdir(home+'/.canopy',{recursive:true,mode:0o700});const temporary=`${defaultsFile}.${randomUUID()}.tmp`;
-    await writeFile(temporary,JSON.stringify({maxima}),{mode:0o600,flag:'wx'});await rename(temporary,defaultsFile);
-    return listMaxima(maxima);
-   });
-   writes=next;return next;
-  },
+  terminal_governor_status:async()=>{watching();return governor.snapshot();},
+  /** The adapter's poll: state changes since `cursor`, as "terminal:governor" events. */
+  terminal_governor_events:async({cursor}={})=>{watching();return governor.drain(cursor);},
+  terminal_governor_incidents:async()=>governor.incidents(),
+  terminal_governor_grant:async({id,budgetGeneration,requestId,incrementBytes})=>governor.grant(Number(id),Number(budgetGeneration),String(requestId??''),Number(incrementBytes)),
+  terminal_governor_stop:async({id,budgetGeneration,requestId})=>governor.stop(Number(id),Number(budgetGeneration),String(requestId??''),stopSession),
+  terminal_governor_remember_default:async({id,grantRequestId,grantBudgetGeneration,incrementBytes,confirmed})=>governor.rememberDefault(Number(id),String(grantRequestId??''),Number(grantBudgetGeneration),Number(incrementBytes),confirmed===true),
+  terminal_governor_memory_maxima:async()=>governor.maxima(),
+  terminal_governor_set_memory_maximum:async({cliKey,maxAllowanceBytes})=>governor.setMaximum(cliKey,maxAllowanceBytes),
  };
 }
