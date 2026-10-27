@@ -8,6 +8,21 @@ use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
+/// The built helper. Cargo builds a package's binaries before its integration
+/// tests and puts them one level above this test executable's `deps/` dir.
+fn hook_bin() -> PathBuf {
+    if let Some(p) = option_env!("CARGO_BIN_EXE_canopy-hook") {
+        return PathBuf::from(p);
+    }
+    let exe = std::env::current_exe().unwrap();
+    let dir = exe.parent().unwrap().parent().unwrap();
+    dir.join(if cfg!(windows) {
+        "canopy-hook.exe"
+    } else {
+        "canopy-hook"
+    })
+}
+
 fn root_hash(canonical: &str) -> String {
     use sha2::{Digest, Sha256};
     hex::encode(&Sha256::digest(canonical.as_bytes())[..16])
@@ -64,7 +79,7 @@ impl Sandbox {
 
     /// Run the hook on one event; returns stdout.
     fn hook(&self, args: &[&str], event: serde_json::Value) -> String {
-        let mut cmd = Command::new(env!("CARGO_BIN_EXE_canopy-hook"));
+        let mut cmd = Command::new(hook_bin());
         cmd.args(args)
             .env_clear()
             .env("HOME", &self.home)
