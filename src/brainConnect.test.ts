@@ -70,6 +70,14 @@ describe("which CLIs can be the brain", () => {
     expect(recommendedBrain(only(amp.bin))).toBeNull();
   });
 
+  it("switching brains drops the old vendor's model overrides", async () => {
+    updateSettings({ defaultAgent: claude.id, brainModel: "opus", brainBackgroundModel: "haiku" });
+    await chooseBrain(claude.id);
+    expect(getSettings()).toMatchObject({ brainModel: "opus", brainBackgroundModel: "haiku" });
+    await chooseBrain(codex.id);
+    expect(getSettings()).toMatchObject({ brainModel: "", brainBackgroundModel: "" });
+  });
+
   it("choosing a brain stores it as the default agent and checks it", async () => {
     await chooseBrain(codex.id);
     expect(getSettings().defaultAgent).toBe(codex.id);

@@ -25,7 +25,7 @@ import {
   structuredRunnerFor,
   type AgentCli,
 } from "./projects";
-import { installedBrain } from "./brain";
+import { installedBrain, resolveBrain } from "./brain";
 import { mascotDef } from "./mascots";
 import { getSettings, updateSettings } from "./settings";
 import type { StructuredRunnerLaunch } from "./structuredRunners";
@@ -208,7 +208,7 @@ export function companionCli(
   const usable = AGENT_CLIS.filter((c) => installed(c.bin));
   if (usable.length === 0) return null;
   // `usable` is non-empty here, so the brain is always an installed CLI.
-  return usable.find((c) => c.id === s.companionCli) ?? installedBrain(installed);
+  return usable.find((c) => c.id === s.companionCli) ?? resolveBrain(installed) ?? null;
 }
 
 /** The companion's conversation with this CLI, minted once and then kept.

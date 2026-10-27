@@ -61,6 +61,16 @@ describe("BrainConnectPanel", () => {
     expect(checkMock).toHaveBeenCalled();
   });
 
+  it("never shows another CLI's result under the selected brain", async () => {
+    installed(claude.bin, codex.bin);
+    setState({ state: "error", cli: codex.id, label: codex.name, checkedAt: 1, message: "model_not_found" });
+    render(<BrainConnectPanel />);
+    await screen.findByRole("radio", { name: new RegExp(claude.name) });
+    expect(screen.queryByText(/model_not_found/)).not.toBeInTheDocument();
+    expect(screen.queryByText(new RegExp(`${codex.name} did not answer`))).not.toBeInTheDocument();
+    await waitFor(() => expect(checkMock).toHaveBeenCalled());
+  });
+
   it("shows connected with the model pickers", async () => {
     installed(claude.bin);
     setState({ state: "connected", cli: claude.id, label: claude.name, checkedAt: 1 });

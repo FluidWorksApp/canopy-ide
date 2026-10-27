@@ -45,9 +45,14 @@ describe("resolveBrain", () => {
 });
 
 describe("installedBrain", () => {
-  it("is the resolved brain when it is installed", () => {
-    updateSettings({ defaultAgent: "opencode" });
+  it("is the chosen brain when it is installed", () => {
+    updateSettings({ defaultAgent: "codex" });
     expect(installedBrain(only("codex"))?.id).toBe("codex");
+  });
+
+  it("never swaps in another vendor when the chosen one is missing", () => {
+    updateSettings({ defaultAgent: "claude" });
+    expect(installedBrain(only("codex"))).toBeNull();
   });
 
   it("is null rather than an absent vendor when nothing is installed", () => {

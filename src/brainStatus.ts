@@ -7,6 +7,7 @@
 // "usage limit reached" has learned something the status should show without
 // anyone spending a probe to rediscover it.
 
+import { chosenBrainId } from "./brain";
 import { askBrain, type BrainAnswer } from "./brainCall";
 
 export type BrainConnectionState =
@@ -59,6 +60,9 @@ export function noteBrainOutcome(
   cli: { id: string; name: string } | null,
   opts: { probe?: boolean; now?: number } = {},
 ): void {
+  // An answer from a CLI that is no longer the brain (a call that started
+  // before the person switched) says nothing about the current one.
+  if (cli && cli.id !== chosenBrainId()) return;
   const base = {
     cli: cli?.id ?? current.cli,
     label: cli?.name ?? current.label,
@@ -91,12 +95,25 @@ export function noteBrainOutcome(
 }
 
 let inFlight: Promise<BrainConnection> | null = null;
+/** Which brain the running probe is asking. */
+let inFlightFor = "";
 
 /** Probe the brain with a one-word question on the background tier. Coalesced:
- *  a second caller while a probe runs gets the same answer. */
+ *  a second caller while a probe of the same brain runs gets the same answer;
+ *  after a switch, the new brain is probed once the old probe ends. */
 export function checkBrainConnection(cwd?: string): Promise<BrainConnection> {
-  if (inFlight) return inFlight;
-  set({ ...current, state: "checking", message: undefined });
+  const target = chosenBrainId();
+  if (inFlight && inFlightFor === target) return inFlight;
+  if (inFlight) return inFlight.then(() => checkBrainConnection(cwd));
+  inFlightFor = target;
+  // Until the probe answers, the state belongs to the brain being asked, not
+  // to whichever CLI answered last.
+  set({
+    ...current,
+    ...(current.cli !== target ? { cli: target, label: null, checkedAt: null } : {}),
+    state: "checking",
+    message: undefined,
+  });
   inFlight = (async () => {
     try {
       await askBrain({
@@ -120,4 +137,5 @@ export function checkBrainConnection(cwd?: string): Promise<BrainConnection> {
 export function resetBrainConnectionForTests(): void {
   current = { state: "unknown", cli: null, label: null, checkedAt: null };
   inFlight = null;
+  inFlightFor = "";
 }

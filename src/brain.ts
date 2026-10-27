@@ -60,14 +60,17 @@ export function resolveBrain(
   );
 }
 
-/** The brain, but only if it is actually installed here — null otherwise.
+/** The brain the person chose, if it is installed here — null otherwise.
  *
- *  For surfaces where naming an absent CLI would be a false claim (a menu's
- *  "default" badge, the companion), as opposed to launchers that would rather
- *  name the person's choice and let the install flow take over. */
+ *  Never another vendor: the brain runs invisibly (commit messages, session
+ *  names, reviews), so substituting the first installed CLI for the one the
+ *  person picked would spend a different account, on a different model, with
+ *  nothing on screen saying so. A missing choice is a "not connected" state
+ *  the connect panel turns into an explicit "Use <other CLI>" button. Visible
+ *  launchers that would rather start *something* use resolveBrain instead. */
 export function installedBrain(
   installed: (bin: string) => boolean,
 ): AgentCli | null {
-  const brain = resolveBrain(installed);
-  return brain && installed(brain.bin) ? brain : null;
+  const chosen = agentCliFor(getSettings().defaultAgent);
+  return chosen && installed(chosen.bin) ? chosen : null;
 }

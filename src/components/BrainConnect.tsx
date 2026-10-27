@@ -139,7 +139,15 @@ export function BrainConnectPanel({ onTerminalOpened, hideModels = false }: Brai
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [loaded]);
 
-  const text = brainStateText(conn);
+  // A result from a CLI that is not the selected brain (the last check ran
+  // before a switch) must never be shown under the selected one's name.
+  const stale = Boolean(brain && conn.cli && conn.cli !== brain.id && conn.state !== "missing");
+  const text = brainStateText(
+    stale ? { state: "unknown", label: brain!.name } : { ...conn, label: brain?.name ?? conn.label },
+  );
+  useEffect(() => {
+    if (stale && conn.state !== "checking") void checkBrainConnection();
+  }, [stale, conn.state]);
   const missingWithChoices = conn.state === "missing" && candidates.length > 0;
   const detail = missingWithChoices
     ? `${conn.label ?? "The selected agent"} can't power Canopy's features. Pick one below.`
@@ -168,7 +176,7 @@ export function BrainConnectPanel({ onTerminalOpened, hideModels = false }: Brai
         <span className="brain-connect-short">{missingWithChoices ? "Not connected" : text.short}</span>
       </div>
       <p className="brain-connect-detail">{detail}</p>
-      {conn.message && conn.state !== "connected" && conn.state !== "checking" && (
+      {!stale && conn.message && conn.state !== "connected" && conn.state !== "checking" && (
         <code className="brain-connect-error" title="What the CLI said">
           {conn.message.slice(0, 280)}
         </code>

@@ -4,6 +4,7 @@ vi.mock("./ipc", () => ({
   whichCheck: vi.fn(async () => ({})),
   brainCallSpawn: vi.fn(),
   brainKill: vi.fn(async () => {}),
+  profileEnv: vi.fn(async () => [["CODEX_HOME", "/profiles/work/codex"]]),
 }));
 
 import * as ipc from "./ipc";
@@ -190,6 +191,26 @@ describe("askBrain", () => {
     expect(await askBrain({ feature: "receipt", prompt: "x", cwd: "/r" })).toMatchObject({ reason: "over-budget" });
     scripted([line(result())]);
     expect((await askBrain({ feature: "connect-probe", prompt: "x", cwd: "" })).ok).toBe(true);
+  });
+
+  it("runs on the active account, like the person's own sessions", async () => {
+    updateSettings({ defaultAgent: "codex", activeProfile: "work" });
+    setBrainInstalledPredicate((bin) => bin === codex.bin);
+    spawnMock.mockImplementationOnce(async (_id: string, _opts: unknown, onData: (o: Out) => void) => {
+      queueMicrotask(() => onData({ kind: "exit", code: 0 }));
+    });
+    await askBrain({ feature: "lens", prompt: "x", cwd: "" });
+    expect(ipc.profileEnv).toHaveBeenCalledWith("codex", "work");
+    expect(spawnMock.mock.calls[0][1]).toMatchObject({ env: [["CODEX_HOME", "/profiles/work/codex"]] });
+  });
+
+  it("never runs another vendor when the chosen brain isn't installed", async () => {
+    updateSettings({ defaultAgent: "claude" });
+    setBrainInstalledPredicate((bin) => bin === codex.bin);
+    const answer = await askBrain({ feature: "lens", prompt: "x", cwd: "" });
+    expect(answer).toMatchObject({ ok: false, reason: "no-brain" });
+    expect(answer.ok ? "" : answer.message).toContain(`${claude.name} is your brain`);
+    expect(spawnMock).not.toHaveBeenCalled();
   });
 
   it("answers no-brain when nothing usable is installed", async () => {

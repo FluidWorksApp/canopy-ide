@@ -10,6 +10,7 @@ import {
   resetBrainConnectionForTests,
   subscribeBrainConnection,
 } from "./brainStatus";
+import { updateSettings } from "./settings";
 
 const askMock = askBrain as unknown as ReturnType<typeof vi.fn>;
 const cli = { id: "brain-cli", name: "Brain CLI" };
@@ -24,6 +25,7 @@ const ok = {
 };
 
 beforeEach(() => {
+  updateSettings({ defaultAgent: "brain-cli" });
   resetBrainConnectionForTests();
   vi.clearAllMocks();
 });
@@ -79,6 +81,37 @@ describe("brain connection", () => {
     expect((await a).state).toBe("connected");
     expect(seen).toEqual(["checking", "connected"]);
     off();
+  });
+
+  it("ignores answers from a CLI that is no longer the brain", () => {
+    noteBrainOutcome(ok, cli, { now: 5 });
+    noteBrainOutcome(
+      { ok: false, reason: "failed", message: "model_not_found" },
+      { id: "other-cli", name: "Other CLI" },
+      { probe: true },
+    );
+    expect(brainConnection()).toMatchObject({ state: "connected", label: "Brain CLI" });
+  });
+
+  it("re-probes the new brain after a switch mid-probe", async () => {
+    let finish!: () => void;
+    askMock.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          finish = () => resolve(ok);
+        }),
+    );
+    askMock.mockImplementationOnce(async () => {
+      noteBrainOutcome(ok, { id: "other-cli", name: "Other CLI" });
+      return ok;
+    });
+    const first = checkBrainConnection();
+    updateSettings({ defaultAgent: "other-cli" });
+    const second = checkBrainConnection();
+    expect(second).not.toBe(first);
+    finish();
+    expect(await second).toMatchObject({ state: "connected", cli: "other-cli", label: "Other CLI" });
+    expect(askMock).toHaveBeenCalledTimes(2);
   });
 
   it("reports an error when the probe itself throws", async () => {
