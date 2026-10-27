@@ -56,8 +56,8 @@ const ipcDeps: TrailerDeps = {
   now: () => Date.now(),
 };
 
-/** Sessions looked at per commit, newest first — the journal read is per
- *  session, and a commit is waiting on this. */
+/** Sessions looked at per commit, newest first — the journal reads run
+ *  together, but a commit is waiting on them. */
 const MAX_SESSIONS = 12;
 /** A session idle longer than this did not write today's commit. */
 const RECENT_SECS = 14 * 86_400;
@@ -78,12 +78,14 @@ export async function sessionsInCommit(repo: string, deps: TrailerDeps = ipcDeps
     .filter((d) => d.agent && (under(d.cwd, repo) || under(d.launch_cwd, repo)) && (d.updated ?? 0) >= cutoff)
     .sort((a, b) => (b.updated ?? 0) - (a.updated ?? 0))
     .slice(0, MAX_SESSIONS);
-  const out: TrailerSession[] = [];
-  for (const d of candidates) {
-    const edits = await deps.edits(repo, d.session_id).catch(() => [] as ipc.AgentEdit[]);
-    if (edits.some((e) => e.present && staged.has(e.path))) out.push({ agent: d.agent!, sessionId: d.session_id });
-  }
-  return out;
+  // One batch: every journal is read at once, so a commit waits on the
+  // slowest read rather than the sum of up to MAX_SESSIONS of them.
+  const journals = await Promise.all(
+    candidates.map((d) => deps.edits(repo, d.session_id).catch(() => [] as ipc.AgentEdit[])),
+  );
+  return candidates
+    .filter((_, i) => journals[i].some((e) => e.present && staged.has(e.path)))
+    .map((d) => ({ agent: d.agent!, sessionId: d.session_id }));
 }
 
 /** The message to commit with: unchanged when the setting is off or anything

@@ -42,3 +42,14 @@ test('failed shutdown revokes access immediately and retains a retryable cleanup
  const p=shares.collaboration(workspace,{projectId:'app',title:'Pair'});shares.register(p,1);await assert.rejects(shares.revoke(workspace.id,p.id),/shutdown is pending/);assert.equal(shares.entries.has(p.id),false);assert.equal(shares.pendingStops.size,1);failure=false;await shares.stopPending(shares.pendingStops.values().next().value);assert.equal(shares.pendingStops.size,0);
  }finally{shares.close();}
 });
+test('a published terminal may carry its live session room, strictly shaped, to viewers with access',async()=>{
+ const current={projectAccess:access(['app']),sessionAccess:{view:access(['app']),interact:access([])}};
+ const shares=new SharedSessions({now:()=>10,authorizeMember:async()=>current});try{
+ const room={id:'0f8fad5b-d9cb-469f-a165-70867728950e',owner:'owner-account',team:'team-1'};
+ for(const bad of [{...room,id:'nope'},{...room,owner:''},{...room,team:'a‮b'},{...room,extra:1},[room],'room'])
+  assert.throws(()=>shares.publish(workspace,{sessionId:2,projectId:'app',title:'Agent',mode:'view',acknowledged:true,room:bad}));
+ const p=shares.publish(workspace,{sessionId:2,projectId:'app',title:'Agent',mode:'view',acknowledged:true,room});
+ assert.deepEqual(p.room,room);assert.deepEqual(shares.ownerList(workspace.id)[0].room,room);
+ assert.deepEqual((await shares.list(workspace,principal,'Bearer own'))[0].room,room);
+ }finally{shares.close();}
+});

@@ -18,6 +18,11 @@ pub const LAPTOP_ONLY_TOOLS: &[&str] = &[
     "canopy_device_swipe",
     "canopy_device_tap",
     "canopy_device_type",
+    // Teams chat is end-to-end encrypted with keys only the user's own devices
+    // hold, and a message there speaks as the user: the workspace's device
+    // never may.
+    "canopy_team_people",
+    "canopy_team_send",
     "canopy_vault_fill",
     "canopy_vault_list",
     "canopy_vault_read",
@@ -100,6 +105,8 @@ pub const SUPPORTED_TOOLS: &[&str] = &[
     "canopy_start_session",
     "canopy_stop_server",
     "canopy_symbols",
+    "canopy_team_people",
+    "canopy_team_send",
     "canopy_tickets",
     "canopy_vault_fill",
     "canopy_vault_list",

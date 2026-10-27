@@ -65,6 +65,16 @@ pub struct StoreSession {
     pub updated: i64,
     /// Message bodies, oldest first. Empty for a metadata-only read.
     pub bodies: Vec<String>,
+    /// Who wrote each body, parallel to `bodies`: "user", "assistant", or
+    /// "message" where the store does not keep it (agy's protobuf runs).
+    pub roles: Vec<&'static str>,
+}
+
+impl StoreSession {
+    fn push(&mut self, role: &'static str, text: &str) {
+        self.bodies.push(clip(text));
+        self.roles.push(role);
+    }
 }
 
 /// Agents this module can read, in registry-id form. `amp` is not one of them
@@ -464,8 +474,8 @@ pub fn append_line_message(agent: &str, line: &str) -> Option<(&'static str, Str
 }
 
 /// The end of one conversation's transcript, oldest first, as (role, text).
-/// Role is "message" for whole-file stores, which do not keep it in a form
-/// `whole_sessions` returns. At most `max_bytes` are read from an append-only
+/// Role is "user" or "assistant", or "message" where the store keeps no
+/// author (agy, and an opencode store too old to join parts to messages). At most `max_bytes` are read from an append-only
 /// file's end — a long session's transcript can be tens of megabytes, and a
 /// document only needs its last stretch. Empty when no store has the session.
 pub fn transcript_tail(
@@ -475,10 +485,24 @@ pub fn transcript_tail(
     profile: Option<&str>,
     max_bytes: u64,
 ) -> Vec<(String, String)> {
-    if session_id.is_empty() || session_id.contains(['/', '\\']) {
+    if session_id.is_empty() {
         return Vec::new();
     }
     let files = source_files(roots, &|a| a == agent);
+    transcript_tail_in(&files, agent, session_id, roots, profile, max_bytes)
+}
+
+/// `transcript_tail` over a given list of store files — the whole lookup
+/// minus the walk of this machine's homes, so each format can be tested
+/// against a fixture.
+fn transcript_tail_in(
+    files: &[SourceFile],
+    agent: &str,
+    session_id: &str,
+    roots: &[String],
+    profile: Option<&str>,
+    max_bytes: u64,
+) -> Vec<(String, String)> {
     // The session's own profile first; any other only when that finds nothing
     // (a digest written before profiles existed names none).
     let mut ordered: Vec<&SourceFile> = files
@@ -493,6 +517,12 @@ pub fn transcript_tail(
     for f in ordered {
         match f.layout {
             Layout::Append => {
+                // An append store's file is named for its session, so an id
+                // shaped like a path names no file here. (aider's ids are its
+                // history file's path plus a timestamp; it is a whole store.)
+                if session_id.contains(['/', '\\']) {
+                    continue;
+                }
                 let stem = f
                     .path
                     .file_stem()
@@ -517,14 +547,62 @@ pub fn transcript_tail(
                     return s
                         .bodies
                         .into_iter()
+                        .zip(s.roles.into_iter().chain(std::iter::repeat("message")))
                         .skip(n.saturating_sub(400))
-                        .map(|b| ("message".to_string(), b))
+                        .map(|(b, r)| (r.to_string(), b))
                         .collect();
                 }
             }
         }
     }
     Vec::new()
+}
+
+/// The transcript file whose subagents and context use a session's live
+/// state is read from (session_activity.rs), for the CLIs whose transcript
+/// records them. Claude Code's does: each Task/Agent call, its result or its
+/// background launch and the notification it finished with, every reply's
+/// token usage, and each compaction. Verified against Claude Code 2.1.311
+/// transcripts on 2026-10-27. Other CLIs: None.
+pub fn activity_transcript(
+    agent: &str,
+    session_id: &str,
+    roots: &[String],
+    profile: Option<&str>,
+) -> Option<PathBuf> {
+    match agent {
+        "claude" => {}
+        _ => return None,
+    }
+    if session_id.is_empty() || session_id.contains(['/', '\\']) {
+        return None;
+    }
+    // Remembered per session: the walk stats every transcript on the machine,
+    // and a running session's activity is polled every few seconds.
+    static FOUND: std::sync::LazyLock<
+        std::sync::Mutex<std::collections::HashMap<String, PathBuf>>,
+    > = std::sync::LazyLock::new(Default::default);
+    let key = format!("{agent}/{session_id}");
+    if let Some(p) = FOUND.lock().unwrap().get(&key) {
+        if p.exists() {
+            return Some(p.clone());
+        }
+    }
+    let files = source_files(roots, &|a| a == agent);
+    let stem_is = |f: &&SourceFile| {
+        f.path
+            .file_stem()
+            .map(|s| s.to_string_lossy() == session_id)
+            == Some(true)
+    };
+    let found = files
+        .iter()
+        .filter(stem_is)
+        .find(|f| profile.is_none_or(|p| f.profile == p))
+        .or_else(|| files.iter().find(stem_is))
+        .map(|f| f.path.clone())?;
+    FOUND.lock().unwrap().insert(key, found.clone());
+    Some(found)
 }
 
 /// Whole lines from the last `max_bytes` of a file. A partial first line (the
@@ -642,7 +720,7 @@ fn gemini_sessions(path: &Path, roots: &[String]) -> Vec<StoreSession> {
         if s.title.is_empty() && ty == "user" {
             s.title = t.chars().take(120).collect();
         }
-        s.bodies.push(clip(t));
+        s.push(if ty == "user" { "user" } else { "assistant" }, t);
     }
     if s.session_id.is_empty() || s.bodies.is_empty() {
         return Vec::new();
@@ -670,7 +748,7 @@ fn gemini_log_sessions(v: &Value, cwd: &str, updated: i64) -> Vec<StoreSession> 
             continue;
         }
         match by_session.iter_mut().find(|s| s.session_id == id) {
-            Some(s) => s.bodies.push(clip(t)),
+            Some(s) => s.push("user", t),
             None => by_session.push(StoreSession {
                 agent: "gemini".into(),
                 profile: "default".into(),
@@ -679,6 +757,7 @@ fn gemini_log_sessions(v: &Value, cwd: &str, updated: i64) -> Vec<StoreSession> 
                 title: t.chars().take(120).collect(),
                 updated,
                 bodies: vec![clip(t)],
+                roles: vec!["user"],
             }),
         }
     }
@@ -724,13 +803,26 @@ fn opencode_sessions(path: &Path) -> Vec<StoreSession> {
             title,
             // opencode stores milliseconds.
             updated: updated / 1000,
-            bodies: Vec::new(),
+            ..Default::default()
         };
-        if let Ok(mut parts) = conn
-            .prepare("SELECT data FROM part WHERE session_id = ?1 ORDER BY time_created LIMIT 2000")
-        {
-            if let Ok(rows) = parts.query_map([&id], |r| r.get::<_, String>(0)) {
-                for data in rows.flatten() {
+        // Who wrote a part is on its message (`message.data.role`); a store
+        // without that join still yields the text, attributed to no one.
+        let parts = conn
+            .prepare(
+                "SELECT p.data, COALESCE(json_extract(m.data, '$.role'), '') FROM part p \
+                 LEFT JOIN message m ON m.id = p.message_id \
+                 WHERE p.session_id = ?1 ORDER BY p.time_created LIMIT 2000",
+            )
+            .or_else(|_| {
+                conn.prepare(
+                    "SELECT data, '' FROM part WHERE session_id = ?1 ORDER BY time_created LIMIT 2000",
+                )
+            });
+        if let Ok(mut parts) = parts {
+            if let Ok(rows) = parts.query_map([&id], |r| {
+                Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+            }) {
+                for (data, role) in rows.flatten() {
                     let Ok(v) = serde_json::from_str::<Value>(&data) else {
                         continue;
                     };
@@ -742,7 +834,12 @@ fn opencode_sessions(path: &Path) -> Vec<StoreSession> {
                     if t.is_empty() || is_injected(t) {
                         continue;
                     }
-                    s.bodies.push(clip(t));
+                    let role = match role.as_str() {
+                        "user" => "user",
+                        "assistant" => "assistant",
+                        _ => "message",
+                    };
+                    s.push(role, t);
                 }
             }
         }
@@ -794,7 +891,7 @@ fn agy_sessions(path: &Path) -> Vec<StoreSession> {
                     if s.title.is_empty() {
                         s.title = run.chars().take(120).collect();
                     }
-                    s.bodies.push(clip(&run));
+                    s.push("message", &run);
                 }
             }
         }
@@ -909,10 +1006,11 @@ fn aider_sessions(path: &Path) -> Vec<StoreSession> {
         if text.is_empty() {
             continue;
         }
-        if s.title.is_empty() && line.starts_with("#### ") {
+        let asked = line.starts_with("#### ");
+        if s.title.is_empty() && asked {
             s.title = text.chars().take(120).collect();
         }
-        s.bodies.push(clip(text));
+        s.push(if asked { "user" } else { "assistant" }, text);
     }
     if let Some(s) = cur {
         if !s.bodies.is_empty() {
@@ -983,7 +1081,7 @@ pub fn digests(
                             cwd,
                             title: first_prompt(f.agent, &f.path),
                             updated: mtime_secs(&f.path),
-                            bodies: Vec::new(),
+                            ..Default::default()
                         })]
                     }
                 }
@@ -994,6 +1092,7 @@ pub fn digests(
                         s.profile = f.profile.clone();
                         digest_json(&StoreSession {
                             bodies: Vec::new(),
+                            roles: Vec::new(),
                             ..s
                         })
                     })
@@ -1059,7 +1158,7 @@ mod tests {
             cwd: "/repo".into(),
             title: "fix it".into(),
             updated: 1,
-            bodies: Vec::new(),
+            ..Default::default()
         });
         assert_eq!(digest["profile"], "work");
     }
@@ -1230,6 +1329,265 @@ mod tests {
         assert_eq!(sessions[1].title, "now log it");
         assert!(sessions[0].session_id.ends_with("#2026-07-23T04:30:16"));
         std::fs::remove_file(&path).ok();
+    }
+}
+
+#[cfg(test)]
+mod transcript_formats {
+    //! `transcript_tail` against a fixture of each store format it reads —
+    //! the shapes verified on disk and documented at the top of this file.
+    use super::*;
+
+    fn dir(name: &str) -> PathBuf {
+        let d = std::env::temp_dir().join(format!("canopy-tail-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    fn file(agent: &'static str, path: PathBuf, layout: Layout) -> SourceFile {
+        SourceFile {
+            agent,
+            profile: "default".into(),
+            path,
+            layout,
+        }
+    }
+
+    fn tail(f: SourceFile, id: &str, roots: &[String]) -> Vec<(String, String)> {
+        let agent = f.agent;
+        transcript_tail_in(&[f], agent, id, roots, None, 1 << 20)
+    }
+
+    fn pairs(v: &[(&str, &str)]) -> Vec<(String, String)> {
+        v.iter()
+            .map(|(r, t)| (r.to_string(), t.to_string()))
+            .collect()
+    }
+
+    #[test]
+    fn claude() {
+        let d = dir("claude");
+        let p = d.join("0b1c-4e2f-9a77-aaaa.jsonl");
+        std::fs::write(
+            &p,
+            concat!(
+                r#"{"type":"user","cwd":"/r","message":{"content":"fix the test"}}"#,
+                "\n",
+                r#"{"type":"assistant","message":{"content":[{"type":"text","text":"Fixed."},{"type":"tool_use","name":"Edit"}]}}"#,
+                "\n",
+                r#"{"type":"user","message":{"content":[{"type":"tool_result","content":"ok"}]}}"#,
+                "\n"
+            ),
+        )
+        .unwrap();
+        let got = tail(
+            file("claude", p, Layout::Append),
+            "0b1c-4e2f-9a77-aaaa",
+            &[],
+        );
+        assert_eq!(
+            got,
+            pairs(&[("user", "fix the test"), ("assistant", "Fixed.")])
+        );
+        assert!(tail(
+            file(
+                "claude",
+                d.join("0b1c-4e2f-9a77-aaaa.jsonl"),
+                Layout::Append
+            ),
+            "other",
+            &[]
+        )
+        .is_empty());
+    }
+
+    #[test]
+    fn codex() {
+        let d = dir("codex");
+        let p = d.join("rollout-2026-07-29T07-21-13-019fab3f-7c1d-4e2f-9a77.jsonl");
+        std::fs::write(
+            &p,
+            concat!(
+                r#"{"type":"session_meta","payload":{"session_id":"019fab3f-7c1d-4e2f-9a77","cwd":"/r"}}"#,
+                "\n",
+                r#"{"type":"response_item","payload":{"type":"message","role":"developer","content":[{"type":"input_text","text":"rules"}]}}"#,
+                "\n",
+                r#"{"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"add a flag"}]}}"#,
+                "\n",
+                r#"{"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"Added --flag."}]}}"#,
+                "\n"
+            ),
+        )
+        .unwrap();
+        let got = tail(
+            file("codex", p, Layout::Append),
+            "019fab3f-7c1d-4e2f-9a77",
+            &[],
+        );
+        assert_eq!(
+            got,
+            pairs(&[("user", "add a flag"), ("assistant", "Added --flag.")])
+        );
+    }
+
+    #[test]
+    fn omp() {
+        let d = dir("omp");
+        let p = d.join("2026-07-19T23-41-29-912Z_019f7cc1-aaaa-bbbb.jsonl");
+        std::fs::write(
+            &p,
+            concat!(
+                r#"{"type":"session","id":"019f7cc1-aaaa-bbbb","cwd":"/r"}"#,
+                "\n",
+                r#"{"type":"message","message":{"role":"user","content":[{"type":"text","text":"ship it"}]}}"#,
+                "\n",
+                r#"{"type":"custom","customType":"tool_execution_start","data":{}}"#,
+                "\n",
+                r#"{"type":"message","message":{"role":"assistant","content":[{"type":"text","text":"Shipped."}]}}"#,
+                "\n"
+            ),
+        )
+        .unwrap();
+        let got = tail(file("omp", p, Layout::Append), "019f7cc1-aaaa-bbbb", &[]);
+        assert_eq!(
+            got,
+            pairs(&[("user", "ship it"), ("assistant", "Shipped.")])
+        );
+    }
+
+    #[test]
+    fn gemini_chats_and_unsaved_logs() {
+        let root = "/projects/app".to_string();
+        let bucket = dir("gemini").join(sha256_hex(root.as_bytes()));
+        std::fs::create_dir_all(bucket.join("chats")).unwrap();
+        let chat = bucket.join("chats/session-1.json");
+        std::fs::write(
+            &chat,
+            r#"{"sessionId":"g-1","messages":[
+                {"type":"user","content":"rename the button"},
+                {"type":"info","content":"tool ran"},
+                {"type":"gemini","content":"Renamed it to Save."}]}"#,
+        )
+        .unwrap();
+        let got = tail(
+            file("gemini", chat, Layout::Whole),
+            "g-1",
+            std::slice::from_ref(&root),
+        );
+        assert_eq!(
+            got,
+            pairs(&[
+                ("user", "rename the button"),
+                ("assistant", "Renamed it to Save.")
+            ])
+        );
+
+        let log = bucket.join("logs.json");
+        std::fs::write(
+            &log,
+            r#"[{"type":"user","sessionId":"g-2","message":"what does main do"},
+                {"type":"user","sessionId":"g-3","message":"other session"}]"#,
+        )
+        .unwrap();
+        let got = tail(file("gemini", log, Layout::Whole), "g-2", &[root]);
+        assert_eq!(got, pairs(&[("user", "what does main do")]));
+    }
+
+    #[test]
+    fn opencode_attributes_parts_through_their_message() {
+        let d = dir("opencode");
+        let db = d.join("opencode.db");
+        let conn = rusqlite::Connection::open(&db).unwrap();
+        conn.execute_batch(
+            r#"CREATE TABLE session (id TEXT, directory TEXT, title TEXT, time_updated INTEGER);
+               CREATE TABLE message (id TEXT, session_id TEXT, time_created INTEGER, data TEXT);
+               CREATE TABLE part (id TEXT, message_id TEXT, session_id TEXT, time_created INTEGER, data TEXT);
+               INSERT INTO session VALUES ('ses_1', '/r', 'login', 1760000000000);
+               INSERT INTO message VALUES ('m1', 'ses_1', 1, '{"role":"user"}');
+               INSERT INTO message VALUES ('m2', 'ses_1', 2, '{"role":"assistant"}');
+               INSERT INTO part VALUES ('p1', 'm1', 'ses_1', 1, '{"type":"text","text":"add a login page"}');
+               INSERT INTO part VALUES ('p2', 'm2', 'ses_1', 2, '{"type":"tool","tool":"edit"}');
+               INSERT INTO part VALUES ('p3', 'm2', 'ses_1', 3, '{"type":"text","text":"Added /login."}');"#,
+        )
+        .unwrap();
+        drop(conn);
+        let got = tail(file("opencode", db, Layout::Whole), "ses_1", &[]);
+        assert_eq!(
+            got,
+            pairs(&[("user", "add a login page"), ("assistant", "Added /login.")])
+        );
+    }
+
+    #[test]
+    fn opencode_without_a_message_table_still_reads_the_text() {
+        let d = dir("opencode-old");
+        let db = d.join("opencode.db");
+        let conn = rusqlite::Connection::open(&db).unwrap();
+        conn.execute_batch(
+            r#"CREATE TABLE session (id TEXT, directory TEXT, title TEXT, time_updated INTEGER);
+               CREATE TABLE part (id TEXT, session_id TEXT, time_created INTEGER, data TEXT);
+               INSERT INTO session VALUES ('ses_1', '/r', 't', 1);
+               INSERT INTO part VALUES ('p1', 'ses_1', 1, '{"type":"text","text":"hello"}');"#,
+        )
+        .unwrap();
+        drop(conn);
+        let got = tail(file("opencode", db, Layout::Whole), "ses_1", &[]);
+        assert_eq!(got, pairs(&[("message", "hello")]));
+    }
+
+    #[test]
+    fn antigravity_keeps_its_prose_without_authors() {
+        let d = dir("agy");
+        let db = d.join("c0ffee00-1111-2222-3333-444455556666.db");
+        let conn = rusqlite::Connection::open(&db).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE trajectory_metadata_blob (data BLOB);
+             CREATE TABLE steps (idx INTEGER, step_payload BLOB);",
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO trajectory_metadata_blob VALUES (?1)",
+            [b"\n6\n2file:///Users/dev/app\x1a\x00".to_vec()],
+        )
+        .unwrap();
+        let mut step = vec![0x0a, 0x0c, 0x08, 0x01];
+        step.extend_from_slice(b"Run the website and browse all pages");
+        conn.execute("INSERT INTO steps VALUES (1, ?1)", [step])
+            .unwrap();
+        drop(conn);
+        let got = tail(
+            file("agy", db, Layout::Whole),
+            "c0ffee00-1111-2222-3333-444455556666",
+            &[],
+        );
+        assert_eq!(
+            got,
+            pairs(&[("message", "Run the website and browse all pages")])
+        );
+    }
+
+    #[test]
+    fn aider_tells_prompts_from_replies() {
+        let d = dir("aider");
+        let p = d.join(".aider.chat.history.md");
+        std::fs::write(
+            &p,
+            "# aider chat started at 2026-07-23 04:30:16\n\
+             > Aider v0.86.2\n\
+             #### add a retry\n\
+             Sure — adding a retry to the client.\n",
+        )
+        .unwrap();
+        let id = format!("{}#2026-07-23T04:30:16", p.to_string_lossy());
+        let got = tail(file("aider", p, Layout::Whole), &id, &[]);
+        assert_eq!(
+            got,
+            pairs(&[
+                ("user", "add a retry"),
+                ("assistant", "Sure — adding a retry to the client.")
+            ])
+        );
     }
 }
 

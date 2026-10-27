@@ -12,9 +12,8 @@
 // This module is pure: `assembleSessionDoc` takes those inputs and returns the
 // document, so the shape is tested from fixtures without a backend. `load.ts`
 // does the fetching, and every fetch there is allowed to fail — a hookless CLI
-// has no journal, a remote workspace has no turn timeline, a past session's
-// checkout may be gone — so every input here is optional and every section has
-// an honest empty state.
+// has no journal, a past session's checkout may be gone — so every input here
+// is optional and every section has an honest empty state.
 //
 // Ledger entries come from sibling features that own their own `data` shapes
 // (receipt, plan, memory, awareness). They are read defensively: a field that

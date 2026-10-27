@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   HARNESS_CAPABILITIES,
+  HARNESS_COMPACT_COMMAND,
   HARNESS_FEATURES,
   HARNESS_MIN_VERSION,
   harnessCapabilities,
@@ -41,10 +42,15 @@ describe("harness capabilities", () => {
     expect(harnessCapabilities("claude").ideProtocol.source).toMatch(/claude_ide_protocol_capture\.md/);
   });
 
-  it("leaves Claude Code's unchecked features unknown", () => {
+  it("records subagents and compaction from the transcript and live-run evidence", () => {
     for (const feature of ["subagents", "compaction"] as const) {
-      expect(harnessSupport("claude", feature)).toBe("unknown");
+      expect(harnessSupport("claude", feature)).toBe("native");
+      expect(harnessCapabilities("claude")[feature].source).toMatch(/session_activity\.rs/);
     }
+    expect(HARNESS_COMPACT_COMMAND.claude).toBe("/compact");
+    // A CLI nobody has checked promises neither.
+    expect(harnessSupport("codex", "subagents")).toBe("unknown");
+    expect(HARNESS_COMPACT_COMMAND.codex).toBeUndefined();
   });
 
   it("records Claude's file rewind as partial, with the Canopy layer beside it", () => {
@@ -72,11 +78,24 @@ describe("harness capabilities", () => {
     expect(harnessVersionWarning("codex", "0.0.1")).toBeNull();
   });
 
-  it("claims nothing for any other CLI while research is in progress", () => {
+  it("claims nothing for any other CLI beyond rule enforcement while research is in progress", () => {
     for (const cli of BUILTIN_AGENT_CLIS.filter((c) => c.id !== "claude")) {
-      for (const feature of HARNESS_FEATURES) {
+      for (const feature of HARNESS_FEATURES.filter((f) => f !== "ruleEnforcement")) {
         expect(harnessSupport(cli.id, feature), `${cli.id}.${feature}`).toBe("unknown");
       }
+    }
+  });
+
+  it("says how rules are enforced for every built-in agent CLI, with a source", () => {
+    for (const cli of BUILTIN_AGENT_CLIS) {
+      const cap = harnessCapabilities(cli.id).ruleEnforcement;
+      expect(cap.support, cli.id).not.toBe("unknown");
+      expect(cap.source, cli.id).toBeTruthy();
+      expect(cap.note, cli.id).toBeTruthy();
+    }
+    expect(harnessSupport("aider", "ruleEnforcement")).toBe("none");
+    for (const id of ["claude", "codex", "cursor", "grok", "agy", "opencode", "omp", "amp"]) {
+      expect(harnessSupport(id, "ruleEnforcement"), id).toBe("native");
     }
   });
 

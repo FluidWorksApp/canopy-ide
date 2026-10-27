@@ -24,11 +24,20 @@ test('real Postgres readable links: allocation, team access, revocation and no r
  const chat=(await readableLinkAction(db,u(member),{action:'ensure',kind:'message',teamId:team,peer:null,messageId:message,origin})).link;
  assert.equal((await readableLinkAction(db,u(owner),{action:'resolve',url:chat.url,origin})).link.target.messageId,message);
  assert.equal(JSON.stringify((await db.query('SELECT target FROM readable_link WHERE kind=$1 AND team_id=$2',['message',team])).rows),JSON.stringify([{target:{teamId:team,messageId:message,participants:null}}]));
+ // Manage links: the owner sees every live link on their workspace and team;
+ // a member sees the ones they made, and may revoke only those.
+ const owned=(await readableLinkAction(db,u(owner),{action:'list',origin})).links;
+ assert.deepEqual(new Set(owned.map(l=>l.url)),new Set([first.url,session.url,chat.url]));assert.ok(owned.every(l=>l.canRevoke));
+ const mine=(await readableLinkAction(db,u(member),{action:'list',origin})).links;
+ assert.deepEqual(new Set(mine.map(l=>l.url)),new Set([session.url,chat.url]));assert.ok(mine.every(l=>l.mine&&l.canRevoke));
+ assert.equal((await readableLinkAction(db,u(outsider),{action:'list',origin})).links.length,0);
+ assert.match((await readableLinkAction(db,u(member),{action:'resolve',url:first.url,origin})).link.about.teamName,/^Synthetic Links /);
  // Removal from the team cuts access at once; no stored credential survives.
  await db.query('UPDATE team_member SET removed_at=now() WHERE team_id=$1 AND user_id=$2',[team,member]);
  await assert.rejects(()=>readableLinkAction(db,u(member),{action:'resolve',url:chat.url,origin}),e=>e.code===404);
  await assert.rejects(()=>readableLinkAction(db,u(member),{action:'resolve',url:first.url,origin}),e=>e.code===404);
  assert.deepEqual(await readableLinkAction(db,u(owner),{action:'revoke',url:first.url,origin}),{revoked:true});
+ assert.equal((await readableLinkAction(db,u(owner),{action:'list',origin})).links.some(l=>l.url===first.url),false);
  await assert.rejects(()=>readableLinkAction(db,u(owner),{action:'resolve',url:first.url,origin}),e=>e.code===410);
  const again=(await readableLinkAction(db,u(owner),{action:'ensure',kind:'workspace',workspaceId:workspace,origin})).link;
  assert.notEqual(again.url,first.url);

@@ -134,3 +134,13 @@ button.team-row{cursor:pointer;}button.team-row:hover:not(:disabled){background:
 .account-chat-picker-custom input[aria-invalid=true]{border-color:var(--warn)}
 .account-chat-picker-custom button:disabled{opacity:.5;cursor:default;text-decoration:none}
 .account-chat-reaction.is-undelivered{border-style:dashed;border-color:var(--warn);background:var(--bg-raised);opacity:.8}
+
+/* Teams chat → agent: Run as task / Send to agent under a message. */
+.account-chat-handoff{margin-top:4px;font-size:var(--fs-xs);color:var(--text-muted)}
+.account-chat-handoff-actions{opacity:0;transition:opacity .12s}
+.account-chat-msg:hover .account-chat-handoff-actions,.account-chat-msg:focus-within .account-chat-handoff-actions,.account-chat-handoff-actions:has([aria-expanded="true"]){opacity:1}
+.account-chat-handoff-pick{display:flex;gap:var(--sp-2);align-items:center;margin-top:4px;flex-wrap:wrap}
+.account-chat-handoff-pick select{min-width:0;max-width:100%}
+.account-chat-handoff-result{display:block;margin-top:2px}
+.account-chat-handoff-result.failed{color:var(--danger,var(--text))}
+@media (hover:none){.account-chat-handoff-actions{opacity:1}}

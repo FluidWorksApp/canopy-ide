@@ -3,6 +3,8 @@ import {noticeLevels,creditStatus,computeAllowed,amountToRestoreUsd,enforcementM
 import {requestOperation} from './lifecycle.mjs';
 import {enforceAfterDebit,syncCreditNotices,grantCredit,pauseWorkspaceForCredit} from './credit-enforcement.mjs';
 import {creditNoticeEmail,creditRequestEmail} from './credit-email.mjs';
+// Notify is the default; tests of blocking opt in explicitly.
+const ENFORCE={CANOPY_CREDIT_ENFORCEMENT:'enforce'};
 
 test('thresholds: low below $5, zero at $0, final at -$5, paused at -$10 inclusive',()=>{
  assert.deepEqual(noticeLevels('5'),[]);assert.deepEqual(noticeLevels('4.999999'),['low']);
@@ -16,24 +18,29 @@ test('the amount to restore access is the smallest cent amount that lifts the ba
  assert.equal(amountToRestoreUsd('-64.48'),'54.49');assert.equal(amountToRestoreUsd('-10'),'0.01');assert.equal(amountToRestoreUsd('-10.0001'),'0.01');assert.equal(amountToRestoreUsd('-9'),'0.00');
  assert.equal(formatUsd('-64.48'),'−$64.48');assert.equal(formatUsd('1234.5'),'$1,234.50');assert.equal(formatUsd('-0.000001'),'$0.00');
 });
-test('enforcement mode defaults to enforce and accepts only known values',()=>{
- assert.equal(enforcementMode({}),'enforce');assert.equal(enforcementMode({CANOPY_CREDIT_ENFORCEMENT:' Notify '}),'notify');assert.equal(enforcementMode({CANOPY_CREDIT_ENFORCEMENT:'off'}),'off');assert.equal(enforcementMode({CANOPY_CREDIT_ENFORCEMENT:'disable'}),'enforce');
+test('enforcement mode defaults to notify (the rollout default) and accepts only known values',()=>{
+ assert.equal(enforcementMode({}),'notify');assert.equal(enforcementMode({CANOPY_CREDIT_ENFORCEMENT:' Enforce '}),'enforce');assert.equal(enforcementMode({CANOPY_CREDIT_ENFORCEMENT:'off'}),'off');assert.equal(enforcementMode({CANOPY_CREDIT_ENFORCEMENT:'disable'}),'notify');
+});
+test('by default nothing is blocked: the start gate and the debit hook never pause',async()=>{
+ const db=recorder('-64.48');assert.equal(await assertComputeAllowed(db,'owner','resume',{env:{}}),null);assert.equal(db.sql.length,0);
+ const hook=recorder('-64.48');assert.equal((await enforceAfterDebit(hook,{userId:'u',workspaceId:'w'},{env:{}})).paused,null);assert.ok(!hook.sql.some(s=>/workspace_operation|FROM workspace/.test(s)));
 });
 
 function recorder(balance){const sql=[];return {sql,query:async(text,args)=>{sql.push(text);if(text.includes('FROM credit_account'))return {rows:balance==null?[]:[{balance}]};return {rows:[]};}};}
 test('the start gate locks the credit account and refuses compute at the cutoff with a structured error',async()=>{
  const db=recorder('-10');
- await assert.rejects(assertComputeAllowed(db,'owner','resume',{env:{}}),error=>error instanceof CreditExhaustedError&&error.code===402&&error.reason==='credit_exhausted'&&error.balanceUsd==='-10'&&error.cutoffUsd===String(CUTOFF_USD)&&/−\$10\.00/.test(error.message));
+ await assert.rejects(assertComputeAllowed(db,'owner','resume',{env:ENFORCE}),error=>error instanceof CreditExhaustedError&&error.code===402&&error.reason==='credit_exhausted'&&error.balanceUsd==='-10'&&error.cutoffUsd===String(CUTOFF_USD)&&/−\$10\.00/.test(error.message));
  assert.match(db.sql[0],/FOR UPDATE$/);
  assert.deepEqual(new CreditExhaustedError('-12.5').toJSON(),{error:new CreditExhaustedError('-12.5').message,code:'credit_exhausted',balanceUsd:'-12.5',cutoffUsd:'-10',shared:false});
- for(const action of ['retry','resize','grow-storage'])await assert.rejects(assertComputeAllowed(recorder('-11'),'owner',action,{env:{}}),{code:402});
+ for(const action of ['retry','resize','grow-storage'])await assert.rejects(assertComputeAllowed(recorder('-11'),'owner',action,{env:ENFORCE}),{code:402});
  // Stop and delete never consult the balance; notify/off never block.
- for(const action of ['hibernate','delete']){const quiet=recorder('-50');assert.equal(await assertComputeAllowed(quiet,'owner',action,{env:{}}),null);assert.equal(quiet.sql.length,0);}
+ for(const action of ['hibernate','delete']){const quiet=recorder('-50');assert.equal(await assertComputeAllowed(quiet,'owner',action,{env:ENFORCE}),null);assert.equal(quiet.sql.length,0);}
  assert.equal(await assertComputeAllowed(recorder('-50'),'owner','resume',{env:{CANOPY_CREDIT_ENFORCEMENT:'notify'}}),null);
  // No account row yet means a zero balance, which may start.
- assert.equal(await assertComputeAllowed(recorder(null),'owner','resume',{env:{}}),'0');
+ assert.equal(await assertComputeAllowed(recorder(null),'owner','resume',{env:ENFORCE}),'0');
 });
-test('requestOperation locks the workspace before the credit account (metering order) and creates nothing when refused',async()=>{
+test('requestOperation locks the workspace before the credit account (metering order) and creates nothing when refused',async t=>{
+ const previous=process.env.CANOPY_CREDIT_ENFORCEMENT;process.env.CANOPY_CREDIT_ENFORCEMENT='enforce';t.after(()=>{if(previous===undefined)delete process.env.CANOPY_CREDIT_ENFORCEMENT;else process.env.CANOPY_CREDIT_ENFORCEMENT=previous;});
  const sql=[];const db={query:async text=>{sql.push(text);if(text.startsWith('SELECT * FROM workspace WHERE'))return {rows:[{id:'ws-1',owner_id:'owner',name:'W',state:'stopped',desired_state:'stopped',generation:1}]};if(text.includes('FROM credit_account'))return {rows:[{balance:'-10.5'}]};return {rows:[]};}};
  await assert.rejects(requestOperation(db,'owner','ws-1',{action:'resume',requestKey:'f9b67dc0-f389-4ddb-b6c9-bb9aff258e67'}),{code:402});
  const workspaceLock=sql.findIndex(s=>/FROM workspace WHERE .*FOR UPDATE/.test(s)),accountLock=sql.findIndex(s=>/FROM credit_account.*FOR UPDATE/.test(s));
@@ -79,4 +86,26 @@ test('a refused pause is deferred to the sweep and never aborts the caller (mete
  for(const code of [400,409,410])assert.equal(await pauseWorkspaceForCredit(db,'u','w',{request:async()=>{throw Object.assign(Error('refused'),{code});},log:null}),'deferred');
  assert.equal(sql.filter(s=>s==='ROLLBACK TO SAVEPOINT credit_pause').length,3);
  await assert.rejects(pauseWorkspaceForCredit(db,'u','w',{request:async()=>{throw Error('connection lost');},log:null}),/connection lost/);
+});
+test('a pause waits for an operation already in flight (the worker meters while holding its lock)',async()=>{
+ const sql=[];let requested=false;const db={query:async text=>{sql.push(text);if(text.startsWith('SELECT id,owner_id'))return {rows:[{id:'w',owner_id:'u',desired_state:'running',deleted_at:null}]};if(text.startsWith('SELECT action FROM workspace_operation'))return {rows:[{action:'resume'}]};return {rows:[]};}};
+ assert.equal(await pauseWorkspaceForCredit(db,'u','w',{request:async()=>{requested=true;},log:null}),'deferred');
+ assert.equal(requested,false);assert.ok(!sql.some(s=>s.startsWith('SAVEPOINT')));
+});
+
+// Billing policy (website tests/credit-billing.test.mjs covers the metering side).
+test('a start needs one billing interval above the cutoff; the refusal names the minimum',async()=>{
+ const {startMinimumUsd,startAllowed,BILLING_INTERVAL_SECONDS}=await import('./credit-policy.mjs');
+ assert.equal(BILLING_INTERVAL_SECONDS,300);assert.equal(startMinimumUsd(null),-10);assert.ok(Math.abs(startMinimumUsd('1.2')+9.9)<1e-9);
+ assert.equal(startAllowed('-9.9','1.2'),true);assert.equal(startAllowed('-9.91','1.2'),false);
+ await assert.rejects(assertComputeAllowed(recorder('-9.95'),'owner','resume',{env:ENFORCE,usdPerHour:()=>'1.2'}),error=>error.minimumUsd==='-9.90'&&/Workspaces pause at/.test(error.message)&&error.toJSON().minimumUsd==='-9.90');
+ assert.equal(new CreditExhaustedError('-9.95',{shared:true,minimumUsd:-9.9}).toJSON().minimumUsd,undefined);
+});
+test('paused storage is charged by default; hold skips it only while enforce has paused the account',async()=>{
+ const {pausedStorageBilling,purchaseEnabled}=await import('./credit-policy.mjs');const {storageChargeHeld}=await import('./credit-enforcement.mjs');
+ assert.equal(pausedStorageBilling({}),'charge');assert.equal(pausedStorageBilling({CANOPY_PAUSED_STORAGE_BILLING:'hold'}),'hold');
+ const hold={...ENFORCE,CANOPY_PAUSED_STORAGE_BILLING:'hold'};
+ assert.equal(await storageChargeHeld(recorder('-20'),'u',{env:ENFORCE}),false);assert.equal(await storageChargeHeld(recorder('-20'),'u',{env:{CANOPY_PAUSED_STORAGE_BILLING:'hold'}}),false);
+ assert.equal(await storageChargeHeld(recorder('-9'),'u',{env:hold}),false);assert.equal(await storageChargeHeld(recorder('-20'),'u',{env:hold}),true);
+ assert.equal(purchaseEnabled({}),false);
 });

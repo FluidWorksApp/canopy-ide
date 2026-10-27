@@ -30,6 +30,7 @@ import { TRACKERS } from "./trackers";
 import { readBoundedFile } from "./boundedFileRead";
 import { sizeLimitFor } from "./fileOpen";
 import type { MeshJobs } from "./meshJobs";
+import type { AgentChat } from "./teamMessaging/agentChat";
 import { rendererIoBudget } from "./ioBudget";
 import {
   leaseEditorModel,
@@ -464,6 +465,12 @@ export interface UiOpContext {
   /** Mesh jobs (meshJobs.ts): where a job can go, and submitting one. Open to
    *  every agent, not just the companion. */
   meshJobs?: Pick<MeshJobs, "targets" | "submit" | "message">;
+  /** Teams chat (teamMessaging/agentChat.ts): the user's teams and people,
+   *  and posting a message there. Open to every agent. */
+  teamChat?: Pick<AgentChat, "people" | "send">;
+  /** The display name of the agent in a terminal, for the line that marks a
+   *  Teams message as agent-written. */
+  agentLabel?: (ptyId: number) => Promise<string | null>;
   /** The preview tab an agent's browser ops are driving, for the vault ops:
    *  filling a credential needs to know which page is being logged in to. */
   preview: () => Promise<PreviewTarget | null>;
@@ -619,6 +626,11 @@ function needCompanion<T>(handler: T | undefined, tool: string): T {
   return handler;
 }
 
+function needTeamChat(ctx: UiOpContext) {
+  if (!ctx.teamChat) throw new Error("Teams chat isn't available in this Canopy window yet — try again in a moment.");
+  return ctx.teamChat;
+}
+
 function needMeshJobs(ctx: UiOpContext) {
   if (!ctx.meshJobs) throw new Error("Mesh jobs aren't available in this Canopy window yet — try again in a moment.");
   return ctx.meshJobs;
@@ -717,6 +729,15 @@ export async function runUiOp(op: ipc.AgentUiOp, ctx: UiOpContext): Promise<unkn
         origin: op.ptyId != null && op.instance ? { ptyId: op.ptyId, instance: op.instance } : null,
         fromName: op.fromName,
         requestId: op.requestId,
+      });
+    case "team_people":
+      return needTeamChat(ctx).people();
+    case "team_send":
+      return needTeamChat(ctx).send({
+        to: op.member ?? "",
+        text: op.prompt ?? "",
+        team: op.label,
+        agent: op.ptyId != null ? await ctx.agentLabel?.(op.ptyId).catch(() => null) : null,
       });
     case "pr_details":
       return prDetails(op, ctx);

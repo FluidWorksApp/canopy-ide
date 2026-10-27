@@ -42,7 +42,7 @@ export const NATIVE_COMMANDS=new Set([
  // MCP server connections.
  'mcp_connect','mcp_call_tool','mcp_task_get','mcp_task_update','mcp_task_cancel','mcp_disconnect','mcp_connected',
  // Proof receipts, session documents and change churn (agent awareness).
- 'receipt_run_check','receipt_check_start','receipt_check_status','session_transcript_tail','git_churn',
+ 'receipt_run_check','receipt_check_start','receipt_check_status','session_transcript_tail','session_activity','git_churn',
  // Spot search index.
  'spot_ingest','spot_search','spot_index_stats','spot_index_clear','spot_save_context_text',
 ]);

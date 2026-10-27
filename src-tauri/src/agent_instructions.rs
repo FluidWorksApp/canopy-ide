@@ -100,6 +100,10 @@ IDE the user is watching, and their results stay inspectable:\n\
   teammate -> canopy_mesh_targets, then canopy_mesh_submit with a complete \
   brief. A teammate approves before it runs; its steps come back to you as \
   mesh notices tagged ref kind \"job\"\n\
+- Telling a colleague something, or passing them work they can hand to their \
+  own agent -> canopy_team_people, then canopy_team_send to a teammate or the \
+  team channel. It posts in the user's Teams chat as the user, marked as \
+  agent-written; only send what the user asked you to\n\
 - If available, delegating a bounded, independent slice -> canopy_spawn_agent with a complete \
   brief. The child has no memory of this conversation; it opens as a pane beside \
   you, and autoClose: true makes it a one-shot that reports and closes itself. \

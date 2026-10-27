@@ -622,14 +622,16 @@ async fn actions(State(service): Svc, Path(ws): Path<String>, body: Bytes) -> Re
 /// its own: kept on the mesh under `ref {kind, id}` and announced in that
 /// terminal. From Canopy itself, so no sever applies.
 async fn mesh_job_update(ws: &Arc<Workspace>, value: &serde_json::Value) -> Response {
-    // A job step, a relay reply, or an agent-awareness note from the IDE.
+    // A job step, a relay reply, an agent-awareness note from the IDE, or
+    // "team-chat": the user handing this agent a Teams chat message ("Send to
+    // agent" in the IDE viewing this workspace); `jobId` is the message's id.
     let kind = match value.get("refKind").and_then(|k| k.as_str()) {
         None | Some("job") => "job",
         Some("relay") => "relay",
         Some("awareness") => "awareness",
+        Some("team-chat") => "team-chat",
         Some(other) => return error(400, format!("unknown mesh update kind {other}")),
     };
-    let relay = kind == "relay";
     let Some(pty_id) = value
         .get("ptyId")
         .and_then(|v| v.as_u64())
@@ -697,21 +699,23 @@ async fn mesh_job_update(ws: &Arc<Workspace>, value: &serde_json::Value) -> Resp
     let Ok(record) = record else {
         return error(403, "the mesh refused this job update");
     };
-    let notice = if relay {
-        format!(
+    let notice = match kind {
+        "relay" => format!(
             "[canopy: cloud workspace reply to {job_id}] {}",
             crate::meshtext::mesh_notice_for(&record)
-        )
-    } else if kind == "awareness" {
-        format!(
+        ),
+        "awareness" => format!(
             "[canopy: awareness] {}",
             crate::meshtext::mesh_notice_for(&record)
-        )
-    } else {
-        format!(
+        ),
+        "team-chat" => format!(
+            "[canopy: from the user, via Teams chat] {}",
+            crate::meshtext::mesh_notice_for(&record)
+        ),
+        _ => format!(
             "[canopy: mesh job {job_id}] {}",
             crate::meshtext::mesh_notice_for(&record)
-        )
+        ),
     };
     if let Err(failure) = ws.deliver(pty_id, &record.id, &notice, None, None).await {
         return match failure {

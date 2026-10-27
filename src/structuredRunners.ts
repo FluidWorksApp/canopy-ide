@@ -70,6 +70,11 @@ export interface StructuredRunner {
    *  whose `args` expect the prompt on stdin. A oneshot-tier runner without
    *  this gets `args(...)` plus the prompt (see `brainArgs`). */
   oneshotArgs?(o: StructuredRunnerLaunch, prompt: string): string[];
+  /** Complete argv that resumes session `o.policy.sessionId` headlessly and
+   *  runs `command` (the harness's compaction command and its instructions,
+   *  harness.ts HARNESS_COMPACT_COMMAND) as its one message, then exits.
+   *  Only where verified; absent = no headless compaction on this CLI. */
+  compactArgs?(o: StructuredRunnerLaunch, command: string): string[];
   /** A cheaper model alias for background brain calls, when the CLI has a
    *  stable one. Absent = background calls use the CLI's default too. Lives
    *  here rather than in feature code because which alias is cheap is a fact
@@ -293,6 +298,23 @@ export const CLAUDE_RUNNER: StructuredRunner = {
     prompt,
   ],
   backgroundModel: "haiku",
+  // Verified against Claude Code 2.1.311 on 2026-10-27: `/compact <text>` as
+  // the final argv value of `-p --resume <id>`, stdin closed, compacts that
+  // session (stream-json shows system/compact_boundary with pre/post tokens,
+  // then a success result) and exits. No session-persistence flag: the
+  // compaction has to land in the session's own transcript.
+  compactArgs: (o, command) => [
+    "-p",
+    "--output-format",
+    "stream-json",
+    "--verbose",
+    "--strict-mcp-config",
+    "--resume",
+    o.policy.sessionId,
+    ...claudePermissionArgs(o.policy),
+    "--",
+    command,
+  ],
   resumeArgs: (o) => [
     "-p",
     "--input-format",

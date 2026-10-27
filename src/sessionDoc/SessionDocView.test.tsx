@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { askBrain, BrainAnswer } from "../brainCall";
 import type { LedgerDraft, LedgerEntry } from "../ledger";
@@ -93,6 +93,7 @@ function makeDeps(over: Partial<SessionDocDeps> = {}) {
     ],
     projects: () => [{ name: "App", dirs: ["/repo/app"] }],
     autoSummary: () => true,
+    onTurnEnd: () => () => {},
     ...over,
   };
   return { deps, ask, appended };
@@ -144,6 +145,65 @@ describe("SessionDocView", () => {
     expect(await screen.findByText("Old reading.", undefined, WAIT)).toBeTruthy();
     expect(screen.getByText(/Written before the latest turn/)).toBeTruthy();
     expect(off.ask).not.toHaveBeenCalled();
+  });
+
+  it("stays live: re-reads after every turn, re-asks the brain only every few turns", async () => {
+    // A doc whose timeline has `n` turns.
+    const withTurns = (n: number) =>
+      assembleSessionDoc({
+        sessionId: SID,
+        agent: "claude",
+        cwd: "/repo/app",
+        digest: { session_id: SID, first_prompt: "Add a login page", files: [] },
+        turns: {
+          git: true,
+          root: "/repo/app",
+          shared: false,
+          peers: [],
+          restores: [],
+          turns: Array.from({ length: n }, (_, i) => ({
+            n: i + 1,
+            prompt: `Step ${i + 1}`,
+            start: { ref: `s${i}`, commit: "c", tree: "t", ts_ms: T0 + i * 60_000 },
+            end: { ref: `e${i}`, commit: "c", tree: "t", ts_ms: T0 + i * 60_000 + 30_000 },
+            late: false,
+            native_uuid: null,
+          })),
+        },
+        edits: [],
+        ledger: [],
+        transcript: [],
+        live: true,
+      });
+    let turns = 1;
+    let turnEnded: (sid: string) => void = () => {};
+    const { deps, ask } = makeDeps({
+      load: async () => ({ doc: withTurns(turns), missing: [] }),
+      onTurnEnd: (cb) => {
+        turnEnded = cb;
+        return () => {};
+      },
+    });
+    render(<SessionDocView request={{ ...request, live: true }} onClose={() => {}} deps={deps} />);
+    await screen.findByText(NARRATIVE.summary, undefined, WAIT);
+    expect(ask).toHaveBeenCalledTimes(1);
+
+    // Two more turns: the timeline follows, the summary is the cached one.
+    for (const n of [2, 3]) {
+      turns = n;
+      act(() => turnEnded(SID));
+      await screen.findByText(`Step ${n}`, undefined, WAIT);
+    }
+    expect(screen.getByText(/rewritten every few turns while the session runs/)).toBeTruthy();
+    expect(ask).toHaveBeenCalledTimes(1);
+    // Another session's turn changes nothing.
+    turns = 9;
+    act(() => turnEnded("someone-else"));
+    // The third turn since the summary: now it is re-asked, once.
+    turns = 4;
+    act(() => turnEnded(SID));
+    await screen.findByText("Step 4", undefined, WAIT);
+    await waitFor(() => expect(ask).toHaveBeenCalledTimes(2), WAIT);
   });
 
   it("says plainly when there is no brain", async () => {

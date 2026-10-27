@@ -20,10 +20,15 @@ export type LinkTarget =
   | {kind: 'session'; workspaceId: string; projectId: string; publicationId: string; title: string}
   /** `peer: null` is the team channel; otherwise the other person in a DM. */
   | {kind: 'message'; teamId: string; peer: string | null; messageId: string};
-export type ResolvedLink =
+/** Newer servers say which team holds a link and when it was last active. */
+export type LinkAbout = {teamName: string | null; activity: 'opened' | 'shared'; activityAt: string | null};
+export type ResolvedLink = (
   | {url: string; kind: 'workspace'; target: {workspaceId: string; name: string}}
   | {url: string; kind: 'session'; target: {workspaceId: string; workspaceName: string; projectId: string; publicationId: string; title: string}}
-  | {url: string; kind: 'message'; target: {teamId: string; teamName: string; peer: string | null; peerName: string; messageId: string; viewer: string}};
+  | {url: string; kind: 'message'; target: {teamId: string; teamName: string; peer: string | null; peerName: string; messageId: string; viewer: string}}
+) & {about?: LinkAbout};
+/** A link in Settings → Account → Links. */
+export type ManagedLink = ResolvedLink & {createdAt: string | null; mine: boolean; canRevoke: boolean};
 
 const request = <T,>(body: unknown) => invoke<T>('canopy_account_request', {route: '/api/links', body});
 export const targetKey = (t: LinkTarget) =>
@@ -61,6 +66,30 @@ export async function copyReadableLink(target: LinkTarget, write: (text: string)
 }
 
 export const resolveReadableLink = (url: string) => request<{link: ResolvedLink}>({action: 'resolve', url}).then((r) => r.link);
+
+/** The live links this account manages: the ones it made, plus those on
+ *  workspaces it owns and in teams it owns or administers. */
+export const listReadableLinks = () => request<{links?: ManagedLink[]}>({action: 'list'}).then((r) => (Array.isArray(r?.links) ? r.links : []));
+
+/** Revoke a link. Nobody can open it afterwards, and its path is never reused;
+ *  the next "Copy link" on the same thing makes a new one. */
+export async function revokeReadableLink(url: string): Promise<void> {
+  await request<{revoked: boolean}>({action: 'revoke', url});
+  for (const [key, known] of cache) if (known === url) cache.delete(key);
+}
+
+/** One line a person can read for what a link points at. Never message text:
+ *  links don't carry it. */
+export function describeLink(link: ResolvedLink): {kind: string; name: string; detail: string} {
+  const team = link.about?.teamName;
+  if (link.kind === 'workspace') return {kind: 'Workspace', name: link.target.name || 'Workspace', detail: team ?? ''};
+  if (link.kind === 'session') return {kind: 'Shared session', name: link.target.title || 'Agent session', detail: [link.target.workspaceName, team].filter(Boolean).join(' · ')};
+  const t = link.target;
+  return {kind: 'Message', name: t.peer ? `Direct message${t.peerName ? ` with ${t.peerName}` : ''}` : 'Message in the team channel', detail: t.teamName || team || ''};
+}
+
+/** The in-app deep link for a readable URL (deepLinks.ts `link`). */
+export const appLinkFor = (url: string) => `canopy://link?url=${encodeURIComponent(url)}`;
 
 // A shared session waiting for its panel: the link opens the workspace's
 // details, and SharedSessionsPanel picks this up when it mounts or is open.

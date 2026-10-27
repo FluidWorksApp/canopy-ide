@@ -13,6 +13,7 @@ import * as ipc from "../ipc";
 import { useMemories, type MemoryRow } from "../useMemories";
 import { brainConnection, subscribeBrainConnection } from "../brainStatus";
 import {
+  addMemoryByHand,
   approveMemory,
   editMemory,
   expireMemory,
@@ -33,6 +34,7 @@ import {
 } from "../memoryLedger";
 import { agentCliFor } from "../projects";
 import { getSettings, subscribeSettings } from "../settings";
+import { regenerateInstructionSection, rememberInstructionFile } from "../memoryInstructionSync";
 import { Button, Segmented, Select, TextInput } from "./ui";
 import "./memoryPanel.css";
 
@@ -152,12 +154,26 @@ export function MemoryPanel({ roots, onOpenSession, load }: MemoryPanelProps) {
     return matchesSearch(r.entry, query.trim());
   });
 
+  const [synced, setSynced] = useState<string | null>(null);
+  /** After any change to what is approved, the instruction file's section
+   *  follows (when the person has used "Update the instruction file" here). */
+  const resync = async (ledgerRoots: string[]) => {
+    try {
+      const path = await regenerateInstructionSection(roots[0] ?? "", roots, ledgerRoots);
+      if (path) setSynced(`Updated the Team memory section in ${path.split(/[\\/]/).pop()}.`);
+    } catch (e) {
+      setSynced(`Couldn't update the instruction file: ${String(e)}`);
+    }
+  };
+  const ledgerRoots = () => [...new Set(rows.map((r) => r.root))];
+
   const act = async (row: MemoryRow, what: string, fn: () => Promise<unknown>) => {
     setBusy(`${row.entry.data.memoryId}:${what}`);
     setNotice(null);
     try {
       await fn();
       await reload();
+      void resync([...ledgerRoots(), row.root]);
     } catch (e) {
       setNotice(String(e instanceof Error ? e.message : e));
     } finally {
@@ -187,6 +203,14 @@ export function MemoryPanel({ roots, onOpenSession, load }: MemoryPanelProps) {
         someone approves it.
       </p>
       {status && <p className="memory-state">{status}</p>}
+      <AddMemory
+        roots={roots}
+        onAdded={async (root) => {
+          await reload();
+          void resync([...ledgerRoots(), root]);
+        }}
+      />
+      {synced && <p className="memory-state">{synced}</p>}
       <div className="memory-filters">
         <Segmented<View>
           aria-label="Which memories"
@@ -268,7 +292,7 @@ export function MemoryPanel({ roots, onOpenSession, load }: MemoryPanelProps) {
           </section>
         );
       })}
-      <InstructionSync roots={roots} rows={rows} />
+      <InstructionSync roots={roots} rows={rows} onWritten={(path) => rememberInstructionFile(roots[0] ?? "", path)} />
     </div>
   );
 }
@@ -473,12 +497,127 @@ function MemoryItem({
   );
 }
 
+// ------------------------------------------------------------ add by hand
+
+/** A memory the person writes down themselves. They are the approval, so it
+ *  lands in use, with them as its author. */
+function AddMemory({ roots, onAdded }: { roots: readonly string[]; onAdded: (root: string) => Promise<void> }) {
+  const [open, setOpen] = useState(false);
+  const [draft, setDraft] = useState<{ type: MemoryType; text: string; why: string; scope: MemoryScope }>({
+    type: "decision",
+    text: "",
+    why: "",
+    scope: "project",
+  });
+  const [root, setRoot] = useState(roots[0] ?? "");
+  const [error, setError] = useState<string | null>(null);
+  const [saving, setSaving] = useState(false);
+  useEffect(() => {
+    if (!roots.includes(root)) setRoot(roots[0] ?? "");
+  }, [roots, root]);
+
+  if (!open) {
+    return (
+      <button type="button" className="research-more memory-add-open" onClick={() => setOpen(true)}>
+        + Add a memory
+      </button>
+    );
+  }
+  const save = async () => {
+    setSaving(true);
+    setError(null);
+    try {
+      const stored = await addMemoryByHand(root, draft);
+      setDraft({ type: draft.type, text: "", why: "", scope: draft.scope });
+      setOpen(false);
+      await onAdded(stored.root || root);
+    } catch (e) {
+      setError(String(e instanceof Error ? e.message : e));
+    } finally {
+      setSaving(false);
+    }
+  };
+  return (
+    <form
+      className="memory-add"
+      aria-label="Add a memory"
+      onSubmit={(e) => {
+        e.preventDefault();
+        void save();
+      }}
+    >
+      <div className="memory-filter-row">
+        <Select size="sm" width="full" aria-label="Kind of memory" value={draft.type} onChange={(e) => setDraft({ ...draft, type: e.target.value as MemoryType })}>
+          {MEMORY_TYPES.map((t) => (
+            <option key={t} value={t}>
+              {TYPE_LABEL[t]}
+            </option>
+          ))}
+        </Select>
+        <Select size="sm" width="full" aria-label="Applies to" value={draft.scope} onChange={(e) => setDraft({ ...draft, scope: e.target.value as MemoryScope })}>
+          {MEMORY_SCOPES.map((sc) => (
+            <option key={sc} value={sc}>
+              {SCOPE_LABEL[sc]}
+            </option>
+          ))}
+        </Select>
+      </div>
+      {roots.length > 1 && (
+        <Select size="sm" width="full" aria-label="Repository" value={root} onChange={(e) => setRoot(e.target.value)}>
+          {roots.map((r) => (
+            <option key={r} value={r}>
+              {r.split(/[\\/]/).pop() || r}
+            </option>
+          ))}
+        </Select>
+      )}
+      <TextInput
+        size="sm"
+        width="full"
+        aria-label="Memory"
+        placeholder={TYPE_BLURB[draft.type] + " — one plain sentence"}
+        value={draft.text}
+        onChange={(e) => setDraft({ ...draft, text: e.target.value })}
+      />
+      <TextInput
+        size="sm"
+        width="full"
+        aria-label="Why"
+        placeholder="Why (optional)"
+        value={draft.why}
+        onChange={(e) => setDraft({ ...draft, why: e.target.value })}
+      />
+      {error && (
+        <p className="memory-error" role="alert">
+          {error}
+        </p>
+      )}
+      <div className="memory-actions">
+        <Button size="sm" variant="accent" type="submit" disabled={saving || draft.text.trim().length < 8}>
+          {saving ? "Saving…" : "Add — in use now"}
+        </Button>
+        <Button size="sm" variant="ghost" type="button" onClick={() => setOpen(false)}>
+          Cancel
+        </Button>
+      </div>
+    </form>
+  );
+}
+
 // ------------------------------------------------------------ instruction file
 
 /** "Update CLAUDE.md / AGENTS.md from approved memory": a short generated
  *  section between markers, written through the same instructions_write the
  *  Instructions view uses. Optional — agents can always ask canopy_memory. */
-function InstructionSync({ roots, rows }: { roots: readonly string[]; rows: readonly MemoryRow[] }) {
+function InstructionSync({
+  roots,
+  rows,
+  onWritten,
+}: {
+  roots: readonly string[];
+  rows: readonly MemoryRow[];
+  onWritten: (path: string) => void;
+}) {
   const [open, setOpen] = useState(false);
   const [files, setFiles] = useState<ipc.InstructionFile[]>([]);
   const [path, setPath] = useState("");
@@ -515,7 +654,12 @@ function InstructionSync({ roots, rows }: { roots: readonly string[]; rows: read
       const current = file.exists ? await ipc.instructionsRead(file.path, [...roots]) : "";
       const next = spliceMemorySection(current, renderMemorySection(rows.map((r) => r.entry)));
       await ipc.instructionsWrite(file.path, [...roots], next);
-      setState(`Updated ${file.label}.`);
+      onWritten(file.path);
+      setState(
+        getSettings().memoryInstructionAutoUpdate === false
+          ? `Updated ${file.label}.`
+          : `Updated ${file.label}. From now on it follows every approval — turn that off in Settings → Agents → Team memory.`,
+      );
     } catch (e) {
       setState(`Couldn't write it: ${String(e)}`);
     }

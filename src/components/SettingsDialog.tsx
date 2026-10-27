@@ -3,6 +3,7 @@
 // long labels into slivers and pushed wide control groups out of the modal).
 // Skins render as rich choices — a palette is a thing you look at, not a word
 // you read.
+import { RulesSettings, type RulesSettingsProject } from "./RulesSettings";
 import { BrainConnectPanel } from "./BrainConnect";
 import { BrainSpendTable } from "./BrainChip";
 import { BrainAutomation, BrainExceptions } from "./BrainSettings";
@@ -140,11 +141,16 @@ export type SettingsTab =
   | "browser"
   | "remote"
   | "vault"
-  | "privacy";
+  | "privacy"
+  | "rules";
 
 interface SettingsDialogProps {
   onClose: () => void;
   initialTab?: SettingsTab;
+  /** Every project, for the Rules tab (RulesSettings.tsx). */
+  projects?: readonly RulesSettingsProject[];
+  /** Open one project's Rules panel. */
+  onOpenRules?: (projectId: string, cwd: string) => void;
 }
 
 /** Ordered, and grouped by what you came here to change: how it looks, what
@@ -162,6 +168,7 @@ const TABS: { id: SettingsTab; label: string; group: string }[] = [
   { id: "editor", label: "Editor", group: "Look" },
   { id: "terminal", label: "Terminal", group: "Look" },
   { id: "agents", label: "Agents", group: "Agents" },
+  { id: "rules", label: "Rules", group: "Agents" },
   { id: "mascot", label: "Mascot", group: "Agents" },
   { id: "dictation", label: "Dictation", group: "Agents" },
   { id: "spotsearch", label: "SpotSearch", group: "Agents" },
@@ -1200,7 +1207,7 @@ function CustomClis({
  *  advertise a key the handler does not answer. */
 const SECTION_MOD = resolve("settings-section")!;
 
-export function SettingsDialog({ onClose, initialTab = "appearance" }: SettingsDialogProps) {
+export function SettingsDialog({ onClose, initialTab = "appearance", projects = [], onOpenRules }: SettingsDialogProps) {
   // "vault" is still a valid deep-link target (agentOps and the status bar
   // both open it by name); it now lands on the tab the vault lives in.
   const [tab, setTab] = useState<SettingsTab>(
@@ -1418,6 +1425,17 @@ export function SettingsDialog({ onClose, initialTab = "appearance" }: SettingsD
           <div className="settings-content">
             {tab === "account" && <Item name="Accounts" desc="Your balance and workspace usage."><AccountSettings onTeams={()=>setTab("teams")} onWorkspaces={()=>{onClose();window.dispatchEvent(new Event("canopy:open-workspaces"));}} /></Item>}
             {tab === "teams" && <OrganizationSettings />}
+            {tab === "rules" && (
+              <Item name="Rules" desc="Team rules across your projects, and which agent CLIs enforce them.">
+                <RulesSettings
+                  projects={projects}
+                  onOpen={(id, cwd) => {
+                    onClose();
+                    onOpenRules?.(id, cwd);
+                  }}
+                />
+              </Item>
+            )}
             {tab === "appearance" && (
               <>
                 <Item

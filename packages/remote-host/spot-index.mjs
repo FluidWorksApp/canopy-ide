@@ -70,7 +70,7 @@ async function configRoots(home){
  return [...roots,...(await accountHomes(home)).map(root=>['account',root])];
 }
 
-async function sourceFiles(home,roots,wanted,scopedRoot){
+export async function sourceFiles(home,roots,wanted,scopedRoot){
  const out=[],push=(agent,file,layout)=>out.push({agent,path:file,layout});
  const cfg=await configRoots(home);
  for(const [agent,sub,depth] of [['claude','.claude/projects',1],['codex','.codex/sessions',3]])
@@ -124,9 +124,9 @@ async function geminiSessions(file,roots,mtime){
  const isLog=path.basename(file)==='logs.json';
  const bucket=path.basename(isLog?path.dirname(file):path.dirname(path.dirname(file)));
  const cwd=roots.find(r=>sha256(r.replace(/\/+$/,''))===bucket)??'';
- if(isLog){const by=new Map();for(const e of Array.isArray(v)?v:[]){if(e?.type!=='user'||typeof e.sessionId!=='string'||typeof e.message!=='string')continue;const t=e.message.trim();if(!t||isInjected(t))continue;const s=by.get(e.sessionId);if(s)s.bodies.push(clip(t));else by.set(e.sessionId,{session_id:e.sessionId,cwd,updated:mtime,bodies:[clip(t)]});}return [...by.values()];}
- const s={session_id:typeof v?.sessionId==='string'?v.sessionId:'',cwd,updated:mtime,bodies:[]};
- for(const m of Array.isArray(v?.messages)?v.messages:[]){if(m?.type!=='user'&&m?.type!=='gemini')continue;if(typeof m.content!=='string')continue;const t=m.content.trim();if(!t||isInjected(t))continue;s.bodies.push(clip(t));}
+ if(isLog){const by=new Map();for(const e of Array.isArray(v)?v:[]){if(e?.type!=='user'||typeof e.sessionId!=='string'||typeof e.message!=='string')continue;const t=e.message.trim();if(!t||isInjected(t))continue;const s=by.get(e.sessionId);if(s){s.bodies.push(clip(t));s.roles.push('user');}else by.set(e.sessionId,{session_id:e.sessionId,cwd,updated:mtime,bodies:[clip(t)],roles:['user']});}return [...by.values()];}
+ const s={session_id:typeof v?.sessionId==='string'?v.sessionId:'',cwd,updated:mtime,bodies:[],roles:[]};
+ for(const m of Array.isArray(v?.messages)?v.messages:[]){if(m?.type!=='user'&&m?.type!=='gemini')continue;if(typeof m.content!=='string')continue;const t=m.content.trim();if(!t||isInjected(t))continue;s.bodies.push(clip(t));s.roles.push(m.type==='user'?'user':'assistant');}
  return s.session_id&&s.bodies.length?[s]:[];
 }
 
@@ -134,9 +134,9 @@ async function aiderSessions(file,mtime){
  const raw=await readFile(file,'utf8').catch(()=>null);if(raw==null)return [];
  const cwd=path.dirname(file),out=[];let cur=null;
  for(const line of lines(raw)){
-  if(line.startsWith('# aider chat started at ')){if(cur?.bodies.length)out.push(cur);cur={session_id:file+'#'+line.slice(24).trim().replaceAll(' ','T'),cwd,updated:mtime,bodies:[]};continue;}
+  if(line.startsWith('# aider chat started at ')){if(cur?.bodies.length)out.push(cur);cur={session_id:file+'#'+line.slice(24).trim().replaceAll(' ','T'),cwd,updated:mtime,bodies:[],roles:[]};continue;}
   if(!cur||line.startsWith('>')||!line.trim())continue;
-  const text=(line.startsWith('#### ')?line.slice(5):line).trim();if(text)cur.bodies.push(clip(text));
+  const asked=line.startsWith('#### '),text=(asked?line.slice(5):line).trim();if(text){cur.bodies.push(clip(text));cur.roles.push(asked?'user':'assistant');}
  }
  if(cur?.bodies.length)out.push(cur);return out;
 }
@@ -148,10 +148,11 @@ async function readonlyDb(file){const m=await loadSqlite();if(!m)return null;try
 async function opencodeSessions(file){
  const db=await readonlyDb(file);if(!db)return [];const out=[];
  try{
-  const parts=db.prepare('SELECT data FROM part WHERE session_id = ? ORDER BY time_created LIMIT 2000');
+  // Who wrote a part is on its message; a store without that join still yields the text.
+  let parts;try{parts=db.prepare("SELECT p.data AS data, COALESCE(json_extract(m.data,'$.role'),'') AS role FROM part p LEFT JOIN message m ON m.id = p.message_id WHERE p.session_id = ? ORDER BY p.time_created LIMIT 2000");}catch{parts=db.prepare("SELECT data, '' AS role FROM part WHERE session_id = ? ORDER BY time_created LIMIT 2000");}
   for(const r of db.prepare("SELECT id, directory, COALESCE(title,'') AS title, COALESCE(time_updated,0) AS updated FROM session").all()){
-   const s={session_id:String(r.id),cwd:r.directory??'',updated:Math.trunc(Number(r.updated)/1000),bodies:[]};
-   for(const p of parts.all(r.id)){const v=json(p.data);if(typeof v?.text!=='string')continue;const t=v.text.trim();if(t&&!isInjected(t))s.bodies.push(clip(t));}
+   const s={session_id:String(r.id),cwd:r.directory??'',updated:Math.trunc(Number(r.updated)/1000),bodies:[],roles:[]};
+   for(const p of parts.all(r.id)){const v=json(p.data);if(typeof v?.text!=='string')continue;const t=v.text.trim();if(t&&!isInjected(t)){s.bodies.push(clip(t));s.roles.push(p.role==='user'||p.role==='assistant'?p.role:'message');}}
    if(s.bodies.length)out.push(s);
   }
  }catch{}finally{try{db.close();}catch{}}
@@ -165,15 +166,18 @@ function firstFileUrl(blob){const text=decode(blob);const at=text.indexOf('file:
 
 async function agySessions(file,mtime){
  const db=await readonlyDb(file);if(!db)return [];
- const s={session_id:path.basename(file,path.extname(file)),cwd:'',updated:mtime,bodies:[]};
+ const s={session_id:path.basename(file,path.extname(file)),cwd:'',updated:mtime,bodies:[],roles:[]};
  try{
   try{const r=db.prepare('SELECT data FROM trajectory_metadata_blob LIMIT 1').get();if(r?.data instanceof Uint8Array)s.cwd=firstFileUrl(r.data)??'';}catch{}
-  for(const r of db.prepare('SELECT step_payload FROM steps ORDER BY idx LIMIT 500').all()){if(!(r.step_payload instanceof Uint8Array))continue;for(const run of printableRuns(r.step_payload,24)){if(isInjected(run)||isSessionMetadata(run))continue;s.bodies.push(clip(run));}}
+  for(const r of db.prepare('SELECT step_payload FROM steps ORDER BY idx LIMIT 500').all()){if(!(r.step_payload instanceof Uint8Array))continue;for(const run of printableRuns(r.step_payload,24)){if(isInjected(run)||isSessionMetadata(run))continue;s.bodies.push(clip(run));s.roles.push('message');}}
  }catch{}finally{try{db.close();}catch{}}
  return s.bodies.length?[s]:[];
 }
 
-function wholeSessions(agent,file,roots,mtime){
+/** Every conversation in a whole-file store, each with `bodies` and the
+ *  parallel `roles` (user / assistant / message) — session-transcript.mjs reads
+ *  one conversation's end through this. */
+export function wholeSessions(agent,file,roots,mtime){
  if(agent==='gemini')return geminiSessions(file,roots,mtime);
  if(agent==='aider')return aiderSessions(file,mtime);
  if(agent==='opencode')return opencodeSessions(file);

@@ -11,9 +11,14 @@ const ORDER:CreditStatus[]=['ok','low','zero','final','paused'];
 export type CreditDebit={occurred_at:string;amount_usd:string;workspace_id:string|null;workspace_name:string|null;description?:string;quantity?:string|null};
 export type CreditSession={id:string;workspace_id:string;workspace_name:string;started_at:string;ended_at:string|null;metered_seconds:string|number;consumed_usd:string};
 export type WorkspaceUsage={workspace_id:string|null;workspace_name:string|null;usd:string;last_at:string};
+/** Add funds (Stripe Checkout) limits, sent when the server supports it. */
+export type PurchaseOptions={enabled:boolean;currency?:string;presetsUsd:number[];minUsd:number;maxUsd:number};
+/** A credited payment; `reference` is the checkout id. */
+export type CreditPurchase={reference:string;amount_usd:string;occurred_at:string};
 /** GET /api/credits. Everything after `paymentsEnabled` is newer than some
- * deployed servers, so each field is optional. */
-export type Credits={balanceUsd?:string;assignedUsd?:string;balance?:string;paymentsEnabled?:boolean;status?:CreditStatus;policy?:CreditPolicy;computeAllowed?:boolean;amountToRestoreUsd?:string;enforcement?:'enforce'|'notify'|'off';recentDebits?:CreditDebit[];usageByWorkspace?:WorkspaceUsage[];sessions?:CreditSession[];lastCreditRequestAt?:string|null;creditRequestsEnabled?:boolean};
+ * deployed servers, so each field is optional. `paymentsEnabled` is true only
+ * when the server has Add funds configured. */
+export type Credits={balanceUsd?:string;assignedUsd?:string;balance?:string;paymentsEnabled?:boolean;purchase?:PurchaseOptions;purchases?:CreditPurchase[];status?:CreditStatus;policy?:CreditPolicy;computeAllowed?:boolean;amountToRestoreUsd?:string;enforcement?:'enforce'|'notify'|'off';recentDebits?:CreditDebit[];usageByWorkspace?:WorkspaceUsage[];sessions?:CreditSession[];lastCreditRequestAt?:string|null;creditRequestsEnabled?:boolean};
 
 export const balanceOf=(credits:Credits|null|undefined)=>{if(!credits)return null;const value=credits.balanceUsd??(credits.balance==null?null:Number(credits.balance)/100);const n=value==null||value===''?NaN:Number(value);return Number.isFinite(n)?n:null;};
 export function creditStatus(balance:number,policy:CreditPolicy=CREDIT_POLICY):CreditStatus{
@@ -32,13 +37,16 @@ export type CreditBanner={tone:'warn'|'error';title:string;body:string};
 export function creditBanner(credits:Credits|null|undefined):CreditBanner|null{
  const balance=balanceOf(credits),status=statusOf(credits);if(balance==null||!status||status==='ok')return null;
  const policy=credits?.policy??CREDIT_POLICY,cutoff=usd(policy.cutoffUsd),left=usd(Math.max(0,balance-policy.cutoffUsd));
+ const more=credits?.paymentsEnabled===true?'Add funds':'Request more credit';
  if(status==='paused'){const restore=Number(credits?.amountToRestoreUsd??amountToRestore(balance,policy));return {tone:'error',title:'Workspaces paused',body:`Your balance is past the ${cutoff} limit, so running workspaces were stopped and new starts are blocked. Add at least ${usd(restore)} to start them again. Your files and settings are kept.`};}
- if(status==='final')return {tone:'error',title:'Final notice',body:`Workspaces pause at ${cutoff}, in about ${left} of running time. Request more credit to keep working.`};
+ if(status==='final')return {tone:'error',title:'Final notice',body:`Workspaces pause at ${cutoff}, in about ${left} of running time. ${more} to keep working.`};
  if(status==='zero')return {tone:'warn',title:'Out of credit',body:`You have about ${left} of running time before workspaces pause at ${cutoff}.`};
  return {tone:'warn',title:'Balance running low',body:`Workspaces keep running. They pause if the balance reaches ${cutoff}.`};
 }
 
-export type CreditExhausted={message:string;balanceUsd:number|null;cutoffUsd:number;shared:boolean};
+/** `minimumUsd`: the balance a start needs (the cutoff plus one billing
+ * interval), sent when the balance is above the cutoff but too close to it. */
+export type CreditExhausted={message:string;balanceUsd:number|null;cutoffUsd:number;shared:boolean;minimumUsd?:number|null};
 /** Recognises the control plane's refusal to start compute. Works with a
  * `detailedErrors` response ({code:'credit_exhausted', status:402, ...}), a
  * server that only passes the status, and the plain message. */
@@ -48,8 +56,8 @@ export function creditExhaustedFromError(error:unknown):CreditExhausted|null{
  const message=typeof detail?.error==='string'?detail.error:text;
  const matched=detail?.code==='credit_exhausted'||detail?.reason==='credit_exhausted'||detail?.status===402||/Workspaces pause at|past the .{1,12} limit/.test(message);
  if(!matched)return null;
- const balance=Number(detail?.balanceUsd);const cutoff=Number(detail?.cutoffUsd);
- return {message,balanceUsd:detail?.balanceUsd!=null&&Number.isFinite(balance)?balance:null,cutoffUsd:Number.isFinite(cutoff)&&detail?.cutoffUsd!=null?cutoff:CREDIT_POLICY.cutoffUsd,shared:detail?.shared===true||/owner/.test(message)};
+ const balance=Number(detail?.balanceUsd);const cutoff=Number(detail?.cutoffUsd);const minimum=Number(detail?.minimumUsd);
+ return {message,balanceUsd:detail?.balanceUsd!=null&&Number.isFinite(balance)?balance:null,cutoffUsd:Number.isFinite(cutoff)&&detail?.cutoffUsd!=null?cutoff:CREDIT_POLICY.cutoffUsd,shared:detail?.shared===true||/owner/.test(message),...(detail?.minimumUsd!=null&&Number.isFinite(minimum)?{minimumUsd:minimum}:{})};
 }
 
 const request=<T,>(route:string,body?:unknown)=>invoke<T>('canopy_account_request',{route,body:body??null});
@@ -58,6 +66,25 @@ export const openAccountSettings=()=>window.dispatchEvent(new CustomEvent('canop
  * answers a repeat with the open request. */
 export async function requestMoreCredit(note?:string){
  return request<{requested:boolean;duplicate?:boolean;requestedAt?:string;emailed?:boolean}>('/api/credits',{action:'request-credit',...(note?.trim()?{note:note.trim().slice(0,1000)}:{})});
+}
+
+export type CheckoutStart={url:string;sessionId:string;amountUsd:string;expiresAt?:string|null};
+/** Start a Stripe Checkout for `amountUsd`. The server answers 503 when Add
+ * funds isn't configured; the balance is credited by its webhook, not here. */
+export async function startCheckout(amountUsd:number){
+ return request<CheckoutStart>('/api/credits',{action:'checkout',amountUsd:amountUsd.toFixed(2)});
+}
+/** Read the balance until the checkout `sessionId` shows up as a credited
+ * purchase. Resolves with the credits that include it, or null when `signal`
+ * aborts or `timeoutMs` passes (the payment may still arrive later). */
+export async function waitForPurchase(sessionId:string,{signal,intervalMs=3000,timeoutMs=15*60_000,onCredits}:{signal?:AbortSignal;intervalMs?:number;timeoutMs?:number;onCredits?:(credits:Credits)=>void}={}){
+ const deadline=Date.now()+timeoutMs;
+ while(!signal?.aborted&&Date.now()<deadline){
+  await new Promise(resolve=>setTimeout(resolve,intervalMs));if(signal?.aborted)break;
+  try{const credits=await request<Credits>('/api/credits');onCredits?.(credits);if(credits.purchases?.some(p=>p.reference===sessionId))return credits;}
+  catch{/* Offline for a moment; keep waiting. */}
+ }
+ return null;
 }
 
 // Non-blocking in-app warning, once per crossing into a worse level. The level

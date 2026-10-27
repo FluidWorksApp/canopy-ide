@@ -1,8 +1,14 @@
 // Fetch everything a session document is assembled from. Every source is
 // optional and every failure is swallowed into "not available": a hookless CLI
-// has no journal, a cloud workspace has no turn timeline, a past session's
-// checkout may have been deleted. The document says what it could not see
-// (`missing`) instead of failing to open.
+// has no journal, a past session's checkout may have been deleted. The
+// document says what it could not see (`missing`) instead of failing to open.
+//
+// In a cloud workspace the same calls reach the workspace host — the turn
+// timeline (turns.mjs), the change journal (agent-workspace.mjs), PR
+// provenance (provenance.mjs), the session records and the transcript — while
+// the ledger stays on this computer, where the brain filed it. A host too old
+// to answer one of them is named as such (`hostOutdated`), not as missing
+// data.
 
 import * as ipc from "../ipc";
 import { queryLedger, type LedgerEntry } from "../ledger";
@@ -22,6 +28,10 @@ export interface LoadedSessionDoc {
   digest?: ipc.SessionDigest;
   /** Which sources could not be read, in plain words. */
   missing: string[];
+  /** The cloud workspace's host predates a source this document reads: the
+   *  fix is restarting or updating the workspace, not anything about the
+   *  session. */
+  hostOutdated?: boolean;
 }
 
 /** The injectable lookups — real IPC by default, fixtures in tests. */
@@ -52,8 +62,10 @@ export async function loadSessionDoc(
   deps: SessionDocDeps = ipcSessionDocDeps,
 ): Promise<LoadedSessionDoc> {
   const missing: string[] = [];
+  let hostOutdated = false;
   const soft = <T,>(what: string, p: Promise<T>, empty: T): Promise<T> =>
-    p.catch(() => {
+    p.catch((e: unknown) => {
+      if (/older Canopy host/i.test(String(e))) hostOutdated = true;
       missing.push(what);
       return empty;
     });
@@ -111,5 +123,5 @@ export async function loadSessionDoc(
     transcript,
     live: src.live,
   });
-  return { doc, digest, missing: [...new Set(missing)] };
+  return { doc, digest, missing: [...new Set(missing)], ...(hostOutdated ? { hostOutdated } : {}) };
 }

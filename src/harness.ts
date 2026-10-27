@@ -51,7 +51,10 @@ export type HarnessFeature =
   /** Token, cost and model figures Canopy can read for the status tray. */
   | "usageReporting"
   /** An in-place self-updater, as opposed to reinstalling the package. */
-  | "selfUpdate";
+  | "selfUpdate"
+  /** A hook that can refuse a tool call before it runs — what the Rules
+   *  panel's gates are enforced through. */
+  | "ruleEnforcement";
 
 export interface HarnessCapability {
   support: HarnessSupport;
@@ -81,6 +84,7 @@ export const HARNESS_FEATURES: readonly HarnessFeature[] = [
   "compaction",
   "usageReporting",
   "selfUpdate",
+  "ruleEnforcement",
 ];
 
 const UNKNOWN: HarnessCapability = { support: "unknown" };
@@ -96,12 +100,24 @@ function allUnknown(): HarnessCapabilities {
 const CLAUDE_RUNNER_STAMP =
   "src/structuredRunners.ts CLAUDE_RUNNER.verification (Claude Code 2.1.310, `claude --help` + live run, 2026-10-26)";
 
-/** Claude Code, filled only from what the repo has already stamped. Subagents
- *  and compaction are left unknown on purpose: they may well exist, but no
- *  file here records them being checked, and a surface that trusted a
- *  remembered flag would fail in front of the person. */
+const ACTIVITY_STAMP =
+  "src-tauri/src/session_activity.rs header (Claude Code 2.1.311 transcripts on disk, 2026-10-27)";
+
+/** Claude Code, filled only from what the repo has already stamped. */
 const CLAUDE_CODE: HarnessCapabilities = {
   ...allUnknown(),
+  subagents: {
+    support: "native",
+    note: "Task/Agent tool calls; background agents report back through task notifications. Read from the transcript, not from hooks.",
+    source: ACTIVITY_STAMP,
+    canopyLayer: "The subagent tree under each session (SubagentTree.tsx), from session_activity.",
+  },
+  compaction: {
+    support: "native",
+    note: "`/compact [instructions]` typed at an idle prompt, or sent as a stream-json user message to `claude -p --resume <id>` (emits system/compact_boundary with pre/post tokens). It always condenses the whole conversation; instructions steer what the summary keeps.",
+    source: `${ACTIVITY_STAMP}; live run of /compact over --input-format stream-json --resume, 2026-10-27`,
+    canopyLayer: "Context controls on the turn timeline (contextCompaction.ts).",
+  },
   checkpointsRewind: {
     support: "partial",
     note: "Files only, and only what Write/Edit/NotebookEdit touched: `CLAUDE_CODE_ENABLE_SDK_FILE_CHECKPOINTING=true claude -p --resume <id> --rewind-files <uuid>`, keyed on the replayed prompt's uuid, printed \"Files rewound to state at message <uuid>\" and restored the file; a Bash-created file was left behind. Conversation rewind is interactive-only.",
@@ -143,20 +159,78 @@ const CLAUDE_CODE: HarnessCapabilities = {
     note: "`claude update`, for both npm and native installs.",
     source: "src/projects.ts claude registry entry `update` (Verified)",
   },
+  ruleEnforcement: {
+    support: "native",
+    note: "PreToolUse hook denies with hookSpecificOutput.permissionDecision \"deny\".",
+    source: "src-tauri/src/agents.rs setup_claude_hooks GATE_TOOLS_MATCHER; code.claude.com/docs/en/hooks",
+    canopyLayer: "canopy-hook evaluates the approved gates and the always-on irreversible-action check before Bash, edits, reads, fetches and the vault run.",
+  },
 };
 
-/** The ledger, keyed by agent registry id. Only Claude Code has an entry: the
- *  other CLIs are being researched, and Codex's runner stamps, for one, will
- *  move in here with that research rather than ahead of it. */
+/** The ledger, keyed by agent registry id. Only Claude Code has a full entry:
+ *  the other CLIs are being researched, and Codex's runner stamps, for one,
+ *  will move in here with that research rather than ahead of it. */
 export const HARNESS_CAPABILITIES: Readonly<Record<string, HarnessCapabilities>> = {
   claude: CLAUDE_CODE,
+};
+
+const CHECKED = "checked against the vendor docs, 2026-10-27";
+
+/** How the Rules panel's gates reach each CLI, from each vendor's pre-tool
+ *  hook contract. Kept apart from the full entries above because it is the
+ *  one feature researched for every CLI Canopy installs hooks for; the rest
+ *  of their records stay `unknown` until their own research lands. */
+export const RULE_ENFORCEMENT: Readonly<Record<string, HarnessCapability>> = {
+  codex: {
+    support: "native",
+    note: "PreToolUse on Bash and apply_patch; the deny shape is Claude's. Run /hooks in Codex once to trust the updated hook file.",
+    source: `learn.chatgpt.com/docs/hooks (${CHECKED}); src-tauri/src/agents.rs CODEX_GATE_MATCHER`,
+  },
+  cursor: {
+    support: "native",
+    note: "preToolUse on Shell, Write, Read, Delete and MCP tools; denies with permission \"deny\" and tells the agent why.",
+    source: `cursor.com/docs/hooks (${CHECKED}); src-tauri/src/agents.rs CURSOR_GATE_MATCHER`,
+  },
+  grok: {
+    support: "native",
+    note: "PreToolUse with Claude's tool names; denies with decision \"deny\".",
+    source: `docs.x.ai/build/features/hooks (${CHECKED}); grok 1.0.46 embedded docs`,
+  },
+  agy: {
+    support: "native",
+    note: "PreToolUse on run_command, the file writers, view_file and read_url_content; denies with decision \"deny\", otherwise defers to Antigravity's own permissions.",
+    source: `antigravity.google/docs/hooks (${CHECKED}; auto_approve present in the 1.2.14 binary)`,
+  },
+  opencode: {
+    support: "native",
+    note: "Canopy's plugin asks before bash, edits, reads and fetches in tool.execute.before, and throws to refuse.",
+    source: `opencode.ai/docs/plugins (${CHECKED})`,
+  },
+  omp: {
+    support: "native",
+    note: "Canopy's extension answers tool_call with {block, reason}.",
+    source: "@oh-my-pi/pi-coding-agent 18.4.10 ToolCallEventResult types",
+  },
+  amp: {
+    support: "native",
+    note: "Canopy's plugin answers tool.call with reject-and-continue. Amp's tool names were read from the installed binary.",
+    source: "`amp plugins show-docs`; Bash/create_file/edit_file/Read/read_web_page in the amp binary",
+  },
+  aider: {
+    support: "none",
+    note: "No hook can stop a tool call. Rules reach Aider as guidance, and Aider asks you before running each shell command unless skip-permissions is on.",
+    source: "docs/agent-parity.md Aider: no hooks",
+    canopyLayer: "Guidance at session start; Aider's own confirm-before-shell prompt.",
+  },
 };
 
 /** What this CLI is known to support. Never undefined: an id with no entry
  *  gets a record of `unknown`s, so a caller cannot mistake absence of research
  *  for absence of the feature — or crash on it. */
 export function harnessCapabilities(cliId: string): HarnessCapabilities {
-  return HARNESS_CAPABILITIES[cliId] ?? allUnknown();
+  const base = HARNESS_CAPABILITIES[cliId] ?? allUnknown();
+  const rules = RULE_ENFORCEMENT[cliId];
+  return rules ? { ...base, ruleEnforcement: rules } : base;
 }
 
 /** One feature's verdict for one CLI — the question a surface actually asks. */
@@ -166,6 +240,13 @@ export function harnessSupport(
 ): HarnessSupport {
   return harnessCapabilities(cliId)[feature].support;
 }
+
+/** How to ask a harness to compact its conversation, where `compaction` is
+ *  supported: the command typed at its prompt (or sent as a user message to a
+ *  resumed headless run), followed by optional instructions. */
+export const HARNESS_COMPACT_COMMAND: Readonly<Record<string, string>> = {
+  claude: "/compact",
+};
 
 /** The oldest version of a harness Canopy's launches are written for, with
  *  the behaviour that makes it the floor. Separate from the feature ledger:
