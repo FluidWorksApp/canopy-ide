@@ -343,7 +343,16 @@ export class NativeWorkspaceHost implements Host {
       const requested=Array.isArray(args.argv)?(args.argv as string[]).map(quote).join(' '):String(args.runCommand??args.command??args.shell??'/bin/bash');
       const requestId=crypto.randomUUID();
       const commandLine=`cd ${quote(cwd)} && env ${[...env.filter(([key])=>!['CANOPY_ACCOUNT_POOL','CANOPY_SESSION_REQUEST_ID',CLAUDE_IDE_MARKER].includes(key)),['CANOPY_SESSION_REQUEST_ID',requestId]].map(([key,val])=>quote(key+'='+val)).join(' ')} ${requested}`;
-      const session=await this.call<RemoteSession>('/sessions',{command:commandLine,kind:args.runCommand?'build':'terminal',accountId,requestId,projectId:args.projectId,...(claudeIde?{claudeIde}:{})});
+      // A task attempt's terminal: the attempt must be the current reserved
+      // one, and starts (or fails) with the spawn, as pty.rs does.
+      const binding=args.runId!=null||args.attemptId!=null?await this.native<Args|null>('task_spawn_binding',{runId:args.runId??null,attemptId:args.attemptId??null}):null;
+      let session:RemoteSession;
+      try{session=await this.call<RemoteSession>('/sessions',{command:commandLine,kind:args.runCommand?'build':'terminal',accountId,requestId,projectId:args.projectId,...(claudeIde?{claudeIde}:{})});}
+      catch(error){if(binding)await this.native('task_mark_launch_failed',{binding}).catch(()=>{});throw error;}
+      if(binding){
+        try{await this.native('task_mark_spawned',{binding});}
+        catch(error){await this.call(`/sessions/${session.id}/stop`,{}).catch(()=>{});await this.native('task_mark_launch_failed',{binding}).catch(()=>{});throw Error(`spawned PTY but could not start task attempt: ${String(error).replace(/^Error: /,'')}`);}
+      }
       if(Number(args.cols)>0 && Number(args.rows)>0){
         try{await this.call(`/sessions/${session.id}/resize`,{cols:args.cols,rows:args.rows});session.cols=Number(args.cols);session.rows=Number(args.rows);}
         catch(error){
@@ -395,8 +404,39 @@ export class NativeWorkspaceHost implements Host {
    * newer app asking a workspace that still runs last month's host gets one
    * plain "restart or update the workspace" instead of "does not support". */
   private async hostCommand<T>(command:string,args:Args){
-    try{return await this.native<T>(command,args);}
-    catch(error){if(outdatedHostCommand(error)!==command)throw error;this.hostOutdated(command);throw Error(hostOutdatedMessage(command));}
+    // A Channel argument (LSP output, a runner's lines) is named for the host,
+    // which queues what the command sends; pumpChannels drains it here.
+    const opened:string[]=[];let input=args;
+    for(const [key,value] of Object.entries(args))if(value instanceof WorkspaceChannel){const id=crypto.randomUUID();this.hostChannels.set(id,value as WorkspaceChannel<unknown>);opened.push(id);input={...input,[key]:{__canopyChannel:id}};}
+    if(opened.length)this.pumpChannels();
+    try{
+      const result=await this.native<T>(command,input);
+      // The desktop announces a language server's end as an event; here its
+      // channel closing is that end.
+      if(command==='lsp_start')for(const id of opened)this.channelEnded.set(id,()=>this.emit('lsp:exit',result));
+      return result;
+    }catch(error){
+      for(const id of opened)this.hostChannels.delete(id);
+      if(outdatedHostCommand(error)!==command)throw error;this.hostOutdated(command);throw Error(hostOutdatedMessage(command));
+    }
+  }
+  private hostChannels=new Map<string,WorkspaceChannel<unknown>>();
+  private channelEnded=new Map<string,()=>void>();
+  private pumping=false;
+  private async pumpChannels(){
+    if(this.pumping)return;this.pumping=true;
+    try{
+      while(this.hostChannels.size&&!this.disposed){
+        let batch:Record<string,{messages:unknown[];closed:boolean}>;
+        try{batch=await this.native('channel_poll',{ids:[...this.hostChannels.keys()].slice(0,64),wait:1500},INTERACTIVE);}
+        catch{await new Promise(resolve=>setTimeout(resolve,1000));continue;}
+        for(const [id,{messages,closed}] of Object.entries(batch??{})){
+          const channel=this.hostChannels.get(id);if(!channel)continue;
+          for(const message of messages){try{channel.onmessage(message);}catch{/* One listener's failure never stalls the stream. */}}
+          if(closed){this.hostChannels.delete(id);this.channelEnded.get(id)?.();this.channelEnded.delete(id);}
+        }
+      }
+    }finally{this.pumping=false;}
   }
   private outdatedReported=false;
   private hostOutdated(command?:string){
@@ -419,5 +459,5 @@ export class NativeWorkspaceHost implements Host {
   }
   channel<T>():HostChannel<T>{return new WorkspaceChannel<T>();}
   invokeDesktop<T>(command:string,args:Args={}):Promise<T>{return this.desktopCall<T>(command,args);}
-  dispose(){this.disposed=true;this.harness?.stop();this.harness=undefined;for(const release of [...this.desktopListeners]){try{release();}catch{/* Disposed handlers stay inert even if native teardown fails. */}}this.desktopListeners.clear();window.removeEventListener('canopy:account-changed',this.onAccountChanged);clearTimeout(this.heartbeat);clearTimeout(this.versionCheck);for(const input of this.inputs.values())input.dispose();this.inputs.clear();clearTimeout(this.poll);for(const id of this.streams.keys())this.detach(id);this.listeners.clear();}
+  dispose(){const channels=[...this.hostChannels.keys()];this.hostChannels.clear();if(channels.length&&!this.disposed)void this.native('channel_drop',{ids:channels}).catch(()=>{});this.disposed=true;this.harness?.stop();this.harness=undefined;for(const release of [...this.desktopListeners]){try{release();}catch{/* Disposed handlers stay inert even if native teardown fails. */}}this.desktopListeners.clear();window.removeEventListener('canopy:account-changed',this.onAccountChanged);clearTimeout(this.heartbeat);clearTimeout(this.versionCheck);for(const input of this.inputs.values())input.dispose();this.inputs.clear();clearTimeout(this.poll);for(const id of this.streams.keys())this.detach(id);this.listeners.clear();}
 }

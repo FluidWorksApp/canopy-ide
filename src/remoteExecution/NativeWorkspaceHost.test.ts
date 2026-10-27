@@ -670,3 +670,18 @@ it('checks the host protocol once after boot and reports a stale host',async()=>
   window.removeEventListener('canopy:workspace-host-outdated',heard);host.dispose();
  }finally{vi.useRealTimers();}
 });
+it('streams a workspace command\'s channel output back from the host',async()=>{
+ const {host,fetcher}=setup();
+ let polls=0;
+ fetcher.mockImplementation(async(_url:string,options:RequestInit)=>{const body=JSON.parse(String(options.body||'{}'));
+  if(body.command==='lsp_start')return {ok:true,json:async()=>({result:3})};
+  if(body.command==='channel_poll'){polls++;const id=body.args.ids[0];return {ok:true,json:async()=>({result:{[id]:polls===1?{messages:['{"id":1}'],closed:false}:{messages:['{"id":2}'],closed:true}}})};}
+  return {ok:true,json:async()=>({result:null})};});
+ const seen:unknown[]=[];const channel=host.channel<string>();channel.onmessage=m=>seen.push(m);
+ const exits:unknown[]=[];await host.listen('lsp:exit',event=>exits.push(event.payload));
+ expect(await host.invoke('lsp_start',{command:'tsserver',args:[],root:'/workspace',onMessage:channel})).toBe(3);
+ const sent=fetcher.mock.calls.map(([,o])=>JSON.parse(String(o.body))).find(b=>b.command==='lsp_start');
+ expect(sent.args.onMessage.__canopyChannel).toMatch(/^[0-9a-f-]{36}$/);
+ await vi.waitFor(()=>expect(seen).toEqual(['{"id":1}','{"id":2}']));
+ expect(polls).toBe(2);await vi.waitFor(()=>expect(exits).toEqual([3]));host.dispose();
+});

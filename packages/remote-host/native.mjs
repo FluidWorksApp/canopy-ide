@@ -4,7 +4,7 @@ import {safeGitRead,GIT_READ_COMMANDS} from './git-read.mjs';
 import {gitIdentityEnvironment} from './git-identity.mjs';
 // Native IDE command boundary for a Linux workspace. Files and subprocesses
 // never escape the selected container; no host Docker/cloud credential API.
-import {readFile,writeFile,open,readdir,stat,mkdir,rename,cp,unlink,rm,lstat} from 'node:fs/promises';
+import {readFile,writeFile,open,readdir,stat,mkdir,rename,cp,unlink,rm,lstat,realpath} from 'node:fs/promises';
 import {execFile,spawn} from 'node:child_process';
 import {promisify} from 'node:util';
 import path from 'node:path';
@@ -34,6 +34,13 @@ import {gitHistory} from './git-history.mjs';
 import {claudeIde,claudeIdeCommand} from './claude-ide.mjs';
 import {workspaceToolsCommands} from './workspace-tools.mjs';
 import {workspaceCleanupCommands} from './workspace-cleanup.mjs';
+import {lspCommands} from './lsp.mjs';
+import {githubCommands} from './github.mjs';
+import {taskStoreCommands,taskStoreFor} from './task-store.mjs';
+import {workflowStoreCommands} from './workflow-store.mjs';
+import {structuredRunnerCommands} from './structured-runner.mjs';
+import {turnsCommands} from './turns.mjs';
+import {provenanceCommands} from './provenance.mjs';
 import {ChannelHub,isChannelArg} from './channels.mjs';
 import {HOST_PROTOCOL,NATIVE_COMMANDS,NATIVE_PREFIXES} from './native-commands.mjs';
 const sessionProcesses=sessionProcessReader();
@@ -83,10 +90,22 @@ async function metadata(file,fallback){try{return JSON.parse((await boundedRead(
 async function saveMetadata(file,value){await mkdir(HOME+'/.canopy',{recursive:true,mode:0o700});const target=HOME+'/.canopy/'+file;const temporary=target+'.'+randomUUID()+'.next';const data=JSON.stringify(value);if(Buffer.byteLength(data)>1048576)throw Error('Workspace metadata limit reached');await writeFile(temporary,data,{mode:0o600,flag:'wx'});await rename(temporary,target);changeCursor++;changes.push({sequence:changeCursor,change:{store:file,scope:ROOT,id:''}});if(changes.length>1024)changes.shift();}
 // Command families ported from the desktop's Rust commands, one module each.
 // Each takes the same containment helpers as the commands below.
-const familyContext={run,scoped,execute,home:HOME,root:ROOT};
+const familyContext={run,scoped,execute,home:HOME,root:ROOT,
+ // Store mutations wake the IDE's caches through store_changes, as change::pulse does.
+ pulse:(store,scope,id)=>{changeCursor++;changes.push({sequence:changeCursor,change:{store,scope:scope??ROOT,id:id??''}});if(changes.length>1024)changes.shift();}};
+familyContext.changed=familyContext.pulse;
+const taskStore=taskStoreFor(familyContext);
+// A structured runner may only run the current attempt, in the worktree its task reserved.
+familyContext.authorize=async(attemptId,cwd)=>{
+ const detail=await taskStore.getForAttempt(attemptId);const attempt=detail?.attempts.find(a=>a.attemptId===attemptId);
+ if(!attempt)throw Error('task attempt not found');
+ if(attempt.state!=='running')throw Error(`structured runner attempt is ${attempt.state}, not running`);
+ let expected;try{expected=await realpath(detail.envelope.worktreePath);}catch(error){throw Error(`reserved task workspace is invalid: ${error.message}`);}
+ if(expected!==cwd)throw Error('structured runner cwd does not match its reserved task workspace');
+};
 const channels=new ChannelHub();
 export const NATIVE_FAMILIES=Object.assign({},...[
- workspaceToolsCommands,workspaceCleanupCommands,
+ workspaceToolsCommands,workspaceCleanupCommands,lspCommands,githubCommands,taskStoreCommands,workflowStoreCommands,structuredRunnerCommands,turnsCommands,provenanceCommands,
 ].map(family=>family(familyContext)));
 const FAMILIES=NATIVE_FAMILIES;
 const CLIS=['claude','codex','amp','aider','agy','opencode','omp','cursor-agent','grok'];
@@ -95,6 +114,10 @@ export async function nativeInvoke(command,args={}){
   // The desktop's answers to the Claude Code IDE servers of this workspace's
   // terminals (claude-ide.mjs), which live in this same process.
   if(command.startsWith('claude_ide_')){const handled=claudeIdeCommand(claudeIde,command,args);if(handled.handled)return handled.value;}
+  // Managed task spawns (pty.rs spawn_binding/mark_spawned/mark_launch_failed).
+  if(command==='task_spawn_binding')return taskStore.spawnBinding(args.runId??null,args.attemptId??null);
+  if(command==='task_mark_spawned'){await taskStore.markSpawned(args.binding);return;}
+  if(command==='task_mark_launch_failed'){await taskStore.markLaunchFailed(args.binding);return;}
   if(command==='channel_poll')return channels.poll(args.ids,args.wait);
   if(command==='channel_drop'){channels.drop(args.ids);return;}
   if(Object.hasOwn(FAMILIES,command)){
@@ -137,7 +160,7 @@ export async function nativeInvoke(command,args={}){
   if(command==='cli_take_pending_open'||command==='cli_take_pending_link'||command==='agent_health_report')return null;
   if(command==='instance_id')return 'remote-'+(process.env.CANOPY_WORKSPACE_ID??'workspace');
   if(command==='relay_status')return {role:'off',code:null,port:null,ips:[],addr:null,self_id:null,name:null,visibility:null,public_ip:null,members:[]};
-  if(['notes_list','notes_due','research_list','task_list_history'].includes(command))return metadata(command+'.json',[]);
+  if(['notes_list','notes_due','research_list'].includes(command))return metadata(command+'.json',[]);
   if(['context_tools','context_publish','set_context_scopes','pr_watch_set'].includes(command)){await saveMetadata(command+'.json',args);return;}
   if(command==='terminal_governor_status'){
     const limit=Number(await readFile('/sys/fs/cgroup/memory.max','utf8'));
