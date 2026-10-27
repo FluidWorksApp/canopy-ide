@@ -4,6 +4,20 @@ import { NativeWorkspaceHost } from './NativeWorkspaceHost';
 import { renderHook } from '@testing-library/react';
 import { connectionKey, useConnectionState } from './connectionState';
 afterEach(() => vi.unstubAllGlobals());
+it('runs brain calls and the ledger on the viewing computer, streaming the brain\'s output back',async()=>{
+ const {host,desktop,fetcher}=setup();
+ const native={onmessage:(_:unknown)=>{}};
+ vi.mocked(desktop.channel).mockReturnValue(native as never);
+ vi.mocked(desktop.invoke).mockResolvedValue(undefined);
+ const seen:unknown[]=[];
+ const onData=host.channel<unknown>();onData.onmessage=m=>seen.push(m);
+ await host.invoke('brain_call',{callId:'c1',command:'brain',args:['-p'],cwd:'',onData});
+ expect(desktop.invoke).toHaveBeenCalledWith('brain_call',{callId:'c1',command:'brain',args:['-p'],cwd:'',onData:native});
+ native.onmessage({kind:'line',text:'{"type":"result"}'});
+ expect(seen).toEqual([{kind:'line',text:'{"type":"result"}'}]);
+ for(const command of ['brain_kill','ledger_append','ledger_query','ledger_root','ledger_update_status'])await host.invoke(command,{});
+ expect(fetcher).not.toHaveBeenCalled();host.dispose();
+});
 it('runs the companion CLI on the viewing computer and streams its output back through a native channel',async()=>{
  const {host,desktop,fetcher}=setup();
  const native={onmessage:(_:unknown)=>{}};
