@@ -2423,6 +2423,11 @@ export const profileDelete = (id: string) => invoke<string>("profile_delete", { 
 /** The env pointing one CLI at one profile. Empty for the default. */
 export const profileEnv = (agent: string, id: string) =>
   invoke<[string, string][]>("profile_env", { agent, id });
+/** The profiles and profile env on the computer showing the IDE, whatever
+ *  host the workspace runs on — for the brain, which always runs there. */
+export const profilesListDesktop = () => invokeDesktop<AgentProfile[]>("profiles_list");
+export const profileEnvDesktop = (agent: string, id: string) =>
+  invokeDesktop<[string, string][]>("profile_env", { agent, id });
 /** Re-run hook + MCP setup for one CLI inside one profile. */
 export const profileSetup = (agent: string, id: string) =>
   invoke<SetupReport>("profile_setup", { agent, id });

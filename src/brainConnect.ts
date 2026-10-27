@@ -30,7 +30,7 @@ import {
 } from "./projects";
 import { loginCommand } from "./profiles";
 import { companionCli } from "./companion";
-import { updateSettings, type Settings } from "./settings";
+import { getSettings, updateSettings, type Settings } from "./settings";
 import { brainArgs } from "./structuredRunners";
 
 /** Asks the app to open the connect flow (BrainConnectHost listens). */
@@ -86,9 +86,16 @@ export function recommendedBrain(installed: (bin: string) => boolean): AgentCli 
 }
 
 /** Make `cliId` the brain and check it straight away. The brain is stored as
- *  `defaultAgent` (see brain.ts): one setting, one answer. */
+ *  `defaultAgent` (see brain.ts): one setting, one answer. Model overrides are
+ *  vendor aliases ("haiku", "gpt-…"), so they go back to the new CLI's
+ *  defaults rather than being handed to a CLI that never offered them. */
 export function chooseBrain(cliId: string): Promise<BrainConnection> {
-  updateSettings({ defaultAgent: cliId });
+  const prev = getSettings().defaultAgent;
+  updateSettings(
+    prev === cliId
+      ? { defaultAgent: cliId }
+      : { defaultAgent: cliId, brainModel: "", brainBackgroundModel: "" },
+  );
   return checkBrainConnection();
 }
 

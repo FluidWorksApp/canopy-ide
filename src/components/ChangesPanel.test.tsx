@@ -132,7 +132,8 @@ describe("Suggest message", () => {
 describe("with no brain connected", () => {
   it("swaps Suggest message for the one Connect your brain call to action", async () => {
     const { noteBrainOutcome, resetBrainConnectionForTests } = await import("../brainStatus");
-    noteBrainOutcome({ ok: false, reason: "signed-out", message: "Not logged in" }, { id: "x", name: "X" });
+    const { chosenBrainId } = await import("../brain");
+    noteBrainOutcome({ ok: false, reason: "signed-out", message: "Not logged in" }, { id: chosenBrainId(), name: "X" });
     try {
       panel({ groups: [group([file({ staged: true, status: "M " })])], onCommit: vi.fn(async () => {}) });
       expect(screen.queryByRole("button", { name: "Suggest message" })).toBeNull();

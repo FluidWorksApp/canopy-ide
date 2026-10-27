@@ -18,11 +18,13 @@
 // Feature code calls `askBrain` and nothing below it.
 
 import * as ipc from "./ipc";
-import { installedBrain } from "./brain";
+import { chosenBrainId, installedBrain } from "./brain";
+import { brainLaunchEnv } from "./profiles";
 import { overBudget, recordBrainCall } from "./brainMeter";
 import { noteBrainOutcome } from "./brainStatus";
 import {
   AGENT_CLIS_CHANGED_EVENT,
+  agentCliFor,
   CLI_INSTALLS_CHANGED_EVENT,
   checkDesktopClis,
   streamsStructured,
@@ -254,8 +256,16 @@ export async function askBrain<T = unknown>(req: BrainRequest<T>): Promise<Brain
   if (overBudget(req.feature, started)) {
     return { ok: false, reason: "over-budget", message: `The ${req.feature} feature has reached today's brain budget.` };
   }
-  const installed = await installedPredicate(started);
-  const cli = installedBrain(installed);
+  let installed = await installedPredicate(started);
+  let cli = installedBrain(installed);
+  if (!cli && installedCache) {
+    // The chosen CLI may have been installed since the last look; check again
+    // once before telling the person it is missing.
+    invalidateBrainInstalled();
+    installed = await installedPredicate(started);
+    cli = installedBrain(installed);
+  }
+  const chosen = agentCliFor(chosenBrainId());
   const runner = cli ? structuredRunnerFor(cli.id) : undefined;
   if (!cli || !runner || !streamsStructured(cli.id)) {
     const answer: BrainFailure = {
@@ -263,7 +273,9 @@ export async function askBrain<T = unknown>(req: BrainRequest<T>): Promise<Brain
       reason: "no-brain",
       message: cli
         ? `${cli.name} has no verified headless runner, so it cannot answer for Canopy's features yet.`
-        : "No agent CLI is installed to act as Canopy's brain.",
+        : chosen
+          ? `${chosen.name} is your brain but isn't installed on this computer.`
+          : "No agent CLI is installed to act as Canopy's brain.",
     };
     noteBrainOutcome(answer, cli ? { id: cli.id, name: cli.name } : null, { probe: isProbe(req) });
     return answer;
@@ -314,7 +326,7 @@ export async function askBrain<T = unknown>(req: BrainRequest<T>): Promise<Brain
   let collector: StructuredRunCollector | null = null;
   let cwdMissing = false;
   try {
-    const run = await runOnce(cli, runner.dialect, args, req);
+    const run = await runOnce(cli, runner.dialect, args, req, await brainLaunchEnv(cli.id));
     collector = run.collector;
     cwdMissing = run.end === "spawn-failed" && !!req.cwd && /cwd does not exist/i.test(run.spawnError ?? "");
     answer = interpret<T>(run, req, started);
@@ -361,6 +373,7 @@ function runOnce(
   dialect: StructuredDialect,
   args: string[],
   req: BrainRequest<unknown>,
+  env: [string, string][],
 ): Promise<RunResult> {
   const id = callId();
   const collector = new StructuredRunCollector(dialect);
@@ -390,7 +403,17 @@ function runOnce(
         id,
         // A little past our own deadline, so Rust's ceiling is the backstop
         // for a renderer that went away, never the normal path.
-        { command: cli.bin, args, cwd: req.cwd, timeoutMs: timeoutMs + 5_000 },
+        {
+          command: cli.bin,
+          args,
+          cwd: req.cwd,
+          // The active account (Settings → Accounts) when this computer has
+          // it. Without it the brain ran on the CLI's default login and
+          // config — a different account and model than the person's
+          // sessions use.
+          env,
+          timeoutMs: timeoutMs + 5_000,
+        },
         (out) => {
           if (out.kind === "line") {
             collector.handleLine(out.text);
