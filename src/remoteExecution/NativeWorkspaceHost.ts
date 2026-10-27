@@ -341,7 +341,7 @@ export class NativeWorkspaceHost implements Host {
         action:(kind,body)=>this.call('/harness/actions',{...body,kind},INTERACTIVE),
         native:(name,body)=>this.native(name,body),
         desktop:(name,body)=>this.desktopCall(name,body),
-        instance:`remote-${this.connection.workspaceId}`,
+        instance:`remote-${this.connection.workspaceId}`,readOnly:this.readOnly,
       }) as T;}
       catch(error){if(!isOutdatedHarnessError(error))throw error;this.hostOutdated(command);throw Error(hostOutdatedMessage(command));}
     }

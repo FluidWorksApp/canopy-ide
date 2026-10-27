@@ -48,6 +48,7 @@ import {structuredRunnerCommands} from './structured-runner.mjs';
 import {turnsCommands} from './turns.mjs';
 import {provenanceCommands} from './provenance.mjs';
 import {PrObserver} from './pr-observer.mjs';
+import {researchMirrorCommands} from './research-mirror.mjs';
 import {ChannelHub,isChannelArg} from './channels.mjs';
 import {HOST_PROTOCOL,NATIVE_COMMANDS,NATIVE_PREFIXES} from './native-commands.mjs';
 import {WorkspaceGates} from './gates.mjs';
@@ -115,7 +116,7 @@ familyContext.authorize=async(attemptId,cwd)=>{
 };
 const channels=new ChannelHub();
 export const NATIVE_FAMILIES=Object.assign({},...[
- workspaceToolsCommands,workspaceCleanupCommands,lspCommands,githubCommands,taskStoreCommands,workflowStoreCommands,structuredRunnerCommands,turnsCommands,provenanceCommands,gitOpsCommands,agentWorkspaceCommands,workspaceMiscCommands,mcpClientCommands,spotIndexCommands,
+ workspaceToolsCommands,workspaceCleanupCommands,lspCommands,githubCommands,taskStoreCommands,workflowStoreCommands,structuredRunnerCommands,turnsCommands,provenanceCommands,gitOpsCommands,agentWorkspaceCommands,workspaceMiscCommands,mcpClientCommands,spotIndexCommands,researchMirrorCommands,
 ].map(family=>family(familyContext)));
 const FAMILIES=NATIVE_FAMILIES;
 // PR-watcher provenance rows (prwatch.rs): the IDE names the projects with pr_watch_set.

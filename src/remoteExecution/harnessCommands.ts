@@ -13,6 +13,8 @@ export type HarnessIo = {
   desktop<T>(command: string, args: Record<string, unknown>): Promise<T>;
   /** This workspace's run id, `remote-<workspace>`. */
   instance: string;
+  /** A view-only member: reads must not write anything on the way. */
+  readOnly?: boolean;
 };
 type Args = Record<string, unknown>;
 
@@ -34,11 +36,14 @@ export const HARNESS_READS: ReadonlySet<string> = new Set([
 /** How a workspace whose gateway and service predate a query or action
  *  refuses it — which means "update the workspace", not a missing feature. */
 export const isOutdatedHarnessError = (error: unknown) =>
-  /Invalid harness action|no query \S+ on|unknown action kind|unknown research action: (?:import_text|delete)\b/.test(String(error));
+  /Invalid harness action|no query \S+ on|unknown action kind|unknown research action: (?:import_text|import_chunk|replace|delete)\b/.test(String(error));
 export const isHarnessCommand = (command: string) => HANDLED.has(command);
 
-/** The gateway caps a harness action body at 256 KiB. */
-const IMPORT_MAX = 250 * 1024;
+/** The service's own limit on an imported file (research.rs SOURCE_MAX). */
+const IMPORT_MAX = 512 * 1024;
+/** The gateway caps a harness action body at 256 KiB, so a larger import goes
+ *  in pieces this many characters long (≤ 192 KiB even fully JSON-escaped). */
+const IMPORT_CHUNK = 32 * 1024;
 const QUERY_BATCH_BYTES = 48 * 1024;
 
 const items = <T>(value: unknown): T[] => {
@@ -51,11 +56,44 @@ const defined = (value: Args) => Object.fromEntries(Object.entries(value).filter
 async function readWorkspaceText(io: HarnessIo, path: string): Promise<string> {
   const slice = await io.native<{ b64: string; size: number }>("fs_read_range", { path, offset: 0, length: 1024 * 1024 });
   if (slice.size > IMPORT_MAX)
-    throw Error(`${path} is ${slice.size} bytes; a cloud workspace imports files up to ${IMPORT_MAX} bytes`);
+    throw Error(`cannot read ${path}: ${path} is ${slice.size} bytes; the read limit is ${IMPORT_MAX}`);
   return new TextDecoder().decode(Uint8Array.from(atob(slice.b64), (c) => c.charCodeAt(0)));
 }
-const importText = async (io: HarnessIo, path: string) =>
-  io.action<unknown>("research_write", { action: "import_text", path, text: await readWorkspaceText(io, path) });
+/** Import a workspace file the service cannot open: in one action when it
+ *  fits the gateway's body cap, else in pieces the service joins (import_chunk). */
+async function importText(io: HarnessIo, path: string): Promise<unknown> {
+  const text = await readWorkspaceText(io, path);
+  if (text.length <= IMPORT_CHUNK) return io.action<unknown>("research_write", { action: "import_text", path, text });
+  const upload = crypto.randomUUID();
+  let result: unknown = null;
+  for (let offset = 0; offset < text.length; offset += IMPORT_CHUNK) {
+    const done = offset + IMPORT_CHUNK >= text.length;
+    result = await io.action<unknown>("research_write", { action: "import_chunk", upload, path, offset, text: text.slice(offset, offset + IMPORT_CHUNK), done });
+  }
+  return result;
+}
+
+type EntryFile = { name: string; path: string; text: string };
+/** What a workspace research run wrote in its entry's directory in the VM
+ *  (research-mirror.mjs), copied into the entry as sources once each. */
+async function syncEntryFiles(io: HarnessIo, id: string, detail: unknown): Promise<boolean> {
+  if (io.readOnly || !id) return false;
+  const files = await io.native<EntryFile[]>("research_entry_files", { id }).catch(() => [] as EntryFile[]);
+  const sources = (detail as { sources?: { origin?: string }[] } | null)?.sources ?? [];
+  const have = new Set(sources.map((s) => s.origin ?? ""));
+  let added = false;
+  for (const f of files) {
+    const origin = `workspace:${f.path}`;
+    if (have.has(origin) || !f.text.trim() || f.text.length > IMPORT_CHUNK * 5) continue;
+    try {
+      await io.action("research_write", { action: "source", id, title: f.name.replace(/\.[^.]+$/, ""), text: f.text, origin });
+      added = true;
+    } catch {
+      // The entry may be full (64 sources); the rest still go.
+    }
+  }
+  return added;
+}
 
 export async function harnessCommand(command: string, args: Args, io: HarnessIo): Promise<unknown> {
   const write = (body: Args) => io.action<unknown>("research_write", defined(body));
@@ -66,15 +104,17 @@ export async function harnessCommand(command: string, args: Args, io: HarnessIo)
       const found = await io.query<{ research?: unknown[] }>("research", "search", defined({ query: args.query, limit: args.limit ?? undefined }));
       return Array.isArray(found?.research) ? found.research : [];
     }
-    case "research_get":
-      return io.query("research", "get", { id: args.id });
+    case "research_get": {
+      const detail = await io.query("research", "get", { id: args.id });
+      return (await syncEntryFiles(io, String(args.id ?? ""), detail)) ? io.query("research", "get", { id: args.id }) : detail;
+    }
     case "research_start":
       return write({ action: "start", title: args.title, question: args.question, agent: args.agent, pty_id: args.ptyId, tags: args.tags, text: args.body, instance: io.instance });
     case "research_update": {
-      // A whole replacement write-up has no service op; no caller sends one.
-      if (typeof args.body === "string" && args.append == null)
-        throw Error("Replacing a research write-up isn't available in a cloud workspace yet; append to it instead.");
       const fields = { id: args.id, title: args.title, digest: args.digest, recommendation: args.recommendation, open_questions: args.openQuestions, tags: args.tags };
+      // A whole replacement write-up is the person's edit: the service's
+      // user-only "replace", which no agent op reaches.
+      if (typeof args.body === "string" && args.append == null) return write({ action: "replace", text: args.body, ...fields });
       return write(args.append != null ? { action: "append", text: args.append, ...fields } : { action: "update", ...fields });
     }
     case "research_set_status":
@@ -111,10 +151,15 @@ export async function harnessCommand(command: string, args: Args, io: HarnessIo)
       return { imported, matched, skipped };
     }
     case "research_dir":
-      // The entry's directory is on the service's machine, which a workspace
-      // agent cannot write; it records findings through canopy_research tools,
-      // and an empty directory turns the hook's prose-file gate off.
-      return "";
+      // The entry itself is on the service's machine, which a workspace agent
+      // cannot write; its run writes prose and progress in a directory in the
+      // VM instead (research-mirror.mjs), copied in as sources on the next
+      // read. An older host has none: "" turns the hook's prose gate off.
+      if (io.readOnly) return "";
+      return io.native<string>("research_entry_dir", { id: args.id }).catch((error) => {
+        if (/does not support research_entry_dir yet/.test(String(error))) return "";
+        throw error;
+      });
     case "context_claims":
       return items(await io.query("claims", "list"));
     case "context_claim_history":

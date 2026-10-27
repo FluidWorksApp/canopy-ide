@@ -37,7 +37,8 @@ describe("workspace research and mesh commands", () => {
       ["action", "research_write", { action: "append", text: "more", id: "r1", open_questions: ["q"] }],
       ["action", "research_write", { action: "status", id: "r1", status: "researched", by: "" }],
     ]);
-    await expect(harnessCommand("research_update", { id: "r1", body: "all new" }, value)).rejects.toThrow(/append/);
+    await harnessCommand("research_update", { id: "r1", body: "all new" }, value);
+    expect(calls.at(-1)).toEqual(["action", "research_write", { action: "replace", text: "all new", id: "r1" }]);
   });
   it("imports workspace files by sending their text, and sweeps with the service's plan", async () => {
     const { value, calls } = io({ fs_read_range: { b64: btoa("# Notes"), size: 7 }, fs_list_files: ["/workspace/a.md", "/workspace/b.ts", "/workspace/c.md"], "research.sweep_plan": { candidates: ["/workspace/a.md"], matched: 2 } });
@@ -45,11 +46,40 @@ describe("workspace research and mesh commands", () => {
     expect(calls.at(-1)).toEqual(["action", "research_write", { action: "import_text", path: "/workspace/a.md", text: "# Notes" }]);
     expect(await harnessCommand("research_sweep", { projectId: "p", roots: ["/workspace"] }, value)).toEqual({ imported: 1, matched: 2, skipped: 0 });
     expect(calls).toContainEqual(["query", "research", "sweep_plan", { paths: ["/workspace/a.md", "/workspace/c.md"] }]);
-    expect(await harnessCommand("research_dir", { projectId: "p", id: "r1" }, value)).toBe("");
   });
-  it("refuses imports larger than a harness action carries", async () => {
-    const { value } = io({ fs_read_range: { b64: "", size: 900 * 1024 } });
-    await expect(harnessCommand("research_import", { path: "/workspace/big.md" }, value)).rejects.toThrow(/imports files up to/);
+  it("imports a file bigger than one harness action in pieces, and refuses one past the service's limit", async () => {
+    const big = "x".repeat(70 * 1024);
+    const { value, calls } = io({ fs_read_range: { b64: btoa(big), size: big.length }, research_write: { id: "0001-big" } });
+    expect(await harnessCommand("research_import", { path: "/workspace/big.md" }, value)).toEqual({ id: "0001-big" });
+    const chunks = calls.filter((c) => c[0] === "action").map((c) => c[2] as { action: string; offset: number; text: string; done: boolean; upload: string });
+    expect(chunks.map((c) => [c.action, c.offset, c.text.length, c.done])).toEqual([
+      ["import_chunk", 0, 32 * 1024, false],
+      ["import_chunk", 32 * 1024, 32 * 1024, false],
+      ["import_chunk", 64 * 1024, 6 * 1024, true],
+    ]);
+    expect(new Set(chunks.map((c) => c.upload)).size).toBe(1);
+    const tooBig = io({ fs_read_range: { b64: "", size: 900 * 1024 } });
+    await expect(harnessCommand("research_import", { path: "/workspace/huge.md" }, tooBig.value)).rejects.toThrow(/the read limit is 524288/);
+  });
+  it("gives a research run a directory in the VM and copies what it wrote there into the entry", async () => {
+    const { value, calls } = io({
+      research_entry_dir: "/home/agent/.canopy/research/0001-a",
+      "research.get": { id: "0001-a", sources: [{ origin: "workspace:/home/agent/.canopy/research/0001-a/old.md" }] },
+      research_entry_files: [
+        { name: "old.md", path: "/home/agent/.canopy/research/0001-a/old.md", text: "seen" },
+        { name: "findings.md", path: "/home/agent/.canopy/research/0001-a/findings.md", text: "# Found" },
+      ],
+    });
+    expect(await harnessCommand("research_dir", { projectId: "p", id: "0001-a" }, value)).toBe("/home/agent/.canopy/research/0001-a");
+    await harnessCommand("research_get", { projectId: "p", id: "0001-a" }, value);
+    expect(calls.filter((c) => c[0] === "action")).toEqual([
+      ["action", "research_write", { action: "source", id: "0001-a", title: "findings", text: "# Found", origin: "workspace:/home/agent/.canopy/research/0001-a/findings.md" }],
+    ]);
+    const viewer = io({ "research.get": { id: "0001-a" } });
+    viewer.value.readOnly = true;
+    expect(await harnessCommand("research_dir", { id: "0001-a" }, viewer.value)).toBe("");
+    await harnessCommand("research_get", { id: "0001-a" }, viewer.value);
+    expect(viewer.calls.filter((c) => c[0] !== "query")).toEqual([]);
   });
   it("sends mesh changes to the service, and a desktop job's updates to the desktop", async () => {
     const { value, calls } = io({ mesh_sever: { items: [{ a: "1", b: "2" }] }, mesh_job_update: { id: "m1" }, "desktop.context_mesh_job_update": "m2" });
