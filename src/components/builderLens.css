@@ -248,3 +248,54 @@
 }
 
 .builder-lens-globs-edit { flex-direction: column; align-items: stretch; }
+
+.builder-lens-approvals {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.builder-lens-approval {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 6px 8px;
+  border-radius: var(--r-sm);
+  border: 1px solid var(--border);
+  font-size: var(--fs-xs);
+}
+
+.builder-lens-approval.is-approved {
+  border-color: color-mix(in srgb, var(--ok, var(--accent)) 45%, var(--border));
+}
+
+.builder-lens-approval.is-rejected {
+  border-color: color-mix(in srgb, var(--danger, var(--warn)) 45%, var(--border));
+}
+
+.builder-lens-restore {
+  max-width: min(560px, calc(100vw - 32px));
+}
+
+.builder-lens-restore-st {
+  display: inline-block;
+  min-width: 82px;
+  color: var(--text-dim);
+  font-size: var(--fs-xs);
+}
+
+.builder-lens-patch {
+  max-height: 260px;
+  overflow: auto;
+  margin: 0;
+  padding: 6px 8px;
+  border-radius: var(--r-sm);
+  background: var(--bg-sunken, var(--bg));
+  font-size: 11px;
+  white-space: pre;
+}

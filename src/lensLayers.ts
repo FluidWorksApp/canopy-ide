@@ -5,11 +5,13 @@
 // once per project on the background tier and cached in the ledger (`memory`
 // kind) so reopening a project costs nothing. Ownership claims are `rule`
 // entries: they are team constraints, and the gates feature (which *enforces*
-// rules in the hook) reads the same kind. This module never blocks a change;
-// it makes ownership visible and the approval request one click away.
+// rules in the hook) reads the same kind. Ownership is enforced through that
+// feature: lensGates.ts compiles each owned layer into a gate. An owner is a
+// team identity (teamIdentity.ts), never a name typed on this computer.
 import { askBrain, type BrainAnswer } from "./brainCall";
 import { appendLedger, queryLedger, setLedgerStatus, type LedgerEntry } from "./ledger";
-import { getSettings } from "./settings";
+import { rulesEditorFor } from "./gates/events";
+import { isMe, type TeamIdentity } from "./teamIdentity";
 
 /** Every layer a change can be filed under. */
 export type LensLayer = "data" | "logic" | "view" | "auth" | "deploy" | "integration";
@@ -201,6 +203,23 @@ export async function saveLayerGlobs(root: string, layer: OwnedLayer, globs: str
 
 // ------------------------------------------------------------- glob matching
 
+/** A glob as the hook reads it (gates.rs `expand_glob`, kept in step): a bare
+ *  name ("migrations") is that file or folder anywhere, a name ending in `/`
+ *  its contents, a pattern with no slash the file name at any depth, and a
+ *  plain path also covers what is under it. What the lens shows as owned is
+ *  then exactly what the hook stops. */
+export function expandGlob(glob: string): string[] {
+  const g = glob.trim().replace(/\\/g, "/").replace(/^(\.\/)+/, "").replace(/^\/+/, "");
+  if (!g) return [];
+  const meta = /[*?[{]/.test(g);
+  if (g.endsWith("/")) {
+    const dir = g.slice(0, -1);
+    return [`${dir.includes("/") || dir.startsWith("**") ? dir : `**/${dir}`}/**`];
+  }
+  if (!g.includes("/")) return meta ? [`**/${g}`] : [`**/${g}`, `**/${g}/**`];
+  return meta ? [g] : [g, `${g}/**`];
+}
+
 /** A small, predictable glob: `**` any depth, `*` within one segment, `?` one
  *  character. A pattern with no slash matches the file name at any depth
  *  (".env" catches "config/.env"), which is how people write them. */
@@ -230,7 +249,7 @@ export function globToRegExp(glob: string): RegExp {
 
 export function matchesAnyGlob(path: string, globs: readonly string[]): boolean {
   const p = path.replace(/\\/g, "/").replace(/^\.\//, "");
-  return globs.some((g) => g.trim() && globToRegExp(g).test(p));
+  return globs.some((g) => expandGlob(g).some((x) => globToRegExp(x).test(p)));
 }
 
 /** Paths relative to `root` when they sit under it; untouched otherwise. */
@@ -245,7 +264,11 @@ export function relativeTo(root: string, path: string): string {
 export interface LayerOwnerRule {
   type: "layer-owner";
   layer: OwnedLayer;
+  /** The owner's name, for display. */
   owner: string;
+  /** The owner's team identity. Absent on claims made before ownership was
+   *  tied to the signed-in account; those match by name. */
+  ownerId?: string;
 }
 
 export type LayerOwners = Partial<Record<OwnedLayer, LedgerEntry<LayerOwnerRule>>>;
@@ -273,18 +296,23 @@ export async function layerOwners(root: string): Promise<LayerOwners> {
   return owners;
 }
 
-export async function claimLayer(root: string, layer: OwnedLayer, owner: string): Promise<LedgerEntry<LayerOwnerRule>> {
-  const name = owner.trim().slice(0, 80);
+/** Claim a layer as the signed-in person. */
+export async function claimLayer(root: string, layer: OwnedLayer, me: TeamIdentity): Promise<LedgerEntry<LayerOwnerRule>> {
+  const name = me.name.trim().slice(0, 80) || me.email;
   return appendLedger<LayerOwnerRule>(root, {
     kind: "rule",
     author: { kind: "human", name },
     scope: "team",
     subject: `${name} owns ${LAYER_LABEL[layer]}`,
     ref: { kind: OWNER_REF_KIND, id: layer },
-    data: { type: "layer-owner", layer, owner: name },
+    data: { type: "layer-owner", layer, owner: name, ownerId: me.id },
     status: "active",
   });
 }
+
+/** Whether a layer's claim is the signed-in person's. */
+export const ownsLayer = (me: TeamIdentity | null, claim: LedgerEntry<LayerOwnerRule> | undefined): boolean =>
+  !!claim && isMe(me, { id: claim.data.ownerId, name: claim.data.owner });
 
 export async function releaseLayer(root: string, claim: LedgerEntry<LayerOwnerRule>): Promise<void> {
   await setLedgerStatus(root, claim.id, RELEASED);
@@ -293,6 +321,7 @@ export async function releaseLayer(root: string, claim: LedgerEntry<LayerOwnerRu
 export interface OwnedLayerHit {
   layer: OwnedLayer;
   owner: string;
+  ownerId: string | null;
   files: string[];
 }
 
@@ -303,58 +332,34 @@ export function ownedLayerHits(
   files: readonly string[],
   globs: Partial<Record<OwnedLayer, readonly string[]>>,
   owners: LayerOwners,
-  me: string | null,
+  me: TeamIdentity | null,
 ): OwnedLayerHit[] {
   const hits: OwnedLayerHit[] = [];
-  const self = me?.trim().toLowerCase() || null;
   for (const layer of OWNABLE_LAYERS) {
     const claim = owners[layer];
     const patterns = globs[layer] ?? [];
     if (!claim || patterns.length === 0) continue;
-    if (self && claim.data.owner.trim().toLowerCase() === self) continue;
+    if (ownsLayer(me, claim)) continue;
     const matched = files.map((f) => relativeTo(root, f)).filter((f) => matchesAnyGlob(f, patterns));
-    if (matched.length) hits.push({ layer, owner: claim.data.owner, files: [...new Set(matched)] });
+    if (matched.length) {
+      hits.push({ layer, owner: claim.data.owner, ownerId: claim.data.ownerId ?? null, files: [...new Set(matched)] });
+    }
   }
   return hits;
 }
 
 /** The one sentence the builder lens shows. */
 export function ownershipNotice(hit: OwnedLayerHit): string {
-  return `${LAYER_LABEL[hit.layer]} is owned by ${hit.owner} — your change will be sent for their approval.`;
+  return `${LAYER_LABEL[hit.layer]} is owned by ${hit.owner} — changes to it wait for their approval.`;
 }
 
 // ------------------------------------------------------------- team rules
 
-/** Is there a team-rules editor to send people to? The gates feature ships it
- *  separately, so this feature-detects rather than imports: a rules setting
- *  exists, or the ledger already holds rules that aren't layer claims. */
-export async function teamRulesAvailable(root: string): Promise<boolean> {
-  const settings = getSettings() as unknown as Record<string, unknown>;
-  if (Object.keys(settings).some((k) => /rules?/i.test(k))) return true;
-  const rows = await queryLedger(root, { kinds: ["rule"], limit: 50 }).catch(() => []);
-  return rows.some((r) => r.ref?.kind !== OWNER_REF_KIND);
-}
-
-// --------------------------------------------------------- who am I (local)
-
-const ME_KEY = "canopy.lens.ownerName";
-
-/** The name this person claims layers under. Local: identity across a team
- *  belongs to team chat; this is only "is that claim mine?". */
-export function lensIdentity(): string | null {
-  try {
-    return localStorage.getItem(ME_KEY)?.trim() || null;
-  } catch {
-    return null;
-  }
-}
-
-export function setLensIdentity(name: string): void {
-  try {
-    localStorage.setItem(ME_KEY, name.trim().slice(0, 80));
-  } catch {
-    /* private window: claims still work, just not remembered */
-  }
+/** Is there a Rules panel to send people to for this project? A real check: a
+ *  project view holding `root` has its Rules editor mounted (gates/events.ts
+ *  `registerRulesEditor`), so pressing the button opens something. */
+export function teamRulesAvailable(root: string): boolean {
+  return rulesEditorFor(root);
 }
 
 export function resetLensLayersForTests(): void {

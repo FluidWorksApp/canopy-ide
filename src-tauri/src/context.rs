@@ -970,45 +970,17 @@ pub fn context_hotspot_claim(
     let instance = crate::pty::instance_token().to_string();
     let key = format!("pty:{instance}:{pty_id}");
     let id = app.state::<ContextBridge>().claims.next_id()?;
+    let holder = ClaimIdentity {
+        key,
+        display: owner,
+        pty_id: Some(pty_id),
+        instance: Some(instance),
+        run_id: None,
+        attempt_id: None,
+        process_started_at: crate::mesh::current_process_started_at(),
+    };
     let reply = with_claims(&app, |claims| {
-        let mine: Vec<&Claim> = claims
-            .iter()
-            .filter(|c| c.released_at_ms.is_none() && c.owner_key == key)
-            .collect();
-        let mut held: Vec<String> = mine.iter().flat_map(|c| c.paths.clone()).collect();
-        let covered = |p: &String| {
-            held.iter().any(|h| {
-                let h = h.trim_end_matches('/');
-                p == h || p.starts_with(&format!("{h}/"))
-            })
-        };
-        if paths.iter().all(covered) {
-            return (ClaimReply::Ok("Already held.".into()), false);
-        }
-        let holder = ClaimIdentity {
-            key: key.clone(),
-            display: mine.first().map(|c| c.owner.clone()).unwrap_or(owner),
-            pty_id: Some(pty_id),
-            instance: Some(instance.clone()),
-            run_id: mine.first().and_then(|c| c.run_id.clone()),
-            attempt_id: mine.first().and_then(|c| c.attempt_id.clone()),
-            process_started_at: crate::mesh::current_process_started_at(),
-        };
-        let note = mine.first().and_then(|c| c.note.clone()).or(note);
-        for p in &paths {
-            if !held.contains(p) {
-                held.push(p.clone());
-            }
-        }
-        let req = ClaimReq {
-            action: "claim".into(),
-            paths: held,
-            owner: holder.display.clone(),
-            note,
-        };
-        let reply = apply_claim(claims, &req, &holder, now_ms(), &id);
-        let changed = !matches!(reply, ClaimReply::Bad(_));
-        (reply, changed)
+        hotspot_claim(claims, &holder, &paths, note, now_ms(), &id)
     });
     match reply {
         Some(ClaimReply::Ok(msg)) => Ok(msg),
@@ -2165,9 +2137,12 @@ fn apply_claim(
             // only those. Keyed by the display string, as it was, an agent
             // could end anyone's claims simply by naming them — and two agents
             // in one checkout ended each other's without meaning to, because
-            // they shared a name.
-            let n = end_claims(claims, &who.key, now, "agent");
-            ClaimReply::Ok(format!("Released {n} claim(s)."))
+            // they shared a name. With paths, only those are let go.
+            if req.paths.is_empty() {
+                let n = end_claims(claims, &who.key, now, "agent");
+                return ClaimReply::Ok(format!("Released {n} claim(s)."));
+            }
+            release_paths(claims, who, &req.paths, now, id)
         }
         "claim" => {
             if req.paths.is_empty() {
@@ -2260,6 +2235,78 @@ fn apply_claim(
         }
         other => ClaimReply::Bad(format!("unknown claim action: {other}")),
     }
+}
+
+/// `canopy_claim release` with paths: let go of those, keep the rest
+/// (canopy_core::claims::release_paths has the rules).
+fn release_paths(
+    claims: &mut Vec<Claim>,
+    who: &ClaimIdentity,
+    release: &[String],
+    now: u64,
+    id: &str,
+) -> ClaimReply {
+    let r = canopy_core::claims::release_paths(claims, &who.key, release, now, id);
+    if r.dropped > 0 {
+        prune_claims(claims);
+    }
+    ClaimReply::Ok(canopy_core::claims::partial_release_message(&r))
+}
+
+/// The claim Canopy takes for an agent that touched a hotspot another live
+/// agent is also on. The agent's own held paths are carried over (a new claim
+/// supersedes the holder's old ones), and the rules are `apply_claim`'s, so a
+/// path someone else holds is refused and recorded against them. Returns the
+/// reply and whether the store changed.
+fn hotspot_claim(
+    claims: &mut Vec<Claim>,
+    holder: &ClaimIdentity,
+    paths: &[String],
+    note: Option<String>,
+    now: u64,
+    id: &str,
+) -> (ClaimReply, bool) {
+    let mine: Vec<&Claim> = claims
+        .iter()
+        .filter(|c| c.released_at_ms.is_none() && c.owner_key == holder.key)
+        .collect();
+    let mut held: Vec<String> = mine.iter().flat_map(|c| c.paths.clone()).collect();
+    let covered = |p: &String| {
+        held.iter().any(|h| {
+            let h = h.trim_end_matches('/');
+            p == h || p.starts_with(&format!("{h}/"))
+        })
+    };
+    if paths.iter().all(covered) {
+        return (ClaimReply::Ok("Already held.".into()), false);
+    }
+    let who = ClaimIdentity {
+        key: holder.key.clone(),
+        display: mine
+            .first()
+            .map(|c| c.owner.clone())
+            .unwrap_or_else(|| holder.display.clone()),
+        pty_id: holder.pty_id,
+        instance: holder.instance.clone(),
+        run_id: mine.first().and_then(|c| c.run_id.clone()),
+        attempt_id: mine.first().and_then(|c| c.attempt_id.clone()),
+        process_started_at: holder.process_started_at,
+    };
+    let note = mine.first().and_then(|c| c.note.clone()).or(note);
+    for p in paths {
+        if !held.contains(p) {
+            held.push(p.clone());
+        }
+    }
+    let req = ClaimReq {
+        action: "claim".into(),
+        paths: held,
+        owner: who.display.clone(),
+        note,
+    };
+    let reply = apply_claim(claims, &req, &who, now, id);
+    let changed = !matches!(reply, ClaimReply::Bad(_));
+    (reply, changed)
 }
 
 /// End every claim this identity still holds, and say how. Returns how many,
@@ -5898,6 +5945,87 @@ mod tests {
             .iter()
             .filter(|c| c.released_at_ms.is_none())
             .collect()
+    }
+
+    fn hotspot(
+        claims: &mut Vec<Claim>,
+        w: &ClaimIdentity,
+        paths: &[&str],
+        now: u64,
+        id: &str,
+    ) -> (ClaimReply, bool) {
+        let paths: Vec<String> = paths.iter().map(|p| p.to_string()).collect();
+        hotspot_claim(claims, w, &paths, Some("Canopy: hotspot".into()), now, id)
+    }
+
+    #[test]
+    fn a_hotspot_claim_carries_over_what_the_agent_already_holds() {
+        let (mut claims, alice) = (Vec::new(), named("alice"));
+        ok(claim(&mut claims, &alice, &["/w/src/a.ts"], 100, "c1"));
+        let (reply, changed) = hotspot(&mut claims, &alice, &["/w/src/routes.ts"], 200, "c2");
+        assert!(changed);
+        ok(reply);
+        let live = held(&claims);
+        assert_eq!(live.len(), 1, "the new claim supersedes the old one");
+        assert_eq!(live[0].id, "c2");
+        assert_eq!(
+            live[0].paths,
+            vec!["/w/src/a.ts".to_string(), "/w/src/routes.ts".into()]
+        );
+        // The agent's own note wins over Canopy's.
+        assert_eq!(live[0].note.as_deref(), Some("alice's work"));
+    }
+
+    #[test]
+    fn a_hotspot_already_covered_is_not_claimed_again() {
+        let (mut claims, alice) = (Vec::new(), named("alice"));
+        ok(claim(&mut claims, &alice, &["/w/src"], 100, "c1"));
+        let (reply, changed) = hotspot(&mut claims, &alice, &["/w/src/routes.ts"], 200, "c2");
+        assert!(!changed);
+        assert_eq!(ok(reply), "Already held.");
+        assert_eq!(held(&claims)[0].id, "c1");
+    }
+
+    #[test]
+    fn a_hotspot_someone_else_holds_is_refused_and_recorded_against_them() {
+        let (mut claims, alice, bob) = (Vec::new(), named("alice"), named("bob"));
+        ok(claim(&mut claims, &bob, &["/w/src/routes.ts"], 100, "c1"));
+        let (reply, changed) = hotspot(&mut claims, &alice, &["/w/src/routes.ts"], 200, "c2");
+        assert!(changed, "a refusal is a write");
+        assert!(conflict(reply).contains("bob"));
+        assert_eq!(claims[0].refusals.len(), 1);
+        assert_eq!(claims[0].refusals[0].owner, "alice");
+        assert_eq!(held(&claims).len(), 1);
+    }
+
+    #[test]
+    fn a_hotspot_claim_with_no_prior_claim_uses_the_given_owner_and_note() {
+        let (mut claims, alice) = (Vec::new(), named("alice"));
+        let (reply, _) = hotspot(&mut claims, &alice, &["/w/package.json"], 200, "c1");
+        ok(reply);
+        assert_eq!(held(&claims)[0].owner, "alice");
+        assert_eq!(held(&claims)[0].note.as_deref(), Some("Canopy: hotspot"));
+    }
+
+    #[test]
+    fn releasing_a_hotspot_path_keeps_the_agents_other_claims() {
+        let (mut claims, alice) = (Vec::new(), named("alice"));
+        ok(claim(&mut claims, &alice, &["/w/src/a.ts"], 100, "c1"));
+        ok(hotspot(&mut claims, &alice, &["/w/src/routes.ts"], 200, "c2").0);
+        let msg = ok(apply_claim(
+            &mut claims,
+            &claim_req("release", "alice", &["/w/src/routes.ts"]),
+            &alice,
+            300,
+            "c3",
+        ));
+        assert_eq!(msg, "Released 1 path(s); still holding 1.");
+        let live = held(&claims);
+        assert_eq!(live.len(), 1);
+        assert_eq!(live[0].paths, vec!["/w/src/a.ts".to_string()]);
+        // A bare release still lets go of everything.
+        ok(release(&mut claims, &alice, 400));
+        assert!(held(&claims).is_empty());
     }
 
     #[test]

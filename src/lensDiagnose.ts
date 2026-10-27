@@ -263,6 +263,8 @@ export function restartFromPlanRequest(args: {
   checkpoint: { sha: string; title: string } | null;
   plan: string | null;
   tried: readonly Diagnosis[];
+  /** The builder lens already restored the checkpoint's files (lensRestore). */
+  restored?: boolean;
 }): { text: string; context: string } {
   return {
     text: args.checkpoint
@@ -270,7 +272,9 @@ export function restartFromPlanRequest(args: {
       : "Let's start over from the plan instead of patching this again.",
     context: [
       `Three fixes for "${args.symptom.trim()}" did not work. Stop patching.`,
-      args.checkpoint
+      args.checkpoint && args.restored
+        ? `The project's files are already back to saved version ${args.checkpoint.sha} ("${args.checkpoint.title}"), committed as a new version. Confirm the preview works.`
+        : args.checkpoint
         ? `Restore the project's files to saved version ${args.checkpoint.sha} ("${args.checkpoint.title}") without rewriting history (check the files out from that version and commit the result as a new version), then confirm the preview works.`
         : "There is no saved version to return to; keep the current files but rebuild the broken part cleanly.",
       args.plan ? `Then rebuild what came after, following this plan, avoiding what failed:\n${args.plan}` : "Then rebuild what came after, one small step at a time, avoiding what failed.",

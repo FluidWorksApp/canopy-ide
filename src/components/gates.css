@@ -251,3 +251,22 @@
   color: var(--danger);
   border-color: color-mix(in srgb, var(--danger) 50%, transparent);
 }
+
+/* A turn's plain-language summary in the turn list (lensSteps.ts). */
+.aw-turn-summary {
+  margin-top: 2px;
+  font-size: var(--fs-xs);
+  color: var(--text);
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+.aw-turn-risk {
+  color: var(--text-dim);
+}
+
+.aw-turn-summarize {
+  align-self: flex-start;
+}

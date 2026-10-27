@@ -265,9 +265,14 @@ impl Workspace {
         let now = now_ms();
         let result = self.claims.mutate(|claims| {
             let reply = match action {
-                "release" => {
+                "release" if paths.is_empty() => {
                     let n = end_claims(claims, &key, now, "agent");
                     (200, format!("Released {n} claim(s)."))
+                }
+                // With paths, only those are let go; the rest stay held.
+                "release" => {
+                    let r = canopy_core::claims::release_paths(claims, &key, &paths, now, &id);
+                    (200, canopy_core::claims::partial_release_message(&r))
                 }
                 "claim" => apply_claim(
                     claims,

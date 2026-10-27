@@ -6,8 +6,11 @@
 //
 //  1. Overlap (overlap.ts): files the other agent has claimed, edited in the
 //     last 30 minutes (its edit journal) or touched this session, and files
-//     that reference an exported symbol the turn changed (symbols.ts, via a
-//     language server already running — skipped when none is).
+//     that use a symbol the turn changed or renamed away (symbols.ts: a
+//     language server, started on demand within a budget, with a whole-word
+//     text search for removed names and as the fallback). The turn's files
+//     are its edit journal plus what turn rollback's snapshots show it changed
+//     through Bash (turnSnapshots.ts), so a `sed -i` counts too.
 //  2. Judgment: ONE background-tier brain call per turn, covering every
 //     overlapping agent (notes.ts). It decides whether the change matters to
 //     each and writes the note. Cached by diff hash per target, so the same
@@ -37,7 +40,8 @@ import { basename } from "../paths";
 import { onAgentTurnEnd, type AgentTurnEnd } from "../agentTurns";
 import { computeOverlaps, relOverlap, toRepoRel, type FileOverlap, type Overlap, type PeerAgent } from "./overlap";
 import { CHURN_DAYS, hotspotReason, inferHotspots, type Hotspot } from "./hotspots";
-import { changedIdentifiers, referenceFiles } from "./symbols";
+import { changedIdentifiers, referenceFiles, type ChangedIdentifier, type EditText } from "./symbols";
+import { filesInRange, patchInRange, turnSnapshotRange, type SnapshotRange } from "../turnSnapshots";
 import {
   buildDiff,
   buildNotePrompt,
@@ -55,6 +59,8 @@ export const HOTSPOT_WINDOW_MS = 30 * 60_000;
 /** Hotspot lists are recomputed at most this often per repository. */
 const HOTSPOT_TTL_MS = 10 * 60_000;
 const CACHE_MAX = 500;
+/** How much of the Bash-made part of a turn's diff the brain reads. */
+const BASH_PATCH_KEEP = 24 * 1024;
 
 /** The `data` of an `awareness` ledger entry. */
 export interface AwarenessData {
@@ -94,7 +100,11 @@ export interface AwarenessDeps {
   /** Every checkout (main + worktrees) of the repo at `root`. */
   checkouts(root: string): Promise<string[]>;
   churn(repo: string): Promise<ipc.ChurnRow[]>;
-  references(root: string, symbols: string[]): Promise<{ symbol: string; files: string[] }[]>;
+  references(root: string, symbols: ChangedIdentifier[]): Promise<{ symbol: string; files: string[] }[]>;
+  /** Turn rollback's snapshots around the turn, for what it did through Bash. */
+  snapshot(cwd: string, sessionId: string, startedAt: number, endedAt: number): Promise<SnapshotRange | null>;
+  snapshotFiles(cwd: string, range: SnapshotRange): Promise<string[]>;
+  snapshotPatch(cwd: string, range: SnapshotRange, files: string[]): Promise<string>;
   ask<T>(req: BrainRequest<T>): Promise<BrainAnswer<T>>;
   deliver(ptyId: number, instance: string, noteId: string, text: string): Promise<string>;
   claim(ptyId: number, paths: string[], owner: string, note: string): Promise<string>;
@@ -116,7 +126,10 @@ const defaultDeps: AwarenessDeps = {
   claimHistory: () => ipc.contextClaimHistory(),
   checkouts: async (root) => (await ipc.gitWorktrees(root)).filter((w) => !w.bare).map((w) => w.path),
   churn: (repo) => ipc.gitChurn(repo, CHURN_DAYS),
-  references: (root, symbols) => referenceFiles(root, symbols),
+  references: (root, symbols) => referenceFiles(root, symbols, { canStart: !isRemoteHost() }),
+  snapshot: (cwd, sessionId, startedAt, endedAt) => turnSnapshotRange(cwd, sessionId, startedAt, endedAt),
+  snapshotFiles: (cwd, range) => filesInRange(cwd, range),
+  snapshotPatch: (cwd, range, files) => patchInRange(cwd, range, files, BASH_PATCH_KEEP),
   ask: (req) => askBrain(req),
   deliver: (ptyId, instance, noteId, text) => ipc.meshAwareness(ptyId, instance, noteId, text),
   claim: (ptyId, paths, owner, note) => ipc.contextHotspotClaim(ptyId, paths, owner, note),
@@ -374,7 +387,7 @@ async function hotspotPass(origin: Origin, touched: string[], peers: PeerAgent[]
     const me = { sessionId: turn.sessionId, ptyId: turn.ptyId ?? -1, name: origin.name, task: null, cwd: turn.cwd };
     const base = { kind: "hotspot" as const, risk: "conflict" as AwarenessRisk, files: [path] };
     const youNote = claimed
-      ? `${path} is a hotspot (${reason}) that ${names} also worked on in the last 30 minutes. Canopy claimed it for you so your writes don't collide; tell them when you're done (canopy_claim release frees it).`
+      ? `${path} is a hotspot (${reason}) that ${names} also worked on in the last 30 minutes. Canopy claimed it for you so your writes don't collide; when you're done with it, call canopy_claim with action release and paths ["${topOf(turn.cwd, checkouts)}/${path}"] — that frees only this file — and tell them.`
       : refusal
         ? `${path} is a hotspot (${reason}) and another agent holds a claim on it: ${clip(refusal, 240)} Coordinate before editing it again.`
         : `${path} is a hotspot (${reason}) that ${names} also worked on in the last 30 minutes. Coordinate with them before editing it again.`;
@@ -470,6 +483,56 @@ async function notePass(
   }
 }
 
+// ------------------------------------------------------------------- bash
+
+/** A unified patch's removed and added lines per file, as before/after text:
+ *  enough for `changedIdentifiers` to see what a shell command declared or
+ *  renamed away. */
+export function patchEdits(patch: string): EditText[] {
+  const out: EditText[] = [];
+  let cur: { path: string; old: string[]; new: string[] } | null = null;
+  const flush = () => {
+    if (cur && (cur.old.length || cur.new.length)) {
+      out.push({ path: cur.path, old: cur.old.join("\n") || null, new: cur.new.join("\n") || null });
+    }
+  };
+  for (const line of patch.split("\n")) {
+    const head = /^diff --git a\/(.+?) b\/(.+)$/.exec(line);
+    if (head) {
+      flush();
+      cur = { path: head[2], old: [], new: [] };
+      continue;
+    }
+    if (!cur || line.startsWith("+++") || line.startsWith("---")) continue;
+    if (line.startsWith("-")) cur.old.push(line.slice(1));
+    else if (line.startsWith("+")) cur.new.push(line.slice(1));
+  }
+  flush();
+  return out;
+}
+
+/** Files the turn changed outside its edit tools, with their patch. */
+async function bashChanges(
+  turn: AgentTurnEnd,
+  journal: readonly string[],
+  peers: readonly PeerAgent[],
+): Promise<{ files: string[]; patch: string }> {
+  const range = await deps.snapshot(turn.cwd, turn.sessionId, turn.startedAt, turn.endedAt).catch(() => null);
+  if (!range) return { files: [], patch: "" };
+  const changed = await deps.snapshotFiles(turn.cwd, range).catch(() => [] as string[]);
+  const theirs = new Set(
+    range.shared
+      ? peers.flatMap((p) =>
+          p.recent.filter((e) => e.ts >= turn.startedAt - 2000 && e.ts <= turn.endedAt + 2000).map((e) => e.path),
+        )
+      : [],
+  );
+  const files = changed.filter((f) => !journal.includes(f) && !theirs.has(f)).slice(0, 100);
+  if (!files.length) return { files, patch: "" };
+  const patch = await deps.snapshotPatch(turn.cwd, range, files.slice(0, 40)).catch(() => "");
+  return { files, patch };
+}
+
 // ------------------------------------------------------------------- turn
 
 /** Run awareness for one finished turn. Exported for tests; the engine
@@ -484,14 +547,19 @@ export async function handleTurn(turn: AgentTurnEnd): Promise<void> {
       setStatus({ state: "remote" });
       return;
     }
-    if (!turn.filesTouched.length) return;
     const checkouts = await checkoutsOf(turn.root, turn.cwd);
-    const touched = [
+    const journal = [
       ...new Set(turn.filesTouched.map((f) => toRepoRel(f, checkouts)).filter((p): p is string => !!p)),
     ];
-    if (!touched.length) return;
     const peers = await gatherPeers(turn, checkouts);
     if (!peers.length) return;
+
+    // What the turn did through Bash: files its snapshots show changed that
+    // its journal doesn't. In a checkout another agent shares, a file a peer
+    // edited during the turn is theirs, not this turn's.
+    const bash = await bashChanges(turn, journal, peers);
+    const touched = [...journal, ...bash.files];
+    if (!touched.length) return;
     const origin: Origin = { turn, checkouts, name: nameFor(turn.ptyId, turn.cli, turn.cwd).name };
 
     // The turn's own edits: the diff the brain reads, and the symbols whose
@@ -501,11 +569,17 @@ export async function handleTurn(turn: AgentTurnEnd): Promise<void> {
     const edits = (await deps.edits(turn.cwd, turn.sessionId).catch(() => [] as ipc.AgentEdit[])).filter(
       (e) => e.ts >= from && e.ts <= to,
     );
-    const relEdits = edits.map((e) => ({ ...e, path: toRepoRel(e.path, checkouts) ?? e.path }));
-    const diff = buildDiff(relEdits);
-    const symbols = changedIdentifiers(relEdits).map((s) => s.symbol);
-    const references = symbols.length
-      ? (await deps.references(turn.cwd, symbols).catch(() => [])).map((r) => ({
+    const relEdits: EditText[] = [
+      ...edits.map((e) => ({ ...e, path: toRepoRel(e.path, checkouts) ?? e.path })),
+      ...patchEdits(bash.patch),
+    ];
+    const diff = [buildDiff(edits.map((e) => ({ ...e, path: toRepoRel(e.path, checkouts) ?? e.path }))), bash.patch && `Changed through shell commands:\n${bash.patch}`]
+      .filter(Boolean)
+      .join("\n");
+    const changed = changedIdentifiers(relEdits);
+    const symbols = changed.map((s) => s.symbol);
+    const references = changed.length
+      ? (await deps.references(turn.cwd, changed).catch(() => [])).map((r) => ({
           symbol: r.symbol,
           files: r.files.map((f) => toRepoRel(f, checkouts)).filter((p): p is string => !!p),
         }))

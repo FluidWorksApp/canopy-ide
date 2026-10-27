@@ -3,7 +3,7 @@
 // the tree), always through a diff preview first. Snapshots and restores are
 // src-tauri/src/turn_rollback.rs; which snapshot each button means is
 // turnRollback.ts buildTimeline, tested there.
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState, useSyncExternalStore } from "react";
 import { DiffView, DiffModeEnum } from "@git-diff-view/react";
 import * as ipc from "../ipc";
 import type { Notify } from "../types";
@@ -22,6 +22,8 @@ import {
   type TimelineAction,
 } from "../turnRollback";
 import { irreversibleByTurn } from "../gates/timeline";
+import { lensStepsVersion, matchStepSummary, stepSummariesFor, subscribeLensSteps, type StepSummary } from "../lensSteps";
+import { RISK_LABEL, summarizeCheckpoint } from "../lensCheckpoints";
 import "./gates.css";
 
 interface Props {
@@ -83,6 +85,44 @@ export function TurnTimeline({ cwd, sessionId, agent, builder, refreshKey, onNot
       live = false;
     };
   }, [cwd, sessionId, entries]);
+  // The brain's plain-language summary of each turn — the same ones the
+  // builder lens shows (lensSteps.ts), read back by session.
+  const stepsVersion = useSyncExternalStore(subscribeLensSteps, lensStepsVersion);
+  const [summaries, setSummaries] = useState<StepSummary[]>([]);
+  const [summarizing, setSummarizing] = useState<Set<number>>(new Set());
+  useEffect(() => {
+    let live = true;
+    void stepSummariesFor(cwd, sessionId)
+      .then((s) => live && setSummaries(s))
+      .catch(() => {});
+    return () => {
+      live = false;
+    };
+  }, [cwd, sessionId, entries, stepsVersion]);
+  const summarize = useCallback(
+    (n: number) => {
+      const point = list?.turns.find((p) => p.n === n);
+      if (!point?.start || !list) return;
+      setSummarizing((cur) => new Set(cur).add(n));
+      void summarizeCheckpoint(cwd, {
+        key: `turn:${sessionId}:${point.start.ts_ms}`,
+        kind: "step",
+        goal: point.prompt ?? "",
+        at: point.end?.ts_ms ?? point.start.ts_ms,
+        files: [],
+        range: { from: point.start.commit, to: point.end?.commit ?? null, shared: list.shared },
+      }).then((s) => {
+        setSummarizing((cur) => {
+          const next = new Set(cur);
+          next.delete(n);
+          return next;
+        });
+        if (s && point.start) setSummaries((cur) => [...cur, { startedAt: point.start!.ts_ms, summary: s }]);
+        else onNotice("Couldn't write a summary for that turn right now.", "warn");
+      });
+    },
+    [cwd, sessionId, list, onNotice],
+  );
   const lastRestore = list?.restores[list.restores.length - 1];
   const scope: ipc.TurnScope = list?.shared && onlyMine ? "session" : list?.shared ? "all" : "auto";
 
@@ -160,6 +200,12 @@ export function TurnTimeline({ cwd, sessionId, agent, builder, refreshKey, onNot
                   {t.prompt}
                 </div>
               )}
+              <TurnSummary
+                summary={matchStepSummary(summaries, t.startedMs)}
+                busy={summarizing.has(t.n)}
+                canAsk={!t.running && t.startedMs != null}
+                onAsk={() => summarize(t.n)}
+              />
               <div className="aw-turn-actions">
                 {t.undo && (
                   <Button
@@ -202,6 +248,35 @@ export function TurnTimeline({ cwd, sessionId, agent, builder, refreshKey, onNot
         />
       )}
     </div>
+  );
+}
+
+/** One turn's brain summary, or a button to ask for it. Written
+ *  automatically for builder-lens projects; anywhere else it's on request. */
+function TurnSummary({
+  summary,
+  busy,
+  canAsk,
+  onAsk,
+}: {
+  summary: ReturnType<typeof matchStepSummary>;
+  busy: boolean;
+  canAsk: boolean;
+  onAsk: () => void;
+}) {
+  if (summary) {
+    return (
+      <div className="aw-turn-summary" title={`${summary.title}: ${summary.whatChanged}`}>
+        <strong>{summary.title}</strong> {summary.whatChanged}{" "}
+        <span className="aw-turn-risk">{RISK_LABEL[summary.risk]}</span>
+      </div>
+    );
+  }
+  if (!canAsk) return null;
+  return (
+    <Button size="sm" variant="ghost" className="aw-turn-summarize" disabled={busy} onClick={onAsk} title="Ask your brain to describe this turn in plain words">
+      {busy ? "Summarising…" : "Summarise"}
+    </Button>
   );
 }
 

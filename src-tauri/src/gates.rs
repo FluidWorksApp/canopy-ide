@@ -50,7 +50,13 @@ pub const APPROVAL_TTL_MS: u64 = 10 * 60 * 1000;
 pub enum Gate {
     /// No write (Write/Edit/patch, or a shell writer like rm/mv/tee/>) to a
     /// path matching any glob, relative to the repository's top level.
-    DenyPathWrite { globs: Vec<String> },
+    /// `except_files` are exact repo-relative files let through anyway: a layer
+    /// owner approved a change to them (src/lensGates.ts).
+    DenyPathWrite {
+        globs: Vec<String>,
+        #[serde(rename = "exceptFiles", default, skip_serializing_if = "Vec::is_empty")]
+        except_files: Vec<String>,
+    },
     /// No shell command matching any pattern (Rust `regex` syntax: linear time,
     /// no backreferences or lookaround — the TS validator enforces the same).
     DenyCommand { patterns: Vec<String> },
@@ -1780,7 +1786,7 @@ pub fn evaluate(
     if let Some(policy) = policy {
         for g in &policy.gates {
             match &g.gate {
-                Gate::DenyPathWrite { globs } | Gate::ProtectTests { globs } => {
+                Gate::DenyPathWrite { globs, .. } | Gate::ProtectTests { globs } => {
                     let defaults: Vec<String>;
                     let globs = if globs.is_empty() && matches!(g.gate, Gate::ProtectTests { .. }) {
                         defaults = DEFAULT_TEST_GLOBS.iter().map(|s| s.to_string()).collect();
@@ -1789,7 +1795,14 @@ pub fn evaluate(
                         globs
                     };
                     let Some(set) = glob_set(globs) else { continue };
-                    if let Some(hit) = rel_writes.iter().find(|r| set.is_match(r.as_str())) {
+                    let except: &[String] = match &g.gate {
+                        Gate::DenyPathWrite { except_files, .. } => except_files,
+                        _ => &[],
+                    };
+                    if let Some(hit) = rel_writes
+                        .iter()
+                        .find(|r| set.is_match(r.as_str()) && !except.iter().any(|e| e == *r))
+                    {
                         let what = if matches!(g.gate, Gate::ProtectTests { .. }) {
                             "changes a test file"
                         } else {
@@ -2285,11 +2298,54 @@ mod tests {
     }
 
     #[test]
+    fn deny_path_write_lets_approved_files_through() {
+        let p = policy(vec![(
+            "Data is owned by Sam",
+            Gate::DenyPathWrite {
+                globs: vec!["db/**".into()],
+                except_files: vec!["db/schema.sql".into()],
+            },
+        )]);
+        assert_eq!(
+            eval(&p, &write("/home/u/repo/db/schema.sql")),
+            Outcome::Allow
+        );
+        assert_eq!(
+            eval(&p, &write("/home/u/repo/db/seed.sql")),
+            Outcome::Blocked
+        );
+        assert_eq!(eval(&p, &bash("echo x > ../db/seed.sql")), Outcome::Blocked);
+    }
+
+    #[test]
+    fn a_policy_without_except_files_still_parses() {
+        let raw = r#"{"type":"deny-path-write","globs":["db/"]}"#;
+        let g: Gate = serde_json::from_str(raw).unwrap();
+        assert_eq!(
+            g,
+            Gate::DenyPathWrite {
+                globs: vec!["db/".into()],
+                except_files: vec![],
+            }
+        );
+        // And an empty exception list is not written back out.
+        assert_eq!(serde_json::to_string(&g).unwrap(), raw);
+        let with: Gate = serde_json::from_str(
+            r#"{"type":"deny-path-write","globs":["db/"],"exceptFiles":["db/a.sql"]}"#,
+        )
+        .unwrap();
+        assert!(
+            matches!(with, Gate::DenyPathWrite { ref except_files, .. } if except_files == &vec!["db/a.sql".to_string()])
+        );
+    }
+
+    #[test]
     fn deny_path_write_globs() {
         let p = policy(vec![(
             "Never touch migrations/",
             Gate::DenyPathWrite {
                 globs: vec!["migrations/".into()],
+                except_files: vec![],
             },
         )]);
         assert_eq!(
@@ -2321,6 +2377,7 @@ mod tests {
             "No SQL edits",
             Gate::DenyPathWrite {
                 globs: vec!["*.sql".into()],
+                except_files: vec![],
             },
         )]);
         assert_eq!(
@@ -2331,6 +2388,7 @@ mod tests {
             "Lockfile",
             Gate::DenyPathWrite {
                 globs: vec!["package-lock.json".into()],
+                except_files: vec![],
             },
         )]);
         assert_eq!(
@@ -2345,6 +2403,7 @@ mod tests {
             "Config",
             Gate::DenyPathWrite {
                 globs: vec!["config/*.yml".into()],
+                except_files: vec![],
             },
         )]);
         assert_eq!(
@@ -2515,6 +2574,7 @@ mod tests {
             "Never touch migrations/",
             Gate::DenyPathWrite {
                 globs: vec!["migrations".into()],
+                except_files: vec![],
             },
         )]);
         let f = evaluate(

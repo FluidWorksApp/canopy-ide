@@ -116,7 +116,9 @@ import { companionName, summonCompanion } from "./companion";
 import type { CompanionProposal } from "./companionSession";
 import { personaBinding } from "./personaBinding";
 import { getSettings, subscribeSettings, THEME_CHANGE_EVENT } from "./settings";
-import { defaultLens, initialLensConfig, projectLens, toggleProjectLens } from "./projectLens";
+import { builderRoot, defaultLens, initialLensConfig, projectLens, toggleProjectLens } from "./projectLens";
+import { startLensSteps } from "./lensSteps";
+import { startLensApprovals } from "./lensApprovals";
 import {
   dismissTerminalMemoryPromptsForWindow,
   subscribeTerminalMemoryPromptVisibility,
@@ -947,8 +949,21 @@ export default function App() {
     const stop = startAwareness({
       roots: () => wsRef.current.projects.flatMap((p) => p.components.map((c) => c.path)),
     });
+    // Builder-lens steps and their summaries (src/lensSteps.ts), and owners'
+    // answers to layer approvals (src/lensApprovals.ts): app-wide, so neither
+    // depends on a panel being open.
+    const stopSteps = startLensSteps({
+      roots: () =>
+        wsRef.current.projects.flatMap((p) => {
+          const builder = projectLens(p) === "builder" ? builderRoot(p) : null;
+          return p.components.map((c) => ({ root: c.path, builder: c.path === builder }));
+        }),
+    });
+    const stopApprovals = startLensApprovals();
     return () => {
       stop();
+      stopSteps();
+      stopApprovals();
       setCloudRosterProvider(null);
     };
   }, [meshJobs]);
