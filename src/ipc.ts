@@ -3798,6 +3798,12 @@ export interface SyncProbe {
   /** Uncommitted files the incoming commits also touch — git refuses to start
    *  a merge over these, so they're worth naming before the user clicks. */
   overlap: string[];
+  /** Untracked files the incoming commits add: git refuses to merge over
+   *  them. Absent from workspace hosts before 0.5.6. */
+  untracked?: string[];
+  /** The part of `untracked` already identical to the base's copy; the
+   *  one-click merge replaces those. */
+  untracked_same?: string[];
   subjects: string[];
   blocked: string | null;
   /** Fetch failed: counts are from the last successful fetch, not from now. */

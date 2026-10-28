@@ -63,10 +63,18 @@ export interface SyncPrompt {
  *  phrasing is pinned by tests — this text is the entire product surface of
  *  the feature, and "4 commits" vs "1 commit" is exactly the kind of thing
  *  that rots silently. */
+/** Untracked files the incoming commits add with different contents. git
+ *  refuses to merge over them, and only the user or an agent can say what in
+ *  them is worth keeping. Identical copies are not listed: the merge replaces
+ *  them and nothing is lost. */
+export const untrackedInWay = (p: SyncProbe): string[] =>
+  (p.untracked ?? []).filter((f) => !(p.untracked_same ?? []).includes(f));
+
 export function describe(p: SyncProbe): SyncPrompt {
   const base = baseLabel(p.base);
   const branch = p.branch ?? "this branch";
   const headline = `${base} has ${plural(p.behind, "new commit")}`;
+  const them = (n: number) => (n === 1 ? "it" : "them");
 
   // Uncommitted edits to a file the merge needs: git will refuse before it
   // writes anything, so say so now instead of surfacing its error later.
@@ -75,9 +83,9 @@ export function describe(p: SyncProbe): SyncPrompt {
       headline,
       detail:
         `You have uncommitted changes in ${plural(p.overlap.length, "file")} the incoming ` +
-        `commits also touch. Commit or stash ${p.overlap.length === 1 ? "it" : "them"} and this can merge — ` +
-        `or have an agent merge around ${p.overlap.length === 1 ? "it" : "them"}, leaving your edits uncommitted.`,
-      files: p.overlap,
+        `commits also touch. Commit or stash ${them(p.overlap.length)} and this can merge — ` +
+        `or have an agent merge around ${them(p.overlap.length)}, leaving your edits uncommitted.`,
+      files: [...p.overlap, ...untrackedInWay(p)],
       canMerge: false,
       blockedReason: "uncommitted changes are in the way",
       mergeLabel: `Merge ${base}`,
@@ -86,13 +94,36 @@ export function describe(p: SyncProbe): SyncPrompt {
     };
   }
 
+  const inWay = untrackedInWay(p);
+  if (inWay.length > 0) {
+    return {
+      headline,
+      detail:
+        `${plural(inWay.length, "file")} here ${inWay.length === 1 ? "isn't" : "aren't"} in git yet, and ` +
+        `the incoming commits add ${them(inWay.length)} with different contents. An agent can merge ` +
+        `and keep anything only your copy has — or move ${them(inWay.length)} aside yourself.`,
+      files: inWay,
+      canMerge: false,
+      blockedReason: "files not yet in git are in the way",
+      mergeLabel: `Merge ${base}`,
+      willConflict: p.state === "conflict",
+      canResolve: true,
+    };
+  }
+  // Untracked copies identical to the base's: the merge replaces them.
+  const same = p.untracked_same?.length ?? 0;
+  const replaced = same
+    ? ` ${plural(same, "file")} not yet in git already ${same === 1 ? "matches" : "match"} ${base}'s copy and will be replaced by it.`
+    : "";
+
   if (p.state === "conflict") {
     return {
       headline: `${headline} — ${plural(p.conflicts.length, "file")} would conflict`,
       detail:
         `Merging ${base} into ${branch} will stop on ${p.conflicts.length === 1 ? "this file" : "these files"} ` +
         `so you can resolve ${p.conflicts.length === 1 ? "it" : "them"}. Nothing has been changed yet — ` +
-        `you can leave this until later and keep working.`,
+        `you can leave this until later and keep working.` +
+        replaced,
       files: p.conflicts,
       canMerge: true,
       blockedReason: null,
@@ -107,7 +138,8 @@ export function describe(p: SyncProbe): SyncPrompt {
       headline,
       detail:
         `This git is too old to check for conflicts up front (needs 2.38 or newer), ` +
-        `so the merge may stop partway. It can be undone either way.`,
+        `so the merge may stop partway. It can be undone either way.` +
+        replaced,
       files: [],
       canMerge: true,
       blockedReason: null,
@@ -119,7 +151,7 @@ export function describe(p: SyncProbe): SyncPrompt {
 
   return {
     headline,
-    detail: `They merge into ${branch} cleanly. Your commits stay as they are.`,
+    detail: `They merge into ${branch} cleanly. Your commits stay as they are.${replaced}`,
     files: [],
     canMerge: true,
     blockedReason: null,
