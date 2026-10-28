@@ -14,7 +14,8 @@ import {TerminalInput} from './terminalInput';
 import {canSwitchExecutionMode} from '../executionMode';
 import {remoteDiagnostic} from './remoteDiagnostic';
 import type {ClaudeIdeEvent} from '../claudeIde';
-import {HOST_PROTOCOL} from '../../packages/remote-host/native-commands.mjs';
+import {hostUpdateState,type HostCapabilities} from './hostUpdate';
+import {peekWorkspaceList} from './workspaceListCache';
 import {HARNESS_READS,harnessCommand,isHarnessCommand,isOutdatedHarnessError} from './harnessCommands';
 import {HOST_OUTDATED_EVENT,hostOutdatedMessage,isRemoteUnsupported,outdatedHostCommand,outdatedNoticeCommand,remoteUnsupportedMessage} from './remoteSupport';
 
@@ -514,21 +515,33 @@ export class NativeWorkspaceHost implements Host {
       }
     }finally{this.pumping=false;}
   }
-  private outdatedReported=false;
-  private hostOutdated(command?:string){
-    if(this.outdatedReported||this.disposed)return;this.outdatedReported=true;
+  /** The update notice (WorkspaceUpdateNotice) hears this once per state per
+   * connection; `available` may still become `required`, never the reverse. */
+  private updateReported:'available'|'required'|null=null;
+  private hostUpdate(state:'available'|'required',command?:string,revision:string|null=null){
+    if(this.disposed||this.updateReported==='required'||this.updateReported===state)return;this.updateReported=state;
     // A background probe is not something the person asked for: never name it.
-    const named=outdatedNoticeCommand(command);
-    window.dispatchEvent(new CustomEvent(HOST_OUTDATED_EVENT,{detail:{command:named??null,message:hostOutdatedMessage(named)}}));
+    const named=state==='required'?outdatedNoticeCommand(command):undefined;
+    window.dispatchEvent(new CustomEvent(HOST_OUTDATED_EVENT,{detail:{workspaceId:this.connection.workspaceId,state,command:named??null,revision,message:hostOutdatedMessage(named)}}));
   }
+  private hostOutdated(command?:string){this.hostUpdate('required',command);}
   /** Ask once per connection, so a stale host is reported before anyone hits
-   * it — after boot settles, never competing with the handshake for a lane. */
+   * it — after boot settles, never competing with the handshake for a lane.
+   * The workspace list's host report decides when there is one; otherwise
+   * the container's own host_capabilities answer. */
   private versionCheck?: ReturnType<typeof setTimeout>;
-  private scheduleHostVersionCheck(){if(!this.versionCheck&&!this.outdatedReported)this.versionCheck=setTimeout(()=>void this.checkHostVersion(),10_000);}
+  private scheduleHostVersionCheck(){if(!this.versionCheck&&this.updateReported!=='required')this.versionCheck=setTimeout(()=>void this.checkHostVersion(),10_000);}
   private async checkHostVersion(){
     if(this.disposed)return;
-    try{const capabilities=await this.native<{protocol?:number}>('host_capabilities');if(!(Number(capabilities?.protocol)>=HOST_PROTOCOL))this.hostOutdated();}
-    catch(error){if(/does not support host_capabilities yet/.test(String(error)))this.hostOutdated();}
+    const listed=peekWorkspaceList()?.workspaces.find(w=>w.id===this.connection.workspaceId);
+    let capabilities:HostCapabilities|null=null;
+    if(!listed?.host){
+      try{capabilities=await this.native<HostCapabilities>('host_capabilities');}
+      catch(error){if(!/does not support host_capabilities yet/.test(String(error)))return;capabilities={protocol:0};}
+      if(this.disposed)return;
+    }
+    const state=hostUpdateState(listed??{},capabilities);
+    if(state==='available'||state==='required')this.hostUpdate(state,undefined,listed?.release?.revision??null);
   }
   async listen<T>(event:string,handler:(event:HostEvent<T>)=>void):Promise<UnlistenFn>{
     if(this.disposed)throw Error('Workspace disconnected');

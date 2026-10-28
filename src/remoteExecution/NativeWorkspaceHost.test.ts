@@ -669,7 +669,7 @@ it('never names a background probe as the feature that needs the update',async()
  const seen:unknown[]=[];const heard=(event:Event)=>seen.push((event as CustomEvent).detail);
  window.addEventListener('canopy:workspace-host-outdated',heard);
  await expect(host.invoke('git_sync_probe',{repo:'/workspace',fetch:false,base:null})).rejects.toThrow('This workspace is running an older Canopy host. Restart or update the workspace to use everything in this version of Canopy.');
- expect(seen).toEqual([{command:null,message:'This workspace is running an older Canopy host. Restart or update the workspace to use everything in this version of Canopy.'}]);
+ expect(seen).toEqual([expect.objectContaining({state:'required',command:null,revision:null,message:'This workspace is running an older Canopy host. Restart or update the workspace to use everything in this version of Canopy.'})]);
  window.removeEventListener('canopy:workspace-host-outdated',heard);host.dispose();
 });
 it('refuses features a cloud workspace does not offer without a round trip',async()=>{
@@ -691,7 +691,7 @@ it('checks the host protocol once after boot and reports a stale host',async()=>
   await host.invoke('pty_renderer_register');
   expect(fetcher.mock.calls.some(([,o])=>String(o.body).includes('host_capabilities'))).toBe(false);
   await vi.advanceTimersByTimeAsync(10_000);
-  expect(seen).toEqual([{command:null,message:'This workspace is running an older Canopy host. Restart or update the workspace to use everything in this version of Canopy.'}]);
+  expect(seen).toEqual([expect.objectContaining({state:'required',command:null,revision:null,message:'This workspace is running an older Canopy host. Restart or update the workspace to use everything in this version of Canopy.'})]);
   window.removeEventListener('canopy:workspace-host-outdated',heard);host.dispose();
  }finally{vi.useRealTimers();}
 });

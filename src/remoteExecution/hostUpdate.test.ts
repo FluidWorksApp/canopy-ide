@@ -1,7 +1,7 @@
 import {it,expect,vi,beforeEach} from 'vitest';
 const mocks=vi.hoisted(()=>({invoke:vi.fn()}));
 vi.mock('@tauri-apps/api/core',()=>({invoke:mocks.invoke}));
-import {HostUpdateCancelled,hostUpdateState,requestHostUpdate} from './hostUpdate';
+import {HostUpdateCancelled,hostUpdateState,requestHostUpdate,workspaceUpdate} from './hostUpdate';
 const id='ws-11111111-1111-1111-1111-111111111111',A='a'.repeat(40),B='b'.repeat(40);
 beforeEach(()=>{vi.clearAllMocks();});
 
@@ -21,6 +21,19 @@ it('falls back to what the host answers when the list has no report',()=>{
  expect(hostUpdateState({host:{revision:A,protocol:5},release:{revision:B,protocol:6}},{protocol:6,revision:B},6)).toBe('required'); // The control plane's report wins over a cached answer.
 });
 
+it('a container on an older image than the release has an update available',()=>{
+ const image=(digest:string)=>'ghcr.io/fluidworksapp/canopy-workspace@sha256:'+digest.repeat(64);
+ expect(hostUpdateState({host:{revision:B,protocol:6,image:image('1')},release:{revision:B,protocol:6,image:image('2')}},null,6)).toBe('available');
+ expect(hostUpdateState({host:{revision:B,protocol:6,image:image('2')},release:{revision:B,protocol:6,image:image('2')}},null,6)).toBe('current');
+});
+it('a failed command outranks the list; otherwise the list decides, then what the connection learned',()=>{
+ const required={workspaceId:id,state:'required' as const,command:'gh_pr_list',revision:null};
+ expect(workspaceUpdate({host:{revision:B,protocol:6},release:{revision:B,protocol:6}},required)).toEqual({state:'required',command:'gh_pr_list',revision:B});
+ expect(workspaceUpdate({host:{revision:B,protocol:6},release:{revision:B,protocol:6}},{...required,state:'available',command:null})).toBeNull();
+ expect(workspaceUpdate({host:{revision:A,protocol:6},release:{revision:B,protocol:6}},null)).toEqual({state:'available',command:null,revision:B});
+ expect(workspaceUpdate(undefined,{...required,state:'available',command:null,revision:B})).toEqual({state:'available',command:null,revision:B});
+ expect(workspaceUpdate(undefined,null)).toBeNull();
+});
 const status=(operation:unknown,state='ready')=>({workspaces:[{id,state,operation}]});
 it('requests update-host with a request key and client id, then waits for the operation to finish',async()=>{
  vi.useFakeTimers();try{

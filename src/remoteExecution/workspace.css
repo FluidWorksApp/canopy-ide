@@ -383,3 +383,6 @@
 .workspace-share-link {display:flex;justify-content:space-between;align-items:center;gap:12px;padding:10px 0;border-top:1px solid var(--border);}
 .workspace-share-link > div {min-width:0;display:flex;flex-direction:column;gap:2px;}
 .workspace-share-link small {color:var(--text-muted);font-size:var(--fs-xs);}
+/* A workspace host update: a dot on the workspace chip (WorkspaceUpdateNotice). */
+.workspace-update-dot {display:inline-block;width:7px;height:7px;border-radius:50%;margin-left:6px;background:var(--accent);flex:none;}
+.workspace-update-dot.required {background:var(--warn,var(--accent));}

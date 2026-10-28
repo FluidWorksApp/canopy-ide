@@ -2,17 +2,21 @@ import {invoke} from '@tauri-apps/api/core';
 import {HOST_PROTOCOL} from '../../packages/remote-host/native-commands.mjs';
 import {accountErrorMessage,accountRequestError,othersConnected} from './accountWorkspace';
 import type {ManagedWorkspace} from './ManagedWorkspaces';
+import {HOST_OUTDATED_EVENT} from './remoteSupport';
 // Workspace host updates (docs/designs/workspace-host-rollout.md, part 3).
 // The workspace list reports which host release a workspace runs (`host`) and
 // which one is active (`release`); the app decides what that means itself.
+// `host.protocol` is what the owner's container answers (native commands run
+// there), so it is the protocol this app talks to.
 export type HostUpdateState='current'|'available'|'required'|'unknown';
-export type HostReport={revision:string|null;protocol:number|null;reportedAt?:string|null};
-export type HostRelease={revision:string;protocol:number};
-/** What the host itself answers to host_capabilities, for when the list has
- * no report (control plane unreachable, or a host from before reporting). */
+export type HostReport={revision:string|null;protocol:number|null;image?:string|null;reportedAt?:string|null};
+export type HostRelease={revision:string;protocol:number;image?:string|null};
+/** What the container answers to host_capabilities, for when the list has no
+ * report (control plane unreachable, or a host from before reporting). */
 export type HostCapabilities={protocol?:number;revision?:string|null};
-/** `required`: the host speaks an older protocol than this app. `available`:
- * a newer release is active and this host still works with this app. */
+/** `required`: the workspace speaks an older protocol than this app.
+ * `available`: a newer release is active and the workspace still works with
+ * this app. */
 export function hostUpdateState(workspace:Pick<ManagedWorkspace,'host'|'release'>,capabilities?:HostCapabilities|null,appProtocol=HOST_PROTOCOL):HostUpdateState{
  const host=workspace.host??null,release=workspace.release??null;
  const protocol=typeof host?.protocol==='number'?host.protocol:typeof capabilities?.protocol==='number'?capabilities.protocol:null;
@@ -20,8 +24,39 @@ export function hostUpdateState(workspace:Pick<ManagedWorkspace,'host'|'release'
  if(protocol===null)return 'unknown';
  if(protocol<appProtocol)return 'required';
  if(!release)return 'current';
+ if(host?.image&&release.image&&host.image!==release.image)return 'available';
  if(!revision)return 'unknown';
  return revision===release.revision?'current':'available';
+}
+
+/** What a workspace connection learned about its host: sent by
+ * NativeWorkspaceHost as HOST_OUTDATED_EVENT. `command` is the feature that
+ * failed, never a background probe. */
+export type HostUpdateSignal={workspaceId:string;state:'available'|'required';command:string|null;revision:string|null};
+const signals=new Map<string,HostUpdateSignal>(),signalListeners=new Set<()=>void>();
+export const hostUpdateSignal=(workspaceId:string)=>signals.get(workspaceId)??null;
+export function subscribeHostUpdates(listener:()=>void){signalListeners.add(listener);return()=>{signalListeners.delete(listener);};}
+export function recordHostUpdate(signal:HostUpdateSignal|null,workspaceId=signal?.workspaceId){
+ if(!workspaceId)return;
+ if(signal)signals.set(workspaceId,signal);else signals.delete(workspaceId);
+ signalListeners.forEach(listener=>{try{listener();}catch{/* One view never blocks another. */}});
+}
+if(typeof window!=='undefined')window.addEventListener(HOST_OUTDATED_EVENT,event=>{
+ const detail=(event as CustomEvent<Partial<HostUpdateSignal>>).detail;
+ if(typeof detail?.workspaceId!=='string'||(detail.state!=='available'&&detail.state!=='required'))return;
+ const previous=signals.get(detail.workspaceId);if(previous?.state==='required'&&detail.state==='available')return;
+ recordHostUpdate({workspaceId:detail.workspaceId,state:detail.state,command:detail.command??null,revision:detail.revision??null});
+});
+/** The notice to show. A command that failed for want of an update is proof;
+ * otherwise the workspace list decides when it has a report, and what the
+ * connection learned when it does not. */
+export function workspaceUpdate(listed:Pick<ManagedWorkspace,'host'|'release'>|undefined,signal:HostUpdateSignal|null):{state:'available'|'required';command:string|null;revision:string|null}|null{
+ const revision=listed?.release?.revision??signal?.revision??null;
+ if(signal?.state==='required')return {state:'required',command:signal.command,revision};
+ const fromList=listed?.host?hostUpdateState(listed):null;
+ if(fromList==='available'||fromList==='required')return {state:fromList,command:null,revision};
+ if(fromList==='current')return null;
+ return signal?{state:signal.state,command:null,revision}:null;
 }
 
 export type HostUpdateProgress={phase:'requesting'|'updating'|'completed';accepted:boolean};
