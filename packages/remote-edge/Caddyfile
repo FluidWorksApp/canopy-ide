@@ -1,0 +1,13 @@
+# TLS for the public handles and the tunnel endpoint. Requires a Caddy build
+# with github.com/caddy-dns/route53 (wildcards need the DNS-01 challenge).
+# CANOPY_REMOTE_DOMAIN comes from the caddy.service drop-in written by install.sh.
+*.{$CANOPY_REMOTE_DOMAIN}, edge.{$CANOPY_REMOTE_DOMAIN} {
+	tls {
+		dns route53
+	}
+	# Caddy replaces any client-sent X-Forwarded-For with the peer address;
+	# the edge trusts the rightmost entry because it only listens on loopback.
+	reverse_proxy 127.0.0.1:8080 {
+		flush_interval -1
+	}
+}

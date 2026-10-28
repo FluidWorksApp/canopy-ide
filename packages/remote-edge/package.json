@@ -1,0 +1,19 @@
+{
+  "name": "@canopy/remote-edge",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "bin": {
+    "canopy-remote-edge": "main.mjs"
+  },
+  "scripts": {
+    "start": "node main.mjs",
+    "test": "node --test *.test.mjs"
+  },
+  "dependencies": {
+    "ws": "8.22.0"
+  }
+}
