@@ -32,3 +32,11 @@ describe("account requests to a server older than the app", () => {
     await expect(requestMoreCredit()).rejects.toThrow(/Requesting credit: not available on Canopy's server yet/);
   });
 });
+
+describe("a wrapped not-on-server-yet error", () => {
+  it("is still recognised", () => {
+    const wrapped = serverFeatureError(Error("not-on-server-yet"), "Readable links");
+    expect(notOnServerYet(wrapped)).toBe(true);
+    expect(notOnServerYet(serverFeatureError(Error("offline"), "Readable links"))).toBe(false);
+  });
+});
