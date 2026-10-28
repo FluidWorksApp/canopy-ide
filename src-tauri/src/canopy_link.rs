@@ -100,7 +100,13 @@ async fn fetch_grant() -> Result<Grant, String> {
     grant_from(&value)
 }
 
-fn publish(app: &AppHandle, last: &Arc<Mutex<TunnelState>>, url: Option<String>, message: Option<String>, running: bool) {
+fn publish(
+    app: &AppHandle,
+    last: &Arc<Mutex<TunnelState>>,
+    url: Option<String>,
+    message: Option<String>,
+    running: bool,
+) {
     let state = TunnelState {
         running,
         provider: Some(PROVIDER.into()),
@@ -187,7 +193,11 @@ async fn run_once(
         Err(tungstenite::Error::Http(response)) if response.status() == 401 => {
             return Outcome::Retry("Canopy's edge refused the link token. Trying again…".into())
         }
-        Err(error) => return Outcome::Retry(format!("Can't reach Canopy's edge ({error}). Trying again…")),
+        Err(error) => {
+            return Outcome::Retry(format!(
+                "Can't reach Canopy's edge ({error}). Trying again…"
+            ))
+        }
     };
     *attempt = 0;
     publish(app, last, Some(grant.url.clone()), None, true);
@@ -234,7 +244,12 @@ async fn run_once(
     outcome
 }
 
-async fn handle_frame(bytes: &[u8], router: &axum::Router, streams: &Streams, out: &mpsc::Sender<Message>) {
+async fn handle_frame(
+    bytes: &[u8],
+    router: &axum::Router,
+    streams: &Streams,
+    out: &mpsc::Sender<Message>,
+) {
     let Some((kind, id, payload)) = parse(bytes) else {
         return;
     };
@@ -244,7 +259,13 @@ async fn handle_frame(bytes: &[u8], router: &axum::Router, streams: &Streams, ou
                 .ok()
                 .and_then(|v| v.get("auth").and_then(Value::as_str).map(|a| a == "owner"))
                 .unwrap_or(false);
-            open_stream(id, EdgeAuth { owner }, router.clone(), streams.clone(), out.clone());
+            open_stream(
+                id,
+                EdgeAuth { owner },
+                router.clone(),
+                streams.clone(),
+                out.clone(),
+            );
         }
         DATA => {
             // Take the writer out while writing so the lock never spans an await.
@@ -272,13 +293,20 @@ async fn handle_frame(bytes: &[u8], router: &axum::Router, streams: &Streams, ou
 
 /// One browser connection: an in-memory pipe whose far end is served by the
 /// portal router, the near end pumped to and from the tunnel.
-fn open_stream(id: u32, auth: EdgeAuth, router: axum::Router, streams: Streams, out: mpsc::Sender<Message>) {
+fn open_stream(
+    id: u32,
+    auth: EdgeAuth,
+    router: axum::Router,
+    streams: Streams,
+    out: mpsc::Sender<Message>,
+) {
     let (near, far) = tokio::io::duplex(STREAM_BUFFER);
     let (mut read, write) = tokio::io::split(near);
     streams.lock().unwrap().insert(id, write);
 
     tokio::spawn(async move {
-        let service = hyper_util::service::TowerToHyperService::new(router.layer(axum::Extension(auth)));
+        let service =
+            hyper_util::service::TowerToHyperService::new(router.layer(axum::Extension(auth)));
         let _ = hyper::server::conn::http1::Builder::new()
             .serve_connection(hyper_util::rt::TokioIo::new(far), service)
             .with_upgrades()
@@ -294,7 +322,11 @@ fn open_stream(id: u32, auth: EdgeAuth, router: axum::Router, streams: Streams, 
                     break;
                 }
                 Ok(n) => {
-                    if out.send(Message::Binary(frame(DATA, id, &buf[..n]))).await.is_err() {
+                    if out
+                        .send(Message::Binary(frame(DATA, id, &buf[..n])))
+                        .await
+                        .is_err()
+                    {
                         break;
                     }
                 }
@@ -318,7 +350,10 @@ mod tests {
         assert_eq!(bytes[..5], [DATA, 0, 0, 0, 7]);
         assert_eq!(parse(&bytes), Some((DATA, 7, &b"hello"[..])));
         assert_eq!(parse(&[1, 0, 0]), None);
-        assert_eq!(parse(&frame(END, u32::MAX, &[])), Some((END, u32::MAX, &[][..])));
+        assert_eq!(
+            parse(&frame(END, u32::MAX, &[])),
+            Some((END, u32::MAX, &[][..]))
+        );
     }
 
     #[test]
@@ -337,14 +372,28 @@ mod tests {
         let router = axum::Router::new().route(
             "/who",
             get(|edge: Option<axum::Extension<EdgeAuth>>| async move {
-                if edge.is_some_and(|e| e.owner) { "owner" } else { "anonymous" }
+                if edge.is_some_and(|e| e.owner) {
+                    "owner"
+                } else {
+                    "anonymous"
+                }
             }),
         );
         let streams: Streams = Default::default();
         let (out, mut frames) = mpsc::channel::<Message>(64);
-        handle_frame(&frame(OPEN, 1, br#"{"auth":"owner"}"#), &router, &streams, &out).await;
         handle_frame(
-            &frame(DATA, 1, b"GET /who HTTP/1.1\r\nHost: vj.remote.test\r\nConnection: close\r\n\r\n"),
+            &frame(OPEN, 1, br#"{"auth":"owner"}"#),
+            &router,
+            &streams,
+            &out,
+        )
+        .await;
+        handle_frame(
+            &frame(
+                DATA,
+                1,
+                b"GET /who HTTP/1.1\r\nHost: vj.remote.test\r\nConnection: close\r\n\r\n",
+            ),
             &router,
             &streams,
             &out,
@@ -375,7 +424,10 @@ mod tests {
     #[test]
     fn grants_need_https_and_wss() {
         let ok = serde_json::json!({"url":"https://vj.remote.canopyide.dev","tunnel":"wss://edge.remote.canopyide.dev/v1/tunnel","token":"t"});
-        assert_eq!(grant_from(&ok).unwrap().url, "https://vj.remote.canopyide.dev");
+        assert_eq!(
+            grant_from(&ok).unwrap().url,
+            "https://vj.remote.canopyide.dev"
+        );
         let insecure = serde_json::json!({"url":"http://vj.remote.canopyide.dev","tunnel":"wss://edge/v1/tunnel","token":"t"});
         assert!(grant_from(&insecure).is_err());
         assert!(grant_from(&serde_json::json!({"url":"https://x","tunnel":"wss://y"})).is_err());

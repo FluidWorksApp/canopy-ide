@@ -629,8 +629,8 @@ export function SessionDocView({
                 <>
                   {editsWritten(doc.files) > 0 && (
                     <p className="sdoc-note">
-                      {doc.survivingEdits} of {editsWritten(doc.files)} edit{editsWritten(doc.files) === 1 ? "" : "s"}{" "}
-                      this session wrote are still in the code.
+                      Still in the code: {doc.survivingEdits} of the {editsWritten(doc.files)} edit
+                      {editsWritten(doc.files) === 1 ? "" : "s"} this session wrote.
                     </p>
                   )}
                   <ul className="sdoc-files">
