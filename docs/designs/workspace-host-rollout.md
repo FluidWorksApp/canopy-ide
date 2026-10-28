@@ -243,7 +243,7 @@ verify its `ChecksumSHA256` matches and continue.
 
 **CI identity.** GitHub Actions OIDC. The AWS role
 `arn:aws:iam::703671915771:role/canopy-release-publisher` trusts
-`repo:FluidWorksApp/canopy-ide:ref:refs/heads/main` and may only
+`repo:FluidWorksApp@157910230/canopy-ide@1303048905:ref:refs/heads/main` (GitHub's immutable subject format) and may only
 `s3:PutObject` / `s3:GetObject` on `canopy-runtime-703671915771/releases/*`.
 The control plane accepts a GitHub OIDC token with `aud=https://canopyide.dev`,
 `iss=https://token.actions.githubusercontent.com`,
