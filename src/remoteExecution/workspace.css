@@ -124,6 +124,10 @@
 .workspace-progress-line strong {overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0;}
 .workspace-progress-line [role=status] {font-size:var(--fs-xs);color:var(--text-dim);margin-left:auto;white-space:nowrap;}
 .workspace-progress-line > .btn-icon {flex-shrink:0;}
+/* The update notice's message can be a long failure from the control plane: wrap it, never cut it off. */
+.workspace-update-notice .workspace-progress-line {align-items:flex-start;}
+.workspace-update-notice .workspace-progress-dot {margin-top:5px;}
+.workspace-update-notice .workspace-update-message {white-space:normal;overflow:visible;text-overflow:clip;overflow-wrap:anywhere;min-width:0;line-height:1.45;}
 .workspace-progress-dot {width:7px;height:7px;border-radius:50%;background:var(--accent);flex-shrink:0;}
 .workspace-progress-track {height:3px;background:var(--border);}
 .workspace-progress-track > span {display:block;height:100%;background:var(--accent);transition:width .3s ease;}

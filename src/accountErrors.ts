@@ -14,6 +14,7 @@ const text = (error: unknown) => String(error instanceof Error ? error.message :
 
 /** True when the request failed only because the server predates the feature. */
 export function notOnServerYet(error: unknown): boolean {
+  if ((error as { notOnServerYet?: boolean } | null)?.notOnServerYet === true) return true;
   const message = text(error);
   return message === NOT_ON_SERVER_YET || /^method not allowed$/i.test(message.trim());
 }
@@ -22,7 +23,12 @@ export function notOnServerYet(error: unknown): boolean {
  *  links") when the server doesn't offer it yet; otherwise the original. */
 export function serverFeatureError(error: unknown, feature: string): Error {
   if (notOnServerYet(error)) {
-    return Error(`${feature}: not available on Canopy's server yet. It starts working once the server is updated; nothing on your side needs to change.`);
+    // Still recognisable after wrapping, so a surface can say it quietly
+    // instead of as a failure.
+    return Object.assign(
+      Error(`${feature}: not available on Canopy's server yet. It starts working once the server is updated; nothing on your side needs to change.`),
+      { notOnServerYet: true },
+    );
   }
   return error instanceof Error ? error : Error(text(error));
 }

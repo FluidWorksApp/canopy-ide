@@ -1,25 +1,18 @@
 /* Sharing a terminal: the Share sheet (ShareTerminalSheet.tsx) and Team →
    Live now (LiveSessions.tsx). Theme tokens only. */
 
-/* Share sheet: labels in one column, controls in the other. */
-.share-sheet{display:grid;grid-template-columns:max-content minmax(0,1fr);gap:12px 16px;align-items:start;min-width:0}
-.share-sheet-label{padding-top:5px;font-size:var(--fs-sm);font-weight:600;color:var(--text);white-space:nowrap}
-.share-sheet-control{display:flex;flex-direction:column;gap:6px;min-width:0}
-.share-sheet-value{padding-top:5px;font-size:var(--fs-sm);color:var(--text)}
-.share-sheet-note{font-size:var(--fs-xs);line-height:1.45;color:var(--text-dim)}
+/* Share sheet: one list of terminals, or nothing to pick. */
+.share-sheet{display:flex;flex-direction:column;gap:10px;min-width:0}
+.share-sheet-note{margin:0;font-size:var(--fs-xs);line-height:1.45;color:var(--text-dim)}
 .share-sheet-error{margin:0;font-size:var(--fs-sm);color:var(--danger)}
 .share-sheet-done{margin:0;font-size:var(--fs-sm);line-height:1.5}
-.share-sheet-modes{gap:10px}
-.share-sheet-modes .set-inline-check{align-items:flex-start;gap:8px}
-.share-sheet-modes .set-inline-check input{margin-top:1px;flex:0 0 auto}
-.share-sheet-modes .set-inline-check em{display:block;font-style:normal;font-size:var(--fs-xs);color:var(--text-dim);line-height:1.45}
-.share-terminal-list{display:flex;flex-direction:column;gap:4px;max-height:200px;overflow:auto;min-width:0}
+.share-terminal-list{display:flex;flex-direction:column;gap:4px;max-height:240px;overflow:auto;min-width:0}
 .share-terminal-card{display:flex;align-items:baseline;justify-content:space-between;gap:12px;width:100%;padding:7px 10px;text-align:left;font:inherit;font-size:var(--fs-sm);color:var(--text);background:var(--bg-deep);border:1px solid var(--border);border-radius:var(--r-sm);cursor:pointer}
 .share-terminal-card strong{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-weight:500}
 .share-terminal-card small{flex:0 0 auto;font-size:var(--fs-xs);color:var(--text-dim)}
-.share-terminal-card:hover{border-color:color-mix(in srgb,var(--accent) 45%,var(--border))}
+.share-terminal-card:hover:not(:disabled){border-color:color-mix(in srgb,var(--accent) 45%,var(--border))}
 .share-terminal-card.is-picked{border-color:var(--accent);background:color-mix(in srgb,var(--accent) 10%,var(--bg-deep))}
-@media(max-width:480px){.share-sheet{grid-template-columns:minmax(0,1fr)}.share-sheet>span:empty{display:none}}
+.share-terminal-card:disabled{cursor:default;color:var(--text-dim);opacity:.7}
 
 /* Team → Live now. */
 .live-sessions{display:flex;flex-direction:column;gap:6px;min-width:0}

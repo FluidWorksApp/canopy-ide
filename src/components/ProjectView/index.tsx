@@ -559,7 +559,7 @@ import {
 import { PrView } from "../PrView";
 import { ErrorBoundary } from "../ErrorBoundary";
 import { TeamPanel } from "../TeamPanel";
-import { shareAvailability, shareTerminal } from "../shareTerminal";
+import { publishShareableTerminals, shareAvailability, shareTerminal, type ShareableTerminal } from "../shareTerminal";
 import { OPEN_TEAM_EVENT } from "../../readableLinks";
 import { McpToolsPanel } from "../McpToolsPanel";
 import { McpView } from "../McpView";
@@ -12136,18 +12136,55 @@ const ProjectViewBody = memo(function ProjectViewBody({
   // Only the owner of the connected Canopy workspace can share, and there a
   // tab's pty id is the workspace's session id (NativeWorkspaceHost).
   const canShareTerminals = shareAvailability().ok;
-  const shareTerminalTab = useCallback(
-    (tab: TermSubTab) => {
-      if (tab.ptyId == null) return;
-      shareTerminal({
+  const shareWorkspaceId = workspaceConnection?.workspaceId;
+  /** A terminal as the Share sheet names it: the tab's title, this project
+   *  and the branch of the worktree its cwd is in. */
+  const shareableOf = useCallback(
+    (tab: TermSubTab): ShareableTerminal | null => {
+      if (tab.ptyId == null) return null;
+      let branch: string | undefined, depth = -1;
+      for (const { trees } of allWorktrees)
+        for (const w of trees)
+          if (w.branch && (tab.cwd === w.path || tab.cwd.startsWith(`${w.path}/`)) && w.path.length > depth) {
+            branch = w.branch.replace(/^refs\/heads\//, "");
+            depth = w.path.length;
+          }
+      return {
         sessionId: tab.ptyId,
         title: tabName(tab, { agent: isAgentTabRef.current(tab) }),
         projectId: project.id,
         projectName: project.name,
-      });
+        cwd: tab.cwd,
+        ...(branch ? { branch } : {}),
+        ...(shareWorkspaceId ? { workspaceId: shareWorkspaceId } : {}),
+      };
     },
-    [project.id, project.name],
+    [allWorktrees, project.id, project.name, shareWorkspaceId],
   );
+  const shareTerminalTab = useCallback(
+    (tab: TermSubTab) => {
+      const terminal = shareableOf(tab);
+      if (terminal) shareTerminal(terminal);
+    },
+    [shareableOf],
+  );
+  // The Team panel's Share sheet lists these by name (only in a workspace,
+  // where a tab's pty id is the workspace's session id).
+  useEffect(() => {
+    if (!canShareTerminals || !shareWorkspaceId) {
+      publishShareableTerminals(project.id, []);
+      return;
+    }
+    publishShareableTerminals(
+      project.id,
+      tabs.flatMap((t) =>
+        t.type === "terminal" && !t.run && !t.exited && t.exitCode == null
+          ? (shareableOf(t) ?? [])
+          : [],
+      ),
+    );
+  }, [tabs, shareableOf, canShareTerminals, shareWorkspaceId, project.id]);
+  useEffect(() => () => publishShareableTerminals(project.id, []), [project.id]);
   const onTabContextMenu = useCallback(
     (e: React.MouseEvent, tab: SubTab) => {
       // Every tab kind that names a concrete thing can seed a task about it —

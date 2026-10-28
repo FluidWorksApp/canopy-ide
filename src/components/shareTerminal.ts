@@ -12,8 +12,22 @@ import {OPEN_TEAM_EVENT} from '../readableLinks';
  * `collaborative` are only in the owner's own list. */
 export type Publication={id:string;projectId:string;title:string;mode:'view'|'interact';expiresAt:number;sessionId?:number;collaborative?:boolean;room?:{id:string;owner:string;team:string}};
 /** A running terminal in the connected workspace. `sessionId` is the
- * workspace's session id, which is the tab's pty id in a remote workspace. */
-export type ShareableTerminal={sessionId:number;title:string;projectId?:string;projectName?:string};
+ * workspace's session id, which is the tab's pty id in a remote workspace.
+ * `title` is the tab's name as the IDE shows it (tabName), `branch` the Git
+ * branch of the worktree its cwd is in. */
+export type ShareableTerminal={sessionId:number;title:string;projectId?:string;projectName?:string;branch?:string;cwd?:string;workspaceId?:string};
+/** How a person knows a terminal: "claude · SuprFlow · main". Never the
+ * command line or the session number. */
+export function terminalLabel(t:ShareableTerminal){
+ const title=t.title.trim(),project=t.projectName?.trim();
+ return [title||(project?`${project} terminal`:'Terminal'),title?project:undefined,t.branch?.trim()].filter((part,i,all):part is string=>!!part&&all.indexOf(part)===i).join(' · ');
+}
+// The terminal tabs each open project shows, so the sheet opened from the
+// Team panel lists them by name rather than by the workspace's session list.
+const openTerminals=new Map<string,ShareableTerminal[]>();
+/** A project view says which of its terminal tabs are running (or none). */
+export function publishShareableTerminals(projectId:string,terminals:ShareableTerminal[]){if(terminals.length)openTerminals.set(projectId,terminals);else openTerminals.delete(projectId);}
+export function shareableTerminals(workspaceId:string):ShareableTerminal[]{return [...openTerminals.values()].flat().filter(t=>t.workspaceId===workspaceId);}
 export const SHARE_TERMINAL_EVENT='canopy:share-terminal';
 /** Something was shared or stopped: the Live now list refreshes. */
 export const SHARED_SESSIONS_CHANGED='canopy:shared-sessions-changed';

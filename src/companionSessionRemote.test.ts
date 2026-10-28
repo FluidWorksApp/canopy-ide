@@ -26,6 +26,7 @@ vi.mock("./settings", () => ({
   subscribeSettings: () => () => {},
 }));
 vi.mock("./projects", () => ({ shellBin: (b: string) => b, shellQuote: (t: string) => t }));
+vi.mock("./profiles", () => ({ brainLaunchEnv: async () => [] }));
 vi.mock("./companionTransport", () => ({
   startOneshot: (_id: string, launch: { roots: string[] }) => {
     seen.roots = launch.roots;

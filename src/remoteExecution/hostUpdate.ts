@@ -65,6 +65,19 @@ export function workspaceUpdate(listed:Pick<ManagedWorkspace,'host'|'release'>|u
  return signal?{state:signal.state,command:null,revision}:null;
 }
 
+/** A failed `update-host`, with the control plane's update code
+ * (`context.updateResult.code`, flattened to `update_code` in the list). */
+export class HostUpdateFailed extends Error{readonly code:string|null;constructor(message:string,code?:string|null){super(message);this.code=code??null;}}
+/** The control plane could not start an in-place update on this host (a
+ * gateway from before 0.5.3 never answers the update-host dispatch): update
+ * code `unsupported`. Trying again cannot work. Matches the control plane's
+ * text when the code is not available. */
+export function hostUpdateUnsupported(error:unknown){
+ const code=error instanceof HostUpdateFailed?error.code:accountRequestError(error)?.code;
+ if(code==='unsupported')return true;
+ return /cannot update in place/i.test(error instanceof Error?error.message:accountErrorMessage(error));
+}
+
 /** The host's own step, as the control plane copies it to the operation's
  * `context.updateStep` (host-update-run.mjs). */
 export type HostUpdateStep='download'|'gateway'|'gateway-ready'|'image'|'rollback';
@@ -75,7 +88,7 @@ export type ConfirmHostUpdate=(others:number)=>Promise<boolean>;
 export class HostUpdateCancelled extends Error{constructor(){super('Update cancelled. The workspace keeps running its current host.');}}
 // Step (b) may pull the release image when the pre-pull has not.
 export const HOST_UPDATE_WAIT_MS=20*60*1000;
-type Observed={id:string;state:string;operation?:{id?:string;action?:string;status:string;last_error?:string|null;update_step?:string|null;context?:{updateStep?:string|null}|null}};
+type Observed={id:string;state:string;operation?:{id?:string;action?:string;status:string;last_error?:string|null;update_step?:string|null;update_code?:string|null;context?:{updateStep?:string|null}|null}};
 const transient=(error:unknown)=>{const message=String(error);if(/\b(?:401|403)\b|unauthorized|forbidden|not signed in/i.test(message))return false;return /timed?\s*out|timeout|network|connection|failed to fetch|\b(?:408|429|500|502|503|504)\b/i.test(message);};
 const pause=(ms:number)=>new Promise(resolve=>setTimeout(resolve,ms));
 /** Owner only: asks the control plane for the `update-host` operation, with
@@ -93,7 +106,7 @@ export async function requestHostUpdate(workspaceId:string,{clientId,confirmOthe
    const others=confirmed?null:othersConnected(error);
    if(others!==null){if(!confirmOthers||!await confirmOthers(others))throw new HostUpdateCancelled();confirmed=true;continue;}
    // A lost response may still have started the update: watch for it below.
-   if(!transient(error))throw accountRequestError(error)?Error(accountErrorMessage(error)):error;
+   if(!transient(error)){const detail=accountRequestError(error);throw detail?new HostUpdateFailed(detail.error,detail.code):error;}
   }
   break;
  }
@@ -105,7 +118,7 @@ export async function requestHostUpdate(workspaceId:string,{clientId,confirmOthe
   catch(error){if(!transient(error))throw error;await pause(2000);continue;}
   if(!current)throw Error('Could not find the workspace to confirm its update.');
   const operation=current.operation,ours=operation?.action==='update-host'&&(!operationId||!operation.id||operation.id===operationId);
-  if(ours&&operation?.status==='failed')throw Error(operation.last_error||'The workspace update failed. The workspace keeps running its current host.');
+  if(ours&&operation?.status==='failed')throw new HostUpdateFailed(operation.last_error||'The workspace update failed. The workspace keeps running its current host.',operation.update_code);
   if(ours&&['pending','running'].includes(operation!.status)){
    // The control plane's workspace list flattens context.updateStep to update_step.
    const reported=operation?.update_step??operation?.context?.updateStep;

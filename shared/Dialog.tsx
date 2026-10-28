@@ -41,6 +41,8 @@ export interface DialogProps {
   /** Absolute instead of fixed — for embedding inside a positioned container. */
   inline?: boolean;
   children?: ReactNode;
+  /** One short muted line under the action row. */
+  footnote?: ReactNode;
 }
 
 const SIZE_CLASS = { sm: "dlg-sm", md: "dlg-md", lg: "dlg-lg" } as const;
@@ -59,6 +61,7 @@ function DialogImpl({
   onDismiss,
   inline = false,
   children,
+  footnote,
 }: DialogProps) {
   const [alive, setAlive] = useState(open);
   const [closing, setClosing] = useState(false);
@@ -233,6 +236,7 @@ function DialogImpl({
             ))}
           </div>
         )}
+        {footnote && <div className="dlg-footnote">{footnote}</div>}
       </div>
     </div>
   );

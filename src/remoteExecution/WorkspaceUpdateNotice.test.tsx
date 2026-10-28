@@ -1,3 +1,4 @@
+import {readFileSync} from 'node:fs';
 import {render,screen,fireEvent,act,waitFor} from '@testing-library/react';
 import {it,expect,vi,beforeEach} from 'vitest';
 const mocks=vi.hoisted(()=>({invoke:vi.fn()}));
@@ -95,4 +96,54 @@ it('shows the host\'s current step while updating, and the operation\'s error wh
  await screen.findByText('Rolling back. Your files and projects are kept. Terminals and agents restart.');
  await screen.findByText('The new image did not become ready; the previous container is running.',undefined,{timeout:4000});
  expect(screen.getByRole('button',{name:'Try again'})).toBeTruthy();
+});
+
+it('a host that cannot update in place shows the whole message with Dismiss only, never Try again',async()=>{
+ const w=id(),message='This workspace host cannot update in place. Hibernate and resume the workspace to get the new release.';
+ mocks.invoke.mockImplementation(async(_command,args)=>{
+  if(args?.route==='/api/operations')return {accepted:true,operation:{id:'op'}};
+  if(args?.body?.action==='status')return {workspaces:[{id:w,state:'ready',operation:{id:'op',action:'update-host',status:'failed',last_error:message,update_code:'unsupported'}}]};
+  return {workspaces:[]};
+ });
+ render(<WorkspaceUpdateNotice workspaceId={w} name="Studio" owner listed={listed(w,{revision:A,protocol:6})} reconnect={async()=>{}}/>);
+ fireEvent.click(screen.getByRole('button',{name:'Update workspace'}));
+ fireEvent.click(screen.getAllByRole('button',{name:'Update workspace'}).at(-1)!);
+ const shown=await screen.findByText(message);
+ expect(shown.textContent).toBe(message);
+ expect(screen.queryByRole('button',{name:'Try again'})).toBeNull();
+ expect(screen.queryByRole('button',{name:'Update workspace'})).toBeNull();
+ fireEvent.click(screen.getByRole('button',{name:'Dismiss'}));
+ expect(screen.queryByText(message)).toBeNull();
+});
+
+it('an unsupported refusal without an update code still leaves no Try again',async()=>{
+ const w=id(),message='This workspace host cannot update in place. Hibernate and resume the workspace to get the new release.';
+ mocks.invoke.mockImplementation(async()=>{throw JSON.stringify({error:message});});
+ render(<WorkspaceUpdateNotice workspaceId={w} name="Studio" owner listed={listed(w,{revision:A,protocol:6})} reconnect={async()=>{}}/>);
+ fireEvent.click(screen.getByRole('button',{name:'Update workspace'}));
+ fireEvent.click(screen.getAllByRole('button',{name:'Update workspace'}).at(-1)!);
+ await screen.findByText(message);
+ expect(screen.queryByRole('button',{name:'Try again'})).toBeNull();
+ expect(screen.getByRole('button',{name:'Dismiss'})).toBeTruthy();
+});
+
+it('puts the message in the wrapping slot, so a long failure is never cut off',async()=>{
+ const w=id(),message='The new image did not become ready within two minutes, so the previous container was restored and started again; your files and projects are kept and the workspace keeps running its current host.';
+ mocks.invoke.mockImplementation(async()=>{throw JSON.stringify({error:message});});
+ const {container}=render(<WorkspaceUpdateNotice workspaceId={w} name="Studio" owner listed={listed(w,{revision:A,protocol:6})} reconnect={async()=>{}}/>);
+ fireEvent.click(screen.getByRole('button',{name:'Update workspace'}));
+ fireEvent.click(screen.getAllByRole('button',{name:'Update workspace'}).at(-1)!);
+ const shown=await screen.findByText(message);
+ expect(shown.textContent).toBe(message);
+ expect(shown.classList.contains('workspace-update-message')).toBe(true);
+ expect(shown.closest('.workspace-update-notice')).toBe(container.ownerDocument.querySelector('aside.workspace-update-notice'));
+ expect(screen.getByRole('button',{name:'Try again'})).toBeTruthy(); // An ordinary failure can still be retried.
+});
+
+it('styles the notice message to wrap, overriding the one-line progress rules',()=>{
+ const css=readFileSync('src/remoteExecution/workspace.css','utf8');
+ const rule=css.match(/\.workspace-update-notice \.workspace-update-message\s*\{([^}]*)\}/)?.[1]??'';
+ expect(rule).toMatch(/white-space:\s*normal/);expect(rule).toMatch(/text-overflow:\s*clip/);expect(rule).toMatch(/overflow:\s*visible/);
+ // Same specificity as `.workspace-progress-line [role=status]`, so it must come later.
+ expect(css.indexOf('.workspace-update-notice .workspace-update-message')).toBeGreaterThan(css.indexOf('.workspace-progress-line [role=status]'));
 });

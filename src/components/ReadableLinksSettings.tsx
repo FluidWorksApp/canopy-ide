@@ -3,6 +3,7 @@ import {Button} from './ui';
 import {CheckIcon,CopyIcon} from './icons';
 import {describeLink,listReadableLinks,revokeReadableLink,type ManagedLink} from '../readableLinks';
 import {writeClipboardText} from '../terminalClipboard';
+import {notOnServerYet} from '../accountErrors';
 import './readableLinksSettings.css';
 
 const shortDate=(iso:string|null|undefined)=>{if(!iso)return '';const at=new Date(iso);return Number.isNaN(at.getTime())?'':at.toLocaleDateString(undefined,{month:'short',day:'numeric',year:'numeric'});};
@@ -14,12 +15,15 @@ const reason=(error:unknown)=>String(error instanceof Error?error.message:error)
  *  own, and team links when they own or administer the team. */
 export function ReadableLinksSettings(){
  const [links,setLinks]=useState<ManagedLink[]|null>(null),[error,setError]=useState(''),[notice,setNotice]=useState('');
+ // Waiting on canopyide.dev, not broken: said quietly, never as an error.
+ const [pending,setPending]=useState(false);
  const [copied,setCopied]=useState<string|null>(null),[confirm,setConfirm]=useState<string|null>(null),[revoking,setRevoking]=useState<string|null>(null);
  const generation=useRef(0),timer=useRef<number>(undefined);
  const load=useCallback(async()=>{
-  const current=++generation.current;setError('');
+  const current=++generation.current;setError('');setPending(false);
   try{const next=await listReadableLinks();if(current===generation.current)setLinks(next);}
-  catch(e){if(current===generation.current){setLinks(previous=>previous??[]);setError(/invalid account request|unknown link action/i.test(reason(e))?'Your Canopy account service does not list links yet.':`Links could not load. ${reason(e)}`);}}
+  catch(e){if(current===generation.current&&notOnServerYet(e)){setLinks(previous=>previous??[]);setPending(true);return;}
+   if(current===generation.current){setLinks(previous=>previous??[]);setError(/invalid account request|unknown link action/i.test(reason(e))?'Your Canopy account service does not list links yet.':`Links could not load. ${reason(e)}`);}}
  },[]);
  useEffect(()=>{void load();const changed=()=>{setLinks(null);setConfirm(null);void load();};window.addEventListener('canopy:account-changed',changed);return()=>{generation.current++;window.clearTimeout(timer.current);window.removeEventListener('canopy:account-changed',changed);};},[load]);
  async function copy(url:string){
@@ -38,7 +42,8 @@ export function ReadableLinksSettings(){
   <div className="readable-links-head"><h4 id="readable-links-title">Links</h4><Button size="sm" variant="ghost" onClick={()=>void load()} disabled={links===null}>Refresh</Button></div>
   <p className="set-desc">Readable links to workspaces, shared sessions and team messages that you made, or that you manage as a workspace owner or team admin. A link only opens for people who already have access.</p>
   {links===null&&!error&&<p className="readable-links-empty">Loading links…</p>}
-  {links&&links.length===0&&!error&&<p className="readable-links-empty">No links yet. Use <strong>Copy link</strong> on a workspace, a shared session or a chat message to make one.</p>}
+  {pending&&<p className="readable-links-empty" role="status">Links start working once Canopy's server is updated. Nothing to change on your side.</p>}
+  {links&&links.length===0&&!error&&!pending&&<p className="readable-links-empty">No links yet. Use <strong>Copy link</strong> on a workspace, a shared session or a chat message to make one.</p>}
   {links&&links.length>0&&<ul className="readable-links-list">{links.map(link=>{
    const {kind,name,detail}=describeLink(link),when=shortDate(link.about?.activityAt??link.createdAt);
    const activity=when?(link.about?.activity==='opened'?`Last opened ${when}`:`Made ${when}`):'';

@@ -30,9 +30,19 @@ vi.mock("./settings", () => ({
   updateSettings: () => {},
 }));
 vi.mock("./projects", () => ({ shellBin: (b: string) => b, shellQuote: (t: string) => t }));
+let launchedEnv: [string, string][] | undefined;
+vi.mock("./profiles", () => ({
+  brainLaunchEnv: async () => [["CLAUDE_CONFIG_DIR", "/profiles/vj/.claude"]],
+}));
 vi.mock("./companionTransport", () => ({
-  startOneshot: (_id: string, _launch: unknown, sink: { emit: (e: StructuredRunnerEvent) => void }) => {
+  startOneshot: (
+    _id: string,
+    _launch: unknown,
+    sink: { emit: (e: StructuredRunnerEvent) => void },
+    opts: { env?: [string, string][] },
+  ) => {
     emit = sink.emit;
+    launchedEnv = opts.env;
     return {
       send: async (wire: string) => {
         calls.push(`send ${wire}`);
@@ -55,6 +65,9 @@ describe("an agent's reply in the companion's session", () => {
     await startCompanion({ projects: [], installed: () => true, tools: [] });
     emit!({ kind: "ready" } as StructuredRunnerEvent);
     expect(companionState().status).toBe("ready");
+    // It runs on the active account, not the CLI's default sign-in.
+    expect(launchedEnv).toContainEqual(["CLAUDE_CONFIG_DIR", "/profiles/vj/.claude"]);
+    expect(launchedEnv).toContainEqual(["CANOPY_COMPANION", "1"]);
 
     const answered = askCompanion("CI is green.", "[canopy: reply from Fern …]\n\nCI is green.", {
       origin: "slack:item-0001",
