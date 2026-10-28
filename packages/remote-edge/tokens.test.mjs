@@ -67,3 +67,19 @@ test('requires a secret of at least 32 characters', () => {
   assert.throws(() => checkSecret(undefined));
   assert.equal(checkSecret(SECRET), SECRET);
 });
+
+// The website mints these (canopy-website lib/canopy/remote-link.mjs, same
+// vectors in its tests/remote-link.test.mjs). If the HMAC input or encoding
+// drifts in either repo, every sign-in breaks — so the edge checks the
+// website's exact output.
+test('accepts the website\'s published token vectors', () => {
+  const secret = 'x'.repeat(32);
+  const tunnel = 'eyJ2IjoxLCJraW5kIjoidHVubmVsIiwidXNlcklkIjoidXNlci0xIiwiaGFuZGxlIjoic2FtIiwiZXhwIjoxOTAwMDAwMDAwfQ.aNHuI9Zaw91U_eJdN7gZ0AqyipeiOL2ruJDCGh9d-1k';
+  const ticket = 'eyJ2IjoxLCJraW5kIjoidGlja2V0IiwidXNlcklkIjoidXNlci0xIiwiaGFuZGxlIjoic2FtIiwiZXhwIjoxOTAwMDAwMDAwLCJub25jZSI6IkFBQUFBQUFBQUFBQUFBQUFBQUFBQUEiLCJyZXQiOiIvdGVhbT94PTEifQ.yTehIT0vwep1q4JxuqpIDGqH7U0svnx4rrM-Yjx46Uw';
+  const now = 1_800_000_000;
+  assert.equal(verify(secret, 'tunnel', tunnel, now)?.handle, 'sam');
+  const t = verify(secret, 'ticket', ticket, now);
+  assert.equal(t?.ret, '/team?x=1');
+  assert.equal(t?.nonce, 'AAAAAAAAAAAAAAAAAAAAAA');
+  assert.equal(verify(secret, 'ticket', tunnel, now), null);
+});

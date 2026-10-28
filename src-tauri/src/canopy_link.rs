@@ -421,6 +421,33 @@ mod tests {
         assert!(ended);
     }
 
+    /// The portal's real traffic is a WebSocket: the upgrade has to survive
+    /// the in-memory pipe and come back as a 101 with the accept key.
+    #[tokio::test]
+    async fn upgrades_a_framed_websocket() {
+        use axum::extract::ws::WebSocketUpgrade;
+        use axum::routing::get;
+        let router = axum::Router::new().route(
+            "/remote/ws",
+            get(|ws: WebSocketUpgrade| async move { ws.on_upgrade(|_socket| async {}) }),
+        );
+        let streams: Streams = Default::default();
+        let (out, mut frames) = mpsc::channel::<Message>(64);
+        handle_frame(&frame(OPEN, 3, br#"{"auth":"owner"}"#), &router, &streams, &out).await;
+        let handshake = "GET /remote/ws HTTP/1.1\r\nHost: vj.remote.test\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\r\n";
+        handle_frame(&frame(DATA, 3, handshake.as_bytes()), &router, &streams, &out).await;
+        let Ok(Some(Message::Binary(bytes))) =
+            tokio::time::timeout(Duration::from_secs(5), frames.recv()).await
+        else {
+            panic!("no response frame");
+        };
+        let (kind, id, payload) = parse(&bytes).unwrap();
+        assert_eq!((kind, id), (DATA, 3));
+        let text = String::from_utf8_lossy(payload).to_ascii_lowercase();
+        assert!(text.starts_with("http/1.1 101"), "{text}");
+        assert!(text.contains("sec-websocket-accept: s3pplmbitxaq9kygzzhzrbk+xoo="), "{text}");
+    }
+
     #[test]
     fn grants_need_https_and_wss() {
         let ok = serde_json::json!({"url":"https://vj.remote.canopyide.dev","tunnel":"wss://edge.remote.canopyide.dev/v1/tunnel","token":"t"});
