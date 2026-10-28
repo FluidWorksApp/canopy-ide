@@ -45,6 +45,11 @@ export interface TermSubTab extends TabNames {
    * attaches like a remote PTY, but closing it must still stop the process. */
   killAttachedOnClose?: boolean;
   command?: string;
+  /** The conversation the last snapshot recorded for this same PTY lifetime,
+   *  carried onto a reattached tab. The snapshot falls back to it while the
+   *  live hook binding has not (yet) named the session, so a recovery never
+   *  overwrites a known session with nothing. */
+  rememberedSessionId?: string;
   icon?: string;
   /** Stamped onto the shell at spawn. Carries the port lease of the workspace
    *  this terminal's cwd is in, so a run there serves on its own number.

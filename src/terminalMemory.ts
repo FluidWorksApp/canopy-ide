@@ -12,6 +12,7 @@ import type { TerminalGroup } from "./terminalGroups";
 import type { Restorable } from "./restorable";
 import { resumeSessionId } from "./projects";
 import { agentIdForCommand } from "./agentIdentity";
+import { withoutConversationNames } from "./tabName";
 
 export interface RememberedTerminal {
   cwd: string;
@@ -153,8 +154,12 @@ export function terminalResumeCards(
     const agentId = agentIdForCommand(terminal.command);
     const sessionId =
       terminal.sessionId ?? resumeSessionId(terminal.command) ?? undefined;
-    const restorable = sessionId ? available.get(sessionId) : undefined;
-    if (restorable) available.delete(sessionId!);
+    // By id first; then by the terminal's own pty in its own launch, which
+    // also catches a record holding an id the CLI has since moved off.
+    const restorable =
+      (sessionId ? available.get(sessionId) : undefined) ??
+      restorableOnSurface(terminal, available.values());
+    if (restorable) available.delete(restorable.digest.session_id);
 
     // A remembered, identified conversation that is absent from Restorable may
     // be live, user-closed, or unresumable. Never replay it as a fresh agent.
@@ -163,7 +168,10 @@ export function terminalResumeCards(
       key: terminal.tabId
         ? `terminal:${terminal.tabId}`
         : `terminal:${leaves.length}`,
-      remembered: terminal,
+      // Without its conversation the row reopens a shell (or a fresh agent):
+      // it must not wear that conversation's prompt or title, nor hand them to
+      // the new tab, whose next snapshot would carry the lie forward.
+      remembered: restorable ? terminal : withoutConversationNames(terminal),
       restorable,
     });
   }
@@ -195,6 +203,25 @@ export function terminalResumeCards(
     if (!claimed.has(leaf)) cards.push({ key: leaf.key, leaves: [leaf] });
   }
   return cards;
+}
+
+/** The conversation a remembered terminal with no recorded session id was
+ *  running, by exact terminal identity: the digest's last writer was this
+ *  PTY (`surface`) in this same app launch (`instance`). That pair is unique
+ *  per terminal lifetime, unlike a pty number alone (which every launch
+ *  restarts at 1) or a cwd. A record without an instance proves nothing. */
+export function restorableOnSurface(
+  terminal: Pick<RememberedTerminal, "instance" | "ptyId" | "run">,
+  restorables: Iterable<Restorable>,
+): Restorable | undefined {
+  if (terminal.run || !terminal.instance || terminal.ptyId == null) return undefined;
+  let found: Restorable | undefined;
+  for (const r of restorables) {
+    if (r.digest.instance !== terminal.instance) continue;
+    if (r.digest.surface !== String(terminal.ptyId)) continue;
+    if (!found || (r.digest.updated ?? 0) > (found.digest.updated ?? 0)) found = r;
+  }
+  return found;
 }
 
 function leafIdsSafe(node: TerminalGroup["root"]): string[] {

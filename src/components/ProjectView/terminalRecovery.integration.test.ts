@@ -8,7 +8,7 @@ import {
   namePatch,
   tabName,
 } from "../../tabName";
-import { rememberedLiveTerminal } from "../../terminalRecovery";
+import { recoveredIdentity, rememberedLiveTerminal } from "../../terminalRecovery";
 import {
   leafIds,
   mapSplitTabIds,
@@ -67,6 +67,7 @@ it("the actual live attachment callback reuses saved identities and names instea
       thisInstanceRef: { current: "instance" },
       terminalRecoveryMemory: memory,
       rememberedLiveTerminal,
+      recoveredIdentity,
       recoveredTabIds: ids,
       tabId: createId,
       componentsRef: { current: [] },
@@ -104,6 +105,64 @@ it("the actual live attachment callback reuses saved identities and names instea
   );
   expect(tabs).toHaveLength(1);
   expect(tabName(tabs[0])).toBe("My choice");
+});
+
+it("the actual live attachment callback gives a reattached agent its command, account and session back", async () => {
+  // Native returns no command for an agent PTY. The tab used to come back with
+  // the prompt as its name and nothing else, and the empty state later offered
+  // it as a blank shell named after the conversation.
+  let tabs: any[] = [];
+  const attach = await callback(
+    "attachTerminal",
+    "\n  // App routes native PTYs",
+    {
+      useCallback: (fn: any) => fn,
+      tabsRef: { get current() { return tabs; } },
+      thisInstanceRef: { current: "instance" },
+      terminalRecoveryMemory: {
+        terminals: [
+          {
+            tabId: "agent-tab",
+            ptyId: 2,
+            sessionGeneration: 2,
+            instance: "instance",
+            cwd: "/repo",
+            command: "claude --dangerously-skip-permissions",
+            title: "what were the features…",
+            promptName: "what were the features…",
+            icon: "✳",
+            sessionId: "685a",
+            profile: "vj",
+          },
+        ],
+        terminalGroups: {},
+      },
+      rememberedLiveTerminal,
+      recoveredIdentity,
+      recoveredTabIds: { current: new Map() },
+      tabId: () => "random-tab",
+      componentsRef: { current: [] },
+      setTabs: (update: any) => {
+        tabs = update(tabs);
+      },
+      setActiveTabId: vi.fn(),
+      adoptSnapshotNames,
+      unattendedManagedRunCommand: vi.fn(),
+    },
+  );
+  attach(2, "/repo", "", "⌨", false, true, "zsh", {
+    recovered: true,
+    sessionGeneration: 2,
+    run: false,
+  });
+  expect(tabs[0]).toMatchObject({
+    id: "agent-tab",
+    command: "claude --dangerously-skip-permissions",
+    icon: "✳",
+    profile: "vj",
+    rememberedSessionId: "685a",
+    promptName: "what were the features…",
+  });
 });
 
 it("the actual conversation resume callback restores user labels and mux layout together", async () => {

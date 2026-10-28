@@ -89,6 +89,19 @@ describe("resolveSessions", () => {
     });
     expect(bound.sessionByPty.has(10)).toBe(false);
   });
+
+  it("never binds an unstamped (pre-instance) digest by its pty number", () => {
+    // The real case: a July session's digest said `surface: "1"` with no
+    // instance, and the blank shell that got pty 1 months later was named
+    // after a different conversation through it.
+    const bound = resolveSessions({
+      digests: [digest({ surface: "1", instance: undefined })],
+      events: [],
+      instance: "run-1",
+      livePtys: new Set([1]),
+    });
+    expect(bound.sessionByPty.has(1)).toBe(false);
+  });
 });
 
 describe("the whole chain, as the strip runs it", () => {
