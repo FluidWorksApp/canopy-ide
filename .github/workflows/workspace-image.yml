@@ -19,6 +19,9 @@ on:
       - 'src-tauri/Cargo.lock'
       - 'scripts/workspace-host-release*.mjs'
       - '.github/workflows/workspace-image.yml'
+      # Every version bump changes package.json, so each release commit gets its
+      # own registered host release for the v* tag to activate (release.yml).
+      - 'package.json'
   workflow_dispatch:
     inputs:
       promote:
