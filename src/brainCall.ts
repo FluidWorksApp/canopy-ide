@@ -192,7 +192,7 @@ function releaseBackground(): void {
 const RATE_LIMITED =
   /rate[ _-]?limit|usage limit|limit reached|quota|too many requests|\b429\b|resets? at/i;
 const SIGNED_OUT =
-  /not logged in|please (?:run )?\/?login|\/login|log ?in again|invalid api key|invalid x-api-key|authentication[_ ]error|unauthori[sz]ed|\b401\b|oauth token (?:has )?expired|token (?:has )?expired|not authenticated/i;
+  /not logged in|please (?:run )?\/?login|\/login|log ?in again|invalid api key|invalid x-api-key|authentication[_ ]error|unauthori[sz]ed|\b401\b|oauth token (?:has )?expired|token (?:has )?expired|not authenticated|failed to authenticate|oauth session expired|could not be refreshed/i;
 
 /** Whether failure text means the account is throttled or signed out. Matched
  *  on wording because no CLI gives these a machine-readable code on stdout —

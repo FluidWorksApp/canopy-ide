@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { fireEvent, render, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { CompanionChat } from "./CompanionChat";
 import type { CompanionState, CompanionTool } from "../companionSession";
 
@@ -269,5 +269,27 @@ describe("attachments", () => {
     finish("/tmp/a.png");
     await waitFor(() => expect(document.querySelector(".companion-file")?.textContent).toContain("a.png"));
     expect(document.body.textContent).not.toContain("b.png");
+  });
+});
+
+describe("an expired companion login", () => {
+  const signedOut = (): CompanionState => ({
+    ...state([], "failed"),
+    cliName: "Claude Code",
+    error: "Failed to authenticate: OAuth session expired and could not be refreshed",
+  });
+
+  it("offers Sign in, and shows what to run when no terminal can open", () => {
+    const onSignIn = vi.fn(() => "Run `claude /login` in a terminal.");
+    mount(signedOut(), { onSignIn });
+    fireEvent.click(screen.getByRole("button", { name: "Sign in to Claude Code" }));
+    expect(onSignIn).toHaveBeenCalled();
+    expect(screen.getByText("Run `claude /login` in a terminal.")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Retry" })).toBeInTheDocument();
+  });
+
+  it("keeps only Retry for failures that aren't about the login", () => {
+    mount({ ...signedOut(), error: "The companion's agent stopped." }, { onSignIn: () => null });
+    expect(screen.queryByRole("button", { name: /Sign in/ })).toBeNull();
   });
 });

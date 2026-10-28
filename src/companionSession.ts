@@ -33,6 +33,7 @@ import {
 } from "./companionTransport";
 import type { StructuredRunnerEvent } from "./structuredEvents";
 import { getSettings, updateSettings } from "./settings";
+import { brainLaunchEnv } from "./profiles";
 import { isWorkspaceHost } from "./host";
 import { shellBin, shellQuote } from "./projects";
 
@@ -400,6 +401,13 @@ export async function startCompanion(
       cliName: cli.name,
       generation: state.generation + 1,
     });
+    // The active account (Settings → Accounts), as the brain uses it: the
+    // companion runs on this computer, so it is this computer's profile, or
+    // the CLI's default sign-in when the account lives elsewhere. Without it
+    // the companion ran on the default sign-in even when that one had expired
+    // and every session used another account. Looked up after "starting" is
+    // set, so a caller waiting on the start sees it begin.
+    env.unshift(...(await brainLaunchEnv(cli.id)));
 
     try {
       const tier = tierFor(cli.id);

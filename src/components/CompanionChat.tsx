@@ -11,6 +11,7 @@
 // prose.
 
 import { useEffect, useLayoutEffect, useRef, useState, useSyncExternalStore } from "react";
+import { classifyBrainFailure } from "../brainCall";
 import type {
   CompanionAttachment,
   CompanionProposal,
@@ -43,6 +44,9 @@ interface Props {
   onInstall: () => void;
   /** Start the session again after it died. */
   onRetry: () => void;
+  /** Sign the companion's CLI in again; shown when its login has expired.
+   *  Returns what to do by hand when no terminal could be opened for it. */
+  onSignIn?: () => string | null;
   /** Stop the turn currently in flight. */
   onCancel: () => void;
   name: string;
@@ -67,12 +71,15 @@ export function CompanionChat({
   onAnswer,
   onInstall,
   onRetry,
+  onSignIn,
   onCancel,
   expanded,
   onToggleExpand,
   onSend,
   onClose,
 }: Props) {
+  /** How to sign in by hand, when no terminal could be opened for it. */
+  const [signInSteps, setSignInSteps] = useState<string | null>(null);
   const [draft, setDraft] = useState("");
   const [attachments, setAttachments] = useState<CompanionAttachment[]>([]);
   const [attaching, setAttaching] = useState(false);
@@ -306,6 +313,14 @@ export function CompanionChat({
       {state.error && (
         <div className="companion-error">
           <span className="companion-error-text">{state.error}</span>
+          {/* Retrying a CLI whose login has expired fails the same way every
+              time; the fix is signing it in again. */}
+          {onSignIn && classifyBrainFailure(state.error) === "signed-out" && (
+            <button className="companion-retry" onClick={() => setSignInSteps(onSignIn())} type="button">
+              Sign in{state.cliName ? ` to ${state.cliName}` : ""}
+            </button>
+          )}
+          {signInSteps && <span className="companion-error-text">{signInSteps}</span>}
           {/* An agent that stopped is the one failure the user can actually do
               something about, and having to find the Settings toggle to turn
               the companion off and on again is not that something. */}

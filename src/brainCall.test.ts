@@ -309,6 +309,7 @@ describe("pure helpers", () => {
     expect(classifyBrainFailure("Not logged in · Please run /login")).toBe("signed-out");
     expect(classifyBrainFailure("Invalid API key")).toBe("signed-out");
     expect(classifyBrainFailure("OAuth token has expired")).toBe("signed-out");
+    expect(classifyBrainFailure("Failed to authenticate: OAuth session expired and could not be refreshed")).toBe("signed-out");
     expect(classifyBrainFailure("ENOENT")).toBeNull();
   });
 
