@@ -43,7 +43,7 @@ test('a hash mismatch, malformed request or different release changes nothing',a
   for(const bad of [{...f.payload,url:'http://bucket/x'},{...f.payload,revision:'main'},{...f.payload,runtimeLockSha256:undefined},null]){assert.equal(validHostUpdate(bad),false);assert.equal((await updateHostInPlace(bad,f.options(ready))).code,'invalid');}
   assert.equal((await updateHostInPlace(f.payload,{...f.options(ready),fetchImpl:async()=>new Response('gone',{status:403})})).code,'invalid');
   assert.equal((await updateHostInPlace({...f.payload,revision:'c'.repeat(40)},f.options(ready))).code,'invalid','the archive must be the release that was requested');
-  assert.equal(await text(join(f.root,'gateway.mjs')),'old gateway');assert.equal(await exists(f.root+'.next'),false);assert.equal(await exists(f.root+'.prev'),false);
+  assert.equal(await text(join(f.root,'gateway.mjs')),'old gateway');assert.equal(await exists(f.root+'.next'),false);assert.equal(await exists(f.root+'.prev'),false);assert.equal(await exists(f.root+'.download.tgz'),false);
   assert.ok(!f.calls.some(c=>c[0]==='systemctl'));
   await assert.rejects(updateHostInPlace(f.payload,{...f.options(ready),ready:undefined}),/readiness/);
  }finally{await f.cleanup();}

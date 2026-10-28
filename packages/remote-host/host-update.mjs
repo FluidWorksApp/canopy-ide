@@ -35,17 +35,19 @@ export async function updateHostInPlace(payload,{root='/opt/canopy-host',units='
  if(await installed(root)===revision&&String(await read(root+'/workspace-runtime.sha256')??'').trim()===payload.runtimeSha256)return result('current');
  const discard=async()=>{await fs.rm(next,{recursive:true,force:true});await fs.rm(archive,{force:true});};
  await discard();
- // 1. Download and check the hash before anything is unpacked.
- let bytes;try{
+ // 1. Download and check the hash before anything is unpacked. Streamed to
+ // disk: the recovery agent runs under a small memory limit.
+ try{
   const response=await fetchImpl(payload.url,{redirect:'error',signal:AbortSignal.timeout(120000)});
   if(!response.ok||!response.body)return result('invalid',`Download failed (${response.status})`);
-  const chunks=[];let length=0;for await(const chunk of response.body){length+=chunk.length;if(length>HOST_UPDATE_MAX_BYTES)return result('invalid','Archive is too large');chunks.push(Buffer.from(chunk));}
-  bytes=Buffer.concat(chunks);
- }catch(error){return result('invalid',`Download failed: ${error?.message??error}`);}
- if(sha256(bytes)!==payload.runtimeSha256)return result('invalid','Archive hash does not match the release');
+  const hash=createHash('sha256'),file=await fs.open(archive,'wx',0o600);let length=0,tooLarge=false;
+  try{for await(const chunk of response.body){length+=chunk.length;if(length>HOST_UPDATE_MAX_BYTES){tooLarge=true;break;}hash.update(chunk);await file.write(chunk);}}finally{await file.close();}
+  if(tooLarge){await discard();return result('invalid','Archive is too large');}
+  if(hash.digest('hex')!==payload.runtimeSha256){await discard();return result('invalid','Archive hash does not match the release');}
+ }catch(error){await discard().catch(()=>{});return result('invalid',`Download failed: ${error?.message??error}`);}
  // 2. Unpack beside the live tree and refuse a dependency change.
  try{
-  await fs.writeFile(archive,bytes,{mode:0o600});await fs.mkdir(next,{mode:0o755});
+  await fs.mkdir(next,{mode:0o755});
   await exec('tar',['-xzf',archive,'-C',next,'--no-same-owner'],{timeout:60000});
   const lock=await read(next+'/package-lock.json'),current=await read(root+'/package-lock.json');
   if(!lock||!current||sha256(lock)!==sha256(current)||sha256(lock)!==payload.runtimeLockSha256){await discard();return result('refresh-required','The dependency lock changed; this release needs a full refresh');}
