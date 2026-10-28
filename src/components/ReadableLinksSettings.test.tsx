@@ -55,3 +55,10 @@ it('shows an empty state, and a plain error when links cannot load',async()=>{
  render(<ReadableLinksSettings/>);
  expect(await screen.findByRole('alert')).toHaveTextContent('Links could not load. Cannot reach Canopy.');
 });
+
+it('says links are waiting on the server quietly, not as an error',async()=>{
+ mocks.invoke.mockRejectedValueOnce('not-on-server-yet');
+ render(<ReadableLinksSettings/>);
+ expect(await screen.findByText(/Links start working once Canopy's server is updated/)).toBeInTheDocument();
+ expect(screen.queryByRole('alert')).toBeNull();
+});
