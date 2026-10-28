@@ -227,9 +227,11 @@ export class DockerWorkspaces {
    * report: its release image digest and the native protocol it answers. */
   async ownerRuntimeReport(workspace,{fetchImpl=fetch,maxAgeMs=60000}={}){
     const none={image:null,protocol:null};
+    // Asked on every authorization: answer from the cache without Docker. Only
+    // updateOwnerImage replaces the container in this process, and it clears it.
+    if(this.ownerReport&&Date.now()-this.ownerReport.at<maxAgeMs)return this.ownerReport.report;
     let current;try{current=await this.inspectRuntime(workspace);}catch{return none;}
     if(current?.State?.Running!==true)return none;
-    if(this.ownerReport?.id===current.Id&&Date.now()-this.ownerReport.at<maxAgeMs)return this.ownerReport.report;
     let image=null;
     try{const [info]=JSON.parse((await this.docker(['image','inspect',current.Image])).stdout);image=info?.RepoDigests?.find(value=>{try{return value.includes('@sha256:')&&workspaceImageReference(value)===value;}catch{return false;}})??null;}catch{/* Unknown provenance is reported as no image. */}
     let protocol=null;
