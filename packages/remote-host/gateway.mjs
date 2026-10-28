@@ -244,8 +244,10 @@ export function createGateway({ config, workspaces, origins = [], elasticMemory,
         const input=await body(request,4096);
         if(input.action==='revoke'){await sharedSessions.revoke(workspace.id,input.id);return json(response,200,{sessions:sharedSessions.ownerList(workspace.id)});}
         if(['stopped','deleted'].includes(workspace.desiredState??workspace.desired_state))throw Error('Workspace is stopped');
+        // The owner's own IDE projects, which /projects lists beside the mounts.
+        const ownerProjectIds=new Set(sharedCatalog?(await sharedCatalog.get(workspace.id)).map(p=>p.id):[]);
         if(input.action==='create'){
-          const entry=sharedSessions.collaboration(workspace,input);
+          const entry=sharedSessions.collaboration(workspace,input,{ownerProjectIds});
           try{const runtime=await workspaces.open(entry.runtime,{resume:true});
             const result=await fetch(`${runtime.url}/sessions`,{method:'POST',redirect:'error',headers:{authorization:`Bearer ${runtime.token}`,'content-type':'application/json'},body:JSON.stringify({command:`cd /workspace/projects/${entry.projectId} && exec /bin/bash`,kind:'terminal',requestId:entry.id}),signal:AbortSignal.timeout(15000)});
             const data=await sessionRuntimeJson(result);if(!result.ok)throw Error('Collaboration shell could not start');sharedSessions.register(entry,data.id);
@@ -256,7 +258,7 @@ export function createGateway({ config, workspaces, origins = [], elasticMemory,
         const runtime=await workspaces.open(workspace);
         const result=await fetch(`${runtime.url}/sessions`,{redirect:'error',headers:{authorization:`Bearer ${runtime.token}`},signal:AbortSignal.timeout(5000)});
         const sessions=await sessionRuntimeJson(result);if(!result.ok||!Array.isArray(sessions)||!sessions.some(s=>s.id===input.sessionId&&s.exitCode==null))throw Error('Session is not running');
-        sharedSessions.publish(workspace,input);return json(response,200,{sessions:sharedSessions.ownerList(workspace.id)});
+        sharedSessions.publish(workspace,input,{ownerProjectIds});return json(response,200,{sessions:sharedSessions.ownerList(workspace.id)});
       }
       const sharedInput=operation.match(/^\/shared-sessions\/([a-f0-9-]{36})\/input$/);
       if(sharedInput){
@@ -313,7 +315,9 @@ export function createGateway({ config, workspaces, origins = [], elasticMemory,
         const catalog=principal.memberId?{...workspace,projectMounts:grantedProjects(workspace,projectAccess)}:workspace;
         const legacy=sharedProjectDefinitions(catalog),ids=new Set(legacy.map(p=>p.id));
         const owner=sharedCatalog?(await sharedCatalog.get(workspace.id)).filter(p=>!ids.has(p.id)):[];
-        return json(response,200,{projects:[...legacy,...owner].map(p=>({id:p.id,name:p.name,components:p.components.map(c=>({id:c.id,name:c.label}))}))});
+        // canPair: a clean collaboration shell can mount only a writable shared
+        // project; the owner's own projects can be watched, not paired on.
+        return json(response,200,{projects:[...legacy.map(p=>({...p,canPair:!p.readOnly})),...owner.map(p=>({...p,canPair:false}))].map(p=>({id:p.id,name:p.name,canPair:p.canPair,components:p.components.map(c=>({id:c.id,name:c.label}))}))});
       }
       if (operation === '/ticket') {
         const args = await body(request, 4096);

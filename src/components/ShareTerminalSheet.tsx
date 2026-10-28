@@ -1,69 +1,86 @@
 import {useEffect,useRef,useState} from 'react';
 import {Dialog} from './Dialog';
-import {Checkbox,Radio,Select} from './ui';
 import {activeWorkspace} from '../remoteExecution/workspace';
 import {copyReadableLink} from '../readableLinks';
-import {SHARE_TERMINAL_EVENT,SHARED_SESSIONS_CHANGED,shareAvailability,type Publication,type ShareableTerminal} from './shareTerminal';
+import {SHARE_TERMINAL_EVENT,SHARED_SESSIONS_CHANGED,shareAvailability,shareableTerminals,terminalLabel,type Publication,type ShareableTerminal} from './shareTerminal';
 import './sharedSessions.css';
-type Project={id:string;name:string};
+/** `canPair` (from the host's /projects): false for a project a clean shell
+ * can't mount, such as the owner's own projects. Older hosts leave it out. */
+type Project={id:string;name:string;canPair?:boolean};
 type Done={title:string;text:string};
 const message=(e:unknown)=>(e instanceof Error?e.message:String(e)).replace(/^Error:\s*/,'');
+/** The host's refusals, in words the person sharing can act on. */
+const PLAIN:Record<string,string>={
+ 'Invalid collaboration project':"Pair isn't available for this project: it needs a shared project teammates can edit. Share it for watching instead.",
+ 'Invalid session publication':"This project's terminals can't be shared from this workspace yet. The workspace host may need an update.",
+ 'Session is not running':'That terminal has stopped. Pick one that is still running.',
+ 'Shared session capacity reached':'Too many terminals are shared right now. Stop sharing one under Team → Live now, then try again.',
+ 'Workspace is stopped':'The workspace is stopped. Start it, then share again.',
+ 'Collaboration shell could not start':"The clean shell couldn't start. Try again in a moment.",
+ Forbidden:'Only the workspace owner can share its terminals.',
+};
+const shareError=(e:unknown)=>{const text=message(e);return PLAIN[text]??text;};
+/** The shared project a terminal belongs to: its own project, or the shared
+ * project mount its cwd is in. None means its project isn't shared. */
+function projectOf(catalog:Project[],t:ShareableTerminal){
+ return catalog.find(p=>p.id===t.projectId)
+  ??catalog.find(p=>!!t.cwd&&(t.cwd===`/workspace/projects/${p.id}`||t.cwd.startsWith(`/workspace/projects/${p.id}/`)))
+  ??catalog.find(p=>!!t.projectName&&p.name===t.projectName);
+}
+const NOT_SHARED='Not shared with your team';
 /** Share one terminal with teammates. Opened on a terminal it has no picker;
- * opened from the Team panel it lists the workspace's running terminals.
- * Watch only publishes that terminal; Pair starts a clean collaboration shell,
- * because the workspace only lets people type in one of those. */
+ * opened from the Team panel it lists the terminal tabs open in this
+ * workspace, named as their tabs are ("claude · SuprFlow · main").
+ * "Share — they can watch" publishes that terminal; "Pair in a fresh shell"
+ * starts a clean collaboration shell in its project, offered only where the
+ * workspace supports it (a shared project teammates can edit). */
 export function ShareTerminalSheet({terminal,onClose}:{terminal:ShareableTerminal|null;onClose:()=>void}){
  const available=shareAvailability();
- const [running,setRunning]=useState<ShareableTerminal[]|null>(terminal?[terminal]:null),[picked,setPicked]=useState<ShareableTerminal|null>(terminal);
- const [catalog,setCatalog]=useState<Project[]|null>(null),[projectChoice,setProjectChoice]=useState('');
- const [mode,setMode]=useState<'view'|'pair'>('view'),[busy,setBusy]=useState(false),[error,setError]=useState(''),[done,setDone]=useState<Done|null>(null);
- const alive=useRef(true);useEffect(()=>()=>{alive.current=false;},[]);
  const workspaceId=available.ok?available.workspaceId:'';
+ const [open]=useState(()=>{if(terminal||!workspaceId)return [];const seen=new Set<number>();return shareableTerminals(workspaceId).filter(t=>!seen.has(t.sessionId)&&!!seen.add(t.sessionId));});
+ // Session ids still running in the workspace; 'unknown' if that list failed.
+ const [running,setRunning]=useState<Set<number>|'unknown'|null>(null),[picked,setPicked]=useState<ShareableTerminal|null>(terminal);
+ const [catalog,setCatalog]=useState<Project[]|null>(null);
+ const [busy,setBusy]=useState(false),[error,setError]=useState(''),[done,setDone]=useState<Done|null>(null);
+ const alive=useRef(true);useEffect(()=>()=>{alive.current=false;},[]);
  useEffect(()=>{
   const client=activeWorkspace()?.client;if(!workspaceId||!client)return;
-  void client.workspace<{projects:Project[]}>(workspaceId,'/projects').then(r=>{if(alive.current)setCatalog(r.projects??[]);},e=>{if(alive.current){setCatalog([]);setError(message(e));}});
-  if(!terminal)void client.workspace<{id:number;title:string;exitCode:number|null}[]>(workspaceId,'/sessions').then(list=>{if(alive.current)setRunning(list.filter(s=>s.exitCode==null).map(s=>({sessionId:s.id,title:s.title})));},e=>{if(alive.current){setRunning([]);setError(message(e));}});
+  void client.workspace<{projects:Project[]}>(workspaceId,'/projects').then(r=>{if(alive.current)setCatalog(r.projects??[]);},e=>{if(alive.current){setCatalog([]);setError(shareError(e));}});
+  if(!terminal)void client.workspace<{id:number;exitCode:number|null}[]>(workspaceId,'/sessions').then(list=>{if(alive.current)setRunning(new Set(list.filter(s=>s.exitCode==null).map(s=>s.id)));},()=>{if(alive.current)setRunning('unknown');});
  },[workspaceId,terminal]);
+ const choices=terminal||running===null?null:open.filter(t=>running==='unknown'||running.has(t.sessionId));
  const target=terminal??picked;
- const derived=catalog?(catalog.find(p=>p.id===target?.projectId)??catalog.find(p=>!!target?.projectName&&p.name===target.projectName)??(catalog.length===1?catalog[0]:undefined)):undefined;
- const project=derived??catalog?.find(p=>p.id===projectChoice);
- const title=(mode==='view'?target?.title:target?.title||(project?`Pair on ${project.name}`:''))?.trim().slice(0,80)||'Shared terminal';
- const ready=available.ok&&!!project&&(mode==='pair'||!!target)&&!busy;
- async function share(){
-  const client=activeWorkspace()?.client;if(!ready||!client||!project)return;
+ const project=catalog&&target?projectOf(catalog,target):undefined;
+ const canPair=!!project&&project.canPair!==false;
+ const ready=available.ok&&!!project&&!busy;
+ async function share(kind:'watch'|'pair'){
+  const client=activeWorkspace()?.client;if(!ready||!client||!project||!target)return;
+  const title=(kind==='watch'?terminalLabel(target):`Pair on ${project.name}`).slice(0,80);
   setBusy(true);setError('');
   try{
-   const result=await client.workspace<{sessions:Publication[]}>(workspaceId,'/shared-sessions',mode==='view'?{action:'publish',sessionId:target!.sessionId,projectId:project.id,title,mode:'view',acknowledged:true}:{action:'create',projectId:project.id,title});
+   const result=await client.workspace<{sessions:Publication[]}>(workspaceId,'/shared-sessions',kind==='watch'?{action:'publish',sessionId:target.sessionId,projectId:project.id,title,mode:'view',acknowledged:true}:{action:'create',projectId:project.id,title});
    window.dispatchEvent(new Event(SHARED_SESSIONS_CHANGED));
    const sessions=result?.sessions??[];
-   const p=mode==='view'?sessions.find(s=>s.sessionId===target!.sessionId&&!s.collaborative):sessions.filter(s=>s.collaborative&&s.title===title).sort((a,b)=>b.expiresAt-a.expiresAt)[0];
+   const p=kind==='watch'?sessions.find(s=>s.sessionId===target.sessionId&&!s.collaborative):sessions.filter(s=>s.collaborative&&s.title===title).sort((a,b)=>b.expiresAt-a.expiresAt)[0];
    if(!p){if(alive.current)setDone({title,text:'Shared. Copy its link from Live now under Team.'});return;}
    try{await copyReadableLink({kind:'session',workspaceId,projectId:p.projectId,publicationId:p.id,title:p.title});if(alive.current)setDone({title,text:'Shared. Link copied. Paste it to your team.'});}
    catch(e){if(alive.current)setDone({title,text:`Shared, but the link wasn't copied: ${message(e)}`});}
-  }catch(e){if(alive.current)setError(message(e));}
+  }catch(e){if(alive.current)setError(shareError(e));}
   finally{if(alive.current)setBusy(false);}
  }
- const heading=terminal?`Share “${terminal.title}”`:'Share a terminal';
+ const heading=terminal?`Share “${terminalLabel(terminal)}”`:'Share a terminal';
  if(!available.ok)return <Dialog title={heading} body={available.reason} dismissLabel="Close" onDismiss={onClose}/>;
  if(done)return <Dialog title={heading} variant="accent" actions={[{label:'Done',primary:true,onClick:onClose}]} onDismiss={onClose}><p role="status" className="share-sheet-done"><strong>{done.title}</strong> {done.text} It's listed under Team → Live now.</p></Dialog>;
- return <Dialog title={heading} size="md" dismissLabel="Cancel" onDismiss={onClose} actions={[{label:busy?'Sharing…':'Share + copy link',primary:true,disabled:!ready,onClick:()=>void share()}]}>
+ const unshared=!!catalog&&!!target&&!project;
+ return <Dialog title={heading} size="md" dismissLabel="Cancel" onDismiss={onClose} footnote="Your team sees it under Team → Live now."
+  actions={[...(canPair?[{label:'Pair in a fresh shell',disabled:!ready,onClick:()=>void share('pair')}]:[]),{label:busy?'Sharing…':'Share — they can watch',primary:true,disabled:!ready,onClick:()=>void share('watch')}]}>
   <div className="share-sheet">
-   {!terminal&&mode==='view'&&<><span className="share-sheet-label" id="share-terminal-label">Terminal</span><div className="share-terminal-list" role="group" aria-labelledby="share-terminal-label">
-    {running===null?<span className="share-sheet-note" role="status">Loading terminals…</span>:!running.length?<span className="share-sheet-note">No running terminals in this workspace.</span>:running.map(t=><button type="button" key={t.sessionId} className={`share-terminal-card${picked?.sessionId===t.sessionId?' is-picked':''}`} aria-pressed={picked?.sessionId===t.sessionId} onClick={()=>setPicked(t)}><strong>{t.title}</strong><small>Terminal {t.sessionId}</small></button>)}
-   </div></>}
-   <span className="share-sheet-label">Who sees it</span>
-   {/* Visibility follows project access in the workspace; there is no per-share audience to pick, so this says who rather than offering a choice that changes nothing. */}
-   <div className="share-sheet-control"><span className="share-sheet-value">Everyone who can open {project?.name??'this project'} in {available.workspaceName}</span>
-    <small className="share-sheet-note">They find it under Team → Live now. Change who that is in the workspace's Access tab.</small></div>
-   {catalog!==null&&!derived&&<><span className="share-sheet-label">Project</span><div className="share-sheet-control"><Select size="sm" width="full" aria-label="Project" value={projectChoice} onChange={e=>setProjectChoice(e.target.value)}><option value="" disabled>Choose a project</option>{catalog.map(p=><option key={p.id} value={p.id}>{p.name}</option>)}</Select></div></>}
-   <span className="share-sheet-label">Access</span>
-   <div className="share-sheet-control share-sheet-modes" role="radiogroup" aria-label="Access">
-    <Radio name="share-mode" checked={mode==='view'} onChange={()=>setMode('view')} label="Watch only" hint="They see this terminal live. Only you type."/>
-    <Radio name="share-mode" checked={mode==='pair'} onChange={()=>setMode('pair')} label="Pair (can type)" hint="Everyone types in one shell."/>
-    {mode==='pair'&&<Checkbox checked disabled onChange={()=>{}} label="Start a clean shell instead (no Git or agent logins, ends after 1 hour)" hint="Typing in an existing terminal isn't available, so Pair always starts a clean shell in this project. Anyone invited can edit its files."/>}
-   </div>
-   <span/><small className="share-sheet-note">{mode==='view'?'Viewers see earlier output too.':'The shell ends after 1 hour, or when you stop sharing.'}</small>
-   {error&&<><span/><p role="alert" className="share-sheet-error">{error}</p></>}
+   {!terminal&&<div className="share-terminal-list" role="group" aria-label="Terminal">
+    {choices===null?<span className="share-sheet-note" role="status">Loading terminals…</span>:!choices.length?<span className="share-sheet-note">No open terminals in this workspace.</span>:choices.map(t=>{const blocked=!!catalog&&!projectOf(catalog,t);return <button type="button" key={t.sessionId} disabled={blocked} className={`share-terminal-card${picked?.sessionId===t.sessionId?' is-picked':''}`} aria-pressed={picked?.sessionId===t.sessionId} onClick={()=>setPicked(t)}><strong>{terminalLabel(t)}</strong>{blocked&&<small>{NOT_SHARED}</small>}</button>;})}
+   </div>}
+   {terminal&&unshared&&<p className="share-sheet-note">{NOT_SHARED}: its project isn't one your team can open.</p>}
+   {project&&<p className="share-sheet-note">They also see what's already on screen.</p>}
+   {error&&<p role="alert" className="share-sheet-error">{error}</p>}
   </div>
  </Dialog>;
 }
