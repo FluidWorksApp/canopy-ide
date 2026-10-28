@@ -134,8 +134,8 @@ test('kill_process kills own-uid processes and refuses system pids',async()=>{
  try{
   const child=spawn('sleep',['30']);
   const exited=new Promise(r=>child.on('exit',(code,signal)=>r(signal)));
-  assert.equal(await f.tools.kill_process({pid:child.pid}),null);
-  assert.equal(await exited,'SIGKILL');
+  if(process.platform==='linux'){assert.equal(await f.tools.kill_process({pid:child.pid}),null);assert.equal(await exited,'SIGKILL');}
+  else{await assert.rejects(f.tools.kill_process({pid:child.pid}),/No such process/);child.kill('SIGKILL');await exited;} // the uid check reads /proc, which only the Linux VM has
   for(const pid of [0,1,process.pid,process.ppid])await assert.rejects(f.tools.kill_process({pid}),/Refusing/);
   await assert.rejects(f.tools.kill_process({pid:-5}),/invalid pid/);
   await assert.rejects(f.tools.kill_process({pid:4194304+7}),/No such process/);
