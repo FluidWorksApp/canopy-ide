@@ -10,7 +10,7 @@ import {canSwitchExecutionMode,setExecutionMode} from '../executionMode';
 import {activeWorkspace} from './workspace';
 import {RemoteExecutionClient} from './client';
 import {connectionKey,reportWorkspaceLifecycle} from './connectionState';
-import {clearStopRequest,markStopRequested,saveStopSwitchNotice,stopRequestError,useWorkspaceLifecycle,workspaceLifecycle} from './workspaceLifecycle';
+import {clearStopRequest,failedSetup,markStopRequested,saveStopSwitchNotice,stopRequestError,useWorkspaceLifecycle,workspaceLifecycle} from './workspaceLifecycle';
 import {subscribeWorkspaceList} from './workspaceListCache';
 import type {WorkspaceConnection} from './NativeWorkspaceHost';
 import {accountErrorMessage,othersConnected,othersConnectedMessage} from './accountWorkspace';
@@ -21,7 +21,7 @@ export type ManagedWorkspace={id:string;name:string;provider?:string;state:strin
 const startupSteps=['Starting machine','Connecting saved files','Starting services','Checking connection','Ready'];
 const reportStages:Record<string,string>={packages:'Installing host tools',storage:'Connecting saved files','migrating-files':'Moving your files',artifact:'Downloading the workspace runtime',image:'Preparing the workspace image','host-services':'Starting workspace services'};
 export function workspaceStartupProblem(w:ManagedWorkspace){
- if(w.state!=='error'&&w.operation?.status!=='failed'&&w.operation?.bootstrap_report?.status!=='failed')return null;
+ if(w.state!=='error'&&!failedSetup(w)&&w.operation?.bootstrap_report?.status!=='failed')return null;
  const report=w.operation?.bootstrap_report,stage=report&&(report.stage==='packages'&&w.operation?.bootstrap_mode==='prebuilt'?'Verifying prebuilt host tools':reportStages[report.stage]);
  const provided=typeof w.operation?.last_error==='string'?w.operation.last_error.replace(/[\u0000-\u001f\u007f]/g,' ').slice(0,400).trim():'';
  if(stage&&(!provided||provided.startsWith('Workspace startup failed during ')))return `${stage} failed. Your saved files are retained. ${retryActionLabel(w)}, or stop the workspace to keep compute off.`;

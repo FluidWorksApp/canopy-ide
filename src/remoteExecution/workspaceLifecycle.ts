@@ -33,6 +33,10 @@ restore();
 
 const activeOperation=(w:ManagedWorkspace,action:string)=>w.operation?.action===action&&['pending','running'].includes(w.operation.status);
 const failedStop=(w:ManagedWorkspace)=>w.operation?.action==='hibernate'&&w.operation.status==='failed';
+/** A failed operation that left the workspace needing attention. A failed
+ * Update workspace does not: the workspace keeps running its current host,
+ * and the update notice reports the failure. */
+export const failedSetup=(w:ManagedWorkspace)=>w.operation?.status==='failed'&&w.operation.action!=='update-host';
 /** The server has accepted a stop: either the worker moved the row to
  * `stopping`, or the hibernate operation is queued while the row reads ready. */
 export const serverStopping=(w:ManagedWorkspace)=>activeOperation(w,'hibernate')||(w.state==='stopping'&&!failedStop(w));
@@ -45,7 +49,7 @@ export function workspaceLifecycle(w:ManagedWorkspace,now=Date.now()):WorkspaceL
  // A list response can be older than the accepted stop. Never flip back to
  // Running while our own stop request is still waiting to be observed.
  if(request&&!failedStop(w)&&(request.acknowledged||now-request.requestedAt<STOP_ACKNOWLEDGE_TIMEOUT_MS))return 'stopping';
- if(w.state==='error'||w.operation?.status==='failed')return 'error';
+ if(w.state==='error'||failedSetup(w))return 'error';
  return ({ready:'running',starting:'starting',created:'not-started'} as Record<string,WorkspaceLifecycle>)[w.state]??'unknown';
 }
 
