@@ -16,7 +16,7 @@ import {remoteDiagnostic} from './remoteDiagnostic';
 import type {ClaudeIdeEvent} from '../claudeIde';
 import {HOST_PROTOCOL} from '../../packages/remote-host/native-commands.mjs';
 import {HARNESS_READS,harnessCommand,isHarnessCommand,isOutdatedHarnessError} from './harnessCommands';
-import {HOST_OUTDATED_EVENT,hostOutdatedMessage,isRemoteUnsupported,outdatedHostCommand,remoteUnsupportedMessage} from './remoteSupport';
+import {HOST_OUTDATED_EVENT,hostOutdatedMessage,isRemoteUnsupported,outdatedHostCommand,outdatedNoticeCommand,remoteUnsupportedMessage} from './remoteSupport';
 
 export interface WorkspaceConnection { endpoint: string; token: string; workspaceId: string; workspaceName: string; scope?: 'view'|'drive'; clientId?: string; expiresAt?: string; credentialAccountKey?: string }
 type Args = Record<string, unknown>;
@@ -492,7 +492,7 @@ export class NativeWorkspaceHost implements Host {
       return result;
     }catch(error){
       for(const id of opened)this.hostChannels.delete(id);
-      if(outdatedHostCommand(error)!==command)throw error;this.hostOutdated(command);throw Error(hostOutdatedMessage(command));
+      if(outdatedHostCommand(error)!==command)throw error;this.hostOutdated(command);throw Error(hostOutdatedMessage(outdatedNoticeCommand(command)));
     }
   }
   private governorCursor:number|null=null;
@@ -517,7 +517,9 @@ export class NativeWorkspaceHost implements Host {
   private outdatedReported=false;
   private hostOutdated(command?:string){
     if(this.outdatedReported||this.disposed)return;this.outdatedReported=true;
-    window.dispatchEvent(new CustomEvent(HOST_OUTDATED_EVENT,{detail:{command:command??null,message:hostOutdatedMessage(command)}}));
+    // A background probe is not something the person asked for: never name it.
+    const named=outdatedNoticeCommand(command);
+    window.dispatchEvent(new CustomEvent(HOST_OUTDATED_EVENT,{detail:{command:named??null,message:hostOutdatedMessage(named)}}));
   }
   /** Ask once per connection, so a stale host is reported before anyone hits
    * it — after boot settles, never competing with the handshake for a lane. */

@@ -663,6 +663,15 @@ it('tells an older workspace host apart from a missing feature, and says so once
  expect(seen).toEqual(['This workspace is running an older Canopy host. Restart or update the workspace to use this Git action.']);
  window.removeEventListener('canopy:workspace-host-outdated',heard);host.dispose();
 });
+it('never names a background probe as the feature that needs the update',async()=>{
+ const {host,fetcher}=setup();
+ fetcher.mockImplementation(async(_url:string,options:RequestInit)=>{const {command}=JSON.parse(String(options.body||'{}'));return {ok:false,status:400,json:async()=>({error:`The Linux workspace does not support ${command} yet`})};});
+ const seen:unknown[]=[];const heard=(event:Event)=>seen.push((event as CustomEvent).detail);
+ window.addEventListener('canopy:workspace-host-outdated',heard);
+ await expect(host.invoke('git_sync_probe',{repo:'/workspace',fetch:false,base:null})).rejects.toThrow('This workspace is running an older Canopy host. Restart or update the workspace to use everything in this version of Canopy.');
+ expect(seen).toEqual([{command:null,message:'This workspace is running an older Canopy host. Restart or update the workspace to use everything in this version of Canopy.'}]);
+ window.removeEventListener('canopy:workspace-host-outdated',heard);host.dispose();
+});
 it('refuses features a cloud workspace does not offer without a round trip',async()=>{
  const {host,desktop,fetcher}=setup();
  await expect(host.invoke('fs_reveal',{path:'/workspace/a.ts'})).rejects.toThrow("Reveal in file manager isn't available in a cloud workspace.");
