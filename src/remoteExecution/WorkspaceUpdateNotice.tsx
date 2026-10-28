@@ -1,10 +1,10 @@
-import {useEffect,useState,useSyncExternalStore} from 'react';
+import {useEffect,useState} from 'react';
 import {createPortal} from 'react-dom';
 import {Button} from '../components/ui';
 import {Dialog} from '../components/Dialog';
 import type {ManagedWorkspace} from './ManagedWorkspaces';
 import {hostFeatureName} from './remoteSupport';
-import {HostUpdateCancelled,hostUpdateSignal,recordHostUpdate,requestHostUpdate,subscribeHostUpdates,workspaceUpdate} from './hostUpdate';
+import {HostUpdateCancelled,recordHostUpdate,requestHostUpdate,useWorkspaceUpdate} from './hostUpdate';
 import {refreshWorkspaceList} from './workspaceListCache';
 // The update notice for the active cloud workspace
 // (docs/designs/workspace-host-rollout.md, part 3). It replaces the one-time
@@ -16,14 +16,8 @@ const notNow=new Set<string>();
 function laterRevision(workspaceId:string){try{return localStorage.getItem(LATER_KEY+workspaceId);}catch{return null;}}
 function rememberLater(workspaceId:string,revision:string|null){try{if(revision)localStorage.setItem(LATER_KEY+workspaceId,revision);}catch{/* Storage is optional: Later then lasts this session. */}}
 
-/** The update this workspace needs, if any, as the notice and the chip dot see it. */
-export function useWorkspaceUpdate(workspaceId:string|undefined,listed:ManagedWorkspace|undefined){
- const signal=useSyncExternalStore(subscribeHostUpdates,()=>workspaceId?hostUpdateSignal(workspaceId):null);
- return workspaceId?workspaceUpdate(listed,signal):null;
-}
-
-export const updateConfirmBody='Terminals and agents in this workspace restart. Your files and projects are kept.';
-export const othersUpdateMessage=(others:number)=>`${others} other ${others===1?'person is':'people are'} connected. Their terminals and agents stop too; they come back when they open the workspace again.`;
+const updateConfirmBody='Terminals and agents in this workspace restart. Your files and projects are kept.';
+const othersUpdateMessage=(others:number)=>`${others} other ${others===1?'person is':'people are'} connected. Their terminals and agents stop too; they come back when they open the workspace again.`;
 
 type Phase={kind:'notice'}|{kind:'updating'}|{kind:'done'}|{kind:'failed';message:string};
 export function WorkspaceUpdateNotice({workspaceId,name,owner,listed,clientId,reconnect}:{workspaceId:string;name:string;owner:boolean;listed:ManagedWorkspace|undefined;clientId?:string;reconnect:()=>Promise<void>}){

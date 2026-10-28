@@ -1,4 +1,5 @@
 import {invoke} from '@tauri-apps/api/core';
+import {useSyncExternalStore} from 'react';
 import {HOST_PROTOCOL} from '../../packages/remote-host/native-commands.mjs';
 import {accountErrorMessage,accountRequestError,othersConnected} from './accountWorkspace';
 import type {ManagedWorkspace} from './ManagedWorkspaces';
@@ -40,6 +41,11 @@ export function recordHostUpdate(signal:HostUpdateSignal|null,workspaceId=signal
  if(!workspaceId)return;
  if(signal)signals.set(workspaceId,signal);else signals.delete(workspaceId);
  signalListeners.forEach(listener=>{try{listener();}catch{/* One view never blocks another. */}});
+}
+/** The update this workspace needs, if any, as the notice and the chip dot see it. */
+export function useWorkspaceUpdate(workspaceId:string|undefined,listed:Pick<ManagedWorkspace,'host'|'release'>|undefined){
+ const signal=useSyncExternalStore(subscribeHostUpdates,()=>workspaceId?hostUpdateSignal(workspaceId):null);
+ return workspaceId?workspaceUpdate(listed,signal):null;
 }
 if(typeof window!=='undefined')window.addEventListener(HOST_OUTDATED_EVENT,event=>{
  const detail=(event as CustomEvent<Partial<HostUpdateSignal>>).detail;
