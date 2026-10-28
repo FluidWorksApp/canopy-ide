@@ -4,7 +4,7 @@ import {Button} from '../components/ui';
 import {Dialog} from '../components/Dialog';
 import type {ManagedWorkspace} from './ManagedWorkspaces';
 import {hostFeatureName} from './remoteSupport';
-import {HostUpdateCancelled,recordHostUpdate,requestHostUpdate,useWorkspaceUpdate} from './hostUpdate';
+import {HostUpdateCancelled,hostUpdateStepLabel,recordHostUpdate,requestHostUpdate,useWorkspaceUpdate} from './hostUpdate';
 import {refreshWorkspaceList} from './workspaceListCache';
 // The update notice for the active cloud workspace
 // (docs/designs/workspace-host-rollout.md, part 3). It replaces the one-time
@@ -19,7 +19,7 @@ function rememberLater(workspaceId:string,revision:string|null){try{if(revision)
 const updateConfirmBody='Terminals and agents in this workspace restart. Your files and projects are kept.';
 const othersUpdateMessage=(others:number)=>`${others} other ${others===1?'person is':'people are'} connected. Their terminals and agents stop too; they come back when they open the workspace again.`;
 
-type Phase={kind:'notice'}|{kind:'updating'}|{kind:'done'}|{kind:'failed';message:string};
+type Phase={kind:'notice'}|{kind:'updating';step?:string|null}|{kind:'done'}|{kind:'failed';message:string};
 export function WorkspaceUpdateNotice({workspaceId,name,owner,listed,clientId,reconnect}:{workspaceId:string;name:string;owner:boolean;listed:ManagedWorkspace|undefined;clientId?:string;reconnect:()=>Promise<void>}){
  const update=useWorkspaceUpdate(workspaceId,listed);
  const [phase,setPhase]=useState<Phase>({kind:'notice'});
@@ -41,7 +41,7 @@ export function WorkspaceUpdateNotice({workspaceId,name,owner,listed,clientId,re
  async function run(){
   setConfirm(false);setPhase({kind:'updating'});
   try{
-   await requestHostUpdate(workspaceId,{clientId,confirmOthers:count=>new Promise(resolve=>setOthers({count,answer:resolve}))});
+   await requestHostUpdate(workspaceId,{clientId,confirmOthers:count=>new Promise(resolve=>setOthers({count,answer:resolve})),onProgress:progress=>{if(progress.phase==='updating')setPhase({kind:'updating',step:progress.step??null});}});
    recordHostUpdate(null,workspaceId);
    await refreshWorkspaceList().catch(()=>{});
    // Terminals and agents restarted with the container: open it again.
@@ -58,7 +58,7 @@ export function WorkspaceUpdateNotice({workspaceId,name,owner,listed,clientId,re
    {busy&&<div className="workspace-progress-track" role="progressbar" aria-label="Workspace update progress" aria-valuetext={message}><span style={{width:'60%'}}/></div>}
    <div className="workspace-progress-meta">
     {phase.kind==='notice'&&!owner&&<small>Ask the workspace owner to update it.</small>}
-    {busy&&<small>Your files and projects are kept. Terminals and agents restart.</small>}
+    {phase.kind==='updating'&&<small>{hostUpdateStepLabel(phase.step)?`${hostUpdateStepLabel(phase.step)}. `:''}Your files and projects are kept. Terminals and agents restart.</small>}
     <div className="workspace-inline-actions">
      {owner&&(phase.kind==='notice'||phase.kind==='failed')&&<Button size="sm" variant="accent" onClick={()=>setConfirm(true)}>{phase.kind==='failed'?'Try again':'Update workspace'}</Button>}
      {!busy&&<Button size="sm" onClick={dismiss}>{phase.kind!=='notice'?'Dismiss':!owner?'Dismiss':required?'Not now':'Later'}</Button>}

@@ -1,7 +1,7 @@
 import {it,expect,vi,beforeEach} from 'vitest';
 const mocks=vi.hoisted(()=>({invoke:vi.fn()}));
 vi.mock('@tauri-apps/api/core',()=>({invoke:mocks.invoke}));
-import {HostUpdateCancelled,hostUpdateState,requestHostUpdate,workspaceUpdate} from './hostUpdate';
+import {HostUpdateCancelled,hostUpdateState,hostUpdateStepLabel,requestHostUpdate,workspaceUpdate} from './hostUpdate';
 const id='ws-11111111-1111-1111-1111-111111111111',A='a'.repeat(40),B='b'.repeat(40);
 beforeEach(()=>{vi.clearAllMocks();});
 
@@ -57,6 +57,16 @@ it('asks before stopping other people\'s sessions, and resubmits only with their
  mocks.invoke.mockClear();mocks.invoke.mockImplementation(async()=>{throw others;});
  await expect(requestHostUpdate(id,{confirmOthers:async()=>false})).rejects.toBeInstanceOf(HostUpdateCancelled);
  expect(mocks.invoke).toHaveBeenCalledOnce();
+});
+it('passes on each new step the host reports through the operation',async()=>{
+ vi.useFakeTimers();try{
+  let reads=0;const progress=vi.fn();const steps=['download','download','image','bogus'];
+  mocks.invoke.mockImplementation(async(_command,args)=>{if(args.route==='/api/operations')return {accepted:true,operation:{id:'op-1'}};const step=steps[reads++];return status(step?{id:'op-1',action:'update-host',status:'running',context:{updateStep:step}}:{id:'op-1',action:'update-host',status:'succeeded'});});
+  const done=requestHostUpdate(id,{onProgress:progress});
+  await vi.advanceTimersByTimeAsync(10000);await done;
+  expect(progress.mock.calls.map(([p])=>[p.phase,p.step??null])).toEqual([['requesting',null],['updating',null],['updating','download'],['updating','image'],['updating',null],['completed',null]]);
+  expect(hostUpdateStepLabel('gateway')).toBe('Restarting the workspace host');expect(hostUpdateStepLabel('bogus')).toBeNull();
+ }finally{vi.useRealTimers();}
 });
 it('reports a refused request and a failed update in plain words',async()=>{
  mocks.invoke.mockImplementation(async()=>{throw JSON.stringify({error:'Only the workspace owner can update it',status:403});});

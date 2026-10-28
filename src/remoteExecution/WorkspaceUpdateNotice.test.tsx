@@ -81,3 +81,18 @@ it('shows a failed update with a retry, and cancelling the confirmation changes 
  expect(screen.getByRole('button',{name:'Try again'})).toBeTruthy();
  recordHostUpdate(null,w);
 });
+
+it('shows the host\'s current step while updating, and the operation\'s error when it fails',async()=>{
+ const w=id();let reads=0;
+ mocks.invoke.mockImplementation(async(_command,args)=>{
+  if(args?.route==='/api/operations')return {accepted:true,operation:{id:'op'}};
+  if(args?.body?.action==='status'){reads++;return {workspaces:[{id:w,state:'ready',operation:reads===1?{id:'op',action:'update-host',status:'running',context:{updateStep:'rollback'}}:{id:'op',action:'update-host',status:'failed',last_error:'The new image did not become ready; the previous container is running.'}}]};}
+  return {workspaces:[]};
+ });
+ render(<WorkspaceUpdateNotice workspaceId={w} name="Studio" owner listed={listed(w,{revision:A,protocol:5})} reconnect={async()=>{}}/>);
+ fireEvent.click(screen.getByRole('button',{name:'Update workspace'}));
+ fireEvent.click(screen.getAllByRole('button',{name:'Update workspace'}).at(-1)!);
+ await screen.findByText('Rolling back. Your files and projects are kept. Terminals and agents restart.');
+ await screen.findByText('The new image did not become ready; the previous container is running.',undefined,{timeout:4000});
+ expect(screen.getByRole('button',{name:'Try again'})).toBeTruthy();
+});
