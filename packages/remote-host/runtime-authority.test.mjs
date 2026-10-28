@@ -46,8 +46,9 @@ test('explicit release lookup is fresh, immutable and bound to current run inten
 
 test('ordinary authorization never opts into registry lookup, while release lookup explicitly requests it',async()=>{
  const image='ghcr.io/fluidworksapp/canopy-workspace@sha256:'+'a'.repeat(64),requests=[];
- const authority=runtimeAuthority('https://control.invalid/api/runtime-policy',{key,workspaceId:workspace.id},{now:()=>now,fetchImpl:async(url,options)=>{requests.push(options);const claims=verifyRuntimePolicyToken(options.headers.authorization.slice(7),()=>key,now);assert.equal(claims.generation,workspace.generation);assert.equal(claims.workspaceId,workspace.id);return Response.json({allowed:true,workspaceId:workspace.id,generation:workspace.generation,image});}});
- assert.equal(await authority(workspace),true);assert.equal(requests[0].body,undefined);
- assert.equal(await authority.release(workspace),image);assert.deepEqual(JSON.parse(requests[1].body),{resolveRelease:true});assert.equal(requests[1].headers['content-type'],'application/json');
+ const host={revision:'c'.repeat(40),protocol:6,runtimeSha256:'d'.repeat(64)};
+ const authority=runtimeAuthority('https://control.invalid/api/runtime-policy',{key,workspaceId:workspace.id},{now:()=>now,hostRelease:async()=>host,fetchImpl:async(url,options)=>{requests.push(options);const claims=verifyRuntimePolicyToken(options.headers.authorization.slice(7),()=>key,now);assert.equal(claims.generation,workspace.generation);assert.equal(claims.workspaceId,workspace.id);return Response.json({allowed:true,workspaceId:workspace.id,generation:workspace.generation,image});}});
+ assert.equal(await authority(workspace),true);assert.deepEqual(JSON.parse(requests[0].body),{host});
+ assert.equal(await authority.release(workspace),image);assert.deepEqual(JSON.parse(requests[1].body),{resolveRelease:true,host});assert.equal(requests[1].headers['content-type'],'application/json');
  await assert.rejects(authority.release({...workspace,id:'other'}));assert.equal(requests.length,2);
 });
