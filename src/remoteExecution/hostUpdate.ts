@@ -75,7 +75,7 @@ export type ConfirmHostUpdate=(others:number)=>Promise<boolean>;
 export class HostUpdateCancelled extends Error{constructor(){super('Update cancelled. The workspace keeps running its current host.');}}
 // Step (b) may pull the release image when the pre-pull has not.
 export const HOST_UPDATE_WAIT_MS=20*60*1000;
-type Observed={id:string;state:string;operation?:{id?:string;action?:string;status:string;last_error?:string|null;context?:{updateStep?:string|null}|null}};
+type Observed={id:string;state:string;operation?:{id?:string;action?:string;status:string;last_error?:string|null;update_step?:string|null;context?:{updateStep?:string|null}|null}};
 const transient=(error:unknown)=>{const message=String(error);if(/\b(?:401|403)\b|unauthorized|forbidden|not signed in/i.test(message))return false;return /timed?\s*out|timeout|network|connection|failed to fetch|\b(?:408|429|500|502|503|504)\b/i.test(message);};
 const pause=(ms:number)=>new Promise(resolve=>setTimeout(resolve,ms));
 /** Owner only: asks the control plane for the `update-host` operation, with
@@ -107,7 +107,9 @@ export async function requestHostUpdate(workspaceId:string,{clientId,confirmOthe
   const operation=current.operation,ours=operation?.action==='update-host'&&(!operationId||!operation.id||operation.id===operationId);
   if(ours&&operation?.status==='failed')throw Error(operation.last_error||'The workspace update failed. The workspace keeps running its current host.');
   if(ours&&['pending','running'].includes(operation!.status)){
-   const step=hostUpdateStepLabel(operation?.context?.updateStep)?operation!.context!.updateStep as HostUpdateStep:null;
+   // The control plane's workspace list flattens context.updateStep to update_step.
+   const reported=operation?.update_step??operation?.context?.updateStep;
+   const step=hostUpdateStepLabel(reported)?reported as HostUpdateStep:null;
    if(!seen||step!==lastStep){seen=true;lastStep=step;onProgress?.({phase:'updating',accepted:true,step});}
   }
   else if(seen&&current.state==='ready'){onProgress?.({phase:'completed',accepted:true});return;}

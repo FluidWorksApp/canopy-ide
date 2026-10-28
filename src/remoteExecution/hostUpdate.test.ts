@@ -61,7 +61,7 @@ it('asks before stopping other people\'s sessions, and resubmits only with their
 it('passes on each new step the host reports through the operation',async()=>{
  vi.useFakeTimers();try{
   let reads=0;const progress=vi.fn();const steps=['download','download','image','bogus'];
-  mocks.invoke.mockImplementation(async(_command,args)=>{if(args.route==='/api/operations')return {accepted:true,operation:{id:'op-1'}};const step=steps[reads++];return status(step?{id:'op-1',action:'update-host',status:'running',context:{updateStep:step}}:{id:'op-1',action:'update-host',status:'succeeded'});});
+  mocks.invoke.mockImplementation(async(_command,args)=>{if(args.route==='/api/operations')return {accepted:true,operation:{id:'op-1'}};const step=steps[reads++];return status(step?{id:'op-1',action:'update-host',status:'running',update_step:step}:{id:'op-1',action:'update-host',status:'succeeded'});});
   const done=requestHostUpdate(id,{onProgress:progress});
   await vi.advanceTimersByTimeAsync(10000);await done;
   expect(progress.mock.calls.map(([p])=>[p.phase,p.step??null])).toEqual([['requesting',null],['updating',null],['updating','download'],['updating','image'],['updating',null],['completed',null]]);
