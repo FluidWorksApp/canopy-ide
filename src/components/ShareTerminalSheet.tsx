@@ -1,13 +1,11 @@
 import {useEffect,useRef,useState} from 'react';
-import {invoke} from '@tauri-apps/api/core';
 import {Dialog} from './Dialog';
 import {Checkbox,Radio,Select} from './ui';
 import {activeWorkspace} from '../remoteExecution/workspace';
 import {copyReadableLink} from '../readableLinks';
-import {knownTeams} from './TeamHub';
 import {SHARE_TERMINAL_EVENT,SHARED_SESSIONS_CHANGED,shareAvailability,type Publication,type ShareableTerminal} from './shareTerminal';
 import './sharedSessions.css';
-type Team={id:string;name:string};type Project={id:string;name:string};
+type Project={id:string;name:string};
 type Done={title:string;text:string};
 const message=(e:unknown)=>(e instanceof Error?e.message:String(e)).replace(/^Error:\s*/,'');
 /** Share one terminal with teammates. Opened on a terminal it has no picker;
@@ -17,7 +15,6 @@ const message=(e:unknown)=>(e instanceof Error?e.message:String(e)).replace(/^Er
 export function ShareTerminalSheet({terminal,onClose}:{terminal:ShareableTerminal|null;onClose:()=>void}){
  const available=shareAvailability();
  const [running,setRunning]=useState<ShareableTerminal[]|null>(terminal?[terminal]:null),[picked,setPicked]=useState<ShareableTerminal|null>(terminal);
- const [teams,setTeams]=useState<Team[]|null>(()=>knownTeams().teams),[team,setTeam]=useState(()=>{const known=knownTeams();return known.teams?.some(t=>t.id===known.selected)?known.selected:known.teams?.[0]?.id??'';});
  const [catalog,setCatalog]=useState<Project[]|null>(null),[projectChoice,setProjectChoice]=useState('');
  const [mode,setMode]=useState<'view'|'pair'>('view'),[busy,setBusy]=useState(false),[error,setError]=useState(''),[done,setDone]=useState<Done|null>(null);
  const alive=useRef(true);useEffect(()=>()=>{alive.current=false;},[]);
@@ -26,7 +23,6 @@ export function ShareTerminalSheet({terminal,onClose}:{terminal:ShareableTermina
   const client=activeWorkspace()?.client;if(!workspaceId||!client)return;
   void client.workspace<{projects:Project[]}>(workspaceId,'/projects').then(r=>{if(alive.current)setCatalog(r.projects??[]);},e=>{if(alive.current){setCatalog([]);setError(message(e));}});
   if(!terminal)void client.workspace<{id:number;title:string;exitCode:number|null}[]>(workspaceId,'/sessions').then(list=>{if(alive.current)setRunning(list.filter(s=>s.exitCode==null).map(s=>({sessionId:s.id,title:s.title})));},e=>{if(alive.current){setRunning([]);setError(message(e));}});
-  if(!knownTeams().teams)void invoke<{teams?:Team[]}>('canopy_account_request',{route:'/api/teams',body:null}).then(r=>{if(!alive.current)return;const list=(r?.teams??[]).map(t=>({id:t.id,name:t.name}));setTeams(list);setTeam(old=>old||list[0]?.id||'');},()=>{if(alive.current)setTeams([]);});
  },[workspaceId,terminal]);
  const target=terminal??picked;
  const derived=catalog?(catalog.find(p=>p.id===target?.projectId)??catalog.find(p=>!!target?.projectName&&p.name===target.projectName)??(catalog.length===1?catalog[0]:undefined)):undefined;
@@ -55,9 +51,10 @@ export function ShareTerminalSheet({terminal,onClose}:{terminal:ShareableTermina
    {!terminal&&mode==='view'&&<><span className="share-sheet-label" id="share-terminal-label">Terminal</span><div className="share-terminal-list" role="group" aria-labelledby="share-terminal-label">
     {running===null?<span className="share-sheet-note" role="status">Loading terminals…</span>:!running.length?<span className="share-sheet-note">No running terminals in this workspace.</span>:running.map(t=><button type="button" key={t.sessionId} className={`share-terminal-card${picked?.sessionId===t.sessionId?' is-picked':''}`} aria-pressed={picked?.sessionId===t.sessionId} onClick={()=>setPicked(t)}><strong>{t.title}</strong><small>Terminal {t.sessionId}</small></button>)}
    </div></>}
-   <span className="share-sheet-label">With</span>
-   <div className="share-sheet-control">{teams?.length?<Select size="sm" width="full" aria-label="Team" value={team} onChange={e=>setTeam(e.target.value)}>{teams.map(t=><option key={t.id} value={t.id}>{t.name}</option>)}</Select>:<span className="share-sheet-value">{teams===null?'Your team':'People with access to this workspace'}</span>}
-    <small className="share-sheet-note">Teammates who can open {project?.name??'this project'} in {available.workspaceName} find it under Team.</small></div>
+   <span className="share-sheet-label">Who sees it</span>
+   {/* Visibility follows project access in the workspace; there is no per-share audience to pick, so this says who rather than offering a choice that changes nothing. */}
+   <div className="share-sheet-control"><span className="share-sheet-value">Everyone who can open {project?.name??'this project'} in {available.workspaceName}</span>
+    <small className="share-sheet-note">They find it under Team → Live now. Change who that is in the workspace's Access tab.</small></div>
    {catalog!==null&&!derived&&<><span className="share-sheet-label">Project</span><div className="share-sheet-control"><Select size="sm" width="full" aria-label="Project" value={projectChoice} onChange={e=>setProjectChoice(e.target.value)}><option value="" disabled>Choose a project</option>{catalog.map(p=><option key={p.id} value={p.id}>{p.name}</option>)}</Select></div></>}
    <span className="share-sheet-label">Access</span>
    <div className="share-sheet-control share-sheet-modes" role="radiogroup" aria-label="Access">

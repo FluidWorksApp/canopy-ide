@@ -2,7 +2,6 @@ import {afterEach,beforeEach,expect,it,vi} from 'vitest';import {act,cleanup,fir
 const state=vi.hoisted(()=>({host:null as null|{connection:{workspaceId:string;endpoint:string;token:string;workspaceName:string};client:{workspace:ReturnType<typeof vi.fn>}},copy:vi.fn()}));
 vi.mock('../remoteExecution/workspace',()=>({activeWorkspace:()=>state.host}));
 vi.mock('../remoteExecution/workspaceListCache',()=>({peekWorkspaceList:()=>({workspaces:[{id:'ws',name:'API',state:'ready',access:{owner:true}}],at:0})}));
-vi.mock('./TeamHub',()=>({knownTeams:()=>({teams:[{id:'t1',name:'Engineering'},{id:'t2',name:'Design'}],selected:'t1'})}));
 vi.mock('../readableLinks',async importOriginal=>({...(await importOriginal<typeof import('../readableLinks')>()),copyReadableLink:state.copy}));
 import {ShareTerminalHost} from './ShareTerminalSheet';
 import {shareTerminal,SHARED_SESSIONS_CHANGED} from './shareTerminal';
@@ -22,7 +21,7 @@ it('Share on a terminal opens the sheet on that terminal, with no terminal picke
  render(<ShareTerminalHost/>);open({sessionId:7,title:'Owner shell',projectId:'app',projectName:'Product'});
  const sheet=screen.getByRole('dialog',{name:'Share “Owner shell”'});
  expect(within(sheet).queryByRole('group',{name:'Terminal'})).toBeNull();
- expect(within(sheet).getByRole('combobox',{name:'Team'})).toHaveValue('t1');
+ expect(sheet.querySelector('.share-sheet-value')?.textContent).toMatch(/^Everyone who can open \S/);
  expect(within(sheet).getByRole('radio',{name:/Watch only/})).toBeChecked();
  expect(within(sheet).getByText('Viewers see earlier output too.')).toBeInTheDocument();
  // No "nothing private on screen" gate: the primary button is the acknowledgement.

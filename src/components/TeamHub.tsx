@@ -36,7 +36,6 @@ let cacheEpoch=0;
 window.addEventListener('canopy:account-changed',()=>{cacheEpoch++;cache={directory:null,details:{},selected:''};});
 /** The teams this panel last loaded and the one it shows, for the Share
  *  sheet's "With" choice. Null until the panel has loaded once. */
-export const knownTeams=()=>({teams:cache.directory?.teams.map(t=>({id:t.id,name:t.name}))??null,selected:cache.selected});
 
 function Avatar({person}:{person:Person}){
  return <span aria-hidden="true" className="team-avatar" style={{'--team-tone':`var(${avatarTone(person)})`} as CSSProperties}>{initials(person)}</span>;
