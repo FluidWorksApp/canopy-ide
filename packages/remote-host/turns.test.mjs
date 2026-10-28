@@ -112,7 +112,8 @@ test('duplicate delivery is collapsed',async()=>{
  try{
   const c=turnsCommands(ctxFor(f));forgetDeliveries(root);
   const [a,b]=await Promise.all([c.turn_snapshot({cwd:root,sessionId:'dup',kind:'start'}),c.turn_snapshot({cwd:root,sessionId:'dup',kind:'start'})]);
-  assert.ok(a.taken&&!b.taken);assert.equal(b.note,'duplicate delivery');
+  const [won,lost]=a.taken?[a,b]:[b,a]; // either call can reach the lock first
+  assert.ok(won.taken&&!lost.taken);assert.equal(lost.note,'duplicate delivery');
  }finally{await cleanup(f);}
 });
 
