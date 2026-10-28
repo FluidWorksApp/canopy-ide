@@ -9,3 +9,4 @@
 25813e594d711bac3c842c004ab19c6df0ddbcaf:src-tauri/src/clipboard.rs:generic-api-key:982
 17529adc30f8fcadc59d52250c7f5fea2fedd0bb:src-tauri/src/mcp.rs:gcp-api-key:866
 49c420961ce29187e73abaed4f15f75ccf43c443:src/hibernation.ts:generic-api-key:309
+bcd79e7750f1a888d6f7a7a977597a66dd65e07f:src-tauri/src/canopy_link.rs:generic-api-key:437
