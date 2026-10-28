@@ -433,9 +433,21 @@ mod tests {
         );
         let streams: Streams = Default::default();
         let (out, mut frames) = mpsc::channel::<Message>(64);
-        handle_frame(&frame(OPEN, 3, br#"{"auth":"owner"}"#), &router, &streams, &out).await;
+        handle_frame(
+            &frame(OPEN, 3, br#"{"auth":"owner"}"#),
+            &router,
+            &streams,
+            &out,
+        )
+        .await;
         let handshake = "GET /remote/ws HTTP/1.1\r\nHost: vj.remote.test\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\r\n";
-        handle_frame(&frame(DATA, 3, handshake.as_bytes()), &router, &streams, &out).await;
+        handle_frame(
+            &frame(DATA, 3, handshake.as_bytes()),
+            &router,
+            &streams,
+            &out,
+        )
+        .await;
         let Ok(Some(Message::Binary(bytes))) =
             tokio::time::timeout(Duration::from_secs(5), frames.recv()).await
         else {
@@ -445,7 +457,10 @@ mod tests {
         assert_eq!((kind, id), (DATA, 3));
         let text = String::from_utf8_lossy(payload).to_ascii_lowercase();
         assert!(text.starts_with("http/1.1 101"), "{text}");
-        assert!(text.contains("sec-websocket-accept: s3pplmbitxaq9kygzzhzrbk+xoo="), "{text}");
+        assert!(
+            text.contains("sec-websocket-accept: s3pplmbitxaq9kygzzhzrbk+xoo="),
+            "{text}"
+        );
     }
 
     #[test]
