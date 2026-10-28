@@ -1,7 +1,7 @@
 import {it,expect,vi,beforeEach} from 'vitest';
 const mocks=vi.hoisted(()=>({invoke:vi.fn()}));
 vi.mock('@tauri-apps/api/core',()=>({invoke:mocks.invoke}));
-import {HostUpdateCancelled,hostUpdateState,hostUpdateStepLabel,requestHostUpdate,workspaceUpdate} from './hostUpdate';
+import {HostUpdateCancelled,HostUpdateFailed,hostUpdateUnsupported,hostUpdateState,hostUpdateStepLabel,requestHostUpdate,workspaceUpdate} from './hostUpdate';
 const id='ws-11111111-1111-1111-1111-111111111111',A='a'.repeat(40),B='b'.repeat(40);
 beforeEach(()=>{vi.clearAllMocks();});
 
@@ -75,4 +75,21 @@ it('reports a refused request and a failed update in plain words',async()=>{
  await expect(requestHostUpdate(id)).rejects.toThrow('previous host is running');
  mocks.invoke.mockImplementation(async(_command,args)=>args.route==='/api/operations'?{accepted:true}:status({action:'hibernate',status:'running'},'stopping'));
  await expect(requestHostUpdate(id)).rejects.toThrow('Another workspace action replaced this update');
+});
+
+const UNSUPPORTED='This workspace host cannot update in place. Hibernate and resume the workspace to get the new release.';
+it('carries the operation\'s update code, so a host that cannot update in place is told apart',async()=>{
+ mocks.invoke.mockImplementation(async(_command,args)=>args.route==='/api/operations'?{accepted:true}:status({action:'update-host',status:'failed',last_error:UNSUPPORTED,update_code:'unsupported'}));
+ const error=await requestHostUpdate(id).catch(e=>e);
+ expect(error).toBeInstanceOf(HostUpdateFailed);expect(error.message).toBe(UNSUPPORTED);expect(error.code).toBe('unsupported');
+ expect(hostUpdateUnsupported(error)).toBe(true);
+ mocks.invoke.mockImplementation(async(_command,args)=>args.route==='/api/operations'?{accepted:true}:status({action:'update-host',status:'failed',last_error:'The updated host did not become ready',update_code:'rolled-back'}));
+ expect(hostUpdateUnsupported(await requestHostUpdate(id).catch(e=>e))).toBe(false);
+});
+it('recognises an unsupported host by its message when no code reaches the app',()=>{
+ expect(hostUpdateUnsupported(Error(UNSUPPORTED))).toBe(true);
+ expect(hostUpdateUnsupported(new HostUpdateFailed(UNSUPPORTED,null))).toBe(true);
+ expect(hostUpdateUnsupported(JSON.stringify({error:'Refused',code:'unsupported'}))).toBe(true);
+ expect(hostUpdateUnsupported(Error('The workspace update failed. The previous host is running.'))).toBe(false);
+ expect(hostUpdateUnsupported(new HostUpdateFailed('Another host update is already running on this workspace','busy'))).toBe(false);
 });
