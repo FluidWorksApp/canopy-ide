@@ -14,11 +14,12 @@ async function fixture({launch=true}={}){
   if(command==='inspect'){const found=containers.get(name);if(!found)throw Object.assign(Error('missing'),{missingResource:true});return {stdout:JSON.stringify([found])};}
   if(command==='stop')containers.get(name).State.Running=false;
   if(command==='start')containers.get(name).State.Running=true;
+  if(command==='update'&&args[1]==='--restart'){const [policy,count]=args[2].split(':');containers.get(name).HostConfig.RestartPolicy={Name:policy,MaximumRetryCount:Number(count??0)};}
   if(command==='rename'){const [from,to]=args.slice(1);containers.set(to,containers.get(from));containers.delete(from);if(from==='canopy-ws-alice'&&to.startsWith('canopy-previous-'))preserved=containers.get(to);}
   if(command==='run'){if(!launch)throw Error('new image would not start');containers.set('canopy-ws-alice',{...structuredClone(preserved),Id:'1'.repeat(64),Image:newImage,State:{Running:true},Config:{...preserved.Config,Image:args.at(-1),Labels:{'canopy.workspace':'alice','canopy.image-channel':old}}});}
   return {stdout:''};}});
  containers.set('canopy-ws-alice',{Id:'e'.repeat(64),Image:oldImage,Config:{Labels:{'canopy.workspace':'alice','canopy.image-channel':old},Image:old,User:'1000:1000',Env:[`CANOPY_RUNNER_TOKEN=${host.token('alice')}`,'CANOPY_ACCOUNTS=']},HostConfig:{Memory:2147483648,MemorySwap:3758096384,NanoCpus:2e9,RestartPolicy:{Name:'on-failure',MaximumRetryCount:3},PidsLimit:1024,CapDrop:['ALL'],CapAdd:[],NetworkMode:'canopy-net-alice',SecurityOpt:['no-new-privileges:true']},Mounts:[{Type:'volume',Destination:'/workspace',Name:'canopy-project-alice',RW:true},{Type:'volume',Destination:'/home/agent',Name:'canopy-home-alice',RW:true}],State:{Running:true},NetworkSettings:{Networks:{'canopy-net-alice':{IPAddress:'172.18.0.2'}},Ports:{'8080/tcp':[{HostIp:'127.0.0.1',HostPort:'45000'}]}}});
- containers.set('canopy-ws-'+member,{Id:'2'.repeat(64),Config:{Labels:{'canopy.workspace':member}},State:{Running:true}});
+ containers.set('canopy-ws-'+member,{Id:'2'.repeat(64),Config:{Labels:{'canopy.workspace':member}},HostConfig:{RestartPolicy:{Name:'on-failure',MaximumRetryCount:3}},State:{Running:true}});
  const fetch=globalThis.fetch;globalThis.fetch=async()=>Response.json([]);
  return {host,workspace,calls,containers,cleanup:async()=>{globalThis.fetch=fetch;await rm(directory,{recursive:true,force:true});}};
 }
