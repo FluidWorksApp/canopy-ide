@@ -7,7 +7,7 @@ vi.mock('./workspace',()=>({activeWorkspace:()=>null}));
 vi.mock('./client',()=>({RemoteExecutionClient:class{workspace=mocks.open;}}));
 vi.mock('../components/AccountSettings',()=>({AccountSettings:()=>null}));
 vi.mock('../components/WorkspaceSharing',()=>({WorkspaceSharing:()=>null}));
-vi.mock('../components/SharedSessionsPanel',()=>({SharedSessionsPanel:()=>null}));
+
 vi.mock('./WorkspaceOwnerTools',()=>({WorkspaceOwnerTools:()=>null}));
 vi.mock('./LocalProjectImport',()=>({LocalProjectImport:()=>null}));
 vi.mock('./RemoteDesktop',()=>({RemoteDesktop:()=>null}));

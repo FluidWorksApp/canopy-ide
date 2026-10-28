@@ -68,7 +68,7 @@ it('shows a clear error with Retry when the first load fails',async()=>{
 it('asks to sign in instead of showing an empty panel when signed out',async()=>{
  invoke.mockImplementation(async()=>{throw 'Not signed in';});
  render(<TeamHub/>);
- expect(await screen.findByRole('alert')).toHaveTextContent('Sign in to see your teams');
+ expect(await screen.findByRole('alert')).toHaveTextContent('Sign in to share with your team');
  expect(screen.getByRole('button',{name:'Sign in'})).toBeInTheDocument();
 });
 

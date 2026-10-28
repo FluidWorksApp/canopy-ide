@@ -13,6 +13,7 @@ import { HOST_OUTDATED_EVENT } from "./remoteExecution/remoteSupport";
 import {MeshJobInbox} from "./components/MeshJobInbox";
 import {projectCheckouts} from "./jobScope";
 import {ensureProjectWorkspace,ProjectWorkspaceProgress} from "./remoteExecution/projectWorkspace";
+import {ShareTerminalHost} from "./components/ShareTerminalSheet";
 import {stopIdleProjectWorkspace} from "./remoteExecution/projectIdle";
 import {selectAllFocused} from './selectAll';
 // Shell: project tabs on top; each open project is a fully mounted (hidden
@@ -4119,6 +4120,7 @@ export default function App() {
         </div>
       )}
       <ProjectWorkspaceProgress/>
+      <ShareTerminalHost/>
       <TitleBar
         projects={ws.projects}
         openProjects={openProjects}

@@ -5,7 +5,7 @@ import {accountErrorMessage,isAccountWorkspace,isMemberConnection,othersConnecte
 import {postAttention} from '../attention';
 import {WorkspaceOwnerTools} from './WorkspaceOwnerTools';
 import {WorkspaceSharing} from "../components/WorkspaceSharing";
-import {SharedSessionsPanel} from "../components/SharedSessionsPanel";
+import {openTeamPanel} from "../components/shareTerminal";
 import {CreateWorkspace} from "./CreateWorkspace";
 import {ManagedWorkspaces, type ManagedWorkspace} from './ManagedWorkspaces';
 import {Dialog} from '../components/Dialog';
@@ -150,8 +150,8 @@ export function WorkspaceSelector({ onboarding = false,onHibernateWorkspace }: {
   const [openRequest,setOpenRequest]=useState<{id:string;nonce:number}|null>(null);
   useEffect(()=>{const show=()=>setOpen(true);window.addEventListener('canopy:open-workspaces',show);return()=>window.removeEventListener('canopy:open-workspaces',show);},[]);
   // A readable Canopy link (readableLinks.ts) asks to open a workspace, or to
-  // show it (a shared session link lands on its Overview). Opening goes through
-  // the same background resume-and-connect as picking it from the menu.
+  // show its details. Opening goes through the same background
+  // resume-and-connect as picking it from the menu.
   useEffect(()=>{
    const show=(event:Event)=>{
     const detail=(event as CustomEvent<ShowWorkspaceDetail>).detail;if(!detail?.workspaceId)return;
@@ -272,7 +272,7 @@ export function WorkspaceSelector({ onboarding = false,onHibernateWorkspace }: {
       {managedSelection&&section==='tools'&&managedSelection.access?.owner===true&&<WorkspaceOwnerTools key={managedSelection.id} workspaceId={managedSelection.id}/>}
       {managedSelection&&section==='tools'&&!selectedActive&&<p className="workspace-section-hint">Open this workspace to connect your personal accounts, import projects or use its desktop.</p>}
       {managedSelection&&section==='overview'&&<div className="workspace-share-link"><div><strong>Link for teammates</strong><small>Anyone with access opens this workspace from it. Nothing to generate.</small></div><CopyLinkButton target={{kind:'workspace',workspaceId:managedSelection.id}}/></div>}
-      {managedSelection&&section==='overview'&&<SharedSessionsPanel key={'sessions-'+managedSelection.id} workspaceId={managedSelection.id} owner={managedSelection.access?.owner===true}/>}
+      {managedSelection&&section==='overview'&&<p className="workspace-section-hint workspace-sessions-hint">Shared sessions are under Team.<Button size="sm" variant="ghost" onClick={()=>{setOpen(false);openTeamPanel();}}>Open Team</Button></p>}
       <section id="workspace-controls" role="tabpanel" aria-labelledby={`workspace-tab-${workspaceTabs.findIndex(workspace=>workspace.id===resolvedSelectedId)}`} className="workspace-detail" hidden={!!managedSelection&&section!=='tools'}>
         {!selectedManagedId&&<div className="workspace-detail-heading"><div><strong>{selected?.workspaceName??'Local workspace'}</strong><small>{selected?'Remote workspace · files and processes run here':'This Mac · files and processes run on this device'}</small></div><span className="workspace-selected">{selectedActive?(active?connectionLabel(connectionState):'Active'):'Not active'}</span></div>}
         {!selectedActive&&!managedSelection?<div className="workspace-activate"><p>Switch to this workspace to use its projects, accounts and desktop.</p><Button variant="accent" disabled={busy} onClick={()=>selected?void chooseSaved(selected.savedId??selected.id):void choose()}>{busy?'Switching…':'Use this workspace'}</Button></div>:selectedActive&&active?<>
