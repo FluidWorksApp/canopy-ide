@@ -36,6 +36,7 @@ jobs:
       - name: Install runtime search dependency
         run: sudo apt-get update && sudo apt-get install -y ripgrep
       - run: npm run test --workspace @canopy/remote-host
+      - run: npm run test --workspace @canopy/remote-edge
 
   remote-host-linux:
     name: Portable Linux host (real PTY · isolation · desktop · LSP)

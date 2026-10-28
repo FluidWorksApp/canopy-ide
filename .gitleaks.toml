@@ -46,3 +46,10 @@ condition = "AND"
 regexTarget = "secret"
 paths = ['''^packages/remote-host/shared-agent-launch\.mjs$''']
 regexes = ['''^ANTHROPIC_API_KEY=$''']
+
+[[rules.allowlists]]
+description = "Synthetic HMAC key in the remote edge tests"
+condition = "AND"
+regexTarget = "secret"
+paths = ['''^packages/remote-edge/(edge|tokens)\.test\.mjs$''']
+regexes = ['''^synthetic-remote-edge-test-key-0123456789$''']
