@@ -17,7 +17,11 @@ on:
       - 'crates/canopy-core/**'
       - 'crates/canopy-service/**'
       - 'src-tauri/Cargo.lock'
+      - 'scripts/workspace-host-release*.mjs'
       - '.github/workflows/workspace-image.yml'
+      # Every version bump changes package.json, so each release commit gets its
+      # own registered host release for the v* tag to activate (release.yml).
+      - 'package.json'
   workflow_dispatch:
     inputs:
       promote:
@@ -57,7 +61,7 @@ jobs:
           node-version: 22
       - run: sudo apt-get update && sudo apt-get install -y ripgrep
       - run: npm ci --prefix packages/remote-host --workspaces=false --ignore-scripts
-      - run: node --test packages/remote-host/*.test.mjs packages/chrome-stream/protocol.test.mjs packages/chrome-stream/screencast.test.mjs packages/chrome-stream/recovery.test.mjs
+      - run: node --test packages/remote-host/*.test.mjs scripts/workspace-host-release.test.mjs packages/chrome-stream/protocol.test.mjs packages/chrome-stream/screencast.test.mjs packages/chrome-stream/recovery.test.mjs
       - run: node packages/remote-host/prepare-hook-build.mjs
       - run: node packages/remote-host/prepare-browser-build.mjs
       # canopy-serviced ships in the host release archive (not the image), as a
@@ -134,10 +138,13 @@ jobs:
     name: Publish multi-platform release
     needs: build
     runs-on: ubuntu-24.04
-    timeout-minutes: 15
+    timeout-minutes: 20
     permissions:
       contents: read
       packages: write
+      # GitHub OIDC: the AWS release-publisher role and the control plane's
+      # release registration both trust this workflow's token on main.
+      id-token: write
     steps:
       - uses: actions/checkout@v4
       - uses: docker/setup-buildx-action@v3
@@ -193,3 +200,16 @@ jobs:
             release=$(IMAGE="$image" node --input-type=module -e 'import fs from "node:fs";const m=JSON.parse(fs.readFileSync("workspace-release.json"));if(!m.image?.startsWith(process.env.IMAGE+"@sha256:")||!/^sha256:[a-f0-9]{64}$/.test(m.image.split("@")[1]))throw Error("Missing verified release digest");process.stdout.write(m.image);')
             docker buildx imagetools create --tag "$image:stable" "$release"
           fi
+      # Publish the host runtime with the image it was tested with. The role
+      # can only write (once) and read releases/* in the runtime bucket.
+      - name: Release publisher credentials
+        if: (github.event_name == 'push' || inputs.promote) && github.ref == 'refs/heads/main'
+        uses: aws-actions/configure-aws-credentials@cbe3b392738ccf3f987d68400dafcf4b0624a56c # v6.2.4
+        with:
+          role-to-assume: arn:aws:iam::703671915771:role/canopy-release-publisher
+          aws-region: ap-southeast-1
+      - name: Upload host runtime write-once and register the candidate release
+        if: (github.event_name == 'push' || inputs.promote) && github.ref == 'refs/heads/main'
+        run: |
+          aws --version
+          node scripts/workspace-host-release.mjs publish workspace-release.json workspace-host.tar.gz

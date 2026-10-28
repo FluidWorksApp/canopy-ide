@@ -9,7 +9,6 @@ import {setChatHandoff} from "./teamMessaging/chatHandoff";
 import {teamName} from "./teamMessaging/unread";
 import {createMeshJobs,localRemoteJobs,localRemoteMessages,type MeshJobs} from "./meshJobs";
 import {peekWorkspaceList,refreshWorkspaceList,restoreWorkspaceList} from "./remoteExecution/workspaceListCache";
-import { HOST_OUTDATED_EVENT } from "./remoteExecution/remoteSupport";
 import {MeshJobInbox} from "./components/MeshJobInbox";
 import {projectCheckouts} from "./jobScope";
 import {ensureProjectWorkspace,ProjectWorkspaceProgress} from "./remoteExecution/projectWorkspace";
@@ -661,16 +660,8 @@ export default function App() {
       cancelled = true;
     };
   }, [notify]);
-  // A workspace host older than this app: said once, as one notice, rather
-  // than as a "does not support" toast from every feature that touches it.
-  useEffect(() => {
-    const outdated = (event: Event) => {
-      const { message } = (event as CustomEvent<{ message: string }>).detail;
-      notify(message, "error", { dedupe: HOST_OUTDATED_EVENT });
-    };
-    window.addEventListener(HOST_OUTDATED_EVENT, outdated);
-    return () => window.removeEventListener(HOST_OUTDATED_EVENT, outdated);
-  }, [notify]);
+  // A workspace host older than this app is shown as the workspace update
+  // notice (WorkspaceSelector → WorkspaceUpdateNotice), not as an error.
   // A micro-task in flight when Canopy last quit has no terminal to come back
   // to — its tab is ephemeral and never restored — so it can never report.
   // Settle those before anything new is recorded, or they stay "running"
