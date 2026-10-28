@@ -4,8 +4,11 @@ Status: proposed, 2026-10-28. Not yet reviewed.
 
 A Canopy release changes three things: the desktop app, the workspace container
 image, and the **host runtime** (`workspace-host.tar.gz`: the gateway in
-`/opt/canopy-host` that answers native commands such as `git_sync_probe`). Only
-the app updates itself. The image follows the `:stable` tag CI promotes, but
+`/opt/canopy-host`). Native commands such as `git_sync_probe` are not answered
+by the gateway: it passes `/native` to the runner in the owner's container
+(`gateway.mjs` → `runtime.nativeUrl`; the image runs `node runner.mjs`, which
+imports `native.mjs`). So the protocol the app talks to changes with the
+container's image, not with the host runtime. Only the app updates itself. The image follows the `:stable` tag CI promotes, but
 the host reaches production only through hand-edited Vercel environment
 variables, nothing records which release a
 workspace runs, and the app learns a host is old only when a command fails. This
@@ -44,7 +47,12 @@ Facts the design relies on:
 - Updating a running host in place works. On 10-26 a swap of the files in
   `/opt/canopy-host` plus `systemctl restart canopy-host` kept the owner's
   container running. It also **stopped member containers** (SIGTERM, exit
-  143), which came back on the members' next open.
+  143), which came back on the members' next open. A gateway swap alone does
+  not change the native commands the owner's container serves.
+- Moving a container onto a new image already exists: `upgradeRuntimeImage`
+  (`image-upgrade.mjs`) replaces a stopped container with one on the release
+  image, journals the step, and restores the previous container if the new one
+  is not ready. Resume uses it today.
 
 ## 1. Publish: a release reaches prod without manual steps
 
@@ -100,10 +108,16 @@ is written to the audit columns.
 
 ## 2. Know who runs what
 
-**The host reports its release.** The gateway reads `revision`, `runtimeKey` and
-`HOST_PROTOCOL` from `/opt/canopy-host/workspace-release.json` and sends them on
-each `/api/runtime-policy` call, which it already makes on start and every 30
-minutes. It also reports the image digest its owner container runs.
+**The host reports its release.** On each `/api/runtime-policy` call, which it
+already makes on start and every 30 minutes, the gateway sends:
+- `revision`: from its own `/opt/canopy-host/workspace-release.json`;
+- `runtimeSha256`: the installed archive's hash, which the installer writes to
+  `/opt/canopy-host/workspace-runtime.sha256` (the manifest is inside the
+  archive, so it cannot carry it);
+- `protocol` and `image`: what the owner's running container serves, its
+  release image digest and the `HOST_PROTOCOL` its runner answers to
+  `host_capabilities`. This is the protocol the app talks to; the gateway's own
+  `HOST_PROTOCOL` is not reported.
 
 **The control plane keeps it.** New `workspace` columns:
 - `host_revision`
@@ -121,10 +135,10 @@ The gateway can check that at start.
   - `current`: the host runs the active release.
   - `available`: a newer release is active and this host still works with
     this app.
-  - `required`: the host's protocol is older than the app needs.
+  - `required`: the container's protocol is older than the app needs.
   - `unknown`: the host has not reported since this column was added.
-- `host_capabilities` adds `revision`, so the app can tell the state directly
-  from the host when the control plane is unreachable.
+- The app asks the container's `host_capabilities` for its protocol when the
+  list has no report (control plane unreachable).
 
 ## 3. Offer the update in the app
 
@@ -142,24 +156,33 @@ The gateway can check that at start.
 same request-key, confirmation and progress handling as hibernate. It picks the
 lightest path that delivers the active release.
 
-*In-place host update* is the default when only the runtime changed and its lock
-hash matches what the host already has:
+*Update in place* is the default when the release's lock hash matches what the
+host already has. It never touches the VM, and does two steps, each only when
+needed, in this order:
+
+(a) Gateway, when the active release's runtime differs from the installed one:
 1. The control plane checks that the active release's `lock_sha256` matches
    the host.
-2. The host downloads the archive through a presigned URL from
-   `/api/runtime-policy` and checks its hash.
+2. The host downloads the archive through a presigned URL and checks its hash.
 3. It unpacks the archive next to `/opt/canopy-host`, keeps the previous tree,
    and switches by rename.
 4. It restarts `canopy-host`.
 5. If readiness (`MANAGEMENT_READINESS_SCRIPT`) fails within 2 minutes, it
    switches back to the previous tree, restarts again, and reports the failure.
 
-The owner's container and terminals keep running. Members' containers stop, so
-when members are connected the confirmation names them first, the same way
-`confirmOthers` does for hibernate. The image is not changed by this path.
+(b) Owner container, when its image differs from the release image. This is
+the step that fixes `required`, because the container serves native commands:
+1. Members' containers stop (they move to the release on their next open).
+2. The owner's container stops, and is moved onto the release image the same
+   way resume does it (`upgradeRuntimeImage`): the previous container is kept
+   until the new one is ready, and restored and started again if it is not.
 
-*Full refresh* runs hibernate then resume. It is used only when the lock or the
-image changed. The confirmation says that the workspace will shut down and
+Terminals and agents in the workspace restart; files, projects and volumes are
+kept. When members are connected the confirmation says so first, the same way
+`confirmOthers` does for hibernate.
+
+*Full refresh* runs hibernate then resume. It is used only when the lock
+changed. The confirmation says that the workspace will shut down and
 start again, that files and projects are kept, and that agents and terminals
 stop. It is never chosen without that confirmation.
 
@@ -203,9 +226,9 @@ Neither path replaces compute without the person pressing the button.
   strand older apps. Should the release record carry a minimum app version?
 - **Members.** Can a member trigger an update, or only the owner? This design
   assumes owner only, and members see "ask the owner to update".
-- **Image in place.** In-place image changes need the container recreated.
-  Is recreating the owner container in place, with volumes kept, acceptable as
-  a third path, or is the image always left to the next wake?
+- **Image in place.** Decided (2026-10-28): update in place moves the owner's
+  container onto the release image (step b), because that is where native
+  commands run. The VM is never replaced by it.
 
 ## Implementation contract (2026-10-28)
 
@@ -240,33 +263,59 @@ The control plane accepts a GitHub OIDC token with `aud=https://canopyide.dev`,
   `{revision, runtimeKey, runtimeSha256, runtimeLockSha256, hostProtocol}` from
   the active row, falling back to the `CANOPY_RUNTIME_*` env when the table is
   empty. Bootstrap, runtime preflight and snapshot selection use it.
-- `/api/runtime-policy` request body may carry
-  `host: {revision, protocol, runtimeSha256}`; the server stores it on the
-  workspace (`host_revision`, `host_protocol`, `host_runtime_sha256`,
-  `host_reported_at`). The response adds
+- `/api/runtime-policy` request body carries
+  `host: {revision, protocol, runtimeSha256, image}` (any field may be null):
+  `revision` and `runtimeSha256` are the gateway tree's; `protocol` and
+  `image` are the owner container's (the `HOST_PROTOCOL` its runner answers,
+  and its release image digest `ghcr.io/…@sha256:…`). The server stores it on
+  the workspace (`host_revision`, `host_protocol`, `host_runtime_sha256`,
+  `runtime_image`, `host_reported_at`). The response adds
   `hostRelease: {revision, protocol, runtimeSha256, runtimeLockSha256}`.
 - The workspace list the app reads adds
-  `host: {revision, protocol, reportedAt} | null` and
-  `release: {revision, protocol}`. The app decides `current` / `available` /
-  `required` itself, by comparing with its own `HOST_PROTOCOL`.
-- In-place update is a management-recovery action: the owner's request
-  (`POST /api/operations` `{action:'update-host', workspaceId, confirmOthers?}`)
-  makes the control plane send the existing encrypted recovery channel a
-  payload `{action:'update-host', url, runtimeSha256, runtimeLockSha256,
-  revision}` (presigned URL, 1 h). Members get 403.
+  `host: {revision, protocol, image, reportedAt} | null` and
+  `release: {revision, protocol, image}`. The app decides `current` /
+  `available` / `required` itself, by comparing `host.protocol` with its own
+  `HOST_PROTOCOL` and `host.revision`/`host.image` with the release.
+- Update in place is a management-recovery action: the owner's request
+  (`POST /api/operations` `{action:'update-host', workspaceId, requestKey,
+  clientId, confirmOthers?}`) makes the control plane send the existing
+  encrypted recovery channel a payload `{action:'update-host', url,
+  runtimeSha256, runtimeLockSha256, revision, image}` (presigned URL, 1 h;
+  `image` is the active release's digest reference). Members get 403. The
+  operation fails with the host's `detail` when the result code is
+  `failed`, `rolled-back`, `invalid` or `refresh-required`.
 
 **Host (this repo, `packages/remote-host`).**
-- The gateway reads `/opt/canopy-host/workspace-release.json` and sends `host`
-  on every runtime-policy call. `host_capabilities` adds `revision`.
-- `management-recovery-host` handles `update-host` as root:
-  1. download to a temp file and check the SHA-256;
-  2. refuse when the archive's `package-lock.json` hash differs from the
-     installed one (that needs a full refresh);
-  3. unpack to `/opt/canopy-host.next`, move the current tree to
-     `/opt/canopy-host.prev`, rename `.next` into place;
-  4. `systemctl restart canopy-host`, wait for the management readiness check
-     (2 min);
-  5. on failure restore `.prev`, restart, report the failure.
+- The gateway sends `host` on every runtime-policy call
+  (`host-release.mjs` `hostReport`, `DockerWorkspaces.ownerRuntimeReport`).
+  Bootstrap must write the archive hash to
+  `/opt/canopy-host/workspace-runtime.sha256`, or `runtimeSha256` is null.
+- The root recovery agent handles `update-host` by calling
+  `updateWorkspaceInPlace(payload, {ready})` from
+  `/opt/canopy-host/host-update.mjs` (node builtins only), with its management
+  readiness probe as `ready`. It returns `{code, host, image}`, each step
+  `{code, detail?}`, `code` being the worse of the two:
+  `current` < `updated` < `rolled-back` < `failed`; `invalid` and
+  `refresh-required` come from step (a) and skip (b).
+  - (a) `updateHostInPlace`, only when the installed revision or archive hash
+    differs:
+    1. download to `/opt/canopy-host.download.tgz` and check the SHA-256;
+    2. refuse when the archive's `package-lock.json` hash differs from the
+       installed one (that needs a full refresh);
+    3. unpack to `/opt/canopy-host.next`, move `node_modules` across, move the
+       current tree to `/opt/canopy-host.prev`, rename `.next` into place;
+    4. copy the units, `systemctl restart canopy-host`, wait for the
+       management readiness check (2 min);
+    5. on failure restore `.prev`, restart, report the failure.
+  - (b) asks the gateway over `/srv/canopy/host-state/host-admin.sock`
+    (`POST /v1/owner-image {image}`, mode 0600, never behind Caddy), which runs
+    `DockerWorkspaces.updateOwnerImage`: no change when the owner container
+    already runs that image; otherwise stop members, stop the owner, resume it
+    onto the release image through `upgradeRuntimeImage`, and restart the
+    previous container if the new one is not ready.
+  - The recovery agent's unit needs `/opt` in `ReadWritePaths`; the update may
+    outlast the current 45 s recovery request timeout (an image pull), so the
+    control plane should not wait on it synchronously.
 
 **CI (this repo).**
 - `workspace-image.yml`, after `:stable` promotion on `main`: assume the
@@ -276,5 +325,7 @@ The control plane accepts a GitHub OIDC token with `aud=https://canopyide.dev`,
 
 **App (this repo).** The one-time "older Canopy host" error becomes the update
 notice in part 3: **Update workspace** calls the control plane's
-`update-host` operation (owner), shows progress, and reconnects. A member sees
-"Ask <owner> to update this workspace."
+`update-host` operation (owner) after a confirmation that terminals and agents
+restart and files are kept, asks again when other people are connected, shows
+progress, and reconnects. A member sees "Ask the workspace owner to update it."
+(the list has no owner name).

@@ -68,7 +68,8 @@ export function workspaceUpdate(listed:Pick<ManagedWorkspace,'host'|'release'>|u
 export type HostUpdateProgress={phase:'requesting'|'updating'|'completed';accepted:boolean};
 export type ConfirmHostUpdate=(others:number)=>Promise<boolean>;
 export class HostUpdateCancelled extends Error{constructor(){super('Update cancelled. The workspace keeps running its current host.');}}
-export const HOST_UPDATE_WAIT_MS=5*60*1000;
+// Step (b) may pull the release image when the pre-pull has not.
+export const HOST_UPDATE_WAIT_MS=20*60*1000;
 type Observed={id:string;state:string;operation?:{id?:string;action?:string;status:string;last_error?:string|null}};
 const transient=(error:unknown)=>{const message=String(error);if(/\b(?:401|403)\b|unauthorized|forbidden|not signed in/i.test(message))return false;return /timed?\s*out|timeout|network|connection|failed to fetch|\b(?:408|429|500|502|503|504)\b/i.test(message);};
 const pause=(ms:number)=>new Promise(resolve=>setTimeout(resolve,ms));
