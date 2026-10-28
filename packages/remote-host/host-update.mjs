@@ -30,7 +30,7 @@ export function validHostUpdate(payload){
  * (bad payload, download or archive, nothing changed); `rolled-back` (the new
  * tree failed readiness and the previous one is running again); `failed` (the
  * rollback did not become ready either). */
-export async function updateHostInPlace(payload,{root='/opt/canopy-host',units='/etc/systemd/system',user='canopy-host',fetchImpl=fetch,fs=nodeFs,exec=defaultExec,ready,readyMs=HOST_UPDATE_READY_MS,pollMs=1000,now=Date.now,sleep=ms=>new Promise(resolve=>setTimeout(resolve,ms)),log=()=>{}}={}){
+export async function updateHostInPlace(payload,{root='/opt/canopy-host',units='/etc/systemd/system',user='canopy-host',fetchImpl=fetch,fs=nodeFs,exec=defaultExec,ready,readyMs=HOST_UPDATE_READY_MS,pollMs=1000,now=Date.now,sleep=ms=>new Promise(resolve=>setTimeout(resolve,ms)),log=()=>{},onStep=()=>{}}={}){
  if(typeof ready!=='function')throw Error('Host update requires a management readiness check');
  const revision=typeof payload?.revision==='string'?payload.revision:null,result=(code,detail)=>({code,revision,...(detail?{detail}:{})});
  if(!validHostUpdate(payload))return result('invalid','Update request is malformed');
@@ -40,6 +40,7 @@ export async function updateHostInPlace(payload,{root='/opt/canopy-host',units='
  if(await installed(root)===revision&&String(await read(root+'/workspace-runtime.sha256')??'').trim()===payload.runtimeSha256)return result('current');
  const discard=async()=>{await fs.rm(next,{recursive:true,force:true});await fs.rm(archive,{force:true});};
  await discard();
+ onStep('download');
  // 1. Download and check the hash before anything is unpacked. Streamed to
  // disk: the recovery agent runs under a small memory limit.
  try{
@@ -63,6 +64,7 @@ export async function updateHostInPlace(payload,{root='/opt/canopy-host',units='
   if(!Number.isSafeInteger(uid)||uid<1||!Number.isSafeInteger(gid)||gid<1)throw Error('Management service identity unavailable');
   await exec('chown',['-R',`${uid}:${gid}`,next],{timeout:60000});
  }catch(error){await discard().catch(()=>{});return result('invalid',`Unpack failed: ${error?.message??error}`);}
+ onStep('gateway');
  // 3. Swap by rename, keeping the previous tree. node_modules move with the code.
  const exists=async file=>{try{await fs.stat(file);return true;}catch(error){if(error?.code==='ENOENT')return false;throw error;}};
  const modules=await exists(root+'/node_modules');
@@ -85,9 +87,9 @@ export async function updateHostInPlace(payload,{root='/opt/canopy-host',units='
   }catch(error){log(`Host restart failed: ${error?.message??error}`);}
   for(const deadline=now()+readyMs;;){if(await ready().catch(()=>false))return true;if(now()>=deadline)return false;await sleep(pollMs);}
  };
- if(await start())return result('updated');
+ if(await start()){onStep('gateway-ready');return result('updated');}
  // 5. Restore the previous tree and report the failure.
- log('Updated host did not become ready; restoring the previous host');
+ onStep('rollback');log('Updated host did not become ready; restoring the previous host');
  try{
   await fs.rename(root,next);await fs.rename(prev,root);
   if(modules)await fs.rename(next+'/node_modules',root+'/node_modules');
@@ -123,6 +125,7 @@ export async function updateWorkspaceInPlace(payload,{requestImage=requestOwnerI
  if(typeof payload?.image!=='string'||!RELEASE_IMAGE.test(payload.image)){const host={code:'invalid',revision:payload?.revision??null,detail:'Update request has no immutable release image'};return {code:'invalid',host,image:{code:'skipped'}};}
  const host=await updateHostInPlace(payload,options);
  if(!['updated','current'].includes(host.code))return {code:host.code,host,image:{code:'skipped'}};
+ options.onStep?.('image');
  let image;try{image=await requestImage(payload.image,socketPath?{socketPath}:undefined);}catch(error){image={code:'failed',detail:`The workspace host could not update the container: ${error?.message??error}`};}
  if(!SEVERITY.includes(image?.code))image={code:'failed',detail:`Unexpected container update result: ${image?.code}`};
  return {code:SEVERITY[Math.max(SEVERITY.indexOf(host.code),SEVERITY.indexOf(image.code))],host,image};

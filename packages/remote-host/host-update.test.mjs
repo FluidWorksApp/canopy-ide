@@ -95,6 +95,20 @@ test('update workspace runs the host step first, then moves the owner container 
  try{let asked=false;const result=await updateWorkspaceInPlace({...refused.payload,image:IMAGE},{...refused.options(async()=>true),requestImage:async()=>{asked=true;}});assert.deepEqual([result.code,result.image.code,asked],['refresh-required','skipped',false]);}
  finally{await refused.cleanup();}
 });
+test('progress steps follow the update: download, gateway, gateway-ready, image; rollback when the host is not ready',async()=>{
+ const f=await fixture();
+ try{
+  const steps=[];
+  await updateWorkspaceInPlace({...f.payload,image:IMAGE},{...f.options(async()=>true),onStep:step=>steps.push(step),requestImage:async()=>({code:'updated'})});
+  assert.deepEqual(steps,['download','gateway','gateway-ready','image']);
+ }finally{await f.cleanup();}
+ const g=await fixture();
+ try{
+  const steps=[];
+  await updateWorkspaceInPlace({...g.payload,image:IMAGE},{...g.options(async()=>false),onStep:step=>steps.push(step),requestImage:async()=>({code:'updated'})});
+  assert.deepEqual(steps,['download','gateway','rollback']);
+ }finally{await g.cleanup();}
+});
 test('the recovery agent reaches the gateway over its management socket, waiting for a restarted gateway',async()=>{
  const dir=await mkdtemp(join(tmpdir(),'canopy-admin-')),socketPath=join(dir,'host-admin.sock'),asked=[];
  let server;
