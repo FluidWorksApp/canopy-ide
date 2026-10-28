@@ -1,11 +1,11 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {mkdtemp} from 'node:fs/promises';
+import {mkdtemp,realpath} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
 import path from 'node:path';
 import {receiptRunCheck,receiptCheckStart,receiptCheckStatus,capture} from './receipt-check.mjs';
 
-const dir=await mkdtemp(path.join(tmpdir(),'receipt-'));
+const dir=await realpath(await mkdtemp(path.join(tmpdir(),'receipt-'))); // git reports real paths (/private/var on macOS)
 const scoped=async value=>{if(!value.startsWith(dir))throw Error('Path outside selected workspace');return value;};
 
 test('a failing check returns its exit code and output, not an error',async()=>{

@@ -166,7 +166,7 @@ test('terminal rows mirror live sessions, retention drops old transcript rows', 
   // terminals:false purges them too.
   f.sessions.push({id:9,title:'t',pid:process.pid});f.output[9]='lemur';
   await f.commands.spot_ingest({agents:[],roots:[]});
-  const hit=(await f.commands.spot_search({query:'lemur'}))[0];assert.equal(hit.cwd,process.cwd()); // cwd from /proc/<pid>/cwd
+  const hit=(await f.commands.spot_search({query:'lemur'}))[0];assert.equal(hit.cwd,process.platform==='linux'?process.cwd():''); // cwd from /proc/<pid>/cwd, absent off Linux
   assert.equal((await f.commands.spot_ingest({agents:[],terminals:false,roots:[]})).pruned,1);
   // retention: transcript ts is the file mtime for append stores.
   const old=Date.now()/1000-40*86400;await utimes(f.claude,old,old);

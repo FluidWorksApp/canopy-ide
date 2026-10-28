@@ -206,7 +206,11 @@ export class DockerWorkspaces {
       if(wasRunning)await this.docker(['stop','--time','30',name]);
       const stopped=await this.inspectRuntime(workspace);
       if(stopped?.Id!==current.Id||stopped.State?.Running!==false){await this.docker(['update','--restart','on-failure:3',name]).catch(()=>{});return {code:'failed',detail:'The workspace container did not stop'};}
+      // ensure() refuses an owner container without its normal restart policy
+      // (only members may be stopped with `no`). A stopped container is not
+      // restarted by it, and upgradeRuntimeImage sets `no` again before the swap.
       try{
+        await this.docker(['update','--restart','on-failure:3',name]);
         const runtime=await this.ensure(workspace,{resume:true,releaseReference:reference});
         this.runtimes.set(workspace.id,{workspace,runtime,fingerprint:JSON.stringify([workspace,true]),checkedAt:Date.now()});
         return {code:'updated'};

@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {mkdtemp,mkdir,writeFile,readFile,rm,chmod,access} from 'node:fs/promises';
+import {mkdtemp,mkdir,writeFile,readFile,rm,chmod,access,realpath} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
 import path from 'node:path';
 import {generate} from './gen-agent-templates.mjs';
@@ -47,7 +47,7 @@ test('each CLI gets its lifecycle hooks and the Rules gate, idempotently, keepin
 });
 
 test('the workspace integrations report and set up every hooked CLI the image ships',async()=>{
- const home=await mkdtemp(path.join(tmpdir(),'agent-gates-int-'));
+ const home=await realpath(await mkdtemp(path.join(tmpdir(),'agent-gates-int-'))); // profiles refuse a symlinked root (/var on macOS)
  try{
   const bin=path.join(home,'bin');await mkdir(bin);
   const helper=path.join(bin,'canopy-hook');await writeFile(helper,'#!/bin/sh\n');await chmod(helper,0o755);
