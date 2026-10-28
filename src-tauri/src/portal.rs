@@ -258,6 +258,8 @@ struct Running {
     shutdown: tokio::sync::watch::Sender<bool>,
     /// The `listen_any` registrations to drop on disable.
     listeners: Vec<EventId>,
+    /// The same routes the listener serves, for the Canopy link's streams.
+    router: Router,
 }
 
 impl RemoteManager {
@@ -289,6 +291,23 @@ struct Portal {
     /// first answer back rather than starting a second run.
     verbs: Arc<VerbRouter>,
     sockets: Arc<SocketMetrics>,
+}
+
+/// Set on requests that reached the portal through Canopy's edge
+/// (canopy_link.rs). `owner` means the edge already checked the person's
+/// Canopy sign-in for this link, so the PIN is not asked again; the LAN
+/// listener never carries it.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct EdgeAuth {
+    pub owner: bool,
+}
+
+/// The running portal's router, for serving connections that arrive some
+/// other way than its TCP listener (the Canopy link's tunnel streams).
+pub(crate) fn portal_router(app: &AppHandle) -> Option<Router> {
+    let mgr = app.try_state::<RemoteManager>()?;
+    let guard = mgr.inner.lock().unwrap();
+    guard.as_ref().map(|r| r.router.clone())
 }
 
 /// What a PIN-minted token may do. Drive, not admin: it matches the surface
@@ -401,6 +420,7 @@ pub async fn remote_enable(
         .route("/remote/ws-ticket", post(ws_ticket_handler))
         .route("/remote/ws", get(ws_handler))
         .route("/remote/health", get(|| async { "ok" }))
+        .route("/remote/session", get(session_handler))
         // Team relay ingress on the same server — the internet path, where the
         // tunnel forwards a joiner's wss:// here. Gated by the team join code
         // (SPAKE2 over the socket), NOT the portal PIN: two separate credentials
@@ -431,6 +451,7 @@ pub async fn remote_enable(
     .ok()
     .flatten();
 
+    let serve_router = router.clone();
     let (sd_tx, mut sd_rx) = tokio::sync::watch::channel(false);
     tokio::spawn(async move {
         let shutdown = async move {
@@ -441,7 +462,7 @@ pub async fn remote_enable(
                 }
             }
         };
-        let _ = axum::serve(listener, router)
+        let _ = axum::serve(listener, serve_router)
             .with_graceful_shutdown(shutdown)
             .await;
     });
@@ -462,6 +483,7 @@ pub async fn remote_enable(
         public_ip,
         shutdown: sd_tx,
         listeners,
+        router,
     };
     let status = RemoteStatus::from(&running);
     *guard = Some(running);
@@ -573,11 +595,24 @@ pub async fn remote_rotate_pin(
 
 #[derive(Deserialize)]
 struct AuthReq {
+    /// Absent when the Canopy link's sign-in stands in for it.
+    #[serde(default)]
     pin: String,
 }
 
-async fn auth_handler(AxumState(p): AxumState<Portal>, Json(body): Json<AuthReq>) -> Response {
-    if !ct_eq(body.pin.as_bytes(), p.pin.as_bytes()) {
+/// Whether this request came through the Canopy link as the signed-in owner,
+/// so the portal can skip its PIN screen.
+async fn session_handler(edge: Option<axum::Extension<EdgeAuth>>) -> Response {
+    Json(json!({ "edge": edge.is_some_and(|e| e.owner) })).into_response()
+}
+
+async fn auth_handler(
+    AxumState(p): AxumState<Portal>,
+    edge: Option<axum::Extension<EdgeAuth>>,
+    Json(body): Json<AuthReq>,
+) -> Response {
+    let owner = edge.is_some_and(|e| e.owner);
+    if !owner && !ct_eq(body.pin.as_bytes(), p.pin.as_bytes()) {
         tokio::time::sleep(AUTH_TARPIT).await;
         return (
             StatusCode::UNAUTHORIZED,

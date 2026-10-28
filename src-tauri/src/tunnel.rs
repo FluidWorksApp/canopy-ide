@@ -21,6 +21,8 @@ use tauri::{AppHandle, Emitter, State};
 #[derive(Default)]
 pub struct TunnelManager {
     child: Arc<Mutex<Option<Child>>>,
+    /// Stops the Canopy link's in-process tunnel (canopy_link.rs).
+    canopy: Mutex<Option<tokio::sync::watch::Sender<bool>>>,
     /// The current reported state, so `tunnel_status` can answer after a reload.
     last: Arc<Mutex<TunnelState>>,
 }
@@ -38,6 +40,9 @@ pub struct TunnelState {
 impl TunnelManager {
     /// Kill the tunnel process (called on stop and on app exit).
     pub fn kill_all(&self) {
+        if let Some(stop) = self.canopy.lock().unwrap().take() {
+            let _ = stop.send(true);
+        }
         if let Some(mut child) = self.child.lock().unwrap().take() {
             let _ = child.kill();
             let _ = child.wait();
@@ -137,6 +142,20 @@ pub fn tunnel_start(
     token: Option<String>,
 ) -> Result<TunnelState, String> {
     state.kill_all();
+
+    if provider == crate::canopy_link::PROVIDER {
+        let starting = TunnelState {
+            running: true,
+            provider: Some(provider),
+            url: None,
+            message: Some("Starting…".into()),
+        };
+        set_and_emit(&app, &state.last, starting.clone());
+        let (stop, stopped) = tokio::sync::watch::channel(false);
+        *state.canopy.lock().unwrap() = Some(stop);
+        crate::canopy_link::spawn(app, state.last.clone(), stopped);
+        return Ok(starting);
+    }
 
     let Some((bin, args, envs)) = spec(&provider, port, token.as_deref()) else {
         return Err(format!("unknown provider {provider}"));

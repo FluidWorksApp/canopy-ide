@@ -1,6 +1,10 @@
 # Persistent remote links — a lightweight router on canopy.dev
 
-Research note, not yet a commitment to build. Goal: **one stable URL per Canopy
+Built as the Canopy link (`src-tauri/src/canopy_link.rs`, `packages/remote-edge/`,
+website `/api/remote` and `/remote/<handle>`): one link per signed-in person at
+`https://<handle>.remote.canopyide.dev`, gated by the Canopy account rather than a
+claim code and recovery key, so §5 below is superseded by the account. Original
+research note follows. Goal: **one stable URL per Canopy
 install**, claimed once and bound to that IDE forever, reachable from anywhere,
 with no per-user DNS work and no dependency on `trycloudflare.com`.
 

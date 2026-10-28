@@ -348,7 +348,6 @@
 .workspace-main > * {min-width:0;max-width:100%;}
 .workspace-main :is(section,div,header,form,fieldset,details,label,p,ul,li) {min-width:0;}
 .workspace-main :is(p,small,strong,h3,h4,label,summary,span) {overflow-wrap:anywhere;}
-.workspace-main .shared-session-disclosure {white-space:normal;}
 .workspace-hero-right {flex-shrink:1;min-width:0;}
 .workspace-hero-actions {flex-wrap:wrap;justify-content:flex-end;}
 .workspace-hero-unavailable {color:var(--text-dim);}
@@ -383,6 +382,10 @@
 .workspace-share-link {display:flex;justify-content:space-between;align-items:center;gap:12px;padding:10px 0;border-top:1px solid var(--border);}
 .workspace-share-link > div {min-width:0;display:flex;flex-direction:column;gap:2px;}
 .workspace-share-link small {color:var(--text-muted);font-size:var(--fs-xs);}
+
+/* One line pointing at Team, where shared terminals live now. */
+.workspace-sessions-hint{display:flex;align-items:center;justify-content:space-between;gap:12px;margin:0;padding:8px 8px 8px 16px}
+
 /* A workspace host update: a dot on the workspace chip (WorkspaceUpdateNotice). */
 .workspace-update-dot {display:inline-block;width:7px;height:7px;border-radius:50%;margin-left:6px;background:var(--accent);flex:none;}
 .workspace-update-dot.required {background:var(--warn,var(--accent));}

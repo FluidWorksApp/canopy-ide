@@ -10,7 +10,7 @@ vi.mock('./RemoteDesktop',()=>({RemoteDesktop:()=>null}));
 vi.mock('./LocalProjectImport',()=>({LocalProjectImport:()=>null}));
 vi.mock('../components/AccountSettings',()=>({AccountSettings:()=>null}));
 vi.mock('../components/WorkspaceSharing',()=>({WorkspaceSharing:()=>null}));
-vi.mock('../components/SharedSessionsPanel',()=>({SharedSessionsPanel:()=>null}));
+
 vi.mock('./WorkspaceOwnerTools',()=>({WorkspaceOwnerTools:()=>null}));
 import {WorkspaceSelector} from './WorkspaceSelector';
 import {HibernateCancelled} from './hibernateWorkspace';

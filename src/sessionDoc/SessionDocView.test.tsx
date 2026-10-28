@@ -127,7 +127,7 @@ describe("SessionDocView", () => {
     expect(within(timeline).getByText("Add a login page")).toBeTruthy();
     expect(within(timeline).getByText("login.tsx")).toBeTruthy();
     expect(within(timeline).getByText(/did what was asked/)).toBeTruthy();
-    expect(screen.getByText(/Lines from this session: 1 edit it wrote/)).toBeTruthy();
+    expect(screen.getByText(/Still in the code: 1 of the 1 edit\s*this session wrote/)).toBeTruthy();
     expect(screen.getByText(/Private to you/)).toBeTruthy();
   });
 
@@ -279,5 +279,16 @@ describe("receiving a handoff", () => {
     fireEvent.click(start);
     await screen.findByText("Started an agent in /repo/app.", undefined, WAIT);
     expect(deps.launch).toHaveBeenCalledWith(expect.objectContaining({ agent: "brain-cli", prompt: expect.stringContaining(md) }));
+  });
+});
+
+describe("changed file paths", () => {
+  it("are relative to the session's folder, or their last folders when outside it", async () => {
+    const { shortPath } = await import("./SessionDocView");
+    expect(shortPath("/repo/app/src/a.ts", "/repo/app")).toBe("src/a.ts");
+    expect(shortPath("/repo/app/src/a.ts", "/repo/app/")).toBe("src/a.ts");
+    expect(shortPath("/scratch/wt-051/src/accountErrors.ts", "/repo/app")).toBe("…/wt-051/src/accountErrors.ts");
+    expect(shortPath("/tmp/a.ts", "/repo/app")).toBe("/tmp/a.ts");
+    expect(shortPath("C:\\Users\\vj\\app\\src\\a.ts", "C:\\Users\\vj\\app")).toBe("src\\a.ts");
   });
 });

@@ -1,0 +1,29 @@
+[Unit]
+Description=Canopy remote edge (https://<handle>.<domain> tunnels)
+After=network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=120
+StartLimitBurst=5
+
+[Service]
+Type=simple
+User=canopy-remote-edge
+WorkingDirectory=/opt/canopy-remote-edge
+EnvironmentFile=/etc/canopy-remote-edge.env
+Environment=PORT=8080
+Environment=CANOPY_REMOTE_EDGE_HOST=127.0.0.1
+ExecStart=/usr/bin/node /opt/canopy-remote-edge/main.mjs
+Restart=on-failure
+RestartSec=2
+TimeoutStopSec=10
+MemoryMax=512M
+TasksMax=64
+LimitNOFILE=65536
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+
+[Install]
+WantedBy=multi-user.target
