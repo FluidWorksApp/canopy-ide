@@ -228,6 +228,27 @@ test('sync probes without writing, applies on request, and aborts a conflicted m
  }finally{await done();}
 });
 
+test('sync names untracked copies of incoming files and merges over identical ones',async()=>{
+ // Seen 2026-10-28: an untracked draft inside an untracked folder; porcelain
+ // folds the folder, so the probe said clean and git refused.
+ const {repo,ops,done}=await fixture();
+ try{
+  await sh(repo,'checkout','-qb','feature');
+  await sh(repo,'checkout','-q','main');await mkdir(join(repo,'docs','designs'),{recursive:true});await writeFile(join(repo,'docs','designs','x.md'),'final\n');await sh(repo,'add','.');await sh(repo,'commit','-qm','Design');await sh(repo,'checkout','-q','feature');
+  await mkdir(join(repo,'docs','designs'),{recursive:true});await writeFile(join(repo,'docs','designs','x.md'),'draft\n');await writeFile(join(repo,'docs','designs','notes.md'),'only mine\n');
+  const differ=await ops.git_sync_probe({repo,fetch:false});
+  assert.deepEqual([differ.untracked,differ.untracked_same],[['docs/designs/x.md'],[]]);
+  await assert.rejects(ops.git_sync_apply({repo,base:'main'}),/not in git yet would be replaced by main's version: docs\/designs\/x\.md/);
+  assert.equal(await readFile(join(repo,'docs','designs','x.md'),'utf8'),'draft\n');
+  await writeFile(join(repo,'docs','designs','x.md'),'final\n');
+  const same=await ops.git_sync_probe({repo,fetch:false});
+  assert.deepEqual([same.untracked,same.untracked_same],[['docs/designs/x.md'],['docs/designs/x.md']]);
+  assert.equal((await ops.git_sync_apply({repo,base:'main'})).merged,true);
+  assert.equal(await readFile(join(repo,'docs','designs','x.md'),'utf8'),'final\n');assert.equal(await readFile(join(repo,'docs','designs','notes.md'),'utf8'),'only mine\n');
+  assert.equal(await sh(repo,'ls-files','docs/designs/x.md'),'docs/designs/x.md');
+ }finally{await done();}
+});
+
 test('PR workspaces and merge probes fetch pull heads from origin',async()=>{
  const {root,repo,ops,done}=await fixture();
  try{

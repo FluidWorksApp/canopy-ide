@@ -6,7 +6,7 @@
 // Inspection goes through ctx.run (safeGitRead for read subcommands); commands
 // whose exit code or both output streams matter use ctx.execute.
 import path from 'node:path';
-import {access,stat,lstat,mkdir,copyFile,rm,realpath,constants} from 'node:fs/promises';
+import {access,stat,lstat,mkdir,copyFile,rm,rename,rmdir,realpath,constants} from 'node:fs/promises';
 import {listWorkspaceFiles} from './file-search.mjs';
 import {parseWorktrees,classifyCheckout,classifyExtra,stripGhNoise,remoteUnreachableFor,repoBusy,switchFailure} from './checkout-errors.mjs';
 import {checkedRef} from './git-history.mjs';
@@ -176,6 +176,20 @@ export function gitOpsCommands(ctx){
   const parts=raw.split('\0'),out=[];
   for(let i=0;i<parts.length;i++){const part=parts[i];if(part.length<4)continue;if(part[0]==='R'||part[0]==='C')i++;out.push(part.slice(3));}
   return out;
+ }
+ // Untracked files the incoming commits add: git refuses to merge over them,
+ // and porcelain folds an untracked folder into one entry, so overlap misses
+ // them. `same`: regular files already identical to the base's copy.
+ async function untrackedInWay(top,base){
+  let added,others;
+  try{added=new Set(nulFields(await read(top,['diff','--name-only','--diff-filter=A','--no-renames','-z',`HEAD...${base}`])));if(!added.size)return {inWay:[],same:[]};others=nulFields(await read(top,['ls-files','--others','--exclude-standard','-z']));}catch{return {inWay:[],same:[]};}
+  const inWay=others.filter(p=>added.has(p)).slice(0,CONFLICT_LIMIT),same=[];
+  for(const p of inWay){
+   let file=false;try{file=(await lstat(path.join(top,p))).isFile();}catch{}
+   const here=file&&await opt(top,['hash-object','--',p]);
+   if(here&&here===await opt(top,['rev-parse','--verify','--quiet',`${base}:${p}`]))same.push(p);
+  }
+  return {inWay,same};
  }
  // Exit 0 clean, 1 conflicts (paths after the tree id), anything else: can't tell.
  async function mergeTree(top,a,b){
@@ -418,7 +432,7 @@ export function gitOpsCommands(ctx){
    const counts=await opt(top,['rev-list','--left-right','--count',`HEAD...${base}`]);
    if(counts){const [a,b]=counts.split(/\s+/).map(Number);ahead=Number.isInteger(a)?a:0;behind=Number.isInteger(b)?b:0;}
    const dirty=await dirtyPaths(top);
-   const probe={repo:top,branch,base,base_head:baseHead,behind,ahead,dirty:dirty.length,state:'current',conflicts:[],overlap:[],subjects:[],blocked:null,fetch_error:fetchError};
+   const probe={repo:top,branch,base,base_head:baseHead,behind,ahead,dirty:dirty.length,state:'current',conflicts:[],overlap:[],untracked:[],untracked_same:[],subjects:[],blocked:null,fetch_error:fetchError};
    const blocked=detached?'HEAD is detached — check out a branch to merge into':branch===base.split('/').at(-1)&&behind===0?`this is the ${base} branch itself`:await inProgress(top);
    if(blocked){probe.blocked=blocked;probe.state=behind===0?'current':'blocked';return probe;}
    if(behind===0)return probe;
@@ -426,6 +440,7 @@ export function gitOpsCommands(ctx){
    if(dirty.length){
     let raw=null;try{raw=await read(top,['diff','--name-only','-z',`HEAD...${base}`]);}catch{}
     if(raw!=null){const incoming=new Set(nulFields(raw));probe.overlap=dirty.filter(p=>incoming.has(p)).slice(0,CONFLICT_LIMIT);}
+    const {inWay,same}=await untrackedInWay(top,base);probe.untracked=inWay;probe.untracked_same=same;
    }
    const dry=await mergeTree(top,'HEAD',base);
    probe.state=dry.clean===true?'clean':dry.clean===false?'conflict':'unknown';
@@ -442,12 +457,24 @@ export function gitOpsCommands(ctx){
    if(base===branch)throw Error("that's the branch you're on");
    checkedBase(base);
    if(!await ok(top,['rev-parse','--verify','--quiet',`${base}^{commit}`]))throw Error(`base branch "${base}" doesn't exist in this repository`);
-   const r=await exec(top,['merge','--no-edit',base],{timeout:120000});
+   // Copies identical to the base's are set aside in the git dir for the merge
+   // and put back if git refuses; any other copy is the user's to decide on.
+   const {inWay,same}=await untrackedInWay(top,base),differ=inWay.filter(p=>!same.includes(p));
+   if(differ.length)throw Error(`${differ.length===1?'A file':`${differ.length} files`} not in git yet would be replaced by ${base}'s version: ${differ.join(', ')}. Move ${differ.length===1?'it':'them'} aside, or use Resolve & merge.`);
+   const asideDir=same.length?path.join(await must(top,['rev-parse','--absolute-git-dir']).then(s=>s.trim()),'canopy-sync-aside'):null,aside=[];
+   const putBack=async()=>{for(const [from,to] of aside)await rename(to,from).catch(()=>{});if(asideDir)await rmdir(asideDir).catch(()=>{});};
+   if(asideDir){
+    await rm(asideDir,{recursive:true,force:true});await mkdir(asideDir,{recursive:true});
+    for(const [i,p] of same.entries()){const from=path.join(top,p),to=path.join(asideDir,String(i));try{await rename(from,to);}catch(error){await putBack();throw Error(`can't set ${p} aside: ${error.message}`);}aside.push([from,to]);}
+   }
+   let r;try{r=await exec(top,['merge','--no-edit',base],{timeout:120000});}catch(error){await putBack();throw error;}
    const firstLine=s=>s.split('\n').map(l=>l.trim()).find(Boolean)??null;
-   if(!r.code)return {merged:true,conflicts:[],message:firstLine(r.stdout)??`Merged ${base} into ${branch}`};
+   const dropAside=()=>asideDir&&rm(asideDir,{recursive:true,force:true});
+   if(!r.code){await dropAside();return {merged:true,conflicts:[],message:firstLine(r.stdout)??`Merged ${base} into ${branch}`};}
    // Unmerged paths: the merge started and stopped. None: git refused outright.
    let conflicts=[];try{conflicts=nulFields(await read(top,['diff','--name-only','--diff-filter=U','-z'])).slice(0,CONFLICT_LIMIT);}catch{}
-   if(!conflicts.length)throw Error(r.stderr.trim()||r.stdout.trim());
+   if(!conflicts.length){await putBack();throw Error(r.stderr.trim()||r.stdout.trim());}
+   await dropAside();
    return {merged:false,conflicts,message:firstLine(r.stderr)??firstLine(r.stdout)??'merge stopped on conflicts'};
   },
   async git_sync_abort({repo}){

@@ -110,6 +110,30 @@ suite("what it says", () => {
     expect(d.canResolve).toBe(true);
   });
 
+  it("refuses the merge when an untracked copy of an incoming file differs, and offers an agent", () => {
+    // Seen 2026-10-28: "merges cleanly", then git's "untracked working tree
+    // files would be overwritten".
+    const d = describe(probe({ dirty: 2, untracked: ["docs/x.md", "docs/y.md"], untracked_same: ["docs/y.md"] }));
+    expect(d.canMerge).toBe(false);
+    expect(d.blockedReason).toBe("files not yet in git are in the way");
+    expect(d.files).toEqual(["docs/x.md"]);
+    expect(d.detail).toContain("1 file here isn't in git yet");
+    expect(d.canResolve).toBe(true);
+  });
+
+  it("merges over untracked copies identical to the base's, and says so", () => {
+    const d = describe(probe({ dirty: 1, untracked: ["docs/x.md"], untracked_same: ["docs/x.md"] }));
+    expect(d.canMerge).toBe(true);
+    expect(d.canResolve).toBe(false);
+    expect(d.detail).toContain("1 file not yet in git already matches main's copy and will be replaced by it.");
+  });
+
+  it("treats a host that does not report untracked files as before", () => {
+    const d = describe(probe({ untracked: undefined, untracked_same: undefined }));
+    expect(d.canMerge).toBe(true);
+    expect(d.detail).toBe("They merge into fix/login cleanly. Your commits stay as they are.");
+  });
+
   it("admits when it could not check, rather than implying clean", () => {
     const d = describe(probe({ state: "unknown" }));
     expect(d.detail).toContain("too old to check");

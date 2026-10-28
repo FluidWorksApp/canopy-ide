@@ -29,6 +29,7 @@ import {
   probeKey,
   remember,
   shouldPrompt,
+  untrackedInWay,
 } from "../branchSync";
 import { fmtTokens } from "../format";
 import { formatDeepLink } from "../deepLinks";
@@ -668,6 +669,7 @@ export const StatusBar = memo(function StatusBar({
         base: sync.base,
         overlap: sync.overlap,
         conflicts,
+        untracked: untrackedInWay(sync),
       });
       if (started) closeSync();
     } finally {
@@ -994,7 +996,9 @@ export const StatusBar = memo(function StatusBar({
                             title={
                               sync.overlap.length > 0
                                 ? "An agent sets your edits aside, merges, then puts them back uncommitted"
-                                : "An agent merges, settles the conflicts, runs the tests and commits"
+                                : untrackedInWay(sync).length > 0
+                                  ? "An agent sets your copies aside, merges, then keeps anything only your copies had"
+                                  : "An agent merges, settles the conflicts, runs the tests and commits"
                             }
                             onClick={() => void resolveWithAgent(sync.conflicts)}
                           >

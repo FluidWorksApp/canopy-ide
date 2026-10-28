@@ -194,6 +194,7 @@ describe("the tray's base-branch chip", () => {
         base: "origin/main",
         overlap: ["src/a.ts"],
         conflicts: [],
+        untracked: [],
       }),
     );
     expect(ipc.gitSyncApply).not.toHaveBeenCalled();
