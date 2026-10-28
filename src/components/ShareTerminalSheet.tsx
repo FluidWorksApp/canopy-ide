@@ -45,7 +45,7 @@ export function ShareTerminalSheet({terminal,onClose}:{terminal:ShareableTermina
  const alive=useRef(true);useEffect(()=>()=>{alive.current=false;},[]);
  useEffect(()=>{
   const client=activeWorkspace()?.client;if(!workspaceId||!client)return;
-  void client.workspace<{projects:Project[]}>(workspaceId,'/projects').then(r=>{if(alive.current)setCatalog(r.projects??[]);},e=>{if(alive.current){setCatalog([]);setError(shareError(e));}});
+  void client.workspace<{projects:Project[]}>(workspaceId,'/projects').then(r=>{if(alive.current)setCatalog(r.projects??[]);},e=>{if(alive.current)setError(shareError(e));});
   if(!terminal)void client.workspace<{id:number;exitCode:number|null}[]>(workspaceId,'/sessions').then(list=>{if(alive.current)setRunning(new Set(list.filter(s=>s.exitCode==null).map(s=>s.id)));},()=>{if(alive.current)setRunning('unknown');});
  },[workspaceId,terminal]);
  const choices=terminal||running===null?null:open.filter(t=>running==='unknown'||running.has(t.sessionId));

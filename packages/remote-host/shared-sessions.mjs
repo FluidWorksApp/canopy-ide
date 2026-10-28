@@ -59,7 +59,7 @@ export class SharedSessions {
  }
  prune(){for(const [id,p] of this.entries)if(p.expiresAt<=this.now())void this.remove(id).catch(()=>{});}
  async revoke(workspaceId,id){const entry=this.entries.get(id);if(!entry||entry.workspaceId!==workspaceId)throw Error('Forbidden');await this.remove(id);}
- ownerList(workspaceId){this.prune();return [...this.entries.values()].filter(p=>p.workspaceId===workspaceId).map(({runtime,catalog,...p})=>({...p,collaborative:!!runtime}));}
+ ownerList(workspaceId){this.prune();return [...this.entries.values()].filter(p=>p.workspaceId===workspaceId).map(({runtime,catalog:_catalog,...p})=>({...p,collaborative:!!runtime}));}
  async resolve(workspace,principal,bearer,id,operation='view'){
   if(typeof this.authorizeMember!=='function'||!principal?.memberId||principal.workspaceId!==workspace.id||!Number.isFinite(principal.expiresAt)||principal.expiresAt<=this.now()||!this.entries.has(id)||!['view','interact'].includes(operation))throw Error('Forbidden');
   const current=await this.authorizeMember(principal,bearer);
