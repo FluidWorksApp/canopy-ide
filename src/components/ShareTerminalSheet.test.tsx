@@ -45,7 +45,7 @@ it('Pair starts a clean shell in the terminal’s project and copies its link',a
  fireEvent.click(screen.getByRole('radio',{name:/Pair \(can type\)/}));
  const clean=screen.getByRole('checkbox',{name:/Start a clean shell instead/});expect(clean).toBeChecked();expect(clean).toBeDisabled();
  expect(screen.getByText(/Typing in an existing terminal isn't available/)).toBeInTheDocument();
- const start=screen.getByRole('button',{name:/Start \+ copy link/});await waitFor(()=>expect(start).toBeEnabled());fireEvent.click(start);
+ const start=screen.getByRole('button',{name:/Share \+ copy link/});await waitFor(()=>expect(start).toBeEnabled());fireEvent.click(start);
  await waitFor(()=>expect(request).toHaveBeenCalledWith('ws','/shared-sessions',{action:'create',projectId:'app',title:'Owner shell'}));
  expect(request.mock.calls.some(([,,body])=>(body as Body|undefined)?.action==='publish')).toBe(false);
  await waitFor(()=>expect(state.copy).toHaveBeenCalledWith({kind:'session',workspaceId:'ws',projectId:'app',publicationId:'shell-1',title:'Owner shell'}));

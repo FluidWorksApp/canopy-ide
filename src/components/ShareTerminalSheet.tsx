@@ -50,7 +50,7 @@ export function ShareTerminalSheet({terminal,onClose}:{terminal:ShareableTermina
  const heading=terminal?`Share “${terminal.title}”`:'Share a terminal';
  if(!available.ok)return <Dialog title={heading} body={available.reason} dismissLabel="Close" onDismiss={onClose}/>;
  if(done)return <Dialog title={heading} variant="accent" actions={[{label:'Done',primary:true,onClick:onClose}]} onDismiss={onClose}><p role="status" className="share-sheet-done"><strong>{done.title}</strong> {done.text} It's listed under Team → Live now.</p></Dialog>;
- return <Dialog title={heading} size="md" dismissLabel="Cancel" onDismiss={onClose} actions={[{label:busy?'Sharing…':mode==='pair'?'Start + copy link':'Share + copy link',primary:true,disabled:!ready,onClick:()=>void share()}]}>
+ return <Dialog title={heading} size="md" dismissLabel="Cancel" onDismiss={onClose} actions={[{label:busy?'Sharing…':'Share + copy link',primary:true,disabled:!ready,onClick:()=>void share()}]}>
   <div className="share-sheet">
    {!terminal&&mode==='view'&&<><span className="share-sheet-label" id="share-terminal-label">Terminal</span><div className="share-terminal-list" role="group" aria-labelledby="share-terminal-label">
     {running===null?<span className="share-sheet-note" role="status">Loading terminals…</span>:!running.length?<span className="share-sheet-note">No running terminals in this workspace.</span>:running.map(t=><button type="button" key={t.sessionId} className={`share-terminal-card${picked?.sessionId===t.sessionId?' is-picked':''}`} aria-pressed={picked?.sessionId===t.sessionId} onClick={()=>setPicked(t)}><strong>{t.title}</strong><small>Terminal {t.sessionId}</small></button>)}
