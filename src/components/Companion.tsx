@@ -11,6 +11,9 @@
 // later without touching the mascot, the drag or the panel — only what supplies
 // the viewport changes.
 
+import { AGENT_CLIS } from "../projects";
+import { isWorkspaceHost } from "../host";
+import { signInSteps, startBrainSignIn } from "../brainConnect";
 import {
   useCallback,
   useEffect,
@@ -441,6 +444,15 @@ export function Companion({
             // session replay a one-shot turn when it has one to replay.
             onRetry();
             void retryCompanion();
+          }}
+          onSignIn={() => {
+            const cli = AGENT_CLIS.find((c) => c.name === state.cliName);
+            if (!cli) return null;
+            // The companion runs on this computer. A project terminal in a
+            // cloud workspace would sign in the workspace's copy instead, so
+            // there the command is shown to run here.
+            if (!isWorkspaceHost() && startBrainSignIn(cli)) return null;
+            return signInSteps(cli);
           }}
           onCancel={() => void cancelCompanionTurn()}
           onSend={(text, attachments) => void sendToCompanion(text, attachments)}
