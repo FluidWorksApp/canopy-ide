@@ -1,5 +1,7 @@
 import test from 'node:test';import assert from 'node:assert/strict';import {mkdtemp,mkdir,writeFile,readFile,rm,stat} from 'node:fs/promises';import {tmpdir} from 'node:os';import {join} from 'node:path';import {execFile} from 'node:child_process';import {promisify} from 'node:util';import {createHash} from 'node:crypto';
-import {updateHostInPlace,validHostUpdate} from './host-update.mjs';
+import {updateHostInPlace,updateWorkspaceInPlace,requestOwnerImageUpdate,validHostUpdate} from './host-update.mjs';
+import {startHostAdmin} from './host-admin.mjs';
+const IMAGE='ghcr.io/fluidworksapp/canopy-workspace@sha256:'+'9'.repeat(64);
 const run=promisify(execFile),sha=bytes=>createHash('sha256').update(bytes).digest('hex');
 const OLD='a'.repeat(40),NEW='b'.repeat(40),LOCK='{"lockfileVersion":3}';
 async function fixture({lock=LOCK,revision=NEW}={}){
@@ -71,4 +73,39 @@ test('a host that does not become ready is rolled back to the previous tree and 
   try{assert.equal((await updateHostInPlace(never.payload,never.options(async()=>false))).code,'failed');assert.equal(await text(join(never.root,'gateway.mjs')),'old gateway');}
   finally{await never.cleanup();}
  }finally{await f.cleanup();}
+});
+test('update workspace runs the host step first, then moves the owner container onto the release image',async()=>{
+ const f=await fixture();
+ try{
+  const order=[];const options=f.options(async()=>true);
+  const result=await updateWorkspaceInPlace({...f.payload,image:IMAGE},{...options,exec:async(...a)=>{if(a[0]==='systemctl'&&a[1][0]==='restart')order.push('host');return options.exec(...a);},requestImage:async image=>{order.push('image:'+image);return {code:'updated'};}});
+  assert.deepEqual(order,['host','image:'+IMAGE]);
+  assert.deepEqual(result,{code:'updated',host:{code:'updated',revision:NEW},image:{code:'updated'}});
+  const again=await updateWorkspaceInPlace({...f.payload,image:IMAGE},{...options,requestImage:async()=>({code:'current'})});
+  assert.equal(again.code,'current','nothing to do on either step');
+  const rolled=await updateWorkspaceInPlace({...f.payload,image:IMAGE},{...options,requestImage:async()=>({code:'rolled-back',detail:'not ready'})});
+  assert.deepEqual([rolled.code,rolled.host.code,rolled.image],['rolled-back','current',{code:'rolled-back',detail:'not ready'}]);
+  const unreachable=await updateWorkspaceInPlace({...f.payload,image:IMAGE},{...options,requestImage:async()=>{throw Object.assign(Error('connect ENOENT'),{code:'ENOENT'});}});
+  assert.equal(unreachable.code,'failed');assert.match(unreachable.image.detail,/could not update the container/);
+  let asked=false;
+  assert.equal((await updateWorkspaceInPlace({...f.payload,image:'ghcr.io/fluidworksapp/canopy-workspace:stable'},{...options,requestImage:async()=>{asked=true;}})).code,'invalid','a moving tag is never an update target');
+  assert.equal(asked,false);
+ }finally{await f.cleanup();}
+ const refused=await fixture({lock:'{"changed":true}'});
+ try{let asked=false;const result=await updateWorkspaceInPlace({...refused.payload,image:IMAGE},{...refused.options(async()=>true),requestImage:async()=>{asked=true;}});assert.deepEqual([result.code,result.image.code,asked],['refresh-required','skipped',false]);}
+ finally{await refused.cleanup();}
+});
+test('the recovery agent reaches the gateway over its management socket, waiting for a restarted gateway',async()=>{
+ const dir=await mkdtemp(join(tmpdir(),'canopy-admin-')),socketPath=join(dir,'host-admin.sock'),asked=[];
+ let server;
+ try{
+  const started=new Promise(resolve=>setTimeout(async()=>{server=await startHostAdmin({socketPath,log:()=>{},updateOwnerImage:async image=>{asked.push(image);return {code:'updated'};}});resolve();},50));
+  assert.deepEqual(await requestOwnerImageUpdate(IMAGE,{socketPath,sleep:ms=>new Promise(r=>setTimeout(r,Math.min(ms,20)))}),{code:'updated'});
+  await started;assert.deepEqual(asked,[IMAGE]);
+  assert.equal((await stat(socketPath)).mode&0o777,0o600,'only management can open the socket');
+  assert.deepEqual(await requestOwnerImageUpdate('ghcr.io/fluidworksapp/canopy-workspace:stable',{socketPath}),{code:'failed',detail:'An immutable release image is required'});
+  server.close();server=await startHostAdmin({socketPath,log:()=>{},updateOwnerImage:async()=>{throw Error('docker down');}});
+  assert.deepEqual(await requestOwnerImageUpdate(IMAGE,{socketPath}),{code:'failed',detail:'docker down'});
+  await assert.rejects(requestOwnerImageUpdate(IMAGE,{socketPath:join(dir,'missing.sock'),connectMs:0}),/ENOENT/);
+ }finally{server?.close();await rm(dir,{recursive:true,force:true});}
 });

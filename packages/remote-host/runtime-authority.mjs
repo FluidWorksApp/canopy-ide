@@ -1,13 +1,13 @@
 import {createHmac} from 'node:crypto';
 import {workspaceImageReference} from './image-release.mjs';
-import {readHostRelease} from './host-release.mjs';
-export function runtimeAuthority(endpoint,managed,{fetchImpl=fetch,now=Date.now,hostRelease=readHostRelease}={}){
+import {hostReport} from './host-release.mjs';
+export function runtimeAuthority(endpoint,managed,{fetchImpl=fetch,now=Date.now,hostRelease=hostReport}={}){
  if(!endpoint)return undefined;
  const url=new URL(endpoint);
  if(url.protocol!=='https:'||url.username||url.password||url.search||url.hash||url.pathname!=='/api/runtime-policy'||typeof managed?.key!=='string'||managed.key.length<32)throw Error('Invalid runtime policy authority');
- // Every call also reports the host release this gateway runs (host-release.mjs).
- // Read once: the tree only changes through an install that restarts this process.
- let host;const reported=()=>host??=Promise.resolve().then(hostRelease).catch(()=>null);
+ // Every call also reports what this host runs (host-release.mjs hostReport);
+ // the provider caches what is costly to learn.
+ const reported=()=>Promise.resolve().then(hostRelease).catch(()=>null);
  const observe=async (workspace,{resolveRelease=false}={})=>{
   if(workspace.id!==managed.workspaceId||!Number.isSafeInteger(workspace.generation)||workspace.generation<0)return null;
   try{

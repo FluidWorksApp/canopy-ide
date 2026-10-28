@@ -162,20 +162,89 @@ export class DockerWorkspaces {
   }
   async suspendMember(workspace) {
     if(!/^member-[a-f0-9]{40}$/.test(workspace.id)||!validId(workspace.parentWorkspaceId))throw Error('Invalid member runtime');
+    return this.withResourceLock(()=>this.stopMemberRuntime(workspace));
+  }
+  /** suspendMember's work; the caller holds the resource lock. */
+  async stopMemberRuntime(workspace){
+    const name=`canopy-ws-${workspace.id}`;
+    let current;
+    try{current=JSON.parse((await this.docker(['inspect',name])).stdout)[0];}
+    catch(error){if(error.missingResource)return;throw error;}
+    if(current?.Config?.Labels?.['canopy.workspace']!==workspace.id)throw Error('Member runtime ownership differs');
+    this.runtimes.delete(workspace.id);
+    // Disable daemon recovery before checking/stopping, including when Docker
+    // is between a crash and an automatic restart.
+    await this.docker(['update','--restart','no',name]);
+    if(current.State?.Running)await this.docker(['stop','--time','5',name]);
+    const stopped=JSON.parse((await this.docker(['inspect',name])).stdout)[0];
+    if(stopped?.State?.Running!==false)throw Error('Member runtime did not stop');
+  }
+  /** Update workspace, step (b): move the owner's container onto the release
+   * image `reference`, the same way a resume does (upgradeRuntimeImage keeps
+   * the previous container until the new one is ready). Members' containers
+   * stop and move to the release on their next open. The VM is never touched.
+   * Returns {code:'updated'|'current'|'rolled-back'|'failed', detail?}. */
+  async updateOwnerImage(workspace,reference){
+    try{if(!workspaceImageReference(reference).includes('@sha256:'))throw Error();}catch{return {code:'failed',detail:'The release image must be an immutable digest'};}
+    if(!this.releaseChannel)return {code:'failed',detail:'This host has no workspace release channel'};
     return this.withResourceLock(async()=>{
-      const name=`canopy-ws-${workspace.id}`;
-      let current;
-      try{current=JSON.parse((await this.docker(['inspect',name])).stdout)[0];}
-      catch(error){if(error.missingResource)return;throw error;}
-      if(current?.Config?.Labels?.['canopy.workspace']!==workspace.id)throw Error('Member runtime ownership differs');
-      this.runtimes.delete(workspace.id);
-      // Disable daemon recovery before checking/stopping, including when Docker
-      // is between a crash and an automatic restart.
+      if(this.idleReserved?.(workspace.id))return {code:'failed',detail:'Workspace idle shutdown is reserved'};
+      if(this.migrationCleanupRequired.has(workspace.id))return {code:'failed',detail:'Workspace migration requires recovery'};
+      const name=`canopy-ws-${workspace.id}`,current=await this.inspectRuntime(workspace);
+      if(!current)return {code:'current',detail:'The workspace has no container yet; it starts on the release image'};
+      let release;try{release=await pullWorkspaceImage(reference,{docker:this.docker,space:this.pullSpace(reference)});}
+      catch(error){return {code:'failed',detail:`Image download failed: ${error.message}`};}
+      if(current.Image===release.imageId)return {code:'current'};
+      const wasRunning=current.State?.Running===true;
+      const members=(await this.docker(['ps','--filter','name=^/canopy-ws-member-','--filter','status=running','--format','{{.Names}}'])).stdout.trim().split('\n').filter(Boolean);
+      for(const member of members){
+        if(!/^canopy-ws-member-[a-f0-9]{40}$/.test(member))throw Error('Unexpected member runtime name');
+        await this.stopMemberRuntime({id:member.slice('canopy-ws-'.length),parentWorkspaceId:workspace.id});
+      }
+      this.runtimes.delete(workspace.id);this.ownerReport=undefined;
       await this.docker(['update','--restart','no',name]);
-      if(current.State?.Running)await this.docker(['stop','--time','5',name]);
-      const stopped=JSON.parse((await this.docker(['inspect',name])).stdout)[0];
-      if(stopped?.State?.Running!==false)throw Error('Member runtime did not stop');
+      if(wasRunning)await this.docker(['stop','--time','30',name]);
+      const stopped=await this.inspectRuntime(workspace);
+      if(stopped?.Id!==current.Id||stopped.State?.Running!==false){await this.docker(['update','--restart','on-failure:3',name]).catch(()=>{});return {code:'failed',detail:'The workspace container did not stop'};}
+      try{
+        const runtime=await this.ensure(workspace,{resume:true,releaseReference:reference});
+        this.runtimes.set(workspace.id,{workspace,runtime,fingerprint:JSON.stringify([workspace,true]),checkedAt:Date.now()});
+        return {code:'updated'};
+      }catch(error){
+        this.runtimes.delete(workspace.id);
+        // An interrupted replacement is quarantined by its journal; only a
+        // clean rollback may start the previous container again.
+        if(this.migrationCleanupRequired.has(workspace.id))return {code:'failed',detail:`Image update stopped part way: ${error.message}`};
+        try{
+          await this.docker(['update','--restart','on-failure:3',name]);
+          if(wasRunning){await this.docker(['start',name]);const runtime=await this.ensure(workspace);this.runtimes.set(workspace.id,{workspace,runtime,fingerprint:JSON.stringify([workspace,false]),checkedAt:Date.now()});}
+        }catch(restore){return {code:'failed',detail:`Image update failed (${error.message}) and the previous container did not restart: ${restore.message}`};}
+        return {code:'rolled-back',detail:`The new image did not become ready; the previous container is ${wasRunning?'running':'kept'}: ${error.message}`};
+      }
     });
+  }
+  /** What the owner's running container serves, for the runtime-policy `host`
+   * report: its release image digest and the native protocol it answers. */
+  async ownerRuntimeReport(workspace,{fetchImpl=fetch,maxAgeMs=60000}={}){
+    const none={image:null,protocol:null};
+    let current;try{current=await this.inspectRuntime(workspace);}catch{return none;}
+    if(current?.State?.Running!==true)return none;
+    if(this.ownerReport?.id===current.Id&&Date.now()-this.ownerReport.at<maxAgeMs)return this.ownerReport.report;
+    let image=null;
+    try{const [info]=JSON.parse((await this.docker(['image','inspect',current.Image])).stdout);image=info?.RepoDigests?.find(value=>{try{return value.includes('@sha256:')&&workspaceImageReference(value)===value;}catch{return false;}})??null;}catch{/* Unknown provenance is reported as no image. */}
+    let protocol=null;
+    const address=current.NetworkSettings?.Networks?.[`canopy-net-${workspace.id}`]?.IPAddress;
+    if(address&&/^\d+\.\d+\.\d+\.\d+$/.test(address)){
+      try{
+        const response=await fetchImpl(`http://${address}:8081/native`,{method:'POST',redirect:'error',headers:{authorization:`Bearer ${this.token(workspace.id)}`,'content-type':'application/json'},body:JSON.stringify({command:'host_capabilities',args:{}}),signal:AbortSignal.timeout(2000)});
+        const body=await response.json();
+        // A runner from before host_capabilities is older than every protocol.
+        protocol=response.ok&&Number.isSafeInteger(body?.result?.protocol)?body.result.protocol:/does not support host_capabilities/.test(String(body?.error))?0:null;
+      }catch{/* Unreachable: reported as unknown. */}
+    }
+    const report={image,protocol};
+    if(protocol!==null)this.ownerReport={id:current.Id,at:Date.now(),report};
+    return report;
   }
   async inspectRuntime(workspace){
     if(!validId(workspace.id))throw Error('Invalid runtime workspace');
@@ -289,7 +358,7 @@ export class DockerWorkspaces {
     }
     if(status&&!status.ok)this.log(`Terminal memory limits unavailable for ${name}: the kernel refused to ${status.step}: ${status.error}`);
   }
-  async ensureRuntime(workspace,{resume=false,releaseImage}={},state={}) {
+  async ensureRuntime(workspace,{resume=false,releaseImage,releaseReference}={},state={}) {
     if(this.idleReserved?.(workspace.parentWorkspaceId??workspace.id))throw Error('Workspace idle shutdown is reserved. Retry after it finishes.');
     if(this.migrationCleanupRequired.has(workspace.parentWorkspaceId??workspace.id))throw Error('Workspace migration requires recovery');
     if (!validId(workspace.id) || !workspace.accounts.every(validId)) throw new Error('Invalid workspace');
@@ -313,7 +382,8 @@ export class DockerWorkspaces {
     let release;
     if(this.releaseChannel&&!releaseImage){
       if(!existing||(resume&&existing.State?.Running===false)){
-        const reference=this.resolveRelease?await this.resolveRelease(workspace):this.releaseChannel;
+        // updateOwnerImage names the release it was asked for.
+        const reference=releaseReference??(this.resolveRelease?await this.resolveRelease(workspace):this.releaseChannel);
         release=await pullWorkspaceImage(reference,{docker:this.docker,space:this.pullSpace(reference)});state.release=release;
         if(existing){
           const retained=retainedRuntimeImage(workspace,existing,this.releaseChannel);

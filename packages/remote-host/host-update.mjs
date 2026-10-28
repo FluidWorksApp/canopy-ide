@@ -2,16 +2,21 @@ import {createHash} from 'node:crypto';
 import * as nodeFs from 'node:fs/promises';
 import {execFile} from 'node:child_process';
 import {promisify} from 'node:util';
-// In-place host update: the `update-host` management-recovery action. The
-// root recovery agent (installed by the control plane's bootstrap) calls this
-// with the decrypted payload {url, runtimeSha256, runtimeLockSha256, revision}
-// and its own management readiness probe. Only node builtins are imported, so
-// the agent can load it from the installed tree.
+import http from 'node:http';
+// Update workspace: the `update-host` management-recovery action. The root
+// recovery agent (installed by the control plane's bootstrap) calls
+// updateWorkspaceInPlace with the decrypted payload {url, runtimeSha256,
+// runtimeLockSha256, revision, image} and its own management readiness probe.
+// Only node builtins are imported, so the agent can load it from the
+// installed tree. The VM is never replaced.
 //
-// It replaces the management code only. node_modules move across unchanged,
-// which is why a dependency lock change is refused (that needs a full
-// refresh). The owner's container keeps running; it serves native commands
-// from its image, so this never changes the protocol the IDE talks to.
+// (a) updateHostInPlace replaces the management code. node_modules move
+// across unchanged, which is why a dependency lock change is refused (that
+// needs a full refresh).
+// (b) The owner's container serves native commands from its image, so the
+// protocol the IDE talks to only changes when that container moves onto the
+// release image: the gateway does that (DockerWorkspaces.updateOwnerImage),
+// asked over its management socket (host-admin.mjs).
 export const HOST_UPDATE_READY_MS=120000;
 export const HOST_UPDATE_MAX_BYTES=32*1024*1024;
 const sha256=bytes=>createHash('sha256').update(bytes).digest('hex');
@@ -89,4 +94,36 @@ export async function updateHostInPlace(payload,{root='/opt/canopy-host',units='
   await fs.rm(next,{recursive:true,force:true});
  }catch(error){return result('failed',`Rollback failed: ${error?.message??error}`);}
  return await start()?result('rolled-back','The updated host did not become ready; the previous host is running'):result('failed','Neither the updated nor the previous host became ready');
+}
+
+// Step (b) runs in the gateway, which owns the containers: the recovery agent
+// asks it over the management socket (host-admin.mjs) after step (a).
+export const HOST_ADMIN_SOCKET_PATH='/srv/canopy/host-state/host-admin.sock';
+const RELEASE_IMAGE=/^[a-z0-9]+(?:[.-][a-z0-9]+)+(?::[0-9]{1,5})?\/[a-z0-9]+(?:[._-][a-z0-9]+)*(?:\/[a-z0-9]+(?:[._-][a-z0-9]+)*)*@sha256:[a-f0-9]{64}$/;
+export async function requestOwnerImageUpdate(image,{socketPath=HOST_ADMIN_SOCKET_PATH,timeoutMs=30*60*1000,connectMs=60000,now=Date.now,sleep=ms=>new Promise(resolve=>setTimeout(resolve,ms))}={}){
+ const once=()=>new Promise((resolve,reject)=>{
+  const request=http.request({socketPath,path:'/v1/owner-image',method:'POST',headers:{'content-type':'application/json'},timeout:timeoutMs},response=>{
+   let body='';response.setEncoding('utf8');response.on('data',chunk=>{body+=chunk;});
+   response.on('end',()=>{try{const value=JSON.parse(body);resolve([200,500].includes(response.statusCode)?value:{code:'failed',detail:value?.error??`The workspace host answered ${response.statusCode}`});}catch{reject(Error('The workspace host answer was not JSON'));}});
+  });
+  request.on('timeout',()=>request.destroy(Error('The container update timed out')));request.on('error',reject);
+  request.end(JSON.stringify({image}));
+ });
+ // A gateway that step (a) just restarted may not be listening yet.
+ for(const deadline=now()+connectMs;;){
+  try{return await once();}catch(error){if(!['ENOENT','ECONNREFUSED'].includes(error?.code)||now()>=deadline)throw error;await sleep(1000);}
+ }
+}
+const SEVERITY=['current','updated','rolled-back','failed'];
+/** The whole `update-host` action: (a) the gateway tree when the release's
+ * runtime differs, then (b) the owner's container when its image differs.
+ * Returns {code, host, image}, each step {code, detail?}; `code` is the worst
+ * of the two. When (a) refuses or rolls back, (b) is skipped. */
+export async function updateWorkspaceInPlace(payload,{requestImage=requestOwnerImageUpdate,socketPath,...options}={}){
+ if(typeof payload?.image!=='string'||!RELEASE_IMAGE.test(payload.image)){const host={code:'invalid',revision:payload?.revision??null,detail:'Update request has no immutable release image'};return {code:'invalid',host,image:{code:'skipped'}};}
+ const host=await updateHostInPlace(payload,options);
+ if(!['updated','current'].includes(host.code))return {code:host.code,host,image:{code:'skipped'}};
+ let image;try{image=await requestImage(payload.image,socketPath?{socketPath}:undefined);}catch(error){image={code:'failed',detail:`The workspace host could not update the container: ${error?.message??error}`};}
+ if(!SEVERITY.includes(image?.code))image={code:'failed',detail:`Unexpected container update result: ${image?.code}`};
+ return {code:SEVERITY[Math.max(SEVERITY.indexOf(host.code),SEVERITY.indexOf(image.code))],host,image};
 }
