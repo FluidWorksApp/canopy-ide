@@ -22,6 +22,8 @@ import {adoptCapacityGroup} from './capacity-adoption.mjs';
 import {SessionViewLeases} from './session-view-leases.mjs';
 import {IdleAttestation} from './idle-attestation.mjs';
 import {runtimeAuthority} from './runtime-authority.mjs';
+import {hostReport} from './host-release.mjs';
+import {startHostAdmin,HOST_ADMIN_SOCKET} from './host-admin.mjs';
 import {memberAuthority} from './member-authority.mjs';
 import {authorizeNativeRead} from './readonly-native.mjs';
 import {runnerRequestId} from './runner-harness.mjs';
@@ -540,7 +542,11 @@ if (process.argv[1] === new URL(import.meta.url).pathname) {
   const credentialVault=config.managedSession?await CredentialVault.initialize(path.join(state,'credential-vault')):undefined;
   const credentialTickets=credentialVault?await CredentialTickets.initialize(path.join(state,'credential-ticket-journal'),secret):undefined;
   const sharedAccounts=credentialVault?new SharedAccounts(credentialVault):undefined;
-  const authority=runtimeAuthority(config.managedSession?.runtimePolicyUrl,config.managedSession);
+  // runtime-policy calls report this gateway's release and what the owner's
+  // container serves; the container is known once `workspaces` exists.
+  const ownerWorkspace=config.workspaces.find(w=>w.id===config.managedSession?.workspaceId);
+  let ownerReport=async()=>({image:null,protocol:null});
+  const authority=runtimeAuthority(config.managedSession?.runtimePolicyUrl,config.managedSession,{hostRelease:()=>hostReport({owner:()=>ownerReport()})});
   // Canopy service (agent harness). Optional: CANOPY_SERVICE_ADMIN_SOCKET=off
   // disables it; an absent daemon only degrades agents to no harness env.
   let workspaces;
@@ -563,6 +569,13 @@ if (process.argv[1] === new URL(import.meta.url).pathname) {
   // Host restart loses in-memory leases. Quarantine member processes before
   // accepting connections; only a fresh live authorization can restart them.
   await workspaces.suspendUnleasedMembers();
+  // Update workspace (update-host): the root recovery agent asks this gateway,
+  // over a socket only management can open, to move the owner's container
+  // onto the release image.
+  if(ownerWorkspace){
+    ownerReport=()=>workspaces.ownerRuntimeReport(ownerWorkspace);
+    await startHostAdmin({socketPath:path.join(state,HOST_ADMIN_SOCKET),updateOwnerImage:image=>workspaces.updateOwnerImage(ownerWorkspace,image)}).catch(error=>console.warn(`Host admin socket unavailable: ${error.message}`));
+  }
   const elasticMemory = new ElasticMemory({registry:config.workspaces,docker:workspaces});
   const elasticCpu = new ElasticCpu({registry:config.workspaces,docker:workspaces});
   const supervisor=new RuntimeSupervisor({directory:path.join(state,'runtime-recovery'),host:workspaces});
