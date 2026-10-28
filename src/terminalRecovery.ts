@@ -44,6 +44,28 @@ export function rememberedLiveTerminal(
   return matches.length === 1 ? matches[0] : undefined;
 }
 
+/** What a reattached tab takes back from the snapshot of its own PTY lifetime,
+ *  beyond its names. Native only records the launch command for run-rail
+ *  PTYs, so an agent terminal comes back from Rust with no command at all; if
+ *  the tab adopts the snapshot's names but not this, the next snapshot writes
+ *  a record titled with the agent's prompt but with no command, no session
+ *  and no account — which the empty state can only offer as a blank shell.
+ *
+ *  Only for an exact lifetime match (pty id + generation + instance): a
+ *  legacy name-only match is not proof that this PTY ran that command. */
+export function recoveredIdentity(
+  saved: RememberedTerminal | undefined,
+  native: { command?: string; run?: boolean },
+): Pick<RememberedTerminal, "command" | "icon" | "profile" | "sessionId"> {
+  if (!saved || saved.ptyId == null) return { command: native.command };
+  return {
+    command: native.command ?? (native.run || saved.run ? undefined : saved.command),
+    icon: saved.icon,
+    profile: saved.profile,
+    sessionId: saved.sessionId ?? resumeSessionId(saved.command) ?? undefined,
+  };
+}
+
 /** Only restore a split once every surviving live member has attached. This
  * prevents an early one-pane render from overwriting the saved mux layout. */
 export function recoverLiveGroups(

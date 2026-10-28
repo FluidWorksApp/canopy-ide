@@ -2,6 +2,7 @@ import { activeWorkspace } from "../../remoteExecution/workspace";
 import { publishAwarenessRoster } from "../../awareness/roster";
 import {
   hostLiveTerminals,
+  recoveredIdentity,
   rememberedLiveTerminal,
   recoverLiveGroups,
   withoutLiveSessions,
@@ -2073,6 +2074,10 @@ const ProjectViewBody = memo(function ProjectViewBody({
             .find((component) => component.id === presentation.componentId)
             ?.commands?.find((command) => command.id === presentation.runCommandId)
         : undefined;
+      const identity = recoveredIdentity(saved, {
+        command: presentation?.command,
+        run: presentation?.run,
+      });
       setTabs((prev) => [
         ...prev,
         {
@@ -2088,11 +2093,13 @@ const ProjectViewBody = memo(function ProjectViewBody({
           sessionGeneration: presentation?.sessionGeneration,
           attachId: ptyId,
           killAttachedOnClose: killOnClose || undefined,
-          icon,
+          icon: identity.icon ?? icon,
           run: presentation?.run || undefined,
           command: configured
             ? unattendedManagedRunCommand(configured)
-            : presentation?.command,
+            : identity.command,
+          profile: identity.profile,
+          rememberedSessionId: identity.sessionId,
           componentId: presentation?.componentId,
           runCommandId: presentation?.runCommandId,
         },
@@ -2873,6 +2880,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
         sessionId:
           (t.ptyId != null ? liveSessionByPtyRef.current.get(t.ptyId) : undefined) ??
           resumeSessionId(t.command) ??
+          t.rememberedSessionId ??
           undefined,
         profile: t.profile,
       }));
@@ -8115,7 +8123,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
         seeds: new Map(
           tabs.flatMap((t) => {
             if (t.type !== "terminal" || t.ptyId == null) return [];
-            const sid = resumeSessionId(t.command);
+            const sid = resumeSessionId(t.command) ?? t.rememberedSessionId;
             return sid ? [[t.ptyId, sid] as [number, string]] : [];
           }),
         ),
