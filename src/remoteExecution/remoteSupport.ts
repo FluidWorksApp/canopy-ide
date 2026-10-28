@@ -49,6 +49,13 @@ const FEATURES: [string, string][] = [
 export const hostFeatureName = (command: string) =>
   FEATURES.find(([prefix]) => command.startsWith(prefix))?.[1] ?? command.replaceAll("_", " ");
 
+/** Commands Canopy sends on its own, not because the person used a feature
+ * (the status bar's branch sync check). The outdated-host notice must not
+ * name them as the feature that needs the update. */
+const BACKGROUND_HOST_COMMANDS: ReadonlySet<string> = new Set(["git_sync_probe", "host_capabilities"]);
+export const outdatedNoticeCommand = (command?: string | null) =>
+  command && !BACKGROUND_HOST_COMMANDS.has(command) ? command : undefined;
+
 export const HOST_OUTDATED_EVENT = "canopy:workspace-host-outdated";
 export const hostOutdatedMessage = (command?: string) =>
   `This workspace is running an older Canopy host. Restart or update the workspace to use ${command ? hostFeatureName(command) : "everything in this version of Canopy"}.`;

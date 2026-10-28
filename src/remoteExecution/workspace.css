@@ -385,3 +385,7 @@
 
 /* One line pointing at Team, where shared terminals live now. */
 .workspace-sessions-hint{display:flex;align-items:center;justify-content:space-between;gap:12px;margin:0;padding:8px 8px 8px 16px}
+
+/* A workspace host update: a dot on the workspace chip (WorkspaceUpdateNotice). */
+.workspace-update-dot {display:inline-block;width:7px;height:7px;border-radius:50%;margin-left:6px;background:var(--accent);flex:none;}
+.workspace-update-dot.required {background:var(--warn,var(--accent));}

@@ -40,7 +40,7 @@ jobs:
         with:
           node-version: 22
       - name: Release boundary regression checks
-        run: node --test scripts/release-assets.test.mjs
+        run: node --test scripts/release-assets.test.mjs scripts/workspace-host-release.test.mjs
       # Also creates the one draft release, before the build matrix starts, so
       # the jobs' uploads cannot race into separate drafts. Needs this
       # version's docs/releases/<version>.md, so missing notes fail here.
@@ -364,3 +364,26 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           CANOPY_RELEASE_TAG: ${{ github.ref_name }}
         run: node scripts/release-assets.mjs ${{ inputs.publish && '--publish' || '' }}
+
+  # Workspaces move with the app version that needs them: make this tag's
+  # commit the active workspace host release. The image workflow on main
+  # registers it; this waits up to 30 minutes for that to finish.
+  activate-workspace-host:
+    name: Activate the workspace host release
+    needs: finalize
+    if: github.ref_type == 'tag'
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Activate this tag's revision
+        env:
+          REVISION: ${{ github.sha }}
+          TAG: ${{ github.ref_name }}
+        run: node scripts/workspace-host-release.mjs activate "$REVISION" "${TAG#v}"
