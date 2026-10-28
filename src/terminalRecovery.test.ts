@@ -6,7 +6,7 @@ import {
   forgetTerminals,
   terminalResumeCards,
 } from "./terminalMemory";
-import { rememberedLiveTerminal, recoverLiveGroups } from "./terminalRecovery";
+import { recoveredIdentity, rememberedLiveTerminal, recoverLiveGroups } from "./terminalRecovery";
 import {
   adoptSnapshotNames,
   multiplexTabName,
@@ -246,4 +246,44 @@ it("a remote agent resumed after a workspace restart takes its predecessor's tab
   );
   expect(remote?.tabId).toBe("b");
   expect(rememberedLiveTerminal(memory, { ptyId: 9, sessionGeneration: 9, cwd: "/repo" }, "backend")).toBeUndefined();
+});
+
+it("a reattached agent tab keeps its own launch command, account and session", () => {
+  // Native records a command only for run-rail PTYs, so an agent terminal
+  // reattaches with none. Without the snapshot's identity the next snapshot
+  // wrote a record titled with the prompt but resumable as nothing.
+  const saved = {
+    cwd: "/repo",
+    command: "claude --dangerously-skip-permissions",
+    title: "what were the features…",
+    promptName: "what were the features…",
+    icon: "✳",
+    tabId: "t1",
+    ptyId: 2,
+    sessionGeneration: 2,
+    instance: "backend",
+    sessionId: "685a",
+    profile: "vj",
+  };
+  const match = rememberedLiveTerminal(
+    { terminals: [saved], terminalGroups: {} },
+    { ptyId: 2, sessionGeneration: 2, cwd: "/repo" },
+    "backend",
+  );
+  expect(recoveredIdentity(match, {})).toEqual({
+    command: "claude --dangerously-skip-permissions",
+    icon: "✳",
+    profile: "vj",
+    sessionId: "685a",
+  });
+  // A resume command names its session even when the record predates sessionId.
+  expect(
+    recoveredIdentity({ ...saved, sessionId: undefined, command: "claude --resume abc" }, {}).sessionId,
+  ).toBe("abc");
+  // What native says wins; a run's command is never borrowed from memory.
+  expect(recoveredIdentity(saved, { command: "npm run dev", run: true }).command).toBe("npm run dev");
+  expect(recoveredIdentity(saved, { run: true }).command).toBeUndefined();
+  // A legacy name-only match is not proof this PTY ran that command.
+  expect(recoveredIdentity({ ...saved, ptyId: undefined }, {})).toEqual({ command: undefined });
+  expect(recoveredIdentity(undefined, {})).toEqual({ command: undefined });
 });

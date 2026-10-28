@@ -314,6 +314,24 @@ export function adoptSnapshotNames(
   };
 }
 
+/** A snapshot that will come back without its conversation, stripped of that
+ *  conversation's names. The agent's title, the brain's title and the opening
+ *  prompt describe a transcript the restore cannot bring back; a name the user
+ *  chose is theirs and stays (as `userName`, and as the display `title`). */
+export function withoutConversationNames<
+  T extends { title: string; renamed?: boolean } & DurableNames,
+>(snapshot: T): T {
+  if (!snapshot.agentName && !snapshot.brainName && !snapshot.promptName) {
+    return snapshot;
+  }
+  const out = { ...snapshot };
+  delete out.agentName;
+  delete out.brainName;
+  delete out.promptName;
+  out.title = adoptSnapshotNames(snapshot).userName ?? "";
+  return out;
+}
+
 /** A mux owns its user label independently of its focused pane. */
 export function multiplexTabName(
   group: TabNames,

@@ -2,6 +2,7 @@ import { activeWorkspace } from "../../remoteExecution/workspace";
 import { publishAwarenessRoster } from "../../awareness/roster";
 import {
   hostLiveTerminals,
+  recoveredIdentity,
   rememberedLiveTerminal,
   recoverLiveGroups,
   withoutLiveSessions,
@@ -558,6 +559,8 @@ import {
 import { PrView } from "../PrView";
 import { ErrorBoundary } from "../ErrorBoundary";
 import { TeamPanel } from "../TeamPanel";
+import { shareAvailability, shareTerminal } from "../shareTerminal";
+import { OPEN_TEAM_EVENT } from "../../readableLinks";
 import { McpToolsPanel } from "../McpToolsPanel";
 import { McpView } from "../McpView";
 import { ClaimView } from "../ClaimView";
@@ -2073,6 +2076,10 @@ const ProjectViewBody = memo(function ProjectViewBody({
             .find((component) => component.id === presentation.componentId)
             ?.commands?.find((command) => command.id === presentation.runCommandId)
         : undefined;
+      const identity = recoveredIdentity(saved, {
+        command: presentation?.command,
+        run: presentation?.run,
+      });
       setTabs((prev) => [
         ...prev,
         {
@@ -2088,11 +2095,13 @@ const ProjectViewBody = memo(function ProjectViewBody({
           sessionGeneration: presentation?.sessionGeneration,
           attachId: ptyId,
           killAttachedOnClose: killOnClose || undefined,
-          icon,
+          icon: identity.icon ?? icon,
           run: presentation?.run || undefined,
           command: configured
             ? unattendedManagedRunCommand(configured)
-            : presentation?.command,
+            : identity.command,
+          profile: identity.profile,
+          rememberedSessionId: identity.sessionId,
           componentId: presentation?.componentId,
           runCommandId: presentation?.runCommandId,
         },
@@ -2241,14 +2250,6 @@ const ProjectViewBody = memo(function ProjectViewBody({
     },
     [openPr],
   );
-
-  /** Open a code-review request that arrived over the relay — the diff came
-   *  with it, so there is nothing to fetch. */
-  const openReview = useCallback((review: ReviewPayload) => {
-    const id = tabId();
-    setTabs((prev) => [...prev, { id, type: "review", review }]);
-    setActiveTabId(id);
-  }, []);
 
   const patchTabRaw = useCallback((id: string, patch: Partial<SubTab>) => {
     setTabs((prev) =>
@@ -2598,58 +2599,6 @@ const ProjectViewBody = memo(function ProjectViewBody({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [relay.chat]);
 
-  /** Act on a relay command: open-pr finds the local checkout whose origin
-   *  matches the sender's repo and opens the PR natively in it. */
-  const openInboxItem = useCallback(
-    async (item: ipc.RelayCommandMsg) => {
-      // A review request carries its own diff — open it directly, no repo
-      // lookup needed (the reviewer may not even have the code).
-      if (item.kind === "review") {
-        openReview({
-          ...(item.payload as ReviewPayload),
-          from: item.from_name,
-        });
-        relay.dismissInbox(item.id);
-        return;
-      }
-      if (item.kind !== "open-pr") {
-        relay.dismissInbox(item.id);
-        return;
-      }
-      const payload = item.payload as { repo?: string; pr?: ipc.PrInfo };
-      if (!payload.pr) {
-        onNotice("That request is missing its PR payload.", "error");
-        return;
-      }
-      try {
-        const repos = await ipc.gitRepos(
-          componentsRef.current.map(
-            (c) => [c.label, c.path] as [string, string],
-          ),
-        );
-        for (const r of repos) {
-          const url = await ipc.gitRemoteUrl(r.path).catch(() => "");
-          if (
-            url &&
-            payload.repo &&
-            url.toLowerCase() === payload.repo.toLowerCase()
-          ) {
-            openPr(r.path, payload.pr);
-            relay.dismissInbox(item.id);
-            return;
-          }
-        }
-        onNotice(
-          `No component in this project has origin ${payload.repo ?? "?"} — open the matching project and try from there.`,
-          "warn",
-        );
-      } catch (err) {
-        onNotice(String(err), "error");
-      }
-    },
-    [onNotice, openPr, openReview, relay],
-  );
-
   // Repo toplevels for this project's components, resolved once per component
   // set: the PR inbox needs them to tell one of this project's PRs (open it
   // here) from another project's (ask App to switch first).
@@ -2873,6 +2822,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
         sessionId:
           (t.ptyId != null ? liveSessionByPtyRef.current.get(t.ptyId) : undefined) ??
           resumeSessionId(t.command) ??
+          t.rememberedSessionId ??
           undefined,
         profile: t.profile,
       }));
@@ -8115,7 +8065,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
         seeds: new Map(
           tabs.flatMap((t) => {
             if (t.type !== "terminal" || t.ptyId == null) return [];
-            const sid = resumeSessionId(t.command);
+            const sid = resumeSessionId(t.command) ?? t.rememberedSessionId;
             return sid ? [[t.ptyId, sid] as [number, string]] : [];
           }),
         ),
@@ -9027,6 +8977,16 @@ const ProjectViewBody = memo(function ProjectViewBody({
       window.removeEventListener(BROWSER_INPUT_EVENT, dismiss);
     };
   }, [sideOpen, cancelPeekOpen, cancelPeekClose, sidePrefs.clickOutsideCloses]);
+
+  // A shared session link, or "Shared sessions are under Team", shows Team.
+  useEffect(() => {
+    const open = () => {
+      setSideTab("team");
+      setPinned(true);
+    };
+    window.addEventListener(OPEN_TEAM_EVENT, open);
+    return () => window.removeEventListener(OPEN_TEAM_EVENT, open);
+  }, []);
 
   // Click is the latch: it pins the panel open so it survives the pointer
   // leaving. Clicking the pinned tab again puts it away.
@@ -12173,6 +12133,21 @@ const ProjectViewBody = memo(function ProjectViewBody({
     },
     [closeTab, closeTerminalGroup],
   );
+  // Only the owner of the connected Canopy workspace can share, and there a
+  // tab's pty id is the workspace's session id (NativeWorkspaceHost).
+  const canShareTerminals = shareAvailability().ok;
+  const shareTerminalTab = useCallback(
+    (tab: TermSubTab) => {
+      if (tab.ptyId == null) return;
+      shareTerminal({
+        sessionId: tab.ptyId,
+        title: tabName(tab, { agent: isAgentTabRef.current(tab) }),
+        projectId: project.id,
+        projectName: project.name,
+      });
+    },
+    [project.id, project.name],
+  );
   const onTabContextMenu = useCallback(
     (e: React.MouseEvent, tab: SubTab) => {
       // Every tab kind that names a concrete thing can seed a task about it —
@@ -12255,6 +12230,16 @@ const ProjectViewBody = memo(function ProjectViewBody({
                   if (tab.type === "terminal") startRename(tab);
                 },
               },
+              ...(canShareTerminals && tab.ptyId != null && !tab.run
+                ? [
+                    {
+                      label: "Share with team…",
+                      onClick: () => {
+                        if (tab.type === "terminal") shareTerminalTab(tab);
+                      },
+                    },
+                  ]
+                : []),
               ...(tab.run
                 ? []
                 : [
@@ -12291,7 +12276,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
             ];
       tabMenu.open(e, items);
     },
-    [startRename, closeTab, closeVisualTab, tabMenu.open, taskMenu, startMicroTask],
+    [startRename, closeTab, closeVisualTab, tabMenu.open, taskMenu, startMicroTask, canShareTerminals, shareTerminalTab],
   );
   const onClearScrollback = useCallback(() => {
     if (activeTermTab)
@@ -12300,6 +12285,9 @@ const ProjectViewBody = memo(function ProjectViewBody({
   const onHardReset = useCallback(() => {
     if (activeTermTab) termHandles.current.get(activeTermTab.id)?.hardReset();
   }, [activeTermTab]);
+  const onShareTerminal = useCallback(() => {
+    if (activeTermTab) shareTerminalTab(activeTermTab);
+  }, [activeTermTab, shareTerminalTab]);
   const onToggleView = useCallback(() => {
     if (activeFileTab) void toggleView(activeFileTab.file.path);
   }, [activeFileTab, toggleView]);
@@ -13316,6 +13304,11 @@ const ProjectViewBody = memo(function ProjectViewBody({
         onNewShell={onNewShell}
         onClearScrollback={onClearScrollback}
         onHardReset={onHardReset}
+        onShareTerminal={
+          canShareTerminals && activeTermTab?.ptyId != null && !activeTermTab.run
+            ? onShareTerminal
+            : undefined
+        }
         onToggleView={onToggleView}
         onShareFile={onShareFile}
         onShareProject={onShareProject}
@@ -14723,11 +14716,8 @@ const ProjectViewBody = memo(function ProjectViewBody({
       ))}
       {sidePane("team", () => (
         <TeamPanel
-              onOpenAccountChat={openAccountChat}
-          relay={relay}
-          onOpenChat={openChat}
-          onOpenInboxItem={(item) => void openInboxItem(item)}
-          onNotice={onNotice}
+          onOpenAccountChat={openAccountChat}
+          visible={sideTab === "team"}
         />
       ))}
       {sidePane("tasks", () => (

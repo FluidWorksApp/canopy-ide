@@ -1,16 +1,38 @@
-.shared-sessions-panel,.sharing-setup-panel{margin-top:16px;border-top:1px solid var(--border);padding-top:16px}.shared-sessions-panel>summary,.sharing-setup-panel>summary{cursor:pointer;font-weight:700}.shared-sessions-content{display:grid;gap:14px;padding-top:12px}.shared-sessions-content>header,.shared-session-preview>header{display:flex;align-items:center;justify-content:space-between;gap:12px}.shared-session-row{display:flex;align-items:center;flex-wrap:wrap;gap:12px;border:1px solid var(--border);border-radius:8px;padding:12px;background:var(--bg-deep)}.shared-session-row>span{color:var(--text-dim);flex:1}.shared-session-form{display:grid;gap:12px;border:1px solid var(--border);border-radius:8px;padding:16px}.shared-session-form label{display:grid;gap:6px}.shared-session-form input,.shared-session-form select{background:var(--bg-deep);color:var(--text);padding:8px;border:1px solid var(--border);border-radius:4px}.shared-session-form p{color:var(--text-dim);line-height:1.5;margin:0}.shared-session-form h4{margin:6px 0}.shared-session-disclosure{display:flex;align-items:flex-start;gap:10px;line-height:1.5}.shared-session-disclosure input{margin-top:5px}.shared-session-preview .remote-terminal-surface{height:300px}.shared-session-preview{min-width:0}.shared-session-form button{justify-self:start}
+/* Sharing a terminal: the Share sheet (ShareTerminalSheet.tsx) and Team →
+   Live now (LiveSessions.tsx). Theme tokens only. */
 
-/* One line per action: label, inputs and button together, one short hint below. */
-.shared-sessions-content>header{display:flex;align-items:center;justify-content:space-between;gap:8px}
-.shared-sessions-content>header p,.shared-session-empty{margin:0;font-size:var(--fs-sm);color:var(--text-dim)}
-.shared-session-form{display:flex;flex-direction:column;gap:10px;margin-top:10px;padding:10px 12px;border:1px solid var(--border);border-radius:var(--r-sm);background:var(--bg-alt)}
-.shared-session-form h4{display:none}
-.shared-session-action{display:flex;flex-direction:column;gap:3px;padding-top:10px;border-top:1px solid var(--border)}
-.shared-session-line{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
-.shared-session-label{flex:0 0 112px;font-size:var(--fs-sm);font-weight:600}
-.shared-session-line select,.shared-session-line input:not([type=checkbox]){flex:1 1 180px;min-width:0;height:28px;font-size:var(--fs-sm)}
-.shared-session-line>.btn{flex-shrink:0}
-.shared-session-line small,.shared-session-action>small{font-size:var(--fs-xs);color:var(--text-dim)}
-.shared-session-action>small{padding-left:120px}
-.shared-session-disclosure{display:inline-flex;align-items:center;gap:6px;font-size:var(--fs-xs);color:var(--text-dim);white-space:nowrap}
-@media(max-width:620px){.shared-session-label{flex-basis:100%}.shared-session-action>small{padding-left:0}}
+/* Share sheet: labels in one column, controls in the other. */
+.share-sheet{display:grid;grid-template-columns:max-content minmax(0,1fr);gap:12px 16px;align-items:start;min-width:0}
+.share-sheet-label{padding-top:5px;font-size:var(--fs-sm);font-weight:600;color:var(--text);white-space:nowrap}
+.share-sheet-control{display:flex;flex-direction:column;gap:6px;min-width:0}
+.share-sheet-value{padding-top:5px;font-size:var(--fs-sm);color:var(--text)}
+.share-sheet-note{font-size:var(--fs-xs);line-height:1.45;color:var(--text-dim)}
+.share-sheet-error{margin:0;font-size:var(--fs-sm);color:var(--danger)}
+.share-sheet-done{margin:0;font-size:var(--fs-sm);line-height:1.5}
+.share-sheet-modes{gap:10px}
+.share-sheet-modes .set-inline-check{align-items:flex-start;gap:8px}
+.share-sheet-modes .set-inline-check input{margin-top:1px;flex:0 0 auto}
+.share-sheet-modes .set-inline-check em{display:block;font-style:normal;font-size:var(--fs-xs);color:var(--text-dim);line-height:1.45}
+.share-terminal-list{display:flex;flex-direction:column;gap:4px;max-height:200px;overflow:auto;min-width:0}
+.share-terminal-card{display:flex;align-items:baseline;justify-content:space-between;gap:12px;width:100%;padding:7px 10px;text-align:left;font:inherit;font-size:var(--fs-sm);color:var(--text);background:var(--bg-deep);border:1px solid var(--border);border-radius:var(--r-sm);cursor:pointer}
+.share-terminal-card strong{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-weight:500}
+.share-terminal-card small{flex:0 0 auto;font-size:var(--fs-xs);color:var(--text-dim)}
+.share-terminal-card:hover{border-color:color-mix(in srgb,var(--accent) 45%,var(--border))}
+.share-terminal-card.is-picked{border-color:var(--accent);background:color-mix(in srgb,var(--accent) 10%,var(--bg-deep))}
+@media(max-width:480px){.share-sheet{grid-template-columns:minmax(0,1fr)}.share-sheet>span:empty{display:none}}
+
+/* Team → Live now. */
+.live-sessions{display:flex;flex-direction:column;gap:6px;min-width:0}
+.live-sessions-head{display:flex;align-items:center;justify-content:space-between;gap:8px;min-width:0}
+.live-sessions-head h3{margin:0;white-space:nowrap}
+.live-sessions-head h3 span{font-weight:400;color:var(--text-dim)}
+.live-sessions-muted{margin:0;font-size:11px;line-height:1.45;color:var(--text-dim)}
+.live-sessions-error{margin:0;font-size:11px;color:var(--danger)}
+.live-session-list{display:flex;flex-direction:column;gap:4px;margin:0;padding:0;list-style:none}
+.live-session-row{display:flex;align-items:center;flex-wrap:wrap;gap:4px 8px;padding:6px 6px 6px 8px;border:1px solid var(--border);border-radius:6px;background:var(--bg-deep);min-width:0}
+.live-session-text{display:flex;flex-direction:column;flex:1 1 110px;min-width:0}
+.live-session-text strong{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-weight:600}
+.live-session-text small{font-size:11px;color:var(--text-dim);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.live-session-actions{display:flex;align-items:center;gap:4px;margin-left:auto;flex:0 0 auto}
+.live-session-viewer{min-width:0}
+.live-session-viewer .remote-terminal-surface{height:min(60vh,480px)}

@@ -29,6 +29,7 @@ mod execution;
 mod remote_upload;
 // Intel macOS builds compile dictation out (no compatible ONNX Runtime); a stub
 // keeps the command surface identical so the rest of this file is unchanged.
+mod canopy_link;
 #[cfg(not(feature = "dictation"))]
 #[path = "dictation_stub.rs"]
 mod dictation;

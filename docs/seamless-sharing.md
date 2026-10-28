@@ -15,10 +15,10 @@ deploying outside this repository.
 |---|---|---|---|
 | Team chat, presence, DMs (account) | `src/teamMessaging/background.ts`, `session.ts`, `client.ts`; `packages/control-plane/lib/peer-messaging.mjs` (`/api/peers`); `teams.mjs` (`/api/teams`) | **Nothing.** `startBackgroundTeams()` (App.tsx) already joins every team the account belongs to on sign-in. | Yes |
 | Self-hosted team relay | `src-tauri/src/relay.rs` (`relay_host_start`, `relay_regenerate_code`, `relay_connect`), `src/components/TeamPanel.tsx` `RelayTeamPanel` | Host shares an address/tunnel URL and a 7-digit SPAKE2 join code; others type both. | No |
-| Canopy Remote (drive your own agents from a phone/browser) | `src-tauri/src/portal.rs` (`/remote/auth`, 6-digit PIN), `tunnel.rs` | Enable, share tunnel URL or QR, type the PIN. | No (personal, by design) |
+| Canopy Remote (drive your own agents from a phone/browser) | `src-tauri/src/portal.rs` (`/remote/auth`, 6-digit PIN), `tunnel.rs`, `canopy_link.rs`, `packages/remote-edge/` | Signed in: turn it on; the link is `https://<handle>.remote.canopyide.dev`, opened by signing in to Canopy (no PIN, no tunnel). Signed out: tunnel URL or QR plus the PIN. | Yes when signed in |
 | Account workspaces (managed VMs) | `src/remoteExecution/ManagedWorkspaces.tsx`, `/api/workspaces`, `/api/operations` (`connect`) | Nothing for owners or people granted access: they appear in the switcher, and a member's open waits for the owner's host to prove member isolation, then connects. | Yes |
 | Saved remote connections (self-hosted hosts) | `execution_remote_*`, Settings → Remote access | Paste an endpoint and token. | No |
-| Shared agent sessions | `src/components/SharedSessionsPanel.tsx`, gateway `/shared-sessions` (`packages/remote-host/gateway.mjs`), `/api/operations` `shared-session-connect` | Open the workspace's details, open "Shared sessions", **click "View shared sessions"**, pick the session. No way to point a teammate at one session. | Yes, but manual |
+| Shared agent sessions | `src/components/LiveSessions.tsx` (was `SharedSessionsPanel.tsx`), gateway `/shared-sessions` (`packages/remote-host/gateway.mjs`), `/api/operations` `shared-session-connect` | Open the workspace's details, open "Shared sessions", **click "View shared sessions"**, pick the session. No way to point a teammate at one session. | Yes, but manual |
 | Workspace sharing "like a document" | `WorkspaceSharing.tsx`, `workspace-team-grants.mjs`, `workspace-person-grants.mjs`, `workspace-organization-grants.mjs` | Grant a team or person a role. No URL to send them. | Yes |
 | Organization / team / workspace invitations | `organizations.mjs`, `teams.mjs`, `invitation-url.mjs`, `invitation-email.mjs`, `workspace_invitation` | Admin invites an email; invitee follows the emailed link and accepts. | Yes (one-off, by design) |
 | Chat messages, plans, handoffs, reports | `src/teamMessaging/*`, chat cards (`cardSchema.ts`), `ShareDialog.tsx` | Could be shared *into* chat, but there was no link *to* a message. | E2E, device-local |
@@ -85,7 +85,8 @@ Other findings:
 - **Links, with no generation step**: "Copy link" is a single click on:
   - a workspace: its Overview ("Link for teammates") and the header switcher
     ("Copy workspace link" for the active account workspace);
-  - a shared agent session: each row in Shared sessions;
+  - a shared agent session: each row in Team → Live now, and the Share sheet
+    copies it as it shares;
   - a team chat message, including posted plans, handoffs and reports (cards):
     right-click → Copy link.
 
@@ -96,7 +97,7 @@ Other findings:
   `canopy https://canopyide.dev/acme/api`. The app resolves it for the
   signed-in account, then:
   - a workspace opens through the normal resume-and-connect (or shows its details);
-  - a shared session opens the workspace's Overview with that session showing;
+  - a shared session opens Team → Live now with that session showing;
   - a message opens its conversation and scrolls to it, if this device still
     has it in its encrypted history (latest 500 messages); otherwise the
     conversation opens.
@@ -225,14 +226,14 @@ identity checks in `NativeWorkspaceHost.ts`, `accountWorkspace.ts` and
     `canopy://link?url=…`.
   - `src/readableLinks.ts`, `src/deepLinks.ts` (`link` kind and chat `message`),
     `App.tsx` routing, `spotSources.ts` (`canopy-link` source), and
-    `CopyLinkButton`, `SharedSessionsPanel`, `WorkspaceSelector`/`WorkspaceMenu`,
+    `CopyLinkButton`, `LiveSessions`/`ShareTerminalSheet`, `WorkspaceSelector`/`WorkspaceMenu`,
     `AccountChatView` and `TeamPanel`.
 
 Tests: `readable-words.test.mjs`, `readable-links.test.mjs`,
 `readable-link-route.test.mjs`, `readable-links.postgres.test.mjs` (real
 Postgres; skips without the validation database), `src/readableLinks.test.ts`
 (including parity with the control-plane parser and reserved names),
-`SharedSessionsPanel.links.test.tsx`, `TeamPanel.account.test.tsx`,
+`LiveSessions.test.tsx`, `ShareTerminalSheet.test.tsx`, `TeamPanel.account.test.tsx`,
 `ReadableLinksSettings.test.tsx`, `WorkspaceSelector.link.test.tsx`,
 `ManagedWorkspaces.test.tsx` (member waits for sharing), `cli.rs`
 `readable_links_become_deep_links` and `os_links_wait_for_the_frontend_then_route_directly`,

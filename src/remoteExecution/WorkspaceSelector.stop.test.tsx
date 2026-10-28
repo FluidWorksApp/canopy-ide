@@ -6,7 +6,7 @@ vi.mock('@tauri-apps/api/core',()=>({invoke:mocks.invoke}));
 vi.mock('../links',()=>({openLink:vi.fn()}));
 vi.mock('./RemoteDesktop',()=>({RemoteDesktop:()=>null}));
 vi.mock('../components/WorkspaceSharing',()=>({WorkspaceSharing:()=>null}));
-vi.mock('../components/SharedSessionsPanel',()=>({SharedSessionsPanel:()=>null}));
+
 vi.mock('./WorkspaceOwnerTools',()=>({WorkspaceOwnerTools:()=>null}));
 import {WorkspaceSelector} from './WorkspaceSelector';
 import {dismissStopSwitchNotice,markStopRequested,resetWorkspaceLifecycle,saveStopSwitchNotice} from './workspaceLifecycle';

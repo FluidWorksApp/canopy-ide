@@ -1,6 +1,6 @@
 [package]
 name = "canopy"
-version = "0.5.2"
+version = "0.5.3"
 description = "Local-first, memory-light, vibe-coding-first IDE"
 authors = ["Cause Connect Pte Ltd <sam@fluidwords.app>"]
 license = "MIT"
@@ -78,8 +78,8 @@ include_dir = "0.7"
 # Preview proxy: the raw-byte WebSocket tunnel (dev-server HMR through the
 # in-app browser) needs hyper's upgrade types and hyper-util's Tokio IO shim.
 # Both are already in the tree under axum, so this adds names, not weight.
-hyper = { version = "1", default-features = false }
-hyper-util = { version = "0.1", default-features = false, features = ["tokio"] }
+hyper = { version = "1", default-features = false, features = ["server", "http1"] }
+hyper-util = { version = "0.1", default-features = false, features = ["tokio", "service"] }
 # A scannable QR of the portal URL so pairing a phone is "scan + type the PIN".
 # Pure-Rust encoder; the SVG is hand-built from the matrix (no render feature).
 qrcode = { version = "0.14", default-features = false }

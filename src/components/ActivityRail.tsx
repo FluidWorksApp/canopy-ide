@@ -145,7 +145,7 @@ const RAIL_GROUPS: { id: string; name: string; tabs: RailTab[] }[] = [
         key: "team",
         Icon: TeamIcon,
         Pixel: PixelTeamIcon,
-        title: "Team — relay, chat, notifications",
+        title: "Team — live sessions, chat",
       },
       {
         key: "outcomes",

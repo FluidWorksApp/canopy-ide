@@ -1,6 +1,6 @@
 import {afterEach,describe,expect,it,vi} from 'vitest';
 import {mockCommands} from './test/setup';
-import {RESERVED_HANDLES,parseReadableLink,ensureReadableLink,copyReadableLink,openReadableLink,revokeReadableLink,describeLink,takePendingSession,SHOW_WORKSPACE_EVENT,SHARED_SESSION_FOCUS_EVENT,type ResolvedLink} from './readableLinks';
+import {RESERVED_HANDLES,parseReadableLink,ensureReadableLink,copyReadableLink,openReadableLink,revokeReadableLink,describeLink,takePendingSession,SHOW_WORKSPACE_EVENT,SHARED_SESSION_FOCUS_EVENT,OPEN_TEAM_EVENT,type ResolvedLink} from './readableLinks';
 import {formatDeepLink,parseDeepLink} from './deepLinks';
 import {readableLinkRows} from './spotSources';
 // The control plane is the authority on link shapes; the app must agree.
@@ -49,10 +49,10 @@ describe('opening',()=>{
   await openReadableLink('https://canopyide.dev/acme/api',{follow:vi.fn(),dispatch:e=>events.push(e),resolve:resolved({url:'https://canopyide.dev/acme/api',kind:'workspace',target:{workspaceId:'ws-1',name:'API'}})});
   expect(events.map(e=>[e.type,(e as CustomEvent).detail])).toEqual([[SHOW_WORKSPACE_EVENT,{workspaceId:'ws-1',connect:true}]]);
  });
- it('shows a shared session in its workspace and hands the panel the session',async()=>{
+ it('shows a shared session under Team and hands the Live now list the session',async()=>{
   const events:Event[]=[];
   await openReadableLink('https://canopyide.dev/acme/api/s/fix-27',{follow:vi.fn(),dispatch:e=>events.push(e),resolve:resolved({url:'https://canopyide.dev/acme/api/s/fix-27',kind:'session',target:{workspaceId:'ws-1',workspaceName:'API',projectId:'app',publicationId:'pub-1',title:'Fix'}})});
-  expect(events.map(e=>e.type)).toEqual([SHOW_WORKSPACE_EVENT,SHARED_SESSION_FOCUS_EVENT]);
+  expect(events.map(e=>e.type)).toEqual([OPEN_TEAM_EVENT,SHARED_SESSION_FOCUS_EVENT]);
   expect(takePendingSession('ws-other')).toBeNull();expect(takePendingSession('ws-1')).toBe('pub-1');expect(takePendingSession('ws-1')).toBeNull();
  });
  it('opens a message in its conversation as the signed-in person',async()=>{

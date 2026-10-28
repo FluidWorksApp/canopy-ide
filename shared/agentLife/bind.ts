@@ -78,11 +78,15 @@ export function resolveSessions(snap: BindSnapshot): Bound {
   for (const [pty, v] of latest) sessionByPty.set(pty, v.sid);
 
   // Then the recorded surface, for sessions whose events have aged out of the
-  // ring. Newest digest per surface, and never one from another launch.
+  // ring. Newest digest per surface, and never one from another launch. A
+  // digest with no instance stamp (written before stamping existed) cannot
+  // show it is from this launch either: every launch numbers its ptys from 1,
+  // so its surface would hand a months-old conversation to whichever new
+  // terminal happens to get that number.
   const bySurface = new Map<string, BindableDigest>();
   for (const d of snap.digests) {
     if (!d.surface) continue;
-    if (snap.instance && d.instance && d.instance !== snap.instance) continue;
+    if (snap.instance && d.instance !== snap.instance) continue;
     const prev = bySurface.get(d.surface);
     if (!prev || (d.updated ?? 0) > (prev.updated ?? 0)) bySurface.set(d.surface, d);
   }

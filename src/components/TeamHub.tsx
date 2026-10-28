@@ -1,5 +1,5 @@
 import type {AccountConversation} from './AccountChatView';
-import type {CSSProperties} from 'react';
+import type {CSSProperties,ReactNode} from 'react';
 import {useCallback,useEffect,useRef,useState,useSyncExternalStore} from 'react';
 import {getUnreadSummary,subscribeTeamUnread} from '../teamMessaging/session';
 import {badgeLabel,NO_UNREAD,rememberTeamName} from '../teamMessaging/unread';
@@ -34,6 +34,8 @@ const LIST_POLL_MS=15000,DETAIL_POLL_MS=3000;
 let cache:{directory:Directory|null;details:Record<string,Detail>;selected:string}={directory:null,details:{},selected:''};
 let cacheEpoch=0;
 window.addEventListener('canopy:account-changed',()=>{cacheEpoch++;cache={directory:null,details:{},selected:''};});
+/** The teams this panel last loaded and the one it shows, for the Share
+ *  sheet's "With" choice. Null until the panel has loaded once. */
 
 function Avatar({person}:{person:Person}){
  return <span aria-hidden="true" className="team-avatar" style={{'--team-tone':`var(${avatarTone(person)})`} as CSSProperties}>{initials(person)}</span>;
@@ -54,11 +56,11 @@ function AccountIcon(){
 }
 
 /** `unavailable`: teams could not be loaded for another reason (offline, no
- *  route to Canopy), which also leaves an account-less fallback useful. */
+ *  route to Canopy). */
 export type TeamAccountState='unknown'|'signed-in'|'signed-out'|'unavailable';
-/** `onAccount`: whether a Canopy account is signed in, so the panel around
- *  this can keep the no-account fallback (join codes) out of a signed-in flow. */
-export function TeamHub({onOpenChat,onAccount}:{onOpenChat?:(conversation:AccountConversation)=>void;onAccount?:(state:TeamAccountState)=>void}){
+/** `onAccount`: whether a Canopy account is signed in. `live`: shown under
+ *  the team picker once signed in (Team → Live now). */
+export function TeamHub({onOpenChat,onAccount,live}:{onOpenChat?:(conversation:AccountConversation)=>void;onAccount?:(state:TeamAccountState)=>void;live?:ReactNode}){
  const [epoch,setEpoch]=useState(cacheEpoch);
  const [directory,setDirectory]=useState<Directory|null>(cache.directory);
  const [details,setDetails]=useState<Record<string,Detail>>(cache.details);
@@ -147,7 +149,7 @@ export function TeamHub({onOpenChat,onAccount}:{onOpenChat?:(conversation:Accoun
 
   {firstLoad&&<div className="team-hub-loading"><span role="status" className="team-hub-sr">Loading teams…</span><div className="team-hub-picker"><span className="team-skel-select"/></div><SkeletonRows count={4}/></div>}
 
-  {!directory&&listError&&!listLoading&&<div className="team-hub-state" role="alert"><p>{signedOut?'Sign in to see your teams and message teammates.':`Couldn't load teams. ${listError}`}</p>{signedOut?<Button size="sm" variant="accent" onClick={()=>setAccount(true)}>Sign in</Button>:<Button size="sm" onClick={()=>setRetry(r=>r+1)}>Retry</Button>}</div>}
+  {!directory&&listError&&!listLoading&&<div className="team-hub-state" role="alert"><p>{signedOut?'Sign in to share with your team.':`Couldn't load teams. ${listError}`}</p>{signedOut?<Button size="sm" variant="accent" onClick={()=>setAccount(true)}>Sign in</Button>:<Button size="sm" onClick={()=>setRetry(r=>r+1)}>Retry</Button>}</div>}
 
   {shownError&&<div className="team-hub-banner" role="alert"><span>Couldn't refresh. {shownError}</span><Button size="sm" variant="ghost" onClick={()=>setRetry(r=>r+1)}>Retry</Button></div>}
   {actionError&&<p role="alert" className="team-hub-error">{actionError}</p>}{notice&&<p role="status" className="team-hub-notice">{notice}</p>}
@@ -159,6 +161,8 @@ export function TeamHub({onOpenChat,onAccount}:{onOpenChat?:(conversation:Accoun
    {elsewhere>0&&<span className="team-hub-picker-dot" role="img" aria-label={`${elsewhere} unread in other teams`} title={`${elsewhere} unread in other teams`}/>}
    <Button icon size="sm" variant="ghost" aria-label="Manage teams" title={manage?'Back to team':'Manage teams'} aria-pressed={manage} onClick={()=>setManage(!manage)}><SettingsIcon size={14}/></Button>
   </div>}
+
+  {directory&&!manage&&live}
 
   {directory&&(manage||!teams.length)&&<div className="team-hub-management">
    {!teams.length&&<p className="team-hub-muted">You're not in a team yet. Create one, or ask an organization admin to invite you.</p>}

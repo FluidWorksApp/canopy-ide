@@ -7,7 +7,7 @@
 // otherwise is what produced a wide layout that was just a stretched phone.
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { Wire, auth, savedToken, clearToken, type Msg } from './wire'
+import { Wire, auth, edgeSession, edgeSignOut, savedToken, clearToken, type Msg } from './wire'
 import type { Rpc } from './rpc'
 import { SocketHost } from '../../src/host/socket'
 import { useViewportFit, useWide } from './useMedia'
@@ -36,23 +36,52 @@ import type { Transport } from '@shared/transport'
 
 export default function App() {
   const [token, setToken] = useState<string | null>(savedToken())
+  /** Reached through the person's Canopy link: signed in already, no PIN. */
+  const [edge, setEdge] = useState<boolean | null>(null)
   useViewportFit()
-  if (!token) return <PinGate onToken={setToken} />
-  return (
-    <Console
-      token={token}
-      onLogout={() => {
-        clearToken()
-        setToken(null)
-      }}
-    />
-  )
+  useEffect(() => {
+    void edgeSession().then(setEdge)
+  }, [])
+  // A token the desktop no longer honours (remote access was turned off and
+  // on again) just drops back to the gate, which on a Canopy link signs
+  // straight back in.
+  const expire = useCallback(() => {
+    clearToken()
+    setToken(null)
+  }, [])
+  if (!token) return <PinGate edge={edge} onToken={setToken} />
+  return <Console token={token} onAuthFail={expire} onLogout={edge ? edgeSignOut : expire} />
 }
 
-function PinGate({ onToken }: { onToken: (t: string) => void }) {
+function PinGate({ edge, onToken }: { edge: boolean | null; onToken: (t: string) => void }) {
   const [pin, setPin] = useState('')
   const [err, setErr] = useState('')
   const [busy, setBusy] = useState(false)
+  useEffect(() => {
+    if (!edge) return
+    let live = true
+    auth('').then(
+      (t) => live && onToken(t),
+      () => live && setErr("Couldn't sign in through your Canopy link. Reload to try again."),
+    )
+    return () => {
+      live = false
+    }
+  }, [edge, onToken])
+  if (edge !== false) {
+    return (
+      <div className="gate">
+        <div className="gate-glow" />
+        <div className="gate-card">
+          <div className="mark big">
+            <span className="mark-dot" />
+            CANOPY<span className="mark-thin">·REMOTE</span>
+          </div>
+          {err ? <div className="err">{err}</div> : <p className="gate-sub">Connecting…</p>}
+        </div>
+      </div>
+    )
+  }
   const submit = async (e: React.FormEvent) => {
     e.preventDefault()
     setBusy(true)
@@ -106,7 +135,15 @@ function PinGate({ onToken }: { onToken: (t: string) => void }) {
  *  enough — and unbounded growth on a page left open all day is not. */
 const EVENT_TAIL = 400
 
-function Console({ token, onLogout }: { token: string; onLogout: () => void }) {
+function Console({
+  token,
+  onLogout,
+  onAuthFail,
+}: {
+  token: string
+  onLogout: () => void
+  onAuthFail: () => void
+}) {
   const wide = useWide()
 
   // ---- live state from the socket ----
@@ -158,7 +195,7 @@ function Console({ token, onLogout }: { token: string; onLogout: () => void }) {
       setUp(ok)
       // Host operations fail promptly on disconnect; mutations are not replayed automatically.
     }
-    wire.onAuthFail = onLogout
+    wire.onAuthFail = onAuthFail
     wire.on((m: Msg) => {
       if (m.t === 'snapshot') {
         const ws = (m.projects as Workspace) || { projects: [] }
@@ -222,7 +259,7 @@ function Console({ token, onLogout }: { token: string; onLogout: () => void }) {
       host.dispose()
       wire.close()
     }
-  }, [token, onLogout, openTarget])
+  }, [token, onAuthFail, openTarget])
 
   // A notification tap (handled by the service worker) asks the live tab to open
   // that agent rather than opening a second one.
