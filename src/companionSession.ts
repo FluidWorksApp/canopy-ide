@@ -617,6 +617,39 @@ export interface AskOptions {
   from?: string;
 }
 
+/** How long a turn asked from outside waits for a sleeping companion to
+ *  come up. A cold CLI start is seconds; this only bounds a stuck one. */
+const WAKE_TIMEOUT_MS = 90_000;
+
+/** Bring the companion up for a turn asked from outside the panel. The person
+ *  asking (on Slack, say) cannot see the mascot or press Retry, so a companion
+ *  that is still starting, died, or ran out of automatic retries is started
+ *  again rather than refused. Only a deliberate "off" and "no agent CLI here"
+ *  are answered with why. */
+async function ensureRunning(
+  until: (done: () => boolean, timeoutMs?: number) => Promise<void>,
+): Promise<CompanionTransport> {
+  if (transport && state.status === "ready") return transport;
+  if (state.status === "unavailable") {
+    throw new Error("Canopy has no agent CLI installed to run the companion on this computer.");
+  }
+  if (!getSettings().companionEnabled || !lastStart) {
+    throw new Error("The companion is turned off in Canopy right now.");
+  }
+  if (!transport && !starting) void startCompanion(lastStart);
+  try {
+    await until(() => state.status !== "starting", WAKE_TIMEOUT_MS);
+  } catch {
+    throw new Error("The companion is still starting in Canopy. Try again in a minute.");
+  }
+  if (!transport || state.status !== "ready") {
+    throw new Error(
+      `The companion could not start in Canopy${state.error ? `: ${state.error}` : "."}`,
+    );
+  }
+  return transport;
+}
+
 /** A turn asked from outside the panel (Slack, or an agent answering a
  *  companion request), answered back there. Waits for the companion to be free
  *  rather than interleaving with the user's own turn, and resolves with the
@@ -627,13 +660,13 @@ export async function askCompanion(
   wire: string,
   { timeoutMs = 10 * 60_000, origin = null, from }: AskOptions = {},
 ): Promise<{ text: string; failed: boolean }> {
-  const until = (done: () => boolean) =>
+  const until = (done: () => boolean, waitMs = timeoutMs) =>
     new Promise<void>((resolve, reject) => {
       if (done()) return resolve();
       const timer = setTimeout(() => {
         off();
         reject(new Error("The companion did not answer in time."));
-      }, timeoutMs);
+      }, waitMs);
       const off = subscribeCompanion(() => {
         if (!done()) return;
         clearTimeout(timer);
@@ -642,9 +675,7 @@ export async function askCompanion(
       });
     });
   await until(() => state.status !== "working");
-  if (!transport || state.status !== "ready") {
-    throw new Error("The companion is not running in Canopy right now.");
-  }
+  const live = await ensureRunning(until);
   const replyId = nextId();
   set({
     status: "working",
@@ -657,7 +688,7 @@ export async function askCompanion(
   });
   try {
     await setOrigin(origin);
-    await transport.send(wire);
+    await live.send(wire);
   } catch (err) {
     set({ status: "ready", error: String(err) });
     throw err;
