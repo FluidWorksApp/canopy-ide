@@ -17,16 +17,16 @@ const project = (id: string, name: string, build = false): Project => ({
   vibe: build ? { version: 1, enabled: true } : undefined,
 });
 
-const renderTitleBar = (active: Project, projects: Project[]) => {
+const renderTitleBar = (active: Project, projects: Project[], collabActive = true) => {
   const onOpenProject = vi.fn();
   const onSelectProject = vi.fn();
-  render(
+  const { unmount } = render(
     <TitleBar
       projects={projects}
       openProjects={[active]}
       activeId={active.id}
       pendingCount={() => 0}
-      collabActive
+      collabActive={collabActive}
       tabDragId={null}
       tabDragOffsetX={0}
       tabDragItemProps={(id) => ({
@@ -50,7 +50,7 @@ const renderTitleBar = (active: Project, projects: Project[]) => {
       onManageProjects={() => {}}
     />,
   );
-  return { onOpenProject, onSelectProject };
+  return { onOpenProject, onSelectProject, unmount };
 };
 
 describe("TitleBar Build shell", () => {
@@ -140,5 +140,40 @@ describe("TitleBar Build shell", () => {
     expect(css).toMatch(
       /\.build-browser-controls\s*{[^}]*position:\s*absolute;[^}]*left:\s*50%;[^}]*transform:\s*translateX\(-50%\);/s,
     );
+  });
+});
+
+describe("TitleBar lens switch placement", () => {
+  // The switch must not jump when toggled: both lenses render it from the same
+  // trailing slot, followed by the same controls, and that slot is pinned to
+  // the right edge regardless of what (if anything) fills the bar before it.
+  const trailingLayout = (build: boolean) => {
+    const active = project("app", "Storefront", build);
+    const { unmount } = renderTitleBar(active, [active], false);
+    const toggle = screen.getByRole("button", { name: /Switch to the .* lens/ });
+    const slot = toggle.closest(".titlebar-context");
+    expect(slot).not.toBeNull();
+    expect(slot!.parentElement!.classList.contains("titlebar")).toBe(true);
+    expect(slot!.lastElementChild).toBe(toggle);
+    const after: string[] = [];
+    for (let el = slot!.nextElementSibling; el; el = el.nextElementSibling) {
+      if (el.classList.contains("notif-bell")) after.push("bell");
+      else if (el.matches(".build-project-menu, .project-manage-btn")) after.push("projects");
+      else after.push(el.className);
+    }
+    unmount();
+    return after;
+  };
+
+  it("renders the switch in the same slot and order in Builder and Engineer", () => {
+    const builder = trailingLayout(true);
+    const engineer = trailingLayout(false);
+    expect(builder).toEqual(["bell", "projects"]);
+    expect(engineer).toEqual(builder);
+  });
+
+  it("pins the switch slot to the right edge of the title bar", () => {
+    const css = readFileSync(join(process.cwd(), "shared", "chrome.css"), "utf8");
+    expect(css).toMatch(/\.titlebar-context\s*{[^}]*margin-left:\s*auto;/s);
   });
 });

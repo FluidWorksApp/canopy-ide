@@ -258,5 +258,9 @@
 
 .titlebar-projects {display:flex;align-items:center;gap:6px;min-width:0;flex:1;}
 .titlebar-projects > .project-tabs {flex:1;}
-.titlebar-context {display:flex;align-items:center;gap:12px;flex-shrink:0;}
+/* One trailing slot for workspace + lens switch + the controls after it, in
+   both lenses. margin-left:auto pins it right even when nothing in flow fills
+   the bar (Builder's preview controls are absolute or absent); in Engineer the
+   flex:1 tab strip already consumes the space, so it is a no-op there. */
+.titlebar-context {display:flex;align-items:center;gap:12px;flex-shrink:0;margin-left:auto;}
 .titlebar-context .project-mode-toggle {border-left:1px solid var(--border);margin-left:4px;}
