@@ -107,7 +107,7 @@ describe("recovering once a CLI appears", () => {
 // Slack asks from outside the panel; with no companion running there is no one
 // to answer, and saying so beats a reply that never comes.
 describe("asking from Slack", () => {
-  it("refuses at once when the companion is not running", async () => {
-    await expect(askCompanion("Slack · Sam: hi", "hi")).rejects.toThrow(/not running/);
+  it("says why when the companion cannot be brought up", async () => {
+    await expect(askCompanion("Slack · Sam: hi", "hi")).rejects.toThrow(/could not start in Canopy: .+|turned off/);
   });
 });
