@@ -3,6 +3,7 @@ vi.mock('@tauri-apps/api/core',()=>({invoke:vi.fn()}));
 import type {ManagedWorkspace} from './ManagedWorkspaces';
 import {STOP_ACKNOWLEDGE_TIMEOUT_MS,markStopRequested,reconcileStopRequests,resetWorkspaceLifecycle,saveStopSwitchNotice,stopRequestError,stopRequested,takeStopSwitchNotice,dismissStopSwitchNotice,workspaceLifecycle} from './workspaceLifecycle';
 import {workspaceStatus} from './WorkspaceHero';
+import {workspaceStartupProblem} from './ManagedWorkspaces';
 
 const base:ManagedWorkspace={id:'ws-a',name:'Machine Works',provider:'lightsail',state:'ready',cpu_max:2,memory_max_mib:8192};
 const w=(patch:Partial<ManagedWorkspace>={}):ManagedWorkspace=>({...base,...patch});
@@ -21,6 +22,17 @@ it('derives one lifecycle from server state and the latest operation',()=>{
  expect(workspaceLifecycle(w({operation:hibernate('pending')}))).toBe('stopping');
  expect(workspaceLifecycle(w({state:'stopping',operation:hibernate('running')}))).toBe('stopping');
  expect(workspaceLifecycle(w({state:'stopping',operation:hibernate('failed','Provider refused')}))).toBe('error');
+});
+
+it('a failed Update workspace leaves a running workspace running',()=>{
+ // Seen 2026-10-28: an update-host refused by a host from before 0.5.3 turned
+ // a ready workspace into "Needs attention" with Retry preparation.
+ const update={phase:'dispatch',status:'failed',action:'update-host',last_error:'This workspace host cannot update in place. Hibernate and resume the workspace to get the new release.'};
+ expect(workspaceLifecycle(w({operation:update}))).toBe('running');
+ expect(workspaceStatus(w({operation:update}))).toMatchObject({label:'Running'});
+ expect(workspaceStartupProblem(w({operation:update}))).toBeNull();
+ expect(workspaceLifecycle(w({state:'error',operation:update}))).toBe('error');
+ expect(workspaceLifecycle(w({operation:{phase:'boot',status:'failed',action:'resume'}}))).toBe('error');
 });
 
 it('every surface reads the same stopping label from that lifecycle',()=>{
