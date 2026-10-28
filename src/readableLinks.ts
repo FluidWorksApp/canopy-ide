@@ -95,8 +95,8 @@ export function describeLink(link: ResolvedLink): {kind: string; name: string; d
 /** The in-app deep link for a readable URL (deepLinks.ts `link`). */
 export const appLinkFor = (url: string) => `canopy://link?url=${encodeURIComponent(url)}`;
 
-// A shared session waiting for its panel: the link opens the workspace's
-// details, and SharedSessionsPanel picks this up when it mounts or is open.
+// A shared session waiting for its viewer: the link opens the Team panel, and
+// its Live now list (LiveSessions.tsx) picks this up when it mounts or is open.
 let pendingSession: {workspaceId: string; publicationId: string} | null = null;
 export const SHARED_SESSION_FOCUS_EVENT = 'canopy:shared-session-focus';
 export function takePendingSession(workspaceId: string): string | null {
@@ -105,6 +105,14 @@ export function takePendingSession(workspaceId: string): string | null {
   pendingSession = null;
   return id;
 }
+/** The waiting shared session for whichever workspace it names. */
+export function takeAnyPendingSession(): {workspaceId: string; publicationId: string} | null {
+  const pending = pendingSession;
+  pendingSession = null;
+  return pending;
+}
+/** `canopy:open-team` asks the project view to show the Team panel. */
+export const OPEN_TEAM_EVENT = 'canopy:open-team';
 
 /** `canopy:show-workspace` asks the workspace switcher to open a workspace
  *  (`connect`) or show its details. */
@@ -138,7 +146,7 @@ export async function openReadableLink(raw: string, deps: OpenDeps): Promise<Res
     dispatch(new CustomEvent<ShowWorkspaceDetail>(SHOW_WORKSPACE_EVENT, {detail: {workspaceId: link.target.workspaceId, connect: true}}));
   } else if (link.kind === 'session') {
     pendingSession = {workspaceId: link.target.workspaceId, publicationId: link.target.publicationId};
-    dispatch(new CustomEvent<ShowWorkspaceDetail>(SHOW_WORKSPACE_EVENT, {detail: {workspaceId: link.target.workspaceId, connect: false}}));
+    dispatch(new Event(OPEN_TEAM_EVENT));
     dispatch(new CustomEvent(SHARED_SESSION_FOCUS_EVENT, {detail: {workspaceId: link.target.workspaceId}}));
   } else {
     const t = link.target;

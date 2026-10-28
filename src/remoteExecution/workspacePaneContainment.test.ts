@@ -13,7 +13,6 @@ it('every pane child can shrink to the pane and long text wraps',()=>{
  expect(body(workspace,'.workspace-main > *')).toMatch(/min-width:0;max-width:100%/);
  expect(body(workspace,'.workspace-main :is(section,div,header,form,fieldset,details,label,p,ul,li)')).toContain('min-width:0');
  expect(body(workspace,'.workspace-main :is(p,small,strong,h3,h4,label,summary,span)')).toContain('overflow-wrap:anywhere');
- expect(body(workspace,'.workspace-main .shared-session-disclosure')).toContain('white-space:normal');
 });
 it('shared account actions wrap instead of reserving a fixed width',()=>{
  expect(accounts).not.toMatch(/\.shared-account-actions\{[^}]*flex:0 0 \d+px/);

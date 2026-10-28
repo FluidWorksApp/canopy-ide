@@ -319,6 +319,9 @@ export interface PaneBarProps {
   onNewShell: () => void;
   onClearScrollback: () => void;
   onHardReset: () => void;
+  /** Opens the Share sheet on the active terminal. Absent when it can't be
+   *  shared (not the owner's Canopy workspace), which hides the button. */
+  onShareTerminal?: () => void;
   onToggleView: () => void;
   onShareFile: (memberId: string, memberName: string) => void;
   onShareProject: (memberId: string, memberName: string) => void;
@@ -351,7 +354,7 @@ function PaneBarImpl({
   relayMembers, isProjectShared,
   onSelectTab, onTabContextMenu, onCloseTab, onCommitRename, onCancelRename,
   onRenameDraftChange, onNewShell,
-  onClearScrollback, onHardReset, onToggleView,
+  onClearScrollback, onHardReset, onShareTerminal, onToggleView,
   onShareFile, onShareProject, onOpenPreview, onLaunchCli, account, profileLabels, onRunCliUpdate,
   onRefreshInstalled, onRefreshUpdates, onOpenAllTabs,
   activeTabElRef,
@@ -803,6 +806,12 @@ function PaneBarImpl({
           <>
             <Button icon title="Clear scrollback" onClick={onClearScrollback}>⌫</Button>
             <Button icon title="Hard reset" onClick={onHardReset}>↺</Button>
+            {onShareTerminal && (
+              <Button title="Share this terminal with your team" onClick={onShareTerminal}>
+                <TeamIcon size={14} />
+                Share
+              </Button>
+            )}
           </>
         )}
 

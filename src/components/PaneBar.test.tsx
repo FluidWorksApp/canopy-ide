@@ -443,3 +443,15 @@ describe("the appear animation", () => {
     expect(cls("c")).toContain("tab-new");
   });
 });
+
+describe("sharing a terminal", () => {
+  it("a terminal tab gets a Share button that opens the sheet for it", () => {
+    const share = vi.fn();
+    const { rerender } = render(paneBar({ isTerminalTab: true, onShareTerminal: share }));
+    fireEvent.click(screen.getByRole("button", { name: /^Share$/ }));
+    expect(share).toHaveBeenCalledTimes(1);
+    // Not shareable here (no Canopy workspace, or not its owner): no button.
+    rerender(paneBar({ isTerminalTab: true }));
+    expect(screen.queryByRole("button", { name: /^Share$/ })).toBeNull();
+  });
+});
