@@ -44,3 +44,27 @@ test('sharing attestation is control-plane only and reports a fixed reason when 
   assert.equal((await call({},'/sharing-setup',{action:'start'})).status,400,'the project-copy setup route is gone');
  }finally{await close(server);}
 });
+test('real gateway lets the owner share a terminal in their own project for watching, never Pair, and only granted members see it',async()=>{
+ const id='ws-22222222-2222-4222-8222-222222222222',key='o'.repeat(48);
+ const workspace={id,cgroupParent:'canopy-test.slice',accounts:['owner'],memoryMiB:1024,cpus:1,projectMounts:[{id:'app',writable:true},{id:'docs',writable:false}]};
+ const token=claims=>{const payload=Buffer.from(JSON.stringify({workspaceId:id,expires:Math.floor(Date.now()/1000)+120,...claims})).toString('base64url');return payload+'.'+createHmac('sha256',key).update(payload).digest('base64url');};
+ const owner=token({}),alice=token({version:2,memberId:'alice',accessVersion:1,scope:'drive'}),bob=token({version:2,memberId:'bob',accessVersion:1,scope:'drive'}),opened=[];
+ const runner=http.createServer((req,res)=>{res.setHeader('content-type','application/json');if(req.url==='/sessions'&&req.method==='GET')return res.end(JSON.stringify([{id:9,title:'SuprFlow dev',exitCode:null}]));res.statusCode=500;res.end('{}');});const runnerUrl=await listen(runner);
+ const grant=ids=>({allRead:false,allWrite:false,selected:ids.map(id=>({id,writable:true}))});
+ const access={alice:{projectAccess:grant(['suprflow']),sessionAccess:{view:grant(['suprflow']),interact:grant(['suprflow'])}},bob:{projectAccess:grant(['app']),sessionAccess:{view:grant(['app']),interact:grant([])}}};
+ const sharedCatalog={get:async()=>[{id:'suprflow',name:'SuprFlow',components:[{id:'web',label:'Web',path:'/workspace/SuprFlow'}]}]};
+ const gateway=createGateway({config:{workspaces:[workspace],principals:[{id:'managed-account',scope:'drive',workspaces:[id],tokenSha256:'0'.repeat(64)}],managedSession:{workspaceId:id,key}},sharedCatalog,workspaces:{open:async w=>{opened.push(w);return {url:runnerUrl,token:'synthetic'};},suspendMember:async()=>{}},authorizeMember:async principal=>access[principal.memberId]});const base=await listen(gateway);
+ const call=(auth,route,input)=>fetch(base+'/v1/workspaces/'+id+route,{method:input?'POST':'GET',headers:{authorization:'Bearer '+auth,'content-type':'application/json'},...(input?{body:JSON.stringify(input)}:{})});
+ try{
+  assert.deepEqual((await (await call(owner,'/projects')).json()).projects.map(p=>[p.id,p.canPair]),[['app',true],['docs',false],['suprflow',false]]);
+  const pair=await call(owner,'/shared-sessions',{action:'create',projectId:'suprflow',title:'Pair'});assert.equal(pair.status,400);assert.match((await pair.json()).error,/^Pair needs a shared project/);assert.equal(opened.length,0,'no collaboration runtime starts');
+  const watched=await call(owner,'/shared-sessions',{action:'publish',sessionId:9,projectId:'suprflow',title:'SuprFlow dev',mode:'view',acknowledged:true});assert.equal(watched.status,200);
+  const p=(await watched.json()).sessions[0];assert.equal(p.projectId,'suprflow');assert.equal(p.collaborative,false);assert.equal(p.catalog,undefined);
+  assert.deepEqual((await (await call(alice,'/shared-sessions')).json()).sessions.map(s=>[s.id,s.mode]),[[p.id,'view']]);
+  assert.ok((await (await call(alice,'/ticket',{stream:`/shared-sessions/${p.id}/stream`})).json()).ticket);
+  assert.equal((await call(alice,`/shared-sessions/${p.id}/input`,{data:'nope'})).status,403);
+  assert.deepEqual((await (await call(bob,'/shared-sessions')).json()).sessions,[]);
+  assert.equal((await call(bob,'/ticket',{stream:`/shared-sessions/${p.id}/stream`})).status,403);
+  assert.equal((await call(owner,'/shared-sessions',{action:'publish',sessionId:9,projectId:'elsewhere',title:'X',mode:'view',acknowledged:true})).status,400);
+ }finally{await close(gateway);await close(runner);}
+});

@@ -13170,6 +13170,14 @@ input[type="radio"]:disabled {
 .dlg-actions-spacer {
   flex: 1;
 }
+.dlg-footnote {
+  flex-shrink: 0;
+  margin-top: -6px;
+  padding: 0 20px 12px;
+  text-align: right;
+  font-size: var(--fs-xs);
+  color: var(--text-dim);
+}
 
 .terminal-governor-card {
   pointer-events: auto;

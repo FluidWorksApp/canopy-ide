@@ -251,7 +251,7 @@ test('member store loads discover only granted shared projects and their compone
  const url=await listen(server);
  try{
   const catalogResponse=await fetch(url+'/v1/workspaces/shared/projects',{headers:{authorization:bearer}});
-  assert.equal(catalogResponse.status,200);assert.deepEqual(await catalogResponse.json(),{projects:[{id:'app',name:'Product',components:[{id:'web',name:'Web'}]}]});
+  assert.equal(catalogResponse.status,200);assert.deepEqual(await catalogResponse.json(),{projects:[{id:'app',name:'Product',canPair:true,components:[{id:'web',name:'Web'}]}]});
   const response=await fetch(url+'/v1/workspaces/shared/native',{method:'POST',headers:{authorization:bearer,'content-type':'application/json'},body:JSON.stringify({command:'store_load'})});
   assert.equal(response.status,200);
   const store=JSON.parse((await response.json()).result);
@@ -266,7 +266,7 @@ test('trusted project catalog can be read without opening a stopped runtime and 
  const server=createGateway({config,workspaces:{open:async()=>{opens++;throw Error('Stopped runtime must not be opened');}}});const url=await listen(server);
  try{
   const result=await fetch(url+'/v1/workspaces/catalog/projects',{headers:{authorization:'Bearer owner'}});
-  assert.equal(result.status,200);assert.deepEqual(await result.json(),{projects:[{id:'app',name:'Product',components:[{id:'web',name:'Frontend'}]}]});
+  assert.equal(result.status,200);assert.deepEqual(await result.json(),{projects:[{id:'app',name:'Product',canPair:true,components:[{id:'web',name:'Frontend'}]}]});
   const write=await fetch(url+'/v1/workspaces/catalog/projects',{method:'POST',headers:{authorization:'Bearer owner'},body:'{}'});assert.ok(write.status>=400);assert.equal(opens,0);
  }finally{await close(server);}
 });

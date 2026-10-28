@@ -4,62 +4,106 @@ vi.mock('../remoteExecution/workspace',()=>({activeWorkspace:()=>state.host}));
 vi.mock('../remoteExecution/workspaceListCache',()=>({peekWorkspaceList:()=>({workspaces:[{id:'ws',name:'API',state:'ready',access:{owner:true}}],at:0})}));
 vi.mock('../readableLinks',async importOriginal=>({...(await importOriginal<typeof import('../readableLinks')>()),copyReadableLink:state.copy}));
 import {ShareTerminalHost} from './ShareTerminalSheet';
-import {shareTerminal,SHARED_SESSIONS_CHANGED} from './shareTerminal';
+import {publishShareableTerminals,shareTerminal,terminalLabel,SHARED_SESSIONS_CHANGED} from './shareTerminal';
 type Body={action:string;sessionId?:number;projectId?:string;title?:string};
+let projects:{id:string;name:string;canPair?:boolean}[]=[],failure:Error|null=null;
 let published:{id:string;projectId:string;title:string;mode:string;expiresAt:number;sessionId?:number;collaborative?:boolean}[]=[];
 const request=vi.fn(async(_id:string,route:string,body?:Body)=>{
- if(route==='/projects')return {projects:[{id:'app',name:'Product'}]};
- if(route==='/sessions')return [{id:7,title:'Owner shell',exitCode:null},{id:9,title:'Dev server',exitCode:null},{id:11,title:'Finished build',exitCode:0}];
+ if(route==='/projects')return {projects};
+ if(failure&&body)throw failure;
+ if(route==='/sessions')return [{id:7,title:"cd '/workspace/projects/app' && exec claude",exitCode:null},{id:9,title:'npm run dev',exitCode:null},{id:11,title:'Finished build',exitCode:0},{id:12,title:'bash',exitCode:null},{id:203,title:'orphan',exitCode:null}];
  if(body?.action==='publish')published=[...published,{id:'pub-'+body.sessionId,projectId:body.projectId!,title:body.title!,mode:'view',expiresAt:1,sessionId:body.sessionId}];
  if(body?.action==='create')published=[...published,{id:'shell-1',projectId:body.projectId!,title:body.title!,mode:'interact',expiresAt:2,collaborative:true}];
  return {sessions:published};
 });
-beforeEach(()=>{published=[];request.mockClear();state.copy.mockReset();state.copy.mockResolvedValue('https://canopyide.dev/acme/api/s/x-1');state.host={connection:{workspaceId:'ws',endpoint:'https://ws.workspaces.canopyide.dev',token:'owner.token',workspaceName:'API'},client:{workspace:request}};});
-afterEach(()=>{cleanup();state.host=null;});
+beforeEach(()=>{published=[];projects=[{id:'app',name:'Product'}];failure=null;request.mockClear();state.copy.mockReset();state.copy.mockResolvedValue('https://canopyide.dev/acme/api/s/x-1');state.host={connection:{workspaceId:'ws',endpoint:'https://ws.workspaces.canopyide.dev',token:'owner.token',workspaceName:'API'},client:{workspace:request}};});
+afterEach(()=>{cleanup();state.host=null;for(const id of ['p-app','p-suprflow','p-local'])publishShareableTerminals(id,[]);});
 const open=(...args:Parameters<typeof shareTerminal>)=>act(()=>shareTerminal(...args));
-it('Share on a terminal opens the sheet on that terminal, with no terminal picker',async()=>{
- render(<ShareTerminalHost/>);open({sessionId:7,title:'Owner shell',projectId:'app',projectName:'Product'});
- const sheet=screen.getByRole('dialog',{name:'Share “Owner shell”'});
- expect(within(sheet).queryByRole('group',{name:'Terminal'})).toBeNull();
- expect(sheet.querySelector('.share-sheet-value')?.textContent).toMatch(/^Everyone who can open \S/);
- expect(within(sheet).getByRole('radio',{name:/Watch only/})).toBeChecked();
- expect(within(sheet).getByText('Viewers see earlier output too.')).toBeInTheDocument();
- // No "nothing private on screen" gate: the primary button is the acknowledgement.
- expect(within(sheet).queryByRole('checkbox')).toBeNull();
- await waitFor(()=>expect(within(sheet).getByRole('button',{name:/Share \+ copy link/})).toBeEnabled());
- // The project comes from the terminal; nothing asks for one.
- expect(within(sheet).queryByRole('combobox',{name:'Project'})).toBeNull();
+const claude={sessionId:7,title:'claude',projectId:'app',projectName:'Product',branch:'main',workspaceId:'ws'};
+const share=()=>screen.getByRole('button',{name:/Share — they can watch/});
+const tabs=()=>{
+ publishShareableTerminals('p-app',[claude,{sessionId:9,title:'Dev server',projectId:'app',projectName:'Product',branch:'feat/login',workspaceId:'ws'},{sessionId:11,title:'Finished build',projectId:'app',projectName:'Product',workspaceId:'ws'}]);
+ publishShareableTerminals('p-suprflow',[{sessionId:12,title:'',projectId:'notes',projectName:'Notes',workspaceId:'ws'}]);
+ publishShareableTerminals('p-local',[{sessionId:9,title:'local shell',projectId:'x',projectName:'Elsewhere'}]);
+};
+it('names a terminal the way its tab does, never by command or number',()=>{
+ expect(terminalLabel(claude)).toBe('claude · Product · main');
+ expect(terminalLabel({sessionId:3,title:'',projectName:'SuprFlow',branch:'main'})).toBe('SuprFlow terminal · main');
+ expect(terminalLabel({sessionId:3,title:'  '})).toBe('Terminal');
+ expect(terminalLabel({sessionId:3,title:'Product',projectName:'Product'})).toBe('Product');
 });
-it('Watch only publishes the terminal for viewing and copies its link',async()=>{
+it('Share on a terminal opens on that terminal: no picker, no project, no radios',async()=>{
+ render(<ShareTerminalHost/>);open(claude);
+ const sheet=screen.getByRole('dialog',{name:'Share “claude · Product · main”'});
+ expect(within(sheet).queryByRole('group',{name:'Terminal'})).toBeNull();
+ expect(within(sheet).queryByRole('combobox')).toBeNull();expect(within(sheet).queryByRole('radio')).toBeNull();expect(within(sheet).queryByRole('checkbox')).toBeNull();
+ expect(sheet.textContent).not.toMatch(/Who sees it|Access tab|Terminal 7/);
+ expect(within(sheet).getByText('Your team sees it under Team → Live now.')).toBeInTheDocument();
+ await waitFor(()=>expect(share()).toBeEnabled());
+ expect(within(sheet).getByText("They also see what's already on screen.")).toBeInTheDocument();
+ expect(within(sheet).getByRole('button',{name:'Pair in a fresh shell'})).toBeEnabled();
+});
+it('Share — they can watch publishes the terminal for viewing and copies its link',async()=>{
  const changed=vi.fn();window.addEventListener(SHARED_SESSIONS_CHANGED,changed);
- render(<ShareTerminalHost/>);open({sessionId:7,title:'Owner shell',projectId:'app',projectName:'Product'});
- const share=screen.getByRole('button',{name:/Share \+ copy link/});await waitFor(()=>expect(share).toBeEnabled());fireEvent.click(share);
- await waitFor(()=>expect(request).toHaveBeenCalledWith('ws','/shared-sessions',{action:'publish',sessionId:7,projectId:'app',title:'Owner shell',mode:'view',acknowledged:true}));
- await waitFor(()=>expect(state.copy).toHaveBeenCalledWith({kind:'session',workspaceId:'ws',projectId:'app',publicationId:'pub-7',title:'Owner shell'}));
+ render(<ShareTerminalHost/>);open(claude);
+ await waitFor(()=>expect(share()).toBeEnabled());fireEvent.click(share());
+ await waitFor(()=>expect(request).toHaveBeenCalledWith('ws','/shared-sessions',{action:'publish',sessionId:7,projectId:'app',title:'claude · Product · main',mode:'view',acknowledged:true}));
+ await waitFor(()=>expect(state.copy).toHaveBeenCalledWith({kind:'session',workspaceId:'ws',projectId:'app',publicationId:'pub-7',title:'claude · Product · main'}));
  expect(await screen.findByRole('status')).toHaveTextContent('Link copied');
  expect(changed).toHaveBeenCalled();window.removeEventListener(SHARED_SESSIONS_CHANGED,changed);
 });
-it('Pair starts a clean shell in the terminal’s project and copies its link',async()=>{
- render(<ShareTerminalHost/>);open({sessionId:7,title:'Owner shell',projectId:'app',projectName:'Product'});
- fireEvent.click(screen.getByRole('radio',{name:/Pair \(can type\)/}));
- const clean=screen.getByRole('checkbox',{name:/Start a clean shell instead/});expect(clean).toBeChecked();expect(clean).toBeDisabled();
- expect(screen.getByText(/Typing in an existing terminal isn't available/)).toBeInTheDocument();
- const start=screen.getByRole('button',{name:/Share \+ copy link/});await waitFor(()=>expect(start).toBeEnabled());fireEvent.click(start);
- await waitFor(()=>expect(request).toHaveBeenCalledWith('ws','/shared-sessions',{action:'create',projectId:'app',title:'Owner shell'}));
+it('Pair in a fresh shell starts a clean shell in the terminal’s project and copies its link',async()=>{
+ render(<ShareTerminalHost/>);open(claude);
+ const pair=await screen.findByRole('button',{name:'Pair in a fresh shell'});await waitFor(()=>expect(pair).toBeEnabled());fireEvent.click(pair);
+ await waitFor(()=>expect(request).toHaveBeenCalledWith('ws','/shared-sessions',{action:'create',projectId:'app',title:'Pair on Product'}));
  expect(request.mock.calls.some(([,,body])=>(body as Body|undefined)?.action==='publish')).toBe(false);
- await waitFor(()=>expect(state.copy).toHaveBeenCalledWith({kind:'session',workspaceId:'ws',projectId:'app',publicationId:'shell-1',title:'Owner shell'}));
+ await waitFor(()=>expect(state.copy).toHaveBeenCalledWith({kind:'session',workspaceId:'ws',projectId:'app',publicationId:'shell-1',title:'Pair on Product'}));
 });
-it('from the Team panel the sheet lists running terminals to pick from',async()=>{
- render(<ShareTerminalHost/>);open();
+it('from the Team panel it lists open terminal tabs by name; an unshared project is greyed with a reason',async()=>{
+ tabs();render(<ShareTerminalHost/>);open();
  const sheet=screen.getByRole('dialog',{name:'Share a terminal'});
  const picker=await within(sheet).findByRole('group',{name:'Terminal'});
- const cards=await within(picker).findAllByRole('button');expect(cards.map(c=>c.textContent)).toEqual(['Owner shellTerminal 7','Dev serverTerminal 9']);
- expect(within(sheet).getByRole('button',{name:/Share \+ copy link/})).toBeDisabled();
+ await waitFor(()=>expect(within(picker).getByRole('button',{name:/Notes terminal/})).toBeDisabled());
+ const cards=within(picker).getAllByRole('button');
+ // Running tabs in this workspace only: no exited build, no other window's local shell, no session without a tab.
+ expect(cards.map(c=>c.textContent)).toEqual(['claude · Product · main','Dev server · Product · feat/login','Notes terminal'+'Not shared with your team']);
+ expect(sheet.textContent).not.toMatch(/Terminal \d|cd '|npm run dev|orphan/);
+ expect(within(sheet).queryByRole('combobox')).toBeNull();
+ expect(share()).toBeDisabled();expect(within(sheet).queryByRole('button',{name:'Pair in a fresh shell'})).toBeNull();
  fireEvent.click(within(picker).getByRole('button',{name:/Dev server/}));expect(within(picker).getByRole('button',{name:/Dev server/})).toHaveAttribute('aria-pressed','true');
- const share=within(sheet).getByRole('button',{name:/Share \+ copy link/});await waitFor(()=>expect(share).toBeEnabled());fireEvent.click(share);
- await waitFor(()=>expect(request).toHaveBeenCalledWith('ws','/shared-sessions',{action:'publish',sessionId:9,projectId:'app',title:'Dev server',mode:'view',acknowledged:true}));
+ await waitFor(()=>expect(share()).toBeEnabled());fireEvent.click(share());
+ await waitFor(()=>expect(request).toHaveBeenCalledWith('ws','/shared-sessions',{action:'publish',sessionId:9,projectId:'app',title:'Dev server · Product · feat/login',mode:'view',acknowledged:true}));
+});
+it('a terminal in the owner’s own project can be watched; Pair is not offered',async()=>{
+ projects=[{id:'app',name:'Product',canPair:true},{id:'suprflow',name:'SuprFlow',canPair:false}];
+ render(<ShareTerminalHost/>);open({sessionId:7,title:'claude',projectId:'suprflow',projectName:'SuprFlow',branch:'main'});
+ const sheet=screen.getByRole('dialog',{name:'Share “claude · SuprFlow · main”'});
+ await waitFor(()=>expect(share()).toBeEnabled());
+ expect(within(sheet).queryByRole('button',{name:'Pair in a fresh shell'})).toBeNull();
+ fireEvent.click(share());
+ await waitFor(()=>expect(request).toHaveBeenCalledWith('ws','/shared-sessions',{action:'publish',sessionId:7,projectId:'suprflow',title:'claude · SuprFlow · main',mode:'view',acknowledged:true}));
+ expect(request.mock.calls.some(([,,body])=>(body as Body|undefined)?.action==='create')).toBe(false);
+ expect(await screen.findByRole('status')).toHaveTextContent('Link copied');
+});
+it('a terminal whose project is not shared says so and offers nothing to press',async()=>{
+ render(<ShareTerminalHost/>);open({sessionId:7,title:'claude',projectId:'scratch',projectName:'Scratch'});
+ const sheet=screen.getByRole('dialog');
+ expect(await within(sheet).findByText(/Not shared with your team/)).toBeInTheDocument();
+ expect(share()).toBeDisabled();expect(within(sheet).queryByRole('button',{name:'Pair in a fresh shell'})).toBeNull();
+});
+it('a project mount is found from the terminal’s cwd',async()=>{
+ render(<ShareTerminalHost/>);open({sessionId:7,title:'zsh',cwd:'/workspace/projects/app/web'});
+ await waitFor(()=>expect(share()).toBeEnabled());fireEvent.click(share());
+ await waitFor(()=>expect(request).toHaveBeenCalledWith('ws','/shared-sessions',expect.objectContaining({action:'publish',projectId:'app',title:'zsh'})));
+});
+it('turns a raw host refusal into plain words',async()=>{
+ failure=Error('Invalid session publication');
+ render(<ShareTerminalHost/>);open(claude);
+ await waitFor(()=>expect(share()).toBeEnabled());fireEvent.click(share());
+ const alert=await screen.findByRole('alert');
+ expect(alert).toHaveTextContent("This project's terminals can't be shared from this workspace yet.");expect(alert.textContent).not.toMatch(/Invalid/);
 });
 it('says why when this window cannot share',()=>{
  state.host=null;render(<ShareTerminalHost/>);open({sessionId:7,title:'Owner shell'});
- expect(screen.getByRole('dialog')).toHaveTextContent('Terminals on this computer stay private');expect(screen.queryByRole('button',{name:/copy link/})).toBeNull();
+ expect(screen.getByRole('dialog')).toHaveTextContent('Terminals on this computer stay private');expect(screen.queryByRole('button',{name:/they can watch/})).toBeNull();
 });
