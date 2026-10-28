@@ -276,27 +276,56 @@ The control plane accepts a GitHub OIDC token with `aud=https://canopyide.dev`,
   `release: {revision, protocol, image}`. The app decides `current` /
   `available` / `required` itself, by comparing `host.protocol` with its own
   `HOST_PROTOCOL` and `host.revision`/`host.image` with the release.
-- Update in place is a management-recovery action: the owner's request
+- Update in place is asynchronous, carried by two management-recovery actions
+  on the existing encrypted recovery channel. The owner's request
   (`POST /api/operations` `{action:'update-host', workspaceId, requestKey,
-  clientId, confirmOthers?}`) makes the control plane send the existing
-  encrypted recovery channel a payload `{action:'update-host', url,
-  runtimeSha256, runtimeLockSha256, revision, image}` (presigned URL, 1 h;
-  `image` is the active release's digest reference). Members get 403. The
-  operation fails with the host's `detail` when the result code is
-  `failed`, `rolled-back`, `invalid` or `refresh-required`.
+  clientId, confirmOthers?}`; members get 403) creates an `update-host`
+  operation that moves through three phases:
+  1. **dispatch**: send `update-host` with the payload `{updateId, url,
+     runtimeSha256, runtimeLockSha256, revision, image}` (presigned URL, 1 h;
+     `image` is the active release's digest reference). The recovery agent
+     writes the payload to a root-only file, starts
+     `systemd-run … node /opt/canopy-host/host-update-run.mjs <payload.json>`
+     detached, and answers `{started:true}`, or `{code:'busy'}` while
+     `/var/lib/canopy-host/host-update/current` names another update.
+  2. **wait**: poll `update-host-status {updateId}`, which answers the
+     contents of `/var/lib/canopy-host/host-update/<updateId>.json`. While it
+     is `{state:'running', step}`, copy `step` to the operation's
+     `context.updateStep` (`download` | `gateway` | `gateway-ready` | `image`
+     | `rollback`), which the app shows. The gateway restarts during this
+     phase, so a status call may fail and is retried.
+  3. **complete**: on `{state:'done', code, host, image, detail}` the
+     operation succeeds for `updated` and `current`, and fails with `detail`
+     as `last_error` for `rolled-back`, `failed`, `invalid` and
+     `refresh-required`. With no `done` status 20 minutes after dispatch, the
+     operation fails ("The workspace update did not finish").
+  The operation stays pending/running until complete: the app treats an
+  `update-host` operation that has left pending/running, with the workspace
+  `ready`, as finished, and then reconnects.
 
 **Host (this repo, `packages/remote-host`).**
 - The gateway sends `host` on every runtime-policy call
   (`host-release.mjs` `hostReport`, `DockerWorkspaces.ownerRuntimeReport`).
   Bootstrap must write the archive hash to
   `/opt/canopy-host/workspace-runtime.sha256`, or `runtimeSha256` is null.
-- The root recovery agent handles `update-host` by calling
-  `updateWorkspaceInPlace(payload, {ready})` from
-  `/opt/canopy-host/host-update.mjs` (node builtins only), with its management
-  readiness probe as `ready`. It returns `{code, host, image}`, each step
+- `host-update-run.mjs <payload.json>` (in the host archive) is what the
+  recovery agent starts detached, as root. It runs
+  `updateWorkspaceInPlace(payload, {ready, onStep})` from `host-update.mjs`
+  with the management readiness check (`canopy-host` and `caddy` active,
+  `http://127.0.0.1:8787/v1/workspaces` answering 401, as in
+  `MANAGEMENT_READINESS_SCRIPT`), and writes its status atomically (temporary
+  file + rename, mode 0600) to `/var/lib/canopy-host/host-update/<updateId>.json`:
+  `{state:'running', step, updatedAt}` as each step starts, then
+  `{state:'done', code, host, image, detail, updatedAt}`. `current` in that
+  directory holds the update id while it runs and is removed at the end. Every
+  run ends with a `done` status, including a crash (`failed`) or an unreadable
+  payload (`invalid`, written as `invalid-request.json`).
+- `updateWorkspaceInPlace` returns `{code, host, image}`, each step
   `{code, detail?}`, `code` being the worse of the two:
   `current` < `updated` < `rolled-back` < `failed`; `invalid` and
-  `refresh-required` come from step (a) and skip (b).
+  `refresh-required` come from step (a) and skip (b). Steps reported:
+  `download`, `gateway`, then `gateway-ready` or `rollback` for (a); `image`
+  for (b).
   - (a) `updateHostInPlace`, only when the installed revision or archive hash
     differs:
     1. download to `/opt/canopy-host.download.tgz` and check the SHA-256;
@@ -313,9 +342,9 @@ The control plane accepts a GitHub OIDC token with `aud=https://canopyide.dev`,
     already runs that image; otherwise stop members, stop the owner, resume it
     onto the release image through `upgradeRuntimeImage`, and restart the
     previous container if the new one is not ready.
-  - The recovery agent's unit needs `/opt` in `ReadWritePaths`; the update may
-    outlast the current 45 s recovery request timeout (an image pull), so the
-    control plane should not wait on it synchronously.
+  - The runner is its own transient unit, so the recovery agent's
+    `ProtectSystem=strict` does not apply to it; the agent itself only needs to
+    write the payload file and read `/var/lib/canopy-host/host-update`.
 
 **CI (this repo).**
 - `workspace-image.yml`, after `:stable` promotion on `main`: assume the
@@ -326,6 +355,9 @@ The control plane accepts a GitHub OIDC token with `aud=https://canopyide.dev`,
 **App (this repo).** The one-time "older Canopy host" error becomes the update
 notice in part 3: **Update workspace** calls the control plane's
 `update-host` operation (owner) after a confirmation that terminals and agents
-restart and files are kept, asks again when other people are connected, shows
-progress, and reconnects. A member sees "Ask the workspace owner to update it."
-(the list has no owner name).
+restart and files are kept, asks again when other people are connected (by
+count: the `others-connected` error has no names), polls the operation for up
+to 20 minutes showing `context.updateStep` (downloading, restarting the
+workspace host, updating the workspace, rolling back), shows `last_error` when
+it fails, and reconnects when it finishes. A member sees "Ask the workspace
+owner to update it." (the list has no owner name).
