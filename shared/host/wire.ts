@@ -12,7 +12,27 @@ export function clearToken() {
   localStorage.removeItem(TOKEN_KEY)
 }
 
-/** Exchange the PIN for a bearer token. Throws on a bad PIN. */
+/** Whether this page came through the person's Canopy link
+ *  (https://<handle>.remote.canopyide.dev), where Canopy's sign-in already
+ *  proved who they are and the PIN is not asked. False on the LAN address and
+ *  on hosts that predate the route. */
+export async function edgeSession(): Promise<boolean> {
+  try {
+    const r = await fetch('/remote/session')
+    return r.ok && (await r.json()).edge === true
+  } catch {
+    return false
+  }
+}
+
+/** Leave a Canopy-link session: the edge clears its sign-in cookie. */
+export function edgeSignOut() {
+  clearToken()
+  location.assign('/_canopy/signout')
+}
+
+/** Exchange the PIN for a bearer token. Throws on a bad PIN. On a Canopy link
+ *  the PIN is empty: the edge's sign-in stands in for it. */
 export async function auth(pin: string): Promise<string> {
   const r = await fetch('/remote/auth', {
     method: 'POST',

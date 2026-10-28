@@ -51,6 +51,11 @@ import { clearCompanionView, clearRun } from "../companionSession";
 import { forgetAllMemories } from "../companionMemory";
 import { Mascot } from "./Mascot";
 import { Button, Checkbox, Field, Radio, Row, Segmented, Select, Stepper, Switch, TextInput } from "./ui";
+import { serverFeatureError } from "../accountErrors";
+import { peekTeamIdentity, subscribeTeamIdentity, teamIdentity, type TeamIdentity } from "../teamIdentity";
+
+/** tunnel.rs's provider id for the link through Canopy's edge. */
+const CANOPY_LINK = "canopy";
 import "./receipts.css";
 import { drawWave } from "../waveStyles";
 import { useEscape, useEscapeLayer } from "../useEscape";
@@ -2760,7 +2765,149 @@ const TUNNELS: {
   },
 ];
 
-function RemoteSettings({
+/** Signed in to Canopy, remote access is your own link on canopyide.dev:
+ *  no tunnel to pick, no PIN to read out. Signed out, the self-hosted
+ *  options below stay. */
+export function RemoteSettings({
+  runInTerminal,
+}: {
+  runInTerminal: (command: string, title: string) => void;
+}) {
+  const [me, setMe] = useState<TeamIdentity | null | undefined>(() => peekTeamIdentity() ?? undefined);
+  useEffect(() => {
+    const read = () => void teamIdentity().then(setMe).catch(() => setMe(null));
+    read();
+    const off = subscribeTeamIdentity(read);
+    window.addEventListener("canopy:account-changed", read);
+    return () => {
+      off();
+      window.removeEventListener("canopy:account-changed", read);
+    };
+  }, []);
+  if (me === undefined) return null;
+  if (me) return <CanopyLinkSettings />;
+  return <SelfHostedRemoteSettings runInTerminal={runInTerminal} />;
+}
+
+/** The portal is served under /remote. */
+const remotePath = (u: string) => (u.endsWith("/remote") ? u : `${u.replace(/\/+$/, "")}/remote`);
+
+function CanopyLinkSettings() {
+  const [status, setStatus] = useState<ipc.RemoteStatus | null>(null);
+  const [tunnel, setTunnel] = useState<ipc.TunnelState>({ running: false, provider: null, url: null, message: null });
+  const [busy, setBusy] = useState(false);
+  const [qr, setQr] = useState<string | null>(null);
+  const [showLan, setShowLan] = useState(false);
+
+  useEffect(() => {
+    void ipc.remoteStatus().then(setStatus).catch(() => setStatus(null));
+    void ipc.tunnelStatus().then(setTunnel).catch(() => {});
+    const un = ipc.onTunnelState(setTunnel);
+    return () => void un.then((f) => f());
+  }, []);
+
+  const on = status?.enabled ?? false;
+  const linked = tunnel.provider === CANOPY_LINK;
+  const url = linked && tunnel.url ? remotePath(tunnel.url) : null;
+  const connected = linked && tunnel.running && !!tunnel.url && !tunnel.message;
+  const failed = linked && !tunnel.running && !!tunnel.message;
+
+  const connect = (port: number) =>
+    ipc
+      .tunnelStart(CANOPY_LINK, port)
+      .then(setTunnel)
+      .catch((e) => setTunnel({ running: false, provider: CANOPY_LINK, url: null, message: String(e) }));
+
+  // Remote access left on from an earlier run, or a link another computer
+  // took over and this one is asked to reclaim: bring the link up with it.
+  useEffect(() => {
+    if (on && status && !linked) void connect(status.port);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [on, linked]);
+
+  useEffect(() => {
+    if (!url) {
+      setQr(null);
+      return;
+    }
+    void ipc.remoteQr(url).then(setQr).catch(() => setQr(null));
+  }, [url]);
+
+  const toggle = () => {
+    setBusy(true);
+    const op = on
+      ? ipc.tunnelStop().then(setTunnel).then(() => ipc.remoteDisable())
+      : ipc.remoteEnable().then(async (next) => {
+          await connect(next.port);
+          return next;
+        });
+    void op.then(setStatus).catch(() => {}).finally(() => setBusy(false));
+  };
+
+  const state = !on
+    ? null
+    : connected
+      ? "Connected. Open it on your phone and sign in to Canopy."
+      : failed
+        ? serverFeatureError(tunnel.message, "Your Canopy link").message
+        : (tunnel.message ?? "Connecting…");
+
+  return (
+    <>
+      <Item
+        name="Remote access"
+        desc="Open your agents from your phone at your own Canopy link. Only you can open it, after signing in to Canopy."
+      >
+        <div className="set-inline">
+          <Switch checked={on} disabled={busy} aria-label="Remote access" onChange={toggle} />
+          {state && (
+            <span className={failed ? "set-warn" : "set-note"} role="status">
+              {state}
+            </span>
+          )}
+          {failed && status && (
+            <Button size="sm" disabled={busy} onClick={() => void connect(status.port)}>
+              Try again
+            </Button>
+          )}
+        </div>
+      </Item>
+
+      {on && url && (
+        <Item name="Your link" desc="The same address every time. Bookmark it or add it to your home screen.">
+          <div className="set-inline" style={{ alignItems: "center", gap: 18 }}>
+            {qr && (
+              <div
+                style={{ width: 128, height: 128, padding: 7, background: "#fff", borderRadius: 10, flex: "none" }}
+                dangerouslySetInnerHTML={{ __html: qr }}
+              />
+            )}
+            <div style={{ minWidth: 0, flex: 1 }}>
+              <Copyable text={url} />
+            </div>
+          </div>
+        </Item>
+      )}
+
+      {on && status && (
+        <Item name="On this network" desc="Without going through the internet: the local address, with a PIN.">
+          {showLan ? (
+            <div style={{ display: "grid", gap: 10, minWidth: 0 }}>
+              {status.urls?.[0] && <Copyable text={status.urls[0]} />}
+              {status.pin && <Copyable text={status.pin} big />}
+            </div>
+          ) : (
+            <Button size="sm" onClick={() => setShowLan(true)}>
+              Show address and PIN
+            </Button>
+          )}
+        </Item>
+      )}
+    </>
+  );
+}
+
+function SelfHostedRemoteSettings({
   runInTerminal,
 }: {
   runInTerminal: (command: string, title: string) => void;
@@ -2856,7 +3003,10 @@ function RemoteSettings({
 
   return (
     <>
-      <Item name="Remote access" desc="Drive your agents from your phone, behind a PIN.">
+      <Item
+        name="Remote access"
+        desc="Drive your agents from your phone, behind a PIN. Sign in to Canopy (Settings → Accounts) to get your own link instead: no tunnel to set up and no PIN."
+      >
         <div className="set-inline">
           <Switch
             checked={on}

@@ -332,6 +332,20 @@ function HandOffPanel({
 
 // ------------------------------------------------------------ document
 
+/** Edits the session made that Canopy can still compare with the code. */
+const editsWritten = (files: { edits: number }[]) => files.reduce((n, f) => n + f.edits, 0);
+
+/** A changed file as a person reads it: relative to the session's folder when
+ *  it is inside it, else its last few folders — a full scratch path is noise.
+ *  The full path stays on hover. */
+export function shortPath(path: string, cwd: string): string {
+  const sep = path.includes("\\") && !path.includes("/") ? "\\" : "/";
+  const root = cwd.replace(/[\\/]+$/, "");
+  if (root && path.startsWith(root + sep)) return path.slice(root.length + 1);
+  const parts = path.split(/[\\/]/).filter(Boolean);
+  return parts.length > 3 ? `…${sep}${parts.slice(-3).join(sep)}` : path;
+}
+
 export function SessionDocView({
   request,
   onClose,
@@ -613,14 +627,16 @@ export function SessionDocView({
                 <p className="sdoc-empty">No file changes recorded.</p>
               ) : (
                 <>
-                  <p className="sdoc-note">
-                    Lines from this session: {doc.survivingEdits} edit{doc.survivingEdits === 1 ? "" : "s"} it wrote are
-                    still in the code.
-                  </p>
+                  {editsWritten(doc.files) > 0 && (
+                    <p className="sdoc-note">
+                      {doc.survivingEdits} of {editsWritten(doc.files)} edit{editsWritten(doc.files) === 1 ? "" : "s"}{" "}
+                      this session wrote are still in the code.
+                    </p>
+                  )}
                   <ul className="sdoc-files">
                     {doc.files.map((f) => (
                       <li key={f.path}>
-                        <code>{f.path}</code>
+                        <code title={f.path}>{shortPath(f.path, doc.cwd)}</code>
                         {f.edits > 0 && (
                           <span className="sdoc-by">
                             {f.present} of {f.edits} edit{f.edits === 1 ? "" : "s"} still present

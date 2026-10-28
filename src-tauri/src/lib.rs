@@ -47,6 +47,7 @@ mod memory_tool;
 mod mesh;
 mod notes;
 mod notify;
+mod canopy_link;
 mod portal;
 mod preview;
 mod procenv;
