@@ -45,7 +45,6 @@ describe("ActivityRail", () => {
       "Work — Research — what's been investigated, and what shipped from it",
       "Work — Team memory — decisions and conventions your agents are told",
       "Work — Team — live sessions, chat",
-      "Work — Outcomes — spend, what merged, what was reworked, and the brain's weekly read",
       "Tools — MCP servers your agents can reach, from every CLI",
       "Settings (Cmd+,)",
       "Accounts",
@@ -105,7 +104,7 @@ describe("ActivityRail", () => {
     it("draws the 8x8 twins for every icon in the rail", () => {
       document.documentElement.dataset.theme = "pixel";
       const { container } = render(<ActivityRail {...props} />);
-      expect(boxes(container)).toEqual(Array(14).fill("0 0 8 8"));
+      expect(boxes(container)).toEqual(Array(13).fill("0 0 8 8"));
     });
 
     it("swaps back and forth when the skin changes under it", () => {

@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { BrainAnswer } from "./brainCall";
-import { AUTO_TIDY_AT, maybeTidyMemory, setConsolidateDepsForTests, tidyMemory, tidySummary } from "./memoryConsolidate";
+import { TIDY_ABOVE, maybeTidyMemory, setConsolidateDepsForTests, tidyMemory } from "./memoryConsolidate";
 import { buildConsolidationPrompt, validateConsolidation, type MemoryEntry, type NewMemory } from "./memoryLedger";
 
 const ok = <T,>(value: T): BrainAnswer<T> => ({
@@ -118,23 +118,20 @@ describe("tidying the queue", () => {
     expect(await tidyMemory("/repo")).toBeNull();
   });
 
-  it("tidies on its own only once the queue is long, and at most hourly", async () => {
-    const few = Array.from({ length: AUTO_TIDY_AT - 1 }, (_, i) => entry(`p${i}`, `Pending rule ${i}`));
-    const short = setup(few, { merges: [], drops: [] });
+  it("tidies on its own once more than ten are waiting, and not again until the queue changes", async () => {
+    const ten = Array.from({ length: TIDY_ABOVE }, (_, i) => entry(`p${i}`, `Pending rule ${i}`));
+    const short = setup(ten, { merges: [], drops: [] });
     await maybeTidyMemory("/repo", "/repo");
     expect(short.ask).not.toHaveBeenCalled();
 
-    const many = Array.from({ length: AUTO_TIDY_AT }, (_, i) => entry(`p${i}`, `Pending rule ${i}`));
-    const long = setup(many, { merges: [], drops: [] });
+    const eleven = [...ten, entry("p10", "Pending rule 10")];
+    const long = setup(eleven, { merges: [], drops: [] });
     await maybeTidyMemory("/repo", "/repo");
     await maybeTidyMemory("/repo", "/repo");
     expect(long.ask).toHaveBeenCalledTimes(1);
-  });
 
-  it("says what happened in plain words", () => {
-    expect(tidySummary({ combined: 8, into: 3, setAside: 12 })).toBe(
-      "Combined 8 proposals into 3, and set aside 12 that were only one task's steps or repeats. Nothing was approved; set-aside ones are under All.",
-    );
-    expect(tidySummary({ combined: 0, into: 0, setAside: 0 })).toMatch(/^Nothing to tidy/);
+    eleven.push(entry("p11", "Pending rule 11"));
+    await maybeTidyMemory("/repo", "/repo");
+    expect(long.ask).toHaveBeenCalledTimes(2);
   });
 });

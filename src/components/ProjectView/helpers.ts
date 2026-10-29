@@ -25,6 +25,7 @@ export type SideTab =
   | "agents"
   | "team"
   | "tools"
+  /** Retired: read from older snapshots and links, never shown. */
   | "outcomes";
 
 export interface TermSubTab extends TabNames {

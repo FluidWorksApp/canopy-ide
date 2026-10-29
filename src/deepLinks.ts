@@ -299,6 +299,8 @@ export function followLink(
     case "link":
       return { do: "nothing" };
     case "panel":
+      // Outcomes is a row in the status bar's usage popover now, not a panel.
+      if (link.panel === "outcomes") return { do: "nothing" };
       // Changes is now the first subview of Source control. Keep accepting old
       // notification URLs, but never route them to the retired rail entry.
       return {

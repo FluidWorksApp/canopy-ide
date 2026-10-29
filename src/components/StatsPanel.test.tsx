@@ -1,5 +1,14 @@
 import { describe, expect, it, vi } from "vitest";
 import { render, screen, waitFor } from "@testing-library/react";
+vi.mock("../outcomes", () => ({ outcomesReconcileDeps: {} }));
+vi.mock("../outcomes/reconcile", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../outcomes/reconcile")>()),
+  reconcileOutcomes: vi.fn(async () => ({ root: "/repo", sinceMs: 0, generatedAt: 0, spends: [], outcomes: [], receipts: [], mergedInWindow: 0, gitUnavailable: false, planTitles: new Map() })),
+  groupReport: vi.fn(() => ({
+    rows: [],
+    total: { key: "all", sessions: 9, costUsd: 30, merged: 4, costPerMerged: 6.5, receipts: {}, passRate: 0.75, reverted: 1, reworked: 0, revertRate: 0.11, reworkRate: 0, medianReviewHours: 3 },
+  })),
+}));
 import * as ipc from "../ipc";
 import { StatsPanel } from "./StatsPanel";
 
@@ -74,5 +83,10 @@ describe("StatsPanel layout", () => {
     ]);
     render(<StatsPanel visible roots={["/repo"]} />);
     expect(await screen.findByText("$151")).toBeTruthy();
+  });
+
+  it("sums up outcomes in one line, not a panel of its own", async () => {
+    render(<StatsPanel visible roots={["/repo"]} />);
+    expect(await screen.findByText("Last 30 days: 4 merged · $6.50 per merged change · 75% proven · 11% reverted")).toBeTruthy();
   });
 });
