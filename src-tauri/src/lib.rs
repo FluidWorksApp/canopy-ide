@@ -934,6 +934,7 @@ pub fn run() {
             git::git_show_at,
             git::git_rev_count,
             git::git_share_context,
+            git::git_project_checkouts,
             git::gh_pr_checkout,
             git::gh_pr_merge,
             git::gh_pr_close,
