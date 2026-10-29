@@ -15,7 +15,10 @@ test('progress is written step by step, the update id is current while it runs, 
    assert.deepEqual(input,payload);assert.equal(typeof ready,'function');
    assert.equal((await readFile(join(f.statusDir,'current'),'utf8')).trim(),payload.updateId);
    seen.push((await f.status()).step);
-   for(const step of ['gateway','gateway-ready','image']){onStep(step);await new Promise(resolve=>setTimeout(resolve,5));seen.push((await f.status()).step);}
+   // Steps are written in the background: wait for each to land (a fixed 5 ms
+   // was not enough on a loaded CI runner).
+   const landed=async step=>{let now;for(const end=Date.now()+2000;Date.now()<end;await new Promise(resolve=>setTimeout(resolve,2))){try{now=(await f.status()).step;}catch{}if(now===step)break;}return now;};
+   for(const step of ['gateway','gateway-ready','image']){onStep(step);seen.push(await landed(step));}
    return {code:'updated',host:{code:'updated',revision:payload.revision},image:{code:'updated'}};
   };
   const done=await runHostUpdate(f.file,{fs,statusDir:f.statusDir,update,now:()=>'2026-10-28T12:00:00.000Z'});

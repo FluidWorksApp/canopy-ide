@@ -51,13 +51,26 @@ describe("Remote access, signed in to Canopy", () => {
     setTeamIdentityFetchForTests(null);
   });
 
-  it("says the feature is waiting on the server instead of an error", async () => {
+  it.each(["not-on-server-yet", "Remote access is not configured"])(
+    "says links are waiting on the server, not an error (%s)",
+    async (message) => {
+      setTeamIdentityFetchForTests(async () => ({ user: { id: "u1", name: "VJ" } }));
+      commands([], null, message);
+      render(<RemoteSettings runInTerminal={() => {}} />);
+      await userEvent.click(await screen.findByRole("switch", { name: "Remote access" }));
+      const note = await screen.findByText(/Canopy links aren't live on Canopy's server yet/);
+      expect(note).toHaveClass("set-note");
+      expect(screen.queryByRole("button", { name: "Try again" })).toBeNull();
+      setTeamIdentityFetchForTests(null);
+    },
+  );
+
+  it("still offers Try again when the link really fails", async () => {
     setTeamIdentityFetchForTests(async () => ({ user: { id: "u1", name: "VJ" } }));
-    commands([], null, "not-on-server-yet");
+    commands([], null, "Can't reach Canopy's edge");
     render(<RemoteSettings runInTerminal={() => {}} />);
     await userEvent.click(await screen.findByRole("switch", { name: "Remote access" }));
-    expect(await screen.findByText(/Your Canopy link: not available on Canopy's server yet/)).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Try again" })).toBeInTheDocument();
+    expect(await screen.findByRole("button", { name: "Try again" })).toBeInTheDocument();
     setTeamIdentityFetchForTests(null);
   });
 });

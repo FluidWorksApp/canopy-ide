@@ -43,7 +43,10 @@ const set = (next: HooksState) => {
   listeners.forEach((fn) => fn());
 };
 
-export const workspaceHooksState = () => (dismissed ? ({ state: "unknown" } as HooksState) : hooks);
+// One object, not a fresh literal per call: useSyncExternalStore compares
+// snapshots by identity, and a new object each read re-renders forever.
+const DISMISSED: HooksState = { state: "unknown" };
+export const workspaceHooksState = () => (dismissed ? DISMISSED : hooks);
 export function subscribeWorkspaceHooks(fn: () => void): () => void {
   listeners.add(fn);
   return () => {

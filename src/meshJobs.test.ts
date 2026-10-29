@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { createMeshJobs, localRemoteJobs, localRemoteMessages, needsApproval, pickWorkspace, type JobSession, type MeshJobDeps, type RemoteJob, type RemoteMessage } from "./meshJobs";
+import { createMeshJobs, localIncomingJobs, localRemoteJobs, localRemoteMessages, needsApproval, pickWorkspace, type JobSession, type MeshJobDeps, type RemoteJob, type RemoteMessage } from "./meshJobs";
 import type { Device } from "./teamMessaging/client";
 import type { JobRequest, JobStatus, RosterAgent, RosterRequest } from "./teamMessaging/jobSchema";
 import type { TeamJobEvent } from "./teamMessaging/session";
@@ -127,6 +127,28 @@ describe("submitting a job", () => {
 });
 
 describe("receiving a job", () => {
+  it("keeps a waiting job across a reload, notification and all", async () => {
+    const data = new Map<string, string>();
+    const storage = { getItem: (k: string) => data.get(k) ?? null, setItem: (k: string, v: string) => void data.set(k, v) } as Storage;
+    const first = setup({ inboxStore: localIncomingJobs("k", () => storage) });
+    first.jobs.receive(incoming("bob", job({ workspace: "api" })));
+    await flush();
+    expect(first.jobs.inbox()).toHaveLength(1);
+
+    // The window reloads: a new coordinator over the same storage.
+    const second = setup({ inboxStore: localIncomingJobs("k", () => storage) });
+    expect(second.jobs.restore()).toEqual(new Set(["job-incoming-1"]));
+    expect(second.jobs.inbox().map((i) => i.job.title)).toEqual(["Fix flaky test"]);
+    expect(second.deps.post).toHaveBeenCalledWith(expect.objectContaining({ dedupeKey: "mesh-job:job-incoming-1" }));
+    // The same job arriving again is not a second card.
+    second.jobs.receive(incoming("bob", job({ workspace: "api" })));
+    await flush();
+    expect(second.jobs.inbox()).toHaveLength(1);
+
+    await second.jobs.decline("job-incoming-1");
+    expect(localIncomingJobs("k", () => storage).load()).toEqual([]);
+  });
+
   it("holds a teammate's job for approval — nothing runs until the user says so", async () => {
     const { jobs, deps, s } = setup();
     jobs.receive(incoming("bob", job({ workspace: "api" })));

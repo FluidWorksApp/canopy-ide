@@ -161,17 +161,32 @@ export function scopeBrief(scope: JobScope | undefined, placement: Placement): s
 
 /** The lookups projectCheckouts needs, injectable for tests. */
 export interface CheckoutLookups {
+  /** Every saved component's checkout, closed and hibernating projects too.
+   *  Rejects where it isn't served (a cloud workspace's host). */
+  all?: () => Promise<{ dir: string; rel: string; origin: string; main: boolean }[]>;
   share: (path: string) => Promise<{ root: string; rel: string; origin: string }>;
   worktrees: (repo: string) => Promise<{ path: string; is_main: boolean }[]>;
 }
 
 /** Every component of these projects with its checkout's origin and whether
  *  it is the main checkout. A component that is not a checkout (or that git
- *  cannot read) is left out: it can never match, so it is never guessed at. */
+ *  cannot read) is left out: it can never match, so it is never guessed at.
+ *  A closed or hibernating project counts: the job is about its repository
+ *  whether or not the user has it open. */
 export async function projectCheckouts(
   projects: readonly { name: string; components: readonly { path: string }[] }[],
-  look: CheckoutLookups = { share: ipc.gitShareContext, worktrees: ipc.gitWorktrees },
+  look: CheckoutLookups = { all: ipc.gitProjectCheckouts, share: ipc.gitShareContext, worktrees: ipc.gitWorktrees },
 ): Promise<Checkout[]> {
+  const saved = await look.all?.().catch(() => null);
+  if (saved) {
+    const byDir = new Map(saved.map((c) => [c.dir, c]));
+    return projects.flatMap((p) =>
+      p.components.flatMap((c) => {
+        const found = byDir.get(c.path);
+        return found ? [{ project: p.name, dir: c.path, rel: found.rel, origin: found.origin, main: found.main }] : [];
+      }),
+    );
+  }
   const mains = new Map<string, Promise<boolean>>();
   const isMain = (root: string) => {
     let known = mains.get(root);

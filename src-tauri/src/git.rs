@@ -2304,6 +2304,66 @@ pub async fn git_share_context(
     })
 }
 
+/// One saved project component's checkout, as an incoming mesh job matches it.
+#[derive(Serialize)]
+pub struct ProjectCheckout {
+    pub dir: String,
+    pub root: String,
+    pub rel: String,
+    pub origin: String,
+    pub main: bool,
+}
+
+/// The checkout of every component of every saved project — open, closed or
+/// hibernating — so a teammate's job finds its repository's project without
+/// the user opening it first. `git_share_context` can't: it is scoped to open
+/// projects. The paths come from the saved workspace, never from the caller.
+/// A component that is not a checkout with an origin is left out.
+#[tauri::command]
+pub async fn git_project_checkouts() -> Result<Vec<ProjectCheckout>, String> {
+    let store: Value =
+        serde_json::from_str(&crate::fsx::store_load().await?).map_err(|e| e.to_string())?;
+    let dirs: Vec<String> = store["projects"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .flat_map(|p| p["components"].as_array().cloned().unwrap_or_default())
+        .filter_map(|c| c["path"].as_str().map(str::to_owned))
+        .collect();
+    Ok(dirs
+        .into_iter()
+        .filter_map(|dir| project_checkout(&dir))
+        .collect())
+}
+
+fn project_checkout(dir: &str) -> Option<ProjectCheckout> {
+    let path = Path::new(dir);
+    if !path.is_dir() {
+        return None;
+    }
+    let read = |args: &[&str]| run(git(path).args(args)).ok().map(|s| s.trim().to_string());
+    let origin = read(&["remote", "get-url", "origin"]).filter(|o| !o.is_empty())?;
+    let root = read(&["rev-parse", "--show-toplevel"])?;
+    let rel = read(&["rev-parse", "--show-prefix"])?
+        .trim_end_matches('/')
+        .to_string();
+    // A linked worktree's git dir lives under the main checkout's common dir.
+    let main = match (
+        read(&["rev-parse", "--path-format=absolute", "--git-dir"]),
+        read(&["rev-parse", "--path-format=absolute", "--git-common-dir"]),
+    ) {
+        (Some(own), Some(common)) => own == common,
+        _ => true,
+    };
+    Some(ProjectCheckout {
+        dir: dir.to_owned(),
+        root,
+        rel,
+        origin,
+        main,
+    })
+}
+
 /// Check out a PR's head here. Ordinary branch switching wearing gh's coat, so
 /// it refuses in exactly the same ways and comes back as the same outcomes.
 ///
@@ -5749,6 +5809,47 @@ mod tests {
         assert_eq!(full_sha(Some(&"AB".repeat(20))), "ab".repeat(20));
         assert_eq!(full_sha(Some("abc")), "");
         assert_eq!(full_sha(None), "");
+    }
+
+    #[test]
+    fn project_checkout_reads_unborn_subfolders_and_worktrees() {
+        let dir = std::env::temp_dir().join(format!(
+            "canopy-project-checkout-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        std::fs::remove_dir_all(&dir).ok();
+        let repo = dir.join("repo");
+        std::fs::create_dir_all(repo.join("web")).unwrap();
+        let g = |args: &[&str]| {
+            run(git(&repo)
+                .args([
+                    "-c",
+                    "user.name=t",
+                    "-c",
+                    "user.email=t@t",
+                    "-c",
+                    "commit.gpgsign=false",
+                ])
+                .args(args))
+            .unwrap()
+        };
+        g(&["init", "-q"]);
+        // No origin: nothing to match. With one, an unborn repo still counts.
+        assert!(project_checkout(repo.to_str().unwrap()).is_none());
+        g(&["remote", "add", "origin", "git@github.com:acme/mono.git"]);
+        let web = project_checkout(repo.join("web").to_str().unwrap()).unwrap();
+        assert_eq!(
+            (web.rel.as_str(), web.origin.as_str(), web.main),
+            ("web", "git@github.com:acme/mono.git", true)
+        );
+        g(&["commit", "-q", "--allow-empty", "-m", "one"]);
+        let wt = dir.join("wt");
+        g(&["worktree", "add", "-q", "-b", "side", wt.to_str().unwrap()]);
+        let linked = project_checkout(wt.to_str().unwrap()).unwrap();
+        assert_eq!((linked.rel.as_str(), linked.main), ("", false));
+        assert!(project_checkout(dir.join("gone").to_str().unwrap()).is_none());
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]

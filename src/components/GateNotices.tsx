@@ -45,11 +45,10 @@ export function GateNotices({ ptyId, onEditRule }: Props) {
       {shown.map((n) => {
         const f = leadFinding(n.stamp);
         const ask = n.stamp.status === "needs-approval";
-        const warn = n.stamp.status === "warned";
         return (
           <div
             key={n.id}
-            className={`gate-notice ${ask ? "gate-notice-ask" : warn ? "gate-notice-warn" : "gate-notice-block"}`}
+            className={`gate-notice ${ask ? "gate-notice-ask" : "gate-notice-block"}`}
             role={ask ? "alertdialog" : "status"}
             aria-label={noticeTitle(n.stamp)}
           >
@@ -57,11 +56,6 @@ export function GateNotices({ ptyId, onEditRule }: Props) {
             <code className="gate-notice-action" title={n.stamp.action}>
               {actionText(n.stamp)}
             </code>
-            {warn && (
-              <div className="gate-notice-note">
-                This session read content from the web. Canopy is only warning — turn on blocking in Rules to stop it.
-              </div>
-            )}
             <div className="gate-notice-actions">
               {ask && (
                 <>
@@ -78,9 +72,9 @@ export function GateNotices({ ptyId, onEditRule }: Props) {
                   Allow once
                 </Button>
               )}
-              {(f?.kind === "rule" || warn) && onEditRule && (
-                <Button size="sm" variant="ghost" onClick={() => onEditRule(f?.ruleId)}>
-                  {warn ? "Open rules" : "Edit rule"}
+              {f?.kind === "rule" && onEditRule && (
+                <Button size="sm" variant="ghost" onClick={() => onEditRule(f.ruleId)}>
+                  Edit rule
                 </Button>
               )}
               {!ask && (

@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { buildScope, originMatches, parseRepoArg, place, projectCheckouts, scopeBrief, type Checkout } from "./jobScope";
 import { validJobRequest, validJobScope } from "./teamMessaging/jobSchema";
 
@@ -188,5 +188,35 @@ describe("reading this machine's checkouts", () => {
       { project: "api-wt", dir: "/a-wt", rel: "", origin: "git@github.com:acme/api.git", main: false },
       { project: "mono", dir: "/m/web", rel: "web", origin: "https://github.com/acme/mono", main: true },
     ]);
+  });
+
+  it("uses every saved project's checkout, closed or hibernating, when the desktop can list them", async () => {
+    const share = vi.fn(async () => {
+      throw new Error("path outside workspace scope");
+    });
+    const rows = await projectCheckouts(
+      [
+        { name: "api", components: [{ path: "/a" }] },
+        { name: "plain", components: [{ path: "/plain" }] },
+      ],
+      {
+        all: async () => [{ dir: "/a", rel: "", origin: "git@github.com:acme/api.git", main: true }],
+        share,
+        worktrees: async () => [],
+      },
+    );
+    expect(rows).toEqual([{ project: "api", dir: "/a", rel: "", origin: "git@github.com:acme/api.git", main: true }]);
+    expect(share).not.toHaveBeenCalled();
+  });
+
+  it("falls back to the open projects where the list isn't served", async () => {
+    const rows = await projectCheckouts([{ name: "api", components: [{ path: "/a" }] }], {
+      all: async () => {
+        throw new Error("unknown command");
+      },
+      share: async () => ({ root: "/a", rel: "", origin: "https://github.com/acme/api" }),
+      worktrees: async () => [{ path: "/a", is_main: true }],
+    });
+    expect(rows).toEqual([{ project: "api", dir: "/a", rel: "", origin: "https://github.com/acme/api", main: true }]);
   });
 });

@@ -16,7 +16,13 @@ const text = (error: unknown) => String(error instanceof Error ? error.message :
 export function notOnServerYet(error: unknown): boolean {
   if ((error as { notOnServerYet?: boolean } | null)?.notOnServerYet === true) return true;
   const message = text(error);
-  return message === NOT_ON_SERVER_YET || /^method not allowed$/i.test(message.trim());
+  return (
+    message === NOT_ON_SERVER_YET ||
+    /^method not allowed$/i.test(message.trim()) ||
+    // The route exists but the server hasn't been given what it needs yet
+    // (canopyide.dev's /api/remote before the edge is set up).
+    /^remote access is not configured$/i.test(message.trim())
+  );
 }
 
 /** The error to show for `feature` (a short noun phrase, e.g. "Readable
