@@ -29,6 +29,9 @@ const REMOTE_BRANCHED = new Set([
   // onPtyExit/onPtySpawned listen for the adapter's pty:exit/pty:spawned events
   // remotely instead of polling for them (ipc.ts).
   "pty_renderer_events",
+  // A workspace's git_share_context already reaches every project under
+  // /workspace; jobScope.projectCheckouts falls back to it (ipc.ts).
+  "git_project_checkouts",
 ]);
 
 const SRC = join(__dirname, "..");

@@ -4118,9 +4118,13 @@ export interface ShareContext {
 export const gitShareContext = (path: string) =>
   invoke<ShareContext>("git_share_context", { path });
 /** Every saved project component's checkout (open, closed or hibernating),
- *  for placing an incoming mesh job. Desktop only. */
+ *  for placing an incoming mesh job. Desktop only: a workspace's host already
+ *  answers git_share_context for every project under /workspace, so there the
+ *  caller falls back to that. */
 export const gitProjectCheckouts = () =>
-  invoke<{ dir: string; root: string; rel: string; origin: string; main: boolean }[]>("git_project_checkouts");
+  isRemoteHost()
+    ? Promise.reject(new Error("git_project_checkouts is desktop only"))
+    : invoke<{ dir: string; root: string; rel: string; origin: string; main: boolean }[]>("git_project_checkouts");
 /** A repo-relative file's real path, refused when it does not exist or when
  *  any symlink on the way leads out of `repo`. Use before opening a file a
  *  link or a teammate's card named. */
