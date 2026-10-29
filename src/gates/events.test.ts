@@ -15,6 +15,7 @@ vi.mock("../ledger", () => ({ queryLedger: m.queryLedger, appendLedger: m.append
 
 import { parseAgentEvent } from "../../shared/notifications";
 import { allowOnce, denyNotice, gateNotices, noticeTitle, observeGateEvents, resetGateNoticesForTests } from "./events";
+import { visibleNotices } from "./useGateNotices";
 
 const raw = (status: string, findings: unknown[], id = "e1") =>
   JSON.stringify({
@@ -60,6 +61,14 @@ describe("gate events", () => {
     vi.advanceTimersByTime(400);
     expect(m.ptyWrite).toHaveBeenLastCalledWith(7, "\r");
     expect(gateNotices()[0].resolved).toBe("approved");
+  });
+
+  it("keeps warnings off the terminal; blocks still show", () => {
+    const TRIFECTA = [{ kind: "trifecta", class: "outbound-write", label: "sends data out of this computer after this session read untrusted content (WebSearch)" }];
+    observeGateEvents([parseAgentEvent(raw("warned", TRIFECTA, "w1")), parseAgentEvent(raw("blocked", RULE, "b1"))]);
+    expect(gateNotices()).toHaveLength(2);
+    expect(visibleNotices(gateNotices(), 7).map((n) => n.id)).toEqual(["b1"]);
+    expect(m.postAttention).not.toHaveBeenCalledWith(expect.objectContaining({ title: expect.stringContaining("Heads up") }));
   });
 
   it("records a block in this window's ledger only when the hook's write didn't land here", async () => {
