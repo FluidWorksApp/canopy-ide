@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { render, screen, waitFor } from "@testing-library/react";
+import * as ipc from "../ipc";
 import { StatsPanel } from "./StatsPanel";
 
 vi.mock("../ipc", () => ({
@@ -65,5 +66,13 @@ describe("StatsPanel layout", () => {
     );
     const cell = container.querySelector(".plan-reset-wide")!;
     expect(cell.getAttribute("title")).toBe(cell.textContent);
+  });
+
+  it("shows plan credits a remote host reports as a numeric string (#692)", async () => {
+    vi.mocked(ipc.planUsage).mockResolvedValueOnce([
+      { agent: "codex", profile: "default", plan: null, windows: [], credits: "150.5" as unknown as number, observed: 1 },
+    ]);
+    render(<StatsPanel visible roots={["/repo"]} />);
+    expect(await screen.findByText("$151")).toBeTruthy();
   });
 });

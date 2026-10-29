@@ -64,6 +64,8 @@ describe("workspace hooks", () => {
     expect(workspaceHooksState()).toMatchObject({ state: "failed", agents: ["a1"], summary: "default: Configuration is invalid" });
     dismissWorkspaceHooks();
     expect(workspaceHooksState()).toEqual({ state: "unknown" });
+    // useSyncExternalStore needs the same snapshot on every read, or it loops.
+    expect(workspaceHooksState()).toBe(workspaceHooksState());
   });
 
   it("says nothing when every hook is current", async () => {
