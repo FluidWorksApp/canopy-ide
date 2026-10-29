@@ -129,7 +129,9 @@ test('metadata, stale sweep, history list, delete and clear history',async()=>{
  assert.equal((await cmd.task_get({runId:mine.envelope.runId})).attempts[0].state,'reserved');
  assert.equal((await cmd.task_get({runId:notHistory.envelope.runId})).attempts[0].state,'reserved');
  await assert.rejects(cmd.task_interrupt_stale({currentInstance:'  '}),/app instance is required/);
- // history lists only metadata.history true/1, newest first.
+ // history lists only metadata.history true/1, newest first. The sweep above
+ // can share this millisecond, and a tie falls back to the random run id.
+ const swept=Date.now();while(Date.now()<=swept)await new Promise(r=>setTimeout(r,1));
  const updated=await cmd.task_update_metadata({runId:notHistory.envelope.runId,metadata:{history:true,label:'x'}});
  assert.deepEqual(updated.metadata,{history:true,label:'x'});
  const history=await cmd.task_list_history({limit:200});
