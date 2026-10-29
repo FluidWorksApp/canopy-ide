@@ -18,6 +18,21 @@
   color: var(--warn);
 }
 
+/* "Tidy up N proposals": the button, then what it does in small print. */
+.memory-tidy {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 10px 8px;
+  font-size: 11px;
+  line-height: 1.4;
+  color: var(--text-dim);
+}
+
+.memory-tidy > button {
+  flex-shrink: 0;
+}
+
 .memory-review-badge {
   margin-left: 6px;
   color: var(--on-accent);
