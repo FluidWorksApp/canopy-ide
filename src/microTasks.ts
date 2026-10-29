@@ -803,6 +803,8 @@ export interface SyncMergePayload {
   overlap: string[];
   /** Files the merge itself would conflict in. */
   conflicts: string[];
+  /** Untracked files the incoming commits add with different contents. */
+  untracked?: string[];
 }
 
 /** The status bar's "Resolve & merge": the base has moved, and the one-click
@@ -844,12 +846,23 @@ export const syncMergeTask: MicroTaskDef<SyncMergePayload> = {
     const conflicts = p.conflicts.length
       ? `The merge is expected to conflict in ${p.conflicts.join(", ")}. `
       : "";
+    const untracked = p.untracked?.length
+      ? `These files are not in git here, and the incoming commits add them with different ` +
+        `contents: ${p.untracked.join(", ")}. git refuses to merge over them. Before merging, move ` +
+        `each one to the same path with \`.canopy-local\` appended. After the merge commit, compare ` +
+        `each copy with the merged file: delete the copy if everything in it is already in the ` +
+        `merged file (an older draft of it, say); otherwise fold what only the copy has into the ` +
+        `merged file, leaving that uncommitted like any other work in progress, then delete the ` +
+        `copy. If you can't tell what to keep, leave the copy in place and name it in your summary. ` +
+        `Never discard content that exists only in the user's copy. `
+      : "";
     return oneLine(
       `The branch ${branch} in this checkout is behind ${p.base}, and the one-click merge in ` +
         `Canopy could not do it alone. Bring ${p.base} in with a real merge — \`git fetch\` then ` +
         `\`git merge ${p.base}\` — onto ${branch} in this checkout. If a merge is already in ` +
         `progress here (MERGE_HEAD exists), continue that one rather than starting another. ` +
         overlap +
+        untracked +
         conflicts +
         `Resolve every conflict by editing the files and removing the markers. Preserve the intent ` +
         `of BOTH sides rather than picking one: read enough surrounding code, and the base's side ` +

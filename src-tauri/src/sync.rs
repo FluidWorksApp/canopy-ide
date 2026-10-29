@@ -77,6 +77,13 @@ pub struct SyncProbe {
     /// Not a conflict — a warning that `git merge` will refuse to start until
     /// they're committed or stashed.
     pub overlap: Vec<String>,
+    /// Untracked files here that the incoming commits add. git refuses to
+    /// merge over them, and `status --porcelain` folds an untracked folder
+    /// into one entry, so `overlap` cannot see them.
+    pub untracked: Vec<String>,
+    /// The part of `untracked` already identical to the base's copy: nothing
+    /// is lost by replacing them, so the one-click merge does.
+    pub untracked_same: Vec<String>,
     /// Newest-first subjects of the incoming commits, capped.
     pub subjects: Vec<String>,
     /// Why no merge can be offered (detached HEAD, a merge already in
@@ -184,6 +191,57 @@ fn dirty_paths(top: &Path) -> Vec<String> {
         out.push(part[3..].to_string());
     }
     out
+}
+
+/// Untracked files the incoming commits add, and which of them already hold
+/// exactly the base's copy. Only regular files can be "the same": a symlink or
+/// anything unreadable counts as different, so it is never replaced silently.
+fn untracked_in_way(top: &Path, base: &str) -> (Vec<String>, Vec<String>) {
+    let Ok(added) = run(git(top).args([
+        "diff",
+        "--name-only",
+        "--diff-filter=A",
+        "--no-renames",
+        "-z",
+        &format!("HEAD...{base}"),
+    ])) else {
+        return (Vec::new(), Vec::new());
+    };
+    let added: std::collections::HashSet<&str> = nul_fields(&added).collect();
+    if added.is_empty() {
+        return (Vec::new(), Vec::new());
+    }
+    let Ok(others) = run(git(top).args(["ls-files", "--others", "--exclude-standard", "-z"]))
+    else {
+        return (Vec::new(), Vec::new());
+    };
+    let in_way: Vec<String> = nul_fields(&others)
+        .filter(|p| added.contains(p))
+        .take(CONFLICT_LIMIT)
+        .map(str::to_string)
+        .collect();
+    let same = in_way
+        .iter()
+        .filter(|p| {
+            std::fs::symlink_metadata(top.join(p)).is_ok_and(|m| m.is_file())
+                && match (
+                    run(git(top).args(["hash-object", "--", p])),
+                    run(git(top).args([
+                        "rev-parse",
+                        "--verify",
+                        "--quiet",
+                        &format!("{base}:{p}"),
+                    ])),
+                ) {
+                    (Ok(here), Ok(theirs)) => {
+                        !here.trim().is_empty() && here.trim() == theirs.trim()
+                    }
+                    _ => false,
+                }
+        })
+        .cloned()
+        .collect();
+    (in_way, same)
 }
 
 /// Does this git have `merge-tree --write-tree`? Exit status tells us apart:
@@ -464,6 +522,8 @@ pub(crate) fn probe(
         state: SyncState::Current,
         conflicts: Vec::new(),
         overlap: Vec::new(),
+        untracked: Vec::new(),
+        untracked_same: Vec::new(),
         subjects: Vec::new(),
         blocked: None,
         fetch_error,
@@ -520,6 +580,7 @@ pub(crate) fn probe(
                 .cloned()
                 .collect();
         }
+        (probe.untracked, probe.untracked_same) = untracked_in_way(top, &base);
     }
 
     probe.state = match dry_run_merge(top, &base) {
@@ -564,18 +625,63 @@ pub(crate) fn apply(top: &Path, base: &str) -> Result<SyncOutcome, String> {
     ]))
     .map_err(|_| format!("base branch \"{base}\" doesn't exist in this repository"))?;
 
+    // Untracked files the merge adds. Copies identical to the base's are moved
+    // into the git dir for the merge and put back if git refuses; any other
+    // copy is the user's work, and only they or an agent decide what to keep.
+    let (in_way, same) = untracked_in_way(top, base);
+    let differ: Vec<&String> = in_way.iter().filter(|p| !same.contains(p)).collect();
+    if !differ.is_empty() {
+        return Err(format!(
+            "{} not in git yet would be replaced by {base}'s version: {}. Move {} aside, or use Resolve & merge.",
+            if differ.len() == 1 { "A file".to_string() } else { format!("{} files", differ.len()) },
+            differ.iter().map(|p| p.as_str()).collect::<Vec<_>>().join(", "),
+            if differ.len() == 1 { "it" } else { "them" },
+        ));
+    }
+    let aside_dir = git_dir(top)
+        .ok_or("can't find this repository's git directory")?
+        .join("canopy-sync-aside");
+    let mut aside: Vec<(PathBuf, PathBuf)> = Vec::new();
+    if !same.is_empty() {
+        let _ = std::fs::remove_dir_all(&aside_dir);
+        std::fs::create_dir_all(&aside_dir).map_err(|e| format!("can't set files aside: {e}"))?;
+    }
+    for (i, p) in same.iter().enumerate() {
+        let (from, to) = (top.join(p), aside_dir.join(i.to_string()));
+        if let Err(e) = std::fs::rename(&from, &to) {
+            for (from, to) in &aside {
+                let _ = std::fs::rename(to, from);
+            }
+            return Err(format!("can't set {p} aside: {e}"));
+        }
+        aside.push((from, to));
+    }
+    let put_back = |aside: &[(PathBuf, PathBuf)]| {
+        for (from, to) in aside {
+            let _ = std::fs::rename(to, from);
+        }
+        let _ = std::fs::remove_dir(&aside_dir);
+    };
+
     // --no-edit: take git's own merge message rather than opening an editor
     // there is no terminal for. Fast-forward stays enabled, so a branch with
     // no commits of its own just moves up without a merge commit.
-    let out = crate::process_capture::output(
+    let out = match crate::process_capture::output(
         git(top).args(["merge", "--no-edit", base]),
         crate::process_capture::DEFAULT_STREAM_MAX,
-    )?;
+    ) {
+        Ok(out) => out,
+        Err(e) => {
+            put_back(&aside);
+            return Err(e);
+        }
+    };
     crate::process_capture::reject_truncated(&out, "git merge")?;
     let stdout = String::from_utf8_lossy(&out.stdout).trim().to_string();
     let stderr = String::from_utf8_lossy(&out.stderr).trim().to_string();
 
     if out.status.success() {
+        let _ = std::fs::remove_dir_all(&aside_dir);
         return Ok(SyncOutcome {
             merged: true,
             conflicts: Vec::new(),
@@ -597,8 +703,12 @@ pub(crate) fn apply(top: &Path, base: &str) -> Result<SyncOutcome, String> {
             .unwrap_or_default();
 
     if conflicts.is_empty() {
+        put_back(&aside);
         return Err(if stderr.is_empty() { stdout } else { stderr });
     }
+    // The merge started: the base's copies are in place, so the set-aside
+    // ones (identical) are no longer needed.
+    let _ = std::fs::remove_dir_all(&aside_dir);
     Ok(SyncOutcome {
         merged: false,
         conflicts,
@@ -884,6 +994,85 @@ mod tests {
         let p = probe(&f.dir, false, Some("main")).unwrap();
         assert_eq!(p.overlap, vec!["g.txt"], "the file git will refuse over");
         assert_eq!(p.dirty, 1);
+    }
+
+    /// Seen 2026-10-28: main added docs/designs/x.md while an untracked draft of
+    /// it sat here. Porcelain folds the folder to `docs/designs/`, so the probe
+    /// said "merges cleanly" and git then refused.
+    fn untracked_draft(f: &Fixture, mine: &str) {
+        std::fs::create_dir_all(f.dir.join("docs/designs")).unwrap();
+        let head = f.git(&["rev-parse", "HEAD"]);
+        f.git(&["checkout", "-q", "main"]);
+        f.write("docs/designs/x.md", "final\n");
+        f.commit("design");
+        f.git(&["checkout", "-q", "feat"]);
+        assert_eq!(f.git(&["rev-parse", "HEAD"]), head);
+        std::fs::create_dir_all(f.dir.join("docs/designs")).unwrap();
+        f.write("docs/designs/x.md", mine);
+        f.write("docs/designs/notes.md", "only mine\n");
+    }
+
+    #[test]
+    fn untracked_copies_of_incoming_files_are_named_inside_untracked_folders() {
+        let f = Fixture::new();
+        untracked_draft(&f, "draft\n");
+        let p = probe(&f.dir, false, Some("main")).unwrap();
+        assert_eq!(p.untracked, vec!["docs/designs/x.md"]);
+        assert!(
+            p.untracked_same.is_empty(),
+            "a different draft is not the same file"
+        );
+
+        let err = apply(&f.dir, "main").unwrap_err();
+        assert!(
+            err.contains("docs/designs/x.md") && err.contains("not in git yet"),
+            "got: {err}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(f.dir.join("docs/designs/x.md")).unwrap(),
+            "draft\n"
+        );
+        assert!(!f.dir.join(".git").join("MERGE_HEAD").exists());
+    }
+
+    #[test]
+    fn untracked_copies_identical_to_the_base_are_replaced_by_the_merge() {
+        let f = Fixture::new();
+        untracked_draft(&f, "final\n");
+        let p = probe(&f.dir, false, Some("main")).unwrap();
+        assert_eq!(p.untracked, vec!["docs/designs/x.md"]);
+        assert_eq!(p.untracked_same, vec!["docs/designs/x.md"]);
+
+        let out = apply(&f.dir, "main").unwrap();
+        assert!(out.merged);
+        assert_eq!(
+            std::fs::read_to_string(f.dir.join("docs/designs/x.md")).unwrap(),
+            "final\n"
+        );
+        assert_eq!(
+            f.git(&["ls-files", "docs/designs/x.md"]),
+            "docs/designs/x.md"
+        );
+        assert_eq!(
+            std::fs::read_to_string(f.dir.join("docs/designs/notes.md")).unwrap(),
+            "only mine\n"
+        );
+        assert!(!f.dir.join(".git").join("canopy-sync-aside").exists());
+    }
+
+    #[test]
+    fn identical_copies_come_back_when_git_refuses_for_another_reason() {
+        let f = Fixture::new();
+        f.advance_main("g.txt", "two\n", "teammate edits g");
+        untracked_draft(&f, "final\n");
+        f.write("g.txt", "my uncommitted g\n");
+
+        assert!(apply(&f.dir, "main").is_err());
+        assert_eq!(
+            std::fs::read_to_string(f.dir.join("docs/designs/x.md")).unwrap(),
+            "final\n"
+        );
+        assert!(!f.dir.join(".git").join("canopy-sync-aside").exists());
     }
 
     #[test]
