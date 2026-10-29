@@ -35,7 +35,6 @@ import {
 import { agentCliFor } from "../projects";
 import { getSettings, subscribeSettings } from "../settings";
 import { regenerateInstructionSection, rememberInstructionFile } from "../memoryInstructionSync";
-import { tidyMemory, tidySummary, type TidyResult } from "../memoryConsolidate";
 import { Button, Segmented, Select, TextInput } from "./ui";
 import "./memoryPanel.css";
 
@@ -169,35 +168,6 @@ export function MemoryPanel({ roots, onOpenSession, load }: MemoryPanelProps) {
   };
   const ledgerRoots = () => [...new Set(rows.map((r) => r.root))];
 
-  // Each project's queue is its own ledger, so each is tidied on its own.
-  const [tidying, setTidying] = useState(false);
-  const [tidied, setTidied] = useState<string | null>(null);
-  const tidy = async () => {
-    setTidying(true);
-    setNotice(null);
-    setTidied(null);
-    try {
-      const queues = [...new Set(rows.filter((r) => needsReview(r.entry)).map((r) => r.root))];
-      const total: TidyResult = { combined: 0, into: 0, setAside: 0 };
-      let answered = false;
-      for (const root of queues) {
-        const r = await tidyMemory(root);
-        if (!r) continue;
-        answered = true;
-        total.combined += r.combined;
-        total.into += r.into;
-        total.setAside += r.setAside;
-      }
-      await reload();
-      if (answered) setTidied(tidySummary(total));
-      else setNotice("Couldn't tidy right now — the brain didn't answer, or another window is already tidying.");
-    } catch (e) {
-      setNotice(String(e instanceof Error ? e.message : e));
-    } finally {
-      setTidying(false);
-    }
-  };
-
   const act = async (row: MemoryRow, what: string, fn: () => Promise<unknown>) => {
     setBusy(`${row.entry.data.memoryId}:${what}`);
     setNotice(null);
@@ -284,19 +254,6 @@ export function MemoryPanel({ roots, onOpenSession, load }: MemoryPanelProps) {
           </Select>
         </div>
       </div>
-      {view === "review" && reviewCount >= 3 && (
-        <div className="memory-tidy">
-          <Button size="sm" disabled={tidying || !!busy} onClick={() => void tidy()}>
-            {tidying ? "Tidying…" : `Tidy up ${reviewCount} proposals`}
-          </Button>
-          <span>Combines repeats and sets aside one-task notes. You still approve what's left.</span>
-        </div>
-      )}
-      {tidied && (
-        <p className="memory-intro" role="status">
-          {tidied}
-        </p>
-      )}
       {notice && (
         <p className="memory-error" role="alert">
           {notice}
