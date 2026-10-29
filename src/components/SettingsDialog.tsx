@@ -51,7 +51,7 @@ import { clearCompanionView, clearRun } from "../companionSession";
 import { forgetAllMemories } from "../companionMemory";
 import { Mascot } from "./Mascot";
 import { Button, Checkbox, Field, Radio, Row, Segmented, Select, Stepper, Switch, TextInput } from "./ui";
-import { serverFeatureError } from "../accountErrors";
+import { notOnServerYet, serverFeatureError } from "../accountErrors";
 import { peekTeamIdentity, subscribeTeamIdentity, teamIdentity, type TeamIdentity } from "../teamIdentity";
 
 /** tunnel.rs's provider id for the link through Canopy's edge. */
@@ -2811,6 +2811,8 @@ function CanopyLinkSettings() {
   const url = linked && tunnel.url ? remotePath(tunnel.url) : null;
   const connected = linked && tunnel.running && !!tunnel.url && !tunnel.message;
   const failed = linked && !tunnel.running && !!tunnel.message;
+  // Canopy's server doesn't offer links yet: a quiet note, not a failure.
+  const pending = failed && notOnServerYet(serverFeatureError(tunnel.message, "Your Canopy link"));
 
   const connect = (port: number) =>
     ipc
@@ -2848,9 +2850,11 @@ function CanopyLinkSettings() {
     ? null
     : connected
       ? "Connected. Open it on your phone and sign in to Canopy."
-      : failed
-        ? serverFeatureError(tunnel.message, "Your Canopy link").message
-        : (tunnel.message ?? "Connecting…");
+      : pending
+        ? "Canopy links aren't live on Canopy's server yet. Nothing to fix on your side; until then, use On this network below."
+        : failed
+          ? serverFeatureError(tunnel.message, "Your Canopy link").message
+          : (tunnel.message ?? "Connecting…");
 
   return (
     <>
@@ -2861,11 +2865,11 @@ function CanopyLinkSettings() {
         <div className="set-inline">
           <Switch checked={on} disabled={busy} aria-label="Remote access" onChange={toggle} />
           {state && (
-            <span className={failed ? "set-warn" : "set-note"} role="status">
+            <span className={failed && !pending ? "set-warn" : "set-note"} role="status">
               {state}
             </span>
           )}
-          {failed && status && (
+          {failed && !pending && status && (
             <Button size="sm" disabled={busy} onClick={() => void connect(status.port)}>
               Try again
             </Button>
