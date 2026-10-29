@@ -7,7 +7,7 @@ import {liveTeamSessions,subscribeTeamJobs} from "./teamMessaging/session";
 import {createAgentChat} from "./teamMessaging/agentChat";
 import {setChatHandoff} from "./teamMessaging/chatHandoff";
 import {teamName} from "./teamMessaging/unread";
-import {createMeshJobs,localRemoteJobs,localRemoteMessages,type MeshJobs} from "./meshJobs";
+import {createMeshJobs,localIncomingJobs,localRemoteJobs,localRemoteMessages,type MeshJobs} from "./meshJobs";
 import {peekWorkspaceList,refreshWorkspaceList,restoreWorkspaceList} from "./remoteExecution/workspaceListCache";
 import {MeshJobInbox} from "./components/MeshJobInbox";
 import {projectCheckouts} from "./jobScope";
@@ -94,9 +94,9 @@ import {
   type RouteShareActionDetail,
 } from "./gitLinkRouting";
 import {
-  attentionItems,
   badgeFor,
   buildAttentionItems,
+  attentionItems,
   dismissToast,
   forProject,
   isOutstanding,
@@ -952,9 +952,22 @@ export default function App() {
     },
     remoteJobs: localRemoteJobs(),
     remoteMessages: localRemoteMessages(),
+    inboxStore: localIncomingJobs(),
     reportReply: ipc.meshRelayReply,
   });
   const meshJobs = meshJobsRef.current;
+  useEffect(() => {
+    // Jobs left waiting by the last session come back; a notification whose
+    // job didn't (saved before jobs were) is withdrawn rather than left
+    // pointing at nothing.
+    const waiting = meshJobs.restore();
+    for (const item of attentionItems()) {
+      const key = item.dedupeKey;
+      if (key?.startsWith("mesh-job:") && isOutstanding(item) && !waiting.has(key.slice("mesh-job:".length))) {
+        resolveAttentionByKey(key, "withdrawn");
+      }
+    }
+  }, [meshJobs]);
   useEffect(() => subscribeTeamJobs((event) => meshJobs.receive(event)), [meshJobs]);
   // Every agent knows what every other agent just did (src/awareness): one
   // engine for the window, on every agent turn end. The board asks the mesh

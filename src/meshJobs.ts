@@ -110,6 +110,8 @@ export interface MeshJobDeps {
   remoteJobs?: RemoteJobStore;
   /** Durable record of agent messages sent to cloud workspaces, for their replies. */
   remoteMessages?: RemoteMessageStore;
+  /** Durable copy of the approval inbox, so a waiting job outlives a reload. */
+  inboxStore?: IncomingJobStore;
   /** Type a cloud agent's reply into the terminal that messaged it, tagged
    *  ref {kind: "relay", id: messageId} (ipc.meshRelayReply). */
   reportReply?: (ptyId: number, instance: string, messageId: string, text: string) => Promise<unknown>;
@@ -182,6 +184,34 @@ export function localRemoteJobs(key = "canopy:mesh-remote-jobs:v1", storage: () 
 }
 export function localRemoteMessages(key = "canopy:mesh-remote-messages:v1", storage: () => Storage = () => localStorage): RemoteMessageStore {
   return localRecords<RemoteMessage>(key, (r) => r.messageId, storage);
+}
+
+/** Jobs waiting on the user, kept across reloads and restarts: the
+ *  notification that announces one is durable, so the job must be too. */
+export interface IncomingJobStore {
+  load(): IncomingJob[];
+  save(jobs: IncomingJob[]): void;
+}
+export function localIncomingJobs(key = "canopy:mesh-inbox:v1", storage: () => Storage = () => localStorage): IncomingJobStore {
+  return {
+    load: () => {
+      try {
+        const rows = JSON.parse(storage().getItem(key) ?? "[]");
+        return Array.isArray(rows)
+          ? rows.filter((r) => r && typeof r.job?.id === "string" && typeof r.received === "number" && r.received + WORKSPACE_TTL_MS > Date.now())
+          : [];
+      } catch {
+        return [];
+      }
+    },
+    save: (jobs) => {
+      try {
+        storage().setItem(key, JSON.stringify(jobs));
+      } catch {
+        /* quota: the in-memory inbox still shows it */
+      }
+    },
+  };
 }
 
 /** A job someone else sent this account, waiting on the user. */
@@ -304,7 +334,10 @@ export function createMeshJobs(deps: MeshJobDeps) {
   const seen = new Set<string>();
   let inbox: IncomingJob[] = [];
   const listeners = new Set<() => void>();
-  const changed = () => listeners.forEach((fn) => fn());
+  const changed = () => {
+    deps.inboxStore?.save(inbox);
+    listeners.forEach((fn) => fn());
+  };
 
   const sessionFor = (team: string, account: string) =>
     deps.sessions().find((s) => s.team === team && s.user === account);
@@ -798,20 +831,39 @@ export function createMeshJobs(deps: MeshJobDeps) {
       void sendStatus(event.team, event.user, event.sender.device, job.id, "declined", "Their Canopy has too many jobs waiting for approval.");
       return;
     }
-    const sender = event.sender.name ?? "A teammate";
-    incoming.attentionId = deps.post({
+    incoming.attentionId = announce(incoming);
+    inbox = [...inbox, incoming];
+    changed();
+  }
+
+  const announce = ({ job, sameAccount, sender }: IncomingJob) =>
+    deps.post({
       kind: "question",
       tone: "info",
       source: "team",
       title: sameAccount
         ? `Choose a project for a job from your other machine: ${job.title}`
-        : `${sender} wants your agent to: ${job.title}`,
-      body: "Review it in the job inbox before anything runs.",
+        : `${sender.name ?? "A teammate"} wants your agent to: ${job.title}`,
+      body: "It's waiting in the bottom-right corner. Nothing runs until you approve it.",
       where: { kind: "panel", panel: "team" },
       dedupeKey: `mesh-job:${job.id}`,
     });
-    inbox = [...inbox, incoming];
-    changed();
+
+  /** Bring back the jobs that were waiting when the window last closed, each
+   *  with its notification. Returns the ids now waiting, so the caller can
+   *  withdraw notifications for jobs that are gone. Called once, after mount:
+   *  posting a notification during render would update other components. */
+  function restore(): Set<string> {
+    const saved = (deps.inboxStore?.load() ?? []).filter((i) => !seen.has(i.job.id));
+    for (const item of saved) {
+      seen.add(item.job.id);
+      item.attentionId = announce(item);
+    }
+    if (saved.length) {
+      inbox = [...inbox, ...saved];
+      changed();
+    }
+    return new Set(inbox.map((i) => i.job.id));
   }
 
   function take(jobId: string) {
@@ -876,6 +928,7 @@ export function createMeshJobs(deps: MeshJobDeps) {
     approve,
     decline,
     relocate,
+    restore,
     runEnded,
     inbox: () => inbox,
     subscribe: (fn: () => void) => {
