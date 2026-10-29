@@ -229,9 +229,6 @@
 .gate-notice-ask {
   border-left-color: var(--danger);
 }
-.gate-notice-warn {
-  border-left-color: var(--text-dim);
-}
 .gate-notice-title {
   font-weight: 600;
   line-height: 1.35;
@@ -242,10 +239,6 @@
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
-}
-.gate-notice-note {
-  font-size: 11px;
-  color: var(--text-dim);
 }
 .gate-notice-actions {
   display: flex;
