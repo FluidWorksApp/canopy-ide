@@ -44,11 +44,14 @@ import {
 } from "./memoryLedger";
 import { getSettings } from "./settings";
 import { claimLease } from "./memoryLease";
+import { AUTO_TIDY_AT, maybeTidyMemory } from "./memoryConsolidate";
 import { turnFileChanges, type TurnFileChange } from "./turnDiff";
 import * as ipc from "./ipc";
 import type { AgentEventData } from "../shared/notifications";
 
 export const EXTRACT_WINDOW_MS = 10 * 60 * 1000;
+/** With a long review queue, proposals below this confidence are not added. */
+const CROWDED_MIN_CONFIDENCE = 0.75;
 /** Buffered turns kept per session; older ones are summarised by their
  *  files alone rather than growing the prompt without bound. */
 const MAX_BUFFERED_TURNS = 6;
@@ -137,6 +140,8 @@ export interface MemoryExtractDeps {
   transcriptTail: (sessionId: string, cli: string, roots: string[]) => Promise<ipc.TranscriptLine[]>;
   /** What the turn changed on disk between its rollback snapshots. */
   turnChanges: (t: { cwd: string; sessionId: string; startedAt: number; endedAt: number }) => Promise<TurnFileChange[] | null>;
+  /** Tidy the review queue once it is long (memoryConsolidate.ts). */
+  tidy: (root: string, cwd: string) => Promise<void>;
 }
 
 const realDeps: MemoryExtractDeps = {
@@ -148,6 +153,7 @@ const realDeps: MemoryExtractDeps = {
   lease: (root, key, ttlMs) => claimLease(root, key, ttlMs),
   transcriptTail: (sessionId, agent, roots) => ipc.sessionTranscriptTail({ sessionId, agent, roots, maxBytes: 128 * 1024 }),
   turnChanges: (t) => turnFileChanges(t),
+  tidy: maybeTidyMemory,
 };
 let deps = realDeps;
 
@@ -258,9 +264,13 @@ async function extract(sessionId: string): Promise<void> {
   if (!answer.ok || !answer.value?.length) return;
 
   const known = new Set(live.map((e) => contentKey(e.data.text)));
+  // A long queue raises the bar: only what the brain is sure of joins it.
+  const crowded = live.filter((e) => memoryStatus(e) !== "approved").length >= AUTO_TIDY_AT;
+  let added = 0;
   for (const m of answer.value) {
     const key = contentKey(m.text);
     if (!key || known.has(key)) continue;
+    if (crowded && m.confidence < CROWDED_MIN_CONFIDENCE) continue;
     known.add(key);
     const verdict = await checkContradictions(s.cwd, m.text, m.why, existing);
     await deps
@@ -278,8 +288,10 @@ async function extract(sessionId: string): Promise<void> {
         ...(untrusted.length ? { untrusted } : {}),
         ...(verdict ? { verdict } : {}),
       })
+      .then(() => added++)
       .catch(() => {});
   }
+  if (added) await deps.tidy(s.root, s.cwd).catch(() => {});
 }
 
 /** One background call, and only when the keyword prefilter found approved

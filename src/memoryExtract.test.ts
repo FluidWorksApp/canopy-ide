@@ -69,6 +69,7 @@ let existing: MemoryEntry[];
 let lease: ReturnType<typeof vi.fn>;
 let tail: ReturnType<typeof vi.fn>;
 let changes: ReturnType<typeof vi.fn>;
+let tidy: ReturnType<typeof vi.fn>;
 
 beforeEach(() => {
   localStorage.clear();
@@ -87,7 +88,9 @@ beforeEach(() => {
   lease = vi.fn(async () => true);
   tail = vi.fn(async () => []);
   changes = vi.fn(async () => null);
+  tidy = vi.fn(async () => {});
   setMemoryExtractDepsForTests({
+    tidy: tidy as never,
     ask: ask as never,
     list: async () => existing,
     append: append as never,
@@ -217,6 +220,37 @@ describe("memory extraction after a turn", () => {
     onTurnEnd(turn());
     await settle();
     expect(append).not.toHaveBeenCalled();
+  });
+});
+
+describe("a long review queue", () => {
+  const waiting = (n: number) =>
+    Array.from({ length: n }, (_, i) => ({ ...approved(`p${i}`, `Pending rule number ${i} about deploys`), status: "proposed" }));
+
+  it("tidies the queue after adding to it", async () => {
+    onTurnEnd(turn());
+    await settle();
+    expect(append).toHaveBeenCalledTimes(1);
+    expect(tidy).toHaveBeenCalledWith("/repo", "/repo/wt");
+  });
+
+  it("only lets confident proposals join a queue that is already long", async () => {
+    existing = waiting(12);
+    ask.mockImplementation(async () =>
+      ok([
+        { type: "fact", text: "Staging runs in eu-west-1 only", why: "", scope: "team", confidence: 0.6 },
+        { type: "decision", text: "Tenant isolation uses Postgres row level security", why: "", scope: "team", confidence: 0.9 },
+      ]),
+    );
+    onTurnEnd(turn());
+    await settle();
+    expect(append.mock.calls.map(([, m]) => m.text)).toEqual(["Tenant isolation uses Postgres row level security"]);
+  });
+
+  it("asks for durable knowledge, not the steps of the task underway", async () => {
+    onTurnEnd(turn());
+    await settle();
+    expect(ask.mock.calls[0][0].prompt).toContain("which\n  issues or pull requests to leave open");
   });
 });
 

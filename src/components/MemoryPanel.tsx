@@ -35,6 +35,7 @@ import {
 import { agentCliFor } from "../projects";
 import { getSettings, subscribeSettings } from "../settings";
 import { regenerateInstructionSection, rememberInstructionFile } from "../memoryInstructionSync";
+import { tidyMemory, tidySummary, type TidyResult } from "../memoryConsolidate";
 import { Button, Segmented, Select, TextInput } from "./ui";
 import "./memoryPanel.css";
 
@@ -93,6 +94,7 @@ function authorLine(e: MemoryEntry): string {
   const session = shortSession(e.data.provenance?.sessionId ?? e.author.sessionId);
   switch (e.data.source) {
     case "brain":
+      if (e.data.consolidatedFrom?.length) return `Combined by the brain from ${e.data.consolidatedFrom.length} proposals`;
       return `Noticed by the brain in ${cli ? `a ${cli} session` : "an agent session"}${session ? ` (${session})` : ""}`;
     case "agent":
       return `Proposed by an agent${session ? ` in session ${session}` : e.author.ptyId != null ? ` in terminal ${e.author.ptyId}` : ""}`;
@@ -166,6 +168,35 @@ export function MemoryPanel({ roots, onOpenSession, load }: MemoryPanelProps) {
     }
   };
   const ledgerRoots = () => [...new Set(rows.map((r) => r.root))];
+
+  // Each project's queue is its own ledger, so each is tidied on its own.
+  const [tidying, setTidying] = useState(false);
+  const [tidied, setTidied] = useState<string | null>(null);
+  const tidy = async () => {
+    setTidying(true);
+    setNotice(null);
+    setTidied(null);
+    try {
+      const queues = [...new Set(rows.filter((r) => needsReview(r.entry)).map((r) => r.root))];
+      const total: TidyResult = { combined: 0, into: 0, setAside: 0 };
+      let answered = false;
+      for (const root of queues) {
+        const r = await tidyMemory(root);
+        if (!r) continue;
+        answered = true;
+        total.combined += r.combined;
+        total.into += r.into;
+        total.setAside += r.setAside;
+      }
+      await reload();
+      if (answered) setTidied(tidySummary(total));
+      else setNotice("Couldn't tidy right now — the brain didn't answer, or another window is already tidying.");
+    } catch (e) {
+      setNotice(String(e instanceof Error ? e.message : e));
+    } finally {
+      setTidying(false);
+    }
+  };
 
   const act = async (row: MemoryRow, what: string, fn: () => Promise<unknown>) => {
     setBusy(`${row.entry.data.memoryId}:${what}`);
@@ -253,6 +284,19 @@ export function MemoryPanel({ roots, onOpenSession, load }: MemoryPanelProps) {
           </Select>
         </div>
       </div>
+      {view === "review" && reviewCount >= 3 && (
+        <div className="memory-tidy">
+          <Button size="sm" disabled={tidying || !!busy} onClick={() => void tidy()}>
+            {tidying ? "Tidying…" : `Tidy up ${reviewCount} proposals`}
+          </Button>
+          <span>Combines repeats and sets aside one-task notes. You still approve what's left.</span>
+        </div>
+      )}
+      {tidied && (
+        <p className="memory-intro" role="status">
+          {tidied}
+        </p>
+      )}
       {notice && (
         <p className="memory-error" role="alert">
           {notice}
@@ -387,6 +431,13 @@ function MemoryItem({
           <p className="memory-text">{d.text}</p>
           {d.why && <p className="memory-why">Because {d.why.replace(/^because\s+/i, "")}</p>}
         </>
+      )}
+      {d.retiredBy === "consolidation" && (s === "rejected" || s === "superseded") && (
+        <p className="memory-meta">
+          {s === "superseded"
+            ? `Tidied: combined into “${byId.get(d.supersededBy ?? "")?.entry.data.text ?? "a newer proposal"}”`
+            : `Tidied: set aside — ${d.retiredReason ?? "not durable"}`}
+        </p>
       )}
       {s === "quarantined" && (
         <p className="memory-warn">
