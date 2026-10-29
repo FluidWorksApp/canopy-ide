@@ -67,7 +67,11 @@ describe("the brain's tidy plan", () => {
 
 describe("tidying the queue", () => {
   it("combines repeats into one proposal and sets aside one-task notes — approving nothing", async () => {
-    const rows = [entry("a", "Deploy on Tuesdays"), entry("b", "Only deploy on a Tuesday"), entry("c", "Close PR 12 after the relay is up")];
+    const rows = [
+      entry("a", "Deploy on Tuesdays", {}, { supersedes: ["old-1"] }),
+      entry("b", "Only deploy on a Tuesday", {}, { contradicts: ["old-2"] }),
+      entry("c", "Close PR 12 after the relay is up"),
+    ];
     const { append, revise } = setup(rows, {
       merges: [{ ids: ["a", "b"], type: "decision", text: "Deploy only on Tuesdays", why: "fewer surprises", scope: "team" }],
       drops: [{ id: "c", reason: "one task's next step" }],
@@ -77,6 +81,8 @@ describe("tidying the queue", () => {
     const [, merged] = append.mock.calls[0];
     expect(merged).toMatchObject({ text: "Deploy only on Tuesdays", consolidatedFrom: ["a", "b"], provenance: { files: ["a.ts", "b.ts"] } });
     expect(merged.untrusted).toBeUndefined();
+    // Still warns about, and on approval retires, what its sources would replace.
+    expect(merged.verdict).toEqual({ contradicts: ["old-2"], supersedes: ["old-1"] });
     expect(revise).toHaveBeenCalledWith("/repo", "a", expect.objectContaining({ status: "superseded", data: { supersededBy: "merged-1", retiredBy: "consolidation" } }));
     expect(revise).toHaveBeenCalledWith("/repo", "c", expect.objectContaining({ status: "rejected", data: { retiredBy: "consolidation", retiredReason: "one task's next step" } }));
     expect(revise.mock.calls.some(([, , p]) => p.status === "approved")).toBe(false);
@@ -87,6 +93,20 @@ describe("tidying the queue", () => {
     const { append } = setup(rows, { merges: [{ ids: ["a", "b"], type: "decision", text: "Deploy only on Tuesdays", scope: "team" }], drops: [] });
     await tidyMemory("/repo");
     expect(append.mock.calls[0][1].untrusted).toEqual(["read a web page"]);
+  });
+
+  it("leaves alone a proposal someone approved while the brain was thinking", async () => {
+    const before = [entry("a", "Deploy on Tuesdays"), entry("b", "Only deploy on a Tuesday"), entry("c", "Close PR 12")];
+    const after = [{ ...before[0], status: "approved" }, before[1], { ...before[2], status: "rejected" }];
+    const { append, revise } = setup(before, {
+      merges: [{ ids: ["a", "b"], type: "decision", text: "Deploy only on Tuesdays", scope: "team" }],
+      drops: [{ id: "c", reason: "one task's next step" }],
+    });
+    let reads = 0;
+    setConsolidateDepsForTests({ list: async () => (reads++ === 0 ? before : after), append: append as never, revise: revise as never, lease: async () => true, ask: (async (req: { validate: (v: unknown) => unknown }) => ok(req.validate({ merges: [{ ids: ["a", "b"], type: "decision", text: "Deploy only on Tuesdays", scope: "team" }], drops: [{ id: "c", reason: "x" }] }))) as never });
+    expect(await tidyMemory("/repo")).toEqual({ combined: 0, into: 0, setAside: 0 });
+    expect(append).not.toHaveBeenCalled();
+    expect(revise).not.toHaveBeenCalled();
   });
 
   it("leaves approved memories out of the plan and stands aside for another window", async () => {

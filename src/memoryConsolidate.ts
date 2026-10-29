@@ -86,11 +86,15 @@ export async function tidyMemory(root: string, cwd: string = root): Promise<Tidy
     validate: (v) => validateConsolidation(v, offered),
   });
   if (!answer.ok || !answer.value) return null;
-  const byId = new Map(pending.map((e) => [e.data.memoryId, e]));
+  // The brain took a while: a proposal someone approved or rejected in the
+  // meantime is theirs now, and is left alone.
+  const still = new Set((await deps.list(root)).filter(needsReview).map((e) => e.data.memoryId));
+  const byId = new Map(pending.filter((e) => still.has(e.data.memoryId)).map((e) => [e.data.memoryId, e]));
   const result: TidyResult = { combined: 0, into: 0, setAside: 0 };
 
   for (const m of answer.value.merges) {
     const sources = m.ids.map((id) => byId.get(id)).filter((e): e is MemoryEntry => !!e);
+    if (sources.length < 2) continue;
     const untrusted = [
       ...new Set(
         sources.flatMap((e) =>
@@ -99,6 +103,10 @@ export async function tidyMemory(root: string, cwd: string = root): Promise<Tidy
       ),
     ];
     const files = [...new Set(sources.flatMap((e) => e.data.provenance?.files ?? []))].slice(0, 50);
+    // What the sources would replace or disagree with in approved memory, so
+    // the combined entry still warns, and approving it still retires them.
+    const contradicts = [...new Set(sources.flatMap((e) => e.data.contradicts ?? []))];
+    const supersedes = [...new Set(sources.flatMap((e) => e.data.supersedes ?? []))];
     const merged = await deps.append(root, {
       type: m.type,
       text: m.text,
@@ -108,7 +116,8 @@ export async function tidyMemory(root: string, cwd: string = root): Promise<Tidy
       source: "brain",
       author: { kind: "brain", name: "memory" },
       provenance: { files },
-      consolidatedFrom: m.ids,
+      consolidatedFrom: sources.map((e) => e.data.memoryId),
+      ...(contradicts.length || supersedes.length ? { verdict: { contradicts, supersedes } } : {}),
       ...(untrusted.length ? { untrusted } : {}),
     });
     for (const e of sources) {
@@ -122,6 +131,7 @@ export async function tidyMemory(root: string, cwd: string = root): Promise<Tidy
     result.into += 1;
   }
   for (const d of answer.value.drops) {
+    if (!byId.has(d.id)) continue;
     await deps.revise(root, d.id, {
       status: "rejected",
       expiresAt: tombstoneUntil(deps.now()),
