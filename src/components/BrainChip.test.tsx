@@ -50,7 +50,9 @@ describe("BrainChip", () => {
     setState({ state: "connected", cli: "x", label: "Brain CLI", checkedAt: 1 });
     render(<BrainChip />);
     const chip = screen.getByRole("button", { name: "Brain: Brain CLI, Connected" });
-    expect(chip).toHaveTextContent("Brain CLI");
+    // Just the dot in the bar; the name is in its tooltip.
+    expect(chip).toHaveTextContent("");
+    expect(chip).toHaveAttribute("title", "Brain: Brain CLI — Connected");
     await userEvent.click(chip);
     const pop = screen.getByRole("dialog", { name: "Brain" });
     const rows = within(pop).getAllByRole("row");
@@ -97,7 +99,7 @@ describe("BrainChip", () => {
     try {
       render(<BrainChip />);
       const chip = screen.getByRole("button", { name: "Connect your brain (Signed out)" });
-      expect(chip).toHaveTextContent("Connect your brain");
+      expect(chip).toHaveAttribute("title", "Connect your brain — Signed out");
       await userEvent.click(chip);
     } finally {
       window.removeEventListener(OPEN_BRAIN_CONNECT_EVENT, opened);

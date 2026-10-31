@@ -12309,6 +12309,32 @@ input[type="radio"]:disabled {
   height: 16px;
 }
 
+/* The status bar's resource graph (LoadGraph.tsx): CPU in the accent,
+   memory dimmer beneath it; both turn the warning colour on a shortage. */
+.load-graph {
+  display: block;
+  overflow: visible;
+}
+.load-graph polyline {
+  fill: none;
+  stroke-width: 1.4;
+  stroke-linejoin: round;
+  stroke-linecap: round;
+}
+.load-graph-cpu {
+  stroke: var(--accent);
+}
+.load-graph-mem {
+  stroke: var(--text-dim);
+  opacity: 0.8;
+}
+.load-graph.is-low polyline {
+  stroke: var(--warn);
+}
+.load-graph.is-critical polyline {
+  stroke: var(--danger);
+}
+
 .status-res {
   font-variant-numeric: tabular-nums;
 }

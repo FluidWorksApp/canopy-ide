@@ -95,3 +95,31 @@ export function desktopFree(app: AppStats): { text: string; className?: string; 
       (level === "critical" ? " Memory is nearly full." : level === "low" ? " Memory is getting low." : ""),
   };
 }
+
+/** CPU and memory use as fractions of what's available (0–1), for the
+ *  status bar's little graph. Null when that number isn't reported. On a
+ *  cloud workspace both are the workspace's own; on a desktop, memory is the
+ *  computer's and CPU is Canopy's share of its cores. */
+export function loadSample(app: AppStats, cores: number): { cpu: number | null; mem: number | null } {
+  const clamp = (x: number) => Math.min(1, Math.max(0, x));
+  const ws = app.workspace;
+  if (ws) {
+    const cpu =
+      ws.cpus && ws.cpusUsed != null
+        ? ws.cpusUsed / ws.cpus
+        : ws.cpus && ws.cpusAvailable != null
+          ? (ws.cpus - ws.cpusAvailable) / ws.cpus
+          : Number.isFinite(app.cpu)
+            ? app.cpu / 100
+            : null;
+    const used = ws.workingSetBytes ?? app.mem_bytes;
+    const mem = ws.memoryLimitBytes ? used / ws.memoryLimitBytes : null;
+    return { cpu: cpu == null ? null : clamp(cpu), mem: mem == null ? null : clamp(mem) };
+  }
+  const cpu = Number.isFinite(app.cpu) && cores > 0 ? clamp(app.cpu / (100 * cores)) : null;
+  const mem = app.system && app.system.totalBytes > 0 ? clamp(1 - app.system.availableBytes / app.system.totalBytes) : null;
+  return { cpu, mem };
+}
+
+/** Samples kept for the graph: about two minutes at the monitor's pace. */
+export const LOAD_SAMPLES = 30;

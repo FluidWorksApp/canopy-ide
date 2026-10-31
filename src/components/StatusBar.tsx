@@ -46,7 +46,8 @@ import {
   type LoadScope,
 } from "../resourceLoad";
 import { nextCpuStreak, selfOwnerId } from "../resourceAttribution";
-import { desktopFree, reportsAvailability, workspaceChip } from "../resourceChip";
+import { desktopFree, LOAD_SAMPLES, loadSample, reportsAvailability, workspaceChip } from "../resourceChip";
+import { LoadGraph, type LoadPoint } from "./LoadGraph";
 import { WorkspaceResourcesPanel } from "./WorkspaceResources";
 import { Mascot } from "./Mascot";
 import { StatsPanel } from "./StatsPanel";
@@ -251,6 +252,8 @@ export const StatusBar = memo(function StatusBar({
   // Consecutive polls with the workspace's CPU nearly all used: the chip only
   // warns about a sustained shortage, not one busy build step.
   const [cpuLowStreak, setCpuLowStreak] = useState(0);
+  // The last couple of minutes of CPU and memory use, for the chip's graph.
+  const [load, setLoad] = useState<LoadPoint[]>([]);
   const [stats, setStats] = useState<ipc.ClaudeSessionStats | null>(null);
   const [modelMenu, setModelMenu] = useState(false);
   // The pending switch, held for confirmation. `id` is absent for a picker:
@@ -385,6 +388,7 @@ export const StatusBar = memo(function StatusBar({
     if (!visible) return;
     const sub = ipc.onAppStats((stats) => {
       setCpuLowStreak((n) => nextCpuStreak(n, stats.workspace?.cpusAvailable, stats.workspace?.cpus));
+      setLoad((prev) => [...prev, loadSample(stats, navigator.hardwareConcurrency || 1)].slice(-LOAD_SAMPLES));
       setApp(stats);
     });
     return () => void sub.then((fn) => fn());
@@ -791,6 +795,13 @@ export const StatusBar = memo(function StatusBar({
     ? workspaceChip(app.workspace, selfId, cpuLowStreak)
     : null;
   const freeHere = app && !app.workspace ? desktopFree(app) : null;
+  // The graph says "short" in colour; the tooltip says how short.
+  const shortage = [...(wsChip?.parts ?? []), ...(freeHere ? [freeHere] : [])].map((p) => p.className);
+  const loadTone: "low" | "critical" | undefined = shortage.includes("res-critical")
+    ? "critical"
+    : shortage.includes("res-low") || appLoad?.cpu || appLoad?.mem
+      ? "low"
+      : undefined;
 
   // `rev-parse --abbrev-ref HEAD` answers a literal "HEAD" off a branch, which
   // the tray used to print as if it were one. It is the snapshot state the Git
@@ -1060,24 +1071,7 @@ export const StatusBar = memo(function StatusBar({
               setBreakdown((v) => !v);
             }}
           >
-            {wsChip ? wsChip.parts.map((part, i) => (
-              <span key={i}>
-                {i > 0 && " · "}
-                <span className={part.className}>{part.text}</span>
-              </span>
-            )) : <>
-            <span className={appLoad?.cpu ? "bd-hot" : undefined}>
-              {Number.isFinite(app.cpu) ? fixedNumber(app.cpu, 0) : "—"}% cpu
-            </span>{" "}
-            ·{" "}
-            <span className={appLoad?.mem ? "bd-hot" : undefined}>
-              {Number.isFinite(app.mem_bytes) ? fmtMem(app.mem_bytes) : "—"}
-            </span>
-            {freeHere && <>
-              {" "}·{" "}
-              <span className={freeHere.className}>{freeHere.text}</span>
-            </>}
-            </>}
+            <LoadGraph points={load} slots={LOAD_SAMPLES} tone={loadTone} />
           </button>
           {breakdown && (
             <div
