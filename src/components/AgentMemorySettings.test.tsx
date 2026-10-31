@@ -44,7 +44,7 @@ describe("AgentMemorySettings", () => {
         4 * GIB,
       ),
     );
-    expect(screen.getByText(/cap future allowance grants/i)).toBeTruthy();
-    expect(screen.getByText(/only monitors memory/i)).toBeTruthy();
+    // No explanatory paragraph under the controls.
+    expect(screen.queryByText(/cap future allowance grants/i)).toBeNull();
   });
 });

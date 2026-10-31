@@ -58,7 +58,7 @@ describe("Remote access, signed in to Canopy", () => {
       commands([], null, message);
       render(<RemoteSettings runInTerminal={() => {}} />);
       await userEvent.click(await screen.findByRole("switch", { name: "Remote access" }));
-      const note = await screen.findByText(/Canopy links aren't live on Canopy's server yet/);
+      const note = await screen.findByText("Not live yet — use On this network.");
       expect(note).toHaveClass("set-note");
       expect(screen.queryByRole("button", { name: "Try again" })).toBeNull();
       setTeamIdentityFetchForTests(null);

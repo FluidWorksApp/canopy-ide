@@ -18,15 +18,13 @@ const backend = (saved: boolean) =>
 it("saves a pasted token to the backend and never keeps it on screen", async () => {
   backend(false);
   render(<PlaywrightTokenSetting />);
-  expect(await screen.findByText(/Chrome asks you to approve each connection/)).toBeTruthy();
-  const field = screen.getByLabelText("Skip Chrome's approval:") as HTMLInputElement;
+  const field = (await screen.findByLabelText("Skip Chrome's approval:")) as HTMLInputElement;
   await waitFor(() => expect(field.disabled).toBe(false));
   expect(field.type).toBe("password");
   fireEvent.change(field, { target: { value: "  synthetic-token_123  " } });
   fireEvent.click(screen.getByRole("button", { name: "Save" }));
   await screen.findByText(/token saved in Keychain/);
   expect(mocks.invoke).toHaveBeenCalledWith("chrome_extension_token_set", { token: "synthetic-token_123" });
-  expect(screen.getByText(/Chrome connects without asking/)).toBeTruthy();
   expect(document.body.innerHTML).not.toContain("synthetic-token_123");
   expect(window.localStorage.length).toBe(0);
 });
@@ -37,7 +35,7 @@ it("clears a saved token", async () => {
   fireEvent.click(await screen.findByRole("button", { name: "Clear" }));
   await screen.findByLabelText("Skip Chrome's approval:");
   expect(mocks.invoke).toHaveBeenCalledWith("chrome_extension_token_clear");
-  expect(screen.getByText(/Chrome asks you to approve each connection/)).toBeTruthy();
+  expect(screen.queryByText(/token saved in Keychain/)).toBeNull();
 });
 
 it("opens the extension page, and explains where the token is when Chrome cannot be opened", async () => {
