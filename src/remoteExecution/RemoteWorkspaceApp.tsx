@@ -95,7 +95,7 @@ export function RemoteWorkspaceApp() {
       setToken(""); setPrincipal(result.principal); setWritable(result.scope !== "view"); setWorkspaces(result.workspaces);
       setWorkspaceId(result.workspaces[0]?.id ?? ""); setClient(connection);
     }); }}>
-      <h1>Your workspace, on your host</h1><p>Agents, repositories, and accounts stay on the Linux VM. This client displays only the work you open.</p>
+      <h1>Your workspace, on your host</h1>
       <label>Host endpoint<input value={endpoint} onChange={event => setEndpoint(event.target.value)} required /></label>
       <label>Access token<input type="password" autoComplete="off" value={token} onChange={event => setToken(event.target.value)} required /></label>
       <button disabled={busy}>Connect</button>

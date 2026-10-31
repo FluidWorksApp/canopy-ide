@@ -33,7 +33,6 @@ function UpdateToastImpl({
       <div className="update-head">
         <strong>Canopy {update.info.version}</strong> is available
       </div>
-      <p className="update-summary">A new build is ready. Review what changed, then update when your agents are at a safe stopping point.</p>
       <button className="update-release-link" onClick={onOpenReleaseNotes}>
         View release notes <span aria-hidden="true">↗</span>
       </button>
@@ -101,9 +100,7 @@ function ReleaseNotesToastImpl({ release, onOpen, onDismiss }: ReleaseNotesToast
         <ul className="release-notes-list">
           {highlights.map((line) => <li key={line}>{line}</li>)}
         </ul>
-      ) : (
-        <p className="release-notes-fallback">See the improvements, fixes, and technical details in the full release notes.</p>
-      )}
+      ) : null}
       <button className="release-notes-open" onClick={onOpen}>
         Read the full release on GitHub <span aria-hidden="true">↗</span>
       </button>
