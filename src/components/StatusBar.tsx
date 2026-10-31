@@ -78,24 +78,6 @@ const STATS_PANEL_WIDTH = 452;
  *  what it wouldn't show you and naming a panel to go open instead. */
 const BRANCH_MENU_PREVIEW = 12;
 
-/** The chip tooltip's split of the total, one line per slice. Empty when the
- *  core predates the breakdown (or for a remote workspace). */
-function appBreakdownLines(app: ipc.AppStats): string {
-  const parts: [string, ipc.AppStatsPart | undefined][] = [
-    ["Core", app.core],
-    ["UI (WebKit)", app.webviews],
-    ["Terminals & agents", app.children],
-  ];
-  return parts
-    .map(([label, part]) =>
-      part
-        ? `${label}: ${fmtMem(part.mem_bytes)} · ${fixedNumber(part.cpu, 0)}% cpu · ` +
-          `${part.procs} process${part.procs === 1 ? "" : "es"}\n`
-        : "",
-    )
-    .join("");
-}
-
 const fmtMem = (bytes: number) =>
   bytes >= 1024 * 1024 * 1024
     ? `${(bytes / 1024 ** 3).toFixed(1)} GB`
@@ -1048,24 +1030,16 @@ export const StatusBar = memo(function StatusBar({
         <span className="status-item status-res status-model-anchor">
           <button
             className="status-model-btn"
+            // Numbers only; the breakdown it opens has the rest.
             title={wsChip ? wsChip.title : app.workspace
-              ? `Remote workspace: ${app.workspace.available ? "agents, shells, builds and desktop" : "resources unavailable"}. CPU is a percentage of the workspace CPU allocation. Click for workspace resources.`
-              : withLoadNote(
-              `${app.includes_webviews ? "canopy" : "canopy lower bound"}: ` +
-                `${app.procs} process${app.procs === 1 ? "" : "es"}. ` +
-                `Memory is charged physical footprint on macOS (resident memory elsewhere). ` +
-                `Click for the per-project breakdown.\n` +
-                appBreakdownLines(app) +
-                "\n" +
-                (app.includes_webviews
-                  ? `Includes WebView helper processes (on macOS: WebContent, ` +
-                    `Graphics and Networking, which Activity Monitor lists as separate rows).`
-                  : `Does not include WebContent, Graphics or Networking: macOS runs ` +
-                    `those as separate WebKit processes, and they could not be ` +
-                    `attributed to Canopy in this launch. Activity Monitor shows them ` +
-                    `as separate rows; add them to this lower bound for the OS-level Canopy total.`),
-              appLoad ? loadNote("app", appLoad) : "",
-            ) + (freeHere ? `\n${freeHere.title}` : "")}
+              ? app.workspace.available
+                ? `Remote workspace: ${Number.isFinite(app.cpu) ? fixedNumber(app.cpu, 0) : "—"}% CPU · ${fmtMem(app.mem_bytes)}`
+                : "Remote workspace: resources unavailable"
+              : [
+                  `Canopy: ${Number.isFinite(app.cpu) ? fixedNumber(app.cpu, 0) : "—"}% CPU · ${Number.isFinite(app.mem_bytes) ? fmtMem(app.mem_bytes) : "—"}${app.includes_webviews ? "" : " (without WebKit helpers)"}`,
+                  freeHere?.title,
+                  appLoad?.hot ? "Unusually heavy" : "",
+                ].filter(Boolean).join("\n")}
             onClick={(e) => {
               anchorMenu(e);
               setBreakdown((v) => !v);

@@ -61,24 +61,18 @@ export function workspaceChip(ws: Workspace & { workingSetBytes: number }, selfI
       : `${fmtBytes(ws.workingSetBytes)} memory in use`;
   const cpu =
     ws.cpusAvailable != null && ws.cpus
-      ? `${fmtCores(ws.cpusAvailable)} of ${fmtAllocated(ws.cpus)} free`
+      ? `${fixedNumber(ws.cpusAvailable, 1)} of ${fmtAllocated(ws.cpus)} free`
       : ws.cpusUsed != null
         ? `${fmtCores(ws.cpusUsed)} in use`
         : null;
+  // Numbers only, one line each; the breakdown it opens has the rest.
   const title = [
-    `Cloud workspace: ${mem}${cpu ? `; CPU ${cpu}` : ""}.`,
-    you ? `Your terminals use ${fmtBytes(you.memoryBytes)} and ${fmtCores(you.cpusUsed ?? 0)}.` : "",
-    ws.reclaimableBytes ? `${fmtBytes(ws.reclaimableBytes)} of cached files isn't counted as in use: it's freed automatically when needed.` : "",
-    memLevel === "critical"
-      ? "Memory is nearly full: agents and builds may be stopped."
-      : memLevel === "low"
-        ? "Memory is getting low."
-        : "",
-    cpuLow ? "CPU has been nearly fully used for a while, so things may run slowly." : "",
-    "Click for who is using what.",
+    `Cloud workspace: ${[mem, cpu, you ? `you ${fmtBytes(you.memoryBytes)}` : null].filter(Boolean).join(" · ")}`,
+    memLevel === "critical" ? "Memory nearly full" : memLevel === "low" ? "Memory low" : "",
+    cpuLow ? "CPU busy for a while" : "",
   ]
     .filter(Boolean)
-    .join(" ");
+    .join("\n");
   return { parts, title };
 }
 
@@ -91,8 +85,8 @@ export function desktopFree(app: AppStats): { text: string; className?: string; 
     text: `${fmtBytes(app.system.availableBytes)} free`,
     className: availabilityClass(level),
     title:
-      `This computer has ${fmtBytes(app.system.availableBytes)} of ${fmtBytes(app.system.totalBytes)} memory free.` +
-      (level === "critical" ? " Memory is nearly full." : level === "low" ? " Memory is getting low." : ""),
+      `${fmtBytes(app.system.availableBytes)} of ${fmtBytes(app.system.totalBytes)} free on this computer` +
+      (level === "critical" ? "\nMemory nearly full" : level === "low" ? "\nMemory low" : ""),
   };
 }
 
