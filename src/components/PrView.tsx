@@ -2449,8 +2449,8 @@ export function PrView({
                     onClick={() => launch(prReviewTask, reviewPayload())}>
                     {prReviewTask.icon} Review this for me
                   </Button>
-                  <span className="pr-files-note">
-                    risk-ranked, findings staged as drafts, nothing posted
+                  <span className="pr-files-note" title="Risk-ranked; findings are staged as drafts.">
+                    nothing posted
                   </span>
                 </div>
               )}
@@ -2563,13 +2563,11 @@ export function PrView({
                   {conv.threads.length > liveThreads.length && (
                     <div className="pr-rail-empty">
                       {conv.threads.length - liveThreads.length} resolved
-                      thread(s) hidden.
                     </div>
                   )}
                   {unanchored.length > 0 && (
                     <div className="pr-rail-empty">
-                      {unanchored.length} thread(s) whose line no longer exists
-                      — listed above, not in the diff.
+                      {unanchored.length} outdated
                     </div>
                   )}
                 </div>
@@ -2606,10 +2604,6 @@ export function PrView({
                         </span>
                       </div>
                     ))}
-                    <div className="pr-rail-empty">
-                      Its terminal is in this project's Tasks panel; it closes
-                      itself when done.
-                    </div>
                   </div>
                 )}
 
@@ -2622,8 +2616,7 @@ export function PrView({
                   </div>
                   {loop.rounds.length === 0 && (
                     <div className="pr-rail-empty">
-                      No rounds yet. A round validates each comment, fixes the
-                      cause, replies, and pushes — then waits for you.
+                      No rounds yet.
                     </div>
                   )}
                   {loop.rounds.map((r) => (
@@ -2798,9 +2791,7 @@ export function PrView({
               )}
             </span>
             {totalChanged > AUTO_EXPAND_TOTAL && (
-              <span className="pr-files-note">
-                large diff — files collapsed for speed
-              </span>
+              <span className="pr-files-note">collapsed</span>
             )}
             <span className="git-spacer" />
             {/* Re-reviewing means reading what changed since you last looked,
@@ -2992,7 +2983,7 @@ export function PrView({
                 <span className="pr-verdict-hint">
                   {blockingDrafts > 0
                     ? `${blockingDrafts} blocking`
-                    : `${drafts.length} ${drafts.length === 1 ? "nit" : "nits"}, nothing blocking`}
+                    : `${drafts.length} ${drafts.length === 1 ? "nit" : "nits"}`}
                   {" — whichever verdict you pick posts "}
                   {drafts.length === 1 ? "it" : `all ${drafts.length}`}.
                 </span>
@@ -3321,8 +3312,7 @@ function PrLinkRail({
       </div>
       {error && (
         <div className="pr-rail-empty">
-          Stack status could not be refreshed. The last known relationships are
-          still shown.
+          Stack may be stale.
         </div>
       )}
       {groups.map((g) => (

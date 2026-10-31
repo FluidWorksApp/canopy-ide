@@ -551,7 +551,7 @@ export function TasksPanel({
                 <div
                   className={`task-row task-row-built-in is-${effect}`}
                   key={t.id}
-                  title={`${t.blurb ?? ""} ${EFFECT_HEADING[effect]}. Runs from its own surface — ${t.surfaceNote ?? "see its tab"}, which supplies what it works on.`.trim()}
+                  title={`${t.blurb ?? ""} ${EFFECT_HEADING[effect]}.`.trim()}
                 >
                   <span className="task-icon">{t.icon}</span>
                   <span className="task-label task-label-dim">{t.label}</span>

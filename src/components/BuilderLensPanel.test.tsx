@@ -309,7 +309,7 @@ describe("BuilderLensPanel — layers and notices", () => {
 
     // Who claims is the signed-in team member, not a typed name.
     expect(screen.queryByLabelText("Your name")).toBeNull();
-    expect(await screen.findByText(/You’re signed in as Alex/)).toBeTruthy();
+    expect((await screen.findByText("Others’ agents need owner approval.")).getAttribute("title")).toMatch(/Signed in as Alex/);
     fireEvent.click(screen.getByRole("button", { name: "I own sign-in & accounts" }));
     expect(await screen.findByText("Owned by Alex")).toBeTruthy();
     expect(

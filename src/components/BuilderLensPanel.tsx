@@ -829,7 +829,6 @@ function WrongSection({
           {phase.kind === "diagnosing" ? "Looking into it…" : "Find the cause"}
         </Button>
       </div>
-      <p className="builder-lens-note">Finding the cause never changes your project. Nothing is fixed until you say so.</p>
       {phase.kind === "failed" && <p className="builder-lens-note" role="alert">Couldn’t look into it: {phase.message}</p>}
       {phase.kind === "diagnosed" && (
         <>
@@ -918,7 +917,7 @@ function WrongSection({
       )}
       {phase.kind === "fixing" && (
         <div className="builder-lens-fixing" role="status">
-          <p>Build is working on the fix. When it’s done, check the preview.</p>
+          <p>Fixing… check the preview when it’s done.</p>
           <div className="builder-lens-actions">
             <span>Did that fix it?</span>
             <Button size="sm" variant="accent" onClick={() => void settle("fixed")}>
@@ -1017,9 +1016,6 @@ function LayersSection({ project, root }: { project: BuilderLensPanelProps["proj
         </Button>
       </div>
       {state.message && <p className="builder-lens-note" role="alert">Couldn’t map the project: {state.message}</p>}
-      {!map && !state.busy && !state.message && (
-        <p className="builder-lens-note">Map the project to see its data, logic and view layers.</p>
-      )}
       {map && (
         <div className="builder-lens-layers">
           {(["data", "logic", "view"] as const).map((layer) => (
@@ -1049,9 +1045,8 @@ function LayersSection({ project, root }: { project: BuilderLensPanelProps["proj
       )}
       <div className="builder-lens-head">Who looks after what</div>
       {me ? (
-        <p className="builder-lens-note">
-          You’re signed in as {me.name}. Agents can’t change a layer someone else owns until its owner approves;
-          your own agents can. What you own is shared with your team, so their Canopy enforces it too.
+        <p className="builder-lens-note" title={`Signed in as ${me.name}. Your own agents can change what you own; what you own is shared with your team, so their Canopy enforces it too.`}>
+          Others’ agents need owner approval.
         </p>
       ) : (
         known && (

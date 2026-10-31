@@ -149,7 +149,7 @@ export function CommitView({ repo, hash, onNotice }: CommitViewProps) {
         ) : files.length === 0 ? (
           <div className="tree-empty">
             {isMerge
-              ? "Merge commit — no patch of its own. Open its parents to see the changes."
+              ? "Merge commit — see its parents."
               : "No file changes in this commit."}
           </div>
         ) : (
@@ -157,8 +157,7 @@ export function CommitView({ repo, hash, onNotice }: CommitViewProps) {
         )}
         {patch?.truncated && (
           <div className="tree-empty">
-            Patch truncated — this commit is larger than 2 MB. Use{" "}
-            <code>git show {detail.short}</code> for the whole thing.
+            Truncated at 2 MB.
           </div>
         )}
       </div>

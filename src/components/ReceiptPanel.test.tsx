@@ -67,7 +67,7 @@ describe("ReceiptPanel plan checks and isolation", () => {
     const list = screen.getByRole("region", { name: "What the plan said counts as done" });
     expect(list.textContent).toContain("Met: npm test passes — 4 passed");
     expect(list.textContent).toContain("Not met: Total shows on the page");
-    expect(screen.getByText(/separate copy of this turn's files/)).toBeTruthy();
+    expect(screen.getByText("Ran in an isolated copy.")).toBeTruthy();
   });
 
   it("says when the checks had to run in the live folder", () => {

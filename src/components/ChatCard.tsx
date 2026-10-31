@@ -300,10 +300,10 @@ function CardBody({card,message,userId,messages,name,onReply,teamId,deps}:{card:
     {card.decisions?.length?<div className="chat-card-plan-section"><small className="chat-card-byline">Decisions</small><ul>{card.decisions.map((d,i)=><li key={i}>{d.q} <strong>→ {d.a}</strong></li>)}</ul></div>:null}
     {card.acceptance.length?<div className="chat-card-plan-section"><small className="chat-card-byline">Done when</small><ul>{card.acceptance.map((a,i)=><li key={i}>{a}</li>)}</ul></div>:null}
     {card.wontDo?.length?<div className="chat-card-plan-section"><small className="chat-card-byline">Won't do</small><ul>{card.wontDo.map((w,i)=><li key={i}>{w}</li>)}</ul></div>:null}
-    <p className="chat-card-note">{card.approvers?.length?<>Approvers: {card.approvers.map(name).join(', ')}</>:<>No approvers were named, so this plan can't be approved from chat.</>}</p>
+    <p className="chat-card-note">{card.approvers?.length?<>Approvers: {card.approvers.map(name).join(', ')}</>:<>No approvers.</>}</p>
     <PlanOutcomes request={message} messages={messages} name={name} own={own}/>
     {!own&&(card.approvers??[]).includes(userId)&&<PlanControls card={card} request={message} onReply={onReply}/>}
-    {!own&&!(card.approvers??[]).includes(userId)&&card.approvers?.length?<p className="chat-card-note">Only the approvers can approve this plan. Reply in the thread to comment.</p>:null}
+    {!own&&!(card.approvers??[]).includes(userId)&&card.approvers?.length?<p className="chat-card-note">Approvers only.</p>:null}
    </div>;
   }
   case 'plan-outcome':return <div className="chat-card is-compact" data-type="plan-outcome">
@@ -391,7 +391,7 @@ function PlanOutcomes({request,messages,name,own}:{request:ChatMessage;messages:
   carried.add(card.plan);
   void applyChatApproval(card.plan,{id:approval.by,name:name(approval.by)}).catch(()=>carried.delete(card.plan));
  },[own,approval,card.plan,name]);
- if(!folded.length)return <p className="chat-card-note">No answers yet. Approvers can approve; anyone can comment in the thread.</p>;
+ if(!folded.length)return <p className="chat-card-note">No answers yet.</p>;
  return <ul className="chat-card-chips" aria-label="Plan answers">
   {folded.map(f=><li key={f.by} className={`chat-card-chip is-${f.outcome}`}><strong>{name(f.by)}</strong> {f.outcome==='approved'?'✅ Approved':'🔁 Changes asked'}</li>)}
  </ul>;

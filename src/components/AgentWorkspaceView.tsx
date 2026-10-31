@@ -1793,20 +1793,18 @@ export function AgentWorkspaceView({
       {(!repo || wsErr) && (
         <div className="tree-empty">
           {!repo
-            ? "This session isn't inside a tracked repository — showing what the agent reported."
+            ? "Not a repo — showing what the agent reported."
             : wsErr}
         </div>
       )}
       {ws?.cwd_missing && (
         <div className="tree-empty">
-          The agent's directory ({ws.cwd}) no longer exists — showing what git
-          still knows.
+          Directory gone — showing what git still knows.
         </div>
       )}
       {ws?.on_base && (
         <div className="tree-empty">
-          Working directly on {ws.base} — no branch of its own, showing
-          uncommitted changes only.
+          On {ws.base} — uncommitted changes only.
         </div>
       )}
 
@@ -2217,23 +2215,17 @@ export function AgentWorkspaceView({
           ) : changesState === "error" ? (
             <div className="tree-empty aw-loading" role="alert">
               Couldn't read this agent's changes: {patchErr}
-              <div className="aw-note">Refresh to try again.</div>
             </div>
           ) : changesState === "unavailable" ? (
             <div className="tree-empty">
-              {ws?.branch
-                ? "There is no diff against the base branch for a detached or base-branch checkout."
-                : "This agent's checkout has no branch, so there is no branch diff to show."}
+              No branch diff.
             </div>
           ) : changesState !== "ready" || !patch ? null : mine.length === 0 ? (
             <div className="tree-empty">
               No changes by this agent{pane === "uncommitted" ? " yet" : ""}.
               {!canAttribute && (
-                <div className="aw-note">
-                  It ran on a shared checkout without reporting its edits, so
-                  its changes can't be told apart from the rest of the tree. Run
-                  it in an isolated worktree, or with a CLI that reports edits,
-                  to see them here.
+                <div className="aw-note" title="It ran on a shared checkout without reporting its edits. Run it in an isolated worktree, or with a CLI that reports edits, to see them here.">
+                  Shared checkout; edits can't be attributed.
                 </div>
               )}
             </div>
@@ -2242,8 +2234,7 @@ export function AgentWorkspaceView({
           ))}
         {patch?.truncated && pane !== "edits" && pane !== "intent" && (
           <div className="tree-empty">
-            Diff truncated at 2 MB — use <code>git diff</code> for the whole
-            thing.
+            Truncated at 2 MB.
           </div>
         )}
       </div>

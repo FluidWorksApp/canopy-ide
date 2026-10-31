@@ -227,11 +227,6 @@ export default function DeviceView({
         <div className="device-picker">
           <div className="device-picker-card">
             <h3>Pick a device to watch</h3>
-            <p className="device-picker-lead">
-              Canopy shows its screen here and refreshes it while this tab is in front. Your
-              agent can install the app, drive it and read its log on the same device.
-            </p>
-
             {missing.length > 0 && (
               <div className="device-block device-block-warn">
                 <h4>Install these first</h4>
@@ -327,9 +322,8 @@ export default function DeviceView({
 
             {devices.length === 0 && avds.length === 0 && missing.length === 0 && (
               <div className="device-block">
-                <p>
-                  No devices and no emulators. Create one in Android Studio, or plug in a phone
-                  with USB debugging turned on.
+                <p title="Create an emulator in Android Studio, or plug in a phone with USB debugging on.">
+                  No devices.
                 </p>
               </div>
             )}
@@ -424,7 +418,7 @@ export default function DeviceView({
             </div>
             {annotations.length === 0 && (
               <p className="preview-panel-hint">
-                Click anything on the device to tag it, then write what should change.
+                Click to tag.
               </p>
             )}
             <div className="preview-panel-list">

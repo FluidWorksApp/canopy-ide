@@ -266,7 +266,7 @@ export function TicketsPanel({
         <ContextMenu x={menu.menu.x} y={menu.menu.y} items={menu.menu.items} onClose={menu.close} />
       )}
       <div className={page ? "collection-page-head" : "side-panel-head"}>
-        {page ? <div><h1>Issues</h1><p>{matching.length} from connected trackers</p></div> : <span>Issues</span>}
+        {page ? <div><h1>Issues</h1><p>{matching.length} {matching.length === 1 ? "issue" : "issues"}</p></div> : <span>Issues</span>}
         {page && <TextInput search width="lg" aria-label="Search issues" placeholder="Search issues…" value={query} onChange={(e) => setQuery(e.target.value)} />}
         {!page && <Button size="sm" variant="ghost" onClick={onOpenAll}>View all</Button>}
         <button

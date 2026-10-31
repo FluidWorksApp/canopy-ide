@@ -216,11 +216,6 @@ export function RulesPanel({ roots, files, onNotice, focusRuleId }: Props) {
     <div className="gates-panel">
       <div className="gates-head">
         <h2>Rules</h2>
-        <p className="gates-lede">
-          Write rules in plain words. <strong>Enforced</strong> rules are compiled into checks Canopy runs before an
-          agent's action — a rule that matters is a refusal, not a request. <strong>Guidance</strong> is passed to agents
-          as a short reminder. A rule no check can enforce is labelled <em>suggestion only</em>.
-        </p>
         {roots.length > 1 && (
           <label className="gates-root">
             Repository{" "}
@@ -363,20 +358,16 @@ export function RulesPanel({ roots, files, onNotice, focusRuleId }: Props) {
 
       <section className="gates-section" aria-labelledby="gates-builtin">
         <h3 id="gates-builtin">Always on: actions that can't be undone</h3>
-        <p>
-          Dropping database data, deleting folders outside the project, force-pushing a protected branch, throwing away
-          uncommitted work, deleting volumes or buckets, tearing down infrastructure, production deploys and moving money
-          stop and ask you first. Approving lets that exact command run once, within 10 minutes.
+        <p title="Dropping database data, deleting folders outside the project, force-pushing a protected branch, throwing away uncommitted work, deleting volumes or buckets, tearing down infrastructure, production deploys and moving money. Approving lets that exact command run once, within 10 minutes.">
+          Destructive commands ask first. Approval runs once.
           {builtIns > 0 && <> Stopped {builtIns}× so far.</>}
         </p>
       </section>
 
       <section className="gates-section" aria-labelledby="gates-trifecta">
         <h3 id="gates-trifecta">After a session reads web content</h3>
-        <p>
-          Pages and search results can carry instructions that aren't yours. Once an agent session has fetched web
-          content, Canopy can keep secrets (.env files, saved passwords) and outbound writes (pushes, POSTs, GitHub
-          writes) away from it for the rest of that session.
+        <p title="Pages and search results can carry instructions that aren't yours. Secrets are .env files and saved passwords; outbound writes are pushes, POSTs and GitHub writes.">
+          Block secrets and pushes after web reads.
         </p>
         <Segmented
           aria-label="After a session reads web content"
@@ -559,10 +550,7 @@ function InstructionSuggestions({
   return (
     <section className="gates-section" aria-labelledby="gates-shrink">
       <h3 id="gates-shrink">Instruction files</h3>
-      <p>
-        Long instruction files are followed unreliably. Ask the brain which lines are really hard rules — those can
-        become enforced gates, and come out of the file.
-      </p>
+      <p>Turn hard rules into gates.</p>
       {candidates.length === 0 && <p className="gates-hint">This project has no instruction files.</p>}
       <ul className="gates-files">
         {candidates.map((f) => (

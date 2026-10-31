@@ -367,11 +367,6 @@ export function TaskHistoryView({
           <span className="task-history-empty-title">
             {runs.length === 0 ? "No finished tasks yet" : "No task matches that"}
           </span>
-          <span className="task-history-empty-note">
-            {runs.length === 0
-              ? "One-shot tasks land here when they finish — with what the agent reported and the tail of its terminal, which is otherwise gone the moment the tab closes itself."
-              : "Nothing here answers to that search and filter. Widen one of them."}
-          </span>
         </div>
       ) : (
         <div className="task-history-scroll">
@@ -630,8 +625,7 @@ export function TaskHistoryView({
                             </div>
                           ) : (
                             <div className="task-history-note">
-                              The terminal output for this run is no longer kept — only the
-                              most recent runs hold on to theirs.
+                              Output expired.
                             </div>
                           )}
 

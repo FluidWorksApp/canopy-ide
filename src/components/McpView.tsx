@@ -430,7 +430,7 @@ export function McpView({ server, onNotice }: McpViewProps) {
             <span
               key={k}
               className="mcp-tag mcp-tag-env"
-              title="An environment variable this server is given. Names only — Canopy never reads the values into the UI."
+              title="Env var (name only)"
             >
               {k}
             </span>

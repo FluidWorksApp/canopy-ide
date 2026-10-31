@@ -177,7 +177,7 @@ describe("ResearchView", () => {
       />,
     );
     expect(await screen.findByRole("button", { name: "Review spec" })).toBeInTheDocument();
-    expect(screen.getByText(/building against the spec/)).toBeInTheDocument();
+    expect(screen.getByText(/against the spec/)).toBeInTheDocument();
     expect(screen.getByText("design spec")).toBeInTheDocument();
   });
 
@@ -239,7 +239,7 @@ describe("ResearchView", () => {
     // The first unreported one is what it is doing now.
     expect(screen.getByText("Digging into it")).toBeInTheDocument();
     // And an empty write-up says so rather than looking broken.
-    expect(screen.getByText(/findings appear here/)).toBeInTheDocument();
+    expect(screen.getByText("No findings yet.")).toBeInTheDocument();
     unmount();
 
     // A finished entry gets no rail — a progress bar on something that ended
