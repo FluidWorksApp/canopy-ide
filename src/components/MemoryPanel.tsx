@@ -88,17 +88,22 @@ function expiry(ms: number | undefined, now = Date.now()): string {
 
 const shortSession = (id?: string) => (id ? id.slice(0, 8) : "");
 
-function authorLine(e: MemoryEntry): string {
+/** Where it came from, for the tooltip on the short author word. */
+function sourceDetail(e: MemoryEntry): string {
   const cli = agentCliFor(e.data.provenance?.cli ?? e.author.cli)?.name;
   const session = shortSession(e.data.provenance?.sessionId ?? e.author.sessionId);
+  return [cli, session && `session ${session}`].filter(Boolean).join(" · ");
+}
+
+function authorLine(e: MemoryEntry): string {
   switch (e.data.source) {
     case "brain":
-      if (e.data.consolidatedFrom?.length) return `Combined by the brain from ${e.data.consolidatedFrom.length} proposals`;
-      return `Noticed by the brain in ${cli ? `a ${cli} session` : "an agent session"}${session ? ` (${session})` : ""}`;
+      if (e.data.consolidatedFrom?.length) return `Combined from ${e.data.consolidatedFrom.length}`;
+      return "Brain";
     case "agent":
-      return `Proposed by an agent${session ? ` in session ${session}` : e.author.ptyId != null ? ` in terminal ${e.author.ptyId}` : ""}`;
+      return "Agent";
     default:
-      return `Added by ${e.author.name}`;
+      return e.author.name;
   }
 }
 
@@ -161,7 +166,7 @@ export function MemoryPanel({ roots, onOpenSession, load }: MemoryPanelProps) {
   const resync = async (ledgerRoots: string[]) => {
     try {
       const path = await regenerateInstructionSection(roots[0] ?? "", roots, ledgerRoots);
-      if (path) setSynced(`Updated the Team memory section in ${path.split(/[\\/]/).pop()}.`);
+      if (path) setSynced(`Updated ${path.split(/[\\/]/).pop()}.`);
     } catch (e) {
       setSynced(`Couldn't update the instruction file: ${String(e)}`);
     }
@@ -183,10 +188,10 @@ export function MemoryPanel({ roots, onOpenSession, load }: MemoryPanelProps) {
   };
 
   const status = !autoExtract
-    ? "Automatic memory is off — turn it on in Settings → Agents."
+    ? "Automatic memory is off (Settings → Agents)."
     : brain.state === "connected" || brain.state === "unknown" || brain.state === "checking"
       ? null
-      : "The brain isn't connected, so nothing new is being noticed. Existing memory still works.";
+      : "Brain not connected — nothing new is noticed.";
 
   return (
     <div className="side-panel memory-panel">
@@ -199,10 +204,6 @@ export function MemoryPanel({ roots, onOpenSession, load }: MemoryPanelProps) {
         )}
         <span className="status-spacer" />
       </div>
-      <p className="memory-intro">
-        What your agents are told before they decide something. Nothing here reaches an agent until
-        someone approves it.
-      </p>
       {status && <p className="memory-state">{status}</p>}
       <AddMemory
         roots={roots}
@@ -263,9 +264,9 @@ export function MemoryPanel({ roots, onOpenSession, load }: MemoryPanelProps) {
       {loaded && shown.length === 0 && (
         <p className="tree-empty">
           {view === "review"
-            ? "Nothing waiting for review. After agents work, the brain suggests the decisions worth keeping here."
+            ? "Nothing to review."
             : rows.length === 0
-              ? "No team memory yet. When an agent's work settles a decision, it shows up here for you to approve."
+              ? "No memory yet."
               : "Nothing matches."}
         </p>
       )}
@@ -390,16 +391,13 @@ function MemoryItem({
         </>
       )}
       {d.retiredBy === "consolidation" && (s === "rejected" || s === "superseded") && (
-        <p className="memory-meta">
-          {s === "superseded"
-            ? `Tidied: combined into “${byId.get(d.supersededBy ?? "")?.entry.data.text ?? "a newer proposal"}”`
-            : `Tidied: set aside — ${d.retiredReason ?? "not durable"}`}
+        <p className="memory-meta" title={s === "superseded" ? byId.get(d.supersededBy ?? "")?.entry.data.text : undefined}>
+          {s === "superseded" ? "Combined" : `Set aside: ${d.retiredReason ?? "not durable"}`}
         </p>
       )}
       {s === "quarantined" && (
         <p className="memory-warn">
-          This came from a session that {(d.untrusted ?? ["read content from outside the team"]).join(", ")}. Text from
-          outside the team can try to plant instructions — check it before approving.
+          Session {(d.untrusted ?? ["read outside content"]).join(", ")} — check before approving.
         </p>
       )}
       {conflicts.map((c) => (
@@ -413,7 +411,7 @@ function MemoryItem({
         </p>
       ))}
       <p className="memory-meta">
-        <span>{authorLine(entry)}</span>
+        <span title={sourceDetail(entry) || undefined}>{authorLine(entry)}</span>
         {/* Terminal ids are per app run, so the link is offered only when the
             source terminal is known; the session id stays in the line above. */}
         {ptyId != null && onOpenSession && (
@@ -421,8 +419,7 @@ function MemoryItem({
             Open session
           </button>
         )}
-        <span>{age(d.createdAt)}</span>
-        <span>{expiry(entry.expiresAt)}</span>
+        <span title={expiry(entry.expiresAt)}>{age(d.createdAt)}</span>
         {d.provenance?.files?.length ? (
           <span title={d.provenance.files.join("\n")}>
             {d.provenance.files.length} file{d.provenance.files.length === 1 ? "" : "s"}

@@ -90,9 +90,10 @@ describe("MemoryPanel", () => {
     expect(within(row).getByText("Because app-level checks were missed twice")).toBeInTheDocument();
     expect(within(row).getByText("Needs review")).toBeInTheDocument();
     expect(within(row).getByText("Whole team")).toBeInTheDocument();
-    expect(within(row).getByText(/Noticed by the brain in an agent session \(3f9a2c71\)/)).toBeInTheDocument();
+    // A short author word; the session is in its tooltip.
+    expect(within(row).getByText("Brain")).toHaveAttribute("title", "session 3f9a2c71");
     expect(within(row).getByText("2 h ago")).toBeInTheDocument();
-    expect(within(row).getByText(/expires in 180 days/)).toBeInTheDocument();
+    expect(within(row).getByTitle(/expires in 180 days/)).toBeInTheDocument();
     expect(within(row).getByText("1 file")).toBeInTheDocument();
     // The count badge and the review tab both say one thing is waiting.
     expect(screen.getByLabelText("1 to review")).toBeInTheDocument();
@@ -123,7 +124,7 @@ describe("MemoryPanel", () => {
     render(<MemoryPanel roots={["/repo"]} />);
     const row = await screen.findByTestId("memory-row");
     expect(within(row).getByText("Quarantined")).toBeInTheDocument();
-    expect(within(row).getByText(/came from a session that read a web page/)).toBeInTheDocument();
+    expect(within(row).getByText("Session read a web page — check before approving.")).toBeInTheDocument();
     expect(within(row).getByRole("button", { name: "Approve anyway" })).toBeInTheDocument();
   });
 
@@ -243,7 +244,7 @@ describe("MemoryPanel", () => {
     const [path, , content] = vi.mocked(ipc.instructionsWrite).mock.calls[1];
     expect(path).toBe("/repo/AGENTS.md");
     expect(content).toContain("- Deploys go out on Tuesdays only");
-    expect(await screen.findByText(/Updated the Team memory section in AGENTS.md/)).toBeInTheDocument();
+    expect(await screen.findByText("Updated AGENTS.md.")).toBeInTheDocument();
   }, 30_000);
 
   it("leaves the instruction file alone on approval when that is switched off", async () => {
@@ -260,9 +261,9 @@ describe("MemoryPanel", () => {
     seed({ data: { memoryId: "mem-new", text: "Deploy only on Tuesdays", consolidatedFrom: ["mem-a", "mem-b"] } });
     seed({ status: "rejected", data: { memoryId: "mem-c", text: "Close PR 12 once the relay is up", retiredBy: "consolidation", retiredReason: "one task's next step" } });
     render(<MemoryPanel roots={["/repo"]} />);
-    expect(await screen.findByText("Combined by the brain from 2 proposals")).toBeInTheDocument();
+    expect(await screen.findByText("Combined from 2")).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /tidy/i })).toBeNull();
     await userEvent.click(screen.getByRole("radio", { name: "All" }));
-    expect(await screen.findByText("Tidied: set aside — one task's next step")).toBeInTheDocument();
+    expect(await screen.findByText("Set aside: one task's next step")).toBeInTheDocument();
   });
 });
