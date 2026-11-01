@@ -66,6 +66,7 @@ import { startCloudSync } from "./remoteExecution/cloudSync";
 import { WorkspaceHooksNotice } from "./remoteExecution/WorkspaceHooksNotice";
 import { installOutcomes } from "./outcomes";
 import { observeMemoryEvents, startMemory } from "./memoryExtract";
+import { startMemoryTidy } from "./memoryConsolidate";
 import { startReceiptEngine } from "./receipts/engine";
 import { observeGateEvents, openRules } from "./gates/events";
 import {
@@ -900,6 +901,9 @@ export default function App() {
 
   const wsRef = useRef(ws);
   wsRef.current = ws;
+  // Team memory's review queue tidies itself once it grows past ten
+  // (memoryConsolidate.ts), checked in the background for every project.
+  useEffect(() => startMemoryTidy(() => wsRef.current.projects.flatMap((p) => p.components.map((c) => c.path))), []);
   // Spend & outcomes (src/outcomes): per-session spend records, session
   // budgets (warn at 80%, pause at 100%) and the outcome ledger. Installed
   // once; reads projects through refs at call time.

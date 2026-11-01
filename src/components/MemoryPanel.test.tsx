@@ -36,7 +36,6 @@ import * as ipc from "../ipc";
 import { resetLedgerForTests } from "../ledger";
 import { MemoryPanel } from "./MemoryPanel";
 import { updateSettings } from "../settings";
-import { setConsolidateDepsForTests } from "../memoryConsolidate";
 
 const DAY = 24 * 60 * 60 * 1000;
 
@@ -91,9 +90,10 @@ describe("MemoryPanel", () => {
     expect(within(row).getByText("Because app-level checks were missed twice")).toBeInTheDocument();
     expect(within(row).getByText("Needs review")).toBeInTheDocument();
     expect(within(row).getByText("Whole team")).toBeInTheDocument();
-    expect(within(row).getByText(/Noticed by the brain in an agent session \(3f9a2c71\)/)).toBeInTheDocument();
+    // A short author word; the session is in its tooltip.
+    expect(within(row).getByText("Brain")).toHaveAttribute("title", "session 3f9a2c71");
     expect(within(row).getByText("2 h ago")).toBeInTheDocument();
-    expect(within(row).getByText(/expires in 180 days/)).toBeInTheDocument();
+    expect(within(row).getByTitle(/expires in 180 days/)).toBeInTheDocument();
     expect(within(row).getByText("1 file")).toBeInTheDocument();
     // The count badge and the review tab both say one thing is waiting.
     expect(screen.getByLabelText("1 to review")).toBeInTheDocument();
@@ -124,7 +124,7 @@ describe("MemoryPanel", () => {
     render(<MemoryPanel roots={["/repo"]} />);
     const row = await screen.findByTestId("memory-row");
     expect(within(row).getByText("Quarantined")).toBeInTheDocument();
-    expect(within(row).getByText(/came from a session that read a web page/)).toBeInTheDocument();
+    expect(within(row).getByText("Session read a web page — check before approving.")).toBeInTheDocument();
     expect(within(row).getByRole("button", { name: "Approve anyway" })).toBeInTheDocument();
   });
 
@@ -244,7 +244,7 @@ describe("MemoryPanel", () => {
     const [path, , content] = vi.mocked(ipc.instructionsWrite).mock.calls[1];
     expect(path).toBe("/repo/AGENTS.md");
     expect(content).toContain("- Deploys go out on Tuesdays only");
-    expect(await screen.findByText(/Updated the Team memory section in AGENTS.md/)).toBeInTheDocument();
+    expect(await screen.findByText("Updated AGENTS.md.")).toBeInTheDocument();
   }, 30_000);
 
   it("leaves the instruction file alone on approval when that is switched off", async () => {
@@ -257,33 +257,13 @@ describe("MemoryPanel", () => {
     expect(ipc.instructionsWrite).not.toHaveBeenCalled();
   }, 30_000);
 
-  it("tidies the review queue: repeats combined, one-task notes set aside, nothing approved", async () => {
-    seed({ data: { memoryId: "mem-a", text: "Deploy on Tuesdays" } });
-    seed({ data: { memoryId: "mem-b", text: "Only deploy on a Tuesday" } });
-    seed({ data: { memoryId: "mem-c", text: "Close PR 12 once the relay is up" } });
-    setConsolidateDepsForTests({
-      lease: async () => true,
-      ask: (async (req: { validate: (v: unknown) => unknown }) => ({
-        ok: true,
-        value: req.validate({
-          merges: [{ ids: ["mem-a", "mem-b"], type: "decision", text: "Deploy only on Tuesdays", why: "fewer surprises", scope: "team" }],
-          drops: [{ id: "mem-c", reason: "one task's next step" }],
-        }),
-      })) as never,
-    });
+  it("shows where a tidied proposal went, with no button to press", async () => {
+    seed({ data: { memoryId: "mem-new", text: "Deploy only on Tuesdays", consolidatedFrom: ["mem-a", "mem-b"] } });
+    seed({ status: "rejected", data: { memoryId: "mem-c", text: "Close PR 12 once the relay is up", retiredBy: "consolidation", retiredReason: "one task's next step" } });
     render(<MemoryPanel roots={["/repo"]} />);
-    await userEvent.click(await screen.findByRole("button", { name: "Tidy up 3 proposals" }));
-    expect(
-      await screen.findByText(
-        "Combined 2 proposals into 1, and set aside 1 that were only one task's steps or repeats. Nothing was approved; set-aside ones are under All.",
-      ),
-    ).toBeInTheDocument();
-    expect(screen.getByText("Deploy only on Tuesdays")).toBeInTheDocument();
-    expect(screen.getByText("Combined by the brain from 2 proposals")).toBeInTheDocument();
-    expect(screen.queryByText("Deploy on Tuesdays")).toBeNull();
-    // Under All, the set-aside note says why.
+    expect(await screen.findByText("Combined from 2")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /tidy/i })).toBeNull();
     await userEvent.click(screen.getByRole("radio", { name: "All" }));
-    expect(await screen.findByText("Tidied: set aside — one task's next step")).toBeInTheDocument();
-    setConsolidateDepsForTests(null);
-  }, 30_000);
+    expect(await screen.findByText("Set aside: one task's next step")).toBeInTheDocument();
+  });
 });

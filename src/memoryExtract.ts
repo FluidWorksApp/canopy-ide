@@ -44,7 +44,7 @@ import {
 } from "./memoryLedger";
 import { getSettings } from "./settings";
 import { claimLease } from "./memoryLease";
-import { AUTO_TIDY_AT, maybeTidyMemory } from "./memoryConsolidate";
+import { TIDY_ABOVE, maybeTidyMemory } from "./memoryConsolidate";
 import { turnFileChanges, type TurnFileChange } from "./turnDiff";
 import * as ipc from "./ipc";
 import type { AgentEventData } from "../shared/notifications";
@@ -265,7 +265,7 @@ async function extract(sessionId: string): Promise<void> {
 
   const known = new Set(live.map((e) => contentKey(e.data.text)));
   // A long queue raises the bar: only what the brain is sure of joins it.
-  const crowded = live.filter((e) => memoryStatus(e) !== "approved").length >= AUTO_TIDY_AT;
+  const crowded = live.filter((e) => memoryStatus(e) !== "approved").length > TIDY_ABOVE;
   let added = 0;
   for (const m of answer.value) {
     const key = contentKey(m.text);

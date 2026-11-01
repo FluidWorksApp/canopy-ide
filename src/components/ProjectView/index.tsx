@@ -462,7 +462,6 @@ import {
 import { GitPanel } from "../GitPanel";
 import { TicketsPanel, type AgentTarget } from "../TicketsPanel";
 import { PrsPanel } from "../PrsPanel";
-import { OutcomesPanel } from "../OutcomesPanel";
 import { ServersPanel } from "../ServersPanel";
 import {
   IntegrationsPanel,
@@ -8517,7 +8516,8 @@ const ProjectViewBody = memo(function ProjectViewBody({
       // SideTab long enough to read older hibernation snapshots, then land it
       // on the combined panel instead of restoring a rail item that no longer
       // exists.
-      setSideTab(restore.sideTab === "changes" ? "git" : restore.sideTab);
+      // Outcomes left the rail for a row in the usage popover.
+      setSideTab(restore.sideTab === "changes" ? "git" : restore.sideTab === "outcomes" ? "files" : restore.sideTab);
       setPinned(restore.sidePinned);
       const ids: (string | null)[] = [];
       const restoredTerminalIds = new Map<string, string>();
@@ -14849,12 +14849,6 @@ const ProjectViewBody = memo(function ProjectViewBody({
           rootsKey={rootsKey}
           visible={sideTab === "tools" && visible && sideOpen}
           onOpen={openMcpServer}
-        />
-      ))}
-      {sidePane("outcomes", () => (
-        <OutcomesPanel
-          repos={repoPaths}
-          visible={sideTab === "outcomes" && visible && sideOpen}
         />
       ))}
     </div>
