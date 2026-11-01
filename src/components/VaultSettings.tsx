@@ -484,7 +484,7 @@ export function VaultSettings() {
     return (
       <Item
         name="Create a vault"
-        desc="Logins for the built-in browser, encrypted with a passphrase only you know. There is no recovery."
+        desc="Browser logins. No passphrase recovery."
       >
         <form
           className="vault-card"
@@ -528,10 +528,7 @@ export function VaultSettings() {
 
   if (!status.unlocked) {
     return (
-      <Item
-        name="Unlock the vault"
-        desc={`It locks itself after ${status.auto_lock_minutes} minutes unused, and whenever Canopy restarts.`}
-      >
+      <Item name="Unlock the vault">
         <form
           className="vault-card"
           onSubmit={(e) => {
@@ -632,7 +629,7 @@ export function VaultSettings() {
 
       <Item
         name="Sites agents may use"
-        desc="An agent's first attempt on a site asks you. Revoking puts the question back."
+        desc="Sites agents may log in to."
       >
         <div className="vault-list">
           {approvals.length === 0 && (

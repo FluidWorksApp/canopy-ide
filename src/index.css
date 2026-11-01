@@ -10754,15 +10754,10 @@ body.dragging-tab * {
   display: flex;
   align-items: center;
   gap: 16px;
-  justify-content: space-between;
+  justify-content: flex-end;
   padding: 14px 22px;
   border-top: 1px solid var(--border);
   background: var(--bg-alt);
-}
-
-.settings-footer-note {
-  font-size: 11.5px;
-  color: var(--text-dim);
 }
 
 /* One setting: name over description over control — never side-by-side, so

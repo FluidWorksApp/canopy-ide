@@ -46,7 +46,8 @@ it("leads with Add to Slack when nothing is installed or linked", async () => {
   expect(buttons()).toEqual(["Add to Slack", "Link my Slack"]);
   expect(screen.getByRole("button", { name: "Add to Slack" }).className).toContain("btn-accent");
   expect(screen.getByRole("button", { name: "Link my Slack" }).className).not.toContain("btn-accent");
-  expect(screen.getByText(/Already in a workspace with Canopy\?/)).toBeTruthy();
+  // The button says it; no note repeating it.
+  expect(screen.queryByText(/Already in a workspace with Canopy\?/)).toBeNull();
   fireEvent.click(screen.getByRole("button", { name: "Add to Slack" }));
   await waitFor(() => expect(mocks.openUrl).toHaveBeenCalledWith("https://slack.com/oauth/v2/authorize?x"));
   expect(action()).toEqual(["install-url"]);

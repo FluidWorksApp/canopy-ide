@@ -1036,10 +1036,6 @@ export function AgentAccounts({
         );
       })}
 
-      <p className="cli-account-note">
-        Claude Code, Codex, OpenCode and Amp can hold a second login. Antigravity,
-        oh-my-pi and Aider always use the account they're signed into.
-      </p>
     </div>
   );
 }
@@ -1195,8 +1191,7 @@ function CustomClis({
           can still be seen. */}
       {rows.length > 0 && (
         <div className="cli-custom-hint">
-          <code>{"{id}"}</code> the session id · <code>{"{prompt}"}</code> your text · omit
-          either and it's appended
+          <code>{"{id}"}</code> session · <code>{"{prompt}"}</code> text
         </div>
       )}
       <Button
@@ -1219,7 +1214,7 @@ export function SettingsDialog({ onClose, initialTab = "appearance", projects = 
     initialTab === "vault" ? "browser" : initialTab,
   );
   const [keyDrafts, setKeyDrafts] = useState<Record<string, string>>({});
-  const [keysVersion, setKeysVersion] = useState(0);
+  const [, setKeysVersion] = useState(0);
   const [gh, setGh] = useState<ipc.GhAuth | null>(null);
   const [ghBusy, setGhBusy] = useState(false);
   // Dictation rides on the bundled ONNX Runtime, absent on unsupported builds
@@ -1521,7 +1516,7 @@ export function SettingsDialog({ onClose, initialTab = "appearance", projects = 
                 <Item
                   name="Mascot"
                   tag="Applies immediately"
-                  desc="The face Canopy shows in agents, notifications and empty screens."
+                  desc="Shown in agents and notifications."
                 >
                   <div className="mascot-grid">
                     {MASCOTS.map((m) => (
@@ -1561,13 +1556,13 @@ export function SettingsDialog({ onClose, initialTab = "appearance", projects = 
                     same panel as the first-run step and the chip's dialog. */}
                 <Item
                   name="Brain"
-                  desc="The agent CLI you're signed in to that powers every smart feature: commit messages, session names, the companion, reviews, Build."
+                  desc="The CLI that powers Canopy's smart features."
                 >
                   <BrainConnectPanel onTerminalOpened={onClose} />
                 </Item>
                 <Item
                   name="Brain spending"
-                  desc="What Canopy's own features spent on your plan today, by feature. A feature over its daily cap pauses until tomorrow; leave a cap blank for none."
+                  desc="Today's spend and daily caps per feature."
                 >
                   <BrainSpendTable />
                 </Item>
@@ -1582,7 +1577,7 @@ export function SettingsDialog({ onClose, initialTab = "appearance", projects = 
                 </Item>
                 <Item
                   name="Fleet readiness"
-                  desc="What can launch now, composed from install, account, plan, and integration signals."
+                  desc="What can launch now."
                 >
                   <AgentFleetReadout
                     open={fleetReadoutOpen}
@@ -1592,7 +1587,7 @@ export function SettingsDialog({ onClose, initialTab = "appearance", projects = 
                 </Item>
                 <Item
                   name="Ask for attention"
-                  desc="Control whether an agent can bring the project or tab it is working on to the front."
+                  desc="Let agents bring their tab to the front."
                 >
                   <Checkbox
                     checked={s.agentAskForAttention}
@@ -1603,7 +1598,7 @@ export function SettingsDialog({ onClose, initialTab = "appearance", projects = 
                 </Item>
                 <Item
                   name="Agent delegation"
-                  desc="Control whether coding agents can create additional agent tabs."
+                  desc="Let agents open agent tabs."
                 >
                   <Checkbox
                     checked={s.agentsMaySpawn}
@@ -1620,7 +1615,7 @@ export function SettingsDialog({ onClose, initialTab = "appearance", projects = 
                     dispatched work and writes the review's intent summary. */}
                 <Item
                   name="Plan before an agent starts"
-                  desc="When you hand work to an agent, the brain writes a short plan first. Small, low-risk work starts right away with the plan shown; anything riskier waits for your approval."
+                  desc="Plan first; risky work waits for approval."
                 >
                   <Checkbox
                     checked={s.planBeforeDispatch}
@@ -1635,7 +1630,7 @@ export function SettingsDialog({ onClose, initialTab = "appearance", projects = 
                 </Item>
                 <Item
                   name="Intent & evidence review"
-                  desc="Reviewing an agent's changes or a pull request opens on the plan, what changed against it, the proof receipt and a risk map, before the diff."
+                  desc="Open reviews on plan, receipt and risk map first."
                 >
                   <Checkbox
                     checked={s.reviewAutoSummary}
@@ -1659,7 +1654,7 @@ export function SettingsDialog({ onClose, initialTab = "appearance", projects = 
                 </Item>
                 <Item
                   name="Agent awareness"
-                  desc="When an agent finishes a change, the other agents working on the same code are told what changed and why it matters to them."
+                  desc="Tell other agents on the same code what changed."
                 >
                   <Checkbox
                     checked={s.awarenessEnabled}
@@ -1674,13 +1669,13 @@ export function SettingsDialog({ onClose, initialTab = "appearance", projects = 
                 </Item>
                 <Item
                   name="Team memory"
-                  desc="Decisions, constraints and conventions your agents are told, each approved by a person and kept only until it expires."
+                  desc="Approved facts your agents are told."
                 >
                   <MemorySettings s={s} patch={patch} />
                 </Item>
                 <Item
                   name="CLI updates"
-                  desc="Keep the agent CLIs installed on this computer current. Remote workspaces keep the versions their image pins."
+                  desc="Keep local agent CLIs updated."
                 >
                   <Checkbox
                     checked={s.autoUpdateClis}
@@ -1697,7 +1692,7 @@ export function SettingsDialog({ onClose, initialTab = "appearance", projects = 
                     brain's weekly insight in the Outcomes panel. */}
                 <Item
                   name="Session budget"
-                  desc="Default dollar budget for each agent session. Warns at 80% and pauses the agent at 100%. A session's own budget (in its tab, or “Budget $5” in a prompt) or its plan's budget wins. Empty for none."
+                  desc="Per-session cap: warns at 80%, pauses at 100%."
                 >
                   <TextInput
                     type="number"
@@ -1716,7 +1711,7 @@ export function SettingsDialog({ onClose, initialTab = "appearance", projects = 
                 </Item>
                 <Item
                   name="Prototype session cap"
-                  desc="Dollar cap for agent sessions in Build (prototype) projects when no other budget applies, so a prototype left running overnight cannot run up a bill. Empty for none."
+                  desc="Cap for Build projects. Empty for none."
                 >
                   <TextInput
                     type="number"
@@ -1750,7 +1745,7 @@ export function SettingsDialog({ onClose, initialTab = "appearance", projects = 
                 </Item>
                 <Item
                   name="Spend & outcomes"
-                  desc="The Outcomes panel counts spend, merges, reverts and rework on this computer. Nothing is sent to Canopy."
+                  desc="Track outcomes locally."
                 >
                   <Checkbox
                     checked={s.outcomesInsight}
@@ -1795,7 +1790,7 @@ export function SettingsDialog({ onClose, initialTab = "appearance", projects = 
                 </Item>
                 <Item
                   name="Turn rollback"
-                  desc="Save a hidden snapshot of the checkout at every agent turn so you can undo a turn from the agent's tab."
+                  desc="Snapshot each turn so it can be undone."
                 >
                   <Checkbox
                     checked={s.turnRollback}
@@ -1811,7 +1806,7 @@ export function SettingsDialog({ onClose, initialTab = "appearance", projects = 
                 {/* Session documents (src/sessionDoc). */}
                 <Item
                   name="Session documents"
-                  desc="An agent session opened as a document: goal, turns, files, decisions, and a hand-off packet for whoever continues it."
+                  desc="View a session as a document."
                 >
                   <Checkbox
                     checked={s.sessionDocAutoSummary}
@@ -1836,7 +1831,7 @@ export function SettingsDialog({ onClose, initialTab = "appearance", projects = 
                 </Item>
                 <Item
                   name="Proof receipts"
-                  desc="After an agent finishes, Canopy re-runs the project's tests itself — not in the agent's terminal — checks for tests the agent changed and packages that don't exist, and asks the brain whether the work matches the request."
+                  desc="Re-run tests and check the work after each agent finishes."
                 >
                   <span className="rc-settings">
                     <Segmented<"auto" | "manual" | "off">
@@ -1877,7 +1872,7 @@ export function SettingsDialog({ onClose, initialTab = "appearance", projects = 
                 </Item>
                 <Item
                   name="Memory monitoring prompts"
-                  desc="Choose whether terminal memory warnings and allowance decisions appear while you work."
+                  desc="Show memory warnings."
                 >
                   <Checkbox
                     checked={s.terminalMemoryPromptsEnabled}
@@ -1892,13 +1887,13 @@ export function SettingsDialog({ onClose, initialTab = "appearance", projects = 
                 </Item>
                 <Item
                   name="Memory allowance maximums"
-                  desc="Choose how far each agent's monitored allowance may be raised on this device."
+                  desc="Max allowance per agent."
                 >
                   <AgentMemorySettings />
                 </Item>
                 <Item
                   name="Notification pop-ups"
-                  desc="Choose whether agent and project notices interrupt your work or wait in the bell."
+                  desc="Interrupt, or wait in the bell."
                 >
                   <Checkbox
                     checked={s.notificationPopupsEnabled}
@@ -1913,7 +1908,7 @@ export function SettingsDialog({ onClose, initialTab = "appearance", projects = 
                 </Item>
                 <Item
                   name="Team messages"
-                  desc="Show in-app and system notifications when a teammate messages you or your team's channel while that conversation isn't on screen. Unread counts show in Teams either way."
+                  desc="Notify on teammate messages."
                 >
                   <Checkbox
                     checked={s.teamMessageNotifications}
@@ -1950,7 +1945,7 @@ export function SettingsDialog({ onClose, initialTab = "appearance", projects = 
                 </Item>
                 <Item
                   name="Default agent"
-                  desc="What the Start button launches; pick another per ticket. It is also your brain when it can be one (see Brain above)."
+                  desc="What Start launches."
                 >
                   {/* Chips, not cards: picking a CLI is a one-line choice, and
                       the card grid took half the page to say it. */}
@@ -1986,10 +1981,7 @@ export function SettingsDialog({ onClose, initialTab = "appearance", projects = 
                   />
                   {s.dangerouslySkipPermissions && (
                     <div className="set-danger-note" role="alert">
-                      Agents will run commands, edit and delete files, and spend
-                      money without asking first — a mistaken or misled agent can
-                      do real damage anywhere it can reach. Keep this on only if
-                      you trust every repository and prompt you point agents at.
+                      Agents act without asking. Use only with trusted repos.
                     </div>
                   )}
                 </Item>
@@ -2102,7 +2094,7 @@ export function SettingsDialog({ onClose, initialTab = "appearance", projects = 
                 </Item>
                 <Item
                   name="Ctrl+Tab switching"
-                  desc="Choose whether the switcher follows what you used last, the tab strip's stable order, or the work items your tabs belong to."
+                  desc="Switcher order."
                 >
                   <Segmented<TabSwitchMode>
                     aria-label="Ctrl+Tab switching order"
@@ -2170,7 +2162,7 @@ export function SettingsDialog({ onClose, initialTab = "appearance", projects = 
                 </Item>
                 <Item
                   name="Restore sessions I close"
-                  desc="By default, Restorable only keeps sessions whose agent tab you did not explicitly close."
+                  desc="Also keep sessions you closed."
                 >
                   <Checkbox
                     checked={s.restoreUserClosedSessions}
@@ -2180,7 +2172,7 @@ export function SettingsDialog({ onClose, initialTab = "appearance", projects = 
                 </Item>
                 <Item
                   name="New agents get a workspace"
-                  desc="⌘N and the launch cards open each agent in its own worktree, so parallel agents can't trample each other. Off opens them in the current checkout, which is instant; ⇧↵ or the row's hover action always does the opposite once."
+                  desc="Open each new agent in its own worktree."
                 >
                   <Checkbox
                     checked={s.agentWorkspaceByDefault}
@@ -2190,7 +2182,7 @@ export function SettingsDialog({ onClose, initialTab = "appearance", projects = 
                 </Item>
                 <Item
                   name="Set up new workspaces"
-                  desc="Copy the gitignored config and install dependencies, so it builds right away."
+                  desc="Copy config and install deps."
                 >
                   <Checkbox
                     checked={s.workspaceBootstrap}
@@ -2269,7 +2261,7 @@ export function SettingsDialog({ onClose, initialTab = "appearance", projects = 
                 <Item
                   name="Automatic session names"
                   tag="New terminals only"
-                  desc="Choose the callsign vocabulary Canopy uses before an agent publishes what it is working on."
+                  desc="Agent callsign words."
                 >
                   <div className="session-name-theme">
                     <Select
@@ -2359,7 +2351,7 @@ export function SettingsDialog({ onClose, initialTab = "appearance", projects = 
               <>
                 <Item
                   name="Markdown research import"
-                  desc="Sweep open project folders for research-like Markdown. Repository policies, legal and release files, agent instructions, templates, dependencies, generated output, and fixtures are ignored."
+                  desc="Find research Markdown in open projects."
                 >
                   <Checkbox
                     checked={s.autoImportMarkdownResearch}
@@ -2369,7 +2361,7 @@ export function SettingsDialog({ onClose, initialTab = "appearance", projects = 
                 </Item>
                 <Item
                   name="Crash reporting"
-                  desc="An anonymous email to the maintainers — the error and stack, app version and OS. Filing a GitHub issue instead is always offered."
+                  desc="Send crash details anonymously."
                 >
                   <Checkbox
                     checked={s.crashReporting}
@@ -2522,25 +2514,15 @@ export function SettingsDialog({ onClose, initialTab = "appearance", projects = 
                             {ghBusy ? "Checking…" : "Recheck"}
                           </Button>
                         </div>
-                        <div className="set-item-desc set-note">
-                          Sign-in runs in a terminal; gh keeps the token in your
-                          keychain, Canopy never sees it.
-                        </div>
                       </>
                     )}
                   </div>
                 ))}
-                <div className="set-item-desc" data-v={keysVersion}>
-                  Connected trackers show up in the ◎ Issues panel.
-                </div>
               </>
             )}
           </div>
         </div>
         <div className="settings-footer">
-          <div className="settings-footer-note">
-            {tab === "account" || tab === "teams" ? "Account and team changes are saved to your Canopy account." : "Device preferences apply immediately and are stored on this machine."}
-          </div>
           <Button variant="accent" onClick={onClose}>
             Done
           </Button>
@@ -2851,7 +2833,7 @@ function CanopyLinkSettings() {
     : connected
       ? "Connected. Open it on your phone and sign in to Canopy."
       : pending
-        ? "Canopy links aren't live on Canopy's server yet. Nothing to fix on your side; until then, use On this network below."
+        ? "Not live yet — use On this network."
         : failed
           ? serverFeatureError(tunnel.message, "Your Canopy link").message
           : (tunnel.message ?? "Connecting…");
@@ -2860,7 +2842,7 @@ function CanopyLinkSettings() {
     <>
       <Item
         name="Remote access"
-        desc="Open your agents from your phone at your own Canopy link. Only you can open it, after signing in to Canopy."
+        desc="Use your agents from your phone."
       >
         <div className="set-inline">
           <Switch checked={on} disabled={busy} aria-label="Remote access" onChange={toggle} />
@@ -2878,7 +2860,7 @@ function CanopyLinkSettings() {
       </Item>
 
       {on && url && (
-        <Item name="Your link" desc="The same address every time. Bookmark it or add it to your home screen.">
+        <Item name="Your link" desc="Permanent link.">
           <div className="set-inline" style={{ alignItems: "center", gap: 18 }}>
             {qr && (
               <div
@@ -2894,7 +2876,7 @@ function CanopyLinkSettings() {
       )}
 
       {on && status && (
-        <Item name="On this network" desc="Without going through the internet: the local address, with a PIN.">
+        <Item name="On this network" desc="Local address, with PIN.">
           {showLan ? (
             <div style={{ display: "grid", gap: 10, minWidth: 0 }}>
               {status.urls?.[0] && <Copyable text={status.urls[0]} />}
@@ -3009,7 +2991,7 @@ function SelfHostedRemoteSettings({
     <>
       <Item
         name="Remote access"
-        desc="Drive your agents from your phone, behind a PIN. Sign in to Canopy (Settings → Accounts) to get your own link instead: no tunnel to set up and no PIN."
+        desc="Use your agents from your phone, behind a PIN. Sign in to Canopy for your own link."
       >
         <div className="set-inline">
           <Switch
@@ -3232,7 +3214,7 @@ function SpotSearchSettings({
     <>
       <Item
         name={`What ${format("spot-search")} searches`}
-        desc="Which kinds of result the omnibox offers. Nothing is deleted when you switch one off."
+        desc="Results the omnibox offers."
       >
         <div className="spot-set-list">
           {sources.map((src) => {
@@ -3258,9 +3240,7 @@ function SpotSearchSettings({
 
       <Item
         name="Conversations to index"
-        desc={`Full-text search over each CLI's own session files, so ${format(
-          "spot-search",
-        )} finds a conversation by something said in it. Off deletes what it indexed.`}
+        desc="Search past conversations by content."
       >
         <div className="spot-set-list" style={{ ["--spot-set-name-w" as string]: "150px" }}>
           {INDEXABLE_AGENTS.map((agent) => {
@@ -3319,9 +3299,7 @@ function SpotSearchSettings({
 
       <Item
         name="Keep history for"
-        desc={`How far back ${format(
-          "spot-search",
-        )} can see. Older messages are dropped from the index; zero keeps everything.`}
+        desc="0 keeps everything."
       >
         <div className="spot-set-days">
           <TextInput
@@ -3346,7 +3324,7 @@ function SpotSearchSettings({
 
       <Item
         name="The index"
-        desc="A SQLite database in ~/.canopy, rebuilt from files that still exist."
+        
       >
         <div className="spot-set-index">
           <p className="set-item-desc">
@@ -3443,9 +3421,9 @@ function ClipboardSettings({
     return (
       <Item
         name="Clipboard history"
-        desc="Not available on this platform yet — capture is macOS-only so far."
+        desc="macOS only."
       >
-        <span className="set-item-desc">Unavailable here.</span>
+        {null}
       </Item>
     );
   }
@@ -3492,7 +3470,7 @@ function ClipboardSettings({
 
       <Item
         name="Where it's kept"
-        desc="Kept in ~/.canopy/clipboard.sqlite — your account only, and not encrypted."
+        desc="Stored unencrypted."
       >
         <Checkbox
           checked={s.clipboardPersist}
@@ -3506,7 +3484,7 @@ function ClipboardSettings({
 
       <Item
         name="How much to keep"
-        desc="The newest clips, up to this many. Older ones fall off the end."
+        
       >
         <div className="spot-set-days">
           <TextInput
@@ -3551,7 +3529,7 @@ function ClipboardSettings({
 
       <Item
         name="The history"
-        desc="The only copy — nothing here can be rebuilt, so clearing it is permanent."
+        desc="Clearing is permanent."
       >
         <div className="spot-set-index">
           <p className="set-item-desc">
@@ -3683,11 +3661,7 @@ function DictationSettings() {
       )}
 
       {s.dictationTriggerMode !== "combo" && (
-        <p className="set-note">
-          {modKeyLabel(s.dictationModKey)} still works as a modifier — dictation
-          fires only when nothing else is pressed with it.
-          {s.dictationModKey === "CapsLock" && " Caps Lock still latches."}
-        </p>
+        <p className="set-note">Fires only when pressed alone.</p>
       )}
 
       <Item
@@ -3702,7 +3676,7 @@ function DictationSettings() {
 
       <Item
         name="Live preview"
-        desc="Words appear as you speak. Costs a CPU core; the final text is the same."
+        desc="Words appear as you speak."
       >
         <Checkbox
           checked={s.dictationStreaming}
@@ -3743,7 +3717,7 @@ function DictationSettings() {
 
       <Item
         name="Model"
-        desc="Local speech model; larger is more accurate, Moonshine fastest for English."
+        desc="Larger is more accurate."
       >
         <div className="dictation-models">
           {models.map((m) => {

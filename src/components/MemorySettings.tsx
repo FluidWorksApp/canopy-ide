@@ -21,8 +21,8 @@ export function MemorySettings({
         label="Suggest team memory after agents work"
         hint={
           s.memoryAutoExtract
-            ? "After an agent's turn (at most every 10 minutes per session, and when it ends) the brain picks out decisions worth keeping. Each waits in the Memory panel for your approval."
-            : "Nothing is suggested automatically. Agents can still propose entries, and approved memory is still served."
+            ? "Suggestions wait for your approval."
+            : "Agents can still propose entries."
         }
       />
       <div className="memory-settings-row">
@@ -55,10 +55,10 @@ export function MemorySettings({
         label="Keep the instruction file's Team memory section up to date"
         hint={
           s.memoryInstructionAutoUpdate === false
-            ? "The section changes only when you press “Update the instruction file” in the Memory panel."
+            ? "Changes only when you update it from the Memory panel."
             : Object.keys(s.memoryInstructionFiles).length
-              ? "Every approval, edit or rejection rewrites the section in the file you last updated. Nothing outside its markers changes."
-              : "Starts once you use “Update the instruction file” in a project's Memory panel; after that, every approval rewrites the section."
+              ? "Rewrites only the Team memory section."
+              : "Starts after you first update it from the Memory panel."
         }
       />
       <Radio
@@ -66,14 +66,14 @@ export function MemorySettings({
         checked={s.memoryQuarantine === "quarantine"}
         onChange={() => patch({ memoryQuarantine: "quarantine" })}
         label="Quarantine suggestions from sessions that read web pages, tickets or PR comments"
-        hint="They are kept, marked with what was read, and need an explicit “Approve anyway”."
+        hint="Need “Approve anyway”."
       />
       <Radio
         name="memory-quarantine"
         checked={s.memoryQuarantine === "skip"}
         onChange={() => patch({ memoryQuarantine: "skip" })}
         label="Don't learn from those sessions at all"
-        hint="Safest. Memory only comes from sessions that worked on your own code."
+        hint="Safest."
       />
     </div>
   );

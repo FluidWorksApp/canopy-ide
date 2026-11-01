@@ -142,9 +142,6 @@ export function SlackSettings({ companion }: { companion: string }) {
             )}
           </div>
         )}
-        {ready && !isLinked && !installedNotLinked && (
-          <div className="set-item-desc set-note">Already in a workspace with Canopy? Link my Slack instead.</div>
-        )}
         {ready && <SlackWorkspaceCompanion current={status?.workspaceCompanion ?? null} onChange={refresh} />}
       </div>
     </div>
