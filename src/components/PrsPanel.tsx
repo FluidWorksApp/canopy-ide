@@ -272,7 +272,7 @@ export function PrsPanel({ localRepos, onOpen, page = false, onOpenAll, onQuickT
     <div className={`${page ? "collection-page" : ""} prs-panel`}>
       {menu.menu && <ContextMenu {...menu.menu} onClose={menu.close} />}
       <div className={page ? "collection-page-head" : "side-panel-head"}>
-        {page ? <div><h1>Pull requests</h1><p>{totals.count} open · {totals.ready} ready · {totals.drafts} draft</p></div> : <span>Pull requests</span>}
+        {page ? <div><h1>Pull requests</h1><p title={`${totals.ready} ready · ${totals.drafts} draft`}>{totals.count} open</p></div> : <span>Pull requests</span>}
         {page && (
           <TextInput search width="lg" aria-label="Search pull requests" placeholder="Search pull requests…" value={query} onChange={(e) => setQuery(e.target.value)} />
         )}
@@ -329,13 +329,6 @@ export function PrsPanel({ localRepos, onOpen, page = false, onOpenAll, onQuickT
                 ? "No matching pull requests"
                 : "No open pull requests"}
           </strong>
-          <span className="prs-empty-copy">
-            {!fetchedMs
-              ? "This usually takes just a moment."
-              : hasActiveFilter
-                ? "Try another search or clear the active filters."
-                : "When someone opens one for this project, it will appear here."}
-          </span>
           {fetchedMs && (
             <span className="prs-empty-actions">
               {hasActiveFilter && (

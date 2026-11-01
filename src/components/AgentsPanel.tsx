@@ -53,8 +53,7 @@ import { format, matchesModifierClick } from "../shortcuts";
  *  promised a session "never sees its own work", which is an implementation
  *  note phrased as a riddle — of course an agent knows what it just did. */
 const SHARE_EXPLAIN =
-  "Agents in this project can see what the others are up to. Before each prompt, an agent is told " +
-  "the recent prompts you gave the other sessions here and the files they touched.";
+  "Agents see each other's recent prompts and files.";
 
 interface AgentsPanelProps {
   /** False while another side tab is in front. The panel stays mounted (so
@@ -180,7 +179,7 @@ function SharedDialog({
         <h3>What's shared</h3>
         <p className="share-modal-note">{SHARE_EXPLAIN}</p>
         {shared.length === 0 ? (
-          <p className="share-none">Nothing yet — a session appears here once it runs a prompt.</p>
+          <p className="share-none">Nothing yet.</p>
         ) : (
           shared.map((d) => {
             // The ladder's verdict, not the legacy `idle` boolean: that field
@@ -820,8 +819,7 @@ export function AgentsPanel({
           <div className="tree-empty">Looking…</div>
         ) : headlineInstructions.rows.length === 0 ? (
           <div className="tree-empty">
-            No instruction files yet. Agents here start with nothing but your prompt —
-            open this to write the first one.
+            No instruction files.
           </div>
         ) : (
           headlineInstructions.rows.slice(0, 6).map((f) => (
@@ -942,14 +940,13 @@ export function AgentsPanel({
 
       {showHookHelp && hookPath && (
         <div className="hook-help">
-          <p>Stream tool-use events from agent CLIs into this panel:</p>
           <IntegrationsList
             health={integrations.health}
             onSetUp={(a) => void integrations.setUp(a)}
           />
           {integrations.result && <p className="hook-result">{integrations.result}</p>}
           <p>
-            Other CLIs: point any hook at appending single-line JSON to:
+            Other CLIs:
           </p>
           <code className="hook-path">{hookPath}</code>
         </div>
@@ -959,8 +956,7 @@ export function AgentsPanel({
         <div className="tree-empty ash-scene">
           <Mascot state="sleeping" size={64} />
           <div>
-            No agents running. Launch <code>claude</code>, <code>codex</code>, etc. from the ＋
-            menu or by right-clicking a component.
+            No agents. Start one from ＋.
           </div>
         </div>
       ) : (
@@ -1067,7 +1063,7 @@ export function AgentsPanel({
                 {!m.submitted && (
                   <span
                     className="mesh-msg-flag"
-                    title="The terminal went away before the return that submits it — this may still be sitting unsent in its composer."
+                    title="May still be unsent in its composer."
                   >
                     unsent
                   </span>

@@ -300,7 +300,7 @@ export function TaskEvidence({ runId }: TaskEvidenceProps) {
         <div className="task-history-section-head">Evidence</div>
         <div className="task-history-note">
           {state === "missing"
-            ? "This run has no durable record left — it was imported, or the envelope was removed."
+            ? "No record."
             : `The durable record could not be read: ${error}`}
         </div>
       </div>
@@ -322,7 +322,7 @@ export function TaskEvidence({ runId }: TaskEvidenceProps) {
 
       {evidence.attempts.length === 0 ? (
         <div className="task-history-note">
-          This run recorded no attempt, so there is nothing it can show.
+          No attempts.
         </div>
       ) : (
         evidence.attempts.map((attempt) => (

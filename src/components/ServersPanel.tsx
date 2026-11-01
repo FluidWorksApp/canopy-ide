@@ -223,10 +223,6 @@ export function ServersPanel({
       {groups.length === 0 && (
         <div className="servers-empty">
           <p>Nothing to run yet.</p>
-          <p>
-            Run commands live on a component — a dev server, a build, a worker. Add one and
-            it shows up here.
-          </p>
           <Button size="sm" onClick={onEdit}>
             Add a run command
           </Button>
