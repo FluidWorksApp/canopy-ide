@@ -1265,6 +1265,7 @@ export function PreviewView({
           <div className="vibe-preview-copy">
             <span className="vibe-preview-kicker">Live preview</span>
             <h2>Your idea is taking shape</h2>
+            <p>It will appear here automatically.</p>
           </div>
           <div className="vibe-preview-mockup" aria-hidden>
             <div className="vibe-preview-mockup-bar">
