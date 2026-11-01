@@ -753,6 +753,7 @@ export const StatusBar = memo(function StatusBar({
   // (an Azure deployment, say) it is the only cost that exists, since the
   // price table has no row to estimate such a model from.
   const shown = stats ?? storeStats;
+  const hasTokens = !!shown && (shown.input_tokens > 0 || shown.output_tokens > 0);
   const billed = !stats && storeStats?.cost != null;
   const cost = stats
     ? estimateCost(stats)
@@ -1428,25 +1429,21 @@ export const StatusBar = memo(function StatusBar({
           ]}
         />
       )}
-      {shown && (shown.input_tokens > 0 || shown.output_tokens > 0) && (
-        <span
-          className="status-item"
-          title={`in ${shown.input_tokens.toLocaleString()} · out ${shown.output_tokens.toLocaleString()} · cache read ${shown.cache_read_tokens.toLocaleString()} · ${shown.turns} turns`}
-        >
-          ↑{fmtTokens(shown.input_tokens + shown.cache_creation_tokens, true)} ↓
-          {fmtTokens(shown.output_tokens, true)}
-        </span>
-      )}
-      {cost != null && (
+      {/* Spend, with the session's tokens in its tooltip rather than as a
+          second chip of numbers beside it. */}
+      {(cost != null || hasTokens) && (
         <span
           className="status-item status-cost"
-          title={
-            billed
-              ? "session cost, as billed by the CLI"
-              : "estimated session cost"
-          }
+          title={[
+            cost == null ? "" : billed ? "Session cost, as billed by the CLI" : "Estimated session cost",
+            hasTokens
+              ? `↑${fmtTokens(shown!.input_tokens + shown!.cache_creation_tokens, true)} ↓${fmtTokens(shown!.output_tokens, true)} tokens · ${shown!.turns} turns`
+              : "",
+          ].filter(Boolean).join("\n")}
         >
-          {billed ? "" : "~"}${fixedNumber(cost, 2)}
+          {cost != null
+            ? `${billed ? "" : "~"}$${fixedNumber(cost, 2)}`
+            : `${fmtTokens(shown!.input_tokens + shown!.cache_creation_tokens + shown!.output_tokens, true)} tokens`}
         </span>
       )}
       {/* Plan headroom, right of spend: the two answer different questions —

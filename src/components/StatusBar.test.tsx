@@ -470,7 +470,7 @@ describe("the tray's numbers for a store-backed CLI", () => {
     const chip = await screen.findByText("$19.31");
     // Billed, not estimated: no "~", and the tooltip says whose figure it is.
     expect(chip.textContent).not.toContain("~");
-    expect(chip.getAttribute("title")).toBe("session cost, as billed by the CLI");
+    expect(chip.getAttribute("title")).toMatch(/^Session cost, as billed by the CLI/);
     expect(screen.getByTitle(/130 turns/)).toBeTruthy();
     expect(ipc.opencodeSessionStats).toHaveBeenCalledWith("ses_billed");
     // No transcript was ever guessed at for it.
@@ -493,7 +493,7 @@ describe("the tray's numbers for a store-backed CLI", () => {
     );
     // $5/MTok input for the gpt-5.6 family, hedged as every estimate is.
     const chip = await screen.findByText("~$5.00");
-    expect(chip.getAttribute("title")).toBe("estimated session cost");
+    expect(chip.getAttribute("title")).toMatch(/^Estimated session cost/);
   });
 
   it("never reads the store for a terminal that isn't opencode's", async () => {
