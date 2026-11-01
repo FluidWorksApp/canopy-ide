@@ -46,7 +46,8 @@ import {
   type LoadScope,
 } from "../resourceLoad";
 import { nextCpuStreak, selfOwnerId } from "../resourceAttribution";
-import { desktopFree, reportsAvailability, workspaceChip } from "../resourceChip";
+import { desktopFree, LOAD_SAMPLES, loadSample, reportsAvailability, workspaceChip } from "../resourceChip";
+import { LoadGraph, type LoadPoint } from "./LoadGraph";
 import { WorkspaceResourcesPanel } from "./WorkspaceResources";
 import { Mascot } from "./Mascot";
 import { StatsPanel } from "./StatsPanel";
@@ -76,24 +77,6 @@ const STATS_PANEL_WIDTH = 452;
  *  with a hundred and fifty branches the rest used to be a dim row counting
  *  what it wouldn't show you and naming a panel to go open instead. */
 const BRANCH_MENU_PREVIEW = 12;
-
-/** The chip tooltip's split of the total, one line per slice. Empty when the
- *  core predates the breakdown (or for a remote workspace). */
-function appBreakdownLines(app: ipc.AppStats): string {
-  const parts: [string, ipc.AppStatsPart | undefined][] = [
-    ["Core", app.core],
-    ["UI (WebKit)", app.webviews],
-    ["Terminals & agents", app.children],
-  ];
-  return parts
-    .map(([label, part]) =>
-      part
-        ? `${label}: ${fmtMem(part.mem_bytes)} · ${fixedNumber(part.cpu, 0)}% cpu · ` +
-          `${part.procs} process${part.procs === 1 ? "" : "es"}\n`
-        : "",
-    )
-    .join("");
-}
 
 const fmtMem = (bytes: number) =>
   bytes >= 1024 * 1024 * 1024
@@ -251,6 +234,8 @@ export const StatusBar = memo(function StatusBar({
   // Consecutive polls with the workspace's CPU nearly all used: the chip only
   // warns about a sustained shortage, not one busy build step.
   const [cpuLowStreak, setCpuLowStreak] = useState(0);
+  // The last couple of minutes of CPU and memory use, for the chip's graph.
+  const [load, setLoad] = useState<LoadPoint[]>([]);
   const [stats, setStats] = useState<ipc.ClaudeSessionStats | null>(null);
   const [modelMenu, setModelMenu] = useState(false);
   // The pending switch, held for confirmation. `id` is absent for a picker:
@@ -385,6 +370,7 @@ export const StatusBar = memo(function StatusBar({
     if (!visible) return;
     const sub = ipc.onAppStats((stats) => {
       setCpuLowStreak((n) => nextCpuStreak(n, stats.workspace?.cpusAvailable, stats.workspace?.cpus));
+      setLoad((prev) => [...prev, loadSample(stats, navigator.hardwareConcurrency || 1)].slice(-LOAD_SAMPLES));
       setApp(stats);
     });
     return () => void sub.then((fn) => fn());
@@ -767,6 +753,7 @@ export const StatusBar = memo(function StatusBar({
   // (an Azure deployment, say) it is the only cost that exists, since the
   // price table has no row to estimate such a model from.
   const shown = stats ?? storeStats;
+  const hasTokens = !!shown && (shown.input_tokens > 0 || shown.output_tokens > 0);
   const billed = !stats && storeStats?.cost != null;
   const cost = stats
     ? estimateCost(stats)
@@ -791,6 +778,13 @@ export const StatusBar = memo(function StatusBar({
     ? workspaceChip(app.workspace, selfId, cpuLowStreak)
     : null;
   const freeHere = app && !app.workspace ? desktopFree(app) : null;
+  // The graph says "short" in colour; the tooltip says how short.
+  const shortage = [...(wsChip?.parts ?? []), ...(freeHere ? [freeHere] : [])].map((p) => p.className);
+  const loadTone: "low" | "critical" | undefined = shortage.includes("res-critical")
+    ? "critical"
+    : shortage.includes("res-low") || appLoad?.cpu || appLoad?.mem
+      ? "low"
+      : undefined;
 
   // `rev-parse --abbrev-ref HEAD` answers a literal "HEAD" off a branch, which
   // the tray used to print as if it were one. It is the snapshot state the Git
@@ -1037,47 +1031,22 @@ export const StatusBar = memo(function StatusBar({
         <span className="status-item status-res status-model-anchor">
           <button
             className="status-model-btn"
+            // Numbers only; the breakdown it opens has the rest.
             title={wsChip ? wsChip.title : app.workspace
-              ? `Remote workspace: ${app.workspace.available ? "agents, shells, builds and desktop" : "resources unavailable"}. CPU is a percentage of the workspace CPU allocation. Click for workspace resources.`
-              : withLoadNote(
-              `${app.includes_webviews ? "canopy" : "canopy lower bound"}: ` +
-                `${app.procs} process${app.procs === 1 ? "" : "es"}. ` +
-                `Memory is charged physical footprint on macOS (resident memory elsewhere). ` +
-                `Click for the per-project breakdown.\n` +
-                appBreakdownLines(app) +
-                "\n" +
-                (app.includes_webviews
-                  ? `Includes WebView helper processes (on macOS: WebContent, ` +
-                    `Graphics and Networking, which Activity Monitor lists as separate rows).`
-                  : `Does not include WebContent, Graphics or Networking: macOS runs ` +
-                    `those as separate WebKit processes, and they could not be ` +
-                    `attributed to Canopy in this launch. Activity Monitor shows them ` +
-                    `as separate rows; add them to this lower bound for the OS-level Canopy total.`),
-              appLoad ? loadNote("app", appLoad) : "",
-            ) + (freeHere ? `\n${freeHere.title}` : "")}
+              ? app.workspace.available
+                ? `Remote workspace: ${Number.isFinite(app.cpu) ? fixedNumber(app.cpu, 0) : "—"}% CPU · ${fmtMem(app.mem_bytes)}`
+                : "Remote workspace: resources unavailable"
+              : [
+                  `Canopy: ${Number.isFinite(app.cpu) ? fixedNumber(app.cpu, 0) : "—"}% CPU · ${Number.isFinite(app.mem_bytes) ? fmtMem(app.mem_bytes) : "—"}${app.includes_webviews ? "" : " (without WebKit helpers)"}`,
+                  freeHere?.title,
+                  appLoad?.hot ? "Unusually heavy" : "",
+                ].filter(Boolean).join("\n")}
             onClick={(e) => {
               anchorMenu(e);
               setBreakdown((v) => !v);
             }}
           >
-            {wsChip ? wsChip.parts.map((part, i) => (
-              <span key={i}>
-                {i > 0 && " · "}
-                <span className={part.className}>{part.text}</span>
-              </span>
-            )) : <>
-            <span className={appLoad?.cpu ? "bd-hot" : undefined}>
-              {Number.isFinite(app.cpu) ? fixedNumber(app.cpu, 0) : "—"}% cpu
-            </span>{" "}
-            ·{" "}
-            <span className={appLoad?.mem ? "bd-hot" : undefined}>
-              {Number.isFinite(app.mem_bytes) ? fmtMem(app.mem_bytes) : "—"}
-            </span>
-            {freeHere && <>
-              {" "}·{" "}
-              <span className={freeHere.className}>{freeHere.text}</span>
-            </>}
-            </>}
+            <LoadGraph points={load} slots={LOAD_SAMPLES} tone={loadTone} />
           </button>
           {breakdown && (
             <div
@@ -1460,25 +1429,21 @@ export const StatusBar = memo(function StatusBar({
           ]}
         />
       )}
-      {shown && (shown.input_tokens > 0 || shown.output_tokens > 0) && (
-        <span
-          className="status-item"
-          title={`in ${shown.input_tokens.toLocaleString()} · out ${shown.output_tokens.toLocaleString()} · cache read ${shown.cache_read_tokens.toLocaleString()} · ${shown.turns} turns`}
-        >
-          ↑{fmtTokens(shown.input_tokens + shown.cache_creation_tokens, true)} ↓
-          {fmtTokens(shown.output_tokens, true)}
-        </span>
-      )}
-      {cost != null && (
+      {/* Spend, with the session's tokens in its tooltip rather than as a
+          second chip of numbers beside it. */}
+      {(cost != null || hasTokens) && (
         <span
           className="status-item status-cost"
-          title={
-            billed
-              ? "session cost, as billed by the CLI"
-              : "estimated session cost"
-          }
+          title={[
+            cost == null ? "" : billed ? "Session cost, as billed by the CLI" : "Estimated session cost",
+            hasTokens
+              ? `↑${fmtTokens(shown!.input_tokens + shown!.cache_creation_tokens, true)} ↓${fmtTokens(shown!.output_tokens, true)} tokens · ${shown!.turns} turns`
+              : "",
+          ].filter(Boolean).join("\n")}
         >
-          {billed ? "" : "~"}${fixedNumber(cost, 2)}
+          {cost != null
+            ? `${billed ? "" : "~"}$${fixedNumber(cost, 2)}`
+            : `${fmtTokens(shown!.input_tokens + shown!.cache_creation_tokens + shown!.output_tokens, true)} tokens`}
         </span>
       )}
       {/* Plan headroom, right of spend: the two answer different questions —

@@ -470,7 +470,7 @@ describe("the tray's numbers for a store-backed CLI", () => {
     const chip = await screen.findByText("$19.31");
     // Billed, not estimated: no "~", and the tooltip says whose figure it is.
     expect(chip.textContent).not.toContain("~");
-    expect(chip.getAttribute("title")).toBe("session cost, as billed by the CLI");
+    expect(chip.getAttribute("title")).toMatch(/^Session cost, as billed by the CLI/);
     expect(screen.getByTitle(/130 turns/)).toBeTruthy();
     expect(ipc.opencodeSessionStats).toHaveBeenCalledWith("ses_billed");
     // No transcript was ever guessed at for it.
@@ -493,7 +493,7 @@ describe("the tray's numbers for a store-backed CLI", () => {
     );
     // $5/MTok input for the gpt-5.6 family, hedged as every estimate is.
     const chip = await screen.findByText("~$5.00");
-    expect(chip.getAttribute("title")).toBe("estimated session cost");
+    expect(chip.getAttribute("title")).toMatch(/^Estimated session cost/);
   });
 
   it("never reads the store for a terminal that isn't opencode's", async () => {
@@ -602,10 +602,9 @@ describe("the app resource boundary", () => {
     publish(false);
     render(<StatusBar {...base} events={[]} />);
 
-    const chip = await screen.findByTitle(/canopy lower bound/);
-    expect(chip.textContent).toContain("44% cpu · 2.4 GB");
+    const chip = await screen.findByTitle(/\(without WebKit helpers\)/);
+    expect(chip.querySelector("svg.load-graph")).toBeTruthy();
     expect(chip.textContent).not.toContain("≥");
-    expect(chip.getAttribute("title")).toContain("Activity Monitor");
 
     fireEvent.click(chip);
     expect(screen.getByText("WebKit layers")).toBeTruthy();
@@ -616,10 +615,10 @@ describe("the app resource boundary", () => {
     publish(true);
     render(<StatusBar {...base} events={[]} />);
 
-    const chip = await screen.findByTitle(/^canopy:/);
-    expect(chip.textContent).toContain("44% cpu · 2.4 GB");
-    expect(chip.textContent).not.toContain("≥");
-    expect(chip.getAttribute("title")).toContain("Includes WebView helper processes");
+    const chip = await screen.findByTitle(/^Canopy:/);
+    expect(chip.querySelector("svg.load-graph")).toBeTruthy();
+    // Numbers only in the tooltip; the explanation is in the breakdown.
+    expect(chip.getAttribute("title")).toBe("Canopy: 44% CPU · 2.4 GB");
   });
 
   it("splits the total into core, WebKit UI and terminals", async () => {
@@ -638,12 +637,7 @@ describe("the app resource boundary", () => {
     });
     render(<StatusBar {...base} events={[]} />);
 
-    const chip = await screen.findByTitle(/^canopy:/);
-    const title = chip.getAttribute("title") ?? "";
-    expect(title).toContain("Core: 140 MB");
-    expect(title).toContain("UI (WebKit): 1.1 GB · 15% cpu · 4 processes");
-    expect(title).toContain("Terminals & agents: 200 MB");
-
+    const chip = await screen.findByTitle(/^Canopy:/);
     fireEvent.click(chip);
     expect(screen.getByText("UI (WebKit)")).toBeTruthy();
     expect(screen.queryByText("WebKit layers")).toBeNull();
@@ -741,7 +735,7 @@ describe("the account switcher", () => {
  it("uses the existing bottom resource chip for workspace totals", async () => {
   vi.mocked(ipc.onAppStats).mockImplementation(async cb=>{cb({cpu:44,mem_bytes:1.2*1024**3,procs:0,includes_webviews:true,workspace:{available:true,memoryLimitBytes:3*1024**3,cpus:1,elasticCpu:{minCpus:1,maxCpus:4,currentCpus:1,availableMaxCpus:2,status:'steady',sampledAt:0},elasticMemory:{minMiB:3072,maxMiB:16384,currentMiB:3072,availableMaxMiB:5632,status:'steady',sampledAt:0}}});return ()=>{};});
   const {container}=render(<StatusBar {...base} events={[]}/>);
-  const chip=await screen.findByTitle(/^Remote workspace:/);expect(chip.closest('.status-res')).toBeTruthy();expect(chip.textContent).toContain('44% cpu');expect(container.querySelector('.workspace-metrics')).toBeNull();fireEvent.click(chip);expect(screen.getByText('Usage now')).toBeTruthy();expect(screen.getByText('of 1 allocated cores')).toBeTruthy();expect(screen.queryByText('Core services')).toBeNull();expect(screen.getByText('Automatic scaling · configured range')).toBeTruthy();expect(screen.getByText('1 – 4 cores')).toBeTruthy();expect(screen.getByText(/This VM allows up to 2 CPU cores/)).toBeTruthy();expect(screen.getByText('3.0 GB – 16.0 GB')).toBeTruthy();expect(screen.getByText(/RAM available to this workspace: 5.5 GB/)).toBeTruthy();
+  const chip=await screen.findByTitle(/^Remote workspace:/);expect(chip.closest('.status-res')).toBeTruthy();expect(chip.querySelector('svg.load-graph')).toBeTruthy();expect(container.querySelector('.workspace-metrics')).toBeNull();fireEvent.click(chip);expect(screen.getByText('Usage now')).toBeTruthy();expect(screen.getByText('of 1 allocated cores')).toBeTruthy();expect(screen.queryByText('Core services')).toBeNull();expect(screen.getByText('Automatic scaling · configured range')).toBeTruthy();expect(screen.getByText('1 – 4 cores')).toBeTruthy();expect(screen.getByText(/This VM allows up to 2 CPU cores/)).toBeTruthy();expect(screen.getByText('3.0 GB – 16.0 GB')).toBeTruthy();expect(screen.getByText(/RAM available to this workspace: 5.5 GB/)).toBeTruthy();
  });
 
 describe("shared workspace availability", () => {
@@ -756,16 +750,17 @@ describe("shared workspace availability", () => {
   feed(ws());
   render(<StatusBar {...base} events={[]}/>);
   const chip=await screen.findByTitle(/^Cloud workspace:/);
-  expect(chip.textContent).toBe('You 3.4 GB · 20.8 GB free · 6.0 cores free');
-  expect(chip.textContent).not.toContain('21.0 GB');
-  expect(chip.getAttribute('title')).toMatch(/20\.8 GB of 28\.8 GB memory free; CPU 6\.0 cores of 8 cores free\..*13\.0 GB of cached files isn't counted as in use/);
-  expect(chip.querySelector('.res-low,.res-critical')).toBeNull();
+  // A small graph in the bar; the numbers are in its tooltip.
+  expect(chip.textContent).toBe('');
+  expect(within(chip).getByRole('img',{name:'CPU 25%, memory 28%'})).toBeTruthy();
+  expect(chip.getAttribute('title')).toBe('Cloud workspace: 20.8 GB of 28.8 GB memory free · 6.0 of 8 cores free · you 3.4 GB');
+  expect(chip.querySelector('.load-graph.is-low,.load-graph.is-critical')).toBeNull();
  });
 
  it("leads with what is in use when none of the terminals are yours", async () => {
   feed(ws({sessions:[{id:3,memoryBytes:3*GB,cpusUsed:1,owner:{id:'u-ada',name:'Ada'}}]}));
   render(<StatusBar {...base} events={[]}/>);
-  expect((await screen.findByTitle(/^Cloud workspace:/)).textContent).toBe('8.0 GB in use · 20.8 GB free · 6.0 cores free');
+  expect((await screen.findByTitle(/^Cloud workspace:/)).getAttribute('title')).not.toContain('you ');
  });
 
  it("breaks the workspace down by person, with cache apart", async () => {
@@ -813,31 +808,33 @@ describe("shared workspace availability", () => {
  it("warns on what is free: amber under 15%, red under 7%, never on cache", async () => {
   feed(ws({availableBytes:3*GB,reclaimableBytes:25*GB}));
   const {unmount}=render(<StatusBar {...base} events={[]}/>);
-  expect((await screen.findByText('3.0 GB free')).className).toBe('res-low');
+  const graph=async()=>(await screen.findByTitle(/^Cloud workspace:/)).querySelector('.load-graph')!.getAttribute('class');
+  expect(await graph()).toBe('load-graph is-low');
   unmount();
   feed(ws({availableBytes:1.5*GB}));
   render(<StatusBar {...base} events={[]}/>);
-  const free=await screen.findByText('1.5 GB free');
-  expect(free.className).toBe('res-critical');
-  expect(screen.getByTitle(/Memory is nearly full/)).toBeTruthy();
+  expect(await graph()).toBe('load-graph is-critical');
+  expect((await screen.findByTitle(/^Cloud workspace:/)).getAttribute('title')).toMatch(/\nMemory nearly full$/);
  });
 
  it("warns on CPU only when it stays short", async () => {
   const short=ws({cpusAvailable:0.4,cpusUsed:7.6});
   feed(short,short,short,short);
   const {unmount}=render(<StatusBar {...base} events={[]}/>);
-  expect((await screen.findByText('0.4 cores free')).className).toBe('');
+  const graph=async()=>(await screen.findByTitle(/^Cloud workspace:/)).querySelector('.load-graph')!.getAttribute('class');
+  expect(await graph()).toBe('load-graph');
   unmount();
   feed(short,short,short,short,short);
   render(<StatusBar {...base} events={[]}/>);
-  expect((await screen.findByText('0.4 cores free')).className).toBe('res-low');
+  expect(await graph()).toBe('load-graph is-low');
  });
 
  it("says what is in use when the workspace has no limit or no per-terminal measurement yet", async () => {
   feed(ws({memoryLimitBytes:null,availableBytes:null,cpus:null,cpusAvailable:null,sessions:null}));
   render(<StatusBar {...base} events={[]}/>);
   const chip=await screen.findByTitle(/^Cloud workspace:/);
-  expect(chip.textContent).toBe('8.0 GB in use · 2.0 cores in use');
+  expect(chip.getAttribute('title')).toBe('Cloud workspace: 8.0 GB memory in use · 2.0 cores in use');
+  expect(within(chip).getByRole('img',{name:'CPU 25%, memory unknown'})).toBeTruthy();
   fireEvent.click(chip);
   expect(screen.getByText(/Per-person usage appears once the workspace has measured its terminals/)).toBeTruthy();
   expect(screen.getAllByText('no limit set')).toHaveLength(2);
@@ -846,10 +843,11 @@ describe("shared workspace availability", () => {
  it("on this computer, shows Canopy's footprint beside the memory free", async () => {
   feed({cpu:12,mem_bytes:1.2*GB,procs:3,includes_webviews:true,system:{availableBytes:1*GB,totalBytes:16*GB}});
   render(<StatusBar {...base} events={[]}/>);
-  const free=await screen.findByText('1.0 GB free');
-  expect(free.className).toBe('res-critical');
-  expect(free.closest('button')!.textContent).toBe('12% cpu · 1.2 GB · 1.0 GB free');
-  expect(free.closest('button')!.getAttribute('title')).toMatch(/This computer has 1\.0 GB of 16\.0 GB memory free\. Memory is nearly full\./);
+  const chip=await screen.findByTitle(/^Canopy:/);
+  expect(chip.getAttribute('title')).toBe('Canopy: 12% CPU · 1.2 GB\n1.0 GB of 16.0 GB free on this computer\nMemory nearly full');
+  expect(chip.textContent).toBe('');
+  expect(chip.querySelector('.load-graph')!.getAttribute('class')).toBe('load-graph is-critical');
+  expect(within(chip).getByRole('img',{name:/memory 94%$/})).toBeTruthy();
  });
 });
 
