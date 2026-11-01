@@ -31,6 +31,6 @@ describe("release note surfaces", () => {
       />,
     );
     expect(screen.queryByText("## Raw markdown")).not.toBeInTheDocument();
-    expect(screen.getByText(/Review what changed/)).toBeInTheDocument();
+    expect(screen.getByText(/View release notes/)).toBeInTheDocument();
   });
 });

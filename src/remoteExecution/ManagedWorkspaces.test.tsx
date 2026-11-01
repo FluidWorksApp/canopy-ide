@@ -24,7 +24,7 @@ it('keeps startup focused on one workspace with an elapsed timer',async()=>{
  expect(screen.queryByRole('button',{name:'＋ Create workspace'})).toBeNull();
  await act(async()=>{await vi.advanceTimersByTimeAsync(6000);});
  expect(screen.getByText('0m 6s elapsed')).toBeTruthy();
- expect(screen.getByText(/First-time setup can take/)).toBeTruthy();
+ expect(screen.getByText(/First setup takes a few minutes/)).toBeTruthy();
 });
 
 it('stops a running workspace only after explaining interruption',async()=>{
@@ -32,7 +32,7 @@ it('stops a running workspace only after explaining interruption',async()=>{
  fireEvent.click(screen.getByLabelText('More actions for My workspace'));
  fireEvent.click(screen.getByRole('button',{name:/Stop workspace/}));
  expect(mocks.invoke.mock.calls.some(([,a])=>a?.body?.action==='hibernate')).toBe(false);
- expect(screen.getByText(/All running agents, terminals and jobs/)).toBeTruthy();
+ expect(screen.getByText(/Everything running stops, for everyone/)).toBeTruthy();
  fireEvent.click(screen.getByRole('button',{name:'Confirm stop'}));await act(async()=>{});
  expect(mocks.invoke).toHaveBeenCalledWith('canopy_account_request',expect.objectContaining({body:expect.objectContaining({workspaceId:'ws-test',action:'hibernate',confirmInterrupt:true})}));
 });
@@ -63,7 +63,7 @@ it('requires the exact name before deleting and clears the saved connection only
  const deleted=vi.fn();render(<ManagedWorkspaces onDeleted={deleted}/>);await act(async()=>{});
  fireEvent.click(screen.getByLabelText('More actions for My workspace'));
  fireEvent.click(screen.getByRole('button',{name:/Delete workspace/}));
- expect(screen.getByText(/Permanently remove this workspace/)).toBeTruthy();
+ expect(screen.getByText(/Permanently deletes its files/)).toBeTruthy();
  const confirm=screen.getByRole('button',{name:'Confirm delete'});expect(confirm).toBeDisabled();
  fireEvent.change(screen.getByLabelText('Type the workspace name to confirm'),{target:{value:'My workspace'}});
  fireEvent.click(confirm);await act(async()=>{});

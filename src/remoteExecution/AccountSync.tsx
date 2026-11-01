@@ -72,7 +72,7 @@ export function AccountSync({workspaceName}:{workspaceName:string}){
     {p.id===active?<span className="account-sync-active">Active</span>:<Button size="sm" variant="ghost" disabled={there===null} title={there===null?'Sync this account first':`New agents in ${workspaceName} launch as ${p.label}`} onClick={()=>setActiveProfile(p.id)}>Use</Button>}
    </li>;})}</ul>
   <div className="account-sync-footer">
-   <small>Syncing replaces the workspace copy with this Mac’s current login. A copied Claude or Codex login shares one renewable token with this Mac: when either side renews it, the other can be signed out. For an account you use on both, sign in inside the workspace instead.</small>
+   <small>Replaces the workspace’s login. Either side may then be signed out.</small>
    <Button variant="accent" disabled={busy||!count} onClick={()=>void sync()}>{busy?'Syncing…':`Sync ${count} account${count===1?'':'s'}`}</Button>
   </div>
   {notice&&<p className="workspace-feedback" role="status">✓ {notice}</p>}
