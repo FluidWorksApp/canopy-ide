@@ -199,8 +199,7 @@ export function ReceiptPanel({
       {state?.state === "error" && <div className="rc-note">{state.message}</div>}
       {!record && !verifying && state?.state !== "error" && (
         <p className="rc-empty">
-          Nothing has been verified for this agent yet. Verify re-runs the project's checks
-          outside the agent's terminal and compares the result with what was asked.
+          Not verified yet.
         </p>
       )}
       {record && (
@@ -234,7 +233,7 @@ export function ReceiptPanel({
             {record.ranIn && (
               <p className="rc-note">
                 {record.ranIn.kind === "copy"
-                  ? "Checks ran in a separate copy of this turn's files, so the agent's next turn could not change them mid-run."
+                  ? "Ran in an isolated copy."
                   : `Checks ran in the live folder: a separate copy could not be made (${record.ranIn.why}).`}
               </p>
             )}

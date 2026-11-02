@@ -136,7 +136,7 @@ export function TurnTimeline({ cwd, sessionId, agent, builder, refreshKey, onNot
       <div className="aw-turns">
         <div className="ticket-state-head">{words.title}</div>
         <div className="aw-turns-note">
-          Rollback needs git — this folder isn't a git repository, so turns aren't saved.
+          Needs git.
         </div>
       </div>
     ) : null;
@@ -146,9 +146,6 @@ export function TurnTimeline({ cwd, sessionId, agent, builder, refreshKey, onNot
     return (
       <div className="aw-turns">
         <div className="ticket-state-head">{words.title}</div>
-        <div className="aw-turns-note">
-          Each turn is saved as it starts and ends. Points appear here after the next prompt.
-        </div>
       </div>
     );
   }
@@ -390,10 +387,8 @@ function RestorePreview({
               </ul>
             )}
             {preview.excluded.length > 0 && (
-              <p className="aw-turns-note">
-                Left alone: {preview.excluded.length} other changed file
-                {preview.excluded.length === 1 ? "" : "s"} not attributed to this agent
-                (another agent's work, or files made by shell commands).
+              <p className="aw-turns-note" title="Changed files not attributed to this agent: another agent's work, or files made by shell commands.">
+                {preview.excluded.length} other file{preview.excluded.length === 1 ? "" : "s"} left alone
               </p>
             )}
             {files.map((f) => (
@@ -408,7 +403,7 @@ function RestorePreview({
                 />
               </div>
             ))}
-            {preview.truncated && <p className="aw-turns-note">Diff truncated; the file list above is complete.</p>}
+            {preview.truncated && <p className="aw-turns-note">Diff truncated.</p>}
           </>
         )}
         <p className="aw-turns-note">{IRREVERSIBLE_NOTE}</p>

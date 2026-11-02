@@ -94,11 +94,6 @@ export function AgentMemorySettings({
           </label>
         );
       })}
-      <p className="set-item-desc">
-        These values cap future allowance grants for each agent on this device.
-        Canopy still only monitors memory unless the platform capability above
-        explicitly says otherwise.
-      </p>
       {error && <p className="set-danger-note" role="alert">{error}</p>}
     </div>
   );

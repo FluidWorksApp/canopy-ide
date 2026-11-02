@@ -165,17 +165,15 @@ export function TeamHub({onOpenChat,onAccount,live}:{onOpenChat?:(conversation:A
   {directory&&!manage&&live}
 
   {directory&&(manage||!teams.length)&&<div className="team-hub-management">
-   {!teams.length&&<p className="team-hub-muted">You're not in a team yet. Create one, or ask an organization admin to invite you.</p>}
+   {!teams.length&&<p className="team-hub-muted">No team yet.</p>}
    <h3>Create a team</h3>
    <form onSubmit={e=>{e.preventDefault();void action({action:'organization-team-create',organizationId:organization,name}).then(r=>{if(r)setName('');});}}>
     <Select size="sm" width="full" aria-label="Team organization" value={organization} onChange={e=>setOrganization(e.target.value)}><option value="" disabled>Choose an organization</option>{organizations.map(o=><option key={o.id} value={o.id}>{o.name}</option>)}</Select>
     <div className="team-hub-inline"><TextInput aria-label="Team name" placeholder="Team name" value={name} onChange={e=>setName(e.target.value)} maxLength={80}/><Button size="sm" disabled={busy||!name.trim()||!organization} type="submit">Create team</Button></div>
    </form>
-   <p className="team-hub-muted">Teams belong to an organization. Organization owners and admins manage their people and workspace access.</p>
    {team&&team.role!=='member'&&<>
     <h3>Invite to {team.name}</h3>
     <form onSubmit={e=>{e.preventDefault();void action({action:'invite',teamId:selected,email}).then(r=>{if(r){setNotice(r.emailSent===false?'Invitation saved. Email delivery failed; they can sign in to accept.':r.alreadyInvited?'An invitation is already waiting for this person.':'Invitation sent.');setEmail('');}});}}><div className="team-hub-inline"><TextInput aria-label="Teammate email" type="email" placeholder="name@company.com" value={email} onChange={e=>setEmail(e.target.value)}/><Button size="sm" type="submit" disabled={busy||!email}>Invite</Button></div></form>
-    <p className="team-hub-muted">Joining enables messaging. Workspace access is granted separately.</p>
     {pending.map(i=><div key={i.id} className="team-row"><Avatar person={{id:i.id,email:i.email}}/><span className="team-row-text"><strong>{i.email}</strong><small>Invited</small></span><Button size="sm" variant="ghost" disabled={busy} onClick={()=>void action({action:'revoke-invitation',teamId:selected,invitationId:i.id}).then(()=>patchDetail(d=>({...d,pending:d.pending.filter(x=>x.id!==i.id)})))}>Revoke</Button></div>)}
    </>}
    {team&&<>
@@ -193,7 +191,6 @@ export function TeamHub({onOpenChat,onAccount,live}:{onOpenChat?:(conversation:A
     {others.map(m=>{const n=here.peers[m.id]??0,muted=mutedHere(m.id);return <button key={m.id} className={`team-row${n&&!muted?' is-unread':''}`} disabled={!onOpenChat} onContextMenu={e=>openRowMenu(e,m.id)} onClick={()=>onOpenChat?.({teamId:selected,userId:selfId,peer:m.id,name:displayName(m),email:m.email})}><Avatar person={m}/><span className="team-row-text"><strong>{displayName(m)}</strong>{secondaryEmail(m)&&<small>{secondaryEmail(m)}</small>}</span>{m.role!=='member'&&<span className="team-role">{m.role}</span>}<UnreadPill count={n} label={`from ${displayName(m)}`} mentions={here.mentions?.peers[m.id]} muted={muted}/></button>;})}
     {!others.length&&<p className="team-hub-muted">No teammates yet.{team.role!=='member'?' Invite people from Manage.':''}</p>}
    </>}
-   {!onOpenChat&&<p className="team-hub-muted">Open Teams in the sidebar to start a conversation.</p>}
   </nav>}
   {rowMenu.menu&&<ContextMenu x={rowMenu.menu.x} y={rowMenu.menu.y} items={rowMenu.menu.items} onClose={rowMenu.close}/>}
  </section>;

@@ -799,8 +799,7 @@ export function GitPanel({
               Say what it is and how to leave it, right where the exit is. */}
           {status?.detached && (
             <div className="git-snapshot-note">
-              You're looking at a snapshot of the code. Click any branch below to go
-              back — nothing you had is lost.
+              Snapshot — pick a branch to return. Nothing is lost.
             </div>
           )}
           <div className="git-branch-new">

@@ -1265,10 +1265,7 @@ export function PreviewView({
           <div className="vibe-preview-copy">
             <span className="vibe-preview-kicker">Live preview</span>
             <h2>Your idea is taking shape</h2>
-            <p>
-              Your first look will appear here automatically. You can keep
-              describing changes while it gets ready.
-            </p>
+            <p>It will appear here automatically.</p>
           </div>
           <div className="vibe-preview-mockup" aria-hidden>
             <div className="vibe-preview-mockup-bar">
@@ -1513,7 +1510,7 @@ export function PreviewView({
               </div>
               {annotations.length === 0 && (
                 <p className="preview-panel-hint">
-                  Click an element on the page to tag it, then write what should change.
+                  Click to tag.
                 </p>
               )}
               <div className="preview-panel-list">

@@ -233,15 +233,15 @@ export function BrainChip() {
         className={`status-brain-btn ${needs ? "is-cta" : ""}`}
         aria-haspopup={needs ? "dialog" : "true"}
         aria-expanded={needs ? undefined : open}
-        title={`Brain: ${name} — ${text.short}`}
+        title={needs ? `Connect your brain — ${text.short}` : `Brain: ${name} — ${text.short}`}
         aria-label={needs ? `Connect your brain (${text.short})` : `Brain: ${name}, ${text.short}`}
         onClick={() => {
           if (needs) openBrainConnect();
           else setOpen((v) => !v);
         }}
       >
+        {/* Just the dot: its name and state are in the tooltip and the popover. */}
         <span className={`brain-dot is-${text.tone}`} aria-hidden />
-        <span>{needs ? "Connect your brain" : name}</span>
       </button>
       {open &&
         createPortal(

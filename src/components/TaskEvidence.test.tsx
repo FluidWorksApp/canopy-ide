@@ -223,7 +223,7 @@ describe("TaskEvidence", () => {
     vi.spyOn(ipc, "taskTranscriptList").mockResolvedValue([]);
     render(<TaskEvidence runId="run-1" />);
     expect(
-      await screen.findByText(/no durable record left/),
+      await screen.findByText("No record."),
     ).toBeTruthy();
   });
 });

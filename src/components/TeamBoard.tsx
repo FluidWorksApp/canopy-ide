@@ -226,10 +226,10 @@ export function TeamBoard({ active, allProjects, onJumpToPty, tabNames }: TeamBo
       <section className="agv-section" aria-labelledby="tb-inflight">
         <header className="agv-section-head">
           <h2 id="tb-inflight">In flight</h2>
-          <span className="agv-section-note">{agentSessions.length} agent{agentSessions.length === 1 ? "" : "s"} across every open project</span>
+          <span className="agv-section-note">{agentSessions.length} agent{agentSessions.length === 1 ? "" : "s"}</span>
         </header>
         {agentSessions.length === 0 ? (
-          <p className="tb-empty">No agents are running in this window right now.</p>
+          <p className="tb-empty">None running.</p>
         ) : (
           <table className="acp-table tb-table">
             <thead>
@@ -287,10 +287,9 @@ export function TeamBoard({ active, allProjects, onJumpToPty, tabNames }: TeamBo
       <section className="agv-section" aria-labelledby="tb-feed">
         <header className="agv-section-head">
           <h2 id="tb-feed">What agents were told</h2>
-          <span className="agv-section-note">written by your brain when one agent's change touches another's work</span>
         </header>
         {notes.length === 0 ? (
-          <p className="tb-empty">Nothing yet. When an agent finishes a change that overlaps another agent's files, the note it was sent shows up here.</p>
+          <p className="tb-empty">No overlaps yet.</p>
         ) : (
           <ul className="tb-feed">
             {notes.slice(0, 20).map((n) => (
@@ -314,10 +313,10 @@ export function TeamBoard({ active, allProjects, onJumpToPty, tabNames }: TeamBo
       <section className="agv-section" aria-labelledby="tb-hot">
         <header className="agv-section-head">
           <h2 id="tb-hot">Hotspots</h2>
-          <span className="agv-section-note">files many changes pass through. When two agents touch one, the latest gets a claim and both are warned.</span>
+          <span className="agv-section-note" title="Files many changes pass through. When two agents touch one, the latest gets a claim and both are warned.">shared files</span>
         </header>
         {repoRoots.length === 0 ? (
-          <p className="tb-empty">Hotspots appear for the repositories your agents are working in.</p>
+          <p className="tb-empty">No hotspots.</p>
         ) : (
           repoRoots.map((root) => {
             const h = hotspots[root];
@@ -335,7 +334,7 @@ export function TeamBoard({ active, allProjects, onJumpToPty, tabNames }: TeamBo
                 </div>
                 {editing === root ? (
                   <div className="tb-edit">
-                    <label htmlFor={`tb-edit-${root}`}>One path per line, relative to the repository. A folder covers everything in it.</label>
+                    <label htmlFor={`tb-edit-${root}`}>One path per line</label>
                     <textarea id={`tb-edit-${root}`} rows={6} value={draft} onChange={(e) => setDraft(e.target.value)} />
                     <div className="tb-edit-actions">
                       <Button size="sm" variant="accent" onClick={() => saveOverride(root, draft)}>Save</Button>
@@ -349,7 +348,7 @@ export function TeamBoard({ active, allProjects, onJumpToPty, tabNames }: TeamBo
                     ))}
                   </div>
                 ) : (
-                  <p className="tb-empty">{h ? "No hotspots found. Route tables, registries and config files still count when two agents touch them." : "Working it out…"}</p>
+                  <p className="tb-empty">{h ? "No hotspots." : "Working it out…"}</p>
                 )}
               </div>
             );
@@ -360,13 +359,12 @@ export function TeamBoard({ active, allProjects, onJumpToPty, tabNames }: TeamBo
       <section className="agv-section" aria-labelledby="tb-cloud">
         <header className="agv-section-head">
           <h2 id="tb-cloud">Cloud workspaces</h2>
-          <span className="agv-section-note">agents running in your cloud workspaces and the ones teammates shared with you</span>
           <Button size="sm" onClick={() => { setCloud("loading"); void cloudRosters().then(setCloud); }} disabled={cloud === "loading"}>
             {cloud === "loading" ? "Checking…" : "Check now"}
           </Button>
         </header>
         {cloud === null ? (
-          <p className="tb-empty">Not checked yet. Checking asks each workspace's service who is running.</p>
+          <p className="tb-empty">Not checked yet.</p>
         ) : cloud === "loading" ? null : cloud.length === 0 ? (
           <p className="tb-empty">No cloud workspaces are reachable from this account.</p>
         ) : (

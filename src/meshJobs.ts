@@ -844,7 +844,7 @@ export function createMeshJobs(deps: MeshJobDeps) {
       title: sameAccount
         ? `Choose a project for a job from your other machine: ${job.title}`
         : `${sender.name ?? "A teammate"} wants your agent to: ${job.title}`,
-      body: "It's waiting in the bottom-right corner. Nothing runs until you approve it.",
+      body: "Approve it in the corner.",
       where: { kind: "panel", panel: "team" },
       dedupeKey: `mesh-job:${job.id}`,
     });

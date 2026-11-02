@@ -462,7 +462,6 @@ import {
 import { GitPanel } from "../GitPanel";
 import { TicketsPanel, type AgentTarget } from "../TicketsPanel";
 import { PrsPanel } from "../PrsPanel";
-import { OutcomesPanel } from "../OutcomesPanel";
 import { ServersPanel } from "../ServersPanel";
 import {
   IntegrationsPanel,
@@ -1306,17 +1305,15 @@ const ProjectViewBody = memo(function ProjectViewBody({
    *  never reach the screen, only labels do.) */
   const leaveWorktreeEnv = useCallback(
     async (env: { path: string }) => {
-      const name = basename(env.path) || env.path;
       const action = await ask(
         askDialog({
           title: "Go back to your own checkout?",
-          body: `Files, search and new terminals stop coming from ${name}. Anything already open there stays open.`,
+          body: "Open tabs stay open.",
           detail: env.path,
           choices: [
             {
               action: "move-here",
               label: "Go back",
-              sub: "Nothing there is changed or removed — this only stops pointing at it.",
               recommended: true,
             },
             { action: "cancel", label: "Stay here" },
@@ -1347,20 +1344,18 @@ const ProjectViewBody = memo(function ProjectViewBody({
       }
       const action = await ask(
         askDialog({
-          title: "The workspace this project was using is gone",
-          body: `${basename(env.path) || env.path} isn't there any more, so this project's files come from your own checkout. Nothing you had open has been touched.`,
+          title: "Workspace gone",
+          body: `${basename(env.path) || env.path} is gone. Using your checkout.`,
           detail: `${env.path} — was on ${env.branch}`,
           choices: [
             {
               action: "cancel",
               label: "Work in the main checkout",
-              sub: "Files, search and new terminals come from this project's own checkout.",
               recommended: true,
             },
             {
               action: "open-there",
               label: "Show me what's there",
-              sub: "Opens the list of workspaces this project has.",
             },
           ],
         }),
@@ -6848,8 +6843,8 @@ const ProjectViewBody = memo(function ProjectViewBody({
       ].filter(Boolean);
       const action = await ask(
         askDialog({
-          title: "This agent left work behind",
-          body: `${basename(ws.root)} still holds ${held.join(" and ")} that exist nowhere else. The tab is closed either way — this is only about the folder.`,
+          title: "Unsaved work",
+          body: `${basename(ws.root)} holds unsaved ${held.join(" and ")}.`,
           detail: ws.root,
           choices: [
             { action: "cancel", label: "Keep the workspace", recommended: true },
@@ -8517,7 +8512,8 @@ const ProjectViewBody = memo(function ProjectViewBody({
       // SideTab long enough to read older hibernation snapshots, then land it
       // on the combined panel instead of restoring a rail item that no longer
       // exists.
-      setSideTab(restore.sideTab === "changes" ? "git" : restore.sideTab);
+      // Outcomes left the rail for a row in the usage popover.
+      setSideTab(restore.sideTab === "changes" ? "git" : restore.sideTab === "outcomes" ? "files" : restore.sideTab);
       setPinned(restore.sidePinned);
       const ids: (string | null)[] = [];
       const restoredTerminalIds = new Map<string, string>();
@@ -10548,12 +10544,12 @@ const ProjectViewBody = memo(function ProjectViewBody({
     agent: {
       selector: ".tab.tab-active",
       title: "Your agent workspace lives here",
-      body: "This tab is the agent's workspace — its terminal, diffs and activity. Reopen it any time from the tab strip.",
+      body: "Terminal, diffs and activity.",
     },
     multiplex: {
       selector: ".pane-bar .tab.tab-active.tab-multiplexed",
-      title: "This tab now holds multiple agents",
-      body: "Each pane is still an independent agent. These shortcuts keep the group quick to use:",
+      title: "Multiple agents",
+      body: "Shortcuts:",
       steps: [
         {
           label: "Split or add a pane to the right",
@@ -13015,7 +13011,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
         ) : (
           <div className="editor-empty">
             <h2>{tab.name}</h2>
-            <p>This live session has ended.</p>
+            <p>Ended</p>
           </div>
         );
       }
@@ -13250,7 +13246,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
 
   const mainArea = (
     <div className="project-main">
-      {readOnly?<div className="workspace-readonly-notice" role="status">Read-only access · Browse project files and Git history. Editing and terminal execution are unavailable.</div>:<AgentIntegrationWarning agents={agentTargets.map(a => a.agentId)} targets={agentTargets.map(a=>({agent:a.agentId,ptyId:a.ptyId,profile:(tabs.find(t=>t.id===a.tabId) as TermSubTab|undefined)?.profile||"default"}))} />}
+      {readOnly?<div className="workspace-readonly-notice" role="status">Read-only</div>:<AgentIntegrationWarning agents={agentTargets.map(a => a.agentId)} targets={agentTargets.map(a=>({agent:a.agentId,ptyId:a.ptyId,profile:(tabs.find(t=>t.id===a.tabId) as TermSubTab|undefined)?.profile||"default"}))} />}
       {tabMenu.menu && (
         <ContextMenu
           x={tabMenu.menu.x}
@@ -13941,7 +13937,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
             {PREREQS.some((p) => prereqs[p.bin] === false) && (
               <div className="prereq-banner">
                 <span className="prereq-note">
-                  Missing prerequisites — the agent CLIs need these:
+                  Missing:
                 </span>
                 <div className="prereq-actions">
                   {PREREQS.filter((p) => prereqs[p.bin] === false).map((p) => (
@@ -14039,7 +14035,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
               <div className="resume-block">
                 <div className="resume-head">
                   <span>
-                    Pick up where you left off
+                    Resume
                     <span className="badge">{resumeTerminalCount} terminals</span>
                   </span>
                   <span className="resume-head-actions">
@@ -14049,7 +14045,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
                           ? `Reopen ${resumeItems
                               .filter((item) => chosen.includes(item.key))
                               .reduce((sum, item) => sum + item.count, 0)} selected terminals`
-                          : "Reopen everything below — agent sessions with their history, terminals with their command"
+                          : "Reopen all"
                       }
                       onClick={() =>
                         runResume(
@@ -14065,7 +14061,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
                         : "Restore all"}
                     </Button>
                     <Button icon
-                      title="Forget everything here — remembered terminals and restorable agent sessions — for this project"
+                      title="Forget all"
                       onClick={() => {
                         forgetTerminals(project.id, terminalMemoryScope);
                         setRemembered([]);
@@ -14851,12 +14847,6 @@ const ProjectViewBody = memo(function ProjectViewBody({
           onOpen={openMcpServer}
         />
       ))}
-      {sidePane("outcomes", () => (
-        <OutcomesPanel
-          repos={repoPaths}
-          visible={sideTab === "outcomes" && visible && sideOpen}
-        />
-      ))}
     </div>
   );
 
@@ -14926,10 +14916,10 @@ const ProjectViewBody = memo(function ProjectViewBody({
                     <strong>Project discovery</strong>
                     <small>
                       {vibeTarget.kind === "ready"
-                        ? "Components and runtime relationships are configured."
+                        ? "Ready"
                         : project.vibe?.discovery
                           ? project.vibe.discovery.message
-                          : "Build is mapping components, commands, data, and dependencies."}
+                          : "Mapping…"}
                     </small>
                   </span>
                   {vibeTarget.kind !== "ready" && (
@@ -15112,7 +15102,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
         <Dialog
           variant="accent"
           title={`Reload agents as ${reloadAsk.label}?`}
-          body="Restart the eligible agents with this account. Claude and Codex continue the same conversation after their current process stops. Credentials stay separate. Agents without a verified conversation or sign-in are left running."
+          body="Claude and Codex keep their conversations."
           meta={`${reloading(reloadAsk.plan).length} of ${reloadAsk.plan.length} agents in this project`}
           dismissLabel="Leave them"
           onDismiss={() => setReloadAsk(null)}
@@ -15145,7 +15135,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
         <Dialog
           variant="danger"
           title="Reopen every one of these?"
-          body="Each one starts its own agent process. A dozen at once will take the machine down with them."
+          body="Each starts a process; a dozen will overload the machine."
           meta={`${confirmResume.count} terminals`}
           dismissLabel="Cancel"
           onDismiss={() => setConfirmResume(null)}

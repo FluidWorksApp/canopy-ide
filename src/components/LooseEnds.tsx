@@ -614,7 +614,7 @@ export function LooseEnds({
         </Button>
       )}
       {visible.length === 0 && !showAll && (
-        <div className="tree-empty">Nothing left hanging — every branch is merged and clean.</div>
+        <div className="tree-empty">All clean.</div>
       )}
     </div>
   );

@@ -257,7 +257,7 @@ export function ChangesPanel({
         <div className="tree-empty">
           {loading
             ? "Checking for changes…"
-            : "Working tree clean. Edits made by agents or by you show up here as diffs against HEAD."}
+            : "Clean."}
         </div>
       ) : (
         groups.map((g) => (

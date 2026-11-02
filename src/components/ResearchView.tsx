@@ -344,8 +344,7 @@ export function ResearchView({
                     }}
                   />
                   <p className="research-steer-note">
-                    It gets this entry and everything already recorded in it.
-                    Say what to focus on, or what the last run got wrong.
+                    What to focus on?
                   </p>
                   <Button size="sm" variant="accent"
                     onClick={() => {
@@ -480,8 +479,7 @@ export function ResearchView({
               absence — saying so beats a blank panel that reads as broken. */}
           {live && !entry.body.replace(/^#.*$/m, "").trim() ? (
             <p className="research-pending">
-              Nothing written up yet — findings appear here as the agent records
-              them.
+              No findings yet.
             </p>
           ) : (
             // `owned`: the store wrote this, so its wikilinks resolve.
@@ -614,10 +612,8 @@ export function ResearchView({
           it that way. */}
       {moves.includes("implementing") && onImplement && (
         <div className="research-actions">
-          <span className="research-actions-note">
-            {spec
-              ? <>Starts an agent on a branch of its own, building against the spec. The pull request it raises is what marks this implemented.</>
-              : <>Starts an agent on a branch of its own. The pull request it raises is what marks this implemented.</>}
+          <span className="research-actions-note" title="The pull request it raises marks this implemented.">
+            Agent on a new branch{spec ? ", against the spec" : ""}
           </span>
           <span className="status-spacer" />
           {onWriteSpec && (

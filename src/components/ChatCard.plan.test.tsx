@@ -145,6 +145,6 @@ describe("plan card in chat", () => {
     render(<ChatCard message={m} userId="carol" messages={[m]} name={(id) => id.toUpperCase()} onReply={vi.fn()} deps={deps} />);
     expect(screen.getByText("Approvers: BOB")).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Approve plan…" })).toBeNull();
-    expect(screen.getByText(/Only the approvers can approve this plan/)).toBeInTheDocument();
+    expect(screen.getByText("Approvers only.")).toBeInTheDocument();
   });
 });

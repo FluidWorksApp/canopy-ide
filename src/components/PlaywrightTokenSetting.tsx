@@ -92,7 +92,6 @@ export function PlaywrightTokenSetting() {
       )}
       {!saved && (
         <p className="set-item-desc">
-          The token is on the Playwright extension's status page.{" "}
           <Button size="sm" variant="ghost" onClick={openPage}>
             Open extension page
           </Button>
@@ -103,12 +102,6 @@ export function PlaywrightTokenSetting() {
           {error}
         </p>
       )}
-      <p className="set-item-desc">
-        Reopen preview tabs after changing engines.{" "}
-        {saved
-          ? "Chrome connects without asking while the token is saved."
-          : "Until a token is saved, Chrome asks you to approve each connection."}
-      </p>
     </>
   );
 }

@@ -238,8 +238,7 @@ export function BrainConnectPanel({ onTerminalOpened, hideModels = false }: Brai
       </Row>
       {conn.state === "signed-out" && brain && !manual && (
         <p className="brain-connect-hint">
-          Opens a terminal running <code>{brain.bin}</code>. Finish {brain.name}'s sign-in there;
-          Canopy keeps checking while it is open and shows Connected as soon as you are signed in.
+          Finish sign-in in the terminal.
         </p>
       )}
       {manual && (
@@ -290,10 +289,6 @@ export function BrainConnectHost() {
         onMouseDown={(e) => e.stopPropagation()}
       >
         <div className="set-head">Connect your brain</div>
-        <p className="brain-connect-lede">
-          Canopy's smart features — commit messages, session names, the companion, reviews — all
-          run on one agent CLI you are already signed in to.
-        </p>
         <BrainConnectPanel onTerminalOpened={() => setOpen(false)} />
         <Row className="brain-connect-dialog-actions">
           <Button onClick={() => setOpen(false)}>Close</Button>

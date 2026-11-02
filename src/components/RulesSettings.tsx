@@ -55,8 +55,7 @@ export function RulesSettings({
   return (
     <div className="rules-settings">
       <p className="set-item-desc">
-        Rules belong to a project: write, approve and pause them in that project's Rules panel. The check on actions
-        that can't be undone is always on, everywhere.
+        Edit rules in each project's Rules panel.
       </p>
       {projects.length === 0 && <p className="set-item-desc">No projects yet.</p>}
       <ul className="rules-settings-list">

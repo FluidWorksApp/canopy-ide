@@ -580,8 +580,7 @@ export function InstructionsView({
           <div className="tree-empty">Looking…</div>
         ) : shown.length === 0 ? (
           <div className="tree-empty">
-            Nothing matches. Turn on “All formats” to see every instruction file Canopy
-            knows how to create.
+            No matches.
           </div>
         ) : (
           GROUPS.map((g) => {
@@ -659,11 +658,7 @@ export function InstructionsView({
         ) : !current ? (
           <div className="editor-empty">
             <h2>Agent instructions</h2>
-            <p>
-              Pick a file to read or edit it. These are the files your agents load before
-              they see any of your code — the project's own, yours across every project,
-              and the skills and subagents they reach for on demand.
-            </p>
+            <p>Pick a file.</p>
           </div>
         ) : (
           <>

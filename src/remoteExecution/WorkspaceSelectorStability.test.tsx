@@ -34,7 +34,7 @@ it('keeps Local selected through reordered polls and pins a background startup t
  fireEvent.click(screen.getByRole('tab',{name:/^Local workspace/}));
  expect(screen.queryByLabelText('Workspace startup')).toBeNull();
  expect(screen.getByLabelText('Workspace progress')).toHaveTextContent('Machine Works');
- expect(screen.getByText(/Projects, agent sign-ins and Git settings use this Mac/)).toBeInTheDocument();
+ expect(screen.getByText(/Using this Mac\./)).toBeInTheDocument();
  reversed=true;await act(async()=>{await vi.advanceTimersByTimeAsync(10000);});
  expect(screen.getByRole('tab',{name:/^Local workspace/})).toHaveAttribute('aria-selected','true');
  expect(screen.getAllByRole('tab').map(tab=>tab.getAttribute('aria-label'))).toEqual(initialTabs);
