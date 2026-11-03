@@ -64,10 +64,22 @@ export function createRunner({ secret, spawnPty, accounts = [], workspaceId = 'w
       const session = { ...entry.session, exitCode: entry.session.exitCode ?? -1, output: Buffer.alloc(0), pty: null };
       sequence = Math.max(sequence, session.id);
       sessions.set(session.id, session);
-      receipts.set(entry.requestId, { fingerprint: entry.fingerprint, result: Promise.resolve(summarize(session)), id: session.id });
+      receipts.set(entry.requestId, { fingerprint: entry.fingerprint, result: Promise.resolve(summarize(session)), id: session.id, settled: true });
     }
   });
   const persist = () => history.save([...receipts].filter(([, r]) => r.id != null).map(([requestId, r]) => ({ requestId, fingerprint: r.fingerprint, session: summarize(sessions.get(r.id)) })));
+  // A receipt answers a retried spawn with its first result, so it outlives the
+  // spawn, but only up to the cap: past it the oldest finished ones go, with
+  // their exited sessions, or a long-lived workspace stops opening terminals.
+  const prune = () => {
+    for (const [requestId, receipt] of receipts) {
+      if (receipts.size < 256) return;
+      const session = sessions.get(receipt.id);
+      if (!receipt.settled || session?.exitCode == null || [...sockets].some(socket => socket.sessionId === receipt.id)) continue;
+      receipts.delete(requestId);
+      sessions.delete(receipt.id);
+    }
+  };
   const authorized = request => {
     const received = Buffer.from(request.headers.authorization ?? '');
     const expected = Buffer.from(`Bearer ${secret}`);
@@ -90,6 +102,7 @@ export function createRunner({ secret, spawnPty, accounts = [], workspaceId = 'w
       if (receipt.fingerprint !== fingerprint(args)) throw new Error('Request id reused with different arguments');
       return receipt.result;
     }
+    prune();
     if ([...sessions.values()].filter(s => s.exitCode == null).length + pendingSpawns >= 16 || receipts.size >= 256) throw new Error('Workspace session capacity reached');
     if (typeof args.command !== 'string' || !args.command.trim() || args.command.length > 8192) throw new Error('Command required');
     if (args.kind && !['terminal', 'build'].includes(args.kind)) throw new Error('Invalid session kind');
@@ -100,14 +113,15 @@ export function createRunner({ secret, spawnPty, accounts = [], workspaceId = 'w
     // Reserve before awaiting credential I/O, so a retry cannot race a spawn.
     let resolve, reject;
     const result = new Promise((yes, no) => { resolve = yes; reject = no; });
-    receipts.set(args.requestId, { fingerprint: fingerprint(args), result });
+    const receipt = { fingerprint: fingerprint(args), result };
+    receipts.set(args.requestId, receipt);
     pendingSpawns++;
     try {
       const id = ++sequence;
       // Record acceptance before any credential I/O or child process creation.
       const pending = { id, kind: args.kind ?? 'terminal', title: args.command.slice(0, 80), cols: 120, rows: 40, accountId: args.accountId ?? null, output: Buffer.alloc(0), exitCode: -1, pty: null };
       sessions.set(id, pending);
-      receipts.get(args.requestId).id = id;
+      receipt.id = id;
       await persist();
       let accountHome = '/home/agent';
       if (args.accountId) {
@@ -151,7 +165,7 @@ export function createRunner({ secret, spawnPty, accounts = [], workspaceId = 'w
       });
       pty.onExit(event => { claudeIde.close(id); session.exitCode = event.exitCode; broadcast(session, { t: 'exit', exitCode: event.exitCode }); void persist().catch(() => {}); });
       resolve(summarize(session));
-    } catch (error) { reject(error); } finally { pendingSpawns--; }
+    } catch (error) { reject(error); } finally { pendingSpawns--; receipt.settled = true; }
     return result;
   }
   async function startDesktop() {
