@@ -380,6 +380,10 @@ export interface Settings {
    *  to sign in, which the switcher and ＋ menu say up front. "default" exports
    *  no environment at all. */
   activeProfile: string;
+  /** Move a session to the next signed-in account when it reaches a limit. */
+  accountRotation: boolean;
+  /** Accounts at a limit, keyed `cli:profile`, until the time they reset. */
+  accountLimits: Record<string, { until: number; message?: string }>;
   /** Agent CLIs Canopy ships no entry for, described by the user (Settings →
    *  Agents). Machine-wide for the same reason as `cliBins`: an in-house agent
    *  is a property of the workstation, not of one repo. See CustomAgentCli for
@@ -736,6 +740,8 @@ export const DEFAULTS: Settings = {
   dangerouslySkipPermissions: false,
   cliBins: {},
   activeProfile: "default",
+  accountRotation: true,
+  accountLimits: {},
   customClis: [],
   relayName: "",
   relayAddr: "",
@@ -939,8 +945,8 @@ export function getSettings(): Settings {
     if (!isShortcutProfile(value.keymapProfile)) value.keymapProfile = "canopy";
     // Retired native engines (and unknown values) become Embedded. Keep the
     // established storage keys for the two remaining browsing options.
-    if (value.browserEngine !== "proxy" && value.browserEngine !== "chrome")
-      value.browserEngine = "proxy";
+    // Every earlier browser choice lands on the one embedded engine.
+    value.browserEngine = "proxy";
     if (
       !Array.isArray(value.teamMutedConversations) ||
       !value.teamMutedConversations.every(

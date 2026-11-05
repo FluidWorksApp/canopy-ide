@@ -6,6 +6,7 @@ import { RemoteExecutionClient, type RemoteSession } from './client';
 import {workspaceReceiptCheck} from './receiptCheck';
 import {wantsWorkspaceAndroid,workspaceAndroid} from './androidBridge';
 import {pollGovernorEvents} from './governorEvents';
+import {isWorkspaceLocalPage} from '../previewEngine';
 import {connectionKey,reportConnection,reportStream,workspaceLifecyclePhase} from './connectionState';
 import {saveRemoteContextImage} from './saveContextImage';
 import {basename} from '../paths';
@@ -26,9 +27,6 @@ const LOCAL_UI = new Set(['js_log','watchdog_ack','watchdog_incidents','memory_i
 // The clipboard and microphone belong to the computer displaying the IDE.
 // Remote execution must not redirect their native services into the VM.
 for(const command of ['clipboard_image_png','clipboard_write_text','clipboard_read_text','clipboard_watch_set','clipboard_recent','clipboard_read','clipboard_forget','clipboard_clear','clipboard_status','dictation_models','dictation_status','dictation_download','dictation_delete_model','dictation_start','dictation_stop','dictation_cancel'])LOCAL_UI.add(command);
-// The Playwright extension token unlocks this computer's Chrome, which is the
-// one the desktop's Chrome bridge connects to; it never belongs in the VM.
-for(const command of ['chrome_extension_token_status','chrome_extension_token_set','chrome_extension_token_clear','chrome_extension_open_status'])LOCAL_UI.add(command);
 // The scratchpad is the person's own thoughts and screenshots, kept on the
 // computer showing the IDE like the clipboard; the workspace has no notes store
 // (it answered "does not support notes_create"). Attaching a file stays with the
@@ -70,8 +68,8 @@ for(const command of ['process_capture_metrics','snapshot_capture_metrics','brow
 /** Desktop events that belong to the commands above. */
 const DESKTOP_EVENTS=['relay:state','relay:chat','relay:command','relay:collab','relay:transfer','relay:transfer-progress','tunnel:state'];
 /** Commands this adapter answers itself (below) rather than passing to the
- *  host by name: terminals, browser streams, uploads and clone progress. */
-export const WORKSPACE_ADAPTER_COMMANDS=['spot_save_context_image','notes_attach_file','spot_stage_drop_images','chrome_stream_ticket','chrome_stream_close','chrome_stream_open','execution_remote_upload','execution_remote_upload_cancel','git_clone','browser_supported','environment_identity','pty_renderer_register','pty_renderer_sessions','instance_id','pty_spawn','pty_spawn_attached_argv','pty_spawn_argv','pty_spawn_detached','pty_attach_desktop','pty_read_desktop','pty_detach_desktop','pty_ack','pty_write_binary','pty_write','pty_resize','pty_kill','pty_set_name_theme','cli_set_native_update_env','pty_set_title','pty_set_name','pty_stats'] as const;
+ *  host by name: terminals, preview forwarding, uploads and clone progress. */
+export const WORKSPACE_ADAPTER_COMMANDS=['spot_save_context_image','notes_attach_file','spot_stage_drop_images','preview_start','preview_stop','execution_remote_upload','execution_remote_upload_cancel','git_clone','browser_supported','environment_identity','pty_renderer_register','pty_renderer_sessions','instance_id','pty_spawn','pty_spawn_attached_argv','pty_spawn_argv','pty_spawn_detached','pty_attach_desktop','pty_read_desktop','pty_detach_desktop','pty_ack','pty_write_binary','pty_write','pty_resize','pty_kill','pty_set_name_theme','cli_set_native_update_env','pty_set_title','pty_set_name','pty_stats'] as const;
 /** Whether a command runs on the computer showing the IDE in remote mode. */
 export const isDesktopLocal=(command:string)=>LOCAL_UI.has(command);
 class WorkspaceChannel<T> implements HostChannel<T>{onmessage:(message:T)=>void=()=>{};}
@@ -93,7 +91,33 @@ export class NativeWorkspaceHost implements Host {
   // The first connect already named this IDE connection; keep that identity
   // so member token renewals match the lease the control plane issued.
   get connectionClientId(){return this.connection.clientId??(this.connection.clientId=crypto.randomUUID());}
-  private remoteBrowsers = new Map<string,string>();
+  /** Workspace port to local port. A preview's server is forwarded on demand,
+   *  and while any preview is open so are the project's other detected servers,
+   *  because a frontend usually calls an API on a second port. */
+  private forwardedPorts = new Map<number,number>();
+  private forwardTickets?: Promise<UnlistenFn>;
+  private get forwardKey(){return connectionKey(this.connection.endpoint,this.connection.workspaceId);}
+  private async forward(port:number){
+    const key=this.forwardKey;
+    // Rust owns the connection and its retries; a ticket is one-use and managed
+    // tokens rotate here, so it asks for a fresh one before every attempt.
+    this.forwardTickets??=this.desktop.listen<{key:string}>('workspace-forward:ticket',event=>{
+      if(event.payload.key!==key||this.disposed)return;
+      void this.client.streamUrl(this.connection.workspaceId,'/forward').then(url=>this.desktop.invoke('workspace_forward_ticket',{key,url})).catch(()=>{});
+    });
+    await this.forwardTickets;
+    const known=this.forwardedPorts.get(port);if(known)return known;
+    const local=await this.desktopCall<number>('workspace_forward_open',{key,port});
+    this.forwardedPorts.set(port,local);
+    // A page may only reach this computer's loopback through the tunnel, so only
+    // ports that kept their number here are addressable from it.
+    await this.desktopCall('preview_allow_ports',{ports:[...this.forwardedPorts].filter(([remote,here])=>remote===here).map(([remote])=>remote)});
+    return local;
+  }
+  private forwardDetected(stats:unknown){
+    if(!this.forwardTickets||!Array.isArray(stats))return;
+    for(const port of new Set(stats.flatMap((session:{ports?:number[]})=>session.ports??[])))if(!this.forwardedPorts.has(port))void this.forward(port).catch(()=>{});
+  }
   private projectIdle = false;
   private tokenFreshUntil = 0;
   private heartbeat?: ReturnType<typeof setTimeout>;
@@ -231,7 +255,7 @@ export class NativeWorkspaceHost implements Host {
   }
   private beginPoll() {
     if(this.poll || this.disposed)return;
-    const tick=async()=>{try{if(this.stopping)return;await this.sessions();if(this.listeners.get('pty:stats')?.size){try{const stats=await this.invoke('pty_stats');if(!this.disposed)this.emit('pty:stats',stats);}catch{/* Keep file refresh working if process inspection is unavailable. */}}if(!this.readOnly&&this.listeners.get('terminal:governor')?.size){try{this.governorCursor=await pollGovernorEvents((name,body)=>this.native(name,body),this.governorCursor,event=>{if(!this.disposed)this.emit('terminal:governor',event);});}catch{/* Budgets resume on the next poll. */}}if(this.listeners.get('agent:events')?.size){try{const batch=await this.native<{cursor:string|null;lines:string[]}>('agent_events_poll',{cursor:this.agentEventCursor});if(!this.disposed){this.agentEventCursor=batch.cursor;if(batch.lines.length)this.emit('agent:events',batch.lines);}}catch{/* Keep polling after transient hook transport failures. */}}this.emit('git:change',{root:'/workspace'});this.emit('fs:change',{root:'/workspace',paths:[],kind:'other',overflow:true});}catch{/* Disconnection never falls back to native execution. */}finally{if(!this.disposed)this.poll=setTimeout(()=>void tick(),3000);}};
+    const tick=async()=>{try{if(this.stopping)return;await this.sessions();if(this.listeners.get('pty:stats')?.size){try{const stats=await this.invoke('pty_stats');if(!this.disposed){this.emit('pty:stats',stats);this.forwardDetected(stats);}}catch{/* Keep file refresh working if process inspection is unavailable. */}}if(!this.readOnly&&this.listeners.get('terminal:governor')?.size){try{this.governorCursor=await pollGovernorEvents((name,body)=>this.native(name,body),this.governorCursor,event=>{if(!this.disposed)this.emit('terminal:governor',event);});}catch{/* Budgets resume on the next poll. */}}if(this.listeners.get('agent:events')?.size){try{const batch=await this.native<{cursor:string|null;lines:string[]}>('agent_events_poll',{cursor:this.agentEventCursor});if(!this.disposed){this.agentEventCursor=batch.cursor;if(batch.lines.length)this.emit('agent:events',batch.lines);}}catch{/* Keep polling after transient hook transport failures. */}}this.emit('git:change',{root:'/workspace'});this.emit('fs:change',{root:'/workspace',paths:[],kind:'other',overflow:true});}catch{/* Disconnection never falls back to native execution. */}finally{if(!this.disposed)this.poll=setTimeout(()=>void tick(),3000);}};
     this.poll=setTimeout(()=>void tick(),3000);
   }
   private async attach(id:number, channel?:HostChannel<ArrayBuffer>) {
@@ -308,25 +332,15 @@ export class NativeWorkspaceHost implements Host {
     if(this.readOnly&&['spot_save_context_image','spot_stage_drop_images','execution_remote_upload'].includes(command))throw Error('This workspace is read-only');
     let value:unknown;
     if(command==='spot_save_context_image')return await saveRemoteContextImage((command,args)=>this.native(command,args),args.dir,args.base64Png) as T;
-    if(command==='chrome_stream_ticket'){
+    if(command==='preview_stop')return this.desktopCall<T>(command,args);
+    if(command==='preview_start'){
+      // The page always renders here. Only a server inside the workspace needs
+      // the tunnel; any other site is loaded straight from this computer.
+      const target=String(args.target);
+      if(!isWorkspaceLocalPage(target))return this.desktopCall<T>(command,args);
       if(this.readOnly)throw Error('This workspace is read-only');
-      const id=this.remoteBrowsers.get(String(args.sessionId));if(!id)throw Error('Unknown workspace preview');
-      return await this.client.streamUrl(this.connection.workspaceId,`/browsers/${id}/stream`) as T;
-    }
-    if(command==='chrome_stream_close'){
-      const id=this.remoteBrowsers.get(String(args.sessionId));if(!id)return this.desktopCall<T>(command,args);
-      this.remoteBrowsers.delete(String(args.sessionId));return await this.native('workspace_chrome_stream_close',{id}) as T;
-    }
-    if(command==='chrome_stream_open'){
-      const url=new URL(String(args.url));
-      if(['localhost','127.0.0.1','0.0.0.0','[::1]'].includes(url.hostname)||url.hostname.endsWith('.localhost')){
-        if(this.readOnly)throw Error('This workspace is read-only');
-        const result=await this.native<{id:string}>('workspace_chrome_stream_open',args);
-        if(!/^[a-f0-9-]{36}$/.test(result.id))throw Error('Invalid workspace preview');
-        this.remoteBrowsers.set(String(args.sessionId),result.id);
-        return new URL(`/chrome-stream/viewer.html?remote=1&sessionId=${encodeURIComponent(String(args.sessionId))}`,window.location.href).href as T;
-      }
-      return this.desktopCall<T>(command,args);
+      const url=new URL(target),port=Number(url.port||(url.protocol==='https:'?443:80));
+      return this.desktopCall<T>(command,{...args,forwardedPort:await this.forward(port)});
     }
     if(command==='notes_attach_file')return await this.attachWorkspaceFile(args) as T;
     if(command==='spot_stage_drop_images'){await this.call('/resources');return this.desktopCall<T>('execution_remote_stage_images',{...args,workspaceId:this.connection.workspaceId,endpoint:this.connection.endpoint});}
@@ -367,7 +381,7 @@ export class NativeWorkspaceHost implements Host {
         job=await this.native('git_clone_status',{id:job.id});
       }
     }
-    // Workspace previews stream a VM browser; the native webview never applies.
+    // Workspace previews use the embedded proxy; the native webview never applies.
     if(command==='browser_supported')value=false;
     else if(command==='environment_identity')value=`${this.connection.endpoint}/${this.connection.workspaceId}`;
     else if(command==='pty_renderer_register'){
@@ -550,5 +564,5 @@ export class NativeWorkspaceHost implements Host {
   }
   channel<T>():HostChannel<T>{return new WorkspaceChannel<T>();}
   invokeDesktop<T>(command:string,args:Args={}):Promise<T>{return this.desktopCall<T>(command,args);}
-  dispose(){const channels=[...this.hostChannels.keys()];this.hostChannels.clear();if(channels.length&&!this.disposed)void this.native('channel_drop',{ids:channels}).catch(()=>{});this.disposed=true;this.harness?.stop();this.harness=undefined;for(const release of [...this.desktopListeners]){try{release();}catch{/* Disposed handlers stay inert even if native teardown fails. */}}this.desktopListeners.clear();window.removeEventListener('canopy:account-changed',this.onAccountChanged);clearTimeout(this.heartbeat);clearTimeout(this.versionCheck);for(const input of this.inputs.values())input.dispose();this.inputs.clear();clearTimeout(this.poll);for(const id of this.streams.keys())this.detach(id);this.listeners.clear();}
+  dispose(){if(this.forwardTickets){void this.forwardTickets.then(stop=>stop()).catch(()=>{});void this.desktop.invoke('workspace_forward_close',{key:this.forwardKey}).catch(()=>{});}const channels=[...this.hostChannels.keys()];this.hostChannels.clear();if(channels.length&&!this.disposed)void this.native('channel_drop',{ids:channels}).catch(()=>{});this.disposed=true;this.harness?.stop();this.harness=undefined;for(const release of [...this.desktopListeners]){try{release();}catch{/* Disposed handlers stay inert even if native teardown fails. */}}this.desktopListeners.clear();window.removeEventListener('canopy:account-changed',this.onAccountChanged);clearTimeout(this.heartbeat);clearTimeout(this.versionCheck);for(const input of this.inputs.values())input.dispose();this.inputs.clear();clearTimeout(this.poll);for(const id of this.streams.keys())this.detach(id);this.listeners.clear();}
 }

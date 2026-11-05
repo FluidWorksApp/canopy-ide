@@ -42,12 +42,4 @@ describe("browser engine override", () => {
     act(() => overrideBrowserEngine(null));
     expect(result.current).toBe("proxy");
   });
-
-  it("re-renders on a settings change without a parent render", () => {
-    const { result } = renderHook(() => useBrowserEngine());
-    act(() => {
-      updateSettings({ browserEngine: "chrome" });
-    });
-    expect(result.current).toBe("chrome");
-  });
 });

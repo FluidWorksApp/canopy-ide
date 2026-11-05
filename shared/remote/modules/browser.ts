@@ -11,7 +11,7 @@ const browser: RemoteManifest = {
   capability: {
     level: 'none',
     reason:
-      'Remote preview forwarding is not connected yet. Embedded and Playwright previews currently use host-local addresses.',
+      'Remote preview forwarding is not connected yet. Embedded previews currently use host-local addresses.',
   },
   kinds: ['page'],
 }

@@ -8,7 +8,7 @@ of these places:
 |---|---|---|
 | The workspace host (`packages/remote-host/native.mjs` and one module per family) | `NATIVE_COMMANDS` in `packages/remote-host/native-commands.mjs` | git, gh, task and workflow stores, turns, LSP, MCP |
 | The workspace's canopy-service (research, claims, mesh) | `HARNESS_COMMANDS` in `src/remoteExecution/harnessCommands.ts` | `research_*`, `context_claims` |
-| The adapter itself (terminals, browser streams, uploads, note attachments) | `WORKSPACE_ADAPTER_COMMANDS` | `pty_spawn`, `chrome_stream_open` |
+| The adapter itself (terminals, preview forwarding, uploads, note attachments) | `WORKSPACE_ADAPTER_COMMANDS` | `pty_spawn`, `preview_start` |
 | The desktop (the computer showing the IDE) | `LOCAL_UI` in `NativeWorkspaceHost.ts` | vault, Android devices, LAN relay |
 | Refused with a message, without a network call | `UNSUPPORTED_REMOTE` in `src/remoteExecution/remoteSupport.ts` | `fs_reveal` |
 
@@ -225,21 +225,21 @@ Counts: **(a) 11 · (b) 62 · (c) 148 · (d) 13 · test 2**.
 | `android_text` | b | LOCAL_UI: Devices and emulators are attached to the person's computer; the VM image has no Android SDK. |
 | `android_ui_dump` | b | LOCAL_UI: Devices and emulators are attached to the person's computer; the VM image has no Android SDK. |
 | `app_stats` | a | ipc.ts asks `workspace_metrics` when remote. |
-| `browser_clear_data` | d | Native child webview of the desktop window; a workspace replaces it with the streamed VM browser and browser_supported answers false, so the UI never offers it (refused without a round trip if sent). |
-| `browser_close` | d | Native child webview of the desktop window; a workspace replaces it with the streamed VM browser and browser_supported answers false, so the UI never offers it (refused without a round trip if sent). |
+| `browser_clear_data` | d | Native child webview of the desktop window; a workspace uses the embedded proxy and browser_supported answers false, so the UI never offers it (refused without a round trip if sent). |
+| `browser_close` | d | Native child webview of the desktop window; a workspace uses the embedded proxy and browser_supported answers false, so the UI never offers it (refused without a round trip if sent). |
 | `browser_close_metrics` | b | LOCAL_UI: Desktop app diagnostics (no workspace meaning). |
-| `browser_command` | d | Native child webview of the desktop window; a workspace replaces it with the streamed VM browser and browser_supported answers false, so the UI never offers it (refused without a round trip if sent). |
-| `browser_frame` | d | Native child webview of the desktop window; a workspace replaces it with the streamed VM browser and browser_supported answers false, so the UI never offers it (refused without a round trip if sent). |
-| `browser_here` | d | Native child webview of the desktop window; a workspace replaces it with the streamed VM browser and browser_supported answers false, so the UI never offers it (refused without a round trip if sent). |
-| `browser_navigate` | d | Native child webview of the desktop window; a workspace replaces it with the streamed VM browser and browser_supported answers false, so the UI never offers it (refused without a round trip if sent). |
-| `browser_open` | d | Native child webview of the desktop window; a workspace replaces it with the streamed VM browser and browser_supported answers false, so the UI never offers it (refused without a round trip if sent). |
-| `browser_painted` | d | Native child webview of the desktop window; a workspace replaces it with the streamed VM browser and browser_supported answers false, so the UI never offers it (refused without a round trip if sent). |
+| `browser_command` | d | Native child webview of the desktop window; a workspace uses the embedded proxy and browser_supported answers false, so the UI never offers it (refused without a round trip if sent). |
+| `browser_frame` | d | Native child webview of the desktop window; a workspace uses the embedded proxy and browser_supported answers false, so the UI never offers it (refused without a round trip if sent). |
+| `browser_here` | d | Native child webview of the desktop window; a workspace uses the embedded proxy and browser_supported answers false, so the UI never offers it (refused without a round trip if sent). |
+| `browser_navigate` | d | Native child webview of the desktop window; a workspace uses the embedded proxy and browser_supported answers false, so the UI never offers it (refused without a round trip if sent). |
+| `browser_open` | d | Native child webview of the desktop window; a workspace uses the embedded proxy and browser_supported answers false, so the UI never offers it (refused without a round trip if sent). |
+| `browser_painted` | d | Native child webview of the desktop window; a workspace uses the embedded proxy and browser_supported answers false, so the UI never offers it (refused without a round trip if sent). |
 | `browser_pressure_reload_metrics` | b | LOCAL_UI: Desktop app diagnostics (no workspace meaning). |
-| `browser_run_op` | d | Native child webview of the desktop window; a workspace replaces it with the streamed VM browser and browser_supported answers false, so the UI never offers it (refused without a round trip if sent). |
-| `browser_set_bounds` | d | Native child webview of the desktop window; a workspace replaces it with the streamed VM browser and browser_supported answers false, so the UI never offers it (refused without a round trip if sent). |
-| `browser_set_visible` | d | Native child webview of the desktop window; a workspace replaces it with the streamed VM browser and browser_supported answers false, so the UI never offers it (refused without a round trip if sent). |
-| `browser_snapshot` | d | Native child webview of the desktop window; a workspace replaces it with the streamed VM browser and browser_supported answers false, so the UI never offers it (refused without a round trip if sent). |
-| `browser_supported` | a | The adapter answers : workspace previews use the Chrome stream. |
+| `browser_run_op` | d | Native child webview of the desktop window; a workspace uses the embedded proxy and browser_supported answers false, so the UI never offers it (refused without a round trip if sent). |
+| `browser_set_bounds` | d | Native child webview of the desktop window; a workspace uses the embedded proxy and browser_supported answers false, so the UI never offers it (refused without a round trip if sent). |
+| `browser_set_visible` | d | Native child webview of the desktop window; a workspace uses the embedded proxy and browser_supported answers false, so the UI never offers it (refused without a round trip if sent). |
+| `browser_snapshot` | d | Native child webview of the desktop window; a workspace uses the embedded proxy and browser_supported answers false, so the UI never offers it (refused without a round trip if sent). |
+| `browser_supported` | a | The adapter answers: workspace previews use the embedded proxy. |
 | `build_operation_acquire` | c | Host: `workspace-misc.mjs` (mirrors fsx.rs / agents.rs / profiles.rs / prwatch.rs / governor.rs) |
 | `build_operation_release` | c | Host: `workspace-misc.mjs` (mirrors fsx.rs / agents.rs / profiles.rs / prwatch.rs / governor.rs) |
 | `cleanup_disk` | c | Host: `workspace-cleanup.mjs` (mirrors cleanup.rs) |
@@ -334,7 +334,7 @@ Counts: **(a) 11 · (b) 62 · (c) 148 · (d) 13 · test 2**.
 | `model_catalog` | c | Host: `workspace-tools.mjs` (mirrors instructions.rs / agents.rs) |
 | `notes_attach_file` | c | Adapter: reads the workspace file with fs_read_range and attaches it with the desktop's notes_add_attachment. |
 | `pr_watch_now` | c | Host: `workspace-misc.mjs` (mirrors fsx.rs / agents.rs / profiles.rs / prwatch.rs / governor.rs) |
-| `preview_start` | a | previewEngine() streams every web page from the workspace browser; the proxy engine never starts. |
+| `preview_start` | a | The page renders on the desktop. A workspace server is forwarded first (`workspace_forward_open`); any other site goes straight to the desktop proxy. |
 | `preview_stop` | a | As preview_start. |
 | `probe_http_readiness` | c | Host: `workspace-tools.mjs` (mirrors instructions.rs / agents.rs) |
 | `process_capture_metrics` | b | LOCAL_UI: Desktop app diagnostics (no workspace meaning). |

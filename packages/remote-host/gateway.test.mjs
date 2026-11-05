@@ -74,6 +74,7 @@ test('HTTP gateway enforces tenant, write and desktop grants before touching run
     assert.equal((await call('/v1/workspaces/a/files/write', { path: 'x', text: 'x' })).status, 403);
     assert.equal((await call('/v1/workspaces/a/desktop', {})).status, 403);
     assert.equal((await call('/v1/workspaces/a/ticket', { stream: '/desktop/ws' })).status, 403);
+    assert.equal((await call('/v1/workspaces/a/ticket', { stream: '/forward' })).status, 403);
     assert.deepEqual(opened, []);
     assert.equal((await call('/v1/workspaces/a/sessions')).status, 200);
     assert.deepEqual(invoked, ['/sessions']);

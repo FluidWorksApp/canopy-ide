@@ -1,5 +1,5 @@
 import {resolveWorkspacePath} from './workspace-file-paths.mjs';
-import {BrowserStreams} from './browser-streams.mjs';
+import {servePortForward} from './port-forward.mjs';
 import {safeGitRead,GIT_READ_COMMANDS} from './git-read.mjs';
 import {gitIdentityEnvironment} from './git-identity.mjs';
 // Native IDE command boundary for a Linux workspace. Files and subprocesses
@@ -64,7 +64,6 @@ const workspaceMetrics=metricsReader();
 let lastSessionPass=null;
 const execute=promisify(execFile);
 const ROOT='/workspace', HOME='/home/agent', STORE=HOME+'/.canopy/ide-projects.json';
-const browsers=new BrowserStreams({home:HOME});
 const profiles=new WorkspaceProfiles(HOME);
 const sessionCompact=sessionCompactCommand({home:HOME,scoped:value=>scoped(value),profileEnv:(agent,id)=>profiles.env(agent,id)});
 const integrations=new AgentIntegrations(HOME);
@@ -337,8 +336,6 @@ export async function nativeInvoke(command,args={}){
   if(command==='session_transcript_tail')return sessionTranscriptTail(HOME,args,{scoped});
   if(command==='session_activity')return sessionActivity(HOME,args);
   if(command==='session_compact')return sessionCompact(args);
-  if(command==='workspace_chrome_stream_open')return browsers.open(args);
-  if(command==='workspace_chrome_stream_close'){await browsers.close(args.id);return;}
   if(command==='mcp_servers')return mcpRegistry.servers(args.projectDirs??[]);
   if(command==='mcp_update_sources')return mcpRegistry.update(args.projectDirs??[],args.changes);
   if(command==='agent_integration_health')return Promise.all(HOOKED_CLIS.map(agent=>integrations.health(agent)));
@@ -362,8 +359,8 @@ export function startNativeServer(){
   const authorized=request=>{const auth=Buffer.from(request.headers.authorization??'');return auth.length===expected.length&&timingSafeEqual(auth,expected);};
   const server=http.createServer(async(request,response)=>{if(!authorized(request))return json(response,401,{error:'Unauthorized'});try{const input=await body(request);const resize=request.url.match(/^\/sessions\/(\d+)\/resize$/);if(resize)return json(response,200,await screens.resize(Number(resize[1]),input.cols,input.rows));if(request.url!=='/native')throw Error('Unknown workspace operation');return json(response,200,{result:(await nativeInvoke(input.command,input.args))??null});}catch(error){return json(response,400,{error:error.message});}});
   const wss=new WebSocketServer({noServer:true,maxPayload:256000,perMessageDeflate:false});
-  server.on('upgrade',(request,socket,head)=>{const match=request.url.match(/^\/sessions\/(\d+)\/stream$/),browser=request.url.match(/^\/browsers\/([a-f0-9-]{36})\/stream$/);if(!authorized(request)||(!match&&!browser))return socket.destroy();wss.handleUpgrade(request,socket,head,client=>{client.on('error',()=>{});if(browser){try{browsers.attach(browser[1],client);}catch{client.close(1008,'Unknown browser');}return;}void screens.attach(Number(match[1]),client).catch(()=>client.close(1011,'Terminal unavailable'));});});
-  server.on('close',()=>{screens.dispose();browsers.dispose();});
+  server.on('upgrade',(request,socket,head)=>{const match=request.url.match(/^\/sessions\/(\d+)\/stream$/),forward=request.url==='/forward';if(!authorized(request)||(!match&&!forward))return socket.destroy();wss.handleUpgrade(request,socket,head,client=>{client.on('error',()=>{});if(forward)return servePortForward(client);void screens.attach(Number(match[1]),client).catch(()=>client.close(1011,'Terminal unavailable'));});});
+  server.on('close',()=>screens.dispose());
   server.maxConnections=32;server.requestTimeout=30000;server.headersTimeout=10000;server.listen(8081,'0.0.0.0');
 }
 

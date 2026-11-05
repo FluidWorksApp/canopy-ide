@@ -156,7 +156,7 @@ pub fn spawn(app: AppHandle, last: Arc<Mutex<TunnelState>>, mut stop: watch::Rec
     });
 }
 
-fn rand_unit() -> f64 {
+pub(crate) fn rand_unit() -> f64 {
     let mut b = [0u8; 2];
     let _ = getrandom::getrandom(&mut b);
     u16::from_le_bytes(b) as f64 / u16::MAX as f64

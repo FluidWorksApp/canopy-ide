@@ -39,6 +39,7 @@ use futures_util::StreamExt;
 use std::collections::{HashMap, HashSet};
 use std::net::ToSocketAddrs;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU16, Ordering};
 use std::sync::{Arc, Mutex};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
@@ -52,6 +53,8 @@ pub const RESET_PATH: &str = "/__canopy__/reset";
 /// non-HTML responses continue to stream without this retention.
 const MAX_BODY: usize = 16 * 1024 * 1024;
 const MAX_INJECTABLE_HTML: usize = 16 * 1024 * 1024;
+
+type AllowedPorts = Arc<Mutex<std::collections::BTreeSet<u16>>>;
 
 /// One proxied request, as the canopy_browser_network tool reports it.
 type NetLog = Arc<Mutex<std::collections::VecDeque<serde_json::Value>>>;
@@ -70,6 +73,12 @@ struct ProxyCtx {
     secure: bool,
     /// Browser-facing host. Distinct per project; cookies ignore ports.
     proxy_host: String,
+    /// The local port forwarding a workspace server, or 0 for a direct origin.
+    /// `origin` stays the page's own address: the workspace's `localhost:3000`
+    /// keeps its identity for Host, redirects and storage wherever it is dialled.
+    forwarded: Arc<AtomicU16>,
+    /// Forwarded ports a workspace page may address by number.
+    allowed_ports: AllowedPorts,
     client: reqwest::Client,
     /// Rolling log of proxied requests — the proxy sees every request the page
     /// makes, so agents get a network tab without instrumenting the page.
@@ -79,7 +88,51 @@ struct ProxyCtx {
     cookies: Arc<Mutex<HashSet<CookieKey>>>,
 }
 
+impl ProxyCtx {
+    fn upstream_base(&self) -> String {
+        match self.forwarded.load(Ordering::Relaxed) {
+            0 => self.origin.clone(),
+            port => format!(
+                "{}://127.0.0.1:{port}",
+                if self.secure { "https" } else { "http" }
+            ),
+        }
+    }
+
+    fn upstream_dial(&self) -> String {
+        match self.forwarded.load(Ordering::Relaxed) {
+            0 => self.dial.clone(),
+            port => format!("127.0.0.1:{port}"),
+        }
+    }
+
+    /// A workspace's code renders on this computer, so it must not be able to
+    /// address services here. CSP has no deny form, so this allows everything a
+    /// page normally needs except plain http, then adds back the proxy itself
+    /// and the ports served by the tunnel. Local previews are left as they are.
+    fn workspace_csp(&self) -> String {
+        let mut sources = format!(
+            "'self' https: wss: data: blob: 'unsafe-inline' 'unsafe-eval' ws://{}:*",
+            self.proxy_host
+        );
+        for port in self.allowed_ports.lock().unwrap().iter() {
+            for host in ["localhost", "127.0.0.1"] {
+                sources.push_str(&format!(" http://{host}:{port} ws://{host}:{port}"));
+            }
+        }
+        format!("default-src {sources}")
+    }
+
+    /// Servers compare Origin with Host to reject cross-site writes. Host is
+    /// the target's, so an Origin naming this proxy must become the target's too.
+    fn upstream_origin(&self, value: &str) -> Option<String> {
+        let host = value.split("://").nth(1)?.split(':').next()?;
+        (host == self.proxy_host).then(|| self.origin.clone())
+    }
+}
+
 struct RunningProxy {
+    forwarded: Arc<AtomicU16>,
     project_id: String,
     origin: String,
     host: String,
@@ -102,6 +155,7 @@ struct CookieKey {
 
 #[derive(Default)]
 pub struct PreviewManager {
+    allowed_ports: AllowedPorts,
     /// Two tabs in one project previewing the same server share one proxy. The
     /// project is part of the key so another project gets another browser host.
     proxies: Mutex<HashMap<ProxyKey, RunningProxy>>,
@@ -316,6 +370,7 @@ pub async fn preview_start(
     state: tauri::State<'_, PreviewManager>,
     project_id: String,
     target: String,
+    forwarded_port: Option<u16>,
 ) -> Result<PreviewInfo, String> {
     if project_id.trim().is_empty() {
         return Err("preview: project id is required for an isolated origin".into());
@@ -328,6 +383,8 @@ pub async fn preview_start(
     {
         let guard = state.proxies.lock().unwrap();
         if let Some(p) = guard.get(&key) {
+            p.forwarded
+                .store(forwarded_port.unwrap_or(0), Ordering::Relaxed);
             return Ok(PreviewInfo {
                 port: p.port,
                 host: p.host.clone(),
@@ -342,6 +399,8 @@ pub async fn preview_start(
     {
         let guard = state.proxies.lock().unwrap();
         if let Some(p) = guard.get(&key) {
+            p.forwarded
+                .store(forwarded_port.unwrap_or(0), Ordering::Relaxed);
             return Ok(PreviewInfo {
                 port: p.port,
                 host: p.host.clone(),
@@ -350,14 +409,21 @@ pub async fn preview_start(
         }
     }
 
+    let forwarded_port = forwarded_port.unwrap_or(0);
+    // A forwarded https server is dialled by loopback address over the signed-in
+    // tunnel, so its development certificate cannot name that address.
     let client = reqwest::Client::builder()
         .redirect(reqwest::redirect::Policy::none())
+        .danger_accept_invalid_certs(forwarded_port != 0)
         .build()
         .map_err(|e| e.to_string())?;
     let log: NetLog = Arc::default();
     let cookies: Arc<Mutex<HashSet<CookieKey>>> = Arc::default();
     let host = proxy_host(&project_id);
+    let forwarded = Arc::new(AtomicU16::new(forwarded_port));
     let ctx = Arc::new(ProxyCtx {
+        forwarded: forwarded.clone(),
+        allowed_ports: state.allowed_ports.clone(),
         dial: dial_addr(&origin, &authority),
         secure: origin.starts_with("https://"),
         proxy_host: host.clone(),
@@ -401,6 +467,7 @@ pub async fn preview_start(
     guard.insert(
         key,
         RunningProxy {
+            forwarded,
             project_id,
             origin: origin.clone(),
             host: host.clone(),
@@ -410,6 +477,12 @@ pub async fn preview_start(
         },
     );
     Ok(PreviewInfo { port, host, origin })
+}
+
+/// The forwarded ports a workspace page may reach, replacing any earlier list.
+#[tauri::command]
+pub fn preview_allow_ports(state: tauri::State<'_, PreviewManager>, ports: Vec<u16>) {
+    *state.allowed_ports.lock().unwrap() = ports.into_iter().collect();
 }
 
 #[tauri::command]
@@ -469,7 +542,11 @@ async fn proxy_handler(State(ctx): State<Arc<ProxyCtx>>, req: Request) -> Respon
         record_request(&ctx, &method, &path, &resp, started, true);
         return resp;
     }
+    let navigation = wants_page(req.headers());
     let resp = forward_http(ctx.clone(), req).await.unwrap_or_else(|e| {
+        if navigation {
+            return waiting_page(&ctx);
+        }
         plain(
             StatusCode::BAD_GATEWAY,
             format!("Canopy preview: the server didn't answer: {e}\n\nIs it still running?"),
@@ -616,6 +693,31 @@ fn record_request(
     }
 }
 
+/// A top-level page load rather than one of its images or scripts.
+fn wants_page(headers: &HeaderMap) -> bool {
+    headers
+        .get(header::ACCEPT)
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|v| v.contains("text/html"))
+}
+
+/// Shown while the server is down or still starting, in either mode. It keeps
+/// asking, so the page appears by itself the moment the server answers.
+fn waiting_page(ctx: &ProxyCtx) -> Response {
+    let html = format!(
+        "<!doctype html><meta charset=utf-8><title>Waiting for server</title>\
+         <style>body{{font:14px system-ui;color:#777;display:grid;place-items:center;height:100vh;margin:0}}</style>\
+         <p>Waiting for {}…</p><script>setTimeout(()=>location.reload(),1000)</script>",
+        ctx.origin
+    );
+    Response::builder()
+        .status(StatusCode::SERVICE_UNAVAILABLE)
+        .header(header::CONTENT_TYPE, "text/html; charset=utf-8")
+        .header(header::CACHE_CONTROL, "no-store")
+        .body(Body::from(html))
+        .unwrap()
+}
+
 fn plain(status: StatusCode, msg: String) -> Response {
     Response::builder()
         .status(status)
@@ -646,7 +748,7 @@ async fn forward_http(ctx: Arc<ProxyCtx>, req: Request) -> Result<Response, Stri
         .path_and_query()
         .map(|p| p.as_str())
         .unwrap_or("/");
-    let url = format!("{}{}", ctx.origin, pq);
+    let url = format!("{}{}", ctx.upstream_base(), pq);
 
     let method =
         reqwest::Method::from_bytes(parts.method.as_str().as_bytes()).map_err(|e| e.to_string())?;
@@ -658,7 +760,16 @@ async fn forward_http(ctx: Arc<ProxyCtx>, req: Request) -> Result<Response, Stri
         if hop_by_hop(n) || n == "host" || n == "accept-encoding" || n == "content-length" {
             continue;
         }
+        if n == "origin" {
+            if let Some(origin) = value.to_str().ok().and_then(|v| ctx.upstream_origin(v)) {
+                rb = rb.header(name, origin);
+                continue;
+            }
+        }
         rb = rb.header(name, value);
+    }
+    if ctx.forwarded.load(Ordering::Relaxed) != 0 {
+        rb = rb.header(header::HOST, &ctx.authority);
     }
     if parts.method != Method::GET && parts.method != Method::HEAD {
         let bytes = axum::body::to_bytes(body, MAX_BODY)
@@ -725,6 +836,9 @@ async fn forward_http(ctx: Arc<ProxyCtx>, req: Request) -> Result<Response, Stri
             continue;
         }
         builder = builder.header(name, value);
+    }
+    if is_html && ctx.forwarded.load(Ordering::Relaxed) != 0 {
+        builder = builder.header(header::CONTENT_SECURITY_POLICY, ctx.workspace_csp());
     }
     if let Some(loc) = rewritten_location {
         builder = builder.header(header::LOCATION, loc);
@@ -871,12 +985,15 @@ async fn tunnel_upgrade(ctx: Arc<ProxyCtx>, mut req: Request) -> Result<Response
             continue;
         }
         if let Ok(v) = value.to_str() {
-            head.push_str(&format!("{name}: {v}\r\n"));
+            let origin = (name.as_str() == "origin")
+                .then(|| ctx.upstream_origin(v))
+                .flatten();
+            head.push_str(&format!("{name}: {}\r\n", origin.as_deref().unwrap_or(v)));
         }
     }
     head.push_str("\r\n");
 
-    let mut upstream = tokio::net::TcpStream::connect(&ctx.dial)
+    let mut upstream = tokio::net::TcpStream::connect(ctx.upstream_dial())
         .await
         .map_err(|e| e.to_string())?;
     upstream
@@ -1134,8 +1251,43 @@ mod tests {
         assert!(browser_jar.get(&host_b).is_none());
     }
 
+    #[test]
+    fn an_origin_naming_the_proxy_becomes_the_target() {
+        let ctx = test_ctx("abc.localhost", &[]);
+        assert_eq!(
+            ctx.upstream_origin("http://abc.localhost:51000").as_deref(),
+            Some("http://127.0.0.1:3000")
+        );
+        assert_eq!(ctx.upstream_origin("https://elsewhere.example"), None);
+    }
+
+    #[test]
+    fn a_workspace_page_reaches_only_forwarded_local_ports() {
+        let ctx = test_ctx("abc.localhost", &[]);
+        ctx.allowed_ports.lock().unwrap().insert(8000);
+        let csp = ctx.workspace_csp();
+        assert!(csp.contains("http://localhost:8000"));
+        assert!(csp.contains("ws://abc.localhost:*"));
+        assert!(
+            !csp.contains(" http: "),
+            "plain http must stay blocked: {csp}"
+        );
+    }
+
+    #[test]
+    fn a_page_load_waits_for_the_server_and_asks_again() {
+        let mut headers = HeaderMap::new();
+        assert!(!wants_page(&headers));
+        headers.insert(header::ACCEPT, HeaderValue::from_static("text/html,*/*"));
+        assert!(wants_page(&headers));
+        let page = waiting_page(&test_ctx("abc.localhost", &[]));
+        assert_eq!(page.status(), StatusCode::SERVICE_UNAVAILABLE);
+    }
+
     fn test_ctx(host: &str, cookies: &[(&str, &str)]) -> ProxyCtx {
         ProxyCtx {
+            forwarded: Default::default(),
+            allowed_ports: Default::default(),
             origin: "http://127.0.0.1:3000".into(),
             authority: "127.0.0.1:3000".into(),
             dial: "127.0.0.1:3000".into(),
@@ -1210,6 +1362,8 @@ mod tests {
         tokio::spawn(async move { axum::serve(upstream, app).await.unwrap() });
 
         let ctx = Arc::new(ProxyCtx {
+            forwarded: Default::default(),
+            allowed_ports: Default::default(),
             origin: format!("http://127.0.0.1:{upstream_port}"),
             authority: format!("127.0.0.1:{upstream_port}"),
             dial: format!("127.0.0.1:{upstream_port}"),
@@ -1299,6 +1453,8 @@ mod tests {
         tokio::spawn(async move { axum::serve(upstream, app).await.unwrap() });
 
         let ctx = Arc::new(ProxyCtx {
+            forwarded: Default::default(),
+            allowed_ports: Default::default(),
             dial: format!("127.0.0.1:{upstream_port}"),
             secure: false,
             proxy_host: "p-test.localhost".into(),

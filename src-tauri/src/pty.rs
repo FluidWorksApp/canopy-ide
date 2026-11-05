@@ -85,6 +85,38 @@ pub enum PtyEvent {
 /// one whose history never existed. Long enough for that, short enough that
 /// quitting the app never feels stuck.
 const GRACE: Duration = Duration::from_millis(2500);
+/// After SIGKILL the job has nothing left to do but be reaped by its shell.
+const FORCE_WAIT: Duration = Duration::from_millis(3000);
+
+enum Signal {
+    Stop,
+    Force,
+}
+
+fn signal_group(group: u32, signal: Signal) {
+    #[cfg(unix)]
+    unsafe {
+        let number = match signal {
+            Signal::Stop => libc::SIGTERM,
+            Signal::Force => libc::SIGKILL,
+        };
+        libc::killpg(group as libc::pid_t, number);
+    }
+    #[cfg(not(unix))]
+    let _ = (group, signal);
+}
+
+fn group_alive(group: u32) -> bool {
+    #[cfg(unix)]
+    {
+        unsafe { libc::killpg(group as libc::pid_t, 0) == 0 }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = group;
+        false
+    }
+}
 
 /// A tag unique to this app launch, stamped onto every terminal it spawns
 /// (env `CANOPY_INSTANCE`) and recorded in each session digest. Pid distinguishes
@@ -657,6 +689,55 @@ impl PtyManager {
         session.shutdown.store(true, Ordering::SeqCst);
         thread::spawn(move || session.terminate());
         Ok(())
+    }
+
+    /// Stop only what is running in the terminal, leaving its shell and tab
+    /// alive, and return once the shell has the terminal back. That handover is
+    /// the proof: the kernel gives the foreground back only after the job left,
+    /// so a conversation file read after this has no writer. Cached stats and
+    /// the session map cannot say the same.
+    pub fn stop_foreground(&self, id: u32) -> Result<(), String> {
+        let session = self.get(id).ok_or("The agent's terminal has closed")?;
+        let root = session.pid.ok_or("The agent's terminal has no shell")?;
+        // Not knowing is not the same as nothing running: without the terminal's
+        // answer there is no proof, so the conversation stays untouched.
+        let job = session
+            .foreground_pid()
+            .ok_or("Canopy cannot tell what is running in this terminal")?;
+        if job == root {
+            return Ok(());
+        }
+        let back = |grace: Duration| {
+            let deadline = std::time::Instant::now() + grace;
+            loop {
+                if session.foreground_pid() == Some(root) && !group_alive(job) {
+                    return true;
+                }
+                if std::time::Instant::now() >= deadline {
+                    return false;
+                }
+                thread::sleep(Duration::from_millis(25));
+            }
+        };
+        signal_group(job, Signal::Stop);
+        if back(GRACE) {
+            return Ok(());
+        }
+        signal_group(job, Signal::Force);
+        if back(FORCE_WAIT) {
+            return Ok(());
+        }
+        Err("The agent did not stop, so its conversation was left alone".into())
+    }
+
+    /// Whether something other than the shell owns the terminal right now.
+    pub fn foreground_running(&self, id: u32) -> bool {
+        self.get(id).is_some_and(|session| {
+            session.pid.is_some()
+                && session
+                    .foreground_pid()
+                    .is_some_and(|job| Some(job) != session.pid)
+        })
     }
 
     /// Attach a remote consumer (Canopy Remote): returns the current scrollback
@@ -2441,6 +2522,20 @@ pub fn pty_kill(state: State<'_, PtyManager>, id: u32) -> Result<(), String> {
     state.kill(id)
 }
 
+/// See [`PtyManager::stop_foreground`]. Async, so its wait stays off the main
+/// thread that `pty_kill` warns about.
+#[tauri::command]
+pub async fn pty_stop_foreground(app: AppHandle, id: u32) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || app.state::<PtyManager>().stop_foreground(id))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+pub fn pty_foreground_running(state: State<'_, PtyManager>, id: u32) -> bool {
+    state.foreground_running(id)
+}
+
 #[tauri::command]
 pub fn pty_set_title(state: State<'_, PtyManager>, id: u32, title: String) -> Result<(), String> {
     let session = get_session(&state, id)?;
@@ -4031,6 +4126,97 @@ mod tests {
         let _ = pm.kill(id);
         assert!(receipt.submitted);
         assert!(seen, "core delivery never reached the real child process");
+    }
+
+    fn at_prompt(pm: &PtyManager, id: u32) -> bool {
+        let deadline = Instant::now() + Duration::from_secs(8);
+        while Instant::now() < deadline {
+            if !pm.foreground_running(id) {
+                return true;
+            }
+            thread::sleep(Duration::from_millis(25));
+        }
+        false
+    }
+
+    fn running_job(pm: &PtyManager, id: u32, command: &str) {
+        thread::sleep(Duration::from_millis(600));
+        pm.write(id, &format!("{command}\r")).expect("type");
+        let deadline = Instant::now() + Duration::from_secs(8);
+        while Instant::now() < deadline && !pm.foreground_running(id) {
+            thread::sleep(Duration::from_millis(25));
+        }
+        assert!(pm.foreground_running(id), "the job never took the terminal");
+    }
+
+    // The account handover relies on this: only the agent goes, the shell and
+    // the tab it belongs to stay, and the proof holds for a job that refuses.
+    #[test]
+    fn stopping_the_foreground_job_keeps_the_shell() {
+        let app = tauri::test::mock_app();
+        let pm = PtyManager::default();
+        let id = pm
+            .spawn_headless(app.handle().clone(), Some("/tmp".into()), None, None)
+            .expect("spawn");
+        running_job(&pm, id, "sleep 60");
+        pm.stop_foreground(id).expect("stop");
+        assert!(!pm.foreground_running(id));
+        assert!(pm.get(id).is_some(), "the shell went with the job");
+        running_job(&pm, id, "sh -c 'trap \"\" TERM; sleep 60'");
+        pm.stop_foreground(id).expect("forced stop");
+        assert!(at_prompt(&pm, id));
+        assert!(pm.get(id).is_some(), "the shell went with a stubborn job");
+        running_job(&pm, id, "sleep 60");
+        pm.stop_foreground(id)
+            .expect("the terminal is still usable");
+        let _ = pm.kill(id);
+    }
+
+    // The whole move, in a real shell: the relaunch lands in the same terminal
+    // with the new account's environment and in the requested directory.
+    #[test]
+    fn a_relaunch_in_the_same_shell_gets_the_new_account() {
+        let app = tauri::test::mock_app();
+        let pm = PtyManager::default();
+        let dir = std::env::temp_dir().join(format!("canopy-handover-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let dir = std::fs::canonicalize(dir).unwrap();
+        let id = pm
+            .spawn_headless(app.handle().clone(), Some("/tmp".into()), None, None)
+            .expect("spawn");
+        running_job(&pm, id, "export CANOPY_OLD=a; sleep 60");
+        pm.stop_foreground(id).expect("stop");
+        pm.write(
+            id,
+            &format!(
+                "\x15 cd '{}' && export CANOPY_NEW='b' && unset CANOPY_OLD && sh -c 'echo \"[$CANOPY_NEW][$CANOPY_OLD]$PWD\" > seen; sleep 60'\r",
+                dir.display()
+            ),
+        )
+        .expect("write");
+        let seen = dir.join("seen");
+        let deadline = Instant::now() + Duration::from_secs(8);
+        while Instant::now() < deadline && !seen.exists() {
+            thread::sleep(Duration::from_millis(25));
+        }
+        let text = std::fs::read_to_string(&seen).expect("the relaunch never ran");
+        assert_eq!(text.trim(), format!("[b][]{}", dir.display()));
+        assert!(pm.foreground_running(id));
+        let _ = pm.kill(id);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn stopping_an_idle_shell_is_a_no_op() {
+        let app = tauri::test::mock_app();
+        let pm = PtyManager::default();
+        let id = pm
+            .spawn_headless(app.handle().clone(), Some("/tmp".into()), None, None)
+            .expect("spawn");
+        thread::sleep(Duration::from_millis(600));
+        pm.stop_foreground(id).expect("stop");
+        assert!(pm.get(id).is_some());
+        let _ = pm.kill(id);
     }
 
     // Regression: kill tears the session down (no leaked child / map entry).

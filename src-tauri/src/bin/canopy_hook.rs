@@ -450,6 +450,21 @@ fn current_profile() -> String {
 
 /// Where the plan chip reads from. One file per agent per account — limits are
 /// per subscription, and a single file would have them overwrite each other.
+/// The structured verdict of a `StopFailure`, with the CLI's own wording for
+/// the reset time. For this event `last_assistant_message` is the error string.
+fn limit_reached(event: &serde_json::Map<String, serde_json::Value>) -> Option<serde_json::Value> {
+    let kind = event.get("error")?.as_str()?;
+    if !matches!(kind, "rate_limit" | "billing_error") {
+        return None;
+    }
+    let message = ["last_assistant_message", "error_details"]
+        .iter()
+        .find_map(|key| event.get(*key).and_then(|v| v.as_str()))
+        .unwrap_or("");
+    let message: String = message.chars().take(300).collect();
+    Some(serde_json::json!({ "kind": kind, "message": message }))
+}
+
 fn plan_usage_path(agent: &str, profile: &str) -> std::path::PathBuf {
     let name = if profile == "default" {
         format!("{agent}.json")
@@ -1043,6 +1058,13 @@ fn normalize_event(event: &mut serde_json::Value, agent: &str) {
         .and_then(|v| v.as_str())
         .unwrap_or("")
         .to_string();
+    // A turn that ended on a plan limit still ends as a turn. The account pool
+    // reads this field; the lifecycle ladder keeps seeing an ordinary turn-end.
+    if name == "StopFailure" {
+        if let Some(limit) = limit_reached(map) {
+            map.insert("canopy_limit".into(), limit);
+        }
+    }
     if map.get("canopy_signal").is_none() {
         let signal = match name.as_str() {
             "UserPromptSubmit" => Some("turn-start"),
@@ -6944,6 +6966,43 @@ fn urlencode(s: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_limit_rides_on_the_event_and_the_turn_still_ends() {
+        let mut event = serde_json::json!({
+            "hook_event_name": "StopFailure",
+            "session_id": "s",
+            "error": "rate_limit",
+            "last_assistant_message": "You've hit your weekly limit · resets 4am (Asia/Bangkok)",
+        });
+        normalize_event(&mut event, "claude");
+        assert_eq!(event["canopy_limit"]["kind"], "rate_limit");
+        assert_eq!(event["canopy_signal"], "turn-end");
+        let mut other = serde_json::json!({
+            "hook_event_name": "StopFailure", "session_id": "s", "error": "authentication_failed",
+        });
+        normalize_event(&mut other, "claude");
+        assert!(other.get("canopy_limit").is_none());
+    }
+
+    #[test]
+    fn a_plan_limit_is_read_from_the_structured_failure() {
+        let event = |value: serde_json::Value| value.as_object().unwrap().clone();
+        let limit = limit_reached(&event(serde_json::json!({
+            "error": "rate_limit",
+            "last_assistant_message": "You've hit your weekly limit · resets 4am (Asia/Bangkok)",
+        })))
+        .expect("limit");
+        assert_eq!(limit["kind"], "rate_limit");
+        assert!(limit["message"].as_str().unwrap().contains("resets 4am"));
+        let details = limit_reached(&event(serde_json::json!({
+            "error": "billing_error", "error_details": "402",
+        })))
+        .expect("billing");
+        assert_eq!(details["message"], "402");
+        assert!(limit_reached(&event(serde_json::json!({ "error": "overloaded" }))).is_none());
+        assert!(limit_reached(&event(serde_json::json!({ "error": "server_error" }))).is_none());
+    }
+
     use super::*;
 
     /// One irreversible command, as each CLI delivers it to its pre-tool hook,

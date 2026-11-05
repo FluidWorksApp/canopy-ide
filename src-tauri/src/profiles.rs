@@ -502,6 +502,22 @@ pub async fn profile_create(label: String) -> Result<Profile, String> {
     Ok(profile)
 }
 
+/// Bring every account up to the hooks this build expects. Setup merges, so
+/// running it on an account that is already current changes nothing.
+#[tauri::command]
+pub async fn profiles_ensure_integration() -> Result<(), String> {
+    let home = home()?;
+    tauri::async_runtime::spawn_blocking(move || {
+        for profile in list(&home) {
+            for cli in agent_cli::profile_clis() {
+                let _ = crate::agents::setup_agent_in(cli.id, &profile.root, &home);
+            }
+        }
+    })
+    .await
+    .map_err(|e| e.to_string())
+}
+
 /// Which account each CLI holds inside one profile.
 #[tauri::command]
 pub async fn profile_accounts(id: String) -> Result<Vec<AccountStatus>, String> {
@@ -559,6 +575,41 @@ pub(crate) fn valid_account_credentials(agent: &str, value: &serde_json::Value) 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // The launch sweep touches real account settings, so this is the promise it
+    // depends on: an account gains what is missing and keeps what is the user's.
+    #[test]
+    fn the_integration_sweep_adds_the_limit_hook_and_keeps_the_users_own() {
+        let base = std::env::temp_dir().join(format!("canopy-sweep-{}", std::process::id()));
+        std::fs::create_dir_all(&base).unwrap();
+        let base = std::fs::canonicalize(base).unwrap();
+        let home = base.to_str().unwrap();
+        let work = create(home, "Sweep").unwrap();
+        // The app installs the helper at startup, before any sweep can run.
+        std::fs::create_dir_all(base.join(".canopy/bin")).unwrap();
+        std::fs::write(base.join(".canopy/bin/canopy-hook"), "").unwrap();
+        let settings = PathBuf::from(&work.root).join(".claude/settings.json");
+        std::fs::create_dir_all(settings.parent().unwrap()).unwrap();
+        std::fs::write(
+            &settings,
+            r#"{"model":"mine","hooks":{"Stop":[{"hooks":[{"type":"command","command":"my-own-hook"}]}]}}"#,
+        )
+        .unwrap();
+        let read = || -> serde_json::Value {
+            serde_json::from_str(&std::fs::read_to_string(&settings).unwrap()).unwrap()
+        };
+        crate::agents::setup_agent_in("claude", &work.root, home).unwrap();
+        let once = read();
+        assert!(
+            once["hooks"]["StopFailure"].is_array(),
+            "the limit hook was not installed"
+        );
+        assert_eq!(once["model"], "mine");
+        assert!(once["hooks"]["Stop"].to_string().contains("my-own-hook"));
+        crate::agents::setup_agent_in("claude", &work.root, home).unwrap();
+        assert_eq!(read(), once, "a second sweep changed the account");
+        let _ = std::fs::remove_dir_all(base);
+    }
 
     fn scratch(name: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!("canopy-profiles-{name}"));
@@ -914,10 +965,29 @@ pub(crate) fn conversation_store(agent: &str) -> Option<&'static str> {
         _ => None,
     }
 }
+/// How a CLI records that its user trusted a folder.
+pub(crate) enum TrustStore {
+    ClaudeState,
+    CodexConfig,
+}
+
+pub(crate) fn trust_store(agent: &str) -> Option<TrustStore> {
+    match agent {
+        "claude" => Some(TrustStore::ClaudeState),
+        "codex" => Some(TrustStore::CodexConfig),
+        _ => None,
+    }
+}
+
 pub(crate) fn conversation_file_matches(agent: &str, name: &str, id: &str) -> bool {
     match agent {
         "claude" => name == format!("{id}.jsonl"),
-        "codex" => name.starts_with("rollout-") && name.ends_with(&format!("-{id}.jsonl")),
+        // Codex compresses rollouts it has finished writing.
+        "codex" => {
+            name.starts_with("rollout-")
+                && (name.ends_with(&format!("-{id}.jsonl"))
+                    || name.ends_with(&format!("-{id}.jsonl.zst")))
+        }
         _ => false,
     }
 }

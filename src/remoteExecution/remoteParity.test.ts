@@ -18,14 +18,18 @@ const DESKTOP_DIRECT = new Set([
   "execution_remote_account_candidates", "execution_remote_activate", "execution_remote_forget",
   "execution_remote_import_accounts", "execution_remote_list", "execution_remote_login_prepare",
   "canopy_account_cache_key",
+  // The preview tunnel lives on this computer; its tickets and teardown go
+  // straight there from the workspace host, even once it is disposed.
+  "workspace_forward_ticket", "workspace_forward_close",
 ]);
 /** Callers that branch on isRemoteHost() and never send this command to a
  *  workspace (the remote branch asks something else). */
 const REMOTE_BRANCHED = new Set([
+  // The subscription pool moves local terminals. Its callers check isRemoteHost,
+  // because a workspace host cannot yet stop only the agent in a session.
+  "pty_stop_foreground", "pty_foreground_running", "profile_carry_trust",
+  "profiles_ensure_integration",
   "app_stats", // workspace_metrics remotely (ipc.ts)
-  // The preview proxy only serves the proxy engine; previewEngine() picks the
-  // workspace's Chrome stream for every web page in a workspace.
-  "preview_start", "preview_stop",
   // onPtyExit/onPtySpawned listen for the adapter's pty:exit/pty:spawned events
   // remotely instead of polling for them (ipc.ts).
   "pty_renderer_events",

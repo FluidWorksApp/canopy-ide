@@ -36,6 +36,15 @@ export function setActiveProfile(profileId: string): void {
   );
 }
 
+let integrationEnsured = false;
+/** Once per run. An account that predates a hook, or was signed in by hand,
+ *  would otherwise never report a limit, and rotation would silently not fire. */
+export function ensureAccountIntegration(): Promise<void> {
+  if (integrationEnsured) return Promise.resolve();
+  integrationEnsured = true;
+  return ipc.profilesEnsureIntegration().catch(() => {});
+}
+
 /** A profile's display name, falling back to its id so a selection pointing at
  *  a profile that was removed still renders as something the user can act on
  *  rather than as blank space. */

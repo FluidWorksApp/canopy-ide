@@ -6,27 +6,22 @@ import { activeWorkspace } from "../remoteExecution/workspace";
 // to an agent through the same AgentLaunchButton + PTY-seed path tickets and
 // PRs use.
 //
-// Three engines sit behind the same toolbar (see browserBounds.chooseEngine):
+// Two engines sit behind the same toolbar (see browserBounds.chooseEngine):
 //
-//   chrome   — Chrome executes the page through the Playwright extension. An
-//              ordinary iframe displays frames and forwards input. It never
-//              registers a native view with browserHost.
 //   webview  — a real child webview at the page's real origin, on a persistent
 //              profile, so a site you log into stays logged in. It is a native
 //              view drawn OVER the window, so this component renders only a
 //              placeholder and hands its rect to browserHost, which is what
 //              actually positions and hides it.
-//   proxy    — the original: an iframe onto a per-origin loopback reverse proxy
-//              (preview.rs). No sessions, but it is the only engine that exists
-//              off macOS.
+//   proxy    — the default and the only choice offered: an iframe onto a
+//              per-origin loopback reverse proxy (preview.rs). A workspace uses
+//              it too, with its server forwarded here (workspace_forward.rs).
 //
 // Everything below the transport is shared. The same picker script runs in the
 // page under both, and answers the same messages; only how those messages
 // travel differs — postMessage through the iframe, or an evaluated call
 // through browser.rs (see browserTransport.ts).
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { openUrl } from "@tauri-apps/plugin-opener";
-import { captureChromeFrame } from "../chromeStream";
 import {
   browserPageChanged,
   browserViewChanged,
@@ -38,7 +33,7 @@ import {
   useBrowserEngine,
   useBrowserPane,
 } from "../browserHost";
-import { isWorkspaceLocalPage, previewEngine } from "../previewEngine";
+import { previewEngine } from "../previewEngine";
 import { transportFor } from "../browserTransport";
 import * as ipc from "../ipc";
 import {
@@ -201,10 +196,8 @@ export function PreviewView({
   // until the proxy's origin became project-scoped and stable, because its
   // cookies were host-shared and its port ephemeral; that is what preview.rs
   // now provides.
-  const chromeSession = useRef<string | null>(null);
   const remoteWorkspace = activeWorkspace();
-  const remotePreview = !!remoteWorkspace && isWorkspaceLocalPage(url);
-  const engine = previewEngine({ remote: !!remoteWorkspace, url, buildMode, chosen: chosenEngine });
+  const engine = previewEngine({ remote: !!remoteWorkspace, buildMode, chosen: chosenEngine });
   const native = engine === "webview";
   // What the placeholder stands in with while the native view is out of the
   // way: a still of the page, or the app's own background — never a white hole.
@@ -215,10 +208,8 @@ export function PreviewView({
   const [draft, setDraft] = useState(url);
   const [picking, setPicking] = useState(false);
   const [proxyError, setProxyError] = useState<string | null>(null);
-  const [chromeSrc, setChromeSrc] = useState<string | null>(null);
-  const [chromeStarted, setChromeStarted] = useState(false);
-  const [chromeRetry, setChromeRetry] = useState(0);
-  const chromeOpenFailures = useRef(0);
+  const [proxyAttempt, setProxyAttempt] = useState(0);
+  const proxyFailures = useRef(0);
   const [capturing, setCapturing] = useState(false);
   // The mode the plain click uses, remembered across sessions. Held in state as
   // well as settings so the menu's "default" hint updates without a reload.
@@ -268,49 +259,6 @@ export function PreviewView({
   transportRef.current = transport;
 
   const origin = originOf(url);
-  const hasUrl = !!origin;
-
-  useEffect(() => {
-    if (engine === "chrome" && hasUrl && (visible || streaming)) setChromeStarted(true);
-  }, [engine, hasUrl, visible, streaming]);
-
-  useEffect(() => {
-    if (engine !== "chrome" || !hasUrl || !chromeStarted) return;
-    let stale = false;
-    const sessionId = `${tabId}-${crypto.randomUUID()}`;
-    chromeSession.current=sessionId;
-    setProxyError(null);
-    setChromeSrc(null);
-    void ipc.chromeStreamOpen(sessionId, urlRef.current, tabId).then(src => {
-      if (stale) { void ipc.chromeStreamClose(sessionId); return; }
-      chromeOpenFailures.current = 0;
-      setChromeSrc(src);
-    }, error => { if (!stale) { chromeOpenFailures.current++; setProxyError(String(error)); } });
-    return () => {
-      stale = true;
-      if(chromeSession.current===sessionId)chromeSession.current=null;
-      void ipc.chromeStreamClose(sessionId);
-    };
-  }, [engine, hasUrl, tabId, chromeStarted, chromeRetry]);
-
-  // A failed bridge open is recoverable when the project comes back into
-  // view. Keep retries bounded and paused while nobody needs this preview.
-  useEffect(() => {
-    if (engine !== "chrome" || !proxyError || (!visible && !streaming)) return;
-    const timer = window.setTimeout(() => setChromeRetry(n => n + 1),
-      Math.min(500 * 2 ** Math.min(chromeOpenFailures.current, 5), 10_000));
-    return () => window.clearTimeout(timer);
-  }, [engine, proxyError, visible, streaming, chromeRetry]);
-
-  const initChromeFrame = useCallback(() => {
-    if (!chromeSrc) return;
-    iframeRef.current?.contentWindow?.postMessage({ canopy: "stream-init", sessionId: chromeSession.current, url: urlRef.current, visible: visibleRef.current || streamingRef.current }, new URL(chromeSrc).origin);
-  }, [chromeSrc]);
-
-  useEffect(() => {
-    if (!chromeSrc || engine !== "chrome") return;
-    iframeRef.current?.contentWindow?.postMessage({ canopy: "stream-visible", visible: visible || streaming }, new URL(chromeSrc).origin);
-  }, [engine, chromeSrc, visible, streaming]);
 
   const post = useCallback((msg: Record<string, unknown>) => {
     const t = transportRef.current;
@@ -331,16 +279,30 @@ export function PreviewView({
       .previewStart(projectId, origin)
       .then((p) => {
         if (stale) return;
+        proxyFailures.current = 0;
         setProxy(p);
         setFrameSrc(`http://${p.host}:${p.port}${restOf(urlRef.current)}`);
       })
       .catch((err) => {
-        if (!stale) setProxyError(String(err));
+        if (stale) return;
+        proxyFailures.current++;
+        setProxyError(String(err));
       });
     return () => {
       stale = true;
     };
-  }, [engine, origin]);
+  }, [engine, origin, proxyAttempt]);
+
+  // A workspace that is waking or reconnecting refuses a start for a moment.
+  // Keep asking while the tab is in view, so that recovers without a click.
+  useEffect(() => {
+    if (engine !== "proxy" || !proxyError || !visible) return;
+    const timer = window.setTimeout(
+      () => setProxyAttempt((n) => n + 1),
+      Math.min(500 * 2 ** Math.min(proxyFailures.current, 5), 10_000),
+    );
+    return () => window.clearTimeout(timer);
+  }, [engine, proxyError, visible, proxyAttempt]);
 
   // ---------- webview engine: the native view's lifecycle ----------
   // The placeholder's rect is measured by browserHost on demand rather than
@@ -469,7 +431,6 @@ export function PreviewView({
    *  is already the truth. */
   const unproxied = useCallback((pageUrl: string): string | null => {
     if (nativeRef.current) return pageUrl;
-    if (engineRef.current === "chrome") return /^https?:\/\//i.test(pageUrl) ? pageUrl : null;
     const p = proxyRef.current;
     if (!p) return null;
     try {
@@ -577,10 +538,6 @@ export function PreviewView({
       }
       setDraft(target);
       onPatchRef.current({ url: target });
-      if (engineRef.current === "chrome") {
-        post({ canopy: "navigate", url: target });
-        return;
-      }
       const t = transportRef.current;
       if (t) {
         if (opened.current) void t.navigate(tabId, target, null).catch(() => {});
@@ -696,37 +653,14 @@ export function PreviewView({
   // The picker inside a proxied page talks postMessage; accept only messages
   // from our own iframe's window.
   useEffect(() => {
-    if (engine !== "proxy" && engine !== "chrome") return;
+    if (engine !== "proxy") return;
     const onMessage = (e: MessageEvent) => {
       if (e.source !== iframeRef.current?.contentWindow) return;
-      if (engine === "chrome") {
-        if (!chromeSrc || e.origin !== new URL(chromeSrc).origin) return;
-        if(e.data?.canopy === "stream-reopen" && e.data.sessionId===chromeSession.current){
-          setChromeRetry(n => n + 1);return;
-        }
-        if(e.data?.canopy === "remote-stream-ticket-request" && e.data.sessionId===chromeSession.current){
-          const session=e.data.sessionId,requestId=e.data.requestId,source=e.source,origin=e.origin;
-          const reply=(message:Record<string,unknown>)=>{
-            if(chromeSession.current===session&&iframeRef.current?.contentWindow===source)
-              iframeRef.current.contentWindow?.postMessage({...message,sessionId:session,...(requestId!=null?{requestId}:{})},origin);
-          };
-          void ipc.chromeStreamTicket(session).then(
-            url=>reply({canopy:"remote-stream-ticket",url}),
-            ()=>reply({canopy:"remote-stream-ticket-error"}),
-          );
-          return;
-        }
-        if (e.data?.canopy === "stream-ready") { initChromeFrame(); return; }
-        if (e.data?.canopy === "install-extension") {
-          void openUrl("https://chromewebstore.google.com/detail/playwright-extension/mmlmfjhmonkocbjadbfplnigmagldckm");
-          return;
-        }
-      }
       handleMessage(e.data);
     };
     window.addEventListener("message", onMessage);
     return () => window.removeEventListener("message", onMessage);
-  }, [engine, chromeSrc, initChromeFrame, handleMessage]);
+  }, [engine, handleMessage]);
 
   // A native page's messages arrive drained, in batches, addressed by tab.
   useEffect(() => {
@@ -851,13 +785,6 @@ export function PreviewView({
       return;
     }
     if (op.op === "screenshot") {
-      if (engineRef.current === "chrome") {
-        void captureChromeFrame(iframeRef.current).then(
-          shot => ipc.browserResult(op.id, true, { ...shot, mimeType: "image/png", url: urlRef.current }),
-          error => ipc.browserResult(op.id, false, String(error)),
-        );
-        return;
-      }
       // Pixels, not structure: the DOM snapshot can say a button exists, not
       // that it's sitting on top of the heading.
       //
@@ -973,10 +900,6 @@ export function PreviewView({
    *  an image-space one. Under the webview engine the page is its own view and
    *  is captured whole; under the proxy it is one rectangle of this window. */
   const shootPane = useCallback(async (): Promise<{ png: string; cssWidth: number }> => {
-    if (engineRef.current === "chrome") {
-      const shot = await captureChromeFrame(iframeRef.current);
-      return { png: shot.image, cssWidth: shot.width };
-    }
     const el = nativeRef.current ? hostRef.current : iframeRef.current;
     const rect = el?.getBoundingClientRect();
     if (!rect || !painted() || rect.width < 1 || rect.height < 1) {
@@ -988,7 +911,7 @@ export function PreviewView({
       ? (await ipc.browserSnapshot(tabId, SHOOT_WIDTH)).image
       : await ipc.webviewSnapshot(rect.x, rect.y, rect.width, rect.height, SHOOT_WIDTH);
     return { png, cssWidth: rect.width };
-  }, [painted, tabId, remotePreview]);
+  }, [painted, tabId]);
 
   /** Put the page into region-drag mode and wait for what the user drew.
    *  Resolves null if they pressed Escape, clicked without dragging, or walked
@@ -1060,7 +983,7 @@ export function PreviewView({
         setCapturing(false);
       }
     },
-    [askRegion, buildMode, dir, onNotice, shootPane, remotePreview],
+    [askRegion, buildMode, dir, onNotice, shootPane],
   );
 
   /** Take one, and remember the mode as the button's one-click default. */
@@ -1236,23 +1159,16 @@ export function PreviewView({
         <div className="preview-error">
           <p>Couldn't reach {origin}.</p>
           <pre>{proxyError}</pre>
-          <Button onClick={() => engine === "chrome" ? setChromeRetry(n => n + 1) : navigate(urlRef.current)}>
+          <Button onClick={() => setProxyAttempt((n) => n + 1)}>
             Retry
           </Button>
         </div>
       );
     }
-    if (engine === "chrome") {
-      return chromeSrc ? (
-        <iframe ref={iframeRef} className="preview-frame" src={chromeSrc}
-          title="Chrome live preview" sandbox="allow-scripts allow-same-origin"
-          onLoad={initChromeFrame} />
-      ) : <div className="preview-error"><p>Starting Chrome preview…</p></div>;
-    }
     return frameSrc ? (
       <iframe ref={iframeRef} className="preview-frame" src={frameSrc} title="preview" />
     ) : null;
-  }, [engine, native, proxyError, origin, frameSrc, navigate, pane, chromeSrc, initChromeFrame, remotePreview, remoteWorkspace, url]);
+  }, [engine, native, proxyError, origin, frameSrc, pane]);
 
   // ---------- empty tab: pick one of the project's own servers ----------
   // Suggest servers tied to this project's components for feedback routing.
@@ -1368,7 +1284,7 @@ export function PreviewView({
             for changing your mind. Same split shape as the agent launcher. */}
         <span className="split-btn split-btn-mini">
           <Button size="sm" className="split-btn-main"
-            title={remotePreview ? "Screenshot workspace browser" : `Screenshot — ${captureModeLabel(captureMode).toLowerCase()}`}
+            title={`Screenshot — ${captureModeLabel(captureMode).toLowerCase()}`}
             disabled={capturing}
             onClick={() => runCapture(captureMode)}>
             <CameraIcon size={12} /> Screenshot{shots.length > 0 ? ` (${shots.length})` : ""}

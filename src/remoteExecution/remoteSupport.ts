@@ -12,8 +12,8 @@ const unsupported = (feature: string, commands: string[]) => {
   for (const command of commands) UNSUPPORTED[command] = feature;
 };
 // The embedded native webview lives in the desktop window and can only load
-// pages this computer can reach. A workspace replaces it: previews stream a
-// browser running in the VM (chrome_stream_open → workspace_chrome_stream_open)
+// pages this computer can reach. A workspace uses the embedded proxy instead,
+// with its server forwarded here (preview_start → workspace_forward_open),
 // and browser_supported answers false, so these are never sent; refusing them
 // keeps a stray call from reaching either machine.
 unsupported("The built-in native browser", [

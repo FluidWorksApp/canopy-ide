@@ -4,6 +4,8 @@ declare module "@novnc/novnc" {
     scaleViewport: boolean;
     background: string;
     disconnect(): void;
+    focus(options?: FocusOptions): void;
+    blur(): void;
     toDataURL(type?: string): string;
   }
 }

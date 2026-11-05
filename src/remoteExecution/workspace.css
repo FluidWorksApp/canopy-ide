@@ -2,6 +2,11 @@
 .workspace-location { font-size:11px; color:var(--text-dim); }
 .workspace-location.remote { color:var(--accent); }
 .remote-workspace-overlay { position: fixed; inset: 0; z-index: 10000; background: var(--scrim, #0009); display: grid; place-items: center; }
+/* Hidden, not removed: the display keeps its size and its connection, so
+   restoring is instant. display:none would collapse noVNC's scaling to zero. */
+.remote-workspace-overlay.is-minimized { visibility: hidden; pointer-events: none; }
+.workspace-desktop-minimized { position: relative; }
+.workspace-desktop-minimized::after { content: ""; position: absolute; top: 3px; right: 3px; width: 6px; height: 6px; border-radius: 50%; background: var(--accent); }
 .workspace-desktop { width: 94vw; height: 90vh; background: var(--bg); border:1px solid var(--border); display: flex; flex-direction: column; }
 .remote-desktop-heading {display:flex;align-items:center;gap:12px;min-width:0;}
 .remote-desktop-heading > span {overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}

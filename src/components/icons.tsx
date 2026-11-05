@@ -338,6 +338,15 @@ export function DesktopIcon({ size = 14, className }: IconProps) {
   );
 }
 
+/** A single low bar: put a window away without closing it. */
+export function MinimizeIcon({ size = 14, className }: IconProps) {
+  return (
+    <svg {...svgProps(size, className)}>
+      <path d="M5 18h14" />
+    </svg>
+  );
+}
+
 /** A camera: capture a screenshot. */
 export function CameraIcon({ size = 14, className }: IconProps) {
   return (

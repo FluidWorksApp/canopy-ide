@@ -7,8 +7,8 @@
 // not invent a bridge request to get them. So it sends the op down the very
 // same path (the `canopy:agent-browser` window event ProjectView routes to a
 // PreviewView) under a negative id, and `browserResult` hands any negative id
-// back here instead of to the bridge. Same routing, same engines (webview,
-// proxy, chrome-stream), no second capture implementation to drift.
+// back here instead of to the bridge. Same routing, same engines, no second
+// capture implementation to drift.
 //
 // No IPC import: ipc.ts calls `settleLocalBrowserOp`, so this module must not
 // pull ipc.ts in.

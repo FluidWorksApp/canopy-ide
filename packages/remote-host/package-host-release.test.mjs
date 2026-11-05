@@ -7,7 +7,7 @@ test('packaging binds actual lock and both Linux gates while excluding retained 
   await writeFile(join(source,'package.json'),JSON.stringify(pkg));await writeFile(join(source,'package-lock.json'),JSON.stringify(lock));
   for(const file of ['install.sh','install-service.sh','canopy-service.service','canopy-service.tmpfiles.conf','network-isolation.sh','agents.lock.json','canopy-host.service','canopy-network.service','canopy-runtime.tmpfiles.conf','safe.mjs','excluded.test.mjs','factory.json'])await writeFile(join(source,file),'synthetic');
   await mkdir(join(source,'node_modules'));await writeFile(join(source,'node_modules','private-fixture'),'never package');
-  await mkdir(join(source,'chrome-stream'));for(const file of ['server.mjs','playwright.mjs','protocol.mjs','viewer.html','viewer.js','preview_picker.js'])await writeFile(join(source,'chrome-stream',file),'synthetic');
+  await mkdir(join(source,'browser-assets'));await writeFile(join(source,'browser-assets','preview_picker.js'),'synthetic');
   const bin=join(dir,'service-bin');await mkdir(bin);const elf=arch=>Buffer.concat([Buffer.from('\x7fELF','latin1'),Buffer.alloc(2048,arch)]);
   const serviceBinaries={};for(const target of ['linux-amd64','linux-arm64']){await writeFile(join(bin,'canopy-serviced-'+target),elf(target));serviceBinaries[target]={sha256:createHash('sha256').update(elf(target)).digest('hex'),bytes:2052};}
   const manifest={runtimeLockSha256:createHash('sha256').update(await readFile(join(source,'package-lock.json'))).digest('hex'),checks:{linuxAmd64:true,linuxArm64:true},serviceBinaries},release=join(dir,'release.json'),archive=join(dir,'runtime.tgz');
