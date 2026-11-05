@@ -13,6 +13,7 @@ import {
   useCallback,
   useEffect,
   useMemo,
+  useContext,
   useRef,
   useState,
   type CSSProperties,
@@ -59,6 +60,9 @@ const CANOPY_LINK = "canopy";
 import "./receipts.css";
 import { drawWave } from "../waveStyles";
 import { useEscape, useEscapeLayer } from "../useEscape";
+import { SettingsSearch } from "./SettingsSearch";
+import { settingAnchor, type SettingHit } from "./settingsIndex";
+import { SettingsNavContext } from "./settingsNav";
 import { TRACKERS, setTrackerKey, trackerKey } from "../trackers";
 import * as ipc from "../ipc";
 import { SlackSettings } from "./SlackSettings";
@@ -486,8 +490,12 @@ function Item({
   desc?: string;
   children: React.ReactNode;
 }) {
+  // Which tab this row is on, from the dialog: names repeat across tabs, so the
+  // anchor a search result scrolls to is tab + name.
+  const nav = useContext(SettingsNavContext);
+  const id = nav.tab ? settingAnchor(nav.tab, name) : undefined;
   return (
-    <div className="set-item">
+    <div className={`set-item${id && nav.highlight === id ? " set-item-flash" : ""}`} id={id}>
       <div className="set-item-head">
         <span className="set-item-name">{name}</span>
         {tag && <span className="set-item-tag">{tag}</span>}
@@ -1260,6 +1268,17 @@ export function SettingsDialog({ onClose, initialTab = "appearance", projects = 
   // never advertises a chord that does nothing (Dictation drops out on
   // machines without it, and everything below it shifts up by one).
   const shortcutTabs = useMemo(() => visibleTabs.slice(0, 9), [visibleTabs]);
+  // Search: results replace the tab list; picking one opens its tab, scrolls to
+  // the row and flashes it.
+  const [query, setQuery] = useState("");
+  const [pendingAnchor, setPendingAnchor] = useState<string | null>(null);
+  const [highlight, setHighlight] = useState<string | null>(null);
+  const searchRef = useRef<HTMLInputElement>(null);
+  const tabLabels = useMemo(
+    () => Object.fromEntries(visibleTabs.map((t) => [t.id, t.label])) as Partial<Record<SettingsTab, string>>,
+    [visibleTabs],
+  );
+  const nav = useMemo(() => ({ tab, highlight }), [tab, highlight]);
 
   // The digit chord jumps between sections. Bound while the dialog is open and
   // nowhere else, which is why the manifest marks it `scoped` and lets it reuse
@@ -1310,8 +1329,32 @@ export function SettingsDialog({ onClose, initialTab = "appearance", projects = 
     onClose();
   };
   const [s, setS] = useState<Settings>(() => getSettings());
+  const pickSetting = (hit: SettingHit) => {
+    setSkinPickerOpen(false);
+    setFleetReadoutOpen(false);
+    setTab(hit.entry.tab);
+    setPendingAnchor(hit.anchor);
+  };
+  useEffect(() => {
+    if (!pendingAnchor) return;
+    // After the tab has rendered, so the row exists to scroll to.
+    const frame = requestAnimationFrame(() => {
+      document.getElementById(pendingAnchor)?.scrollIntoView({ block: "center", behavior: "smooth" });
+      setHighlight(pendingAnchor);
+      setPendingAnchor(null);
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [pendingAnchor, tab]);
+  useEffect(() => {
+    if (!highlight) return;
+    const timer = setTimeout(() => setHighlight(null), 1800);
+    return () => clearTimeout(timer);
+  }, [highlight]);
   useEscape(() => {
-    if (skinPickerOpen) {
+    if (query) {
+      setQuery("");
+      searchRef.current?.focus();
+    } else if (skinPickerOpen) {
       skinPickerTrigger.current?.focus();
       setSkinPickerOpen(false);
     } else if (fleetReadoutOpen) {
@@ -1405,10 +1448,18 @@ export function SettingsDialog({ onClose, initialTab = "appearance", projects = 
   return (
     <div className="confirm-backdrop" onMouseDown={onClose}>
       <div className="confirm settings-dialog" onMouseDown={(e) => e.stopPropagation()}>
+        <SettingsNavContext.Provider value={nav}>
         <div className="settings-layout">
           <nav className="settings-nav">
             <div className="settings-title">Settings</div>
-            {visibleTabs.map((t, i) => (
+            <SettingsSearch
+              ref={searchRef}
+              query={query}
+              onQuery={setQuery}
+              onPick={pickSetting}
+              tabLabels={tabLabels}
+            />
+            {!query.trim() && visibleTabs.map((t, i) => (
               <Fragment key={t.id}>
                 {/* A heading only where the group actually turns over. */}
                 {(i === 0 || visibleTabs[i - 1].group !== t.group) && (
@@ -2507,6 +2558,7 @@ export function SettingsDialog({ onClose, initialTab = "appearance", projects = 
             )}
           </div>
         </div>
+        </SettingsNavContext.Provider>
         <div className="settings-footer">
           <Button variant="accent" onClick={onClose}>
             Done
