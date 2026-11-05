@@ -25,6 +25,10 @@ const DESKTOP_DIRECT = new Set([
 /** Callers that branch on isRemoteHost() and never send this command to a
  *  workspace (the remote branch asks something else). */
 const REMOTE_BRANCHED = new Set([
+  // The subscription pool moves local terminals. Its callers check isRemoteHost,
+  // because a workspace host cannot yet stop only the agent in a session.
+  "pty_stop_foreground", "pty_foreground_running", "profile_carry_trust",
+  "profiles_ensure_integration",
   "app_stats", // workspace_metrics remotely (ipc.ts)
   // onPtyExit/onPtySpawned listen for the adapter's pty:exit/pty:spawned events
   // remotely instead of polling for them (ipc.ts).

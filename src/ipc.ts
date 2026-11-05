@@ -5340,6 +5340,10 @@ export const onGitCloneProgress=(cb:(progress:GitCloneProgress)=>void)=>listen<G
 export const gitCloneCancel=(id:string)=>invoke('git_clone_cancel',{id});
 
 /** Make a selected conversation available to another own CLI account. */
+export const profileCarryTrust = (agent: string, cwd: string, sourceProfile: string, targetProfile: string) =>
+  invoke<void>("profile_carry_trust", { agent, cwd, sourceProfile, targetProfile });
+/** Installs Canopy's hooks on every account, so each one can report a limit. */
+export const profilesEnsureIntegration = () => invoke<void>("profiles_ensure_integration");
 export const profilePrepareSession = (agent: string, sessionId: string, sourceProfile: string, targetProfile: string) => invoke<void>("profile_prepare_session", { agent, sessionId, sourceProfile, targetProfile });
 
 export const clipboardImagePng = () => invoke<string | null>("clipboard_image_png");
@@ -5351,11 +5355,22 @@ export const clipboardWriteText = (text: string) => invoke<void>("clipboard_writ
 export const clipboardReadText = () => invoke<string | null>("clipboard_read_text");
 
 /** Account transfer must wait for transcript writers to exit before copying. */
+/** Stop what runs in a local terminal and keep its shell. Resolves only once the
+ *  shell owns the terminal again, which proves the agent has exited. */
+export const ptyStopForeground = (id: number) => invoke<void>("pty_stop_foreground", { id });
+export const ptyForegroundRunning = (id: number) => invoke<boolean>("pty_foreground_running", { id });
+
 export async function ptyStopAndWait(id: number): Promise<void> {
-  await invoke<void>("pty_kill", { id });
+  await invoke<void>("pty_kill", { id }).catch((error: unknown) => {
+    // Already over is what this function is waiting for.
+    if (!/no pty session|Session not running/.test(String(error))) throw error;
+  });
   const deadline = Date.now() + 10000;
   while (Date.now() < deadline) {
-    if (!(await ptyStats()).some(session => session.id === id)) return;
+    // A workspace under load can refuse a low-priority poll. The agent was
+    // already told to stop, so a refused look is a reason to look again.
+    const running = await ptyStats().catch(() => [{ id }]);
+    if (!running.some(session => session.id === id)) return;
     await new Promise(resolve => setTimeout(resolve, 100));
   }
   throw new Error("Agent has not stopped yet. Its conversation was not transferred.");

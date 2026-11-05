@@ -874,6 +874,8 @@ export function AgentAccounts({
     return () => window.removeEventListener("focus", refresh);
   }, [refresh]);
 
+  const [rotation, setRotation] = useState(() => getSettings().accountRotation);
+
   const create = () => {
     const label = draft.trim();
     if (!label || busy) return;
@@ -923,6 +925,18 @@ export function AgentAccounts({
 
   return (
     <div className="cli-accounts">
+      <Row>
+        <Switch
+          checked={rotation}
+          aria-label="Rotate accounts at limits"
+          onChange={(on) => { setRotation(on); updateSettings({ accountRotation: on }); }}
+        />
+        <span className="set-item-desc">
+          {rotation
+            ? "When a Claude or Codex session reaches a limit, it continues on the next signed-in account."
+            : "Off. A session stops at its limit and stays on its account."}
+        </span>
+      </Row>
       <div className="cli-account-new">
         <input
           className="cli-bin-input"

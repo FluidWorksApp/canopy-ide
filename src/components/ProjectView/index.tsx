@@ -55,7 +55,10 @@ import {
   type TerminalSplitNode,
 } from "../../terminalGroups";
 import { terminalMinimumContrast } from "../../terminalContrast";
-import { getSettings, SETTINGS_CHANGE_EVENT } from "../../settings";
+import { getSettings, SETTINGS_CHANGE_EVENT, updateSettings } from "../../settings";
+import { canHandOver, carriedFlags, CONTINUE_PROMPT, earliestReset, handoverLine, limitKey, limitResetAt, nextAccount, windowSpent, withPrompt } from "../../accountPool";
+import { handOver, type HandoverResult } from "../../accountHandover";
+import { agentLife as lifeOfSession } from "../../../shared/agentLife";
 import {
   dismissTerminalMemoryPromptsForWindow,
   subscribeTerminalMemoryPromptVisibility,
@@ -153,6 +156,7 @@ import {
 import {
   activeProfile,
   DEFAULT_PROFILE,
+  ensureAccountIntegration,
   launchEnv,
   launchEnvSync,
   launchProfile,
@@ -3044,7 +3048,10 @@ const ProjectViewBody = memo(function ProjectViewBody({
   /** Carry out an accepted reload: each eligible agent's terminal is replaced
    *  by one running under the new account, in the same directory. The old
    *  conversation is prepared under the new profile only after its writer exits.
-   *  A failed transfer leaves the source transcript and tab available. */
+   *  Locally the agent moves inside its own terminal (accountHandover.ts), so a
+   *  failure leaves it on its original account. A workspace session still stops
+   *  and relaunches, because its host cannot yet stop only the agent. */
+  const moveAgentRef = useRef<(tabId: string, to: string, opts?: { prompt?: boolean; sessionId?: string }) => Promise<HandoverResult | null>>(async () => null);
   const runReload = useCallback(async (ask: NonNullable<typeof reloadAsk>) => {
     setReloadAsk(null);
     for (const item of reloading(ask.plan)) {
@@ -3057,6 +3064,13 @@ const ProjectViewBody = memo(function ProjectViewBody({
         if (!envReachesProfile(ask.profile, env)) throw new Error("Selected account is unavailable");
         const tab = tabsRef.current.find(t => t.id === item.agent.tabId && t.type === "terminal") as TermSubTab | undefined;
         if (!tab) continue;
+        if (item.action.kind === "resume" && item.action.sourceProfile === ask.profile) continue;
+        if (item.action.kind === "resume" && item.action.sourceProfile && !isRemoteHost() && canHandOver()) {
+          const moved = await moveAgentRef.current(tab.id, ask.profile, { sessionId: item.action.sessionId });
+          if (moved?.outcome === "restored") onNoticeRef.current(`${item.agent.label} stayed on its account: ${moved.reason}`, "error");
+          if (moved?.outcome === "failed") onNoticeRef.current(`${item.agent.label} could not move: ${moved.reason}`, "error");
+          continue;
+        }
         if (item.action.kind === "resume" && item.action.sourceProfile) {
           if (tab.ptyId != null) await ipc.ptyStopAndWait(tab.ptyId);
           await ipc.profilePrepareSession(cli.id, item.action.sessionId, item.action.sourceProfile, ask.profile);
@@ -10643,6 +10657,210 @@ const ProjectViewBody = memo(function ProjectViewBody({
   const agentTargetsRef = useRef<AgentTarget[]>([]);
   agentTargetsRef.current = agentTargets;
 
+  // ---- subscription pool: move a session on when its account reaches a limit.
+  const movingTabs = useRef(new Set<string>());
+  const waitingTabs = useRef(new Set<string>());
+  const [poolExhausted, setPoolExhausted] = useState<{ cli: string; name: string; until: number; dismissed?: true } | null>(null);
+  const moveAgent = useCallback(async (
+    tabId: string,
+    to: string,
+    opts: { prompt?: boolean; sessionId?: string } = {},
+  ): Promise<HandoverResult | null> => {
+    const tab = tabsRef.current.find(t => t.id === tabId && t.type === "terminal") as TermSubTab | undefined;
+    const target = agentTargetsRef.current.find(a => a.tabId === tabId);
+    const cli = target && agentCliFor(target.agentId);
+    if (!tab || tab.ptyId == null || !cli || movingTabs.current.has(tabId)) return null;
+    movingTabs.current.add(tabId);
+    const ptyId = tab.ptyId;
+    const from = tab.profile || DEFAULT_PROFILE;
+    const log = (step: string, detail?: string) =>
+      void ipc.jsLog("info", `account-handover pty=${ptyId} ${cli.id} ${from}->${to} ${step}${detail ? `: ${detail}` : ""}`);
+    try {
+      const sessionId = opts.sessionId || liveSessionByPtyRef.current.get(ptyId) || resumeSessionId(tab.command) || tab.rememberedSessionId;
+      const envOf = (profile: string) => (profile === DEFAULT_PROFILE ? Promise.resolve([] as [string, string][]) : ipc.profileEnv(cli.id, profile));
+      const [fromEnv, toEnv, digests] = await Promise.all([envOf(from), envOf(to), ipc.sessionDigests(rootsRef.current)]);
+      if (!envReachesProfile(to, toEnv)) throw new Error("Selected account is unavailable");
+      const digest = digests.find(d => d.session_id === sessionId);
+      const cwd = resumeCwd(digest, tab.cwd);
+      const without = (env: [string, string][], other: [string, string][]) =>
+        env.map(([key]) => key).filter(key => !other.some(([name]) => name === key));
+      const flags = carriedFlags(cli.capabilities?.resumeKeeps ?? [], tab.command);
+      const resume = sessionId ? restoreCommand(cli.id, sessionId) : null;
+      const command = resume ? [resume, ...flags].join(" ") : null;
+      const fresh = launchCommand(cli);
+      const onTarget = (line: string) => handoverLine({ cwd, set: toEnv, clear: without(fromEnv, toEnv), command: line });
+      const midTurn = digest && lifeOfSession({ digest: digest as never, now: Date.now() / 1000 }).state === "working";
+      const prompted = command && (opts.prompt || midTurn) ? withPrompt(command, sessionId!, CONTINUE_PROMPT) : command;
+      const result = await handOver({
+        target: { line: onTarget(prompted ?? fresh), profile: to },
+        // Never with the prompt: a way back that spent a turn on a limited
+        // account would report the limit again and start the move over.
+        original: { line: handoverLine({ cwd, set: fromEnv, clear: without(toEnv, fromEnv), command: command ?? fresh }), profile: from },
+        fresh: { line: onTarget(fresh), profile: to },
+      }, {
+        stop: () => ipc.ptyStopForeground(ptyId),
+        transfer: async () => {
+          // Best effort: without it the CLI waits at a prompt, which the
+          // started check below reports. It is no reason to stay on a limit.
+          await ipc.profileCarryTrust(cli.id, cwd, from, to).catch(error => log("trust-not-carried", String(error)));
+          if (!sessionId) throw new Error("Saved conversation not found");
+          await ipc.profilePrepareSession(cli.id, sessionId, from, to);
+        },
+        write: line => ipc.ptyWrite(ptyId, line),
+        running: () => ipc.ptyForegroundRunning(ptyId),
+        sleep: ms => new Promise(resolve => setTimeout(resolve, ms)),
+        log,
+      });
+      log(result.outcome, "reason" in result ? result.reason : undefined);
+      if (result.outcome === "moved" || result.outcome === "started-fresh") {
+        const accountKeys = [...fromEnv, ...toEnv].map(([key]) => key);
+        setTabs(prev => prev.map(t => (t.id === tabId && t.type === "terminal" ? {
+          ...t,
+          profile: to === DEFAULT_PROFILE ? undefined : to,
+          env: [...(t.env ?? []).filter(([key]) => !accountKeys.includes(key)), ...toEnv],
+          command: result.outcome === "moved" && command ? command : fresh,
+        } : t)));
+      }
+      return result;
+    } catch (error) {
+      log("failed", String(error));
+      return { outcome: "failed", reason: error instanceof Error ? error.message : String(error) };
+    } finally {
+      movingTabs.current.delete(tabId);
+    }
+  }, []);
+  moveAgentRef.current = moveAgent;
+
+  /** A live process is not proof: first-run dialogs hold a CLI before it does
+   *  anything. A hook reporting from the new account is. */
+  const agentStarted = useCallback(async (sessionId: string | undefined, profile: string) => {
+    const since = Date.now() / 1000 - 30;
+    for (let waited = 0; sessionId && waited < 20_000; waited += 1000) {
+      const digests = await ipc.sessionDigests(rootsRef.current).catch(() => []);
+      const digest = digests.find(d => d.session_id === sessionId);
+      if (digest && (digest.profile || DEFAULT_PROFILE) === profile && (digest.updated ?? 0) >= since) return true;
+      await new Promise(resolve => setTimeout(resolve, 1000));
+    }
+    return false;
+  }, []);
+
+  /** Send a tab to the next account with room, or wait for the first reset. */
+  const continueOnNextAccount = useCallback(async (tabId: string, sessionId?: string) => {
+    const tab = tabsRef.current.find(t => t.id === tabId && t.type === "terminal") as TermSubTab | undefined;
+    const target = agentTargetsRef.current.find(a => a.tabId === tabId);
+    const cli = target && agentCliFor(target.agentId);
+    if (!tab || !cli) return;
+    const order = profilesRef.current.map(p => p.id);
+    const from = tab.profile || DEFAULT_PROFILE;
+    const signedIn = (await Promise.all(order.map(id => ipc.profileAccounts(id)
+      .then(list => (list.find(a => a.agent === cli.id)?.state === "in" ? id : null))
+      .catch(() => null)))).filter((id): id is string => id != null);
+    const refused: Record<string, { until: number }> = {};
+    for (let tries = 0; tries < order.length; tries++) {
+      const now = Date.now();
+      const limits = { ...getSettings().accountLimits, ...refused };
+      const to = nextAccount({ cli: cli.id, from, order, signedIn, limits, now });
+      if (!to) {
+        waitingTabs.current.add(tabId);
+        setPoolExhausted({ cli: cli.id, name: cli.name, until: earliestReset(cli.id, signedIn, getSettings().accountLimits, now) });
+        return;
+      }
+      const label = profilesRef.current.find(p => p.id === to)?.label ?? to;
+      const result = await moveAgent(tabId, to, { prompt: true, sessionId });
+      if (!result) return;
+      if (result.outcome === "moved") {
+        waitingTabs.current.delete(tabId);
+        const moved = sessionId || liveSessionByPtyRef.current.get(tab.ptyId ?? -1);
+        const started = await agentStarted(moved, to);
+        onNoticeRef.current(started
+          ? `Continuing conversation on ${label}`
+          : `${cli.name} moved to ${label} and is waiting for an answer in its terminal`, started ? "info" : "error");
+        return;
+      }
+      if (result.outcome === "started-fresh") { waitingTabs.current.delete(tabId); onNoticeRef.current(`${cli.name} started on ${label}; it had no saved conversation to carry`, "info"); return; }
+      if (result.outcome === "failed") { onNoticeRef.current(`${cli.name} could not change account: ${result.reason}`, "error"); return; }
+      refused[limitKey(cli.id, to)] = { until: now + 60_000 };
+    }
+    onNoticeRef.current(`${cli.name} stayed on its account: no other account could open this conversation`, "error");
+  }, [agentStarted, moveAgent]);
+
+  const onAccountLimit = useCallback(async (tabId: string, limit: { message: string; sessionId?: string }) => {
+    if (isRemoteHost() || !canHandOver() || !getSettings().accountRotation || movingTabs.current.has(tabId)) return;
+    const tab = tabsRef.current.find(t => t.id === tabId && t.type === "terminal") as TermSubTab | undefined;
+    const target = agentTargetsRef.current.find(a => a.tabId === tabId);
+    const cli = target && agentCliFor(target.agentId);
+    if (!tab || !cli?.capabilities?.conversationTransfer) return;
+    const profile = tab.profile || DEFAULT_PROFILE;
+    const plans = await ipc.planUsage(limit.sessionId).catch(() => []);
+    const windows = plans.find(p => p.agent === cli.id && p.profile === profile)?.windows ?? [];
+    const now = new Date();
+    const live = Object.fromEntries(Object.entries(getSettings().accountLimits).filter(([, value]) => value.until > now.getTime()));
+    updateSettings({ accountLimits: { ...live, [limitKey(cli.id, profile)]: { until: limitResetAt(limit.message, windows, now), message: limit.message } } });
+    await continueOnNextAccount(tabId, limit.sessionId);
+  }, [continueOnNextAccount]);
+  const onAccountLimitRef = useRef(onAccountLimit);
+  onAccountLimitRef.current = onAccountLimit;
+
+  // Claude reports a limit through its StopFailure hook, tagged by canopy-hook.
+  useEffect(() => {
+    if (isRemoteHost()) return;
+    let stale = false;
+    let stop: (() => void) | undefined;
+    void ipc.onAgentEvents(lines => {
+      for (const line of lines) {
+        if (!line.includes('"canopy_limit"')) continue;
+        try {
+          const event = JSON.parse(line) as { canopy_pty?: number; session_id?: string; canopy_limit?: { message?: string } };
+          const tab = tabsRef.current.find(t => t.type === "terminal" && t.ptyId === event.canopy_pty);
+          if (tab) void onAccountLimitRef.current(tab.id, { message: event.canopy_limit?.message ?? "", sessionId: event.session_id });
+        } catch { /* A torn line is the next line's problem. */ }
+      }
+    }).then(unlisten => { if (stale) unlisten(); else stop = unlisten; });
+    return () => { stale = true; stop?.(); };
+  }, []);
+
+  // The second way to notice. A CLI with no failure hook stops at a limit and
+  // goes quiet without ending its turn, and so does one whose hook is missing.
+  // Working and idle agents are left alone: a spent window alone is no reason to
+  // interrupt one, or to discard what someone is typing to the other.
+  useEffect(() => {
+    if (isRemoteHost()) return;
+    void ensureAccountIntegration();
+    const look = async () => {
+      if (!getSettings().accountRotation) return;
+      const agents = agentTargetsRef.current.filter(a => agentCliFor(a.agentId)?.capabilities?.conversationTransfer);
+      if (!agents.length) return;
+      const digests = await ipc.sessionDigests(rootsRef.current).catch(() => []);
+      for (const agent of agents) {
+        const tab = tabsRef.current.find(t => t.id === agent.tabId && t.type === "terminal") as TermSubTab | undefined;
+        const sessionId = liveSessionByPtyRef.current.get(agent.ptyId);
+        const digest = digests.find(d => d.session_id === sessionId);
+        if (!tab || !digest) continue;
+        if (lifeOfSession({ digest: digest as never, now: Date.now() / 1000 }).state !== "unknown") continue;
+        const profile = tab.profile || DEFAULT_PROFILE;
+        const plans = await ipc.planUsage(sessionId).catch(() => []);
+        const windows = plans.find(p => p.agent === agent.agentId && p.profile === profile)?.windows ?? [];
+        if (windowSpent(windows, new Date())) await onAccountLimitRef.current(agent.tabId, { message: "", sessionId });
+      }
+    };
+    const timer = setInterval(() => void look(), 60_000);
+    return () => clearInterval(timer);
+  }, []);
+
+  const retryExhausted = useCallback((clearLimits: boolean) => {
+    const cli = poolExhausted?.cli;
+    setPoolExhausted(null);
+    if (clearLimits && cli) {
+      updateSettings({ accountLimits: Object.fromEntries(Object.entries(getSettings().accountLimits).filter(([key]) => !key.startsWith(`${cli}:`))) });
+    }
+    for (const tabId of [...waitingTabs.current]) void continueOnNextAccount(tabId);
+  }, [continueOnNextAccount, poolExhausted]);
+  useEffect(() => {
+    if (!poolExhausted) return;
+    const timer = setTimeout(() => retryExhausted(false), Math.max(poolExhausted.until - Date.now(), 0) + 30_000);
+    return () => clearTimeout(timer);
+  }, [poolExhausted, retryExhausted]);
+
   // The session changeset shaped for the agent context builder: component
   // label plus each file's repo-relative path.
   const changeContextGroups = () =>
@@ -15098,6 +15316,16 @@ const ProjectViewBody = memo(function ProjectViewBody({
       {/* A profile switch comes from the status bar, not the side panel. Inside
           sidePanel this was off-screen whenever the panel was closed (overlay
           slides it out, docked collapses it, zen and vibe never mount it). */}
+      {poolExhausted && !poolExhausted.dismissed && visible && (
+        <Dialog
+          variant="accent"
+          title="All subscriptions are exhausted"
+          body={`Every signed-in ${poolExhausted.name} account has reached a limit. Canopy will retry around ${new Date(poolExhausted.until).toLocaleString([], { weekday: "short", hour: "numeric", minute: "2-digit" })}.`}
+          dismissLabel="OK"
+          onDismiss={() => setPoolExhausted(current => (current ? { ...current, dismissed: true } : current))}
+          actions={[{ label: "Retry now", primary: true, onClick: () => retryExhausted(true) }]}
+        />
+      )}
       {reloadAsk && (
         <Dialog
           variant="accent"

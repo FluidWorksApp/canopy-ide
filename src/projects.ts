@@ -782,6 +782,8 @@ export interface AgentCliCapabilities {
   profiles?: true;
   managedIntegration?: true;
   conversationTransfer?: true;
+  /** Launch flags a resume must repeat, or the moved session changes model. */
+  resumeKeeps?: readonly string[];
   remoteIntegration?: true;
   approvalInput?: "keystroke";
   terminalMinimumContrast?: number;
@@ -907,6 +909,7 @@ export const BUILTIN_AGENT_CLIS: AgentCliDef[] = [
       profiles: true,
       managedIntegration: true,
       conversationTransfer: true,
+      resumeKeeps: ["--model", "--effort", "--fallback-model"],
       remoteIntegration: true,
       approvalInput: "keystroke",
       routingModelFamily: "anthropic",
@@ -992,6 +995,7 @@ export const BUILTIN_AGENT_CLIS: AgentCliDef[] = [
       profiles: true,
       managedIntegration: true,
       conversationTransfer: true,
+      resumeKeeps: ["--model", "-m"],
       remoteIntegration: true,
       approvalInput: "keystroke",
       planUsageRequiresSession: true,
