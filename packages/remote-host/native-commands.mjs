@@ -4,7 +4,7 @@
 // IDE says plainly instead of reporting a missing feature. Bump HOST_PROTOCOL
 // whenever commands are added, so a desktop can tell a stale host up front.
 // native-commands.test.mjs keeps this list equal to what native.mjs handles.
-export const HOST_PROTOCOL=6;
+export const HOST_PROTOCOL=7;
 export const NATIVE_PREFIXES=['fs_upload_','claude_ide_','gates_'];
 export const NATIVE_COMMANDS=new Set([
  // Files, projects and the workspace itself.
@@ -13,6 +13,8 @@ export const NATIVE_COMMANDS=new Set([
  'git_head_content','git_log','git_checkout','git_clone','git_clone_start','git_clone_status','git_clone_cancel','git_stage','git_unstage','git_commit_detail','git_commit_patch','git_branch_commits','git_branch_patch','git_commit_paths','git_commit','git_fetch','git_pull','git_push','git_repos','git_status','git_repo_status','git_branches','git_worktrees','git_diff','git_remote_url','git_branch_current',
  // Agents, accounts and their integrations.
  'agent_workspace_at','agent_events_poll','agent_health_report','agent_hooks_installed','agent_integration_health','agent_session_summaries','agent_usage','claude_session_stats','opencode_session_stats','plan_usage','hook_bridge_path','setup_agent_hooks','session_digests','session_history','profiles_list','profile_create','profile_delete','profile_env','profile_activate','profile_accounts','profile_import_git','profile_import_credentials','profile_prepare_session','mcp_servers','mcp_update_sources',
+ // The remote desktop's clipboard: VNC's own carries only Latin-1.
+ 'desktop_clipboard_read','desktop_clipboard_write',
  // Small metadata stores.
  'notes_list','notes_due','research_list','task_list_history','context_tools','context_publish','set_context_scopes','pr_watch_set','pr_watch_list',
  // Agent instructions, model catalogs, readiness probes, processes.

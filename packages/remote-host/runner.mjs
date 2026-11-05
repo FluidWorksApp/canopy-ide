@@ -6,6 +6,7 @@ import { nativeInvoke, startNativeServer } from "./native.mjs";
 import http from 'node:http';
 import net from 'node:net';
 import { spawn as childSpawn, execFile } from 'node:child_process';
+import { PULSE_ARGS, streamDesktopAudio } from './desktop-audio.mjs';
 import { promisify } from 'node:util';
 import { readFile, writeFile, readdir, realpath, stat, cp, mkdir } from 'node:fs/promises';
 import path from 'node:path';
@@ -183,6 +184,9 @@ export function createRunner({ secret, spawnPty, accounts = [], workspaceId = 'w
           try { await stat('/tmp/.X11-unix/X99'); break; }
           catch { if (i === 29) throw new Error('Desktop display did not start'); await new Promise(r => setTimeout(r, 100)); }
         }
+        // Before the session, so its programs find the sound card. A desktop
+        // without sound is still a desktop.
+        await launch('pulseaudio', PULSE_ARGS).then(child => { child.on('error', () => {}); children.push(child); }, () => {});
         children.push(await launch('dbus-run-session', ['--', 'xfce4-session']));
         children.push(await launch('x11vnc', ['-display', ':99', '-localhost', '-rfbport', '5900', '-forever', '-shared', '-nopw']));
         for (let i = 0; i < 50; i++) {
@@ -286,6 +290,8 @@ export function createRunner({ secret, spawnPty, accounts = [], workspaceId = 'w
         ws.on('message', data => { if (tcp.writableLength > 1024 * 1024) ws.close(1013); else tcp.write(data); });
         tcp.on('error', () => ws.close()); tcp.on('close', () => ws.close()); ws.on('close', () => tcp.destroy());
       });
+    } else if (route === '/desktop/audio' && desktop) {
+      wss.handleUpgrade(request, socket, head, ws => streamDesktopAudio(ws, { spawn: childSpawn, env: { ...process.env, HOME: '/home/agent', XDG_RUNTIME_DIR: '/home/agent/.cache/runtime' } }));
     } else socket.destroy();
   });
   server.on('close', () => { for (const ws of sockets) ws.close(); claudeIde.closeAll(); void browser?.close(); });
