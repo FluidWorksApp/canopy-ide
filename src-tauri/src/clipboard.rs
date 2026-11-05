@@ -68,7 +68,7 @@ use rusqlite::Connection;
 use serde::Serialize;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{mpsc, Arc, Mutex};
 use std::time::Duration;
 use tauri::{AppHandle, Emitter, State};
 
@@ -194,8 +194,32 @@ impl Clipboard {
 
 // ---------- the pasteboard ----------
 
+/// Run `f` on the main thread and wait for its result. `None` means it never
+/// ran, which only happens once the event loop has gone away.
+///
+/// `NSPasteboard` is not thread-safe. AppKit and WebKit use the same
+/// process-wide general pasteboard on the main thread, so a read from any other
+/// thread races their updates to its type cache; that race took the app down
+/// with a SIGSEGV in `-[NSPasteboard _updateTypeCacheIfNeeded]`. A lock here
+/// could not help, because those callers would never take it.
+///
+/// Safe to call from the main thread too: Tauri runs the task inline there. No
+/// caller may hold a lock the main thread can want while it waits here.
+fn on_main<T: Send + 'static>(
+    app: &AppHandle,
+    f: impl FnOnce() -> T + Send + 'static,
+) -> Option<T> {
+    let (tx, rx) = mpsc::sync_channel(1);
+    app.run_on_main_thread(move || {
+        let _ = tx.send(f());
+    })
+    .ok()?;
+    rx.recv().ok()
+}
+
 /// macOS. Everything that touches AppKit is behind this one door so the rest of
-/// the module is platform-free and testable.
+/// the module is platform-free and testable. Every function here must run on the
+/// main thread (see `on_main`) and returns `None` anywhere else.
 #[cfg(target_os = "macos")]
 mod pb {
     use objc2::runtime::NSObjectProtocol;
@@ -207,16 +231,26 @@ mod pb {
 
     /// A counter, not contents. Reading it raises no alert.
     pub fn change_count() -> Option<i64> {
-        guarded("changeCount", || {
-            NSPasteboard::generalPasteboard().changeCount() as i64
-        })
+        with_pasteboard("changeCount", |pb| pb.changeCount() as i64)
+    }
+
+    /// The door itself: the general pasteboard, on the main thread only. A
+    /// caller that got this wrong fails with a logged `None` rather than
+    /// reopening a race that crashes the process.
+    fn with_pasteboard<T>(operation: &str, f: impl FnOnce(&NSPasteboard) -> T) -> Option<T> {
+        if objc2::MainThreadMarker::new().is_none() {
+            log::error!("NSPasteboard {operation} refused off the main thread");
+            return None;
+        }
+        guarded(operation, || f(&NSPasteboard::generalPasteboard()))
     }
 
     /// Contain AppKit exceptions at the Objective-C boundary. Without this, an
     /// unavailable pasteboard unwinds into Rust, which aborts the process.
     fn guarded<T>(operation: &str, f: impl FnOnce() -> T) -> Option<T> {
         match objc2::exception::catch(AssertUnwindSafe(|| {
-            // The poller is a bare thread, so it has no Cocoa pool of its own.
+            // Drain per call, so a poll leaves nothing behind for the main
+            // thread's run loop to carry.
             objc2::rc::autoreleasepool(|_| f())
         })) {
             Ok(value) => Some(value),
@@ -232,33 +266,28 @@ mod pb {
     /// The UTIs currently declared on the pasteboard. Type metadata, not data —
     /// this is how a clip can be recognised as concealed without reading it.
     pub fn types() -> Option<Vec<String>> {
-        guarded("types", || {
-            match NSPasteboard::generalPasteboard().types() {
-                Some(list) => list.iter().map(|t| t.to_string()).collect(),
-                None => Vec::new(),
-            }
+        with_pasteboard("types", |pb| match pb.types() {
+            Some(list) => list.iter().map(|t| t.to_string()).collect(),
+            None => Vec::new(),
         })
     }
 
     /// The one call that reads contents, and thus the one that the OS may ask
     /// the user about. Only ever reached when `change_count` moved.
     pub fn read_string() -> Option<Option<String>> {
-        guarded("stringForType:", || {
+        with_pasteboard("stringForType:", |pb| {
             // The type constant is an extern static, hence the unsafe — the
             // call itself is safe.
             let ty = unsafe { NSPasteboardTypeString };
-            NSPasteboard::generalPasteboard()
-                .stringForType(ty)
-                .map(|s| s.to_string())
+            pb.stringForType(ty).map(|s| s.to_string())
         })
     }
 
     /// Replace the pasteboard's contents with plain text. `Some(true)` only
     /// when AppKit accepted the string.
     pub fn write_string(text: &str) -> Option<bool> {
-        guarded("setString:forType:", || {
+        with_pasteboard("setString:forType:", |pb| {
             let ty = unsafe { NSPasteboardTypeString };
-            let pb = NSPasteboard::generalPasteboard();
             pb.clearContents();
             pb.setString_forType(&objc2_foundation::NSString::from_str(text), ty)
         })
@@ -268,8 +297,7 @@ mod pb {
     /// Canopy's minimum is 10.15, and an unrecognised selector is a crash, not
     /// a None.
     pub fn access_behavior() -> Option<String> {
-        guarded("accessBehavior", || {
-            let pb = NSPasteboard::generalPasteboard();
+        with_pasteboard("accessBehavior", |pb| {
             if !pb.respondsToSelector(sel!(accessBehavior)) {
                 return String::new();
             }
@@ -286,7 +314,7 @@ mod pb {
 
     #[cfg(test)]
     mod tests {
-        use super::guarded;
+        use super::{change_count, guarded, read_string, types};
         use objc2::exception::{throw, Exception};
         use objc2::rc::Retained;
         use objc2::runtime::NSObject;
@@ -296,6 +324,16 @@ mod pb {
             let object: Retained<Exception> = unsafe { Retained::cast_unchecked(NSObject::new()) };
             let result: Option<()> = guarded("test", || throw(object));
             assert!(result.is_none());
+        }
+
+        /// The crash this guards against needs a race to reproduce, so pin the
+        /// rule instead. Test threads are never the main thread.
+        #[test]
+        fn the_pasteboard_is_refused_off_the_main_thread() {
+            assert!(objc2::MainThreadMarker::new().is_none());
+            assert_eq!(change_count(), None);
+            assert_eq!(types(), None);
+            assert_eq!(read_string(), None);
         }
     }
 }
@@ -782,9 +820,9 @@ fn spawn_poller(app: AppHandle, state: &Clipboard) {
     let generation = state.generation.clone();
     let counters = state.counters.clone();
     let mine = generation.load(Ordering::SeqCst);
-    // A plain OS thread, not a tokio task: this holds an AppKit object across
-    // its whole life and does nothing async, so a runtime worker would only be
-    // a place for it to block.
+    // A plain OS thread, not a tokio task: it sleeps between ticks and waits on
+    // the main thread for every pasteboard call, so a runtime worker would only
+    // be a place for it to block. It must never touch AppKit itself.
     std::thread::spawn(move || {
         let alive = || running.load(Ordering::SeqCst) && generation.load(Ordering::SeqCst) == mine;
         let stop_after_native_failure = || {
@@ -794,7 +832,7 @@ fn spawn_poller(app: AppHandle, state: &Clipboard) {
         // The count as it is *now*, recorded without reading anything. This is
         // what keeps enabling the feature from capturing whatever the last app
         // put there — very often a password.
-        let Some(mut last) = pb::change_count() else {
+        let Some(mut last) = on_main(&app, pb::change_count).flatten() else {
             stop_after_native_failure();
             return;
         };
@@ -803,11 +841,7 @@ fn spawn_poller(app: AppHandle, state: &Clipboard) {
             if !alive() {
                 break;
             }
-            // Every AppKit call here returns autoreleased objects, and a plain
-            // std::thread has no pool to drain them into — so they accumulated
-            // for the life of the process, roughly a hundred thousand a day at
-            // this interval. Invisible in a CPU profile; not invisible in RSS.
-            let Some(count) = pb::change_count() else {
+            let Some(count) = on_main(&app, pb::change_count).flatten() else {
                 stop_after_native_failure();
                 break;
             };
@@ -819,7 +853,7 @@ fn spawn_poller(app: AppHandle, state: &Clipboard) {
             // The user told the OS never to let this app read the pasteboard.
             // Believe it, and stop asking rather than generating a denial per
             // copy for the rest of the session.
-            let Some(access) = pb::access_behavior() else {
+            let Some(access) = on_main(&app, pb::access_behavior).flatten() else {
                 stop_after_native_failure();
                 break;
             };
@@ -831,7 +865,7 @@ fn spawn_poller(app: AppHandle, state: &Clipboard) {
 
             // Type metadata, not data: a concealed clip is recognised without
             // ever being read.
-            let Some(types) = pb::types() else {
+            let Some(types) = on_main(&app, pb::types).flatten() else {
                 stop_after_native_failure();
                 break;
             };
@@ -855,7 +889,7 @@ fn spawn_poller(app: AppHandle, state: &Clipboard) {
             };
 
             // The one read of contents, at most once per copy.
-            let Some(raw) = pb::read_string() else {
+            let Some(raw) = on_main(&app, pb::read_string).flatten() else {
                 stop_after_native_failure();
                 break;
             };
@@ -1005,7 +1039,10 @@ pub async fn clipboard_clear(state: State<'_, Clipboard>) -> Result<(), String> 
 /// app's permission and not pasteboard contents — no alert, and it is the only
 /// way to tell someone why their history stopped filling up.
 #[tauri::command]
-pub async fn clipboard_status(state: State<'_, Clipboard>) -> Result<ClipboardStatus, String> {
+pub async fn clipboard_status(
+    app: AppHandle,
+    state: State<'_, Clipboard>,
+) -> Result<ClipboardStatus, String> {
     let (watching, persisted) = {
         let c = state.cfg.lock().unwrap();
         (c.enabled && state.running.load(Ordering::SeqCst), c.persist)
@@ -1029,7 +1066,9 @@ pub async fn clipboard_status(state: State<'_, Clipboard>) -> Result<ClipboardSt
         supported: pb::SUPPORTED,
         watching,
         persisted,
-        access: pb::access_behavior().unwrap_or_default(),
+        access: on_main(&app, pb::access_behavior)
+            .flatten()
+            .unwrap_or_default(),
         clips,
         bytes,
         skipped_secrets: state.counters.secrets.load(Ordering::Relaxed),
@@ -1194,14 +1233,14 @@ const MAX_WRITE_BYTES: usize = 4 * 1024 * 1024;
 /// happens here. Off macOS this reports unsupported and the caller falls back
 /// to the webview's clipboard, which is what those platforms already used.
 #[tauri::command]
-pub fn clipboard_write_text(text: String) -> Result<(), String> {
+pub fn clipboard_write_text(app: AppHandle, text: String) -> Result<(), String> {
     if text.len() > MAX_WRITE_BYTES {
         return Err("Text is too large for the clipboard".into());
     }
     if !pb::SUPPORTED {
         return Err("unsupported".into());
     }
-    match pb::write_string(&text) {
+    match on_main(&app, move || pb::write_string(&text)).flatten() {
         Some(true) => Ok(()),
         _ => Err("Cannot write to the clipboard".into()),
     }
@@ -1212,16 +1251,22 @@ pub fn clipboard_write_text(text: String) -> Result<(), String> {
 /// raise its own "Paste" confirmation bubble; reading here keeps it one click.
 /// Never recorded in clipboard history.
 #[tauri::command]
-pub fn clipboard_read_text() -> Result<Option<String>, String> {
+pub fn clipboard_read_text(app: AppHandle) -> Result<Option<String>, String> {
     if !pb::SUPPORTED {
         return Err("unsupported".into());
     }
-    pb::read_string().ok_or_else(|| "Cannot read the clipboard".to_string())
+    on_main(&app, pb::read_string)
+        .flatten()
+        .ok_or_else(|| "Cannot read the clipboard".to_string())
 }
 
 /// Explicit user-triggered image paste; never retained in clipboard history.
 #[tauri::command]
-pub fn clipboard_image_png() -> Result<Option<String>, String> {
+pub fn clipboard_image_png(app: AppHandle) -> Result<Option<String>, String> {
+    on_main(&app, read_image_png).unwrap_or_else(|| Err("Cannot access the Mac clipboard".into()))
+}
+
+fn read_image_png() -> Result<Option<String>, String> {
     #[cfg(target_os = "macos")]
     {
         use base64::Engine;
