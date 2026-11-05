@@ -39,8 +39,8 @@ test('budget questions start sampling and answer from the per-terminal governor'
  const {TerminalGovernor}=await import('./terminal-governor.mjs');
  const governor=new TerminalGovernor({defaultsFile:join(home,'d.json')});
  const commands=workspaceMiscCommands({home,terminalGovernor:governor,governorSampler:{start:()=>{started++;}},stopSession:async id=>stopped.push(id)});
- await governor.observe([{id:3,bytes:2*1024**3}],8*1024**3,6*1024**3,0);
- for(let i=1;i<=6;i++)await governor.observe([{id:3,bytes:2*1024**3}],8*1024**3,6*1024**3,i*2000);
+ await governor.observe([{id:3,bytes:2*1024**3}],1024**3,6*1024**3,0);
+ for(let i=1;i<=6;i++)await governor.observe([{id:3,bytes:2*1024**3}],1024**3,6*1024**3,i*2000);
  const status=await commands.terminal_governor_status();assert.equal(started,1);
  const s=status.sessions[0];assert.equal(s.state,'over_allowance');
  assert.deepEqual(await commands.terminal_governor_events({cursor:null}),{cursor:2,events:[]});

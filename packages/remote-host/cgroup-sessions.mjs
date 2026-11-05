@@ -2,8 +2,8 @@
 // runner: /run/canopy-cgroup/sessions/<id>. The governor (terminal-governor.mjs)
 // puts each terminal's process tree there, measures it with memory.current and
 // memory.events, and limits it the way the desktop's containment.rs does:
-// memory.high at the terminal's allowance (soft: the kernel reclaims and
-// throttles above it; raised when the person grants more), plus memory.max at
+// memory.high at the terminal's allowance (the whole workspace by default, so
+// it does not throttle one terminal on an idle machine), plus memory.max at
 // the agent's allowance maximum when one is set (hard: the kernel stops the
 // tree there).
 //
