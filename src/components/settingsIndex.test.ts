@@ -23,14 +23,16 @@ function tabOfComponent(name:string,seen=new Set<string>()):string|undefined{
 
 /** Every <Item name="..."> in SettingsDialog.tsx with the tab it is shown on. */
 function itemsInSource(){
-  const rows:{tab:string;name:string}[]=[];
+  const rows:{tab:string;name:string;desc?:string}[]=[];
   for(const m of source.matchAll(/<Item\b([^>]*?)>/gs)){
     const name=/\bname="([^"]*)"/.exec(m[1])?.[1];
     if(!name)continue;
     const inside=enclosingFunction(m.index!);
     const tab=inside==='SettingsDialog'?tabAt(m.index!):tabOfComponent(inside);
     if(!tab)throw Error(`Item "${name}" is in ${inside}, which is not rendered on any tab`);
-    rows.push({tab,name:name.replace(/&apos;/g,"'").replace(/&amp;/g,'&')});
+    const unescape=(v:string)=>v.replace(/&apos;/g,"'").replace(/&quot;/g,'"').replace(/&lt;/g,'<').replace(/&gt;/g,'>').replace(/&amp;/g,'&');
+    const desc=/\bdesc="([^"]*)"/.exec(m[1])?.[1];
+    rows.push({tab,name:unescape(name),...(desc===undefined?{}:{desc:unescape(desc)})});
   }
   return rows;
 }
@@ -42,6 +44,16 @@ describe('the settings index',()=>{
     const indexed=new Set(SETTINGS_INDEX.filter(e=>!e.panel).map(e=>`${e.tab}:${e.name}`));
     const missing=rows.filter(r=>!indexed.has(`${r.tab}:${r.name}`)).map(r=>`${r.tab}: ${r.name}`);
     expect(missing,'settings not in settingsIndex.ts (so search cannot find them)').toEqual([]);
+  });
+  it('shows each setting\'s current description, so a reworded one cannot leave search showing the old text',()=>{
+    const stale:string[]=[];
+    for(const row of itemsInSource()){
+      if(row.desc===undefined)continue;
+      // A setting that exists in two modes has two rows (and two entries) with the same name.
+      const ok=SETTINGS_INDEX.some(e=>e.tab===row.tab&&e.name===row.name&&e.desc===row.desc);
+      if(!ok)stale.push(`${row.tab}: ${row.name}`);
+    }
+    expect(stale,'description differs from settingsIndex.ts').toEqual([]);
   });
   it('lists nothing that is not a real setting row',()=>{
     const real=new Set(itemsInSource().map(r=>`${r.tab}:${r.name}`));
@@ -83,6 +95,15 @@ describe('searchSettings',()=>{
   });
   it('can match the tab itself, so a tab name lists its settings',()=>{
     expect(names('dictation',{tabLabels:{dictation:'Dictation'}})).toEqual(expect.arrayContaining(['Trigger','Model']));
+  });
+  it('shows one result for a setting that is indexed twice',()=>{
+    const remote=searchSettings('remote access').filter(h=>h.entry.tab==='remote'&&h.entry.name==='Remote access');
+    expect(remote).toHaveLength(1);
+  });
+  it('offers billing under Accounts only, not under the agent CLI accounts',()=>{
+    const hits=searchSettings('billing').map(h=>`${h.entry.tab}:${h.entry.name}`);
+    expect(hits).toContain('account:Accounts');
+    expect(hits).not.toContain('agents:Accounts');
   });
   it('returns nothing for an empty query, and gives a panel no row to scroll to',()=>{
     expect(searchSettings('   ')).toEqual([]);

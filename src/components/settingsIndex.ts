@@ -51,7 +51,7 @@ export const SETTINGS_INDEX: SettingEntry[] = [
   { tab: "agents", name: "Default agent", desc: "What Start launches.", keywords: ["cli", "default", "start"] },
   { tab: "agents", name: "Skip permission prompts", desc: "Start every agent in its CLI's own bypass mode, so it acts without stopping to ask.", keywords: ["yolo", "dangerously", "auto approve", "permissions"] },
   { tab: "agents", name: "CLI commands", desc: "Leave blank unless yours was renamed or lives off your PATH.", keywords: ["launch", "flags", "arguments"] },
-  { tab: "agents", name: "Accounts", desc: "Several logins per CLI. Pick one from the ＋ menu.", keywords: ["billing", "balance", "credits", "subscription", "sign in", "login", "usage"] },
+  { tab: "agents", name: "Accounts", desc: "Several logins per CLI. Pick one from the ＋ menu.", keywords: ["logins","sign in","cli accounts","profiles"] },
   { tab: "agents", name: "Other CLIs", desc: "Agents Canopy ships no entry for. Each one joins the launcher.", keywords: ["custom agent", "add cli", "binary"] },
   { tab: "agents", name: "Tools available", desc: "What agents can do through Canopy's MCP server. Off means never offered.", keywords: ["detect", "installed", "path", "binaries"] },
   { tab: "agents", name: "Ctrl+Tab switching", desc: "Switcher order.", keywords: ["tab switch", "cycle", "mru", "keyboard"] },
@@ -154,5 +154,13 @@ export function searchSettings(
     if (matched) hits.push({ entry, score, anchor: entry.panel ? null : settingAnchor(entry.tab, entry.name) });
   }
   hits.sort((a, b) => b.score - a.score || a.entry.name.localeCompare(b.entry.name));
-  return hits.slice(0, options.limit ?? 40);
+  // One result per row: a setting that exists in two modes is indexed twice.
+  const seen = new Set<string>();
+  const unique = hits.filter((h) => {
+    const key = `${h.entry.tab}:${h.entry.name}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+  return unique.slice(0, options.limit ?? 40);
 }
