@@ -27,9 +27,9 @@ export async function adminGrantCredit(client,{admin,body}){
 export async function listCreditAccounts(db,{below=LOW_USD,limit=200}={}){
  const threshold=below==null||below===''?LOW_USD:Number(below);
  if(!Number.isFinite(threshold)||Math.abs(threshold)>1e6)throw Object.assign(Error('`below` must be a dollar amount'),{code:400});
- const rows=(await db.query(`SELECT u.id user_id,u.email,u.name,a.balance_usd::text balance_usd,a.updated_at,
+ const rows=(await db.query(`SELECT u.id user_id,u.email,u.name,a.balance_usd::text balance_usd,a.alert_base_usd::text alert_base_usd,a.updated_at,
   (SELECT count(*)::int FROM workspace w WHERE w.owner_id=a.user_id AND w.deleted_at IS NULL AND w.desired_state='running') running_workspaces,
   (SELECT r.created_at FROM credit_request r WHERE r.user_id=a.user_id AND r.resolved_at IS NULL ORDER BY r.created_at DESC LIMIT 1) open_request_at
   FROM credit_account a JOIN "user" u ON u.id=a.user_id WHERE a.balance_usd<$1 ORDER BY a.balance_usd ASC LIMIT $2`,[threshold,Math.max(1,Math.min(500,limit))])).rows;
- return {belowUsd:threshold,accounts:rows.map(row=>({userId:row.user_id,email:row.email,name:row.name,balanceUsd:row.balance_usd,status:creditStatus(row.balance_usd),amountToRestoreUsd:amountToRestoreUsd(row.balance_usd),runningWorkspaces:row.running_workspaces,openRequestAt:row.open_request_at,updatedAt:row.updated_at}))};
+ return {belowUsd:threshold,accounts:rows.map(row=>({userId:row.user_id,email:row.email,name:row.name,balanceUsd:row.balance_usd,status:creditStatus(row.balance_usd,row.alert_base_usd),amountToRestoreUsd:amountToRestoreUsd(row.balance_usd),runningWorkspaces:row.running_workspaces,openRequestAt:row.open_request_at,updatedAt:row.updated_at}))};
 }

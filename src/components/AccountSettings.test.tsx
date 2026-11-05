@@ -36,7 +36,7 @@ it('reopens with the cached account and balance while refreshing',async()=>{
 it('shows the paused banner with the amount owed, recent spend per workspace and the request action',async()=>{
  mocks.invoke.mockImplementation(async(_cmd,{route,body})=>route==='/api/me'?{user:{name:'Sam',email:'sam@coraa.test'}}:body?.action==='request-credit'?{requested:true}:{balanceUsd:'-64.48',paymentsEnabled:false,sessions:[{id:'s1',workspace_id:'ws-1',workspace_name:'Main',started_at:new Date().toISOString(),ended_at:null,metered_seconds:3600,consumed_usd:'1.25'},{id:'s2',workspace_id:'ws-1',workspace_name:'Main',started_at:new Date(Date.now()-86_400_000).toISOString(),ended_at:new Date().toISOString(),metered_seconds:60,consumed_usd:'0.75'}]});
  render(<AccountSettings/>);
- expect(await screen.findByRole('alert')).toHaveTextContent(/Workspaces paused.*Add at least \$54\.49/);
+ expect(await screen.findByRole('alert')).toHaveTextContent(/Out of credit.*Add at least \$69\.48/);
  expect(screen.getByRole('region',{name:'Recent usage by workspace'})).toHaveTextContent(/Main.*\$2\.00/);
  fireEvent.click(screen.getByRole('button',{name:'Request more credit'}));
  await screen.findByText(/Request sent/);
@@ -88,7 +88,7 @@ it('offers Request more credit instead of Add funds when the server has no payme
 });
 it('explains a start refused just above the cutoff with the balance it needs',async()=>{
  const {CreditExhaustedNotice}=await import('./CreditNotice');
- render(<CreditExhaustedNotice detail={{message:'x',balanceUsd:-9.95,cutoffUsd:-10,shared:false,minimumUsd:-9.9}}/>);
- expect(screen.getByRole('alert')).toHaveTextContent('Your balance is −$9.95. Workspaces pause at −$10.00, so starting needs at least −$9.90');
+ render(<CreditExhaustedNotice detail={{message:'x',balanceUsd:0.05,cutoffUsd:0,shared:false,minimumUsd:5}}/>);
+ expect(screen.getByRole('alert')).toHaveTextContent('Your balance is $0.05. You need at least $5.00 to create or start a workspace.');
  expect(screen.getByRole('button',{name:'Add funds or view balance'})).toBeTruthy();
 });

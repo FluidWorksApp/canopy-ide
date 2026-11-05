@@ -1,7 +1,7 @@
 import {useEffect,useRef,useState} from 'react';
 import {Button} from './ui';
 import {openInOsBrowser} from '../links';
-import {creditBanner,openAccountSettings,requestMoreCredit,startCheckout,usd,waitForPurchase,type CreditExhausted,type Credits,type PurchaseOptions} from '../credits';
+import {CREDIT_POLICY,creditBanner,openAccountSettings,requestMoreCredit,startCheckout,usd,waitForPurchase,type CreditExhausted,type Credits,type PurchaseOptions} from '../credits';
 
 /** "Request more credit": emails Canopy support from the account. Offered when
  * the server has no Add funds configured, and beside it while the balance is
@@ -71,8 +71,8 @@ export function CreditBanner({credits}:{credits:Credits|null}){
  * to start compute for an exhausted balance. */
 export function CreditExhaustedNotice({detail}:{detail:CreditExhausted}){
  return <div className="credit-banner credit-banner-error" role="alert">
-  <strong>{detail.shared?'Workspace paused by its owner’s balance':'Workspace paused: out of credit'}</strong>
-  <p>{detail.shared?detail.message:detail.minimumUsd!=null&&detail.balanceUsd!=null&&detail.balanceUsd>detail.cutoffUsd?`Your balance is ${usd(detail.balanceUsd)}. Workspaces pause at ${usd(detail.cutoffUsd)}, so starting needs at least ${usd(detail.minimumUsd)} to cover the first few minutes. Your files and settings are kept.`:`Your balance is ${detail.balanceUsd==null?'past the limit':usd(detail.balanceUsd)}. Workspaces can’t start at or below ${usd(detail.cutoffUsd)}. Your files and settings are kept.`}</p>
+  <strong>{detail.shared?'Workspace can’t start':'Add credit to continue'}</strong>
+  <p>{detail.shared?detail.message:`Your balance is ${detail.balanceUsd==null?'too low':usd(detail.balanceUsd)}. You need at least ${usd(detail.minimumUsd??CREDIT_POLICY.minimumUsd)} to create or start a workspace.`}</p>
   {!detail.shared&&<div className="credit-banner-actions"><RequestCreditButton variant="accent"/><Button size="sm" variant="ghost" onClick={openAccountSettings}>Add funds or view balance</Button></div>}
  </div>;
 }
