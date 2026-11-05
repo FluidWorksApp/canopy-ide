@@ -35,6 +35,25 @@ function itemsInSource(){
   return rows;
 }
 
+/** Where every setting is meant to live. Moving one is a deliberate act: change it here too. */
+const EXPECTED:Record<string,string[]>={
+  "account":["Accounts"],
+  "agents":["Accounts", "Agent delegation", "CLI commands", "CLI updates", "Claude Code editor link", "Default agent", "Fleet readiness", "Intent & evidence review", "Other CLIs", "Plan before an agent starts", "Proof receipts", "Session documents", "Skip permission prompts", "Tools available", "Turn rollback"],
+  "appearance":["Accent color", "Side panel", "Skin"],
+  "brain":["Agent awareness", "Automatic brain work", "Brain", "Brain spending", "Builder lens summaries", "Features not using your brain", "Memory allowance maximums", "Memory monitoring prompts", "Team memory"],
+  "clipboard":["Clipboard history", "How much to keep", "Keep what I copy", "Passwords and keys", "The history", "Where it's kept"],
+  "dictation":["Indicator", "Key", "Language", "Live preview", "Model", "Mute while recording", "Recent dictation", "Shortcut", "Trigger"],
+  "editor":["File associations", "Font and cursor", "Keyboard shortcuts"],
+  "mascot":["Mascot"],
+  "notifications":["Ask for attention", "Notification pop-ups", "Team messages"],
+  "privacy":["Crash reporting", "Markdown research import"],
+  "remote":["On this network", "Public link", "Reach", "Remote access", "Remote access", "Scan to connect", "Your link"],
+  "rules":["Rules"],
+  "sessions":["At the budget", "Ctrl+Tab switching", "Hibernate idle agents", "Live agents per project", "New agents get a workspace", "Prototype session cap", "Restore sessions I close", "Session budget", "Set up new workspaces", "Settle into Idle after", "Spend & outcomes", "Stack tabs by status", "Workspace ports"],
+  "spotsearch":["Conversations to index", "Keep history for", "Scope", "Terminal scrollback", "The index"],
+  "terminal":["Automatic session names", "Font and cursor", "Scrollback"],
+};
+
 describe('the settings index',()=>{
   it('has an entry for every setting row, under the tab it is shown on',()=>{
     const rows=itemsInSource();
@@ -42,6 +61,13 @@ describe('the settings index',()=>{
     const indexed=new Set(SETTINGS_INDEX.filter(e=>!e.panel).map(e=>`${e.tab}:${e.name}`));
     const missing=rows.filter(r=>!indexed.has(`${r.tab}:${r.name}`)).map(r=>`${r.tab}: ${r.name}`);
     expect(missing,'settings not in settingsIndex.ts (so search cannot find them)').toEqual([]);
+  });
+  it('puts every setting exactly once on the tab it is meant to be on',()=>{
+    const found:Record<string,string[]>={};
+    for(const r of itemsInSource())(found[r.tab]??=[]).push(r.name);
+    for(const tab of Object.keys(found))found[tab].sort();
+    expect(found).toEqual(EXPECTED);
+    expect(Object.values(found).flat().length).toBe(81);// none lost, none doubled
   });
   it('lists nothing that is not a real setting row',()=>{
     const real=new Set(itemsInSource().map(r=>`${r.tab}:${r.name}`));
