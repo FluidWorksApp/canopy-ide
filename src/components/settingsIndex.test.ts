@@ -4,22 +4,32 @@ import {describe,expect,it} from 'vitest';
 import {SETTINGS_INDEX,searchSettings,settingAnchor} from './settingsIndex';
 
 const source=readFileSync(join(process.cwd(),'src/components/SettingsDialog.tsx'),'utf8');
-// Components that render rows for one tab but are defined outside SettingsDialog.
-const COMPONENT_TAB:Record<string,string>={CanopyLinkSettings:'integrations',SelfHostedRemoteSettings:'integrations',SpotSearchSettings:'spotsearch',ClipboardSettings:'clipboard',DictationSettings:'dictation'};
+/** Where in SettingsDialog.tsx a function's body starts: every <Item> belongs to the function it sits in. */
+const functions=[...source.matchAll(/\n(?:export )?function ([A-Z][A-Za-z]+)\(/g)].map(m=>[m.index!,m[1]] as const);
+const tabMarks=[...source.matchAll(/\{tab === "([a-z]+)"/g)].map(m=>[m.index!,m[1]] as const);
+const enclosingFunction=(pos:number)=>functions.filter(f=>f[0]<=pos).at(-1)![1];
+const tabAt=(pos:number)=>tabMarks.filter(t=>t[0]<=pos).at(-1)?.[1];
+
+/** The tab a component is shown on, followed from where it is rendered: directly in a tab block, or inside another component that is. */
+function tabOfComponent(name:string,seen=new Set<string>()):string|undefined{
+  if(seen.has(name))return undefined;seen.add(name);
+  for(const use of source.matchAll(new RegExp(`<${name}\\b`,'g'))){
+    const inside=enclosingFunction(use.index!);
+    const tab=inside==='SettingsDialog'?tabAt(use.index!):tabOfComponent(inside,seen);
+    if(tab)return tab;
+  }
+  return undefined;
+}
 
 /** Every <Item name="..."> in SettingsDialog.tsx with the tab it is shown on. */
 function itemsInSource(){
-  const tabMarks=[...source.matchAll(/\{tab === "([a-z]+)"/g)].map(m=>[m.index!,m[1]] as const);
-  const functions=[...source.matchAll(/\n(?:export )?function ([A-Z][A-Za-z]+)\(/g)].map(m=>[m.index!,m[1]] as const);
   const rows:{tab:string;name:string}[]=[];
   for(const m of source.matchAll(/<Item\b([^>]*?)>/gs)){
     const name=/\bname="([^"]*)"/.exec(m[1])?.[1];
     if(!name)continue;
-    const enclosing=[...functions].filter(f=>f[0]<=m.index!).at(-1)![1];
-    let tab:string|undefined;
-    if(enclosing==='SettingsDialog')tab=[...tabMarks].filter(t=>t[0]<=m.index!).at(-1)?.[1];
-    else tab=COMPONENT_TAB[enclosing];
-    if(!tab)throw Error(`Item "${name}" is in ${enclosing}, which this test does not know the tab of. Add it to COMPONENT_TAB.`);
+    const inside=enclosingFunction(m.index!);
+    const tab=inside==='SettingsDialog'?tabAt(m.index!):tabOfComponent(inside);
+    if(!tab)throw Error(`Item "${name}" is in ${inside}, which is not rendered on any tab`);
     rows.push({tab,name:name.replace(/&apos;/g,"'").replace(/&amp;/g,'&')});
   }
   return rows;
@@ -42,7 +52,7 @@ describe('the settings index',()=>{
     const anchors=SETTINGS_INDEX.filter(e=>!e.panel).map(e=>settingAnchor(e.tab,e.name));
     const repeated=anchors.filter((a,i)=>anchors.indexOf(a)!==i);
     // "Remote access" appears twice on one tab (the two remote modes); both are the same destination.
-    expect([...new Set(repeated)].filter(a=>a!==settingAnchor('integrations','Remote access'))).toEqual([]);
+    expect([...new Set(repeated)].filter(a=>a!==settingAnchor('remote','Remote access'))).toEqual([]);
   });
 });
 
