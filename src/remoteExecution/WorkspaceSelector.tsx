@@ -24,9 +24,10 @@ import './workspace.css';
 import {WorkspacePanel} from './WorkspacePanel';
 import {WorkspaceProgress,type WorkspaceProgressState} from './WorkspaceProgress';
 import {peekWorkspaceList,refreshWorkspaceList} from './workspaceListCache';
-import {connectionLabel,useConnectionState} from './connectionState';
+import {connectionLabel,useSettledConnectionState} from './connectionState';
 import {WorkspaceMenu,type WorkspaceMenuRow} from './WorkspaceMenu';
 import {AccountSync} from './AccountSync';
+import {MirrorSetup} from './MirrorSetup';
 import {workspaceStatus} from './WorkspaceHero';
 import {dismissStopSwitchNotice,markStopRequested,saveMemberStopNotice,saveStopSwitchNotice,takeMemberStopNotice,takeStopSwitchNotice,useWorkspaceLifecycle,workspaceLifecycle} from './workspaceLifecycle';
 import {WorkspaceStopNotice} from './WorkspaceStopNotice';
@@ -119,7 +120,7 @@ export function WorkspaceSelector({ onboarding = false,onHibernateWorkspace }: {
     finally{setStoppingVm(false);}
   }
   const activeId=active?workspaceTabId({id:`${active.connection.endpoint}/${active.connection.workspaceId}`,endpoint:active.connection.endpoint,workspaceId:active.connection.workspaceId,workspaceName:active.connection.workspaceName},managed):'local';
-  const connectionState=useConnectionState(active?`${active.connection.endpoint}/${active.connection.workspaceId}`:'local');
+  const connectionState=useSettledConnectionState(active?`${active.connection.endpoint}/${active.connection.workspaceId}`:'local');
   const [selectedId,setSelectedId]=useState(activeId);
   const [section,setSection]=useState<'overview'|'access'|'tools'>('overview');
   useEffect(()=>{setSection('overview');},[selectedId]);
@@ -287,6 +288,7 @@ export function WorkspaceSelector({ onboarding = false,onHibernateWorkspace }: {
           {!['connected','stopping','hibernated'].includes(connectionState.phase)&&<div className="workspace-feedback error" role="status"><span>{connectionLabel(connectionState)}. {connectionState.phase==='authentication-error'?'Reconnect with an updated access token.':'Your files remain on the VM. Waiting for the host connection.'}</span><Button size="sm" disabled={busy} onClick={()=>{setBusy(true);void active.reconnect().catch(e=>setError(String(e))).finally(()=>setBusy(false));}}>Retry now</Button></div>}
           <section className="workspace-card"><header><h3>Personal accounts</h3><p className="workspace-description">Sync agent accounts from this Mac, then pick which one new agents in {active.connection.workspaceName} launch as.</p></header><AccountSync workspaceName={active.connection.workspaceName}/></section>
           <section className="workspace-card"><header><h3>Git</h3></header><div className="workspace-action-row"><div><strong>GitHub & Git</strong><small>Repository access and commit identity</small></div><Button disabled={busy} onClick={()=>void runSetup('execution_remote_import_git')}>Connect GitHub</Button></div>{notice&&<p className="workspace-feedback" role="status">✓ {notice}</p>}</section>
+          <section className="workspace-card"><header><h3>Set up from this Mac</h3></header><MirrorSetup workspaceName={active.connection.workspaceName} disabled={connectionState.phase!=='connected'}/></section>
           <section className="workspace-card workspace-utilities"><header><h3>Workspace tools</h3></header><div className="workspace-inline-actions"><Button onClick={()=>{setOpen(false);setDesktop('open');}}><DesktopIcon size={14}/> Open desktop</Button>{member?isAccountWorkspace(active.connection)&&<Button disabled={stoppingVm||['stopping','hibernated'].includes(connectionState.phase)} onClick={()=>{setMemberStopError('');setMemberStopConfirm(true);}}>Stop my session</Button>:<>{onHibernateWorkspace&&<Button disabled={stoppingVm||['stopping','hibernated'].includes(connectionState.phase)} onClick={()=>setHibernateConfirm(true)}>Hibernate workspace</Button>}{!managedSelection&&active.connection.workspaceId==='shoaib-work'&&<Button disabled={stoppingVm} onClick={()=>setStopConfirm(true)}>Stop workspace</Button>}</>}</div><LocalProjectImport/>
           <details><summary>Browser sign-in</summary><p>Open a CLI sign-in link on this Mac, or use this workspace’s browser for a localhost callback.</p><label>Sign-in URL<TextInput width="full" type="url" autoComplete="off" placeholder="https://…" value={signInLink} onChange={e=>setSignInLink(e.target.value)}/></label><div className="workspace-inline-actions"><Button disabled={!/^https:\/\//i.test(signInLink)} onClick={()=>{openLink(signInLink,true);setSignInLink('');}}>Open on this Mac</Button><Button disabled={busy||!/^https:\/\//i.test(signInLink)} onClick={()=>{setBusy(true);setError('');void active.client.workspace(active.connection.workspaceId,'/desktop',{}).then(()=>active.client.workspace(active.connection.workspaceId,'/native',{command:'workspace_browser_open',args:{url:signInLink}})).then(()=>{setOpen(false);setDesktop('open');setSignInLink('');}).catch(e=>setError(String(e))).finally(()=>setBusy(false));}}>Open in {active.connection.workspaceName}</Button></div></details></section>
         </>:!selected?<p className="workspace-description">Using this Mac.</p>:null}

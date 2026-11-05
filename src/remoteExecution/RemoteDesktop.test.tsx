@@ -75,6 +75,7 @@ it('reconnects by itself after a dropped connection, and not after it is closed'
 const open=async(workspace=vi.fn().mockResolvedValue({}),streamUrl=vi.fn().mockResolvedValue('wss://example.test/ticket'))=>{
  const view=render(<RemoteDesktop client={{workspace,streamUrl} as unknown as RemoteExecutionClient} workspaceId="alice"/>);
  await waitFor(()=>expect(mock.connect).toHaveBeenCalledOnce());act(()=>mock.events.get('connect')!());
+ mock.key.mockClear();// the release sent on connect is tested on its own
  return {view,workspace,streamUrl,surface:view.container.querySelector('.remote-desktop-surface')!};
 };
 const shiftInsert=[[0xffe1,'ShiftLeft',true],[0xff63,'Insert',true],[0xff63,'Insert',false],[0xffe1,'ShiftLeft',false]];
@@ -134,4 +135,102 @@ it('says so when a workspace has no sound yet',async()=>{
  const {view}=await open(undefined,streamUrl);
  fireEvent.click(view.getByRole('button',{name:'Sound off'}));
  expect(await view.findByText(/Sound isn’t available/)).toBeTruthy();expect(view.getByRole('button',{name:'Sound off'})).toBeTruthy();vi.unstubAllGlobals();
+});
+
+const keyUps=()=>mock.key.mock.calls.filter(call=>call[2]===false).map(call=>call[1] as string);
+const everyModifierReleased=()=>{const up=keyUps();for(const code of ['ShiftLeft','ControlLeft','ControlRight','AltLeft','AltRight','MetaLeft','MetaRight'])expect(up).toContain(code);expect(mock.key.mock.calls.every(call=>call[2]===false)).toBe(true);};
+it('lets go of every modifier the workspace may still hold when it connects',async()=>{
+ const client=live();render(<RemoteDesktop client={client} workspaceId="alice"/>);
+ await waitFor(()=>expect(mock.connect).toHaveBeenCalledOnce());act(()=>mock.events.get('connect')!());
+ everyModifierReleased();
+});
+const surfaceOf=(view:ReturnType<typeof render>)=>view.container.querySelector('.remote-desktop-surface')!;
+it('hands the keyboard back to the desktop on reconnect only if the person was typing in it',async()=>{
+ const client=live(),view=render(<RemoteDesktop client={client} workspaceId="alice"/>);
+ await waitFor(()=>expect(mock.connect).toHaveBeenCalledOnce());
+ act(()=>{surfaceOf(view).dispatchEvent(new FocusEvent('focusin',{bubbles:true}));});// they clicked into the desktop
+ mock.focus.mockClear();act(()=>mock.events.get('connect')!());
+ expect(mock.focus).toHaveBeenCalled();
+});
+it('leaves the keyboard where it is when the person was typing elsewhere, on connect and on window focus',async()=>{
+ const client=live(),view=render(<RemoteDesktop client={client} workspaceId="alice"/>);
+ await waitFor(()=>expect(mock.connect).toHaveBeenCalledOnce());
+ const elsewhere=document.createElement('textarea');document.body.append(elsewhere);
+ act(()=>{surfaceOf(view).dispatchEvent(new FocusEvent('focusin',{bubbles:true}));});
+ act(()=>{surfaceOf(view).dispatchEvent(new FocusEvent('focusout',{bubbles:true,relatedTarget:elsewhere}));});// they moved to the IDE
+ mock.focus.mockClear();act(()=>mock.events.get('connect')!());
+ act(()=>{window.dispatchEvent(new Event('focus'));});
+ expect(mock.focus).not.toHaveBeenCalled();elsewhere.remove();
+});
+it('keeps the keyboard claim when the window itself loses focus, so coming back returns to the desktop',async()=>{
+ const client=live(),view=render(<RemoteDesktop client={client} workspaceId="alice"/>);
+ await waitFor(()=>expect(mock.connect).toHaveBeenCalledOnce());act(()=>mock.events.get('connect')!());
+ act(()=>{surfaceOf(view).dispatchEvent(new FocusEvent('focusin',{bubbles:true}));});
+ act(()=>{surfaceOf(view).dispatchEvent(new FocusEvent('focusout',{bubbles:true,relatedTarget:null}));});// window blur: no destination
+ mock.focus.mockClear();act(()=>{window.dispatchEvent(new Event('focus'));});
+ expect(mock.focus).toHaveBeenCalled();
+});
+it('does not move the workspace pointer on blur unless a button press may be stuck',async()=>{
+ const client=live(),view=render(<RemoteDesktop client={client} workspaceId="alice"/>);
+ await waitFor(()=>expect(mock.connect).toHaveBeenCalledOnce());act(()=>mock.events.get('connect')!());
+ const canvas=document.createElement('canvas');surfaceOf(view).append(canvas);
+ const ups=vi.fn();canvas.addEventListener('mouseup',ups);
+ act(()=>{window.dispatchEvent(new Event('blur'));});expect(ups).not.toHaveBeenCalled();// nothing pressed
+ act(()=>{surfaceOf(view).dispatchEvent(new Event('pointerdown',{bubbles:true}));});
+ act(()=>{window.dispatchEvent(new Event('pointerup'));});// released while connected: the workspace saw it
+ act(()=>{window.dispatchEvent(new Event('blur'));});expect(ups).not.toHaveBeenCalled();
+ act(()=>{surfaceOf(view).dispatchEvent(new Event('pointerdown',{bubbles:true}));});// pressed, then the stream drops before the release
+ act(()=>mock.events.get('disconnect')!());
+ act(()=>{window.dispatchEvent(new Event('pointerup'));});// the release goes nowhere
+ act(()=>{window.dispatchEvent(new Event('blur'));});expect(ups).toHaveBeenCalledTimes(3);// left, middle, right
+ act(()=>{window.dispatchEvent(new Event('blur'));});expect(ups).toHaveBeenCalledTimes(3);// once is enough
+});
+it('lets go of every modifier when the window loses focus, is hidden, or is minimized',async()=>{
+ const client=live(),view=render(<RemoteDesktop client={client} workspaceId="alice"/>);
+ await waitFor(()=>expect(mock.connect).toHaveBeenCalledOnce());act(()=>mock.events.get('connect')!());
+ mock.key.mockClear();act(()=>{window.dispatchEvent(new Event('blur'));});everyModifierReleased();
+ mock.key.mockClear();Object.defineProperty(document,'hidden',{configurable:true,get:()=>true});
+ act(()=>{document.dispatchEvent(new Event('visibilitychange'));});everyModifierReleased();
+ Object.defineProperty(document,'hidden',{configurable:true,get:()=>false});
+ mock.key.mockClear();view.rerender(<RemoteDesktop client={client} workspaceId="alice" minimized/>);everyModifierReleased();
+});
+it('has a button that releases stuck keys and returns the keyboard to the desktop',async()=>{
+ const {view}=await open();mock.focus.mockClear();
+ fireEvent.click(view.getByRole('button',{name:'Release keys'}));
+ everyModifierReleased();expect(mock.focus).toHaveBeenCalled();
+});
+it('reconnects at once when the window comes back while disconnected, instead of waiting out the backoff',async()=>{
+ vi.useFakeTimers();const client=live();render(<RemoteDesktop client={client} workspaceId="alice"/>);
+ await settle();await settle();act(()=>mock.events.get('connect')!());
+ // Two drops in a row: the next automatic retry is 1s away.
+ act(()=>mock.events.get('disconnect')!());
+ await act(async()=>{await vi.advanceTimersByTimeAsync(600);});await settle();await settle();
+ expect(mock.connect).toHaveBeenCalledTimes(2);
+ act(()=>mock.events.get('disconnect')!());
+ await act(async()=>{await vi.advanceTimersByTimeAsync(100);});await settle();
+ expect(mock.connect).toHaveBeenCalledTimes(2);// still waiting on the backoff
+ act(()=>{window.dispatchEvent(new Event('online'));});await settle();await settle();
+ expect(mock.connect).toHaveBeenCalledTimes(3);// the network came back: no waiting
+});
+it('does not restart a connect that is still in progress when the window is focused',async()=>{
+ vi.useFakeTimers();const client=live();render(<RemoteDesktop client={client} workspaceId="alice"/>);
+ await settle();await settle();expect(mock.connect).toHaveBeenCalledTimes(1);
+ act(()=>{window.dispatchEvent(new Event('focus'));});await settle();await settle();
+ expect(mock.connect).toHaveBeenCalledTimes(1);
+});
+it('leaves a working stream alone however long the window was hidden',async()=>{
+ vi.useFakeTimers();const client=live();render(<RemoteDesktop client={client} workspaceId="alice"/>);
+ await settle();await settle();act(()=>mock.events.get('connect')!());
+ Object.defineProperty(document,'hidden',{configurable:true,get:()=>true});act(()=>{document.dispatchEvent(new Event('visibilitychange'));});
+ for(let i=0;i<12;i++)await act(async()=>{await vi.advanceTimersByTimeAsync(5000);});// a minute hidden, timers ticking normally
+ Object.defineProperty(document,'hidden',{configurable:true,get:()=>false});act(()=>{document.dispatchEvent(new Event('visibilitychange'));});
+ await settle();await settle();expect(mock.connect).toHaveBeenCalledTimes(1);expect(mock.disconnect).not.toHaveBeenCalled();
+});
+it('replaces the stream when the machine has slept, since its socket may have died without a close',async()=>{
+ vi.useFakeTimers();vi.setSystemTime(1_000_000);const client=live();render(<RemoteDesktop client={client} workspaceId="alice"/>);
+ await settle();await settle();act(()=>mock.events.get('connect')!());
+ expect(mock.connect).toHaveBeenCalledTimes(1);
+ vi.setSystemTime(1_000_000+10*60_000);// the clock jumps; the next tick sees the gap
+ await act(async()=>{await vi.advanceTimersByTimeAsync(5000);});await settle();await settle();
+ expect(mock.connect).toHaveBeenCalledTimes(2);
 });

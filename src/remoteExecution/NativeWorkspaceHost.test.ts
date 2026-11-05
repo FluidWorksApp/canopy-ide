@@ -398,7 +398,7 @@ it('parks terminal reconnects and heartbeats while the workspace is intentionall
 });
 
 it('reconnects a waiting terminal as soon as the workspace answers, not after its backoff',async()=>{
- vi.useFakeTimers();vi.setSystemTime(1000000);
+ vi.useFakeTimers();vi.setSystemTime(1000000);vi.spyOn(Math,'random').mockReturnValue(0.5);// the retry delay is jittered; pin it so the waits below are exact
  const invoke=vi.fn().mockImplementation(async(command:string)=>command==='canopy_account_request'?{connection,expiresAt:new Date(Date.now()+3600000).toISOString()}:undefined);
  const desktop={kind:'native',invoke,listen:vi.fn(),channel:vi.fn()} as unknown as Host;
  class Socket {static CONNECTING=0;static all:Socket[]=[];readyState=0;onopen?:()=>void;onclose?:()=>void;onmessage?:()=>void;onerror?:()=>void;constructor(){Socket.all.push(this);}close(){this.onclose?.();}}
@@ -422,9 +422,47 @@ it('reconnects a waiting terminal as soon as the workspace answers, not after it
   Socket.all.at(-1)!.close();
   await host.invoke('pty_renderer_sessions');await vi.advanceTimersByTimeAsync(0);
   expect(Socket.all).toHaveLength(before+1);
- }finally{host.dispose();vi.useRealTimers();}
+ }finally{host.dispose();vi.useRealTimers();vi.restoreAllMocks();}
 });
 
+it('keeps backing off when the host closes a stream right after its snapshot, instead of retrying every second',async()=>{
+ vi.useFakeTimers();vi.setSystemTime(1000000);vi.spyOn(Math,'random').mockReturnValue(0.5);
+ const invoke=vi.fn().mockImplementation(async(command:string)=>command==='canopy_account_request'?{connection,expiresAt:new Date(Date.now()+3600000).toISOString()}:undefined);
+ const desktop={kind:'native',invoke,listen:vi.fn(),channel:vi.fn()} as unknown as Host;
+ class Socket {static CONNECTING=0;static all:Socket[]=[];readyState=0;onopen?:()=>void;onclose?:()=>void;onmessage?:(event:{data:string})=>void;onerror?:()=>void;constructor(){Socket.all.push(this);}close(){this.onclose?.();}}
+ vi.stubGlobal('WebSocket',Socket);
+ const shell={id:7,title:'shell',cols:40,rows:10,exitCode:null};
+ const fetcher=vi.fn().mockImplementation(async(url:string,options:RequestInit)=>({ok:true,json:async()=>url.endsWith('/ticket')?{ticket:'synthetic-ticket'}:url.endsWith('/sessions')?(options.method==='POST'?shell:[shell]):{result:null}}));
+ vi.stubGlobal('fetch',fetcher);
+ const host=new NativeWorkspaceHost(connection,desktop);
+ // What the host does to a slow consumer: a full snapshot, then a close.
+ const snapshotThenClose=()=>{const socket=Socket.all.at(-1)!;socket.onopen?.();socket.onmessage?.({data:JSON.stringify({t:'snapshot',b64:''})});socket.close();};
+ const reconnectsAfter=async(ms:number)=>{const before=Socket.all.length;await vi.advanceTimersByTimeAsync(ms);return Socket.all.length-before;};
+ try{
+  await host.invoke('pty_spawn_attached_argv',{cwd:'/workspace',argv:['bash'],onData:{onmessage:vi.fn()}});
+  snapshotThenClose();expect(await reconnectsAfter(900)).toBe(0);expect(await reconnectsAfter(200)).toBe(1);// 1s
+  snapshotThenClose();expect(await reconnectsAfter(1500)).toBe(0);expect(await reconnectsAfter(600)).toBe(1);// 2s, not 1s again
+  snapshotThenClose();expect(await reconnectsAfter(3500)).toBe(0);expect(await reconnectsAfter(700)).toBe(1);// 4s
+ }finally{host.dispose();vi.useRealTimers();vi.restoreAllMocks();}
+});
+it('forgets earlier failures once a stream has stayed up',async()=>{
+ vi.useFakeTimers();vi.setSystemTime(1000000);vi.spyOn(Math,'random').mockReturnValue(0.5);
+ const invoke=vi.fn().mockImplementation(async(command:string)=>command==='canopy_account_request'?{connection,expiresAt:new Date(Date.now()+3600000).toISOString()}:undefined);
+ const desktop={kind:'native',invoke,listen:vi.fn(),channel:vi.fn()} as unknown as Host;
+ class Socket {static CONNECTING=0;static all:Socket[]=[];readyState=0;onopen?:()=>void;onclose?:()=>void;onmessage?:(event:{data:string})=>void;onerror?:()=>void;constructor(){Socket.all.push(this);}close(){this.onclose?.();}}
+ vi.stubGlobal('WebSocket',Socket);
+ const shell={id:7,title:'shell',cols:40,rows:10,exitCode:null};
+ vi.stubGlobal('fetch',vi.fn().mockImplementation(async(url:string,options:RequestInit)=>({ok:true,json:async()=>url.endsWith('/ticket')?{ticket:'synthetic-ticket'}:url.endsWith('/sessions')?(options.method==='POST'?shell:[shell]):{result:null}})));
+ const host=new NativeWorkspaceHost(connection,desktop);
+ const snapshot=()=>{const socket=Socket.all.at(-1)!;socket.onopen?.();socket.onmessage?.({data:JSON.stringify({t:'snapshot',b64:''})});return socket;};
+ const reconnectsAfter=async(ms:number)=>{const before=Socket.all.length;await vi.advanceTimersByTimeAsync(ms);return Socket.all.length-before;};
+ try{
+  await host.invoke('pty_spawn_attached_argv',{cwd:'/workspace',argv:['bash'],onData:{onmessage:vi.fn()}});
+  snapshot().close();await reconnectsAfter(1100);snapshot().close();await reconnectsAfter(2100);// two quick failures: next wait would be 4s
+  const healthy=snapshot();await vi.advanceTimersByTimeAsync(10_500);// then it stays up
+  healthy.close();expect(await reconnectsAfter(1100)).toBe(1);// back to 1s
+ }finally{host.dispose();vi.useRealTimers();vi.restoreAllMocks();}
+});
 it('sends keystrokes over the stream socket once the gateway offers it and falls back to HTTP across a reconnect',async()=>{
  const {host,fetcher}=setup();
  class Socket {

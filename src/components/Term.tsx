@@ -462,8 +462,11 @@ export const Term = forwardRef<TermHandle, TermProps>(function Term(
     // call show()/hide(). Pressure may arrive in that gap, so compaction asks
     // the current paint/focus truth directly rather than trusting its last
     // effect-delivered state.
+    // A remote terminal is never compacted: it stays attached while hidden (see
+    // the hide branch below), and emptying the buffer under a live stream would
+    // corrupt what arrives next.
     const compactionVisible = () =>
-      terminalCompactionProtected(activeRef.current, streamingRef.current);
+      isRemoteHost() || terminalCompactionProtected(activeRef.current, streamingRef.current);
     let compactedViewportY: number | null = null;
     const compaction = new TerminalCompactionController(
       {
@@ -984,6 +987,13 @@ export const Term = forwardRef<TermHandle, TermProps>(function Term(
         })();
       } else {
         linkHint.hide();
+        // Hiding a remote terminal used to detach its stream and empty its buffer,
+        // and showing it again meant a new ticket, a new socket and a snapshot of
+        // up to 683 KiB over the network: a blank pane and "Reconnecting…" every
+        // time you switched tab or project. The stream stays open and the contents
+        // stay put; output keeps arriving into the buffer while it is out of view.
+        // (Local terminals still detach and compact: that is cheap and saves memory.)
+        if (isRemoteHost()) return;
         detachViewer();
         compaction.hide();
       }

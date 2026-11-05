@@ -23,7 +23,12 @@ export class ServiceAdmin{
     response.on('error',()=>finish(new ServiceAdminError('unavailable','Service connection failed')));
     response.on('end',()=>{
      const text=Buffer.concat(chunks).toString();let body;
-     try{body=text?JSON.parse(text):{};}catch{return finish(new ServiceAdminError('invalid-response','Service answered with invalid JSON',{status:response.statusCode}));}
+     // The service words a refusal as plain text under a JSON content type.
+     // It is still a refusal, not a service that has gone away.
+     try{body=text?JSON.parse(text):{};}catch{
+      if(response.statusCode>=400&&response.statusCode<500)return finish(new ServiceAdminError('rejected',text.slice(0,500),{status:response.statusCode}));
+      return finish(new ServiceAdminError('invalid-response','Service answered with invalid JSON',{status:response.statusCode}));
+     }
      if(response.statusCode<200||response.statusCode>=300)return finish(new ServiceAdminError('rejected',typeof body?.message==='string'?body.message:typeof body?.error==='string'?body.error:`Service refused (${response.statusCode})`,{status:response.statusCode,body}));
      finish(null,body);
     });

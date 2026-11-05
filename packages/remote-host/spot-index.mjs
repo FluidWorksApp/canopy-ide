@@ -186,7 +186,7 @@ export function wholeSessions(agent,file,roots,mtime){
 }
 
 // research.rs / notes.rs index_docs, over the same <home>/.canopy/{research,notes} layout.
-const validId=id=>{const i=id.indexOf('-');if(i<0)return false;const num=id.slice(0,i),slug=id.slice(i+1);return /^\d{4}$/.test(num)&&slug.length>0&&slug.length<=64&&/^[a-z0-9-]+$/.test(slug);};
+const validId=id=>{const i=id.indexOf('-');if(i<0)return false;const num=id.slice(0,i),slug=id.slice(i+1);return /^\d{4,}$/.test(num)&&slug.length>0&&slug.length<=64&&/^[a-z0-9-]+$/.test(slug);};
 async function storeDocs(home,store){
  const root=path.join(home,'.canopy',store),out=[];let projects;try{projects=await readdir(root,{withFileTypes:true});}catch{return out;}
  for(const p of projects.filter(p=>p.isDirectory())){

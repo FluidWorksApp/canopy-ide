@@ -24,6 +24,7 @@ import {storeDigestReader,withStoreDigests} from './session-store-digests.mjs';
 import {prepareSession} from './session-transfer.mjs';
 import {importAgentAccounts,importAccountProfiles} from './agent-accounts.mjs';
 import {CloneJobs} from './git-clone.mjs';
+import {MirrorJobs} from './mirror-apply.mjs';
 import {repositorySource} from './git-source.mjs';
 import {agentUsageReader} from './agent-usage.mjs';
 import {metricsReader,sessionUsage} from './workspace-metrics.mjs';
@@ -92,6 +93,7 @@ const history=gitHistory({git:async(argv,cwd,{maxBuffer=1024*1024,partial=false,
   throw Error(String(error.stderr||error.message||'Git inspection failed').slice(0,4096));
  }
 }});
+const mirrorJobs=new MirrorJobs({scoped,root:ROOT,home:HOME});
 const mcpRegistry=new McpRegistry({home:HOME,workspace:ROOT,scoped,profiles});
 let children=0;
 let metadataWrites=Promise.resolve();
@@ -327,6 +329,9 @@ export async function nativeInvoke(command,args={}){
   if(command==='git_clone_start')return cloneJobs.start(args.parent,args.url);
   if(command==='git_clone_status')return cloneJobs.status(args.id);
   if(command==='git_clone_cancel')return cloneJobs.cancel(args.id);
+  if(command==='mirror_apply_start')return mirrorJobs.start(args);
+  if(command==='mirror_apply_status')return mirrorJobs.status(args.id);
+  if(command==='mirror_apply_discard')return mirrorJobs.discard(args);
   if(command==='git_clone'){
     const {url,name}=repositorySource(args.url);const parent=await scoped(args.parent);
     const destination=await scoped(path.join(parent,name),true);

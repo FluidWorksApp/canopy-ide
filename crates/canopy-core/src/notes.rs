@@ -433,7 +433,8 @@ fn valid_id(id: &str) -> bool {
     let Some((num, slug)) = id.split_once('-') else {
         return false;
     };
-    num.len() == 4
+    // At least four digits: ids are minted `{next:04}`, which grows past 9999.
+    num.len() >= 4
         && num.bytes().all(|b| b.is_ascii_digit())
         && !slug.is_empty()
         && slug.len() <= 64
@@ -1886,6 +1887,7 @@ mod tests {
     fn ids_are_the_path_gate() {
         assert!(valid_id("0001-a"));
         assert!(valid_id("0042-tiered-donations"));
+        assert!(valid_id("10000-past-four-digits"));
         assert!(!valid_id("1-short-number"));
         assert!(!valid_id("0001-Upper"));
         assert!(!valid_id("0001-with/slash"));

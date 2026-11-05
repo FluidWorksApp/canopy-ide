@@ -2,6 +2,7 @@ import {it,expect,vi,beforeEach} from 'vitest';
 const mocks=vi.hoisted(()=>({invoke:vi.fn()}));
 vi.mock('@tauri-apps/api/core',()=>({invoke:mocks.invoke}));
 import {HostUpdateCancelled,HostUpdateFailed,hostUpdateUnsupported,hostUpdateState,hostUpdateStepLabel,requestHostUpdate,workspaceUpdate} from './hostUpdate';
+import {HOST_PROTOCOL} from '../../packages/remote-host/native-commands.mjs';
 const id='ws-11111111-1111-1111-1111-111111111111',A='a'.repeat(40),B='b'.repeat(40);
 beforeEach(()=>{vi.clearAllMocks();});
 
@@ -28,9 +29,9 @@ it('a container on an older image than the release has an update available',()=>
 });
 it('a failed command outranks the list; otherwise the list decides, then what the connection learned',()=>{
  const required={workspaceId:id,state:'required' as const,command:'gh_pr_list',revision:null};
- expect(workspaceUpdate({host:{revision:B,protocol:7},release:{revision:B,protocol:7}},required)).toEqual({state:'required',command:'gh_pr_list',revision:B});
- expect(workspaceUpdate({host:{revision:B,protocol:7},release:{revision:B,protocol:7}},{...required,state:'available',command:null})).toBeNull();
- expect(workspaceUpdate({host:{revision:A,protocol:7},release:{revision:B,protocol:7}},null)).toEqual({state:'available',command:null,revision:B});
+ expect(workspaceUpdate({host:{revision:B,protocol:HOST_PROTOCOL},release:{revision:B,protocol:HOST_PROTOCOL}},required)).toEqual({state:'required',command:'gh_pr_list',revision:B});
+ expect(workspaceUpdate({host:{revision:B,protocol:HOST_PROTOCOL},release:{revision:B,protocol:HOST_PROTOCOL}},{...required,state:'available',command:null})).toBeNull();
+ expect(workspaceUpdate({host:{revision:A,protocol:HOST_PROTOCOL},release:{revision:B,protocol:HOST_PROTOCOL}},null)).toEqual({state:'available',command:null,revision:B});
  expect(workspaceUpdate(undefined,{...required,state:'available',command:null,revision:B})).toEqual({state:'available',command:null,revision:B});
  expect(workspaceUpdate(undefined,null)).toBeNull();
 });

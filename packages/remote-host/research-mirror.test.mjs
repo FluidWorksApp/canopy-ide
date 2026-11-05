@@ -18,6 +18,7 @@ test('a research entry gets a directory in the VM, and its prose is listed for t
   await writeFile(path.join(dir,'image.png'),'x');
   const files=await c.research_entry_files({id:'0001-a'});
   assert.deepEqual(files.map(f=>[f.name,f.text]),[['findings.md','# Found']]);
+  assert.equal(await c.research_entry_dir({id:'10000-a'}),path.join(home,'.canopy','research','10000-a'));
   await assert.rejects(c.research_entry_dir({id:'../../etc'}),/not a research id/);
  }finally{await rm(home,{recursive:true,force:true});}
 });

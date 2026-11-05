@@ -15,3 +15,13 @@ input:focus, button:focus-visible, textarea:focus, select:focus { outline: 2px s
 .remote-inspection { max-height: 40%; overflow: auto; padding: 12px; border-top: 1px solid #343d4a; }
 .remote-inspection pre, .remote-diagnostics { white-space: pre-wrap; overflow-wrap: anywhere; font: 12px ui-monospace, monospace; }
 .remote-diagnostics { max-height: 120px; overflow: auto; padding: 8px; margin: 0; }
+
+/* Set up from this Mac */
+.mirror-setup { display: grid; gap: 8px; }
+.mirror-setup details { font-size: 12px; color: var(--text-dim); }
+.mirror-setup details ul { margin: 6px 0 0; padding-left: 18px; }
+.mirror-steps, .mirror-project ul { list-style: none; margin: 0; padding: 0; display: grid; gap: 4px; }
+.mirror-project { display: grid; gap: 4px; padding-top: 6px; border-top: 1px solid var(--border); }
+.mirror-repo { display: grid; gap: 2px; padding-left: 10px; }
+.mirror-repo small, .mirror-project small { color: var(--text-dim); overflow-wrap: anywhere; }
+.mirror-setup small.mirror-problem { color: var(--danger, #e5484d); }
