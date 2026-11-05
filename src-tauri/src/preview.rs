@@ -1175,7 +1175,9 @@ mod tests {
     #[tokio::test]
     async fn a_silent_server_shows_the_waiting_page() {
         // Accepts every connection and never answers.
-        let silent = tokio::net::TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let silent = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .unwrap();
         let port = silent.local_addr().unwrap().port();
         tokio::spawn(async move {
             let mut held = Vec::new();
@@ -1195,7 +1197,9 @@ mod tests {
             log: NetLog::default(),
             cookies: Arc::default(),
         });
-        let proxy = tokio::net::TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let proxy = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .unwrap();
         let proxy_port = proxy.local_addr().unwrap().port();
         let router = Router::new().fallback(proxy_handler).with_state(ctx);
         tokio::spawn(async move { axum::serve(proxy, router).await.unwrap() });
