@@ -51,10 +51,10 @@ test('admin grants are limited to CANOPY_ADMIN_EMAILS and record the admin as ac
  assert.equal(result.applied,true);assert.equal(db.ledger.get('admin-grant:ticket-12345').actor,'admin:ops@example.invalid');
  await assert.rejects(adminGrantCredit(db,{admin:{email:'ops@example.invalid'},body:{amountUsd:'5',reason:'x'}}),{code:400});
  const calls=[];const listed=await listCreditAccounts({query:async(sql,args)=>{calls.push(args);return {rows:[{user_id:'u-1',email:'sam@example.invalid',name:'Sam',balance_usd:'-64.48',running_workspaces:0,open_request_at:null,updated_at:null}]};}},{below:'-10'});
- assert.deepEqual(calls[0],[-10,200]);assert.equal(listed.accounts[0].amountToRestoreUsd,'54.49');
+ assert.deepEqual(calls[0],[-10,200]);assert.equal(listed.accounts[0].amountToRestoreUsd,'69.48');
  await assert.rejects(listCreditAccounts({query:async()=>({rows:[]})},{below:'lots'}),{code:400});
 });
 test('reminder emails name Add funds only when it is configured',()=>{
- assert.match(creditNoticeEmail({level:'zero',balanceUsd:'-1'}).text,/Request more credit/);
- assert.match(creditNoticeEmail({level:'zero',balanceUsd:'-1',addFunds:true}).text,/choose Add funds/);
+ assert.match(creditNoticeEmail({level:'pct15',balanceUsd:'1'}).text,/Request more credit/);
+ assert.match(creditNoticeEmail({level:'pct15',balanceUsd:'1',addFunds:true}).text,/choose Add funds/);
 });

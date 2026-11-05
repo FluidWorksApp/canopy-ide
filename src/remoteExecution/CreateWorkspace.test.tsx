@@ -1,9 +1,9 @@
 import {render,screen,act,cleanup,fireEvent} from '@testing-library/react';
 import {afterEach,it,expect,vi} from 'vitest';
-const mocks=vi.hoisted(()=>({plans:null as unknown}));
-vi.mock('@tauri-apps/api/core',()=>({invoke:vi.fn(async()=>mocks.plans)}));
+const mocks=vi.hoisted(()=>({plans:null as unknown,credits:{balanceUsd:'20'} as unknown}));
+vi.mock('@tauri-apps/api/core',()=>({invoke:vi.fn(async(_command:string,args?:{route?:string})=>{if(args?.route!=='/api/credits')return mocks.plans;if(mocks.credits instanceof Error)throw mocks.credits;return mocks.credits;})}));
 import {CreateWorkspace} from './CreateWorkspace';
-afterEach(()=>{cleanup();mocks.plans=null;});
+afterEach(()=>{cleanup();mocks.plans=null;mocks.credits={balanceUsd:'20'};});
 const plan=(id:string,extra:object)=>({id,name:id,cpu_cores:2,memory_mib:8192,pricePerHour:'0.1',storagePricePerGibMonth:'0.1177',storageMode:'disk',...extra});
 it('shows the disk size and monthly estimate the plans API reports, not a fixed 50 GB',async()=>{
  mocks.plans={plans:[plan('standard',{storage_gib:100,storageMonthlyUsd:'11.77'}),plan('power',{storage_gib:100})],regions:[{id:'ap-southeast-1',name:'Singapore'}]};
@@ -32,4 +32,27 @@ it('offers the API storage selector, shows each size per hour, and sends the cho
  fireEvent.change(screen.getByRole('textbox',{name:/Workspace name/}),{target:{value:'Big'}});
  await act(async()=>{fireEvent.click(screen.getByRole('button',{name:/Create workspace/}));});
  expect(vi.mocked(invoke)).toHaveBeenCalledWith('canopy_account_request',{route:'/api/workspaces',body:{name:'Big',planId:'standard',regionId:'ap-southeast-1',storageGib:1000}});
+});
+const create=()=>screen.getByRole('button',{name:'Create workspace'});
+it('blocks creating below the credit floor and points at adding credit',async()=>{
+ const {invoke}=await import('@tauri-apps/api/core');vi.mocked(invoke).mockClear();
+ mocks.plans={plans:[plan('standard',{})],regions:[]};mocks.credits={balanceUsd:'4.99'};
+ render(<CreateWorkspace onCreated={()=>{}}/>);await act(async()=>{});
+ fireEvent.change(screen.getByRole('textbox',{name:/Workspace name/}),{target:{value:'Main'}});
+ expect(screen.getByRole('alert')).toHaveTextContent('You need at least $5.00 to create or start a workspace.');
+ expect(screen.getByRole('button',{name:'Add credit'})).toBeTruthy();expect(create()).toBeDisabled();
+ fireEvent.submit(create().closest('form')!);await act(async()=>{});
+ expect(invoke).not.toHaveBeenCalledWith('canopy_account_request',expect.objectContaining({route:'/api/workspaces'}));
+});
+it('allows creating at the floor',async()=>{
+ mocks.plans={plans:[plan('standard',{})],regions:[]};mocks.credits={balanceUsd:'5'};
+ render(<CreateWorkspace onCreated={()=>{}}/>);await act(async()=>{});
+ fireEvent.change(screen.getByRole('textbox',{name:/Workspace name/}),{target:{value:'Main'}});
+ expect(create()).toBeEnabled();expect(screen.queryByRole('alert')).toBeNull();
+});
+it('stays blocked when the balance can\u2019t be read',async()=>{
+ mocks.plans={plans:[plan('standard',{})],regions:[]};mocks.credits=new Error('offline');
+ render(<CreateWorkspace onCreated={()=>{}}/>);await act(async()=>{});
+ fireEvent.change(screen.getByRole('textbox',{name:/Workspace name/}),{target:{value:'Main'}});
+ expect(create()).toBeDisabled();expect(screen.getByRole('alert')).toHaveTextContent('couldn’t be checked');
 });

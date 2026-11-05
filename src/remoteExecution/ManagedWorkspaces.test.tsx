@@ -155,13 +155,13 @@ it('shows the specific disk-full startup failure instead of a generic image-stag
 });
 it('a credit refusal shows the balance and how to get credit instead of a generic error',async()=>{
  setup();vi.useRealTimers();
- const refusal=JSON.stringify({error:'Your Canopy balance is −$64.48. Workspaces pause at −$10.00, so this workspace can’t start until credit is added. Your files are kept.',code:'credit_exhausted',balanceUsd:'-64.480000',cutoffUsd:'-10',shared:false,status:402});
+ const refusal=JSON.stringify({error:'Your Canopy balance is −$64.48. You need at least $5.00 to create or start a workspace. Add credit first.',code:'credit_exhausted',balanceUsd:'-64.480000',cutoffUsd:'0',minimumUsd:'5.00',shared:false,status:402});
  const base=mocks.invoke.getMockImplementation()!;
  mocks.invoke.mockImplementation(async(command,args)=>{if(args?.body?.action==='resume'){expect(args.detailedErrors).toBe(true);throw refusal;}if(args?.route==='/api/credits')return {requested:true};return base(command,args);});
  render(<ManagedWorkspaces/>);await act(async()=>{});
  fireEvent.click(screen.getByRole('button',{name:'Resume workspace'}));await act(async()=>{});
- expect(screen.getByText('Workspace paused: out of credit')).toBeTruthy();
- expect(screen.getByText(/Your balance is −\$64\.48\. Workspaces can’t start at or below −\$10\.00/)).toBeTruthy();
+ expect(screen.getByText('Add credit to continue')).toBeTruthy();
+ expect(screen.getByText(/Your balance is −\$64\.48\. You need at least \$5\.00/)).toBeTruthy();
  expect(screen.queryByText(/credit_exhausted|\{"error"/)).toBeNull();
  fireEvent.click(screen.getByRole('button',{name:'Request more credit'}));await act(async()=>{});
  expect(mocks.invoke).toHaveBeenCalledWith('canopy_account_request',{route:'/api/credits',body:{action:'request-credit'}});

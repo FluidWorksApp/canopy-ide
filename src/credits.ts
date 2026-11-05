@@ -4,8 +4,9 @@ import {postAttention} from './attention';
 import {subscribeWorkspaceList} from './remoteExecution/workspaceListCache';
 
 /** Mirrors packages/control-plane/lib/credit-policy.mjs. The server's `policy`
- * wins when it sends one; these keep the app right against an older server. */
-export const CREDIT_POLICY={lowUsd:5,zeroUsd:0,finalUsd:-5,cutoffUsd:-10};
+ * wins, with this account's own alert amounts; these only cover a server that
+ * sends none. */
+export const CREDIT_POLICY={lowUsd:5,zeroUsd:0,finalUsd:0,cutoffUsd:0,minimumUsd:5};
 export type CreditPolicy=typeof CREDIT_POLICY;
 export type CreditStatus='ok'|'low'|'zero'|'final'|'paused';
 const ORDER:CreditStatus[]=['ok','low','zero','final','paused'];
@@ -29,8 +30,12 @@ export function statusOf(credits:Credits|null|undefined):CreditStatus|null{
  const balance=balanceOf(credits);if(balance==null)return null;
  return credits?.status&&ORDER.includes(credits.status)?credits.status:creditStatus(balance,credits?.policy??CREDIT_POLICY);
 }
-/** Smallest cent amount that lifts the balance above the cutoff. */
-export function amountToRestore(balance:number,policy:CreditPolicy=CREDIT_POLICY){const owed=policy.cutoffUsd-balance;return owed<0?0:(Math.floor(owed*100+1e-6)+1)/100;}
+const minimumOf=(policy?:Partial<CreditPolicy>|null)=>policy?.minimumUsd??CREDIT_POLICY.minimumUsd;
+/** Smallest cent amount that reaches the balance needed to create or start. */
+export function amountToRestore(balance:number,policy:CreditPolicy=CREDIT_POLICY){const owed=minimumOf(policy)-balance;return owed>0?Math.ceil(owed*100-1e-6)/100:0;}
+/** Creating or starting needs this balance; the server enforces it too. */
+export function canCreateWorkspace(credits:Credits|null|undefined){const balance=balanceOf(credits);return balance!=null&&balance>=minimumOf(credits?.policy);}
+export const creditFloorMessage=(credits:Credits|null|undefined)=>`You need at least ${usd(minimumOf(credits?.policy))} to create or start a workspace. Add credit first.`;
 // A true minus sign, matching the control plane's emails and errors.
 export const usd=(value:number)=>new Intl.NumberFormat('en-US',{style:'currency',currency:'USD'}).format(value).replace(/^-/,'−');
 
@@ -39,10 +44,10 @@ export function creditBanner(credits:Credits|null|undefined):CreditBanner|null{
  const balance=balanceOf(credits),status=statusOf(credits);if(balance==null||!status||status==='ok')return null;
  const policy=credits?.policy??CREDIT_POLICY,cutoff=usd(policy.cutoffUsd),left=usd(Math.max(0,balance-policy.cutoffUsd));
  const more=credits?.paymentsEnabled===true?'Add funds':'Request more credit';
- if(status==='paused'){const restore=Number(credits?.amountToRestoreUsd??amountToRestore(balance,policy));return {tone:'error',title:'Workspaces paused',body:`Your balance is past the ${cutoff} limit, so running workspaces were stopped and new starts are blocked. Add at least ${usd(restore)} to start them again. Your files and settings are kept.`};}
- if(status==='final')return {tone:'error',title:'Final notice',body:`Workspaces pause at ${cutoff}, in about ${left} of running time. ${more} to keep working.`};
- if(status==='zero')return {tone:'warn',title:'Out of credit',body:`You have about ${left} of running time before workspaces pause at ${cutoff}.`};
- return {tone:'warn',title:'Balance running low',body:`Workspaces keep running. They pause if the balance reaches ${cutoff}.`};
+ if(status==='paused'){const restore=Number(credits?.amountToRestoreUsd??amountToRestore(balance,policy));return credits?.enforcement==='enforce'?{tone:'error',title:'Workspaces deleted',body:`Your balance reached ${cutoff}, so your workspaces and their files were deleted. Add at least ${usd(restore)} to create a new one.`}:{tone:'error',title:'Out of credit',body:`${creditFloorMessage(credits)} Add at least ${usd(restore)}.`};}
+ if(status==='final')return {tone:'error',title:'Final notice',body:`Workspaces and their files are permanently deleted at ${cutoff}, in about ${left} of running time. ${more} to keep them.`};
+ if(status==='zero')return {tone:'warn',title:'Out of credit',body:`You have about ${left} of running time before workspaces are deleted at ${cutoff}.`};
+ return {tone:'warn',title:'Balance running low',body:`Workspaces keep running. They and their files are permanently deleted if the balance reaches ${cutoff}.`};
 }
 
 /** `minimumUsd`: the balance a start needs (the cutoff plus one billing
@@ -55,7 +60,7 @@ export function creditExhaustedFromError(error:unknown):CreditExhausted|null{
  const text=error instanceof Error?error.message:String(error);
  let detail:Record<string,unknown>|null=null;try{const parsed=JSON.parse(text);if(parsed&&typeof parsed==='object')detail=parsed;}catch{/* plain message */}
  const message=typeof detail?.error==='string'?detail.error:text;
- const matched=detail?.code==='credit_exhausted'||detail?.reason==='credit_exhausted'||detail?.status===402||/Workspaces pause at|past the .{1,12} limit/.test(message);
+ const matched=detail?.code==='credit_exhausted'||detail?.reason==='credit_exhausted'||detail?.status===402||/Workspaces pause at|past the .{1,12} limit|to create or start a workspace|balance is too low/.test(message);
  if(!matched)return null;
  const balance=Number(detail?.balanceUsd);const cutoff=Number(detail?.cutoffUsd);const minimum=Number(detail?.minimumUsd);
  return {message,balanceUsd:detail?.balanceUsd!=null&&Number.isFinite(balance)?balance:null,cutoffUsd:Number.isFinite(cutoff)&&detail?.cutoffUsd!=null?cutoff:CREDIT_POLICY.cutoffUsd,shared:detail?.shared===true||/owner/.test(message),...(detail?.minimumUsd!=null&&Number.isFinite(minimum)?{minimumUsd:minimum}:{})};

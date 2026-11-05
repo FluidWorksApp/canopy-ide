@@ -9,7 +9,7 @@
 CREATE TABLE IF NOT EXISTS credit_notice (
  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
  user_id text NOT NULL REFERENCES "user"(id) ON DELETE CASCADE,
- level text NOT NULL CHECK(level IN ('low','zero','final','paused')),
+ level text NOT NULL,
  balance_usd numeric(18,6) NOT NULL,
  created_at timestamptz NOT NULL DEFAULT now(),
  cleared_at timestamptz,
@@ -41,3 +41,17 @@ CREATE INDEX IF NOT EXISTS credit_request_user_time_idx ON credit_request(user_i
 ALTER TABLE credit_ledger ADD COLUMN IF NOT EXISTS actor text;
 -- Per-workspace usage history on the account page.
 CREATE INDEX IF NOT EXISTS credit_ledger_user_usage_idx ON credit_ledger(user_id,occurred_at DESC) WHERE kind='usage';
+
+-- Percentage alerts. The base is the balance right after the last credit; the
+-- backfill rebuilds it from the ledger so existing accounts measure the same way.
+ALTER TABLE credit_notice DROP CONSTRAINT IF EXISTS credit_notice_level_check;
+ALTER TABLE credit_notice ADD CONSTRAINT credit_notice_level_check CHECK(level IN ('low','zero','final','pct30','pct15','pct5','paused'));
+ALTER TABLE credit_account ADD COLUMN IF NOT EXISTS alert_base_usd numeric(18,6) NOT NULL DEFAULT 0;
+UPDATE credit_account a SET alert_base_usd=GREATEST(0,a.balance_usd-COALESCE((
+ SELECT sum(l.amount_usd) FROM credit_ledger l WHERE l.user_id=a.user_id AND l.occurred_at>(
+  SELECT max(g.occurred_at) FROM credit_ledger g WHERE g.user_id=a.user_id AND g.kind='grant')),0))
+WHERE a.alert_base_usd=0;
+-- Reminders on the old dollar thresholds never send after this change.
+UPDATE credit_notice SET cleared_at=now(),delivery=CASE WHEN delivery='pending' THEN 'skipped' ELSE delivery END WHERE cleared_at IS NULL AND level IN ('low','zero','final');
+-- Packages include no free credit.
+UPDATE compute_plan SET included_usd=0 WHERE included_usd<>0;

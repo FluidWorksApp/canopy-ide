@@ -1,4 +1,4 @@
-// Credit enforcement: reminder notices, pausing compute at the cutoff, admin
+// Credit enforcement: reminder notices, deleting workspaces at the cutoff, admin
 // grants, credit requests and the account summary. Thresholds live in
 // credit-policy.mjs; operations and wiring are in docs/credits.md.
 //
@@ -7,7 +7,7 @@
 // Paths that touch only the account (notices, grants) lock only the account.
 import {randomUUID} from 'node:crypto';
 import {requestOperation} from './lifecycle.mjs';
-import {CREDIT_POLICY,CUTOFF_USD,LOW_USD,NOTICE_LEVELS,amountToRestoreUsd,computeAllowed,creditStatus,enforcementMode,noticeLevels,pausedStorageBilling,purchaseEnabled} from './credit-policy.mjs';
+import {ALERT_SHARES,CUTOFF_USD,NOTICE_LEVELS,RETIRED_NOTICE_LEVELS,accountPolicy,amountToRestoreUsd,computeAllowed,creditStatus,enforcementMode,noticeLevels,pausedStorageBilling,purchaseEnabled,startAllowed} from './credit-policy.mjs';
 import {creditNoticeEmail,creditRequestEmail} from './credit-email.mjs';
 
 const severity=level=>NOTICE_LEVELS.indexOf(level);
@@ -15,6 +15,7 @@ const severity=level=>NOTICE_LEVELS.indexOf(level);
 // compute the control plane owns. to_jsonb keeps this valid on databases
 // created before the provider column.
 const MANAGED="COALESCE(to_jsonb(w)->>'provider','lightsail')='lightsail'";
+const alertBase=async(client,userId)=>(await client.query('SELECT alert_base_usd::text base FROM credit_account WHERE user_id=$1',[userId])).rows[0]?.base??null;
 
 /** Open a notice for every level the balance has crossed and close the ones it
  * has recovered past (re-arming them). Returns the levels newly crossed.
@@ -23,9 +24,9 @@ const MANAGED="COALESCE(to_jsonb(w)->>'provider','lightsail')='lightsail'";
  * emailed, so a jump from +$20 to -$12 sends one email, not four. */
 export async function syncCreditNotices(client,userId,balanceUsd,{env=process.env}={}){
  const mode=enforcementMode(env);if(mode==='off')return [];
- // In notify mode nothing is paused, so the "paused" email would be untrue.
- const active=noticeLevels(balanceUsd).filter(level=>mode==='enforce'||level!=='paused');
- const recovered=NOTICE_LEVELS.filter(level=>!active.includes(level));
+ // In notify mode nothing is deleted, so the "paused" email would be untrue.
+ const active=noticeLevels(balanceUsd,await alertBase(client,userId)).filter(level=>mode==='enforce'||level!=='paused');
+ const recovered=[...NOTICE_LEVELS,...RETIRED_NOTICE_LEVELS].filter(level=>!active.includes(level));
  await client.query("UPDATE credit_notice SET cleared_at=now(),delivery=CASE WHEN delivery='pending' THEN 'skipped' ELSE delivery END WHERE user_id=$1 AND cleared_at IS NULL AND level=ANY($2::text[])",[userId,recovered]);
  if(!active.length)return [];
  const crossed=(await client.query('INSERT INTO credit_notice(user_id,level,balance_usd) SELECT $1,level,$3::numeric FROM unnest($2::text[]) AS level ON CONFLICT(user_id,level) WHERE cleared_at IS NULL DO NOTHING RETURNING level',[userId,active,String(balanceUsd)])).rows.map(row=>row.level);
@@ -38,23 +39,24 @@ export async function syncCreditNotices(client,userId,balanceUsd,{env=process.en
  return crossed.sort((a,b)=>severity(a)-severity(b));
 }
 
-/** Hibernate one workspace for an exhausted balance. The caller holds the
- * transaction (and normally the workspace and account locks). Uses a savepoint
- * so a refused lifecycle request never aborts the caller's debit. Returns
- * 'requested' | 'already-stopping' | 'deferred'. */
-export async function pauseWorkspaceForCredit(client,ownerId,workspaceId,{balanceUsd,request=requestOperation,log=console}={}){
- const w=(await client.query('SELECT id,owner_id,desired_state,deleted_at FROM workspace WHERE id=$1 FOR UPDATE',[workspaceId])).rows[0];
- if(!w||w.owner_id!==ownerId||w.deleted_at||w.desired_state!=='running')return 'already-stopping';
+/** Permanently delete one workspace for an exhausted balance: compute, disks,
+ * snapshots and files. The caller holds the transaction (and normally the
+ * workspace and account locks). Uses a savepoint so a refused lifecycle request
+ * never aborts the caller's debit. Returns 'requested' | 'already-stopping' |
+ * 'deferred'. */
+export async function deleteWorkspaceForCredit(client,ownerId,workspaceId,{balanceUsd,request=requestOperation,log=console}={}){
+ const w=(await client.query('SELECT id,owner_id,name,desired_state,deleted_at FROM workspace WHERE id=$1 FOR UPDATE',[workspaceId])).rows[0];
+ if(!w||w.owner_id!==ownerId||w.deleted_at||w.desired_state==='deleted')return 'already-stopping';
  const active=(await client.query("SELECT action FROM workspace_operation WHERE workspace_id=$1 AND status IN('pending','running')",[workspaceId])).rows[0];
- if(active&&['hibernate','delete'].includes(active.action))return 'already-stopping';
- // Any other operation in flight finishes first; the next sweep pauses the
+ if(active?.action==='delete')return 'already-stopping';
+ // Any other operation in flight finishes first; the next sweep deletes the
  // workspace. The worker meters (and so reaches this hook) while it holds that
- // operation's session advisory lock, which a nested hibernate request would
+ // operation's session advisory lock, which a nested delete request would
  // re-acquire and supersede under the worker's feet.
  if(active)return 'deferred';
  await client.query('SAVEPOINT credit_pause');
  try{
-  const operation=await request(client,ownerId,workspaceId,{action:'hibernate',confirmInterrupt:true,requestKey:randomUUID()});
+  const operation=await request(client,ownerId,workspaceId,{action:'delete',confirmName:w.name,confirmInterrupt:true,requestKey:randomUUID()});
   if(operation?.id)await client.query('UPDATE workspace_operation SET context=context||$2::jsonb WHERE id=$1',[operation.id,JSON.stringify({creditPause:{balanceUsd:balanceUsd==null?null:String(balanceUsd),cutoffUsd:String(CUTOFF_USD)}})]);
   await client.query('RELEASE SAVEPOINT credit_pause');return 'requested';
  }catch(error){
@@ -62,7 +64,7 @@ export async function pauseWorkspaceForCredit(client,ownerId,workspaceId,{balanc
   // A refused lifecycle request (a provider step in progress, 409, or any
   // other lifecycle status) is retried by the next sweep. It must not abort
   // the caller: metering debits every workspace in one transaction.
-  if(typeof error?.code==='number'){if(error.code!==409)log?.warn?.('Credit pause deferred',error.code,error.message);return 'deferred';}
+  if(typeof error?.code==='number'){if(error.code!==409)log?.warn?.('Credit delete deferred',error.code,error.message);return 'deferred';}
   throw error;
  }
 }
@@ -70,15 +72,15 @@ export async function pauseWorkspaceForCredit(client,ownerId,workspaceId,{balanc
 /** Call from the debit path right after the balance update, in the same
  * transaction, while the workspace and credit_account rows are locked (as
  * meterWorkspace holds them). Records crossed notices and, at or below the
- * cutoff, hibernates the debited workspace. The owner's other workspaces are
- * paused by their own next debit or by the sweep. */
+ * cutoff, deletes the debited workspace. The owner's other workspaces are
+ * deleted by their own next debit or by the sweep. */
 export async function enforceAfterDebit(client,{userId,workspaceId},{env=process.env}={}){
  const mode=enforcementMode(env);if(mode==='off')return {status:'ok',notices:[],paused:null};
  const row=(await client.query('SELECT balance_usd::text balance FROM credit_account WHERE user_id=$1',[userId])).rows[0];
  const balance=row?.balance??'0';
  const notices=await syncCreditNotices(client,userId,balance,{env});
- const paused=mode==='enforce'&&workspaceId&&!computeAllowed(balance)?await pauseWorkspaceForCredit(client,userId,workspaceId,{balanceUsd:balance}):null;
- return {balanceUsd:balance,status:creditStatus(balance),notices,paused};
+ const paused=mode==='enforce'&&workspaceId&&!computeAllowed(balance)?await deleteWorkspaceForCredit(client,userId,workspaceId,{balanceUsd:balance}):null;
+ return {balanceUsd:balance,status:creditStatus(balance,await alertBase(client,userId)),notices,paused};
 }
 
 /** Whether saved-storage metering should skip this owner right now: with
@@ -91,12 +93,12 @@ export async function storageChargeHeld(client,userId,{env=process.env}={}){
  return !computeAllowed(row?.balance??'0');
 }
 
-/** When a workspace's running time stops being charged because a credit pause
- * was requested for it: the creation time of its pending credit-pause
- * hibernate, or null. Metering bills up to this moment and not the minute or
- * two the hibernate takes to stop compute. */
+/** When a workspace's running time stops being charged because a credit delete
+ * was requested for it: the creation time of its pending credit operation, or
+ * null. Metering bills up to this moment and not the minute or two the delete
+ * takes to stop compute. */
 export async function creditPauseRequestedAt(client,workspaceId){
- return (await client.query("SELECT created_at FROM workspace_operation WHERE workspace_id=$1 AND action='hibernate' AND status IN('pending','running') AND context ? 'creditPause' ORDER BY created_at LIMIT 1",[workspaceId])).rows[0]?.created_at??null;
+ return (await client.query("SELECT created_at FROM workspace_operation WHERE workspace_id=$1 AND action IN('hibernate','delete') AND status IN('pending','running') AND context ? 'creditPause' ORDER BY created_at LIMIT 1",[workspaceId])).rows[0]?.created_at??null;
 }
 
 async function inTransaction(pool,work){
@@ -113,7 +115,8 @@ async function inTransaction(pool,work){
 export async function enforceCreditPolicy(pool,{env=process.env,send=null,accountUrl,supportEmail=env.CANOPY_SUPPORT_EMAIL,limit=100,log=console}={}){
  const mode=enforcementMode(env);const result={mode,noticed:0,paused:0,deferred:0,emailed:0};
  if(mode==='off')return result;
- const accounts=(await pool.query('SELECT user_id FROM credit_account WHERE balance_usd<$1 UNION SELECT user_id FROM credit_notice WHERE cleared_at IS NULL LIMIT $2',[LOW_USD,limit])).rows;
+ // An account with no workspace left has nothing to be warned about.
+ const accounts=(await pool.query(`SELECT a.user_id FROM credit_account a WHERE (a.balance_usd<=$1 OR a.balance_usd<=a.alert_base_usd*$3) AND EXISTS(SELECT 1 FROM workspace w WHERE w.owner_id=a.user_id AND w.deleted_at IS NULL AND ${MANAGED}) UNION SELECT user_id FROM credit_notice WHERE cleared_at IS NULL LIMIT $2`,[CUTOFF_USD,limit,ALERT_SHARES.pct30])).rows;
  for(const {user_id:userId} of accounts){
   try{
    result.noticed+=await inTransaction(pool,async client=>{
@@ -123,18 +126,18 @@ export async function enforceCreditPolicy(pool,{env=process.env,send=null,accoun
   }catch(error){log?.warn?.('Credit notice sweep failed for one account',error?.message);}
  }
  if(mode==='enforce'){
-  const running=(await pool.query(`SELECT w.id,w.owner_id FROM workspace w JOIN credit_account a ON a.user_id=w.owner_id WHERE a.balance_usd<=$1 AND w.deleted_at IS NULL AND w.desired_state='running' AND ${MANAGED} LIMIT $2`,[CUTOFF_USD,limit])).rows;
-  for(const w of running){
+  const exhausted=(await pool.query(`SELECT w.id,w.owner_id FROM workspace w JOIN credit_account a ON a.user_id=w.owner_id WHERE a.balance_usd<=$1 AND w.deleted_at IS NULL AND w.desired_state<>'deleted' AND ${MANAGED} LIMIT $2`,[CUTOFF_USD,limit])).rows;
+  for(const w of exhausted){
    try{
     const outcome=await inTransaction(pool,async client=>{
      // Same order as metering: workspace first, then the account.
      if(!(await client.query('SELECT id FROM workspace WHERE id=$1 FOR UPDATE SKIP LOCKED',[w.id])).rows.length)return 'deferred';
      const row=(await client.query('SELECT balance_usd::text balance FROM credit_account WHERE user_id=$1 FOR UPDATE',[w.owner_id])).rows[0];
      if(!row||computeAllowed(row.balance))return 'recovered';
-     return pauseWorkspaceForCredit(client,w.owner_id,w.id,{balanceUsd:row.balance});
+     return deleteWorkspaceForCredit(client,w.owner_id,w.id,{balanceUsd:row.balance});
     });
     if(outcome==='requested')result.paused++;else if(outcome==='deferred')result.deferred++;
-   }catch(error){log?.warn?.('Credit pause failed for one workspace',error?.message);}
+   }catch(error){log?.warn?.('Credit delete failed for one workspace',error?.message);}
   }
  }
  if(send)result.emailed=await deliverCreditNotices(pool,{send,accountUrl,supportEmail,addFunds:purchaseEnabled(env),log});
@@ -198,7 +201,8 @@ export async function grantCredit(client,{userId,amountUsd,reason,actor,requestK
  const eventKey=`${origin.prefix}:${requestKey}`;const kind=Number(amount)>0?'grant':'adjustment';
  const inserted=(await client.query('INSERT INTO credit_ledger(user_id,event_key,kind,amount_usd,description,actor) VALUES($1,$2,$3,$4::numeric,$5,$6) ON CONFLICT(event_key) DO NOTHING RETURNING amount_usd::text amount',[userId,eventKey,kind,amount,`${kind==='grant'?origin.label:'Balance correction'}: ${reason.trim()}`,actor.trim()])).rows[0];
  let applied=false;
- if(inserted){await client.query('UPDATE credit_account SET balance_usd=balance_usd+$2::numeric,updated_at=now() WHERE user_id=$1',[userId,amount]);applied=true;}
+ // Credit restarts the percentage alerts from the new balance; a correction doesn't.
+ if(inserted){await client.query(`UPDATE credit_account SET balance_usd=balance_usd+$2::numeric,alert_base_usd=${kind==='grant'?'balance_usd+$2::numeric':'alert_base_usd'},updated_at=now() WHERE user_id=$1`,[userId,amount]);applied=true;}
  else{
   const previous=(await client.query('SELECT user_id,amount_usd::numeric=$3::numeric same FROM credit_ledger WHERE event_key=$1 AND user_id=$2',[eventKey,userId,amount])).rows[0];
   if(!previous?.same)throw Object.assign(Error('Request key already used for a different grant'),{code:409});
@@ -206,7 +210,7 @@ export async function grantCredit(client,{userId,amountUsd,reason,actor,requestK
  const balance=(await client.query('SELECT balance_usd::text balance FROM credit_account WHERE user_id=$1',[userId])).rows[0].balance;
  await syncCreditNotices(client,userId,balance);
  if(applied&&kind==='grant')await client.query('UPDATE credit_request SET resolved_at=now(),resolved_by=$2 WHERE user_id=$1 AND resolved_at IS NULL',[userId,actor.trim()]);
- return {applied,eventKey,balanceUsd:balance,status:creditStatus(balance),computeAllowed:computeAllowed(balance)};
+ return {applied,eventKey,balanceUsd:balance,status:creditStatus(balance,await alertBase(client,userId)),computeAllowed:startAllowed(balance)};
 }
 
 /** Record a "Request more credit" from the desktop. One request per user per
@@ -231,7 +235,8 @@ export async function deliverCreditRequest({send,supportEmail,result}){
 /** Body additions for GET /api/credits. The desktop keeps working without
  * them (it mirrors the thresholds), so the API and app can deploy in any order. */
 export async function creditSummary(db,userId,{env=process.env}={}){
- const balance=(await db.query('SELECT balance_usd::text balance FROM credit_account WHERE user_id=$1',[userId])).rows[0]?.balance??'0';
+ const account=(await db.query('SELECT balance_usd::text balance,alert_base_usd::text base FROM credit_account WHERE user_id=$1',[userId])).rows[0];
+ const balance=account?.balance??'0',base=account?.base??null;
  const recentDebits=(await db.query("SELECT l.occurred_at,l.amount_usd::text amount_usd,l.quantity::text quantity,l.workspace_id,COALESCE(w.name,l.workspace_id) workspace_name,l.description FROM credit_ledger l LEFT JOIN workspace w ON w.id=l.workspace_id WHERE l.user_id=$1 AND l.kind='usage' ORDER BY l.occurred_at DESC LIMIT 25",[userId])).rows;
  const usageByWorkspace=(await db.query("SELECT l.workspace_id,COALESCE(max(w.name),l.workspace_id) workspace_name,(-sum(l.amount_usd))::text usd,max(l.occurred_at) last_at FROM credit_ledger l LEFT JOIN workspace w ON w.id=l.workspace_id WHERE l.user_id=$1 AND l.kind='usage' AND l.occurred_at>now()-interval '30 days' GROUP BY l.workspace_id ORDER BY sum(l.amount_usd) ASC LIMIT 20",[userId])).rows;
  const lastRequest=(await db.query('SELECT created_at FROM credit_request WHERE user_id=$1 ORDER BY created_at DESC LIMIT 1',[userId])).rows[0]?.created_at??null;
@@ -239,5 +244,5 @@ export async function creditSummary(db,userId,{env=process.env}={}){
  // been credited (`reference` is the checkout id).
  const purchases=(await db.query("SELECT substr(event_key,10) reference,amount_usd::text amount_usd,occurred_at FROM credit_ledger WHERE user_id=$1 AND kind='grant' AND event_key LIKE 'purchase:%' ORDER BY occurred_at DESC LIMIT 5",[userId])).rows;
  const mode=enforcementMode(env);
- return {balanceUsd:balance,status:creditStatus(balance),computeAllowed:mode!=='enforce'||computeAllowed(balance),amountToRestoreUsd:amountToRestoreUsd(balance),policy:CREDIT_POLICY,enforcement:mode,pausedStorageBilling:pausedStorageBilling(env),recentDebits,usageByWorkspace,purchases,lastCreditRequestAt:lastRequest,creditRequestsEnabled:Boolean(env.CANOPY_SUPPORT_EMAIL)};
+ return {balanceUsd:balance,status:creditStatus(balance,base),computeAllowed:mode==='off'||startAllowed(balance),amountToRestoreUsd:amountToRestoreUsd(balance),policy:accountPolicy(balance,base),enforcement:mode,pausedStorageBilling:pausedStorageBilling(env),recentDebits,usageByWorkspace,purchases,lastCreditRequestAt:lastRequest,creditRequestsEnabled:Boolean(env.CANOPY_SUPPORT_EMAIL)};
 }
