@@ -3,7 +3,7 @@ import {invoke} from '@tauri-apps/api/core';
 // Stage codes only, like startup diagnostics: the resilience log never keeps
 // paths, URLs, tokens or error text. One line per stage per 30s at most, so a
 // retry loop shows up without flooding the log.
-export type RemoteStage='terminal-attach-failed'|'terminal-stream-retry'|'terminal-stream-live'|'desktop-connected'|'desktop-disconnected'|'desktop-failed';
+export type RemoteStage='terminal-attach-failed'|'terminal-stream-retry'|'terminal-stream-live'|'desktop-connected'|'desktop-disconnected'|'desktop-failed'|'desktop-wake-reconnect';
 const last=new Map<RemoteStage,number>();
 export function remoteDiagnostic(stage:RemoteStage){
  const now=Date.now();
