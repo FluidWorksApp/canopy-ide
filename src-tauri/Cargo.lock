@@ -639,7 +639,7 @@ dependencies = [
 
 [[package]]
 name = "canopy"
-version = "0.5.10"
+version = "0.5.11"
 dependencies = [
  "argon2",
  "axum",
