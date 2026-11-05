@@ -42,7 +42,9 @@ export function useSettledConnectionState(key:string):ConnectionState{
  const shown=held.key===key?held.state:live;
  const holding=live.phase==='reconnecting'&&shown.phase==='connected';
  // Anything that is not a fresh drop shows at once.
- useEffect(()=>{if(!holding)setHeld({key,state:live});},[key,live,holding]);
+ // Returning the same object when nothing changed lets React skip the render:
+ // callers with effects keyed on their own props re-ran them on every mount.
+ useEffect(()=>{if(!holding)setHeld(held=>held.key===key&&held.state===live?held:{key,state:live});},[key,live,holding]);
  // Keyed on `holding`, not on the state object: every failed request stores a
  // new object, and restarting the timer on each one would hide a real outage.
  useEffect(()=>{
