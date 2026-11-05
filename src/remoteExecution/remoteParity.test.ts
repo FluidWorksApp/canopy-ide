@@ -17,6 +17,8 @@ import { isHarnessCommand } from "./harnessCommands";
 const DESKTOP_DIRECT = new Set([
   "execution_remote_account_candidates", "execution_remote_activate", "execution_remote_forget",
   "execution_remote_import_accounts", "execution_remote_list", "execution_remote_login_prepare",
+  // "Set up from this Mac" reads this Mac's repositories; the workspace half goes through the host (mirror_apply_*).
+  "execution_mirror_inspect", "execution_mirror_send",
   "canopy_account_cache_key",
   // The preview tunnel lives on this computer; its tickets and teardown go
   // straight there from the workspace host, even once it is disposed.
