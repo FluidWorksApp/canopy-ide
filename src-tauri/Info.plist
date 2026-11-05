@@ -11,5 +11,20 @@
 	<string>Canopy uses local-network access for direct, encrypted connections to teammates. When a direct connection is unavailable, encrypted messages use the relay.</string>
 	<key>NSMicrophoneUsageDescription</key>
 	<string>Canopy uses the microphone for voice dictation. Audio is transcribed locally on this device and never uploaded.</string>
+  <!-- Previews load from http://p-<hash>.localhost. Without this exception a
+       bundled app's WebKit refuses them and the frame stays blank. -->
+  <key>NSAppTransportSecurity</key>
+  <dict>
+    <key>NSExceptionDomains</key>
+    <dict>
+      <key>localhost</key>
+      <dict>
+        <key>NSIncludesSubdomains</key>
+        <true/>
+        <key>NSExceptionAllowsInsecureHTTPLoads</key>
+        <true/>
+      </dict>
+    </dict>
+  </dict>
 </dict>
 </plist>

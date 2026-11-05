@@ -51,6 +51,15 @@ pub const RESET_PATH: &str = "/__canopy__/reset";
 /// Request bodies and injectable HTML are the only proxy payloads buffered in
 /// native memory. Keep them below a useful development upload/document size;
 /// non-HTML responses continue to stream without this retention.
+/// How long a page load waits for the server's first response. A server that
+/// accepts a connection and then says nothing would otherwise leave the frame
+/// blank forever; past this the waiting page shows and keeps retrying. Long
+/// enough for a cold dev-server compile. Only page loads are limited, because
+/// fetches and event streams may legitimately stay quiet.
+#[cfg(not(test))]
+const PAGE_WAIT: std::time::Duration = std::time::Duration::from_secs(30);
+#[cfg(test)]
+const PAGE_WAIT: std::time::Duration = std::time::Duration::from_millis(200);
 const MAX_BODY: usize = 16 * 1024 * 1024;
 const MAX_INJECTABLE_HTML: usize = 16 * 1024 * 1024;
 
@@ -543,7 +552,15 @@ async fn proxy_handler(State(ctx): State<Arc<ProxyCtx>>, req: Request) -> Respon
         return resp;
     }
     let navigation = wants_page(req.headers());
-    let resp = forward_http(ctx.clone(), req).await.unwrap_or_else(|e| {
+    let forwarded = forward_http(ctx.clone(), req);
+    let result = if navigation {
+        tokio::time::timeout(PAGE_WAIT, forwarded)
+            .await
+            .unwrap_or_else(|_| Err("no response".into()))
+    } else {
+        forwarded.await
+    };
+    let resp = result.unwrap_or_else(|e| {
         if navigation {
             return waiting_page(&ctx);
         }
@@ -1153,6 +1170,54 @@ mod tests {
         assert!(hop_by_hop("connection"));
         assert!(!hop_by_hop("content-type"));
         assert!(!hop_by_hop("set-cookie"));
+    }
+
+    #[tokio::test]
+    async fn a_silent_server_shows_the_waiting_page() {
+        // Accepts every connection and never answers.
+        let silent = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .unwrap();
+        let port = silent.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            let mut held = Vec::new();
+            while let Ok((socket, _)) = silent.accept().await {
+                held.push(socket);
+            }
+        });
+        let ctx = Arc::new(ProxyCtx {
+            forwarded: Default::default(),
+            allowed_ports: Default::default(),
+            origin: format!("http://127.0.0.1:{port}"),
+            authority: format!("127.0.0.1:{port}"),
+            dial: format!("127.0.0.1:{port}"),
+            secure: false,
+            proxy_host: "p-test.localhost".into(),
+            client: reqwest::Client::new(),
+            log: NetLog::default(),
+            cookies: Arc::default(),
+        });
+        let proxy = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .unwrap();
+        let proxy_port = proxy.local_addr().unwrap().port();
+        let router = Router::new().fallback(proxy_handler).with_state(ctx);
+        tokio::spawn(async move { axum::serve(proxy, router).await.unwrap() });
+
+        let page = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            reqwest::Client::new()
+                .get(format!("http://127.0.0.1:{proxy_port}/"))
+                .header(header::ACCEPT, "text/html")
+                .header("sec-fetch-dest", "iframe")
+                .header("sec-fetch-mode", "navigate")
+                .send(),
+        )
+        .await
+        .expect("the proxy must not hang on a silent server")
+        .unwrap();
+        assert_eq!(page.status(), reqwest::StatusCode::SERVICE_UNAVAILABLE);
+        assert!(page.text().await.unwrap().contains("Waiting for"));
     }
 
     #[test]
