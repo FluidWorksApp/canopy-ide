@@ -35,9 +35,15 @@ export function releaseMouseButtons(root: ParentNode | null | undefined) {
   for (const button of [0, 1, 2]) canvas.dispatchEvent(new MouseEvent('mouseup', { bubbles: true, cancelable: true, button, clientX, clientY }));
 }
 
-/** Longer away than this and the old stream is not trusted: a socket that died
- *  while the machine slept is not noticed until TCP gives up, which is minutes. */
-export const STALE_AFTER_MS = 15_000;
+/** A timer that ticks this often notices the machine sleeping: sleep or a network
+ *  change is what kills a socket without a close. Merely being hidden or
+ *  minimised does not, so a working stream is left alone for that. */
+export const SLEEP_TICK_MS = 5_000;
+/** Ticks further apart than this mean the machine was asleep. Well above the
+ *  one-second timer throttling a hidden page gets. */
+export const SLEEP_GAP_MS = 45_000;
+export const sleptBetween = (lastTick: number, now: number) => now - lastTick > SLEEP_GAP_MS;
+
 /** A connect that began this recently is still in progress, not stuck. */
 export const CONNECT_GRACE_MS = 3_000;
 export const RETRY_BASE_MS = 500;
@@ -47,8 +53,9 @@ export const RETRY_MAX_MS = 5_000;
  *  stays short: a user is looking at a frozen desktop while this runs. */
 export const retryDelay = (drops: number) => Math.min(RETRY_BASE_MS * 2 ** Math.min(drops, 4), RETRY_MAX_MS);
 
-/** What to do when the window becomes visible, focused or online again. */
-export function wakeAction({ connected, awayMs, connectingForMs }: { connected: boolean; awayMs: number; connectingForMs: number }): 'reconnect' | 'keep' {
-  if (connected) return awayMs >= STALE_AFTER_MS ? 'reconnect' : 'keep';
+/** What to do when the window is shown, focused or back online. A live stream is
+ *  kept; a dropped one is retried now instead of when its backoff timer fires. */
+export function wakeAction({ connected, connectingForMs }: { connected: boolean; connectingForMs: number }): 'reconnect' | 'keep' {
+  if (connected) return 'keep';
   return connectingForMs < CONNECT_GRACE_MS ? 'keep' : 'reconnect';
 }

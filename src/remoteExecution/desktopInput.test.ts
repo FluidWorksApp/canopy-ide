@@ -1,5 +1,5 @@
 import {describe,expect,it,vi} from 'vitest';
-import {CONNECT_GRACE_MS,MODIFIER_KEYS,RETRY_MAX_MS,STALE_AFTER_MS,releaseAllKeys,releaseMouseButtons,retryDelay,wakeAction} from './desktopInput';
+import {CONNECT_GRACE_MS,MODIFIER_KEYS,RETRY_MAX_MS,SLEEP_GAP_MS,SLEEP_TICK_MS,releaseAllKeys,releaseMouseButtons,retryDelay,sleptBetween,wakeAction} from './desktopInput';
 
 describe('releaseAllKeys',()=>{
   it('sends a key-up, never a key-down, for every modifier',()=>{
@@ -36,19 +36,28 @@ describe('retryDelay',()=>{
   });
 });
 
-describe('wakeAction',()=>{
-  it('leaves a live stream alone after a short absence',()=>{
-    expect(wakeAction({connected:true,awayMs:0,connectingForMs:0})).toBe('keep');
-    expect(wakeAction({connected:true,awayMs:STALE_AFTER_MS-1,connectingForMs:0})).toBe('keep');
+describe('sleptBetween',()=>{
+  it('does not mistake ordinary or throttled timers for sleep',()=>{
+    expect(sleptBetween(0,SLEEP_TICK_MS)).toBe(false);
+    expect(sleptBetween(0,SLEEP_TICK_MS*6)).toBe(false);// a hidden page's timers can run slow
+    expect(sleptBetween(0,SLEEP_GAP_MS)).toBe(false);
   });
-  it('replaces a stream that was hidden long enough to have died unnoticed',()=>{
-    expect(wakeAction({connected:true,awayMs:STALE_AFTER_MS,connectingForMs:0})).toBe('reconnect');
+  it('notices the machine having been asleep',()=>{
+    expect(sleptBetween(0,SLEEP_GAP_MS+1)).toBe(true);
+    expect(sleptBetween(1_000_000,1_000_000+10*60_000)).toBe(true);
+  });
+});
+
+describe('wakeAction',()=>{
+  it('leaves a live stream alone, however long the window was hidden',()=>{
+    expect(wakeAction({connected:true,connectingForMs:Infinity})).toBe('keep');
+    expect(wakeAction({connected:true,connectingForMs:0})).toBe('keep');
   });
   it('does not restart a connect that is still in progress',()=>{
-    expect(wakeAction({connected:false,awayMs:60_000,connectingForMs:CONNECT_GRACE_MS-1})).toBe('keep');
+    expect(wakeAction({connected:false,connectingForMs:CONNECT_GRACE_MS-1})).toBe('keep');
   });
   it('reconnects at once when disconnected, instead of waiting out the backoff',()=>{
-    expect(wakeAction({connected:false,awayMs:60_000,connectingForMs:CONNECT_GRACE_MS})).toBe('reconnect');
-    expect(wakeAction({connected:false,awayMs:0,connectingForMs:60_000})).toBe('reconnect');
+    expect(wakeAction({connected:false,connectingForMs:CONNECT_GRACE_MS})).toBe('reconnect');
+    expect(wakeAction({connected:false,connectingForMs:Infinity})).toBe('reconnect');
   });
 });

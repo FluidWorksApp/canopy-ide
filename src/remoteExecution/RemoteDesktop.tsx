@@ -7,7 +7,7 @@ import { CloseIcon, MinimizeIcon, RestartIcon } from '../components/icons';
 import { readClipboardText, writeClipboardText } from '../terminalClipboard';
 import { createPcmPlayer, DESKTOP_AUDIO_RATE } from './desktopAudio';
 import { copiedText, fitsVncClipboard, KEYS } from './desktopClipboard';
-import { releaseAllKeys, releaseMouseButtons, retryDelay, wakeAction } from './desktopInput';
+import { releaseAllKeys, releaseMouseButtons, retryDelay, SLEEP_TICK_MS, sleptBetween, wakeAction } from './desktopInput';
 
 /** How long a minimized desktop stays connected. An open stream counts as
  *  activity, so an indefinite one would keep the workspace from idling out. */
@@ -43,7 +43,12 @@ export function RemoteDesktop({ client, workspaceId, workspaceName, onClose, onM
   minimizedRef.current = minimized;
   const parkedRef = useRef(false);
   parkedRef.current = parked;
-  const hiddenAt = useRef<number | null>(null);
+  // Whether the desktop is where the person is typing. A reconnect or a window
+  // focus may hand the keyboard back to it only then; taking it otherwise would
+  // send what they type in the IDE to the workspace.
+  const ownsKeyboard = useRef(false);
+  // A button pressed on the desktop whose release may not have reached it.
+  const buttonMaybeDown = useRef(false);
   // When the current connect began, or null once it has connected, dropped or failed.
   const connecting = useRef<number | null>(null);
   const [sound, setSound] = useState(false);
@@ -70,7 +75,38 @@ export function RemoteDesktop({ client, workspaceId, workspaceName, onClose, onM
   // that can lose one (focus away, hidden, minimised, a new connection) lets go.
   const releaseAll = useCallback(() => {
     releaseAllKeys(connection.current);
-    releaseMouseButtons(surface.current);
+    // Only when a press may be stuck: releasing sends the pointer to the canvas
+    // centre, which would otherwise jump the workspace's cursor on every blur.
+    if (buttonMaybeDown.current) { releaseMouseButtons(surface.current); buttonMaybeDown.current = false; }
+  }, []);
+  const takeKeyboard = useCallback(() => {
+    if (ownsKeyboard.current) connection.current?.focus({ preventScroll: true });
+  }, []);
+  // Track who has the keyboard and any press that may not have been let go.
+  useEffect(() => {
+    const element = surface.current;
+    if (!element) return;
+    const claim = () => { ownsKeyboard.current = true; };
+    const pressed = () => { ownsKeyboard.current = true; buttonMaybeDown.current = true; };
+    // Focus leaving for another element is a choice. Leaving for nowhere (the
+    // window lost focus, or this canvas was replaced) is not.
+    const leave = (event: FocusEvent) => {
+      if (event.relatedTarget instanceof Node && !element.contains(event.relatedTarget)) ownsKeyboard.current = false;
+    };
+    // A release counts only if it reached the workspace.
+    const released = () => { if (connected.current) buttonMaybeDown.current = false; };
+    element.addEventListener('focusin', claim);
+    element.addEventListener('pointerdown', pressed, true);
+    element.addEventListener('focusout', leave);
+    window.addEventListener('pointerup', released, true);
+    window.addEventListener('pointercancel', released, true);
+    return () => {
+      element.removeEventListener('focusin', claim);
+      element.removeEventListener('pointerdown', pressed, true);
+      element.removeEventListener('focusout', leave);
+      window.removeEventListener('pointerup', released, true);
+      window.removeEventListener('pointercancel', released, true);
+    };
   }, []);
   // The clipboard goes through the workspace rather than VNC: x11vnc's is
   // Latin-1, and it passed changes late or not at all when tested.
@@ -164,8 +200,8 @@ export function RemoteDesktop({ client, workspaceId, workspaceName, onClose, onM
     return () => clearTimeout(timer);
   }, [minimized, releaseAll]);
   // Coming back (window shown, focused, network up again) should not wait out a
-  // retry timer, and a stream that was hidden for a while is replaced rather than
-  // trusted: its socket may have died while the machine slept.
+  // retry timer. A stream that merely sat hidden is left alone, but one the
+  // machine slept through is replaced: its socket may be dead and nothing says so.
   useEffect(() => {
     const reconnect = () => {
       remoteDiagnostic('desktop-wake-reconnect');
@@ -174,29 +210,33 @@ export function RemoteDesktop({ client, workspaceId, workspaceName, onClose, onM
     };
     const wake = () => {
       if (parkedRef.current || minimizedRef.current) return;
-      const awayMs = hiddenAt.current === null ? 0 : Date.now() - hiddenAt.current;
-      hiddenAt.current = null;
-      const action = wakeAction({ connected: connected.current, awayMs, connectingForMs: connecting.current === null ? Infinity : Date.now() - connecting.current });
+      const action = wakeAction({ connected: connected.current, connectingForMs: connecting.current === null ? Infinity : Date.now() - connecting.current });
       if (action === 'reconnect') reconnect();
-      else if (connected.current) { releaseAll(); connection.current?.focus({ preventScroll: true }); }
+      else if (connected.current) { releaseAll(); takeKeyboard(); }
     };
-    const visibility = () => {
-      if (document.hidden) { hiddenAt.current ??= Date.now(); releaseAll(); } else wake();
-    };
+    const visibility = () => { if (document.hidden) releaseAll(); else wake(); };
     const blur = () => releaseAll();
+    let lastTick = Date.now();
+    const online = () => { lastTick = Date.now(); wake(); };
+    const tick = setInterval(() => {
+      const now = Date.now(), slept = sleptBetween(lastTick, now);
+      lastTick = now;
+      if (slept && !parkedRef.current) reconnect();
+    }, SLEEP_TICK_MS);
     document.addEventListener('visibilitychange', visibility);
     window.addEventListener('focus', wake);
     window.addEventListener('pageshow', wake);
-    window.addEventListener('online', wake);
+    window.addEventListener('online', online);
     window.addEventListener('blur', blur);
     return () => {
+      clearInterval(tick);
       document.removeEventListener('visibilitychange', visibility);
       window.removeEventListener('focus', wake);
       window.removeEventListener('pageshow', wake);
-      window.removeEventListener('online', wake);
+      window.removeEventListener('online', online);
       window.removeEventListener('blur', blur);
     };
-  }, [releaseAll]);
+  }, [releaseAll, takeKeyboard]);
   useEffect(() => {
     if (parked) { setStatus('Paused while minimized'); return; }
     setStatus('Connecting…');
@@ -224,10 +264,12 @@ export function RemoteDesktop({ client, workspaceId, workspaceName, onClose, onM
           if (disposed) return;
           connected.current = true; connecting.current = null; drops.current = 0; setStatus("Connected"); remoteDiagnostic('desktop-connected');
           // A key held when the last connection died is still held in the workspace.
-          releaseAllKeys(rfb); releaseMouseButtons(surface.current);
-          // A new connection has no keyboard focus, so the first keystrokes would
-          // go to the IDE as its shortcuts.
-          if (!minimizedRef.current) rfb.focus({ preventScroll: true });
+          releaseAllKeys(rfb);
+          if (buttonMaybeDown.current) { releaseMouseButtons(surface.current); buttonMaybeDown.current = false; }
+          // A new connection has no keyboard focus. If the person was typing in the
+          // desktop, give it back, or their next keystrokes go to the IDE as
+          // shortcuts. If they were elsewhere, leave the keyboard there.
+          if (!minimizedRef.current && ownsKeyboard.current) rfb.focus({ preventScroll: true });
         });
         rfb.addEventListener("disconnect", () => {
           if (disposed) return;
