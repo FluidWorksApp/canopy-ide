@@ -40,7 +40,7 @@ jobs:
         with:
           node-version: 22
       - name: Release boundary regression checks
-        run: node --test scripts/release-assets.test.mjs scripts/workspace-host-release.test.mjs
+        run: node --test scripts/release-assets.test.mjs scripts/workspace-host-release.test.mjs scripts/workspace-host-fingerprint.test.mjs
       # Also creates the one draft release, before the build matrix starts, so
       # the jobs' uploads cannot race into separate drafts. Needs this
       # version's docs/releases/<version>.md, so missing notes fail here.
@@ -379,11 +379,21 @@ jobs:
       id-token: write
     steps:
       - uses: actions/checkout@v4
+        with:
+          # The host comparison reads the previous tag.
+          fetch-depth: 0
+          fetch-tags: true
       - uses: actions/setup-node@v4
         with:
           node-version: 22
-      - name: Activate this tag's revision
+      # An app-only release keeps the active host. Any doubt activates.
+      - name: Activate this tag's revision if its host changed
         env:
           REVISION: ${{ github.sha }}
           TAG: ${{ github.ref_name }}
-        run: node scripts/workspace-host-release.mjs activate "$REVISION" "${TAG#v}"
+        run: |
+          if node scripts/workspace-host-fingerprint.mjs unchanged "$TAG"; then
+            echo "Keeping the active workspace host."
+            exit 0
+          fi
+          node scripts/workspace-host-release.mjs activate "$REVISION" "${TAG#v}"

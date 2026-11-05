@@ -351,6 +351,9 @@ The control plane accepts a GitHub OIDC token with `aud=https://canopyide.dev`,
   role, upload the archive write-once, then `POST /api/releases`.
 - `release.yml`, on a `v*` tag: `POST /api/releases/activate` for the tag's
   commit, polling up to 30 minutes for the image workflow to register it.
+  A tag whose host inputs match the previous tag keeps the active host
+  (`scripts/workspace-host-fingerprint.mjs`), so an app-only release never
+  rolls a host out. If the comparison fails, the tag activates as before.
 
 **App (this repo).** The one-time "older Canopy host" error becomes the update
 notice in part 3: **Update workspace** calls the control plane's
