@@ -143,7 +143,7 @@ fn plan(paths: Vec<PathBuf>, cancel: &AtomicBool) -> Result<Plan, String> {
     }
     Ok(result)
 }
-async fn remote(
+pub(crate) async fn remote(
     client: &reqwest::Client,
     c: &RemoteConnection,
     command: &str,
@@ -190,6 +190,94 @@ async fn remote(
         .get("result")
         .cloned()
         .unwrap_or(serde_json::Value::Null))
+}
+/// Exclusive use of the upload channel for a sender without a picker (the
+/// local-to-remote mirror). Cancelled by `execution_remote_upload_cancel(id)`.
+pub(crate) struct UploadClaim {
+    _guard: JobGuard,
+    pub(crate) cancel: Arc<AtomicBool>,
+}
+pub(crate) fn claim_upload(id: &str) -> Result<UploadClaim, String> {
+    let cancel = Arc::new(AtomicBool::new(false));
+    let mut job = JOB
+        .get_or_init(Default::default)
+        .lock()
+        .map_err(|_| "Upload state unavailable")?;
+    if job.is_some() {
+        return Err("Another upload is already running".into());
+    }
+    *job = Some((id.to_string(), cancel.clone()));
+    Ok(UploadClaim {
+        _guard: JobGuard,
+        cancel,
+    })
+}
+/// Upload one local file the caller produced to an absolute workspace path.
+pub(crate) async fn send_file(
+    client: &reqwest::Client,
+    c: &RemoteConnection,
+    local: &Path,
+    target: &str,
+    cancel: &AtomicBool,
+) -> Result<u64, String> {
+    let mut file = tokio::fs::File::open(local)
+        .await
+        .map_err(|_| "Prepared file unavailable")?;
+    let size = file
+        .metadata()
+        .await
+        .map_err(|_| "Prepared file unavailable")?
+        .len();
+    let start = remote(
+        client,
+        c,
+        "fs_upload_begin",
+        serde_json::json!({"path":target,"size":size,"mode":0o600}),
+    )
+    .await?;
+    let upload_id = start
+        .get("id")
+        .and_then(|v| v.as_str())
+        .ok_or("Invalid upload response")?
+        .to_string();
+    let result: Result<(), String> = async {
+        let (mut buffer, mut offset, mut hash) = (vec![0u8; CHUNK], 0u64, Sha256::new());
+        loop {
+            if cancel.load(Ordering::Relaxed) {
+                return Err("Upload cancelled".into());
+            }
+            let count = file
+                .read(&mut buffer)
+                .await
+                .map_err(|_| "Prepared file unavailable")?;
+            if count == 0 {
+                break;
+            }
+            hash.update(&buffer[..count]);
+            let ack = remote(client, c, "fs_upload_chunk", serde_json::json!({"id":upload_id,"offset":offset,"b64":base64::engine::general_purpose::STANDARD.encode(&buffer[..count])})).await?;
+            offset += count as u64;
+            if ack.get("written").and_then(|v| v.as_u64()) != Some(offset) {
+                return Err("Upload acknowledgement mismatch".into());
+            }
+        }
+        if offset != size {
+            return Err("Prepared file changed during upload".into());
+        }
+        remote(client, c, "fs_upload_finish", serde_json::json!({"id":upload_id,"sha256":format!("{:x}",hash.finalize())})).await?;
+        Ok(())
+    }
+    .await;
+    if let Err(error) = result {
+        let _ = remote(
+            client,
+            c,
+            "fs_upload_abort",
+            serde_json::json!({"id":upload_id}),
+        )
+        .await;
+        return Err(error);
+    }
+    Ok(size)
 }
 #[tauri::command]
 pub fn execution_remote_upload_cancel(id: String) -> Result<(), String> {

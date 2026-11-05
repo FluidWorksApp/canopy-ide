@@ -25,6 +25,7 @@ mod crash;
 #[cfg(feature = "dictation")]
 mod dictation;
 mod execution;
+mod mirror;
 mod remote_upload;
 // Intel macOS builds compile dictation out (no compatible ONNX Runtime); a stub
 // keeps the command surface identical so the rest of this file is unchanged.
@@ -746,6 +747,8 @@ pub fn run() {
             client_mode::execution_remote_account_candidates,
             client_mode::execution_remote_import_git,
             client_mode::execution_remote_login_prepare,
+            mirror::execution_mirror_inspect,
+            mirror::execution_mirror_send,
             remote_upload::execution_remote_upload,
             remote_upload::execution_remote_upload_cancel,
             remote_upload::execution_remote_stage_images,

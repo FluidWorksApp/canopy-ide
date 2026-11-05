@@ -7,20 +7,21 @@ import {WorkspaceUpdateNotice} from './WorkspaceUpdateNotice';
 import {recordHostUpdate} from './hostUpdate';
 import {HOST_OUTDATED_EVENT} from './remoteSupport';
 import type {ManagedWorkspace} from './ManagedWorkspaces';
+import {HOST_PROTOCOL} from '../../packages/remote-host/native-commands.mjs';
 const A='a'.repeat(40),B='b'.repeat(40);
 let n=0;const id=()=>`ws-${String(++n).padStart(8,'0')}-1111-1111-1111-111111111111`;
-const listed=(workspaceId:string,host:ManagedWorkspace['host'],release:ManagedWorkspace['release']={revision:B,protocol:7})=>({id:workspaceId,name:'Studio',state:'ready',memory_max_mib:2048,cpu_max:2,host,release}) as ManagedWorkspace;
+const listed=(workspaceId:string,host:ManagedWorkspace['host'],release:ManagedWorkspace['release']={revision:B,protocol:HOST_PROTOCOL})=>({id:workspaceId,name:'Studio',state:'ready',memory_max_mib:2048,cpu_max:2,host,release}) as ManagedWorkspace;
 beforeEach(()=>{vi.clearAllMocks();try{localStorage.clear();}catch{/* optional */}});
 
 it('offers an available update to the owner, and Later hides it for that release',()=>{
  const w=id();
- const {unmount}=render(<WorkspaceUpdateNotice workspaceId={w} name="Studio" owner listed={listed(w,{revision:A,protocol:7})} reconnect={async()=>{}}/>);
+ const {unmount}=render(<WorkspaceUpdateNotice workspaceId={w} name="Studio" owner listed={listed(w,{revision:A,protocol:HOST_PROTOCOL})} reconnect={async()=>{}}/>);
  expect(screen.getByText('A newer Canopy host is ready for Studio.')).toBeTruthy();
  expect(screen.getByRole('button',{name:'Update workspace'})).toBeTruthy();
  fireEvent.click(screen.getByRole('button',{name:'Later'}));
  expect(screen.queryByText(/newer Canopy host/)).toBeNull();
  unmount();
- render(<WorkspaceUpdateNotice workspaceId={w} name="Studio" owner listed={listed(w,{revision:A,protocol:7})} reconnect={async()=>{}}/>);
+ render(<WorkspaceUpdateNotice workspaceId={w} name="Studio" owner listed={listed(w,{revision:A,protocol:HOST_PROTOCOL})} reconnect={async()=>{}}/>);
  expect(screen.queryByText(/newer Canopy host/)).toBeNull();
 });
 
@@ -45,7 +46,7 @@ it('tells a member to ask the owner, with no update button',()=>{
 
 it('says nothing for a current workspace',()=>{
  const w=id();
- const {container}=render(<WorkspaceUpdateNotice workspaceId={w} name="Studio" owner listed={listed(w,{revision:B,protocol:7})} reconnect={async()=>{}}/>);
+ const {container}=render(<WorkspaceUpdateNotice workspaceId={w} name="Studio" owner listed={listed(w,{revision:B,protocol:HOST_PROTOCOL})} reconnect={async()=>{}}/>);
  expect(container.textContent).toBe('');
 });
 
@@ -72,7 +73,7 @@ it('confirms, asks before stopping other people, shows progress, then reconnects
 it('shows a failed update with a retry, and cancelling the confirmation changes nothing',async()=>{
  const w=id();
  mocks.invoke.mockImplementation(async()=>{throw JSON.stringify({error:'The workspace update failed. The previous host is running.'});});
- render(<WorkspaceUpdateNotice workspaceId={w} name="Studio" owner listed={listed(w,{revision:A,protocol:7})} reconnect={async()=>{}}/>);
+ render(<WorkspaceUpdateNotice workspaceId={w} name="Studio" owner listed={listed(w,{revision:A,protocol:HOST_PROTOCOL})} reconnect={async()=>{}}/>);
  fireEvent.click(screen.getByRole('button',{name:'Update workspace'}));
  fireEvent.click(screen.getByRole('button',{name:'Cancel'}));
  expect(mocks.invoke).not.toHaveBeenCalled();
@@ -105,7 +106,7 @@ it('a host that cannot update in place shows the whole message with Dismiss only
   if(args?.body?.action==='status')return {workspaces:[{id:w,state:'ready',operation:{id:'op',action:'update-host',status:'failed',last_error:message,update_code:'unsupported'}}]};
   return {workspaces:[]};
  });
- render(<WorkspaceUpdateNotice workspaceId={w} name="Studio" owner listed={listed(w,{revision:A,protocol:7})} reconnect={async()=>{}}/>);
+ render(<WorkspaceUpdateNotice workspaceId={w} name="Studio" owner listed={listed(w,{revision:A,protocol:HOST_PROTOCOL})} reconnect={async()=>{}}/>);
  fireEvent.click(screen.getByRole('button',{name:'Update workspace'}));
  fireEvent.click(screen.getAllByRole('button',{name:'Update workspace'}).at(-1)!);
  const shown=await screen.findByText(message);
@@ -119,7 +120,7 @@ it('a host that cannot update in place shows the whole message with Dismiss only
 it('an unsupported refusal without an update code still leaves no Try again',async()=>{
  const w=id(),message='This workspace host cannot update in place. Hibernate and resume the workspace to get the new release.';
  mocks.invoke.mockImplementation(async()=>{throw JSON.stringify({error:message});});
- render(<WorkspaceUpdateNotice workspaceId={w} name="Studio" owner listed={listed(w,{revision:A,protocol:7})} reconnect={async()=>{}}/>);
+ render(<WorkspaceUpdateNotice workspaceId={w} name="Studio" owner listed={listed(w,{revision:A,protocol:HOST_PROTOCOL})} reconnect={async()=>{}}/>);
  fireEvent.click(screen.getByRole('button',{name:'Update workspace'}));
  fireEvent.click(screen.getAllByRole('button',{name:'Update workspace'}).at(-1)!);
  await screen.findByText(message);
@@ -130,7 +131,7 @@ it('an unsupported refusal without an update code still leaves no Try again',asy
 it('puts the message in the wrapping slot, so a long failure is never cut off',async()=>{
  const w=id(),message='The new image did not become ready within two minutes, so the previous container was restored and started again; your files and projects are kept and the workspace keeps running its current host.';
  mocks.invoke.mockImplementation(async()=>{throw JSON.stringify({error:message});});
- const {container}=render(<WorkspaceUpdateNotice workspaceId={w} name="Studio" owner listed={listed(w,{revision:A,protocol:7})} reconnect={async()=>{}}/>);
+ const {container}=render(<WorkspaceUpdateNotice workspaceId={w} name="Studio" owner listed={listed(w,{revision:A,protocol:HOST_PROTOCOL})} reconnect={async()=>{}}/>);
  fireEvent.click(screen.getByRole('button',{name:'Update workspace'}));
  fireEvent.click(screen.getAllByRole('button',{name:'Update workspace'}).at(-1)!);
  const shown=await screen.findByText(message);
