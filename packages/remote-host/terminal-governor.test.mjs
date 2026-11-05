@@ -5,12 +5,12 @@ import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import {TerminalGovernor,baseAllowance,cliKeyOf,governorSampler,workspaceMemory,CAPABILITY} from './terminal-governor.mjs';
 
-const MIB=1024*1024,GIB=1024*MIB,TOTAL=GIB,AVAIL=6*GIB;
+const MIB=1024*1024,GIB=1024*MIB,TOTAL=3.5*GIB,AVAIL=6*GIB;
 async function setup(){const dir=await mkdtemp(join(tmpdir(),'governor-'));return {dir,file:join(dir,'defaults.json'),gov:new TerminalGovernor({defaultsFile:join(dir,'defaults.json')}),done:()=>rm(dir,{recursive:true,force:true})};}
 const at=s=>s*1000;
 
-test('a terminal may use the whole workspace, cli keys content-free',()=>{
- assert.equal(baseAllowance(8*GIB),8*GIB);assert.equal(baseAllowance(60*GIB),60*GIB);
+test('a terminal gets 30% of the machine, cli keys content-free',()=>{
+ assert.equal(baseAllowance(8*GIB),2*GIB);assert.equal(baseAllowance(64*GIB),19*GIB);assert.equal(baseAllowance(GIB),512*MIB);
  assert.equal(cliKeyOf({bin:'claude',pkg:'npm:@anthropic-ai/claude-code'}),'pkg:npm:@anthropic-ai/claude-code');
  assert.equal(cliKeyOf({bin:'Codex.exe',pkg:null}),'bin:codex');assert.equal(cliKeyOf(null),null);
 });

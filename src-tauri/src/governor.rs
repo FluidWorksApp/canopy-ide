@@ -383,11 +383,12 @@ impl Default for TerminalGovernor {
     }
 }
 
-/// A terminal may use the whole machine. Above `memory.high` the kernel throttles
-/// a terminal while the machine sits idle, so a fixed allowance turned a large
-/// build into a frozen one.
+/// 30% of the machine, on the grant grid. Above `memory.high` the kernel throttles
+/// a terminal even while the machine sits idle, so a fixed allowance froze large
+/// builds on large machines.
 pub(crate) fn base_allowance(total_bytes: u64) -> u64 {
-    total_bytes
+    let share = total_bytes / 10 * 3;
+    (share / GRANT_STEP_BYTES * GRANT_STEP_BYTES).max(GRANT_STEP_BYTES)
 }
 
 fn protected_reserve(total_bytes: u64) -> u64 {
@@ -1566,8 +1567,9 @@ mod tests {
 
     #[test]
     fn dynamic_defaults_and_reserve_are_bounded() {
-        assert_eq!(base_allowance(gib(8)), gib(8));
-        assert_eq!(base_allowance(gib(60)), gib(60));
+        assert_eq!(base_allowance(gib(8)), gib(2));
+        assert_eq!(base_allowance(gib(64)), gib(19));
+        assert_eq!(base_allowance(gib(1)), 512 * MIB);
         assert_eq!(protected_reserve(gib(8)), gib(3));
         assert_eq!(protected_reserve(gib(32)), gib(8));
         assert_eq!(protected_reserve(gib(2)), gib(2));
@@ -2026,7 +2028,7 @@ mod tests {
         let path = defaults_scratch();
         let governor = TerminalGovernor::with_defaults_path(path.clone());
         let key = "pkg:npm:@example/agent".to_string();
-        let maximum = gib(16) + 512 * MIB;
+        let maximum = base_allowance(gib(16)) + 512 * MIB;
         governor
             .set_memory_maximum(key.clone(), Some(maximum))
             .unwrap();
