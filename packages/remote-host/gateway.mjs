@@ -322,10 +322,10 @@ export function createGateway({ config, workspaces, origins = [], elasticMemory,
       if (operation === '/ticket') {
         const args = await body(request, 4096);
         const shared=args.stream?.match(/^\/shared-sessions\/([a-f0-9-]{36})\/stream$/);
-        if (!/^\/sessions\/\d+\/stream$/.test(args.stream) && args.stream !== '/desktop/ws'&&!/^\/browsers\/[a-f0-9-]{36}\/stream$/.test(args.stream)&&!shared&&args.stream!=='/harness/stream') throw new Error('Invalid stream');
+        if (!/^\/sessions\/\d+\/stream$/.test(args.stream) && args.stream !== '/desktop/ws'&&args.stream!=='/forward'&&!shared&&args.stream!=='/harness/stream') throw new Error('Invalid stream');
         if(principal.memberId&&principal.scope==='view'&&!shared&&args.stream!=='/harness/stream')throw Error('Viewer terminals are unavailable');
         if(shared)await resolveShared(workspace,principal,request.headers.authorization,shared[1]);
-        authorize(config, principal, workspaceId, args.stream === '/desktop/ws'||args.stream.startsWith('/browsers/') ? 'drive' : 'view');
+        authorize(config, principal, workspaceId, args.stream === '/desktop/ws'||args.stream==='/forward' ? 'drive' : 'view');
         const ticket = randomBytes(32).toString('base64url');
         tickets.issue(ticket, { principalId: principal.id, principalFingerprint:principal.tokenSha256, expiresAt:principal.expiresAt, memberPrincipal:principal.memberId?principal:undefined, bearer:principal.memberId?request.headers.authorization:undefined, workspaceId, stream: args.stream });
         return json(response, 200, { ticket });
@@ -441,7 +441,10 @@ export function createGateway({ config, workspaces, origins = [], elasticMemory,
   server.maxConnections = 128;
   server.requestTimeout = 30_000;
   server.headersTimeout = 10_000;
-  const streams = new Map(),streamWarnings=new Map();
+  // The preview tunnel stays up for as long as an IDE is connected, so like the
+  // harness stream it is counted apart: it must not hold a workspace awake for
+  // idle shutdown, or take the slots a person's terminals need.
+  const streams = new Map(),forwardStreams=new Map(),streamWarnings=new Map();
   // A refused or broken stream used to leave no trace on the host. Messages are
   // fixed reasons (never tickets or tokens), each logged at most once a minute.
   const streamWarning=message=>{const now=Date.now();if(now-(streamWarnings.get(message)??0)<60000)return;if(streamWarnings.size>=64)streamWarnings.clear();streamWarnings.set(message,now);console.warn(message);};
@@ -454,15 +457,16 @@ export function createGateway({ config, workspaces, origins = [], elasticMemory,
       const grant = tickets.consume(url.searchParams.get('ticket'));
       const {principal,workspace} = authorizeStream(config, grant);
       const projectAccess=await checkMember(principal,grant.bearer);
-      if ((streams.get(principal.id) ?? 0) >= 8 || total(streams) >= 32) throw new Error('Stream capacity reached');
-      streams.set(principal.id, (streams.get(principal.id) ?? 0) + 1);
+      const pool = grant.stream === '/forward' ? forwardStreams : streams;
+      if ((pool.get(principal.id) ?? 0) >= 8 || total(pool) >= 32) throw new Error('Stream capacity reached');
+      pool.set(principal.id, (pool.get(principal.id) ?? 0) + 1);
       let released = false;
-      release = () => { if (!released) { released = true; const count = streams.get(principal.id) - 1; if (count) streams.set(principal.id, count); else streams.delete(principal.id); } };
+      release = () => { if (!released) { released = true; const count = pool.get(principal.id) - 1; if (count) pool.set(principal.id, count); else pool.delete(principal.id); } };
       const shared=grant.stream.match(/^\/shared-sessions\/([a-f0-9-]{36})\/stream$/);
       const publication=shared?await resolveShared(workspace,principal,grant.bearer,shared[1]):null;
       const runtime = publication?await workspaces.open(publication.runtime??workspace):await openRuntime(workspace,principal,grant.bearer,projectAccess);
       if(publication)await resolveShared(workspace,principal,grant.bearer,publication.id);
-      const terminal=grant.stream!=='/desktop/ws'&&!grant.stream.startsWith('/browsers/');
+      const terminal=grant.stream!=='/desktop/ws'&&grant.stream!=='/forward';
       const inputSession=publication?publication.sessionId:Number(grant.stream.match(/^\/sessions\/(\d+)\/stream$/)?.[1]);
       // Exactly the HTTP input route's grants: drive scope, and for a shared
       // session a live interact grant on a collaboration shell.
@@ -474,7 +478,7 @@ export function createGateway({ config, workspaces, origins = [], elasticMemory,
       if (socket.destroyed) { release(); return; }
       wss.handleUpgrade(request, socket, head, client => {
         const upstreamStream=publication?`/sessions/${publication.sessionId}/stream`:grant.stream;
-        const upstream = new WebSocket(`${(grant.stream !== '/desktop/ws' && runtime.nativeUrl ? runtime.nativeUrl : runtime.url).replace('http:', 'ws:')}${upstreamStream}`, { headers: { authorization: `Bearer ${runtime.token}` }, maxPayload: grant.stream.startsWith('/browsers/') ? 8 * 1024 * 1024 : 2 * 1024 * 1024, perMessageDeflate: false, handshakeTimeout: 10_000 });
+        const upstream = new WebSocket(`${(grant.stream !== '/desktop/ws' && runtime.nativeUrl ? runtime.nativeUrl : runtime.url).replace('http:', 'ws:')}${upstreamStream}`, { headers: { authorization: `Bearer ${runtime.token}` }, maxPayload: 2 * 1024 * 1024, perMessageDeflate: false, handshakeTimeout: 10_000 });
         let checkingAuthorization=false;
         const authorizationTimer = setInterval(async () => {
           if(checkingAuthorization)return;

@@ -31,7 +31,7 @@ export function validateBrowserOp(op,args){
  if(op==='screenshot'&&args.scope!=null&&args.scope!=='browser')throw failure(400,'scope must be browser or ide');
 }
 export class AgentBrowser{
- constructor({home='/home/agent',timeoutMs=30_000,launch,picker=new URL('./chrome-stream/preview_picker.js',import.meta.url),executablePath=process.env.CANOPY_CHROMIUM_EXECUTABLE??'/usr/bin/chromium'}={}){
+ constructor({home='/home/agent',timeoutMs=30_000,launch,picker=new URL('./browser-assets/preview_picker.js',import.meta.url),executablePath=process.env.CANOPY_CHROMIUM_EXECUTABLE??'/usr/bin/chromium'}={}){
   Object.assign(this,{home,timeoutMs,picker,executablePath});
   this.launch=launch??(async profileDirectory=>{const {chromium}=createRequire(import.meta.url)('playwright-core');return chromium.launchPersistentContext(profileDirectory,{executablePath:this.executablePath,headless:true,args:['--no-sandbox','--disable-dev-shm-usage'],viewport:DEFAULT_VIEWPORT});});
   this.tail=Promise.resolve();this.pending=new Map();this.serial=0;this.viewport=DEFAULT_VIEWPORT;

@@ -50,7 +50,7 @@ import {
 import { clearCompanionView, clearRun } from "../companionSession";
 import { forgetAllMemories } from "../companionMemory";
 import { Mascot } from "./Mascot";
-import { Button, Checkbox, Field, Radio, Row, Segmented, Select, Stepper, Switch, TextInput } from "./ui";
+import { Button, Checkbox, Field, Row, Segmented, Select, Stepper, Switch, TextInput } from "./ui";
 import { notOnServerYet, serverFeatureError } from "../accountErrors";
 import { peekTeamIdentity, subscribeTeamIdentity, teamIdentity, type TeamIdentity } from "../teamIdentity";
 
@@ -63,7 +63,6 @@ import { TRACKERS, setTrackerKey, trackerKey } from "../trackers";
 import * as ipc from "../ipc";
 import { SlackSettings } from "./SlackSettings";
 import { VaultSettings } from "./VaultSettings";
-import { PlaywrightTokenSetting } from "./PlaywrightTokenSetting";
 import { availableMonoFonts, fontLabel, fontStack } from "../fonts";
 import {
   AgentIcon,
@@ -2374,34 +2373,6 @@ export function SettingsDialog({ onClose, initialTab = "appearance", projects = 
 
             {tab === "browser" && (
               <>
-                <Item
-                  name="Engine"
-                  desc="Choose where websites run and how their pages appear in Canopy."
-                >
-                    <div className="set-checks">
-                      <Radio
-                        name="browser-engine"
-                        checked={s.browserEngine === "proxy"}
-                        onChange={() => patch({ browserEngine: "proxy" })}
-                        label="Embedded"
-                        hint="An iframe with a separate session for each project."
-                      />
-                      <Radio
-                        name="browser-engine"
-                        checked={s.browserEngine === "chrome"}
-                        onChange={() => patch({ browserEngine: "chrome" })}
-                        label="Playwright"
-                        hint="Your Chrome logins, streamed into Canopy. Requires Chrome, the Playwright extension and Node.js 20+."
-                      />
-                      {s.browserEngine === "chrome" ? (
-                        <PlaywrightTokenSetting />
-                      ) : (
-                        <p className="set-item-desc">
-                          Reopen preview tabs after changing engines.
-                        </p>
-                      )}
-                    </div>
-                </Item>
                 {/* The vault is the browser's other half: it exists to fill
                     logins into these same preview tabs, and as its own tab it
                     read as an unrelated feature. */}

@@ -17,7 +17,7 @@ describe("Build previews a live page rather than a black rectangle", () => {
     // The choice lives in previewEngine (behaviour-tested there); the view must
     // still route through it with Build mode.
     expect(read("src/previewEngine.ts")).toContain('opts.buildMode && opts.chosen === "webview" ? "proxy" : opts.chosen');
-    expect(preview).toContain("previewEngine({ remote: !!remoteWorkspace, url, buildMode, chosen: chosenEngine })");
+    expect(preview).toContain("previewEngine({ remote: !!remoteWorkspace, buildMode, chosen: chosenEngine })");
   });
 });
 

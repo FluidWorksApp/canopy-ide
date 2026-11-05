@@ -1036,7 +1036,7 @@ export function useBrowserEngine(): BrowserEngine | null {
   const [, bump] = useState(0);
   const preferred = useSyncExternalStore(subscribeEngine, preferredEngine);
   useEffect(() => {
-    if (preferred === "chrome" || preferred === "proxy") return;
+    if (preferred === "proxy") return;
     if (supported !== null) return;
     probe ??= probeSupport().then((s) => {
       supported = s;
@@ -1047,7 +1047,7 @@ export function useBrowserEngine(): BrowserEngine | null {
       live = false;
     };
   }, [preferred]);
-  if (preferred === "chrome" || preferred === "proxy") return preferred;
+  if (preferred === "proxy") return preferred;
   return supported === null ? null : chooseEngine(preferred, supported);
 }
 

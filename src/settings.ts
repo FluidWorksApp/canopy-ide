@@ -939,8 +939,8 @@ export function getSettings(): Settings {
     if (!isShortcutProfile(value.keymapProfile)) value.keymapProfile = "canopy";
     // Retired native engines (and unknown values) become Embedded. Keep the
     // established storage keys for the two remaining browsing options.
-    if (value.browserEngine !== "proxy" && value.browserEngine !== "chrome")
-      value.browserEngine = "proxy";
+    // Every earlier browser choice lands on the one embedded engine.
+    value.browserEngine = "proxy";
     if (
       !Array.isArray(value.teamMutedConversations) ||
       !value.teamMutedConversations.every(

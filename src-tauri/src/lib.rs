@@ -11,7 +11,6 @@ mod bounded_file;
 mod brain;
 mod browser;
 mod change;
-mod chrome_stream;
 mod claude_ide;
 mod cleanup;
 mod cli;
@@ -83,6 +82,7 @@ mod watchdog;
 mod webview_keys;
 mod winproc;
 mod workflow;
+mod workspace_forward;
 mod wsbridge;
 
 use tauri::menu::{Menu, MenuItem, PredefinedMenuItem, Submenu};
@@ -552,7 +552,7 @@ pub fn run() {
         .manage(portal::RemoteManager::default())
         .manage(preview::PreviewManager::default())
         .manage(browser::BrowserManager::default())
-        .manage(chrome_stream::ChromeStreams::default())
+        .manage(workspace_forward::WorkspaceForwards::default())
         .manage(context::ContextBridge::default())
         .manage(agents::StatsCache::default())
         .manage(agents::AppStatsCache::default())
@@ -1029,13 +1029,11 @@ pub fn run() {
             relay::relay_accept_file,
             preview::preview_start,
             preview::preview_stop,
+            preview::preview_allow_ports,
             browser::browser_supported,
-            chrome_stream::chrome_stream_open,
-            chrome_stream::chrome_stream_close,
-            chrome_stream::chrome_extension_token_status,
-            chrome_stream::chrome_extension_token_set,
-            chrome_stream::chrome_extension_token_clear,
-            chrome_stream::chrome_extension_open_status,
+            workspace_forward::workspace_forward_open,
+            workspace_forward::workspace_forward_ticket,
+            workspace_forward::workspace_forward_close,
             browser::browser_open,
             browser::browser_navigate,
             browser::browser_painted,
@@ -1134,7 +1132,8 @@ pub fn run() {
                 app.state::<preview::PreviewManager>().shutdown_all();
                 // ... and any embedded-browser views.
                 app.state::<browser::BrowserManager>().shutdown_all(app);
-                app.state::<chrome_stream::ChromeStreams>().shutdown_all();
+                app.state::<workspace_forward::WorkspaceForwards>()
+                    .shutdown_all();
                 // ... and any public-link tunnel process.
                 app.state::<tunnel::TunnelManager>().kill_all();
                 // ... and stop polling GitHub for pull requests.

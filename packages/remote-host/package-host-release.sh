@@ -29,10 +29,8 @@ done
 for file in install.sh install-service.sh network-isolation.sh package.json package-lock.json agents.lock.json canopy-host.service canopy-network.service canopy-runtime.tmpfiles.conf canopy-service.service canopy-service.tmpfiles.conf; do
   cp "$source_dir/$file" "$bundle/"
 done
-mkdir "$bundle/chrome-stream"
-for file in server.mjs playwright.mjs protocol.mjs viewer.html viewer.js preview_picker.js; do
-  cp "$source_dir/chrome-stream/$file" "$bundle/chrome-stream/$file"
-done
+mkdir "$bundle/browser-assets"
+cp "$source_dir/browser-assets/preview_picker.js" "$bundle/browser-assets/preview_picker.js"
 mkdir "$bundle/bin"
 for file in "$service_bin"/canopy-serviced-linux-*; do
   install -m 0755 "$file" "$bundle/bin/"

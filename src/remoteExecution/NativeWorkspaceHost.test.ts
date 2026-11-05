@@ -64,26 +64,38 @@ it('asks the viewing computer when a desktop-level feature says so',async()=>{
  expect(desktop.invoke).toHaveBeenCalledWith('which_check',{commands:['codex']});
  expect(fetcher).not.toHaveBeenCalled();host.dispose();
 });
-it('opens and closes public browser previews on the viewing computer',async()=>{
+it('loads public sites through the desktop proxy with no tunnel',async()=>{
  const {host,desktop,fetcher}=setup();
- vi.mocked(desktop.invoke).mockResolvedValue('http://127.0.0.1:9000/viewer');
- const args={sessionId:'github-preview',url:'https://github.com'};
- expect(await host.invoke('chrome_stream_open',args)).toBe('http://127.0.0.1:9000/viewer');
- await host.invoke('chrome_stream_close',{sessionId:args.sessionId});
- expect(desktop.invoke).toHaveBeenCalledWith('chrome_stream_open',args);
- expect(desktop.invoke).toHaveBeenCalledWith('chrome_stream_close',{sessionId:args.sessionId});
+ vi.mocked(desktop.invoke).mockResolvedValue({host:'p.localhost',port:9000,origin:'https://github.com'});
+ const args={projectId:'p_1',target:'https://github.com'};
+ await host.invoke('preview_start',args);
+ expect(desktop.invoke).toHaveBeenCalledWith('preview_start',args);
+ expect(desktop.invoke).not.toHaveBeenCalledWith('workspace_forward_open',expect.anything());
  expect(fetcher).not.toHaveBeenCalled();host.dispose();
 });
-it('routes workspace localhost through a private remote browser and scoped ticket',async()=>{
- const {host,desktop,fetcher}=setup();const id='12345678-1234-1234-1234-123456789abc';
- fetcher.mockImplementation(async(url:string)=>({ok:true,json:async()=>url.endsWith('/ticket')?{ticket:'one-use'}:{result:{id}}}));
- const viewer=await host.invoke<string>('chrome_stream_open',{sessionId:'dev',url:'http://localhost:3000'});
- expect(viewer).toContain('/chrome-stream/viewer.html?remote=1&sessionId=dev');
- expect(await host.invoke('chrome_stream_ticket',{sessionId:'dev'})).toContain('/v1/stream?ticket=one-use');
- expect(JSON.parse(fetcher.mock.calls.at(-1)![1].body as string).stream).toBe(`/browsers/${id}/stream`);
- await host.invoke('chrome_stream_close',{sessionId:'dev'});
- await expect(host.invoke('chrome_stream_ticket',{sessionId:'dev'})).rejects.toThrow('Unknown');
- expect(desktop.invoke).not.toHaveBeenCalled();host.dispose();
+it('forwards a workspace server and answers each tunnel attempt with a fresh ticket',async()=>{
+ const {host,desktop,fetcher}=setup();let ask:((event:{payload:{key:string}})=>void)|undefined;
+ vi.mocked(desktop.listen).mockImplementation(async(event:string,handler:unknown)=>{if(event==='workspace-forward:ticket')ask=handler as typeof ask;return ()=>{};});
+ vi.mocked(desktop.invoke).mockImplementation(async(command:string)=>(command==='workspace_forward_open'?3000:undefined) as never);
+ fetcher.mockImplementation(async()=>({ok:true,json:async()=>({ticket:'one-use'})}));
+ await host.invoke('preview_start',{projectId:'p_1',target:'http://localhost:3000/app'});
+ const open=vi.mocked(desktop.invoke).mock.calls.find(([command])=>command==='workspace_forward_open')!;
+ const key=(open[1] as {key:string}).key;expect((open[1] as {port:number}).port).toBe(3000);
+ expect(desktop.invoke).toHaveBeenCalledWith('preview_allow_ports',{ports:[3000]});
+ expect(desktop.invoke).toHaveBeenCalledWith('preview_start',{projectId:'p_1',target:'http://localhost:3000/app',forwardedPort:3000});
+ ask!({payload:{key:'another-workspace'}});expect(fetcher).not.toHaveBeenCalled();
+ ask!({payload:{key}});
+ await vi.waitFor(()=>expect(desktop.invoke).toHaveBeenCalledWith('workspace_forward_ticket',{key,url:expect.stringContaining('/v1/stream?ticket=one-use')}));
+ expect(JSON.parse(fetcher.mock.calls.at(-1)![1].body as string).stream).toBe('/forward');
+ host.dispose();expect(desktop.invoke).toHaveBeenCalledWith('workspace_forward_close',{key});
+});
+it('allows only ports that kept their number on this computer',async()=>{
+ const {host,desktop}=setup();
+ vi.mocked(desktop.listen).mockResolvedValue(()=>{});
+ vi.mocked(desktop.invoke).mockImplementation(async(command:string)=>(command==='workspace_forward_open'?51000:undefined) as never);
+ await host.invoke('preview_start',{projectId:'p_1',target:'http://localhost:3000'});
+ expect(desktop.invoke).toHaveBeenCalledWith('preview_allow_ports',{ports:[]});
+ expect(desktop.invoke).toHaveBeenCalledWith('preview_start',expect.objectContaining({forwardedPort:51000}));host.dispose();
 });
 it('keeps the scratchpad on the viewing computer, but attaches workspace files through the workspace',async()=>{
  const {host,desktop,fetcher}=setup();
@@ -356,8 +368,7 @@ it('viewer host browses files but rejects terminal, uploads and mutations before
 it('view-only workspace cannot start or request interactive remote browser tickets',async()=>{
  const desktop={kind:'native',invoke:vi.fn(),listen:vi.fn(),channel:vi.fn()} as unknown as Host;
  const host=new NativeWorkspaceHost({...connection,scope:'view'},desktop);const fetcher=vi.fn();vi.stubGlobal('fetch',fetcher);
- await expect(host.invoke('chrome_stream_open',{sessionId:'readonly',url:'http://localhost:3000'})).rejects.toThrow('read-only');
- await expect(host.invoke('chrome_stream_ticket',{sessionId:'readonly'})).rejects.toThrow('read-only');expect(fetcher).not.toHaveBeenCalled();host.dispose();
+ await expect(host.invoke('preview_start',{projectId:'p_1',target:'http://localhost:3000'})).rejects.toThrow('read-only');expect(fetcher).not.toHaveBeenCalled();host.dispose();
 });
 it('parks terminal reconnects and heartbeats while the workspace is intentionally stopping',async()=>{
  vi.useFakeTimers();vi.setSystemTime(1000000);

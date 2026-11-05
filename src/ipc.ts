@@ -74,21 +74,6 @@ const releaseRendererListeners = () => {
 
 // ---------- App shell ----------
 
-export const chromeStreamOpen = (sessionId: string, url: string, profileId?:string) =>
-  invoke<string>("chrome_stream_open", { sessionId, url, profileId });
-export const chromeStreamClose = (sessionId: string) =>
-  invoke<void>("chrome_stream_close", { sessionId });
-/** Whether a Playwright extension token is saved. The token is write-only
- *  from here: it lives in the OS credential store and is never read back. */
-export const chromeExtensionTokenStatus = () =>
-  invoke<boolean>("chrome_extension_token_status");
-export const chromeExtensionTokenSet = (token: string) =>
-  invoke<void>("chrome_extension_token_set", { token });
-export const chromeExtensionTokenClear = () =>
-  invoke<void>("chrome_extension_token_clear");
-/** Opens the Playwright extension's status page (which shows the token) in Chrome. */
-export const chromeExtensionOpenStatus = () =>
-  invoke<void>("chrome_extension_open_status");
 
 /** Rebuild the native menu so its accelerators match the live webview profile. */
 export const setShortcutProfile = (profile: ShortcutProfile) =>
@@ -5376,7 +5361,6 @@ export async function ptyStopAndWait(id: number): Promise<void> {
   throw new Error("Agent has not stopped yet. Its conversation was not transferred.");
 }
 
-export const chromeStreamTicket = (sessionId:string) => invoke<string>('chrome_stream_ticket',{sessionId});
 
 // ---------- Slack (the hub on canopyide.dev; docs/slack-hub-protocol.md) ----------
 

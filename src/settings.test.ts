@@ -51,9 +51,9 @@ describe("getSettings / updateSettings", () => {
     expect(getSettings().browserEngine).toBe("proxy");
   });
 
-  it.each(["proxy", "chrome"] as const)("preserves browser choice %s", (browserEngine) => {
-    updateSettings({ browserEngine });
-    expect(getSettings().browserEngine).toBe(browserEngine);
+  it("moves a saved Playwright choice onto the embedded engine", () => {
+    localStorage.setItem("canopy.settings", JSON.stringify({ browserEngine: "chrome" }));
+    expect(getSettings().browserEngine).toBe("proxy");
   });
 
   it("round-trips a patch through localStorage", () => {
