@@ -12,3 +12,14 @@ describe("preview frame policy", () => {
     expect(directive(security[key], "frame-src")).toContain("http://*.localhost:*");
   });
 });
+
+// A bundled macOS app also needs an App Transport Security exception for those
+// hosts. Dev builds aren't bundled, so only a packaged app shows the blank frame.
+describe("preview transport exception", () => {
+  it("allows plain http to localhost subdomains", () => {
+    const plist = readFileSync("src-tauri/Info.plist", "utf8");
+    expect(plist).toMatch(
+      /<key>localhost<\/key>\s*<dict>[\s\S]*?<key>NSIncludesSubdomains<\/key>\s*<true\/>[\s\S]*?<key>NSExceptionAllowsInsecureHTTPLoads<\/key>\s*<true\/>/,
+    );
+  });
+});
