@@ -28,9 +28,9 @@ it('a container on an older image than the release has an update available',()=>
 });
 it('a failed command outranks the list; otherwise the list decides, then what the connection learned',()=>{
  const required={workspaceId:id,state:'required' as const,command:'gh_pr_list',revision:null};
- expect(workspaceUpdate({host:{revision:B,protocol:6},release:{revision:B,protocol:6}},required)).toEqual({state:'required',command:'gh_pr_list',revision:B});
- expect(workspaceUpdate({host:{revision:B,protocol:6},release:{revision:B,protocol:6}},{...required,state:'available',command:null})).toBeNull();
- expect(workspaceUpdate({host:{revision:A,protocol:6},release:{revision:B,protocol:6}},null)).toEqual({state:'available',command:null,revision:B});
+ expect(workspaceUpdate({host:{revision:B,protocol:7},release:{revision:B,protocol:7}},required)).toEqual({state:'required',command:'gh_pr_list',revision:B});
+ expect(workspaceUpdate({host:{revision:B,protocol:7},release:{revision:B,protocol:7}},{...required,state:'available',command:null})).toBeNull();
+ expect(workspaceUpdate({host:{revision:A,protocol:7},release:{revision:B,protocol:7}},null)).toEqual({state:'available',command:null,revision:B});
  expect(workspaceUpdate(undefined,{...required,state:'available',command:null,revision:B})).toEqual({state:'available',command:null,revision:B});
  expect(workspaceUpdate(undefined,null)).toBeNull();
 });

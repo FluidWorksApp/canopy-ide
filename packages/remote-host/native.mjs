@@ -153,6 +153,26 @@ familyContext.prObserver=prObserver;
 // workspace's canopy-hook reads them (gates.mjs).
 const workspaceGates=new WorkspaceGates({home:HOME,run:(bin,argv,cwd)=>run(bin,argv,cwd)});
 const CLIS=['claude','codex','amp','aider','agy','opencode','omp','cursor-agent','grok'];
+const MAX_DESKTOP_CLIPBOARD=1024*1024;
+const desktopEnv=()=>({...process.env,HOME,DISPLAY:':99',XDG_RUNTIME_DIR:HOME+'/.cache/runtime'});
+function desktopClipboardWrite(selection,text){
+ return new Promise((resolve,reject)=>{
+  const child=spawn('xclip',['-selection',selection,'-in'],{env:desktopEnv(),stdio:['pipe','ignore','ignore'],timeout:3000});
+  child.once('error',()=>reject(Error('Desktop clipboard unavailable')));
+  child.once('close',code=>code===0?resolve():reject(Error('Desktop clipboard unavailable')));
+  child.stdin.on('error',()=>{});child.stdin.end(text);
+ });
+}
+function desktopClipboardRead(selection){
+ return new Promise(resolve=>{
+  const child=spawn('xclip',['-selection',selection,'-out'],{env:desktopEnv(),stdio:['ignore','pipe','ignore'],timeout:3000});
+  const parts=[];let size=0;
+  child.stdout.on('data',chunk=>{size+=chunk.length;if(size<=MAX_DESKTOP_CLIPBOARD)parts.push(chunk);});
+  child.once('error',()=>resolve(''));
+  child.once('close',code=>resolve(code===0&&size<=MAX_DESKTOP_CLIPBOARD?Buffer.concat(parts).toString('utf8'):''));
+ });
+}
+
 export async function nativeInvoke(command,args={}){
   if(command.startsWith('fs_upload_'))return uploads.invoke(command,args);
   if(command.startsWith('gates_'))return workspaceGates.invoke(command,args);
@@ -227,6 +247,17 @@ export async function nativeInvoke(command,args={}){
     await nativeInvoke('desktop_session');
     const child=spawn('chromium',['--no-sandbox','--disable-dev-shm-usage','--no-first-run','--user-data-dir='+HOME+'/.cache/canopy-browser',url.href],{env:{...process.env,HOME,DISPLAY:':99',XDG_RUNTIME_DIR:HOME+'/.cache/runtime'},stdio:'ignore'});
     await new Promise((resolve,reject)=>{child.once('spawn',resolve);child.once('error',()=>reject(Error('Remote browser unavailable')));});child.unref();return;
+  }
+
+  if(command==='desktop_clipboard_write'){
+    if(typeof args.text!=='string'||args.text.length>MAX_DESKTOP_CLIPBOARD)throw Error('Clipboard text is too large');
+    // Both selections: a terminal's Shift+Insert pastes PRIMARY, the rest CLIPBOARD.
+    for(const selection of ['clipboard','primary'])await desktopClipboardWrite(selection,args.text);
+    return;
+  }
+  if(command==='desktop_clipboard_read'){
+    if(!['clipboard','primary'].includes(args.selection))throw Error('Choose a clipboard selection');
+    return desktopClipboardRead(args.selection);
   }
 
   if(command==='desktop_session'){

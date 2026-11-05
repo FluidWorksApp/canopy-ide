@@ -1,11 +1,13 @@
 // @vitest-environment jsdom
-import {render,waitFor,cleanup,act} from '@testing-library/react';
+import {render,waitFor,cleanup,act,fireEvent} from '@testing-library/react';
 import {afterEach,expect,it,vi} from 'vitest';
 import {createRef} from 'react';
 import {MINIMIZED_KEEP_MS,RemoteDesktop,type RemoteDesktopCapture} from './RemoteDesktop';
 import type {RemoteExecutionClient} from './client';
-const mock=vi.hoisted(()=>({connect:vi.fn(),disconnect:vi.fn(),focus:vi.fn(),blur:vi.fn(),png:vi.fn(()=>'data:image/png;base64,c3ludGhldGlj'),events:new Map<string,()=>void>()}));
-vi.mock('@novnc/novnc',()=>({default:class{focus(){mock.focus();} blur(){mock.blur();} constructor(...args:unknown[]){mock.connect(...args);} addEventListener(name:string,callback:()=>void){mock.events.set(name,callback);} toDataURL(){return mock.png();} disconnect(){mock.disconnect();}}}));
+const clip=vi.hoisted(()=>({read:vi.fn(),write:vi.fn()}));
+vi.mock('../terminalClipboard',()=>({readClipboardText:clip.read,writeClipboardText:clip.write}));
+const mock=vi.hoisted(()=>({paste:vi.fn(),key:vi.fn(),connect:vi.fn(),disconnect:vi.fn(),focus:vi.fn(),blur:vi.fn(),png:vi.fn(()=>'data:image/png;base64,c3ludGhldGlj'),events:new Map<string,(event?:unknown)=>void>()}));
+vi.mock('@novnc/novnc',()=>({default:class{clipboardPasteFrom(text:string){mock.paste(text);} sendKey(...args:unknown[]){mock.key(...args);} focus(){mock.focus();} blur(){mock.blur();} constructor(...args:unknown[]){mock.connect(...args);} addEventListener(name:string,callback:(event?:unknown)=>void){mock.events.set(name,callback);} toDataURL(){return mock.png();} disconnect(){mock.disconnect();}}}));
 afterEach(()=>{vi.useRealTimers();cleanup();vi.clearAllMocks();mock.events.clear();vi.restoreAllMocks();});
 it('starts the browser in the selected workspace before connecting its authenticated display',async()=>{
  const workspace=vi.fn().mockResolvedValue({});const streamUrl=vi.fn().mockResolvedValue('wss://example.test/single-use-ticket');
@@ -69,4 +71,67 @@ it('reconnects by itself after a dropped connection, and not after it is closed'
  expect(mock.connect).toHaveBeenCalledTimes(2);
  act(()=>mock.events.get('disconnect')!());view.unmount();
  await act(async()=>{await vi.advanceTimersByTimeAsync(60_000);});expect(mock.connect).toHaveBeenCalledTimes(2);
+});
+const open=async(workspace=vi.fn().mockResolvedValue({}),streamUrl=vi.fn().mockResolvedValue('wss://example.test/ticket'))=>{
+ const view=render(<RemoteDesktop client={{workspace,streamUrl} as unknown as RemoteExecutionClient} workspaceId="alice"/>);
+ await waitFor(()=>expect(mock.connect).toHaveBeenCalledOnce());act(()=>mock.events.get('connect')!());
+ return {view,workspace,streamUrl,surface:view.container.querySelector('.remote-desktop-surface')!};
+};
+const shiftInsert=[[0xffe1,'ShiftLeft',true],[0xff63,'Insert',true],[0xff63,'Insert',false],[0xffe1,'ShiftLeft',false]];
+it('pastes through the workspace, with full Unicode, then presses paste there',async()=>{
+ clip.read.mockResolvedValue('curly ’ 😀');const {view,workspace}=await open();
+ fireEvent.click(view.getByRole('button',{name:'Paste'}));
+ await waitFor(()=>expect(workspace).toHaveBeenCalledWith('alice','/native',{command:'desktop_clipboard_write',args:{text:'curly ’ 😀'}}));
+ await waitFor(()=>expect(mock.key.mock.calls).toEqual(shiftInsert));expect(mock.paste).not.toHaveBeenCalled();
+});
+it('falls back to VNC on an older host, and says when characters may be lost',async()=>{
+ clip.read.mockResolvedValue('😀');
+ const workspace=vi.fn().mockImplementation(async(_id,_path,body)=>{if(body.command==='desktop_clipboard_write')throw Error('does not support');return {};});
+ const {view}=await open(workspace);
+ fireEvent.click(view.getByRole('button',{name:'Paste'}));
+ await waitFor(()=>expect(mock.paste).toHaveBeenCalledWith('😀'));
+ expect(await view.findByText(/may not paste until this workspace updates/)).toBeTruthy();
+});
+const copying=(selections:{clipboard:string[];primary:string})=>vi.fn().mockImplementation(async(_id,_path,body)=>{if(body.command!=='desktop_clipboard_read')return {};return {result:body.args.selection==='primary'?selections.primary:selections.clipboard.shift()};});
+it('copies the workspace’s clipboard to this computer on request, and presses copy there',async()=>{
+ clip.write.mockResolvedValue(true);const {view}=await open(copying({clipboard:['old','it’s 😀'],primary:''}));
+ fireEvent.click(view.getByRole('button',{name:'Copy'}));
+ await waitFor(()=>expect(clip.write).toHaveBeenCalledWith('it’s 😀'));
+ expect(mock.key.mock.calls).toEqual([[0xffe3,'ControlLeft',true],[0xff63,'Insert',true],[0xff63,'Insert',false],[0xffe3,'ControlLeft',false]]);
+ expect(await view.findByText('Copied to this computer')).toBeTruthy();
+});
+it('uses the highlighted text when the copy shortcut changed nothing, as in a terminal',async()=>{
+ clip.write.mockResolvedValue(true);const {view}=await open(copying({clipboard:['same','same'],primary:'highlighted'}));
+ fireEvent.click(view.getByRole('button',{name:'Copy'}));
+ await waitFor(()=>expect(clip.write).toHaveBeenCalledWith('highlighted'));
+});
+it('never touches this computer’s clipboard without a request',async()=>{
+ const {view}=await open();expect(mock.events.has('clipboard')).toBe(false);
+ fireEvent.click(view.getByRole('button',{name:'Copy'}));
+ expect(await view.findByText('Nothing selected to copy')).toBeTruthy();expect(clip.write).not.toHaveBeenCalled();
+});
+it('sends shortcuts to the clipboard, not to the workspace as keystrokes',async()=>{
+ clip.read.mockResolvedValue('text');const {surface,workspace}=await open();
+ const event=new KeyboardEvent('keydown',{key:'v',ctrlKey:true,bubbles:true,cancelable:true});
+ act(()=>{surface.dispatchEvent(event);});expect(event.defaultPrevented).toBe(true);
+ await waitFor(()=>expect(workspace).toHaveBeenCalledWith('alice','/native',{command:'desktop_clipboard_write',args:{text:'text'}}));
+});
+it('turns sound on with a click, plays the stream, and stops with the desktop',async()=>{
+ const sockets:{url:string;close:ReturnType<typeof vi.fn>;onclose?:()=>void}[]=[];
+ vi.stubGlobal('WebSocket',class{close=vi.fn();url:string;constructor(url:string){this.url=url;sockets.push(this);}});
+ const resume=vi.fn().mockResolvedValue(undefined),close=vi.fn().mockResolvedValue(undefined);
+ vi.stubGlobal('AudioContext',class{currentTime=0;resume=resume;close=close;});
+ const {view,streamUrl}=await open();
+ expect(sockets).toHaveLength(0);
+ fireEvent.click(view.getByRole('button',{name:'Sound off'}));expect(resume).toHaveBeenCalled();
+ await waitFor(()=>expect(sockets).toHaveLength(1));expect(streamUrl).toHaveBeenCalledWith('alice','/desktop/audio');
+ fireEvent.click(view.getByRole('button',{name:'Sound on'}));expect(sockets[0].close).toHaveBeenCalled();
+ view.unmount();expect(close).toHaveBeenCalled();vi.unstubAllGlobals();
+});
+it('says so when a workspace has no sound yet',async()=>{
+ vi.stubGlobal('AudioContext',class{currentTime=0;resume=vi.fn().mockResolvedValue(undefined);close=vi.fn().mockResolvedValue(undefined);});
+ const streamUrl=vi.fn().mockImplementation(async(_id,stream)=>{if(stream==='/desktop/audio')throw Error('Invalid stream');return 'wss://example.test/ticket';});
+ const {view}=await open(undefined,streamUrl);
+ fireEvent.click(view.getByRole('button',{name:'Sound off'}));
+ expect(await view.findByText(/Sound isn’t available/)).toBeTruthy();expect(view.getByRole('button',{name:'Sound off'})).toBeTruthy();vi.unstubAllGlobals();
 });

@@ -38,7 +38,7 @@ import { randomBytes } from 'node:crypto';
 import path from 'node:path';
 import os from 'node:os';
 import { WebSocket, WebSocketServer } from 'ws';
-import { authenticate, authorize, validateConfig, Tickets, authorizeStream } from './policy.mjs';
+import { authenticate, authorize, validateConfig, Tickets, authorizeStream, desktopStream } from './policy.mjs';
 import { DockerWorkspaces } from './docker.mjs';
 import {ElasticMemory, memoryRange} from './elastic-memory.mjs';
 import {ElasticCpu, cpuRange} from './elastic-cpu.mjs';
@@ -322,10 +322,10 @@ export function createGateway({ config, workspaces, origins = [], elasticMemory,
       if (operation === '/ticket') {
         const args = await body(request, 4096);
         const shared=args.stream?.match(/^\/shared-sessions\/([a-f0-9-]{36})\/stream$/);
-        if (!/^\/sessions\/\d+\/stream$/.test(args.stream) && args.stream !== '/desktop/ws'&&args.stream!=='/forward'&&!shared&&args.stream!=='/harness/stream') throw new Error('Invalid stream');
+        if (!/^\/sessions\/\d+\/stream$/.test(args.stream) && !desktopStream(args.stream)&&args.stream!=='/forward'&&!shared&&args.stream!=='/harness/stream') throw new Error('Invalid stream');
         if(principal.memberId&&principal.scope==='view'&&!shared&&args.stream!=='/harness/stream')throw Error('Viewer terminals are unavailable');
         if(shared)await resolveShared(workspace,principal,request.headers.authorization,shared[1]);
-        authorize(config, principal, workspaceId, args.stream === '/desktop/ws'||args.stream==='/forward' ? 'drive' : 'view');
+        authorize(config, principal, workspaceId, desktopStream(args.stream)||args.stream==='/forward' ? 'drive' : 'view');
         const ticket = randomBytes(32).toString('base64url');
         tickets.issue(ticket, { principalId: principal.id, principalFingerprint:principal.tokenSha256, expiresAt:principal.expiresAt, memberPrincipal:principal.memberId?principal:undefined, bearer:principal.memberId?request.headers.authorization:undefined, workspaceId, stream: args.stream });
         return json(response, 200, { ticket });
@@ -466,7 +466,7 @@ export function createGateway({ config, workspaces, origins = [], elasticMemory,
       const publication=shared?await resolveShared(workspace,principal,grant.bearer,shared[1]):null;
       const runtime = publication?await workspaces.open(publication.runtime??workspace):await openRuntime(workspace,principal,grant.bearer,projectAccess);
       if(publication)await resolveShared(workspace,principal,grant.bearer,publication.id);
-      const terminal=grant.stream!=='/desktop/ws'&&grant.stream!=='/forward';
+      const terminal=!desktopStream(grant.stream)&&grant.stream!=='/forward';
       const inputSession=publication?publication.sessionId:Number(grant.stream.match(/^\/sessions\/(\d+)\/stream$/)?.[1]);
       // Exactly the HTTP input route's grants: drive scope, and for a shared
       // session a live interact grant on a collaboration shell.
@@ -478,7 +478,7 @@ export function createGateway({ config, workspaces, origins = [], elasticMemory,
       if (socket.destroyed) { release(); return; }
       wss.handleUpgrade(request, socket, head, client => {
         const upstreamStream=publication?`/sessions/${publication.sessionId}/stream`:grant.stream;
-        const upstream = new WebSocket(`${(grant.stream !== '/desktop/ws' && runtime.nativeUrl ? runtime.nativeUrl : runtime.url).replace('http:', 'ws:')}${upstreamStream}`, { headers: { authorization: `Bearer ${runtime.token}` }, maxPayload: 2 * 1024 * 1024, perMessageDeflate: false, handshakeTimeout: 10_000 });
+        const upstream = new WebSocket(`${(!desktopStream(grant.stream) && runtime.nativeUrl ? runtime.nativeUrl : runtime.url).replace('http:', 'ws:')}${upstreamStream}`, { headers: { authorization: `Bearer ${runtime.token}` }, maxPayload: 2 * 1024 * 1024, perMessageDeflate: false, handshakeTimeout: 10_000 });
         let checkingAuthorization=false;
         const authorizationTimer = setInterval(async () => {
           if(checkingAuthorization)return;
@@ -525,7 +525,7 @@ export function createGateway({ config, workspaces, origins = [], elasticMemory,
         });
         client.on('close', () => { upstream.close(); release(); });
         upstream.on('close', () => client.close());
-        upstream.on('error', error => { streamWarning(`Stream upstream failed for ${principal.memberId?'member':'owner'} ${grant.stream==='/desktop/ws'?'desktop':'terminal'}: ${error.code??error.message}`); client.close(1011); });
+        upstream.on('error', error => { streamWarning(`Stream upstream failed for ${principal.memberId?'member':'owner'} ${desktopStream(grant.stream)?'desktop':'terminal'}: ${error.code??error.message}`); client.close(1011); });
         client.on('error', () => upstream.close());
       });
     } catch (error) { release?.(); socket.destroy(); streamWarning(`Stream refused: ${String(error?.message??error).slice(0,120)}`); }

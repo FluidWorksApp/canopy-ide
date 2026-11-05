@@ -17,7 +17,7 @@ export async function workspaceActivity(){
    if(name==='node'&&['/opt/canopy/runner.mjs','runner.mjs'].includes(argv[1]))continue;
    // Even an open shell might hold a function/job not represented by children.
    // Keep it alive until its session has ended rather than risking work loss.
-   if(['Xvfb','x11vnc','openbox','xfwm4','xfce4-session','xfce4-panel','xfsettingsd','xfdesktop','dbus-daemon','dbus-launch','at-spi-bus-launcher','at-spi2-registryd','xfconfd','tini','docker-init'].includes(name))continue;
+   if(['Xvfb','x11vnc','pulseaudio','parec','xclip','openbox','xfwm4','xfce4-session','xfce4-panel','xfsettingsd','xfdesktop','dbus-daemon','dbus-launch','at-spi-bus-launcher','at-spi2-registryd','xfconfd','tini','docker-init'].includes(name))continue;
    activeJobs++;
   }catch(error){if(error.code!=='ENOENT'&&error.code!=='ESRCH')unknownActivity=true;}
  }
