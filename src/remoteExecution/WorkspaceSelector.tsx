@@ -24,7 +24,7 @@ import './workspace.css';
 import {WorkspacePanel} from './WorkspacePanel';
 import {WorkspaceProgress,type WorkspaceProgressState} from './WorkspaceProgress';
 import {peekWorkspaceList,refreshWorkspaceList} from './workspaceListCache';
-import {connectionLabel,useConnectionState} from './connectionState';
+import {connectionLabel,useSettledConnectionState} from './connectionState';
 import {WorkspaceMenu,type WorkspaceMenuRow} from './WorkspaceMenu';
 import {AccountSync} from './AccountSync';
 import {workspaceStatus} from './WorkspaceHero';
@@ -119,7 +119,7 @@ export function WorkspaceSelector({ onboarding = false,onHibernateWorkspace }: {
     finally{setStoppingVm(false);}
   }
   const activeId=active?workspaceTabId({id:`${active.connection.endpoint}/${active.connection.workspaceId}`,endpoint:active.connection.endpoint,workspaceId:active.connection.workspaceId,workspaceName:active.connection.workspaceName},managed):'local';
-  const connectionState=useConnectionState(active?`${active.connection.endpoint}/${active.connection.workspaceId}`:'local');
+  const connectionState=useSettledConnectionState(active?`${active.connection.endpoint}/${active.connection.workspaceId}`:'local');
   const [selectedId,setSelectedId]=useState(activeId);
   const [section,setSection]=useState<'overview'|'access'|'tools'>('overview');
   useEffect(()=>{setSection('overview');},[selectedId]);
