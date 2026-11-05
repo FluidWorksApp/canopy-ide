@@ -24,7 +24,10 @@ const GRANT_STEP=512*MIB,GRANT_CHOICES=[GRANT_STEP,2*GRANT_STEP];
 const DEFAULTS_CAP=64,MIN_MAX=512*MIB,MAX_MAX=1024*GIB;
 export const FALLBACK_POLICY='notify_natively_and_refuse_automatic_grant_pause_or_stop';
 
-export function baseAllowance(total){return total<=12*GIB?GIB:total<24*GIB?GIB+512*MIB:4*GIB;}
+// 30% of the machine this workspace runs on, on the grant grid. Above memory.high
+// the kernel throttles a terminal even while the machine sits idle, so a fixed
+// allowance froze large builds on large machines.
+export function baseAllowance(total){return Math.max(GRANT_STEP,Math.floor(total*0.3/GRANT_STEP)*GRANT_STEP);}
 const protectedReserve=total=>Math.min(Math.max(3*GIB,Math.floor(total/4)),total);
 export const validCliKey=key=>typeof key==='string'&&!!key&&key.length<=192&&(key.startsWith('pkg:')||key.startsWith('bin:'))&&!/[\x00-\x1f\x7f]/.test(key);
 const validMax=v=>Number.isSafeInteger(v)&&v>=MIN_MAX&&v<=MAX_MAX&&v%GRANT_STEP===0;
