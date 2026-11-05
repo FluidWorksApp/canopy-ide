@@ -7,11 +7,11 @@ import { CloseIcon, MinimizeIcon, RestartIcon } from '../components/icons';
 import { readClipboardText, writeClipboardText } from '../terminalClipboard';
 import { createPcmPlayer, DESKTOP_AUDIO_RATE } from './desktopAudio';
 import { copiedText, fitsVncClipboard, KEYS } from './desktopClipboard';
+import { releaseAllKeys, releaseMouseButtons, retryDelay, wakeAction } from './desktopInput';
 
 /** How long a minimized desktop stays connected. An open stream counts as
  *  activity, so an indefinite one would keep the workspace from idling out. */
 export const MINIMIZED_KEEP_MS = 15 * 60_000;
-const RETRY_MAX_MS = 30_000;
 const AUDIO_RETRY_MS = 2_000;
 const NOTE_MS = 4_000;
 /** Time for the focused program to answer the copy shortcut. */
@@ -38,6 +38,14 @@ export function RemoteDesktop({ client, workspaceId, workspaceName, onClose, onM
   const [status, setStatus] = useState("Starting workspace desktop…");
   const [parked, setParked] = useState(false);
   const drops = useRef(0);
+  // Read from event handlers and timers that outlive a render.
+  const minimizedRef = useRef(minimized);
+  minimizedRef.current = minimized;
+  const parkedRef = useRef(false);
+  parkedRef.current = parked;
+  const hiddenAt = useRef<number | null>(null);
+  // When the current connect began, or null once it has connected, dropped or failed.
+  const connecting = useRef<number | null>(null);
   const [sound, setSound] = useState(false);
   const [note, setNote] = useState('');
   const audio = useRef<AudioContext | null>(null);
@@ -57,6 +65,12 @@ export function RemoteDesktop({ client, workspaceId, workspaceName, onClose, onM
   // turn the shortcut into another one.
   const releaseModifiers = useCallback(() => {
     for (const [keysym, code] of [KEYS.superLeft, KEYS.superRight, KEYS.shift]) connection.current?.sendKey(keysym, code, false);
+  }, []);
+  // The workspace keeps whatever was down when a key-up was lost, so every moment
+  // that can lose one (focus away, hidden, minimised, a new connection) lets go.
+  const releaseAll = useCallback(() => {
+    releaseAllKeys(connection.current);
+    releaseMouseButtons(surface.current);
   }, []);
   // The clipboard goes through the workspace rather than VNC: x11vnc's is
   // Latin-1, and it passed changes late or not at all when tested.
@@ -144,13 +158,49 @@ export function RemoteDesktop({ client, workspaceId, workspaceName, onClose, onM
       connection.current?.focus({ preventScroll: true });
       return;
     }
+    releaseAll();
     connection.current?.blur();
     const timer = setTimeout(() => setParked(true), MINIMIZED_KEEP_MS);
     return () => clearTimeout(timer);
-  }, [minimized]);
+  }, [minimized, releaseAll]);
+  // Coming back (window shown, focused, network up again) should not wait out a
+  // retry timer, and a stream that was hidden for a while is replaced rather than
+  // trusted: its socket may have died while the machine slept.
+  useEffect(() => {
+    const reconnect = () => {
+      remoteDiagnostic('desktop-wake-reconnect');
+      drops.current = 0;
+      setAttempt(value => value + 1);
+    };
+    const wake = () => {
+      if (parkedRef.current || minimizedRef.current) return;
+      const awayMs = hiddenAt.current === null ? 0 : Date.now() - hiddenAt.current;
+      hiddenAt.current = null;
+      const action = wakeAction({ connected: connected.current, awayMs, connectingForMs: connecting.current === null ? Infinity : Date.now() - connecting.current });
+      if (action === 'reconnect') reconnect();
+      else if (connected.current) { releaseAll(); connection.current?.focus({ preventScroll: true }); }
+    };
+    const visibility = () => {
+      if (document.hidden) { hiddenAt.current ??= Date.now(); releaseAll(); } else wake();
+    };
+    const blur = () => releaseAll();
+    document.addEventListener('visibilitychange', visibility);
+    window.addEventListener('focus', wake);
+    window.addEventListener('pageshow', wake);
+    window.addEventListener('online', wake);
+    window.addEventListener('blur', blur);
+    return () => {
+      document.removeEventListener('visibilitychange', visibility);
+      window.removeEventListener('focus', wake);
+      window.removeEventListener('pageshow', wake);
+      window.removeEventListener('online', wake);
+      window.removeEventListener('blur', blur);
+    };
+  }, [releaseAll]);
   useEffect(() => {
     if (parked) { setStatus('Paused while minimized'); return; }
     setStatus('Connecting…');
+    connecting.current = Date.now();
     let disposed = false;
     let retry: ReturnType<typeof setTimeout> | undefined;
     let disconnect: (() => void) | undefined;
@@ -170,17 +220,25 @@ export function RemoteDesktop({ client, workspaceId, workspaceName, onClose, onM
         connection.current = rfb;
         rfb.scaleViewport = true;
         rfb.background = 'var(--bg-deep)';
-        rfb.addEventListener("connect", () => { if (!disposed) { connected.current=true;drops.current=0;setStatus("Connected");remoteDiagnostic('desktop-connected'); } });
+        rfb.addEventListener("connect", () => {
+          if (disposed) return;
+          connected.current = true; connecting.current = null; drops.current = 0; setStatus("Connected"); remoteDiagnostic('desktop-connected');
+          // A key held when the last connection died is still held in the workspace.
+          releaseAllKeys(rfb); releaseMouseButtons(surface.current);
+          // A new connection has no keyboard focus, so the first keystrokes would
+          // go to the IDE as its shortcuts.
+          if (!minimizedRef.current) rfb.focus({ preventScroll: true });
+        });
         rfb.addEventListener("disconnect", () => {
           if (disposed) return;
-          connected.current = false;
+          connected.current = false; connecting.current = null;
           remoteDiagnostic('desktop-disconnected');
           setStatus("Reconnecting… agents keep running");
-          const delay = Math.min(1000 * 2 ** Math.min(drops.current++, 5), RETRY_MAX_MS);
+          const delay = retryDelay(drops.current++);
           retry = setTimeout(() => setAttempt(value => value + 1), delay);
         });
         disconnect = () => rfb.disconnect();
-      } catch (error) { if (!disposed) { setStatus(String(error)); remoteDiagnostic('desktop-failed'); } }
+      } catch (error) { if (!disposed) { connecting.current = null; setStatus(String(error)); remoteDiagnostic('desktop-failed'); } }
     })();
     return () => { disposed = true; clearTimeout(retry); connected.current=false; disconnect?.(); connection.current = null; };
   }, [client, workspaceId, attempt, previewUrl, parked]);
@@ -193,6 +251,7 @@ export function RemoteDesktop({ client, workspaceId, workspaceName, onClose, onM
         <Button size="sm" variant="ghost" disabled={!live} title="Copy the workspace selection to this computer" onClick={() => void copy()}>Copy</Button>
         <Button size="sm" variant="ghost" disabled={!live} title="Paste this computer’s clipboard into the workspace" onClick={() => void paste()}>Paste</Button>
         <Button size="sm" variant="ghost" aria-pressed={fit} title={fit ? 'Show desktop at its original size' : 'Fit desktop to the viewer'} onClick={() => setFit(value => !value)}>{fit ? 'Actual size' : 'Fit'}</Button>
+        <Button size="sm" variant="ghost" disabled={!live} title="Let go of any key or mouse button the workspace thinks is held (Ctrl, Alt, Cmd, Shift)" onClick={() => { releaseAll(); connection.current?.focus({ preventScroll: true }); setNote('Keys released'); }}>Release keys</Button>
         <Button size="sm" variant="ghost" icon title="Reconnect desktop" aria-label="Reconnect desktop" onClick={() => setAttempt(value => value + 1)}><RestartIcon /></Button>
         {onMinimize && <Button size="sm" variant="ghost" icon title="Minimize desktop (stays connected)" aria-label="Minimize desktop" onClick={onMinimize}><MinimizeIcon /></Button>}
         {onClose && <Button size="sm" variant="ghost" icon title="Close desktop" aria-label="Close desktop" onClick={onClose}><CloseIcon /></Button>}
