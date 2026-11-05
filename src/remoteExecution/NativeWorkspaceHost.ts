@@ -8,6 +8,7 @@ import {wantsWorkspaceAndroid,workspaceAndroid} from './androidBridge';
 import {pollGovernorEvents} from './governorEvents';
 import {isWorkspaceLocalPage} from '../previewEngine';
 import {connectionKey,reportConnection,reportStream,workspaceLifecyclePhase} from './connectionState';
+import {STREAM_STABLE_MS,streamRetryDelay} from './streamBackoff';
 import {saveRemoteContextImage} from './saveContextImage';
 import {basename} from '../paths';
 import {terminalOwner} from '../resourceAttribution';
@@ -264,11 +265,11 @@ export class NativeWorkspaceHost implements Host {
     this.streams.set(id,stream);
     const stateKey=connectionKey(this.connection.endpoint,this.connection.workspaceId);
     reportStream(stateKey,id,false);
-    let failures=0;
+    let failures=0,stable:ReturnType<typeof setTimeout>|undefined;
     // An intentionally stopping or hibernated workspace is not reconnected;
     // the stream parks without network attempts until that state is cleared.
     const parked=()=>{if(stream.closed)return;if(workspaceLifecyclePhase(stateKey)){stream.retry=setTimeout(parked,2000);return;}void connect();};
-    const retry=()=>{if(stream.closed)return;remoteDiagnostic('terminal-stream-retry');clearTimeout(stream.handshake);reportStream(stateKey,id,false);if(workspaceLifecyclePhase(stateKey)){stream.retry=setTimeout(parked,2000);return;}const delay=Math.min(30_000,1000*2**Math.min(failures++,5))+Math.random()*500;stream.retry=setTimeout(()=>void connect(),delay);
+    const retry=()=>{if(stream.closed)return;clearTimeout(stable);stable=undefined;remoteDiagnostic('terminal-stream-retry');clearTimeout(stream.handshake);reportStream(stateKey,id,false);if(workspaceLifecyclePhase(stateKey)){stream.retry=setTimeout(parked,2000);return;}const delay=streamRetryDelay(failures++);stream.retry=setTimeout(()=>void connect(),delay);
       // The backoff guards against a workspace that isn't answering. Once the
       // session poll shows it is, a waiting terminal reconnects then instead of
       // sitting out up to 30s; at most once per 10s, so a refusal cannot spin.
@@ -296,7 +297,8 @@ export class NativeWorkspaceHost implements Host {
             // A view-only window cannot answer a diff, so it is not shown one.
             if(message.t==='ide'){if(!this.readOnly&&message.event&&typeof message.event.kind==='string')this.emit('claude-ide',{...message.event,ptyId:id} as ClaudeIdeEvent);return;}
             if(!['snapshot','data'].includes(message.t))return;
-            failures=0;
+            // A snapshot proves nothing: the host may close the stream right after it. Only a stream that stays up has earned a fresh start.
+            stable??=setTimeout(()=>{failures=0;},STREAM_STABLE_MS);
             const bytes=Uint8Array.from(atob(message.b64),c=>c.charCodeAt(0));
             const reset=message.t==='snapshot' && message.reset===true;
             if(message.t==='snapshot'){if(!stream.receivedSnapshot)remoteDiagnostic('terminal-stream-live');stream.frames=[];stream.queuedBytes=0;stream.receivedSnapshot=true;const exitCode=message.exitCode??this.known.get(id)?.exitCode;if(exitCode!=null)stream.pendingExit=exitCode;}
