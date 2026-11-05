@@ -13,6 +13,7 @@ import {
   useCallback,
   useEffect,
   useMemo,
+  useContext,
   useRef,
   useState,
   type CSSProperties,
@@ -59,6 +60,9 @@ const CANOPY_LINK = "canopy";
 import "./receipts.css";
 import { drawWave } from "../waveStyles";
 import { useEscape, useEscapeLayer } from "../useEscape";
+import { SettingsSearch } from "./SettingsSearch";
+import { settingAnchor, type SettingHit } from "./settingsIndex";
+import { SettingsNavContext } from "./settingsNav";
 import { TRACKERS, setTrackerKey, trackerKey } from "../trackers";
 import * as ipc from "../ipc";
 import { SlackSettings } from "./SlackSettings";
@@ -135,6 +139,9 @@ export type SettingsTab =
   | "teams"
   | "appearance"
   | "agents"
+  | "brain"
+  | "sessions"
+  | "notifications"
   | "mascot"
   | "editor"
   | "terminal"
@@ -168,15 +175,18 @@ interface SettingsDialogProps {
 const TABS: { id: SettingsTab; label: string; group: string }[] = [
   { id: "account", label: "Accounts", group: "Your account" },
   { id: "teams", label: "Teams", group: "Your account" },
-  { id: "appearance", label: "Appearance", group: "Look" },
-  { id: "editor", label: "Editor", group: "Look" },
-  { id: "terminal", label: "Terminal", group: "Look" },
+  { id: "appearance", label: "Appearance", group: "Look & feel" },
+  { id: "editor", label: "Editor", group: "Look & feel" },
+  { id: "terminal", label: "Terminal", group: "Look & feel" },
+  { id: "mascot", label: "Mascot", group: "Look & feel" },
+  { id: "notifications", label: "Notifications", group: "Look & feel" },
   { id: "agents", label: "Agents", group: "Agents" },
+  { id: "brain", label: "Brain & memory", group: "Agents" },
+  { id: "sessions", label: "Sessions & budget", group: "Agents" },
   { id: "rules", label: "Rules", group: "Agents" },
-  { id: "mascot", label: "Mascot", group: "Agents" },
-  { id: "dictation", label: "Dictation", group: "Agents" },
-  { id: "spotsearch", label: "SpotSearch", group: "Agents" },
-  { id: "clipboard", label: "Clipboard", group: "Agents" },
+  { id: "dictation", label: "Dictation", group: "Input & tools" },
+  { id: "spotsearch", label: "SpotSearch", group: "Input & tools" },
+  { id: "clipboard", label: "Clipboard", group: "Input & tools" },
   { id: "integrations", label: "Integrations", group: "Access" },
   { id: "browser", label: "Browser & Vault", group: "Access" },
   { id: "remote", label: "Remote access", group: "Access" },
@@ -486,8 +496,12 @@ function Item({
   desc?: string;
   children: React.ReactNode;
 }) {
+  // Which tab this row is on, from the dialog: names repeat across tabs, so the
+  // anchor a search result scrolls to is tab + name.
+  const nav = useContext(SettingsNavContext);
+  const id = nav.tab ? settingAnchor(nav.tab, name) : undefined;
   return (
-    <div className="set-item">
+    <div className={`set-item${id && nav.highlight === id ? " set-item-flash" : ""}`} id={id}>
       <div className="set-item-head">
         <span className="set-item-name">{name}</span>
         {tag && <span className="set-item-tag">{tag}</span>}
@@ -1260,6 +1274,17 @@ export function SettingsDialog({ onClose, initialTab = "appearance", projects = 
   // never advertises a chord that does nothing (Dictation drops out on
   // machines without it, and everything below it shifts up by one).
   const shortcutTabs = useMemo(() => visibleTabs.slice(0, 9), [visibleTabs]);
+  // Search: results replace the tab list; picking one opens its tab, scrolls to
+  // the row and flashes it.
+  const [query, setQuery] = useState("");
+  const [pendingAnchor, setPendingAnchor] = useState<string | null>(null);
+  const [highlight, setHighlight] = useState<string | null>(null);
+  const searchRef = useRef<HTMLInputElement>(null);
+  const tabLabels = useMemo(
+    () => Object.fromEntries(visibleTabs.map((t) => [t.id, t.label])) as Partial<Record<SettingsTab, string>>,
+    [visibleTabs],
+  );
+  const nav = useMemo(() => ({ tab, highlight }), [tab, highlight]);
 
   // The digit chord jumps between sections. Bound while the dialog is open and
   // nowhere else, which is why the manifest marks it `scoped` and lets it reuse
@@ -1310,8 +1335,32 @@ export function SettingsDialog({ onClose, initialTab = "appearance", projects = 
     onClose();
   };
   const [s, setS] = useState<Settings>(() => getSettings());
+  const pickSetting = (hit: SettingHit) => {
+    setSkinPickerOpen(false);
+    setFleetReadoutOpen(false);
+    setTab(hit.entry.tab);
+    setPendingAnchor(hit.anchor);
+  };
+  useEffect(() => {
+    if (!pendingAnchor) return;
+    // After the tab has rendered, so the row exists to scroll to.
+    const frame = requestAnimationFrame(() => {
+      document.getElementById(pendingAnchor)?.scrollIntoView({ block: "center", behavior: "smooth" });
+      setHighlight(pendingAnchor);
+      setPendingAnchor(null);
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [pendingAnchor, tab]);
+  useEffect(() => {
+    if (!highlight) return;
+    const timer = setTimeout(() => setHighlight(null), 1800);
+    return () => clearTimeout(timer);
+  }, [highlight]);
   useEscape(() => {
-    if (skinPickerOpen) {
+    if (query) {
+      setQuery("");
+      searchRef.current?.focus();
+    } else if (skinPickerOpen) {
       skinPickerTrigger.current?.focus();
       setSkinPickerOpen(false);
     } else if (fleetReadoutOpen) {
@@ -1405,10 +1454,18 @@ export function SettingsDialog({ onClose, initialTab = "appearance", projects = 
   return (
     <div className="confirm-backdrop" onMouseDown={onClose}>
       <div className="confirm settings-dialog" onMouseDown={(e) => e.stopPropagation()}>
+        <SettingsNavContext.Provider value={nav}>
         <div className="settings-layout">
           <nav className="settings-nav">
             <div className="settings-title">Settings</div>
-            {visibleTabs.map((t, i) => (
+            <SettingsSearch
+              ref={searchRef}
+              query={query}
+              onQuery={setQuery}
+              onPick={pickSetting}
+              tabLabels={tabLabels}
+            />
+            {!query.trim() && visibleTabs.map((t, i) => (
               <Fragment key={t.id}>
                 {/* A heading only where the group actually turns over. */}
                 {(i === 0 || visibleTabs[i - 1].group !== t.group) && (
@@ -1565,397 +1622,6 @@ export function SettingsDialog({ onClose, initialTab = "appearance", projects = 
 
             {tab === "agents" && (
               <>
-                {/* First, because everything smart in Canopy runs on it. The
-                    same panel as the first-run step and the chip's dialog. */}
-                <Item
-                  name="Brain"
-                  desc="The CLI that powers Canopy's smart features."
-                >
-                  <BrainConnectPanel onTerminalOpened={onClose} />
-                </Item>
-                <Item
-                  name="Brain spending"
-                  desc="Today's spend and daily caps per feature."
-                >
-                  <BrainSpendTable />
-                </Item>
-                <Item
-                  name="Features not using your brain"
-                  desc="Overrides you chose for one feature. Everything else follows the brain."
-                >
-                  <BrainExceptions />
-                </Item>
-                <Item name="Automatic brain work" desc="Small background calls the brain makes on its own.">
-                  <BrainAutomation />
-                </Item>
-                <Item
-                  name="Fleet readiness"
-                  desc="What can launch now."
-                >
-                  <AgentFleetReadout
-                    open={fleetReadoutOpen}
-                    trigger={fleetReadoutTrigger}
-                    onOpenChange={setFleetReadoutOpen}
-                  />
-                </Item>
-                <Item
-                  name="Ask for attention"
-                  desc="Let agents bring their tab to the front."
-                >
-                  <Checkbox
-                    checked={s.agentAskForAttention}
-                    onChange={(v) => patch({ agentAskForAttention: v })}
-                    label="Let agents switch focus to files, previews, and run tabs"
-                    hint="Off keeps their work in the background; questions and notices still appear."
-                  />
-                </Item>
-                <Item
-                  name="Agent delegation"
-                  desc="Let agents open agent tabs."
-                >
-                  <Checkbox
-                    checked={s.agentsMaySpawn}
-                    onChange={(v) => patch({ agentsMaySpawn: v })}
-                    label="Agents may spawn new agent tabs"
-                    hint={
-                      s.agentsMaySpawn
-                        ? "Agents can delegate bounded work to a new tab."
-                        : "The spawn tool is hidden and existing clients are refused."
-                    }
-                  />
-                </Item>
-                {/* Plans and review (src/plans, src/review): the brain plans
-                    dispatched work and writes the review's intent summary. */}
-                <Item
-                  name="Plan before an agent starts"
-                  desc="Plan first; risky work waits for approval."
-                >
-                  <Checkbox
-                    checked={s.planBeforeDispatch}
-                    onChange={(v) => patch({ planBeforeDispatch: v })}
-                    label="Plan dispatched work first"
-                    hint={
-                      s.planBeforeDispatch
-                        ? "Uses your brain's plan once per task you start."
-                        : "Agents start straight from what you typed."
-                    }
-                  />
-                </Item>
-                <Item
-                  name="Intent & evidence review"
-                  desc="Open reviews on plan, receipt and risk map first."
-                >
-                  <Checkbox
-                    checked={s.reviewAutoSummary}
-                    onChange={(v) => patch({ reviewAutoSummary: v })}
-                    label="Summarize changes against the plan when the review opens"
-                    hint={
-                      s.reviewAutoSummary
-                        ? "One brain call per new diff; the same diff is never summarized twice."
-                        : "The review shows a button to ask for the summary."
-                    }
-                  />
-                  <Stepper
-                    aria-label="Most changed lines per reviewable slice"
-                    suffix="lines"
-                    value={s.reviewSliceBudgetLines}
-                    min={50}
-                    max={5000}
-                    step={50}
-                    onChange={(v) => patch({ reviewSliceBudgetLines: v })}
-                  />
-                </Item>
-                <Item
-                  name="Agent awareness"
-                  desc="Tell other agents on the same code what changed."
-                >
-                  <Checkbox
-                    checked={s.awarenessEnabled}
-                    onChange={(v) => patch({ awarenessEnabled: v })}
-                    label="Tell agents about each other's changes"
-                    hint={
-                      s.awarenessEnabled
-                        ? "Your brain writes each note in the background, and busy shared files get a claim so two agents don't write them at once. Edit a project's hotspot list on the Agents page, board view."
-                        : "Agents work without hearing about each other's changes, and no brain calls are made for it."
-                    }
-                  />
-                </Item>
-                <Item
-                  name="Team memory"
-                  desc="Approved facts your agents are told."
-                >
-                  <MemorySettings s={s} patch={patch} />
-                </Item>
-                <Item
-                  name="CLI updates"
-                  desc="Keep local agent CLIs updated."
-                >
-                  <Checkbox
-                    checked={s.autoUpdateClis}
-                    onChange={(v) => patch({ autoUpdateClis: v })}
-                    label="Keep agent CLIs up to date automatically"
-                    hint={
-                      s.autoUpdateClis
-                        ? "Claude Code, Grok and Antigravity update themselves; Canopy updates the others about once a day, the way each was installed, and never while one is running."
-                        : "Canopy updates nothing, and asks Claude Code, Grok and Antigravity to stop updating themselves in agents started from now on."
-                    }
-                  />
-                </Item>
-                {/* Spend & outcomes (src/outcomes): session budgets and the
-                    brain's weekly insight in the Outcomes panel. */}
-                <Item
-                  name="Session budget"
-                  desc="Per-session cap: warns at 80%, pauses at 100%."
-                >
-                  <TextInput
-                    type="number"
-                    width="xs"
-                    aria-label="Default session budget in dollars"
-                    min={0}
-                    step={1}
-                    placeholder="None"
-                    value={s.sessionBudgetUsd ?? ""}
-                    onChange={(e) => {
-                      const raw = e.target.value.trim();
-                      const v = Number(raw);
-                      patch({ sessionBudgetUsd: raw === "" || !Number.isFinite(v) || v <= 0 ? null : v });
-                    }}
-                  />
-                </Item>
-                <Item
-                  name="Prototype session cap"
-                  desc="Cap for Build projects. Empty for none."
-                >
-                  <TextInput
-                    type="number"
-                    width="xs"
-                    aria-label="Prototype session cap in dollars"
-                    min={0}
-                    step={1}
-                    placeholder="None"
-                    value={s.builderSessionCapUsd ?? ""}
-                    onChange={(e) => {
-                      const raw = e.target.value.trim();
-                      const v = Number(raw);
-                      patch({ builderSessionCapUsd: raw === "" || !Number.isFinite(v) || v <= 0 ? null : v });
-                    }}
-                  />
-                </Item>
-                <Item
-                  name="At the budget"
-                  desc="What happens when an agent session reaches its budget."
-                >
-                  <Checkbox
-                    checked={s.budgetPauseAtLimit}
-                    onChange={(v) => patch({ budgetPauseAtLimit: v })}
-                    label="Pause the agent (press Esc in its terminal)"
-                    hint={
-                      s.budgetPauseAtLimit
-                        ? "Canopy stops the agent's current step and asks you to raise the budget. Nothing is lost; tell it to continue."
-                        : "Canopy only warns. The agent keeps going."
-                    }
-                  />
-                </Item>
-                <Item
-                  name="Spend & outcomes"
-                  desc="Track outcomes locally."
-                >
-                  <Checkbox
-                    checked={s.outcomesInsight}
-                    onChange={(v) => patch({ outcomesInsight: v })}
-                    label="Let the brain write a weekly insight from the numbers"
-                    hint={
-                      s.outcomesInsight
-                        ? "At most once a day, on the brain's cheaper model. It sees totals only, never code."
-                        : "The panel shows the numbers only."
-                    }
-                  />
-                </Item>
-                <Item
-                  name="Builder lens summaries"
-                  desc="In the Builder lens, explain each saved step and the project's layers in plain words."
-                >
-                  <Checkbox
-                    checked={s.lensAutoSummaries}
-                    onChange={(v) => patch({ lensAutoSummaries: v })}
-                    label="Summarise changes automatically"
-                    hint={
-                      s.lensAutoSummaries
-                        ? "Your connected agent writes a short summary of each step in the background, once per step."
-                        : "Steps show what you asked for; the layer map is made only when you ask."
-                    }
-                  />
-                </Item>
-                <Item
-                  name="Claude Code editor link"
-                  desc="Let Claude Code use Canopy as its IDE: diffs to review, your selection, and live diagnostics."
-                >
-                  <Checkbox
-                    checked={s.claudeIdeIntegration}
-                    onChange={(v) => patch({ claudeIdeIntegration: v })}
-                    label="Connect Claude Code to the editor"
-                    hint={
-                      s.claudeIdeIntegration
-                        ? "New Claude tabs open proposed edits as a diff here and see what you select. Running tabs keep their current setting."
-                        : "Claude uses Canopy's MCP editor tools instead. Running tabs keep their current setting."
-                    }
-                  />
-                </Item>
-                <Item
-                  name="Turn rollback"
-                  desc="Snapshot each turn so it can be undone."
-                >
-                  <Checkbox
-                    checked={s.turnRollback}
-                    onChange={(v) => patch({ turnRollback: v })}
-                    label="Snapshot each agent turn"
-                    hint={
-                      s.turnRollback
-                        ? "Claude Code turns in git checkouts get “Undo this turn” and “Back to here”. Your branches, index and commits are never touched."
-                        : "No new snapshots are taken. Ones already saved stay restorable until they age out."
-                    }
-                  />
-                </Item>
-                {/* Session documents (src/sessionDoc). */}
-                <Item
-                  name="Session documents"
-                  desc="View a session as a document."
-                >
-                  <Checkbox
-                    checked={s.sessionDocAutoSummary}
-                    onChange={(v) => patch({ sessionDocAutoSummary: v })}
-                    label="Write a summary when a session document opens"
-                    hint={
-                      s.sessionDocAutoSummary
-                        ? "The brain reads the session in the background (the cheaper model) the first time you open it and after each new turn."
-                        : "Summaries are written only when you press “Write summary”."
-                    }
-                  />
-                  <Checkbox
-                    checked={s.commitSessionTrailers}
-                    onChange={(v) => patch({ commitSessionTrailers: v })}
-                    label="Add Agent-Session trailers to commits"
-                    hint={
-                      s.commitSessionTrailers
-                        ? "Commits from the Changes panel name each agent session whose edits they include, so a line can be traced back to its session."
-                        : "Commits are made exactly as you write them."
-                    }
-                  />
-                </Item>
-                <Item
-                  name="Proof receipts"
-                  desc="Re-run tests and check the work after each agent finishes."
-                >
-                  <span className="rc-settings">
-                    <Segmented<"auto" | "manual" | "off">
-                      aria-label="When to verify agent turns"
-                      options={[
-                        { id: "auto", label: "After every turn" },
-                        { id: "manual", label: "When I ask" },
-                        { id: "off", label: "Off" },
-                      ]}
-                      value={s.receiptMode}
-                      onChange={(receiptMode) => patch({ receiptMode })}
-                    />
-                    <span className="set-item-desc">
-                      {s.receiptMode === "auto"
-                        ? "Turns that changed files are verified in the background on the brain's cheaper model. Finished agents show ✓ Proven, ◐ Partial, ✗ Unproven or ⚠ Tests changed."
-                        : s.receiptMode === "manual"
-                          ? "Nothing runs on its own. Open an agent's receipt badge and choose Verify now."
-                          : "No checks run and no receipt badges are shown."}
-                    </span>
-                    {Object.entries(s.receiptCommands).map(([root, lines]) => (
-                      <span key={root} className="set-item-desc">
-                        <code>{root.split(/[\\/]/).pop()}</code>: {lines.join(" · ")}{" "}
-                        <Button
-                          size="sm"
-                          variant="ghost"
-                          title={`Forget the check commands set for ${root}`}
-                          onClick={() => {
-                            const next = { ...s.receiptCommands };
-                            delete next[root];
-                            patch({ receiptCommands: next });
-                          }}
-                        >
-                          Use detected checks
-                        </Button>
-                      </span>
-                    ))}
-                  </span>
-                </Item>
-                <Item
-                  name="Memory monitoring prompts"
-                  desc="Show memory warnings."
-                >
-                  <Checkbox
-                    checked={s.terminalMemoryPromptsEnabled}
-                    onChange={(v) => patch({ terminalMemoryPromptsEnabled: v })}
-                    label="Show terminal memory prompts"
-                    hint={
-                      s.terminalMemoryPromptsEnabled
-                        ? "Warnings and memory decisions appear when an agent exceeds its allowance."
-                        : "Monitoring continues silently; no memory warning cards or notifications appear."
-                    }
-                  />
-                </Item>
-                <Item
-                  name="Memory allowance maximums"
-                  desc="Max allowance per agent."
-                >
-                  <AgentMemorySettings />
-                </Item>
-                <Item
-                  name="Notification pop-ups"
-                  desc="Interrupt, or wait in the bell."
-                >
-                  <Checkbox
-                    checked={s.notificationPopupsEnabled}
-                    onChange={(v) => patch({ notificationPopupsEnabled: v })}
-                    label="Show notification pop-ups"
-                    hint={
-                      s.notificationPopupsEnabled
-                        ? "Shows corner cards, companion notices, and system banners."
-                        : "Off keeps every notice in the top-right bell."
-                    }
-                  />
-                </Item>
-                <Item
-                  name="Team messages"
-                  desc="Notify on teammate messages."
-                >
-                  <Checkbox
-                    checked={s.teamMessageNotifications}
-                    onChange={(v) => patch({ teamMessageNotifications: v })}
-                    label="Notify me about team messages"
-                  />
-                  <Checkbox
-                    checked={s.teamMessagePreviews}
-                    disabled={!s.teamMessageNotifications}
-                    onChange={(v) => patch({ teamMessagePreviews: v })}
-                    label="Show message previews"
-                    hint={
-                      s.teamMessagePreviews
-                        ? "Shows the first line of the message. Notifications are kept in the bell on this device."
-                        : "Shows only who wrote; message text stays in the encrypted conversation."
-                    }
-                  />
-                  <Checkbox
-                    checked={s.teamMentionNotifications}
-                    onChange={(v) => patch({ teamMentionNotifications: v })}
-                    label="Always notify me when I'm mentioned"
-                    hint="Mentions of you, review requests to you and replies to your messages notify even in muted conversations or with team notifications off. @channel doesn't count."
-                  />
-                  <Checkbox
-                    checked={s.teamReadReceipts}
-                    onChange={(v) => patch({ teamReadReceipts: v })}
-                    label="Send and show read receipts"
-                    hint={
-                      s.teamReadReceipts
-                        ? "Teammates on Canopy 0.4.11 or later see when you've read their messages, and you see when they've read yours."
-                        : "Off: teammates don't see when you've read their messages, and you don't see when they've read yours."
-                    }
-                  />
-                </Item>
                 <Item
                   name="Default agent"
                   desc="What Start launches."
@@ -2106,28 +1772,354 @@ export function SettingsDialog({ onClose, initialTab = "appearance", projects = 
                   </div>
                 </Item>
                 <Item
-                  name="Ctrl+Tab switching"
-                  desc="Switcher order."
+                  name="CLI updates"
+                  desc="Keep local agent CLIs updated."
                 >
-                  <Segmented<TabSwitchMode>
-                    aria-label="Ctrl+Tab switching order"
-                    options={[
-                      { id: "recent", label: "Recent activity" },
-                      { id: "order", label: "Tab order" },
-                      { id: "items", label: "Work items" },
-                    ]}
-                    value={s.tabSwitchMode}
-                    onChange={(tabSwitchMode) => patch({ tabSwitchMode })}
+                  <Checkbox
+                    checked={s.autoUpdateClis}
+                    onChange={(v) => patch({ autoUpdateClis: v })}
+                    label="Keep agent CLIs up to date automatically"
+                    hint={
+                      s.autoUpdateClis
+                        ? "Claude Code, Grok and Antigravity update themselves; Canopy updates the others about once a day, the way each was installed, and never while one is running."
+                        : "Canopy updates nothing, and asks Claude Code, Grok and Antigravity to stop updating themselves in agents started from now on."
+                    }
                   />
                 </Item>
                 <Item
-                  name="Stack tabs by status"
-                  desc="Fold the agent strip into three stacks: Needs you, Working, Idle."
+                  name="Fleet readiness"
+                  desc="What can launch now."
+                >
+                  <AgentFleetReadout
+                    open={fleetReadoutOpen}
+                    trigger={fleetReadoutTrigger}
+                    onOpenChange={setFleetReadoutOpen}
+                  />
+                </Item>
+                <Item
+                  name="Agent delegation"
+                  desc="Let agents open agent tabs."
                 >
                   <Checkbox
-                    checked={s.groupTabsByStatus}
-                    onChange={(v) => patch({ groupTabsByStatus: v })}
-                    label="Keep agents that need you on the left, quiet ones stacked away"
+                    checked={s.agentsMaySpawn}
+                    onChange={(v) => patch({ agentsMaySpawn: v })}
+                    label="Agents may spawn new agent tabs"
+                    hint={
+                      s.agentsMaySpawn
+                        ? "Agents can delegate bounded work to a new tab."
+                        : "The spawn tool is hidden and existing clients are refused."
+                    }
+                  />
+                </Item>
+                {/* Plans and review (src/plans, src/review): the brain plans
+                    dispatched work and writes the review's intent summary. */}
+                <Item
+                  name="Plan before an agent starts"
+                  desc="Plan first; risky work waits for approval."
+                >
+                  <Checkbox
+                    checked={s.planBeforeDispatch}
+                    onChange={(v) => patch({ planBeforeDispatch: v })}
+                    label="Plan dispatched work first"
+                    hint={
+                      s.planBeforeDispatch
+                        ? "Uses your brain's plan once per task you start."
+                        : "Agents start straight from what you typed."
+                    }
+                  />
+                </Item>
+                <Item
+                  name="Intent & evidence review"
+                  desc="Open reviews on plan, receipt and risk map first."
+                >
+                  <Checkbox
+                    checked={s.reviewAutoSummary}
+                    onChange={(v) => patch({ reviewAutoSummary: v })}
+                    label="Summarize changes against the plan when the review opens"
+                    hint={
+                      s.reviewAutoSummary
+                        ? "One brain call per new diff; the same diff is never summarized twice."
+                        : "The review shows a button to ask for the summary."
+                    }
+                  />
+                  <Stepper
+                    aria-label="Most changed lines per reviewable slice"
+                    suffix="lines"
+                    value={s.reviewSliceBudgetLines}
+                    min={50}
+                    max={5000}
+                    step={50}
+                    onChange={(v) => patch({ reviewSliceBudgetLines: v })}
+                  />
+                </Item>
+                <Item
+                  name="Turn rollback"
+                  desc="Snapshot each turn so it can be undone."
+                >
+                  <Checkbox
+                    checked={s.turnRollback}
+                    onChange={(v) => patch({ turnRollback: v })}
+                    label="Snapshot each agent turn"
+                    hint={
+                      s.turnRollback
+                        ? "Claude Code turns in git checkouts get “Undo this turn” and “Back to here”. Your branches, index and commits are never touched."
+                        : "No new snapshots are taken. Ones already saved stay restorable until they age out."
+                    }
+                  />
+                </Item>
+                {/* Session documents (src/sessionDoc). */}
+                <Item
+                  name="Session documents"
+                  desc="View a session as a document."
+                >
+                  <Checkbox
+                    checked={s.sessionDocAutoSummary}
+                    onChange={(v) => patch({ sessionDocAutoSummary: v })}
+                    label="Write a summary when a session document opens"
+                    hint={
+                      s.sessionDocAutoSummary
+                        ? "The brain reads the session in the background (the cheaper model) the first time you open it and after each new turn."
+                        : "Summaries are written only when you press “Write summary”."
+                    }
+                  />
+                  <Checkbox
+                    checked={s.commitSessionTrailers}
+                    onChange={(v) => patch({ commitSessionTrailers: v })}
+                    label="Add Agent-Session trailers to commits"
+                    hint={
+                      s.commitSessionTrailers
+                        ? "Commits from the Changes panel name each agent session whose edits they include, so a line can be traced back to its session."
+                        : "Commits are made exactly as you write them."
+                    }
+                  />
+                </Item>
+                <Item
+                  name="Proof receipts"
+                  desc="Re-run tests and check the work after each agent finishes."
+                >
+                  <span className="rc-settings">
+                    <Segmented<"auto" | "manual" | "off">
+                      aria-label="When to verify agent turns"
+                      options={[
+                        { id: "auto", label: "After every turn" },
+                        { id: "manual", label: "When I ask" },
+                        { id: "off", label: "Off" },
+                      ]}
+                      value={s.receiptMode}
+                      onChange={(receiptMode) => patch({ receiptMode })}
+                    />
+                    <span className="set-item-desc">
+                      {s.receiptMode === "auto"
+                        ? "Turns that changed files are verified in the background on the brain's cheaper model. Finished agents show ✓ Proven, ◐ Partial, ✗ Unproven or ⚠ Tests changed."
+                        : s.receiptMode === "manual"
+                          ? "Nothing runs on its own. Open an agent's receipt badge and choose Verify now."
+                          : "No checks run and no receipt badges are shown."}
+                    </span>
+                    {Object.entries(s.receiptCommands).map(([root, lines]) => (
+                      <span key={root} className="set-item-desc">
+                        <code>{root.split(/[\\/]/).pop()}</code>: {lines.join(" · ")}{" "}
+                        <Button
+                          size="sm"
+                          variant="ghost"
+                          title={`Forget the check commands set for ${root}`}
+                          onClick={() => {
+                            const next = { ...s.receiptCommands };
+                            delete next[root];
+                            patch({ receiptCommands: next });
+                          }}
+                        >
+                          Use detected checks
+                        </Button>
+                      </span>
+                    ))}
+                  </span>
+                </Item>
+                <Item
+                  name="Claude Code editor link"
+                  desc="Let Claude Code use Canopy as its IDE: diffs to review, your selection, and live diagnostics."
+                >
+                  <Checkbox
+                    checked={s.claudeIdeIntegration}
+                    onChange={(v) => patch({ claudeIdeIntegration: v })}
+                    label="Connect Claude Code to the editor"
+                    hint={
+                      s.claudeIdeIntegration
+                        ? "New Claude tabs open proposed edits as a diff here and see what you select. Running tabs keep their current setting."
+                        : "Claude uses Canopy's MCP editor tools instead. Running tabs keep their current setting."
+                    }
+                  />
+                </Item>
+              </>
+            )}
+
+            {tab === "brain" && (
+              <>
+                {/* First, because everything smart in Canopy runs on it. The
+                    same panel as the first-run step and the chip's dialog. */}
+                <Item
+                  name="Brain"
+                  desc="The CLI that powers Canopy's smart features."
+                >
+                  <BrainConnectPanel onTerminalOpened={onClose} />
+                </Item>
+                <Item
+                  name="Brain spending"
+                  desc="Today's spend and daily caps per feature."
+                >
+                  <BrainSpendTable />
+                </Item>
+                <Item
+                  name="Features not using your brain"
+                  desc="Overrides you chose for one feature. Everything else follows the brain."
+                >
+                  <BrainExceptions />
+                </Item>
+                <Item name="Automatic brain work" desc="Small background calls the brain makes on its own.">
+                  <BrainAutomation />
+                </Item>
+                <Item
+                  name="Builder lens summaries"
+                  desc="In the Builder lens, explain each saved step and the project's layers in plain words."
+                >
+                  <Checkbox
+                    checked={s.lensAutoSummaries}
+                    onChange={(v) => patch({ lensAutoSummaries: v })}
+                    label="Summarise changes automatically"
+                    hint={
+                      s.lensAutoSummaries
+                        ? "Your connected agent writes a short summary of each step in the background, once per step."
+                        : "Steps show what you asked for; the layer map is made only when you ask."
+                    }
+                  />
+                </Item>
+                <Item
+                  name="Agent awareness"
+                  desc="Tell other agents on the same code what changed."
+                >
+                  <Checkbox
+                    checked={s.awarenessEnabled}
+                    onChange={(v) => patch({ awarenessEnabled: v })}
+                    label="Tell agents about each other's changes"
+                    hint={
+                      s.awarenessEnabled
+                        ? "Your brain writes each note in the background, and busy shared files get a claim so two agents don't write them at once. Edit a project's hotspot list on the Agents page, board view."
+                        : "Agents work without hearing about each other's changes, and no brain calls are made for it."
+                    }
+                  />
+                </Item>
+                <Item
+                  name="Team memory"
+                  desc="Approved facts your agents are told."
+                >
+                  <MemorySettings s={s} patch={patch} />
+                </Item>
+                <Item
+                  name="Memory monitoring prompts"
+                  desc="Show memory warnings."
+                >
+                  <Checkbox
+                    checked={s.terminalMemoryPromptsEnabled}
+                    onChange={(v) => patch({ terminalMemoryPromptsEnabled: v })}
+                    label="Show terminal memory prompts"
+                    hint={
+                      s.terminalMemoryPromptsEnabled
+                        ? "Warnings and memory decisions appear when an agent exceeds its allowance."
+                        : "Monitoring continues silently; no memory warning cards or notifications appear."
+                    }
+                  />
+                </Item>
+                <Item
+                  name="Memory allowance maximums"
+                  desc="Max allowance per agent."
+                >
+                  <AgentMemorySettings />
+                </Item>
+              </>
+            )}
+
+            {tab === "sessions" && (
+              <>
+                {/* Spend & outcomes (src/outcomes): session budgets and the
+                    brain's weekly insight in the Outcomes panel. */}
+                <Item
+                  name="Session budget"
+                  desc="Per-session cap: warns at 80%, pauses at 100%."
+                >
+                  <TextInput
+                    type="number"
+                    width="xs"
+                    aria-label="Default session budget in dollars"
+                    min={0}
+                    step={1}
+                    placeholder="None"
+                    value={s.sessionBudgetUsd ?? ""}
+                    onChange={(e) => {
+                      const raw = e.target.value.trim();
+                      const v = Number(raw);
+                      patch({ sessionBudgetUsd: raw === "" || !Number.isFinite(v) || v <= 0 ? null : v });
+                    }}
+                  />
+                </Item>
+                <Item
+                  name="Prototype session cap"
+                  desc="Cap for Build projects. Empty for none."
+                >
+                  <TextInput
+                    type="number"
+                    width="xs"
+                    aria-label="Prototype session cap in dollars"
+                    min={0}
+                    step={1}
+                    placeholder="None"
+                    value={s.builderSessionCapUsd ?? ""}
+                    onChange={(e) => {
+                      const raw = e.target.value.trim();
+                      const v = Number(raw);
+                      patch({ builderSessionCapUsd: raw === "" || !Number.isFinite(v) || v <= 0 ? null : v });
+                    }}
+                  />
+                </Item>
+                <Item
+                  name="At the budget"
+                  desc="What happens when an agent session reaches its budget."
+                >
+                  <Checkbox
+                    checked={s.budgetPauseAtLimit}
+                    onChange={(v) => patch({ budgetPauseAtLimit: v })}
+                    label="Pause the agent (press Esc in its terminal)"
+                    hint={
+                      s.budgetPauseAtLimit
+                        ? "Canopy stops the agent's current step and asks you to raise the budget. Nothing is lost; tell it to continue."
+                        : "Canopy only warns. The agent keeps going."
+                    }
+                  />
+                </Item>
+                <Item
+                  name="Spend & outcomes"
+                  desc="Track outcomes locally."
+                >
+                  <Checkbox
+                    checked={s.outcomesInsight}
+                    onChange={(v) => patch({ outcomesInsight: v })}
+                    label="Let the brain write a weekly insight from the numbers"
+                    hint={
+                      s.outcomesInsight
+                        ? "At most once a day, on the brain's cheaper model. It sees totals only, never code."
+                        : "The panel shows the numbers only."
+                    }
+                  />
+                </Item>
+                <Item
+                  name="Live agents per project"
+                  desc="Agent terminals to keep before hibernation reclaims the stalest idle ones."
+                >
+                  <Stepper
+                    aria-label="Live agents per project"
+                    value={s.maxLiveAgents}
+                    min={1}
+                    max={64}
+                    disabled={!s.autoHibernate}
+                    onChange={(v) => patch({ maxLiveAgents: v })}
                   />
                 </Item>
                 <Item
@@ -2158,19 +2150,6 @@ export function SettingsDialog({ onClose, initialTab = "appearance", projects = 
                     checked={s.autoHibernate}
                     onChange={(v) => patch({ autoHibernate: v })}
                     label="Hibernate the stalest idle agents past the limit"
-                  />
-                </Item>
-                <Item
-                  name="Live agents per project"
-                  desc="Agent terminals to keep before hibernation reclaims the stalest idle ones."
-                >
-                  <Stepper
-                    aria-label="Live agents per project"
-                    value={s.maxLiveAgents}
-                    min={1}
-                    max={64}
-                    disabled={!s.autoHibernate}
-                    onChange={(v) => patch({ maxLiveAgents: v })}
                   />
                 </Item>
                 <Item
@@ -2219,6 +2198,99 @@ export function SettingsDialog({ onClose, initialTab = "appearance", projects = 
                       if (Number.isFinite(v) && v >= 1024 && v <= 65000)
                         patch({ workspaceBasePort: Math.floor(v) });
                     }}
+                  />
+                </Item>
+                <Item
+                  name="Ctrl+Tab switching"
+                  desc="Switcher order."
+                >
+                  <Segmented<TabSwitchMode>
+                    aria-label="Ctrl+Tab switching order"
+                    options={[
+                      { id: "recent", label: "Recent activity" },
+                      { id: "order", label: "Tab order" },
+                      { id: "items", label: "Work items" },
+                    ]}
+                    value={s.tabSwitchMode}
+                    onChange={(tabSwitchMode) => patch({ tabSwitchMode })}
+                  />
+                </Item>
+                <Item
+                  name="Stack tabs by status"
+                  desc="Fold the agent strip into three stacks: Needs you, Working, Idle."
+                >
+                  <Checkbox
+                    checked={s.groupTabsByStatus}
+                    onChange={(v) => patch({ groupTabsByStatus: v })}
+                    label="Keep agents that need you on the left, quiet ones stacked away"
+                  />
+                </Item>
+              </>
+            )}
+
+            {tab === "notifications" && (
+              <>
+                <Item
+                  name="Ask for attention"
+                  desc="Let agents bring their tab to the front."
+                >
+                  <Checkbox
+                    checked={s.agentAskForAttention}
+                    onChange={(v) => patch({ agentAskForAttention: v })}
+                    label="Let agents switch focus to files, previews, and run tabs"
+                    hint="Off keeps their work in the background; questions and notices still appear."
+                  />
+                </Item>
+                <Item
+                  name="Notification pop-ups"
+                  desc="Interrupt, or wait in the bell."
+                >
+                  <Checkbox
+                    checked={s.notificationPopupsEnabled}
+                    onChange={(v) => patch({ notificationPopupsEnabled: v })}
+                    label="Show notification pop-ups"
+                    hint={
+                      s.notificationPopupsEnabled
+                        ? "Shows corner cards, companion notices, and system banners."
+                        : "Off keeps every notice in the top-right bell."
+                    }
+                  />
+                </Item>
+                <Item
+                  name="Team messages"
+                  desc="Notify on teammate messages."
+                >
+                  <Checkbox
+                    checked={s.teamMessageNotifications}
+                    onChange={(v) => patch({ teamMessageNotifications: v })}
+                    label="Notify me about team messages"
+                  />
+                  <Checkbox
+                    checked={s.teamMessagePreviews}
+                    disabled={!s.teamMessageNotifications}
+                    onChange={(v) => patch({ teamMessagePreviews: v })}
+                    label="Show message previews"
+                    hint={
+                      s.teamMessagePreviews
+                        ? "Shows the first line of the message. Notifications are kept in the bell on this device."
+                        : "Shows only who wrote; message text stays in the encrypted conversation."
+                    }
+                  />
+                  <Checkbox
+                    checked={s.teamMentionNotifications}
+                    onChange={(v) => patch({ teamMentionNotifications: v })}
+                    label="Always notify me when I'm mentioned"
+                    hint="Mentions of you, review requests to you and replies to your messages notify even in muted conversations or with team notifications off. @channel doesn't count."
+                  />
+                  <Checkbox
+                    checked={s.teamReadReceipts}
+                    onChange={(v) => patch({ teamReadReceipts: v })}
+                    label="Send and show read receipts"
+                    hint={
+                      s.teamReadReceipts
+                        ? "Teammates on Canopy 0.4.11 or later see when you've read their messages, and you see when they've read yours."
+                        : "Off: teammates don't see when you've read their messages, and you don't see when they've read yours."
+                    }
                   />
                 </Item>
               </>
@@ -2507,6 +2579,7 @@ export function SettingsDialog({ onClose, initialTab = "appearance", projects = 
             )}
           </div>
         </div>
+        </SettingsNavContext.Provider>
         <div className="settings-footer">
           <Button variant="accent" onClick={onClose}>
             Done

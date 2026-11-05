@@ -57,7 +57,8 @@ test('the runner says exactly why limits are off, and places, measures and limit
  await sampler.tick();
  assert.deepEqual(observed.map(o=>[o.id,o.bytes,o.workingSet]),[[7,GIB/2,GIB/4]],'the pass reports each terminal\'s working set, cache it can drop left out');
  assert.equal(await readFile(path.join(root,'sessions','7','cgroup.procs'),'utf8'),'41','pid 1 is never moved');
- assert.equal(await readFile(path.join(root,'sessions','7','memory.high'),'utf8'),String(GIB));
+ // 30% of the machine: a fixed allowance froze large builds on an idle machine.
+ assert.equal(await readFile(path.join(root,'sessions','7','memory.high'),'utf8'),String(2*GIB));
  assert.equal(await readFile(path.join(root,'sessions','7','memory.max'),'utf8'),'max');
  const snap=governor.snapshot();
  assert.equal(snap.sessions[0].current_bytes,GIB/2,'measured as the kernel charges it');
