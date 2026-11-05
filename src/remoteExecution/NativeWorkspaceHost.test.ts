@@ -398,7 +398,7 @@ it('parks terminal reconnects and heartbeats while the workspace is intentionall
 });
 
 it('reconnects a waiting terminal as soon as the workspace answers, not after its backoff',async()=>{
- vi.useFakeTimers();vi.setSystemTime(1000000);
+ vi.useFakeTimers();vi.setSystemTime(1000000);vi.spyOn(Math,'random').mockReturnValue(0.5);// the retry delay is jittered; pin it so the waits below are exact
  const invoke=vi.fn().mockImplementation(async(command:string)=>command==='canopy_account_request'?{connection,expiresAt:new Date(Date.now()+3600000).toISOString()}:undefined);
  const desktop={kind:'native',invoke,listen:vi.fn(),channel:vi.fn()} as unknown as Host;
  class Socket {static CONNECTING=0;static all:Socket[]=[];readyState=0;onopen?:()=>void;onclose?:()=>void;onmessage?:()=>void;onerror?:()=>void;constructor(){Socket.all.push(this);}close(){this.onclose?.();}}
@@ -422,7 +422,7 @@ it('reconnects a waiting terminal as soon as the workspace answers, not after it
   Socket.all.at(-1)!.close();
   await host.invoke('pty_renderer_sessions');await vi.advanceTimersByTimeAsync(0);
   expect(Socket.all).toHaveLength(before+1);
- }finally{host.dispose();vi.useRealTimers();}
+ }finally{host.dispose();vi.useRealTimers();vi.restoreAllMocks();}
 });
 
 it('keeps backing off when the host closes a stream right after its snapshot, instead of retrying every second',async()=>{

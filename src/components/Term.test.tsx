@@ -24,6 +24,13 @@ const xterm = vi.hoisted(() => ({
   },
 }));
 
+/** Whether the code under test thinks execution is on a workspace VM. */
+const hostMode = vi.hoisted(() => ({ remote: false }));
+vi.mock("../host", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../host")>()),
+  isRemoteHost: () => hostMode.remote,
+}));
+
 vi.mock("@xterm/xterm", () => {
   class Terminal {
     options: Record<string, unknown> = {};
@@ -329,6 +336,50 @@ describe("Term ended process recovery", () => {
   });
 });
 
+describe("Term when its pane is hidden", () => {
+  const setup = async () => {
+    const ipc = await import("../ipc");
+    vi.spyOn(ipc, "onPtyExit").mockResolvedValue(() => {});
+    const attach = vi.spyOn(ipc, "ptyAttachDesktop").mockResolvedValue({ generation: 1, cols: 80, rows: 24 } as Awaited<ReturnType<typeof ipc.ptyAttachDesktop>>);
+    const detach = vi.spyOn(ipc, "ptyDetachDesktop").mockResolvedValue(undefined);
+    const c = consumer(runTab());
+    const props = { cwd: "/w/site", active: true, attachId: 12, onSpawned: c.onSpawned, onExited: c.onExited };
+    const view = render(<Term {...props} streaming />);
+    await waitFor(() => expect(c.tab.ptyId).toBe(12));
+    return { attach, detach, props, view };
+  };
+
+  it("keeps a remote terminal's stream open, so switching tab or project never reconnects or blanks it", async () => {
+    hostMode.remote = true;
+    try {
+      const { attach, detach, props, view } = await setup();
+      for (let i = 0; i < 3; i++) {
+        view.rerender(<Term {...props} streaming={false} />);
+        await new Promise((resolve) => setTimeout(resolve, 30));
+        view.rerender(<Term {...props} streaming />);
+        await new Promise((resolve) => setTimeout(resolve, 30));
+      }
+      expect(detach).not.toHaveBeenCalled();
+      expect(attach).toHaveBeenCalledTimes(1);
+      view.unmount();
+      expect(detach).toHaveBeenCalledTimes(1); // closing the tab still releases it
+    } finally {
+      hostMode.remote = false;
+      vi.restoreAllMocks();
+    }
+  });
+
+  it("still detaches a local terminal when it is hidden, and attaches again when shown", async () => {
+    const { attach, detach, props, view } = await setup();
+    view.rerender(<Term {...props} streaming={false} />);
+    await waitFor(() => expect(detach).toHaveBeenCalledTimes(1));
+    view.rerender(<Term {...props} streaming />);
+    await waitFor(() => expect(attach).toHaveBeenCalledTimes(2));
+    view.unmount();
+    vi.restoreAllMocks();
+  });
+});
+
 describe("Term recovered attachment", () => {
   it("resumes every stream before starting the shared exit puller", async () => {
     // Earlier component tests install and remove their subscribers from the
@@ -482,3 +533,4 @@ describe("Term clipboard", () => {
     view.unmount();
   });
 });
+
