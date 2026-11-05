@@ -707,7 +707,10 @@ mod tests {
         let prepared = prepare(&state, false, &without).unwrap();
         assert_eq!(listing(&without), vec![".env.example", "readme.md"]);
         assert_eq!(prepared.env_files, 0);
-        assert!(prepared.skipped.iter().any(|s| s.contains("2 untracked files")));
+        assert!(prepared
+            .skipped
+            .iter()
+            .any(|s| s.contains("2 untracked files")));
         assert_eq!(
             prepared.artifacts.get("files.tgz").copied(),
             Some(std::fs::metadata(without.join("files.tgz")).unwrap().len())
