@@ -563,6 +563,9 @@ describe("researchEntryForFile", () => {
         "/Users/me/.canopy/research/p-123/0007-index-staleness/sources/01-x.md",
       ),
     ).toEqual({ projectId: "p-123", id: "0007-index-staleness" });
+    expect(
+      researchEntryForFile("/Users/me/.canopy/research/p-123/10000-past-four-digits/research.md"),
+    ).toEqual({ projectId: "p-123", id: "10000-past-four-digits" });
   });
 
   it("leaves ordinary files to the editor", () => {

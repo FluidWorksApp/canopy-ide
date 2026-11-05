@@ -36,6 +36,8 @@ test('admin failures are typed: unavailable, timeout, rejected, invalid response
  const fake=await fakeServiceAdmin((call,request,response)=>{
   if(call.path==='/admin/health'){return new Promise(()=>{});}
   if(call.path==='/admin/device'){response.writeHead(200);response.end('not json');return;}
+  if(call.path==='/admin/workspaces/alice/refused'){response.writeHead(400,{'content-type':'application/json'});response.end('not a research id: "x"');return;}
+  if(call.path==='/admin/workspaces/alice/broken'){response.writeHead(500);response.end('panic');return;}
   if(call.path==='/admin/workspaces/alice/query'){response.writeHead(200,{'content-type':'application/json'});response.end(JSON.stringify({blob:'x'.repeat(4096)}));return;}
   return [409,{error:'rollback',message:'Snapshot revision is older'}];
  });
@@ -43,6 +45,8 @@ test('admin failures are typed: unavailable, timeout, rejected, invalid response
   const admin=new ServiceAdmin({socketPath:fake.socketPath,timeoutMs:200,maxBytes:1024});
   await assert.rejects(admin.health(),error=>error.code==='timeout');
   await assert.rejects(admin.device(),error=>error.code==='invalid-response');
+  await assert.rejects(admin.call('POST','/admin/workspaces/alice/refused',{}),error=>error.code==='rejected'&&error.status===400&&error.message==='not a research id: "x"');
+  await assert.rejects(admin.call('POST','/admin/workspaces/alice/broken',{}),error=>error.code==='invalid-response');
   await assert.rejects(admin.call('POST','/admin/workspaces/alice/query',{}),error=>error.code==='invalid-response'&&/too large/.test(error.message));
   await assert.rejects(admin.putAccess('alice',{}),error=>error.code==='rejected'&&error.status===409&&error.message==='Snapshot revision is older');
   const before=fake.calls.length;

@@ -8,7 +8,7 @@
 import {mkdir,readdir,readFile,stat} from 'node:fs/promises';
 import path from 'node:path';
 
-const ID=/^\d{4}-[a-z0-9-]{1,64}$/;
+const ID=/^\d{4,}-[a-z0-9-]{1,64}$/;
 const MAX_FILES=64,MAX_BYTES=512*1024;
 const SKIP=new Set(['progress.txt']);
 

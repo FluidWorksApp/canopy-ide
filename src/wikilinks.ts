@@ -32,7 +32,7 @@ export interface WikilinkCandidates {
 const norm = (s: string) => s.trim().toLowerCase().replace(/\s+/g, " ");
 
 /** The `nnnn-slug` shape both stores mint ids in. */
-const looksLikeId = (s: string) => /^\d{4}-[a-z0-9-]+$/.test(s.trim());
+const looksLikeId = (s: string) => /^\d{4,}-[a-z0-9-]+$/.test(s.trim());
 
 /** The file this target names, if the corpus holds exactly one that fits.
  *

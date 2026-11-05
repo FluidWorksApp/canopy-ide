@@ -71,6 +71,10 @@ const BODY_MAX: usize = 24 * 1024;
 const SOURCE_MAX: usize = 512 * 1024;
 /// Sources per entry. An entry needing more than this is two entries.
 const MAX_SOURCES: usize = 64;
+/// Imported entries one project may gather automatically. A sweep adopts every
+/// research-like Markdown file, and a workspace holding many repositories has
+/// thousands that nobody chose. Explicit imports are not limited.
+const AUTO_IMPORT_MAX: usize = 2000;
 const TITLE_MAX: usize = 120;
 const QUESTION_MAX: usize = 600;
 /// Open questions per entry, each capped at DIGEST_MAX.
@@ -425,7 +429,8 @@ fn valid_id(id: &str) -> bool {
     let Some((num, slug)) = id.split_once('-') else {
         return false;
     };
-    num.len() == 4
+    // At least four digits: ids are minted `{next:04}`, which grows past 9999.
+    num.len() >= 4
         && num.bytes().all(|b| b.is_ascii_digit())
         && !slug.is_empty()
         && slug.len() <= 64
@@ -616,6 +621,49 @@ fn links_file(meta: &Meta, path: &str) -> bool {
         .files
         .iter()
         .any(|linked| canonical_path(linked) == canonical)
+}
+
+/// How many more entries a sweep may import into this project.
+fn auto_import_room(entries: &[Meta]) -> usize {
+    let imported = entries
+        .iter()
+        .filter(|meta| meta.tags.iter().any(|tag| tag == "imported"))
+        .count();
+    AUTO_IMPORT_MAX.saturating_sub(imported)
+}
+
+/// An entry whose import failed has no link to its file, so the next sweep
+/// would import that file again and leave another one behind. It does not stay.
+fn discard_if_failed<T>(dir: &Path, result: Result<T, String>) -> Result<T, String> {
+    if result.is_err() {
+        let _ = std::fs::remove_dir_all(dir);
+    }
+    result
+}
+
+/// Turn a freshly started entry into the record of an imported document.
+fn fill_imported(dir: &Path, file: &Path, path: &str, text: &str) -> Result<Summary, String> {
+    let mut meta = read_meta(dir)?;
+
+    write_imported_content(dir, &mut meta, file, path, text)?;
+
+    meta.digest = imported_digest(text);
+    meta.tags.push("imported".into());
+    meta.links.files.push(path.to_string());
+    // Researched, not researching: someone already did this work, and the entry
+    // is a record of it rather than a run waiting to finish. Nothing is going
+    // to arrive later to move it.
+    meta.history.push(HistoryEntry {
+        at: now_secs(),
+        from: Status::Researching.as_str().into(),
+        to: Status::Researched.as_str().into(),
+        by: "you".into(),
+        note: format!("imported from {path}"),
+    });
+    meta.status = Status::Researched;
+    meta.updated_at = now_secs();
+    write_meta(dir, &meta)?;
+    Ok(summarize(&meta))
 }
 
 fn write_imported_content(
@@ -1785,27 +1833,7 @@ impl ResearchStore {
             instance,
         )?;
         let dir = self.entry_dir(&project_id, &summary.id)?;
-        let mut meta = read_meta(&dir)?;
-
-        write_imported_content(&dir, &mut meta, file, path, text)?;
-
-        meta.digest = imported_digest(text);
-        meta.tags.push("imported".into());
-        meta.links.files.push(path.to_string());
-        // Researched, not researching: someone already did this work, and the entry
-        // is a record of it rather than a run waiting to finish. Nothing is going
-        // to arrive later to move it.
-        meta.history.push(HistoryEntry {
-            at: now_secs(),
-            from: Status::Researching.as_str().into(),
-            to: Status::Researched.as_str().into(),
-            by: "you".into(),
-            note: format!("imported from {path}"),
-        });
-        meta.status = Status::Researched;
-        meta.updated_at = now_secs();
-        write_meta(&dir, &meta)?;
-        Ok(summarize(&meta))
+        discard_if_failed(&dir, fill_imported(&dir, file, path, text))
     }
 
     /// Adopt research-like git-visible Markdown under the project's roots. Common
@@ -1823,8 +1851,9 @@ impl ResearchStore {
         let files = markdown_files(&roots);
         let matched = files.len();
         let _guard = self.lock.lock().unwrap();
-        let mut before: HashSet<String> = self
-            .load_project(&project_id)?
+        let entries = self.load_project(&project_id)?;
+        let room = auto_import_room(&entries);
+        let mut before: HashSet<String> = entries
             .into_iter()
             .flat_map(|meta| meta.links.files)
             .map(|path| canonical_path(&path))
@@ -1833,6 +1862,9 @@ impl ResearchStore {
         let mut skipped = 0;
 
         for path in files {
+            if imported >= room {
+                break;
+            }
             if before.contains(&path) {
                 continue;
             }
@@ -1961,8 +1993,9 @@ impl ResearchStore {
             }
         }
         let matched = seen.len();
-        let adopted: HashSet<String> = self
-            .load_project(&project_id)?
+        let entries = self.load_project(&project_id)?;
+        let room = auto_import_room(&entries);
+        let adopted: HashSet<String> = entries
             .into_iter()
             .flat_map(|meta| meta.links.files)
             .map(|path| canonical_path(&path))
@@ -1972,6 +2005,7 @@ impl ResearchStore {
             .filter(|path| !adopted.contains(&canonical_path(path)))
             .collect();
         candidates.sort();
+        candidates.truncate(room);
         Ok(SweepPlan {
             candidates,
             matched,
@@ -2295,6 +2329,7 @@ mod tests {
     fn ids_are_the_path_gate() {
         assert!(valid_id("0007-index-staleness"));
         assert!(valid_id("0001-a"));
+        assert!(valid_id("10000-past-four-digits"));
         // Anything that could address something else is simply not an id.
         assert!(!valid_id("../../etc/passwd"));
         assert!(!valid_id("0007-Index"));
@@ -2988,6 +3023,91 @@ mod tests {
                 .contains("read limit")
         );
         assert!(store.load_project("p1").unwrap().is_empty());
+    }
+
+    /// Entries on disk under `numbers`, each copied from a real imported one.
+    fn seed_entries(store: &ResearchStore, numbers: impl Iterator<Item = usize>) {
+        let roots = vec!["/workspace".to_string()];
+        let seed = store
+            .import_text_impl(
+                "p1".into(),
+                None,
+                Some(roots),
+                "/workspace/docs/seed.md".into(),
+                "# Seed\n\nA finding.\n".into(),
+                None,
+            )
+            .unwrap();
+        let mut meta = read_meta(&store.entry_dir("p1", &seed.id).unwrap()).unwrap();
+        for number in numbers {
+            meta.id = format!("{number:04}-seed");
+            meta.links.files = vec![format!("/workspace/docs/seed-{number}.md")];
+            let dir = store.entry_dir("p1", &meta.id).unwrap();
+            std::fs::create_dir_all(dir.join("sources")).unwrap();
+            write_meta(&dir, &meta).unwrap();
+        }
+    }
+
+    #[test]
+    fn an_import_past_entry_9999_is_adopted_once() {
+        let store = TempHome::new("id-overflow");
+        seed_entries(&store, std::iter::once(9999));
+        let roots = vec!["/workspace".to_string()];
+        let import = || {
+            store.import_text_impl(
+                "p1".into(),
+                None,
+                Some(roots.clone()),
+                "/workspace/docs/next.md".into(),
+                "# Next\n\nStill imports.\n".into(),
+                None,
+            )
+        };
+        let first = import().unwrap();
+        assert_eq!(first.id, "10000-next");
+        assert_eq!(first.status, "researched");
+        assert_eq!(import().unwrap().id, first.id, "a repeat finds the entry");
+        let plan = store
+            .sweep_plan(
+                "p1".into(),
+                roots.clone(),
+                vec!["/workspace/docs/next.md".into()],
+            )
+            .unwrap();
+        assert!(plan.candidates.is_empty(), "it is not imported again");
+    }
+
+    #[test]
+    fn a_failed_import_leaves_no_entry_behind() {
+        let store = TempHome::new("failed-import");
+        seed_entries(&store, std::iter::empty());
+        let kept = store.entry_dir("p1", "0001-seed").unwrap();
+        assert!(discard_if_failed(&kept, Ok(())).is_ok());
+        assert!(kept.exists());
+        assert!(discard_if_failed::<()>(&kept, Err("no".into())).is_err());
+        assert!(!kept.exists());
+    }
+
+    #[test]
+    fn a_sweep_stops_adopting_at_the_project_limit() {
+        let store = TempHome::new("sweep-limit");
+        seed_entries(&store, 2..AUTO_IMPORT_MAX);
+        let plan = |store: &ResearchStore| {
+            store
+                .sweep_plan(
+                    "p1".into(),
+                    vec!["/workspace".to_string()],
+                    vec!["/workspace/docs/a.md".into(), "/workspace/docs/b.md".into()],
+                )
+                .unwrap()
+        };
+        let room_for_one = plan(&store);
+        assert_eq!(room_for_one.matched, 2);
+        assert_eq!(room_for_one.candidates, vec!["/workspace/docs/a.md"]);
+        seed_entries(&store, std::iter::once(AUTO_IMPORT_MAX));
+        let full = plan(&store);
+        assert_eq!(full.matched, 2);
+        assert!(full.candidates.is_empty());
     }
 
     #[test]

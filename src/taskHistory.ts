@@ -703,7 +703,7 @@ export function resolveTaskFile(file: string, cwd: string): string {
 export function researchEntryForFile(
   file: string,
 ): { projectId: string; id: string } | null {
-  const m = /\/\.canopy\/research\/([^/]+)\/(\d{4}-[a-z0-9-]+)\//.exec(file);
+  const m = /\/\.canopy\/research\/([^/]+)\/(\d{4,}-[a-z0-9-]+)\//.exec(file);
   return m ? { projectId: m[1], id: m[2] } : null;
 }
 
