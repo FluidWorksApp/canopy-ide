@@ -64,6 +64,7 @@ import { ContextMenu, useContextMenu } from "./ContextMenu";
 import { CameraIcon } from "./icons";
 import type { AgentTarget } from "./TicketsPanel";
 import { Button } from "./ui";
+import { OpenInBrowserButton } from "./OpenInBrowserButton";
 
 /** A trusted press landed inside a previewed page, forwarded out of it by the
  *  injected picker. The page's own events never reach this window under either
@@ -1233,6 +1234,7 @@ export function PreviewView({
         <Button icon title="Reload" onClick={() => go(0)}>
           ↻
         </Button>
+        <OpenInBrowserButton url={url} />
         <form
           className="preview-url-form"
           onSubmit={(e) => {
