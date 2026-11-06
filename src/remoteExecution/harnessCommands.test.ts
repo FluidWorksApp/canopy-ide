@@ -40,12 +40,10 @@ describe("workspace research and mesh commands", () => {
     await harnessCommand("research_update", { id: "r1", body: "all new" }, value);
     expect(calls.at(-1)).toEqual(["action", "research_write", { action: "replace", text: "all new", id: "r1" }]);
   });
-  it("imports workspace files by sending their text, and sweeps with the service's plan", async () => {
+  it("imports workspace files by sending their text", async () => {
     const { value, calls } = io({ fs_read_range: { b64: btoa("# Notes"), size: 7 }, fs_list_files: ["/workspace/a.md", "/workspace/b.ts", "/workspace/c.md"], "research.sweep_plan": { candidates: ["/workspace/a.md"], matched: 2 } });
     await harnessCommand("research_import", { projectId: "p", path: "/workspace/a.md" }, value);
     expect(calls.at(-1)).toEqual(["action", "research_write", { action: "import_text", path: "/workspace/a.md", text: "# Notes" }]);
-    expect(await harnessCommand("research_sweep", { projectId: "p", roots: ["/workspace"] }, value)).toEqual({ imported: 1, matched: 2, skipped: 0 });
-    expect(calls).toContainEqual(["query", "research", "sweep_plan", { paths: ["/workspace/a.md", "/workspace/c.md"] }]);
   });
   it("imports a file bigger than one harness action in pieces, and refuses one past the service's limit", async () => {
     const big = "x".repeat(70 * 1024);

@@ -921,16 +921,12 @@ const ProjectViewBody = memo(function ProjectViewBody({
    *  state rather than read inline: these decide what effects are registered,
    *  and a change has to take hold without reopening the project. */
   const [sidePrefs, setSidePrefs] = useState(sidebarPrefs);
-  const [autoImportMarkdownResearch, setAutoImportMarkdownResearch] = useState(
-    () => getSettings().autoImportMarkdownResearch,
-  );
   const [restoreUserClosedSessions, setRestoreUserClosedSessions] = useState(
     () => getSettings().restoreUserClosedSessions,
   );
   useEffect(() => {
     const refresh = () => {
       setSidePrefs(sidebarPrefs());
-      setAutoImportMarkdownResearch(getSettings().autoImportMarkdownResearch);
       setRestoreUserClosedSessions(getSettings().restoreUserClosedSessions);
     };
     window.addEventListener(SETTINGS_CHANGE_EVENT, refresh);
@@ -1769,50 +1765,6 @@ const ProjectViewBody = memo(function ProjectViewBody({
   const rootsRef = useRef(roots);
   rootsRef.current = roots;
 
-  // Loose Markdown is research wherever it was written. Sweep on open and
-  // root changes, then again after a short quiet period when a watcher reports
-  // a Markdown write. The backend resolves by canonical path, so duplicate
-  // watcher events and overlapping component roots remain idempotent.
-  useEffect(() => {
-    if (!autoImportMarkdownResearch) return;
-    let alive = true;
-    let timer: number | undefined;
-    const sweep = () => {
-      if (!alive) return;
-      void ipc.researchSweep({
-        projectId: project.id,
-        projectName: project.name,
-        roots: rootsRef.current,
-      }).catch(() => {});
-    };
-    sweep();
-    const sub = ipc.onFsChange((event) => {
-      const normalizedRoot = event.root.replaceAll("\\", "/").replace(/\/$/, "");
-      const belongs = rootsRef.current.some((root) => {
-        const normalized = root.replaceAll("\\", "/").replace(/\/$/, "");
-        return (
-          normalized === normalizedRoot ||
-          normalized.startsWith(normalizedRoot + "/") ||
-          normalizedRoot.startsWith(normalized + "/")
-        );
-      });
-      if (
-        !belongs ||
-        event.kind === "remove" ||
-        (!event.overflow &&
-          !event.paths.some((path) => path.toLowerCase().endsWith(".md")))
-      ) {
-        return;
-      }
-      if (timer !== undefined) window.clearTimeout(timer);
-      timer = window.setTimeout(sweep, 500);
-    });
-    return () => {
-      alive = false;
-      if (timer !== undefined) window.clearTimeout(timer);
-      void sub.then((unlisten) => unlisten());
-    };
-  }, [autoImportMarkdownResearch, project.id, project.name, rootsKey]);
   // Set from the memo below; the restore loader reads it without having to
   // re-subscribe every time an event arrives.
   const liveSessionIdsRef = useRef<string[]>([]);

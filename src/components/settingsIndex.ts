@@ -69,7 +69,6 @@ export const SETTINGS_INDEX: SettingEntry[] = [
   { tab: "terminal", name: "Automatic session names", desc: "Agent callsign words.", tag: "New terminals only", keywords: ["titles", "rename", "tab names"] },
   { tab: "terminal", name: "Font and cursor", desc: "Monospace fonts found on this machine.", tag: "New terminals only", keywords: ["font size", "typeface", "cursor style", "blink", "line height"] },
   { tab: "terminal", name: "Scrollback", desc: "Lines of history each terminal keeps; applies to new terminals.", keywords: ["history", "buffer", "lines", "memory"] },
-  { tab: "privacy", name: "Markdown research import", desc: "Find research Markdown in open projects.", keywords: ["notes", "import", "obsidian"] },
   { tab: "privacy", name: "Crash reporting", desc: "Send crash details anonymously.", keywords: ["telemetry", "diagnostics", "errors", "privacy"] },
   { tab: "remote", name: "Remote access", desc: "Use your agents from your phone.", keywords: ["phone", "mobile", "tunnel", "pairing"] },
   { tab: "remote", name: "Your link", desc: "Permanent link.", keywords: ["url", "bookmark", "phone", "share"] },

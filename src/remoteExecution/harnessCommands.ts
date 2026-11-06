@@ -21,7 +21,7 @@ type Args = Record<string, unknown>;
 export const HARNESS_COMMANDS = [
   "research_list", "research_search", "research_get", "research_start", "research_update",
   "research_set_status", "research_link", "research_read_file", "research_for_file",
-  "research_delete", "research_import", "research_sweep", "research_dir",
+  "research_delete", "research_import", "research_dir",
   "context_claims", "context_claim_history", "context_claim_history_for_path",
   "context_messages", "context_mesh_severed", "context_release_claim", "context_mesh_sever",
   "context_mesh_job_update", "context_hotspot_claim",
@@ -44,7 +44,6 @@ const IMPORT_MAX = 512 * 1024;
 /** The gateway caps a harness action body at 256 KiB, so a larger import goes
  *  in pieces this many characters long (≤ 192 KiB even fully JSON-escaped). */
 const IMPORT_CHUNK = 32 * 1024;
-const QUERY_BATCH_BYTES = 48 * 1024;
 
 const items = <T>(value: unknown): T[] => {
   const rows = (value as { items?: unknown })?.items;
@@ -130,26 +129,6 @@ export async function harnessCommand(command: string, args: Args, io: HarnessIo)
       return null;
     case "research_import":
       return importText(io, String(args.path ?? ""));
-    case "research_sweep": {
-      // The service decides which files to adopt (sweep_plan applies the
-      // desktop sweep's rules); the workspace host lists and reads them.
-      const roots = (Array.isArray(args.roots) ? args.roots : []).map(String);
-      const files = await io.native<string[]>("fs_list_files", { roots, limit: 20000 });
-      const markdown = [...new Set(files.filter((path) => /\.md$/i.test(path)))];
-      let imported = 0, matched = 0, skipped = 0;
-      for (let start = 0; start < markdown.length;) {
-        const batch: string[] = [];let bytes = 0;
-        while (start < markdown.length && (bytes + markdown[start].length < QUERY_BATCH_BYTES || !batch.length)) {
-          bytes += markdown[start].length + 4;batch.push(markdown[start++]);
-        }
-        const plan = await io.query<{ candidates: string[]; matched: number }>("research", "sweep_plan", { paths: batch });
-        matched += plan.matched;
-        for (const path of plan.candidates) {
-          try { await importText(io, path); imported++; } catch { skipped++; }
-        }
-      }
-      return { imported, matched, skipped };
-    }
     case "research_dir":
       // The entry itself is on the service's machine, which a workspace agent
       // cannot write; its run writes prose and progress in a directory in the

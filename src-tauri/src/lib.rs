@@ -834,7 +834,6 @@ pub fn run() {
             research::research_read_file,
             research::research_dir,
             research::research_import,
-            research::research_sweep,
             research::research_for_file,
             research::research_delete,
             notes::notes_list,

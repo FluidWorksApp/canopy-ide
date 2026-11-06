@@ -931,19 +931,14 @@ async fn the_research_panel_is_served_with_file_contents_the_host_read() {
     let runner = FakeRunner::start().await;
     daemon.register(WS, Some(&runner)).await;
 
-    // The sweep: the host lists Markdown, the service picks what to adopt.
-    let (status, plan) = ask_research(
+    // An app from before automatic import was removed stops at its first call.
+    let (status, refused) = ask_research(
         &daemon,
         "sweep_plan",
-        serde_json::json!({"paths":["/workspace/docs/spike.md","/workspace/README.md","/elsewhere/x.md"]}),
+        serde_json::json!({"paths":["/workspace/docs/spike.md"]}),
     )
     .await;
-    assert_eq!(status, 200, "{plan}");
-    assert_eq!(
-        plan["candidates"],
-        serde_json::json!(["/workspace/docs/spike.md"])
-    );
-    assert_eq!(plan["matched"], 1);
+    assert_eq!(status, 400, "{refused}");
 
     let (status, entry) = act(
         &daemon,
@@ -954,14 +949,6 @@ async fn the_research_panel_is_served_with_file_contents_the_host_read() {
     assert_eq!(status, 200, "{entry}");
     assert_eq!(entry["title"], "Spike");
     let id = entry["id"].as_str().unwrap().to_string();
-    let (_, plan) = ask_research(
-        &daemon,
-        "sweep_plan",
-        serde_json::json!({"paths":["/workspace/docs/spike.md"]}),
-    )
-    .await;
-    assert_eq!(plan["candidates"], serde_json::json!([]));
-
     let (status, found) = ask_research(
         &daemon,
         "for_file",

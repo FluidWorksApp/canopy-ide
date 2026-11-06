@@ -42,15 +42,12 @@ describe("Onboarding", () => {
     await user.click(screen.getByRole("tab", { name: /slide 7: one search for everything/i }));
     await user.click(screen.getByRole("checkbox", { name: /search across every project/i }));
 
-    await user.click(screen.getByRole("tab", { name: /slide 8: research and scratchpad/i }));
-    await user.click(screen.getByRole("checkbox", { name: /automatically import project research/i }));
 
     expect(getSettings()).toMatchObject({
       keymapProfile: "vscode",
       defaultProjectLens: "build",
       dictationTriggerMode: "doubleTap",
       spotSearchAllProjects: true,
-      autoImportMarkdownResearch: false,
     });
   });
 

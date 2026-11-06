@@ -366,7 +366,6 @@ Counts: **(a) 11 · (b) 62 · (c) 148 · (d) 13 · test 2**.
 | `research_search` | c | canopy-service via /harness/query or /harness/actions (src/remoteExecution/harnessCommands.ts) |
 | `research_set_status` | c | canopy-service via /harness/query or /harness/actions (src/remoteExecution/harnessCommands.ts) |
 | `research_start` | c | canopy-service via /harness/query or /harness/actions (src/remoteExecution/harnessCommands.ts) |
-| `research_sweep` | c | canopy-service via /harness/query or /harness/actions (src/remoteExecution/harnessCommands.ts) |
 | `research_update` | c | canopy-service via /harness/query or /harness/actions (src/remoteExecution/harnessCommands.ts) |
 | `selftest_checkpoint` | b | LOCAL_UI: Desktop self-test harness state. |
 | `selftest_checkpoint_save` | b | LOCAL_UI: Desktop self-test harness state. |
