@@ -28793,3 +28793,123 @@ a.btn-sm {
   0%, 35% { background: color-mix(in srgb, var(--accent) 22%, transparent); }
   100% { background: transparent; }
 }
+
+/* ---------- component picker ---------- */
+
+.cpick {
+  width: min(620px, 88vw);
+}
+
+.cpick-title {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.13em;
+  text-transform: uppercase;
+  color: var(--text);
+  padding: 16px 20px 0;
+}
+
+.cpick-title-dim {
+  color: var(--text-faint);
+}
+
+.cpick-field {
+  position: relative;
+  padding: 6px 20px 10px;
+}
+
+/* The ghost sits behind the input at exactly its metrics, so the grey letters
+   continue what is typed. The input's own background must stay clear. */
+.cpick-ghost,
+.cpick-input {
+  font-size: 28px;
+  font-weight: 700;
+  letter-spacing: -0.01em;
+  line-height: 1.25;
+  padding: 6px 0;
+  font-family: inherit;
+  box-sizing: border-box;
+  width: 100%;
+}
+
+.cpick-ghost {
+  position: absolute;
+  left: 20px;
+  right: 20px;
+  top: 6px;
+  white-space: pre;
+  overflow: hidden;
+  pointer-events: none;
+  color: var(--text-faint);
+}
+
+.cpick-ghost-typed {
+  visibility: hidden;
+}
+
+.cpick-input {
+  position: relative;
+  background: transparent;
+  border: none;
+  border-bottom: 2px solid var(--accent);
+  border-radius: 0;
+  color: var(--text);
+  outline: none;
+}
+
+.cpick-input::placeholder {
+  color: var(--text-faint);
+  font-weight: 700;
+}
+
+.cpick-row {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  padding: 9px 20px;
+}
+
+.cpick-name {
+  font-size: 15px;
+  font-weight: 700;
+  color: var(--text);
+}
+
+.cpick-path {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text-dim);
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.cpick-tag {
+  font-family: var(--font-mono);
+  font-size: 9px;
+  font-weight: 600;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--accent);
+  border: 1px solid color-mix(in srgb, var(--accent) 45%, transparent);
+  border-radius: 999px;
+  padding: 1px 7px;
+}
+
+.cpick-tag-current {
+  color: var(--text-dim);
+  border-color: var(--border-strong);
+}
+
+.cpick-hint {
+  display: flex;
+  gap: 16px;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--text-faint);
+  padding: 9px 20px 12px;
+  border-top: 1px solid var(--border);
+}
