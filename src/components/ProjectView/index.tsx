@@ -455,6 +455,8 @@ import { digestBySurface } from "../../agentSessions";
 import { StatusBar } from "../StatusBar";
 import { Palette, type PaletteMode } from "../Palette";
 import { LaunchPalette } from "../LaunchPalette";
+import { ComponentPicker } from "../ComponentPicker";
+import { recentComponentIds, recordRecentComponent, type PickerComponent } from "../../componentPicker";
 import { SpotSearch } from "../SpotSearch";
 import type { SpotAction } from "../../spotSources";
 import { capturePageContext, composeTaskBrief } from "../../spotContext";
@@ -1739,6 +1741,31 @@ const ProjectViewBody = memo(function ProjectViewBody({
   // worktree is activated — disagreeing with the panel's own terminal button.
   const componentsRef = useRef(components);
   componentsRef.current = components;
+  // "Open it in which component?" for a new shell or agent when the project has
+  // several, so the choice is the person's rather than whichever came first.
+  // Resolves null if they cancel, and straight away (no dialog) with the only
+  // component when there is one. Called from user gestures only: session
+  // restore, workflows and task spawns go through addTerminal / launchCli
+  // directly and must never wait on a dialog nobody is looking at.
+  const [componentPick, setComponentPick] = useState<{
+    title: string;
+    resolve: (component: PickerComponent | null) => void;
+  } | null>(null);
+  const pickComponent = useCallback(
+    (title: string) =>
+      new Promise<PickerComponent | null>((resolve) => {
+        const list = componentsRef.current;
+        if (list.length < 2) {
+          resolve(list[0] ?? null);
+          return;
+        }
+        setComponentPick((previous) => {
+          previous?.resolve(null);
+          return { title, resolve };
+        });
+      }),
+    [],
+  );
   const rootsRef = useRef(roots);
   rootsRef.current = roots;
 
@@ -5486,8 +5513,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
         closeTabRef.current(activeTabIdRef.current, "user");
     };
     const newTerminalHandler = () => {
-      const first = componentsRef.current[0];
-      if (first) addTerminal(first.path);
+      void pickComponent("New shell").then((component) => component && addTerminal(component.path));
     };
     const toggleSidebarHandler = () => {
       setPinned((v) => !v);
@@ -12564,13 +12590,14 @@ const ProjectViewBody = memo(function ProjectViewBody({
       completePendingSplit({ title: "shell" });
       return;
     }
-    const cwd = activeContextRoot ?? componentsRef.current[0]?.path;
-    if (cwd) addTerminal(cwd);
-  }, [activeContextRoot, addTerminal, completePendingSplit]);
+    void pickComponent("New shell").then((component) => component && addTerminal(component.path));
+  }, [addTerminal, completePendingSplit, pickComponent]);
   const onLaunchCli = useCallback(
-    (cli: AgentCli, where?: "workspace" | "current") =>
-      launchCli(cli, undefined, where),
-    [launchCli],
+    async (cli: AgentCli, where?: "workspace" | "current") => {
+      const component = await pickComponent(`New ${cli.name}`);
+      if (component) await launchCli(cli, component.path, where);
+    },
+    [launchCli, pickComponent],
   );
   const onRunCliUpdate = useCallback(
     (cli: AgentCli, _e: React.MouseEvent) => runCliUpdate(cli),
@@ -12662,7 +12689,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
           return;
         case "launch-cli": {
           const cli = agentCliFor(action.cliId);
-          if (cli) launchCli(cli);
+          if (cli) void onLaunchCli(cli);
           return;
         }
         case "open-file":
@@ -14184,7 +14211,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
             <div className="launch-grid">
               <button
                 className="launch-card"
-                onClick={() => components[0] && addTerminal(components[0].path)}
+                onClick={() => onNewShell()}
               >
                 <TerminalIcon size={26} />
                 <span>Shell</span>
@@ -14193,7 +14220,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
                 <button
                   key={cli.id}
                   className="launch-card"
-                  onClick={() => launchCli(cli)}
+                  onClick={() => void onLaunchCli(cli)}
                   title={
                     installed[cli.bin] !== false
                       ? cli.bin
@@ -15401,6 +15428,27 @@ const ProjectViewBody = memo(function ProjectViewBody({
           ]}
         />
       )}
+      {componentPick && visible && (
+        <ComponentPicker
+          title={componentPick.title}
+          components={components}
+          recents={recentComponentIds(project.id)}
+          // Only when a tab is actually in front: with none open the active folder
+          // falls back to the first component, which is not "this tab".
+          activePath={activeTab ? activeContextRoot : null}
+          onPick={(component) => {
+            const { resolve } = componentPick;
+            setComponentPick(null);
+            recordRecentComponent(project.id, component.id);
+            resolve(component);
+          }}
+          onCancel={() => {
+            const { resolve } = componentPick;
+            setComponentPick(null);
+            resolve(null);
+          }}
+        />
+      )}
       {launcherOpen && visible && (
         <LaunchPalette
           installed={installed}
@@ -15418,6 +15466,13 @@ const ProjectViewBody = memo(function ProjectViewBody({
             setLauncherOpen(false);
           }}
           onLaunchCli={(cli, where) => {
+            if (!pendingSplitRef.current) {
+              setLauncherOpen(false);
+              void pickComponent(`New ${cli.name}`).then((component) => {
+                if (component) void launchCli(cli, component.path, where);
+              });
+              return;
+            }
             void launchCli(cli, activeContextRoot ?? undefined, where).finally(() => {
               setLauncherOpen(false);
               // A successful split consumes this itself. Clear only a launch

@@ -56,7 +56,11 @@ import {harnessAction,harnessFailure,harnessQuery,pipeHarnessStream} from './ser
 import {nativeTimeoutMs} from './native-commands.mjs';
 import {InputLedger,SocketInput,TERMINAL_INPUT_PROTOCOL,BINARY_TERMINAL_INPUT_PROTOCOL,forwardInput,inputKey,sequencedInput} from './terminal-input.mjs';
 
-export function createGateway({ config, workspaces, origins = [], elasticMemory, elasticCpu, machineMetrics = typeof workspaces?.inspectRuntime === 'function' ? new MachineMetrics({ inspect: runtime => workspaces.inspectRuntime(runtime) }) : null, authorizeMember, authorizeRuntime, supervisor, credentialVault, sharedAccounts, credentialTickets, sharingAttest, sharedCatalog, brokerOptions={}, renewMember, now=Date.now, hostStorage=createHostStorage(), harness }) {
+/** Requests in flight, scaled to the machine. `perPrincipal` counts requests a
+ * client is still waiting for; `total` also counts work whose client has gone. */
+export const admissionLimits=cpus=>({perPrincipal:Math.max(8,cpus*4),total:Math.max(32,cpus*8)});
+
+export function createGateway({ config, workspaces, origins = [], cpus = os.availableParallelism(), elasticMemory, elasticCpu, machineMetrics = typeof workspaces?.inspectRuntime === 'function' ? new MachineMetrics({ inspect: runtime => workspaces.inspectRuntime(runtime) }) : null, authorizeMember, authorizeRuntime, supervisor, credentialVault, sharedAccounts, credentialTickets, sharingAttest, sharedCatalog, brokerOptions={}, renewMember, now=Date.now, hostStorage=createHostStorage(), harness }) {
   validateConfig(config);
   // Members' names as the control plane gives them (their Git identity), for
   // the per-person usage teammates in the same workspace see.
@@ -135,7 +139,9 @@ export function createGateway({ config, workspaces, origins = [], elasticMemory,
     const broker=new CredentialBroker({...brokerOptions,authorize:async(p,c)=>{if(options.isSessionActive&&!options.isSessionActive())return null;const grant=await cliAuthority(p,c);return grant?.accountId===claims.accountId?grant:null;},loadCredential:loadSharedCredential});
     return broker.execute(principal,input,options);
   }}):null;
-  const active = new Map();
+  const active = new Map(), connected = new Map(), limits = admissionLimits(cpus);
+  const increment = (counts, id) => counts.set(id, (counts.get(id) ?? 0) + 1);
+  const decrement = (counts, id) => { const count = (counts.get(id) ?? 1) - 1; if (count) counts.set(id, count); else counts.delete(id); };
   const total = counts => [...counts.values()].reduce((sum, count) => sum + count, 0);
   const idleAttestation=config.managedSession?new IdleAttestation({config,host:workspaces,authorizeRuntime,now,busy:()=>total(active)>1||total(streams)>0||workspaces.pending?.size>0||leases.pending.size>0||leases.entries.size>0||sharedSessions.entries.size>0||sharedSessions.pendingStops.size>0||cliSessions?.active.size>0||cliSessions?.pending.size>0||[...sessionViewLeases.entries.values()].some(entry=>entry.principal.expiresAt>now())||cliSessions?.entries.size>0,closeBusy:()=>total(active)>1||total(streams)>0||workspaces.pending?.size>0||leases.pending.size>0||leases.entries.size>0||sharedSessions.entries.size>0||sharedSessions.pendingStops.size>0||cliSessions?.active.size>0||cliSessions?.pending.size>0||[...sessionViewLeases.entries.values()].some(entry=>entry.principal.expiresAt>now())||[...(cliSessions?.entries.values()??[])].some(entry=>!entry.isOwner)}):null;
   const harnessStreams=new Map();
@@ -183,8 +189,14 @@ export function createGateway({ config, workspaces, origins = [], elasticMemory,
     catch { return json(response, 401, { error: 'Unauthorized' }); }
     if(config.managedSession&&principal.id==='managed-account'&&!principal.memberId&&Number.isFinite(principal.expiresAt)){const old=ownerLeases.get(config.managedSession.workspaceId);if(!old||old.expiresAt<=principal.expiresAt)ownerLeases.set(config.managedSession.workspaceId,{...principal,lastClientAt:now()});}
     if (process.env.CANOPY_INSTANCE_NAME) response.setHeader('x-canopy-instance', process.env.CANOPY_INSTANCE_NAME);
-    if ((active.get(principal.id) ?? 0) >= 8 || total(active) >= 32) return json(response, 429, { error: 'Too many pending operations' });
-    active.set(principal.id, (active.get(principal.id) ?? 0) + 1);
+    if ((connected.get(principal.id) ?? 0) >= limits.perPrincipal || total(active) >= limits.total) return json(response, 429, { error: 'Workspace is busy. Try again shortly.' });
+    increment(active, principal.id); increment(connected, principal.id);
+    // A client that left stops counting against its owner at once, or a relaunch
+    // is locked out by its own abandoned requests. The work is not cancelled: the
+    // runner would not stop, and a session must still be bound when it starts.
+    let left = false;
+    const leave = () => { if (!left) { left = true; decrement(connected, principal.id); } };
+    response.once('close', leave);
     try {
       const route = new URL(request.url, 'http://gateway').pathname;
       if (route === '/v1/workspaces' && request.method === 'GET') {
@@ -433,8 +445,7 @@ export function createGateway({ config, workspaces, origins = [], elasticMemory,
       if(response.headersSent){response.destroy();return;}
       json(response, error.message === 'Forbidden' ? 403 : 400, { error: error.message });
     } finally {
-      const count = (active.get(principal.id) ?? 1) - 1;
-      if (count) active.set(principal.id, count); else active.delete(principal.id);
+      leave(); decrement(active, principal.id);
     }
   });
   const wss = new WebSocketServer({ noServer: true, maxPayload: 1024 * 1024, perMessageDeflate: false });

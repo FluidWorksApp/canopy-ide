@@ -32,6 +32,28 @@ it("the main window keeps running while it is hidden", () => {
   const config = JSON.parse(readFileSync("src-tauri/tauri.conf.json", "utf8"));
   expect(config.app.windows[0].backgroundThrottling).toBe("disabled");
 });
+const busy=()=>new Response(JSON.stringify({error:'Workspace is busy. Try again shortly.'}),{status:429});
+it('an action waits for a busy host instead of failing',async()=>{
+ vi.useFakeTimers();
+ try{
+  const fetcher=vi.fn();for(let i=0;i<7;i++)fetcher.mockResolvedValueOnce(busy());fetcher.mockResolvedValueOnce(new Response(JSON.stringify({opened:true}),{status:200}));
+  vi.stubGlobal('fetch',fetcher);const client=new RemoteExecutionClient('https://patient.example','token');
+  const opened=client.workspace('alice','/open',{});await vi.advanceTimersByTimeAsync(20_000);
+  await expect(opened).resolves.toEqual({opened:true});expect(fetcher).toHaveBeenCalledTimes(8);
+ }finally{vi.useRealTimers();}
+});
+it('an action stops waiting after 30 seconds and a poll after one',async()=>{
+ vi.useFakeTimers();
+ try{
+  const fetcher=vi.fn().mockImplementation(async()=>busy());vi.stubGlobal('fetch',fetcher);
+  const client=new RemoteExecutionClient('https://impatient.example','token');
+  const action=client.workspace('alice','/open',{}).catch(error=>error);await vi.advanceTimersByTimeAsync(40_000);
+  expect(String(await action)).toContain('busy');const attempts=fetcher.mock.calls.length;expect(attempts).toBeGreaterThan(5);
+  fetcher.mockClear();
+  const poll=client.workspace('alice','/sessions').catch(error=>error);await vi.advanceTimersByTimeAsync(2000);
+  expect(String(await poll)).toContain('busy');expect(fetcher).toHaveBeenCalledTimes(3);
+ }finally{vi.useRealTimers();}
+});
 it('retries only admission rejection and never repeats an admitted mutation after failure',async()=>{
  const fetcher=vi.fn().mockResolvedValueOnce(new Response(JSON.stringify({error:'Too many pending operations'}),{status:429})).mockResolvedValueOnce(new Response(JSON.stringify({saved:true}),{status:200}));
  vi.stubGlobal('fetch',fetcher);const client=new RemoteExecutionClient('https://admission.example','token');

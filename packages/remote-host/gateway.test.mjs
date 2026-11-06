@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import http from 'node:http';
 import { once } from 'node:events';
-import { createGateway } from './gateway.mjs';
+import { admissionLimits, createGateway } from './gateway.mjs';
 import { createRunner } from './runner.mjs';
 import { digest } from './policy.mjs';
 import { WebSocket } from 'ws';
@@ -129,7 +129,7 @@ test('global admission refuses the 33rd pending operation across different ident
   const server = createGateway({ config: {
     workspaces: [{ id: 'shared', accounts: [], memoryMiB: 1024, cpus: 1 }],
     principals: Array.from({ length: 33 }, (_, i) => ({ id: `user-${i}`, tokenSha256: digest(`test-${i}`), workspaces: ['shared'], scope: 'view' })),
-  }, workspaces: { open: async () => { if (++opened === 32) ready(); await gate; return { url: runtimeUrl, token: 'synthetic' }; } } });
+  }, cpus: 1, workspaces: { open: async () => { if (++opened === 32) ready(); await gate; return { url: runtimeUrl, token: 'synthetic' }; } } });
   const url = await listen(server);
   const request = i => fetch(`${url}/v1/workspaces/shared/sessions`, { headers: { authorization: `Bearer test-${i}` } });
   const pending = Array.from({ length: 32 }, (_, i) => request(i));
@@ -140,6 +140,62 @@ test('global admission refuses the 33rd pending operation across different ident
     release();
     assert.ok((await Promise.all(pending)).every(response => response.status === 200));
   } finally { release(); await Promise.allSettled(pending); await close(server); await close(runtime); }
+});
+
+test('admission limits scale with the machine and keep their floor on a small one', () => {
+  assert.deepEqual(admissionLimits(1), { perPrincipal: 8, total: 32 });
+  assert.deepEqual(admissionLimits(16), { perPrincipal: 64, total: 128 });
+});
+
+async function heldGateway(cpus) {
+  const runtime = http.createServer((_, response) => { response.setHeader('content-type', 'application/json'); response.end('[]'); });
+  const runtimeUrl = await listen(runtime);
+  let release, opened = 0; const waiters = [];
+  const gate = new Promise(resolve => { release = resolve; });
+  const reached = count => new Promise(resolve => { if (opened >= count) resolve(); else waiters.push({ count, resolve }); });
+  const server = createGateway({ config: {
+    workspaces: [{ id: 'shared', accounts: [], memoryMiB: 1024, cpus: 1 }],
+    principals: [{ id: 'owner', tokenSha256: digest('owner'), workspaces: ['shared'], scope: 'view' }],
+  }, cpus, workspaces: { open: async () => { opened++; for (const w of waiters) if (opened >= w.count) w.resolve(); await gate; return { url: runtimeUrl, token: 'synthetic' }; } } });
+  const url = await listen(server);
+  const send = signal => fetch(`${url}/v1/workspaces/shared/sessions`, { headers: { authorization: 'Bearer owner' }, signal });
+  return { send, reached, release, stop: async () => { release(); await close(server); await close(runtime); } };
+}
+const admitted = async (send, reached, count) => { const client = new AbortController(); const requests = Array.from({ length: count }, () => send(client.signal).catch(() => null)); await reached(count); return { client, requests }; };
+
+test('a client that left does not lock its owner out', async () => {
+  const { send, reached, release, stop } = await heldGateway(1);
+  try {
+    const { client, requests } = await admitted(send, reached, 8);
+    assert.equal((await send()).status, 429);
+    client.abort(); await Promise.all(requests);
+    let next; for (let i = 0; i < 100; i++) { next = send(); const raced = await Promise.race([next, reached(9).then(() => null)]); if (raced === null) break; await new Promise(resolve => setTimeout(resolve, 10)); }
+    await reached(9); release();
+    assert.equal((await next).status, 200);
+  } finally { await stop(); }
+});
+
+test('work whose client left still counts toward the machine total', async () => {
+  const { send, reached, stop } = await heldGateway(1);
+  try {
+    for (let batch = 1; batch <= 4; batch++) {
+      const client = new AbortController();
+      const requests = Array.from({ length: 8 }, () => send(client.signal).catch(() => null));
+      await reached(batch * 8); client.abort(); await Promise.all(requests);
+      await new Promise(resolve => setTimeout(resolve, 50));
+    }
+    assert.equal((await send()).status, 429);
+  } finally { await stop(); }
+});
+
+test('a large machine admits more than the small-machine floor', async () => {
+  const { send, reached, release, stop } = await heldGateway(16);
+  try {
+    const { requests } = await admitted(send, reached, 64);
+    assert.equal((await send()).status, 429);
+    release();
+    assert.ok((await Promise.all(requests)).every(response => response.status === 200));
+  } finally { await stop(); }
 });
 
 test('removing a principal disconnects an established stream',async()=>{

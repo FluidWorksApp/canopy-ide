@@ -1,6 +1,10 @@
 import {requestQueue,requestPriority} from './requestQueue';
 import {connectionKey,reportConnection} from './connectionState';
 import {nativeTimeoutMs} from '../../packages/remote-host/native-commands.mjs';
+// How long a request waits for the host to admit it. An action someone asked for
+// waits; a poll retries on its next tick, and late keystrokes are worse than none.
+const ACTION_ADMISSION_WAIT_MS=30_000;
+const QUICK_ADMISSION_WAIT_MS=1000;
 export interface RemoteWorkspace {
   id: string;
   name: string;
@@ -36,9 +40,9 @@ export class RemoteExecutionClient {
   private readonly resolveToken?: () => Promise<string>;
   constructor(endpoint: string, token: string, resolveToken?: () => Promise<string>) { this.endpoint = remoteEndpoint(endpoint); this.token = token; this.resolveToken = resolveToken; }
   async request<T>(route: string, args?: unknown, priority=requestPriority(route,args)): Promise<T> {
-    return requestQueue(this.endpoint).run(priority,()=>this.performRequest<T>(route,args));
+    return requestQueue(this.endpoint).run(priority,()=>this.performRequest<T>(route,args,priority===1?ACTION_ADMISSION_WAIT_MS:QUICK_ADMISSION_WAIT_MS));
   }
-  private async performRequest<T>(route: string, args?: unknown, retries=0): Promise<T> {
+  private async performRequest<T>(route: string, args: unknown, patienceMs: number, waitedMs=0): Promise<T> {
     const id=route.match(/^\/workspaces\/([a-z][a-z0-9-]*)(?:\/|$)/)?.[1];
     const key=id?connectionKey(this.endpoint,id):null;
     let response:Response,token:string;
@@ -53,10 +57,11 @@ export class RemoteExecutionClient {
       body: args === undefined ? undefined : JSON.stringify(args), signal: AbortSignal.timeout(route.endsWith("/native") ? Math.max(30_000, nativeTimeoutMs((args as {command?:string})?.command) + 15_000) : 30_000),
     });
     } catch(error) { if(key)reportConnection(key,'reconnecting');throw error; }
-    if(response.status===429&&retries<2){
+    if(response.status===429&&waitedMs<patienceMs){
       // A rejected request was never admitted: retrying it cannot repeat a mutation.
-      await new Promise(resolve=>setTimeout(resolve,500));
-      return this.performRequest<T>(route,args,retries+1);
+      const delay=Math.min(4000,Math.max(500,waitedMs));
+      await new Promise(resolve=>setTimeout(resolve,delay));
+      return this.performRequest<T>(route,args,patienceMs,waitedMs+delay);
     }
     const result = await response.json();
     const unavailable=response.status>=500 || /^(fetch failed|Workspace.*(?:unavailable|unreachable)|connect E(?:CONNREFUSED|TIMEDOUT))/i.test(String(result.error??''));
