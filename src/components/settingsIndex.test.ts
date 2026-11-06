@@ -48,7 +48,7 @@ const EXPECTED:Record<string,string[]>={
   "editor":["File associations", "Font and cursor", "Keyboard shortcuts"],
   "mascot":["Mascot"],
   "notifications":["Ask for attention", "Notification pop-ups", "Team messages"],
-  "privacy":["Crash reporting", "Markdown research import"],
+  "privacy":["Crash reporting"],
   "remote":["On this network", "Public link", "Reach", "Remote access", "Remote access", "Scan to connect", "Your link"],
   "rules":["Rules"],
   "sessions":["At the budget", "Ctrl+Tab switching", "Hibernate idle agents", "Live agents per project", "New agents get a workspace", "Prototype session cap", "Restore sessions I close", "Session budget", "Set up new workspaces", "Settle into Idle after", "Spend & outcomes", "Stack tabs by status", "Workspace ports"],
@@ -69,7 +69,7 @@ describe('the settings index',()=>{
     for(const r of itemsInSource())(found[r.tab]??=[]).push(r.name);
     for(const tab of Object.keys(found))found[tab].sort();
     expect(found).toEqual(EXPECTED);
-    expect(Object.values(found).flat().length).toBe(81);// none lost, none doubled
+    expect(Object.values(found).flat().length).toBe(80);// none lost, none doubled
   });
   it('shows each setting\'s current description, so a reworded one cannot leave search showing the old text',()=>{
     const stale:string[]=[];

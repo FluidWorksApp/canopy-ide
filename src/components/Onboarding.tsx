@@ -377,14 +377,6 @@ export function Onboarding({ onClose, onCreateProject }: OnboardingProps) {
                 hint="Off keeps searches inside the project you are viewing."
               />
             )}
-            {step === 7 && (
-              <Checkbox
-                checked={settings.autoImportMarkdownResearch}
-                onChange={(autoImportMarkdownResearch) => patch({ autoImportMarkdownResearch })}
-                label="Automatically import project research"
-                hint="Canopy recognizes research-like Markdown and skips policies, instructions, and generated files."
-              />
-            )}
           </div>
         </div>
 

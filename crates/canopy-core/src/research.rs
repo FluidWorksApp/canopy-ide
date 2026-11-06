@@ -36,7 +36,6 @@
 use crate::events::{EventSink, Store, StoreChange};
 use crate::project::Project;
 use serde::{Deserialize, Serialize};
-use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
@@ -71,10 +70,6 @@ const BODY_MAX: usize = 24 * 1024;
 const SOURCE_MAX: usize = 512 * 1024;
 /// Sources per entry. An entry needing more than this is two entries.
 const MAX_SOURCES: usize = 64;
-/// Imported entries one project may gather automatically. A sweep adopts every
-/// research-like Markdown file, and a workspace holding many repositories has
-/// thousands that nobody chose. Explicit imports are not limited.
-const AUTO_IMPORT_MAX: usize = 2000;
 const TITLE_MAX: usize = 120;
 const QUESTION_MAX: usize = 600;
 /// Open questions per entry, each capped at DIGEST_MAX.
@@ -623,15 +618,6 @@ fn links_file(meta: &Meta, path: &str) -> bool {
         .any(|linked| canonical_path(linked) == canonical)
 }
 
-/// How many more entries a sweep may import into this project.
-fn auto_import_room(entries: &[Meta]) -> usize {
-    let imported = entries
-        .iter()
-        .filter(|meta| meta.tags.iter().any(|tag| tag == "imported"))
-        .count();
-    AUTO_IMPORT_MAX.saturating_sub(imported)
-}
-
 /// An entry whose import failed has no link to its file, so the next sweep
 /// would import that file again and leave another one behind. It does not stay.
 fn discard_if_failed<T>(dir: &Path, result: Result<T, String>) -> Result<T, String> {
@@ -701,22 +687,6 @@ fn write_imported_content(
     )
 }
 
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct SweepSummary {
-    imported: usize,
-    matched: usize,
-    skipped: usize,
-}
-
-/// What `sweep_plan` answers: the paths still to import, and how many paths
-/// qualified at all (`matched` in the sweep summary).
-#[derive(Debug, Serialize)]
-pub struct SweepPlan {
-    pub candidates: Vec<String>,
-    pub matched: usize,
-}
-
 /// A path named by a caller that can see a file this host cannot (a container
 /// path): normalised by text alone, never resolved through this host's disk.
 fn lexical_path(path: &str) -> Result<PathBuf, String> {
@@ -735,212 +705,6 @@ fn lexical_path(path: &str) -> Result<PathBuf, String> {
         }
     }
     Ok(out)
-}
-
-fn normalized_name(path: &Path) -> Option<String> {
-    Some(
-        path.file_stem()?
-            .to_string_lossy()
-            .to_ascii_lowercase()
-            .replace(['.', '_'], "-"),
-    )
-}
-
-fn is_auto_import_noise_dir(name: &str) -> bool {
-    matches!(
-        name.to_ascii_lowercase().as_str(),
-        // Git hosts, editor/agent instructions, and release machinery.
-        ".github"
-            | ".gitlab"
-            | ".gitea"
-            | ".circleci"
-            | ".claude"
-            | ".agents"
-            | ".cursor"
-            | ".opencode"
-            | ".continue"
-            | ".cline"
-            | ".clinerules"
-            | ".roo"
-            | ".devin"
-            | ".windsurf"
-            | ".vscode"
-            | ".idea"
-            | ".devcontainer"
-            | ".changeset"
-            | ".husky"
-            | ".canopy"
-            | "issue_template"
-            | "pull_request_template"
-            // Dependencies, generated output, and non-source fixtures.
-            | "node_modules"
-            | ".pnpm"
-            | ".yarn"
-            | ".venv"
-            | ".tox"
-            | ".nox"
-            | "site-packages"
-            | "target"
-            | "dist"
-            | "dist-ssr"
-            | "build"
-            | "out"
-            | "coverage"
-            | "generated"
-            | "fixtures"
-            | "fixture"
-            | "testdata"
-            | "demo"
-    )
-}
-
-fn is_auto_import_candidate(relative: &Path) -> bool {
-    // These trees contain repository plumbing, generated material, or agent
-    // configuration rather than findings. Explicit import remains available.
-    if relative
-        .components()
-        .any(|part| is_auto_import_noise_dir(part.as_os_str().to_string_lossy().as_ref()))
-    {
-        return false;
-    }
-
-    let Some(stem) = normalized_name(relative) else {
-        return false;
-    };
-    const EXACT_HOUSEKEEPING: &[&str] = &[
-        "authors",
-        "bug-report-template",
-        "changes",
-        "cla",
-        "code-of-conduct",
-        "copilot-instructions",
-        "contributing",
-        "contributors",
-        "copying",
-        "copyright",
-        "dco",
-        "feature-request-template",
-        "governance",
-        "history",
-        "issue-template",
-        "licence",
-        "license",
-        "maintainers",
-        "news",
-        "notice",
-        "patents",
-        "pull-request-template",
-        "release-process",
-        "releases",
-        "releasing",
-        "security",
-        "skill",
-        "support",
-        "third-party-notices",
-        "trademarks",
-    ];
-    const PREFIX_HOUSEKEEPING: &[&str] = &[
-        // Locale/tool variants are conventional: README.fr, CLAUDE.local,
-        // AGENTS.override, LICENSE-MIT, and versioned changelogs/release notes.
-        "agents",
-        "changelog",
-        "claude",
-        "gemini",
-        "readme",
-        "release-notes",
-    ];
-
-    let legal_variant = ["copying", "licence", "license"].iter().any(|base| {
-        stem.strip_prefix(&format!("{base}-")).is_some_and(|kind| {
-            matches!(
-                kind,
-                "0bsd"
-                    | "agpl"
-                    | "agpl-3"
-                    | "agpl-3-0"
-                    | "apache"
-                    | "apache-2"
-                    | "apache-2-0"
-                    | "bsd"
-                    | "bsd-2-clause"
-                    | "bsd-3-clause"
-                    | "cc0"
-                    | "gpl"
-                    | "gpl-2"
-                    | "gpl-2-0"
-                    | "gpl-3"
-                    | "gpl-3-0"
-                    | "isc"
-                    | "lgpl"
-                    | "lgpl-2-1"
-                    | "lgpl-3"
-                    | "lgpl-3-0"
-                    | "mit"
-                    | "mpl"
-                    | "mpl-2"
-                    | "mpl-2-0"
-                    | "ofl"
-                    | "unlicense"
-            )
-        })
-    });
-
-    if EXACT_HOUSEKEEPING.contains(&stem.as_str())
-        || legal_variant
-        || PREFIX_HOUSEKEEPING
-            .iter()
-            .any(|base| stem == *base || stem.starts_with(&format!("{base}-")))
-    {
-        return false;
-    }
-
-    // Generated conversations and repository forms also occur outside their
-    // usual hidden directories.
-    !stem.ends_with("-chat-history")
-        && !stem.ends_with("-conversation-history")
-        && !stem.ends_with("-session-transcript")
-        && stem != "chat-history"
-        && stem != "conversation-history"
-        && stem != "session-transcript"
-        && stem != "transcript"
-}
-
-fn markdown_files(roots: &[String]) -> Vec<String> {
-    let mut seen = HashSet::new();
-    for root in roots {
-        let root = canonical_path(root);
-        let root_path = PathBuf::from(&root);
-        let mut builder = ignore::WalkBuilder::new(&root_path);
-        builder
-            .hidden(false)
-            .git_ignore(true)
-            .git_global(true)
-            .git_exclude(true)
-            .parents(true)
-            .require_git(false)
-            .follow_links(false)
-            .filter_entry(|entry| {
-                let name = entry.file_name().to_string_lossy();
-                !entry.file_type().is_some_and(|kind| kind.is_dir())
-                    || (name != ".git" && !is_auto_import_noise_dir(name.as_ref()))
-            });
-        for entry in builder.build().flatten() {
-            let path = entry.path();
-            if entry.file_type().is_some_and(|kind| kind.is_file())
-                && path
-                    .extension()
-                    .is_some_and(|ext| ext.eq_ignore_ascii_case("md"))
-                && path
-                    .strip_prefix(&root_path)
-                    .is_ok_and(is_auto_import_candidate)
-            {
-                seen.insert(canonical_path(&path.to_string_lossy()));
-            }
-        }
-    }
-    let mut files: Vec<_> = seen.into_iter().collect();
-    files.sort();
-    files
 }
 
 /// Keyed by instance *and* terminal, not terminal alone. Pty ids restart from
@@ -1836,65 +1600,6 @@ impl ResearchStore {
         discard_if_failed(&dir, fill_imported(&dir, file, path, text))
     }
 
-    /// Adopt research-like git-visible Markdown under the project's roots. Common
-    /// repository housekeeping and agent instruction files are left alone. The import
-    /// itself is path-keyed and idempotent, so opening a project repeatedly or a watcher
-    /// delivering the same write twice cannot create duplicate entries.
-    pub fn sweep(
-        &self,
-        project_id: String,
-        project_name: Option<String>,
-        roots: Vec<String>,
-    ) -> Result<SweepSummary, String> {
-        // Traversal can be the expensive part in a large monorepo. Do it before
-        // taking the research write lock so unrelated entries remain responsive.
-        let files = markdown_files(&roots);
-        let matched = files.len();
-        let _guard = self.lock.lock().unwrap();
-        let entries = self.load_project(&project_id)?;
-        let room = auto_import_room(&entries);
-        let mut before: HashSet<String> = entries
-            .into_iter()
-            .flat_map(|meta| meta.links.files)
-            .map(|path| canonical_path(&path))
-            .collect();
-        let mut imported = 0;
-        let mut skipped = 0;
-
-        for path in files {
-            if imported >= room {
-                break;
-            }
-            if before.contains(&path) {
-                continue;
-            }
-            match self.import_impl_inner(
-                project_id.clone(),
-                project_name.clone(),
-                Some(roots.clone()),
-                path.clone(),
-                None,
-                false,
-            ) {
-                Ok(_) => {
-                    imported += 1;
-                    before.insert(path);
-                }
-                Err(_) => skipped += 1,
-            }
-        }
-
-        let summary = SweepSummary {
-            imported,
-            matched,
-            skipped,
-        };
-        if imported > 0 {
-            self.announce(&project_id);
-        }
-        Ok(summary)
-    }
-
     /// Adopt a document whose text the caller read for us — a cloud workspace,
     /// where the file lives in a container this store cannot see. Everything but
     /// the read is `import`: the same roots rule, path identity, title, digest and
@@ -1958,58 +1663,6 @@ impl ResearchStore {
             &text,
             instance,
         )
-    }
-
-    /// `sweep` for a caller that walks the files itself: of the Markdown paths it
-    /// found under `roots`, which are research-like by `sweep`'s rules and not yet
-    /// adopted. The caller then imports each with `import_text`.
-    pub fn sweep_plan(
-        &self,
-        project_id: String,
-        roots: Vec<String>,
-        paths: Vec<String>,
-    ) -> Result<SweepPlan, String> {
-        let roots: Vec<PathBuf> = roots
-            .iter()
-            .filter_map(|root| lexical_path(root).ok())
-            .collect();
-        let mut seen = HashSet::new();
-        for path in paths {
-            let Ok(file) = lexical_path(&path) else {
-                continue;
-            };
-            if !file
-                .extension()
-                .is_some_and(|ext| ext.eq_ignore_ascii_case("md"))
-            {
-                continue;
-            }
-            if roots.iter().any(|root| {
-                file.strip_prefix(root).is_ok_and(|relative| {
-                    !relative.as_os_str().is_empty() && is_auto_import_candidate(relative)
-                })
-            }) {
-                seen.insert(file.to_string_lossy().to_string());
-            }
-        }
-        let matched = seen.len();
-        let entries = self.load_project(&project_id)?;
-        let room = auto_import_room(&entries);
-        let adopted: HashSet<String> = entries
-            .into_iter()
-            .flat_map(|meta| meta.links.files)
-            .map(|path| canonical_path(&path))
-            .collect();
-        let mut candidates: Vec<String> = seen
-            .into_iter()
-            .filter(|path| !adopted.contains(&canonical_path(path)))
-            .collect();
-        candidates.sort();
-        candidates.truncate(room);
-        Ok(SweepPlan {
-            candidates,
-            matched,
-        })
     }
 
     /// Where an entry lives on disk. The launcher exports this to a research
@@ -3067,14 +2720,6 @@ mod tests {
         assert_eq!(first.id, "10000-next");
         assert_eq!(first.status, "researched");
         assert_eq!(import().unwrap().id, first.id, "a repeat finds the entry");
-        let plan = store
-            .sweep_plan(
-                "p1".into(),
-                roots.clone(),
-                vec!["/workspace/docs/next.md".into()],
-            )
-            .unwrap();
-        assert!(plan.candidates.is_empty(), "it is not imported again");
     }
 
     #[test]
@@ -3086,65 +2731,6 @@ mod tests {
         assert!(kept.exists());
         assert!(discard_if_failed::<()>(&kept, Err("no".into())).is_err());
         assert!(!kept.exists());
-    }
-
-    #[test]
-    fn a_sweep_stops_adopting_at_the_project_limit() {
-        let store = TempHome::new("sweep-limit");
-        seed_entries(&store, 2..AUTO_IMPORT_MAX);
-        let plan = |store: &ResearchStore| {
-            store
-                .sweep_plan(
-                    "p1".into(),
-                    vec!["/workspace".to_string()],
-                    vec!["/workspace/docs/a.md".into(), "/workspace/docs/b.md".into()],
-                )
-                .unwrap()
-        };
-        let room_for_one = plan(&store);
-        assert_eq!(room_for_one.matched, 2);
-        assert_eq!(room_for_one.candidates, vec!["/workspace/docs/a.md"]);
-        seed_entries(&store, std::iter::once(AUTO_IMPORT_MAX));
-        let full = plan(&store);
-        assert_eq!(full.matched, 2);
-        assert!(full.candidates.is_empty());
-    }
-
-    #[test]
-    fn a_sweep_plan_applies_the_sweep_rules_to_listed_paths() {
-        let store = TempHome::new("sweep-plan");
-        let roots = vec!["/workspace".to_string()];
-        store
-            .import_text_impl(
-                "p1".into(),
-                None,
-                Some(roots.clone()),
-                "/workspace/docs/done.md".into(),
-                "# Done\n\nAlready adopted.\n".into(),
-                None,
-            )
-            .unwrap();
-        let plan = store
-            .sweep_plan(
-                "p1".into(),
-                roots,
-                vec![
-                    "/workspace/docs/done.md".into(),
-                    "/workspace/docs/spike.md".into(),
-                    "/workspace/docs/spike.md".into(),
-                    "/workspace/README.md".into(),
-                    "/workspace/.github/notes.md".into(),
-                    "/workspace/node_modules/x/finding.md".into(),
-                    "/workspace/src/main.rs".into(),
-                    "/elsewhere/finding.md".into(),
-                ],
-            )
-            .unwrap();
-        assert_eq!(plan.matched, 2);
-        assert_eq!(
-            plan.candidates,
-            vec!["/workspace/docs/spike.md".to_string()]
-        );
     }
 
     #[test]
@@ -3195,82 +2781,6 @@ mod tests {
         assert_eq!(second.id, first.id);
         assert_eq!(store.load_project("p1").unwrap().len(), 1);
         assert_eq!(store.for_file("p1".into(), dotted).unwrap(), Some(first.id));
-    }
-
-    #[test]
-    fn markdown_sweep_honors_ignores_noise_filters_and_overlapping_roots() {
-        let store = TempHome::new("markdown-sweep");
-        let repo = store.0.join("repo");
-        std::fs::create_dir_all(repo.join("docs")).unwrap();
-        std::fs::create_dir_all(repo.join("node_modules/pkg")).unwrap();
-        std::fs::write(repo.join(".gitignore"), "ignored.md\n").unwrap();
-        std::fs::write(repo.join("README.md"), "# Read me\n").unwrap();
-        std::fs::write(repo.join("README.fr.md"), "# Lisez-moi\n").unwrap();
-        std::fs::write(repo.join("CLAUDE.md"), "# Agent instructions\n").unwrap();
-        std::fs::write(repo.join("AGENTS.md"), "# Agent instructions\n").unwrap();
-        std::fs::write(repo.join("SECURITY.md"), "# Security policy\n").unwrap();
-        std::fs::write(repo.join("ignored.md"), "# Ignored\n").unwrap();
-        std::fs::write(repo.join("docs/finding.MD"), "# Finding\n").unwrap();
-        std::fs::write(repo.join("node_modules/pkg/notes.md"), "# Dependency\n").unwrap();
-        std::fs::create_dir_all(repo.join(".github")).unwrap();
-        std::fs::write(
-            repo.join(".github/PULL_REQUEST_TEMPLATE.md"),
-            "# Pull request\n",
-        )
-        .unwrap();
-
-        let files = markdown_files(&[
-            repo.to_string_lossy().to_string(),
-            repo.join("docs").to_string_lossy().to_string(),
-        ]);
-        assert_eq!(files.len(), 1);
-        assert!(files.iter().any(|path| path.ends_with("finding.MD")));
-    }
-
-    #[test]
-    fn automatic_import_covers_housekeeping_without_hiding_findings() {
-        let excluded = [
-            "README.md",
-            "docs/README.fr.md",
-            "AGENTS.override.md",
-            "CLAUDE.local.md",
-            "LICENSE-MIT.md",
-            "THIRD_PARTY_NOTICES.md",
-            "RELEASING.md",
-            "docs/release-notes-v0.2.8.md",
-            "CHANGELOG-next.md",
-            ".github/ISSUE_TEMPLATE/bug.md",
-            ".claude/rules/testing.md",
-            ".opencode/agents/reviewer.md",
-            ".changeset/quiet-dogs.md",
-            "demo/notes.md",
-            "fixtures/research.md",
-            "docs/session-transcript.md",
-            ".aider.chat.history.md",
-        ];
-        for path in excluded {
-            assert!(
-                !is_auto_import_candidate(Path::new(path)),
-                "{path} is housekeeping"
-            );
-        }
-
-        let retained = [
-            "docs/agent-parity.md",
-            "docs/persistent-remote-links.md",
-            "docs/security-model-investigation.md",
-            "docs/history-of-index-corruption.md",
-            "docs/license-analysis.md",
-            "docs/collab-editing.md",
-            "SPEC.md",
-            "notes.md",
-        ];
-        for path in retained {
-            assert!(
-                is_auto_import_candidate(Path::new(path)),
-                "{path} may contain genuine research"
-            );
-        }
     }
 
     #[test]

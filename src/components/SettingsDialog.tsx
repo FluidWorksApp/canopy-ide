@@ -2435,16 +2435,6 @@ export function SettingsDialog({ onClose, initialTab = "appearance", projects = 
             {tab === "privacy" && (
               <>
                 <Item
-                  name="Markdown research import"
-                  desc="Find research Markdown in open projects."
-                >
-                  <Checkbox
-                    checked={s.autoImportMarkdownResearch}
-                    onChange={(v) => patch({ autoImportMarkdownResearch: v })}
-                    label="Automatically import project Markdown"
-                  />
-                </Item>
-                <Item
                   name="Crash reporting"
                   desc="Send crash details anonymously."
                 >

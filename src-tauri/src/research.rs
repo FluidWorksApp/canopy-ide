@@ -195,16 +195,6 @@ pub fn research_import(
 }
 
 #[tauri::command]
-pub fn research_sweep(
-    store: State<'_, ResearchStore>,
-    project_id: String,
-    project_name: Option<String>,
-    roots: Vec<String>,
-) -> Result<SweepSummary, String> {
-    store.sweep(project_id, project_name, roots)
-}
-
-#[tauri::command]
 pub fn research_dir(
     store: State<'_, ResearchStore>,
     project_id: String,

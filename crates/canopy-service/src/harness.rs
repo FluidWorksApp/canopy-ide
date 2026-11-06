@@ -459,7 +459,7 @@ impl Harness for CoreHarness {
                 },
             },
             // The panel's own readers, which the agent's op never had.
-            "read_file" | "for_file" | "sweep_plan" if store == HarnessStore::Research => {
+            "read_file" | "for_file" if store == HarnessStore::Research => {
                 let (_, research) = self.stores(ctx);
                 let text = |key: &str| {
                     args.get(key)
@@ -467,23 +467,14 @@ impl Harness for CoreHarness {
                         .unwrap_or_default()
                         .to_string()
                 };
-                let strings = |key: &str| {
-                    args.get(key)
-                        .and_then(|v| serde_json::from_value::<Vec<String>>(v.clone()).ok())
-                        .unwrap_or_default()
-                };
                 let project = ctx.project_id.clone();
                 reply_of(match action {
                     "read_file" => research
                         .read_file(project, text("id"), text("path"))
                         .map(|text| serde_json::json!({ "text": text })),
-                    "for_file" => research
+                    _ => research
                         .for_file(project, text("path"))
                         .map(|id| serde_json::json!({ "id": id })),
-                    // Roots are the workspace's, never the caller's.
-                    _ => research
-                        .sweep_plan(project, vec![ctx.project_root.clone()], strings("paths"))
-                        .and_then(|plan| serde_json::to_value(plan).map_err(|e| e.to_string())),
                 })
             }
             "get" | "search" => {
