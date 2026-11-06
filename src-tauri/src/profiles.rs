@@ -580,7 +580,8 @@ mod tests {
     // depends on: an account gains what is missing and keeps what is the user's.
     #[test]
     fn the_integration_sweep_adds_the_limit_hook_and_keeps_the_users_own() {
-        let base = std::env::temp_dir().join(format!("canopy-sweep-{}", std::process::id()));
+        let base =
+            std::env::temp_dir().join(format!("canopy-profile-sweep-{}", std::process::id()));
         std::fs::create_dir_all(&base).unwrap();
         let base = std::fs::canonicalize(base).unwrap();
         let home = base.to_str().unwrap();
