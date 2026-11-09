@@ -12,6 +12,16 @@ Codex 0.162.1, Amp 0.0.1790913650, Aider 0.86.2, Antigravity (agy) 1.2.14,
 OpenCode 1.18.34, oh-my-pi (omp) 18.4.10, Cursor Agent 2026.10.01 and Grok
 1.0.46. Kiro CLI 3.1.0 was added afterwards and checked against its own `--help`.
 
+## ACP
+
+Kiro CLI runs over the Agent Client Protocol (`kiro-cli acp`, verified
+2026-10-27). Any other ACP agent can be added in Settings > Agents, from presets
+(Gemini CLI `--acp`, Goose `acp`, checked against the ACP registry on
+2026-11-09) or the registry browser. Caveats: Canopy advertises no fs or
+terminal client capabilities, ACP has no system-prompt field, custom entries
+are unverified, and brain and compaction calls skip ACP runners. Details in
+[acp.md](acp.md).
+
 ## Where we are today
 
 Hooks have first-class installers for all ten launcher CLIs. Codex, Cursor and

@@ -2,6 +2,7 @@
 // or more labeled component directories (frontend, backend, ...). The whole
 // workspace (projects, which are open, which is active) persists via the Rust
 // core to ~/.canopy/projects.json.
+import { customAcpRunner, type CustomAcpConfig } from "./acp/providers";
 import { invoke, invokeDesktop } from "./host";
 import type { CustomMicroTask } from "./microTasks";
 import { getSettings, updateSettings } from "./settings";
@@ -1574,6 +1575,13 @@ export interface CustomAgentCli {
    * TUI is up — slower, but it works everywhere.
    */
   promptArgs?: string;
+  /**
+   * Set when this CLI speaks the Agent Client Protocol (`my-agent --acp`):
+   * `args` is the argv that puts it in ACP mode, an array and never a shell
+   * string. Build then drives it through the ACP transport as a first-class
+   * agent instead of a bare terminal.
+   */
+  acp?: CustomAcpConfig;
 }
 
 /** Ids nothing may take: the built-ins, and the bare binaries that already name
@@ -1676,6 +1684,7 @@ export function customCliDefs(): AgentCliDef[] {
         // initial, which at least tells two custom entries apart.
         icon: (name[0] ?? "▷").toUpperCase(),
         custom: true,
+        structuredRunner: c.acp ? customAcpRunner(id, name, bin, c.acp) : undefined,
         resume: resumeArgs
           ? (sessionId, b) => `${b} ${expandArgs(resumeArgs, "{id}", sessionId)}`
           : undefined,

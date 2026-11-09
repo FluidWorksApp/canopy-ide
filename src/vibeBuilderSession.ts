@@ -2471,6 +2471,12 @@ export class VibeBuilderSession implements BuilderSession {
       case "turnEnd":
         if (this.verifying) return;
         this.hasRun = true;
+        // ACP agents mint the session id themselves, so the one we generated
+        // never names anything. Keep theirs: the next launch resumes it.
+        {
+          const minted = (this.transport as { sessionId?: string | null } | undefined)?.sessionId;
+          if (typeof minted === "string" && minted) this.cliSessionId = minted;
+        }
         this.publish(event);
         const turnEpoch = this.turnEpoch;
         let verification!: Promise<void>;

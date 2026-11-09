@@ -67,7 +67,8 @@ process teardown; React owns the project workspace and presentation.
 
 - **Real agent terminals.** Full PTY and TUI support for shells, `vim`, `htop`,
   `tmux`, Claude Code, Codex CLI, Amp, Aider, Antigravity, OpenCode, oh-my-pi, Kiro CLI,
-  and custom CLIs. Canopy reports the integration and resume capabilities each
+  and custom CLIs, including any agent that speaks the Agent Client Protocol
+  (see [docs/acp.md](docs/acp.md)). Canopy reports the integration and resume capabilities each
   CLI actually supports instead of assuming parity.
 - **Parallel work without checkout collisions.** Work in the current checkout or
   isolated Git worktrees. Canopy tracks which branch lives where, allocates

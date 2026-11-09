@@ -65,6 +65,8 @@ import { settingAnchor, type SettingHit } from "./settingsIndex";
 import { SettingsNavContext } from "./settingsNav";
 import { TRACKERS, setTrackerKey, trackerKey } from "../trackers";
 import * as ipc from "../ipc";
+import { AcpProviderPicker } from "./AcpProviderPicker";
+import { joinArgv, splitArgv } from "../acp/providers";
 import { SlackSettings } from "./SlackSettings";
 import { VaultSettings } from "./VaultSettings";
 import { availableMonoFonts, fontLabel, fontStack } from "../fonts";
@@ -1090,6 +1092,7 @@ function CustomClis({
 }) {
   const [rows, setRows] = useState<CustomAgentCli[]>(() => value);
   const [found, setFound] = useState<Record<string, boolean>>({});
+  const [acpText, setAcpText] = useState<Record<number, string>>({});
 
   // Keyed on the bins themselves: probing costs a login shell, and every other
   // field on this row is irrelevant to whether the executable exists.
@@ -1210,6 +1213,32 @@ function CustomClis({
                 }
               />
             </div>
+            <div className="cli-custom-args">
+              <input
+                className="cli-bin-input"
+                placeholder="ACP args, e.g. --acp (blank = not ACP)"
+                spellCheck={false}
+                aria-label={`ACP arguments for ${c.name || "this CLI"}`}
+                title="Arguments that put this CLI in Agent Client Protocol mode. Set, Canopy drives it as a first-class ACP agent."
+                value={acpText[i] ?? (c.acp ? joinArgv(c.acp.args) : "")}
+                onChange={(e) => setAcpText((t) => ({ ...t, [i]: e.target.value }))}
+                onBlur={(e) => {
+                  const text = e.target.value.trim();
+                  setAcpText((t) => {
+                    const { [i]: _drop, ...rest } = t;
+                    return rest;
+                  });
+                  commit(
+                    rows.map((o, n) => {
+                      if (n !== i) return o;
+                      const { acp: _old, ...base } = o;
+                      return text ? { ...base, acp: { ...o.acp, args: splitArgv(text) } } : base;
+                    }),
+                  );
+                }}
+              />
+              {c.acp && <span className="cli-bin-state" title="Runs over the Agent Client Protocol">ACP</span>}
+            </div>
           </div>
         );
       })}
@@ -1225,6 +1254,19 @@ function CustomClis({
         onClick={() => commit([...rows, { id: "", name: "", bin: "" }])}>
         ＋ Add a CLI
       </Button>
+      <AcpProviderPicker
+        onAdd={(choice) =>
+          commit([
+            ...rows,
+            {
+              id: newCustomCliId(choice.name, rows.map((o) => o.id)),
+              name: choice.name,
+              bin: choice.bin,
+              acp: choice.acp,
+            },
+          ])
+        }
+      />
     </div>
   );
 }
@@ -1637,6 +1679,9 @@ export function SettingsDialog({ onClose, initialTab = "appearance", projects = 
                       >
                         <AgentIcon id={cli.id} size={16} />
                         <span>{cli.name}</span>
+                        {cli.structuredRunner?.tier === "acp" && (
+                          <span className="acp-badge" title="Runs over the Agent Client Protocol">ACP</span>
+                        )}
                       </button>
                     ))}
                   </div>
