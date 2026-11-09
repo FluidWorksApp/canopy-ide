@@ -226,7 +226,10 @@ mod tests {
     type Tx = tokio::sync::mpsc::UnboundedSender<Result<Bytes, ()>>;
 
     /// A test body the test feeds by hand.
-    fn channel() -> (Tx, impl Stream<Item = Result<Bytes, ()>> + Send + Unpin + 'static) {
+    fn channel() -> (
+        Tx,
+        impl Stream<Item = Result<Bytes, ()>> + Send + Unpin + 'static,
+    ) {
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
         let stream = futures_util::stream::unfold(rx, |mut rx| async move {
             rx.recv().await.map(|item| (item, rx))
@@ -291,7 +294,10 @@ mod tests {
             b"--frame\r\nContent-Length: 99999999999\r\n\r\nabc",
         ));
         assert!(!t.tracking());
-        assert_eq!(part_length("--frame\r\ncontent-length: 16777216\r\n"), Some(16_777_216));
+        assert_eq!(
+            part_length("--frame\r\ncontent-length: 16777216\r\n"),
+            Some(16_777_216)
+        );
         assert_eq!(part_length("--frame\r\ncontent-length: 16777217\r\n"), None);
         assert_eq!(part_length("frame\r\ncontent-length: 1\r\n"), None);
     }
@@ -309,7 +315,10 @@ mod tests {
     fn devicehub_mjpeg_crlf_split_across_pieces_is_recognised() {
         let p = part(b"abc");
         let n = p.len();
-        let pieces = vec![Bytes::copy_from_slice(&p[..n - 1]), Bytes::copy_from_slice(&p[n - 1..])];
+        let pieces = vec![
+            Bytes::copy_from_slice(&p[..n - 1]),
+            Bytes::copy_from_slice(&p[n - 1..]),
+        ];
         assert!(ends_with_crlf(&pieces));
     }
 
@@ -354,6 +363,9 @@ mod tests {
         tx.send(Ok(Bytes::copy_from_slice(&p[..20]))).unwrap();
         assert_eq!(out.next().await.unwrap().unwrap().len(), 20);
         let waited = tokio::time::timeout(Duration::from_millis(80), out.next()).await;
-        assert!(waited.is_err(), "no still exists mid-part, so nothing is repeated");
+        assert!(
+            waited.is_err(),
+            "no still exists mid-part, so nothing is repeated"
+        );
     }
 }

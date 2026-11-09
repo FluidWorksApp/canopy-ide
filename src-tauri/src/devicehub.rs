@@ -92,7 +92,9 @@ pub fn is_installed(paths: &ToolPaths) -> bool {
 }
 
 fn install_error(step: &str, exit_code: Option<i32>, detail: Option<&str>) -> String {
-    let suffix = exit_code.map(|c| format!(" (exit code {c})")).unwrap_or_default();
+    let suffix = exit_code
+        .map(|c| format!(" (exit code {c})"))
+        .unwrap_or_default();
     let mut msg = format!("Installing {DEVICE_HUB_PACKAGE} failed while {step}{suffix}.");
     if let Some(detail) = detail.map(str::trim).filter(|d| !d.is_empty()) {
         msg.push(' ');
@@ -114,7 +116,10 @@ fn install_lock() -> &'static tokio::sync::Mutex<()> {
 
 /// Install the pinned hub into a staging directory, verify it, mark it
 /// complete and publish it with one rename. Idempotent.
-pub async fn install_hub(base_dir: &Path, env: &HashMap<String, String>) -> Result<ToolPaths, String> {
+pub async fn install_hub(
+    base_dir: &Path,
+    env: &HashMap<String, String>,
+) -> Result<ToolPaths, String> {
     let _permit = install_lock().lock().await;
     let paths = tool_paths(base_dir);
     if is_installed(&paths) {
@@ -128,15 +133,25 @@ pub async fn install_hub(base_dir: &Path, env: &HashMap<String, String>) -> Resu
     if paths.install_dir.exists() {
         tokio::fs::remove_dir_all(&paths.install_dir)
             .await
-            .map_err(|e| install_error("removing an incomplete install", None, Some(&e.to_string())))?;
+            .map_err(|e| {
+                install_error("removing an incomplete install", None, Some(&e.to_string()))
+            })?;
     }
-    tokio::fs::create_dir_all(&parent)
-        .await
-        .map_err(|e| install_error("preparing the install directory", None, Some(&e.to_string())))?;
+    tokio::fs::create_dir_all(&parent).await.map_err(|e| {
+        install_error(
+            "preparing the install directory",
+            None,
+            Some(&e.to_string()),
+        )
+    })?;
     let staging = parent.join(format!(".staging-{}", random_suffix()));
-    tokio::fs::create_dir(&staging)
-        .await
-        .map_err(|e| install_error("preparing the install directory", None, Some(&e.to_string())))?;
+    tokio::fs::create_dir(&staging).await.map_err(|e| {
+        install_error(
+            "preparing the install directory",
+            None,
+            Some(&e.to_string()),
+        )
+    })?;
 
     let result = install_into(&staging, &paths, env).await;
     // T3: `Effect.ensuring(fs.remove(stagingDir))`.
@@ -181,21 +196,38 @@ async fn install_into(
     };
     let mut cmd = std::process::Command::new(&program);
     cmd.args(&args).env_clear().envs(env).no_console_window();
-    let output = match tokio::task::spawn_blocking(move || run_with_timeout(cmd, INSTALL_TIMEOUT)).await {
-        Ok(Ok(output)) => output,
-        Ok(Err(RunFailure::TimedOut)) => {
-            return Err(install_error("running npm install", None, Some("npm did not finish within 10 minutes.")))
-        }
-        Ok(Err(RunFailure::Spawn(e))) => return Err(install_error("running npm install", None, Some(&e))),
-        Err(e) => return Err(install_error("running npm install", None, Some(&e.to_string()))),
-    };
+    let output =
+        match tokio::task::spawn_blocking(move || run_with_timeout(cmd, INSTALL_TIMEOUT)).await {
+            Ok(Ok(output)) => output,
+            Ok(Err(RunFailure::TimedOut)) => {
+                return Err(install_error(
+                    "running npm install",
+                    None,
+                    Some("npm did not finish within 10 minutes."),
+                ))
+            }
+            Ok(Err(RunFailure::Spawn(e))) => {
+                return Err(install_error("running npm install", None, Some(&e)))
+            }
+            Err(e) => {
+                return Err(install_error(
+                    "running npm install",
+                    None,
+                    Some(&e.to_string()),
+                ))
+            }
+        };
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         let stdout = String::from_utf8_lossy(&output.stdout);
         return Err(install_error(
             "running npm install",
             output.status.code(),
-            Some(if stderr.trim().is_empty() { &stdout } else { &stderr }),
+            Some(if stderr.trim().is_empty() {
+                &stdout
+            } else {
+                &stderr
+            }),
         ));
     }
     let mut staged_entry = staging.join("node_modules").join(DEVICE_HUB_PACKAGE);
@@ -203,15 +235,32 @@ async fn install_into(
         staged_entry.push(part);
     }
     if !staged_entry.is_file() {
-        return Err(install_error("verifying the installed entry point", None, None));
+        return Err(install_error(
+            "verifying the installed entry point",
+            None,
+            None,
+        ));
     }
-    tokio::fs::write(staging.join(".install-complete"), format!("{DEVICE_HUB_VERSION}\n"))
-        .await
-        .map_err(|e| install_error("recording the completed install", None, Some(&e.to_string())))?;
+    tokio::fs::write(
+        staging.join(".install-complete"),
+        format!("{DEVICE_HUB_VERSION}\n"),
+    )
+    .await
+    .map_err(|e| {
+        install_error(
+            "recording the completed install",
+            None,
+            Some(&e.to_string()),
+        )
+    })?;
     if let Err(e) = tokio::fs::rename(staging, &paths.install_dir).await {
         // Another install may have published the same version first.
         if !is_installed(paths) {
-            return Err(install_error("publishing the install", None, Some(&e.to_string())));
+            return Err(install_error(
+                "publishing the install",
+                None,
+                Some(&e.to_string()),
+            ));
         }
     }
     Ok(paths.clone())
@@ -267,7 +316,10 @@ pub fn process_environment() -> HashMap<String, String> {
 }
 
 fn env_path(env: &HashMap<String, String>) -> String {
-    env.get("PATH").or_else(|| env.get("Path")).cloned().unwrap_or_default()
+    env.get("PATH")
+        .or_else(|| env.get("Path"))
+        .cloned()
+        .unwrap_or_default()
 }
 
 /// Windows variables are case-insensitive, so a `Path` beside a new `PATH`
@@ -297,7 +349,8 @@ pub const NODE_UNAVAILABLE: &str =
 /// so that check has nothing to compare against.
 pub fn resolve_node(env: &HashMap<String, String>, host: HostPlatform) -> Result<PathBuf, String> {
     let name = if host.windows() { "node.exe" } else { "node" };
-    let found = find_on_path(name, &env_path(env), host).ok_or_else(|| NODE_UNAVAILABLE.to_string())?;
+    let found =
+        find_on_path(name, &env_path(env), host).ok_or_else(|| NODE_UNAVAILABLE.to_string())?;
     std::fs::canonicalize(&found).map_err(|_| NODE_UNAVAILABLE.to_string())
 }
 
@@ -331,7 +384,11 @@ pub fn android_sdk(env: &HashMap<String, String>, host: HostPlatform) -> Android
                 .filter(|s| !s.is_empty())
         });
     let adb_binary = if windows { "adb.exe" } else { "adb" };
-    let avdmanager_binary = if windows { "avdmanager.bat" } else { "avdmanager" };
+    let avdmanager_binary = if windows {
+        "avdmanager.bat"
+    } else {
+        "avdmanager"
+    };
     let inspect = |root: &Path| -> Option<AndroidSdk> {
         let adb = root.join("platform-tools").join(adb_binary).exists();
         let emulator = root
@@ -347,8 +404,12 @@ pub fn android_sdk(env: &HashMap<String, String>, host: HostPlatform) -> Android
             .join("bin")
             .join(avdmanager_binary)
             .exists();
-        let legacy_avdmanager =
-            !avdmanager && root.join("tools").join("bin").join(avdmanager_binary).exists();
+        let legacy_avdmanager = !avdmanager
+            && root
+                .join("tools")
+                .join("bin")
+                .join(avdmanager_binary)
+                .exists();
         Some(AndroidSdk {
             root: Some(root.to_path_buf()),
             adb,
@@ -378,7 +439,10 @@ pub fn android_sdk(env: &HashMap<String, String>, host: HostPlatform) -> Android
     // PATH entries can be slow to stat (network shares), so only consult them
     // after the standard locations miss.
     if explicit.is_none() {
-        for dir in env_path(env).split(host.path_separator()).filter(|d| !d.is_empty()) {
+        for dir in env_path(env)
+            .split(host.path_separator())
+            .filter(|d| !d.is_empty())
+        {
             let adb = Path::new(dir).join(adb_binary);
             if !adb.exists() {
                 continue;
@@ -484,7 +548,11 @@ pub fn hub_environment(
     if let Some(android_home) = out.get("ANDROID_HOME").cloned() {
         let emulator = Path::new(&android_home)
             .join("emulator")
-            .join(if host.windows() { "emulator.exe" } else { "emulator" });
+            .join(if host.windows() {
+                "emulator.exe"
+            } else {
+                "emulator"
+            });
         let emulated = regex::Regex::new(r"\bemulated\b").expect("static regex");
         let imagefile = regex::Regex::new(r"\bimagefile\b").expect("static regex");
         let overrides: Vec<String> = ["front", "back"]
@@ -499,7 +567,10 @@ pub fn hub_environment(
             .collect();
         let overrides = overrides.join(" ");
         if !overrides.is_empty() {
-            let existing = out.get("EXPO_DEVICE_HUB_EMULATOR_EXTRA_ARGS").cloned().unwrap_or_default();
+            let existing = out
+                .get("EXPO_DEVICE_HUB_EMULATOR_EXTRA_ARGS")
+                .cloned()
+                .unwrap_or_default();
             let joined = [overrides, existing]
                 .into_iter()
                 .filter(|s| !s.is_empty())
@@ -514,7 +585,10 @@ pub fn hub_environment(
             // its gRPC token.
             let runtime_dir = PathBuf::from(format!("/run/user/{uid}"));
             if runtime_dir_owned_by(&runtime_dir, uid) {
-                out.insert("XDG_RUNTIME_DIR".into(), runtime_dir.to_string_lossy().into_owned());
+                out.insert(
+                    "XDG_RUNTIME_DIR".into(),
+                    runtime_dir.to_string_lossy().into_owned(),
+                );
             }
         }
     }
@@ -540,7 +614,11 @@ pub fn hub_args(entry_path: &Path, port: u16, host: HostPlatform) -> Vec<String>
     args
 }
 
-fn real_camera_help(emulator: &Path, facing: &str, env: &HashMap<String, String>) -> Option<String> {
+fn real_camera_help(
+    emulator: &Path,
+    facing: &str,
+    env: &HashMap<String, String>,
+) -> Option<String> {
     let mut cmd = std::process::Command::new(emulator);
     cmd.arg(format!("-help-camera-{facing}"))
         .env_clear()
@@ -577,7 +655,10 @@ const RUN_STREAM_MAX: usize = 1024 * 1024;
 
 /// Run `cmd`, reading both streams through the bounded drain the rest of the
 /// app uses, and kill it when `timeout` passes.
-fn run_with_timeout(mut cmd: std::process::Command, timeout: Duration) -> Result<RunOutput, RunFailure> {
+fn run_with_timeout(
+    mut cmd: std::process::Command,
+    timeout: Duration,
+) -> Result<RunOutput, RunFailure> {
     use std::process::Stdio;
     let mut child = cmd
         .stdin(Stdio::null())
@@ -585,10 +666,18 @@ fn run_with_timeout(mut cmd: std::process::Command, timeout: Duration) -> Result
         .stderr(Stdio::piped())
         .spawn()
         .map_err(|e| RunFailure::Spawn(e.to_string()))?;
-    let stdout = child.stdout.take().ok_or(RunFailure::Spawn("stdout was not piped".into()))?;
-    let stderr = child.stderr.take().ok_or(RunFailure::Spawn("stderr was not piped".into()))?;
-    let out = std::thread::spawn(move || crate::process_capture::drain_capped(stdout, RUN_STREAM_MAX));
-    let err = std::thread::spawn(move || crate::process_capture::drain_capped(stderr, RUN_STREAM_MAX));
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or(RunFailure::Spawn("stdout was not piped".into()))?;
+    let stderr = child
+        .stderr
+        .take()
+        .ok_or(RunFailure::Spawn("stderr was not piped".into()))?;
+    let out =
+        std::thread::spawn(move || crate::process_capture::drain_capped(stdout, RUN_STREAM_MAX));
+    let err =
+        std::thread::spawn(move || crate::process_capture::drain_capped(stderr, RUN_STREAM_MAX));
     let deadline = Instant::now() + timeout;
     loop {
         match child.try_wait() {
@@ -612,7 +701,9 @@ fn run_with_timeout(mut cmd: std::process::Command, timeout: Duration) -> Result
 #[cfg(unix)]
 fn real_runtime_dir_owned_by(dir: &Path, uid: u32) -> bool {
     use std::os::unix::fs::MetadataExt;
-    std::fs::metadata(dir).map(|m| m.is_dir() && m.uid() == uid).unwrap_or(false)
+    std::fs::metadata(dir)
+        .map(|m| m.is_dir() && m.uid() == uid)
+        .unwrap_or(false)
 }
 #[cfg(not(unix))]
 fn real_runtime_dir_owned_by(_dir: &Path, _uid: u32) -> bool {
@@ -762,7 +853,8 @@ fn terminate_now(pid: u32) {
     let root = std::env::var_os("SystemRoot").unwrap_or_else(|| "C:\\Windows".into());
     let taskkill = Path::new(&root).join("System32").join("taskkill.exe");
     let mut cmd = std::process::Command::new(taskkill);
-    cmd.args(["/PID", &pid.to_string(), "/F"]).no_console_window();
+    cmd.args(["/PID", &pid.to_string(), "/F"])
+        .no_console_window();
     let _ = run_with_timeout(cmd, Duration::from_secs(5));
 }
 
@@ -822,10 +914,13 @@ async fn reap_if_ours(previous: &HubStateFile) {
     // `/bin/ps` on macOS and Linux alike; a GUI app's PATH is not trusted here.
     let mut ps = std::process::Command::new("/bin/ps");
     ps.args(["-o", "command=", "-p", &previous.pid.to_string()]);
-    let command_line = match tokio::task::spawn_blocking(move || run_with_timeout(ps, Duration::from_secs(5))).await {
-        Ok(Ok(out)) => String::from_utf8_lossy(&out.stdout).into_owned(),
-        _ => String::new(),
-    };
+    let command_line =
+        match tokio::task::spawn_blocking(move || run_with_timeout(ps, Duration::from_secs(5)))
+            .await
+        {
+            Ok(Ok(out)) => String::from_utf8_lossy(&out.stdout).into_owned(),
+            _ => String::new(),
+        };
     if command_line.contains(&previous.entry_path) {
         log::warn!(
             "Stopping a device hub left behind by a previous run (pid {}, port {})",
@@ -845,7 +940,9 @@ async fn record_hub(state_path: &Path, record: &HubStateFile) {
         return;
     };
     let tmp = state_path.with_extension(format!("json.{}", random_suffix()));
-    if tokio::fs::write(&tmp, contents).await.is_ok() && tokio::fs::rename(&tmp, state_path).await.is_err() {
+    if tokio::fs::write(&tmp, contents).await.is_ok()
+        && tokio::fs::rename(&tmp, state_path).await.is_err()
+    {
         let _ = tokio::fs::remove_file(&tmp).await;
     }
 }
@@ -858,7 +955,11 @@ fn reserve_loopback_port() -> Result<u16, String> {
 }
 
 /// The child's lifetime: wait for it, or stop it when its record is dropped.
-async fn own_child(mut child: tokio::process::Child, kill: oneshot::Receiver<()>, exited: watch::Sender<bool>) {
+async fn own_child(
+    mut child: tokio::process::Child,
+    kill: oneshot::Receiver<()>,
+    exited: watch::Sender<bool>,
+) {
     tokio::select! {
         _ = child.wait() => {}
         _ = kill => {
@@ -899,10 +1000,22 @@ where
     });
 }
 
-fn hub_error(step: &str, cause: impl std::fmt::Display, output: Option<&Mutex<VecDeque<String>>>) -> String {
+fn hub_error(
+    step: &str,
+    cause: impl std::fmt::Display,
+    output: Option<&Mutex<VecDeque<String>>>,
+) -> String {
     let mut msg = format!("The device hub failed while {step}: {cause}");
     if let Some(output) = output {
-        let tail: Vec<String> = output.lock().unwrap().iter().rev().take(8).rev().cloned().collect();
+        let tail: Vec<String> = output
+            .lock()
+            .unwrap()
+            .iter()
+            .rev()
+            .take(8)
+            .rev()
+            .cloned()
+            .collect();
         if !tail.is_empty() {
             msg.push_str("\n");
             msg.push_str(&tail.join("\n"));
@@ -915,7 +1028,11 @@ fn hub_error(step: &str, cause: impl std::fmt::Display, output: Option<&Mutex<Ve
 /// one second probe timeout, for up to thirty seconds. Canopy also stops early
 /// when the hub has already exited, so a crash reports its output at once
 /// rather than after the full timeout.
-async fn wait_for_ready(http: &reqwest::Client, origin: &str, exited: &watch::Receiver<bool>) -> Result<(), String> {
+async fn wait_for_ready(
+    http: &reqwest::Client,
+    origin: &str,
+    exited: &watch::Receiver<bool>,
+) -> Result<(), String> {
     let url = format!("{origin}/readyz");
     let deadline = Instant::now() + HUB_READY_TIMEOUT;
     let mut last: String;
@@ -939,7 +1056,11 @@ async fn wait_for_ready(http: &reqwest::Client, origin: &str, exited: &watch::Re
     }
 }
 
-async fn spawn_hub(inner: &Arc<Inner>, tool: &ToolPaths, node: &Path) -> Result<HubProcess, String> {
+async fn spawn_hub(
+    inner: &Arc<Inner>,
+    tool: &ToolPaths,
+    node: &Path,
+) -> Result<HubProcess, String> {
     let state_path = hub_state_path(&inner.base_dir);
     reap_stale_hub(&state_path).await;
     let _ = tokio::fs::create_dir_all(&inner.base_dir).await;
@@ -963,7 +1084,12 @@ async fn spawn_hub(inner: &Arc<Inner>, tool: &ToolPaths, node: &Path) -> Result<
     cmd.args(hub_args(&tool.entry_path, port, host))
         // T3 runs the hub in the server's working directory. A GUI app's is
         // `/`, so Canopy uses the home directory instead.
-        .current_dir(env.get("HOME").or_else(|| env.get("USERPROFILE")).map(PathBuf::from).unwrap_or_else(std::env::temp_dir))
+        .current_dir(
+            env.get("HOME")
+                .or_else(|| env.get("USERPROFILE"))
+                .map(PathBuf::from)
+                .unwrap_or_else(std::env::temp_dir),
+        )
         .env_clear()
         .envs(&env)
         .stdin(std::process::Stdio::null())
@@ -1012,7 +1138,12 @@ async fn spawn_hub(inner: &Arc<Inner>, tool: &ToolPaths, node: &Path) -> Result<
 }
 
 /// Waits for the hub's lifetime and restarts it, as T3's `superviseHub`.
-async fn supervise(inner: Arc<Inner>, first: (u32, watch::Receiver<bool>, Instant), tool: ToolPaths, node: PathBuf) {
+async fn supervise(
+    inner: Arc<Inner>,
+    first: (u32, watch::Receiver<bool>, Instant),
+    tool: ToolPaths,
+    node: PathBuf,
+) {
     let (mut pid, mut exited, mut started) = first;
     loop {
         let _ = exited.wait_for(|e| *e).await;
@@ -1093,7 +1224,11 @@ impl DeviceHubManager {
         if let Some(hub) = inner.set_running(None) {
             let mut exited = hub.exited.clone();
             drop(hub);
-            let _ = tokio::time::timeout(HUB_STOP_GRACE + Duration::from_secs(1), exited.wait_for(|e| *e)).await;
+            let _ = tokio::time::timeout(
+                HUB_STOP_GRACE + Duration::from_secs(1),
+                exited.wait_for(|e| *e),
+            )
+            .await;
         }
         let _ = tokio::fs::remove_file(hub_state_path(&inner.base_dir)).await;
     }
@@ -1144,9 +1279,20 @@ impl DeviceHubManager {
         let (env, sdk) = inner.host_environment();
         let node = resolve_node(&env, host);
         let path_var = env_path(&env);
-        let npm = find_on_path(if host.windows() { "npm.cmd" } else { "npm" }, &path_var, host)
-            .or_else(|| find_on_path(if host.windows() { "pnpm.cmd" } else { "pnpm" }, &path_var, host));
-        let xcrun = host == HostPlatform::Darwin && find_on_path("xcrun", &path_var, host).is_some();
+        let npm = find_on_path(
+            if host.windows() { "npm.cmd" } else { "npm" },
+            &path_var,
+            host,
+        )
+        .or_else(|| {
+            find_on_path(
+                if host.windows() { "pnpm.cmd" } else { "pnpm" },
+                &path_var,
+                host,
+            )
+        });
+        let xcrun =
+            host == HostPlatform::Darwin && find_on_path("xcrun", &path_var, host).is_some();
         let tool = tool_paths(&inner.base_dir);
         let platforms = [DevicePlatform::Ios, DevicePlatform::Android]
             .into_iter()
@@ -1293,10 +1439,21 @@ fn vendor_prefix(platform: DevicePlatform) -> &'static str {
 /// Merge the hub's listing with AVDs it does not report until they boot.
 /// `avds` is `emulator -list-avds`'s (exit code, stdout) when Android is
 /// available here.
-fn merge_listing(hub: HubDeviceList, android_available: bool, avds: Option<(i32, String)>) -> DeviceListing {
-    let mut devices: Vec<HostDevice> = hub.simulators.iter().chain(hub.emulators.iter()).cloned().collect();
-    let plist = regex::Regex::new(r"/CoreSimulator/Devices/[^/]+/device\.plist:$").expect("static regex");
-    let enoent = regex::Regex::new(r#"(?:^Error:\s*ENOENT:|\bcode:\s*['"]ENOENT['"])"#).expect("static regex");
+fn merge_listing(
+    hub: HubDeviceList,
+    android_available: bool,
+    avds: Option<(i32, String)>,
+) -> DeviceListing {
+    let mut devices: Vec<HostDevice> = hub
+        .simulators
+        .iter()
+        .chain(hub.emulators.iter())
+        .cloned()
+        .collect();
+    let plist =
+        regex::Regex::new(r"/CoreSimulator/Devices/[^/]+/device\.plist:$").expect("static regex");
+    let enoent = regex::Regex::new(r#"(?:^Error:\s*ENOENT:|\bcode:\s*['"]ENOENT['"])"#)
+        .expect("static regex");
     let mut details: Vec<String> = hub
         .errors
         .iter()
@@ -1345,12 +1502,20 @@ fn merge_listing(hub: HubDeviceList, android_available: bool, avds: Option<(i32,
     // expo-device-hub 0.19.1 reports a failed simulator listing only as text.
     let simulator_list_failed = regex::Regex::new(r"^\[apple-utils\] (?:Failed to (?:run `xcrun simctl list devices|parse JSON output:|list devices:)|`xcrun simctl list devices --json` did not respond within )").expect("static regex");
     let simulators_unlisted = hub.simulators.is_empty()
-        && hub.errors.iter().flatten().any(|e| simulator_list_failed.is_match(&e.message));
+        && hub
+            .errors
+            .iter()
+            .flatten()
+            .any(|e| simulator_list_failed.is_match(&e.message));
     DeviceListing {
         devices,
         detail: (!details.is_empty()).then(|| details.join("\n")),
         android_discovery_incomplete,
-        incomplete_platforms: if simulators_unlisted { vec![DevicePlatform::Ios] } else { vec![] },
+        incomplete_platforms: if simulators_unlisted {
+            vec![DevicePlatform::Ios]
+        } else {
+            vec![]
+        },
     }
 }
 
@@ -1359,7 +1524,8 @@ impl DeviceHubManager {
         let origin = self.origin()?;
         let host = HostPlatform::current();
         let (env, sdk) = self.inner.host_environment();
-        let android_available = platform_reason(DevicePlatform::Android, host, &sdk, false).is_none();
+        let android_available =
+            platform_reason(DevicePlatform::Android, host, &sdk, false).is_none();
         let listed = tokio::time::timeout(LIST_TIMEOUT, async {
             let response = self
                 .inner
@@ -1380,7 +1546,11 @@ impl DeviceHubManager {
                         "The device hub did not answer within {} seconds.",
                         LIST_TIMEOUT.as_secs()
                     )),
-                    incomplete_platforms: if android_available { vec![DevicePlatform::Android] } else { vec![] },
+                    incomplete_platforms: if android_available {
+                        vec![DevicePlatform::Android]
+                    } else {
+                        vec![]
+                    },
                     ..Default::default()
                 })
             }
@@ -1389,16 +1559,26 @@ impl DeviceHubManager {
         };
         let avds = if android_available {
             let emulator = sdk.root.as_ref().map(|r| {
-                r.join("emulator")
-                    .join(if host.windows() { "emulator.exe" } else { "emulator" })
+                r.join("emulator").join(if host.windows() {
+                    "emulator.exe"
+                } else {
+                    "emulator"
+                })
             });
             let env = env.clone();
             tokio::task::spawn_blocking(move || {
                 let emulator = emulator?;
                 let mut cmd = std::process::Command::new(emulator);
-                cmd.arg("-list-avds").env_clear().envs(&env).stdin(std::process::Stdio::null()).no_console_window();
+                cmd.arg("-list-avds")
+                    .env_clear()
+                    .envs(&env)
+                    .stdin(std::process::Stdio::null())
+                    .no_console_window();
                 Some(match run_with_timeout(cmd, Duration::from_secs(20)) {
-                    Ok(out) => (out.status.code().unwrap_or(127), String::from_utf8_lossy(&out.stdout).into_owned()),
+                    Ok(out) => (
+                        out.status.code().unwrap_or(127),
+                        String::from_utf8_lossy(&out.stdout).into_owned(),
+                    ),
                     Err(_) => (124, String::new()),
                 })
             })
@@ -1411,7 +1591,12 @@ impl DeviceHubManager {
         Ok(merge_listing(hub, android_available, avds))
     }
 
-    async fn post_action(&self, path: &str, body: serde_json::Value, timeout: Duration) -> Result<HubActionResult, String> {
+    async fn post_action(
+        &self,
+        path: &str,
+        body: serde_json::Value,
+        timeout: Duration,
+    ) -> Result<HubActionResult, String> {
         let origin = self.origin()?;
         let request = self
             .inner
@@ -1492,7 +1677,9 @@ impl DeviceHubManager {
             if r.ok {
                 Ok(())
             } else {
-                Err(r.error.unwrap_or_else(|| "The device hub refused to shut the device down.".into()))
+                Err(r
+                    .error
+                    .unwrap_or_else(|| "The device hub refused to shut the device down.".into()))
             }
         };
         if device.platform == DevicePlatform::Ios {
@@ -1594,12 +1781,17 @@ mod tests {
     }
 
     fn env(pairs: &[(&str, &str)]) -> HashMap<String, String> {
-        pairs.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect()
+        pairs
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect()
     }
 
     #[test]
     fn devicehub_hub_args_match_t3() {
-        let entry = Path::new("/tools/expo-device-hub/0.19.1/node_modules/expo-device-hub/dist/server/cli.mjs");
+        let entry = Path::new(
+            "/tools/expo-device-hub/0.19.1/node_modules/expo-device-hub/dist/server/cli.mjs",
+        );
         assert_eq!(
             hub_args(entry, 41234, HostPlatform::Linux),
             vec![
@@ -1615,22 +1807,32 @@ mod tests {
             ]
         );
         let mac = hub_args(entry, 1, HostPlatform::Darwin);
-        assert!(!mac.contains(&"--platform".to_string()), "a Mac lists both platforms");
-        assert!(hub_args(entry, 1, HostPlatform::Windows).ends_with(&["--platform".into(), "android".into()]));
+        assert!(
+            !mac.contains(&"--platform".to_string()),
+            "a Mac lists both platforms"
+        );
+        assert!(hub_args(entry, 1, HostPlatform::Windows)
+            .ends_with(&["--platform".into(), "android".into()]));
     }
 
     #[test]
     fn devicehub_tool_paths_and_sentinel() {
         let base = temp_dir("paths");
         let paths = tool_paths(&base);
-        assert_eq!(paths.install_dir, base.join("expo-device-hub").join("0.19.1"));
+        assert_eq!(
+            paths.install_dir,
+            base.join("expo-device-hub").join("0.19.1")
+        );
         assert!(paths
             .entry_path
             .ends_with("node_modules/expo-device-hub/dist/server/cli.mjs"));
         assert!(!is_installed(&paths));
         std::fs::create_dir_all(paths.entry_path.parent().unwrap()).unwrap();
         std::fs::write(&paths.entry_path, "").unwrap();
-        assert!(!is_installed(&paths), "an entry without the sentinel is a partial install");
+        assert!(
+            !is_installed(&paths),
+            "an entry without the sentinel is a partial install"
+        );
         std::fs::write(&paths.sentinel_path, "0.18.0\n").unwrap();
         assert!(!is_installed(&paths), "the sentinel must name this version");
         std::fs::write(&paths.sentinel_path, "0.19.1\n").unwrap();
@@ -1643,7 +1845,10 @@ mod tests {
         let base = env(&[("PATH", "/usr/bin:/bin"), ("HOME", "/home/u")]);
         let out = device_host_environment(&base, Some(Path::new("/sdk")), HostPlatform::Linux);
         assert_eq!(out["ANDROID_HOME"], "/sdk");
-        assert_eq!(out["PATH"], "/sdk/platform-tools:/sdk/emulator:/usr/bin:/bin");
+        assert_eq!(
+            out["PATH"],
+            "/sdk/platform-tools:/sdk/emulator:/usr/bin:/bin"
+        );
         let untouched = device_host_environment(&base, None, HostPlatform::Linux);
         assert_eq!(untouched, base);
         // Windows: one PATH key, `;`-joined.
@@ -1671,7 +1876,10 @@ mod tests {
             Some(format!("-camera-{facing} <mode>: none, emulated, webcam0"))
         };
         let mut with_user = base.clone();
-        with_user.insert("EXPO_DEVICE_HUB_EMULATOR_EXTRA_ARGS".into(), "-no-snapshot".into());
+        with_user.insert(
+            "EXPO_DEVICE_HUB_EMULATOR_EXTRA_ARGS".into(),
+            "-no-snapshot".into(),
+        );
         let out = hub_environment(&with_user, HostPlatform::Linux, Some(1000), old_sdk, &owned);
         assert_eq!(
             out["EXPO_DEVICE_HUB_EMULATOR_EXTRA_ARGS"],
@@ -1684,19 +1892,30 @@ mod tests {
 
         // XDG_RUNTIME_DIR: only on Linux, only when unset, only when owned.
         let not_owned = |_: &Path, _: u32| false;
-        assert!(!hub_environment(&base, HostPlatform::Linux, Some(1000), no_help, &not_owned)
-            .contains_key("XDG_RUNTIME_DIR"));
-        assert!(!hub_environment(&base, HostPlatform::Darwin, Some(501), no_help, &owned)
-            .contains_key("XDG_RUNTIME_DIR"));
+        assert!(
+            !hub_environment(&base, HostPlatform::Linux, Some(1000), no_help, &not_owned)
+                .contains_key("XDG_RUNTIME_DIR")
+        );
+        assert!(
+            !hub_environment(&base, HostPlatform::Darwin, Some(501), no_help, &owned)
+                .contains_key("XDG_RUNTIME_DIR")
+        );
         let mut set = base.clone();
         set.insert("XDG_RUNTIME_DIR".into(), "/custom".into());
         assert_eq!(
-            hub_environment(&set, HostPlatform::Linux, Some(1000), no_help, &owned)["XDG_RUNTIME_DIR"],
+            hub_environment(&set, HostPlatform::Linux, Some(1000), no_help, &owned)
+                ["XDG_RUNTIME_DIR"],
             "/custom"
         );
         // No SDK: no camera probing at all.
         let probed: CameraHelp = &|_, _, _| panic!("no ANDROID_HOME, no probe");
-        hub_environment(&env(&[("PATH", "/bin")]), HostPlatform::Linux, None, probed, &owned);
+        hub_environment(
+            &env(&[("PATH", "/bin")]),
+            HostPlatform::Linux,
+            None,
+            probed,
+            &owned,
+        );
     }
 
     #[test]
@@ -1711,7 +1930,10 @@ mod tests {
         assert!(sdk.adb && !sdk.emulator);
         assert_eq!(
             platform_reason(DevicePlatform::Android, HostPlatform::Linux, &sdk, false),
-            Some(format!("Android Emulator is missing from {}. Install it in Android Studio's SDK Manager.", root.display()))
+            Some(format!(
+                "Android Emulator is missing from {}. Install it in Android Studio's SDK Manager.",
+                root.display()
+            ))
         );
         std::fs::create_dir_all(root.join("emulator")).unwrap();
         std::fs::write(root.join("emulator").join("emulator"), "").unwrap();
@@ -1719,26 +1941,48 @@ mod tests {
         std::fs::write(root.join("tools/bin/avdmanager"), "").unwrap();
         let sdk = android_sdk(&e, HostPlatform::Linux);
         assert!(sdk.legacy_avdmanager);
-        assert!(platform_reason(DevicePlatform::Android, HostPlatform::Linux, &sdk, false)
-            .unwrap()
-            .contains("older, unsupported version"));
+        assert!(
+            platform_reason(DevicePlatform::Android, HostPlatform::Linux, &sdk, false)
+                .unwrap()
+                .contains("older, unsupported version")
+        );
         std::fs::create_dir_all(root.join("cmdline-tools/latest/bin")).unwrap();
         std::fs::write(root.join("cmdline-tools/latest/bin/avdmanager"), "").unwrap();
         let sdk = android_sdk(&e, HostPlatform::Linux);
-        assert_eq!(platform_reason(DevicePlatform::Android, HostPlatform::Linux, &sdk, false), None);
+        assert_eq!(
+            platform_reason(DevicePlatform::Android, HostPlatform::Linux, &sdk, false),
+            None
+        );
         // An explicit ANDROID_HOME wins and is reported even when empty.
-        let explicit = env(&[("HOME", home.to_str().unwrap()), ("ANDROID_HOME", "/nowhere")]);
+        let explicit = env(&[
+            ("HOME", home.to_str().unwrap()),
+            ("ANDROID_HOME", "/nowhere"),
+        ]);
         let sdk = android_sdk(&explicit, HostPlatform::Linux);
         assert_eq!(sdk.root.as_deref(), Some(Path::new("/nowhere")));
         assert!(!sdk.adb);
         // Nothing found.
         let empty = env(&[("HOME", "/definitely/not/a/home"), ("PATH", "")]);
-        assert_eq!(android_sdk(&empty, HostPlatform::Linux), AndroidSdk::default());
-        assert!(platform_reason(DevicePlatform::Android, HostPlatform::Linux, &AndroidSdk::default(), false)
-            .unwrap()
-            .starts_with("Android SDK was not found."));
         assert_eq!(
-            platform_reason(DevicePlatform::Ios, HostPlatform::Linux, &AndroidSdk::default(), true).as_deref(),
+            android_sdk(&empty, HostPlatform::Linux),
+            AndroidSdk::default()
+        );
+        assert!(platform_reason(
+            DevicePlatform::Android,
+            HostPlatform::Linux,
+            &AndroidSdk::default(),
+            false
+        )
+        .unwrap()
+        .starts_with("Android SDK was not found."));
+        assert_eq!(
+            platform_reason(
+                DevicePlatform::Ios,
+                HostPlatform::Linux,
+                &AndroidSdk::default(),
+                true
+            )
+            .as_deref(),
             Some("iOS Simulators need macOS with Xcode.")
         );
         std::fs::remove_dir_all(home).unwrap();
@@ -1762,7 +2006,10 @@ mod tests {
     fn devicehub_node_resolution() {
         let dir = temp_dir("node");
         let e = env(&[("PATH", dir.to_str().unwrap())]);
-        assert_eq!(resolve_node(&e, HostPlatform::Linux).unwrap_err(), NODE_UNAVAILABLE);
+        assert_eq!(
+            resolve_node(&e, HostPlatform::Linux).unwrap_err(),
+            NODE_UNAVAILABLE
+        );
         std::fs::write(dir.join("node"), "").unwrap();
         assert_eq!(
             resolve_node(&e, HostPlatform::Linux).unwrap(),
@@ -1783,7 +2030,11 @@ mod tests {
 
     #[test]
     fn devicehub_state_file_is_t3s_shape() {
-        let record = HubStateFile { pid: 42, port: 5555, entry_path: "/x/cli.mjs".into() };
+        let record = HubStateFile {
+            pid: 42,
+            port: 5555,
+            entry_path: "/x/cli.mjs".into(),
+        };
         let json = serde_json::to_string(&record).unwrap();
         assert_eq!(json, r#"{"pid":42,"port":5555,"entryPath":"/x/cli.mjs"}"#);
     }
@@ -1794,7 +2045,11 @@ mod tests {
         let dir = temp_dir("reap");
         let state = dir.join("hub.json");
         let write = |pid: u32, entry: &str| {
-            let record = HubStateFile { pid, port: 1, entry_path: entry.into() };
+            let record = HubStateFile {
+                pid,
+                port: 1,
+                entry_path: entry.into(),
+            };
             std::fs::write(&state, serde_json::to_string(&record).unwrap()).unwrap();
         };
         // `; true` keeps the shell from exec'ing sleep, so its own argv (which
@@ -1810,7 +2065,10 @@ mod tests {
         write(bystander.id(), "/not/the/hub/cli.mjs");
         reap_stale_hub(&state).await;
         assert!(!state.exists(), "the record is removed either way");
-        assert!(bystander.try_wait().unwrap().is_none(), "a recycled pid is not killed");
+        assert!(
+            bystander.try_wait().unwrap().is_none(),
+            "a recycled pid is not killed"
+        );
         // The previous run's hub: its command line names the entry.
         let entry = dir.join("cli.mjs").to_string_lossy().into_owned();
         let mut stale = spawn(&entry);
@@ -1843,7 +2101,11 @@ mod tests {
         .unwrap();
         let listing = merge_listing(hub, true, Some((0, "Pixel_8\nTablet\n".into())));
         let names: Vec<&str> = listing.devices.iter().map(|d| d.name.as_str()).collect();
-        assert_eq!(names, vec!["Pixel_8", "Tablet"], "a booted AVD is not listed twice");
+        assert_eq!(
+            names,
+            vec!["Pixel_8", "Tablet"],
+            "a booted AVD is not listed twice"
+        );
         assert!(!listing.devices[1].booted);
         assert_eq!(listing.incomplete_platforms, vec![DevicePlatform::Ios]);
         let detail = listing.detail.unwrap();
@@ -1857,9 +2119,14 @@ mod tests {
         }))
         .unwrap();
         let listing = merge_listing(hub, false, None);
-        assert!(listing.detail.is_none(), "a missing SDK's probe noise is hidden");
+        assert!(
+            listing.detail.is_none(),
+            "a missing SDK's probe noise is hidden"
+        );
 
-        let hub: HubDeviceList = serde_json::from_value(serde_json::json!({ "simulators": [], "emulators": [] })).unwrap();
+        let hub: HubDeviceList =
+            serde_json::from_value(serde_json::json!({ "simulators": [], "emulators": [] }))
+                .unwrap();
         let listing = merge_listing(hub, true, Some((1, String::new())));
         assert!(listing.android_discovery_incomplete);
     }
@@ -1893,24 +2160,35 @@ mod tests {
         let client = reqwest::Client::builder().no_proxy().build().unwrap();
 
         let devices = client
-            .get(format!("{}/api/devices?wsTicket={ticket}", access.http_base))
+            .get(format!(
+                "{}/api/devices?wsTicket={ticket}",
+                access.http_base
+            ))
             .send()
             .await
             .unwrap();
         assert_eq!(devices.status(), 200);
         assert_eq!(devices.headers()["cache-control"], "no-store, no-transform");
-        let body: serde_json::Value = serde_json::from_slice(&devices.bytes().await.unwrap()).unwrap();
+        let body: serde_json::Value =
+            serde_json::from_slice(&devices.bytes().await.unwrap()).unwrap();
         eprintln!("proxied /api/devices: {body}");
         assert!(body.get("emulators").is_some());
 
         let exec = client
-            .post(format!("{}/vendor/serve-sim/exec?wsTicket={ticket}", access.http_base))
+            .post(format!(
+                "{}/vendor/serve-sim/exec?wsTicket={ticket}",
+                access.http_base
+            ))
             .body("{\"command\":\"id\"}")
             .send()
             .await
             .unwrap();
         assert_eq!(exec.status(), 404, "the exec route is refused");
-        let no_ticket = client.get(format!("{}/api/devices", access.http_base)).send().await.unwrap();
+        let no_ticket = client
+            .get(format!("{}/api/devices", access.http_base))
+            .send()
+            .await
+            .unwrap();
         assert_eq!(no_ticket.status(), 401);
 
         let listing = hub.list().await.unwrap();
@@ -1934,19 +2212,25 @@ mod tests {
                 .unwrap();
             let api_status = api.status();
             let api_body = String::from_utf8_lossy(&api.bytes().await.unwrap()).into_owned();
-            eprintln!("proxied serve-emu /api: {api_status} {}", &api_body[..api_body.len().min(400)]);
+            eprintln!(
+                "proxied serve-emu /api: {api_status} {}",
+                &api_body[..api_body.len().min(400)]
+            );
             let url = format!(
                 "{}/vendor/serve-emu/ws?device={}&frame-meta=1&wsTicket={ticket}",
                 access.ws_base, device.id
             );
-            let (mut socket, response) =
-                tokio_tungstenite::connect_async(url).await.expect("stream socket upgrade through the proxy");
+            let (mut socket, response) = tokio_tungstenite::connect_async(url)
+                .await
+                .expect("stream socket upgrade through the proxy");
             eprintln!("socket upgraded through the proxy: {}", response.status());
             let mut semu = 0;
             let mut bytes = 0usize;
             let deadline = Instant::now() + Duration::from_secs(180);
             while semu < 3 && Instant::now() < deadline {
-                let Ok(Some(Ok(message))) = tokio::time::timeout(Duration::from_secs(60), socket.next()).await else {
+                let Ok(Some(Ok(message))) =
+                    tokio::time::timeout(Duration::from_secs(60), socket.next()).await
+                else {
                     eprintln!("socket ended");
                     break;
                 };
@@ -1964,12 +2248,17 @@ mod tests {
                             );
                         }
                     }
-                    tokio_tungstenite::tungstenite::Message::Text(text) => eprintln!("text: {text}"),
+                    tokio_tungstenite::tungstenite::Message::Text(text) => {
+                        eprintln!("text: {text}")
+                    }
                     other => eprintln!("frame: {other:?}"),
                 }
             }
             if api_status.is_success() {
-                assert!(semu > 0, "no SEMU video arrived through the proxy ({bytes} bytes)");
+                assert!(
+                    semu > 0,
+                    "no SEMU video arrived through the proxy ({bytes} bytes)"
+                );
             } else {
                 eprintln!("serve-emu refused the device ({api_status}); video not exercised");
             }

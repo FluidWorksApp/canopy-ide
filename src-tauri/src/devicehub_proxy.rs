@@ -129,7 +129,11 @@ fn matches(list: &[Regex], path: &str) -> bool {
 /// T3's allowlist and method rules: 404 for any route outside the allowlist,
 /// 405 for a method the route does not take. Checked before authentication,
 /// as in T3, so an unknown route never reveals whether a ticket was valid.
-pub(crate) fn route_decision(hub_path: &str, method: &Method, upgrade: bool) -> Result<(), StatusCode> {
+pub(crate) fn route_decision(
+    hub_path: &str,
+    method: &Method,
+    upgrade: bool,
+) -> Result<(), StatusCode> {
     let p = patterns();
     let allowed = if upgrade {
         matches(&p.ws, hub_path)
@@ -205,7 +209,10 @@ fn percent_decode(s: &str) -> String {
 }
 
 /// Request headers to send upstream: T3's `forwardHeaders`.
-pub(crate) fn forward_headers(headers: &HeaderMap, hub_origin: &str) -> Vec<(HeaderName, HeaderValue)> {
+pub(crate) fn forward_headers(
+    headers: &HeaderMap,
+    hub_origin: &str,
+) -> Vec<(HeaderName, HeaderValue)> {
     let mut out = Vec::new();
     for (name, value) in headers {
         let lower = name.as_str();
@@ -266,8 +273,9 @@ impl Tickets {
         live.retain(|(_, expires)| *expires > now);
         // Every live ticket is compared, in constant time each, so neither the
         // match position nor a near miss shows in the timing.
-        live.iter()
-            .fold(false, |hit, (t, _)| crate::context::constant_time_eq(presented, t) | hit)
+        live.iter().fold(false, |hit, (t, _)| {
+            crate::context::constant_time_eq(presented, t) | hit
+        })
     }
 }
 
@@ -408,7 +416,8 @@ async fn proxy_http(
     }
     let upstream = request.send().await.map_err(|e| e.to_string())?;
 
-    let status = StatusCode::from_u16(upstream.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
+    let status =
+        StatusCode::from_u16(upstream.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
     let mut builder = Response::builder().status(status);
     let mut content_type: Option<String> = None;
     for (name, value) in upstream.headers() {
@@ -452,7 +461,11 @@ async fn proxy_http(
 /// does. Every frame reaches the other side unchanged either way; extensions
 /// and subprotocols are not offered upstream, as in T3, so neither leg
 /// negotiates compression.
-async fn proxy_websocket(mut req: Request, origin: &str, path_and_query: &str) -> Result<Response, String> {
+async fn proxy_websocket(
+    mut req: Request,
+    origin: &str,
+    path_and_query: &str,
+) -> Result<Response, String> {
     let on_upgrade = req
         .extensions_mut()
         .remove::<hyper::upgrade::OnUpgrade>()
@@ -573,7 +586,10 @@ mod tests {
         assert!(t.verify_at(&ticket, now + Duration::from_secs(60)));
         assert!(!t.verify_at("not-a-ticket", now));
         assert!(!t.verify_at("", now));
-        assert!(!t.verify_at(&ticket[..63], now), "a prefix is not the ticket");
+        assert!(
+            !t.verify_at(&ticket[..63], now),
+            "a prefix is not the ticket"
+        );
         assert!(!t.verify_at(&ticket, now + TICKET_TTL + Duration::from_millis(1)));
         // Expired tickets are pruned, not just refused.
         assert!(t.live.lock().unwrap().is_empty());
@@ -605,7 +621,10 @@ mod tests {
         );
         // An encoded key is still the ticket.
         assert_eq!(upstream_search(Some("ws%54icket=secret&a=1")), "?a=1");
-        assert_eq!(ticket_from_query(Some("a=1&wsTicket=ab%2Bc")).as_deref(), Some("ab+c"));
+        assert_eq!(
+            ticket_from_query(Some("a=1&wsTicket=ab%2Bc")).as_deref(),
+            Some("ab+c")
+        );
         assert_eq!(ticket_from_query(Some("a=1")), None);
     }
 
@@ -620,13 +639,24 @@ mod tests {
         // Reads.
         assert_eq!(decide("/api/devices", Method::GET, false), Ok(()));
         assert_eq!(decide("/vendor/serve-emu/api", Method::GET, false), Ok(()));
-        assert_eq!(decide("/vendor/serve-emu/api/fold", Method::GET, false), Ok(()));
         assert_eq!(
-            decide("/vendor/serve-sim/helper/udid-1/stream.avcc", Method::GET, false),
+            decide("/vendor/serve-emu/api/fold", Method::GET, false),
             Ok(())
         );
         assert_eq!(
-            decide("/vendor/serve-sim/helper/udid-1/stream.mjpeg", Method::HEAD, false),
+            decide(
+                "/vendor/serve-sim/helper/udid-1/stream.avcc",
+                Method::GET,
+                false
+            ),
+            Ok(())
+        );
+        assert_eq!(
+            decide(
+                "/vendor/serve-sim/helper/udid-1/stream.mjpeg",
+                Method::HEAD,
+                false
+            ),
             Ok(())
         );
         // Stream tuning, fold changes and screenshots take POST.
@@ -641,11 +671,21 @@ mod tests {
         }
         // WebRTC signalling is POST only.
         assert_eq!(
-            decide("/vendor/serve-sim/helper/udid-1/webrtc/offer", Method::POST, false),
+            decide(
+                "/vendor/serve-sim/helper/udid-1/webrtc/offer",
+                Method::POST,
+                false
+            ),
             Ok(())
         );
-        assert_eq!(decide("/vendor/serve-emu/webrtc/offer", Method::POST, false), Ok(()));
-        assert_eq!(decide("/vendor/serve-emu/webrtc/close", Method::POST, false), Ok(()));
+        assert_eq!(
+            decide("/vendor/serve-emu/webrtc/offer", Method::POST, false),
+            Ok(())
+        );
+        assert_eq!(
+            decide("/vendor/serve-emu/webrtc/close", Method::POST, false),
+            Ok(())
+        );
         assert_eq!(
             decide("/vendor/serve-emu/webrtc/offer", Method::GET, false),
             Err(StatusCode::METHOD_NOT_ALLOWED)
@@ -663,13 +703,24 @@ mod tests {
 
     #[test]
     fn devicehub_route_sockets_only_on_socket_paths() {
-        for path in ["/api/devices/ws", "/vendor/serve-sim/helper/ws", "/vendor/serve-emu/ws"] {
+        for path in [
+            "/api/devices/ws",
+            "/vendor/serve-sim/helper/ws",
+            "/vendor/serve-emu/ws",
+        ] {
             assert_eq!(decide(path, Method::GET, true), Ok(()), "{path}");
             // Without the upgrade they are not HTTP routes at all.
-            assert_eq!(decide(path, Method::GET, false), Err(StatusCode::NOT_FOUND), "{path}");
+            assert_eq!(
+                decide(path, Method::GET, false),
+                Err(StatusCode::NOT_FOUND),
+                "{path}"
+            );
         }
         // An upgrade to an HTTP route is refused.
-        assert_eq!(decide("/api/devices", Method::GET, true), Err(StatusCode::NOT_FOUND));
+        assert_eq!(
+            decide("/api/devices", Method::GET, true),
+            Err(StatusCode::NOT_FOUND)
+        );
     }
 
     #[test]
@@ -686,7 +737,11 @@ mod tests {
         }
         // Unsupported Duo routes.
         assert_eq!(
-            decide("/vendor/serve-sim/helper/duo/panel/1/webrtc/offer", Method::GET, false),
+            decide(
+                "/vendor/serve-sim/helper/duo/panel/1/webrtc/offer",
+                Method::GET,
+                false
+            ),
             Err(StatusCode::NOT_FOUND)
         );
         // serve-emu's unauthenticated action routes.
@@ -698,7 +753,11 @@ mod tests {
             "/",
             "/vendor/serve-emu/api/devices/../exec",
         ] {
-            assert_eq!(decide(path, Method::POST, false), Err(StatusCode::NOT_FOUND), "{path}");
+            assert_eq!(
+                decide(path, Method::POST, false),
+                Err(StatusCode::NOT_FOUND),
+                "{path}"
+            );
         }
     }
 
@@ -712,10 +771,19 @@ mod tests {
         h.insert("content-type", HeaderValue::from_static("application/json"));
         h.insert("accept-encoding", HeaderValue::from_static("gzip"));
         let out = forward_headers(&h, "http://127.0.0.1:9");
-        let get = |n: &str| out.iter().find(|(k, _)| k.as_str() == n).map(|(_, v)| v.clone());
+        let get = |n: &str| {
+            out.iter()
+                .find(|(k, _)| k.as_str() == n)
+                .map(|(_, v)| v.clone())
+        };
         assert_eq!(get("origin").unwrap(), "http://127.0.0.1:9");
         assert_eq!(get("content-type").unwrap(), "application/json");
-        for gone in ["x-forwarded-proto", "cookie", "authorization", "accept-encoding"] {
+        for gone in [
+            "x-forwarded-proto",
+            "cookie",
+            "authorization",
+            "accept-encoding",
+        ] {
             assert!(get(gone).is_none(), "{gone} must not reach the hub");
         }
     }
@@ -737,7 +805,10 @@ mod tests {
                 "/api/devices",
                 get(|| async {
                     (
-                        [("set-cookie", "upstream=1"), ("content-type", "application/json")],
+                        [
+                            ("set-cookie", "upstream=1"),
+                            ("content-type", "application/json"),
+                        ],
                         r#"{"simulators":[],"emulators":[]}"#,
                     )
                 }),
@@ -764,7 +835,10 @@ mod tests {
                     let record = record.clone();
                     async move {
                         record.lock().unwrap().push(
-                            req.uri().path_and_query().map(|p| p.to_string()).unwrap_or_default(),
+                            req.uri()
+                                .path_and_query()
+                                .map(|p| p.to_string())
+                                .unwrap_or_default(),
                         );
                         next.run(req).await
                     }
@@ -798,8 +872,17 @@ mod tests {
             response.headers().get("cache-control").unwrap(),
             "no-store, no-transform"
         );
-        assert_eq!(response.headers().get("access-control-allow-origin").unwrap(), "*");
-        assert_eq!(response.text().await.unwrap(), r#"{"simulators":[],"emulators":[]}"#);
+        assert_eq!(
+            response
+                .headers()
+                .get("access-control-allow-origin")
+                .unwrap(),
+            "*"
+        );
+        assert_eq!(
+            response.text().await.unwrap(),
+            r#"{"simulators":[],"emulators":[]}"#
+        );
         assert_eq!(*f.seen.lock().unwrap(), vec!["/api/devices".to_string()]);
     }
 
@@ -821,14 +904,20 @@ mod tests {
         let ticket = f.state.tickets.mint();
         let client = reqwest::Client::new();
         let exec = client
-            .post(format!("{}/vendor/serve-sim/exec?wsTicket={ticket}", f.proxy))
+            .post(format!(
+                "{}/vendor/serve-sim/exec?wsTicket={ticket}",
+                f.proxy
+            ))
             .body("rm -rf /")
             .send()
             .await
             .unwrap();
         assert_eq!(exec.status(), 404);
         let wrong = client
-            .post(format!("{}/vendor/serve-emu/api?wsTicket={ticket}", f.proxy))
+            .post(format!(
+                "{}/vendor/serve-emu/api?wsTicket={ticket}",
+                f.proxy
+            ))
             .send()
             .await
             .unwrap();
@@ -841,10 +930,19 @@ mod tests {
         let f = fixture().await;
         let ticket = f.state.tickets.mint();
         let client = reqwest::Client::new();
-        let url = format!("{}/vendor/serve-emu/api/stream-settings?wsTicket={ticket}", f.proxy);
+        let url = format!(
+            "{}/vendor/serve-emu/api/stream-settings?wsTicket={ticket}",
+            f.proxy
+        );
         let preflight = client.request(Method::OPTIONS, &url).send().await.unwrap();
         assert_eq!(preflight.status(), 204);
-        assert_eq!(preflight.headers().get("access-control-allow-origin").unwrap(), "*");
+        assert_eq!(
+            preflight
+                .headers()
+                .get("access-control-allow-origin")
+                .unwrap(),
+            "*"
+        );
         let response = client
             .post(&url)
             .header("content-type", "application/json")
@@ -887,8 +985,14 @@ mod tests {
         assert_eq!(first, Message::Binary(vec![0x83]));
         socket.send(Message::Binary(vec![0x03, 1])).await.unwrap();
         socket.send(Message::Binary(vec![0x03, 2])).await.unwrap();
-        assert_eq!(socket.next().await.unwrap().unwrap(), Message::Binary(vec![0x03, 1]));
-        assert_eq!(socket.next().await.unwrap().unwrap(), Message::Binary(vec![0x03, 2]));
+        assert_eq!(
+            socket.next().await.unwrap().unwrap(),
+            Message::Binary(vec![0x03, 1])
+        );
+        assert_eq!(
+            socket.next().await.unwrap().unwrap(),
+            Message::Binary(vec![0x03, 2])
+        );
         assert_eq!(
             *f.seen.lock().unwrap(),
             vec!["/vendor/serve-sim/helper/ws?device=test".to_string()]

@@ -682,7 +682,10 @@ mod tests {
     fn split_position_needs_positive_numbers() {
         assert_eq!(split_position("a.rs:3"), Some(("a.rs", 3, None)));
         assert_eq!(split_position("a.rs:3:9"), Some(("a.rs", 3, Some(9))));
-        assert_eq!(split_position("C:\\x\\a.rs:3"), Some(("C:\\x\\a.rs", 3, None)));
+        assert_eq!(
+            split_position("C:\\x\\a.rs:3"),
+            Some(("C:\\x\\a.rs", 3, None))
+        );
         assert_eq!(split_position("a.rs"), None);
         assert_eq!(split_position("a.rs:"), None);
         assert_eq!(split_position("a.rs:x"), None);
@@ -704,7 +707,9 @@ mod tests {
     fn a_burst_before_boot_is_capped() {
         let pending = PendingTargets::default();
         let many = (0..MAX_PENDING_TARGETS + 10)
-            .map(|i| OpenTarget::Dir { path: i.to_string() })
+            .map(|i| OpenTarget::Dir {
+                path: i.to_string(),
+            })
             .collect();
         assert!(pending.hold_or_route(many).is_empty());
         assert_eq!(pending.take().len(), MAX_PENDING_TARGETS);
