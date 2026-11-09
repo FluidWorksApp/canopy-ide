@@ -4,6 +4,7 @@ import { UnifiedWorkspace } from "./UnifiedWorkspace";
 import { buildUnifiedRows } from "../placement/unified";
 import type { Gathered } from "../placement/gather";
 import { getGlobalPreference } from "../placement/preferences";
+import { targetPreference } from "../placement/types";
 
 const rows = buildUnifiedRows({
   local: { projects: [{ id: "p", name: "Canopy" }], agents: [{ id: "a", name: "claude", project: "Canopy" }] },
@@ -14,6 +15,11 @@ const rows = buildUnifiedRows({
 const data: Gathered = {
   rows,
   notes: ["Only the active host is readable."],
+  targets: [
+    { target: { kind: "local" }, name: "This Mac", online: true },
+    { target: { kind: "remote", workspaceId: "w1" }, name: "Cloud", online: true },
+    { target: { kind: "t3", machineId: "m1" }, name: "Studio", online: false },
+  ],
   resources: [
     { target: { kind: "local" }, online: true, activeAgents: 1, capacity: 4, lastSeen: 0 },
     { target: { kind: "remote", workspaceId: "w1" }, online: true, activeAgents: 0, capacity: 4, lastSeen: 0 },
@@ -57,8 +63,8 @@ describe("UnifiedWorkspace", () => {
   it("persists the default run-on choice", async () => {
     render(<UnifiedWorkspace gather={async () => data} />);
     await screen.findByRole("region", { name: "Canopy" });
-    fireEvent.change(screen.getByLabelText("Default run on"), { target: { value: "remote" } });
-    expect(getGlobalPreference()).toBe("remote");
+    fireEvent.change(screen.getByLabelText("Default run on"), { target: { value: "remote:w1" } });
+    expect(getGlobalPreference()).toEqual(targetPreference({ kind: "remote", workspaceId: "w1" }));
   });
 
   it("shows a load failure", async () => {

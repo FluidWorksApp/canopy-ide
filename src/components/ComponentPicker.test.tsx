@@ -2,11 +2,17 @@
 import {cleanup,fireEvent,render,screen} from '@testing-library/react';
 import {afterEach,expect,it,vi} from 'vitest';
 import {ComponentPicker} from './ComponentPicker';
+import {automaticPreference,targetPreference,type DisplayTarget} from '../placement/types';
 import type {PickerComponent} from '../componentPicker';
 
 afterEach(cleanup);
 const C=(id:string,label:string,path:string):PickerComponent=>({id,label,path});
 const COMPONENTS=[C('a','api','/w/shop/services/api'),C('w','web','/w/shop/apps/web'),C('k','worker','/w/shop/services/worker')];
+const MACHINES:DisplayTarget[]=[
+  {target:{kind:'local'},name:'This Mac',online:true},
+  {target:{kind:'remote',workspaceId:'design'},name:'Design Studio',online:true},
+  {target:{kind:'t3',machineId:'mini'},name:'Build Mini',online:true},
+];
 const mount=(over:Partial<Parameters<typeof ComponentPicker>[0]>={})=>{
   const onPick=vi.fn(),onCancel=vi.fn();
   render(<ComponentPicker title="New shell" components={COMPONENTS} recents={[]} onPick={onPick} onCancel={onCancel} {...over}/>);
@@ -19,6 +25,31 @@ it('asks which component, naming what is being opened',()=>{
   mount({title:'New Claude Code'});
   expect(screen.getByRole('dialog',{name:'New Claude Code'})).toBeTruthy();
   expect(screen.getByText(/in which component\?/)).toBeTruthy();
+});
+it('shows Automatic, This Mac, and each connected machine for agent launches',()=>{
+  mount({title:'New Claude Code',machineTargets:MACHINES});
+  expect(screen.getAllByRole('radio').map(row=>row.textContent)).toEqual(['Automatic','This Mac','Design Studio','Build Mini']);
+  expect(screen.queryByText(/Balance|Remote|T3 Connect|Cloud/)).toBeNull();
+});
+it('returns the exact selected machine and supports arrow-key selection',()=>{
+  const {onPick,input}=mount({
+    title:'New Claude Code',
+    components:[COMPONENTS[0]],
+    machineTargets:MACHINES,
+    initialMachine:automaticPreference(),
+  });
+  const automatic=screen.getByRole('radio',{name:'Automatic'});
+  automatic.focus();
+  fireEvent.keyDown(automatic,{key:'ArrowRight'});
+  fireEvent.keyDown(screen.getByRole('radio',{name:'This Mac'}),{key:'ArrowRight'});
+  expect(screen.getByRole('radio',{name:'Design Studio'})).toHaveAttribute('aria-checked','true');
+  input.focus();
+  fireEvent.keyDown(input,{key:'Enter'});
+  expect(onPick).toHaveBeenCalledWith(COMPONENTS[0],targetPreference({kind:'remote',workspaceId:'design'}));
+});
+it('keeps shell selection free of machine controls',()=>{
+  mount({title:'New shell',components:[COMPONENTS[0]]});
+  expect(screen.queryByRole('radiogroup',{name:'Run on machine'})).toBeNull();
 });
 it('lists every component, the one used last first and flagged',()=>{
   mount({recents:['k','w']});

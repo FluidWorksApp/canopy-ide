@@ -28942,6 +28942,52 @@ a.btn-sm {
   border-color: var(--border-strong);
 }
 
+.cpick-machine {
+  display: grid;
+  gap: 6px;
+  padding: 12px 20px 4px;
+}
+
+.cpick-machine-label {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+}
+
+.cpick-machine-options {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.cpick-machine-options button {
+  min-height: 28px;
+  padding: 4px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  background: var(--surface-raised);
+  color: var(--text-dim);
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.cpick-machine-options button:hover,
+.cpick-machine-options button:focus-visible {
+  border-color: var(--border-strong);
+  color: var(--text);
+  outline: none;
+}
+
+.cpick-machine-options button.is-selected {
+  border-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 12%, var(--surface-raised));
+  color: var(--text);
+}
+
 .cpick-hint {
   display: flex;
   gap: 16px;

@@ -1,4 +1,9 @@
 import { activeWorkspace } from "../../remoteExecution/workspace";
+import { effectivePreference } from "../../placement/balancer";
+import { decideLaunch } from "../../placement/launch";
+import { getAgentPreference, getGlobalPreference, getProjectPreference } from "../../placement/preferences";
+import { canLaunchOnActiveTarget, requestTargetTransition } from "../../placement/transitions";
+import type { DisplayTarget, Preference, Target } from "../../placement/types";
 import { publishAwarenessRoster } from "../../awareness/roster";
 import {
   hostLiveTerminals,
@@ -414,6 +419,7 @@ import { Term, type TermHandle } from "../Term";
 import { ContextMenu, useContextMenu, type MenuItem } from "../ContextMenu";
 import { FileTree } from "../FileTree";
 import {useRemoteUpload} from "../../remoteExecution/useRemoteUpload";
+import {ProjectSetupDialog} from "../../remoteExecution/ProjectSetupDialog";
 import { FileView, hasDiffToolbar } from "../FileView";
 import { ChangesPanel, type ChangeGroup } from "../ChangesPanel";
 import { Dialog } from "../Dialog";
@@ -1738,31 +1744,87 @@ const ProjectViewBody = memo(function ProjectViewBody({
   // worktree is activated — disagreeing with the panel's own terminal button.
   const componentsRef = useRef(components);
   componentsRef.current = components;
-  // "Open it in which component?" for a new shell or agent when the project has
-  // several, so the choice is the person's rather than whichever came first.
-  // Resolves null if they cancel, and straight away (no dialog) with the only
-  // component when there is one. Called from user gestures only: session
-  // restore, workflows and task spawns go through addTerminal / launchCli
-  // directly and must never wait on a dialog nobody is looking at.
+  // Interactive agent launches always pass through this dialog, including a
+  // one-component project, because machine placement remains a real choice.
+  // Shells retain their old shortcut for a one-component project.
+  type ComponentLaunchPick = { component: PickerComponent; machine?: Preference };
   const [componentPick, setComponentPick] = useState<{
     title: string;
-    resolve: (component: PickerComponent | null) => void;
+    machineTargets?: DisplayTarget[];
+    initialMachine?: Preference;
+    resolve: (selection: ComponentLaunchPick | null) => void;
   } | null>(null);
   const pickComponent = useCallback(
-    (title: string) =>
-      new Promise<PickerComponent | null>((resolve) => {
+    (title: string, agentKind?: string) =>
+      new Promise<ComponentLaunchPick | null>((resolve) => {
         const list = componentsRef.current;
-        if (list.length < 2) {
-          resolve(list[0] ?? null);
+        if (!agentKind && list.length < 2) {
+          resolve(list[0] ? { component: list[0] } : null);
           return;
         }
-        setComponentPick((previous) => {
-          previous?.resolve(null);
-          return { title, resolve };
-        });
+        const show = (machineTargets?: DisplayTarget[]) => {
+          const initialMachine = agentKind
+            ? effectivePreference({
+                preference: getGlobalPreference(),
+                projectPref: getProjectPreference(project.id),
+                agentPref: getAgentPreference(agentKind),
+              })
+            : undefined;
+          setComponentPick((previous) => {
+            previous?.resolve(null);
+            return { title, machineTargets, initialMachine, resolve };
+          });
+        };
+        if (!agentKind) {
+          show();
+          return;
+        }
+        void import("../../placement/gather")
+          .then(({ gatherUnified }) => gatherUnified())
+          .then((gathered) => show(gathered.targets))
+          .catch(() => show([{ target: { kind: "local" }, name: "This Mac", online: true }]));
       }),
-    [],
+    [project.id],
   );
+  const [machineTransition, setMachineTransition] = useState<{ target: Target; name: string } | null>(null);
+  const [placementSetup, setPlacementSetup] = useState<{ name: string; resolve: (ready: boolean) => void } | null>(null);
+  const [placementSetupReady, setPlacementSetupReady] = useState(false);
+  const prepareMachineLaunch = useCallback(async (agentKind: string, machine: Preference) => {
+    let gathered;
+    try {
+      const { gatherUnified } = await import("../../placement/gather");
+      gathered = await gatherUnified();
+    } catch (error) {
+      onNotice(`Could not read connected machines: ${String(error)}`, "warn");
+      return false;
+    }
+    const availability = gathered.rows
+      .filter((row) => row.kind === "project" && !row.needsSetup)
+      .map((row) => row.target);
+    const decision = decideLaunch({
+      projectId: project.id,
+      agentKind,
+      resources: gathered.resources,
+      requested: machine,
+      availability,
+      targets: gathered.targets,
+    });
+    if (!decision.target) {
+      onNotice(decision.reason, "warn");
+      return false;
+    }
+    if (!canLaunchOnActiveTarget(decision.target)) {
+      setMachineTransition({ target: decision.target, name: decision.targetName ?? "the selected machine" });
+      return false;
+    }
+    if (decision.target.kind === "remote" && decision.needsSetup) {
+      setPlacementSetupReady(false);
+      return new Promise<boolean>((resolve) =>
+        setPlacementSetup({ name: decision.targetName ?? "the selected workspace", resolve }),
+      );
+    }
+    return true;
+  }, [onNotice, project.id]);
   const rootsRef = useRef(roots);
   rootsRef.current = roots;
 
@@ -5466,7 +5528,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
         closeTabRef.current(activeTabIdRef.current, "user");
     };
     const newTerminalHandler = () => {
-      void pickComponent("New shell").then((component) => component && addTerminal(component.path));
+      void pickComponent("New shell").then((selection) => selection && addTerminal(selection.component.path));
     };
     const toggleSidebarHandler = () => {
       setPinned((v) => !v);
@@ -9420,11 +9482,13 @@ const ProjectViewBody = memo(function ProjectViewBody({
       // decides. Callers with an explicit gesture (⇧↵, the hover action, a
       // context-menu entry) still pass their own.
       where?: "workspace" | "current",
+      machine?: Preference,
     ) => {
       const cwd = at ?? activeContextRoot ?? componentsRef.current[0]?.path;
       if (!cwd) return;
       const target =
         where ?? (getSettings().agentWorkspaceByDefault ? "workspace" : "current");
+      if (machine && !(await prepareMachineLaunch(cli.id, machine))) return;
       // `undefined` is a probe that hasn't answered, never "not installed".
       // Ask now; if it still can't say, launch anyway: a missing binary fails
       // visibly in its own terminal, while guessing "missing" would run the
@@ -9556,6 +9620,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
       addTerminal,
       completePendingSplit,
       onNotice,
+      prepareMachineLaunch,
       project.name,
       activeContextRoot,
       repoPaths,
@@ -9608,7 +9673,11 @@ const ProjectViewBody = memo(function ProjectViewBody({
           : cliUpdates[cli.bin]?.hasUpdate
             ? `⇡ ${cliUpdates[cli.bin]?.latest}`
             : undefined,
-      onClick: () => void launchCli(cli, cwd, "current"),
+      onClick: () => {
+        void pickComponent(`New ${cli.name}`, cli.id).then((selection) => {
+          if (selection) void launchCli(cli, selection.component.path, "current", selection.machine);
+        });
+      },
     })),
   ];
 
@@ -12571,12 +12640,12 @@ const ProjectViewBody = memo(function ProjectViewBody({
       completePendingSplit({ title: "shell" });
       return;
     }
-    void pickComponent("New shell").then((component) => component && addTerminal(component.path));
+    void pickComponent("New shell").then((selection) => selection && addTerminal(selection.component.path));
   }, [addTerminal, completePendingSplit, pickComponent]);
   const onLaunchCli = useCallback(
     async (cli: AgentCli, where?: "workspace" | "current") => {
-      const component = await pickComponent(`New ${cli.name}`);
-      if (component) await launchCli(cli, component.path, where);
+      const selection = await pickComponent(`New ${cli.name}`, cli.id);
+      if (selection) await launchCli(cli, selection.component.path, where, selection.machine);
     },
     [launchCli, pickComponent],
   );
@@ -12922,13 +12991,13 @@ const ProjectViewBody = memo(function ProjectViewBody({
               },
             }}
             onStartNew={(agentId, decision) => {
-              // Launching reaches only the active host. A decision for another
-              // target is recorded and explained rather than silently ignored.
-              if (decision?.target && decision.target.kind !== "local" && !isRemoteHost())
-                onNotice(
-                  "Placement chose another machine, but agents start on the active workspace. Switch to that workspace to run it there; starting here instead.",
-                  "info",
-                );
+              if (decision?.target && !canLaunchOnActiveTarget(decision.target)) {
+                setMachineTransition({
+                  target: decision.target,
+                  name: decision.targetName ?? "the selected machine",
+                });
+                return;
+              }
               void startTicketWork(tab.ticket, tab.repo ?? "", agentId);
             }}
             onStartTask={() => startTicketTask(tab.ticket, tab.repo)}
@@ -13013,15 +13082,21 @@ const ProjectViewBody = memo(function ProjectViewBody({
             relay={relay}
             agentTargets={agentTargets}
             installed={installed}
-            onStartReview={(agentId) =>
-              void startPrReview(tab.repo, tab.pr, agentId)
-            }
+            onStartReview={(agentId) => {
+              void pickComponent(`Review PR with an agent`, agentId).then(async (selection) => {
+                if (selection?.machine && await prepareMachineLaunch(agentId, selection.machine))
+                  await startPrReview(tab.repo, tab.pr, agentId);
+              });
+            }}
             onSendToAgent={(target) =>
               sendTicketToAgent(target, prReviewContext(tab.pr))
             }
-            onStartResolve={(agentId) =>
-              void startPrConflictResolve(tab.repo, tab.pr, agentId)
-            }
+            onStartResolve={(agentId) => {
+              void pickComponent(`Resolve conflicts with an agent`, agentId).then(async (selection) => {
+                if (selection?.machine && await prepareMachineLaunch(agentId, selection.machine))
+                  await startPrConflictResolve(tab.repo, tab.pr, agentId);
+              });
+            }}
             onSendResolve={(target) =>
               sendTicketToAgent(target, prConflictContext(tab.pr))
             }
@@ -15442,6 +15517,58 @@ const ProjectViewBody = memo(function ProjectViewBody({
           ]}
         />
       )}
+      {machineTransition && visible && (
+        <Dialog
+          title={`Run on ${machineTransition.name}`}
+          body={
+            machineTransition.target.kind === "t3"
+              ? `${machineTransition.name} opens in its machine view. Continue there after it opens; this agent was not started on the active workspace.`
+              : `Switch to ${machineTransition.name}, then launch the agent there. This agent was not started on the active workspace.`
+          }
+          dismissLabel="Cancel"
+          onDismiss={() => setMachineTransition(null)}
+          actions={[{
+            label: machineTransition.target.kind === "local" ? "Switch to This Mac" : `Open ${machineTransition.name}`,
+            primary: true,
+            onClick: () => {
+              const target = machineTransition.target;
+              setMachineTransition(null);
+              void requestTargetTransition(target);
+            },
+          }]}
+        />
+      )}
+      {placementSetup && visible && (
+        <Dialog
+          title={`Set up ${project.name} on ${placementSetup.name}`}
+          size="lg"
+          dismissLabel="Cancel"
+          onDismiss={() => {
+            const { resolve } = placementSetup;
+            setPlacementSetup(null);
+            resolve(false);
+          }}
+          actions={[{
+            label: "Launch",
+            primary: true,
+            disabled: !placementSetupReady,
+            onClick: () => {
+              const { resolve } = placementSetup;
+              setPlacementSetup(null);
+              resolve(true);
+            },
+          }]}
+          body={
+            <ProjectSetupDialog
+              projectId={project.id}
+              projectName={project.name}
+              workspaceName={placementSetup.name}
+              components={project.components.map((component) => ({ componentId: component.id, label: component.label }))}
+              onComplete={setPlacementSetupReady}
+            />
+          }
+        />
+      )}
       {componentPick && visible && (
         <ComponentPicker
           title={componentPick.title}
@@ -15450,11 +15577,13 @@ const ProjectViewBody = memo(function ProjectViewBody({
           // Only when a tab is actually in front: with none open the active folder
           // falls back to the first component, which is not "this tab".
           activePath={activeTab ? activeContextRoot : null}
-          onPick={(component) => {
+          machineTargets={componentPick.machineTargets}
+          initialMachine={componentPick.initialMachine}
+          onPick={(component, machine) => {
             const { resolve } = componentPick;
             setComponentPick(null);
             recordRecentComponent(project.id, component.id);
-            resolve(component);
+            resolve({ component, machine });
           }}
           onCancel={() => {
             const { resolve } = componentPick;
@@ -15480,21 +15609,20 @@ const ProjectViewBody = memo(function ProjectViewBody({
             setLauncherOpen(false);
           }}
           onLaunchCli={(cli, where) => {
-            if (!pendingSplitRef.current) {
-              setLauncherOpen(false);
-              void pickComponent(`New ${cli.name}`).then((component) => {
-                if (component) void launchCli(cli, component.path, where);
+            setLauncherOpen(false);
+            void pickComponent(`New ${cli.name}`, cli.id).then((selection) => {
+              if (!selection) return;
+              const path = pendingSplitRef.current
+                ? activeContextRoot ?? selection.component.path
+                : selection.component.path;
+              void launchCli(cli, path, where, selection.machine).finally(() => {
+                // A successful split consumes this itself. Clear only a launch
+                // that stopped before it reached completePendingSplit.
+                if (pendingSplitRef.current) {
+                  pendingSplitRef.current = null;
+                  setPendingSplit(null);
+                }
               });
-              return;
-            }
-            void launchCli(cli, activeContextRoot ?? undefined, where).finally(() => {
-              setLauncherOpen(false);
-              // A successful split consumes this itself. Clear only a launch
-              // that failed before it reached completePendingSplit.
-              if (pendingSplitRef.current) {
-                pendingSplitRef.current = null;
-                setPendingSplit(null);
-              }
             });
           }}
           onCancel={() => {

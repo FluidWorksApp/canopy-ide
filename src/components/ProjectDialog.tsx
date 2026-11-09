@@ -1,5 +1,5 @@
 // Create/edit a project: name + labeled component directories.
-import { useState, useRef } from "react";
+import { useEffect, useState, useRef } from "react";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import * as ipc from "../ipc";
 import { basename } from "../paths";
@@ -14,7 +14,7 @@ import {Dialog} from "./Dialog";
 import {DirectoryPicker} from "../remoteExecution/DirectoryPicker";
 import { PlacementPicker } from "./PlacementPicker";
 import { getProjectPreference, setProjectPreference } from "../placement/preferences";
-import type { Preference } from "../placement/types";
+import { inheritPreference, type DisplayTarget, type Preference } from "../placement/types";
 
 interface ProjectDialogProps {
   existing?: Project;
@@ -26,7 +26,21 @@ interface ProjectDialogProps {
 
 export function ProjectDialog({ existing, initialCloneUrl, onSave, onCancel }: ProjectDialogProps) {
   const [saving,setSaving]=useState(false);
-  const [placement, setPlacement] = useState<Preference>(() => (existing ? getProjectPreference(existing.id) : "auto"));
+  const [placement, setPlacement] = useState<Preference>(() => existing ? getProjectPreference(existing.id) : inheritPreference());
+  const [placementTargets, setPlacementTargets] = useState<DisplayTarget[]>([
+    { target: { kind: "local" }, name: "This Mac", online: true },
+  ]);
+  useEffect(() => {
+    let live = true;
+    void import("../placement/gather")
+      .then(({ gatherUnified }) => gatherUnified())
+      .then((gathered) => {
+        if (live && gathered.targets.some((target) => target.target.kind !== "local"))
+          setPlacementTargets(gathered.targets);
+      })
+      .catch(() => {});
+    return () => { live = false; };
+  }, []);
   const [name, setName] = useState(existing?.name ?? "");
   const [components, setComponents] = useState<Component[]>(
     existing?.components ?? [],
@@ -344,7 +358,13 @@ export function ProjectDialog({ existing, initialCloneUrl, onSave, onCancel }: P
           </div>
         )}
         {existing && (
-          <PlacementPicker label="Run agents on" value={placement} onChange={setPlacement} />
+          <PlacementPicker
+            label="Run agents on"
+            value={placement}
+            onChange={setPlacement}
+            targets={placementTargets}
+            allowInherit
+          />
         )}
         <div className="modal-actions">
           <Button onClick={onCancel}>

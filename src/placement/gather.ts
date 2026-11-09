@@ -13,7 +13,7 @@ import { peekWorkspaceList, refreshWorkspaceList } from "../remoteExecution/work
 import { localRemoteJobs } from "../meshJobs";
 import { collectResources, type ResourceSources } from "./resources";
 import { buildUnifiedRows, type UnifiedInput, type UnifiedRow } from "./unified";
-import type { ResourceSnapshot } from "./types";
+import { sameTarget, type DisplayTarget, type ResourceSnapshot, type Target } from "./types";
 
 const LOCAL_CAPACITY = 6;
 
@@ -31,8 +31,9 @@ const agentStats = async () => (await ipc.ptyStats()).filter((s) => s.agent_hint
 export function realSources(): ResourceSources {
   return {
     now: () => Date.now(),
-    localActiveAgents: async () => (await agentStats()).length,
+    localActiveAgents: async () => isRemoteHost() ? "unknown" : (await agentStats()).length,
     localMemory: async () => {
+      if (isRemoteHost()) return null;
       const m = await ipc.memoryInfo();
       return m ? { total_bytes: m.total_bytes, available_bytes: m.available_bytes } : null;
     },
@@ -43,15 +44,46 @@ export function realSources(): ResourceSources {
     remoteActiveAgents: async (id) =>
       isRemoteHost() && activeWorkspace()?.connection.workspaceId === id ? (await agentStats()).length : "unknown",
     t3Machines: listT3Machines,
-    t3ActiveAgents: async () => "unknown",
+    t3ActiveAgents: async (id) => {
+      const rpc = await connectT3Machine(id);
+      try {
+        const shell = await listShell(rpc);
+        return shell.threads.filter((thread) => thread.status === "running").length;
+      } finally {
+        rpc.close();
+      }
+    },
   };
 }
 
 export interface Gathered {
   rows: UnifiedRow[];
   resources: ResourceSnapshot[];
+  /** Concrete choices shown anywhere a person selects a machine. */
+  targets: DisplayTarget[];
   /** Plain-language notes on what could not be read. */
   notes: string[];
+}
+
+export function displayTargets(
+  resources: ResourceSnapshot[],
+  remoteWorkspaces: { id: string; name: string }[],
+  t3Machines: { id: string; label: string }[],
+): DisplayTarget[] {
+  const online = (target: Target) =>
+    resources.find((resource) => sameTarget(resource.target, target))?.online ?? false;
+  const local: Target = { kind: "local" };
+  return [
+    { target: local, name: "This Mac", online: online(local) },
+    ...remoteWorkspaces.map(({ id, name }) => {
+      const target: Target = { kind: "remote", workspaceId: id };
+      return { target, name, online: online(target) };
+    }),
+    ...t3Machines.map(({ id, label }) => {
+      const target: Target = { kind: "t3", machineId: id };
+      return { target, name: label, online: online(target) };
+    }),
+  ];
 }
 
 export async function gatherUnified(): Promise<Gathered> {
@@ -107,5 +139,10 @@ export async function gatherUnified(): Promise<Gathered> {
       }
     }),
   );
-  return { rows: buildUnifiedRows(input), resources, notes };
+  return {
+    rows: buildUnifiedRows(input),
+    resources,
+    targets: displayTargets(resources, list, machines),
+    notes,
+  };
 }

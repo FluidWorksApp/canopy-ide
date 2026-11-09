@@ -69,7 +69,13 @@ export function UnifiedWorkspace({
   return (
     <div className="unified-workspace" role="region" aria-label="All workspaces">
       <div className="unified-toolbar">
-        <PlacementPicker label="Default run on" value={pref} onChange={(p) => { setPref(p); setGlobalPreference(p); }} names={names} />
+        <PlacementPicker
+          label="Default run on"
+          value={pref}
+          onChange={(preference) => { setPref(preference); setGlobalPreference(preference); }}
+          names={names}
+          targets={data?.targets}
+        />
         <label className="field"><span>Show</span>
           <select aria-label="Target filter" value={filter.target} onChange={(e) => setFilter({ ...filter, target: e.target.value as UnifiedFilter["target"] })}>
             <option value="all">All targets</option><option value="local">This Mac</option><option value="remote">Cloud</option><option value="t3">T3 Code</option>

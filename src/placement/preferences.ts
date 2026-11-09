@@ -1,58 +1,106 @@
 // Persisted placement preferences: a global default, one per project and one
 // per agent kind. Stored flat in localStorage like src/settings.ts.
-import type { Preference } from "./types";
+import {
+  automaticPreference,
+  inheritPreference,
+  targetPreference,
+  type Preference,
+  type Target,
+} from "./types";
 
 const KEY = "canopy:placement:v1";
-const VALID: readonly Preference[] = ["local", "remote", "balance", "auto"];
 
+type Level = "global" | "override";
 interface Stored {
   global: Preference;
   projects: Record<string, Preference>;
   agents: Record<string, Preference>;
 }
 
-export const isPreference = (v: unknown): v is Preference => VALID.includes(v as Preference);
+function target(raw: unknown): Target | null {
+  if (!raw || typeof raw !== "object") return null;
+  const value = raw as Record<string, unknown>;
+  if (value.kind === "local") return { kind: "local" };
+  if (value.kind === "remote" && typeof value.workspaceId === "string" && value.workspaceId)
+    return { kind: "remote", workspaceId: value.workspaceId };
+  if (value.kind === "t3" && typeof value.machineId === "string" && value.machineId)
+    return { kind: "t3", machineId: value.machineId };
+  return null;
+}
+
+export function parsePreference(raw: unknown, level: Level): Preference {
+  if (raw && typeof raw === "object") {
+    const value = raw as Record<string, unknown>;
+    if (value.mode === "automatic") return automaticPreference();
+    if (value.mode === "inherit") return level === "global" ? automaticPreference() : inheritPreference();
+    if (value.mode === "target") {
+      const parsed = target(value.target);
+      if (parsed) return targetPreference(parsed);
+    }
+  }
+
+  // canopy:placement:v1 originally stored broad strings. Keep them readable
+  // without pretending a generic remote choice identifies a real machine.
+  if (raw === "local") return targetPreference({ kind: "local" });
+  if (raw === "balance") return automaticPreference();
+  if (raw === "auto") return level === "global" ? automaticPreference() : inheritPreference();
+  if (raw === "remote") return level === "global" ? automaticPreference() : inheritPreference();
+  return level === "global" ? automaticPreference() : inheritPreference();
+}
+
+export const isPreference = (value: unknown): value is Preference => {
+  if (!value || typeof value !== "object") return false;
+  const p = value as Record<string, unknown>;
+  return p.mode === "inherit" || p.mode === "automatic" || (p.mode === "target" && target(p.target) !== null);
+};
 
 function clean(raw: unknown): Record<string, Preference> {
   const out: Record<string, Preference> = Object.create(null);
-  if (raw && typeof raw === "object")
-    for (const [k, v] of Object.entries(raw)) if (isPreference(v) && v !== "auto") out[k] = v;
+  if (raw && typeof raw === "object") {
+    for (const [key, value] of Object.entries(raw)) {
+      const parsed = parsePreference(value, "override");
+      if (parsed.mode !== "inherit") out[key] = parsed;
+    }
+  }
   return out;
 }
 
 function load(): Stored {
   try {
-    const p = JSON.parse(localStorage.getItem(KEY) ?? "null");
-    return { global: isPreference(p?.global) ? p.global : "auto", projects: clean(p?.projects), agents: clean(p?.agents) };
+    const parsed = JSON.parse(localStorage.getItem(KEY) ?? "null");
+    return {
+      global: parsePreference(parsed?.global, "global"),
+      projects: clean(parsed?.projects),
+      agents: clean(parsed?.agents),
+    };
   } catch {
-    return { global: "auto", projects: clean(null), agents: clean(null) };
+    return { global: automaticPreference(), projects: clean(null), agents: clean(null) };
   }
 }
 
-function save(s: Stored) {
+function save(stored: Stored) {
   try {
-    localStorage.setItem(KEY, JSON.stringify(s));
+    localStorage.setItem(KEY, JSON.stringify(stored));
   } catch {
     /* Storage is optional. */
   }
 }
 
 export const getGlobalPreference = (): Preference => load().global;
-export const getProjectPreference = (id: string): Preference => load().projects[id] ?? "auto";
-export const getAgentPreference = (kind: string): Preference => load().agents[kind] ?? "auto";
+export const getProjectPreference = (id: string): Preference => load().projects[id] ?? inheritPreference();
+export const getAgentPreference = (kind: string): Preference => load().agents[kind] ?? inheritPreference();
 
-export function setGlobalPreference(p: Preference) {
-  save({ ...load(), global: p });
+export function setGlobalPreference(preference: Preference) {
+  save({ ...load(), global: preference.mode === "inherit" ? automaticPreference() : preference });
 }
 
-// Setting "auto" clears the entry: auto is the absence of an override.
-function setIn(table: "projects" | "agents", id: string, p: Preference) {
-  const s = load();
-  const next = { ...s[table] };
-  if (p === "auto") delete next[id];
-  else next[id] = p;
-  save({ ...s, [table]: next });
+function setIn(table: "projects" | "agents", id: string, preference: Preference) {
+  const stored = load();
+  const next = { ...stored[table] };
+  if (preference.mode === "inherit") delete next[id];
+  else next[id] = preference;
+  save({ ...stored, [table]: next });
 }
 
-export const setProjectPreference = (id: string, p: Preference) => setIn("projects", id, p);
-export const setAgentPreference = (kind: string, p: Preference) => setIn("agents", kind, p);
+export const setProjectPreference = (id: string, preference: Preference) => setIn("projects", id, preference);
+export const setAgentPreference = (kind: string, preference: Preference) => setIn("agents", kind, preference);

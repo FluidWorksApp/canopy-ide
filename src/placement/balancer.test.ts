@@ -1,69 +1,105 @@
 import { describe, expect, it } from "vitest";
 import { choosePlacement, effectivePreference } from "./balancer";
-import type { ResourceSnapshot, Target } from "./types";
+import { automaticPreference, inheritPreference, targetPreference, type ResourceSnapshot, type Target } from "./types";
 
 const L: Target = { kind: "local" };
 const R: Target = { kind: "remote", workspaceId: "w1" };
-const snap = (target: Target, o: Partial<ResourceSnapshot> = {}): ResourceSnapshot => ({
-  target, online: true, activeAgents: 0, capacity: 4, lastSeen: 0, ...o,
+const R2: Target = { kind: "remote", workspaceId: "w2" };
+const snap = (target: Target, overrides: Partial<ResourceSnapshot> = {}): ResourceSnapshot => ({
+  target, online: true, activeAgents: 0, capacity: 4, lastSeen: 0, ...overrides,
 });
 
 describe("effectivePreference", () => {
-  it("agent beats project beats global, auto defers", () => {
-    expect(effectivePreference({ preference: "local", projectPref: "remote", agentPref: "balance" })).toBe("balance");
-    expect(effectivePreference({ preference: "local", projectPref: "remote", agentPref: "auto" })).toBe("remote");
-    expect(effectivePreference({ preference: "local", projectPref: "auto" })).toBe("local");
-    expect(effectivePreference({})).toBe("balance");
+  it("lets only Use default defer while Automatic remains explicit", () => {
+    expect(effectivePreference({
+      preference: targetPreference(L),
+      projectPref: targetPreference(R),
+      agentPref: automaticPreference(),
+    })).toEqual(automaticPreference());
+    expect(effectivePreference({
+      preference: targetPreference(L),
+      projectPref: targetPreference(R),
+      agentPref: inheritPreference(),
+    })).toEqual(targetPreference(R));
+    expect(effectivePreference({ preference: targetPreference(L), projectPref: inheritPreference() })).toEqual(targetPreference(L));
+    expect(effectivePreference({})).toEqual(automaticPreference());
   });
 });
 
 describe("choosePlacement", () => {
   const both = [snap(L), snap(R)];
-  const avail = [L, R];
-  it("honors the preference by precedence", () => {
-    const d = choosePlacement({ preference: "local", projectPref: "remote", resources: both, projectAvailability: avail });
-    expect(d.target).toEqual(R);
-    const a = choosePlacement({ preference: "local", projectPref: "remote", agentPref: "local", resources: both, projectAvailability: avail });
-    expect(a.target).toEqual(L);
-  });
-  it("balance ranks targets with unknown load after known ones", () => {
-    const d = choosePlacement({ preference: "balance", resources: [snap(L, { activeAgents: 3 }), snap(R, { loadUnknown: true })], projectAvailability: [L, R] });
-    expect(d.target).toEqual(L);
-    const only = choosePlacement({ preference: "balance", resources: [snap(L, { online: false }), snap(R, { loadUnknown: true })], projectAvailability: [R] });
-    expect(only.target).toEqual(R);
+  const available = [L, R];
+
+  it("honors a concrete target by stable ID", () => {
+    expect(choosePlacement({
+      preference: targetPreference(R2),
+      resources: [snap(R), snap(R2)],
+      projectAvailability: [R, R2],
+    }).target).toEqual(R2);
   });
 
-  it("balance picks the lowest utilization", () => {
-    const d = choosePlacement({ preference: "balance", resources: [snap(L, { activeAgents: 3 }), snap(R, { activeAgents: 1 })], projectAvailability: avail });
-    expect(d.target).toEqual(R);
-    expect(d.alternatives).toEqual([L]);
+  it("never falls back from an unavailable concrete target", () => {
+    expect(choosePlacement({
+      preference: targetPreference(R),
+      resources: [snap(L), snap(R, { online: false })],
+      projectAvailability: available,
+    })).toMatchObject({ target: null, reason: "The selected machine is offline." });
+    expect(choosePlacement({
+      preference: targetPreference(R),
+      resources: [snap(L), snap(R, { activeAgents: 4 })],
+      projectAvailability: available,
+    })).toMatchObject({ target: null, reason: "The selected machine is full." });
   });
-  it("breaks utilization ties by cpu, then by stated preference", () => {
-    expect(choosePlacement({ preference: "balance", resources: [snap(L, { cpuLoad: 0.9 }), snap(R, { cpuLoad: 0.1 })], projectAvailability: avail }).target).toEqual(R);
-    expect(choosePlacement({ preference: "auto", agentPref: "balance", resources: both, projectAvailability: avail }).target).toEqual(L);
+
+  it("Automatic ranks targets with unknown load after known ones", () => {
+    const decision = choosePlacement({
+      preference: automaticPreference(),
+      resources: [snap(L, { activeAgents: 3 }), snap(R, { loadUnknown: true })],
+      projectAvailability: available,
+    });
+    expect(decision.target).toEqual(L);
   });
-  it("never picks offline or full targets", () => {
-    expect(choosePlacement({ preference: "local", resources: [snap(L, { online: false }), snap(R)], projectAvailability: avail })).toMatchObject({ target: R, reason: expect.stringContaining("offline") });
-    expect(choosePlacement({ preference: "remote", resources: [snap(L), snap(R, { activeAgents: 4 })], projectAvailability: avail })).toMatchObject({ target: L, reason: expect.stringContaining("full") });
-    expect(choosePlacement({ preference: "balance", resources: [snap(L, { online: false }), snap(R, { activeAgents: 4 })] }).target).toBeNull();
+
+  it("Automatic uses current availability and load", () => {
+    const remote = choosePlacement({
+      preference: automaticPreference(),
+      resources: [snap(L, { activeAgents: 3 }), snap(R, { activeAgents: 1 })],
+      projectAvailability: available,
+    });
+    expect(remote.target).toEqual(R);
+    const local = choosePlacement({
+      preference: automaticPreference(),
+      resources: [snap(L), snap(R, { online: false })],
+      projectAvailability: available,
+    });
+    expect(local.target).toEqual(L);
   });
-  it("flags needsSetup when the project is not on the chosen remote", () => {
-    expect(choosePlacement({ preference: "remote", resources: both, projectAvailability: [L] })).toMatchObject({ target: R, needsSetup: true });
-    expect(choosePlacement({ preference: "remote", resources: both, projectAvailability: avail }).needsSetup).toBe(false);
+
+  it("flags setup and prefers a machine where the project is ready", () => {
+    expect(choosePlacement({
+      preference: targetPreference(R), resources: both, projectAvailability: [L],
+    })).toMatchObject({ target: R, needsSetup: true });
+    const decision = choosePlacement({
+      preference: automaticPreference(),
+      resources: [snap(R, { activeAgents: 2 }), snap(R2)],
+      projectAvailability: [L, R],
+    });
+    expect(decision.target).toEqual(R);
   });
-  it("prefers a set-up target over one needing setup within a side", () => {
-    const R2: Target = { kind: "remote", workspaceId: "w2" };
-    const d = choosePlacement({ preference: "remote", resources: [snap(R, { activeAgents: 2 }), snap(R2)], projectAvailability: [L, R] });
-    expect(d.target).toEqual(R);
+
+  it("keeps a sticky target only for Automatic", () => {
+    expect(choosePlacement({
+      preference: automaticPreference(), sticky: R, resources: both, projectAvailability: available,
+    }).target).toEqual(R);
+    expect(choosePlacement({
+      preference: targetPreference(L), sticky: R, resources: both, projectAvailability: available,
+    }).target).toEqual(L);
   });
-  it("keeps a sticky target while it has room", () => {
-    expect(choosePlacement({ preference: "local", sticky: R, resources: both, projectAvailability: avail }).target).toEqual(R);
-    expect(choosePlacement({ preference: "local", sticky: R, resources: [snap(L), snap(R, { online: false })] }).target).toEqual(L);
-  });
+
   it("is deterministic regardless of input order", () => {
-    const rs = [snap(L), snap(R), snap({ kind: "t3", machineId: "m" })];
-    const a = choosePlacement({ preference: "balance", resources: rs });
-    const b = choosePlacement({ preference: "balance", resources: [...rs].reverse() });
-    expect(a).toEqual(b);
+    const resources = [snap(L), snap(R), snap({ kind: "t3", machineId: "m" })];
+    expect(choosePlacement({ preference: automaticPreference(), resources })).toEqual(
+      choosePlacement({ preference: automaticPreference(), resources: [...resources].reverse() }),
+    );
   });
 });

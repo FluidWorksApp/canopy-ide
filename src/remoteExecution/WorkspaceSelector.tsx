@@ -39,6 +39,7 @@ import {CopyLinkButton} from '../components/CopyLinkButton';
 import {connectionKey,reportWorkspaceLifecycle} from './connectionState';
 import {T3Connect} from '../t3connect/T3Connect';
 import {listT3Machines,type T3Machine} from '../t3connect/api';
+import {OPEN_T3_MACHINE_EVENT,type OpenT3MachineDetail} from '../placement/transitions';
 // Monaco and xterm load only when a T3 machine is opened.
 const UnifiedWorkspace=lazy(()=>import('../components/UnifiedWorkspace').then(module=>({default:module.UnifiedWorkspace})));
 const T3MachineView=lazy(()=>import('../t3connect/T3MachineView').then(module=>({default:module.T3MachineView})));
@@ -63,6 +64,18 @@ export function WorkspaceSelector({ onboarding = false,onHibernateWorkspace }: {
   const [forgetConfirm,setForgetConfirm]=useState(false);
   // A T3 Code machine opened from "Connect to T3 Connect protocol supported machine" (src/t3connect).
   const [unifiedOpen,setUnifiedOpen]=useState(false),[t3Machine,setT3Machine]=useState<T3Machine|null>(null),[t3PairOpen,setT3PairOpen]=useState(false);
+  useEffect(()=>{
+    const openMachine=(event:Event)=>{
+      const machineId=(event as CustomEvent<OpenT3MachineDetail>).detail?.machineId;
+      if(!machineId)return;
+      void listT3Machines().then(list=>{
+        const machine=list.find(item=>item.id===machineId);
+        if(machine){setOpen(false);setUnifiedOpen(false);setT3Machine(machine);}
+      }).catch(error=>{setError(`Could not open the selected machine: ${String(error)}`);setOpen(true);});
+    };
+    window.addEventListener(OPEN_T3_MACHINE_EVENT,openMachine);
+    return()=>window.removeEventListener(OPEN_T3_MACHINE_EVENT,openMachine);
+  },[]);
   const accountRemovalEpoch=useRef(0);
   const [accountRemoval,setAccountRemoval]=useState<ManagedWorkspace|null>(null),[accountRemovalName,setAccountRemovalName]=useState('');
   async function removeAccountConnection(){

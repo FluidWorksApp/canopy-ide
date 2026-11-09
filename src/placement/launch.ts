@@ -6,34 +6,49 @@ import {
   getGlobalPreference,
   getProjectPreference,
 } from "./preferences";
-import { sameTarget, type PlacementDecision, type ResourceSnapshot, type Target } from "./types";
+import {
+  sameTarget,
+  type DisplayTarget,
+  type PlacementDecision,
+  type Preference,
+  type ResourceSnapshot,
+  type Target,
+} from "./types";
 
 export interface LaunchQuery {
   projectId: string;
   agentKind: string;
   resources: ResourceSnapshot[];
+  /** A choice made in this launch dialog overrides stored defaults. */
+  requested?: Preference;
   /** Targets the project is known to be set up on (local is implied). */
   availability?: Target[];
+  /** Names gathered alongside resources, used by actionable transitions. */
+  targets?: DisplayTarget[];
   sticky?: Target;
 }
 
-export function decideLaunch(q: LaunchQuery): PlacementDecision {
-  return choosePlacement({
+export function decideLaunch(query: LaunchQuery): PlacementDecision {
+  const decision = choosePlacement({
     preference: getGlobalPreference(),
-    projectPref: getProjectPreference(q.projectId),
-    agentPref: getAgentPreference(q.agentKind),
-    resources: q.resources,
-    projectAvailability: q.availability,
-    sticky: q.sticky,
+    projectPref: getProjectPreference(query.projectId),
+    agentPref: query.requested ?? getAgentPreference(query.agentKind),
+    resources: query.resources,
+    projectAvailability: query.availability,
+    sticky: query.sticky,
   });
+  const targetName = decision.target
+    ? query.targets?.find((item) => sameTarget(item.target, decision.target as Target))?.name
+    : undefined;
+  return targetName ? { ...decision, targetName } : decision;
 }
 
 /** Re-dispatch a task somewhere other than where it is: the same decision with
- *  the current target taken out of the running. */
-export function decideHandoff(q: LaunchQuery & { from: Target }): PlacementDecision {
+ * the current target taken out of the running. */
+export function decideHandoff(query: LaunchQuery & { from: Target }): PlacementDecision {
   return decideLaunch({
-    ...q,
+    ...query,
     sticky: undefined,
-    resources: q.resources.filter((r) => !sameTarget(r.target, q.from)),
+    resources: query.resources.filter((resource) => !sameTarget(resource.target, query.from)),
   });
 }

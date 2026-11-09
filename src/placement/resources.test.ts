@@ -24,6 +24,15 @@ describe("collectResources", () => {
     expect(rs[2]).toMatchObject({ online: false });
     expect(rs[3]).toMatchObject({ target: { kind: "t3", machineId: "m1" }, online: true });
   });
+  it("keeps an inactive local machine eligible without pretending its load is known", async () => {
+    const [local] = await collectResources({
+      ...base,
+      localActiveAgents: async () => "unknown",
+      remoteWorkspaces: async () => [],
+      t3Machines: async () => [],
+    });
+    expect(local).toMatchObject({ online: true, activeAgents: 0, loadUnknown: true, capacity: 4 });
+  });
   it("marks failing sources offline instead of throwing", async () => {
     const boom = async () => { throw new Error("x"); };
     const rs = await collectResources({ ...base, localActiveAgents: boom, remoteActiveAgents: boom, t3ActiveAgents: boom });

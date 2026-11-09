@@ -2,7 +2,7 @@
 // one: the ticket tab's "▶ Start work" split-button and the PR header's
 // "Review ▾" dropdown. It owns the agent menu (running agents to send to, or a
 // fresh CLI in a worktree) and either an agent or task primary action.
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { AGENT_CLIS } from "../projects";
 import { resolveBrain } from "../brain";
 import { agentMenuItems } from "../agentMenu";
@@ -14,7 +14,18 @@ import { Dialog } from "./Dialog";
 import { ProjectSetupDialog } from "../remoteExecution/ProjectSetupDialog";
 import { decideLaunch } from "../placement/launch";
 import { getAgentPreference, setAgentPreference } from "../placement/preferences";
-import type { PlacementDecision, Preference } from "../placement/types";
+import {
+  automaticPreference,
+  inheritPreference,
+  preferenceKey,
+  targetKey,
+  targetPreference,
+  type DisplayTarget,
+  type PlacementDecision,
+  type Preference,
+  type Target,
+} from "../placement/types";
+import { canLaunchOnActiveTarget, requestTargetTransition } from "../placement/transitions";
 
 /** Where an agent launched from this button should run. Omit it and the button
  *  behaves exactly as before (always here). */
@@ -22,17 +33,20 @@ export interface LaunchPlacement {
   project: { id: string; name: string; components: { componentId: string; label: string }[] };
   /** Name shown for the remote while it is being set up. */
   workspaceName?: string;
+  /** Concrete machines shown in this agent's override menu. */
+  targets?: DisplayTarget[];
+  /** Optional host-shell transition seam for tests or embedding surfaces. */
+  onTransition?: (target: Target) => void | Promise<void>;
   /** The decision for this agent now. Defaults to the stored preferences and
    *  live resources; injectable so callers and tests can supply their own. */
   decide?: (agentId: string) => Promise<PlacementDecision>;
 }
 
-const RUN_ON: { value: Preference; label: string }[] = [
-  { value: "auto", label: "Auto" },
-  { value: "local", label: "Local" },
-  { value: "remote", label: "Remote" },
-  { value: "balance", label: "Balance" },
-];
+const LOCAL_TARGET: DisplayTarget = {
+  target: { kind: "local" },
+  name: "This Mac",
+  online: true,
+};
 
 async function defaultDecide(project: { id: string }, agentId: string): Promise<PlacementDecision> {
   // Loaded on demand: gathering pulls in the T3 and workspace clients.
@@ -41,7 +55,13 @@ async function defaultDecide(project: { id: string }, agentId: string): Promise<
   const availability = g.rows
     .filter((r) => r.kind === "project" && !r.needsSetup && r.target.kind !== "local")
     .map((r) => r.target);
-  return decideLaunch({ projectId: project.id, agentKind: agentId, resources: g.resources, availability });
+  return decideLaunch({
+    projectId: project.id,
+    agentKind: agentId,
+    resources: g.resources,
+    availability,
+    targets: g.targets,
+  });
 }
 
 interface AgentLaunchButtonProps {
@@ -110,6 +130,23 @@ export function AgentLaunchButton({
     resolveBrain((bin) => Boolean(installed[bin])) ?? AGENT_CLIS[0];
 
   const [pending, setPending] = useState<{ agentId: string; decision: PlacementDecision } | null>(null);
+  const [transition, setTransition] = useState<{ target: Target; name: string } | null>(null);
+  const suppliedTargets = placement?.targets;
+  const placementProjectId = placement?.project.id;
+  const [placementTargets, setPlacementTargets] = useState<DisplayTarget[]>(() => suppliedTargets ?? [LOCAL_TARGET]);
+  useEffect(() => {
+    if (suppliedTargets) {
+      setPlacementTargets(suppliedTargets);
+      return;
+    }
+    if (!placementProjectId) return;
+    let live = true;
+    void import("../placement/gather")
+      .then(({ gatherUnified }) => gatherUnified())
+      .then((gathered) => { if (live) setPlacementTargets(gathered.targets); })
+      .catch(() => {});
+    return () => { live = false; };
+  }, [placementProjectId, suppliedTargets]);
   const [setupOk, setSetupOk] = useState(false);
   const [refusal, setRefusal] = useState("");
   const launching = useRef(false);
@@ -123,9 +160,24 @@ export function AgentLaunchButton({
     setRefusal("");
     void (placement.decide ?? ((id: string) => defaultDecide(placement.project, id)))(agentId)
       .then((decision) => {
-        if (!decision.target) setRefusal(decision.reason);
-        else if (decision.target.kind === "remote" && decision.needsSetup) { setSetupOk(false); setPending({ agentId, decision }); }
-        else onStartDirect(agentId, decision);
+        if (!decision.target) {
+          setRefusal(decision.reason);
+          return;
+        }
+        if (!canLaunchOnActiveTarget(decision.target)) {
+          const known = placementTargets.find((item) => targetKey(item.target) === targetKey(decision.target!));
+          setTransition({
+            target: decision.target,
+            name: decision.targetName ?? known?.name ?? (decision.target.kind === "local" ? "This Mac" : "selected machine"),
+          });
+          return;
+        }
+        if (decision.target.kind === "remote" && decision.needsSetup) {
+          setSetupOk(false);
+          setPending({ agentId, decision });
+          return;
+        }
+        onStartDirect(agentId, decision);
       })
       .catch((e) => setRefusal(`Could not decide where to run this: ${String((e as { message?: string })?.message ?? e)}`))
       .finally(() => { launching.current = false; });
@@ -142,13 +194,22 @@ export function AgentLaunchButton({
       onSend,
       onStart,
     });
+    const currentPreference = getAgentPreference(preferredCli.id);
+    const targets = placementTargets.some((item) => item.target.kind === "local")
+      ? placementTargets
+      : [LOCAL_TARGET, ...placementTargets];
+    const runOnChoices: { label: string; preference: Preference }[] = [
+      { label: "Use default", preference: inheritPreference() },
+      { label: "Automatic", preference: automaticPreference() },
+      ...targets.map((item) => ({ label: item.name, preference: targetPreference(item.target) })),
+    ];
     const runOn: MenuItem[] = placement
       ? [
           { separator: true },
-          ...RUN_ON.map((o) => ({
-            label: `Run on: ${o.label}`,
-            hint: getAgentPreference(preferredCli.id) === o.value ? "current" : undefined,
-            onClick: () => setAgentPreference(preferredCli.id, o.value),
+          ...runOnChoices.map((choice) => ({
+            label: `Run on: ${choice.label}`,
+            hint: preferenceKey(currentPreference) === preferenceKey(choice.preference) ? "current" : undefined,
+            onClick: () => setAgentPreference(preferredCli.id, choice.preference),
           })),
         ]
       : [];
@@ -159,6 +220,28 @@ export function AgentLaunchButton({
   return (
     <>
       {refusal && <small className="placement-decision" role="status">{refusal}</small>}
+      {transition && placement && (
+        <Dialog
+          title={`Run on ${transition.name}`}
+          body={
+            transition.target.kind === "t3"
+              ? `${transition.name} opens in its machine view. Open it there to continue; Canopy will not start this agent on the active workspace.`
+              : `Switch to ${transition.name}, then launch the agent there. Canopy will not start it on the active workspace.`
+          }
+          dismissLabel="Cancel"
+          onDismiss={() => setTransition(null)}
+          actions={[{
+            label: transition.target.kind === "local" ? "Switch to This Mac" : `Open ${transition.name}`,
+            primary: true,
+            onClick: () => {
+              const target = transition.target;
+              setTransition(null);
+              if (placement.onTransition) void placement.onTransition(target);
+              else void requestTargetTransition(target);
+            },
+          }]}
+        />
+      )}
       {pending && placement && (
         <Dialog
           title={`Set up ${placement.project.name} first`}
@@ -166,7 +249,7 @@ export function AgentLaunchButton({
           dismissLabel="Cancel"
           onDismiss={() => setPending(null)}
           actions={[{ label: "Launch", primary: true, disabled: !setupOk, onClick: () => { const p = pending; setPending(null); onStartDirect(p.agentId, p.decision); } }]}
-          body={<ProjectSetupDialog projectId={placement.project.id} projectName={placement.project.name} workspaceName={placement.workspaceName ?? "the remote workspace"} components={placement.project.components} onComplete={setSetupOk} />}
+          body={<ProjectSetupDialog projectId={placement.project.id} projectName={placement.project.name} workspaceName={pending.decision.targetName ?? placement.workspaceName ?? "the selected workspace"} components={placement.project.components} onComplete={setSetupOk} />}
         />
       )}
       {menu.menu && (
