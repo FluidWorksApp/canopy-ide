@@ -95,9 +95,11 @@ process teardown; React owns the project workspace and presentation.
   standards before an agent implements it — Google's
   [Elephant-Goldfish Model](https://github.com/google/elephant-goldfish-model)
   as a built-in workflow. See [the design](./docs/egm-spec-stage.md).
-- **Run agents where it makes sense.** Choose local, remote or balance at
-  global, project and agent level, and see this Mac, cloud workspaces and T3
-  Code machines in one list. See
+- **Run agents on the machine you choose.** Every primary launch offers
+  Automatic load balancing, This Mac, and each connected machine by name.
+  Project and agent overrides can inherit with Use default, while Git worktree
+  placement stays separate. The All workspaces dashboard shows machine status
+  and visible work in one responsive table. See
   [placement](./docs/placement-and-unified-workspace.md).
 - **Preview what agents build.** Open detected dev servers, inspect console and
   network activity, annotate elements, and capture viewport, full-page, or

@@ -101,7 +101,8 @@ export function groupByProject(rows: UnifiedRow[]): UnifiedGroup[] {
 }
 
 export interface UnifiedFilter {
-  target?: "all" | "local" | "remote" | "t3";
+  /** "all" or a stable targetKey such as remote:workspace-id. */
+  target?: string;
   kind?: UnifiedKind | "all";
   text?: string;
 }
@@ -110,7 +111,7 @@ export function filterRows(rows: UnifiedRow[], f: UnifiedFilter): UnifiedRow[] {
   const text = norm(f.text ?? "");
   return rows.filter(
     (r) =>
-      (!f.target || f.target === "all" || r.target.kind === f.target) &&
+      (!f.target || f.target === "all" || targetKey(r.target) === f.target) &&
       (!f.kind || f.kind === "all" || r.kind === f.kind) &&
       (!text || norm(r.name).includes(text) || norm(r.targetLabel).includes(text)),
   );

@@ -1,6 +1,6 @@
-import {act,fireEvent,render,screen} from '@testing-library/react';import {it,expect,vi} from 'vitest';import {WorkspaceSelector} from './WorkspaceSelector';
+import {act,fireEvent,render,screen,within} from '@testing-library/react';import {it,expect,vi} from 'vitest';import {WorkspaceSelector} from './WorkspaceSelector';
 const mocks=vi.hoisted(()=>({workspace:vi.fn(),openLink:vi.fn()}));
-vi.mock('./workspace',()=>({activeWorkspace:()=>({connection:{workspaceId:'test',workspaceName:'Test',endpoint:'http://127.0.0.1:8787'},client:{workspace:mocks.workspace}})}));vi.mock('@tauri-apps/api/core',()=>({invoke:vi.fn(async()=>[])}));vi.mock('../links',()=>({openLink:mocks.openLink}));vi.mock('./RemoteDesktop',()=>({RemoteDesktop:()=> <div>Remote desktop surface</div>}));vi.mock('./LocalProjectImport',()=>({LocalProjectImport:()=>null}));
+vi.mock('./workspace',()=>({activeWorkspace:()=>({connection:{workspaceId:'test',workspaceName:'Test',endpoint:'http://127.0.0.1:8787'},client:{workspace:mocks.workspace}})}));vi.mock('@tauri-apps/api/core',()=>({invoke:vi.fn(async()=>[])}));vi.mock('../links',()=>({openLink:mocks.openLink}));vi.mock('./RemoteDesktop',()=>({RemoteDesktop:()=> <div>Remote desktop surface</div>}));vi.mock('./LocalProjectImport',()=>({LocalProjectImport:()=>null}));vi.mock('../components/UnifiedWorkspace',()=>({UnifiedWorkspace:()=> <div className="unified-workspace">Machine dashboard</div>}));
 it('offers a visible desktop control',async()=>{mocks.workspace.mockResolvedValue({result:null});render(<WorkspaceSelector/>);await act(async()=>{});fireEvent.click(screen.getByRole('button',{name:'Open remote desktop'}));expect(screen.getByText('Remote desktop surface')).toBeInTheDocument();});
 it('retains pending browser requests without polling header metrics',async()=>{
  vi.useFakeTimers();let requests=0;mocks.workspace.mockImplementation(async(_id:string,_route:string,args:{command:string})=>{if(args.command==='workspace_metrics')throw Error('unavailable');requests++;return {result:`https://github.com/login/device?request=${requests}`};});
@@ -24,6 +24,19 @@ it('separates new workspace setup and scopes controls to the selected workspace 
  expect(screen.getByText('Create a cloud workspace')).toBeInTheDocument();expect(screen.getByText(/Connect to T3 Connect protocol supported machine/)).toBeInTheDocument();
  expect(screen.getByLabelText('Access token')).toBeInTheDocument();
  expect(screen.queryByRole('tablist',{name:'Workspaces'})).toBeNull();
+});
+it('opens All workspaces from the header menu and keeps it out of Manage workspaces',async()=>{
+ mocks.workspace.mockResolvedValue({result:null});render(<WorkspaceSelector/>);await act(async()=>{});
+ fireEvent.click(screen.getByTitle('Test · Connecting…'));
+ fireEvent.click(screen.getByRole('menuitem',{name:'All workspaces…'}));
+ const dialog=await screen.findByRole('dialog',{name:'All workspaces'});
+ await screen.findByText('Machine dashboard');
+ expect(dialog.querySelector('.dlg-children .unified-workspace')).toHaveTextContent('Machine dashboard');
+ expect(dialog.querySelector('.dlg-header .unified-workspace')).toBeNull();
+ fireEvent.click(within(dialog).getByRole('button',{name:/Close/}));
+ fireEvent.click(screen.getByTitle('Test · Connecting…'));
+ fireEvent.click(screen.getByRole('menuitem',{name:/Manage workspaces/}));
+ expect(screen.queryByRole('button',{name:'All workspaces'})).toBeNull();
 });
 it('offers workspace hibernation with a confirmation and runs the project snapshot workflow',async()=>{
  mocks.workspace.mockResolvedValue({result:null});const hibernate=vi.fn().mockResolvedValue(undefined);
