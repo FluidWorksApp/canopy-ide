@@ -65,7 +65,7 @@ for(const command of ['relay_status','relay_host_start','relay_host_stop','relay
 for(const command of ['tunnel_start','tunnel_stop','tunnel_status','linear_issues','linear_issue_detail','linear_issue_set_state','linear_issue_comment'])LOCAL_UI.add(command);
 // This app's own diagnostics, self-test harness, `canopy` launcher, and
 // workspace files chosen in this computer's save/open dialogs.
-for(const command of ['process_capture_metrics','snapshot_capture_metrics','browser_close_metrics','browser_pressure_reload_metrics','selftest_checkpoint','selftest_checkpoint_save','selftest_finish','selftest_reload_renderer','selftest_spawn_remote','selftest_store_contains','cli_install_shim','workspace_export','workspace_import'])LOCAL_UI.add(command);
+for(const command of ['process_capture_metrics','snapshot_capture_metrics','browser_close_metrics','browser_pressure_reload_metrics','selftest_checkpoint','selftest_checkpoint_save','selftest_finish','selftest_reload_renderer','selftest_spawn_remote','selftest_store_contains','cli_install_shim','cli_take_pending_targets','cli_take_pending_open','cli_take_pending_link','workspace_export','workspace_import'])LOCAL_UI.add(command);
 /** Desktop events that belong to the commands above. */
 const DESKTOP_EVENTS=['relay:state','relay:chat','relay:command','relay:collab','relay:transfer','relay:transfer-progress','tunnel:state'];
 /** Commands this adapter answers itself (below) rather than passing to the

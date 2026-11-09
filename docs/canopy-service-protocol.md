@@ -150,6 +150,12 @@ The service reaches the container runner with the `runnerUrl` and
   browser 503 `not-implemented`; errors are `{error}`. One headless page per
   workspace runtime, profile `/home/agent/.canopy/browser-profiles/agent-tools`,
   ops serialized; `url`/`project` selectors are ignored (there is one page).
+  People watch and drive the same page over the runner's WebSocket
+  `/browser/stream` (ticketed by the gateway like `/desktop/ws`; ported from
+  T3 Code's preview stream, `packages/remote-host/browser-stream.mjs`). While a
+  person holds control, actions answer 409 `{error, reason:"humanControl"}`
+  (reads — `snapshot`, `console`, `network`, `screenshot` — still run); a
+  pending page dialog answers 409 `reason:"dialogPending"`.
 
 ## 5. Stream and attention
 

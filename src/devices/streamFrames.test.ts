@@ -1,0 +1,100 @@
+// Ported from T3 Code packages/client-runtime/src/device/streamFrames.test.ts
+// (https://github.com/pingdotgg/t3code, commit d5290e9, MIT License, Copyright (c) 2026 T3 Tools Inc.).
+// Unchanged apart from the test-runner import and module path.
+import { afterEach, expect, it, vi } from "vitest";
+import { createDeviceStreamClient } from "./stream";
+
+afterEach(() => vi.unstubAllGlobals());
+
+it("delivers borrowed decoded frames, reports presentation failure, and discards late output", async () => {
+  let decoderOutput: VideoFrameOutputCallback | undefined;
+  let resolveOutput!: () => void;
+  const outputReady = new Promise<void>((resolve) => {
+    resolveOutput = resolve;
+  });
+  class Decoder {
+    static isConfigSupported = async () => ({ supported: true });
+    state = "unconfigured";
+    constructor(options: VideoDecoderInit) {
+      decoderOutput = options.output;
+      resolveOutput();
+    }
+    configure() {
+      this.state = "configured";
+    }
+    close() {
+      this.state = "closed";
+    }
+  }
+  vi.stubGlobal("VideoDecoder", Decoder);
+  vi.stubGlobal("EncodedVideoChunk", vi.fn());
+  vi.stubGlobal(
+    "WebSocket",
+    class {
+      close() {}
+    },
+  );
+  const envelope = new Uint8Array([0, 0, 0, 5, 1, 1, 0x64, 0, 0x1f]);
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(
+      async (url: string) =>
+        new Response(
+          url.includes("avcc")
+            ? new ReadableStream({
+                start(controller) {
+                  controller.enqueue(envelope);
+                },
+              })
+            : "seed",
+        ),
+    ),
+  );
+  const present = vi.fn(() => true);
+  const events = {
+    onStatus: vi.fn(),
+    onScreen: vi.fn(),
+    onUnauthorized: vi.fn(),
+    onMjpegFallback: vi.fn(),
+    onInputConnected: vi.fn(),
+  };
+  const client = createDeviceStreamClient(
+    {
+      platform: "ios",
+      deviceId: "phone",
+      access: {
+        httpBase: "https://test",
+        wsBase: "wss://test",
+        credentials: false,
+        query: {},
+      },
+    },
+    { present },
+    events,
+  );
+  client.start();
+  await outputReady;
+  const frame = {
+    displayWidth: 1170,
+    displayHeight: 2532,
+    close: vi.fn(),
+  } as unknown as VideoFrame;
+  decoderOutput?.(frame);
+  expect(present).toHaveBeenCalledExactlyOnceWith(frame, 1170, 2532);
+  expect(frame.close).toHaveBeenCalledOnce();
+  present.mockImplementationOnce(() => {
+    throw new Error("renderer failed");
+  });
+  expect(() => decoderOutput?.(frame)).toThrow("renderer failed");
+  expect(frame.close).toHaveBeenCalledTimes(2);
+  present.mockReturnValueOnce(false);
+  decoderOutput?.(frame);
+  expect(events.onStatus).toHaveBeenLastCalledWith(
+    "error",
+    "Could not display the device stream. Reconnect to try again.",
+  );
+  expect(frame.close).toHaveBeenCalledTimes(3);
+  decoderOutput?.(frame);
+  expect(present).toHaveBeenCalledTimes(3);
+  expect(frame.close).toHaveBeenCalledTimes(4);
+});

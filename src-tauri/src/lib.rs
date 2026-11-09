@@ -22,6 +22,9 @@ mod companion_requests;
 mod containment;
 mod context;
 mod crash;
+mod devicehub;
+mod devicehub_mjpeg;
+mod devicehub_proxy;
 #[cfg(feature = "dictation")]
 mod dictation;
 mod execution;
@@ -560,6 +563,7 @@ pub fn run() {
         .manage(governor::TerminalGovernor::default())
         .manage(containment::ContainmentManager::default())
         .manage(tunnel::TunnelManager::default())
+        .manage(devicehub::DeviceHubManager::default())
         .manage(prwatch::PrWatcher::default())
         .manage(dictation::DictationManager::default())
         .manage(selftest::SelftestState::default())
@@ -675,6 +679,7 @@ pub fn run() {
             crash::file_crash_issue,
             cli::cli_take_pending_open,
             cli::cli_take_pending_link,
+            cli::cli_take_pending_targets,
             cli::cli_install_shim,
             notify::notify_native,
             selftest::selftest_config,
@@ -792,6 +797,15 @@ pub fn run() {
             android::android_describe,
             android::android_run,
             android::android_stage_file,
+            devicehub::device_hub_status,
+            devicehub::device_hub_install,
+            devicehub::device_hub_start,
+            devicehub::device_hub_stop,
+            devicehub::device_hub_access,
+            devicehub::device_hub_devices,
+            devicehub::device_hub_boot,
+            devicehub::device_hub_attach,
+            devicehub::device_hub_shutdown,
             clipboard::clipboard_watch_set,
             clipboard::clipboard_recent,
             clipboard::clipboard_read,
@@ -1142,6 +1156,9 @@ pub fn run() {
                     .shutdown_all();
                 // ... and any public-link tunnel process.
                 app.state::<tunnel::TunnelManager>().kill_all();
+                // ... and the device hub (expo-device-hub), whose record is
+                // removed so the next launch has nothing to reap.
+                app.state::<devicehub::DeviceHubManager>().shutdown();
                 // ... and stop polling GitHub for pull requests.
                 app.state::<prwatch::PrWatcher>().shutdown();
                 // ... and stop watching the pasteboard.

@@ -82,6 +82,17 @@ terms govern use of the model:
 - **SenseVoice Small (int8)** — FunASR MODEL_LICENSE (custom) — <https://github.com/modelscope/FunASR/blob/main/MODEL_LICENSE>, by FunAudioLLM / Alibaba. <https://huggingface.co/FunAudioLLM/SenseVoiceSmall>
 - **Moonshine Base** — MIT, by Useful Sensors. <https://huggingface.co/UsefulSensors/moonshine>
 
+## Tools downloaded at runtime
+
+Live device streaming installs these on the user's machine, from npm, only
+after the user agrees to it in the Device tab. Canopy does not bundle or
+redistribute them:
+
+- **expo-device-hub 0.19.1** — MIT, by 650 Industries, Inc. (Expo). <https://github.com/expo/expo-device-hub>
+- **serve-emu (vendored in expo-device-hub)** — Apache-2.0, by Expo. <https://github.com/expo/expo-device-hub>
+- **serve-sim (vendored in expo-device-hub)** — Apache-2.0, by Evan Bacon, with changes by Expo. <https://github.com/EvanBacon/serve-sim>
+- **scrcpy-server v4.0 (downloaded by serve-emu when an Android device is first streamed)** — Apache-2.0, by Genymobile and Romain Vimont. <https://github.com/Genymobile/scrcpy>
+
 ## Rust crates (729)
 
 ### MIT — 669
