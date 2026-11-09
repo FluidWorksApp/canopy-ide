@@ -28928,18 +28928,16 @@ a.btn-sm {
   gap: 12px;
   padding: 6px 12px;
   background: var(--danger);
-  color: #fff;
+  color: var(--on-danger);
   font-size: var(--fs-sm);
   font-weight: 600;
 }
-.desk-banner button {
-  border: 1px solid #fff;
-  background: transparent;
-  color: inherit;
-  font: inherit;
-  padding: 2px 10px;
-  border-radius: var(--r-sm);
-  cursor: pointer;
+.desk-banner .btn {
+  border-color: var(--on-danger);
+  color: var(--on-danger);
+}
+.desk-banner .btn:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--on-danger) 14%, transparent);
 }
 .desk-viewer {
   position: fixed;
@@ -28973,7 +28971,17 @@ a.btn-sm {
   min-height: 0;
   width: 100%;
   object-fit: contain;
-  background: #000;
+  background: var(--bg-deep);
   outline: none;
 }
+.desk-canvas:focus-visible { box-shadow: inset var(--ring); }
 .desk-members { padding: 8px 12px; }
+.desk-member-row { align-items: center; }
+.desk-member-actions { display: flex; gap: 6px; flex: 0 0 auto; }
+.desk-request-status,
+.desk-inline-error,
+.desk-trust { display: block; margin-top: 3px; font-size: var(--fs-xs); }
+.desk-request-status,
+.desk-trust { color: var(--text-muted); }
+.desk-inline-error,
+.desk-trust.changed { color: var(--danger); }

@@ -78,12 +78,26 @@ pub enum Button {
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 #[serde(tag = "kind", rename_all = "kebab-case")]
 pub enum InputEvent {
-    MouseMove { x: f64, y: f64 },
-    MouseButton { button: Button, down: bool },
-    Scroll { dx: i32, dy: i32 },
+    MouseMove {
+        x: f64,
+        y: f64,
+    },
+    MouseButton {
+        button: Button,
+        down: bool,
+    },
+    Scroll {
+        dx: i32,
+        dy: i32,
+    },
     /// `code` is a W3C `KeyboardEvent.code` value from a fixed allow list.
-    Key { code: String, down: bool },
-    Text { s: String },
+    Key {
+        code: String,
+        down: bool,
+    },
+    Text {
+        s: String,
+    },
 }
 
 /// The body of a desk message. Version tolerant in the sense that an unknown
@@ -92,11 +106,17 @@ pub enum InputEvent {
 #[serde(tag = "kind", rename_all = "kebab-case")]
 pub enum DeskBody {
     /// Viewer -> target: "let me see (and maybe control) your screen."
-    Request { mode: Mode },
+    Request {
+        mode: Mode,
+    },
     /// Target -> viewer: the local user accepted, with this (possibly weaker) mode.
-    Accept { mode: Mode },
+    Accept {
+        mode: Mode,
+    },
     /// Target -> viewer: refused.
-    Deny { reason: String },
+    Deny {
+        reason: String,
+    },
     /// Target -> viewer: one JPEG frame. `seq` strictly increases.
     Frame {
         seq: u64,
@@ -105,10 +125,14 @@ pub enum DeskBody {
         jpeg_b64: String,
     },
     /// Viewer -> target: one input event.
-    Input { event: InputEvent },
+    Input {
+        event: InputEvent,
+    },
     Ping,
     /// Either side: the session is over.
-    End { reason: String },
+    End {
+        reason: String,
+    },
 }
 
 // ---------- validation ----------
@@ -225,7 +249,10 @@ pub fn is_known_key(code: &str) -> bool {
         return d.len() == 1 && d.as_bytes()[0].is_ascii_digit();
     }
     if let Some(n) = code.strip_prefix('F') {
-        return n.parse::<u8>().map(|n| (1..=12).contains(&n)).unwrap_or(false)
+        return n
+            .parse::<u8>()
+            .map(|n| (1..=12).contains(&n))
+            .unwrap_or(false)
             && !n.starts_with('0');
     }
     false
@@ -284,9 +311,7 @@ impl DeskBody {
                     Ok(())
                 }
             }
-            DeskBody::Frame {
-                w, h, jpeg_b64, ..
-            } => {
+            DeskBody::Frame { w, h, jpeg_b64, .. } => {
                 if jpeg_b64.len() > MAX_FRAME_B64 {
                     Err(DeskError::FrameTooLarge)
                 } else if *w == 0 || *h == 0 || *w > MAX_DIMENSION || *h > MAX_DIMENSION {
@@ -466,15 +491,24 @@ impl DeskSession {
 pub enum Action {
     Nothing,
     /// A peer asked to view us. Show the consent prompt. Nothing is captured.
-    Incoming { mode: Mode },
+    Incoming {
+        mode: Mode,
+    },
     /// Viewer side: the target accepted with this mode.
     Activated(Mode),
     /// Viewer side: show this frame.
     Render,
     /// Target side: inject this (already validated) event.
     Apply(InputEvent),
+    /// The local request lifetime elapsed before this message was handled.
+    Expired {
+        info: SessionInfo,
+    },
     /// The session is over; tear everything down.
-    Ended { info: SessionInfo, reason: String },
+    Ended {
+        info: SessionInfo,
+        reason: String,
+    },
 }
 
 /// Holds at most one live session.
@@ -502,10 +536,20 @@ impl DeskHub {
 
     /// Drop a request nobody answered within [`REQUEST_TTL_MS`], on either
     /// side, so an ignored request cannot hold the single session slot.
-    /// Active sessions are never expired here.
+    /// The exact TTL boundary is expired. Active sessions are never expired.
     pub fn expire(&mut self, now_ms: u64) -> Option<SessionInfo> {
-        let stale = self.session.as_ref().map_or(false, |s| {
-            s.phase == Phase::Requested && now_ms.saturating_sub(s.created_ms) > REQUEST_TTL_MS
+        let session = self.session.as_ref()?.id.clone();
+        self.expire_request(&session, now_ms)
+    }
+
+    /// Drop only the still-matching pending request. Native timeout workers use
+    /// this form so a stale worker cannot end an accepted or replacement
+    /// session after it wakes.
+    pub fn expire_request(&mut self, session: &str, now_ms: u64) -> Option<SessionInfo> {
+        let stale = self.session.as_ref().is_some_and(|s| {
+            s.id == session
+                && s.phase == Phase::Requested
+                && now_ms.saturating_sub(s.created_ms) >= REQUEST_TTL_MS
         });
         if !stale {
             return None;
@@ -554,7 +598,7 @@ impl DeskHub {
         if s.phase != Phase::Requested {
             return Err(DeskError::NotActive);
         }
-        if now_ms.saturating_sub(s.created_ms) > REQUEST_TTL_MS {
+        if now_ms.saturating_sub(s.created_ms) >= REQUEST_TTL_MS {
             self.session = None;
             return Err(DeskError::Expired);
         }
@@ -621,13 +665,23 @@ impl DeskHub {
             return Ok(Action::Incoming { mode: *mode });
         }
 
-        let s = self.session.as_mut().ok_or(DeskError::NoSession)?;
+        let s = self.session.as_ref().ok_or(DeskError::NoSession)?;
         if s.id != session {
             return Err(DeskError::UnknownSession);
         }
         if s.peer != from {
             return Err(DeskError::WrongPeer);
         }
+        if s.phase == Phase::Requested && now_ms.saturating_sub(s.created_ms) >= REQUEST_TTL_MS {
+            let info = self
+                .expire_request(session, now_ms)
+                .expect("the matching request was just proven expired");
+            return Ok(Action::Expired { info });
+        }
+        let s = self
+            .session
+            .as_mut()
+            .expect("the session was checked above");
 
         match body {
             DeskBody::End { reason } => {
@@ -744,7 +798,10 @@ impl HeldInput {
                     self.buttons.push(*button);
                 }
             }
-            InputEvent::MouseButton { button, down: false } => self.buttons.retain(|b| b != button),
+            InputEvent::MouseButton {
+                button,
+                down: false,
+            } => self.buttons.retain(|b| b != button),
             _ => {}
         }
     }
@@ -755,7 +812,10 @@ impl HeldInput {
             .buttons
             .drain(..)
             .rev()
-            .map(|button| InputEvent::MouseButton { button, down: false })
+            .map(|button| InputEvent::MouseButton {
+                button,
+                down: false,
+            })
             .collect();
         out.extend(
             self.keys
@@ -829,7 +889,9 @@ pub fn build_frame(
 ) -> Result<DeskBody, FrameError> {
     let img = src.capture().map_err(FrameError::Capture)?;
     let img = downscale(img, max_w);
-    let jpeg = enc.encode_jpeg(&img, quality).map_err(FrameError::Capture)?;
+    let jpeg = enc
+        .encode_jpeg(&img, quality)
+        .map_err(FrameError::Capture)?;
     let jpeg_b64 = base64::engine::general_purpose::STANDARD.encode(jpeg);
     let body = DeskBody::Frame {
         seq,
@@ -956,7 +1018,10 @@ pub mod fakes {
     impl FrameEncoder for FakeEncoder {
         fn encode_jpeg(&mut self, img: &Rgba, quality: u8) -> Result<Vec<u8>, String> {
             self.qualities.push(quality);
-            Ok(vec![0xff; img.w as usize * img.h as usize * self.bytes_per_pixel])
+            Ok(vec![
+                0xff;
+                img.w as usize * img.h as usize * self.bytes_per_pixel
+            ])
         }
     }
 
@@ -998,9 +1063,7 @@ mod tests {
     /// Target hub with a pending request from peer "v".
     fn target_pending(mode: Mode) -> DeskHub {
         let mut hub = DeskHub::new();
-        let a = hub
-            .handle("v", S, &DeskBody::Request { mode }, 0)
-            .unwrap();
+        let a = hub.handle("v", S, &DeskBody::Request { mode }, 0).unwrap();
         assert_eq!(a, Action::Incoming { mode });
         hub
     }
@@ -1012,44 +1075,106 @@ mod tests {
     }
 
     #[test]
-    fn unanswered_request_expires_and_frees_the_slot() {
+    fn unanswered_request_expires_at_boundary_and_frees_the_slot() {
         let mut hub = DeskHub::new();
-        hub.handle("a", S, &DeskBody::Request { mode: Mode::Control }, 0)
-            .unwrap();
+        hub.handle(
+            "a",
+            S,
+            &DeskBody::Request {
+                mode: Mode::Control,
+            },
+            0,
+        )
+        .unwrap();
         assert_eq!(
-            hub.handle("b", "sess-2", &DeskBody::Request { mode: Mode::Control }, 1),
+            hub.handle(
+                "b",
+                "sess-2",
+                &DeskBody::Request {
+                    mode: Mode::Control
+                },
+                1
+            ),
             Err(DeskError::Busy)
         );
-        let late = REQUEST_TTL_MS + 1;
+        assert!(hub.expire(REQUEST_TTL_MS - 1).is_none());
+        assert!(hub.expire(REQUEST_TTL_MS).is_some());
         assert!(hub
-            .handle("b", "sess-2", &DeskBody::Request { mode: Mode::Control }, late)
+            .handle(
+                "b",
+                "sess-2",
+                &DeskBody::Request {
+                    mode: Mode::Control
+                },
+                REQUEST_TTL_MS,
+            )
             .is_ok());
         assert_eq!(hub.current().unwrap().peer, "b");
+
         // Viewer side too, and active sessions never expire.
         let mut v = DeskHub::new();
         v.request_out("sess-3", "t", Mode::Control, 0).unwrap();
-        assert!(v.expire(REQUEST_TTL_MS + 1).is_some());
+        assert!(v.expire(REQUEST_TTL_MS).is_some());
         assert!(v.current().is_none());
         let mut t = DeskHub::new();
-        t.handle("a", S, &DeskBody::Request { mode: Mode::Control }, 0)
-            .unwrap();
+        t.handle(
+            "a",
+            S,
+            &DeskBody::Request {
+                mode: Mode::Control,
+            },
+            0,
+        )
+        .unwrap();
         t.respond(S, true, Mode::Control, 1, "").unwrap();
         assert!(t.expire(REQUEST_TTL_MS * 10).is_none());
     }
 
     #[test]
+    fn stale_expiry_cannot_end_an_active_or_replacement_session() {
+        let mut hub = target_pending(Mode::Control);
+        hub.respond(S, true, Mode::Control, 1, "").unwrap();
+        assert!(hub.expire_request(S, REQUEST_TTL_MS).is_none());
+        assert_eq!(hub.current().unwrap().phase, Phase::Active(Mode::Control));
+
+        hub.end_local(S).unwrap();
+        hub.handle(
+            "other",
+            "sess-2",
+            &DeskBody::Request {
+                mode: Mode::ViewOnly,
+            },
+            REQUEST_TTL_MS,
+        )
+        .unwrap();
+        assert!(hub
+            .expire_request(S, REQUEST_TTL_MS.saturating_mul(2))
+            .is_none());
+        assert_eq!(hub.current().unwrap().session, "sess-2");
+    }
+
+    #[test]
     fn held_input_releases_everything_still_down() {
         let mut h = HeldInput::new();
-        let k = |c: &str, down| InputEvent::Key { code: c.into(), down };
+        let k = |c: &str, down| InputEvent::Key {
+            code: c.into(),
+            down,
+        };
         h.note(&k("ControlLeft", true));
         h.note(&k("KeyA", true));
         h.note(&k("KeyA", false));
-        h.note(&InputEvent::MouseButton { button: Button::Left, down: true });
+        h.note(&InputEvent::MouseButton {
+            button: Button::Left,
+            down: true,
+        });
         let rel = h.release_all();
         assert_eq!(
             rel,
             vec![
-                InputEvent::MouseButton { button: Button::Left, down: false },
+                InputEvent::MouseButton {
+                    button: Button::Left,
+                    down: false
+                },
                 k("ControlLeft", false)
             ]
         );
@@ -1058,7 +1183,12 @@ mod tests {
 
     #[test]
     fn oversized_frame_dimensions_are_rejected() {
-        let b = DeskBody::Frame { seq: 1, w: MAX_DIMENSION + 1, h: 10, jpeg_b64: "AAAA".into() };
+        let b = DeskBody::Frame {
+            seq: 1,
+            w: MAX_DIMENSION + 1,
+            h: 10,
+            jpeg_b64: "AAAA".into(),
+        };
         assert_eq!(b.validate(), Err(DeskError::BadDimensions));
     }
 
@@ -1078,13 +1208,25 @@ mod tests {
     fn accept_enables_capture_and_deny_clears() {
         let mut hub = target_pending(Mode::Control);
         let body = hub.respond(S, true, Mode::Control, 10, "").unwrap();
-        assert_eq!(body, DeskBody::Accept { mode: Mode::Control });
+        assert_eq!(
+            body,
+            DeskBody::Accept {
+                mode: Mode::Control
+            }
+        );
         assert!(hub.capture_allowed(S));
         assert!(!hub.capture_allowed("other"));
 
         let mut hub = target_pending(Mode::Control);
-        let body = hub.respond(S, false, Mode::Control, 10, "no thanks").unwrap();
-        assert_eq!(body, DeskBody::Deny { reason: "no thanks".into() });
+        let body = hub
+            .respond(S, false, Mode::Control, 10, "no thanks")
+            .unwrap();
+        assert_eq!(
+            body,
+            DeskBody::Deny {
+                reason: "no thanks".into()
+            }
+        );
         assert!(!hub.capture_allowed(S));
         assert!(hub.current().is_none());
     }
@@ -1093,17 +1235,40 @@ mod tests {
     fn grant_is_clamped_to_the_request() {
         let mut hub = target_pending(Mode::ViewOnly);
         let body = hub.respond(S, true, Mode::Control, 10, "").unwrap();
-        assert_eq!(body, DeskBody::Accept { mode: Mode::ViewOnly });
+        assert_eq!(
+            body,
+            DeskBody::Accept {
+                mode: Mode::ViewOnly
+            }
+        );
     }
 
     #[test]
     fn expired_request_cannot_be_accepted() {
         let mut hub = target_pending(Mode::Control);
         assert_eq!(
-            hub.respond(S, true, Mode::Control, REQUEST_TTL_MS + 1, ""),
+            hub.respond(S, true, Mode::Control, REQUEST_TTL_MS, ""),
             Err(DeskError::Expired)
         );
         assert!(!hub.capture_allowed(S));
+    }
+
+    #[test]
+    fn late_incoming_answer_expires_viewer_request() {
+        let mut hub = DeskHub::new();
+        hub.request_out(S, "target", Mode::Control, 0).unwrap();
+        let action = hub
+            .handle(
+                "target",
+                S,
+                &DeskBody::Accept {
+                    mode: Mode::Control,
+                },
+                REQUEST_TTL_MS,
+            )
+            .unwrap();
+        assert!(matches!(action, Action::Expired { info } if info.session == S));
+        assert!(hub.current().is_none());
     }
 
     #[test]
@@ -1121,10 +1286,24 @@ mod tests {
     fn accept_by_wrong_peer_rejected() {
         let mut hub = DeskHub::new();
         hub.request_out(S, "t", Mode::Control, 0).unwrap();
-        let r = hub.handle("mallory", S, &DeskBody::Accept { mode: Mode::Control }, 1);
+        let r = hub.handle(
+            "mallory",
+            S,
+            &DeskBody::Accept {
+                mode: Mode::Control,
+            },
+            1,
+        );
         assert_eq!(r, Err(DeskError::WrongPeer));
         assert_eq!(hub.current().unwrap().phase, Phase::Requested);
-        let r = hub.handle("t", S, &DeskBody::Accept { mode: Mode::Control }, 1);
+        let r = hub.handle(
+            "t",
+            S,
+            &DeskBody::Accept {
+                mode: Mode::Control,
+            },
+            1,
+        );
         assert_eq!(r, Ok(Action::Activated(Mode::Control)));
     }
 
@@ -1132,7 +1311,14 @@ mod tests {
     fn viewer_cannot_be_granted_more_than_asked() {
         let mut hub = DeskHub::new();
         hub.request_out(S, "t", Mode::ViewOnly, 0).unwrap();
-        let r = hub.handle("t", S, &DeskBody::Accept { mode: Mode::Control }, 1);
+        let r = hub.handle(
+            "t",
+            S,
+            &DeskBody::Accept {
+                mode: Mode::Control,
+            },
+            1,
+        );
         assert_eq!(r, Err(DeskError::InvalidGrant));
     }
 
@@ -1156,9 +1342,15 @@ mod tests {
     #[test]
     fn view_only_never_injects_input() {
         let mut hub = target_active(Mode::ViewOnly);
-        assert_eq!(hub.handle("v", S, &mv(0.5, 0.5), 20), Err(DeskError::ViewOnly));
+        assert_eq!(
+            hub.handle("v", S, &mv(0.5, 0.5), 20),
+            Err(DeskError::ViewOnly)
+        );
         let key = DeskBody::Input {
-            event: InputEvent::Key { code: "Enter".into(), down: true },
+            event: InputEvent::Key {
+                code: "Enter".into(),
+                down: true,
+            },
         };
         assert_eq!(hub.handle("v", S, &key, 20), Err(DeskError::ViewOnly));
     }
@@ -1166,7 +1358,12 @@ mod tests {
     #[test]
     fn out_of_range_coordinates_rejected() {
         let mut hub = target_active(Mode::Control);
-        for (x, y) in [(-0.01, 0.5), (0.5, 1.01), (f64::NAN, 0.5), (f64::INFINITY, 0.0)] {
+        for (x, y) in [
+            (-0.01, 0.5),
+            (0.5, 1.01),
+            (f64::NAN, 0.5),
+            (f64::INFINITY, 0.0),
+        ] {
             assert!(matches!(
                 hub.handle("v", S, &mv(x, y), 20),
                 Err(DeskError::OutOfRange(_))
@@ -1180,15 +1377,39 @@ mod tests {
         let ev = |e: InputEvent| DeskBody::Input { event: e };
         let mut hub = target_active(Mode::Control);
         assert_eq!(
-            hub.handle("v", S, &ev(InputEvent::Key { code: "Power".into(), down: true }), 20),
+            hub.handle(
+                "v",
+                S,
+                &ev(InputEvent::Key {
+                    code: "Power".into(),
+                    down: true
+                }),
+                20
+            ),
             Err(DeskError::UnknownKey)
         );
         assert_eq!(
-            hub.handle("v", S, &ev(InputEvent::Key { code: "F13".into(), down: true }), 20),
+            hub.handle(
+                "v",
+                S,
+                &ev(InputEvent::Key {
+                    code: "F13".into(),
+                    down: true
+                }),
+                20
+            ),
             Err(DeskError::UnknownKey)
         );
         assert!(hub
-            .handle("v", S, &ev(InputEvent::Key { code: "KeyA".into(), down: true }), 20)
+            .handle(
+                "v",
+                S,
+                &ev(InputEvent::Key {
+                    code: "KeyA".into(),
+                    down: true
+                }),
+                20
+            )
             .is_ok());
         assert!(matches!(
             hub.handle("v", S, &ev(InputEvent::Scroll { dx: 0, dy: 5000 }), 20),
@@ -1200,19 +1421,35 @@ mod tests {
             Err(DeskError::TextTooLong)
         );
         assert_eq!(
-            hub.handle("v", S, &ev(InputEvent::Text { s: "a\u{7}b".into() }), 20),
+            hub.handle(
+                "v",
+                S,
+                &ev(InputEvent::Text {
+                    s: "a\u{7}b".into()
+                }),
+                20
+            ),
             Err(DeskError::BadText)
         );
         let max = "a".repeat(MAX_TEXT_CHARS);
-        assert!(hub.handle("v", S, &ev(InputEvent::Text { s: max }), 20).is_ok());
+        assert!(hub
+            .handle("v", S, &ev(InputEvent::Text { s: max }), 20)
+            .is_ok());
     }
 
     #[test]
     fn oversize_frame_rejected() {
         let mut hub = DeskHub::new();
         hub.request_out(S, "t", Mode::ViewOnly, 0).unwrap();
-        hub.handle("t", S, &DeskBody::Accept { mode: Mode::ViewOnly }, 1)
-            .unwrap();
+        hub.handle(
+            "t",
+            S,
+            &DeskBody::Accept {
+                mode: Mode::ViewOnly,
+            },
+            1,
+        )
+        .unwrap();
         let big = DeskBody::Frame {
             seq: 0,
             w: 10,
@@ -1220,7 +1457,12 @@ mod tests {
             jpeg_b64: "A".repeat(MAX_FRAME_B64 + 1),
         };
         assert_eq!(hub.handle("t", S, &big, 2), Err(DeskError::FrameTooLarge));
-        let zero = DeskBody::Frame { seq: 0, w: 0, h: 10, jpeg_b64: "AA".into() };
+        let zero = DeskBody::Frame {
+            seq: 0,
+            w: 0,
+            h: 10,
+            jpeg_b64: "AA".into(),
+        };
         assert_eq!(hub.handle("t", S, &zero, 2), Err(DeskError::BadDimensions));
         let at_cap = DeskBody::Frame {
             seq: 0,
@@ -1237,8 +1479,15 @@ mod tests {
         hub.request_out(S, "t", Mode::ViewOnly, 0).unwrap();
         // Frames before accept are refused.
         assert_eq!(hub.handle("t", S, &frame(0), 1), Err(DeskError::NotActive));
-        hub.handle("t", S, &DeskBody::Accept { mode: Mode::ViewOnly }, 1)
-            .unwrap();
+        hub.handle(
+            "t",
+            S,
+            &DeskBody::Accept {
+                mode: Mode::ViewOnly,
+            },
+            1,
+        )
+        .unwrap();
         assert_eq!(hub.handle("t", S, &frame(5), 2), Ok(Action::Render));
         assert_eq!(hub.handle("t", S, &frame(5), 3), Err(DeskError::StaleSeq));
         assert_eq!(hub.handle("t", S, &frame(4), 3), Err(DeskError::StaleSeq));
@@ -1251,8 +1500,19 @@ mod tests {
         assert_eq!(t.handle("v", S, &frame(0), 20), Err(DeskError::WrongRole));
         let mut v = DeskHub::new();
         v.request_out(S, "t", Mode::Control, 0).unwrap();
-        v.handle("t", S, &DeskBody::Accept { mode: Mode::Control }, 1).unwrap();
-        assert_eq!(v.handle("t", S, &mv(0.5, 0.5), 2), Err(DeskError::WrongRole));
+        v.handle(
+            "t",
+            S,
+            &DeskBody::Accept {
+                mode: Mode::Control,
+            },
+            1,
+        )
+        .unwrap();
+        assert_eq!(
+            v.handle("t", S, &mv(0.5, 0.5), 2),
+            Err(DeskError::WrongRole)
+        );
     }
 
     #[test]
@@ -1277,7 +1537,14 @@ mod tests {
     #[test]
     fn second_concurrent_session_refused() {
         let mut hub = target_active(Mode::Control);
-        let r = hub.handle("other", "sess-2", &DeskBody::Request { mode: Mode::ViewOnly }, 30);
+        let r = hub.handle(
+            "other",
+            "sess-2",
+            &DeskBody::Request {
+                mode: Mode::ViewOnly,
+            },
+            30,
+        );
         assert_eq!(r, Err(DeskError::Busy));
         assert_eq!(hub.current().unwrap().session, S);
         assert_eq!(
@@ -1291,7 +1558,14 @@ mod tests {
         let mut hub = DeskHub::new();
         for id in ["", "has space", "a/b", &"x".repeat(MAX_SESSION_ID + 1)] {
             assert_eq!(
-                hub.handle("v", id, &DeskBody::Request { mode: Mode::Control }, 0),
+                hub.handle(
+                    "v",
+                    id,
+                    &DeskBody::Request {
+                        mode: Mode::Control
+                    },
+                    0
+                ),
                 Err(DeskError::BadSessionId)
             );
             assert_eq!(
@@ -1311,7 +1585,14 @@ mod tests {
         );
         assert!(hub.capture_allowed(S));
         let a = hub
-            .handle("v", S, &DeskBody::End { reason: "done".into() }, 21)
+            .handle(
+                "v",
+                S,
+                &DeskBody::End {
+                    reason: "done".into(),
+                },
+                21,
+            )
             .unwrap();
         assert!(matches!(a, Action::Ended { ref reason, .. } if reason == "done"));
         assert!(!hub.capture_allowed(S));
@@ -1335,7 +1616,14 @@ mod tests {
         let mut hub = DeskHub::new();
         hub.request_out(S, "t", Mode::Control, 0).unwrap();
         let a = hub
-            .handle("t", S, &DeskBody::Deny { reason: "no".into() }, 1)
+            .handle(
+                "t",
+                S,
+                &DeskBody::Deny {
+                    reason: "no".into(),
+                },
+                1,
+            )
             .unwrap();
         assert!(matches!(a, Action::Ended { .. }));
         assert!(hub.current().is_none());
@@ -1347,24 +1635,54 @@ mod tests {
         hub.request_out(S, "t", Mode::Control, 0).unwrap();
         let ev = InputEvent::MouseMove { x: 0.5, y: 0.5 };
         assert_eq!(hub.check_outgoing_input(S, &ev), Err(DeskError::NotActive));
-        hub.handle("t", S, &DeskBody::Accept { mode: Mode::ViewOnly }, 1).unwrap();
+        hub.handle(
+            "t",
+            S,
+            &DeskBody::Accept {
+                mode: Mode::ViewOnly,
+            },
+            1,
+        )
+        .unwrap();
         assert_eq!(hub.check_outgoing_input(S, &ev), Err(DeskError::ViewOnly));
     }
 
     #[test]
     fn serde_round_trip_and_unknown_kind() {
         let bodies = vec![
-            DeskBody::Request { mode: Mode::ViewOnly },
-            DeskBody::Accept { mode: Mode::Control },
-            DeskBody::Deny { reason: "busy".into() },
+            DeskBody::Request {
+                mode: Mode::ViewOnly,
+            },
+            DeskBody::Accept {
+                mode: Mode::Control,
+            },
+            DeskBody::Deny {
+                reason: "busy".into(),
+            },
             frame(3),
             mv(0.25, 0.75),
-            DeskBody::Input { event: InputEvent::MouseButton { button: Button::Left, down: true } },
-            DeskBody::Input { event: InputEvent::Scroll { dx: 1, dy: -2 } },
-            DeskBody::Input { event: InputEvent::Key { code: "KeyA".into(), down: false } },
-            DeskBody::Input { event: InputEvent::Text { s: "hi".into() } },
+            DeskBody::Input {
+                event: InputEvent::MouseButton {
+                    button: Button::Left,
+                    down: true,
+                },
+            },
+            DeskBody::Input {
+                event: InputEvent::Scroll { dx: 1, dy: -2 },
+            },
+            DeskBody::Input {
+                event: InputEvent::Key {
+                    code: "KeyA".into(),
+                    down: false,
+                },
+            },
+            DeskBody::Input {
+                event: InputEvent::Text { s: "hi".into() },
+            },
             DeskBody::Ping,
-            DeskBody::End { reason: "bye".into() },
+            DeskBody::End {
+                reason: "bye".into(),
+            },
         ];
         for b in bodies {
             let json = serde_json::to_string(&b).unwrap();
@@ -1372,7 +1690,10 @@ mod tests {
             assert_eq!(b, back, "{json}");
         }
         assert_eq!(
-            serde_json::to_string(&DeskBody::Request { mode: Mode::ViewOnly }).unwrap(),
+            serde_json::to_string(&DeskBody::Request {
+                mode: Mode::ViewOnly
+            })
+            .unwrap(),
             r#"{"kind":"request","mode":"view-only"}"#
         );
         assert!(serde_json::from_str::<DeskBody>(r#"{"kind":"clipboard","text":"x"}"#).is_err());
@@ -1385,10 +1706,14 @@ mod tests {
 
     #[test]
     fn key_allow_list() {
-        for ok in ["KeyA", "KeyZ", "Digit0", "F1", "F12", "Enter", "ArrowUp", "MetaLeft"] {
+        for ok in [
+            "KeyA", "KeyZ", "Digit0", "F1", "F12", "Enter", "ArrowUp", "MetaLeft",
+        ] {
             assert!(is_known_key(ok), "{ok}");
         }
-        for bad in ["", "Keya", "KeyAB", "Digit10", "F0", "F13", "F01", "Power", "key", "Sleep"] {
+        for bad in [
+            "", "Keya", "KeyAB", "Digit10", "F0", "F13", "F01", "Power", "key", "Sleep",
+        ] {
             assert!(!is_known_key(bad), "{bad}");
         }
     }
@@ -1413,11 +1738,19 @@ mod tests {
 
     #[test]
     fn downscale_caps_width_and_keeps_aspect() {
-        let img = Rgba { w: 3200, h: 1800, pixels: vec![7; 3200 * 1800 * 4] };
+        let img = Rgba {
+            w: 3200,
+            h: 1800,
+            pixels: vec![7; 3200 * 1800 * 4],
+        };
         let out = downscale(img, 1600);
         assert_eq!((out.w, out.h), (1600, 900));
         assert_eq!(out.pixels.len(), 1600 * 900 * 4);
-        let small = Rgba { w: 100, h: 50, pixels: vec![1; 100 * 50 * 4] };
+        let small = Rgba {
+            w: 100,
+            h: 50,
+            pixels: vec![1; 100 * 50 * 4],
+        };
         assert_eq!(downscale(small.clone(), 1600), small);
     }
 
@@ -1435,7 +1768,9 @@ mod tests {
             true
         };
         let mut slept = Vec::new();
-        let exit = capture_loop(&mut src, &mut enc, &alive, &mut send, &mut |d| slept.push(d));
+        let exit = capture_loop(&mut src, &mut enc, &alive, &mut send, &mut |d| {
+            slept.push(d)
+        });
         assert_eq!(exit, LoopExit::Stopped);
         let seqs: Vec<u64> = got
             .iter()
@@ -1498,10 +1833,14 @@ mod tests {
         let mut target = DeskHub::new();
 
         viewer.request_out(S, "t", Mode::Control, 0).unwrap();
-        let req = DeskBody::Request { mode: Mode::Control };
+        let req = DeskBody::Request {
+            mode: Mode::Control,
+        };
         assert_eq!(
             target.handle("v", S, &req, 0),
-            Ok(Action::Incoming { mode: Mode::Control })
+            Ok(Action::Incoming {
+                mode: Mode::Control
+            })
         );
         assert!(!target.capture_allowed(S));
 
@@ -1517,16 +1856,25 @@ mod tests {
         let mut enc = FakeEncoder::new(0);
         let alive = AtomicBool::new(true);
         let mut frames = Vec::new();
-        capture_loop(&mut src, &mut enc, &alive, &mut |b| {
-            frames.push(b);
-            alive.store(false, Ordering::SeqCst);
-            true
-        }, &mut |_| {});
+        capture_loop(
+            &mut src,
+            &mut enc,
+            &alive,
+            &mut |b| {
+                frames.push(b);
+                alive.store(false, Ordering::SeqCst);
+                true
+            },
+            &mut |_| {},
+        );
         assert_eq!(frames.len(), 1);
         assert_eq!(viewer.handle("t", S, &frames[0], 2), Ok(Action::Render));
 
         // Viewer input passes both checks and reaches the sink.
-        let ev = InputEvent::MouseButton { button: Button::Right, down: true };
+        let ev = InputEvent::MouseButton {
+            button: Button::Right,
+            down: true,
+        };
         viewer.check_outgoing_input(S, &ev).unwrap();
         let mut sink = RecordingSink::default();
         match target

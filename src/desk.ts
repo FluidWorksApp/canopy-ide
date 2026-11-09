@@ -42,10 +42,12 @@ export interface DeskStateEvent {
   peer: string;
   peer_name: string;
   mode: DeskMode | null;
-  /** What the viewer asked for; absent on older payloads. */
-  requested?: DeskMode;
+  /** What the viewer asked for. */
+  requested: DeskMode;
   reason?: string | null;
 }
+
+export type DeskStatus = Omit<DeskStateEvent, "reason">;
 
 // ---------- session state ----------
 
@@ -186,7 +188,13 @@ export function clampScroll(d: number, max = 1000): number {
 
 // ---------- frames ----------
 
-type FrameListener = (frame: { session: string; w: number; h: number; jpeg_b64: string }) => void;
+type FrameListener = (frame: {
+  session: string;
+  seq: number;
+  w: number;
+  h: number;
+  jpeg_b64: string;
+}) => void;
 
 /** Frames are too hot to live in React state. App publishes here and the
  *  viewer canvas subscribes. */
@@ -195,8 +203,8 @@ export function createFrameBus() {
   return {
     publish(msg: DeskMsg) {
       if (msg.body.kind !== "frame") return;
-      const { w, h, jpeg_b64 } = msg.body;
-      for (const l of listeners) l({ session: msg.session, w, h, jpeg_b64 });
+      const { seq, w, h, jpeg_b64 } = msg.body;
+      for (const l of listeners) l({ session: msg.session, seq, w, h, jpeg_b64 });
     },
     subscribe(l: FrameListener) {
       listeners.add(l);

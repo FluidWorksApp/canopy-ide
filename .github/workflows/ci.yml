@@ -179,6 +179,12 @@ jobs:
           if [[ "${RUNNER_OS}" == "Windows" ]]; then suffix=".exe"; fi
           touch "src-tauri/binaries/canopy-hook-${triple}${suffix}"
 
+      - name: Compile native remote desktop application library
+        working-directory: src-tauri
+        # Compile coverage only. Real capture, permissions and input injection
+        # still require manual tests on physical Windows and macOS machines.
+        run: cargo check --no-default-features --features desk-native --lib
+
       - name: Compile containment launcher
         working-directory: src-tauri
         run: cargo check --no-default-features --bin canopy-hook

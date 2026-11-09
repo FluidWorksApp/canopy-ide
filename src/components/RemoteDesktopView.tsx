@@ -6,6 +6,7 @@
 // screen for as long as the session is live, with a Stop button.
 import { useCallback, useEffect, useRef, useState } from "react";
 import * as ipc from "../ipc";
+import type { RelayMember } from "../ipc";
 import {
   bannerText,
   canSendInput,
@@ -24,33 +25,98 @@ import {
   type InputEvent,
 } from "../desk";
 import { Dialog } from "./Dialog";
+import { Button } from "./ui";
 import type { Notify, RelayHandle } from "../types";
 
 const MOVE_GAP_MS = 33;
+const MAX_FRAME_DIMENSION = 4096;
 
 function send(session: string, event: InputEvent) {
   void ipc.deskSendInput(session, event).catch(() => {
-    /* the session ending races with in-flight input; the state event tells the user */
+    /* The state event reports a session ending while input is in flight. */
   });
 }
 
-export function ConsentDialog({ session }: { session: DeskStateEvent }) {
-  const answer = (accept: boolean, mode: DeskMode) =>
-    void ipc.deskRespond(session.session, accept, mode).catch(() => {});
+function shortFingerprint(key: string | null): string | null {
+  if (!key) return null;
+  const compact = key.replace(/[^a-fA-F0-9]/g, "").toUpperCase();
+  if (!compact) return null;
+  return compact.slice(0, 12).match(/.{1,4}/g)?.join(" ") ?? null;
+}
+
+function trustEvidence(member?: RelayMember): string {
+  if (!member) return "Device identity is unavailable for this member.";
+  const fingerprint = shortFingerprint(member.key);
+  const key = fingerprint ? ` Key ${fingerprint}.` : " Key fingerprint unavailable.";
+  switch (member.trust) {
+    case "known":
+      return `Known device.${key}`;
+    case "changed":
+      return `Warning: this device key changed.${key}`;
+    case "new":
+      return `First-seen device.${key}`;
+    case "relayed":
+      return `Identity is asserted by the relay host, not verified directly.${key}`;
+    case "self":
+      return `This is your device.${key}`;
+    default:
+      return `Device identity is unavailable.${key}`;
+  }
+}
+
+export function ConsentDialog({
+  session,
+  member,
+}: {
+  session: DeskStateEvent;
+  member?: RelayMember;
+}) {
+  const [answering, setAnswering] = useState<DeskMode | "deny" | null>(null);
+  const [error, setError] = useState("");
+  const answer = (accept: boolean, mode: DeskMode) => {
+    if (answering) return;
+    setAnswering(accept ? mode : "deny");
+    setError("");
+    void ipc.deskRespond(session.session, accept, mode).catch((reason) => {
+      setAnswering(null);
+      setError(String(reason));
+    });
+  };
   const viewOnly = session.requested === "view-only";
   return (
     <Dialog
       variant="accent"
       title={`${session.peer_name} wants to see your screen`}
-      body={`${viewOnly ? "They asked to view only. " : ""}Nothing is shared until you choose. You can stop the session at any time from the banner at the top of the window. Names are chosen by each person, so only accept from someone you expect.`}
+      body={
+        <>
+          <span>
+            {viewOnly ? "They asked to view only. " : ""}Nothing is shared until you choose.
+            You can stop the session at any time from the banner at the top of the window.
+          </span>
+          <span className={`desk-trust ${member?.trust === "changed" ? "changed" : ""}`}>
+            {trustEvidence(member)} Names are chosen by each person, so only accept from someone
+            you expect.
+          </span>
+          {error && <span role="alert" className="desk-inline-error">{error}</span>}
+        </>
+      }
       meta={viewOnly ? "They will not be able to move your mouse or type." : "Control lets them move your mouse and type on this computer."}
-      dismissLabel="Deny"
+      dismissLabel={answering === "deny" ? "Denying…" : "Deny"}
       onDismiss={() => answer(false, "view-only")}
       actions={[
-        { label: "Accept view-only", primary: true, onClick: () => answer(true, "view-only") },
+        {
+          label: answering === "view-only" ? "Accepting…" : "Accept view-only",
+          primary: true,
+          disabled: answering !== null,
+          onClick: () => answer(true, "view-only"),
+        },
         ...(viewOnly
           ? []
-          : [{ label: "Accept control", onClick: () => answer(true, "control") }]),
+          : [{
+              label: answering === "control" ? "Accepting…" : "Accept control",
+              disabled: answering !== null,
+              onClick: () => answer(true, "control"),
+            }]),
       ]}
     />
   );
@@ -60,9 +126,9 @@ export function ControlledBanner({ session }: { session: DeskStateEvent }) {
   return (
     <div className="desk-banner" role="alert">
       <span>{bannerText(session)}</span>
-      <button type="button" onClick={() => void ipc.deskEnd(session.session).catch(() => {})}>
+      <Button size="sm" variant="danger" onClick={() => void ipc.deskEnd(session.session).catch(() => {})}>
         Stop
-      </button>
+      </Button>
     </div>
   );
 }
@@ -78,6 +144,8 @@ export function RemoteDesktopView({
 }) {
   const canvas = useRef<HTMLCanvasElement>(null);
   const size = useRef({ w: 0, h: 0 });
+  const paintedSeq = useRef(-1);
+  const focusedSession = useRef<string | null>(null);
   const moveGate = useRef(createThrottle(MOVE_GAP_MS));
   const sessionRef = useRef(view.session);
   sessionRef.current = view.session;
@@ -85,11 +153,25 @@ export function RemoteDesktopView({
   const control = canSendInput(view);
   const live = view.state !== "ended";
 
+  useEffect(() => {
+    paintedSeq.current = -1;
+    size.current = { w: 0, h: 0 };
+    if (canvas.current) {
+      canvas.current.width = 0;
+      canvas.current.height = 0;
+    }
+  }, [view.session]);
+
   useEffect(
     () =>
       frames.subscribe((f) => {
-        if (f.session !== sessionRef.current) return;
-        size.current = { w: f.w, h: f.h };
+        if (
+          f.session !== sessionRef.current ||
+          f.w <= 0 ||
+          f.h <= 0 ||
+          f.w > MAX_FRAME_DIMENSION ||
+          f.h > MAX_FRAME_DIMENSION
+        ) return;
         const el = canvas.current;
         if (!el || typeof createImageBitmap !== "function") return;
         void (async () => {
@@ -97,22 +179,60 @@ export function RemoteDesktopView({
             const bin = atob(f.jpeg_b64);
             const bytes = Uint8Array.from(bin, (c) => c.charCodeAt(0));
             const bmp = await createImageBitmap(new Blob([bytes], { type: "image/jpeg" }));
-            // Trust the decoded size, not the peer's header, and bound it.
-            if (bmp.width > 4096 || bmp.height > 4096 || bmp.width !== f.w || bmp.height !== f.h) {
+            const valid =
+              bmp.width > 0 &&
+              bmp.height > 0 &&
+              bmp.width <= MAX_FRAME_DIMENSION &&
+              bmp.height <= MAX_FRAME_DIMENSION &&
+              bmp.width === f.w &&
+              bmp.height === f.h;
+            if (
+              !valid ||
+              f.session !== sessionRef.current ||
+              f.seq <= paintedSeq.current
+            ) {
+              bmp.close();
+              return;
+            }
+            const context = el.getContext("2d");
+            if (!context) {
               bmp.close();
               return;
             }
             if (el.width !== f.w) el.width = f.w;
             if (el.height !== f.h) el.height = f.h;
-            el.getContext("2d")?.drawImage(bmp, 0, 0);
+            context.drawImage(bmp, 0, 0);
+            size.current = { w: f.w, h: f.h };
+            paintedSeq.current = f.seq;
             bmp.close();
           } catch {
-            /* a corrupt frame is dropped; the next one repaints */
+            /* A corrupt frame is dropped; the next valid frame repaints. */
           }
         })();
       }),
     [frames],
   );
+
+  useEffect(() => {
+    if (!control || focusedSession.current === view.session) return;
+    focusedSession.current = view.session;
+    canvas.current?.focus({ preventScroll: true });
+  }, [control, view.session]);
+
+  // React delegates wheel events through a passive root listener. A native,
+  // non-passive target listener is required to stop the workbench from
+  // scrolling while the pointer is over the remote screen.
+  useEffect(() => {
+    const element = canvas.current;
+    if (!element) return;
+    const blockDefault = (event: Event) => event.preventDefault();
+    element.addEventListener("wheel", blockDefault, { passive: false });
+    element.addEventListener("contextmenu", blockDefault);
+    return () => {
+      element.removeEventListener("wheel", blockDefault);
+      element.removeEventListener("contextmenu", blockDefault);
+    };
+  }, []);
 
   const norm = useCallback((clientX: number, clientY: number) => {
     const el = canvas.current;
@@ -124,7 +244,11 @@ export function RemoteDesktopView({
   const releaseHeld = () => {
     for (const k of held.current) {
       if (k.startsWith("b:")) {
-        send(sessionRef.current, { kind: "mouse-button", button: k.slice(2) as Extract<InputEvent, { kind: "mouse-button" }>["button"], down: false });
+        send(sessionRef.current, {
+          kind: "mouse-button",
+          button: k.slice(2) as Extract<InputEvent, { kind: "mouse-button" }>["button"],
+          down: false,
+        });
       } else {
         send(sessionRef.current, { kind: "key", code: k.slice(2), down: false });
       }
@@ -150,16 +274,16 @@ export function RemoteDesktopView({
         <span className={`desk-badge ${control ? "control" : "view"}`}>
           {control ? "Control" : "View only"}
         </span>
-        <span className="desk-status">{viewerStatus(view)}</span>
+        <span className="desk-status" role="status" aria-live="polite">
+          {viewerStatus(view)}
+        </span>
         <span className="desk-spacer" />
         {live ? (
-          <button type="button" onClick={() => void ipc.deskEnd(view.session).catch(() => {})}>
+          <Button size="sm" variant="danger" onClick={() => void ipc.deskEnd(view.session).catch(() => {})}>
             End
-          </button>
+          </Button>
         ) : (
-          <button type="button" onClick={onClose}>
-            Close
-          </button>
+          <Button size="sm" onClick={onClose}>Close</Button>
         )}
       </div>
       <canvas
@@ -168,38 +292,43 @@ export function RemoteDesktopView({
         tabIndex={0}
         aria-label="Remote screen"
         onBlur={releaseHeld}
-        onContextMenu={(e) => control && e.preventDefault()}
-        onMouseMove={(e) => {
+        onContextMenu={(event) => {
+          event.preventDefault();
+          event.stopPropagation();
+        }}
+        onMouseMove={(event) => {
           if (!control || !moveGate.current(performance.now())) return;
-          const p = norm(e.clientX, e.clientY);
+          const p = norm(event.clientX, event.clientY);
           if (p) emit({ kind: "mouse-move", ...p });
         }}
-        onMouseDown={(e) => {
-          const b = mouseButton(e.button);
-          const p = norm(e.clientX, e.clientY);
-          if (!control || !b || !p) return;
-          e.currentTarget.focus();
+        onMouseDown={(event) => {
+          const button = mouseButton(event.button);
+          const p = norm(event.clientX, event.clientY);
+          if (!control || !button || !p) return;
+          event.currentTarget.focus();
           emit({ kind: "mouse-move", ...p });
-          emit({ kind: "mouse-button", button: b, down: true });
+          emit({ kind: "mouse-button", button, down: true });
         }}
-        onMouseUp={(e) => {
-          const b = mouseButton(e.button);
-          if (control && b) emit({ kind: "mouse-button", button: b, down: false });
+        onMouseUp={(event) => {
+          const button = mouseButton(event.button);
+          if (control && button) emit({ kind: "mouse-button", button, down: false });
         }}
-        onWheel={(e) => {
+        onWheel={(event) => {
+          event.preventDefault();
+          event.stopPropagation();
           if (!control) return;
-          emit({ kind: "scroll", dx: clampScroll(e.deltaX), dy: clampScroll(e.deltaY) });
+          emit({ kind: "scroll", dx: clampScroll(event.deltaX), dy: clampScroll(event.deltaY) });
         }}
-        onKeyDown={(e) => {
-          const code = mapKeyCode(e.code);
+        onKeyDown={(event) => {
+          const code = mapKeyCode(event.code);
           if (!control || !code) return;
-          e.preventDefault();
+          event.preventDefault();
           emit({ kind: "key", code, down: true });
         }}
-        onKeyUp={(e) => {
-          const code = mapKeyCode(e.code);
+        onKeyUp={(event) => {
+          const code = mapKeyCode(event.code);
           if (!control || !code) return;
-          e.preventDefault();
+          event.preventDefault();
           emit({ kind: "key", code, down: false });
         }}
       />
@@ -211,15 +340,20 @@ export function RemoteDesktopView({
 export function DeskOverlay({
   desk,
   frames,
+  relay,
   onDismiss,
 }: {
   desk: DeskView;
   frames: FrameBus;
+  relay?: RelayHandle;
   onDismiss: () => void;
 }) {
   const [hidden, setHidden] = useState<string | null>(null);
   if (!desk) return null;
-  if (needsConsent(desk)) return <ConsentDialog session={desk} />;
+  if (needsConsent(desk)) {
+    const member = relay?.status.members.find((candidate) => candidate.id === desk.peer);
+    return <ConsentDialog session={desk} member={member} />;
+  }
   if (isBeingViewed(desk)) return <ControlledBanner session={desk} />;
   if (desk.role === "viewer" && hidden !== desk.session) {
     return (
@@ -236,8 +370,8 @@ export function DeskOverlay({
   return null;
 }
 
-/** Team panel section: one "Remote desktop" action per connected teammate.
- *  Never offered for yourself, and not while a session is already running. */
+/** Team panel section: separate view and control requests for each connected
+ * teammate. Never offered for yourself, and not while a session is running. */
 export function RemoteDesktopMembers({
   relay,
   onNotice,
@@ -245,33 +379,66 @@ export function RemoteDesktopMembers({
   relay: RelayHandle;
   onNotice?: Notify;
 }) {
+  const [pending, setPending] = useState<{ peer: string; mode: DeskMode } | null>(null);
+  const [error, setError] = useState<{ peer: string; message: string } | null>(null);
   const { self_id: selfId, role, members } = relay.status;
   if (role === "off") return null;
-  const others = members.filter((m) => m.id !== selfId);
+  const others = members.filter((member) => member.id !== selfId);
   if (others.length === 0) return null;
   const busy = !!relay.desk && relay.desk.state !== "ended";
+
+  const request = (peer: string, mode: DeskMode) => {
+    if (pending || busy) return;
+    setPending({ peer, mode });
+    setError(null);
+    void relay.deskRequest(peer, mode).catch((reason) => {
+      const message = String(reason);
+      setError({ peer, message });
+      onNotice?.(message, "error");
+    }).finally(() => setPending(null));
+  };
+
   return (
     <section className="desk-members" aria-label="Remote desktop">
       <h3 className="team-hub-section">Remote desktop</h3>
-      {others.map((m) => (
-        <div key={m.id} className="team-row">
-          <span className="team-row-text">
-            <strong>{m.name}</strong>
-          </span>
-          <button
-            type="button"
-            className="btn"
-            disabled={busy}
-            title={`Ask ${m.name} to share their screen. They must accept.`}
-            aria-label={`Remote desktop with ${m.name}`}
-            onClick={() =>
-              relay.deskRequest(m.id, "control").catch((err) => onNotice?.(String(err), "error"))
-            }
-          >
-            Remote desktop
-          </button>
-        </div>
-      ))}
+      {others.map((member) => {
+        const requestingView = pending?.peer === member.id && pending.mode === "view-only";
+        const requestingControl = pending?.peer === member.id && pending.mode === "control";
+        return (
+          <div key={member.id} className="team-row desk-member-row">
+            <span className="team-row-text">
+              <strong>{member.name}</strong>
+              {error?.peer === member.id && <span role="alert" className="desk-inline-error">{error.message}</span>}
+              {pending?.peer === member.id && (
+                <span role="status" aria-live="polite" className="desk-request-status">
+                  Requesting {pending.mode === "control" ? "control" : "view only"}…
+                </span>
+              )}
+            </span>
+            <span className="desk-member-actions">
+              <Button
+                size="sm"
+                disabled={busy || pending !== null}
+                title={`Ask ${member.name} to share their screen for viewing. They must accept.`}
+                aria-label={`View ${member.name}'s desktop`}
+                onClick={() => request(member.id, "view-only")}
+              >
+                {requestingView ? "Requesting…" : "View"}
+              </Button>
+              <Button
+                size="sm"
+                variant="accent"
+                disabled={busy || pending !== null}
+                title={`Ask ${member.name} to share control. They must accept.`}
+                aria-label={`Control ${member.name}'s desktop`}
+                onClick={() => request(member.id, "control")}
+              >
+                {requestingControl ? "Requesting…" : "Control"}
+              </Button>
+            </span>
+          </div>
+        );
+      })}
     </section>
   );
 }

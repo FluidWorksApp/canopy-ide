@@ -4728,7 +4728,7 @@ export const deskSendInput = (
 export const deskEnd = (session: string) =>
   invoke<void>("desk_end", { session });
 export const deskStatus = () =>
-  invoke<import("./desk").DeskStateEvent | null>("desk_status");
+  invoke<import("./desk").DeskStatus | null>("desk_status");
 export const onRelayDesk = (
   cb: (m: import("./desk").DeskMsg) => void,
 ): Promise<UnlistenFn> =>

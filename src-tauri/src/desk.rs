@@ -16,7 +16,7 @@
 use crate::relay::{DeskMsg, RelayManager};
 use canopy_core::desk::{
     capture_loop, Action, DeskBody, DeskError, DeskHub, FrameEncoder, InputEvent, InputSink,
-    LoopExit, Mode, Phase, Rgba, ScreenSource, SessionInfo,
+    LoopExit, Mode, Phase, Rgba, ScreenSource, SessionInfo, REQUEST_TTL_MS,
 };
 use serde::Serialize;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -208,7 +208,13 @@ mod native {
         impl InputSink for Injector {
             fn apply(&mut self, event: &InputEvent) -> Result<(), String> {
                 let e = |r: enigo::InputResult<()>| r.map_err(|e| format!("Input failed: {e}"));
-                let dir = |down: bool| if down { Direction::Press } else { Direction::Release };
+                let dir = |down: bool| {
+                    if down {
+                        Direction::Press
+                    } else {
+                        Direction::Release
+                    }
+                };
                 match event {
                     InputEvent::MouseMove { x, y } => {
                         let (w, h) = self.0.main_display().map_err(|e| format!("{e}"))?;
@@ -281,6 +287,12 @@ impl State_ {
             run.alive.store(false, Ordering::SeqCst);
         }
     }
+
+    fn expire_request(&mut self, session: &str, at_ms: u64) -> Option<(SessionInfo, String)> {
+        self.hub
+            .expire_request(session, at_ms)
+            .map(|info| (info, self.peer_name.clone()))
+    }
 }
 
 #[derive(Default)]
@@ -333,6 +345,8 @@ pub struct DeskStatus {
     pub peer_name: String,
     pub state: &'static str,
     pub mode: Option<&'static str>,
+    /// What the viewer asked for, retained across WebView reloads.
+    pub requested: &'static str,
 }
 
 fn mode_str(m: Mode) -> &'static str {
@@ -388,11 +402,52 @@ fn finish(app: &AppHandle, session: &str, reason: &str, notify_peer: bool) {
             &info.peer,
             session,
             DeskBody::End {
-                reason: reason.chars().take(canopy_core::desk::MAX_REASON_CHARS).collect(),
+                reason: reason
+                    .chars()
+                    .take(canopy_core::desk::MAX_REASON_CHARS)
+                    .collect(),
             },
         );
     }
     emit(app, &info, &name, Some(reason.to_string()));
+}
+
+/// Start a one-shot timeout for a pending request. The state-machine check at
+/// wake-up is authoritative, so accepting the request or replacing it makes an
+/// old worker a no-op.
+fn schedule_request_expiry(app: &AppHandle, session: String) {
+    let worker_app = app.clone();
+    let worker_session = session.clone();
+    let spawned = thread::Builder::new()
+        .name("desk-request-expiry".into())
+        .spawn(move || {
+            thread::sleep(Duration::from_millis(REQUEST_TTL_MS));
+            let mgr = worker_app.state::<DeskManager>();
+            let expired = {
+                let mut g = mgr.inner.lock().unwrap();
+                g.expire_request(&worker_session, now_ms())
+            };
+            let Some((info, name)) = expired else {
+                return;
+            };
+            let reason = "Request expired.";
+            let _ = worker_app.state::<RelayManager>().send_desk(
+                &info.peer,
+                &info.session,
+                DeskBody::End {
+                    reason: reason.into(),
+                },
+            );
+            emit(&worker_app, &info, &name, Some(reason.into()));
+        });
+    if let Err(error) = spawned {
+        finish(
+            app,
+            &session,
+            &format!("Couldn't schedule request expiry: {error}"),
+            true,
+        );
+    }
 }
 
 // ---------- relay entry points ----------
@@ -403,6 +458,7 @@ enum Outcome {
     Busy,
     Activated(SessionInfo, String),
     Render,
+    Expired(SessionInfo, String),
     Ended(SessionInfo, String, String),
 }
 
@@ -434,6 +490,10 @@ pub fn on_incoming(app: &AppHandle, msg: DeskMsg) {
                 }
                 Outcome::None
             }
+            Ok(Action::Expired { info }) => {
+                g.stop_run();
+                Outcome::Expired(info, g.peer_name.clone())
+            }
             Ok(Action::Ended { info, reason }) => {
                 g.stop_run();
                 Outcome::Ended(info, g.peer_name.clone(), reason)
@@ -445,9 +505,11 @@ pub fn on_incoming(app: &AppHandle, msg: DeskMsg) {
     };
     match outcome {
         Outcome::None => {}
-        Outcome::Incoming(info, name) | Outcome::Activated(info, name) => {
-            emit(app, &info, &name, None)
+        Outcome::Incoming(info, name) => {
+            emit(app, &info, &name, None);
+            schedule_request_expiry(app, info.session);
         }
+        Outcome::Activated(info, name) => emit(app, &info, &name, None),
         Outcome::Busy => {
             let _ = app.state::<RelayManager>().send_desk(
                 &msg.from,
@@ -459,6 +521,17 @@ pub fn on_incoming(app: &AppHandle, msg: DeskMsg) {
         }
         Outcome::Render => {
             let _ = app.emit("relay:desk", msg);
+        }
+        Outcome::Expired(info, name) => {
+            let reason = "Request expired.";
+            let _ = app.state::<RelayManager>().send_desk(
+                &info.peer,
+                &info.session,
+                DeskBody::End {
+                    reason: reason.into(),
+                },
+            );
+            emit(app, &info, &name, Some(reason.into()));
         }
         Outcome::Ended(info, name, reason) => emit(app, &info, &name, Some(reason)),
     }
@@ -514,6 +587,7 @@ pub async fn desk_request(
         return Err(e);
     }
     emit(&app, &info, &name, None);
+    schedule_request_expiry(&app, session.clone());
     Ok(session)
 }
 
@@ -529,22 +603,49 @@ pub async fn desk_respond(
     mode: Mode,
 ) -> Result<(), String> {
     // Refuse up front, and tell the viewer why, when this build cannot share.
-    let unavailable = if accept { native::unavailable_reason() } else { None };
+    let unavailable = if accept {
+        native::unavailable_reason()
+    } else {
+        None
+    };
     let accept = accept && unavailable.is_none();
     let reason = unavailable.unwrap_or("Declined.");
+    let response_ms = now_ms();
 
-    let (body, info, peer, name, alive, rx) = {
+    // Expiry and response compete under the same manager lock. If the command
+    // reaches the exact boundary first, it still emits the same ended event
+    // and peer notification as the timeout worker.
+    let expired = {
         let mut g = desk.inner.lock().unwrap();
-        // Read the peer first: a denial clears the session from the hub.
-        let peer = g
+        g.expire_request(&session, response_ms)
+    };
+    if let Some((info, name)) = expired {
+        let expiry_reason = "Request expired.";
+        let _ = relay.send_desk(
+            &info.peer,
+            &info.session,
+            DeskBody::End {
+                reason: expiry_reason.into(),
+            },
+        );
+        emit(&app, &info, &name, Some(expiry_reason.into()));
+        return Err(DeskError::Expired.to_string());
+    }
+
+    let (body, info, peer, requested, name, alive, rx) = {
+        let mut g = desk.inner.lock().unwrap();
+        // Read the peer and requested mode first: a denial clears the session
+        // from the hub.
+        let current = g
             .hub
             .current()
             .filter(|i| i.session == session)
-            .map(|i| i.peer)
             .ok_or_else(|| DeskError::UnknownSession.to_string())?;
+        let peer = current.peer;
+        let requested = current.requested;
         let body = g
             .hub
-            .respond(&session, accept, mode, now_ms(), reason)
+            .respond(&session, accept, mode, response_ms, reason)
             .map_err(|e| e.to_string())?;
         let name = g.peer_name.clone();
         let info = g.hub.current();
@@ -565,7 +666,7 @@ pub async fn desk_respond(
             });
             alive = Some(flag);
         }
-        (body, info, peer, name, alive, rx)
+        (body, info, peer, requested, name, alive, rx)
     };
 
     let sent = relay.send_desk(&peer, &session, body.clone());
@@ -592,7 +693,7 @@ pub async fn desk_respond(
                 peer,
                 role: canopy_core::desk::Role::Target,
                 phase: Phase::Ended,
-                requested: Mode::ViewOnly,
+                requested,
             };
             emit(&app, &ended, &name, Some(reason.to_string()));
             match unavailable {
@@ -658,6 +759,7 @@ pub async fn desk_status(desk: State<'_, DeskManager>) -> Result<Option<DeskStat
             peer_name: g.peer_name.clone(),
             state,
             mode,
+            requested: mode_str(info.requested),
         }
     }))
 }
@@ -667,44 +769,50 @@ pub async fn desk_status(desk: State<'_, DeskManager>) -> Result<Option<DeskStat
 /// Target capture thread. Only ever spawned from an accepted `desk_respond`.
 fn spawn_capture(app: &AppHandle, session: String, peer: String, alive: Arc<AtomicBool>) {
     let app = app.clone();
-    let spawned = thread::Builder::new()
-        .name("desk-capture".into())
-        .spawn({
-            let app = app.clone();
-            let session = session.clone();
-            move || {
-                let mut src = match native::new_source() {
-                    Ok(s) => s,
-                    Err(e) => return finish(&app, &session, &e, true),
-                };
-                let mut enc = native::Jpeg;
-                let relay = app.state::<RelayManager>();
-                let exit = capture_loop(
-                    &mut *src,
-                    &mut enc,
-                    &alive,
-                    &mut |body| relay.send_desk(&peer, &session, body).is_ok(),
-                    &mut |total| {
-                        // Sleep in slices so a revoke is felt within 50 ms.
-                        let mut left = total;
-                        while left > Duration::ZERO && alive.load(Ordering::SeqCst) {
-                            let step = left.min(Duration::from_millis(50));
-                            thread::sleep(step);
-                            left -= step;
-                        }
-                    },
-                );
-                match exit {
-                    LoopExit::Stopped => {}
-                    LoopExit::PeerGone => {
-                        finish(&app, &session, "Lost the connection to the other side.", false)
+    let spawned = thread::Builder::new().name("desk-capture".into()).spawn({
+        let app = app.clone();
+        let session = session.clone();
+        move || {
+            let mut src = match native::new_source() {
+                Ok(s) => s,
+                Err(e) => return finish(&app, &session, &e, true),
+            };
+            let mut enc = native::Jpeg;
+            let relay = app.state::<RelayManager>();
+            let exit = capture_loop(
+                &mut *src,
+                &mut enc,
+                &alive,
+                &mut |body| relay.send_desk(&peer, &session, body).is_ok(),
+                &mut |total| {
+                    // Sleep in slices so a revoke is felt within 50 ms.
+                    let mut left = total;
+                    while left > Duration::ZERO && alive.load(Ordering::SeqCst) {
+                        let step = left.min(Duration::from_millis(50));
+                        thread::sleep(step);
+                        left -= step;
                     }
-                    LoopExit::Failed(e) => finish(&app, &session, &e, true),
-                }
+                },
+            );
+            match exit {
+                LoopExit::Stopped => {}
+                LoopExit::PeerGone => finish(
+                    &app,
+                    &session,
+                    "Lost the connection to the other side.",
+                    false,
+                ),
+                LoopExit::Failed(e) => finish(&app, &session, &e, true),
             }
-        });
+        }
+    });
     if let Err(e) = spawned {
-        finish(&app, &session, &format!("Couldn't start screen sharing: {e}"), true);
+        finish(
+            &app,
+            &session,
+            &format!("Couldn't start screen sharing: {e}"),
+            true,
+        );
     }
 }
 
@@ -753,7 +861,12 @@ fn spawn_input(
         }
     });
     if let Err(e) = spawned {
-        finish(&app, &session, &format!("Couldn't start input control: {e}"), true);
+        finish(
+            &app,
+            &session,
+            &format!("Couldn't start input control: {e}"),
+            true,
+        );
     }
 }
 
@@ -829,12 +942,90 @@ mod tests {
         assert_eq!(v["peer_name"], "Sam");
     }
 
+    #[test]
+    fn desk_status_shape_retains_requested_mode() {
+        let info = SessionInfo {
+            session: "s1".into(),
+            peer: "p".into(),
+            role: canopy_core::desk::Role::Target,
+            phase: Phase::Requested,
+            requested: Mode::ViewOnly,
+        };
+        let (state, role, mode) = parts(&info);
+        let status = DeskStatus {
+            session: info.session,
+            role,
+            peer: info.peer,
+            peer_name: "Sam".into(),
+            state,
+            mode,
+            requested: mode_str(info.requested),
+        };
+        let v = serde_json::to_value(status).unwrap();
+        assert_eq!(v["state"], "requested");
+        assert_eq!(v["mode"], serde_json::Value::Null);
+        assert_eq!(v["requested"], "view-only");
+    }
+
+    #[test]
+    fn desk_manager_stale_timeout_preserves_active_and_replacement_sessions() {
+        let mut state = State_::default();
+        state
+            .hub
+            .handle(
+                "viewer",
+                "old",
+                &DeskBody::Request {
+                    mode: Mode::Control,
+                },
+                0,
+            )
+            .unwrap();
+        state
+            .hub
+            .respond("old", true, Mode::Control, 1, "")
+            .unwrap();
+        assert!(state.expire_request("old", REQUEST_TTL_MS).is_none());
+        assert_eq!(
+            state.hub.current().unwrap().phase,
+            Phase::Active(Mode::Control)
+        );
+
+        state.hub.end_local("old").unwrap();
+        state
+            .hub
+            .handle(
+                "viewer",
+                "new",
+                &DeskBody::Request {
+                    mode: Mode::ViewOnly,
+                },
+                REQUEST_TTL_MS,
+            )
+            .unwrap();
+        assert!(state
+            .expire_request("old", REQUEST_TTL_MS.saturating_mul(2))
+            .is_none());
+        assert_eq!(state.hub.current().unwrap().session, "new");
+        let (ended, _) = state
+            .expire_request("new", REQUEST_TTL_MS.saturating_mul(2))
+            .expect("replacement expires at its own exact boundary");
+        assert_eq!(ended.session, "new");
+    }
+
     /// The view-only guarantee end to end: the sink never sees an event.
     #[test]
     fn desk_view_only_session_never_reaches_the_sink() {
         let mut hub = DeskHub::new();
-        hub.handle("v", "s1", &DeskBody::Request { mode: Mode::Control }, 0)
-            .unwrap();
+        hub.handle(
+            "v",
+            "s1",
+            &DeskBody::Request {
+                mode: Mode::Control,
+            },
+            0,
+        )
+        .unwrap();
         hub.respond("s1", true, Mode::ViewOnly, 1, "").unwrap();
         let mut sink = RecordingSink::default();
         let body = DeskBody::Input {

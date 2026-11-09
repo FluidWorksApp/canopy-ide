@@ -23,6 +23,7 @@ const ev = (o: Partial<DeskStateEvent> = {}): DeskStateEvent => ({
   peer: "ada",
   peer_name: "Ada",
   mode: null,
+  requested: "control",
   ...o,
 });
 
@@ -134,7 +135,7 @@ describe("frame bus", () => {
     bus.publish({ ...base, body: { kind: "ping" } });
     expect(cb).not.toHaveBeenCalled();
     bus.publish({ ...base, body: { kind: "frame", seq: 1, w: 2, h: 3, jpeg_b64: "QQ==" } });
-    expect(cb).toHaveBeenCalledWith({ session: "s1", w: 2, h: 3, jpeg_b64: "QQ==" });
+    expect(cb).toHaveBeenCalledWith({ session: "s1", seq: 1, w: 2, h: 3, jpeg_b64: "QQ==" });
     off();
     bus.publish({ ...base, body: { kind: "frame", seq: 2, w: 2, h: 3, jpeg_b64: "QQ==" } });
     expect(cb).toHaveBeenCalledTimes(1);

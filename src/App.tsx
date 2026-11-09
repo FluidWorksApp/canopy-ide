@@ -811,6 +811,8 @@ export default function App() {
   // subscription feeds it. Frames go to a bus, not state.
   const [desk, dispatchDesk] = useReducer(deskReducer, null);
   const deskFrames = useMemo(() => createFrameBus(), []);
+  const deskAttentionQuestions = useRef(new Map<string, string>());
+  const deskAttentionAnnouncements = useRef(new Set<string>());
   // The relay we're persisting chat under = the host's stable identity key.
   // Null when off, so the persist effect never writes an empty transcript.
   const relayChatLabel = useRef<string | null>(null);
@@ -1299,10 +1301,13 @@ export default function App() {
       }),
       ipc.onDeskState((event) => {
         dispatchDesk({ type: "state", event });
-        // The consent dialog is the real prompt; this puts the request in
-        // Notifications too if the window is not in front.
-        if (event.role === "target" && event.state === "requested") {
-          postAttention({
+        if (event.role !== "target") return;
+
+        // The consent dialog is the real prompt. Notifications preserve both
+        // the pending decision and the later active grant if the window is not
+        // in front.
+        if (event.state === "requested") {
+          const id = postAttention({
             kind: "question",
             tone: "warn",
             title: `${event.peer_name} wants to see your screen`,
@@ -1310,6 +1315,41 @@ export default function App() {
             source: "team",
             where: { kind: "panel", panel: "team" },
             dedupeKey: `desk:${event.session}`,
+          });
+          deskAttentionQuestions.current.set(event.session, id);
+          return;
+        }
+
+        const question = deskAttentionQuestions.current.get(event.session);
+        if (question) {
+          resolveAttention(question, event.state === "active" ? "answered" : "dismissed");
+          deskAttentionQuestions.current.delete(event.session);
+        }
+        const key = `${event.session}:${event.state}`;
+        if (deskAttentionAnnouncements.current.has(key)) return;
+        deskAttentionAnnouncements.current.add(key);
+
+        if (event.state === "active") {
+          const controlling = event.mode === "control";
+          postAttention({
+            kind: "fyi",
+            tone: controlling ? "warn" : "info",
+            title: `${event.peer_name} is now ${controlling ? "controlling" : "viewing"} your screen`,
+            body: "Use Stop in the persistent banner to end access immediately.",
+            source: "team",
+            where: { kind: "panel", panel: "team" },
+            dedupeKey: `desk-active:${event.session}`,
+          });
+        } else {
+          const expired = /expir/i.test(event.reason ?? "");
+          postAttention({
+            kind: "fyi",
+            tone: "info",
+            title: expired ? "Remote desktop request expired" : "Remote desktop access ended",
+            body: event.reason || `${event.peer_name} no longer has access.`,
+            source: "team",
+            where: { kind: "panel", panel: "team" },
+            dedupeKey: `desk-ended:${event.session}`,
           });
         }
       }),
@@ -4015,6 +4055,7 @@ export default function App() {
       <DeskOverlay
         desk={desk}
         frames={deskFrames}
+        relay={relay}
         onDismiss={() => dispatchDesk({ type: "dismiss" })}
       />
       {/* Transient zoom level, shown ~1s after Cmd +/-/0. */}

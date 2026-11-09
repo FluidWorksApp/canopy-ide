@@ -7,14 +7,19 @@ nothing is shared until the person at that computer says yes.
 ## How to use it
 
 1. Both of you join the same team relay (host or connect from the Team panel).
-2. In the Team panel, open **Remote desktop** and press the button next to a
-   teammate.
-3. They see a dialog: **Accept view-only**, **Accept control** or **Deny**.
-   Closing the dialog or pressing Esc denies.
+2. In the Team panel, open **Remote desktop** and choose **View** or
+   **Control** next to a teammate. The row shows while the request is being sent
+   and reports a delivery error without creating a duplicate request.
+3. They see a dialog with the requested access, the available device trust
+   verdict and a short key fingerprint: **Accept view-only**, **Accept control**
+   when control was requested, or **Deny**. Closing the dialog or pressing Esc
+   denies. Relay-hosted identity metadata is labeled as host-asserted, and names
+   remain self-chosen.
 4. While the session is live, they see a red banner across the top of the window
    ("Ada is viewing your screen" or "Ada is controlling your screen") with a
    **Stop** button. You see the remote screen with a View only or Control badge
-   and an **End** button.
+   and an **End** button. Notifications record the request, the active grant and
+   its end.
 
 The grant is clamped to what was asked: a view-only request can never become
 control.
@@ -63,6 +68,10 @@ teammate with a problem, not for replacing a remote workstation.
 - The banner is persistent and cannot be dismissed, only stopped. Stopping,
   denying, either side pressing End, the peer leaving the relay, the relay
   stopping, or app exit all end the session and the capture thread.
+- An unanswered request expires after 60 seconds on both viewer and target.
+  Each side emits an ended state and tries to notify the peer. A timeout checks
+  the exact session and requested phase, so it cannot end an accepted or newer
+  session. A request is expired at the exact 60-second boundary.
 - No clipboard sync, no file access, no audio. Text input is capped and refused
   if it contains control characters.
 - The request also appears in Notifications so it is not missed if the window is
@@ -74,14 +83,14 @@ teammate with a problem, not for replacing a remote workstation.
 | --- | --- |
 | A relay member spoofs another as viewer | The host re-stamps `from` from the authenticated link. Members cannot choose it. |
 | A member broadcasts frames or input to others | `Frame::Desk` requires a single `to` and is never fanned out. |
-| Flooding the target with input | Per-link rate limit at the relay and a per-session input limiter in the core. The relay limiter counts messages, not bytes. |
+| Flooding the target with frames or input | Each authenticated member has two independent Desk relay token buckets: 24 messages burst with 16 messages/s refill, plus 4 MiB serialized burst with 13 MiB/s refill. The normal 1600px, about 8 fps stream fits these bounds. Input also has a per-session limiter in the core. Other relay traffic does not consume the Desk budget. |
 | Oversized or malformed frames | Validated before fan-out: frame cap 1.5 MiB base64, dimension cap, text cap, strict key allow list, normalized coordinates must be in 0..1. Unknown message kinds fail to parse and are dropped. |
 | Replayed or stale frames | Frame `seq` must strictly increase. |
 | Remote user types dangerous shortcuts | Keys outside the allow list are refused. Control is something the local user grants knowingly, and they can stop it instantly. |
-| Forgotten session | Sessions end on disconnect, relay stop and app exit. A pending request older than 60 seconds is dropped lazily, the next time a request or answer arrives, and can no longer be accepted. It frees the session slot then, not on a timer. |
+| Forgotten session | Pending requests actively expire after 60 seconds on viewer and target. Sessions also end on disconnect, relay stop and app exit. |
 | Sniffing by other members or the network | Each link is SPAKE2 plus ChaCha20-Poly1305. |
 | The relay host | Encryption is per link, not end to end. The host decrypts and re-seals every message, so it can see the screen and can forge the sender. Only share with teams whose host you trust. |
-| Name lookalikes | Names are self-chosen. The consent dialog reminds you to accept only from someone you expect. |
+| Name lookalikes or changed devices | Names are self-chosen. The consent dialog shows the available trust verdict and a short Ed25519 key fingerprint. A changed key is a warning. A relayed identity is explicitly host-asserted, not directly verified. |
 | Stuck keys | Keys and buttons held on the target are released when a session ends, and the viewer releases them on blur. |
 
 Not covered: a teammate you accept control for can do anything you can do at the
@@ -100,13 +109,15 @@ keyboard. Only grant control to people you trust, and prefer view-only.
   enable it (Windows and macOS capture, input injection via enigo).
 - Primary display only, downscaled to at most 1600 px wide, about 8 fps and
   slower when sends back up.
-- A request to an unknown or departed peer is silently dropped by the host. The
-  viewer has no timer and stays in "Requested" until you press End.
+- Pending requests end automatically after 60 seconds even if the target address
+  became stale and the host silently dropped the original request.
 - There is no OS-level indicator of live control. The red banner lives inside the
-  Canopy window, so if the window is minimized or hidden the only signal is the
-  Notifications entry for the request.
-- Windows and macOS capture paths were compiled and exercised only through fakes
-  in CI-less development. Test them on real machines before relying on them.
+  Canopy window. Notifications record both the request and the active grant, but
+  a minimized or hidden window cannot provide an always-visible system signal.
+- CI compiles the application library with `desk-native` on Windows and macOS.
+  This catches platform-specific xcap/enigo compile failures only. Native
+  capture, permission prompts, frame delivery and input injection still require
+  tests on physical machines before relying on them.
 
 ## OS permissions
 

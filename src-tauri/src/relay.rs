@@ -203,6 +203,89 @@ pub struct DeskMsg {
     pub ts: u64,
 }
 
+/// Per authenticated relay member. The message budget rejects CPU/queue floods;
+/// the serialized-byte budget caps sustained screen traffic while permitting a
+/// 1600px stream at about 8 fps. Four MiB of burst absorbs frame-size variance,
+/// then the bucket refills at 13 MiB/s. Non-Desk frames never touch this budget.
+const DESK_MESSAGE_BURST: u64 = 24;
+const DESK_MESSAGES_PER_SEC: u64 = 16;
+const DESK_BYTE_BURST: u64 = 4 * 1024 * 1024;
+const DESK_BYTES_PER_SEC: u64 = 13 * 1024 * 1024;
+
+#[derive(Clone, Debug)]
+struct WeightedRateLimiter {
+    capacity: f64,
+    per_sec: f64,
+    tokens: f64,
+    last_ms: Option<u64>,
+}
+
+impl WeightedRateLimiter {
+    fn new(capacity: u64, per_sec: u64) -> Self {
+        Self {
+            capacity: capacity as f64,
+            per_sec: per_sec as f64,
+            tokens: capacity as f64,
+            last_ms: None,
+        }
+    }
+
+    fn allow(&mut self, cost: usize, now_ms: u64) -> bool {
+        if let Some(last) = self.last_ms {
+            let elapsed = now_ms.saturating_sub(last) as f64 / 1000.0;
+            self.tokens = (self.tokens + elapsed * self.per_sec).min(self.capacity);
+        }
+        self.last_ms = Some(now_ms);
+        let cost = cost as f64;
+        if cost > self.tokens {
+            return false;
+        }
+        self.tokens -= cost;
+        true
+    }
+}
+
+#[derive(Debug)]
+struct DeskRelayBudget {
+    messages: WeightedRateLimiter,
+    bytes: WeightedRateLimiter,
+}
+
+impl DeskRelayBudget {
+    fn new() -> Self {
+        Self {
+            messages: WeightedRateLimiter::new(DESK_MESSAGE_BURST, DESK_MESSAGES_PER_SEC),
+            bytes: WeightedRateLimiter::new(DESK_BYTE_BURST, DESK_BYTES_PER_SEC),
+        }
+    }
+
+    fn allow(&mut self, serialized_bytes: usize, now_ms: u64) -> bool {
+        // Commit both charges together. A rejection from either budget leaves
+        // the other untouched, so one kind of flood cannot delay recovery of
+        // the independent bound.
+        let mut bytes = self.bytes.clone();
+        let mut messages = self.messages.clone();
+        if !bytes.allow(serialized_bytes, now_ms) || !messages.allow(1, now_ms) {
+            return false;
+        }
+        self.bytes = bytes;
+        self.messages = messages;
+        true
+    }
+}
+
+fn allow_relay_frame(
+    budget: &mut DeskRelayBudget,
+    frame: &Frame,
+    serialized_bytes: usize,
+    now_ms: u64,
+) -> bool {
+    match frame {
+        Frame::Desk(_) => budget.allow(serialized_bytes, now_ms),
+        _ => true,
+    }
+}
+
 #[derive(Serialize, Deserialize, Clone)]
 #[serde(tag = "type", rename_all = "kebab-case")]
 enum Frame {
@@ -1475,12 +1558,16 @@ fn serve_peer(
     // Joined: reads now block until the peer speaks or disconnects.
     on_joined();
     // Bounds how much remote-desktop traffic one member can push through us.
-    let mut desk_limit = canopy_core::desk::RateLimiter::new(300, 500);
+    let mut desk_limit = DeskRelayBudget::new();
     loop {
         let Some(bytes) = receiver.recv() else { break };
+        let serialized_len = bytes.len();
         let Ok(frame) = serde_json::from_slice::<Frame>(&bytes) else {
             continue;
         };
+        if !allow_relay_frame(&mut desk_limit, &frame, serialized_len, now_ms()) {
+            continue;
+        }
         // Decide everything that needs the lock, then drop it before writing a
         // single byte to a socket.
         let plan: Option<(Vec<Arc<Mutex<secure::Sender>>>, bool, Frame, &str)> = {
@@ -1530,7 +1617,6 @@ fn serve_peer(
                         || !canopy_core::desk::valid_session_id(&msg.session)
                         || msg.to.is_empty()
                         || msg.to == my_id
-                        || !desk_limit.allow(now_ms())
                     {
                         None
                     } else {
@@ -3290,16 +3376,64 @@ mod tests {
             from_name: "n".into(),
             to: "t".into(),
             session: "s1".into(),
-            body: DeskBody::Request { mode: Mode::ViewOnly },
+            body: DeskBody::Request {
+                mode: Mode::ViewOnly,
+            },
             ts: 0,
         });
-        assert!(serde_json::to_string(&req).unwrap().contains(r#""type":"desk""#));
+        assert!(serde_json::to_string(&req)
+            .unwrap()
+            .contains(r#""type":"desk""#));
 
         let bad = br#"{"type":"desk","id":"i","from":"f","from_name":"n","to":"t","session":"s","body":{"kind":"clipboard","text":"x"},"ts":0}"#;
         assert!(serde_json::from_slice::<Frame>(bad).is_err());
         // A desk frame with no addressee is not representable.
         let no_to = br#"{"type":"desk","id":"i","from":"f","from_name":"n","session":"s","body":{"kind":"ping"},"ts":0}"#;
         assert!(serde_json::from_slice::<Frame>(no_to).is_err());
+    }
+
+    #[test]
+    fn desk_relay_budget_allows_a_normal_eight_fps_stream() {
+        let mut budget = DeskRelayBudget::new();
+        for frame in 0..32 {
+            assert!(
+                budget.allow(1024 * 1024, frame * 125),
+                "normal frame {frame} was rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn desk_relay_budget_rejects_a_byte_burst_and_refills() {
+        let mut budget = DeskRelayBudget::new();
+        assert!(budget.allow(2 * 1024 * 1024, 0));
+        assert!(budget.allow(2 * 1024 * 1024, 0));
+        assert!(!budget.allow(1, 0));
+        assert!(budget.allow(2 * 1024 * 1024, 1_000));
+    }
+
+    #[test]
+    fn desk_relay_budget_enforces_message_count_and_refills() {
+        let mut budget = DeskRelayBudget::new();
+        for _ in 0..DESK_MESSAGE_BURST {
+            assert!(budget.allow(1, 0));
+        }
+        assert!(!budget.allow(1, 0));
+        for _ in 0..DESK_MESSAGES_PER_SEC {
+            assert!(budget.allow(1, 1_000));
+        }
+        assert!(!budget.allow(1, 1_000));
+    }
+
+    #[test]
+    fn non_desk_traffic_does_not_consume_the_desk_budget() {
+        let mut budget = DeskRelayBudget::new();
+        for _ in 0..100 {
+            assert!(allow_relay_frame(&mut budget, &Frame::Ping, usize::MAX, 0));
+        }
+        for _ in 0..DESK_MESSAGE_BURST {
+            assert!(budget.allow(1, 0));
+        }
     }
 
     /// Fan-out must skip the sender — echoing an operation back to its author
