@@ -1,0 +1,41 @@
+{
+  "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
+  "bundle": {
+    "fileAssociations": [
+      {
+        "name": "Text and source code",
+        "description": "Text and source files Canopy can edit",
+        "ext": [],
+        "contentTypes": [
+          "public.plain-text",
+          "public.source-code",
+          "public.script",
+          "public.shell-script",
+          "public.json",
+          "public.xml",
+          "public.yaml",
+          "public.comma-separated-values-text",
+          "net.daringfireball.markdown"
+        ],
+        "role": "Editor",
+        "rank": "Alternate"
+      },
+      {
+        "name": "Source code",
+        "description": "Source and config files with no system-declared type",
+        "ext": [
+          "ts", "tsx", "mts", "cts", "jsx", "mjs", "cjs",
+          "rs", "go", "kt", "kts", "scala", "dart", "zig", "lua",
+          "ex", "exs", "erl", "hs", "ml", "clj", "nim", "jl", "r",
+          "vue", "svelte", "astro",
+          "toml", "ini", "cfg", "conf", "env", "properties", "lock",
+          "jsonc", "json5", "yml", "yaml", "mdx",
+          "sql", "graphql", "gql", "proto", "tf", "tfvars", "hcl",
+          "gradle", "cmake", "mk", "nix", "dockerfile", "gitignore", "editorconfig"
+        ],
+        "role": "Editor",
+        "rank": "Alternate"
+      }
+    ]
+  }
+}

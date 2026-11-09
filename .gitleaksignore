@@ -10,5 +10,7 @@
 17529adc30f8fcadc59d52250c7f5fea2fedd0bb:src-tauri/src/mcp.rs:gcp-api-key:866
 49c420961ce29187e73abaed4f15f75ccf43c443:src/hibernation.ts:generic-api-key:309
 bcd79e7750f1a888d6f7a7a977597a66dd65e07f:src-tauri/src/canopy_link.rs:generic-api-key:437
+# T3 pairing-link parser test fixture: an expired one-time code from a throwaway
+# local test server, replaced by a placeholder in the next commit.
 af6d8e1204fa57b3ac92e56b69ba07963847bd2c:src/t3connect/pairing.test.ts:generic-api-key:102
 af6d8e1204fa57b3ac92e56b69ba07963847bd2c:src/t3connect/pairing.test.ts:generic-api-key:103

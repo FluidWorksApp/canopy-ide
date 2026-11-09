@@ -38,7 +38,7 @@ import { randomBytes } from 'node:crypto';
 import path from 'node:path';
 import os from 'node:os';
 import { WebSocket, WebSocketServer } from 'ws';
-import { authenticate, authorize, validateConfig, Tickets, authorizeStream, desktopStream } from './policy.mjs';
+import { authenticate, authorize, validateConfig, Tickets, authorizeStream, desktopStream, browserStream } from './policy.mjs';
 import { DockerWorkspaces } from './docker.mjs';
 import {ElasticMemory, memoryRange} from './elastic-memory.mjs';
 import {ElasticCpu, cpuRange} from './elastic-cpu.mjs';
@@ -489,7 +489,7 @@ export function createGateway({ config, workspaces, origins = [], cpus = os.avai
       if (socket.destroyed) { release(); return; }
       wss.handleUpgrade(request, socket, head, client => {
         const upstreamStream=publication?`/sessions/${publication.sessionId}/stream`:grant.stream;
-        const upstream = new WebSocket(`${(!desktopStream(grant.stream) && runtime.nativeUrl ? runtime.nativeUrl : runtime.url).replace('http:', 'ws:')}${upstreamStream}`, { headers: { authorization: `Bearer ${runtime.token}` }, maxPayload: 2 * 1024 * 1024, perMessageDeflate: false, handshakeTimeout: 10_000 });
+        const upstream = new WebSocket(`${(!desktopStream(grant.stream) && runtime.nativeUrl ? runtime.nativeUrl : runtime.url).replace('http:', 'ws:')}${upstreamStream}`, { headers: { authorization: `Bearer ${runtime.token}` }, maxPayload: (browserStream(grant.stream) ? 8 : 2) * 1024 * 1024, perMessageDeflate: false, handshakeTimeout: 10_000 });
         let checkingAuthorization=false;
         const authorizationTimer = setInterval(async () => {
           if(checkingAuthorization)return;
@@ -535,7 +535,8 @@ export function createGateway({ config, workspaces, origins = [], cpus = os.avai
           client.send(data, { binary });
         });
         client.on('close', () => { upstream.close(); release(); });
-        upstream.on('close', () => client.close());
+        // The agent browser's close codes are its protocol (browser-stream.mjs): 4404 the page is gone, 1012 reconnect.
+        upstream.on('close', (code, reason) => { if (browserStream(grant.stream) && (code === 4404 || code === 1012)) client.close(code, reason); else client.close(); });
         upstream.on('error', error => { streamWarning(`Stream upstream failed for ${principal.memberId?'member':'owner'} ${desktopStream(grant.stream)?'desktop':'terminal'}: ${error.code??error.message}`); client.close(1011); });
         client.on('error', () => upstream.close());
       });

@@ -1152,6 +1152,69 @@ export default function App() {
   const saveProjectRef = useRef<(p: Project) => Promise<void>>(async () => {});
   const updateRef = useRef<(patch: Partial<WorkspaceState>) => void>(() => {});
 
+  /** A file the OS or `canopy <file>[:line[:col]]` handed over (cli.rs). It
+   *  opens in the project that contains it. A file outside every project opens
+   *  in the project in front: cli.rs has already let the editor read and write
+   *  that one file, and nothing else next to it. */
+  const openFileTarget = useCallback(
+    async (target: { path: string; line?: number; column?: number }) => {
+      const norm = (p: string) => p.replace(/[\\/]+$/, "");
+      const containing = () => {
+        const path = norm(target.path);
+        let bestId: string | undefined;
+        let bestLen = -1;
+        for (const p of wsRef.current.projects) {
+          for (const c of p.components) {
+            const root = norm(c.path);
+            if (
+              root &&
+              (path.startsWith(root + "/") || path.startsWith(root + "\\")) &&
+              root.length > bestLen
+            ) {
+              bestLen = root.length;
+              bestId = p.id;
+            }
+          }
+        }
+        return bestId;
+      };
+      const front = () => {
+        const state = wsRef.current;
+        if (state.activeId && state.openIds.includes(state.activeId)) {
+          return state.activeId;
+        }
+        return state.openIds[0] ?? state.projects[0]?.id;
+      };
+      let projectId: string | undefined = containing() ?? front();
+      // First run, nothing to open it in: its folder becomes the project, the
+      // same as `canopy <dir>` would have made it.
+      if (!projectId) {
+        const dir = target.path.replace(/[\\/][^\\/]*$/, "");
+        if (dir && dir !== target.path) {
+          await openDirAsProject(dir);
+          projectId = containing();
+        }
+      }
+      if (!projectId) {
+        notify(`Couldn't open ${target.path}: there's no project to show it in.`, "error");
+        return;
+      }
+      await openForActionRef.current(projectId);
+      // Timer, not rAF: the ProjectView may mount only now (see the agent
+      // action dispatch, which waits the same way).
+      window.setTimeout(
+        () =>
+          window.dispatchEvent(
+            new CustomEvent("canopy:open-file", {
+              detail: { projectId, ...target },
+            }),
+          ),
+        80,
+      );
+    },
+    [notify, openDirAsProject],
+  );
+
   // Load persisted workspace; re-register watchers/scopes for open projects.
   // A tab that was asleep when the app last quit comes back asleep — and a
   // sleeping project watches nothing, so it registers nothing until it wakes.
@@ -1717,23 +1780,52 @@ export default function App() {
   // project before load would be clobbered by setWs). Warm: a second CLI
   // invocation's argv arrives as a cli-open event via the single-instance
   // plugin.
+  //
+  // Files take the same two paths (cli_take_pending_targets, cli-open-target),
+  // and so does whatever Finder hands over on macOS. Everything runs in arrival
+  // order, so `canopy . src/main.rs` makes the project before the file looks
+  // for one to open in.
   useEffect(() => {
     if (!loaded) return;
-    void import("./host").then(({ invoke }) =>
-      invoke<string | null>("cli_take_pending_open")
-        .then((dir) => (dir ? openDirAsProject(dir) : undefined))
-        .catch(() => {}),
-    );
-    let unlisten: (() => void) | undefined;
-    void import("./host").then(({ listen }) =>
-      listen<string>("cli-open", (e) => void openDirAsProject(e.payload)).then(
-        (fn) => {
-          unlisten = fn;
-        },
-      ),
-    );
-    return () => unlisten?.();
-  }, [loaded, openDirAsProject]);
+    type Target =
+      | { kind: "dir"; path: string }
+      | { kind: "file"; path: string; line?: number; column?: number };
+    let chain: Promise<unknown> = Promise.resolve();
+    const run = (work: () => Promise<unknown>) => {
+      chain = chain.then(work).catch((e) => console.warn("cli open failed", e));
+    };
+    const openTarget = (t: Target) =>
+      t.kind === "dir"
+        ? openDirAsProject(t.path)
+        : openFileTarget({ path: t.path, line: t.line, column: t.column });
+    const unlisten: (() => void)[] = [];
+    let disposed = false;
+    // Listen before collecting: once the pending targets are taken, native
+    // code emits instead of holding, and an event before the listener is lost.
+    void import("./host").then(async ({ invoke, listen }) => {
+      const fns = await Promise.all([
+        listen<string>("cli-open", (e) => run(() => openDirAsProject(e.payload))),
+        listen<Target>("cli-open-target", (e) => run(() => openTarget(e.payload))),
+      ]);
+      if (disposed) {
+        fns.forEach((fn) => fn());
+        return;
+      }
+      unlisten.push(...fns);
+      run(async () => {
+        const dir = await invoke<string | null>("cli_take_pending_open");
+        if (dir) await openDirAsProject(dir);
+      });
+      run(async () => {
+        const targets = await invoke<Target[]>("cli_take_pending_targets");
+        for (const t of targets) await openTarget(t);
+      });
+    });
+    return () => {
+      disposed = true;
+      unlisten.forEach((fn) => fn());
+    };
+  }, [loaded, openDirAsProject, openFileTarget]);
 
   // A first install and an update relaunch both cross a version boundary. Show
   // the canonical GitHub release once per installed version; ordinary launches

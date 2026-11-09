@@ -1,0 +1,35 @@
+{
+  "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
+  "bundle": {
+    "fileAssociations": [
+      { "name": "Plain text", "ext": ["txt", "log"], "mimeType": "text/plain" },
+      { "name": "Markdown", "ext": ["md", "markdown"], "mimeType": "text/markdown" },
+      { "name": "JSON", "ext": ["json"], "mimeType": "application/json" },
+      { "name": "XML", "ext": ["xml"], "mimeType": "application/xml" },
+      { "name": "YAML", "ext": ["yml", "yaml"], "mimeType": "application/x-yaml" },
+      { "name": "TOML", "ext": ["toml"], "mimeType": "application/toml" },
+      { "name": "CSV", "ext": ["csv"], "mimeType": "text/csv" },
+      { "name": "CSS", "ext": ["css"], "mimeType": "text/css" },
+      { "name": "JavaScript", "ext": ["js", "mjs", "cjs"], "mimeType": "text/javascript" },
+      { "name": "JavaScript (legacy type)", "ext": ["js"], "mimeType": "application/javascript" },
+      { "name": "TypeScript", "ext": ["ts", "mts", "cts"], "mimeType": "application/x-typescript" },
+      { "name": "Python", "ext": ["py"], "mimeType": "text/x-python" },
+      { "name": "Python 3", "ext": ["py"], "mimeType": "text/x-python3" },
+      { "name": "Rust", "ext": ["rs"], "mimeType": "text/rust" },
+      { "name": "Rust (legacy type)", "ext": ["rs"], "mimeType": "text/x-rust" },
+      { "name": "Go", "ext": ["go"], "mimeType": "text/x-go" },
+      { "name": "C", "ext": ["c"], "mimeType": "text/x-csrc" },
+      { "name": "C header", "ext": ["h"], "mimeType": "text/x-chdr" },
+      { "name": "C++", "ext": ["cc", "cpp", "cxx"], "mimeType": "text/x-c++src" },
+      { "name": "C++ header", "ext": ["hh", "hpp", "hxx"], "mimeType": "text/x-c++hdr" },
+      { "name": "Java", "ext": ["java"], "mimeType": "text/x-java" },
+      { "name": "Kotlin", "ext": ["kt", "kts"], "mimeType": "text/x-kotlin" },
+      { "name": "C#", "ext": ["cs"], "mimeType": "text/x-csharp" },
+      { "name": "Ruby", "ext": ["rb"], "mimeType": "application/x-ruby" },
+      { "name": "PHP", "ext": ["php"], "mimeType": "application/x-php" },
+      { "name": "Shell script", "ext": ["sh", "bash", "zsh"], "mimeType": "application/x-shellscript" },
+      { "name": "SQL", "ext": ["sql"], "mimeType": "application/sql" },
+      { "name": "Makefile", "ext": ["mk"], "mimeType": "text/x-makefile" }
+    ]
+  }
+}

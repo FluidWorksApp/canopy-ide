@@ -29,9 +29,13 @@ function fakeBrowser(){
   },
   goto:async url=>{state.url=new URL(url).href;},goBack:async()=>{},goForward:async()=>{},reload:async()=>{},
   setViewportSize:async size=>{state.viewport=size;},
+  viewportSize:()=>state.viewport??{width:1280,height:720},
   screenshot:async()=>Buffer.from('png'),
+  // Used by the streamed-browser port (dialogs, crashes, OOPIF copy sessions).
+  on:()=>{},close:async()=>{},
  };
- const context={pages:()=>[page],newPage:async()=>page,on:(event,fn)=>{if(event==='close')closeHandler=fn;},close:async()=>closeHandler?.()};
+ const cdp={send:async()=>({}),on:()=>{},detach:async()=>{}};
+ const context={pages:()=>[page],newPage:async()=>page,newCDPSession:async()=>cdp,grantPermissions:async()=>{},on:(event,fn)=>{if(event==='close')closeHandler=fn;},close:async()=>closeHandler?.()};
  return {state,launch:async profile=>{state.launches++;state.profile=profile;return context;}};
 }
 

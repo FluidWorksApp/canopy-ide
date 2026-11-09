@@ -1,0 +1,213 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Lists Canopy under Explorer's "Open with" for text and source files without
+  ever taking over a default; the MSI counterpart of open-with.nsh. Tauri's
+  `bundle.fileAssociations` is not used on Windows because its
+  `<ProgId Advertise="yes">` rewrites `Software\Classes\.<ext>`'s default
+  value, making Canopy the handler for every listed extension.
+
+  Tauri's MSI is per-machine (main.wxs: InstallScope="perMachine", deep links
+  under HKLM\Software\Classes), so this writes to HKLM too. Windows Installer
+  removes every value here on uninstall. The ProgID and Applications keys are
+  ours alone and are deleted whole; the shared `.<ext>\OpenWithProgids` keys
+  only lose our value.
+
+  Tauri passes this file to candle as is (not through its templates), so the
+  executable name is spelled out: "canopy.exe" is the Cargo binary name, which
+  Tauri keeps unless `mainBinaryName` is set. `[!Path]` is the full path of
+  main.wxs's File Id="Path", the installed main executable.
+
+  The extension list must match open-with.nsh.
+-->
+<Wix xmlns="http://schemas.microsoft.com/wix/2006/wi">
+<?if $(sys.BUILDARCH)="x86"?>
+    <?define CanopyWin64 = "no" ?>
+<?else?>
+    <?define CanopyWin64 = "yes" ?>
+<?endif?>
+    <Fragment>
+        <DirectoryRef Id="INSTALLDIR">
+            <Component Id="CanopyOpenWith" Guid="5B313577-4FEA-4882-9430-344DBA09FFBB" Win64="$(var.CanopyWin64)">
+                <RegistryKey Root="HKLM" Key="Software\Classes\Canopy.SourceFile" ForceDeleteOnUninstall="yes">
+                    <RegistryValue Type="string" Value="Source file" KeyPath="yes" />
+                    <RegistryKey Key="DefaultIcon">
+                        <RegistryValue Type="string" Value="&quot;[!Path]&quot;,0" />
+                    </RegistryKey>
+                    <RegistryKey Key="shell\open\command">
+                        <RegistryValue Type="string" Value="&quot;[!Path]&quot; &quot;%1&quot;" />
+                    </RegistryKey>
+                </RegistryKey>
+                <RegistryKey Root="HKLM" Key="Software\Classes\Applications\canopy.exe" ForceDeleteOnUninstall="yes">
+                    <RegistryValue Name="FriendlyAppName" Type="string" Value="Canopy" />
+                    <RegistryKey Key="shell\open\command">
+                        <RegistryValue Type="string" Value="&quot;[!Path]&quot; &quot;%1&quot;" />
+                    </RegistryKey>
+                    <RegistryKey Key="SupportedTypes">
+                    <RegistryValue Name=".txt" Type="string" Value="" />
+                    <RegistryValue Name=".log" Type="string" Value="" />
+                    <RegistryValue Name=".md" Type="string" Value="" />
+                    <RegistryValue Name=".markdown" Type="string" Value="" />
+                    <RegistryValue Name=".json" Type="string" Value="" />
+                    <RegistryValue Name=".xml" Type="string" Value="" />
+                    <RegistryValue Name=".yml" Type="string" Value="" />
+                    <RegistryValue Name=".yaml" Type="string" Value="" />
+                    <RegistryValue Name=".toml" Type="string" Value="" />
+                    <RegistryValue Name=".csv" Type="string" Value="" />
+                    <RegistryValue Name=".css" Type="string" Value="" />
+                    <RegistryValue Name=".js" Type="string" Value="" />
+                    <RegistryValue Name=".mjs" Type="string" Value="" />
+                    <RegistryValue Name=".cjs" Type="string" Value="" />
+                    <RegistryValue Name=".ts" Type="string" Value="" />
+                    <RegistryValue Name=".tsx" Type="string" Value="" />
+                    <RegistryValue Name=".mts" Type="string" Value="" />
+                    <RegistryValue Name=".cts" Type="string" Value="" />
+                    <RegistryValue Name=".jsx" Type="string" Value="" />
+                    <RegistryValue Name=".py" Type="string" Value="" />
+                    <RegistryValue Name=".rs" Type="string" Value="" />
+                    <RegistryValue Name=".go" Type="string" Value="" />
+                    <RegistryValue Name=".c" Type="string" Value="" />
+                    <RegistryValue Name=".h" Type="string" Value="" />
+                    <RegistryValue Name=".cc" Type="string" Value="" />
+                    <RegistryValue Name=".cpp" Type="string" Value="" />
+                    <RegistryValue Name=".cxx" Type="string" Value="" />
+                    <RegistryValue Name=".hh" Type="string" Value="" />
+                    <RegistryValue Name=".hpp" Type="string" Value="" />
+                    <RegistryValue Name=".hxx" Type="string" Value="" />
+                    <RegistryValue Name=".java" Type="string" Value="" />
+                    <RegistryValue Name=".kt" Type="string" Value="" />
+                    <RegistryValue Name=".kts" Type="string" Value="" />
+                    <RegistryValue Name=".cs" Type="string" Value="" />
+                    <RegistryValue Name=".rb" Type="string" Value="" />
+                    <RegistryValue Name=".php" Type="string" Value="" />
+                    <RegistryValue Name=".sh" Type="string" Value="" />
+                    <RegistryValue Name=".bash" Type="string" Value="" />
+                    <RegistryValue Name=".zsh" Type="string" Value="" />
+                    <RegistryValue Name=".sql" Type="string" Value="" />
+                    <RegistryValue Name=".mk" Type="string" Value="" />
+                    <RegistryValue Name=".scala" Type="string" Value="" />
+                    <RegistryValue Name=".dart" Type="string" Value="" />
+                    <RegistryValue Name=".zig" Type="string" Value="" />
+                    <RegistryValue Name=".lua" Type="string" Value="" />
+                    <RegistryValue Name=".ex" Type="string" Value="" />
+                    <RegistryValue Name=".exs" Type="string" Value="" />
+                    <RegistryValue Name=".erl" Type="string" Value="" />
+                    <RegistryValue Name=".hs" Type="string" Value="" />
+                    <RegistryValue Name=".ml" Type="string" Value="" />
+                    <RegistryValue Name=".clj" Type="string" Value="" />
+                    <RegistryValue Name=".nim" Type="string" Value="" />
+                    <RegistryValue Name=".jl" Type="string" Value="" />
+                    <RegistryValue Name=".r" Type="string" Value="" />
+                    <RegistryValue Name=".vue" Type="string" Value="" />
+                    <RegistryValue Name=".svelte" Type="string" Value="" />
+                    <RegistryValue Name=".astro" Type="string" Value="" />
+                    <RegistryValue Name=".ini" Type="string" Value="" />
+                    <RegistryValue Name=".cfg" Type="string" Value="" />
+                    <RegistryValue Name=".conf" Type="string" Value="" />
+                    <RegistryValue Name=".env" Type="string" Value="" />
+                    <RegistryValue Name=".properties" Type="string" Value="" />
+                    <RegistryValue Name=".lock" Type="string" Value="" />
+                    <RegistryValue Name=".jsonc" Type="string" Value="" />
+                    <RegistryValue Name=".json5" Type="string" Value="" />
+                    <RegistryValue Name=".mdx" Type="string" Value="" />
+                    <RegistryValue Name=".graphql" Type="string" Value="" />
+                    <RegistryValue Name=".gql" Type="string" Value="" />
+                    <RegistryValue Name=".proto" Type="string" Value="" />
+                    <RegistryValue Name=".tf" Type="string" Value="" />
+                    <RegistryValue Name=".tfvars" Type="string" Value="" />
+                    <RegistryValue Name=".hcl" Type="string" Value="" />
+                    <RegistryValue Name=".gradle" Type="string" Value="" />
+                    <RegistryValue Name=".cmake" Type="string" Value="" />
+                    <RegistryValue Name=".nix" Type="string" Value="" />
+                    <RegistryValue Name=".dockerfile" Type="string" Value="" />
+                    <RegistryValue Name=".gitignore" Type="string" Value="" />
+                    <RegistryValue Name=".editorconfig" Type="string" Value="" />
+                    <RegistryValue Name=".ps1" Type="string" Value="" />
+                    <RegistryValue Name=".bat" Type="string" Value="" />
+                    <RegistryValue Name=".cmd" Type="string" Value="" />
+                    </RegistryKey>
+                </RegistryKey>
+                <RegistryValue Root="HKLM" Key="Software\Classes\.txt\OpenWithProgids" Name="Canopy.SourceFile" Type="string" Value="" />
+                <RegistryValue Root="HKLM" Key="Software\Classes\.log\OpenWithProgids" Name="Canopy.SourceFile" Type="string" Value="" />
+                <RegistryValue Root="HKLM" Key="Software\Classes\.md\OpenWithProgids" Name="Canopy.SourceFile" Type="string" Value="" />
+                <RegistryValue Root="HKLM" Key="Software\Classes\.markdown\OpenWithProgids" Name="Canopy.SourceFile" Type="string" Value="" />
+                <RegistryValue Root="HKLM" Key="Software\Classes\.json\OpenWithProgids" Name="Canopy.SourceFile" Type="string" Value="" />
+                <RegistryValue Root="HKLM" Key="Software\Classes\.xml\OpenWithProgids" Name="Canopy.SourceFile" Type="string" Value="" />
+                <RegistryValue Root="HKLM" Key="Software\Classes\.yml\OpenWithProgids" Name="Canopy.SourceFile" Type="string" Value="" />
+                <RegistryValue Root="HKLM" Key="Software\Classes\.yaml\OpenWithProgids" Name="Canopy.SourceFile" Type="string" Value="" />
+                <RegistryValue Root="HKLM" Key="Software\Classes\.toml\OpenWithProgids" Name="Canopy.SourceFile" Type="string" Value="" />
+                <RegistryValue Root="HKLM" Key="Software\Classes\.csv\OpenWithProgids" Name="Canopy.SourceFile" Type="string" Value="" />
+                <RegistryValue Root="HKLM" Key="Software\Classes\.css\OpenWithProgids" Name="Canopy.SourceFile" Type="string" Value="" />
+                <RegistryValue Root="HKLM" Key="Software\Classes\.js\OpenWithProgids" Name="Canopy.SourceFile" Type="string" Value="" />
+                <RegistryValue Root="HKLM" Key="Software\Classes\.mjs\OpenWithProgids" Name="Canopy.SourceFile" Type="string" Value="" />
+                <RegistryValue Root="HKLM" Key="Software\Classes\.cjs\OpenWithProgids" Name="Canopy.SourceFile" Type="string" Value="" />
+                <RegistryValue Root="HKLM" Key="Software\Classes\.ts\OpenWithProgids" Name="Canopy.SourceFile" Type="string" Value="" />
+                <RegistryValue Root="HKLM" Key="Software\Classes\.tsx\OpenWithProgids" Name="Canopy.SourceFile" Type="string" Value="" />
+                <RegistryValue Root="HKLM" Key="Software\Classes\.mts\OpenWithProgids" Name="Canopy.SourceFile" Type="string" Value="" />
+                <RegistryValue Root="HKLM" Key="Software\Classes\.cts\OpenWithProgids" Name="Canopy.SourceFile" Type="string" Value="" />
+                <RegistryValue Root="HKLM" Key="Software\Classes\.jsx\OpenWithProgids" Name="Canopy.SourceFile" Type="string" Value="" />
+                <RegistryValue Root="HKLM" Key="Software\Classes\.py\OpenWithProgids" Name="Canopy.SourceFile" Type="string" Value="" />
+                <RegistryValue Root="HKLM" Key="Software\Classes\.rs\OpenWithProgids" Name="Canopy.SourceFile" Type="string" Value="" />
+                <RegistryValue Root="HKLM" Key="Software\Classes\.go\OpenWithProgids" Name="Canopy.SourceFile" Type="string" Value="" />
+                <RegistryValue Root="HKLM" Key="Software\Classes\.c\OpenWithProgids" Name="Canopy.SourceFile" Type="string" Value="" />
+                <RegistryValue Root="HKLM" Key="Software\Classes\.h\OpenWithProgids" Name="Canopy.SourceFile" Type="string" Value="" />
+                <RegistryValue Root="HKLM" Key="Software\Classes\.cc\OpenWithProgids" Name="Canopy.SourceFile" Type="string" Value="" />
+                <RegistryValue Root="HKLM" Key="Software\Classes\.cpp\OpenWithProgids" Name="Canopy.SourceFile" Type="string" Value="" />
+                <RegistryValue Root="HKLM" Key="Software\Classes\.cxx\OpenWithProgids" Name="Canopy.SourceFile" Type="string" Value="" />
+                <RegistryValue Root="HKLM" Key="Software\Classes\.hh\OpenWithProgids" Name="Canopy.SourceFile" Type="string" Value="" />
+                <RegistryValue Root="HKLM" Key="Software\Classes\.hpp\OpenWithProgids" Name="Canopy.SourceFile" Type="string" Value="" />
+                <RegistryValue Root="HKLM" Key="Software\Classes\.hxx\OpenWithProgids" Name="Canopy.SourceFile" Type="string" Value="" />
+                <RegistryValue Root="HKLM" Key="Software\Classes\.java\OpenWithProgids" Name="Canopy.SourceFile" Type="string" Value="" />
+                <RegistryValue Root="HKLM" Key="Software\Classes\.kt\OpenWithProgids" Name="Canopy.SourceFile" Type="string" Value="" />
+                <RegistryValue Root="HKLM" Key="Software\Classes\.kts\OpenWithProgids" Name="Canopy.SourceFile" Type="string" Value="" />
+                <RegistryValue Root="HKLM" Key="Software\Classes\.cs\OpenWithProgids" Name="Canopy.SourceFile" Type="string" Value="" />
+                <RegistryValue Root="HKLM" Key="Software\Classes\.rb\OpenWithProgids" Name="Canopy.SourceFile" Type="string" Value="" />
+                <RegistryValue Root="HKLM" Key="Software\Classes\.php\OpenWithProgids" Name="Canopy.SourceFile" Type="string" Value="" />
+                <RegistryValue Root="HKLM" Key="Software\Classes\.sh\OpenWithProgids" Name="Canopy.SourceFile" Type="string" Value="" />
+                <RegistryValue Root="HKLM" Key="Software\Classes\.bash\OpenWithProgids" Name="Canopy.SourceFile" Type="string" Value="" />
+                <RegistryValue Root="HKLM" Key="Software\Classes\.zsh\OpenWithProgids" Name="Canopy.SourceFile" Type="string" Value="" />
+                <RegistryValue Root="HKLM" Key="Software\Classes\.sql\OpenWithProgids" Name="Canopy.SourceFile" Type="string" Value="" />
+                <RegistryValue Root="HKLM" Key="Software\Classes\.mk\OpenWithProgids" Name="Canopy.SourceFile" Type="string" Value="" />
+                <RegistryValue Root="HKLM" Key="Software\Classes\.scala\OpenWithProgids" Name="Canopy.SourceFile" Type="string" Value="" />
+                <RegistryValue Root="HKLM" Key="Software\Classes\.dart\OpenWithProgids" Name="Canopy.SourceFile" Type="string" Value="" />
+                <RegistryValue Root="HKLM" Key="Software\Classes\.zig\OpenWithProgids" Name="Canopy.SourceFile" Type="string" Value="" />
+                <RegistryValue Root="HKLM" Key="Software\Classes\.lua\OpenWithProgids" Name="Canopy.SourceFile" Type="string" Value="" />
+                <RegistryValue Root="HKLM" Key="Software\Classes\.ex\OpenWithProgids" Name="Canopy.SourceFile" Type="string" Value="" />
+                <RegistryValue Root="HKLM" Key="Software\Classes\.exs\OpenWithProgids" Name="Canopy.SourceFile" Type="string" Value="" />
+                <RegistryValue Root="HKLM" Key="Software\Classes\.erl\OpenWithProgids" Name="Canopy.SourceFile" Type="string" Value="" />
+                <RegistryValue Root="HKLM" Key="Software\Classes\.hs\OpenWithProgids" Name="Canopy.SourceFile" Type="string" Value="" />
+                <RegistryValue Root="HKLM" Key="Software\Classes\.ml\OpenWithProgids" Name="Canopy.SourceFile" Type="string" Value="" />
+                <RegistryValue Root="HKLM" Key="Software\Classes\.clj\OpenWithProgids" Name="Canopy.SourceFile" Type="string" Value="" />
+                <RegistryValue Root="HKLM" Key="Software\Classes\.nim\OpenWithProgids" Name="Canopy.SourceFile" Type="string" Value="" />
+                <RegistryValue Root="HKLM" Key="Software\Classes\.jl\OpenWithProgids" Name="Canopy.SourceFile" Type="string" Value="" />
+                <RegistryValue Root="HKLM" Key="Software\Classes\.r\OpenWithProgids" Name="Canopy.SourceFile" Type="string" Value="" />
+                <RegistryValue Root="HKLM" Key="Software\Classes\.vue\OpenWithProgids" Name="Canopy.SourceFile" Type="string" Value="" />
+                <RegistryValue Root="HKLM" Key="Software\Classes\.svelte\OpenWithProgids" Name="Canopy.SourceFile" Type="string" Value="" />
+                <RegistryValue Root="HKLM" Key="Software\Classes\.astro\OpenWithProgids" Name="Canopy.SourceFile" Type="string" Value="" />
+                <RegistryValue Root="HKLM" Key="Software\Classes\.ini\OpenWithProgids" Name="Canopy.SourceFile" Type="string" Value="" />
+                <RegistryValue Root="HKLM" Key="Software\Classes\.cfg\OpenWithProgids" Name="Canopy.SourceFile" Type="string" Value="" />
+                <RegistryValue Root="HKLM" Key="Software\Classes\.conf\OpenWithProgids" Name="Canopy.SourceFile" Type="string" Value="" />
+                <RegistryValue Root="HKLM" Key="Software\Classes\.env\OpenWithProgids" Name="Canopy.SourceFile" Type="string" Value="" />
+                <RegistryValue Root="HKLM" Key="Software\Classes\.properties\OpenWithProgids" Name="Canopy.SourceFile" Type="string" Value="" />
+                <RegistryValue Root="HKLM" Key="Software\Classes\.lock\OpenWithProgids" Name="Canopy.SourceFile" Type="string" Value="" />
+                <RegistryValue Root="HKLM" Key="Software\Classes\.jsonc\OpenWithProgids" Name="Canopy.SourceFile" Type="string" Value="" />
+                <RegistryValue Root="HKLM" Key="Software\Classes\.json5\OpenWithProgids" Name="Canopy.SourceFile" Type="string" Value="" />
+                <RegistryValue Root="HKLM" Key="Software\Classes\.mdx\OpenWithProgids" Name="Canopy.SourceFile" Type="string" Value="" />
+                <RegistryValue Root="HKLM" Key="Software\Classes\.graphql\OpenWithProgids" Name="Canopy.SourceFile" Type="string" Value="" />
+                <RegistryValue Root="HKLM" Key="Software\Classes\.gql\OpenWithProgids" Name="Canopy.SourceFile" Type="string" Value="" />
+                <RegistryValue Root="HKLM" Key="Software\Classes\.proto\OpenWithProgids" Name="Canopy.SourceFile" Type="string" Value="" />
+                <RegistryValue Root="HKLM" Key="Software\Classes\.tf\OpenWithProgids" Name="Canopy.SourceFile" Type="string" Value="" />
+                <RegistryValue Root="HKLM" Key="Software\Classes\.tfvars\OpenWithProgids" Name="Canopy.SourceFile" Type="string" Value="" />
+                <RegistryValue Root="HKLM" Key="Software\Classes\.hcl\OpenWithProgids" Name="Canopy.SourceFile" Type="string" Value="" />
+                <RegistryValue Root="HKLM" Key="Software\Classes\.gradle\OpenWithProgids" Name="Canopy.SourceFile" Type="string" Value="" />
+                <RegistryValue Root="HKLM" Key="Software\Classes\.cmake\OpenWithProgids" Name="Canopy.SourceFile" Type="string" Value="" />
+                <RegistryValue Root="HKLM" Key="Software\Classes\.nix\OpenWithProgids" Name="Canopy.SourceFile" Type="string" Value="" />
+                <RegistryValue Root="HKLM" Key="Software\Classes\.dockerfile\OpenWithProgids" Name="Canopy.SourceFile" Type="string" Value="" />
+                <RegistryValue Root="HKLM" Key="Software\Classes\.gitignore\OpenWithProgids" Name="Canopy.SourceFile" Type="string" Value="" />
+                <RegistryValue Root="HKLM" Key="Software\Classes\.editorconfig\OpenWithProgids" Name="Canopy.SourceFile" Type="string" Value="" />
+                <RegistryValue Root="HKLM" Key="Software\Classes\.ps1\OpenWithProgids" Name="Canopy.SourceFile" Type="string" Value="" />
+                <RegistryValue Root="HKLM" Key="Software\Classes\.bat\OpenWithProgids" Name="Canopy.SourceFile" Type="string" Value="" />
+                <RegistryValue Root="HKLM" Key="Software\Classes\.cmd\OpenWithProgids" Name="Canopy.SourceFile" Type="string" Value="" />
+            </Component>
+        </DirectoryRef>
+    </Fragment>
+</Wix>
