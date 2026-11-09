@@ -10,7 +10,7 @@ import {CreateWorkspace} from "./CreateWorkspace";
 import {ManagedWorkspaces, type ManagedWorkspace} from './ManagedWorkspaces';
 import {Dialog} from '../components/Dialog';
 import {Button,TextInput,Checkbox} from '../components/ui';
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useRef, lazy, Suspense } from 'react';
 import { createPortal } from 'react-dom';
 import { invoke } from '@tauri-apps/api/core';
 import { canSwitchExecutionMode, setExecutionMode } from '../executionMode';
@@ -37,6 +37,10 @@ import {useWorkspaceUpdate} from './hostUpdate';
 import {SHOW_WORKSPACE_EVENT,type ShowWorkspaceDetail} from '../readableLinks';
 import {CopyLinkButton} from '../components/CopyLinkButton';
 import {connectionKey,reportWorkspaceLifecycle} from './connectionState';
+import {T3Connect} from '../t3connect/T3Connect';
+import type {T3Machine} from '../t3connect/api';
+// Monaco and xterm load only when a T3 machine is opened.
+const T3MachineView=lazy(()=>import('../t3connect/T3MachineView').then(module=>({default:module.T3MachineView})));
 
 export function WorkspaceSelector({ onboarding = false,onHibernateWorkspace }: { onboarding?: boolean;onHibernateWorkspace?:(onProgress?:HibernateProgressListener,confirmOthers?:ConfirmOthers)=>Promise<void> }) {
   const active = activeWorkspace();
@@ -56,6 +60,8 @@ export function WorkspaceSelector({ onboarding = false,onHibernateWorkspace }: {
   const [memberStopName]=useState(()=>active?null:takeMemberStopNotice());
   useEffect(()=>{if(memberStopName)postAttention({kind:'fyi',tone:'success',source:'app',title:`Your session stopped. ${memberStopName} keeps running for its owner.`});},[memberStopName]);
   const [forgetConfirm,setForgetConfirm]=useState(false);
+  // A T3 Code machine opened from "Connect to a T3 Code machine…" (src/t3connect).
+  const [t3Machine,setT3Machine]=useState<T3Machine|null>(null),[t3PairOpen,setT3PairOpen]=useState(false);
   const accountRemovalEpoch=useRef(0);
   const [accountRemoval,setAccountRemoval]=useState<ManagedWorkspace|null>(null),[accountRemovalName,setAccountRemovalName]=useState('');
   async function removeAccountConnection(){
@@ -302,7 +308,8 @@ export function WorkspaceSelector({ onboarding = false,onHibernateWorkspace }: {
       {selected&&!selectedManagedId&&<div className="workspace-connection-remove"><Button size="sm" disabled={busy} onClick={()=>setForgetConfirm(true)}>Remove saved connection</Button><small>Removes it from this Mac. Remote files stay on the host.</small></div>}
       {error && <p className="workspace-feedback error" role="alert">{error}</p>}
     </div></div></div></WorkspacePanel>, document.body)}
-    {open && adding && createPortal(<Dialog title="Cloud workspaces" body="Sign in once, then open a workspace from your account." size="md" dismissLabel="Back" onDismiss={()=>{setAdding(false);setError('');}}><div className="workspace-tools"><ManagedWorkspaces showList={false}/><CreateWorkspace onCreated={()=>setAdding(false)}/><details><summary>Advanced: connect your own host</summary><label>Remote host<TextInput width="full" value={endpoint} onChange={e => setEndpoint(e.target.value)} autoComplete="off" /></label><label>Access token<TextInput width="full" type="password" value={token} onChange={e => setToken(e.target.value)} autoComplete="off" /></label><Button disabled={busy || !token} onClick={() => void connect()}>{busy ? 'Connecting…' : 'Find workspaces'}</Button>{!!workspaces.length && <Checkbox checked={copyAccounts} onChange={setCopyAccounts} label="Copy local Claude and Codex accounts" hint="One-time copy into the workspace you select."/>}{workspaces.map(workspace => <Button key={workspace.id} disabled={busy} onClick={() => void choose(workspace)}>{workspace.name}</Button>)}{error&&<p className="workspace-feedback error" role="alert">{error}</p>}</details></div></Dialog>,document.body)}
+    {open && adding && createPortal(<Dialog title="Cloud workspaces" body="Sign in once, then open a workspace from your account." size="md" dismissLabel="Back" onDismiss={()=>{setAdding(false);setError('');}}><div className="workspace-tools"><ManagedWorkspaces showList={false}/><CreateWorkspace onCreated={()=>setAdding(false)}/><details><summary>Advanced: connect your own host</summary><label>Remote host<TextInput width="full" value={endpoint} onChange={e => setEndpoint(e.target.value)} autoComplete="off" /></label><label>Access token<TextInput width="full" type="password" value={token} onChange={e => setToken(e.target.value)} autoComplete="off" /></label><Button disabled={busy || !token} onClick={() => void connect()}>{busy ? 'Connecting…' : 'Find workspaces'}</Button>{!!workspaces.length && <Checkbox checked={copyAccounts} onChange={setCopyAccounts} label="Copy local Claude and Codex accounts" hint="One-time copy into the workspace you select."/>}{workspaces.map(workspace => <Button key={workspace.id} disabled={busy} onClick={() => void choose(workspace)}>{workspace.name}</Button>)}{error&&<p className="workspace-feedback error" role="alert">{error}</p>}</details><details onToggle={event=>setT3PairOpen(event.currentTarget.open)}><summary>Connect to a T3 Code machine…</summary>{t3PairOpen&&<T3Connect onOpen={machine=>{setAdding(false);setOpen(false);setT3PairOpen(false);setT3Machine(machine);}}/>}</details></div></Dialog>,document.body)}
+    {t3Machine&&createPortal(<div className="remote-workspace-overlay"><section className="workspace-desktop" role="dialog" aria-modal="true" aria-label={`T3 Code machine ${t3Machine.label}`}><Suspense fallback={<div className="remote-empty">Loading…</div>}><T3MachineView key={t3Machine.id} machine={t3Machine} onClose={()=>setT3Machine(null)}/></Suspense></section></div>,document.body)}
     {desktop!=='closed' && active && createPortal(<div className={`remote-workspace-overlay${desktop==='minimized'?' is-minimized':''}`} aria-hidden={desktop==='minimized'} onMouseDown={event=>{if(event.target===event.currentTarget)setDesktop('minimized');}}><section className="workspace-desktop" role="dialog" aria-modal={desktop==='open'} aria-label="Workspace desktop"><RemoteDesktop key={active.connection.workspaceId} client={active.client} workspaceId={active.connection.workspaceId} workspaceName={active.connection.workspaceName} minimized={desktop==='minimized'} onMinimize={() => setDesktop('minimized')} onClose={() => setDesktop('closed')} /></section></div>, document.body)}
     {agentBrowser!=='closed' && active && createPortal(<div className={`remote-workspace-overlay${agentBrowser==='minimized'?' is-minimized':''}`} aria-hidden={agentBrowser==='minimized'} onMouseDown={event=>{if(event.target===event.currentTarget)setAgentBrowser('minimized');}}><section className="workspace-desktop" role="dialog" aria-modal={agentBrowser==='open'} aria-label="Workspace agent browser"><StreamedBrowser key={active.connection.workspaceId} client={active.client} workspaceId={active.connection.workspaceId} workspaceName={active.connection.workspaceName} minimized={agentBrowser==='minimized'} onMinimize={() => setAgentBrowser('minimized')} onClose={() => setAgentBrowser('closed')} /></section></div>, document.body)}
   </>;

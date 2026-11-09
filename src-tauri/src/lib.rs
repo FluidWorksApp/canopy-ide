@@ -77,6 +77,8 @@ mod stores;
 mod structured_runner;
 mod sync;
 mod sysaudio;
+mod t3_client;
+mod t3_socket;
 mod tasks;
 mod tunnel;
 mod turn_rollback;
@@ -568,6 +570,7 @@ pub fn run() {
         .manage(dictation::DictationManager::default())
         .manage(selftest::SelftestState::default())
         .manage(client_mode::RemoteConnectionState::default())
+        .manage(t3_socket::T3Sockets::default())
         .manage(spot::SpotIndex::default())
         .manage(research::load())
         .manage(notes::load())
@@ -752,6 +755,13 @@ pub fn run() {
             client_mode::execution_remote_account_candidates,
             client_mode::execution_remote_import_git,
             client_mode::execution_remote_login_prepare,
+            t3_client::t3_list,
+            t3_client::t3_describe,
+            t3_client::t3_pair,
+            t3_client::t3_remove,
+            t3_socket::t3_socket_open,
+            t3_socket::t3_socket_send,
+            t3_socket::t3_socket_close,
             mirror::execution_mirror_inspect,
             mirror::execution_mirror_send,
             remote_upload::execution_remote_upload,
@@ -1154,6 +1164,8 @@ pub fn run() {
                 app.state::<browser::BrowserManager>().shutdown_all(app);
                 app.state::<workspace_forward::WorkspaceForwards>()
                     .shutdown_all();
+                // ... and any T3 Code machine sockets.
+                app.state::<t3_socket::T3Sockets>().shutdown_all();
                 // ... and any public-link tunnel process.
                 app.state::<tunnel::TunnelManager>().kill_all();
                 // ... and the device hub (expo-device-hub), whose record is
