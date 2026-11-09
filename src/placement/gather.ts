@@ -86,12 +86,49 @@ export function displayTargets(
   ];
 }
 
+export function projectAvailability(
+  rows: UnifiedRow[],
+  project: { id: string; name: string },
+): Target[] {
+  const name = project.name.trim().toLowerCase();
+  return rows
+    .filter((row) =>
+      row.kind === "project" &&
+      !row.needsSetup &&
+      (row.projectId === project.id || row.name.trim().toLowerCase() === name),
+    )
+    .map((row) => row.target);
+}
+
 export async function gatherUnified(): Promise<Gathered> {
   const notes: string[] = [];
-  const [resources, list, machines, ws, stats] = await Promise.all([
-    collectResources(realSources()),
+  const [list, machines] = await Promise.all([
     workspaces().catch(() => []),
     listT3Machines().catch(() => []),
+  ]);
+  const shells = new Map<string, Awaited<ReturnType<typeof listShell>>>();
+  await Promise.all(machines.map(async (machine) => {
+    try {
+      const rpc = await connectT3Machine(machine.id);
+      try {
+        shells.set(machine.id, await listShell(rpc));
+      } finally {
+        rpc.close();
+      }
+    } catch {
+      notes.push(`Could not read ${machine.label}.`);
+    }
+  }));
+  const sources = realSources();
+  sources.remoteWorkspaces = async () => list;
+  sources.t3Machines = async () => machines;
+  sources.t3ActiveAgents = async (id) => {
+    const shell = shells.get(id);
+    if (!shell) throw new Error("Machine shell is unavailable");
+    return shell.threads.filter((thread) => thread.status === "running").length;
+  };
+  const [resources, ws, stats] = await Promise.all([
+    collectResources(sources),
     loadWorkspace().catch(() => null),
     agentStats().catch(() => []),
   ]);
@@ -119,26 +156,16 @@ export async function gatherUnified(): Promise<Gathered> {
   if (list.some((w) => w.id !== onRemote)) notes.push("Projects on workspaces other than the active one are not listed until you switch to them.");
   if (onRemote) notes.push("This Mac's projects are not readable while a remote workspace is active.");
 
-  await Promise.all(
-    machines.map(async (m) => {
-      try {
-        const rpc = await connectT3Machine(m.id);
-        try {
-          const shell = await listShell(rpc);
-          input.t3.push({
-            machineId: m.id,
-            label: m.label,
-            projects: shell.projects.map((p) => ({ id: p.id, title: p.title })),
-            threads: shell.threads.map((t) => ({ id: t.id, name: t.title ?? t.id, project: t.projectId, status: t.status, branch: t.branch ?? undefined })),
-          });
-        } finally {
-          rpc.close();
-        }
-      } catch {
-        notes.push(`Could not read ${m.label}.`);
-      }
-    }),
-  );
+  for (const machine of machines) {
+    const shell = shells.get(machine.id);
+    if (!shell) continue;
+    input.t3.push({
+      machineId: machine.id,
+      label: machine.label,
+      projects: shell.projects.map((p) => ({ id: p.id, title: p.title })),
+      threads: shell.threads.map((t) => ({ id: t.id, name: t.title ?? t.id, project: t.projectId, status: t.status, branch: t.branch ?? undefined })),
+    });
+  }
   return {
     rows: buildUnifiedRows(input),
     resources,

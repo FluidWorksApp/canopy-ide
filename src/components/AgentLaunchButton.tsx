@@ -13,18 +13,15 @@ import { Button } from "./ui";
 import { Dialog } from "./Dialog";
 import { ProjectSetupDialog } from "../remoteExecution/ProjectSetupDialog";
 import { decideLaunch } from "../placement/launch";
-import { getAgentPreference, setAgentPreference } from "../placement/preferences";
 import {
   automaticPreference,
-  inheritPreference,
-  preferenceKey,
   targetKey,
-  targetPreference,
   type DisplayTarget,
   type PlacementDecision,
   type Preference,
   type Target,
 } from "../placement/types";
+import { PlacementPicker } from "./PlacementPicker";
 import { canLaunchOnActiveTarget, requestTargetTransition } from "../placement/transitions";
 
 /** Where an agent launched from this button should run. Omit it and the button
@@ -39,7 +36,7 @@ export interface LaunchPlacement {
   onTransition?: (target: Target) => void | Promise<void>;
   /** The decision for this agent now. Defaults to the stored preferences and
    *  live resources; injectable so callers and tests can supply their own. */
-  decide?: (agentId: string) => Promise<PlacementDecision>;
+  decide?: (agentId: string, requested: Preference) => Promise<PlacementDecision>;
 }
 
 const LOCAL_TARGET: DisplayTarget = {
@@ -48,18 +45,16 @@ const LOCAL_TARGET: DisplayTarget = {
   online: true,
 };
 
-async function defaultDecide(project: { id: string }, agentId: string): Promise<PlacementDecision> {
+async function defaultDecide(project: { id: string; name: string }, agentId: string, requested: Preference): Promise<PlacementDecision> {
   // Loaded on demand: gathering pulls in the T3 and workspace clients.
-  const { gatherUnified } = await import("../placement/gather");
+  const { gatherUnified, projectAvailability } = await import("../placement/gather");
   const g = await gatherUnified();
-  const availability = g.rows
-    .filter((r) => r.kind === "project" && !r.needsSetup && r.target.kind !== "local")
-    .map((r) => r.target);
   return decideLaunch({
     projectId: project.id,
     agentKind: agentId,
     resources: g.resources,
-    availability,
+    requested,
+    availability: projectAvailability(g.rows, project),
     targets: g.targets,
   });
 }
@@ -130,6 +125,7 @@ export function AgentLaunchButton({
     resolveBrain((bin) => Boolean(installed[bin])) ?? AGENT_CLIS[0];
 
   const [pending, setPending] = useState<{ agentId: string; decision: PlacementDecision } | null>(null);
+  const [launchChoice, setLaunchChoice] = useState<{ agentId: string; preference: Preference } | null>(null);
   const [transition, setTransition] = useState<{ target: Target; name: string } | null>(null);
   const suppliedTargets = placement?.targets;
   const placementProjectId = placement?.project.id;
@@ -151,14 +147,14 @@ export function AgentLaunchButton({
   const [refusal, setRefusal] = useState("");
   const launching = useRef(false);
 
-  // Decide where first. A remote that lacks the project is set up on demand
-  // (and only then launched); no room anywhere says so instead of launching.
-  const onStart = (agentId: string) => {
+  // Bind the CLI and machine into one launch-scoped choice. The choice is not
+  // stored as an agent preference because it describes this launch only.
+  const startOn = (agentId: string, requested: Preference) => {
     if (!placement) return onStartDirect(agentId);
     if (launching.current) return;
     launching.current = true;
     setRefusal("");
-    void (placement.decide ?? ((id: string) => defaultDecide(placement.project, id)))(agentId)
+    void (placement.decide ?? ((id: string, choice: Preference) => defaultDecide(placement.project, id, choice)))(agentId, requested)
       .then((decision) => {
         if (!decision.target) {
           setRefusal(decision.reason);
@@ -183,6 +179,12 @@ export function AgentLaunchButton({
       .finally(() => { launching.current = false; });
   };
 
+  const onStart = (agentId: string) => {
+    if (!placement) return onStartDirect(agentId);
+    menu.close();
+    setLaunchChoice({ agentId, preference: automaticPreference() });
+  };
+
   const openMenu = (e: React.MouseEvent) => {
     // ContextMenu items are built once at open; bump a counter so a change in
     // targets/installed since last open is reflected.
@@ -194,32 +196,36 @@ export function AgentLaunchButton({
       onSend,
       onStart,
     });
-    const currentPreference = getAgentPreference(preferredCli.id);
-    const targets = placementTargets.some((item) => item.target.kind === "local")
-      ? placementTargets
-      : [LOCAL_TARGET, ...placementTargets];
-    const runOnChoices: { label: string; preference: Preference }[] = [
-      { label: "Use default", preference: inheritPreference() },
-      { label: "Automatic", preference: automaticPreference() },
-      ...targets.map((item) => ({ label: item.name, preference: targetPreference(item.target) })),
-    ];
-    const runOn: MenuItem[] = placement
-      ? [
-          { separator: true },
-          ...runOnChoices.map((choice) => ({
-            label: `Run on: ${choice.label}`,
-            hint: preferenceKey(currentPreference) === preferenceKey(choice.preference) ? "current" : undefined,
-            onClick: () => setAgentPreference(preferredCli.id, choice.preference),
-          })),
-        ]
-      : [];
     const tail = extras?.length ? [{ separator: true } as MenuItem, ...extras] : [];
-    menu.open(e, [...agents, ...runOn, ...tail]);
+    menu.open(e, [...agents, ...tail]);
   };
 
   return (
     <>
       {refusal && <small className="placement-decision" role="status">{refusal}</small>}
+      {launchChoice && placement && (
+        <Dialog
+          title={`Start ${AGENT_CLIS.find((cli) => cli.id === launchChoice.agentId)?.name ?? launchChoice.agentId}`}
+          dismissLabel="Cancel"
+          onDismiss={() => setLaunchChoice(null)}
+          actions={[{
+            label: "Start agent",
+            primary: true,
+            onClick: () => {
+              const choice = launchChoice;
+              setLaunchChoice(null);
+              startOn(choice.agentId, choice.preference);
+            },
+          }]}
+          body={
+            <PlacementPicker
+              value={launchChoice.preference}
+              targets={placementTargets}
+              onChange={(preference) => setLaunchChoice((current) => current ? { ...current, preference } : null)}
+            />
+          }
+        />
+      )}
       {transition && placement && (
         <Dialog
           title={`Run on ${transition.name}`}

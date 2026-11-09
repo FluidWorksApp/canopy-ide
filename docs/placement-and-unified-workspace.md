@@ -6,7 +6,9 @@ checkout or creates a worktree.
 
 ## Launch flow
 
-Every primary agent launch includes the same machine choices:
+Every primary agent launch includes the same machine choices. The chosen CLI and
+machine are confirmed together for that launch; choosing a machine here does not
+silently rewrite the CLI's saved default:
 
 1. **Automatic** picks an eligible online machine using current availability and
    measured load. It prefers a machine where the project is already set up.

@@ -1791,16 +1791,15 @@ const ProjectViewBody = memo(function ProjectViewBody({
   const [placementSetupReady, setPlacementSetupReady] = useState(false);
   const prepareMachineLaunch = useCallback(async (agentKind: string, machine: Preference) => {
     let gathered;
+    let availability: Target[];
     try {
-      const { gatherUnified } = await import("../../placement/gather");
+      const { gatherUnified, projectAvailability } = await import("../../placement/gather");
       gathered = await gatherUnified();
+      availability = projectAvailability(gathered.rows, { id: project.id, name: project.name });
     } catch (error) {
       onNotice(`Could not read connected machines: ${String(error)}`, "warn");
       return false;
     }
-    const availability = gathered.rows
-      .filter((row) => row.kind === "project" && !row.needsSetup)
-      .map((row) => row.target);
     const decision = decideLaunch({
       projectId: project.id,
       agentKind,
@@ -1824,7 +1823,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
       );
     }
     return true;
-  }, [onNotice, project.id]);
+  }, [onNotice, project.id, project.name]);
   const rootsRef = useRef(roots);
   rootsRef.current = roots;
 
@@ -13027,6 +13026,13 @@ const ProjectViewBody = memo(function ProjectViewBody({
             researchId={tab.researchId}
             agentTargets={agentTargets}
             installed={installed}
+            placement={{
+              project: {
+                id: project.id,
+                name: project.name,
+                components: project.components.map((c) => ({ componentId: c.id, label: c.label })),
+              },
+            }}
             onImplement={(entry, agentId) =>
               void implementResearch(entry, "", agentId)
             }
@@ -13063,6 +13069,13 @@ const ProjectViewBody = memo(function ProjectViewBody({
             id={tab.noteId}
             agentTargets={agentTargets}
             installed={installed}
+            placement={{
+              project: {
+                id: project.id,
+                name: project.name,
+                components: project.components.map((c) => ({ componentId: c.id, label: c.label })),
+              },
+            }}
             onStartNew={(note, agentId) => void workOnNote(note, "", agentId)}
             onSendToAgent={(note, target) =>
               sendTicketToAgent(target, noteContext(note, note.dir))
@@ -13152,6 +13165,13 @@ const ProjectViewBody = memo(function ProjectViewBody({
               serverForUrl(tab.url, previewServers),
             )}
             installed={installed}
+            placement={{
+              project: {
+                id: project.id,
+                name: project.name,
+                components: project.components.map((c) => ({ componentId: c.id, label: c.label })),
+              },
+            }}
             onSendToAgent={sendTicketToAgent}
             onStartNew={(agentId, text, cwd) => {
               // The serving component's checkout when the page is linked to
@@ -13182,6 +13202,13 @@ const ProjectViewBody = memo(function ProjectViewBody({
             onPatch={(patch) => patchTabRaw(tab.id, patch as Partial<SubTab>)}
             agentTargets={agentTargets}
             installed={installed}
+            placement={{
+              project: {
+                id: project.id,
+                name: project.name,
+                components: project.components.map((c) => ({ componentId: c.id, label: c.label })),
+              },
+            }}
             onSendToAgent={sendTicketToAgent}
             onStartNew={(agentId, text, cwd) => {
               const dir = cwd ?? componentsRef.current[0]?.path;

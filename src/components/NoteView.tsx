@@ -25,7 +25,7 @@ import {
 import { IS_MAC } from "../platform";
 import type { Notify } from "../types";
 import { ago } from "./ProjectView/helpers";
-import { AgentLaunchButton } from "./AgentLaunchButton";
+import { AgentLaunchButton, type LaunchPlacement } from "./AgentLaunchButton";
 import { Markdown } from "./Markdown";
 import {
   ArchiveIcon,
@@ -51,6 +51,7 @@ interface NoteViewProps {
   id: string;
   agentTargets: AgentTarget[];
   installed: Record<string, boolean>;
+  placement?: LaunchPlacement;
   /** Start an agent on this note (noteTask). */
   onStartNew: (note: ipc.NoteDetail, agentId: string) => void;
   onSendToAgent: (note: ipc.NoteDetail, target: AgentTarget) => void;
@@ -69,6 +70,7 @@ export function NoteView({
   id,
   agentTargets,
   installed,
+  placement,
   onStartNew,
   onSendToAgent,
   onOpenResearch,
@@ -516,6 +518,7 @@ export function NoteView({
           label="Work on it"
           agentTargets={agentTargets}
           installed={installed}
+          placement={placement}
           newAgentLabel="New agent on this note"
           primaryTitle={(cli) =>
             `Start ${cli} on this note, with everything attached to it`
