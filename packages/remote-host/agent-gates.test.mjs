@@ -23,7 +23,7 @@ test('each CLI gets its lifecycle hooks and the Rules gate, idempotently, keepin
   await writeFile(path.join(home,'.cursor/hooks.json'),JSON.stringify({version:1,hooks:{preToolUse:[{command:'/mine/audit.sh'}],stop:[{command:"'/old/.canopy/bin/canopy-hook' --agent cursor --signal turn-end"}]}}));
   await mkdir(path.join(home,'.gemini/config'),{recursive:true});
   await writeFile(path.join(home,'.gemini/config/hooks.json'),JSON.stringify({mine:{Stop:[]},canopy:{enabled:false,Notification:[]}}));
-  for(const agent of ['cursor','grok','opencode','omp','amp','agy']){
+  for(const agent of ['cursor','grok','kiro','opencode','omp','amp','agy']){
    assert.equal(await gatesInstalled(agent,home,home,helper),false,agent);
    assert.match(await installGates(agent,home,home,helper),/installed/,agent);
    assert.equal(await gatesInstalled(agent,home,home,helper),true,agent);
@@ -34,6 +34,9 @@ test('each CLI gets its lifecycle hooks and the Rules gate, idempotently, keepin
   assert.deepEqual(cursor.hooks.stop,[{command:"'/usr/local/bin/canopy-hook' --agent cursor --signal turn-end",timeout:10}],'an older Canopy entry is replaced, not stacked');
   const grok=JSON.parse(await readFile(path.join(home,'.grok/hooks/canopy.json'),'utf8'));
   assert.equal(grok.hooks.PreToolUse[0].hooks[0].command,"'/usr/local/bin/canopy-hook' --agent grok");
+  const kiro=JSON.parse(await readFile(path.join(home,'.kiro/agents/canopy.json'),'utf8'));
+  assert.equal(kiro.name,'canopy');assert.equal(kiro.hooks.preToolUse[0].command,"'/usr/local/bin/canopy-hook' --agent kiro");
+  assert.deepEqual(Object.keys(kiro.hooks),['agentSpawn','userPromptSubmit','preToolUse','postToolUse','stop']);
   const agy=JSON.parse(await readFile(path.join(home,'.gemini/config/hooks.json'),'utf8'));
   assert.deepEqual(agy.mine,{Stop:[]});assert.equal(agy.canopy.enabled,false,'the user switched it off');
   assert.equal(agy.canopy.PreToolUse[0].hooks[0].command,"'/usr/local/bin/canopy-hook' --agent agy --gate");
@@ -53,7 +56,7 @@ test('the workspace integrations report and set up every hooked CLI the image sh
   const helper=path.join(bin,'canopy-hook');await writeFile(helper,'#!/bin/sh\n');await chmod(helper,0o755);
   await writeFile(path.join(bin,'cursor-agent'),'#!/bin/sh\n');await chmod(path.join(bin,'cursor-agent'),0o755);
   const integrations=new AgentIntegrations(home,helper,bin);
-  assert.deepEqual(HOOKED_CLIS,['claude','codex','cursor','grok','opencode','omp','amp','agy']);
+  assert.deepEqual(HOOKED_CLIS,['claude','codex','cursor','grok','kiro','opencode','omp','amp','agy']);
   assert.deepEqual(await integrations.health('cursor'),{agent:'cursor',cli_installed:true,hooks:'missing',mcp:'missing'});
   assert.equal((await integrations.health('grok')).cli_installed,false);
   const report=await integrations.setup('cursor');
@@ -71,7 +74,7 @@ test('each CLI\'s registry gets the Canopy MCP server, keeping the user\'s keys 
   await writeFile(path.join(home,'.config/opencode/opencode.json'),JSON.stringify({theme:'x',mcp:{canopy:{type:'local',command:['/old/canopy-hook','--mcp'],enabled:false}}}));
   await mkdir(path.join(home,'.grok'),{recursive:true});
   await writeFile(path.join(home,'.grok/config.toml'),'# mine\nmodel = "grok-4"\n');
-  for(const agent of ['cursor','agy','omp','opencode','amp','grok']){
+  for(const agent of ['cursor','agy','omp','opencode','amp','grok','kiro']){
    assert.match(await installGatedMcp(agent,home,helper),/registered —/,agent);
    assert.equal(await gatedMcpStatus(agent,home,helper),'ours',agent);
    assert.equal(await installGatedMcp(agent,home,helper),'Canopy MCP server already registered',agent);

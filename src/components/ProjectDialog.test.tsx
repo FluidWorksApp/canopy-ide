@@ -3,6 +3,7 @@ import { describe, expect, it, vi } from "vitest";
 import type { Project } from "../projects";
 import { ProjectDialog } from "./ProjectDialog";
 import { updateSettings } from "../settings";
+import { getProjectPreference } from "../placement/preferences";
 
 vi.mock("@tauri-apps/plugin-dialog", () => ({
   open: vi.fn(async () => "/repo/new-app"),
@@ -28,6 +29,15 @@ const existing = (configured = true): Project => ({
 });
 
 describe("ProjectDialog project structure identity", () => {
+  it("persists the project's Run agents on choice when saved", () => {
+    localStorage.clear();
+    render(<ProjectDialog existing={existing()} onSave={vi.fn()} onCancel={() => {}} />);
+    fireEvent.change(screen.getByLabelText("Run agents on"), { target: { value: "remote" } });
+    expect(getProjectPreference("p1")).toBe("auto");
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    expect(getProjectPreference("p1")).toBe("remote");
+  });
+
   it("stamps the onboarding default lens onto a new project", async () => {
     localStorage.clear();
     updateSettings({ defaultProjectLens: "build" });

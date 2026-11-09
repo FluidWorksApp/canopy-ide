@@ -49,8 +49,19 @@ const cursorEvent: Record<string, string> = {
   PostToolUseFailure: "postToolUseFailure",
 };
 
+// Kiro registers camelCase triggers; its helper normalizes them to these names.
+const kiroEvent: Record<string, string> = {
+  Stop: "stop",
+  UserPromptSubmit: "userPromptSubmit",
+  PostToolUse: "postToolUse",
+};
+
 function registers(body: string, id: string, event: string): boolean {
-  return body.includes(event) || (id === "cursor" && body.includes(cursorEvent[event] ?? event));
+  return (
+    body.includes(event) ||
+    (id === "cursor" && body.includes(cursorEvent[event] ?? event)) ||
+    (id === "kiro" && body.includes(kiroEvent[event] ?? event))
+  );
 }
 
 describe("the fidelity manifest matches the installers", () => {

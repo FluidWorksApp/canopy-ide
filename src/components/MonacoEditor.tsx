@@ -206,11 +206,12 @@ export function MonacoEditor({
     // editor here: the tab may already have been open, so this can't ride on
     // the open path alone.
     const reveal = (e: Event) => {
-      const d = (e as CustomEvent).detail as { path?: string; line?: number };
+      const d = (e as CustomEvent).detail as { path?: string; line?: number; column?: number };
       if (!d?.path || !d.line || model.uri.path !== d.path) return;
       const line = Math.max(1, Math.min(d.line, model.getLineCount()));
+      const column = Math.max(1, Math.min(d.column ?? 1, model.getLineMaxColumn(line)));
       editor.revealLineInCenter(line);
-      editor.setPosition({ lineNumber: line, column: 1 });
+      editor.setPosition({ lineNumber: line, column });
       editor.focus();
     };
     window.addEventListener("canopy:reveal-line", reveal);

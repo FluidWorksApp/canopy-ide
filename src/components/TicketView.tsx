@@ -10,7 +10,8 @@ import * as ipc from "../ipc";
 import { heldBadge } from "../branchSwitch";
 import { useBranchSwitch } from "../useBranchSwitch";
 import { TRACKERS, trackerKey } from "../trackers";
-import { AgentLaunchButton } from "./AgentLaunchButton";
+import type { PlacementDecision } from "../placement/types";
+import { AgentLaunchButton, type LaunchPlacement } from "./AgentLaunchButton";
 import { Markdown } from "./Markdown";
 import { TrackerIcon } from "./icons";
 import type { AgentTarget } from "./TicketsPanel";
@@ -33,7 +34,9 @@ interface TicketViewProps {
   /** Which agent CLIs are on PATH. */
   installed: Record<string, boolean>;
   /** Start a fresh agent on this ticket in its worktree. */
-  onStartNew: (agentId: string) => void;
+  onStartNew: (agentId: string, decision?: PlacementDecision) => void;
+  /** Where new agents run; see AgentLaunchButton. */
+  placement?: LaunchPlacement;
   /** Run the ticket as a one-shot task in its worktree. The promise settles
    *  when the launch has been accepted or refused — it is what keeps the
    *  button honest about being mid-submit. */
@@ -58,6 +61,7 @@ export function TicketView({
   agentTargets,
   installed,
   onStartNew,
+  placement,
   onStartTask,
   taskRunning,
   onShowTasks,
@@ -328,6 +332,7 @@ export function TicketView({
             }`
           }
           onStart={onStartNew}
+          placement={placement}
           onSend={onSendToAgent}
           primaryTask={{
             title: "Start this ticket as a one-shot task",

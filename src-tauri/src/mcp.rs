@@ -211,6 +211,13 @@ const GLOBAL_REGISTRIES: &[Registry] = &[
         dialect: Dialect::Claude,
     },
     Registry {
+        agent: "kiro",
+        label: "Kiro",
+        rel: ".kiro/settings/mcp.json",
+        key: "mcpServers",
+        dialect: Dialect::Claude,
+    },
+    Registry {
         agent: "windsurf",
         label: "Windsurf",
         rel: ".codeium/windsurf/mcp_config.json",
@@ -233,6 +240,13 @@ const PROJECT_REGISTRIES: &[Registry] = &[
         agent: "cursor",
         label: "Cursor",
         rel: ".cursor/mcp.json",
+        key: "mcpServers",
+        dialect: Dialect::Claude,
+    },
+    Registry {
+        agent: "kiro",
+        label: "Kiro",
+        rel: ".kiro/settings/mcp.json",
         key: "mcpServers",
         dialect: Dialect::Claude,
     },

@@ -1,0 +1,36 @@
+/* The T3 Code machine view (T3MachineView.tsx) and its pairing form
+   (T3Connect.tsx). The overlay frame is workspace.css's .workspace-desktop. */
+.t3-connect { display: grid; gap: 10px; }
+.t3-connect label { display: grid; gap: 6px; }
+.t3-connect-preview, .t3-connect-list li { display: flex; align-items: center; gap: 10px; padding: 8px 10px; border: 1px solid var(--border); border-radius: var(--r-sm); }
+.t3-connect-preview { flex-wrap: wrap; }
+.t3-connect-preview > div:first-child, .t3-connect-list li > div { flex: 1; min-width: 0; display: grid; gap: 2px; }
+.t3-connect-preview small, .t3-connect-list small { color: var(--text-dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.t3-connect-list { list-style: none; margin: 0; padding: 0; display: grid; gap: 6px; }
+
+.t3-machine { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+.t3-machine-body { flex: 1; min-height: 0; display: flex; }
+.t3-machine-sidebar { width: 260px; overflow: auto; padding: 8px; border-right: 1px solid var(--border); }
+.t3-machine-sidebar h3 { margin: 10px 4px 4px; font-size: 11px; text-transform: uppercase; color: var(--text-dim); }
+.t3-projects { display: grid; }
+.t3-tree { list-style: none; margin: 0; padding: 0; }
+.t3-tree-row { display: block; width: 100%; padding: 3px 8px; border: 0; background: none; color: inherit; text-align: left; font: inherit; font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; cursor: pointer; border-radius: var(--r-xs); }
+.t3-tree-row:hover { background: var(--bg-raised); }
+.t3-tree-row.is-selected { background: var(--bg-alt); }
+.t3-tree-row.is-ignored { opacity: .55; }
+.t3-tree-mark { display: inline-block; width: 12px; }
+.t3-tree-note { font-size: 12px; color: var(--text-dim); padding: 3px 8px; margin: 0; }
+.t3-machine-main { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+.t3-machine-tabs { display: flex; align-items: center; gap: 4px; padding: 4px 8px; border-bottom: 1px solid var(--border); }
+.t3-machine-tab { display: inline-flex; align-items: center; border-radius: var(--r-xs); }
+.t3-machine-tab button { border: 0; background: none; color: inherit; font: inherit; font-size: 12px; padding: 3px 6px; cursor: pointer; }
+.t3-machine-tab.is-active { background: var(--bg-alt); }
+.t3-spacer { flex: 1; }
+.t3-machine-note { margin: 0; padding: 4px 10px; font-size: 12px; color: var(--text-dim); }
+.t3-machine-content { flex: 1; min-height: 0; position: relative; display: flex; }
+.t3-machine-pane { flex: 1; min-width: 0; min-height: 0; display: flex; flex-direction: column; }
+.t3-machine-pane[hidden] { display: none; }
+.t3-machine .remote-terminal { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+.t3-machine .remote-status { padding: 4px 10px; font-size: 12px; color: var(--text-dim); }
+.t3-terminal-surface { flex: 1; min-height: 0; overflow: hidden; padding: 6px; background: #0d0f12; }
+.t3-machine .remote-empty { flex: 1; padding: 40px; color: var(--text-dim); }

@@ -327,17 +327,21 @@ export interface PreviewSubTab {
   shots?: PreviewShot[];
 }
 
-/** A live Android device or emulator, shown as refreshing still frames.
+/** A live Android device or emulator, or an iOS Simulator.
  *
- *  Deliberately not a video stream: an agent drives the device and the user
- *  watches, so there is nothing to decode and the tab works identically on
- *  every platform Canopy runs on. Like PreviewSubTab, the selected device and
- *  collected annotations live on the tab so they survive switching away. */
+ *  Streamed through the device hub when the user installed the device tools
+ *  (src/devices, a port of T3 Code's device panel); otherwise shown as
+ *  refreshing adb screencap stills, which need nothing beyond adb. Like
+ *  PreviewSubTab, the selected device and collected annotations live on the
+ *  tab so they survive switching away. */
 export interface DeviceSubTab {
   id: string;
   type: "device";
-  /** adb serial ("" until a device is picked). */
+  /** adb serial, or a simulator UDID when `platform` is "ios" ("" until a
+   *  device is picked). */
   serial: string;
+  /** Absent on tabs saved before simulators could be picked: Android. */
+  platform?: "android" | "ios";
   /** The Android project this device is showing, for SDK resolution and so
    *  feedback names the codebase to change. */
   projectDir: string;

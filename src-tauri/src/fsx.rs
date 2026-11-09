@@ -19,6 +19,43 @@ use tauri::{AppHandle, Emitter, State};
 pub struct WorkspaceManager {
     roots: Mutex<Vec<PathBuf>>,
     watchers: Mutex<HashMap<PathBuf, RecommendedWatcher>>,
+    /// Single files outside every root that the user opened through the OS or
+    /// the command line. Exact canonical paths, never their folders: opening
+    /// ~/notes.txt must not make the rest of ~ readable. Only native code adds
+    /// to this (cli.rs), because the renderer is not a trust boundary. It lasts
+    /// for this app run.
+    files: Mutex<Vec<PathBuf>>,
+}
+
+/// More than anyone opens loose in one run; the oldest grant goes first.
+const MAX_GRANTED_FILES: usize = 512;
+
+impl WorkspaceManager {
+    /// Let the editor read and write this one file. Called only for a file the
+    /// user named to the OS or a terminal.
+    pub fn grant_file(&self, path: &Path) {
+        let Ok(canonical) = path.canonicalize() else {
+            return;
+        };
+        if !canonical.is_file() {
+            return;
+        }
+        let mut files = self.files.lock().unwrap();
+        files.retain(|p| p != &canonical);
+        if files.len() >= MAX_GRANTED_FILES {
+            files.remove(0);
+        }
+        files.push(canonical);
+    }
+
+    fn allows(&self, canonical: &Path) -> bool {
+        self.roots
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|root| canonical.starts_with(root))
+            || self.files.lock().unwrap().iter().any(|f| f == canonical)
+    }
 }
 
 // Shared by every renderer window. A renderer disappearing cannot let another
@@ -303,8 +340,7 @@ pub(crate) fn check_scope(
     if !suffix.as_os_str().is_empty() {
         canonical = canonical.join(suffix);
     }
-    let roots = state.roots.lock().unwrap();
-    if roots.iter().any(|root| canonical.starts_with(root)) {
+    if state.allows(&canonical) {
         Ok(canonical)
     } else {
         Err(format!(
@@ -1411,6 +1447,30 @@ fn copy_dir(src: &Path, dst: &Path) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_granted_file_is_reachable_but_its_neighbours_are_not() {
+        let dir = std::env::temp_dir()
+            .canonicalize()
+            .unwrap()
+            .join("canopy-fsx-grant-test");
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("loose.txt");
+        let neighbour = dir.join("secret.txt");
+        std::fs::write(&file, "a").unwrap();
+        std::fs::write(&neighbour, "b").unwrap();
+        let manager = WorkspaceManager::default();
+        assert!(!manager.allows(&file));
+        manager.grant_file(&file);
+        assert!(manager.allows(&file));
+        assert!(!manager.allows(&neighbour));
+        assert!(!manager.allows(&dir));
+        assert!(!manager.allows(&dir.join("loose.txt").join("child")));
+        // A folder is never granted this way: that is what workspace_add is for.
+        manager.grant_file(&dir);
+        assert!(!manager.allows(&neighbour));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     fn write(path: &Path, text: &str) {
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();

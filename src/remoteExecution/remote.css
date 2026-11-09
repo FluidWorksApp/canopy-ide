@@ -25,3 +25,16 @@ input:focus, button:focus-visible, textarea:focus, select:focus { outline: 2px s
 .mirror-repo { display: grid; gap: 2px; padding-left: 10px; }
 .mirror-repo small, .mirror-project small { color: var(--text-dim); overflow-wrap: anywhere; }
 .mirror-setup small.mirror-problem { color: var(--danger, #e5484d); }
+
+/* Unified workspace view (src/components/UnifiedWorkspace.tsx) */
+.workspace-unified-entry { display: flex; justify-content: flex-end; margin-bottom: 8px; }
+.unified-workspace { display: grid; gap: 10px; }
+.unified-toolbar { display: flex; flex-wrap: wrap; gap: 8px; align-items: end; }
+.unified-loads { list-style: none; margin: 0; padding: 0; display: grid; gap: 4px; }
+.unified-load { display: grid; grid-template-columns: 140px 1fr auto; gap: 8px; align-items: center; font-size: 12px; }
+.unified-load progress { width: 100%; }
+.unified-group h4 { margin: 8px 0 4px; }
+.unified-group ul { list-style: none; margin: 0; padding: 0; display: grid; gap: 4px; }
+.unified-row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; font-size: 12px; }
+.unified-badge { padding: 1px 6px; border-radius: 8px; background: var(--bg-elevated, rgba(127, 127, 127, 0.18)); }
+.unified-kind, .unified-status, .placement-decision { color: var(--text-dim); }
