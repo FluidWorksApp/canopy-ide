@@ -115,8 +115,9 @@ describe("tiers", () => {
   it("only lists a CLI whose flags were verified", () => {
     expect(tierFor("claude")).toBe("structured");
     expect(tierFor("codex")).toBe("oneshot");
+    expect(tierFor("kiro")).toBe("structured");
     for (const [id, runner] of Object.entries(COMPANION_RUNNERS)) {
-      expect(["structured", "oneshot"], id).toContain(runner.tier);
+      expect(["structured", "oneshot", "acp"], id).toContain(runner.tier);
     }
   });
 

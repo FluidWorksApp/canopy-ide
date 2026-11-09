@@ -142,6 +142,7 @@ export {
   CursorIcon,
   GeminiIcon,
   GrokIcon,
+  KiroIcon,
   OmpIcon,
   OpenCodeIcon,
 } from "../../shared/agentGlyphs";
@@ -154,6 +155,7 @@ import {
   CursorIcon as Cursor,
   GeminiIcon as Gemini,
   GrokIcon as Grok,
+  KiroIcon as Kiro,
   OmpIcon as Omp,
   OpenCodeIcon as OpenCode,
 } from "../../shared/agentGlyphs";
@@ -169,6 +171,7 @@ export const BRAND_ICONS: Record<string, (p: IconProps) => ReactElement> = {
   agy: Antigravity,
   cursor: Cursor,
   grok: Grok,
+  kiro: Kiro,
 };
 
 // ---------- sidebar rail ----------

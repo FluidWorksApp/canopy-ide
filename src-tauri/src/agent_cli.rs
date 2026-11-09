@@ -30,6 +30,7 @@ pub enum IntegrationAdapter {
     Omp,
     Cursor,
     Grok,
+    Kiro,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -124,6 +125,15 @@ pub const AGENT_CLIS: &[AgentCliManifest] = &[
         profile_isolation: None,
         account_probe: AccountProbe::Unknown,
         integration: Some(IntegrationAdapter::Grok),
+        mesh_reader: true,
+    },
+    AgentCliManifest {
+        id: "kiro",
+        bin: "kiro-cli",
+        aliases: &[],
+        profile_isolation: None,
+        account_probe: AccountProbe::Unknown,
+        integration: Some(IntegrationAdapter::Kiro),
         mesh_reader: true,
     },
 ];

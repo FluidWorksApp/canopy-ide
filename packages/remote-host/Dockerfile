@@ -33,6 +33,8 @@ COPY --from=agent-locks /locks/cursor.json /tmp/locks/
 RUN bash /usr/local/lib/canopy/install-agents.sh /tmp/locks/cursor.json
 COPY --from=agent-locks /locks/grok.json /tmp/locks/
 RUN bash /usr/local/lib/canopy/install-agents.sh /tmp/locks/grok.json
+COPY --from=agent-locks /locks/kiro.json /tmp/locks/
+RUN bash /usr/local/lib/canopy/install-agents.sh /tmp/locks/kiro.json
 COPY --from=agent-locks /locks/opencode.json /tmp/locks/
 RUN bash /usr/local/lib/canopy/install-agents.sh /tmp/locks/opencode.json
 # oh-my-pi is ~725 MB compressed: the lock ships it as a lazy launcher.

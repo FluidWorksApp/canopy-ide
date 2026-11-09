@@ -7,7 +7,7 @@ import path from 'node:path';
 // desktop, but every hit must also resolve inside /workspace (project files) or
 // the VM home (the global files of that table, and nothing else there).
 
-const AGENTS_MD=['claude','codex','cursor-agent','copilot','gemini','amp','aider','opencode','goose','qwen','droid','omp'];
+const AGENTS_MD=['claude','codex','cursor-agent','copilot','gemini','amp','aider','opencode','goose','qwen','droid','omp','kiro'];
 const SKILL_MD=['claude','codex','cursor-agent','copilot','gemini','opencode','goose','droid','qwen'];
 const CLAUDE=['claude'],CODEX=['codex'],GEMINI=['gemini','agy'],CURSOR=['cursor-agent'],COPILOT=['copilot'],OPENCODE=['opencode'],GOOSE=['goose'],QWEN=['qwen'],DROID=['droid'],AMP=['amp'],AIDER=['aider'],WINDSURF=['windsurf'],JUNIE=['junie'],CLINE=['cline'],KIRO=['kiro'],ROO=['roo'],CONTINUE=['continue'],ZED=['zed'];
 const MAX_NEST=4,MAX_BYTES=2*1024*1024;

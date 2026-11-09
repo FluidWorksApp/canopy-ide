@@ -102,6 +102,17 @@
       "notification": "block",
       "verifiedAt": "2026-08-18",
       "$note": "Grok's global hooks report all turn endings plus idle_prompt and permission_prompt notifications; Canopy maps each matcher to an explicit signal and ignores subagent events."
+    },
+    {
+      "id": "kiro",
+      "endsSession": [],
+      "endsTurn": ["Stop"],
+      "startsTurn": ["UserPromptSubmit"],
+      "toolActivity": ["PostToolUse"],
+      "structuredBlock": [],
+      "notification": "none",
+      "verifiedAt": "2026-10-27",
+      "$note": "Kiro's agent hooks (agentSpawn, userPromptSubmit, preToolUse, postToolUse, stop) mark turn and tool boundaries. There is no session-end or permission/notification trigger, so a closed terminal and a pending approval are inferred from the PTY, not from a hook."
     }
   ]
 }

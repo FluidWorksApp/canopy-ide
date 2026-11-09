@@ -159,7 +159,10 @@ export function companionRunnerLaunch(
 }
 
 export function tierFor(cliId: string): CompanionTier {
-  return structuredRunnerFor(cliId)?.tier ?? "terminal";
+  const tier = structuredRunnerFor(cliId)?.tier;
+  // An ACP agent is long-lived and streams, which is what "structured" means
+  // to the companion; only the wire protocol differs.
+  return tier === "acp" ? "structured" : (tier ?? "terminal");
 }
 
 /** One line for the settings row, so the choice is made with its consequence

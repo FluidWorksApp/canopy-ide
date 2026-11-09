@@ -20878,6 +20878,44 @@ a.btn-sm {
   gap: 8px;
 }
 
+.acp-picker {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.acp-picker-presets {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.acp-registry-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  max-height: 220px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.acp-registry-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.acp-badge {
+  font-size: 10px;
+  padding: 0 4px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  color: var(--text-dim);
+}
+
 .cli-custom-hint {
   font-size: 11px;
   color: var(--text-dim);

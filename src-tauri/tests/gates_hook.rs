@@ -100,6 +100,34 @@ impl Sandbox {
         String::from_utf8_lossy(&out.stdout).to_string()
     }
 
+    /// Like `hook`, but with the exit code and stderr: Kiro refuses by exiting
+    /// 2 and writing the reason to stderr, not by printing a verdict.
+    fn hook_exit(&self, args: &[&str], event: serde_json::Value) -> (Option<i32>, String, String) {
+        let mut cmd = Command::new(hook_bin());
+        cmd.args(args)
+            .env_clear()
+            .env("HOME", &self.home)
+            .env("PATH", std::env::var("PATH").unwrap_or_default())
+            .env("CANOPY", "1")
+            .current_dir(&self.repo)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        let mut child = cmd.spawn().unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(event.to_string().as_bytes())
+            .unwrap();
+        let out = child.wait_with_output().unwrap();
+        (
+            out.status.code(),
+            String::from_utf8_lossy(&out.stdout).to_string(),
+            String::from_utf8_lossy(&out.stderr).to_string(),
+        )
+    }
+
     fn pre(&self, tool: &str, input: serde_json::Value) -> serde_json::Value {
         serde_json::json!({
             "hook_event_name": "PreToolUse",
@@ -325,6 +353,28 @@ fn every_hooked_cli_is_refused_in_its_own_contract() {
         s.pre("Bash", serde_json::json!({ "command": "dropdb prod" })),
     );
     assert!(aider.trim().is_empty(), "{aider}");
+}
+
+/// Kiro's preToolUse contract: exit 2 blocks and hands stderr to the model;
+/// exit 0 allows. Its trigger name and shell tool differ from Claude's.
+#[test]
+fn kiro_is_refused_by_exit_code_two_with_the_reason_on_stderr() {
+    let s = Sandbox::new("kiro");
+    let event = |command: &str| {
+        serde_json::json!({
+            "hook_event_name": "preToolUse",
+            "cwd": s.repo.to_string_lossy(),
+            "tool_name": "execute_bash",
+            "tool_input": { "command": command },
+        })
+    };
+    let (code, stdout, stderr) = s.hook_exit(&["--agent", "kiro"], event("dropdb prod"));
+    assert_eq!(code, Some(2), "{stdout} {stderr}");
+    assert!(stderr.contains("can't be undone"), "{stderr}");
+    assert!(stdout.trim().is_empty(), "{stdout}");
+    let (code, stdout, _) = s.hook_exit(&["--agent", "kiro"], event("ls"));
+    assert_eq!(code, Some(0));
+    assert!(stdout.trim().is_empty(), "{stdout}");
 }
 
 /// Outside a Canopy terminal the hook does nothing — except answer a

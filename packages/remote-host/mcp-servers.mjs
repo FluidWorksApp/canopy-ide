@@ -31,11 +31,13 @@ export const GLOBAL_REGISTRIES=[
  {agent:'opencode',label:'OpenCode',rel:'.config/opencode/opencode.json',key:'mcp',dialect:'opencode'},
  {agent:'amp',label:'Amp',rel:'.config/amp/settings.json',key:'amp.mcpServers',dialect:'claude'},
  {agent:'cursor',label:'Cursor',rel:'.cursor/mcp.json',key:'mcpServers',dialect:'claude'},
+ {agent:'kiro',label:'Kiro',rel:'.kiro/settings/mcp.json',key:'mcpServers',dialect:'claude'},
  {agent:'windsurf',label:'Windsurf',rel:'.codeium/windsurf/mcp_config.json',key:'mcpServers',dialect:'claude'},
 ];
 export const PROJECT_REGISTRIES=[
  {agent:'claude',label:'Claude Code',rel:'.mcp.json',key:'mcpServers',dialect:'claude'},
  {agent:'cursor',label:'Cursor',rel:'.cursor/mcp.json',key:'mcpServers',dialect:'claude'},
+ {agent:'kiro',label:'Kiro',rel:'.kiro/settings/mcp.json',key:'mcpServers',dialect:'claude'},
  {agent:'vscode',label:'VS Code',rel:'.vscode/mcp.json',key:'servers',dialect:'claude'},
  {agent:'opencode',label:'OpenCode',rel:'opencode.json',key:'mcp',dialect:'opencode'},
 ];

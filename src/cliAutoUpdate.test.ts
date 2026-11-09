@@ -149,7 +149,7 @@ describe("planCliAutoUpdates", () => {
     expect(p.skipped.codex).toBe("current");
     expect(p.skipped.opencode).toBe("current");
     const unversioned = p.run.filter((j) => j.reason === "unversioned").map((j) => j.cli.id);
-    expect(unversioned.sort()).toEqual(["cursor", "omp"]);
+    expect(unversioned.sort()).toEqual(["cursor", "kiro", "omp"]);
   });
 
   it("attempts each CLI at most once per interval", () => {

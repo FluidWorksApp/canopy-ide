@@ -2718,7 +2718,14 @@ pub async fn git_pr_context(
     }
     let range = format!("{base}..HEAD");
     let sym = format!("{base}...HEAD");
-    let log = run(git(&top).args(["log", "--reverse", "--no-merges", "--format=%s", &range, "--"]))?;
+    let log = run(git(&top).args([
+        "log",
+        "--reverse",
+        "--no-merges",
+        "--format=%s",
+        &range,
+        "--",
+    ]))?;
     let all_commits: Vec<String> = log.lines().map(|l| l.to_string()).collect();
     let names = run(git(&top).args(["diff", "--name-only", &sym, "--"]))?;
     let all_files: Vec<String> = names.lines().map(|l| l.to_string()).collect();

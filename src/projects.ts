@@ -2,6 +2,7 @@
 // or more labeled component directories (frontend, backend, ...). The whole
 // workspace (projects, which are open, which is active) persists via the Rust
 // core to ~/.canopy/projects.json.
+import { customAcpRunner, type CustomAcpConfig } from "./acp/providers";
 import { invoke, invokeDesktop } from "./host";
 import type { CustomMicroTask } from "./microTasks";
 import { getSettings, updateSettings } from "./settings";
@@ -18,6 +19,7 @@ import {
   CLAUDE_RUNNER,
   CODEX_RUNNER,
   CURSOR_RUNNER,
+  KIRO_RUNNER,
   type StructuredRunner,
 } from "./structuredRunners";
 import {
@@ -1467,6 +1469,58 @@ export const BUILTIN_AGENT_CLIS: AgentCliDef[] = [
       launchArgs: (config) => option("--model", config.model),
     },
   },
+  {
+    id: "kiro",
+    name: "Kiro CLI",
+    bin: "kiro-cli",
+    icon: "◈",
+    brandColor: "#9046FF",
+    capabilities: {
+      managedIntegration: true,
+    },
+    modelSwitch: MODEL_SWITCH.kiro,
+    install: "curl -fsSL https://cli.kiro.dev/install | bash",
+    update: "kiro-cli update",
+    // Kiro updates itself on startup, but its only off-switch is the settings
+    // key `app.disableAutoupdates` (`kiro-cli settings list`), not an
+    // environment variable, so Canopy cannot suppress it per launch. It runs
+    // the documented `kiro-cli update` instead.
+    autoUpdate: {
+      mechanism: "canopy",
+      verification: {
+        cliVersion: "3.1.0",
+        checkedOn: "2026-10-27",
+        source: "`kiro-cli update --help`; `kiro-cli settings list` (app.disableAutoupdates)",
+      },
+    },
+    // Verified against kiro-cli 3.1.0 --help: the top-level command takes
+    // `--resume-id <SESSION_ID>` and `--agent <AGENT>` as shorthands for
+    // `chat --resume-id` / `chat --agent`.
+    resume: (id, bin) => `${bin} --resume-id ${id}`,
+    // A bare word at the top level is read as a subcommand, so the opening
+    // prompt goes to `chat`, whose [INPUT] is "The first question to ask".
+    prompt: (text, bin) => `${bin} chat ${shellQuote(text)}`,
+    // Kiro runs hooks only from the active agent's config. Canopy installs a
+    // global agent named `canopy` (agents.rs setup_kiro_hooks) that mirrors the
+    // default agent and carries the hooks; an unknown agent name falls back to
+    // Kiro's default, so a machine without it still launches.
+    sessionArgs: "--agent canopy",
+    structuredRunner: KIRO_RUNNER,
+    skipPermissions: "--trust-all-tools",
+    // No reviewed automatic mode is documented: `--trust-tools=<names>` trusts
+    // a fixed set rather than classifying calls, so Kiro keeps asking unless
+    // the user opts in to skipPermissions.
+    execution: {
+      fields: [
+        modelField(undefined, "auto"),
+        effortField(["low", "medium", "high", "xhigh", "max"]),
+      ],
+      launchArgs: (config) => [
+        ...option("--model", config.model),
+        ...option("--effort", config.effort),
+      ],
+    },
+  },
 ];
 
 /** Agents users run by hand that we don't ship a launcher entry for. Their id
@@ -1521,6 +1575,13 @@ export interface CustomAgentCli {
    * TUI is up — slower, but it works everywhere.
    */
   promptArgs?: string;
+  /**
+   * Set when this CLI speaks the Agent Client Protocol (`my-agent --acp`):
+   * `args` is the argv that puts it in ACP mode, an array and never a shell
+   * string. Build then drives it through the ACP transport as a first-class
+   * agent instead of a bare terminal.
+   */
+  acp?: CustomAcpConfig;
 }
 
 /** Ids nothing may take: the built-ins, and the bare binaries that already name
@@ -1623,6 +1684,7 @@ export function customCliDefs(): AgentCliDef[] {
         // initial, which at least tells two custom entries apart.
         icon: (name[0] ?? "▷").toUpperCase(),
         custom: true,
+        structuredRunner: c.acp ? customAcpRunner(id, name, bin, c.acp) : undefined,
         resume: resumeArgs
           ? (sessionId, b) => `${b} ${expandArgs(resumeArgs, "{id}", sessionId)}`
           : undefined,

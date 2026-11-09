@@ -42,6 +42,7 @@ const AGENTS_MD: &[&str] = &[
     "qwen",
     "droid",
     "omp",
+    "kiro",
 ];
 
 /// Agents that read the Agent Skills standard (`<name>/SKILL.md`).

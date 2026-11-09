@@ -15,6 +15,8 @@
 //   Antigravity — lobe-icons `antigravity`, in Google's four brand colours
 //   Cursor   — lobe-icons `cursor` (currentColor; the brand is black-on-white)
 //   Grok     — lobe-icons `grok` (currentColor, same reason)
+//   Kiro     — kiro.dev/icon.svg (official), as lobe-icons `kiro-color`: white
+//              ghost on the #9046FF tile
 //   others   — a terminal glyph (matches the app's Shell row)
 
 import type { ReactElement } from 'react'
@@ -155,6 +157,16 @@ export function GrokIcon({ size = 14, className }: P) {
   )
 }
 
+export function KiroIcon({ size = 14, className }: P) {
+  return (
+    <svg {...brand(size, className, '0 0 24 24')}>
+      <path d="M18.8 0H5.2A5.2 5.2 0 000 5.2v13.6A5.2 5.2 0 005.2 24h13.6a5.2 5.2 0 005.2-5.2V5.2A5.2 5.2 0 0018.8 0z" fill="#9046FF" />
+      <path d="M7.97 16.376c-1.644 3.642 1.86 4.556 4.443 2.424.76 2.39 3.608.607 4.631-1.247 2.251-4.084 1.342-8.249 1.108-9.108-1.6-5.859-9.6-5.869-10.976.03-.323 1.033-.328 2.206-.507 3.423-.09.617-.16 1.009-.393 1.655-.139.373-.323.7-.62 1.257-.458.865-.264 2.53 2.101 1.665l.224-.1h-.01l-.001.001z" fill="#fff" />
+      <path d="M12.722 10.985c-.656 0-.755-.785-.755-1.252 0-.423.074-.756.218-.97a.61.61 0 01.537-.283c.229 0 .428.095.567.289.159.218.243.55.243.964 0 .785-.303 1.252-.805 1.252h-.005zm2.703 0c-.656 0-.755-.785-.755-1.252 0-.423.074-.756.219-.97a.61.61 0 01.536-.283c.229 0 .428.095.567.289.159.218.243.55.243.964 0 .785-.303 1.252-.805 1.252h-.005z" fill="#000" />
+    </svg>
+  )
+}
+
 /** Terminal glyph — the app's fallback for CLIs with no brand mark (Shell),
  *  and for anything unknown. The set's shell, at the set's weight; it was a
  *  bare chevron and underscore at a weight of its own. */
@@ -173,6 +185,7 @@ const BRAND: Record<string, (p: P) => ReactElement> = {
   agy: AntigravityIcon,
   cursor: CursorIcon,
   grok: GrokIcon,
+  kiro: KiroIcon,
 }
 
 /** The hue each mark is drawn in, as data.
@@ -194,6 +207,7 @@ export const AGENT_BRAND_COLOR: Record<string, string> = {
   gemini: '#8E75B2',
   amp: '#F34E3F',
   aider: '#14b014',
+  kiro: '#9046FF',
 }
 
 /** An agent CLI's brand mark by registry id, matching the desktop's AgentIcon:

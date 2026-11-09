@@ -114,3 +114,14 @@ describe('the tree keeps the remote surface honest', () => {
     }
   })
 })
+
+describe('agent brand marks', () => {
+  it('draws Kiro as the official white ghost on the #9046FF tile', () => {
+    const src = read('shared', 'agentGlyphs.tsx')
+    const body = src.slice(src.indexOf('export function KiroIcon'), src.indexOf('/** Terminal glyph'))
+    expect(body).toContain('fill="#9046FF"')
+    expect(body).toContain('fill="#fff"')
+    expect(body).not.toContain('currentColor')
+    expect(src).toContain("kiro: '#9046FF'")
+  })
+})
