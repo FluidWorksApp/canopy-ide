@@ -267,12 +267,12 @@ it('delivers the final output before reporting an already-completed run',async()
  }finally{host.dispose();}
 });
 
-it('uploads dropped images through the desktop into the bound remote workspace',async()=>{
+it('uploads dropped files (not only images) through the desktop into the bound remote workspace',async()=>{
  const {host,desktop,fetcher}=setup();
  vi.mocked(desktop.invoke).mockResolvedValue(['/workspace/.canopy/attachments/image.png']);
- const paths=['/tmp/local-screenshot.png'];
- expect(await host.invoke('spot_stage_drop_images',{dir:'/workspace',paths})).toEqual(['/workspace/.canopy/attachments/image.png']);
- expect(desktop.invoke).toHaveBeenCalledWith('execution_remote_stage_images',{dir:'/workspace',paths,workspaceId:'alice',endpoint:connection.endpoint});
+ const paths=['/tmp/local-screenshot.png','/tmp/report.pdf'];
+ expect(await host.invoke('spot_stage_drop_images',{dir:'/workspace',paths,progressId:'drop-1'})).toEqual(['/workspace/.canopy/attachments/image.png']);
+ expect(desktop.invoke).toHaveBeenCalledWith('execution_remote_stage_images',{dir:'/workspace',paths,progressId:'drop-1',workspaceId:'alice',endpoint:connection.endpoint});
  expect(fetcher.mock.calls[0][0]).toContain('/resources');host.dispose();
 });
 
