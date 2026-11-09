@@ -12912,9 +12912,23 @@ const ProjectViewBody = memo(function ProjectViewBody({
             worktree={ticketWorktree(tab.ticket, ticketWorktrees)}
             agentTargets={agentTargets}
             installed={installed}
-            onStartNew={(agentId) =>
-              void startTicketWork(tab.ticket, tab.repo ?? "", agentId)
-            }
+            placement={{
+              project: {
+                id: project.id,
+                name: project.name,
+                components: project.components.map((c) => ({ componentId: c.id, label: c.label })),
+              },
+            }}
+            onStartNew={(agentId, decision) => {
+              // Launching reaches only the active host. A decision for another
+              // target is recorded and explained rather than silently ignored.
+              if (decision?.target && decision.target.kind !== "local" && !isRemoteHost())
+                onNotice(
+                  "Placement chose another machine, but agents start on the active workspace. Switch to that workspace to run it there; starting here instead.",
+                  "info",
+                );
+              void startTicketWork(tab.ticket, tab.repo ?? "", agentId);
+            }}
             onStartTask={() => startTicketTask(tab.ticket, tab.repo)}
             // The run's identity is its label (one adhoc task looks like any
             // other), so the live state the button shows is "a run with this

@@ -113,3 +113,5 @@ Opening a file picks a renderer by type; raw-source view is always available as 
 6. Viewer registry (MD → HTML → PDF → XLSX → ipynb)
 7. Agents panel v1 (process-tree detection) + hook bridge
 8. Multi-project workspace registry
+
+Placement (where an agent runs: local, remote, balanced) and the unified workspace view are described in docs/placement-and-unified-workspace.md.

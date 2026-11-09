@@ -5,7 +5,9 @@
 //   commits.bundle  commits the Mac has that origin does not (git bundle)
 //   staged.patch    `git diff --cached --binary` (applied with --index)
 //   unstaged.patch  `git diff --binary`
-//   files.tgz       untracked, non-ignored files plus opted-in env files
+//   files.tgz       untracked, non-ignored files plus opted-in env files and
+//                   ignored files the person picked
+// `filesOnly` applies just files.tgz to an existing project (never overwriting).
 // A job is started once and polled; the gateway gives native calls 15 seconds.
 // Every step is a spawned process with its own deadline: installs routinely
 // outlast run()'s budget and output cap. An artifact that cannot be applied is
@@ -112,7 +114,8 @@ export class MirrorJobs {
   const id=String(args.id??'');
   if(!STAGING_ID.test(id))throw Error('Invalid setup identifier');
   if(this.jobs.has(id))return this.status(id);
-  if(!OBJECT.test(String(args.head??'')))throw Error('Invalid commit');
+  const filesOnly=args.filesOnly===true;
+  if(!filesOnly&&!OBJECT.test(String(args.head??'')))throw Error('Invalid commit');
   if(args.branch!=null&&!validBranch(args.branch))throw Error('Invalid branch name');
   if(args.upstream!=null&&!(typeof args.upstream==='string'&&args.upstream.startsWith('origin/')&&validBranch(args.upstream.slice(7))))throw Error('Invalid upstream branch');
   const components=Array.isArray(args.components)?args.components:[];
@@ -135,7 +138,7 @@ export class MirrorJobs {
   await mkdir(path.join(this.home,'.canopy','mirror'),{recursive:true,mode:0o700});
   const job={id,state:'running',phase:'commits',repo,staging,steps:[],notes:[],installs:[],log:path.join(this.home,'.canopy','mirror',id+'.log'),startedAt:this.now(),finishedAt:null};
   this.jobs.set(id,job);
-  this.run(job,{head:args.head,branch:args.branch??null,upstream:args.upstream??null,components,install:args.install!==false,present}).catch(error=>{job.state='failed';job.error=String(error.message??error).slice(0,2048);}).finally(()=>{job.finishedAt=this.now();if(job.state==='running')job.state='complete';});
+  this.run(job,{filesOnly,head:args.head,branch:args.branch??null,upstream:args.upstream??null,components,install:args.install!==false,present}).catch(error=>{job.state='failed';job.error=String(error.message??error).slice(0,2048);}).finally(()=>{job.finishedAt=this.now();if(job.state==='running')job.state='complete';});
   return this.status(id);
  }
  status(id){
@@ -168,9 +171,11 @@ export class MirrorJobs {
   const kept=path.join(this.home,'.canopy','mirror',job.id);await mkdir(kept,{recursive:true,mode:0o700});
   await rename(path.join(job.staging,name),path.join(kept,name)).catch(()=>{});return path.join(kept,name);
  }
- async run(job,{head,branch,upstream,components,install,present}){
+ async run(job,{filesOnly=false,head,branch,upstream,components,install,present}){
   const git=(...argv)=>this.exec(job,['git',...argv]);
   try{
+   // Files-only (incremental sync into a project already here) leaves commits, branch and changes alone.
+   if(!filesOnly){
    // Commits: from the bundle when the Mac had unpushed work, else origin.
    if(present['commits.bundle']){
     const bundle=path.join(job.staging,'commits.bundle');
@@ -199,6 +204,7 @@ export class MirrorJobs {
     if(applied.ok)this.record(job,name.replace('.patch',''),'done',label+' applied');
     else this.record(job,name.replace('.patch',''),'failed',`${label} did not apply; the patch is kept at ${await this.keep(job,name)}. ${applied.output}`);
    }
+   }
    if(present['files.tgz']){
     job.phase='files';
     const archive=path.join(job.staging,'files.tgz');
@@ -206,16 +212,18 @@ export class MirrorJobs {
      const list=await this.capture(['tar','-tzf',archive,...LITERAL]),types=(await this.capture(['tar','-tvzf',archive,...LITERAL])).map(line=>line[0]);
      checkMembers(list,types);
      for(const name of list){const parts=name.split('/');for(let i=1;i<parts.length;i++){const info=await lstat(path.join(job.repo,...parts.slice(0,i))).catch(()=>null);if(info?.isSymbolicLink())throw Error(`Archive path goes through a symlink: ${name.slice(0,200)}`);}}
+     // --skip-old-files keeps what is there, so count only members that were absent.
+     let absent=0;for(const name of list)if(!await lstat(path.join(job.repo,name)).catch(()=>null))absent++;
      const extracted=await this.exec(job,['tar','-xzf',archive,'-C',job.repo,'--no-same-owner','--skip-old-files'],{env:{LC_ALL:'C'}});
      if(!extracted.ok)throw Error(extracted.output);
-     this.record(job,'files','done',`${list.length} new or local-only ${list.length===1?'file':'files'} copied`);
+     this.record(job,'files','done',`${absent} new or local-only ${absent===1?'file':'files'} copied${absent<list.length?` (${list.length-absent} already there, left as is)`:''}`);
     }catch(error){this.record(job,'files','failed',`New files were not copied; the archive is kept at ${await this.keep(job,'files.tgz')}. ${error.message??error}`);}
    }
-   if(await lstat(path.join(job.repo,'.gitmodules')).catch(()=>null)){
+   if(!filesOnly&&await lstat(path.join(job.repo,'.gitmodules')).catch(()=>null)){
     const submodules=await git('submodule','update','--init','--recursive');
     this.record(job,'submodules',submodules.ok?'done':'failed',submodules.ok?'Submodules checked out':submodules.output);
    }
-   job.notes.push(...await toolchainNotes(job.repo));
+   if(!filesOnly)job.notes.push(...await toolchainNotes(job.repo));
    if(install){
     job.phase='dependencies';
     for(const plan of await installPlan(job.repo,components)){

@@ -243,6 +243,19 @@ export interface OrchestrationProjectShell {
   readonly [field: string]: unknown;
 }
 
+/** orchestration thread shell, the fields Canopy reads. Everything is optional
+ *  because the snapshot's thread shape is not pinned by a Canopy test against a
+ *  live server; unknown shapes are dropped in methods.ts. */
+export interface OrchestrationThreadShell {
+  readonly id: string;
+  readonly projectId?: string;
+  readonly title?: string;
+  readonly status?: string;
+  readonly branch?: string | null;
+  readonly archivedAt?: string | null;
+  readonly [field: string]: unknown;
+}
+
 /** packages/contracts/src/orchestrationV2.ts: OrchestrationV2SubscribeShellInput. */
 export interface OrchestrationV2SubscribeShellInput {
   readonly afterSequence?: number;
@@ -255,7 +268,7 @@ export interface OrchestrationV2SubscribeShellInput {
 export type OrchestrationV2ShellStreamItem =
   | { readonly kind: "synchronized" }
   | { readonly kind: "snapshot-required" }
-  | { readonly kind: "snapshot"; readonly snapshot: { readonly projects: ReadonlyArray<OrchestrationProjectShell>; readonly [field: string]: unknown } }
+  | { readonly kind: "snapshot"; readonly snapshot: { readonly projects: ReadonlyArray<OrchestrationProjectShell>; readonly threads?: ReadonlyArray<OrchestrationThreadShell>; readonly [field: string]: unknown } }
   | { readonly kind: "project.updated"; readonly sequence: number; readonly project: OrchestrationProjectShell }
   | { readonly kind: "project.removed"; readonly sequence: number; readonly projectId: string }
   | { readonly kind: string; readonly [field: string]: unknown };

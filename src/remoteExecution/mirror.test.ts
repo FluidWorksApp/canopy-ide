@@ -105,3 +105,91 @@ it('skips a project that was set up completely',async()=>{
  const result=await run(h);
  expect(result.projects[0].state).toBe('skipped');expect(h.calls.some(c=>c.command==='execution_mirror_send')).toBe(false);
 });
+
+// On-demand setup of ONE project.
+import {ensureProjectOnRemote} from './mirror';
+
+function ondemand(opts:{remoteStore?:string;missing?:string[];rows?:object[]}={}){
+ const calls:{command:string;args?:Record<string,unknown>}[]=[];
+ let remoteStore=opts.remoteStore??'{"projects":[],"openIds":[]}';
+ const mk=(id:string,label:string,relative:string)=>({projectId:id,projectName:'Shop',componentId:'c-'+label,label,path:'/w/shop/'+relative,repo:'/w/shop',relative,origin:'https://github.com/o/shop.git',head:'a'.repeat(40),branch:'main',unpushed:0,staged:0,unstaged:0,untracked:0,stashes:0,envFiles:[]});
+ const rows=opts.rows??[mk('p1','web',''),mk('p2','other','')];
+ const local=async(command:string,args?:Record<string,unknown>):Promise<any>=>{
+  calls.push({command,args});
+  switch(command){
+   case 'execution_mirror_inspect':return rows;
+   case 'store_load':return JSON.stringify({projects:[{id:'p1',name:'Shop',components:[{id:'c-web',label:'web',path:'/w/shop'}]}]});
+   case 'execution_remote_import_git':return {};
+   case 'execution_mirror_send':return {head:'a'.repeat(40),branch:'main',upstream:null,relative:'',sent:{commits:false,staged:false,unstaged:false,files:1,envFiles:0,skipped:[],artifacts:{'files.tgz':5}}};
+  }
+  throw Error('unexpected local '+command);
+ };
+ const remote=async(command:string,args?:Record<string,unknown>):Promise<any>=>{
+  calls.push({command,args});
+  switch(command){
+   case 'fs_create_dir':case 'mirror_apply_discard':return {};
+   case 'fs_stat':if((opts.missing??[]).some(m=>String(args!.path).endsWith('/'+m)))throw Error('No such file');return {};
+   case 'git_clone_start':return {id:'c',state:'complete',path:'/workspace/x/repo-1/shop'};
+   case 'store_load':return remoteStore;
+   case 'store_save':remoteStore=String(args!.data);return {};
+   case 'mirror_apply_start':return {};
+   case 'mirror_apply_status':return done;
+  }
+  throw Error('unexpected remote '+command);
+ };
+ return {calls,local,remote,store:()=>JSON.parse(remoteStore) as {projects:{id:string;mirroredFrom?:string;components:{path:string;label:string}[]}[]}};
+}
+const ensure=(h:ReturnType<typeof ondemand>,extra:Record<string,unknown>={})=>{let last!:MirrorProgress;return ensureProjectOnRemote({local:h.local,remote:h.remote,sleep:async()=>{},newId:()=>'22222222-2222-2222-2222-222222222222'},{projectId:'p1',selectedFiles:{'c-web':['.env','data/dev.sqlite']},install:false,...extra} as never,p=>{last=p;}).then(()=>last);};
+
+it('sets up one project on demand without the whole-Mac mirror, sending only the chosen files',async()=>{
+ const h=ondemand();const result=await ensure(h);
+ expect(result.projects).toHaveLength(1);expect(result.projects[0].state).toBe('done');
+ const cmds=h.calls.map(c=>c.command);
+ expect(cmds).not.toContain('execution_remote_import_accounts');
+ expect(h.calls.filter(c=>c.command==='execution_mirror_send')).toHaveLength(1);
+ expect(h.calls.find(c=>c.command==='execution_mirror_send')!.args).toMatchObject({projectId:'p1',componentId:'c-web',extraFiles:['.env','data/dev.sqlite']});
+ expect(h.calls.find(c=>c.command==='mirror_apply_start')!.args).toMatchObject({head:'a'.repeat(40)});
+ // Only p1 was inspected into the store.
+ expect(h.store().projects.map(p=>p.mirroredFrom)).toEqual(['p1']);
+});
+
+it('is idempotent: an already set up project only gets the selected files that are missing remotely',async()=>{
+ const first=ondemand();await ensure(first);
+ const saved=JSON.stringify({projects:first.store().projects.map(p=>({...p,components:[{...p.components[0],label:'web',path:'/workspace/x/repo-1/shop'}]})),openIds:[]});
+ const again=ondemand({remoteStore:saved,missing:['data/dev.sqlite']});
+ const result=await ensure(again);
+ expect(result.projects[0].state).toBe('done');
+ expect(again.calls.some(c=>c.command==='git_clone_start')).toBe(false);
+ expect(again.calls.find(c=>c.command==='execution_mirror_send')!.args).toMatchObject({extraFiles:['data/dev.sqlite'],filesOnly:true});
+ const start=again.calls.find(c=>c.command==='mirror_apply_start')!.args!;
+ expect(start).toMatchObject({filesOnly:true,repo:'/workspace/x/repo-1/shop'});expect(start).not.toHaveProperty('head');
+ expect(again.store().projects).toHaveLength(1);
+});
+
+it('does not treat a non-not-found stat failure as missing',async()=>{
+ const first=ondemand();await ensure(first);
+ const saved=JSON.stringify({projects:first.store().projects,openIds:[]});
+ const again=ondemand({remoteStore:saved});
+ const remote=again.remote;
+ const flaky=async(command:string,args?:Record<string,unknown>)=>{if(command==='fs_stat')throw Error('connection reset');return remote(command,args);};
+ let last!:MirrorProgress;
+ await ensureProjectOnRemote({local:again.local,remote:flaky,sleep:async()=>{},newId:()=>'22222222-2222-2222-2222-222222222222'},{projectId:'p1',selectedFiles:{'c-web':['.env']},install:false},p=>{last=p;});
+ expect(last.projects[0].state).toBe('failed');
+ expect(again.calls.some(c=>c.command==='execution_mirror_send')).toBe(false);
+});
+
+it('sends nothing when every selected file is already on the remote',async()=>{
+ const first=ondemand();await ensure(first);
+ const saved=JSON.stringify({projects:first.store().projects,openIds:[]});
+ const again=ondemand({remoteStore:saved,missing:[]});
+ const result=await ensure(again);
+ expect(again.calls.some(c=>c.command==='execution_mirror_send')).toBe(false);
+ expect(result.projects[0].state).toBe('skipped');
+ expect(result.projects[0].detail).toMatch(/already/i);
+});
+
+it('fails clearly for a project that is not on this Mac',async()=>{
+ const h=ondemand();
+ const result=await ensure(h,{projectId:'nope'});
+ expect(result.projects[0].state).toBe('failed');expect(result.projects[0].detail).toMatch(/not on this Mac/);
+});

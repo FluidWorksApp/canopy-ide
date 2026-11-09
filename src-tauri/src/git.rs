@@ -2571,6 +2571,172 @@ pub async fn gh_pr_ready(
     Ok(format!("#{number} is ready for review"))
 }
 
+// ---------- opening a pull request ----------
+
+/// `gh` wants the branch name, not the `origin/…` ref `default_base` can hand
+/// back.
+fn pr_branch_leaf(name: &str) -> &str {
+    name.strip_prefix("origin/").unwrap_or(name)
+}
+
+/// Arguments for `gh pr create`. The body is not among them: it goes in on
+/// stdin (`--body-file -`) so a long description never meets an argv limit or a
+/// shell. Every value is its own argv entry, and a leading `-` is refused so a
+/// branch named like a flag cannot become one.
+pub(crate) fn pr_create_args(
+    base: &str,
+    head: &str,
+    title: &str,
+    draft: bool,
+    reviewers: &[String],
+) -> Result<Vec<String>, String> {
+    let base = pr_branch_leaf(base.trim());
+    let head = head.trim();
+    if title.trim().is_empty() {
+        return Err("a pull request needs a title".into());
+    }
+    for (what, v) in [("base", base), ("head", head)] {
+        if v.is_empty() {
+            return Err(format!("a pull request needs a {what} branch"));
+        }
+        if v.starts_with('-') {
+            return Err(format!("{what} branch {v:?} looks like a flag"));
+        }
+    }
+    let mut args: Vec<String> = ["pr", "create", "--base", base, "--head", head, "--title"]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+    args.push(title.trim().to_string());
+    args.extend(["--body-file".into(), "-".into()]);
+    if draft {
+        args.push("--draft".into());
+    }
+    for r in reviewers.iter().map(|r| r.trim()).filter(|r| !r.is_empty()) {
+        if r.starts_with('-') {
+            return Err(format!("reviewer {r:?} looks like a flag"));
+        }
+        args.extend(["--reviewer".into(), r.to_string()]);
+    }
+    Ok(args)
+}
+
+/// Open a PR for `head` through `gh pr create`. Outward-facing (it notifies
+/// reviewers), so the dialog is the confirmation. Returns the PR's URL.
+#[tauri::command]
+pub async fn gh_pr_create(
+    state: State<'_, WorkspaceManager>,
+    repo: String,
+    base: String,
+    head: String,
+    title: String,
+    body: String,
+    draft: bool,
+    reviewers: Option<Vec<String>>,
+) -> Result<String, String> {
+    let top = repo_path(&state, &repo)?;
+    let args = pr_create_args(&base, &head, &title, draft, &reviewers.unwrap_or_default())?;
+    let mut cmd = gh_in(&top);
+    cmd.args(&args);
+    let out = run_net_with_input(&mut cmd, Some(&body))?;
+    // gh prints the URL last; earlier lines can be "Creating pull request…".
+    Ok(out
+        .lines()
+        .rev()
+        .find(|l| l.trim().starts_with("http"))
+        .unwrap_or(out.trim())
+        .trim()
+        .to_string())
+}
+
+const PR_TEMPLATE_PATHS: [&str; 5] = [
+    ".github/PULL_REQUEST_TEMPLATE.md",
+    ".github/pull_request_template.md",
+    "docs/PULL_REQUEST_TEMPLATE.md",
+    "PULL_REQUEST_TEMPLATE.md",
+    "pull_request_template.md",
+];
+const PR_TEMPLATE_MAX: usize = 16 * 1024;
+const PR_CONTEXT_COMMITS: usize = 50;
+const PR_CONTEXT_FILES: usize = 200;
+
+/// The repo's PR template, if it keeps one, cut to a size the dialog can show.
+pub(crate) fn detect_pr_template(top: &Path) -> Option<String> {
+    PR_TEMPLATE_PATHS.iter().find_map(|rel| {
+        let path = top.join(rel);
+        // A symlinked template could point anywhere; only regular files count.
+        if !std::fs::symlink_metadata(&path).ok()?.is_file() {
+            return None;
+        }
+        let text = std::fs::read_to_string(&path).ok()?;
+        if text.trim().is_empty() {
+            return None;
+        }
+        let mut end = text.len().min(PR_TEMPLATE_MAX);
+        while !text.is_char_boundary(end) {
+            end -= 1;
+        }
+        Some(text[..end].to_string())
+    })
+}
+
+#[derive(Serialize, Clone, Default)]
+pub struct PrContext {
+    pub branch: String,
+    /// The base this was measured against, as a branch name gh accepts.
+    pub base: String,
+    /// Subjects since the merge-base, oldest first, bounded.
+    pub commits: Vec<String>,
+    pub commit_count: usize,
+    pub files: Vec<String>,
+    pub file_count: usize,
+    /// `git diff --shortstat`, e.g. "3 files changed, 10 insertions(+)".
+    pub stat: String,
+    pub template: Option<String>,
+}
+
+/// What a PR description is written from. Empty `base` means the repo's own.
+#[tauri::command]
+pub async fn git_pr_context(
+    state: State<'_, WorkspaceManager>,
+    repo: String,
+    base: String,
+) -> Result<PrContext, String> {
+    let top = repo_path(&state, &repo)?;
+    let (branch, detached) = head_branch(&top);
+    if detached {
+        return Err("HEAD is detached, check out a branch before opening a PR".into());
+    }
+    let branch = branch.ok_or("no current branch")?;
+    let base = if base.trim().is_empty() {
+        default_base(&top)
+    } else {
+        base.trim().to_string()
+    };
+    if base.starts_with('-') {
+        return Err(format!("base {base:?} looks like a flag"));
+    }
+    let range = format!("{base}..HEAD");
+    let sym = format!("{base}...HEAD");
+    let log = run(git(&top).args(["log", "--reverse", "--no-merges", "--format=%s", &range, "--"]))?;
+    let all_commits: Vec<String> = log.lines().map(|l| l.to_string()).collect();
+    let names = run(git(&top).args(["diff", "--name-only", &sym, "--"]))?;
+    let all_files: Vec<String> = names.lines().map(|l| l.to_string()).collect();
+    let stat = run(git(&top).args(["diff", "--shortstat", &sym, "--"]))
+        .map(|s| s.trim().to_string())
+        .unwrap_or_default();
+    Ok(PrContext {
+        branch,
+        base: pr_branch_leaf(&base).to_string(),
+        commit_count: all_commits.len(),
+        commits: all_commits.into_iter().take(PR_CONTEXT_COMMITS).collect(),
+        file_count: all_files.len(),
+        files: all_files.into_iter().take(PR_CONTEXT_FILES).collect(),
+        stat,
+        template: detect_pr_template(&top),
+    })
+}
+
 // ---------- pull request conversation (gh api graphql) ----------
 //
 // Review threads — the inline comments, and the only place resolved/outdated
@@ -6949,5 +7115,68 @@ index 333..444 100644
         assert_eq!(l.mentions.len(), 1);
         assert_eq!(l.mentions[0].repo, "other/repo");
         assert_eq!(l.mentions[0].state, "MERGED");
+    }
+
+    #[test]
+    fn pr_create_args_keep_every_value_a_separate_argument() {
+        let a = pr_create_args(
+            "origin/main",
+            "feat/x",
+            "  Add the thing; rm -rf / ",
+            true,
+            &["alice".into(), " ".into(), "bob".into()],
+        )
+        .unwrap();
+        assert_eq!(&a[..2], ["pr", "create"]);
+        let at = |flag: &str| a[a.iter().position(|x| x == flag).unwrap() + 1].clone();
+        assert_eq!(at("--base"), "main");
+        assert_eq!(at("--head"), "feat/x");
+        assert_eq!(at("--title"), "Add the thing; rm -rf /");
+        assert_eq!(at("--body-file"), "-");
+        assert!(a.contains(&"--draft".to_string()));
+        assert_eq!(a.iter().filter(|x| *x == "--reviewer").count(), 2);
+        let ready = pr_create_args("main", "feat/x", "T", false, &[]).unwrap();
+        assert!(!ready.contains(&"--draft".to_string()));
+    }
+
+    #[test]
+    fn pr_create_args_refuse_empty_or_flag_like_input() {
+        assert!(pr_create_args("main", "feat/x", "  ", false, &[]).is_err());
+        assert!(pr_create_args("", "feat/x", "T", false, &[]).is_err());
+        assert!(pr_create_args("main", "--web", "T", false, &[]).is_err());
+        assert!(pr_create_args("main", "feat/x", "T", false, &["-x".into()]).is_err());
+    }
+
+    #[test]
+    fn pr_template_is_found_in_github_dir_and_bounded() {
+        let dir = std::env::temp_dir().join(format!("canopy-prtpl-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join(".github")).unwrap();
+        assert!(detect_pr_template(&dir).is_none());
+        std::fs::write(dir.join(".github/PULL_REQUEST_TEMPLATE.md"), "## Summary\n").unwrap();
+        assert_eq!(detect_pr_template(&dir).as_deref(), Some("## Summary\n"));
+        std::fs::write(
+            dir.join(".github/PULL_REQUEST_TEMPLATE.md"),
+            "é".repeat(PR_TEMPLATE_MAX),
+        )
+        .unwrap();
+        assert!(detect_pr_template(&dir).unwrap().len() <= PR_TEMPLATE_MAX);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn pr_template_symlink_is_not_followed() {
+        let dir = std::env::temp_dir().join(format!("canopy-prtpl-link-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join(".github")).unwrap();
+        std::fs::write(dir.join("secret.txt"), "private").unwrap();
+        std::os::unix::fs::symlink(
+            dir.join("secret.txt"),
+            dir.join(".github/PULL_REQUEST_TEMPLATE.md"),
+        )
+        .unwrap();
+        assert!(detect_pr_template(&dir).is_none());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -1,7 +1,19 @@
-import { fireEvent, render, screen } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 import { AgentLaunchButton } from "./AgentLaunchButton";
 import type { AgentTarget } from "./TicketsPanel";
+import type { PlacementDecision } from "../placement/types";
+import { getAgentPreference } from "../placement/preferences";
+
+vi.mock("../remoteExecution/ProjectSetupDialog", () => ({
+  ProjectSetupDialog: ({ projectName, workspaceName, onComplete }: { projectName: string; workspaceName: string; onComplete?: (ok: boolean) => void }) => (
+    <div>
+      Setup {projectName} on {workspaceName}
+      <button onClick={() => onComplete?.(true)}>finish-ok</button>
+      <button onClick={() => onComplete?.(false)}>finish-fail</button>
+    </div>
+  ),
+}));
 
 const origin: AgentTarget = {
   tabId: "agent-tab",
@@ -95,5 +107,70 @@ describe("AgentLaunchButton", () => {
     fireEvent.click(screen.getByText("Other agent"));
 
     expect(p.onSend).toHaveBeenCalledWith(other);
+  });
+
+  describe("placement", () => {
+    const project = { id: "p1", name: "App", components: [{ componentId: "c1", label: "web" }] };
+    const decision = (d: Partial<PlacementDecision>): PlacementDecision => ({
+      target: { kind: "local" }, reason: "", alternatives: [], needsSetup: false, ...d,
+    });
+    const click = () => fireEvent.click(screen.getByText("Send feedback", { exact: false }).closest("button")!);
+
+    it("launches straight away when the decision is local, passing it along", async () => {
+      const p = props();
+      const d = decision({});
+      render(<AgentLaunchButton {...p} placement={{ project, decide: async () => d }} />);
+      click();
+      await waitFor(() => expect(p.onStart).toHaveBeenCalledWith(expect.any(String), d));
+    });
+
+    it("asks to set the project up before launching on a remote that lacks it", async () => {
+      const p = props();
+      const d = decision({ target: { kind: "remote", workspaceId: "w1" }, needsSetup: true });
+      render(<AgentLaunchButton {...p} placement={{ project, workspaceName: "Cloud", decide: async () => d }} />);
+      click();
+      expect(await screen.findByText("Setup App on Cloud")).toBeInTheDocument();
+      expect(p.onStart).not.toHaveBeenCalled();
+      expect(screen.getByRole("button", { name: "Launch" })).toBeDisabled();
+      fireEvent.click(screen.getByText("finish-ok"));
+      fireEvent.click(screen.getByRole("button", { name: "Launch" }));
+      expect(p.onStart).toHaveBeenCalledWith(expect.any(String), d);
+    });
+
+    it("keeps Launch disabled when setup fails", async () => {
+      const p = props();
+      const d = decision({ target: { kind: "remote", workspaceId: "w1" }, needsSetup: true });
+      render(<AgentLaunchButton {...p} placement={{ project, workspaceName: "Cloud", decide: async () => d }} />);
+      click();
+      await screen.findByText("Setup App on Cloud");
+      fireEvent.click(screen.getByText("finish-ok"));
+      fireEvent.click(screen.getByText("finish-fail"));
+      expect(screen.getByRole("button", { name: "Launch" })).toBeDisabled();
+    });
+
+    it("reports a failed decision instead of silently launching locally", async () => {
+      const p = props();
+      render(<AgentLaunchButton {...p} placement={{ project, decide: async () => { throw new Error("offline"); } }} />);
+      click();
+      expect(await screen.findByText(/offline/)).toBeInTheDocument();
+      expect(p.onStart).not.toHaveBeenCalled();
+    });
+
+    it("does not launch when no target has room", async () => {
+      const p = props();
+      render(<AgentLaunchButton {...p} placement={{ project, decide: async () => decision({ target: null, reason: "Full." }) }} />);
+      click();
+      expect(await screen.findByText("Full.")).toBeInTheDocument();
+      expect(p.onStart).not.toHaveBeenCalled();
+    });
+
+    it("stores the Run on choice per agent from the caret menu", () => {
+      localStorage.clear();
+      const p = props();
+      render(<AgentLaunchButton {...p} placement={{ project, decide: async () => decision({}) }} />);
+      fireEvent.click(screen.getByTitle("Send to a running agent, or start a different one"));
+      fireEvent.click(screen.getByText("Run on: Remote"));
+      expect(getAgentPreference("opencode")).toBe("remote");
+    });
   });
 });

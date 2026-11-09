@@ -5,7 +5,7 @@
 // token. gh goes through ctx.execute rather than ctx.run because run_net's
 // contract needs things run can't give: stdout+stderr on success, stdout kept
 // on a failed `gh api graphql`, a request body on stdin, and 8 MiB streams.
-import {access,constants,realpath} from 'node:fs/promises';
+import {access,constants,lstat,readFile,realpath} from 'node:fs/promises';
 import {existsSync} from 'node:fs';
 import {delimiter,isAbsolute,join} from 'node:path';
 import {parseWorktrees,stripGhNoise,remoteUnreachableFor,repoBusy,switchFailure} from './checkout-errors.mjs';
@@ -288,6 +288,37 @@ export function githubCommands(ctx){
    return del?`Closed #${n} and deleted its branch`:`Closed #${n}`;
   },
   async gh_pr_ready({repo,number}){const top=await repoPath(repo),n=num(number);await gh(['pr','ready',String(n)],top);return `#${n} is ready for review`;},
+  // Same argv rules as git.rs pr_create_args: body on stdin, no value can become a flag.
+  async gh_pr_create({repo,base,head,title,body,draft,reviewers}){
+   const top=await repoPath(repo),leaf=text(base,'base branch',256).trim().replace(/^origin\//,''),h=text(head,'head branch',256).trim(),t=text(title,'title',1024).trim();
+   if(!t)throw Error('a pull request needs a title');
+   for(const [what,v] of [['base',leaf],['head',h]]){if(!v)throw Error(`a pull request needs a ${what} branch`);if(v.startsWith('-'))throw Error(`${what} branch ${rustDebug(v)} looks like a flag`);}
+   const rs=(reviewers==null?[]:Array.isArray(reviewers)?reviewers:(()=>{throw Error('invalid reviewers');})()).map(r=>text(r,'reviewer',256).trim()).filter(Boolean);
+   for(const r of rs)if(r.startsWith('-'))throw Error(`reviewer ${rustDebug(r)} looks like a flag`);
+   const out=await gh(['pr','create','--base',leaf,'--head',h,'--title',t,'--body-file','-',...(bool(draft,'draft')?['--draft']:[]),...rs.flatMap(r=>['--reviewer',r])],top,{input:text(body,'body')});
+   return lines(out).reverse().find(l=>l.trim().startsWith('http'))?.trim()??out.trim();
+  },
+  // Same shape and bounds as git.rs git_pr_context.
+  async git_pr_context({repo,base}){
+   const top=await repoPath(repo);
+   const branch=(await git(['symbolic-ref','--quiet','--short','HEAD'],top).catch(()=>'')).trim();
+   if(!branch)throw Error('HEAD is detached, check out a branch before opening a PR');
+   let b=opt(base,'base').trim();
+   if(!b){
+    const ok=async ref=>{try{await git(['rev-parse','--verify','--quiet',ref],top);return true;}catch{return false;}};
+    b=(await git(['symbolic-ref','--short','refs/remotes/origin/HEAD'],top).catch(()=>'')).trim();
+    if(!b)for(const c of ['origin/main','origin/master','main','master'])if(await ok(c)){b=c;break;}
+    if(!b)b=branch;
+   }
+   if(b.startsWith('-'))throw Error(`base ${rustDebug(b)} looks like a flag`);
+   const commits=lines((await git(['log','--reverse','--no-merges','--format=%s',`${b}..HEAD`,'--'],top)).trimEnd()),files=lines((await git(['diff','--name-only',`${b}...HEAD`,'--'],top)).trimEnd());
+   const stat=(await git(['diff','--shortstat',`${b}...HEAD`,'--'],top).catch(()=>'')).trim();
+   let template=null;
+   for(const rel of ['.github/PULL_REQUEST_TEMPLATE.md','.github/pull_request_template.md','docs/PULL_REQUEST_TEMPLATE.md','PULL_REQUEST_TEMPLATE.md','pull_request_template.md']){
+    try{const full=join(top,rel);if(!(await lstat(full)).isFile())continue;const buf=await readFile(full);if(!buf.toString('utf8').trim())continue;template=new TextDecoder().decode(buf.subarray(0,16*1024)).replace(/\uFFFD$/,'');break;}catch{}
+   }
+   return {branch,base:b.replace(/^origin\//,''),commits:commits.slice(0,50),commit_count:commits.length,files:files.slice(0,200),file_count:files.length,stat,template};
+  },
   async gh_pr_conversation({repo,number}){
    const top=await repoPath(repo),n=num(number),[owner,name]=await nwo(top);
    return parseConversation(await graphql(top,PR_CONVERSATION_QUERY,[['owner',owner],['name',name],['number',n]]),n);

@@ -19,6 +19,7 @@ import { AgentChip } from "./AgentChip";
 import { ContextMenu, useContextMenu, type MenuItem } from "./ContextMenu";
 import { RestartIcon } from "./icons";
 import { LooseEnds } from "./LooseEnds";
+import { OpenPrDialog } from "./OpenPrDialog";
 import { PruneDialog } from "./PruneDialog";
 import { Button } from "./ui";
 
@@ -116,6 +117,7 @@ export function GitPanel({
   const [busy, setBusy] = useState<string | null>(null);
   const [branchFilter, setBranchFilter] = useState("");
   const [pruning, setPruning] = useState(false);
+  const [openingPr, setOpeningPr] = useState(false);
   /** Bumped when a bulk prune finishes. The lists here refresh off `refresh()`
    *  and `loadWorktrees()`, but Loose ends reads its own audit — this is how it
    *  is told that ninety of the rows it is showing have just gone. */
@@ -755,6 +757,12 @@ export function GitPanel({
           onClick={() => repo && void act("push", () => ipc.gitPush(repo, !status?.upstream))}>
           Push
         </Button>
+        <Button size="sm"
+          disabled={busy != null || status?.detached}
+          title="Open a pull request for this branch with a generated title and description"
+          onClick={() => setOpeningPr(true)}>
+          Open PR
+        </Button>
       </div>
 
       <div className="git-tabs">
@@ -962,6 +970,12 @@ export function GitPanel({
           another side tab takes this panel off screen. Pruning is not a
           question: it is a working surface with a filter, a selection and a
           list you scroll, and it belongs to the panel you opened it from. */}
+      <OpenPrDialog
+        open={openingPr}
+        repo={repo}
+        onNotice={onNotice}
+        onClose={() => setOpeningPr(false)}
+      />
       <PruneDialog
         open={pruning}
         repo={repo}
