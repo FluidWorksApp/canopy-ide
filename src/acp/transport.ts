@@ -8,10 +8,19 @@ import type {
   StructuredRunner,
   StructuredRunnerLaunch,
 } from "../structuredRunners";
-import { AcpSession } from "./client";
+import { fsReadText, fsWriteFile } from "../ipc";
+import { AcpSession, type AcpFileSystem } from "./client";
 import type { AcpPermissionRequest } from "./protocol";
 
 const STDERR_KEEP = 2000;
+/** Larger files are refused by the reader instead of filling the renderer. */
+const FS_READ_MAX_BYTES = 8 * 1024 * 1024;
+
+/** The Tauri file commands, which check the path against registered roots. */
+const tauriFileSystem: AcpFileSystem = {
+  readTextFile: (path) => fsReadText(path, FS_READ_MAX_BYTES),
+  writeTextFile: (path, content) => fsWriteFile(path, content),
+};
 
 /** A long-lived ACP agent behind the same `send`/`turnEnd` rhythm as every
  *  other runner. The process outlives the turn; `send` is `session/prompt`. */
@@ -31,6 +40,7 @@ export class AcpTransport implements ProjectRunnerTransport {
   private opts: {
     resume: boolean;
     onPermission?: (request: AcpPermissionRequest) => Promise<string | null | undefined>;
+    fs?: AcpFileSystem;
   };
 
   constructor(
@@ -42,6 +52,7 @@ export class AcpTransport implements ProjectRunnerTransport {
     opts: {
       resume: boolean;
       onPermission?: (request: AcpPermissionRequest) => Promise<string | null | undefined>;
+      fs?: AcpFileSystem;
     },
   ) {
     this.attemptId = attemptId;
@@ -57,6 +68,10 @@ export class AcpTransport implements ProjectRunnerTransport {
       authority: policy.authority,
       cwd: policy.cwd ?? "",
       modeId: runner.acp?.defaultMode?.[policy.authority],
+      modelId: policy.model || undefined,
+      systemPrompt: policy.systemPromptAppend || undefined,
+      authHint: runner.acp?.authHint,
+      fs: opts.fs ?? tauriFileSystem,
       onPermission: opts.onPermission,
     });
   }
@@ -110,17 +125,19 @@ export class AcpTransport implements ProjectRunnerTransport {
 
   private async sendNow(text: string): Promise<void> {
     await this.ready;
-    // ACP has no system-prompt field, so the brief rides on the first turn of
-    // the session and stays in its history.
+    // An agent that advertises `systemPrompt` already has the brief from
+    // session setup. Any other gets it on the first turn, where it stays in
+    // the session history.
     const brief = this.launch.policy.systemPromptAppend;
-    const prompt = !this.briefed && brief ? `${brief}\n\n---\n\n${text}` : text;
+    const prompt =
+      !this.briefed && brief && !this.session.briefDelivered ? `${brief}\n\n---\n\n${text}` : text;
     this.briefed = true;
     await this.session.prompt(prompt);
   }
 
   async stop(): Promise<void> {
     if (!this.exited) await this.session.cancel().catch(() => {});
-    this.session.stop();
+    await this.session.stop();
     await this.process.kill(this.attemptId);
   }
 }
