@@ -66,8 +66,9 @@ process teardown; React owns the project workspace and presentation.
 ## Highlights
 
 - **Real agent terminals.** Full PTY and TUI support for shells, `vim`, `htop`,
-  `tmux`, Claude Code, Codex CLI, Amp, Aider, Antigravity, OpenCode, oh-my-pi,
-  and custom CLIs. Canopy reports the integration and resume capabilities each
+  `tmux`, Claude Code, Codex CLI, Amp, Aider, Antigravity, OpenCode, oh-my-pi, Kiro CLI,
+  and custom CLIs, including any agent that speaks the Agent Client Protocol
+  (see [docs/acp.md](docs/acp.md)). Canopy reports the integration and resume capabilities each
   CLI actually supports instead of assuming parity.
 - **Remote desktop for teammates.** Ask a connected teammate for their screen
   from the Team panel. They accept view-only or control per session, see an
@@ -99,6 +100,10 @@ process teardown; React owns the project workspace and presentation.
   standards before an agent implements it — Google's
   [Elephant-Goldfish Model](https://github.com/google/elephant-goldfish-model)
   as a built-in workflow. See [the design](./docs/egm-spec-stage.md).
+- **Run agents where it makes sense.** Choose local, remote or balance at
+  global, project and agent level, and see this Mac, cloud workspaces and T3
+  Code machines in one list. See
+  [placement](./docs/placement-and-unified-workspace.md).
 - **Preview what agents build.** Open detected dev servers, inspect console and
   network activity, annotate elements, and capture viewport, full-page, or
   region screenshots. Agents can drive previews through scoped browser tools.

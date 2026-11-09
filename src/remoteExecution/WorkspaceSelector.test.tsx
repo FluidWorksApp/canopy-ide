@@ -21,6 +21,7 @@ it('separates new workspace setup and scopes controls to the selected workspace 
  expect(screen.getByRole('button',{name:'Use this workspace'})).toBeInTheDocument();
  fireEvent.click(screen.getByRole('button',{name:'＋ New workspace'}));
  expect(screen.getByText('Cloud workspaces')).toBeInTheDocument();
+ expect(screen.getByText('Create a cloud workspace')).toBeInTheDocument();expect(screen.getByText(/Connect to T3 Connect protocol supported machine/)).toBeInTheDocument();
  expect(screen.getByLabelText('Access token')).toBeInTheDocument();
  expect(screen.queryByRole('tablist',{name:'Workspaces'})).toBeNull();
 });

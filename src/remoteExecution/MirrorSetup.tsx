@@ -22,6 +22,18 @@ function Repo({repo}:{repo:RepoResult}){
  </li>;
 }
 
+/** Steps and per-project results of a mirror run; shared with the on-demand project setup. */
+export function MirrorProgressView({progress}:{progress:MirrorProgress}){
+ return <>
+  <ul className="mirror-steps" aria-label="Setup progress">{progress.steps.map(step=><li key={step.key}><span aria-hidden="true">{MARK[step.state]}</span> {step.label}{step.detail&&<small> · {step.detail}</small>}</li>)}</ul>
+  {progress.projects.map((project,i)=><section key={i} className="mirror-project">
+   <strong>{project.name}</strong> <span className={`account-sync-state ${tone(project.state)}`}>{project.state==='done'?'Set up':project.state==='skipped'?'Skipped':project.state==='failed'?'Needs attention':'Working…'}</span>
+   {project.detail&&<small className={project.state==='failed'?'mirror-problem':undefined}>{project.detail}</small>}
+   <ul>{project.repos.map((repo,j)=><Repo key={j} repo={repo}/>)}</ul>
+  </section>)}
+ </>;
+}
+
 /** Make the selected workspace match this Mac: logins, projects, branches and
  * work in progress, then dependencies. Nothing is sent until the button is
  * pressed, and env files only when that box is ticked. */
@@ -49,12 +61,7 @@ export function MirrorSetup({workspaceName,disabled=false}:{workspaceName:string
     ?<Button disabled={abort.current?.signal.aborted} onClick={()=>abort.current?.abort()}>Stop after this repository</Button>
     :<Button variant="accent" disabled={disabled} onClick={()=>void start()}>Set up from this Mac</Button>}
   </div>
-  {progress&&<ul className="mirror-steps" aria-label="Setup progress">{progress.steps.map(step=><li key={step.key}><span aria-hidden="true">{MARK[step.state]}</span> {step.label}{step.detail&&<small> · {step.detail}</small>}</li>)}</ul>}
-  {progress?.projects.map((project,i)=><section key={i} className="mirror-project">
-   <strong>{project.name}</strong> <span className={`account-sync-state ${tone(project.state)}`}>{project.state==='done'?'Set up':project.state==='skipped'?'Skipped':project.state==='failed'?'Needs attention':'Working…'}</span>
-   {project.detail&&<small className={project.state==='failed'?'mirror-problem':undefined}>{project.detail}</small>}
-   <ul>{project.repos.map((repo,j)=><Repo key={j} repo={repo}/>)}</ul>
-  </section>)}
+  {progress&&<MirrorProgressView progress={progress}/>}
   {progress?.done&&!error&&<p className={`workspace-feedback${failed?' error':''}`} role="status">{failed?'Some work could not be set up. Fix what is listed and run it again; finished projects are skipped.':'✓ Your projects are set up in this workspace.'}</p>}
   {error&&<p className="workspace-feedback error" role="alert">{error}</p>}
  </div>;

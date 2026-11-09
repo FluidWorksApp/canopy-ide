@@ -417,6 +417,7 @@ import {useRemoteUpload} from "../../remoteExecution/useRemoteUpload";
 import { FileView, hasDiffToolbar } from "../FileView";
 import { ChangesPanel, type ChangeGroup } from "../ChangesPanel";
 import { Dialog } from "../Dialog";
+import { AgentHierarchyOverlay } from "../AgentHierarchyOverlay";
 import { BranchSwitchProvider, useBranchSwitch } from "../../useBranchSwitch";
 import { askDialog } from "../../branchSwitch";
 import { useTabDragGroups, applyOrder } from "../../tabDrag";
@@ -6624,6 +6625,34 @@ const ProjectViewBody = memo(function ProjectViewBody({
     [openGitTarget],
   );
 
+  // A file the user opened from the OS or a terminal (`canopy <file>:12`). App
+  // chose this project; the user asked for the file, so it always comes to the
+  // front, unlike an agent's open_file which follows the attention setting.
+  useEffect(() => {
+    const onOpen = (e: Event) => {
+      const d = (e as CustomEvent).detail as {
+        projectId?: string;
+        path?: string;
+        line?: number;
+        column?: number;
+      };
+      if (d?.projectId !== project.id || !d.path) return;
+      const { path, line, column } = d;
+      void openFileRef.current(path, { activate: true }).then(() => {
+        if (line)
+          requestAnimationFrame(() =>
+            window.dispatchEvent(
+              new CustomEvent("canopy:reveal-line", {
+                detail: { path, line, column },
+              }),
+            ),
+          );
+      });
+    };
+    window.addEventListener("canopy:open-file", onOpen);
+    return () => window.removeEventListener("canopy:open-file", onOpen);
+  }, [project.id]);
+
   // App routed a share card from team chat here: the card already resolved to
   // a checkout in this project. Not gated on `visible`, like OPEN_GIT_LINK.
   useEffect(() => {
@@ -12772,6 +12801,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
   // rebuilt when it's in front (so it always sees current props) or when its
   // tab changed underneath it.
   const docTabs = tabs.filter((t): t is DocSubTab => t.type !== "terminal");
+  const terminalTabsForHierarchy = tabs.filter((t): t is TermSubTab => t.type === "terminal");
   const panes = useRef(
     new Map<string, { tab: DocSubTab; active: boolean; el: ReactNode }>(),
   );
@@ -12884,9 +12914,23 @@ const ProjectViewBody = memo(function ProjectViewBody({
             worktree={ticketWorktree(tab.ticket, ticketWorktrees)}
             agentTargets={agentTargets}
             installed={installed}
-            onStartNew={(agentId) =>
-              void startTicketWork(tab.ticket, tab.repo ?? "", agentId)
-            }
+            placement={{
+              project: {
+                id: project.id,
+                name: project.name,
+                components: project.components.map((c) => ({ componentId: c.id, label: c.label })),
+              },
+            }}
+            onStartNew={(agentId, decision) => {
+              // Launching reaches only the active host. A decision for another
+              // target is recorded and explained rather than silently ignored.
+              if (decision?.target && decision.target.kind !== "local" && !isRemoteHost())
+                onNotice(
+                  "Placement chose another machine, but agents start on the active workspace. Switch to that workspace to run it there; starting here instead.",
+                  "info",
+                );
+              void startTicketWork(tab.ticket, tab.repo ?? "", agentId);
+            }}
             onStartTask={() => startTicketTask(tab.ticket, tab.repo)}
             // The run's identity is its label (one adhoc task looks like any
             // other), so the live state the button shows is "a run with this
@@ -13056,6 +13100,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
         return (
           <DeviceView
             serial={tab.serial}
+            platform={tab.platform}
             projectDir={tab.projectDir}
             annotations={tab.annotations}
             visible={active}
@@ -13745,6 +13790,23 @@ const ProjectViewBody = memo(function ProjectViewBody({
                     ×
                   </button>
                 </div>
+              )}
+              {tab.id === activeTabId && shown && (
+                <AgentHierarchyOverlay
+                  tabs={terminalTabsForHierarchy}
+                  activeTabId={activeTabId}
+                  onSelect={(id) => setActiveTabId(id)}
+                  activityKey={
+                    tab.ptyId != null && liveSessionByPty.get(tab.ptyId) && agentIdForCommand(tab.command)
+                      ? {
+                          agent: agentIdForCommand(tab.command) as string,
+                          sessionId: liveSessionByPty.get(tab.ptyId) as string,
+                          cwd: tab.cwd,
+                          profile: tab.profile ?? null,
+                        }
+                      : null
+                  }
+                />
               )}
               <TermPorts
                 ptyId={tab.ptyId}

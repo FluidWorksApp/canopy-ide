@@ -63,3 +63,6 @@ src-tauri/onnxruntime/*.dll
 
 # Canonical browser bridge/viewer sources staged for runtime/app builds
 /packages/remote-host/browser-assets/
+
+# Agent task state and planning files
+/.agents/

@@ -10,33 +10,43 @@ The October corrections come from the harness capability research of
 CLI to the version installed in the research environment: Claude Code 2.1.310,
 Codex 0.162.1, Amp 0.0.1790913650, Aider 0.86.2, Antigravity (agy) 1.2.14,
 OpenCode 1.18.34, oh-my-pi (omp) 18.4.10, Cursor Agent 2026.10.01 and Grok
-1.0.46.
+1.0.46. Kiro CLI 3.1.0 was added afterwards and checked against its own `--help`.
+
+## ACP
+
+Kiro CLI runs over the Agent Client Protocol (`kiro-cli acp`, verified
+2026-10-27). Any other ACP agent can be added in Settings > Agents, from presets
+(Gemini CLI `--acp`, Goose `acp`, checked against the ACP registry on
+2026-11-09) or the registry browser. Caveats: Canopy advertises no fs or
+terminal client capabilities, ACP has no system-prompt field, custom entries
+are unverified, and brain and compaction calls skip ACP runners. Details in
+[acp.md](acp.md).
 
 ## Where we are today
 
-Hooks have first-class installers for all nine launcher CLIs. Codex, Cursor and
+Hooks have first-class installers for all ten launcher CLIs. Codex, Cursor and
 Grok use native hook files; the plugin/extension/hook adapters for the others
 normalize events through the same Canopy helper. MCP registration is written
 for every CLI with a native MCP client — all of them except Aider.
 
-| Feature | claude | codex | amp | aider | agy | opencode | omp | cursor | grok |
-|---|---|---|---|---|---|---|---|---|---|
-| Hook auto-setup | full | full (needs `/hooks` trust) | plugin | notification command | full | plugin | extension | hooks.json | hooks.json |
-| Event stream (stamped w/ pty) | yes | yes | yes | limited | yes | yes | yes | yes | yes |
-| MCP auto-setup | yes | yes | yes | no native MCP | yes | yes | yes | yes | yes |
-| Canopy bootstrap | MCP system instructions | MCP system instructions | MCP system instructions | read-only context | MCP system instructions | MCP system instructions | system-prompt hook + MCP | MCP system instructions | MCP system instructions |
-| Session digests (powers restore + shared context) | yes | yes | yes | limited | yes | yes | yes | yes | yes |
-| Resume command in registry | yes | yes | yes | – | yes | yes | yes | yes (unverified) | yes (unverified) |
-| Token/cost/model tray | yes | tokens + live plan chip | native source available, not wired | – | model only | tokens + billed cost | CLI cost | – | native source available, not wired |
-| Model switcher | yes | yes | – | yes | yes | yes | yes | yes | yes |
-| Shared context (receive) | yes | yes | – | – | – | – | – | – | – |
-| Shared-checkout file attribution | full | `apply_patch` | no | no | file tools | built-in edit/write | write/edit | Claude-named tools only | `search_replace` |
-| Build headless runner | yes | partial | no | no | no | capable, not built | capable, not built | partial (oneshot) | capable, not built |
-| Detection / tab promotion / launcher | yes | yes | yes | yes | yes | yes | yes | yes | yes |
-| Rollback | Build only (git) | Build only (git) | none | none | none | none | none | none | none |
-| Claude IDE protocol | not served | n/a | n/a | n/a | n/a | n/a | n/a | n/a | n/a |
-| Clipboard (OSC 52 in Canopy's terminal) | no | no | no | no | no | no | no | no | no |
-| Update pinning | none | none | none | none | none | none | none | none | none |
+| Feature | claude | codex | amp | aider | agy | opencode | omp | cursor | grok | kiro |
+|---|---|---|---|---|---|---|---|---|---|---|
+| Hook auto-setup | full | full (needs `/hooks` trust) | plugin | notification command | full | plugin | extension | hooks.json | hooks.json | agent file (`kiro-cli --agent canopy`) |
+| Event stream (stamped w/ pty) | yes | yes | yes | limited | yes | yes | yes | yes | yes | yes (needs a signed-in session to verify) |
+| MCP auto-setup | yes | yes | yes | no native MCP | yes | yes | yes | yes | yes | yes |
+| Canopy bootstrap | MCP system instructions | MCP system instructions | MCP system instructions | read-only context | MCP system instructions | MCP system instructions | system-prompt hook + MCP | MCP system instructions | MCP system instructions | MCP system instructions |
+| Session digests (powers restore + shared context) | yes | yes | yes | limited | yes | yes | yes | yes | yes | limited (no session id verified) |
+| Resume command in registry | yes | yes | yes | – | yes | yes | yes | yes (unverified) | yes (unverified) | yes (`--resume-id`, flags verified) |
+| Token/cost/model tray | yes | tokens + live plan chip | native source available, not wired | – | model only | tokens + billed cost | CLI cost | – | native source available, not wired | – |
+| Model switcher | yes | yes | – | yes | yes | yes | yes | yes | yes | yes (picker) |
+| Shared context (receive) | yes | yes | – | – | – | – | – | – | – | – |
+| Shared-checkout file attribution | full | `apply_patch` | no | no | file tools | built-in edit/write | write/edit | Claude-named tools only | `search_replace` | `fs_write` (unverified payload) |
+| Build headless runner | yes | partial | no | no | no | capable, not built | capable, not built | partial (oneshot) | capable, not built | no |
+| Detection / tab promotion / launcher | yes | yes | yes | yes | yes | yes | yes | yes | yes | yes |
+| Rollback | Build only (git) | Build only (git) | none | none | none | none | none | none | none | none |
+| Claude IDE protocol | not served | n/a | n/a | n/a | n/a | n/a | n/a | n/a | n/a | n/a |
+| Clipboard (OSC 52 in Canopy's terminal) | no | no | no | no | no | no | no | no | no | no |
+| Update pinning | none | none | none | none | none | none | none | none | none | none (updates itself; off-switch is a setting, not an env var) |
 
 The Build row is deliberately narrower than terminal support. The Claude and
 Codex runner argv was verified against Claude Code 2.1.226 and Codex 0.147.0 on
@@ -252,6 +262,33 @@ The load-bearing pieces every feature hangs off:
   dedupes Canopy's server by name, its own `config.toml` entry winning.
 - MCP in `~/.grok/config.toml` `[mcp_servers]`. Native usage (`grok usage`
   JSON, USD) is not wired. Subagent hook events are dropped by the helper.
+
+### Kiro CLI (`kiro`, binary `kiro-cli`, 3.1.0)
+- **Launch**: `kiro-cli --agent canopy` (bare), `kiro-cli chat '<prompt>' --agent canopy`
+  (the top-level command reads a bare word as a subcommand, so a prompt goes to `chat`),
+  `kiro-cli --resume-id <id> --agent canopy` (resume). `--trust-all-tools` is the skip
+  permissions flag; `--model` and `--effort` come from the agent's launch settings. There is
+  no reviewed automatic mode, so Kiro keeps asking unless skip permissions is on. All flags
+  were read from `kiro-cli --help` and `kiro-cli chat --help`.
+- **Hooks**: Kiro runs hooks only from the active agent's config. Canopy writes a global
+  agent, `~/.kiro/agents/canopy.json`, that mirrors the default agent (all tools, the user's
+  MCP servers, `AGENTS.md`, README and `.kiro/steering`) and registers `agentSpawn`,
+  `userPromptSubmit`, `preToolUse`, `postToolUse` and `stop` with `--agent kiro`. An unknown
+  agent name falls back to Kiro's default, so a machine without the file still launches. The
+  helper maps the triggers to `SessionStart`, `UserPromptSubmit`, `PreToolUse`,
+  `PostToolUse` and `Stop`. `preToolUse` is the Rules gate: a deny exits 2 with the reason on
+  stderr. `agentSpawn` and `userPromptSubmit` print peer and rules context as plain text,
+  which Kiro adds to the conversation.
+- **Not verified**: the hook payload's field names (a session id in particular) and the
+  exit-2 contract were not exercised against a signed-in session, since none was available.
+  The accepted trigger names come from the 3.1.0 binary; the `fs_write` edit shape
+  (`command`, `path`, `old_str`, `new_str`, `file_text`) and the `execute_bash` shell tool
+  name come from Kiro's tool docs. Kiro has no session-end or permission-prompt hook, so a
+  blocked prompt is inferred from the PTY only.
+- **MCP** in `~/.kiro/settings/mcp.json` (`mcpServers`), also read per project from
+  `.kiro/settings/mcp.json`. **Steering** in `.kiro/steering/*.md`. **Updates**: Kiro
+  updates itself on startup; the only off-switch is the setting `app.disableAutoupdates`,
+  so Canopy runs `kiro-cli update` and cannot pin it by environment.
 
 ## Ranked plan
 

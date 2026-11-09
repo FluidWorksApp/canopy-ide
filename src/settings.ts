@@ -14,6 +14,7 @@ import type { CaptureMode } from "./pageCapture";
 import { IS_MAC } from "./platform";
 import { lensFromStoredDefault, storedDefaultFor } from "./lensMigration";
 import { DEFAULT_AGENT_CLI_ID } from "../shared/agentCliIdentity";
+import { sanitizeAcpConfig } from "./acp/providers";
 import { SKINS, type SkinId } from "./skins/registry";
 import {
   isSessionNameTheme,
@@ -908,6 +909,20 @@ function hotspotOverrides(raw: unknown): Record<string, string[]> {
   return out;
 }
 
+/** Stored custom CLIs, with only the ACP block re-validated: a hand-edited or
+ *  corrupt `acp` becomes a plain CLI rather than an unlaunchable one. Older
+ *  entries have no `acp` and pass through unchanged. */
+export function sanitizeCustomClis(raw: unknown): CustomAgentCli[] {
+  if (!Array.isArray(raw)) return [];
+  return raw
+    .filter((c): c is CustomAgentCli => !!c && typeof c === "object" && typeof (c as CustomAgentCli).bin === "string")
+    .map((c) => {
+      const { acp, ...rest } = c;
+      const clean = sanitizeAcpConfig(acp);
+      return clean ? { ...rest, acp: clean } : rest;
+    });
+}
+
 export function getSettings(): Settings {
   const raw = localStorage.getItem(KEY);
   if (settingsCache && settingsCache.raw === raw) return settingsCache.value;
@@ -953,6 +968,7 @@ export function getSettings(): Settings {
     // Budgets gate spending, so a hand-edited or corrupt value must fail
     // towards "no cap" rather than towards a NaN that compares false forever
     // or a negative that blocks every call.
+    value.customClis = sanitizeCustomClis(value.customClis);
     value.brainDailyBudgetUsd = budgetUsd(value.brainDailyBudgetUsd);
     value.brainFeatureBudgetsUsd = featureBudgets(value.brainFeatureBudgetsUsd);
     value.sessionBudgetUsd = budgetUsd(value.sessionBudgetUsd);

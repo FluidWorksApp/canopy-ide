@@ -13,6 +13,18 @@
 .remote-desktop-heading [role=status] {text-transform:none;letter-spacing:normal;}
 .workspace-desktop .remote-desktop { flex: 1; min-height: 0; display: flex; flex-direction: column; }
 .workspace-desktop .remote-desktop-surface { flex: 1; min-height: 0; }
+/* The streamed agent browser (StreamedBrowser.tsx): the frame is letterboxed
+   like T3's object-contain canvas, so pagePoint can map input back. */
+.streamed-browser-surface { position: relative; flex: 1; min-height: 0; overflow: hidden; background: var(--bg-deep); }
+.streamed-browser-canvas { display: block; width: 100%; height: 100%; object-fit: contain; touch-action: none; }
+.streamed-browser-canvas.is-controlled { outline: 2px solid var(--accent); outline-offset: -2px; }
+.streamed-browser-input { position: absolute; top: 0; left: 0; width: 1px; height: 1px; padding: 0; border: 0; opacity: 0; overflow: hidden; resize: none; font-size: 16px; pointer-events: none; }
+.streamed-browser-dialog { position: absolute; top: 8px; left: 8px; right: 8px; z-index: 1; display: flex; flex-direction: column; gap: 8px; padding: 12px; background: var(--bg); border: 1px solid var(--border); border-radius: 8px; box-shadow: 0 6px 24px #0006; }
+.streamed-browser-dialog p { margin: 0; overflow-wrap: anywhere; }
+.streamed-browser-dialog small { color: var(--text-dim); }
+.streamed-browser-dialog-actions { display: flex; justify-content: flex-end; gap: 8px; }
+.streamed-browser-agent-cursor { position: absolute; width: 14px; height: 14px; margin: -7px 0 0 -7px; border-radius: 50%; border: 2px solid var(--accent); pointer-events: none; transition: left 160ms ease-out, top 160ms ease-out; }
+.streamed-browser-agent-cursor.is-click { background: var(--accent); }
 
 /* Only layout belongs here; Dialog and ui controls own type, skin and sizing. */
 .workspace-tools {display:flex;flex-direction:column;gap:12px;}
@@ -101,6 +113,16 @@
 .workspace-stop-confirm {padding:16px;border:1px solid var(--border-strong);border-radius:8px;}
 .workspace-create {display:flex;flex-direction:column;gap:12px;border-top:1px solid var(--border);padding-top:16px;}
 .workspace-create h3 {margin:0;}
+.workspace-create-heading {display:flex;flex-direction:column;gap:2px;}
+.workspace-create-grid {display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:4px 12px;align-items:start;}
+.workspace-create-grid label {margin:0;min-width:0;}
+.workspace-create-grid .workspace-plan-note {display:block;margin-top:4px;color:var(--text-dim);font-size:var(--fs-xs);line-height:1.4;}
+@media(max-width:560px){.workspace-create-grid {grid-template-columns:minmax(0,1fr);}}
+.workspace-tools > * {flex-shrink:0;}
+.workspace-tools > details.workspace-section {border:1px solid var(--border);border-radius:var(--r-sm);padding:10px 12px;}
+.workspace-tools > details.workspace-section[open] {padding-bottom:12px;}
+.workspace-section > summary {display:flex;flex-direction:column;gap:2px;font-weight:600;}
+.workspace-section > summary small {font-weight:400;color:var(--text-dim);}
 .workspace-create select {display:block;width:100%;padding:10px;color:var(--text);background:var(--bg);border:1px solid var(--border);border-radius:4px;}
 @media(prefers-reduced-motion:reduce){.dlg-panel:has(.workspace-tools){animation:none;}}
 .workspace-import-list {display:flex;flex-direction:column;gap:8px;margin:12px 0;}

@@ -52,6 +52,7 @@ export const SETTINGS_INDEX: SettingEntry[] = [
   { tab: "agents", name: "Skip permission prompts", desc: "Start every agent in its CLI's own bypass mode, so it acts without stopping to ask.", keywords: ["yolo", "dangerously", "auto approve", "permissions"] },
   { tab: "agents", name: "CLI commands", desc: "Leave blank unless yours was renamed or lives off your PATH.", keywords: ["launch", "flags", "arguments"] },
   { tab: "agents", name: "Accounts", desc: "Several logins per CLI. Pick one from the ＋ menu.", keywords: ["logins","sign in","cli accounts","profiles"] },
+  { tab: "agents", name: "ACP providers", desc: "Add any Agent Client Protocol agent, from presets or the ACP registry.", keywords: ["acp", "agent client protocol", "registry", "gemini", "goose", "provider"], panel: true },
   { tab: "agents", name: "Other CLIs", desc: "Agents Canopy ships no entry for. Each one joins the launcher.", keywords: ["custom agent", "add cli", "binary"] },
   { tab: "agents", name: "Tools available", desc: "What agents can do through Canopy's MCP server. Off means never offered.", keywords: ["detect", "installed", "path", "binaries"] },
   { tab: "sessions", name: "Ctrl+Tab switching", desc: "Switcher order.", keywords: ["tab switch", "cycle", "mru", "keyboard"] },

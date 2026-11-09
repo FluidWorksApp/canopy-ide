@@ -61,7 +61,8 @@ fn forget_account_token() -> Result<(), String> {
 
 /// The credential store can block: a D-Bus round trip, or a keyring unlock
 /// prompt the person has to answer. Keep that off the async workers.
-async fn blocking_store<T: Send + 'static>(
+/// t3_client.rs stores its saved machines through this too.
+pub(crate) async fn blocking_store<T: Send + 'static>(
     call: impl FnOnce() -> Result<T, String> + Send + 'static,
 ) -> Result<T, String> {
     tauri::async_runtime::spawn_blocking(call)

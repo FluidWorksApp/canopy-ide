@@ -1,0 +1,14 @@
+{
+  "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
+  "bundle": {
+    "windows": {
+      "nsis": {
+        "installerHooks": "./windows/open-with.nsh"
+      },
+      "wix": {
+        "fragmentPaths": ["./windows/open-with.wxs"],
+        "componentRefs": ["CanopyOpenWith"]
+      }
+    }
+  }
+}

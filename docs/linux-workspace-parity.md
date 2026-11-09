@@ -154,13 +154,13 @@ The workspace image (`packages/remote-host/Dockerfile`) already has `gh` and `gi
 - **Rules on connect.** Each connect and reconnect writes every open project's policy with
   `gates_policy_write`. The host installs Canopy's hooks for every CLI the image ships, as
   the desktop's installers in `agents.rs` do: Claude Code and Codex (`agent-integrations.mjs`,
-  PreToolUse matchers included) and Cursor, Grok, OpenCode, oh-my-pi, Amp and Antigravity
+  PreToolUse matchers included) and Cursor, Grok, Kiro, OpenCode, oh-my-pi, Amp and Antigravity
   (`agent-gates.mjs`; the OpenCode, oh-my-pi and Amp plugin sources are generated from
   `agents.rs` into `agent-templates.mjs` by `gen-agent-templates.mjs`, and a test fails when
   they drift). When `agent_integration_health` reports an installed CLI's hooks missing or
   out of date, the workspace offers **Update agent hooks** (`setup_agent_hooks`). The same
   setup registers the `canopy-hook --mcp` server in each CLI's own registry (Cursor,
-  Antigravity, oh-my-pi and OpenCode JSON, Amp's `amp.mcpServers`, Grok's TOML), as
+  Antigravity, oh-my-pi, Kiro and OpenCode JSON, Amp's `amp.mcpServers`, Grok's TOML), as
   `setup_*_mcp` in `agents.rs` does.
 - **Team memory.** The ledger stays on the desktop. Each connect, and each change to a
   memory, sends the approved, unexpired entries to the workspace's canopy-service

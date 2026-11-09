@@ -23,6 +23,9 @@ mod containment;
 mod context;
 mod crash;
 mod desk;
+mod devicehub;
+mod devicehub_mjpeg;
+mod devicehub_proxy;
 #[cfg(feature = "dictation")]
 mod dictation;
 mod execution;
@@ -75,6 +78,8 @@ mod stores;
 mod structured_runner;
 mod sync;
 mod sysaudio;
+mod t3_client;
+mod t3_socket;
 mod tasks;
 mod tunnel;
 mod turn_rollback;
@@ -562,10 +567,12 @@ pub fn run() {
         .manage(governor::TerminalGovernor::default())
         .manage(containment::ContainmentManager::default())
         .manage(tunnel::TunnelManager::default())
+        .manage(devicehub::DeviceHubManager::default())
         .manage(prwatch::PrWatcher::default())
         .manage(dictation::DictationManager::default())
         .manage(selftest::SelftestState::default())
         .manage(client_mode::RemoteConnectionState::default())
+        .manage(t3_socket::T3Sockets::default())
         .manage(spot::SpotIndex::default())
         .manage(research::load())
         .manage(notes::load())
@@ -677,6 +684,7 @@ pub fn run() {
             crash::file_crash_issue,
             cli::cli_take_pending_open,
             cli::cli_take_pending_link,
+            cli::cli_take_pending_targets,
             cli::cli_install_shim,
             notify::notify_native,
             selftest::selftest_config,
@@ -749,8 +757,16 @@ pub fn run() {
             client_mode::execution_remote_account_candidates,
             client_mode::execution_remote_import_git,
             client_mode::execution_remote_login_prepare,
+            t3_client::t3_list,
+            t3_client::t3_describe,
+            t3_client::t3_pair,
+            t3_client::t3_remove,
+            t3_socket::t3_socket_open,
+            t3_socket::t3_socket_send,
+            t3_socket::t3_socket_close,
             mirror::execution_mirror_inspect,
             mirror::execution_mirror_send,
+            mirror::execution_mirror_candidates,
             remote_upload::execution_remote_upload,
             remote_upload::execution_remote_upload_cancel,
             remote_upload::execution_remote_stage_images,
@@ -794,6 +810,15 @@ pub fn run() {
             android::android_describe,
             android::android_run,
             android::android_stage_file,
+            devicehub::device_hub_status,
+            devicehub::device_hub_install,
+            devicehub::device_hub_start,
+            devicehub::device_hub_stop,
+            devicehub::device_hub_access,
+            devicehub::device_hub_devices,
+            devicehub::device_hub_boot,
+            devicehub::device_hub_attach,
+            devicehub::device_hub_shutdown,
             clipboard::clipboard_watch_set,
             clipboard::clipboard_recent,
             clipboard::clipboard_read,
@@ -945,6 +970,8 @@ pub fn run() {
             git::gh_pr_merge,
             git::gh_pr_close,
             git::gh_pr_ready,
+            git::gh_pr_create,
+            git::git_pr_context,
             git::gh_pr_conversation,
             git::gh_pr_links,
             git::gh_pr_thread_reply,
@@ -1149,8 +1176,13 @@ pub fn run() {
                 app.state::<browser::BrowserManager>().shutdown_all(app);
                 app.state::<workspace_forward::WorkspaceForwards>()
                     .shutdown_all();
+                // ... and any T3 Code machine sockets.
+                app.state::<t3_socket::T3Sockets>().shutdown_all();
                 // ... and any public-link tunnel process.
                 app.state::<tunnel::TunnelManager>().kill_all();
+                // ... and the device hub (expo-device-hub), whose record is
+                // removed so the next launch has nothing to reap.
+                app.state::<devicehub::DeviceHubManager>().shutdown();
                 // ... and stop polling GitHub for pull requests.
                 app.state::<prwatch::PrWatcher>().shutdown();
                 // ... and stop watching the pasteboard.

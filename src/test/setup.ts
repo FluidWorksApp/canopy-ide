@@ -33,11 +33,16 @@ if (typeof globalThis.localStorage === "undefined") {
 // jsdom has no layout, so it ships no scrollIntoView. Any list that keeps its
 // selection in view (the palettes, the tab strip) would throw on the first
 // arrow key — a no-op stands in, since there is nothing to scroll here.
-if (!Element.prototype.scrollIntoView) {
+// A test file may opt into `@vitest-environment node` (no DOM, Node's own
+// fetch and WebSocket, as the T3 integration test does); skip the DOM setup there.
+const hasDom = typeof window !== "undefined";
+
+if (hasDom && !Element.prototype.scrollIntoView) {
   Element.prototype.scrollIntoView = () => {};
 }
 
 beforeEach(() => {
+  if (!hasDom) return;
   mockIPC((cmd) => {
     throw new Error(
       `Unmocked Tauri command "${cmd}". Call mockCommands({ ${cmd}: ... }) in this test.`,
@@ -46,6 +51,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  if (!hasDom) return;
   cleanup();
   clearMocks();
 });

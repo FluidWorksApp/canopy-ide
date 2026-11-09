@@ -1,0 +1,27 @@
+.drop-upload {
+  position: absolute;
+  left: 8px;
+  right: 8px;
+  bottom: 8px;
+  z-index: 450;
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-1);
+  padding: 6px 10px;
+  border-radius: var(--r-xs);
+  font-size: var(--fs-xs);
+  color: var(--text-dim);
+  background: var(--bg-overlay);
+  border: 1px solid var(--border);
+}
+.drop-upload.is-error { flex-direction: row; align-items: center; justify-content: space-between; color: var(--danger); }
+.drop-upload-text { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.drop-upload-close { background: none; border: 0; color: inherit; cursor: pointer; font-size: 14px; }
+.drop-upload-close:focus-visible { outline: none; box-shadow: var(--ring); }
+.drop-upload-bar { height: 3px; border-radius: 2px; background: var(--border); overflow: hidden; }
+.drop-upload-fill { height: 100%; width: 0; background: var(--accent); transition: width 120ms linear; }
+.drop-upload-bar.is-indeterminate .drop-upload-fill { width: 35%; animation: drop-upload-slide 1.1s ease-in-out infinite; }
+@keyframes drop-upload-slide { from { margin-left: -35%; } to { margin-left: 100%; } }
+@media (prefers-reduced-motion: reduce) {
+  .drop-upload-bar.is-indeterminate .drop-upload-fill { animation: none; width: 100%; opacity: 0.5; }
+}

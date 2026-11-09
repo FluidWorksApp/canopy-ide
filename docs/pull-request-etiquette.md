@@ -201,6 +201,16 @@ Open a draft pull request when early CI or design feedback will prevent wasted
 work. Mark it ready only when the description is complete, the intended scope is
 implemented, and known failures are disclosed.
 
+### Opening from Canopy
+
+The Git panel's **Open PR** button pushes the current branch and opens the pull
+request through `gh`. The title and description are drafted offline from the
+branch name, commit subjects and changed files (`src/prGenerate.ts`), fill the
+repository's `.github/PULL_REQUEST_TEMPLATE.md` when it has one, and stay
+editable before you submit. The Testing section is a placeholder: replace it
+with the exact commands you ran. A new PR reaches the PR dashboard and inbox on
+the next watcher pass, which the dialog triggers on success.
+
 ## 6. Required checks
 
 Before requesting final review:

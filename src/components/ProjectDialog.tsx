@@ -12,6 +12,9 @@ import { defaultLens, initialLensConfig } from "../projectLens";
 import {isRemoteHost} from "../host";
 import {Dialog} from "./Dialog";
 import {DirectoryPicker} from "../remoteExecution/DirectoryPicker";
+import { PlacementPicker } from "./PlacementPicker";
+import { getProjectPreference, setProjectPreference } from "../placement/preferences";
+import type { Preference } from "../placement/types";
 
 interface ProjectDialogProps {
   existing?: Project;
@@ -23,6 +26,7 @@ interface ProjectDialogProps {
 
 export function ProjectDialog({ existing, initialCloneUrl, onSave, onCancel }: ProjectDialogProps) {
   const [saving,setSaving]=useState(false);
+  const [placement, setPlacement] = useState<Preference>(() => (existing ? getProjectPreference(existing.id) : "auto"));
   const [name, setName] = useState(existing?.name ?? "");
   const [components, setComponents] = useState<Component[]>(
     existing?.components ?? [],
@@ -339,6 +343,9 @@ export function ProjectDialog({ existing, initialCloneUrl, onSave, onCancel }: P
             </label>
           </div>
         )}
+        {existing && (
+          <PlacementPicker label="Run agents on" value={placement} onChange={setPlacement} />
+        )}
         <div className="modal-actions">
           <Button onClick={onCancel}>
             Cancel
@@ -348,6 +355,7 @@ export function ProjectDialog({ existing, initialCloneUrl, onSave, onCancel }: P
             onClick={async () => {
               if(saving)return;
               setSaving(true);
+              if (existing) setProjectPreference(existing.id, placement);
               try { await onSave({
                 // Spread first: this dialog only edits name/components, and the
                 // caller replaces the whole project object. Rebuilding from

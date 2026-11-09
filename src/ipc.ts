@@ -1426,6 +1426,10 @@ export interface RemoteUploadProgress {
 }
 export const remoteUpload=(destination:string,kind:'files'|'folder',id:string)=>invoke<RemoteUploadProgress>('execution_remote_upload',{destination,kind,id});
 export const remoteUploadCancel=(id:string)=>invoke<void>('execution_remote_upload_cancel',{id});
+export type MirrorCandidateCategory='secret'|'config'|'data'|'other';
+export interface MirrorCandidate{path:string;size:number;category:MirrorCandidateCategory}
+/** Ignored files of one local project component that could be copied to a remote. Names and sizes only. Runs on this Mac even in remote mode. */
+export const mirrorCandidates=(projectId:string,componentId:string)=>invokeDesktop<{relative:string;files:MirrorCandidate[]}>('execution_mirror_candidates',{projectId,componentId});
 export const onRemoteUploadProgress=(cb:(progress:RemoteUploadProgress)=>void)=>listen<RemoteUploadProgress>('remote:upload-progress',event=>cb(event.payload));
 
 export const fsWriteFile = (path: string, content: string) =>
@@ -2252,8 +2256,29 @@ export const spotIndexClear = () => invoke<void>("spot_index_clear");
 export const spotSaveContextImage = (dir: string, base64Png: string) =>
   invoke<string>("spot_save_context_image", { dir, base64Png });
 
-export const spotStageDropImages = (dir: string, paths: string[]) =>
-  invoke<string[]>("spot_stage_drop_images", { dir, paths });
+/** Stage dropped files (images are copied, other files pass through locally and
+ *  are uploaded on a remote workspace). `progressId` tags `remote:stage-progress`
+ *  events so the caller can show upload progress. */
+export const spotStageDropImages = (
+  dir: string,
+  paths: string[],
+  progressId?: string,
+) =>
+  invoke<string[]>(
+    "spot_stage_drop_images",
+    progressId ? { dir, paths, progressId } : { dir, paths },
+  );
+
+export interface DropUploadEvent {
+  id: string;
+  name: string;
+  bytes: number;
+  totalBytes: number;
+  files: number;
+  totalFiles: number;
+}
+export const onDropUploadProgress = (cb: (event: DropUploadEvent) => void) =>
+  listen<DropUploadEvent>("remote:stage-progress", (event) => cb(event.payload));
 
 /** Persist a brief too long to type at a shell prompt (see agentSeed.ts) under
  *  `<dir>/.canopy/spot/`, and return its path for the agent to read. */
@@ -4128,6 +4153,31 @@ export const ghPrClose = (repo: string, number: number, deleteBranch = false) =>
   invoke<string>("gh_pr_close", { repo, number, deleteBranch });
 export const ghPrReady = (repo: string, number: number) =>
   invoke<string>("gh_pr_ready", { repo, number });
+
+/** What a PR description is written from: commits and files since the merge
+ *  base (bounded; the counts are the true totals) and the repo's PR template. */
+export interface PrContext {
+  branch: string;
+  base: string;
+  commits: string[];
+  commit_count: number;
+  files: string[];
+  file_count: number;
+  stat: string;
+  template: string | null;
+}
+export const gitPrContext = (repo: string, base = "") =>
+  invoke<PrContext>("git_pr_context", { repo, base });
+/** Open a PR; resolves to its URL. The caller pushes the branch first. */
+export const ghPrCreate = (
+  repo: string,
+  base: string,
+  head: string,
+  title: string,
+  body: string,
+  draft: boolean,
+  reviewers?: string[],
+) => invoke<string>("gh_pr_create", { repo, base, head, title, body, draft, reviewers });
 
 // ---------- PR conversation (review threads, comments, reviews) ----------
 
