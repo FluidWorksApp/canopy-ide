@@ -5,10 +5,12 @@
 //! std::net threads — the same spawn-a-named-thread idiom as the monitor and
 //! hook bridge, and no new dependency.
 //!
-//! Trust model: this is a same-team convenience on a network you already
-//! share, not a security boundary. The code gates entry; frames from a peer
-//! are re-stamped with the identity that joined, so a member can't speak as
-//! someone else. Traffic is not encrypted — the panel says so.
+//! Trust model: this is a same-team convenience, not a hardened service. The
+//! code gates entry through a SPAKE2 handshake and every frame is then sealed
+//! with ChaCha20-Poly1305 under the resulting session key (see `secure`);
+//! members also prove an Ed25519 identity that is pinned on first use. Frames
+//! from a peer are re-stamped with the identity that joined, so a member can't
+//! speak as someone else.
 
 use crate::winproc::NoConsoleWindow;
 use serde::{Deserialize, Serialize};
@@ -185,6 +187,22 @@ pub struct CollabMsg {
     pub ts: u64,
 }
 
+/// Remote desktop control traffic (see `canopy_core::desk` and `desk.rs`).
+/// Always point to point: the host forwards it to the single addressed member
+/// and never broadcasts it, and re-stamps `from` from the authenticated link.
+#[derive(Serialize, Deserialize, Clone)]
+pub struct DeskMsg {
+    pub id: String,
+    pub from: String,
+    pub from_name: String,
+    /// The one member this is for. Required: there is no broadcast form.
+    pub to: String,
+    /// Opaque session token minted by the viewer.
+    pub session: String,
+    pub body: canopy_core::desk::DeskBody,
+    pub ts: u64,
+}
+
 #[derive(Serialize, Deserialize, Clone)]
 #[serde(tag = "type", rename_all = "kebab-case")]
 enum Frame {
@@ -214,6 +232,9 @@ enum Frame {
     /// notification, which is right for "review this PR" and catastrophic for
     /// a frame per keystroke.
     Collab(CollabMsg),
+    /// Remote desktop control. Its own variant for the same reason as `Collab`:
+    /// screen frames must not land in the Team inbox or raise notifications.
+    Desk(DeskMsg),
     Ping,
     Pong,
 }
@@ -797,6 +818,59 @@ pub struct RelayManager {
 }
 
 impl RelayManager {
+    /// Display name of a member we can currently see.
+    pub(crate) fn member_name(&self, id: &str) -> Option<String> {
+        let inner = self.inner.lock().unwrap();
+        status_of(&inner)
+            .members
+            .into_iter()
+            .find(|m| m.id == id)
+            .map(|m| m.name)
+    }
+
+    /// Send one desk body to exactly one member. The caller's body is
+    /// validated first; the lock is released before any socket write.
+    pub(crate) fn send_desk(
+        &self,
+        to: &str,
+        session: &str,
+        body: canopy_core::desk::DeskBody,
+    ) -> Result<(), String> {
+        body.validate().map_err(|e| e.to_string())?;
+        let (frame, sender) = {
+            let inner = self.inner.lock().unwrap();
+            let (from, from_name) = sender_context(&inner)?;
+            if to == from {
+                return Err("Can't start a remote session with yourself.".into());
+            }
+            let sender = if let Some(host) = &inner.host {
+                host.peers
+                    .get(to)
+                    .map(|p| p.sender.clone())
+                    .ok_or("That member is no longer connected.")?
+            } else if let Some(client) = &inner.client {
+                client.sender.clone()
+            } else {
+                return Err("Not connected to a relay.".into());
+            };
+            let frame = Frame::Desk(DeskMsg {
+                id: new_id(),
+                from,
+                from_name,
+                to: to.to_string(),
+                session: session.to_string(),
+                body,
+                ts: now_ms(),
+            });
+            (frame, sender)
+        };
+        if peer_send(&sender, &frame) {
+            Ok(())
+        } else {
+            Err("Couldn't reach that member.".into())
+        }
+    }
+
     /// App exit: close everything so no socket outlives the window.
     pub fn shutdown(&self) {
         let mut inner = self.inner.lock().unwrap();
@@ -946,7 +1020,12 @@ fn fetch_public_ip() -> Option<String> {
 }
 
 fn emit_state(app: &AppHandle, inner: &Inner) {
-    let _ = app.emit("relay:state", status_of(inner));
+    let status = status_of(inner);
+    // A remote desktop session cannot outlive its peer: any membership change
+    // (peer left, link dropped, relay stopped) ends it here. The desk lock is
+    // never held while taking the relay lock, so calling in under ours is safe.
+    crate::desk::on_members(app, status.members.iter().map(|m| m.id.as_str()));
+    let _ = app.emit("relay:state", status);
 }
 
 /// Presence to every connected peer.
@@ -1395,6 +1474,8 @@ fn serve_peer(
 
     // Joined: reads now block until the peer speaks or disconnects.
     on_joined();
+    // Bounds how much remote-desktop traffic one member can push through us.
+    let mut desk_limit = canopy_core::desk::RateLimiter::new(300, 500);
     loop {
         let Some(bytes) = receiver.recv() else { break };
         let Ok(frame) = serde_json::from_slice::<Frame>(&bytes) else {
@@ -1441,6 +1522,28 @@ fn serve_peer(
                     }
                     let (targets, local) = route_targets(host, &my_id, &msg.to);
                     Some((targets, local, Frame::Collab(msg), "relay:collab"))
+                }
+                Frame::Desk(mut msg) => {
+                    // Size and shape caps run before any fan-out, and a member
+                    // flooding us is dropped rather than forwarded.
+                    if msg.body.validate().is_err()
+                        || !canopy_core::desk::valid_session_id(&msg.session)
+                        || msg.to.is_empty()
+                        || msg.to == my_id
+                        || !desk_limit.allow(now_ms())
+                    {
+                        None
+                    } else {
+                        msg.from = my_id.clone();
+                        msg.from_name = my_name.clone();
+                        msg.ts = now_ms();
+                        if msg.id.is_empty() {
+                            msg.id = new_id();
+                        }
+                        // Exactly one recipient: the addressed peer, or us.
+                        let (targets, local) = route_targets(host, &my_id, &Some(msg.to.clone()));
+                        Some((targets, local, Frame::Desk(msg), "relay:desk"))
+                    }
                 }
                 Frame::Ping => host
                     .peers
@@ -1533,6 +1636,7 @@ fn deliver_frame(
             Frame::Collab(m) => {
                 let _ = app.emit(event, m.clone());
             }
+            Frame::Desk(m) => crate::desk::on_incoming(app, m.clone()),
             _ => {}
         }
     }
@@ -1775,6 +1879,11 @@ fn run_client(
                     }
                     Frame::Collab(msg) => {
                         let _ = reader_app.emit("relay:collab", msg);
+                    }
+                    Frame::Desk(msg) => {
+                        if msg.body.validate().is_ok() {
+                            crate::desk::on_incoming(&reader_app, msg);
+                        }
                     }
                     Frame::Ping => {
                         let _ = peer_send(&reader_sender, &Frame::Pong);
@@ -3151,6 +3260,46 @@ mod tests {
             serde_json::from_slice::<Frame>(&bytes).unwrap(),
             Frame::Collab(_)
         ));
+    }
+
+    /// A desk frame must survive the relay's encode/decode, land as `Desk`, and
+    /// an unknown body kind must make the whole frame unparseable so the relay
+    /// drops it instead of forwarding something it cannot bound.
+    #[test]
+    fn desk_frame_round_trips_and_rejects_unknown_kind() {
+        use canopy_core::desk::{DeskBody, InputEvent, Mode};
+        let frame = Frame::Desk(DeskMsg {
+            id: "i".into(),
+            from: "f".into(),
+            from_name: "n".into(),
+            to: "t".into(),
+            session: "s1".into(),
+            body: DeskBody::Input {
+                event: InputEvent::MouseMove { x: 0.5, y: 0.25 },
+            },
+            ts: 0,
+        });
+        let bytes = serde_json::to_vec(&frame).unwrap();
+        match serde_json::from_slice::<Frame>(&bytes).unwrap() {
+            Frame::Desk(m) => assert_eq!(m.to, "t"),
+            _ => panic!("not a desk frame"),
+        }
+        let req = Frame::Desk(DeskMsg {
+            id: "i".into(),
+            from: "f".into(),
+            from_name: "n".into(),
+            to: "t".into(),
+            session: "s1".into(),
+            body: DeskBody::Request { mode: Mode::ViewOnly },
+            ts: 0,
+        });
+        assert!(serde_json::to_string(&req).unwrap().contains(r#""type":"desk""#));
+
+        let bad = br#"{"type":"desk","id":"i","from":"f","from_name":"n","to":"t","session":"s","body":{"kind":"clipboard","text":"x"},"ts":0}"#;
+        assert!(serde_json::from_slice::<Frame>(bad).is_err());
+        // A desk frame with no addressee is not representable.
+        let no_to = br#"{"type":"desk","id":"i","from":"f","from_name":"n","session":"s","body":{"kind":"ping"},"ts":0}"#;
+        assert!(serde_json::from_slice::<Frame>(no_to).is_err());
     }
 
     /// Fan-out must skip the sender — echoing an operation back to its author

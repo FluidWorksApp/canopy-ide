@@ -22,6 +22,7 @@ mod companion_requests;
 mod containment;
 mod context;
 mod crash;
+mod desk;
 #[cfg(feature = "dictation")]
 mod dictation;
 mod execution;
@@ -550,6 +551,7 @@ pub fn run() {
         .manage(fsx::WorkspaceManager::default())
         .manage(lsp::LspManager::default())
         .manage(relay::RelayManager::default())
+        .manage(desk::DeskManager::default())
         .manage(portal::RemoteManager::default())
         .manage(preview::PreviewManager::default())
         .manage(browser::BrowserManager::default())
@@ -1033,6 +1035,11 @@ pub fn run() {
             relay::relay_send_collab,
             relay::relay_offer_file,
             relay::relay_accept_file,
+            desk::desk_request,
+            desk::desk_respond,
+            desk::desk_send_input,
+            desk::desk_end,
+            desk::desk_status,
             preview::preview_start,
             preview::preview_stop,
             preview::preview_allow_ports,
@@ -1131,6 +1138,8 @@ pub fn run() {
                     ide.close_all();
                 }
                 // ... and no relay socket either.
+                app.state::<desk::DeskManager>()
+                    .shutdown(&app.state::<relay::RelayManager>());
                 app.state::<relay::RelayManager>().shutdown();
                 // ... and stop the remote-access server.
                 app.state::<portal::RemoteManager>().shutdown();
