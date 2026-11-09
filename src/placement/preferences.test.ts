@@ -1,32 +1,55 @@
 import { beforeEach, describe, expect, it } from "vitest";
-import * as p from "./preferences";
+import * as preferences from "./preferences";
+import { automaticPreference, inheritPreference, targetPreference } from "./types";
 
 describe("placement preferences", () => {
   beforeEach(() => localStorage.clear());
-  it("defaults to auto", () => {
-    expect(p.getGlobalPreference()).toBe("auto");
-    expect(p.getProjectPreference("a")).toBe("auto");
-    expect(p.getAgentPreference("claude")).toBe("auto");
+
+  it("defaults global placement to Automatic and overrides to Use default", () => {
+    expect(preferences.getGlobalPreference()).toEqual(automaticPreference());
+    expect(preferences.getProjectPreference("a")).toEqual(inheritPreference());
+    expect(preferences.getAgentPreference("claude")).toEqual(inheritPreference());
   });
-  it("round-trips each level independently", () => {
-    p.setGlobalPreference("balance");
-    p.setProjectPreference("a", "remote");
-    p.setAgentPreference("claude", "local");
-    expect(p.getGlobalPreference()).toBe("balance");
-    expect(p.getProjectPreference("a")).toBe("remote");
-    expect(p.getProjectPreference("b")).toBe("auto");
-    expect(p.getAgentPreference("claude")).toBe("local");
+
+  it("round-trips concrete targets without collapsing their stable IDs", () => {
+    preferences.setGlobalPreference(targetPreference({ kind: "local" }));
+    preferences.setProjectPreference("a", targetPreference({ kind: "remote", workspaceId: "workspace-a" }));
+    preferences.setAgentPreference("claude", targetPreference({ kind: "t3", machineId: "machine-a" }));
+    expect(preferences.getGlobalPreference()).toEqual(targetPreference({ kind: "local" }));
+    expect(preferences.getProjectPreference("a")).toEqual(targetPreference({ kind: "remote", workspaceId: "workspace-a" }));
+    expect(preferences.getAgentPreference("claude")).toEqual(targetPreference({ kind: "t3", machineId: "machine-a" }));
+
+    preferences.setProjectPreference("b", targetPreference({ kind: "remote", workspaceId: "workspace-b" }));
+    expect(preferences.getProjectPreference("a")).not.toEqual(preferences.getProjectPreference("b"));
   });
-  it("auto clears an override", () => {
-    p.setProjectPreference("a", "remote");
-    p.setProjectPreference("a", "auto");
-    expect(p.getProjectPreference("a")).toBe("auto");
+
+  it("Use default clears an override while Automatic remains explicit", () => {
+    preferences.setProjectPreference("a", automaticPreference());
+    expect(preferences.getProjectPreference("a")).toEqual(automaticPreference());
+    preferences.setProjectPreference("a", inheritPreference());
+    expect(preferences.getProjectPreference("a")).toEqual(inheritPreference());
   });
-  it("ignores corrupt storage and invalid values", () => {
+
+  it("migrates legacy values without inventing a generic remote target", () => {
+    localStorage.setItem("canopy:placement:v1", JSON.stringify({
+      global: "balance",
+      projects: { inherited: "auto", automatic: "balance", local: "local", remote: "remote" },
+      agents: { remote: "remote" },
+    }));
+    expect(preferences.getGlobalPreference()).toEqual(automaticPreference());
+    expect(preferences.getProjectPreference("inherited")).toEqual(inheritPreference());
+    expect(preferences.getProjectPreference("automatic")).toEqual(automaticPreference());
+    expect(preferences.getProjectPreference("local")).toEqual(targetPreference({ kind: "local" }));
+    expect(preferences.getProjectPreference("remote")).toEqual(inheritPreference());
+    expect(preferences.getAgentPreference("remote")).toEqual(inheritPreference());
+  });
+
+  it("maps legacy global auto to Automatic and ignores corrupt values", () => {
+    localStorage.setItem("canopy:placement:v1", JSON.stringify({ global: "auto" }));
+    expect(preferences.getGlobalPreference()).toEqual(automaticPreference());
     localStorage.setItem("canopy:placement:v1", "{nope");
-    expect(p.getGlobalPreference()).toBe("auto");
-    localStorage.setItem("canopy:placement:v1", JSON.stringify({ global: "x", projects: { a: "bogus", __proto__: "local" } }));
-    expect(p.getGlobalPreference()).toBe("auto");
-    expect(p.getProjectPreference("a")).toBe("auto");
+    expect(preferences.getGlobalPreference()).toEqual(automaticPreference());
+    localStorage.setItem("canopy:placement:v1", JSON.stringify({ global: "x", projects: { a: "bogus" } }));
+    expect(preferences.getProjectPreference("a")).toEqual(inheritPreference());
   });
 });

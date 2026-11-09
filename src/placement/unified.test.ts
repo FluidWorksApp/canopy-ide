@@ -19,10 +19,13 @@ describe("buildUnifiedRows", () => {
     expect(rows.filter((r) => r.kind === "thread")).toMatchObject([{ name: "Canopy", status: "running", branch: "main", target: { kind: "t3", machineId: "m1" } }]);
     expect(rows.find((r) => r.kind === "job")).toMatchObject({ name: "Fix tests", target: { kind: "remote", workspaceId: "w1" } });
   });
-  it("adds a needsSetup placeholder only where a known, online remote lacks a local project", () => {
+  it("adds setup placeholders by project identity even when names collide", () => {
     const setup = rows.filter((r) => r.needsSetup);
-    expect(setup).toHaveLength(1);
-    expect(setup[0]).toMatchObject({ name: "Docs", target: { kind: "remote", workspaceId: "w1" }, status: "not set up" });
+    expect(setup).toHaveLength(2);
+    expect(setup).toEqual(expect.arrayContaining([
+      expect.objectContaining({ projectId: "p1", name: "Canopy", target: { kind: "remote", workspaceId: "w1" }, status: "not set up" }),
+      expect.objectContaining({ projectId: "p2", name: "Docs", target: { kind: "remote", workspaceId: "w1" }, status: "not set up" }),
+    ]));
   });
 });
 
@@ -32,9 +35,15 @@ describe("groupByProject and filterRows", () => {
     const g = groupByProject(rows).find((x) => x.key === "canopy")!;
     expect(new Set(g.rows.map((r) => r.target.kind))).toEqual(new Set(["local", "remote", "t3"]));
   });
-  it("filters by target, kind and text", () => {
-    expect(filterRows(rows, { target: "t3" }).every((r) => r.target.kind === "t3")).toBe(true);
+  it("filters by stable named-machine ID, kind and text", () => {
+    const t3Rows = filterRows(rows, { target: "t3:m1" });
+    expect(t3Rows.length).toBeGreaterThan(0);
+    expect(t3Rows.every((r) => r.target.kind === "t3" && r.target.machineId === "m1")).toBe(true);
+    const remoteRows = filterRows(rows, { target: "remote:w1" });
+    expect(remoteRows.length).toBeGreaterThan(0);
+    expect(remoteRows.every((r) => r.target.kind === "remote" && r.target.workspaceId === "w1")).toBe(true);
     expect(filterRows(rows, { kind: "agent" }).every((r) => r.kind === "agent")).toBe(true);
+    expect(filterRows(rows, { text: "studio" }).every((r) => r.targetLabel === "Studio")).toBe(true);
     expect(filterRows(rows, { text: "fix" })).toHaveLength(1);
     expect(filterRows(rows, {})).toHaveLength(rows.length);
   });

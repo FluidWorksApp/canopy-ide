@@ -1,9 +1,16 @@
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
-import { describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import { AgentLaunchButton } from "./AgentLaunchButton";
 import type { AgentTarget } from "./TicketsPanel";
 import type { PlacementDecision } from "../placement/types";
-import { getAgentPreference } from "../placement/preferences";
+import { targetPreference } from "../placement/types";
+import { getAgentPreference, setGlobalPreference } from "../placement/preferences";
+
+const transitionMocks = vi.hoisted(() => ({ active: true, request: vi.fn() }));
+vi.mock("../placement/transitions", () => ({
+  canLaunchOnActiveTarget: () => transitionMocks.active,
+  requestTargetTransition: transitionMocks.request,
+}));
 
 vi.mock("../remoteExecution/ProjectSetupDialog", () => ({
   ProjectSetupDialog: ({ projectName, workspaceName, onComplete }: { projectName: string; workspaceName: string; onComplete?: (ok: boolean) => void }) => (
@@ -41,6 +48,11 @@ const props = () => ({
 });
 
 describe("AgentLaunchButton", () => {
+  beforeEach(() => {
+    transitionMocks.active = true;
+    transitionMocks.request.mockReset();
+    localStorage.clear();
+  });
   it("sends the primary action to the originating agent", () => {
     const p = props();
     render(<AgentLaunchButton {...p} primaryTarget={origin} />);
@@ -114,7 +126,10 @@ describe("AgentLaunchButton", () => {
     const decision = (d: Partial<PlacementDecision>): PlacementDecision => ({
       target: { kind: "local" }, reason: "", alternatives: [], needsSetup: false, ...d,
     });
-    const click = () => fireEvent.click(screen.getByText("Send feedback", { exact: false }).closest("button")!);
+    const click = () => {
+      fireEvent.click(screen.getByText("Send feedback", { exact: false }).closest("button")!);
+      fireEvent.click(screen.getByRole("button", { name: "Start agent" }));
+    };
 
     it("launches straight away when the decision is local, passing it along", async () => {
       const p = props();
@@ -164,13 +179,72 @@ describe("AgentLaunchButton", () => {
       expect(p.onStart).not.toHaveBeenCalled();
     });
 
-    it("stores the Run on choice per agent from the caret menu", () => {
-      localStorage.clear();
+    it("initializes a one-launch choice from the effective saved default", async () => {
       const p = props();
-      render(<AgentLaunchButton {...p} placement={{ project, decide: async () => decision({}) }} />);
+      const saved = targetPreference({ kind: "remote", workspaceId: "w1" });
+      setGlobalPreference(saved);
+      const decide = vi.fn(async () => decision({ target: saved.target }));
+      const targets = [
+        { target: { kind: "local" } as const, name: "This Mac", online: true },
+        { target: saved.target, name: "Design Studio", online: true },
+      ];
+      render(<AgentLaunchButton {...p} placement={{ project, targets, decide }} />);
+      fireEvent.click(screen.getByText("Send feedback", { exact: false }).closest("button")!);
+      expect(screen.getByRole("combobox", { name: "Run on" })).toHaveValue("remote:w1");
+      fireEvent.click(screen.getByRole("button", { name: "Start agent" }));
+      await waitFor(() => expect(decide).toHaveBeenCalledWith("opencode", saved));
+    });
+
+    it("edits the persistent agent default outside the one-launch choice", () => {
+      const p = props();
+      const targets = [
+        { target: { kind: "local" } as const, name: "This Mac", online: true },
+        { target: { kind: "remote", workspaceId: "w1" } as const, name: "Design Studio", online: true },
+      ];
+      render(<AgentLaunchButton {...p} placement={{ project, targets, decide: async () => decision({}) }} />);
       fireEvent.click(screen.getByTitle("Send to a running agent, or start a different one"));
-      fireEvent.click(screen.getByText("Run on: Remote"));
-      expect(getAgentPreference("opencode")).toBe("remote");
+      fireEvent.click(screen.getByText("Default machine for OpenCode…"));
+      fireEvent.change(screen.getByRole("combobox", { name: "Default run on" }), { target: { value: "remote:w1" } });
+      fireEvent.click(screen.getByRole("button", { name: "Save default" }));
+      expect(getAgentPreference("opencode")).toEqual(targetPreference({ kind: "remote", workspaceId: "w1" }));
+    });
+
+    it("binds the selected CLI and machine into one launch interaction", async () => {
+      const p = props();
+      const decide = vi.fn(async () => decision({ target: { kind: "remote", workspaceId: "w1" } }));
+      const targets = [
+        { target: { kind: "local" } as const, name: "This Mac", online: true },
+        { target: { kind: "remote", workspaceId: "w1" } as const, name: "Design Studio", online: true },
+      ];
+      render(<AgentLaunchButton {...p} placement={{ project, targets, decide }} />);
+      fireEvent.click(screen.getByTitle("Send to a running agent, or start a different one"));
+      fireEvent.click(screen.getByText("OpenCode"));
+      fireEvent.change(screen.getByRole("combobox", { name: "Run on" }), { target: { value: "remote:w1" } });
+      fireEvent.click(screen.getByRole("button", { name: "Start agent" }));
+      await waitFor(() => expect(decide).toHaveBeenCalledWith("opencode", targetPreference({ kind: "remote", workspaceId: "w1" })));
+      expect(p.onStart).toHaveBeenCalledWith("opencode", expect.objectContaining({ target: { kind: "remote", workspaceId: "w1" } }));
+    });
+
+    it("offers a named transition instead of launching on the wrong active machine", async () => {
+      transitionMocks.active = false;
+      const p = props();
+      const d = decision({ target: { kind: "remote", workspaceId: "w1" }, targetName: "Design Studio" });
+      render(<AgentLaunchButton {...p} placement={{ project, decide: async () => d }} />);
+      click();
+      const open = await screen.findByRole("button", { name: "Open Design Studio" });
+      expect(p.onStart).not.toHaveBeenCalled();
+      fireEvent.click(open);
+      expect(transitionMocks.request).toHaveBeenCalledWith({ kind: "remote", workspaceId: "w1" }, "Design Studio");
+    });
+
+    it("opens an unsupported T3 target by name without launching locally", async () => {
+      transitionMocks.active = false;
+      const p = props();
+      const d = decision({ target: { kind: "t3", machineId: "m1" }, targetName: "Build Mini" });
+      render(<AgentLaunchButton {...p} placement={{ project, decide: async () => d }} />);
+      click();
+      expect(await screen.findByText(/Build Mini opens in its machine view/)).toBeInTheDocument();
+      expect(p.onStart).not.toHaveBeenCalled();
     });
   });
 });

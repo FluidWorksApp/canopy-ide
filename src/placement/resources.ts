@@ -12,7 +12,7 @@ export interface RemoteWorkspaceInfo {
 export interface ResourceSources {
   now: () => number;
   /** Running local agents/ptys. */
-  localActiveAgents: () => Promise<number>;
+  localActiveAgents: () => Promise<number | "unknown">;
   localMemory: () => Promise<{ total_bytes: number; available_bytes: number } | null>;
   localCapacity: number;
   remoteWorkspaces: () => Promise<RemoteWorkspaceInfo[]>;
@@ -48,7 +48,11 @@ export async function collectResources(src: ResourceSources, defaultRemoteCapaci
     agents === null
       ? offline(local, now)
       : {
-          target: local, online: true, activeAgents: agents, capacity: src.localCapacity,
+          target: local,
+          online: true,
+          activeAgents: agents === "unknown" ? 0 : agents,
+          ...(agents === "unknown" ? { loadUnknown: true } : {}),
+          capacity: src.localCapacity,
           memFree: mem && mem.total_bytes > 0 ? mem.available_bytes / mem.total_bytes : undefined,
           lastSeen: now,
         },

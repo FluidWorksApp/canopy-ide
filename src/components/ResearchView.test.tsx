@@ -137,6 +137,32 @@ describe("ResearchView", () => {
     expect(screen.queryByRole("button", { name: "Implement this" })).toBeNull();
   });
 
+  it("routes a fresh research agent through launch-scoped machine selection", async () => {
+    mockCommands({ research_get: () => detail() });
+    const onImplement = vi.fn();
+    const decide = vi.fn(async () => ({
+      target: { kind: "local" } as const,
+      targetName: "This Mac",
+      reason: "Selected This Mac.",
+      alternatives: [],
+      needsSetup: false,
+    }));
+    render(
+      <ResearchView
+        projectId="p1"
+        researchId="0007-index-staleness"
+        onImplement={onImplement}
+        installed={{ opencode: true }}
+        placement={{ project: { id: "p1", name: "Canopy", components: [] }, decide }}
+      />,
+    );
+
+    await userEvent.click(await screen.findByRole("button", { name: /Implement this/ }));
+    expect(screen.getByRole("combobox", { name: "Run on" })).toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "Start agent" }));
+    await waitFor(() => expect(onImplement).toHaveBeenCalledOnce());
+  });
+
   it("offers to spec a finding before it is built, and says when it has been", async () => {
     mockCommands({ research_get: () => detail() });
     const onWriteSpec = vi.fn();

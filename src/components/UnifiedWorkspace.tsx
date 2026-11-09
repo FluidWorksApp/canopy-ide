@@ -1,31 +1,34 @@
-// One panel for everything Canopy can run or see: this Mac, cloud workspaces,
-// T3 Code machines. Reads are read-only; opening or handing off goes through
-// the callbacks the shell supplies. See docs/placement-and-unified-workspace.md
-// for what can and cannot be read from a target that is not the active host.
+// A compact view of work Canopy can see across every named machine. Reads are
+// read-only; opening or handing off goes through callbacks supplied by the app.
+// See docs/placement-and-unified-workspace.md for cross-machine limits.
 import { useCallback, useEffect, useMemo, useState } from "react";
 import type { Gathered } from "../placement/gather";
 import { decideHandoff } from "../placement/launch";
 import { getGlobalPreference, setGlobalPreference } from "../placement/preferences";
-import { filterRows, groupByProject, type UnifiedFilter, type UnifiedRow } from "../placement/unified";
-import { targetKey, type PlacementDecision, type Preference, type ResourceSnapshot } from "../placement/types";
+import { filterRows, groupByProject, type UnifiedFilter, type UnifiedKind, type UnifiedRow } from "../placement/unified";
+import { targetKey, type DisplayTarget, type PlacementDecision, type Preference, type ResourceSnapshot } from "../placement/types";
 import { PlacementPicker, targetName } from "./PlacementPicker";
 import { Button } from "./ui";
 
 const load = async (): Promise<Gathered> => (await import("../placement/gather")).gatherUnified();
+const kindLabel: Record<UnifiedKind, string> = { project: "Project", agent: "Agent", thread: "Thread", job: "Job" };
 
-function LoadBar({ r, name }: { r: ResourceSnapshot; name: string }) {
-  const pct = r.online && r.capacity > 0 ? Math.min(100, Math.round((r.activeAgents / r.capacity) * 100)) : 0;
+function MachineSummary({ machine, resource }: { machine: DisplayTarget; resource?: ResourceSnapshot }) {
+  const online = resource?.online ?? machine.online;
+  const measured = online && resource && !resource.loadUnknown && resource.capacity > 0;
+  const pct = measured ? Math.min(100, Math.round((resource.activeAgents / resource.capacity) * 100)) : 0;
   return (
-    <li className="unified-load">
-      <span>{name}</span>
-      {r.online ? (
+    <li className="unified-machine" data-target-id={targetKey(machine.target)}>
+      <div className="unified-machine-heading">
+        <strong className="unified-machine-name">{machine.name}</strong>
+        <span className={`unified-machine-state ${online ? "online" : "offline"}`}><i aria-hidden="true" />{online ? "Online" : "Offline"}</span>
+      </div>
+      {measured ? (
         <>
-          <progress max={100} value={pct} aria-label={`${name} load`} />
-          <small>{r.activeAgents}/{r.capacity} agents</small>
+          <progress max={100} value={pct} aria-label={`${machine.name} load`} />
+          <small>{resource.activeAgents} of {resource.capacity} agent slots in use</small>
         </>
-      ) : (
-        <small>offline</small>
-      )}
+      ) : <small>{online ? "Load unavailable" : "Not available for new work"}</small>}
     </li>
   );
 }
@@ -36,29 +39,32 @@ export function UnifiedWorkspace({
   onHandOff,
 }: {
   gather?: () => Promise<Gathered>;
-  /** Open a thread or job in its own surface (T3 machine view, mesh). */
+  /** Open a thread or job in its own surface. */
   onOpen?: (row: UnifiedRow) => void;
-  /** Called with the target choosePlacement picked for a hand-off. */
+  /** Called with the exact target selected for a hand-off. */
   onHandOff?: (row: UnifiedRow, decision: PlacementDecision) => void;
 }) {
   const [data, setData] = useState<Gathered | null>(null);
+  const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [filter, setFilter] = useState<UnifiedFilter>({ target: "all", kind: "all", text: "" });
   const [pref, setPref] = useState<Preference>(getGlobalPreference);
   const [handoff, setHandoff] = useState<{ id: string; decision: PlacementDecision } | null>(null);
 
   const refresh = useCallback(() => {
+    setLoading(true);
     setError("");
-    gather().then(setData, (e) => setError(String((e as { message?: string })?.message ?? e)));
+    gather().then(value => { setData(value);setLoading(false); }, reason => { setError(String((reason as { message?: string })?.message ?? reason));setLoading(false); });
   }, [gather]);
   useEffect(refresh, [refresh]);
 
   const names = useMemo(() => {
     const out: Record<string, string> = {};
-    for (const r of data?.rows ?? []) out[r.target.kind === "remote" ? r.target.workspaceId : r.target.kind === "t3" ? r.target.machineId : "local"] = r.targetLabel;
+    for (const target of data?.targets ?? []) out[targetKey(target.target)] = target.name;
+    for (const row of data?.rows ?? []) out[targetKey(row.target)] = row.targetLabel;
     return out;
   }, [data]);
-  const groups = useMemo(() => groupByProject(filterRows(data?.rows ?? [], filter)), [data, filter]);
+  const visibleRows = useMemo(() => groupByProject(filterRows(data?.rows ?? [], filter)).flatMap(group => group.rows), [data, filter]);
 
   const doHandOff = (row: UnifiedRow) => {
     const decision = decideHandoff({ projectId: row.name, agentKind: row.kind, resources: data?.resources ?? [], from: row.target });
@@ -68,50 +74,63 @@ export function UnifiedWorkspace({
 
   return (
     <div className="unified-workspace" role="region" aria-label="All workspaces">
-      <div className="unified-toolbar">
-        <PlacementPicker label="Default run on" value={pref} onChange={(p) => { setPref(p); setGlobalPreference(p); }} names={names} />
-        <label className="field"><span>Show</span>
-          <select aria-label="Target filter" value={filter.target} onChange={(e) => setFilter({ ...filter, target: e.target.value as UnifiedFilter["target"] })}>
-            <option value="all">All targets</option><option value="local">This Mac</option><option value="remote">Cloud</option><option value="t3">T3 Code</option>
+      <div className="unified-toolbar" aria-label="Workspace filters">
+        <PlacementPicker
+          label="Default run on"
+          value={pref}
+          onChange={(preference) => { setPref(preference); setGlobalPreference(preference); }}
+          names={names}
+          targets={data?.targets}
+        />
+        <label className="field"><span>Machine</span>
+          <select aria-label="Machine filter" value={filter.target} onChange={(event) => setFilter({ ...filter, target: event.target.value })}>
+            <option value="all">All machines</option>
+            {data?.targets.map(machine => <option key={targetKey(machine.target)} value={targetKey(machine.target)}>{machine.name}</option>)}
           </select>
         </label>
         <label className="field"><span>Type</span>
-          <select aria-label="Kind filter" value={filter.kind} onChange={(e) => setFilter({ ...filter, kind: e.target.value as UnifiedFilter["kind"] })}>
+          <select aria-label="Type filter" value={filter.kind} onChange={(event) => setFilter({ ...filter, kind: event.target.value as UnifiedFilter["kind"] })}>
             <option value="all">Everything</option><option value="project">Projects</option><option value="agent">Agents</option><option value="thread">Threads</option><option value="job">Jobs</option>
           </select>
         </label>
-        <input type="search" aria-label="Filter by name" placeholder="Filter" value={filter.text} onChange={(e) => setFilter({ ...filter, text: e.target.value })} />
-        <Button size="sm" onClick={refresh}>Refresh</Button>
+        <label className="field unified-search"><span>Find work</span><input type="search" aria-label="Filter by name" placeholder="Project, branch, or machine" value={filter.text} onChange={(event) => setFilter({ ...filter, text: event.target.value })} /></label>
+        <Button size="sm" onClick={refresh} disabled={loading} aria-label="Refresh all workspaces">Refresh</Button>
       </div>
-      {error && <p role="alert" className="workspace-feedback error">{error}</p>}
-      {!data && !error && <p className="remote-empty">Loading…</p>}
+
+      {loading && !data && !error && <div className="unified-state" role="status"><strong>Loading work from your machines…</strong><span>Checking availability and visible projects.</span></div>}
+      {error && <div className="unified-state error" role="alert"><strong>Could not load workspaces: {error}</strong><span>Your existing work is unchanged.</span><Button size="sm" onClick={refresh}>Try again</Button></div>}
       {data && (
         <>
-          <ul className="unified-loads" aria-label="Load per target">
-            {data.resources.map((r) => <LoadBar key={targetKey(r.target)} r={r} name={targetName(r.target, names)} />)}
+          <ul className="unified-machines" aria-label="Machine availability">
+            {data.targets.map(machine => <MachineSummary key={targetKey(machine.target)} machine={machine} resource={data.resources.find(resource => targetKey(resource.target) === targetKey(machine.target))} />)}
           </ul>
-          {data.notes.map((n) => <p key={n} className="workspace-description">{n}</p>)}
-          {!groups.length && <p className="remote-empty">Nothing matches.</p>}
-          {groups.map((g) => (
-            <section key={g.key} className="unified-group" aria-label={g.name}>
-              <h4>{g.name}</h4>
-              <ul>
-                {g.rows.map((r) => (
-                  <li key={r.id} className="unified-row">
-                    <span className="unified-badge" data-target={r.target.kind}>{r.targetLabel}</span>
-                    <span className="unified-kind">{r.kind}</span>
-                    <span className="unified-status">{r.needsSetup ? "needs setup" : r.status}</span>
-                    {r.branch && <code>{r.branch}</code>}
-                    {onOpen && (r.kind === "thread" || r.kind === "job") && <Button size="sm" variant="ghost" onClick={() => onOpen(r)}>Open</Button>}
-                    {r.kind !== "project" && <Button size="sm" variant="ghost" onClick={() => doHandOff(r)}>Hand off</Button>}
-                    {handoff?.id === r.id && (
-                      <small role="status">{handoff.decision.target ? `Could move to ${targetName(handoff.decision.target, names)}. ` : ""}{handoff.decision.reason}</small>
-                    )}
-                  </li>
-                ))}
-              </ul>
-            </section>
-          ))}
+          {data.notes.length > 0 && <aside className="unified-limitations" aria-label="Workspace visibility limits"><strong>Visibility</strong>{data.notes.map(note => <p key={note}>{note}</p>)}</aside>}
+          {visibleRows.length > 0 ? (
+            <div className="unified-table-wrap">
+              <table className="unified-table" aria-label="Work across all machines">
+                <thead><tr><th scope="col">Work</th><th scope="col">Machine</th><th scope="col">Type</th><th scope="col">Status</th><th scope="col">Branch</th><th scope="col">Actions</th></tr></thead>
+                <tbody>
+                  {visibleRows.map(row => {
+                    const canOpen = !!onOpen && row.target.kind === "t3" && (row.kind === "thread" || row.kind === "job");
+                    const canHandOff = row.kind !== "project";
+                    return <tr key={row.id} className="unified-row" data-row-id={row.id}>
+                      <th scope="row" data-label="Work"><span className="unified-work-name">{row.name}</span></th>
+                      <td data-label="Machine"><span className="unified-target-badge" data-target-id={targetKey(row.target)}>{row.targetLabel}</span></td>
+                      <td data-label="Type"><span className="unified-kind">{kindLabel[row.kind]}</span></td>
+                      <td data-label="Status"><span className={`unified-status${row.needsSetup ? " attention" : ""}`}>{row.needsSetup ? "Needs setup" : row.status}</span></td>
+                      <td data-label="Branch">{row.branch ? <code>{row.branch}</code> : <span className="unified-none" aria-label="No branch">None</span>}</td>
+                      <td data-label="Actions" className="unified-actions"><div className="unified-action-buttons">
+                        {canOpen && <Button size="sm" variant="ghost" onClick={() => onOpen(row)} aria-label={`Open ${row.name} on ${row.targetLabel}`}>Open</Button>}
+                        {canHandOff && <Button size="sm" variant="ghost" onClick={() => doHandOff(row)} aria-label={`Hand off ${row.name} from ${row.targetLabel}`}>Hand off</Button>}
+                        {!canOpen && !canHandOff && <span className="unified-none">None</span>}
+                        {handoff?.id === row.id && <small role="status">{handoff.decision.target ? `Could move to ${targetName(handoff.decision.target, names)}. ` : ""}{handoff.decision.reason}</small>}
+                      </div></td>
+                    </tr>;
+                  })}
+                </tbody>
+              </table>
+            </div>
+          ) : <div className="unified-state"><strong>{data.rows.length ? "No work matches these filters." : "No work is visible yet."}</strong><span>{data.rows.length ? "Change a filter to see more work." : "Open or set up a project on a connected machine, then refresh."}</span></div>}
         </>
       )}
     </div>

@@ -3,6 +3,7 @@ import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 import { mockCommands } from "../test/setup";
 import { NoteView } from "./NoteView";
+import type { Preference } from "../placement/types";
 
 const detail = (over: Record<string, unknown> = {}) => ({
   id: "0007-tier-donations",
@@ -128,6 +129,36 @@ describe("NoteView", () => {
     expect(kids[0]).toHaveClass("note-actions-note");
     expect(kids[1]).toHaveClass("status-spacer");
     expect(kids.at(-1)?.textContent).toMatch(/Work on it/);
+  });
+
+  it("routes a fresh note agent through launch-scoped machine selection", async () => {
+    mockCommands({ notes_get: detail(), notes_list: [] });
+    const onStartNew = vi.fn();
+    const decide = vi.fn(async (_agentId: string, requested: Preference) => ({
+      target: { kind: "local" } as const,
+      targetName: "This Mac",
+      reason: "Selected This Mac.",
+      alternatives: [],
+      needsSetup: false,
+      requested,
+    }));
+    render(
+      <NoteView
+        projectId="p1"
+        id="0007-tier-donations"
+        agentTargets={[]}
+        installed={{ opencode: true }}
+        placement={{ project: { id: "p1", name: "Canopy", components: [] }, decide }}
+        onStartNew={onStartNew}
+        onSendToAgent={vi.fn()}
+      />,
+    );
+
+    await userEvent.click(await screen.findByRole("button", { name: /Work on it/ }));
+    expect(screen.getByRole("combobox", { name: "Run on" })).toHaveValue("automatic");
+    await userEvent.click(screen.getByRole("button", { name: "Start agent" }));
+    await waitFor(() => expect(onStartNew).toHaveBeenCalledOnce());
+    expect(decide).toHaveBeenCalledWith("opencode", { mode: "automatic" });
   });
 
   it("marks a captured line reference with the commit it came from", async () => {

@@ -6,8 +6,20 @@ export type Target =
   | { kind: "remote"; workspaceId: string }
   | { kind: "t3"; machineId: string };
 
-/** What the user asked for. "auto" defers to the next level (or balance). */
-export type Preference = "local" | "remote" | "balance" | "auto";
+/** What the user asked for. Inheritance is available only at override levels;
+ * automatic is always an explicit request to balance over live targets. */
+export type Preference =
+  | { mode: "inherit" }
+  | { mode: "automatic" }
+  | { mode: "target"; target: Target };
+
+export type ResolvedPreference = Exclude<Preference, { mode: "inherit" }>;
+
+export interface DisplayTarget {
+  target: Target;
+  name: string;
+  online: boolean;
+}
 
 export interface ResourceSnapshot {
   target: Target;
@@ -31,9 +43,18 @@ export interface PlacementDecision {
   alternatives: Target[];
   /** The project is not on the chosen remote yet; run on-demand setup first. */
   needsSetup: boolean;
+  /** User-facing name supplied by the gathering/UI layer when available. */
+  targetName?: string;
 }
 
 export const targetKey = (t: Target): string =>
   t.kind === "local" ? "local" : t.kind === "remote" ? `remote:${t.workspaceId}` : `t3:${t.machineId}`;
 
 export const sameTarget = (a: Target, b: Target) => targetKey(a) === targetKey(b);
+
+export const preferenceKey = (p: Preference): string =>
+  p.mode === "target" ? targetKey(p.target) : p.mode;
+
+export const automaticPreference = (): { mode: "automatic" } => ({ mode: "automatic" });
+export const inheritPreference = (): { mode: "inherit" } => ({ mode: "inherit" });
+export const targetPreference = (target: Target): { mode: "target"; target: Target } => ({ mode: "target", target });

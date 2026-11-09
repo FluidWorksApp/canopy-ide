@@ -59,7 +59,7 @@ import {
   publishVibePreviewContext,
   removeVibePreviewContext,
 } from "../vibePreviewContext";
-import { AgentLaunchButton } from "./AgentLaunchButton";
+import { AgentLaunchButton, type LaunchPlacement } from "./AgentLaunchButton";
 import { ContextMenu, useContextMenu } from "./ContextMenu";
 import { CameraIcon } from "./icons";
 import type { AgentTarget } from "./TicketsPanel";
@@ -119,6 +119,7 @@ interface PreviewViewProps {
    *  agent working in the component that serves this page. */
   primaryTarget?: AgentTarget;
   installed: Record<string, boolean>;
+  placement?: LaunchPlacement;
   onSendToAgent: (target: AgentTarget, text: string) => void;
   /** `cwd` is the serving component's directory when the URL is linked to one. */
   onStartNew: (
@@ -175,6 +176,7 @@ export function PreviewView({
   agentTargets,
   primaryTarget,
   installed,
+  placement,
   onSendToAgent,
   onStartNew,
   onRunOneOff,
@@ -1378,6 +1380,7 @@ export function PreviewView({
                       agentTargets={agentTargets}
                       primaryTarget={primaryTarget}
                       installed={installed}
+                      placement={placement}
                       newAgentLabel={
                         linked?.componentLabel
                           ? `New agent in ${linked.componentLabel}`
@@ -1464,6 +1467,7 @@ export function PreviewView({
                     agentTargets={agentTargets}
                     primaryTarget={primaryTarget}
                     installed={installed}
+                    placement={placement}
                     newAgentLabel={
                       linked?.componentLabel
                         ? `New agent in ${linked.componentLabel}`

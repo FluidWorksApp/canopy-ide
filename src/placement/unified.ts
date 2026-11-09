@@ -14,6 +14,8 @@ export interface UnifiedRow {
   targetLabel: string;
   status: string;
   branch?: string;
+  /** Stable project identity for project rows. */
+  projectId?: string;
   /** A remote placeholder for a local project that is not on that remote yet. */
   needsSetup: boolean;
 }
@@ -52,7 +54,7 @@ export function buildUnifiedRows(input: UnifiedInput): UnifiedRow[] {
     rows.push({ needsSetup: false, ...r });
 
   for (const p of input.local.projects)
-    push({ id: `local:project:${p.id}`, name: p.name, kind: "project", target: local, targetLabel: "This Mac", status: "ready" });
+    push({ id: `local:project:${p.id}`, projectId: p.id, name: p.name, kind: "project", target: local, targetLabel: "This Mac", status: "ready" });
   for (const a of input.local.agents)
     push({ id: `local:agent:${a.id}`, name: a.project ?? a.name, kind: "agent", target: local, targetLabel: "This Mac", status: a.status ?? "running", branch: a.branch });
 
@@ -60,13 +62,13 @@ export function buildUnifiedRows(input: UnifiedInput): UnifiedRow[] {
     const target: Target = { kind: "remote", workspaceId: w.workspaceId };
     const online = w.state === "ready";
     if (w.projects) {
-      const have = new Set(w.projects.map((p) => norm(p.name)));
+      const have = new Set(w.projects.map((p) => p.id));
       for (const p of w.projects)
-        push({ id: `${targetKey(target)}:project:${p.id}`, name: p.name, kind: "project", target, targetLabel: w.name, status: online ? "ready" : w.state });
+        push({ id: `${targetKey(target)}:project:${p.id}`, projectId: p.id, name: p.name, kind: "project", target, targetLabel: w.name, status: online ? "ready" : w.state });
       if (online)
         for (const p of input.local.projects)
-          if (!have.has(norm(p.name)))
-            push({ id: `${targetKey(target)}:setup:${p.id}`, name: p.name, kind: "project", target, targetLabel: w.name, status: "not set up", needsSetup: true });
+          if (!have.has(p.id))
+            push({ id: `${targetKey(target)}:setup:${p.id}`, projectId: p.id, name: p.name, kind: "project", target, targetLabel: w.name, status: "not set up", needsSetup: true });
     }
     for (const a of w.agents ?? [])
       push({ id: `${targetKey(target)}:agent:${a.id}`, name: a.project ?? a.name, kind: "agent", target, targetLabel: w.name, status: a.status ?? "running", branch: a.branch });
@@ -75,7 +77,7 @@ export function buildUnifiedRows(input: UnifiedInput): UnifiedRow[] {
   for (const m of input.t3) {
     const target: Target = { kind: "t3", machineId: m.machineId };
     for (const p of m.projects)
-      push({ id: `${targetKey(target)}:project:${p.id}`, name: p.title, kind: "project", target, targetLabel: m.label, status: "ready" });
+      push({ id: `${targetKey(target)}:project:${p.id}`, projectId: p.id, name: p.title, kind: "project", target, targetLabel: m.label, status: "ready" });
     const byId = new Map(m.projects.map((p) => [p.id, p.title]));
     for (const t of m.threads)
       push({ id: `${targetKey(target)}:thread:${t.id}`, name: (t.project && byId.get(t.project)) ?? t.project ?? "T3 Code", kind: "thread", target, targetLabel: m.label, status: t.status ?? "idle", branch: t.branch });
@@ -101,7 +103,8 @@ export function groupByProject(rows: UnifiedRow[]): UnifiedGroup[] {
 }
 
 export interface UnifiedFilter {
-  target?: "all" | "local" | "remote" | "t3";
+  /** "all" or a stable targetKey such as remote:workspace-id. */
+  target?: string;
   kind?: UnifiedKind | "all";
   text?: string;
 }
@@ -110,7 +113,7 @@ export function filterRows(rows: UnifiedRow[], f: UnifiedFilter): UnifiedRow[] {
   const text = norm(f.text ?? "");
   return rows.filter(
     (r) =>
-      (!f.target || f.target === "all" || r.target.kind === f.target) &&
+      (!f.target || f.target === "all" || targetKey(r.target) === f.target) &&
       (!f.kind || f.kind === "all" || r.kind === f.kind) &&
       (!text || norm(r.name).includes(text) || norm(r.targetLabel).includes(text)),
   );

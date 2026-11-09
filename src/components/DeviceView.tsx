@@ -39,7 +39,7 @@ import {
 import { DeviceSetup } from "../devices/DeviceSetup";
 import { DeviceStreamView } from "../devices/DeviceStreamView";
 import type { DevicePlatform } from "../devices/stream";
-import { AgentLaunchButton } from "./AgentLaunchButton";
+import { AgentLaunchButton, type LaunchPlacement } from "./AgentLaunchButton";
 import type { AgentTarget } from "./TicketsPanel";
 import { Button } from "./ui";
 
@@ -62,6 +62,7 @@ interface DeviceViewProps {
   }) => void;
   agentTargets: AgentTarget[];
   installed: Record<string, boolean>;
+  placement?: LaunchPlacement;
   onSendToAgent: (target: AgentTarget, text: string) => void;
   onStartNew: (
     agentId: string,
@@ -82,6 +83,7 @@ export default function DeviceView({
   onPatch,
   agentTargets,
   installed,
+  placement,
   onSendToAgent,
   onStartNew,
   projects,
@@ -736,6 +738,7 @@ export default function DeviceView({
                   label="Send feedback"
                   agentTargets={agentTargets}
                   installed={installed}
+                  placement={placement}
                   newAgentLabel="New agent on this feedback"
                   primaryTitle={(cli) => `Start ${cli} on this feedback`}
                   onStart={(agentId) => onStartNew(agentId, feedback(), projectDir || null)}

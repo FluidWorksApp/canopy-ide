@@ -10,7 +10,7 @@ export type WorkspaceMenuRow={id:string;name:string;kind:'local'|'saved'|'manage
  * its own popup rather than in this menu. */
 /** `linkWorkspaceId`: the active account workspace, offered as one-click
  *  "Copy workspace link" (readableLinks.ts). */
-export function WorkspaceMenu({anchor,rows,busyId,error,onPick,onManage,onNew,onClose,linkWorkspaceId}:{anchor:HTMLElement|null;rows:WorkspaceMenuRow[];busyId:string|null;error:string;onPick:(row:WorkspaceMenuRow)=>void;onManage:()=>void;onNew:()=>void;onClose:()=>void;linkWorkspaceId?:string}){
+export function WorkspaceMenu({anchor,rows,busyId,error,onPick,onAllWorkspaces,onManage,onNew,onClose,linkWorkspaceId}:{anchor:HTMLElement|null;rows:WorkspaceMenuRow[];busyId:string|null;error:string;onPick:(row:WorkspaceMenuRow)=>void;onAllWorkspaces:()=>void;onManage:()=>void;onNew:()=>void;onClose:()=>void;linkWorkspaceId?:string}){
  const [linkState,setLinkState]=useState<{text:string;error:boolean}|null>(null);
  const copyLink=()=>{if(!linkWorkspaceId)return;setLinkState({text:'Copying…',error:false});void copyReadableLink({kind:'workspace',workspaceId:linkWorkspaceId}).then(url=>setLinkState({text:`Copied ${url.replace(/^https:\/\//,'')}`,error:false})).catch((e:unknown)=>setLinkState({text:e instanceof Error?e.message:String(e),error:true}));};
  const menu=useRef<HTMLDivElement>(null);
@@ -42,6 +42,7 @@ export function WorkspaceMenu({anchor,rows,busyId,error,onPick,onManage,onNew,on
   {linkWorkspaceId&&<button type="button" role="menuitem" className="workspace-menu-action" onClick={copyLink}><span aria-hidden="true">⧉</span>Copy workspace link</button>}
   {linkState&&<p className={linkState.error?'workspace-menu-error':'workspace-menu-note'} role={linkState.error?'alert':'status'}>{linkState.text}</p>}
   <div className="workspace-menu-sep" role="separator"/>
+  <button type="button" role="menuitem" className="workspace-menu-action" onClick={onAllWorkspaces}><span aria-hidden="true">▦</span>All workspaces…</button>
   <button type="button" role="menuitem" className="workspace-menu-action" onClick={onNew}><span aria-hidden="true">＋</span>New workspace…</button>
   <button type="button" role="menuitem" className="workspace-menu-action" onClick={onManage}><span aria-hidden="true">⚙</span>Manage workspaces…</button>
  </div>,document.body);
