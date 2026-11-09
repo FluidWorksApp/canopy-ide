@@ -325,15 +325,13 @@ export function RemoteDesktopView({
       'button:not([disabled]),[href],input:not([disabled]),select:not([disabled]),textarea:not([disabled]),[tabindex]:not([tabindex="-1"])',
     )];
     if (focusable.length === 0) return;
-    const first = focusable[0];
-    const last = focusable[focusable.length - 1];
-    if (event.shiftKey && document.activeElement === first) {
-      event.preventDefault();
-      last.focus();
-    } else if (!event.shiftKey && document.activeElement === last) {
-      event.preventDefault();
-      first.focus();
-    }
+    event.preventDefault();
+    event.stopPropagation();
+    const current = focusable.indexOf(document.activeElement as HTMLElement);
+    const next = event.shiftKey
+      ? (current <= 0 ? focusable.length : current) - 1
+      : (current + 1) % focusable.length;
+    focusable[next].focus();
   };
 
   return (
@@ -343,7 +341,7 @@ export function RemoteDesktopView({
       role="dialog"
       aria-modal="true"
       aria-label={`Remote desktop: ${view.peer_name}`}
-      onKeyDown={containFocus}
+      onKeyDownCapture={containFocus}
     >
       <div className="desk-viewer-bar">
         <strong>{view.peer_name}</strong>

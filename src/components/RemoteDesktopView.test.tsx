@@ -249,6 +249,20 @@ describe("viewer input and frames", () => {
     before.remove();
   });
 
+  it("keeps modal Tab navigation local in control mode", () => {
+    const input = vi.fn(() => null);
+    mockCommands({ desk_send_input: input });
+    render(
+      <RemoteDesktopView view={view("control")} frames={createFrameBus()} onClose={() => {}} />,
+    );
+    const canvas = screen.getByLabelText("Remote screen");
+    const end = screen.getByText("End");
+    expect(document.activeElement).toBe(canvas);
+    fireEvent.keyDown(canvas, { key: "Tab", code: "Tab" });
+    expect(document.activeElement).toBe(end);
+    expect(input).not.toHaveBeenCalled();
+  });
+
   it("End button calls desk_end and status is live", async () => {
     const end = vi.fn(() => null);
     mockCommands({ desk_end: end });
