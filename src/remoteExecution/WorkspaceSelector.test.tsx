@@ -1,6 +1,8 @@
-import {act,fireEvent,render,screen,within} from '@testing-library/react';import {it,expect,vi} from 'vitest';import {WorkspaceSelector} from './WorkspaceSelector';
-const mocks=vi.hoisted(()=>({workspace:vi.fn(),openLink:vi.fn()}));
-vi.mock('./workspace',()=>({activeWorkspace:()=>({connection:{workspaceId:'test',workspaceName:'Test',endpoint:'http://127.0.0.1:8787'},client:{workspace:mocks.workspace}})}));vi.mock('@tauri-apps/api/core',()=>({invoke:vi.fn(async()=>[])}));vi.mock('../links',()=>({openLink:mocks.openLink}));vi.mock('./RemoteDesktop',()=>({RemoteDesktop:()=> <div>Remote desktop surface</div>}));vi.mock('./LocalProjectImport',()=>({LocalProjectImport:()=>null}));vi.mock('../components/UnifiedWorkspace',()=>({UnifiedWorkspace:()=> <div className="unified-workspace">Machine dashboard</div>}));
+import {act,fireEvent,render,screen,within} from '@testing-library/react';import {beforeEach,it,expect,vi} from 'vitest';import {WorkspaceSelector} from './WorkspaceSelector';
+import {OPEN_T3_MACHINE_EVENT} from '../placement/transitions';
+const mocks=vi.hoisted(()=>({workspace:vi.fn(),openLink:vi.fn(),listMachines:vi.fn()}));
+vi.mock('./workspace',()=>({activeWorkspace:()=>({connection:{workspaceId:'test',workspaceName:'Test',endpoint:'http://127.0.0.1:8787'},client:{workspace:mocks.workspace}})}));vi.mock('@tauri-apps/api/core',()=>({invoke:vi.fn(async()=>[])}));vi.mock('../links',()=>({openLink:mocks.openLink}));vi.mock('../t3connect/api',()=>({listT3Machines:mocks.listMachines}));vi.mock('./RemoteDesktop',()=>({RemoteDesktop:()=> <div>Remote desktop surface</div>}));vi.mock('./LocalProjectImport',()=>({LocalProjectImport:()=>null}));vi.mock('../components/UnifiedWorkspace',()=>({UnifiedWorkspace:()=> <div className="unified-workspace">Machine dashboard</div>}));
+beforeEach(()=>{mocks.listMachines.mockReset();mocks.listMachines.mockResolvedValue([]);});
 it('offers a visible desktop control',async()=>{mocks.workspace.mockResolvedValue({result:null});render(<WorkspaceSelector/>);await act(async()=>{});fireEvent.click(screen.getByRole('button',{name:'Open remote desktop'}));expect(screen.getByText('Remote desktop surface')).toBeInTheDocument();});
 it('retains pending browser requests without polling header metrics',async()=>{
  vi.useFakeTimers();let requests=0;mocks.workspace.mockImplementation(async(_id:string,_route:string,args:{command:string})=>{if(args.command==='workspace_metrics')throw Error('unavailable');requests++;return {result:`https://github.com/login/device?request=${requests}`};});
@@ -37,6 +39,11 @@ it('opens All workspaces from the header menu and keeps it out of Manage workspa
  fireEvent.click(screen.getByTitle('Test · Connecting…'));
  fireEvent.click(screen.getByRole('menuitem',{name:/Manage workspaces/}));
  expect(screen.queryByRole('button',{name:'All workspaces'})).toBeNull();
+});
+it('reports a named T3 target that disappears during transition',async()=>{
+ mocks.workspace.mockResolvedValue({result:null});render(<WorkspaceSelector/>);await act(async()=>{});
+ window.dispatchEvent(new CustomEvent(OPEN_T3_MACHINE_EVENT,{detail:{machineId:'m1',machineName:'Build Mini'}}));
+ expect(await screen.findByText('Could not open Build Mini: this machine is no longer connected.')).toBeInTheDocument();
 });
 it('offers workspace hibernation with a confirmation and runs the project snapshot workflow',async()=>{
  mocks.workspace.mockResolvedValue({result:null});const hibernate=vi.fn().mockResolvedValue(undefined);

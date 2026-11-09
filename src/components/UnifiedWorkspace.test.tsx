@@ -14,6 +14,7 @@ const rows = buildUnifiedRows({
 });
 const data: Gathered = {
   rows,
+  discoveryFailures: [],
   notes: ["Projects on other machines appear after you switch to them."],
   targets: [
     { target: { kind: "local" }, name: "This Mac", online: true },

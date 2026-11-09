@@ -46,11 +46,7 @@ export function ComponentPicker({
   useEscapeLayer(true, { onEscape: () => cancel() });
   const [query, setQuery] = useState("");
   const [selectedRow, setSelectedRow] = useState(0);
-  const [machine, setMachine] = useState<Preference>(() =>
-    initialMachine.mode === "target" && !machineTargets?.some((item) => targetKey(item.target) === targetKey(initialMachine.target))
-      ? automaticPreference()
-      : initialMachine,
-  );
+  const [machine, setMachine] = useState<Preference>(initialMachine);
   const inputRef = useRef<HTMLInputElement>(null);
   const listRef = useRef<HTMLDivElement>(null);
   const before = useRef<Element | null>(document.activeElement);
@@ -68,6 +64,13 @@ export function ComponentPicker({
           label: item.name,
           preference: targetPreference(item.target),
         })),
+        ...(machine.mode === "target" && !machineTargets.some((item) => targetKey(item.target) === targetKey(machine.target))
+          ? [{
+              key: targetKey(machine.target),
+              label: `Unavailable machine (${machine.target.kind === "remote" ? machine.target.workspaceId : machine.target.kind === "t3" ? machine.target.machineId : "This Mac"})`,
+              preference: targetPreference(machine.target),
+            }]
+          : []),
       ]
     : [];
 
@@ -148,9 +151,9 @@ export function ComponentPicker({
               } else if (event.key === "ArrowUp") {
                 event.preventDefault();
                 setSelectedRow((index) => Math.max(index - 1, 0));
-              } else if (event.key === "Tab") {
+              } else if (event.key === "Tab" && !event.shiftKey && ghost) {
                 event.preventDefault();
-                if (ghost) setQuery(ghost.full);
+                setQuery(ghost.full);
               } else if (event.key === "Enter") {
                 event.preventDefault();
                 event.stopPropagation();

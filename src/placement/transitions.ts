@@ -5,7 +5,7 @@ import { setExecutionMode } from "../executionMode";
 import { sameTarget, type Target } from "./types";
 
 export const OPEN_T3_MACHINE_EVENT = "canopy:open-t3-machine";
-export interface OpenT3MachineDetail { machineId: string }
+export interface OpenT3MachineDetail { machineId: string; machineName?: string }
 
 export function activeExecutionTarget(): Target {
   const workspaceId = isRemoteHost() ? activeWorkspace()?.connection.workspaceId : undefined;
@@ -17,7 +17,7 @@ export const canLaunchOnActiveTarget = (target: Target) =>
 
 /** Continue through the surface that owns the selected machine. This function
  * never launches an agent itself. */
-export async function requestTargetTransition(target: Target): Promise<void> {
+export async function requestTargetTransition(target: Target, targetName?: string): Promise<void> {
   if (target.kind === "local") {
     if (!canLaunchOnActiveTarget(target)) await setExecutionMode("local");
     return;
@@ -32,7 +32,7 @@ export async function requestTargetTransition(target: Target): Promise<void> {
   }
   window.dispatchEvent(
     new CustomEvent<OpenT3MachineDetail>(OPEN_T3_MACHINE_EVENT, {
-      detail: { machineId: target.machineId },
+      detail: { machineId: target.machineId, ...(targetName ? { machineName: targetName } : {}) },
     }),
   );
 }

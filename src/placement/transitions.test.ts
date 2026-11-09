@@ -15,11 +15,11 @@ describe("machine transitions", () => {
     window.removeEventListener(SHOW_WORKSPACE_EVENT, listener);
   });
 
-  it("preserves the exact T3 machine ID", async () => {
+  it("preserves the exact T3 machine ID and display name", async () => {
     const listener = vi.fn();
     window.addEventListener(OPEN_T3_MACHINE_EVENT, listener);
-    await requestTargetTransition({ kind: "t3", machineId: "machine-precise" });
-    expect((listener.mock.calls[0][0] as CustomEvent).detail).toEqual({ machineId: "machine-precise" });
+    await requestTargetTransition({ kind: "t3", machineId: "machine-precise" }, "Build Mini");
+    expect((listener.mock.calls[0][0] as CustomEvent).detail).toEqual({ machineId: "machine-precise", machineName: "Build Mini" });
     window.removeEventListener(OPEN_T3_MACHINE_EVENT, listener);
   });
 });

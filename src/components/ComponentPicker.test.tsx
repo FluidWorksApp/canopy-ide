@@ -1,5 +1,6 @@
 // @vitest-environment jsdom
 import {cleanup,fireEvent,render,screen} from '@testing-library/react';
+import userEvent from '@testing-library/user-event';
 import {afterEach,expect,it,vi} from 'vitest';
 import {ComponentPicker} from './ComponentPicker';
 import {automaticPreference,targetPreference,type DisplayTarget} from '../placement/types';
@@ -30,6 +31,27 @@ it('shows Automatic, This Mac, and each connected machine for agent launches',()
   mount({title:'New Claude Code',machineTargets:MACHINES});
   expect(screen.getAllByRole('radio').map(row=>row.textContent)).toEqual(['Automatic','This Mac','Design Studio','Build Mini']);
   expect(screen.queryByText(/Balance|Remote|T3 Connect|Cloud/)).toBeNull();
+});
+it('reaches the machine choices from the initially focused component field',async()=>{
+  const user=userEvent.setup();
+  const {input}=mount({title:'New Claude Code',machineTargets:MACHINES});
+  expect(input).toHaveFocus();
+  await user.tab({shift:true});
+  expect(screen.getByRole('radio',{name:'Automatic'})).toHaveFocus();
+  await user.keyboard('{ArrowRight}');
+  expect(screen.getByRole('radio',{name:'This Mac'})).toHaveFocus();
+});
+it('preserves a disconnected saved machine for an exact refusal',()=>{
+  const missing=targetPreference({kind:'remote',workspaceId:'offline-workspace'});
+  const {onPick,input}=mount({
+    title:'New Claude Code',
+    components:[COMPONENTS[0]],
+    machineTargets:MACHINES,
+    initialMachine:missing,
+  });
+  expect(screen.getByRole('radio',{name:'Unavailable machine (offline-workspace)'})).toHaveAttribute('aria-checked','true');
+  fireEvent.keyDown(input,{key:'Enter'});
+  expect(onPick).toHaveBeenCalledWith(COMPONENTS[0],missing);
 });
 it('returns the exact selected machine and supports arrow-key selection',()=>{
   const {onPick,input}=mount({

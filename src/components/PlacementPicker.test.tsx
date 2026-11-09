@@ -42,6 +42,13 @@ describe("PlacementPicker", () => {
     expect(onChange).toHaveBeenCalledWith(targetPreference({ kind: "t3", machineId: "same" }));
   });
 
+  it("keeps a missing concrete default selected instead of changing it to Automatic", () => {
+    const missing = targetPreference({ kind: "remote", workspaceId: "offline-workspace" });
+    render(<PlacementPicker value={missing} onChange={() => {}} targets={targets} />);
+    expect(screen.getByLabelText("Run on")).toHaveValue("remote:offline-workspace");
+    expect(screen.getByRole("option", { name: "Unavailable machine (offline-workspace)" })).toBeInTheDocument();
+  });
+
   it("shows the decision, machine name, reason, and setup warning", () => {
     render(
       <PlacementPicker

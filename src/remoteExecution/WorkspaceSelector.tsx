@@ -66,12 +66,15 @@ export function WorkspaceSelector({ onboarding = false,onHibernateWorkspace }: {
   const [unifiedOpen,setUnifiedOpen]=useState(false),[t3Machine,setT3Machine]=useState<T3Machine|null>(null),[t3PairOpen,setT3PairOpen]=useState(false);
   useEffect(()=>{
     const openMachine=(event:Event)=>{
-      const machineId=(event as CustomEvent<OpenT3MachineDetail>).detail?.machineId;
+      const detail=(event as CustomEvent<OpenT3MachineDetail>).detail;
+      const machineId=detail?.machineId;
       if(!machineId)return;
+      const machineName=detail.machineName??machineId;
       void listT3Machines().then(list=>{
         const machine=list.find(item=>item.id===machineId);
         if(machine){setOpen(false);setUnifiedOpen(false);setT3Machine(machine);}
-      }).catch(error=>{setError(`Could not open the selected machine: ${String(error)}`);setOpen(true);});
+        else{setError(`Could not open ${machineName}: this machine is no longer connected.`);setOpen(true);}
+      }).catch(error=>{setError(`Could not open ${machineName}: ${String(error)}`);setOpen(true);});
     };
     window.addEventListener(OPEN_T3_MACHINE_EVENT,openMachine);
     return()=>window.removeEventListener(OPEN_T3_MACHINE_EVENT,openMachine);

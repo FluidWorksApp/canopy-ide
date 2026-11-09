@@ -19,10 +19,13 @@ describe("buildUnifiedRows", () => {
     expect(rows.filter((r) => r.kind === "thread")).toMatchObject([{ name: "Canopy", status: "running", branch: "main", target: { kind: "t3", machineId: "m1" } }]);
     expect(rows.find((r) => r.kind === "job")).toMatchObject({ name: "Fix tests", target: { kind: "remote", workspaceId: "w1" } });
   });
-  it("adds a needsSetup placeholder only where a known, online remote lacks a local project", () => {
+  it("adds setup placeholders by project identity even when names collide", () => {
     const setup = rows.filter((r) => r.needsSetup);
-    expect(setup).toHaveLength(1);
-    expect(setup[0]).toMatchObject({ name: "Docs", target: { kind: "remote", workspaceId: "w1" }, status: "not set up" });
+    expect(setup).toHaveLength(2);
+    expect(setup).toEqual(expect.arrayContaining([
+      expect.objectContaining({ projectId: "p1", name: "Canopy", target: { kind: "remote", workspaceId: "w1" }, status: "not set up" }),
+      expect.objectContaining({ projectId: "p2", name: "Docs", target: { kind: "remote", workspaceId: "w1" }, status: "not set up" }),
+    ]));
   });
 });
 

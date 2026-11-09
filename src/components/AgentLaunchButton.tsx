@@ -13,8 +13,14 @@ import { Button } from "./ui";
 import { Dialog } from "./Dialog";
 import { ProjectSetupDialog } from "../remoteExecution/ProjectSetupDialog";
 import { decideLaunch } from "../placement/launch";
+import { effectivePreference } from "../placement/balancer";
 import {
-  automaticPreference,
+  getAgentPreference,
+  getGlobalPreference,
+  getProjectPreference,
+  setAgentPreference,
+} from "../placement/preferences";
+import {
   targetKey,
   type DisplayTarget,
   type PlacementDecision,
@@ -49,6 +55,7 @@ async function defaultDecide(project: { id: string; name: string }, agentId: str
   // Loaded on demand: gathering pulls in the T3 and workspace clients.
   const { gatherUnified, projectAvailability } = await import("../placement/gather");
   const g = await gatherUnified();
+  if (g.discoveryFailures.length) throw new Error(g.discoveryFailures.join(" "));
   return decideLaunch({
     projectId: project.id,
     agentKind: agentId,
@@ -126,6 +133,7 @@ export function AgentLaunchButton({
 
   const [pending, setPending] = useState<{ agentId: string; decision: PlacementDecision } | null>(null);
   const [launchChoice, setLaunchChoice] = useState<{ agentId: string; preference: Preference } | null>(null);
+  const [agentDefault, setAgentDefault] = useState<{ agentId: string; preference: Preference } | null>(null);
   const [transition, setTransition] = useState<{ target: Target; name: string } | null>(null);
   const suppliedTargets = placement?.targets;
   const placementProjectId = placement?.project.id;
@@ -138,9 +146,15 @@ export function AgentLaunchButton({
     if (!placementProjectId) return;
     let live = true;
     void import("../placement/gather")
-      .then(({ gatherUnified }) => gatherUnified())
-      .then((gathered) => { if (live) setPlacementTargets(gathered.targets); })
-      .catch(() => {});
+      .then(({ gatherTargetInventory }) => gatherTargetInventory())
+      .then((inventory) => {
+        if (!live) return;
+        setPlacementTargets(inventory.targets);
+        if (inventory.discoveryFailures.length) setRefusal(inventory.discoveryFailures.join(" "));
+      })
+      .catch((error) => {
+        if (live) setRefusal(`Could not read connected machines: ${String(error)}`);
+      });
     return () => { live = false; };
   }, [placementProjectId, suppliedTargets]);
   const [setupOk, setSetupOk] = useState(false);
@@ -182,7 +196,14 @@ export function AgentLaunchButton({
   const onStart = (agentId: string) => {
     if (!placement) return onStartDirect(agentId);
     menu.close();
-    setLaunchChoice({ agentId, preference: automaticPreference() });
+    setLaunchChoice({
+      agentId,
+      preference: effectivePreference({
+        preference: getGlobalPreference(),
+        projectPref: getProjectPreference(placement.project.id),
+        agentPref: getAgentPreference(agentId),
+      }),
+    });
   };
 
   const openMenu = (e: React.MouseEvent) => {
@@ -196,8 +217,17 @@ export function AgentLaunchButton({
       onSend,
       onStart,
     });
+    const defaultSetting: MenuItem[] = placement
+      ? [{ separator: true }, {
+          label: `Default machine for ${preferredCli.name}…`,
+          onClick: () => setAgentDefault({
+            agentId: preferredCli.id,
+            preference: getAgentPreference(preferredCli.id),
+          }),
+        }]
+      : [];
     const tail = extras?.length ? [{ separator: true } as MenuItem, ...extras] : [];
-    menu.open(e, [...agents, ...tail]);
+    menu.open(e, [...agents, ...defaultSetting, ...tail]);
   };
 
   return (
@@ -226,6 +256,30 @@ export function AgentLaunchButton({
           }
         />
       )}
+      {agentDefault && placement && (
+        <Dialog
+          title={`Default machine for ${AGENT_CLIS.find((cli) => cli.id === agentDefault.agentId)?.name ?? agentDefault.agentId}`}
+          dismissLabel="Cancel"
+          onDismiss={() => setAgentDefault(null)}
+          actions={[{
+            label: "Save default",
+            primary: true,
+            onClick: () => {
+              setAgentPreference(agentDefault.agentId, agentDefault.preference);
+              setAgentDefault(null);
+            },
+          }]}
+          body={
+            <PlacementPicker
+              label="Default run on"
+              value={agentDefault.preference}
+              targets={placementTargets}
+              allowInherit
+              onChange={(preference) => setAgentDefault((current) => current ? { ...current, preference } : null)}
+            />
+          }
+        />
+      )}
       {transition && placement && (
         <Dialog
           title={`Run on ${transition.name}`}
@@ -243,7 +297,7 @@ export function AgentLaunchButton({
               const target = transition.target;
               setTransition(null);
               if (placement.onTransition) void placement.onTransition(target);
-              else void requestTargetTransition(target);
+              else void requestTargetTransition(target, transition.name);
             },
           }]}
         />

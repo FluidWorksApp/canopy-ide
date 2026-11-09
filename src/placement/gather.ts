@@ -17,13 +17,43 @@ import { sameTarget, type DisplayTarget, type ResourceSnapshot, type Target } fr
 
 const LOCAL_CAPACITY = 6;
 
-async function workspaces() {
+const failureMessage = (source: string, error: unknown) =>
+  `Could not read ${source}: ${String((error as { message?: string })?.message ?? error)}`;
+
+async function discoverWorkspaces() {
   const cached = peekWorkspaceList();
   try {
-    return (await refreshWorkspaceList()).workspaces;
-  } catch {
-    return cached?.workspaces ?? [];
+    return { remoteWorkspaces: (await refreshWorkspaceList()).workspaces, failure: null };
+  } catch (error) {
+    return {
+      remoteWorkspaces: cached?.workspaces ?? [],
+      failure: failureMessage("connected workspaces", error),
+    };
   }
+}
+
+async function discoverMachines() {
+  try {
+    return { t3Machines: await listT3Machines(), failure: null };
+  } catch (error) {
+    return { t3Machines: [], failure: failureMessage("connected machines", error) };
+  }
+}
+
+async function discoverInventory() {
+  const [workspacesResult, machinesResult] = await Promise.all([
+    discoverWorkspaces(),
+    discoverMachines(),
+  ]);
+  return {
+    remoteWorkspaces: workspacesResult.remoteWorkspaces,
+    t3Machines: machinesResult.t3Machines,
+    failures: [workspacesResult.failure, machinesResult.failure].filter((failure): failure is string => Boolean(failure)),
+  };
+}
+
+async function workspaces() {
+  return (await discoverWorkspaces()).remoteWorkspaces;
 }
 
 const agentStats = async () => (await ipc.ptyStats()).filter((s) => s.agent_hint);
@@ -61,8 +91,17 @@ export interface Gathered {
   resources: ResourceSnapshot[];
   /** Concrete choices shown anywhere a person selects a machine. */
   targets: DisplayTarget[];
+  /** Inventory reads that failed. Launches fail closed while these are present. */
+  discoveryFailures: string[];
   /** Plain-language notes on what could not be read. */
   notes: string[];
+}
+
+export interface TargetInventory {
+  /** Lightweight picker choices. No machine shell is opened to build these. */
+  targets: DisplayTarget[];
+  /** Inventory reads that failed. Callers must not treat these as an empty list. */
+  discoveryFailures: string[];
 }
 
 export function displayTargets(
@@ -86,26 +125,44 @@ export function displayTargets(
   ];
 }
 
+export async function gatherTargetInventory(): Promise<TargetInventory> {
+  const { remoteWorkspaces, t3Machines, failures } = await discoverInventory();
+  return {
+    targets: [
+      { target: { kind: "local" }, name: "This Mac", online: true },
+      ...remoteWorkspaces.map((workspace) => ({
+        target: { kind: "remote" as const, workspaceId: workspace.id },
+        name: workspace.name,
+        online: workspace.state === "ready",
+      })),
+      ...t3Machines.map((machine) => ({
+        target: { kind: "t3" as const, machineId: machine.id },
+        name: machine.label,
+        online: true,
+      })),
+    ],
+    discoveryFailures: failures,
+  };
+}
+
 export function projectAvailability(
   rows: UnifiedRow[],
   project: { id: string; name: string },
 ): Target[] {
-  const name = project.name.trim().toLowerCase();
   return rows
     .filter((row) =>
       row.kind === "project" &&
       !row.needsSetup &&
-      (row.projectId === project.id || row.name.trim().toLowerCase() === name),
+      row.projectId === project.id,
     )
     .map((row) => row.target);
 }
 
 export async function gatherUnified(): Promise<Gathered> {
-  const notes: string[] = [];
-  const [list, machines] = await Promise.all([
-    workspaces().catch(() => []),
-    listT3Machines().catch(() => []),
-  ]);
+  const inventory = await discoverInventory();
+  const notes: string[] = [...inventory.failures];
+  const list = inventory.remoteWorkspaces;
+  const machines = inventory.t3Machines;
   const shells = new Map<string, Awaited<ReturnType<typeof listShell>>>();
   await Promise.all(machines.map(async (machine) => {
     try {
@@ -170,6 +227,7 @@ export async function gatherUnified(): Promise<Gathered> {
     rows: buildUnifiedRows(input),
     resources,
     targets: displayTargets(resources, list, machines),
+    discoveryFailures: inventory.failures,
     notes,
   };
 }

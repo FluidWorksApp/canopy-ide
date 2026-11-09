@@ -33,10 +33,10 @@ export function ProjectDialog({ existing, initialCloneUrl, onSave, onCancel }: P
   useEffect(() => {
     let live = true;
     void import("../placement/gather")
-      .then(({ gatherUnified }) => gatherUnified())
-      .then((gathered) => {
-        if (live && gathered.targets.some((target) => target.target.kind !== "local"))
-          setPlacementTargets(gathered.targets);
+      .then(({ gatherTargetInventory }) => gatherTargetInventory())
+      .then((inventory) => {
+        if (live && inventory.targets.some((target) => target.target.kind !== "local"))
+          setPlacementTargets(inventory.targets);
       })
       .catch(() => {});
     return () => { live = false; };

@@ -40,9 +40,16 @@ export function PlacementPicker({
   /** Project and agent overrides can inherit. Global placement cannot. */
   allowInherit?: boolean;
 }) {
-  const concrete = targets.some((item) => item.target.kind === "local")
+  const listed = targets.some((item) => item.target.kind === "local")
     ? targets
     : [...fallbackTargets, ...targets];
+  const concrete = value.mode === "target" && !listed.some((item) => targetKey(item.target) === targetKey(value.target))
+    ? [...listed, {
+        target: value.target,
+        name: `Unavailable machine (${value.target.kind === "remote" ? value.target.workspaceId : value.target.kind === "t3" ? value.target.machineId : "This Mac"})`,
+        online: false,
+      }]
+    : listed;
   const selected = preferenceKey(value);
   const change = (key: string) => {
     if (key === "inherit") onChange(inheritPreference());

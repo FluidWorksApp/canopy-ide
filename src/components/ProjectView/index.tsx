@@ -1,9 +1,9 @@
 import { activeWorkspace } from "../../remoteExecution/workspace";
 import { effectivePreference } from "../../placement/balancer";
-import { decideLaunch } from "../../placement/launch";
 import { getAgentPreference, getGlobalPreference, getProjectPreference } from "../../placement/preferences";
 import { canLaunchOnActiveTarget, requestTargetTransition } from "../../placement/transitions";
 import type { DisplayTarget, Preference, Target } from "../../placement/types";
+import { resolveProjectMachineLaunch } from "./placement";
 import { publishAwarenessRoster } from "../../awareness/roster";
 import {
   hostLiveTerminals,
@@ -1780,46 +1780,40 @@ const ProjectViewBody = memo(function ProjectViewBody({
           return;
         }
         void import("../../placement/gather")
-          .then(({ gatherUnified }) => gatherUnified())
-          .then((gathered) => show(gathered.targets))
-          .catch(() => show([{ target: { kind: "local" }, name: "This Mac", online: true }]));
+          .then(({ gatherTargetInventory }) => gatherTargetInventory())
+          .then((inventory) => {
+            if (inventory.discoveryFailures.length)
+              onNotice(inventory.discoveryFailures.join(" "), "warn");
+            show(inventory.targets);
+          })
+          .catch((error) => {
+            onNotice(`Could not read connected machines: ${String(error)}`, "warn");
+            show([{ target: { kind: "local" }, name: "This Mac", online: true }]);
+          });
       }),
-    [project.id],
+    [onNotice, project.id],
   );
   const [machineTransition, setMachineTransition] = useState<{ target: Target; name: string } | null>(null);
   const [placementSetup, setPlacementSetup] = useState<{ name: string; resolve: (ready: boolean) => void } | null>(null);
   const [placementSetupReady, setPlacementSetupReady] = useState(false);
   const prepareMachineLaunch = useCallback(async (agentKind: string, machine: Preference) => {
-    let gathered;
-    let availability: Target[];
-    try {
-      const { gatherUnified, projectAvailability } = await import("../../placement/gather");
-      gathered = await gatherUnified();
-      availability = projectAvailability(gathered.rows, { id: project.id, name: project.name });
-    } catch (error) {
-      onNotice(`Could not read connected machines: ${String(error)}`, "warn");
-      return false;
-    }
-    const decision = decideLaunch({
-      projectId: project.id,
+    const outcome = await resolveProjectMachineLaunch({
+      project: { id: project.id, name: project.name },
       agentKind,
-      resources: gathered.resources,
       requested: machine,
-      availability,
-      targets: gathered.targets,
     });
-    if (!decision.target) {
-      onNotice(decision.reason, "warn");
+    if (outcome.kind === "refusal") {
+      onNotice(outcome.reason, "warn");
       return false;
     }
-    if (!canLaunchOnActiveTarget(decision.target)) {
-      setMachineTransition({ target: decision.target, name: decision.targetName ?? "the selected machine" });
+    if (outcome.kind === "transition") {
+      setMachineTransition({ target: outcome.target, name: outcome.name });
       return false;
     }
-    if (decision.target.kind === "remote" && decision.needsSetup) {
+    if (outcome.kind === "setup") {
       setPlacementSetupReady(false);
       return new Promise<boolean>((resolve) =>
-        setPlacementSetup({ name: decision.targetName ?? "the selected workspace", resolve }),
+        setPlacementSetup({ name: outcome.name, resolve }),
       );
     }
     return true;
@@ -15560,7 +15554,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
             onClick: () => {
               const target = machineTransition.target;
               setMachineTransition(null);
-              void requestTargetTransition(target);
+              void requestTargetTransition(target, machineTransition.name);
             },
           }]}
         />

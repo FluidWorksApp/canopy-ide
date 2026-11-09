@@ -20,7 +20,9 @@ At project and agent override levels, **Use default** inherits the next setting.
 It does not balance by itself. The precedence is agent, then project, then
 global. An explicit **Automatic** at any level stops inheritance and performs
 a fresh balancing decision. The global setting offers Automatic, This Mac, and
-named machines because there is no higher setting to inherit.
+named machines because there is no higher setting to inherit. The agent menu's
+**Default machine for…** action edits the persistent agent default separately
+from the machine choice for the current launch.
 
 The visible process is:
 
@@ -33,11 +35,16 @@ Start agent
      or show a named switch, open, or setup step before launch
 ```
 
-Canopy never changes a concrete machine choice into another machine. If the
-selected machine is inactive or its current integration cannot accept a direct
-launch, Canopy names the required transition instead of starting on the active
-machine. A selected active workspace that does not have the project opens the
-setup dialog before launch.
+Canopy never changes a concrete machine choice into another machine. If a
+saved machine is missing from the current inventory, the launch dialog keeps
+that exact choice visible as unavailable so the final check can refuse it. If
+the selected machine is inactive or its current integration cannot accept a
+direct launch, Canopy names the required transition instead of starting on the
+active machine. A selected active workspace that does not have the same project
+ID opens the setup dialog before launch; matching display names alone never
+count as project identity. If connected-machine discovery fails, launch stops
+with that discovery error rather than treating the unread inventory as an empty
+set and balancing elsewhere.
 
 Older `canopy:placement:v1` settings remain readable. Legacy project or agent
 `auto` values become Use default. Legacy global `auto` and `balance` values
@@ -71,7 +78,8 @@ moved when no dispatch path exists.
 - `balancer.ts` chooses among eligible online resource snapshots using project
   setup, known load, available capacity, CPU load, and free memory.
 - `resources.ts` and `gather.ts` collect machine names, availability, and load
-  through the existing host and connection seams.
+  through the existing host and connection seams. Picker inventory lists names
+  without opening machine shells; one fresh full gather runs before dispatch.
 - `launch.ts` resolves preferences and creates launch, hand-off, or named
   transition decisions.
 - `unified.ts` merges visible projects, agents, threads, and jobs into rows and

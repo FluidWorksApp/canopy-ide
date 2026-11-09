@@ -62,12 +62,12 @@ export function buildUnifiedRows(input: UnifiedInput): UnifiedRow[] {
     const target: Target = { kind: "remote", workspaceId: w.workspaceId };
     const online = w.state === "ready";
     if (w.projects) {
-      const have = new Set(w.projects.map((p) => norm(p.name)));
+      const have = new Set(w.projects.map((p) => p.id));
       for (const p of w.projects)
         push({ id: `${targetKey(target)}:project:${p.id}`, projectId: p.id, name: p.name, kind: "project", target, targetLabel: w.name, status: online ? "ready" : w.state });
       if (online)
         for (const p of input.local.projects)
-          if (!have.has(norm(p.name)))
+          if (!have.has(p.id))
             push({ id: `${targetKey(target)}:setup:${p.id}`, projectId: p.id, name: p.name, kind: "project", target, targetLabel: w.name, status: "not set up", needsSetup: true });
     }
     for (const a of w.agents ?? [])
