@@ -202,9 +202,9 @@ export interface EnsureOptions{
  /** Repo-relative ignored files to carry, by local component id (from execution_mirror_candidates). */
  selectedFiles:Record<string,string[]>;
  install:boolean;
- /** Skip selected files the remote already has. */
- onlyMissing:boolean;
 }
+
+const NOT_FOUND=/ENOENT|no such file|not found|does not exist/i;
 
 /** Set up ONE project on the remote, on demand, without the whole-Mac mirror.
  * Idempotent: a project already there only gets the selected files it lacks
@@ -248,11 +248,12 @@ export async function ensureProjectOnRemote(deps:MirrorDeps,options:EnsureOption
      if(!match)throw Error(`${first.label} is not set up in this workspace yet`);
      const root=first.relative&&match.path.endsWith(`/${first.relative}`)?match.path.slice(0,-first.relative.length-1):match.path;
      let wanted=filesFor(members);
-     if(options.onlyMissing){
-      const missing:string[]=[];
-      for(const file of wanted){try{await deps.remote('fs_stat',{path:`${root}/${file}`});}catch{missing.push(file);}}
-      wanted=missing;
-     }
+     // The remote never overwrites, so only send what is absent. Only a
+     // definite not-found counts as absent; any other failure (a flaky link)
+     // aborts this repository rather than re-sending the whole selection.
+     const missing:string[]=[];
+     for(const file of wanted){try{await deps.remote('fs_stat',{path:`${root}/${file}`});}catch(error){if(!NOT_FOUND.test(message(error)))throw error;missing.push(file);}}
+     wanted=missing;
      if(!wanted.length){repo.state='done';repo.carried.push('Selected files are already on the workspace');emit();continue;}
      const id=newId();let started=false;
      try{

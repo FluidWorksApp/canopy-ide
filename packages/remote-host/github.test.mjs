@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {execFile} from 'node:child_process';
 import {promisify} from 'node:util';
-import {mkdtemp,mkdir,writeFile,readFile,rm,realpath,chmod} from 'node:fs/promises';
+import {mkdtemp,mkdir,writeFile,readFile,rm,realpath,chmod,symlink} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
 import {join,resolve} from 'node:path';
 import {safeGitRead,GIT_READ_COMMANDS} from './git-read.mjs';
@@ -68,6 +68,12 @@ test('git_pr_context reads commits, files and the PR template since the base',as
  assert.deepEqual(c.files,['.github/PULL_REQUEST_TEMPLATE.md','b.txt']);
  assert.match(c.stat,/2 files changed/);
  assert.equal((await gh.git_pr_context({repo:dir,base:''})).base,'main');
+});
+
+test('git_pr_context does not follow a symlinked PR template',async()=>{
+ const dir=await repo();
+ await mkdir(join(dir,'.github'));await writeFile(join(dir,'secret.txt'),'private\n');await symlink(join(dir,'secret.txt'),join(dir,'.github/PULL_REQUEST_TEMPLATE.md'));
+ assert.equal((await gh.git_pr_context({repo:dir,base:'main'})).template,null);
 });
 
 test('exports a read-only subset of the commands it handles',()=>{

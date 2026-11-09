@@ -234,6 +234,7 @@ test('files-only setup adds missing files to an existing project without touchin
   const status=await wait(f.jobs,id);
   assert.equal(status.state,'complete',JSON.stringify(status));
   assert.deepEqual(status.steps.map(s=>s.name),['files']);
+  assert.match(JSON.stringify(status.steps[0]),/1 new or local-only file copied \(1 already there/);
   assert.equal(git(f.repo,'rev-parse','HEAD').trim(),before);
   assert.equal(await readFile(path.join(f.repo,'app.js'),'utf8'),'remote edit\n');
   assert.equal(await readFile(path.join(f.repo,'local.sqlite'),'utf8'),'db');

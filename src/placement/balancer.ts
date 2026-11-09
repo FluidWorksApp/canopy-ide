@@ -33,6 +33,9 @@ function utilization(r: ResourceSnapshot) {
 
 /** Lowest utilization first, then cpu, then more free memory, then a stable key. */
 function compare(a: ResourceSnapshot, b: ResourceSnapshot, tie: "local" | "remote" | null) {
+  // A target whose load is unknown is not idle: rank it after any known one.
+  const k = Number(!!a.loadUnknown) - Number(!!b.loadUnknown);
+  if (k) return k;
   const u = utilization(a) - utilization(b);
   if (u) return u;
   const c = (a.cpuLoad ?? 0) - (b.cpuLoad ?? 0);

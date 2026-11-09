@@ -26,6 +26,13 @@ describe("choosePlacement", () => {
     const a = choosePlacement({ preference: "local", projectPref: "remote", agentPref: "local", resources: both, projectAvailability: avail });
     expect(a.target).toEqual(L);
   });
+  it("balance ranks targets with unknown load after known ones", () => {
+    const d = choosePlacement({ preference: "balance", resources: [snap(L, { activeAgents: 3 }), snap(R, { loadUnknown: true })], projectAvailability: [L, R] });
+    expect(d.target).toEqual(L);
+    const only = choosePlacement({ preference: "balance", resources: [snap(L, { online: false }), snap(R, { loadUnknown: true })], projectAvailability: [R] });
+    expect(only.target).toEqual(R);
+  });
+
   it("balance picks the lowest utilization", () => {
     const d = choosePlacement({ preference: "balance", resources: [snap(L, { activeAgents: 3 }), snap(R, { activeAgents: 1 })], projectAvailability: avail });
     expect(d.target).toEqual(R);

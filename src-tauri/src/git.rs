@@ -2663,7 +2663,12 @@ const PR_CONTEXT_FILES: usize = 200;
 /// The repo's PR template, if it keeps one, cut to a size the dialog can show.
 pub(crate) fn detect_pr_template(top: &Path) -> Option<String> {
     PR_TEMPLATE_PATHS.iter().find_map(|rel| {
-        let text = std::fs::read_to_string(top.join(rel)).ok()?;
+        let path = top.join(rel);
+        // A symlinked template could point anywhere; only regular files count.
+        if !std::fs::symlink_metadata(&path).ok()?.is_file() {
+            return None;
+        }
+        let text = std::fs::read_to_string(&path).ok()?;
         if text.trim().is_empty() {
             return None;
         }
@@ -7156,6 +7161,22 @@ index 333..444 100644
         )
         .unwrap();
         assert!(detect_pr_template(&dir).unwrap().len() <= PR_TEMPLATE_MAX);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn pr_template_symlink_is_not_followed() {
+        let dir = std::env::temp_dir().join(format!("canopy-prtpl-link-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join(".github")).unwrap();
+        std::fs::write(dir.join("secret.txt"), "private").unwrap();
+        std::os::unix::fs::symlink(
+            dir.join("secret.txt"),
+            dir.join(".github/PULL_REQUEST_TEMPLATE.md"),
+        )
+        .unwrap();
+        assert!(detect_pr_template(&dir).is_none());
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

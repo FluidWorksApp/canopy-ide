@@ -5,7 +5,7 @@
 // token. gh goes through ctx.execute rather than ctx.run because run_net's
 // contract needs things run can't give: stdout+stderr on success, stdout kept
 // on a failed `gh api graphql`, a request body on stdin, and 8 MiB streams.
-import {access,constants,readFile,realpath} from 'node:fs/promises';
+import {access,constants,lstat,readFile,realpath} from 'node:fs/promises';
 import {existsSync} from 'node:fs';
 import {delimiter,isAbsolute,join} from 'node:path';
 import {parseWorktrees,stripGhNoise,remoteUnreachableFor,repoBusy,switchFailure} from './checkout-errors.mjs';
@@ -315,7 +315,7 @@ export function githubCommands(ctx){
    const stat=(await git(['diff','--shortstat',`${b}...HEAD`,'--'],top).catch(()=>'')).trim();
    let template=null;
    for(const rel of ['.github/PULL_REQUEST_TEMPLATE.md','.github/pull_request_template.md','docs/PULL_REQUEST_TEMPLATE.md','PULL_REQUEST_TEMPLATE.md','pull_request_template.md']){
-    try{const buf=await readFile(join(top,rel));if(!buf.toString('utf8').trim())continue;template=new TextDecoder().decode(buf.subarray(0,16*1024)).replace(/\uFFFD$/,'');break;}catch{}
+    try{const full=join(top,rel);if(!(await lstat(full)).isFile())continue;const buf=await readFile(full);if(!buf.toString('utf8').trim())continue;template=new TextDecoder().decode(buf.subarray(0,16*1024)).replace(/\uFFFD$/,'');break;}catch{}
    }
    return {branch,base:b.replace(/^origin\//,''),commits:commits.slice(0,50),commit_count:commits.length,files:files.slice(0,200),file_count:files.length,stat,template};
   },

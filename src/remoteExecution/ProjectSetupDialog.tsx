@@ -16,10 +16,10 @@ const size=(bytes:number)=>bytes<1024?`${bytes} B`:bytes<1048576?`${Math.round(b
  * git-ignored files on this Mac (names and sizes only) so the person picks
  * which to copy; credential-shaped ones start unchecked. Nothing is sent until
  * the button is pressed. */
-export function ProjectSetupDialog({projectId,projectName,workspaceName,components,disabled=false}:{projectId:string;projectName:string;workspaceName:string;components:{componentId:string;label:string}[];disabled?:boolean}){
+export function ProjectSetupDialog({projectId,projectName,workspaceName,components,disabled=false,onComplete}:{projectId:string;projectName:string;workspaceName:string;components:{componentId:string;label:string}[];disabled?:boolean;onComplete?:(ok:boolean)=>void}){
  const [files,setFiles]=useState<Record<string,MirrorCandidate[]>>({});
  const [chosen,setChosen]=useState<Record<string,string[]>>({});
- const [onlyMissing,setOnlyMissing]=useState(true),[install,setInstall]=useState(true);
+ const [install,setInstall]=useState(true);
  const [progress,setProgress]=useState<MirrorProgress|null>(null);
  const [running,setRunning]=useState(false),[error,setError]=useState('');
  const abort=useRef<AbortController|null>(null);
@@ -43,7 +43,11 @@ export function ProjectSetupDialog({projectId,projectName,workspaceName,componen
  async function start(){
   const controller=new AbortController();abort.current=controller;
   setRunning(true);setError('');setProgress(null);
-  try{await ensureProjectOnRemote({local,remote,signal:controller.signal},{projectId,componentIds:components.map(c=>c.componentId),selectedFiles:chosen,install,onlyMissing},setProgress);}
+  onComplete?.(false);
+  try{
+   const final=await ensureProjectOnRemote({local,remote,signal:controller.signal},{projectId,componentIds:components.map(c=>c.componentId),selectedFiles:chosen,install},setProgress);
+   onComplete?.(final.projects.length>0&&!final.projects.some(p=>p.state==='failed'));
+  }
   catch(e){setError(String((e as {message?:string})?.message??e));}
   finally{abort.current=null;setRunning(false);}
  }
@@ -65,7 +69,6 @@ export function ProjectSetupDialog({projectId,projectName,workspaceName,componen
     })}
    </section>;
   })}
-  <Checkbox checked={onlyMissing} disabled={running} onChange={setOnlyMissing} label="Copy missing files only" hint="Files already in the workspace are left alone, so running this again only sends what is absent."/>
   <Checkbox checked={install} disabled={running} onChange={setInstall} label="Install dependencies in the workspace" hint="Runs the project’s package manager for new setups."/>
   <div className="account-sync-footer">
    {running

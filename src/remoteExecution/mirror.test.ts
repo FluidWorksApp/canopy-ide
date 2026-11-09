@@ -139,7 +139,7 @@ function ondemand(opts:{remoteStore?:string;missing?:string[];rows?:object[]}={}
  };
  return {calls,local,remote,store:()=>JSON.parse(remoteStore) as {projects:{id:string;mirroredFrom?:string;components:{path:string;label:string}[]}[]}};
 }
-const ensure=(h:ReturnType<typeof ondemand>,extra:Record<string,unknown>={})=>{let last!:MirrorProgress;return ensureProjectOnRemote({local:h.local,remote:h.remote,sleep:async()=>{},newId:()=>'22222222-2222-2222-2222-222222222222'},{projectId:'p1',selectedFiles:{'c-web':['.env','data/dev.sqlite']},install:false,onlyMissing:true,...extra} as never,p=>{last=p;}).then(()=>last);};
+const ensure=(h:ReturnType<typeof ondemand>,extra:Record<string,unknown>={})=>{let last!:MirrorProgress;return ensureProjectOnRemote({local:h.local,remote:h.remote,sleep:async()=>{},newId:()=>'22222222-2222-2222-2222-222222222222'},{projectId:'p1',selectedFiles:{'c-web':['.env','data/dev.sqlite']},install:false,...extra} as never,p=>{last=p;}).then(()=>last);};
 
 it('sets up one project on demand without the whole-Mac mirror, sending only the chosen files',async()=>{
  const h=ondemand();const result=await ensure(h);
@@ -164,6 +164,18 @@ it('is idempotent: an already set up project only gets the selected files that a
  const start=again.calls.find(c=>c.command==='mirror_apply_start')!.args!;
  expect(start).toMatchObject({filesOnly:true,repo:'/workspace/x/repo-1/shop'});expect(start).not.toHaveProperty('head');
  expect(again.store().projects).toHaveLength(1);
+});
+
+it('does not treat a non-not-found stat failure as missing',async()=>{
+ const first=ondemand();await ensure(first);
+ const saved=JSON.stringify({projects:first.store().projects,openIds:[]});
+ const again=ondemand({remoteStore:saved});
+ const remote=again.remote;
+ const flaky=async(command:string,args?:Record<string,unknown>)=>{if(command==='fs_stat')throw Error('connection reset');return remote(command,args);};
+ let last!:MirrorProgress;
+ await ensureProjectOnRemote({local:again.local,remote:flaky,sleep:async()=>{},newId:()=>'22222222-2222-2222-2222-222222222222'},{projectId:'p1',selectedFiles:{'c-web':['.env']},install:false},p=>{last=p;});
+ expect(last.projects[0].state).toBe('failed');
+ expect(again.calls.some(c=>c.command==='execution_mirror_send')).toBe(false);
 });
 
 it('sends nothing when every selected file is already on the remote',async()=>{

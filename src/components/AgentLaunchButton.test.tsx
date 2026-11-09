@@ -6,8 +6,12 @@ import type { PlacementDecision } from "../placement/types";
 import { getAgentPreference } from "../placement/preferences";
 
 vi.mock("../remoteExecution/ProjectSetupDialog", () => ({
-  ProjectSetupDialog: ({ projectName, workspaceName }: { projectName: string; workspaceName: string }) => (
-    <div>Setup {projectName} on {workspaceName}</div>
+  ProjectSetupDialog: ({ projectName, workspaceName, onComplete }: { projectName: string; workspaceName: string; onComplete?: (ok: boolean) => void }) => (
+    <div>
+      Setup {projectName} on {workspaceName}
+      <button onClick={() => onComplete?.(true)}>finish-ok</button>
+      <button onClick={() => onComplete?.(false)}>finish-fail</button>
+    </div>
   ),
 }));
 
@@ -127,8 +131,29 @@ describe("AgentLaunchButton", () => {
       click();
       expect(await screen.findByText("Setup App on Cloud")).toBeInTheDocument();
       expect(p.onStart).not.toHaveBeenCalled();
+      expect(screen.getByRole("button", { name: "Launch" })).toBeDisabled();
+      fireEvent.click(screen.getByText("finish-ok"));
       fireEvent.click(screen.getByRole("button", { name: "Launch" }));
       expect(p.onStart).toHaveBeenCalledWith(expect.any(String), d);
+    });
+
+    it("keeps Launch disabled when setup fails", async () => {
+      const p = props();
+      const d = decision({ target: { kind: "remote", workspaceId: "w1" }, needsSetup: true });
+      render(<AgentLaunchButton {...p} placement={{ project, workspaceName: "Cloud", decide: async () => d }} />);
+      click();
+      await screen.findByText("Setup App on Cloud");
+      fireEvent.click(screen.getByText("finish-ok"));
+      fireEvent.click(screen.getByText("finish-fail"));
+      expect(screen.getByRole("button", { name: "Launch" })).toBeDisabled();
+    });
+
+    it("reports a failed decision instead of silently launching locally", async () => {
+      const p = props();
+      render(<AgentLaunchButton {...p} placement={{ project, decide: async () => { throw new Error("offline"); } }} />);
+      click();
+      expect(await screen.findByText(/offline/)).toBeInTheDocument();
+      expect(p.onStart).not.toHaveBeenCalled();
     });
 
     it("does not launch when no target has room", async () => {

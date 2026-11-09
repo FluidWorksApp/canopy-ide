@@ -110,6 +110,7 @@ export function AgentLaunchButton({
     resolveBrain((bin) => Boolean(installed[bin])) ?? AGENT_CLIS[0];
 
   const [pending, setPending] = useState<{ agentId: string; decision: PlacementDecision } | null>(null);
+  const [setupOk, setSetupOk] = useState(false);
   const [refusal, setRefusal] = useState("");
   const launching = useRef(false);
 
@@ -123,10 +124,10 @@ export function AgentLaunchButton({
     void (placement.decide ?? ((id: string) => defaultDecide(placement.project, id)))(agentId)
       .then((decision) => {
         if (!decision.target) setRefusal(decision.reason);
-        else if (decision.target.kind === "remote" && decision.needsSetup) setPending({ agentId, decision });
+        else if (decision.target.kind === "remote" && decision.needsSetup) { setSetupOk(false); setPending({ agentId, decision }); }
         else onStartDirect(agentId, decision);
       })
-      .catch(() => onStartDirect(agentId))
+      .catch((e) => setRefusal(`Could not decide where to run this: ${String((e as { message?: string })?.message ?? e)}`))
       .finally(() => { launching.current = false; });
   };
 
@@ -164,8 +165,8 @@ export function AgentLaunchButton({
           size="lg"
           dismissLabel="Cancel"
           onDismiss={() => setPending(null)}
-          actions={[{ label: "Launch", primary: true, onClick: () => { const p = pending; setPending(null); onStartDirect(p.agentId, p.decision); } }]}
-          body={<ProjectSetupDialog projectId={placement.project.id} projectName={placement.project.name} workspaceName={placement.workspaceName ?? "the remote workspace"} components={placement.project.components} />}
+          actions={[{ label: "Launch", primary: true, disabled: !setupOk, onClick: () => { const p = pending; setPending(null); onStartDirect(p.agentId, p.decision); } }]}
+          body={<ProjectSetupDialog projectId={placement.project.id} projectName={placement.project.name} workspaceName={placement.workspaceName ?? "the remote workspace"} components={placement.project.components} onComplete={setSetupOk} />}
         />
       )}
       {menu.menu && (

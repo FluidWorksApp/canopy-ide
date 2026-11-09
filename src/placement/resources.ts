@@ -16,9 +16,10 @@ export interface ResourceSources {
   localMemory: () => Promise<{ total_bytes: number; available_bytes: number } | null>;
   localCapacity: number;
   remoteWorkspaces: () => Promise<RemoteWorkspaceInfo[]>;
-  remoteActiveAgents: (workspaceId: string) => Promise<number>;
+  /** "unknown" when this client cannot observe that workspace's load. */
+  remoteActiveAgents: (workspaceId: string) => Promise<number | "unknown">;
   t3Machines: () => Promise<{ id: string }[]>;
-  t3ActiveAgents: (machineId: string) => Promise<number>;
+  t3ActiveAgents: (machineId: string) => Promise<number | "unknown">;
 }
 
 /** One agent per ~1.5 GiB of memory, at least 2. */
@@ -61,7 +62,7 @@ export async function collectResources(src: ResourceSources, defaultRemoteCapaci
         if (w.state !== "ready") return offline(target, now);
         const n = await safe(() => src.remoteActiveAgents(w.id));
         if (n === null) return offline(target, now);
-        return { target, online: true, activeAgents: n, capacity: capacityFromMemory(w.memory_max_mib, defaultRemoteCapacity), lastSeen: now };
+        return { target, online: true, activeAgents: n === "unknown" ? 0 : n, ...(n === "unknown" ? { loadUnknown: true } : {}), capacity: capacityFromMemory(w.memory_max_mib, defaultRemoteCapacity), lastSeen: now };
       }),
     )),
   );
@@ -73,7 +74,7 @@ export async function collectResources(src: ResourceSources, defaultRemoteCapaci
         const target: Target = { kind: "t3", machineId: m.id };
         const n = await safe(() => src.t3ActiveAgents(m.id));
         if (n === null) return offline(target, now);
-        return { target, online: true, activeAgents: n, capacity: defaultRemoteCapacity, lastSeen: now };
+        return { target, online: true, activeAgents: n === "unknown" ? 0 : n, ...(n === "unknown" ? { loadUnknown: true } : {}), capacity: defaultRemoteCapacity, lastSeen: now };
       }),
     )),
   );

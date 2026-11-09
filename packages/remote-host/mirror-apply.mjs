@@ -212,9 +212,11 @@ export class MirrorJobs {
      const list=await this.capture(['tar','-tzf',archive,...LITERAL]),types=(await this.capture(['tar','-tvzf',archive,...LITERAL])).map(line=>line[0]);
      checkMembers(list,types);
      for(const name of list){const parts=name.split('/');for(let i=1;i<parts.length;i++){const info=await lstat(path.join(job.repo,...parts.slice(0,i))).catch(()=>null);if(info?.isSymbolicLink())throw Error(`Archive path goes through a symlink: ${name.slice(0,200)}`);}}
+     // --skip-old-files keeps what is there, so count only members that were absent.
+     let absent=0;for(const name of list)if(!await lstat(path.join(job.repo,name)).catch(()=>null))absent++;
      const extracted=await this.exec(job,['tar','-xzf',archive,'-C',job.repo,'--no-same-owner','--skip-old-files'],{env:{LC_ALL:'C'}});
      if(!extracted.ok)throw Error(extracted.output);
-     this.record(job,'files','done',`${list.length} new or local-only ${list.length===1?'file':'files'} copied`);
+     this.record(job,'files','done',`${absent} new or local-only ${absent===1?'file':'files'} copied${absent<list.length?` (${list.length-absent} already there, left as is)`:''}`);
     }catch(error){this.record(job,'files','failed',`New files were not copied; the archive is kept at ${await this.keep(job,'files.tgz')}. ${error.message??error}`);}
    }
    if(!filesOnly&&await lstat(path.join(job.repo,'.gitmodules')).catch(()=>null)){

@@ -13,6 +13,9 @@ export interface ResourceSnapshot {
   target: Target;
   online: boolean;
   activeAgents: number;
+  /** False when activeAgents could not be read (assumed 0). Balance prefers
+   *  targets whose load is known. */
+  loadUnknown?: boolean;
   /** Max concurrent agents this target should carry. */
   capacity: number;
   /** 0..1 */

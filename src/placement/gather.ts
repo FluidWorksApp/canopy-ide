@@ -38,12 +38,12 @@ export function realSources(): ResourceSources {
     },
     localCapacity: LOCAL_CAPACITY,
     remoteWorkspaces: workspaces,
-    // Only the active host's terminals can be counted; others read as idle,
-    // so balance may overfill a remote that someone else is using.
+    // Only the active host's terminals can be counted; others are reported as
+    // unknown so balance does not mistake them for idle.
     remoteActiveAgents: async (id) =>
-      isRemoteHost() && activeWorkspace()?.connection.workspaceId === id ? (await agentStats()).length : 0,
+      isRemoteHost() && activeWorkspace()?.connection.workspaceId === id ? (await agentStats()).length : "unknown",
     t3Machines: listT3Machines,
-    t3ActiveAgents: async () => 0,
+    t3ActiveAgents: async () => "unknown",
   };
 }
 

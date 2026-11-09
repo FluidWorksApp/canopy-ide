@@ -32,7 +32,6 @@ it('groups candidate files by category and leaves secret-looking ones unchecked 
  expect((screen.getByLabelText(/data\/dev\.sqlite/) as HTMLInputElement).checked).toBe(true);
  expect(screen.getByText(/look like credentials/i)).toBeTruthy();
  for(const heading of ['Secrets','Config','Data','Other'])expect(screen.getByText(heading)).toBeTruthy();
- expect((screen.getByLabelText(/Copy missing files only/) as HTMLInputElement).checked).toBe(true);
  expect((screen.getByLabelText(/Install dependencies/) as HTMLInputElement).checked).toBe(true);
 });
 
@@ -46,6 +45,16 @@ it('sends nothing until the button is pressed, then sets up only the chosen file
  // The project is not on this Mac per the mocked inspection, which the progress view reports.
  expect(await screen.findByText(/not on this Mac/)).toBeTruthy();
  await waitFor(()=>expect(tauri).toHaveBeenCalledWith('execution_mirror_inspect',undefined));
+});
+
+it('reports a failed setup through onComplete',async()=>{
+ const done=vi.fn();
+ render(<ProjectSetupDialog projectId="p1" projectName="Shop" workspaceName="Studio" components={[component]} onComplete={done}/>);
+ await screen.findByLabelText(/config\/local\.json/);
+ fireEvent.click(screen.getByRole('button',{name:'Set up on Studio'}));
+ await screen.findByText(/not on this Mac/);
+ await waitFor(()=>expect(done).toHaveBeenLastCalledWith(false));
+ expect(done).not.toHaveBeenCalledWith(true);
 });
 
 it('shows why candidates could not be read',async()=>{
