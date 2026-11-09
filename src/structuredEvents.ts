@@ -24,7 +24,7 @@ export interface StructuredRunnerHost {
  *  failing launch actually produces are the ones least likely to identify
  *  themselves: a codex turn that dies on a bad flag emits clap's usage text on
  *  stderr and nothing at all on stdout. */
-export type StructuredDialect = "claude" | "codex" | "cursor";
+export type StructuredDialect = "claude" | "codex" | "cursor" | "acp";
 
 /** `codex exec --json` emits one of these per line. Fields are those observed
  *  against codex-cli 0.146.1 on 2026-08-07; everything else on the line is

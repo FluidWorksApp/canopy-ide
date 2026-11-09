@@ -18,6 +18,7 @@ import {
   CLAUDE_RUNNER,
   CODEX_RUNNER,
   CURSOR_RUNNER,
+  KIRO_RUNNER,
   type StructuredRunner,
 } from "./structuredRunners";
 import {
@@ -1503,6 +1504,7 @@ export const BUILTIN_AGENT_CLIS: AgentCliDef[] = [
     // default agent and carries the hooks; an unknown agent name falls back to
     // Kiro's default, so a machine without it still launches.
     sessionArgs: "--agent canopy",
+    structuredRunner: KIRO_RUNNER,
     skipPermissions: "--trust-all-tools",
     // No reviewed automatic mode is documented: `--trust-tools=<names>` trusts
     // a fixed set rather than classifying calls, so Kiro keeps asking unless

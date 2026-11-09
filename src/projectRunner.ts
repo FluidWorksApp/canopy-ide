@@ -10,6 +10,8 @@ import {
   type StructuredRunnerLaunch,
 } from "./structuredRunners";
 import { streamsStructured, structuredRunnerFor } from "./projects";
+import type { AcpPermissionRequest } from "./acp/protocol";
+import { AcpTransport } from "./acp/transport";
 import { recordNativeCheckpoint } from "./turnRollback";
 
 /** The caller's env plus whatever the runner needs every session to carry.
@@ -271,6 +273,9 @@ export async function startStructured(
     process: ProjectRunnerProcess;
     /** Where a Claude checkpoint id goes; defaults to the rollback store. */
     onCheckpoint?: (sessionId: string, uuid: string) => void;
+    /** ACP only: lets an interactive surface answer a permission request.
+     *  Absent, the launch authority answers (acp/permissions.ts). */
+    onPermission?: (request: AcpPermissionRequest) => Promise<string | null | undefined>;
   },
 ): Promise<ProjectRunnerTransport> {
   if (!attemptId) throw new Error("A structured runner requires an attempt id");
@@ -295,6 +300,14 @@ export async function startStructured(
       runner,
       launch,
     );
+  }
+  if (runner.tier === "acp") {
+    const acp = new AcpTransport(attemptId, host, opts.process, runner, launch, {
+      resume: opts.resume,
+      onPermission: opts.onPermission,
+    });
+    await acp.start();
+    return acp;
   }
   const sessionId = launch.policy.sessionId;
   const transport = new StructuredTransport(
