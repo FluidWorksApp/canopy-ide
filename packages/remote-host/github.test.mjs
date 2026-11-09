@@ -49,8 +49,29 @@ async function repo(){
 const NWO={args:['repo','view','--json','nameWithOwner','--jq','.nameWithOwner'],stdout:'acme/widgets\n'};
 const SHA='a'.repeat(40);
 
+test('gh_pr_create sends body on stdin and keeps values out of flag position',async()=>{
+ const dir=await repo();
+ await fixtures([{args:['pr','create'],stdout:'Creating pull request\nhttps://github.com/acme/widgets/pull/9\n'}]);
+ assert.equal(await gh.gh_pr_create({repo:dir,base:'origin/main',head:'feat/x',title:' Add x ',body:'## Summary',draft:true,reviewers:['bob']}),'https://github.com/acme/widgets/pull/9');
+ await assert.rejects(gh.gh_pr_create({repo:dir,base:'main',head:'--web',title:'T',body:'',draft:false}),/looks like a flag/);
+ await assert.rejects(gh.gh_pr_create({repo:dir,base:'main',head:'x',title:' ',body:'',draft:false}),/needs a title/);
+ const [call]=await calls();
+ assert.deepEqual(call.argv,['pr','create','--base','main','--head','feat/x','--title','Add x','--body-file','-','--draft','--reviewer','bob']);
+});
+
+test('git_pr_context reads commits, files and the PR template since the base',async()=>{
+ const dir=await repo();
+ await sh(dir,'checkout','-q','-b','feat/x');await mkdir(join(dir,'.github'));await writeFile(join(dir,'.github/PULL_REQUEST_TEMPLATE.md'),'## Summary\n');
+ await writeFile(join(dir,'b.txt'),'two\n');await sh(dir,'add','.');await sh(dir,'commit','-q','-m','Add b');
+ const c=await gh.git_pr_context({repo:dir,base:'main'});
+ assert.deepEqual([c.branch,c.base,c.commits,c.commit_count,c.template],['feat/x','main',['Add b'],1,'## Summary\n']);
+ assert.deepEqual(c.files,['.github/PULL_REQUEST_TEMPLATE.md','b.txt']);
+ assert.match(c.stat,/2 files changed/);
+ assert.equal((await gh.git_pr_context({repo:dir,base:''})).base,'main');
+});
+
 test('exports a read-only subset of the commands it handles',()=>{
- assert.equal(Object.keys(gh).length,28);
+ assert.equal(Object.keys(gh).length,30);
  for(const c of GITHUB_READ_ONLY)assert.ok(gh[c],c);
  for(const c of ['gh_pr_checkout','gh_pr_merge','gh_pr_file_viewed','gh_issue_comment'])assert.ok(!GITHUB_READ_ONLY.includes(c));
 });

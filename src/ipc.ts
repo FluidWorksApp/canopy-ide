@@ -4133,6 +4133,31 @@ export const ghPrClose = (repo: string, number: number, deleteBranch = false) =>
 export const ghPrReady = (repo: string, number: number) =>
   invoke<string>("gh_pr_ready", { repo, number });
 
+/** What a PR description is written from: commits and files since the merge
+ *  base (bounded; the counts are the true totals) and the repo's PR template. */
+export interface PrContext {
+  branch: string;
+  base: string;
+  commits: string[];
+  commit_count: number;
+  files: string[];
+  file_count: number;
+  stat: string;
+  template: string | null;
+}
+export const gitPrContext = (repo: string, base = "") =>
+  invoke<PrContext>("git_pr_context", { repo, base });
+/** Open a PR; resolves to its URL. The caller pushes the branch first. */
+export const ghPrCreate = (
+  repo: string,
+  base: string,
+  head: string,
+  title: string,
+  body: string,
+  draft: boolean,
+  reviewers?: string[],
+) => invoke<string>("gh_pr_create", { repo, base, head, title, body, draft, reviewers });
+
 // ---------- PR conversation (review threads, comments, reviews) ----------
 
 export interface PrComment {

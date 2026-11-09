@@ -968,6 +968,8 @@ pub fn run() {
             git::gh_pr_merge,
             git::gh_pr_close,
             git::gh_pr_ready,
+            git::gh_pr_create,
+            git::git_pr_context,
             git::gh_pr_conversation,
             git::gh_pr_links,
             git::gh_pr_thread_reply,
