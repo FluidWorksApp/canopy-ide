@@ -55,3 +55,52 @@
 .cx-note { color: var(--text-faint); }
 .cx-compose { display: flex; flex-direction: column; gap: var(--sp-1); width: 100%; }
 .cx-compose textarea { width: 100%; font: inherit; font-size: var(--fs-xs); }
+
+/* The agent hierarchy overlay on the terminal (AgentHierarchyOverlay.tsx).
+   The box ignores the pointer except on its own controls. */
+.ah-overlay {
+  position: absolute;
+  top: var(--sp-2);
+  right: var(--sp-3);
+  z-index: 5;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: var(--sp-1);
+  max-width: min(360px, 70%);
+  pointer-events: none;
+  font-size: var(--fs-xs);
+}
+.ah-bar, .ah-panel { pointer-events: auto; }
+.ah-bar { display: flex; gap: var(--sp-1); }
+.ah-pill, .ah-pin, .ah-back, .ah-row {
+  font: inherit;
+  color: var(--text-dim);
+  background: var(--bg-elev, var(--bg));
+  border: 1px solid var(--border);
+  border-radius: var(--r-xs);
+  padding: 2px 8px;
+  cursor: pointer;
+}
+.ah-pill:hover, .ah-pin:hover, .ah-back:hover, .ah-row:hover { color: var(--text); }
+.ah-pill:focus-visible, .ah-pin:focus-visible, .ah-back:focus-visible, .ah-row:focus-visible { outline: none; box-shadow: var(--ring); }
+.ah-pin.is-pinned { color: var(--cyan); }
+.ah-panel {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-1);
+  min-width: 220px;
+  max-height: 50vh;
+  overflow: auto;
+  padding: var(--sp-1);
+  background: var(--bg-elev, var(--bg));
+  border: 1px solid var(--border);
+  border-radius: var(--r-xs);
+}
+.ah-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 2px; }
+.ah-row { display: flex; align-items: baseline; gap: var(--sp-1); width: 100%; text-align: left; border-color: transparent; }
+.ah-row.is-active { color: var(--text); border-color: var(--border); font-weight: 600; }
+.ah-row.is-exited { opacity: 0.6; }
+.ah-branch { color: var(--text-faint); font-family: var(--font-mono); flex: none; }
+.ah-title { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ah-state { color: var(--text-faint); flex: none; }

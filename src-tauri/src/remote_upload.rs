@@ -502,7 +502,64 @@ mod tests {
     }
 }
 
-/// Stage explicitly dropped images on the selected workspace, never send Mac paths to Linux.
+/// Progress for files dropped into a remote terminal, emitted as `remote:stage-progress`.
+#[derive(Clone, serde::Serialize, Default)]
+#[serde(rename_all = "camelCase")]
+struct StageProgress {
+    id: String,
+    name: String,
+    bytes: u64,
+    total_bytes: u64,
+    files: usize,
+    total_files: usize,
+}
+
+const STAGE_MAX_FILES: usize = 16;
+const STAGE_MAX_BYTES: u64 = 100 * 1024 * 1024;
+
+fn sanitize_part(raw: &str, max: usize) -> String {
+    let mut out = String::new();
+    for ch in raw.chars() {
+        if out.len() >= max {
+            break;
+        }
+        if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' {
+            out.push(ch.to_ascii_lowercase());
+        } else if !out.ends_with('-') && !out.is_empty() {
+            out.push('-');
+        }
+    }
+    out.trim_matches('-').to_string()
+}
+
+/// `<random>-<name>.<ext>` with the name and extension reduced to [a-z0-9_-].
+fn staged_name(unique: &str, source: &Path) -> String {
+    let stem = sanitize_part(
+        source.file_stem().and_then(|s| s.to_str()).unwrap_or(""),
+        40,
+    );
+    let ext: String = source
+        .extension()
+        .and_then(|s| s.to_str())
+        .unwrap_or("")
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric())
+        .take(10)
+        .collect::<String>()
+        .to_ascii_lowercase();
+    let mut name = unique.to_string();
+    if !stem.is_empty() {
+        name.push('-');
+        name.push_str(&stem);
+    }
+    if !ext.is_empty() {
+        name.push('.');
+        name.push_str(&ext);
+    }
+    name
+}
+
+/// Stage explicitly dropped files on the selected workspace, never send Mac paths to Linux.
 #[tauri::command]
 pub async fn execution_remote_stage_images(
     app: tauri::AppHandle,
@@ -511,39 +568,52 @@ pub async fn execution_remote_stage_images(
     endpoint: String,
     dir: String,
     paths: Vec<String>,
+    progress_id: Option<String>,
 ) -> Result<Vec<String>, String> {
-    if paths.is_empty() || paths.len() > 16 {
-        return Err("Drop up to 16 images at a time".into());
+    if paths.is_empty() || paths.len() > STAGE_MAX_FILES {
+        return Err("Drop up to 16 files at a time".into());
     }
-    let c = execution_remote_get(app, state)?.ok_or("Select a remote workspace first")?;
+    let progress_id = progress_id.unwrap_or_default();
+    if progress_id.len() > 64 {
+        return Err("Invalid upload id".into());
+    }
+    let c = execution_remote_get(app.clone(), state)?.ok_or("Select a remote workspace first")?;
     if c.workspace_id != workspace_id
         || c.endpoint.trim_end_matches('/') != endpoint.trim_end_matches('/')
     {
-        return Err("Workspace changed; drop the images again".into());
+        return Err("Workspace changed; drop the files again".into());
     }
+    // The timeout applies to each request, and every request carries one chunk,
+    // so large files are not limited by it.
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(30))
         .build()
         .map_err(|_| "Upload unavailable")?;
     let destination = format!("{}/.canopy/attachments", dir.trim_end_matches('/'));
     let mut sources = Vec::new();
+    let mut total_bytes = 0u64;
     for path in paths {
         let source = PathBuf::from(path);
-        let ext = source
-            .extension()
-            .and_then(|s| s.to_str())
-            .unwrap_or("")
-            .to_ascii_lowercase();
-        if !["png", "jpg", "jpeg", "gif", "webp", "avif", "bmp", "svg"].contains(&ext.as_str()) {
-            return Err("Drop an image here. Use Upload files for other file types.".into());
-        }
         let meta = std::fs::symlink_metadata(&source)
-            .map_err(|_| "Dropped image is no longer available")?;
-        if !meta.is_file() || meta.len() > 25 * 1024 * 1024 {
-            return Err("Each dropped image must be a regular file under 25 MB".into());
+            .map_err(|_| "Dropped file is no longer available")?;
+        if !meta.is_file() || meta.len() > STAGE_MAX_BYTES {
+            return Err("Each dropped file must be a regular file under 100 MB".into());
         }
-        sources.push((source, ext, meta));
+        total_bytes += meta.len();
+        sources.push((source, meta));
     }
+    let mut progress = StageProgress {
+        id: progress_id,
+        total_bytes,
+        total_files: sources.len(),
+        ..Default::default()
+    };
+    let emit = |p: &StageProgress| {
+        if !p.id.is_empty() {
+            let _ = app.emit("remote:stage-progress", p);
+        }
+    };
+    emit(&progress);
     remote(
         &client,
         &c,
@@ -551,17 +621,24 @@ pub async fn execution_remote_stage_images(
         serde_json::json!({"path":destination}),
     )
     .await?;
+    let mut last_event = std::time::Instant::now();
     let mut staged = Vec::new();
-    for (source, ext, expected) in sources {
+    for (source, expected) in sources {
+        progress.name = source
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or("")
+            .to_string();
+        emit(&progress);
         let mut file = tokio::fs::File::open(&source)
             .await
-            .map_err(|_| "Cannot open dropped image")?;
+            .map_err(|_| "Cannot open dropped file")?;
         let actual = file
             .metadata()
             .await
-            .map_err(|_| "Cannot inspect dropped image")?;
+            .map_err(|_| "Cannot inspect dropped file")?;
         if !same_file(&expected, &actual) {
-            return Err("Dropped image changed; try again".into());
+            return Err("Dropped file changed; try again".into());
         }
         let mut random = [0u8; 16];
         getrandom::getrandom(&mut random).map_err(|_| "Cannot create attachment name")?;
@@ -569,7 +646,7 @@ pub async fn execution_remote_stage_images(
             .iter()
             .map(|b| format!("{b:02x}"))
             .collect::<String>();
-        let target = format!("{}/{}.{}", destination, unique, ext);
+        let target = format!("{}/{}", destination, staged_name(&unique, &source));
         let start = remote(
             &client,
             &c,
@@ -585,13 +662,15 @@ pub async fn execution_remote_stage_images(
         let uploaded:Result<(),String>=async {
             let mut offset=0u64;let mut hash=Sha256::new();let mut buffer=vec![0;CHUNK];
             loop {
-                let count=file.read(&mut buffer).await.map_err(|_|"Cannot read dropped image")?;if count==0{break;}
-                if offset+count as u64>expected.len(){return Err("Dropped image changed; try again".into());}
+                let count=file.read(&mut buffer).await.map_err(|_|"Cannot read dropped file")?;if count==0{break;}
+                if offset+count as u64>expected.len(){return Err("Dropped file changed; try again".into());}
                 hash.update(&buffer[..count]);
                 let ack=remote(&client,&c,"fs_upload_chunk",serde_json::json!({"id":id,"offset":offset,"b64":base64::engine::general_purpose::STANDARD.encode(&buffer[..count])})).await?;
                 offset+=count as u64;if ack.get("written").and_then(|v|v.as_u64())!=Some(offset){return Err("Upload acknowledgement mismatch".into());}
+                progress.bytes+=count as u64;
+                if last_event.elapsed().as_millis()>=100{emit(&progress);last_event=std::time::Instant::now();}
             }
-            if offset!=expected.len() || !same_file(&expected,&file.metadata().await.map_err(|_|"Cannot inspect image")?){return Err("Dropped image changed; try again".into());}
+            if offset!=expected.len() || !same_file(&expected,&file.metadata().await.map_err(|_|"Cannot inspect file")?){return Err("Dropped file changed; try again".into());}
             remote(&client,&c,"fs_upload_finish",serde_json::json!({"id":id,"sha256":format!("{:x}",hash.finalize())})).await?;
             Ok(())
         }.await;
@@ -599,7 +678,27 @@ pub async fn execution_remote_stage_images(
             let _ = remote(&client, &c, "fs_upload_abort", serde_json::json!({"id":id})).await;
             return Err(error);
         }
+        progress.files += 1;
+        emit(&progress);
         staged.push(target);
     }
     Ok(staged)
+}
+
+#[cfg(test)]
+mod stage_tests {
+    use super::*;
+    #[test]
+    fn staged_names_keep_a_sanitized_name_and_extension() {
+        let p = Path::new("/tmp/My Report (final).PDF");
+        assert_eq!(staged_name("abc", p), "abc-my-report-final.pdf");
+        assert_eq!(staged_name("abc", Path::new("/tmp/data.csv")), "abc-data.csv");
+        assert_eq!(staged_name("abc", Path::new("/tmp/Makefile")), "abc-makefile");
+        assert_eq!(staged_name("abc", Path::new("/tmp/a.t%x/../b.s h")), "abc-b.sh");
+    }
+    #[test]
+    fn staged_names_never_contain_separators() {
+        let name = staged_name("abc", Path::new("/tmp/..%2f..%2fetc.pa/ss"));
+        assert!(!name.contains('/') && !name.contains(".."));
+    }
 }

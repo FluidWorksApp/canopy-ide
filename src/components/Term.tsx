@@ -8,9 +8,12 @@ import {
   forwardRef,
   useEffect,
   useImperativeHandle,
+  useReducer,
   useRef,
   type MouseEvent as ReactMouseEvent,
 } from "react";
+import { DropUploadProgress } from "./DropUploadProgress";
+import { dropUploadErrorText, dropUploadReducer } from "../dropUpload";
 import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import { SerializeAddon } from "@xterm/addon-serialize";
@@ -164,6 +167,7 @@ export const Term = forwardRef<TermHandle, TermProps>(function Term(
 ) {
   // Frozen once: a Term never switches between spawn and attach mid-life, and
   // the mount-once effect closes over it.
+  const [dropUpload, dispatchDrop] = useReducer(dropUploadReducer, null);
   const attachIdRef = useRef(attachId);
   const killAttachedOnCloseRef = useRef(killAttachedOnClose);
   const containerRef = useRef<HTMLDivElement>(null);
@@ -1229,9 +1233,36 @@ export const Term = forwardRef<TermHandle, TermProps>(function Term(
           term.focus();
         };
         if (!cwd && !isRemoteHost()) return paste(paths);
-        void ipc.spotStageDropImages(cwd || '/workspace', paths).then(paste).catch((error) => {
-          if (!isRemoteHost()) return paste(paths);
-          void ipc.notifyNative('Image upload failed', String(error));
+        const remote = isRemoteHost();
+        const id = `drop-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+        let unlisten: (() => void) | undefined;
+        let stopped = false;
+        const stopListening = () => {
+          unlisten?.();
+          unlisten = undefined;
+        };
+        if (remote) {
+          // Show the strip now; the upload can take a while before any bytes land.
+          dispatchDrop({ type: "start", id, totalFiles: paths.length, name: paths[0]?.split(/[\\/]/).pop() });
+          void ipc
+            .onDropUploadProgress((event) => {
+              if (event.id === id) dispatchDrop({ type: "progress", ...event });
+            })
+            .then((off) => {
+              if (stopped) off();
+              else unlisten = off;
+            });
+        }
+        void ipc.spotStageDropImages(cwd || '/workspace', paths, remote ? id : undefined).then((ready) => {
+          stopped = true;
+          stopListening();
+          if (remote) dispatchDrop({ type: "done", id });
+          paste(ready);
+        }).catch((error) => {
+          stopped = true;
+          stopListening();
+          if (!remote) return paste(paths);
+          dispatchDrop({ type: "fail", id, error: dropUploadErrorText(error) });
         });
       },
       themeChanged: onThemeChange,
@@ -1321,6 +1352,9 @@ export const Term = forwardRef<TermHandle, TermProps>(function Term(
   return (
     <>
       <div className="term-container" ref={containerRef} onContextMenu={openMenu} />
+      {dropUpload && (
+        <DropUploadProgress state={dropUpload} onDismiss={() => dispatchDrop({ type: "dismiss" })} />
+      )}
       {menu.menu && (
         <ContextMenu
           x={menu.menu.x}

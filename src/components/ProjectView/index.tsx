@@ -417,6 +417,7 @@ import {useRemoteUpload} from "../../remoteExecution/useRemoteUpload";
 import { FileView, hasDiffToolbar } from "../FileView";
 import { ChangesPanel, type ChangeGroup } from "../ChangesPanel";
 import { Dialog } from "../Dialog";
+import { AgentHierarchyOverlay } from "../AgentHierarchyOverlay";
 import { BranchSwitchProvider, useBranchSwitch } from "../../useBranchSwitch";
 import { askDialog } from "../../branchSwitch";
 import { useTabDragGroups, applyOrder } from "../../tabDrag";
@@ -12800,6 +12801,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
   // rebuilt when it's in front (so it always sees current props) or when its
   // tab changed underneath it.
   const docTabs = tabs.filter((t): t is DocSubTab => t.type !== "terminal");
+  const terminalTabsForHierarchy = tabs.filter((t): t is TermSubTab => t.type === "terminal");
   const panes = useRef(
     new Map<string, { tab: DocSubTab; active: boolean; el: ReactNode }>(),
   );
@@ -13788,6 +13790,23 @@ const ProjectViewBody = memo(function ProjectViewBody({
                     ×
                   </button>
                 </div>
+              )}
+              {tab.id === activeTabId && shown && (
+                <AgentHierarchyOverlay
+                  tabs={terminalTabsForHierarchy}
+                  activeTabId={activeTabId}
+                  onSelect={(id) => setActiveTabId(id)}
+                  activityKey={
+                    tab.ptyId != null && liveSessionByPty.get(tab.ptyId) && agentIdForCommand(tab.command)
+                      ? {
+                          agent: agentIdForCommand(tab.command) as string,
+                          sessionId: liveSessionByPty.get(tab.ptyId) as string,
+                          cwd: tab.cwd,
+                          profile: tab.profile ?? null,
+                        }
+                      : null
+                  }
+                />
               )}
               <TermPorts
                 ptyId={tab.ptyId}

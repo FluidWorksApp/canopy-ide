@@ -2256,8 +2256,29 @@ export const spotIndexClear = () => invoke<void>("spot_index_clear");
 export const spotSaveContextImage = (dir: string, base64Png: string) =>
   invoke<string>("spot_save_context_image", { dir, base64Png });
 
-export const spotStageDropImages = (dir: string, paths: string[]) =>
-  invoke<string[]>("spot_stage_drop_images", { dir, paths });
+/** Stage dropped files (images are copied, other files pass through locally and
+ *  are uploaded on a remote workspace). `progressId` tags `remote:stage-progress`
+ *  events so the caller can show upload progress. */
+export const spotStageDropImages = (
+  dir: string,
+  paths: string[],
+  progressId?: string,
+) =>
+  invoke<string[]>(
+    "spot_stage_drop_images",
+    progressId ? { dir, paths, progressId } : { dir, paths },
+  );
+
+export interface DropUploadEvent {
+  id: string;
+  name: string;
+  bytes: number;
+  totalBytes: number;
+  files: number;
+  totalFiles: number;
+}
+export const onDropUploadProgress = (cb: (event: DropUploadEvent) => void) =>
+  listen<DropUploadEvent>("remote:stage-progress", (event) => cb(event.payload));
 
 /** Persist a brief too long to type at a shell prompt (see agentSeed.ts) under
  *  `<dir>/.canopy/spot/`, and return its path for the agent to read. */
