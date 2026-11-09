@@ -1238,6 +1238,11 @@ function CustomClis({
                 }}
               />
               {c.acp && <span className="cli-bin-state" title="Runs over the Agent Client Protocol">ACP</span>}
+              {c.acp && (
+                <span className="cli-custom-hint">
+                  Read-only is advisory: Canopy answers permission requests, but an agent that never asks can still write.
+                </span>
+              )}
             </div>
           </div>
         );

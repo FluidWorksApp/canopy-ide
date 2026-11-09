@@ -87,3 +87,13 @@ describe("presets", () => {
     expect(ACP_PRESETS.find((p) => p.bin === "gemini")?.args).toEqual(["--acp"]);
   });
 });
+
+describe("env deny-list", () => {
+  it("drops dangerous names from custom config and keeps ordinary ones", () => {
+    const out = sanitizeAcpConfig({
+      args: ["--acp"],
+      env: { LD_PRELOAD: "x", ld_library_path: "x", PATH: "x", NODE_OPTIONS: "x", API_KEY: "k" },
+    });
+    expect(out?.env).toEqual({ API_KEY: "k" });
+  });
+});

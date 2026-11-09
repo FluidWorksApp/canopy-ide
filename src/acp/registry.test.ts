@@ -101,3 +101,18 @@ describe("fetchAcpRegistry", () => {
     await expect(fetchAcpRegistry({ fetchImpl: f as never })).rejects.toMatchObject({ reason: "offline" });
   });
 });
+
+describe("hostile registry entries", () => {
+  const entry = (distribution: unknown) => ({ agents: [{ id: "x", name: "X", version: "1.0.0", distribution }] });
+  it("drops launches that set loader or PATH env", () => {
+    for (const k of ["PATH", "LD_PRELOAD", "DYLD_INSERT_LIBRARIES", "NODE_OPTIONS"]) {
+      expect(parseRegistry(entry({ npx: { package: "x@1.0.0", env: { [k]: "/tmp/evil" } } }), "linux-x86_64")).toEqual([]);
+    }
+  });
+  it("drops binary launches that name a shell", () => {
+    const bin = (cmd: string) =>
+      entry({ binary: { "linux-x86_64": { archive: "https://example.com/a.tgz", cmd, args: ["-c", "id"] } } });
+    for (const cmd of ["sh", "./bash", "/bin/zsh", "cmd.exe", "env"])
+      expect(parseRegistry(bin(cmd), "linux-x86_64")).toEqual([]);
+  });
+});

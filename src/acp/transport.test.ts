@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { startStructured, type ProjectRunnerOutput, type ProjectRunnerProcess } from "../projectRunner";
 import type { StructuredRunnerEvent } from "../structuredEvents";
 import type { StructuredRunnerLaunch } from "../structuredRunners";
@@ -85,7 +85,7 @@ async function run(authority: "read-only" | "workspace-write", resume = false, l
 describe("AcpTransport", () => {
   it("plays initialize, session/new, prompt, permission and stop", async () => {
     const { agent, events, transport } = await run("workspace-write");
-    expect(agent.spawned[0]).toMatchObject({ command: "kiro-cli", args: ["acp", "--trust-all-tools"], keepStdin: true });
+    expect(agent.spawned[0]).toMatchObject({ command: "kiro-cli", args: ["acp", "--agent", "canopy", "--trust-all-tools"], keepStdin: true });
     await transport.send("do it");
     expect(events.map((e) => e.kind)).toEqual(["ready", "delta", "tool", "reply", "turnEnd"]);
     expect(events.find((e) => e.kind === "reply")).toEqual({ kind: "reply", text: "Done" });
@@ -104,9 +104,51 @@ describe("AcpTransport", () => {
     expect(agent.isKilled()).toBe(true);
   });
 
+  it("ends quietly when stopped during an in-flight prompt", async () => {
+    const agent = fakeAgent();
+    const events: StructuredRunnerEvent[] = [];
+    const base = fakeAgent();
+    void base;
+    // An agent that never answers the prompt.
+    const hang = {
+      ...agent.process,
+      write: async (id: string, line: string) => {
+        if ((JSON.parse(line) as Msg).method === "session/prompt") {
+          agent.written.push(JSON.parse(line) as Msg);
+          return;
+        }
+        return agent.process.write(id, line);
+      },
+    };
+    const transport = await startStructured("a1", "kiro", launch("read-only"), { emit: (e) => events.push(e) }, {
+      resume: false,
+      process: hang,
+    });
+    await vi.waitFor(() => expect(events.some((e) => e.kind === "ready")).toBe(true));
+    const sent = transport.send("long task");
+    await vi.waitFor(() => expect(agent.written.some((m) => m.method === "session/prompt")).toBe(true));
+    await transport.stop();
+    await sent;
+    expect(events.some((e) => e.kind === "error")).toBe(false);
+    expect(events.filter((e) => e.kind === "turnEnd")).toHaveLength(1);
+  });
+
+  it("fails clearly when the working directory is not absolute", async () => {
+    const agent = fakeAgent();
+    const events: StructuredRunnerEvent[] = [];
+    await startStructured("a1", "kiro", launch("read-only", { cwd: "work" }), { emit: (e) => events.push(e) }, {
+      resume: false,
+      process: agent.process,
+    });
+    await vi.waitFor(() =>
+      expect(events).toContainEqual({ kind: "error", message: "ACP needs an absolute working directory." }),
+    );
+    expect(agent.written.some((m) => m.method === "initialize")).toBe(false);
+  });
+
   it("rejects once and reports blocked under read-only", async () => {
     const { agent, events, transport } = await run("read-only");
-    expect(agent.spawned[0].args).toEqual(["acp"]);
+    expect(agent.spawned[0].args).toEqual(["acp", "--agent", "canopy"]);
     await transport.send("x");
     const answer = agent.written.find((m) => m.id === 77 && m.result) as { result: unknown };
     expect(answer.result).toEqual({ outcome: { outcome: "selected", optionId: "no" } });

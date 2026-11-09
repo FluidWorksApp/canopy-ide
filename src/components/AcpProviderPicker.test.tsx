@@ -29,6 +29,9 @@ describe("AcpProviderPicker", () => {
     render(<AcpProviderPicker onAdd={onAdd} fetchImpl={f as never} />);
     await userEvent.click(screen.getByRole("button", { name: "Browse the ACP registry" }));
     await userEvent.click(await screen.findByRole("button", { name: "Add Qwen via npx" }));
+    expect(onAdd).not.toHaveBeenCalled();
+    expect(screen.getByText("npx -y @q/qwen@1.0.0 --acp")).toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "Add Qwen" }));
     expect(onAdd).toHaveBeenCalledWith({
       name: "Qwen",
       bin: "npx",

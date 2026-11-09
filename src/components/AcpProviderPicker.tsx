@@ -26,6 +26,7 @@ export function AcpProviderPicker({
   const [agents, setAgents] = useState<RegistryAgent[] | null>(null);
   const [busy, setBusy] = useState(false);
   const [note, setNote] = useState("");
+  const [pending, setPending] = useState<AcpProviderChoice | null>(null);
 
   const browse = async () => {
     setBusy(true);
@@ -44,8 +45,9 @@ export function AcpProviderPicker({
     }
   };
 
+  // Registry JSON is unsigned: show exactly what will run before it is stored.
   const addLaunch = (a: RegistryAgent, l: RegistryLaunch) =>
-    onAdd({ name: a.name, bin: l.command, acp: { args: l.args, ...(l.env ? { env: l.env } : {}) } });
+    setPending({ name: a.name, bin: l.command, acp: { args: l.args, ...(l.env ? { env: l.env } : {}) } });
 
   return (
     <div className="acp-picker" role="group" aria-label="Add an ACP provider">
@@ -77,6 +79,37 @@ export function AcpProviderPicker({
           {note}
         </div>
       )}
+      {pending && (
+        <div className="acp-confirm" role="group" aria-label={`Confirm adding ${pending.name}`}>
+          <div>
+            Canopy will run this when you start <strong>{pending.name}</strong>:
+          </div>
+          <code>{[pending.bin, ...pending.acp.args].join(" ")}</code>
+          {pending.acp.env && (
+            <div>
+              Environment:{" "}
+              <code>
+                {Object.entries(pending.acp.env)
+                  .map(([k, v]) => `${k}=${v}`)
+                  .join(" ")}
+              </code>
+            </div>
+          )}
+          <button
+            type="button"
+            className="agent-chip"
+            onClick={() => {
+              onAdd(pending);
+              setPending(null);
+            }}
+          >
+            Add {pending.name}
+          </button>
+          <button type="button" className="agent-chip" onClick={() => setPending(null)}>
+            Cancel
+          </button>
+        </div>
+      )}
       {agents && (
         <ul className="acp-registry-list" aria-label="ACP registry agents">
           {agents.map((a) => (
@@ -90,11 +123,9 @@ export function AcpProviderPicker({
                   type="button"
                   className="agent-chip"
                   aria-label={`Add ${a.name} via ${l.kind}`}
-                  title={
-                    l.needsInstall
-                      ? `Needs ${l.command} installed on your PATH`
-                      : `Runs ${l.command} ${l.args.join(" ")} when you start it`
-                  }
+                  title={`${
+                    l.needsInstall ? `Needs ${l.command} installed on your PATH. ` : ""
+                  }Runs ${l.command} ${l.args.join(" ")} when you start it`}
                   onClick={() => addLaunch(a, l)}
                 >
                   ＋ {l.kind}

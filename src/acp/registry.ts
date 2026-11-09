@@ -2,6 +2,8 @@
  *  downloads a binary. The person picks an entry and adds it as a custom CLI;
  *  the launch command is theirs to run on first use. */
 
+import { isDeniedEnvName, isShellCommand } from "./providers";
+
 export const ACP_REGISTRY_URL =
   "https://cdn.agentclientprotocol.com/registry/v1/latest/registry.json";
 
@@ -61,7 +63,7 @@ function envRecord(v: unknown): Record<string, string> | undefined | null {
   const out: Record<string, string> = {};
   for (const [k, val] of Object.entries(v as Record<string, unknown>)) {
     const s = str(val, 1024);
-    if (s === undefined || !/^[A-Za-z_][A-Za-z0-9_]{0,127}$/.test(k)) return null;
+    if (s === undefined || !/^[A-Za-z_][A-Za-z0-9_]{0,127}$/.test(k) || isDeniedEnvName(k)) return null;
     out[k] = s;
   }
   return Object.keys(out).length ? out : undefined;
@@ -110,7 +112,7 @@ function parseLaunch(dist: unknown, platform: string): RegistryLaunch[] {
     // Last path segment, extension kept: the archive is not unpacked by
     // Canopy, so this names the executable the person installs on PATH.
     const name = cmd?.split(/[\\/]/).pop();
-    if (name && name !== "." && name !== ".." && args && env !== null && https)
+    if (name && name !== "." && name !== ".." && !isShellCommand(name) && args && env !== null && https)
       out.push({ kind: "binary", command: name, args, env, needsInstall: true });
   }
   return out;

@@ -18,6 +18,8 @@ export interface AcpProviderSpec {
   /** Flags, when the CLI has them. Absent = Canopy cannot choose that. */
   modelArg?: string;
   agentArg?: string;
+  /** Value for `agentArg`, e.g. the agent profile that carries Canopy's hooks. */
+  agentProfile?: string;
   /** Passed ONLY for workspace-write authority; the agent then never asks. */
   trustAllArg?: string;
   /** ACP session mode ids to select per authority, when the agent offers them. */
@@ -28,6 +30,7 @@ export interface AcpProviderSpec {
 export function buildAcpRunner(spec: AcpProviderSpec): StructuredRunner {
   const argv: StructuredRunner["args"] = (o) => [
     ...spec.args,
+    ...(spec.agentArg && spec.agentProfile ? [spec.agentArg, spec.agentProfile] : []),
     ...(spec.modelArg && o.policy.model ? [spec.modelArg, o.policy.model] : []),
     ...(spec.trustAllArg && o.policy.authority === "workspace-write" ? [spec.trustAllArg] : []),
   ];
@@ -55,6 +58,33 @@ const MAX_ARG_LEN = 1024;
 const MAX_ENV = 32;
 const ENV_NAME = /^[A-Za-z_][A-Za-z0-9_]{0,127}$/;
 
+/** Env names that change what a launched program loads or which program is
+ *  found, so a settings or registry entry must never set them. */
+const DENIED_ENV_EXACT = new Set([
+  "PATH", "PATHEXT", "HOME", "SHELL", "IFS", "ENV", "BASH_ENV", "PROMPT_COMMAND",
+  "NODE_OPTIONS", "NODE_PATH", "NODE_EXTRA_CA_CERTS", "PYTHONPATH", "PYTHONSTARTUP",
+  "PYTHONHOME", "RUBYOPT", "RUBYLIB", "PERL5OPT", "PERL5LIB", "JAVA_TOOL_OPTIONS",
+  "_JAVA_OPTIONS", "JDK_JAVA_OPTIONS", "GIT_SSH_COMMAND", "GIT_EXEC_PATH", "SSL_CERT_FILE",
+  "SSL_CERT_DIR", "CURL_CA_BUNDLE", "COMSPEC",
+]);
+const DENIED_ENV_PREFIX = ["LD_", "DYLD_"];
+
+export function isDeniedEnvName(name: string): boolean {
+  const n = name.toUpperCase();
+  return DENIED_ENV_EXACT.has(n) || DENIED_ENV_PREFIX.some((p) => n.startsWith(p));
+}
+
+/** Executables that turn an "agent" entry into a generic shell. */
+const SHELL_COMMANDS = new Set([
+  "sh", "bash", "zsh", "fish", "dash", "ksh", "csh", "tcsh", "cmd", "cmd.exe",
+  "powershell", "powershell.exe", "pwsh", "pwsh.exe", "env", "sudo", "su", "eval", "xargs",
+]);
+
+export function isShellCommand(command: string): boolean {
+  const base = command.split(/[\\/]/).pop()?.toLowerCase() ?? "";
+  return SHELL_COMMANDS.has(base);
+}
+
 /** Coerce stored/imported JSON into a CustomAcpConfig, or undefined when it is
  *  not one. Lenient on junk (dropped, not thrown) because it runs on every
  *  settings read; strict on shape so a corrupt entry degrades to a plain CLI. */
@@ -69,7 +99,7 @@ export function sanitizeAcpConfig(raw: unknown): CustomAcpConfig | undefined {
   if (r.env && typeof r.env === "object" && !Array.isArray(r.env)) {
     const env: Record<string, string> = {};
     for (const [k, v] of Object.entries(r.env as Record<string, unknown>).slice(0, MAX_ENV)) {
-      if (ENV_NAME.test(k) && typeof v === "string" && v.length <= MAX_ARG_LEN && !v.includes("\0"))
+      if (ENV_NAME.test(k) && !isDeniedEnvName(k) && typeof v === "string" && v.length <= MAX_ARG_LEN && !v.includes("\0"))
         env[k] = v;
     }
     if (Object.keys(env).length) out.env = env;

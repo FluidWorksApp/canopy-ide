@@ -463,6 +463,8 @@ export const KIRO_ACP_SPEC: AcpProviderSpec = {
   authHint: "Run `kiro-cli login` in a terminal.",
   modelArg: "--model",
   agentArg: "--agent",
+  // Carries Canopy's hooks; an unknown agent name falls back to Kiro's default.
+  agentProfile: "canopy",
   trustAllArg: "--trust-all-tools",
   verification: {
     cliVersion: "3.1.0",

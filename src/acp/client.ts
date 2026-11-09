@@ -13,6 +13,9 @@ import {
 } from "./protocol";
 import { AcpRpc, methodNotFound } from "./rpc";
 
+/** `initialize` and `session/new` can wait on a first `npx -y` download. */
+const HANDSHAKE_TIMEOUT_MS = 180_000;
+
 export interface AcpSessionOptions {
   write(line: string): Promise<void>;
   host: StructuredRunnerHost;
@@ -37,6 +40,7 @@ export class AcpSession {
   /** `session/load` replays the old conversation as updates; none of it is a
    *  new turn, so it is dropped until the load resolves. */
   private replaying = false;
+  private stopped = false;
 
   constructor(opts: AcpSessionOptions) {
     this.opts = opts;
@@ -49,6 +53,10 @@ export class AcpSession {
     });
   }
 
+  private handshakeMs(): number {
+    return this.opts.requestTimeoutMs ?? HANDSHAKE_TIMEOUT_MS;
+  }
+
   handleLine(raw: string): void {
     this.rpc.handleLine(raw);
   }
@@ -59,7 +67,7 @@ export class AcpSession {
       protocolVersion: ACP_PROTOCOL_VERSION,
       clientCapabilities: CANOPY_ACP_CAPABILITIES,
       clientInfo: { name: "canopy", title: "Canopy", version: "1" },
-    });
+    }, this.handshakeMs());
     const base = { cwd: this.opts.cwd, mcpServers: this.opts.mcpServers ?? [] };
     let created: AcpNewSessionResult | null = null;
     if (resumeId && this.initialized.agentCapabilities?.loadSession) {
@@ -73,7 +81,7 @@ export class AcpSession {
         this.replaying = false;
       }
     }
-    if (!created) created = await this.rpc.request<AcpNewSessionResult>("session/new", base);
+    if (!created) created = await this.rpc.request<AcpNewSessionResult>("session/new", base, this.handshakeMs());
     this.sessionId = created.sessionId;
     const wanted = this.opts.modeId;
     if (wanted && created.modes?.availableModes?.some((m) => m.id === wanted)) {
@@ -95,12 +103,23 @@ export class AcpSession {
       );
       this.mapper.endTurn(result?.stopReason);
     } catch (e) {
+      // A deliberate stop rejects the pending prompt locally; that is not a failure.
+      if (this.stopped) {
+        this.mapper.endTurn("cancelled");
+        return;
+      }
       this.mapper.fail(e instanceof Error ? e.message : String(e));
     }
   }
 
   async cancel(): Promise<void> {
     if (this.sessionId) await this.rpc.notify("session/cancel", { sessionId: this.sessionId });
+  }
+
+  /** Closes after a user-initiated stop: the in-flight prompt ends quietly. */
+  stop(): void {
+    this.stopped = true;
+    this.rpc.close("stopped");
   }
 
   close(reason?: string): void {
