@@ -98,9 +98,9 @@ describe("T3 pairing links", () => {
   it("reads whatever someone pastes: a direct link, an app link, or the CLI's LAN link", () => {
     expect(parseT3PairingLink("  https://box.example.com/pair#token=T1  ")).toMatchObject({ credential: "T1", httpBaseUrl: "https://box.example.com/" });
     expect(parseT3PairingLink(buildPairingAppLink("http://192.168.1.4:3773/pair#token=T2"))).toMatchObject({ credential: "T2", httpBaseUrl: "http://192.168.1.4:3773/" });
-    // What `t3 serve` and `t3 pair` print (recorded from 0.1.7).
-    expect(parseT3PairingLink("t3code://pair?pairingUrl=http%3A%2F%2F127.0.0.1%3A43413%2Fpair%23token%3DQ6X28AD3LU5V"))
-      .toEqual({ credential: "Q6X28AD3LU5V", httpBaseUrl: "http://127.0.0.1:43413/", wsBaseUrl: "ws://127.0.0.1:43413/" });
+    // What `t3 serve` and `t3 pair` print (shape recorded from 0.1.7; the code is a placeholder).
+    expect(parseT3PairingLink("t3code://pair?pairingUrl=http%3A%2F%2F127.0.0.1%3A43413%2Fpair%23token%3DEXAMPLECODE"))
+      .toEqual({ credential: "EXAMPLECODE", httpBaseUrl: "http://127.0.0.1:43413/", wsBaseUrl: "ws://127.0.0.1:43413/" });
     expect(() => parseT3PairingLink("")).toThrowError(expect.objectContaining({ _tag: "RemoteBackendUrlMissingError" }));
   });
 });
