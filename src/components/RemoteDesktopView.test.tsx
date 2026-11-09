@@ -228,6 +228,27 @@ describe("viewer input and frames", () => {
     expect(fireEvent.contextMenu(canvas, { cancelable: true })).toBe(false);
   });
 
+  it("contains focus for both grants and restores the previous focus", () => {
+    const before = document.createElement("button");
+    document.body.append(before);
+    before.focus();
+    const { unmount } = render(
+      <RemoteDesktopView view={view("view-only")} frames={createFrameBus()} onClose={() => {}} />,
+    );
+    const dialog = screen.getByRole("dialog");
+    const canvas = screen.getByLabelText("Remote screen");
+    const end = screen.getByText("End");
+    expect(dialog).toHaveAttribute("aria-modal", "true");
+    expect(document.activeElement).toBe(canvas);
+    fireEvent.keyDown(canvas, { key: "Tab" });
+    expect(document.activeElement).toBe(end);
+    fireEvent.keyDown(end, { key: "Tab", shiftKey: true });
+    expect(document.activeElement).toBe(canvas);
+    unmount();
+    expect(document.activeElement).toBe(before);
+    before.remove();
+  });
+
   it("End button calls desk_end and status is live", async () => {
     const end = vi.fn(() => null);
     mockCommands({ desk_end: end });
@@ -324,6 +345,30 @@ describe("held input", () => {
       }),
     );
     expect(send).toHaveBeenCalledTimes(3);
+  });
+
+  it("releases held input under its originating session when the viewer changes", async () => {
+    const send = vi.fn(() => null);
+    mockCommands({ desk_send_input: send });
+    const frames = createFrameBus();
+    const { rerender } = render(
+      <RemoteDesktopView view={ev({ role: "viewer", state: "active", mode: "control" })} frames={frames} onClose={() => {}} />,
+    );
+    const canvas = screen.getByLabelText("Remote screen");
+    fireEvent.keyDown(canvas, { code: "ControlLeft" });
+    rerender(
+      <RemoteDesktopView view={ev({ session: "s2", role: "viewer", state: "active", mode: "control" })} frames={frames} onClose={() => {}} />,
+    );
+    await waitFor(() =>
+      expect(send).toHaveBeenCalledWith({
+        session: "s1",
+        event: { kind: "key", code: "ControlLeft", down: false },
+      }),
+    );
+    expect(send).not.toHaveBeenCalledWith(expect.objectContaining({
+      session: "s2",
+      event: { kind: "key", code: "ControlLeft", down: false },
+    }));
   });
 
   it("releases a held key when the canvas loses focus", async () => {

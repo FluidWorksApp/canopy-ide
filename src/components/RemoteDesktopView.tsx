@@ -143,13 +143,16 @@ export function RemoteDesktopView({
   onClose: () => void;
 }) {
   const canvas = useRef<HTMLCanvasElement>(null);
+  const viewer = useRef<HTMLDivElement>(null);
   const size = useRef({ w: 0, h: 0 });
   const paintedSeq = useRef(-1);
   const focusedSession = useRef<string | null>(null);
+  const restoreFocus = useRef<HTMLElement | null>(null);
   const moveGate = useRef(createThrottle(MOVE_GAP_MS));
   const sessionRef = useRef(view.session);
   sessionRef.current = view.session;
   const held = useRef(new Set<string>());
+  const heldSession = useRef<string | null>(null);
   const control = canSendInput(view);
   const live = view.state !== "ended";
 
@@ -214,10 +217,15 @@ export function RemoteDesktopView({
   );
 
   useEffect(() => {
-    if (!control || focusedSession.current === view.session) return;
+    restoreFocus.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    return () => restoreFocus.current?.focus({ preventScroll: true });
+  }, []);
+
+  useEffect(() => {
+    if (focusedSession.current === view.session) return;
     focusedSession.current = view.session;
     canvas.current?.focus({ preventScroll: true });
-  }, [control, view.session]);
+  }, [view.session]);
 
   // React delegates wheel events through a passive root listener. A native,
   // non-passive target listener is required to stop the workbench from
@@ -242,18 +250,22 @@ export function RemoteDesktopView({
   }, []);
 
   const releaseHeld = useCallback(() => {
-    for (const k of held.current) {
+    const session = heldSession.current;
+    const inputs = [...held.current];
+    held.current.clear();
+    heldSession.current = null;
+    if (!session) return;
+    for (const k of inputs) {
       if (k.startsWith("b:")) {
-        send(sessionRef.current, {
+        send(session, {
           kind: "mouse-button",
           button: k.slice(2) as Extract<InputEvent, { kind: "mouse-button" }>["button"],
           down: false,
         });
       } else {
-        send(sessionRef.current, { kind: "key", code: k.slice(2), down: false });
+        send(session, { kind: "key", code: k.slice(2), down: false });
       }
     }
-    held.current.clear();
   }, []);
 
   const releaseMouseButton = useCallback(
@@ -261,10 +273,16 @@ export function RemoteDesktopView({
       const heldButton = `b:${button}`;
       if (!held.current.has(heldButton)) return;
       held.current.delete(heldButton);
-      send(sessionRef.current, { kind: "mouse-button", button, down: false });
+      const session = heldSession.current;
+      if (held.current.size === 0) heldSession.current = null;
+      if (session) send(session, { kind: "mouse-button", button, down: false });
     },
     [],
   );
+
+  useEffect(() => {
+    if (held.current.size && (heldSession.current !== view.session || !control)) releaseHeld();
+  }, [control, releaseHeld, view.session]);
 
   // Pointer capture keeps a drag owned by the canvas. The window listener is
   // the fallback for WebViews that release capture over native chrome, and the
@@ -287,17 +305,46 @@ export function RemoteDesktopView({
 
   const emit = (event: InputEvent) => {
     if (event.kind === "key") {
-      if (event.down) held.current.add(`k:${event.code}`);
-      else held.current.delete(`k:${event.code}`);
+      if (event.down) {
+        held.current.add(`k:${event.code}`);
+        heldSession.current = view.session;
+      } else held.current.delete(`k:${event.code}`);
     } else if (event.kind === "mouse-button") {
-      if (event.down) held.current.add(`b:${event.button}`);
-      else held.current.delete(`b:${event.button}`);
+      if (event.down) {
+        held.current.add(`b:${event.button}`);
+        heldSession.current = view.session;
+      } else held.current.delete(`b:${event.button}`);
     }
+    if (held.current.size === 0) heldSession.current = null;
     if (control) send(view.session, event);
   };
 
+  const containFocus = (event: React.KeyboardEvent) => {
+    if (event.key !== "Tab" || !viewer.current) return;
+    const focusable = [...viewer.current.querySelectorAll<HTMLElement>(
+      'button:not([disabled]),[href],input:not([disabled]),select:not([disabled]),textarea:not([disabled]),[tabindex]:not([tabindex="-1"])',
+    )];
+    if (focusable.length === 0) return;
+    const first = focusable[0];
+    const last = focusable[focusable.length - 1];
+    if (event.shiftKey && document.activeElement === first) {
+      event.preventDefault();
+      last.focus();
+    } else if (!event.shiftKey && document.activeElement === last) {
+      event.preventDefault();
+      first.focus();
+    }
+  };
+
   return (
-    <div className="desk-viewer" role="dialog" aria-label={`Remote desktop: ${view.peer_name}`}>
+    <div
+      ref={viewer}
+      className="desk-viewer"
+      role="dialog"
+      aria-modal="true"
+      aria-label={`Remote desktop: ${view.peer_name}`}
+      onKeyDown={containFocus}
+    >
       <div className="desk-viewer-bar">
         <strong>{view.peer_name}</strong>
         <span className={`desk-badge ${control ? "control" : "view"}`}>

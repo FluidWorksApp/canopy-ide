@@ -784,7 +784,7 @@ impl HeldInput {
         Self::default()
     }
 
-    /// Record an event that is about to be (or was) applied.
+    /// Record an event after it was applied successfully.
     pub fn note(&mut self, event: &InputEvent) {
         match event {
             InputEvent::Key { code, down: true } => {

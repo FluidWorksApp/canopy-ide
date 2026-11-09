@@ -21,9 +21,9 @@ use canopy_core::desk::{
 use serde::Serialize;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{sync_channel, RecvTimeoutError, SyncSender};
-use std::sync::{Arc, Mutex};
-use std::thread;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::sync::{Arc, Condvar, Mutex};
+use std::thread::{self, JoinHandle};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tauri::{AppHandle, Emitter, Manager, State};
 
 fn now_ms() -> u64 {
@@ -272,6 +272,20 @@ mod native {
 struct Run {
     alive: Arc<AtomicBool>,
     input_tx: Option<SyncSender<InputEvent>>,
+    input_done: Option<Arc<(Mutex<bool>, Condvar)>>,
+}
+
+type ExpiryTask = (String, Instant);
+
+#[derive(Default)]
+struct ExpiryState {
+    task: Option<ExpiryTask>,
+    stopped: bool,
+}
+
+struct ExpiryRun {
+    state: Arc<(Mutex<ExpiryState>, Condvar)>,
+    worker: JoinHandle<()>,
 }
 
 #[derive(Default)]
@@ -279,12 +293,18 @@ struct State_ {
     hub: DeskHub,
     peer_name: String,
     run: Option<Run>,
+    input_cleanups: Vec<Arc<(Mutex<bool>, Condvar)>>,
 }
 
 impl State_ {
     fn stop_run(&mut self) {
+        self.input_cleanups.retain(|done| !*done.0.lock().unwrap());
         if let Some(run) = self.run.take() {
             run.alive.store(false, Ordering::SeqCst);
+            drop(run.input_tx);
+            if let Some(done) = run.input_done {
+                self.input_cleanups.push(done);
+            }
         }
     }
 
@@ -295,20 +315,52 @@ impl State_ {
     }
 }
 
-#[derive(Default)]
 pub struct DeskManager {
     inner: Mutex<State_>,
+    expiry: Mutex<Option<ExpiryRun>>,
+}
+
+impl Default for DeskManager {
+    fn default() -> Self {
+        Self {
+            inner: Mutex::new(State_::default()),
+            expiry: Mutex::new(None),
+        }
+    }
+}
+
+fn wait_for_input_cleanup(cleanups: Vec<Arc<(Mutex<bool>, Condvar)>>) {
+    let deadline = Instant::now() + Duration::from_secs(2);
+    for done in cleanups {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            break;
+        }
+        let (lock, ready) = &*done;
+        let completed = lock.lock().unwrap();
+        let _ = ready
+            .wait_timeout_while(completed, remaining, |completed| !*completed)
+            .unwrap();
+    }
 }
 
 impl DeskManager {
     /// App exit: tell the peer, stop the threads. Called before the relay is
     /// torn down so the End can still be delivered.
     pub fn shutdown(&self, relay: &RelayManager) {
-        let info = {
+        let (info, input_cleanups) = {
             let mut g = self.inner.lock().unwrap();
             g.stop_run();
-            g.hub.end_all()
+            let input_cleanups = std::mem::take(&mut g.input_cleanups);
+            (g.hub.end_all(), input_cleanups)
         };
+        wait_for_input_cleanup(input_cleanups);
+        if let Some(expiry) = self.expiry.lock().unwrap().take() {
+            let (lock, wake) = &*expiry.state;
+            lock.lock().unwrap().stopped = true;
+            wake.notify_one();
+            let _ = expiry.worker.join();
+        }
         if let Some(info) = info {
             let _ = relay.send_desk(
                 &info.peer,
@@ -412,42 +464,80 @@ fn finish(app: &AppHandle, session: &str, reason: &str, notify_peer: bool) {
     emit(app, &info, &name, Some(reason.to_string()));
 }
 
-/// Start a one-shot timeout for a pending request. The state-machine check at
-/// wake-up is authoritative, so accepting the request or replacing it makes an
-/// old worker a no-op.
+/// Schedule expiry through one shared worker and one replaceable task slot.
+/// Request/End churn therefore cannot accumulate threads or queued timers.
 fn schedule_request_expiry(app: &AppHandle, session: String) {
-    let worker_app = app.clone();
-    let worker_session = session.clone();
-    let spawned = thread::Builder::new()
-        .name("desk-request-expiry".into())
-        .spawn(move || {
-            thread::sleep(Duration::from_millis(REQUEST_TTL_MS));
-            let mgr = worker_app.state::<DeskManager>();
-            let expired = {
-                let mut g = mgr.inner.lock().unwrap();
-                g.expire_request(&worker_session, now_ms())
-            };
-            let Some((info, name)) = expired else {
+    let mgr = app.state::<DeskManager>();
+    let mut expiry = mgr.expiry.lock().unwrap();
+    if expiry.is_none() {
+        let state = Arc::new((Mutex::new(ExpiryState::default()), Condvar::new()));
+        let worker_state = state.clone();
+        let worker_app = app.clone();
+        let spawned = thread::Builder::new()
+            .name("desk-request-expiry".into())
+            .spawn(move || loop {
+                let task = {
+                    let (lock, wake) = &*worker_state;
+                    let mut state = lock.lock().unwrap();
+                    loop {
+                        if state.stopped {
+                            return;
+                        }
+                        match state.task.as_ref() {
+                            None => state = wake.wait(state).unwrap(),
+                            Some((_, deadline)) => {
+                                let remaining = deadline.saturating_duration_since(Instant::now());
+                                if remaining.is_zero() {
+                                    break state.task.take();
+                                }
+                                state = wake.wait_timeout(state, remaining).unwrap().0;
+                            }
+                        }
+                    }
+                };
+                let Some((worker_session, _)) = task else {
+                    continue;
+                };
+                let mgr = worker_app.state::<DeskManager>();
+                let expired = {
+                    let mut g = mgr.inner.lock().unwrap();
+                    g.expire_request(&worker_session, now_ms())
+                };
+                let Some((info, name)) = expired else {
+                    continue;
+                };
+                let reason = "Request expired.";
+                let _ = worker_app.state::<RelayManager>().send_desk(
+                    &info.peer,
+                    &info.session,
+                    DeskBody::End {
+                        reason: reason.into(),
+                    },
+                );
+                emit(&worker_app, &info, &name, Some(reason.into()));
+            });
+        match spawned {
+            Ok(worker) => *expiry = Some(ExpiryRun { state, worker }),
+            Err(error) => {
+                drop(expiry);
+                finish(
+                    app,
+                    &session,
+                    &format!("Couldn't schedule request expiry: {error}"),
+                    true,
+                );
                 return;
-            };
-            let reason = "Request expired.";
-            let _ = worker_app.state::<RelayManager>().send_desk(
-                &info.peer,
-                &info.session,
-                DeskBody::End {
-                    reason: reason.into(),
-                },
-            );
-            emit(&worker_app, &info, &name, Some(reason.into()));
-        });
-    if let Err(error) = spawned {
-        finish(
-            app,
-            &session,
-            &format!("Couldn't schedule request expiry: {error}"),
-            true,
-        );
+            }
+        }
     }
+    let state = expiry.as_ref().unwrap().state.clone();
+    drop(expiry);
+    let (lock, wake) = &*state;
+    lock.lock().unwrap().task = Some((
+        session,
+        Instant::now() + Duration::from_millis(REQUEST_TTL_MS),
+    ));
+    wake.notify_one();
 }
 
 // ---------- relay entry points ----------
@@ -591,6 +681,11 @@ pub async fn desk_request(
     Ok(session)
 }
 
+fn publish_active_then_start(publish: impl FnOnce(), start: impl FnOnce()) {
+    publish();
+    start();
+}
+
 /// Target: the local user's decision. Accepting here is the only way capture
 /// or input injection can ever start.
 #[tauri::command]
@@ -632,7 +727,7 @@ pub async fn desk_respond(
         return Err(DeskError::Expired.to_string());
     }
 
-    let (body, info, peer, requested, name, alive, rx) = {
+    let (body, info, peer, requested, name, alive, rx, input_done) = {
         let mut g = desk.inner.lock().unwrap();
         // Read the peer and requested mode first: a denial clears the session
         // from the hub.
@@ -651,11 +746,13 @@ pub async fn desk_respond(
         let info = g.hub.current();
         let mut alive = None;
         let mut rx = None;
+        let mut input_done = None;
         if let (DeskBody::Accept { mode: granted }, Some(_)) = (&body, &info) {
             let flag = Arc::new(AtomicBool::new(true));
             let tx = if *granted == Mode::Control {
                 let (tx, r) = sync_channel::<InputEvent>(256);
                 rx = Some(r);
+                input_done = Some(Arc::new((Mutex::new(false), Condvar::new())));
                 Some(tx)
             } else {
                 None
@@ -663,10 +760,11 @@ pub async fn desk_respond(
             g.run = Some(Run {
                 alive: flag.clone(),
                 input_tx: tx,
+                input_done: input_done.clone(),
             });
             alive = Some(flag);
         }
-        (body, info, peer, requested, name, alive, rx)
+        (body, info, peer, requested, name, alive, rx, input_done)
     };
 
     let sent = relay.send_desk(&peer, &session, body.clone());
@@ -677,13 +775,19 @@ pub async fn desk_respond(
                 finish(&app, &session, &e, false);
                 return Err(e);
             }
-            if let Some(alive) = alive {
-                spawn_capture(&app, session.clone(), peer.clone(), alive.clone());
-                if let Some(rx) = rx {
-                    spawn_input(&app, session.clone(), alive, rx);
-                }
-            }
-            emit(&app, &info, &name, None);
+            // Publish active before workers can report asynchronous startup
+            // failures. Any failure then emits ended as the final state.
+            publish_active_then_start(
+                || emit(&app, &info, &name, None),
+                || {
+                    if let Some(alive) = alive {
+                        spawn_capture(&app, session.clone(), peer.clone(), alive.clone());
+                        if let (Some(rx), Some(done)) = (rx, input_done) {
+                            spawn_input(&app, session.clone(), alive, rx, done);
+                        }
+                    }
+                },
+            );
             Ok(())
         }
         _ => {
@@ -816,18 +920,42 @@ fn spawn_capture(app: &AppHandle, session: String, peer: String, alive: Arc<Atom
     }
 }
 
+/// Applies one input and records held state only after the OS accepts it.
+fn apply_tracked_input(
+    sink: &mut dyn InputSink,
+    held: &mut canopy_core::desk::HeldInput,
+    event: &InputEvent,
+) -> Result<(), String> {
+    sink.apply(event)?;
+    held.note(event);
+    Ok(())
+}
+
+struct InputCompletion(Arc<(Mutex<bool>, Condvar)>);
+
+impl Drop for InputCompletion {
+    fn drop(&mut self) {
+        let (lock, wake) = &*self.0;
+        *lock.lock().unwrap() = true;
+        wake.notify_all();
+    }
+}
+
 /// Target input thread: applies validated events through the OS sink.
 fn spawn_input(
     app: &AppHandle,
     session: String,
     alive: Arc<AtomicBool>,
     rx: std::sync::mpsc::Receiver<InputEvent>,
+    done: Arc<(Mutex<bool>, Condvar)>,
 ) {
     let app = app.clone();
+    let worker_done = done.clone();
     let spawned = thread::Builder::new().name("desk-input".into()).spawn({
         let app = app.clone();
         let session = session.clone();
         move || {
+            let _completion = InputCompletion(worker_done);
             let mut sink = match native::new_sink() {
                 Ok(s) => s,
                 Err(e) => return finish(&app, &session, &e, true),
@@ -841,8 +969,7 @@ fn spawn_input(
                         if !alive.load(Ordering::SeqCst) {
                             break;
                         }
-                        held.note(&event);
-                        if let Err(e) = sink.apply(&event) {
+                        if let Err(e) = apply_tracked_input(&mut *sink, &mut held, &event) {
                             for up in held.release_all() {
                                 let _ = sink.apply(&up);
                             }
@@ -861,6 +988,7 @@ fn spawn_input(
         }
     });
     if let Err(e) = spawned {
+        drop(InputCompletion(done));
         finish(
             &app,
             &session,
@@ -1011,6 +1139,82 @@ mod tests {
             .expire_request("new", REQUEST_TTL_MS.saturating_mul(2))
             .expect("replacement expires at its own exact boundary");
         assert_eq!(ended.session, "new");
+    }
+
+    #[test]
+    fn desk_active_event_precedes_worker_start_failure() {
+        let order = Mutex::new(Vec::new());
+        publish_active_then_start(
+            || order.lock().unwrap().push("active"),
+            || order.lock().unwrap().push("ended"),
+        );
+        assert_eq!(*order.lock().unwrap(), ["active", "ended"]);
+    }
+
+    #[test]
+    fn desk_expiry_scheduler_keeps_only_the_latest_request() {
+        let mut state = ExpiryState::default();
+        state.task = Some(("old".into(), Instant::now()));
+        state.task = Some(("new".into(), Instant::now()));
+        assert_eq!(state.task.as_ref().map(|task| task.0.as_str()), Some("new"));
+    }
+
+    struct FailingReleaseSink;
+
+    impl InputSink for FailingReleaseSink {
+        fn apply(&mut self, event: &InputEvent) -> Result<(), String> {
+            match event {
+                InputEvent::Key { down: false, .. }
+                | InputEvent::MouseButton { down: false, .. } => Err("release rejected".into()),
+                _ => Ok(()),
+            }
+        }
+    }
+
+    #[test]
+    fn desk_failed_key_and_button_releases_remain_tracked_for_cleanup() {
+        let cases = [
+            (
+                InputEvent::Key {
+                    code: "ControlLeft".into(),
+                    down: true,
+                },
+                InputEvent::Key {
+                    code: "ControlLeft".into(),
+                    down: false,
+                },
+            ),
+            (
+                InputEvent::MouseButton {
+                    button: canopy_core::desk::Button::Left,
+                    down: true,
+                },
+                InputEvent::MouseButton {
+                    button: canopy_core::desk::Button::Left,
+                    down: false,
+                },
+            ),
+        ];
+        for (down, up) in cases {
+            let mut sink = FailingReleaseSink;
+            let mut held = canopy_core::desk::HeldInput::new();
+            apply_tracked_input(&mut sink, &mut held, &down).unwrap();
+            assert!(apply_tracked_input(&mut sink, &mut held, &up).is_err());
+            assert_eq!(held.release_all(), vec![up]);
+        }
+    }
+
+    #[test]
+    fn desk_shutdown_barrier_waits_for_input_cleanup_completion() {
+        let done = Arc::new((Mutex::new(false), Condvar::new()));
+        let worker_done = done.clone();
+        let worker = thread::spawn(move || {
+            thread::sleep(Duration::from_millis(20));
+            drop(InputCompletion(worker_done));
+        });
+        wait_for_input_cleanup(vec![done.clone()]);
+        assert!(*done.0.lock().unwrap());
+        worker.join().unwrap();
     }
 
     /// The view-only guarantee end to end: the sink never sees an event.
