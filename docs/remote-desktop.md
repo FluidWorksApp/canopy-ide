@@ -74,11 +74,11 @@ teammate with a problem, not for replacing a remote workstation.
 | --- | --- |
 | A relay member spoofs another as viewer | The host re-stamps `from` from the authenticated link. Members cannot choose it. |
 | A member broadcasts frames or input to others | `Frame::Desk` requires a single `to` and is never fanned out. |
-| Flooding the target with input | Per-link rate limit at the relay and a per-session input limiter in the core. |
+| Flooding the target with input | Per-link rate limit at the relay and a per-session input limiter in the core. The relay limiter counts messages, not bytes. |
 | Oversized or malformed frames | Validated before fan-out: frame cap 1.5 MiB base64, dimension cap, text cap, strict key allow list, normalized coordinates must be in 0..1. Unknown message kinds fail to parse and are dropped. |
 | Replayed or stale frames | Frame `seq` must strictly increase. |
 | Remote user types dangerous shortcuts | Keys outside the allow list are refused. Control is something the local user grants knowingly, and they can stop it instantly. |
-| Forgotten session | Sessions end on disconnect, relay stop and app exit. A pending request expires after 60 seconds on both sides and frees the session slot. |
+| Forgotten session | Sessions end on disconnect, relay stop and app exit. A pending request older than 60 seconds is dropped lazily, the next time a request or answer arrives, and can no longer be accepted. It frees the session slot then, not on a timer. |
 | Sniffing by other members or the network | Each link is SPAKE2 plus ChaCha20-Poly1305. |
 | The relay host | Encryption is per link, not end to end. The host decrypts and re-seals every message, so it can see the screen and can forge the sender. Only share with teams whose host you trust. |
 | Name lookalikes | Names are self-chosen. The consent dialog reminds you to accept only from someone you expect. |
@@ -100,6 +100,11 @@ keyboard. Only grant control to people you trust, and prefer view-only.
   enable it (Windows and macOS capture, input injection via enigo).
 - Primary display only, downscaled to at most 1600 px wide, about 8 fps and
   slower when sends back up.
+- A request to an unknown or departed peer is silently dropped by the host. The
+  viewer has no timer and stays in "Requested" until you press End.
+- There is no OS-level indicator of live control. The red banner lives inside the
+  Canopy window, so if the window is minimized or hidden the only signal is the
+  Notifications entry for the request.
 - Windows and macOS capture paths were compiled and exercised only through fakes
   in CI-less development. Test them on real machines before relying on them.
 
