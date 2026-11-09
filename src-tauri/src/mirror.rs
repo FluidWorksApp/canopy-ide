@@ -9,7 +9,8 @@
 //!   staged.patch    `git diff --cached --binary`
 //!   unstaged.patch  `git diff --binary`
 //!   files.tgz       untracked, non-ignored files; ignored env files only when
-//!                   the person opted in
+//!                   the person opted in; ignored files the person picked one
+//!                   by one (execution_mirror_candidates lists them)
 //! and uploads them to /workspace/.canopy-mirror/<id>/, where the workspace's
 //! mirror job (packages/remote-host/mirror-apply.mjs) applies them.
 use crate::client_mode::{execution_remote_get, RemoteConnectionState};
@@ -25,6 +26,25 @@ const FILES_MAX: usize = 5000;
 const BUNDLE_MAX_BYTES: u64 = 1024 * 1024 * 1024;
 const ENV_MAX_BYTES: u64 = 1024 * 1024;
 const ENV_MAX_COUNT: usize = 50;
+const CANDIDATES_MAX: usize = 500;
+const CANDIDATE_FILE_MAX_BYTES: u64 = 10 * 1024 * 1024;
+const CANDIDATES_MAX_BYTES: u64 = 100 * 1024 * 1024;
+const EXTRA_MAX: usize = 200;
+/// Folders that are rebuilt or reinstalled remotely, never worth copying.
+const HEAVY_DIRS: [&str; 12] = [
+    "node_modules",
+    "target",
+    ".git",
+    "dist",
+    "build",
+    ".venv",
+    "venv",
+    "__pycache__",
+    ".cache",
+    ".next",
+    ".turbo",
+    ".gradle",
+];
 const ARTIFACTS: [&str; 4] = [
     "commits.bundle",
     "staged.patch",
@@ -248,6 +268,164 @@ fn env_files(top: &Path) -> Vec<(String, u64)> {
         .collect()
 }
 
+fn in_heavy_dir(name: &str) -> bool {
+    name.split('/').any(|part| HEAVY_DIRS.contains(&part))
+}
+
+/// env/secret, config, data or other, from the file name alone.
+fn categorize(name: &str) -> &'static str {
+    if looks_secret(name) {
+        return "secret";
+    }
+    let base = name.rsplit('/').next().unwrap_or(name).to_ascii_lowercase();
+    let ext = base.rsplit_once('.').map(|(_, e)| e).unwrap_or("");
+    if base.starts_with(".env")
+        || base.contains("config")
+        || base.contains("settings")
+        || ["json", "yaml", "yml", "toml", "ini", "conf", "cfg"].contains(&ext)
+    {
+        "config"
+    } else if ["db", "sqlite", "sqlite3", "csv", "sql", "parquet", "jsonl", "tsv"].contains(&ext) {
+        "data"
+    } else {
+        "other"
+    }
+}
+
+#[derive(Debug, serde::Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+struct Candidate {
+    path: String,
+    size: u64,
+    category: &'static str,
+}
+
+/// Files inside a collapsed ignored folder (`--directory` prints `dir/`),
+/// bounded so a huge cache cannot stall the listing.
+fn expand_dir(top: &Path, dir: &str, out: &mut Vec<String>, budget: &mut usize) {
+    let Ok(entries) = std::fs::read_dir(top.join(dir)) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        if *budget == 0 {
+            return;
+        }
+        let Some(name) = entry.file_name().to_str().map(String::from) else {
+            continue;
+        };
+        let rel = format!("{}{}", dir, name);
+        if HEAVY_DIRS.contains(&name.as_str()) {
+            continue;
+        }
+        match entry.file_type() {
+            Ok(t) if t.is_file() => {
+                *budget -= 1;
+                out.push(rel);
+            }
+            Ok(t) if t.is_dir() && rel.matches('/').count() < 4 => {
+                expand_dir(top, &format!("{rel}/"), out, budget)
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Ignored files that may be worth carrying along, with sizes only. Heavy
+/// reinstallable folders are skipped; output is capped by count and size.
+fn ignored_candidates(top: &Path) -> Vec<Candidate> {
+    let names = run(git(top).args([
+        "ls-files",
+        "--others",
+        "--ignored",
+        "--exclude-standard",
+        "--directory",
+        "-z",
+    ]))
+    .unwrap_or_default();
+    let mut paths = Vec::new();
+    let mut budget = 2000usize;
+    for name in names.split('\0').filter(|n| !n.is_empty()) {
+        if in_heavy_dir(name) {
+            continue;
+        }
+        if name.ends_with('/') {
+            expand_dir(top, name, &mut paths, &mut budget);
+        } else {
+            paths.push(name.to_string());
+        }
+    }
+    let joined = paths.join("\0");
+    let mut found: Vec<Candidate> = regular_files(top, &joined)
+        .into_iter()
+        .filter(|(name, size)| !in_heavy_dir(name) && *size <= CANDIDATE_FILE_MAX_BYTES)
+        .map(|(path, size)| Candidate {
+            category: categorize(&path),
+            path,
+            size,
+        })
+        .collect();
+    let rank = |c: &str| ["secret", "config", "data", "other"].iter().position(|x| *x == c);
+    found.sort_by(|a, b| (rank(a.category), &a.path).cmp(&(rank(b.category), &b.path)));
+    let mut total = 0u64;
+    found.retain(|c| {
+        total += c.size;
+        total <= CANDIDATES_MAX_BYTES
+    });
+    found.truncate(CANDIDATES_MAX);
+    found
+}
+
+/// Validate renderer-chosen repo-relative paths: relative, no `..`, inside the
+/// repository, regular files within limits, and really ignored or untracked
+/// (tracked files already arrive with the clone; nothing else may be read).
+fn validate_extra_files(top: &Path, names: &[String]) -> Result<Vec<(String, u64)>, String> {
+    if names.len() > EXTRA_MAX {
+        return Err(format!("Choose at most {EXTRA_MAX} extra files"));
+    }
+    let canonical_top = std::fs::canonicalize(top).map_err(|_| "Repository unavailable")?;
+    let mut seen = std::collections::BTreeSet::new();
+    let mut out = Vec::new();
+    for name in names {
+        let bad = name.is_empty()
+            || name.starts_with('/')
+            || name.contains('\\')
+            || name.contains('\0')
+            || name.contains('\n')
+            || name.split('/').any(|p| p.is_empty() || p == "." || p == ".." || p == ".git");
+        if bad || Path::new(name).is_absolute() {
+            return Err(format!("Invalid file path: {}", name.chars().take(100).collect::<String>()));
+        }
+        if !seen.insert(name.clone()) {
+            continue;
+        }
+        let full = top.join(name);
+        let meta = std::fs::symlink_metadata(&full).map_err(|_| format!("{name} no longer exists"))?;
+        if !meta.file_type().is_file() {
+            return Err(format!("{name} is not a regular file"));
+        }
+        if meta.len() > CANDIDATE_FILE_MAX_BYTES {
+            return Err(format!("{name} is larger than 10 MB"));
+        }
+        // A parent that is a symlink would escape the repository.
+        let parent = std::fs::canonicalize(full.parent().unwrap_or(top))
+            .map_err(|_| format!("{name} is unavailable"))?;
+        if !parent.starts_with(&canonical_top) {
+            return Err(format!("{name} is outside the repository"));
+        }
+        // Without --exclude-standard this lists untracked AND ignored files,
+        // and never a tracked one.
+        let listed = run(git(top)
+            .args(["ls-files", "--others", "-z", "--"])
+            .arg(format!(":(literal){name}")))
+        .unwrap_or_default();
+        if !listed.split('\0').any(|n| n == name) {
+            return Err(format!("{name} is tracked by git, so it comes with the clone"));
+        }
+        out.push((name.clone(), meta.len()));
+    }
+    Ok(out)
+}
+
 fn to_file(mut cmd: Command, out: &Path) -> Result<bool, String> {
     let file = std::fs::File::create(out).map_err(|_| "Cannot prepare setup files")?;
     let status = cmd
@@ -266,16 +444,91 @@ struct Prepared {
     unstaged: bool,
     files: usize,
     env_files: usize,
+    extra_files: usize,
     skipped: Vec<String>,
     /// Name -> size of each artifact written, so the workspace can refuse to
     /// apply a setup whose upload went elsewhere or was cut short.
     artifacts: std::collections::BTreeMap<String, u64>,
 }
 
+/// Tar `files` (relative to `top`) into files.tgz, then drop empty artifacts
+/// and record the sizes of the rest.
+fn package_files(
+    top: &Path,
+    files: Vec<(String, u64)>,
+    dir: &Path,
+    mut prepared: Prepared,
+) -> Result<Prepared, String> {
+    if !files.is_empty() {
+        let mut cmd = Command::new(crate::procenv::resolve_command("tar"));
+        cmd.no_console_window();
+        // macOS tar would otherwise add AppleDouble `._` files and xattrs.
+        cmd.current_dir(top).env("COPYFILE_DISABLE", "1");
+        #[cfg(target_os = "macos")]
+        cmd.arg("--no-xattrs");
+        cmd.args(["--no-recursion", "--null", "-czf"])
+            .arg(dir.join("files.tgz"))
+            .args(["-T", "-"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        let mut child = cmd.spawn().map_err(|_| "tar is unavailable on this Mac")?;
+        let list: Vec<u8> = files
+            .iter()
+            .flat_map(|(name, _)| name.bytes().chain(std::iter::once(0)))
+            .collect();
+        child
+            .stdin
+            .take()
+            .ok_or("Cannot package new files")?
+            .write_all(&list)
+            .map_err(|_| "Cannot package new files")?;
+        if !child
+            .wait()
+            .map_err(|_| "Cannot package new files")?
+            .success()
+        {
+            return Err("Could not package this repository's new files".into());
+        }
+    }
+    for name in ARTIFACTS {
+        let path = dir.join(name);
+        if std::fs::metadata(&path)
+            .map(|m| m.len() == 0)
+            .unwrap_or(false)
+        {
+            let _ = std::fs::remove_file(path);
+        }
+    }
+    for name in ARTIFACTS {
+        if let Ok(meta) = std::fs::metadata(dir.join(name)) {
+            prepared.artifacts.insert(name.to_string(), meta.len());
+        }
+    }
+    Ok(prepared)
+}
+
 /// Write the artifacts for `state` into `dir`; empty ones are removed.
 fn prepare(state: &RepoState, include_env: bool, dir: &Path) -> Result<Prepared, String> {
+    prepare_with(state, include_env, &[], false, dir)
+}
+
+/// `extra` are validated user-chosen ignored files added to files.tgz.
+/// `files_only` packages just those, for a project already on the remote.
+fn prepare_with(
+    state: &RepoState,
+    include_env: bool,
+    extra: &[(String, u64)],
+    files_only: bool,
+    dir: &Path,
+) -> Result<Prepared, String> {
     let top = &state.top;
     let mut prepared = Prepared::default();
+    if files_only {
+        prepared.extra_files = extra.len();
+        prepared.files = extra.len();
+        return package_files(top, extra.to_vec(), dir, prepared);
+    }
     if state.unpushed > 0 {
         let bundle = dir.join("commits.bundle");
         let mut cmd = git(top);
@@ -343,52 +596,13 @@ fn prepare(state: &RepoState, include_env: bool, dir: &Path) -> Result<Prepared,
             if found.secrets.len() == 1 { "file" } else { "files" }
         ));
     }
-    if !files.is_empty() {
-        let mut cmd = Command::new(crate::procenv::resolve_command("tar"));
-        cmd.no_console_window();
-        // macOS tar would otherwise add AppleDouble `._` files and xattrs.
-        cmd.current_dir(top).env("COPYFILE_DISABLE", "1");
-        #[cfg(target_os = "macos")]
-        cmd.arg("--no-xattrs");
-        cmd.args(["--no-recursion", "--null", "-czf"])
-            .arg(dir.join("files.tgz"))
-            .args(["-T", "-"])
-            .stdin(Stdio::piped())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null());
-        let mut child = cmd.spawn().map_err(|_| "tar is unavailable on this Mac")?;
-        let list: Vec<u8> = files
-            .iter()
-            .flat_map(|(name, _)| name.bytes().chain(std::iter::once(0)))
-            .collect();
-        child
-            .stdin
-            .take()
-            .ok_or("Cannot package new files")?
-            .write_all(&list)
-            .map_err(|_| "Cannot package new files")?;
-        if !child
-            .wait()
-            .map_err(|_| "Cannot package new files")?
-            .success()
-        {
-            return Err("Could not package this repository's new files".into());
+    for item in extra {
+        if !files.iter().any(|(n, _)| n == &item.0) {
+            files.push(item.clone());
+            prepared.extra_files += 1;
         }
     }
-    for name in ARTIFACTS {
-        let path = dir.join(name);
-        if std::fs::metadata(&path)
-            .map(|m| m.len() == 0)
-            .unwrap_or(false)
-        {
-            let _ = std::fs::remove_file(path);
-        }
-    }
-    for name in ARTIFACTS {
-        if let Ok(meta) = std::fs::metadata(dir.join(name)) {
-            prepared.artifacts.insert(name.to_string(), meta.len());
-        }
-    }
+    prepared = package_files(top, files, dir, prepared)?;
     if state.stashes > 0 {
         prepared.skipped.push(format!(
             "{} stash entries stayed on this Mac",
@@ -456,6 +670,27 @@ pub async fn execution_mirror_inspect() -> Result<Vec<serde_json::Value>, String
     .map_err(|_| "Local project inspection failed".to_string())
 }
 
+/// Ignored files the person may choose to carry to the remote, for one
+/// component. Names, sizes and categories only; never file content.
+#[tauri::command]
+pub async fn execution_mirror_candidates(
+    project_id: String,
+    component_id: String,
+) -> Result<serde_json::Value, String> {
+    let component = local_components()
+        .await?
+        .into_iter()
+        .find(|c| c.project_id == project_id && c.component_id == component_id)
+        .ok_or("This project is no longer on this Mac")?;
+    tauri::async_runtime::spawn_blocking(move || -> Result<_, String> {
+        let repo = inspect_repo(Path::new(&component.path))?;
+        let files = ignored_candidates(&repo.top);
+        Ok(serde_json::json!({ "relative": repo.relative, "files": files }))
+    })
+    .await
+    .map_err(|_| "Local project inspection failed".to_string())?
+}
+
 /// Package one component's repository state and upload it for the
 /// workspace's `mirror_apply_start`. `id` names the remote staging folder.
 #[tauri::command]
@@ -466,6 +701,8 @@ pub async fn execution_mirror_send(
     project_id: String,
     component_id: String,
     include_env: bool,
+    extra_files: Option<Vec<String>>,
+    files_only: Option<bool>,
 ) -> Result<serde_json::Value, String> {
     if !valid_id(&id) {
         return Err("Invalid setup identifier".into());
@@ -493,7 +730,14 @@ pub async fn execution_mirror_send(
     let work = dir.clone();
     let (repo, prepared) = tauri::async_runtime::spawn_blocking(move || -> Result<_, String> {
         let repo = inspect_repo(Path::new(&component.path))?;
-        let prepared = prepare(&repo, include_env, &work)?;
+        let extra = validate_extra_files(&repo.top, &extra_files.unwrap_or_default())?;
+        let prepared = prepare_with(
+            &repo,
+            include_env,
+            &extra,
+            files_only.unwrap_or(false),
+            &work,
+        )?;
         Ok((repo, prepared))
     })
     .await
@@ -724,6 +968,95 @@ mod tests {
             listing(&with),
             vec![".env.example", ".env.local", "readme.md", "server.pem"]
         );
+        std::fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn candidates_list_useful_ignored_files_without_heavy_folders() {
+        let base = fixture("candidates");
+        let mac = base.join("mac");
+        std::fs::write(
+            mac.join(".gitignore"),
+            ".env\nnode_modules\nlocal/\n*.sqlite\n",
+        )
+        .unwrap();
+        std::fs::write(mac.join(".env"), "SECRET=1\n").unwrap();
+        std::fs::write(mac.join("dev.sqlite"), "data").unwrap();
+        std::fs::create_dir_all(mac.join("local")).unwrap();
+        std::fs::write(mac.join("local/settings.json"), "{}").unwrap();
+        std::fs::create_dir_all(mac.join("node_modules/pkg")).unwrap();
+        std::fs::write(mac.join("node_modules/pkg/a.js"), "x").unwrap();
+        let found = ignored_candidates(&mac);
+        let summary: Vec<_> = found.iter().map(|c| (c.path.as_str(), c.category)).collect();
+        assert_eq!(
+            summary,
+            vec![
+                (".env", "secret"),
+                ("local/settings.json", "config"),
+                ("dev.sqlite", "data")
+            ]
+        );
+        assert_eq!(found[0].size, 9);
+        std::fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn extra_files_must_be_safe_ignored_regular_files() {
+        let base = fixture("extras");
+        let mac = base.join("mac");
+        std::fs::write(mac.join(".env"), "A=1\n").unwrap();
+        std::fs::write(mac.join("secret.txt"), "outside\n").unwrap();
+        let top = inspect_repo(&mac).unwrap().top;
+        let ok = |n: &str| validate_extra_files(&top, &[n.to_string()]);
+        assert_eq!(ok(".env").unwrap(), vec![(".env".to_string(), 4)]);
+        // Untracked (not ignored) is fine too.
+        assert!(ok("secret.txt").is_ok());
+        for bad in ["/etc/passwd", "../x", "a/../.env", "", ".git/config", "app.js", "missing", "a\\b"] {
+            assert!(ok(bad).is_err(), "{bad} should be refused");
+        }
+        std::fs::create_dir_all(mac.join("dir")).unwrap();
+        assert!(ok("dir").is_err());
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink("/etc/hosts", mac.join("link")).unwrap();
+            assert!(ok("link").is_err());
+        }
+        let many: Vec<String> = (0..=EXTRA_MAX).map(|i| format!("f{i}")).collect();
+        assert!(validate_extra_files(&top, &many).is_err());
+        std::fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn chosen_ignored_files_are_packaged_and_files_only_skips_the_rest() {
+        let base = fixture("extra-pack");
+        let mac = base.join("mac");
+        std::fs::write(mac.join("dev.sqlite"), "data").unwrap();
+        std::fs::write(mac.join(".gitignore"), ".env\nnode_modules\n*.sqlite\n").unwrap();
+        std::fs::write(mac.join("app.js"), "one\nchanged\n").unwrap();
+        let state = inspect_repo(&mac).unwrap();
+        let extra = validate_extra_files(&state.top, &["dev.sqlite".to_string()]).unwrap();
+        let listing = |dir: &Path| {
+            let out = Command::new(crate::procenv::resolve_command("tar"))
+                .arg("-tzf")
+                .arg(dir.join("files.tgz"))
+                .output()
+                .unwrap();
+            String::from_utf8_lossy(&out.stdout).lines().map(String::from).collect::<Vec<_>>()
+        };
+        let full = base.join("full");
+        std::fs::create_dir_all(&full).unwrap();
+        let prepared = prepare_with(&state, false, &extra, false, &full).unwrap();
+        assert_eq!(prepared.extra_files, 1);
+        assert!(prepared.unstaged);
+        assert_eq!(listing(&full), vec!["dev.sqlite"]);
+
+        let only = base.join("only");
+        std::fs::create_dir_all(&only).unwrap();
+        let prepared = prepare_with(&state, false, &extra, true, &only).unwrap();
+        assert!(!prepared.unstaged && !prepared.staged && !prepared.commits);
+        assert!(!only.join("unstaged.patch").exists());
+        assert_eq!(listing(&only), vec!["dev.sqlite"]);
+        assert_eq!(prepared.artifacts.keys().collect::<Vec<_>>(), vec!["files.tgz"]);
         std::fs::remove_dir_all(base).unwrap();
     }
 

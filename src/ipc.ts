@@ -1426,6 +1426,10 @@ export interface RemoteUploadProgress {
 }
 export const remoteUpload=(destination:string,kind:'files'|'folder',id:string)=>invoke<RemoteUploadProgress>('execution_remote_upload',{destination,kind,id});
 export const remoteUploadCancel=(id:string)=>invoke<void>('execution_remote_upload_cancel',{id});
+export type MirrorCandidateCategory='secret'|'config'|'data'|'other';
+export interface MirrorCandidate{path:string;size:number;category:MirrorCandidateCategory}
+/** Ignored files of one local project component that could be copied to a remote. Names and sizes only. Runs on this Mac even in remote mode. */
+export const mirrorCandidates=(projectId:string,componentId:string)=>invokeDesktop<{relative:string;files:MirrorCandidate[]}>('execution_mirror_candidates',{projectId,componentId});
 export const onRemoteUploadProgress=(cb:(progress:RemoteUploadProgress)=>void)=>listen<RemoteUploadProgress>('remote:upload-progress',event=>cb(event.payload));
 
 export const fsWriteFile = (path: string, content: string) =>

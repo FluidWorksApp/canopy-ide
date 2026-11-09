@@ -219,3 +219,31 @@ test('a step that ignores SIGTERM is abandoned instead of hanging the job',async
   assert.equal(result.ok,false);assert.deepEqual(kills,['SIGTERM','SIGKILL']);assert.match(result.output,/Timed out/);
  }finally{await f.cleanup();}
 });
+
+test('files-only setup adds missing files to an existing project without touching its commits or changes',async()=>{
+ const f=await fixture();
+ try{
+  await writeFile(path.join(f.repo,'app.js'),'remote edit\n');
+  await writeFile(path.join(f.repo,'.env'),'KEEP=remote\n');
+  const before=git(f.repo,'rev-parse','HEAD').trim(),id=randomUUID(),staging=mirrorStaging(f.root,id);
+  await mkdir(staging,{recursive:true});
+  await writeFile(path.join(f.mac,'local.sqlite'),'db');
+  execFileSync('tar',['-czf',path.join(staging,'files.tgz'),'--null','-T','-'],{cwd:f.mac,input:['local.sqlite','.env'].join('\0')});
+  // No head, no branch: a files-only job needs neither.
+  await f.jobs.start({id,repo:'repo',filesOnly:true,install:false});
+  const status=await wait(f.jobs,id);
+  assert.equal(status.state,'complete',JSON.stringify(status));
+  assert.deepEqual(status.steps.map(s=>s.name),['files']);
+  assert.equal(git(f.repo,'rev-parse','HEAD').trim(),before);
+  assert.equal(await readFile(path.join(f.repo,'app.js'),'utf8'),'remote edit\n');
+  assert.equal(await readFile(path.join(f.repo,'local.sqlite'),'utf8'),'db');
+  // Existing files are never overwritten.
+  assert.equal(await readFile(path.join(f.repo,'.env'),'utf8'),'KEEP=remote\n');
+ }finally{await f.cleanup();}
+});
+
+test('a normal setup still requires a valid commit',async()=>{
+ const f=await fixture();
+ try{await assert.rejects(f.jobs.start({id:randomUUID(),repo:'repo',install:false}),/Invalid commit/);}
+ finally{await f.cleanup();}
+});

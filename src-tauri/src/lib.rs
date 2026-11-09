@@ -764,6 +764,7 @@ pub fn run() {
             t3_socket::t3_socket_close,
             mirror::execution_mirror_inspect,
             mirror::execution_mirror_send,
+            mirror::execution_mirror_candidates,
             remote_upload::execution_remote_upload,
             remote_upload::execution_remote_upload_cancel,
             remote_upload::execution_remote_stage_images,

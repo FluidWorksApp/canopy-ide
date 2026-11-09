@@ -60,6 +60,38 @@ async function waitForApply(deps:MirrorDeps,sleep:(ms:number)=>Promise<void>,id:
  }
 }
 
+type RemoteStore=Omit<WorkspaceState,'projects'>&{projects:(Project&{mirroredFrom?:string;mirrorIncomplete?:boolean})[]};
+async function loadRemoteStore(deps:MirrorDeps){return JSON.parse(await deps.remote<string>('store_load')) as RemoteStore;}
+
+/** Add (or replace the partial entry of) a mirrored project in the workspace store. */
+async function recordProject(deps:MirrorDeps,p:{source?:Project;projectId:string;id:string;name:string;mirrored:{local:LocalComponent;path:string}[];incomplete:boolean}){
+ const store=await loadRemoteStore(deps),{source,projectId,id}=p;
+ // The retry replaces the earlier partial entry; its folders stay in the workspace.
+ store.projects=store.projects.filter(x=>!(x.mirroredFrom===projectId&&x.mirrorIncomplete));
+ store.projects.push({...(source?{...source,vibe:undefined}:{}),id,name:p.name,mirroredFrom:projectId,...(p.incomplete?{mirrorIncomplete:true}:{}),components:p.mirrored.map(({local,path})=>{const original=source?.components.find(c=>c.id===local.componentId);return {id:newComponentId(),label:local.label,path,...(original?.commands?{commands:original.commands}:{}),...(original?.role?{role:original.role}:{})};})} as Project&{mirroredFrom:string});
+ store.openIds=[...(store.openIds??[]),id];store.activeId=store.activeId??id;
+ await deps.remote('store_save',{data:JSON.stringify(store)});
+}
+
+export interface SendInput{id:string;path:string;projectId:string;componentId:string;relatives:string[];includeEnv:boolean;install:boolean;extraFiles?:string[];filesOnly?:boolean}
+/** Package one repository on this Mac, upload it, apply it in the workspace and wait. `onStarted` fires once the workspace owns the staged files. */
+async function sendAndApply(deps:MirrorDeps,sleep:(ms:number)=>Promise<void>,repo:RepoResult,input:SendInput,onStarted:()=>void,emit:()=>void){
+ repo.stage='Sending work in progress';emit();
+ const sent=await deps.local<SendResult>('execution_mirror_send',{id:input.id,projectId:input.projectId,componentId:input.componentId,includeEnv:input.includeEnv,...(input.extraFiles?.length?{extraFiles:input.extraFiles}:{}),...(input.filesOnly?{filesOnly:true}:{})});
+ // What stayed on the Mac (stashes, over-limit files, withheld credentials) is information, not a failure.
+ repo.notes.push(...sent.sent.skipped);
+ repo.stage='Applying';emit();
+ await deps.remote('mirror_apply_start',{id:input.id,repo:input.path,...(input.filesOnly?{filesOnly:true}:{head:sent.head,branch:sent.branch,upstream:sent.upstream}),components:input.relatives,install:input.install,expect:sent.sent.artifacts});
+ onStarted();
+ const status=await waitForApply(deps,sleep,input.id,status=>{repo.stage=status.phase==='dependencies'?'Installing dependencies':repo.stage;repo.installs=status.installs;emit();});
+ if(status.state==='failed')throw Error(status.error??'Setup failed');
+ for(const s of status.steps)(s.state==='failed'?repo.problems:repo.carried).push(s.detail??s.name);
+ if(sent.sent.envFiles)repo.carried.push(`${plural(sent.sent.envFiles,'env file')} included`);
+ repo.notes.push(...status.notes);
+ for(const install of status.installs.filter(i=>i.state==='failed'))repo.problems.push(`${install.tool} install in ${install.cwd} failed${install.detail?`: ${install.detail.split('\n').slice(-3).join(' ')}`:''}`);
+ return sent;
+}
+
 export function carriedSummary(row:LocalComponent,options:MirrorOptions){
  const parts=[row.branch?`branch ${row.branch}`:'detached commit'];
  if(row.unpushed)parts.push(plural(row.unpushed,'unpushed commit'));
@@ -98,7 +130,7 @@ export async function runMirror(deps:MirrorDeps,options:MirrorOptions,onProgress
  try{await deps.remote('mirror_apply_status',{id:'00000000-0000-0000-0000-000000000000'});}
  catch(error){if(unsupported(error,'mirror_apply_status'))applies=false;}
 
- const remoteStore=async()=>JSON.parse(await deps.remote<string>('store_load')) as Omit<WorkspaceState,'projects'>&{projects:(Project&{mirroredFrom?:string;mirrorIncomplete?:boolean})[]};
+ const remoteStore=()=>loadRemoteStore(deps);
  // A project whose last attempt had failures is retried, not skipped as done.
  const already=new Set((await remoteStore()).projects.filter(p=>p.mirroredFrom&&!p.mirrorIncomplete).map(p=>p.mirroredFrom));
  const byProject=new Map<string,LocalComponent[]>();
@@ -126,21 +158,9 @@ export async function runMirror(deps:MirrorDeps,options:MirrorOptions,onProgress
      const cloneParent=`${parent}/repo-${++index}`;await deps.remote('fs_create_dir',{path:cloneParent});
      const path=await clone(deps,sleep,cloneParent,first.origin!,stage=>{repo.stage=stage;emit();});
      if(applies){
-      repo.stage='Sending work in progress';emit();
       const mirrorId=newId();
       staged=mirrorId;
-      const sent=await deps.local<SendResult>('execution_mirror_send',{id:mirrorId,projectId,componentId:first.componentId,includeEnv:options.includeEnv});
-      // What stayed on the Mac (stashes, over-limit files, withheld credentials) is information, not a failure.
-      repo.notes.push(...sent.sent.skipped);
-      repo.stage='Applying';emit();
-      await deps.remote('mirror_apply_start',{id:mirrorId,repo:path,head:sent.head,branch:sent.branch,upstream:sent.upstream,components:members.map(m=>m.relative??''),install:options.install,expect:sent.sent.artifacts});
-      started=true;
-      const status=await waitForApply(deps,sleep,mirrorId,status=>{repo.stage=status.phase==='dependencies'?'Installing dependencies':repo.stage;repo.installs=status.installs;emit();});
-      if(status.state==='failed')throw Error(status.error??'Setup failed');
-      for(const s of status.steps)(s.state==='failed'?repo.problems:repo.carried).push(s.state==='failed'?(s.detail??s.name):(s.detail??s.name));
-      if(sent.sent.envFiles)repo.carried.push(`${plural(sent.sent.envFiles,'env file')} included`);
-      repo.notes.push(...status.notes);
-      for(const install of status.installs.filter(i=>i.state==='failed'))repo.problems.push(`${install.tool} install in ${install.cwd} failed${install.detail?`: ${install.detail.split('\n').slice(-3).join(' ')}`:''}`);
+      await sendAndApply(deps,sleep,repo,{id:mirrorId,path,projectId,componentId:first.componentId,relatives:members.map(m=>m.relative??''),includeEnv:options.includeEnv,install:options.install},()=>{started=true;},emit);
      }else{
       if(first.branch){try{await deps.remote('git_checkout',{path,branch:first.branch});repo.carried.push(`On ${first.branch}`);}catch{repo.problems.push(`Branch ${first.branch} is not on origin; the default branch is checked out`);}}
       repo.problems.push('This workspace’s runtime predates full setup: unpushed commits, changes and new files were not carried. Update the workspace and set up again.');
@@ -155,14 +175,8 @@ export async function runMirror(deps:MirrorDeps,options:MirrorOptions,onProgress
     emit();
    }
    if(!mirrored.length)throw Error('No repository could be set up');
-   const source=localStore?.projects.find(p=>p.id===projectId);
-   const store=await remoteStore();
    const incomplete=result.repos.some(r=>r.state==='failed');
-   // The retry replaces the earlier partial entry; its folders stay in the workspace.
-   store.projects=store.projects.filter(p=>!(p.mirroredFrom===projectId&&p.mirrorIncomplete));
-   store.projects.push({...(source?{...source,vibe:undefined}:{}),id,name:result.name,mirroredFrom:projectId,...(incomplete?{mirrorIncomplete:true}:{}),components:mirrored.map(({local,path})=>{const original=source?.components.find(c=>c.id===local.componentId);return {id:newComponentId(),label:local.label,path,...(original?.commands?{commands:original.commands}:{}),...(original?.role?{role:original.role}:{})};})} as Project&{mirroredFrom:string});
-   store.openIds=[...(store.openIds??[]),id];store.activeId=store.activeId??id;
-   await deps.remote('store_save',{data:JSON.stringify(store)});
+   await recordProject(deps,{source:localStore?.projects.find(p=>p.id===projectId),projectId,id,name:result.name,mirrored,incomplete});
    result.state=incomplete?'failed':'done';
   }catch(error){result.state='failed';result.detail=message(error);}
   emit();
@@ -179,4 +193,119 @@ async function clone(deps:MirrorDeps,sleep:(ms:number)=>Promise<void>,parent:str
  while(job.state==='cloning'){stage(`Cloning${job.percent!=null?` · ${job.percent}%`:''}`);await sleep(1000);job=await deps.remote('git_clone_status',{id:job.id});}
  if(job.state!=='complete')throw Error(job.error??'Clone failed');
  return job.path;
+}
+
+export interface EnsureOptions{
+ projectId:string;
+ /** Limit to these local component ids; default is every component. */
+ componentIds?:string[];
+ /** Repo-relative ignored files to carry, by local component id (from execution_mirror_candidates). */
+ selectedFiles:Record<string,string[]>;
+ install:boolean;
+ /** Skip selected files the remote already has. */
+ onlyMissing:boolean;
+}
+
+/** Set up ONE project on the remote, on demand, without the whole-Mac mirror.
+ * Idempotent: a project already there only gets the selected files it lacks
+ * (never touching its commits, branch or changes). New projects are cloned and
+ * given the Mac's work in progress plus the selected files, like runMirror. */
+export async function ensureProjectOnRemote(deps:MirrorDeps,options:EnsureOptions,onProgress:(progress:MirrorProgress)=>void):Promise<MirrorProgress>{
+ const sleep=deps.sleep??(ms=>new Promise<void>(resolve=>setTimeout(resolve,ms)));
+ const newId=deps.newId??(()=>crypto.randomUUID());
+ const steps:MirrorStep[]=[{key:'inspect',label:'Reading the project on this Mac',state:'pending'},{key:'project',label:'Setting up the project',state:'pending'}];
+ const progress:MirrorProgress={steps,projects:[],done:false};
+ const emit=()=>onProgress({steps:steps.map(s=>({...s})),projects:progress.projects.map(p=>({...p,repos:p.repos.map(r=>({...r}))})),done:progress.done});
+ const step=(key:string,state:StepState,detail?:string)=>{const s=steps.find(item=>item.key===key)!;s.state=state;s.detail=detail;emit();};
+ const finish=()=>{progress.done=true;emit();return progress;};
+ const fail=(project:ProjectResult,error:unknown)=>{project.state='failed';project.detail=message(error);step('project','failed');return finish();};
+
+ step('inspect','running');
+ const rows=(await deps.local<LocalComponent[]>('execution_mirror_inspect')).filter(r=>r.projectId===options.projectId&&(!options.componentIds||options.componentIds.includes(r.componentId)));
+ const result:ProjectResult={name:rows[0]?.projectName||'Project',state:'running',repos:[]};
+ progress.projects.push(result);
+ if(!rows.length){step('inspect','failed');return fail(result,Error('This project is not on this Mac'));}
+ step('inspect','done');
+ step('project','running');
+ const ready=rows.filter(r=>!r.error);
+ if(!ready.length){result.state='skipped';result.detail=rows.map(c=>`${c.label}: ${c.error}`).join('; ');step('project','skipped');return finish();}
+
+ try{
+  const store=await loadRemoteStore(deps);
+  const existing=store.projects.find(p=>p.mirroredFrom===options.projectId&&!p.mirrorIncomplete);
+  const repos=new Map<string,LocalComponent[]>();
+  for(const c of ready)repos.set(c.repo!,[...(repos.get(c.repo!)??[]),c]);
+  const filesFor=(members:LocalComponent[])=>[...new Set(members.flatMap(m=>options.selectedFiles[m.componentId]??[]))];
+
+  if(existing){
+   // Incremental: find each repository's folder remotely, send only what is absent.
+   for(const [,members] of repos){
+    const first=members[0];
+    const repo:RepoResult={name:first.label,components:members.map(m=>m.label),state:'running',carried:[],problems:[],notes:[],installs:[]};
+    result.repos.push(repo);emit();
+    try{
+     const match=existing.components.find(c=>c.label===first.label)??existing.components.find(c=>first.relative&&c.path.endsWith(`/${first.relative}`));
+     if(!match)throw Error(`${first.label} is not set up in this workspace yet`);
+     const root=first.relative&&match.path.endsWith(`/${first.relative}`)?match.path.slice(0,-first.relative.length-1):match.path;
+     let wanted=filesFor(members);
+     if(options.onlyMissing){
+      const missing:string[]=[];
+      for(const file of wanted){try{await deps.remote('fs_stat',{path:`${root}/${file}`});}catch{missing.push(file);}}
+      wanted=missing;
+     }
+     if(!wanted.length){repo.state='done';repo.carried.push('Selected files are already on the workspace');emit();continue;}
+     const id=newId();let started=false;
+     try{
+      await sendAndApply(deps,sleep,repo,{id,path:root,projectId:options.projectId,componentId:first.componentId,relatives:members.map(m=>m.relative??''),includeEnv:false,install:false,extraFiles:wanted,filesOnly:true},()=>{started=true;},emit);
+     }catch(error){if(!started)await deps.remote('mirror_apply_discard',{id}).catch(()=>{});throw error;}
+     repo.state=repo.problems.length?'failed':'done';repo.stage=undefined;
+    }catch(error){repo.state='failed';repo.stage=undefined;repo.detail=message(error);}
+    emit();
+   }
+   const allSkipped=result.repos.every(r=>r.state==='done'&&r.carried.length===1&&/already on the workspace/.test(r.carried[0]));
+   const failed=result.repos.some(r=>r.state==='failed');
+   result.state=failed?'failed':allSkipped?'skipped':'done';
+   if(allSkipped)result.detail='Selected files are already on the workspace';
+   step('project',result.state==='failed'?'failed':result.state==='skipped'?'skipped':'done');
+   return finish();
+  }
+
+  // Fresh setup. Private clones need the Mac's GitHub login in the workspace.
+  try{await deps.local('execution_remote_import_git');}catch{/* public repositories still clone */}
+  let applies=true;
+  try{await deps.remote('mirror_apply_status',{id:'00000000-0000-0000-0000-000000000000'});}
+  catch(error){if(unsupported(error,'mirror_apply_status'))applies=false;}
+  const id=newProjectId(),parent=`/workspace/${id}`;
+  const mirrored:{local:LocalComponent;path:string}[]=[];
+  await deps.remote('fs_create_dir',{path:parent});
+  let index=0;
+  for(const [,members] of repos){
+   const first=members[0];
+   const repo:RepoResult={name:first.origin!.replace(/\/$/,'').split(/[/:]/).pop()!.replace(/\.git$/,''),components:members.map(m=>m.label),state:'running',stage:'Cloning',carried:[],problems:[],notes:[],installs:[]};
+   result.repos.push(repo);emit();
+   let staged:string|null=null,started=false;
+   try{
+    if(deps.signal?.aborted)throw Error('Setup was cancelled');
+    const cloneParent=`${parent}/repo-${++index}`;await deps.remote('fs_create_dir',{path:cloneParent});
+    const path=await clone(deps,sleep,cloneParent,first.origin!,stage=>{repo.stage=stage;emit();});
+    if(applies){
+     staged=newId();
+     await sendAndApply(deps,sleep,repo,{id:staged,path,projectId:options.projectId,componentId:first.componentId,relatives:members.map(m=>m.relative??''),includeEnv:false,install:options.install,extraFiles:filesFor(members)},()=>{started=true;},emit);
+    }else repo.problems.push('This workspace’s runtime predates full setup: only the clone was made. Update the workspace and set up again.');
+    for(const m of members){const componentPath=path+(m.relative?`/${m.relative}`:'');await deps.remote('fs_stat',{path:componentPath});mirrored.push({local:m,path:componentPath});}
+    repo.state=repo.problems.length?'failed':'done';repo.stage=undefined;
+   }catch(error){
+    repo.state='failed';repo.stage=undefined;repo.detail=message(error);
+    if(staged&&!started)await deps.remote('mirror_apply_discard',{id:staged}).catch(()=>{});
+   }
+   emit();
+  }
+  if(!mirrored.length)throw Error('No repository could be set up');
+  const incomplete=result.repos.some(r=>r.state==='failed');
+  const localStore=JSON.parse(await deps.local<string>('store_load')??'null') as WorkspaceState|null;
+  await recordProject(deps,{source:localStore?.projects.find(p=>p.id===options.projectId),projectId:options.projectId,id,name:result.name,mirrored,incomplete});
+  result.state=incomplete?'failed':'done';
+  step('project',result.state==='failed'?'failed':'done');
+  return finish();
+ }catch(error){return fail(result,error);}
 }
