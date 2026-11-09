@@ -4712,6 +4712,32 @@ export const onRelayCollab = (
 ): Promise<UnlistenFn> =>
   listen<import("./collab").CollabMsg>("relay:collab", (e) => cb(e.payload));
 
+/** Remote desktop over the relay (docs/remote-desktop.md). Nothing is shared
+ *  until the teammate accepts `desk:state` with state "requested" locally. */
+export const deskRequest = (to: string, mode: import("./desk").DeskMode) =>
+  invoke<string>("desk_request", { to, mode });
+export const deskRespond = (
+  session: string,
+  accept: boolean,
+  mode: import("./desk").DeskMode,
+) => invoke<void>("desk_respond", { session, accept, mode });
+export const deskSendInput = (
+  session: string,
+  event: import("./desk").InputEvent,
+) => invoke<void>("desk_send_input", { session, event });
+export const deskEnd = (session: string) =>
+  invoke<void>("desk_end", { session });
+export const deskStatus = () =>
+  invoke<import("./desk").DeskStateEvent | null>("desk_status");
+export const onRelayDesk = (
+  cb: (m: import("./desk").DeskMsg) => void,
+): Promise<UnlistenFn> =>
+  listen<import("./desk").DeskMsg>("relay:desk", (e) => cb(e.payload));
+export const onDeskState = (
+  cb: (s: import("./desk").DeskStateEvent) => void,
+): Promise<UnlistenFn> =>
+  listen<import("./desk").DeskStateEvent>("desk:state", (e) => cb(e.payload));
+
 /** A "file-offer" command's payload: where to fetch, the one-time token that
  *  gates the fetch, and the hash the received bytes must match. */
 export interface RelayFileOffer {

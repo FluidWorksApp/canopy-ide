@@ -69,6 +69,11 @@ process teardown; React owns the project workspace and presentation.
   `tmux`, Claude Code, Codex CLI, Amp, Aider, Antigravity, OpenCode, oh-my-pi,
   and custom CLIs. Canopy reports the integration and resume capabilities each
   CLI actually supports instead of assuming parity.
+- **Remote desktop for teammates.** Ask a connected teammate for their screen
+  from the Team panel. They accept view-only or control per session, see an
+  always-on banner with a Stop button, and everything rides the encrypted relay.
+  See [docs/remote-desktop.md](docs/remote-desktop.md) for limits (Linux cannot
+  share its screen yet).
 - **Parallel work without checkout collisions.** Work in the current checkout or
   isolated Git worktrees. Canopy tracks which branch lives where, allocates
   workspace ports, prepares ignored configuration, and surfaces loose ends for

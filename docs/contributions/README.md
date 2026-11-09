@@ -27,6 +27,7 @@ For branch, review, test disclosure, and merge expectations, read
 | File renderer | [File viewer](./file-viewer.md) | `ViewerKind` and byte renderer |
 | Keyboard shortcut | [Shortcut](./shortcut.md) | `shared/shortcuts.json` |
 | Team collaboration message | [Relay message](./relay-message.md) | Encrypted relay and `RelayHandle` |
+| Remote desktop (reference) | [Remote desktop](../remote-desktop.md) | `Frame::Desk`, consent state machine |
 
 ## Shared lifecycle
 

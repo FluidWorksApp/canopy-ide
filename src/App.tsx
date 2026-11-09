@@ -22,6 +22,7 @@ import {
   useEffect,
   useMemo,
   useRef,
+  useReducer,
   useState,
   useSyncExternalStore,
 } from "react";
@@ -198,6 +199,8 @@ import { BrainConnectHost } from "./components/BrainConnect";
 import { openBrainConnect } from "./brainConnect";
 import { Welcome } from "./components/Welcome";
 import { Dialog } from "./components/Dialog";
+import { DeskOverlay } from "./components/RemoteDesktopView";
+import { createFrameBus, deskReducer, type DeskMode } from "./desk";
 import { TerminalGovernorCard } from "./components/TerminalGovernorDialog";
 import {
   terminalMemoryQuotaSummary,
@@ -804,6 +807,10 @@ export default function App() {
   // Narrowed once here: the useMemo below can't see the control-flow guard.
   const collabMgr = collab.current;
   const [collabTick, setCollabTick] = useState(0);
+  // Remote desktop: one session at a time, owned here so the single relay
+  // subscription feeds it. Frames go to a bus, not state.
+  const [desk, dispatchDesk] = useReducer(deskReducer, null);
+  const deskFrames = useMemo(() => createFrameBus(), []);
   // The relay we're persisting chat under = the host's stable identity key.
   // Null when off, so the persist effect never writes an empty transcript.
   const relayChatLabel = useRef<string | null>(null);
@@ -1211,6 +1218,14 @@ export default function App() {
         );
       }),
       ipc.onRelayState(setRelayStatus),
+      // A reload mid-session must not lose the controlled-indicator.
+      ipc
+        .deskStatus()
+        .then((st) => {
+          if (st) dispatchDesk({ type: "state", event: { reason: null, ...st } });
+        })
+        .catch(() => {})
+        .then(() => () => {}),
       ipc.onRelayChat((m) => {
         setRelayChat((prev) => [...prev.slice(-499), m]);
         // A DM lives in the sender's conversation; a broadcast in the team
@@ -1282,6 +1297,23 @@ export default function App() {
           where: { kind: "panel", panel: "team" },
         });
       }),
+      ipc.onDeskState((event) => {
+        dispatchDesk({ type: "state", event });
+        // The consent dialog is the real prompt; this puts the request in
+        // Notifications too if the window is not in front.
+        if (event.role === "target" && event.state === "requested") {
+          postAttention({
+            kind: "question",
+            tone: "warn",
+            title: `${event.peer_name} wants to see your screen`,
+            body: "Accept or deny in the dialog. Nothing is shared until you accept.",
+            source: "team",
+            where: { kind: "panel", panel: "team" },
+            dedupeKey: `desk:${event.session}`,
+          });
+        }
+      }),
+      ipc.onRelayDesk((m) => deskFrames.publish(m)),
       ipc.onRelayCollab((m) => {
         const mgr = collab.current!;
         const known = mgr.get(m.doc) !== undefined;
@@ -3271,6 +3303,12 @@ export default function App() {
       transfers: relayTransfers,
       collab: collabMgr,
       collabTick,
+      desk,
+      deskFrames,
+      deskRequest: async (to: string, mode: DeskMode) => {
+        await ipc.deskRequest(to, mode);
+      },
+      deskDismiss: () => dispatchDesk({ type: "dismiss" }),
       hostStart: async (name, visibility, port) => {
         setRelayStatus(await ipc.relayHostStart(name, visibility, port));
       },
@@ -3308,6 +3346,8 @@ export default function App() {
       relayTransfers,
       collabMgr,
       collabTick,
+      desk,
+      deskFrames,
       relaySendChat,
       relaySendCommand,
       markSeen,
@@ -3972,6 +4012,11 @@ export default function App() {
       {/* Focus mode: chrome slides away but stays reachable — hovering the top
           edge brings the project tabs and the tab strip back. */}
       {zen && <div className="zen-hotzone" />}
+      <DeskOverlay
+        desk={desk}
+        frames={deskFrames}
+        onDismiss={() => dispatchDesk({ type: "dismiss" })}
+      />
       {/* Transient zoom level, shown ~1s after Cmd +/-/0. */}
       {zoomPct !== null && <div className="zoom-indicator">{zoomPct}%</div>}
       {cloudWorkspace && <WorkspaceHooksNotice />}
