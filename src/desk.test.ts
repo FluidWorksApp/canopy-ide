@@ -4,6 +4,7 @@ import {
   canSendInput,
   clampScroll,
   contentRect,
+  createDeskHydrationGate,
   createFrameBus,
   createThrottle,
   deskReducer,
@@ -54,6 +55,27 @@ describe("deskReducer", () => {
     const live = ev({ state: "ended" });
     expect(deskReducer(live, { type: "dismiss", session: "x" })).toBe(live);
     expect(deskReducer(live, { type: "dismiss", session: "s1" })).toBeNull();
+  });
+});
+
+describe("desk status hydration", () => {
+  it("applies a snapshot when no live state event arrived", () => {
+    const gate = createDeskHydrationGate();
+    expect(gate.shouldApplySnapshot()).toBe(true);
+  });
+
+  it("does not let a stale snapshot overwrite a live event", () => {
+    const gate = createDeskHydrationGate();
+    let state = deskReducer(null, {
+      type: "state",
+      event: ev({ state: "ended", reason: "Viewer ended the session." }),
+    });
+    gate.observeLiveEvent();
+    const staleSnapshot = ev({ state: "active", mode: "control" });
+    if (gate.shouldApplySnapshot()) {
+      state = deskReducer(state, { type: "state", event: staleSnapshot });
+    }
+    expect(state?.state).toBe("ended");
   });
 });
 

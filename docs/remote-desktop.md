@@ -76,6 +76,9 @@ teammate with a problem, not for replacing a remote workstation.
   if it contains control characters.
 - The request also appears in Notifications so it is not missed if the window is
   in the background.
+- On WebView startup, Canopy registers the live state listener before reading
+  the current status. If a state event arrives during hydration, that event wins
+  over the unversioned snapshot, so an ended session cannot reappear as active.
 
 ## Threat model
 
@@ -83,7 +86,7 @@ teammate with a problem, not for replacing a remote workstation.
 | --- | --- |
 | A relay member spoofs another as viewer | The host re-stamps `from` from the authenticated link. Members cannot choose it. |
 | A member broadcasts frames or input to others | `Frame::Desk` requires a single `to` and is never fanned out. |
-| Flooding the target with frames or input | Each authenticated member has two independent Desk relay token buckets: 24 messages burst with 16 messages/s refill, plus 4 MiB serialized burst with 13 MiB/s refill. The normal 1600px, about 8 fps stream fits these bounds. Input also has a per-session limiter in the core. Other relay traffic does not consume the Desk budget. |
+| Flooding the target with frames or input | Each authenticated member has independent ordinary and priority Desk relay budgets. Ordinary frames and pointer traffic allow a 96-message burst, refill at 64 messages/s, allow a 4 MiB serialized burst, and refill at 13 MiB/s. End, consent, deny, and key or mouse release messages use a separate 32-message and 64 KiB reserve, refilled at 16 messages/s and 32 KiB/s. A frame or movement burst therefore cannot consume the cleanup path, while every class remains bounded. Input also has a per-session limiter in the core. Other relay traffic does not consume the Desk budget. |
 | Oversized or malformed frames | Validated before fan-out: frame cap 1.5 MiB base64, dimension cap, text cap, strict key allow list, normalized coordinates must be in 0..1. Unknown message kinds fail to parse and are dropped. |
 | Replayed or stale frames | Frame `seq` must strictly increase. |
 | Remote user types dangerous shortcuts | Keys outside the allow list are refused. Control is something the local user grants knowingly, and they can stop it instantly. |
@@ -91,7 +94,7 @@ teammate with a problem, not for replacing a remote workstation.
 | Sniffing by other members or the network | Each link is SPAKE2 plus ChaCha20-Poly1305. |
 | The relay host | Encryption is per link, not end to end. The host decrypts and re-seals every message, so it can see the screen and can forge the sender. Only share with teams whose host you trust. |
 | Name lookalikes or changed devices | Names are self-chosen. The consent dialog shows the available trust verdict and a short Ed25519 key fingerprint. A changed key is a warning. A relayed identity is explicitly host-asserted, not directly verified. |
-| Stuck keys | Keys and buttons held on the target are released when a session ends, and the viewer releases them on blur. |
+| Stuck keys | Keys and buttons held on the target are released when a session ends. The viewer uses pointer capture plus window-level pointer release, cancel, and blur handling so releasing a drag outside the canvas still sends mouse-up. Keyboard state is also released on blur. |
 
 Not covered: a teammate you accept control for can do anything you can do at the
 keyboard. Only grant control to people you trust, and prefer view-only.
@@ -102,11 +105,13 @@ keyboard. Only grant control to people you trust, and prefer view-only.
   crate needs libpipewire on Linux, which the build images do not carry. A Linux
   target answers Accept with a clear "not available" denial. Linux users can
   still view and control Windows and macOS teammates.
-- Native capture and input are behind the `desk-native` cargo feature, which is
-  off by default. Without it, the whole protocol and consent flow still run but
-  sharing reports as unavailable. Build with
-  `cargo build --manifest-path src-tauri/Cargo.toml --features desk-native` to
-  enable it (Windows and macOS capture, input injection via enigo).
+- Native capture and input are behind the `desk-native` cargo feature. Official
+  Windows and macOS release packages enable it, including Intel macOS where
+  dictation remains disabled. Plain Cargo development builds keep it off unless
+  requested with
+  `cargo build --manifest-path src-tauri/Cargo.toml --features desk-native`.
+  Builds without the feature retain the protocol and consent flow but report
+  sharing as unavailable.
 - Primary display only, downscaled to at most 1600 px wide, about 8 fps and
   slower when sends back up.
 - Pending requests end automatically after 60 seconds even if the target address
@@ -114,10 +119,12 @@ keyboard. Only grant control to people you trust, and prefer view-only.
 - There is no OS-level indicator of live control. The red banner lives inside the
   Canopy window. Notifications record both the request and the active grant, but
   a minimized or hidden window cannot provide an always-visible system signal.
-- CI compiles the application library with `desk-native` on Windows and macOS.
-  This catches platform-specific xcap/enigo compile failures only. Native
-  capture, permission prompts, frame delivery and input injection still require
-  tests on physical machines before relying on them.
+- CI compiles the application library with `desk-native` on Windows and macOS,
+  and the Windows packaging check builds an installer with the same feature.
+  Release workflow guards require both Windows and macOS package commands to
+  retain it. This catches platform-specific xcap/enigo compile and packaging
+  failures only. Native capture, permission prompts, frame delivery and input
+  injection still require tests on physical machines before relying on them.
 
 ## OS permissions
 

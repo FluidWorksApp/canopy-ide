@@ -144,9 +144,9 @@ describe("viewer input and frames", () => {
 
   it("sends nothing in view-only mode", async () => {
     const { input, canvas } = await rig("view-only");
-    fireEvent.mouseMove(canvas, { clientX: 50, clientY: 50 });
-    fireEvent.mouseDown(canvas, { clientX: 50, clientY: 50, button: 0 });
-    fireEvent.mouseUp(canvas, { button: 0 });
+    fireEvent.pointerMove(canvas, { clientX: 50, clientY: 50, pointerId: 1 });
+    fireEvent.pointerDown(canvas, { clientX: 50, clientY: 50, button: 0, pointerId: 1 });
+    fireEvent.pointerUp(canvas, { button: 0, pointerId: 1 });
     fireEvent.wheel(canvas, { deltaY: 10 });
     fireEvent.keyDown(canvas, { code: "KeyA" });
     expect(input).not.toHaveBeenCalled();
@@ -155,7 +155,7 @@ describe("viewer input and frames", () => {
 
   it("sends mapped input and remote Escape in control mode", async () => {
     const { input, canvas } = await rig("control");
-    fireEvent.mouseDown(canvas, { clientX: 50, clientY: 25, button: 0 });
+    fireEvent.pointerDown(canvas, { clientX: 50, clientY: 25, button: 0, pointerId: 1 });
     await waitFor(() => expect(input).toHaveBeenCalledTimes(2));
     expect(input.mock.calls[0]).toEqual([
       { session: "s1", event: { kind: "mouse-move", x: 0.5, y: 0.25 } },
@@ -200,7 +200,7 @@ describe("viewer input and frames", () => {
     canvas.getContext = vi.fn(() => ({ drawImage })) as unknown as typeof canvas.getContext;
     frame(bus);
     await waitFor(() => expect(createImageBitmap).toHaveBeenCalled());
-    fireEvent.mouseDown(canvas, { clientX: 50, clientY: 50, button: 0 });
+    fireEvent.pointerDown(canvas, { clientX: 50, clientY: 50, button: 0, pointerId: 1 });
     expect(drawImage).not.toHaveBeenCalled();
     expect(input).not.toHaveBeenCalled();
   });
@@ -292,6 +292,40 @@ describe("Remote desktop actions", () => {
 });
 
 describe("held input", () => {
+  it("releases a held mouse button when the pointer is released outside the canvas", async () => {
+    const send = vi.fn(() => null);
+    mockCommands({ desk_send_input: send });
+    vi.stubGlobal("createImageBitmap", vi.fn(async () => ({ width: 100, height: 100, close: vi.fn() })));
+    const frames = createFrameBus();
+    render(
+      <RemoteDesktopView view={ev({ role: "viewer", state: "active", mode: "control" })} frames={frames} onClose={() => {}} />,
+    );
+    const canvas = screen.getByLabelText("Remote screen") as HTMLCanvasElement;
+    canvas.getBoundingClientRect = () =>
+      ({ left: 0, top: 0, width: 100, height: 100, right: 100, bottom: 100 }) as DOMRect;
+    canvas.getContext = vi.fn(() => ({ drawImage: vi.fn() })) as unknown as typeof canvas.getContext;
+    frames.publish({
+      id: "i",
+      from: "ada",
+      from_name: "Ada",
+      to: "me",
+      session: "s1",
+      ts: 1,
+      body: { kind: "frame", seq: 1, w: 100, h: 100, jpeg_b64: "QQ==" },
+    });
+    await waitFor(() => expect(canvas.width).toBe(100));
+    fireEvent.pointerDown(canvas, { clientX: 50, clientY: 50, button: 0, pointerId: 7 });
+    await waitFor(() => expect(send).toHaveBeenCalledTimes(2));
+    fireEvent.pointerUp(window, { button: 0, pointerId: 7 });
+    await waitFor(() =>
+      expect(send).toHaveBeenLastCalledWith({
+        session: "s1",
+        event: { kind: "mouse-button", button: "left", down: false },
+      }),
+    );
+    expect(send).toHaveBeenCalledTimes(3);
+  });
+
   it("releases a held key when the canvas loses focus", async () => {
     const send = vi.fn(() => null);
     mockCommands({ desk_send_input: send });

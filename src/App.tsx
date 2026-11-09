@@ -200,7 +200,7 @@ import { openBrainConnect } from "./brainConnect";
 import { Welcome } from "./components/Welcome";
 import { Dialog } from "./components/Dialog";
 import { DeskOverlay } from "./components/RemoteDesktopView";
-import { createFrameBus, deskReducer, type DeskMode } from "./desk";
+import { createDeskHydrationGate, createFrameBus, deskReducer, type DeskMode } from "./desk";
 import { TerminalGovernorCard } from "./components/TerminalGovernorDialog";
 import {
   terminalMemoryQuotaSummary,
@@ -1194,6 +1194,7 @@ export default function App() {
     }).catch((error) => {
       if (!cancelled) setWorkspaceLoadError(String(error));
     });
+    const deskHydration = createDeskHydrationGate();
     const subs = [
       ipc.onAgentEvents((raws) => {
         // Parsed once here; consumers read fields off `data`. Re-parsing the
@@ -1220,14 +1221,6 @@ export default function App() {
         );
       }),
       ipc.onRelayState(setRelayStatus),
-      // A reload mid-session must not lose the controlled-indicator.
-      ipc
-        .deskStatus()
-        .then((st) => {
-          if (st) dispatchDesk({ type: "state", event: { reason: null, ...st } });
-        })
-        .catch(() => {})
-        .then(() => () => {}),
       ipc.onRelayChat((m) => {
         setRelayChat((prev) => [...prev.slice(-499), m]);
         // A DM lives in the sender's conversation; a broadcast in the team
@@ -1300,6 +1293,7 @@ export default function App() {
         });
       }),
       ipc.onDeskState((event) => {
+        deskHydration.observeLiveEvent();
         dispatchDesk({ type: "state", event });
         if (event.role !== "target") return;
 
@@ -1352,6 +1346,19 @@ export default function App() {
             dedupeKey: `desk-ended:${event.session}`,
           });
         }
+      }).then((unlisten) => {
+        // Register the listener before asking for status. If a live event wins
+        // the race with the snapshot, it is authoritative and the snapshot is
+        // ignored rather than regressing an active or ended session.
+        void ipc
+          .deskStatus()
+          .then((status) => {
+            if (status && deskHydration.shouldApplySnapshot()) {
+              dispatchDesk({ type: "state", event: { reason: null, ...status } });
+            }
+          })
+          .catch(() => {});
+        return unlisten;
       }),
       ipc.onRelayDesk((m) => deskFrames.publish(m)),
       ipc.onRelayCollab((m) => {

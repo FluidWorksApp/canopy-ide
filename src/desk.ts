@@ -72,6 +72,19 @@ export function deskReducer(state: DeskView, action: DeskAction): DeskView {
   return ev;
 }
 
+/** Coordinates startup status hydration with the live event stream. The caller
+ * subscribes first, then reads status. Any event observed in between is newer
+ * ordering evidence than the unversioned snapshot. */
+export function createDeskHydrationGate() {
+  let liveEventObserved = false;
+  return {
+    observeLiveEvent: () => {
+      liveEventObserved = true;
+    },
+    shouldApplySnapshot: () => !liveEventObserved,
+  };
+}
+
 /** The target side must show the consent dialog. */
 export const needsConsent = (s: DeskView): boolean =>
   !!s && s.role === "target" && s.state === "requested";

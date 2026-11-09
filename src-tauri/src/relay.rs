@@ -203,14 +203,19 @@ pub struct DeskMsg {
     pub ts: u64,
 }
 
-/// Per authenticated relay member. The message budget rejects CPU/queue floods;
-/// the serialized-byte budget caps sustained screen traffic while permitting a
-/// 1600px stream at about 8 fps. Four MiB of burst absorbs frame-size variance,
-/// then the bucket refills at 13 MiB/s. Non-Desk frames never touch this budget.
-const DESK_MESSAGE_BURST: u64 = 24;
-const DESK_MESSAGES_PER_SEC: u64 = 16;
+/// Per authenticated relay member. Ordinary traffic has enough headroom for
+/// the viewer's 30 Hz pointer stream plus frames while remaining bounded by
+/// message and byte token buckets. Terminal messages and input releases use a
+/// small independent reserve, so movement or frame traffic cannot strand a
+/// remote session or held input. Non-Desk frames never touch these budgets.
+const DESK_MESSAGE_BURST: u64 = 96;
+const DESK_MESSAGES_PER_SEC: u64 = 64;
 const DESK_BYTE_BURST: u64 = 4 * 1024 * 1024;
 const DESK_BYTES_PER_SEC: u64 = 13 * 1024 * 1024;
+const DESK_PRIORITY_MESSAGE_BURST: u64 = 32;
+const DESK_PRIORITY_MESSAGES_PER_SEC: u64 = 16;
+const DESK_PRIORITY_BYTE_BURST: u64 = 64 * 1024;
+const DESK_PRIORITY_BYTES_PER_SEC: u64 = 32 * 1024;
 
 #[derive(Clone, Debug)]
 struct WeightedRateLimiter {
@@ -245,32 +250,66 @@ impl WeightedRateLimiter {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum DeskTrafficClass {
+    Ordinary,
+    Priority,
+}
+
 #[derive(Debug)]
 struct DeskRelayBudget {
-    messages: WeightedRateLimiter,
-    bytes: WeightedRateLimiter,
+    ordinary_messages: WeightedRateLimiter,
+    ordinary_bytes: WeightedRateLimiter,
+    priority_messages: WeightedRateLimiter,
+    priority_bytes: WeightedRateLimiter,
 }
 
 impl DeskRelayBudget {
     fn new() -> Self {
         Self {
-            messages: WeightedRateLimiter::new(DESK_MESSAGE_BURST, DESK_MESSAGES_PER_SEC),
-            bytes: WeightedRateLimiter::new(DESK_BYTE_BURST, DESK_BYTES_PER_SEC),
+            ordinary_messages: WeightedRateLimiter::new(DESK_MESSAGE_BURST, DESK_MESSAGES_PER_SEC),
+            ordinary_bytes: WeightedRateLimiter::new(DESK_BYTE_BURST, DESK_BYTES_PER_SEC),
+            priority_messages: WeightedRateLimiter::new(
+                DESK_PRIORITY_MESSAGE_BURST,
+                DESK_PRIORITY_MESSAGES_PER_SEC,
+            ),
+            priority_bytes: WeightedRateLimiter::new(
+                DESK_PRIORITY_BYTE_BURST,
+                DESK_PRIORITY_BYTES_PER_SEC,
+            ),
         }
     }
 
-    fn allow(&mut self, serialized_bytes: usize, now_ms: u64) -> bool {
+    fn allow(&mut self, class: DeskTrafficClass, serialized_bytes: usize, now_ms: u64) -> bool {
+        let (message_budget, byte_budget) = match class {
+            DeskTrafficClass::Ordinary => (&mut self.ordinary_messages, &mut self.ordinary_bytes),
+            DeskTrafficClass::Priority => (&mut self.priority_messages, &mut self.priority_bytes),
+        };
         // Commit both charges together. A rejection from either budget leaves
         // the other untouched, so one kind of flood cannot delay recovery of
         // the independent bound.
-        let mut bytes = self.bytes.clone();
-        let mut messages = self.messages.clone();
+        let mut bytes = byte_budget.clone();
+        let mut messages = message_budget.clone();
         if !bytes.allow(serialized_bytes, now_ms) || !messages.allow(1, now_ms) {
             return false;
         }
-        self.bytes = bytes;
-        self.messages = messages;
+        *byte_budget = bytes;
+        *message_budget = messages;
         true
+    }
+}
+
+fn desk_traffic_class(body: &canopy_core::desk::DeskBody) -> DeskTrafficClass {
+    use canopy_core::desk::{DeskBody, InputEvent};
+    match body {
+        DeskBody::Request { .. }
+        | DeskBody::Accept { .. }
+        | DeskBody::Deny { .. }
+        | DeskBody::End { .. }
+        | DeskBody::Input {
+            event: InputEvent::MouseButton { down: false, .. } | InputEvent::Key { down: false, .. },
+        } => DeskTrafficClass::Priority,
+        _ => DeskTrafficClass::Ordinary,
     }
 }
 
@@ -281,7 +320,9 @@ fn allow_relay_frame(
     now_ms: u64,
 ) -> bool {
     match frame {
-        Frame::Desk(_) => budget.allow(serialized_bytes, now_ms),
+        Frame::Desk(message) => {
+            budget.allow(desk_traffic_class(&message.body), serialized_bytes, now_ms)
+        }
         _ => true,
     }
 }
@@ -3392,12 +3433,24 @@ mod tests {
         assert!(serde_json::from_slice::<Frame>(no_to).is_err());
     }
 
+    fn budget_frame(body: canopy_core::desk::DeskBody) -> Frame {
+        Frame::Desk(DeskMsg {
+            id: "i".into(),
+            from: "f".into(),
+            from_name: "n".into(),
+            to: "t".into(),
+            session: "s1".into(),
+            body,
+            ts: 0,
+        })
+    }
+
     #[test]
     fn desk_relay_budget_allows_a_normal_eight_fps_stream() {
         let mut budget = DeskRelayBudget::new();
         for frame in 0..32 {
             assert!(
-                budget.allow(1024 * 1024, frame * 125),
+                budget.allow(DeskTrafficClass::Ordinary, 1024 * 1024, frame * 125),
                 "normal frame {frame} was rejected"
             );
         }
@@ -3406,23 +3459,80 @@ mod tests {
     #[test]
     fn desk_relay_budget_rejects_a_byte_burst_and_refills() {
         let mut budget = DeskRelayBudget::new();
-        assert!(budget.allow(2 * 1024 * 1024, 0));
-        assert!(budget.allow(2 * 1024 * 1024, 0));
-        assert!(!budget.allow(1, 0));
-        assert!(budget.allow(2 * 1024 * 1024, 1_000));
+        assert!(budget.allow(DeskTrafficClass::Ordinary, 2 * 1024 * 1024, 0));
+        assert!(budget.allow(DeskTrafficClass::Ordinary, 2 * 1024 * 1024, 0));
+        assert!(!budget.allow(DeskTrafficClass::Ordinary, 1, 0));
+        assert!(budget.allow(DeskTrafficClass::Ordinary, 2 * 1024 * 1024, 1_000));
     }
 
     #[test]
     fn desk_relay_budget_enforces_message_count_and_refills() {
         let mut budget = DeskRelayBudget::new();
         for _ in 0..DESK_MESSAGE_BURST {
-            assert!(budget.allow(1, 0));
+            assert!(budget.allow(DeskTrafficClass::Ordinary, 1, 0));
         }
-        assert!(!budget.allow(1, 0));
+        assert!(!budget.allow(DeskTrafficClass::Ordinary, 1, 0));
         for _ in 0..DESK_MESSAGES_PER_SEC {
-            assert!(budget.allow(1, 1_000));
+            assert!(budget.allow(DeskTrafficClass::Ordinary, 1, 1_000));
         }
-        assert!(!budget.allow(1, 1_000));
+        assert!(!budget.allow(DeskTrafficClass::Ordinary, 1, 1_000));
+    }
+
+    #[test]
+    fn pointer_stream_cannot_consume_release_or_end_reserve() {
+        use canopy_core::desk::{DeskBody, InputEvent};
+
+        let mut budget = DeskRelayBudget::new();
+        for tick in 0..90 {
+            let movement = budget_frame(DeskBody::Input {
+                event: InputEvent::MouseMove { x: 0.5, y: 0.5 },
+            });
+            let bytes = serde_json::to_vec(&movement).unwrap().len();
+            assert!(
+                allow_relay_frame(&mut budget, &movement, bytes, tick * 33),
+                "30 Hz pointer event {tick} was rejected"
+            );
+        }
+
+        // Even if an ordinary burst then consumes all remaining headroom, the
+        // user's release and terminal session message have an independent,
+        // bounded reserve.
+        while budget.allow(DeskTrafficClass::Ordinary, 1, 3_000) {}
+        for body in [
+            DeskBody::Input {
+                event: InputEvent::MouseButton {
+                    button: canopy_core::desk::Button::Left,
+                    down: false,
+                },
+            },
+            DeskBody::End {
+                reason: "Viewer ended the session.".into(),
+            },
+        ] {
+            let frame = budget_frame(body);
+            let bytes = serde_json::to_vec(&frame).unwrap().len();
+            assert!(allow_relay_frame(&mut budget, &frame, bytes, 3_000));
+        }
+    }
+
+    #[test]
+    fn priority_reserve_is_still_message_and_byte_bounded() {
+        let mut budget = DeskRelayBudget::new();
+        for _ in 0..DESK_PRIORITY_MESSAGE_BURST {
+            assert!(budget.allow(DeskTrafficClass::Priority, 1, 0));
+        }
+        assert!(!budget.allow(DeskTrafficClass::Priority, 1, 0));
+        for _ in 0..DESK_PRIORITY_MESSAGES_PER_SEC {
+            assert!(budget.allow(DeskTrafficClass::Priority, 1, 1_000));
+        }
+        assert!(!budget.allow(DeskTrafficClass::Priority, 1, 1_000));
+
+        let mut bytes = DeskRelayBudget::new();
+        assert!(!bytes.allow(
+            DeskTrafficClass::Priority,
+            DESK_PRIORITY_BYTE_BURST as usize + 1,
+            0,
+        ));
     }
 
     #[test]
@@ -3432,7 +3542,7 @@ mod tests {
             assert!(allow_relay_frame(&mut budget, &Frame::Ping, usize::MAX, 0));
         }
         for _ in 0..DESK_MESSAGE_BURST {
-            assert!(budget.allow(1, 0));
+            assert!(budget.allow(DeskTrafficClass::Ordinary, 1, 0));
         }
     }
 

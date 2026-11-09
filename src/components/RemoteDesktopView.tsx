@@ -241,7 +241,7 @@ export function RemoteDesktopView({
     return pointerToNormalized(clientX, clientY, r, size.current.w, size.current.h);
   }, []);
 
-  const releaseHeld = () => {
+  const releaseHeld = useCallback(() => {
     for (const k of held.current) {
       if (k.startsWith("b:")) {
         send(sessionRef.current, {
@@ -254,7 +254,36 @@ export function RemoteDesktopView({
       }
     }
     held.current.clear();
-  };
+  }, []);
+
+  const releaseMouseButton = useCallback(
+    (button: Extract<InputEvent, { kind: "mouse-button" }>["button"]) => {
+      const heldButton = `b:${button}`;
+      if (!held.current.has(heldButton)) return;
+      held.current.delete(heldButton);
+      send(sessionRef.current, { kind: "mouse-button", button, down: false });
+    },
+    [],
+  );
+
+  // Pointer capture keeps a drag owned by the canvas. The window listener is
+  // the fallback for WebViews that release capture over native chrome, and the
+  // blur path covers leaving the application window entirely.
+  useEffect(() => {
+    const pointerUp = (event: PointerEvent) => {
+      const button = mouseButton(event.button);
+      if (button) releaseMouseButton(button);
+    };
+    window.addEventListener("pointerup", pointerUp);
+    window.addEventListener("pointercancel", releaseHeld);
+    window.addEventListener("blur", releaseHeld);
+    return () => {
+      window.removeEventListener("pointerup", pointerUp);
+      window.removeEventListener("pointercancel", releaseHeld);
+      window.removeEventListener("blur", releaseHeld);
+      releaseHeld();
+    };
+  }, [releaseHeld, releaseMouseButton]);
 
   const emit = (event: InputEvent) => {
     if (event.kind === "key") {
@@ -296,23 +325,28 @@ export function RemoteDesktopView({
           event.preventDefault();
           event.stopPropagation();
         }}
-        onMouseMove={(event) => {
+        onPointerMove={(event) => {
           if (!control || !moveGate.current(performance.now())) return;
           const p = norm(event.clientX, event.clientY);
           if (p) emit({ kind: "mouse-move", ...p });
         }}
-        onMouseDown={(event) => {
+        onPointerDown={(event) => {
           const button = mouseButton(event.button);
           const p = norm(event.clientX, event.clientY);
           if (!control || !button || !p) return;
           event.currentTarget.focus();
+          event.currentTarget.setPointerCapture?.(event.pointerId);
           emit({ kind: "mouse-move", ...p });
           emit({ kind: "mouse-button", button, down: true });
         }}
-        onMouseUp={(event) => {
+        onPointerUp={(event) => {
           const button = mouseButton(event.button);
-          if (control && button) emit({ kind: "mouse-button", button, down: false });
+          if (button) releaseMouseButton(button);
+          if (event.currentTarget.hasPointerCapture?.(event.pointerId)) {
+            event.currentTarget.releasePointerCapture(event.pointerId);
+          }
         }}
+        onPointerCancel={() => releaseHeld()}
         onWheel={(event) => {
           event.preventDefault();
           event.stopPropagation();
