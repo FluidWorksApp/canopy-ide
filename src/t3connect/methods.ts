@@ -3,6 +3,7 @@ import type { StreamHandle, T3RpcClient } from "./rpc";
 import {
   T3_METHODS,
   type OrchestrationProjectShell,
+  type OrchestrationThreadShell,
   type OrchestrationV2ShellStreamItem,
   type ProjectListEntriesInput,
   type ProjectListEntriesResult,
@@ -47,6 +48,12 @@ export const t3 = {
  *  snapshot (apps/web reads its shell state the same way). Resolves with the
  *  snapshot's projects, unarchived, and ends the subscription. */
 export function listProjects(rpc: T3RpcClient): Promise<OrchestrationProjectShell[]> {
+  return listShell(rpc).then(shell => shell.projects);
+}
+
+/** Projects and threads from the same first snapshot. Threads without a string
+ *  id are dropped; archived ones are hidden like archived projects. */
+export function listShell(rpc: T3RpcClient): Promise<{ projects: OrchestrationProjectShell[]; threads: OrchestrationThreadShell[] }> {
   return new Promise((resolve, reject) => {
     let settled = false;
     const handle = rpc.stream<OrchestrationV2ShellStreamItem>(T3_METHODS.subscribeShell, {}, values => {
@@ -54,7 +61,10 @@ export function listProjects(rpc: T3RpcClient): Promise<OrchestrationProjectShel
         if (settled || item.kind !== "snapshot") continue;
         settled = true;
         const snapshot = (item as Extract<OrchestrationV2ShellStreamItem, { kind: "snapshot" }>).snapshot;
-        resolve(snapshot.projects.filter(project => !project.archivedAt));
+        resolve({
+          projects: snapshot.projects.filter(project => !project.archivedAt),
+          threads: (Array.isArray(snapshot.threads) ? snapshot.threads : []).filter(t => t && typeof t.id === "string" && !t.archivedAt),
+        });
         handle.cancel();
       }
     });
