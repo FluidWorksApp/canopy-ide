@@ -5621,7 +5621,10 @@ mod integration_tests {
             let command = agent["hooks"][*trigger][0]["command"].as_str().unwrap();
             assert!(command.contains("canopy-hook"), "{trigger}");
             assert!(command.ends_with("--agent kiro"), "{trigger}: {command}");
-            assert!(!command.contains("--signal"), "a signal would replace the payload");
+            assert!(
+                !command.contains("--signal"),
+                "a signal would replace the payload"
+            );
         }
         assert_eq!(agent["hooks"]["preToolUse"][0]["matcher"], "*");
         let mcp = read_json_config(&home.join(".kiro/settings/mcp.json")).unwrap();

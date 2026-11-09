@@ -237,9 +237,8 @@ fn gate_deny_output(agent: Option<&str>, reason: &str) -> Option<serde_json::Val
         })),
         // Kiro blocks on exit code 2 with the reason on stderr, not on stdout;
         // the caller prints this value's `reason` that way (see real_main).
-        Some("kiro") | Some("grok") | Some("agy") | Some("opencode") | Some("omp") | Some("amp") => {
-            Some(serde_json::json!({ "decision": "deny", "reason": reason }))
-        }
+        Some("kiro") | Some("grok") | Some("agy") | Some("opencode") | Some("omp")
+        | Some("amp") => Some(serde_json::json!({ "decision": "deny", "reason": reason })),
         _ => None,
     }
 }
@@ -1042,7 +1041,10 @@ fn normalize_event(event: &mut serde_json::Value, agent: &str) {
             .is_some_and(|s| !s.is_empty())
         {
             let pty = std::env::var("CANOPY_PTY").unwrap_or_default();
-            map.insert("session_id".into(), serde_json::json!(format!("kiro-pty{pty}")));
+            map.insert(
+                "session_id".into(),
+                serde_json::json!(format!("kiro-pty{pty}")),
+            );
         }
         if let Some(name) = map
             .get("hook_event_name")
@@ -9069,7 +9071,11 @@ mod tests {
             assert_eq!(event["agent"], "kiro");
             assert_eq!(event["hook_event_name"], canonical, "{trigger}");
             assert_eq!(event["cwd"], "/repo");
-            assert_eq!(event.get("canopy_signal").and_then(|v| v.as_str()), signal, "{trigger}");
+            assert_eq!(
+                event.get("canopy_signal").and_then(|v| v.as_str()),
+                signal,
+                "{trigger}"
+            );
         }
     }
 

@@ -823,7 +823,14 @@ const WRITE_TOOLS: &[&str] = &[
     // Kiro CLI `fs_write` (create, str_replace, insert, append) with `path`.
     "fs_write",
 ];
-const READ_TOOLS: &[&str] = &["read", "read_file", "view", "view_file", "notebookread", "fs_read"];
+const READ_TOOLS: &[&str] = &[
+    "read",
+    "read_file",
+    "view",
+    "view_file",
+    "notebookread",
+    "fs_read",
+];
 /// The keys a CLI puts a path under: Claude/Codex/Grok `file_path`, OpenCode
 /// `filePath`, Amp/omp/Cursor `path`, Antigravity `TargetFile`/`AbsolutePath`.
 const PATH_KEYS: &[&str] = &[
@@ -3747,7 +3754,12 @@ mod tests {
     #[test]
     fn kiro_fs_read_targets_are_reads() {
         let cwd = Path::new("/w");
-        let flat = action_from_event("fs_read", &serde_json::json!({"path": "a.txt"}), cwd, vec![]);
+        let flat = action_from_event(
+            "fs_read",
+            &serde_json::json!({"path": "a.txt"}),
+            cwd,
+            vec![],
+        );
         assert_eq!(flat.reads, vec![PathBuf::from("/w/a.txt")]);
         let batched = action_from_event(
             "fs_read",

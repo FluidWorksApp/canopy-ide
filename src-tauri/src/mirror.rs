@@ -285,7 +285,11 @@ fn categorize(name: &str) -> &'static str {
         || ["json", "yaml", "yml", "toml", "ini", "conf", "cfg"].contains(&ext)
     {
         "config"
-    } else if ["db", "sqlite", "sqlite3", "csv", "sql", "parquet", "jsonl", "tsv"].contains(&ext) {
+    } else if [
+        "db", "sqlite", "sqlite3", "csv", "sql", "parquet", "jsonl", "tsv",
+    ]
+    .contains(&ext)
+    {
         "data"
     } else {
         "other"
@@ -364,7 +368,11 @@ fn ignored_candidates(top: &Path) -> Vec<Candidate> {
             size,
         })
         .collect();
-    let rank = |c: &str| ["secret", "config", "data", "other"].iter().position(|x| *x == c);
+    let rank = |c: &str| {
+        ["secret", "config", "data", "other"]
+            .iter()
+            .position(|x| *x == c)
+    };
     found.sort_by(|a, b| (rank(a.category), &a.path).cmp(&(rank(b.category), &b.path)));
     let mut total = 0u64;
     found.retain(|c| {
@@ -391,15 +399,21 @@ fn validate_extra_files(top: &Path, names: &[String]) -> Result<Vec<(String, u64
             || name.contains('\\')
             || name.contains('\0')
             || name.contains('\n')
-            || name.split('/').any(|p| p.is_empty() || p == "." || p == ".." || p == ".git");
+            || name
+                .split('/')
+                .any(|p| p.is_empty() || p == "." || p == ".." || p == ".git");
         if bad || Path::new(name).is_absolute() {
-            return Err(format!("Invalid file path: {}", name.chars().take(100).collect::<String>()));
+            return Err(format!(
+                "Invalid file path: {}",
+                name.chars().take(100).collect::<String>()
+            ));
         }
         if !seen.insert(name.clone()) {
             continue;
         }
         let full = top.join(name);
-        let meta = std::fs::symlink_metadata(&full).map_err(|_| format!("{name} no longer exists"))?;
+        let meta =
+            std::fs::symlink_metadata(&full).map_err(|_| format!("{name} no longer exists"))?;
         if !meta.file_type().is_file() {
             return Err(format!("{name} is not a regular file"));
         }
@@ -419,7 +433,9 @@ fn validate_extra_files(top: &Path, names: &[String]) -> Result<Vec<(String, u64
             .arg(format!(":(literal){name}")))
         .unwrap_or_default();
         if !listed.split('\0').any(|n| n == name) {
-            return Err(format!("{name} is tracked by git, so it comes with the clone"));
+            return Err(format!(
+                "{name} is tracked by git, so it comes with the clone"
+            ));
         }
         out.push((name.clone(), meta.len()));
     }
@@ -987,7 +1003,10 @@ mod tests {
         std::fs::create_dir_all(mac.join("node_modules/pkg")).unwrap();
         std::fs::write(mac.join("node_modules/pkg/a.js"), "x").unwrap();
         let found = ignored_candidates(&mac);
-        let summary: Vec<_> = found.iter().map(|c| (c.path.as_str(), c.category)).collect();
+        let summary: Vec<_> = found
+            .iter()
+            .map(|c| (c.path.as_str(), c.category))
+            .collect();
         assert_eq!(
             summary,
             vec![
@@ -1011,7 +1030,16 @@ mod tests {
         assert_eq!(ok(".env").unwrap(), vec![(".env".to_string(), 4)]);
         // Untracked (not ignored) is fine too.
         assert!(ok("secret.txt").is_ok());
-        for bad in ["/etc/passwd", "../x", "a/../.env", "", ".git/config", "app.js", "missing", "a\\b"] {
+        for bad in [
+            "/etc/passwd",
+            "../x",
+            "a/../.env",
+            "",
+            ".git/config",
+            "app.js",
+            "missing",
+            "a\\b",
+        ] {
             assert!(ok(bad).is_err(), "{bad} should be refused");
         }
         std::fs::create_dir_all(mac.join("dir")).unwrap();
@@ -1041,7 +1069,10 @@ mod tests {
                 .arg(dir.join("files.tgz"))
                 .output()
                 .unwrap();
-            String::from_utf8_lossy(&out.stdout).lines().map(String::from).collect::<Vec<_>>()
+            String::from_utf8_lossy(&out.stdout)
+                .lines()
+                .map(String::from)
+                .collect::<Vec<_>>()
         };
         let full = base.join("full");
         std::fs::create_dir_all(&full).unwrap();
@@ -1056,7 +1087,10 @@ mod tests {
         assert!(!prepared.unstaged && !prepared.staged && !prepared.commits);
         assert!(!only.join("unstaged.patch").exists());
         assert_eq!(listing(&only), vec!["dev.sqlite"]);
-        assert_eq!(prepared.artifacts.keys().collect::<Vec<_>>(), vec!["files.tgz"]);
+        assert_eq!(
+            prepared.artifacts.keys().collect::<Vec<_>>(),
+            vec!["files.tgz"]
+        );
         std::fs::remove_dir_all(base).unwrap();
     }
 
