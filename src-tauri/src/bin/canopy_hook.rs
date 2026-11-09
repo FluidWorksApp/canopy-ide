@@ -881,6 +881,10 @@ fn real_main() -> Result<(), Box<dyn std::error::Error>> {
         // Kiro adds a hook's plain-text stdout to the conversation for
         // agentSpawn and userPromptSubmit (kiro.dev/docs/cli/hooks), so the
         // peer and rules context goes out as text, not Claude's JSON shape.
+        //
+        // No research/write-root denial here, same as Grok: `edited_path` only
+        // knows Claude-shaped tools and `file_path`, and Kiro's `fs_write` uses
+        // `path`. Those restrictions fail open for Kiro until that is mapped.
         Some("kiro") => {
             if hook_event == "UserPromptSubmit" || hook_event == "SessionStart" {
                 let always = hook_event == "SessionStart";
@@ -1024,10 +1028,21 @@ fn normalize_event(event: &mut serde_json::Value, agent: &str) {
         // (`hook_event_name`, `cwd`, `tool_name`, `tool_input`, `prompt`,
         // `assistant_response`). Map the trigger onto the Claude names every
         // downstream consumer reads; a session id is kept when Kiro sends one.
-        if map.get("session_id").is_none() {
+        if map.get("session_id").and_then(|v| v.as_str()).is_none() {
             if let Some(value) = map.get("sessionId").cloned() {
                 map.insert("session_id".into(), value);
             }
+        }
+        // Kiro's documented payload has no session id. Without one, digests,
+        // peer context and per-session attention grouping are all skipped, so
+        // fall back to one stable id per terminal, as the --signal path does.
+        if !map
+            .get("session_id")
+            .and_then(|v| v.as_str())
+            .is_some_and(|s| !s.is_empty())
+        {
+            let pty = std::env::var("CANOPY_PTY").unwrap_or_default();
+            map.insert("session_id".into(), serde_json::json!(format!("kiro-pty{pty}")));
         }
         if let Some(name) = map
             .get("hook_event_name")
@@ -9056,6 +9071,18 @@ mod tests {
             assert_eq!(event["cwd"], "/repo");
             assert_eq!(event.get("canopy_signal").and_then(|v| v.as_str()), signal, "{trigger}");
         }
+    }
+
+    #[test]
+    fn kiro_without_a_session_id_gets_a_per_terminal_one() {
+        let mut event = serde_json::json!({ "hook_event_name": "stop", "cwd": "/repo" });
+        normalize_event(&mut event, "kiro");
+        let id = event["session_id"].as_str().unwrap();
+        assert!(id.starts_with("kiro-pty"), "{id}");
+        assert!(safe_session_id(id));
+        let mut event = serde_json::json!({ "hook_event_name": "stop", "sessionId": "s1" });
+        normalize_event(&mut event, "kiro");
+        assert_eq!(event["session_id"], "s1");
     }
 
     #[test]

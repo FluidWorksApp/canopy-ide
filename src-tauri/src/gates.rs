@@ -823,7 +823,7 @@ const WRITE_TOOLS: &[&str] = &[
     // Kiro CLI `fs_write` (create, str_replace, insert, append) with `path`.
     "fs_write",
 ];
-const READ_TOOLS: &[&str] = &["read", "read_file", "view", "view_file", "notebookread"];
+const READ_TOOLS: &[&str] = &["read", "read_file", "view", "view_file", "notebookread", "fs_read"];
 /// The keys a CLI puts a path under: Claude/Codex/Grok `file_path`, OpenCode
 /// `filePath`, Amp/omp/Cursor `path`, Antigravity `TargetFile`/`AbsolutePath`.
 const PATH_KEYS: &[&str] = &[
@@ -898,6 +898,15 @@ pub fn action_from_event(
     if tool_in(READ_TOOLS, tool) {
         if let Some(p) = first_path() {
             a.reads.push(abs(p, cwd));
+        }
+        // Kiro `fs_read` batches its targets: `operations: [{ path, mode }]`.
+        if let Some(ops) = input["operations"].as_array() {
+            for p in ops
+                .iter()
+                .filter_map(|o| o["path"].as_str().filter(|p| !p.is_empty()))
+            {
+                a.reads.push(abs(p, cwd));
+            }
         }
     }
     if let Some(u) = input["url"].as_str().or_else(|| input["Url"].as_str()) {
@@ -3733,6 +3742,20 @@ mod tests {
             ),
             Outcome::Refused
         );
+    }
+
+    #[test]
+    fn kiro_fs_read_targets_are_reads() {
+        let cwd = Path::new("/w");
+        let flat = action_from_event("fs_read", &serde_json::json!({"path": "a.txt"}), cwd, vec![]);
+        assert_eq!(flat.reads, vec![PathBuf::from("/w/a.txt")]);
+        let batched = action_from_event(
+            "fs_read",
+            &serde_json::json!({"operations": [{"mode": "Line", "path": "/x/.env"}]}),
+            cwd,
+            vec![],
+        );
+        assert_eq!(batched.reads, vec![PathBuf::from("/x/.env")]);
     }
 
     #[test]
