@@ -212,7 +212,7 @@ The protocol, from T3's `packages/contracts` and `packages/client-runtime`:
 What this means for Canopy:
 
 - **Canopy app → T3 Code machine** (works today on T3's side):
-  - Add "Connect to a T3 Code machine" in Canopy and paste a pairing link.
+  - Add "Connect to T3 Connect protocol supported machine" in Canopy and paste a pairing link.
   - Canopy redeems the code, keeps the token in the keychain, and connects over
     whatever URL the link names.
   - The desktop (`src-tauri/src/t3_socket.rs`) mints the ticket, opens the

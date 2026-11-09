@@ -1,4 +1,4 @@
-// "Connect to a T3 Code machine…": paste a pairing link, see which machine it
+// "Connect to T3 Connect protocol supported machine": paste a pairing link, see which machine it
 // reaches, then save it. Saved machines open in T3MachineView.
 import { useEffect, useState } from "react";
 import { Button, TextInput } from "../components/ui";
@@ -39,7 +39,7 @@ export function T3Connect({ onOpen }: { onOpen: (machine: T3Machine) => void }) 
   });
 
   return <div className="t3-connect">
-    <p className="workspace-description">Paste a pairing link from T3 Code (Settings → Connections, or <code>t3 pair</code>). It works over any network that reaches the machine: LAN, Tailscale, a tunnel or a T3 Connect address. No T3 account is needed.</p>
+    <p className="workspace-description">Works with any machine that supports the T3 Connect protocol. Paste a pairing link from T3 Code (Settings → Connections, or <code>t3 pair</code>). Any network that reaches the machine works, and no T3 account is needed.</p>
     <label>Pairing link<TextInput width="full" type="url" autoComplete="off" spellCheck={false} placeholder="https://…/pair#token=…" value={link} disabled={busy}
       onChange={event => { setLink(event.target.value); setPreview(null); setError(""); }} /></label>
     {!preview ? <Button disabled={busy || !link.trim()} onClick={() => void check()}>{busy ? "Checking…" : "Check link"}</Button>

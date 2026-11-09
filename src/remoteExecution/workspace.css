@@ -113,6 +113,16 @@
 .workspace-stop-confirm {padding:16px;border:1px solid var(--border-strong);border-radius:8px;}
 .workspace-create {display:flex;flex-direction:column;gap:12px;border-top:1px solid var(--border);padding-top:16px;}
 .workspace-create h3 {margin:0;}
+.workspace-create-heading {display:flex;flex-direction:column;gap:2px;}
+.workspace-create-grid {display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:4px 12px;align-items:start;}
+.workspace-create-grid label {margin:0;min-width:0;}
+.workspace-create-grid .workspace-plan-note {display:block;margin-top:4px;color:var(--text-dim);font-size:var(--fs-xs);line-height:1.4;}
+@media(max-width:560px){.workspace-create-grid {grid-template-columns:minmax(0,1fr);}}
+.workspace-tools > * {flex-shrink:0;}
+.workspace-tools > details.workspace-section {border:1px solid var(--border);border-radius:var(--r-sm);padding:10px 12px;}
+.workspace-tools > details.workspace-section[open] {padding-bottom:12px;}
+.workspace-section > summary {display:flex;flex-direction:column;gap:2px;font-weight:600;}
+.workspace-section > summary small {font-weight:400;color:var(--text-dim);}
 .workspace-create select {display:block;width:100%;padding:10px;color:var(--text);background:var(--bg);border:1px solid var(--border);border-radius:4px;}
 @media(prefers-reduced-motion:reduce){.dlg-panel:has(.workspace-tools){animation:none;}}
 .workspace-import-list {display:flex;flex-direction:column;gap:8px;margin:12px 0;}
