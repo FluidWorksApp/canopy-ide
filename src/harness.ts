@@ -196,6 +196,11 @@ export const RULE_ENFORCEMENT: Readonly<Record<string, HarnessCapability>> = {
     note: "PreToolUse with Claude's tool names; denies with decision \"deny\".",
     source: `docs.x.ai/build/features/hooks (${CHECKED}); grok 1.0.46 embedded docs`,
   },
+  kiro: {
+    support: "native",
+    note: "preToolUse hook on the canopy agent matches every tool; exit code 2 blocks the call and returns the reason to the model.",
+    source: "kiro-cli 3.1.0 hook triggers read from the binary; exit-code-2 block per Kiro's hooks docs, not yet exercised against a signed-in session; src-tauri/src/agents.rs setup_kiro_hooks",
+  },
   agy: {
     support: "native",
     note: "PreToolUse on run_command, the file writers, view_file and read_url_content; denies with decision \"deny\", otherwise defers to Antigravity's own permissions.",

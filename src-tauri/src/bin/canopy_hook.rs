@@ -235,7 +235,9 @@ fn gate_deny_output(agent: Option<&str>, reason: &str) -> Option<serde_json::Val
             "agent_message": reason,
             "user_message": "Canopy stopped this tool call — see the card on the agent's terminal.",
         })),
-        Some("grok") | Some("agy") | Some("opencode") | Some("omp") | Some("amp") => {
+        // Kiro blocks on exit code 2 with the reason on stderr, not on stdout;
+        // the caller prints this value's `reason` that way (see real_main).
+        Some("kiro") | Some("grok") | Some("agy") | Some("opencode") | Some("omp") | Some("amp") => {
             Some(serde_json::json!({ "decision": "deny", "reason": reason }))
         }
         _ => None,
@@ -772,6 +774,12 @@ fn real_main() -> Result<(), Box<dyn std::error::Error>> {
     // A gate's deny, in the contract of the CLI that asked (gate_deny_output).
     if let Some(reason) = gate.as_ref().and_then(|g| g.deny.clone()) {
         if let Some(out) = gate_deny_output(agent_override.as_deref(), &reason) {
+            if agent_override.as_deref() == Some("kiro") {
+                // Kiro's preToolUse contract (kiro.dev/docs/cli/hooks): exit 0
+                // allows, exit 2 blocks and hands STDERR to the model.
+                eprintln!("{reason}");
+                std::process::exit(2);
+            }
             print_verdict(&out);
             return Ok(());
         }
@@ -867,6 +875,29 @@ fn real_main() -> Result<(), Box<dyn std::error::Error>> {
                         }
                     });
                     println!("{out}");
+                }
+            }
+        }
+        // Kiro adds a hook's plain-text stdout to the conversation for
+        // agentSpawn and userPromptSubmit (kiro.dev/docs/cli/hooks), so the
+        // peer and rules context goes out as text, not Claude's JSON shape.
+        Some("kiro") => {
+            if hook_event == "UserPromptSubmit" || hook_event == "SessionStart" {
+                let always = hook_event == "SessionStart";
+                let peers = peer_context(&session_id, &cwd)
+                    .filter(|c| peer_context_changed(&session_id, c) || always);
+                let rules = always
+                    .then(|| {
+                        gates::load_policy(&home(), std::path::Path::new(&cwd))
+                            .and_then(|(_, p)| gates::session_context(&p))
+                    })
+                    .flatten();
+                let context = match (peers, rules) {
+                    (Some(p), Some(r)) => Some(format!("{r}\n{p}")),
+                    (p, r) => p.or(r),
+                };
+                if let Some(context) = context {
+                    println!("{context}");
                 }
             }
         }
@@ -983,6 +1014,32 @@ fn normalize_event(event: &mut serde_json::Value, agent: &str) {
                 "stop_failure" => "StopFailure",
                 "stop_cancelled" => "StopCancelled",
                 "notification" => "Notification",
+                _ => name.as_str(),
+            };
+            map.insert("hook_event_name".into(), serde_json::json!(canonical));
+        }
+    }
+    if agent == "kiro" {
+        // Kiro's triggers are camelCase and its payload is already snake_case
+        // (`hook_event_name`, `cwd`, `tool_name`, `tool_input`, `prompt`,
+        // `assistant_response`). Map the trigger onto the Claude names every
+        // downstream consumer reads; a session id is kept when Kiro sends one.
+        if map.get("session_id").is_none() {
+            if let Some(value) = map.get("sessionId").cloned() {
+                map.insert("session_id".into(), value);
+            }
+        }
+        if let Some(name) = map
+            .get("hook_event_name")
+            .and_then(|v| v.as_str())
+            .map(str::to_string)
+        {
+            let canonical = match name.as_str() {
+                "agentSpawn" => "SessionStart",
+                "userPromptSubmit" => "UserPromptSubmit",
+                "preToolUse" => "PreToolUse",
+                "postToolUse" => "PostToolUse",
+                "stop" => "Stop",
                 _ => name.as_str(),
             };
             map.insert("hook_event_name".into(), serde_json::json!(canonical));
@@ -1698,6 +1755,15 @@ fn edit_records(agent: &str, event: &serde_json::Value) -> Vec<EditRecord> {
             .unwrap_or_default(),
         ("grok", "search_replace") => first_path(&["file_path", "path", "target_file"])
             .map(|p| vec![rec(&p, s(&input["old_string"]), s(&input["new_string"]))])
+            .unwrap_or_default(),
+        // Kiro `fs_write`: `command` is create | str_replace | insert | append,
+        // with `path` and `file_text` / `old_str` / `new_str`.
+        ("kiro", "fs_write") => first_path(&["path"])
+            .map(|p| match input["command"].as_str() {
+                Some("str_replace") => vec![rec(&p, s(&input["old_str"]), s(&input["new_str"]))],
+                Some("create") => vec![rec(&p, None, s(&input["file_text"]))],
+                _ => vec![rec(&p, None, None)],
+            })
             .unwrap_or_default(),
         ("omp", "write") => first_path(&["path"])
             .map(|p| vec![rec(&p, None, s(&input["content"]))])
@@ -7051,6 +7117,11 @@ mod tests {
                 serde_json::json!({"hook_event_name": "PreToolUse", "session_id": "t", "cwd": "/w",
                 "tool_name": "Bash", "tool_input": {"cmd": "rm -rf ~"}}),
             ),
+            (
+                Some("kiro"),
+                serde_json::json!({"hook_event_name": "preToolUse", "cwd": "/w",
+                "tool_name": "execute_bash", "tool_input": {"command": "rm -rf ~"}}),
+            ),
         ];
         for (agent, mut event) in cases {
             let label = agent.unwrap_or("claude");
@@ -8963,6 +9034,43 @@ mod tests {
         assert_eq!(event["cwd"], "/repo");
         assert_eq!(event["hook_event_name"], "UserPromptSubmit");
         assert_eq!(event["canopy_signal"], "turn-start");
+    }
+
+    #[test]
+    fn kiro_triggers_normalize_to_the_shared_lifecycle() {
+        for (trigger, canonical, signal) in [
+            ("agentSpawn", "SessionStart", None),
+            ("userPromptSubmit", "UserPromptSubmit", Some("turn-start")),
+            ("preToolUse", "PreToolUse", None),
+            ("postToolUse", "PostToolUse", Some("turn-progress")),
+            ("stop", "Stop", Some("turn-end")),
+        ] {
+            let mut event = serde_json::json!({
+                "hook_event_name": trigger,
+                "cwd": "/repo",
+                "tool_name": "fs_write"
+            });
+            normalize_event(&mut event, "kiro");
+            assert_eq!(event["agent"], "kiro");
+            assert_eq!(event["hook_event_name"], canonical, "{trigger}");
+            assert_eq!(event["cwd"], "/repo");
+            assert_eq!(event.get("canopy_signal").and_then(|v| v.as_str()), signal, "{trigger}");
+        }
+    }
+
+    #[test]
+    fn kiro_fs_write_is_an_edit_after_a_tool_runs() {
+        let mut event = serde_json::json!({
+            "hook_event_name": "postToolUse",
+            "cwd": "/repo",
+            "tool_name": "fs_write",
+            "tool_input": { "command": "str_replace", "path": "src/a.rs", "old_str": "a", "new_str": "b" }
+        });
+        normalize_event(&mut event, "kiro");
+        assert_eq!(
+            edit_records("kiro", &event),
+            vec![rec("/repo/src/a.rs", Some("a"), Some("b"))]
+        );
     }
 
     #[test]

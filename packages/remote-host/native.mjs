@@ -154,7 +154,7 @@ familyContext.prObserver=prObserver;
 // The Rules panel's approved gates and approve-once tokens, written where this
 // workspace's canopy-hook reads them (gates.mjs).
 const workspaceGates=new WorkspaceGates({home:HOME,run:(bin,argv,cwd)=>run(bin,argv,cwd)});
-const CLIS=['claude','codex','amp','aider','agy','opencode','omp','cursor-agent','grok'];
+const CLIS=['claude','codex','amp','aider','agy','opencode','omp','cursor-agent','grok','kiro-cli'];
 const MAX_DESKTOP_CLIPBOARD=1024*1024;
 const desktopEnv=()=>({...process.env,HOME,DISPLAY:':99',XDG_RUNTIME_DIR:HOME+'/.cache/runtime'});
 function desktopClipboardWrite(selection,text){

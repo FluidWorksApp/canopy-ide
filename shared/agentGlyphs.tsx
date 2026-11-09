@@ -15,6 +15,7 @@
 //   Antigravity — lobe-icons `antigravity`, in Google's four brand colours
 //   Cursor   — lobe-icons `cursor` (currentColor; the brand is black-on-white)
 //   Grok     — lobe-icons `grok` (currentColor, same reason)
+//   Kiro     — lobe-icons `kiro` (currentColor, same reason)
 //   others   — a terminal glyph (matches the app's Shell row)
 
 import type { ReactElement } from 'react'
@@ -155,6 +156,14 @@ export function GrokIcon({ size = 14, className }: P) {
   )
 }
 
+export function KiroIcon({ size = 14, className }: P) {
+  return (
+    <svg {...brand(size, className, '0 0 24 24')} fill="currentColor" fillRule="evenodd">
+      <path d="M4.594 6.677C6.67-2.226 18.746-2.211 21.16 6.632c.353 1.297 1.725 7.582-1.673 13.747-1.545 2.797-5.841 5.49-6.99 1.883C8.6 25.477 3.315 24.1 5.789 18.609l-.318.143c-3.57 1.305-3.863-1.208-3.173-2.513.45-.84.727-1.335.937-1.897.353-.975.458-1.568.593-2.498.27-1.837.277-3.607.765-5.167zm8.37.01a.92.92 0 00-.81.428c-.217.323-.33.825-.33 1.462 0 .705.15 1.89 1.14 1.89h.008c.757 0 1.214-.705 1.214-1.89 0-.622-.127-1.125-.367-1.455a1.014 1.014 0 00-.855-.435zm4.08 0a.92.92 0 00-.81.428c-.217.323-.33.825-.33 1.462 0 .705.15 1.89 1.14 1.89h.008c.757 0 1.215-.705 1.215-1.89 0-.622-.128-1.125-.368-1.455a1.014 1.014 0 00-.855-.435z" />
+    </svg>
+  )
+}
+
 /** Terminal glyph — the app's fallback for CLIs with no brand mark (Shell),
  *  and for anything unknown. The set's shell, at the set's weight; it was a
  *  bare chevron and underscore at a weight of its own. */
@@ -173,6 +182,7 @@ const BRAND: Record<string, (p: P) => ReactElement> = {
   agy: AntigravityIcon,
   cursor: CursorIcon,
   grok: GrokIcon,
+  kiro: KiroIcon,
 }
 
 /** The hue each mark is drawn in, as data.

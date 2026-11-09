@@ -92,6 +92,10 @@ export const MODEL_SWITCH: Record<string, ModelSwitch> = {
   omp: { kind: "picker", command: "/model" },
   cursor: { kind: "picker", command: "/model" },
   grok: { kind: "picker", command: "/model" },
+  // Verified in the kiro-cli 3.1.0 binary: `/model` is in its slash command
+  // table, and `kiro-cli chat --list-models` shows the set is account-bound,
+  // so the picker is the only list that can be right.
+  kiro: { kind: "picker", command: "/model" },
   // Deliberately absent — nothing here could be verified:
   //   amp: its only "/model" string is a `provider/model` format error.
 };

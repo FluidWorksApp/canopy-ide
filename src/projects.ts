@@ -1467,6 +1467,57 @@ export const BUILTIN_AGENT_CLIS: AgentCliDef[] = [
       launchArgs: (config) => option("--model", config.model),
     },
   },
+  {
+    id: "kiro",
+    name: "Kiro CLI",
+    bin: "kiro-cli",
+    icon: "◈",
+    brandColor: "#9046FF",
+    capabilities: {
+      managedIntegration: true,
+    },
+    modelSwitch: MODEL_SWITCH.kiro,
+    install: "curl -fsSL https://cli.kiro.dev/install | bash",
+    update: "kiro-cli update",
+    // Kiro updates itself on startup, but its only off-switch is the settings
+    // key `app.disableAutoupdates` (`kiro-cli settings list`), not an
+    // environment variable, so Canopy cannot suppress it per launch. It runs
+    // the documented `kiro-cli update` instead.
+    autoUpdate: {
+      mechanism: "canopy",
+      verification: {
+        cliVersion: "3.1.0",
+        checkedOn: "2026-10-27",
+        source: "`kiro-cli update --help`; `kiro-cli settings list` (app.disableAutoupdates)",
+      },
+    },
+    // Verified against kiro-cli 3.1.0 --help: the top-level command takes
+    // `--resume-id <SESSION_ID>` and `--agent <AGENT>` as shorthands for
+    // `chat --resume-id` / `chat --agent`.
+    resume: (id, bin) => `${bin} --resume-id ${id}`,
+    // A bare word at the top level is read as a subcommand, so the opening
+    // prompt goes to `chat`, whose [INPUT] is "The first question to ask".
+    prompt: (text, bin) => `${bin} chat ${shellQuote(text)}`,
+    // Kiro runs hooks only from the active agent's config. Canopy installs a
+    // global agent named `canopy` (agents.rs setup_kiro_hooks) that mirrors the
+    // default agent and carries the hooks; an unknown agent name falls back to
+    // Kiro's default, so a machine without it still launches.
+    sessionArgs: "--agent canopy",
+    skipPermissions: "--trust-all-tools",
+    // No reviewed automatic mode is documented: `--trust-tools=<names>` trusts
+    // a fixed set rather than classifying calls, so Kiro keeps asking unless
+    // the user opts in to skipPermissions.
+    execution: {
+      fields: [
+        modelField(undefined, "auto"),
+        effortField(["low", "medium", "high", "xhigh", "max"]),
+      ],
+      launchArgs: (config) => [
+        ...option("--model", config.model),
+        ...option("--effort", config.effort),
+      ],
+    },
+  },
 ];
 
 /** Agents users run by hand that we don't ship a launcher entry for. Their id

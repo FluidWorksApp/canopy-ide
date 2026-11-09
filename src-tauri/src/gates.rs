@@ -799,6 +799,8 @@ const SHELL_TOOLS: &[&str] = &[
     "execute_command",
     "run_command",
     "shell_command",
+    // Kiro CLI: `execute_bash` (V2) and `shell` (above) with `command`.
+    "execute_bash",
 ];
 /// Writers: Claude's set, Gemini's `replace`/`write_file`, Amp's
 /// `create_file`/`edit_file`, Antigravity's `write_to_file` family, Grok's
@@ -818,6 +820,8 @@ const WRITE_TOOLS: &[&str] = &[
     "search_replace",
     "delete",
     "delete_file",
+    // Kiro CLI `fs_write` (create, str_replace, insert, append) with `path`.
+    "fs_write",
 ];
 const READ_TOOLS: &[&str] = &["read", "read_file", "view", "view_file", "notebookread"];
 /// The keys a CLI puts a path under: Claude/Codex/Grok `file_path`, OpenCode

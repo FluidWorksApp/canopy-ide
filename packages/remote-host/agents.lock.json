@@ -83,6 +83,25 @@
       }
     }
   },
+  "kiro": {
+    "kind": "archive",
+    "version": "3.1.0",
+    "format": "tar.gz",
+    "strip": 1,
+    "bin": {
+      "kiro-cli": "bin/kiro-cli"
+    },
+    "platforms": {
+      "amd64": {
+        "url": "https://prod.download.cli.kiro.dev/stable/{version}/kirocli-x86_64-linux.tar.gz",
+        "sha512": "74ab9c4f4f7db63bedd182397ce3f9dc52cb32f4c6a713628144ff07eabf5bfca44e24e827588de2845ea04edf7b94dc614177e8b755d5af2f5e4b9a662c8724"
+      },
+      "arm64": {
+        "url": "https://prod.download.cli.kiro.dev/stable/{version}/kirocli-aarch64-linux.tar.gz",
+        "sha512": "5fbc23121d8257f24210e6e95dc27c50f8bccd4b07d094992e457dfd91eb2dd0f7e8ecc6a7a80bee96626f852869c549dfe112c2386bc902161594c4c51347a2"
+      }
+    }
+  },
   "opencode": {
     "kind": "npm",
     "package": "opencode-ai",
