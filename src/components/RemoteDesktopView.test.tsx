@@ -20,6 +20,14 @@ const ev = (o: Partial<DeskStateEvent> = {}): DeskStateEvent => ({
 });
 
 describe("consent dialog", () => {
+  it("hides Accept control when the viewer only asked to view", () => {
+    render(
+      <DeskOverlay desk={ev({ requested: "view-only" })} frames={createFrameBus()} onDismiss={() => {}} />,
+    );
+    expect(screen.getByText("Accept view-only")).toBeTruthy();
+    expect(screen.queryByText("Accept control")).toBeNull();
+  });
+
   it("accepting view-only calls desk_respond with view-only", async () => {
     const respond = vi.fn(() => null);
     mockCommands({ desk_respond: respond });
@@ -182,5 +190,28 @@ describe("Remote desktop action", () => {
     r.status.role = "off";
     const { container } = render(<RemoteDesktopMembers relay={r} />);
     expect(container).toBeEmptyDOMElement();
+  });
+});
+
+describe("held input", () => {
+  it("releases a held key when the canvas loses focus", async () => {
+    const send = vi.fn(() => null);
+    mockCommands({ desk_send_input: send });
+    render(
+      <RemoteDesktopView
+        view={ev({ role: "viewer", state: "active", mode: "control" })}
+        frames={createFrameBus()}
+        onClose={() => {}}
+      />,
+    );
+    const c = screen.getByLabelText("Remote screen");
+    fireEvent.keyDown(c, { code: "ControlLeft" });
+    fireEvent.blur(c);
+    await waitFor(() =>
+      expect(send).toHaveBeenLastCalledWith({
+        session: "s1",
+        event: { kind: "key", code: "ControlLeft", down: false },
+      }),
+    );
   });
 });

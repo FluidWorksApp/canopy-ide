@@ -42,6 +42,8 @@ export interface DeskStateEvent {
   peer: string;
   peer_name: string;
   mode: DeskMode | null;
+  /** What the viewer asked for; absent on older payloads. */
+  requested?: DeskMode;
   reason?: string | null;
 }
 

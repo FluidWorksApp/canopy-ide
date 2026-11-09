@@ -320,6 +320,8 @@ pub struct DeskStateEvent {
     pub peer_name: String,
     /// "view-only" | "control" once active.
     pub mode: Option<&'static str>,
+    /// What the viewer asked for: "view-only" | "control".
+    pub requested: &'static str,
     pub reason: Option<String>,
 }
 
@@ -361,6 +363,7 @@ fn event_for(info: &SessionInfo, peer_name: &str, reason: Option<String>) -> Des
         peer: info.peer.clone(),
         peer_name: peer_name.to_string(),
         mode,
+        requested: mode_str(info.requested),
         reason,
     }
 }
@@ -589,6 +592,7 @@ pub async fn desk_respond(
                 peer,
                 role: canopy_core::desk::Role::Target,
                 phase: Phase::Ended,
+                requested: Mode::ViewOnly,
             };
             emit(&app, &ended, &name, Some(reason.to_string()));
             match unavailable {
@@ -720,6 +724,7 @@ fn spawn_input(
                 Ok(s) => s,
                 Err(e) => return finish(&app, &session, &e, true),
             };
+            let mut held = canopy_core::desk::HeldInput::new();
             while alive.load(Ordering::SeqCst) {
                 match rx.recv_timeout(Duration::from_millis(100)) {
                     Ok(event) => {
@@ -728,13 +733,22 @@ fn spawn_input(
                         if !alive.load(Ordering::SeqCst) {
                             break;
                         }
+                        held.note(&event);
                         if let Err(e) = sink.apply(&event) {
+                            for up in held.release_all() {
+                                let _ = sink.apply(&up);
+                            }
                             return finish(&app, &session, &e, true);
                         }
                     }
                     Err(RecvTimeoutError::Timeout) => {}
                     Err(RecvTimeoutError::Disconnected) => break,
                 }
+            }
+            // Session over (End, revoke, disconnect): never leave a modifier
+            // or button held on the target.
+            for up in held.release_all() {
+                let _ = sink.apply(&up);
             }
         }
     });
@@ -805,11 +819,13 @@ mod tests {
             peer: "p".into(),
             role: canopy_core::desk::Role::Target,
             phase: Phase::Active(Mode::ViewOnly),
+            requested: Mode::Control,
         };
         let v = serde_json::to_value(event_for(&info, "Sam", None)).unwrap();
         assert_eq!(v["state"], "active");
         assert_eq!(v["role"], "target");
         assert_eq!(v["mode"], "view-only");
+        assert_eq!(v["requested"], "control");
         assert_eq!(v["peer_name"], "Sam");
     }
 

@@ -37,17 +37,20 @@ function send(session: string, event: InputEvent) {
 export function ConsentDialog({ session }: { session: DeskStateEvent }) {
   const answer = (accept: boolean, mode: DeskMode) =>
     void ipc.deskRespond(session.session, accept, mode).catch(() => {});
+  const viewOnly = session.requested === "view-only";
   return (
     <Dialog
       variant="accent"
       title={`${session.peer_name} wants to see your screen`}
-      body="Nothing is shared until you choose. You can stop the session at any time from the banner at the top of the window."
-      meta="Control lets them move your mouse and type on this computer."
+      body={`${viewOnly ? "They asked to view only. " : ""}Nothing is shared until you choose. You can stop the session at any time from the banner at the top of the window. Names are chosen by each person, so only accept from someone you expect.`}
+      meta={viewOnly ? "They will not be able to move your mouse or type." : "Control lets them move your mouse and type on this computer."}
       dismissLabel="Deny"
       onDismiss={() => answer(false, "view-only")}
       actions={[
         { label: "Accept view-only", primary: true, onClick: () => answer(true, "view-only") },
-        { label: "Accept control", onClick: () => answer(true, "control") },
+        ...(viewOnly
+          ? []
+          : [{ label: "Accept control", onClick: () => answer(true, "control") }]),
       ]}
     />
   );
@@ -78,6 +81,7 @@ export function RemoteDesktopView({
   const moveGate = useRef(createThrottle(MOVE_GAP_MS));
   const sessionRef = useRef(view.session);
   sessionRef.current = view.session;
+  const held = useRef(new Set<string>());
   const control = canSendInput(view);
   const live = view.state !== "ended";
 
@@ -93,6 +97,11 @@ export function RemoteDesktopView({
             const bin = atob(f.jpeg_b64);
             const bytes = Uint8Array.from(bin, (c) => c.charCodeAt(0));
             const bmp = await createImageBitmap(new Blob([bytes], { type: "image/jpeg" }));
+            // Trust the decoded size, not the peer's header, and bound it.
+            if (bmp.width > 4096 || bmp.height > 4096 || bmp.width !== f.w || bmp.height !== f.h) {
+              bmp.close();
+              return;
+            }
             if (el.width !== f.w) el.width = f.w;
             if (el.height !== f.h) el.height = f.h;
             el.getContext("2d")?.drawImage(bmp, 0, 0);
@@ -112,7 +121,25 @@ export function RemoteDesktopView({
     return pointerToNormalized(clientX, clientY, r, size.current.w, size.current.h);
   }, []);
 
+  const releaseHeld = () => {
+    for (const k of held.current) {
+      if (k.startsWith("b:")) {
+        send(sessionRef.current, { kind: "mouse-button", button: k.slice(2) as Extract<InputEvent, { kind: "mouse-button" }>["button"], down: false });
+      } else {
+        send(sessionRef.current, { kind: "key", code: k.slice(2), down: false });
+      }
+    }
+    held.current.clear();
+  };
+
   const emit = (event: InputEvent) => {
+    if (event.kind === "key") {
+      if (event.down) held.current.add(`k:${event.code}`);
+      else held.current.delete(`k:${event.code}`);
+    } else if (event.kind === "mouse-button") {
+      if (event.down) held.current.add(`b:${event.button}`);
+      else held.current.delete(`b:${event.button}`);
+    }
     if (control) send(view.session, event);
   };
 
@@ -140,6 +167,7 @@ export function RemoteDesktopView({
         className="desk-canvas"
         tabIndex={0}
         aria-label="Remote screen"
+        onBlur={releaseHeld}
         onContextMenu={(e) => control && e.preventDefault()}
         onMouseMove={(e) => {
           if (!control || !moveGate.current(performance.now())) return;

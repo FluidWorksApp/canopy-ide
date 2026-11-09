@@ -78,8 +78,11 @@ teammate with a problem, not for replacing a remote workstation.
 | Oversized or malformed frames | Validated before fan-out: frame cap 1.5 MiB base64, dimension cap, text cap, strict key allow list, normalized coordinates must be in 0..1. Unknown message kinds fail to parse and are dropped. |
 | Replayed or stale frames | Frame `seq` must strictly increase. |
 | Remote user types dangerous shortcuts | Keys outside the allow list are refused. Control is something the local user grants knowingly, and they can stop it instantly. |
-| Forgotten session | Sessions end on disconnect, relay stop and app exit. A pending request expires. |
-| Sniffing | Everything rides the SPAKE2 plus ChaCha20-Poly1305 relay link. |
+| Forgotten session | Sessions end on disconnect, relay stop and app exit. A pending request expires after 60 seconds on both sides and frees the session slot. |
+| Sniffing by other members or the network | Each link is SPAKE2 plus ChaCha20-Poly1305. |
+| The relay host | Encryption is per link, not end to end. The host decrypts and re-seals every message, so it can see the screen and can forge the sender. Only share with teams whose host you trust. |
+| Name lookalikes | Names are self-chosen. The consent dialog reminds you to accept only from someone you expect. |
+| Stuck keys | Keys and buttons held on the target are released when a session ends, and the viewer releases them on blur. |
 
 Not covered: a teammate you accept control for can do anything you can do at the
 keyboard. Only grant control to people you trust, and prefer view-only.

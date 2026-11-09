@@ -32,7 +32,7 @@ pub const MAX_FRAME_B64: usize = 1_572_864;
 /// Longest text run a single `Text` input may carry, in characters.
 pub const MAX_TEXT_CHARS: usize = 256;
 /// Sanity bound on advertised frame dimensions.
-pub const MAX_DIMENSION: u32 = 8192;
+pub const MAX_DIMENSION: u32 = 4096;
 /// Captured frames are downscaled to at most this width before encoding.
 pub const MAX_CAPTURE_WIDTH: u32 = 1600;
 /// Longest free-text reason carried by Deny and End.
@@ -412,6 +412,8 @@ pub struct SessionInfo {
     pub peer: String,
     pub role: Role,
     pub phase: Phase,
+    /// The mode the viewer asked for (the target may grant less).
+    pub requested: Mode,
 }
 
 #[derive(Debug)]
@@ -446,6 +448,7 @@ impl DeskSession {
             peer: self.peer.clone(),
             role: self.role,
             phase: self.phase,
+            requested: self.requested,
         }
     }
 
@@ -497,6 +500,21 @@ impl DeskHub {
         })
     }
 
+    /// Drop a request nobody answered within [`REQUEST_TTL_MS`], on either
+    /// side, so an ignored request cannot hold the single session slot.
+    /// Active sessions are never expired here.
+    pub fn expire(&mut self, now_ms: u64) -> Option<SessionInfo> {
+        let stale = self.session.as_ref().map_or(false, |s| {
+            s.phase == Phase::Requested && now_ms.saturating_sub(s.created_ms) > REQUEST_TTL_MS
+        });
+        if !stale {
+            return None;
+        }
+        let mut info = self.session.take()?.info();
+        info.phase = Phase::Ended;
+        Some(info)
+    }
+
     /// Viewer starts a request to `peer`.
     pub fn request_out(
         &mut self,
@@ -508,6 +526,7 @@ impl DeskHub {
         if !valid_session_id(id) {
             return Err(DeskError::BadSessionId);
         }
+        self.expire(now_ms);
         if self.session.is_some() {
             return Err(DeskError::Busy);
         }
@@ -594,6 +613,7 @@ impl DeskHub {
         body.validate()?;
 
         if let DeskBody::Request { mode } = body {
+            self.expire(now_ms);
             if self.session.is_some() {
                 return Err(DeskError::Busy);
             }
@@ -694,6 +714,56 @@ impl DeskHub {
             Phase::Active(Mode::ViewOnly) => Err(DeskError::ViewOnly),
             _ => Err(DeskError::NotActive),
         }
+    }
+}
+
+/// Tracks keys and buttons currently held on the target so they can be
+/// released when a session ends or events were dropped.
+#[derive(Debug, Default)]
+pub struct HeldInput {
+    keys: Vec<String>,
+    buttons: Vec<Button>,
+}
+
+impl HeldInput {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Record an event that is about to be (or was) applied.
+    pub fn note(&mut self, event: &InputEvent) {
+        match event {
+            InputEvent::Key { code, down: true } => {
+                if !self.keys.contains(code) {
+                    self.keys.push(code.clone());
+                }
+            }
+            InputEvent::Key { code, down: false } => self.keys.retain(|k| k != code),
+            InputEvent::MouseButton { button, down: true } => {
+                if !self.buttons.contains(button) {
+                    self.buttons.push(*button);
+                }
+            }
+            InputEvent::MouseButton { button, down: false } => self.buttons.retain(|b| b != button),
+            _ => {}
+        }
+    }
+
+    /// Release events for everything still held, newest first. Clears state.
+    pub fn release_all(&mut self) -> Vec<InputEvent> {
+        let mut out: Vec<InputEvent> = self
+            .buttons
+            .drain(..)
+            .rev()
+            .map(|button| InputEvent::MouseButton { button, down: false })
+            .collect();
+        out.extend(
+            self.keys
+                .drain(..)
+                .rev()
+                .map(|code| InputEvent::Key { code, down: false }),
+        );
+        out
     }
 }
 
@@ -939,6 +1009,57 @@ mod tests {
         let mut hub = target_pending(Mode::Control);
         hub.respond(S, true, mode, 10, "").unwrap();
         hub
+    }
+
+    #[test]
+    fn unanswered_request_expires_and_frees_the_slot() {
+        let mut hub = DeskHub::new();
+        hub.handle("a", S, &DeskBody::Request { mode: Mode::Control }, 0)
+            .unwrap();
+        assert_eq!(
+            hub.handle("b", "sess-2", &DeskBody::Request { mode: Mode::Control }, 1),
+            Err(DeskError::Busy)
+        );
+        let late = REQUEST_TTL_MS + 1;
+        assert!(hub
+            .handle("b", "sess-2", &DeskBody::Request { mode: Mode::Control }, late)
+            .is_ok());
+        assert_eq!(hub.current().unwrap().peer, "b");
+        // Viewer side too, and active sessions never expire.
+        let mut v = DeskHub::new();
+        v.request_out("sess-3", "t", Mode::Control, 0).unwrap();
+        assert!(v.expire(REQUEST_TTL_MS + 1).is_some());
+        assert!(v.current().is_none());
+        let mut t = DeskHub::new();
+        t.handle("a", S, &DeskBody::Request { mode: Mode::Control }, 0)
+            .unwrap();
+        t.respond(S, true, Mode::Control, 1, "").unwrap();
+        assert!(t.expire(REQUEST_TTL_MS * 10).is_none());
+    }
+
+    #[test]
+    fn held_input_releases_everything_still_down() {
+        let mut h = HeldInput::new();
+        let k = |c: &str, down| InputEvent::Key { code: c.into(), down };
+        h.note(&k("ControlLeft", true));
+        h.note(&k("KeyA", true));
+        h.note(&k("KeyA", false));
+        h.note(&InputEvent::MouseButton { button: Button::Left, down: true });
+        let rel = h.release_all();
+        assert_eq!(
+            rel,
+            vec![
+                InputEvent::MouseButton { button: Button::Left, down: false },
+                k("ControlLeft", false)
+            ]
+        );
+        assert!(h.release_all().is_empty());
+    }
+
+    #[test]
+    fn oversized_frame_dimensions_are_rejected() {
+        let b = DeskBody::Frame { seq: 1, w: MAX_DIMENSION + 1, h: 10, jpeg_b64: "AAAA".into() };
+        assert_eq!(b.validate(), Err(DeskError::BadDimensions));
     }
 
     #[test]
