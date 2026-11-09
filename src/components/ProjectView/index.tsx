@@ -15106,6 +15106,8 @@ const ProjectViewBody = memo(function ProjectViewBody({
         <TeamPanel
           onOpenAccountChat={openAccountChat}
           visible={sideTab === "team"}
+          relay={relay}
+          onNotice={onNotice}
         />
       ))}
       {sidePane("tasks", () => (

@@ -28997,3 +28997,75 @@ a.btn-sm {
   padding: 9px 20px 12px;
   border-top: 1px solid var(--border);
 }
+
+/* Remote desktop (docs/remote-desktop.md). The banner is the controlled-side
+   indicator: it sits above everything and cannot be dismissed, only stopped. */
+.desk-banner {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  z-index: 400;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  padding: 6px 12px;
+  background: var(--danger);
+  color: var(--on-danger);
+  font-size: var(--fs-sm);
+  font-weight: 600;
+}
+.desk-banner .btn {
+  border-color: var(--on-danger);
+  color: var(--on-danger);
+}
+.desk-banner .btn:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--on-danger) 14%, transparent);
+}
+.desk-viewer {
+  position: fixed;
+  inset: 48px 24px 24px;
+  z-index: 300;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg-overlay);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--r-md);
+  box-shadow: var(--shadow-2);
+  overflow: hidden;
+}
+.desk-viewer-bar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 12px;
+  font-size: var(--fs-sm);
+}
+.desk-spacer { flex: 1; }
+.desk-badge {
+  padding: 1px 8px;
+  border-radius: var(--r-sm);
+  border: 1px solid var(--border-strong);
+}
+.desk-badge.control { border-color: var(--danger); color: var(--danger); }
+.desk-status { color: var(--text-muted); }
+.desk-canvas {
+  flex: 1;
+  min-height: 0;
+  width: 100%;
+  object-fit: contain;
+  background: var(--bg-deep);
+  outline: none;
+}
+.desk-canvas:focus-visible { box-shadow: inset var(--ring); }
+.desk-members { padding: 8px 12px; }
+.desk-member-row { align-items: center; }
+.desk-member-actions { display: flex; gap: 6px; flex: 0 0 auto; }
+.desk-request-status,
+.desk-inline-error,
+.desk-trust { display: block; margin-top: 3px; font-size: var(--fs-xs); }
+.desk-request-status,
+.desk-trust { color: var(--text-muted); }
+.desk-inline-error,
+.desk-trust.changed { color: var(--danger); }

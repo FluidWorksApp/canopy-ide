@@ -22,6 +22,7 @@ import {
   useEffect,
   useMemo,
   useRef,
+  useReducer,
   useState,
   useSyncExternalStore,
 } from "react";
@@ -198,6 +199,8 @@ import { BrainConnectHost } from "./components/BrainConnect";
 import { openBrainConnect } from "./brainConnect";
 import { Welcome } from "./components/Welcome";
 import { Dialog } from "./components/Dialog";
+import { DeskOverlay } from "./components/RemoteDesktopView";
+import { createDeskHydrationGate, createFrameBus, deskReducer, type DeskMode } from "./desk";
 import { TerminalGovernorCard } from "./components/TerminalGovernorDialog";
 import {
   terminalMemoryQuotaSummary,
@@ -804,6 +807,12 @@ export default function App() {
   // Narrowed once here: the useMemo below can't see the control-flow guard.
   const collabMgr = collab.current;
   const [collabTick, setCollabTick] = useState(0);
+  // Remote desktop: one session at a time, owned here so the single relay
+  // subscription feeds it. Frames go to a bus, not state.
+  const [desk, dispatchDesk] = useReducer(deskReducer, null);
+  const deskFrames = useMemo(() => createFrameBus(), []);
+  const deskAttentionQuestions = useRef(new Map<string, string>());
+  const deskAttentionAnnouncements = useRef(new Set<string>());
   // The relay we're persisting chat under = the host's stable identity key.
   // Null when off, so the persist effect never writes an empty transcript.
   const relayChatLabel = useRef<string | null>(null);
@@ -1248,6 +1257,7 @@ export default function App() {
     }).catch((error) => {
       if (!cancelled) setWorkspaceLoadError(String(error));
     });
+    const deskHydration = createDeskHydrationGate();
     const subs = [
       ipc.onAgentEvents((raws) => {
         // Parsed once here; consumers read fields off `data`. Re-parsing the
@@ -1345,6 +1355,75 @@ export default function App() {
           where: { kind: "panel", panel: "team" },
         });
       }),
+      ipc.onDeskState((event) => {
+        deskHydration.observeLiveEvent();
+        dispatchDesk({ type: "state", event });
+        if (event.role !== "target") return;
+
+        // The consent dialog is the real prompt. Notifications preserve both
+        // the pending decision and the later active grant if the window is not
+        // in front.
+        if (event.state === "requested") {
+          const id = postAttention({
+            kind: "question",
+            tone: "warn",
+            title: `${event.peer_name} wants to see your screen`,
+            body: "Accept or deny in the dialog. Nothing is shared until you accept.",
+            source: "team",
+            where: { kind: "panel", panel: "team" },
+            dedupeKey: `desk:${event.session}`,
+          });
+          deskAttentionQuestions.current.set(event.session, id);
+          return;
+        }
+
+        const question = deskAttentionQuestions.current.get(event.session);
+        if (question) {
+          resolveAttention(question, event.state === "active" ? "answered" : "dismissed");
+          deskAttentionQuestions.current.delete(event.session);
+        }
+        const key = `${event.session}:${event.state}`;
+        if (deskAttentionAnnouncements.current.has(key)) return;
+        deskAttentionAnnouncements.current.add(key);
+
+        if (event.state === "active") {
+          const controlling = event.mode === "control";
+          postAttention({
+            kind: "fyi",
+            tone: controlling ? "warn" : "info",
+            title: `${event.peer_name} is now ${controlling ? "controlling" : "viewing"} your screen`,
+            body: "Use Stop in the persistent banner to end access immediately.",
+            source: "team",
+            where: { kind: "panel", panel: "team" },
+            dedupeKey: `desk-active:${event.session}`,
+          });
+        } else {
+          const expired = /expir/i.test(event.reason ?? "");
+          postAttention({
+            kind: "fyi",
+            tone: "info",
+            title: expired ? "Remote desktop request expired" : "Remote desktop access ended",
+            body: event.reason || `${event.peer_name} no longer has access.`,
+            source: "team",
+            where: { kind: "panel", panel: "team" },
+            dedupeKey: `desk-ended:${event.session}`,
+          });
+        }
+      }).then((unlisten) => {
+        // Register the listener before asking for status. If a live event wins
+        // the race with the snapshot, it is authoritative and the snapshot is
+        // ignored rather than regressing an active or ended session.
+        void ipc
+          .deskStatus()
+          .then((status) => {
+            if (status && deskHydration.shouldApplySnapshot()) {
+              dispatchDesk({ type: "state", event: { reason: null, ...status } });
+            }
+          })
+          .catch(() => {});
+        return unlisten;
+      }),
+      ipc.onRelayDesk((m) => deskFrames.publish(m)),
       ipc.onRelayCollab((m) => {
         const mgr = collab.current!;
         const known = mgr.get(m.doc) !== undefined;
@@ -3363,6 +3442,12 @@ export default function App() {
       transfers: relayTransfers,
       collab: collabMgr,
       collabTick,
+      desk,
+      deskFrames,
+      deskRequest: async (to: string, mode: DeskMode) => {
+        await ipc.deskRequest(to, mode);
+      },
+      deskDismiss: () => dispatchDesk({ type: "dismiss" }),
       hostStart: async (name, visibility, port) => {
         setRelayStatus(await ipc.relayHostStart(name, visibility, port));
       },
@@ -3400,6 +3485,8 @@ export default function App() {
       relayTransfers,
       collabMgr,
       collabTick,
+      desk,
+      deskFrames,
       relaySendChat,
       relaySendCommand,
       markSeen,
@@ -4064,6 +4151,12 @@ export default function App() {
       {/* Focus mode: chrome slides away but stays reachable — hovering the top
           edge brings the project tabs and the tab strip back. */}
       {zen && <div className="zen-hotzone" />}
+      <DeskOverlay
+        desk={desk}
+        frames={deskFrames}
+        relay={relay}
+        onDismiss={() => dispatchDesk({ type: "dismiss" })}
+      />
       {/* Transient zoom level, shown ~1s after Cmd +/-/0. */}
       {zoomPct !== null && <div className="zoom-indicator">{zoomPct}%</div>}
       {cloudWorkspace && <WorkspaceHooksNotice />}

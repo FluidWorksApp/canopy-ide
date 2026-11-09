@@ -692,9 +692,18 @@ mod stage_tests {
     fn staged_names_keep_a_sanitized_name_and_extension() {
         let p = Path::new("/tmp/My Report (final).PDF");
         assert_eq!(staged_name("abc", p), "abc-my-report-final.pdf");
-        assert_eq!(staged_name("abc", Path::new("/tmp/data.csv")), "abc-data.csv");
-        assert_eq!(staged_name("abc", Path::new("/tmp/Makefile")), "abc-makefile");
-        assert_eq!(staged_name("abc", Path::new("/tmp/a.t%x/../b.s h")), "abc-b.sh");
+        assert_eq!(
+            staged_name("abc", Path::new("/tmp/data.csv")),
+            "abc-data.csv"
+        );
+        assert_eq!(
+            staged_name("abc", Path::new("/tmp/Makefile")),
+            "abc-makefile"
+        );
+        assert_eq!(
+            staged_name("abc", Path::new("/tmp/a.t%x/../b.s h")),
+            "abc-b.sh"
+        );
     }
     #[test]
     fn staged_names_never_contain_separators() {

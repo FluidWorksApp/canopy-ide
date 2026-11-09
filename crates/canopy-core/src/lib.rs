@@ -5,6 +5,7 @@
 
 pub mod bounded_file;
 pub mod claims;
+pub mod desk;
 pub mod events;
 pub mod memory;
 pub mod mesh;

@@ -102,6 +102,13 @@ export interface RelayHandle {
   /** Bumped whenever an offer arrives or a session opens, so the panels that
    *  render them re-run — the manager itself is mutable and outside React. */
   collabTick: number;
+  /** Remote desktop session (null when none). Owned by App; frames bypass
+   *  React via `deskFrames`. */
+  desk: import("./desk").DeskView;
+  deskFrames: import("./desk").FrameBus;
+  /** Ask a connected teammate for their screen. The teammate must accept. */
+  deskRequest: (to: string, mode: import("./desk").DeskMode) => Promise<void>;
+  deskDismiss: () => void;
   hostStart: (
     name: string,
     visibility: "local" | "public",

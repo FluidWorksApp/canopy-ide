@@ -43,6 +43,15 @@ it('hears the desktop context bridge, which answers the companion\'s tools',asyn
  expect(desktop.listen).toHaveBeenCalledTimes(4);
  host.dispose();expect(release).toHaveBeenCalledTimes(4);
 });
+it('keeps local Desk state and frames on the viewing computer',async()=>{
+ const {host,desktop,fetcher}=setup();
+ const release=vi.fn();vi.mocked(desktop.listen).mockResolvedValue(release);
+ await host.listen('desk:state',()=>{});
+ await host.listen('relay:desk',()=>{});
+ expect(vi.mocked(desktop.listen).mock.calls.map(([event])=>event)).toEqual(['desk:state','relay:desk']);
+ expect(fetcher).not.toHaveBeenCalled();
+ host.dispose();expect(release).toHaveBeenCalledTimes(2);
+});
 it('drops a desktop terminal\'s ops, whose pty ids would alias workspace sessions',async()=>{
  const {host,desktop}=setup();
  let fire:((event:HostEvent<unknown>)=>void)|undefined;

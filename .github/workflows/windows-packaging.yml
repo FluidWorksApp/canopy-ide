@@ -48,7 +48,7 @@ jobs:
           # nothing. The tag release separately signs every updater artifact.
           '{"bundle":{"createUpdaterArtifacts":false}}' | Set-Content -Encoding utf8NoBOM packaging-check.json
           $config = (Resolve-Path packaging-check.json).Path
-          npm run tauri -- build --target x86_64-pc-windows-msvc --bundles nsis --config $config
+          npm run tauri -- build --target x86_64-pc-windows-msvc --bundles nsis --features desk-native --config $config
       - name: Verify staged helper, installer and one v6 application manifest
         shell: pwsh
         run: |

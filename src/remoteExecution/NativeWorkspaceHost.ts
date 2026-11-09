@@ -59,7 +59,7 @@ for(const command of ['vault_status','vault_create','vault_unlock','vault_lock',
 for(const command of ['android_sdk_status','android_devices','android_avds','android_emulator_start','android_emulator_stop','android_screencap','android_ui_dump','android_layout','android_foreground','android_tap','android_text','android_swipe','android_key','android_logcat','android_run','android_describe','android_stage_file'])LOCAL_UI.add(command);
 // The LAN relay is hosted by the desktop app between people's computers; its
 // file offers use this computer's dialogs and paths. Its status goes with it.
-for(const command of ['relay_status','relay_host_start','relay_host_stop','relay_regenerate_code','relay_connect','relay_disconnect','relay_send_chat','relay_send_collab','relay_send_command','relay_offer_file','relay_accept_file'])LOCAL_UI.add(command);
+for(const command of ['relay_status','relay_host_start','relay_host_stop','relay_regenerate_code','relay_connect','relay_disconnect','relay_send_chat','relay_send_collab','relay_send_command','relay_offer_file','relay_accept_file','desk_request','desk_respond','desk_send_input','desk_end','desk_status'])LOCAL_UI.add(command);
 // Public links expose this computer's own portal port (tunnel.rs); Linear is a
 // plain HTTPS API called with a key from this computer's settings.
 for(const command of ['tunnel_start','tunnel_stop','tunnel_status','linear_issues','linear_issue_detail','linear_issue_set_state','linear_issue_comment'])LOCAL_UI.add(command);
@@ -70,7 +70,7 @@ for(const command of ['tunnel_start','tunnel_stop','tunnel_status','linear_issue
 for(const command of ['t3_list','t3_describe','t3_pair','t3_remove','t3_socket_open','t3_socket_send','t3_socket_close'])LOCAL_UI.add(command);
 for(const command of ['process_capture_metrics','snapshot_capture_metrics','browser_close_metrics','browser_pressure_reload_metrics','selftest_checkpoint','selftest_checkpoint_save','selftest_finish','selftest_reload_renderer','selftest_spawn_remote','selftest_store_contains','cli_install_shim','cli_take_pending_targets','cli_take_pending_open','cli_take_pending_link','workspace_export','workspace_import'])LOCAL_UI.add(command);
 /** Desktop events that belong to the commands above. */
-const DESKTOP_EVENTS=['relay:state','relay:chat','relay:command','relay:collab','relay:transfer','relay:transfer-progress','tunnel:state'];
+const DESKTOP_EVENTS=['relay:state','relay:chat','relay:command','relay:collab','relay:transfer','relay:transfer-progress','desk:state','relay:desk','tunnel:state'];
 /** Commands this adapter answers itself (below) rather than passing to the
  *  host by name: terminals, preview forwarding, uploads and clone progress. */
 export const WORKSPACE_ADAPTER_COMMANDS=['spot_save_context_image','notes_attach_file','spot_stage_drop_images','preview_start','preview_stop','execution_remote_upload','execution_remote_upload_cancel','git_clone','browser_supported','environment_identity','pty_renderer_register','pty_renderer_sessions','instance_id','pty_spawn','pty_spawn_attached_argv','pty_spawn_argv','pty_spawn_detached','pty_attach_desktop','pty_read_desktop','pty_detach_desktop','pty_ack','pty_write_binary','pty_write','pty_resize','pty_kill','pty_set_name_theme','cli_set_native_update_env','pty_set_title','pty_set_name','pty_stats'] as const;
