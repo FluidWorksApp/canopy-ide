@@ -75,11 +75,9 @@ describe("the companion runs on the desktop in a cloud workspace", () => {
     expect(calls.filter((c) => !isDesktopLocal(c))).toEqual([]);
   });
 
-  it("routes the companion's own stores and bridge commands to the desktop", async () => {
+  it("routes the companion's bridge commands to the desktop", async () => {
     await ipc.companionWrite("{}");
     await ipc.companionStatus();
-    await ipc.canopyStoreRead("memory.json");
-    await ipc.canopyStoreWrite("memory.json", "{}");
     await ipc.companionSaveAttachment("a.png", "");
     await ipc.companionDispatchOrigin(null);
     await ipc.companionOpenRequests("slack:1");

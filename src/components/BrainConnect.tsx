@@ -12,13 +12,16 @@
 // without a brain, so nothing here is modal to the IDE.
 
 import { useEffect, useState } from "react";
+import type { AcpPreset } from "../acp/providers";
 import { useEscape } from "../useEscape";
 import { Button, Field, Radio, Row, Select, TextInput } from "./ui";
 import {
+  addAcpPreset,
   brainCandidates,
   brainCapableClis,
   brainStateText,
   chooseBrain,
+  installableAcpPresets,
   initBrainConnect,
   OPEN_BRAIN_CONNECT_EVENT,
   openBrainConnect,
@@ -34,7 +37,7 @@ import {
   agentModelSwitchFor,
   checkDesktopClis,
   CLI_INSTALLS_CHANGED_EVENT,
-  structuredRunnerFor,
+  legacyRunnerFor,
   type AgentCli,
 } from "../projects";
 import { getSettings, updateSettings, type Settings } from "../settings";
@@ -71,7 +74,7 @@ export function BrainModels({ cli }: { cli: AgentCli }) {
   const [s, setS] = useState<Settings>(getSettings);
   const patch = (p: Partial<Settings>) => setS(updateSettings(p));
   const models = agentModelSwitchFor(cli.id);
-  const cheap = structuredRunnerFor(cli.id)?.backgroundModel;
+  const cheap = legacyRunnerFor(cli.id)?.backgroundModel;
   const field = (key: "brainModel" | "brainBackgroundModel", label: string, fallback: string) => (
     <Field label={label}>
       {models?.kind === "inline" ? (
@@ -126,6 +129,14 @@ export function BrainConnectPanel({ onTerminalOpened, hideModels = false }: Brai
   const { installed, loaded } = useInstalled();
   const has = (bin: string) => Boolean(installed[bin]);
   const candidates = brainCandidates(has);
+  const [presets, setPresets] = useState<AcpPreset[]>([]);
+  useEffect(() => {
+    let live = true;
+    void installableAcpPresets().then((p) => live && setPresets(p));
+    return () => {
+      live = false;
+    };
+  }, [installed]);
   const recommended = recommendedBrain(has);
   const current = installedBrain(has);
   const brain = current && candidates.includes(current) ? current : null;
@@ -175,7 +186,9 @@ export function BrainConnectPanel({ onTerminalOpened, hideModels = false }: Brai
         <strong>{brain?.name ?? conn.label ?? "Brain"}</strong>
         <span className="brain-connect-short">{missingWithChoices ? "Not connected" : text.short}</span>
       </div>
-      <p className="brain-connect-detail">{detail}</p>
+      {conn.state !== "connected" && conn.state !== "checking" && conn.state !== "unknown" && detail && (
+        <p className="brain-connect-detail">{detail}</p>
+      )}
       {!stale && conn.message && conn.state !== "connected" && conn.state !== "checking" && (
         <code className="brain-connect-error" title="What the CLI said">
           {conn.message.slice(0, 280)}
@@ -190,17 +203,26 @@ export function BrainConnectPanel({ onTerminalOpened, hideModels = false }: Brai
               name="brain-cli"
               checked={brain?.id === cli.id}
               onChange={() => void chooseBrain(cli.id)}
-              label={
-                <>
-                  {cli.name}
-                  {cli.id === recommended?.id && <span className="brain-badge">Recommended</span>}
-                </>
-              }
+              label={cli.name}
             />
           ))}
         </div>
       )}
-
+      {presets.length > 0 && (
+        <div className="brain-connect-install">
+          <Row>
+            {presets.map((p) => (
+              <Button
+                key={p.id}
+                title={`Adds ${p.bin} ${p.args.join(" ")} as an ACP agent and uses it as the brain`}
+                onClick={() => void chooseBrain(addAcpPreset(p))}
+              >
+                Use {p.name}
+              </Button>
+            ))}
+          </Row>
+        </div>
+      )}
       {loaded && candidates.length === 0 && (
         <div className="brain-connect-install">
           <span>Install one to give Canopy a brain:</span>

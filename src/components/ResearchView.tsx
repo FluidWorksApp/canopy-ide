@@ -25,7 +25,7 @@ import {
   setStatus,
 } from "../research";
 import { ago } from "./ProjectView/helpers";
-import { AgentLaunchButton } from "./AgentLaunchButton";
+import { AgentLaunchButton, type LaunchPlacement } from "./AgentLaunchButton";
 import { Markdown } from "./Markdown";
 import type { AgentTarget } from "./TicketsPanel";
 import {
@@ -62,6 +62,7 @@ interface ResearchViewProps {
   agentTargets?: AgentTarget[];
   /** Which agent CLIs are on PATH. */
   installed?: Record<string, boolean>;
+  placement?: LaunchPlacement;
   /** Put an agent back on it. `steer` is what the user typed into the popover
    *  — continuing with nothing extra is allowed, and is the empty string. */
   onContinue?: (entry: ipc.ResearchDetail, steer: string) => void;
@@ -86,6 +87,7 @@ export function ResearchView({
   onWriteSpec,
   agentTargets,
   installed,
+  placement,
   onContinue,
   onOpenPr,
   onOpenFile,
@@ -634,6 +636,7 @@ export function ResearchView({
             label="Implement this"
             agentTargets={agentTargets ?? []}
             installed={installed ?? {}}
+            placement={placement}
             newAgentLabel={`New agent on research/${entry.id}`}
             primaryTitle={(cli) =>
               `Start ${cli} on this research, in a worktree of its own`

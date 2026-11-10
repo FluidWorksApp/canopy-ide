@@ -11,6 +11,7 @@
 import { useEffect, useState } from "react";
 import * as ipc from "./ipc";
 import { harnessSupport } from "./harness";
+import { liveEnvironments } from "./environments/live";
 
 export const ACTIVITY_FAST_MS = 3_000;
 export const ACTIVITY_SLOW_MS = 15_000;
@@ -21,6 +22,8 @@ export interface ActivityKey {
   /** Where the session ran: finds the per-project stores. */
   cwd: string;
   profile?: string | null;
+  /** The machine the session runs on, when it is not this window's own. */
+  env?: string;
 }
 
 /** Whether `agent`'s sessions have activity Canopy can read. */
@@ -40,10 +43,24 @@ interface Entry {
 }
 
 const entries = new Map<string, Entry>();
-const idOf = (k: ActivityKey) => `${k.agent}\u0000${k.sessionId}\u0000${k.profile ?? ""}`;
+const idOf = (k: ActivityKey) => `${k.env ?? ""}\u0000${k.agent}\u0000${k.sessionId}\u0000${k.profile ?? ""}`;
 
 let read: (k: ActivityKey) => Promise<ipc.SessionActivity | null> = (k) =>
-  ipc.sessionActivity({ sessionId: k.sessionId, agent: k.agent, roots: k.cwd ? [k.cwd] : [], profile: k.profile });
+  k.env
+    ? readOnMachine(k)
+    : ipc.sessionActivity({ sessionId: k.sessionId, agent: k.agent, roots: k.cwd ? [k.cwd] : [], profile: k.profile });
+
+/** A session on another machine is read from that machine, never from this Mac's disk. */
+function readOnMachine(k: ActivityKey): Promise<ipc.SessionActivity | null> {
+  const host = liveEnvironments.get(k.env ?? "")?.host;
+  if (!host) return Promise.resolve(null);
+  return host.invoke<ipc.SessionActivity | null>("session_activity", {
+    sessionId: k.sessionId,
+    agent: k.agent,
+    roots: k.cwd ? [k.cwd] : [],
+    profile: k.profile ?? null,
+  });
+}
 
 const busy = (e: Entry) => e.fast > 0 || !!e.value?.subagents.some((s) => s.status === "running");
 
@@ -118,12 +135,13 @@ export function useSessionActivity(
   const sessionId = key?.sessionId ?? "";
   const cwd = key?.cwd ?? "";
   const profile = key?.profile ?? null;
+  const env = key?.env;
   const fast = !!opts.fast;
   useEffect(() => {
     setValue(null);
     if (!sessionId || !activitySupported(agent)) return;
-    return watchSessionActivity({ agent, sessionId, cwd, profile }, setValue, { fast });
-  }, [agent, sessionId, cwd, profile, fast]);
+    return watchSessionActivity({ agent, sessionId, cwd, profile, ...(env ? { env } : {}) }, setValue, { fast });
+  }, [agent, sessionId, cwd, profile, env, fast]);
   return value;
 }
 

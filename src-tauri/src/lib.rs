@@ -22,11 +22,16 @@ mod companion_requests;
 mod containment;
 mod context;
 mod crash;
+mod desk;
+mod devicehub;
+mod devicehub_mjpeg;
+mod devicehub_proxy;
 #[cfg(feature = "dictation")]
 mod dictation;
 mod execution;
 mod mirror;
 mod remote_upload;
+mod teleport;
 // Intel macOS builds compile dictation out (no compatible ONNX Runtime); a stub
 // keeps the command surface identical so the rest of this file is unchanged.
 mod canopy_link;
@@ -44,7 +49,6 @@ mod lsp;
 mod maintenance;
 mod mcp;
 mod mcp_client;
-mod memory_tool;
 mod mesh;
 mod notes;
 mod notify;
@@ -74,6 +78,8 @@ mod stores;
 mod structured_runner;
 mod sync;
 mod sysaudio;
+mod t3_client;
+mod t3_socket;
 mod tasks;
 mod tunnel;
 mod turn_rollback;
@@ -550,6 +556,7 @@ pub fn run() {
         .manage(fsx::WorkspaceManager::default())
         .manage(lsp::LspManager::default())
         .manage(relay::RelayManager::default())
+        .manage(desk::DeskManager::default())
         .manage(portal::RemoteManager::default())
         .manage(preview::PreviewManager::default())
         .manage(browser::BrowserManager::default())
@@ -560,10 +567,12 @@ pub fn run() {
         .manage(governor::TerminalGovernor::default())
         .manage(containment::ContainmentManager::default())
         .manage(tunnel::TunnelManager::default())
+        .manage(devicehub::DeviceHubManager::default())
         .manage(prwatch::PrWatcher::default())
         .manage(dictation::DictationManager::default())
         .manage(selftest::SelftestState::default())
         .manage(client_mode::RemoteConnectionState::default())
+        .manage(t3_socket::T3Sockets::default())
         .manage(spot::SpotIndex::default())
         .manage(research::load())
         .manage(notes::load())
@@ -675,6 +684,7 @@ pub fn run() {
             crash::file_crash_issue,
             cli::cli_take_pending_open,
             cli::cli_take_pending_link,
+            cli::cli_take_pending_targets,
             cli::cli_install_shim,
             notify::notify_native,
             selftest::selftest_config,
@@ -685,16 +695,25 @@ pub fn run() {
             selftest::selftest_spawn_remote,
             selftest::selftest_store_contains,
             companion::companion_spawn,
+            companion::companion_dir,
             companion::companion_write,
             companion::companion_kill,
             companion::companion_status,
-            companion::companion_store_read,
-            companion::companion_store_write,
             structured_runner::structured_runner_spawn,
             structured_runner::structured_runner_write,
             structured_runner::structured_runner_kill,
             brain::brain_call,
             brain::brain_kill,
+            brain::brain_write,
+            brain::brain_home,
+            teleport::teleport_home,
+            teleport::teleport_transcript_read,
+            teleport::teleport_transcript_write,
+            teleport::teleport_git_relation,
+            teleport::teleport_bundle_create,
+            teleport::teleport_bundle_apply,
+            teleport::teleport_patch_create,
+            teleport::teleport_patch_apply,
             ledger::ledger_append,
             ledger::ledger_query,
             ledger::ledger_root,
@@ -705,6 +724,7 @@ pub fn run() {
             session_doc::session_transcript_tail,
             session_activity::session_activity,
             gates_commands::gates_policy_write,
+            gates_commands::gates_set_global,
             gates_commands::gates_policy_read,
             gates_commands::gates_allow_once,
             tasks::task_reserve,
@@ -747,8 +767,16 @@ pub fn run() {
             client_mode::execution_remote_account_candidates,
             client_mode::execution_remote_import_git,
             client_mode::execution_remote_login_prepare,
+            t3_client::t3_list,
+            t3_client::t3_describe,
+            t3_client::t3_pair,
+            t3_client::t3_remove,
+            t3_socket::t3_socket_open,
+            t3_socket::t3_socket_send,
+            t3_socket::t3_socket_close,
             mirror::execution_mirror_inspect,
             mirror::execution_mirror_send,
+            mirror::execution_mirror_candidates,
             remote_upload::execution_remote_upload,
             remote_upload::execution_remote_upload_cancel,
             remote_upload::execution_remote_stage_images,
@@ -785,6 +813,8 @@ pub fn run() {
             android::android_layout,
             android::android_foreground,
             android::android_tap,
+            android::android_reverse,
+            android::android_reverse_remove,
             android::android_text,
             android::android_swipe,
             android::android_key,
@@ -792,6 +822,15 @@ pub fn run() {
             android::android_describe,
             android::android_run,
             android::android_stage_file,
+            devicehub::device_hub_status,
+            devicehub::device_hub_install,
+            devicehub::device_hub_start,
+            devicehub::device_hub_stop,
+            devicehub::device_hub_access,
+            devicehub::device_hub_devices,
+            devicehub::device_hub_boot,
+            devicehub::device_hub_attach,
+            devicehub::device_hub_shutdown,
             clipboard::clipboard_watch_set,
             clipboard::clipboard_recent,
             clipboard::clipboard_read,
@@ -863,7 +902,10 @@ pub fn run() {
             fsx::fs_read_dir,
             fsx::fs_read_file,
             fsx::fs_write_file,
+            fsx::fs_write_file_confined,
             fsx::fs_stat,
+            fsx::fs_set_link_grants,
+            fsx::fs_grant_link_file,
             fsx::fs_repo_path,
             fsx::fs_stat_many,
             fsx::fs_list_files,
@@ -934,6 +976,7 @@ pub fn run() {
             git::gh_pr_diff,
             git::gh_pr_body,
             git::gh_pr_state,
+            git::gh_pr_branch_state,
             git::gh_pr_review,
             git::git_show_at,
             git::git_rev_count,
@@ -943,6 +986,8 @@ pub fn run() {
             git::gh_pr_merge,
             git::gh_pr_close,
             git::gh_pr_ready,
+            git::gh_pr_create,
+            git::git_pr_context,
             git::gh_pr_conversation,
             git::gh_pr_links,
             git::gh_pr_thread_reply,
@@ -1033,12 +1078,18 @@ pub fn run() {
             relay::relay_send_collab,
             relay::relay_offer_file,
             relay::relay_accept_file,
+            desk::desk_request,
+            desk::desk_respond,
+            desk::desk_send_input,
+            desk::desk_end,
+            desk::desk_status,
             preview::preview_start,
             preview::preview_stop,
             preview::preview_allow_ports,
             browser::browser_supported,
             workspace_forward::workspace_forward_open,
             workspace_forward::workspace_forward_ticket,
+            workspace_forward::workspace_forward_probe,
             workspace_forward::workspace_forward_close,
             browser::browser_open,
             browser::browser_navigate,
@@ -1131,6 +1182,8 @@ pub fn run() {
                     ide.close_all();
                 }
                 // ... and no relay socket either.
+                app.state::<desk::DeskManager>()
+                    .shutdown(&app.state::<relay::RelayManager>());
                 app.state::<relay::RelayManager>().shutdown();
                 // ... and stop the remote-access server.
                 app.state::<portal::RemoteManager>().shutdown();
@@ -1140,8 +1193,13 @@ pub fn run() {
                 app.state::<browser::BrowserManager>().shutdown_all(app);
                 app.state::<workspace_forward::WorkspaceForwards>()
                     .shutdown_all();
+                // ... and any T3 Code machine sockets.
+                app.state::<t3_socket::T3Sockets>().shutdown_all();
                 // ... and any public-link tunnel process.
                 app.state::<tunnel::TunnelManager>().kill_all();
+                // ... and the device hub (expo-device-hub), whose record is
+                // removed so the next launch has nothing to reap.
+                app.state::<devicehub::DeviceHubManager>().shutdown();
                 // ... and stop polling GitHub for pull requests.
                 app.state::<prwatch::PrWatcher>().shutdown();
                 // ... and stop watching the pasteboard.

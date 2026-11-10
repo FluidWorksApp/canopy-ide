@@ -19,6 +19,7 @@ import {gitIdentityEnvironment} from './git-identity.mjs';
 import { analyze } from './language.mjs';
 import {harnessEnvironment} from './runner-harness.mjs';
 import {AgentBrowser} from './agent-browser.mjs';
+import {browserStreamServer, handleBrowserStream} from './browser-stream.mjs';
 import {claudeIde as defaultClaudeIde, lockDir as claudeIdeLockDir} from './claude-ide.mjs';
 import {CLIPBOARD_BIN, installClipboardShims} from './clipboard-shims.mjs';
 const exec = promisify(execFile);
@@ -223,7 +224,8 @@ export function createRunner({ secret, spawnPty, accounts = [], workspaceId = 'w
         if (!browser) return json(response, 503, { error: 'unavailable', reason: 'not-implemented', message: 'This workspace image has no agent browser' });
         const input = await body(request, 256 * 1024);
         try { return json(response, 200, await browser.run(input.op, input.args ?? {})); }
-        catch (error) { return json(response, error.status ?? 400, { error: error.message }); }
+        // A person controlling the streamed page answers 409 with the control reason (session-control.mjs).
+        catch (error) { return json(response, error.status ?? 400, { error: error.message, ...(error._tag === 'BrowserControlInterrupted' ? { reason: error.reason } : {}) }); }
       }
       if (request.method === 'POST' && route === '/files/list') {
         const { path: requested = '.' } = await body(request);
@@ -267,6 +269,8 @@ export function createRunner({ secret, spawnPty, accounts = [], workspaceId = 'w
     } catch (error) { json(response, 400, { error: error.message }); }
   });
   const wss = new WebSocketServer({ noServer: true, maxPayload: 64 * 1024, perMessageDeflate: false });
+  // The agent browser's live view (browser-stream.mjs, ported from T3 Code).
+  const browserStreams = browserStreamServer();
   server.on('upgrade', (request, socket, head) => {
     if (!authorized(request)) return socket.destroy();
     const route = new URL(request.url, 'http://runner').pathname;
@@ -292,6 +296,8 @@ export function createRunner({ secret, spawnPty, accounts = [], workspaceId = 'w
       });
     } else if (route === '/desktop/audio' && desktop) {
       wss.handleUpgrade(request, socket, head, ws => streamDesktopAudio(ws, { spawn: childSpawn, env: { ...process.env, HOME: '/home/agent', XDG_RUNTIME_DIR: '/home/agent/.cache/runtime' } }));
+    } else if (route === '/browser/stream' && browser) {
+      void handleBrowserStream(browser, browserStreams, request, socket, head).catch(() => socket.destroy());
     } else socket.destroy();
   });
   server.on('close', () => { for (const ws of sockets) ws.close(); claudeIde.closeAll(); void browser?.close(); });

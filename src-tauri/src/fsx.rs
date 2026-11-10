@@ -19,6 +19,194 @@ use tauri::{AppHandle, Emitter, State};
 pub struct WorkspaceManager {
     roots: Mutex<Vec<PathBuf>>,
     watchers: Mutex<HashMap<PathBuf, RecommendedWatcher>>,
+    /// Single files outside every root that the user opened through the OS or
+    /// the command line. Exact canonical paths, never their folders: opening
+    /// ~/notes.txt must not make the rest of ~ readable. Only native code adds
+    /// to this (cli.rs), because the renderer is not a trust boundary. It lasts
+    /// for this app run.
+    files: Mutex<Vec<PathBuf>>,
+    /// Files granted by clicking a terminal link (Settings → Privacy). Kept apart
+    /// from `files` so turning the setting off can take exactly these back.
+    link_files: Mutex<Vec<PathBuf>>,
+    /// Whether a terminal link may grant a file outside every root
+    /// (Settings → Privacy, off by default). Held here, not only in the
+    /// renderer, so `fs_grant_link_file` checks it itself.
+    link_grants: std::sync::atomic::AtomicBool,
+}
+
+/// More than anyone opens loose in one run; the oldest grant goes first.
+const MAX_GRANTED_FILES: usize = 512;
+
+impl WorkspaceManager {
+    /// Let the editor read and write this one file. Called only for a file the
+    /// user named to the OS or a terminal.
+    pub fn grant_file(&self, path: &Path) {
+        let Ok(canonical) = path.canonicalize() else {
+            return;
+        };
+        if !canonical.is_file() {
+            return;
+        }
+        let mut files = self.files.lock().unwrap();
+        files.retain(|p| p != &canonical);
+        if files.len() >= MAX_GRANTED_FILES {
+            files.remove(0);
+        }
+        files.push(canonical);
+    }
+
+    fn allows(&self, canonical: &Path) -> bool {
+        self.roots
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|root| canonical.starts_with(root))
+            || self.files.lock().unwrap().iter().any(|f| f == canonical)
+            || self
+                .link_files
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|f| f == canonical)
+    }
+
+    /// Like `grant_file`, for a file named by a terminal link click.
+    fn grant_link_file(&self, canonical: PathBuf) {
+        let mut files = self.link_files.lock().unwrap();
+        files.retain(|p| p != &canonical);
+        if files.len() >= MAX_GRANTED_FILES {
+            files.remove(0);
+        }
+        files.push(canonical);
+    }
+}
+
+/// Settings → Privacy → "Open files outside the project from terminal links".
+/// The renderer mirrors the setting here; the grant command checks it.
+#[tauri::command]
+pub fn fs_set_link_grants(state: State<'_, WorkspaceManager>, enabled: bool) {
+    state
+        .link_grants
+        .store(enabled, std::sync::atomic::Ordering::SeqCst);
+    // Turning it off takes back what it allowed, not only the ability to ask.
+    if !enabled {
+        state.link_files.lock().unwrap().clear();
+    }
+}
+
+/// Folders under the home directory that hold credentials, browser profiles and
+/// shell history. A terminal link is never allowed to open anything in them.
+const SENSITIVE_HOME_DIRS: &[&str] = &[
+    ".ssh",
+    ".gnupg",
+    ".aws",
+    ".azure",
+    ".kube",
+    ".docker",
+    ".config",
+    ".password-store",
+    ".local/share/keyrings",
+    ".claude",
+    ".codex",
+    ".gemini",
+    ".cursor",
+    "Library/Keychains",
+    "Library/Application Support",
+    "Library/Cookies",
+    "Library/Mail",
+    "Library/Messages",
+    "Library/Safari",
+    "AppData",
+];
+
+/// Files that hold credentials wherever they live.
+fn credential_file_name(name: &str) -> bool {
+    let lower = name.to_ascii_lowercase();
+    matches!(
+        lower.as_str(),
+        ".netrc"
+            | ".npmrc"
+            | ".pypirc"
+            | ".pgpass"
+            | ".git-credentials"
+            | ".bash_history"
+            | ".zsh_history"
+            | ".zshrc"
+            | ".bashrc"
+            | ".profile"
+            | ".zprofile"
+            | "credentials"
+            | "credentials.json"
+            | "auth.json"
+            | "secrets.json"
+    ) || lower.starts_with("id_rsa")
+        || lower.starts_with("id_ed25519")
+        || lower.starts_with("id_ecdsa")
+        || lower.starts_with("id_dsa")
+        || lower.ends_with(".pem")
+        || lower.ends_with(".key")
+        || lower.ends_with(".p12")
+        || lower.ends_with(".pfx")
+        || lower.ends_with(".kdbx")
+}
+
+/// Why a path may not be granted from a terminal link, even with the setting on.
+/// `home` is the canonical home directory. Pure so it can be tested. Matching is
+/// case-insensitive: a macOS or Windows volume can be, and being wrong the
+/// permissive way here is the failure that matters.
+fn link_grant_refusal(canonical: &Path, home: Option<&Path>) -> Option<&'static str> {
+    let lower = |p: &Path| p.to_string_lossy().to_ascii_lowercase();
+    if let Some(home) = home {
+        let path = lower(canonical);
+        let base = lower(home);
+        if let Some(rest) = path.strip_prefix(&base) {
+            let rest = rest.trim_start_matches(['/', '\\']);
+            for sensitive in SENSITIVE_HOME_DIRS {
+                let dir = sensitive.to_ascii_lowercase();
+                if rest == dir
+                    || rest.starts_with(&format!("{dir}/"))
+                    || rest.starts_with(&format!("{dir}\\"))
+                {
+                    return Some("That location holds credentials or private data and is never opened from a link.");
+                }
+            }
+        }
+    }
+    let name = canonical.file_name().and_then(|n| n.to_str()).unwrap_or("");
+    if credential_file_name(name) {
+        return Some("That file holds credentials and is never opened from a link.");
+    }
+    None
+}
+
+/// Let the editor open this one file, named by a click on a terminal link.
+/// Refused unless the Privacy setting is on; the grant is that exact file for
+/// this app run, never its folder (see `grant_file`).
+#[tauri::command]
+pub fn fs_grant_link_file(state: State<'_, WorkspaceManager>, path: String) -> Result<(), String> {
+    if !state.link_grants.load(std::sync::atomic::Ordering::SeqCst) {
+        return Err("Opening files outside the project is off in Settings → Privacy.".into());
+    }
+    let requested = Path::new(&path);
+    if !requested.is_absolute() {
+        return Err("Only an absolute path can be opened from a link.".into());
+    }
+    let canonical = requested.canonicalize().map_err(|e| e.to_string())?;
+    if !canonical.is_file() {
+        return Err("That is not a file.".into());
+    }
+    // The canonical home, so a symlinked home (`/home` -> `/data/home`) still
+    // matches the canonical path it is compared with. Windows has USERPROFILE.
+    let home = std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"))
+        .map(PathBuf::from)
+        .filter(|h| h.is_absolute())
+        .and_then(|h| h.canonicalize().ok());
+    if let Some(reason) = link_grant_refusal(&canonical, home.as_deref()) {
+        return Err(reason.into());
+    }
+    state.grant_link_file(canonical);
+    Ok(())
 }
 
 // Shared by every renderer window. A renderer disappearing cannot let another
@@ -277,6 +465,20 @@ pub(crate) fn check_scope(
     state: &State<'_, WorkspaceManager>,
     path: &Path,
 ) -> Result<PathBuf, String> {
+    let canonical = canonicalize_lenient(path)?;
+    if state.allows(&canonical) {
+        Ok(canonical)
+    } else {
+        Err(format!(
+            "path outside workspace scope: {}",
+            canonical.display()
+        ))
+    }
+}
+
+/// Resolve symlinks in the deepest existing ancestor of `path` and re-attach
+/// the not-yet-existing tail, so a file that does not exist yet still resolves.
+fn canonicalize_lenient(path: &Path) -> Result<PathBuf, String> {
     // Canonicalize the deepest existing ancestor so new files still validate.
     let mut existing = path.to_path_buf();
     let mut suffix = PathBuf::new();
@@ -303,15 +505,7 @@ pub(crate) fn check_scope(
     if !suffix.as_os_str().is_empty() {
         canonical = canonical.join(suffix);
     }
-    let roots = state.roots.lock().unwrap();
-    if roots.iter().any(|root| canonical.starts_with(root)) {
-        Ok(canonical)
-    } else {
-        Err(format!(
-            "path outside workspace scope: {}",
-            canonical.display()
-        ))
-    }
+    Ok(canonical)
 }
 
 // ---------- repo-scoped containment ----------
@@ -626,6 +820,119 @@ pub async fn fs_write_file(
 ) -> Result<(), String> {
     let file = check_scope(&state, Path::new(&path))?;
     std::fs::write(&file, content).map_err(|e| e.to_string())
+}
+
+/// Files that change what an agent, git or an editor task runner executes
+/// next. An ACP agent may not write these through `fs/write_text_file`; the
+/// check runs on the symlink-resolved path, so a link into one does not help.
+/// Mirrors `isProtected` in `src/acp/fsGuard.ts`. Names compare
+/// case-insensitively because macOS and Windows volumes usually are.
+fn is_agent_protected(path: &Path) -> bool {
+    let segs: Vec<String> = path
+        .components()
+        .filter_map(|c| match c {
+            std::path::Component::Normal(s) => Some(s.to_string_lossy().to_lowercase()),
+            _ => None,
+        })
+        .collect();
+    let Some(name) = segs.last().map(String::as_str) else {
+        return false;
+    };
+    if matches!(
+        name,
+        ".mcp.json" | ".gitmodules" | "opencode.json" | "opencode.jsonc" | ".git"
+    ) {
+        return true;
+    }
+    if segs.len() >= 2 && segs[segs.len() - 2] == ".vscode" && name == "tasks.json" {
+        return true;
+    }
+    if let Some(git) = segs.iter().position(|s| s == ".git") {
+        let rest = &segs[git + 1..];
+        if rest.first().map(String::as_str) == Some("hooks") && rest.len() > 1 {
+            return true;
+        }
+        if rest.len() == 1 && matches!(rest[0].as_str(), "config" | "hooks") {
+            return true;
+        }
+    }
+    let last = segs.len() - 1;
+    if segs[..last]
+        .iter()
+        .any(|s| s == ".husky" || s == ".opencode")
+    {
+        return true;
+    }
+    if let Some(dir) = segs[..last]
+        .iter()
+        .position(|s| matches!(s.as_str(), ".claude" | ".codex" | ".kiro" | ".cursor"))
+    {
+        if matches!(
+            name,
+            "settings.json"
+                | "settings.local.json"
+                | "config.toml"
+                | "config.json"
+                | "mcp.json"
+                | "hooks.json"
+        ) {
+            return true;
+        }
+        if segs[dir] == ".kiro" && segs.get(dir + 1).map(String::as_str) == Some("settings") {
+            return true;
+        }
+    }
+    false
+}
+
+/// Write for an ACP agent. `requested` is what the agent named; it is resolved
+/// here (symlinks followed), must land inside one of `roots`, and must not be a
+/// protected file. The file is opened without following a leaf symlink, then
+/// the path is resolved again and compared with the open handle, so a swap in
+/// the check-to-open window fails instead of writing elsewhere.
+fn write_confined(requested: &Path, roots: &[PathBuf], content: &str) -> Result<(), String> {
+    use std::io::Write;
+    let canonical = canonicalize_lenient(requested)?;
+    let roots: Vec<PathBuf> = roots.iter().filter_map(|r| r.canonicalize().ok()).collect();
+    if !roots.iter().any(|r| canonical.starts_with(r)) {
+        return Err(format!(
+            "path resolves outside the session's working directories: {}",
+            canonical.display()
+        ));
+    }
+    if is_agent_protected(&canonical) {
+        return Err("that file configures hooks, settings or MCP servers and cannot be written without permission".into());
+    }
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NOFOLLOW);
+    }
+    let mut file = options.open(&canonical).map_err(|e| e.to_string())?;
+    let opened = same_file::Handle::from_file(file.try_clone().map_err(|e| e.to_string())?)
+        .map_err(|e| e.to_string())?;
+    let again = canonicalize_lenient(requested)?;
+    let live = same_file::Handle::from_path(&again).map_err(|e| e.to_string())?;
+    if again != canonical || opened != live {
+        return Err("file changed while opening; retry the write".into());
+    }
+    file.set_len(0).map_err(|e| e.to_string())?;
+    file.write_all(content.as_bytes())
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn fs_write_file_confined(
+    state: State<'_, WorkspaceManager>,
+    path: String,
+    content: String,
+    roots: Vec<String>,
+) -> Result<(), String> {
+    check_scope(&state, Path::new(&path))?;
+    let roots: Vec<PathBuf> = roots.into_iter().map(PathBuf::from).collect();
+    write_confined(Path::new(&path), &roots, &content)
 }
 
 #[derive(Serialize, Clone)]
@@ -1073,6 +1380,64 @@ fn walk_plain(dir: &Path, out: &mut Vec<PathBuf>, limit: usize, depth: usize) {
     }
 }
 
+/// Walk several roots for quick-open and find-in-files. Each root has its own
+/// `limit`, so one huge component cannot use the whole budget and leave the rest
+/// unlisted, and a root that is outside the workspace scope or cannot be read is
+/// skipped rather than failing the others. If every root fails, the first
+/// error is returned so a single bad root still reports why.
+fn walk_roots(
+    state: &State<'_, WorkspaceManager>,
+    roots: Vec<String>,
+    limit: usize,
+) -> Result<Vec<PathBuf>, String> {
+    merge_roots(roots, limit, |root| {
+        check_scope(state, Path::new(root)).map(|dir| {
+            let mut part: Vec<PathBuf> = Vec::new();
+            walk(&dir, &mut part, limit);
+            part
+        })
+    })
+}
+
+/// The merging rule behind `walk_roots`, with the per-root work injected so it
+/// can be tested without a workspace: each root contributes up to `limit`, a
+/// root that fails is skipped, the same file reached through a parent and a
+/// child component is listed once, and the whole answer is capped at twice the
+/// per-root limit so many components cannot multiply the payload. If every root
+/// fails the first error is returned.
+fn merge_roots<F>(roots: Vec<String>, limit: usize, mut list: F) -> Result<Vec<PathBuf>, String>
+where
+    F: FnMut(&str) -> Result<Vec<PathBuf>, String>,
+{
+    let cap = limit.saturating_mul(2);
+    let mut seen = std::collections::HashSet::new();
+    let mut out: Vec<PathBuf> = Vec::new();
+    let mut first_error: Option<String> = None;
+    let mut any_ok = roots.is_empty();
+    for root in roots {
+        match list(&root) {
+            Ok(part) => {
+                any_ok = true;
+                for path in part {
+                    if out.len() >= cap {
+                        break;
+                    }
+                    if seen.insert(path.clone()) {
+                        out.push(path);
+                    }
+                }
+            }
+            Err(error) => {
+                first_error.get_or_insert(error);
+            }
+        }
+    }
+    match (any_ok, first_error) {
+        (false, Some(error)) => Err(error),
+        _ => Ok(out),
+    }
+}
+
 /// Flat file list under the given roots — the corpus for quick-open (Cmd+P).
 /// Bounded so a huge tree can't balloon the heap or the IPC payload.
 #[tauri::command]
@@ -1082,11 +1447,7 @@ pub async fn fs_list_files(
     limit: Option<usize>,
 ) -> Result<Vec<String>, String> {
     let limit = limit.unwrap_or(20_000);
-    let mut out: Vec<PathBuf> = Vec::new();
-    for root in roots {
-        let dir = check_scope(&state, Path::new(&root))?;
-        walk(&dir, &mut out, limit);
-    }
+    let out = walk_roots(&state, roots, limit)?;
     Ok(out
         .iter()
         .map(|p| p.to_string_lossy().to_string())
@@ -1161,11 +1522,7 @@ pub async fn fs_search(
     }
     let limit = limit.unwrap_or(300);
     let needle = query.to_lowercase();
-    let mut files: Vec<PathBuf> = Vec::new();
-    for root in roots {
-        let dir = check_scope(&state, Path::new(&root))?;
-        walk(&dir, &mut files, 20_000);
-    }
+    let files = walk_roots(&state, roots, 20_000)?;
 
     let mut hits = Vec::new();
     for file in files {
@@ -1410,7 +1767,193 @@ fn copy_dir(src: &Path, dst: &Path) -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn credential_locations_are_never_granted_from_a_link() {
+        let home = std::path::Path::new("/Users/me");
+        for p in [
+            "/Users/me/.ssh/config",
+            "/Users/me/.SSH/config",
+            "/Users/me/.aws/credentials",
+            "/Users/me/Library/Keychains/login.keychain-db",
+            "/Users/me/LIBRARY/Application Support/Google/Chrome/Default/Login Data",
+            "/Users/me/.config/gcloud/x",
+            "/Users/me/.config/other/x.toml",
+            "/Users/me/.claude/projects/x.jsonl",
+            "/Users/me/.zsh_history",
+            "/tmp/id_rsa",
+            "/tmp/id_ecdsa.pub",
+            "/tmp/.netrc",
+            "/tmp/server.pem",
+            "/tmp/secrets.json",
+        ] {
+            assert!(
+                super::link_grant_refusal(std::path::Path::new(p), Some(home)).is_some(),
+                "{p}"
+            );
+        }
+        for p in [
+            "/Users/me/Documents/notes.md",
+            "/Users/me/Downloads/report.pdf",
+            "/Users/me/.canopy/sessions/a.json",
+            "/Users/me/.sshfoo/readme.md",
+            "/private/tmp/claude/tasks/a.output",
+        ] {
+            assert!(
+                super::link_grant_refusal(std::path::Path::new(p), Some(home)).is_none(),
+                "{p}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_link_grant_can_be_taken_back_without_touching_cli_grants() {
+        let manager = super::WorkspaceManager::default();
+        let a = std::path::PathBuf::from("/tmp/a.txt");
+        let b = std::path::PathBuf::from("/tmp/b.txt");
+        manager.files.lock().unwrap().push(a.clone());
+        manager.grant_link_file(b.clone());
+        assert!(manager.allows(&a) && manager.allows(&b));
+        manager.link_files.lock().unwrap().clear();
+        assert!(manager.allows(&a), "a file named to the OS stays granted");
+        assert!(!manager.allows(&b));
+    }
+
+    fn p(s: &str) -> std::path::PathBuf {
+        std::path::PathBuf::from(s)
+    }
+
+    #[test]
+    fn a_failing_root_is_skipped_but_every_failing_root_is_an_error() {
+        let got = super::merge_roots(vec!["/a".into(), "/bad".into(), "/b".into()], 10, |r| {
+            if r == "/bad" {
+                Err("outside scope".into())
+            } else {
+                Ok(vec![p(&format!("{r}/f"))])
+            }
+        });
+        assert_eq!(got.unwrap(), vec![p("/a/f"), p("/b/f")]);
+        let none = super::merge_roots(vec!["/x".into(), "/y".into()], 10, |_| Err("nope".into()));
+        assert_eq!(none.unwrap_err(), "nope");
+        assert!(super::merge_roots(vec![], 10, |_| Err("unused".into()))
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
+    fn overlapping_roots_list_a_file_once_and_the_total_is_capped() {
+        let got = super::merge_roots(vec!["/p".into(), "/p/c".into()], 10, |_| {
+            Ok(vec![p("/p/c/same")])
+        });
+        assert_eq!(got.unwrap(), vec![p("/p/c/same")]);
+        let many = super::merge_roots(vec!["/a".into(), "/b".into(), "/c".into()], 2, |r| {
+            Ok((0..5).map(|i| p(&format!("{r}/{i}"))).collect())
+        });
+        assert_eq!(many.unwrap().len(), 4, "capped at twice the per-root limit");
+    }
+
     use super::*;
+
+    #[test]
+    fn protected_paths_cover_agent_hook_and_task_files() {
+        for p in [
+            "/w/.git/hooks/pre-commit",
+            "/w/.git/config",
+            "/w/.git",
+            "/w/.Claude/Settings.json",
+            "/w/.codex/config.toml",
+            "/w/.kiro/settings/mcp.json",
+            "/w/.opencode/plugin/x.js",
+            "/w/opencode.json",
+            "/w/sub/OpenCode.jsonc",
+            "/w/.gitmodules",
+            "/w/.husky/pre-commit",
+            "/w/.vscode/tasks.json",
+            "/w/.mcp.json",
+        ] {
+            assert!(is_agent_protected(Path::new(p)), "{p}");
+        }
+        for p in [
+            "/w/src/a.ts",
+            "/w/.vscode/launch.json",
+            "/w/notes/settings.json",
+        ] {
+            assert!(!is_agent_protected(Path::new(p)), "{p}");
+        }
+    }
+
+    /// The same table `src/acp/fsGuard.test.ts` asserts against `isProtected`,
+    /// so the Rust and TypeScript copies of the list cannot drift.
+    #[test]
+    fn protected_paths_match_the_shared_table() {
+        let table: serde_json::Value =
+            serde_json::from_str(include_str!("../../src/acp/protectedPaths.json")).unwrap();
+        for p in table["protected"].as_array().unwrap() {
+            let p = p.as_str().unwrap();
+            assert!(is_agent_protected(Path::new(p)), "{p}");
+        }
+        for p in table["allowed"].as_array().unwrap() {
+            let p = p.as_str().unwrap();
+            assert!(!is_agent_protected(Path::new(p)), "{p}");
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn confined_write_refuses_symlinks_into_protected_files_and_outside_roots() {
+        let root = std::env::temp_dir()
+            .canonicalize()
+            .unwrap()
+            .join("canopy-confined-write-test");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join(".git/hooks")).unwrap();
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        let outside = root.parent().unwrap().join("canopy-confined-outside.txt");
+        std::fs::write(&outside, "keep").unwrap();
+        std::os::unix::fs::symlink(root.join(".git/hooks"), root.join("notes")).unwrap();
+        std::os::unix::fs::symlink(&outside, root.join("src/out")).unwrap();
+        let roots = vec![root.clone()];
+
+        let err = write_confined(&root.join("notes/pre-commit"), &roots, "x").unwrap_err();
+        assert!(err.contains("cannot be written"), "{err}");
+        assert!(!root.join(".git/hooks/pre-commit").exists());
+
+        let err = write_confined(&root.join("src/out"), &roots, "x").unwrap_err();
+        assert!(err.contains("outside"), "{err}");
+        assert_eq!(std::fs::read_to_string(&outside).unwrap(), "keep");
+
+        write_confined(&root.join("src/new.txt"), &roots, "hello").unwrap();
+        write_confined(&root.join("src/new.txt"), &roots, "hi").unwrap();
+        assert_eq!(
+            std::fs::read_to_string(root.join("src/new.txt")).unwrap(),
+            "hi"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::remove_file(&outside);
+    }
+
+    #[test]
+    fn a_granted_file_is_reachable_but_its_neighbours_are_not() {
+        let dir = std::env::temp_dir()
+            .canonicalize()
+            .unwrap()
+            .join("canopy-fsx-grant-test");
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("loose.txt");
+        let neighbour = dir.join("secret.txt");
+        std::fs::write(&file, "a").unwrap();
+        std::fs::write(&neighbour, "b").unwrap();
+        let manager = WorkspaceManager::default();
+        assert!(!manager.allows(&file));
+        manager.grant_file(&file);
+        assert!(manager.allows(&file));
+        assert!(!manager.allows(&neighbour));
+        assert!(!manager.allows(&dir));
+        assert!(!manager.allows(&dir.join("loose.txt").join("child")));
+        // A folder is never granted this way: that is what workspace_add is for.
+        manager.grant_file(&dir);
+        assert!(!manager.allows(&neighbour));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     fn write(path: &Path, text: &str) {
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();

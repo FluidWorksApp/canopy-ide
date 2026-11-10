@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
+  sweepEligible,
   agentWorkspaceRoot,
   pickReusableWorkspace,
   reapDecision,
@@ -182,5 +183,41 @@ describe("reuseAgentWorkspace", () => {
     mocks.gitWorkAudit.mockResolvedValue({ base: "main", counts_degraded: false, items: [] });
     await expect(reuseAgentWorkspace("/repo", "claude")).resolves.toBeNull();
     expect(mocks.gitWorktreeRealign).not.toHaveBeenCalled();
+  });
+});
+
+describe("prLanded", () => {
+  const sha = "0123456789abcdef0123456789abcdef01234567";
+  it("is true for a merged PR whose head is the local tip, full or abbreviated", async () => {
+    const { prLanded } = await import("./agentWorkspaceLifecycle");
+    expect(prLanded(`MERGED ${sha}`, sha)).toBe(true);
+    expect(prLanded(`merged ${sha}\n`, sha.slice(0, 9))).toBe(true);
+  });
+  it("is false when the PR is open or closed, or work was added after it", async () => {
+    const { prLanded } = await import("./agentWorkspaceLifecycle");
+    expect(prLanded(`OPEN ${sha}`, sha)).toBe(false);
+    expect(prLanded(`CLOSED ${sha}`, sha)).toBe(false);
+    expect(prLanded(`MERGED ${sha}`, "ffffffffffff")).toBe(false);
+  });
+  it("is false for missing, malformed or too-short input", async () => {
+    const { prLanded } = await import("./agentWorkspaceLifecycle");
+    expect(prLanded("", sha)).toBe(false);
+    expect(prLanded("MERGED", sha)).toBe(false);
+    expect(prLanded(`MERGED ${sha}`, "")).toBe(false);
+    expect(prLanded(`MERGED ${sha}`, "0123")).toBe(false);
+  });
+});
+
+describe("sweepEligible", () => {
+  const work = { dirty: 0, protected: false, is_main: false, current: false, upstream: "origin/a", upstream_gone: false, ahead: 0 };
+  it("accepts a pushed, idle, clean branch", () => expect(sweepEligible(work, 0, false)).toBe(true));
+  it("accepts a branch whose remote is gone", () => expect(sweepEligible({ ...work, upstream: null, upstream_gone: true, ahead: 3 }, 0, false)).toBe(true));
+  it("refuses unpushed work, dirt, use, and protected branches", () => {
+    expect(sweepEligible({ ...work, ahead: 1 }, 0, false)).toBe(false);
+    expect(sweepEligible({ ...work, upstream: null }, 0, false)).toBe(false);
+    expect(sweepEligible(work, 2, false)).toBe(false);
+    expect(sweepEligible(work, 0, true)).toBe(false);
+    expect(sweepEligible({ ...work, protected: true }, 0, false)).toBe(false);
+    expect(sweepEligible({ ...work, current: true }, 0, false)).toBe(false);
   });
 });

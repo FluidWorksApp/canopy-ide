@@ -66,9 +66,15 @@ process teardown; React owns the project workspace and presentation.
 ## Highlights
 
 - **Real agent terminals.** Full PTY and TUI support for shells, `vim`, `htop`,
-  `tmux`, Claude Code, Codex CLI, Amp, Aider, Antigravity, OpenCode, oh-my-pi,
-  and custom CLIs. Canopy reports the integration and resume capabilities each
+  `tmux`, Claude Code, Codex CLI, Amp, Aider, Antigravity, OpenCode, oh-my-pi, Kiro CLI,
+  and custom CLIs, including any agent that speaks the Agent Client Protocol
+  (see [docs/acp.md](docs/acp.md)). Canopy reports the integration and resume capabilities each
   CLI actually supports instead of assuming parity.
+- **Remote desktop for teammates.** Ask a connected teammate for their screen
+  from the Team panel. They accept view-only or control per session, see an
+  always-on banner with a Stop button, and everything rides the encrypted relay.
+  See [docs/remote-desktop.md](docs/remote-desktop.md) for limits (Linux cannot
+  share its screen yet).
 - **Parallel work without checkout collisions.** Work in the current checkout or
   isolated Git worktrees. Canopy tracks which branch lives where, allocates
   workspace ports, prepares ignored configuration, and surfaces loose ends for
@@ -94,6 +100,12 @@ process teardown; React owns the project workspace and presentation.
   standards before an agent implements it — Google's
   [Elephant-Goldfish Model](https://github.com/google/elephant-goldfish-model)
   as a built-in workflow. See [the design](./docs/egm-spec-stage.md).
+- **Run agents on the machine you choose.** Every primary launch offers
+  Automatic load balancing, This Mac, and each connected machine by name.
+  Project and agent overrides can inherit with Use default, while Git worktree
+  placement stays separate. The All workspaces dashboard shows machine status
+  and visible work in one responsive table. See
+  [placement](./docs/placement-and-unified-workspace.md).
 - **Preview what agents build.** Open detected dev servers, inspect console and
   network activity, annotate elements, and capture viewport, full-page, or
   region screenshots. Agents can drive previews through scoped browser tools.

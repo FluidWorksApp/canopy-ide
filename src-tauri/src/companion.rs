@@ -39,7 +39,6 @@ use crate::winproc::NoConsoleWindow;
 const STDERR_KEEP: usize = 8 * 1024;
 const STDOUT_LINE_MAX: usize = 1024 * 1024;
 const COMPANION_INPUT_MAX: usize = 1024 * 1024;
-const COMPANION_STORE_MAX: usize = 1024 * 1024;
 
 /// Drain one complete protocol line while retaining at most `max` bytes. The
 /// unread suffix must still be consumed or a rogue child can fill its pipe and
@@ -434,14 +433,6 @@ pub async fn companion_kill(state: tauri::State<'_, CompanionManager>) -> Result
     Ok(())
 }
 
-/// The companion's own corner of `~/.canopy`, for what it has learned about
-/// the user (companionMemory.ts).
-///
-/// Deliberately NOT a general read/write-a-file pair. A generic one would hand
-/// the webview an arbitrary-file-write primitive, and the companion needs
-/// exactly one directory — so the name is validated to a bare filename and
-/// joined under a fixed root. A caller that wants to escape it has nothing to
-/// work with: no separators, no `..`, no absolute paths.
 /// `~/.canopy/companion` — the companion's own directory, and the cwd it runs
 /// in so that no project's CLAUDE.md is auto-discovered.
 fn companion_home() -> std::path::PathBuf {
@@ -453,18 +444,17 @@ fn companion_home() -> std::path::PathBuf {
         .join("companion")
 }
 
-fn companion_store_path(name: &str) -> Result<std::path::PathBuf, String> {
-    if name.is_empty()
-        || name.len() > 64
-        || !name
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-' || c == '_')
-        || name.starts_with('.')
-        || name.contains("..")
-    {
-        return Err(format!("{name:?} is not a companion store file"));
+/// The companion's own directory as an absolute path, created if missing. An ACP
+/// agent is told its working directory in `session/new` and refuses anything
+/// that is not absolute, so the companion cannot leave it unset for those.
+#[tauri::command]
+pub fn companion_dir() -> Result<String, String> {
+    let dir = companion_home();
+    if !dir.is_absolute() {
+        return Err("The companion's directory could not be resolved.".into());
     }
-    Ok(companion_home().join(name))
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    Ok(dir.to_string_lossy().into_owned())
 }
 
 /// Freeze a chat attachment under the companion's own directory, where every
@@ -528,49 +518,6 @@ pub fn companion_save_attachment(name: String, base64: String) -> Result<String,
     Ok(path.to_string_lossy().to_string())
 }
 
-#[tauri::command]
-pub fn companion_store_read(name: String) -> Result<Option<String>, String> {
-    use std::io::Read;
-    let path = companion_store_path(&name)?;
-    match std::fs::File::open(&path) {
-        Ok(file) => {
-            let mut bytes = Vec::with_capacity(COMPANION_STORE_MAX.min(8 * 1024));
-            file.take(COMPANION_STORE_MAX as u64 + 1)
-                .read_to_end(&mut bytes)
-                .map_err(|e| format!("{} could not be read: {e}", path.display()))?;
-            if bytes.len() > COMPANION_STORE_MAX {
-                return Err("companion store is larger than 1 MiB".into());
-            }
-            String::from_utf8(bytes)
-                .map(Some)
-                .map_err(|_| "companion store is not UTF-8".into())
-        }
-        // Nothing written yet is not a failure — it is a companion that has
-        // not learned anything about you so far.
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(e) => Err(format!("{} could not be read: {e}", path.display())),
-    }
-}
-
-/// Written whole, through a temp file and a rename. `~/.canopy` holds the one
-/// store Canopy cannot rebuild, and a crash between truncate and write would
-/// lose everything the companion knows rather than one fact.
-#[tauri::command]
-pub fn companion_store_write(name: String, body: String) -> Result<(), String> {
-    if body.len() > COMPANION_STORE_MAX {
-        return Err("companion store is limited to 1 MiB".into());
-    }
-    let path = companion_store_path(&name)?;
-    let parent = path.parent().ok_or("bad store path")?;
-    std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
-    let tmp = parent.join(format!(".{name}.canopy-{}", std::process::id()));
-    std::fs::write(&tmp, body).map_err(|e| e.to_string())?;
-    std::fs::rename(&tmp, &path).map_err(|e| {
-        let _ = std::fs::remove_file(&tmp);
-        format!("{} could not be written: {e}", path.display())
-    })
-}
-
 #[derive(Clone, serde::Serialize)]
 pub struct CompanionStatus {
     pub running: bool,
@@ -610,28 +557,6 @@ pub async fn companion_status(
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn the_store_refuses_anything_that_is_not_a_bare_filename() {
-        // This is the whole security story of the pair: the companion needs one
-        // directory, so nothing that could name a file outside it is accepted.
-        for bad in [
-            "",
-            "../evil",
-            "a/b",
-            "/etc/passwd",
-            ".hidden",
-            "memory.json/../../x",
-            "..",
-        ] {
-            assert!(
-                companion_store_path(bad).is_err(),
-                "{bad:?} should be refused"
-            );
-        }
-        assert!(companion_store_path("memory.json").is_ok());
-        assert!(companion_store_path("notes-2.json").is_ok());
-    }
 
     #[tokio::test]
     async fn a_fresh_manager_holds_no_child() {

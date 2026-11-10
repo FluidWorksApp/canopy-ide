@@ -199,3 +199,25 @@ workspace desktop, then opens Chromium inside that workspace and shows its noVNC
 view. Browser redirects to localhost therefore reach the VM CLI directly. This
 fallback is independent of the Mac callback provider allowlist and does not expose
 any VM callback port to the public network.
+
+## On-demand setup of one project
+
+"Set up from this Mac" mirrors every project. `ensureProjectOnRemote`
+(`src/remoteExecution/mirror.ts`) does the same for a single project when it is
+first needed, using the same primitives as `runMirror`: clone, `execution_mirror_send`,
+`mirror_apply_start`, then a `store_save` entry carrying `mirroredFrom`.
+
+- `execution_mirror_candidates` (`src-tauri/src/mirror.rs`) lists a component's
+  git-ignored files with size and category (secret, config, data, other). It
+  returns names and sizes only, skips heavy reinstallable folders (`node_modules`,
+  `target`, `.git`, `dist`, `build`, `.venv`, caches), and is capped by count and size.
+- `ProjectSetupDialog` shows them grouped by category. Credential-shaped files
+  start unchecked with a warning; nothing is read or sent until the button is pressed.
+- `execution_mirror_send` takes optional `extraFiles` (and `filesOnly`). Each path
+  is validated on the Mac: repo-relative, no `..`, no `.git`, a regular file within
+  10 MB, and actually ignored or untracked. Only those are added to `files.tgz`.
+- Re-running is idempotent. A project already on the workspace is not cloned or
+  reset; with "copy missing files only" the renderer checks each selected file with
+  `fs_stat` and sends only the absent ones. These go through `mirror_apply_start`
+  with `filesOnly`, which extracts `files.tgz` with `--skip-old-files` and leaves
+  commits, branch and changes untouched.

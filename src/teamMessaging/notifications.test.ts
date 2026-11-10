@@ -66,3 +66,10 @@ it('routes unread team messages to system notifications while working elsewhere 
   expect(shouldReachOS({...input,id:'notification',ts:Date.now()},true)).toBe(true);
  }
 });
+
+import { personalReason as _pr } from './notifications';
+describe('remote connect request', () => {
+  it('is always personal', () => {
+    expect(_pr({ team: 't', user: 'u', message: { id: 'm', text: 'x', card: { type: 'relay-request', v: 1 } } } as never)).toBe('remote');
+  });
+});

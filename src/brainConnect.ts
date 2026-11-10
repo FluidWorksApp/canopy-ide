@@ -23,13 +23,19 @@ import {
 } from "./brainStatus";
 import {
   AGENT_CLIS,
+  binName,
   CLI_INSTALLS_CHANGED_EVENT,
+  newCustomCliId,
+  refreshAgentClis,
   streamsStructured,
-  structuredRunnerFor,
+  legacyRunnerFor,
   type AgentCli,
 } from "./projects";
+import { invokeDesktop } from "./host";
+import { ACP_PRESETS, type AcpPreset } from "./acp/providers";
 import { loginCommand } from "./profiles";
 import { companionCli } from "./companion";
+import { registerConnectorIcon } from "./acp/connectorIcons";
 import { getSettings, updateSettings, type Settings } from "./settings";
 import { brainArgs } from "./structuredRunners";
 
@@ -41,12 +47,15 @@ export const TERMINAL_EXITED_EVENT = "canopy:terminal-exited";
 /** The marker a sign-in terminal carries. */
 export const BRAIN_RECHECK = "brain-recheck";
 
-/** Whether `cli` can be the brain: a verified structured runner that can take
- *  one prompt and end with its answer. The same test askBrain applies, made
- *  with a throwaway launch so this never re-implements the runner's rules. */
+/** Whether `cli` can be the brain: a structured runner that can take one
+ *  prompt and end with its answer. Either a hand-verified headless argv
+ *  (claude, codex, cursor) or an ACP agent, driven one-shot over JSON-RPC by
+ *  brainAcp.ts. The same test askBrain applies, made with a throwaway launch so
+ *  this never re-implements the runner's rules. */
 export function canBeBrain(cli: AgentCli): boolean {
-  const runner = structuredRunnerFor(cli.id);
+  const runner = legacyRunnerFor(cli.id);
   if (!runner || !streamsStructured(cli.id)) return false;
+  if (runner.tier === "acp") return true;
   return (
     brainArgs(
       runner,
@@ -66,6 +75,31 @@ export function canBeBrain(cli: AgentCli): boolean {
   );
 }
 
+/** What a brain pick rests on, in words, or null for a hand-verified headless
+ *  runner. ACP agents work through the protocol rather than a flag set Canopy
+ *  checked against the binary, so the person is told how far that was checked.
+ *  Taken from the runner's own `verification`, never invented here. */
+export function brainVerificationNote(cli: AgentCli): string | null {
+  const runner = legacyRunnerFor(cli.id);
+  if (runner?.tier !== "acp") return null;
+  const v = runner.verification;
+  const checked =
+    v.checkedOn === "unverified"
+      ? "Canopy has not verified this agent's ACP support"
+      : `Canopy verified ${cli.name} ${v.cliVersion} on ${v.checkedOn}`;
+  return `Runs over the Agent Client Protocol, which is less verified than Canopy's own runners. ${checked}. Canopy refuses every permission request, but an agent that never asks can still use its own tools.`;
+}
+
+/** Why an installed CLI cannot be the brain, for the picker to say instead of
+ *  silently omitting it. */
+export function brainExclusionReason(cli: AgentCli): string | null {
+  if (canBeBrain(cli)) return null;
+  const runner = legacyRunnerFor(cli.id);
+  return runner
+    ? `${cli.name} has no one-shot mode Canopy has verified.`
+    : `${cli.name} has no headless or ACP mode configured. Add its ACP arguments under Settings \u2192 Agents to use it.`;
+}
+
 /** Every CLI that could be the brain, installed or not — what the "not
  *  installed" state offers to install. */
 export function brainCapableClis(): AgentCli[] {
@@ -77,12 +111,65 @@ export function brainCandidates(installed: (bin: string) => boolean): AgentCli[]
   return brainCapableClis().filter((c) => installed(c.bin));
 }
 
+/** Installed candidates split for the picker: runners Canopy verified, then
+ *  ACP agents. Registry order within each group. */
+export function groupedBrainCandidates(installed: (bin: string) => boolean): {
+  verified: AgentCli[];
+  acp: AgentCli[];
+} {
+  const all = brainCandidates(installed);
+  const isAcp = (c: AgentCli) => legacyRunnerFor(c.id)?.tier === "acp";
+  return { verified: all.filter((c) => !isAcp(c)), acp: all.filter(isAcp) };
+}
+
+/** Installed agents that cannot be the brain, each with the reason. */
+export function brainExcluded(
+  installed: (bin: string) => boolean,
+): { cli: AgentCli; reason: string }[] {
+  return AGENT_CLIS.filter((c) => installed(c.bin)).flatMap((cli) => {
+    const reason = brainExclusionReason(cli);
+    return reason ? [{ cli, reason }] : [];
+  });
+}
+
 /** The brain to recommend: the person's choice when it can be one, else the
  *  first installed verified CLI. Null when none is installed. */
 export function recommendedBrain(installed: (bin: string) => boolean): AgentCli | null {
   const chosen = installedBrain(installed);
   if (chosen && canBeBrain(chosen)) return chosen;
   return brainCandidates(installed)[0] ?? null;
+}
+
+/** ACP presets (Gemini, Goose, ...) whose binary is on this computer but that
+ *  are not yet in the agent list, so the picker can offer to add them. Presets
+ *  already registered as a CLI (by binary name) are skipped: those are listed
+ *  as candidates directly. */
+export async function installableAcpPresets(): Promise<AcpPreset[]> {
+  const known = new Set(AGENT_CLIS.map((c) => binName(c.bin)));
+  const todo = ACP_PRESETS.filter((p) => !known.has(p.bin));
+  if (todo.length === 0) return [];
+  try {
+    const found = await invokeDesktop<Record<string, boolean>>("which_check", {
+      commands: todo.map((p) => p.bin),
+    });
+    return todo.filter((p) => found[p.bin]);
+  } catch {
+    return [];
+  }
+}
+
+/** Register a preset as an ordinary custom ACP CLI (the same row Settings →
+ *  Agents adds) and return its id. Nothing is installed or run. */
+export function addAcpPreset(preset: AcpPreset): string {
+  const rows = getSettings().customClis;
+  const id = newCustomCliId(preset.name, rows.map((r) => r.id));
+  // The preset's connector mark, as the registry publishes it for its id.
+  registerConnectorIcon(id, `https://cdn.agentclientprotocol.com/registry/v1/latest/${preset.id}.svg`);
+  updateSettings({
+    customClis: [...rows, { id, name: preset.name, bin: preset.bin, acp: { args: [...preset.args] } }],
+  });
+  refreshAgentClis();
+  return id;
 }
 
 /** Make `cliId` the brain and check it straight away. The brain is stored as

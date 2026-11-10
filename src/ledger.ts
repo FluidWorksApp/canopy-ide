@@ -1,5 +1,5 @@
 // The ledger: one durable, append-only store for what the brain and the agents
-// produce — plans, proof receipts, memories, awareness notes, handoffs, review
+// produce — plans, proof receipts, awareness notes, handoffs, review
 // verdicts, rules, outcomes, spend.
 //
 // The store is Rust (src-tauri/src/ledger.rs): one JSONL file per repository,
@@ -18,6 +18,7 @@ import * as ipc from "./ipc";
 export type LedgerKind =
   | "plan"
   | "receipt"
+  // Kept after Team memory was removed: the builder lens files its caches under it.
   | "memory"
   | "awareness"
   | "handoff"

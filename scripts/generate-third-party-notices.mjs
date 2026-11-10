@@ -142,6 +142,37 @@ const RUNTIME_DOWNLOADS = [
   },
 ];
 
+// Tools the Device tab installs from npm into ~/.canopy/device-tools only after
+// the user consents (src-tauri/src/devicehub.rs). Like the models above they
+// are fetched to the user's machine, not redistributed; they are listed so
+// their terms are on record. Versions are the ones devicehub.rs pins.
+const RUNTIME_TOOLS = [
+  {
+    name: "expo-device-hub 0.19.1",
+    license: "MIT",
+    by: "650 Industries, Inc. (Expo)",
+    url: "https://github.com/expo/expo-device-hub",
+  },
+  {
+    name: "serve-emu (vendored in expo-device-hub)",
+    license: "Apache-2.0",
+    by: "Expo",
+    url: "https://github.com/expo/expo-device-hub",
+  },
+  {
+    name: "serve-sim (vendored in expo-device-hub)",
+    license: "Apache-2.0",
+    by: "Evan Bacon, with changes by Expo",
+    url: "https://github.com/EvanBacon/serve-sim",
+  },
+  {
+    name: "scrcpy-server v4.0 (downloaded by serve-emu when an Android device is first streamed)",
+    license: "Apache-2.0",
+    by: "Genymobile and Romain Vimont",
+    url: "https://github.com/Genymobile/scrcpy",
+  },
+];
+
 // ---------------------------------------------------------------------------
 // Copyright-line extraction
 // ---------------------------------------------------------------------------
@@ -574,6 +605,14 @@ redistribute these — they are fetched to the user's own machine — but their
 terms govern use of the model:
 
 ${RUNTIME_DOWNLOADS.map((m) => `- **${m.name}** — ${m.license}, by ${m.by}. <${m.url}>`).join("\n")}
+
+## Tools downloaded at runtime
+
+Live device streaming installs these on the user's machine, from npm, only
+after the user agrees to it in the Device tab. Canopy does not bundle or
+redistribute them:
+
+${RUNTIME_TOOLS.map((m) => `- **${m.name}** — ${m.license}, by ${m.by}. <${m.url}>`).join("\n")}
 
 ${renderSection("Rust crates", crates)}
 ${renderSection("npm packages", npm)}

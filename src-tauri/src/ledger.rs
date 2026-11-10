@@ -1,5 +1,5 @@
 //! The ledger: one durable, append-only record of what the brain and the
-//! agents produced for a project — plans, proof receipts, memories, awareness
+//! agents produced for a project — plans, proof receipts, awareness
 //! notes, handoffs, review verdicts, spend.
 //!
 //! Ten features write here, so it is deliberately one store with one shape
@@ -34,6 +34,7 @@ pub const LEDGER_APPENDED: &str = "ledger-appended";
 pub const KINDS: &[&str] = &[
     "plan",
     "receipt",
+    // Kept after Team memory was removed: the builder lens files its caches under it.
     "memory",
     "awareness",
     "handoff",

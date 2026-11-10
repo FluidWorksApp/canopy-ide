@@ -154,6 +154,7 @@ Major managed services:
 | `preview.rs` | Loopback reverse proxies and preview instrumentation |
 | `portal.rs` / `remote/` | Canopy Remote server, authentication, protocol, capability grants, streams, and verbs |
 | `relay.rs` / `wsbridge.rs` | Encrypted peer collaboration, chat, commands, and file transfer |
+| `desk.rs` | Consent-first remote desktop over the relay; see [Remote desktop](./remote-desktop.md) |
 | `notes.rs` / `research.rs` | Project-scoped durable knowledge stores under `~/.canopy` |
 | `spot.rs` / `stores.rs` | SQLite FTS index and adapters for agent transcript stores |
 | `vault.rs` | Encrypted local credential vault |

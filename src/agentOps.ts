@@ -769,30 +769,6 @@ export async function runUiOp(op: ipc.AgentUiOp, ctx: UiOpContext): Promise<unkn
         ...(answer.note ? { theySaid: answer.note } : {}),
       };
     }
-    case "recall": {
-      const { loadMemories, recallFrom } = await import("./companionMemory");
-      const found = recallFrom(await loadMemories(), op.query);
-      return {
-        memories: found.map((m) => ({
-          about: m.about,
-          fact: m.fact,
-          when: new Date(m.ts).toISOString().slice(0, 10),
-        })),
-        note: found.length
-          ? undefined
-          : "Nothing recorded yet — this is a companion that has not learned anything about them so far.",
-      };
-    }
-    case "remember": {
-      const { remember } = await import("./companionMemory");
-      const result = await remember({
-        fact: op.fact ?? "",
-        about: op.about,
-        forget: op.forget,
-      });
-      return result;
-    }
-
     default:
       throw new Error(`unknown op: ${op.op}`);
     }

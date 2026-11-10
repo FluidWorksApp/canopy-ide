@@ -10,7 +10,7 @@ export type WorkspaceMenuRow={id:string;name:string;kind:'local'|'saved'|'manage
  * its own popup rather than in this menu. */
 /** `linkWorkspaceId`: the active account workspace, offered as one-click
  *  "Copy workspace link" (readableLinks.ts). */
-export function WorkspaceMenu({anchor,rows,busyId,error,onPick,onManage,onNew,onClose,linkWorkspaceId}:{anchor:HTMLElement|null;rows:WorkspaceMenuRow[];busyId:string|null;error:string;onPick:(row:WorkspaceMenuRow)=>void;onManage:()=>void;onNew:()=>void;onClose:()=>void;linkWorkspaceId?:string}){
+export function WorkspaceMenu({anchor,rows,busyId,error,onPick,allActive,onAllWorkspaces,onManage,onNew,onClose,linkWorkspaceId}:{anchor:HTMLElement|null;rows:WorkspaceMenuRow[];busyId:string|null;error:string;onPick:(row:WorkspaceMenuRow)=>void;allActive:boolean;onAllWorkspaces:()=>void;onManage:()=>void;onNew:()=>void;onClose:()=>void;linkWorkspaceId?:string}){
  const [linkState,setLinkState]=useState<{text:string;error:boolean}|null>(null);
  const copyLink=()=>{if(!linkWorkspaceId)return;setLinkState({text:'Copying…',error:false});void copyReadableLink({kind:'workspace',workspaceId:linkWorkspaceId}).then(url=>setLinkState({text:`Copied ${url.replace(/^https:\/\//,'')}`,error:false})).catch((e:unknown)=>setLinkState({text:e instanceof Error?e.message:String(e),error:true}));};
  const menu=useRef<HTMLDivElement>(null);
@@ -33,6 +33,11 @@ export function WorkspaceMenu({anchor,rows,busyId,error,onPick,onManage,onNew,on
  }
  return createPortal(<div ref={menu} className="workspace-menu" role="menu" aria-label="Switch workspace" style={position?{top:position.top,right:position.right}:{visibility:'hidden'}} onKeyDown={keys}>
   <div className="workspace-menu-heading">Workspaces</div>
+  <button type="button" role="menuitemradio" aria-checked={allActive} className={`workspace-menu-row${allActive?' is-active':''}`} onClick={onAllWorkspaces}>
+   <span className="workspace-menu-icon" aria-hidden="true"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.4"><rect x="2" y="2" width="5" height="5" rx="1"/><rect x="9" y="2" width="5" height="5" rx="1"/><rect x="2" y="9" width="5" height="5" rx="1"/><rect x="9" y="9" width="5" height="5" rx="1"/></svg></span>
+   <span className="workspace-menu-text"><span className="workspace-menu-name">All workspaces</span><span className="workspace-menu-detail">Every machine</span></span>
+   <span className="workspace-menu-check" aria-hidden="true">{allActive?'✓':''}</span>
+  </button>
   {rows.map(row=>{const busy=busyId===row.id;return <button type="button" role="menuitemradio" aria-checked={row.active} aria-disabled={!!row.disabled||!!busyId} key={row.id} title={row.disabled} className={`workspace-menu-row${row.active?' is-active':''}`} onClick={()=>{if(!row.disabled&&!busyId)onPick(row);}}>
    <span className={`workspace-menu-icon ${row.kind}`} aria-hidden="true">{row.kind==='local'?<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.4"><rect x="2" y="3" width="12" height="8" rx="1.5"/><path d="M5.5 13.5h5"/></svg>:<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.4"><rect x="2" y="2.5" width="12" height="4.5" rx="1.2"/><rect x="2" y="9" width="12" height="4.5" rx="1.2"/><path d="M4.5 4.75h.01M4.5 11.25h.01"/></svg>}</span>
    <span className="workspace-menu-text"><span className="workspace-menu-name">{row.name}</span><span className={`workspace-menu-detail ${row.tone}`}>{busy?'Switching…':row.disabled??row.detail}</span></span>

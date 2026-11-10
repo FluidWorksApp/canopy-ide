@@ -4,6 +4,7 @@
 // purpose: two palettes that look alike are one thing to learn.
 import { useEffect, useMemo, useRef, useState } from "react";
 import { AGENT_CLIS, type AgentCli } from "../projects";
+import { listedForLaunch } from "../agentCliVisibility";
 import { AgentIcon, TerminalIcon } from "./icons";
 import { fuzzy } from "../fuzzy";
 import { getSettings } from "../settings";
@@ -60,14 +61,14 @@ export function LaunchPalette({
   const rows: Row[] = useMemo(() => {
     const all: Row[] = [
       { kind: "shell" },
-      ...AGENT_CLIS.map((cli) => ({ kind: "cli" as const, cli })),
+      ...listedForLaunch(AGENT_CLIS, installed).map((cli) => ({ kind: "cli" as const, cli })),
     ];
     if (!query.trim()) return all;
     // Menu order is kept rather than re-ranked by score: the list is short
     // enough to read, and a list that reshuffles under the cursor is worse
     // than one whose order you can predict.
     return all.filter((r) => fuzzy(query, rowLabel(r)) !== null);
-  }, [query]);
+  }, [query, installed]);
 
   useEffect(() => setSel(0), [query]);
   useEffect(() => {

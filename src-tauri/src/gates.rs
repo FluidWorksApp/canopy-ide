@@ -174,6 +174,44 @@ pub fn policy_dir(home: &str) -> PathBuf {
     PathBuf::from(home).join(".canopy").join("policy")
 }
 
+/// Where the app tells the hook about the one global switch that touches the
+/// built-in confirmations: Settings → Agents → "Skip permission prompts".
+/// `CANOPY_GATES_GLOBAL` points straight at the file (tests).
+pub fn global_path(home: &str) -> PathBuf {
+    if let Ok(file) = std::env::var("CANOPY_GATES_GLOBAL") {
+        return PathBuf::from(file);
+    }
+    PathBuf::from(home)
+        .join(".canopy")
+        .join("gates-global.json")
+}
+
+/// Whether the person turned on "Skip permission prompts". With it on, Canopy's
+/// own confirmation for deleting files outside the project is skipped too: it
+/// is the same decision (let agents act without asking), and asking twice about
+/// the same thing is what the setting exists to stop. Never skipped: deleting
+/// the project folder itself, the home folder, or a top-level folder.
+pub fn skip_outside_delete_confirm(home: &str) -> bool {
+    std::fs::read_to_string(global_path(home))
+        .ok()
+        .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok())
+        .and_then(|value| value.get("skipPermissions").and_then(|v| v.as_bool()))
+        .unwrap_or(false)
+}
+
+/// Record the switch for the hook. Written whole and atomically, so a hook
+/// reading it mid-write sees the old or the new value, never half of one.
+pub fn write_global(home: &str, skip_permissions: bool) -> Result<(), String> {
+    let path = global_path(home);
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+    }
+    let tmp = path.with_extension("json.tmp");
+    let body = serde_json::json!({ "skipPermissions": skip_permissions }).to_string();
+    std::fs::write(&tmp, body).map_err(|e| e.to_string())?;
+    std::fs::rename(&tmp, &path).map_err(|e| e.to_string())
+}
+
 /// Same rule as ledger.rs `store_dir`, so a hook-side block lands in the very
 /// file the app's Rules panel reads.
 pub fn ledger_dir(home: &str) -> PathBuf {
@@ -476,7 +514,7 @@ pub fn reads_untrusted(tool: &str) -> bool {
         || t == "read_url_content"
         || t == "read_web_page"
         // Text from a tracker or a pull request: whoever filed the issue or
-        // left the comment wrote it (memoryLedger.ts `untrustedReason`).
+        // left the comment wrote it.
         || t.ends_with("canopy_tickets")
         || t.ends_with("canopy_reviews")
         || t.ends_with("canopy_pr_details")
@@ -799,6 +837,8 @@ const SHELL_TOOLS: &[&str] = &[
     "execute_command",
     "run_command",
     "shell_command",
+    // Kiro CLI: `execute_bash` (V2) and `shell` (above) with `command`.
+    "execute_bash",
 ];
 /// Writers: Claude's set, Gemini's `replace`/`write_file`, Amp's
 /// `create_file`/`edit_file`, Antigravity's `write_to_file` family, Grok's
@@ -818,8 +858,17 @@ const WRITE_TOOLS: &[&str] = &[
     "search_replace",
     "delete",
     "delete_file",
+    // Kiro CLI `fs_write` (create, str_replace, insert, append) with `path`.
+    "fs_write",
 ];
-const READ_TOOLS: &[&str] = &["read", "read_file", "view", "view_file", "notebookread"];
+const READ_TOOLS: &[&str] = &[
+    "read",
+    "read_file",
+    "view",
+    "view_file",
+    "notebookread",
+    "fs_read",
+];
 /// The keys a CLI puts a path under: Claude/Codex/Grok `file_path`, OpenCode
 /// `filePath`, Amp/omp/Cursor `path`, Antigravity `TargetFile`/`AbsolutePath`.
 const PATH_KEYS: &[&str] = &[
@@ -894,6 +943,15 @@ pub fn action_from_event(
     if tool_in(READ_TOOLS, tool) {
         if let Some(p) = first_path() {
             a.reads.push(abs(p, cwd));
+        }
+        // Kiro `fs_read` batches its targets: `operations: [{ path, mode }]`.
+        if let Some(ops) = input["operations"].as_array() {
+            for p in ops
+                .iter()
+                .filter_map(|o| o["path"].as_str().filter(|p| !p.is_empty()))
+            {
+                a.reads.push(abs(p, cwd));
+            }
         }
     }
     if let Some(u) = input["url"].as_str().or_else(|| input["Url"].as_str()) {
@@ -1678,6 +1736,13 @@ fn classify_segment(words: &[String], ctx: &Ctx) -> Option<(String, String)> {
                 let is_root = path.parent().is_none();
                 let outside = !path.starts_with(boundary);
                 let is_boundary = path == boundary || boundary.starts_with(&path);
+                // Files outside the project are the one case the global
+                // "Skip permission prompts" switch lifts. Everything bigger
+                // (the project folder, home, a top-level folder) still asks.
+                let only_outside = outside && !is_root && path != home && !is_boundary;
+                if only_outside && skip_outside_delete_confirm(ctx.home) {
+                    continue;
+                }
                 if is_root || path == home || is_boundary || outside {
                     let label = if is_root || path == home {
                         "deletes everything under a top-level folder for good"
@@ -2813,6 +2878,53 @@ mod tests {
     }
 
     #[test]
+    fn skipping_permission_prompts_lifts_only_the_outside_the_project_delete() {
+        // A home of its own, so the switch is read from a file only this test
+        // touches (the environment override is shared by every test).
+        let home = std::env::temp_dir().join(format!("canopy-gates-global-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&home);
+        let home_str = home.to_string_lossy().to_string();
+        let git = &CLEAN;
+        let make = |home: &'static str| Ctx {
+            cwd: Path::new("/home/u/repo/src"),
+            top: Some(Path::new("/home/u/repo")),
+            home,
+            git,
+        };
+        // Leak the string: Ctx borrows it for the test's duration.
+        let home_static: &'static str = Box::leak(home_str.clone().into_boxed_str());
+        let c = make(home_static);
+        let outside = "rm -rf /private/tmp/claude-501/scratch";
+        assert!(
+            classify_irreversible(outside, &c).is_some(),
+            "asks by default"
+        );
+
+        write_global(&home_str, true).unwrap();
+        assert!(skip_outside_delete_confirm(&home_str));
+        assert!(
+            classify_irreversible(outside, &c).is_none(),
+            "skipped when the switch is on"
+        );
+        // Never skipped: the project folder, home, a top-level folder.
+        assert!(classify_irreversible("rm -rf /home/u/repo", &c).is_some());
+        assert!(classify_irreversible("rm -rf /", &c).is_some());
+        // Single-quoted: a Windows home path has backslashes, which an unquoted
+        // shell word would read as escapes.
+        assert!(classify_irreversible(&format!("rm -rf '{home_str}'"), &c).is_some());
+
+        write_global(&home_str, false).unwrap();
+        assert!(
+            classify_irreversible(outside, &c).is_some(),
+            "asks again when it is off"
+        );
+        // A missing or malformed file is "off".
+        std::fs::write(global_path(&home_str), "not json").unwrap();
+        assert!(!skip_outside_delete_confirm(&home_str));
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
     fn irreversible_positives() {
         let cases: &[(&str, &str)] = &[
             ("psql -c 'DROP TABLE users'", "database"),
@@ -3729,6 +3841,25 @@ mod tests {
             ),
             Outcome::Refused
         );
+    }
+
+    #[test]
+    fn kiro_fs_read_targets_are_reads() {
+        let cwd = Path::new("/w");
+        let flat = action_from_event(
+            "fs_read",
+            &serde_json::json!({"path": "a.txt"}),
+            cwd,
+            vec![],
+        );
+        assert_eq!(flat.reads, vec![PathBuf::from("/w/a.txt")]);
+        let batched = action_from_event(
+            "fs_read",
+            &serde_json::json!({"operations": [{"mode": "Line", "path": "/x/.env"}]}),
+            cwd,
+            vec![],
+        );
+        assert_eq!(batched.reads, vec![PathBuf::from("/x/.env")]);
     }
 
     #[test]

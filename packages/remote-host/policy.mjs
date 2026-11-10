@@ -87,8 +87,18 @@ export class Tickets {
   }
 }
 
-/** The on-demand desktop's picture and sound. Both need drive access and go to the runner. */
-export const desktopStream=stream=>stream==='/desktop/ws'||stream==='/desktop/audio';
+/** The agent browser's live view (runner /browser/stream). A ticket names one
+ *  stream, so the viewer's query (T3's maxWidth, maxHeight, quality and
+ *  interactive) travels in it; only those, with integer or "false" values. */
+export const browserStream=stream=>{
+  if(typeof stream!=='string'||stream.length>256)return false;
+  const [route,query,...rest]=stream.split('?');
+  if(route!=='/browser/stream'||rest.length)return false;
+  const params=new URLSearchParams(query??'');
+  return [...params].every(([key,value])=>['maxWidth','maxHeight','quality'].includes(key)?/^\d{1,5}$/.test(value):key==='interactive'&&value==='false');
+};
+/** The on-demand desktop's picture and sound, and the agent browser's live view. All need drive access and go to the runner. */
+export const desktopStream=stream=>stream==='/desktop/ws'||stream==='/desktop/audio'||browserStream(stream);
 
 // Re-evaluate active streams, not just the HTTP request that minted a ticket.
 export function authorizeStream(config, grant, now = Date.now()) {

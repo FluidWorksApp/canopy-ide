@@ -68,8 +68,8 @@ export function BrainAutomation() {
       label="Let the brain name sessions"
       hint={
         settings.brainSessionTitles
-          ? "When an agent doesn't name its own task, the brain titles its tab and writes the one-line summary in Agents. One small background call per new session."
-          : "Tabs keep the first words of the opening prompt, and Agents shows the latest message."
+          ? "Titles each tab and writes its one-line summary."
+          : "Tabs keep the opening prompt's first words."
       }
     />
   );

@@ -36,7 +36,7 @@ export function BranchSwitchDialog({
               key={`${c.action}-${i}`}
               className={`branch-switch-choice ${
                 c.recommended ? "branch-switch-choice-lead" : ""
-              }`}
+              } ${c.danger ? "branch-switch-choice-danger" : ""}`}
               disabled={c.disabled || busy}
               onClick={() => onChoose(c.action)}
             >

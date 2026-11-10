@@ -235,9 +235,10 @@ fn gate_deny_output(agent: Option<&str>, reason: &str) -> Option<serde_json::Val
             "agent_message": reason,
             "user_message": "Canopy stopped this tool call — see the card on the agent's terminal.",
         })),
-        Some("grok") | Some("agy") | Some("opencode") | Some("omp") | Some("amp") => {
-            Some(serde_json::json!({ "decision": "deny", "reason": reason }))
-        }
+        // Kiro blocks on exit code 2 with the reason on stderr, not on stdout;
+        // the caller prints this value's `reason` that way (see real_main).
+        Some("kiro") | Some("grok") | Some("agy") | Some("opencode") | Some("omp")
+        | Some("amp") => Some(serde_json::json!({ "decision": "deny", "reason": reason })),
         _ => None,
     }
 }
@@ -772,6 +773,12 @@ fn real_main() -> Result<(), Box<dyn std::error::Error>> {
     // A gate's deny, in the contract of the CLI that asked (gate_deny_output).
     if let Some(reason) = gate.as_ref().and_then(|g| g.deny.clone()) {
         if let Some(out) = gate_deny_output(agent_override.as_deref(), &reason) {
+            if agent_override.as_deref() == Some("kiro") {
+                // Kiro's preToolUse contract (kiro.dev/docs/cli/hooks): exit 0
+                // allows, exit 2 blocks and hands STDERR to the model.
+                eprintln!("{reason}");
+                std::process::exit(2);
+            }
             print_verdict(&out);
             return Ok(());
         }
@@ -867,6 +874,33 @@ fn real_main() -> Result<(), Box<dyn std::error::Error>> {
                         }
                     });
                     println!("{out}");
+                }
+            }
+        }
+        // Kiro adds a hook's plain-text stdout to the conversation for
+        // agentSpawn and userPromptSubmit (kiro.dev/docs/cli/hooks), so the
+        // peer and rules context goes out as text, not Claude's JSON shape.
+        //
+        // No research/write-root denial here, same as Grok: `edited_path` only
+        // knows Claude-shaped tools and `file_path`, and Kiro's `fs_write` uses
+        // `path`. Those restrictions fail open for Kiro until that is mapped.
+        Some("kiro") => {
+            if hook_event == "UserPromptSubmit" || hook_event == "SessionStart" {
+                let always = hook_event == "SessionStart";
+                let peers = peer_context(&session_id, &cwd)
+                    .filter(|c| peer_context_changed(&session_id, c) || always);
+                let rules = always
+                    .then(|| {
+                        gates::load_policy(&home(), std::path::Path::new(&cwd))
+                            .and_then(|(_, p)| gates::session_context(&p))
+                    })
+                    .flatten();
+                let context = match (peers, rules) {
+                    (Some(p), Some(r)) => Some(format!("{r}\n{p}")),
+                    (p, r) => p.or(r),
+                };
+                if let Some(context) = context {
+                    println!("{context}");
                 }
             }
         }
@@ -983,6 +1017,46 @@ fn normalize_event(event: &mut serde_json::Value, agent: &str) {
                 "stop_failure" => "StopFailure",
                 "stop_cancelled" => "StopCancelled",
                 "notification" => "Notification",
+                _ => name.as_str(),
+            };
+            map.insert("hook_event_name".into(), serde_json::json!(canonical));
+        }
+    }
+    if agent == "kiro" {
+        // Kiro's triggers are camelCase and its payload is already snake_case
+        // (`hook_event_name`, `cwd`, `tool_name`, `tool_input`, `prompt`,
+        // `assistant_response`). Map the trigger onto the Claude names every
+        // downstream consumer reads; a session id is kept when Kiro sends one.
+        if map.get("session_id").and_then(|v| v.as_str()).is_none() {
+            if let Some(value) = map.get("sessionId").cloned() {
+                map.insert("session_id".into(), value);
+            }
+        }
+        // Kiro's documented payload has no session id. Without one, digests,
+        // peer context and per-session attention grouping are all skipped, so
+        // fall back to one stable id per terminal, as the --signal path does.
+        if !map
+            .get("session_id")
+            .and_then(|v| v.as_str())
+            .is_some_and(|s| !s.is_empty())
+        {
+            let pty = std::env::var("CANOPY_PTY").unwrap_or_default();
+            map.insert(
+                "session_id".into(),
+                serde_json::json!(format!("kiro-pty{pty}")),
+            );
+        }
+        if let Some(name) = map
+            .get("hook_event_name")
+            .and_then(|v| v.as_str())
+            .map(str::to_string)
+        {
+            let canonical = match name.as_str() {
+                "agentSpawn" => "SessionStart",
+                "userPromptSubmit" => "UserPromptSubmit",
+                "preToolUse" => "PreToolUse",
+                "postToolUse" => "PostToolUse",
+                "stop" => "Stop",
                 _ => name.as_str(),
             };
             map.insert("hook_event_name".into(), serde_json::json!(canonical));
@@ -1537,6 +1611,56 @@ fn update_digest(
         digest["subagents"] = serde_json::json!(n);
     }
 
+    // The agent's own task list. Claude's TodoWrite sends the whole list on
+    // every call, so the latest call is the truth and replaces what was kept.
+    // Only Claude's tool is read here: it is the shape verified against T3
+    // Code's adapter; other agents' plan tools are not guessed at.
+    if hook_event == "PostToolUse"
+        && matches!(
+            event["tool_name"].as_str(),
+            Some("TodoWrite") | Some("update_plan")
+        )
+    {
+        // Codex's `update_plan` sends the whole plan each call too, as
+        // `{plan:[{step,status}]}`; same replace-the-list rule.
+        let input = if event["tool_name"].as_str() == Some("update_plan") {
+            plan_as_todos(&event["tool_input"])
+        } else {
+            event["tool_input"].clone()
+        };
+        if let Some(tasks) = tasks_from_todo_write(&input) {
+            digest["tasks"] = tasks;
+            digest["tasks_updated"] = serde_json::json!(now);
+        }
+    } else if hook_event == "PostToolUse"
+        && matches!(
+            event["tool_name"].as_str(),
+            Some("TaskCreate") | Some("TaskUpdate")
+        )
+    {
+        // Newer Claude builds keep the list one task at a time. The shapes are
+        // read from the CLI itself: TaskCreate {subject, description,
+        // activeForm?} answers "Task #<id> created successfully: <subject>";
+        // TaskUpdate {taskId, status?, subject?} where status may be `deleted`.
+        let current = digest["tasks"].as_array().cloned().unwrap_or_default();
+        if let Some(tasks) = apply_task_tool(
+            current,
+            event["tool_name"].as_str().unwrap_or(""),
+            &event["tool_input"],
+            &event["tool_response"],
+        ) {
+            digest["tasks"] = serde_json::Value::Array(tasks);
+            digest["tasks_updated"] = serde_json::json!(now);
+        }
+    } else if hook_event == "SessionEnd" {
+        // A closed session has no work in progress: leaving its last list would
+        // show a step "running" for as long as the digest file lives.
+        if let Some(object) = digest.as_object_mut() {
+            object.remove("tasks");
+            object.remove("tasks_updated");
+        }
+    }
+
     // What the human actually asked for — the highest-signal, lowest-token
     // summary of what a session is doing. NB: the field is `prompt`; the docs
     // say `user_input`, which does not exist on the wire.
@@ -1583,6 +1707,37 @@ fn update_digest(
         if let Some(arr) = digest["files"].as_array_mut() {
             if !arr.iter().any(|v| v.as_str() == Some(rel.as_str())) {
                 arr.push(serde_json::json!(rel));
+                while arr.len() > MAX_FILES {
+                    arr.remove(0);
+                }
+            }
+        }
+    }
+
+    // Files a shell command wrote (`> out.png`, `-o report.pdf`, `tee`): an agent
+    // generates images and documents this way as often as through a Write call.
+    if hook_event == "PostToolUse" && event["tool_name"].as_str() == Some("Bash") {
+        if let Some(command) = event["tool_input"]["command"].as_str() {
+            for rel in bash_output_paths(command, &cwd) {
+                if let Some(arr) = digest["files"].as_array_mut() {
+                    if !arr.iter().any(|v| v.as_str() == Some(rel.as_str())) {
+                        arr.push(serde_json::json!(rel));
+                        while arr.len() > MAX_FILES {
+                            arr.remove(0);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // A screenshot taken through a Canopy tool reaches this hook as raw image
+    // data, never a path. Saved beside the digest so it is an asset like any
+    // other file the agent made.
+    if hook_event == "PostToolUse" {
+        if let Some(shot) = save_screenshot(&dir, session_id, event) {
+            if let Some(arr) = digest["files"].as_array_mut() {
+                arr.push(serde_json::json!(shot));
                 while arr.len() > MAX_FILES {
                     arr.remove(0);
                 }
@@ -1698,6 +1853,15 @@ fn edit_records(agent: &str, event: &serde_json::Value) -> Vec<EditRecord> {
             .unwrap_or_default(),
         ("grok", "search_replace") => first_path(&["file_path", "path", "target_file"])
             .map(|p| vec![rec(&p, s(&input["old_string"]), s(&input["new_string"]))])
+            .unwrap_or_default(),
+        // Kiro `fs_write`: `command` is create | str_replace | insert | append,
+        // with `path` and `file_text` / `old_str` / `new_str`.
+        ("kiro", "fs_write") => first_path(&["path"])
+            .map(|p| match input["command"].as_str() {
+                Some("str_replace") => vec![rec(&p, s(&input["old_str"]), s(&input["new_str"]))],
+                Some("create") => vec![rec(&p, None, s(&input["file_text"]))],
+                _ => vec![rec(&p, None, None)],
+            })
             .unwrap_or_default(),
         ("omp", "write") => first_path(&["path"])
             .map(|p| vec![rec(&p, None, s(&input["content"]))])
@@ -2151,6 +2315,271 @@ fn peer_context(session_id: &str, cwd: &str) -> Option<String> {
     }
     out.push_str(&format!("(project: {project})\n"));
     Some(out)
+}
+
+/// Standard base64 (with or without padding), no dependency: this binary is
+/// also built on its own in workspace images.
+fn b64_decode(input: &str) -> Option<Vec<u8>> {
+    let mut out = Vec::with_capacity(input.len() / 4 * 3);
+    let (mut acc, mut bits) = (0u32, 0u32);
+    for c in input.bytes() {
+        let v = match c {
+            b'A'..=b'Z' => c - b'A',
+            b'a'..=b'z' => c - b'a' + 26,
+            b'0'..=b'9' => c - b'0' + 52,
+            b'+' => 62,
+            b'/' => 63,
+            b'=' | b'\n' | b'\r' | b' ' => continue,
+            _ => return None,
+        } as u32;
+        acc = (acc << 6) | v;
+        bits += 6;
+        if bits >= 8 {
+            bits -= 8;
+            out.push((acc >> bits) as u8);
+            acc &= (1 << bits) - 1;
+        }
+    }
+    Some(out)
+}
+
+/// The base64 image inside a screenshot tool's response, whichever shape the
+/// CLI wraps it in (a content array, or an object holding one).
+fn screenshot_data(response: &serde_json::Value) -> Option<String> {
+    let items = response
+        .as_array()
+        .or_else(|| response["content"].as_array())?;
+    items.iter().find_map(|item| {
+        item["source"]["data"]
+            .as_str()
+            .or_else(|| item["data"].as_str())
+            .map(|s| s.to_string())
+    })
+}
+
+/// Keep a screenshot a Canopy tool returned as a file beside the digest and give
+/// back its path, so it can be listed as the agent's asset. At most the newest
+/// 20 are kept per session.
+fn save_screenshot(dir: &str, session_id: &str, event: &serde_json::Value) -> Option<String> {
+    let tool = event["tool_name"].as_str()?;
+    if !tool.contains("canopy") || !tool.ends_with("screenshot") {
+        return None;
+    }
+    let data = screenshot_data(&event["tool_response"])?;
+    if data.len() > 12 * 1024 * 1024 {
+        return None;
+    }
+    let bytes = b64_decode(&data)?;
+    let ext = if bytes.starts_with(&[0x89, b'P', b'N', b'G']) {
+        "png"
+    } else {
+        "jpg"
+    };
+    let shots = format!("{dir}/{session_id}.shots");
+    std::fs::create_dir_all(&shots).ok()?;
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0);
+    let file = format!("{shots}/screenshot-{stamp}.{ext}");
+    std::fs::write(&file, bytes).ok()?;
+    if let Ok(read) = std::fs::read_dir(&shots) {
+        let mut names: Vec<_> = read.flatten().map(|e| e.path()).collect();
+        names.sort();
+        while names.len() > 20 {
+            let _ = std::fs::remove_file(names.remove(0));
+        }
+    }
+    Some(file)
+}
+
+/// Output files named in a shell command: after `>`, `>>`, `-o`, `--output`,
+/// `-O` or `tee`. Only ones that exist now and are not directories, as paths
+/// relative to `cwd` when under it. Quoting is stripped; anything with a shell
+/// expansion (`$`, backticks, `*`) is skipped rather than guessed at.
+fn bash_output_paths(command: &str, cwd: &str) -> Vec<String> {
+    let tokens: Vec<&str> = command.split_whitespace().collect();
+    let mut out: Vec<String> = Vec::new();
+    for (i, tok) in tokens.iter().enumerate() {
+        let target = match *tok {
+            ">" | ">>" | "-o" | "--output" | "-O" | "tee" => tokens.get(i + 1).copied(),
+            t if t.len() > 1 && t.starts_with('>') && !t.starts_with(">&") => {
+                Some(t.trim_start_matches('>'))
+            }
+            t if t.starts_with("--output=") => Some(&t["--output=".len()..]),
+            _ => None,
+        };
+        let Some(raw) = target else { continue };
+        let name = raw.trim_matches(|c| c == '"' || c == '\'' || c == ';');
+        if name.is_empty()
+            || name.starts_with('-')
+            || name.starts_with('&')
+            || name == "/dev/null"
+            || name.contains(['$', '`', '*', '?', '|', '('])
+        {
+            continue;
+        }
+        let full = if name.starts_with('/') {
+            name.to_string()
+        } else {
+            format!("{cwd}/{name}")
+        };
+        if !std::path::Path::new(&full).is_file() {
+            continue;
+        }
+        let rel = full
+            .strip_prefix(&format!("{cwd}/"))
+            .unwrap_or(&full)
+            .to_string();
+        if !out.contains(&rel) {
+            out.push(rel);
+        }
+    }
+    out
+}
+
+/// Codex's `update_plan` input (`{plan:[{step,status}]}`) in TodoWrite's shape.
+/// Null when there is no plan list, so a malformed call keeps the last list.
+fn plan_as_todos(input: &serde_json::Value) -> serde_json::Value {
+    let Some(plan) = input["plan"].as_array() else {
+        return serde_json::Value::Null;
+    };
+    let todos: Vec<serde_json::Value> = plan
+        .iter()
+        .map(|p| serde_json::json!({ "content": p["step"], "status": p["status"] }))
+        .collect();
+    serde_json::json!({ "todos": todos })
+}
+
+/// Claude's TodoWrite input (`{todos:[{content,status,activeForm?}]}`) as the
+/// digest's task list: `[{text, status}]` with status `pending`, `running` or
+/// `completed`. Bounded so a runaway list cannot bloat every digest write.
+/// None when the input has no list at all (so a malformed call keeps the last
+/// good list); an empty list is a real "no tasks" answer.
+fn tasks_from_todo_write(input: &serde_json::Value) -> Option<serde_json::Value> {
+    const MAX_TASKS: usize = 50;
+    let todos = input["todos"].as_array()?;
+    let tasks: Vec<serde_json::Value> = todos
+        .iter()
+        .filter_map(|todo| {
+            let text = todo["content"]
+                .as_str()
+                .or_else(|| todo["text"].as_str())?
+                .trim();
+            if text.is_empty() {
+                return None;
+            }
+            let status = match todo["status"].as_str() {
+                Some("completed") => "completed",
+                Some("in_progress") => "running",
+                _ => "pending",
+            };
+            Some(serde_json::json!({ "text": truncate(text, 200), "status": status }))
+        })
+        .take(MAX_TASKS)
+        .collect();
+    Some(serde_json::Value::Array(tasks))
+}
+
+/// An agent's task list as the roster reports it: `{done, total, current}`,
+/// plus every step when `detail`. Null when the agent has recorded no list, so
+/// "no tasks yet" reads differently from "0 of 3 done".
+fn task_progress(digest: &serde_json::Value, detail: bool) -> serde_json::Value {
+    let Some(tasks) = digest["tasks"].as_array().filter(|t| !t.is_empty()) else {
+        return serde_json::Value::Null;
+    };
+    let done = tasks.iter().filter(|t| t["status"] == "completed").count();
+    let current = tasks
+        .iter()
+        .find(|t| t["status"] == "running")
+        .or_else(|| tasks.iter().find(|t| t["status"] == "pending"))
+        .map(|t| t["text"].clone())
+        .unwrap_or(serde_json::Value::Null);
+    let mut out = serde_json::json!({ "done": done, "total": tasks.len(), "current": current });
+    if detail {
+        out["items"] = serde_json::Value::Array(tasks.clone());
+    }
+    out
+}
+
+/// The task id a TaskCreate answered with, from its response: "Task #<id>
+/// created successfully: ...". The response may be a plain string or an object
+/// carrying text, so the whole value is searched.
+fn created_task_id(response: &serde_json::Value) -> Option<String> {
+    let text = match response {
+        serde_json::Value::String(s) => s.clone(),
+        other => other.to_string(),
+    };
+    let rest = text.split("Task #").nth(1)?;
+    let id: String = rest
+        .chars()
+        .take_while(|c| !c.is_whitespace() && *c != '"' && *c != '\\')
+        .collect();
+    // "Task #3: subject" and "Task #3." name task 3.
+    let id = id.trim_end_matches([':', '.', ',', ')']).to_string();
+    (!id.is_empty()).then_some(id)
+}
+
+/// Apply one TaskCreate or TaskUpdate to the digest's task list. None when the
+/// call says nothing usable, so a malformed call keeps the last good list.
+fn apply_task_tool(
+    mut tasks: Vec<serde_json::Value>,
+    tool: &str,
+    input: &serde_json::Value,
+    response: &serde_json::Value,
+) -> Option<Vec<serde_json::Value>> {
+    const MAX_TASKS: usize = 50;
+    match tool {
+        "TaskCreate" => {
+            let text = input["subject"].as_str()?.trim();
+            if text.is_empty() {
+                return None;
+            }
+            // A full list drops its oldest finished task to make room, so a long
+            // session keeps tracking new work instead of freezing at the cap.
+            if tasks.len() >= MAX_TASKS {
+                let done = tasks.iter().position(|t| t["status"] == "completed")?;
+                tasks.remove(done);
+            }
+            let mut task = serde_json::json!({ "text": truncate(text, 200), "status": "pending" });
+            if let Some(id) = created_task_id(response) {
+                task["id"] = serde_json::json!(id);
+            }
+            tasks.push(task);
+            Some(tasks)
+        }
+        "TaskUpdate" => {
+            let id = input["taskId"]
+                .as_str()
+                .map(str::to_string)
+                .or_else(|| input["taskId"].as_u64().map(|n| n.to_string()))?;
+            let at = tasks
+                .iter()
+                .position(|t| t["id"].as_str() == Some(id.as_str()))?;
+            match input["status"].as_str() {
+                Some("deleted") => {
+                    tasks.remove(at);
+                }
+                Some(status) => {
+                    tasks[at]["status"] = serde_json::json!(match status {
+                        "completed" => "completed",
+                        "in_progress" => "running",
+                        _ => "pending",
+                    });
+                }
+                None => {}
+            }
+            if let Some(subject) = input["subject"]
+                .as_str()
+                .map(str::trim)
+                .filter(|t| !t.is_empty())
+            {
+                tasks[at]["text"] = serde_json::json!(truncate(subject, 200));
+            }
+            Some(tasks)
+        }
+        _ => None,
+    }
 }
 
 fn truncate(s: &str, max: usize) -> String {
@@ -3859,7 +4288,6 @@ const COMPANION_MUTATING_TOOLS: &[&str] = &[
     "canopy_claim",
     "canopy_notes_write",
     "canopy_research_write",
-    "canopy_memory_propose",
     "canopy_vault_fill",
     "canopy_vault_read",
     "canopy_browser_click",
@@ -4007,7 +4435,6 @@ fn static_tool_defs() -> Vec<serde_json::Value> {
     };
     tools.extend(research_tool_defs());
     tools.extend(notes_tool_defs());
-    tools.extend(memory_tool_defs());
     tools.extend(mesh_tool_defs());
     tools.extend(session_tool_defs());
     tools.extend(task_tool_defs());
@@ -4057,7 +4484,6 @@ const READ_ONLY_TOOLS: &[&str] = &[
     "canopy_team_people",
     "canopy_research",
     "canopy_notes",
-    "canopy_memory",
     "canopy_wait_for",
     "canopy_screenshot",
     "canopy_browser_snapshot",
@@ -4279,37 +4705,6 @@ fn notes_tool_defs() -> Vec<serde_json::Value> {
     ]
 }
 
-/// Team memory: approved decisions, constraints, conventions and facts, with
-/// who recorded them and from which session. Read split from write on the
-/// notes pattern, so a host can auto-approve the reader.
-fn memory_tool_defs() -> Vec<serde_json::Value> {
-    vec![
-        serde_json::json!({
-            "name": "canopy_memory",
-            "description": "Check team memory before deciding anything durable: which library or pattern to use, how data is secured, a convention for naming or layout, a constraint on deploys. Returns only entries a person on the team approved and that have not expired, most relevant first, each with its reason, scope and the session it came from. Follow them unless the user says otherwise; if one looks wrong or stale, tell the user. Scoped to the project you are running in, or the one you name with `project`.",
-            "inputSchema": { "type": "object", "properties": {
-                "query": { "type": "string", "description": "What you are about to decide, in a few words, e.g. \"tenant isolation in queries\" or \"date formatting\". Empty lists the most confident entries" },
-                "scope": { "type": "string", "enum": ["personal", "project", "team", "all"], "description": "personal = this user's own preferences; project = this codebase; team = how the team works anywhere. Default all" },
-                "type": { "type": "string", "enum": ["decision", "constraint", "convention", "fact"], "description": "Only this kind of entry" },
-                "limit": { "type": "integer", "description": "Max entries (default 8, max 30)" },
-                "project": { "type": "string", "description": "Which project, by name. Only needed when you are not running inside it" }
-            }, "additionalProperties": false }
-        }),
-        serde_json::json!({
-            "name": "canopy_memory_propose",
-            "description": "Propose a durable, non-obvious piece of team knowledge that came out of this work: a decision and its reason (\"we chose row-level security over app checks because…\"), a constraint the code must respect, a team convention, or a fact about the environment. It is recorded as a proposal with this session as its source; a person approves it before any agent is told it. Do not propose task progress, what you changed, or anything obvious from the code. Check canopy_memory first so the same thing is not proposed twice.",
-            "inputSchema": { "type": "object", "properties": {
-                "type": { "type": "string", "enum": ["decision", "constraint", "convention", "fact"] },
-                "text": { "type": "string", "description": "The memory, as one plain sentence a non-engineer can follow" },
-                "why": { "type": "string", "description": "The reason, one sentence" },
-                "scope": { "type": "string", "enum": ["personal", "project", "team"], "description": "Default project" },
-                "files": { "type": "array", "items": { "type": "string" }, "description": "Files this is about, relative to the project" },
-                "project": { "type": "string", "description": "Which project, by name. Only needed when you are not running inside it" }
-            }, "required": ["type", "text", "why"], "additionalProperties": false }
-        }),
-    ]
-}
-
 fn research_tool_defs() -> Vec<serde_json::Value> {
     vec![
         serde_json::json!({
@@ -4467,22 +4862,6 @@ fn companion_tool_defs() -> Vec<serde_json::Value> {
                 "detail": { "type": "string", "description": "The specifics they need to judge it: the command, the path, the branch" },
                 "timeoutMs": { "type": "integer", "description": "How long to wait (default 120000, max 600000)" }
             }, "required": ["action"], "additionalProperties": false }
-        }),
-        serde_json::json!({
-            "name": "canopy_recall",
-            "description": "What you have already learned about this user and how they work — kept across every project and every restart, because it belongs to no repo. Check it before asking them something they have told you before.",
-            "inputSchema": { "type": "object", "properties": {
-                "query": { "type": "string", "description": "Narrow to what matters now; omit for everything" }
-            }, "additionalProperties": false }
-        }),
-        serde_json::json!({
-            "name": "canopy_remember",
-            "description": "Keep something that will still matter next week: how they like work delivered, a standing decision about a repo, the shape of a project that its files do not show. NOT a scratchpad for this turn, and never anything the code or the git history already records — your conversation already carries across restarts, so this is only for what outlives the conversation. One fact per call.",
-            "inputSchema": { "type": "object", "properties": {
-                "fact": { "type": "string", "description": "The thing worth keeping, in a sentence or two" },
-                "about": { "type": "string", "description": "What it concerns — a project name, or \"how they work\"" },
-                "forget": { "type": "boolean", "description": "Drop a fact that has turned out to be wrong, matched on `about`" }
-            }, "required": ["fact"], "additionalProperties": false }
         }),
     ]
 }
@@ -4810,7 +5189,7 @@ fn tool_defs() -> serde_json::Value {
         },
         {
             "name": "canopy_agents",
-            "description": "What the other agent sessions in this project are doing — often where the context behind a request already is. Each live row has a stable Canopy-assigned name plus its terminal id; pass name, ptyId, or session for that agent's full conversation. Also includes held file claims for the shared checkout.",
+            "description": "What the other agent sessions in this project are doing — often where the context behind a request already is. Each live row has a stable Canopy-assigned name plus its terminal id, and `tasks` when the agent keeps a task list ({done, total, current}: how far along it is); pass name, ptyId, or session for that agent's full conversation and every task step. Also includes held file claims for the shared checkout.",
             "inputSchema": { "type": "object", "properties": {
                 "ptyId": { "type": "integer", "description": "One agent, by terminal — adds its conversation" },
                 "name": { "type": "string", "description": "One agent, by its stable Canopy-assigned name — adds its conversation" },
@@ -5032,7 +5411,6 @@ fn describe_action(name: &str, args: &serde_json::Value) -> (String, Option<Stri
         ),
         "canopy_claim" => ("Claim files".into(), arg("note")),
         "canopy_notes_write" => ("Write to your scratchpad".into(), arg("title")),
-        "canopy_memory_propose" => ("Propose a team memory".into(), arg("text")),
         "canopy_research_write" => ("Record research".into(), arg("title")),
         "canopy_vault_fill" => ("Sign in to a page".into(), arg("entryId")),
         "canopy_vault_read" => ("Read a stored password".into(), arg("entryId")),
@@ -5139,8 +5517,8 @@ fn call_tool(name: &str, args: &serde_json::Value) -> Result<ToolOutput, String>
     }
     // The other leg: content a stranger wrote, served by this server. Marked
     // on the terminal here because not every CLI's post-tool hook carries MCP
-    // tool names, and the memory bridge quarantines a proposal from a
-    // terminal marked this way the moment it arrives.
+    // tool names, and the gates treat a terminal marked this way as having
+    // read untrusted content.
     if gates::reads_untrusted(name) {
         if let Some(id) = gates::pty_taint_id(
             std::env::var("CANOPY_INSTANCE").ok().as_deref(),
@@ -5447,18 +5825,6 @@ fn call_tool(name: &str, args: &serde_json::Value) -> Result<ToolOutput, String>
             }
             text(notes_op(action, args))
         }
-        "canopy_memory" => text(memory_op("query", args)),
-        "canopy_memory_propose" => {
-            let has = |k: &str| {
-                args.get(k)
-                    .and_then(|v| v.as_str())
-                    .is_some_and(|t| !t.trim().is_empty())
-            };
-            if !has("type") || !has("text") {
-                return Err("canopy_memory_propose needs `type` and `text` (and `why`)".into());
-            }
-            text(memory_op("propose", args))
-        }
         "canopy_vault_list" => {
             let mut body = args.clone();
             body["vaultOp"] = serde_json::json!("list");
@@ -5500,9 +5866,7 @@ fn call_tool(name: &str, args: &serde_json::Value) -> Result<ToolOutput, String>
         | "canopy_workspace_prs"
         | "canopy_pr_details"
         | "canopy_start_session"
-        | "canopy_open_project"
-        | "canopy_recall"
-        | "canopy_remember" => {
+        | "canopy_open_project" => {
             if !is_companion_session() {
                 return Err(format!(
                     "{name} belongs to Canopy's companion and is not available to this session"
@@ -5523,14 +5887,6 @@ fn call_tool(name: &str, args: &serde_json::Value) -> Result<ToolOutput, String>
                     .map_or(true, str::is_empty)
             {
                 return Err("missing required argument: project".into());
-            }
-            if name == "canopy_remember"
-                && args
-                    .get("fact")
-                    .and_then(|v| v.as_str())
-                    .map_or(true, |f| f.trim().is_empty())
-            {
-                return Err("missing required argument: fact".into());
             }
             if name == "canopy_start_session" {
                 if args
@@ -6354,6 +6710,9 @@ fn agents_json(args: &serde_json::Value) -> Result<String, String> {
                 p.iter().rev().take(3).cloned().collect::<Vec<_>>()
             }),
             "workingOn": d["working_on"],
+            // The agent's own task list: progress always, the steps themselves
+            // when one agent was asked about in detail.
+            "tasks": task_progress(&d, detail),
             "filesEdited": d["files"].as_array().map(|f| {
                 f.iter().rev().take(10).cloned().collect::<Vec<_>>()
             }),
@@ -6754,28 +7113,6 @@ fn notes_op(action: &str, args: &serde_json::Value) -> Result<String, String> {
     .map(pretty)
 }
 
-/// A team-memory read or proposal. Scoped like notes: the bridge resolves the
-/// project from our cwd (or a named project); who is proposing comes from the
-/// bridge's credential, not from these arguments.
-fn memory_op(op: &str, args: &serde_json::Value) -> Result<String, String> {
-    let mut body = args.clone();
-    if !body.is_object() {
-        body = serde_json::json!({});
-    }
-    body["op"] = serde_json::json!(op);
-    body["cwd"] = serde_json::json!(cwd());
-    if op == "propose" {
-        body["by"] = serde_json::json!(claim_owner());
-    }
-    ctx_request_with_timeout(
-        "POST",
-        "/ctx/memory",
-        Some(body.to_string()),
-        std::time::Duration::from_secs(20),
-    )
-    .map(pretty)
-}
-
 fn research_op(action: &str, args: &serde_json::Value) -> Result<String, String> {
     let mut body = args.clone();
     if !body.is_object() {
@@ -6967,6 +7304,200 @@ fn urlencode(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     #[test]
+    fn bash_outputs_are_found_when_they_exist() {
+        let dir = std::env::temp_dir().join(format!("hook-bash-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("a.png"), b"x").unwrap();
+        std::fs::write(dir.join("r.pdf"), b"x").unwrap();
+        let cwd = dir.to_string_lossy().to_string();
+        let got = super::bash_output_paths("render > a.png && curl -o 'r.pdf' http://x && echo hi > nope.txt && ls > /dev/null 2>&1 && cat x > $OUT", &cwd);
+        assert_eq!(got, vec!["a.png".to_string(), "r.pdf".to_string()]);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn codex_plan_becomes_tasks() {
+        let input = serde_json::json!({"plan":[{"step":"a","status":"in_progress"},{"step":"b","status":"pending"}]});
+        let t = super::tasks_from_todo_write(&super::plan_as_todos(&input)).unwrap();
+        assert_eq!(t[0]["status"], "running");
+        assert_eq!(t[1]["text"], "b");
+        assert!(
+            super::tasks_from_todo_write(&super::plan_as_todos(&serde_json::json!({}))).is_none()
+        );
+    }
+
+    #[test]
+    fn todo_write_becomes_the_digests_task_list() {
+        let input = serde_json::json!({"todos": [
+            {"content": "Write the parser", "status": "completed", "activeForm": "Writing"},
+            {"content": "Wire it up", "status": "in_progress"},
+            {"content": "Ship", "status": "pending"},
+            {"content": "  ", "status": "pending"},
+            {"content": "Odd status", "status": "weird"}
+        ]});
+        let tasks = super::tasks_from_todo_write(&input).unwrap();
+        let tasks = tasks.as_array().unwrap();
+        assert_eq!(tasks.len(), 4, "blank entries are dropped");
+        assert_eq!(tasks[0]["status"], "completed");
+        assert_eq!(tasks[1]["status"], "running");
+        assert_eq!(tasks[2]["status"], "pending");
+        assert_eq!(
+            tasks[3]["status"], "pending",
+            "an unknown status is pending"
+        );
+        assert_eq!(tasks[1]["text"], "Wire it up");
+    }
+
+    #[test]
+    fn a_todo_write_without_a_list_keeps_the_last_good_one() {
+        assert!(super::tasks_from_todo_write(&serde_json::json!({})).is_none());
+        let empty = super::tasks_from_todo_write(&serde_json::json!({"todos": []})).unwrap();
+        assert_eq!(
+            empty.as_array().unwrap().len(),
+            0,
+            "an empty list is a real answer"
+        );
+    }
+
+    #[test]
+    fn the_roster_reports_task_progress_and_the_steps_only_in_detail() {
+        let digest = serde_json::json!({"tasks": [
+            {"text": "a", "status": "completed"},
+            {"text": "b", "status": "running"},
+            {"text": "c", "status": "pending"}
+        ]});
+        let brief = super::task_progress(&digest, false);
+        assert_eq!(brief["done"], 1);
+        assert_eq!(brief["total"], 3);
+        assert_eq!(brief["current"], "b");
+        assert!(brief.get("items").is_none());
+        assert_eq!(
+            super::task_progress(&digest, true)["items"]
+                .as_array()
+                .unwrap()
+                .len(),
+            3
+        );
+        assert!(super::task_progress(&serde_json::json!({}), true).is_null());
+        assert!(super::task_progress(&serde_json::json!({"tasks": []}), true).is_null());
+    }
+
+    #[test]
+    fn task_create_and_update_keep_the_list_one_task_at_a_time() {
+        let created = |subject: &str, id: &str| {
+            (
+                serde_json::json!({"subject": subject, "description": "d"}),
+                serde_json::json!(format!("Task #{id} created successfully: {subject}")),
+            )
+        };
+        let (i1, r1) = created("Write parser", "1");
+        let (i2, r2) = created("Ship it", "2");
+        let list = super::apply_task_tool(vec![], "TaskCreate", &i1, &r1).unwrap();
+        let list = super::apply_task_tool(list, "TaskCreate", &i2, &r2).unwrap();
+        assert_eq!(list.len(), 2);
+        assert_eq!(list[0]["id"], "1");
+        assert_eq!(list[0]["status"], "pending");
+        let list = super::apply_task_tool(
+            list,
+            "TaskUpdate",
+            &serde_json::json!({"taskId": "1", "status": "in_progress"}),
+            &serde_json::Value::Null,
+        )
+        .unwrap();
+        assert_eq!(list[0]["status"], "running");
+        let list = super::apply_task_tool(
+            list,
+            "TaskUpdate",
+            &serde_json::json!({"taskId": "1", "status": "completed"}),
+            &serde_json::Value::Null,
+        )
+        .unwrap();
+        assert_eq!(list[0]["status"], "completed");
+        let list = super::apply_task_tool(
+            list,
+            "TaskUpdate",
+            &serde_json::json!({"taskId": "2", "status": "deleted"}),
+            &serde_json::Value::Null,
+        )
+        .unwrap();
+        assert_eq!(list.len(), 1);
+    }
+
+    #[test]
+    fn a_full_task_list_drops_its_oldest_finished_task_instead_of_freezing() {
+        let mut list: Vec<serde_json::Value> = (0..50)
+            .map(|i| serde_json::json!({"id": i.to_string(), "text": format!("t{i}"), "status": if i == 0 { "completed" } else { "pending" }}))
+            .collect();
+        let out = super::apply_task_tool(
+            list.clone(),
+            "TaskCreate",
+            &serde_json::json!({"subject": "new"}),
+            &serde_json::json!("Task #99 created successfully: new"),
+        )
+        .unwrap();
+        assert_eq!(out.len(), 50);
+        assert_eq!(out.last().unwrap()["id"], "99");
+        assert!(
+            out.iter().all(|t| t["id"] != "0"),
+            "the finished task made room"
+        );
+        // Nothing finished to drop: the list is left as it is.
+        list[0]["status"] = serde_json::json!("pending");
+        assert!(super::apply_task_tool(
+            list,
+            "TaskCreate",
+            &serde_json::json!({"subject": "new"}),
+            &serde_json::Value::Null
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn a_task_update_for_an_unknown_task_or_without_a_subject_changes_nothing() {
+        assert!(super::apply_task_tool(
+            vec![],
+            "TaskUpdate",
+            &serde_json::json!({"taskId": "9", "status": "completed"}),
+            &serde_json::Value::Null
+        )
+        .is_none());
+        assert!(super::apply_task_tool(
+            vec![],
+            "TaskCreate",
+            &serde_json::json!({"description": "x"}),
+            &serde_json::Value::Null
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn a_created_task_id_is_found_in_a_string_or_an_object_response() {
+        assert_eq!(
+            super::created_task_id(&serde_json::json!("Task #12 created successfully: x"))
+                .as_deref(),
+            Some("12")
+        );
+        assert_eq!(
+            super::created_task_id(&serde_json::json!({"content": [{"type": "text", "text": "Task #7 created successfully: y"}]})).as_deref(),
+            Some("7")
+        );
+        assert!(super::created_task_id(&serde_json::json!("nothing here")).is_none());
+        assert_eq!(
+            super::created_task_id(&serde_json::json!("Task #3: subject")).as_deref(),
+            Some("3")
+        );
+    }
+
+    #[test]
+    fn the_task_list_is_bounded() {
+        let many: Vec<_> = (0..80)
+            .map(|i| serde_json::json!({"content": format!("t{i}"), "status": "pending"}))
+            .collect();
+        let tasks = super::tasks_from_todo_write(&serde_json::json!({"todos": many})).unwrap();
+        assert_eq!(tasks.as_array().unwrap().len(), 50);
+    }
+
+    #[test]
     fn a_limit_rides_on_the_event_and_the_turn_still_ends() {
         let mut event = serde_json::json!({
             "hook_event_name": "StopFailure",
@@ -7050,6 +7581,11 @@ mod tests {
                 Some("amp"),
                 serde_json::json!({"hook_event_name": "PreToolUse", "session_id": "t", "cwd": "/w",
                 "tool_name": "Bash", "tool_input": {"cmd": "rm -rf ~"}}),
+            ),
+            (
+                Some("kiro"),
+                serde_json::json!({"hook_event_name": "preToolUse", "cwd": "/w",
+                "tool_name": "execute_bash", "tool_input": {"command": "rm -rf ~"}}),
             ),
         ];
         for (agent, mut event) in cases {
@@ -8509,36 +9045,6 @@ mod tests {
     }
 
     #[test]
-    fn memory_tools_are_published_split_read_from_propose() {
-        let names: Vec<String> = memory_tool_defs()
-            .iter()
-            .filter_map(|t| t.get("name").and_then(|n| n.as_str()).map(str::to_string))
-            .collect();
-        assert_eq!(names, ["canopy_memory", "canopy_memory_propose"]);
-        assert!(READ_ONLY_TOOLS.contains(&"canopy_memory"));
-        assert!(!READ_ONLY_TOOLS.contains(&"canopy_memory_propose"));
-        // A companion that may only answer must not write team memory.
-        assert!(COMPANION_MUTATING_TOOLS.contains(&"canopy_memory_propose"));
-        // Asserted against what tools_list() starts from, not its output:
-        // the output intersects with whatever bridge is running on this
-        // machine, which may be an older build without these tools.
-        let published = static_tool_defs();
-        let listed: Vec<&str> = published
-            .iter()
-            .filter_map(|t| t.get("name").and_then(|n| n.as_str()))
-            .collect();
-        assert!(listed.contains(&"canopy_memory"), "{listed:?}");
-        assert!(listed.contains(&"canopy_memory_propose"), "{listed:?}");
-        // Caught before a round trip: a proposal with no text.
-        let err = call_tool(
-            "canopy_memory_propose",
-            &serde_json::json!({ "type": "decision", "text": " " }),
-        )
-        .unwrap_err();
-        assert!(err.contains("needs `type` and `text`"), "{err}");
-    }
-
-    #[test]
     fn the_notes_tools_are_published_to_the_host() {
         // A tool defined but never added to the *published* list is invisible,
         // which is the failure this catches. `tool_defs()` is only the base
@@ -8966,6 +9472,59 @@ mod tests {
     }
 
     #[test]
+    fn kiro_triggers_normalize_to_the_shared_lifecycle() {
+        for (trigger, canonical, signal) in [
+            ("agentSpawn", "SessionStart", None),
+            ("userPromptSubmit", "UserPromptSubmit", Some("turn-start")),
+            ("preToolUse", "PreToolUse", None),
+            ("postToolUse", "PostToolUse", Some("turn-progress")),
+            ("stop", "Stop", Some("turn-end")),
+        ] {
+            let mut event = serde_json::json!({
+                "hook_event_name": trigger,
+                "cwd": "/repo",
+                "tool_name": "fs_write"
+            });
+            normalize_event(&mut event, "kiro");
+            assert_eq!(event["agent"], "kiro");
+            assert_eq!(event["hook_event_name"], canonical, "{trigger}");
+            assert_eq!(event["cwd"], "/repo");
+            assert_eq!(
+                event.get("canopy_signal").and_then(|v| v.as_str()),
+                signal,
+                "{trigger}"
+            );
+        }
+    }
+
+    #[test]
+    fn kiro_without_a_session_id_gets_a_per_terminal_one() {
+        let mut event = serde_json::json!({ "hook_event_name": "stop", "cwd": "/repo" });
+        normalize_event(&mut event, "kiro");
+        let id = event["session_id"].as_str().unwrap();
+        assert!(id.starts_with("kiro-pty"), "{id}");
+        assert!(safe_session_id(id));
+        let mut event = serde_json::json!({ "hook_event_name": "stop", "sessionId": "s1" });
+        normalize_event(&mut event, "kiro");
+        assert_eq!(event["session_id"], "s1");
+    }
+
+    #[test]
+    fn kiro_fs_write_is_an_edit_after_a_tool_runs() {
+        let mut event = serde_json::json!({
+            "hook_event_name": "postToolUse",
+            "cwd": "/repo",
+            "tool_name": "fs_write",
+            "tool_input": { "command": "str_replace", "path": "src/a.rs", "old_str": "a", "new_str": "b" }
+        });
+        normalize_event(&mut event, "kiro");
+        assert_eq!(
+            edit_records("kiro", &event),
+            vec![rec("/repo/src/a.rs", Some("a"), Some("b"))]
+        );
+    }
+
+    #[test]
     fn grok_hooks_keep_prompt_and_tool_identity() {
         let mut event = serde_json::json!({
             "sessionId": "grok-1",
@@ -8989,5 +9548,42 @@ mod tests {
         assert!(!safe_session_id("../outside"));
         assert!(!safe_session_id("folder/session"));
         assert!(!safe_session_id(r"folder\session"));
+    }
+}
+
+#[cfg(test)]
+mod screenshot_tests {
+    use super::*;
+
+    #[test]
+    fn decodes_base64_with_and_without_padding() {
+        assert_eq!(b64_decode("aGVsbG8=").unwrap(), b"hello");
+        assert_eq!(b64_decode("aGVsbG8").unwrap(), b"hello");
+        assert!(b64_decode("not*base64").is_none());
+    }
+
+    #[test]
+    fn finds_the_image_in_a_tool_response() {
+        let array = serde_json::json!([{ "source": { "data": "aGk=" } }]);
+        assert_eq!(screenshot_data(&array).as_deref(), Some("aGk="));
+        let object = serde_json::json!({ "content": [{ "type": "image", "data": "aGk=" }] });
+        assert_eq!(screenshot_data(&object).as_deref(), Some("aGk="));
+        assert!(screenshot_data(&serde_json::json!("text")).is_none());
+    }
+
+    #[test]
+    fn saves_a_canopy_screenshot_and_ignores_other_tools() {
+        let dir = std::env::temp_dir().join(format!("canopy-shot-test-{}", std::process::id()));
+        let dir_s = dir.to_string_lossy().to_string();
+        let event = serde_json::json!({
+            "tool_name": "mcp__canopy__canopy_screenshot",
+            "tool_response": [{ "source": { "data": "iVBORw0KGgo=" } }],
+        });
+        let path = save_screenshot(&dir_s, "sid", &event).unwrap();
+        assert!(path.ends_with(".png"));
+        assert!(std::path::Path::new(&path).is_file());
+        let other = serde_json::json!({ "tool_name": "Bash", "tool_response": [{ "source": { "data": "aGk=" } }] });
+        assert!(save_screenshot(&dir_s, "sid", &other).is_none());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

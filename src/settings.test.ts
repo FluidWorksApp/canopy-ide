@@ -145,6 +145,18 @@ describe("getSettings / updateSettings", () => {
     );
     expect(getSettings().dictationTriggerMode).toBe("hold");
   });
+
+  it("drops the retired Team memory keys without disturbing the rest", () => {
+    localStorage.setItem(
+      "canopy.settings",
+      JSON.stringify({ scrollback: 7_000, memoryAutoExtract: false, memoryFactExpiryDays: 5, memoryInstructionFiles: { a: "b" } }),
+    );
+    const s = getSettings() as unknown as Record<string, unknown>;
+    expect(s.scrollback).toBe(7_000);
+    expect(s).not.toHaveProperty("memoryAutoExtract");
+    expect(s).not.toHaveProperty("memoryFactExpiryDays");
+    expect(s).not.toHaveProperty("memoryInstructionFiles");
+  });
 });
 
 describe("keyLabel", () => {
@@ -181,5 +193,17 @@ describe("formatHotkey", () => {
     const plain: Hotkey = { meta: false, ctrl: false, alt: false, shift: false, code: "KeyD" };
     expect(formatHotkey(plain)).toBe("D");
     expect(formatHotkey({ ...plain, shift: true })).toContain("D");
+  });
+
+  it("keeps opening files outside the project from terminal links off by default", () => {
+    localStorage.clear();
+    expect(getSettings().allowOutsideFileLinks).toBe(false);
+  });
+
+  it("drops a malformed per-agent account map instead of breaking launches", () => {
+    localStorage.setItem("canopy.settings", JSON.stringify({ lastProfileByCli: ["x"] }));
+    expect(getSettings().lastProfileByCli).toEqual({});
+    localStorage.setItem("canopy.settings", JSON.stringify({ lastProfileByCli: { codex: "work", claude: 5 } }));
+    expect(getSettings().lastProfileByCli).toEqual({ codex: "work" });
   });
 });

@@ -60,7 +60,7 @@ export class AgentIntegrations {
   return true;
  }
  async health(agent){if(GATED_CLIS[agent]){const profiles=new WorkspaceProfiles(this.home);const states=[];for(const p of await profiles.list())states.push(await gatedMcpStatus(agent,await profiles.root(p.id),this.helper));return {agent,cli_installed:await this.cliInstalled(agent),hooks:await this.installed(agent)?'ours':'missing',mcp:states.every(s=>s==='ours')?'ours':states.find(s=>s!=='ours')??'missing'};}const states=await Promise.all((await new WorkspaceProfiles(this.home).list()).map(p=>mcpStatus(p.root,agent,this.helper)));return {agent,cli_installed:await this.cliInstalled(agent),hooks:await this.installed(agent)?'ours':'missing',mcp:states.every(s=>s==='ours')?'ours':states.find(s=>s!=='ours')??'missing'};}
- /** Cursor, Grok, OpenCode, oh-my-pi, Amp and Antigravity: lifecycle hooks and
+ /** Cursor, Grok, Kiro, OpenCode, oh-my-pi, Amp and Antigravity: lifecycle hooks and
   *  the Rules gate, per profile, as the desktop installs them. */
  async installGated(agent){
   await access(this.helper,constants.X_OK);

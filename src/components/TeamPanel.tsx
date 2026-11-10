@@ -6,13 +6,17 @@ import {LiveSessions} from "./LiveSessions";
 // Live now lists the terminals shared with you. Signed out, there is nothing
 // to share with, so the panel says how to get there.
 import * as ipc from "../ipc";
-import type { Notify } from "../types";
+import type { Notify, RelayHandle } from "../types";
+import { RemoteDesktopMembers } from "./RemoteDesktopView";
+import { RelayConnect } from "./RelayConnect";
 import { basename } from "../paths";
 
 interface TeamPanelProps {
   onOpenAccountChat?: (conversation:AccountConversation)=>void;
   /** False while the panel is hidden behind another side tab: Live now stops polling. */
   visible?: boolean;
+  relay?: RelayHandle;
+  onNotice?: Notify;
 }
 
 /** Pick a file and offer it to a member — the transfer itself runs
@@ -32,6 +36,6 @@ export async function offerFileTo(memberId: string, memberName: string, onNotice
 /** Live now sits under the team picker, above the conversations, so a shared
  *  session is the first thing seen. Signed out, TeamHub asks for a sign-in
  *  ("Sign in to share with your team") and nothing offers to share. */
-export function TeamPanel({onOpenAccountChat,visible=true}: TeamPanelProps){
- return <div style={{height:"100%",overflow:"auto"}}><TeamHub onOpenChat={onOpenAccountChat} live={<LiveSessions visible={visible}/>}/></div>;
+export function TeamPanel({onOpenAccountChat,visible=true,relay,onNotice}: TeamPanelProps){
+ return <div style={{height:"100%",overflow:"auto"}}>{relay&&<RelayConnect relay={relay} onNotice={onNotice}/>}{relay&&<RemoteDesktopMembers relay={relay} onNotice={onNotice}/>}<TeamHub onOpenChat={onOpenAccountChat} live={<LiveSessions visible={visible}/>}/></div>;
 }

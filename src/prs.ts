@@ -60,6 +60,16 @@ export function prReviewContext(pr: ipc.PrInfo, wt?: { repo: string; worktree: s
   );
 }
 
+/** What the agent that owns a PR is told when its checks fail. */
+export function prFixChecksContext(pr: ipc.PrInfo): string {
+  return (
+    `Pull request #${pr.number}: "${pr.title}" (${pr.url}) has failing checks. ` +
+    `Look at what failed (e.g. \`gh pr checks ${pr.number}\` and \`gh run view --log-failed\`), ` +
+    `fix the cause in this workspace, run the same checks locally if the project has them, ` +
+    `then commit and push to ${pr.branch} so the checks pass. Summarize what was wrong.`
+  );
+}
+
 /** What a conflict-resolution agent is told: the PR conflicts with its base,
  *  its branch is checked out here, and to merge the base in, resolve every
  *  conflict preserving both sides' intent, verify, and push so the PR updates.

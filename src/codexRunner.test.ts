@@ -12,7 +12,8 @@
 // rewritten to /repo, and one command's `aggregated_output` was truncated. No
 // type name, field name or event name was touched.
 
-import { describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { updateSettings } from "./settings";
 import {
   StructuredEventParser,
   type StructuredRunnerEvent,
@@ -63,6 +64,13 @@ function readCodex(lines: string[]): {
   for (const line of lines) parser.handleLine(line);
   return { events, threads };
 }
+
+// These cover the vendor runners; ACP is covered in src/acp.
+beforeEach(() => updateSettings({ acpAgents: { claude: false, codex: false, cursor: false } }));
+afterEach(() => {
+  localStorage.clear();
+  updateSettings({ acpAgents: {} });
+});
 
 describe("the codex event schema", () => {
   it("reads a real turn into the shared vocabulary", () => {

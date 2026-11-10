@@ -199,3 +199,9 @@
 .git-commit-actions {
   flex-wrap: wrap;
 }
+
+.brain-connect-group-title {
+  font-size: 11px;
+  color: var(--text-faint);
+  margin: 4px 0 2px;
+}

@@ -87,7 +87,7 @@ export async function loadSessionDoc(
     soft("ledger", deps.ledger(cwd, { refKind: "session", refId: src.sessionId, limit: 500 }), [] as LedgerEntry[]),
     soft(
       "ledger",
-      deps.ledger(cwd, { kinds: ["receipt", "plan", "memory", "awareness", "handoff"], limit: 1000 }),
+      deps.ledger(cwd, { kinds: ["receipt", "plan", "awareness", "handoff"], limit: 1000 }),
       [] as LedgerEntry[],
     ),
     soft("pull request links", deps.provenance(src.sessionId), [] as ipc.ProvenanceEdge[]),

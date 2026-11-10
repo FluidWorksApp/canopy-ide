@@ -1,15 +1,17 @@
-// A live Android device as refreshing still frames, with the same annotate-and-
-// hand-over flow the preview tab has for web pages.
+// A live device, streamed when the device tools are installed and shown as
+// refreshing still frames when they are not, with the same annotate-and-hand-
+// over flow the preview tab has for web pages.
 //
-// The frames are pictures, not video. That is what keeps this tab identical on
-// macOS, Windows and Linux: no codec, no vendored server, nothing per-platform
-// beyond adb itself. Cost is the refresh rate — a screencap round trip is about
-// half a second — which is fine for watching an agent work and is why there is
-// no attempt at direct manipulation here.
+// Streaming goes through expo-device-hub, run and proxied by
+// src-tauri/src/devicehub.rs and decoded by src/devices/stream.ts — a port of
+// T3 Code's device panel (MIT). The hub is optional: until the user installs it
+// from the setup card (or after they decline), or whenever it cannot start,
+// the tab falls back to adb screencap stills. Those need nothing beyond adb.
 //
-// Frames are pulled, never pushed: the loop asks for the next picture only once
+// Stills are pulled, never pushed: the loop asks for the next picture only once
 // the last has arrived and only while the tab is on screen, so a slow device
-// throttles itself and a hidden tab costs nothing.
+// throttles itself and a hidden tab costs nothing. A stream exists only while
+// the tab is visible, too.
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
   actionableFor,
@@ -22,7 +24,24 @@ import {
   type DeviceAnnotation,
 } from "../android";
 import * as ipc from "../ipc";
-import { AgentLaunchButton } from "./AgentLaunchButton";
+import { activeWorkspace } from "../remoteExecution/workspace";
+import {
+  deviceHubAttach,
+  deviceHubBoot,
+  deviceHubDeclined,
+  deviceHubDevices,
+  deviceHubStart,
+  deviceHubStatus,
+  ensureDeviceHub,
+  setDeviceHubDeclined,
+  useDeviceHubAccess,
+  type DeviceHubStatus,
+  type HostDevice,
+} from "../devices/deviceHub";
+import { DeviceSetup } from "../devices/DeviceSetup";
+import { DeviceStreamView } from "../devices/DeviceStreamView";
+import type { DevicePlatform } from "../devices/stream";
+import { AgentLaunchButton, type LaunchPlacement } from "./AgentLaunchButton";
 import type { AgentTarget } from "./TicketsPanel";
 import { Button } from "./ui";
 
@@ -32,16 +51,20 @@ const FRAME_GAP_MS = 250;
 
 interface DeviceViewProps {
   serial: string;
+  /** Absent on tabs saved before iOS Simulators could be picked. */
+  platform?: DevicePlatform;
   projectDir: string;
   annotations: DeviceAnnotation[];
   visible: boolean;
   onPatch: (patch: {
     serial?: string;
+    platform?: DevicePlatform;
     projectDir?: string;
     annotations?: DeviceAnnotation[];
   }) => void;
   agentTargets: AgentTarget[];
   installed: Record<string, boolean>;
+  placement?: LaunchPlacement;
   onSendToAgent: (target: AgentTarget, text: string) => void;
   onStartNew: (
     agentId: string,
@@ -55,12 +78,14 @@ interface DeviceViewProps {
 
 export default function DeviceView({
   serial,
+  platform = "android",
   projectDir,
   annotations,
   visible,
   onPatch,
   agentTargets,
   installed,
+  placement,
   onSendToAgent,
   onStartNew,
   projects,
@@ -74,6 +99,17 @@ export default function DeviceView({
   const [picking, setPicking] = useState(false);
   const [resolving, setResolving] = useState(false);
   const [booting, setBooting] = useState<string | null>(null);
+
+  // ---- streaming (device hub) ----
+  const [hub, setHub] = useState<DeviceHubStatus | null>(null);
+  const [declined, setDeclined] = useState(deviceHubDeclined);
+  const [hubStartError, setHubStartError] = useState<string | null>(null);
+  const [simulators, setSimulators] = useState<HostDevice[]>([]);
+  // Device pixels of the screen, for annotation on a stream (whose video may
+  // be scaled); read off the accessibility tree's root.
+  const [deviceSize, setDeviceSize] = useState<{ w: number; h: number } | null>(null);
+  // The user chose stills over a stream that is running (e.g. it cannot decode).
+  const [preferStills, setPreferStills] = useState(false);
 
   const imgRef = useRef<HTMLImageElement | null>(null);
   const frameUrl = useRef<string | null>(null);
@@ -100,10 +136,61 @@ export default function DeviceView({
     if (visible) void refreshDevices();
   }, [visible, refreshDevices]);
 
+  // The hub starts when a tab that can use it is on screen, as T3 starts its
+  // host on demand. It is never installed from here: only the setup card does.
+  useEffect(() => {
+    if (!visible) return;
+    let cancelled = false;
+    void (async () => {
+      try {
+        let next = await deviceHubStatus();
+        if (cancelled) return;
+        setHub(next);
+        // Missing: it is fetched automatically; the setup card shows only if that fails.
+        if (!next.installed && !next.nodeError && !declined) {
+          next = (await ensureDeviceHub()) ?? next;
+          if (cancelled) return;
+          setHub(next);
+        }
+        if (next.installed && !next.running && !next.nodeError && !declined) {
+          next = await deviceHubStart();
+          if (cancelled) return;
+          setHub(next);
+          setHubStartError(null);
+        }
+      } catch (e) {
+        if (!cancelled) setHubStartError(String(e));
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [visible, declined]);
+
+  const hubRunning = !!hub?.running && !declined;
+  const iosAvailable = !!hub?.platforms.some((p) => p.platform === "ios" && p.available);
+  const streaming = hubRunning && !!serial && !(preferStills && platform === "android");
+  const { access, refresh: refreshAccess } = useDeviceHubAccess(streaming && visible);
+
+  // iOS Simulators come from the hub; adb knows nothing about them.
+  useEffect(() => {
+    if (!visible || !hubRunning || !iosAvailable || serial) return;
+    let cancelled = false;
+    deviceHubDevices().then(
+      (listing) => {
+        if (!cancelled) setSimulators(listing.devices.filter((d) => d.platform === "ios"));
+      },
+      () => {},
+    );
+    return () => {
+      cancelled = true;
+    };
+  }, [visible, hubRunning, iosAvailable, serial]);
+
   // ---- frames ----
 
   useEffect(() => {
-    if (!visible || !serial) return;
+    if (!visible || !serial || streaming || platform !== "android") return;
     let stopped = false;
     let timer: ReturnType<typeof setTimeout> | undefined;
 
@@ -131,7 +218,54 @@ export default function DeviceView({
       stopped = true;
       if (timer) clearTimeout(timer);
     };
-  }, [visible, serial, dir]);
+  }, [visible, serial, dir, streaming, platform]);
+
+  // A remote workspace's servers are forwarded onto this computer's loopback
+  // (workspace_forward.rs), so `adb reverse` is all a local device needs to open
+  // them as localhost:<port>. Re-checked while the tab is open, because ports
+  // appear as servers start; each is reversed once per device.
+  const [reachable, setReachable] = useState<number[]>([]);
+  const reversed = useRef(new Set<number>());
+  useEffect(() => {
+    if (!visible || !serial || platform !== "android") return;
+    let stopped = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    let failures = 0;
+    const sync = async () => {
+      const ports = activeWorkspace()?.forwardedLoopbackPorts() ?? [];
+      const fresh = ports.filter((p) => !reversed.current.has(p));
+      if (fresh.length > 0) {
+        try {
+          const ok = await ipc.androidReverse(serial, fresh, dir);
+          for (const p of ok) reversed.current.add(p);
+          failures = 0;
+          if (!stopped) setReachable([...reversed.current].sort((a, b) => a - b));
+        } catch {
+          // adb refused (device offline or unauthorized): the tab already says
+          // so. Ask less and less often rather than spawning adb every 5s.
+          failures += 1;
+        }
+      }
+      if (!stopped) {
+        timer = setTimeout(() => void sync(), Math.min(60_000, 5_000 * 2 ** Math.min(failures, 4)));
+      }
+    };
+    void sync();
+    return () => {
+      stopped = true;
+      if (timer) clearTimeout(timer);
+    };
+  }, [visible, serial, dir, platform]);
+  // Undo the mappings when the device changes or the tab goes away, so nothing
+  // is left reversed on a phone that is no longer being looked at.
+  useEffect(() => {
+    const done = reversed.current;
+    return () => {
+      const ports = [...done];
+      done.clear();
+      if (serial && ports.length > 0) void ipc.androidReverseRemove(serial, ports, dir).catch(() => {});
+    };
+  }, [serial, dir]);
 
   // Drop the last frame when the tab unmounts; nothing else owns this URL.
   useEffect(
@@ -144,12 +278,8 @@ export default function DeviceView({
 
   // ---- annotate ----
 
-  const onFrameClick = async (e: React.MouseEvent<HTMLImageElement>) => {
-    if (!picking || !imgRef.current || !size || resolving) return;
-    const rect = imgRef.current.getBoundingClientRect();
-    const point = toDevicePoint(e.clientX, e.clientY, rect, size.w, size.h);
-    if (!point) return;
-
+  /** Resolve a click at `point` (device pixels) to an annotation. */
+  const annotateAt = async (point: { x: number; y: number }) => {
     setResolving(true);
     try {
       // Dumped at click time rather than cached with the frame: the tree has to
@@ -186,6 +316,47 @@ export default function DeviceView({
     }
   };
 
+  const onFrameClick = async (e: React.MouseEvent<HTMLImageElement>) => {
+    if (!picking || !imgRef.current || !size || resolving) return;
+    const rect = imgRef.current.getBoundingClientRect();
+    const point = toDevicePoint(e.clientX, e.clientY, rect, size.w, size.h);
+    if (!point) return;
+    await annotateAt(point);
+  };
+
+  /** The screen's size in device pixels: the accessibility tree's extent. */
+  const readDeviceSize = useCallback(async () => {
+    const nodes = parseUiDump(await ipc.androidUiDump(serial, dir));
+    let w = 0;
+    let h = 0;
+    for (const n of nodes) {
+      if (n.parent >= 0) continue;
+      w = Math.max(w, n.bounds.x2);
+      h = Math.max(h, n.bounds.y2);
+    }
+    const next = w > 0 && h > 0 ? { w, h } : null;
+    setDeviceSize(next);
+    return next;
+  }, [serial, dir]);
+
+  useEffect(() => {
+    if (!streaming || platform !== "android" || !visible) return;
+    if (!picking && annotations.length === 0) return;
+    void readDeviceSize().catch(() => {});
+  }, [streaming, platform, visible, picking, annotations.length, readDeviceSize]);
+
+  const onStreamClick = async (e: React.MouseEvent<HTMLDivElement>) => {
+    if (!picking || resolving) return;
+    const rect = e.currentTarget.getBoundingClientRect();
+    const known = deviceSize ?? (await readDeviceSize().catch(() => null));
+    if (!known) {
+      setError("Could not read the device's screen size.");
+      return;
+    }
+    const point = toDevicePoint(e.clientX, e.clientY, rect, known.w, known.h);
+    if (point) await annotateAt(point);
+  };
+
   const setComment = (n: number, comment: string) =>
     onPatch({
       annotations: annotationsRef.current.map((a) => (a.n === n ? { ...a, comment } : a)),
@@ -206,8 +377,23 @@ export default function DeviceView({
     setError(null);
     try {
       const started = await ipc.androidEmulatorStart(name, dir);
-      onPatch({ serial: started });
+      onPatch({ serial: started, platform: "android" });
       await refreshDevices();
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setBooting(null);
+    }
+  };
+
+  const openSimulator = async (sim: HostDevice) => {
+    setBooting(sim.id);
+    setError(null);
+    try {
+      // DeviceHubOperations: boot attaches serve-sim's helper; a running
+      // simulator only needs the attach.
+      const id = sim.booted ? (await deviceHubAttach(sim), sim.id) : await deviceHubBoot(sim);
+      onPatch({ serial: id, platform: "ios" });
     } catch (e) {
       setError(String(e));
     } finally {
@@ -227,6 +413,25 @@ export default function DeviceView({
         <div className="device-picker">
           <div className="device-picker-card">
             <h3>Pick a device to watch</h3>
+            {hub && !hub.installed && !declined && (
+              <DeviceSetup status={hub} onChange={setHub} onDecline={() => setDeclined(true)} />
+            )}
+            {hub && !hub.installed && declined && (
+              <Button
+                size="sm"
+                onClick={() => {
+                  setDeviceHubDeclined(false);
+                  setDeclined(false);
+                }}
+              >
+                Set up live streaming
+              </Button>
+            )}
+            {hubStartError && !declined && (
+              <p className="preview-error device-picker-error" title={hubStartError}>
+                Streaming is unavailable, so this tab will show screenshots: {hubStartError}
+              </p>
+            )}
             {missing.length > 0 && (
               <div className="device-block device-block-warn">
                 <h4>Install these first</h4>
@@ -260,7 +465,10 @@ export default function DeviceView({
                 <ul className="device-list">
                   {running.map((d) => (
                     <li key={d.serial}>
-                      <button className="device-row" onClick={() => onPatch({ serial: d.serial })}>
+                      <button
+                        className="device-row"
+                        onClick={() => onPatch({ serial: d.serial, platform: "android" })}
+                      >
                         <span className="device-row-name">{d.model || d.serial}</span>
                         <span className="device-row-sub">
                           {d.emulator ? "emulator" : "connected device"} · {d.serial}
@@ -294,6 +502,30 @@ export default function DeviceView({
                             (booting === avd.name
                               ? "this takes about half a minute"
                               : "not running — click to boot it")}
+                        </span>
+                      </button>
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            )}
+
+            {simulators.length > 0 && (
+              <div className="device-block">
+                <h4>iOS Simulators</h4>
+                <ul className="device-list">
+                  {simulators.map((sim) => (
+                    <li key={sim.id}>
+                      <button
+                        className="device-row"
+                        disabled={booting !== null}
+                        onClick={() => void openSimulator(sim)}
+                      >
+                        <span className="device-row-name">
+                          {booting === sim.id ? `Starting ${sim.name}…` : sim.name}
+                        </span>
+                        <span className="device-row-sub">
+                          {sim.version} · {sim.booted ? "running" : "not running — click to boot it"}
                         </span>
                       </button>
                     </li>
@@ -342,12 +574,18 @@ export default function DeviceView({
   return (
     <div className="preview-view">
       <div className="preview-head">
-        <span className="preview-component-badge" title={`adb serial ${serial}`}>
-          {devices.find((d) => d.serial === serial)?.model || serial}
+        <span
+          className="preview-component-badge"
+          title={platform === "ios" ? `Simulator ${serial}` : `adb serial ${serial}`}
+        >
+          {platform === "ios"
+            ? simulators.find((d) => d.id === serial)?.name || serial
+            : devices.find((d) => d.serial === serial)?.model || serial}
         </span>
         <Button size="sm" onClick={() => onPatch({ serial: "" })}>
           Change device
         </Button>
+        {platform === "android" && (
         <Button
           size="sm"
           className={`preview-annotate-toggle ${picking ? "preview-annotate-on" : ""}`}
@@ -356,11 +594,106 @@ export default function DeviceView({
         >
           ◎ Annotate{annotations.length > 0 ? ` (${annotations.length})` : ""}
         </Button>
+        )}
+        {hubRunning && platform === "android" && (
+          <Button
+            size="sm"
+            title="Switch between the live stream and refreshing screenshots"
+            onClick={() => setPreferStills((p) => !p)}
+          >
+            {preferStills ? "Live stream" : "Screenshots"}
+          </Button>
+        )}
+        {!streaming && hub && !hub.installed && !declined && platform === "android" && (
+          <span className="device-row-sub" title="Install the device tools from the device picker">
+            Screenshots only. Change device to set up live streaming.
+          </span>
+        )}
+        {reachable.length > 0 && (
+          <span
+            className="device-row-sub"
+            title="Servers in your remote workspace, reachable from this device as localhost:<port> through adb reverse"
+          >
+            Workspace ports on this device: {reachable.join(", ")}
+          </span>
+        )}
         {resolving && <span className="device-busy">Reading the screen…</span>}
       </div>
       <div className="preview-body">
         <div className="preview-frame-wrap device-frame-wrap">
-          {frame ? (
+          {streaming ? (
+            <DeviceStreamView
+              platform={platform}
+              deviceId={serial}
+              deviceName={
+                platform === "ios"
+                  ? simulators.find((d) => d.id === serial)?.name
+                  : devices.find((d) => d.serial === serial)?.model || serial
+              }
+              visible={visible}
+              access={access}
+              onUnauthorized={refreshAccess}
+              inputSuspended={picking}
+              renderControls={(handle) => (
+                <div className="dsv-controls">
+                  {(platform === "android"
+                    ? ([
+                        ["back", "◁ Back"],
+                        ["home", "○ Home"],
+                        ["recents", "▢ Recents"],
+                      ] as const)
+                    : ([
+                        ["home", "Home"],
+                        ["appSwitcher", "App switcher"],
+                      ] as const)
+                  ).map(([button, label]) => (
+                    <Button
+                      key={button}
+                      size="sm"
+                      disabled={!handle?.inputConnected}
+                      onClick={() => handle?.pressButton(button)}
+                    >
+                      {label}
+                    </Button>
+                  ))}
+                  {platform === "ios" && (
+                    <Button size="sm" disabled={!handle?.inputConnected} onClick={() => handle?.rotate()}>
+                      Rotate
+                    </Button>
+                  )}
+                </div>
+              )}
+              overlay={
+                platform === "android" && (picking || annotations.length > 0) ? (
+                  <div
+                    className={`dsv-overlay ${picking ? "dsv-picking" : ""}`}
+                    style={picking ? undefined : { pointerEvents: "none" }}
+                    onClick={(e) => void onStreamClick(e)}
+                  >
+                    {deviceSize &&
+                      annotations.map((a) => (
+                        <span
+                          key={a.n}
+                          className="device-mark"
+                          style={{
+                            left: `${(a.bounds.x1 / deviceSize.w) * 100}%`,
+                            top: `${(a.bounds.y1 / deviceSize.h) * 100}%`,
+                            width: `${((a.bounds.x2 - a.bounds.x1) / deviceSize.w) * 100}%`,
+                            height: `${((a.bounds.y2 - a.bounds.y1) / deviceSize.h) * 100}%`,
+                          }}
+                        >
+                          <b>{a.n}</b>
+                        </span>
+                      ))}
+                  </div>
+                ) : null
+              }
+            />
+          ) : platform === "ios" ? (
+            <p className="preview-panel-hint">
+              iOS Simulators stream through the device hub, which is not running.
+            </p>
+          ) : frame ? (
             // The box is given the device's aspect ratio and told to fit the
             // pane; the image then fills it exactly. Sizing the image by
             // `max-height: 100%` instead does nothing, because its parent has
@@ -468,6 +801,7 @@ export default function DeviceView({
                   label="Send feedback"
                   agentTargets={agentTargets}
                   installed={installed}
+                  placement={placement}
                   newAgentLabel="New agent on this feedback"
                   primaryTitle={(cli) => `Start ${cli} on this feedback`}
                   onStart={(agentId) => onStartNew(agentId, feedback(), projectDir || null)}

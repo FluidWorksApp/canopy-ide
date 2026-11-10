@@ -101,8 +101,8 @@ describe("renderer recovery wiring", () => {
     expect(term).toContain('new Error("terminal attach timed out")');
     expect(term).toContain("late.generation");
     expect(term).toContain("Math.min(100 * 2 ** (attachFailureCount - 1), 2_000)");
-    expect(ipc).toContain('await invoke<PtyGeometry & {');
-    expect(ipc).toContain('invoke<DesktopRead | null>("pty_read_desktop"');
+    expect(ipc).toContain('await ptyCall<PtyGeometry & {');
+    expect(ipc).toContain('ptyCall<DesktopRead | null>(id, "pty_read_desktop"');
     expect(ipc).toContain("One in-flight renderer-owned read per attachment");
   });
 

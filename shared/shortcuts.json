@@ -54,7 +54,7 @@
     },
     "jetbrains": {
       "label": "JetBrains",
-      "description": "Navigation shortcuts shared by IntelliJ IDEA, WebStorm, PyCharm and other JetBrains IDEs.",
+      "description": "Shortcuts shared by JetBrains IDEs.",
       "overrides": {
         "quick-open": {
           "chord": { "mods": ["Mod", "Shift"], "key": "KeyO" },

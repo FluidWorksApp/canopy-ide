@@ -59,7 +59,7 @@ import {
   publishVibePreviewContext,
   removeVibePreviewContext,
 } from "../vibePreviewContext";
-import { AgentLaunchButton } from "./AgentLaunchButton";
+import { AgentLaunchButton, type LaunchPlacement } from "./AgentLaunchButton";
 import { ContextMenu, useContextMenu } from "./ContextMenu";
 import { CameraIcon } from "./icons";
 import type { AgentTarget } from "./TicketsPanel";
@@ -119,6 +119,7 @@ interface PreviewViewProps {
    *  agent working in the component that serves this page. */
   primaryTarget?: AgentTarget;
   installed: Record<string, boolean>;
+  placement?: LaunchPlacement;
   onSendToAgent: (target: AgentTarget, text: string) => void;
   /** `cwd` is the serving component's directory when the URL is linked to one. */
   onStartNew: (
@@ -175,6 +176,7 @@ export function PreviewView({
   agentTargets,
   primaryTarget,
   installed,
+  placement,
   onSendToAgent,
   onStartNew,
   onRunOneOff,
@@ -805,6 +807,27 @@ export function PreviewView({
           painted: painted(),
           rect: el?.getBoundingClientRect() ?? null,
         });
+        if (plan.take === "no" && !nativeRef.current) {
+          // The proxy engine cannot photograph a tab that isn't in front, and
+          // nothing moves the user's tab to make it. So the same URL is loaded
+          // in a throwaway hidden view, photographed, and closed: a fresh render
+          // of the page, never the user's own tab.
+          const size = el?.getBoundingClientRect();
+          const width = size && size.width >= 1 ? Math.round(size.width) : 1280;
+          const height = size && size.height >= 1 ? Math.round(size.height) : 800;
+          void captureInBackground(urlRef.current, width, height, op.max ?? undefined)
+            .then(({ image, width: w, height: h, mimeType }) =>
+              ipc.browserResult(op.id, true, {
+                image,
+                mimeType,
+                url: urlRef.current,
+                width: Math.round(w),
+                height: Math.round(h),
+              }),
+            )
+            .catch(() => ipc.browserResult(op.id, false, plan.reason));
+          return;
+        }
         if (plan.take === "no") {
           void ipc.browserResult(op.id, false, plan.reason);
           return;
@@ -1378,6 +1401,7 @@ export function PreviewView({
                       agentTargets={agentTargets}
                       primaryTarget={primaryTarget}
                       installed={installed}
+                      placement={placement}
                       newAgentLabel={
                         linked?.componentLabel
                           ? `New agent in ${linked.componentLabel}`
@@ -1464,6 +1488,7 @@ export function PreviewView({
                     agentTargets={agentTargets}
                     primaryTarget={primaryTarget}
                     installed={installed}
+                    placement={placement}
                     newAgentLabel={
                       linked?.componentLabel
                         ? `New agent in ${linked.componentLabel}`
@@ -1486,4 +1511,29 @@ export function PreviewView({
       </div>
     </div>
   );
+}
+
+/** Photograph `url` in a throwaway hidden native view, off screen, and close it. */
+async function captureInBackground(url: string, width: number, height: number, max?: number) {
+  const id = `agent-shot-${Date.now().toString(36)}`;
+  let unlisten: (() => void) | undefined;
+  try {
+    const loaded = new Promise<void>((resolve) => {
+      const finish = () => resolve();
+      void ipc
+        .onBrowserNav((n) => {
+          if (n.tabId === id && !n.loading) setTimeout(finish, 500);
+        })
+        .then((off) => {
+          unlisten = off;
+        });
+      setTimeout(finish, 8000);
+    });
+    await ipc.browserOpen(id, url, -30000, -30000, width, height, undefined, false);
+    await loaded;
+    return await ipc.browserSnapshot(id, max);
+  } finally {
+    unlisten?.();
+    void ipc.browserClose(id);
+  }
 }

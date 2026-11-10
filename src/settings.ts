@@ -14,6 +14,7 @@ import type { CaptureMode } from "./pageCapture";
 import { IS_MAC } from "./platform";
 import { lensFromStoredDefault, storedDefaultFor } from "./lensMigration";
 import { DEFAULT_AGENT_CLI_ID } from "../shared/agentCliIdentity";
+import { sanitizeAcpConfig } from "./acp/providers";
 import { SKINS, type SkinId } from "./skins/registry";
 import {
   isSessionNameTheme,
@@ -300,6 +301,10 @@ export interface Settings {
    *  and switching back returns to the right conversation rather than losing
    *  both. */
   companionSessions: Record<string, string>;
+  /** The account (profile id) each agent CLI was last launched under. The
+   *  launcher defaults to it, so someone who keeps using one account for Codex
+   *  and another for Claude is not asked again each time. */
+  lastProfileByCli: Record<string, string>;
 
   /** Which mascot the app wears (mascots.ts). Stored as an id rather than
    *  anything drawable, so a build that adds or drops one reads an old
@@ -389,6 +394,9 @@ export interface Settings {
    *  is a property of the workstation, not of one repo. See CustomAgentCli for
    *  what an entry can and deliberately cannot say. */
   customClis: CustomAgentCli[];
+  /** Per-agent "Use ACP" switch. Absent means on for any agent that has an ACP
+   *  entrypoint; only an explicit false selects the vendor runner. */
+  acpAgents: Record<string, boolean>;
   /** Display name on the team relay, remembered from the last host/join. */
   relayName: string;
   /** Last relay address joined, prefilled on the next join. */
@@ -540,25 +548,6 @@ export interface Settings {
    *  existing ones stay restorable until retention prunes them. Claude Code
    *  only for now, and only in git checkouts. */
   turnRollback: boolean;
-  /** Team memory (memoryExtract.ts): after agent turns, ask the brain on the
-   *  background tier for 0–3 durable decisions/constraints/conventions/facts
-   *  and file them in the ledger as *proposed* — never served to agents until
-   *  a person approves them in the Memory panel. */
-  memoryAutoExtract: boolean;
-  /** Days a new memory lives before it must be reconfirmed. Facts go stale
-   *  fastest; decisions, constraints and conventions share the longer clock. */
-  memoryFactExpiryDays: number;
-  memoryDecisionExpiryDays: number;
-  /** What happens to memories from a session that read untrusted content
-   *  (web pages, the browser, tickets, PR comments): "quarantine" files them
-   *  behind an explicit approval, "skip" never extracts from such a session. */
-  memoryQuarantine: "quarantine" | "skip";
-  /** Rewrite the instruction file's generated "Team memory" section whenever
-   *  memory is approved or changes (memoryInstructionSync.ts). null = on for
-   *  a project once someone has used "Update the instruction file" there. */
-  memoryInstructionAutoUpdate: boolean | null;
-  /** Per ledger root, the instruction file that section was last written to. */
-  memoryInstructionFiles: Record<string, string>;
   /** Show attention items outside the notification centre: corner cards,
    * companion notices, native banners, and the remote companion channel. Off
    * is a presentation preference only — every item stays in the shared queue
@@ -710,6 +699,10 @@ export interface Settings {
    *  Off by default: ⌘N opens where you are. Renamed from `agentWorkspaces`
    *  when that default flipped, because a stored key outlives its default. */
   agentWorkspaceByDefault: boolean;
+  /** Close an agent's tab once the pull request it was working under has
+   *  merged. Its workspace is then removed by the normal close. Off by default:
+   *  a tab can still be the thing someone is reading. */
+  closeAgentOnMerge: boolean;
 
   // ---- Crash reporting ----
   /** Opt-in, default off: when a panel crashes (or a native panic is found on
@@ -717,6 +710,10 @@ export interface Settings {
    *  app version, OS/arch — to the collector baked into the build. Nothing
    *  leaves the machine unless this is on. */
   crashReporting: boolean;
+  /** Let a click on a terminal link open a file outside every project folder.
+   *  Off by default: an agent can print any path, and opening it reads that file
+   *  into the editor. Only the clicked file is allowed, never its folder. */
+  allowOutsideFileLinks: boolean;
 }
 
 // NB: stored settings override these (see getSettings), so flipping a default
@@ -739,6 +736,7 @@ export const DEFAULTS: Settings = {
   accountRotation: true,
   accountLimits: {},
   customClis: [],
+  acpAgents: {},
   relayName: "",
   relayAddr: "",
   autoHibernate: false,
@@ -772,12 +770,6 @@ export const DEFAULTS: Settings = {
   reviewSliceBudgetLines: 400,
   claudeIdeIntegration: true,
   turnRollback: true,
-  memoryAutoExtract: true,
-  memoryFactExpiryDays: 90,
-  memoryDecisionExpiryDays: 180,
-  memoryQuarantine: "quarantine",
-  memoryInstructionAutoUpdate: null,
-  memoryInstructionFiles: {},
   notificationPopupsEnabled: true,
   teamMessageNotifications: true,
   teamMessagePreviews: true,
@@ -800,6 +792,7 @@ export const DEFAULTS: Settings = {
   // the two stay in agreement.
   companionSpot: { x: 0.97, y: 0.86 },
   companionSessions: {},
+  lastProfileByCli: {},
   // The literal, not `DEFAULT_MASCOT`: mascots.ts reads settings, so importing
   // a *value* back from it would be a live cycle evaluated while this very
   // object is being built. The type import below is erased and safe, and
@@ -844,7 +837,9 @@ export const DEFAULTS: Settings = {
   workspacePorts: {},
   workspaceBootstrap: true,
   agentWorkspaceByDefault: false,
+  closeAgentOnMerge: false,
   crashReporting: false,
+  allowOutsideFileLinks: false,
 };
 
 /** Hard renderer ownership boundary. The settings UI lets the user explicitly
@@ -908,6 +903,39 @@ function hotspotOverrides(raw: unknown): Record<string, string[]> {
   return out;
 }
 
+/** Stored custom CLIs, with only the ACP block re-validated: a hand-edited or
+ *  corrupt `acp` becomes a plain CLI rather than an unlaunchable one. Older
+ *  entries have no `acp` and pass through unchanged. */
+export function sanitizeCustomClis(raw: unknown): CustomAgentCli[] {
+  if (!Array.isArray(raw)) return [];
+  return raw
+    .filter((c): c is CustomAgentCli => !!c && typeof c === "object" && typeof (c as CustomAgentCli).bin === "string")
+    .map((c) => {
+      const { acp, ...rest } = c;
+      const clean = sanitizeAcpConfig(acp);
+      return clean ? { ...rest, acp: clean } : rest;
+    });
+}
+
+const RETIRED_MEMORY_KEYS = [
+  "memoryAutoExtract",
+  "memoryFactExpiryDays",
+  "memoryDecisionExpiryDays",
+  "memoryQuarantine",
+  "memoryInstructionAutoUpdate",
+  "memoryInstructionFiles",
+] as const;
+/** Keep only `id: boolean` pairs, so a hand-edited value cannot enable or
+ *  disable anything by accident. */
+export function sanitizeAcpAgents(raw: unknown): Record<string, boolean> {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return {};
+  const out: Record<string, boolean> = {};
+  for (const [id, on] of Object.entries(raw as Record<string, unknown>).slice(0, 64)) {
+    if (typeof on === "boolean" && id.length > 0 && id.length <= 64) out[id] = on;
+  }
+  return out;
+}
+
 export function getSettings(): Settings {
   const raw = localStorage.getItem(KEY);
   if (settingsCache && settingsCache.raw === raw) return settingsCache.value;
@@ -942,6 +970,17 @@ export function getSettings(): Settings {
     // established storage keys for the two remaining browsing options.
     // Every earlier browser choice lands on the one embedded engine.
     value.browserEngine = "proxy";
+    // Per-agent account memory: a plain map of id to id, nothing else.
+    {
+      const raw = value.lastProfileByCli as unknown;
+      const clean: Record<string, string> = {};
+      if (raw && typeof raw === "object" && !Array.isArray(raw)) {
+        for (const [cli, id] of Object.entries(raw as Record<string, unknown>)) {
+          if (typeof id === "string" && id.length <= 128) clean[cli] = id;
+        }
+      }
+      value.lastProfileByCli = clean;
+    }
     if (
       !Array.isArray(value.teamMutedConversations) ||
       !value.teamMutedConversations.every(
@@ -953,6 +992,8 @@ export function getSettings(): Settings {
     // Budgets gate spending, so a hand-edited or corrupt value must fail
     // towards "no cap" rather than towards a NaN that compares false forever
     // or a negative that blocks every call.
+    value.customClis = sanitizeCustomClis(value.customClis);
+    value.acpAgents = sanitizeAcpAgents(value.acpAgents);
     value.brainDailyBudgetUsd = budgetUsd(value.brainDailyBudgetUsd);
     value.brainFeatureBudgetsUsd = featureBudgets(value.brainFeatureBudgetsUsd);
     value.sessionBudgetUsd = budgetUsd(value.sessionBudgetUsd);
@@ -967,16 +1008,8 @@ export function getSettings(): Settings {
     value.defaultProjectLens = storedDefaultFor(lensFromStoredDefault(stored.defaultProjectLens ?? DEFAULTS.defaultProjectLens));
     if (typeof value.awarenessEnabled !== "boolean") value.awarenessEnabled = true;
     value.awarenessHotspots = hotspotOverrides(value.awarenessHotspots);
-    // An expiry is a safety property (stale memory stops being served), so a
-    // corrupt value falls back to the default rather than to "never".
-    for (const key of ["memoryFactExpiryDays", "memoryDecisionExpiryDays"] as const) {
-      const days = Number(value[key]);
-      value[key] = Number.isFinite(days) && days >= 1 ? Math.min(Math.round(days), 3650) : DEFAULTS[key];
-    }
-    if (value.memoryQuarantine !== "skip") value.memoryQuarantine = "quarantine";
-    if (typeof value.memoryInstructionAutoUpdate !== "boolean") value.memoryInstructionAutoUpdate = null;
-    if (!value.memoryInstructionFiles || typeof value.memoryInstructionFiles !== "object" || Array.isArray(value.memoryInstructionFiles))
-      value.memoryInstructionFiles = {};
+    // Team memory was removed; drop its retired keys so they are not written back.
+    for (const key of RETIRED_MEMORY_KEYS) delete (value as unknown as Record<string, unknown>)[key];
     if (typeof value.brainSessionTitles !== "boolean") value.brainSessionTitles = true;
     if (
       !Number.isFinite(value.reviewSliceBudgetLines) ||

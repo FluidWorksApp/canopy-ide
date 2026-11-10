@@ -22,6 +22,7 @@ import {sessionActivity} from './session-activity.mjs';
 import {sessionCompactCommand} from './session-compact.mjs';
 import {storeDigestReader,withStoreDigests} from './session-store-digests.mjs';
 import {prepareSession} from './session-transfer.mjs';
+import {teleportTranscript,teleportGit} from './teleport-transcript.mjs';
 import {importAgentAccounts,importAccountProfiles} from './agent-accounts.mjs';
 import {CloneJobs} from './git-clone.mjs';
 import {MirrorJobs} from './mirror-apply.mjs';
@@ -66,6 +67,8 @@ let lastSessionPass=null;
 const execute=promisify(execFile);
 const ROOT='/workspace', HOME='/home/agent', STORE=HOME+'/.canopy/ide-projects.json';
 const profiles=new WorkspaceProfiles(HOME);
+const teleport=teleportTranscript(HOME);
+const teleportGitOps=teleportGit();
 const sessionCompact=sessionCompactCommand({home:HOME,scoped:value=>scoped(value),profileEnv:(agent,id)=>profiles.env(agent,id)});
 const integrations=new AgentIntegrations(HOME);
 const sessionDigests=sessionDigestReader(HOME);
@@ -154,7 +157,7 @@ familyContext.prObserver=prObserver;
 // The Rules panel's approved gates and approve-once tokens, written where this
 // workspace's canopy-hook reads them (gates.mjs).
 const workspaceGates=new WorkspaceGates({home:HOME,run:(bin,argv,cwd)=>run(bin,argv,cwd)});
-const CLIS=['claude','codex','amp','aider','agy','opencode','omp','cursor-agent','grok'];
+const CLIS=['claude','codex','amp','aider','agy','opencode','omp','cursor-agent','grok','kiro-cli'];
 const MAX_DESKTOP_CLIPBOARD=1024*1024;
 const desktopEnv=()=>({...process.env,HOME,DISPLAY:':99',XDG_RUNTIME_DIR:HOME+'/.cache/runtime'});
 function desktopClipboardWrite(selection,text){
@@ -368,6 +371,14 @@ export async function nativeInvoke(command,args={}){
   if(command==='agent_usage')return agentUsage.usage();
   if(command==='plan_usage'){await agentUsage.usage();return agentUsage.plans(args.sessionId??null);}
   if(command==='profile_prepare_session')return prepareSession(HOME,args);
+  if(command==='teleport_home')return teleport.home();
+  if(command==='teleport_transcript_read')return teleport.read(args);
+  if(command==='teleport_transcript_write')return teleport.write(args);
+  if(command==='teleport_git_relation')return teleportGitOps.relation(args);
+  if(command==='teleport_bundle_create')return teleportGitOps.bundleCreate(args);
+  if(command==='teleport_bundle_apply')return teleportGitOps.bundleApply(args);
+  if(command==='teleport_patch_create')return teleportGitOps.patchCreate(args);
+  if(command==='teleport_patch_apply')return teleportGitOps.patchApply(args);
   if(command==='session_digests')return withStoreDigests(await sessionDigests(),await storeDigests(args.roots).catch(()=>[]));
   if(command==='session_transcript_tail')return sessionTranscriptTail(HOME,args,{scoped});
   if(command==='session_activity')return sessionActivity(HOME,args);

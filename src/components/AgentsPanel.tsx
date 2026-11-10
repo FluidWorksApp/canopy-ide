@@ -1,8 +1,9 @@
 import { fixedNumber } from "../format";
+import { hasCommandModifier } from "../shortcuts";
 // Agent management: one row per terminal session, named after whatever the pty
 // has in its foreground (see agentIdentity.ts), with CPU/memory for the runaway
 // guard.
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useId, useMemo, useRef, useState } from "react";
 import * as ipc from "../ipc";
 import { basename } from "../paths";
 import { getSettings } from "../settings";
@@ -17,7 +18,6 @@ import {
   silenceLabel,
   type Attention,
 } from "../../shared/agentLife";
-import { ashFor } from "../ash";
 import { markRestored } from "../restorable";
 import { openSessionDoc } from "../sessionDoc/events";
 import { SubagentTree } from "./SubagentTree";
@@ -25,14 +25,11 @@ import { lastHumanPrompt, useAgentSessions } from "../agentSessions";
 import { claimOwnerName } from "../claims";
 import { AGENT_LABELS, IntegrationsList, useIntegrations } from "./AgentIntegrations";
 import { PendingCard } from "./PendingCard";
-import { Mascot } from "./Mascot";
 import { AgentRuntime } from "./AgentRuntime";
 import {
   AgentIcon,
   DiffIcon,
   DocumentIcon,
-  ExchangeIcon,
-  InstructionKindIcon,
   MoonIcon,
   RestartIcon,
   TerminalIcon,
@@ -145,6 +142,26 @@ const meshEnd = (
   pty == null ? "companion" : name || (agent ? `${agent} ${pty}` : `terminal ${pty}`);
 
 /** Compact relative age; the panel is narrow and "3h" beats a timestamp. */
+/** "5m", "2h", "3d": the compact age a thread list shows beside a name. */
+export const agoShort = (secs?: number) => {
+  if (!secs) return "";
+  const d = Math.max(0, Math.floor(Date.now() / 1000) - secs);
+  if (d < 60) return "now";
+  if (d < 3600) return `${Math.floor(d / 60)}m`;
+  if (d < 86400) return `${Math.floor(d / 3600)}h`;
+  return `${Math.floor(d / 86400)}d`;
+};
+
+/** Which component an agent works in: the deepest configured root holding its
+ *  directory, named by that root's folder. Anything outside every root is
+ *  grouped by its own folder name. */
+export function componentGroup(cwd: string, roots: string[]): string {
+  const root = roots
+    .filter((r) => cwd === r || cwd.startsWith(r.replace(/\/+$/, "") + "/"))
+    .sort((a, b) => b.length - a.length)[0];
+  return basename(root ?? cwd) || cwd;
+}
+
 const ago = (secs?: number) => {
   if (!secs) return "";
   const d = Math.max(0, Math.floor(Date.now() / 1000) - secs);
@@ -219,59 +236,6 @@ function SharedDialog({
           </Button>
         </div>
       </div>
-    </div>
-  );
-}
-
-/** One group. The panel used to be five identical full-width lists with
- *  identical headings, so "running now" and "restorable from before" looked
- *  the same — the indented body plus a rule is what separates them. */
-function Section({
-  title,
-  count,
-  tone,
-  action,
-  collapseKey,
-  children,
-}: {
-  title: string;
-  count?: number;
-  tone?: "urgent" | "quiet";
-  action?: React.ReactNode;
-  /** Set to make the section collapsible. It starts collapsed, and the choice
-   *  is remembered under this key — a panel section you closed should stay
-   *  closed the next time you open the project. */
-  collapseKey?: string;
-  children: React.ReactNode;
-}) {
-  const [open, setOpen] = useState(
-    () => collapseKey != null && localStorage.getItem(`canopy.section.${collapseKey}`) === "1",
-  );
-  const toggle = () => {
-    if (collapseKey == null) return;
-    setOpen((v) => {
-      localStorage.setItem(`canopy.section.${collapseKey}`, v ? "0" : "1");
-      return !v;
-    });
-  };
-  const collapsible = collapseKey != null;
-  return (
-    <div className={`ap-section ${tone ? `ap-section-${tone}` : ""}`}>
-      <div
-        className={`ap-head ${collapsible ? "ap-head-toggle" : ""}`}
-        onClick={collapsible ? toggle : undefined}
-      >
-        {collapsible && (
-          <span className="tree-chevron">{open ? "▾" : "▸"}</span>
-        )}
-        <span className="ap-title">{title}</span>
-        {count != null && count > 0 && <span className="badge">{count}</span>}
-        <span className="ap-head-spacer" />
-        {/* Actions live inside the header, so their clicks must not also
-            toggle it. */}
-        {action && <span onClick={(e) => e.stopPropagation()}>{action}</span>}
-      </div>
-      {(!collapsible || open) && <div className="ap-body">{children}</div>}
     </div>
   );
 }
@@ -510,215 +474,397 @@ export function AgentsPanel({
     }
   }, [agentSessions, settings.autoHibernate, settings.maxLiveAgents, onNotice, lifeOf, attentionOf]);
 
-  const sessionRow = (row: (typeof sessions)[number]) => {
-    const { session: s, agent, dir, digest } = row;
+
+  // ---- The list -------------------------------------------------------------
+  // One flat list the keyboard walks: waiting-on-you first, then running agents
+  // by project, terminals, claims, and what can be restored. The mouse is a
+  // bonus, never the only way: every action below has a key (see KEYS).
+  type Row = (typeof sessions)[number];
+  type Restorable = (typeof restorable)[number];
+  type Item =
+    | { key: string; kind: "agent" | "term"; row: Row }
+    | { key: string; kind: "claim"; claim: ipc.AgentClaim }
+    | { key: string; kind: "restore"; entry: Restorable }
+    | { key: string; kind: "more" };
+
+  const uid = useId().replace(/:/g, "");
+  const filterRef = useRef<HTMLInputElement>(null);
+  const listRef = useRef<HTMLDivElement>(null);
+  const [filter, setFilter] = useState("");
+  const [showAllRestorable, setShowAllRestorable] = useState(false);
+  const [showKeys, setShowKeys] = useState(false);
+  const [cursorKey, setCursorKey] = useState<string | null>(null);
+  // A destructive key press is armed by the first press and done by the second.
+  const [armed, setArmed] = useState<string | null>(null);
+  const lastIndex = useRef(0);
+
+  // Bring the filter under the cursor when the panel is opened (a tab switch is
+  // the person asking for it), never on first paint of an already-open panel.
+  const wasVisible = useRef(visible);
+  useEffect(() => {
+    if (visible && !wasVisible.current) filterRef.current?.focus();
+    wasVisible.current = visible;
+  }, [visible]);
+
+  const query = filter.trim().toLowerCase();
+  const matches = (...parts: (string | null | undefined)[]) =>
+    query === "" || parts.filter(Boolean).join(" ").toLowerCase().includes(query);
+
+  const nameOf = (row: Row) =>
+    agentDisplayName({
+      tab: tabNames?.get(row.session.id),
+      sessionName: row.session.name,
+      sessionTitle: row.session.title,
+      cwd: row.session.cwd,
+      agentLabel: row.agent?.label,
+    });
+
+  const rowMatches = (row: Row) =>
+    matches(
+      nameOf(row),
+      row.agent?.label,
+      row.dir,
+      row.digest?.branch,
+      row.digest?.profile,
+      lastHumanPrompt(row.digest?.prompts),
+      row.session.cwd,
+    );
+
+  const blocks = useMemo(() => {
+    const out: { title: string; tone?: "urgent"; groups: { name: string | null; items: Item[] }[] }[] = [];
+    const visibleAgents = agentSessions.filter(rowMatches);
+    const waiting = visibleAgents.filter(
+      (row) => bucketFor(lifeOf(row), attentionOf(row.session.id)) === "attention",
+    );
+    const running = visibleAgents.filter((row) => !waiting.includes(row));
+    if (waiting.length > 0)
+      out.push({
+        title: "Waiting on you",
+        tone: "urgent",
+        groups: [{ name: null, items: waiting.map((row) => ({ key: `a:${row.session.id}`, kind: "agent", row })) }],
+      });
+    if (running.length > 0) {
+      const byGroup = new Map<string, Item[]>();
+      for (const row of running) {
+        const name = componentGroup(row.session.cwd, roots);
+        byGroup.set(name, [...(byGroup.get(name) ?? []), { key: `a:${row.session.id}`, kind: "agent", row }]);
+      }
+      out.push({
+        title: "Running",
+        groups: [...byGroup].map(([name, items]) => ({ name: byGroup.size > 1 ? name : null, items })),
+      });
+    }
+    const terms = termSessions.filter(rowMatches);
+    if (terms.length > 0)
+      out.push({
+        title: "Terminals",
+        groups: [{ name: null, items: terms.map((row) => ({ key: `t:${row.session.id}`, kind: "term", row })) }],
+      });
+    const claimItems: Item[] = claims
+      .filter((claim) => matches(claim.owner, claim.note, claim.paths.join(" ")))
+      .map((claim) => ({ key: `c:${claim.id}`, kind: "claim", claim }));
+    if (claimItems.length > 0) out.push({ title: "Claimed files", groups: [{ name: null, items: claimItems }] });
+    const past = [...restorable]
+      .sort((a, b) => (b.digest.updated ?? 0) - (a.digest.updated ?? 0))
+      .filter((entry) =>
+        matches(entry.agentId, basename(entry.cwd), entry.digest.branch, lastHumanPrompt(entry.digest.prompts)),
+      );
+    if (past.length > 0) {
+      // The recent few; a filter or "show all" lifts the cap.
+      const cap = query !== "" || showAllRestorable ? past.length : 5;
+      const items: Item[] = past
+        .slice(0, cap)
+        .map((entry) => ({ key: `r:${entry.digest.session_id}`, kind: "restore", entry }));
+      if (past.length > 5 && query === "") items.push({ key: "more", kind: "more" });
+      out.push({ title: "Restorable", groups: [{ name: null, items }] });
+    }
+    return out;
+    // `rowMatches` and `matches` close over `query` and the props already listed.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [agentSessions, termSessions, claims, restorable, query, showAllRestorable, roots, tabNames, lifeOf, attentionOf]);
+
+  const items = useMemo(() => blocks.flatMap((b) => b.groups.flatMap((g) => g.items)), [blocks]);
+  const found = items.findIndex((item) => item.key === cursorKey);
+  const cursorIndex = items.length === 0 ? -1 : found >= 0 ? found : Math.min(lastIndex.current, items.length - 1);
+  const cursorItem = cursorIndex >= 0 ? items[cursorIndex] : undefined;
+  lastIndex.current = Math.max(0, cursorIndex);
+  const domId = (key: string) => `ap2-${uid}-${key.replace(/[^a-z0-9]/gi, "_")}`;
+
+  useEffect(() => {
+    if (!cursorItem) return;
+    document.getElementById(domId(cursorItem.key))?.scrollIntoView?.({ block: "nearest" });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [cursorItem?.key]);
+
+  const move = (delta: number | "first" | "last") => {
+    if (items.length === 0) return;
+    const next =
+      delta === "first" ? 0 : delta === "last" ? items.length - 1 : Math.max(0, Math.min(items.length - 1, cursorIndex + delta));
+    setCursorKey(items[next].key);
+    setArmed(null);
+  };
+
+  const restoreEntry = (entry: Restorable) => {
+    // Bridge the gap until the resumed agent's first hook event rewrites the
+    // digest's surface; without it the row sits looking un-restored.
+    markRestored(entry.digest.session_id);
+    onRestore?.(entry.cwd, entry.command, entry.agentId, entry.agentId);
+  };
+  const documentEntry = (entry: Restorable) =>
+    openSessionDoc({
+      kind: "session",
+      sessionId: entry.digest.session_id,
+      agent: entry.agentId,
+      cwd: entry.cwd,
+      digest: entry.digest,
+      resumeCommand: entry.command,
+      onResume: () => restoreEntry(entry),
+    });
+
+  const activate = (item: Item) => {
+    if (item.kind === "agent" || item.kind === "term") onJumpToPty?.(item.row.session.id);
+    else if (item.kind === "restore") restoreEntry(item.entry);
+    else if (item.kind === "claim") onOpenClaim?.(item.claim);
+    else setShowAllRestorable((v) => !v);
+  };
+
+  const canHibernateRow = (row: Row) =>
+    !!row.agent && reclaimable(lifeOf(row), attentionOf(row.session.id));
+
+  const remove = (item: Item) => {
+    if (item.kind === "agent" || item.kind === "term") void ipc.ptyKill(item.row.session.id);
+    else if (item.kind === "restore") forget([item.entry.digest, ...item.entry.superseded]);
+    else if (item.kind === "claim")
+      void ipc
+        .contextReleaseClaim(item.claim.owner_key)
+        .catch((err) => onNotice?.(`Couldn't release this claim: ${err}`));
+  };
+
+  // Disarm on its own, so a stray first press cannot sit there for an hour.
+  useEffect(() => {
+    if (!armed) return;
+    const timer = setTimeout(() => setArmed(null), 4000);
+    return () => clearTimeout(timer);
+  }, [armed]);
+
+  const onListKey = (e: React.KeyboardEvent<HTMLDivElement>) => {
+    if (e.target !== e.currentTarget || hasCommandModifier(e)) return;
+    const handled = () => {
+      e.preventDefault();
+      e.stopPropagation();
+    };
+    switch (e.key) {
+      case "j":
+      case "ArrowDown":
+        handled();
+        return move(1);
+      case "k":
+      case "ArrowUp":
+        handled();
+        return move(-1);
+      case "g":
+      case "Home":
+        handled();
+        return move("first");
+      case "G":
+      case "End":
+        handled();
+        return move("last");
+      case "Enter":
+      case " ":
+        if (cursorItem) {
+          handled();
+          activate(cursorItem);
+        }
+        return;
+      case "/":
+        handled();
+        filterRef.current?.focus();
+        return;
+      case "o":
+        if (cursorItem && (cursorItem.kind === "agent") && cursorItem.row.agent?.id && onOpenAgent) {
+          handled();
+          const { session: s, agent, digest } = cursorItem.row;
+          onOpenAgent({ agent: agent!.id ?? "agent", cwd: s.cwd, ptyId: s.id, sessionId: digest?.session_id, digest });
+        }
+        return;
+      case "h":
+        if (cursorItem?.kind === "agent" && canHibernateRow(cursorItem.row)) {
+          handled();
+          hibernate(cursorItem.row.session.id);
+        }
+        return;
+      case "d":
+        if (cursorItem?.kind === "restore") {
+          handled();
+          documentEntry(cursorItem.entry);
+        }
+        return;
+      case "x":
+      case "Delete":
+      case "Backspace":
+        if (cursorItem && cursorItem.kind !== "more") {
+          handled();
+          if (armed === cursorItem.key) {
+            setArmed(null);
+            remove(cursorItem);
+          } else {
+            setArmed(cursorItem.key);
+          }
+        }
+        return;
+      case "a":
+        handled();
+        setShowAllRestorable((v) => !v);
+        return;
+      case "s":
+        handled();
+        onShareContext(!shareContext);
+        return;
+      case "i":
+        handled();
+        onOpenInstructions?.();
+        return;
+      case "w":
+        if (onOpenAgentsPage) {
+          handled();
+          onOpenAgentsPage();
+        }
+        return;
+      case "t":
+        handled();
+        setShowHookHelp((v) => !v);
+        return;
+      case "?":
+        handled();
+        setShowKeys((v) => !v);
+        return;
+    }
+  };
+
+  const onFilterKey = (e: React.KeyboardEvent<HTMLInputElement>) => {
+    if (hasCommandModifier(e)) return;
+    if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+      e.preventDefault();
+      listRef.current?.focus();
+      move(e.key === "ArrowDown" ? (cursorIndex < 0 ? "first" : 1) : -1);
+    } else if (e.key === "Enter") {
+      e.preventDefault();
+      if (cursorItem) activate(cursorItem);
+    } else if (e.key === "Escape") {
+      e.preventDefault();
+      e.stopPropagation();
+      setFilter("");
+      listRef.current?.focus();
+    }
+  };
+
+  // ---- Rows -----------------------------------------------------------------
+  const portChips = (row: Row) =>
+    row.session.ports?.map((p) => (
+      <button
+        key={p}
+        type="button"
+        tabIndex={-1}
+        className="ap2-chip ap2-chip-port"
+        title={
+          onPreviewUrl
+            ? `Preview http://localhost:${p} in Canopy — ${format("open-external")}-click for your browser`
+            : `Open http://localhost:${p} in your browser`
+        }
+        onClick={(e) => {
+          e.stopPropagation();
+          if (onPreviewUrl && !matchesModifierClick(e, "open-external")) {
+            onPreviewUrl(`http://localhost:${p}`);
+          } else {
+            void import("@tauri-apps/plugin-opener").then(({ openUrl }) => openUrl(`http://localhost:${p}`));
+          }
+        }}
+      >
+        :{p}
+      </button>
+    ));
+
+  const sessionRow = (item: Extract<Item, { kind: "agent" | "term" }>) => {
+    const { session: s, agent, dir, digest } = item.row;
+    const row = item.row;
+    const selected = cursorItem?.key === item.key;
     const runaway =
-      s.total_cpu > settings.runawayCpuPercent ||
-      s.total_mem_bytes > settings.runawayMemBytes;
-    // Lifecycle dot: only for agent rows the hook stream has spoken for, and
-    // only believed as far as the session's own activity backs it up — a CLI
-    // that stops without a Stop event leaves "working" behind forever.
+      s.total_cpu > settings.runawayCpuPercent || s.total_mem_bytes > settings.runawayMemBytes;
+    // Only believed as far as the session's own activity backs it up.
     const life = lifeOf(row);
     const shown = life.state;
-    const st = agent ? LIFE_META[shown] : undefined;
+    const meta = agent ? LIFE_META[shown] : undefined;
     const stTitle =
       shown === "unknown"
         ? `${life.note} (silent for ${silenceLabel(digest?.updated, Date.now() / 1000)})`
-        : life.note || st?.label;
-    // Only reclaim an agent that has *provably* finished — never one mid-turn,
-    // never one blocked, and never one we have merely lost track of. The
-    // confidence check is the part that matters: aider's whole lifecycle used
-    // to read `idle` (its one integration shipped a message Canopy wrote and
-    // then re-parsed into "finished"), so this button offered to kill a session
-    // sitting on a y/n confirm.
-    const canHibernate = !!agent && reclaimable(life, attentionOf(s.id));
-    // What the human last asked for. The highest-signal line about a session:
-    // "fix the login redirect" identifies it in a way that cpu, memory and a
-    // directory never will.
+        : life.note || meta?.label;
     const task = lastHumanPrompt(digest?.prompts);
-    // What to call this row. Its tab's name first — the CLI titles that tab
-    // with what it is working on, and the user can rename it — so the panel
-    // never shows a column of identical "claude"s while the tab strip above it
-    // is naming the same sessions apart.
-    const name = agentDisplayName({
-      tab: tabNames?.get(s.id),
-      sessionName: s.name,
-      sessionTitle: s.title,
-      cwd: s.cwd,
-      agentLabel: agent?.label,
-    });
+    const name = nameOf(row);
+    const needsYou = bucketFor(life, attentionOf(s.id)) === "attention";
+    const canHibernate = canHibernateRow(row);
+    const trail = armed === item.key
+      ? "press x again to close"
+      : !agent
+        ? ""
+        : shown === "working"
+          ? "Working"
+          : shown === "waiting"
+            ? "Needs you"
+            : agoShort(digest?.updated);
     return (
       <div
-        key={s.id}
-        className={`agent-row ${runaway ? "agent-runaway" : ""} ${
-          onJumpToPty ? "agent-row-jump" : ""
-        } ${s.id === activePty ? "agent-row-active" : ""}`}
-        // Clicking a row jumps to the live session — the active thing you're
-        // steering. The workspace (files, diffs, commits, PR) is one chip away
-        // for agent rows; it isn't the row's job to open it. Plain shells only
-        // ever had a terminal to jump to, so they're unchanged.
-        onClick={() => onJumpToPty?.(s.id)}
-        // Rows truncate to one line each now; the full detail lives here.
+        key={item.key}
+        id={domId(item.key)}
+        role="option"
+        aria-selected={selected}
+        className={`ap2-row ${selected ? "is-cursor" : ""} ${s.id === activePty ? "is-active" : ""} ${runaway ? "is-runaway" : ""}`}
+        onClick={() => {
+          setCursorKey(item.key);
+          onJumpToPty?.(s.id);
+        }}
         title={[
-          // The row's name, then which CLI it is — now that the name is the
-          // tab's, the row no longer says that on its face.
           name,
-          agent && name !== agent.label
-            ? `${agent.label} (identified by ${agent.via})`
-            : agent
-              ? `identified by ${agent.via}`
-              : undefined,
+          agent && name !== agent.label ? `${agent.label} (identified by ${agent.via})` : agent ? `identified by ${agent.via}` : undefined,
           s.cwd,
           digest?.branch,
           task,
-          "Click to jump to this terminal",
+          `${fixedNumber(s.total_cpu, 0)}% cpu · ${fmtMem(s.total_mem_bytes)} · ${s.procs.length} procs`,
         ]
           .filter(Boolean)
           .join("\n")}
       >
-        <div className="agent-main">
-          {/* Lifecycle at a glance: green pulse = working, amber = waiting on
-              you, grey = idle, faded = ended. */}
-          {st &&
-            (() => {
-              const look = ashFor(shown);
-              return (
-                <Mascot
-                  state={look.state}
-                  tone={look.tone}
-                  size={16}
-                  className="agent-state-ash"
-                  title={stTitle}
-                />
-              );
-            })()}
-          {/* The CLI's own mark, not its name in bold — the panel is a column
-              of near-identical rows and a glyph reads faster than a word. */}
-          {/* No id means we can see the program but cannot name whose it
-              is — it gets the plain terminal glyph rather than a guess at a
-              brand. */}
-          {agent?.id ? (
-            <AgentIcon id={agent.id} size={14} className="ap-mark" />
-          ) : (
-            <TerminalIcon size={13} className="ap-mark" />
-          )}
-          <span className="agent-name">{name}</span>
-          {/* How long it has actually been working: this stretch while it is
-              working, the session's total once it stops. Ahead of the directory
-              and branch chips because this row truncates rather than wraps, and
-              a timer clipped off the end is a timer that is not there — those
-              two ellipsize gracefully, a stopwatch does not. Both numbers are
-              in the tooltip, and in the agent's workspace tab.
-
-              Live only while `shown` says it is genuinely working: a CLI that
-              dies mid-turn leaves "working" behind forever, and a clock counting
-              up from that would invent hours of work it never did. */}
-          {agent && <AgentRuntime timing={digest} live={shown === "working"} />}
-          {/* Kept on the left, right after the name: the hover stats overlay is
-              anchored to the row's right edge, so a badge over there gets buried
-              the moment you hover the very row you're trying to inspect. */}
+        <div className="ap2-line">
+          <span className={`ap2-dot ap2-dot-${agent ? shown : "none"}`} title={stTitle} aria-hidden="true" />
+          {agent?.id ? <AgentIcon id={agent.id} size={13} className="ap2-mark" /> : <TerminalIcon size={12} className="ap2-mark" />}
+          <span className="ap2-name">{name}</span>
           {runaway && <span className="runaway-badge">runaway?</span>}
-          {/* "Finished a turn" is the agent's word; the receipt is the
-              workspace's evidence, and it is what this row shows. */}
-          {agent && (shown === "idle" || shown === "ended") && (
-            <ReceiptBadge
-              sessionId={digest?.session_id}
-              ptyId={s.id}
-              cwd={s.cwd}
-              cli={agent.id ?? ""}
-              quietWhenUnverified={shown === "ended"}
-            />
-          )}
-          {dir && (
-            <span className="agent-dir" title={s.cwd}>
-              {dir}
-            </span>
-          )}
-          {/* Which branch this agent is editing — the difference between
-              two identical-looking rows working on different things. */}
-          {digest?.branch && (
-            <span className="agent-branch" title={`On branch ${digest.branch}`}>
-              {digest.branch}
-            </span>
-          )}
-          {/* Which account it is spending — two agents of the same CLI on one
-              branch are otherwise identical rows. */}
-          {digest?.profile && digest.profile !== "default" && (
-            <span
-              className="agent-account"
-              title={`Running under the "${digest.profile}" account`}
-            >
-              {digest.profile}
-            </span>
-          )}
-          {/* Blocked on you, stated on the row itself so it survives whether
-              or not the transient card is up and whichever tab is focused —
-              the durable "needs input" signal, not a fleeting event. */}
-          {bucketFor(life, attentionOf(s.id)) === "attention" && (
-            <span className="agent-needs-you" title="This agent is waiting for your answer">
+          {needsYou && (
+            <span className="ap2-badge" title="This agent is waiting for your answer">
               needs you
             </span>
           )}
-          {/* Helpers this turn spawned, so a quiet-looking row that's actually
-              fanning out work reads as busy rather than idle. */}
-          {(digest?.subagents ?? 0) > 0 && (
-            <span
-              className="agent-subagents"
-              title={`${digest?.subagents} subagent${digest?.subagents === 1 ? "" : "s"} finished this turn`}
-            >
-              ⑃ {digest?.subagents}
-            </span>
-          )}
-          {/* The row jumps to the terminal; this chip is the one way to the
-              workspace — files, diffs, commits and PR — keyed on the live
-              process. Only agent rows have a workspace to open. */}
-          {agent?.id && onOpenAgent && (
-            <button
-              className="agent-session agent-session-icon"
-              title="Open this agent's workspace — files, diffs, commits and PR"
-              onClick={(e) => {
-                e.stopPropagation();
-                onOpenAgent({
-                  agent: agent.id ?? "agent",
-                  cwd: s.cwd,
-                  ptyId: s.id,
-                  sessionId: digest?.session_id,
-                  digest,
-                });
-              }}
-            >
-              <DiffIcon size={12} />
-            </button>
-          )}
-          {/* A dev server in here, without opening the tab to find out. */}
-          {s.ports?.map((p) => (
-            <button
-              key={p}
-              className="agent-port"
-              title={
-                onPreviewUrl
-                  ? `Preview http://localhost:${p} in Canopy — ${format(
-                      "open-external",
-                    )}-click for your browser`
-                  : `Open http://localhost:${p} in your browser`
-              }
-              onClick={(e) => {
-                e.stopPropagation();
-                if (onPreviewUrl && !matchesModifierClick(e, "open-external")) {
-                  onPreviewUrl(`http://localhost:${p}`);
-                } else {
-                  void import("@tauri-apps/plugin-opener").then(({ openUrl }) =>
-                    openUrl(`http://localhost:${p}`),
-                  );
-                }
-              }}
-            >
-              :{p}
-            </button>
-          ))}
+          <span className="ap2-spacer" />
+          <span className={`ap2-trail ap2-trail-${agent ? shown : "none"} ${armed === item.key ? "is-armed" : ""}`} title={stTitle}>
+            {trail}
+          </span>
         </div>
-        {task && <div className="agent-task">{task}</div>}
-        {/* The subagents it spawned, live: a count that opens into the list. */}
+        <div className="ap2-meta">
+          {agent && <AgentRuntime timing={digest} live={shown === "working"} />}
+          {agent && (shown === "idle" || shown === "ended") && (
+            <ReceiptBadge sessionId={digest?.session_id} ptyId={s.id} cwd={s.cwd} cli={agent.id ?? ""} quietWhenUnverified={shown === "ended"} />
+          )}
+          {dir && <span className="ap2-chip" title={s.cwd}>{dir}</span>}
+          {digest?.branch && <span className="ap2-chip ap2-chip-branch" title={`On branch ${digest.branch}`}>⎇ {digest.branch}</span>}
+          {digest?.profile && digest.profile !== "default" && (
+            <span className="ap2-chip" title={`Running under the "${digest.profile}" account`}>{digest.profile}</span>
+          )}
+          {(digest?.subagents ?? 0) > 0 && (
+            <span className="ap2-chip" title={`${digest?.subagents} subagent${digest?.subagents === 1 ? "" : "s"} finished this turn`}>⑃ {digest?.subagents}</span>
+          )}
+          {portChips(row)}
+        </div>
+        {task && <div className="ap2-prompt">{task}</div>}
         {agent?.id && digest?.session_id && (
           <SubagentTree
             compact
@@ -726,29 +872,212 @@ export function AgentsPanel({
             activityKey={{ agent: agent.id, sessionId: digest.session_id, cwd: s.cwd, profile: digest.profile ?? null }}
           />
         )}
-        <div className="agent-stats">
-          <span>{fixedNumber(s.total_cpu, 0)}% cpu</span>
-          <span>{fmtMem(s.total_mem_bytes)}</span>
-          <span>{s.procs.length} procs</span>
+        {selected && (
+          <div className="ap2-stats">
+            {fixedNumber(s.total_cpu, 0)}% cpu · {fmtMem(s.total_mem_bytes)} · {s.procs.length} procs
+          </div>
+        )}
+        <div className="ap2-actions">
+          {agent?.id && onOpenAgent && (
+            <button
+              type="button"
+              tabIndex={-1}
+              className="ap2-act"
+              title="Open this agent's workspace — files, diffs, commits and PR"
+              onClick={(e) => {
+                e.stopPropagation();
+                onOpenAgent({ agent: agent.id ?? "agent", cwd: s.cwd, ptyId: s.id, sessionId: digest?.session_id, digest });
+              }}
+            >
+              <DiffIcon size={12} />
+            </button>
+          )}
           {canHibernate && (
-            <Button icon
+            <button
+              type="button"
+              tabIndex={-1}
+              className="ap2-act"
               title="Hibernate — frees memory now; resume later from Restorable with its history"
               onClick={(e) => {
                 e.stopPropagation();
                 hibernate(s.id);
-              }}>
+              }}
+            >
               <MoonIcon size={12} />
-            </Button>
+            </button>
           )}
-          <Button icon variant="danger"
+          <button
+            type="button"
+            tabIndex={-1}
+            className="ap2-act ap2-act-danger"
             title={`Kill terminal #${s.id}${agent ? ` and the ${agent.label} running in it` : ""}`}
             onClick={(e) => {
               e.stopPropagation();
               void ipc.ptyKill(s.id);
-            }}>
+            }}
+          >
             ✕
-          </Button>
+          </button>
         </div>
+      </div>
+    );
+  };
+
+  const restoreRow = (item: Extract<Item, { kind: "restore" }>) => {
+    const { digest: d, agentId, cwd: runIn, command: cmd, superseded } = item.entry;
+    const selected = cursorItem?.key === item.key;
+    // runIn is resume_cwd, not cwd: claude looks the conversation up under its
+    // project root, so resuming from a subdirectory reports "No conversation".
+    const dir = basename(runIn);
+    const last = lastHumanPrompt(d.prompts);
+    return (
+      <div
+        key={item.key}
+        id={domId(item.key)}
+        role="option"
+        aria-selected={selected}
+        className={`ap2-row ap2-row-past ${selected ? "is-cursor" : ""}`}
+        onClick={() => setCursorKey(item.key)}
+        onDoubleClick={() => restoreEntry(item.entry)}
+        title={`${agentId}\n${runIn}\n${last ?? ""}`.trim()}
+      >
+        <div className="ap2-line">
+          <span className="ap2-dot ap2-dot-ended" aria-hidden="true" />
+          <AgentIcon id={agentId} size={13} className="ap2-mark" />
+          <span className="ap2-name">{agentId}</span>
+          <span className="ap2-spacer" />
+          <span className={`ap2-trail ${armed === item.key ? "is-armed" : ""}`}>
+            {armed === item.key ? "press x again to forget" : agoShort(d.updated)}
+          </span>
+        </div>
+        <div className="ap2-meta">
+          <AgentRuntime timing={d} live={false} />
+          {dir && <span className="ap2-chip" title={runIn}>{dir}</span>}
+          {d.branch && <span className="ap2-chip ap2-chip-branch">⎇ {d.branch}</span>}
+        </div>
+        <div className="ap2-prompt">{last ?? <em>(no prompt captured for this session)</em>}</div>
+        <div className="ap2-actions">
+          <button
+            type="button"
+            tabIndex={-1}
+            className="ap2-act"
+            title={`Restore this session — ${cmd}`}
+            onClick={(e) => {
+              e.stopPropagation();
+              restoreEntry(item.entry);
+            }}
+          >
+            <RestartIcon size={12} />
+          </button>
+          <button
+            type="button"
+            tabIndex={-1}
+            className="ap2-act"
+            title="Read this session as a document and hand it off"
+            onClick={(e) => {
+              e.stopPropagation();
+              documentEntry(item.entry);
+            }}
+          >
+            <DocumentIcon size={12} />
+          </button>
+          <button
+            type="button"
+            tabIndex={-1}
+            className="ap2-act ap2-act-danger"
+            title={
+              superseded.length > 0
+                ? `Forget this directory's ${superseded.length + 1} sessions — removes them from this list`
+                : "Forget this session — removes it from this list"
+            }
+            // The row stands for its whole directory, so forgetting only the
+            // session on show would just promote the next one behind it.
+            onClick={(e) => {
+              e.stopPropagation();
+              forget([d, ...superseded]);
+            }}
+          >
+            <TrashIcon size={12} />
+          </button>
+        </div>
+      </div>
+    );
+  };
+
+  const claimRow = (item: Extract<Item, { kind: "claim" }>) => {
+    const { claim } = item;
+    const selected = cursorItem?.key === item.key;
+    return (
+      <div
+        key={item.key}
+        id={domId(item.key)}
+        role="option"
+        aria-selected={selected}
+        className={`ap2-row ap2-row-claim ${selected ? "is-cursor" : ""}`}
+        title={`${claim.owner}\n${claim.paths.join("\n")}${onOpenClaim ? "\nEnter opens this claim" : ""}`}
+        onClick={() => {
+          setCursorKey(item.key);
+          onOpenClaim?.(claim);
+        }}
+      >
+        <div className="ap2-line">
+          <span className="ap2-name">{claimOwnerName(claim.owner)}</span>
+          {/* A contested file is the most useful thing this list can say. */}
+          {claim.refusals.length > 0 && (
+            <span
+              className="ap2-badge"
+              title={`${claim.refusals.length} other claim${claim.refusals.length === 1 ? "" : "s"} on these files ${
+                claim.refusals.length === 1 ? "was" : "were"
+              } turned away — open the claim to see who`}
+            >
+              ⛔ {claim.refusals.length}
+            </span>
+          )}
+          <span className="ap2-spacer" />
+          <span className={`ap2-trail ${armed === item.key ? "is-armed" : ""}`}>{armed === item.key ? "press x again to release" : ""}</span>
+        </div>
+        <div className="ap2-prompt">
+          {claim.note ? `${claim.note} — ` : ""}
+          {claim.paths.map((p) => basename(p)).join(", ")}
+        </div>
+        <div className="ap2-actions">
+          <button
+            type="button"
+            tabIndex={-1}
+            className="ap2-act ap2-act-text"
+            title="Drop this claim — for an agent that died holding it"
+            onClick={(e) => {
+              e.stopPropagation();
+              // A release that failed and said nothing looks exactly like a
+              // claim that won't die.
+              void ipc.contextReleaseClaim(claim.owner_key).catch((err) => onNotice?.(`Couldn't release this claim: ${err}`));
+            }}
+          >
+            Release
+          </button>
+        </div>
+      </div>
+    );
+  };
+
+  const renderItem = (item: Item) => {
+    if (item.kind === "agent" || item.kind === "term") return sessionRow(item);
+    if (item.kind === "restore") return restoreRow(item);
+    if (item.kind === "claim") return claimRow(item);
+    const past = restorable.length;
+    return (
+      <div
+        key={item.key}
+        id={domId(item.key)}
+        role="option"
+        aria-selected={cursorItem?.key === item.key}
+        className={`ap2-row ap2-more ${cursorItem?.key === item.key ? "is-cursor" : ""}`}
+        onClick={() => {
+          setCursorKey(item.key);
+          setShowAllRestorable((v) => !v);
+        }}
+      >
+        {showAllRestorable ? "Show fewer" : `Show all ${past}`} <kbd>a</kbd>
       </div>
     );
   };
@@ -756,165 +1085,86 @@ export function AgentsPanel({
   // Blocked-on-you vs merely-finished: the same stream, very different urgency.
   const urgent = pending.filter((i) => i.kind !== "idle");
   const idle = pending.filter((i) => i.kind === "idle");
+  const keyHints: [string, string][] = [
+    ["j k  ↑ ↓", "move"],
+    ["Enter", "jump to terminal · restore"],
+    ["/", "filter (Esc leaves it)"],
+    ["o", "open the agent's workspace"],
+    ["h", "hibernate an idle agent"],
+    ["x", "close · forget · release (twice)"],
+    ["d", "read a past session as a document"],
+    ["a", "show all restorable"],
+    ["s", "toggle shared context"],
+    ["i", "agent instructions"],
+    ["w", "agents page"],
+    ["t", "hook setup help"],
+  ];
 
   return (
-    <div className="side-panel">
+    <div className="side-panel ap2" aria-label="Agents">
+      <div className="ap2-filter">
+        <input
+          ref={filterRef}
+          className="ap2-filter-input"
+          type="text"
+          spellCheck={false}
+          autoComplete="off"
+          placeholder="Filter agents…"
+          aria-label="Filter agents"
+          value={filter}
+          onChange={(e) => setFilter(e.target.value)}
+          onKeyDown={onFilterKey}
+        />
+        <button
+          type="button"
+          className="ap2-keys-toggle"
+          aria-pressed={showKeys}
+          title="Keyboard shortcuts (?)"
+          onClick={() => setShowKeys((v) => !v)}
+        >
+          ?
+        </button>
+      </div>
+      {showKeys && (
+        <dl className="ap2-keys" aria-label="Keyboard shortcuts">
+          {keyHints.map(([k, d]) => (
+            <div key={k}>
+              <dt>{k}</dt>
+              <dd>{d}</dd>
+            </div>
+          ))}
+        </dl>
+      )}
+
       {urgent.length > 0 && (
         <>
-          <div className="side-panel-head">
+          <div className="ap2-head ap2-head-urgent">
             <span>Needs your input</span>
-            <span className="badge">{urgent.length}</span>
+            <span className="ap2-count">{urgent.length}</span>
           </div>
           {urgent.map((item) => (
-            <PendingCard
-              key={item.key}
-              item={item}
-              onAnswer={onAnswer}
-              onRespond={onRespond}
-              onJumpToTerminal={onJumpToTerminal}
-              onDismiss={onDismissPending}
-            />
+            <PendingCard key={item.key} item={item} onAnswer={onAnswer} onRespond={onRespond} onJumpToTerminal={onJumpToTerminal} onDismiss={onDismissPending} />
           ))}
         </>
       )}
       {idle.length > 0 && (
         <>
-          <div className="side-panel-head">
+          <div className="ap2-head">
             <span>Finished</span>
-            <span className="badge">{idle.length}</span>
+            <span className="ap2-count">{idle.length}</span>
           </div>
           {idle.map((item) => (
-            <PendingCard
-              key={item.key}
-              item={item}
-              onJumpToTerminal={onJumpToTerminal}
-              onDismiss={onDismissPending}
-            />
+            <PendingCard key={item.key} item={item} onJumpToTerminal={onJumpToTerminal} onDismiss={onDismissPending} />
           ))}
         </>
       )}
-      {/* What every agent here reads before it sees any code. A count and the
-          headline files; the tab is where they're actually edited. */}
-      <Section
-        title="Instructions"
-        // The count is what the list below shows — the instruction files in
-        // effect. Counting every scanned file put "143" (mostly global skills)
-        // over a list of four.
-        count={headlineInstructions.live}
-        // Collapsed until asked for: instruction files change rarely, and this
-        // list sat between the pending questions and the running agents — the
-        // two things the panel exists for.
-        collapseKey="instructions"
-        action={
-          <Button icon
-            title="Open all agent instructions — CLAUDE.md, AGENTS.md, skills, subagents"
-            onClick={() => onOpenInstructions?.()}>
-            ⤢
-          </Button>
-        }
-      >
-        {instructionsFailed ? (
-          <div className="tree-empty">Couldn't look for instruction files.</div>
-        ) : instructionFiles === null ? (
-          <div className="tree-empty">Looking…</div>
-        ) : headlineInstructions.rows.length === 0 ? (
-          <div className="tree-empty">
-            No instruction files.
-          </div>
-        ) : (
-          headlineInstructions.rows.slice(0, 6).map((f) => (
-            // Same mark as the Instructions tab: the CLI's logo when one CLI
-            // owns the file, the kind's shape when several read it.
-            <div className="task-row" key={f.path}>
-              <span className={`instr-row-icon ${f.exists ? "" : "is-missing"}`}>
-                {f.agents.length === 1 ? (
-                  <AgentIcon id={f.agents[0]} size={13} />
-                ) : (
-                  <InstructionKindIcon kind={f.kind} size={13} />
-                )}
-              </span>
-              <span
-                className={`task-label task-label-link ${f.exists ? "" : "task-label-dim"}`}
-                title={`${f.path}\nRead by ${f.agents.join(", ")}`}
-                onClick={() => onOpenInstructions?.(f.path)}
-              >
-                {f.title ?? f.label}
-              </span>
-              {!f.exists && <span className="task-note">create</span>}
-            </div>
-          ))
-        )}
-      </Section>
-
-      {/* Shared context — opt-in, and always inspectable, in one line.
-          The four-line explanation is a tooltip: it is read once, and it was
-          costing a permanent block of a panel whose job is to show what the
-          agents are doing right now. What's actually shared is a click away in
-          a dialog rather than an expander, because it is a wall of other
-          sessions' prompts and it was pushing the running agents off screen.
-          The mark tells this row apart from the section headings around it —
-          it is a switch, not a list. */}
-      <div className="side-panel-head share-head">
-        <span className="share-head-title">
-          <ExchangeIcon size={13} />
-          Shared context
-        </span>
-        <span className="side-head-actions">
-          {shareContext && (
-            <button
-              className="share-peek"
-              title="See exactly what the other sessions are being told"
-              onClick={() => setShowShared(true)}
-            >
-              {shared.length} shared
-            </button>
-          )}
-          <span className="share-hint" title={SHARE_EXPLAIN}>
-            ?
-          </span>
-          <label className="share-toggle" title={SHARE_EXPLAIN}>
-            <input
-              type="checkbox"
-              checked={shareContext}
-              onChange={(e) => onShareContext(e.target.checked)}
-            />
-            <span>{shareContext ? "on" : "off"}</span>
-          </label>
-        </span>
-      </div>
-      {showShared && <SharedDialog shared={shared} onClose={() => setShowShared(false)} />}
-
-      <Section
-        title="Running agents"
-        count={agentSessions.length}
-        action={
-          <>
-            {/* The same material with room for it: cards instead of one-line
-                rows, the archive searchable, and the integrations out in the
-                open. The panel stays the glance. */}
-            {onOpenAgentsPage && (
-              <Button icon
-                title="Open the agents page — every session, with room to read it"
-                onClick={onOpenAgentsPage}>
-                ⤢
-              </Button>
-            )}
-            <Button icon
-              title="How to hook up agent CLIs"
-              onClick={() => setShowHookHelp((v) => !v)}>
-              ?
-            </Button>
-          </>
-        }
-      >
 
       {/* Hooks genuinely absent — offer the one-click setup. */}
       {noHookSignal && !showHookHelp && unhooked !== null && unhooked.length > 0 && (
         <div className="hook-nudge">
           <span>
             No events are streaming in from{" "}
-            {unhooked.map((id) => AGENT_LABELS.find((a) => a.id === id)?.label ?? id).join(", ")} —
-            questions, tasks and tokens won't show until hooks are set up.
+            {unhooked.map((id) => AGENT_LABELS.find((a) => a.id === id)?.label ?? id).join(", ")} — questions, tasks and tokens won't show until hooks are set up.
           </span>
           <Button variant="accent" onClick={() => void integrations.setUp(unhooked)}>
             Set up agent integrations
@@ -922,269 +1172,144 @@ export function AgentsPanel({
           {integrations.result && <p className="hook-result">{integrations.result}</p>}
         </div>
       )}
-
-      {/* Hooks are installed; these agents just predate them. Say the thing that
-          actually fixes it (restart) instead of the setup button, and let it be
-          dismissed — otherwise it nags in every project forever. */}
+      {/* Hooks are installed; these agents just predate them. */}
       {noHookSignal && !showHookHelp && unhooked?.length === 0 && !hintDismissed && (
         <div className="hook-nudge">
-          <span>
-            Hooks are set up, but these agents started before that — restart one
-            to stream its questions, tasks and tokens here.
-          </span>
-          <Button onClick={dismissHint}>
-            Got it
-          </Button>
+          <span>Hooks are set up, but these agents started before that — restart one to stream its questions, tasks and tokens here.</span>
+          <Button onClick={dismissHint}>Got it</Button>
         </div>
       )}
-
       {showHookHelp && hookPath && (
         <div className="hook-help">
-          <IntegrationsList
-            health={integrations.health}
-            onSetUp={(a) => void integrations.setUp(a)}
-          />
+          <IntegrationsList health={integrations.health} onSetUp={(a) => void integrations.setUp(a)} />
           {integrations.result && <p className="hook-result">{integrations.result}</p>}
-          <p>
-            Other CLIs:
-          </p>
+          <p>Other CLIs:</p>
           <code className="hook-path">{hookPath}</code>
         </div>
       )}
 
-      {agentSessions.length === 0 ? (
-        <div className="tree-empty ash-scene">
-          <Mascot state="sleeping" size={64} />
-          <div>
-            No agents. Start one from ＋.
-          </div>
-        </div>
-      ) : (
-        agentSessions.map(sessionRow)
-      )}
-      </Section>
-
-      {termSessions.length > 0 && (
-        <Section title="Terminals" count={termSessions.length}>
-          {termSessions.map(sessionRow)}
-        </Section>
-      )}
-
-      {/* Files an agent has claimed (canopy_claim). Advisory, so it only works
-          if it is visible — and if a dead session's claim can be dropped. The
-          row opens the claim: at this width it can only ever show a name and
-          some filenames, and every other question about a claim is a sentence
-          long. */}
-      {claims.length > 0 && (
-        <Section title="Claimed files" count={claims.length} tone="quiet">
-          <div className="claim-list">
-            {claims.map((claim) => (
-              <div
-                key={claim.id}
-                className={`claim-row ${onOpenClaim ? "claim-row-open" : ""}`}
-                title={`${claim.owner}\n${claim.paths.join("\n")}${
-                  onOpenClaim ? "\nClick to open this claim" : ""
-                }`}
-                onClick={() => onOpenClaim?.(claim)}
-              >
-                <span className="claim-owner">{claimOwnerName(claim.owner)}</span>
-                <span className="claim-paths">
-                  {claim.note ? `${claim.note} — ` : ""}
-                  {claim.paths.map((p) => basename(p)).join(", ")}
-                </span>
-                {/* A contested file is the most useful thing this list can
-                    say — until now the turned-away agents were only visible
-                    inside an already-open claim tab. */}
-                {claim.refusals.length > 0 && (
-                  <span
-                    className="claim-refusals"
-                    title={`${claim.refusals.length} other claim${
-                      claim.refusals.length === 1 ? "" : "s"
-                    } on these files ${
-                      claim.refusals.length === 1 ? "was" : "were"
-                    } turned away — open the claim to see who`}
-                  >
-                    ⛔ {claim.refusals.length}
-                  </span>
-                )}
-                <Button
-                  title="Drop this claim — for an agent that died holding it"
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    // A release that failed and said nothing looks exactly
-                    // like a claim that won't die.
-                    void ipc
-                      .contextReleaseClaim(claim.owner_key)
-                      .catch((err) =>
-                        onNotice?.(`Couldn't release this claim: ${err}`),
-                      );
-                  }}>
-                  Release
-                </Button>
+      <div
+        ref={listRef}
+        className="ap2-list"
+        role="listbox"
+        aria-label="Agents and sessions"
+        tabIndex={0}
+        aria-activedescendant={cursorItem ? domId(cursorItem.key) : undefined}
+        onKeyDown={onListKey}
+      >
+        {blocks.map((block) => (
+          <div key={block.title} role="group" aria-label={block.title} className="ap2-block">
+            <div className={`ap2-head ${block.tone === "urgent" ? "ap2-head-urgent" : ""}`}>
+              <span>{block.title}</span>
+              <span className="ap2-count">{block.groups.reduce((n, g) => n + g.items.filter((i) => i.kind !== "more").length, 0)}</span>
+            </div>
+            {block.groups.map((group) => (
+              <div key={group.name ?? "-"}>
+                {group.name && <div className="ap2-sub">{group.name}</div>}
+                {group.items.map(renderItem)}
               </div>
             ))}
           </div>
-        </Section>
-      )}
+        ))}
+        {items.length === 0 && (
+          <div className="ap2-empty">
+            {query !== "" ? `Nothing matches “${filter.trim()}”.` : "No agents. Start one from ＋."}
+          </div>
+        )}
+      </div>
 
-      {/* Messages agents have typed into each other (canopy_message_agent).
-          One arrives in its target's composer indistinguishable from the user
-          typing, so without this the only trace of one agent reaching into
-          another was a toast that had already gone. Newest first and capped to
-          the recent few — a busy mesh writes hundreds, and the rest are one
-          click away rather than one scroll. */}
+      {/* Messages agents have typed into each other (canopy_message_agent). One
+          arrives in its target's composer indistinguishable from the user typing,
+          so this log is the only place the reach-in is recoverable. */}
       {messages.length > 0 && (
-        <Section title="Agent messages" count={messages.length} tone="quiet">
+        <div className="ap2-block ap2-quiet">
+          <div className="ap2-head">
+            <span>Agent messages</span>
+            <span className="ap2-count">{messages.length}</span>
+          </div>
           <div className="mesh-msg-list">
             {[...messages]
               .reverse()
               .slice(0, showAllMessages ? messages.length : MESH_TOP_N)
               .map((m) => (
-              <div
-                key={m.id}
-                className={`mesh-msg ${m.submitted ? "" : "mesh-msg-unsent"}`}
-                title={[
-                  `${m.from_cwd ?? "the Canopy companion"} → terminal ${m.to_pty_id}`,
-                  m.from_task ? `from: ${m.from_task}` : null,
-                  m.to_task ? `to: ${m.to_task}` : null,
-                  new Date(m.at_ms).toLocaleString(),
-                  "",
-                  m.text,
-                ]
-                  .filter((l) => l != null)
-                  .join("\n")}
-              >
-                <span className="mesh-msg-route">
-                  {meshEnd(m.from_pty_id, m.from_name, m.from_agent)}
-                  {" → "}
-                  {meshEnd(m.to_pty_id, m.to_name, m.to_agent)}
-                </span>
-                <span className="mesh-msg-text">{m.text}</span>
-                {!m.submitted && (
-                  <span
-                    className="mesh-msg-flag"
-                    title="May still be unsent in its composer."
-                  >
-                    unsent
+                <div
+                  key={m.id}
+                  className={`mesh-msg ${m.submitted ? "" : "mesh-msg-unsent"}`}
+                  title={[
+                    `${m.from_cwd ?? "the Canopy companion"} → terminal ${m.to_pty_id}`,
+                    m.from_task ? `from: ${m.from_task}` : null,
+                    m.to_task ? `to: ${m.to_task}` : null,
+                    new Date(m.at_ms).toLocaleString(),
+                    "",
+                    m.text,
+                  ]
+                    .filter((l) => l != null)
+                    .join("\n")}
+                >
+                  <span className="mesh-msg-route">
+                    {meshEnd(m.from_pty_id, m.from_name, m.from_agent)}
+                    {" → "}
+                    {meshEnd(m.to_pty_id, m.to_name, m.to_agent)}
                   </span>
-                )}
-                <span className="mesh-msg-when">{ago(m.at_ms / 1000)}</span>
-              </div>
-            ))}
-          </div>
-          {messages.length > MESH_TOP_N && (
-            <button
-              className="research-more"
-              onClick={() => setShowAllMessages((v) => !v)}
-            >
-              {showAllMessages
-                ? "Show recent only"
-                : `View all ${messages.length} messages`}
-            </button>
-          )}
-        </Section>
-      )}
-
-      {restorable.length > 0 && (
-        <Section title="Restorable sessions" count={restorable.length} tone="quiet">
-          <div className="restore-help">
-            Not open right now — reopening runs the agent's own resume, so it
-            comes back with its history.
-          </div>
-          {restorable.map(({ digest: d, agentId, cwd: runIn, command: cmd, superseded }) => {
-            // runIn is resume_cwd, not cwd: claude looks the conversation up
-            // under its project root, so resuming from the subdirectory the
-            // agent ran in reports "No conversation found".
-            const dir = basename(runIn);
-            const last = lastHumanPrompt(d.prompts);
-            return (
-              <div key={d.session_id} className="restore-row">
-                <div className="restore-main">
-                  <AgentIcon id={agentId} size={14} className="ap-mark" />
-                  <span className="agent-name">{agentId}</span>
-                  {/* What this session got done before it went away. Never live
-                      here, so it reads as a finished total. */}
-                  <AgentRuntime timing={d} live={false} />
-                  {dir && (
-                    <span className="agent-dir" title={runIn}>
-                      {dir}
+                  <span className="mesh-msg-text">{m.text}</span>
+                  {!m.submitted && (
+                    <span className="mesh-msg-flag" title="May still be unsent in its composer.">
+                      unsent
                     </span>
                   )}
-                  {d.branch && <span className="share-branch">⎇ {d.branch}</span>}
-                  <span className="agent-session">{ago(d.updated)}</span>
+                  <span className="mesh-msg-when">{ago(m.at_ms / 1000)}</span>
                 </div>
-                {/* The last prompt is how you recognise which session this was —
-                    a bare uuid tells you nothing. Non-claude agents may not
-                    have one captured; say so instead of rendering nothing. */}
-                <div className="restore-prompt">
-                  {last ?? <em>(no prompt captured for this session)</em>}
-                </div>
-                {/* Two icon actions in the row's own top-right corner: the
-                    empty column beside the text was doing nothing, and two
-                    full-width buttons per row made four sessions look like a
-                    form. Labels come back on hover. */}
-                <div className="restore-actions">
-                  {/* Always a real offer: a session the CLI can't reopen by id,
-                      or that wrote no transcript to reopen, never reaches this
-                      list — see restorableFrom. */}
-                  <button
-                    className="row-act row-act-go"
-                    title={`Restore this session — ${cmd}`}
-                    onClick={() => {
-                      // Bridge the gap until the resumed agent's first hook
-                      // event rewrites the digest's surface; without it the row
-                      // sits here looking un-restored for a few seconds.
-                      markRestored(d.session_id);
-                      onRestore?.(runIn, cmd, agentId, agentId);
-                    }}
-                  >
-                    <RestartIcon size={13} />
-                    <span className="row-act-label">Restore</span>
-                  </button>
-                  {/* The session as a readable document, with Hand off — the
-                      same entry the Agents page's past sessions offer. */}
-                  <button
-                    className="row-act"
-                    title="Read this session as a document and hand it off"
-                    onClick={() =>
-                      openSessionDoc({
-                        kind: "session",
-                        sessionId: d.session_id,
-                        agent: agentId,
-                        cwd: runIn,
-                        digest: d,
-                        resumeCommand: cmd,
-                        onResume: () => {
-                          markRestored(d.session_id);
-                          onRestore?.(runIn, cmd, agentId, agentId);
-                        },
-                      })
-                    }
-                  >
-                    <DocumentIcon size={13} />
-                    <span className="row-act-label">Document</span>
-                  </button>
-                  <button
-                    className="row-act row-act-del"
-                    title={
-                      superseded.length > 0
-                        ? `Forget this directory's ${superseded.length + 1} sessions — removes them from this list`
-                        : "Forget this session — removes it from this list"
-                    }
-                    // The row stands for its whole directory (see
-                    // newestPerDirectory), so forgetting only the session on
-                    // show would just promote the next one behind it.
-                    onClick={() => forget([d, ...superseded])}
-                  >
-                    <TrashIcon size={13} />
-                    <span className="row-act-label">Forget</span>
-                  </button>
-                </div>
-              </div>
-            );
-          })}
-        </Section>
+              ))}
+          </div>
+          {messages.length > MESH_TOP_N && (
+            <button className="research-more" onClick={() => setShowAllMessages((v) => !v)}>
+              {showAllMessages ? "Show recent only" : `View all ${messages.length} messages`}
+            </button>
+          )}
+        </div>
       )}
+
+      {/* Instructions and shared context: one quiet row, both a key away. */}
+      <div className="ap2-foot">
+        <button
+          type="button"
+          className="ap2-foot-btn"
+          title={
+            instructionsFailed
+              ? "Couldn't look for instruction files"
+              : "Open all agent instructions — CLAUDE.md, AGENTS.md, skills, subagents (i)"
+          }
+          onClick={() => onOpenInstructions?.()}
+        >
+          Instructions
+          {headlineInstructions.live > 0 && <span className="ap2-count">{headlineInstructions.live}</span>}
+        </button>
+        <button
+          type="button"
+          role="switch"
+          aria-checked={shareContext}
+          className="ap2-foot-btn"
+          title={`${SHARE_EXPLAIN} (s)`}
+          onClick={() => onShareContext(!shareContext)}
+        >
+          Shared context <span className={shareContext ? "ap2-on" : "ap2-off"}>{shareContext ? "on" : "off"}</span>
+        </button>
+        {shareContext && (
+          <button type="button" className="share-peek" title="See exactly what the other sessions are being told" onClick={() => setShowShared(true)}>
+            {shared.length} shared
+          </button>
+        )}
+        <span className="ap2-spacer" />
+        {onOpenAgentsPage && (
+          <button type="button" className="ap2-foot-btn" title="Open the agents page — every session, with room to read it (w)" onClick={onOpenAgentsPage}>
+            ⤢
+          </button>
+        )}
+        <button type="button" className="ap2-foot-btn" title="How to hook up agent CLIs (t)" onClick={() => setShowHookHelp((v) => !v)}>
+          hooks
+        </button>
+      </div>
+      {showShared && <SharedDialog shared={shared} onClose={() => setShowShared(false)} />}
     </div>
   );
 }

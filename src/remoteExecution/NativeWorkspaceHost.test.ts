@@ -29,7 +29,7 @@ it('runs the companion CLI on the viewing computer and streams its output back t
  expect(desktop.invoke).toHaveBeenCalledWith('companion_spawn',{command:'codex',args:['exec'],keepStdin:false,onData:native});
  native.onmessage({kind:'line',text:'{"type":"thread.started"}'});
  expect(seen).toEqual([{kind:'line',text:'{"type":"thread.started"}'}]);
- const rest=['companion_write','companion_kill','companion_status','companion_store_read','companion_store_write','companion_save_attachment','companion_dispatch_origin','companion_open_requests','context_publish','context_remove','context_tools','browser_result','webview_snapshot','canopy_account_request','send_crash'];
+ const rest=['companion_write','companion_kill','companion_status','companion_save_attachment','companion_dispatch_origin','companion_open_requests','context_publish','context_remove','context_tools','browser_result','webview_snapshot','canopy_account_request','send_crash'];
  for(const command of rest)await host.invoke(command,{});
  expect(vi.mocked(desktop.invoke).mock.calls.map(([command])=>command)).toEqual(['companion_spawn',...rest]);
  expect(fetcher).not.toHaveBeenCalled();host.dispose();
@@ -42,6 +42,15 @@ it('hears the desktop context bridge, which answers the companion\'s tools',asyn
  await host.listen('pty:exit',()=>{});
  expect(desktop.listen).toHaveBeenCalledTimes(4);
  host.dispose();expect(release).toHaveBeenCalledTimes(4);
+});
+it('keeps local Desk state and frames on the viewing computer',async()=>{
+ const {host,desktop,fetcher}=setup();
+ const release=vi.fn();vi.mocked(desktop.listen).mockResolvedValue(release);
+ await host.listen('desk:state',()=>{});
+ await host.listen('relay:desk',()=>{});
+ expect(vi.mocked(desktop.listen).mock.calls.map(([event])=>event)).toEqual(['desk:state','relay:desk']);
+ expect(fetcher).not.toHaveBeenCalled();
+ host.dispose();expect(release).toHaveBeenCalledTimes(2);
 });
 it('drops a desktop terminal\'s ops, whose pty ids would alias workspace sessions',async()=>{
  const {host,desktop}=setup();
@@ -267,12 +276,12 @@ it('delivers the final output before reporting an already-completed run',async()
  }finally{host.dispose();}
 });
 
-it('uploads dropped images through the desktop into the bound remote workspace',async()=>{
+it('uploads dropped files (not only images) through the desktop into the bound remote workspace',async()=>{
  const {host,desktop,fetcher}=setup();
  vi.mocked(desktop.invoke).mockResolvedValue(['/workspace/.canopy/attachments/image.png']);
- const paths=['/tmp/local-screenshot.png'];
- expect(await host.invoke('spot_stage_drop_images',{dir:'/workspace',paths})).toEqual(['/workspace/.canopy/attachments/image.png']);
- expect(desktop.invoke).toHaveBeenCalledWith('execution_remote_stage_images',{dir:'/workspace',paths,workspaceId:'alice',endpoint:connection.endpoint});
+ const paths=['/tmp/local-screenshot.png','/tmp/report.pdf'];
+ expect(await host.invoke('spot_stage_drop_images',{dir:'/workspace',paths,progressId:'drop-1'})).toEqual(['/workspace/.canopy/attachments/image.png']);
+ expect(desktop.invoke).toHaveBeenCalledWith('execution_remote_stage_images',{dir:'/workspace',paths,progressId:'drop-1',workspaceId:'alice',endpoint:connection.endpoint});
  expect(fetcher.mock.calls[0][0]).toContain('/resources');host.dispose();
 });
 

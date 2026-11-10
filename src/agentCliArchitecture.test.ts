@@ -29,6 +29,7 @@ describe("first-class agent CLI architecture", () => {
     const allowed = new Set([
       "shared/agentCliIdentity.ts",
       "shared/notifications.ts",
+      "src/acp/providers.ts",
       "src/agentModels.ts",
       "src/modelCatalog.ts",
       "src/projects.ts",
@@ -36,7 +37,7 @@ describe("first-class agent CLI architecture", () => {
       "src/structuredEvents.ts",
       "src/structuredRunners.ts",
     ]);
-    const vendorLiteral = /(["'])(?:claude|codex|amp|aider|agy|opencode|omp|grok)\1/g;
+    const vendorLiteral = /(["'])(?:claude|codex|amp|aider|agy|opencode|omp|grok|kiro)\1/g;
     const violations = [resolve(root, "src"), resolve(root, "shared"), resolve(root, "portal/src")]
       .flatMap((dir) => sources(dir))
       .flatMap((path) => {
@@ -64,7 +65,7 @@ describe("first-class agent CLI architecture", () => {
       "src-tauri/src/profiles.rs",
       "src-tauri/src/stores.rs",
     ]);
-    const vendorBranch = /(?:[=!]=\s*"(?:claude|codex|amp|aider|agy|opencode|omp|cursor|grok)"|"(?:claude|codex|amp|aider|agy|opencode|omp|cursor|grok)"\s*=>|Some\("(?:claude|codex|amp|aider|agy|opencode|omp|cursor|grok)"[^)]*\))/g;
+    const vendorBranch = /(?:[=!]=\s*"(?:claude|codex|amp|aider|agy|opencode|omp|cursor|grok|kiro)"|"(?:claude|codex|amp|aider|agy|opencode|omp|cursor|grok|kiro)"\s*=>|Some\("(?:claude|codex|amp|aider|agy|opencode|omp|cursor|grok|kiro)"[^)]*\))/g;
     const violations = sources(resolve(root, "src-tauri/src"), /\.rs$/)
       .flatMap((path) => {
         const name = relative(root, path).replaceAll("\\", "/");
@@ -96,7 +97,7 @@ describe("first-class agent CLI architecture", () => {
   it("owns routing and protocol adapters on the CLI model", () => {
     for (const cli of routingAgentClis()) {
       expect(streamsStructured(cli.id), cli.id).toBe(true);
-      expect(structuredRunnerFor(cli.id)).toBe(cli.structuredRunner);
+      expect(structuredRunnerFor(cli.id)).toBe(cli.acpRunner ?? cli.structuredRunner);
     }
     for (const [id, runner] of Object.entries(STRUCTURED_RUNNERS)) {
       expect(agentCliFor(id)?.structuredRunner, id).toBe(runner);

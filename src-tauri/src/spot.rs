@@ -921,6 +921,9 @@ pub async fn spot_save_context_image(
     Ok(path.to_string_lossy().to_string())
 }
 
+/// Stage dropped images under `.canopy/spot/`. Any other file (pdf, csv, ...)
+/// passes through as its original path, so a local drop accepts every file type.
+/// Remote workspaces use `execution_remote_stage_images`, which uploads every file.
 #[tauri::command]
 pub async fn spot_stage_drop_images(
     ws: State<'_, WorkspaceManager>,

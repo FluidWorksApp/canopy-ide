@@ -28,6 +28,8 @@ import type {
   WorkflowStepRecordInput,
 } from "./workflowRun";
 import { rendererIoBudget } from "./ioBudget";
+import { aliasOf, aliasPty, routeOf } from "./environments/ptyRoute";
+import { remoteStats } from "./environments/remoteStats";
 
 type AsyncUnlisten = () => void | Promise<void>;
 const activeTauriListeners = new Set<AsyncUnlisten>();
@@ -261,6 +263,109 @@ const browserRendererGeneration = (): number => renderer?.generation ?? 0;
  * generation, so a stale-generation filter never drops the synthetic exit. */
 export const rendererSessionGeneration = (): number => renderer?.generation ?? 0;
 
+/** The machine a terminal is started on, when it is not the primary one. */
+export interface PtyMachine {
+  id: string;
+  host: import("./host/contract").Host;
+  readOnly: boolean;
+}
+
+// Exits of terminals on other machines. The primary host's exits arrive through
+// the poller / the host listener below; these arrive from each machine's own
+// `pty:exit`, are renamed to the terminal's alias, and are handed to everyone who
+// asked for exits.
+const machineExitSubscribers = new Set<(event: PtyExit) => void>();
+const machinesListening = new Map<string, { host: PtyMachine["host"]; off: Promise<UnlistenFn> }>();
+export const stopListeningToMachine = (machineId: string) => {
+  for (const watched of [machinesListening, machinesWatchedForAgents]) {
+    const pending = watched.get(machineId);
+    watched.delete(machineId);
+    void pending?.off.then((off) => off()).catch(() => {});
+  }
+};
+// Agent hook events from a machine, for the terminals started on it from here
+// only: `canopy_pty` is renamed to the terminal's alias so attention, status and
+// lineage find the right tab. Lines from anyone else's terminals on that machine
+// (or with no terminal stamp) are dropped.
+const machineAgentEventSubscribers = new Set<(lines: string[]) => void>();
+const machinesWatchedForAgents = new Map<string, { host: PtyMachine["host"]; off: Promise<UnlistenFn> }>();
+export const renameAgentEventLines = (machineId: string, lines: string[]): string[] => {
+  const out: string[] = [];
+  for (const raw of lines) {
+    try {
+      const parsed = JSON.parse(raw) as Record<string, unknown>;
+      if (typeof parsed.canopy_pty !== "number") continue;
+      const alias = aliasOf(machineId, parsed.canopy_pty);
+      if (alias === undefined) continue;
+      out.push(JSON.stringify({ ...parsed, canopy_pty: alias }));
+    } catch {
+      /* A line that is not JSON is not an agent event. */
+    }
+  }
+  return out;
+};
+function listenToMachineAgentEvents(machine: PtyMachine) {
+  const known = machinesWatchedForAgents.get(machine.id);
+  // A reconnected machine is a new host under the same id: listen to that one.
+  if (known?.host === machine.host) return;
+  void known?.off.then((off) => off()).catch(() => {});
+  machinesWatchedForAgents.set(machine.id, {
+    host: machine.host,
+    off: machine.host.listen<string[]>("agent:events", (event) => {
+      const lines = renameAgentEventLines(machine.id, event.payload);
+      if (lines.length) for (const subscriber of [...machineAgentEventSubscribers]) subscriber(lines);
+    }),
+  });
+}
+function listenToMachineExits(machine: PtyMachine) {
+  const known = machinesListening.get(machine.id);
+  if (known?.host === machine.host) return;
+  void known?.off.then((off) => off()).catch(() => {});
+  machinesListening.set(machine.id, {
+    host: machine.host,
+    off: machine.host.listen<PtyExit>("pty:exit", (event) => {
+      const alias = aliasOf(machine.id, event.payload.id);
+      if (alias === undefined) return; // someone else's terminal on that machine
+      const renamed = { ...event.payload, id: alias, session_generation: rendererSessionGeneration() };
+      for (const subscriber of [...machineExitSubscribers]) subscriber(renamed);
+    }),
+  });
+}
+
+/** Start a terminal on another machine (a shell, or `argv` with no shell) and
+ *  stream it to `onData`. The result's id is the terminal's alias, so everything
+ *  that takes a PTY id keeps working; the machine's own id never leaves here.
+ *  The window's renderer generation is reused, never re-registered: registering
+ *  on a second host would detach the first one's streams
+ *  (docs/multi-host-design.md, P2 follow-up). */
+export async function ptySpawnOnMachine(
+  machine: PtyMachine,
+  opts: Parameters<typeof ptySpawn>[0] & { argv?: string[] },
+  onData: (chunk: PtyChunk) => void,
+): Promise<SpawnResult> {
+  if (machine.readOnly) throw new Error(`${machine.id} is view-only`);
+  const channel = machine.host.channel<ArrayBuffer | number[]>();
+  channel.onmessage = (data) => onData(decodePtyChunk(data));
+  // Subscribe before spawning so a command that exits at once is not missed.
+  listenToMachineExits(machine);
+  listenToMachineAgentEvents(machine);
+  const result = await machine.host.invoke<SpawnResult>(opts.argv?.length ? "pty_spawn_attached_argv" : "pty_spawn", {
+    ...withMember(opts),
+    rendererGeneration: rendererGeneration(),
+    onData: channel,
+  });
+  return { ...result, id: aliasPty(machine.id, result.id, machine.host, machine.readOnly) };
+}
+
+/** Take over a terminal that is already running on another machine (one this
+ *  window started before it slept): listen for its exit and agent events and
+ *  give it an alias, exactly as a fresh spawn would. Nothing is started. */
+export function adoptMachineTerminal(machine: PtyMachine, realId: number): number {
+  listenToMachineExits(machine);
+  listenToMachineAgentEvents(machine);
+  return aliasPty(machine.id, realId, machine.host, machine.readOnly);
+}
+
 /** Every terminal says which signed-in team member started it
  *  (`CANOPY_MEMBER`), so a gate that exempts a layer's owner (lensGates.ts)
  *  can tell the owner's own agents from everyone else's. Nothing is added
@@ -316,26 +421,32 @@ export async function ptySpawn(
 // sites, where one missed `void` becomes an unhandled rejection in the log.
 // ptyResize is not in this set: it resolves with data its caller uses.
 const gone = (p: Promise<void>) => p.catch(() => {});
+/** A PTY command for terminal `id`: on the primary host as always, or, when `id`
+ *  is the alias of a terminal on another machine, on that machine's host with
+ *  the id it knows (environments/ptyRoute.ts). */
+const ptyCall = <T>(id: number, command: string, args: Record<string, unknown> = {}): Promise<T> => {
+  const route = routeOf(id);
+  return route ? route.host.invoke<T>(command, { ...args, id: route.id }) : invoke<T>(command, { ...args, id });
+};
 /** xterm legacy mouse reports are byte strings, not UTF-8 text. */
 export const ptyWriteBinary = (id: number, data: string) =>
-  gone(invoke<void>("pty_write_binary", { id, data }));
+  gone(ptyCall<void>(id, "pty_write_binary", { data }));
 export const ptyWrite = (id: number, data: string) =>
-  gone(invoke<void>("pty_write", { id, data }));
+  gone(ptyCall<void>(id, "pty_write", { data }));
 export const ptyAck = (id: number, generation: number, bytes: number) =>
-  gone(invoke<void>("pty_ack", {
-    id,
+  gone(ptyCall<void>(id, "pty_ack", {
     rendererGeneration: rendererGeneration(),
     generation,
     bytes,
   }));
 /** Resize the pty; resolves with the size it actually took (clamped to >= 1). */
 export const ptyResize = (id: number, cols: number, rows: number) =>
-  invoke<PtyGeometry>("pty_resize", { id, cols, rows });
-export const ptyKill = (id: number) => gone(invoke<void>("pty_kill", { id }));
+  ptyCall<PtyGeometry>(id, "pty_resize", { cols, rows });
+export const ptyKill = (id: number) => gone(ptyCall<void>(id, "pty_kill"));
 export const ptySetTitle = (id: number, title: string) =>
-  gone(invoke<void>("pty_set_title", { id, title }));
+  gone(ptyCall<void>(id, "pty_set_title", { title }));
 export const ptySetName = (id: number, name: string) =>
-  invoke<string>("pty_set_name", { id, name });
+  ptyCall<string>(id, "pty_set_name", { name });
 export const ptySetNameTheme = (theme: string) =>
   invoke<void>("pty_set_name_theme", { theme });
 /** The variables that switch self-updating CLIs' background updaters off
@@ -409,7 +520,7 @@ export const ptySpawnDetached = (opts: {
  *  a run with no xterm buffer to read. Feed it through renderPtyText (ptyText.ts)
  *  to get something a human can read. */
 export const ptyOutput = (id: number, max?: number) =>
-  invoke<string | null>("pty_output", { id, max }).catch(() => null);
+  ptyCall<string | null>(id, "pty_output", { max }).catch(() => null);
 
 /** Attach this page to an existing PTY, including one that survived renderer loss.
  * The returned generation must accompany every ack; stale pages are ignored. */
@@ -423,20 +534,18 @@ export async function ptyAttachDesktop(
   replay_end: number;
 }> {
   const rendererGenerationAtAttach = rendererGeneration();
-  const attached = await invoke<PtyGeometry & {
+  const attached = await ptyCall<PtyGeometry & {
     generation: number;
     replay_start: number;
     replay_end: number;
-  }>("pty_attach_desktop", {
-    id,
+  }>(id, "pty_attach_desktop", {
     rendererGeneration: rendererGenerationAtAttach,
     after,
   });
   type DesktopRead = { start:number;end?:number;gap:boolean;bytes:number[];reset?:boolean;cols?:number;rows?:number };
   const pull = async (): Promise<void> => {
     try {
-      const chunk = await invoke<DesktopRead | null>("pty_read_desktop", {
-        id,
+      const chunk = await ptyCall<DesktopRead | null>(id, "pty_read_desktop", {
         rendererGeneration: rendererGenerationAtAttach,
         generation: attached.generation,
       });
@@ -461,8 +570,7 @@ export async function ptyAttachDesktop(
 }
 
 export const ptyDetachDesktop = (id: number, generation: number) =>
-  gone(invoke<void>("pty_detach_desktop", {
-    id,
+  gone(ptyCall<void>(id, "pty_detach_desktop", {
     rendererGeneration: rendererGeneration(),
     generation,
   }));
@@ -548,6 +656,16 @@ const stopPtyEventPollingIfIdle = () => {
 };
 
 export const onPtyExit = async (cb: (e: PtyExit) => void): Promise<UnlistenFn> => {
+  // Terminals on other machines report through their own host (see above).
+  machineExitSubscribers.add(cb);
+  const off = await onPrimaryPtyExit(cb);
+  return () => {
+    machineExitSubscribers.delete(cb);
+    off();
+  };
+};
+
+const onPrimaryPtyExit = async (cb: (e: PtyExit) => void): Promise<UnlistenFn> => {
   // A socket host has no renderer generation to pull against; it forwards the
   // native lifecycle event instead (portal FORWARDED_EVENTS).
   if (isRemoteHost()) return listen<PtyExit>("pty:exit", (event) => cb(event.payload));
@@ -810,8 +928,6 @@ export interface AgentUiOp {
     | "start_session"
     | "open_project"
     | "confirm"
-    | "recall"
-    | "remember"
     // Mesh jobs, open to every agent: where a job can go, and sending one.
     | "mesh_targets"
     | "mesh_submit"
@@ -877,10 +993,6 @@ export interface AgentUiOp {
   label?: string | null;
   agent?: string | null;
   limit?: number | null;
-  /** remember: the fact, what it concerns, and whether this retracts one. */
-  fact?: string | null;
-  about?: string | null;
-  forget?: boolean | null;
   /** Companion PR tools. `repo` is an absolute checkout path returned by
    *  canopy_workspace_prs, never an arbitrary remote name. */
   repo?: string | null;
@@ -1426,10 +1538,27 @@ export interface RemoteUploadProgress {
 }
 export const remoteUpload=(destination:string,kind:'files'|'folder',id:string)=>invoke<RemoteUploadProgress>('execution_remote_upload',{destination,kind,id});
 export const remoteUploadCancel=(id:string)=>invoke<void>('execution_remote_upload_cancel',{id});
+export type MirrorCandidateCategory='secret'|'config'|'data'|'other';
+export interface MirrorCandidate{path:string;size:number;category:MirrorCandidateCategory}
+/** Ignored files of one local project component that could be copied to a remote. Names and sizes only. Runs on this Mac even in remote mode. */
+export const mirrorCandidates=(projectId:string,componentId:string)=>invokeDesktop<{relative:string;files:MirrorCandidate[]}>('execution_mirror_candidates',{projectId,componentId});
 export const onRemoteUploadProgress=(cb:(progress:RemoteUploadProgress)=>void)=>listen<RemoteUploadProgress>('remote:upload-progress',event=>cb(event.payload));
 
 export const fsWriteFile = (path: string, content: string) =>
   invoke<void>("fs_write_file", { path, content });
+/** Mirror Settings → Privacy → "Open files outside the project" into native code. */
+export const fsSetLinkGrants = (enabled: boolean) => invoke<void>("fs_set_link_grants", { enabled });
+/** Allow the editor to open this one file, named by a terminal link click.
+ *  Refused natively unless the setting is on, and for credential locations. */
+export const fsGrantLinkFile = (path: string) => invoke<void>("fs_grant_link_file", { path });
+/** Write on behalf of an ACP agent. On this computer the desktop resolves
+ *  symlinks, confines the write to `roots` and refuses hook and agent-config
+ *  files. A workspace host has no such command, so it takes the plain write
+ *  (the TS guard has already checked the path as written). */
+export const fsWriteFileConfined = (path: string, content: string, roots: string[]) =>
+  isRemoteHost()
+    ? fsWriteFile(path, content)
+    : invoke<void>("fs_write_file_confined", { path, content, roots });
 export const fsStat = (path: string) =>
   sharedIpc(statFlights, path, () =>
     rendererIoBudget.run(
@@ -2243,6 +2372,12 @@ export const notesDue = (before: number) =>
 export const ghPrState = (repo: string, number: number) =>
   invoke<string>("gh_pr_state", { repo, number });
 
+/** "MERGED <head sha>" (or OPEN/CLOSED) for the PR raised from a branch. A
+ *  squash merge leaves the branch's commits out of the base, so this is how a
+ *  merge is told from "unpushed work". */
+export const ghPrBranchState = (repo: string, branch: string) =>
+  invoke<string>("gh_pr_branch_state", { repo, branch });
+
 /** Empty the index. Everything in it is derived, so this costs recall until
  *  the next ingest and nothing else. */
 export const spotIndexClear = () => invoke<void>("spot_index_clear");
@@ -2252,8 +2387,29 @@ export const spotIndexClear = () => invoke<void>("spot_index_clear");
 export const spotSaveContextImage = (dir: string, base64Png: string) =>
   invoke<string>("spot_save_context_image", { dir, base64Png });
 
-export const spotStageDropImages = (dir: string, paths: string[]) =>
-  invoke<string[]>("spot_stage_drop_images", { dir, paths });
+/** Stage dropped files (images are copied, other files pass through locally and
+ *  are uploaded on a remote workspace). `progressId` tags `remote:stage-progress`
+ *  events so the caller can show upload progress. */
+export const spotStageDropImages = (
+  dir: string,
+  paths: string[],
+  progressId?: string,
+) =>
+  invoke<string[]>(
+    "spot_stage_drop_images",
+    progressId ? { dir, paths, progressId } : { dir, paths },
+  );
+
+export interface DropUploadEvent {
+  id: string;
+  name: string;
+  bytes: number;
+  totalBytes: number;
+  files: number;
+  totalFiles: number;
+}
+export const onDropUploadProgress = (cb: (event: DropUploadEvent) => void) =>
+  listen<DropUploadEvent>("remote:stage-progress", (event) => cb(event.payload));
 
 /** Persist a brief too long to type at a shell prompt (see agentSeed.ts) under
  *  `<dir>/.canopy/spot/`, and return its path for the agent to read. */
@@ -2782,7 +2938,13 @@ export interface SessionStats {
 /** The latest process reading for every live terminal, on demand — for a caller
  *  that needs one now and has no `onPtyStats` subscription. Reads the cache the
  *  monitor already fills. */
-export const ptyStats = (): Promise<SessionStats[]> => invoke<SessionStats[]>("pty_stats");
+export const ptyStats = async (): Promise<SessionStats[]> => {
+  const local = await invoke<SessionStats[]>("pty_stats");
+  // Terminals started on other machines from here, under their alias ids. With
+  // none, this is exactly the local reading.
+  const remote = await remoteStats();
+  return remote.length ? [...local, ...remote] : local;
+};
 
 /** Verify the exact path declared by a Build run on one of that PTY's local
  * listening ports. Native transport keeps browser CORS out of process health. */
@@ -3433,10 +3595,17 @@ export const onIntegrationHealth = (
 export const instanceId = () => invoke<string>("instance_id");
 /** One batch per hook-bridge poll (500ms): every new JSONL line since the
  *  last, so a busy agent costs one React commit per window, not one per line. */
-export const onAgentEvents = (
+export const onAgentEvents = async (
   cb: (lines: string[]) => void,
-): Promise<UnlistenFn> =>
-  listen<string[]>("agent:events", (event) => cb(event.payload));
+): Promise<UnlistenFn> => {
+  // Plus the events of terminals started on other machines from here.
+  machineAgentEventSubscribers.add(cb);
+  const off = await listen<string[]>("agent:events", (event) => cb(event.payload));
+  return () => {
+    machineAgentEventSubscribers.delete(cb);
+    off();
+  };
+};
 
 // ---------- git ----------
 
@@ -4129,6 +4298,31 @@ export const ghPrClose = (repo: string, number: number, deleteBranch = false) =>
 export const ghPrReady = (repo: string, number: number) =>
   invoke<string>("gh_pr_ready", { repo, number });
 
+/** What a PR description is written from: commits and files since the merge
+ *  base (bounded; the counts are the true totals) and the repo's PR template. */
+export interface PrContext {
+  branch: string;
+  base: string;
+  commits: string[];
+  commit_count: number;
+  files: string[];
+  file_count: number;
+  stat: string;
+  template: string | null;
+}
+export const gitPrContext = (repo: string, base = "") =>
+  invoke<PrContext>("git_pr_context", { repo, base });
+/** Open a PR; resolves to its URL. The caller pushes the branch first. */
+export const ghPrCreate = (
+  repo: string,
+  base: string,
+  head: string,
+  title: string,
+  body: string,
+  draft: boolean,
+  reviewers?: string[],
+) => invoke<string>("gh_pr_create", { repo, base, head, title, body, draft, reviewers });
+
 // ---------- PR conversation (review threads, comments, reviews) ----------
 
 export interface PrComment {
@@ -4396,6 +4590,11 @@ export interface SessionDigest {
    *  never rewrites what the human asked or why the session was started. */
   working_on?: string;
   working_on_updated?: number;
+  /** The agent's own task list from its latest TodoWrite call (Claude), as the
+   *  hook recorded it. Statuses are `pending`, `running` or `completed`; read
+   *  through normalizeTasks (src/agentTasks.ts), which does not trust the file. */
+  tasks?: { text: string; status: string }[];
+  tasks_updated?: number;
   files?: string[];
   /** Where the session was launched. Pinned at first sighting and never
    *  updated, unlike `cwd`, which follows the agent as it cds. */
@@ -4712,6 +4911,32 @@ export const onRelayCollab = (
 ): Promise<UnlistenFn> =>
   listen<import("./collab").CollabMsg>("relay:collab", (e) => cb(e.payload));
 
+/** Remote desktop over the relay (docs/remote-desktop.md). Nothing is shared
+ *  until the teammate accepts `desk:state` with state "requested" locally. */
+export const deskRequest = (to: string, mode: import("./desk").DeskMode) =>
+  invoke<string>("desk_request", { to, mode });
+export const deskRespond = (
+  session: string,
+  accept: boolean,
+  mode: import("./desk").DeskMode,
+) => invoke<void>("desk_respond", { session, accept, mode });
+export const deskSendInput = (
+  session: string,
+  event: import("./desk").InputEvent,
+) => invoke<void>("desk_send_input", { session, event });
+export const deskEnd = (session: string) =>
+  invoke<void>("desk_end", { session });
+export const deskStatus = () =>
+  invoke<import("./desk").DeskStatus | null>("desk_status");
+export const onRelayDesk = (
+  cb: (m: import("./desk").DeskMsg) => void,
+): Promise<UnlistenFn> =>
+  listen<import("./desk").DeskMsg>("relay:desk", (e) => cb(e.payload));
+export const onDeskState = (
+  cb: (s: import("./desk").DeskStateEvent) => void,
+): Promise<UnlistenFn> =>
+  listen<import("./desk").DeskStateEvent>("desk:state", (e) => cb(e.payload));
+
 /** A "file-offer" command's payload: where to fetch, the one-time token that
  *  gates the fetch, and the hash the received bytes must match. */
 export interface RelayFileOffer {
@@ -4994,6 +5219,14 @@ export const androidForeground = (serial: string, projectDir?: string) =>
 export const androidTap = (serial: string, x: number, y: number, projectDir?: string) =>
   invoke<void>("android_tap", { serial, x, y, projectDir });
 
+/** `adb reverse` each port, so the device reaches this computer's (forwarded) loopback. Returns the ports set up. */
+export const androidReverse = (serial: string, ports: number[], projectDir?: string) =>
+  invoke<number[]>("android_reverse", { serial, ports, projectDir });
+
+/** Undo `androidReverse` for these ports. Errors are ignored natively. */
+export const androidReverseRemove = (serial: string, ports: number[], projectDir?: string) =>
+  invoke<void>("android_reverse_remove", { serial, ports, projectDir });
+
 export const androidText = (serial: string, text: string, projectDir?: string) =>
   invoke<void>("android_text", { serial, text, projectDir });
 
@@ -5173,6 +5406,8 @@ export async function brainCallSpawn(
     cwd: string;
     env?: [string, string][];
     timeoutMs?: number;
+    /** Keep a writable stdin (an ACP agent). Headless CLIs leave it off. */
+    keepStdin?: boolean;
   },
   onData: (out: StructuredRunnerOut) => void,
 ): Promise<void> {
@@ -5183,6 +5418,13 @@ export async function brainCallSpawn(
 
 /** Stop a brain call. Idempotent: a call that already ended is not an error. */
 export const brainKill = (callId: string) => invoke<void>("brain_kill", { callId });
+
+/** Write one line to the stdin of a brain call started with `keepStdin`. */
+export const brainWrite = (callId: string, line: string) =>
+  invoke<void>("brain_write", { callId, line });
+
+/** The absolute directory a brain call with an empty cwd runs in (home). */
+export const brainHome = () => invoke<string>("brain_home");
 
 // ------------------------------------------------------------------ ledger
 
@@ -5246,6 +5488,9 @@ export interface CompanionStatus {
   generation: number;
 }
 
+/** The companion's own directory (`~/.canopy/companion`) as an absolute path. */
+export const companionDir = () => invoke<string>("companion_dir");
+
 /** Start the companion's CLI on plain pipes, replacing any already running.
  *  Not a PTY: the structured tier speaks JSON lines, and a terminal's line
  *  discipline would echo them back and truncate the long ones. */
@@ -5306,15 +5551,6 @@ export const companionOpenRequests = (origin: string) =>
 export const companionSaveAttachment = (name: string, base64: string) =>
   invoke<string>("companion_save_attachment", { name, base64 });
 
-/** The companion's own corner of `~/.canopy`. Scoped to one directory on the
- *  Rust side — deliberately not a general file read/write, which would hand the
- *  webview an arbitrary-write primitive for the sake of one JSON file. */
-export const canopyStoreRead = (name: string) =>
-  invoke<string | null>("companion_store_read", { name });
-
-export const canopyStoreWrite = (name: string, body: string) =>
-  invoke<void>("companion_store_write", { name, body });
-
 export const companionStatus = () =>
   invoke<CompanionStatus>("companion_status").catch(
     (): CompanionStatus => ({ running: false, generation: 0 }),
@@ -5343,11 +5579,11 @@ export const clipboardReadText = () => invoke<string | null>("clipboard_read_tex
 /** Account transfer must wait for transcript writers to exit before copying. */
 /** Stop what runs in a local terminal and keep its shell. Resolves only once the
  *  shell owns the terminal again, which proves the agent has exited. */
-export const ptyStopForeground = (id: number) => invoke<void>("pty_stop_foreground", { id });
-export const ptyForegroundRunning = (id: number) => invoke<boolean>("pty_foreground_running", { id });
+export const ptyStopForeground = (id: number) => ptyCall<void>(id, "pty_stop_foreground");
+export const ptyForegroundRunning = (id: number) => ptyCall<boolean>(id, "pty_foreground_running");
 
 export async function ptyStopAndWait(id: number): Promise<void> {
-  await invoke<void>("pty_kill", { id }).catch((error: unknown) => {
+  await ptyCall<void>(id, "pty_kill").catch((error: unknown) => {
     // Already over is what this function is waiting for.
     if (!/no pty session|Session not running/.test(String(error))) throw error;
   });
@@ -5355,8 +5591,11 @@ export async function ptyStopAndWait(id: number): Promise<void> {
   while (Date.now() < deadline) {
     // A workspace under load can refuse a low-priority poll. The agent was
     // already told to stop, so a refused look is a reason to look again.
-    const running = await ptyStats().catch(() => [{ id }]);
-    if (!running.some(session => session.id === id)) return;
+    const route = routeOf(id);
+    const running = route
+      ? await route.host.invoke<{ id: number }[]>("pty_stats").catch(() => [{ id: route.id }])
+      : await ptyStats().catch(() => [{ id }]);
+    if (!running.some(session => session.id === (route ? route.id : id))) return;
     await new Promise(resolve => setTimeout(resolve, 100));
   }
   throw new Error("Agent has not stopped yet. Its conversation was not transferred.");
@@ -5443,6 +5682,9 @@ export interface GatePolicyWire {
   guidance: string[];
 }
 
+/** Mirror "Skip permission prompts" for the hook (see gates::skip_outside_delete_confirm). */
+export const gatesSetGlobal = (skipPermissions: boolean) =>
+  invoke<void>("gates_set_global", { skipPermissions });
 export const gatesPolicyWrite = (cwd: string, policy: GatePolicyWire) =>
   invoke<string>("gates_policy_write", { cwd, policy });
 

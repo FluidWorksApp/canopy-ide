@@ -94,7 +94,7 @@ describe("harness capabilities", () => {
       expect(cap.note, cli.id).toBeTruthy();
     }
     expect(harnessSupport("aider", "ruleEnforcement")).toBe("none");
-    for (const id of ["claude", "codex", "cursor", "grok", "agy", "opencode", "omp", "amp"]) {
+    for (const id of ["claude", "codex", "cursor", "grok", "kiro", "agy", "opencode", "omp", "amp"]) {
       expect(harnessSupport(id, "ruleEnforcement"), id).toBe("native");
     }
   });

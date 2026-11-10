@@ -8,9 +8,12 @@ import {
   forwardRef,
   useEffect,
   useImperativeHandle,
+  useReducer,
   useRef,
   type MouseEvent as ReactMouseEvent,
 } from "react";
+import { DropUploadProgress } from "./DropUploadProgress";
+import { dropUploadErrorText, dropUploadReducer } from "../dropUpload";
 import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import { SerializeAddon } from "@xterm/addon-serialize";
@@ -18,15 +21,35 @@ import { Unicode11Addon } from "@xterm/addon-unicode11";
 import { WebLinksAddon } from "@xterm/addon-web-links";
 import "@xterm/xterm/css/xterm.css";
 import { openFileLink, openLink } from "../links";
+
+/** Link detection runs on every pointer move over a row. A row's answer is kept
+ *  for a few seconds, so moving across it does not ask the file system again
+ *  for each step (each ask is a round trip on a remote workspace). */
+const spacedLinkCache = new Map<string, { at: number; links: ReturnType<typeof terminalFileLinks> | Promise<ReturnType<typeof terminalFileLinks>> }>();
+async function cachedSpacedLinks(text: string, cwd: string, env?: string) {
+  const key = `${env ?? ""}\n${cwd}\n${text}`;
+  const hit = spacedLinkCache.get(key);
+  if (hit && Date.now() - hit.at < 5000) return hit.links;
+  const pending = extendSpacedLinks(text, terminalFileLinks(text), (candidate) =>
+    // On another machine the path is that machine's: ask it, not this Mac.
+    env ? remoteFileExists(env, candidate) : ipc.fsStat(candidate).then((s) => !s.is_dir, () => false),
+  );
+  spacedLinkCache.set(key, { at: Date.now(), links: pending });
+  if (spacedLinkCache.size > 200) spacedLinkCache.delete(spacedLinkCache.keys().next().value as string);
+  return pending;
+}
 import { matchesModifierClick } from "../shortcuts";
 import * as ipc from "../ipc";
 import { isRemoteHost } from "../host";
+import { liveEnvironments } from "../environments/live";
+import { openRemoteFile, remoteFileExists } from "../environments/remoteFiles";
 import { remoteDiagnostic } from "../remoteExecution/remoteDiagnostic";
 import { getSettings, type Settings } from "../settings";
 import { terminalTheme } from "../terminalThemes";
 import {
   createLinkHint,
   opensLink,
+  extendSpacedLinks,
   terminalFileLinks,
 } from "../terminalLinks";
 import { matches, matchesChord, resolve } from "../shortcuts";
@@ -129,6 +152,9 @@ interface TermProps {
    *  agent (it stays controllable from the phone). */
   attachId?: number;
   killAttachedOnClose?: boolean;
+  /** Run on this other machine ("remote:<workspaceId>", connected beforehand by
+   *  environments/live.ts) instead of the window's own. Fixed at mount. */
+  machine?: string;
   onSpawned: (ptyId: number, name?: string, sessionGeneration?: number) => void;
   onExited: (event: ipc.PtyExit) => void;
   onTitle?: (title: string) => void;
@@ -155,6 +181,7 @@ export const Term = forwardRef<TermHandle, TermProps>(function Term(
     attemptId,
     attachId,
     killAttachedOnClose,
+    machine,
     onSpawned,
     onExited,
     onTitle,
@@ -164,6 +191,7 @@ export const Term = forwardRef<TermHandle, TermProps>(function Term(
 ) {
   // Frozen once: a Term never switches between spawn and attach mid-life, and
   // the mount-once effect closes over it.
+  const [dropUpload, dispatchDrop] = useReducer(dropUploadReducer, null);
   const attachIdRef = useRef(attachId);
   const killAttachedOnCloseRef = useRef(killAttachedOnClose);
   const containerRef = useRef<HTMLDivElement>(null);
@@ -417,21 +445,41 @@ export const Term = forwardRef<TermHandle, TermProps>(function Term(
           .getLine(bufferLineNumber - 1)
           ?.translateToString(true);
         if (!text) return callback(undefined);
-        const links = terminalFileLinks(text).map((file) => ({
-          range: {
-            start: { x: file.start + 1, y: bufferLineNumber },
-            end: { x: file.end, y: bufferLineNumber },
-          },
-          text: file.path,
-          activate: (event: MouseEvent) => {
-            if (!opensLink(event, term.hasSelection())) return;
-            linkHint.hide();
-            openFileLink(file.path, file.line, cwd);
-          },
-          hover: (event: MouseEvent) => linkHint.show(event, "file"),
-          leave: () => linkHint.hide(),
-        }));
-        callback(links.length ? links : undefined);
+        // A path with spaces in it is found by asking the file system where it
+        // ends (extendSpacedLinks), so the answer arrives a moment later.
+        void cachedSpacedLinks(text, cwd ?? "", machine).then((files) => {
+          const links = files.map((file) => ({
+            range: {
+              start: { x: file.start + 1, y: bufferLineNumber },
+              end: { x: file.end, y: bufferLineNumber },
+            },
+            text: file.path,
+            activate: (event: MouseEvent) => {
+              if (!opensLink(event, term.hasSelection())) return;
+              linkHint.hide();
+              if (machine) {
+                // The file is on that machine: a read-only view through its own file commands.
+                openRemoteFile({ env: machine, machine: liveEnvironments.get(machine)?.name ?? "the workspace", path: file.path, line: file.line });
+                return;
+              }
+              const open = () => openFileLink(file.path, file.line, cwd);
+              // A file outside every project folder opens only when Settings →
+              // Privacy allows it, and then only that file (native code decides).
+              if (getSettings().allowOutsideFileLinks) {
+                void ipc.fsGrantLinkFile(file.path).catch(() => {}).then(open);
+              } else {
+                open();
+              }
+            },
+            hover: (event: MouseEvent) => linkHint.show(event, "file"),
+            leave: () => linkHint.hide(),
+          }));
+          try {
+            callback(links.length ? links : undefined);
+          } catch {
+            // The terminal went away while the file system was being asked.
+          }
+        });
       },
     });
     term.open(el);
@@ -466,7 +514,7 @@ export const Term = forwardRef<TermHandle, TermProps>(function Term(
     // the hide branch below), and emptying the buffer under a live stream would
     // corrupt what arrives next.
     const compactionVisible = () =>
-      isRemoteHost() || terminalCompactionProtected(activeRef.current, streamingRef.current);
+      isRemoteHost() || !!machine || terminalCompactionProtected(activeRef.current, streamingRef.current);
     let compactedViewportY: number | null = null;
     const compaction = new TerminalCompactionController(
       {
@@ -728,7 +776,7 @@ export const Term = forwardRef<TermHandle, TermProps>(function Term(
       } else if (next.cols !== term.cols || next.rows !== term.rows) {
         void ipc
           .ptyResize(ptyIdRef.current, next.cols, next.rows)
-          .then(geometry => { if(!isRemoteHost())applyGeometry(geometry); })
+          .then(geometry => { if(!isRemoteHost() && !machine)applyGeometry(geometry); })
           .catch(() => {});
       }
     };
@@ -923,7 +971,7 @@ export const Term = forwardRef<TermHandle, TermProps>(function Term(
             // network, not a local call: two seconds timed out on slow links.
             attachTimeout = setTimeout(
               () => reject(new Error("terminal attach timed out")),
-              isRemoteHost() ? 15_000 : 2_000,
+              isRemoteHost() || machine ? 15_000 : 2_000,
             );
           }),
         ]).catch((error) => {
@@ -993,7 +1041,7 @@ export const Term = forwardRef<TermHandle, TermProps>(function Term(
         // time you switched tab or project. The stream stays open and the contents
         // stay put; output keeps arriving into the buffer while it is out of view.
         // (Local terminals still detach and compact: that is cheap and saves memory.)
-        if (isRemoteHost()) return;
+        if (isRemoteHost() || machine) return;
         detachViewer();
         compaction.hide();
       }
@@ -1043,7 +1091,7 @@ export const Term = forwardRef<TermHandle, TermProps>(function Term(
         // Decided at spawn rather than stored on the tab: whether this launch
         // gets a Claude Code IDE server depends on the setting *now*, and a
         // restored tab must not carry a marker from a launch long gone.
-        const ideEnv = claudeIdeLaunchEnv({
+        const ideEnv = machine ? [] : claudeIdeLaunchEnv({
           command: initialCommand,
           runCommand,
           root: workspacePath,
@@ -1071,9 +1119,17 @@ export const Term = forwardRef<TermHandle, TermProps>(function Term(
           // page harmless.
           writeStream(chunk, spawnEpoch);
         };
-        const result = runArgv?.length
-          ? await ipc.ptySpawnAttachedArgv({ ...spawnOpts, argv: runArgv }, onData)
-          : await ipc.ptySpawn(spawnOpts, onData);
+        const connected = machine ? liveEnvironments.get(machine) : undefined;
+        if (machine && !connected) throw new Error(`${machine} is not connected`);
+        const result = connected
+          ? await ipc.ptySpawnOnMachine(
+              { id: connected.id, host: connected.host, readOnly: connected.readOnly },
+              { ...spawnOpts, ...(runArgv?.length ? { argv: runArgv } : {}) },
+              onData,
+            )
+          : runArgv?.length
+            ? await ipc.ptySpawnAttachedArgv({ ...spawnOpts, argv: runArgv }, onData)
+            : await ipc.ptySpawn(spawnOpts, onData);
         if (disposed) {
           void ipc.ptyKill(result.id);
           return;
@@ -1228,10 +1284,50 @@ export const Term = forwardRef<TermHandle, TermProps>(function Term(
           term.paste(ready.map(shellQuote).join(" ") + " ");
           term.focus();
         };
+        if (machine) {
+          // Dropped files are on this Mac; a path to one means nothing on the other
+          // machine, and typing it there would point the agent at a different file.
+          // Say so rather than paste a path that does not exist.
+          const id = `drop-${Date.now().toString(36)}`;
+          dispatchDrop({ type: "start", id, totalFiles: paths.length, name: paths[0]?.split(/[\\/]/).pop() });
+          dispatchDrop({
+            type: "fail",
+            id,
+            error: `Files on this Mac can't be dropped into a terminal on ${liveEnvironments.get(machine)?.name ?? "another machine"} yet. Put the file in the project there, or open it in a terminal on this Mac.`,
+          });
+          return;
+        }
         if (!cwd && !isRemoteHost()) return paste(paths);
-        void ipc.spotStageDropImages(cwd || '/workspace', paths).then(paste).catch((error) => {
-          if (!isRemoteHost()) return paste(paths);
-          void ipc.notifyNative('Image upload failed', String(error));
+        const remote = isRemoteHost();
+        const id = `drop-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+        let unlisten: (() => void) | undefined;
+        let stopped = false;
+        const stopListening = () => {
+          unlisten?.();
+          unlisten = undefined;
+        };
+        if (remote) {
+          // Show the strip now; the upload can take a while before any bytes land.
+          dispatchDrop({ type: "start", id, totalFiles: paths.length, name: paths[0]?.split(/[\\/]/).pop() });
+          void ipc
+            .onDropUploadProgress((event) => {
+              if (event.id === id) dispatchDrop({ type: "progress", ...event });
+            })
+            .then((off) => {
+              if (stopped) off();
+              else unlisten = off;
+            });
+        }
+        void ipc.spotStageDropImages(cwd || '/workspace', paths, remote ? id : undefined).then((ready) => {
+          stopped = true;
+          stopListening();
+          if (remote) dispatchDrop({ type: "done", id });
+          paste(ready);
+        }).catch((error) => {
+          stopped = true;
+          stopListening();
+          if (!remote) return paste(paths);
+          dispatchDrop({ type: "fail", id, error: dropUploadErrorText(error) });
         });
       },
       themeChanged: onThemeChange,
@@ -1321,6 +1417,9 @@ export const Term = forwardRef<TermHandle, TermProps>(function Term(
   return (
     <>
       <div className="term-container" ref={containerRef} onContextMenu={openMenu} />
+      {dropUpload && (
+        <DropUploadProgress state={dropUpload} onDismiss={() => dispatchDrop({ type: "dismiss" })} />
+      )}
       {menu.menu && (
         <ContextMenu
           x={menu.menu.x}

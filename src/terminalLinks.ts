@@ -69,6 +69,58 @@ export function terminalFileLinks(text: string): TerminalFileLink[] {
   return found.sort((a, b) => a.start - b.start);
 }
 
+const TRAILING_PUNCT = /[.,;!?)\]}]+$/;
+/** A word that could end a file name: it carries an extension. */
+const ENDS_LIKE_A_FILE = /\.[A-Za-z0-9]{1,8}(?::\d+(?::\d+)?)?[.,;!?)\]}]*$/;
+const MAX_EXTRA_WORDS = 8;
+
+/** Paths with spaces in them ("…/EveryApp store policy risk.md"). The row
+ *  scanner above stops a bare path at the first space, because prose follows
+ *  paths far more often than spaces sit inside them. So a link followed by more
+ *  words is tried again with those words appended, and kept only where such a
+ *  file really exists: the file system, not a guess, decides where it ends.
+ *
+ *  Only words that could finish a file name (they carry an extension) are
+ *  tried, which keeps a long sentence after a path down to a stat or two. The
+ *  longest existing candidate wins. */
+export async function extendSpacedLinks(
+  text: string,
+  links: TerminalFileLink[],
+  exists: (path: string) => Promise<boolean>,
+): Promise<TerminalFileLink[]> {
+  const out: TerminalFileLink[] = [];
+  for (const link of links) {
+    // Only a bare path that ran into a single space, and not one that already
+    // names a line (":12" ends a path).
+    if (link.line !== undefined || text[link.end] !== " ") {
+      out.push(link);
+      continue;
+    }
+    const words = [...text.slice(link.end).matchAll(/ +[^\s'"<>|]+/g)];
+    // Words must be contiguous from the link: stop at the first gap in the match.
+    let consumed = 0;
+    const usable: string[] = [];
+    for (const word of words) {
+      if ((word.index ?? 0) !== consumed || usable.length >= MAX_EXTRA_WORDS) break;
+      usable.push(word[0]);
+      consumed += word[0].length;
+    }
+    let best: TerminalFileLink | null = null;
+    let joined = "";
+    for (const word of usable) {
+      joined += word;
+      if (!ENDS_LIKE_A_FILE.test(word)) continue;
+      const trimmed = (link.path + joined).replace(TRAILING_PUNCT, "");
+      const at = withLine(trimmed);
+      if (await exists(at.path)) {
+        best = { path: at.path, line: at.line, start: link.start, end: link.start + trimmed.length };
+      }
+    }
+    out.push(best ?? link);
+  }
+  return out;
+}
+
 /** The bubble that appears while the pointer rests on a link. xterm underlines
  *  a hovered link whether or not the modifier is down, and an underline that
  *  does nothing when clicked reads as a broken link rather than a guarded one —

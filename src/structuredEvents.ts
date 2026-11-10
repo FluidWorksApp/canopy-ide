@@ -6,6 +6,14 @@ export type StructuredRunnerEvent =
   | { kind: "tool"; name: string; detail?: string }
   /** A tool call the CLI refused for want of a permission nobody can grant. */
   | { kind: "blocked"; tool: string }
+  /** A tool call the agent reported as failed (ACP `tool_call_update`). */
+  | { kind: "toolFailed"; name: string; detail?: string }
+  /** The agent's reasoning text (ACP `agent_thought_chunk`). No host renders it yet. */
+  | { kind: "thought"; text: string }
+  /** The agent's plan, replaced whole on every update (ACP `plan`). */
+  | { kind: "plan"; entries: { content: string; status: string; priority?: string }[] }
+  /** Context window use (ACP `usage_update`): tokens used of `size`. */
+  | { kind: "usage"; used: number; size: number; cost?: { amount: number; currency: string } }
   | { kind: "turnEnd" }
   | { kind: "error"; message: string }
   | { kind: "exit" };
@@ -24,7 +32,7 @@ export interface StructuredRunnerHost {
  *  failing launch actually produces are the ones least likely to identify
  *  themselves: a codex turn that dies on a bad flag emits clap's usage text on
  *  stderr and nothing at all on stdout. */
-export type StructuredDialect = "claude" | "codex" | "cursor";
+export type StructuredDialect = "claude" | "codex" | "cursor" | "acp";
 
 /** `codex exec --json` emits one of these per line. Fields are those observed
  *  against codex-cli 0.146.1 on 2026-08-07; everything else on the line is

@@ -1,3 +1,5 @@
+import { installModalFocusTrap } from "./modalFocusTrap";
+import { withLink } from "./teleport/sessionMove";
 import {hibernateWorkspaceProjects,type ConfirmOthers,type HibernateProgressListener} from './remoteExecution/hibernateWorkspace';
 import {activeWorkspace} from './remoteExecution/workspace';
 import {startBackgroundTeams} from "./teamMessaging/background";
@@ -22,6 +24,7 @@ import {
   useEffect,
   useMemo,
   useRef,
+  useReducer,
   useState,
   useSyncExternalStore,
 } from "react";
@@ -65,8 +68,6 @@ import { isWorkspaceHost } from "./host";
 import { startCloudSync } from "./remoteExecution/cloudSync";
 import { WorkspaceHooksNotice } from "./remoteExecution/WorkspaceHooksNotice";
 import { installOutcomes } from "./outcomes";
-import { observeMemoryEvents, startMemory } from "./memoryExtract";
-import { startMemoryTidy } from "./memoryConsolidate";
 import { startReceiptEngine } from "./receipts/engine";
 import { observeGateEvents, openRules } from "./gates/events";
 import {
@@ -129,6 +130,9 @@ import { setBrainProjectResolver } from "./brainMeter";
 import { startLensApprovals } from "./lensApprovals";
 import { startLensClaimSync } from "./lensClaimSync";
 import { teamIdentity } from "./teamIdentity";
+import { RELAY_JOIN_EVENT, RELAY_ACCEPT_EVENT, type RelayJoinDetail, type RelayAcceptDetail } from "./relayJoin";
+import { ensureInternetLink } from "./internetLink";
+import { accountTeam, post as postTeamCard } from "./components/RelayConnect";
 import {
   dismissTerminalMemoryPromptsForWindow,
   subscribeTerminalMemoryPromptVisibility,
@@ -167,6 +171,7 @@ import { ReleaseNotesToast, UpdateToast, NoticeToast } from "./components/Toast"
 import { ProjectDialog } from "./components/ProjectDialog";
 import { ProjectManager } from "./components/ProjectManager";
 import { SettingsDialog } from "./components/SettingsDialog";
+import { RemoteFileViewer } from "./components/RemoteFileViewer";
 import { HelpDialog } from "./components/HelpDialog";
 import { AskDialog } from "./components/AskDialog";
 import { PlanGateHost } from "./components/PlanGateHost";
@@ -189,6 +194,7 @@ import {
   checkDesktopClis,
   checkInstalledClis,
   nativeUpdateOffEnv,
+  orderWithPins,
   remoteCliMetadata,
 } from "./projects";
 import { useCliAutoUpdater } from "./cliAutoUpdate";
@@ -198,6 +204,8 @@ import { BrainConnectHost } from "./components/BrainConnect";
 import { openBrainConnect } from "./brainConnect";
 import { Welcome } from "./components/Welcome";
 import { Dialog } from "./components/Dialog";
+import { DeskOverlay } from "./components/RemoteDesktopView";
+import { createDeskHydrationGate, createFrameBus, deskReducer, type DeskMode } from "./desk";
 import { TerminalGovernorCard } from "./components/TerminalGovernorDialog";
 import {
   terminalMemoryQuotaSummary,
@@ -299,8 +307,6 @@ const PROJECTLESS_OPS = new Set([
   "reviews",
   "start_session",
   "open_project",
-  "recall",
-  "remember",
   // Mesh jobs address workspaces and teammates by name, so where the caller
   // stands decides nothing.
   "mesh_targets",
@@ -330,6 +336,16 @@ function publishScopes(state: WorkspaceState) {
 
 export default function App() {
   useEffect(() => startBackgroundTeams(), []);
+  // Tab stays inside whichever modal layer is open.
+  useEffect(() => installModalFocusTrap(), []);
+  // Live device streaming ships with the app: fetch its pinned tools once, in
+  // the background, after startup has settled.
+  useEffect(() => {
+    const timer = setTimeout(() => {
+      void import("./devices/deviceHub").then((m) => m.ensureDeviceHub());
+    }, 15_000);
+    return () => clearTimeout(timer);
+  }, []);
   // Unread teammates' messages reach the bell and the OS, including while
   // working elsewhere in Canopy; the conversation being read stays quiet.
   useEffect(() => startTeamMessageNotifications(), []);
@@ -615,9 +631,6 @@ export default function App() {
   useNoteReminders(projectNameFor);
   // Settings → Agents → "Keep agent CLIs up to date" (cliAutoUpdate.ts).
   useCliAutoUpdater();
-  // Team memory: brain extraction after agent turns, review of agent
-  // proposals (memoryExtract.ts). Settings gate each run, not the arming.
-  useEffect(() => startMemory(), []);
   // The `Notify` seam, threaded through nearly every component. The opts bag
   // is how a plain notice stops being anonymous: a caller names the project it
   // speaks for (by id or by any path inside it) and where a click should land,
@@ -804,6 +817,12 @@ export default function App() {
   // Narrowed once here: the useMemo below can't see the control-flow guard.
   const collabMgr = collab.current;
   const [collabTick, setCollabTick] = useState(0);
+  // Remote desktop: one session at a time, owned here so the single relay
+  // subscription feeds it. Frames go to a bus, not state.
+  const [desk, dispatchDesk] = useReducer(deskReducer, null);
+  const deskFrames = useMemo(() => createFrameBus(), []);
+  const deskAttentionQuestions = useRef(new Map<string, string>());
+  const deskAttentionAnnouncements = useRef(new Set<string>());
   // The relay we're persisting chat under = the host's stable identity key.
   // Null when off, so the persist effect never writes an empty transcript.
   const relayChatLabel = useRef<string | null>(null);
@@ -901,9 +920,6 @@ export default function App() {
 
   const wsRef = useRef(ws);
   wsRef.current = ws;
-  // Team memory's review queue tidies itself once it grows past ten
-  // (memoryConsolidate.ts), checked in the background for every project.
-  useEffect(() => startMemoryTidy(() => wsRef.current.projects.flatMap((p) => p.components.map((c) => c.path))), []);
   // Spend & outcomes (src/outcomes): per-session spend records, session
   // budgets (warn at 80%, pause at 100%) and the outcome ledger. Installed
   // once; reads projects through refs at call time.
@@ -1031,7 +1047,7 @@ export default function App() {
       setCloudNoteSender(null);
     };
   }, [meshJobs]);
-  // A cloud workspace keeps Rules, agent hooks and team memory in step with
+  // A cloud workspace keeps Rules and agent hooks in step with
   // this computer on every connect (remoteExecution/cloudSync.ts).
   const cloudWorkspace = isWorkspaceHost();
   useEffect(
@@ -1152,6 +1168,69 @@ export default function App() {
   const saveProjectRef = useRef<(p: Project) => Promise<void>>(async () => {});
   const updateRef = useRef<(patch: Partial<WorkspaceState>) => void>(() => {});
 
+  /** A file the OS or `canopy <file>[:line[:col]]` handed over (cli.rs). It
+   *  opens in the project that contains it. A file outside every project opens
+   *  in the project in front: cli.rs has already let the editor read and write
+   *  that one file, and nothing else next to it. */
+  const openFileTarget = useCallback(
+    async (target: { path: string; line?: number; column?: number }) => {
+      const norm = (p: string) => p.replace(/[\\/]+$/, "");
+      const containing = () => {
+        const path = norm(target.path);
+        let bestId: string | undefined;
+        let bestLen = -1;
+        for (const p of wsRef.current.projects) {
+          for (const c of p.components) {
+            const root = norm(c.path);
+            if (
+              root &&
+              (path.startsWith(root + "/") || path.startsWith(root + "\\")) &&
+              root.length > bestLen
+            ) {
+              bestLen = root.length;
+              bestId = p.id;
+            }
+          }
+        }
+        return bestId;
+      };
+      const front = () => {
+        const state = wsRef.current;
+        if (state.activeId && state.openIds.includes(state.activeId)) {
+          return state.activeId;
+        }
+        return state.openIds[0] ?? state.projects[0]?.id;
+      };
+      let projectId: string | undefined = containing() ?? front();
+      // First run, nothing to open it in: its folder becomes the project, the
+      // same as `canopy <dir>` would have made it.
+      if (!projectId) {
+        const dir = target.path.replace(/[\\/][^\\/]*$/, "");
+        if (dir && dir !== target.path) {
+          await openDirAsProject(dir);
+          projectId = containing();
+        }
+      }
+      if (!projectId) {
+        notify(`Couldn't open ${target.path}: there's no project to show it in.`, "error");
+        return;
+      }
+      await openForActionRef.current(projectId);
+      // Timer, not rAF: the ProjectView may mount only now (see the agent
+      // action dispatch, which waits the same way).
+      window.setTimeout(
+        () =>
+          window.dispatchEvent(
+            new CustomEvent("canopy:open-file", {
+              detail: { projectId, ...target },
+            }),
+          ),
+        80,
+      );
+    },
+    [notify, openDirAsProject],
+  );
+
   // Load persisted workspace; re-register watchers/scopes for open projects.
   // A tab that was asleep when the app last quit comes back asleep — and a
   // sleeping project watches nothing, so it registers nothing until it wakes.
@@ -1185,6 +1264,7 @@ export default function App() {
     }).catch((error) => {
       if (!cancelled) setWorkspaceLoadError(String(error));
     });
+    const deskHydration = createDeskHydrationGate();
     const subs = [
       ipc.onAgentEvents((raws) => {
         // Parsed once here; consumers read fields off `data`. Re-parsing the
@@ -1198,8 +1278,6 @@ export default function App() {
         // The same boundaries, enriched (root, files touched) for features
         // that subscribe through agentTurns.ts.
         observeAgentTurns(parsed.map((p) => p.data), ts);
-        // Team memory: final messages, untrusted reads, session ends.
-        observeMemoryEvents(parsed.map((p) => p.data));
         // What a team rule or the irreversible-action gate stopped, for the
         // cards over the agent's terminal and the approve-once question.
         observeGateEvents(parsed.map((p) => p.data), ts);
@@ -1282,6 +1360,75 @@ export default function App() {
           where: { kind: "panel", panel: "team" },
         });
       }),
+      ipc.onDeskState((event) => {
+        deskHydration.observeLiveEvent();
+        dispatchDesk({ type: "state", event });
+        if (event.role !== "target") return;
+
+        // The consent dialog is the real prompt. Notifications preserve both
+        // the pending decision and the later active grant if the window is not
+        // in front.
+        if (event.state === "requested") {
+          const id = postAttention({
+            kind: "question",
+            tone: "warn",
+            title: `${event.peer_name} wants to see your screen`,
+            body: "Accept or deny in the dialog. Nothing is shared until you accept.",
+            source: "team",
+            where: { kind: "panel", panel: "team" },
+            dedupeKey: `desk:${event.session}`,
+          });
+          deskAttentionQuestions.current.set(event.session, id);
+          return;
+        }
+
+        const question = deskAttentionQuestions.current.get(event.session);
+        if (question) {
+          resolveAttention(question, event.state === "active" ? "answered" : "dismissed");
+          deskAttentionQuestions.current.delete(event.session);
+        }
+        const key = `${event.session}:${event.state}`;
+        if (deskAttentionAnnouncements.current.has(key)) return;
+        deskAttentionAnnouncements.current.add(key);
+
+        if (event.state === "active") {
+          const controlling = event.mode === "control";
+          postAttention({
+            kind: "fyi",
+            tone: controlling ? "warn" : "info",
+            title: `${event.peer_name} is now ${controlling ? "controlling" : "viewing"} your screen`,
+            body: "Use Stop in the persistent banner to end access immediately.",
+            source: "team",
+            where: { kind: "panel", panel: "team" },
+            dedupeKey: `desk-active:${event.session}`,
+          });
+        } else {
+          const expired = /expir/i.test(event.reason ?? "");
+          postAttention({
+            kind: "fyi",
+            tone: "info",
+            title: expired ? "Remote desktop request expired" : "Remote desktop access ended",
+            body: event.reason || `${event.peer_name} no longer has access.`,
+            source: "team",
+            where: { kind: "panel", panel: "team" },
+            dedupeKey: `desk-ended:${event.session}`,
+          });
+        }
+      }).then((unlisten) => {
+        // Register the listener before asking for status. If a live event wins
+        // the race with the snapshot, it is authoritative and the snapshot is
+        // ignored rather than regressing an active or ended session.
+        void ipc
+          .deskStatus()
+          .then((status) => {
+            if (status && deskHydration.shouldApplySnapshot()) {
+              dispatchDesk({ type: "state", event: { reason: null, ...status } });
+            }
+          })
+          .catch(() => {});
+        return unlisten;
+      }),
+      ipc.onRelayDesk((m) => deskFrames.publish(m)),
       ipc.onRelayCollab((m) => {
         const mgr = collab.current!;
         const known = mgr.get(m.doc) !== undefined;
@@ -1626,6 +1773,13 @@ export default function App() {
       void ipc
         .cliSetNativeUpdateEnv(nativeUpdateOffEnv(settings.autoUpdateClis))
         .catch((err) => console.warn("failed to apply CLI auto-update setting", err));
+      // Native code checks this itself before granting a terminal-linked file.
+      void ipc
+        .fsSetLinkGrants(settings.allowOutsideFileLinks)
+        .catch(() => {});
+      // "Skip permission prompts" also lifts Canopy's own confirmation for
+      // deleting files outside the project (read by the hook).
+      void ipc.gatesSetGlobal(settings.dangerouslySkipPermissions).catch(() => {});
     };
     sync();
     return subscribeSettings(sync);
@@ -1717,23 +1871,52 @@ export default function App() {
   // project before load would be clobbered by setWs). Warm: a second CLI
   // invocation's argv arrives as a cli-open event via the single-instance
   // plugin.
+  //
+  // Files take the same two paths (cli_take_pending_targets, cli-open-target),
+  // and so does whatever Finder hands over on macOS. Everything runs in arrival
+  // order, so `canopy . src/main.rs` makes the project before the file looks
+  // for one to open in.
   useEffect(() => {
     if (!loaded) return;
-    void import("./host").then(({ invoke }) =>
-      invoke<string | null>("cli_take_pending_open")
-        .then((dir) => (dir ? openDirAsProject(dir) : undefined))
-        .catch(() => {}),
-    );
-    let unlisten: (() => void) | undefined;
-    void import("./host").then(({ listen }) =>
-      listen<string>("cli-open", (e) => void openDirAsProject(e.payload)).then(
-        (fn) => {
-          unlisten = fn;
-        },
-      ),
-    );
-    return () => unlisten?.();
-  }, [loaded, openDirAsProject]);
+    type Target =
+      | { kind: "dir"; path: string }
+      | { kind: "file"; path: string; line?: number; column?: number };
+    let chain: Promise<unknown> = Promise.resolve();
+    const run = (work: () => Promise<unknown>) => {
+      chain = chain.then(work).catch((e) => console.warn("cli open failed", e));
+    };
+    const openTarget = (t: Target) =>
+      t.kind === "dir"
+        ? openDirAsProject(t.path)
+        : openFileTarget({ path: t.path, line: t.line, column: t.column });
+    const unlisten: (() => void)[] = [];
+    let disposed = false;
+    // Listen before collecting: once the pending targets are taken, native
+    // code emits instead of holding, and an event before the listener is lost.
+    void import("./host").then(async ({ invoke, listen }) => {
+      const fns = await Promise.all([
+        listen<string>("cli-open", (e) => run(() => openDirAsProject(e.payload))),
+        listen<Target>("cli-open-target", (e) => run(() => openTarget(e.payload))),
+      ]);
+      if (disposed) {
+        fns.forEach((fn) => fn());
+        return;
+      }
+      unlisten.push(...fns);
+      run(async () => {
+        const dir = await invoke<string | null>("cli_take_pending_open");
+        if (dir) await openDirAsProject(dir);
+      });
+      run(async () => {
+        const targets = await invoke<Target[]>("cli_take_pending_targets");
+        for (const t of targets) await openTarget(t);
+      });
+    });
+    return () => {
+      disposed = true;
+      unlisten.forEach((fn) => fn());
+    };
+  }, [loaded, openDirAsProject, openFileTarget]);
 
   // A first install and an update relaunch both cross a version boundary. Show
   // the canonical GitHub release once per installed version; ordinary launches
@@ -1846,7 +2029,14 @@ export default function App() {
 
   const update = useCallback((patch: Partial<WorkspaceState>) => {
     setWs((prev) => {
-      const next = { ...prev, ...patch };
+      const merged = { ...prev, ...patch };
+      // Whenever the open order or the projects change, pinned tabs go back to
+      // the front: a pinned project that is reopened is appended like any other
+      // and would otherwise sit behind unpinned ones until the next drag.
+      const next =
+        patch.openIds || patch.projects
+          ? { ...merged, openIds: orderWithPins(merged.openIds, merged.projects) }
+          : merged;
       // After the updater returns — a disk write and an IPC don't belong in
       // the render phase.
       queueMicrotask(() => {
@@ -3263,6 +3453,46 @@ export default function App() {
   // Memoized: this handle is threaded through every ProjectView and beyond,
   // and a fresh object per App render is what used to defeat memo barriers
   // downstream (PaneBar, and now ProjectView itself).
+  // A teammate's "Connect" on a desktop-relay card in team chat (src/relayJoin.ts).
+  useEffect(() => {
+    const onJoin = (event: Event) => {
+      const { addr, code, from } = (event as CustomEvent<RelayJoinDetail>).detail ?? {};
+      if (!addr || !code) return;
+      void (async () => {
+        try {
+          const me = await teamIdentity();
+          setRelayStatus(await ipc.relayConnect(addr, code, me?.name || getSettings().relayName || "Me"));
+          notify(`Connected to ${from}'s desktop relay.`, "success");
+        } catch (err) {
+          notify(`Could not connect to ${from}: ${String(err)}`, "error");
+        }
+      })();
+    };
+    const onAccept = (event: Event) => {
+      const { to, from } = (event as CustomEvent<RelayAcceptDetail>).detail ?? {};
+      if (!to) return;
+      void (async () => {
+        try {
+          const origin = await ensureInternetLink();
+          const me = await teamIdentity();
+          const st = await ipc.relayHostStart(me?.name || getSettings().relayName || "Me", "public");
+          setRelayStatus(st);
+          const target = await accountTeam();
+          if (!target || !st.code) throw new Error("Not signed in to a team.");
+          await postTeamCard(target.team, target.self, { type: "relay-offer", v: 1, addr: origin, code: st.code }, to);
+          notify(`Sharing your desktop with ${from}.`, "success");
+        } catch (err) {
+          notify(`Could not share your desktop with ${from}: ${String(err)}`, "error");
+        }
+      })();
+    };
+    window.addEventListener(RELAY_JOIN_EVENT, onJoin);
+    window.addEventListener(RELAY_ACCEPT_EVENT, onAccept);
+    return () => {
+      window.removeEventListener(RELAY_JOIN_EVENT, onJoin);
+      window.removeEventListener(RELAY_ACCEPT_EVENT, onAccept);
+    };
+  }, [notify]);
   const relay: RelayHandle = useMemo(
     () => ({
       status: relayStatus,
@@ -3271,6 +3501,12 @@ export default function App() {
       transfers: relayTransfers,
       collab: collabMgr,
       collabTick,
+      desk,
+      deskFrames,
+      deskRequest: async (to: string, mode: DeskMode) => {
+        await ipc.deskRequest(to, mode);
+      },
+      deskDismiss: () => dispatchDesk({ type: "dismiss" }),
       hostStart: async (name, visibility, port) => {
         setRelayStatus(await ipc.relayHostStart(name, visibility, port));
       },
@@ -3308,6 +3544,8 @@ export default function App() {
       relayTransfers,
       collabMgr,
       collabTick,
+      desk,
+      deskFrames,
       relaySendChat,
       relaySendCommand,
       markSeen,
@@ -3793,7 +4031,18 @@ export default function App() {
     !(freezing?.id === id && !freezing.leaving);
   // Project tabs are draggable; their order is the workspace's own, so it
   // persists with everything else in the workspace file.
-  const tabDrag = useTabDrag(ws.openIds, (openIds) => update({ openIds }));
+  // A pinned tab never ends up behind an unpinned one, however it was dragged.
+  const tabDrag = useTabDrag(ws.openIds, (openIds) =>
+    update({ openIds: orderWithPins(openIds, wsRef.current.projects) }),
+  );
+  const togglePinProject = useCallback(
+    (id: string) => {
+      const { projects, openIds } = wsRef.current;
+      const nextProjects = projects.map((p) => (p.id === id ? { ...p, pinned: !p.pinned } : p));
+      update({ projects: nextProjects, openIds: orderWithPins(openIds, nextProjects) });
+    },
+    [update],
+  );
   // Tab badges count only what's blocked on the user — an agent that finished
   // and is idling is not urgent. Content-stable: most hook events move no
   // badge, and only a count actually changing should break TitleBar's memo.
@@ -3830,6 +4079,7 @@ export default function App() {
         onRestored: () => void;
         onEdit: () => void;
         onShareContext: (on: boolean) => void;
+        onLinkProject: (env: string, id: string) => void;
         onSaveCustomTasks: (tasks: CustomMicroTask[]) => void;
         onSaveIntegrations: (state: ProjectIntegrationState) => Promise<void>;
         onPersistVibeTarget: (selection: VibeTargetSelection) => Promise<boolean>;
@@ -3852,6 +4102,10 @@ export default function App() {
         onShareContext: (on) => {
           const p = find();
           if (p) void saveProject({ ...p, shareContext: on });
+        },
+        onLinkProject: (env, other) => {
+          const p = find();
+          if (p) void saveProject(withLink(p, env, other));
         },
         onSaveCustomTasks: (tasks) => {
           const p = find();
@@ -3969,9 +4223,16 @@ export default function App() {
 
   return (
     <div className={`app ${zen ? "zen" : ""}`}>
+      <RemoteFileViewer />
       {/* Focus mode: chrome slides away but stays reachable — hovering the top
           edge brings the project tabs and the tab strip back. */}
       {zen && <div className="zen-hotzone" />}
+      <DeskOverlay
+        desk={desk}
+        frames={deskFrames}
+        relay={relay}
+        onDismiss={() => dispatchDesk({ type: "dismiss" })}
+      />
       {/* Transient zoom level, shown ~1s after Cmd +/-/0. */}
       {zoomPct !== null && <div className="zoom-indicator">{zoomPct}%</div>}
       {cloudWorkspace && <WorkspaceHooksNotice />}
@@ -4147,6 +4408,7 @@ export default function App() {
         onSelectProject={selectProject}
         onCloseProject={handleCloseProject}
         onHibernateProject={hibernateProject}
+        onTogglePinProject={togglePinProject}
         onHibernateWorkspace={hibernateWorkspace}
         onWakeProject={wakeProject}
         onToggleVibe={toggleVibe}
@@ -4211,6 +4473,7 @@ export default function App() {
               onEdit={handlersFor(p.id).onEdit}
               onNotice={notify}
               onShareContext={handlersFor(p.id).onShareContext}
+              onLinkProject={handlersFor(p.id).onLinkProject}
               onSaveCustomTasks={handlersFor(p.id).onSaveCustomTasks}
               onSaveIntegrations={handlersFor(p.id).onSaveIntegrations}
               onPersistVibeTarget={handlersFor(p.id).onPersistVibeTarget}

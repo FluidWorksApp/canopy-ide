@@ -42,6 +42,7 @@ const renderTitleBar = (active: Project, projects: Project[], collabActive = tru
       onSelectProject={onSelectProject}
       onCloseProject={() => {}}
       onHibernateProject={() => {}}
+      onTogglePinProject={() => {}}
       onWakeProject={() => {}}
       onToggleVibe={() => {}}
       onEditProject={() => {}}

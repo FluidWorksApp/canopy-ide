@@ -1,4 +1,5 @@
 import type { StructuredDialect } from "./structuredEvents";
+import { buildAcpRunner, type AcpProviderSpec } from "./acp/providers";
 
 export type StructuredRunnerAuthority = "read-only" | "workspace-write";
 
@@ -40,9 +41,18 @@ export interface StructuredRunner {
    *    new process resuming the conversation by id. Both tiers stream the same
    *    events off stdout; only the lifecycle differs.
    *
+   *  `acp` — the process outlives the turn and speaks the Agent Client
+   *    Protocol (JSON-RPC over stdio) instead of a vendor stream: a turn is
+   *    `session/prompt`. Long-lived and streaming like `structured`, but it
+   *    has no one-question argv; brain calls drive it one-shot through
+   *    brainAcp.ts (initialize, session/new, one prompt, terminate), and
+   *    compaction callers skip it.
+   *
    *  Read by companion.ts to pick a transport, and by projectRunner.ts to
    *  decide whether `send` writes a line or launches a process. */
-  tier: "structured" | "oneshot";
+  tier: "structured" | "oneshot" | "acp";
+  /** Present on `acp` runners: the provider manifest the launch came from. */
+  acp?: AcpProviderSpec;
   /** Which JSON schema this CLI's stdout is written in. Not implied by the
    *  tier: two CLIs could share a lifecycle and agree on nothing else. */
   dialect: StructuredDialect;
@@ -438,11 +448,132 @@ export const CURSOR_RUNNER: StructuredRunner = {
   ],
 };
 
+/** Kiro CLI over ACP, verified live against kiro-cli 3.1.0 on 2026-10-27:
+ *  `kiro-cli acp` answers `initialize` (protocolVersion 1) with
+ *  agentCapabilities {loadSession: true, promptCapabilities: {image: true,
+ *  audio: false, embeddedContext: false}, mcpCapabilities: {http: true,
+ *  sse: false}}, authMethods [] (it signs in through `kiro-cli login`), and
+ *  `session/new` returns a sessionId with modes (kiro_default, kiro_planner,
+ *  kiro_guide) and models. Vendor notifications under `_kiro.dev/` are
+ *  ignored. `--agent`, `--model` and `--trust-all-tools` are listed by
+ *  `kiro-cli acp --help`. */
+export const KIRO_ACP_SPEC: AcpProviderSpec = {
+  id: "kiro",
+  name: "Kiro CLI",
+  command: "kiro-cli",
+  args: ["acp"],
+  authHint: "Run `kiro-cli login` in a terminal.",
+  modelArg: "--model",
+  agentArg: "--agent",
+  // Carries Canopy's hooks; an unknown agent name falls back to Kiro's default.
+  agentProfile: "canopy",
+  trustAllArg: "--trust-all-tools",
+  verification: {
+    cliVersion: "3.1.0",
+    checkedOn: "2026-10-27",
+    source: "`kiro-cli acp --help`; live initialize and session/new handshake",
+    flags: {
+      structuredJson: true,
+      systemPrompt: false,
+      planMode: false,
+      toolAllowlist: false,
+      workspaceSandbox: false,
+    },
+    caveats: [
+      "ACP has no system-prompt field; Canopy prepends the brief to the first turn.",
+      "Canopy advertises no fs or terminal client capabilities; Kiro uses its own tools.",
+      "--trust-all-tools is passed only for workspace-write authority; read-only sessions are answered reject_once.",
+      "Advertises loadSession; a stored session id is resumed with session/load.",
+    ],
+  },
+};
+
+export const KIRO_RUNNER: StructuredRunner = buildAcpRunner(KIRO_ACP_SPEC);
+
+/** Registry-sourced ACP rows for the agents that also have a vendor runner
+ *  above. Read from the ACP registry v1 JSON on 2026-11-09. No adapter binary
+ *  was available when these were written, so none of them has had a live
+ *  handshake; the stamps say so and the vendor runners stay as the fallback. */
+const REGISTRY_CHECKED = "2026-11-09";
+const registryStamp = (
+  entry: string,
+  version: string,
+  dist: string,
+  extra: readonly string[],
+): AcpProviderSpec["verification"] => ({
+  cliVersion: version,
+  checkedOn: REGISTRY_CHECKED,
+  source: `ACP registry v1 entry ${entry} (${dist}); NOT live-tested`,
+  flags: {
+    structuredJson: true,
+    systemPrompt: false,
+    planMode: false,
+    toolAllowlist: false,
+    workspaceSandbox: false,
+  },
+  caveats: [
+    "Registry-sourced, not live-tested: no live initialize or session handshake was run.",
+    "Model and mode are chosen with session/set_config_option after session/new, not argv flags.",
+    "Permission requests are answered from the launch authority; no trust-all flag is passed.",
+    ...extra,
+  ],
+});
+
+export const CLAUDE_ACP_SPEC: AcpProviderSpec = {
+  id: "claude",
+  name: "Claude Code",
+  command: "npx",
+  adapter: true,
+  args: ["-y", "@agentclientprotocol/claude-agent-acp@0.102.0"],
+  authHint: "Run `claude` once in a terminal and sign in, or set ANTHROPIC_API_KEY.",
+  verification: registryStamp("claude-acp", "0.102.0", "npx @agentclientprotocol/claude-agent-acp", [
+    "Runs through an adapter package fetched by npx, so the first launch needs network access.",
+  ]),
+};
+
+export const CODEX_ACP_SPEC: AcpProviderSpec = {
+  id: "codex",
+  name: "Codex CLI",
+  command: "npx",
+  adapter: true,
+  args: ["-y", "@agentclientprotocol/codex-acp@2.6.0"],
+  authHint: "Run `codex login` in a terminal.",
+  verification: registryStamp("codex-acp", "2.6.0", "npx @agentclientprotocol/codex-acp", [
+    "Runs through an adapter package fetched by npx, so the first launch needs network access.",
+  ]),
+};
+
+export const CURSOR_ACP_SPEC: AcpProviderSpec = {
+  id: "cursor",
+  name: "Cursor Agent",
+  command: "cursor-agent",
+  args: ["acp"],
+  authHint: "Run `cursor-agent login` in a terminal.",
+  verification: registryStamp("cursor", "2026.11.05", "binary cursor-agent, args acp", []),
+};
+
+export const OPENCODE_ACP_SPEC: AcpProviderSpec = {
+  id: "opencode",
+  name: "OpenCode",
+  command: "opencode",
+  args: ["acp"],
+  authHint: "Run `opencode auth login` in a terminal.",
+  verification: registryStamp("opencode", "2.2.6", "binary opencode, args acp", [
+    "No vendor runner exists for OpenCode; turning ACP off leaves it terminal-only.",
+  ]),
+};
+
+export const CLAUDE_ACP_RUNNER: StructuredRunner = buildAcpRunner(CLAUDE_ACP_SPEC);
+export const CODEX_ACP_RUNNER: StructuredRunner = buildAcpRunner(CODEX_ACP_SPEC);
+export const CURSOR_ACP_RUNNER: StructuredRunner = buildAcpRunner(CURSOR_ACP_SPEC);
+export const OPENCODE_ACP_RUNNER: StructuredRunner = buildAcpRunner(OPENCODE_ACP_SPEC);
+
 /** Verified non-interactive argv shapes, keyed by the agent registry id. */
 export const STRUCTURED_RUNNERS: Record<string, StructuredRunner> = {
   claude: CLAUDE_RUNNER,
   codex: CODEX_RUNNER,
   cursor: CURSOR_RUNNER,
+  kiro: KIRO_RUNNER,
 };
 
 /** Whether this CLI can run a task that is read back off a JSON stream.

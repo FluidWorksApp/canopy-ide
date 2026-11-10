@@ -23,8 +23,8 @@ use std::time::Duration;
 
 use tauri::ipc::Channel;
 use tauri::Manager;
-use tokio::io::BufReader;
-use tokio::process::Child;
+use tokio::io::{AsyncWriteExt, BufReader};
+use tokio::process::{Child, ChildStdin};
 use tokio::sync::Mutex;
 
 use crate::structured_runner::{capped_line, StructuredRunnerOut};
@@ -38,6 +38,12 @@ const STDOUT_LINE_MAX: usize = 1024 * 1024;
 const CEILING_MS: u64 = 15 * 60 * 1000;
 
 struct Running {
+    /// Only for an ACP call (`keep_stdin`): the JSON-RPC lines go in here.
+    /// None for a headless one-shot CLI, whose stdin is closed at spawn.
+    /// Shared so a write never holds the calls map: a stalled agent that stops
+    /// reading its stdin must not freeze every other brain call (the reaper and
+    /// `brain_kill` take that same lock).
+    stdin: Option<std::sync::Arc<tokio::sync::Mutex<ChildStdin>>>,
     child: Child,
     process_group: Option<u32>,
 }
@@ -55,6 +61,11 @@ impl Drop for Running {
         let _ = self.child.start_kill();
     }
 }
+
+/// Longest line `brain_write` will send, and how long it waits for the agent to
+/// take it.
+const MAX_LINE_BYTES: usize = 1024 * 1024;
+const WRITE_TIMEOUT: Duration = Duration::from_secs(15);
 
 #[derive(Default)]
 pub struct BrainCalls {
@@ -82,7 +93,35 @@ fn scrubbed(key: &str) -> bool {
     key.starts_with("CANOPY")
 }
 
-/// Start one brain call. Returns once the process is running; output arrives
+/// An empty cwd means "nowhere in particular" — the connection probe asks
+/// before any project is open. Home, so the CLI loads no project's config.
+fn brain_dir(cwd: &str) -> Result<std::path::PathBuf, String> {
+    if cwd.trim().is_empty() {
+        absolute_home(std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")))
+    } else {
+        Ok(std::path::PathBuf::from(cwd))
+    }
+}
+
+/// An empty or relative home is no home: an ACP agent refuses a working
+/// directory that is not absolute, and a relative one would load whichever
+/// project the app happened to start in.
+fn absolute_home(home: Option<std::ffi::OsString>) -> Result<std::path::PathBuf, String> {
+    home.map(std::path::PathBuf::from)
+        .filter(|dir| dir.is_absolute())
+        .ok_or_else(|| "a brain call without a cwd needs an absolute home directory".to_string())
+}
+
+/// The directory a brain call with no cwd runs in, as an absolute path. An ACP
+/// agent is told its working directory in `session/new` and needs it spelled out.
+#[tauri::command]
+pub fn brain_home() -> Result<String, String> {
+    brain_dir("").map(|d| d.to_string_lossy().into_owned())
+}
+
+/// Start one brain call. `keep_stdin` is for an ACP agent, which is spoken to
+/// over stdin for the life of the call (see `brain_write`); every headless CLI
+/// leaves it off and gets a closed stdin, as before. Returns once the process is running; output arrives
 /// on `on_data` and ends with an `exit` message, exactly like the structured
 /// runner, so the TS side can reuse its line handling.
 #[tauri::command]
@@ -96,21 +135,13 @@ pub async fn brain_call(
     cwd: String,
     env: Option<Vec<(String, String)>>,
     timeout_ms: Option<u64>,
+    keep_stdin: Option<bool>,
     on_data: Channel<StructuredRunnerOut>,
 ) -> Result<(), String> {
     if !valid_call_id(&call_id) {
         return Err("a brain call requires a valid call id".into());
     }
-    // An empty cwd means "nowhere in particular" — the connection probe asks
-    // before any project is open. Home, so the CLI loads no project's config.
-    let dir = if cwd.trim().is_empty() {
-        std::env::var_os("HOME")
-            .or_else(|| std::env::var_os("USERPROFILE"))
-            .map(std::path::PathBuf::from)
-            .ok_or("a brain call without a cwd needs a home directory")?
-    } else {
-        std::path::PathBuf::from(&cwd)
-    };
+    let dir = brain_dir(&cwd)?;
     if !dir.is_dir() {
         return Err(format!("brain call cwd does not exist: {cwd}"));
     }
@@ -126,8 +157,13 @@ pub async fn brain_call(
         .current_dir(dir)
         // Closed, not piped: a one-shot CLI reads a piped stdin to EOF even
         // when the prompt is on argv (see structured_runner_spawn), and a
-        // brain call never writes a second message.
-        .stdin(Stdio::null())
+        // headless brain call never writes a second message. Only an ACP call
+        // asks for a pipe.
+        .stdin(if keep_stdin.unwrap_or(false) {
+            Stdio::piped()
+        } else {
+            Stdio::null()
+        })
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
@@ -159,6 +195,10 @@ pub async fn brain_call(
             }
         )
     })?;
+    let stdin = child
+        .stdin
+        .take()
+        .map(|s| std::sync::Arc::new(tokio::sync::Mutex::new(s)));
     let Some(stdout) = child.stdout.take() else {
         let _ = child.start_kill();
         return Err("the brain call has no stdout".into());
@@ -201,6 +241,7 @@ pub async fn brain_call(
     held.insert(
         call_id.clone(),
         Running {
+            stdin,
             child,
             process_group,
         },
@@ -239,6 +280,49 @@ pub async fn brain_call(
     Ok(())
 }
 
+/// Write one line to an ACP brain call's stdin. Errors for a call that is gone
+/// or was started without `keep_stdin`.
+#[tauri::command]
+pub async fn brain_write(
+    state: tauri::State<'_, BrainCalls>,
+    call_id: String,
+    line: String,
+) -> Result<(), String> {
+    if line.len() > MAX_LINE_BYTES {
+        return Err(format!("a line to brain call {call_id} is too large"));
+    }
+    // One JSON-RPC message per line: an embedded newline would split it into
+    // several, and the agent would read the rest as separate requests.
+    if line.contains(['\n', '\r']) {
+        return Err("a line sent to a brain call must not contain a newline".into());
+    }
+    // The map is locked only long enough to find the pipe.
+    let stdin = {
+        let held = state.running.lock().await;
+        held.get(&call_id)
+            .ok_or_else(|| format!("brain call is not running: {call_id}"))?
+            .stdin
+            .clone()
+            .ok_or_else(|| {
+                format!("brain call {call_id} takes its prompt at launch, not on stdin")
+            })?
+    };
+    let mut body = line;
+    body.push('\n');
+    let write = async {
+        let mut pipe = stdin.lock().await;
+        pipe.write_all(body.as_bytes()).await?;
+        pipe.flush().await
+    };
+    match tokio::time::timeout(WRITE_TIMEOUT, write).await {
+        Ok(Ok(())) => Ok(()),
+        Ok(Err(error)) => Err(format!("could not reach brain call {call_id}: {error}")),
+        // The agent has stopped reading. The caller's own timeout or abort ends
+        // the call; this only stops the write from waiting forever.
+        Err(_) => Err(format!("brain call {call_id} is not reading its input")),
+    }
+}
+
 /// Stop a brain call: an aborted feature, a TS-side timeout, or an answer that
 /// arrived before the CLI got round to exiting. Idempotent — killing a call
 /// that already finished is not an error, because the caller cannot know
@@ -266,6 +350,22 @@ mod tests {
         assert!(!valid_call_id(""));
         assert!(!valid_call_id("../etc"));
         assert!(!valid_call_id(&"a".repeat(129)));
+    }
+
+    #[test]
+    fn an_empty_cwd_resolves_to_an_absolute_home() {
+        assert_eq!(brain_dir("/x/y").unwrap(), std::path::PathBuf::from("/x/y"));
+        assert_eq!(
+            absolute_home(Some("/Users/me".into())).unwrap(),
+            std::path::PathBuf::from("/Users/me")
+        );
+    }
+
+    #[test]
+    fn a_missing_empty_or_relative_home_is_refused() {
+        assert!(absolute_home(None).is_err());
+        assert!(absolute_home(Some("".into())).is_err());
+        assert!(absolute_home(Some("relative/home".into())).is_err());
     }
 
     #[test]

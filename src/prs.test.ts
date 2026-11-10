@@ -119,3 +119,13 @@ describe("repoLabel", () => {
     expect(repoLabel("", "/Users/me/code/canopy/")).toBe("canopy");
   });
 });
+
+describe("prFixChecksContext", () => {
+  it("names the PR, its failing checks and its branch", async () => {
+    const { prFixChecksContext } = await import("./prs");
+    const text = prFixChecksContext({ number: 9, title: "T", url: "u", branch: "feat/x" } as never);
+    expect(text).toContain("#9");
+    expect(text).toContain("failing checks");
+    expect(text).toContain("feat/x");
+  });
+});

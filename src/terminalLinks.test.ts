@@ -154,3 +154,52 @@ describe("createLinkHint", () => {
     hint.dispose();
   });
 });
+
+import { extendSpacedLinks } from "./terminalLinks";
+
+describe("paths with spaces", () => {
+  const DIR = "/Users/shoaib/Documents/GitHub/everyapp/reports";
+  const FILE = `${DIR}/EveryApp store policy risk.md`;
+  const text = `I'll summarize it when it lands at ${FILE}.`;
+  const exists = (known: string[]) => async (p: string) => known.includes(p);
+
+  it("extends a bare path across spaces to the file that really exists", async () => {
+    const [link] = await extendSpacedLinks(text, terminalFileLinks(text), exists([FILE]));
+    expect(link.path).toBe(FILE);
+    expect(text.slice(link.start, link.end)).toBe(FILE);
+  });
+
+  it("leaves the link alone when no longer path exists", async () => {
+    const [link] = await extendSpacedLinks(text, terminalFileLinks(text), exists([]));
+    expect(link.path).toBe(`${DIR}/EveryApp`);
+  });
+
+  it("does not swallow the sentence after an ordinary path", async () => {
+    const prose = "see /tmp/a.md and then read the other notes.txt for more";
+    const links = terminalFileLinks(prose);
+    const out = await extendSpacedLinks(prose, links, exists(["/tmp/a.md"]));
+    expect(out[0].path).toBe("/tmp/a.md");
+  });
+
+  it("keeps the longest existing candidate and reads a trailing :line", async () => {
+    const t = "open /w/My Notes/final draft.md:12 now";
+    const out = await extendSpacedLinks(t, terminalFileLinks(t), exists(["/w/My Notes/final draft.md"]));
+    expect(out[0]).toMatchObject({ path: "/w/My Notes/final draft.md", line: 12 });
+  });
+
+  it("only asks the file system about words that could end a file name", async () => {
+    const calls: string[] = [];
+    const t = "at /a/b one two three four";
+    await extendSpacedLinks(t, terminalFileLinks(t), async (p) => {
+      calls.push(p);
+      return false;
+    });
+    expect(calls).toEqual([]);
+  });
+
+  it("does not extend a path that already names a line", async () => {
+    const t = "error in /src/app.ts:10 and more.md";
+    const [link] = await extendSpacedLinks(t, terminalFileLinks(t), async () => true);
+    expect(link).toMatchObject({ path: "/src/app.ts", line: 10 });
+  });
+});

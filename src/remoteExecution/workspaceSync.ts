@@ -4,9 +4,6 @@
 //
 //  - each open project's approved Rules policy, written into the VM where the
 //    agents' hook reads it (gates/rules.ts publishPolicy);
-//  - approved team memory, copied to the workspace's Canopy service so its
-//    agents' canopy_memory answers from it, and their proposals brought back
-//    to the ledger here (memorySync.ts);
 //  - whether the VM's agent hooks are current: a workspace set up before the
 //    Rules panel existed has no PreToolUse gate, so it is offered a one-click
 //    update (WorkspaceHooksNotice).

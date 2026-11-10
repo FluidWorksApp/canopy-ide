@@ -79,7 +79,7 @@ const ledger: LedgerEntry[] = [
   // Receipt with only a session ref and a status word, filed as turn 2 ended.
   entry({ kind: "receipt", ts: T0 + 505_000, ref: { kind: "session", id: SID }, status: "failed", data: {} }),
   entry({ kind: "plan", ts: T0 - 1000, ref: { kind: "session", id: SID }, data: { goal: "Passwordless login", steps: ["Page", { title: "Tests" }, 42] } }),
-  entry({ kind: "memory", ts: T0 + 1000, author: { kind: "agent", name: "x", sessionId: SID }, data: { text: "Auth uses Supabase" } }),
+  entry({ kind: "awareness", ts: T0 + 1000, author: { kind: "agent", name: "x", sessionId: SID }, data: { text: "Auth uses Supabase" } }),
   entry({ kind: "awareness", ts: T0 + 2000, ref: { kind: "session", id: "someone-else" }, data: { text: "Not ours" } }),
   entry({ kind: "handoff", ts: T0 + 600_000, ref: { kind: "session", id: SID }, subject: "Earlier handoff", data: {} }),
 ];

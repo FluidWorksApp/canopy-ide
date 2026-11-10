@@ -2,6 +2,7 @@
 // or more labeled component directories (frontend, backend, ...). The whole
 // workspace (projects, which are open, which is active) persists via the Rust
 // core to ~/.canopy/projects.json.
+import { customAcpRunner, type CustomAcpConfig } from "./acp/providers";
 import { invoke, invokeDesktop } from "./host";
 import type { CustomMicroTask } from "./microTasks";
 import { getSettings, updateSettings } from "./settings";
@@ -15,9 +16,14 @@ import {
   type ProjectIntegrationState,
 } from "./projectIntegrations";
 import {
+  CLAUDE_ACP_RUNNER,
   CLAUDE_RUNNER,
+  CODEX_ACP_RUNNER,
+  CURSOR_ACP_RUNNER,
+  OPENCODE_ACP_RUNNER,
   CODEX_RUNNER,
   CURSOR_RUNNER,
+  KIRO_RUNNER,
   type StructuredRunner,
 } from "./structuredRunners";
 import {
@@ -123,6 +129,17 @@ export interface Project {
   readOnly?: boolean;
   id: string;
   name: string;
+  /** On a workspace copy of a project: the id of the project on the Mac it was
+   *  mirrored from (src/remoteExecution/mirror.ts). See placement/identity.ts. */
+  mirroredFrom?: string;
+  /** The mirror stopped partway: this copy is not complete yet. */
+  mirrorIncomplete?: boolean;
+  /** The same project on other machines: `{env, id}` per machine. Set when a
+   *  project that began on a workspace is brought to this Mac (docs/teleport-design.md). */
+  linkedTo?: { env: string; id: string }[];
+  /** Pinned in the project tab strip: kept at the front, in place, whatever
+   *  else is opened, closed or dragged. */
+  pinned?: boolean;
   components: Component[];
   /** Let agent sessions in this project see each other's recent work. Off by
    *  default: it puts one session's prompts into another's context, which is
@@ -746,6 +763,9 @@ export interface AgentCli {
 
   /** Verified non-interactive transport, owned by this CLI's adapter. */
   structuredRunner?: StructuredRunner;
+  /** The same agent over ACP. Wins over `structuredRunner` unless the person
+   *  turned "Use ACP" off (settings.acpAgents). */
+  acpRunner?: StructuredRunner;
 
   /** Verified interactive model control, when this CLI exposes one. */
   modelSwitch?: ModelSwitch;
@@ -922,6 +942,7 @@ export const BUILTIN_AGENT_CLIS: AgentCliDef[] = [
       conversationStore: { path: "~/.claude/projects/**/*.jsonl", open: "session" },
     },
     structuredRunner: CLAUDE_RUNNER,
+    acpRunner: CLAUDE_ACP_RUNNER,
     modelSwitch: MODEL_SWITCH.claude,
     install: "npm install -g @anthropic-ai/claude-code",
     pkgs: ["npm:@anthropic-ai/claude-code"],
@@ -1004,6 +1025,7 @@ export const BUILTIN_AGENT_CLIS: AgentCliDef[] = [
       conversationStore: { path: "~/.codex/sessions/**/rollout-*.jsonl", open: "session" },
     },
     structuredRunner: CODEX_RUNNER,
+    acpRunner: CODEX_ACP_RUNNER,
     modelSwitch: MODEL_SWITCH.codex,
     install: "npm install -g @openai/codex",
     pkgs: ["npm:@openai/codex"],
@@ -1258,6 +1280,8 @@ export const BUILTIN_AGENT_CLIS: AgentCliDef[] = [
       eventSessionLookup: true,
       conversationStore: { path: "~/.local/share/opencode/opencode.db", open: "session" },
     },
+    // ACP only: there is no vendor runner, so "Use ACP" off leaves it terminal-only.
+    acpRunner: OPENCODE_ACP_RUNNER,
     modelSwitch: MODEL_SWITCH.opencode,
     install: "npm install -g opencode-ai",
     pkgs: ["npm:opencode-ai"],
@@ -1329,7 +1353,7 @@ export const BUILTIN_AGENT_CLIS: AgentCliDef[] = [
       managedIntegration: true,
       conversationStore: {
         path: "~/.omp/agent/sessions/**/*.jsonl",
-        note: "Sub-agent transcripts are indexed under their parent conversation.",
+        note: "Sub-agent transcripts are indexed under their parent.",
         open: "session",
       },
     },
@@ -1397,6 +1421,7 @@ export const BUILTIN_AGENT_CLIS: AgentCliDef[] = [
       managedIntegration: true,
     },
     structuredRunner: CURSOR_RUNNER,
+    acpRunner: CURSOR_ACP_RUNNER,
     modelSwitch: MODEL_SWITCH.cursor,
     install: "curl https://cursor.com/install -fsS | bash",
     update: "cursor-agent update",
@@ -1467,6 +1492,58 @@ export const BUILTIN_AGENT_CLIS: AgentCliDef[] = [
       launchArgs: (config) => option("--model", config.model),
     },
   },
+  {
+    id: "kiro",
+    name: "Kiro CLI",
+    bin: "kiro-cli",
+    icon: "◈",
+    brandColor: "#9046FF",
+    capabilities: {
+      managedIntegration: true,
+    },
+    modelSwitch: MODEL_SWITCH.kiro,
+    install: "curl -fsSL https://cli.kiro.dev/install | bash",
+    update: "kiro-cli update",
+    // Kiro updates itself on startup, but its only off-switch is the settings
+    // key `app.disableAutoupdates` (`kiro-cli settings list`), not an
+    // environment variable, so Canopy cannot suppress it per launch. It runs
+    // the documented `kiro-cli update` instead.
+    autoUpdate: {
+      mechanism: "canopy",
+      verification: {
+        cliVersion: "3.1.0",
+        checkedOn: "2026-10-27",
+        source: "`kiro-cli update --help`; `kiro-cli settings list` (app.disableAutoupdates)",
+      },
+    },
+    // Verified against kiro-cli 3.1.0 --help: the top-level command takes
+    // `--resume-id <SESSION_ID>` and `--agent <AGENT>` as shorthands for
+    // `chat --resume-id` / `chat --agent`.
+    resume: (id, bin) => `${bin} --resume-id ${id}`,
+    // A bare word at the top level is read as a subcommand, so the opening
+    // prompt goes to `chat`, whose [INPUT] is "The first question to ask".
+    prompt: (text, bin) => `${bin} chat ${shellQuote(text)}`,
+    // Kiro runs hooks only from the active agent's config. Canopy installs a
+    // global agent named `canopy` (agents.rs setup_kiro_hooks) that mirrors the
+    // default agent and carries the hooks; an unknown agent name falls back to
+    // Kiro's default, so a machine without it still launches.
+    sessionArgs: "--agent canopy",
+    structuredRunner: KIRO_RUNNER,
+    skipPermissions: "--trust-all-tools",
+    // No reviewed automatic mode is documented: `--trust-tools=<names>` trusts
+    // a fixed set rather than classifying calls, so Kiro keeps asking unless
+    // the user opts in to skipPermissions.
+    execution: {
+      fields: [
+        modelField(undefined, "auto"),
+        effortField(["low", "medium", "high", "xhigh", "max"]),
+      ],
+      launchArgs: (config) => [
+        ...option("--model", config.model),
+        ...option("--effort", config.effort),
+      ],
+    },
+  },
 ];
 
 /** Agents users run by hand that we don't ship a launcher entry for. Their id
@@ -1521,6 +1598,13 @@ export interface CustomAgentCli {
    * TUI is up — slower, but it works everywhere.
    */
   promptArgs?: string;
+  /**
+   * Set when this CLI speaks the Agent Client Protocol (`my-agent --acp`):
+   * `args` is the argv that puts it in ACP mode, an array and never a shell
+   * string. Build then drives it through the ACP transport as a first-class
+   * agent instead of a bare terminal.
+   */
+  acp?: CustomAcpConfig;
 }
 
 /** Ids nothing may take: the built-ins, and the bare binaries that already name
@@ -1623,6 +1707,7 @@ export function customCliDefs(): AgentCliDef[] {
         // initial, which at least tells two custom entries apart.
         icon: (name[0] ?? "▷").toUpperCase(),
         custom: true,
+        structuredRunner: c.acp ? customAcpRunner(id, name, bin, c.acp) : undefined,
         resume: resumeArgs
           ? (sessionId, b) => `${b} ${expandArgs(resumeArgs, "{id}", sessionId)}`
           : undefined,
@@ -1685,7 +1770,24 @@ export function agentClisWith(
   return AGENT_CLIS.filter((cli) => cli.capabilities?.[capability] !== undefined);
 }
 
+/** Whether this agent's ACP runner is in use: it has one and the person has
+ *  not turned it off. Only an explicit false disables it. */
+export function acpEnabledFor(id?: string | null): boolean {
+  const cli = agentCliFor(id);
+  return Boolean(cli?.acpRunner) && getSettings().acpAgents[cli!.id] !== false;
+}
+
+/** The runner Build and the project runner launch: ACP when the agent has one
+ *  and it is enabled, else the vendor runner. */
 export function structuredRunnerFor(id?: string | null): StructuredRunner | undefined {
+  const cli = agentCliFor(id);
+  return acpEnabledFor(id) ? cli?.acpRunner : cli?.structuredRunner;
+}
+
+/** The vendor runner, regardless of the ACP setting. One-shot brain and
+ *  compaction calls use it: ACP has no one-shot mode, and brain.rs puts the
+ *  prompt on argv. An ACP-only agent (Kiro) returns its ACP runner. */
+export function legacyRunnerFor(id?: string | null): StructuredRunner | undefined {
   return agentCliFor(id)?.structuredRunner;
 }
 
@@ -2240,3 +2342,11 @@ export function componentForPath(
 // Shared credential slots are provider adapters, separate from CLI launch identities.
 export const SHARED_ACCOUNT_SLOTS = ["git", "claude", "codex"] as const;
 export const SHARED_ACCOUNT_PROVIDERS = {git: "github", claude: "anthropic", codex: "openai"} as const;
+
+/** The open project order with pinned projects first, each group keeping its own
+ *  order. A pinned tab never ends up behind an unpinned one, whether it was
+ *  dragged there or something was opened after it. */
+export function orderWithPins(openIds: readonly string[], projects: readonly Pick<Project, "id" | "pinned">[]): string[] {
+  const pinned = new Set(projects.filter((p) => p.pinned).map((p) => p.id));
+  return [...openIds.filter((id) => pinned.has(id)), ...openIds.filter((id) => !pinned.has(id))];
+}

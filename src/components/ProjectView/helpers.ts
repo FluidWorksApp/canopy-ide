@@ -21,21 +21,42 @@ export type SideTab =
   | "tasks"
   | "notes"
   | "research"
-  | "memory"
   | "agents"
   | "team"
   | "tools"
   /** Retired: read from older snapshots and links, never shown. */
-  | "outcomes";
+  | "outcomes"
+  | "memory";
 
 export interface TermSubTab extends TabNames {
   id: string;
   type: "terminal";
+  /** Pinned: stays at the front of the strip whatever the agent is doing. */
+  pinned?: boolean;
+  /** Settled: finished work, put away in the collapsed Settled group. A new
+   *  message to the agent, or the person, un-settles it. */
+  settled?: boolean;
   cwd: string;
   /** Agent-published one-line description, updated through canopy_name_task
    *  whenever the work changes. */
   description?: string;
   ptyId: number | null;
+  /** The machine this terminal runs on, when it is not the window's primary one
+   *  (multi-host, docs/multi-host-design.md). Absent means the primary. */
+  machine?: string;
+  /** When this terminal was started on that machine (ms). A session digest read
+   *  from the machine only belongs to this tab if it was written after this. */
+  launchedAt?: number;
+  /** A terminal that ran on another machine before the project slept. Nothing is
+   *  connected until the person asks; then it reattaches to this session (the id
+   *  on that machine) if it is still running. */
+  reconnect?: { sessionId: number };
+  /** Shown because "All workspaces" is on: the machine's own live terminal, not
+   *  something this window started. Closing it lets go of it without killing the
+   *  session, and it is not part of the project's saved snapshot. */
+  viaAll?: boolean;
+  /** The workspace's name, for the strip's machine badge. */
+  machineName?: string;
   /** The backend lifetime, independent of output-stream attachment epochs. */
   sessionGeneration?: number;
   /** When set, this tab attaches to an already-running headless PTY (spawned
@@ -327,17 +348,21 @@ export interface PreviewSubTab {
   shots?: PreviewShot[];
 }
 
-/** A live Android device or emulator, shown as refreshing still frames.
+/** A live Android device or emulator, or an iOS Simulator.
  *
- *  Deliberately not a video stream: an agent drives the device and the user
- *  watches, so there is nothing to decode and the tab works identically on
- *  every platform Canopy runs on. Like PreviewSubTab, the selected device and
- *  collected annotations live on the tab so they survive switching away. */
+ *  Streamed through the device hub when the user installed the device tools
+ *  (src/devices, a port of T3 Code's device panel); otherwise shown as
+ *  refreshing adb screencap stills, which need nothing beyond adb. Like
+ *  PreviewSubTab, the selected device and collected annotations live on the
+ *  tab so they survive switching away. */
 export interface DeviceSubTab {
   id: string;
   type: "device";
-  /** adb serial ("" until a device is picked). */
+  /** adb serial, or a simulator UDID when `platform` is "ios" ("" until a
+   *  device is picked). */
   serial: string;
+  /** Absent on tabs saved before simulators could be picked: Android. */
+  platform?: "android" | "ios";
   /** The Android project this device is showing, for SDK resolution and so
    *  feedback names the codebase to change. */
   projectDir: string;
@@ -500,6 +525,8 @@ export interface ProjectViewProps {
   onEdit: () => void;
   onNotice: Notify;
   onShareContext: (on: boolean) => void;
+  /** Record that this project is also on another machine (teleport). */
+  onLinkProject?: (env: string, id: string) => void;
   /** Persist this project's custom tasks — they live on the project record, so
    *  writing one is a workspace save. */
   onSaveCustomTasks: (tasks: import("../../microTasks").CustomMicroTask[]) => void;
@@ -923,3 +950,23 @@ export function previewLabel(url: string): string {
     return url;
   }
 }
+
+/** A pinned tab keeps its place at the front of the strip, outside the
+ *  Needs you / Working / Idle grouping, whatever state its agent is in. Any kind
+ *  of tab can be pinned, so this reads the flag without knowing the kind. */
+export const isPinnedTab = (tab: object): boolean => (tab as { pinned?: unknown }).pinned === true;
+
+/** Split a strip into its pinned tabs and the rest, each keeping its order. */
+export function splitPinned<T extends object>(tabs: readonly T[]): { pinned: T[]; rest: T[] } {
+  const pinned: T[] = [];
+  const rest: T[] = [];
+  for (const tab of tabs) (isPinnedTab(tab) ? pinned : rest).push(tab);
+  return { pinned, rest };
+}
+
+/** A settled tab is out of the Needs you / Working / Idle groups and sits in the
+ *  collapsed Settled one. Pinned wins: a pinned tab is never settled away. */
+export const isSettledTab = (tab: object): boolean => {
+  const t = tab as { settled?: unknown; pinned?: unknown };
+  return t.settled === true && t.pinned !== true;
+};

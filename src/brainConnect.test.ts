@@ -19,8 +19,11 @@ import {
   brainExceptions,
   brainNeedsConnect,
   brainStateText,
+  brainExcluded,
+  brainVerificationNote,
   canBeBrain,
   chooseBrain,
+  groupedBrainCandidates,
   initBrainConnect,
   loginPollTick,
   resetBrainConnectForTests,
@@ -30,7 +33,7 @@ import {
   startBrainSignIn,
   TERMINAL_EXITED_EVENT,
 } from "./brainConnect";
-import { AGENT_CLIS, agentCliFor, CLI_INSTALLS_CHANGED_EVENT } from "./projects";
+import { AGENT_CLIS, agentCliFor, CLI_INSTALLS_CHANGED_EVENT, refreshAgentClis } from "./projects";
 import { getSettings, updateSettings } from "./settings";
 
 const checkMock = status.checkBrainConnection as unknown as ReturnType<typeof vi.fn>;
@@ -39,6 +42,7 @@ const setState = (status as unknown as { __set: (s: Record<string, unknown>) => 
 const claude = agentCliFor("claude")!;
 const codex = agentCliFor("codex")!;
 const amp = agentCliFor("amp")!;
+const kiro = agentCliFor("kiro")!;
 const only = (...bins: string[]) => (bin: string) => bins.includes(bin);
 
 beforeEach(() => {
@@ -48,17 +52,51 @@ beforeEach(() => {
 });
 
 describe("which CLIs can be the brain", () => {
-  it("accepts verified one-shot runners and refuses CLIs without one", () => {
+  it("accepts verified one-shot runners and ACP agents, and refuses CLIs with neither", () => {
     expect(canBeBrain(claude)).toBe(true);
     expect(canBeBrain(codex)).toBe(true);
+    expect(canBeBrain(kiro)).toBe(true);
     expect(canBeBrain(amp)).toBe(false);
   });
 
   it("lists only installed capable CLIs, in registry order", () => {
-    const found = brainCandidates(only(codex.bin, amp.bin, claude.bin));
+    const found = brainCandidates(only(codex.bin, amp.bin, claude.bin, kiro.bin));
     expect(found.map((c) => c.id)).toEqual(
-      AGENT_CLIS.filter((c) => [claude.id, codex.id].includes(c.id)).map((c) => c.id),
+      AGENT_CLIS.filter((c) => [claude.id, codex.id, kiro.id].includes(c.id)).map((c) => c.id),
     );
+  });
+
+  it("groups verified runners apart from ACP agents, and says why the rest are out", () => {
+    const has = only(claude.bin, kiro.bin, amp.bin);
+    const g = groupedBrainCandidates(has);
+    expect(g.verified.map((c) => c.id)).toEqual([claude.id]);
+    expect(g.acp.map((c) => c.id)).toEqual([kiro.id]);
+    const out = brainExcluded(has);
+    expect(out.map((e) => e.cli.id)).toEqual([amp.id]);
+    expect(out[0].reason).toMatch(/no headless or ACP mode/);
+  });
+
+  it("describes ACP picks from their verification data, and not verified runners", () => {
+    expect(brainVerificationNote(claude)).toBeNull();
+    const note = brainVerificationNote(kiro)!;
+    expect(note).toMatch(/less verified/);
+    expect(note).toContain(kiro.name);
+    expect(note).toContain("3.1.0");
+    expect(note).toContain("2026-10-27");
+  });
+
+  it("offers a user-added ACP CLI and says it is unverified", () => {
+    updateSettings({ customClis: [{ id: "my-acp", name: "My ACP", bin: "my-acp-bin", acp: { args: ["--acp"] } }] });
+    refreshAgentClis();
+    try {
+      const mine = agentCliFor("my-acp")!;
+      expect(canBeBrain(mine)).toBe(true);
+      expect(groupedBrainCandidates(only("my-acp-bin")).acp.map((c) => c.id)).toEqual(["my-acp"]);
+      expect(brainVerificationNote(mine)).toMatch(/has not verified/);
+    } finally {
+      updateSettings({ customClis: [] });
+      refreshAgentClis();
+    }
   });
 
   it("recommends the chosen brain when it can be one, else the first candidate", () => {

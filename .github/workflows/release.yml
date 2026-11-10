@@ -66,12 +66,12 @@ jobs:
           # dylib; the ONNX steps below skip it.
           - platform: macos-latest
             target: aarch64-apple-darwin
-            args: "--target aarch64-apple-darwin"
+            args: "--target aarch64-apple-darwin --features desk-native"
           - platform: macos-latest
             target: x86_64-apple-darwin
             # `--` hands --no-default-features to cargo; `tauri build` has no such
             # flag of its own and errors on it otherwise.
-            args: "--target x86_64-apple-darwin -- --no-default-features"
+            args: "--target x86_64-apple-darwin -- --no-default-features --features desk-native"
           # 22.04, not latest: the glibc you build against is the *floor* for
           # what users can run. Building on 24.04 would exclude 22.04 users.
           - platform: ubuntu-22.04
@@ -84,7 +84,7 @@ jobs:
           # certificate is added.
           - platform: windows-latest
             target: x86_64-pc-windows-msvc
-            args: "--target x86_64-pc-windows-msvc --bundles nsis"
+            args: "--target x86_64-pc-windows-msvc --bundles nsis --features desk-native"
 
     runs-on: ${{ matrix.platform }}
     steps:

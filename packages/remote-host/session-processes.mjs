@@ -3,7 +3,7 @@ import {execFile} from 'node:child_process';
 import {promisify} from 'node:util';
 import path from 'node:path';
 const exec=promisify(execFile);
-const agents=['claude','codex','amp','aider','agy','opencode','omp','cursor-agent','grok'];
+const agents=['claude','codex','amp','aider','agy','opencode','omp','cursor-agent','grok','kiro-cli'];
 export function parseProcessStat(raw){
  const end=raw.lastIndexOf(')'),start=raw.indexOf('('),tail=raw.slice(end+2).trim().split(/\s+/);
  if(start<0||end<start||tail.length<22)throw Error('Invalid process record');

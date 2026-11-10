@@ -200,7 +200,8 @@
 :root[data-theme="pixel"] .palette-backdrop,
 :root[data-theme="pixel"] .dlg-scrim,
 :root[data-theme="pixel"] .md-lightbox,
-:root[data-theme="pixel"] .workspace-handle,
+:root[data-theme="pixel"] .agent-card,
+:root[data-theme="pixel"] .agent-card-pill,
 :root[data-theme="pixel"] .workspace-overlay,
 :root[data-theme="pixel"] .aw-touched-more,
 :root[data-theme="pixel"] .hib-frost {
@@ -221,7 +222,8 @@
 :root[data-theme="pixel"] .palette {
   --glass-tint: 100%;
 }
-:root[data-theme="pixel"] .workspace-handle,
+:root[data-theme="pixel"] .agent-card,
+:root[data-theme="pixel"] .agent-card-pill,
 :root[data-theme="pixel"] .aw-touched-more {
   background: var(--bg-raised);
 }
@@ -6584,49 +6586,461 @@ body.dragging-tab * {
    frost adapts to every theme (including the light "daylight" one) without a
    per-theme override. */
 
-/* The always-present affordance: a vertical tab clinging to the right edge of
-   the terminal, so the workspace is discoverable without a toolbar hunt. */
-.workspace-handle {
+/* ---------- Agent details card ----------
+   A frosted card at the top right of an agent's terminal (T3 Code's thread
+   details card, in this theme's tokens). The glass is a translucent raised
+   surface over a blur; where backdrop-filter is missing it falls back to the
+   solid raised colour. */
+.agent-card,
+.agent-card-pill {
   position: absolute;
-  right: 0;
-  top: 50%;
-  transform: translateY(-50%);
+  top: 12px;
+  right: 14px;
   z-index: 19;
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 9px;
-  padding: 15px 7px 16px;
-  background: color-mix(in srgb, var(--bg-raised) 82%, transparent);
-  backdrop-filter: blur(10px) saturate(140%);
-  -webkit-backdrop-filter: blur(10px) saturate(140%);
-  border: 1px solid color-mix(in srgb, var(--border) 90%, transparent);
-  border-right: none;
-  border-radius: 12px 0 0 12px;
-  corner-shape: squircle;
-  color: var(--text-dim);
-  box-shadow: -10px 0 30px -16px rgba(0, 0, 0, 0.6);
-  cursor: pointer;
-  transition:
-    color var(--dur-fast) var(--ease-out),
-    background var(--dur-fast) var(--ease-out),
-    padding-right var(--dur-fast) var(--ease-out);
-}
-.workspace-handle:hover {
   color: var(--text);
-  background: color-mix(in srgb, var(--bg-raised) 94%, transparent);
-  padding-right: 11px;
+  background: var(--bg-raised);
+  border: 1px solid color-mix(in srgb, var(--text) 10%, transparent);
+  box-shadow: 0 10px 34px -14px rgba(0, 0, 0, 0.7);
 }
-.workspace-handle:focus-visible {
+@supports (backdrop-filter: blur(1px)) {
+  .agent-card,
+  .agent-card-pill {
+    /* Dense enough that terminal text behind it never shows through: the blur
+       does not reach a terminal's own layer. */
+    background: color-mix(in srgb, var(--bg-raised) 95%, transparent);
+    backdrop-filter: blur(14px) saturate(1.14);
+    -webkit-backdrop-filter: blur(14px) saturate(1.14);
+  }
+}
+.agent-card {
+  width: 280px;
+  max-height: calc(100% - 28px);
+  overflow-y: auto;
+  border-radius: 16px;
+  corner-shape: squircle;
+  padding: 6px;
+  font-size: 12px;
+}
+.agent-card-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 9px;
+  border-radius: 999px;
+  cursor: pointer;
+  font-size: 11px;
+}
+.agent-card-pill-count {
+  color: var(--text-dim);
+  font-variant-numeric: tabular-nums;
+}
+.agent-card-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px 8px;
+}
+.agent-card-title {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  font-weight: 600;
+}
+.agent-card-machine {
+  margin-left: auto;
+  color: var(--text-dim);
+  font-size: 11px;
+  max-width: 110px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.agent-card-icon-btn {
+  background: none;
+  border: none;
+  color: var(--text-dim);
+  cursor: pointer;
+  font-size: 16px;
+  line-height: 1;
+  padding: 0 4px;
+  border-radius: 6px;
+}
+.agent-card-icon-btn:hover {
+  color: var(--text);
+}
+.agent-card-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 8px;
+  border-radius: 10px;
+  min-width: 0;
+}
+.agent-card-btn {
+  width: 100%;
+  background: none;
+  border: none;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.agent-card-btn:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--text) 7%, transparent);
+}
+.agent-card-btn:disabled {
+  cursor: default;
+  opacity: 0.75;
+}
+.agent-card-btn:focus-visible,
+.agent-card-pill:focus-visible,
+.agent-card-icon-btn:focus-visible,
+.agent-card-task-actions button:focus-visible {
   outline: 2px solid var(--accent);
-  outline-offset: 2px;
+  outline-offset: 1px;
 }
-.workspace-handle-label {
-  writing-mode: vertical-rl;
-  text-orientation: mixed;
+.agent-card-grow {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+.agent-card-ellipsis {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.agent-card-dim {
+  color: var(--text-dim);
+}
+.agent-card-pr-num {
+  color: var(--text-dim);
+  font-variant-numeric: tabular-nums;
+}
+.agent-card-chip {
+  flex: 0 0 auto;
+  padding: 1px 8px;
+  border-radius: 999px;
   font-size: 11px;
   font-weight: 600;
-  letter-spacing: 0.06em;
+  background: color-mix(in srgb, var(--text) 12%, transparent);
+}
+.agent-card-chip-ready,
+.agent-card-chip-approved {
+  background: color-mix(in srgb, var(--accent) 28%, transparent);
+}
+.agent-card-chip-checks-failing,
+.agent-card-chip-conflicts {
+  background: color-mix(in srgb, var(--danger, #e5534b) 30%, transparent);
+}
+.agent-card-pr-row {
+  position: relative;
+}
+.agent-card-prlist {
+  position: absolute;
+  right: 0;
+  bottom: calc(100% + 6px);
+  z-index: 20;
+  width: max-content;
+  min-width: 100%;
+  max-width: 420px;
+  max-height: 260px;
+  overflow-y: auto;
+  margin: 0;
+  padding: 4px;
+  list-style: none;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--bg-elevated, var(--bg)) 92%, transparent);
+  backdrop-filter: blur(14px);
+  box-shadow: 0 8px 28px rgba(0, 0, 0, 0.45);
+}
+.agent-card-prlist-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 5px 8px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.agent-card-prlist-row:hover,
+.agent-card-prlist-row:focus-visible {
+  background: color-mix(in srgb, var(--text) 10%, transparent);
+}
+.agent-card-fix {
+  flex: 0 0 auto;
+  padding: 1px 10px;
+  border-radius: 999px;
+  border: 1px solid color-mix(in srgb, var(--accent) 60%, transparent);
+  background: color-mix(in srgb, var(--accent) 22%, transparent);
+  color: var(--text);
+  font-size: 11px;
+  font-weight: 600;
+  cursor: pointer;
+}
+.agent-card-fix:hover:not(:disabled),
+.agent-card-fix:focus-visible {
+  background: color-mix(in srgb, var(--accent) 40%, transparent);
+}
+.agent-card-fix:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+.agent-card-merge {
+  gap: 6px;
+}
+.agent-card-fix-quiet {
+  border-color: var(--border);
+  background: transparent;
+}
+.agent-card-diffstat {
+  font-variant-numeric: tabular-nums;
+}
+.agent-card-add {
+  color: var(--ok, #3fb950);
+}
+.agent-card-del {
+  color: var(--danger, #e5534b);
+}
+.cpick-fixed {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 16px 14px;
+}
+.cpick-launch {
+  padding: 6px 14px;
+  border-radius: 8px;
+  border: 1px solid var(--accent);
+  background: var(--accent);
+  color: var(--bg);
+  font: inherit;
+  font-weight: 600;
+  cursor: pointer;
+}
+.cpick-launch:focus-visible {
+  outline: 2px solid var(--text);
+  outline-offset: 2px;
+}
+.cpick-hint-inline {
+  color: var(--text-dim);
+  font-size: 11px;
+}
+.tab-pin-mark {
+  display: inline-flex;
+  align-items: center;
+  flex: 0 0 auto;
+  margin-right: 4px;
+  color: var(--accent);
+  opacity: 0.85;
+}
+.agent-card-assets {
+  list-style: none;
+  margin: 0 0 4px;
+  padding: 0 4px;
+  max-height: 220px;
+  overflow-y: auto;
+}
+.agent-card-asset {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 5px 6px;
+  background: none;
+  border: none;
+  border-radius: 8px;
+  color: var(--text);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  min-width: 0;
+}
+.agent-card-asset:hover,
+.agent-card-asset:focus-visible {
+  background: color-mix(in srgb, var(--text) 8%, transparent);
+  outline: none;
+}
+.agent-card-asset-kind {
+  flex: 0 0 auto;
+  min-width: 48px;
+  color: var(--text-dim);
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+.agent-card-asset-name {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+/* Over everything, beside the card, and out of the pointer's way. */
+.asset-preview {
+  position: fixed;
+  z-index: 60;
+  box-sizing: border-box;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  pointer-events: none;
+  border-radius: 14px;
+  color: var(--text);
+  background: var(--bg-raised);
+  border: 1px solid color-mix(in srgb, var(--text) 14%, transparent);
+  box-shadow: 0 18px 48px -18px rgba(0, 0, 0, 0.8);
+}
+.asset-preview-head {
+  padding: 9px 12px;
+  font-size: 12px;
+  font-weight: 600;
+  border-bottom: 1px solid color-mix(in srgb, var(--text) 10%, transparent);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.asset-preview-body {
+  padding: 10px 12px;
+  overflow: hidden;
+  font-size: 12px;
+}
+.asset-preview-body img {
+  display: block;
+  max-width: 100%;
+  max-height: 280px;
+  margin: 0 auto;
+  border-radius: 6px;
+}
+.asset-preview-body pre {
+  margin: 0;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  line-height: 1.5;
+}
+.asset-preview-dim,
+.asset-preview-foot {
+  color: var(--text-dim);
+  font-size: 11px;
+}
+.asset-preview-foot {
+  padding: 6px 12px;
+  border-top: 1px solid color-mix(in srgb, var(--text) 10%, transparent);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+:root[data-theme="pixel"] .asset-preview {
+  box-shadow: none;
+}
+.agent-card-lineage {
+  padding: 2px 0;
+}
+.agent-card-lineage-head {
+  padding: 6px 8px 2px;
+  color: var(--text-dim);
+  font-size: 11px;
+}
+.agent-card-subs {
+  list-style: none;
+  margin: 0;
+  padding: 0 4px;
+  max-height: 200px;
+  overflow-y: auto;
+}
+.agent-card-sub {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 0;
+  padding: 4px 6px;
+  border-radius: 8px;
+  min-width: 0;
+}
+.agent-card-sub:hover {
+  background: color-mix(in srgb, var(--text) 6%, transparent);
+}
+.agent-card-sub-dot {
+  flex: 0 0 8px;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--text-dim);
+}
+.agent-card-sub-running .agent-card-sub-dot {
+  background: var(--accent);
+}
+.agent-card-sub-failed .agent-card-sub-dot {
+  background: var(--danger, #e5534b);
+}
+.agent-card-sub-done .agent-card-sub-dot {
+  background: var(--ok, #3fb950);
+}
+.agent-card-sub-name {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.agent-card-sub-age {
+  flex: 0 0 auto;
+  font-variant-numeric: tabular-nums;
+}
+.agent-card-current {
+  margin: -2px 8px 4px 30px;
+  color: var(--text-dim);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.agent-card-tasks {
+  list-style: none;
+  margin: 0 0 4px;
+  padding: 0 4px;
+  max-height: 240px;
+  overflow-y: auto;
+}
+.agent-card-task {
+  display: grid;
+  grid-template-columns: 16px 1fr;
+  gap: 2px 6px;
+  padding: 5px 6px;
+  border-radius: 8px;
+}
+.agent-card-task:hover {
+  background: color-mix(in srgb, var(--text) 6%, transparent);
+}
+.agent-card-task-completed .agent-card-task-text {
+  color: var(--text-dim);
+  text-decoration: line-through;
+}
+.agent-card-task-running .agent-card-task-mark {
+  color: var(--accent);
+}
+.agent-card-task-actions {
+  grid-column: 2;
+  display: flex;
+  gap: 6px;
+}
+.agent-card-task-actions button {
+  background: none;
+  border: 1px solid color-mix(in srgb, var(--text) 14%, transparent);
+  color: var(--text-dim);
+  border-radius: 6px;
+  font-size: 11px;
+  padding: 1px 7px;
+  cursor: pointer;
+}
+.agent-card-task-actions button:hover {
+  color: var(--text);
+  border-color: color-mix(in srgb, var(--text) 30%, transparent);
 }
 
 /* ---------- Agent browser picture in picture ----------
@@ -6727,6 +7141,20 @@ body.dragging-tab * {
   user-select: none;
   pointer-events: none;
   -webkit-user-drag: none;
+}
+.agent-browser-pip-embed {
+  /* Render at desktop width and scale down so the page isn't laid out at the
+     pip's tiny width. Read-only: pointer events never reach the page. */
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 1280px;
+  height: 720px;
+  border: 0;
+  background: #fff;
+  transform-origin: top left;
+  transform: scale(calc(var(--pip-w, 400) / 1280));
+  pointer-events: none;
 }
 .agent-browser-pip-readonly {
   position: absolute;
@@ -7052,8 +7480,7 @@ body.dragging-tab * {
 }
 @media (prefers-reduced-motion: reduce) {
   .workspace-overlay-layer,
-  .workspace-overlay,
-  .workspace-handle {
+  .workspace-overlay {
     transition: none;
   }
 }
@@ -8227,6 +8654,57 @@ body.dragging-tab * {
 
 /* ---------- agents panel ---------- */
 
+/* Thread-list shape (after T3 Code's sidebar): component headings, then rows
+   with the status or age pinned to the right. */
+.agent-group-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 8px 10px 4px;
+  background: none;
+  border: none;
+  color: var(--text);
+  font: inherit;
+  font-weight: 600;
+  cursor: pointer;
+  text-align: left;
+}
+.agent-group-head:hover {
+  background: color-mix(in srgb, var(--text) 5%, transparent);
+}
+.agent-group-head:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+.agent-group-name {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.agent-group-count,
+.agent-group-chevron {
+  color: var(--text-dim);
+  font-weight: 400;
+  font-size: 11px;
+}
+.agent-trail {
+  margin-left: auto;
+  flex: 0 0 auto;
+  color: var(--text-dim);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+.agent-trail-working {
+  color: var(--accent);
+  font-weight: 600;
+}
+.agent-trail-waiting {
+  color: var(--warn, #d29922);
+  font-weight: 600;
+}
 .agent-row {
   padding: 6px 10px;
   border-bottom: 1px solid var(--border);
@@ -10966,6 +11444,19 @@ body.dragging-tab * {
   line-height: 1.45;
   color: var(--text-dim);
   max-width: 60ch;
+}
+
+/* A hint is a second line under its label wherever the checkbox sits, not
+   only inside .set-checks; otherwise it runs on straight after the label. */
+.set-inline-check.has-hint {
+  align-items: flex-start;
+}
+
+.set-inline-check.has-hint em {
+  display: block;
+  margin-top: 2px;
+  font-style: normal;
+  color: var(--text-dim);
 }
 
 /* The UA checkbox and radio are ~13px system controls with a system-blue
@@ -20878,6 +21369,91 @@ a.btn-sm {
   gap: 8px;
 }
 
+.acp-picker {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.acp-picker {
+  position: relative;
+}
+
+.acp-picker-toggle {
+  align-self: flex-start;
+}
+
+/* The connector dropdown: verified presets, then the registry's list, each with
+   its brand mark. Scrolls rather than growing the settings page. */
+.acp-menu {
+  list-style: none;
+  margin: 0;
+  padding: 4px;
+  max-height: 320px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  background: var(--bg-raised);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  box-shadow: 0 12px 32px -16px rgba(0, 0, 0, 0.65);
+}
+
+.acp-menu-item {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  width: 100%;
+  padding: 6px 8px;
+  background: none;
+  border: none;
+  border-radius: 7px;
+  color: var(--text);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.acp-menu-item:hover,
+.acp-menu-item:focus-visible {
+  background: color-mix(in srgb, var(--text) 8%, transparent);
+  outline: none;
+}
+
+.acp-menu-name {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.acp-menu-note {
+  padding: 6px 8px;
+}
+
+.acp-badge {
+  font-size: 10px;
+  padding: 0 4px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  color: var(--text-dim);
+}
+
+.cli-bin-login {
+  font-size: 11px;
+  color: var(--text-dim);
+  white-space: nowrap;
+}
+
+.cli-bin-add {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding-top: 6px;
+}
+
 .cli-custom-hint {
   font-size: 11px;
   color: var(--text-dim);
@@ -28904,6 +29480,52 @@ a.btn-sm {
   border-color: var(--border-strong);
 }
 
+.cpick-machine {
+  display: grid;
+  gap: 6px;
+  padding: 12px 20px 4px;
+}
+
+.cpick-machine-label {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+}
+
+.cpick-machine-options {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.cpick-machine-options button {
+  min-height: 28px;
+  padding: 4px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  background: var(--surface-raised);
+  color: var(--text-dim);
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.cpick-machine-options button:hover,
+.cpick-machine-options button:focus-visible {
+  border-color: var(--border-strong);
+  color: var(--text);
+  outline: none;
+}
+
+.cpick-machine-options button.is-selected {
+  border-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 12%, var(--surface-raised));
+  color: var(--text);
+}
+
 .cpick-hint {
   display: flex;
   gap: 16px;
@@ -28912,4 +29534,604 @@ a.btn-sm {
   color: var(--text-faint);
   padding: 9px 20px 12px;
   border-top: 1px solid var(--border);
+}
+
+/* Remote desktop (docs/remote-desktop.md). The banner is the controlled-side
+   indicator: it sits above everything and cannot be dismissed, only stopped. */
+.desk-banner {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  z-index: 400;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  padding: 6px 12px;
+  background: var(--danger);
+  color: var(--on-danger);
+  font-size: var(--fs-sm);
+  font-weight: 600;
+}
+.desk-banner .btn {
+  border-color: var(--on-danger);
+  color: var(--on-danger);
+}
+.desk-banner .btn:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--on-danger) 14%, transparent);
+}
+.desk-viewer {
+  position: fixed;
+  inset: 48px 24px 24px;
+  z-index: 300;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg-overlay);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--r-md);
+  box-shadow: var(--shadow-2);
+  overflow: hidden;
+}
+.desk-viewer-bar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 12px;
+  font-size: var(--fs-sm);
+}
+.desk-spacer { flex: 1; }
+.desk-badge {
+  padding: 1px 8px;
+  border-radius: var(--r-sm);
+  border: 1px solid var(--border-strong);
+}
+.desk-badge.control { border-color: var(--danger); color: var(--danger); }
+.desk-status { color: var(--text-muted); }
+.desk-canvas {
+  flex: 1;
+  min-height: 0;
+  width: 100%;
+  object-fit: contain;
+  background: var(--bg-deep);
+  outline: none;
+}
+.desk-canvas:focus-visible { box-shadow: inset var(--ring); }
+.desk-members { padding: 8px 12px; }
+.desk-member-row { align-items: center; }
+.desk-member-actions { display: flex; gap: 6px; flex: 0 0 auto; }
+.desk-request-status,
+.desk-inline-error,
+.desk-trust { display: block; margin-top: 3px; font-size: var(--fs-xs); }
+.desk-request-status,
+.desk-trust { color: var(--text-muted); }
+.desk-inline-error,
+.desk-trust.changed { color: var(--danger); }
+
+/* Frosted preview: the card's translucency, with enough blur that the terminal
+   text behind it never bleeds through. */
+@supports (backdrop-filter: blur(1px)) {
+  .asset-preview {
+    background: color-mix(in srgb, var(--bg-raised) 66%, transparent);
+    backdrop-filter: blur(22px) saturate(1.4);
+    -webkit-backdrop-filter: blur(22px) saturate(1.4);
+  }
+  .agent-card,
+  .agent-card-pill {
+    backdrop-filter: blur(22px) saturate(1.4);
+    -webkit-backdrop-filter: blur(22px) saturate(1.4);
+  }
+}
+/* Sections read as separate groups: a hairline between each, not one run of text. */
+.agent-card > * + * {
+  border-top: 1px solid color-mix(in srgb, var(--text) 10%, transparent);
+  margin-top: 4px;
+  padding-top: 4px;
+}
+/* Tasks as a notepad checklist: one ruled line per item. */
+.agent-card-task {
+  border-bottom: 1px dashed color-mix(in srgb, var(--text) 12%, transparent);
+}
+.agent-card-task:last-child {
+  border-bottom: 0;
+}
+
+/* Safe and destructive choices must not look alike. */
+.branch-switch-choice-lead {
+  border-color: var(--ok, #3fb950);
+  background: color-mix(in srgb, var(--ok, #3fb950) 14%, transparent);
+}
+.branch-switch-choice-danger {
+  border-color: color-mix(in srgb, var(--danger, #e5534b) 70%, transparent);
+  background: color-mix(in srgb, var(--danger, #e5534b) 12%, transparent);
+}
+.branch-switch-choice-danger .branch-switch-choice-label {
+  color: var(--danger, #e5534b);
+}
+
+/* Teleport dialog: compact checklist and one linear step bar. */
+.tp { display: flex; flex-direction: column; gap: 10px; font-size: 12px; }
+.tp-head { margin: 0; font-size: 10px; letter-spacing: 0.08em; color: var(--text-dim, #9aa3ad); }
+.tp-list { list-style: none; margin: 0; padding: 0; }
+.tp-item {
+  display: flex; align-items: center; gap: 8px; padding: 5px 0;
+  border-bottom: 1px dashed color-mix(in srgb, var(--text) 12%, transparent);
+}
+.tp-item:last-child { border-bottom: 0; }
+.tp-item > :first-child { flex: 1; min-width: 0; }
+.tp-detail { color: var(--text-dim, #9aa3ad); font-size: 11px; }
+.tp-reasons { margin: 0; padding: 8px 10px 8px 24px; border-radius: 8px; color: var(--danger, #e5534b); background: color-mix(in srgb, var(--danger, #e5534b) 10%, transparent); }
+.tp-error { margin: 0; color: var(--danger, #e5534b); }
+.tp-steps { list-style: none; margin: 4px 0 0; padding: 0; display: flex; align-items: flex-start; }
+.tp-step { flex: 1; display: flex; flex-direction: column; align-items: center; gap: 4px; position: relative; font-size: 10px; color: var(--text-dim, #9aa3ad); }
+.tp-step + .tp-step::before { content: ""; position: absolute; top: 10px; right: 50%; width: 100%; height: 2px; background: color-mix(in srgb, var(--text) 14%, transparent); z-index: 0; }
+.tp-step-done + .tp-step::before, .tp-step-now::before, .tp-step-failed::before { background: var(--ok, #3fb950); }
+.tp-dot { position: relative; z-index: 1; width: 22px; height: 22px; border-radius: 50%; display: flex; align-items: center; justify-content: center; font-size: 11px; background: var(--bg-raised); border: 1px solid color-mix(in srgb, var(--text) 25%, transparent); }
+.tp-step-done .tp-dot { background: var(--ok, #3fb950); border-color: var(--ok, #3fb950); color: #0a0d12; }
+.tp-step-now .tp-dot { border-color: var(--accent, #f4b13d); color: var(--accent, #f4b13d); }
+.tp-step-now .tp-step-label { color: var(--accent, #f4b13d); }
+.tp-step-failed .tp-dot { border-color: var(--danger, #e5534b); color: var(--danger, #e5534b); }
+
+/* A file from another machine: read-only, with the machine named. */
+.remote-file {
+  width: min(780px, 92vw);
+  max-height: 80vh;
+  display: flex;
+  flex-direction: column;
+  border-radius: 14px;
+  background: var(--bg-raised);
+  border: 1px solid color-mix(in srgb, var(--text) 14%, transparent);
+  box-shadow: 0 24px 60px -20px rgba(0, 0, 0, 0.8);
+  overflow: hidden;
+}
+.remote-file-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 14px;
+  border-bottom: 1px solid color-mix(in srgb, var(--text) 10%, transparent);
+}
+.remote-file-machine {
+  font-size: 11px;
+  padding: 1px 8px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--accent, #f4b13d) 22%, transparent);
+  color: var(--accent, #f4b13d);
+}
+.remote-file-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.remote-file-ro, .remote-file-dim, .remote-file-foot { font-size: 11px; color: var(--text-dim, #9aa3ad); }
+.remote-file-close { background: none; border: 0; color: inherit; font-size: 18px; cursor: pointer; }
+.remote-file-body { overflow: auto; padding: 12px 14px; min-height: 80px; }
+.remote-file-body pre { margin: 0; font: 12px/1.5 var(--mono, ui-monospace, monospace); white-space: pre-wrap; word-break: break-word; }
+.remote-file-body img { max-width: 100%; }
+.remote-file-foot { padding: 7px 14px; border-top: 1px solid color-mix(in srgb, var(--text) 10%, transparent); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* A remote terminal waiting for the person to reconnect to its machine. */
+.term-reconnect {
+  display: grid;
+  gap: 10px;
+  justify-items: start;
+  padding: 16px;
+  font-size: 12px;
+  color: var(--text-dim, inherit);
+}
+.term-reconnect p {
+  margin: 0;
+}
+.term-reconnect-problem {
+  color: var(--danger, #e5534b);
+}
+.term-reconnect-actions {
+  display: flex;
+  gap: 8px;
+}
+
+/* Sign-in state beside a CLI's name: a dot, not a line of its own. */
+.cli-login-dot {
+  display: inline-block;
+  width: 7px;
+  height: 7px;
+  margin-left: 6px;
+  border-radius: 50%;
+  vertical-align: middle;
+  flex: none;
+}
+.cli-login-dot-on {
+  background: var(--ok, #3fb950);
+}
+.cli-login-dot-off {
+  background: transparent;
+  box-shadow: inset 0 0 0 1.5px color-mix(in srgb, var(--text) 40%, transparent);
+}
+
+/* A terminal that runs on another machine says so on its tab. */
+.tab-machine {
+  margin-left: 4px;
+  padding: 0 5px;
+  border-radius: 5px;
+  font-size: 9px;
+  letter-spacing: 0.04em;
+  color: var(--accent, #f4b13d);
+  background: color-mix(in srgb, var(--accent, #f4b13d) 16%, transparent);
+  flex: none;
+  max-width: 90px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+/* In "All workspaces", a coloured left edge tells the machines apart. */
+:root[data-all-workspaces="on"] .tabs .tab {
+  box-shadow: inset 3px 0 0 #6e9fff;
+}
+:root[data-all-workspaces="on"] .tabs .tab.tab-remote {
+  box-shadow: inset 3px 0 0 #f4b13d;
+}
+
+/* ---------- Agents panel: a flat, keyboard-first list ----------
+   One list, no nested boxes: group heads are quiet labels, a row is a status
+   dot, the name in full, and small right-aligned meta. The cursor row carries
+   the actions; the whole panel is walked with j/k and Enter (see AgentsPanel). */
+.ap2 {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  padding-bottom: 4px;
+}
+.ap2-filter {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 10px 6px;
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  background: var(--bg);
+}
+.ap2-filter-input {
+  flex: 1;
+  min-width: 0;
+  height: 28px;
+  padding: 0 9px;
+  font: inherit;
+  font-size: 12px;
+  color: var(--text);
+  background: var(--bg-deep, var(--bg-alt));
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm, 6px);
+}
+.ap2-filter-input:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -1px;
+}
+.ap2-keys-toggle,
+.ap2-foot-btn,
+.ap2 .share-peek {
+  font: inherit;
+  font-size: 11px;
+  color: var(--text-dim);
+  background: none;
+  border: 1px solid transparent;
+  border-radius: var(--r-sm, 6px);
+  padding: 2px 7px;
+  cursor: pointer;
+}
+.ap2-keys-toggle:hover,
+.ap2-foot-btn:hover,
+.ap2 .share-peek:hover,
+.ap2-keys-toggle[aria-pressed="true"] {
+  color: var(--text);
+  border-color: var(--border);
+}
+.ap2-keys-toggle:focus-visible,
+.ap2-foot-btn:focus-visible,
+.ap2 .share-peek:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+.ap2-keys {
+  margin: 0 10px 6px;
+  padding: 6px 8px;
+  font-size: 11px;
+  color: var(--text-dim);
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm, 6px);
+}
+.ap2-keys > div {
+  display: flex;
+  gap: 10px;
+  padding: 1px 0;
+}
+.ap2-keys dt {
+  flex: 0 0 74px;
+  margin: 0;
+  color: var(--text);
+  font-weight: 600;
+}
+.ap2-keys dd {
+  margin: 0;
+}
+
+.ap2-list {
+  outline: none;
+  padding-bottom: 4px;
+}
+.ap2-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 10px 12px 3px;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+}
+.ap2-head-urgent {
+  color: var(--warn, #d29922);
+}
+.ap2-count {
+  margin-left: 4px;
+  font-weight: 600;
+  letter-spacing: 0;
+  color: var(--text-faint, var(--text-dim));
+}
+.ap2-sub {
+  padding: 5px 12px 1px;
+  font-size: 11px;
+  color: var(--text-faint, var(--text-dim));
+}
+.ap2-quiet {
+  opacity: 0.92;
+}
+
+.ap2-row {
+  position: relative;
+  display: grid;
+  gap: 1px;
+  margin: 0 6px;
+  padding: 5px 8px 5px 10px;
+  border-radius: var(--r-sm, 6px);
+  font-size: 12px;
+  line-height: 1.4;
+  cursor: pointer;
+}
+.ap2-row:hover {
+  background: color-mix(in srgb, var(--text) 5%, transparent);
+}
+.ap2-row.is-active {
+  background: color-mix(in srgb, var(--accent) 9%, transparent);
+}
+.ap2-row.is-cursor {
+  background: color-mix(in srgb, var(--text) 8%, transparent);
+}
+.ap2-list:focus .ap2-row.is-cursor {
+  background: color-mix(in srgb, var(--accent) 16%, transparent);
+  box-shadow: inset 2px 0 0 var(--accent);
+}
+.ap2-line {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  min-width: 0;
+}
+.ap2-dot {
+  flex: 0 0 auto;
+  width: 7px;
+  height: 7px;
+  margin-top: 5px;
+  border-radius: 50%;
+  background: var(--text-faint, #6b7480);
+}
+.ap2-dot-working {
+  background: var(--ok, #3fb950);
+}
+.ap2-dot-waiting {
+  background: var(--warn, #d29922);
+}
+.ap2-dot-idle {
+  background: var(--text-dim);
+}
+.ap2-dot-ended,
+.ap2-dot-none {
+  background: transparent;
+  box-shadow: inset 0 0 0 1.5px var(--text-faint, #6b7480);
+}
+.ap2-mark {
+  flex: 0 0 auto;
+  margin-top: 2px;
+  color: var(--text-dim);
+}
+/* The name is read in full: it wraps rather than being clipped to "cl…". */
+.ap2-name {
+  min-width: 0;
+  font-weight: 600;
+  color: var(--text);
+  overflow-wrap: anywhere;
+}
+.ap2-spacer {
+  flex: 1;
+}
+.ap2-trail {
+  flex: 0 0 auto;
+  font-size: 11px;
+  color: var(--text-faint, var(--text-dim));
+  white-space: nowrap;
+}
+.ap2-trail-working {
+  color: var(--ok, #3fb950);
+}
+.ap2-trail-waiting,
+.ap2-trail.is-armed {
+  color: var(--warn, #d29922);
+  font-weight: 600;
+}
+.ap2-badge {
+  flex: 0 0 auto;
+  padding: 0 6px;
+  font-size: 10px;
+  font-weight: 700;
+  color: var(--on-accent, #1a1b26);
+  background: var(--warn, #e0af68);
+  border-radius: 999px;
+}
+.ap2-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 6px;
+  padding-left: 13px;
+  font-size: 11px;
+  color: var(--text-dim);
+}
+.ap2-meta:empty {
+  display: none;
+}
+.ap2-chip {
+  padding: 0 6px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--text) 7%, transparent);
+  color: var(--text-dim);
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ap2-chip-branch {
+  color: var(--ok, #3fb950);
+}
+.ap2-chip-port {
+  font: inherit;
+  font-size: 11px;
+  border: 0;
+  cursor: pointer;
+}
+/* The prompt is the one line that is allowed to be cut. */
+.ap2-prompt {
+  padding-left: 13px;
+  font-size: 11px;
+  color: var(--text-dim);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ap2-stats {
+  padding-left: 13px;
+  font-size: 10px;
+  color: var(--text-faint, var(--text-dim));
+}
+.ap2-actions {
+  position: absolute;
+  top: 3px;
+  right: 6px;
+  display: none;
+  gap: 2px;
+  padding: 1px;
+  border-radius: var(--r-sm, 6px);
+  background: var(--bg-raised);
+  border: 1px solid var(--border);
+}
+.ap2-row:hover .ap2-actions,
+.ap2-row.is-cursor .ap2-actions,
+.ap2-row:focus-within .ap2-actions {
+  display: flex;
+}
+.ap2-row:hover .ap2-trail,
+.ap2-row.is-cursor .ap2-trail {
+  visibility: hidden;
+}
+.ap2-row:hover .ap2-trail.is-armed,
+.ap2-row.is-cursor .ap2-trail.is-armed {
+  visibility: visible;
+}
+.ap2-act {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 22px;
+  height: 20px;
+  font: inherit;
+  font-size: 11px;
+  color: var(--text-dim);
+  background: none;
+  border: 0;
+  border-radius: 4px;
+  cursor: pointer;
+}
+.ap2-act:hover {
+  color: var(--text);
+  background: color-mix(in srgb, var(--text) 10%, transparent);
+}
+.ap2-act-danger:hover {
+  color: var(--danger);
+}
+.ap2-act-text {
+  padding: 0 6px;
+}
+.ap2-more {
+  color: var(--text-dim);
+  font-size: 11px;
+}
+.ap2-more kbd {
+  margin-left: 4px;
+  padding: 0 4px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  font: inherit;
+  font-size: 10px;
+}
+.ap2-empty {
+  padding: 18px 12px;
+  font-size: 12px;
+  color: var(--text-dim);
+}
+.ap2-foot {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 2px 4px;
+  margin: 8px 6px 0;
+  padding-top: 6px;
+  border-top: 1px solid var(--border);
+}
+.ap2-on {
+  color: var(--ok, #3fb950);
+  font-weight: 600;
+}
+.ap2-off {
+  color: var(--text-faint, var(--text-dim));
+}
+.ap2 .runaway-badge {
+  flex: 0 0 auto;
+}
+
+.agent-card-sub-btn {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.agent-card-sub-btn:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  border-radius: 4px;
+}
+.agent-card-sub-result {
+  margin: 6px 0 2px 16px;
+  padding: 8px 10px;
+  max-height: 220px;
+  overflow-y: auto;
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--text) 7%, transparent);
+  font-size: 12px;
+  line-height: 1.45;
+  white-space: pre-wrap;
+  word-break: break-word;
+  user-select: text;
 }

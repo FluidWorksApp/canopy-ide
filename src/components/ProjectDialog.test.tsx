@@ -3,6 +3,12 @@ import { describe, expect, it, vi } from "vitest";
 import type { Project } from "../projects";
 import { ProjectDialog } from "./ProjectDialog";
 import { updateSettings } from "../settings";
+import { getProjectPreference } from "../placement/preferences";
+import { automaticPreference, inheritPreference } from "../placement/types";
+
+vi.mock("../placement/gather", () => ({
+  gatherUnified: vi.fn(() => new Promise(() => {})),
+}));
 
 vi.mock("@tauri-apps/plugin-dialog", () => ({
   open: vi.fn(async () => "/repo/new-app"),
@@ -28,6 +34,18 @@ const existing = (configured = true): Project => ({
 });
 
 describe("ProjectDialog project structure identity", () => {
+  it("persists Automatic separately from Use default when saved", () => {
+    localStorage.clear();
+    render(<ProjectDialog existing={existing()} onSave={vi.fn()} onCancel={() => {}} />);
+    expect(screen.getAllByRole("option").map((option) => option.textContent)).toEqual(
+      expect.arrayContaining(["Use default", "Automatic", "This Mac"]),
+    );
+    fireEvent.change(screen.getByLabelText("Run agents on"), { target: { value: "automatic" } });
+    expect(getProjectPreference("p1")).toEqual(inheritPreference());
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    expect(getProjectPreference("p1")).toEqual(automaticPreference());
+  });
+
   it("stamps the onboarding default lens onto a new project", async () => {
     localStorage.clear();
     updateSettings({ defaultProjectLens: "build" });

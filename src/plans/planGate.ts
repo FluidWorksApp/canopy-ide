@@ -259,7 +259,7 @@ export async function dispatchWithPlan(req: DispatchRequest, launch: Launch): Pr
   });
   put({ id, phase: "planning", req });
 
-  const ctx = await gatherPlanContext(req.dir, req.request).catch(() => ({ tree: [], relevant: [], memory: [] }));
+  const ctx = await gatherPlanContext(req.dir, req.request).catch(() => ({ tree: [], relevant: [] }));
   if (settled) return;
   const answer = await askBrain({
     feature: "plan",

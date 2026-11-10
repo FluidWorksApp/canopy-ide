@@ -54,10 +54,6 @@ export interface AgentEventData {
    *  CLIs whose plugin fires an explicit signal; the rest are mapped from the
    *  event name. Nothing anywhere re-derives meaning from `message`. */
   signal?: string;
-  /** A shell tool call's command line, clipped — read by team memory's
-   *  untrusted-content rule (memoryLedger.ts), which needs to tell
-   *  `gh issue view` from `npm test`. Tool events only. */
-  toolCommand?: string;
   /** codex's turn-complete carries the agent's last words. */
   lastAssistantMessage?: string;
   transcriptPath?: string;
@@ -196,10 +192,6 @@ export function parseAgentEvent(raw: string): AgentEventData | null {
   const last = parsed.last_assistant_message ?? parsed["last-assistant-message"];
   if (typeof last === "string" && last.trim())
     data.lastAssistantMessage = last.trim();
-  if (event === "PostToolUse" || event === "PreToolUse") {
-    const command = (parsed.tool_input as { command?: unknown } | undefined)?.command;
-    if (typeof command === "string" && command) data.toolCommand = command.slice(0, 400);
-  }
   if (typeof parsed.canopy_plan_id === "string" && /^pl-[a-z0-9]{1,16}-[a-z0-9]{1,16}$/.test(parsed.canopy_plan_id))
     data.planId = parsed.canopy_plan_id;
   if (typeof parsed.transcript_path === "string")

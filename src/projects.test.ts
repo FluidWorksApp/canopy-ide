@@ -307,6 +307,8 @@ describe("dangerouslySkipPermissions", () => {
       .toBe("cursor-agent 'build' --auto-review --model 'composer-1'");
     expect(startCommand("grok", "build", { model: "grok-4.5" })?.command)
       .toBe("grok 'build' --permission-mode auto --model 'grok-4.5'");
+    expect(startCommand("kiro", "build", { model: "auto", effort: "high" })?.command)
+      .toBe("kiro-cli chat 'build' --agent canopy --model 'auto' --effort 'high'");
   });
 
   it("leaves custom CLIs alone — we know nothing about their flags", () => {
@@ -350,6 +352,10 @@ describe("dangerouslySkipPermissions", () => {
       command: "grok --always-approve",
       resumeTemplate: "grok --resume __CANOPY_SESSION_ID__ --always-approve",
     });
+    expect(rows.find((row) => row.id === "kiro")).toMatchObject({
+      command: "kiro-cli --agent canopy --trust-all-tools",
+      resumeTemplate: "kiro-cli --resume-id __CANOPY_SESSION_ID__ --agent canopy --trust-all-tools",
+    });
   });
 });
 
@@ -381,6 +387,13 @@ describe("unattended working mode", () => {
     });
     expect(startCommand("grok", "hi")?.command).toBe("grok 'hi' --permission-mode auto");
     expect(startCommand("cursor", "hi")?.command).toBe("cursor-agent 'hi' --auto-review");
+    expect(startCommand("kiro", "hi")?.command).toBe("kiro-cli chat 'hi' --agent canopy");
+  });
+
+  it("resumes Kiro by session id and reads the id back from the command", () => {
+    expect(restoreCommand("kiro", "abc-1")).toBe("kiro-cli --resume-id abc-1 --agent canopy");
+    expect(resumeSessionId("kiro-cli --resume-id abc-1 --agent canopy")).toBe("abc-1");
+    expect(resumeSessionId("kiro-cli --resume-id abc-1")).toBe("abc-1");
   });
 
   it("automates Aider confirmations and leaves Amp on its automatic default", () => {
@@ -1313,7 +1326,7 @@ describe("remembered agent permission settings", () => {
   updateSettings({dangerouslySkipPermissions:false});
   expect(rememberedAgentCommand(bypass)).toBe(saved);
  });
- it.each(["claude", "codex", "opencode", "omp", "aider"])("rebuilds remembered bare and automatic %s launches", agent => {
+ it.each(["claude", "codex", "opencode", "omp", "aider", "kiro"])("rebuilds remembered bare and automatic %s launches", agent => {
   const cli = AGENT_CLIS.find(cli => cli.id === agent)!;
   updateSettings({dangerouslySkipPermissions:false});
   const automatic = launchCommand(cli);

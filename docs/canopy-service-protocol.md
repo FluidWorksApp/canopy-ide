@@ -46,8 +46,7 @@ Same paths, request bodies and response shapes as the desktop bridge
 credential>`. The service serves:
 
 `GET /ctx/identity`, `GET /ctx/tools`, `GET|POST /ctx/claims`, `POST /ctx/mesh`,
-`POST /ctx/notes`, `POST /ctx/research`, `POST /ctx/memory` (team memory, from
-the copy the desktop syncs; proposals queue for the desktop's ledger), `POST /ctx/action` for kinds
+`POST /ctx/notes`, `POST /ctx/research`, `POST /ctx/action` for kinds
 `job_done`, `task_named`, `notify`, `mesh_send`, `message_agent` (ptyId/name
 targets only), `close_session`; `POST /ctx/ask` (ask_user/confirm, §5);
 `POST /ctx/browser` (forwarded to the runner, §4); `POST /ctx/device` (the
@@ -76,7 +75,7 @@ workspace name supplied at registration, its root `/workspace`.
 | `PUT /admin/workspaces/{ws}/access` | signed access snapshot (§6) | `{revision}`; rejects rollback and bad signatures |
 | `GET /admin/workspaces/{ws}/stream?cursor=<epoch>:<seq>` | — | SSE, §5 |
 | `POST /admin/workspaces/{ws}/query` | `{store, action, args}` | same JSON the desktop's Tauri command returns for that store/action (reads only) |
-| `POST /admin/workspaces/{ws}/actions` | `{kind, ...}` with the acting user in `actor` | user actions: `answer` (ask_user), `attention_ack`, `notes_write`, `research_write`; `memory_sync` `{root, entries}` replaces the synced team-memory copy (only approved, in-date memory entries are kept) and `memory_ack` `{ids}` drops proposals the desktop has recorded (query `memory` `list` / `proposals` reads them) |
+| `POST /admin/workspaces/{ws}/actions` | `{kind, ...}` with the acting user in `actor` | user actions: `answer` (ask_user), `attention_ack`, `notes_write`, `research_write` |
 | `GET /admin/device` | — | `{deviceId, keys:{agreement,signing}}` public JWKs of this host's relay device |
 
 The gateway is the only admin client. It authenticates IDE users with its
@@ -150,6 +149,12 @@ The service reaches the container runner with the `runnerUrl` and
   browser 503 `not-implemented`; errors are `{error}`. One headless page per
   workspace runtime, profile `/home/agent/.canopy/browser-profiles/agent-tools`,
   ops serialized; `url`/`project` selectors are ignored (there is one page).
+  People watch and drive the same page over the runner's WebSocket
+  `/browser/stream` (ticketed by the gateway like `/desktop/ws`; ported from
+  T3 Code's preview stream, `packages/remote-host/browser-stream.mjs`). While a
+  person holds control, actions answer 409 `{error, reason:"humanControl"}`
+  (reads — `snapshot`, `console`, `network`, `screenshot` — still run); a
+  pending page dialog answers 409 `reason:"dialogPending"`.
 
 ## 5. Stream and attention
 

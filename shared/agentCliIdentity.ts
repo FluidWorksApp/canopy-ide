@@ -6,3 +6,8 @@
  * state; use registry aliases if a key itself ever has to be retired.
  */
 export const DEFAULT_AGENT_CLI_ID = "claude";
+
+/** The agent whose conversation transcript Teleport can rewrite and resume
+ *  (src/teleport/claudeTranscript.ts): the one place a feature is tied to a
+ *  vendor on purpose. */
+export const TELEPORT_CLI_ID = "claude";

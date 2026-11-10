@@ -2,7 +2,7 @@
 // one: the ticket tab's "▶ Start work" split-button and the PR header's
 // "Review ▾" dropdown. It owns the agent menu (running agents to send to, or a
 // fresh CLI in a worktree) and either an agent or task primary action.
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { AGENT_CLIS } from "../projects";
 import { resolveBrain } from "../brain";
 import { agentMenuItems } from "../agentMenu";
@@ -10,6 +10,61 @@ import { ContextMenu, useContextMenu, type MenuItem } from "./ContextMenu";
 import { AgentsIcon, TasksIcon } from "./icons";
 import type { AgentTarget } from "./TicketsPanel";
 import { Button } from "./ui";
+import { Dialog } from "./Dialog";
+import { ProjectSetupDialog } from "../remoteExecution/ProjectSetupDialog";
+import { decideLaunch } from "../placement/launch";
+import { effectivePreference } from "../placement/balancer";
+import {
+  getAgentPreference,
+  getGlobalPreference,
+  getProjectPreference,
+  setAgentPreference,
+} from "../placement/preferences";
+import {
+  targetKey,
+  type DisplayTarget,
+  type PlacementDecision,
+  type Preference,
+  type Target,
+} from "../placement/types";
+import { PlacementPicker } from "./PlacementPicker";
+import { canLaunchOnActiveTarget, requestTargetTransition } from "../placement/transitions";
+
+/** Where an agent launched from this button should run. Omit it and the button
+ *  behaves exactly as before (always here). */
+export interface LaunchPlacement {
+  project: { id: string; name: string; components: { componentId: string; label: string }[] };
+  /** Name shown for the remote while it is being set up. */
+  workspaceName?: string;
+  /** Concrete machines shown in this agent's override menu. */
+  targets?: DisplayTarget[];
+  /** Optional host-shell transition seam for tests or embedding surfaces. */
+  onTransition?: (target: Target) => void | Promise<void>;
+  /** The decision for this agent now. Defaults to the stored preferences and
+   *  live resources; injectable so callers and tests can supply their own. */
+  decide?: (agentId: string, requested: Preference) => Promise<PlacementDecision>;
+}
+
+const LOCAL_TARGET: DisplayTarget = {
+  target: { kind: "local" },
+  name: "This Mac",
+  online: true,
+};
+
+async function defaultDecide(project: { id: string; name: string }, agentId: string, requested: Preference): Promise<PlacementDecision> {
+  // Loaded on demand: gathering pulls in the T3 and workspace clients.
+  const { gatherUnified, projectAvailability } = await import("../placement/gather");
+  const g = await gatherUnified();
+  if (g.discoveryFailures.length) throw new Error(g.discoveryFailures.join(" "));
+  return decideLaunch({
+    projectId: project.id,
+    agentKind: agentId,
+    resources: g.resources,
+    requested,
+    availability: projectAvailability(g.rows, project),
+    targets: g.targets,
+  });
+}
 
 interface AgentLaunchButtonProps {
   /** The verb on the button, e.g. "Start work" or "Review". */
@@ -23,7 +78,7 @@ interface AgentLaunchButtonProps {
   /** Tooltip for the primary action, given the resolved CLI's name. */
   primaryTitle?: (cliName: string) => string;
   /** Start a fresh agent (the given CLI) on this item, in its worktree. */
-  onStart: (agentId: string) => void;
+  onStart: (agentId: string, decision?: PlacementDecision) => void;
   /** Hand it to an already-running agent instead. */
   onSend: (target: AgentTarget) => void;
   /** When this surface came from an agent, send back there on the primary click
@@ -50,6 +105,8 @@ interface AgentLaunchButtonProps {
    *  on this control rather than a second button beside it: the question is
    *  who should look at this, and one question wants one control. */
   extras?: MenuItem[];
+  /** Run-on control and on-demand remote setup; see LaunchPlacement. */
+  placement?: LaunchPlacement;
 }
 
 export function AgentLaunchButton({
@@ -58,12 +115,13 @@ export function AgentLaunchButton({
   installed,
   newAgentLabel,
   primaryTitle,
-  onStart,
   onSend,
   primaryTarget,
   primaryTask,
   variant = "split",
   extras,
+  placement,
+  onStart: onStartDirect,
 }: AgentLaunchButtonProps) {
   const menu = useContextMenu();
   const [, force] = useState(0);
@@ -72,6 +130,81 @@ export function AgentLaunchButton({
   // registry, so the button always has something to render.
   const preferredCli =
     resolveBrain((bin) => Boolean(installed[bin])) ?? AGENT_CLIS[0];
+
+  const [pending, setPending] = useState<{ agentId: string; decision: PlacementDecision } | null>(null);
+  const [launchChoice, setLaunchChoice] = useState<{ agentId: string; preference: Preference } | null>(null);
+  const [agentDefault, setAgentDefault] = useState<{ agentId: string; preference: Preference } | null>(null);
+  const [transition, setTransition] = useState<{ target: Target; name: string } | null>(null);
+  const suppliedTargets = placement?.targets;
+  const placementProjectId = placement?.project.id;
+  const [placementTargets, setPlacementTargets] = useState<DisplayTarget[]>(() => suppliedTargets ?? [LOCAL_TARGET]);
+  useEffect(() => {
+    if (suppliedTargets) {
+      setPlacementTargets(suppliedTargets);
+      return;
+    }
+    if (!placementProjectId) return;
+    let live = true;
+    void import("../placement/gather")
+      .then(({ gatherTargetInventory }) => gatherTargetInventory())
+      .then((inventory) => {
+        if (!live) return;
+        setPlacementTargets(inventory.targets);
+        if (inventory.discoveryFailures.length) setRefusal(inventory.discoveryFailures.join(" "));
+      })
+      .catch((error) => {
+        if (live) setRefusal(`Could not read connected machines: ${String(error)}`);
+      });
+    return () => { live = false; };
+  }, [placementProjectId, suppliedTargets]);
+  const [setupOk, setSetupOk] = useState(false);
+  const [refusal, setRefusal] = useState("");
+  const launching = useRef(false);
+
+  // Bind the CLI and machine into one launch-scoped choice. The choice is not
+  // stored as an agent preference because it describes this launch only.
+  const startOn = (agentId: string, requested: Preference) => {
+    if (!placement) return onStartDirect(agentId);
+    if (launching.current) return;
+    launching.current = true;
+    setRefusal("");
+    void (placement.decide ?? ((id: string, choice: Preference) => defaultDecide(placement.project, id, choice)))(agentId, requested)
+      .then((decision) => {
+        if (!decision.target) {
+          setRefusal(decision.reason);
+          return;
+        }
+        if (!canLaunchOnActiveTarget(decision.target)) {
+          const known = placementTargets.find((item) => targetKey(item.target) === targetKey(decision.target!));
+          setTransition({
+            target: decision.target,
+            name: decision.targetName ?? known?.name ?? (decision.target.kind === "local" ? "This Mac" : "selected machine"),
+          });
+          return;
+        }
+        if (decision.target.kind === "remote" && decision.needsSetup) {
+          setSetupOk(false);
+          setPending({ agentId, decision });
+          return;
+        }
+        onStartDirect(agentId, decision);
+      })
+      .catch((e) => setRefusal(`Could not decide where to run this: ${String((e as { message?: string })?.message ?? e)}`))
+      .finally(() => { launching.current = false; });
+  };
+
+  const onStart = (agentId: string) => {
+    if (!placement) return onStartDirect(agentId);
+    menu.close();
+    setLaunchChoice({
+      agentId,
+      preference: effectivePreference({
+        preference: getGlobalPreference(),
+        projectPref: getProjectPreference(placement.project.id),
+        agentPref: getAgentPreference(agentId),
+      }),
+    });
+  };
 
   const openMenu = (e: React.MouseEvent) => {
     // ContextMenu items are built once at open; bump a counter so a change in
@@ -84,11 +217,101 @@ export function AgentLaunchButton({
       onSend,
       onStart,
     });
-    menu.open(e, extras?.length ? [...agents, { separator: true }, ...extras] : agents);
+    const defaultSetting: MenuItem[] = placement
+      ? [{ separator: true }, {
+          label: `Default machine for ${preferredCli.name}…`,
+          onClick: () => setAgentDefault({
+            agentId: preferredCli.id,
+            preference: getAgentPreference(preferredCli.id),
+          }),
+        }]
+      : [];
+    const tail = extras?.length ? [{ separator: true } as MenuItem, ...extras] : [];
+    menu.open(e, [...agents, ...defaultSetting, ...tail]);
   };
 
   return (
     <>
+      {refusal && <small className="placement-decision" role="status">{refusal}</small>}
+      {launchChoice && placement && (
+        <Dialog
+          title={`Start ${AGENT_CLIS.find((cli) => cli.id === launchChoice.agentId)?.name ?? launchChoice.agentId}`}
+          dismissLabel="Cancel"
+          onDismiss={() => setLaunchChoice(null)}
+          actions={[{
+            label: "Start agent",
+            primary: true,
+            onClick: () => {
+              const choice = launchChoice;
+              setLaunchChoice(null);
+              startOn(choice.agentId, choice.preference);
+            },
+          }]}
+          body={
+            <PlacementPicker
+              value={launchChoice.preference}
+              targets={placementTargets}
+              onChange={(preference) => setLaunchChoice((current) => current ? { ...current, preference } : null)}
+            />
+          }
+        />
+      )}
+      {agentDefault && placement && (
+        <Dialog
+          title={`Default machine for ${AGENT_CLIS.find((cli) => cli.id === agentDefault.agentId)?.name ?? agentDefault.agentId}`}
+          dismissLabel="Cancel"
+          onDismiss={() => setAgentDefault(null)}
+          actions={[{
+            label: "Save default",
+            primary: true,
+            onClick: () => {
+              setAgentPreference(agentDefault.agentId, agentDefault.preference);
+              setAgentDefault(null);
+            },
+          }]}
+          body={
+            <PlacementPicker
+              label="Default run on"
+              value={agentDefault.preference}
+              targets={placementTargets}
+              allowInherit
+              onChange={(preference) => setAgentDefault((current) => current ? { ...current, preference } : null)}
+            />
+          }
+        />
+      )}
+      {transition && placement && (
+        <Dialog
+          title={`Run on ${transition.name}`}
+          body={
+            transition.target.kind === "t3"
+              ? `${transition.name} opens in its machine view. Open it there to continue; Canopy will not start this agent on the active workspace.`
+              : `Switch to ${transition.name}, then launch the agent there. Canopy will not start it on the active workspace.`
+          }
+          dismissLabel="Cancel"
+          onDismiss={() => setTransition(null)}
+          actions={[{
+            label: transition.target.kind === "local" ? "Switch to This Mac" : `Open ${transition.name}`,
+            primary: true,
+            onClick: () => {
+              const target = transition.target;
+              setTransition(null);
+              if (placement.onTransition) void placement.onTransition(target);
+              else void requestTargetTransition(target, transition.name);
+            },
+          }]}
+        />
+      )}
+      {pending && placement && (
+        <Dialog
+          title={`Set up ${placement.project.name} first`}
+          size="lg"
+          dismissLabel="Cancel"
+          onDismiss={() => setPending(null)}
+          actions={[{ label: "Launch", primary: true, disabled: !setupOk, onClick: () => { const p = pending; setPending(null); onStartDirect(p.agentId, p.decision); } }]}
+          body={<ProjectSetupDialog projectId={placement.project.id} projectName={placement.project.name} workspaceName={pending.decision.targetName ?? placement.workspaceName ?? "the selected workspace"} components={placement.project.components} onComplete={setSetupOk} />}
+        />
+      )}
       {menu.menu && (
         <ContextMenu x={menu.menu.x} y={menu.menu.y} items={menu.menu.items} onClose={menu.close} />
       )}

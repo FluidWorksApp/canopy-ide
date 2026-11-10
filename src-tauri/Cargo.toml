@@ -43,6 +43,10 @@ default = ["dictation"]
 # The selftest (and the CI job that runs it) builds with it for exactly that
 # reason: it must test the frontend it was built with.
 custom-protocol = ["tauri/custom-protocol"]
+# Remote desktop control (desk.rs): real screen capture (xcap) and input
+# injection (enigo). Off by default builds still run the whole protocol and
+# consent flow, but report that native capture is unavailable.
+desk-native = ["dep:enigo", "dep:xcap"]
 dictation = [
     "dep:transcribe-rs",
     "dep:ort",
@@ -54,6 +58,8 @@ dictation = [
 
 [dependencies]
 canopy-core = { path = "../crates/canopy-core" }
+enigo = { version = "=0.6.1", optional = true }
+image = { version = "0.25", default-features = false, features = ["jpeg"] }
 # io-util: the MCP client reads its stdio servers a line at a time (AsyncBufReadExt).
 # rt-multi-thread: Tauri already builds its shared runtime multi-threaded, but
 # `blocking::io` names `tokio::task::block_in_place`, which only exists behind
@@ -194,6 +200,12 @@ tauri-plugin-notification = "2"
 # Unix signals for killing whole PTY process groups (no zombies)
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
+
+# desk.rs screen capture. xcap on Linux pulls libpipewire (libspa-sys) which the
+# build and CI images do not carry, so Linux capture is not wired up and
+# reports a clear error. Windows and macOS use it behind `desk-native`.
+[target.'cfg(any(windows, target_os = "macos"))'.dependencies]
+xcap = { version = "=0.9.9", optional = true }
 
 # canopy_screenshot: the webview's own snapshot API, so capturing our own window
 # needs no Screen Recording permission. Same objc2 generation wry already links,

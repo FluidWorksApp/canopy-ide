@@ -1,3 +1,4 @@
+import {useAllWorkspaces,setAllWorkspaces} from './allMode';
 import {workspaceTabs as buildWorkspaceTabs,workspaceTabId,type SavedWorkspaceTab,type WorkspaceTab} from './workspaceTabs';
 import {WorkspaceHibernateProgress,type HibernateOperation} from './WorkspaceHibernateProgress';
 import {HibernateCancelled,waitForWorkspaceStopped,type ConfirmOthers,type HibernateProgressListener} from './hibernateWorkspace';
@@ -10,7 +11,7 @@ import {CreateWorkspace} from "./CreateWorkspace";
 import {ManagedWorkspaces, type ManagedWorkspace} from './ManagedWorkspaces';
 import {Dialog} from '../components/Dialog';
 import {Button,TextInput,Checkbox} from '../components/ui';
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useRef, lazy, Suspense } from 'react';
 import { createPortal } from 'react-dom';
 import { invoke } from '@tauri-apps/api/core';
 import { canSwitchExecutionMode, setExecutionMode } from '../executionMode';
@@ -19,7 +20,8 @@ import { RemoteExecutionClient, type RemoteWorkspace } from './client';
 import {LocalProjectImport} from './LocalProjectImport';
 import {openLink} from '../links';
 import { RemoteDesktop } from './RemoteDesktop';
-import { DesktopIcon } from '../components/icons';
+import { StreamedBrowser } from './StreamedBrowser';
+import { DesktopIcon, GlobeIcon } from '../components/icons';
 import './workspace.css';
 import {WorkspacePanel} from './WorkspacePanel';
 import {WorkspaceProgress,type WorkspaceProgressState} from './WorkspaceProgress';
@@ -36,6 +38,12 @@ import {useWorkspaceUpdate} from './hostUpdate';
 import {SHOW_WORKSPACE_EVENT,type ShowWorkspaceDetail} from '../readableLinks';
 import {CopyLinkButton} from '../components/CopyLinkButton';
 import {connectionKey,reportWorkspaceLifecycle} from './connectionState';
+import {T3Connect} from '../t3connect/T3Connect';
+import {listT3Machines,type T3Machine} from '../t3connect/api';
+import {OPEN_T3_MACHINE_EVENT,type OpenT3MachineDetail} from '../placement/transitions';
+// Monaco and xterm load only when a T3 machine is opened.
+const UnifiedWorkspace=lazy(()=>import('../components/UnifiedWorkspace').then(module=>({default:module.UnifiedWorkspace})));
+const T3MachineView=lazy(()=>import('../t3connect/T3MachineView').then(module=>({default:module.T3MachineView})));
 
 export function WorkspaceSelector({ onboarding = false,onHibernateWorkspace }: { onboarding?: boolean;onHibernateWorkspace?:(onProgress?:HibernateProgressListener,confirmOthers?:ConfirmOthers)=>Promise<void> }) {
   const active = activeWorkspace();
@@ -55,6 +63,23 @@ export function WorkspaceSelector({ onboarding = false,onHibernateWorkspace }: {
   const [memberStopName]=useState(()=>active?null:takeMemberStopNotice());
   useEffect(()=>{if(memberStopName)postAttention({kind:'fyi',tone:'success',source:'app',title:`Your session stopped. ${memberStopName} keeps running for its owner.`});},[memberStopName]);
   const [forgetConfirm,setForgetConfirm]=useState(false);
+  // A T3 Code machine opened from "Connect to T3 Connect protocol supported machine" (src/t3connect).
+  const [unifiedOpen,setUnifiedOpen]=useState(false),[t3Machine,setT3Machine]=useState<T3Machine|null>(null),[t3PairOpen,setT3PairOpen]=useState(false);
+  useEffect(()=>{
+    const openMachine=(event:Event)=>{
+      const detail=(event as CustomEvent<OpenT3MachineDetail>).detail;
+      const machineId=detail?.machineId;
+      if(!machineId)return;
+      const machineName=detail.machineName??machineId;
+      void listT3Machines().then(list=>{
+        const machine=list.find(item=>item.id===machineId);
+        if(machine){setOpen(false);setUnifiedOpen(false);setT3Machine(machine);}
+        else{setError(`Could not open ${machineName}: this machine is no longer connected.`);setOpen(true);}
+      }).catch(error=>{setError(`Could not open ${machineName}: ${String(error)}`);setOpen(true);});
+    };
+    window.addEventListener(OPEN_T3_MACHINE_EVENT,openMachine);
+    return()=>window.removeEventListener(OPEN_T3_MACHINE_EVENT,openMachine);
+  },[]);
   const accountRemovalEpoch=useRef(0);
   const [accountRemoval,setAccountRemoval]=useState<ManagedWorkspace|null>(null),[accountRemovalName,setAccountRemovalName]=useState('');
   async function removeAccountConnection(){
@@ -182,6 +207,9 @@ export function WorkspaceSelector({ onboarding = false,onHibernateWorkspace }: {
   // A minimized desktop belongs to the workspace it was opened on.
   const desktopWorkspace = active?.connection.workspaceId;
   useEffect(()=>setDesktop('closed'),[desktopWorkspace]);
+  // The workspace's agent browser (StreamedBrowser), mounted like the desktop.
+  const [agentBrowser, setAgentBrowser] = useState<'closed'|'open'|'minimized'>('closed');
+  useEffect(()=>setAgentBrowser('closed'),[desktopWorkspace]);
   const [endpoint, setEndpoint] = useState(active?.connection.endpoint ?? 'http://127.0.0.1:8787');
   const [token, setToken] = useState(active?.connection.token ?? '');
   const [workspaces, setWorkspaces] = useState<RemoteWorkspace[]>([]);
@@ -241,7 +269,8 @@ export function WorkspaceSelector({ onboarding = false,onHibernateWorkspace }: {
       return {id:tab.id,name:tab.workspaceName,kind:'managed',detail:lifecycle==='stopped'?'Stopped · resumes when opened':status.label,tone:status.tone as WorkspaceMenuRow['tone'],active:false,disabled:transitioning?status.label:unavailable?workspace.access?.connectionUnavailable??'Shared access pending':undefined};}
     return {id:tab.id,name:tab.workspaceName,kind:'saved',detail:'Saved host',tone:'quiet',active:false};
   };
-  const menuRows=workspaceTabs.map(rowFor);
+  const allMode=useAllWorkspaces();
+  const menuRows=workspaceTabs.map(rowFor).map(row=>allMode?{...row,active:false}:row);
   async function pick(row:WorkspaceMenuRow){
     setMenuError('');
     if(row.active){setMenuOpen(false);return;}
@@ -254,7 +283,7 @@ export function WorkspaceSelector({ onboarding = false,onHibernateWorkspace }: {
     catch(error){setMenuError(String(error));}finally{setMenuBusy(null);}
   }
   return <>
-    {menuOpen&&!onboarding&&<WorkspaceMenu linkWorkspaceId={active&&isAccountWorkspace(active.connection)?active.connection.workspaceId:undefined} anchor={menuAnchor.current} rows={menuRows} busyId={menuBusy} error={menuError} onClose={()=>setMenuOpen(false)} onPick={row=>void pick(row)} onNew={()=>{setMenuOpen(false);setError('');setOpen(true);setAdding(true);}} onManage={()=>{setMenuOpen(false);setSelectedId(activeId);setOpen(true);}}/>}
+    {menuOpen&&!onboarding&&<WorkspaceMenu linkWorkspaceId={active&&isAccountWorkspace(active.connection)?active.connection.workspaceId:undefined} anchor={menuAnchor.current} rows={menuRows} busyId={menuBusy} error={menuError} onClose={()=>setMenuOpen(false)} onPick={row=>{setAllWorkspaces(false);void pick(row);}} allActive={allMode} onAllWorkspaces={()=>{setAllWorkspaces(true);setMenuOpen(false);menuAnchor.current?.focus();}} onNew={()=>{setMenuOpen(false);setError('');setOpen(true);setAdding(true);}} onManage={()=>{setMenuOpen(false);setSelectedId(activeId);setOpen(true);}}/>}
     {hibernateOperation&&createPortal(<WorkspaceHibernateProgress operation={hibernateOperation} minimized={hibernateMinimized} onMinimize={()=>setHibernateMinimized(true)} onExpand={()=>setHibernateMinimized(false)} onRetry={()=>void hibernateVm(hibernateOperation.progress.phase==='stopping-compute')} onDismiss={()=>{if(!stoppingVm)setHibernateOperation(null);}}/>,document.body)}
     {accountRemoval&&createPortal(<Dialog title={`Remove ${accountRemoval.name} connection?`} body="Remove this saved connection from your Canopy account. The VM keeps running until you stop it separately. Its disks, files, setup and usage history stay untouched." onDismiss={()=>{if(!busy)setAccountRemoval(null);}} actions={[{label:'Keep connection',onClick:()=>setAccountRemoval(null)},{label:busy?'Removing…':'Remove connection',disabled:busy||accountRemovalName!==accountRemoval.name,onClick:()=>void removeAccountConnection()}]}><label>Type the workspace name to confirm<TextInput aria-label="Workspace name confirmation" width="full" autoComplete="off" value={accountRemovalName} disabled={busy} onChange={event=>setAccountRemovalName(event.target.value)}/></label>{error&&<p role="alert">{error}</p>}</Dialog>,document.body)}
     {forgetConfirm&&createPortal(<Dialog title={`Remove ${selected?.workspaceName??'workspace'} connection?`} body="Remove this saved connection from this Mac. The workspace and its files stay on the remote host. This does not stop or delete the VM." onDismiss={()=>{if(!busy)setForgetConfirm(false);}} actions={[{label:'Cancel',onClick:()=>setForgetConfirm(false)},{label:busy?'Removing…':'Remove connection',onClick:()=>{if(!busy)void forgetConnection();}}]}/>,document.body)}
@@ -263,8 +292,9 @@ export function WorkspaceSelector({ onboarding = false,onHibernateWorkspace }: {
     {othersPrompt&&createPortal(<Dialog title="Other people are connected" body={othersConnectedMessage(othersPrompt.others)} onDismiss={()=>{othersPrompt.answer(false);setOthersPrompt(null);}} actions={[{label:'Cancel',onClick:()=>{othersPrompt.answer(false);setOthersPrompt(null);}},{label:'Hibernate anyway',primary:true,onClick:()=>{othersPrompt.answer(true);setOthersPrompt(null);}}]}/>,document.body)}
     {stopConfirm&&createPortal(<Dialog title={`Stop ${active?.connection.workspaceName??'workspace'}?`} body="Running agents, terminals and jobs will stop. Your files and setup will be saved. Canopy will return to your local workspace." onDismiss={()=>{if(!stoppingVm)setStopConfirm(false);}} actions={[{label:'Cancel',onClick:()=>setStopConfirm(false)},{label:stoppingVm?'Stopping…':'Stop workspace',primary:true,onClick:()=>{if(!stoppingVm)void stopVm();}}]}/>,document.body)}
     {!onboarding && <div className="workspace-header-group" aria-label="Execution workspace">
-      <Button className="workspace-choice" aria-haspopup="menu" aria-expanded={menuOpen} onClick={event => {menuAnchor.current=event.currentTarget;setMenuError('');setPanelMounted(true);setMenuOpen(value=>!value);}} title={active?`${active.connection.workspaceName} · ${connectionLabel(connectionState)}`:'Select workspace'}><span className={`workspace-location ${active ? connectionState.phase : ''}`} aria-label={active ? connectionLabel(connectionState) : 'Local'}>{active ? '●' : '⌂'}</span><span className="workspace-name">{active?.connection.workspaceName ?? 'Local workspace'}</span>{activeUpdate&&<span className={`workspace-update-dot ${activeUpdate.state}`} role="img" aria-label={activeUpdate.state==='required'?'Workspace needs an update':'Workspace update available'} title={activeUpdate.state==='required'?'This workspace needs an update':'A workspace update is available'}/>}{active&&connectionState.phase!=='connected'&&<span className="workspace-header-state">{connectionState.phase==='authentication-error'?'Sign in':connectionState.phase==='hibernated'?'Hibernated':connectionState.phase==='stopping'?'Stopping…':connectionState.phase==='connecting'?'Connecting…':'Reconnecting'}</span>}<span aria-hidden="true">⌄</span></Button>
+      <Button className="workspace-choice" aria-haspopup="menu" aria-expanded={menuOpen} onClick={event => {menuAnchor.current=event.currentTarget;setMenuError('');setPanelMounted(true);setMenuOpen(value=>!value);}} title={active?`${active.connection.workspaceName} · ${connectionLabel(connectionState)}`:'Select workspace'}><span className={`workspace-location ${active ? connectionState.phase : ''}`} aria-label={active ? connectionLabel(connectionState) : 'Local'}>{active ? '●' : '⌂'}</span><span className="workspace-name">{allMode?'All workspaces':(active?.connection.workspaceName ?? 'Local workspace')}</span>{activeUpdate&&<span className={`workspace-update-dot ${activeUpdate.state}`} role="img" aria-label={activeUpdate.state==='required'?'Workspace needs an update':'Workspace update available'} title={activeUpdate.state==='required'?'This workspace needs an update':'A workspace update is available'}/>}{active&&connectionState.phase!=='connected'&&<span className="workspace-header-state">{connectionState.phase==='authentication-error'?'Sign in':connectionState.phase==='hibernated'?'Hibernated':connectionState.phase==='stopping'?'Stopping…':connectionState.phase==='connecting'?'Connecting…':'Reconnecting'}</span>}<span aria-hidden="true">⌄</span></Button>
       {active && <Button variant="ghost" icon className={desktop==='minimized'?'workspace-desktop-minimized':undefined} onClick={() => setDesktop('open')} title={`${desktop==='minimized'?'Restore':'Open'} ${active.connection.workspaceName} desktop`} aria-label={desktop==='minimized'?'Restore remote desktop':'Open remote desktop'}><DesktopIcon size={14}/></Button>}
+      {active && <Button variant="ghost" icon className={agentBrowser==='minimized'?'workspace-desktop-minimized':undefined} onClick={() => setAgentBrowser('open')} title={`${agentBrowser==='minimized'?'Restore':'Open'} ${active.connection.workspaceName} agent browser`} aria-label={agentBrowser==='minimized'?'Restore agent browser':'Open agent browser'}><GlobeIcon size={14}/></Button>}
       {active&&!member&&onHibernateWorkspace&&<Button variant="ghost" icon disabled={stoppingVm||['stopping','hibernated'].includes(connectionState.phase)} onClick={()=>setHibernateConfirm(true)} title="Hibernate workspace — save all projects and stop compute" aria-label="Hibernate workspace">❄</Button>}
       {active&&member&&isAccountWorkspace(active.connection)&&<Button variant="ghost" icon disabled={stoppingVm||['stopping','hibernated'].includes(connectionState.phase)} onClick={()=>{setMemberStopError('');setMemberStopConfirm(true);}} title="Stop my session — the workspace keeps running for its owner" aria-label="Stop my session">❄</Button>}
       {browserRequest && <Button variant="ghost" icon onClick={()=>{openLink(browserRequest,true);pendingBrowser.current=null;setBrowserRequest(null);}} title="Remote CLI sign-in needs your browser" aria-label="Open browser ↗">↗</Button>}
@@ -289,7 +319,7 @@ export function WorkspaceSelector({ onboarding = false,onHibernateWorkspace }: {
           <section className="workspace-card"><header><h3>Personal accounts</h3><p className="workspace-description">Sync agent accounts from this Mac, then pick which one new agents in {active.connection.workspaceName} launch as.</p></header><AccountSync workspaceName={active.connection.workspaceName}/></section>
           <section className="workspace-card"><header><h3>Git</h3></header><div className="workspace-action-row"><div><strong>GitHub & Git</strong><small>Repository access and commit identity</small></div><Button disabled={busy} onClick={()=>void runSetup('execution_remote_import_git')}>Connect GitHub</Button></div>{notice&&<p className="workspace-feedback" role="status">✓ {notice}</p>}</section>
           <section className="workspace-card"><header><h3>Set up from this Mac</h3></header><MirrorSetup workspaceName={active.connection.workspaceName} disabled={connectionState.phase!=='connected'}/></section>
-          <section className="workspace-card workspace-utilities"><header><h3>Workspace tools</h3></header><div className="workspace-inline-actions"><Button onClick={()=>{setOpen(false);setDesktop('open');}}><DesktopIcon size={14}/> Open desktop</Button>{member?isAccountWorkspace(active.connection)&&<Button disabled={stoppingVm||['stopping','hibernated'].includes(connectionState.phase)} onClick={()=>{setMemberStopError('');setMemberStopConfirm(true);}}>Stop my session</Button>:<>{onHibernateWorkspace&&<Button disabled={stoppingVm||['stopping','hibernated'].includes(connectionState.phase)} onClick={()=>setHibernateConfirm(true)}>Hibernate workspace</Button>}{!managedSelection&&active.connection.workspaceId==='shoaib-work'&&<Button disabled={stoppingVm} onClick={()=>setStopConfirm(true)}>Stop workspace</Button>}</>}</div><LocalProjectImport/>
+          <section className="workspace-card workspace-utilities"><header><h3>Workspace tools</h3></header><div className="workspace-inline-actions"><Button onClick={()=>{setOpen(false);setDesktop('open');}}><DesktopIcon size={14}/> Open desktop</Button><Button onClick={()=>{setOpen(false);setAgentBrowser('open');}}><GlobeIcon size={14}/> Agent browser</Button>{member?isAccountWorkspace(active.connection)&&<Button disabled={stoppingVm||['stopping','hibernated'].includes(connectionState.phase)} onClick={()=>{setMemberStopError('');setMemberStopConfirm(true);}}>Stop my session</Button>:<>{onHibernateWorkspace&&<Button disabled={stoppingVm||['stopping','hibernated'].includes(connectionState.phase)} onClick={()=>setHibernateConfirm(true)}>Hibernate workspace</Button>}{!managedSelection&&active.connection.workspaceId==='shoaib-work'&&<Button disabled={stoppingVm} onClick={()=>setStopConfirm(true)}>Stop workspace</Button>}</>}</div><LocalProjectImport/>
           <details><summary>Browser sign-in</summary><p>Open a CLI sign-in link on this Mac, or use this workspace’s browser for a localhost callback.</p><label>Sign-in URL<TextInput width="full" type="url" autoComplete="off" placeholder="https://…" value={signInLink} onChange={e=>setSignInLink(e.target.value)}/></label><div className="workspace-inline-actions"><Button disabled={!/^https:\/\//i.test(signInLink)} onClick={()=>{openLink(signInLink,true);setSignInLink('');}}>Open on this Mac</Button><Button disabled={busy||!/^https:\/\//i.test(signInLink)} onClick={()=>{setBusy(true);setError('');void active.client.workspace(active.connection.workspaceId,'/desktop',{}).then(()=>active.client.workspace(active.connection.workspaceId,'/native',{command:'workspace_browser_open',args:{url:signInLink}})).then(()=>{setOpen(false);setDesktop('open');setSignInLink('');}).catch(e=>setError(String(e))).finally(()=>setBusy(false));}}>Open in {active.connection.workspaceName}</Button></div></details></section>
         </>:!selected?<p className="workspace-description">Using this Mac.</p>:null}
       </section>
@@ -297,7 +327,15 @@ export function WorkspaceSelector({ onboarding = false,onHibernateWorkspace }: {
       {selected&&!selectedManagedId&&<div className="workspace-connection-remove"><Button size="sm" disabled={busy} onClick={()=>setForgetConfirm(true)}>Remove saved connection</Button><small>Removes it from this Mac. Remote files stay on the host.</small></div>}
       {error && <p className="workspace-feedback error" role="alert">{error}</p>}
     </div></div></div></WorkspacePanel>, document.body)}
-    {open && adding && createPortal(<Dialog title="Cloud workspaces" body="Sign in once, then open a workspace from your account." size="md" dismissLabel="Back" onDismiss={()=>{setAdding(false);setError('');}}><div className="workspace-tools"><ManagedWorkspaces showList={false}/><CreateWorkspace onCreated={()=>setAdding(false)}/><details><summary>Advanced: connect your own host</summary><label>Remote host<TextInput width="full" value={endpoint} onChange={e => setEndpoint(e.target.value)} autoComplete="off" /></label><label>Access token<TextInput width="full" type="password" value={token} onChange={e => setToken(e.target.value)} autoComplete="off" /></label><Button disabled={busy || !token} onClick={() => void connect()}>{busy ? 'Connecting…' : 'Find workspaces'}</Button>{!!workspaces.length && <Checkbox checked={copyAccounts} onChange={setCopyAccounts} label="Copy local Claude and Codex accounts" hint="One-time copy into the workspace you select."/>}{workspaces.map(workspace => <Button key={workspace.id} disabled={busy} onClick={() => void choose(workspace)}>{workspace.name}</Button>)}{error&&<p className="workspace-feedback error" role="alert">{error}</p>}</details></div></Dialog>,document.body)}
+    {open && adding && createPortal(<Dialog title="Cloud workspaces" body="Create a workspace, or connect a host or machine you already have." size="md" dismissLabel="Back" onDismiss={()=>{setAdding(false);setError('');}}><div className="workspace-tools"><ManagedWorkspaces showList={false}/><CreateWorkspace onCreated={()=>setAdding(false)}/><details className="workspace-section"><summary>Connect your own host<small>Use a remote host address and access token.</small></summary><label>Remote host<TextInput width="full" value={endpoint} onChange={e => setEndpoint(e.target.value)} autoComplete="off" /></label><label>Access token<TextInput width="full" type="password" value={token} onChange={e => setToken(e.target.value)} autoComplete="off" /></label><Button disabled={busy || !token} onClick={() => void connect()}>{busy ? 'Connecting…' : 'Find workspaces'}</Button>{!!workspaces.length && <Checkbox checked={copyAccounts} onChange={setCopyAccounts} label="Copy local Claude and Codex accounts" hint="One-time copy into the workspace you select."/>}{workspaces.map(workspace => <Button key={workspace.id} disabled={busy} onClick={() => void choose(workspace)}>{workspace.name}</Button>)}{error&&<p className="workspace-feedback error" role="alert">{error}</p>}</details><details className="workspace-section" onToggle={event=>setT3PairOpen(event.currentTarget.open)}><summary>Connect to T3 Connect protocol supported machine<small>Pair with a machine using a pairing link.</small></summary>{t3PairOpen&&<T3Connect onOpen={machine=>{setAdding(false);setOpen(false);setT3PairOpen(false);setT3Machine(machine);}}/>}</details></div></Dialog>,document.body)}
+    {unifiedOpen&&createPortal(<Dialog title="All workspaces" size="lg" dismissLabel="Close" onDismiss={()=>setUnifiedOpen(false)}><div className="unified-dialog-body"><Suspense fallback={<div className="remote-empty" role="status">Loading workspaces…</div>}><UnifiedWorkspace activeTarget={active?{kind:'remote',workspaceId:active.connection.workspaceId}:{kind:'local'}} onSwitch={target=>{
+      if(target.kind==='t3'){void listT3Machines().then(list=>{const m=list.find(x=>x.id===target.machineId);if(m){setUnifiedOpen(false);setT3Machine(m);}}).catch(()=>{});return;}
+      const tab=target.kind==='local'?workspaceTabs.find(item=>item.id==='local'):workspaceTabs.find(item=>item.workspaceId===target.workspaceId||item.managedId===target.workspaceId);
+      if(!tab)return;
+      setUnifiedOpen(false);void pick(rowFor(tab));
+    }} onOpen={row=>{if(row.target.kind!=='t3')return;const id=row.target.machineId;void listT3Machines().then(list=>{const m=list.find(x=>x.id===id);if(m){setUnifiedOpen(false);setT3Machine(m);}}).catch(()=>{});}}/></Suspense></div></Dialog>,document.body)}
+    {t3Machine&&createPortal(<div className="remote-workspace-overlay"><section className="workspace-desktop" role="dialog" aria-modal="true" aria-label={`T3 Code machine ${t3Machine.label}`}><Suspense fallback={<div className="remote-empty">Loading…</div>}><T3MachineView key={t3Machine.id} machine={t3Machine} onClose={()=>setT3Machine(null)}/></Suspense></section></div>,document.body)}
     {desktop!=='closed' && active && createPortal(<div className={`remote-workspace-overlay${desktop==='minimized'?' is-minimized':''}`} aria-hidden={desktop==='minimized'} onMouseDown={event=>{if(event.target===event.currentTarget)setDesktop('minimized');}}><section className="workspace-desktop" role="dialog" aria-modal={desktop==='open'} aria-label="Workspace desktop"><RemoteDesktop key={active.connection.workspaceId} client={active.client} workspaceId={active.connection.workspaceId} workspaceName={active.connection.workspaceName} minimized={desktop==='minimized'} onMinimize={() => setDesktop('minimized')} onClose={() => setDesktop('closed')} /></section></div>, document.body)}
+    {agentBrowser!=='closed' && active && createPortal(<div className={`remote-workspace-overlay${agentBrowser==='minimized'?' is-minimized':''}`} aria-hidden={agentBrowser==='minimized'} onMouseDown={event=>{if(event.target===event.currentTarget)setAgentBrowser('minimized');}}><section className="workspace-desktop" role="dialog" aria-modal={agentBrowser==='open'} aria-label="Workspace agent browser"><StreamedBrowser key={active.connection.workspaceId} client={active.client} workspaceId={active.connection.workspaceId} workspaceName={active.connection.workspaceName} minimized={agentBrowser==='minimized'} onMinimize={() => setAgentBrowser('minimized')} onClose={() => setAgentBrowser('closed')} /></section></div>, document.body)}
   </>;
 }

@@ -19,7 +19,7 @@
 //     agent: no hooks, no turn snapshot.
 
 import * as ipc from "./ipc";
-import { agentCliFor, structuredRunnerFor } from "./projects";
+import { agentCliFor, legacyRunnerFor } from "./projects";
 import { HARNESS_COMPACT_COMMAND, harnessSupport } from "./harness";
 import { StructuredRunCollector } from "./structuredEvents";
 import { BRAIN_DISALLOWED_TOOLS } from "./structuredRunners";
@@ -86,7 +86,7 @@ export function compactPlan(o: {
   return runnerOr();
 
   function runnerOr(): CompactPlan {
-    return structuredRunnerFor(o.agent)?.compactArgs
+    return legacyRunnerFor(o.agent)?.compactArgs
       ? { route: "runner" }
       : { route: "unavailable", why: "Open the session in a terminal to compact it." };
   }
@@ -122,7 +122,7 @@ export async function compactHeadless(
     kill: ipc.brainKill,
   },
 ): Promise<CompactResult> {
-  const runner = structuredRunnerFor(o.agent);
+  const runner = legacyRunnerFor(o.agent);
   const bin = agentCliFor(o.agent)?.bin;
   if (!runner?.compactArgs || !bin) return { ok: false, message: "This agent's CLI cannot compact a session headlessly." };
   if (deps.remote || activeWorkspace()) {

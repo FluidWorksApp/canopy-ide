@@ -404,6 +404,9 @@ export async function resolveShareCard(
     case "plan":
     case "plan-outcome":
     case "layer-approval-outcome":
+    case "relay-offer":
+    case "relay-offer-ended":
+    case "relay-request":
       return { do: "none" };
   }
 }

@@ -31,6 +31,7 @@ import {
   startStructured as startProjectStructured,
   type ProjectRunnerTransport,
 } from "./projectRunner";
+import { legacyRunnerFor } from "./projects";
 import { structuredRunnerFor } from "./projects";
 
 export { StructuredTransport };
@@ -52,6 +53,13 @@ export async function startStructured(
   host: TransportHost,
   opts: { resume: boolean; cwd?: string; env?: [string, string][] },
 ): Promise<CompanionTransport> {
+  // The companion normally starts with no cwd and Rust puts it in its own
+  // directory. An ACP agent is told its directory in `session/new` and refuses
+  // one that is not absolute ("ACP needs an absolute working directory"), so
+  // for that tier the same directory is spelled out.
+  const cwd =
+    opts.cwd ?? (structuredRunnerFor(cliId)?.tier === "acp" ? await ipc.companionDir() : undefined);
+  opts = { ...opts, cwd };
   return startProjectStructured(
     "companion",
     cliId,
@@ -365,7 +373,7 @@ export function startOneshot(
     env?: [string, string][];
   },
 ): CompanionTransport {
-  const runner = structuredRunnerFor(cliId);
+  const runner = legacyRunnerFor(cliId);
   if (!runner) throw new Error(`${cliId} has no verified runner`);
   let transport: OneshotTransport;
   const spawn = async (message: string, sessionId: string | null) => {

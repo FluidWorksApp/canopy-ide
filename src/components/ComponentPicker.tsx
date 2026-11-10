@@ -8,18 +8,28 @@ import {
   rankComponents,
   type PickerComponent,
 } from "../componentPicker";
+import {
+  automaticPreference,
+  preferenceKey,
+  targetKey,
+  targetPreference,
+  type DisplayTarget,
+  type Preference,
+} from "../placement/types";
 
-/**
- * "Open it in which component?" A large, bold field over the project's
- * components, the one used last at the top. Type to filter, and the rest of the
- * best match appears greyed out; Enter opens it, Tab fills it in, Esc cancels.
- * Shown only when a project has more than one component.
- */
+/** Selects a component and, for agent launches, the concrete execution machine.
+ * Shell launches omit machineTargets and retain their existing component-only
+ * behavior. */
 export function ComponentPicker({
   title,
   components,
   recents,
   activePath,
+  preferPath,
+  machineTargets,
+  initialMachine = automaticPreference(),
+  accounts,
+  fixedComponent,
   onPick,
   onCancel,
 }: {
@@ -30,43 +40,195 @@ export function ComponentPicker({
   recents: string[];
   /** The tab in front, if any, so "current tab" can be flagged. */
   activePath?: string | null;
-  onPick: (component: PickerComponent) => void;
+  /** A component the person pointed at (a right-click on it): it comes first and is preselected, ahead of recents. */
+  preferPath?: string | null;
+  /** Present for an agent launch. Includes This Mac and connected machines. */
+  machineTargets?: DisplayTarget[];
+  initialMachine?: Preference;
+  /** Present for an agent launch whose CLI has several accounts. */
+  accounts?: { profiles: { id: string; label: string }[]; initial: string };
+  /** The component is already decided (an agent starts in the one in front), so
+   *  the list and the question are left out and only the choices that remain
+   *  (where to run, which account) are asked. */
+  fixedComponent?: PickerComponent;
+  onPick: (component: PickerComponent, machine?: Preference, profileId?: string) => void;
   onCancel: () => void;
 }) {
   useEscapeLayer(true, { onEscape: () => cancel() });
   const [query, setQuery] = useState("");
-  const [sel, setSel] = useState(0);
+  const [selectedRow, setSelectedRow] = useState(0);
+  const [machine, setMachine] = useState<Preference>(initialMachine);
+  const [profileId, setProfileId] = useState<string | undefined>(accounts?.initial);
+  const fixed = fixedComponent;
   const inputRef = useRef<HTMLInputElement>(null);
   const listRef = useRef<HTMLDivElement>(null);
-  // Where the keyboard was, so cancelling puts it back instead of dropping it.
   const before = useRef<Element | null>(document.activeElement);
 
-  const ordered = useMemo(() => orderComponents(components, recents, activePath), [components, recents, activePath]);
+  const ordered = useMemo(
+    () => orderComponents(components, preferPath ? [] : recents, preferPath ?? activePath),
+    [components, recents, activePath, preferPath],
+  );
   const rows = useMemo(() => rankComponents(query, ordered), [query, ordered]);
   const ghost = completion(query, rows[0]);
   const lastUsed = recents.length ? ordered[0]?.id : undefined;
-  const current = componentAt(components, activePath)?.id;
+  const current = preferPath ? undefined : componentAt(components, activePath)?.id;
+  const machineChoices = machineTargets
+    ? [
+        { key: "automatic", label: "Automatic", preference: automaticPreference() },
+        ...machineTargets.map((item) => ({
+          key: targetKey(item.target),
+          label: item.name,
+          preference: targetPreference(item.target),
+        })),
+        ...(machine.mode === "target" && !machineTargets.some((item) => targetKey(item.target) === targetKey(machine.target))
+          ? [{
+              key: targetKey(machine.target),
+              label: `Unavailable machine (${machine.target.kind === "remote" ? machine.target.workspaceId : machine.target.kind === "t3" ? machine.target.machineId : "This Mac"})`,
+              preference: targetPreference(machine.target),
+            }]
+          : []),
+      ]
+    : [];
 
   useEffect(() => inputRef.current?.focus(), []);
-  useEffect(() => setSel(0), [query]);
+  useEffect(() => setSelectedRow(0), [query]);
   useEffect(() => {
     listRef.current?.querySelector(".palette-row-active")?.scrollIntoView({ block: "nearest" });
-  }, [sel]);
+  }, [selectedRow]);
 
   function cancel() {
     onCancel();
-    const el = before.current;
-    if (el instanceof HTMLElement && el.isConnected) requestAnimationFrame(() => el.focus());
+    const element = before.current;
+    if (element instanceof HTMLElement && element.isConnected) requestAnimationFrame(() => element.focus());
   }
+
+  // The account is passed only when this launch offered a choice, so a picker
+  // without one calls `onPick` exactly as it always did.
+  const pick = (component: PickerComponent) => {
+    const where = machineTargets ? machine : undefined;
+    if (profileId === undefined) onPick(component, where);
+    else onPick(component, where, profileId);
+  };
+
+  const selectMachineByKey = (key: string) => {
+    const choice = machineChoices.find((item) => item.key === key);
+    if (choice) setMachine(choice.preference);
+  };
 
   return (
     <div className="palette-backdrop" onMouseDown={cancel}>
-      <div className="palette cpick" role="dialog" aria-label={title} onMouseDown={(e) => e.stopPropagation()}>
+      <div
+        className="palette cpick"
+        role="dialog"
+        aria-modal="true"
+        aria-label={title}
+        onMouseDown={(event) => event.stopPropagation()}
+        onKeyDown={(event) => {
+          // Enter opens from anywhere in the picker, including a chosen chip.
+          if (event.key !== "Enter" || !(event.target as HTMLElement).matches?.("button[role=radio]")) return;
+          const target = fixed ?? rows[selectedRow] ?? ordered[0];
+          if (!target) return;
+          event.preventDefault();
+          event.stopPropagation();
+          pick(target);
+        }}
+      >
         <div className="cpick-title">
-          {title} <span className="cpick-title-dim">in which component?</span>
+          {title}
+          {fixed ? (
+            <span className="cpick-title-dim"> in {fixed.label}</span>
+          ) : (
+            <span className="cpick-title-dim"> in which component?</span>
+          )}
         </div>
+        {machineTargets && (
+          <div className="cpick-machine">
+            <span className="cpick-machine-label">Run on</span>
+            <div className="cpick-machine-options" role="radiogroup" aria-label="Run on machine">
+              {machineChoices.map((choice) => {
+                const checked = preferenceKey(machine) === choice.key;
+                return (
+                  <button
+                    type="button"
+                    role="radio"
+                    aria-checked={checked}
+                    tabIndex={checked ? 0 : -1}
+                    className={checked ? "is-selected" : ""}
+                    key={choice.key}
+                    onClick={() => setMachine(choice.preference)}
+                    onKeyDown={(event) => {
+                      if (!["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown"].includes(event.key)) return;
+                      event.preventDefault();
+                      const direction = event.key === "ArrowLeft" || event.key === "ArrowUp" ? -1 : 1;
+                      const currentIndex = machineChoices.findIndex((item) => item.key === choice.key);
+                      const next = (currentIndex + direction + machineChoices.length) % machineChoices.length;
+                      selectMachineByKey(machineChoices[next].key);
+                      const buttons = event.currentTarget.parentElement?.querySelectorAll<HTMLButtonElement>("button[role=radio]");
+                      buttons?.[next]?.focus();
+                    }}
+                  >
+                    {choice.label}
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+        )}
+        {accounts && (
+          <div className="cpick-machine">
+            <span className="cpick-machine-label">Account</span>
+            <div className="cpick-machine-options" role="radiogroup" aria-label="Account">
+              {accounts.profiles.map((profile, index, all) => {
+                const checked = profileId === profile.id;
+                return (
+                  <button
+                    type="button"
+                    role="radio"
+                    aria-checked={checked}
+                    tabIndex={checked ? 0 : -1}
+                    className={checked ? "is-selected" : ""}
+                    key={profile.id}
+                    onClick={() => setProfileId(profile.id)}
+                    onKeyDown={(event) => {
+                      if (!["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown"].includes(event.key)) return;
+                      event.preventDefault();
+                      const direction = event.key === "ArrowLeft" || event.key === "ArrowUp" ? -1 : 1;
+                      const next = (index + direction + all.length) % all.length;
+                      setProfileId(all[next].id);
+                      event.currentTarget.parentElement
+                        ?.querySelectorAll<HTMLButtonElement>("button[role=radio]")[next]
+                        ?.focus();
+                    }}
+                  >
+                    {profile.label}
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+        )}
+        {fixed && (
+          <div className="cpick-fixed">
+            <button
+              type="button"
+              className="cpick-launch"
+              autoFocus
+              onClick={() => pick(fixed!)}
+              onKeyDown={(event) => {
+                if (event.key === "Enter") {
+                  event.preventDefault();
+                  event.stopPropagation();
+                  pick(fixed!);
+                }
+              }}
+            >
+              Open ↵
+            </button>
+            <span className="cpick-hint-inline">Esc cancel</span>
+          </div>
+        )}
+        {!fixed && (<>
         <div className="cpick-field">
-          {/* The typed text is invisible here and only holds the grey completion in place behind the real input. */}
           <div className="cpick-ghost" aria-hidden="true">
             <span className="cpick-ghost-typed">{query}</span>
             {ghost?.rest}
@@ -79,49 +241,50 @@ export function ComponentPicker({
             aria-label="Component"
             autoComplete="off"
             spellCheck={false}
-            onChange={(e) => setQuery(e.target.value)}
-            onKeyDown={(e) => {
-              if (e.key === "ArrowDown") {
-                e.preventDefault();
-                setSel((i) => Math.min(i + 1, rows.length - 1));
-              } else if (e.key === "ArrowUp") {
-                e.preventDefault();
-                setSel((i) => Math.max(i - 1, 0));
-              } else if (e.key === "Tab") {
-                e.preventDefault();
-                if (ghost) setQuery(ghost.full);
-              } else if (e.key === "Enter") {
-                e.preventDefault();
-                e.stopPropagation();
-                if (rows[sel]) onPick(rows[sel]);
+            onChange={(event) => setQuery(event.target.value)}
+            onKeyDown={(event) => {
+              if (event.key === "ArrowDown") {
+                event.preventDefault();
+                setSelectedRow((index) => Math.min(index + 1, rows.length - 1));
+              } else if (event.key === "ArrowUp") {
+                event.preventDefault();
+                setSelectedRow((index) => Math.max(index - 1, 0));
+              } else if (event.key === "Tab" && !event.shiftKey && ghost && query.trim() && ghost.full !== query) {
+                event.preventDefault();
+                setQuery(ghost.full);
+              } else if (event.key === "Enter") {
+                event.preventDefault();
+                event.stopPropagation();
+                if (rows[selectedRow]) pick(rows[selectedRow]);
               }
             }}
           />
         </div>
         <div className="palette-list" ref={listRef} role="listbox" aria-label="Components">
           {rows.length === 0 && <div className="palette-empty">No component matches “{query.trim()}”</div>}
-          {rows.map((c, i) => (
+          {rows.map((component, index) => (
             <div
-              key={c.id}
+              key={component.id}
               role="option"
-              aria-selected={i === sel}
-              className={`palette-row cpick-row ${i === sel ? "palette-row-active" : ""}`}
-              onMouseEnter={() => setSel(i)}
-              onClick={() => onPick(c)}
+              aria-selected={index === selectedRow}
+              className={`palette-row cpick-row ${index === selectedRow ? "palette-row-active" : ""}`}
+              onMouseEnter={() => setSelectedRow(index)}
+              onClick={() => pick(component)}
             >
-              <span className="cpick-name">{c.label}</span>
-              <span className="cpick-path">{lastFolder(c.path)}</span>
-              {c.id === lastUsed && <span className="cpick-tag">last used</span>}
-              {c.id === current && <span className="cpick-tag cpick-tag-current">this tab</span>}
+              <span className="cpick-name">{component.label}</span>
+              <span className="cpick-path">{lastFolder(component.path)}</span>
+              {component.id === lastUsed && <span className="cpick-tag">last used</span>}
+              {component.id === current && <span className="cpick-tag cpick-tag-current">this tab</span>}
             </div>
           ))}
         </div>
         <div className="cpick-hint">
           <span>↵ open</span>
-          <span>Tab complete</span>
+          <span>Tab complete / options</span>
           <span>↑↓ choose</span>
           <span>Esc cancel</span>
         </div>
+        </>)}
       </div>
     </div>
   );

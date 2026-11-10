@@ -137,12 +137,16 @@ describe("LaunchPalette", () => {
     expect(onShell).toHaveBeenCalledOnce();
   });
 
-  it("marks a CLI that isn't on PATH as an install", () => {
+  it("lists only the CLIs the probe did not say are missing", () => {
     const installed = Object.fromEntries(AGENT_CLIS.map((c) => [c.bin, false]));
     installed[claude().bin] = true;
     open({ installed });
-    // Every other CLI is missing, so the badge count is one per absent CLI.
-    expect(screen.getAllByText("install")).toHaveLength(AGENT_CLIS.length - 1);
+    // Shell plus the one installed agent; the rest are added back in Settings.
+    expect(screen.getAllByText(/./, { selector: ".palette-name" }).map((n) => n.textContent)).toEqual([
+      "Shell",
+      claude().name,
+    ]);
+    expect(screen.queryByText("install")).not.toBeInTheDocument();
   });
 
   it("closes on Escape without launching anything", async () => {
