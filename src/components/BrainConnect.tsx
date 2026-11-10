@@ -34,7 +34,7 @@ import {
   agentModelSwitchFor,
   checkDesktopClis,
   CLI_INSTALLS_CHANGED_EVENT,
-  structuredRunnerFor,
+  legacyRunnerFor,
   type AgentCli,
 } from "../projects";
 import { getSettings, updateSettings, type Settings } from "../settings";
@@ -71,7 +71,7 @@ export function BrainModels({ cli }: { cli: AgentCli }) {
   const [s, setS] = useState<Settings>(getSettings);
   const patch = (p: Partial<Settings>) => setS(updateSettings(p));
   const models = agentModelSwitchFor(cli.id);
-  const cheap = structuredRunnerFor(cli.id)?.backgroundModel;
+  const cheap = legacyRunnerFor(cli.id)?.backgroundModel;
   const field = (key: "brainModel" | "brainBackgroundModel", label: string, fallback: string) => (
     <Field label={label}>
       {models?.kind === "inline" ? (

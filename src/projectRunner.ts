@@ -9,7 +9,7 @@ import {
   type StructuredRunner,
   type StructuredRunnerLaunch,
 } from "./structuredRunners";
-import { streamsStructured, structuredRunnerFor } from "./projects";
+import { acpEnabledFor, legacyRunnerFor, streamsStructured, structuredRunnerFor } from "./projects";
 import type { AcpPermissionRequest } from "./acp/protocol";
 import { AcpTransport } from "./acp/transport";
 import { recordNativeCheckpoint } from "./turnRollback";
@@ -279,7 +279,7 @@ export async function startStructured(
   },
 ): Promise<ProjectRunnerTransport> {
   if (!attemptId) throw new Error("A structured runner requires an attempt id");
-  const runner = structuredRunnerFor(cliId);
+  let runner = structuredRunnerFor(cliId);
   // One rule, asked in one place. `streamsStructured` is the same predicate the
   // route eligibility filter uses (vibeProjectSetup, vibeBuilderSession), and it
   // is called here rather than re-stated: this launcher used to carry its own
@@ -302,12 +302,33 @@ export async function startStructured(
     );
   }
   if (runner.tier === "acp") {
+    const legacy = legacyRunnerFor(cliId);
+    const hasLegacy = Boolean(legacy && legacy.tier !== "acp");
+    const hint = `Turn off "Use ACP" for ${cliId} in Settings to use its built-in runner.`;
     const acp = new AcpTransport(attemptId, host, opts.process, runner, launch, {
       resume: opts.resume,
       onPermission: opts.onPermission,
+      failureHint: hasLegacy ? hint : undefined,
     });
-    await acp.start();
-    return acp;
+    try {
+      await acp.start();
+      return acp;
+    } catch (error) {
+      // The ACP process never started (command not found, spawn refused), so
+      // nothing has been said to the agent and the vendor runner can take over.
+      if (!hasLegacy || !legacy) {
+        const detail = error instanceof Error ? error.message : String(error);
+        throw new Error(
+          acpEnabledFor(cliId)
+            ? `${detail} Turn off "Use ACP" for ${cliId} in Settings to stop launching it.`
+            : detail,
+        );
+      }
+      runner = legacy;
+    }
+  }
+  if (runner.tier === "oneshot") {
+    return new OneshotStructuredTransport(attemptId, host, opts.process, runner, launch);
   }
   const sessionId = launch.policy.sessionId;
   const transport = new StructuredTransport(

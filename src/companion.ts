@@ -22,7 +22,7 @@
 import {
   AGENT_CLIS,
   agentModelSwitchFor,
-  structuredRunnerFor,
+  legacyRunnerFor,
   type AgentCli,
 } from "./projects";
 import { resolveBrain } from "./brain";
@@ -159,7 +159,7 @@ export function companionRunnerLaunch(
 }
 
 export function tierFor(cliId: string): CompanionTier {
-  const tier = structuredRunnerFor(cliId)?.tier;
+  const tier = legacyRunnerFor(cliId)?.tier;
   // An ACP agent is long-lived and streams, which is what "structured" means
   // to the companion; only the wire protocol differs.
   return tier === "acp" ? "structured" : (tier ?? "terminal");

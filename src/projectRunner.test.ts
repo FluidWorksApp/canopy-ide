@@ -1,4 +1,5 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { updateSettings } from "./settings";
 import {
   createProjectRunner,
   type ProjectRunnerOutput,
@@ -48,6 +49,13 @@ function processHarness() {
   };
   return { process, spawned, writes, kills, emit: (out: ProjectRunnerOutput) => onData?.(out) };
 }
+
+// These cover the vendor runners; ACP is covered in src/acp.
+beforeEach(() => updateSettings({ acpAgents: { claude: false, codex: false, cursor: false } }));
+afterEach(() => {
+  localStorage.clear();
+  updateSettings({ acpAgents: {} });
+});
 
 describe("the project runner controller", () => {
   it("keys spawn, write and kill to the same attempt", async () => {

@@ -66,6 +66,7 @@ import { SettingsNavContext } from "./settingsNav";
 import { TRACKERS, setTrackerKey, trackerKey } from "../trackers";
 import * as ipc from "../ipc";
 import { AcpProviderPicker } from "./AcpProviderPicker";
+import { AcpAgentToggle } from "./AcpAgentToggle";
 import { joinArgv, splitArgv } from "../acp/providers";
 import { SlackSettings } from "./SlackSettings";
 import { VaultSettings } from "./VaultSettings";
@@ -80,6 +81,7 @@ import {
 } from "./icons";
 import {
   AGENT_CLIS,
+  structuredRunnerFor,
   AGENT_CLIS_CHANGED_EVENT,
   agentCliFor,
   agentModelSwitchFor,
@@ -1684,10 +1686,26 @@ export function SettingsDialog({ onClose, initialTab = "appearance", projects = 
                       >
                         <AgentIcon id={cli.id} size={16} />
                         <span>{cli.name}</span>
-                        {cli.structuredRunner?.tier === "acp" && (
+                        {structuredRunnerFor(cli.id)?.tier === "acp" && (
                           <span className="acp-badge" title="Runs over the Agent Client Protocol">ACP</span>
                         )}
                       </button>
+                    ))}
+                  </div>
+                </Item>
+                <Item
+                  name="Use ACP"
+                  desc="Run these agents over the Agent Client Protocol. Off uses the agent's built-in runner."
+                >
+                  <div className="agent-chips">
+                    {AGENT_CLIS.map((cli) => (
+                      <AcpAgentToggle
+                        key={cli.id}
+                        cliId={cli.id}
+                        name={cli.name}
+                        value={s.acpAgents[cli.id]}
+                        onChange={(id, on) => patch({ acpAgents: { ...s.acpAgents, [id]: on } })}
+                      />
                     ))}
                   </div>
                 </Item>

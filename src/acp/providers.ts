@@ -9,6 +9,10 @@ export interface AcpProviderSpec {
   id: string;
   name: string;
   command: string;
+  /** True when `command` is a launcher for an adapter package (`npx -y pkg`)
+   *  rather than the agent's own binary, so the person's configured path for
+   *  the agent must not replace it. */
+  adapter?: boolean;
   /** The subcommand or flags that put the CLI in ACP mode (`acp`,
    *  `--experimental-acp`, ...). */
   args: readonly string[];
@@ -190,5 +194,59 @@ export const ACP_PRESETS: readonly AcpPreset[] = [
     install: "https://github.com/block/goose/releases",
     verifiedOn: "2026-11-09",
     source: "ACP registry entry `goose` 1.57.0 (binary goose, args acp)",
+  },
+  {
+    id: "github-copilot-cli",
+    name: "GitHub Copilot CLI",
+    bin: "npx",
+    args: ["-y", "@github/copilot@1.0.108", "--acp"],
+    install: "Needs Node.js; npx fetches @github/copilot on first run.",
+    verifiedOn: "2026-11-09",
+    source: "ACP registry entry `github-copilot-cli` 1.0.108 (npx @github/copilot, args --acp)",
+  },
+  {
+    id: "opencode",
+    name: "OpenCode",
+    bin: "opencode",
+    args: ["acp"],
+    install: "https://opencode.ai",
+    verifiedOn: "2026-11-09",
+    source: "ACP registry entry `opencode` 2.2.6 (binary opencode, args acp)",
+  },
+  {
+    id: "qwen-code",
+    name: "Qwen Code",
+    bin: "npx",
+    args: ["-y", "@qwen-code/qwen-code@0.27.1", "--acp", "--experimental-skills"],
+    install: "Needs Node.js; npx fetches @qwen-code/qwen-code on first run.",
+    verifiedOn: "2026-11-09",
+    source: "ACP registry entry `qwen-code` 0.27.1 (npx @qwen-code/qwen-code, args --acp --experimental-skills)",
+  },
+  {
+    id: "claude-acp",
+    name: "Claude (ACP adapter)",
+    bin: "npx",
+    args: ["-y", "@agentclientprotocol/claude-agent-acp@0.102.0"],
+    install: "Needs Node.js; npx fetches the adapter on first run.",
+    verifiedOn: "2026-11-09",
+    source: "ACP registry entry `claude-acp` 0.102.0 (npx package, no args)",
+  },
+  {
+    id: "codex-acp",
+    name: "Codex (ACP adapter)",
+    bin: "npx",
+    args: ["-y", "@agentclientprotocol/codex-acp@2.6.0"],
+    install: "Needs Node.js; npx fetches the adapter on first run.",
+    verifiedOn: "2026-11-09",
+    source: "ACP registry entry `codex-acp` 2.6.0 (npx package, no args)",
+  },
+  {
+    id: "cursor",
+    name: "Cursor Agent",
+    bin: "cursor-agent",
+    args: ["acp"],
+    install: "https://cursor.com/cli",
+    verifiedOn: "2026-11-09",
+    source: "ACP registry entry `cursor` 2026.11.05 (binary cursor-agent, args acp)",
   },
 ];

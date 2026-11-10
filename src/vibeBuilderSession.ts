@@ -1,4 +1,5 @@
 import { nativeProviderDeps } from "./buildProviders";
+import { canResumeSession, type SessionOrigin } from "./sessionOrigin";
 import * as ipc from "./ipc";
 import {
   createProjectRunner,
@@ -1132,6 +1133,8 @@ export class VibeBuilderSession implements BuilderSession {
   private turnEpoch = 0;
   private closedAttempts = new Set<string>();
   private hasRun = false;
+  /** Which kind of transport minted `cliSessionId` (null before the first turn). */
+  private cliSessionOrigin: SessionOrigin | null = null;
   private cliSessionId: string;
   private sendQueue: Promise<void> = Promise.resolve();
   private finishTurn: (() => void) | null = null;
@@ -1425,6 +1428,7 @@ export class VibeBuilderSession implements BuilderSession {
       this.settled = false;
       this.bindAttemptPreview(reservation.attempt.attemptId);
 
+      const resume = this.resumeFor(chosen.cli);
       const launch = this.launchSpec(
         reservation.envelope.runId,
         reservation.attempt.attemptId,
@@ -1446,7 +1450,7 @@ export class VibeBuilderSession implements BuilderSession {
             emit: (event) =>
               this.onRunnerEvent(event, reservation.attempt.attemptId),
           },
-          { resume: this.hasRun },
+          { resume },
         );
         if (this.stopped) {
           await transport.stop().catch(() => {});
@@ -2476,6 +2480,7 @@ export class VibeBuilderSession implements BuilderSession {
         {
           const minted = (this.transport as { sessionId?: string | null } | undefined)?.sessionId;
           if (typeof minted === "string" && minted) this.cliSessionId = minted;
+          this.cliSessionOrigin = typeof minted === "string" && minted ? "acp" : "vendor";
         }
         this.publish(event);
         const turnEpoch = this.turnEpoch;
@@ -3213,6 +3218,18 @@ export class VibeBuilderSession implements BuilderSession {
     await this.reseed(reservation, switched);
   }
 
+  /** Whether the next launch may resume the stored session. An id minted by a
+   *  vendor runner must never reach session/resume, nor an ACP id `--resume`
+   *  (the ACP setting can change between attempts); on a mismatch the session
+   *  starts fresh under a new id. */
+  private resumeFor(cli: string): boolean {
+    if (!this.hasRun) return false;
+    if (canResumeSession(this.cliSessionOrigin, cli)) return true;
+    this.cliSessionId = this.deps.sessionId();
+    this.cliSessionOrigin = null;
+    return false;
+  }
+
   /** Start a fresh attempt on the same run, linked to the one that failed.
    *  `recoveryFromAttemptId` is the only thread joining them: it records that
    *  this attempt exists because that one failed, without either attempt
@@ -3228,6 +3245,7 @@ export class VibeBuilderSession implements BuilderSession {
       // A switched route is a different CLI, so the old session id means
       // nothing to it; a same-route retry keeps its id and can resume.
       if (switched) this.cliSessionId = this.deps.sessionId();
+      const resume = !switched && this.resumeFor(route.cli);
       const attempt = await this.deps.reserveAttempt({
         runId: failed.envelope.runId,
         route,
@@ -3248,7 +3266,7 @@ export class VibeBuilderSession implements BuilderSession {
           route.cli,
         ),
         { emit: (event) => this.onRunnerEvent(event, attempt.attemptId) },
-        { resume: !switched },
+        { resume },
       );
       if (this.stopped) {
         await transport.stop().catch(() => {});

@@ -41,6 +41,8 @@ export class AcpTransport implements ProjectRunnerTransport {
     resume: boolean;
     onPermission?: (request: AcpPermissionRequest) => Promise<string | null | undefined>;
     fs?: AcpFileSystem;
+    /** Appended to a failure before `ready`, e.g. how to switch ACP off. */
+    failureHint?: string;
   };
 
   constructor(
@@ -53,6 +55,7 @@ export class AcpTransport implements ProjectRunnerTransport {
       resume: boolean;
       onPermission?: (request: AcpPermissionRequest) => Promise<string | null | undefined>;
       fs?: AcpFileSystem;
+      failureHint?: string;
     },
   ) {
     this.attemptId = attemptId;
@@ -84,7 +87,7 @@ export class AcpTransport implements ProjectRunnerTransport {
     await this.process.spawn(
       this.attemptId,
       {
-        command: this.launch.bin,
+        command: this.runner.acp?.adapter ? this.runner.acp.command : this.launch.bin,
         args: this.opts.resume ? this.runner.resumeArgs(this.launch) : this.runner.args(this.launch),
         cwd: this.launch.policy.cwd,
         env: withSessionEnv(this.launch.env, this.runner.sessionEnv),
@@ -111,9 +114,13 @@ export class AcpTransport implements ProjectRunnerTransport {
     )
       .then(() => this.host.emit({ kind: "ready" }));
     // Reported on the host now; `send` rethrows it through `ready`.
-    this.ready.catch((e) =>
-      this.host.emit({ kind: "error", message: e instanceof Error ? e.message : String(e) }),
-    );
+    this.ready.catch((e) => {
+      const message = e instanceof Error ? e.message : String(e);
+      this.host.emit({
+        kind: "error",
+        message: this.opts.failureHint ? `${message} ${this.opts.failureHint}` : message,
+      });
+    });
   }
 
   async send(text: string): Promise<void> {

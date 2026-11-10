@@ -25,7 +25,7 @@ import {
   AGENT_CLIS,
   CLI_INSTALLS_CHANGED_EVENT,
   streamsStructured,
-  structuredRunnerFor,
+  legacyRunnerFor,
   type AgentCli,
 } from "./projects";
 import { loginCommand } from "./profiles";
@@ -45,7 +45,7 @@ export const BRAIN_RECHECK = "brain-recheck";
  *  one prompt and end with its answer. The same test askBrain applies, made
  *  with a throwaway launch so this never re-implements the runner's rules. */
 export function canBeBrain(cli: AgentCli): boolean {
-  const runner = structuredRunnerFor(cli.id);
+  const runner = legacyRunnerFor(cli.id);
   if (!runner || !streamsStructured(cli.id)) return false;
   return (
     brainArgs(
