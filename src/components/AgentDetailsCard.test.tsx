@@ -6,6 +6,8 @@ vi.mock("../ipc", () => ({
     new TextEncoder().encode(path.endsWith(".md") ? "# Risk report\nThe store policy changed." : "x"),
   ),
   gitStatus: vi.fn(async () => ({ is_repo: true, branch: "feat/x", entries: [{}, {}, {}] })),
+  ghPrMerge: vi.fn(async () => ({ message: "Merged #21", pending: false })),
+  ghPrClose: vi.fn(async () => "closed"),
   ghPrList: vi.fn(async () => [
     {
       number: 12, title: "Add thing", branch: "feat/x", state: "OPEN", draft: false, checks: "PASS",
@@ -270,5 +272,28 @@ describe("lineage rows", () => {
     fireEvent.click(screen.getByRole("button", { name: /Previous agents/ }));
     fireEvent.click(screen.getByRole("button", { name: /planner/ }));
     expect(screen.getByText("No text was returned.")).toBeInTheDocument();
+  });
+});
+
+describe("merging from the card", () => {
+  it("asks to confirm, then squash-merges the PR", async () => {
+    vi.mocked(ipc.gitStatus).mockResolvedValue({ is_repo: true, branch: "feat/x", entries: [] } as never);
+    vi.mocked(ipc.ghPrList).mockResolvedValue([
+      { number: 21, title: "Ready", url: "u", branch: "feat/x", base: "main", state: "OPEN", draft: false, checks: "PASS", mergeable: "MERGEABLE", additions: 1, deletions: 0 },
+    ] as never);
+    setup({ repo: "/mergeable", cwd: "/mergeable" });
+    fireEvent.click(await screen.findByRole("button", { name: "Squash" }));
+    expect(ipc.ghPrMerge).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: "Confirm" }));
+    await waitFor(() => expect(ipc.ghPrMerge).toHaveBeenCalledWith("/mergeable", 21, "squash"));
+    await waitFor(() => expect(screen.getByText("Merged")).toBeInTheDocument());
+  });
+  it("disables merging while checks fail", async () => {
+    vi.mocked(ipc.gitStatus).mockResolvedValue({ is_repo: true, branch: "feat/x", entries: [] } as never);
+    vi.mocked(ipc.ghPrList).mockResolvedValue([
+      { number: 22, title: "Red", url: "u", branch: "feat/x", base: "main", state: "OPEN", draft: false, checks: "FAIL", mergeable: "MERGEABLE", additions: 1, deletions: 0 },
+    ] as never);
+    setup({ repo: "/red", cwd: "/red" });
+    expect(await screen.findByRole("button", { name: "Squash" })).toBeDisabled();
   });
 });

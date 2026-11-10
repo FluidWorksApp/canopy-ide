@@ -206,6 +206,9 @@ export function AgentDetailsCard({
   /** Every PR this agent raised, newest first; shown on hover. */
   const [agentPrs, setAgentPrs] = useState<ipc.PrInfo[]>([]);
   const [prListOpen, setPrListOpen] = useState(false);
+  /** The merge action awaiting its confirm click, and whether one is running. */
+  const [pending, setPending] = useState<null | "squash" | "merge" | "rebase" | "close">(null);
+  const [merging, setMerging] = useState(false);
 
   const toggle = (value: boolean) => {
     setCollapsed(value);
@@ -394,6 +397,66 @@ export function AgentDetailsCard({
             >
               {pr.checks === "FAIL" ? "Fix it" : "Resolve"}
             </button>
+          )}
+        </div>
+      )}
+
+      {pr && repo && !remoteMachine && pr.state.toUpperCase() === "OPEN" && (
+        <div className="agent-card-row agent-card-merge" role="group" aria-label={`Merge pull request #${pr.number}`}>
+          {pending ? (
+            <>
+              <span className="agent-card-grow agent-card-ellipsis">
+                {pending === "close" ? "Close" : pending === "squash" ? "Squash and merge" : pending === "merge" ? "Merge" : "Rebase and merge"} #{pr.number}?
+              </span>
+              <button
+                type="button"
+                className="agent-card-fix"
+                disabled={merging}
+                autoFocus
+                onClick={() => {
+                  const method = pending;
+                  setMerging(true);
+                  const run = method === "close" ? ipc.ghPrClose(repo, pr.number, false) : ipc.ghPrMerge(repo, pr.number, method);
+                  void Promise.resolve(run)
+                    .then((result) => {
+                      prCache.delete(repo);
+                      const done = method === "close" ? "CLOSED" : "MERGED";
+                      const pendingBg = typeof result === "object" && result?.pending;
+                      if (!pendingBg) {
+                        setPr((p) => (p ? { ...p, state: done } : p));
+                        setAgentPrs((list) => list.map((x) => (x.number === pr.number ? { ...x, state: done } : x)));
+                      }
+                      onNotice?.(typeof result === "object" && result?.message ? result.message : `#${pr.number} ${method === "close" ? "closed" : "merged"}.`);
+                    })
+                    .catch((err) => onNotice?.(String(err)))
+                    .finally(() => {
+                      setMerging(false);
+                      setPending(null);
+                    });
+                }}
+              >
+                {merging ? "Working…" : "Confirm"}
+              </button>
+              <button type="button" className="agent-card-fix agent-card-fix-quiet" disabled={merging} onClick={() => setPending(null)}>
+                Cancel
+              </button>
+            </>
+          ) : (
+            <>
+              <button type="button" className="agent-card-fix" disabled={pr.draft || pr.checks === "FAIL" || pr.mergeable === "CONFLICTING"} title={pr.draft ? "Mark the PR ready first" : pr.checks === "FAIL" ? "Checks are failing" : pr.mergeable === "CONFLICTING" ? "Resolve the conflicts first" : "Squash and merge"} onClick={() => setPending("squash")}>
+                Squash
+              </button>
+              <button type="button" className="agent-card-fix agent-card-fix-quiet" disabled={pr.draft || pr.checks === "FAIL" || pr.mergeable === "CONFLICTING"} onClick={() => setPending("merge")}>
+                Merge
+              </button>
+              <button type="button" className="agent-card-fix agent-card-fix-quiet" disabled={pr.draft || pr.checks === "FAIL" || pr.mergeable === "CONFLICTING"} onClick={() => setPending("rebase")}>
+                Rebase
+              </button>
+              <span className="agent-card-grow" />
+              <button type="button" className="agent-card-fix agent-card-fix-quiet" onClick={() => setPending("close")}>
+                Close
+              </button>
+            </>
           )}
         </div>
       )}

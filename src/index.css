@@ -6790,6 +6790,13 @@ body.dragging-tab * {
   opacity: 0.45;
   cursor: default;
 }
+.agent-card-merge {
+  gap: 6px;
+}
+.agent-card-fix-quiet {
+  border-color: var(--border);
+  background: transparent;
+}
 .agent-card-diffstat {
   font-variant-numeric: tabular-nums;
 }
