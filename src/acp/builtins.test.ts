@@ -163,6 +163,26 @@ describe("launching", () => {
     expect(h.spawned[1].args).toContain("stream-json");
   });
 
+  it("does not hand an ACP-minted session id to the vendor runner on fallback", async () => {
+    const h = harness((c) => c === "npx");
+    const resumed = launch("claude");
+    resumed.policy = { ...resumed.policy, sessionId: "acp-minted-id" };
+    const transport = await startStructured("a1", "claude", resumed, { emit: () => {} }, { resume: true, process: h.process });
+    const vendor = h.spawned[1];
+    expect(vendor.args).not.toContain("--resume");
+    expect(vendor.args).not.toContain("acp-minted-id");
+    const fresh = (transport as { fallbackSessionId?: string }).fallbackSessionId;
+    expect(fresh).toBeTruthy();
+    expect(fresh).not.toBe("acp-minted-id");
+    expect(vendor.args).toContain(fresh);
+  });
+
+  it("keeps the caller's id on fallback when nothing was being resumed", async () => {
+    const h = harness((c) => c === "npx");
+    const transport = await startStructured("a1", "claude", launch("claude"), { emit: () => {} }, { resume: false, process: h.process });
+    expect((transport as { fallbackSessionId?: string }).fallbackSessionId).toBeUndefined();
+  });
+
   it("names the setting when there is no vendor runner to fall back to", async () => {
     const h = harness(() => true);
     await expect(

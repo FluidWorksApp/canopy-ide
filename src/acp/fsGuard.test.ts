@@ -46,6 +46,15 @@ describe("checkFsAccess", () => {
     "/work/.kiro/settings/mcp.json",
     "/work/.mcp.json",
     "/work/sub/.mcp.json",
+    "/work/.Claude/Settings.json",
+    "/work/.GIT/Hooks/pre-commit",
+    "/work/opencode.json",
+    "/work/sub/opencode.jsonc",
+    "/work/.opencode/plugin/x.js",
+    "/work/.gitmodules",
+    "/work/.husky/pre-commit",
+    "/work/.vscode/tasks.json",
+    "/work/.git",
   ])("denies writes to protected %s", (path) => {
     const r = checkFsAccess("write", path, rw);
     expect(r.ok).toBe(false);
@@ -56,6 +65,7 @@ describe("checkFsAccess", () => {
     expect(checkFsAccess("read", "/work/.git/config", rw).ok).toBe(true);
     expect(checkFsAccess("write", "/work/.gitignore", rw).ok).toBe(true);
     expect(checkFsAccess("write", "/work/.git/info/exclude", rw).ok).toBe(true);
+    expect(checkFsAccess("write", "/work/.vscode/launch.json", rw).ok).toBe(true);
   });
 
   it("handles Windows drive paths", () => {

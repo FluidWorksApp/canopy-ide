@@ -41,20 +41,27 @@ const inside = (path: string, root: string): boolean => {
 
 const AGENT_DIRS = new Set([".claude", ".codex", ".kiro", ".cursor"]);
 const AGENT_CONFIG = /^(settings(\.local)?\.json|config\.toml|config\.json|mcp\.json|hooks\.json)$/;
+const PROTECTED_NAMES = new Set([".mcp.json", ".gitmodules", "opencode.json", "opencode.jsonc", ".git"]);
+const PROTECTED_DIRS = new Set([".husky", ".opencode"]);
 
-/** Files that change what the agent, git or an MCP server will execute next.
- *  Writing one is a privilege escalation, so it is refused even in
- *  workspace-write: the agent's own tools can still ask the person. */
+/** Files that change what the agent, git or an editor task runner will execute
+ *  next. Writing one is a privilege escalation, so it is refused even in
+ *  workspace-write: the agent's own tools can still ask the person. Names are
+ *  compared case-insensitively (macOS and Windows volumes usually are). This
+ *  works on the path as written; the Rust writer repeats the check on the
+ *  symlink-resolved path (`fs_write_file_confined`). */
 function isProtected(path: string): boolean {
-  const segs = path.split("/").filter(Boolean);
+  const segs = path.toLowerCase().split("/").filter(Boolean);
   const name = segs[segs.length - 1] ?? "";
-  if (name === ".mcp.json") return true;
+  if (PROTECTED_NAMES.has(name)) return true;
+  if (name === "tasks.json" && segs[segs.length - 2] === ".vscode") return true;
   const git = segs.indexOf(".git");
   if (git >= 0) {
     const rest = segs.slice(git + 1);
     if (rest[0] === "hooks" && rest.length > 1) return true;
     if (rest.length === 1 && (rest[0] === "config" || rest[0] === "hooks")) return true;
   }
+  if (segs.slice(0, -1).some((s) => PROTECTED_DIRS.has(s))) return true;
   const dir = segs.findIndex((s) => AGENT_DIRS.has(s));
   if (dir >= 0 && dir < segs.length - 1) {
     if (AGENT_CONFIG.test(name)) return true;

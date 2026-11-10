@@ -63,6 +63,10 @@ export class StructuredTransport implements ProjectRunnerTransport {
   private parser: StructuredEventParser;
   private attemptId: string;
   private process: ProjectRunnerProcess;
+  /** Set when an ACP launch fell back to this vendor runner mid-resume: the
+   *  fresh id the vendor session was started under. The caller stores it in
+   *  place of the ACP-minted id it passed in. */
+  fallbackSessionId?: string;
 
   constructor(
     attemptId: string,
@@ -143,6 +147,8 @@ export class OneshotStructuredTransport implements ProjectRunnerTransport {
   private process: ProjectRunnerProcess;
   private runner: StructuredRunner;
   private launch: StructuredRunnerLaunch;
+  /** See StructuredTransport.fallbackSessionId. */
+  fallbackSessionId?: string;
 
   constructor(
     attemptId: string,
@@ -280,6 +286,8 @@ export async function startStructured(
 ): Promise<ProjectRunnerTransport> {
   if (!attemptId) throw new Error("A structured runner requires an attempt id");
   let runner = structuredRunnerFor(cliId);
+  let resume = opts.resume;
+  let fallbackSessionId: string | undefined;
   // One rule, asked in one place. `streamsStructured` is the same predicate the
   // route eligibility filter uses (vibeProjectSetup, vibeBuilderSession), and it
   // is called here rather than re-stated: this launcher used to carry its own
@@ -325,10 +333,19 @@ export async function startStructured(
         );
       }
       runner = legacy;
+      // The stored id (if resuming) was minted by the ACP agent and means
+      // nothing to a vendor CLI. Start the vendor session fresh under a new id.
+      if (opts.resume) {
+        fallbackSessionId = crypto.randomUUID();
+        launch = { ...launch, policy: { ...launch.policy, sessionId: fallbackSessionId } };
+        resume = false;
+      }
     }
   }
   if (runner.tier === "oneshot") {
-    return new OneshotStructuredTransport(attemptId, host, opts.process, runner, launch);
+    const oneshot = new OneshotStructuredTransport(attemptId, host, opts.process, runner, launch);
+    if (fallbackSessionId) oneshot.fallbackSessionId = fallbackSessionId;
+    return oneshot;
   }
   const sessionId = launch.policy.sessionId;
   const transport = new StructuredTransport(
@@ -339,7 +356,8 @@ export async function startStructured(
     (uuid) =>
       (opts.onCheckpoint ?? recordNativeCheckpoint)(sessionId, uuid),
   );
-  const args = opts.resume ? runner.resumeArgs(launch) : runner.args(launch);
+  transport.fallbackSessionId = fallbackSessionId;
+  const args = resume ? runner.resumeArgs(launch) : runner.args(launch);
   await opts.process.spawn(
     attemptId,
     {

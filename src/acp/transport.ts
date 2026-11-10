@@ -8,7 +8,7 @@ import type {
   StructuredRunner,
   StructuredRunnerLaunch,
 } from "../structuredRunners";
-import { fsReadText, fsWriteFile } from "../ipc";
+import { fsReadText, fsWriteFileConfined } from "../ipc";
 import { AcpSession, type AcpFileSystem } from "./client";
 import type { AcpPermissionRequest } from "./protocol";
 
@@ -16,10 +16,11 @@ const STDERR_KEEP = 2000;
 /** Larger files are refused by the reader instead of filling the renderer. */
 const FS_READ_MAX_BYTES = 8 * 1024 * 1024;
 
-/** The Tauri file commands, which check the path against registered roots. */
+/** The Tauri file commands. Writes go through the confined command, which
+ *  resolves symlinks and re-checks the roots and protected files. */
 const tauriFileSystem: AcpFileSystem = {
   readTextFile: (path) => fsReadText(path, FS_READ_MAX_BYTES),
-  writeTextFile: (path, content) => fsWriteFile(path, content),
+  writeTextFile: (path, content, roots) => fsWriteFileConfined(path, content, roots),
 };
 
 /** A long-lived ACP agent behind the same `send`/`turnEnd` rhythm as every

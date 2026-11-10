@@ -274,13 +274,17 @@ describe("AcpSession.stop", () => {
 
 describe("AcpSession file system", () => {
   const files = new Map<string, string>([["/work/a.txt", "one\ntwo\nthree\nfour"]]);
+  const writeRoots: string[][] = [];
   const fs = {
     readTextFile: async (path: string) => {
       const v = files.get(path);
       if (v === undefined) throw new Error("ENOENT");
       return v;
     },
-    writeTextFile: async (path: string, content: string) => void files.set(path, content),
+    writeTextFile: async (path: string, content: string, roots: string[]) => {
+      writeRoots.push(roots);
+      files.set(path, content);
+    },
   };
   const setup = (opts: Partial<AcpSessionOptions> = {}) => {
     const h = harness({ initialize: init(), "session/new": () => ({ sessionId: "s" }) }, { fs, ...opts });
@@ -317,6 +321,8 @@ describe("AcpSession file system", () => {
   it("writes inside the root when workspace-write", async () => {
     const h = setup();
     expect(await call(h, 103, "fs/write_text_file", { path: "/work/new.txt", content: "hi" })).toMatchObject({ result: {} });
+    // The writer re-checks symlinks against these roots, so they must reach it.
+    expect(writeRoots.at(-1)?.length).toBeGreaterThan(0);
     expect(files.get("/work/new.txt")).toBe("hi");
   });
 

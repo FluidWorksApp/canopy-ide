@@ -2481,6 +2481,9 @@ export class VibeBuilderSession implements BuilderSession {
           const minted = (this.transport as { sessionId?: string | null } | undefined)?.sessionId;
           if (typeof minted === "string" && minted) this.cliSessionId = minted;
           this.cliSessionOrigin = typeof minted === "string" && minted ? "acp" : "vendor";
+          // ACP failed to spawn and the vendor runner started a fresh session.
+          const fresh = (this.transport as { fallbackSessionId?: string } | undefined)?.fallbackSessionId;
+          if (!minted && fresh) this.cliSessionId = fresh;
         }
         this.publish(event);
         const turnEpoch = this.turnEpoch;

@@ -32,7 +32,7 @@ const CLOSE_TIMEOUT_MS = 2_000;
  *  Tauri; transport.ts supplies the real implementation. */
 export interface AcpFileSystem {
   readTextFile(path: string): Promise<string>;
-  writeTextFile(path: string, content: string): Promise<void>;
+  writeTextFile(path: string, content: string, roots: string[]): Promise<void>;
 }
 
 export interface AcpSessionOptions {
@@ -319,9 +319,13 @@ export class AcpSession {
     return decision.response;
   }
 
+  private roots(): string[] {
+    return this.opts.roots?.length ? this.opts.roots : [this.opts.cwd];
+  }
+
   private guard(op: "read" | "write", path: unknown) {
     const verdict = checkFsAccess(op, String(path ?? ""), {
-      roots: this.opts.roots?.length ? this.opts.roots : [this.opts.cwd],
+      roots: this.roots(),
       authority: this.opts.authority,
     });
     if (verdict.ok) return verdict.path;
@@ -350,7 +354,7 @@ export class AcpSession {
       throw new AcpRpcError(RPC_INVALID_PARAMS, "content must be a string.");
     }
     try {
-      await this.opts.fs!.writeTextFile(path, p.content);
+      await this.opts.fs!.writeTextFile(path, p.content, this.roots());
     } catch (e) {
       throw new AcpRpcError(RPC_INTERNAL_ERROR, e instanceof Error ? e.message : String(e));
     }
