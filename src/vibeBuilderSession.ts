@@ -1135,6 +1135,8 @@ export class VibeBuilderSession implements BuilderSession {
   private hasRun = false;
   /** Which kind of transport minted `cliSessionId` (null before the first turn). */
   private cliSessionOrigin: SessionOrigin | null = null;
+  /** The last launch tried ACP, could not spawn it and ran the vendor CLI. */
+  private acpFellBack = false;
   private cliSessionId: string;
   private sendQueue: Promise<void> = Promise.resolve();
   private finishTurn: (() => void) | null = null;
@@ -1450,7 +1452,7 @@ export class VibeBuilderSession implements BuilderSession {
             emit: (event) =>
               this.onRunnerEvent(event, reservation.attempt.attemptId),
           },
-          { resume },
+          { resume, sessionOrigin: this.cliSessionOrigin },
         );
         if (this.stopped) {
           await transport.stop().catch(() => {});
@@ -2484,6 +2486,9 @@ export class VibeBuilderSession implements BuilderSession {
           // ACP failed to spawn and the vendor runner started a fresh session.
           const fresh = (this.transport as { fallbackSessionId?: string } | undefined)?.fallbackSessionId;
           if (!minted && fresh) this.cliSessionId = fresh;
+          this.acpFellBack =
+            !minted &&
+            (this.transport as { fellBackFromAcp?: boolean } | undefined)?.fellBackFromAcp === true;
         }
         this.publish(event);
         const turnEpoch = this.turnEpoch;
@@ -3227,9 +3232,10 @@ export class VibeBuilderSession implements BuilderSession {
    *  starts fresh under a new id. */
   private resumeFor(cli: string): boolean {
     if (!this.hasRun) return false;
-    if (canResumeSession(this.cliSessionOrigin, cli)) return true;
+    if (canResumeSession(this.cliSessionOrigin, cli, this.acpFellBack)) return true;
     this.cliSessionId = this.deps.sessionId();
     this.cliSessionOrigin = null;
+    this.acpFellBack = false;
     return false;
   }
 
@@ -3269,7 +3275,7 @@ export class VibeBuilderSession implements BuilderSession {
           route.cli,
         ),
         { emit: (event) => this.onRunnerEvent(event, attempt.attemptId) },
-        { resume },
+        { resume, sessionOrigin: this.cliSessionOrigin },
       );
       if (this.stopped) {
         await transport.stop().catch(() => {});

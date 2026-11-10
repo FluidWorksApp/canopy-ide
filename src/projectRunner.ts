@@ -12,6 +12,7 @@ import {
 import { acpEnabledFor, legacyRunnerFor, streamsStructured, structuredRunnerFor } from "./projects";
 import type { AcpPermissionRequest } from "./acp/protocol";
 import { AcpTransport } from "./acp/transport";
+import type { SessionOrigin } from "./sessionOrigin";
 import { recordNativeCheckpoint } from "./turnRollback";
 
 /** The caller's env plus whatever the runner needs every session to carry.
@@ -67,6 +68,9 @@ export class StructuredTransport implements ProjectRunnerTransport {
    *  fresh id the vendor session was started under. The caller stores it in
    *  place of the ACP-minted id it passed in. */
   fallbackSessionId?: string;
+  /** Set when this vendor runner took over from an ACP launch that could not
+   *  spawn (or was skipped because the session already fell back). */
+  fellBackFromAcp?: boolean;
 
   constructor(
     attemptId: string,
@@ -149,6 +153,8 @@ export class OneshotStructuredTransport implements ProjectRunnerTransport {
   private launch: StructuredRunnerLaunch;
   /** See StructuredTransport.fallbackSessionId. */
   fallbackSessionId?: string;
+  /** See StructuredTransport.fellBackFromAcp. */
+  fellBackFromAcp?: boolean;
 
   constructor(
     attemptId: string,
@@ -255,7 +261,7 @@ export interface ProjectRunnerController {
     cliId: string,
     launch: StructuredRunnerLaunch,
     host: StructuredRunnerHost,
-    opts: { resume: boolean },
+    opts: { resume: boolean; sessionOrigin?: SessionOrigin | null },
   ): Promise<ProjectRunnerTransport>;
 }
 
@@ -276,6 +282,10 @@ export async function startStructured(
   host: StructuredRunnerHost,
   opts: {
     resume: boolean;
+    /** Which kind of transport minted the id being resumed. "vendor" on an ACP
+     *  agent means an earlier launch fell back, so ACP is skipped and the
+     *  vendor session resumes. */
+    sessionOrigin?: SessionOrigin | null;
     process: ProjectRunnerProcess;
     /** Where a Claude checkpoint id goes; defaults to the rollback store. */
     onCheckpoint?: (sessionId: string, uuid: string) => void;
@@ -288,6 +298,7 @@ export async function startStructured(
   let runner = structuredRunnerFor(cliId);
   let resume = opts.resume;
   let fallbackSessionId: string | undefined;
+  let fellBackFromAcp = false;
   // One rule, asked in one place. `streamsStructured` is the same predicate the
   // route eligibility filter uses (vibeProjectSetup, vibeBuilderSession), and it
   // is called here rather than re-stated: this launcher used to carry its own
@@ -308,6 +319,19 @@ export async function startStructured(
       runner,
       launch,
     );
+  }
+  const legacyForAcp = runner.tier === "acp" ? legacyRunnerFor(cliId) : undefined;
+  if (
+    runner.tier === "acp" &&
+    legacyForAcp &&
+    legacyForAcp.tier !== "acp" &&
+    opts.resume &&
+    opts.sessionOrigin === "vendor"
+  ) {
+    // An earlier launch already fell back to the vendor CLI and its session
+    // holds the conversation. Do not retry ACP for it.
+    runner = legacyForAcp;
+    fellBackFromAcp = true;
   }
   if (runner.tier === "acp") {
     const legacy = legacyRunnerFor(cliId);
@@ -333,6 +357,7 @@ export async function startStructured(
         );
       }
       runner = legacy;
+      fellBackFromAcp = true;
       // The stored id (if resuming) was minted by the ACP agent and means
       // nothing to a vendor CLI. Start the vendor session fresh under a new id.
       if (opts.resume) {
@@ -345,6 +370,7 @@ export async function startStructured(
   if (runner.tier === "oneshot") {
     const oneshot = new OneshotStructuredTransport(attemptId, host, opts.process, runner, launch);
     if (fallbackSessionId) oneshot.fallbackSessionId = fallbackSessionId;
+    oneshot.fellBackFromAcp = fellBackFromAcp;
     return oneshot;
   }
   const sessionId = launch.policy.sessionId;
@@ -357,6 +383,7 @@ export async function startStructured(
       (opts.onCheckpoint ?? recordNativeCheckpoint)(sessionId, uuid),
   );
   transport.fallbackSessionId = fallbackSessionId;
+  transport.fellBackFromAcp = fellBackFromAcp;
   const args = resume ? runner.resumeArgs(launch) : runner.args(launch);
   await opts.process.spawn(
     attemptId,

@@ -56,6 +56,17 @@ Fixed: fallback resume state, symlink bypass, protected list (OpenCode, hooks,
 case), `fs_write_file` TOCTOU for the ACP path (the plain `fs_write_file` used by
 the editor is unchanged).
 
+Second review: after an ACP spawn failure the session was recorded as `vendor`
+while ACP stayed enabled, so every later turn saw an origin mismatch and started
+a fresh vendor session. Now `startStructured` marks the transport
+`fellBackFromAcp`, `VibeBuilderSession` remembers it (`acpFellBack`), and
+`canResumeSession(origin, cli, fellBack)` keeps the vendor id resumable. The next
+launch passes `sessionOrigin: "vendor"`, skips the ACP spawn attempt and runs
+`--resume <vendor id>`. The flag clears on any origin mismatch (new session,
+switched route). The protected list stays in two places, but both sides now
+assert one shared table, `src/acp/protectedPaths.json` (`fsGuard.test.ts` and
+`protected_paths_match_the_shared_table` in `fsx.rs`).
+
 Not fixed, with reasons:
 
 - Protected-file checks on a remote workspace host: `fsWriteFileConfined` sends
@@ -86,7 +97,7 @@ Not fixed, with reasons:
 
 `npm run typecheck`, `npm run lint` (0 errors, 237 existing warnings),
 `npm run test` and `npm run build` pass. New: `src/acp/builtins.test.ts`
-(specs, resolver, npx launch, fallback incl. resumed-id case, session origin),
+(specs, resolver, npx launch, fallback incl. resumed-id case, two consecutive turns after a spawn failure, session origin),
 `src/acp/fsGuard.test.ts` (new protected names, case), Rust tests for
 `is_agent_protected` and `write_confined` (symlinks, outside roots),
 `src/components/AcpAgentToggle.test.tsx`. Existing vendor-runner tests

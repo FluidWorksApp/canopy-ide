@@ -1587,6 +1587,22 @@ mod tests {
         }
     }
 
+    /// The same table `src/acp/fsGuard.test.ts` asserts against `isProtected`,
+    /// so the Rust and TypeScript copies of the list cannot drift.
+    #[test]
+    fn protected_paths_match_the_shared_table() {
+        let table: serde_json::Value =
+            serde_json::from_str(include_str!("../../src/acp/protectedPaths.json")).unwrap();
+        for p in table["protected"].as_array().unwrap() {
+            let p = p.as_str().unwrap();
+            assert!(is_agent_protected(Path::new(p)), "{p}");
+        }
+        for p in table["allowed"].as_array().unwrap() {
+            let p = p.as_str().unwrap();
+            assert!(!is_agent_protected(Path::new(p)), "{p}");
+        }
+    }
+
     #[cfg(unix)]
     #[test]
     fn confined_write_refuses_symlinks_into_protected_files_and_outside_roots() {

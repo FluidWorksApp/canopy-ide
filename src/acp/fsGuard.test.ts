@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { checkFsAccess } from "./fsGuard";
+import shared from "./protectedPaths.json";
 
 const roots = ["/work"];
 const rw = { roots, authority: "workspace-write" as const };
@@ -59,6 +60,16 @@ describe("checkFsAccess", () => {
     const r = checkFsAccess("write", path, rw);
     expect(r.ok).toBe(false);
     if (!r.ok) expect(r.blocked).toBe(true);
+  });
+
+  // The same table is asserted by `is_agent_protected` in src-tauri/src/fsx.rs
+  // so the two hand-kept lists cannot drift apart.
+  it.each(shared.protected)("shared table: denies writes to %s", (path) => {
+    expect(checkFsAccess("write", path, { roots: ["/w"], authority: "workspace-write" }).ok).toBe(false);
+  });
+
+  it.each(shared.allowed)("shared table: allows writes to %s", (path) => {
+    expect(checkFsAccess("write", path, { roots: ["/w"], authority: "workspace-write" }).ok).toBe(true);
   });
 
   it("allows reading protected files and writing ordinary dotfiles", () => {

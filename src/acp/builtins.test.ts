@@ -131,6 +131,12 @@ describe("session origin", () => {
     expect(canResumeSession("vendor", "claude")).toBe(true);
     expect(canResumeSession(null, "claude")).toBe(false);
   });
+
+  it("resumes a vendor id under ACP only after an ACP launch fell back", () => {
+    expect(canResumeSession("vendor", "claude")).toBe(false);
+    expect(canResumeSession("vendor", "claude", true)).toBe(true);
+    expect(canResumeSession("acp", "claude", true)).toBe(true);
+  });
 });
 
 describe("launching", () => {
@@ -181,6 +187,45 @@ describe("launching", () => {
     const h = harness((c) => c === "npx");
     const transport = await startStructured("a1", "claude", launch("claude"), { emit: () => {} }, { resume: false, process: h.process });
     expect((transport as { fallbackSessionId?: string }).fallbackSessionId).toBeUndefined();
+  });
+
+  it("keeps one vendor session across two turns after an ACP spawn failure", async () => {
+    const h = harness((c) => c === "npx");
+    // The same bookkeeping VibeBuilderSession does at turnEnd and resumeFor.
+    let id = "canopy-id";
+    let origin: "acp" | "vendor" | null = null;
+    let fellBack = false;
+    let hasRun = false;
+    const turn = async () => {
+      const resume = hasRun && canResumeSession(origin, "claude", fellBack);
+      if (hasRun && !resume) {
+        id = "new-id";
+        origin = null;
+        fellBack = false;
+      }
+      const l = launch("claude");
+      l.policy = { ...l.policy, sessionId: id };
+      const t = (await startStructured("a", "claude", l, { emit: () => {} }, {
+        resume,
+        sessionOrigin: origin,
+        process: h.process,
+      })) as { sessionId?: string; fallbackSessionId?: string; fellBackFromAcp?: boolean };
+      hasRun = true;
+      if (t.fallbackSessionId) id = t.fallbackSessionId;
+      origin = "vendor";
+      fellBack = t.fellBackFromAcp === true;
+    };
+    await turn();
+    h.spawned.length = 0;
+    await turn();
+    // Turn two goes straight to the vendor CLI and resumes the turn-one id.
+    expect(h.spawned.map((s) => s.command)).toEqual(["claude"]);
+    expect(h.spawned[0].args).toContain("--resume");
+    expect(h.spawned[0].args).toContain("canopy-id");
+    h.spawned.length = 0;
+    await turn();
+    expect(h.spawned.map((s) => s.command)).toEqual(["claude"]);
+    expect(h.spawned[0].args).toContain("canopy-id");
   });
 
   it("names the setting when there is no vendor runner to fall back to", async () => {

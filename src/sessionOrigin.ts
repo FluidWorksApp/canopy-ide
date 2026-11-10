@@ -13,6 +13,14 @@ export function sessionOriginOf(cliId: string): SessionOrigin {
 
 /** Whether a stored id can be resumed by the transport this agent will use
  *  now. No recorded origin means no id worth resuming. */
-export function canResumeSession(origin: SessionOrigin | null, cliId: string): boolean {
-  return origin !== null && origin === sessionOriginOf(cliId);
+export function canResumeSession(
+  origin: SessionOrigin | null,
+  cliId: string,
+  /** The last launch tried ACP, failed to spawn it and ran the vendor runner.
+   *  Its vendor id stays resumable (the next launch skips ACP for it) instead
+   *  of looking like a setting change and starting fresh every turn. */
+  fellBackFromAcp = false,
+): boolean {
+  if (origin === null) return false;
+  return origin === sessionOriginOf(cliId) || (origin === "vendor" && fellBackFromAcp);
 }
