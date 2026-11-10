@@ -71,14 +71,7 @@ impl Workspace {
         events: Arc<EventLog>,
     ) -> Result<Arc<Self>, String> {
         let dir = state_dir.join("ws").join(id);
-        for sub in [
-            "mesh",
-            "notes",
-            "research",
-            "attention",
-            "inbox",
-            "keys",
-        ] {
+        for sub in ["mesh", "notes", "research", "attention", "inbox", "keys"] {
             crate::util::create_dir_mode(&dir.join(sub), 0o700).map_err(|e| e.to_string())?;
         }
         let _ = crate::util::set_mode(&dir, 0o700);

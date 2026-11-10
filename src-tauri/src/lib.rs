@@ -1,5 +1,4 @@
 mod agent_cli;
-mod teleport;
 mod agent_instructions;
 mod agent_life;
 mod agentid;
@@ -32,6 +31,7 @@ mod dictation;
 mod execution;
 mod mirror;
 mod remote_upload;
+mod teleport;
 // Intel macOS builds compile dictation out (no compatible ONNX Runtime); a stub
 // keeps the command surface identical so the rest of this file is unchanged.
 mod canopy_link;

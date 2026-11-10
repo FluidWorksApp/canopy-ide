@@ -21,14 +21,18 @@ fn home() -> Result<PathBuf, String> {
 
 /// Claude's folder name for a working directory: every non-alphanumeric is `-`.
 fn project_dir_name(cwd: &str) -> String {
-    cwd.chars().map(|c| if c.is_ascii_alphanumeric() { c } else { '-' }).collect()
+    cwd.chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+        .collect()
 }
 
 fn safe_session_id(id: &str) -> bool {
     let mut chars = id.chars();
     matches!(chars.next(), Some(c) if c.is_ascii_alphanumeric())
         && id.len() <= 128
-        && id.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+        && id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
 }
 
 fn transcript_path(home: &Path, cwd: &str, session_id: &str) -> Result<PathBuf, String> {
@@ -62,13 +66,19 @@ pub fn teleport_transcript_read(cwd: String, session_id: String) -> Result<Optio
     if !meta.is_file() || meta.len() > MAX_BYTES {
         return Err("the conversation is not a regular file within the size limit".into());
     }
-    std::fs::read_to_string(&path).map(Some).map_err(|e| e.to_string())
+    std::fs::read_to_string(&path)
+        .map(Some)
+        .map_err(|e| e.to_string())
 }
 
 /// Write the transcript. An identical file is left; a different existing one is
 /// never overwritten (its history would be lost). Returns the path written.
 #[tauri::command]
-pub fn teleport_transcript_write(cwd: String, session_id: String, text: String) -> Result<String, String> {
+pub fn teleport_transcript_write(
+    cwd: String,
+    session_id: String,
+    text: String,
+) -> Result<String, String> {
     if text.len() as u64 > MAX_BYTES {
         return Err("the conversation is too large to move".into());
     }
@@ -77,7 +87,10 @@ pub fn teleport_transcript_write(cwd: String, session_id: String, text: String) 
         return if existing == text {
             Ok(path.to_string_lossy().into_owned())
         } else {
-            Err("this machine already has a different version of this conversation; it was kept".into())
+            Err(
+                "this machine already has a different version of this conversation; it was kept"
+                    .into(),
+            )
         };
     }
     let dir = path.parent().ok_or("no parent directory")?;
@@ -111,7 +124,11 @@ const MAX_GIT_BYTES: usize = 48 * 1024 * 1024;
 fn temp_file(kind: &str) -> PathBuf {
     use std::sync::atomic::{AtomicU64, Ordering};
     static N: AtomicU64 = AtomicU64::new(0);
-    std::env::temp_dir().join(format!("canopy-teleport-{}-{}.{kind}", std::process::id(), N.fetch_add(1, Ordering::Relaxed)))
+    std::env::temp_dir().join(format!(
+        "canopy-teleport-{}-{}.{kind}",
+        std::process::id(),
+        N.fetch_add(1, Ordering::Relaxed)
+    ))
 }
 
 fn is_sha(s: &str) -> bool {
@@ -129,7 +146,11 @@ fn run_git(path: &Path, args: &[&str]) -> Result<std::process::Output, String> {
     if capped.stdout_truncated || capped.stderr_truncated {
         return Err("git output was too large to carry".into());
     }
-    Ok(std::process::Output { status: capped.status, stdout: capped.stdout.clone(), stderr: capped.stderr.clone() })
+    Ok(std::process::Output {
+        status: capped.status,
+        stdout: capped.stdout.clone(),
+        stderr: capped.stderr.clone(),
+    })
 }
 
 const GIT_OUTPUT_MAX: usize = 8 * 1024 * 1024;
@@ -209,7 +230,16 @@ pub fn teleport_bundle_create(path: String, since: String) -> Result<String, Str
     }
     let file = temp_file("bundle");
     let _ = std::fs::remove_file(&file);
-    let made = run_git(&top, &["bundle", "create", &file.to_string_lossy(), "HEAD", &format!("^{since}")]);
+    let made = run_git(
+        &top,
+        &[
+            "bundle",
+            "create",
+            &file.to_string_lossy(),
+            "HEAD",
+            &format!("^{since}"),
+        ],
+    );
     let result = (|| {
         let out = made?;
         if !out.status.success() {
@@ -242,8 +272,12 @@ pub fn teleport_bundle_apply(path: String, data: String) -> Result<String, Strin
     std::fs::write(&file, bytes).map_err(|e| e.to_string())?;
     let result = (|| {
         let f = file.to_string_lossy().into_owned();
-        git_ok(&top, &["bundle", "verify", &f]).map_err(|e| format!("the commits do not fit this repository: {e}"))?;
-        git_ok(&top, &["fetch", "--no-tags", &f, "+HEAD:refs/canopy/teleport"])?;
+        git_ok(&top, &["bundle", "verify", &f])
+            .map_err(|e| format!("the commits do not fit this repository: {e}"))?;
+        git_ok(
+            &top,
+            &["fetch", "--no-tags", &f, "+HEAD:refs/canopy/teleport"],
+        )?;
         git_ok(&top, &["merge", "--ff-only", "refs/canopy/teleport"])
             .map_err(|e| format!("the destination has diverged, so nothing was applied: {e}"))?;
         git_ok(&top, &["rev-parse", "HEAD"])
@@ -293,7 +327,10 @@ mod tests {
     #[test]
     fn path_follows_claudes_encoding() {
         let p = transcript_path(Path::new("/home/u"), "/work/my app/x", "abc-1").unwrap();
-        assert_eq!(p, Path::new("/home/u/.claude/projects/-work-my-app-x/abc-1.jsonl"));
+        assert_eq!(
+            p,
+            Path::new("/home/u/.claude/projects/-work-my-app-x/abc-1.jsonl")
+        );
     }
 
     #[test]
@@ -306,8 +343,17 @@ mod tests {
     }
 
     fn sh(dir: &Path, args: &[&str]) -> String {
-        let out = Command::new("git").arg("-C").arg(dir).args(args).output().unwrap();
-        assert!(out.status.success(), "{args:?}: {}", String::from_utf8_lossy(&out.stderr));
+        let out = Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{args:?}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
         String::from_utf8_lossy(&out.stdout).trim().to_string()
     }
 
@@ -342,17 +388,29 @@ mod tests {
         std::fs::write(src.join("a.txt"), "edited").unwrap();
 
         let path = src.to_string_lossy().into_owned();
-        assert_eq!(teleport_git_relation(path.clone(), base.clone()).unwrap(), "behind");
+        assert_eq!(
+            teleport_git_relation(path.clone(), base.clone()).unwrap(),
+            "behind"
+        );
         let bundle = teleport_bundle_create(path.clone(), base.clone()).unwrap();
         let dpath = dst.to_string_lossy().into_owned();
-        assert_eq!(teleport_git_relation(dpath.clone(), head.clone()).unwrap(), "unknown");
+        assert_eq!(
+            teleport_git_relation(dpath.clone(), head.clone()).unwrap(),
+            "unknown"
+        );
         assert_eq!(teleport_bundle_apply(dpath.clone(), bundle).unwrap(), head);
-        assert_eq!(teleport_git_relation(dpath.clone(), head.clone()).unwrap(), "same");
+        assert_eq!(
+            teleport_git_relation(dpath.clone(), head.clone()).unwrap(),
+            "same"
+        );
 
         let patch = teleport_patch_create(path).unwrap();
         assert!(!patch.is_empty());
         teleport_patch_apply(dpath.clone(), patch.clone()).unwrap();
-        assert_eq!(std::fs::read_to_string(dst.join("a.txt")).unwrap(), "edited");
+        assert_eq!(
+            std::fs::read_to_string(dst.join("a.txt")).unwrap(),
+            "edited"
+        );
         // A dirty destination is never written to.
         assert!(teleport_patch_apply(dpath, patch).is_err());
         let _ = std::fs::remove_dir_all(&src);
@@ -371,7 +429,10 @@ mod tests {
         let bundle = teleport_bundle_create(src.to_string_lossy().into_owned(), base).unwrap();
         let err = teleport_bundle_apply(dst.to_string_lossy().into_owned(), bundle).unwrap_err();
         assert!(err.contains("diverged"), "{err}");
-        assert_eq!(teleport_git_relation(dst.to_string_lossy().into_owned(), "zzz".into()).is_err(), true);
+        assert_eq!(
+            teleport_git_relation(dst.to_string_lossy().into_owned(), "zzz".into()).is_err(),
+            true
+        );
         let _ = std::fs::remove_dir_all(&src);
         let _ = std::fs::remove_dir_all(&dst);
     }

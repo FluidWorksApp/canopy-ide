@@ -1616,7 +1616,10 @@ fn update_digest(
     // Only Claude's tool is read here: it is the shape verified against T3
     // Code's adapter; other agents' plan tools are not guessed at.
     if hook_event == "PostToolUse"
-        && matches!(event["tool_name"].as_str(), Some("TodoWrite") | Some("update_plan"))
+        && matches!(
+            event["tool_name"].as_str(),
+            Some("TodoWrite") | Some("update_plan")
+        )
     {
         // Codex's `update_plan` sends the whole plan each call too, as
         // `{plan:[{step,status}]}`; same replace-the-list rule.
@@ -1630,7 +1633,10 @@ fn update_digest(
             digest["tasks_updated"] = serde_json::json!(now);
         }
     } else if hook_event == "PostToolUse"
-        && matches!(event["tool_name"].as_str(), Some("TaskCreate") | Some("TaskUpdate"))
+        && matches!(
+            event["tool_name"].as_str(),
+            Some("TaskCreate") | Some("TaskUpdate")
+        )
     {
         // Newer Claude builds keep the list one task at a time. The shapes are
         // read from the CLI itself: TaskCreate {subject, description,
@@ -1720,6 +1726,20 @@ fn update_digest(
                             arr.remove(0);
                         }
                     }
+                }
+            }
+        }
+    }
+
+    // A screenshot taken through a Canopy tool reaches this hook as raw image
+    // data, never a path. Saved beside the digest so it is an asset like any
+    // other file the agent made.
+    if hook_event == "PostToolUse" {
+        if let Some(shot) = save_screenshot(&dir, session_id, event) {
+            if let Some(arr) = digest["files"].as_array_mut() {
+                arr.push(serde_json::json!(shot));
+                while arr.len() > MAX_FILES {
+                    arr.remove(0);
                 }
             }
         }
@@ -2297,6 +2317,82 @@ fn peer_context(session_id: &str, cwd: &str) -> Option<String> {
     Some(out)
 }
 
+/// Standard base64 (with or without padding), no dependency: this binary is
+/// also built on its own in workspace images.
+fn b64_decode(input: &str) -> Option<Vec<u8>> {
+    let mut out = Vec::with_capacity(input.len() / 4 * 3);
+    let (mut acc, mut bits) = (0u32, 0u32);
+    for c in input.bytes() {
+        let v = match c {
+            b'A'..=b'Z' => c - b'A',
+            b'a'..=b'z' => c - b'a' + 26,
+            b'0'..=b'9' => c - b'0' + 52,
+            b'+' => 62,
+            b'/' => 63,
+            b'=' | b'\n' | b'\r' | b' ' => continue,
+            _ => return None,
+        } as u32;
+        acc = (acc << 6) | v;
+        bits += 6;
+        if bits >= 8 {
+            bits -= 8;
+            out.push((acc >> bits) as u8);
+            acc &= (1 << bits) - 1;
+        }
+    }
+    Some(out)
+}
+
+/// The base64 image inside a screenshot tool's response, whichever shape the
+/// CLI wraps it in (a content array, or an object holding one).
+fn screenshot_data(response: &serde_json::Value) -> Option<String> {
+    let items = response
+        .as_array()
+        .or_else(|| response["content"].as_array())?;
+    items.iter().find_map(|item| {
+        item["source"]["data"]
+            .as_str()
+            .or_else(|| item["data"].as_str())
+            .map(|s| s.to_string())
+    })
+}
+
+/// Keep a screenshot a Canopy tool returned as a file beside the digest and give
+/// back its path, so it can be listed as the agent's asset. At most the newest
+/// 20 are kept per session.
+fn save_screenshot(dir: &str, session_id: &str, event: &serde_json::Value) -> Option<String> {
+    let tool = event["tool_name"].as_str()?;
+    if !tool.contains("canopy") || !tool.ends_with("screenshot") {
+        return None;
+    }
+    let data = screenshot_data(&event["tool_response"])?;
+    if data.len() > 12 * 1024 * 1024 {
+        return None;
+    }
+    let bytes = b64_decode(&data)?;
+    let ext = if bytes.starts_with(&[0x89, b'P', b'N', b'G']) {
+        "png"
+    } else {
+        "jpg"
+    };
+    let shots = format!("{dir}/{session_id}.shots");
+    std::fs::create_dir_all(&shots).ok()?;
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0);
+    let file = format!("{shots}/screenshot-{stamp}.{ext}");
+    std::fs::write(&file, bytes).ok()?;
+    if let Ok(read) = std::fs::read_dir(&shots) {
+        let mut names: Vec<_> = read.flatten().map(|e| e.path()).collect();
+        names.sort();
+        while names.len() > 20 {
+            let _ = std::fs::remove_file(names.remove(0));
+        }
+    }
+    Some(file)
+}
+
 /// Output files named in a shell command: after `>`, `>>`, `-o`, `--output`,
 /// `-O` or `tee`. Only ones that exist now and are not directories, as paths
 /// relative to `cwd` when under it. Quoting is stripped; anything with a shell
@@ -2307,7 +2403,9 @@ fn bash_output_paths(command: &str, cwd: &str) -> Vec<String> {
     for (i, tok) in tokens.iter().enumerate() {
         let target = match *tok {
             ">" | ">>" | "-o" | "--output" | "-O" | "tee" => tokens.get(i + 1).copied(),
-            t if t.len() > 1 && t.starts_with('>') && !t.starts_with(">&") => Some(t.trim_start_matches('>')),
+            t if t.len() > 1 && t.starts_with('>') && !t.starts_with(">&") => {
+                Some(t.trim_start_matches('>'))
+            }
             t if t.starts_with("--output=") => Some(&t["--output=".len()..]),
             _ => None,
         };
@@ -2321,11 +2419,18 @@ fn bash_output_paths(command: &str, cwd: &str) -> Vec<String> {
         {
             continue;
         }
-        let full = if name.starts_with('/') { name.to_string() } else { format!("{cwd}/{name}") };
+        let full = if name.starts_with('/') {
+            name.to_string()
+        } else {
+            format!("{cwd}/{name}")
+        };
         if !std::path::Path::new(&full).is_file() {
             continue;
         }
-        let rel = full.strip_prefix(&format!("{cwd}/")).unwrap_or(&full).to_string();
+        let rel = full
+            .strip_prefix(&format!("{cwd}/"))
+            .unwrap_or(&full)
+            .to_string();
         if !out.contains(&rel) {
             out.push(rel);
         }
@@ -2336,7 +2441,9 @@ fn bash_output_paths(command: &str, cwd: &str) -> Vec<String> {
 /// Codex's `update_plan` input (`{plan:[{step,status}]}`) in TodoWrite's shape.
 /// Null when there is no plan list, so a malformed call keeps the last list.
 fn plan_as_todos(input: &serde_json::Value) -> serde_json::Value {
-    let Some(plan) = input["plan"].as_array() else { return serde_json::Value::Null };
+    let Some(plan) = input["plan"].as_array() else {
+        return serde_json::Value::Null;
+    };
     let todos: Vec<serde_json::Value> = plan
         .iter()
         .map(|p| serde_json::json!({ "content": p["step"], "status": p["status"] }))
@@ -2355,7 +2462,10 @@ fn tasks_from_todo_write(input: &serde_json::Value) -> Option<serde_json::Value>
     let tasks: Vec<serde_json::Value> = todos
         .iter()
         .filter_map(|todo| {
-            let text = todo["content"].as_str().or_else(|| todo["text"].as_str())?.trim();
+            let text = todo["content"]
+                .as_str()
+                .or_else(|| todo["text"].as_str())?
+                .trim();
             if text.is_empty() {
                 return None;
             }
@@ -2443,7 +2553,9 @@ fn apply_task_tool(
                 .as_str()
                 .map(str::to_string)
                 .or_else(|| input["taskId"].as_u64().map(|n| n.to_string()))?;
-            let at = tasks.iter().position(|t| t["id"].as_str() == Some(id.as_str()))?;
+            let at = tasks
+                .iter()
+                .position(|t| t["id"].as_str() == Some(id.as_str()))?;
             match input["status"].as_str() {
                 Some("deleted") => {
                     tasks.remove(at);
@@ -2457,7 +2569,11 @@ fn apply_task_tool(
                 }
                 None => {}
             }
-            if let Some(subject) = input["subject"].as_str().map(str::trim).filter(|t| !t.is_empty()) {
+            if let Some(subject) = input["subject"]
+                .as_str()
+                .map(str::trim)
+                .filter(|t| !t.is_empty())
+            {
                 tasks[at]["text"] = serde_json::json!(truncate(subject, 200));
             }
             Some(tasks)
@@ -7205,7 +7321,9 @@ mod tests {
         let t = super::tasks_from_todo_write(&super::plan_as_todos(&input)).unwrap();
         assert_eq!(t[0]["status"], "running");
         assert_eq!(t[1]["text"], "b");
-        assert!(super::tasks_from_todo_write(&super::plan_as_todos(&serde_json::json!({}))).is_none());
+        assert!(
+            super::tasks_from_todo_write(&super::plan_as_todos(&serde_json::json!({}))).is_none()
+        );
     }
 
     #[test]
@@ -7223,7 +7341,10 @@ mod tests {
         assert_eq!(tasks[0]["status"], "completed");
         assert_eq!(tasks[1]["status"], "running");
         assert_eq!(tasks[2]["status"], "pending");
-        assert_eq!(tasks[3]["status"], "pending", "an unknown status is pending");
+        assert_eq!(
+            tasks[3]["status"], "pending",
+            "an unknown status is pending"
+        );
         assert_eq!(tasks[1]["text"], "Wire it up");
     }
 
@@ -7231,7 +7352,11 @@ mod tests {
     fn a_todo_write_without_a_list_keeps_the_last_good_one() {
         assert!(super::tasks_from_todo_write(&serde_json::json!({})).is_none());
         let empty = super::tasks_from_todo_write(&serde_json::json!({"todos": []})).unwrap();
-        assert_eq!(empty.as_array().unwrap().len(), 0, "an empty list is a real answer");
+        assert_eq!(
+            empty.as_array().unwrap().len(),
+            0,
+            "an empty list is a real answer"
+        );
     }
 
     #[test]
@@ -7246,7 +7371,13 @@ mod tests {
         assert_eq!(brief["total"], 3);
         assert_eq!(brief["current"], "b");
         assert!(brief.get("items").is_none());
-        assert_eq!(super::task_progress(&digest, true)["items"].as_array().unwrap().len(), 3);
+        assert_eq!(
+            super::task_progress(&digest, true)["items"]
+                .as_array()
+                .unwrap()
+                .len(),
+            3
+        );
         assert!(super::task_progress(&serde_json::json!({}), true).is_null());
         assert!(super::task_progress(&serde_json::json!({"tasks": []}), true).is_null());
     }
@@ -7266,11 +7397,29 @@ mod tests {
         assert_eq!(list.len(), 2);
         assert_eq!(list[0]["id"], "1");
         assert_eq!(list[0]["status"], "pending");
-        let list = super::apply_task_tool(list, "TaskUpdate", &serde_json::json!({"taskId": "1", "status": "in_progress"}), &serde_json::Value::Null).unwrap();
+        let list = super::apply_task_tool(
+            list,
+            "TaskUpdate",
+            &serde_json::json!({"taskId": "1", "status": "in_progress"}),
+            &serde_json::Value::Null,
+        )
+        .unwrap();
         assert_eq!(list[0]["status"], "running");
-        let list = super::apply_task_tool(list, "TaskUpdate", &serde_json::json!({"taskId": "1", "status": "completed"}), &serde_json::Value::Null).unwrap();
+        let list = super::apply_task_tool(
+            list,
+            "TaskUpdate",
+            &serde_json::json!({"taskId": "1", "status": "completed"}),
+            &serde_json::Value::Null,
+        )
+        .unwrap();
         assert_eq!(list[0]["status"], "completed");
-        let list = super::apply_task_tool(list, "TaskUpdate", &serde_json::json!({"taskId": "2", "status": "deleted"}), &serde_json::Value::Null).unwrap();
+        let list = super::apply_task_tool(
+            list,
+            "TaskUpdate",
+            &serde_json::json!({"taskId": "2", "status": "deleted"}),
+            &serde_json::Value::Null,
+        )
+        .unwrap();
         assert_eq!(list.len(), 1);
     }
 
@@ -7279,35 +7428,71 @@ mod tests {
         let mut list: Vec<serde_json::Value> = (0..50)
             .map(|i| serde_json::json!({"id": i.to_string(), "text": format!("t{i}"), "status": if i == 0 { "completed" } else { "pending" }}))
             .collect();
-        let out = super::apply_task_tool(list.clone(), "TaskCreate", &serde_json::json!({"subject": "new"}), &serde_json::json!("Task #99 created successfully: new")).unwrap();
+        let out = super::apply_task_tool(
+            list.clone(),
+            "TaskCreate",
+            &serde_json::json!({"subject": "new"}),
+            &serde_json::json!("Task #99 created successfully: new"),
+        )
+        .unwrap();
         assert_eq!(out.len(), 50);
         assert_eq!(out.last().unwrap()["id"], "99");
-        assert!(out.iter().all(|t| t["id"] != "0"), "the finished task made room");
+        assert!(
+            out.iter().all(|t| t["id"] != "0"),
+            "the finished task made room"
+        );
         // Nothing finished to drop: the list is left as it is.
         list[0]["status"] = serde_json::json!("pending");
-        assert!(super::apply_task_tool(list, "TaskCreate", &serde_json::json!({"subject": "new"}), &serde_json::Value::Null).is_none());
+        assert!(super::apply_task_tool(
+            list,
+            "TaskCreate",
+            &serde_json::json!({"subject": "new"}),
+            &serde_json::Value::Null
+        )
+        .is_none());
     }
 
     #[test]
     fn a_task_update_for_an_unknown_task_or_without_a_subject_changes_nothing() {
-        assert!(super::apply_task_tool(vec![], "TaskUpdate", &serde_json::json!({"taskId": "9", "status": "completed"}), &serde_json::Value::Null).is_none());
-        assert!(super::apply_task_tool(vec![], "TaskCreate", &serde_json::json!({"description": "x"}), &serde_json::Value::Null).is_none());
+        assert!(super::apply_task_tool(
+            vec![],
+            "TaskUpdate",
+            &serde_json::json!({"taskId": "9", "status": "completed"}),
+            &serde_json::Value::Null
+        )
+        .is_none());
+        assert!(super::apply_task_tool(
+            vec![],
+            "TaskCreate",
+            &serde_json::json!({"description": "x"}),
+            &serde_json::Value::Null
+        )
+        .is_none());
     }
 
     #[test]
     fn a_created_task_id_is_found_in_a_string_or_an_object_response() {
-        assert_eq!(super::created_task_id(&serde_json::json!("Task #12 created successfully: x")).as_deref(), Some("12"));
+        assert_eq!(
+            super::created_task_id(&serde_json::json!("Task #12 created successfully: x"))
+                .as_deref(),
+            Some("12")
+        );
         assert_eq!(
             super::created_task_id(&serde_json::json!({"content": [{"type": "text", "text": "Task #7 created successfully: y"}]})).as_deref(),
             Some("7")
         );
         assert!(super::created_task_id(&serde_json::json!("nothing here")).is_none());
-        assert_eq!(super::created_task_id(&serde_json::json!("Task #3: subject")).as_deref(), Some("3"));
+        assert_eq!(
+            super::created_task_id(&serde_json::json!("Task #3: subject")).as_deref(),
+            Some("3")
+        );
     }
 
     #[test]
     fn the_task_list_is_bounded() {
-        let many: Vec<_> = (0..80).map(|i| serde_json::json!({"content": format!("t{i}"), "status": "pending"})).collect();
+        let many: Vec<_> = (0..80)
+            .map(|i| serde_json::json!({"content": format!("t{i}"), "status": "pending"}))
+            .collect();
         let tasks = super::tasks_from_todo_write(&serde_json::json!({"todos": many})).unwrap();
         assert_eq!(tasks.as_array().unwrap().len(), 50);
     }
@@ -9363,5 +9548,42 @@ mod tests {
         assert!(!safe_session_id("../outside"));
         assert!(!safe_session_id("folder/session"));
         assert!(!safe_session_id(r"folder\session"));
+    }
+}
+
+#[cfg(test)]
+mod screenshot_tests {
+    use super::*;
+
+    #[test]
+    fn decodes_base64_with_and_without_padding() {
+        assert_eq!(b64_decode("aGVsbG8=").unwrap(), b"hello");
+        assert_eq!(b64_decode("aGVsbG8").unwrap(), b"hello");
+        assert!(b64_decode("not*base64").is_none());
+    }
+
+    #[test]
+    fn finds_the_image_in_a_tool_response() {
+        let array = serde_json::json!([{ "source": { "data": "aGk=" } }]);
+        assert_eq!(screenshot_data(&array).as_deref(), Some("aGk="));
+        let object = serde_json::json!({ "content": [{ "type": "image", "data": "aGk=" }] });
+        assert_eq!(screenshot_data(&object).as_deref(), Some("aGk="));
+        assert!(screenshot_data(&serde_json::json!("text")).is_none());
+    }
+
+    #[test]
+    fn saves_a_canopy_screenshot_and_ignores_other_tools() {
+        let dir = std::env::temp_dir().join(format!("canopy-shot-test-{}", std::process::id()));
+        let dir_s = dir.to_string_lossy().to_string();
+        let event = serde_json::json!({
+            "tool_name": "mcp__canopy__canopy_screenshot",
+            "tool_response": [{ "source": { "data": "iVBORw0KGgo=" } }],
+        });
+        let path = save_screenshot(&dir_s, "sid", &event).unwrap();
+        assert!(path.ends_with(".png"));
+        assert!(std::path::Path::new(&path).is_file());
+        let other = serde_json::json!({ "tool_name": "Bash", "tool_response": [{ "source": { "data": "aGk=" } }] });
+        assert!(save_screenshot(&dir_s, "sid", &other).is_none());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

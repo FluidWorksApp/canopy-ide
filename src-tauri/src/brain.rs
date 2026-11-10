@@ -97,9 +97,7 @@ fn scrubbed(key: &str) -> bool {
 /// before any project is open. Home, so the CLI loads no project's config.
 fn brain_dir(cwd: &str) -> Result<std::path::PathBuf, String> {
     if cwd.trim().is_empty() {
-        absolute_home(
-            std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")),
-        )
+        absolute_home(std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")))
     } else {
         Ok(std::path::PathBuf::from(cwd))
     }
@@ -161,7 +159,11 @@ pub async fn brain_call(
         // when the prompt is on argv (see structured_runner_spawn), and a
         // headless brain call never writes a second message. Only an ACP call
         // asks for a pipe.
-        .stdin(if keep_stdin.unwrap_or(false) { Stdio::piped() } else { Stdio::null() })
+        .stdin(if keep_stdin.unwrap_or(false) {
+            Stdio::piped()
+        } else {
+            Stdio::null()
+        })
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
@@ -193,7 +195,10 @@ pub async fn brain_call(
             }
         )
     })?;
-    let stdin = child.stdin.take().map(|s| std::sync::Arc::new(tokio::sync::Mutex::new(s)));
+    let stdin = child
+        .stdin
+        .take()
+        .map(|s| std::sync::Arc::new(tokio::sync::Mutex::new(s)));
     let Some(stdout) = child.stdout.take() else {
         let _ = child.start_kill();
         return Err("the brain call has no stdout".into());
@@ -298,7 +303,9 @@ pub async fn brain_write(
             .ok_or_else(|| format!("brain call is not running: {call_id}"))?
             .stdin
             .clone()
-            .ok_or_else(|| format!("brain call {call_id} takes its prompt at launch, not on stdin"))?
+            .ok_or_else(|| {
+                format!("brain call {call_id} takes its prompt at launch, not on stdin")
+            })?
     };
     let mut body = line;
     body.push('\n');

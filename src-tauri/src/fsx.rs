@@ -62,7 +62,12 @@ impl WorkspaceManager {
             .iter()
             .any(|root| canonical.starts_with(root))
             || self.files.lock().unwrap().iter().any(|f| f == canonical)
-            || self.link_files.lock().unwrap().iter().any(|f| f == canonical)
+            || self
+                .link_files
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|f| f == canonical)
     }
 
     /// Like `grant_file`, for a file named by a terminal link click.
@@ -119,7 +124,21 @@ fn credential_file_name(name: &str) -> bool {
     let lower = name.to_ascii_lowercase();
     matches!(
         lower.as_str(),
-        ".netrc" | ".npmrc" | ".pypirc" | ".pgpass" | ".git-credentials" | ".bash_history" | ".zsh_history" | ".zshrc" | ".bashrc" | ".profile" | ".zprofile" | "credentials" | "credentials.json" | "auth.json" | "secrets.json"
+        ".netrc"
+            | ".npmrc"
+            | ".pypirc"
+            | ".pgpass"
+            | ".git-credentials"
+            | ".bash_history"
+            | ".zsh_history"
+            | ".zshrc"
+            | ".bashrc"
+            | ".profile"
+            | ".zprofile"
+            | "credentials"
+            | "credentials.json"
+            | "auth.json"
+            | "secrets.json"
     ) || lower.starts_with("id_rsa")
         || lower.starts_with("id_ed25519")
         || lower.starts_with("id_ecdsa")
@@ -144,7 +163,10 @@ fn link_grant_refusal(canonical: &Path, home: Option<&Path>) -> Option<&'static 
             let rest = rest.trim_start_matches(['/', '\\']);
             for sensitive in SENSITIVE_HOME_DIRS {
                 let dir = sensitive.to_ascii_lowercase();
-                if rest == dir || rest.starts_with(&format!("{dir}/")) || rest.starts_with(&format!("{dir}\\")) {
+                if rest == dir
+                    || rest.starts_with(&format!("{dir}/"))
+                    || rest.starts_with(&format!("{dir}\\"))
+                {
                     return Some("That location holds credentials or private data and is never opened from a link.");
                 }
             }
@@ -1764,7 +1786,10 @@ mod tests {
             "/tmp/server.pem",
             "/tmp/secrets.json",
         ] {
-            assert!(super::link_grant_refusal(std::path::Path::new(p), Some(home)).is_some(), "{p}");
+            assert!(
+                super::link_grant_refusal(std::path::Path::new(p), Some(home)).is_some(),
+                "{p}"
+            );
         }
         for p in [
             "/Users/me/Documents/notes.md",
@@ -1773,7 +1798,10 @@ mod tests {
             "/Users/me/.sshfoo/readme.md",
             "/private/tmp/claude/tasks/a.output",
         ] {
-            assert!(super::link_grant_refusal(std::path::Path::new(p), Some(home)).is_none(), "{p}");
+            assert!(
+                super::link_grant_refusal(std::path::Path::new(p), Some(home)).is_none(),
+                "{p}"
+            );
         }
     }
 
@@ -1797,17 +1825,25 @@ mod tests {
     #[test]
     fn a_failing_root_is_skipped_but_every_failing_root_is_an_error() {
         let got = super::merge_roots(vec!["/a".into(), "/bad".into(), "/b".into()], 10, |r| {
-            if r == "/bad" { Err("outside scope".into()) } else { Ok(vec![p(&format!("{r}/f"))]) }
+            if r == "/bad" {
+                Err("outside scope".into())
+            } else {
+                Ok(vec![p(&format!("{r}/f"))])
+            }
         });
         assert_eq!(got.unwrap(), vec![p("/a/f"), p("/b/f")]);
         let none = super::merge_roots(vec!["/x".into(), "/y".into()], 10, |_| Err("nope".into()));
         assert_eq!(none.unwrap_err(), "nope");
-        assert!(super::merge_roots(vec![], 10, |_| Err("unused".into())).unwrap().is_empty());
+        assert!(super::merge_roots(vec![], 10, |_| Err("unused".into()))
+            .unwrap()
+            .is_empty());
     }
 
     #[test]
     fn overlapping_roots_list_a_file_once_and_the_total_is_capped() {
-        let got = super::merge_roots(vec!["/p".into(), "/p/c".into()], 10, |_| Ok(vec![p("/p/c/same")]));
+        let got = super::merge_roots(vec!["/p".into(), "/p/c".into()], 10, |_| {
+            Ok(vec![p("/p/c/same")])
+        });
         assert_eq!(got.unwrap(), vec![p("/p/c/same")]);
         let many = super::merge_roots(vec!["/a".into(), "/b".into(), "/c".into()], 2, |r| {
             Ok((0..5).map(|i| p(&format!("{r}/{i}"))).collect())

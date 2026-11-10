@@ -181,7 +181,9 @@ pub fn global_path(home: &str) -> PathBuf {
     if let Ok(file) = std::env::var("CANOPY_GATES_GLOBAL") {
         return PathBuf::from(file);
     }
-    PathBuf::from(home).join(".canopy").join("gates-global.json")
+    PathBuf::from(home)
+        .join(".canopy")
+        .join("gates-global.json")
 }
 
 /// Whether the person turned on "Skip permission prompts". With it on, Canopy's
@@ -2893,18 +2895,29 @@ mod tests {
         let home_static: &'static str = Box::leak(home_str.clone().into_boxed_str());
         let c = make(home_static);
         let outside = "rm -rf /private/tmp/claude-501/scratch";
-        assert!(classify_irreversible(outside, &c).is_some(), "asks by default");
+        assert!(
+            classify_irreversible(outside, &c).is_some(),
+            "asks by default"
+        );
 
         write_global(&home_str, true).unwrap();
         assert!(skip_outside_delete_confirm(&home_str));
-        assert!(classify_irreversible(outside, &c).is_none(), "skipped when the switch is on");
+        assert!(
+            classify_irreversible(outside, &c).is_none(),
+            "skipped when the switch is on"
+        );
         // Never skipped: the project folder, home, a top-level folder.
         assert!(classify_irreversible("rm -rf /home/u/repo", &c).is_some());
         assert!(classify_irreversible("rm -rf /", &c).is_some());
-        assert!(classify_irreversible(&format!("rm -rf {home_str}"), &c).is_some());
+        // Single-quoted: a Windows home path has backslashes, which an unquoted
+        // shell word would read as escapes.
+        assert!(classify_irreversible(&format!("rm -rf '{home_str}'"), &c).is_some());
 
         write_global(&home_str, false).unwrap();
-        assert!(classify_irreversible(outside, &c).is_some(), "asks again when it is off");
+        assert!(
+            classify_irreversible(outside, &c).is_some(),
+            "asks again when it is off"
+        );
         // A missing or malformed file is "off".
         std::fs::write(global_path(&home_str), "not json").unwrap();
         assert!(!skip_outside_delete_confirm(&home_str));

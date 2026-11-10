@@ -940,7 +940,13 @@ mod tests {
     #[test]
     fn reverse_specs_drop_zero_duplicates_and_cap_the_list() {
         let specs = super::reverse_specs(&[3000, 0, 3000, 5173]);
-        assert_eq!(specs, vec![(3000, "tcp:3000".to_string()), (5173, "tcp:5173".to_string())]);
+        assert_eq!(
+            specs,
+            vec![
+                (3000, "tcp:3000".to_string()),
+                (5173, "tcp:5173".to_string())
+            ]
+        );
         let many: Vec<u16> = (1..=100).collect();
         assert_eq!(super::reverse_specs(&many).len(), 32);
         assert!(super::reverse_specs(&[]).is_empty());
