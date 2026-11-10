@@ -11,6 +11,8 @@ import { EnvironmentRegistry } from "./registry";
 import { forgetEnvironment } from "./ptyRoute";
 import { stopListeningToMachine } from "../ipc";
 import { targetKey } from "../placement/types";
+import { nativeHost } from "../host/native";
+import { THIS_MAC_ENV } from "./allWorkspaceTabs";
 
 /** Every machine connected for work besides the window's own. */
 export const liveEnvironments = new EnvironmentRegistry();
@@ -71,4 +73,19 @@ export async function connectedMachines(): Promise<ConnectedMachine[]> {
     out.push({ env, name: ws.workspaceName, host: ws.host, readOnly: ws.readOnly, invoke: ws.invoke });
   }
   return out;
+}
+
+/** While a workspace is the window's own machine, this Mac is one of the others:
+ *  registered like any connected machine so what resolves a terminal's machine
+ *  to a host (git status, files, the agent card) finds the desktop too. */
+export function joinThisMac(registry: EnvironmentRegistry = liveEnvironments): void {
+  if (registry.get(THIS_MAC_ENV)) return;
+  registry.register({ id: THIS_MAC_ENV, name: "This Mac", host: nativeHost, status: "connected", readOnly: false }, { secondary: true });
+}
+
+export function leaveThisMac(registry: EnvironmentRegistry = liveEnvironments): void {
+  if (!registry.get(THIS_MAC_ENV)) return;
+  registry.unregister(THIS_MAC_ENV);
+  stopListeningToMachine(THIS_MAC_ENV);
+  forgetEnvironment(THIS_MAC_ENV);
 }
