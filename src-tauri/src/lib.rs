@@ -890,6 +890,7 @@ pub fn run() {
             fsx::fs_read_dir,
             fsx::fs_read_file,
             fsx::fs_write_file,
+            fsx::fs_write_file_confined,
             fsx::fs_stat,
             fsx::fs_repo_path,
             fsx::fs_stat_many,

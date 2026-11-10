@@ -23,7 +23,8 @@ function toolDetail(call: Partial<AcpToolCallFields>): string | undefined {
 /** Maps `session/update` notifications onto the normalized event vocabulary. */
 export class AcpEventMapper {
   private reply = "";
-  private announced = new Set<string>();
+  private announced = new Map<string, { name: string; detail?: string }>();
+  private failed = new Set<string>();
   private host: StructuredRunnerHost;
 
   constructor(host: StructuredRunnerHost) {
@@ -33,6 +34,7 @@ export class AcpEventMapper {
   beginTurn(): void {
     this.reply = "";
     this.announced.clear();
+    this.failed.clear();
   }
 
   handleUpdate(update: AcpSessionUpdate | undefined): void {
@@ -46,30 +48,66 @@ export class AcpEventMapper {
         }
         return;
       }
-      case "tool_call": {
-        const call = update as unknown as AcpToolCallFields;
-        if (this.announced.has(call.toolCallId)) return;
-        this.announced.add(call.toolCallId);
-        this.host.emit({
-          kind: "tool",
-          name: call.title || call.kind || "tool",
-          detail: toolDetail(call),
-        });
-        return;
-      }
-      case "tool_call_update": {
-        // The agent often names the call only after it starts. Announce a call
-        // first seen as an update; later updates are progress on a known row.
-        const call = update as unknown as AcpToolCallFields;
-        if (this.announced.has(call.toolCallId)) return;
-        if (call.title || call.kind) {
-          this.announced.add(call.toolCallId);
-          this.host.emit({ kind: "tool", name: call.title || call.kind || "tool", detail: toolDetail(call) });
+      case "agent_thought_chunk": {
+        const content = update.content as { type?: string; text?: string } | undefined;
+        if (content?.type === "text" && content.text) {
+          this.host.emit({ kind: "thought", text: content.text });
         }
         return;
       }
-      // Thoughts, plans, command lists and mode changes have no event kind;
-      // no host renders them, so they are dropped rather than invented.
+      case "plan": {
+        const entries = (update as { entries?: unknown }).entries;
+        if (!Array.isArray(entries)) return;
+        this.host.emit({
+          kind: "plan",
+          entries: entries.flatMap((e) => {
+            const row = e as { content?: unknown; status?: unknown; priority?: unknown };
+            if (typeof row?.content !== "string") return [];
+            return [
+              {
+                content: row.content,
+                status: typeof row.status === "string" ? row.status : "pending",
+                ...(typeof row.priority === "string" ? { priority: row.priority } : {}),
+              },
+            ];
+          }),
+        });
+        return;
+      }
+      case "usage_update": {
+        const u = update as { used?: unknown; size?: unknown; cost?: { amount?: unknown; currency?: unknown } | null };
+        if (typeof u.used !== "number" || typeof u.size !== "number") return;
+        const cost =
+          typeof u.cost?.amount === "number" && typeof u.cost.currency === "string"
+            ? { amount: u.cost.amount, currency: u.cost.currency }
+            : undefined;
+        this.host.emit({ kind: "usage", used: u.used, size: u.size, ...(cost ? { cost } : {}) });
+        return;
+      }
+      case "tool_call":
+      case "tool_call_update": {
+        // The agent often names the call only after it starts, so a call first
+        // seen as an update is announced then; later updates are progress on a
+        // known row, except a failure, which is reported once.
+        const call = update as unknown as AcpToolCallFields;
+        let known = this.announced.get(call.toolCallId);
+        if (!known && (update.sessionUpdate === "tool_call" || call.title || call.kind)) {
+          known = { name: call.title || call.kind || "tool", detail: toolDetail(call) };
+          this.announced.set(call.toolCallId, known);
+          this.host.emit({ kind: "tool", name: known.name, detail: known.detail });
+        }
+        if (call.status === "failed" && !this.failed.has(call.toolCallId)) {
+          this.failed.add(call.toolCallId);
+          const name = known?.name ?? (call.title || call.kind || "tool");
+          this.host.emit({ kind: "toolFailed", name, detail: known?.detail ?? toolDetail(call) });
+        }
+        return;
+      }
+      // user_message_chunk (history replay), available_commands_update,
+      // session_info_update, current_mode_update and config_option_update
+      // carry session state, not turn output. AcpSession keeps the state it
+      // needs (mode, config options); no host shows the rest, so the mapper
+      // drops them here on purpose.
       default:
         return;
     }

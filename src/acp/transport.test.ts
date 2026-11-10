@@ -6,7 +6,7 @@ import type { StructuredRunnerLaunch } from "../structuredRunners";
 type Msg = Record<string, unknown>;
 
 /** A scripted ACP agent: replies to what the client writes. */
-function fakeAgent(opts: { loadSession?: boolean } = {}) {
+function fakeAgent(opts: { loadSession?: boolean; caps?: Msg } = {}) {
   const written: Msg[] = [];
   const spawned: { command: string; args: string[]; keepStdin?: boolean }[] = [];
   let emit: (out: ProjectRunnerOutput) => void = () => {};
@@ -25,7 +25,7 @@ function fakeAgent(opts: { loadSession?: boolean } = {}) {
       written.push(m);
       queueMicrotask(() => {
         if (m.method === "initialize") {
-          say({ id: m.id, result: { protocolVersion: 1, agentCapabilities: { loadSession: opts.loadSession ?? false } } });
+          say({ id: m.id, result: { protocolVersion: 1, agentCapabilities: { loadSession: opts.loadSession ?? false, ...opts.caps } } });
         } else if (m.method === "session/new") {
           say({ id: m.id, result: { sessionId: "sess-1" } });
         } else if (m.method === "session/load") {
@@ -72,10 +72,16 @@ const launch = (authority: "read-only" | "workspace-write", extra: Partial<Struc
   },
 });
 
-async function run(authority: "read-only" | "workspace-write", resume = false, loadSession = false) {
-  const agent = fakeAgent({ loadSession });
+async function run(
+  authority: "read-only" | "workspace-write",
+  resume = false,
+  loadSession = false,
+  caps?: Msg,
+  extra: Partial<StructuredRunnerLaunch["policy"]> = {},
+) {
+  const agent = fakeAgent({ loadSession, caps });
   const events: StructuredRunnerEvent[] = [];
-  const transport = await startStructured("a1", "kiro", launch(authority), { emit: (e) => events.push(e) }, {
+  const transport = await startStructured("a1", "kiro", launch(authority, extra), { emit: (e) => events.push(e) }, {
     resume,
     process: agent.process,
   });
@@ -87,12 +93,12 @@ describe("AcpTransport", () => {
     const { agent, events, transport } = await run("workspace-write");
     expect(agent.spawned[0]).toMatchObject({ command: "kiro-cli", args: ["acp", "--agent", "canopy", "--trust-all-tools"], keepStdin: true });
     await transport.send("do it");
-    expect(events.map((e) => e.kind)).toEqual(["ready", "delta", "tool", "reply", "turnEnd"]);
+    expect(events.map((e) => e.kind)).toEqual(["ready", "thought", "delta", "tool", "reply", "turnEnd"]);
     expect(events.find((e) => e.kind === "reply")).toEqual({ kind: "reply", text: "Done" });
     const init = agent.written.find((m) => m.method === "initialize") as { params: Msg };
     expect(init.params).toMatchObject({
       protocolVersion: 1,
-      clientCapabilities: { fs: { readTextFile: false, writeTextFile: false }, terminal: false },
+      clientCapabilities: { fs: { readTextFile: true, writeTextFile: true }, terminal: false },
     });
     expect(agent.written.find((m) => m.method === "session/new")).toMatchObject({ params: { cwd: "/work", mcpServers: [] } });
     const prompt = agent.written.find((m) => m.method === "session/prompt") as { params: { prompt: { text: string }[] } };
@@ -102,6 +108,67 @@ describe("AcpTransport", () => {
     await transport.stop();
     expect(agent.written.some((m) => m.method === "session/cancel")).toBe(true);
     expect(agent.isKilled()).toBe(true);
+  });
+
+  it("delivers the brief as systemPrompt and does not repeat it on the first turn", async () => {
+    const { agent, transport } = await run("read-only", false, false, {
+      sessionCapabilities: { systemPrompt: { mode: { override: {} } } },
+    });
+    await transport.send("do it");
+    expect(agent.written.find((m) => m.method === "session/new")).toMatchObject({
+      params: { systemPrompt: { mode: "append", content: [{ type: "text", text: "BRIEF" }] } },
+    });
+    const prompt = agent.written.find((m) => m.method === "session/prompt") as { params: { prompt: { text: string }[] } };
+    expect(prompt.params.prompt[0].text).toBe("do it");
+  });
+
+  it("closes the session on stop when the agent supports it", async () => {
+    const { agent, transport } = await run("read-only", false, false, { sessionCapabilities: { close: {} } });
+    await transport.send("x");
+    const closing = transport.stop();
+    await closing;
+    const methods = agent.written.map((m) => m.method);
+    expect(methods).toContain("session/close");
+    expect(methods.indexOf("session/close")).toBeGreaterThan(methods.indexOf("session/cancel"));
+    expect(agent.isKilled()).toBe(true);
+  });
+
+  it("passes the policy model to the session", async () => {
+    const agent = fakeAgent();
+    const seen: Msg[] = [];
+    const p = {
+      ...agent.process,
+      write: async (id: string, line: string) => {
+        const m = JSON.parse(line) as Msg;
+        seen.push(m);
+        if (m.method === "session/new") {
+          queueMicrotask(() =>
+            agent.say({
+              id: m.id,
+              result: {
+                sessionId: "sess-1",
+                configOptions: [{ id: "m", category: "model", type: "select", currentValue: "x", options: [{ value: "x" }, { value: "opus" }] }],
+              },
+            }),
+          );
+          return;
+        }
+        if (m.method === "session/set_config_option") {
+          queueMicrotask(() => agent.say({ id: m.id, result: { configOptions: [] } }));
+          return;
+        }
+        return agent.process.write(id, line);
+      },
+    };
+    const events: StructuredRunnerEvent[] = [];
+    await startStructured("a1", "kiro", launch("read-only", { model: "opus" }), { emit: (e) => events.push(e) }, {
+      resume: false,
+      process: p,
+    });
+    await vi.waitFor(() => expect(events.some((e) => e.kind === "ready")).toBe(true));
+    expect(seen.find((m) => m.method === "session/set_config_option")).toMatchObject({
+      params: { sessionId: "sess-1", configId: "m", value: "opus" },
+    });
   });
 
   it("ends quietly when stopped during an in-flight prompt", async () => {

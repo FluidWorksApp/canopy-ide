@@ -29,6 +29,7 @@ describe("first-class agent CLI architecture", () => {
     const allowed = new Set([
       "shared/agentCliIdentity.ts",
       "shared/notifications.ts",
+      "src/acp/providers.ts",
       "src/agentModels.ts",
       "src/modelCatalog.ts",
       "src/projects.ts",
@@ -96,7 +97,7 @@ describe("first-class agent CLI architecture", () => {
   it("owns routing and protocol adapters on the CLI model", () => {
     for (const cli of routingAgentClis()) {
       expect(streamsStructured(cli.id), cli.id).toBe(true);
-      expect(structuredRunnerFor(cli.id)).toBe(cli.structuredRunner);
+      expect(structuredRunnerFor(cli.id)).toBe(cli.acpRunner ?? cli.structuredRunner);
     }
     for (const [id, runner] of Object.entries(STRUCTURED_RUNNERS)) {
       expect(agentCliFor(id)?.structuredRunner, id).toBe(runner);

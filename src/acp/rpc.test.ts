@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { AcpRpc, AcpRpcError } from "./rpc";
 
-function make(onRequest: (m: string, p: unknown) => Promise<unknown> = async () => null) {
+function make(onRequest: (m: string, p: unknown, signal: AbortSignal) => Promise<unknown> = async () => null) {
   const written: Record<string, unknown>[] = [];
   const notes: [string, unknown][] = [];
   const rpc = new AcpRpc({
@@ -75,5 +75,41 @@ describe("AcpRpc", () => {
   it("times out a request", async () => {
     const { rpc } = make();
     await expect(rpc.request("slow")).rejects.toThrow(/timed out/);
+  });
+
+  it("aborts an in-flight handler on $/cancel_request and replies once with -32800", async () => {
+    let release: (v: unknown) => void = () => {};
+    let aborted = false;
+    const { rpc, written } = make((_m, _p, signal) => {
+      signal.addEventListener("abort", () => (aborted = true));
+      return new Promise((resolve) => (release = resolve));
+    });
+    rpc.handleLine(JSON.stringify({ jsonrpc: "2.0", id: 5, method: "slow" }));
+    rpc.handleLine(JSON.stringify({ jsonrpc: "2.0", method: "$/cancel_request", params: { requestId: 5 } }));
+    await vi.waitFor(() => expect(written).toHaveLength(1));
+    expect(aborted).toBe(true);
+    expect(written[0]).toMatchObject({ id: 5, error: { code: -32800 } });
+    release({ late: true });
+    await new Promise((r) => setTimeout(r, 5));
+    expect(written).toHaveLength(1);
+  });
+
+  it("ignores $/cancel_request for an unknown or finished request", async () => {
+    const { rpc, written, notes } = make();
+    rpc.handleLine(JSON.stringify({ jsonrpc: "2.0", method: "$/cancel_request", params: { requestId: 99 } }));
+    rpc.handleLine(JSON.stringify({ jsonrpc: "2.0", id: 1, method: "ok" }));
+    await vi.waitFor(() => expect(written).toHaveLength(1));
+    rpc.handleLine(JSON.stringify({ jsonrpc: "2.0", method: "$/cancel_request", params: { requestId: 1 } }));
+    expect(written).toHaveLength(1);
+    expect(notes).toEqual([]);
+  });
+
+  it("marks timeouts as local errors and agent errors as not", async () => {
+    const { rpc } = make();
+    const timed = rpc.request("slow");
+    await expect(timed).rejects.toMatchObject({ local: true });
+    const p = rpc.request("a", undefined, null);
+    rpc.handleLine(JSON.stringify({ jsonrpc: "2.0", id: 2, error: { code: -32000, message: "auth" } }));
+    await expect(p).rejects.toMatchObject({ local: false });
   });
 });

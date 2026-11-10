@@ -14,13 +14,14 @@ OpenCode 1.18.34, oh-my-pi (omp) 18.4.10, Cursor Agent 2026.10.01 and Grok
 
 ## ACP
 
-Kiro CLI runs over the Agent Client Protocol (`kiro-cli acp`, verified
-2026-10-27). Any other ACP agent can be added in Settings > Agents, from presets
-(Gemini CLI `--acp`, Goose `acp`, checked against the ACP registry on
-2026-11-09) or the registry browser. Caveats: Canopy advertises no fs or
-terminal client capabilities, ACP has no system-prompt field, custom entries
-are unverified, and brain and compaction calls skip ACP runners. Details in
-[acp.md](acp.md).
+Claude Code, Codex, Cursor, OpenCode and Kiro CLI run over the Agent Client
+Protocol by default (registry-sourced and not live-tested, except Kiro, verified
+live on kiro-cli 3.1.0, 2026-10-27). All but Kiro have a "Use ACP" switch in Settings >
+Agents; off selects the vendor runner, which is also the fallback when the ACP
+process cannot start. Gemini CLI, Goose, GitHub Copilot CLI and Qwen Code are
+one-click presets. Brain and compaction calls stay on vendor runners. Canopy
+advertises fs but not terminal client capabilities, and uses `systemPrompt` when
+the agent offers it. Details in [acp.md](acp.md).
 
 ## Where we are today
 

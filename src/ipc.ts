@@ -1434,6 +1434,14 @@ export const onRemoteUploadProgress=(cb:(progress:RemoteUploadProgress)=>void)=>
 
 export const fsWriteFile = (path: string, content: string) =>
   invoke<void>("fs_write_file", { path, content });
+/** Write on behalf of an ACP agent. On this computer the desktop resolves
+ *  symlinks, confines the write to `roots` and refuses hook and agent-config
+ *  files. A workspace host has no such command, so it takes the plain write
+ *  (the TS guard has already checked the path as written). */
+export const fsWriteFileConfined = (path: string, content: string, roots: string[]) =>
+  isRemoteHost()
+    ? fsWriteFile(path, content)
+    : invoke<void>("fs_write_file_confined", { path, content, roots });
 export const fsStat = (path: string) =>
   sharedIpc(statFlights, path, () =>
     rendererIoBudget.run(
