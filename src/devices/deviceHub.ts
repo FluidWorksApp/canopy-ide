@@ -47,6 +47,22 @@ export interface DeviceListing {
 export const deviceHubStatus = () => invokeDesktop<DeviceHubStatus>("device_hub_status");
 /** The consent step: downloads and installs the pinned hub. */
 export const deviceHubInstall = () => invokeDesktop<DeviceHubStatus>("device_hub_install");
+let ensuring: Promise<DeviceHubStatus | null> | null = null;
+/** Streaming is part of the app, not a separate setup: install the pinned hub
+ *  in the background the first time it is missing. Once per session; a failure
+ *  leaves the setup card as the fallback. */
+export function ensureDeviceHub(): Promise<DeviceHubStatus | null> {
+  ensuring ??= (async () => {
+    try {
+      const status = await deviceHubStatus();
+      if (status.installed || status.nodeError || deviceHubDeclined()) return status;
+      return await deviceHubInstall();
+    } catch {
+      return null;
+    }
+  })();
+  return ensuring;
+}
 export const deviceHubStart = () => invokeDesktop<DeviceHubStatus>("device_hub_start");
 export const deviceHubStop = () => invokeDesktop<void>("device_hub_stop");
 export const deviceHubAccess = () => invokeDesktop<DeviceHubAccess>("device_hub_access");

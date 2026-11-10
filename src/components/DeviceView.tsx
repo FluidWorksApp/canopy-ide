@@ -32,6 +32,7 @@ import {
   deviceHubDevices,
   deviceHubStart,
   deviceHubStatus,
+  ensureDeviceHub,
   setDeviceHubDeclined,
   useDeviceHubAccess,
   type DeviceHubStatus,
@@ -145,6 +146,12 @@ export default function DeviceView({
         let next = await deviceHubStatus();
         if (cancelled) return;
         setHub(next);
+        // Missing: it is fetched automatically; the setup card shows only if that fails.
+        if (!next.installed && !next.nodeError && !declined) {
+          next = (await ensureDeviceHub()) ?? next;
+          if (cancelled) return;
+          setHub(next);
+        }
         if (next.installed && !next.running && !next.nodeError && !declined) {
           next = await deviceHubStart();
           if (cancelled) return;

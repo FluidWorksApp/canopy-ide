@@ -74,6 +74,22 @@ export function nextAccount(opts: {
   return round.find(id => signedIn.includes(id) && usable(cli, id, limits, now)) ?? null;
 }
 
+/** Automatic launch choice: among accounts not at a limit, the one launched
+ *  longest ago (never launched first). Falls back to the first account when all
+ *  are limited, so a launch is never blocked. */
+export function pickAutomaticProfile(opts: {
+  cli: string; ids: string[]; limits: AccountLimits; lastUsed: Record<string, number>; now: number;
+  /** Worst plan-window percent per account, when the CLI reports it. */
+  usage?: Record<string, number>;
+}): string {
+  const { cli, ids, limits, lastUsed, now, usage = {} } = opts;
+  const ready = ids.filter(id => usable(cli, id, limits, now));
+  const pool = ready.length ? ready : ids;
+  // Most headroom first (unknown counts as untouched), then longest unused.
+  return [...pool].sort((a, b) =>
+    (usage[a] ?? 0) - (usage[b] ?? 0) || (lastUsed[a] ?? 0) - (lastUsed[b] ?? 0))[0] ?? ids[0];
+}
+
 /** When the first exhausted account comes back. */
 export function earliestReset(cli: string, signedIn: string[], limits: AccountLimits, now: number): number {
   const times = signedIn.map(id => limits[limitKey(cli, id)]?.until ?? 0).filter(until => until > now);

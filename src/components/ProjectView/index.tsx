@@ -178,6 +178,9 @@ import {
   launchEnvSync,
   launchProfile,
   lastProfileFor,
+  AUTO_PROFILE,
+  resolveProfile,
+  noteProfileUsed,
   launchableProfiles,
   primeLaunchEnv,
   rememberProfile,
@@ -211,6 +214,7 @@ import {
   prLanded,
   reapDecision,
   reuseAgentWorkspace,
+  sweepEligible,
 } from "../../agentWorkspaceLifecycle";
 import {
   AGENT_CLIS,
@@ -438,7 +442,6 @@ import {SendToWorkspace} from "../../remoteExecution/SendToWorkspace";
 import { FileView, hasDiffToolbar } from "../FileView";
 import { ChangesPanel, type ChangeGroup } from "../ChangesPanel";
 import { Dialog } from "../Dialog";
-import { AgentHierarchyOverlay } from "../AgentHierarchyOverlay";
 import { BranchSwitchProvider, useBranchSwitch } from "../../useBranchSwitch";
 import { askDialog } from "../../branchSwitch";
 import { useTabDragGroups, applyOrder } from "../../tabDrag";
@@ -1832,7 +1835,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
             const profiles = launchableProfiles(await ipc.profilesList(), agentKind);
             if (profiles.length === 0) return undefined;
             return {
-              profiles: profiles.map((p) => ({ id: p.id, label: p.label })),
+              profiles: [...profiles.map((p) => ({ id: p.id, label: p.label })), { id: AUTO_PROFILE, label: "Automatic" }],
               initial: lastProfileFor(agentKind, profiles.map((p) => p.id)),
             };
           } catch {
@@ -2039,6 +2042,9 @@ const ProjectViewBody = memo(function ProjectViewBody({
   // actual PTY: timing this from addTerminal raced terminal mounting and could
   // silently leave a freshly opened agent with no context at all.
   const pendingTerminalPrompts = useRef(new Map<string, string>());
+  /** Prompt to type into the next agent started on another machine. */
+  const remoteSeedRef = useRef<string | undefined>(undefined);
+  const remotePrRef = useRef<{ number: number; branch: string } | undefined>(undefined);
   const pendingAgentSpawnOps = useRef(
     new Map<
       string,
@@ -3953,7 +3959,8 @@ const ProjectViewBody = memo(function ProjectViewBody({
       // The account asked for, else the one this agent was last launched with
       // (the same default the picker uses), which is the active account when it
       // has none of its own.
-      const wanted = requestedProfile || lastProfileFor(cli.id, profilesRef.current.map((p) => p.id));
+      const ids = profilesRef.current.map((p) => p.id);
+      const wanted = await resolveProfile(cli.id, requestedProfile || lastProfileFor(cli.id, ids), ids);
       const profile = wanted || DEFAULT_PROFILE;
       const env =
         wanted === DEFAULT_PROFILE
@@ -7213,10 +7220,9 @@ const ProjectViewBody = memo(function ProjectViewBody({
   // workspaces, and anything with changes, are left alone.
   const swept = useRef(false);
   useEffect(() => {
-    // Disabled until it also requires a pushed branch and a landed PR, and skips
-    // any workspace a live session (in any window) is using.
-    const SWEEP_ENABLED = false;
-    if (!SWEEP_ENABLED || !visible || swept.current || repoPaths.length === 0) return;
+    // Only a pushed, landed branch with nothing uncommitted, that no live
+    // session (in any window) is using.
+    if (!visible || swept.current || repoPaths.length === 0) return;
     const timer = setTimeout(async () => {
       swept.current = true;
       for (const repo of repoPaths) {
@@ -7224,7 +7230,15 @@ const ProjectViewBody = memo(function ProjectViewBody({
           const [worktrees, audit] = await Promise.all([ipc.gitWorktrees(repo), ipc.gitWorkAudit(repo)]);
           for (const worktree of worktrees) {
             const work = audit.items.find((item) => item.branch === worktree.branch);
-            if (!work || worktree.dirty > 0 || work.dirty > 0) continue;
+            if (!work) continue;
+            const inUse =
+              tabsRef.current.some((t) => t.type === "terminal" && (t.cwd === worktree.path || t.cwd.startsWith(`${worktree.path}/`))) ||
+              wsDigestsRef.current.some(
+                (d) =>
+                  d.cwd && (d.cwd === worktree.path || d.cwd.startsWith(`${worktree.path}/`)) &&
+                  lifeFor({ digest: d as never, now: Date.now() / 1000 }).state !== "ended",
+              );
+            if (!sweepEligible(work, worktree.dirty, inUse)) continue;
             if (tabsRef.current.some((t) => t.type === "terminal" && (t.cwd === worktree.path || t.cwd.startsWith(`${worktree.path}/`)))) continue;
             let decision = reapDecision(worktree, work);
             if (decision.kind !== "remove" && decision.kind !== "ask") continue;
@@ -9906,14 +9920,19 @@ const ProjectViewBody = memo(function ProjectViewBody({
             cliName: cli.name,
             isolate: target === "workspace",
             bootstrap: getSettings().workspaceBootstrap,
+            pr: remotePrRef.current,
           });
+          remotePrRef.current = undefined;
           for (const note of prepared.notes) onNotice(note, "warn");
           // The account: a workspace has its own sign-ins, and a profile is a
           // config directory on THIS Mac, so none is carried. Said once, only
           // when a non-default account was chosen.
           if (profileId && profileId !== DEFAULT_PROFILE)
             onNotice(`${cli.name} on ${name} uses that workspace's own sign-in, not the account chosen here.`, "info");
-          addTerminal(prepared.cwd, launchCommand(cli), cli.name, cli.icon, false, undefined, undefined, true, undefined, undefined, undefined, connected.env);
+          const seed = remoteSeedRef.current;
+          remoteSeedRef.current = undefined;
+          const terminalId = addTerminal(prepared.cwd, launchCommand(cli), cli.name, cli.icon, false, undefined, undefined, true, undefined, undefined, undefined, connected.env);
+          if (terminalId && seed) pendingTerminalPrompts.current.set(terminalId, seed);
           return { kind: "started" };
         } catch (error) {
           onNotice(`Could not start ${cli.name} on ${name}: ${String((error as Error)?.message ?? error)}`, "warn");
@@ -10007,7 +10026,9 @@ const ProjectViewBody = memo(function ProjectViewBody({
         }
         // Before the terminal opens: the CLI reads the config-dir variable at
         // startup, so exporting it afterwards is too late.
-        const profile = profileId ?? lastProfileFor(cli.id, profilesRef.current.map((p) => p.id));
+        const profileIds = profilesRef.current.map((p) => p.id);
+        const profile = await resolveProfile(cli.id, profileId ?? lastProfileFor(cli.id, profileIds), profileIds);
+        noteProfileUsed(cli.id, profile);
         const env = await launchEnvFor(cli.id, profile);
         // Remembered only when the CLI can hold an account and the launch
         // actually carries one, so the default follows what was really used.
@@ -13397,7 +13418,6 @@ const ProjectViewBody = memo(function ProjectViewBody({
   // rebuilt when it's in front (so it always sees current props) or when its
   // tab changed underneath it.
   const docTabs = tabs.filter((t): t is DocSubTab => t.type !== "terminal");
-  const terminalTabsForHierarchy = tabs.filter((t): t is TermSubTab => t.type === "terminal");
   const panes = useRef(
     new Map<string, { tab: DocSubTab; active: boolean; el: ReactNode }>(),
   );
@@ -13518,6 +13538,40 @@ const ProjectViewBody = memo(function ProjectViewBody({
               },
             }}
             onStartNew={(agentId, decision) => {
+              if (decision?.target && decision.target.kind === "remote" && !canLaunchOnActiveTarget(decision.target)) {
+                // Just start it there, seeded with the ticket. No switch dialog.
+                const remoteCli = AGENT_CLIS.find((c) => c.id === agentId);
+                if (remoteCli) {
+                  const remoteTarget = decision.target;
+                  void (async () => {
+                    // Planned first, like every dispatched ticket; the plan runs
+                    // against this Mac's checkout and folds into the seed.
+                    let seed = ticketContext(tab.ticket);
+                    let proceed = false;
+                    const dir = tab.repo || (await ticketRepo());
+                    if (dir) {
+                      await dispatchWithPlan(
+                        {
+                          request: seed,
+                          dir,
+                          label: `${tab.ticket.id} · ${remoteCli.name}`,
+                          source: "ticket",
+                          mode: "interactive",
+                          ticketId: tab.ticket.id,
+                        },
+                        (planned) => {
+                          seed = planned;
+                          proceed = true;
+                        },
+                      );
+                    } else proceed = true;
+                    if (!proceed) return;
+                    remoteSeedRef.current = seed;
+                    await launchCliRef.current(remoteCli, undefined, "workspace", { mode: "target", target: remoteTarget });
+                  })();
+                  return;
+                }
+              }
               if (decision?.target && !canLaunchOnActiveTarget(decision.target)) {
                 setMachineTransition({
                   target: decision.target,
@@ -13627,6 +13681,14 @@ const ProjectViewBody = memo(function ProjectViewBody({
             installed={installed}
             onStartReview={(agentId) => {
               void pickComponent(`Review PR with an agent`, agentId).then(async (selection) => {
+                const remoteTarget = selection?.machine?.mode === "target" && selection.machine.target.kind === "remote" ? selection.machine : undefined;
+                const remoteCli = remoteTarget ? AGENT_CLIS.find((c) => c.id === agentId) : undefined;
+                if (remoteTarget && remoteCli && !canLaunchOnActiveTarget(remoteTarget.target)) {
+                  remoteSeedRef.current = prReviewContext(tab.pr);
+                  remotePrRef.current = { number: tab.pr.number, branch: tab.pr.branch };
+                  void launchCliRef.current(remoteCli, undefined, "workspace", remoteTarget);
+                  return;
+                }
                 if (selection?.machine && await prepareMachineLaunch(agentId, selection.machine, { then: { kind: "pr-review", payload: tab.pr } }))
                   await startPrReview(tab.repo, tab.pr, agentId);
               });
@@ -13636,6 +13698,14 @@ const ProjectViewBody = memo(function ProjectViewBody({
             }
             onStartResolve={(agentId) => {
               void pickComponent(`Resolve conflicts with an agent`, agentId).then(async (selection) => {
+                const remoteTarget = selection?.machine?.mode === "target" && selection.machine.target.kind === "remote" ? selection.machine : undefined;
+                const remoteCli = remoteTarget ? AGENT_CLIS.find((c) => c.id === agentId) : undefined;
+                if (remoteTarget && remoteCli && !canLaunchOnActiveTarget(remoteTarget.target)) {
+                  remoteSeedRef.current = prConflictContext(tab.pr);
+                  remotePrRef.current = { number: tab.pr.number, branch: tab.pr.branch };
+                  void launchCliRef.current(remoteCli, undefined, "workspace", remoteTarget);
+                  return;
+                }
                 if (selection?.machine && await prepareMachineLaunch(agentId, selection.machine, { then: { kind: "pr-resolve", payload: tab.pr } }))
                   await startPrConflictResolve(tab.repo, tab.pr, agentId);
               });
@@ -14422,23 +14492,6 @@ const ProjectViewBody = memo(function ProjectViewBody({
                     ×
                   </button>
                 </div>
-              )}
-              {tab.id === activeTabId && shown && (
-                <AgentHierarchyOverlay
-                  tabs={terminalTabsForHierarchy}
-                  activeTabId={activeTabId}
-                  onSelect={(id) => setActiveTabId(id)}
-                  activityKey={
-                    tab.ptyId != null && liveSessionByPty.get(tab.ptyId) && agentIdForCommand(tab.command)
-                      ? {
-                          agent: agentIdForCommand(tab.command) as string,
-                          sessionId: liveSessionByPty.get(tab.ptyId) as string,
-                          cwd: tab.cwd,
-                          profile: tab.profile ?? null,
-                        }
-                      : null
-                  }
-                />
               )}
               <TermPorts
                 ptyId={tab.ptyId}

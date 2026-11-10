@@ -8,6 +8,7 @@ import type { AgentProfile } from "./ipc";
 import * as ipc from "./ipc";
 import { agentCliFor, agentClisWith } from "./projects";
 import { getSettings, updateSettings } from "./settings";
+import { pickAutomaticProfile } from "./accountPool";
 
 /** The implicit profile: the login the machine already had. */
 export const DEFAULT_PROFILE = "default";
@@ -176,4 +177,39 @@ export function supportsProfiles(cliId: string): boolean {
  *  unauthenticated config dir. Nothing to automate, nothing to hold. */
 export function loginCommand(bin: string): string {
   return bin;
+}
+
+/** Picker value meaning "balance across accounts for me". */
+export const AUTO_PROFILE = "auto";
+const USED_KEY = "canopy.profileLastUsed";
+
+function readUsed(): Record<string, Record<string, number>> {
+  try { return JSON.parse(localStorage.getItem(USED_KEY) ?? "{}"); } catch { return {}; }
+}
+
+/** Resolve the picker value to a real account, balancing on limits and recency. */
+export async function resolveProfile(cliId: string, chosen: string, ids: string[]): Promise<string> {
+  if (chosen !== AUTO_PROFILE) return chosen;
+  const all = [DEFAULT_PROFILE, ...ids.filter((id) => id !== DEFAULT_PROFILE)];
+  // Each account's subscription headroom, when its CLI reports it. A failed
+  // read just leaves the choice to limits and recency.
+  const usage: Record<string, number> = {};
+  try {
+    for (const plan of await ipc.planUsage()) {
+      if (plan.agent !== cliId) continue;
+      usage[plan.profile] = Math.max(0, ...plan.windows.map((w) => w.used_percent));
+    }
+  } catch { /* best effort */ }
+  return pickAutomaticProfile({
+    cli: cliId, ids: all, limits: getSettings().accountLimits ?? {},
+    lastUsed: readUsed()[cliId] ?? {}, now: Date.now(), usage,
+  });
+}
+
+export function noteProfileUsed(cliId: string, profileId: string): void {
+  try {
+    const used = readUsed();
+    used[cliId] = { ...used[cliId], [profileId]: Date.now() };
+    localStorage.setItem(USED_KEY, JSON.stringify(used));
+  } catch { /* best effort */ }
 }

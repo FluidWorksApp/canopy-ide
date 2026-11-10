@@ -6729,6 +6729,65 @@ body.dragging-tab * {
 .agent-card-chip-conflicts {
   background: color-mix(in srgb, var(--danger, #e5534b) 30%, transparent);
 }
+.agent-card-pr-row {
+  position: relative;
+}
+.agent-card-prlist {
+  position: absolute;
+  right: 0;
+  bottom: calc(100% + 6px);
+  z-index: 20;
+  width: max-content;
+  min-width: 100%;
+  max-width: 420px;
+  max-height: 260px;
+  overflow-y: auto;
+  margin: 0;
+  padding: 4px;
+  list-style: none;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--bg-elevated, var(--bg)) 92%, transparent);
+  backdrop-filter: blur(14px);
+  box-shadow: 0 8px 28px rgba(0, 0, 0, 0.45);
+}
+.agent-card-prlist-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 5px 8px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.agent-card-prlist-row:hover,
+.agent-card-prlist-row:focus-visible {
+  background: color-mix(in srgb, var(--text) 10%, transparent);
+}
+.agent-card-fix {
+  flex: 0 0 auto;
+  padding: 1px 10px;
+  border-radius: 999px;
+  border: 1px solid color-mix(in srgb, var(--accent) 60%, transparent);
+  background: color-mix(in srgb, var(--accent) 22%, transparent);
+  color: var(--text);
+  font-size: 11px;
+  font-weight: 600;
+  cursor: pointer;
+}
+.agent-card-fix:hover:not(:disabled),
+.agent-card-fix:focus-visible {
+  background: color-mix(in srgb, var(--accent) 40%, transparent);
+}
+.agent-card-fix:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
 .agent-card-diffstat {
   font-variant-numeric: tabular-nums;
 }

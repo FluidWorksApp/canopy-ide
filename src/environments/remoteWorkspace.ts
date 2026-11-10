@@ -42,9 +42,11 @@ export async function prepareRemoteWorkspace(opts: {
   /** Copy the ignored config files (the workspaceBootstrap setting). */
   bootstrap: boolean;
   now?: Date;
+  /** A pull request whose head the workspace should be at. */
+  pr?: { number: number; branch: string };
 }): Promise<RemoteWorkspace> {
   const { invoke, cwd } = opts;
-  if (!opts.isolate) return { cwd, notes: [], isolated: false };
+  if (!opts.isolate && !opts.pr) return { cwd, notes: [], isolated: false };
   const notes: string[] = [];
   let repo: string | undefined;
   try {
@@ -57,15 +59,22 @@ export async function prepareRemoteWorkspace(opts: {
     notes.push(`${opts.cliName} opened in the project folder because it is not inside a Git repository there.`);
     return { cwd, notes, isolated: false };
   }
-  const branch = agentWorkspaceBranch(opts.cliId, opts.now);
+  const branch = opts.pr ? opts.pr.branch : agentWorkspaceBranch(opts.cliId, opts.now);
   let outcome: Outcome;
   try {
-    outcome = await invoke<Outcome>("git_worktree_add", {
-      repo,
-      path: workspacePath(repo, branch),
-      branch,
-      create: true,
-    });
+    outcome = opts.pr
+      ? await invoke<Outcome>("git_worktree_add_pr", {
+          repo,
+          path: workspacePath(repo, `pr-${opts.pr.number}`),
+          number: opts.pr.number,
+          branch,
+        })
+      : await invoke<Outcome>("git_worktree_add", {
+          repo,
+          path: workspacePath(repo, branch),
+          branch,
+          create: true,
+        });
   } catch (error) {
     notes.push(`Could not make a workspace for ${opts.cliName} there, so it opened in the project folder: ${String((error as Error)?.message ?? error)}`);
     return { cwd, notes, isolated: false };

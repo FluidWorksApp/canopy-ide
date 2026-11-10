@@ -336,6 +336,14 @@ export default function App() {
   useEffect(() => startBackgroundTeams(), []);
   // Tab stays inside whichever modal layer is open.
   useEffect(() => installModalFocusTrap(), []);
+  // Live device streaming ships with the app: fetch its pinned tools once, in
+  // the background, after startup has settled.
+  useEffect(() => {
+    const timer = setTimeout(() => {
+      void import("./devices/deviceHub").then((m) => m.ensureDeviceHub());
+    }, 15_000);
+    return () => clearTimeout(timer);
+  }, []);
   // Unread teammates' messages reach the bell and the OS, including while
   // working elsewhere in Canopy; the conversation being read stays quiet.
   useEffect(() => startTeamMessageNotifications(), []);

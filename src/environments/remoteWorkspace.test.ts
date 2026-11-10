@@ -83,4 +83,15 @@ describe("remote digests", () => {
     const out = await fetchMachineDigests([ok, bad], null);
     expect(out.map((d) => d.surface)).toEqual([String(alias)]);
   });
+
+  it("puts a pull request's head in the workspace when asked", async () => {
+    const m = fake({
+      git_repos: () => [{ path: "/w/app" }],
+      git_worktree_add_pr: (a) => ({ kind: "switched", path: a.path }),
+      git_worktree_bootstrap: () => ({}),
+    });
+    const r = await prepareRemoteWorkspace({ ...base, invoke: m.invoke, isolate: false, pr: { number: 7, branch: "feat/x" } });
+    expect(r.isolated).toBe(true);
+    expect(m.calls[1]).toMatchObject({ cmd: "git_worktree_add_pr", args: { repo: "/w/app", number: 7, branch: "feat/x" } });
+  });
 });

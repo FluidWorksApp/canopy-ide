@@ -9,6 +9,8 @@
 import { useEffect, useState } from "react";
 import * as ipc from "../ipc";
 import { agentCliFor } from "../projects";
+import { prConflictContext, prFixChecksContext } from "../prs";
+import { openInOsBrowser } from "../links";
 import { activeWorkspace } from "../remoteExecution/workspace";
 import {
   completePrompt,
@@ -186,6 +188,9 @@ export function AgentDetailsCard({
   const [branch, setBranch] = useState<string | null>(digest?.branch ?? null);
   const [changed, setChanged] = useState<number | null>(null);
   const [pr, setPr] = useState<ipc.PrInfo | null>(null);
+  /** Every PR this agent raised, newest first; shown on hover. */
+  const [agentPrs, setAgentPrs] = useState<ipc.PrInfo[]>([]);
+  const [prListOpen, setPrListOpen] = useState(false);
 
   const toggle = (value: boolean) => {
     setCollapsed(value);
@@ -220,17 +225,32 @@ export function AgentDetailsCard({
   // The PR for that branch, when `gh` knows one.
   useEffect(() => {
     setPr(null);
+    setAgentPrs([]);
     if (collapsed || !repo || !branch || remoteMachine) return;
     let stale = false;
     prsFor(repo)
-      .then((prs) => {
-        if (!stale) setPr(prs.find((p) => p.branch === branch) ?? null);
+      .then(async (prs) => {
+        // The PRs this session is on record as having produced, plus the one
+        // on its current branch.
+        let edges: ipc.ProvenanceEdge[] = [];
+        try {
+          if (digest?.session_id) edges = await ipc.provenanceForSession(digest.session_id);
+        } catch {
+          /* No record: the branch's own PR still shows. */
+        }
+        if (stale) return;
+        const raised = new Set(edges.filter((e) => e.repo === repo || !e.repo).map((e) => e.pr_number));
+        const mine = prs
+          .filter((p) => p.branch === branch || raised.has(p.number))
+          .sort((a, b) => b.number - a.number);
+        setAgentPrs(mine);
+        setPr(prs.find((p) => p.branch === branch) ?? mine[0] ?? null);
       })
       .catch(() => {});
     return () => {
       stale = true;
     };
-  }, [collapsed, repo, branch, remoteMachine]);
+  }, [collapsed, repo, branch, remoteMachine, digest?.session_id]);
 
   // The sub-agents, read from the session's transcript, polled faster while the
   // agent is working.
@@ -312,12 +332,54 @@ export function AgentDetailsCard({
       )}
 
       {pr && (
-        <div className="agent-card-row" title={pr.title}>
+        <div
+          className="agent-card-row agent-card-pr-row"
+          title={agentPrs.length > 1 ? undefined : pr.title}
+          tabIndex={agentPrs.length > 1 ? 0 : undefined}
+          onMouseEnter={() => setPrListOpen(true)}
+          onMouseLeave={() => setPrListOpen(false)}
+          onFocus={() => setPrListOpen(true)}
+          onBlur={(event) => {
+            if (!event.currentTarget.contains(event.relatedTarget as Node | null)) setPrListOpen(false);
+          }}
+          onKeyDown={(event) => {
+            if (event.key === "Escape") setPrListOpen(false);
+          }}
+        >
+          {prListOpen && agentPrs.length > 1 && (
+            <ul className="agent-card-prlist" aria-label="Pull requests from this agent">
+              {agentPrs.map((p) => (
+                <li key={p.number}>
+                  <button type="button" className="agent-card-prlist-row" onClick={() => openInOsBrowser(p.url)} title={p.title}>
+                    <span className="agent-card-pr-num">#{p.number}</span>
+                    <span className="agent-card-grow agent-card-ellipsis">{p.title}</span>
+                    <span className={`agent-card-chip agent-card-chip-${prStatusLabel(p).toLowerCase().replace(/\s+/g, "-")}`}>
+                      {prStatusLabel(p)}
+                    </span>
+                  </button>
+                </li>
+              ))}
+            </ul>
+          )}
           <span className="agent-card-pr-num">#{pr.number}</span>
           <span className="agent-card-grow agent-card-ellipsis">{pr.title}</span>
           <span className={`agent-card-chip agent-card-chip-${prStatusLabel(pr).toLowerCase().replace(/\s+/g, "-")}`}>
             {prStatusLabel(pr)}
           </span>
+          {(pr.checks === "FAIL" || pr.mergeable === "CONFLICTING") && (
+            <button
+              type="button"
+              className="agent-card-fix"
+              disabled={!canAct}
+              title={actHint ?? (pr.checks === "FAIL" ? "Ask this agent to fix the failing checks" : "Ask this agent to resolve the conflicts")}
+              onClick={() =>
+                void Promise.resolve(onSendToAgent(pr.checks === "FAIL" ? prFixChecksContext(pr) : prConflictContext(pr))).then((result) => {
+                  if (result && !result.delivered) onNotice?.(result.note || "The agent did not receive that.");
+                })}
+            >
+              {pr.checks === "FAIL" ? "Fix it" : "Resolve"}
+            </button>
+          )}
         </div>
       )}
 

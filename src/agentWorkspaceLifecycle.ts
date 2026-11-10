@@ -133,3 +133,15 @@ export async function reuseAgentWorkspace(
     return null;
   }
 }
+
+/** Whether the startup sweep may even consider a workspace: a real, finished
+ *  branch whose work is on the remote and that nothing is using. Landing is
+ *  checked separately. */
+export function sweepEligible(work: {
+  dirty: number; protected: boolean; is_main: boolean; current: boolean;
+  upstream: string | null; upstream_gone: boolean; ahead: number;
+}, worktreeDirty: number, inUse: boolean): boolean {
+  if (worktreeDirty > 0 || work.dirty > 0 || inUse) return false;
+  if (work.protected || work.is_main || work.current) return false;
+  return work.upstream_gone || (work.upstream !== null && work.ahead === 0);
+}

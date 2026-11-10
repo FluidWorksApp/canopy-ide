@@ -233,3 +233,33 @@ describe("prStatusLabel", () => {
     expect(prStatusLabel(base)).toBe("Ready");
   });
 });
+
+describe("failing PR", () => {
+  it("offers Fix it, which asks the agent to fix the checks", async () => {
+    vi.mocked(ipc.gitStatus).mockResolvedValue({ is_repo: true, branch: "feat/x", entries: [] } as never);
+    vi.mocked(ipc.ghPrList).mockResolvedValue([
+      { number: 5, title: "Ship it", url: "u", branch: "feat/x", base: "main", state: "OPEN", draft: false, checks: "FAIL", mergeable: "MERGEABLE", additions: 1, deletions: 0 },
+    ] as never);
+    const { onSendToAgent } = setup({ repo: "/failing", cwd: "/failing" });
+    fireEvent.click(await screen.findByRole("button", { name: "Fix it" }));
+    expect(onSendToAgent).toHaveBeenCalledWith(expect.stringContaining("failing checks"));
+  });
+});
+
+describe("PRs raised by the agent", () => {
+  it("lists every one on hover", async () => {
+    vi.mocked(ipc.ghPrList).mockResolvedValue([
+      { number: 7, title: "First", url: "u7", branch: "feat/x", base: "main", state: "OPEN", draft: false, checks: "PASS", mergeable: "MERGEABLE", additions: 1, deletions: 0 },
+      { number: 8, title: "Second", url: "u8", branch: "feat/y", base: "main", state: "OPEN", draft: false, checks: "FAIL", mergeable: "MERGEABLE", additions: 1, deletions: 0 },
+    ] as never);
+    (ipc as unknown as { provenanceForSession: unknown }).provenanceForSession = vi.fn(async () => [
+      { repo: "/many", pr_number: 8, pr_url: "u8", branch: "feat/y", session_id: "s" },
+    ]);
+    setup({ repo: "/many", cwd: "/many" });
+    const row = (await screen.findByText("#7")).closest(".agent-card-pr-row") as HTMLElement;
+    fireEvent.mouseEnter(row);
+    expect(screen.getByRole("list", { name: "Pull requests from this agent" })).toBeInTheDocument();
+    expect(screen.getAllByText("#8").length).toBeGreaterThan(0);
+    delete (ipc as unknown as { provenanceForSession?: unknown }).provenanceForSession;
+  });
+});

@@ -169,3 +169,11 @@ it('with the component already decided, asks only where to run and which account
   fireEvent.click(screen.getByRole('button',{name:/Open/}));
   expect(onPick).toHaveBeenCalledWith(expect.objectContaining({id:'w'}),expect.anything(),'default');
 });
+
+it('offers Automatic as an account and passes it through',()=>{
+  const {onPick,input}=mount({accounts:{profiles:[{id:'default',label:'Default'},{id:'auto',label:'Automatic'}],initial:'default'}});
+  fireEvent.click(screen.getByRole('radio',{name:'Automatic'}));
+  fireEvent.keyDown(input,{key:'Enter'});
+  expect(onPick).toHaveBeenCalled();
+  expect(JSON.stringify(onPick.mock.calls[0])).toContain('auto');
+});

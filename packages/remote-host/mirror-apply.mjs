@@ -22,7 +22,8 @@ const OBJECT=/^[a-f0-9]{40}([a-f0-9]{24})?$/;
 const STEP_MS=5*60000, INSTALL_MS=20*60000, KEEP_MS=30*60000, TAIL_BYTES=4096, KILL_GRACE_MS=5000, STAGING_TTL_MS=24*3600000;
 // Without this GNU tar prints non-ASCII names as \303\251 escapes under LC_ALL=C;
 // the symlink check below would then lstat a name that does not exist and pass.
-const LITERAL=['--quoting-style=literal'];
+// bsdtar (macOS) has no such option and never escapes names.
+const LITERAL=process.platform==='darwin'?[]:['--quoting-style=literal'];
 const STAGING_ID=/^[a-f0-9-]{36}$/;
 
 export const mirrorStaging=(root,id)=>path.join(root,'.canopy-mirror',id);
@@ -214,7 +215,7 @@ export class MirrorJobs {
      for(const name of list){const parts=name.split('/');for(let i=1;i<parts.length;i++){const info=await lstat(path.join(job.repo,...parts.slice(0,i))).catch(()=>null);if(info?.isSymbolicLink())throw Error(`Archive path goes through a symlink: ${name.slice(0,200)}`);}}
      // --skip-old-files keeps what is there, so count only members that were absent.
      let absent=0;for(const name of list)if(!await lstat(path.join(job.repo,name)).catch(()=>null))absent++;
-     const extracted=await this.exec(job,['tar','-xzf',archive,'-C',job.repo,'--no-same-owner','--skip-old-files'],{env:{LC_ALL:'C'}});
+     const extracted=await this.exec(job,['tar','-xzf',archive,'-C',job.repo,'--no-same-owner',process.platform==='darwin'?'-k':'--skip-old-files'],{env:{LC_ALL:'C'}});
      if(!extracted.ok)throw Error(extracted.output);
      this.record(job,'files','done',`${absent} new or local-only ${absent===1?'file':'files'} copied${absent<list.length?` (${list.length-absent} already there, left as is)`:''}`);
     }catch(error){this.record(job,'files','failed',`New files were not copied; the archive is kept at ${await this.keep(job,'files.tgz')}. ${error.message??error}`);}
