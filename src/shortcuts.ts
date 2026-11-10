@@ -453,3 +453,8 @@ export function accelerator(
   parts.push(key);
   return parts.join("+");
 }
+
+/** True when a key press carries a command modifier, so a bare-key handler
+ *  (j/k, /, x) can leave Cmd/Ctrl/Alt chords to their own owners. */
+export const hasCommandModifier = (e: { metaKey: boolean; ctrlKey: boolean; altKey: boolean }): boolean =>
+  e.metaKey || e.ctrlKey || e.altKey;

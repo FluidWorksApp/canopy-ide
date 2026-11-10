@@ -48,7 +48,6 @@ describe("BrainConnectPanel", () => {
     render(<BrainConnectPanel />);
     const radio = await screen.findByRole("radio", { name: new RegExp(claude.name) });
     expect(radio).toBeChecked();
-    expect(screen.getByText("Recommended")).toBeInTheDocument();
     expect(screen.getByRole("radio", { name: new RegExp(codex.name) })).not.toBeChecked();
     await waitFor(() => expect(checkMock).toHaveBeenCalledTimes(1));
   });

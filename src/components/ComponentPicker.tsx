@@ -111,7 +111,22 @@ export function ComponentPicker({
 
   return (
     <div className="palette-backdrop" onMouseDown={cancel}>
-      <div className="palette cpick" role="dialog" aria-label={title} onMouseDown={(event) => event.stopPropagation()}>
+      <div
+        className="palette cpick"
+        role="dialog"
+        aria-modal="true"
+        aria-label={title}
+        onMouseDown={(event) => event.stopPropagation()}
+        onKeyDown={(event) => {
+          // Enter opens from anywhere in the picker, including a chosen chip.
+          if (event.key !== "Enter" || !(event.target as HTMLElement).matches?.("button[role=radio]")) return;
+          const target = fixed ?? rows[selectedRow] ?? ordered[0];
+          if (!target) return;
+          event.preventDefault();
+          event.stopPropagation();
+          pick(target);
+        }}
+      >
         <div className="cpick-title">
           {title}
           {fixed ? (
@@ -228,7 +243,7 @@ export function ComponentPicker({
               } else if (event.key === "ArrowUp") {
                 event.preventDefault();
                 setSelectedRow((index) => Math.max(index - 1, 0));
-              } else if (event.key === "Tab" && !event.shiftKey && ghost) {
+              } else if (event.key === "Tab" && !event.shiftKey && ghost && query.trim() && ghost.full !== query) {
                 event.preventDefault();
                 setQuery(ghost.full);
               } else if (event.key === "Enter") {
@@ -259,7 +274,7 @@ export function ComponentPicker({
         </div>
         <div className="cpick-hint">
           <span>↵ open</span>
-          <span>Tab complete</span>
+          <span>Tab complete / options</span>
           <span>↑↓ choose</span>
           <span>Esc cancel</span>
         </div>

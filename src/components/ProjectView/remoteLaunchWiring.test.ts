@@ -55,38 +55,32 @@ const transition = { kind: "transition", target: remote, name: "Design Studio" }
 describe("starting an agent on another workspace (prepareMachineLaunch)", () => {
   it("starts it there without the switch dialog when the machine accepts the launch", async () => {
     const { fn, setMachineTransition } = await prepare({ outcome: transition });
-    const onRemote = vi.fn(async () => true);
+    const onRemote = vi.fn(async () => ({ kind: "started" as const }));
     expect(await fn("claude", { kind: "target", target: remote }, false, onRemote)).toBe(false);
     expect(onRemote).toHaveBeenCalledWith(remote, "Design Studio");
     expect(setMachineTransition).not.toHaveBeenCalled();
   });
 
-  it("falls back to the old dialog, keeping what to resume, when the machine is unreachable, view-only or has no complete copy", async () => {
-    const onRemote = async () => false;
+  it("never shows the switch dialog when the machine cannot be used: the reason was already said", async () => {
+    const onRemote = async () => ({ kind: "failed" as const });
     const { fn, setMachineTransition } = await prepare({ outcome: transition });
     const then = { kind: "pr-review" as const, payload: { number: 7 } };
     expect(await fn("claude", { kind: "target", target: remote }, { label: "app", then }, onRemote)).toBe(false);
-    expect(setMachineTransition).toHaveBeenCalledWith({
-      target: remote,
-      name: "Design Studio",
-      resumeAgent: "claude",
-      resumeLabel: "app",
-      resumeThen: then,
-    });
+    expect(setMachineTransition).not.toHaveBeenCalled();
   });
 
   it("a window that is itself on a workspace starts the agent on ANOTHER workspace without switching", async () => {
     const { fn, setMachineTransition } = await prepare({ outcome: transition, isRemoteHost: true });
-    const onRemote = vi.fn(async () => true);
+    const onRemote = vi.fn(async () => ({ kind: "started" as const }));
     await fn("claude", { kind: "target", target: remote }, { label: "app" }, onRemote);
     expect(onRemote).toHaveBeenCalledTimes(1);
     expect(setMachineTransition).not.toHaveBeenCalled();
   });
 
-  it("from a workspace window, falls back to the dialog when the other workspace cannot be used", async () => {
+  it("from a workspace window, a workspace that cannot be used shows no switch dialog either", async () => {
     const { fn, setMachineTransition } = await prepare({ outcome: transition, isRemoteHost: true });
-    await fn("claude", { kind: "target", target: remote }, { label: "app" }, vi.fn(async () => false));
-    expect(setMachineTransition).toHaveBeenCalledTimes(1);
+    await fn("claude", { kind: "target", target: remote }, { label: "app" }, vi.fn(async () => ({ kind: "failed" as const })));
+    expect(setMachineTransition).not.toHaveBeenCalled();
   });
 
   it("leaves no resume intent when the caller did not ask for one", async () => {
@@ -97,7 +91,7 @@ describe("starting an agent on another workspace (prepareMachineLaunch)", () => 
 
   it("a local target never takes the remote path", async () => {
     const { fn } = await prepare({ outcome: { kind: "transition", target: { kind: "local" }, name: "This Mac" } });
-    const onRemote = vi.fn(async () => true);
+    const onRemote = vi.fn(async () => ({ kind: "started" as const }));
     await fn("claude", { kind: "local" }, false, onRemote);
     expect(onRemote).not.toHaveBeenCalled();
   });

@@ -1,4 +1,5 @@
 import { fixedNumber } from "../format";
+import { hasCommandModifier } from "../shortcuts";
 // Agent management: one row per terminal session, named after whatever the pty
 // has in its foreground (see agentIdentity.ts), with CPU/memory for the runaway
 // guard.
@@ -647,7 +648,7 @@ export function AgentsPanel({
   }, [armed]);
 
   const onListKey = (e: React.KeyboardEvent<HTMLDivElement>) => {
-    if (e.target !== e.currentTarget || e.metaKey || e.ctrlKey || e.altKey) return;
+    if (e.target !== e.currentTarget || hasCommandModifier(e)) return;
     const handled = () => {
       e.preventDefault();
       e.stopPropagation();
@@ -742,7 +743,7 @@ export function AgentsPanel({
   };
 
   const onFilterKey = (e: React.KeyboardEvent<HTMLInputElement>) => {
-    if (e.metaKey || e.ctrlKey || e.altKey) return;
+    if (hasCommandModifier(e)) return;
     if (e.key === "ArrowDown" || e.key === "ArrowUp") {
       e.preventDefault();
       listRef.current?.focus();

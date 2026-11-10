@@ -80,7 +80,7 @@ export function canBeBrain(cli: AgentCli): boolean {
  *  checked against the binary, so the person is told how far that was checked.
  *  Taken from the runner's own `verification`, never invented here. */
 export function brainVerificationNote(cli: AgentCli): string | null {
-  const runner = structuredRunnerFor(cli.id);
+  const runner = legacyRunnerFor(cli.id);
   if (runner?.tier !== "acp") return null;
   const v = runner.verification;
   const checked =
@@ -94,7 +94,7 @@ export function brainVerificationNote(cli: AgentCli): string | null {
  *  silently omitting it. */
 export function brainExclusionReason(cli: AgentCli): string | null {
   if (canBeBrain(cli)) return null;
-  const runner = structuredRunnerFor(cli.id);
+  const runner = legacyRunnerFor(cli.id);
   return runner
     ? `${cli.name} has no one-shot mode Canopy has verified.`
     : `${cli.name} has no headless or ACP mode configured. Add its ACP arguments under Settings \u2192 Agents to use it.`;
@@ -118,7 +118,7 @@ export function groupedBrainCandidates(installed: (bin: string) => boolean): {
   acp: AgentCli[];
 } {
   const all = brainCandidates(installed);
-  const isAcp = (c: AgentCli) => structuredRunnerFor(c.id)?.tier === "acp";
+  const isAcp = (c: AgentCli) => legacyRunnerFor(c.id)?.tier === "acp";
   return { verified: all.filter((c) => !isAcp(c)), acp: all.filter(isAcp) };
 }
 

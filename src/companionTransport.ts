@@ -32,6 +32,7 @@ import {
   type ProjectRunnerTransport,
 } from "./projectRunner";
 import { legacyRunnerFor } from "./projects";
+import { structuredRunnerFor } from "./projects";
 
 export { StructuredTransport };
 

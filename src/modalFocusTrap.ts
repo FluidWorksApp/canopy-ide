@@ -6,7 +6,10 @@
 // A layer that already handled the key (the shared Dialog traps for itself)
 // calls preventDefault first and is left alone.
 
-const MODAL = '[role="dialog"], [aria-modal="true"], dialog[open]';
+// Only layers that cover the page: an inline card or popover that happens to be
+// role="dialog" must not capture Tab. The backdrops are the pickers, palettes
+// and confirmations that do not set aria-modal themselves.
+const MODAL = '[aria-modal="true"], .palette-backdrop, .confirm-backdrop, dialog[open]';
 const FOCUSABLE =
   'a[href], button:not([disabled]), input:not([disabled]):not([type="hidden"]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])';
 
@@ -22,7 +25,7 @@ export function trapTab(event: KeyboardEvent, root: ParentNode = document): void
   if (event.key !== "Tab" || event.defaultPrevented || event.ctrlKey || event.metaKey || event.altKey) return;
   const modal = topModal(root);
   if (!modal) return;
-  const items = Array.from(modal.querySelectorAll<HTMLElement>(FOCUSABLE)).filter(visible);
+  const items = Array.from(modal.querySelectorAll<HTMLElement>(FOCUSABLE)).filter((el) => visible(el) && el.tabIndex >= 0);
   // Radio groups are one tab stop: arrows move inside them, so a roving
   // tabindex of -1 is already excluded above.
   if (items.length === 0) {

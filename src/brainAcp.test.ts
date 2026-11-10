@@ -122,7 +122,8 @@ describe("askBrain over ACP", () => {
     // Metered and reflected in the connection state, like a headless call.
     expect(brainSpend({ feature: "receipt" })).toMatchObject({ calls: 1, failures: 0 });
     expect(brainConnection().state).toBe("connected");
-    expect(killMock).toHaveBeenCalled();
+    // The process is reaped after the transport has cancelled and closed the session.
+    await vi.waitFor(() => expect(killMock).toHaveBeenCalled());
   });
 
   it("runs a project-less call from the home directory ACP is told about", async () => {
@@ -194,7 +195,7 @@ describe("askBrain over ACP", () => {
     const pending = askBrain({ feature: "plan", prompt: "x", cwd: "/r", timeoutMs: 1_000 });
     await vi.advanceTimersByTimeAsync(1_500);
     expect(await pending).toMatchObject({ ok: false, reason: "timeout" });
-    expect(killMock).toHaveBeenCalledTimes(1);
+    await vi.waitFor(() => expect(killMock).toHaveBeenCalledTimes(1));
     expect(a.sent("session/cancel").length).toBeLessThanOrEqual(1);
     expect(brainSpend({ feature: "plan" })).toMatchObject({ calls: 1, failures: 1 });
     // A timeout is not a connection verdict for a non-probe feature.
@@ -219,7 +220,7 @@ describe("askBrain over ACP", () => {
     });
     const answer = await askBrain({ feature: "plan", prompt: "x", cwd: "/r", signal: abort.signal });
     expect(answer).toEqual({ ok: false, reason: "failed", message: "Cancelled." });
-    expect(killMock).toHaveBeenCalledTimes(1);
+    await vi.waitFor(() => expect(killMock).toHaveBeenCalledTimes(1));
   });
 
   it("does not spawn when already aborted", async () => {

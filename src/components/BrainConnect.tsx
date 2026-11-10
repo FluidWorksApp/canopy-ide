@@ -19,11 +19,8 @@ import {
   addAcpPreset,
   brainCandidates,
   brainCapableClis,
-  brainExcluded,
   brainStateText,
-  brainVerificationNote,
   chooseBrain,
-  groupedBrainCandidates,
   installableAcpPresets,
   initBrainConnect,
   OPEN_BRAIN_CONNECT_EVENT,
@@ -132,8 +129,6 @@ export function BrainConnectPanel({ onTerminalOpened, hideModels = false }: Brai
   const { installed, loaded } = useInstalled();
   const has = (bin: string) => Boolean(installed[bin]);
   const candidates = brainCandidates(has);
-  const groups = groupedBrainCandidates(has);
-  const excluded = brainExcluded(has);
   const [presets, setPresets] = useState<AcpPreset[]>([]);
   useEffect(() => {
     let live = true;
@@ -191,7 +186,9 @@ export function BrainConnectPanel({ onTerminalOpened, hideModels = false }: Brai
         <strong>{brain?.name ?? conn.label ?? "Brain"}</strong>
         <span className="brain-connect-short">{missingWithChoices ? "Not connected" : text.short}</span>
       </div>
-      <p className="brain-connect-detail">{detail}</p>
+      {conn.state !== "connected" && conn.state !== "checking" && conn.state !== "unknown" && detail && (
+        <p className="brain-connect-detail">{detail}</p>
+      )}
       {!stale && conn.message && conn.state !== "connected" && conn.state !== "checking" && (
         <code className="brain-connect-error" title="What the CLI said">
           {conn.message.slice(0, 280)}
@@ -200,43 +197,19 @@ export function BrainConnectPanel({ onTerminalOpened, hideModels = false }: Brai
 
       {candidates.length > 0 && (
         <div className="brain-connect-choices" role="radiogroup" aria-label="Brain">
-          {[
-            ["Verified runners", groups.verified],
-            ["ACP agents (less verified)", groups.acp],
-          ].map(([title, list]) =>
-            (list as AgentCli[]).length === 0 ? null : (
-              <div key={title as string} className="brain-connect-group" role="group" aria-label={title as string}>
-                {groups.verified.length > 0 && groups.acp.length > 0 && (
-                  <div className="brain-connect-group-title">{title as string}</div>
-                )}
-                {(list as AgentCli[]).map((cli) => (
-                  <Radio
-                    key={cli.id}
-                    name="brain-cli"
-                    checked={brain?.id === cli.id}
-                    onChange={() => void chooseBrain(cli.id)}
-                    label={
-                      <>
-                        {cli.name}
-                        {cli.id === recommended?.id && <span className="brain-badge">Recommended</span>}
-                        {structuredRunnerFor(cli.id)?.tier === "acp" && <span className="brain-badge">ACP</span>}
-                      </>
-                    }
-                  />
-                ))}
-              </div>
-            ),
-          )}
+          {candidates.map((cli) => (
+            <Radio
+              key={cli.id}
+              name="brain-cli"
+              checked={brain?.id === cli.id}
+              onChange={() => void chooseBrain(cli.id)}
+              label={cli.name}
+            />
+          ))}
         </div>
-      )}
-      {brain && brainVerificationNote(brain) && (
-        <p className="brain-connect-hint" role="note">
-          {brainVerificationNote(brain)}
-        </p>
       )}
       {presets.length > 0 && (
         <div className="brain-connect-install">
-          <span>Installed here and speaks ACP, not added yet:</span>
           <Row>
             {presets.map((p) => (
               <Button
@@ -250,14 +223,6 @@ export function BrainConnectPanel({ onTerminalOpened, hideModels = false }: Brai
           </Row>
         </div>
       )}
-      {excluded.length > 0 && (
-        <ul className="brain-connect-hint" aria-label="Installed agents that cannot be the brain">
-          {excluded.map(({ cli, reason }) => (
-            <li key={cli.id}>{reason}</li>
-          ))}
-        </ul>
-      )}
-
       {loaded && candidates.length === 0 && (
         <div className="brain-connect-install">
           <span>Install one to give Canopy a brain:</span>

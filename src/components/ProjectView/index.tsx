@@ -1870,8 +1870,9 @@ const ProjectViewBody = memo(function ProjectViewBody({
   };
   const teleportCandidateRef = useRef(teleportCandidate);
   teleportCandidateRef.current = teleportCandidate;
+  type RemoteStart = { kind: "started" } | { kind: "failed" } | { kind: "not-set-up"; invoke: <T>(command: string, args?: Record<string, unknown>) => Promise<T> };
   const [machineTransition, setMachineTransition] = useState<{ target: Target; name: string; resumeAgent?: string; resumeLabel?: string; resumeThen?: PendingLaunch["then"] } | null>(null);
-  const [placementSetup, setPlacementSetup] = useState<{ name: string; resolve: (ready: boolean) => void } | null>(null);
+  const [placementSetup, setPlacementSetup] = useState<{ name: string; resolve: (ready: boolean) => void; remoteInvoke?: <T>(command: string, args?: Record<string, unknown>) => Promise<T> } | null>(null);
   const [placementSetupReady, setPlacementSetupReady] = useState(false);
   /** Take back a remote terminal that survived the project's sleep. Called only
    *  from the tab's Reconnect button. Resolves null on success, else why not. */
@@ -1973,7 +1974,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
   const prepareMachineLaunch = useCallback(async (agentKind: string, machine: Preference, resume: false | { label?: string; then?: PendingLaunch["then"] } = false,
     /** Start the launch on that machine without switching the window to it.
      *  Resolves true when it did; false falls back to the switch dialog. */
-    onRemote?: (target: Target, name: string) => Promise<boolean>) => {
+    onRemote?: (target: Target, name: string) => Promise<RemoteStart>) => {
     const outcome = await resolveProjectMachineLaunch({
       project: { id: project.id, name: project.name },
       agentKind,
@@ -1988,7 +1989,19 @@ const ProjectViewBody = memo(function ProjectViewBody({
       // there, stay here.
       // Only when that cannot be done (not reachable, project not set up there)
       // does the old "switch to it" dialog come up.
-      if (onRemote && outcome.target.kind === "remote" && (await onRemote(outcome.target, outcome.name))) {
+      if (onRemote && outcome.target.kind === "remote") {
+        const first = await onRemote(outcome.target, outcome.name);
+        if (first.kind === "started") return false;
+        if (first.kind === "not-set-up") {
+          // The project is not on that machine yet: set it up there (compact,
+          // everything pre-selected), then start. Never a switch dialog.
+          const ready = await new Promise<boolean>((resolve) => {
+            setPlacementSetupReady(false);
+            setPlacementSetup({ name: outcome.name, resolve, remoteInvoke: first.invoke });
+          });
+          if (ready) await onRemote(outcome.target, outcome.name);
+        }
+        // "failed" already said why; nothing else to ask.
         return false;
       }
       setMachineTransition({ target: outcome.target, name: outcome.name, ...(resume ? { resumeAgent: agentKind, ...(resume.label ? { resumeLabel: resume.label } : {}), ...(resume.then ? { resumeThen: resume.then } : {}) } : {}) });
@@ -7200,7 +7213,10 @@ const ProjectViewBody = memo(function ProjectViewBody({
   // workspaces, and anything with changes, are left alone.
   const swept = useRef(false);
   useEffect(() => {
-    if (!visible || swept.current || repoPaths.length === 0) return;
+    // Disabled until it also requires a pushed branch and a landed PR, and skips
+    // any workspace a live session (in any window) is using.
+    const SWEEP_ENABLED = false;
+    if (!SWEEP_ENABLED || !visible || swept.current || repoPaths.length === 0) return;
     const timer = setTimeout(async () => {
       swept.current = true;
       for (const repo of repoPaths) {
@@ -9866,8 +9882,8 @@ const ProjectViewBody = memo(function ProjectViewBody({
       if (!cwd) return;
       const target =
         where ?? (getSettings().agentWorkspaceByDefault ? "workspace" : "current");
-      const startOnMachine = async (remote: Target, name: string): Promise<boolean> => {
-        if (remote.kind !== "remote") return false;
+      const startOnMachine = async (remote: Target, name: string): Promise<RemoteStart> => {
+        if (remote.kind !== "remote") return { kind: "failed" };
         try {
           onNotice(`Starting ${cli.name} on ${name}…`, "info");
           const connected = await connectMachine(remote.workspaceId);
@@ -9879,7 +9895,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
             component,
           );
           // No complete copy of the project there: the setup flow owns that.
-          if (found.kind !== "found") return false;
+          if (found.kind !== "found") return { kind: "not-set-up", invoke: connected.invoke };
           // The agent's own workspace on that machine, by the same setting the
           // local launch honours, made through that machine's git.
           const prepared = await prepareRemoteWorkspace({
@@ -9898,10 +9914,10 @@ const ProjectViewBody = memo(function ProjectViewBody({
           if (profileId && profileId !== DEFAULT_PROFILE)
             onNotice(`${cli.name} on ${name} uses that workspace's own sign-in, not the account chosen here.`, "info");
           addTerminal(prepared.cwd, launchCommand(cli), cli.name, cli.icon, false, undefined, undefined, true, undefined, undefined, undefined, connected.env);
-          return true;
+          return { kind: "started" };
         } catch (error) {
           onNotice(`Could not start ${cli.name} on ${name}: ${String((error as Error)?.message ?? error)}`, "warn");
-          return false;
+          return { kind: "failed" };
         }
       };
       if (machine && !(await prepareMachineLaunch(cli.id, machine, { label: componentsRef.current.find((c) => c.path === cwd)?.label }, startOnMachine))) return;
@@ -16202,6 +16218,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
               workspaceName={placementSetup.name}
               components={project.components.map((component) => ({ componentId: component.id, label: component.label }))}
               onComplete={setPlacementSetupReady}
+              remoteInvoke={placementSetup.remoteInvoke}
             />
           }
         />

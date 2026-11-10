@@ -1,3 +1,4 @@
+import { installModalFocusTrap } from "./modalFocusTrap";
 import { withLink } from "./teleport/sessionMove";
 import {hibernateWorkspaceProjects,type ConfirmOthers,type HibernateProgressListener} from './remoteExecution/hibernateWorkspace';
 import {activeWorkspace} from './remoteExecution/workspace';
@@ -333,6 +334,8 @@ function publishScopes(state: WorkspaceState) {
 
 export default function App() {
   useEffect(() => startBackgroundTeams(), []);
+  // Tab stays inside whichever modal layer is open.
+  useEffect(() => installModalFocusTrap(), []);
   // Unread teammates' messages reach the bell and the OS, including while
   // working elsewhere in Canopy; the conversation being read stays quiet.
   useEffect(() => startTeamMessageNotifications(), []);

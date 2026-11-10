@@ -1,5 +1,5 @@
 import {isAllWorkspaces,setAllWorkspaces,resetAllWorkspacesForTest} from './allMode';
-import {act,fireEvent,render,screen,within} from '@testing-library/react';import {beforeEach,it,expect,vi} from 'vitest';import {WorkspaceSelector} from './WorkspaceSelector';
+import {act,fireEvent,render,screen} from '@testing-library/react';import {beforeEach,it,expect,vi} from 'vitest';import {WorkspaceSelector} from './WorkspaceSelector';
 import {OPEN_T3_MACHINE_EVENT} from '../placement/transitions';
 const mocks=vi.hoisted(()=>({workspace:vi.fn(),openLink:vi.fn(),listMachines:vi.fn()}));
 vi.mock('./workspace',()=>({activeWorkspace:()=>({connection:{workspaceId:'test',workspaceName:'Test',endpoint:'http://127.0.0.1:8787'},client:{workspace:mocks.workspace}})}));vi.mock('@tauri-apps/api/core',()=>({invoke:vi.fn(async()=>[])}));vi.mock('../links',()=>({openLink:mocks.openLink}));vi.mock('../t3connect/api',()=>({listT3Machines:mocks.listMachines}));vi.mock('./RemoteDesktop',()=>({RemoteDesktop:()=> <div>Remote desktop surface</div>}));vi.mock('./LocalProjectImport',()=>({LocalProjectImport:()=>null}));vi.mock('../components/UnifiedWorkspace',()=>({UnifiedWorkspace:()=> <div className="unified-workspace">Machine dashboard</div>}));
