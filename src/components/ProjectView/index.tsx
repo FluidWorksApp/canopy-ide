@@ -2004,7 +2004,13 @@ const ProjectViewBody = memo(function ProjectViewBody({
             setPlacementSetupReady(false);
             setPlacementSetup({ name: outcome.name, resolve, remoteInvoke: first.invoke });
           });
-          if (ready) await onRemote(outcome.target, outcome.name);
+          if (ready) {
+            const second = await onRemote(outcome.target, outcome.name);
+            // Never silent: setup finished but the machine still does not list a
+            // complete copy of this project, so nothing could be started.
+            if (second.kind === "not-set-up")
+              onNotice(`${outcome.name} still doesn't list a complete copy of ${project.name}, so nothing was started. Run the setup again, or open ${project.name} there once.`, "warn");
+          }
         }
         // "failed" already said why; nothing else to ask.
         return false;
