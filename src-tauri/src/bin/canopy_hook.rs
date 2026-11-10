@@ -7309,7 +7309,8 @@ mod tests {
     /// as the machine had one.
     #[test]
     fn device_list_schema_accepts_the_emulators_it_returns() {
-        let schema = super::output_schema("canopy_device_list").expect("device list has an output schema");
+        let schema =
+            super::output_schema("canopy_device_list").expect("device list has an output schema");
         let avd = serde_json::json!({ "name": "Pixel_8", "ready": true, "problem": null });
         assert!(avd.is_object());
         assert_eq!(schema["properties"]["emulators"]["items"]["type"], "object");
