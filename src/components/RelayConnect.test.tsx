@@ -15,34 +15,15 @@ beforeEach(()=>{sent.length=0;invoke.mockReset();invoke.mockResolvedValue({teams
 afterEach(()=>{cleanup();setTeamIdentityFetchForTests(null);});
 
 describe('RelayConnect',()=>{
- it('signed in: one button, no fields, the account name, and the offer goes to the team',async()=>{
-  signedIn();const relay=handle();
-  const {rerender}=render(<RelayConnect relay={relay}/>);
-  const button=await screen.findByRole('button',{name:'Share my desktop'});
-  expect(screen.queryByLabelText('Your name')).toBeNull();expect(screen.queryByLabelText('Host address')).toBeNull();expect(screen.queryByLabelText('Code')).toBeNull();
-  fireEvent.click(button);
-  await waitFor(()=>expect(relay.hostStart).toHaveBeenCalledWith('Sam','public'));
-  // The relay reports it is hosting; only then is the offer posted.
-  expect(sent).toEqual([]);
-  rerender(<RelayConnect relay={handle({role:'host',code:'1234567',port:6679,ips:['203.0.113.9','192.168.1.20']})}/>);
-  await waitFor(()=>expect(sent).toHaveLength(1));
-  const ext=sent[0][3] as {card:{type:string;addr:string;code:string}};
-  expect(sent[0][1]).toBeNull();
-  expect(ext.card).toEqual({type:'relay-offer',v:1,addr:'192.168.1.20:6679',code:'1234567'});
-  expect(screen.getByText('Sharing your desktop')).toBeInTheDocument();
- });
- it('Stop ends the offer in the team, then stops the relay',async()=>{
-  signedIn();const relay=handle();
-  const {rerender}=render(<RelayConnect relay={relay}/>);
-  fireEvent.click(await screen.findByRole('button',{name:'Share my desktop'}));
-  await waitFor(()=>expect(relay.hostStart).toHaveBeenCalled());
+ it('signed in: no share button; hosting shows Stop, which stops the relay',async()=>{
+  signedIn();
+  const idle=handle();
+  const {rerender}=render(<RelayConnect relay={idle}/>);
+  await waitFor(()=>expect(screen.queryByRole('button',{name:'Share my desktop'})).toBeNull());
   const hosting=handle({role:'host',code:'1234567',port:6679,ips:['192.168.1.20']});
   rerender(<RelayConnect relay={hosting}/>);
-  await waitFor(()=>expect(sent).toHaveLength(1));
-  fireEvent.click(screen.getByRole('button',{name:'Stop'}));
+  fireEvent.click(await screen.findByRole('button',{name:'Stop'}));
   await waitFor(()=>expect(hosting.hostStop).toHaveBeenCalled());
-  const ext=sent[1][3] as {card:{type:string;request:string}};
-  expect(ext.card).toEqual({type:'relay-offer-ended',v:1,request:'11111111-1111-4111-8111-111111111111'});
  });
  it('signed out: the manual form is tucked under Advanced',async()=>{
   setTeamIdentityFetchForTests(async()=>{throw new Error('unauthorized');});

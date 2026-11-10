@@ -77,7 +77,10 @@ export type LayerApprovalOutcomeCard={type:'layer-approval-outcome';v:1;request:
 export type RelayOfferCard={type:'relay-offer';v:1;addr:string;code:string};
 /** The host stopped sharing: posted in reply to its offer, which then reads as ended. */
 export type RelayOfferEndedCard={type:'relay-offer-ended';v:1;request:string};
-export type Card=RelayOfferCard|RelayOfferEndedCard|PrCard|FileCard|DiffCard|TerminalCard|ReportCard|ReviewRequestCard|ReviewOutcomeCard|HandoffCard|LiveSessionCard|PlanCard|PlanOutcomeCard|LayerApprovalCard|LayerApprovalOutcomeCard;
+/** "Connect remotely": asks a teammate to share their whole desktop. Nothing
+ *  starts until they accept; accepting answers with a relay-offer card. */
+export type RelayRequestCard={type:'relay-request';v:1};
+export type Card=RelayRequestCard|RelayOfferCard|RelayOfferEndedCard|PrCard|FileCard|DiffCard|TerminalCard|ReportCard|ReviewRequestCard|ReviewOutcomeCard|HandoffCard|LiveSessionCard|PlanCard|PlanOutcomeCard|LayerApprovalCard|LayerApprovalOutcomeCard;
 export type CardType=Card['type'];
 
 // ---------- limits ----------
@@ -163,6 +166,20 @@ export function validRelayAddr(value:unknown):value is string{
  const [a,b]=o;
  return a===10||(a===172&&b>=16&&b<=31)||(a===192&&b===168)||(a===169&&b===254)||(a===100&&b>=64&&b<=127);
 }
+/** The public address of a teammate's Canopy link: `https://` and a DNS name
+ *  (optionally a port), nothing else. No credentials, path, query, IP literal,
+ *  loopback or local-only name, so a card cannot point a click at the user's own
+ *  machine or network. */
+export function validRelayLink(value:unknown):value is string{
+ if(typeof value!=='string'||value.length>120)return false;
+ const m=/^https:\/\/((?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z][a-z0-9-]{0,61}[a-z0-9])(?::(\d{1,5}))?$/.exec(value);
+ if(!m)return false;
+ const host=m[1];
+ if(host==='localhost'||/\.(local|localhost|internal|lan|home|test|invalid)$/.test(host))return false;
+ const port=m[2]===undefined?443:Number(m[2]);
+ return port>=1&&port<=65535;
+}
+export const validRelayAny=(value:unknown):value is string=>validRelayAddr(value)||validRelayLink(value);
 export const validRelayCode=(value:unknown):value is string=>typeof value==='string'&&/^\d{7}$/.test(value);
 export const validNumber=(value:unknown):value is number=>Number.isSafeInteger(value)&&(value as number)>=1&&(value as number)<=LIMITS.maxNumber;
 /** A repo-relative path a teammate sent: the same rules as a blob link's path
@@ -257,8 +274,12 @@ export function parseCard(value:unknown):Card|undefined{
     return fits({type:'live-session',...base,room:c.room,title:c.title,agent:c.agent,...(c.dir!==undefined?{dir:c.dir as string}:{}),...(c.repo?{repo:repoCopy(c.repo as RepoRef)}:{})});
    }
    case 'relay-offer':{
-    if(!exact(c,['type','v','addr','code'])||!validRelayAddr(c.addr)||!validRelayCode(c.code))return undefined;
+    if(!exact(c,['type','v','addr','code'])||!validRelayAny(c.addr)||!validRelayCode(c.code))return undefined;
     return fits({type:'relay-offer',...base,addr:c.addr,code:c.code});
+   }
+   case 'relay-request':{
+    if(!exact(c,['type','v']))return undefined;
+    return fits({type:'relay-request',...base});
    }
    case 'relay-offer-ended':{
     if(!exact(c,['type','v','request'])||typeof c.request!=='string'||!UUID.test(c.request))return undefined;
@@ -322,7 +343,7 @@ export function cardUrl(card:Card):string|undefined{
   case 'file':return blobUrl(card.repo,card.rev,card.path,card.lines);
   case 'diff':return card.pr?`${prUrl(card.repo,card.pr)}${isGitLab(card.repo.host)?'/diffs':'/files'}`:compareUrl(card.repo,card.base,card.head);
   case 'report':return card.repo&&card.pr?prUrl(card.repo,card.pr):undefined;
-  case 'terminal':case 'handoff':case 'live-session':case 'plan':case 'plan-outcome':case 'layer-approval':case 'layer-approval-outcome':case 'relay-offer':case 'relay-offer-ended':return undefined;
+  case 'terminal':case 'handoff':case 'live-session':case 'plan':case 'plan-outcome':case 'layer-approval':case 'layer-approval-outcome':case 'relay-offer':case 'relay-offer-ended':case 'relay-request':return undefined;
  }
 }
 const linesLabel=(l?:LineRange)=>l?(l.start===l.end?`:${l.start}`:`:${l.start}-${l.end}`):'';
@@ -341,6 +362,7 @@ export function cardSummary(card:Card):string{
   case 'handoff':return `Handoff: ${card.title}${card.repo?` (${card.repo.slug})`:''}`;
   case 'live-session':return `Live agent session: ${card.title}${card.repo?` (${card.repo.slug})`:''} — open it in Canopy 0.5 or later to join`;
   case 'relay-offer':return `Desktop relay open on ${card.addr}, code ${card.code.slice(0,3)} ${card.code.slice(3)} — open Canopy to connect with one click`;
+  case 'relay-request':return 'Wants to connect remotely to your desktop — open Canopy to accept';
   case 'relay-offer-ended':return 'Stopped sharing the desktop relay (via Canopy)';
   case 'plan':return `Plan for review (${card.risk} risk, ${card.size}): ${card.goal}`;
   case 'plan-outcome':return card.outcome==='approved'?'✅ Approved the plan (via Canopy)':'🔁 Asked for changes to the plan (via Canopy)';

@@ -54,8 +54,7 @@ import { Button, Checkbox, Field, Row, Segmented, Select, Stepper, Switch, TextI
 import { notOnServerYet, serverFeatureError } from "../accountErrors";
 import { peekTeamIdentity, subscribeTeamIdentity, teamIdentity, type TeamIdentity } from "../teamIdentity";
 
-/** tunnel.rs's provider id for the link through Canopy's edge. */
-const CANOPY_LINK = "canopy";
+import { CANOPY_LINK } from "../internetLink";
 import "./receipts.css";
 import { drawWave } from "../waveStyles";
 import { useEscape, useEscapeLayer } from "../useEscape";

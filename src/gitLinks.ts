@@ -406,6 +406,7 @@ export async function resolveShareCard(
     case "layer-approval-outcome":
     case "relay-offer":
     case "relay-offer-ended":
+    case "relay-request":
       return { do: "none" };
   }
 }

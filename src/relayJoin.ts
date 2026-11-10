@@ -7,3 +7,13 @@ export interface RelayJoinDetail {
   code: string;
   from: string;
 }
+
+// The other side: a teammate asked to connect remotely (a relay-request card)
+// and this person pressed Accept. App starts the internet link and the relay,
+// then answers with a relay-offer card addressed to the requester.
+export const RELAY_ACCEPT_EVENT = "canopy:relay-accept";
+export interface RelayAcceptDetail {
+  /** Teammate id to answer. */
+  to: string;
+  from: string;
+}

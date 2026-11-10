@@ -24,11 +24,12 @@ it('signed out, it asks for a sign-in instead of offering sharing or a join code
  expect(relayForm().every(el=>el===null)).toBe(true);
 });
 
-it('signed in with a relay, the panel offers one button and no address or code fields',async()=>{
+it('signed in with a relay, the panel has no share button and no address or code fields',async()=>{
  invoke.mockImplementation(async(_name:string,{route,body}:{route:string;body:{action?:string}|null})=>route==='/api/me'?{user:{id:'me',name:'Sam',email:'sam@coraa.ai'}}:!body?directory:body.action==='detail'?{members:[],invitations:[]}:{});
  const relay={status:{role:'off',code:null,port:null,ips:[],addr:null,self_id:null,name:null,visibility:null,public_ip:null,members:[]},chat:[],unread:{},inbox:[],transfers:[],hostStart:async()=>{},hostStop:async()=>{},connect:async()=>{},disconnect:async()=>{}} as never;
  render(<TeamPanel relay={relay}/>);
- expect(await screen.findByRole('button',{name:'Share my desktop'})).toBeInTheDocument();
+ await screen.findByRole('region',{name:/Teams|Live now/}).catch(()=>null);
+ expect(screen.queryByRole('button',{name:'Share my desktop'})).toBeNull();
  expect(screen.queryByPlaceholderText('7-digit code')).toBeNull();
  expect(screen.queryByLabelText('Host address')).toBeNull();
 });

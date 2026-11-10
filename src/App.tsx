@@ -130,7 +130,9 @@ import { setBrainProjectResolver } from "./brainMeter";
 import { startLensApprovals } from "./lensApprovals";
 import { startLensClaimSync } from "./lensClaimSync";
 import { teamIdentity } from "./teamIdentity";
-import { RELAY_JOIN_EVENT, type RelayJoinDetail } from "./relayJoin";
+import { RELAY_JOIN_EVENT, RELAY_ACCEPT_EVENT, type RelayJoinDetail, type RelayAcceptDetail } from "./relayJoin";
+import { ensureInternetLink } from "./internetLink";
+import { accountTeam, post as postTeamCard } from "./components/RelayConnect";
 import {
   dismissTerminalMemoryPromptsForWindow,
   subscribeTerminalMemoryPromptVisibility,
@@ -3466,8 +3468,30 @@ export default function App() {
         }
       })();
     };
+    const onAccept = (event: Event) => {
+      const { to, from } = (event as CustomEvent<RelayAcceptDetail>).detail ?? {};
+      if (!to) return;
+      void (async () => {
+        try {
+          const origin = await ensureInternetLink();
+          const me = await teamIdentity();
+          const st = await ipc.relayHostStart(me?.name || getSettings().relayName || "Me", "public");
+          setRelayStatus(st);
+          const target = await accountTeam();
+          if (!target || !st.code) throw new Error("Not signed in to a team.");
+          await postTeamCard(target.team, target.self, { type: "relay-offer", v: 1, addr: origin, code: st.code }, to);
+          notify(`Sharing your desktop with ${from}.`, "success");
+        } catch (err) {
+          notify(`Could not share your desktop with ${from}: ${String(err)}`, "error");
+        }
+      })();
+    };
     window.addEventListener(RELAY_JOIN_EVENT, onJoin);
-    return () => window.removeEventListener(RELAY_JOIN_EVENT, onJoin);
+    window.addEventListener(RELAY_ACCEPT_EVENT, onAccept);
+    return () => {
+      window.removeEventListener(RELAY_JOIN_EVENT, onJoin);
+      window.removeEventListener(RELAY_ACCEPT_EVENT, onAccept);
+    };
   }, [notify]);
   const relay: RelayHandle = useMemo(
     () => ({

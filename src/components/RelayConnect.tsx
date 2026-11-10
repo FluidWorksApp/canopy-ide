@@ -33,7 +33,7 @@ export function offerAddress(ips: readonly string[], port: number | null): strin
   return null;
 }
 
-async function accountTeam(): Promise<{ team: string; self: string } | null> {
+export async function accountTeam(): Promise<{ team: string; self: string } | null> {
   try {
     const dir = await invoke<{ teams?: { id: string }[]; selfId?: string }>("canopy_account_request", { route: "/api/teams", body: null });
     const teams = dir.teams ?? [];
@@ -45,9 +45,9 @@ async function accountTeam(): Promise<{ team: string; self: string } | null> {
   }
 }
 
-async function post(team: string, self: string, card: Card): Promise<string> {
+export async function post(team: string, self: string, card: Card, peer: string | null = null): Promise<string> {
   const draft = cardDraft(card);
-  const sent = await teamSession(team, self).send(draft.text, null, [], draft.ext);
+  const sent = await teamSession(team, self).send(draft.text, peer, [], draft.ext);
   return sent.id;
 }
 
@@ -58,7 +58,6 @@ export function RelayConnect({ relay, onNotice }: { relay: RelayHandle; onNotice
   const [addr, setAddr] = useState(() => getSettings().relayAddr);
   const [code, setCode] = useState("");
   const [busy, setBusy] = useState(false);
-  const offering = useRef(false);
 
   useEffect(() => {
     let live = true;
@@ -75,32 +74,11 @@ export function RelayConnect({ relay, onNotice }: { relay: RelayHandle; onNotice
     try {
       await action();
     } catch (err) {
-      offering.current = false;
       onNotice?.(String(err), "error");
     } finally {
       setBusy(false);
     }
   };
-
-  // Hosting started from the button: once the relay has a code and an address a
-  // card may carry, offer it to the team. Once per hosting run.
-  useEffect(() => {
-    if (!offering.current || s.role !== "host" || !s.code) return;
-    const address = offerAddress(s.ips, s.port);
-    if (!address) return;
-    offering.current = false;
-    void (async () => {
-      const target = await accountTeam();
-      if (!target) return onNotice?.("Sharing on your network. Join a team to offer it to teammates.", "info");
-      try {
-        const id = await post(target.team, target.self, { type: "relay-offer", v: 1, addr: address, code: s.code! });
-        activeOffer = { ...target, id };
-        onNotice?.("Offered your desktop to the team.", "success");
-      } catch (err) {
-        onNotice?.(`Sharing, but the team offer was not posted: ${String(err)}`, "warn");
-      }
-    })();
-  }, [s.role, s.code, s.ips, s.port, onNotice]);
 
   const stop = () =>
     run(async () => {
@@ -150,31 +128,6 @@ export function RelayConnect({ relay, onNotice }: { relay: RelayHandle; onNotice
 
   if (me === undefined) return null;
 
-  if (me) {
-    return (
-      <section className="desk-members" aria-label="Relay">
-        <h3 className="team-hub-section">Remote desktop</h3>
-        <div className="team-row">
-          <span className="team-row-text">
-            <span>Let your team view or control your screen.</span>
-          </span>
-          <Button
-            size="sm"
-            variant="accent"
-            disabled={busy}
-            onClick={() =>
-              run(async () => {
-                offering.current = true;
-                await relay.hostStart(me.name, "public");
-              })
-            }
-          >
-            {busy ? "Starting…" : "Share my desktop"}
-          </Button>
-        </div>
-      </section>
-    );
-  }
 
   return (
     <section className="desk-members" aria-label="Relay">

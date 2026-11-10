@@ -8,6 +8,7 @@ import {Button,Select,TextInput} from './ui';
 import {AccountSettings} from './AccountSettings';
 import {SettingsIcon} from './icons';
 import {ContextMenu,useContextMenu} from './ContextMenu';
+import {postRelayRequest} from '../relayRequest';
 import {isMuted,setMuted} from '../teamMessaging/notifications';
 import {getSettings,subscribeSettings} from '../settings';
 import './chatThread.css';
@@ -139,7 +140,7 @@ export function TeamHub({onOpenChat,onAccount,live}:{onOpenChat?:(conversation:A
  const mutedKeys=useSyncExternalStore(subscribeSettings,()=>getSettings().teamMutedConversations);
  const mutedHere=(peer:string|null)=>isMuted(selected,peer,{teamMutedConversations:mutedKeys});
  const rowMenu=useContextMenu();
- const openRowMenu=(e:React.MouseEvent,peer:string|null)=>{const muted=mutedHere(peer),teamId=selected;rowMenu.open(e,[{label:muted?'Unmute conversation':'Mute conversation',onClick:()=>setMuted(teamId,peer,!muted)}]);};
+ const openRowMenu=(e:React.MouseEvent,peer:string|null)=>{const muted=mutedHere(peer),teamId=selected;const items=[{label:muted?'Unmute conversation':'Mute conversation',onClick:()=>setMuted(teamId,peer,!muted)}];if(peer&&peer!==selfId&&selfId)items.push({label:'Connect remotely',onClick:()=>{void postRelayRequest(teamId,selfId,peer).catch(()=>{});}});rowMenu.open(e,items);};
 
  return <section className="team-hub" aria-label="Teams" aria-busy={firstLoad||refreshing}>
   <header className="team-hub-head">

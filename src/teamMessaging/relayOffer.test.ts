@@ -32,3 +32,16 @@ describe('relay offers',()=>{
   expect(cardDraft({type:'relay-offer',v:1,addr:'192.168.1.20:6679',code:'1234567'}).ext.card.type).toBe('relay-offer');
  });
 });
+
+import { parseCard as parseRelayCard, validRelayLink as validLink } from './cardSchema';
+describe('relay request and internet link', () => {
+  it('accepts a bare relay-request and rejects extras', () => {
+    expect(parseRelayCard({ type: 'relay-request', v: 1 })).toBeTruthy();
+    expect(parseRelayCard({ type: 'relay-request', v: 1, addr: 'x' })).toBeUndefined();
+  });
+  it('accepts only public https names as a link', () => {
+    expect(validLink('https://abc.canopy.example')).toBe(true);
+    for (const bad of ['http://a.example.com', 'https://localhost', 'https://10.0.0.1', 'https://a.local', 'https://u@a.example.com', 'https://a.example.com/x'])
+      expect(validLink(bad)).toBe(false);
+  });
+});
