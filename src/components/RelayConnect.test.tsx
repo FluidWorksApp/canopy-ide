@@ -21,7 +21,7 @@ describe('RelayConnect',()=>{
   const button=await screen.findByRole('button',{name:'Share my desktop'});
   expect(screen.queryByLabelText('Your name')).toBeNull();expect(screen.queryByLabelText('Host address')).toBeNull();expect(screen.queryByLabelText('Code')).toBeNull();
   fireEvent.click(button);
-  await waitFor(()=>expect(relay.hostStart).toHaveBeenCalledWith('Sam','local'));
+  await waitFor(()=>expect(relay.hostStart).toHaveBeenCalledWith('Sam','public'));
   // The relay reports it is hosting; only then is the offer posted.
   expect(sent).toEqual([]);
   rerender(<RelayConnect relay={handle({role:'host',code:'1234567',port:6679,ips:['203.0.113.9','192.168.1.20']})}/>);

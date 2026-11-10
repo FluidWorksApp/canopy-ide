@@ -165,7 +165,7 @@ export function RelayConnect({ relay, onNotice }: { relay: RelayHandle; onNotice
             onClick={() =>
               run(async () => {
                 offering.current = true;
-                await relay.hostStart(me.name, "local");
+                await relay.hostStart(me.name, "public");
               })
             }
           >
@@ -190,7 +190,7 @@ export function RelayConnect({ relay, onNotice }: { relay: RelayHandle; onNotice
             onClick={() =>
               run(async () => {
                 updateSettings({ relayName: name.trim() });
-                await relay.hostStart(name.trim(), "local");
+                await relay.hostStart(name.trim(), "public");
               })
             }
           >
