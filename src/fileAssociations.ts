@@ -95,7 +95,7 @@ export interface AssociationGroup {
 export const EXTRA_ASSOCIATIONS: AssociationGroup[] = [
   {
     label: "Components & templates",
-    blurb: "Single-file components and server templates, as HTML-family markup.",
+    blurb: "Single-file components and templates, as HTML.",
     entries: [
       { pattern: "*.astro", language: "html" },
       { pattern: "*.svelte", language: "html" },
@@ -121,7 +121,7 @@ export const EXTRA_ASSOCIATIONS: AssociationGroup[] = [
   },
   {
     label: "C, C++ and Objective-C",
-    blurb: "C++ ships registered for .c and .h only — every other suffix was plain text.",
+    blurb: "C++ is registered for .c and .h only.",
     entries: [
       { pattern: "*.cpp", language: "cpp" },
       { pattern: "*.cc", language: "cpp" },
@@ -140,8 +140,7 @@ export const EXTRA_ASSOCIATIONS: AssociationGroup[] = [
   },
   {
     label: "Config & data",
-    blurb:
-      "No JSON grammar is bundled, so JSON files use the JavaScript one (a superset). TOML and dotfiles share INI's key/value and # comments.",
+    blurb: "JSON uses the JavaScript grammar. TOML and dotfiles use INI's.",
     entries: [
       { pattern: "*.json", language: "javascript" },
       { pattern: "*.jsonc", language: "javascript" },
@@ -190,7 +189,7 @@ export const EXTRA_ASSOCIATIONS: AssociationGroup[] = [
   },
   {
     label: "Other languages",
-    blurb: "Younger languages, on the bundled grammar whose keywords line up best.",
+    blurb: "Newer languages, on the closest bundled grammar.",
     entries: [
       { pattern: "*.pyi", language: "python" },
       { pattern: "*.gradle", language: "java" },

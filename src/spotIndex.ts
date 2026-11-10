@@ -29,7 +29,7 @@ const LEGACY_INDEXABLE_AGENTS: IndexableAgent[] = [
     id: "gemini",
     label: "Gemini CLI",
     store: "~/.gemini/tmp/<project>/chats/*.json",
-    note: "Filed under a hash of the project path, so only projects open in Canopy can be found.",
+    note: "Only projects open in Canopy can be found.",
   },
 ];
 

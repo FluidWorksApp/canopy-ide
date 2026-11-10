@@ -68,7 +68,7 @@ export function AccountSettings({onTeams,onWorkspaces}:{onTeams?:()=>void;onWork
    if(current!==generation.current)return;
    const url=new URL(pairing.verificationUrl);
    if(url.origin!=='https://canopyide.dev'||url.pathname!=='/connect')throw Error('Invalid sign-in destination');
-   setCode(pairing.id.slice(0,8).toUpperCase());openInOsBrowser(url.href);setMessage('Finish signing in in your browser. Match the request code before connecting.');
+   setCode(pairing.id.slice(0,8).toUpperCase());openInOsBrowser(url.href);setMessage('Finish in your browser. Match the request code.');
    const deadline=Date.now()+Math.min(pairing.expiresIn,600)*1000;
    while(current===generation.current&&Date.now()<deadline){
     await new Promise(resolve=>setTimeout(resolve,3000));if(current!==generation.current)return;
@@ -93,7 +93,7 @@ export function AccountSettings({onTeams,onWorkspaces}:{onTeams?:()=>void;onWork
    <Button icon variant="ghost" className="account-header-action" aria-label="Sign out" title="Sign out" disabled={busy} onClick={()=>{setBusy(true);void request('/api/device',{action:'revoke'}).then(()=>{clearTeamSessions();window.dispatchEvent(new Event('canopy:account-changed'));setUser(null);setCredits(null);setMessage('Signed out.');}).catch(error=>setMessage(String(error))).finally(()=>setBusy(false));}}><svg aria-hidden="true" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"><path d="M9 4H4v16h5M14 7l5 5-5 5M8 12h11"/></svg><span className="account-action-tooltip">Sign out</span></Button></nav>}</header>
   {loading&&user&&<p role="status">Refreshing your account…</p>}
   {user?<>
-   <div className="account-balance"><span>Available balance <small>USD</small></span><strong>{credits?dollars(credits.balanceUsd??(credits.balance==null?null:Number(credits.balance)/100)):<span className="account-balance-loading" role="status"><span className="account-shimmer account-skeleton-amount"/>Loading balance…</span>}</strong><p>{balanceStale ? "Balance could not refresh. Showing the last available amount." : balanceRefreshing&&credits ? "Updating…" : "Shared across your workspaces. Usage is charged per minute."}</p>
+   <div className="account-balance"><span>Available balance <small>USD</small></span><strong>{credits?dollars(credits.balanceUsd??(credits.balance==null?null:Number(credits.balance)/100)):<span className="account-balance-loading" role="status"><span className="account-shimmer account-skeleton-amount"/>Loading balance…</span>}</strong><p>{balanceStale ? "Couldn't refresh. Showing the last balance." : balanceRefreshing&&credits ? "Updating…" : "Shared across workspaces. Charged per minute."}</p>
     {/* Add funds when the server has payments configured; otherwise credit is
         restored by request (below) and granted by Canopy. */}
     {credits?.paymentsEnabled===true&&credits.purchase?.enabled&&<AddFunds options={credits.purchase} onCredits={next=>{setCredits(next);rememberBalance(user.email,next);if(accountCache?.user.email===user.email)accountCache={user,credits:next};}}/>}
@@ -105,6 +105,6 @@ export function AccountSettings({onTeams,onWorkspaces}:{onTeams?:()=>void;onWork
   </>:<div className="set-inline"><Button disabled={busy} onClick={()=>void signIn()}>{busy?'Waiting for sign-in…':'Sign in or create account'}</Button>{busy&&<Button onClick={()=>{generation.current++;setBusy(false);setCode('');setMessage('Sign-in cancelled.');}}>Cancel</Button>}</div>}
   {code&&<p>Request code: <strong>{code}</strong></p>}
   {message&&<p role="status" aria-live="polite">{message}</p>}
-  <p className="set-desc">Bring your own agents and subscriptions. Your balance covers workspace running time.</p>
+  <p className="set-desc">Bring your own agents. Your balance covers workspace time.</p>
  </section>;
 }

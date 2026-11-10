@@ -98,8 +98,7 @@ const linear: TrackerProvider = {
     label: "Personal API key",
     placeholder: "lin_api_…",
     help:
-      "Create one under Linear → Settings → Security & access → Personal API keys. " +
-      "Stored locally on this machine only; sent nowhere except api.linear.app.",
+      "Create one in Linear → Settings → Security & access. Stored on this machine only.",
   },
 };
 
