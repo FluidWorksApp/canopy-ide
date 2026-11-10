@@ -233,6 +233,8 @@ export function AgentDetailsCard({
   /** The "Commit & raise PR" form, and bumped to re-read the branch's PR after one is raised. */
   const [raising, setRaising] = useState<null | { title: string; busy: boolean }>(null);
   const [prEpoch, setPrEpoch] = useState(0);
+  /** Commits on this branch beyond its base, when nothing is left uncommitted. */
+  const [ahead, setAhead] = useState(0);
 
   const toggle = (value: boolean) => {
     setCollapsed(value);
@@ -294,6 +296,22 @@ export function AgentDetailsCard({
     };
   }, [collapsed, repo, branch, remoteMachine, digest?.session_id, prEpoch]);
 
+  // A branch with everything committed can still have work with no PR.
+  useEffect(() => {
+    setAhead(0);
+    if (collapsed || pr || !cwd || !branch || remoteMachine || DEFAULT_BRANCHES.has(branch) || changed !== 0) return;
+    let stale = false;
+    ipc
+      .gitPrContext(cwd, "")
+      .then((ctx) => {
+        if (!stale) setAhead(ctx.commit_count);
+      })
+      .catch(() => {});
+    return () => {
+      stale = true;
+    };
+  }, [collapsed, pr, cwd, branch, changed, remoteMachine, prEpoch]);
+
   // The sub-agents, read from the session's transcript, polled faster while the
   // agent is working.
   const activity = useSessionActivity(
@@ -320,7 +338,7 @@ export function AgentDetailsCard({
         : pr.mergeable === "CONFLICTING"
           ? "Resolve the conflicts first"
           : undefined;
-  const canRaise = !pr && !!repo && !remoteMachine && !!branch && !DEFAULT_BRANCHES.has(branch) && (changed ?? 0) > 0;
+  const canRaise = !pr && !!repo && !remoteMachine && !!branch && !DEFAULT_BRANCHES.has(branch) && ((changed ?? 0) > 0 || ahead > 0);
 
   if (collapsed) {
     return (
@@ -557,7 +575,7 @@ export function AgentDetailsCard({
                 onClick={() => {
                   const title = raising.title.trim();
                   setRaising({ ...raising, busy: true });
-                  void runCommitPushPr({ repo: cwd || repo!, message: title, title })
+                  void runCommitPushPr({ repo: cwd || repo!, message: title, title, commit: (changed ?? 0) > 0 })
                     .then((result) => {
                       if (result.skipped.length > 0) onNotice?.(`Left out because they look like secrets: ${result.skipped.join(", ")}`);
                       onNotice?.(result.prUrl ? `Opened ${result.prUrl}` : result.prExisted ? "A pull request already exists for this branch." : "Committed and pushed.");
@@ -579,7 +597,7 @@ export function AgentDetailsCard({
             </>
           ) : (
             <button type="button" className="agent-card-fix" onClick={() => setRaising({ title: titleFromBranch(branch!), busy: false })}>
-              Commit &amp; raise PR
+              {(changed ?? 0) > 0 ? "Commit & raise PR" : "Raise PR"}
             </button>
           )}
         </div>

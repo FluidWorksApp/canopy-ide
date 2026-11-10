@@ -5,6 +5,7 @@ vi.mock("../ipc", () => ({
   fsReadFile: vi.fn(async (path: string) =>
     new TextEncoder().encode(path.endsWith(".md") ? "# Risk report\nThe store policy changed." : "x"),
   ),
+  gitPrContext: vi.fn(async () => ({ commit_count: 0 })),
   gitStatus: vi.fn(async () => ({ is_repo: true, branch: "feat/x", entries: [{}, {}, {}] })),
   ghPrMerge: vi.fn(async () => ({ message: "Merged #21", pending: false })),
   ghPrClose: vi.fn(async () => "closed"),
@@ -311,5 +312,15 @@ describe("raising a PR from the card", () => {
     const { runCommitPushPr } = await import("../commitPushPrIpc");
     await waitFor(() => expect(runCommitPushPr).toHaveBeenCalledWith(expect.objectContaining({ repo: "/raise", message: "Hub prefetch scrcpy", title: "Hub prefetch scrcpy" })));
     void onNotice;
+  });
+  it("offers plain Raise PR when everything is committed but the branch is ahead", async () => {
+    vi.mocked(ipc.gitStatus).mockResolvedValue({ is_repo: true, branch: "feat/ahead", entries: [] } as never);
+    vi.mocked(ipc.ghPrList).mockResolvedValue([] as never);
+    vi.mocked(ipc.gitPrContext).mockResolvedValue({ commit_count: 3 } as never);
+    setup({ repo: "/ahead", cwd: "/ahead" });
+    fireEvent.click(await screen.findByRole("button", { name: "Raise PR" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Raise PR" }));
+    const { runCommitPushPr } = await import("../commitPushPrIpc");
+    await waitFor(() => expect(runCommitPushPr).toHaveBeenCalledWith(expect.objectContaining({ repo: "/ahead", commit: false })));
   });
 });
