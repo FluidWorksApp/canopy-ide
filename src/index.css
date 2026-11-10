@@ -6736,13 +6736,14 @@ body.dragging-tab * {
 }
 .agent-card-prlist {
   position: absolute;
+  left: 0;
   right: 0;
   bottom: calc(100% + 6px);
   z-index: 20;
-  width: max-content;
-  min-width: 100%;
-  max-width: 420px;
+  box-sizing: border-box;
+  width: 100%;
   max-height: 260px;
+  overflow-x: hidden;
   overflow-y: auto;
   margin: 0;
   padding: 4px;
@@ -6754,6 +6755,8 @@ body.dragging-tab * {
   box-shadow: 0 8px 28px rgba(0, 0, 0, 0.45);
 }
 .agent-card-prlist-row {
+  min-width: 0;
+  box-sizing: border-box;
   display: flex;
   align-items: center;
   gap: 8px;
