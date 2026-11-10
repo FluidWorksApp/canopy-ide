@@ -36,3 +36,16 @@ describe("joinThisMac", () => {
     expect(registry.get("local")).toBeUndefined();
   });
 });
+
+describe("leaveThisMac", () => {
+  it("keeps the routes of this Mac's terminals so tabs unmounting after it can still let go", async () => {
+    const { aliasPty, routeOf, resetPtyRoutes } = await import("./ptyRoute");
+    resetPtyRoutes();
+    const registry = new EnvironmentRegistry();
+    joinThisMac(registry);
+    const alias = aliasPty("local", 4, registry.get("local")!.host, false);
+    leaveThisMac(registry);
+    expect(routeOf(alias)?.env).toBe("local");
+    resetPtyRoutes();
+  });
+});

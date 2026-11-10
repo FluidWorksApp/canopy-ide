@@ -86,6 +86,8 @@ export function joinThisMac(registry: EnvironmentRegistry = liveEnvironments): v
 export function leaveThisMac(registry: EnvironmentRegistry = liveEnvironments): void {
   if (!registry.get(THIS_MAC_ENV)) return;
   registry.unregister(THIS_MAC_ENV);
+  // Its terminals' routes stay: the tabs showing them unmount after this, and
+  // letting go of one must still reach the desktop it is attached on. Aliases
+  // are stable for the page, so joining again reuses them.
   stopListeningToMachine(THIS_MAC_ENV);
-  forgetEnvironment(THIS_MAC_ENV);
 }
