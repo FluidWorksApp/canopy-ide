@@ -121,12 +121,12 @@ export const AGENT_TOOL_GROUPS: AgentToolGroup[] = [
       {
         name: "canopy_mesh_send",
         label: "Mesh send",
-        note: "A kept message with files attached; the target gets a one-line notice",
+        note: "A kept message with files attached",
       },
       {
         name: "canopy_mesh_submit",
         label: "Mesh jobs",
-        note: "Submit a job to another workspace, machine or teammate; teammates approve first",
+        note: "Submit a job to another workspace, machine or teammate",
       },
       {
         name: "canopy_mesh_targets",
@@ -156,9 +156,7 @@ export const AGENT_TOOL_GROUPS: AgentToolGroup[] = [
     id: "notes",
     label: "Scratchpad",
     blurb:
-      "The user's own thoughts, ideas and to-dos for this project. An agent reads it to " +
-      "avoid noting the same thing twice, and writes to it to park something real that " +
-      "isn't the job it was given.",
+      "Your captured thoughts. Agents read it, and park side-notes here.",
     tools: [
       { name: "canopy_notes", label: "Read notes", note: "What's already been written down" },
       {
@@ -188,8 +186,7 @@ export const AGENT_TOOL_GROUPS: AgentToolGroup[] = [
     id: "research",
     label: "Research",
     blurb:
-      "Findings that outlive the session that produced them — scoped to this project, " +
-      "and the only place an agent's research is kept.",
+      "Findings that outlive the session, scoped to this project.",
     tools: [
       { name: "canopy_research", label: "Read research", note: "What's been investigated already" },
       {

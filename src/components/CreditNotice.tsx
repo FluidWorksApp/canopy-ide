@@ -57,7 +57,7 @@ export function AddFunds({options,onCredits}:{options:PurchaseOptions;onCredits?
   {choice==='custom'&&custom!==''&&!valid&&<small role="alert">Choose an amount from {usd(options.minUsd)} to {usd(options.maxUsd)}.</small>}
   {state==='waiting'&&<small role="status">Finish paying in your browser. Your balance updates here when the payment arrives. <button type="button" className="credit-link-button" onClick={()=>{waiting.current?.abort();setState('idle');}}>Cancel</button></small>}
   {state==='done'&&<small role="status">{note}</small>}
-  {state==='slow'&&<small role="status">We haven’t received the payment yet. If you paid, your balance updates within a few minutes.</small>}
+  {state==='slow'&&<small role="status">Payment not received yet. Your balance updates within minutes.</small>}
   {state==='error'&&<small role="alert">Couldn’t start checkout: {note}</small>}
  </div>;
 }
