@@ -28,6 +28,10 @@ export interface ResourceSnapshot {
   /** False when activeAgents could not be read (assumed 0). Balance prefers
    *  targets whose load is known. */
   loadUnknown?: boolean;
+  /** Set when `activeAgents` counts running sessions (terminals and agents
+   *  alike) because the workspace was read from outside and cannot say which
+   *  are agents. It then over-counts, so the UI says "sessions", not "agents". */
+  loadBasis?: "sessions";
   /** Max concurrent agents this target should carry. */
   capacity: number;
   /** 0..1 */
@@ -45,6 +49,10 @@ export interface PlacementDecision {
   needsSetup: boolean;
   /** User-facing name supplied by the gathering/UI layer when available. */
   targetName?: string;
+  /** The launch goes ahead, but the person should know something: the machine
+   *  is full, or the other machines could not be read. A full machine slows
+   *  agents down; it is never a reason to refuse to start one. */
+  warning?: string;
 }
 
 export const targetKey = (t: Target): string =>

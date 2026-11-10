@@ -37,7 +37,7 @@ for(const command of ['notes_list','notes_due','notes_get','notes_create','notes
 // on the computer showing the IDE in every mode. Its canopy_* tools reach the
 // desktop's context bridge, which publishes ops to this window and waits for
 // the answer; the answers then act on the workspace through this host.
-export const COMPANION_DESKTOP_COMMANDS=['companion_spawn','companion_write','companion_kill','companion_status','companion_store_read','companion_store_write','companion_save_attachment','companion_dispatch_origin','companion_open_requests','context_publish','context_remove','context_tools','context_agent_spawn_ready','browser_result','webview_snapshot'] as const;
+export const COMPANION_DESKTOP_COMMANDS=['companion_spawn','companion_dir','companion_write','companion_kill','companion_status','companion_save_attachment','companion_dispatch_origin','companion_open_requests','context_publish','context_remove','context_tools','context_agent_spawn_ready','browser_result','webview_snapshot'] as const;
 for(const command of COMPANION_DESKTOP_COMMANDS)LOCAL_UI.add(command);
 // The bridge's requests to this window, and the companion's replies. An op from
 // a terminal on this computer is dropped: its pty id would alias a VM session's.
@@ -49,14 +49,16 @@ for(const command of ['canopy_account_request','report_crash','send_crash','cras
 // is the CLI the person signed into here, and the ledger lives in this
 // computer's ~/.canopy. Proof receipts run their checks in the workspace
 // (receipt_run_check is not listed) but judge and record them here.
-export const BRAIN_DESKTOP_COMMANDS=['brain_call','brain_kill','ledger_append','ledger_query','ledger_root','ledger_update_status'] as const;
+export const BRAIN_DESKTOP_COMMANDS=['brain_call','brain_kill','brain_write','brain_home','ledger_append','ledger_query','ledger_root','ledger_update_status'] as const;
 for(const command of BRAIN_DESKTOP_COMMANDS)LOCAL_UI.add(command);
 // The person's credential vault is theirs, on this computer, and fills pages
 // shown here; it never moves into a workspace.
 for(const command of ['vault_status','vault_create','vault_unlock','vault_lock','vault_change_passphrase','vault_list','vault_matches','vault_save','vault_delete','vault_reveal','vault_read','vault_fill','vault_import_kdbx','vault_approvals','vault_approve','vault_revoke'])LOCAL_UI.add(command);
 // Android phones and emulators are attached to this computer, and the VM image
 // has no Android SDK, so device tools act on this computer's devices.
-for(const command of ['android_sdk_status','android_devices','android_avds','android_emulator_start','android_emulator_stop','android_screencap','android_ui_dump','android_layout','android_foreground','android_tap','android_text','android_swipe','android_key','android_logcat','android_run','android_describe','android_stage_file'])LOCAL_UI.add(command);
+for(const command of ['android_sdk_status','android_devices','android_avds','android_emulator_start','android_emulator_stop','android_screencap','android_ui_dump','android_layout','android_foreground','android_tap','android_reverse','android_reverse_remove','android_text','android_swipe','android_key','android_logcat','android_run','android_describe','android_stage_file'])LOCAL_UI.add(command);
+// Granting a clicked terminal link is about this computer's files and its Privacy setting.
+for(const command of ['fs_set_link_grants','fs_grant_link_file','workspace_forward_probe','gates_set_global'])LOCAL_UI.add(command);
 // The LAN relay is hosted by the desktop app between people's computers; its
 // file offers use this computer's dialogs and paths. Its status goes with it.
 for(const command of ['relay_status','relay_host_start','relay_host_stop','relay_regenerate_code','relay_connect','relay_disconnect','relay_send_chat','relay_send_collab','relay_send_command','relay_offer_file','relay_accept_file','desk_request','desk_respond','desk_send_input','desk_end','desk_status'])LOCAL_UI.add(command);
@@ -100,6 +102,7 @@ export class NativeWorkspaceHost implements Host {
    *  because a frontend usually calls an API on a second port. */
   private forwardedPorts = new Map<number,number>();
   private forwardTickets?: Promise<UnlistenFn>;
+  private probeListening=false;
   private get forwardKey(){return connectionKey(this.connection.endpoint,this.connection.workspaceId);}
   private async forward(port:number){
     const key=this.forwardKey;
@@ -110,6 +113,7 @@ export class NativeWorkspaceHost implements Host {
       void this.client.streamUrl(this.connection.workspaceId,'/forward').then(url=>this.desktop.invoke('workspace_forward_ticket',{key,url})).catch(()=>{});
     });
     await this.forwardTickets;
+    if(!this.probeListening){this.probeListening=true;window.addEventListener('online',this.probeForward);document.addEventListener('visibilitychange',this.probeForward);}
     const known=this.forwardedPorts.get(port);if(known)return known;
     const local=await this.desktopCall<number>('workspace_forward_open',{key,port});
     this.forwardedPorts.set(port,local);
@@ -118,6 +122,12 @@ export class NativeWorkspaceHost implements Host {
     await this.desktopCall('preview_allow_ports',{ports:[...this.forwardedPorts].filter(([remote,here])=>remote===here).map(([remote])=>remote)});
     return local;
   }
+  /** Workspace ports that kept their number on this computer's loopback, so a local device or browser can use the same address. */
+  forwardedLoopbackPorts():number[]{return [...this.forwardedPorts].filter(([remote,here])=>remote===here).map(([remote])=>remote);}
+  /** The network came back, or the window came to the front: a forwarded path is
+   *  most likely to have died just now, so ask native code to check it at once
+   *  instead of waiting for the routine ping to notice. */
+  private probeForward=()=>{if(this.disposed||!this.forwardTickets||document.visibilityState==='hidden')return;void this.desktop.invoke('workspace_forward_probe',{key:this.forwardKey}).catch(()=>{});};
   private forwardDetected(stats:unknown){
     if(!this.forwardTickets||!Array.isArray(stats))return;
     for(const port of new Set(stats.flatMap((session:{ports?:number[]})=>session.ports??[])))if(!this.forwardedPorts.has(port))void this.forward(port).catch(()=>{});
@@ -569,5 +579,5 @@ export class NativeWorkspaceHost implements Host {
   }
   channel<T>():HostChannel<T>{return new WorkspaceChannel<T>();}
   invokeDesktop<T>(command:string,args:Args={}):Promise<T>{return this.desktopCall<T>(command,args);}
-  dispose(){if(this.forwardTickets){void this.forwardTickets.then(stop=>stop()).catch(()=>{});void this.desktop.invoke('workspace_forward_close',{key:this.forwardKey}).catch(()=>{});}const channels=[...this.hostChannels.keys()];this.hostChannels.clear();if(channels.length&&!this.disposed)void this.native('channel_drop',{ids:channels}).catch(()=>{});this.disposed=true;this.harness?.stop();this.harness=undefined;for(const release of [...this.desktopListeners]){try{release();}catch{/* Disposed handlers stay inert even if native teardown fails. */}}this.desktopListeners.clear();window.removeEventListener('canopy:account-changed',this.onAccountChanged);clearTimeout(this.heartbeat);clearTimeout(this.versionCheck);for(const input of this.inputs.values())input.dispose();this.inputs.clear();clearTimeout(this.poll);for(const id of this.streams.keys())this.detach(id);this.listeners.clear();}
+  dispose(){if(this.forwardTickets){void this.forwardTickets.then(stop=>stop()).catch(()=>{});void this.desktop.invoke('workspace_forward_close',{key:this.forwardKey}).catch(()=>{});}const channels=[...this.hostChannels.keys()];this.hostChannels.clear();if(channels.length&&!this.disposed)void this.native('channel_drop',{ids:channels}).catch(()=>{});this.disposed=true;this.harness?.stop();this.harness=undefined;for(const release of [...this.desktopListeners]){try{release();}catch{/* Disposed handlers stay inert even if native teardown fails. */}}this.desktopListeners.clear();window.removeEventListener('canopy:account-changed',this.onAccountChanged);window.removeEventListener('online',this.probeForward);document.removeEventListener('visibilitychange',this.probeForward);clearTimeout(this.heartbeat);clearTimeout(this.versionCheck);for(const input of this.inputs.values())input.dispose();this.inputs.clear();clearTimeout(this.poll);for(const id of this.streams.keys())this.detach(id);this.listeners.clear();}
 }

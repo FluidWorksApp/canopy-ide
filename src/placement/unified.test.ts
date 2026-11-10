@@ -48,3 +48,34 @@ describe("groupByProject and filterRows", () => {
     expect(filterRows(rows, {})).toHaveLength(rows.length);
   });
 });
+
+describe("sessions read from outside", () => {
+  it("lists a workspace's running sessions as Session rows on that machine", () => {
+    const rows = buildUnifiedRows({
+      local: { projects: [], agents: [] },
+      remotes: [{ workspaceId: "w9", name: "Coraa Workstation", state: "ready", sessions: [{ id: "4", title: "claude · api" }] }],
+      t3: [],
+      jobs: [],
+    });
+    expect(rows).toEqual([
+      expect.objectContaining({
+        id: "remote:w9:session:4",
+        name: "claude · api",
+        kind: "session",
+        targetLabel: "Coraa Workstation",
+        status: "running",
+        target: { kind: "remote", workspaceId: "w9" },
+      }),
+    ]);
+  });
+
+  it("filters to sessions", () => {
+    const rows = buildUnifiedRows({
+      local: { projects: [{ id: "p", name: "P" }], agents: [] },
+      remotes: [{ workspaceId: "w9", name: "W", state: "ready", sessions: [{ id: "1", title: "x" }] }],
+      t3: [],
+      jobs: [],
+    });
+    expect(filterRows(rows, { kind: "session" }).map((r) => r.kind)).toEqual(["session"]);
+  });
+});

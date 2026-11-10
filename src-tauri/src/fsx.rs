@@ -25,6 +25,13 @@ pub struct WorkspaceManager {
     /// to this (cli.rs), because the renderer is not a trust boundary. It lasts
     /// for this app run.
     files: Mutex<Vec<PathBuf>>,
+    /// Files granted by clicking a terminal link (Settings → Privacy). Kept apart
+    /// from `files` so turning the setting off can take exactly these back.
+    link_files: Mutex<Vec<PathBuf>>,
+    /// Whether a terminal link may grant a file outside every root
+    /// (Settings → Privacy, off by default). Held here, not only in the
+    /// renderer, so `fs_grant_link_file` checks it itself.
+    link_grants: std::sync::atomic::AtomicBool,
 }
 
 /// More than anyone opens loose in one run; the oldest grant goes first.
@@ -55,7 +62,129 @@ impl WorkspaceManager {
             .iter()
             .any(|root| canonical.starts_with(root))
             || self.files.lock().unwrap().iter().any(|f| f == canonical)
+            || self.link_files.lock().unwrap().iter().any(|f| f == canonical)
     }
+
+    /// Like `grant_file`, for a file named by a terminal link click.
+    fn grant_link_file(&self, canonical: PathBuf) {
+        let mut files = self.link_files.lock().unwrap();
+        files.retain(|p| p != &canonical);
+        if files.len() >= MAX_GRANTED_FILES {
+            files.remove(0);
+        }
+        files.push(canonical);
+    }
+}
+
+/// Settings → Privacy → "Open files outside the project from terminal links".
+/// The renderer mirrors the setting here; the grant command checks it.
+#[tauri::command]
+pub fn fs_set_link_grants(state: State<'_, WorkspaceManager>, enabled: bool) {
+    state
+        .link_grants
+        .store(enabled, std::sync::atomic::Ordering::SeqCst);
+    // Turning it off takes back what it allowed, not only the ability to ask.
+    if !enabled {
+        state.link_files.lock().unwrap().clear();
+    }
+}
+
+/// Folders under the home directory that hold credentials, browser profiles and
+/// shell history. A terminal link is never allowed to open anything in them.
+const SENSITIVE_HOME_DIRS: &[&str] = &[
+    ".ssh",
+    ".gnupg",
+    ".aws",
+    ".azure",
+    ".kube",
+    ".docker",
+    ".config",
+    ".password-store",
+    ".local/share/keyrings",
+    ".claude",
+    ".codex",
+    ".gemini",
+    ".cursor",
+    "Library/Keychains",
+    "Library/Application Support",
+    "Library/Cookies",
+    "Library/Mail",
+    "Library/Messages",
+    "Library/Safari",
+    "AppData",
+];
+
+/// Files that hold credentials wherever they live.
+fn credential_file_name(name: &str) -> bool {
+    let lower = name.to_ascii_lowercase();
+    matches!(
+        lower.as_str(),
+        ".netrc" | ".npmrc" | ".pypirc" | ".pgpass" | ".git-credentials" | ".bash_history" | ".zsh_history" | ".zshrc" | ".bashrc" | ".profile" | ".zprofile" | "credentials" | "credentials.json" | "auth.json" | "secrets.json"
+    ) || lower.starts_with("id_rsa")
+        || lower.starts_with("id_ed25519")
+        || lower.starts_with("id_ecdsa")
+        || lower.starts_with("id_dsa")
+        || lower.ends_with(".pem")
+        || lower.ends_with(".key")
+        || lower.ends_with(".p12")
+        || lower.ends_with(".pfx")
+        || lower.ends_with(".kdbx")
+}
+
+/// Why a path may not be granted from a terminal link, even with the setting on.
+/// `home` is the canonical home directory. Pure so it can be tested. Matching is
+/// case-insensitive: a macOS or Windows volume can be, and being wrong the
+/// permissive way here is the failure that matters.
+fn link_grant_refusal(canonical: &Path, home: Option<&Path>) -> Option<&'static str> {
+    let lower = |p: &Path| p.to_string_lossy().to_ascii_lowercase();
+    if let Some(home) = home {
+        let path = lower(canonical);
+        let base = lower(home);
+        if let Some(rest) = path.strip_prefix(&base) {
+            let rest = rest.trim_start_matches(['/', '\\']);
+            for sensitive in SENSITIVE_HOME_DIRS {
+                let dir = sensitive.to_ascii_lowercase();
+                if rest == dir || rest.starts_with(&format!("{dir}/")) || rest.starts_with(&format!("{dir}\\")) {
+                    return Some("That location holds credentials or private data and is never opened from a link.");
+                }
+            }
+        }
+    }
+    let name = canonical.file_name().and_then(|n| n.to_str()).unwrap_or("");
+    if credential_file_name(name) {
+        return Some("That file holds credentials and is never opened from a link.");
+    }
+    None
+}
+
+/// Let the editor open this one file, named by a click on a terminal link.
+/// Refused unless the Privacy setting is on; the grant is that exact file for
+/// this app run, never its folder (see `grant_file`).
+#[tauri::command]
+pub fn fs_grant_link_file(state: State<'_, WorkspaceManager>, path: String) -> Result<(), String> {
+    if !state.link_grants.load(std::sync::atomic::Ordering::SeqCst) {
+        return Err("Opening files outside the project is off in Settings → Privacy.".into());
+    }
+    let requested = Path::new(&path);
+    if !requested.is_absolute() {
+        return Err("Only an absolute path can be opened from a link.".into());
+    }
+    let canonical = requested.canonicalize().map_err(|e| e.to_string())?;
+    if !canonical.is_file() {
+        return Err("That is not a file.".into());
+    }
+    // The canonical home, so a symlinked home (`/home` -> `/data/home`) still
+    // matches the canonical path it is compared with. Windows has USERPROFILE.
+    let home = std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"))
+        .map(PathBuf::from)
+        .filter(|h| h.is_absolute())
+        .and_then(|h| h.canonicalize().ok());
+    if let Some(reason) = link_grant_refusal(&canonical, home.as_deref()) {
+        return Err(reason.into());
+    }
+    state.grant_link_file(canonical);
+    Ok(())
 }
 
 // Shared by every renderer window. A renderer disappearing cannot let another
@@ -1109,6 +1238,64 @@ fn walk_plain(dir: &Path, out: &mut Vec<PathBuf>, limit: usize, depth: usize) {
     }
 }
 
+/// Walk several roots for quick-open and find-in-files. Each root has its own
+/// `limit`, so one huge component cannot use the whole budget and leave the rest
+/// unlisted, and a root that is outside the workspace scope or cannot be read is
+/// skipped rather than failing the others. If every root fails, the first
+/// error is returned so a single bad root still reports why.
+fn walk_roots(
+    state: &State<'_, WorkspaceManager>,
+    roots: Vec<String>,
+    limit: usize,
+) -> Result<Vec<PathBuf>, String> {
+    merge_roots(roots, limit, |root| {
+        check_scope(state, Path::new(root)).map(|dir| {
+            let mut part: Vec<PathBuf> = Vec::new();
+            walk(&dir, &mut part, limit);
+            part
+        })
+    })
+}
+
+/// The merging rule behind `walk_roots`, with the per-root work injected so it
+/// can be tested without a workspace: each root contributes up to `limit`, a
+/// root that fails is skipped, the same file reached through a parent and a
+/// child component is listed once, and the whole answer is capped at twice the
+/// per-root limit so many components cannot multiply the payload. If every root
+/// fails the first error is returned.
+fn merge_roots<F>(roots: Vec<String>, limit: usize, mut list: F) -> Result<Vec<PathBuf>, String>
+where
+    F: FnMut(&str) -> Result<Vec<PathBuf>, String>,
+{
+    let cap = limit.saturating_mul(2);
+    let mut seen = std::collections::HashSet::new();
+    let mut out: Vec<PathBuf> = Vec::new();
+    let mut first_error: Option<String> = None;
+    let mut any_ok = roots.is_empty();
+    for root in roots {
+        match list(&root) {
+            Ok(part) => {
+                any_ok = true;
+                for path in part {
+                    if out.len() >= cap {
+                        break;
+                    }
+                    if seen.insert(path.clone()) {
+                        out.push(path);
+                    }
+                }
+            }
+            Err(error) => {
+                first_error.get_or_insert(error);
+            }
+        }
+    }
+    match (any_ok, first_error) {
+        (false, Some(error)) => Err(error),
+        _ => Ok(out),
+    }
+}
+
 /// Flat file list under the given roots — the corpus for quick-open (Cmd+P).
 /// Bounded so a huge tree can't balloon the heap or the IPC payload.
 #[tauri::command]
@@ -1118,11 +1305,7 @@ pub async fn fs_list_files(
     limit: Option<usize>,
 ) -> Result<Vec<String>, String> {
     let limit = limit.unwrap_or(20_000);
-    let mut out: Vec<PathBuf> = Vec::new();
-    for root in roots {
-        let dir = check_scope(&state, Path::new(&root))?;
-        walk(&dir, &mut out, limit);
-    }
+    let out = walk_roots(&state, roots, limit)?;
     Ok(out
         .iter()
         .map(|p| p.to_string_lossy().to_string())
@@ -1197,11 +1380,7 @@ pub async fn fs_search(
     }
     let limit = limit.unwrap_or(300);
     let needle = query.to_lowercase();
-    let mut files: Vec<PathBuf> = Vec::new();
-    for root in roots {
-        let dir = check_scope(&state, Path::new(&root))?;
-        walk(&dir, &mut files, 20_000);
-    }
+    let files = walk_roots(&state, roots, 20_000)?;
 
     let mut hits = Vec::new();
     for file in files {
@@ -1446,6 +1625,76 @@ fn copy_dir(src: &Path, dst: &Path) -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn credential_locations_are_never_granted_from_a_link() {
+        let home = std::path::Path::new("/Users/me");
+        for p in [
+            "/Users/me/.ssh/config",
+            "/Users/me/.SSH/config",
+            "/Users/me/.aws/credentials",
+            "/Users/me/Library/Keychains/login.keychain-db",
+            "/Users/me/LIBRARY/Application Support/Google/Chrome/Default/Login Data",
+            "/Users/me/.config/gcloud/x",
+            "/Users/me/.config/other/x.toml",
+            "/Users/me/.claude/projects/x.jsonl",
+            "/Users/me/.zsh_history",
+            "/tmp/id_rsa",
+            "/tmp/id_ecdsa.pub",
+            "/tmp/.netrc",
+            "/tmp/server.pem",
+            "/tmp/secrets.json",
+        ] {
+            assert!(super::link_grant_refusal(std::path::Path::new(p), Some(home)).is_some(), "{p}");
+        }
+        for p in [
+            "/Users/me/Documents/notes.md",
+            "/Users/me/Downloads/report.pdf",
+            "/Users/me/.canopy/sessions/a.json",
+            "/Users/me/.sshfoo/readme.md",
+            "/private/tmp/claude/tasks/a.output",
+        ] {
+            assert!(super::link_grant_refusal(std::path::Path::new(p), Some(home)).is_none(), "{p}");
+        }
+    }
+
+    #[test]
+    fn a_link_grant_can_be_taken_back_without_touching_cli_grants() {
+        let manager = super::WorkspaceManager::default();
+        let a = std::path::PathBuf::from("/tmp/a.txt");
+        let b = std::path::PathBuf::from("/tmp/b.txt");
+        manager.files.lock().unwrap().push(a.clone());
+        manager.grant_link_file(b.clone());
+        assert!(manager.allows(&a) && manager.allows(&b));
+        manager.link_files.lock().unwrap().clear();
+        assert!(manager.allows(&a), "a file named to the OS stays granted");
+        assert!(!manager.allows(&b));
+    }
+
+    fn p(s: &str) -> std::path::PathBuf {
+        std::path::PathBuf::from(s)
+    }
+
+    #[test]
+    fn a_failing_root_is_skipped_but_every_failing_root_is_an_error() {
+        let got = super::merge_roots(vec!["/a".into(), "/bad".into(), "/b".into()], 10, |r| {
+            if r == "/bad" { Err("outside scope".into()) } else { Ok(vec![p(&format!("{r}/f"))]) }
+        });
+        assert_eq!(got.unwrap(), vec![p("/a/f"), p("/b/f")]);
+        let none = super::merge_roots(vec!["/x".into(), "/y".into()], 10, |_| Err("nope".into()));
+        assert_eq!(none.unwrap_err(), "nope");
+        assert!(super::merge_roots(vec![], 10, |_| Err("unused".into())).unwrap().is_empty());
+    }
+
+    #[test]
+    fn overlapping_roots_list_a_file_once_and_the_total_is_capped() {
+        let got = super::merge_roots(vec!["/p".into(), "/p/c".into()], 10, |_| Ok(vec![p("/p/c/same")]));
+        assert_eq!(got.unwrap(), vec![p("/p/c/same")]);
+        let many = super::merge_roots(vec!["/a".into(), "/b".into(), "/c".into()], 2, |r| {
+            Ok((0..5).map(|i| p(&format!("{r}/{i}"))).collect())
+        });
+        assert_eq!(many.unwrap().len(), 4, "capped at twice the per-root limit");
+    }
+
     use super::*;
 
     #[test]

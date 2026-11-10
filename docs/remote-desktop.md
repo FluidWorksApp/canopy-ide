@@ -6,7 +6,7 @@ nothing is shared until the person at that computer says yes.
 
 ## How to use it
 
-1. Both of you join the same team relay (host or connect from the Team panel).
+1. Both of you join the same team relay. In the Team panel, open **Remote desktop → Set up**: one of you picks **Host a relay** (local network), the other enters the host's address and 7-digit code and picks **Join**. Account teams alone do not start a relay.
 2. In the Team panel, open **Remote desktop** and choose **View** or
    **Control** next to a teammate. The row shows while the request is being sent
    and reports a delivery error without creating a duplicate request.

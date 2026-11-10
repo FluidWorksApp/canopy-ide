@@ -1,3 +1,4 @@
+import {isAllWorkspaces,setAllWorkspaces,resetAllWorkspacesForTest} from './allMode';
 import {act,fireEvent,render,screen,within} from '@testing-library/react';import {beforeEach,it,expect,vi} from 'vitest';import {WorkspaceSelector} from './WorkspaceSelector';
 import {OPEN_T3_MACHINE_EVENT} from '../placement/transitions';
 const mocks=vi.hoisted(()=>({workspace:vi.fn(),openLink:vi.fn(),listMachines:vi.fn()}));
@@ -27,18 +28,17 @@ it('separates new workspace setup and scopes controls to the selected workspace 
  expect(screen.getByLabelText('Access token')).toBeInTheDocument();
  expect(screen.queryByRole('tablist',{name:'Workspaces'})).toBeNull();
 });
-it('opens All workspaces from the header menu and keeps it out of Manage workspaces',async()=>{
+it('selects All workspaces like any workspace: no dialog, header says so, check mark',async()=>{
+ localStorage.clear();resetAllWorkspacesForTest();
  mocks.workspace.mockResolvedValue({result:null});render(<WorkspaceSelector/>);await act(async()=>{});
  fireEvent.click(screen.getByTitle('Test · Connecting…'));
- fireEvent.click(screen.getByRole('menuitem',{name:'All workspaces…'}));
- const dialog=await screen.findByRole('dialog',{name:'All workspaces'});
- await screen.findByText('Machine dashboard');
- expect(dialog.querySelector('.dlg-children .unified-workspace')).toHaveTextContent('Machine dashboard');
- expect(dialog.querySelector('.dlg-header .unified-workspace')).toBeNull();
- fireEvent.click(within(dialog).getByRole('button',{name:/Close/}));
- fireEvent.click(screen.getByTitle('Test · Connecting…'));
- fireEvent.click(screen.getByRole('menuitem',{name:/Manage workspaces/}));
- expect(screen.queryByRole('button',{name:'All workspaces'})).toBeNull();
+ fireEvent.click(screen.getByRole('menuitemradio',{name:/^All workspaces/}));
+ expect(screen.queryByRole('dialog',{name:'All workspaces'})).toBeNull();
+ expect(isAllWorkspaces()).toBe(true);
+ expect(screen.getByText('All workspaces',{selector:'.workspace-name'})).toBeInTheDocument();
+ fireEvent.click(screen.getByRole('button',{name:/All workspaces/}));
+ expect(screen.getByRole('menuitemradio',{name:/^All workspaces/})).toHaveAttribute('aria-checked','true');
+ setAllWorkspaces(false);
 });
 it('reports a named T3 target that disappears during transition',async()=>{
  mocks.workspace.mockResolvedValue({result:null});render(<WorkspaceSelector/>);await act(async()=>{});

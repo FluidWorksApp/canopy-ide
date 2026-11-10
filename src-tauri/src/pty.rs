@@ -3353,6 +3353,11 @@ mod tests {
         )));
         let config = std::env::temp_dir().join(format!("canopy-pty-ide-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&config);
+        // This test asserts what a PTY inherits when no desktop tab owns it, so
+        // it must not inherit these from the session running the tests (Claude
+        // inside Canopy sets both).
+        std::env::remove_var("CLAUDE_CODE_SSE_PORT");
+        std::env::remove_var("CLAUDE_CODE_IDE_SKIP_AUTO_INSTALL");
         let env = |root: &str| {
             Some(vec![
                 (

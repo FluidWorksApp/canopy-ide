@@ -44,11 +44,42 @@ describe("choosePlacement", () => {
       resources: [snap(L), snap(R, { online: false })],
       projectAvailability: available,
     })).toMatchObject({ target: null, reason: "The selected machine is offline." });
-    expect(choosePlacement({
+  });
+
+  it("a chosen machine that is full is still used, with a warning, never replaced by another", () => {
+    const decision = choosePlacement({
       preference: targetPreference(R),
       resources: [snap(L), snap(R, { activeAgents: 4 })],
       projectAvailability: available,
-    })).toMatchObject({ target: null, reason: "The selected machine is full." });
+    });
+    expect(decision.target).toEqual(R);
+    expect(decision.warning).toMatch(/is full \(4 of 4 agent slots\)/);
+  });
+
+  it("This Mac is never refused, full or not read at all", () => {
+    const full = choosePlacement({ preference: targetPreference(L), resources: [snap(L, { activeAgents: 4 })] });
+    expect(full.target).toEqual(L);
+    expect(full.warning).toMatch(/This Mac is full/);
+    const unread = choosePlacement({ preference: targetPreference(L), resources: [] });
+    expect(unread.target).toEqual(L);
+    expect(unread.warning).toBeUndefined();
+  });
+
+  it("Automatic with every machine full starts on this Mac with a warning instead of refusing", () => {
+    const decision = choosePlacement({
+      preference: automaticPreference(),
+      resources: [snap(L, { activeAgents: 4 }), snap(R, { activeAgents: 4 })],
+      projectAvailability: available,
+    });
+    expect(decision.target).toEqual(L);
+    expect(decision.warning).toMatch(/full/);
+    const none = choosePlacement({ preference: automaticPreference(), resources: [] });
+    expect(none.target).toEqual(L);
+    expect(none.warning).toMatch(/Starting on this Mac/);
+  });
+
+  it("a hand-off still never lands on a machine it was not offered", () => {
+    expect(choosePlacement({ preference: automaticPreference(), resources: [], noLocalFallback: true }).target).toBeNull();
   });
 
   it("Automatic ranks targets with unknown load after known ones", () => {

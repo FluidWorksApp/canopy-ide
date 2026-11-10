@@ -154,28 +154,28 @@ describe("askBrain", () => {
 
   it("maps rate limits and sign-outs from the stream and stderr", async () => {
     scripted([line(result({ is_error: true, result: "Claude AI usage limit reached|1793094000" }))]);
-    expect(await askBrain({ feature: "memory", prompt: "x", cwd: "/r" })).toMatchObject({ ok: false, reason: "rate-limited" });
+    expect(await askBrain({ feature: "plan", prompt: "x", cwd: "/r" })).toMatchObject({ ok: false, reason: "rate-limited" });
     expect(brainConnection().state).toBe("rate-limited");
 
     scripted([
       line(JSON.stringify({ type: "rate_limit_event", rate_limit_info: { status: "rejected" } })),
       line(result({ is_error: true, result: "Request refused" })),
     ]);
-    expect(await askBrain({ feature: "memory", prompt: "x", cwd: "/r" })).toMatchObject({ reason: "rate-limited" });
+    expect(await askBrain({ feature: "plan", prompt: "x", cwd: "/r" })).toMatchObject({ reason: "rate-limited" });
 
     scripted([{ kind: "stderr", text: "Invalid API key · Please run /login" }, { kind: "exit", code: 1 }]);
-    expect(await askBrain({ feature: "memory", prompt: "x", cwd: "/r" })).toMatchObject({ ok: false, reason: "signed-out" });
+    expect(await askBrain({ feature: "plan", prompt: "x", cwd: "/r" })).toMatchObject({ ok: false, reason: "signed-out" });
     expect(brainConnection().state).toBe("signed-out");
 
     scripted([{ kind: "stderr", text: "segfault" }, { kind: "exit", code: 139 }]);
-    expect(await askBrain({ feature: "memory", prompt: "x", cwd: "/r" })).toMatchObject({ ok: false, reason: "failed", message: "segfault" });
+    expect(await askBrain({ feature: "plan", prompt: "x", cwd: "/r" })).toMatchObject({ ok: false, reason: "failed", message: "segfault" });
 
     // A later success flips the state back.
     scripted([line(result())]);
-    await askBrain({ feature: "memory", prompt: "x", cwd: "/r" });
+    await askBrain({ feature: "plan", prompt: "x", cwd: "/r" });
     expect(brainConnection().state).toBe("connected");
     // Every one of those reached the CLI, so every one is metered.
-    expect(brainSpend({ feature: "memory" })).toMatchObject({ calls: 5, failures: 4 });
+    expect(brainSpend({ feature: "plan" })).toMatchObject({ calls: 5, failures: 4 });
   });
 
   it("refuses before spawning when the feature is over budget", async () => {

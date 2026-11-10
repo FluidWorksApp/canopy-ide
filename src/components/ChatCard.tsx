@@ -16,10 +16,11 @@ import {LinkifiedText} from './LinkifiedText';
 import {Button} from './ui';
 import {CheckIcon,CommitIcon,CopyIcon,DocumentIcon,GlobeIcon} from './icons';
 import type {ChatMessage} from '../teamMessaging/client';
-import {LAYER_WORDS,OUTCOME_ICON,OUTCOME_LABEL,cardDraft,cardOf,cardUrl,foldLayerApproval,foldOutcomes,foldPlanOutcomes,type Card,type CardExtensions,type LayerApprovalCard,type LayerApprovalOutcome,type LayerApprovalOutcomeCard,type PlanCard,type PlanOutcome,type PlanOutcomeCard,type ReviewOutcome,type ReviewOutcomeCard,type ReviewRequestCard} from '../teamMessaging/cardSchema';
+import {LAYER_WORDS,OUTCOME_ICON,OUTCOME_LABEL,cardDraft,cardOf,cardUrl,foldLayerApproval,foldOutcomes,foldPlanOutcomes,type Card,type CardExtensions,type LayerApprovalCard,type RelayOfferCard,type LayerApprovalOutcome,type LayerApprovalOutcomeCard,type PlanCard,type PlanOutcome,type PlanOutcomeCard,type ReviewOutcome,type ReviewOutcomeCard,type ReviewRequestCard} from '../teamMessaging/cardSchema';
 import {applyLayerApprovalAnswer} from '../lensApprovals';
 import {openSessionDoc} from '../sessionDoc/events';
 import {applyChatApproval} from '../plans/planStore';
+import {RELAY_JOIN_EVENT,type RelayJoinDetail} from '../relayJoin';
 import './chatCard.css';
 
 /** Everything a card reaches outside itself, injectable for tests. */
@@ -72,7 +73,7 @@ const ipcChatCardDeps=():ChatCardDeps=>ipcDeps??=({
 
 const short=(sha:string)=>sha.slice(0,7);
 const lines=(l?:{start:number;end:number})=>l?(l.start===l.end?`:${l.start}`:`:${l.start}-${l.end}`):'';
-const KIND:Record<Card['type'],string>={pr:'Pull request',file:'File',diff:'Diff',terminal:'Terminal output',report:'Agent report','review-request':'Review requested','review-outcome':'Review',plan:'Plan for review','plan-outcome':'Plan',handoff:'Hand-off','live-session':'Live session','layer-approval':'Approval needed','layer-approval-outcome':'Approval'};
+const KIND:Record<Card['type'],string>={pr:'Pull request',file:'File',diff:'Diff',terminal:'Terminal output',report:'Agent report','review-request':'Review requested','review-outcome':'Review',plan:'Plan for review','plan-outcome':'Plan',handoff:'Hand-off','live-session':'Live session','layer-approval':'Approval needed','layer-approval-outcome':'Approval','relay-offer':'Desktop relay','relay-offer-ended':'Desktop relay'};
 /** Long text blocks start folded to this many lines. */
 const FOLD_LINES=12;
 
@@ -289,6 +290,8 @@ function CardBody({card,message,userId,messages,name,onReply,teamId,deps}:{card:
     {!own&&<div className="chat-card-actions">{teamId?<Button size="sm" variant="accent" onClick={()=>openSessionDoc({kind:'join',team:teamId,owner:message.sender,ownerName:name(message.sender),room:card.room,title:card.title,agent:card.agent})}>Join</Button>:<small className="chat-card-why">Open this conversation in Teams to join.</small>}</div>}
    </div>;
   }
+  case 'relay-offer':return <RelayOffer card={card} message={message} userId={userId} messages={messages} name={name}/>;
+  case 'relay-offer-ended':return <div className="chat-card is-compact" data-type="relay-offer-ended"><span>Stopped sharing the desktop relay</span></div>;
   case 'review-outcome':return <div className="chat-card is-compact" data-type="review-outcome">
    <span>{OUTCOME_ICON[card.outcome]} {OUTCOME_LABEL[card.outcome]} {card.repo.slug}#{card.number}{card.head?` at ${short(card.head)}`:''}</span>
   </div>;
@@ -331,6 +334,27 @@ const carriedApprovals=new Set<string>();
 /** Where a layer-approval card stands. The requester's copy also carries the
  *  owner's answer into the ledger — a backstop for lensApprovals.ts, which
  *  normally applies it the moment it arrives. */
+/** An offer stays good for this long even when nobody posted an end: a host that
+ *  quit Canopy cannot post one, and a code on a day-old card is stale. */
+export const RELAY_OFFER_TTL_MS=12*3600*1000;
+/** Whether a relay offer is still open: not ended by its sender, not too old. */
+export function relayOfferOpen(request:ChatMessage,messages:readonly ChatMessage[],now=Date.now()):boolean{
+ if(now-request.created>RELAY_OFFER_TTL_MS)return false;
+ return !messages.some(m=>{const c=m.sender===request.sender?cardOf(m):undefined;return c?.type==='relay-offer-ended'&&c.request===request.id;});
+}
+/** One click to join a teammate's desktop relay. Nothing happens until the
+ *  click, and the address was already checked to be a local-network one. The
+ *  join itself runs in App (it owns the relay) from the event. */
+function RelayOffer({card,message,userId,messages,name}:{card:RelayOfferCard;message:ChatMessage;userId:string;messages:readonly ChatMessage[];name:(id:string)=>string}){
+ const own=message.sender===userId,open=relayOfferOpen(message,messages),[sent,setSent]=useState(false);
+ return <div className="chat-card" data-type="relay-offer">
+  <div className="chat-card-head"><span className="chat-card-icon" aria-hidden="true">🖥</span><span className="chat-card-kind">Desktop relay</span></div>
+  <div className="chat-card-title">{own?'You are sharing your desktop':`${name(message.sender)} is sharing their desktop`}</div>
+  <small className="chat-card-byline">{open?'On their local network. View or control their screen once you connect.':'This offer has ended.'}</small>
+  {!own&&open&&<div className="chat-card-actions"><Button size="sm" variant="accent" disabled={sent} onClick={()=>{setSent(true);window.dispatchEvent(new CustomEvent<RelayJoinDetail>(RELAY_JOIN_EVENT,{detail:{addr:card.addr,code:card.code,from:name(message.sender)}}));}}>{sent?'Connecting…':'Connect'}</Button></div>}
+ </div>;
+}
+
 function LayerApprovalState({request,messages,name,own}:{request:ChatMessage;messages:readonly ChatMessage[];name:(id:string)=>string;own:boolean}){
  const card=cardOf(request) as LayerApprovalCard;
  const folded=useMemo(()=>foldLayerApproval(request,messages),[request,messages]);

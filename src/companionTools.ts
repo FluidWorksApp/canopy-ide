@@ -87,25 +87,6 @@ export const COMPANION_TOOL_GROUPS: AgentToolGroup[] = [
       },
     ],
   },
-  {
-    id: "companion-memory",
-    label: "Its own memory",
-    blurb:
-      "What the companion has learned about you and your work — kept across projects " +
-      "and across restarts, because it belongs to no repo.",
-    tools: [
-      {
-        name: "canopy_recall",
-        label: "Recall",
-        note: "What it already knows about you and how you work",
-      },
-      {
-        name: "canopy_remember",
-        label: "Remember",
-        note: "Keep something that will still matter next week",
-      },
-    ],
-  },
 ];
 
 export const COMPANION_TOOLS: string[] = COMPANION_TOOL_GROUPS.flatMap((g) =>
@@ -144,7 +125,6 @@ export const MUTATING_TOOLS: string[] = [
   "canopy_claim",
   "canopy_notes_write",
   "canopy_research_write",
-  "canopy_memory_propose",
   "canopy_vault_fill",
   "canopy_vault_read",
   "canopy_browser_click",

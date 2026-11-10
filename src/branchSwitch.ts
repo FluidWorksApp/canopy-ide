@@ -17,6 +17,8 @@ import type * as ipc from "./ipc";
 export type CheckoutOutcome = ipc.CheckoutOutcome;
 
 export type SwitchAction =
+  /** Commit what is there, push it and open a pull request (closing an agent). */
+  | "push"
   /** Point the project's files at the workspace that already has the branch. */
   | "open-there"
   /** Free the name from that workspace, then switch here. */
@@ -57,6 +59,8 @@ export interface SwitchChoice {
   recommended?: boolean;
   /** Shown, but not offerable; `sub` says why. */
   disabled?: boolean;
+  /** A choice that throws work away, coloured so it is never mistaken for the safe one. */
+  danger?: boolean;
 }
 
 export interface SwitchDialog {

@@ -9,7 +9,7 @@ import {
   useSyncExternalStore,
   type MouseEvent,
 } from "react";
-import { BellIcon, CameraIcon, CloseIcon, FrostIcon } from "./icons";
+import { BellIcon, CameraIcon, CloseIcon, FrostIcon, PinIcon } from "./icons";
 import { ContextMenu, useContextMenu } from "./ContextMenu";
 import type { Urgency } from "../attention";
 import type { Project } from "../projects";
@@ -92,6 +92,8 @@ interface TitleBarProps {
   onSelectProject: (id: string) => void;
   onCloseProject: (id: string) => void;
   onHibernateProject: (id: string) => void;
+  /** Pin or unpin a project tab: pinned tabs stay at the front. */
+  onTogglePinProject: (id: string) => void;
   onHibernateWorkspace?: (onProgress?:HibernateProgressListener,confirmOthers?:ConfirmOthers) => Promise<void>;
   onWakeProject: (id: string) => void;
   onToggleVibe: (id: string) => void;
@@ -225,6 +227,7 @@ function TitleBarImpl({
   onSelectProject,
   onCloseProject,
   onHibernateProject,
+  onTogglePinProject,
   onHibernateWorkspace,
   onWakeProject,
   onToggleVibe,
@@ -304,6 +307,12 @@ function TitleBarImpl({
                       onClick: () => onHibernateProject(p.id),
                     },
                 { separator: true },
+                {
+                  label: p.pinned ? "Unpin tab" : "Pin tab",
+                  icon: <PinIcon size={12} />,
+                  hint: p.pinned ? undefined : "stays at the front",
+                  onClick: () => onTogglePinProject(p.id),
+                },
                 { label: "Edit project…", icon: "⚙", onClick: () => onEditProject(p) },
                 { label: "Close project", icon: "✕", onClick: () => onCloseProject(p.id) },
               ])
@@ -318,6 +327,7 @@ function TitleBarImpl({
                 <FrostIcon size={12} />
               </span>
             )}
+            {p.pinned && <span className="tab-pin-mark" title="Pinned" aria-label="Pinned"><PinIcon size={10} /></span>}
             <span>{p.name}</span>
             {/* Nothing is running in a sleeping project, so nothing there can
                 be waiting on you — its agents' last words are history, not a

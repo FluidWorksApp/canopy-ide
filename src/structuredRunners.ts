@@ -44,7 +44,9 @@ export interface StructuredRunner {
    *  `acp` — the process outlives the turn and speaks the Agent Client
    *    Protocol (JSON-RPC over stdio) instead of a vendor stream: a turn is
    *    `session/prompt`. Long-lived and streaming like `structured`, but it
-   *    has no one-question argv, so brain and compaction callers skip it.
+   *    has no one-question argv; brain calls drive it one-shot through
+   *    brainAcp.ts (initialize, session/new, one prompt, terminate), and
+   *    compaction callers skip it.
    *
    *  Read by companion.ts to pick a transport, and by projectRunner.ts to
    *  decide whether `send` writes a line or launches a process. */

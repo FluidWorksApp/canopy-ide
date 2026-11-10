@@ -23,6 +23,20 @@ export interface PipPos {
   y: number;
 }
 
+/** A link that does something when it is loaded: an OAuth callback, a magic or
+ *  verification link, a one-time token. Loading it a second time for a preview
+ *  can consume it or repeat its effect, so the pip shows nothing for it. */
+export function isOneTimeLink(url: string): boolean {
+  try {
+    const u = new URL(url);
+    const keys = [...u.searchParams.keys()].join(" ").toLowerCase();
+    return /(^|[\s_-])(token|code|key|auth|otp|sig|signature|magic|verify|nonce|state)([\s_-]|$)/.test(keys) ||
+      /(callback|verify|confirm|magic|oauth|reset|invite|unsubscribe)/i.test(u.pathname);
+  } catch {
+    return false;
+  }
+}
+
 export function pipOwnerVisible(
   ptyId: number,
   terminals: { id: string; ptyId: number | null; paneGroup?: string }[],
@@ -43,6 +57,9 @@ interface AgentBrowserPipProps {
   agentId: string;
   agentTitle: string;
   supported: boolean;
+  /** Owning project. Under the Embedded (proxy) engine the pip loads the same
+   *  per-project proxy the preview tab uses, so it needs this to start it. */
+  projectId?: string;
   /** Which pip this is among the ones on screen, for the dealt-out default
    *  position. Ignored once the user has dragged it somewhere. */
   slot?: number;
@@ -80,6 +97,7 @@ export function AgentBrowserPip({
   agentId,
   agentTitle,
   supported,
+  projectId,
   slot = 0,
   hidden = false,
   onClose,
@@ -89,6 +107,10 @@ export function AgentBrowserPip({
   const [width, setWidth] = useState(400);
   const [minimized, setMinimized] = useState(false);
   const [failed, setFailed] = useState(false);
+  // Embedded engine: there is no background webview to snapshot, so show the
+  // proxied page itself, read-only. It is a second load of the same URL
+  // (shared cookie jar via the project host), not a mirror of the tab's state.
+  const [proxySrc, setProxySrc] = useState<string | null>(null);
   /** null until the user drags: the pip stays dealt from the bottom-right
    *  corner, which is what keeps it out of the way of the terminal. Once moved
    *  it is anchored top-left, because that is what a drag means. */
@@ -107,6 +129,36 @@ export function AgentBrowserPip({
     },
     [],
   );
+
+  useEffect(() => {
+    // A new page must not show under the old one's proxy while it resolves.
+    setProxySrc(null);
+    if (supported || !projectId || minimized || hidden || isOneTimeLink(url)) return;
+    let stale = false;
+    let origin: string;
+    let rest: string;
+    try {
+      const u = new URL(url);
+      origin = u.origin;
+      rest = `${u.pathname}${u.search}${u.hash}` || "/";
+    } catch {
+      return;
+    }
+    ipc
+      .previewStart(projectId, origin)
+      .then((p) => {
+        if (!stale) {
+          setProxySrc(`http://${p.host}:${p.port}${rest}`);
+          setFailed(false);
+        }
+      })
+      .catch(() => {
+        if (!stale) setFailed(true);
+      });
+    return () => {
+      stale = true;
+    };
+  }, [supported, projectId, url, minimized, hidden]);
 
   useEffect(() => {
     if (!supported || minimized || hidden) return;
@@ -302,7 +354,7 @@ export function AgentBrowserPip({
     <aside
       ref={el}
       className={`agent-browser-pip${minimized ? " minimized" : ""}`}
-      style={{ width, ...placement, ...(hidden ? { display: "none" } : null) }}
+      style={{ width, ...placement, ...(hidden ? { display: "none" } : null), ["--pip-w" as string]: width } as React.CSSProperties}
       // display:none takes it out of the accessibility tree and out of the
       // browser-occlusion walk (browserHost measures rectangles, and it no
       // longer has one) — which is what a pip over its own live view should do.
@@ -341,8 +393,18 @@ export function AgentBrowserPip({
         <div className="agent-browser-pip-frame" style={{ aspectRatio: ratio }}>
           {frame ? (
             <img src={frame} alt={`Live read-only view of ${host}`} draggable={false} />
+          ) : !supported && proxySrc ? (
+            <iframe
+              className="agent-browser-pip-embed"
+              src={proxySrc}
+              title={`Read-only view of ${host}`}
+              tabIndex={-1}
+              // Scripts must run for the page to render, but it may not open
+              // windows, navigate the app, submit forms or use popups.
+              sandbox="allow-scripts allow-same-origin"
+            />
           ) : (
-            <span>{supported && !failed ? "Connecting to browser..." : "Live view unavailable"}</span>
+            <span>{!failed && (supported || (projectId && !proxySrc)) ? "Connecting to browser..." : "Live view unavailable"}</span>
           )}
           <span className="agent-browser-pip-readonly">Live / read only</span>
           <div

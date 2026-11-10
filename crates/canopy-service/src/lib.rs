@@ -11,7 +11,6 @@ pub mod device;
 pub mod harness;
 pub mod http;
 pub mod ledger;
-pub mod memory;
 pub mod meshtext;
 pub mod relay;
 pub mod service;

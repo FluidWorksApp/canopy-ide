@@ -12,13 +12,19 @@
 // without a brain, so nothing here is modal to the IDE.
 
 import { useEffect, useState } from "react";
+import type { AcpPreset } from "../acp/providers";
 import { useEscape } from "../useEscape";
 import { Button, Field, Radio, Row, Select, TextInput } from "./ui";
 import {
+  addAcpPreset,
   brainCandidates,
   brainCapableClis,
+  brainExcluded,
   brainStateText,
+  brainVerificationNote,
   chooseBrain,
+  groupedBrainCandidates,
+  installableAcpPresets,
   initBrainConnect,
   OPEN_BRAIN_CONNECT_EVENT,
   openBrainConnect,
@@ -126,6 +132,16 @@ export function BrainConnectPanel({ onTerminalOpened, hideModels = false }: Brai
   const { installed, loaded } = useInstalled();
   const has = (bin: string) => Boolean(installed[bin]);
   const candidates = brainCandidates(has);
+  const groups = groupedBrainCandidates(has);
+  const excluded = brainExcluded(has);
+  const [presets, setPresets] = useState<AcpPreset[]>([]);
+  useEffect(() => {
+    let live = true;
+    void installableAcpPresets().then((p) => live && setPresets(p));
+    return () => {
+      live = false;
+    };
+  }, [installed]);
   const recommended = recommendedBrain(has);
   const current = installedBrain(has);
   const brain = current && candidates.includes(current) ? current : null;
@@ -184,21 +200,62 @@ export function BrainConnectPanel({ onTerminalOpened, hideModels = false }: Brai
 
       {candidates.length > 0 && (
         <div className="brain-connect-choices" role="radiogroup" aria-label="Brain">
-          {candidates.map((cli) => (
-            <Radio
-              key={cli.id}
-              name="brain-cli"
-              checked={brain?.id === cli.id}
-              onChange={() => void chooseBrain(cli.id)}
-              label={
-                <>
-                  {cli.name}
-                  {cli.id === recommended?.id && <span className="brain-badge">Recommended</span>}
-                </>
-              }
-            />
-          ))}
+          {[
+            ["Verified runners", groups.verified],
+            ["ACP agents (less verified)", groups.acp],
+          ].map(([title, list]) =>
+            (list as AgentCli[]).length === 0 ? null : (
+              <div key={title as string} className="brain-connect-group" role="group" aria-label={title as string}>
+                {groups.verified.length > 0 && groups.acp.length > 0 && (
+                  <div className="brain-connect-group-title">{title as string}</div>
+                )}
+                {(list as AgentCli[]).map((cli) => (
+                  <Radio
+                    key={cli.id}
+                    name="brain-cli"
+                    checked={brain?.id === cli.id}
+                    onChange={() => void chooseBrain(cli.id)}
+                    label={
+                      <>
+                        {cli.name}
+                        {cli.id === recommended?.id && <span className="brain-badge">Recommended</span>}
+                        {structuredRunnerFor(cli.id)?.tier === "acp" && <span className="brain-badge">ACP</span>}
+                      </>
+                    }
+                  />
+                ))}
+              </div>
+            ),
+          )}
         </div>
+      )}
+      {brain && brainVerificationNote(brain) && (
+        <p className="brain-connect-hint" role="note">
+          {brainVerificationNote(brain)}
+        </p>
+      )}
+      {presets.length > 0 && (
+        <div className="brain-connect-install">
+          <span>Installed here and speaks ACP, not added yet:</span>
+          <Row>
+            {presets.map((p) => (
+              <Button
+                key={p.id}
+                title={`Adds ${p.bin} ${p.args.join(" ")} as an ACP agent and uses it as the brain`}
+                onClick={() => void chooseBrain(addAcpPreset(p))}
+              >
+                Use {p.name}
+              </Button>
+            ))}
+          </Row>
+        </div>
+      )}
+      {excluded.length > 0 && (
+        <ul className="brain-connect-hint" aria-label="Installed agents that cannot be the brain">
+          {excluded.map(({ cli, reason }) => (
+            <li key={cli.id}>{reason}</li>
+          ))}
+        </ul>
       )}
 
       {loaded && candidates.length === 0 && (

@@ -2,6 +2,7 @@
  *  downloads a binary. The person picks an entry and adds it as a custom CLI;
  *  the launch command is theirs to run on first use. */
 
+import { trustedIconUrl } from "./connectorIcons";
 import { isDeniedEnvName, isShellCommand } from "./providers";
 
 export const ACP_REGISTRY_URL =
@@ -31,6 +32,8 @@ export interface RegistryAgent {
   version: string;
   description: string;
   website?: string;
+  /** The registry's SVG mark, only when it is on the registry's own CDN. */
+  icon?: string;
   launch: RegistryLaunch[];
 }
 
@@ -141,6 +144,7 @@ export function parseRegistry(json: unknown, platform = registryPlatform()): Reg
       version,
       description: str(a.description, 1024) ?? "",
       website: website && /^https:\/\//.test(website) ? website : undefined,
+      icon: trustedIconUrl(a.icon),
       launch,
     });
   }

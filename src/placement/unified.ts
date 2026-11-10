@@ -3,7 +3,7 @@
 // jobs sent to cloud workspaces. Pure: the caller gathers the inputs.
 import { targetKey, type Target } from "./types";
 
-export type UnifiedKind = "project" | "agent" | "thread" | "job";
+export type UnifiedKind = "project" | "agent" | "thread" | "job" | "session";
 
 export interface UnifiedRow {
   id: string;
@@ -40,7 +40,16 @@ export interface UnifiedInput {
   local: { projects: { id: string; name: string }[]; agents: Item[] };
   /** `projects`/`agents` are absent when that workspace is not the active
    *  host: its contents cannot be read without switching to it. */
-  remotes: { workspaceId: string; name: string; state: string; projects?: { id: string; name: string }[]; agents?: Item[] }[];
+  remotes: {
+    workspaceId: string;
+    name: string;
+    state: string;
+    projects?: { id: string; name: string }[];
+    agents?: Item[];
+    /** Running sessions read from outside, when that workspace is not the active
+     *  host. Agents and shells together: the list cannot tell them apart. */
+    sessions?: { id: string; title: string }[];
+  }[];
   t3: { machineId: string; label: string; projects: { id: string; title: string }[]; threads: Item[] }[];
   jobs: { jobId: string; title: string; workspace: string; target: string; workspaceId?: string }[];
 }
@@ -70,6 +79,8 @@ export function buildUnifiedRows(input: UnifiedInput): UnifiedRow[] {
           if (!have.has(p.id))
             push({ id: `${targetKey(target)}:setup:${p.id}`, projectId: p.id, name: p.name, kind: "project", target, targetLabel: w.name, status: "not set up", needsSetup: true });
     }
+    for (const x of w.sessions ?? [])
+      push({ id: `${targetKey(target)}:session:${x.id}`, name: x.title, kind: "session", target, targetLabel: w.name, status: "running" });
     for (const a of w.agents ?? [])
       push({ id: `${targetKey(target)}:agent:${a.id}`, name: a.project ?? a.name, kind: "agent", target, targetLabel: w.name, status: a.status ?? "running", branch: a.branch });
   }

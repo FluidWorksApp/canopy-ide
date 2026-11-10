@@ -121,8 +121,6 @@ export interface PlanContext {
   tree: string[];
   /** Files that mention the request's keywords. */
   relevant: string[];
-  /** Recent project memory, one line each. */
-  memory: string[];
 }
 
 const REQUEST_MAX = 6000;
@@ -161,8 +159,6 @@ export function buildPlanPrompt(request: string, ctx: PlanContext): string {
   if (ctx.tree.length) lines.push("", "REPO TOP LEVEL:", ctx.tree.slice(0, 80).join("  "));
   if (ctx.relevant.length)
     lines.push("", "FILES THAT MENTION THE REQUEST'S KEYWORDS:", ...ctx.relevant.slice(0, 40).map((p) => `- ${p}`));
-  if (ctx.memory.length)
-    lines.push("", "WHAT THE TEAM HAS LEARNED ABOUT THIS REPO (recent memory):", ...ctx.memory.slice(0, 10).map((m) => `- ${m}`));
   return lines.join("\n");
 }
 

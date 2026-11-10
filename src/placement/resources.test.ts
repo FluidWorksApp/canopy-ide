@@ -24,6 +24,11 @@ describe("collectResources", () => {
     expect(rs[2]).toMatchObject({ online: false });
     expect(rs[3]).toMatchObject({ target: { kind: "t3", machineId: "m1" }, online: true });
   });
+  it("marks a workspace read from outside as counting sessions, not agents", async () => {
+    const rs = await collectResources({ ...base, remoteActiveAgents: async () => ({ sessions: 3 }) });
+    expect(rs[1]).toMatchObject({ online: true, activeAgents: 3, loadBasis: "sessions", capacity: 4 });
+    expect(rs[1].loadUnknown).toBeUndefined();
+  });
   it("keeps an inactive local machine eligible without pretending its load is known", async () => {
     const [local] = await collectResources({
       ...base,

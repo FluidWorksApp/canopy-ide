@@ -33,6 +33,8 @@ const LIST_POLL_MS=15000,DETAIL_POLL_MS=3000;
 // import time), so a new account never sees the previous one's people.
 let cache:{directory:Directory|null;details:Record<string,Detail>;selected:string}={directory:null,details:{},selected:''};
 let cacheEpoch=0;
+/** The team picked in the panel (empty until the directory loads). */
+export const selectedAccountTeam=()=>cache.selected;
 window.addEventListener('canopy:account-changed',()=>{cacheEpoch++;cache={directory:null,details:{},selected:''};});
 /** The teams this panel last loaded and the one it shows, for the Share
  *  sheet's "With" choice. Null until the panel has loaded once. */

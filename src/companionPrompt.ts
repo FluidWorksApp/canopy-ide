@@ -90,9 +90,6 @@ const TOOL_NOTES: Record<string, string> = {
     "search Canopy's own index across projects — past agent conversations, terminal scrollback, notes and research. Reaches things that are on no disk you can grep.",
   canopy_open_project:
     "put a project in front of the user. Use it when your answer is somewhere they should be looking.",
-  canopy_recall: "what you have learned about this user and their work before now.",
-  canopy_remember:
-    "keep something that will matter next week — a preference, a standing decision, how a repo is laid out. Not a scratchpad for this turn.",
 };
 
 export function buildCompanionPrompt(input: PromptInput): string {
@@ -376,22 +373,6 @@ export function buildCompanionPrompt(input: PromptInput): string {
     "A tool that returned an error, or came back declined, did not happen.",
     "",
   );
-
-  if (has("canopy_remember") || has("canopy_recall")) {
-    out.push(
-      "## Memory",
-      "",
-      "Your conversation carries across restarts, so you do not need to write down",
-      "what was said. Use `canopy_remember` for the things that outlive a",
-      "conversation — how they like work delivered, a standing decision about a",
-      "repo, the shape of a project that is not obvious from its files. Check",
-      "`canopy_recall` before asking them something they have told you before.",
-      "",
-      "What you must not put there: anything already in the code or the git",
-      "history, and anything that only matters for the next ten minutes.",
-      "",
-    );
-  }
 
   out.push(
     "## How to answer",

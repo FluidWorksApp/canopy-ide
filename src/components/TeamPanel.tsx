@@ -8,6 +8,7 @@ import {LiveSessions} from "./LiveSessions";
 import * as ipc from "../ipc";
 import type { Notify, RelayHandle } from "../types";
 import { RemoteDesktopMembers } from "./RemoteDesktopView";
+import { RelayConnect } from "./RelayConnect";
 import { basename } from "../paths";
 
 interface TeamPanelProps {
@@ -36,5 +37,5 @@ export async function offerFileTo(memberId: string, memberName: string, onNotice
  *  session is the first thing seen. Signed out, TeamHub asks for a sign-in
  *  ("Sign in to share with your team") and nothing offers to share. */
 export function TeamPanel({onOpenAccountChat,visible=true,relay,onNotice}: TeamPanelProps){
- return <div style={{height:"100%",overflow:"auto"}}>{relay&&<RemoteDesktopMembers relay={relay} onNotice={onNotice}/>}<TeamHub onOpenChat={onOpenAccountChat} live={<LiveSessions visible={visible}/>}/></div>;
+ return <div style={{height:"100%",overflow:"auto"}}>{relay&&<RelayConnect relay={relay} onNotice={onNotice}/>}{relay&&<RemoteDesktopMembers relay={relay} onNotice={onNotice}/>}<TeamHub onOpenChat={onOpenAccountChat} live={<LiveSessions visible={visible}/>}/></div>;
 }

@@ -27,6 +27,8 @@ export function ComponentPicker({
   activePath,
   machineTargets,
   initialMachine = automaticPreference(),
+  accounts,
+  fixedComponent,
   onPick,
   onCancel,
 }: {
@@ -40,13 +42,21 @@ export function ComponentPicker({
   /** Present for an agent launch. Includes This Mac and connected machines. */
   machineTargets?: DisplayTarget[];
   initialMachine?: Preference;
-  onPick: (component: PickerComponent, machine?: Preference) => void;
+  /** Present for an agent launch whose CLI has several accounts. */
+  accounts?: { profiles: { id: string; label: string }[]; initial: string };
+  /** The component is already decided (an agent starts in the one in front), so
+   *  the list and the question are left out and only the choices that remain
+   *  (where to run, which account) are asked. */
+  fixedComponent?: PickerComponent;
+  onPick: (component: PickerComponent, machine?: Preference, profileId?: string) => void;
   onCancel: () => void;
 }) {
   useEscapeLayer(true, { onEscape: () => cancel() });
   const [query, setQuery] = useState("");
   const [selectedRow, setSelectedRow] = useState(0);
   const [machine, setMachine] = useState<Preference>(initialMachine);
+  const [profileId, setProfileId] = useState<string | undefined>(accounts?.initial);
+  const fixed = fixedComponent;
   const inputRef = useRef<HTMLInputElement>(null);
   const listRef = useRef<HTMLDivElement>(null);
   const before = useRef<Element | null>(document.activeElement);
@@ -86,6 +96,14 @@ export function ComponentPicker({
     if (element instanceof HTMLElement && element.isConnected) requestAnimationFrame(() => element.focus());
   }
 
+  // The account is passed only when this launch offered a choice, so a picker
+  // without one calls `onPick` exactly as it always did.
+  const pick = (component: PickerComponent) => {
+    const where = machineTargets ? machine : undefined;
+    if (profileId === undefined) onPick(component, where);
+    else onPick(component, where, profileId);
+  };
+
   const selectMachineByKey = (key: string) => {
     const choice = machineChoices.find((item) => item.key === key);
     if (choice) setMachine(choice.preference);
@@ -95,7 +113,12 @@ export function ComponentPicker({
     <div className="palette-backdrop" onMouseDown={cancel}>
       <div className="palette cpick" role="dialog" aria-label={title} onMouseDown={(event) => event.stopPropagation()}>
         <div className="cpick-title">
-          {title} <span className="cpick-title-dim">in which component?</span>
+          {title}
+          {fixed ? (
+            <span className="cpick-title-dim"> in {fixed.label}</span>
+          ) : (
+            <span className="cpick-title-dim"> in which component?</span>
+          )}
         </div>
         {machineTargets && (
           <div className="cpick-machine">
@@ -130,6 +153,60 @@ export function ComponentPicker({
             </div>
           </div>
         )}
+        {accounts && (
+          <div className="cpick-machine">
+            <span className="cpick-machine-label">Account</span>
+            <div className="cpick-machine-options" role="radiogroup" aria-label="Account">
+              {accounts.profiles.map((profile, index, all) => {
+                const checked = profileId === profile.id;
+                return (
+                  <button
+                    type="button"
+                    role="radio"
+                    aria-checked={checked}
+                    tabIndex={checked ? 0 : -1}
+                    className={checked ? "is-selected" : ""}
+                    key={profile.id}
+                    onClick={() => setProfileId(profile.id)}
+                    onKeyDown={(event) => {
+                      if (!["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown"].includes(event.key)) return;
+                      event.preventDefault();
+                      const direction = event.key === "ArrowLeft" || event.key === "ArrowUp" ? -1 : 1;
+                      const next = (index + direction + all.length) % all.length;
+                      setProfileId(all[next].id);
+                      event.currentTarget.parentElement
+                        ?.querySelectorAll<HTMLButtonElement>("button[role=radio]")[next]
+                        ?.focus();
+                    }}
+                  >
+                    {profile.label}
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+        )}
+        {fixed && (
+          <div className="cpick-fixed">
+            <button
+              type="button"
+              className="cpick-launch"
+              autoFocus
+              onClick={() => pick(fixed!)}
+              onKeyDown={(event) => {
+                if (event.key === "Enter") {
+                  event.preventDefault();
+                  event.stopPropagation();
+                  pick(fixed!);
+                }
+              }}
+            >
+              Open ↵
+            </button>
+            <span className="cpick-hint-inline">Esc cancel</span>
+          </div>
+        )}
+        {!fixed && (<>
         <div className="cpick-field">
           <div className="cpick-ghost" aria-hidden="true">
             <span className="cpick-ghost-typed">{query}</span>
@@ -157,7 +234,7 @@ export function ComponentPicker({
               } else if (event.key === "Enter") {
                 event.preventDefault();
                 event.stopPropagation();
-                if (rows[selectedRow]) onPick(rows[selectedRow], machineTargets ? machine : undefined);
+                if (rows[selectedRow]) pick(rows[selectedRow]);
               }
             }}
           />
@@ -171,7 +248,7 @@ export function ComponentPicker({
               aria-selected={index === selectedRow}
               className={`palette-row cpick-row ${index === selectedRow ? "palette-row-active" : ""}`}
               onMouseEnter={() => setSelectedRow(index)}
-              onClick={() => onPick(component, machineTargets ? machine : undefined)}
+              onClick={() => pick(component)}
             >
               <span className="cpick-name">{component.label}</span>
               <span className="cpick-path">{lastFolder(component.path)}</span>
@@ -186,6 +263,7 @@ export function ComponentPicker({
           <span>↑↓ choose</span>
           <span>Esc cancel</span>
         </div>
+        </>)}
       </div>
     </div>
   );

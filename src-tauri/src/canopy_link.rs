@@ -60,7 +60,14 @@ pub(crate) fn parse(bytes: &[u8]) -> Option<(u8, u32, &[u8])> {
 /// Backoff before reconnect attempt `n` (0-based): 1s doubling to 30s, plus up
 /// to a quarter of jitter so a fleet of laptops waking together spreads out.
 pub(crate) fn backoff(n: u32, jitter: f64) -> Duration {
-    let base = (1u64 << n.min(5)).min(30) as f64;
+    backoff_capped(n, jitter, 30)
+}
+
+/// The same doubling, up to `cap_secs`. A link that never connects (its
+/// workspace stopped, its account gone) should not retry every half minute all
+/// day; T3 Code caps such retries at five minutes.
+pub(crate) fn backoff_capped(n: u32, jitter: f64, cap_secs: u64) -> Duration {
+    let base = (1u64 << n.min(10)).min(cap_secs.max(1)) as f64;
     Duration::from_secs_f64(base + base * 0.25 * jitter.clamp(0.0, 1.0))
 }
 
@@ -362,6 +369,15 @@ mod tests {
         assert_eq!(backoff(1, 0.0), Duration::from_secs(2));
         assert_eq!(backoff(9, 0.0), Duration::from_secs(30));
         assert!(backoff(9, 1.0) <= Duration::from_secs_f64(37.5));
+    }
+
+    #[test]
+    fn a_longer_cap_keeps_doubling_until_it_is_reached() {
+        assert_eq!(backoff_capped(5, 0.0, 300), Duration::from_secs(32));
+        assert_eq!(backoff_capped(8, 0.0, 300), Duration::from_secs(256));
+        assert_eq!(backoff_capped(9, 0.0, 300), Duration::from_secs(300));
+        assert_eq!(backoff_capped(40, 0.0, 300), Duration::from_secs(300));
+        assert!(backoff_capped(40, 1.0, 300) <= Duration::from_secs_f64(375.0));
     }
 
     /// A browser request framed by the edge reaches the router with the

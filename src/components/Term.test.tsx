@@ -189,6 +189,47 @@ describe("Term spawn failure", () => {
     render(<Term cwd="/w/site" active streaming={false} onSpawned={onSpawned} onExited={vi.fn()} />);
     await waitFor(() => expect(onSpawned).toHaveBeenCalledWith(91,"Native label",42));
   });
+  it("starts on another machine's host, binds an alias id, and types the command there", async () => {
+    const { liveEnvironments } = await import("../environments/live");
+    const calls: { command: string; args: Record<string, unknown> }[] = [];
+    const host = {
+      kind: "socket" as const,
+      invoke: async (command: string, args: Record<string, unknown> = {}) => {
+        calls.push({ command, args });
+        if (command === "pty_spawn") return { id: 5, session_generation: 1, cols: 80, rows: 24, generation: 3 };
+        return undefined;
+      },
+      listen: async () => () => {},
+      channel: () => ({ onmessage: () => {} }),
+    };
+    liveEnvironments.register(
+      { id: "remote:ws9", name: "Workstation", host: host as never, status: "connected", readOnly: false },
+      { secondary: true },
+    );
+    mockCommands({ ...events, pty_renderer_register: () => ({ generation: 1, sessions: [] }), pty_detach_desktop: () => undefined });
+    await (await import("../ipc")).ptyRendererRegister();
+    const onSpawned = vi.fn();
+    render(
+      <Term cwd="/workspace/app" machine="remote:ws9" initialCommand="claude" active streaming={false} onSpawned={onSpawned} onExited={vi.fn()} />,
+    );
+    await waitFor(() => expect(onSpawned).toHaveBeenCalled());
+    const alias = onSpawned.mock.calls[0][0] as number;
+    expect(alias).toBeGreaterThanOrEqual(2 ** 40);
+    expect(calls.find((c) => c.command === "pty_spawn")?.args).toMatchObject({ cwd: "/workspace/app" });
+    // The command is typed on that machine, under the machine's own id.
+    await waitFor(() => expect(calls.find((c) => c.command === "pty_write")?.args).toMatchObject({ id: 5, data: "claude\r" }));
+    liveEnvironments.unregister("remote:ws9");
+  });
+
+  it("says so when the machine is not connected, instead of starting here", async () => {
+    mockCommands({ ...events, pty_renderer_register: () => ({ generation: 1, sessions: [] }) });
+    await (await import("../ipc")).ptyRendererRegister();
+    const spawned = vi.fn();
+    mockCommands({ ...events, pty_spawn: () => { spawned(); return { id: 1, generation: 1, cols: 80, rows: 24 }; } });
+    render(<Term cwd="/workspace/app" machine="remote:gone" active streaming={false} onSpawned={vi.fn()} onExited={vi.fn()} />);
+    await new Promise((r) => setTimeout(r, 50));
+    expect(spawned).not.toHaveBeenCalled();
+  });
   it("marks the tab exited/failed when the shell-run spawn is refused", async () => {
     mockCommands({
       ...events,

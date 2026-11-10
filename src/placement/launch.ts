@@ -26,6 +26,8 @@ export interface LaunchQuery {
   /** Names gathered alongside resources, used by actionable transitions. */
   targets?: DisplayTarget[];
   sticky?: Target;
+  /** See PlacementInput.noLocalFallback (hand-offs). */
+  noLocalFallback?: boolean;
 }
 
 export function decideLaunch(query: LaunchQuery): PlacementDecision {
@@ -36,6 +38,7 @@ export function decideLaunch(query: LaunchQuery): PlacementDecision {
     resources: query.resources,
     projectAvailability: query.availability,
     sticky: query.sticky,
+    noLocalFallback: query.noLocalFallback,
   });
   const targetName = decision.target
     ? query.targets?.find((item) => sameTarget(item.target, decision.target as Target))?.name
@@ -49,6 +52,7 @@ export function decideHandoff(query: LaunchQuery & { from: Target }): PlacementD
   return decideLaunch({
     ...query,
     sticky: undefined,
+    noLocalFallback: true,
     resources: query.resources.filter((resource) => !sameTarget(resource.target, query.from)),
   });
 }

@@ -31,6 +31,14 @@ vi.mock("../ipc", () => ({
   setupAgentHooks: () => Promise.resolve({ summary: "" }),
 }));
 
+const panelProps = vi.hoisted(() => ({ last: undefined as undefined | { mode: string; allProjects: { name: string; roots: string[] }[] } }));
+vi.mock("./AgentControlPanel", () => ({
+  AgentControlPanel: (props: { mode: string; allProjects: { name: string; roots: string[] }[] }) => {
+    panelProps.last = props;
+    return <div data-testid="acp">{props.mode}:{props.allProjects.map((p) => p.name).join(",")}</div>;
+  },
+}));
+
 const claimOf = (over: Partial<ipcTypes.AgentClaim> = {}): ipcTypes.AgentClaim => ({
   id: "c1",
   paths: ["/repo/src/auth.ts"],
@@ -217,5 +225,36 @@ describe("claim rows on the page", () => {
     );
     seams.releaseClaim = undefined;
     claims.length = 0;
+  });
+});
+
+describe("the every-project modes", () => {
+  const projects = [
+    { name: "canopy", roots: ["/repo"] },
+    { name: "coraa", roots: ["/coraa", "/coraa-web"] },
+    { name: "indie", roots: ["/indie"] },
+  ];
+
+  it("graph and table show every open project, not just this one", async () => {
+    page({ allProjects: projects });
+    await userEvent.click(screen.getByRole("button", { name: "table" }));
+    expect(screen.getByText("every project")).toBeTruthy();
+    expect(panelProps.last?.mode).toBe("table");
+    expect(panelProps.last?.allProjects.map((p) => p.name)).toEqual(["canopy", "coraa", "indie"]);
+    await userEvent.click(screen.getByRole("button", { name: "graph" }));
+    expect(panelProps.last?.mode).toBe("graph");
+    expect(panelProps.last?.allProjects).toHaveLength(3);
+  });
+
+  it("falls back to this project alone when the app does not pass the list", async () => {
+    page();
+    await userEvent.click(screen.getByRole("button", { name: "graph" }));
+    expect(panelProps.last?.allProjects).toEqual([{ name: "canopy", roots: ["/repo"] }]);
+  });
+
+  it("cards stay scoped to this project", () => {
+    page({ allProjects: projects });
+    expect(screen.queryByTestId("acp")).toBeNull();
+    expect(screen.getByText("canopy", { selector: ".agv-project" })).toBeTruthy();
   });
 });

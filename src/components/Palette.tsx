@@ -25,6 +25,22 @@ interface Row {
   text?: string;
 }
 
+/** The files under each root, listed independently and merged in root order.
+ *  Exported for tests. A root that fails contributes nothing. */
+export async function listComponentFiles(
+  roots: string[],
+  list: (roots: string[], limit?: number) => Promise<string[]> = ipc.fsListFiles,
+): Promise<string[]> {
+  if (roots.length <= 1) return list(roots).catch(() => []);
+  const results = await Promise.all(
+    roots.map((root) => list([root], PER_ROOT_LIMIT).catch(() => [] as string[])),
+  );
+  return [...new Set(results.flat())];
+}
+
+/** Each component's own budget when several are searched at once. */
+const PER_ROOT_LIMIT = 12_000;
+
 const base = (p: string) => p.slice(p.lastIndexOf("/") + 1);
 
 export function Palette({ mode, components, onOpen, onClose }: PaletteProps) {
@@ -65,7 +81,17 @@ export function Palette({ mode, components, onOpen, onClose }: PaletteProps) {
 
   useEffect(() => {
     if (mode !== "files") return;
-    void ipc.fsListFiles(roots).then(setFiles).catch(() => setFiles([]));
+    // One call per component, so a component that cannot be listed (outside
+    // the workspace scope, missing, or so large it uses the whole budget)
+    // never hides the others. A single call over every root failed as a unit
+    // and the catch showed that as "No results".
+    let stale = false;
+    void listComponentFiles(roots).then((all) => {
+      if (!stale) setFiles(all);
+    });
+    return () => {
+      stale = true;
+    };
   }, [mode, roots.join("\n")]);
   useEffect(() => {
     let stopped = false;

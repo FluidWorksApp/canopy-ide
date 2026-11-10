@@ -125,6 +125,17 @@ export interface Project {
   readOnly?: boolean;
   id: string;
   name: string;
+  /** On a workspace copy of a project: the id of the project on the Mac it was
+   *  mirrored from (src/remoteExecution/mirror.ts). See placement/identity.ts. */
+  mirroredFrom?: string;
+  /** The mirror stopped partway: this copy is not complete yet. */
+  mirrorIncomplete?: boolean;
+  /** The same project on other machines: `{env, id}` per machine. Set when a
+   *  project that began on a workspace is brought to this Mac (docs/teleport-design.md). */
+  linkedTo?: { env: string; id: string }[];
+  /** Pinned in the project tab strip: kept at the front, in place, whatever
+   *  else is opened, closed or dragged. */
+  pinned?: boolean;
   components: Component[];
   /** Let agent sessions in this project see each other's recent work. Off by
    *  default: it puts one session's prompts into another's context, which is
@@ -1331,7 +1342,7 @@ export const BUILTIN_AGENT_CLIS: AgentCliDef[] = [
       managedIntegration: true,
       conversationStore: {
         path: "~/.omp/agent/sessions/**/*.jsonl",
-        note: "Sub-agent transcripts are indexed under their parent conversation.",
+        note: "Sub-agent transcripts are indexed under their parent.",
         open: "session",
       },
     },
@@ -2302,3 +2313,11 @@ export function componentForPath(
 // Shared credential slots are provider adapters, separate from CLI launch identities.
 export const SHARED_ACCOUNT_SLOTS = ["git", "claude", "codex"] as const;
 export const SHARED_ACCOUNT_PROVIDERS = {git: "github", claude: "anthropic", codex: "openai"} as const;
+
+/** The open project order with pinned projects first, each group keeping its own
+ *  order. A pinned tab never ends up behind an unpinned one, whether it was
+ *  dragged there or something was opened after it. */
+export function orderWithPins(openIds: readonly string[], projects: readonly Pick<Project, "id" | "pinned">[]): string[] {
+  const pinned = new Set(projects.filter((p) => p.pinned).map((p) => p.id));
+  return [...openIds.filter((id) => pinned.has(id)), ...openIds.filter((id) => !pinned.has(id))];
+}

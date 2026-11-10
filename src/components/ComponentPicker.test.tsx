@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import {cleanup,fireEvent,render,screen} from '@testing-library/react';
+import {cleanup,fireEvent,render,screen,within} from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import {afterEach,expect,it,vi} from 'vitest';
 import {ComponentPicker} from './ComponentPicker';
@@ -138,4 +138,34 @@ it('gives the keyboard back to where it was when cancelled',async()=>{
   fireEvent.mouseDown(document.querySelector('.palette-backdrop')!);
   await new Promise(r=>requestAnimationFrame(()=>r(null)));
   expect(onCancel).toHaveBeenCalled();expect(document.activeElement).toBe(outside);outside.remove();
+});
+
+const ACCOUNTS={profiles:[{id:'default',label:'Default'},{id:'work',label:'Work'}],initial:'work'};
+
+it('offers the agent\'s accounts, preselects the last used one, and returns the choice',()=>{
+  const onPick=vi.fn();
+  render(<ComponentPicker title="New Codex" components={COMPONENTS} recents={[]} machineTargets={MACHINES} accounts={ACCOUNTS} onPick={onPick} onCancel={()=>{}}/>);
+  const group=screen.getByRole('radiogroup',{name:'Account'});
+  expect(within(group).getByRole('radio',{name:'Work'})).toHaveAttribute('aria-checked','true');
+  fireEvent.click(within(group).getByRole('radio',{name:'Default'}));
+  fireEvent.click(screen.getAllByRole('option')[0]);
+  expect(onPick).toHaveBeenCalledWith(expect.objectContaining({id:'a'}),expect.anything(),'default');
+});
+
+it('shows no account row when the agent has a single account',()=>{
+  render(<ComponentPicker title="New Codex" components={COMPONENTS} recents={[]} onPick={()=>{}} onCancel={()=>{}}/>);
+  expect(screen.queryByRole('radiogroup',{name:'Account'})).toBeNull();
+});
+
+it('with the component already decided, asks only where to run and which account, and opens on Enter',async()=>{
+  const onPick=vi.fn();
+  render(<ComponentPicker title="New Claude Code" components={COMPONENTS} recents={[]} machineTargets={MACHINES} accounts={ACCOUNTS} fixedComponent={COMPONENTS[1]} onPick={onPick} onCancel={()=>{}}/>);
+  expect(screen.queryByRole('listbox',{name:'Components'})).toBeNull();
+  expect(screen.queryByLabelText('Component')).toBeNull();
+  expect(screen.getByText(/in web/)).toBeTruthy();
+  expect(screen.getByRole('radiogroup',{name:'Run on machine'})).toBeTruthy();
+  expect(screen.getByRole('radiogroup',{name:'Account'})).toBeTruthy();
+  fireEvent.click(within(screen.getByRole('radiogroup',{name:'Account'})).getByRole('radio',{name:'Default'}));
+  fireEvent.click(screen.getByRole('button',{name:/Open/}));
+  expect(onPick).toHaveBeenCalledWith(expect.objectContaining({id:'w'}),expect.anything(),'default');
 });

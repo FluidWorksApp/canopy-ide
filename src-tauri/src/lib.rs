@@ -1,4 +1,5 @@
 mod agent_cli;
+mod teleport;
 mod agent_instructions;
 mod agent_life;
 mod agentid;
@@ -48,7 +49,6 @@ mod lsp;
 mod maintenance;
 mod mcp;
 mod mcp_client;
-mod memory_tool;
 mod mesh;
 mod notes;
 mod notify;
@@ -695,16 +695,25 @@ pub fn run() {
             selftest::selftest_spawn_remote,
             selftest::selftest_store_contains,
             companion::companion_spawn,
+            companion::companion_dir,
             companion::companion_write,
             companion::companion_kill,
             companion::companion_status,
-            companion::companion_store_read,
-            companion::companion_store_write,
             structured_runner::structured_runner_spawn,
             structured_runner::structured_runner_write,
             structured_runner::structured_runner_kill,
             brain::brain_call,
             brain::brain_kill,
+            brain::brain_write,
+            brain::brain_home,
+            teleport::teleport_home,
+            teleport::teleport_transcript_read,
+            teleport::teleport_transcript_write,
+            teleport::teleport_git_relation,
+            teleport::teleport_bundle_create,
+            teleport::teleport_bundle_apply,
+            teleport::teleport_patch_create,
+            teleport::teleport_patch_apply,
             ledger::ledger_append,
             ledger::ledger_query,
             ledger::ledger_root,
@@ -715,6 +724,7 @@ pub fn run() {
             session_doc::session_transcript_tail,
             session_activity::session_activity,
             gates_commands::gates_policy_write,
+            gates_commands::gates_set_global,
             gates_commands::gates_policy_read,
             gates_commands::gates_allow_once,
             tasks::task_reserve,
@@ -803,6 +813,8 @@ pub fn run() {
             android::android_layout,
             android::android_foreground,
             android::android_tap,
+            android::android_reverse,
+            android::android_reverse_remove,
             android::android_text,
             android::android_swipe,
             android::android_key,
@@ -891,6 +903,8 @@ pub fn run() {
             fsx::fs_read_file,
             fsx::fs_write_file,
             fsx::fs_stat,
+            fsx::fs_set_link_grants,
+            fsx::fs_grant_link_file,
             fsx::fs_repo_path,
             fsx::fs_stat_many,
             fsx::fs_list_files,
@@ -961,6 +975,7 @@ pub fn run() {
             git::gh_pr_diff,
             git::gh_pr_body,
             git::gh_pr_state,
+            git::gh_pr_branch_state,
             git::gh_pr_review,
             git::git_show_at,
             git::git_rev_count,
@@ -1073,6 +1088,7 @@ pub fn run() {
             browser::browser_supported,
             workspace_forward::workspace_forward_open,
             workspace_forward::workspace_forward_ticket,
+            workspace_forward::workspace_forward_probe,
             workspace_forward::workspace_forward_close,
             browser::browser_open,
             browser::browser_navigate,

@@ -45,6 +45,30 @@ describe("UnifiedWorkspace", () => {
     expect(screen.getByText("Projects on other machines appear after you switch to them.")).toBeInTheDocument();
   });
 
+  it("marks the active machine and switches to another online one", async () => {
+    const onSwitch = vi.fn();
+    render(<UnifiedWorkspace gather={async () => data} onSwitch={onSwitch} activeTarget={{ kind: "local" }} />);
+    await screen.findByRole("table");
+    expect(screen.getByText("Active now")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Switch to This Mac" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Switch to Studio" })).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Switch to Build Box" }));
+    expect(onSwitch).toHaveBeenCalledWith({ kind: "remote", workspaceId: "w1" });
+  });
+
+  it("says sessions, not agent slots, for a workspace read from outside", async () => {
+    const withSessions: Gathered = {
+      ...data,
+      resources: data.resources.map((r) =>
+        r.target.kind === "remote" ? { ...r, activeAgents: 3, loadBasis: "sessions" as const } : r,
+      ),
+    };
+    render(<UnifiedWorkspace gather={async () => withSessions} />);
+    await screen.findByRole("table");
+    expect(screen.getByText("3 sessions running")).toBeInTheDocument();
+    expect(screen.queryByText("3 of 4 agent slots in use")).toBeNull();
+  });
+
   it("filters by named machine and type, then opens a thread", async () => {
     const onOpen = vi.fn();
     render(<UnifiedWorkspace gather={async () => data} onOpen={onOpen} />);

@@ -298,7 +298,7 @@ export const OVERLAY_SURFACES: OverlaySurface[] = [
     kind: "persistent",
     covers: "center",
     open: () => {
-      click("button.workspace-handle");
+      click("button.agent-card-workspace");
     },
     close: escape,
     why: "Only exists while an agent has a workspace — skipped otherwise.",

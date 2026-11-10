@@ -1,14 +1,12 @@
-// What the brain gets to see before it plans: the repo's top level, the files
-// that mention the request's words, and what the team's memory says about the
-// repo. The brain call is read-only and could look for itself, but every file
-// it opens is time the person spends watching "Planning…" — a quick, bounded
+// What the brain gets to see before it plans: the repo's top level and the files
+// that mention the request's words. The brain call is read-only and could
+// look for itself, but every file it opens is time the person spends watching "Planning…" — a quick, bounded
 // look here is cheaper than letting it wander.
 //
 // Every source is optional. A failed read is an empty list, never an error:
 // a plan from less context beats no plan.
 
 import * as ipc from "../ipc";
-import { listMemories } from "../memoryLedger";
 import type { PlanContext } from "./plan";
 
 const STOP = new Set(
@@ -40,16 +38,6 @@ const rel = (dir: string, path: string) => {
   return path.startsWith(`${base}/`) ? path.slice(base.length + 1) : path;
 };
 
-/** One line for a memory entry, whatever shape the memory feature gave it. */
-function memoryLine(e: { subject?: string; data: unknown }): string {
-  const d = (e.data ?? {}) as Record<string, unknown>;
-  const text = [d.text, d.summary, d.body, d.note, d.fact, e.subject].find(
-    (v): v is string => typeof v === "string" && v.trim().length > 0,
-  );
-  const line = text ?? JSON.stringify(e.data ?? "");
-  return line.replace(/\s+/g, " ").slice(0, 240);
-}
-
 export async function gatherPlanContext(dir: string, request: string): Promise<PlanContext> {
   const tree = ipc
     .fsReadDir(dir)
@@ -71,11 +59,5 @@ export async function gatherPlanContext(dir: string, request: string): Promise<P
       .map(([p]) => rel(dir, p))
       .slice(0, 40);
   });
-  // Only memories a person approved: the memory kind also holds proposed and
-  // quarantined suggestions (some from sessions that read web pages) and other
-  // features' caches, and none of those may steer a plan.
-  const memory = listMemories(dir)
-    .then((rows) => rows.filter((e) => e.status === "approved").slice(0, 10).map(memoryLine).filter(Boolean))
-    .catch(() => [] as string[]);
-  return { tree: await tree, relevant: await relevant, memory: await memory };
+  return { tree: await tree, relevant: await relevant };
 }

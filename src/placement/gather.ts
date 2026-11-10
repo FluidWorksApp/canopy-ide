@@ -9,9 +9,11 @@ import { loadWorkspace } from "../projects";
 import { listT3Machines, connectT3Machine } from "../t3connect/api";
 import { listShell } from "../t3connect/methods";
 import { activeWorkspace } from "../remoteExecution/workspace";
+import { probeSessions, runningSessions } from "../remoteExecution/workspaceProbe";
 import { peekWorkspaceList, refreshWorkspaceList } from "../remoteExecution/workspaceListCache";
 import { localRemoteJobs } from "../meshJobs";
 import { collectResources, type ResourceSources } from "./resources";
+import { canonicalProjects, type ProjectLike } from "./identity";
 import { buildUnifiedRows, type UnifiedInput, type UnifiedRow } from "./unified";
 import { sameTarget, type DisplayTarget, type ResourceSnapshot, type Target } from "./types";
 
@@ -69,10 +71,18 @@ export function realSources(): ResourceSources {
     },
     localCapacity: LOCAL_CAPACITY,
     remoteWorkspaces: workspaces,
-    // Only the active host's terminals can be counted; others are reported as
-    // unknown so balance does not mistake them for idle.
-    remoteActiveAgents: async (id) =>
-      isRemoteHost() && activeWorkspace()?.connection.workspaceId === id ? (await agentStats()).length : "unknown",
+    // The active host's terminals are counted directly; any other ready workspace
+    // is read through the account (workspaceProbe.ts).
+    remoteActiveAgents: async (id) => {
+      if (isRemoteHost() && activeWorkspace()?.connection.workspaceId === id) return (await agentStats()).length;
+      // Any other ready workspace is asked directly. Failure is "unknown", never
+      // "idle": an unreachable workspace must not look free to the balancer.
+      try {
+        return { sessions: runningSessions(await probeSessions(id)) };
+      } catch {
+        return "unknown";
+      }
+    },
     t3Machines: listT3Machines,
     t3ActiveAgents: async (id) => {
       const rpc = await connectT3Machine(id);
@@ -189,7 +199,10 @@ export async function gatherUnified(): Promise<Gathered> {
     loadWorkspace().catch(() => null),
     agentStats().catch(() => []),
   ]);
-  const projects = (ws?.projects ?? []).map((p) => ({ id: p.id, name: p.name }));
+  // The workspace's projects go by the Mac's ids where the mirror made them
+  // (placement/identity.ts), so a mirrored project counts as set up there. This
+  // Mac's own store has no such links and is unchanged.
+  const projects = canonicalProjects((ws?.projects ?? []) as ProjectLike[]);
   const agents = stats.map((s) => ({
     id: String(s.id),
     name: s.name ?? s.title,
@@ -197,6 +210,22 @@ export async function gatherUnified(): Promise<Gathered> {
   }));
 
   const onRemote = isRemoteHost() ? activeWorkspace()?.connection.workspaceId : undefined;
+  // Other ready workspaces: their running sessions, read through the account.
+  // The listing is cached by the load probe just above, so this is not a second
+  // round trip. An unreachable one is named rather than shown as empty.
+  const sessionsByWorkspace = new Map<string, { id: string; title: string }[]>();
+  await Promise.all(
+    list
+      .filter((w) => w.id !== onRemote && w.state === "ready")
+      .map(async (w) => {
+        try {
+          const running = (await probeSessions(w.id)).filter((x) => x.exitCode == null);
+          sessionsByWorkspace.set(w.id, running.map((x) => ({ id: String(x.id), title: x.title || `Session ${x.id}` })));
+        } catch {
+          notes.push(`Could not read ${w.name}'s sessions.`);
+        }
+      }),
+  );
   const input: UnifiedInput = {
     local: onRemote ? { projects: [], agents: [] } : { projects, agents },
     remotes: list.map((w) => ({
@@ -204,6 +233,7 @@ export async function gatherUnified(): Promise<Gathered> {
       name: w.name,
       state: w.state,
       ...(w.id === onRemote ? { projects, agents } : {}),
+      ...(sessionsByWorkspace.has(w.id) ? { sessions: sessionsByWorkspace.get(w.id) } : {}),
     })),
     t3: [],
     jobs: localRemoteJobs()

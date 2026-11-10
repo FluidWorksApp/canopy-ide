@@ -1991,7 +1991,9 @@ mod tests {
     #[test]
     fn devicehub_android_sdk_from_an_adb_on_path() {
         let home = temp_dir("sdkpath");
-        let root = home.join("custom-sdk");
+        // Canonical: on macOS the temp dir is a symlink (/var → /private/var) and
+        // the SDK root comes back resolved.
+        let root = std::fs::canonicalize(&home).unwrap().join("custom-sdk");
         std::fs::create_dir_all(root.join("platform-tools")).unwrap();
         std::fs::write(root.join("platform-tools").join("adb"), "").unwrap();
         let e = env(&[

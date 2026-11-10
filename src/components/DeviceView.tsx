@@ -24,6 +24,7 @@ import {
   type DeviceAnnotation,
 } from "../android";
 import * as ipc from "../ipc";
+import { activeWorkspace } from "../remoteExecution/workspace";
 import {
   deviceHubAttach,
   deviceHubBoot,
@@ -211,6 +212,53 @@ export default function DeviceView({
       if (timer) clearTimeout(timer);
     };
   }, [visible, serial, dir, streaming, platform]);
+
+  // A remote workspace's servers are forwarded onto this computer's loopback
+  // (workspace_forward.rs), so `adb reverse` is all a local device needs to open
+  // them as localhost:<port>. Re-checked while the tab is open, because ports
+  // appear as servers start; each is reversed once per device.
+  const [reachable, setReachable] = useState<number[]>([]);
+  const reversed = useRef(new Set<number>());
+  useEffect(() => {
+    if (!visible || !serial || platform !== "android") return;
+    let stopped = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    let failures = 0;
+    const sync = async () => {
+      const ports = activeWorkspace()?.forwardedLoopbackPorts() ?? [];
+      const fresh = ports.filter((p) => !reversed.current.has(p));
+      if (fresh.length > 0) {
+        try {
+          const ok = await ipc.androidReverse(serial, fresh, dir);
+          for (const p of ok) reversed.current.add(p);
+          failures = 0;
+          if (!stopped) setReachable([...reversed.current].sort((a, b) => a - b));
+        } catch {
+          // adb refused (device offline or unauthorized): the tab already says
+          // so. Ask less and less often rather than spawning adb every 5s.
+          failures += 1;
+        }
+      }
+      if (!stopped) {
+        timer = setTimeout(() => void sync(), Math.min(60_000, 5_000 * 2 ** Math.min(failures, 4)));
+      }
+    };
+    void sync();
+    return () => {
+      stopped = true;
+      if (timer) clearTimeout(timer);
+    };
+  }, [visible, serial, dir, platform]);
+  // Undo the mappings when the device changes or the tab goes away, so nothing
+  // is left reversed on a phone that is no longer being looked at.
+  useEffect(() => {
+    const done = reversed.current;
+    return () => {
+      const ports = [...done];
+      done.clear();
+      if (serial && ports.length > 0) void ipc.androidReverseRemove(serial, ports, dir).catch(() => {});
+    };
+  }, [serial, dir]);
 
   // Drop the last frame when the tab unmounts; nothing else owns this URL.
   useEffect(
@@ -552,6 +600,14 @@ export default function DeviceView({
         {!streaming && hub && !hub.installed && !declined && platform === "android" && (
           <span className="device-row-sub" title="Install the device tools from the device picker">
             Screenshots only. Change device to set up live streaming.
+          </span>
+        )}
+        {reachable.length > 0 && (
+          <span
+            className="device-row-sub"
+            title="Servers in your remote workspace, reachable from this device as localhost:<port> through adb reverse"
+          >
+            Workspace ports on this device: {reachable.join(", ")}
           </span>
         )}
         {resolving && <span className="device-busy">Reading the screen…</span>}

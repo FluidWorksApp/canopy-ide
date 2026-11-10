@@ -6,7 +6,7 @@
 // prompt and the times it started and ended), the agent's change journal
 // (which file each edit tool touched, and whether that text is still in the
 // tree), the session->PR provenance edges, the ledger entries other features
-// filed against the session (plans, receipts, memories, awareness notes,
+// filed against the session (plans, receipts, awareness notes,
 // handoffs), and the tail of the CLI's own transcript.
 //
 // This module is pure: `assembleSessionDoc` takes those inputs and returns the
@@ -16,7 +16,7 @@
 // is optional and every section has an honest empty state.
 //
 // Ledger entries come from sibling features that own their own `data` shapes
-// (receipt, plan, memory, awareness). They are read defensively: a field that
+// (receipt, plan, awareness). They are read defensively: a field that
 // is missing or of the wrong type is skipped, never trusted.
 
 import type { AgentEdit, ProvenanceEdge, SessionDigest, TurnList } from "../ipc";
@@ -87,7 +87,7 @@ export interface SessionDocument {
   /** Hunks this session wrote that are still in the tree. */
   survivingEdits: number;
   latestReceipt?: ReceiptBadge;
-  /** Memories and awareness notes other features filed about this session. */
+  /** Awareness notes other features filed about this session. */
   notes: DocNote[];
   /** Earlier handoffs of this session, newest first. */
   handoffs: LedgerEntry[];
@@ -280,7 +280,7 @@ export function assembleSessionDoc(input: SessionDocInputs): SessionDocument {
   for (const e of input.provenance ?? []) if (e.session_id === sessionId) prs.set(e.pr_number, e.pr_url);
 
   const notes: DocNote[] = ledger
-    .filter((e) => e.kind === "memory" || e.kind === "awareness")
+    .filter((e) => e.kind === "awareness")
     .flatMap((e) => {
       const text = noteText(e);
       return text ? [{ id: e.id, kind: e.kind, ts: e.ts, text: firstLine(text, 400) }] : [];

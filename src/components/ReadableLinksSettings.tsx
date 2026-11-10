@@ -34,16 +34,16 @@ export function ReadableLinksSettings(){
  function open(url:string){window.dispatchEvent(new CustomEvent('canopy:follow-deep-link',{detail:{url}}));}
  async function revoke(link:ManagedLink){
   const current=generation.current;setRevoking(link.url);setError('');
-  try{await revokeReadableLink(link.url);if(current!==generation.current)return;setLinks(items=>items?.filter(item=>item.url!==link.url)??null);setConfirm(null);setNotice(`Revoked ${describeLink(link).name}. Anyone opening it now sees that it was revoked.`);}
+  try{await revokeReadableLink(link.url);if(current!==generation.current)return;setLinks(items=>items?.filter(item=>item.url!==link.url)??null);setConfirm(null);setNotice(`Revoked ${describeLink(link).name}.`);}
   catch(e){if(current===generation.current)setError(`Couldn't revoke. ${reason(e)}`);}
   finally{if(current===generation.current)setRevoking(null);}
  }
  return <section className="readable-links" aria-labelledby="readable-links-title" aria-busy={links===null&&!error}>
   <div className="readable-links-head"><h4 id="readable-links-title">Links</h4><Button size="sm" variant="ghost" onClick={()=>void load()} disabled={links===null}>Refresh</Button></div>
-  <p className="set-desc">Readable links to workspaces, shared sessions and team messages that you made, or that you manage as a workspace owner or team admin. A link only opens for people who already have access.</p>
+  <p className="set-desc">Links you made or manage. They only open for people with access.</p>
   {links===null&&!error&&<p className="readable-links-empty">Loading links…</p>}
-  {pending&&<p className="readable-links-empty" role="status">Links start working once Canopy's server is updated. Nothing to change on your side.</p>}
-  {links&&links.length===0&&!error&&!pending&&<p className="readable-links-empty">No links yet. Use <strong>Copy link</strong> on a workspace, a shared session or a chat message to make one.</p>}
+  {pending&&<p className="readable-links-empty" role="status">Links start working once Canopy's server is updated.</p>}
+  {links&&links.length===0&&!error&&!pending&&<p className="readable-links-empty">No links yet. Use <strong>Copy link</strong> on a workspace, session or message.</p>}
   {links&&links.length>0&&<ul className="readable-links-list">{links.map(link=>{
    const {kind,name,detail}=describeLink(link),when=shortDate(link.about?.activityAt??link.createdAt);
    const activity=when?(link.about?.activity==='opened'?`Last opened ${when}`:`Made ${when}`):'';

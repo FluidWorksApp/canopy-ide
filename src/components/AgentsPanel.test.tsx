@@ -349,3 +349,115 @@ describe("restorable sessions", () => {
     expect(opened[0]).toMatchObject({ kind: "session", sessionId: "past-1", agent: "claude", cwd: "/repo" });
   });
 });
+
+describe("keyboard use", () => {
+  const two = () => [
+    session({ id: 7, name: "Ember" }),
+    session({ id: 8, name: "Juniper", cwd: "/repo/web" }),
+  ];
+  const list = () => screen.getByRole("listbox", { name: "Agents and sessions" });
+
+  it("walks the list with j and k, and Enter jumps to the terminal under the cursor", async () => {
+    const onJumpToPty = vi.fn();
+    panel({ visible: true, stats: two(), onJumpToPty });
+    await screen.findByText("Juniper");
+    list().focus();
+    // The cursor starts on the first row.
+    await userEvent.keyboard("{Enter}");
+    expect(onJumpToPty).toHaveBeenLastCalledWith(7);
+    await userEvent.keyboard("j");
+    await userEvent.keyboard("{Enter}");
+    expect(onJumpToPty).toHaveBeenLastCalledWith(8);
+    // k walks back; the arrows do the same.
+    await userEvent.keyboard("k");
+    await userEvent.keyboard("{Enter}");
+    expect(onJumpToPty).toHaveBeenLastCalledWith(7);
+    await userEvent.keyboard("{ArrowDown}{Enter}");
+    expect(onJumpToPty).toHaveBeenLastCalledWith(8);
+    // The listbox names the row under the cursor, for screen readers and tests alike.
+    const active = list().getAttribute("aria-activedescendant");
+    expect(document.getElementById(active ?? "")?.getAttribute("aria-selected")).toBe("true");
+  });
+
+  it("filters by typing, from the box that takes focus with /", async () => {
+    panel({ visible: true, stats: two() });
+    await screen.findByText("Juniper");
+    list().focus();
+    await userEvent.keyboard("/");
+    const box = screen.getByRole("textbox", { name: "Filter agents" });
+    expect(document.activeElement).toBe(box);
+    await userEvent.keyboard("juni");
+    expect(screen.getByText("Juniper")).toBeTruthy();
+    expect(screen.queryByText("Ember")).toBeNull();
+    // Esc clears the filter and hands the keys back to the list.
+    await userEvent.keyboard("{Escape}");
+    expect(document.activeElement).toBe(list());
+    expect(screen.getByText("Ember")).toBeTruthy();
+  });
+
+  it("says so when nothing matches", async () => {
+    panel({ visible: true, stats: two() });
+    await userEvent.type(screen.getByRole("textbox", { name: "Filter agents" }), "zzz");
+    expect(screen.getByText(/Nothing matches/)).toBeTruthy();
+  });
+
+  it("closes an agent only on the second x, so one stray key does nothing", async () => {
+    const kill = vi.spyOn(await import("../ipc"), "ptyKill");
+    panel({ visible: true, stats: two() });
+    await screen.findByText("Juniper");
+    list().focus();
+    await userEvent.keyboard("x");
+    expect(kill).not.toHaveBeenCalled();
+    expect(screen.getByText("press x again to close")).toBeTruthy();
+    await userEvent.keyboard("x");
+    expect(kill).toHaveBeenCalledWith(7);
+  });
+
+  it("moving the cursor disarms a pending close", async () => {
+    const kill = vi.spyOn(await import("../ipc"), "ptyKill");
+    kill.mockClear();
+    panel({ visible: true, stats: two() });
+    await screen.findByText("Juniper");
+    list().focus();
+    await userEvent.keyboard("xj");
+    expect(screen.queryByText("press x again to close")).toBeNull();
+    await userEvent.keyboard("x");
+    expect(kill).not.toHaveBeenCalled();
+  });
+
+  it("toggles shared context with s and opens the key hints with ?", async () => {
+    const onShareContext = vi.fn();
+    panel({ visible: true, stats: two(), onShareContext });
+    await screen.findByText("Juniper");
+    list().focus();
+    await userEvent.keyboard("s");
+    expect(onShareContext).toHaveBeenCalledWith(true);
+    await userEvent.keyboard("?");
+    expect(screen.getByLabelText("Keyboard shortcuts")).toBeTruthy();
+  });
+
+  it("restores the past session under the cursor with Enter, and shows only the newest five", async () => {
+    seams.digests = Array.from({ length: 7 }, (_, i) =>
+      digest({
+        session_id: `past-${i}`,
+        // One row stands for a directory, so each session gets its own.
+        cwd: `/repo/d${i}`,
+        surface: `${90 + i}`,
+        state: "ended",
+        updated: 1000 + i,
+        prompts: [`prompt ${i}`],
+      }),
+    );
+    const onRestore = vi.fn();
+    panel({ visible: true, stats: [], onRestore });
+    await screen.findByText("prompt 6");
+    // Newest first, five of seven, the rest behind a keyboard-reachable row.
+    expect(screen.getByText("prompt 2")).toBeTruthy();
+    expect(screen.queryByText("prompt 1")).toBeNull();
+    list().focus();
+    await userEvent.keyboard("{Enter}");
+    expect(onRestore).toHaveBeenCalledWith("/repo/d6", expect.stringContaining("claude"), "claude", "claude");
+    await userEvent.keyboard("a");
+    expect(screen.getByText("prompt 0")).toBeTruthy();
+  });
+});

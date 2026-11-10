@@ -4,8 +4,7 @@
 // exactly what the turn did — Bash edits, generated files and deletions
 // included — where the edit journal only sees the agent's edit tools.
 //
-// Shared by proof receipts (src/receipts/engine.ts), team memory
-// (src/memoryExtract.ts), awareness (src/awareness/engine.ts) and the
+// Shared by proof receipts (src/receipts/engine.ts), awareness (src/awareness/engine.ts) and the
 // builder lens's step summaries (src/lensSteps.ts, lensCheckpoints.ts).
 
 import * as ipc from "./ipc";

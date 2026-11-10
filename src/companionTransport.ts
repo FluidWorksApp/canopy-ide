@@ -52,6 +52,13 @@ export async function startStructured(
   host: TransportHost,
   opts: { resume: boolean; cwd?: string; env?: [string, string][] },
 ): Promise<CompanionTransport> {
+  // The companion normally starts with no cwd and Rust puts it in its own
+  // directory. An ACP agent is told its directory in `session/new` and refuses
+  // one that is not absolute ("ACP needs an absolute working directory"), so
+  // for that tier the same directory is spelled out.
+  const cwd =
+    opts.cwd ?? (structuredRunnerFor(cliId)?.tier === "acp" ? await ipc.companionDir() : undefined);
+  opts = { ...opts, cwd };
   return startProjectStructured(
     "companion",
     cliId,

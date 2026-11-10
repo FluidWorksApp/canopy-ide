@@ -18,6 +18,9 @@ export interface PlacementInput {
   projectAvailability?: Target[];
   /** Keep a running thread where it is, if that target still has room. */
   sticky?: Target;
+  /** Hand-off: no machine may be chosen except from `resources`, so with none
+   *  free the answer is none rather than this Mac. */
+  noLocalFallback?: boolean;
 }
 
 /** Agent beats project beats global. Only inheritance defers to the next level. */
@@ -75,20 +78,54 @@ export function choosePlacement(input: PlacementInput): PlacementDecision {
     needsSetup: !isSetUp(resource.target),
   });
 
+  // This Mac is always something an agent can start on. Fullness is advice, not a
+  // gate: the person may know the machine can take one more, and being refused an
+  // agent on their own computer is worse than a machine running slowly.
+  const fullWarning = (resource: ResourceSnapshot | undefined, name = "This machine") =>
+    resource && resource.capacity > 0
+      ? `${name} is full (${resource.activeAgents} of ${resource.capacity} agent slots). Starting anyway; it may be slow.`
+      : `${name} is full. Starting anyway; it may be slow.`;
+  const localResource = input.resources.find((resource) => sameTarget(resource.target, local));
+  const startOnLocal = (reason: string, warning?: string): PlacementDecision => ({
+    target: local,
+    reason,
+    alternatives: usable.filter((candidate) => !sameTarget(candidate.target, local)).sort(compare).map((candidate) => candidate.target),
+    needsSetup: false,
+    ...(warning ? { warning } : {}),
+  });
+
   if (preference.mode === "target") {
     const selected = usable.find((resource) => sameTarget(resource.target, preference.target));
     if (selected) return done(selected, "Selected machine is online with free capacity.");
     const known = input.resources.find((resource) => sameTarget(resource.target, preference.target));
+    // This Mac, full or not read at all, is still this Mac.
+    if (preference.target.kind === "local") {
+      return known && !hasRoom(known)
+        ? startOnLocal("This Mac was chosen.", fullWarning(known, "This Mac"))
+        : startOnLocal("This Mac was chosen.");
+    }
+    // A chosen workspace that is online but full: start there anyway.
+    if (known && known.online) {
+      return { ...done(known, "Selected machine is online."), warning: fullWarning(known, "The selected machine") };
+    }
     return none(
       known && !known.online
         ? "The selected machine is offline."
-        : known
-          ? "The selected machine is full."
-          : "The selected machine is no longer connected.",
+        : "The selected machine is no longer connected.",
     );
   }
 
-  if (!usable.length) return none("No machine is online with free capacity.");
+  // Automatic with nowhere that has room: this Mac, with a warning, rather than
+  // a refusal.
+  if (!usable.length && input.noLocalFallback) return none("No machine is online with free capacity.");
+  if (!usable.length) {
+    return startOnLocal(
+      "Every machine is full or unreachable.",
+      localResource && !hasRoom(localResource)
+        ? fullWarning(localResource, "Every machine is full, including this Mac.")
+        : "No machine could be read. Starting on this Mac.",
+    );
+  }
 
   if (input.sticky) {
     const sticky = usable.find((resource) => sameTarget(resource.target, input.sticky as Target));

@@ -2122,6 +2122,33 @@ pub async fn gh_pr_state(
     run_net(&mut cmd).map(|s| s.trim().to_uppercase())
 }
 
+/// The state and head commit of the PR raised from `branch`: "MERGED <sha>",
+/// "OPEN <sha>", … A squash or rebase merge leaves the branch's own commits out
+/// of the base, so git alone cannot say they landed; the PR's recorded head,
+/// compared with the local tip by the caller, can.
+#[tauri::command]
+pub async fn gh_pr_branch_state(
+    state: State<'_, WorkspaceManager>,
+    repo: String,
+    branch: String,
+) -> Result<String, String> {
+    if branch.is_empty() || branch.starts_with('-') {
+        return Err("not a branch name".into());
+    }
+    let top = repo_path(&state, &repo)?;
+    let mut cmd = gh_in(&top);
+    cmd.args([
+        "pr",
+        "view",
+        &branch,
+        "--json",
+        "state,headRefOid",
+        "--jq",
+        ".state + \" \" + .headRefOid",
+    ]);
+    run_net(&mut cmd).map(|s| s.trim().to_string())
+}
+
 /// Submit a review. This is outward-facing and visible to other people on a
 /// real repository, so the UI confirms before it ever reaches here — and the
 /// action is never inferred, only taken when explicitly chosen.

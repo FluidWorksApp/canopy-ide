@@ -184,3 +184,25 @@ describe("reuseAgentWorkspace", () => {
     expect(mocks.gitWorktreeRealign).not.toHaveBeenCalled();
   });
 });
+
+describe("prLanded", () => {
+  const sha = "0123456789abcdef0123456789abcdef01234567";
+  it("is true for a merged PR whose head is the local tip, full or abbreviated", async () => {
+    const { prLanded } = await import("./agentWorkspaceLifecycle");
+    expect(prLanded(`MERGED ${sha}`, sha)).toBe(true);
+    expect(prLanded(`merged ${sha}\n`, sha.slice(0, 9))).toBe(true);
+  });
+  it("is false when the PR is open or closed, or work was added after it", async () => {
+    const { prLanded } = await import("./agentWorkspaceLifecycle");
+    expect(prLanded(`OPEN ${sha}`, sha)).toBe(false);
+    expect(prLanded(`CLOSED ${sha}`, sha)).toBe(false);
+    expect(prLanded(`MERGED ${sha}`, "ffffffffffff")).toBe(false);
+  });
+  it("is false for missing, malformed or too-short input", async () => {
+    const { prLanded } = await import("./agentWorkspaceLifecycle");
+    expect(prLanded("", sha)).toBe(false);
+    expect(prLanded("MERGED", sha)).toBe(false);
+    expect(prLanded(`MERGED ${sha}`, "")).toBe(false);
+    expect(prLanded(`MERGED ${sha}`, "0123")).toBe(false);
+  });
+});

@@ -77,7 +77,7 @@ test('git_pr_context does not follow a symlinked PR template',async()=>{
 });
 
 test('exports a read-only subset of the commands it handles',()=>{
- assert.equal(Object.keys(gh).length,30);
+ assert.equal(Object.keys(gh).length,31);
  for(const c of GITHUB_READ_ONLY)assert.ok(gh[c],c);
  for(const c of ['gh_pr_checkout','gh_pr_merge','gh_pr_file_viewed','gh_issue_comment'])assert.ok(!GITHUB_READ_ONLY.includes(c));
 });
@@ -128,6 +128,14 @@ test('gh_pr_diff falls back to per-file patches when GitHub refuses the combined
  assert.match(assemblePatch(Array.from({length:402},(_,i)=>JSON.stringify({filename:`f${i}`,status:'modified',patch:'@@'})).join('\n')),/\(2 more file\(s\) not shown — this pull request touches more than 400\.\)\n$/);
  await fixtures([{args:['pr','diff'],stderr:'HTTP 404: Not Found',code:1}]);
  await assert.rejects(gh.gh_pr_diff({repo:dir,number:3}),/^Error: HTTP 404: Not Found$/);
+});
+
+test('the PR raised from a branch reports its state and head, and refuses option-looking branches',async()=>{
+ const dir=await repo();
+ await fixtures([{args:['pr','view','agent/x','--json','state,headRefOid'],stdout:'MERGED abc123\n'}]);
+ assert.equal(await gh.gh_pr_branch_state({repo:dir,branch:'agent/x'}),'MERGED abc123');
+ await assert.rejects(gh.gh_pr_branch_state({repo:dir,branch:'--web'}),/not a branch name/);
+ await assert.rejects(gh.gh_pr_branch_state({repo:dir,branch:''}),/not a branch name/);
 });
 
 test('pull request actions send the desktop argv and answer in its words',async()=>{

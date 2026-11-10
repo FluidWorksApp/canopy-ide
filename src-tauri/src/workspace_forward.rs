@@ -17,7 +17,7 @@
 //! so this side owns the connection and its retries but asks the renderer for a
 //! fresh ticket before each attempt.
 
-use crate::canopy_link::{backoff, frame, parse, rand_unit};
+use crate::canopy_link::{backoff_capped, frame, parse, rand_unit};
 use futures_util::{SinkExt, StreamExt};
 use std::collections::HashMap;
 use std::future::Future;
@@ -53,10 +53,19 @@ pub const TICKET_EVENT: &str = "workspace-forward:ticket";
 struct Timing {
     ping_every: Duration,
     dead_after: Duration,
+    /// A connection must stay up this long before the retry backoff resets, so
+    /// a link that connects and drops at once keeps backing off.
+    stable_after: Duration,
+    /// Longest wait between attempts, in seconds.
+    max_backoff_secs: u64,
 }
+/// How long a probe waits for the workspace to answer before replacing the link.
+const PROBE_WAIT: Duration = Duration::from_secs(3);
 const TIMING: Timing = Timing {
     ping_every: Duration::from_secs(15),
     dead_after: Duration::from_secs(45),
+    stable_after: Duration::from_secs(20),
+    max_backoff_secs: 120,
 };
 
 enum Inbound {
@@ -75,6 +84,11 @@ struct Session {
     streams: Streams,
     next: AtomicU32,
     slots: Arc<Semaphore>,
+    /// When anything last arrived from the workspace. A probe compares it with
+    /// the moment it pinged.
+    heard_at: Mutex<Instant>,
+    /// Asks `run_session` to end so the reconnect loop replaces the connection.
+    replace: tokio::sync::Notify,
 }
 type Live = watch::Sender<Option<Arc<Session>>>;
 
@@ -241,6 +255,8 @@ async fn run_session<S>(
         streams: streams.clone(),
         next: AtomicU32::new(1),
         slots: Arc::new(Semaphore::new(MAX_STREAMS)),
+        heard_at: Mutex::new(Instant::now()),
+        replace: tokio::sync::Notify::new(),
     });
     live.send_replace(Some(session.clone()));
     let mut ping = tokio::time::interval(timing.ping_every);
@@ -250,6 +266,7 @@ async fn run_session<S>(
     loop {
         tokio::select! {
             _ = stop.changed() => break,
+            _ = session.replace.notified() => break,
             _ = ping.tick() => {
                 // Monotonic time can stop while a laptop sleeps, and a socket
                 // that slept through the network going away looks healthy.
@@ -261,6 +278,7 @@ async fn run_session<S>(
             message = source.next() => match message {
                 Some(Ok(Message::Binary(bytes))) => {
                     heard = Instant::now();
+                    *session.heard_at.lock().unwrap() = heard;
                     if bytes.first() != Some(&PONG) { dispatch(&bytes, &streams); }
                 }
                 Some(Ok(Message::Close(_))) | Some(Err(_)) | None => break,
@@ -274,6 +292,27 @@ async fn run_session<S>(
     drop(session);
     drop(out);
     writer.abort();
+}
+
+/// Ping the workspace now and replace the connection if nothing comes back
+/// within `wait`. The routine ping notices a dead path after `dead_after`;
+/// this is for the moments a path is likely to have died (the network changed,
+/// the app came back to the front), where waiting that long leaves every
+/// forwarded page hanging. Returns whether the connection was replaced.
+async fn probe_session(session: Arc<Session>, wait: Duration) -> bool {
+    let sent = Instant::now();
+    if !session.send(PING, 0, &[]).await {
+        session.replace.notify_one();
+        return true;
+    }
+    tokio::time::sleep(wait).await;
+    let heard = *session.heard_at.lock().unwrap();
+    if heard < sent {
+        session.replace.notify_one();
+        true
+    } else {
+        false
+    }
 }
 
 /// Connects, carries, and reconnects until stopped. `ask` requests a ticket,
@@ -304,13 +343,17 @@ async fn maintain<A, F>(
             Err(elapsed) => Err(elapsed),
         };
         if let Ok(Ok((socket, _))) = connected {
-            attempt = 0;
+            let up = Instant::now();
             run_session(socket, &live, &mut stop, timing).await;
+            // Only a connection that lasted counts as recovered.
+            if up.elapsed() >= timing.stable_after {
+                attempt = 0;
+            }
         }
         attempt += 1;
         tokio::select! {
             _ = stop.changed() => return,
-            _ = tokio::time::sleep(backoff(attempt - 1, rand_unit())) => {}
+            _ = tokio::time::sleep(backoff_capped(attempt - 1, rand_unit(), timing.max_backoff_secs)) => {}
         }
     }
 }
@@ -413,6 +456,22 @@ pub async fn workspace_forward_ticket(
     Ok(())
 }
 
+/// Check that the workspace still answers, and replace the connection if it
+/// does not. The renderer calls it when the network returns or the window comes
+/// back to the front.
+#[tauri::command]
+pub async fn workspace_forward_probe(
+    state: tauri::State<'_, WorkspaceForwards>,
+    key: String,
+) -> Result<(), String> {
+    let tunnel = state.0.lock().unwrap().get(&key).cloned();
+    let session = tunnel.and_then(|t| t.live.borrow().clone());
+    if let Some(session) = session {
+        tokio::spawn(probe_session(session, PROBE_WAIT));
+    }
+    Ok(())
+}
+
 #[tauri::command]
 pub fn workspace_forward_close(state: tauri::State<'_, WorkspaceForwards>, key: String) {
     if let Some(tunnel) = state.0.lock().unwrap().remove(&key) {
@@ -459,6 +518,7 @@ mod tests {
         local: u16,
         accepted: Arc<AtomicUsize>,
         stop: watch::Sender<bool>,
+        live: watch::Receiver<Option<Arc<Session>>>,
     }
 
     async fn harness(answer_pings: bool, timing: Timing) -> Harness {
@@ -478,11 +538,13 @@ mod tests {
         tokio::spawn(maintain(ask, ticket_rx, live, stop_rx, timing));
         let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
         let local = listener.local_addr().unwrap().port();
+        let probe_live = live_rx.clone();
         tokio::spawn(listen(listener, 3000, live_rx, stop.subscribe()));
         Harness {
             local,
             accepted,
             stop,
+            live: probe_live,
         }
     }
 
@@ -526,11 +588,57 @@ mod tests {
         let _ = h.stop.send(true);
     }
 
+    async fn session_of(h: &Harness) -> Arc<Session> {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if let Some(s) = h.live.borrow().clone() {
+                    return s;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("a session should come up")
+    }
+
+    #[tokio::test]
+    async fn a_probe_replaces_a_silent_path_without_waiting_for_the_routine_check() {
+        // The routine check would take a minute; the probe must not.
+        let timing = Timing {
+            ping_every: Duration::from_secs(60),
+            dead_after: Duration::from_secs(180),
+            stable_after: Duration::from_millis(100),
+            max_backoff_secs: 30,
+        };
+        let h = harness(false, timing).await;
+        let session = session_of(&h).await;
+        assert!(probe_session(session, Duration::from_millis(200)).await);
+        tokio::time::timeout(Duration::from_secs(8), async {
+            while h.accepted.load(Ordering::SeqCst) < 2 {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("the silent path should be redialled");
+        let _ = h.stop.send(true);
+    }
+
+    #[tokio::test]
+    async fn a_probe_leaves_a_path_that_answers() {
+        let h = harness(true, TIMING).await;
+        let session = session_of(&h).await;
+        assert!(!probe_session(session, Duration::from_millis(500)).await);
+        assert_eq!(h.accepted.load(Ordering::SeqCst), 1);
+        let _ = h.stop.send(true);
+    }
+
     #[tokio::test]
     async fn a_workspace_that_stops_answering_is_replaced() {
         let timing = Timing {
             ping_every: Duration::from_millis(50),
             dead_after: Duration::from_millis(150),
+            stable_after: Duration::from_millis(100),
+            max_backoff_secs: 30,
         };
         let h = harness(false, timing).await;
         tokio::time::timeout(Duration::from_secs(8), async {

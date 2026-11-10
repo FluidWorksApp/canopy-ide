@@ -49,8 +49,6 @@ pub struct Workspace {
     pub terminals: Arc<TerminalRegistry>,
     pub runner_terminals: RunnerTerminals,
     pub ledger: Ledger,
-    /// Team memory synced from the desktop, and agents' queued proposals.
-    pub memory: crate::memory::MemoryStore,
     /// Android device ops relayed to the IDE that has this workspace open.
     pub device: crate::device::DeviceRelay,
     access: Mutex<Option<(SignedSnapshot, AccessSnapshot)>>,
@@ -80,7 +78,6 @@ impl Workspace {
             "attention",
             "inbox",
             "keys",
-            "memory",
         ] {
             crate::util::create_dir_mode(&dir.join(sub), 0o700).map_err(|e| e.to_string())?;
         }
@@ -110,7 +107,6 @@ impl Workspace {
             claims: ClaimStore::load(Some(dir.join("mesh/claims.sqlite")), instance.clone()),
             attention: AttentionStore::open(dir.join("attention"), events.clone()),
             ledger: Ledger::open(&dir.join("inbox/service.sqlite"))?,
-            memory: crate::memory::MemoryStore::open(dir.join("memory")),
             device: crate::device::DeviceRelay::default(),
             runner_terminals: RunnerTerminals {
                 registry: terminals.clone(),

@@ -12,6 +12,7 @@ import {
   GitBranchIcon,
   GlobeIcon,
   LiveShareIcon,
+  PinIcon,
   PlugIcon,
   PullRequestIcon,
   TeamIcon,
@@ -34,6 +35,8 @@ import type {
   RailChip,
   StripGroup,
 } from "./ProjectView";
+import { listedForLaunch } from "../agentCliVisibility";
+import { isPinnedTab } from "./ProjectView/helpers";
 import { tabDisplayLabel, previewLabel, deviceLabel } from "./ProjectView";
 import { claimOwnerName } from "../claims";
 import { tabName } from "../tabName";
@@ -580,7 +583,7 @@ function PaneBarImpl({
                     tab.id === stripDrag.dragId ? "tab-dragging" : ""
                   } ${
                     tab.type === "terminal" && tabMemoryWarning?.(tab) ? "tab-memory-warning" : ""
-                  }`}
+                  } ${tab.type === "terminal" && tab.machine && tab.machine !== "local" ? "tab-remote" : ""}`}
                   {...stripDrag.itemProps(tab.id)}
                   onMouseEnter={(e) => armHoverPreview(tab, e.currentTarget)}
                   onMouseLeave={cancelHoverPreview}
@@ -603,6 +606,11 @@ function PaneBarImpl({
                         }`}
                         aria-hidden
                       />
+                      {tab.machine && tab.machine !== "local" && (
+                        <span className="tab-machine" title={`Running on ${tab.machineName ?? "another workspace"}`}>
+                          {tab.machineName ?? "WS"}
+                        </span>
+                      )}
                     </>
                   ) : tab.type === "pr" ? (
                     <PullRequestIcon size={12} className="tab-pr-icon" />
@@ -639,6 +647,11 @@ function PaneBarImpl({
                         <span className="tab-external">●</span>
                       )}
                     </>
+                  )}
+                  {isPinnedTab(tab) && (
+                    <span className="tab-pin-mark" title="Pinned: stays at the front of the strip" aria-label="Pinned">
+                      <PinIcon size={11} />
+                    </span>
                   )}
                   {tab.type === "terminal" && renamingTabId === tab.id ? (
                     <input
@@ -840,7 +853,7 @@ function PaneBarImpl({
                   launching as <strong>{account.label}</strong>
                 </div>
               )}
-              {AGENT_CLIS.map((cli) => (
+              {listedForLaunch(AGENT_CLIS, installed).map((cli) => (
                 // Unqualified click follows the agentWorkspaceByDefault setting; the
                 // hover action below is always the other choice, same as the
                 // ⌘N palette.

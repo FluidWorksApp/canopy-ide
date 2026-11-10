@@ -73,6 +73,18 @@ export function reapDecision(
   return { kind: "ask", branch, dirty, unpushed };
 }
 
+/** Whether a branch's work landed through a squash or rebase merge, which leaves
+ *  its commits out of the base so git calls them unpushed. `prBranchState` is
+ *  "<STATE> <head sha>" from `ghPrBranchState`; the work landed only when the PR
+ *  is MERGED and its recorded head is the local tip (a shorter local sha is a
+ *  prefix of it) — a commit made after the merge is not covered. */
+export function prLanded(prBranchState: string, localHead: string): boolean {
+  const [state, sha] = prBranchState.trim().split(/\s+/);
+  if (state?.toUpperCase() !== "MERGED" || !sha) return false;
+  const tip = localHead.trim().toLowerCase();
+  return tip.length >= 7 && sha.toLowerCase().startsWith(tip);
+}
+
 /** A leftover workspace `launchCli` may reuse: same CLI's branch namespace,
  *  nothing in it (clean, no commits of its own, never pushed), and not held by
  *  git for any reason. Newest first, so reuse drains recent leftovers. */

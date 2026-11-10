@@ -39,6 +39,8 @@ function svgProps(size: number, className?: string) {
 // the geometry lives in shared/icons.tsx and every existing `from "./icons"`
 // still resolves through these lines. One shape, not two.
 import { IconIssue, IconStop, IconTerminal } from "../../shared/icons";
+import { connectorIconFor } from "../acp/connectorIcons";
+import { ConnectorIcon } from "./ConnectorIcon";
 
 export {
   AgentsIcon,
@@ -191,16 +193,6 @@ export function NoteIcon({ size = 18, className }: IconProps) {
     <svg {...svgProps(size, className)}>
       <path d="M5.4 18.6l.8-3.4L16.9 4.5a2 2 0 0 1 2.9 2.9L9.1 18.1l-3.7.5z" />
       <path d="M14.7 6.7l2.9 2.9" />
-    </svg>
-  );
-}
-
-/** Team memory: a bookmark — something kept on purpose, to come back to. */
-export function MemoryIcon({ size = 18, className }: IconProps) {
-  return (
-    <svg {...svgProps(size, className)}>
-      <path d="M6.5 4h11a1 1 0 0 1 1 1v15l-6.5-4-6.5 4V5a1 1 0 0 1 1-1z" />
-      <path d="M9.5 8.5h5" />
     </svg>
   );
 }
@@ -458,7 +450,20 @@ export function TrackerIcon({ id, size = 14, className }: IconProps & { id: stri
 // glyph for CLIs we don't have a mark for.
 export function AgentIcon({ id, size = 14, className }: IconProps & { id: string }) {
   const Brand = BRAND_ICONS[id];
-  return Brand ? <Brand size={size} className={className} /> : <IconTerminal size={size} className={className} />;
+  if (Brand) return <Brand size={size} className={className} />;
+  // A connector added from the ACP registry carries the mark its registry gave it.
+  const connector = connectorIconFor(id);
+  if (connector) return <ConnectorIcon url={connector} size={size} className={className} />;
+  return <IconTerminal size={size} className={className} />;
+}
+
+/** A push-pin: a tab that stays where it is. */
+export function PinIcon({ size = 11, className }: IconProps) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 16 16" fill="currentColor" className={className} aria-hidden="true">
+      <path d="M9.5 1.5 14.5 6.5l-1.4 1.4-1.1-.4-2.6 2.6.5 2.6-1.2 1.2-2.8-2.8-3.3 3.3-.7-.7 3.3-3.3L2.4 6.6l1.2-1.2 2.6.5 2.6-2.6-.4-1.1z" />
+    </svg>
+  );
 }
 
 /** Two people — the team relay. One head in front of the other rather than side

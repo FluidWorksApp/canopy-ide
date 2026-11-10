@@ -621,6 +621,77 @@ pub async fn android_tap(
     .map_err(|e| e.to_string())?
 }
 
+/// The `adb reverse` specs for a list of ports: non-zero, de-duplicated, at most
+/// 32, each as `(port, "tcp:<port>")`.
+fn reverse_specs(ports: &[u16]) -> Vec<(u16, String)> {
+    let mut seen = std::collections::BTreeSet::new();
+    ports
+        .iter()
+        .copied()
+        .filter(|p| *p != 0 && seen.insert(*p))
+        .take(32)
+        .map(|p| (p, format!("tcp:{p}")))
+        .collect()
+}
+
+/// Undo `android_reverse` for these ports, so a closed tab or a different device
+/// does not leave mappings behind. Errors are ignored: a device that is already
+/// gone has nothing to undo.
+#[tauri::command]
+pub async fn android_reverse_remove(
+    project_dir: Option<String>,
+    serial: String,
+    ports: Vec<u16>,
+) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let sdk = sdk_or_err(project_dir.as_deref())?;
+        for (_, spec) in reverse_specs(&ports) {
+            let _ = run(adb(&sdk, Some(&serial)).args(["reverse", "--remove", &spec]));
+        }
+        Ok(())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// Make `localhost:<port>` on the device reach `localhost:<port>` on this
+/// computer (`adb reverse`). A remote workspace's forwarded ports are ordinary
+/// loopback listeners here, so this is all a local device needs to reach a
+/// server running in the workspace. Ports must be non-zero; returns the ports
+/// that were set up.
+#[tauri::command]
+pub async fn android_reverse(
+    project_dir: Option<String>,
+    serial: String,
+    ports: Vec<u16>,
+) -> Result<Vec<u16>, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let sdk = sdk_or_err(project_dir.as_deref())?;
+        let wanted = reverse_specs(&ports);
+        if wanted.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut done = Vec::new();
+        let mut first_error: Option<String> = None;
+        for (port, spec) in wanted {
+            match run(adb(&sdk, Some(&serial)).args(["reverse", &spec, &spec])) {
+                Ok(_) => done.push(port),
+                Err(error) => {
+                    first_error.get_or_insert(error);
+                }
+            }
+        }
+        // Every port failing is an error, not "nothing to do": a device that is
+        // offline or unauthorized would otherwise look like success.
+        match (done.is_empty(), first_error) {
+            (true, Some(error)) => Err(error),
+            _ => Ok(done),
+        }
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
 #[tauri::command]
 pub async fn android_text(
     project_dir: Option<String>,
@@ -866,6 +937,15 @@ pub async fn android_stage_file(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn reverse_specs_drop_zero_duplicates_and_cap_the_list() {
+        let specs = super::reverse_specs(&[3000, 0, 3000, 5173]);
+        assert_eq!(specs, vec![(3000, "tcp:3000".to_string()), (5173, "tcp:5173".to_string())]);
+        let many: Vec<u16> = (1..=100).collect();
+        assert_eq!(super::reverse_specs(&many).len(), 32);
+        assert!(super::reverse_specs(&[]).is_empty());
+    }
+
     use super::*;
 
     #[test]

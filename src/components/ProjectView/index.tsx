@@ -1,7 +1,19 @@
 import { activeWorkspace } from "../../remoteExecution/workspace";
+import { TELEPORT_CLI_ID } from "../../../shared/agentCliIdentity";
 import { effectivePreference } from "../../placement/balancer";
 import { getAgentPreference, getGlobalPreference, getProjectPreference } from "../../placement/preferences";
-import { canLaunchOnActiveTarget, requestTargetTransition } from "../../placement/transitions";
+import { remoteComponentFor } from "../../environments/remoteLaunch";
+import { prepareRemoteWorkspace } from "../../environments/remoteWorkspace";
+import { connectedMachines, liveEnvironments } from "../../environments/live";
+import { fetchMachineDigests } from "../../environments/remoteDigests";
+import { activeExecutionTarget, canLaunchOnActiveTarget, requestTargetTransition } from "../../placement/transitions";
+import { TELEPORT_TO_MAC, TeleportFlow } from "../TeleportFlow";
+import { useAllWorkspaces } from "../../remoteExecution/allMode";
+import { connectMachine } from "../../environments/live";
+import { machineBadge, parseMachineSessions, sessionsNeedingTabs } from "../../environments/allWorkspaceTabs";
+import { peekWorkspaceList } from "../../remoteExecution/workspaceListCache";
+import { setPendingLaunch, takePendingLaunch, type PendingLaunch } from "../../placement/pendingLaunch";
+import { canonicalProjectId } from "../../placement/identity";
 import type { DisplayTarget, Preference, Target } from "../../placement/types";
 import { resolveProjectMachineLaunch } from "./placement";
 import { publishAwarenessRoster } from "../../awareness/roster";
@@ -162,10 +174,13 @@ import {
   activeProfile,
   DEFAULT_PROFILE,
   ensureAccountIntegration,
-  launchEnv,
+  launchEnvFor,
   launchEnvSync,
   launchProfile,
+  lastProfileFor,
+  launchableProfiles,
   primeLaunchEnv,
+  rememberProfile,
   setActiveProfile,
   supportsProfiles,
   PROFILE_CHANGE_EVENT,
@@ -193,6 +208,7 @@ import {
 } from "../../agentSpawn";
 import {
   agentWorkspaceRoot,
+  prLanded,
   reapDecision,
   reuseAgentWorkspace,
 } from "../../agentWorkspaceLifecycle";
@@ -307,8 +323,6 @@ import { TasksPanel, type RunningMicroTask } from "../TasksPanel";
 import { NotesPanel } from "../NotesPanel";
 import { NoteView } from "../NoteView";
 import { ResearchPanel } from "../ResearchPanel";
-import { MemoryPanel } from "../MemoryPanel";
-import { useMemoryReviewCount } from "../../useMemories";
 import { ResearchImportCta } from "../ResearchImportCta";
 import { ResearchView } from "../ResearchView";
 import {
@@ -420,6 +434,7 @@ import { ContextMenu, useContextMenu, type MenuItem } from "../ContextMenu";
 import { FileTree } from "../FileTree";
 import {useRemoteUpload} from "../../remoteExecution/useRemoteUpload";
 import {ProjectSetupDialog} from "../../remoteExecution/ProjectSetupDialog";
+import {SendToWorkspace} from "../../remoteExecution/SendToWorkspace";
 import { FileView, hasDiffToolbar } from "../FileView";
 import { ChangesPanel, type ChangeGroup } from "../ChangesPanel";
 import { Dialog } from "../Dialog";
@@ -506,6 +521,11 @@ import { BranchView } from "../BranchView";
 import { AgentWorkspaceView } from "../AgentWorkspaceView";
 import { CliVersionFloor } from "../CliVersionFloor";
 import { AgentBrowserPip, pipOwnerVisible } from "../AgentBrowserPip";
+import { listedForLaunch } from "../../agentCliVisibility";
+import { runCommitPushPr } from "../../commitPushPrIpc";
+import { diffOpenPrs, isMergedState } from "../../prMerged";
+import { isPreviewUrl } from "../../agentAssets";
+import { AgentDetailsCard } from "../AgentDetailsCard";
 import { BROWSER_INPUT_EVENT, PreviewView } from "../PreviewView";
 import DeviceView from "../DeviceView";
 import type { PreviewServer } from "../../preview";
@@ -647,6 +667,9 @@ import {
   tabPrefs as readTabPrefs,
   type SideTab,
   type StripGroup,
+  isPinnedTab,
+  isSettledTab,
+  splitPinned,
   type SubTab,
   type DocSubTab,
   type TermSubTab,
@@ -681,6 +704,8 @@ import {
   statusContextRoot,
 } from "./helpers";
 import { Button } from "../ui";
+import { RemoteReconnect } from "../RemoteReconnect";
+import { remoteTabReconnect, machineLabel } from "../../environments/remoteReconnect";
 import { dispatchWithPlan, restoreWaitingPlans, type PlanResumer } from "../../plans/planGate";
 import { PLAN_ENV, planEnvForCommand } from "../../plans/planLaunch";
 import { armPlanTracking, expectRun } from "../../plans/planStore";
@@ -866,6 +891,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
   onEdit,
   onNotice: onNoticeRaw,
   onShareContext,
+  onLinkProject,
   onSaveCustomTasks,
   onSaveIntegrations,
   onPersistVibeSetup,
@@ -1736,22 +1762,28 @@ const ProjectViewBody = memo(function ProjectViewBody({
     [project.components, worktreeEnv],
   );
   const roots = useMemo(() => components.map((c) => c.path), [components]);
-  // Team memory waiting on a person (MemoryPanel.tsx) — the rail's badge.
-  const memoryBadge = useMemoryReviewCount(roots);
   const rootsKey = roots.join("\n");
   // Cmd+T's listener is registered once; without this it closes over the
   // components from mount and opens shells in the main checkout even after a
   // worktree is activated — disagreeing with the panel's own terminal button.
   const componentsRef = useRef(components);
+  /** The folder of the tab in front, so a new agent can start there without
+   *  asking (set where `activeContextRoot` is known, further down). */
+  const activeContextRootRef = useRef<string | null>(null);
   componentsRef.current = components;
   // Interactive agent launches always pass through this dialog, including a
   // one-component project, because machine placement remains a real choice.
   // Shells retain their old shortcut for a one-component project.
-  type ComponentLaunchPick = { component: PickerComponent; machine?: Preference };
+  type ComponentLaunchPick = { component: PickerComponent; machine?: Preference; profileId?: string };
   const [componentPick, setComponentPick] = useState<{
     title: string;
     machineTargets?: DisplayTarget[];
     initialMachine?: Preference;
+    /** Set when this agent has several accounts to choose between. */
+    accounts?: { profiles: { id: string; label: string }[]; initial: string };
+    /** An agent launch starts in the component already in front; the picker then
+     *  asks only where to run and which account. */
+    fixedComponent?: PickerComponent;
     resolve: (selection: ComponentLaunchPick | null) => void;
   } | null>(null);
   const pickComponent = useCallback(
@@ -1762,7 +1794,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
           resolve(list[0] ? { component: list[0] } : null);
           return;
         }
-        const show = (machineTargets?: DisplayTarget[]) => {
+        const show = (machineTargets?: DisplayTarget[], accounts?: { profiles: { id: string; label: string }[]; initial: string }) => {
           const initialMachine = agentKind
             ? effectivePreference({
                 preference: getGlobalPreference(),
@@ -1770,33 +1802,178 @@ const ProjectViewBody = memo(function ProjectViewBody({
                 agentPref: getAgentPreference(agentKind),
               })
             : undefined;
+          // Choosing an agent is the question "which one", not "in which folder":
+          // it starts in the component in front (else the first). What may still
+          // need asking is where it runs and which account it uses, and only
+          // when there is more than one of either to choose between.
+          // With several components the question is a type-and-pick list, the one
+          // in front first, so Enter alone still opens there and typing narrows
+          // it: no mouse. With one component there is nothing to pick.
+          const fixedComponent = agentKind && list.length === 1 ? list[0] : undefined;
+          const machineChoices = (machineTargets ?? []).filter((target) => target.online).length;
+          if (agentKind && fixedComponent && machineChoices <= 1 && !accounts) {
+            resolve({ component: fixedComponent, machine: initialMachine });
+            return;
+          }
           setComponentPick((previous) => {
             previous?.resolve(null);
-            return { title, machineTargets, initialMachine, resolve };
+            return { title, machineTargets, initialMachine, accounts, fixedComponent, resolve };
           });
         };
         if (!agentKind) {
           show();
           return;
         }
-        void import("../../placement/gather")
-          .then(({ gatherTargetInventory }) => gatherTargetInventory())
-          .then((inventory) => {
-            if (inventory.discoveryFailures.length)
-              onNotice(inventory.discoveryFailures.join(" "), "warn");
-            show(inventory.targets);
-          })
-          .catch((error) => {
-            onNotice(`Could not read connected machines: ${String(error)}`, "warn");
-            show([{ target: { kind: "local" }, name: "This Mac", online: true }]);
-          });
+        // Several accounts for this agent: offer the choice, defaulting to the
+        // one it was last launched with. A failed lookup means no choice is
+        // offered and the launch uses its usual default.
+        const loadAccounts = async () => {
+          try {
+            const profiles = launchableProfiles(await ipc.profilesList(), agentKind);
+            if (profiles.length === 0) return undefined;
+            return {
+              profiles: profiles.map((p) => ({ id: p.id, label: p.label })),
+              initial: lastProfileFor(agentKind, profiles.map((p) => p.id)),
+            };
+          } catch {
+            return undefined;
+          }
+        };
+        void loadAccounts().then((accounts) =>
+          import("../../placement/gather")
+            .then(({ gatherTargetInventory }) => gatherTargetInventory())
+            .then((inventory) => {
+              if (inventory.discoveryFailures.length)
+                onNotice(inventory.discoveryFailures.join(" "), "warn");
+              show(inventory.targets, accounts);
+            })
+            .catch((error) => {
+              onNotice(`Could not read connected machines: ${String(error)}`, "warn");
+              show([{ target: { kind: "local" }, name: "This Mac", online: true }], accounts);
+            }),
+        );
       }),
     [onNotice, project.id],
   );
-  const [machineTransition, setMachineTransition] = useState<{ target: Target; name: string } | null>(null);
+  const [sendOpen, setSendOpen] = useState(false);
+  // A Claude agent being moved to a workspace (teleport): the tab it runs in
+  // and the session, folder and state it had when the person asked.
+  const [teleport, setTeleport] = useState<{ tabId: string; sessionId: string; cwd: string; idle: boolean } | null>(null);
+  /** What a teleport of this terminal tab would move, or null when it is not a
+   *  Claude session with a known conversation (those keep the project dialog). */
+  const teleportCandidate = (tab: TermSubTab) => {
+    if (tab.ptyId == null) return null;
+    if (agentIdForCommand(tab.command) !== TELEPORT_CLI_ID) return null;
+    const sessionId = liveSessionByPtyRef.current.get(tab.ptyId) ?? resumeSessionId(tab.command);
+    if (!sessionId) return null;
+    return { tabId: tab.id, sessionId, cwd: tab.cwd, idle: lifeForPtyRef.current(tab.ptyId)?.state !== "working" };
+  };
+  const teleportCandidateRef = useRef(teleportCandidate);
+  teleportCandidateRef.current = teleportCandidate;
+  const [machineTransition, setMachineTransition] = useState<{ target: Target; name: string; resumeAgent?: string; resumeLabel?: string; resumeThen?: PendingLaunch["then"] } | null>(null);
   const [placementSetup, setPlacementSetup] = useState<{ name: string; resolve: (ready: boolean) => void } | null>(null);
   const [placementSetupReady, setPlacementSetupReady] = useState(false);
-  const prepareMachineLaunch = useCallback(async (agentKind: string, machine: Preference) => {
+  /** Take back a remote terminal that survived the project's sleep. Called only
+   *  from the tab's Reconnect button. Resolves null on success, else why not. */
+  const reconnectRemoteTab = useCallback(
+    async (tabId: string): Promise<string | null> => {
+      const tab = tabsRef.current.find((t) => t.id === tabId);
+      if (!tab || tab.type !== "terminal" || !tab.machine || !tab.reconnect) return null;
+      const result = await remoteTabReconnect(tab.machine, tab.reconnect.sessionId);
+      if (result.kind === "gone") {
+        onNotice(`That session has ended on ${result.machineName}.`, "info");
+        return `That session is no longer running on ${result.machineName}.`;
+      }
+      if (result.kind === "failed") return result.reason;
+      setTabs((prev) =>
+        prev.map((t) =>
+          t.id === tabId && t.type === "terminal"
+            ? { ...t, ptyId: result.alias, attachId: result.alias, killAttachedOnClose: true, reconnect: undefined, launchedAt: t.launchedAt }
+            : t,
+        ),
+      );
+      return null;
+    },
+    [onNotice],
+  );
+  // "All workspaces": the strip also carries the live terminals of the running
+  // workspaces. Choosing the mode is the person's say-so to connect to them
+  // (running ones only; nothing is woken). Each terminal gets a tab attached
+  // through the same alias path as a launch; letting go of the mode removes
+  // those tabs without touching the sessions.
+  const allWorkspaces = useAllWorkspaces();
+  useEffect(() => {
+    if (!visible) return;
+    if (!allWorkspaces) {
+      setTabs((prev) => {
+        const kept = prev.filter((t) => !(t.type === "terminal" && t.viaAll));
+        if (kept.length === prev.length) return prev;
+        for (const t of prev) if (t.type === "terminal" && t.viaAll) pendingAllDetach.current.push(t);
+        return kept;
+      });
+      return;
+    }
+    let live = true;
+    const sync = async () => {
+      const running = (peekWorkspaceList()?.workspaces ?? []).filter((w) => w.state === "ready" && w.access?.canConnect !== false);
+      for (const workspace of running) {
+        try {
+          const machine = await connectMachine(workspace.id);
+          const raw = await Promise.race([
+            machine.invoke<unknown>("pty_stats"),
+            new Promise<never>((_, reject) => setTimeout(() => reject(new Error("timed out")), 10_000)),
+          ]);
+          if (!live) return;
+          const need = sessionsNeedingTabs(machine.env, parseMachineSessions(raw), tabsRef.current);
+          if (need.length === 0) continue;
+          const added = need.map((session) => ({
+            id: tabId(),
+            type: "terminal" as const,
+            cwd: session.cwd ?? "",
+            ptyId: null,
+            machine: machine.env,
+            machineName: machineBadge(machine.name),
+            viaAll: true,
+            command: undefined,
+            icon: undefined,
+            name: session.title || `terminal ${session.id}`,
+            reconnect: { sessionId: session.id },
+          }));
+          setTabs((prev) => [...prev, ...(added as unknown as SubTab[])]);
+          // Attach right away: the person chose this mode, so nothing waits on a button.
+          for (const tab of added) {
+            const result = await remoteTabReconnect(machine.env, tab.reconnect.sessionId);
+            if (!live) return;
+            if (result.kind === "attached") {
+              setTabs((prev) =>
+                prev.map((t) =>
+                  t.id === tab.id && t.type === "terminal"
+                    ? { ...t, ptyId: result.alias, attachId: result.alias, killAttachedOnClose: false, reconnect: undefined }
+                    : t,
+                ),
+              );
+            } else if (result.kind === "gone") {
+              setTabs((prev) => prev.filter((t) => t.id !== tab.id));
+            }
+          }
+        } catch {
+          /* A workspace that cannot be read adds nothing; the strip stays as it is. */
+        }
+      }
+    };
+    void sync();
+    const timer = setInterval(() => void sync(), 15_000);
+    return () => {
+      live = false;
+      clearInterval(timer);
+    };
+  }, [allWorkspaces, visible]);
+  const pendingAllDetach = useRef<unknown[]>([]);
+
+  const prepareMachineLaunch = useCallback(async (agentKind: string, machine: Preference, resume: false | { label?: string; then?: PendingLaunch["then"] } = false,
+    /** Start the launch on that machine without switching the window to it.
+     *  Resolves true when it did; false falls back to the switch dialog. */
+    onRemote?: (target: Target, name: string) => Promise<boolean>) => {
     const outcome = await resolveProjectMachineLaunch({
       project: { id: project.id, name: project.name },
       agentKind,
@@ -1807,7 +1984,14 @@ const ProjectViewBody = memo(function ProjectViewBody({
       return false;
     }
     if (outcome.kind === "transition") {
-      setMachineTransition({ target: outcome.target, name: outcome.name });
+      // Another workspace, from a window on this Mac or on a workspace: run it
+      // there, stay here.
+      // Only when that cannot be done (not reachable, project not set up there)
+      // does the old "switch to it" dialog come up.
+      if (onRemote && outcome.target.kind === "remote" && (await onRemote(outcome.target, outcome.name))) {
+        return false;
+      }
+      setMachineTransition({ target: outcome.target, name: outcome.name, ...(resume ? { resumeAgent: agentKind, ...(resume.label ? { resumeLabel: resume.label } : {}), ...(resume.then ? { resumeThen: resume.then } : {}) } : {}) });
       return false;
     }
     if (outcome.kind === "setup") {
@@ -1816,6 +2000,9 @@ const ProjectViewBody = memo(function ProjectViewBody({
         setPlacementSetup({ name: outcome.name, resolve }),
       );
     }
+    // The launch goes ahead; a full machine or an unreadable workspace list is
+    // something to know, never a reason to refuse an agent.
+    if (outcome.decision.warning) onNotice(outcome.decision.warning, "warn");
     return true;
   }, [onNotice, project.id, project.name]);
   const rootsRef = useRef(roots);
@@ -1923,6 +2110,8 @@ const ProjectViewBody = memo(function ProjectViewBody({
       paneGroup?: string,
       runIdentity?: { componentId: string; runCommandId: string },
       spawnedTask?: TermSubTab["spawnedTask"],
+      /** Run on this other machine ("remote:<workspaceId>", already connected). */
+      machine?: string,
     ) => {
       if(project.readOnly||isReadOnlyHost()){onNotice("This project is read-only. Terminal and agent execution is unavailable.");return "";}
       const id = tabId();
@@ -1936,13 +2125,16 @@ const ProjectViewBody = memo(function ProjectViewBody({
       // end up on the default login. An explicit `profile` still wins — a
       // resume or a wake reopens a conversation owned by a specific account.
       const launchedCli = agentIdForCommand(command);
-      const accountEnv =
-        extraEnv ?? (launchedCli ? launchEnvSync(launchedCli) : []);
+      // A terminal on another machine uses that machine's own logins: this
+      // Mac's account directories do not exist there.
+      const accountEnv = machine
+        ? []
+        : (extraEnv ?? (launchedCli ? launchEnvSync(launchedCli) : []));
       // Before the env is primed (the first launches after start-up) a named
       // account has no env to hand yet. Launching anyway put the CLI on the
       // Default login: it ran, renewed and was billed as an account the user
       // had not chosen. Hold the terminal until the account's env resolves.
-      const pendingAccount = unresolvedLaunchAccount({
+      const pendingAccount = machine ? null : unresolvedLaunchAccount({
         cli: launchedCli,
         extraEnv,
         profile,
@@ -1953,7 +2145,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
       // A task's unattended mode, where its CLI needs environment as well as a
       // flag for it (opencode's permission pin, omp's approval overlay).
       const env = [
-        ...portEnv(portForPath(cwd)),
+        ...(machine ? [] : portEnv(portForPath(cwd))),
         ...managedEnv,
         ...accountEnv,
         ...unattendedEnvFor(command),
@@ -1987,6 +2179,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
           componentId: runIdentity?.componentId,
           runCommandId: runIdentity?.runCommandId,
           spawnedTask,
+          ...(machine ? { machine, launchedAt: Date.now() } : {}),
         },
       ]);
       if (activate) setActiveTabId(id);
@@ -2764,14 +2957,30 @@ const ProjectViewBody = memo(function ProjectViewBody({
                 ),
             ),
           );
-          // Bail when unchanged — otherwise this was an unconditional full
-          // re-render of every open project, every 4 seconds, forever.
-          setWsDigests((prev) =>
-            prev.length === mine.length &&
-            JSON.stringify(prev) === JSON.stringify(mine)
-              ? prev
-              : mine,
-          );
+          // Agents started on another machine from here: their digests live on
+          // that machine, re-keyed to the terminal's alias.
+          return connectedMachines()
+            .then((machines) => {
+              if (!machines.length) return [];
+              // When each remote tab started, by alias: an older digest under the
+              // same id on that machine is another terminal's.
+              const launchedAt = new Map<number, number>();
+              for (const t of tabsRef.current)
+                if (t.type === "terminal" && t.machine && t.ptyId != null && t.launchedAt) launchedAt.set(t.ptyId, t.launchedAt);
+              return fetchMachineDigests(machines, thisInstanceRef.current, launchedAt);
+            })
+            .catch(() => [])
+            .then((remote) => {
+              const all = remote.length ? [...mine, ...remote] : mine;
+              // Bail when unchanged — otherwise this was an unconditional full
+              // re-render of every open project, every 4 seconds, forever.
+              setWsDigests((prev) =>
+                prev.length === all.length &&
+                JSON.stringify(prev) === JSON.stringify(all)
+                  ? prev
+                  : all,
+              );
+            });
         })
         .catch(() => {});
     load();
@@ -3728,12 +3937,17 @@ const ProjectViewBody = memo(function ProjectViewBody({
       env: [string, string][];
     }> => {
       await primeLaunchEnv();
-      const profile = requestedProfile || launchProfile(cli.id) || DEFAULT_PROFILE;
-      const env = requestedProfile
-        ? requestedProfile === DEFAULT_PROFILE
+      // The account asked for, else the one this agent was last launched with
+      // (the same default the picker uses), which is the active account when it
+      // has none of its own.
+      const wanted = requestedProfile || lastProfileFor(cli.id, profilesRef.current.map((p) => p.id));
+      const profile = wanted || DEFAULT_PROFILE;
+      const env =
+        wanted === DEFAULT_PROFILE
           ? []
-          : await ipc.profileEnv(cli.id, requestedProfile).catch(() => [] as [string, string][])
-        : launchEnvSync(cli.id);
+          : wanted && wanted !== launchProfile(cli.id)
+            ? await ipc.profileEnv(cli.id, wanted).catch(() => [] as [string, string][])
+            : launchEnvSync(cli.id);
       const route = await inspectFleetRoute(cli, profile, installed);
       const gate = fleetGate(route.state);
       const profileName =
@@ -6900,10 +7114,21 @@ const ProjectViewBody = memo(function ProjectViewBody({
         ipc.gitWorkAudit(ws.repo),
       ]);
       const worktree = worktrees.find((w) => w.path === ws.root);
-      const decision = reapDecision(
+      let decision = reapDecision(
         worktree,
         audit.items.find((item) => item.branch === worktree?.branch),
       );
+      // A squash or rebase merge leaves the branch's commits out of the base, so
+      // git calls them unpushed. When the branch's PR is merged and its recorded
+      // head is the local tip, they landed: nothing exists only here.
+      if (decision.kind === "ask" && decision.dirty === 0 && decision.unpushed > 0) {
+        try {
+          if (prLanded(await ipc.ghPrBranchState(ws.repo, decision.branch), worktree?.head ?? ""))
+            decision = { kind: "remove", branch: decision.branch, deleteBranch: true };
+        } catch {
+          /* No PR, no gh, offline: the question stays, which is the safe answer. */
+        }
+      }
       if (decision.kind === "keep") return;
       if (decision.kind === "remove") {
         await ipc.gitWorktreeRemove(ws.repo, ws.root, 0);
@@ -6917,24 +7142,147 @@ const ProjectViewBody = memo(function ProjectViewBody({
         decision.unpushed > 0 &&
           `${decision.unpushed} unpushed commit${decision.unpushed === 1 ? "" : "s"}`,
       ].filter(Boolean);
+      // There is no "keep it" here: a closed agent's workspace is removed. What
+      // is asked is what to do with the work that exists only in it.
       const action = await ask(
         askDialog({
-          title: "Unsaved work",
+          title: `Closing would lose ${decision.dirty > 0 ? `${decision.dirty} file${decision.dirty === 1 ? "" : "s"}` : `${decision.unpushed} commit${decision.unpushed === 1 ? "" : "s"}`}`,
           body: `${basename(ws.root)} holds unsaved ${held.join(" and ")}.`,
           detail: ws.root,
           choices: [
-            { action: "cancel", label: "Keep the workspace", recommended: true },
-            { action: "cleanup", label: "Remove it and lose the work" },
+            { action: "push", label: "Commit, push and open a pull request", sub: "Recommended. Secrets are left out.", recommended: true },
+            { action: "cleanup", label: "Discard and remove the workspace", sub: "Uncommitted files are lost; commits stay on the branch.", danger: true },
+            { action: "cancel", label: "Cancel" },
           ],
         }),
       );
-      if (action !== "cleanup") return;
+      if (action === "push") {
+        try {
+          const result = await runCommitPushPr({
+            repo: ws.root,
+            message: `Save work from ${decision.branch}`,
+          });
+          if (result.skipped.length > 0) {
+            onNotice(
+              `Left out of the commit because they look like secrets: ${result.skipped.join(", ")}. The workspace was kept.`,
+              "warn",
+            );
+            return;
+          }
+          if (result.prUrl) onNotice(`Opened ${result.prUrl}`, "success");
+        } catch (error) {
+          // Nothing is removed after a failure: the work is still where it was.
+          onNotice(`Could not save the work, so the workspace was kept: ${String((error as Error).message ?? error)}`, "error");
+          return;
+        }
+        // Everything is on the remote now. Removed without force: a folder that
+        // still holds anything git objects to is left, not overridden.
+        await ipc.gitWorktreeRemove(ws.repo, ws.root, 0).catch((error) => {
+          onNotice(`Saved, but the workspace could not be removed: ${String(error)}`, "warn");
+        });
+        return;
+      }
+      if (action !== "cleanup") {
+        // The agent is already closed; cancelling only declines the removal.
+        onNotice(`Left ${basename(ws.root)} in place, with its unsaved work.`, "info");
+        return;
+      }
       await ipc.gitWorktreeRemove(ws.repo, ws.root, 1);
     },
-    [repoPaths, ask],
+    [repoPaths, ask, onNotice],
   );
   const maybeReapAgentWorkspaceRef = useRef(maybeReapAgentWorkspace);
   maybeReapAgentWorkspaceRef.current = maybeReapAgentWorkspace;
+
+  // Once per project open: agent workspaces whose work already landed (merged,
+  // squash and rebase merges included) and that no tab here is using are
+  // removed. Only clean ones with a merged branch; pristine or unmerged
+  // workspaces, and anything with changes, are left alone.
+  const swept = useRef(false);
+  useEffect(() => {
+    if (!visible || swept.current || repoPaths.length === 0) return;
+    const timer = setTimeout(async () => {
+      swept.current = true;
+      for (const repo of repoPaths) {
+        try {
+          const [worktrees, audit] = await Promise.all([ipc.gitWorktrees(repo), ipc.gitWorkAudit(repo)]);
+          for (const worktree of worktrees) {
+            const work = audit.items.find((item) => item.branch === worktree.branch);
+            if (!work || worktree.dirty > 0 || work.dirty > 0) continue;
+            if (tabsRef.current.some((t) => t.type === "terminal" && (t.cwd === worktree.path || t.cwd.startsWith(`${worktree.path}/`)))) continue;
+            let decision = reapDecision(worktree, work);
+            if (decision.kind !== "remove" && decision.kind !== "ask") continue;
+            let landed = work.merged;
+            if (!landed && decision.kind === "ask" && decision.dirty === 0 && worktree.branch) {
+              landed = prLanded(await ipc.ghPrBranchState(repo, worktree.branch).catch(() => ""), worktree.head);
+            }
+            if (!landed || !worktree.branch) continue;
+            await ipc.gitWorktreeRemove(repo, worktree.path, 0).catch(() => {});
+            await ipc.gitBranchDelete(repo, worktree.branch).catch(() => {});
+          }
+        } catch {
+          /* A sweep that cannot read git simply does nothing. */
+        }
+      }
+    }, 20_000);
+    return () => clearTimeout(timer);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [visible, repoPaths.length]);
+
+  // When an agent's pull request merges, settle its tab, and close it too if
+  // Settings → Agents → "New agents get a workspace" says so. A merge is only
+  // ever seen as "was open, now gone", and gone means merged OR closed, so
+  // `ghPrState` decides; a closed, unmerged PR leaves the tab alone. Never while
+  // the agent is working or waiting on you.
+  const watchedPrs = useRef(new Map<string, Map<string, number>>());
+  const lifeForPtyRef = useRef<(ptyId: number | null | undefined) => Life | undefined>(() => undefined);
+  useEffect(() => {
+    const tick = async () => {
+      const byRepo = new Map<string, Map<string, string[]>>();
+      for (const tab of tabsRef.current) {
+        if (tab.type !== "terminal" || !tab.cwd) continue;
+        const ws = agentWorkspaceRoot(tab.cwd, repoPaths);
+        if (!ws) continue;
+        const roots = byRepo.get(ws.repo) ?? new Map<string, string[]>();
+        roots.set(ws.root, [...(roots.get(ws.root) ?? []), tab.id]);
+        byRepo.set(ws.repo, roots);
+      }
+      for (const [repo, roots] of byRepo) {
+        const worktrees = await ipc.gitWorktrees(repo);
+        const branchOf = new Map<string, string>();
+        for (const root of roots.keys()) {
+          const branch = worktrees.find((w) => w.path === root)?.branch;
+          if (branch?.startsWith("agent/")) branchOf.set(root, branch);
+        }
+        const open = (await ipc.ghPrList(repo)).map((pr) => ({ branch: pr.branch, number: pr.number }));
+        const { tracked, vanished } = diffOpenPrs(
+          watchedPrs.current.get(repo) ?? new Map(),
+          open,
+          [...new Set(branchOf.values())],
+        );
+        watchedPrs.current.set(repo, tracked);
+        for (const gone of vanished) {
+          if (!isMergedState(await ipc.ghPrState(repo, gone.number))) continue;
+          for (const [root, branch] of branchOf) {
+            if (branch !== gone.branch) continue;
+            for (const id of roots.get(root) ?? []) {
+              const tab = tabsRef.current.find((t) => t.id === id);
+              const state = tab?.type === "terminal" ? lifeForPtyRef.current(tab.ptyId)?.state : undefined;
+              // Only a session known to be finished or idle: anything else
+              // (working, waiting, unknown) keeps its tab.
+              if (state !== "idle" && state !== "ended") continue;
+              // A merged PR means this work is done: put the tab away, and close
+              // it as well when the setting says so.
+              patchTabRaw(id, { settled: true } as Partial<SubTab>);
+              if (getSettings().closeAgentOnMerge) closeTabRef.current(id, "automatic");
+            }
+          }
+        }
+      }
+    };
+    const timer = window.setInterval(() => void tick().catch(() => {}), 120_000);
+    return () => window.clearInterval(timer);
+  }, [repoPaths, patchTabRaw]);
 
   const finalizeTabClose = useCallback((
     id: string,
@@ -6961,7 +7309,9 @@ const ProjectViewBody = memo(function ProjectViewBody({
     // once here covers a finished task and an abandoned one alike. recordTaskEnd
     // ignores a run that already settled, so "stopped" can't clobber "done".
     const closingTab = tabsRef.current.find((t) => t.id === id);
-    if (closingTab?.type === "terminal" && closingTab.cwd) {
+    // A terminal on another machine has no local folder to reap: its cwd is a
+    // path on that machine, and no git call here may be made from it.
+    if (closingTab?.type === "terminal" && closingTab.cwd && !closingTab.machine) {
       const closingCwd = closingTab.cwd;
       // After the unmount's PTY kill, not during it: git won't remove a
       // folder a live process still holds open.
@@ -8030,6 +8380,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
     () => statusContextRoot(activeTab, roots),
     [activeTab, roots],
   );
+  activeContextRootRef.current = activeContextRoot ?? null;
   // A full strip with nothing in front renders a blank workspace, and every
   // path that opens tabs without activating one can leave it there. The invariant
   // is worth holding here rather than at each of them: if there are tabs, one of
@@ -8444,6 +8795,28 @@ const ProjectViewBody = memo(function ProjectViewBody({
               paneGroup: t.paneGroup,
               componentId: t.componentId,
               runCommandId: t.runCommandId,
+              ...(t.pinned ? { pinned: true } : {}),
+            });
+          }
+          // A terminal that ran on another machine cannot be woken here: it
+          // would start on this one. Its session is still on that machine, so a
+          // placeholder holds its place and offers to reconnect. Nothing is
+          // connected until the person asks. Without the session's id there is
+          // nothing to reattach to, and the tab is dropped as before.
+          if (t.machine && t.machine !== "local") {
+            if (typeof t.machineSessionId !== "number") return null;
+            return push({
+              id: tabId(),
+              type: "terminal",
+              cwd: t.cwd,
+              ...adoptSnapshotNames(t),
+              ptyId: null,
+              command: t.command,
+              icon: t.icon,
+              machine: t.machine,
+              reconnect: { sessionId: t.machineSessionId },
+              ...(t.pinned ? { pinned: true } : {}),
+              ...(t.settled ? { settled: true } : {}),
             });
           }
           const { command } = terminalLaunch(t);
@@ -8470,6 +8843,8 @@ const ProjectViewBody = memo(function ProjectViewBody({
           // Waking spawns a new pty, which names itself. A name the user chose
           // has to be re-asserted onto it or the wake silently renames the tab.
           restoreTerminalNames(id, t);
+          if (t.pinned) patchTabRaw(id, { pinned: true } as Partial<SubTab>);
+          if (t.settled) patchTabRaw(id, { settled: true } as Partial<SubTab>);
           return id;
         }
         case "file": {
@@ -8588,8 +8963,15 @@ const ProjectViewBody = memo(function ProjectViewBody({
       // SideTab long enough to read older hibernation snapshots, then land it
       // on the combined panel instead of restoring a rail item that no longer
       // exists.
-      // Outcomes left the rail for a row in the usage popover.
-      setSideTab(restore.sideTab === "changes" ? "git" : restore.sideTab === "outcomes" ? "files" : restore.sideTab);
+      // Outcomes left the rail for a row in the usage popover, and Team memory
+      // was removed; a snapshot saved on either opens on Files.
+      setSideTab(
+        restore.sideTab === "changes"
+          ? "git"
+          : restore.sideTab === "outcomes" || restore.sideTab === "memory"
+            ? "files"
+            : restore.sideTab,
+      );
       setPinned(restore.sidePinned);
       const ids: (string | null)[] = [];
       const restoredTerminalIds = new Map<string, string>();
@@ -9476,12 +9858,53 @@ const ProjectViewBody = memo(function ProjectViewBody({
       // context-menu entry) still pass their own.
       where?: "workspace" | "current",
       machine?: Preference,
+      /** The account chosen in the picker. Absent: the one this CLI was last
+       *  launched with. */
+      profileId?: string,
     ) => {
       const cwd = at ?? activeContextRoot ?? componentsRef.current[0]?.path;
       if (!cwd) return;
       const target =
         where ?? (getSettings().agentWorkspaceByDefault ? "workspace" : "current");
-      if (machine && !(await prepareMachineLaunch(cli.id, machine))) return;
+      const startOnMachine = async (remote: Target, name: string): Promise<boolean> => {
+        if (remote.kind !== "remote") return false;
+        try {
+          onNotice(`Starting ${cli.name} on ${name}…`, "info");
+          const connected = await connectMachine(remote.workspaceId);
+          const component = componentsRef.current.find((c) => c.path === cwd) ?? componentsRef.current[0];
+          const found = await remoteComponentFor(
+            () => connected.invoke<string>("store_load"),
+            connected.env,
+            project,
+            component,
+          );
+          // No complete copy of the project there: the setup flow owns that.
+          if (found.kind !== "found") return false;
+          // The agent's own workspace on that machine, by the same setting the
+          // local launch honours, made through that machine's git.
+          const prepared = await prepareRemoteWorkspace({
+            invoke: connected.invoke,
+            cwd: found.path,
+            name: project.name,
+            cliId: cli.id,
+            cliName: cli.name,
+            isolate: target === "workspace",
+            bootstrap: getSettings().workspaceBootstrap,
+          });
+          for (const note of prepared.notes) onNotice(note, "warn");
+          // The account: a workspace has its own sign-ins, and a profile is a
+          // config directory on THIS Mac, so none is carried. Said once, only
+          // when a non-default account was chosen.
+          if (profileId && profileId !== DEFAULT_PROFILE)
+            onNotice(`${cli.name} on ${name} uses that workspace's own sign-in, not the account chosen here.`, "info");
+          addTerminal(prepared.cwd, launchCommand(cli), cli.name, cli.icon, false, undefined, undefined, true, undefined, undefined, undefined, connected.env);
+          return true;
+        } catch (error) {
+          onNotice(`Could not start ${cli.name} on ${name}: ${String((error as Error)?.message ?? error)}`, "warn");
+          return false;
+        }
+      };
+      if (machine && !(await prepareMachineLaunch(cli.id, machine, { label: componentsRef.current.find((c) => c.path === cwd)?.label }, startOnMachine))) return;
       // `undefined` is a probe that hasn't answered, never "not installed".
       // Ask now; if it still can't say, launch anyway: a missing binary fails
       // visibly in its own terminal, while guessing "missing" would run the
@@ -9568,8 +9991,11 @@ const ProjectViewBody = memo(function ProjectViewBody({
         }
         // Before the terminal opens: the CLI reads the config-dir variable at
         // startup, so exporting it afterwards is too late.
-        const profile = activeProfile();
-        const env = await launchEnv(cli.id);
+        const profile = profileId ?? lastProfileFor(cli.id, profilesRef.current.map((p) => p.id));
+        const env = await launchEnvFor(cli.id, profile);
+        // Remembered only when the CLI can hold an account and the launch
+        // actually carries one, so the default follows what was really used.
+        if (env.length || profile === DEFAULT_PROFILE) rememberProfile(cli.id, profile);
         const terminal = {
           cwd: launchCwd,
           command: launchCommand(cli),
@@ -9621,6 +10047,41 @@ const ProjectViewBody = memo(function ProjectViewBody({
     ],
   );
 
+  // An agent start that waited for a machine switch: now that this project is
+  // open on that machine, start it.
+  const launchCliRef = useRef(launchCli);
+  launchCliRef.current = launchCli;
+  const addTerminalRef = useRef(addTerminal);
+  addTerminalRef.current = addTerminal;
+  const startPrAgentRef = useRef(startPrAgent);
+  startPrAgentRef.current = startPrAgent;
+  const startTicketWorkRef = useRef(startTicketWork);
+  startTicketWorkRef.current = startTicketWork;
+  const repoPathsRef = useRef(repoPaths);
+  repoPathsRef.current = repoPaths;
+  useEffect(() => {
+    if (!visible) return;
+    const intent = takePendingLaunch(activeExecutionTarget(), canonicalProjectId(project));
+    if (!intent) return;
+    const cli = AGENT_CLIS.find((c) => c.id === intent.agentId);
+    if (!cli) return;
+    onNotice(`Starting ${cli.name} here.`, "info");
+    const at = intent.componentLabel
+      ? componentsRef.current.find((c) => c.label === intent.componentLabel)?.path
+      : undefined;
+    const first = at ?? componentsRef.current[0]?.path;
+    const repo = [...repoPathsRef.current].sort((a, b) => b.length - a.length).find((r) => first && (first === r || first.startsWith(`${r}/`))) ?? repoPathsRef.current[0] ?? "";
+    if (intent.then?.kind === "resume") {
+      const { sessionId, cwd } = intent.then.payload as { sessionId: string; cwd: string };
+      addTerminalRef.current(cwd, restoreCommand(TELEPORT_CLI_ID, sessionId) || undefined, TELEPORT_CLI_ID, cli.icon);
+    } else if (intent.then?.kind === "pr-review") void startPrAgentRef.current("review", repo, intent.then.payload as ipc.PrInfo, cli.id);
+    else if (intent.then?.kind === "pr-resolve") void startPrAgentRef.current("resolve", repo, intent.then.payload as ipc.PrInfo, cli.id);
+    else if (intent.then?.kind === "ticket") void startTicketWorkRef.current(intent.then.payload as ipc.TicketInfo, repo, cli.id);
+    else void launchCliRef.current(cli, at);
+    // Once per mount of a visible project: the intent is removed as it is taken.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [visible, project.id]);
+
   /** Run `cli`'s updater in a run tab. Its exit re-probes versions (see
    *  onExited), so the badge clears the moment the update lands — no timers. */
   const runCliUpdate = useCallback(
@@ -9655,7 +10116,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
       onClick: () => addTerminal(cwd),
     },
     { label: "", separator: true },
-    ...AGENT_CLIS.map((cli) => ({
+    ...listedForLaunch(AGENT_CLIS, installed).map((cli) => ({
       label: cli.name,
       icon: <AgentIcon id={cli.id} size={15} />,
       // Informational: a context-menu row has one click target, and the ＋
@@ -9668,7 +10129,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
             : undefined,
       onClick: () => {
         void pickComponent(`New ${cli.name}`, cli.id).then((selection) => {
-          if (selection) void launchCli(cli, selection.component.path, "current", selection.machine);
+          if (selection) void launchCli(cli, selection.component.path, "current", selection.machine, selection.profileId);
         });
       },
     })),
@@ -9910,6 +10371,21 @@ const ProjectViewBody = memo(function ProjectViewBody({
     },
     [statsByPty, liveSessionByPty, bound, firstSeen, lifeClock],
   );
+  lifeForPtyRef.current = lifeForPty;
+
+  // A settled agent that starts working or needs you again is not finished:
+  // it comes back out of the Settled group on its own (T3 Code un-settles a
+  // thread on a new message the same way).
+  useEffect(() => {
+    for (const tab of tabs) {
+      if (tab.type !== "terminal" || !isSettledTab(tab)) continue;
+      const state = lifeForPty(tab.ptyId)?.state;
+      if (state === "working" || state === "waiting") {
+        patchTabRaw(tab.id, { settled: false } as Partial<SubTab>);
+      }
+    }
+  }, [tabs, lifeForPty, patchTabRaw]);
+
   const watchdogViews = useStableViews(() => {
     const views: AgentLifeView[] = [];
     for (const tab of tabs) {
@@ -10193,9 +10669,14 @@ const ProjectViewBody = memo(function ProjectViewBody({
   );
 
   const grouped = tabPrefs.grouped;
+  // Pinned tabs sit first and outside the status groups, so they never move
+  // with their agent's state (see isPinnedTab).
+  const pinnedTabs = useMemo(() => splitPinned(stripTabs).pinned, [stripTabs]);
+  const unpinnedAgentTabs = useMemo(() => agentTabs.filter((t) => !isPinnedTab(t) && !isSettledTab(t)), [agentTabs]);
+  const settledTabs = useMemo(() => agentTabs.filter((t) => isSettledTab(t)), [agentTabs]);
   const byStatus = useCallback(
-    (s: TabStatus) => (grouped ? agentTabs.filter((t) => groupOf(t.id) === s) : []),
-    [grouped, agentTabs, groupOf],
+    (s: TabStatus) => (grouped ? unpinnedAgentTabs.filter((t) => groupOf(t.id) === s) : []),
+    [grouped, unpinnedAgentTabs, groupOf],
   );
   const attentionTabs = useMemo(() => byStatus("attention"), [byStatus]);
   const workingTabs = useMemo(() => byStatus("active"), [byStatus]);
@@ -10211,6 +10692,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
   const stripRef = useRef<HTMLDivElement | null>(null);
   const [openStacks, setOpenStacks] = useState<Record<string, boolean>>({
     quiet: false,
+    settled: false,
   });
   const toggleStack = useCallback(
     (key: string) => {
@@ -10264,6 +10746,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
       shown: shownInStack(group, label == null || openStacks[key] !== false),
     });
     return [
+      ...(pinnedTabs.length > 0 ? [run("pinned", null, null, null, pinnedTabs)] : []),
       ...(grouped
         ? [
             // Always this order, whatever is in them: needs you, working,
@@ -10274,20 +10757,23 @@ const ProjectViewBody = memo(function ProjectViewBody({
               run(s, STATUS_LABEL[s], s, null, { attention: attentionTabs, active: workingTabs, quiet: quietTabs }[s]),
             ),
           ]
-        : [run("all", null, null, null, agentTabs)]),
+        : [run("all", null, null, null, unpinnedAgentTabs)]),
+      ...(settledTabs.length > 0 ? [run("settled", "SETTLED", null, null, settledTabs)] : []),
       ...DOC_STACKS.map((d) =>
         run(
           d.key,
           d.label,
           null,
           DOC_STACK_ICONS[d.key],
-          refTabs.filter((t) => docStackFor(t.type) === d.key),
+          refTabs.filter((t) => !isPinnedTab(t) && docStackFor(t.type) === d.key),
         ),
       ),
     ];
   }, [
     grouped,
-    agentTabs,
+    pinnedTabs,
+    unpinnedAgentTabs,
+    settledTabs,
     refTabs,
     attentionTabs,
     workingTabs,
@@ -12285,6 +12771,9 @@ const ProjectViewBody = memo(function ProjectViewBody({
             sessionId,
             digest,
             ptyId: activeTab.ptyId as number,
+            machine: activeTab.machine
+              ? { env: activeTab.machine, name: liveEnvironments.get(activeTab.machine)?.name ?? "Workspace" }
+              : undefined,
           };
         })()
       : null;
@@ -12594,9 +13083,38 @@ const ProjectViewBody = memo(function ProjectViewBody({
               ...taskItem,
               { label: "Close", danger: true, onClick: () => closeTab(tab.id, "user") },
             ];
-      tabMenu.open(e, items);
+      // Pinning keeps a tab at the front of the strip, whatever its agent is
+      // doing, until it is unpinned.
+      const pinned = isPinnedTab(tab);
+      const settled = isSettledTab(tab);
+      tabMenu.open(e, [
+        {
+          label: pinned ? "Unpin tab" : "Pin tab",
+          onClick: () => patchTabRaw(tab.id, { pinned: !pinned } as Partial<SubTab>),
+        },
+        // Finished work, put away: the tab moves to the collapsed Settled group
+        // and out of the way of what is still running.
+        ...(tab.type === "terminal" && isAgentTab(tab) && !pinned
+          ? [
+              {
+                label: settled ? "Unsettle" : "Settle",
+                hint: settled ? undefined : "puts finished work away",
+                onClick: () => patchTabRaw(tab.id, { settled: !settled } as Partial<SubTab>),
+              },
+            ]
+          : []),
+        ...(tab.type === "terminal" && teleportCandidateRef.current(tab)
+          ? [
+              {
+                label: "Teleport to a workspace…",
+                onClick: () => setTeleport(teleportCandidateRef.current(tab)),
+              },
+            ]
+          : []),
+        ...items,
+      ]);
     },
-    [startRename, closeTab, closeVisualTab, tabMenu.open, taskMenu, startMicroTask, canShareTerminals, shareTerminalTab],
+    [startRename, closeTab, closeVisualTab, tabMenu.open, taskMenu, startMicroTask, canShareTerminals, shareTerminalTab, patchTabRaw, isAgentTab],
   );
   const onClearScrollback = useCallback(() => {
     if (activeTermTab)
@@ -12638,7 +13156,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
   const onLaunchCli = useCallback(
     async (cli: AgentCli, where?: "workspace" | "current") => {
       const selection = await pickComponent(`New ${cli.name}`, cli.id);
-      if (selection) await launchCli(cli, selection.component.path, where, selection.machine);
+      if (selection) await launchCli(cli, selection.component.path, where, selection.machine, selection.profileId);
     },
     [launchCli, pickComponent],
   );
@@ -12988,6 +13506,8 @@ const ProjectViewBody = memo(function ProjectViewBody({
                 setMachineTransition({
                   target: decision.target,
                   name: decision.targetName ?? "the selected machine",
+                  resumeAgent: agentId,
+                  resumeThen: { kind: "ticket", payload: tab.ticket },
                 });
                 return;
               }
@@ -13091,7 +13611,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
             installed={installed}
             onStartReview={(agentId) => {
               void pickComponent(`Review PR with an agent`, agentId).then(async (selection) => {
-                if (selection?.machine && await prepareMachineLaunch(agentId, selection.machine))
+                if (selection?.machine && await prepareMachineLaunch(agentId, selection.machine, { then: { kind: "pr-review", payload: tab.pr } }))
                   await startPrReview(tab.repo, tab.pr, agentId);
               });
             }}
@@ -13100,7 +13620,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
             }
             onStartResolve={(agentId) => {
               void pickComponent(`Resolve conflicts with an agent`, agentId).then(async (selection) => {
-                if (selection?.machine && await prepareMachineLaunch(agentId, selection.machine))
+                if (selection?.machine && await prepareMachineLaunch(agentId, selection.machine, { then: { kind: "pr-resolve", payload: tab.pr } }))
                   await startPrConflictResolve(tab.repo, tab.pr, agentId);
               });
             }}
@@ -13909,7 +14429,13 @@ const ProjectViewBody = memo(function ProjectViewBody({
                 stats={stats}
                 onPreview={openPreview}
               />
-              {tab.accountPending ? (
+              {tab.reconnect && tab.machine ? (
+                <RemoteReconnect
+                  machineName={machineLabel(tab.machine)}
+                  onReconnect={() => reconnectRemoteTab(tab.id)}
+                  onClose={() => closeTab(tab.id)}
+                />
+              ) : tab.accountPending ? (
                 <div className="term-account-pending" role="status">
                   Starting under {profileLabels[tab.profile ?? ""] ?? tab.profile}…
                 </div>
@@ -13934,6 +14460,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
                 streaming={shown}
                 attachId={tab.attachId}
                 killAttachedOnClose={tab.killAttachedOnClose}
+                machine={tab.machine}
                 // A run tab hands its command to the shell to run-and-exit
                 // (runCommand) so the pty's exit code is the command's own —
                 // one-shot runs (build, install) report truthfully instead of
@@ -14154,6 +14681,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
                       agentId={agent?.agentId ?? "agent"}
                       agentTitle={agent?.title || "Agent browser"}
                       supported={browserEngine === "webview"}
+                      projectId={project.id}
                       slot={Math.max(0, slot)}
                       hidden={slot < 0}
                       onClose={() => {
@@ -14326,7 +14854,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
                 <TerminalIcon size={26} />
                 <span>Shell</span>
               </button>
-              {AGENT_CLIS.map((cli) => (
+              {listedForLaunch(AGENT_CLIS, installed).map((cli) => (
                 <button
                   key={cli.id}
                   className="launch-card"
@@ -14505,15 +15033,56 @@ const ProjectViewBody = memo(function ProjectViewBody({
         {!vibe && agentTermWs && (
           <>
             {!wsDrawerOpen && (
-              <button
-                className="workspace-handle"
-                title="Open agent workspace — files, diffs, commits & PR"
-                aria-label="Open agent workspace"
-                onClick={() => setWsDrawerOpen(true)}
-              >
-                <AgentIcon id={agentTermWs.agent} size={15} />
-                <span className="workspace-handle-label">Workspace</span>
-              </button>
+              <AgentDetailsCard
+                key={agentTermWs.ptyId}
+                agent={agentTermWs.agent}
+                repo={agentTermWs.repo}
+                cwd={agentTermWs.cwd}
+                digest={agentTermWs.digest}
+                machine={agentTermWs.machine}
+                ports={projectStats.find((s) => s.id === agentTermWs.ptyId)?.ports}
+                life={lifeForPty(agentTermWs.ptyId)}
+                onOpenWorkspace={() => setWsDrawerOpen(true)}
+                onSendToWorkspace={isRemoteHost() ? undefined : () => {
+                  const tab = tabs.find((t): t is TermSubTab => t.type === "terminal" && t.ptyId === agentTermWs.ptyId);
+                  const candidate = tab ? teleportCandidate(tab) : null;
+                  if (candidate) setTeleport(candidate);
+                  else setSendOpen(true);
+                }}
+                settled={isSettledTab(tabs.find((t) => t.type === "terminal" && t.ptyId === agentTermWs.ptyId) ?? {})}
+                onSettle={(settle) => {
+                  const tab = tabs.find((t) => t.type === "terminal" && t.ptyId === agentTermWs.ptyId);
+                  if (tab) patchTabRaw(tab.id, { settled: settle } as Partial<SubTab>);
+                }}
+                onOpenAsset={(path, opts) => {
+                  // A click is the person's own say-so. With a modifier: their
+                  // own app. Otherwise a tab of its own; a file outside the
+                  // project opens only if Privacy allows it, as for a link.
+                  // A running server opens in a preview tab (or the browser with a modifier).
+                  if (isPreviewUrl(path)) {
+                    if (opts.system) void import("@tauri-apps/plugin-opener").then(({ openUrl }) => openUrl(path)).catch(() => {});
+                    else openPreview(path);
+                    return;
+                  }
+                  if (opts.system) {
+                    void import("@tauri-apps/plugin-opener").then(({ openPath }) => openPath(path)).catch(() => {});
+                    return;
+                  }
+                  const open = () => void openFileRef.current(path);
+                  if (getSettings().allowOutsideFileLinks) void ipc.fsGrantLinkFile(path).catch(() => {}).then(open);
+                  else open();
+                }}
+                onSendToAgent={(text) =>
+                  messageAgent({
+                    ptyId: agentTermWs.ptyId,
+                    sessionId: agentTermWs.sessionId,
+                    agentId: agentTermWs.agent,
+                    cwd: agentTermWs.cwd,
+                    text,
+                  })
+                }
+                onNotice={(message) => onNotice(message, "warn")}
+              />
             )}
             <div
               className={`workspace-overlay-layer ${wsDrawerOpen ? "open" : ""}`}
@@ -15154,14 +15723,6 @@ const ProjectViewBody = memo(function ProjectViewBody({
           onOpenAll={() => openCollectionPage("research-list")}
         />
       ))}
-      {sidePane("memory", () => (
-        <MemoryPanel
-          roots={roots}
-          onOpenSession={({ ptyId }) => {
-            if (ptyId != null) jumpToPty(ptyId);
-          }}
-        />
-      ))}
       {sidePane("agents", () => (
         <AgentsPanel
           visible={sideTab === "agents" && visible && sideOpen}
@@ -15227,7 +15788,6 @@ const ProjectViewBody = memo(function ProjectViewBody({
             serversBadge={serversRunning}
             prsBadge={prsBadge}
             tasksBadge={runningMicro.length}
-            memoryBadge={memoryBadge}
             pendingCount={pending.length}
             urgentCount={urgentCount}
             teamBadge={teamBadge}
@@ -15546,7 +16106,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
           body={
             machineTransition.target.kind === "t3"
               ? `${machineTransition.name} opens in its machine view. Continue there after it opens; this agent was not started on the active workspace.`
-              : `Switch to ${machineTransition.name}, then launch the agent there. This agent was not started on the active workspace.`
+              : `Switch to ${machineTransition.name}, then start the agent there. Nothing was started yet.`
           }
           dismissLabel="Cancel"
           onDismiss={() => setMachineTransition(null)}
@@ -15555,10 +16115,64 @@ const ProjectViewBody = memo(function ProjectViewBody({
             primary: true,
             onClick: () => {
               const target = machineTransition.target;
+              // Carry the start across the switch: it happens by itself once
+              // this project is open on that machine.
+              if (machineTransition.resumeAgent && target.kind !== "t3") {
+                setPendingLaunch({
+                  agentId: machineTransition.resumeAgent,
+                  projectId: canonicalProjectId(project),
+                  ...(machineTransition.resumeLabel ? { componentLabel: machineTransition.resumeLabel } : {}),
+                  ...(machineTransition.resumeThen ? { then: machineTransition.resumeThen } : {}),
+                  target,
+                });
+              }
               setMachineTransition(null);
               void requestTargetTransition(target, machineTransition.name);
             },
           }]}
+        />
+      )}
+      {teleport && visible && (
+        <TeleportFlow
+          project={project}
+          direction={isRemoteHost() ? "toMac" : "toWorkspace"}
+          agent={{ sessionId: teleport.sessionId, cwd: teleport.cwd, idle: teleport.idle }}
+          onClose={() => setTeleport(null)}
+          onNotice={onNotice}
+          stopAgent={async () => {
+            // Closing the tab ends the process; give the CLI a moment to flush
+            // its conversation before the transcript is read.
+            closeTab(teleport.tabId);
+            await new Promise((resolve) => setTimeout(resolve, 1500));
+          }}
+          restoreAgent={async () => {
+            addTerminal(teleport.cwd, restoreCommand(TELEPORT_CLI_ID, teleport.sessionId) || undefined, TELEPORT_CLI_ID, agentCliFor(TELEPORT_CLI_ID)?.icon);
+          }}
+          continueOnDestination={async (workspaceId, sessionId, cwd) => {
+            setPendingLaunch({
+              agentId: TELEPORT_CLI_ID,
+              projectId: canonicalProjectId(project),
+              target: workspaceId === TELEPORT_TO_MAC ? { kind: "local" } : { kind: "remote", workspaceId },
+              then: { kind: "resume", payload: { sessionId, cwd } },
+            });
+            await requestTargetTransition(workspaceId === TELEPORT_TO_MAC ? { kind: "local" } : { kind: "remote", workspaceId });
+          }}
+          onLinkProject={(env, id) => onLinkProject?.(env, id)}
+        />
+      )}
+      {sendOpen && visible && (
+        <Dialog
+          title={`Send ${project.name} to a workspace`}
+          size="md"
+          dismissLabel="Close"
+          onDismiss={() => setSendOpen(false)}
+          body={
+            <SendToWorkspace
+              projectId={project.id}
+              projectName={project.name}
+              components={project.components.map((component) => ({ componentId: component.id, label: component.label }))}
+            />
+          }
         />
       )}
       {placementSetup && visible && (
@@ -15602,11 +16216,13 @@ const ProjectViewBody = memo(function ProjectViewBody({
           activePath={activeTab ? activeContextRoot : null}
           machineTargets={componentPick.machineTargets}
           initialMachine={componentPick.initialMachine}
-          onPick={(component, machine) => {
+          accounts={componentPick.accounts}
+          fixedComponent={componentPick.fixedComponent}
+          onPick={(component, machine, profileId) => {
             const { resolve } = componentPick;
             setComponentPick(null);
             recordRecentComponent(project.id, component.id);
-            resolve({ component, machine });
+            resolve({ component, machine, profileId });
           }}
           onCancel={() => {
             const { resolve } = componentPick;
@@ -15638,7 +16254,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
               const path = pendingSplitRef.current
                 ? activeContextRoot ?? selection.component.path
                 : selection.component.path;
-              void launchCli(cli, path, where, selection.machine).finally(() => {
+              void launchCli(cli, path, where, selection.machine, selection.profileId).finally(() => {
                 // A successful split consumes this itself. Clear only a launch
                 // that stopped before it reached completePendingSplit.
                 if (pendingSplitRef.current) {

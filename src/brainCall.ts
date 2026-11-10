@@ -10,6 +10,9 @@
 //     person's resume list and no Canopy hooks firing for it (brain.rs);
 //   * background features share a small concurrency cap and cannot stampede
 //     the person's plan;
+//   * a hand-verified headless CLI runs its own one-shot argv; an ACP agent
+//     (tier "acp") is driven one prompt over JSON-RPC by brainAcp.ts, read-only,
+//     and shares everything else on this list;
 //   * the vendor-specific parts — argv, the cheap model alias, the wire
 //     format — stay in the runner manifest (structuredRunners.ts) and the
 //     protocol adapter (structuredEvents.ts), never in feature code;
@@ -33,6 +36,7 @@ import {
 } from "./projects";
 import { getSettings } from "./settings";
 import { StructuredRunCollector, type StructuredDialect } from "./structuredEvents";
+import { runAcpBrainOnce, type BrainRunResult } from "./brainAcp";
 import { noteContextWindows } from "./contextWindow";
 import { BRAIN_DISALLOWED_TOOLS, brainArgs } from "./structuredRunners";
 
@@ -48,7 +52,6 @@ export type BrainFeature =
   | "handoff"
   | "lens"
   | "gates"
-  | "memory"
   | "outcomes"
   | (string & {});
 
@@ -287,7 +290,10 @@ export async function askBrain<T = unknown>(req: BrainRequest<T>): Promise<Brain
     ? settings.brainBackgroundModel.trim() || runner.backgroundModel || ""
     : settings.brainModel.trim();
   const prompt = req.json ? `${req.prompt}${JSON_INSTRUCTION}` : req.prompt;
-  const args = brainArgs(
+  // An ACP agent has no one-question argv: it is driven over JSON-RPC
+  // (brainAcp.ts) instead, so there is nothing to build here for it.
+  const viaAcp = runner.tier === "acp";
+  const args = viaAcp ? [] : brainArgs(
     runner,
     {
       bin: cli.bin,
@@ -323,11 +329,25 @@ export async function askBrain<T = unknown>(req: BrainRequest<T>): Promise<Brain
     }
   }
   let answer: BrainAnswer<T>;
-  let collector: StructuredRunCollector | null = null;
+  let summary: BrainRunResult["summary"] = null;
   let cwdMissing = false;
   try {
-    const run = await runOnce(cli, runner.dialect, args, req, await brainLaunchEnv(cli.id));
-    collector = run.collector;
+    const env = await brainLaunchEnv(cli.id);
+    const run = viaAcp
+      ? await runAcpBrainOnce({
+          id: callId(),
+          bin: cli.bin,
+          runner,
+          prompt,
+          brief: BRAIN_BRIEF,
+          model,
+          cwd: req.cwd,
+          env,
+          timeoutMs: req.timeoutMs ?? BRAIN_DEFAULT_TIMEOUT_MS,
+          signal: req.signal,
+        })
+      : await runOnce(cli, runner.dialect, args, req, env);
+    summary = run.summary;
     cwdMissing = run.end === "spawn-failed" && !!req.cwd && /cwd does not exist/i.test(run.spawnError ?? "");
     answer = interpret<T>(run, req, started);
   } finally {
@@ -338,7 +358,7 @@ export async function askBrain<T = unknown>(req: BrainRequest<T>): Promise<Brain
   // put what the brain needs in the prompt, so ask again from home rather than
   // fail — once, and without metering a call that never started.
   if (cwdMissing) return askBrain<T>({ ...req, cwd: "" });
-  const s = collector?.summary;
+  const s = summary;
   noteContextWindows(s?.contextWindows);
   recordBrainCall({
     feature: req.feature,
@@ -356,14 +376,7 @@ export async function askBrain<T = unknown>(req: BrainRequest<T>): Promise<Brain
 
 const isProbe = (req: BrainRequest<unknown>) => req.feature === "connect-probe";
 
-interface RunResult {
-  collector: StructuredRunCollector | null;
-  stderr: string[];
-  exitCode: number | null;
-  /** How the run ended, from askBrain's side. */
-  end: "done" | "exit" | "timeout" | "aborted" | "spawn-failed";
-  spawnError?: string;
-}
+type RunResult = BrainRunResult;
 
 /** Spawn the CLI and collect until its answer (or its exit, a timeout, or an
  *  abort). Resolves on the answer line rather than on exit: a CLI that keeps
@@ -388,11 +401,11 @@ function runOnce(
       req.signal?.removeEventListener("abort", onAbort);
       // Reap whatever is left. Idempotent on the Rust side.
       if (end !== "exit" && end !== "spawn-failed") void ipc.brainKill(id).catch(() => {});
-      resolve({ collector, stderr, exitCode, end, spawnError });
+      resolve({ summary: collector.summary, stderr, exitCode, end, spawnError });
     };
     const onAbort = () => finish("aborted");
     if (req.signal?.aborted) {
-      resolve({ collector, stderr, exitCode: null, end: "aborted" });
+      resolve({ summary: collector.summary, stderr, exitCode: null, end: "aborted" });
       return;
     }
     req.signal?.addEventListener("abort", onAbort, { once: true });
@@ -430,7 +443,7 @@ function runOnce(
 }
 
 function interpret<T>(run: RunResult, req: BrainRequest<T>, started: number): BrainAnswer<T> {
-  const s = run.collector?.summary;
+  const s = run.summary;
   if (run.end === "spawn-failed") {
     const message = run.spawnError ?? "The brain CLI could not be started.";
     // The binary vanished since detection: look again next time.

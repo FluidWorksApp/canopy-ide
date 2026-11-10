@@ -27,7 +27,9 @@ export function activeProfile(): string {
  *  variable once, at startup. */
 export function setActiveProfile(profileId: string): void {
   const id = profileId || DEFAULT_PROFILE;
-  updateSettings({ activeProfile: id });
+  // An explicit switch wins over each agent's remembered account: otherwise the
+  // chip would say one account while a launch quietly used another.
+  updateSettings({ activeProfile: id, lastProfileByCli: {} });
   // Mirrored to Rust for the launchers with no webview (the portal).
   // Fire-and-forget: recording it must not block the switch.
   void ipc.profileActivate(id).catch(() => {});
@@ -64,6 +66,38 @@ export async function launchEnv(cliId: string): Promise<[string, string][]> {
     // A launch must not be blocked by a profile lookup. Falling back to no
     // environment means the CLI starts under the default login — visible in the
     // tab badge, and recoverable — rather than not starting at all.
+    return [];
+  }
+}
+
+/** The account `cliId` should launch under when nobody chose: the one it was
+ *  last launched with, if that account still exists, else the active account. */
+export function lastProfileFor(cliId: string, available?: string[]): string {
+  const saved = getSettings().lastProfileByCli?.[cliId];
+  if (saved && (!available || saved === DEFAULT_PROFILE || available.includes(saved))) return saved;
+  return activeProfile();
+}
+
+/** Remember which account `cliId` was launched under. */
+export function rememberProfile(cliId: string, profileId: string): void {
+  const current = getSettings().lastProfileByCli ?? {};
+  if (current[cliId] === profileId) return;
+  updateSettings({ lastProfileByCli: { ...current, [cliId]: profileId } });
+}
+
+/** The accounts a launch of `cliId` can choose between: more than one profile
+ *  and a CLI that can hold one, else none (nothing to ask). */
+export function launchableProfiles(profiles: AgentProfile[], cliId: string): AgentProfile[] {
+  return supportsProfiles(cliId) && profiles.length > 1 ? profiles : [];
+}
+
+/** The env pointing `cliId` at a specific account. Empty on the default account
+ *  and for CLIs that can't hold one, like `launchEnv` but for a chosen profile. */
+export async function launchEnvFor(cliId: string, profile: string): Promise<[string, string][]> {
+  if (profile === DEFAULT_PROFILE || !supportsProfiles(cliId)) return [];
+  try {
+    return await ipc.profileEnv(cliId, profile);
+  } catch {
     return [];
   }
 }

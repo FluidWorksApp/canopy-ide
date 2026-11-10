@@ -162,12 +162,6 @@ The workspace image (`packages/remote-host/Dockerfile`) already has `gh` and `gi
   setup registers the `canopy-hook --mcp` server in each CLI's own registry (Cursor,
   Antigravity, oh-my-pi, Kiro and OpenCode JSON, Amp's `amp.mcpServers`, Grok's TOML), as
   `setup_*_mcp` in `agents.rs` does.
-- **Team memory.** The ledger stays on the desktop. Each connect, and each change to a
-  memory, sends the approved, unexpired entries to the workspace's canopy-service
-  (`memory_sync`), which answers `canopy_memory` from that copy with the desktop's rules
-  (`canopy-core` `memory`). `canopy_memory_propose` validates like the desktop and queues
-  the proposal; the IDE pulls the queue (`workspace_memory_proposals`, every minute and on
-  connect), files each as `proposed` in the ledger and acknowledges it (`memory_ack`).
 - **Android with the project in the VM.** `android_run` with a `/workspace` APK reads it
   from the VM in slices, stages it here (`android_stage_file`) and runs it on this
   computer's device. `android_describe` on a `/workspace` project answers from its Gradle
@@ -287,6 +281,15 @@ Counts: **(a) 11 · (b) 62 · (c) 148 · (d) 13 · test 2**.
 | `gh_pr_review` | c | Host: `github.mjs` (mirrors git.rs (gh_*)) |
 | `gh_pr_review_batch` | c | Host: `github.mjs` (mirrors git.rs (gh_*)) |
 | `gh_pr_reviewer_candidates` | c | Host: `github.mjs` (mirrors git.rs (gh_*)) |
+| `gh_pr_branch_state` | c | Host: `github.mjs` (mirrors git.rs (gh_*)) |
+| `teleport_home` | c | Host: `teleport-transcript.mjs`; desktop: `teleport.rs` |
+| `teleport_transcript_read` | c | Host: `teleport-transcript.mjs`; desktop: `teleport.rs` |
+| `teleport_transcript_write` | c | Host: `teleport-transcript.mjs`; desktop: `teleport.rs` |
+| `teleport_git_relation` | c | Host: `teleport-transcript.mjs`; desktop: `teleport.rs` |
+| `teleport_bundle_create` | c | Host: `teleport-transcript.mjs`; desktop: `teleport.rs` |
+| `teleport_bundle_apply` | c | Host: `teleport-transcript.mjs`; desktop: `teleport.rs` |
+| `teleport_patch_create` | c | Host: `teleport-transcript.mjs`; desktop: `teleport.rs` |
+| `teleport_patch_apply` | c | Host: `teleport-transcript.mjs`; desktop: `teleport.rs` |
 | `gh_pr_state` | c | Host: `github.mjs` (mirrors git.rs (gh_*)) |
 | `gh_pr_thread_reply` | c | Host: `github.mjs` (mirrors git.rs (gh_*)) |
 | `gh_pr_thread_resolved` | c | Host: `github.mjs` (mirrors git.rs (gh_*)) |

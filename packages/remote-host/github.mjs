@@ -11,7 +11,7 @@ import {delimiter,isAbsolute,join} from 'node:path';
 import {parseWorktrees,stripGhNoise,remoteUnreachableFor,repoBusy,switchFailure} from './checkout-errors.mjs';
 
 const NET_TIMEOUT_SECS=120, STREAM_MAX=8*1024*1024, MAX_PATCH_FILES=400;
-export const GITHUB_READ_ONLY=['gh_auth','gh_available','gh_issue_detail','gh_issue_list','gh_pr_body','gh_pr_conversation','gh_pr_diff','gh_pr_diff_since','gh_pr_failing_logs','gh_pr_links','gh_pr_list','gh_pr_reviewer_candidates','gh_pr_state'];
+export const GITHUB_READ_ONLY=['gh_auth','gh_available','gh_issue_detail','gh_issue_list','gh_pr_body','gh_pr_conversation','gh_pr_diff','gh_pr_diff_since','gh_pr_failing_logs','gh_pr_links','gh_pr_list','gh_pr_reviewer_candidates','gh_pr_state','gh_pr_branch_state'];
 
 // ---------- parsing, shared with tests ----------
 const s=v=>typeof v==='string'?v:'';
@@ -249,6 +249,11 @@ export function githubCommands(ctx){
    catch(e){if(!isDiffTooLarge(e.message))throw e;const [owner,name]=await nwo(top);return assemblePatch(await gh(['api','--paginate','--jq','.[] | @json',`repos/${owner}/${name}/pulls/${n}/files?per_page=100`],top));}
   },
   gh_pr_body:args=>prJson(args,'body'),
+  async gh_pr_branch_state({repo,branch}){
+   if(typeof branch!=='string'||!branch||branch.startsWith('-'))throw Error('not a branch name');
+   const top=await repoPath(repo);
+   return (await gh(['pr','view',branch,'--json','state,headRefOid','--jq','.state + " " + .headRefOid'],top)).trim();
+  },
   async gh_pr_state(args){return (await prJson(args,'state')).trim().toUpperCase();},
   async gh_pr_review({repo,number,action,body}){
    const top=await repoPath(repo),n=num(number);

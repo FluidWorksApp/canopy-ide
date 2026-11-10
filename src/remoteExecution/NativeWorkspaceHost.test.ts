@@ -29,7 +29,7 @@ it('runs the companion CLI on the viewing computer and streams its output back t
  expect(desktop.invoke).toHaveBeenCalledWith('companion_spawn',{command:'codex',args:['exec'],keepStdin:false,onData:native});
  native.onmessage({kind:'line',text:'{"type":"thread.started"}'});
  expect(seen).toEqual([{kind:'line',text:'{"type":"thread.started"}'}]);
- const rest=['companion_write','companion_kill','companion_status','companion_store_read','companion_store_write','companion_save_attachment','companion_dispatch_origin','companion_open_requests','context_publish','context_remove','context_tools','browser_result','webview_snapshot','canopy_account_request','send_crash'];
+ const rest=['companion_write','companion_kill','companion_status','companion_save_attachment','companion_dispatch_origin','companion_open_requests','context_publish','context_remove','context_tools','browser_result','webview_snapshot','canopy_account_request','send_crash'];
  for(const command of rest)await host.invoke(command,{});
  expect(vi.mocked(desktop.invoke).mock.calls.map(([command])=>command)).toEqual(['companion_spawn',...rest]);
  expect(fetcher).not.toHaveBeenCalled();host.dispose();

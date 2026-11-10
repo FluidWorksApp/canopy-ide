@@ -19,6 +19,7 @@
 // "is this project hibernating" — a marker held anywhere else would drift from
 // the snapshot it describes, and a project claiming to be asleep with nothing
 // to wake is the one state this feature cannot afford.
+import { routeOf } from "./environments/ptyRoute";
 import type { SubTab, SideTab } from "./components/ProjectView/helpers";
 import { snapshotNames } from "./tabName";
 import type * as ipc from "./ipc";
@@ -71,6 +72,34 @@ export interface TerminalSnapshot {
   /** Runtime tab identity used only to reconnect split-tree leaves on wake. */
   tabId?: string;
   paneGroup?: string;
+  /** Pinned to the front of the strip; restored pinned. */
+  pinned?: boolean;
+  /** Settled (put away); restored settled. */
+  settled?: boolean;
+  /** The machine it ran on, when not the primary one ("remote:<id>"). Written
+   *  only for such tabs; absent means the primary, so every snapshot written
+   *  before this field existed restores exactly as it did. A build that predates
+   *  the field ignores it and would open the tab on its own primary machine: the
+   *  downgrade risk recorded in docs/multi-host-design.md. */
+  machine?: string;
+  /** The terminal's id on that machine, so a wake can offer to reattach to the
+   *  session still running there. Written with `machine`. */
+  machineSessionId?: number;
+}
+
+/** The environment a snapshot tab belongs to. The primary when the field is
+ *  absent; null when it is present but not a usable id, so the caller skips the
+ *  tab rather than quietly opening it on the wrong machine. */
+export function snapshotEnv(t: Pick<TerminalSnapshot, "machine">, primary: string = "local"): string | null {
+  if (t.machine === undefined) return primary;
+  return typeof t.machine === "string" && t.machine.length > 0 && !t.machine.includes("|") ? t.machine : null;
+}
+
+/** The id a remote terminal has on its own machine: the alias of a live tab is
+ *  looked up, a restored placeholder still holds it. */
+function machineSessionIdOf(t: { ptyId: number | null; reconnect?: { sessionId: number } }): number | undefined {
+  if (t.reconnect) return t.reconnect.sessionId;
+  return t.ptyId != null ? (routeOf(t.ptyId)?.id) : undefined;
 }
 
 export type SnapshotTab =
@@ -148,6 +177,9 @@ export function snapshotTabs(
     switch (t.type) {
       case "terminal": {
         if (t.micro) break;
+        // The machine's own terminal, shown because "All workspaces" is on: it
+        // comes back by itself when that mode does.
+        if (t.viaAll) break;
         if (t.run && t.exited) break;
         const command = t.command;
         // The process in the PTY is the strongest answer. A CLI may have been
@@ -184,6 +216,14 @@ export function snapshotTabs(
           profile: t.profile,
           attachId: t.killAttachedOnClose ? undefined : t.attachId,
           ...(t.paneGroup ? { tabId: t.id, paneGroup: t.paneGroup } : {}),
+          ...(t.pinned ? { pinned: true } : {}),
+          ...(t.settled ? { settled: true } : {}),
+          ...(t.machine && t.machine !== "local"
+            ? {
+                machine: t.machine,
+                ...(machineSessionIdOf(t) !== undefined ? { machineSessionId: machineSessionIdOf(t) } : {}),
+              }
+            : {}),
         });
         break;
       }

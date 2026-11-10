@@ -9,7 +9,7 @@ const base: PromptInput = {
     { name: "Coraa", roots: ["/GitHub/coraa"], open: false, hibernated: true },
   ],
   authority: "confirm",
-  tools: ["canopy_workspace", "canopy_workspace_git", "canopy_remember", "canopy_recall"],
+  tools: ["canopy_workspace", "canopy_workspace_git"],
   cliName: "Claude Code",
 };
 

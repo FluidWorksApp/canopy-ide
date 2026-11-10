@@ -43,10 +43,10 @@ describe("brain meter", () => {
 
   it("persists to storage and drops records past 30 days", () => {
     const now = Date.now();
-    recordBrainCall(call("memory", now - 31 * 24 * 3600 * 1000, 9), now - 31 * 24 * 3600 * 1000);
-    recordBrainCall(call("memory", now, 1), now);
+    recordBrainCall(call("plan", now - 31 * 24 * 3600 * 1000, 9), now - 31 * 24 * 3600 * 1000);
+    recordBrainCall(call("plan", now, 1), now);
     expect(JSON.parse(localStorage.getItem("canopy.brainMeter")!)).toHaveLength(1);
-    expect(brainSpend({ feature: "memory" }).costUsd).toBe(1);
+    expect(brainSpend({ feature: "plan" }).costUsd).toBe(1);
   });
 
   it("caps the record count", () => {

@@ -8,7 +8,7 @@ vendor stream, or invent their own store.
 **Two rules:**
 
 1. Every intelligent feature calls `askBrain` with its own feature tag.
-2. Every durable artifact (plan, receipt, memory, awareness note, handoff,
+2. Every durable artifact (plan, receipt, awareness note, handoff,
    rule, review, outcome, spend record) goes in the ledger.
 
 | Piece | File | What it gives you |

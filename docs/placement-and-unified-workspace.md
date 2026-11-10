@@ -88,10 +88,13 @@ moved when no dispatch path exists.
 ## Current limits
 
 - The host is a global singleton. Only the active host's projects and terminals
-  can be read. Other connected machines still show their name and known
-  availability, but their projects and agents appear only after switching to
-  them. While a remote workspace is active, this Mac's projects are not
-  readable.
+  can be read. Other connected machines show their name and availability, and a
+  ready workspace's load is read on demand through the account
+  (`src/remoteExecution/workspaceProbe.ts`): a short, read-only look that lists
+  its sessions. That count is of running sessions, agents and shells together, so
+  it is labelled "sessions", not agent slots. Their projects and agents appear
+  only after switching to them. While a remote workspace is active, this Mac's
+  projects are not readable.
 - Direct agent launch reaches only the active local or workspace host. Selecting
   an inactive local or workspace target produces a named switch step. Selecting
   a machine whose integration currently exposes files and terminals rather

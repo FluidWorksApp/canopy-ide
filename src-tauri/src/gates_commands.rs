@@ -20,6 +20,15 @@ fn now_ms() -> u64 {
 /// Write the approved gates for the repository `cwd` belongs to. Keyed by the
 /// ledger's canonical root, so every worktree of a repo shares one policy just
 /// as it shares one ledger. Returns the file written.
+/// Tell the hook whether "Skip permission prompts" is on, so Canopy's own
+/// confirmation for deleting files outside the project follows the same switch.
+#[tauri::command]
+pub async fn gates_set_global(skip_permissions: bool) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || gates::write_global(&home()?, skip_permissions))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
 #[tauri::command]
 pub async fn gates_policy_write(cwd: String, mut policy: Policy) -> Result<String, String> {
     tauri::async_runtime::spawn_blocking(move || {

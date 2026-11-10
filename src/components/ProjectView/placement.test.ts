@@ -60,11 +60,37 @@ describe("ProjectView machine launch boundary", () => {
     expect(outcome).toEqual({ kind: "transition", target: remote, name: "Design Studio" });
   });
 
-  it("refuses before placement when machine discovery is incomplete", async () => {
+  it("still starts on this Mac when the other machines cannot be read", async () => {
     const outcome = await resolveProjectMachineLaunch({
       project,
       agentKind: "opencode",
       requested: targetPreference(local),
+      gather: async () => gathered({ discoveryFailures: ["Could not read connected machines: offline"] }),
+      canLaunch: () => true,
+    });
+
+    expect(outcome).toMatchObject({ kind: "launch", decision: { target: local } });
+    expect((outcome as { decision: { warning?: string } }).decision.warning).toMatch(/offline.*Starting on this Mac/);
+  });
+
+  it("still starts on this Mac under Automatic when reading the machines throws", async () => {
+    const outcome = await resolveProjectMachineLaunch({
+      project,
+      agentKind: "opencode",
+      requested: { mode: "automatic" },
+      gather: async () => {
+        throw new Error("Cannot reach Canopy");
+      },
+      canLaunch: () => true,
+    });
+    expect(outcome).toMatchObject({ kind: "launch", decision: { target: local } });
+  });
+
+  it("refuses a chosen remote machine it cannot read, because it will not run it somewhere else", async () => {
+    const outcome = await resolveProjectMachineLaunch({
+      project,
+      agentKind: "opencode",
+      requested: targetPreference(remote),
       gather: async () => gathered({ discoveryFailures: ["Could not read connected machines: offline"] }),
       canLaunch: () => true,
     });

@@ -16,8 +16,9 @@ export interface ResourceSources {
   localMemory: () => Promise<{ total_bytes: number; available_bytes: number } | null>;
   localCapacity: number;
   remoteWorkspaces: () => Promise<RemoteWorkspaceInfo[]>;
-  /** "unknown" when this client cannot observe that workspace's load. */
-  remoteActiveAgents: (workspaceId: string) => Promise<number | "unknown">;
+  /** "unknown" when this client cannot observe that workspace's load. A
+   *  `{sessions}` answer counts every running session, agents and shells. */
+  remoteActiveAgents: (workspaceId: string) => Promise<number | "unknown" | { sessions: number }>;
   t3Machines: () => Promise<{ id: string }[]>;
   t3ActiveAgents: (machineId: string) => Promise<number | "unknown">;
 }
@@ -66,7 +67,9 @@ export async function collectResources(src: ResourceSources, defaultRemoteCapaci
         if (w.state !== "ready") return offline(target, now);
         const n = await safe(() => src.remoteActiveAgents(w.id));
         if (n === null) return offline(target, now);
-        return { target, online: true, activeAgents: n === "unknown" ? 0 : n, ...(n === "unknown" ? { loadUnknown: true } : {}), capacity: capacityFromMemory(w.memory_max_mib, defaultRemoteCapacity), lastSeen: now };
+        const capacity = capacityFromMemory(w.memory_max_mib, defaultRemoteCapacity);
+        if (typeof n === "object" && n !== null) return { target, online: true, activeAgents: n.sessions, loadBasis: "sessions", capacity, lastSeen: now };
+        return { target, online: true, activeAgents: n === "unknown" ? 0 : n, ...(n === "unknown" ? { loadUnknown: true } : {}), capacity, lastSeen: now };
       }),
     )),
   );

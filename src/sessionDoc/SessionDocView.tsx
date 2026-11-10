@@ -660,7 +660,7 @@ export function SessionDocView({
                 <ul className="sdoc-list">
                   {doc.notes.map((n) => (
                     <li key={n.id}>
-                      <span className="sdoc-by">{n.kind === "memory" ? "remembered" : "noticed"}</span> {n.text}
+                      <span className="sdoc-by">noticed</span> {n.text}
                     </li>
                   ))}
                 </ul>

@@ -7,6 +7,7 @@
 import { useCallback, useEffect, useState } from "react";
 import * as ipc from "../ipc";
 import { generatePrDraft } from "../prGenerate";
+import { runCommitPushPr } from "../commitPushPrIpc";
 import type { Notify } from "../types";
 import { Dialog } from "./Dialog";
 import { GitBranchIcon } from "./icons";
@@ -78,9 +79,15 @@ export function OpenPrDialog({ open, repo, onNotice, onClose }: OpenPrDialogProp
     setBusy(true);
     setError(null);
     try {
-      // Idempotent when already pushed; sets the upstream when it is missing.
-      await ipc.gitPush(repo, true);
-      const link = await ipc.ghPrCreate(repo, base, ctx.branch, title, body, draft);
+      // Push (idempotent; sets the upstream when missing) and open the PR with
+      // the text on screen. The commit step is the caller's: this dialog is
+      // for a branch whose work is already committed.
+      const result = await runCommitPushPr({ repo, commit: false, base, title, body, draft });
+      const link = result.prUrl;
+      if (!link) {
+        onNotice("A pull request for this branch already exists.", "info");
+        return;
+      }
       setUrl(link);
       // Loaded on demand: the watcher store pulls in the whole event layer,
       // which the Git panel does not otherwise need to open.

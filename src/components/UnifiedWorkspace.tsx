@@ -11,9 +11,9 @@ import { PlacementPicker, targetName } from "./PlacementPicker";
 import { Button } from "./ui";
 
 const load = async (): Promise<Gathered> => (await import("../placement/gather")).gatherUnified();
-const kindLabel: Record<UnifiedKind, string> = { project: "Project", agent: "Agent", thread: "Thread", job: "Job" };
+const kindLabel: Record<UnifiedKind, string> = { project: "Project", agent: "Agent", thread: "Thread", job: "Job", session: "Session" };
 
-function MachineSummary({ machine, resource }: { machine: DisplayTarget; resource?: ResourceSnapshot }) {
+function MachineSummary({ machine, resource, current, onSwitch }: { machine: DisplayTarget; resource?: ResourceSnapshot; current?: boolean; onSwitch?: () => void }) {
   const online = resource?.online ?? machine.online;
   const measured = online && resource && !resource.loadUnknown && resource.capacity > 0;
   const pct = measured ? Math.min(100, Math.round((resource.activeAgents / resource.capacity) * 100)) : 0;
@@ -23,12 +23,19 @@ function MachineSummary({ machine, resource }: { machine: DisplayTarget; resourc
         <strong className="unified-machine-name">{machine.name}</strong>
         <span className={`unified-machine-state ${online ? "online" : "offline"}`}><i aria-hidden="true" />{online ? "Online" : "Offline"}</span>
       </div>
-      {measured ? (
+      {onSwitch && (current
+        ? <small className="unified-machine-current">Active now</small>
+        : online && <Button size="sm" variant="ghost" onClick={onSwitch} aria-label={`Switch to ${machine.name}`}>Switch to this machine</Button>)}
+      {online && resource && resource.loadBasis === "sessions" ? (
+        <small title="Read from outside the workspace: counts every running session, agents and shells">
+          {resource.activeAgents} session{resource.activeAgents === 1 ? "" : "s"} running
+        </small>
+      ) : measured ? (
         <>
           <progress max={100} value={pct} aria-label={`${machine.name} load`} />
           <small>{resource.activeAgents} of {resource.capacity} agent slots in use</small>
         </>
-      ) : <small>{online ? "Load unavailable" : "Not available for new work"}</small>}
+      ) : <small title={online ? "Canopy can only count agents on the workspace you are connected to. Switch to it to see its load." : undefined}>{online ? "Load unavailable until you switch to it" : "Not available for new work"}</small>}
     </li>
   );
 }
@@ -37,7 +44,14 @@ export function UnifiedWorkspace({
   gather = load,
   onOpen,
   onHandOff,
+  onSwitch,
+  activeTarget,
 }: {
+  /** Switch the whole window to this machine, where its projects and agents
+   *  become readable. Only one host is live at a time. */
+  onSwitch?: (target: DisplayTarget["target"]) => void;
+  /** The machine this window is on now. */
+  activeTarget?: DisplayTarget["target"];
   gather?: () => Promise<Gathered>;
   /** Open a thread or job in its own surface. */
   onOpen?: (row: UnifiedRow) => void;
@@ -90,7 +104,7 @@ export function UnifiedWorkspace({
         </label>
         <label className="field"><span>Type</span>
           <select aria-label="Type filter" value={filter.kind} onChange={(event) => setFilter({ ...filter, kind: event.target.value as UnifiedFilter["kind"] })}>
-            <option value="all">Everything</option><option value="project">Projects</option><option value="agent">Agents</option><option value="thread">Threads</option><option value="job">Jobs</option>
+            <option value="all">Everything</option><option value="project">Projects</option><option value="agent">Agents</option><option value="thread">Threads</option><option value="job">Jobs</option><option value="session">Sessions</option>
           </select>
         </label>
         <label className="field unified-search"><span>Find work</span><input type="search" aria-label="Filter by name" placeholder="Project, branch, or machine" value={filter.text} onChange={(event) => setFilter({ ...filter, text: event.target.value })} /></label>
@@ -102,7 +116,7 @@ export function UnifiedWorkspace({
       {data && (
         <>
           <ul className="unified-machines" aria-label="Machine availability">
-            {data.targets.map(machine => <MachineSummary key={targetKey(machine.target)} machine={machine} resource={data.resources.find(resource => targetKey(resource.target) === targetKey(machine.target))} />)}
+            {data.targets.map(machine => <MachineSummary key={targetKey(machine.target)} machine={machine} current={!!activeTarget && targetKey(activeTarget) === targetKey(machine.target)} onSwitch={onSwitch ? () => onSwitch(machine.target) : undefined} resource={data.resources.find(resource => targetKey(resource.target) === targetKey(machine.target))} />)}
           </ul>
           {data.notes.length > 0 && <aside className="unified-limitations" aria-label="Workspace visibility limits"><strong>Visibility</strong>{data.notes.map(note => <p key={note}>{note}</p>)}</aside>}
           {visibleRows.length > 0 ? (
@@ -112,7 +126,7 @@ export function UnifiedWorkspace({
                 <tbody>
                   {visibleRows.map(row => {
                     const canOpen = !!onOpen && row.target.kind === "t3" && (row.kind === "thread" || row.kind === "job");
-                    const canHandOff = row.kind !== "project";
+                    const canHandOff = row.kind !== "project" && row.kind !== "session";
                     return <tr key={row.id} className="unified-row" data-row-id={row.id}>
                       <th scope="row" data-label="Work"><span className="unified-work-name">{row.name}</span></th>
                       <td data-label="Machine"><span className="unified-target-badge" data-target-id={targetKey(row.target)}>{row.targetLabel}</span></td>

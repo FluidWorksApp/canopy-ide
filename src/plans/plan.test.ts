@@ -37,25 +37,22 @@ const plan = (over: Partial<PlanData> = {}): PlanData => ({
 });
 
 describe("plan prompt", () => {
-  it("carries the request, repo context, memory and the JSON contract", () => {
+  it("carries the request, repo context and the JSON contract", () => {
     const p = buildPlanPrompt("add pagination to orders", {
       tree: ["src/", "package.json"],
       relevant: ["src/orders/List.tsx"],
-      memory: ["Orders API is keyset-paginated"],
     });
     expect(p).toContain("add pagination to orders");
     expect(p).toContain("src/  package.json");
     expect(p).toContain("- src/orders/List.tsx");
-    expect(p).toContain("Orders API is keyset-paginated");
     for (const key of ['"goal"', '"decisions"', '"touches"', '"acceptance"', '"wontDo"', '"risk"', '"size"', '"taskClass"'])
       expect(p).toContain(key);
     expect(p).toMatch(/CONSEQUENTIAL decisions/);
   });
 
   it("omits empty context sections", () => {
-    const p = buildPlanPrompt("x", { tree: [], relevant: [], memory: [] });
+    const p = buildPlanPrompt("x", { tree: [], relevant: [] });
     expect(p).not.toContain("REPO TOP LEVEL");
-    expect(p).not.toContain("recent memory");
   });
 
   it("picks identifier-like keywords first and drops filler", () => {

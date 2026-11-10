@@ -1,5 +1,7 @@
+import { aliasPty } from "./environments/ptyRoute";
 import { beforeEach, describe, expect, it } from "vitest";
 import {
+  snapshotEnv,
   buildSnapshot,
   clearHibernation,
   hibernationOf,
@@ -192,6 +194,66 @@ describe("buildSnapshot", () => {
     expect(snap.tabs).toHaveLength(2);
     expect(snap.activeIndex).toBe(1);
     expect(snap.at).toBe(1_700_000_000_000);
+  });
+
+  it("records a pinned terminal as pinned, and an unpinned one without the flag", () => {
+    const snap = buildSnapshot({
+      tabs: [term({ id: "p", command: "claude", pinned: true }), term({ id: "q", command: "claude" })],
+      activeTabId: "p",
+      sideTab: "files",
+      sidePinned: false,
+      worktree: null,
+    });
+    expect(snap.tabs.map((t) => (t.kind === "terminal" ? t.pinned : "x"))).toEqual([true, undefined]);
+  });
+
+  it("records a settled terminal as settled", () => {
+    const snap = buildSnapshot({
+      tabs: [term({ id: "s", command: "claude", settled: true })],
+      activeTabId: "s",
+      sideTab: "files",
+      sidePinned: false,
+      worktree: null,
+    });
+    expect(snap.tabs.map((t) => (t.kind === "terminal" ? t.settled : "x"))).toEqual([true]);
+  });
+
+  it("records the machine of a non-primary terminal and nothing for a primary one", () => {
+    const snap = buildSnapshot({
+      tabs: [
+        term({ id: "r", command: "claude", machine: "remote:ws" }),
+        term({ id: "l", command: "claude", machine: "local" }),
+        term({ id: "n", command: "claude" }),
+      ],
+      activeTabId: "r",
+      sideTab: "files",
+      sidePinned: false,
+      worktree: null,
+    });
+    expect(snap.tabs.map((t) => (t.kind === "terminal" ? t.machine : "x"))).toEqual(["remote:ws", undefined, undefined]);
+  });
+
+  it("keeps the id a remote terminal has on its machine, live or still waiting to reconnect", () => {
+    const alias = aliasPty("remote:ws", 9, {} as never, false);
+    const snap = buildSnapshot({
+      tabs: [
+        term({ id: "live", command: "claude", machine: "remote:ws", ptyId: alias }),
+        term({ id: "waiting", command: "claude", machine: "remote:ws", ptyId: null, reconnect: { sessionId: 4 } }),
+      ],
+      activeTabId: "live",
+      sideTab: "files",
+      sidePinned: false,
+      worktree: null,
+    });
+    expect(snap.tabs.map((t) => (t.kind === "terminal" ? t.machineSessionId : "x"))).toEqual([9, 4]);
+  });
+
+  it("reads a snapshot's machine: absent is the primary, an unusable one is not guessed", () => {
+    expect(snapshotEnv({})).toBe("local");
+    expect(snapshotEnv({ machine: "remote:ws" })).toBe("remote:ws");
+    expect(snapshotEnv({ machine: "" })).toBeNull();
+    expect(snapshotEnv({ machine: "a|b" })).toBeNull();
+    expect(snapshotEnv({ machine: 3 as never })).toBeNull();
   });
 
   it("records no active tab when the one in front was dropped", () => {

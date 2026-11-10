@@ -1,3 +1,4 @@
+import { withLink } from "./teleport/sessionMove";
 import {hibernateWorkspaceProjects,type ConfirmOthers,type HibernateProgressListener} from './remoteExecution/hibernateWorkspace';
 import {activeWorkspace} from './remoteExecution/workspace';
 import {startBackgroundTeams} from "./teamMessaging/background";
@@ -66,8 +67,6 @@ import { isWorkspaceHost } from "./host";
 import { startCloudSync } from "./remoteExecution/cloudSync";
 import { WorkspaceHooksNotice } from "./remoteExecution/WorkspaceHooksNotice";
 import { installOutcomes } from "./outcomes";
-import { observeMemoryEvents, startMemory } from "./memoryExtract";
-import { startMemoryTidy } from "./memoryConsolidate";
 import { startReceiptEngine } from "./receipts/engine";
 import { observeGateEvents, openRules } from "./gates/events";
 import {
@@ -130,6 +129,7 @@ import { setBrainProjectResolver } from "./brainMeter";
 import { startLensApprovals } from "./lensApprovals";
 import { startLensClaimSync } from "./lensClaimSync";
 import { teamIdentity } from "./teamIdentity";
+import { RELAY_JOIN_EVENT, type RelayJoinDetail } from "./relayJoin";
 import {
   dismissTerminalMemoryPromptsForWindow,
   subscribeTerminalMemoryPromptVisibility,
@@ -168,6 +168,7 @@ import { ReleaseNotesToast, UpdateToast, NoticeToast } from "./components/Toast"
 import { ProjectDialog } from "./components/ProjectDialog";
 import { ProjectManager } from "./components/ProjectManager";
 import { SettingsDialog } from "./components/SettingsDialog";
+import { RemoteFileViewer } from "./components/RemoteFileViewer";
 import { HelpDialog } from "./components/HelpDialog";
 import { AskDialog } from "./components/AskDialog";
 import { PlanGateHost } from "./components/PlanGateHost";
@@ -190,6 +191,7 @@ import {
   checkDesktopClis,
   checkInstalledClis,
   nativeUpdateOffEnv,
+  orderWithPins,
   remoteCliMetadata,
 } from "./projects";
 import { useCliAutoUpdater } from "./cliAutoUpdate";
@@ -302,8 +304,6 @@ const PROJECTLESS_OPS = new Set([
   "reviews",
   "start_session",
   "open_project",
-  "recall",
-  "remember",
   // Mesh jobs address workspaces and teammates by name, so where the caller
   // stands decides nothing.
   "mesh_targets",
@@ -618,9 +618,6 @@ export default function App() {
   useNoteReminders(projectNameFor);
   // Settings → Agents → "Keep agent CLIs up to date" (cliAutoUpdate.ts).
   useCliAutoUpdater();
-  // Team memory: brain extraction after agent turns, review of agent
-  // proposals (memoryExtract.ts). Settings gate each run, not the arming.
-  useEffect(() => startMemory(), []);
   // The `Notify` seam, threaded through nearly every component. The opts bag
   // is how a plain notice stops being anonymous: a caller names the project it
   // speaks for (by id or by any path inside it) and where a click should land,
@@ -910,9 +907,6 @@ export default function App() {
 
   const wsRef = useRef(ws);
   wsRef.current = ws;
-  // Team memory's review queue tidies itself once it grows past ten
-  // (memoryConsolidate.ts), checked in the background for every project.
-  useEffect(() => startMemoryTidy(() => wsRef.current.projects.flatMap((p) => p.components.map((c) => c.path))), []);
   // Spend & outcomes (src/outcomes): per-session spend records, session
   // budgets (warn at 80%, pause at 100%) and the outcome ledger. Installed
   // once; reads projects through refs at call time.
@@ -1040,7 +1034,7 @@ export default function App() {
       setCloudNoteSender(null);
     };
   }, [meshJobs]);
-  // A cloud workspace keeps Rules, agent hooks and team memory in step with
+  // A cloud workspace keeps Rules and agent hooks in step with
   // this computer on every connect (remoteExecution/cloudSync.ts).
   const cloudWorkspace = isWorkspaceHost();
   useEffect(
@@ -1271,8 +1265,6 @@ export default function App() {
         // The same boundaries, enriched (root, files touched) for features
         // that subscribe through agentTurns.ts.
         observeAgentTurns(parsed.map((p) => p.data), ts);
-        // Team memory: final messages, untrusted reads, session ends.
-        observeMemoryEvents(parsed.map((p) => p.data));
         // What a team rule or the irreversible-action gate stopped, for the
         // cards over the agent's terminal and the approve-once question.
         observeGateEvents(parsed.map((p) => p.data), ts);
@@ -1768,6 +1760,13 @@ export default function App() {
       void ipc
         .cliSetNativeUpdateEnv(nativeUpdateOffEnv(settings.autoUpdateClis))
         .catch((err) => console.warn("failed to apply CLI auto-update setting", err));
+      // Native code checks this itself before granting a terminal-linked file.
+      void ipc
+        .fsSetLinkGrants(settings.allowOutsideFileLinks)
+        .catch(() => {});
+      // "Skip permission prompts" also lifts Canopy's own confirmation for
+      // deleting files outside the project (read by the hook).
+      void ipc.gatesSetGlobal(settings.dangerouslySkipPermissions).catch(() => {});
     };
     sync();
     return subscribeSettings(sync);
@@ -2017,7 +2016,14 @@ export default function App() {
 
   const update = useCallback((patch: Partial<WorkspaceState>) => {
     setWs((prev) => {
-      const next = { ...prev, ...patch };
+      const merged = { ...prev, ...patch };
+      // Whenever the open order or the projects change, pinned tabs go back to
+      // the front: a pinned project that is reopened is appended like any other
+      // and would otherwise sit behind unpinned ones until the next drag.
+      const next =
+        patch.openIds || patch.projects
+          ? { ...merged, openIds: orderWithPins(merged.openIds, merged.projects) }
+          : merged;
       // After the updater returns — a disk write and an IPC don't belong in
       // the render phase.
       queueMicrotask(() => {
@@ -3434,6 +3440,24 @@ export default function App() {
   // Memoized: this handle is threaded through every ProjectView and beyond,
   // and a fresh object per App render is what used to defeat memo barriers
   // downstream (PaneBar, and now ProjectView itself).
+  // A teammate's "Connect" on a desktop-relay card in team chat (src/relayJoin.ts).
+  useEffect(() => {
+    const onJoin = (event: Event) => {
+      const { addr, code, from } = (event as CustomEvent<RelayJoinDetail>).detail ?? {};
+      if (!addr || !code) return;
+      void (async () => {
+        try {
+          const me = await teamIdentity();
+          setRelayStatus(await ipc.relayConnect(addr, code, me?.name || getSettings().relayName || "Me"));
+          notify(`Connected to ${from}'s desktop relay.`, "success");
+        } catch (err) {
+          notify(`Could not connect to ${from}: ${String(err)}`, "error");
+        }
+      })();
+    };
+    window.addEventListener(RELAY_JOIN_EVENT, onJoin);
+    return () => window.removeEventListener(RELAY_JOIN_EVENT, onJoin);
+  }, [notify]);
   const relay: RelayHandle = useMemo(
     () => ({
       status: relayStatus,
@@ -3972,7 +3996,18 @@ export default function App() {
     !(freezing?.id === id && !freezing.leaving);
   // Project tabs are draggable; their order is the workspace's own, so it
   // persists with everything else in the workspace file.
-  const tabDrag = useTabDrag(ws.openIds, (openIds) => update({ openIds }));
+  // A pinned tab never ends up behind an unpinned one, however it was dragged.
+  const tabDrag = useTabDrag(ws.openIds, (openIds) =>
+    update({ openIds: orderWithPins(openIds, wsRef.current.projects) }),
+  );
+  const togglePinProject = useCallback(
+    (id: string) => {
+      const { projects, openIds } = wsRef.current;
+      const nextProjects = projects.map((p) => (p.id === id ? { ...p, pinned: !p.pinned } : p));
+      update({ projects: nextProjects, openIds: orderWithPins(openIds, nextProjects) });
+    },
+    [update],
+  );
   // Tab badges count only what's blocked on the user — an agent that finished
   // and is idling is not urgent. Content-stable: most hook events move no
   // badge, and only a count actually changing should break TitleBar's memo.
@@ -4009,6 +4044,7 @@ export default function App() {
         onRestored: () => void;
         onEdit: () => void;
         onShareContext: (on: boolean) => void;
+        onLinkProject: (env: string, id: string) => void;
         onSaveCustomTasks: (tasks: CustomMicroTask[]) => void;
         onSaveIntegrations: (state: ProjectIntegrationState) => Promise<void>;
         onPersistVibeTarget: (selection: VibeTargetSelection) => Promise<boolean>;
@@ -4031,6 +4067,10 @@ export default function App() {
         onShareContext: (on) => {
           const p = find();
           if (p) void saveProject({ ...p, shareContext: on });
+        },
+        onLinkProject: (env, other) => {
+          const p = find();
+          if (p) void saveProject(withLink(p, env, other));
         },
         onSaveCustomTasks: (tasks) => {
           const p = find();
@@ -4148,6 +4188,7 @@ export default function App() {
 
   return (
     <div className={`app ${zen ? "zen" : ""}`}>
+      <RemoteFileViewer />
       {/* Focus mode: chrome slides away but stays reachable — hovering the top
           edge brings the project tabs and the tab strip back. */}
       {zen && <div className="zen-hotzone" />}
@@ -4332,6 +4373,7 @@ export default function App() {
         onSelectProject={selectProject}
         onCloseProject={handleCloseProject}
         onHibernateProject={hibernateProject}
+        onTogglePinProject={togglePinProject}
         onHibernateWorkspace={hibernateWorkspace}
         onWakeProject={wakeProject}
         onToggleVibe={toggleVibe}
@@ -4396,6 +4438,7 @@ export default function App() {
               onEdit={handlersFor(p.id).onEdit}
               onNotice={notify}
               onShareContext={handlersFor(p.id).onShareContext}
+              onLinkProject={handlersFor(p.id).onLinkProject}
               onSaveCustomTasks={handlersFor(p.id).onSaveCustomTasks}
               onSaveIntegrations={handlersFor(p.id).onSaveIntegrations}
               onPersistVibeTarget={handlersFor(p.id).onPersistVibeTarget}

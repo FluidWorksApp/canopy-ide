@@ -161,13 +161,17 @@ export function actionRows(query: string, ctx: SpotContext, attachments = 0): Sp
         action: { type: "new-preview" },
       },
     },
-    // "New Android Device" belongs here, and is withheld until the device tab is
-    // finished — it was the only way to open one, so leaving it out is what takes
-    // a half-built feature off the menu. Everything behind it is intact and
-    // untouched: the `new-device` action, ProjectView's openDevice, DeviceView
-    // itself. Putting this entry back is all that turns it on again.
-    //
-    // hay: "new android device emulator preview"
+    {
+      hay: "new android device emulator preview",
+      row: {
+        id: "act:device",
+        group: "Actions",
+        kind: "device",
+        title: "New Android Device",
+        score: 0,
+        action: { type: "new-device" },
+      },
+    },
     ...ctx.clis.map((cli) => ({
       hay: `launch agent ${cli.name}`,
       row: {
@@ -799,32 +803,32 @@ export function readableLinkRows(query: string): SpotRow[] {
 }
 
 const SOURCES: SpotSource[] = [
-  { id: "canopy-link", group: "Canopy link", blurb: "Open a pasted canopyide.dev link to a workspace, shared session or team message.", timing: "instant", composing: true, rows: (q) => readableLinkRows(q.query) },
-  { id: "actions", group: "Actions", blurb: "The launcher entries, and running what you typed as a one-shot task.", timing: "instant", composing: true, rows: (q) => actionRows(q.query, q.ctx, q.attachments) },
+  { id: "canopy-link", group: "Canopy link", blurb: "Open a pasted canopyide.dev link.", timing: "instant", composing: true, rows: (q) => readableLinkRows(q.query) },
+  { id: "actions", group: "Actions", blurb: "Launcher entries, and one-shot tasks.", timing: "instant", composing: true, rows: (q) => actionRows(q.query, q.ctx, q.attachments) },
   { id: "tabs", group: "Open Tabs", blurb: "Everything open in this project's tab strip.", timing: "instant", rows: (q) => tabRows(q.query, q.ctx) },
   // High, and above Files on purpose: what you copied a minute ago is the thing
   // you are most likely to be reaching for, and it is the one row here that
   // disappears if you go and find it somewhere else first.
-  { id: "clipboard", group: "Clipboard", blurb: "What you copied. Off until you switch it on in Settings → Clipboard.", timing: "instant", rows: (q) => clipRows(q.query, q.ctx) },
+  { id: "clipboard", group: "Clipboard", blurb: "What you copied. Off until enabled.", timing: "instant", rows: (q) => clipRows(q.query, q.ctx) },
   { id: "files", group: "Files", blurb: "File names under the project's components.", timing: "deferred", rows: (q) => fileRows(q.query, q.corpus, q.roots) },
-  { id: "symbols", group: "Symbols", blurb: "Workspace symbols from language servers already running — never starts one.", timing: "deferred", minQuery: 2, rows: (q) => codeSymbolRows(q.query, q.roots) },
+  { id: "symbols", group: "Symbols", blurb: "Symbols from language servers already running.", timing: "deferred", minQuery: 2, rows: (q) => codeSymbolRows(q.query, q.roots) },
   { id: "content", group: "In Files", blurb: "Text inside the project's files (ripgrep, live per query).", timing: "deferred", minQuery: 2, rows: (q) => contentRows(q.query, q.roots) },
   // One source, two sections: the persistent index answers for terminal
   // scrollback and transcripts in the same query.
-  { id: "index", group: "Terminal Output", blurb: "The persistent index: every agent's conversations and live terminal scrollback. What it holds is set below.", timing: "deferred", minQuery: 2, rows: (q) => indexRows(q.query, q.ctx, q.roots) },
-  { id: "sessions", group: "Agent Sessions", blurb: "Agent sessions by prompt, branch and files touched (from their digests).", timing: "instant", rows: (q) => sessionRows(q.query, q.ctx) },
+  { id: "index", group: "Terminal Output", blurb: "Past conversations and terminal scrollback.", timing: "deferred", minQuery: 2, rows: (q) => indexRows(q.query, q.ctx, q.roots) },
+  { id: "sessions", group: "Agent Sessions", blurb: "Agent sessions by prompt, branch and files.", timing: "instant", rows: (q) => sessionRows(q.query, q.ctx) },
   // Above tickets and PRs deliberately: if what you are about to go and find
   // out has already been found out, that is the most useful row on the page.
   // Above research and everything below it: if what you are about to type has
   // already been written down, that is the most useful row on the page — the
   // same argument research makes against tickets, one level further up.
-  { id: "notes", group: "Scratchpad", blurb: "Your own captured thoughts, ideas and to-dos in this project.", timing: "instant", rows: (q) => noteRows(q.query, q.ctx.projectId) },
-  { id: "research", group: "Research", blurb: "Findings recorded in this project — what was investigated, and what shipped from it.", timing: "instant", rows: (q) => researchRows(q.query, q.ctx.projectId) },
-  { id: "tickets", group: "Tickets", blurb: "Issues from the configured trackers. Fetches over the network, cached 60s.", timing: "deferred", rows: (q) => ticketRows(q.query, q.roots, q.signal) },
-  { id: "prs", group: "Pull Requests", blurb: "Open PRs the watcher has already fetched — no round trip here.", timing: "instant", rows: (q) => prRows(q.query) },
-  { id: "branches", group: "Branches", blurb: "Branches in this project's repos, local and remote. Enter switches this repo to one.", timing: "deferred", rows: (q) => branchRows(q.query, q.roots, q.signal) },
-  { id: "servers", group: "Servers", blurb: "Every command this project can run, and what's up right now.", timing: "instant", rows: (q) => serverRows(q.query, q.ctx) },
-  { id: "tasks", group: "Task History", blurb: "One-shot tasks that have finished, and what they reported.", timing: "instant", rows: (q) => taskRows(q.query, q.ctx) },
+  { id: "notes", group: "Scratchpad", blurb: "Your captured thoughts and to-dos.", timing: "instant", rows: (q) => noteRows(q.query, q.ctx.projectId) },
+  { id: "research", group: "Research", blurb: "Findings recorded in this project.", timing: "instant", rows: (q) => researchRows(q.query, q.ctx.projectId) },
+  { id: "tickets", group: "Tickets", blurb: "Issues from your trackers. Cached 60s.", timing: "deferred", rows: (q) => ticketRows(q.query, q.roots, q.signal) },
+  { id: "prs", group: "Pull Requests", blurb: "Open PRs already fetched.", timing: "instant", rows: (q) => prRows(q.query) },
+  { id: "branches", group: "Branches", blurb: "Local and remote branches. Enter switches.", timing: "deferred", rows: (q) => branchRows(q.query, q.roots, q.signal) },
+  { id: "servers", group: "Servers", blurb: "Commands this project can run, and what's up.", timing: "instant", rows: (q) => serverRows(q.query, q.ctx) },
+  { id: "tasks", group: "Task History", blurb: "Finished one-shot tasks and their reports.", timing: "instant", rows: (q) => taskRows(q.query, q.ctx) },
 ];
 
 /** Add a source. Returns the undo — call it when whatever registered the source
