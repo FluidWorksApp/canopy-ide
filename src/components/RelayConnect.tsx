@@ -8,7 +8,7 @@
 //
 // Signed out, the same relay can still be hosted or joined by address and code,
 // kept under "Advanced" so it is not the first thing a signed-in person meets.
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { getSettings, updateSettings } from "../settings";
 import { peekTeamIdentity, subscribeTeamIdentity, teamIdentity, type TeamIdentity } from "../teamIdentity";
