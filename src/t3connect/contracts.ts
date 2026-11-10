@@ -32,6 +32,11 @@ export const T3_CANOPY_SCOPES = [
   "filesystem:write",
   "terminal:read",
   "terminal:operate",
+  // Start and talk to agent threads (orchestration.launchThread and
+  // dispatchCommand). The pairing link decides what is granted; a machine
+  // paired before this was asked for simply lacks it, and thread launch is
+  // not offered there.
+  "orchestration:operate",
 ] as const;
 
 /** packages/contracts/src/auth.ts: AuthTokenExchangeGrantType, AuthEnvironmentBootstrapTokenType,
@@ -80,6 +85,10 @@ export interface AuthSessionState {
 export const T3_METHODS = {
   serverGetConfig: "server.getConfig",
   subscribeShell: "orchestration.subscribeShell",
+  launchThread: "orchestration.launchThread",
+  getThreadProjection: "orchestration.getThreadProjection",
+  subscribeThread: "orchestration.subscribeThread",
+  dispatchCommand: "orchestration.dispatchCommand",
   projectsListEntries: "projects.listEntries",
   projectsReadFile: "projects.readFile",
   projectsWriteFile: "projects.writeFile",
@@ -277,5 +286,101 @@ export type OrchestrationV2ShellStreamItem =
 export interface ServerConfig {
   readonly environment: ExecutionEnvironmentDescriptor;
   readonly cwd: string;
+  readonly [field: string]: unknown;
+}
+
+/** packages/contracts/src/orchestrationV2.ts: the model choice a thread runs with.
+ *  `instanceId` names a provider on the machine (ServerProvider.instanceId). */
+export interface ModelSelection {
+  readonly instanceId: string;
+  readonly model: string;
+  readonly options?: unknown;
+}
+
+/** RuntimeMode: how much the agent may do without asking. T3's own default is "full-access". */
+export type RuntimeMode = "approval-required" | "auto-accept-edits" | "auto" | "full-access";
+/** ProviderInteractionMode. */
+export type InteractionMode = "default" | "plan";
+
+/** OrchestrationV2ThreadLaunchWorkspaceStrategy: where the thread works. */
+export type ThreadLaunchWorkspaceStrategy =
+  | { readonly type: "root"; readonly branch?: string }
+  | { readonly type: "existing_worktree"; readonly worktreePath: string; readonly branch?: string }
+  | { readonly type: "worktree"; readonly baseRef: string; readonly branch?: string; readonly startFromOrigin?: boolean };
+
+/** OrchestrationV2ThreadLaunchInput (orchestration.launchThread). Needs `orchestration:operate`. */
+export interface ThreadLaunchInput {
+  readonly commandId: string;
+  readonly creationSource?: "web" | "mobile" | "mcp" | "provider" | "server";
+  readonly threadId?: string;
+  readonly projectId: string;
+  readonly title: string;
+  readonly generateTitle?: boolean;
+  readonly modelSelection: ModelSelection;
+  readonly runtimeMode: RuntimeMode;
+  readonly interactionMode: InteractionMode;
+  readonly workspaceStrategy: ThreadLaunchWorkspaceStrategy;
+  readonly initialMessage?: { readonly messageId?: string; readonly text: string; readonly attachments: ReadonlyArray<never> };
+}
+
+/** OrchestrationV2ThreadProjection, the fields Canopy reads; the rest is left loose. */
+export interface ThreadProjection {
+  readonly thread: {
+    readonly id: string;
+    readonly projectId: string;
+    readonly title: string;
+    readonly providerInstanceId: string;
+    readonly runtimeMode: RuntimeMode;
+    readonly branch: string | null;
+    readonly worktreePath: string | null;
+    readonly [field: string]: unknown;
+  };
+  readonly runs: ReadonlyArray<{ readonly id: string; readonly status: string; readonly [field: string]: unknown }>;
+  readonly messages: ReadonlyArray<ThreadMessage>;
+  readonly runtimeRequests?: ReadonlyArray<{ readonly status?: string; readonly [field: string]: unknown }>;
+  readonly [field: string]: unknown;
+}
+
+/** OrchestrationV2ConversationMessage, the fields Canopy reads. */
+export interface ThreadMessage {
+  readonly id: string;
+  readonly role: "user" | "assistant" | "system";
+  readonly text: string;
+  readonly streaming: boolean;
+  readonly createdAt: string;
+}
+
+/** OrchestrationV2ThreadLaunchResult. */
+export interface ThreadLaunchResult {
+  readonly threadId: string;
+  readonly projection: ThreadProjection;
+  readonly resumed: boolean;
+  readonly sequence?: number;
+}
+
+/** OrchestrationV2Command (orchestration.dispatchCommand), the two Canopy sends. `thread.stop` also stops the thread's delegated tasks. */
+export type ThreadCommand =
+  | {
+      readonly type: "message.dispatch";
+      readonly commandId: string;
+      readonly threadId: string;
+      readonly messageId: string;
+      readonly text: string;
+      readonly attachments: ReadonlyArray<never>;
+      readonly createdBy: "user";
+      readonly creationSource: "web" | "mobile" | "mcp" | "provider" | "server";
+      readonly dispatchMode: { readonly type: "queue_after_active" } | { readonly type: "start_immediately" };
+    }
+  | { readonly type: "thread.stop"; readonly commandId: string; readonly threadId: string; readonly reason?: string };
+
+/** ServerProvider (server.getConfig → providers), the fields Canopy reads. */
+export interface ServerProvider {
+  readonly instanceId: string;
+  readonly driver: string;
+  readonly displayName?: string;
+  readonly enabled: boolean;
+  readonly installed: boolean;
+  readonly status?: string;
+  readonly models?: ReadonlyArray<{ readonly slug: string; readonly name: string; readonly isDefault?: boolean; readonly isLegacy?: boolean }>;
   readonly [field: string]: unknown;
 }

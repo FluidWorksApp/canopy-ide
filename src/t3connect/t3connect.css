@@ -45,3 +45,18 @@
   font: inherit;
   font-size: 12px;
 }
+
+.t3-launcher { display: flex; flex-direction: column; gap: 8px; padding: 10px 12px; border-bottom: 1px solid var(--border); }
+.t3-launcher textarea, .t3-thread-compose textarea { width: 100%; resize: vertical; padding: 8px 10px; border: 1px solid var(--border); border-radius: 8px; background: transparent; color: var(--text); font: inherit; }
+.t3-launcher-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.t3-launcher-note { color: var(--text-dim); font-size: 12px; }
+
+.t3-thread { display: flex; flex-direction: column; height: 100%; min-height: 0; }
+.t3-thread-head { display: flex; align-items: center; gap: 10px; padding: 8px 12px; border-bottom: 1px solid var(--border); font-size: 12px; }
+.t3-thread-meta { color: var(--text-dim); }
+.t3-thread-log { flex: 1; min-height: 0; overflow: auto; display: flex; flex-direction: column; gap: 10px; padding: 12px; }
+.t3-msg { display: flex; flex-direction: column; gap: 2px; max-width: 80ch; }
+.t3-msg.is-user { align-self: flex-end; }
+.t3-msg-who { color: var(--text-dim); font-size: 11px; text-transform: uppercase; letter-spacing: 0.06em; }
+.t3-msg pre { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; font: inherit; }
+.t3-thread-compose { display: flex; gap: 8px; align-items: flex-end; padding: 8px 12px; border-top: 1px solid var(--border); }
