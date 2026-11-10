@@ -718,7 +718,11 @@ fn is_agent_protected(path: &Path) -> bool {
     {
         if matches!(
             name,
-            "settings.json" | "settings.local.json" | "config.toml" | "config.json" | "mcp.json"
+            "settings.json"
+                | "settings.local.json"
+                | "config.toml"
+                | "config.json"
+                | "mcp.json"
                 | "hooks.json"
         ) {
             return true;
@@ -764,7 +768,8 @@ fn write_confined(requested: &Path, roots: &[PathBuf], content: &str) -> Result<
         return Err("file changed while opening; retry the write".into());
     }
     file.set_len(0).map_err(|e| e.to_string())?;
-    file.write_all(content.as_bytes()).map_err(|e| e.to_string())
+    file.write_all(content.as_bytes())
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -1582,7 +1587,11 @@ mod tests {
         ] {
             assert!(is_agent_protected(Path::new(p)), "{p}");
         }
-        for p in ["/w/src/a.ts", "/w/.vscode/launch.json", "/w/notes/settings.json"] {
+        for p in [
+            "/w/src/a.ts",
+            "/w/.vscode/launch.json",
+            "/w/notes/settings.json",
+        ] {
             assert!(!is_agent_protected(Path::new(p)), "{p}");
         }
     }
@@ -1629,7 +1638,10 @@ mod tests {
 
         write_confined(&root.join("src/new.txt"), &roots, "hello").unwrap();
         write_confined(&root.join("src/new.txt"), &roots, "hi").unwrap();
-        assert_eq!(std::fs::read_to_string(root.join("src/new.txt")).unwrap(), "hi");
+        assert_eq!(
+            std::fs::read_to_string(root.join("src/new.txt")).unwrap(),
+            "hi"
+        );
         let _ = std::fs::remove_dir_all(&root);
         let _ = std::fs::remove_file(&outside);
     }
