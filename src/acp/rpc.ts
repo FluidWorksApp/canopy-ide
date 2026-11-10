@@ -1,6 +1,7 @@
 import {
   RPC_INTERNAL_ERROR,
   RPC_METHOD_NOT_FOUND,
+  RPC_REQUEST_CANCELLED,
   type JsonRpcError,
   type JsonRpcResponse,
 } from "./protocol";
@@ -9,11 +10,14 @@ import {
 export class AcpRpcError extends Error {
   readonly code: number;
   readonly data?: unknown;
-  constructor(code: number, message: string, data?: unknown) {
+  /** True when Canopy raised it (timeout, exit) rather than the agent. */
+  readonly local: boolean;
+  constructor(code: number, message: string, data?: unknown, local = false) {
     super(message);
     this.name = "AcpRpcError";
     this.code = code;
     this.data = data;
+    this.local = local;
   }
 }
 
@@ -30,8 +34,9 @@ interface Pending {
 export interface AcpRpcOptions {
   /** Writes one already-framed line (no trailing newline) to the agent. */
   write(line: string): Promise<void>;
-  /** Answers an agent->client request. Throw AcpRpcError to send an error. */
-  onRequest(method: string, params: unknown): Promise<unknown>;
+  /** Answers an agent->client request. Throw AcpRpcError to send an error.
+   *  `signal` aborts when the agent sends `$/cancel_request` for it. */
+  onRequest(method: string, params: unknown, signal: AbortSignal): Promise<unknown>;
   onNotification(method: string, params: unknown): void;
   /** Default timeout for requests that do not pass their own. */
   timeoutMs?: number;
@@ -46,6 +51,8 @@ export class AcpRpc {
   private pending = new Map<number | string, Pending>();
   private buffer = "";
   private closed: AcpRpcError | null = null;
+  /** Agent->client requests still being answered, by id. */
+  private inflight = new Map<number | string, AbortController>();
   private opts: AcpRpcOptions;
 
   constructor(opts: AcpRpcOptions) {
@@ -79,6 +86,7 @@ export class AcpRpc {
     const hasId = typeof id === "number" || typeof id === "string";
     if (typeof msg.method === "string") {
       if (hasId) void this.answer(id, msg.method, msg.params);
+      else if (msg.method === "$/cancel_request") this.cancelInflight(msg.params);
       else this.opts.onNotification(msg.method, msg.params);
       return;
     }
@@ -92,10 +100,33 @@ export class AcpRpc {
     else entry.resolve(msg.result);
   }
 
+  /** The agent no longer wants an answer: abort the handler and reply with
+   *  "request cancelled" now. Whatever the handler returns later is dropped. */
+  private cancelInflight(params: unknown): void {
+    const requestId = (params as { requestId?: unknown } | null | undefined)?.requestId;
+    if (typeof requestId !== "number" && typeof requestId !== "string") return;
+    const controller = this.inflight.get(requestId);
+    if (!controller) return;
+    this.inflight.delete(requestId);
+    controller.abort();
+    const reply: JsonRpcResponse = {
+      jsonrpc: "2.0",
+      id: requestId,
+      error: { code: RPC_REQUEST_CANCELLED, message: "Request cancelled" },
+    };
+    void this.opts.write(JSON.stringify(reply)).catch(() => {});
+  }
+
   private async answer(id: number | string, method: string, params: unknown): Promise<void> {
     let reply: JsonRpcResponse;
+    const controller = new AbortController();
+    this.inflight.set(id, controller);
     try {
-      reply = { jsonrpc: "2.0", id, result: (await this.opts.onRequest(method, params)) ?? null };
+      reply = {
+        jsonrpc: "2.0",
+        id,
+        result: (await this.opts.onRequest(method, params, controller.signal)) ?? null,
+      };
     } catch (e) {
       const err =
         e instanceof AcpRpcError
@@ -103,6 +134,9 @@ export class AcpRpc {
           : new AcpRpcError(RPC_INTERNAL_ERROR, e instanceof Error ? e.message : String(e));
       reply = { jsonrpc: "2.0", id, error: { code: err.code, message: err.message } };
     }
+    // Cancelled while running: the cancellation reply already went out.
+    if (this.inflight.get(id) !== controller) return;
+    this.inflight.delete(id);
     try {
       await this.opts.write(JSON.stringify(reply));
     } catch {
@@ -122,7 +156,7 @@ export class AcpRpc {
           ? null
           : setTimeout(() => {
               this.pending.delete(id);
-              reject(new AcpRpcError(RPC_TIMEOUT, `${method} timed out after ${limit}ms`));
+              reject(new AcpRpcError(RPC_TIMEOUT, `${method} timed out after ${limit}ms`, undefined, true));
             }, limit);
       this.pending.set(id, {
         method,
@@ -137,7 +171,7 @@ export class AcpRpc {
           if (!entry) return;
           this.pending.delete(id);
           if (entry.timer) clearTimeout(entry.timer);
-          reject(new AcpRpcError(RPC_CLOSED, e instanceof Error ? e.message : String(e)));
+          reject(new AcpRpcError(RPC_CLOSED, e instanceof Error ? e.message : String(e), undefined, true));
         });
     });
   }
@@ -150,7 +184,9 @@ export class AcpRpc {
   /** The agent is gone: reject everything still waiting, and every later call. */
   close(reason = "The agent process exited."): void {
     if (this.closed) return;
-    this.closed = new AcpRpcError(RPC_CLOSED, reason);
+    this.closed = new AcpRpcError(RPC_CLOSED, reason, undefined, true);
+    for (const controller of this.inflight.values()) controller.abort();
+    this.inflight.clear();
     for (const entry of this.pending.values()) {
       if (entry.timer) clearTimeout(entry.timer);
       entry.reject(this.closed);

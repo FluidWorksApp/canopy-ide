@@ -16,7 +16,11 @@ import {
   type ProjectIntegrationState,
 } from "./projectIntegrations";
 import {
+  CLAUDE_ACP_RUNNER,
   CLAUDE_RUNNER,
+  CODEX_ACP_RUNNER,
+  CURSOR_ACP_RUNNER,
+  OPENCODE_ACP_RUNNER,
   CODEX_RUNNER,
   CURSOR_RUNNER,
   KIRO_RUNNER,
@@ -759,6 +763,9 @@ export interface AgentCli {
 
   /** Verified non-interactive transport, owned by this CLI's adapter. */
   structuredRunner?: StructuredRunner;
+  /** The same agent over ACP. Wins over `structuredRunner` unless the person
+   *  turned "Use ACP" off (settings.acpAgents). */
+  acpRunner?: StructuredRunner;
 
   /** Verified interactive model control, when this CLI exposes one. */
   modelSwitch?: ModelSwitch;
@@ -935,6 +942,7 @@ export const BUILTIN_AGENT_CLIS: AgentCliDef[] = [
       conversationStore: { path: "~/.claude/projects/**/*.jsonl", open: "session" },
     },
     structuredRunner: CLAUDE_RUNNER,
+    acpRunner: CLAUDE_ACP_RUNNER,
     modelSwitch: MODEL_SWITCH.claude,
     install: "npm install -g @anthropic-ai/claude-code",
     pkgs: ["npm:@anthropic-ai/claude-code"],
@@ -1017,6 +1025,7 @@ export const BUILTIN_AGENT_CLIS: AgentCliDef[] = [
       conversationStore: { path: "~/.codex/sessions/**/rollout-*.jsonl", open: "session" },
     },
     structuredRunner: CODEX_RUNNER,
+    acpRunner: CODEX_ACP_RUNNER,
     modelSwitch: MODEL_SWITCH.codex,
     install: "npm install -g @openai/codex",
     pkgs: ["npm:@openai/codex"],
@@ -1271,6 +1280,8 @@ export const BUILTIN_AGENT_CLIS: AgentCliDef[] = [
       eventSessionLookup: true,
       conversationStore: { path: "~/.local/share/opencode/opencode.db", open: "session" },
     },
+    // ACP only: there is no vendor runner, so "Use ACP" off leaves it terminal-only.
+    acpRunner: OPENCODE_ACP_RUNNER,
     modelSwitch: MODEL_SWITCH.opencode,
     install: "npm install -g opencode-ai",
     pkgs: ["npm:opencode-ai"],
@@ -1410,6 +1421,7 @@ export const BUILTIN_AGENT_CLIS: AgentCliDef[] = [
       managedIntegration: true,
     },
     structuredRunner: CURSOR_RUNNER,
+    acpRunner: CURSOR_ACP_RUNNER,
     modelSwitch: MODEL_SWITCH.cursor,
     install: "curl https://cursor.com/install -fsS | bash",
     update: "cursor-agent update",
@@ -1758,7 +1770,24 @@ export function agentClisWith(
   return AGENT_CLIS.filter((cli) => cli.capabilities?.[capability] !== undefined);
 }
 
+/** Whether this agent's ACP runner is in use: it has one and the person has
+ *  not turned it off. Only an explicit false disables it. */
+export function acpEnabledFor(id?: string | null): boolean {
+  const cli = agentCliFor(id);
+  return Boolean(cli?.acpRunner) && getSettings().acpAgents[cli!.id] !== false;
+}
+
+/** The runner Build and the project runner launch: ACP when the agent has one
+ *  and it is enabled, else the vendor runner. */
 export function structuredRunnerFor(id?: string | null): StructuredRunner | undefined {
+  const cli = agentCliFor(id);
+  return acpEnabledFor(id) ? cli?.acpRunner : cli?.structuredRunner;
+}
+
+/** The vendor runner, regardless of the ACP setting. One-shot brain and
+ *  compaction calls use it: ACP has no one-shot mode, and brain.rs puts the
+ *  prompt on argv. An ACP-only agent (Kiro) returns its ACP runner. */
+export function legacyRunnerFor(id?: string | null): StructuredRunner | undefined {
   return agentCliFor(id)?.structuredRunner;
 }
 

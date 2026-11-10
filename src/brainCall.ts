@@ -31,7 +31,7 @@ import {
   CLI_INSTALLS_CHANGED_EVENT,
   checkDesktopClis,
   streamsStructured,
-  structuredRunnerFor,
+  legacyRunnerFor,
   type AgentCli,
 } from "./projects";
 import { getSettings } from "./settings";
@@ -269,7 +269,7 @@ export async function askBrain<T = unknown>(req: BrainRequest<T>): Promise<Brain
     cli = installedBrain(installed);
   }
   const chosen = agentCliFor(chosenBrainId());
-  const runner = cli ? structuredRunnerFor(cli.id) : undefined;
+  const runner = cli ? legacyRunnerFor(cli.id) : undefined;
   if (!cli || !runner || !streamsStructured(cli.id)) {
     const answer: BrainFailure = {
       ok: false,

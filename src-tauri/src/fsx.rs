@@ -443,6 +443,20 @@ pub(crate) fn check_scope(
     state: &State<'_, WorkspaceManager>,
     path: &Path,
 ) -> Result<PathBuf, String> {
+    let canonical = canonicalize_lenient(path)?;
+    if state.allows(&canonical) {
+        Ok(canonical)
+    } else {
+        Err(format!(
+            "path outside workspace scope: {}",
+            canonical.display()
+        ))
+    }
+}
+
+/// Resolve symlinks in the deepest existing ancestor of `path` and re-attach
+/// the not-yet-existing tail, so a file that does not exist yet still resolves.
+fn canonicalize_lenient(path: &Path) -> Result<PathBuf, String> {
     // Canonicalize the deepest existing ancestor so new files still validate.
     let mut existing = path.to_path_buf();
     let mut suffix = PathBuf::new();
@@ -469,14 +483,7 @@ pub(crate) fn check_scope(
     if !suffix.as_os_str().is_empty() {
         canonical = canonical.join(suffix);
     }
-    if state.allows(&canonical) {
-        Ok(canonical)
-    } else {
-        Err(format!(
-            "path outside workspace scope: {}",
-            canonical.display()
-        ))
-    }
+    Ok(canonical)
 }
 
 // ---------- repo-scoped containment ----------
@@ -791,6 +798,119 @@ pub async fn fs_write_file(
 ) -> Result<(), String> {
     let file = check_scope(&state, Path::new(&path))?;
     std::fs::write(&file, content).map_err(|e| e.to_string())
+}
+
+/// Files that change what an agent, git or an editor task runner executes
+/// next. An ACP agent may not write these through `fs/write_text_file`; the
+/// check runs on the symlink-resolved path, so a link into one does not help.
+/// Mirrors `isProtected` in `src/acp/fsGuard.ts`. Names compare
+/// case-insensitively because macOS and Windows volumes usually are.
+fn is_agent_protected(path: &Path) -> bool {
+    let segs: Vec<String> = path
+        .components()
+        .filter_map(|c| match c {
+            std::path::Component::Normal(s) => Some(s.to_string_lossy().to_lowercase()),
+            _ => None,
+        })
+        .collect();
+    let Some(name) = segs.last().map(String::as_str) else {
+        return false;
+    };
+    if matches!(
+        name,
+        ".mcp.json" | ".gitmodules" | "opencode.json" | "opencode.jsonc" | ".git"
+    ) {
+        return true;
+    }
+    if segs.len() >= 2 && segs[segs.len() - 2] == ".vscode" && name == "tasks.json" {
+        return true;
+    }
+    if let Some(git) = segs.iter().position(|s| s == ".git") {
+        let rest = &segs[git + 1..];
+        if rest.first().map(String::as_str) == Some("hooks") && rest.len() > 1 {
+            return true;
+        }
+        if rest.len() == 1 && matches!(rest[0].as_str(), "config" | "hooks") {
+            return true;
+        }
+    }
+    let last = segs.len() - 1;
+    if segs[..last]
+        .iter()
+        .any(|s| s == ".husky" || s == ".opencode")
+    {
+        return true;
+    }
+    if let Some(dir) = segs[..last]
+        .iter()
+        .position(|s| matches!(s.as_str(), ".claude" | ".codex" | ".kiro" | ".cursor"))
+    {
+        if matches!(
+            name,
+            "settings.json"
+                | "settings.local.json"
+                | "config.toml"
+                | "config.json"
+                | "mcp.json"
+                | "hooks.json"
+        ) {
+            return true;
+        }
+        if segs[dir] == ".kiro" && segs.get(dir + 1).map(String::as_str) == Some("settings") {
+            return true;
+        }
+    }
+    false
+}
+
+/// Write for an ACP agent. `requested` is what the agent named; it is resolved
+/// here (symlinks followed), must land inside one of `roots`, and must not be a
+/// protected file. The file is opened without following a leaf symlink, then
+/// the path is resolved again and compared with the open handle, so a swap in
+/// the check-to-open window fails instead of writing elsewhere.
+fn write_confined(requested: &Path, roots: &[PathBuf], content: &str) -> Result<(), String> {
+    use std::io::Write;
+    let canonical = canonicalize_lenient(requested)?;
+    let roots: Vec<PathBuf> = roots.iter().filter_map(|r| r.canonicalize().ok()).collect();
+    if !roots.iter().any(|r| canonical.starts_with(r)) {
+        return Err(format!(
+            "path resolves outside the session's working directories: {}",
+            canonical.display()
+        ));
+    }
+    if is_agent_protected(&canonical) {
+        return Err("that file configures hooks, settings or MCP servers and cannot be written without permission".into());
+    }
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NOFOLLOW);
+    }
+    let mut file = options.open(&canonical).map_err(|e| e.to_string())?;
+    let opened = same_file::Handle::from_file(file.try_clone().map_err(|e| e.to_string())?)
+        .map_err(|e| e.to_string())?;
+    let again = canonicalize_lenient(requested)?;
+    let live = same_file::Handle::from_path(&again).map_err(|e| e.to_string())?;
+    if again != canonical || opened != live {
+        return Err("file changed while opening; retry the write".into());
+    }
+    file.set_len(0).map_err(|e| e.to_string())?;
+    file.write_all(content.as_bytes())
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn fs_write_file_confined(
+    state: State<'_, WorkspaceManager>,
+    path: String,
+    content: String,
+    roots: Vec<String>,
+) -> Result<(), String> {
+    check_scope(&state, Path::new(&path))?;
+    let roots: Vec<PathBuf> = roots.into_iter().map(PathBuf::from).collect();
+    write_confined(Path::new(&path), &roots, &content)
 }
 
 #[derive(Serialize, Clone)]
@@ -1696,6 +1816,84 @@ mod tests {
     }
 
     use super::*;
+
+    #[test]
+    fn protected_paths_cover_agent_hook_and_task_files() {
+        for p in [
+            "/w/.git/hooks/pre-commit",
+            "/w/.git/config",
+            "/w/.git",
+            "/w/.Claude/Settings.json",
+            "/w/.codex/config.toml",
+            "/w/.kiro/settings/mcp.json",
+            "/w/.opencode/plugin/x.js",
+            "/w/opencode.json",
+            "/w/sub/OpenCode.jsonc",
+            "/w/.gitmodules",
+            "/w/.husky/pre-commit",
+            "/w/.vscode/tasks.json",
+            "/w/.mcp.json",
+        ] {
+            assert!(is_agent_protected(Path::new(p)), "{p}");
+        }
+        for p in [
+            "/w/src/a.ts",
+            "/w/.vscode/launch.json",
+            "/w/notes/settings.json",
+        ] {
+            assert!(!is_agent_protected(Path::new(p)), "{p}");
+        }
+    }
+
+    /// The same table `src/acp/fsGuard.test.ts` asserts against `isProtected`,
+    /// so the Rust and TypeScript copies of the list cannot drift.
+    #[test]
+    fn protected_paths_match_the_shared_table() {
+        let table: serde_json::Value =
+            serde_json::from_str(include_str!("../../src/acp/protectedPaths.json")).unwrap();
+        for p in table["protected"].as_array().unwrap() {
+            let p = p.as_str().unwrap();
+            assert!(is_agent_protected(Path::new(p)), "{p}");
+        }
+        for p in table["allowed"].as_array().unwrap() {
+            let p = p.as_str().unwrap();
+            assert!(!is_agent_protected(Path::new(p)), "{p}");
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn confined_write_refuses_symlinks_into_protected_files_and_outside_roots() {
+        let root = std::env::temp_dir()
+            .canonicalize()
+            .unwrap()
+            .join("canopy-confined-write-test");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join(".git/hooks")).unwrap();
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        let outside = root.parent().unwrap().join("canopy-confined-outside.txt");
+        std::fs::write(&outside, "keep").unwrap();
+        std::os::unix::fs::symlink(root.join(".git/hooks"), root.join("notes")).unwrap();
+        std::os::unix::fs::symlink(&outside, root.join("src/out")).unwrap();
+        let roots = vec![root.clone()];
+
+        let err = write_confined(&root.join("notes/pre-commit"), &roots, "x").unwrap_err();
+        assert!(err.contains("cannot be written"), "{err}");
+        assert!(!root.join(".git/hooks/pre-commit").exists());
+
+        let err = write_confined(&root.join("src/out"), &roots, "x").unwrap_err();
+        assert!(err.contains("outside"), "{err}");
+        assert_eq!(std::fs::read_to_string(&outside).unwrap(), "keep");
+
+        write_confined(&root.join("src/new.txt"), &roots, "hello").unwrap();
+        write_confined(&root.join("src/new.txt"), &roots, "hi").unwrap();
+        assert_eq!(
+            std::fs::read_to_string(root.join("src/new.txt")).unwrap(),
+            "hi"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::remove_file(&outside);
+    }
 
     #[test]
     fn a_granted_file_is_reachable_but_its_neighbours_are_not() {

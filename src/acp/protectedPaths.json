@@ -1,0 +1,30 @@
+{
+  "protected": [
+    "/w/.git/hooks/pre-commit",
+    "/w/.git/config",
+    "/w/.git/hooks",
+    "/w/.git",
+    "/w/.Claude/Settings.json",
+    "/w/.claude/settings.local.json",
+    "/w/.codex/config.toml",
+    "/w/.cursor/mcp.json",
+    "/w/.kiro/settings/mcp.json",
+    "/w/.GIT/Hooks/pre-commit",
+    "/w/.opencode/plugin/x.js",
+    "/w/opencode.json",
+    "/w/sub/OpenCode.jsonc",
+    "/w/.gitmodules",
+    "/w/.husky/pre-commit",
+    "/w/.vscode/tasks.json",
+    "/w/.mcp.json",
+    "/w/sub/.mcp.json"
+  ],
+  "allowed": [
+    "/w/src/a.ts",
+    "/w/.gitignore",
+    "/w/.git/info/exclude",
+    "/w/.vscode/launch.json",
+    "/w/notes/settings.json",
+    "/w/.claude/commands/x.md"
+  ]
+}

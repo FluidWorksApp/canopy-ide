@@ -490,6 +490,84 @@ export const KIRO_ACP_SPEC: AcpProviderSpec = {
 
 export const KIRO_RUNNER: StructuredRunner = buildAcpRunner(KIRO_ACP_SPEC);
 
+/** Registry-sourced ACP rows for the agents that also have a vendor runner
+ *  above. Read from the ACP registry v1 JSON on 2026-11-09. No adapter binary
+ *  was available when these were written, so none of them has had a live
+ *  handshake; the stamps say so and the vendor runners stay as the fallback. */
+const REGISTRY_CHECKED = "2026-11-09";
+const registryStamp = (
+  entry: string,
+  version: string,
+  dist: string,
+  extra: readonly string[],
+): AcpProviderSpec["verification"] => ({
+  cliVersion: version,
+  checkedOn: REGISTRY_CHECKED,
+  source: `ACP registry v1 entry ${entry} (${dist}); NOT live-tested`,
+  flags: {
+    structuredJson: true,
+    systemPrompt: false,
+    planMode: false,
+    toolAllowlist: false,
+    workspaceSandbox: false,
+  },
+  caveats: [
+    "Registry-sourced, not live-tested: no live initialize or session handshake was run.",
+    "Model and mode are chosen with session/set_config_option after session/new, not argv flags.",
+    "Permission requests are answered from the launch authority; no trust-all flag is passed.",
+    ...extra,
+  ],
+});
+
+export const CLAUDE_ACP_SPEC: AcpProviderSpec = {
+  id: "claude",
+  name: "Claude Code",
+  command: "npx",
+  adapter: true,
+  args: ["-y", "@agentclientprotocol/claude-agent-acp@0.102.0"],
+  authHint: "Run `claude` once in a terminal and sign in, or set ANTHROPIC_API_KEY.",
+  verification: registryStamp("claude-acp", "0.102.0", "npx @agentclientprotocol/claude-agent-acp", [
+    "Runs through an adapter package fetched by npx, so the first launch needs network access.",
+  ]),
+};
+
+export const CODEX_ACP_SPEC: AcpProviderSpec = {
+  id: "codex",
+  name: "Codex CLI",
+  command: "npx",
+  adapter: true,
+  args: ["-y", "@agentclientprotocol/codex-acp@2.6.0"],
+  authHint: "Run `codex login` in a terminal.",
+  verification: registryStamp("codex-acp", "2.6.0", "npx @agentclientprotocol/codex-acp", [
+    "Runs through an adapter package fetched by npx, so the first launch needs network access.",
+  ]),
+};
+
+export const CURSOR_ACP_SPEC: AcpProviderSpec = {
+  id: "cursor",
+  name: "Cursor Agent",
+  command: "cursor-agent",
+  args: ["acp"],
+  authHint: "Run `cursor-agent login` in a terminal.",
+  verification: registryStamp("cursor", "2026.11.05", "binary cursor-agent, args acp", []),
+};
+
+export const OPENCODE_ACP_SPEC: AcpProviderSpec = {
+  id: "opencode",
+  name: "OpenCode",
+  command: "opencode",
+  args: ["acp"],
+  authHint: "Run `opencode auth login` in a terminal.",
+  verification: registryStamp("opencode", "2.2.6", "binary opencode, args acp", [
+    "No vendor runner exists for OpenCode; turning ACP off leaves it terminal-only.",
+  ]),
+};
+
+export const CLAUDE_ACP_RUNNER: StructuredRunner = buildAcpRunner(CLAUDE_ACP_SPEC);
+export const CODEX_ACP_RUNNER: StructuredRunner = buildAcpRunner(CODEX_ACP_SPEC);
+export const CURSOR_ACP_RUNNER: StructuredRunner = buildAcpRunner(CURSOR_ACP_SPEC);
+export const OPENCODE_ACP_RUNNER: StructuredRunner = buildAcpRunner(OPENCODE_ACP_SPEC);
+
 /** Verified non-interactive argv shapes, keyed by the agent registry id. */
 export const STRUCTURED_RUNNERS: Record<string, StructuredRunner> = {
   claude: CLAUDE_RUNNER,

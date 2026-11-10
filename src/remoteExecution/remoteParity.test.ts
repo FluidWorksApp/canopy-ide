@@ -38,6 +38,8 @@ const REMOTE_BRANCHED = new Set([
   // A workspace's git_share_context already reaches every project under
   // /workspace; jobScope.projectCheckouts falls back to it (ipc.ts).
   "git_project_checkouts",
+  // ACP file writes: fsWriteFileConfined sends fs_write_file to a workspace host.
+  "fs_write_file_confined",
 ]);
 
 const SRC = join(__dirname, "..");

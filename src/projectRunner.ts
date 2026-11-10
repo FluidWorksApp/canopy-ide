@@ -9,9 +9,10 @@ import {
   type StructuredRunner,
   type StructuredRunnerLaunch,
 } from "./structuredRunners";
-import { streamsStructured, structuredRunnerFor } from "./projects";
+import { acpEnabledFor, legacyRunnerFor, streamsStructured, structuredRunnerFor } from "./projects";
 import type { AcpPermissionRequest } from "./acp/protocol";
 import { AcpTransport } from "./acp/transport";
+import type { SessionOrigin } from "./sessionOrigin";
 import { recordNativeCheckpoint } from "./turnRollback";
 
 /** The caller's env plus whatever the runner needs every session to carry.
@@ -63,6 +64,13 @@ export class StructuredTransport implements ProjectRunnerTransport {
   private parser: StructuredEventParser;
   private attemptId: string;
   private process: ProjectRunnerProcess;
+  /** Set when an ACP launch fell back to this vendor runner mid-resume: the
+   *  fresh id the vendor session was started under. The caller stores it in
+   *  place of the ACP-minted id it passed in. */
+  fallbackSessionId?: string;
+  /** Set when this vendor runner took over from an ACP launch that could not
+   *  spawn (or was skipped because the session already fell back). */
+  fellBackFromAcp?: boolean;
 
   constructor(
     attemptId: string,
@@ -143,6 +151,10 @@ export class OneshotStructuredTransport implements ProjectRunnerTransport {
   private process: ProjectRunnerProcess;
   private runner: StructuredRunner;
   private launch: StructuredRunnerLaunch;
+  /** See StructuredTransport.fallbackSessionId. */
+  fallbackSessionId?: string;
+  /** See StructuredTransport.fellBackFromAcp. */
+  fellBackFromAcp?: boolean;
 
   constructor(
     attemptId: string,
@@ -249,7 +261,7 @@ export interface ProjectRunnerController {
     cliId: string,
     launch: StructuredRunnerLaunch,
     host: StructuredRunnerHost,
-    opts: { resume: boolean },
+    opts: { resume: boolean; sessionOrigin?: SessionOrigin | null },
   ): Promise<ProjectRunnerTransport>;
 }
 
@@ -270,6 +282,10 @@ export async function startStructured(
   host: StructuredRunnerHost,
   opts: {
     resume: boolean;
+    /** Which kind of transport minted the id being resumed. "vendor" on an ACP
+     *  agent means an earlier launch fell back, so ACP is skipped and the
+     *  vendor session resumes. */
+    sessionOrigin?: SessionOrigin | null;
     process: ProjectRunnerProcess;
     /** Where a Claude checkpoint id goes; defaults to the rollback store. */
     onCheckpoint?: (sessionId: string, uuid: string) => void;
@@ -279,7 +295,10 @@ export async function startStructured(
   },
 ): Promise<ProjectRunnerTransport> {
   if (!attemptId) throw new Error("A structured runner requires an attempt id");
-  const runner = structuredRunnerFor(cliId);
+  let runner = structuredRunnerFor(cliId);
+  let resume = opts.resume;
+  let fallbackSessionId: string | undefined;
+  let fellBackFromAcp = false;
   // One rule, asked in one place. `streamsStructured` is the same predicate the
   // route eligibility filter uses (vibeProjectSetup, vibeBuilderSession), and it
   // is called here rather than re-stated: this launcher used to carry its own
@@ -301,13 +320,58 @@ export async function startStructured(
       launch,
     );
   }
+  const legacyForAcp = runner.tier === "acp" ? legacyRunnerFor(cliId) : undefined;
+  if (
+    runner.tier === "acp" &&
+    legacyForAcp &&
+    legacyForAcp.tier !== "acp" &&
+    opts.resume &&
+    opts.sessionOrigin === "vendor"
+  ) {
+    // An earlier launch already fell back to the vendor CLI and its session
+    // holds the conversation. Do not retry ACP for it.
+    runner = legacyForAcp;
+    fellBackFromAcp = true;
+  }
   if (runner.tier === "acp") {
+    const legacy = legacyRunnerFor(cliId);
+    const hasLegacy = Boolean(legacy && legacy.tier !== "acp");
+    const hint = `Turn off "Use ACP" for ${cliId} in Settings to use its built-in runner.`;
     const acp = new AcpTransport(attemptId, host, opts.process, runner, launch, {
       resume: opts.resume,
       onPermission: opts.onPermission,
+      failureHint: hasLegacy ? hint : undefined,
     });
-    await acp.start();
-    return acp;
+    try {
+      await acp.start();
+      return acp;
+    } catch (error) {
+      // The ACP process never started (command not found, spawn refused), so
+      // nothing has been said to the agent and the vendor runner can take over.
+      if (!hasLegacy || !legacy) {
+        const detail = error instanceof Error ? error.message : String(error);
+        throw new Error(
+          acpEnabledFor(cliId)
+            ? `${detail} Turn off "Use ACP" for ${cliId} in Settings to stop launching it.`
+            : detail,
+        );
+      }
+      runner = legacy;
+      fellBackFromAcp = true;
+      // The stored id (if resuming) was minted by the ACP agent and means
+      // nothing to a vendor CLI. Start the vendor session fresh under a new id.
+      if (opts.resume) {
+        fallbackSessionId = crypto.randomUUID();
+        launch = { ...launch, policy: { ...launch.policy, sessionId: fallbackSessionId } };
+        resume = false;
+      }
+    }
+  }
+  if (runner.tier === "oneshot") {
+    const oneshot = new OneshotStructuredTransport(attemptId, host, opts.process, runner, launch);
+    if (fallbackSessionId) oneshot.fallbackSessionId = fallbackSessionId;
+    oneshot.fellBackFromAcp = fellBackFromAcp;
+    return oneshot;
   }
   const sessionId = launch.policy.sessionId;
   const transport = new StructuredTransport(
@@ -318,7 +382,9 @@ export async function startStructured(
     (uuid) =>
       (opts.onCheckpoint ?? recordNativeCheckpoint)(sessionId, uuid),
   );
-  const args = opts.resume ? runner.resumeArgs(launch) : runner.args(launch);
+  transport.fallbackSessionId = fallbackSessionId;
+  transport.fellBackFromAcp = fellBackFromAcp;
+  const args = resume ? runner.resumeArgs(launch) : runner.args(launch);
   await opts.process.spawn(
     attemptId,
     {

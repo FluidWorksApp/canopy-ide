@@ -1551,6 +1551,14 @@ export const fsSetLinkGrants = (enabled: boolean) => invoke<void>("fs_set_link_g
 /** Allow the editor to open this one file, named by a terminal link click.
  *  Refused natively unless the setting is on, and for credential locations. */
 export const fsGrantLinkFile = (path: string) => invoke<void>("fs_grant_link_file", { path });
+/** Write on behalf of an ACP agent. On this computer the desktop resolves
+ *  symlinks, confines the write to `roots` and refuses hook and agent-config
+ *  files. A workspace host has no such command, so it takes the plain write
+ *  (the TS guard has already checked the path as written). */
+export const fsWriteFileConfined = (path: string, content: string, roots: string[]) =>
+  isRemoteHost()
+    ? fsWriteFile(path, content)
+    : invoke<void>("fs_write_file_confined", { path, content, roots });
 export const fsStat = (path: string) =>
   sharedIpc(statFlights, path, () =>
     rendererIoBudget.run(

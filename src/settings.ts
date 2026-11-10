@@ -394,6 +394,9 @@ export interface Settings {
    *  is a property of the workstation, not of one repo. See CustomAgentCli for
    *  what an entry can and deliberately cannot say. */
   customClis: CustomAgentCli[];
+  /** Per-agent "Use ACP" switch. Absent means on for any agent that has an ACP
+   *  entrypoint; only an explicit false selects the vendor runner. */
+  acpAgents: Record<string, boolean>;
   /** Display name on the team relay, remembered from the last host/join. */
   relayName: string;
   /** Last relay address joined, prefilled on the next join. */
@@ -733,6 +736,7 @@ export const DEFAULTS: Settings = {
   accountRotation: true,
   accountLimits: {},
   customClis: [],
+  acpAgents: {},
   relayName: "",
   relayAddr: "",
   autoHibernate: false,
@@ -921,6 +925,16 @@ const RETIRED_MEMORY_KEYS = [
   "memoryInstructionAutoUpdate",
   "memoryInstructionFiles",
 ] as const;
+/** Keep only `id: boolean` pairs, so a hand-edited value cannot enable or
+ *  disable anything by accident. */
+export function sanitizeAcpAgents(raw: unknown): Record<string, boolean> {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return {};
+  const out: Record<string, boolean> = {};
+  for (const [id, on] of Object.entries(raw as Record<string, unknown>).slice(0, 64)) {
+    if (typeof on === "boolean" && id.length > 0 && id.length <= 64) out[id] = on;
+  }
+  return out;
+}
 
 export function getSettings(): Settings {
   const raw = localStorage.getItem(KEY);
@@ -979,6 +993,7 @@ export function getSettings(): Settings {
     // towards "no cap" rather than towards a NaN that compares false forever
     // or a negative that blocks every call.
     value.customClis = sanitizeCustomClis(value.customClis);
+    value.acpAgents = sanitizeAcpAgents(value.acpAgents);
     value.brainDailyBudgetUsd = budgetUsd(value.brainDailyBudgetUsd);
     value.brainFeatureBudgetsUsd = featureBudgets(value.brainFeatureBudgetsUsd);
     value.sessionBudgetUsd = budgetUsd(value.sessionBudgetUsd);

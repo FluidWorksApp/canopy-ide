@@ -48,6 +48,7 @@ export const SETTINGS_INDEX: SettingEntry[] = [
   { tab: "notifications", name: "Notification pop-ups", desc: "Interrupt, or wait in the bell.", keywords: ["alerts", "toasts", "banners", "desktop notifications"] },
   { tab: "notifications", name: "Team messages", desc: "Notify on teammate messages.", keywords: ["chat", "notifications", "mentions"] },
   { tab: "agents", name: "Default agent", desc: "What Start launches.", keywords: ["cli", "default", "start"] },
+  { tab: "agents", name: "Use ACP", desc: "Run these agents over the Agent Client Protocol. Off uses the agent's built-in runner.", keywords: ["acp", "agent client protocol", "protocol", "runner"] },
   { tab: "agents", name: "Skip permission prompts", desc: "Run every agent in its CLI's bypass mode.", keywords: ["yolo", "dangerously", "auto approve", "permissions"] },
   { tab: "agents", name: "CLI commands", desc: "Leave blank unless renamed or off your PATH.", keywords: ["launch", "flags", "arguments"] },
   { tab: "agents", name: "Accounts", desc: "Several logins per CLI. Pick one from the ＋ menu.", keywords: ["logins","sign in","cli accounts","profiles"] },

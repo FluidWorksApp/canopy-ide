@@ -67,6 +67,7 @@ import * as ipc from "../ipc";
 import { AcpProviderPicker } from "./AcpProviderPicker";
 import { partitionBuiltins } from "../agentCliVisibility";
 import { registerConnectorIcon } from "../acp/connectorIcons";
+import { AcpAgentToggle } from "./AcpAgentToggle";
 import { joinArgv, splitArgv } from "../acp/providers";
 import { SlackSettings } from "./SlackSettings";
 import { VaultSettings } from "./VaultSettings";
@@ -1757,6 +1758,22 @@ export function SettingsDialog({ onClose, initialTab = "appearance", projects = 
                   </div>
                 </Item>
                 <Item
+                  name="Use ACP"
+                  desc="Run these agents over the Agent Client Protocol. Off uses the agent's built-in runner."
+                >
+                  <div className="agent-chips">
+                    {AGENT_CLIS.map((cli) => (
+                      <AcpAgentToggle
+                        key={cli.id}
+                        cliId={cli.id}
+                        name={cli.name}
+                        value={s.acpAgents[cli.id]}
+                        onChange={(id, on) => patch({ acpAgents: { ...s.acpAgents, [id]: on } })}
+                      />
+                    ))}
+                  </div>
+                </Item>
+                <Item
                   name="Skip permission prompts"
                   desc="Run every agent in its CLI's bypass mode."
                 >
@@ -1764,7 +1781,7 @@ export function SettingsDialog({ onClose, initialTab = "appearance", projects = 
                     checked={s.dangerouslySkipPermissions}
                     onChange={(v) => patch({ dangerouslySkipPermissions: v })}
                     label="Dangerously skip permission checks"
-                    hint="Uses each CLI's own flag, and skips Canopy's check before deleting files outside the project. New agents only."
+                    hint="Uses each CLI's own flag. Skips the outside-project delete check. New agents only."
                   />
                   {s.dangerouslySkipPermissions && (
                     <div className="set-danger-note" role="alert">

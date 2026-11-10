@@ -902,6 +902,7 @@ pub fn run() {
             fsx::fs_read_dir,
             fsx::fs_read_file,
             fsx::fs_write_file,
+            fsx::fs_write_file_confined,
             fsx::fs_stat,
             fsx::fs_set_link_grants,
             fsx::fs_grant_link_file,
