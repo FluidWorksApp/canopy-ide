@@ -126,7 +126,9 @@ export function RelayConnect({ relay, onNotice }: { relay: RelayHandle; onNotice
     );
   }
 
-  if (me === undefined) return null;
+  // Signed in: no button. A teammate is reached from their right-click menu
+  // (Connect remotely), and the host/client rows above cover an active session.
+  if (me === undefined || me) return null;
 
 
   return (

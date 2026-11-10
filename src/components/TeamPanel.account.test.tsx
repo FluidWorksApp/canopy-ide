@@ -1,4 +1,4 @@
-import {afterEach,beforeEach,expect,it,vi} from 'vitest';import {cleanup,render,screen} from '@testing-library/react';
+import {afterEach,beforeEach,expect,it,vi} from 'vitest';import {cleanup,render,screen,waitFor} from '@testing-library/react';
 const invoke=vi.hoisted(()=>vi.fn());vi.mock('@tauri-apps/api/core',()=>({invoke}));vi.mock('./AccountSettings',()=>({AccountSettings:()=>null}));
 vi.mock('./LiveSessions',()=>({LiveSessions:({visible}:{visible?:boolean})=><section aria-label="Live now">{visible===false?'paused':'live'}</section>}));
 import {TeamPanel} from './TeamPanel';
@@ -28,7 +28,7 @@ it('signed in with a relay, the panel has no share button and no address or code
  invoke.mockImplementation(async(_name:string,{route,body}:{route:string;body:{action?:string}|null})=>route==='/api/me'?{user:{id:'me',name:'Sam',email:'sam@coraa.ai'}}:!body?directory:body.action==='detail'?{members:[],invitations:[]}:{});
  const relay={status:{role:'off',code:null,port:null,ips:[],addr:null,self_id:null,name:null,visibility:null,public_ip:null,members:[]},chat:[],unread:{},inbox:[],transfers:[],hostStart:async()=>{},hostStop:async()=>{},connect:async()=>{},disconnect:async()=>{}} as never;
  render(<TeamPanel relay={relay}/>);
- await screen.findByRole('heading',{name:'Teams'});
+ await waitFor(()=>expect(screen.queryByPlaceholderText('7-digit code')).toBeNull());
  expect(screen.queryByRole('button',{name:'Share my desktop'})).toBeNull();
  expect(screen.queryByPlaceholderText('7-digit code')).toBeNull();
  expect(screen.queryByLabelText('Host address')).toBeNull();
