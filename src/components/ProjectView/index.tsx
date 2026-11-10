@@ -1879,6 +1879,14 @@ const ProjectViewBody = memo(function ProjectViewBody({
   const [machineTransition, setMachineTransition] = useState<{ target: Target; name: string; resumeAgent?: string; resumeLabel?: string; resumeThen?: PendingLaunch["then"] } | null>(null);
   const [placementSetup, setPlacementSetup] = useState<{ name: string; resolve: (ready: boolean) => void; remoteInvoke?: <T>(command: string, args?: Record<string, unknown>) => Promise<T> } | null>(null);
   const [placementSetupReady, setPlacementSetupReady] = useState(false);
+  // The setup finished cleanly: start the launch that was waiting for it, with
+  // no further click. Launch stays as the manual route if this never fires.
+  useEffect(() => {
+    if (!placementSetupReady || !placementSetup) return;
+    const { resolve } = placementSetup;
+    setPlacementSetup(null);
+    resolve(true);
+  }, [placementSetupReady, placementSetup]);
   /** Take back a remote terminal that survived the project's sleep. Called only
    *  from the tab's Reconnect button. Resolves null on success, else why not. */
   const reconnectRemoteTab = useCallback(
@@ -16280,6 +16288,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
               components={project.components.map((component) => ({ componentId: component.id, label: component.label }))}
               onComplete={setPlacementSetupReady}
               remoteInvoke={placementSetup.remoteInvoke}
+              autoStart
             />
           }
         />

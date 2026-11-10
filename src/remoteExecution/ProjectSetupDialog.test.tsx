@@ -62,3 +62,26 @@ it('shows why candidates could not be read',async()=>{
  render(<ProjectSetupDialog projectId="p1" projectName="Shop" workspaceName="Studio" components={[component]}/>);
  expect((await screen.findByRole('alert')).textContent).toMatch(/not a Git repository/);
 });
+
+it('skips a folder that no longer exists here instead of failing the whole list',async()=>{
+ tauri.mockImplementation(async(c:string,a?:unknown)=>{
+  if(c==='execution_mirror_candidates'){
+   if((a as {componentId?:string})?.componentId==='gone')throw new Error('Saved folder no longer exists on this device');
+   return {relative:'',files:candidates};
+  }
+  if(c==='execution_mirror_inspect')return [];
+  if(c==='store_load')return 'null';
+  return {};
+ });
+ render(<ProjectSetupDialog projectId="p1" projectName="Shop" workspaceName="Studio" components={[component,{componentId:'gone',label:'old'}]}/>);
+ expect(await screen.findByLabelText(/config\/local\.json/)).toBeTruthy();
+ expect(screen.getByText(/Skipped, folder no longer exists on this Mac: old/)).toBeTruthy();
+ expect(screen.queryByText(/no longer exists on this device/)).toBeNull();
+});
+
+it('starts by itself when asked, without a click',async()=>{
+ const onComplete=vi.fn();
+ render(<ProjectSetupDialog projectId="p1" projectName="Shop" workspaceName="Studio" components={[component]} autoStart onComplete={onComplete}/>);
+ await screen.findByLabelText(/config\/local\.json/);
+ await waitFor(()=>expect(onComplete).toHaveBeenCalledWith(false));
+});

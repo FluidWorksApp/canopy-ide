@@ -16,26 +16,36 @@ const size=(bytes:number)=>bytes<1024?`${bytes} B`:bytes<1048576?`${Math.round(b
  * git-ignored files on this Mac (names and sizes only) so the person picks
  * which to copy; credential-shaped ones start unchecked. Nothing is sent until
  * the button is pressed. */
-export function ProjectSetupDialog({projectId,projectName,workspaceName,components,disabled=false,onComplete,remoteInvoke}:{projectId:string;projectName:string;workspaceName:string;components:{componentId:string;label:string}[];disabled?:boolean;onComplete?:(ok:boolean)=>void;
+export function ProjectSetupDialog({projectId,projectName,workspaceName,components,disabled=false,onComplete,remoteInvoke,autoStart=false}:{projectId:string;projectName:string;workspaceName:string;components:{componentId:string;label:string}[];disabled?:boolean;onComplete?:(ok:boolean)=>void;
  /** Run workspace commands here instead of on the window's live host: a temporary connection to another workspace (temporaryWorkspace.ts). */
- remoteInvoke?:<T>(command:string,args?:Record<string,unknown>)=>Promise<T>}){
+ remoteInvoke?:<T>(command:string,args?:Record<string,unknown>)=>Promise<T>;
+ /** Start the setup as soon as the files are listed, with everything pre-selected: a launch that needs the project there should not wait for a click. */
+ autoStart?:boolean}){
  const [files,setFiles]=useState<Record<string,MirrorCandidate[]>>({});
  const [chosen,setChosen]=useState<Record<string,string[]>>({});
  const [install,setInstall]=useState(true);
  const [progress,setProgress]=useState<MirrorProgress|null>(null);
  const [running,setRunning]=useState(false),[error,setError]=useState('');
+ const [skipped,setSkipped]=useState<string[]>([]),[scanned,setScanned]=useState(false);
+ const started=useRef(false);
  const abort=useRef<AbortController|null>(null);
  useEffect(()=>{
   let live=true;
   (async()=>{
    try{
     const found:Record<string,MirrorCandidate[]>={},picked:Record<string,string[]>={};
+    const missing:string[]=[];let lastError='';
     for(const c of components){
-     const result=await mirrorCandidates(projectId,c.componentId);
-     found[c.componentId]=result.files;
-     picked[c.componentId]=result.files.filter(f=>f.category!=='secret').map(f=>f.path);
+     // One folder that no longer exists here must not block the rest.
+     try{
+      const result=await mirrorCandidates(projectId,c.componentId);
+      found[c.componentId]=result.files;
+      picked[c.componentId]=result.files.filter(f=>f.category!=='secret').map(f=>f.path);
+     }catch(e){missing.push(c.label);lastError=String((e as {message?:string})?.message??e);}
     }
-    if(live){setFiles(found);setChosen(picked);}
+    // Every folder failing is an error worth showing; some failing is a note.
+    if(live&&missing.length===components.length&&components.length>0)setError(lastError);
+    if(live){setFiles(found);setChosen(picked);setSkipped(missing);setScanned(true);}
    }catch(e){if(live)setError(String((e as {message?:string})?.message??e));}
   })();
   return ()=>{live=false;};
@@ -47,16 +57,22 @@ export function ProjectSetupDialog({projectId,projectName,workspaceName,componen
   setRunning(true);setError('');setProgress(null);
   onComplete?.(false);
   try{
-   const final=await ensureProjectOnRemote({local,remote:remoteInvoke??remote,signal:controller.signal},{projectId,componentIds:components.map(c=>c.componentId),selectedFiles:chosen,install},setProgress);
+   const final=await ensureProjectOnRemote({local,remote:remoteInvoke??remote,signal:controller.signal},{projectId,componentIds:usable.map(c=>c.componentId),selectedFiles:chosen,install},setProgress);
    onComplete?.(final.projects.length>0&&!final.projects.some(p=>p.state==='failed'));
   }
   catch(e){setError(String((e as {message?:string})?.message??e));}
   finally{abort.current=null;setRunning(false);}
  }
+ useEffect(()=>{
+  if(autoStart&&scanned&&!started.current&&!disabled&&usable.length>0){started.current=true;void start();}
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+ },[autoStart,scanned]);
+ const usable=components.filter(c=>!skipped.includes(c.label));
  const failed=progress?.done&&progress.projects.some(p=>p.state==='failed');
  return <div className="mirror-setup" role="group" aria-label={`Set up ${projectName} on ${workspaceName}`}>
   <p className="workspace-description">Copy {projectName} to {workspaceName}: the repository on the same branch with your unpushed commits and changes. Pick any git-ignored files it also needs. Only names and sizes are listed here; files are read when you press the button.</p>
-  {components.map(c=>{
+  {skipped.length>0&&<small className="mirror-problem">Skipped, folder no longer exists on this Mac: {skipped.join(', ')}.</small>}
+  {usable.map(c=>{
    const list=files[c.componentId]??[];
    return <section key={c.componentId} className="mirror-project">
     <strong>{c.label}</strong>
