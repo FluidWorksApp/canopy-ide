@@ -13,6 +13,7 @@ import type { OrchestrationProjectShell, ProjectEntry } from "./contracts";
 import { CANOPY_TERMINAL_THREAD_ID, listProjects, t3 } from "./methods";
 import type { T3RpcClient } from "./rpc";
 import { T3Terminal } from "./T3Terminal";
+import { AGENT_CLIS } from "../projects";
 import "./t3connect.css";
 
 type View = { kind: "file"; path: string } | { kind: "terminal"; id: string } | null;
@@ -81,6 +82,11 @@ export function T3MachineView({ machine, onClose }: { machine: T3Machine; onClos
   const [dirty, setDirty] = useState(false);
   const [saving, setSaving] = useState(false);
   const [terminals, setTerminals] = useState<string[]>([]);
+  /** Terminals opened as an agent: what to type, and the tab's name. */
+  const [agentTabs, setAgentTabs] = useState<Record<string, { label: string; command: string }>>({});
+  const [agentId, setAgentId] = useState<string>(() => {
+    try { return localStorage.getItem("canopy.t3Agent") ?? ""; } catch { return ""; }
+  });
   const fileRef = useRef<OpenFile | null>(null);
   fileRef.current = file;
   const canRead = grants(machine, "filesystem:read");
@@ -146,8 +152,9 @@ export function T3MachineView({ machine, onClose }: { machine: T3Machine; onClos
     }
   }, [rpc, project]);
 
-  const newTerminal = () => {
+  const newTerminal = (agent?: { name: string; bin: string }) => {
     const id = `canopy-${crypto.randomUUID().slice(0, 8)}`;
+    if (agent) setAgentTabs(tabs => ({ ...tabs, [id]: { label: agent.name, command: agent.bin } }));
     setTerminals(items => [...items, id]);
     setView({ kind: "terminal", id });
   };
@@ -157,10 +164,12 @@ export function T3MachineView({ machine, onClose }: { machine: T3Machine; onClos
     setView(current => current?.kind === "terminal" && current.id === id ? null : current);
   };
 
+  const agentChoice = AGENT_CLIS.find(cli => cli.id === agentId) ?? AGENT_CLIS[0] ?? { id: "", name: "Agent", bin: "" };
+
   const tabs = useMemo(() => [
     ...(file ? [{ key: `file:${file.path}`, label: `${basename(file.path)}${dirty ? " •" : ""}`, view: { kind: "file", path: file.path } as View }] : []),
-    ...terminals.map((id, index) => ({ key: `terminal:${id}`, label: `Terminal ${index + 1}`, view: { kind: "terminal", id } as View })),
-  ], [file, dirty, terminals]);
+    ...terminals.map((id, index) => ({ key: `terminal:${id}`, label: agentTabs[id]?.label ?? `Terminal ${index + 1}`, view: { kind: "terminal", id } as View })),
+  ], [file, dirty, terminals, agentTabs]);
 
   return <div className="t3-machine">
     <div className="side-panel-head">
@@ -195,12 +204,20 @@ export function T3MachineView({ machine, onClose }: { machine: T3Machine; onClos
           </span>)}
           <span className="t3-spacer" />
           {file && view?.kind === "file" && !file.readOnly && <Button size="sm" disabled={!dirty || saving || !rpc} onClick={() => void save()}>{saving ? "Saving…" : "Save"}</Button>}
-          <Button size="sm" variant="ghost" disabled={!rpc || !project || !canTerminal} title={canTerminal ? "Open a shell in this project on the T3 machine" : "This machine did not grant terminal:operate"} onClick={newTerminal}>＋ Terminal</Button>
+          <Button size="sm" variant="ghost" disabled={!rpc || !project || !canTerminal} title={canTerminal ? "Open a shell in this project on the T3 machine" : "This machine did not grant terminal:operate"} onClick={() => newTerminal()}>＋ Terminal</Button>
+          {canTerminal && AGENT_CLIS.length > 0 && (
+            <>
+              <select className="t3-agent-select" aria-label="Agent CLI to launch on the T3 machine" value={agentChoice.id} onChange={event => { setAgentId(event.target.value); try { localStorage.setItem("canopy.t3Agent", event.target.value); } catch { /* remembered only as a convenience */ } }}>
+                {AGENT_CLIS.map(cli => <option key={cli.id} value={cli.id}>{cli.name}</option>)}
+              </select>
+              <Button size="sm" variant="ghost" disabled={!rpc || !project} title={`Open a shell in this project and start ${agentChoice.name} there. It must be installed on the T3 machine.`} onClick={() => newTerminal(agentChoice)}>＋ Agent</Button>
+            </>
+          )}
         </div>
         {file && view?.kind === "file" && file.note && <p className="t3-machine-note">{file.note}</p>}
         <div className="t3-machine-content">
           {file && <div className="t3-machine-pane" hidden={view?.kind !== "file"}><MonacoEditor active={view?.kind === "file"} model={file.model} readOnly={file.readOnly} onSave={() => void save()} onDirty={setDirty} /></div>}
-          {rpc && project && terminals.map(id => <div key={id} className="t3-machine-pane" hidden={!(view?.kind === "terminal" && view.id === id)}><T3Terminal rpc={rpc} cwd={project.workspaceRoot} terminalId={id} writable={canTerminal} /></div>)}
+          {rpc && project && terminals.map(id => <div key={id} className="t3-machine-pane" hidden={!(view?.kind === "terminal" && view.id === id)}><T3Terminal rpc={rpc} cwd={project.workspaceRoot} terminalId={id} writable={canTerminal} startup={agentTabs[id]?.command} /></div>)}
           {!view && <div className="remote-empty">{rpc ? "Pick a file, or open a terminal. Files and shells stay on the T3 machine." : error ? "Not connected." : "Connecting…"}</div>}
         </div>
       </section>

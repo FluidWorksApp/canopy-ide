@@ -34,3 +34,14 @@
 .t3-machine .remote-status { padding: 4px 10px; font-size: 12px; color: var(--text-dim); }
 .t3-terminal-surface { flex: 1; min-height: 0; overflow: hidden; padding: 6px; background: #0d0f12; }
 .t3-machine .remote-empty { flex: 1; padding: 40px; color: var(--text-dim); }
+
+.t3-agent-select {
+  max-width: 140px;
+  padding: 2px 6px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  font-size: 12px;
+}
