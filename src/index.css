@@ -10968,6 +10968,19 @@ body.dragging-tab * {
   max-width: 60ch;
 }
 
+/* A hint is a second line under its label wherever the checkbox sits, not
+   only inside .set-checks; otherwise it runs on straight after the label. */
+.set-inline-check.has-hint {
+  align-items: flex-start;
+}
+
+.set-inline-check.has-hint em {
+  display: block;
+  margin-top: 2px;
+  font-style: normal;
+  color: var(--text-dim);
+}
+
 /* The UA checkbox and radio are ~13px system controls with a system-blue
    fill — the last widgets in the app that ignore the skin entirely. Drawn
    here instead: the box is a surface like any other, the mark is ink on the

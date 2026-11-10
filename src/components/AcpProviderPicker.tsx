@@ -37,8 +37,8 @@ export function AcpProviderPicker({
       setAgents(null);
       setNote(
         e instanceof AcpRegistryError && e.reason === "invalid"
-          ? "The ACP registry returned something unreadable. The built-in presets still work."
-          : "Couldn't reach the ACP registry. The built-in presets still work.",
+          ? "Registry unreadable; presets still work."
+          : "Registry unreachable; presets still work.",
       );
     } finally {
       setBusy(false);

@@ -193,8 +193,8 @@ function EntryForm({
           <span className="vault-consent-name">Let agents read this password</span>
           <span className="vault-consent-why">
             {readable
-              ? "An agent can be told this one in plain text. Right for a database URL or an SSH passphrase — nothing with a login form."
-              : "Canopy types this into the page itself; the agent never sees it."}
+              ? "Agents can read this in plain text. For secrets with no login form."
+              : "Canopy types it in; the agent never sees it."}
           </span>
         </span>
       </label>
@@ -388,8 +388,7 @@ function ImportPanel({ onDone }: { onDone: () => void }) {
         <h4>Import from KeePass</h4>
       </div>
       <p className="vault-empty">
-        A .kdbx file from KeePassXC, Bitwarden, 1Password or Strongbox. Nothing
-        here is overwritten, and imports are fill-only.
+        A .kdbx file from KeePassXC, Bitwarden or 1Password. Nothing is overwritten.
       </p>
       <div className="vault-add">
         <Button onClick={() => void pick()}>
@@ -567,7 +566,7 @@ export function VaultSettings() {
     <>
       <Item
         name="Logins"
-        desc="Canopy types these into the browser; the agent never sees the password."
+        desc="Canopy types these in; agents never see the password."
       >
         <div className="vault-list">
           {items.map((item) => (
@@ -576,7 +575,7 @@ export function VaultSettings() {
 
           {items.length === 0 && adding === null && (
             <p className="vault-empty">
-              Nothing saved yet. Add the site you have open, or enter one by hand.
+              Nothing saved yet.
             </p>
           )}
 
@@ -611,7 +610,7 @@ export function VaultSettings() {
 
       <Item
         name="Bring in an existing set"
-        desc="Export from your current manager as .kdbx and import it here."
+        desc="Import a .kdbx export from your current manager."
       >
         {importing ? (
           <ImportPanel

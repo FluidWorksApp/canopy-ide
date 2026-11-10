@@ -1342,7 +1342,7 @@ export const BUILTIN_AGENT_CLIS: AgentCliDef[] = [
       managedIntegration: true,
       conversationStore: {
         path: "~/.omp/agent/sessions/**/*.jsonl",
-        note: "Sub-agent transcripts are indexed under their parent conversation.",
+        note: "Sub-agent transcripts are indexed under their parent.",
         open: "session",
       },
     },

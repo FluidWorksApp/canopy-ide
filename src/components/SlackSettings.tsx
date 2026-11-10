@@ -106,8 +106,7 @@ export function SlackSettings({ companion }: { companion: string }) {
         <span className="set-item-name">Slack</span>
       </div>
       <div className="set-item-desc">
-        Talk to {companion} from Slack while Canopy is signed in. Teammates you've given session access can
-        mention you and {companion} together; only you can approve what it changes.
+        Talk to {companion} from Slack while Canopy is signed in.
       </div>
       <div className="set-item-control">
         {(status || !error) && (
