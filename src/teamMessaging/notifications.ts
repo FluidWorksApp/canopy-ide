@@ -36,7 +36,9 @@ export function reviewRequestFor(message:TeamMessageEvent['message'],user:string
 /** Why a message is for this account personally, if it is: those still notify
  * in a muted conversation and, with Mention notifications on, when team
  * message notifications are off. @channel is not personal. */
-export function personalReason(event:TeamMessageEvent):'mention'|'review'|'reply'|undefined{
+const isRemoteRequest=(message:TeamMessageEvent['message'])=>((message as {card?:{type?:unknown}})?.card)?.type==='relay-request';
+export function personalReason(event:TeamMessageEvent):'mention'|'review'|'reply'|'remote'|undefined{
+ if(isRemoteRequest(event.message))return 'remote';
  if(reviewRequestFor(event.message,event.user))return 'review';
  if(mentionsUser(event.message,event.user))return 'mention';
  if(event.replyToOwn)return 'reply';
@@ -56,8 +58,8 @@ export function teamMessageAttention(event:TeamMessageEvent,options:{previews:bo
   const place=peer?'':` in ${channel}`;
   return {kind:'fyi',tone:'info',source:'team',title:`${event.backfill} messages from ${sender}${place} while you were away`,where,dedupeKey:`team-message:${user}:${team}:${message.id}`};
  }
- const lead=reason==='mention'?(peer?`${sender} mentioned you`:`${sender} mentioned you in ${channel}`):reason==='review'?`${sender} asked you for a review`:reason==='reply'?`${sender} replied to your message`:'';
- const title=lead?(preview?`${lead}: ${preview}`:lead):preview?(peer?`${sender}: ${preview}`:`${sender} in ${channel}: ${preview}`):(peer?`${sender} sent you a message`:`${sender} posted in ${channel}`);
+ const lead=reason==='remote'?`${sender} wants to connect remotely to your desktop`:reason==='mention'?(peer?`${sender} mentioned you`:`${sender} mentioned you in ${channel}`):reason==='review'?`${sender} asked you for a review`:reason==='reply'?`${sender} replied to your message`:'';
+ const title=lead?(preview&&reason!=='remote'?`${lead}: ${preview}`:lead):preview?(peer?`${sender}: ${preview}`:`${sender} in ${channel}: ${preview}`):(peer?`${sender} sent you a message`:`${sender} posted in ${channel}`);
  return {kind:'fyi',tone:'info',source:'team',title,where,dedupeKey:`team-message:${user}:${team}:${message.id}`};
 }
 
