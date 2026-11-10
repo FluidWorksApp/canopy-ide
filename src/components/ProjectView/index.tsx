@@ -1787,10 +1787,12 @@ const ProjectViewBody = memo(function ProjectViewBody({
     /** An agent launch starts in the component already in front; the picker then
      *  asks only where to run and which account. */
     fixedComponent?: PickerComponent;
+    /** The folder the person right-clicked: preselected in the list. */
+    preferPath?: string;
     resolve: (selection: ComponentLaunchPick | null) => void;
   } | null>(null);
   const pickComponent = useCallback(
-    (title: string, agentKind?: string) =>
+    (title: string, agentKind?: string, preferPath?: string) =>
       new Promise<ComponentLaunchPick | null>((resolve) => {
         const list = componentsRef.current;
         if (!agentKind && list.length < 2) {
@@ -1820,7 +1822,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
           }
           setComponentPick((previous) => {
             previous?.resolve(null);
-            return { title, machineTargets, initialMachine, accounts, fixedComponent, resolve };
+            return { title, machineTargets, initialMachine, accounts, fixedComponent, preferPath, resolve };
           });
         };
         if (!agentKind) {
@@ -10165,7 +10167,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
             ? `⇡ ${cliUpdates[cli.bin]?.latest}`
             : undefined,
       onClick: () => {
-        void pickComponent(`New ${cli.name}`, cli.id).then((selection) => {
+        void pickComponent(`New ${cli.name}`, cli.id, cwd).then((selection) => {
           if (selection) void launchCli(cli, selection.component.path, "current", selection.machine, selection.profileId);
         });
       },
@@ -16284,6 +16286,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
           // Only when a tab is actually in front: with none open the active folder
           // falls back to the first component, which is not "this tab".
           activePath={activeTab ? activeContextRoot : null}
+          preferPath={componentPick.preferPath}
           machineTargets={componentPick.machineTargets}
           initialMachine={componentPick.initialMachine}
           accounts={componentPick.accounts}

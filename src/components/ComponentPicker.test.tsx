@@ -177,3 +177,11 @@ it('offers Automatic as an account and passes it through',()=>{
   expect(onPick).toHaveBeenCalled();
   expect(JSON.stringify(onPick.mock.calls[0])).toContain('auto');
 });
+
+it('preselects the component that was right-clicked, ahead of recents and the tab in front',()=>{
+  const {onPick,input}=mount({recents:['a'],activePath:'/w/shop/services/api',preferPath:'/w/shop/apps/web'});
+  expect(names()[0]).toBe('web');
+  expect(screen.queryByText('this tab')).toBeNull();
+  fireEvent.keyDown(input,{key:'Enter'});
+  expect(onPick.mock.calls[0][0].id).toBe('w');
+});

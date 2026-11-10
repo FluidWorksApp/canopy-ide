@@ -25,6 +25,7 @@ export function ComponentPicker({
   components,
   recents,
   activePath,
+  preferPath,
   machineTargets,
   initialMachine = automaticPreference(),
   accounts,
@@ -39,6 +40,8 @@ export function ComponentPicker({
   recents: string[];
   /** The tab in front, if any, so "current tab" can be flagged. */
   activePath?: string | null;
+  /** A component the person pointed at (a right-click on it): it comes first and is preselected, ahead of recents. */
+  preferPath?: string | null;
   /** Present for an agent launch. Includes This Mac and connected machines. */
   machineTargets?: DisplayTarget[];
   initialMachine?: Preference;
@@ -61,11 +64,14 @@ export function ComponentPicker({
   const listRef = useRef<HTMLDivElement>(null);
   const before = useRef<Element | null>(document.activeElement);
 
-  const ordered = useMemo(() => orderComponents(components, recents, activePath), [components, recents, activePath]);
+  const ordered = useMemo(
+    () => orderComponents(components, preferPath ? [] : recents, preferPath ?? activePath),
+    [components, recents, activePath, preferPath],
+  );
   const rows = useMemo(() => rankComponents(query, ordered), [query, ordered]);
   const ghost = completion(query, rows[0]);
   const lastUsed = recents.length ? ordered[0]?.id : undefined;
-  const current = componentAt(components, activePath)?.id;
+  const current = preferPath ? undefined : componentAt(components, activePath)?.id;
   const machineChoices = machineTargets
     ? [
         { key: "automatic", label: "Automatic", preference: automaticPreference() },
