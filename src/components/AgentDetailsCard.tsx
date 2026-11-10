@@ -97,13 +97,28 @@ function Lineage({ subagents }: { subagents: readonly ipc.SubagentRun[] }) {
   const previous = subagents.filter((s) => s.status !== "running");
   const failed = previous.filter((s) => s.status === "failed").length;
   const now = useNow(running.length > 0);
+  const [openId, setOpenId] = useState<string | null>(null);
   const row = (s: ipc.SubagentRun) => {
     const span = subagentSpan(s, now);
+    const open = openId === s.id;
     return (
-      <li key={s.id} className={`agent-card-sub agent-card-sub-${s.status}`} title={s.description}>
-        <span className="agent-card-sub-dot" aria-hidden="true" />
-        <span className="agent-card-sub-name">{s.description || "(no description)"}</span>
-        {span != null && <span className="agent-card-dim agent-card-sub-age">{fmtSpan(span)}</span>}
+      <li key={s.id} className={`agent-card-sub agent-card-sub-${s.status}`}>
+        <button
+          type="button"
+          className="agent-card-sub-btn"
+          title={s.description}
+          aria-expanded={open}
+          onClick={() => setOpenId(open ? null : s.id)}
+        >
+          <span className="agent-card-sub-dot" aria-hidden="true" />
+          <span className="agent-card-sub-name">{s.description || "(no description)"}</span>
+          {span != null && <span className="agent-card-dim agent-card-sub-age">{fmtSpan(span)}</span>}
+        </button>
+        {open && (
+          <div className="agent-card-sub-result" role="region" aria-label={`${s.description || "Agent"} result`}>
+            {s.result?.trim() ? s.result : s.status === "running" ? "Still working…" : "No text was returned."}
+          </div>
+        )}
       </li>
     );
   };

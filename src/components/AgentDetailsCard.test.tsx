@@ -263,3 +263,12 @@ describe("PRs raised by the agent", () => {
     delete (ipc as unknown as { provenanceForSession?: unknown }).provenanceForSession;
   });
 });
+
+describe("lineage rows", () => {
+  it("open to show what the sub-agent returned", () => {
+    setup();
+    fireEvent.click(screen.getByRole("button", { name: /Previous agents/ }));
+    fireEvent.click(screen.getByRole("button", { name: /planner/ }));
+    expect(screen.getByText("No text was returned.")).toBeInTheDocument();
+  });
+});
