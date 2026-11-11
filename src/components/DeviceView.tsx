@@ -325,6 +325,40 @@ export default function DeviceView({
     };
   }, [picking, visible, serial, dir, platform]);
 
+  // Marks describe an app screen. When that app leaves the front (minimised,
+  // another app opened) its boxes would float over a different screen, so they
+  // are hidden until it is back; the notes stay in the list.
+  const [foreground, setForeground] = useState("");
+  useEffect(() => {
+    if (
+      !visible ||
+      !serial ||
+      platform !== "android" ||
+      annotations.length === 0
+    )
+      return;
+    let stopped = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const look = async () => {
+      try {
+        const component = await ipc.androidForeground(serial, dir);
+        if (!stopped && component) setForeground(component);
+      } catch {
+        /* keep the last answer */
+      }
+      if (!stopped) timer = setTimeout(() => void look(), 1000);
+    };
+    void look();
+    return () => {
+      stopped = true;
+      if (timer) clearTimeout(timer);
+    };
+  }, [visible, serial, dir, platform, annotations.length]);
+  const pkg = (c: string) => c.split("/")[0];
+  const shown = annotations.filter(
+    (a) => !foreground || !a.component || pkg(a.component) === pkg(foreground),
+  );
+
   /** The element a click at `point` would select, from the cached tree. */
   const targetAt = (point: { x: number; y: number }) => {
     const tree = treeRef.current;
@@ -826,7 +860,7 @@ export default function DeviceView({
                       />
                     )}
                     {deviceSize &&
-                      annotations.map((a) => (
+                      shown.map((a) => (
                         <span
                           key={a.n}
                           className="device-mark"
@@ -894,7 +928,7 @@ export default function DeviceView({
                 />
               )}
               {size &&
-                annotations.map((a) => (
+                shown.map((a) => (
                   <span
                     key={a.n}
                     className="device-mark"
