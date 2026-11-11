@@ -791,6 +791,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "canopy-pty-host"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "libc",
+ "portable-pty",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "canopy-service"
 version = "0.1.0"
 dependencies = [
