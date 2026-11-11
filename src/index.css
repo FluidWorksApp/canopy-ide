@@ -6736,13 +6736,14 @@ body.dragging-tab * {
 }
 .agent-card-prlist {
   position: absolute;
+  left: 0;
   right: 0;
   bottom: calc(100% + 6px);
   z-index: 20;
-  width: max-content;
-  min-width: 100%;
-  max-width: 420px;
+  box-sizing: border-box;
+  width: 100%;
   max-height: 260px;
+  overflow-x: hidden;
   overflow-y: auto;
   margin: 0;
   padding: 4px;
@@ -6754,6 +6755,8 @@ body.dragging-tab * {
   box-shadow: 0 8px 28px rgba(0, 0, 0, 0.45);
 }
 .agent-card-prlist-row {
+  min-width: 0;
+  box-sizing: border-box;
   display: flex;
   align-items: center;
   gap: 8px;
@@ -6789,6 +6792,64 @@ body.dragging-tab * {
 .agent-card-fix:disabled {
   opacity: 0.45;
   cursor: default;
+}
+.agent-card-split {
+  position: relative;
+  display: inline-flex;
+}
+.agent-card-split-main {
+  border-radius: 999px 0 0 999px;
+  padding-inline: 12px;
+}
+.agent-card-split-chev {
+  border-radius: 0 999px 999px 0;
+  border-left: 0;
+  padding-inline: 8px;
+}
+.agent-card-mergemenu {
+  position: absolute;
+  top: calc(100% + 4px);
+  left: 0;
+  z-index: 30;
+  min-width: 170px;
+  margin: 0;
+  padding: 4px;
+  list-style: none;
+  background: var(--bg-raised);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  box-shadow: 0 10px 28px rgba(0, 0, 0, 0.4);
+}
+.agent-card-mergemenu button {
+  width: 100%;
+  display: flex;
+  gap: 8px;
+  padding: 6px 8px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  font-size: 12px;
+  text-align: left;
+  cursor: pointer;
+}
+.agent-card-mergemenu button:hover,
+.agent-card-mergemenu button:focus-visible {
+  background: color-mix(in srgb, var(--accent) 22%, transparent);
+}
+.agent-card-mergemenu span {
+  width: 12px;
+}
+.agent-card-title-input {
+  min-width: 0;
+  padding: 3px 8px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  font-size: 12px;
 }
 .agent-card-merge {
   gap: 6px;
