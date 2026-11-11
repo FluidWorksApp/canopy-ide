@@ -90,6 +90,11 @@ export const AGENT_TOOL_GROUPS: AgentToolGroup[] = [
         label: "Name its work",
         note: "Names the run and updates its one-line description",
       },
+      {
+        name: "canopy_tasks",
+        label: "Task list",
+        note: "Shows its task list on the agent card, kept current",
+      },
       { name: "canopy_vault_list", label: "Vault list", note: "Which logins exist — never the passwords" },
       { name: "canopy_vault_fill", label: "Vault fill", note: "Sign in to a page; the agent never sees the password" },
       { name: "canopy_vault_read", label: "Vault read", note: "Plain-text password, for entries you mark readable" },
