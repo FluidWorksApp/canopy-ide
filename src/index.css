@@ -6760,6 +6760,18 @@ body.dragging-tab * {
   color: var(--text-dim);
   font-variant-numeric: tabular-nums;
 }
+.agent-card-pr-link {
+  padding: 0;
+  border: 0;
+  background: none;
+  font: inherit;
+  cursor: pointer;
+}
+.agent-card-pr-link:hover,
+.agent-card-pr-link:focus-visible {
+  color: var(--text);
+  text-decoration: underline;
+}
 .agent-card-chip {
   flex: 0 0 auto;
   padding: 1px 8px;

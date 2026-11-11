@@ -637,7 +637,15 @@ export function AgentDetailsCard({
               ))}
             </ul>
           )}
-          <span className="agent-card-pr-num">#{pr.number}</span>
+          <button
+            type="button"
+            className="agent-card-pr-num agent-card-pr-link"
+            title={`Open #${pr.number} on GitHub`}
+            aria-label={`Open pull request #${pr.number} on GitHub`}
+            onClick={() => openInOsBrowser(pr.url)}
+          >
+            #{pr.number}
+          </button>
           <span className="agent-card-grow agent-card-ellipsis">
             {pr.title}
           </span>
