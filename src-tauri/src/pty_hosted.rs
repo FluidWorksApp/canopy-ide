@@ -12,10 +12,78 @@ pub fn enabled() -> bool {
     std::env::var("CANOPY_PTY_HOST").is_ok_and(|v| v == "1")
 }
 
+/// A hosted session "Quit and Stop All" would stop that this app does not hold
+/// in a tab. `command` is what its metadata says it runs (None when the
+/// metadata is unreadable: it is then a Canopy session of this instance only by
+/// its spawn key, and could be an agent).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct StopTarget {
+    pub command: Option<String>,
+    pub unreadable: bool,
+}
+
+/// A hosted session this launch saw and did not take over.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct LeftBehind {
+    pub terminal: Option<u32>,
+    pub reason: String,
+}
+
+/// What the UI shows once per launch about the terminal host.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct HostNotice {
+    /// The host switch is on but this launch's terminals run in-process (the
+    /// host answered unusably, or could not be started), so Quit ends them.
+    pub fell_back: bool,
+    pub left_behind: Vec<LeftBehind>,
+    /// How long a hosted terminal outlives a plain Quit; 0 where nothing is
+    /// hosted.
+    pub linger_secs: u64,
+}
+
+static LEFT_BEHIND: std::sync::Mutex<Vec<LeftBehind>> = std::sync::Mutex::new(Vec::new());
+static FELL_BACK: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Records, for the UI as well as the log, a hosted session that was not
+/// adopted. It stays in the host (and Stop All can stop it); the user would
+/// otherwise never learn it is there.
+pub fn note_left_behind(terminal: Option<u32>, reason: impl Into<String>) {
+    let reason = reason.into();
+    eprintln!("canopy: hosted terminal {terminal:?} left in the host: {reason}");
+    let mut all = LEFT_BEHIND.lock().unwrap();
+    if all.len() < 50 {
+        all.push(LeftBehind { terminal, reason });
+    }
+}
+
+/// Said by `unix::client` when it gives up on the host.
+#[cfg(unix)]
+fn note_fell_back() {
+    FELL_BACK.store(true, std::sync::atomic::Ordering::SeqCst);
+}
+
+/// Known at launch for an unusable host (decided before any terminal opens);
+/// a host that fails to start is added once the first terminal has tried it.
+pub fn host_notice() -> HostNotice {
+    #[cfg(unix)]
+    let unusable =
+        enabled() && matches!(adoption::resolution(), adoption::Resolution::HostUnusable);
+    #[cfg(not(unix))]
+    let unusable = false;
+    HostNotice {
+        fell_back: unusable || FELL_BACK.load(std::sync::atomic::Ordering::SeqCst),
+        left_behind: LEFT_BEHIND.lock().unwrap().clone(),
+        #[cfg(unix)]
+        linger_secs: unix::LINGER_SECS,
+        #[cfg(not(unix))]
+        linger_secs: 0,
+    }
+}
+
 #[cfg(unix)]
 pub use adoption::{
-    adopt, adoptable, identity_floor, note_identity, reused_instance, stop_left_running, Adoptable,
-    Adopted,
+    adopt, adoptable, identity_floor, note_identity, reused_instance, stop_left_running,
+    stop_preview, Adoptable, Adopted,
 };
 #[cfg(unix)]
 pub use sealed::{forget_sealed, remember_sealed, reseal_lineage};
@@ -73,10 +141,12 @@ mod unix {
     /// an agent whose app never comes back does not run unseen forever. Long
     /// enough to quit, update and relaunch; the app that returns adopts it. How
     /// long is the user's Quit decision (default here: two hours).
-    const LINGER_SECS: u64 = 2 * 60 * 60;
+    pub(super) const LINGER_SECS: u64 = 2 * 60 * 60;
 
-    /// A dedicated directory: the host chmods its parent to 0700, so it must
-    /// never be a shared one. Debug builds use their own so a dev app never
+    /// A dedicated directory: the host and the context bridge both create it
+    /// 0700 if missing and refuse an existing one that is not already ours and
+    /// 0700 (neither ever chmods an existing directory), so a shared one such
+    /// as `$HOME` is refused, not tightened. Debug builds use their own so a dev app never
     /// attaches to an installed app's host.
     pub(super) fn socket_path() -> Option<PathBuf> {
         if let Ok(dir) = std::env::var("CANOPY_PTY_HOST_DIR") {
@@ -125,6 +195,7 @@ mod unix {
         // A host that exists but could not be read: hosting this run would
         // create sessions no later launch could adopt, so stay in-process.
         if matches!(resolution(), Resolution::HostUnusable) {
+            super::note_fell_back();
             return None;
         }
         static CLIENT: OnceLock<Option<Client>> = OnceLock::new();
@@ -133,10 +204,12 @@ mod unix {
                 // Said once, so a missing host is not mistaken for a working one.
                 let Some(socket) = socket_path() else {
                     eprintln!("canopy: CANOPY_PTY_HOST=1 but no socket directory; using in-process terminals");
+                    super::note_fell_back();
                     return None;
                 };
                 let Some(exe) = host_exe() else {
                     eprintln!("canopy: CANOPY_PTY_HOST=1 but canopy-pty-host was not found next to the app (set CANOPY_PTY_HOST_EXE); using in-process terminals");
+                    super::note_fell_back();
                     return None;
                 };
                 match HostClient::ensure_running(&exe, &socket, HOST_IDLE_SECS) {
@@ -145,6 +218,7 @@ mod unix {
                         eprintln!(
                             "canopy: PTY host unavailable, using in-process terminals: {error}"
                         );
+                        super::note_fell_back();
                         None
                     }
                 }
@@ -191,9 +265,9 @@ mod unix {
                 env,
                 cols,
                 rows,
-                meta,
+                meta: meta.clone(),
                 linger_secs: Some(LINGER_SECS),
-                key: None,
+                key: meta.as_deref().and_then(super::adoption::spawn_key),
             })
             .map_err(|e| e.to_string())?;
         match HostMaster::attach(client.clone(), id, 0) {
@@ -400,47 +474,153 @@ mod adoption {
     /// The longest the launch path waits on the host for any one answer.
     const LAUNCH_WAIT: Duration = Duration::from_secs(1);
 
+    /// Prefix of the key every Canopy-spawned session carries: instance, pty id,
+    /// generation, and a nonce so a retried spawn never aliases another.
+    /// Unlike the metadata (which any same-user process can overwrite with
+    /// `set_meta`), the key is fixed at spawn, so it still says whose session
+    /// this is after its metadata has been replaced with garbage.
+    const KEY_PREFIX: &str = "canopy-pty:";
+
+    pub(super) fn spawn_key(meta: &str) -> Option<String> {
+        static NONCE: AtomicU64 = AtomicU64::new(0);
+        let meta: HostedMeta = serde_json::from_str(meta).ok()?;
+        if meta.v != 1 || meta.id == 0 || meta.instance.is_empty() || meta.instance.contains(':') {
+            return None;
+        }
+        let ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis())
+            .unwrap_or(0);
+        Some(format!(
+            "{KEY_PREFIX}{}:{}:{}:{ms}-{}",
+            meta.instance,
+            meta.id,
+            meta.generation,
+            NONCE.fetch_add(1, Ordering::Relaxed)
+        ))
+    }
+
+    /// (instance, pty id) a spawn key names.
+    fn key_claim(key: &str) -> Option<(String, u32)> {
+        let rest = key.strip_prefix(KEY_PREFIX)?;
+        let mut parts = rest.splitn(4, ':');
+        let instance = parts.next().filter(|i| !i.is_empty())?;
+        let id: u32 = parts.next()?.parse().ok()?;
+        (id != 0 && parts.next().is_some()).then(|| (instance.to_string(), id))
+    }
+
+    /// Whose session this is and which terminal, from its spawn key when it has
+    /// one (a key is not rewritable) and otherwise from its metadata.
+    struct Identity {
+        id: u32,
+        instance: String,
+        meta: Option<HostedMeta>,
+    }
+
+    fn identity(s: &SessionInfo) -> Option<Identity> {
+        let meta = parse(s);
+        match (s.key.as_deref().and_then(key_claim), meta) {
+            (Some((instance, id)), meta) => Some(Identity { id, instance, meta }),
+            (None, Some(meta)) => Some(Identity {
+                id: meta.id,
+                instance: meta.instance.clone(),
+                meta: Some(meta),
+            }),
+            (None, None) => None,
+        }
+    }
+
     /// Sessions that are running, not attached to anyone (a host that predates
     /// the `attached` field reports unknown, which is never taken), whose
     /// metadata is ours and not a micro-task's, and that belong to `instance`.
+    /// Ones that look ours and cannot be taken are recorded for the UI.
     pub fn adoptable(client: &Client, instance: &str) -> Vec<Adoptable> {
         match client.list_within(LAUNCH_WAIT) {
-            Ok(sessions) => adoptable_from(sessions, instance),
+            Ok(sessions) => {
+                let (found, left) =
+                    classify(sessions, instance, crate::adoption_seal::key().as_ref());
+                for l in left {
+                    super::note_left_behind(l.terminal, l.reason);
+                }
+                found
+            }
             Err(_) => Vec::new(),
         }
     }
 
-    /// One session per terminal id. Two eligible sessions claiming the same
-    /// id (a decoy carrying copied metadata, say) cannot be told apart by what
-    /// they say about themselves, so neither is adopted: the terminal stays in
-    /// the host rather than being handed to whichever listed first.
-    pub(super) fn adoptable_from(sessions: Vec<SessionInfo>, instance: &str) -> Vec<Adoptable> {
-        let found: Vec<Adoptable> = sessions
-            .into_iter()
-            .filter(|s| s.exited.is_none() && s.attached == Some(false) && s.pid.is_some())
-            .filter_map(|info| {
-                let meta = parse(&info)?;
-                (meta.kind != "detached" && meta.run_id.is_none() && meta.instance == instance)
-                    .then_some(Adoptable { info, meta })
-            })
-            .collect();
-        let mut seen: std::collections::HashMap<u32, usize> = Default::default();
-        for a in &found {
-            *seen.entry(a.meta.id).or_default() += 1;
+    pub(super) fn adoptable_from(
+        sessions: Vec<SessionInfo>,
+        instance: &str,
+        key: Option<&[u8; 32]>,
+    ) -> Vec<Adoptable> {
+        classify(sessions, instance, key).0
+    }
+
+    /// One session per terminal id. Several eligible sessions claiming one id
+    /// (a decoy carrying copied metadata, say) cannot be told apart by what
+    /// they say about themselves, with one exception: a claimant whose seal
+    /// verifies for its own host id was made by this app, and a copy cannot
+    /// have that, so it wins over unsealed claimants. Several sealed claimants,
+    /// or none, and none is adopted: the terminal stays in the host rather than
+    /// going to whichever listed first. Every session that looks like this
+    /// instance's and is not taken is returned with why.
+    pub(super) fn classify(
+        sessions: Vec<SessionInfo>,
+        instance: &str,
+        key: Option<&[u8; 32]>,
+    ) -> (Vec<Adoptable>, Vec<LeftBehind>) {
+        let mut left: Vec<LeftBehind> = Vec::new();
+        let mut found: Vec<Adoptable> = Vec::new();
+        for info in sessions {
+            if info.exited.is_some() || info.attached != Some(false) || info.pid.is_none() {
+                continue;
+            }
+            let Some(who) = identity(&info) else { continue };
+            if who.instance != instance {
+                continue;
+            }
+            let Some(meta) = who.meta.filter(|m| m.instance == instance) else {
+                left.push(LeftBehind {
+                    terminal: Some(who.id),
+                    reason: "its saved terminal details are unreadable".into(),
+                });
+                continue;
+            };
+            if meta.kind != "detached" && meta.run_id.is_none() {
+                found.push(Adoptable { info, meta });
+            }
         }
-        found
-            .into_iter()
-            .filter(|a| {
-                let unique = seen[&a.meta.id] == 1;
-                if !unique {
-                    eprintln!(
-                        "canopy: several hosted sessions claim terminal {}; none of them is adopted",
-                        a.meta.id
-                    );
-                }
-                unique
-            })
-            .collect()
+        let sealed = |a: &Adoptable| {
+            a.meta.host == Some(a.info.id)
+                && key.is_some_and(|key| crate::adoption_seal::verify(key, &a.meta))
+        };
+        let mut by_id: std::collections::BTreeMap<u32, Vec<Adoptable>> = Default::default();
+        for a in found {
+            by_id.entry(a.meta.id).or_default().push(a);
+        }
+        let mut adopt = Vec::new();
+        for (id, mut group) in by_id {
+            if group.len() == 1 {
+                adopt.extend(group);
+                continue;
+            }
+            let winners = group.iter().filter(|a| sealed(a)).count();
+            if winners == 1 {
+                let at = group.iter().position(sealed).unwrap();
+                adopt.push(group.swap_remove(at));
+                left.extend(group.into_iter().map(|_| LeftBehind {
+                    terminal: Some(id),
+                    reason: "another session claims the same terminal and is not sealed".into(),
+                }));
+            } else {
+                left.extend(group.into_iter().map(|_| LeftBehind {
+                    terminal: Some(id),
+                    reason:
+                        "several sessions claim this terminal and none could be told apart".into(),
+                }));
+            }
+        }
+        (adopt, left)
     }
 
     pub(super) enum Resolution {
@@ -627,25 +807,94 @@ mod adoption {
         );
     }
 
-    /// Host ids "Quit and Stop All" stops: running Canopy sessions (ours by
-    /// their metadata) that no live app is attached to, or that belong to this
-    /// launch (`instance`). This launch's terminals still in its map (`skip`,
-    /// by pty id) are left to app exit, which stops them itself. A session
-    /// another live app is attached to is that app's, and an old host that
-    /// cannot say whether one is attached never offers a foreign one.
-    pub(super) fn stop_targets(sessions: &[SessionInfo], instance: &str, skip: &[u32]) -> Vec<u32> {
+    /// Host sessions "Quit and Stop All" stops: running Canopy sessions that no
+    /// live app is attached to, or that belong to this launch (`instance`).
+    /// This launch's terminals still in its map (`skip`, by pty id) are left to
+    /// app exit, which stops them itself. A session another live app is
+    /// attached to is that app's, and an old host that cannot say whether one
+    /// is attached never offers a foreign one.
+    ///
+    /// "Canopy session of `instance`" is read from the spawn key first, so a
+    /// session whose metadata was overwritten with garbage is still stopped
+    /// (and counted, as unreadable); with no key, from readable metadata. A
+    /// session with neither is not ours to stop. The key is not a secret: a
+    /// same-user process can spawn with ours, and all that buys it is being
+    /// stopped by an explicit user action.
+    pub(super) fn stop_candidates(
+        sessions: &[SessionInfo],
+        instance: &str,
+        skip: &[u32],
+    ) -> Vec<(u32, StopTarget)> {
         sessions
             .iter()
             .filter(|s| s.exited.is_none())
             .filter_map(|s| {
-                let meta = parse(s)?;
-                let mine = meta.instance == instance;
-                if mine && skip.contains(&meta.id) {
+                let who = identity(s)?;
+                let mine = who.instance == instance;
+                if mine && skip.contains(&who.id) {
                     return None;
                 }
-                (mine || s.attached == Some(false)).then_some(s.id)
+                (mine || s.attached == Some(false)).then(|| {
+                    (
+                        s.id,
+                        StopTarget {
+                            unreadable: who.meta.is_none(),
+                            command: who.meta.and_then(|m| m.command),
+                        },
+                    )
+                })
             })
             .collect()
+    }
+
+    pub(super) fn stop_targets(sessions: &[SessionInfo], instance: &str, skip: &[u32]) -> Vec<u32> {
+        stop_candidates(sessions, instance, skip)
+            .into_iter()
+            .map(|(id, _)| id)
+            .collect()
+    }
+
+    /// What `stop_left_running_with` would stop. No host is nothing to stop.
+    pub fn stop_preview_with(
+        client: &Client,
+        instance: &str,
+        skip: &[u32],
+        wait: Duration,
+    ) -> Result<Vec<StopTarget>, String> {
+        Ok(
+            stop_candidates(&list_for_stop(client, wait)?, instance, skip)
+                .into_iter()
+                .map(|(_, t)| t)
+                .collect(),
+        )
+    }
+
+    pub fn stop_preview(
+        instance: &str,
+        skip: &[u32],
+        wait: Duration,
+    ) -> Result<Vec<StopTarget>, String> {
+        match socket_path() {
+            Some(socket) if socket.exists() => {
+                stop_preview_with(&HostClient::new(socket), instance, skip, wait)
+            }
+            _ => Ok(Vec::new()),
+        }
+    }
+
+    fn list_for_stop(client: &Client, wait: Duration) -> Result<Vec<SessionInfo>, String> {
+        match client.list_within(wait) {
+            Ok(sessions) => Ok(sessions),
+            Err(e)
+                if matches!(
+                    e.kind(),
+                    std::io::ErrorKind::NotFound | std::io::ErrorKind::ConnectionRefused
+                ) =>
+            {
+                Ok(Vec::new())
+            }
+            Err(e) => Err(format!("Could not reach the terminal host: {e}")),
+        }
     }
 
     /// Ask the host to stop every `stop_targets` session (it sends SIGTERM,
@@ -658,18 +907,7 @@ mod adoption {
         skip: &[u32],
         wait: Duration,
     ) -> Result<usize, String> {
-        let sessions = match client.list_within(wait) {
-            Ok(sessions) => sessions,
-            Err(e)
-                if matches!(
-                    e.kind(),
-                    std::io::ErrorKind::NotFound | std::io::ErrorKind::ConnectionRefused
-                ) =>
-            {
-                return Ok(0)
-            }
-            Err(e) => return Err(format!("Could not reach the terminal host: {e}")),
-        };
+        let sessions = list_for_stop(client, wait)?;
         let targets = stop_targets(&sessions, instance, skip);
         let failed: Vec<String> = targets
             .iter()
@@ -715,11 +953,12 @@ use adoption::Resolution;
 #[cfg(all(test, unix))]
 pub(crate) mod tests {
     use super::adoption::{
-        adoptable_from as adoption_adoptable, choose_token as adoption_choose,
-        stop_left_running_with, stop_targets,
+        adoptable_from as adoption_adoptable, choose_token as adoption_choose, classify, spawn_key,
+        stop_candidates, stop_left_running_with, stop_preview_with, stop_targets,
     };
     use super::*;
     use canopy_pty_host::client::HostClient;
+    use canopy_pty_host::protocol::SessionInfo;
     use canopy_pty_host::server::{serve, ServerConfig, EXITED_TTL};
     use std::io::{Read, Write};
     use std::os::unix::net::UnixListener;
@@ -1009,7 +1248,7 @@ pub(crate) mod tests {
             info(6, Some("{not json".into()), Some(false), None),
         ];
         assert_eq!(adoption_choose(&sessions, None), None);
-        assert!(adoption_adoptable(sessions, "inst-a").is_empty());
+        assert!(adoption_adoptable(sessions, "inst-a", None).is_empty());
     }
 
     #[test]
@@ -1023,7 +1262,7 @@ pub(crate) mod tests {
         .to_string();
         let sessions = vec![info(5, Some(bound), Some(false), None)];
         assert_eq!(adoption_choose(&sessions, None), None);
-        assert!(adoption_adoptable(sessions, "inst-a").is_empty());
+        assert!(adoption_adoptable(sessions, "inst-a", None).is_empty());
     }
 
     #[test]
@@ -1067,6 +1306,99 @@ pub(crate) mod tests {
             info(9, None, Some(false), None),            // not Canopy's
         ];
         assert_eq!(stop_targets(&sessions, "inst-a", &[2]), vec![1, 3, 4, 6]);
+    }
+
+    fn keyed(id: u32, instance: &str, meta: Option<String>, attached: Option<bool>) -> SessionInfo {
+        let key = spawn_key(&meta_for(id, id as u64, "desktop", instance));
+        SessionInfo {
+            key,
+            ..info(id, meta, attached, None)
+        }
+    }
+
+    #[test]
+    fn a_session_whose_metadata_was_garbled_is_stopped_by_its_spawn_key() {
+        let a = |i| Some(meta_for(i, i as u64, "desktop", "inst-a"));
+        let sessions = vec![
+            // Victim: metadata replaced with garbage after spawn.
+            keyed(1, "inst-a", Some("not json".into()), Some(false)),
+            // Metadata removed, or rewritten to another launch's.
+            keyed(2, "inst-a", None, Some(false)),
+            keyed(3, "inst-a", a(3), Some(true)), // in the map: left to exit
+            // Garbage and no key: not provably Canopy's, never stopped.
+            info(4, Some("not json".into()), Some(false), None),
+            // Another launch's, garbled: not this instance's, not stopped.
+            keyed(5, "inst-b", Some("not json".into()), Some(true)),
+            keyed(6, "inst-b", Some("not json".into()), Some(false)),
+        ];
+        let got = stop_candidates(&sessions, "inst-a", &[3]);
+        let ids: Vec<u32> = got.iter().map(|(id, _)| *id).collect();
+        assert_eq!(ids, vec![1, 2, 6]);
+        assert!(got.iter().all(|(_, t)| t.unreadable));
+        // Adoption cannot take them, and says so.
+        let (found, left) = classify(sessions, "inst-a", None);
+        assert!(found.is_empty());
+        assert_eq!(
+            left.iter().filter_map(|l| l.terminal).collect::<Vec<_>>(),
+            vec![1, 2]
+        );
+    }
+
+    #[test]
+    fn sessions_left_behind_reach_the_ui_notice_with_the_linger() {
+        note_left_behind(Some(77), "test reason");
+        let notice = host_notice();
+        assert!(notice
+            .left_behind
+            .iter()
+            .any(|l| l.terminal == Some(77) && l.reason == "test reason"));
+        assert_eq!(notice.linger_secs, 2 * 60 * 60);
+    }
+
+    #[test]
+    fn a_spawn_key_names_the_instance_and_terminal_and_never_repeats() {
+        let meta = meta_for(7, 3, "desktop", "inst-a");
+        let (k1, k2) = (spawn_key(&meta).unwrap(), spawn_key(&meta).unwrap());
+        assert_ne!(k1, k2);
+        let s = SessionInfo {
+            key: Some(k1),
+            ..info(50, None, Some(false), None)
+        };
+        let got = stop_candidates(&[s], "inst-a", &[]);
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].0, 50);
+        assert_eq!(spawn_key("junk"), None);
+        assert_eq!(spawn_key(&meta_for(0, 1, "desktop", "inst-a")), None);
+    }
+
+    #[test]
+    fn the_stop_preview_lists_what_stop_all_would_kill_with_what_they_run() {
+        let host = InProcessHost::start("preview");
+        let (c1, m1) = spawn(
+            &host.client,
+            &command("sleep 300"),
+            80,
+            24,
+            Some(meta_for(21, 21, "desktop", "inst-old")),
+        )
+        .unwrap();
+        // Nobody holds it: a previous launch's, left behind.
+        drop((c1, m1));
+        assert!(wait_for(|| host
+            .client
+            .list()
+            .unwrap()
+            .iter()
+            .any(|s| s.attached == Some(false))));
+        let wait = Duration::from_secs(5);
+        let targets = stop_preview_with(&host.client, "inst-a", &[], wait).unwrap();
+        assert_eq!(targets.len(), 1);
+        assert!(!targets[0].unreadable);
+        // Exactly what stop_left_running_with then stops.
+        assert_eq!(
+            stop_left_running_with(&host.client, "inst-a", &[], wait),
+            Ok(1)
+        );
     }
 
     #[test]
@@ -1203,7 +1535,7 @@ pub(crate) mod tests {
                 None,
             ),
         ];
-        let found = adoption_adoptable(sessions, "inst-a");
+        let found = adoption_adoptable(sessions, "inst-a", None);
         assert_eq!(found.len(), 2);
         assert_eq!(
             found[0].meta.bridge.as_deref(),
@@ -1291,10 +1623,16 @@ pub(crate) mod tests {
         let decoy: HostedMeta = serde_json::from_str(&victim).unwrap();
         assert_eq!(trusted_credential(&decoy, Some(&key), 40), None);
         assert!(trusted_credential(&decoy, Some(&key), 4).is_some());
-        // Listed first or last, neither claimant is adopted.
-        assert!(adoption_adoptable(sessions.clone(), "inst-a").is_empty());
-        let reversed: Vec<_> = sessions.into_iter().rev().collect();
-        assert!(adoption_adoptable(reversed, "inst-a").is_empty());
+        // Listed first or last, the claimant whose seal is bound to its own
+        // host id is adopted and the copy is not.
+        for order in [sessions.clone(), sessions.iter().cloned().rev().collect()] {
+            let (found, left) = classify(order, "inst-a", Some(&key));
+            assert_eq!(found.len(), 1);
+            assert_eq!(found[0].info.id, 4);
+            assert_eq!(left.len(), 1, "the decoy is surfaced, not just logged");
+        }
+        // Unable to verify anything, neither claimant is adopted.
+        assert!(adoption_adoptable(sessions, "inst-a", None).is_empty());
     }
 
     /// The review's attack: any process of this user can spawn a session through
@@ -1307,7 +1645,11 @@ pub(crate) mod tests {
             "run": false, "instance": "inst-a", "bridge": "ef".repeat(32), "depth": 0,
         })
         .to_string();
-        let found = adoption_adoptable(vec![info(9, Some(forged), Some(false), None)], "inst-a");
+        let found = adoption_adoptable(
+            vec![info(9, Some(forged), Some(false), None)],
+            "inst-a",
+            None,
+        );
         assert_eq!(found.len(), 1, "adopted as a terminal");
         let key = crate::adoption_seal::key().unwrap();
         assert_eq!(trusted_credential(&found[0].meta, Some(&key), 9), None);

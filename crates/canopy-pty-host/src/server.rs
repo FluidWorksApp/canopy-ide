@@ -21,9 +21,7 @@ use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsE
 use std::os::unix::io::AsRawFd;
 #[cfg(unix)]
 use std::os::unix::net::{UnixListener, UnixStream};
-#[cfg(unix)]
-use std::path::Path;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
 use std::sync::mpsc::{sync_channel, SyncSender, TrySendError};
 use std::sync::{Arc, Condvar, Mutex};
@@ -331,27 +329,15 @@ pub fn run(config: ServerConfig) -> std::io::Result<()> {
     // Held from the liveness probe to the bind: two hosts starting at once must
     // not both find the socket dead, or the loser's unlink would remove the
     // winner's live socket and orphan its sessions.
-    let bind_lock = {
-        let mut path = config.socket.clone().into_os_string();
-        path.push(".lock");
-        let file = std::fs::OpenOptions::new()
-            .create(true)
-            .truncate(false)
-            .write(true)
-            .mode(0o600)
-            .open(path)?;
-        // SAFETY: flock on a descriptor we own; released when `file` drops.
-        if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) } != 0 {
-            return Err(std::io::Error::last_os_error());
-        }
-        file
-    };
+    let bind_lock = lock_bind(&config.socket)?;
     if UnixStream::connect(&config.socket).is_ok() {
         return Ok(());
     }
     let _ = std::fs::remove_file(&config.socket);
     let listener = UnixListener::bind(&config.socket)?;
     std::fs::set_permissions(&config.socket, std::fs::Permissions::from_mode(0o600))?;
+    // Which file is ours, read under the lock so it cannot be a successor's.
+    let bound = socket_identity(&config.socket);
     // Bound and listening: later hosts now find a live socket and exit. Holding
     // the lock for the host's lifetime would block them here instead.
     drop(bind_lock);
@@ -372,7 +358,7 @@ pub fn run(config: ServerConfig) -> std::io::Result<()> {
             stop.store(true, Ordering::SeqCst);
         });
     }
-    serve(listener, &config, stop)
+    serve_bound(listener, &config, stop, bound)
 }
 
 /// Creates the pipe's first instance and serves until a `shutdown` request or
@@ -398,6 +384,79 @@ pub fn serve(
     #[cfg(windows)] mut listener: PipeListener,
     config: &ServerConfig,
     stop: Arc<AtomicBool>,
+) -> std::io::Result<()> {
+    let bound = socket_identity(&config.socket);
+    serve_bound(listener, config, stop, bound)
+}
+
+/// What a host remembers of the endpoint it bound, to remove only that one when
+/// it exits: the socket file's (device, inode) on Unix. On Windows there is
+/// nothing to remember or remove: the pipe's first instance is the single-host
+/// lock, and the pipe disappears with the last handle when the listener drops,
+/// so a successor's pipe can never be mistaken for ours.
+#[cfg(unix)]
+type Bound = Option<(u64, u64)>;
+#[cfg(windows)]
+type Bound = ();
+
+#[cfg(windows)]
+fn socket_identity(_socket: &Path) -> Bound {}
+
+#[cfg(windows)]
+fn unlink_if_bound(_socket: &Path, _bound: Bound) {}
+
+/// The bind lock's path for a socket.
+#[cfg(unix)]
+fn lock_path(socket: &Path) -> PathBuf {
+    let mut path = socket.to_path_buf().into_os_string();
+    path.push(".lock");
+    PathBuf::from(path)
+}
+
+/// Takes the exclusive lock that serialises binding and unlinking the socket.
+#[cfg(unix)]
+fn lock_bind(socket: &Path) -> std::io::Result<std::fs::File> {
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .mode(0o600)
+        .open(lock_path(socket))?;
+    // SAFETY: flock on a descriptor we own; released when `file` drops.
+    if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) } != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(file)
+}
+
+/// (device, inode) of whatever is at `socket` now, without following a symlink.
+#[cfg(unix)]
+fn socket_identity(socket: &Path) -> Option<(u64, u64)> {
+    std::fs::symlink_metadata(socket)
+        .ok()
+        .map(|m| (m.dev(), m.ino()))
+}
+
+/// Unlinks `socket` only if it is still the file this host bound, and does it
+/// under the bind lock: a host that started after this one began exiting has
+/// already replaced the file, and unlinking by name would orphan its sessions.
+/// If the lock cannot be taken the file is left (a later host removes a stale
+/// socket itself).
+#[cfg(unix)]
+fn unlink_if_bound(socket: &Path, bound: Option<(u64, u64)>) {
+    let Some(bound) = bound else { return };
+    let Ok(_lock) = lock_bind(socket) else { return };
+    if socket_identity(socket) == Some(bound) {
+        let _ = std::fs::remove_file(socket);
+    }
+}
+
+fn serve_bound(
+    #[cfg(unix)] listener: UnixListener,
+    #[cfg(windows)] mut listener: PipeListener,
+    config: &ServerConfig,
+    stop: Arc<AtomicBool>,
+    bound: Bound,
 ) -> std::io::Result<()> {
     #[cfg(unix)]
     listener.set_nonblocking(true)?;
@@ -474,8 +533,7 @@ pub fn serve(
     }
 
     drop(listener);
-    #[cfg(unix)]
-    let _ = std::fs::remove_file(&config.socket);
+    unlink_if_bound(&config.socket, bound);
     shutdown_sessions(&host);
     Ok(())
 }
@@ -1084,30 +1142,66 @@ fn release(session: &Session, generation: u64) {
     session.cv.notify_all();
 }
 
+/// What became of one chunk of client input.
+#[derive(Debug, PartialEq, Eq)]
+enum Queued {
+    Sent,
+    /// The child did not read for `INPUT_STALL` and the queue stayed full: the
+    /// chunk was not delivered.
+    Dropped,
+    /// The PTY is gone.
+    Gone,
+}
+
 /// Queues client input for the session's writer thread. A child that is not
-/// reading its terminal fills the queue; after `INPUT_STALL` the chunk is dropped
-/// (and later ones at once until room appears) rather than blocking the caller,
-/// which must keep reading so it notices the client leaving. Returns false once
-/// the PTY is gone.
-fn queue_input(tx: &SyncSender<Vec<u8>>, mut chunk: Vec<u8>, stalled: &mut bool) -> bool {
+/// reading its terminal fills the queue; after `INPUT_STALL` the chunk is
+/// dropped rather than blocking the caller, which must keep reading so it
+/// notices the client leaving. The caller must then deliver nothing further
+/// from that attachment (see `forward_input`): a later chunk landing after a
+/// dropped one would be a paste with a hole in it.
+fn queue_input(tx: &SyncSender<Vec<u8>>, mut chunk: Vec<u8>) -> Queued {
     let deadline = Instant::now() + INPUT_STALL;
     loop {
         match tx.try_send(chunk) {
-            Ok(()) => {
-                *stalled = false;
-                return true;
-            }
-            Err(TrySendError::Disconnected(_)) => return false,
+            Ok(()) => return Queued::Sent,
+            Err(TrySendError::Disconnected(_)) => return Queued::Gone,
             Err(TrySendError::Full(back)) => {
-                if *stalled || Instant::now() >= deadline {
-                    *stalled = true;
-                    return true;
+                if Instant::now() >= deadline {
+                    return Queued::Dropped;
                 }
                 chunk = back;
                 thread::sleep(Duration::from_millis(5));
             }
         }
     }
+}
+
+/// How `forward_input` ended.
+#[derive(Debug, PartialEq, Eq)]
+enum InputEnd {
+    /// The client closed or errored; everything it sent was queued.
+    Closed,
+    /// A chunk was dropped, so input stopped there. The attachment is ended
+    /// (the client sees EOF and reconnects) instead of delivering the tail.
+    Lost,
+    Gone,
+}
+
+/// Client -> writer queue, in order. On the first dropped chunk it stops for
+/// good: nothing after the hole is ever queued from this attachment.
+fn forward_input(mut from: impl Read, tx: &SyncSender<Vec<u8>>) -> InputEnd {
+    let mut buf = [0u8; 8192];
+    while let Ok(n) = from.read(&mut buf) {
+        if n == 0 {
+            return InputEnd::Closed;
+        }
+        match queue_input(tx, buf[..n].to_vec()) {
+            Queued::Sent => {}
+            Queued::Dropped => return InputEnd::Lost,
+            Queued::Gone => return InputEnd::Gone,
+        }
+    }
+    InputEnd::Closed
 }
 
 fn attach(
@@ -1177,12 +1271,12 @@ fn attach(
         let session = Arc::clone(&session);
         let closed = Arc::clone(&closed);
         thread::spawn(move || {
-            let mut buf = [0u8; 8192];
-            let mut stalled = false;
-            while let Ok(n) = input.read(&mut buf) {
-                if n == 0 || !queue_input(&session.input, buf[..n].to_vec(), &mut stalled) {
-                    break;
-                }
+            if forward_input(&mut input, &session.input) == InputEnd::Lost {
+                eprintln!(
+                    "canopy-pty-host: a terminal stopped reading input; ending the attachment so the lost input is not followed by the rest"
+                );
+                // The client sees EOF, not a silent hole in what it typed.
+                let _ = input.shutdown(std::net::Shutdown::Both);
             }
             closed.store(true, Ordering::SeqCst);
             release(&session, generation);
@@ -1284,22 +1378,55 @@ mod tests {
     #[test]
     fn full_input_queue_drops_instead_of_blocking_and_a_gone_pty_is_reported() {
         let (tx, rx) = sync_channel::<Vec<u8>>(1);
-        let mut stalled = false;
-        assert!(queue_input(&tx, vec![1], &mut stalled));
-        assert!(!stalled);
-        // Full: waits out the stall once, then drops at once.
+        assert_eq!(queue_input(&tx, vec![1]), Queued::Sent);
         let t = Instant::now();
-        assert!(queue_input(&tx, vec![2], &mut stalled));
-        assert!(stalled && t.elapsed() >= INPUT_STALL);
-        let t = Instant::now();
-        assert!(queue_input(&tx, vec![3], &mut stalled));
-        assert!(t.elapsed() < INPUT_STALL);
-        // Room again: delivered, and the stall clears.
+        assert_eq!(queue_input(&tx, vec![2]), Queued::Dropped);
+        assert!(t.elapsed() >= INPUT_STALL);
         assert_eq!(rx.recv().unwrap(), vec![1]);
-        assert!(queue_input(&tx, vec![4], &mut stalled));
-        assert!(!stalled);
         drop(rx);
-        assert!(!queue_input(&tx, vec![5], &mut stalled));
+        assert_eq!(queue_input(&tx, vec![5]), Queued::Gone);
+    }
+
+    #[test]
+    fn a_stalled_child_never_gets_a_chunk_after_a_dropped_one() {
+        // A paste of 5 chunks into a queue of 1 whose reader is stalled.
+        let paste: Vec<u8> = (0..5u8).flat_map(|i| vec![i; 8192]).collect();
+        let (tx, rx) = sync_channel::<Vec<u8>>(1);
+        // Cursor yields at most 8192 bytes per read, so chunk i is all `i`.
+        assert_eq!(
+            forward_input(std::io::Cursor::new(paste), &tx),
+            InputEnd::Lost
+        );
+        // The child wakes up and drains: only the head of the paste arrived,
+        // and nothing from after the dropped chunk ever does.
+        let got: Vec<Vec<u8>> = rx.try_iter().collect();
+        assert_eq!(got.len(), 1);
+        assert!(got[0].iter().all(|b| *b == 0));
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_exiting_host_unlinks_only_the_socket_it_bound() {
+        let dir = std::env::temp_dir().join(format!("pty-unlink-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let socket = dir.join("h.sock");
+        let old = UnixListener::bind(&socket).unwrap();
+        let bound = socket_identity(&socket);
+        assert!(bound.is_some());
+        // A new host replaced the file while the old one was exiting.
+        // (Renamed over, so both inodes exist at once and cannot be the same.)
+        let _new = UnixListener::bind(dir.join("n.sock")).unwrap();
+        std::fs::rename(dir.join("n.sock"), &socket).unwrap();
+        drop(old);
+        unlink_if_bound(&socket, bound);
+        assert!(socket.exists(), "the successor's live socket survived");
+        // Its own file is removed.
+        let now = socket_identity(&socket);
+        unlink_if_bound(&socket, now);
+        assert!(!socket.exists());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
