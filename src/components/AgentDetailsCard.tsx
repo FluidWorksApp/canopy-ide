@@ -6,8 +6,9 @@
 //
 // It only reads: the digest the hook wrote, `git status`, and the PR list. The
 // task actions send the agent a message, exactly as typing it would.
-import { useEffect, useState, useSyncExternalStore } from "react";
+import { useEffect, useRef, useState, useSyncExternalStore } from "react";
 import { runCommitPushPr } from "../commitPushPrIpc";
+import { draftPrWithBrain, type BrainPrDraft } from "../prDraftBrain";
 import * as ipc from "../ipc";
 import { agentCliFor } from "../projects";
 import { prConflictContext, prFixChecksContext } from "../prs";
@@ -94,6 +95,9 @@ function readMergeMethod(): "squash" | "merge" | "rebase" {
 }
 const DEFAULT_BRANCHES = new Set(["main", "master", "develop"]);
 /** "fix/hub-prefetch-scrcpy" becomes "Fix hub prefetch scrcpy". */
+/** Longest "Raise PR" waits for the brain's draft before using the offline text. */
+const DRAFT_WAIT_MS = 8000;
+
 export function titleFromBranch(branch: string): string {
   const text = branch
     .replace(/^[^/]+\//, "")
@@ -293,6 +297,26 @@ export function AgentDetailsCard({
     title: string;
     busy: boolean;
   }>(null);
+  /** The brain's draft for the open form. Replies for a closed form are dropped. */
+  const draftRef = useRef<{
+    ctl: AbortController;
+    seed: string;
+    draft: BrainPrDraft | null;
+    /** Settles with the draft, or null; the submit waits on it briefly. */
+    pending: Promise<BrainPrDraft | null>;
+  } | null>(null);
+  const closeRaise = () => {
+    draftRef.current?.ctl.abort();
+    draftRef.current = null;
+    setRaising(null);
+  };
+  useEffect(
+    () => () => {
+      draftRef.current?.ctl.abort();
+      draftRef.current = null;
+    },
+    [cwd, repo, branch],
+  );
   const [prEpoch, setPrEpoch] = useState(0);
   /** Commits on this branch beyond its base, when nothing is left uncommitted. */
   const [ahead, setAhead] = useState(0);
@@ -831,7 +855,7 @@ export function AgentDetailsCard({
                   setRaising({ ...raising, title: e.target.value })
                 }
                 onKeyDown={(e) => {
-                  if (e.key === "Escape") setRaising(null);
+                  if (e.key === "Escape") closeRaise();
                 }}
               />
               <button
@@ -839,14 +863,34 @@ export function AgentDetailsCard({
                 className="agent-card-fix"
                 disabled={raising.busy || !raising.title.trim()}
                 onClick={() => {
-                  const title = raising.title.trim();
+                  const typed = raising.title.trim();
+                  const slot = draftRef.current;
                   setRaising({ ...raising, busy: true });
-                  void runCommitPushPr({
-                    repo: cwd || repo!,
-                    message: title,
-                    title,
-                    commit: (changed ?? 0) > 0,
-                  })
+                  // "Working…" waits briefly for a draft still being written,
+                  // then goes ahead with the offline text.
+                  const settled: Promise<BrainPrDraft | null> =
+                    !slot || slot.draft
+                      ? Promise.resolve(slot?.draft ?? null)
+                      : Promise.race([
+                          slot.pending,
+                          new Promise<null>((r) => setTimeout(r, DRAFT_WAIT_MS, null)),
+                        ]);
+                  void settled
+                    .then((draft) => {
+                      slot?.ctl.abort();
+                      // A title still at the branch-name seed takes the draft's;
+                      // one the person changed wins.
+                      const title =
+                        draft && typed === slot!.seed ? draft.title : typed;
+                      return runCommitPushPr({
+                        repo: cwd || repo!,
+                        message:
+                          draft && title === draft.title ? draft.message : title,
+                        title,
+                        ...(draft ? { body: draft.body } : {}),
+                        commit: (changed ?? 0) > 0,
+                      });
+                    })
                     .then((result) => {
                       if (result.skipped.length > 0)
                         onNotice?.(
@@ -861,7 +905,7 @@ export function AgentDetailsCard({
                       );
                       prCache.delete(repo!);
                       setPrEpoch((n) => n + 1);
-                      setRaising(null);
+                      closeRaise();
                     })
                     .catch((err) => {
                       onNotice?.(
@@ -877,7 +921,7 @@ export function AgentDetailsCard({
                 type="button"
                 className="agent-card-fix agent-card-fix-quiet"
                 disabled={raising.busy}
-                onClick={() => setRaising(null)}
+                onClick={closeRaise}
               >
                 Cancel
               </button>
@@ -886,9 +930,30 @@ export function AgentDetailsCard({
             <button
               type="button"
               className="agent-card-fix"
-              onClick={() =>
-                setRaising({ title: titleFromBranch(branch!), busy: false })
-              }
+              onClick={() => {
+                const seed = titleFromBranch(branch!);
+                const ctl = new AbortController();
+                const slot = {
+                  ctl,
+                  seed,
+                  draft: null as BrainPrDraft | null,
+                  pending: undefined as unknown as Promise<BrainPrDraft | null>,
+                };
+                draftRef.current = slot;
+                setRaising({ title: seed, busy: false });
+                // The form is usable now; the brain's title fills in if it
+                // answers before the person has typed their own.
+                slot.pending = draftPrWithBrain({
+                  repo: cwd || repo!,
+                  signal: ctl.signal,
+                }).then((d) => {
+                  if (!d || draftRef.current !== slot || ctl.signal.aborted)
+                    return null;
+                  slot.draft = d;
+                  setRaising((r) => (r && r.title === slot.seed ? { ...r, title: d.title } : r));
+                  return d;
+                });
+              }}
             >
               {(changed ?? 0) > 0 ? "Commit & raise PR" : "Raise PR"}
             </button>

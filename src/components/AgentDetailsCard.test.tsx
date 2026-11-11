@@ -30,6 +30,9 @@ vi.mock("../ipc", () => ({
     },
   ]),
 }));
+vi.mock("../prDraftBrain", () => ({
+  draftPrWithBrain: vi.fn(async () => null),
+}));
 vi.mock("../commitPushPrIpc", () => ({
   runCommitPushPr: vi.fn(async () => ({
     committed: true,
@@ -657,6 +660,112 @@ describe("raising a PR from the card", () => {
       ),
     );
     void onNotice;
+  });
+  describe("brain-drafted text", () => {
+    const draft = {
+      title: "Hub prefetch keeps scrcpy alive",
+      message: "Hub prefetch keeps scrcpy alive\n\nWhy it matters.",
+      body: "## Summary\nDrafted.",
+    };
+    const openForm = async () => {
+      vi.mocked(ipc.gitStatus).mockResolvedValue({
+        is_repo: true,
+        branch: "fix/hub-prefetch-scrcpy",
+        entries: [{}, {}],
+      } as never);
+      vi.mocked(ipc.ghPrList).mockResolvedValue([] as never);
+      setup({ repo: "/raise", cwd: "/raise" });
+      fireEvent.click(
+        await screen.findByRole("button", { name: "Commit & raise PR" }),
+      );
+      return screen.getByLabelText("Pull request title") as HTMLInputElement;
+    };
+    const submitted = async () => {
+      const { runCommitPushPr } = await import("../commitPushPrIpc");
+      await waitFor(() => expect(runCommitPushPr).toHaveBeenCalled());
+      return vi.mocked(runCommitPushPr).mock.calls.at(-1)![0];
+    };
+
+    it("fills the title and sends the drafted commit message and body", async () => {
+      const { draftPrWithBrain } = await import("../prDraftBrain");
+      vi.mocked(draftPrWithBrain).mockResolvedValueOnce(draft);
+      const input = await openForm();
+      await waitFor(() => expect(input.value).toBe(draft.title));
+      fireEvent.click(screen.getByRole("button", { name: "Raise PR" }));
+      expect(await submitted()).toMatchObject({
+        title: draft.title,
+        message: draft.message,
+        body: draft.body,
+      });
+    });
+
+    it("keeps a title the person typed before the draft arrived", async () => {
+      const { draftPrWithBrain } = await import("../prDraftBrain");
+      let resolve!: (d: typeof draft) => void;
+      vi.mocked(draftPrWithBrain).mockReturnValueOnce(
+        new Promise((r) => (resolve = r)),
+      );
+      const input = await openForm();
+      fireEvent.change(input, { target: { value: "My own title" } });
+      resolve(draft);
+      await Promise.resolve();
+      await Promise.resolve();
+      expect(input.value).toBe("My own title");
+      fireEvent.click(screen.getByRole("button", { name: "Raise PR" }));
+      const call = await submitted();
+      expect(call).toMatchObject({ title: "My own title", message: "My own title" });
+    });
+
+    it("waits for a draft still being written, then uses it", async () => {
+      const { draftPrWithBrain } = await import("../prDraftBrain");
+      let resolve!: (d: typeof draft) => void;
+      vi.mocked(draftPrWithBrain).mockReturnValueOnce(
+        new Promise((r) => (resolve = r)),
+      );
+      await openForm();
+      const { runCommitPushPr } = await import("../commitPushPrIpc");
+      vi.mocked(runCommitPushPr).mockClear();
+      fireEvent.click(screen.getByRole("button", { name: "Raise PR" }));
+      expect(await screen.findByText("Working…")).toBeInTheDocument();
+      expect(runCommitPushPr).not.toHaveBeenCalled();
+      resolve(draft);
+      expect(await submitted()).toMatchObject({
+        title: draft.title,
+        message: draft.message,
+        body: draft.body,
+      });
+    });
+
+    it("raises with the offline text when the draft takes too long", async () => {
+      const { draftPrWithBrain } = await import("../prDraftBrain");
+      vi.mocked(draftPrWithBrain).mockReturnValueOnce(new Promise(() => {}));
+      await openForm();
+      vi.useFakeTimers({ toFake: ["setTimeout"] });
+      try {
+        fireEvent.click(screen.getByRole("button", { name: "Raise PR" }));
+        await vi.advanceTimersByTimeAsync(8000);
+      } finally {
+        vi.useRealTimers();
+      }
+      const call = await submitted();
+      expect(call).toMatchObject({
+        title: "Hub prefetch scrcpy",
+        message: "Hub prefetch scrcpy",
+      });
+      expect(call).not.toHaveProperty("body");
+    });
+
+    it("stops the draft when the form is cancelled", async () => {
+      const { draftPrWithBrain } = await import("../prDraftBrain");
+      let signal: AbortSignal | undefined;
+      vi.mocked(draftPrWithBrain).mockImplementationOnce(async (opts) => {
+        signal = opts.signal;
+        return new Promise(() => {});
+      });
+      await openForm();
+      fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+      expect(signal?.aborted).toBe(true);
+    });
   });
   it("offers plain Raise PR when everything is committed but the branch is ahead", async () => {
     vi.mocked(ipc.gitStatus).mockResolvedValue({
