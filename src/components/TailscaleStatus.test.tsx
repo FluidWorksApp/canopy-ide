@@ -100,6 +100,19 @@ describe("Tailscale row states", () => {
     expect(screen.getByRole("button", { name: "Open Tailscale" })).toBeInTheDocument();
   });
 
+  it("needs approval: says an admin must approve, offers the app", async () => {
+    show(view({ kind: "needsApproval", thisMachine: null, machines: [] }));
+    expect(await screen.findByText("Needs approval")).toBeInTheDocument();
+    expect(screen.getByText("An admin must approve this machine.")).toHaveClass("set-warn");
+    expect(screen.getByRole("button", { name: "Open Tailscale" })).toBeInTheDocument();
+  });
+
+  it("starting: a passing state with nothing to press", async () => {
+    show(view({ kind: "starting", thisMachine: null, machines: [] }));
+    expect(await screen.findByText("Starting…")).toBeInTheDocument();
+    expect(screen.queryByRole("button")).toBeNull();
+  });
+
   it("too old: shows the found and the needed version, and Update", async () => {
     openLink.mockClear();
     show(view({ kind: "tooOld", version: "1.40.2", thisMachine: null, machines: [] }));

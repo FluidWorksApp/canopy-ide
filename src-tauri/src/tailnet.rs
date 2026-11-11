@@ -20,7 +20,7 @@
 use canopy_term_net::allowlist::{canonical_tailnet_entry, valid_stable_id, Allowlist};
 use canopy_term_net::tailscale::{
     parse_version, CliCommand, CliRunner, NodeInfo, ProcessRunner, TailnetIdentity, TailnetState,
-    Tailscale, MIN_VERSION,
+    Tailscale, WhoisError, MIN_VERSION,
 };
 use serde::Serialize;
 use std::collections::BTreeSet;
@@ -252,9 +252,14 @@ pub fn apply_allow(
         .ok_or_else(|| "That machine isn't on your tailnet.".to_string())?;
     let ip = preferred_addr(&peer.addrs)
         .ok_or_else(|| "That machine has no Tailscale address.".to_string())?;
-    let identity = ts
-        .whois(ip)
-        .map_err(|_| "Tailscale couldn't confirm that machine.".to_string())?;
+    let identity = ts.whois(ip).map_err(|e| match e {
+        // A subnet router or exit node: a connection through it could come
+        // from any machine behind it, so the crate never vouches for it.
+        WhoisError::RoutesBeyondSelf => {
+            "That machine routes other traffic, so it can't be allowed.".to_string()
+        }
+        _ => "Tailscale couldn't confirm that machine.".to_string(),
+    })?;
     if identity_stable_id(&identity) != stable_id {
         return Err("Tailscale couldn't confirm that machine.".to_string());
     }
@@ -441,14 +446,16 @@ mod tests {
 
     fn whois_user(stable: &str, user: i64) -> String {
         format!(
-            r#"{{"Node":{{"ID":11,"StableID":"{stable}","Name":"laptop.example.ts.net."}},
+            r#"{{"Node":{{"ID":11,"StableID":"{stable}","Name":"laptop.example.ts.net.",
+            "Addresses":["100.64.0.2/32","fd7a:115c:a1e0::2/128"]}},
             "UserProfile":{{"ID":{user},"LoginName":"user-b@example.com"}}}}"#
         )
     }
 
     fn whois_tagged(stable: &str) -> String {
         format!(
-            r#"{{"Node":{{"ID":12,"StableID":"{stable}","Name":"build-box.example.ts.net.","Tags":["tag:ci"]}},
+            r#"{{"Node":{{"ID":12,"StableID":"{stable}","Name":"build-box.example.ts.net.","Tags":["tag:ci"],
+            "Addresses":["100.64.0.3/32"]}},
             "UserProfile":{{"ID":99,"LoginName":"tagged-devices"}}}}"#
         )
     }
@@ -644,6 +651,23 @@ mod tests {
             vec![format!("tailnet:tagged/{BUILD}/tag:ci")]
         );
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn a_subnet_router_is_refused_with_its_own_reason() {
+        let path = temp_path("allow-router");
+        let mut f = Fake::new(RUNNING);
+        f.whois.insert(
+            ip("100.64.0.3"),
+            format!(
+                r#"{{"Node":{{"StableID":"{BUILD}","Addresses":["100.64.0.3/32"],
+                "AllowedIPs":["100.64.0.3/32","192.168.50.0/24"]}},"UserProfile":{{"ID":7}}}}"#
+            ),
+        );
+        let (_, r) = shared(f);
+        let err = set_allowed_at(&path, Some(&Tailscale::new(r)), BUILD, true).unwrap_err();
+        assert!(err.contains("routes other traffic"), "{err}");
+        assert!(!path.exists());
     }
 
     #[test]
