@@ -7,6 +7,7 @@ import {
   DeskOverlay,
   RemoteDesktopMembers,
   RemoteDesktopView,
+  SharingBanner,
 } from "./RemoteDesktopView";
 
 const ev = (o: Partial<DeskStateEvent> = {}): DeskStateEvent => ({
@@ -26,8 +27,22 @@ const relay = (): RelayHandle =>
       role: "client",
       self_id: "me",
       members: [
-        { id: "me", name: "Me", joined_ms: 1, is_host: false, key: null, trust: "self" },
-        { id: "ada", name: "Ada", joined_ms: 1, is_host: true, key: "aabbccddeeff0011", trust: "known" },
+        {
+          id: "me",
+          name: "Me",
+          joined_ms: 1,
+          is_host: false,
+          key: null,
+          trust: "self",
+        },
+        {
+          id: "ada",
+          name: "Ada",
+          joined_ms: 1,
+          is_host: true,
+          key: "aabbccddeeff0011",
+          trust: "known",
+        },
       ],
     },
     desk: null,
@@ -39,7 +54,11 @@ afterEach(() => vi.unstubAllGlobals());
 describe("consent dialog", () => {
   it("hides Accept control when the viewer only asked to view", () => {
     render(
-      <DeskOverlay desk={ev({ requested: "view-only" })} frames={createFrameBus()} onDismiss={() => {}} />,
+      <DeskOverlay
+        desk={ev({ requested: "view-only" })}
+        frames={createFrameBus()}
+        onDismiss={() => {}}
+      />,
     );
     expect(screen.getByText("Accept view-only")).toBeTruthy();
     expect(screen.queryByText("Accept control")).toBeNull();
@@ -48,55 +67,156 @@ describe("consent dialog", () => {
   it("accepting view-only calls desk_respond with view-only", async () => {
     const respond = vi.fn(() => null);
     mockCommands({ desk_respond: respond });
-    render(<DeskOverlay desk={ev()} frames={createFrameBus()} onDismiss={() => {}} />);
+    render(
+      <DeskOverlay
+        desk={ev()}
+        frames={createFrameBus()}
+        onDismiss={() => {}}
+      />,
+    );
     fireEvent.click(screen.getByText("Accept view-only"));
     await waitFor(() => expect(respond).toHaveBeenCalled());
-    expect(respond).toHaveBeenCalledWith({ session: "s1", accept: true, mode: "view-only" });
+    expect(respond).toHaveBeenCalledWith({
+      session: "s1",
+      accept: true,
+      mode: "view-only",
+    });
   });
 
   it("accepting control and denying are distinct calls", async () => {
     const respond = vi.fn(() => null);
     mockCommands({ desk_respond: respond });
     const { unmount } = render(
-      <DeskOverlay desk={ev()} frames={createFrameBus()} onDismiss={() => {}} />,
+      <DeskOverlay
+        desk={ev()}
+        frames={createFrameBus()}
+        onDismiss={() => {}}
+      />,
     );
     fireEvent.click(screen.getByText("Accept control"));
     await waitFor(() => expect(respond).toHaveBeenCalledTimes(1));
-    expect(respond).toHaveBeenLastCalledWith({ session: "s1", accept: true, mode: "control" });
+    expect(respond).toHaveBeenLastCalledWith({
+      session: "s1",
+      accept: true,
+      mode: "control",
+    });
     unmount();
-    render(<DeskOverlay desk={ev()} frames={createFrameBus()} onDismiss={() => {}} />);
+    render(
+      <DeskOverlay
+        desk={ev()}
+        frames={createFrameBus()}
+        onDismiss={() => {}}
+      />,
+    );
     fireEvent.click(screen.getByText("Deny"));
     await waitFor(() => expect(respond).toHaveBeenCalledTimes(2));
-    expect(respond.mock.calls[1]).toEqual([{ session: "s1", accept: false, mode: "view-only" }]);
+    expect(respond.mock.calls[1]).toEqual([
+      { session: "s1", accept: false, mode: "view-only" },
+    ]);
   });
 
   it.each([
     ["known", "aabbccddeeff0011", "Known device. Key AABB CCDD EEFF."],
-    ["changed", "112233445566", "Warning: this device key changed. Key 1122 3344 5566."],
-    ["relayed", null, "Identity is asserted by the relay host, not verified directly."],
+    [
+      "changed",
+      "112233445566",
+      "Warning: this device key changed. Key 1122 3344 5566.",
+    ],
+    [
+      "relayed",
+      null,
+      "Identity is asserted by the relay host, not verified directly.",
+    ],
     ["", null, "Device identity is unavailable."],
-  ] as const)("shows %s identity evidence and the display-name warning", (trust, key, evidence) => {
-    const handle = relay();
-    const member = handle.status.members.find((candidate) => candidate.id === "ada")!;
-    member.trust = trust;
-    member.key = key;
-    render(<DeskOverlay desk={ev()} frames={createFrameBus()} relay={handle} onDismiss={() => {}} />);
-    expect(screen.getByText(new RegExp(evidence.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")))).toBeInTheDocument();
-    expect(screen.getByText(/Names are chosen by each person/)).toBeInTheDocument();
-  });
+  ] as const)(
+    "shows %s identity evidence and the display-name warning",
+    (trust, key, evidence) => {
+      const handle = relay();
+      const member = handle.status.members.find(
+        (candidate) => candidate.id === "ada",
+      )!;
+      member.trust = trust;
+      member.key = key;
+      render(
+        <DeskOverlay
+          desk={ev()}
+          frames={createFrameBus()}
+          relay={handle}
+          onDismiss={() => {}}
+        />,
+      );
+      expect(
+        screen.getByText(
+          new RegExp(evidence.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")),
+        ),
+      ).toBeInTheDocument();
+      expect(
+        screen.getByText(/Names are chosen by each person/),
+      ).toBeInTheDocument();
+    },
+  );
 
   it("reports unavailable identity metadata when the member is absent", () => {
     const handle = relay();
-    handle.status.members = handle.status.members.filter((member) => member.id !== "ada");
-    render(<DeskOverlay desk={ev()} frames={createFrameBus()} relay={handle} onDismiss={() => {}} />);
-    expect(screen.getByText(/Device identity is unavailable for this member/)).toBeInTheDocument();
+    handle.status.members = handle.status.members.filter(
+      (member) => member.id !== "ada",
+    );
+    render(
+      <DeskOverlay
+        desk={ev()}
+        frames={createFrameBus()}
+        relay={handle}
+        onDismiss={() => {}}
+      />,
+    );
+    expect(
+      screen.getByText(/Device identity is unavailable for this member/),
+    ).toBeInTheDocument();
   });
 
   it("shows nothing to consent to once the session is not requested", () => {
     render(
-      <DeskOverlay desk={ev({ state: "ended", reason: "x" })} frames={createFrameBus()} onDismiss={() => {}} />,
+      <DeskOverlay
+        desk={ev({ state: "ended", reason: "x" })}
+        frames={createFrameBus()}
+        onDismiss={() => {}}
+      />,
     );
     expect(screen.queryByText("Accept control")).toBeNull();
+  });
+});
+
+describe("sharing banner", () => {
+  const host = (others: string[], desk: unknown = null) =>
+    ({
+      status: {
+        role: "host",
+        self_id: "me",
+        members: [
+          { id: "me", name: "Me" },
+          ...others.map((n) => ({ id: n, name: n })),
+        ],
+      },
+      desk,
+    }) as unknown as RelayHandle;
+
+  it("shows who is connected and Stop while this desktop is shared", () => {
+    const stop = vi.fn();
+    render(<SharingBanner relay={host(["Vijay"])} onStop={stop} />);
+    expect(screen.getByText("Sharing your desktop with Vijay")).toBeTruthy();
+    fireEvent.click(screen.getByText("Stop"));
+    expect(stop).toHaveBeenCalled();
+  });
+
+  it("shows nothing when not hosting", () => {
+    const off = {
+      status: { role: "off", members: [] },
+      desk: null,
+    } as unknown as RelayHandle;
+    const { container } = render(
+      <SharingBanner relay={off} onStop={() => {}} />,
+    );
+    expect(container.textContent).toBe("");
   });
 });
 
@@ -105,17 +225,29 @@ describe("controlled banner", () => {
     const end = vi.fn(() => null);
     mockCommands({ desk_end: end });
     render(
-      <DeskOverlay desk={ev({ state: "active", mode: "control" })} frames={createFrameBus()} onDismiss={() => {}} />,
+      <DeskOverlay
+        desk={ev({ state: "active", mode: "control" })}
+        frames={createFrameBus()}
+        onDismiss={() => {}}
+      />,
     );
-    expect(screen.getByRole("alert")).toHaveTextContent("Ada is controlling your screen");
+    expect(screen.getByRole("alert")).toHaveTextContent(
+      "Ada is controlling your screen",
+    );
     fireEvent.click(screen.getByText("Stop"));
     await waitFor(() => expect(end).toHaveBeenCalledWith({ session: "s1" }));
   });
 });
 
 describe("viewer input and frames", () => {
-  const view = (mode: "view-only" | "control") => ev({ role: "viewer", state: "active", mode });
-  const frame = (bus: ReturnType<typeof createFrameBus>, seq = 1, w = 100, h = 100) =>
+  const view = (mode: "view-only" | "control") =>
+    ev({ role: "viewer", state: "active", mode });
+  const frame = (
+    bus: ReturnType<typeof createFrameBus>,
+    seq = 1,
+    w = 100,
+    h = 100,
+  ) =>
     bus.publish({
       id: "i",
       from: "ada",
@@ -130,13 +262,27 @@ describe("viewer input and frames", () => {
     const input = vi.fn(() => null);
     const drawImage = vi.fn();
     mockCommands({ desk_send_input: input });
-    vi.stubGlobal("createImageBitmap", vi.fn(async () => ({ width: 100, height: 100, close: vi.fn() })));
+    vi.stubGlobal(
+      "createImageBitmap",
+      vi.fn(async () => ({ width: 100, height: 100, close: vi.fn() })),
+    );
     const bus = createFrameBus();
-    render(<RemoteDesktopView view={view(mode)} frames={bus} onClose={() => {}} />);
+    render(
+      <RemoteDesktopView view={view(mode)} frames={bus} onClose={() => {}} />,
+    );
     const canvas = screen.getByLabelText("Remote screen") as HTMLCanvasElement;
     canvas.getBoundingClientRect = () =>
-      ({ left: 0, top: 0, width: 100, height: 100, right: 100, bottom: 100 }) as DOMRect;
-    canvas.getContext = vi.fn(() => ({ drawImage })) as unknown as typeof canvas.getContext;
+      ({
+        left: 0,
+        top: 0,
+        width: 100,
+        height: 100,
+        right: 100,
+        bottom: 100,
+      }) as DOMRect;
+    canvas.getContext = vi.fn(() => ({
+      drawImage,
+    })) as unknown as typeof canvas.getContext;
     frame(bus);
     await waitFor(() => expect(drawImage).toHaveBeenCalledTimes(1));
     return { input, canvas, drawImage, bus };
@@ -145,7 +291,12 @@ describe("viewer input and frames", () => {
   it("sends nothing in view-only mode", async () => {
     const { input, canvas } = await rig("view-only");
     fireEvent.pointerMove(canvas, { clientX: 50, clientY: 50, pointerId: 1 });
-    fireEvent.pointerDown(canvas, { clientX: 50, clientY: 50, button: 0, pointerId: 1 });
+    fireEvent.pointerDown(canvas, {
+      clientX: 50,
+      clientY: 50,
+      button: 0,
+      pointerId: 1,
+    });
     fireEvent.pointerUp(canvas, { button: 0, pointerId: 1 });
     fireEvent.wheel(canvas, { deltaY: 10 });
     fireEvent.keyDown(canvas, { code: "KeyA" });
@@ -155,7 +306,12 @@ describe("viewer input and frames", () => {
 
   it("sends mapped input and remote Escape in control mode", async () => {
     const { input, canvas } = await rig("control");
-    fireEvent.pointerDown(canvas, { clientX: 50, clientY: 25, button: 0, pointerId: 1 });
+    fireEvent.pointerDown(canvas, {
+      clientX: 50,
+      clientY: 25,
+      button: 0,
+      pointerId: 1,
+    });
     await waitFor(() => expect(input).toHaveBeenCalledTimes(2));
     expect(input.mock.calls[0]).toEqual([
       { session: "s1", event: { kind: "mouse-move", x: 0.5, y: 0.25 } },
@@ -170,16 +326,37 @@ describe("viewer input and frames", () => {
 
   it("does not let an older asynchronous decode repaint a newer frame", async () => {
     const resolvers: Array<(bitmap: ImageBitmap) => void> = [];
-    vi.stubGlobal("createImageBitmap", vi.fn(() => new Promise<ImageBitmap>((resolve) => resolvers.push(resolve))));
+    vi.stubGlobal(
+      "createImageBitmap",
+      vi.fn(
+        () => new Promise<ImageBitmap>((resolve) => resolvers.push(resolve)),
+      ),
+    );
     const bus = createFrameBus();
-    render(<RemoteDesktopView view={view("view-only")} frames={bus} onClose={() => {}} />);
+    render(
+      <RemoteDesktopView
+        view={view("view-only")}
+        frames={bus}
+        onClose={() => {}}
+      />,
+    );
     const canvas = screen.getByLabelText("Remote screen") as HTMLCanvasElement;
     const drawImage = vi.fn();
-    canvas.getContext = vi.fn(() => ({ drawImage })) as unknown as typeof canvas.getContext;
+    canvas.getContext = vi.fn(() => ({
+      drawImage,
+    })) as unknown as typeof canvas.getContext;
     frame(bus, 1);
     frame(bus, 2);
-    const newest = { width: 100, height: 100, close: vi.fn() } as unknown as ImageBitmap;
-    const oldest = { width: 100, height: 100, close: vi.fn() } as unknown as ImageBitmap;
+    const newest = {
+      width: 100,
+      height: 100,
+      close: vi.fn(),
+    } as unknown as ImageBitmap;
+    const oldest = {
+      width: 100,
+      height: 100,
+      close: vi.fn(),
+    } as unknown as ImageBitmap;
     resolvers[1](newest);
     await waitFor(() => expect(drawImage).toHaveBeenCalledWith(newest, 0, 0));
     resolvers[0](oldest);
@@ -190,30 +367,68 @@ describe("viewer input and frames", () => {
   it("rejects mismatched decoded dimensions before pointer mapping", async () => {
     const input = vi.fn(() => null);
     mockCommands({ desk_send_input: input });
-    vi.stubGlobal("createImageBitmap", vi.fn(async () => ({ width: 90, height: 100, close: vi.fn() })));
+    vi.stubGlobal(
+      "createImageBitmap",
+      vi.fn(async () => ({ width: 90, height: 100, close: vi.fn() })),
+    );
     const bus = createFrameBus();
-    render(<RemoteDesktopView view={view("control")} frames={bus} onClose={() => {}} />);
+    render(
+      <RemoteDesktopView
+        view={view("control")}
+        frames={bus}
+        onClose={() => {}}
+      />,
+    );
     const canvas = screen.getByLabelText("Remote screen") as HTMLCanvasElement;
     canvas.getBoundingClientRect = () =>
-      ({ left: 0, top: 0, width: 100, height: 100, right: 100, bottom: 100 }) as DOMRect;
+      ({
+        left: 0,
+        top: 0,
+        width: 100,
+        height: 100,
+        right: 100,
+        bottom: 100,
+      }) as DOMRect;
     const drawImage = vi.fn();
-    canvas.getContext = vi.fn(() => ({ drawImage })) as unknown as typeof canvas.getContext;
+    canvas.getContext = vi.fn(() => ({
+      drawImage,
+    })) as unknown as typeof canvas.getContext;
     frame(bus);
     await waitFor(() => expect(createImageBitmap).toHaveBeenCalled());
-    fireEvent.pointerDown(canvas, { clientX: 50, clientY: 50, button: 0, pointerId: 1 });
+    fireEvent.pointerDown(canvas, {
+      clientX: 50,
+      clientY: 50,
+      button: 0,
+      pointerId: 1,
+    });
     expect(drawImage).not.toHaveBeenCalled();
     expect(input).not.toHaveBeenCalled();
   });
 
   it("focuses once when control activates and not on later frames", async () => {
-    vi.stubGlobal("createImageBitmap", vi.fn(async () => ({ width: 100, height: 100, close: vi.fn() })));
+    vi.stubGlobal(
+      "createImageBitmap",
+      vi.fn(async () => ({ width: 100, height: 100, close: vi.fn() })),
+    );
     const bus = createFrameBus();
     const { rerender } = render(
-      <RemoteDesktopView view={ev({ role: "viewer", state: "requested" })} frames={bus} onClose={() => {}} />,
+      <RemoteDesktopView
+        view={ev({ role: "viewer", state: "requested" })}
+        frames={bus}
+        onClose={() => {}}
+      />,
     );
     const canvas = screen.getByLabelText("Remote screen") as HTMLCanvasElement;
-    canvas.getContext = vi.fn(() => ({ drawImage: vi.fn() })) as unknown as typeof canvas.getContext;
-    rerender(<RemoteDesktopView view={view("control")} frames={bus} onClose={() => {}} />);
+    canvas.getContext = vi.fn(() => ({
+      drawImage: vi.fn(),
+    })) as unknown as typeof canvas.getContext;
+    rerender(
+      <RemoteDesktopView
+        view={view("control")}
+        frames={bus}
+        onClose={() => {}}
+      />,
+    );
     expect(document.activeElement).toBe(canvas);
     const end = screen.getByText("End");
     end.focus();
@@ -224,7 +439,9 @@ describe("viewer input and frames", () => {
 
   it("prevents wheel and context-menu leakage", async () => {
     const { canvas } = await rig("view-only");
-    expect(fireEvent.wheel(canvas, { deltaY: 10, cancelable: true })).toBe(false);
+    expect(fireEvent.wheel(canvas, { deltaY: 10, cancelable: true })).toBe(
+      false,
+    );
     expect(fireEvent.contextMenu(canvas, { cancelable: true })).toBe(false);
   });
 
@@ -233,7 +450,11 @@ describe("viewer input and frames", () => {
     document.body.append(before);
     before.focus();
     const { unmount } = render(
-      <RemoteDesktopView view={view("view-only")} frames={createFrameBus()} onClose={() => {}} />,
+      <RemoteDesktopView
+        view={view("view-only")}
+        frames={createFrameBus()}
+        onClose={() => {}}
+      />,
     );
     const dialog = screen.getByRole("dialog");
     const canvas = screen.getByLabelText("Remote screen");
@@ -253,7 +474,11 @@ describe("viewer input and frames", () => {
     const input = vi.fn(() => null);
     mockCommands({ desk_send_input: input });
     render(
-      <RemoteDesktopView view={view("control")} frames={createFrameBus()} onClose={() => {}} />,
+      <RemoteDesktopView
+        view={view("control")}
+        frames={createFrameBus()}
+        onClose={() => {}}
+      />,
     );
     const canvas = screen.getByLabelText("Remote screen");
     const end = screen.getByText("End");
@@ -266,7 +491,13 @@ describe("viewer input and frames", () => {
   it("End button calls desk_end and status is live", async () => {
     const end = vi.fn(() => null);
     mockCommands({ desk_end: end });
-    render(<RemoteDesktopView view={view("view-only")} frames={createFrameBus()} onClose={() => {}} />);
+    render(
+      <RemoteDesktopView
+        view={view("view-only")}
+        frames={createFrameBus()}
+        onClose={() => {}}
+      />,
+    );
     expect(screen.getByRole("status")).toHaveTextContent("View only");
     fireEvent.click(screen.getByText("End"));
     await waitFor(() => expect(end).toHaveBeenCalledWith({ session: "s1" }));
@@ -274,11 +505,19 @@ describe("viewer input and frames", () => {
 
   it("reports waiting and denied states", () => {
     const { rerender } = render(
-      <RemoteDesktopView view={ev({ role: "viewer" })} frames={createFrameBus()} onClose={() => {}} />,
+      <RemoteDesktopView
+        view={ev({ role: "viewer" })}
+        frames={createFrameBus()}
+        onClose={() => {}}
+      />,
     );
     expect(screen.getByRole("status")).toHaveTextContent("Waiting for consent");
     rerender(
-      <RemoteDesktopView view={ev({ role: "viewer", state: "ended", reason: "Declined." })} frames={createFrameBus()} onClose={() => {}} />,
+      <RemoteDesktopView
+        view={ev({ role: "viewer", state: "ended", reason: "Declined." })}
+        frames={createFrameBus()}
+        onClose={() => {}}
+      />,
     );
     expect(screen.getByRole("status")).toHaveTextContent("Denied: Declined.");
   });
@@ -293,13 +532,20 @@ describe("Remote desktop actions", () => {
     expect(screen.queryByLabelText("View Me's desktop")).toBeNull();
     fireEvent.click(screen.getByLabelText("View Ada's desktop"));
     expect(handle.deskRequest).toHaveBeenCalledWith("ada", "view-only");
-    await waitFor(() => expect(screen.queryByText("Requesting view only…")).toBeNull());
+    await waitFor(() =>
+      expect(screen.queryByText("Requesting view only…")).toBeNull(),
+    );
   });
 
   it("shows per-request pending feedback and blocks duplicate requests", async () => {
     let finish!: () => void;
     const handle = relay();
-    handle.deskRequest = vi.fn(() => new Promise<void>((resolve) => { finish = resolve; }));
+    handle.deskRequest = vi.fn(
+      () =>
+        new Promise<void>((resolve) => {
+          finish = resolve;
+        }),
+    );
     render(<RemoteDesktopMembers relay={handle} />);
     fireEvent.click(screen.getByLabelText("Control Ada's desktop"));
     expect(screen.getByRole("status")).toHaveTextContent("Requesting control");
@@ -307,15 +553,21 @@ describe("Remote desktop actions", () => {
     fireEvent.click(screen.getByLabelText("Control Ada's desktop"));
     expect(handle.deskRequest).toHaveBeenCalledTimes(1);
     finish();
-    await waitFor(() => expect(screen.queryByText("Requesting control…")).toBeNull());
+    await waitFor(() =>
+      expect(screen.queryByText("Requesting control…")).toBeNull(),
+    );
   });
 
   it("shows request errors in the member row", async () => {
     const handle = relay();
-    handle.deskRequest = vi.fn(() => Promise.reject(new Error("Peer unavailable")));
+    handle.deskRequest = vi.fn(() =>
+      Promise.reject(new Error("Peer unavailable")),
+    );
     render(<RemoteDesktopMembers relay={handle} />);
     fireEvent.click(screen.getByLabelText("View Ada's desktop"));
-    await waitFor(() => expect(screen.getByRole("alert")).toHaveTextContent("Peer unavailable"));
+    await waitFor(() =>
+      expect(screen.getByRole("alert")).toHaveTextContent("Peer unavailable"),
+    );
   });
 
   it("is hidden when the relay is off", () => {
@@ -330,15 +582,31 @@ describe("held input", () => {
   it("releases a held mouse button when the pointer is released outside the canvas", async () => {
     const send = vi.fn(() => null);
     mockCommands({ desk_send_input: send });
-    vi.stubGlobal("createImageBitmap", vi.fn(async () => ({ width: 100, height: 100, close: vi.fn() })));
+    vi.stubGlobal(
+      "createImageBitmap",
+      vi.fn(async () => ({ width: 100, height: 100, close: vi.fn() })),
+    );
     const frames = createFrameBus();
     render(
-      <RemoteDesktopView view={ev({ role: "viewer", state: "active", mode: "control" })} frames={frames} onClose={() => {}} />,
+      <RemoteDesktopView
+        view={ev({ role: "viewer", state: "active", mode: "control" })}
+        frames={frames}
+        onClose={() => {}}
+      />,
     );
     const canvas = screen.getByLabelText("Remote screen") as HTMLCanvasElement;
     canvas.getBoundingClientRect = () =>
-      ({ left: 0, top: 0, width: 100, height: 100, right: 100, bottom: 100 }) as DOMRect;
-    canvas.getContext = vi.fn(() => ({ drawImage: vi.fn() })) as unknown as typeof canvas.getContext;
+      ({
+        left: 0,
+        top: 0,
+        width: 100,
+        height: 100,
+        right: 100,
+        bottom: 100,
+      }) as DOMRect;
+    canvas.getContext = vi.fn(() => ({
+      drawImage: vi.fn(),
+    })) as unknown as typeof canvas.getContext;
     frames.publish({
       id: "i",
       from: "ada",
@@ -349,7 +617,12 @@ describe("held input", () => {
       body: { kind: "frame", seq: 1, w: 100, h: 100, jpeg_b64: "QQ==" },
     });
     await waitFor(() => expect(canvas.width).toBe(100));
-    fireEvent.pointerDown(canvas, { clientX: 50, clientY: 50, button: 0, pointerId: 7 });
+    fireEvent.pointerDown(canvas, {
+      clientX: 50,
+      clientY: 50,
+      button: 0,
+      pointerId: 7,
+    });
     await waitFor(() => expect(send).toHaveBeenCalledTimes(2));
     fireEvent.pointerUp(window, { button: 0, pointerId: 7 });
     await waitFor(() =>
@@ -366,12 +639,25 @@ describe("held input", () => {
     mockCommands({ desk_send_input: send });
     const frames = createFrameBus();
     const { rerender } = render(
-      <RemoteDesktopView view={ev({ role: "viewer", state: "active", mode: "control" })} frames={frames} onClose={() => {}} />,
+      <RemoteDesktopView
+        view={ev({ role: "viewer", state: "active", mode: "control" })}
+        frames={frames}
+        onClose={() => {}}
+      />,
     );
     const canvas = screen.getByLabelText("Remote screen");
     fireEvent.keyDown(canvas, { code: "ControlLeft" });
     rerender(
-      <RemoteDesktopView view={ev({ session: "s2", role: "viewer", state: "active", mode: "control" })} frames={frames} onClose={() => {}} />,
+      <RemoteDesktopView
+        view={ev({
+          session: "s2",
+          role: "viewer",
+          state: "active",
+          mode: "control",
+        })}
+        frames={frames}
+        onClose={() => {}}
+      />,
     );
     await waitFor(() =>
       expect(send).toHaveBeenCalledWith({
@@ -379,17 +665,23 @@ describe("held input", () => {
         event: { kind: "key", code: "ControlLeft", down: false },
       }),
     );
-    expect(send).not.toHaveBeenCalledWith(expect.objectContaining({
-      session: "s2",
-      event: { kind: "key", code: "ControlLeft", down: false },
-    }));
+    expect(send).not.toHaveBeenCalledWith(
+      expect.objectContaining({
+        session: "s2",
+        event: { kind: "key", code: "ControlLeft", down: false },
+      }),
+    );
   });
 
   it("releases a held key when the canvas loses focus", async () => {
     const send = vi.fn(() => null);
     mockCommands({ desk_send_input: send });
     render(
-      <RemoteDesktopView view={ev({ role: "viewer", state: "active", mode: "control" })} frames={createFrameBus()} onClose={() => {}} />,
+      <RemoteDesktopView
+        view={ev({ role: "viewer", state: "active", mode: "control" })}
+        frames={createFrameBus()}
+        onClose={() => {}}
+      />,
     );
     const canvas = screen.getByLabelText("Remote screen");
     fireEvent.keyDown(canvas, { code: "ControlLeft" });
