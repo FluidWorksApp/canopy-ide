@@ -14,9 +14,10 @@ pub fn enabled() -> bool {
 
 #[cfg(unix)]
 pub use adoption::{
-    adopt, adoptable, identity_floor, lineage, note_identity, note_lineage, reused_instance,
-    Adoptable, Adopted,
+    adopt, adoptable, identity_floor, note_identity, reused_instance, Adoptable, Adopted,
 };
+#[cfg(unix)]
+pub use sealed::{forget_sealed, remember_sealed, reseal_lineage};
 #[cfg(unix)]
 pub use unix::{client, host_dir, spawn, Client};
 
@@ -35,9 +36,13 @@ pub fn reused_instance() -> Option<String> {
     None
 }
 
-/// Nothing outlives the app here, so there is no spawn tree to remember.
+/// Nothing outlives the app here, so there is no sealed metadata to keep.
 #[cfg(not(unix))]
-pub fn note_lineage(_instance: &str, _pty_id: u32, _depth: u8, _parent: Option<u32>) {}
+pub fn remember_sealed(_pty_id: u32, _master: &dyn MasterPty, _meta: HostedMeta) {}
+#[cfg(not(unix))]
+pub fn reseal_lineage(_pty_id: u32, _depth: u8, _parent: Option<u32>) {}
+#[cfg(not(unix))]
+pub fn forget_sealed(_pty_id: u32) {}
 
 #[cfg(not(unix))]
 pub fn spawn(
@@ -201,8 +206,12 @@ mod unix {
 /// terminal's bridge credential, never the credential itself, so an adopting
 /// launch can recognise the token the agent already holds (see
 /// `ContextBridge::readopt_agent`) without the host ever storing it.
-#[cfg(unix)]
-#[derive(Debug, Clone, Default, serde::Deserialize)]
+///
+/// Any process of this user can write a session's metadata through the host,
+/// so `bridge`, `depth` and `parent` are trusted only under a valid `seal`
+/// (`adoption_seal.rs`). `depth: None` means the spawn-tree position was not
+/// known when it was sealed, which adoption treats as the delegation cap.
+#[derive(Debug, Clone, Default, serde::Deserialize, serde::Serialize)]
 #[serde(default)]
 pub struct HostedMeta {
     pub v: u32,
@@ -218,6 +227,116 @@ pub struct HostedMeta {
     pub attempt_id: Option<String>,
     pub instance: String,
     pub bridge: Option<String>,
+    pub depth: Option<u8>,
+    pub parent: Option<u32>,
+    pub seal: Option<String>,
+}
+
+/// A spawn-tree position: depth, and the parent's pty id.
+pub type Lineage = (u8, Option<u32>);
+
+/// What adoption may believe about a session's bridge credential: its verifier
+/// and, when it was known at sealing, its spawn-tree position (`None` inside
+/// means unknown). Nothing at all without a valid seal under `key`.
+#[cfg_attr(not(unix), allow(dead_code))]
+pub fn trusted_credential(
+    meta: &HostedMeta,
+    key: Option<&[u8; 32]>,
+) -> Option<(String, Option<Lineage>)> {
+    let verifier = meta.bridge.clone()?;
+    if !crate::adoption_seal::verify(key?, meta) {
+        return None;
+    }
+    Some((verifier, meta.depth.map(|depth| (depth, meta.parent))))
+}
+
+/// Seal `meta` for the host. A spawn-time seal must not claim the root while an
+/// agent spawn is pending: that blob could be replayed after the child is bound
+/// deeper, so its position is sealed as unknown until `reseal_lineage`.
+pub fn seal_for_spawn(meta: &mut HostedMeta, key: &[u8; 32], spawn_pending: bool) {
+    meta.depth = (!spawn_pending).then_some(0);
+    meta.parent = None;
+    meta.seal = Some(crate::adoption_seal::seal(key, meta));
+}
+
+/// Sealed metadata of this launch's hosted terminals, kept in the app so a
+/// reseal never signs anything read back from the host.
+#[cfg(unix)]
+mod sealed {
+    use super::*;
+    use std::collections::HashMap;
+    use std::sync::Mutex;
+
+    type Table = Mutex<HashMap<u32, (u32, HostedMeta)>>;
+
+    fn table() -> &'static Table {
+        static TABLE: std::sync::OnceLock<Table> = std::sync::OnceLock::new();
+        TABLE.get_or_init(Default::default)
+    }
+
+    /// Remember a freshly spawned hosted terminal's sealed metadata under its
+    /// pty id, with the host's own id for the session.
+    pub fn remember_sealed(pty_id: u32, master: &dyn MasterPty, meta: HostedMeta) {
+        if meta.seal.is_none() {
+            return;
+        }
+        if let Some(hosted) = master.downcast_ref::<canopy_pty_host::client::HostMaster>() {
+            table().lock().unwrap().insert(pty_id, (hosted.id(), meta));
+        }
+    }
+
+    pub fn forget_sealed(pty_id: u32) {
+        table().lock().unwrap().remove(&pty_id);
+    }
+
+    /// The new metadata for a terminal whose spawn-tree position was just
+    /// assigned, resealed from what the app holds. None if it is not hosted
+    /// and sealed.
+    pub(crate) fn resealed(
+        pty_id: u32,
+        depth: u8,
+        parent: Option<u32>,
+        key: &[u8; 32],
+    ) -> Option<(u32, HostedMeta)> {
+        let mut table = table().lock().unwrap();
+        let (host_id, meta) = table.get_mut(&pty_id)?;
+        meta.depth = Some(depth);
+        meta.parent = parent;
+        meta.seal = Some(crate::adoption_seal::seal(key, meta));
+        Some((*host_id, meta.clone()))
+    }
+
+    /// Write a delegated child's spawn-tree position into its sealed metadata,
+    /// before its brief is submitted. Bounded to a second so the Tauri command
+    /// cannot hang on the host; a write that does not land leaves the position
+    /// unknown, which adoption treats as the cap (the safe side).
+    pub fn reseal_lineage(pty_id: u32, depth: u8, parent: Option<u32>) {
+        if !super::enabled() {
+            return;
+        }
+        let Some(key) = crate::adoption_seal::key() else {
+            return;
+        };
+        let Some((host_id, meta)) = resealed(pty_id, depth, parent, &key) else {
+            return;
+        };
+        let Some(client) = super::client() else {
+            return;
+        };
+        let Ok(json) = serde_json::to_string(&meta) else {
+            return;
+        };
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(client.set_meta(host_id, Some(json)));
+        });
+        if !matches!(
+            rx.recv_timeout(std::time::Duration::from_secs(1)),
+            Ok(Ok(()))
+        ) {
+            eprintln!("canopy: could not record terminal {pty_id}'s spawn depth in the host; it would come back at the delegation cap");
+        }
+    }
 }
 
 #[cfg(unix)]
@@ -292,7 +411,8 @@ mod adoption {
             }
             let probe = HostClient::new(socket);
             match probe.list_within(LAUNCH_WAIT) {
-                Ok(sessions) => match choose_token(&sessions) {
+                Ok(sessions) => match choose_token(&sessions, crate::adoption_seal::key().as_ref())
+                {
                     Some(token) => Resolution::Reuse(token),
                     None => Resolution::Fresh,
                 },
@@ -317,19 +437,26 @@ mod adoption {
     }
 
     /// The token most waiting sessions agree on: running, free (an old host with
-    /// no `attached` field is never counted), ours, not a micro-task's.
-    pub(super) fn choose_token(sessions: &[SessionInfo]) -> Option<String> {
+    /// no `attached` field is never counted), ours, not a micro-task's. When any
+    /// of them carries a valid seal, only sealed sessions vote, so sessions any
+    /// process can spawn through the host cannot outvote this app's own.
+    pub(super) fn choose_token(sessions: &[SessionInfo], key: Option<&[u8; 32]>) -> Option<String> {
         let mut counts: std::collections::HashMap<String, usize> = Default::default();
+        let mut sealed: std::collections::HashMap<String, usize> = Default::default();
         for info in sessions {
             if info.exited.is_some() || info.attached != Some(false) {
                 continue;
             }
             if let Some(meta) = parse(info) {
                 if meta.kind != "detached" && meta.run_id.is_none() && !meta.instance.is_empty() {
+                    if key.is_some_and(|key| crate::adoption_seal::verify(key, &meta)) {
+                        *sealed.entry(meta.instance.clone()).or_default() += 1;
+                    }
                     *counts.entry(meta.instance).or_default() += 1;
                 }
             }
         }
+        let counts = if sealed.is_empty() { counts } else { sealed };
         // Ties broken by the token itself so the choice never depends on map order.
         counts
             .into_iter()
@@ -445,54 +572,6 @@ mod adoption {
         let (id, generation) = value.split_once(':')?;
         Some((id.parse().ok()?, generation.parse().ok()?))
     }
-
-    pub(super) fn lineage_key(instance: &str, pty_id: u32) -> String {
-        format!("lineage:{instance}:{pty_id}")
-    }
-
-    pub(super) fn lineage_value(depth: u8, parent: Option<u32>) -> String {
-        match parent {
-            Some(parent) => format!("{depth}:{parent}"),
-            None => format!("{depth}:"),
-        }
-    }
-
-    pub(super) fn parse_lineage(value: &str) -> Option<(u8, Option<u32>)> {
-        let (depth, parent) = value.split_once(':')?;
-        let parent = match parent {
-            "" => None,
-            parent => Some(parent.parse().ok()?),
-        };
-        Some((depth.parse().ok()?, parent))
-    }
-
-    /// Remember, in the host, where a delegated agent sits in its spawn tree.
-    /// The bridge assigns depth and parent after the spawn, so the spawn's
-    /// metadata cannot carry them; without this an adopted child would come
-    /// back as a root and could delegate further than its parent allowed.
-    /// Off the caller's thread (it is a Tauri command) and best effort: a host
-    /// that is not running, or too old for `set_state`, loses only this.
-    pub fn note_lineage(instance: &str, pty_id: u32, depth: u8, parent: Option<u32>) {
-        if !super::enabled() {
-            return;
-        }
-        let key = lineage_key(instance, pty_id);
-        let value = lineage_value(depth, parent);
-        std::thread::spawn(move || {
-            if let Some(client) = super::client() {
-                let _ = client.set_state(&key, &value, false);
-            }
-        });
-    }
-
-    /// The spawn-tree position stored by `note_lineage`, if any.
-    pub fn lineage(client: &Client, instance: &str, pty_id: u32) -> Option<(u8, Option<u32>)> {
-        // Bounded like every other launch-path call to the host.
-        let value = client
-            .get_state_within(&lineage_key(instance, pty_id), LAUNCH_WAIT)
-            .ok()??;
-        parse_lineage(&value)
-    }
 }
 
 #[cfg(unix)]
@@ -502,10 +581,7 @@ use adoption::Resolution;
 
 #[cfg(all(test, unix))]
 pub(crate) mod tests {
-    use super::adoption::{
-        adoptable_from as adoption_adoptable, choose_token as adoption_choose, lineage_key,
-        lineage_value, parse_lineage,
-    };
+    use super::adoption::{adoptable_from as adoption_adoptable, choose_token as adoption_choose};
     use super::*;
     use canopy_pty_host::client::HostClient;
     use canopy_pty_host::server::{serve, ServerConfig, EXITED_TTL};
@@ -782,7 +858,7 @@ pub(crate) mod tests {
             info(2, a(2), Some(false), None),
             info(3, b(3), Some(false), None),
         ];
-        assert_eq!(adoption_choose(&sessions).as_deref(), Some("inst-a"));
+        assert_eq!(adoption_choose(&sessions, None).as_deref(), Some("inst-a"));
     }
 
     #[test]
@@ -796,7 +872,7 @@ pub(crate) mod tests {
             info(5, None, Some(false), None),        // no metadata
             info(6, Some("{not json".into()), Some(false), None),
         ];
-        assert_eq!(adoption_choose(&sessions), None);
+        assert_eq!(adoption_choose(&sessions, None), None);
         assert!(adoption_adoptable(sessions, "inst-a").is_empty());
     }
 
@@ -810,7 +886,7 @@ pub(crate) mod tests {
         })
         .to_string();
         let sessions = vec![info(5, Some(bound), Some(false), None)];
-        assert_eq!(adoption_choose(&sessions), None);
+        assert_eq!(adoption_choose(&sessions, None), None);
         assert!(adoption_adoptable(sessions, "inst-a").is_empty());
     }
 
@@ -898,28 +974,113 @@ pub(crate) mod tests {
         assert_eq!(found[1].meta.bridge, None);
     }
 
-    #[test]
-    fn lineage_round_trips_and_garbage_is_ignored() {
-        assert_eq!(lineage_key("inst-a", 7), "lineage:inst-a:7");
-        assert_eq!(
-            parse_lineage(&lineage_value(2, Some(5))),
-            Some((2, Some(5)))
-        );
-        assert_eq!(parse_lineage(&lineage_value(0, None)), Some((0, None)));
-        assert_eq!(parse_lineage("x:5"), None);
-        assert_eq!(parse_lineage("1:y"), None);
-        assert_eq!(parse_lineage("1"), None);
+    fn sealed_meta(id: u32, instance: &str, verifier: &str, pending: bool) -> HostedMeta {
+        let mut meta = HostedMeta {
+            v: 1,
+            id,
+            generation: id as u64,
+            kind: "desktop".into(),
+            cwd: "/tmp".into(),
+            instance: instance.into(),
+            bridge: Some(verifier.into()),
+            ..Default::default()
+        };
+        seal_for_spawn(&mut meta, &crate::adoption_seal::key().unwrap(), pending);
+        meta
     }
 
     #[test]
-    fn lineage_is_stored_in_the_host_and_read_back_by_session() {
-        let host = InProcessHost::start("lin");
-        assert_eq!(lineage(&host.client, "inst-a", 9), None);
+    fn only_a_valid_seal_hands_back_a_credential() {
+        let key = crate::adoption_seal::key().unwrap();
+        let v = "ab".repeat(32);
+        let root = sealed_meta(4, "inst-a", &v, false);
+        assert_eq!(
+            trusted_credential(&root, Some(&key)),
+            Some((v.clone(), Some((0, None))))
+        );
+        // Spawned while an agent spawn was pending: position unknown.
+        let pending = sealed_meta(5, "inst-a", &v, true);
+        assert_eq!(
+            trusted_credential(&pending, Some(&key)),
+            Some((v.clone(), None))
+        );
+        // No key, no seal, a forged seal, or a field changed under the seal.
+        assert_eq!(trusted_credential(&root, None), None);
+        let mut unsealed = root.clone();
+        unsealed.seal = None;
+        assert_eq!(trusted_credential(&unsealed, Some(&key)), None);
+        let mut forged = root.clone();
+        forged.seal = Some("00".repeat(32));
+        assert_eq!(trusted_credential(&forged, Some(&key)), None);
+        let mut swapped = root.clone();
+        swapped.bridge = Some("cd".repeat(32));
+        assert_eq!(trusted_credential(&swapped, Some(&key)), None);
+    }
+
+    /// The review's attack: any process of this user can spawn a session through
+    /// the host carrying the current instance and a verifier for a token it
+    /// chose. It may be adopted as a terminal, but its credential never is.
+    #[test]
+    fn a_session_forged_through_the_host_gets_no_credential() {
+        let forged = serde_json::json!({
+            "v": 1, "id": 9, "generation": 9, "kind": "desktop", "cwd": "/tmp",
+            "run": false, "instance": "inst-a", "bridge": "ef".repeat(32), "depth": 0,
+        })
+        .to_string();
+        let found = adoption_adoptable(vec![info(9, Some(forged), Some(false), None)], "inst-a");
+        assert_eq!(found.len(), 1, "adopted as a terminal");
+        let key = crate::adoption_seal::key().unwrap();
+        assert_eq!(trusted_credential(&found[0].meta, Some(&key)), None);
+    }
+
+    #[test]
+    fn sealed_sessions_outvote_unsealed_ones_for_the_token() {
+        let key = crate::adoption_seal::key().unwrap();
+        let ours =
+            serde_json::to_string(&sealed_meta(1, "inst-a", &"ab".repeat(32), false)).unwrap();
+        let b = |i| Some(meta_for(i, i as u64, "desktop", "inst-b"));
+        let sessions = vec![
+            info(1, Some(ours), Some(false), None),
+            info(2, b(2), Some(false), None),
+            info(3, b(3), Some(false), None),
+        ];
+        assert_eq!(adoption_choose(&sessions, None).as_deref(), Some("inst-b"));
+        assert_eq!(
+            adoption_choose(&sessions, Some(&key)).as_deref(),
+            Some("inst-a")
+        );
+    }
+
+    /// A delegated child's position is resealed from the app's own copy and
+    /// written to the host, and adoption then trusts exactly that position.
+    #[test]
+    fn a_resealed_lineage_round_trips_through_the_host() {
+        let host = InProcessHost::start("reseal");
+        let key = crate::adoption_seal::key().unwrap();
+        let v = "ab".repeat(32);
+        let meta = sealed_meta(61, "inst-r", &v, true);
+        let (mut child, master) = spawn(
+            &host.client,
+            &command("sleep 300"),
+            80,
+            24,
+            Some(serde_json::to_string(&meta).unwrap()),
+        )
+        .unwrap();
+        remember_sealed(61, &*master, meta);
+        let (host_id, resealed) = super::sealed::resealed(61, 2, Some(17), &key).unwrap();
+        assert_eq!(host_id, host.client.list().unwrap()[0].id);
         host.client
-            .set_state(&lineage_key("inst-a", 9), &lineage_value(1, Some(3)), false)
+            .set_meta(host_id, Some(serde_json::to_string(&resealed).unwrap()))
             .unwrap();
-        assert_eq!(lineage(&host.client, "inst-a", 9), Some((1, Some(3))));
-        // Keyed by instance: another launch's pty 9 is a different terminal.
-        assert_eq!(lineage(&host.client, "inst-b", 9), None);
+        let listed = host.client.list().unwrap();
+        let parsed: HostedMeta = serde_json::from_str(listed[0].meta.as_deref().unwrap()).unwrap();
+        assert_eq!(
+            trusted_credential(&parsed, Some(&key)),
+            Some((v, Some((2, Some(17)))))
+        );
+        forget_sealed(61);
+        assert!(super::sealed::resealed(61, 2, Some(17), &key).is_none());
+        let _ = child.kill();
     }
 }
