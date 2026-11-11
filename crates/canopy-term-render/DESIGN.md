@@ -23,6 +23,24 @@ Chrome needs a mockup from the user first.
 | `renderer` + `shader.wgsl` | wgpu pipeline, uploads, one draw call, offscreen readback | adapter (skipped without) |
 | `gpu` | Adapter probe and headless device | adapter |
 
+## Public API a window layer needs
+
+Everything is `pub` for testing, but a window layer only needs:
+
+* `metrics::{FontMetrics::from_font_data, layout, Scale, CellLayout}`: cell size
+  from a font and the window scale factor.
+* `fonts::FontBook` (`bundled()`, `with_primary`, `add_font_data`,
+  `load_system_fonts`) and `text::TextEngine::new(book, layout, atlas_size)` with
+  `set_layout`.
+* `color::Theme` and `builder::{QuadBuilder, RenderState}`:
+  `QuadBuilder::build(&frame, &state, &mut engine) -> BuildReport`.
+* `renderer::Renderer::{new, sync, render}` and, for tests,
+  `renderer::Offscreen`.
+* `geometry::{cursor_rect, Selection}` for IME placement and selection.
+
+The loop is `build` -> (skip when `report.held` or nothing changed) -> `sync` ->
+`render` -> present; see "Winit integration point".
+
 ## Dependencies and licences
 
 | Crate | Use | Licence |
@@ -253,6 +271,21 @@ weight and slant first, then monospaced). Results are cached per
 box is drawn. Emoji use colour bitmap (CBDT/sbix) or colour outline (COLR)
 strikes and are area-resampled to the cell height. Bold and italic missing from
 a face are synthesised (embolden, 14 degree skew).
+
+## What CI can run (probe results)
+
+`tests/gpu_probe.rs` enumerates every backend on each runner:
+
+* ubuntu-latest: no adapter (Vulkan and GL libraries cannot be loaded). A CI
+  change outside this crate could add `libvulkan1` and `mesa-vulkan-drivers`
+  (lavapipe software Vulkan) to the Terminal crates job; this is untested.
+* macos-15: Metal, "Apple Paravirtual device", device opens.
+* windows-2022: DX12, "Microsoft Basic Render Driver" (WARP, software), device
+  opens.
+
+The golden test renders on the GPU where one exists and is skipped (and says so
+in the log) where none does. The CPU reference and the WGSL validation run
+everywhere.
 
 ## What is not proven here
 
