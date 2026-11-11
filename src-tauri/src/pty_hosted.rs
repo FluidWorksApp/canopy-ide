@@ -54,7 +54,8 @@ mod unix {
     use canopy_pty_host::client::{HostChild, HostClient, HostMaster, LaunchCheck};
     use canopy_pty_host::protocol::SpawnSpec;
     use std::path::{Path, PathBuf};
-    use std::sync::OnceLock;
+    use std::sync::{Mutex, OnceLock};
+    use std::time::{Duration, Instant};
 
     pub type Client = HostClient;
 
@@ -156,9 +157,11 @@ mod unix {
         if matches!(resolution(), Resolution::HostUnusable) {
             return None;
         }
-        static CLIENT: OnceLock<Option<Client>> = OnceLock::new();
-        CLIENT
-            .get_or_init(|| {
+        // A failure is not final: a host that was busy for incompatible
+        // terminals, or not yet startable, is tried again after RETRY_AFTER.
+        static CLIENT: Mutex<RetryCell<Client>> = Mutex::new(RetryCell::new());
+        let mut cell = CLIENT.lock().unwrap_or_else(|e| e.into_inner());
+        cell.get(RETRY_AFTER, || {
                 // Said once, so a missing host is not mistaken for a working one.
                 let Some(socket) = socket_path() else {
                     eprintln!("canopy: CANOPY_PTY_HOST=1 but no socket directory; using in-process terminals");
@@ -193,8 +196,51 @@ mod unix {
                         None
                     }
                 }
-            })
-            .clone()
+        })
+    }
+
+    /// How long after a failed start the next terminal waits before trying again.
+    pub(super) const RETRY_AFTER: Duration = Duration::from_secs(30);
+
+    /// A value made on first use. A failure is remembered only for `retry_after`,
+    /// so one bad moment does not cost the app its host for its whole lifetime,
+    /// and a down host is not retried (a start can take seconds) on every spawn.
+    pub(super) struct RetryCell<T> {
+        value: Option<T>,
+        failed_at: Option<Instant>,
+    }
+
+    impl<T: Clone> RetryCell<T> {
+        pub(super) const fn new() -> Self {
+            RetryCell {
+                value: None,
+                failed_at: None,
+            }
+        }
+
+        pub(super) fn get(
+            &mut self,
+            retry_after: Duration,
+            init: impl FnOnce() -> Option<T>,
+        ) -> Option<T> {
+            if let Some(value) = &self.value {
+                return Some(value.clone());
+            }
+            if self.failed_at.is_some_and(|at| at.elapsed() < retry_after) {
+                return None;
+            }
+            match init() {
+                Some(value) => {
+                    self.failed_at = None;
+                    self.value = Some(value.clone());
+                    Some(value)
+                }
+                None => {
+                    self.failed_at = Some(Instant::now());
+                    None
+                }
+            }
+        }
     }
 
     /// Starts `cmd` in the host and attaches to it from offset 0. The host gets
@@ -972,5 +1018,35 @@ pub(crate) mod tests {
             .expect("a hosted master downcasts to HostMaster");
         assert!(hosted.raw_mode());
         child.kill().unwrap();
+    }
+
+    #[test]
+    fn a_failed_host_start_is_retried_not_final() {
+        use super::unix::RetryCell;
+        let mut cell: RetryCell<u32> = RetryCell::new();
+        let mut calls = 0;
+        // Failing, with a long back-off: asked once, then not again.
+        assert_eq!(
+            cell.get(Duration::from_secs(3600), || {
+                calls += 1;
+                None
+            }),
+            None
+        );
+        assert_eq!(
+            cell.get(Duration::from_secs(3600), || {
+                calls += 1;
+                Some(1)
+            }),
+            None
+        );
+        assert_eq!(calls, 1, "a down host must not be retried on every spawn");
+        // Once the back-off has passed, the next ask tries again and can succeed.
+        assert_eq!(cell.get(Duration::ZERO, || Some(7)), Some(7));
+        // A success is kept for good and never re-made.
+        assert_eq!(
+            cell.get(Duration::ZERO, || panic!("must not run again")),
+            Some(7)
+        );
     }
 }

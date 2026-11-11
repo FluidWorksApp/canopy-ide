@@ -38,7 +38,7 @@ const BIN_LOCK: &str = ".lock";
 /// In `bin/`: the last bundle's identity and hash.
 const CACHE: &str = ".bundled-cache";
 /// In each install dir: held shared by every app that uses it.
-pub(super) const DIR_LOCK: &str = ".lock";
+pub(super) const DIR_LOCK: &str = canopy_pty_host::server::INSTALL_LOCK;
 
 /// Hex digits of the content hash in a directory name.
 const DIGEST_LEN: usize = 16;
@@ -106,8 +106,12 @@ pub(super) enum Liveness {
     Unknown,
 }
 
-/// Reads liveness from a `hello` answer. Only "no socket" and "nobody
-/// listening" prove there is no host; any other failure is unknown.
+/// Reads liveness from a `hello` answer. Only a missing socket proves there is
+/// no host. A refused connection does not: a live host whose accept queue is
+/// full is refused too (seen on macOS), and pruning on that would delete the
+/// directory it runs from. Every other failure is unknown as well. (Even then, a
+/// directory the host holds is kept: the host takes the shared lock on its own
+/// install directory, see `unclaimed`.)
 pub(super) fn liveness(hello: &std::io::Result<Response>) -> Liveness {
     match hello {
         Ok(reply) => Liveness::Known(
@@ -116,14 +120,7 @@ pub(super) fn liveness(hello: &std::io::Result<Response>) -> Liveness {
                 .as_deref()
                 .and_then(|exe| install_dir_of(Path::new(exe))),
         ),
-        Err(e)
-            if matches!(
-                e.kind(),
-                std::io::ErrorKind::NotFound | std::io::ErrorKind::ConnectionRefused
-            ) =>
-        {
-            Liveness::Known(None)
-        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Liveness::Known(None),
         Err(_) => Liveness::Unknown,
     }
 }
@@ -169,12 +166,24 @@ pub(super) fn verify(exe: &Path, digest: &str) -> std::io::Result<()> {
 }
 
 /// Create `dir` if needed and make it 0700. Refused if it is a symlink or
-/// belongs to another user (checked before the chmod, which follows
-/// symlinks), since then its mode says nothing about who can replace the
-/// binary inside. The same rule as the context bridge's socket directory.
+/// belongs to another user, since then its mode says nothing about who can
+/// replace the binary inside. The checks and the chmod all go through one
+/// descriptor opened with `O_NOFOLLOW | O_DIRECTORY`, so the path cannot be
+/// swapped for a symlink between the check and the mode change. The same rule
+/// as the context bridge's socket directory.
 fn private_dir(dir: &Path) -> std::io::Result<()> {
     std::fs::create_dir_all(dir)?;
-    let meta = std::fs::symlink_metadata(dir)?;
+    let handle = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_DIRECTORY)
+        .open(dir)
+        .map_err(|e| {
+            std::io::Error::other(format!(
+                "{} is not a plain directory of ours ({e})",
+                dir.display()
+            ))
+        })?;
+    let meta = handle.metadata()?;
     if !meta.file_type().is_dir() {
         return Err(std::io::Error::other(format!(
             "{} is not a directory",
@@ -188,7 +197,7 @@ fn private_dir(dir: &Path) -> std::io::Result<()> {
             dir.display()
         )));
     }
-    std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))
+    handle.set_permissions(std::fs::Permissions::from_mode(0o700))
 }
 
 fn flock(file: &File, op: libc::c_int) -> std::io::Result<()> {
@@ -229,7 +238,9 @@ fn claim(bin: &Path, name: &str) -> std::io::Result<(PathBuf, File)> {
     Ok((dir, hold))
 }
 
-/// Whether no app holds `dir`. A missing lock file means it was never
+/// Whether no app and no host holds `dir`: both take the shared lock on its
+/// `.lock` for as long as they run (the host does it itself at startup, so it
+/// holds across the app that started it, and `hello` need not answer). A missing lock file means it was never
 /// claimed (an older build); anything but a clean acquire means keep it.
 fn unclaimed(dir: &Path) -> bool {
     match File::open(dir.join(DIR_LOCK)) {
@@ -504,11 +515,9 @@ mod tests {
             liveness(&err(std::io::ErrorKind::NotFound)),
             Liveness::Known(None)
         );
-        assert_eq!(
-            liveness(&err(std::io::ErrorKind::ConnectionRefused)),
-            Liveness::Known(None)
-        );
         for kind in [
+            // A full accept queue on a live host looks like this.
+            std::io::ErrorKind::ConnectionRefused,
             std::io::ErrorKind::TimedOut,
             std::io::ErrorKind::WouldBlock,
             std::io::ErrorKind::ConnectionReset,
@@ -752,6 +761,50 @@ mod tests {
     }
 
     #[test]
+    fn prune_leaves_a_directory_a_running_host_holds_even_without_an_app() {
+        // The host takes the same shared lock as an app does, so a host that
+        // outlives its app keeps its directory when `hello` could not answer.
+        let root = scratch("hosthold");
+        let bundled = root.join("bundled");
+        std::fs::write(&bundled, b"old").unwrap();
+        let bin = root.join("bin");
+        let old = install(&bundled, &bin, "0.5.14").unwrap();
+        let old_dir = old.exe.parent().unwrap().to_path_buf();
+        drop(old);
+        let host_hold = File::open(old_dir.join(DIR_LOCK)).unwrap();
+        flock(&host_hold, libc::LOCK_SH).unwrap();
+        prune(&bin, "9.9.9-ffffffffffffffff", &Liveness::Known(None));
+        assert!(old_dir.exists());
+        drop(host_hold);
+        prune(&bin, "9.9.9-ffffffffffffffff", &Liveness::Known(None));
+        assert!(!old_dir.exists());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn private_dir_does_not_follow_a_symlink_swapped_in_for_the_path() {
+        let root = scratch("nofollow");
+        let victim = root.join("victim");
+        std::fs::create_dir_all(&victim).unwrap();
+        std::fs::set_permissions(&victim, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let dir = root.join("dir");
+        std::os::unix::fs::symlink(&victim, &dir).unwrap();
+        assert!(private_dir(&dir).is_err());
+        let mode = std::fs::metadata(&victim).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o755, "the symlink target was chmodded");
+        // A real directory is still made private, mode and all.
+        let real = root.join("real");
+        std::fs::create_dir_all(&real).unwrap();
+        std::fs::set_permissions(&real, std::fs::Permissions::from_mode(0o755)).unwrap();
+        private_dir(&real).unwrap();
+        assert_eq!(
+            std::fs::metadata(&real).unwrap().permissions().mode() & 0o777,
+            0o700
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
     fn a_symlinked_or_foreign_directory_is_refused() {
         let root = scratch("priv");
         let real = root.join("real");
@@ -761,7 +814,7 @@ mod tests {
         assert!(private_dir(&link)
             .unwrap_err()
             .to_string()
-            .contains("not a directory"));
+            .contains("not a plain directory"));
         // The target was not chmodded through the link.
         let mode = std::fs::metadata(&real).unwrap().permissions().mode() & 0o777;
         assert_ne!(mode, 0o700);

@@ -987,3 +987,111 @@ fn a_replaced_client_sees_eof_and_its_typing_no_longer_reaches_the_child() {
     );
     assert_eq!(h.client.list().unwrap()[0].attached, Some(true));
 }
+
+#[test]
+fn shutdown_if_idle_stops_an_idle_host_and_refuses_new_spawns() {
+    use canopy_pty_host::client::IdleShutdown;
+    let (dir, socket, mut old) = refusing_host("sidle");
+    let client = HostClient::new(&socket);
+    assert_eq!(client.shutdown_if_idle().unwrap(), IdleShutdown::Stopping);
+    // From the moment it agreed, a spawn is refused (or finds no host).
+    assert!(client.spawn(spec("sleep 300")).is_err());
+    assert!(
+        exits_within(&mut old, Duration::from_secs(10)),
+        "the idle host did not stop"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn shutdown_if_idle_leaves_a_host_with_a_running_terminal_alone() {
+    use canopy_pty_host::client::IdleShutdown;
+    let (dir, socket, mut old) = refusing_host("sbusy");
+    let client = HostClient::new(&socket);
+    let (id, _) = client.spawn(spec("sleep 300")).unwrap();
+    assert_eq!(client.shutdown_if_idle().unwrap(), IdleShutdown::Busy(1));
+    assert!(matches!(old.try_wait(), Ok(None)), "the host was stopped");
+    let listed = client.list().unwrap();
+    assert!(listed.iter().any(|s| s.id == id && s.exited.is_none()));
+    let _ = old.kill();
+    let _ = exits_within(&mut old, Duration::from_secs(10));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_spawn_racing_shutdown_if_idle_is_never_killed_by_it() {
+    use canopy_pty_host::client::IdleShutdown;
+    // Whichever wins, a session that was started is never under a host that
+    // agreed to stop: either the spawn lands and shutdown says busy, or
+    // shutdown wins and the spawn is refused.
+    for round in 0..8 {
+        let (dir, socket, mut old) = refusing_host(&format!("srace{round}"));
+        let spawner = {
+            let socket = socket.clone();
+            std::thread::spawn(move || HostClient::new(&socket).spawn(spec("sleep 300")))
+        };
+        let stopper = HostClient::new(&socket).shutdown_if_idle().unwrap();
+        let spawned = spawner.join().unwrap();
+        match (spawned.is_ok(), stopper) {
+            (true, IdleShutdown::Busy(1)) => {
+                assert!(matches!(old.try_wait(), Ok(None)), "round {round}");
+            }
+            (false, IdleShutdown::Stopping) => {}
+            (spawned, stopper) => panic!("round {round}: spawn ok={spawned}, stop={stopper:?}"),
+        }
+        let _ = old.kill();
+        let _ = exits_within(&mut old, Duration::from_secs(10));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+#[test]
+fn idle_shutdown_replies_are_classified() {
+    use canopy_pty_host::client::{classify_idle_shutdown, IdleShutdown};
+    use canopy_pty_host::protocol::Response;
+    assert_eq!(
+        classify_idle_shutdown(&Response::ok()),
+        IdleShutdown::Stopping
+    );
+    let busy = Response {
+        error: Some("busy".into()),
+        running: Some(3),
+        ..Default::default()
+    };
+    assert_eq!(classify_idle_shutdown(&busy), IdleShutdown::Busy(3));
+    // What a host from before the op answers.
+    let old = Response::err("bad request: unknown variant `shutdown_if_idle`");
+    assert_eq!(classify_idle_shutdown(&old), IdleShutdown::Unsupported);
+    assert!(matches!(
+        classify_idle_shutdown(&Response::err("boom")),
+        IdleShutdown::Failed(_)
+    ));
+}
+
+#[test]
+fn a_host_started_from_an_install_directory_holds_its_lock_while_it_lives() {
+    use std::os::unix::io::AsRawFd;
+    let dir = std::env::temp_dir().join(format!("cph{}ilock", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let install = dir.join("bin").join("0.0.0-0123456789abcdef");
+    std::fs::create_dir_all(&install).unwrap();
+    let exe = install.join("canopy-pty-host");
+    std::fs::copy(host_exe(), &exe).unwrap();
+    let lock_path = install.join(canopy_pty_host::server::INSTALL_LOCK);
+    std::fs::write(&lock_path, b"").unwrap();
+    let try_exclusive = || {
+        let file = std::fs::File::open(&lock_path).unwrap();
+        // SAFETY: flock on a descriptor we own.
+        unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) == 0 }
+    };
+
+    let client = HostClient::ensure_running(&exe, &dir.join("h.sock"), 60).unwrap();
+    // With no app holding it, only the running host can be what blocks this.
+    assert!(!try_exclusive(), "a running host must hold its directory");
+    let _ = client.shutdown();
+    assert!(
+        wait_until(Duration::from_secs(10), try_exclusive),
+        "the lock outlived the host"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}

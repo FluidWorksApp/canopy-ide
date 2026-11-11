@@ -137,6 +137,30 @@ pub fn skew_action(listed: &std::io::Result<Vec<SessionInfo>>) -> SkewAction {
     }
 }
 
+/// The answer to `shutdown_if_idle`.
+#[derive(Debug, PartialEq)]
+pub enum IdleShutdown {
+    /// The host was idle and is stopping; it takes no more spawns.
+    Stopping,
+    /// It runs this many sessions and was left running.
+    Busy(usize),
+    /// A host older than `SHUTDOWN_IF_IDLE_VERSION` does not know the op.
+    Unsupported,
+    /// Any other refusal.
+    Failed(String),
+}
+
+pub fn classify_idle_shutdown(reply: &Response) -> IdleShutdown {
+    if reply.ok {
+        return IdleShutdown::Stopping;
+    }
+    match reply.error.as_deref() {
+        Some(crate::protocol::BUSY) => IdleShutdown::Busy(reply.running.unwrap_or(0)),
+        Some(e) if e.starts_with("bad request") => IdleShutdown::Unsupported,
+        other => IdleShutdown::Failed(other.unwrap_or("host error").to_owned()),
+    }
+}
+
 pub struct Attached {
     pub stream: UnixStream,
     pub start: u64,
@@ -355,6 +379,13 @@ impl HostClient {
         self.call(&Request::Shutdown).map(|_| ())
     }
 
+    /// Stops the host only if it runs nothing, decided by the host under the
+    /// lock spawns take (see `Request::ShutdownIfIdle`).
+    pub fn shutdown_if_idle(&self) -> std::io::Result<IdleShutdown> {
+        let reply = self.call_raw(&Request::ShutdownIfIdle, CALL_TIMEOUT)?;
+        Ok(classify_idle_shutdown(&reply))
+    }
+
     /// Opens the data connection: the reply, then raw bytes from `start` both ways.
     /// Replaces any client already attached.
     pub fn attach(&self, id: u32, after: u64) -> std::io::Result<Attached> {
@@ -511,22 +542,14 @@ impl HostClient {
                 min_client,
                 host_pid,
             } => match skew_action(&client.list_within(SKEW_LIST_WAIT)) {
-                SkewAction::Replace => {
-                    let _ = client.shutdown();
-                    wait_for_host_gone(socket, host_pid)?;
-                }
+                SkewAction::Replace => match stop_skewed_host(&client) {
+                    SkewStop::Stopping => wait_for_host_gone(socket, host_pid)?,
+                    SkewStop::Keep(running) => {
+                        return Err(skew_kept_error(version, min_client, running));
+                    }
+                },
                 SkewAction::Keep(running) => {
-                    let shown = |v: Option<u32>| v.map_or_else(|| "?".into(), |v| v.to_string());
-                    let running = running.map_or_else(|| "some".into(), |n| n.to_string());
-                    return Err(other(format!(
-                        "an incompatible PTY host is still running {running} terminal(s) \
-                         (it speaks protocol {} and accepts clients from {}; this client \
-                         speaks {PROTOCOL_VERSION} and needs a host of {MIN_HOST_VERSION} or \
-                         newer). It is left running for them; new terminals cannot use it \
-                         until they exit",
-                        shown(version),
-                        shown(min_client),
-                    )));
+                    return Err(skew_kept_error(version, min_client, running));
                 }
             },
             HelloOutcome::NoHost | HelloOutcome::Unknown(_) => {}
@@ -578,6 +601,48 @@ impl HostClient {
         }
         Err(other("host did not start in time"))
     }
+}
+
+enum SkewStop {
+    Stopping,
+    Keep(Option<usize>),
+}
+
+/// Stops a skewed host that `list` showed idle, without killing a session a
+/// compatible client started since. A host that serves `shutdown_if_idle`
+/// decides atomically. An older one cannot: it is listed once more right before
+/// `shutdown`, which narrows that window to the gap between those two calls.
+fn stop_skewed_host(client: &HostClient) -> SkewStop {
+    match client.shutdown_if_idle() {
+        Ok(IdleShutdown::Stopping) => SkewStop::Stopping,
+        Ok(IdleShutdown::Busy(n)) => SkewStop::Keep(Some(n)),
+        Ok(IdleShutdown::Unsupported) => match skew_action(&client.list_within(SKEW_LIST_WAIT)) {
+            SkewAction::Replace => {
+                let _ = client.shutdown();
+                SkewStop::Stopping
+            }
+            SkewAction::Keep(n) => SkewStop::Keep(n),
+        },
+        Ok(IdleShutdown::Failed(_)) | Err(_) => SkewStop::Keep(None),
+    }
+}
+
+fn skew_kept_error(
+    version: Option<u32>,
+    min_client: Option<u32>,
+    running: Option<usize>,
+) -> std::io::Error {
+    let shown = |v: Option<u32>| v.map_or_else(|| "?".into(), |v| v.to_string());
+    let running = running.map_or_else(|| "some".into(), |n| n.to_string());
+    other(format!(
+        "an incompatible PTY host is still running {running} terminal(s) \
+         (it speaks protocol {} and accepts clients from {}; this client \
+         speaks {PROTOCOL_VERSION} and needs a host of {MIN_HOST_VERSION} or \
+         newer). It is left running for them; new terminals cannot use it \
+         until they exit",
+        shown(version),
+        shown(min_client),
+    ))
 }
 
 /// How long a skewed host gets to answer `list`.

@@ -103,7 +103,7 @@ for target in "${TARGETS[@]}"; do
       > src-tauri/onnxruntime/DICTATION_UNSUPPORTED.txt
     # `--` forwards --no-default-features to cargo; `tauri build` rejects it as
     # an unknown flag otherwise.
-    BUILD_ARGS=(--target "$target" -- --no-default-features)
+    BUILD_ARGS=(--target "$target" --config src-tauri/tauri.release-macos.conf.json -- --no-default-features)
   else
     if [ ! -f "$ORT_DYLIB" ]; then
       echo "==> fetching ONNX Runtime $ORT_VER"
@@ -118,7 +118,7 @@ for target in "${TARGETS[@]}"; do
     echo "==> re-signing ONNX Runtime for notarisation"
     codesign --force --timestamp --options runtime --sign "$SIGNING_IDENTITY" "$ORT_DYLIB"
     codesign --verify --strict "$ORT_DYLIB"
-    BUILD_ARGS=(--target "$target")
+    BUILD_ARGS=(--target "$target" --config src-tauri/tauri.release-macos.conf.json)
   fi
   npm run tauri build -- "${BUILD_ARGS[@]}"
 
@@ -140,6 +140,12 @@ for target in "${TARGETS[@]}"; do
   codesign --verify --strict "$APP/Contents/MacOS/canopy-hook"
   # Same for the PTY host, copied to ~/.canopy/pty-host/bin/<version>-<hash>/.
   codesign --verify --strict "$APP/Contents/MacOS/canopy-pty-host"
+  # ...and it must carry no entitlements (src-tauri/pty-host-entitlements.plist);
+  # tauri-bundler would have given it the app's.
+  if codesign -d --entitlements - --xml "$APP/Contents/MacOS/canopy-pty-host" 2>/dev/null | grep -q "<key>"; then
+    echo "error: canopy-pty-host carries entitlements for $target" >&2
+    exit 1
+  fi
 
   if $NOTARIZE; then
     echo "==> notarising $(basename "$DMG")"

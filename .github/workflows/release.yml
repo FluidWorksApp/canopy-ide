@@ -66,12 +66,12 @@ jobs:
           # dylib; the ONNX steps below skip it.
           - platform: macos-latest
             target: aarch64-apple-darwin
-            args: "--target aarch64-apple-darwin --features desk-native"
+            args: "--target aarch64-apple-darwin --features desk-native --config src-tauri/tauri.release-macos.conf.json"
           - platform: macos-latest
             target: x86_64-apple-darwin
             # `--` hands --no-default-features to cargo; `tauri build` has no such
             # flag of its own and errors on it otherwise.
-            args: "--target x86_64-apple-darwin -- --no-default-features --features desk-native"
+            args: "--target x86_64-apple-darwin --config src-tauri/tauri.release-macos.conf.json -- --no-default-features --features desk-native"
           # 22.04, not latest: the glibc you build against is the *floor* for
           # what users can run. Building on 24.04 would exclude 22.04 users.
           - platform: ubuntu-22.04
@@ -281,19 +281,35 @@ jobs:
           includeUpdaterJson: true
           args: ${{ matrix.args }}
 
-      # tauri-bundler signs every externalBin entry with the app's identity,
-      # hardened runtime and entitlements. The app copies canopy-pty-host out
-      # of the bundle and runs it from there (pty_hosted/install.rs), so that
-      # copy carries only its own signature: check it is a valid one. Read-only.
+      # tauri-bundler signs every externalBin entry with the app's entitlements
+      # (one set for all, no per-binary setting), which would hand the PTY host
+      # JIT, library-validation-off, DYLD and microphone rights it does not
+      # need. So on macOS the host is not an externalBin: prepare-sidecar.mjs
+      # signs it with src-tauri/pty-host-entitlements.plist (during the build,
+      # before anything is bundled or uploaded, and failing the build if codesign
+      # fails) and tauri.release-macos.conf.json copies it into
+      # Contents/MacOS, which the bundler does not re-sign. The app copies it out
+      # of the bundle and runs it from there (pty_hosted/install.rs).
+      #
+      # This step checks what shipped. Signing is expected whenever
+      # APPLE_CERTIFICATE is set (an unsigned build is the one supported way to
+      # run without it); then a missing identity, a missing host, or any
+      # entitlement on the host fails the job. It runs after tauri-action has
+      # uploaded to the draft release, which stays a draft until published.
       - name: Verify the PTY host sidecar is signed (macOS)
         if: startsWith(matrix.platform, 'macos')
         shell: bash
         env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
           APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
         run: |
-          if [ -z "$APPLE_SIGNING_IDENTITY" ]; then
-            echo "APPLE_SIGNING_IDENTITY not set — unsigned build, nothing to verify."
+          if [ -z "$APPLE_CERTIFICATE" ]; then
+            echo "APPLE_CERTIFICATE not set: unsigned build, nothing to verify."
             exit 0
+          fi
+          if [ -z "$APPLE_SIGNING_IDENTITY" ]; then
+            echo "::error::APPLE_CERTIFICATE is set but APPLE_SIGNING_IDENTITY is not, so the build was not signed as intended."
+            exit 1
           fi
           root="src-tauri/target/${{ matrix.target }}/release/bundle"
           [ -d "$root" ] || root="src-tauri/target/release/bundle"
@@ -311,16 +327,14 @@ jobs:
             || { echo "::error::canopy-pty-host is not signed with the hardened runtime."; exit 1; }
           echo "$info" | grep -E "^Timestamp=" >/dev/null \
             || { echo "::error::canopy-pty-host has no secure timestamp."; exit 1; }
-          # The host needs no entitlements (src-tauri/pty-host-entitlements.plist).
-          # tauri-bundler signs sidecars with the app's entitlements, so report
-          # anything broader than that as a warning until it can be narrowed.
-          ents="$(codesign -d --entitlements - --xml "$host" 2>/dev/null || true)"
+          # No entitlement at all (src-tauri/pty-host-entitlements.plist).
+          ents="$(codesign -d --entitlements - --xml "$host")" \
+            || { echo "::error::could not read the entitlements of canopy-pty-host."; exit 1; }
           echo "$ents"
-          for key in allow-jit device.audio-input disable-library-validation allow-dyld-environment-variables; do
-            if echo "$ents" | grep -q "$key"; then
-              echo "::warning::canopy-pty-host carries the $key entitlement; it needs none."
-            fi
-          done
+          if echo "$ents" | grep -q "<key>"; then
+            echo "::error::canopy-pty-host carries entitlements; it must carry none."
+            exit 1
+          fi
 
       # `tauri build` exits 0 even when signing fails ("a public key has been
       # found, but no private key"), so a missing or bad secret would publish a

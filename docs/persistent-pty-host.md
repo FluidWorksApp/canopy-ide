@@ -168,6 +168,12 @@ as a second agent on the same conversation. Ids are seeded past the adopted max.
 - Adopted agents' hooks point at the dead context-bridge port. Until the bridge
   has a stable address, adoption only promises terminal-level survival: bytes,
   input, resize, exit. Agent tools and attention do not come back.
+- Replacing an incompatible, idle host uses the protocol 4 `shutdown_if_idle`
+  op: the host checks that nothing runs and stops accepting spawns under the one
+  lock spawns take, so a terminal another client starts meanwhile is never
+  killed. A host older than 4 lacks the op; there the client lists again right
+  before `shutdown`, which leaves a small window. A failed start of the host
+  client is retried after 30 s rather than kept for the app's lifetime.
 - Adoption attaches with `exclusive` on a protocol 3 host, so a CLI client that
   attached after the `list` is refused rather than silently disconnected.
 
@@ -175,10 +181,22 @@ as a second agent on the same conversation. Ids are seeded past the adopted max.
 (`externalBin: binaries/canopy-pty-host`, built by `scripts/prepare-sidecar.mjs`
 through its own manifest). Tauri places it next to the app binary
 (`Canopy.app/Contents/MacOS`, `/usr/bin` for deb and rpm, the AppImage's
-`usr/bin`, next to `canopy.exe` on Windows). On macOS, tauri-bundler signs every
-externalBin entry with the app identity, the hardened runtime and
-`entitlements.plist` (none of its keys need a provisioning profile). The release
-workflow and `release-macos.sh` then run `codesign --verify --strict` on it.
+`usr/bin`, next to `canopy.exe` on Windows).
+- macOS signing. tauri-bundler 2.10 signs every externalBin entry with the app's
+  one entitlements file (`entitlements.plist`: JIT, library validation off, DYLD
+  variables, microphone) and has no per-binary setting, and `codesign --force`
+  would overwrite any signature put on the file beforehand. A long-lived process
+  that outlives the app should not carry those. So for macOS release builds the
+  host is not an externalBin: `prepare-sidecar.mjs --release` signs a copy
+  (`binaries/canopy-pty-host-signed`) with the hardened runtime, a timestamp and
+  the empty `pty-host-entitlements.plist`, and `tauri.release-macos.conf.json`
+  (passed with `--config` by `release.yml` and `release-macos.sh`) removes the
+  externalBin entry and copies that file to `Contents/MacOS/canopy-pty-host`
+  through `bundle.macOS.files`, which the bundler never signs. Without
+  `APPLE_SIGNING_IDENTITY` the copy is staged unsigned. Dev and CI builds do not
+  use the override. The release workflow then checks the shipped host: valid
+  signature, hardened runtime, timestamp, and no entitlement key at all; it fails
+  the job when `APPLE_CERTIFICATE` is set and any of that is wrong.
 - A host never runs from the bundle. An update replaces the bundle while the
   host keeps running. A translocated app, or an AppImage, runs from a mount that
   goes away when the app quits. And a later launch must never exec a path the
