@@ -66,7 +66,7 @@ pub trait FrameSource {
 
     /// A paste, bracketed when the program asked for it.
     fn paste(&mut self, text: &str) -> bool {
-        encode_with(self, |modes, out| encode_paste(text, modes, out))
+        encode_with(self, |modes, out| encode_paste(text, modes, out).written)
     }
 
     /// A mouse event; sends nothing unless the program asked for mouse

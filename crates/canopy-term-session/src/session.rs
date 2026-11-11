@@ -869,7 +869,7 @@ impl<L: SessionLink> FrameSource for Session<L> {
     }
 
     fn paste(&mut self, text: &str) -> bool {
-        self.encode(|modes, out| encode_paste(text, modes, out))
+        self.encode(|modes, out| encode_paste(text, modes, out).written)
     }
 
     fn mouse(&mut self, ev: &MouseEvent) -> bool {
