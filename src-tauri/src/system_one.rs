@@ -143,11 +143,23 @@ fn is_our_server(cmdline: &str, bin: &Path) -> bool {
 
 #[cfg(unix)]
 fn command_of(pid: u32) -> String {
-    Command::new(crate::procenv::resolve_command("ps"))
+    use std::io::Read;
+    let Ok(mut child) = Command::new(crate::procenv::resolve_command("ps"))
         .args(["-p", &pid.to_string(), "-o", "command="])
-        .output()
-        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
-        .unwrap_or_default()
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+    else {
+        return String::new();
+    };
+    let mut out = String::new();
+    if let Some(stdout) = child.stdout.take() {
+        // Bounded: one command line, never more.
+        let _ = stdout.take(4096).read_to_string(&mut out);
+    }
+    let _ = child.wait();
+    out.trim().to_string()
 }
 
 /// End a server left by an earlier run of the app.
