@@ -518,6 +518,13 @@ name = "canopy-term-core"
 version = "0.1.0"
 
 [[package]]
+name = "canopy-term-input"
+version = "0.1.0"
+dependencies = [
+ "canopy-term-core",
+]
+
+[[package]]
 name = "canopy-term-render"
 version = "0.1.0"
 dependencies = [
@@ -538,6 +545,7 @@ dependencies = [
  "accesskit_winit",
  "arboard",
  "canopy-term-core",
+ "canopy-term-input",
  "canopy-term-render",
  "pollster",
  "unicode-width",

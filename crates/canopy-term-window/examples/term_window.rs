@@ -10,7 +10,7 @@ use std::collections::{BTreeSet, VecDeque};
 
 use canopy_term_window::frame::{Attrs, Cell, Color, Cursor, Damage, Frame};
 use canopy_term_window::source::{FrameSource, Waker};
-use canopy_term_window::window::{run, BasicInput, WindowConfig};
+use canopy_term_window::window::{run, WindowConfig};
 use unicode_width::UnicodeWidthChar;
 
 const HELP: &[&str] = &[
@@ -453,7 +453,7 @@ fn main() {
         title: "Canopy terminal window demo".to_string(),
         ..WindowConfig::default()
     };
-    if let Err(e) = run(demo, BasicInput, config) {
+    if let Err(e) = run(demo, config) {
         eprintln!("term_window: {e}");
         std::process::exit(1);
     }

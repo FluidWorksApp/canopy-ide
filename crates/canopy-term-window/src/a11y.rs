@@ -446,9 +446,10 @@ impl A11yTree {
         cell: CellPx,
         selection: Option<&Selection>,
     ) -> Option<TreeUpdate> {
-        let Some(prev) = self.published.as_mut() else {
+        if self.published.is_none() {
             return Some(self.full(frame, cell, selection));
-        };
+        }
+        let prev = self.published.as_mut().expect("checked above");
         let lines = all_lines(frame);
         let sel = text_selection(&lines, frame, selection);
         let title = title_of(frame);

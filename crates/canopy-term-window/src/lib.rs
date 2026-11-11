@@ -18,7 +18,9 @@
 //! * [`source`]: the `FrameSource` boundary the window pulls frames from.
 //!
 //! The `window` feature (on by default) adds [`window::run`], which owns the
-//! winit loop, the wgpu surface and the AccessKit adapter.
+//! winit loop, the wgpu surface and the AccessKit adapter, and maps winit key,
+//! mouse, paste and focus events onto `canopy-term-input` (`window::keymap`),
+//! which does all the encoding.
 //!
 //! Dependency licences (checked with `cargo metadata` over every platform):
 //! all MIT, Apache-2.0, BSD, ISC, Zlib or Unicode, except `clipboard-win` and

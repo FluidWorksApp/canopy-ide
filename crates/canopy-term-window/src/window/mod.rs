@@ -9,7 +9,7 @@
 //! nothing presented during synchronized output.
 
 mod gpu;
-pub mod input_bridge;
+pub mod keymap;
 
 use std::fmt;
 use std::sync::{Arc, Mutex};
@@ -17,6 +17,7 @@ use std::time::Instant;
 
 use accesskit::{Action, ActionData, ActionRequest};
 use canopy_term_core::frame::{Frame, Modes};
+use canopy_term_input as input;
 use canopy_term_render::builder::{QuadBuilder, RenderState};
 use canopy_term_render::color::Theme;
 use canopy_term_render::fonts::{FontBook, BUNDLED_FONT};
@@ -26,13 +27,16 @@ use canopy_term_render::renderer::Renderer;
 use canopy_term_render::text::TextEngine;
 use winit::application::ApplicationHandler;
 use winit::dpi::{LogicalSize, PhysicalPosition, PhysicalSize};
-use winit::event::{ElementState, Ime, KeyEvent, MouseButton, StartCause, WindowEvent};
+use winit::event::{
+    ElementState, Ime, KeyEvent, MouseButton, MouseScrollDelta, StartCause, WindowEvent,
+};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy};
 use winit::keyboard::{Key, ModifiersState};
 use winit::window::{Window, WindowId};
 
 pub use gpu::choose_format;
-pub use input_bridge::{BasicInput, InputBridge};
+
+use keymap::{map_key, mods_from, mouse_button, reports_mouse, wheel_steps, KeyParts};
 
 use crate::a11y::A11yTree;
 use crate::blink::CursorBlink;
@@ -106,10 +110,9 @@ impl std::error::Error for Error {}
 
 /// Opens the window and runs until it is closed or the source closes. Must be
 /// called on the main thread (macOS requires it).
-pub fn run<S, I>(mut source: S, input: I, config: WindowConfig) -> Result<(), Error>
+pub fn run<S>(mut source: S, config: WindowConfig) -> Result<(), Error>
 where
     S: FrameSource + 'static,
-    I: InputBridge + 'static,
 {
     let event_loop = EventLoop::<UserEvent>::with_user_event()
         .build()
@@ -121,7 +124,7 @@ where
             let _ = p.send_event(UserEvent::Wake);
         }
     }));
-    let mut app = App::new(source, input, config, proxy);
+    let mut app = App::new(source, config, proxy);
     event_loop.run_app(&mut app).map_err(Error::EventLoop)?;
     match app.fatal.take() {
         Some(e) => Err(Error::Window(e)),
@@ -175,9 +178,20 @@ struct View {
     clipboard: Option<arboard::Clipboard>,
 }
 
-struct App<S, I> {
+/// winit's key without modifiers ("1" for Shift+1), where winit provides it.
+#[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
+fn unmodified_key(e: &KeyEvent) -> Key {
+    use winit::platform::modifier_supplement::KeyEventExtModifierSupplement;
+    e.key_without_modifiers()
+}
+
+#[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
+fn unmodified_key(e: &KeyEvent) -> Key {
+    e.logical_key.clone()
+}
+
+struct App<S> {
     source: S,
-    input: I,
     config: WindowConfig,
     proxy: EventLoopProxy<UserEvent>,
     view: Option<View>,
@@ -201,16 +215,26 @@ struct App<S, I> {
     ime_area: Option<PxRect>,
     /// The surface must be presented even if no row changed (resize, expose).
     needs_present: bool,
+    /// Reused buffer for encoded input.
+    out: Vec<u8>,
+    /// Mouse reporting: the button held (for motion reports), the last cell
+    /// reported, and the wheel's fractional steps.
+    mouse_held: Option<input::MouseButton>,
+    mouse_cell: Option<(u16, u16)>,
+    wheel_acc: f64,
 }
 
-impl<S: FrameSource, I: InputBridge> App<S, I> {
-    fn new(source: S, input: I, config: WindowConfig, proxy: EventLoopProxy<UserEvent>) -> Self {
+impl<S: FrameSource> App<S> {
+    fn new(source: S, config: WindowConfig, proxy: EventLoopProxy<UserEvent>) -> Self {
         let now = Instant::now();
         let mut blink = CursorBlink::new(now);
         blink.enabled = config.cursor_blink;
         App {
             source,
-            input,
+            out: Vec::new(),
+            mouse_held: None,
+            mouse_cell: None,
+            wheel_acc: 0.0,
             font: FontZoom::new(config.font_px),
             config,
             proxy,
@@ -377,10 +401,21 @@ impl<S: FrameSource, I: InputBridge> App<S, I> {
             self.drag_anchor = None;
         }
         let modes = self.modes();
-        if let Some(bytes) = self.input.focus(focused, &modes) {
-            self.write(&bytes);
-        }
+        self.encode_and_write(|out| input::encode_focus(focused, modes, out));
         self.request_redraw();
+    }
+
+    /// Runs an encoder into the reused buffer and writes what it produced.
+    /// Returns whether anything was written.
+    fn encode_and_write(&mut self, encode: impl FnOnce(&mut Vec<u8>) -> bool) -> bool {
+        let mut out = std::mem::take(&mut self.out);
+        out.clear();
+        let wrote = encode(&mut out) && !out.is_empty();
+        if wrote {
+            self.write(&out);
+        }
+        self.out = out;
+        wrote
     }
 
     fn on_key(&mut self, event: KeyEvent) {
@@ -401,11 +436,26 @@ impl<S: FrameSource, I: InputBridge> App<S, I> {
             return;
         }
         let modes = self.modes();
-        if let Some(bytes) = self.input.key(&event, self.mods, &modes) {
-            if !bytes.is_empty() {
-                self.selection = None;
-                self.write(&bytes);
-            }
+        let unmodified = unmodified_key(&event);
+        let parts = KeyParts {
+            logical: &event.logical_key,
+            unmodified: &unmodified,
+            location: event.location,
+            state: event.state,
+            repeat: event.repeat,
+            text: event.text.as_deref(),
+            mods: self.mods,
+        };
+        let mapped = map_key(&parts, Platform::current());
+        let text = parts.text;
+        let wrote = self.encode_and_write(|out| match mapped {
+            Some(ev) => input::encode_key(&ev, modes, out),
+            // Dead or unidentified keys: whatever text the platform produced.
+            None if pressed => text.is_some_and(|t| input::encode_text(t, modes, out)),
+            None => false,
+        });
+        if wrote && pressed {
+            self.selection = None;
         }
     }
 
@@ -428,8 +478,7 @@ impl<S: FrameSource, I: InputBridge> App<S, I> {
                     .and_then(|cb| cb.get_text().ok());
                 if let Some(text) = text {
                     let modes = self.modes();
-                    let bytes = self.input.paste(&text, &modes);
-                    self.write(&bytes);
+                    self.encode_and_write(|out| input::encode_paste(&text, modes, out));
                 }
             }
             Shortcut::ZoomIn => {
@@ -459,9 +508,8 @@ impl<S: FrameSource, I: InputBridge> App<S, I> {
             }
             ImeAction::Send(text) => {
                 let modes = self.modes();
-                let bytes = self.input.text(&text, &modes);
                 self.ime_area = None;
-                self.write(&bytes);
+                self.encode_and_write(|out| input::encode_text(&text, modes, out));
             }
         }
         self.update_ime_area();
@@ -488,8 +536,36 @@ impl<S: FrameSource, I: InputBridge> App<S, I> {
         }
     }
 
+    fn pointer_cell(&self) -> Option<(u16, u16)> {
+        let (pos, v) = (self.pointer?, self.view.as_ref()?);
+        cell_at(pos, cell_px(&v.layout), self.grid)
+    }
+
+    /// Reports a mouse event to the program at the pointer's cell.
+    fn report_mouse(&mut self, kind: input::MouseEventKind) -> bool {
+        let Some((row, col)) = self.pointer_cell() else {
+            return false;
+        };
+        let ev = input::MouseEvent {
+            kind,
+            col,
+            row,
+            mods: mods_from(self.mods),
+        };
+        let modes = self.modes();
+        self.mouse_cell = Some((row, col));
+        self.encode_and_write(|out| input::encode_mouse(&ev, modes, out))
+    }
+
     fn on_pointer_moved(&mut self, pos: PhysicalPosition<f64>) {
         self.pointer = Some((pos.x, pos.y));
+        if self.drag_anchor.is_none() && reports_mouse(&self.modes(), self.mods) {
+            let cell = self.pointer_cell();
+            if cell.is_some() && cell != self.mouse_cell {
+                self.report_mouse(input::MouseEventKind::Motion(self.mouse_held));
+            }
+            return;
+        }
         let (Some(anchor), Some(v)) = (self.drag_anchor, &self.view) else {
             return;
         };
@@ -508,6 +584,30 @@ impl<S: FrameSource, I: InputBridge> App<S, I> {
     }
 
     fn on_mouse_button(&mut self, state: ElementState, button: MouseButton) {
+        // The program asked for the mouse (and Shift is not held): report it.
+        // A release is reported for a press that was, even if Shift came down
+        // in between.
+        let reporting = self.drag_anchor.is_none()
+            && (reports_mouse(&self.modes(), self.mods)
+                || (state == ElementState::Released && self.mouse_held.is_some()));
+        if reporting {
+            if let Some(b) = mouse_button(button) {
+                let kind = match state {
+                    ElementState::Pressed => {
+                        self.mouse_held = Some(b);
+                        input::MouseEventKind::Press(b)
+                    }
+                    ElementState::Released => {
+                        if self.mouse_held == Some(b) {
+                            self.mouse_held = None;
+                        }
+                        input::MouseEventKind::Release(b)
+                    }
+                };
+                self.report_mouse(kind);
+            }
+            return;
+        }
         if button != MouseButton::Left {
             return;
         }
@@ -529,6 +629,27 @@ impl<S: FrameSource, I: InputBridge> App<S, I> {
                     self.request_redraw();
                 }
             }
+        }
+    }
+
+    /// The wheel goes to the program when it reports the mouse. There is no
+    /// scrollback in this window yet, so otherwise it does nothing.
+    fn on_wheel(&mut self, delta: MouseScrollDelta) {
+        if !reports_mouse(&self.modes(), self.mods) {
+            self.wheel_acc = 0.0;
+            return;
+        }
+        let Some(cell_h) = self.view.as_ref().map(|v| v.layout.height) else {
+            return;
+        };
+        let steps = wheel_steps(&mut self.wheel_acc, delta, cell_h);
+        let button = if steps > 0 {
+            input::MouseButton::WheelUp
+        } else {
+            input::MouseButton::WheelDown
+        };
+        for _ in 0..steps.unsigned_abs().min(50) {
+            self.report_mouse(input::MouseEventKind::Press(button));
         }
     }
 
@@ -674,7 +795,7 @@ impl<S: FrameSource, I: InputBridge> App<S, I> {
     }
 }
 
-impl<S: FrameSource, I: InputBridge> ApplicationHandler<UserEvent> for App<S, I> {
+impl<S: FrameSource> ApplicationHandler<UserEvent> for App<S> {
     fn new_events(&mut self, _el: &ActiveEventLoop, cause: StartCause) {
         if let StartCause::ResumeTimeReached { .. } = cause {
             // A blink phase ended.
@@ -744,6 +865,7 @@ impl<S: FrameSource, I: InputBridge> ApplicationHandler<UserEvent> for App<S, I>
             WindowEvent::Ime(ime) => self.on_ime(ime),
             WindowEvent::CursorMoved { position, .. } => self.on_pointer_moved(position),
             WindowEvent::MouseInput { state, button, .. } => self.on_mouse_button(state, button),
+            WindowEvent::MouseWheel { delta, .. } => self.on_wheel(delta),
             WindowEvent::Occluded(false) => {
                 self.needs_present = true;
                 self.request_redraw();
