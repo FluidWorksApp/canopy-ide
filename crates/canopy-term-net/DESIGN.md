@@ -106,7 +106,16 @@ confuse them.
 
 - One QUIC link per peer, cached; `connect` opens a new bidirectional stream
   (cheap). A dead cached link is dropped and redialed once.
-- ALPN `canopy-term/session/1` for the session protocol.
+- ALPN `canopy-term/session/1` for the session protocol. It is advertised only
+  after an explicit `listen()`; before that the endpoint only dials out, and
+  `accept()` is an error.
+- Accepted streams wait in a bounded queue (64); when it is full a new stream
+  is dropped, never queued without bound. Refusal notices have their own small
+  cap (8) so strangers cannot crowd out admitted peers.
+- The allowlist is checked when the link comes up, for every new stream, and
+  again after the stream preface; a revoked key's link is closed.
+- `LocalUnix` only unlinks its socket on drop if the path still holds the same
+  inode it bound. Allowlist saves are serialised and read the list once.
 - Address string: `<64 hex key>[@ip:port[,ip:port]]`. Without socket addresses
   the n0 discovery and relay are used (`IrohOptions { bind: None }`); the
   loopback options disable relay and discovery and bind only 127.0.0.1.

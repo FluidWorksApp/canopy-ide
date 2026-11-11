@@ -10,7 +10,7 @@
 use std::collections::BTreeSet;
 use std::io::{self, Write};
 use std::path::Path;
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, Mutex, RwLock};
 
 #[derive(Debug, PartialEq, Eq)]
 pub struct InvalidKey;
@@ -84,8 +84,24 @@ pub fn canonical_key(raw: &str) -> Option<String> {
     }
 }
 
+#[derive(Default, Debug)]
+struct Inner {
+    set: RwLock<BTreeSet<String>>,
+    /// Serialises saves, so two writers never race on the file.
+    save: Mutex<()>,
+}
+
 #[derive(Clone, Default, Debug)]
-pub struct Allowlist(Arc<RwLock<BTreeSet<String>>>);
+pub struct Allowlist(Arc<Inner>);
+
+fn render(set: &BTreeSet<String>) -> String {
+    let mut out = String::from("# canopy device allowlist: one public key per line\n");
+    for k in set {
+        out.push_str(k);
+        out.push('\n');
+    }
+    out
+}
 
 /// A poisoned lock (a thread panicked while holding it) fails closed: reads
 /// say "not allowed" and "empty", `add` is an error, and `save` refuses so an
@@ -98,40 +114,40 @@ impl Allowlist {
 
     /// True if a thread panicked while holding the list.
     pub fn is_poisoned(&self) -> bool {
-        self.0.is_poisoned()
+        self.0.set.is_poisoned()
     }
 
     /// Add a key. Returns whether it was new. Errors on an invalid key, and on
     /// a poisoned list (never `Ok`).
     pub fn add(&self, key: &str) -> Result<bool, InvalidKey> {
         let k = canonical_entry(key).ok_or(InvalidKey)?;
-        let mut set = self.0.write().map_err(|_| InvalidKey)?;
+        let mut set = self.0.set.write().map_err(|_| InvalidKey)?;
         Ok(set.insert(k))
     }
 
     pub fn remove(&self, key: &str) -> bool {
-        match (canonical_entry(key), self.0.write()) {
+        match (canonical_entry(key), self.0.set.write()) {
             (Some(k), Ok(mut set)) => set.remove(&k),
             _ => false,
         }
     }
 
     pub fn contains(&self, key: &str) -> bool {
-        match (canonical_entry(key), self.0.read()) {
+        match (canonical_entry(key), self.0.set.read()) {
             (Some(k), Ok(set)) => set.contains(&k),
             _ => false,
         }
     }
 
     pub fn keys(&self) -> Vec<String> {
-        match self.0.read() {
+        match self.0.set.read() {
             Ok(set) => set.iter().cloned().collect(),
             Err(_) => Vec::new(),
         }
     }
 
     pub fn len(&self) -> usize {
-        self.0.read().map(|set| set.len()).unwrap_or(0)
+        self.0.set.read().map(|set| set.len()).unwrap_or(0)
     }
 
     pub fn is_empty(&self) -> bool {
@@ -154,12 +170,21 @@ impl Allowlist {
     }
 
     pub fn to_text(&self) -> String {
-        let mut out = String::from("# canopy device allowlist: one public key per line\n");
-        for k in self.keys() {
-            out.push_str(&k);
-            out.push('\n');
+        match self.0.set.read() {
+            Ok(set) => render(&set),
+            Err(_) => render(&BTreeSet::new()),
         }
-        out
+    }
+
+    /// Test helper: poison the lock the way a panicking holder would.
+    #[cfg(test)]
+    pub(crate) fn poison_for_test(&self) {
+        let h = self.clone();
+        let _ = std::thread::spawn(move || {
+            let _guard = h.0.set.write().unwrap();
+            panic!("poison the allowlist (test)");
+        })
+        .join();
     }
 
     pub fn load(path: &Path) -> io::Result<Self> {
@@ -177,10 +202,21 @@ impl Allowlist {
     /// but who may connect is the access policy: not world writable. A
     /// poisoned list refuses to save.
     pub fn save(&self, path: &Path) -> io::Result<()> {
-        if self.is_poisoned() {
-            return Err(io::Error::other("allowlist is poisoned; not saving"));
-        }
-        let text = self.to_text();
+        // One save at a time, and the text comes from a single read of the
+        // list: a poisoned list is an error, never an empty file.
+        let _serial = self
+            .0
+            .save
+            .lock()
+            .map_err(|_| io::Error::other("allowlist save lock poisoned"))?;
+        let text = {
+            let set = self
+                .0
+                .set
+                .read()
+                .map_err(|_| io::Error::other("allowlist is poisoned; not saving"))?;
+            render(&set)
+        };
         let dir = match path.parent() {
             Some(p) if !p.as_os_str().is_empty() => p.to_path_buf(),
             _ => std::path::PathBuf::from("."),
@@ -364,12 +400,7 @@ mod tests {
     fn a_poisoned_list_fails_closed_and_never_saves() {
         let l = Allowlist::new();
         l.add(A).unwrap();
-        let h = l.clone();
-        let _ = std::thread::spawn(move || {
-            let _guard = h.0.write().unwrap();
-            panic!("poison the allowlist");
-        })
-        .join();
+        l.poison_for_test();
         assert!(l.is_poisoned());
         assert!(!l.contains(A));
         assert!(l.keys().is_empty());

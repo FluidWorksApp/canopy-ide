@@ -75,6 +75,9 @@ pub enum PairError {
     BadPeerKey,
     /// A payload that does not parse.
     BadPayload,
+    /// The allowlist could not store the key (a poisoned list). The offer is
+    /// not burned.
+    Storage,
 }
 
 /// What the host shows the joiner. The secret is reachable only through
@@ -260,9 +263,11 @@ impl<E: Entropy> Pairing<E> {
             }
         }
         if let Some(i) = hit {
+            // Store first, then burn: if the allowlist cannot take the key the
+            // offer stays live and the joiner can retry.
+            self.allow.add(&peer).map_err(|_| PairError::Storage)?;
             self.live.swap_remove(i);
             self.peers.remove(&peer);
-            self.allow.add(&peer).map_err(|_| PairError::BadPeerKey)?;
             return Ok(peer);
         }
         // A wrong code. Count it against this peer if there is room to track
@@ -282,9 +287,8 @@ impl<E: Entropy> Pairing<E> {
                 },
             );
         }
-        if self.global_failures == 0 {
-            self.global_expires_ms = expires;
-        }
+        // Every counted failure pushes the global window out, as documented.
+        self.global_expires_ms = expires;
         self.global_failures += 1;
         if self.global_failures >= MAX_GLOBAL_FAILED_ATTEMPTS {
             // Backstop: burn every live offer; the host must mint new ones.
@@ -504,6 +508,42 @@ mod tests {
             assert_eq!(p.redeem(WRONG, PEER, 4), Err(PairError::Invalid));
         }
         assert!(p.redeem(&again.reveal_code(), PEER, 5).is_ok());
+    }
+
+    #[test]
+    fn a_failed_store_does_not_burn_the_offer() {
+        let (mut p, allow) = pairing();
+        let offer = p.create_offer(0, 60_000);
+        allow.poison_for_test();
+        assert_eq!(
+            p.redeem(&offer.reveal_code(), PEER, 1),
+            Err(PairError::Storage)
+        );
+        assert_eq!(p.live_offers(), 1);
+    }
+
+    #[test]
+    fn every_counted_failure_extends_the_global_window() {
+        let (mut p, _) = pairing();
+        let offer = p.create_offer(0, 100 * LOCKOUT_MS);
+        // 24 failures spread so that the first is long expired by the last:
+        // without the refresh the count would have lapsed in between.
+        let per_key = MAX_FAILED_ATTEMPTS - 1;
+        let keys = (MAX_GLOBAL_FAILED_ATTEMPTS - 1) / per_key;
+        let mut now = 1;
+        for n in 0..keys {
+            for _ in 0..per_key {
+                let _ = p.redeem(WRONG, &key(500 + n), now);
+                now += LOCKOUT_MS / 2;
+            }
+        }
+        // One more failure from a fresh key reaches the cap and burns offers.
+        assert_eq!(
+            p.redeem(WRONG, &key(999), now),
+            Err(PairError::TooManyAttempts)
+        );
+        assert_eq!(p.live_offers(), 0);
+        let _ = offer;
     }
 
     #[test]

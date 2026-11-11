@@ -66,7 +66,15 @@ fn peer_uid(stream: &UnixStream) -> io::Result<u32> {
 
 pub struct LocalUnix {
     listener: Option<UnixListener>,
-    path: Option<PathBuf>,
+    /// The socket path and the (device, inode) it had when bound, so `Drop`
+    /// never unlinks a file someone else put there since.
+    path: Option<(PathBuf, (u64, u64))>,
+}
+
+fn dev_ino(path: &Path) -> io::Result<(u64, u64)> {
+    use std::os::unix::fs::MetadataExt;
+    let m = std::fs::symlink_metadata(path)?;
+    Ok((m.dev(), m.ino()))
 }
 
 impl LocalUnix {
@@ -78,9 +86,10 @@ impl LocalUnix {
             use std::os::unix::fs::PermissionsExt;
             std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
         }
+        let id = dev_ino(path)?;
         Ok(Self {
             listener: Some(listener),
-            path: Some(path.to_path_buf()),
+            path: Some((path.to_path_buf(), id)),
         })
     }
 
@@ -95,8 +104,11 @@ impl LocalUnix {
 
 impl Drop for LocalUnix {
     fn drop(&mut self) {
-        if let Some(p) = &self.path {
-            let _ = std::fs::remove_file(p);
+        if let Some((p, id)) = &self.path {
+            // Only our own socket: a replaced path is left alone.
+            if dev_ino(p).ok().as_ref() == Some(id) {
+                let _ = std::fs::remove_file(p);
+            }
         }
     }
 }
@@ -211,6 +223,30 @@ mod tests {
             std::process::id(),
             N.fetch_add(1, Ordering::Relaxed)
         ))
+    }
+
+    #[test]
+    fn drop_never_unlinks_a_file_that_replaced_the_socket() {
+        let path = sock_path();
+        let moved = path.with_extension("moved");
+        let server = LocalUnix::bind(&path).unwrap();
+        // Move our socket aside (keeping its inode alive) and put an impostor
+        // at the path, so the two inodes differ.
+        std::fs::rename(&path, &moved).unwrap();
+        std::fs::write(&path, b"not ours").unwrap();
+        drop(server);
+        assert_eq!(std::fs::read(&path).unwrap(), b"not ours");
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(&moved);
+    }
+
+    #[test]
+    fn drop_unlinks_its_own_socket() {
+        let path = sock_path();
+        let server = LocalUnix::bind(&path).unwrap();
+        assert!(path.exists());
+        drop(server);
+        assert!(!path.exists());
     }
 
     #[test]
