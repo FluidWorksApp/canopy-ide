@@ -448,6 +448,11 @@ impl HostMaster {
 }
 
 impl HostMaster {
+    /// The host's id for this session, for ops such as `set_meta`.
+    pub fn id(&self) -> u32 {
+        self.id
+    }
+
     /// Whether the foreground program has taken the terminal out of canonical
     /// mode. A hosted session has no local fd to ask, so the host answers.
     pub fn raw_mode(&self) -> bool {
