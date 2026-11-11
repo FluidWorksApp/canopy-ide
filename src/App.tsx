@@ -238,6 +238,8 @@ import {
   useHeldModifier,
 } from "./useHeldModifier";
 import { commandHeld, matches, terminalOwnsCtrl } from "./shortcuts";
+import { quitApp, startQuitStopAll, type QuitStopAllAsk } from "./quitStopAll";
+import { QuitStopAllDialog } from "./components/QuitStopAllDialog";
 import { startCreditWatcher } from "./credits";
 import {
   checkForUpdateAnyChannel,
@@ -375,6 +377,11 @@ export default function App() {
   }>(null);
   const [helpOpen, setHelpOpen] = useState(false);
   const [aboutOpen, setAboutOpen] = useState(false);
+  // "Quit and Stop All…" asking first, because agents are running (or
+  // reporting that stopping failed).
+  const [quitStopAll, setQuitStopAll] = useState<QuitStopAllAsk | null>(null);
+  const quitStopAllOpen = useRef(false);
+  quitStopAllOpen.current = quitStopAll !== null;
   // First-run walkthrough. Seeded once, after the workspace has loaded, so a
   // fresh install lands on the welcome flow while returning users never see it.
   const [onboarding, setOnboarding] = useState(false);
@@ -1607,6 +1614,11 @@ export default function App() {
             setHelpOpen(true);
           } else if (e.payload === "about") {
             setAboutOpen(true);
+          } else if (e.payload === "quit-stop-all") {
+            if (!quitStopAllOpen.current)
+              void startQuitStopAll({ ask: setQuitStopAll }).catch((err) =>
+                notify(`Quit failed: ${err}`, "error"),
+              );
           } else if (e.payload === "support") {
             void import("@tauri-apps/plugin-opener").then(({ openUrl }) =>
               openUrl("https://canopyide.dev/support"),
@@ -4711,6 +4723,13 @@ export default function App() {
         />
       )}
       {aboutOpen && <AboutDialog onClose={() => setAboutOpen(false)} />}
+      {quitStopAll && (
+        <QuitStopAllDialog
+          ask={quitStopAll}
+          onCancel={() => setQuitStopAll(null)}
+          onQuit={quitApp}
+        />
+      )}
       {onboarding && (
         <Onboarding
           onClose={() => {

@@ -1,0 +1,28 @@
+[package]
+name = "canopy-term-cli"
+version = "0.1.0"
+description = "Small command-line client for the Canopy persistent PTY host"
+authors = ["Cause Connect Pte Ltd <sam@fluidwords.app>"]
+license = "MIT"
+edition = "2021"
+# Same floor as the src-tauri workspace that canopy-pty-host inherits.
+rust-version = "1.82"
+
+# Its own workspace root, so it builds without the Tauri app's dependency graph.
+[workspace]
+
+[[bin]]
+name = "canopy-term"
+path = "src/main.rs"
+
+# The host is unix-only; on Windows this crate has no dependencies and builds a
+# stub that says so.
+[target.'cfg(unix)'.dependencies]
+canopy-pty-host = { path = "../canopy-pty-host" }
+libc = "0.2"
+serde_json = "1"
+
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true
