@@ -731,6 +731,8 @@ fn exits_within(child: &mut std::process::Child, timeout: Duration) -> bool {
     wait_until(timeout, || matches!(child.try_wait(), Ok(Some(_))))
 }
 
+// Replacing a skewed host is Unix only for now (see ensure_running_checked).
+#[cfg(unix)]
 #[test]
 fn an_idle_incompatible_host_is_replaced_by_ours() {
     let (dir, socket, mut old) = refusing_host("skewr");
@@ -747,6 +749,8 @@ fn an_idle_incompatible_host_is_replaced_by_ours() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+// Replacing a skewed host is Unix only for now (see ensure_running_checked).
+#[cfg(unix)]
 #[test]
 fn an_incompatible_host_with_terminals_is_left_running_for_them() {
     let (dir, socket, mut old) = refusing_host("skewk");
