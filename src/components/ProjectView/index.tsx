@@ -4242,7 +4242,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
         // reservation already made above — so job_done's recordTaskEnd finds
         // it, settles the attempt as completed, and the run shows in history
         // instead of vanishing with the pane.
-        const appInstance = await ipc.instanceId().catch(() => undefined);
+        const appInstance = await ipc.launchId().catch(() => undefined);
         adoptTaskReservation(reservation, {
           taskId: "agent-delegation",
           label: title,
@@ -4455,7 +4455,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
       let reservation: TaskReservation;
       let durableHistory;
       try {
-        const appInstance = await ipc.instanceId();
+        const appInstance = await ipc.launchId();
         durableHistory = { ...history, appInstance };
         reservation = existingReservation ?? await reserveTask({
             kind: def.id,

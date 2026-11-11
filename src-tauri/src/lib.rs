@@ -816,6 +816,7 @@ pub fn run() {
             pty::pty_set_name,
             pty::pty_set_name_theme,
             pty::instance_id,
+            pty::launch_id,
             android::android_sdk_status,
             android::android_devices,
             android::android_avds,

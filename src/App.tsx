@@ -686,7 +686,7 @@ export default function App() {
   // Settle those before anything new is recorded, or they stay "running"
   // forever: hidden from the history tab, still holding one of its slots.
   useEffect(() => {
-    void Promise.all([hydrateTaskHistory(), ipc.instanceId()]).then(
+    void Promise.all([hydrateTaskHistory(), ipc.launchId()]).then(
       ([, instance]) => sweepStaleRuns(instance),
     );
     // Its question goes with it, and so does every other question that was

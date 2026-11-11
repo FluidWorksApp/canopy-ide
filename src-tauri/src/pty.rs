@@ -132,6 +132,18 @@ pub fn instance_token() -> &'static str {
         if let Some(token) = crate::pty_hosted::reused_instance() {
             return token;
         }
+        launch_token().to_string()
+    })
+}
+
+/// A tag unique to this app launch and never reused. Equal to `instance_token()`
+/// except when this launch adopted a previous launch's hosted terminals (the
+/// token is then theirs). What marks "which launch started this task": the stale
+/// sweep must see every earlier launch's runs as stale even when the pairing
+/// token is carried over.
+pub fn launch_token() -> &'static str {
+    static TOKEN: OnceLock<String> = OnceLock::new();
+    TOKEN.get_or_init(|| {
         let pid = std::process::id();
         let ms = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -145,6 +157,12 @@ pub fn instance_token() -> &'static str {
 #[tauri::command]
 pub fn instance_id() -> String {
     instance_token().to_string()
+}
+
+/// This launch's own tag, for stamping tasks and sweeping the previous launch's.
+#[tauri::command]
+pub fn launch_id() -> String {
+    launch_token().to_string()
 }
 
 /// What `PtyManager::start_session` needs once a child and its master exist.

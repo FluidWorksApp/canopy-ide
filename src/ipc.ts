@@ -3593,6 +3593,11 @@ export const onIntegrationHealth = (
 /** This app launch's instance tag — pair with SessionDigest.instance so a
  *  digest from another instance/run can't bind to this instance's terminals. */
 export const instanceId = () => invoke<string>("instance_id");
+/** This launch's own tag: stamps tasks and sweeps the previous launch's. Equal to
+ *  `instanceId` unless this launch adopted hosted terminals (whose token it
+ *  carries). A remote workspace host without the command answers with its
+ *  instance id, which is what it always used. */
+export const launchId = () => invoke<string>("launch_id").catch(() => instanceId());
 /** One batch per hook-bridge poll (500ms): every new JSONL line since the
  *  last, so a busy agent costs one React commit per window, not one per line. */
 export const onAgentEvents = async (
