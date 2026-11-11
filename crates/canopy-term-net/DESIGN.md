@@ -122,9 +122,18 @@ build until the share UI exists.
 
 ## tailscale-rs
 
-Spike only, behind a non-default cargo feature, and only if it builds on every
-OS CI runs. See the pull request for the per-OS result. It is never in the
-default feature set, tests are loopback only, and nothing runs `tailscale up`,
-login, serve or funnel or touches a real tailnet or auth key. A tailnet
-transport would authenticate by node identity from the tailnet and still use an
-allowlist of node identities.
+Spike only; it is not in this tree. Compile probe: the `tailscale` crate 0.7.1
+(tailscale-rs, "work in progress", BSD-3-Clause, MSRV 1.92) was added as a
+dependency with an empty module and linked: the `Terminal crates` job compiled
+it and passed on ubuntu-latest, macos-15 and windows-2022. That is compile
+only: nothing was connected, no login, no auth key, no tailnet.
+
+It is not kept in the tree for two reasons found by the probe. It adds about
+156 packages to the lock, including `dyn-eq` (MPL-2.0, outside the MIT, Apache,
+BSD policy), and its lockfile contents tripped the repository's secret scanner
+(a false positive on a crypto crate's name). Adding it back needs a licence
+decision and a scanner-safe lock, so it is a separate change. It must stay out
+of the default feature set, tests must be loopback only, and nothing may run
+`tailscale up`, login, serve or funnel. A tailnet transport would authenticate
+by node identity from the tailnet and still use an allowlist of node
+identities. The probe patch is kept outside the repository.
