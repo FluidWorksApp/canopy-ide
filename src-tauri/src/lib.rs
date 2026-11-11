@@ -22,6 +22,8 @@ mod companion_requests;
 mod containment;
 mod context;
 mod crash;
+#[cfg(unix)]
+mod ctx_socket;
 mod desk;
 mod devicehub;
 mod devicehub_mjpeg;

@@ -14,10 +14,11 @@ pub fn enabled() -> bool {
 
 #[cfg(unix)]
 pub use adoption::{
-    adopt, adoptable, identity_floor, note_identity, reused_instance, Adoptable, Adopted,
+    adopt, adoptable, identity_floor, lineage, note_identity, note_lineage, reused_instance,
+    Adoptable, Adopted,
 };
 #[cfg(unix)]
-pub use unix::{client, spawn, Client};
+pub use unix::{client, host_dir, spawn, Client};
 
 #[cfg(not(unix))]
 pub struct Client;
@@ -33,6 +34,10 @@ pub fn client() -> Option<Client> {
 pub fn reused_instance() -> Option<String> {
     None
 }
+
+/// Nothing outlives the app here, so there is no spawn tree to remember.
+#[cfg(not(unix))]
+pub fn note_lineage(_instance: &str, _pty_id: u32, _depth: u8, _parent: Option<u32>) {}
 
 #[cfg(not(unix))]
 pub fn spawn(
@@ -83,6 +88,13 @@ mod unix {
                 .join(leaf)
                 .join("host.sock"),
         )
+    }
+
+    /// The host's directory, which also holds the context bridge's stable
+    /// socket (`ctx_socket.rs`), so both share the debug/release split and the
+    /// `CANOPY_PTY_HOST_DIR` override.
+    pub fn host_dir() -> Option<PathBuf> {
+        socket_path()?.parent().map(PathBuf::from)
     }
 
     /// `CANOPY_PTY_HOST_EXE`, else next to this executable. Packaging the host
@@ -185,7 +197,10 @@ mod unix {
 }
 
 /// Everything adoption needs, read from a session's metadata. Versioned, and
-/// identity only: no environment and no tokens besides the instance tag.
+/// identity only: no environment and no secrets. `bridge` is the SHA-256 of the
+/// terminal's bridge credential, never the credential itself, so an adopting
+/// launch can recognise the token the agent already holds (see
+/// `ContextBridge::readopt_agent`) without the host ever storing it.
 #[cfg(unix)]
 #[derive(Debug, Clone, Default, serde::Deserialize)]
 #[serde(default)]
@@ -202,6 +217,7 @@ pub struct HostedMeta {
     pub run_id: Option<String>,
     pub attempt_id: Option<String>,
     pub instance: String,
+    pub bridge: Option<String>,
 }
 
 #[cfg(unix)]
@@ -416,6 +432,51 @@ mod adoption {
         let (id, generation) = value.split_once(':')?;
         Some((id.parse().ok()?, generation.parse().ok()?))
     }
+
+    pub(super) fn lineage_key(instance: &str, pty_id: u32) -> String {
+        format!("lineage:{instance}:{pty_id}")
+    }
+
+    pub(super) fn lineage_value(depth: u8, parent: Option<u32>) -> String {
+        match parent {
+            Some(parent) => format!("{depth}:{parent}"),
+            None => format!("{depth}:"),
+        }
+    }
+
+    pub(super) fn parse_lineage(value: &str) -> Option<(u8, Option<u32>)> {
+        let (depth, parent) = value.split_once(':')?;
+        let parent = match parent {
+            "" => None,
+            parent => Some(parent.parse().ok()?),
+        };
+        Some((depth.parse().ok()?, parent))
+    }
+
+    /// Remember, in the host, where a delegated agent sits in its spawn tree.
+    /// The bridge assigns depth and parent after the spawn, so the spawn's
+    /// metadata cannot carry them; without this an adopted child would come
+    /// back as a root and could delegate further than its parent allowed.
+    /// Off the caller's thread (it is a Tauri command) and best effort: a host
+    /// that is not running, or too old for `set_state`, loses only this.
+    pub fn note_lineage(instance: &str, pty_id: u32, depth: u8, parent: Option<u32>) {
+        if !super::enabled() {
+            return;
+        }
+        let key = lineage_key(instance, pty_id);
+        let value = lineage_value(depth, parent);
+        std::thread::spawn(move || {
+            if let Some(client) = super::client() {
+                let _ = client.set_state(&key, &value, false);
+            }
+        });
+    }
+
+    /// The spawn-tree position stored by `note_lineage`, if any.
+    pub fn lineage(client: &Client, instance: &str, pty_id: u32) -> Option<(u8, Option<u32>)> {
+        let value = client.get_state(&lineage_key(instance, pty_id)).ok()??;
+        parse_lineage(&value)
+    }
 }
 
 #[cfg(unix)]
@@ -425,7 +486,10 @@ use adoption::Resolution;
 
 #[cfg(all(test, unix))]
 pub(crate) mod tests {
-    use super::adoption::{adoptable_from as adoption_adoptable, choose_token as adoption_choose};
+    use super::adoption::{
+        adoptable_from as adoption_adoptable, choose_token as adoption_choose, lineage_key,
+        lineage_value, parse_lineage,
+    };
     use super::*;
     use canopy_pty_host::client::HostClient;
     use canopy_pty_host::server::{serve, ServerConfig, EXITED_TTL};
@@ -790,5 +854,56 @@ pub(crate) mod tests {
             .expect("a hosted master downcasts to HostMaster");
         assert!(hosted.raw_mode());
         child.kill().unwrap();
+    }
+
+    #[test]
+    fn the_bridge_verifier_rides_in_the_metadata_and_old_metadata_has_none() {
+        let with = serde_json::json!({
+            "v": 1, "id": 4, "generation": 4, "kind": "desktop", "cwd": "/tmp",
+            "run": false, "instance": "inst-a", "bridge": "ab".repeat(32),
+        })
+        .to_string();
+        let sessions = vec![
+            info(4, Some(with), Some(false), None),
+            info(
+                5,
+                Some(meta_for(5, 5, "desktop", "inst-a")),
+                Some(false),
+                None,
+            ),
+        ];
+        let found = adoption_adoptable(sessions, "inst-a");
+        assert_eq!(found.len(), 2);
+        assert_eq!(
+            found[0].meta.bridge.as_deref(),
+            Some("ab".repeat(32).as_str())
+        );
+        // A session spawned before this change: adopted, credential skipped.
+        assert_eq!(found[1].meta.bridge, None);
+    }
+
+    #[test]
+    fn lineage_round_trips_and_garbage_is_ignored() {
+        assert_eq!(lineage_key("inst-a", 7), "lineage:inst-a:7");
+        assert_eq!(
+            parse_lineage(&lineage_value(2, Some(5))),
+            Some((2, Some(5)))
+        );
+        assert_eq!(parse_lineage(&lineage_value(0, None)), Some((0, None)));
+        assert_eq!(parse_lineage("x:5"), None);
+        assert_eq!(parse_lineage("1:y"), None);
+        assert_eq!(parse_lineage("1"), None);
+    }
+
+    #[test]
+    fn lineage_is_stored_in_the_host_and_read_back_by_session() {
+        let host = InProcessHost::start("lin");
+        assert_eq!(lineage(&host.client, "inst-a", 9), None);
+        host.client
+            .set_state(&lineage_key("inst-a", 9), &lineage_value(1, Some(3)), false)
+            .unwrap();
+        assert_eq!(lineage(&host.client, "inst-a", 9), Some((1, Some(3))));
+        // Keyed by instance: another launch's pty 9 is a different terminal.
+        assert_eq!(lineage(&host.client, "inst-b", 9), None);
     }
 }

@@ -43,9 +43,9 @@ are the parent, and tmux would re-emulate the byte stream.
 - `next_id` / `next_session_generation` start at 0 each launch (`pty.rs:407`), so
   they must be seeded past adopted sessions.
 - The Canopy hook already accepts `CANOPY_CTX_SOCKET` as well as `CANOPY_CTX_PORT`
-  (`src-tauri/src/bin/canopy_hook.rs:3404`). The context bridge port is ephemeral
-  (`context.rs:551`). A stable per-profile socket could keep tools alive across an
-  app restart. Not yet checked: whether the socket transport speaks the same API.
+  (`src-tauri/src/bin/canopy_hook.rs` `bridge_env`), prefers the socket when both
+  are set, re-reads its environment on every call, and speaks the same HTTP/1.1
+  over either. The context bridge port is ephemeral (`context.rs` `start`).
 - Sidecars ship through `externalBin` in `tauri.conf.json`; CI stubs them with
   `touch` and releases build them through `scripts/prepare-sidecar.mjs`.
 - POC (python stdlib, not committed): a `setsid` host survives SIGKILL of its
@@ -126,9 +126,10 @@ as a second agent on the same conversation. Ids are seeded past the adopted max.
   high-water mark the app writes ahead in blocks to the host.
 - Run-bound sessions (a task run id in the metadata) are micro-task tabs: they
   are never adopted, matching "micro-task tabs are never restored" and the sweep.
-- An adopted session skips what a fresh spawn registers by pty id: no bridge
-  credential (its hooks keep the dead port), no containment lease, no IDE server.
-  The exit-path releases for those are no-ops. Adoption starts with a one-second
+- An adopted session skips what a fresh spawn registers by pty id: no containment
+  lease, no IDE server; the exit-path releases for those are no-ops. Its bridge
+  credential does come back when its metadata carries a verifier (see "Context
+  bridge continuity" below); metadata written before that keeps no credential. Adoption starts with a one-second
   bound per host call and ten seconds in total; sessions it does not reach stay
   in the host.
 - Replayed history goes straight into the replay ring and does not stamp the
@@ -145,12 +146,46 @@ as a second agent on the same conversation. Ids are seeded past the adopted max.
   `attachId`, used when the web view reloads). Whether tabs persist across a quit,
   and so whether adoption fills an existing tab or needs a new surface, is still
   open.
-- Adopted agents' hooks point at the dead context-bridge port. Until the bridge
-  has a stable socket, adoption only promises terminal-level survival: bytes,
-  input, resize, exit. Agent tools and attention do not come back.
 
-**Not in the first PR:** context-bridge continuity (second commit), quit
-semantics UI, Windows.
+**Context bridge continuity.** An agent's environment is fixed at spawn, so a
+surviving agent keeps the port and token of the launch that started it. With
+the host on:
+- The bridge also listens on a Unix socket at a fixed path, `ctx.sock` in the
+  host's directory (`~/.canopy/pty-host`, `pty-host-dev` for debug builds, or
+  `CANOPY_PTY_HOST_DIR`), and every terminal gets `CANOPY_CTX_SOCKET` beside
+  `CANOPY_CTX_PORT`/`_TOKEN` (`ctx_socket.rs`, `context.rs` `start`). The hook
+  prefers the socket, so after a relaunch its calls reach the new app. There is
+  no fallback from the socket to the port: an old port can belong to anything.
+- Access is unchanged: the directory is 0700 and must be ours and not a symlink,
+  the socket is 0600, a connection from another uid is dropped (`peer_cred`),
+  and every request still needs the same bearer credential. No TCP port is added.
+- The credential survives without being stored: the bridge keys terminal
+  credentials by SHA-256 (`context::verifier`), the spawn metadata records that
+  verifier (`bridge`), and adoption re-registers it under the terminal's id,
+  instance, cwd and spawn-tree position (`ContextBridge::readopt_agent`). The
+  token the agent already holds then authenticates on the new launch. A verifier
+  already registered, or a pty already holding one, is refused.
+- Spawn-tree position (`spawn_depth`, parent) is assigned after the spawn, so it
+  goes to the host's state store (`lineage:<instance>:<pty>`, `note_lineage`)
+  and adoption reads it back; without it a delegated child would return as a
+  root. Best effort: a host too old for `set_state` loses it.
+- One app per directory holds the socket: an exclusive `flock` on `ctx.lock`,
+  held as long as the listener lives. A launch that finds it held retries for
+  five seconds (an updater's old process still exiting), then serves TCP only
+  and exports no socket; it never unlinks a socket it does not hold. A stale
+  socket file is removed by the next owner. Two debug apps share
+  `pty-host-dev`: the first holds the socket, the second runs port-only.
+- Apps started from another Canopy's terminal drop an inherited
+  `CANOPY_CTX_SOCKET` before stamping their own (terminals, companion,
+  structured runs), since the socket would win over their port.
+- With the flag off nothing changes: no socket, no lock, no new variable.
+- Still not restored for adopted agents: the Claude IDE server (diff and
+  selection link) and anything keyed to the old launch's port. A hook call made
+  while no app is running fails with "Canopy isn't reachable at ...ctx.sock".
+  Hook events go through `~/.canopy/agent-events.jsonl`, which is already stable,
+  but the app only reads events written after it starts.
+
+**Not in the first PR:** quit semantics UI, Windows (no socket transport).
 
 ## Remote runner (follow-up, investigated)
 
@@ -225,6 +260,13 @@ Pure protocol tests, plus integration tests in `tests/` that run the real detach
 binary: kill the client and reattach with the same pid and consecutive output;
 stalled client blocks the child; drain with the gap flag; start race; SIGTERM
 leaves no orphans. Existing `pty.rs` tests must pass with the switch off.
+Bridge continuity: `ctx_socket::tests` (private modes, a held lock refuses a
+second claim without unlinking, a stale socket is replaced, a relaunch answers
+at the same path over HTTP), `context::tests` (a token minted on one bridge
+names the same terminal on a fresh bridge fed only the verifier; wrong tokens,
+duplicates and malformed verifiers refused), `pty_hosted::tests` (verifier in
+the metadata, lineage stored and read back from an in-process host). macOS CI
+runs the first and last of these as well.
 
 ## Non-goals
 
