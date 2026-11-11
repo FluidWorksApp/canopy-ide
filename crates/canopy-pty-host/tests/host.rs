@@ -166,6 +166,10 @@ fn stalled_client_blocks_the_child_instead_of_growing_memory() {
     let h = Harness::start("c", 60);
     let (id, _) = h.client.spawn(spec("yes")).unwrap();
     let _stalled = h.client.attach(id, 0).unwrap(); // attached, never reads
+                                                    // Before the attach the host drains the child into its ring, and on a fast
+                                                    // pty that can already be megabytes, so the bound below is on what the
+                                                    // stalled client adds, measured from here.
+    let at_attach = h.client.list().unwrap()[0].end;
 
     std::thread::sleep(Duration::from_millis(1500));
     let first = h.client.list().unwrap()[0].end;
@@ -178,8 +182,9 @@ fn stalled_client_blocks_the_child_instead_of_growing_memory() {
         "output kept growing for a stalled client: {first} -> {second}"
     );
     assert!(
-        (first as usize) < HIGH_WATER + 1024 * 1024,
-        "host buffered {first} bytes for a stalled client"
+        ((first - at_attach) as usize) < HIGH_WATER + 1024 * 1024,
+        "host buffered {} bytes for a stalled client",
+        first - at_attach
     );
 }
 
