@@ -96,10 +96,12 @@ jobs:
   pty-host:
     name: PTY host (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
+    # A hung host test must fail the job, not hold the runner for hours.
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
-        # Windows only builds the wire types and the stub binary.
+        # Windows runs the real host: named pipe, ConPTY and Job Objects.
         os: [ubuntu-latest, macos-15, windows-2022]
     steps:
       - uses: actions/checkout@v4
@@ -129,6 +131,72 @@ jobs:
           CANOPY_PTY_HOST_SOCKET="$dir/h.sock" "$bin" --idle-secs 5 &
           for _ in $(seq 50); do [ -S "$dir/h.sock" ] && break; sleep 0.1; done
           [ -S "$dir/h.sock" ]
+
+  # Each terminal crate is its own workspace root with its own Cargo.lock, so
+  # tracks adding dependencies never touch the app's lock or each other.
+  terminal-crates:
+    name: Terminal crates (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-15, windows-2022]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      # Every crates/canopy-term-* crate is its own workspace root with its own
+      # lock. Found by glob, so a new crate needs no edit here. The CLI crate
+      # has its own job.
+      - name: List terminal crates
+        id: crates
+        shell: bash
+        run: |
+          list=$(ls -d crates/canopy-term-*/ | sed 's#/$##' | grep -v '^crates/canopy-term-cli$' | sort)
+          echo "Crates: $list"
+          { echo 'dirs<<EOF'; echo "$list"; echo 'EOF'; } >> "$GITHUB_OUTPUT"
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: ${{ steps.crates.outputs.dirs }}
+          key: term-${{ matrix.os }}
+      - name: Test and format each crate
+        shell: bash
+        env:
+          DIRS: ${{ steps.crates.outputs.dirs }}
+        run: |
+          for dir in $DIRS; do
+            echo "::group::$dir"
+            cargo test --locked --manifest-path "$dir/Cargo.toml"
+            cargo fmt --manifest-path "$dir/Cargo.toml" --check
+            echo "::endgroup::"
+          done
+
+  term-cli:
+    name: canopy-term (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-15, windows-2022]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            ./src-tauri -> target
+            ./crates/canopy-term-cli -> target
+          key: term-cli-${{ matrix.os }}
+      - name: Build the host the tests start
+        if: runner.os != 'Windows'
+        run: |
+          cargo build --locked --manifest-path crates/canopy-pty-host/Cargo.toml --bin canopy-pty-host
+          echo "CANOPY_PTY_HOST_EXE=$GITHUB_WORKSPACE/src-tauri/target/debug/canopy-pty-host" >> "$GITHUB_ENV"
+      - run: cargo test --locked --manifest-path crates/canopy-term-cli/Cargo.toml
+      - run: cargo fmt --manifest-path crates/canopy-term-cli/Cargo.toml --check
 
   rust:
     name: Rust (cargo test)

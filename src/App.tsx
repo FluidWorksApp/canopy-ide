@@ -238,7 +238,13 @@ import {
   useHeldModifier,
 } from "./useHeldModifier";
 import { commandHeld, matches, terminalOwnsCtrl } from "./shortcuts";
-import { quitApp, startQuitStopAll, type QuitStopAllAsk } from "./quitStopAll";
+import {
+  hostNoticeMessages,
+  quitApp,
+  readHostNotice,
+  startQuitStopAll,
+  type QuitStopAllAsk,
+} from "./quitStopAll";
 import { QuitStopAllDialog } from "./components/QuitStopAllDialog";
 import { startCreditWatcher } from "./credits";
 import {
@@ -682,6 +688,22 @@ export default function App() {
         dedupe: recovery.key,
       });
     }).catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, [notify]);
+  // Once per launch: terminals that fell back in-process (they end on Quit),
+  // or earlier ones that could not be restored. Silent when there is nothing.
+  useEffect(() => {
+    let cancelled = false;
+    void readHostNotice()
+      .then((notice) => {
+        if (cancelled) return;
+        for (const [title, body, key] of hostNoticeMessages(notice)) {
+          notify(title, "info", { body, dedupe: key });
+        }
+      })
+      .catch(() => {});
     return () => {
       cancelled = true;
     };

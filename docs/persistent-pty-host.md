@@ -13,11 +13,10 @@ are the parent, and tmux would re-emulate the byte stream.
 
 ## Scope of the first PR
 
-- Unix only (macOS, Linux). Windows keeps in-process PTYs for now; the host
-  binary compiles on Windows as a stub so the sidecar packaging step does not
-  break. A real Windows host (named pipe, ConPTY, job objects) is a stacked
-  follow-up PR.
-- Off by default behind `CANOPY_PTY_HOST=1`. No UI change in this PR.
+- The app uses the host on Unix (macOS, Linux) only. Windows keeps in-process
+  PTYs in the app; the host itself runs on Windows (see "Windows host" below)
+  but nothing in the app calls it there yet.
+- Off by default behind `CANOPY_PTY_HOST=1`. No UI change in this PR, so no mock is owed yet.
   With it on, Quit leaves adoptable terminals running in the host (micro-tasks
   and run-bound tabs are still stopped) and the next launch adopts them.
   "Quit and Stop All…" (stacked PR #794; app menu under Quit, ⌥⌘Q on macOS,
@@ -56,9 +55,6 @@ are the parent, and tmux would re-emulate the byte stream.
   over either. The context bridge port is ephemeral (`context.rs` `start`).
 - Sidecars ship through `externalBin` in `tauri.conf.json`; CI stubs them with
   `touch` and releases build them through `scripts/prepare-sidecar.mjs`.
-  tauri-build copies them into the target dir with the triple stripped, and
-  tauri-bundler 2.10 signs them on macOS (`bundle/macos/app.rs`, sidecars added
-  to the sign list as executables).
 - POC (python stdlib, not committed): a `setsid` host survives SIGKILL of its
   launcher with the same child pid; a new client reattaches from a byte offset
   with no gap; a non-parent client can resize (SIGWINCH observed) and send input;
@@ -175,63 +171,6 @@ as a second agent on the same conversation. Ids are seeded past the adopted max.
 - Adoption attaches with `exclusive` on a protocol 3 host, so a CLI client that
   attached after the `list` is refused rather than silently disconnected.
 
-**Packaging and updates.** The host ships inside the app as a Tauri sidecar
-(`externalBin: binaries/canopy-pty-host`, built by `scripts/prepare-sidecar.mjs`
-through its own manifest). Tauri places it next to the app binary
-(`Canopy.app/Contents/MacOS`, `/usr/bin` for deb and rpm, the AppImage's
-`usr/bin`, next to `canopy.exe` on Windows). On macOS, tauri-bundler signs every
-externalBin entry with the app identity, the hardened runtime and
-`entitlements.plist` (none of its keys need a provisioning profile). The release
-workflow and `release-macos.sh` then run `codesign --verify --strict` on it.
-- A host never runs from the bundle. An update replaces the bundle while the
-  host keeps running. A translocated app, or an AppImage, runs from a mount that
-  goes away when the app quits. And a later launch must never exec a path the
-  update removed. So on first use (`CANOPY_PTY_HOST=1`, Unix) the app reads the
-  bundled bytes and installs them as
-  `<socket dir>/bin/<app version>-<sha256 prefix>/canopy-pty-host`. The socket
-  dir is `~/.canopy/pty-host` (or `pty-host-dev`, or `CANOPY_PTY_HOST_DIR`),
-  mode 0700. The host is then started from that copy, and a later restart reuses
-  the same path (`src-tauri/src/pty_hosted/install.rs`).
-  `CANOPY_PTY_HOST_EXE` still overrides this, with no copy.
-- The copy is written from the hashed bytes, not with a file copy. So it has no
-  extended attributes, in particular no quarantine flag from a downloaded app.
-  The Mach-O signature travels inside the bytes. The copy is read back and must
-  hash the same before it is renamed into place. A file under `bin/` is never
-  rewritten in place: macOS kills a signed process whose file changes, and a
-  rename leaves a running host on its old inode. If installing fails, terminals
-  stay in-process. The app never falls back to the bundled path.
-- After an update, the new app reaches the old host through the same socket.
-  Protocol versions handle skew. `hello` now reports the host's own path, so the
-  directory a live host came from is kept. Other install directories are pruned
-  on a later launch. Pruning happens only when it is certain which directory is
-  live: from a `hello` answer, or no socket, or nobody listening. Any other
-  failure prunes nothing.
-- Windows: the host is a stub that exits. It is staged and bundled, nothing
-  launches it, and nothing depends on it.
-- The launch probe asks `list` once more after 250 ms on anything but "no
-  socket" or "nobody listening". Right after a quit, the host can briefly fail
-  to answer, and that failure used to read as an unusable host (or as no host).
-
-**Unproven: needs a real signed build, cannot be shown by PR CI.**
-- The release-workflow signing of the sidecar. The verify step only runs on a
-  tag build with the signing identity set.
-- An app update on a signed build while terminals are running. The relaunched
-  app should adopt them from the host started from the old version's install
-  directory, which should be kept, and then pruned once that host exits.
-- Whether macOS folder-permission prompts (for example `~/Documents`) name the
-  host binary instead of Canopy. Hosted children are spawned by
-  `canopy-pty-host`, which runs from outside the bundle.
-- AppImage: quit and relaunch with hosted terminals, checking that the host
-  keeps running after the AppImage mount is gone.
-- A notarized build's copied host executing under Gatekeeper. Expected to work,
-  since it is not quarantined and carries a valid Developer ID signature. On
-  first launch of a freshly downloaded build, `xattr -l` on the installed copy
-  should show no `com.apple.quarantine`.
-- The sidecar's placement in the macOS and Linux bundles. PR CI builds a real
-  bundle only on Windows.
-- The whole launch path (install, `ensure_running`, prune) run end to end with
-  a real host binary. Unit tests cover each step on its own.
-
 **Context bridge continuity.** An agent's environment is fixed at spawn, so a
 surviving agent keeps the port and token of the launch that started it. With
 the host on:
@@ -286,7 +225,48 @@ the host on:
   Hook events go through `~/.canopy/agent-events.jsonl`, which is already stable,
   but the app only reads events written after it starts.
 
-**Not in this PR (stacked follow-ups):** Windows (no socket transport).
+**Not in this PR (stacked follow-ups):** packaging the host so an update does not
+delete it, the app using the host on Windows. Quit and Stop All is #794.
+
+## Windows host
+
+The same protocol, server core and client run on Windows; only the transport,
+the PTY and the launch differ (`crates/canopy-pty-host/src/windows.rs`).
+
+- **Transport.** A per-user named pipe, `\\.\pipe\canopy-pty-host-<user SID>`
+  (`windows::default_pipe_name`), passed as `--socket`. Each instance has owner
+  and DACL `O:<sid>D:P(A;;GA;;;<sid>)(A;;GA;;;SY)` plus
+  `PIPE_REJECT_REMOTE_CLIENTS`. The host relies on that DACL (checked by the
+  kernel at open) instead of looking the client up by pid, which races with pid
+  reuse and fails for elevated peers. The name is predictable, so the client
+  checks the pipe's owner is its own SID and opens it with
+  `SECURITY_IDENTIFICATION` before sending an environment full of tokens. All
+  pipe I/O is overlapped: one connection is read and written from two threads.
+  There is no half-close; `shutdown` ends the connection for every clone.
+- **Single instance.** The first instance is created with
+  `FILE_FLAG_FIRST_PIPE_INSTANCE`. A second host fails to bind and exits 0, and
+  the client keeps asking (or starts another) instead of taking a lock file. A
+  dead host leaves no stale pipe.
+- **PTYs.** ConPTY directly (not portable-pty): portable-pty cannot create the
+  child suspended, and always sets `PSEUDOCONSOLE_INHERIT_CURSOR`, with which
+  conhost is believed (not verified) to wait for a cursor report that an
+  unattached host session never sends. Each child starts suspended, joins its
+  own Job Object with `KILL_ON_JOB_CLOSE`, then resumes. `kill`, linger and
+  host shutdown close the pseudoconsole first (`CTRL_CLOSE_EVENT`), then after
+  the grace period `TerminateJobObject`, even if the main child already exited,
+  so descendants on another console die too. The
+  host closes the pseudoconsole when the child exits, because ConPTY's output
+  pipe never reaches EOF on its own. If the host dies, even by
+  `TerminateProcess`, the job handles close and the sessions die with it.
+  `pgrp` and `raw_mode` answer "unknown". Exit codes are the full `u32`.
+- **Launch.** `CreateProcessW` with `DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP
+  | CREATE_BREAKAWAY_FROM_JOB` (retried without breakaway if the launcher's job
+  refuses it), no inherited handles, and the system directory as the working
+  directory.
+- **Differences from Unix.** Bytes are ConPTY's rendering, not the child's raw
+  output. Background processes still attached to the console are hung up when
+  the main child exits. There is no signal to stop the host gracefully; it stops
+  on `shutdown` or idle exit.
 
 ## Remote runner (follow-up, investigated)
 
@@ -374,4 +354,4 @@ runs the first and last of these as well.
 ## Non-goals
 
 Survival across reboot; surviving a host crash; tmux compatibility; fd passing to
-a new host; Windows in this PR.
+a new host.

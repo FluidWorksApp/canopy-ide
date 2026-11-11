@@ -9,13 +9,22 @@ use crate::protocol::{
 };
 use portable_pty::{Child, ChildKiller, ExitStatus, MasterPty, PtySize};
 use std::io::{Read, Write};
-use std::os::unix::fs::PermissionsExt;
+#[cfg(unix)]
 use std::os::unix::io::AsRawFd;
+#[cfg(unix)]
 use std::os::unix::net::UnixStream;
+#[cfg(unix)]
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
+#[cfg(unix)]
 use std::process::{Command, Stdio};
 use std::sync::Mutex;
+
+/// On Windows the connection is a named pipe with the same methods
+/// (`connect`, `try_clone`, timeouts, `shutdown`), so the client code below is
+/// shared; the name is kept so that code reads the same on both platforms.
+#[cfg(windows)]
+use crate::windows::PipeStream as UnixStream;
 use std::time::{Duration, Instant};
 
 const CALL_TIMEOUT: Duration = Duration::from_secs(5);
@@ -457,6 +466,7 @@ impl HostClient {
     }
 
     /// As `ensure_running`, passing extra arguments to a host it has to start.
+    #[cfg(unix)]
     pub fn ensure_running_with(
         host_exe: &Path,
         socket: &Path,
@@ -491,8 +501,7 @@ impl HostClient {
         let dir = socket
             .parent()
             .ok_or_else(|| other("socket has no parent"))?;
-        std::fs::create_dir_all(dir)?;
-        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))?;
+        crate::server::prepare_socket_dir(dir)?;
         let lock = std::fs::OpenOptions::new()
             .create(true)
             .truncate(false)
@@ -573,6 +582,56 @@ impl HostClient {
             }
             if let Ok(Some(status)) = child.try_wait() {
                 return Err(other(format!("host exited at startup: {status}")));
+            }
+            std::thread::sleep(Duration::from_millis(25));
+        }
+        Err(other("host did not start in time"))
+    }
+
+    /// As `ensure_running`, passing extra arguments to a host it has to start.
+    /// No lock file: the pipe's first instance is the lock. Of several hosts
+    /// started together one creates it and the rest exit 0, so a launched host
+    /// that exits 0 lost that race (or met a host still shutting down) and we
+    /// keep asking, starting another if nobody answers.
+    #[cfg(windows)]
+    pub fn ensure_running_with(
+        host_exe: &Path,
+        socket: &Path,
+        idle_secs: u64,
+        extra_args: &[&str],
+    ) -> std::io::Result<HostClient> {
+        // Probe with a client that cannot restart the host (see the Unix twin).
+        let client = HostClient::new(socket);
+        if client.hello().is_ok() {
+            return Ok(client.with_launch(host_exe, idle_secs));
+        }
+        let mut args: Vec<std::ffi::OsString> = vec![
+            "--socket".into(),
+            socket.as_os_str().to_owned(),
+            "--idle-secs".into(),
+            idle_secs.to_string().into(),
+        ];
+        args.extend(extra_args.iter().map(std::ffi::OsString::from));
+        let mut child = crate::windows::launch_detached(host_exe, &args)?;
+        let mut relaunches = 0;
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while Instant::now() < deadline {
+            if client.hello().is_ok() {
+                return Ok(client.with_launch(host_exe, idle_secs));
+            }
+            match crate::windows::exited(&child) {
+                Some(0) if relaunches < 20 => {
+                    std::thread::sleep(Duration::from_millis(100));
+                    if client.hello().is_ok() {
+                        return Ok(client.with_launch(host_exe, idle_secs));
+                    }
+                    child = crate::windows::launch_detached(host_exe, &args)?;
+                    relaunches += 1;
+                }
+                Some(0) | None => {}
+                Some(code) => {
+                    return Err(other(format!("host exited at startup: exit code {code}")))
+                }
             }
             std::thread::sleep(Duration::from_millis(25));
         }
@@ -697,14 +756,17 @@ impl MasterPty for HostMaster {
         Ok(Box::new(self.stream.try_clone()?))
     }
 
+    #[cfg(unix)]
     fn process_group_leader(&self) -> Option<libc::pid_t> {
         self.client.pgrp(self.id).ok().flatten()
     }
 
+    #[cfg(unix)]
     fn as_raw_fd(&self) -> Option<std::os::unix::io::RawFd> {
         None
     }
 
+    #[cfg(unix)]
     fn tty_name(&self) -> Option<PathBuf> {
         None
     }
@@ -779,7 +841,13 @@ impl Child for HostChild {
                         Some(code) => {
                             // Seen: free the host's ring.
                             let _ = self.killer.client.reap(id);
-                            Some(ExitStatus::with_exit_code(code.max(0) as u32))
+                            // A Windows exit code is a u32 (an NTSTATUS crash
+                            // reads negative here) and must not become 0.
+                            #[cfg(windows)]
+                            let code = code as u32;
+                            #[cfg(unix)]
+                            let code = code.max(0) as u32;
+                            Some(ExitStatus::with_exit_code(code))
                         }
                         None => None,
                     },
@@ -806,5 +874,11 @@ impl Child for HostChild {
 
     fn process_id(&self) -> Option<u32> {
         Some(self.pid)
+    }
+
+    /// The child belongs to the host process, not to us.
+    #[cfg(windows)]
+    fn as_raw_handle(&self) -> Option<std::os::windows::io::RawHandle> {
+        None
     }
 }

@@ -1,0 +1,55 @@
+[package]
+name = "canopy-term-core"
+version = "0.1.0"
+description = "Terminal screen state and the frame contract between emulator and renderer"
+authors = ["Cause Connect Pte Ltd <sam@fluidwords.app>"]
+license = "MIT"
+edition = "2021"
+rust-version = "1.85"
+
+# Its own workspace root with its own lock: parallel work on other crates, and
+# dependencies a track adds, never touch the app's Cargo.lock.
+[workspace]
+
+[features]
+# The headless emulator behind `Screen`. Off by default so crates that only need
+# the frame contract (the renderer) do not pull in an emulator. Tests turn it on
+# through the self dev-dependency below, so plain `cargo test` covers it.
+screen = ["dep:alacritty_terminal"]
+
+[dependencies]
+# Apache-2.0. Chosen by measurement: see PERF.md and tests/compare.rs. Its
+# types never appear in this crate's public API. `serde` is off.
+alacritty_terminal = { version = "0.26.0", default-features = false, optional = true }
+
+[dev-dependencies]
+canopy-term-core = { path = ".", features = ["screen"] }
+# Candidate emulators for the conformance and throughput harness (tests/).
+vt100 = "0.18.1"
+
+# `cargo test` builds unoptimised by default; parse throughput numbers from an
+# unoptimised build mean nothing, so the dev profile is optimised. The crate is
+# its own workspace root, so this affects no other crate.
+[profile.dev]
+opt-level = 3
+
+# Debug assertions and overflow checks in dependencies would skew an emulator
+# comparison by however many asserts each crate happens to contain.
+[profile.dev.package."*"]
+opt-level = 3
+debug-assertions = false
+overflow-checks = false
+
+# Candidate comparison: prints a conformance table and throughput numbers.
+# harness = false so the output reaches the CI log (libtest would capture it)
+# and nothing runs in parallel to skew timings. Report only: it never asserts
+# on timing or on which candidate wins.
+[[test]]
+name = "compare"
+harness = false
+
+# Report-only numbers for Screen (throughput, memory, per-frame cost), printed
+# as markdown rows to the CI log and copied into PERF.md.
+[[test]]
+name = "perf"
+harness = false
