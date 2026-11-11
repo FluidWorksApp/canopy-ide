@@ -66,7 +66,7 @@ use alacritty_terminal::event::{Event, EventListener};
 use alacritty_terminal::grid::Dimensions;
 use alacritty_terminal::index::{Column, Line};
 use alacritty_terminal::term::cell::{Cell as EngineCell, Flags};
-use alacritty_terminal::term::{Config, Term, TermMode};
+use alacritty_terminal::term::{Config, Term, TermDamage, TermMode};
 use alacritty_terminal::vte::ansi::{
     Color as EngineColor, CursorShape as EngineShape, NamedColor, Processor, Rgb, Timeout,
 };
@@ -208,6 +208,11 @@ pub struct Screen {
     /// The cursor's template cell: the pen the next character is drawn with.
     pen: Cell,
     blinking: bool,
+    /// Rows the engine reports as damaged since the last refresh (scratch).
+    dirty: Vec<usize>,
+    /// Reference mode: convert and diff the whole grid on every refresh, as
+    /// the incremental path must be indistinguishable from. Tests only.
+    full_rebuild: bool,
 }
 
 fn convert_color(c: EngineColor) -> Color {
@@ -321,11 +326,13 @@ fn cell_text<'a>(clusters: &'a [String], cell: &Cell, buf: &'a mut String) -> &'
 
 /// Rows are equal when every cell matches, comparing clusters by text rather
 /// than by table index (indices shift when an earlier row changes).
-fn rows_equal(a: &Frame, b_cells: &[Cell], b_clusters: &[String], row: usize) -> bool {
-    let cols = a.cols as usize;
-    let range = row * cols..(row + 1) * cols;
-    let (ac, bc) = (&a.cells[range.clone()], &b_cells[range]);
-    for (x, y) in ac.iter().zip(bc) {
+fn rows_equal(
+    a_cells: &[Cell],
+    a_clusters: &[String],
+    b_cells: &[Cell],
+    b_clusters: &[String],
+) -> bool {
+    for (x, y) in a_cells.iter().zip(b_cells) {
         if x.fg != y.fg || x.bg != y.bg || x.attrs != y.attrs || x.ch != y.ch {
             return false;
         }
@@ -334,7 +341,7 @@ fn rows_equal(a: &Frame, b_cells: &[Cell], b_clusters: &[String], row: usize) ->
         }
         if x.cluster != 0 {
             let (mut s1, mut s2) = (String::new(), String::new());
-            if cell_text(&a.clusters, x, &mut s1) != cell_text(b_clusters, y, &mut s2) {
+            if cell_text(a_clusters, x, &mut s1) != cell_text(b_clusters, y, &mut s2) {
                 return false;
             }
         }
@@ -421,6 +428,8 @@ impl Screen {
             full_seq: 1,
             pen: Cell::default(),
             blinking: false,
+            dirty: Vec::new(),
+            full_rebuild: false,
         };
         screen.frame.seq = 1;
         screen.refresh(true);
@@ -607,7 +616,18 @@ impl Screen {
         Some(Row { cells, clusters })
     }
 
-    fn refresh(&mut self, force_full: bool) {
+    /// Reference mode for tests: rebuild and diff the whole grid on every
+    /// refresh instead of only the rows the engine reports as damaged. The two
+    /// modes must produce identical frames, sequence numbers and damage.
+    #[doc(hidden)]
+    pub fn set_full_rebuild(&mut self, on: bool) {
+        self.full_rebuild = on;
+    }
+
+    /// Convert every row and diff against the current frame. Returns the new
+    /// cells and cluster table and the rows that differ (none when the size
+    /// changed: the caller treats that as a full redraw).
+    fn rebuild_all(&self, size_changed: bool) -> (Vec<Cell>, Vec<String>, Vec<usize>) {
         let (cols, rows) = (self.cols as usize, self.rows as usize);
         let mut clusters = vec![String::new()];
         let mut cells = Vec::with_capacity(cols * rows);
@@ -618,6 +638,103 @@ impl Screen {
                 cells.push(convert_cell(&row[Column(c)], &mut clusters));
             }
         }
+        let mut changed = Vec::new();
+        if !size_changed {
+            let old = &self.frame;
+            for r in 0..rows {
+                let range = r * cols..(r + 1) * cols;
+                if !rows_equal(
+                    &old.cells[range.clone()],
+                    &old.clusters,
+                    &cells[range],
+                    &clusters,
+                ) {
+                    changed.push(r);
+                }
+            }
+        }
+        (cells, clusters, changed)
+    }
+
+    /// Convert only the rows in `self.dirty`, writing the ones that differ into
+    /// the current frame in place. Returns the rows that changed. The cluster
+    /// table is renumbered in row-major order whenever any cluster is involved,
+    /// so it matches what `rebuild_all` produces.
+    fn update_dirty(&mut self) -> Vec<usize> {
+        let (cols, rows) = (self.cols as usize, self.rows as usize);
+        let mut changed = Vec::new();
+        // Local cluster texts of changed rows that have clusters (their cells
+        // carry indices into this, until renumbered).
+        let mut converted: Vec<(usize, Vec<String>)> = Vec::new();
+        let mut row_buf: Vec<Cell> = Vec::with_capacity(cols);
+        let mut local = vec![String::new()];
+        let grid = self.term.grid();
+        for &r in &self.dirty {
+            row_buf.clear();
+            local.truncate(1);
+            let row = &grid[Line(r as i32)];
+            for c in 0..cols {
+                row_buf.push(convert_cell(&row[Column(c)], &mut local));
+            }
+            let range = r * cols..(r + 1) * cols;
+            if rows_equal(
+                &self.frame.cells[range.clone()],
+                &self.frame.clusters,
+                &row_buf,
+                &local,
+            ) {
+                continue;
+            }
+            self.frame.cells[range].copy_from_slice(&row_buf);
+            changed.push(r);
+            if local.len() > 1 {
+                converted.push((r, local[1..].to_vec()));
+            }
+        }
+        if !converted.is_empty() || self.frame.clusters.len() > 1 {
+            let old = std::mem::take(&mut self.frame.clusters);
+            let mut table = vec![String::new()];
+            for r in 0..rows {
+                let fresh = converted
+                    .binary_search_by_key(&r, |(row, _)| *row)
+                    .ok()
+                    .map(|i| &converted[i].1);
+                for cell in &mut self.frame.cells[r * cols..(r + 1) * cols] {
+                    if cell.cluster == 0 {
+                        continue;
+                    }
+                    let text = match fresh {
+                        Some(t) => &t[cell.cluster as usize - 1],
+                        None => &old[cell.cluster as usize],
+                    };
+                    table.push(text.clone());
+                    cell.cluster = (table.len() - 1) as u32;
+                }
+            }
+            self.frame.clusters = table;
+        }
+        changed
+    }
+
+    fn refresh(&mut self, force_full: bool) {
+        let size_changed = self.frame.cols != self.cols || self.frame.rows != self.rows;
+        // Ask the engine what it touched, then clear its record. Cursor
+        // movement, scrolling, alt-screen switches, resizes, mode changes that
+        // repaint, and colour changes all come back as `Full`.
+        self.dirty.clear();
+        let engine_full = match self.term.damage() {
+            TermDamage::Full => true,
+            TermDamage::Partial(lines) => {
+                let rows = self.rows as usize;
+                self.dirty
+                    .extend(lines.map(|l| l.line).filter(|&l| l < rows));
+                false
+            }
+        };
+        self.term.reset_damage();
+        let whole = force_full || size_changed || engine_full || self.full_rebuild;
+
+        let grid = self.term.grid();
         let p = grid.cursor.point;
         let mut scratch = Vec::new();
         let pen = convert_cell(&grid.cursor.template, &mut scratch);
@@ -666,16 +783,19 @@ impl Screen {
         self.pen = pen;
         self.blinking = style.blinking;
 
+        // Rows: either rebuild everything, or convert only the damaged rows.
+        // Either way `changed` is the rows whose content differs from the
+        // previous frame, so damage is exact, not merely the engine's guess.
+        let mut rebuilt: Option<(Vec<Cell>, Vec<String>)> = None;
+        let changed = if whole {
+            let (cells, clusters, changed) = self.rebuild_all(size_changed);
+            rebuilt = Some((cells, clusters));
+            changed
+        } else {
+            self.update_dirty()
+        };
+
         let old = &self.frame;
-        let size_changed = old.cols != self.cols || old.rows != self.rows;
-        let mut changed: Vec<usize> = Vec::new();
-        if !size_changed {
-            for r in 0..rows {
-                if !rows_equal(old, &cells, &clusters, r) {
-                    changed.push(r);
-                }
-            }
-        }
         let alt_changed = old.alt_screen != alt_screen;
         let cursor_changed = old.cursor != cursor;
         let meta_changed = cursor_changed || old.modes != modes || old.title != title;
@@ -684,6 +804,7 @@ impl Screen {
         }
         let seq = old.seq + 1;
         let old_cursor_row = old.cursor.row as usize;
+        let rows = self.rows as usize;
         if force_full || size_changed || alt_changed {
             self.full_seq = seq;
             self.row_seq = vec![seq; rows];
@@ -699,22 +820,17 @@ impl Screen {
                 }
             }
         }
-        self.frame = Frame {
-            seq,
-            cols: self.cols,
-            rows: self.rows,
-            cells,
-            clusters,
-            cursor,
-            modes,
-            damage: Damage {
-                since: 0,
-                full: true,
-                rows: Vec::new(),
-            },
-            alt_screen,
-            title,
-        };
+        if let Some((cells, clusters)) = rebuilt {
+            self.frame.cells = cells;
+            self.frame.clusters = clusters;
+        }
+        self.frame.seq = seq;
+        self.frame.cols = self.cols;
+        self.frame.rows = self.rows;
+        self.frame.cursor = cursor;
+        self.frame.modes = modes;
+        self.frame.alt_screen = alt_screen;
+        self.frame.title = title;
     }
 
     /// Escape sequences that bring a fresh `Screen` of the same size to this

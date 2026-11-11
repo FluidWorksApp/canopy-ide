@@ -142,6 +142,78 @@ fn main() {
         );
     }
 
+    // The same stream and read size with the reference (whole-grid rebuild and
+    // diff on every call) path, to put the incremental path in context. The
+    // mixed stream scrolls a lot, and a scroll is full damage in the engine, so
+    // it only shows part of the gain; the next workload shows the rest.
+    {
+        let mut s = Screen::with_scrollback(80, 24, 10_000);
+        s.set_full_rebuild(true);
+        let start = Instant::now();
+        for chunk in data.chunks(4096) {
+            s.advance(chunk);
+        }
+        let secs = start.elapsed().as_secs_f64();
+        row(
+            &format!("parse throughput 80x24 (4 KiB reads, {mib:.0} MiB mixed stream) REFERENCE full rebuild"),
+            format!("{:.1} MiB/s", mib / secs),
+        );
+    }
+    // A TUI-like workload: each read repaints a few rows by cursor addressing
+    // and never scrolls, so the engine reports only those rows as damaged.
+    for (cols, rows) in [(80u16, 24u16), (200, 50)] {
+        let mut updates: Vec<u8> = Vec::new();
+        for i in 0..4000u32 {
+            updates.extend_from_slice(
+                format!(
+                    "\x1b[{};1H\x1b[2K\x1b[3{}mrow {} value {}\x1b[0m\x1b[{};20Hstatus {}",
+                    1 + i % rows as u32,
+                    i % 8,
+                    i,
+                    i.wrapping_mul(2654435761) % 100_000,
+                    1 + (i * 7) % rows as u32,
+                    i % 100
+                )
+                .as_bytes(),
+            );
+            updates.push(0);
+        }
+        let reads: Vec<&[u8]> = updates
+            .split(|&b| b == 0)
+            .filter(|r| !r.is_empty())
+            .collect();
+        let bytes: usize = reads.iter().map(|r| r.len()).sum();
+        for reference in [false, true] {
+            let mut s = Screen::with_scrollback(cols, rows, 10_000);
+            s.set_full_rebuild(reference);
+            let rounds = 25;
+            let start = Instant::now();
+            for _ in 0..rounds {
+                for r in &reads {
+                    s.advance(r);
+                }
+            }
+            let secs = start.elapsed().as_secs_f64();
+            let calls = (reads.len() * rounds) as f64;
+            row(
+                &format!(
+                    "{cols}x{rows} cursor-addressed repaint, no scroll ({} B per call), {}",
+                    bytes / reads.len(),
+                    if reference {
+                        "REFERENCE full rebuild"
+                    } else {
+                        "incremental"
+                    }
+                ),
+                format!(
+                    "{:.1} us per advance, {:.1} MiB/s",
+                    secs * 1e6 / calls,
+                    (bytes * rounds) as f64 / (1024.0 * 1024.0) / secs
+                ),
+            );
+        }
+    }
+
     // Per-frame cost on a warm screen: one small update, then reading it out.
     for (cols, rows) in [(80u16, 24u16), (200, 50)] {
         let mut s = Screen::with_scrollback(cols, rows, 10_000);

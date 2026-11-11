@@ -46,7 +46,9 @@ Resize of a line wrapped at 10 columns, widened to 20: alacritty gives
 
 ## Screen numbers
 
-Throughput is `Screen::advance` (filter, parse, combining-mark trim, frame
+The tables below were measured before the damage-driven update described in the
+next section, so `advance` there includes a whole-grid rebuild and diff on every
+call. Throughput is `Screen::advance` (filter, parse, combining-mark trim, frame
 rebuild and row diff) over a 32 MiB deterministic mixed stream. The stream has
 prose, 16/256/truecolour SGR, cursor addressing, erases, scroll regions, and
 wide and combining text. The engine-only rows come from `tests/compare.rs`,
@@ -85,11 +87,58 @@ Reading these:
   session is about 130 KiB at 80x24 and 670 KiB at 200x50.
 - **Snapshot timings** are for nearly blank screens (a few lines of text). A
   full screen of styled text gives a larger snapshot and takes longer.
-- **Per-call frame rebuild.** This is the cost to watch: `advance` converts the
-  whole grid, trims it and diffs it on every call. At 4 KiB reads that halves
-  throughput against the bare engine, and the cost is higher at 200x50. Larger
-  reads amortise it (59 to 70 MiB/s at 256 KiB). If it matters, the engine's
-  own damage tracking can limit the rebuild to changed lines; that is not done
-  here.
+- **Per-call frame rebuild.** This was the cost to watch: `advance` converted
+  the whole grid, trimmed it and diffed it on every call. At 4 KiB reads that
+  halved throughput against the bare engine, and the cost was higher at
+  200x50. Larger reads amortise it (59 to 70 MiB/s at 256 KiB). The next
+  section describes the change that limits the work to damaged rows.
 - **Scrollback dominates memory.** At 24 bytes per cell, a 10k-line scrollback
   is about 20 MiB at 80 columns and 49 MiB at 200 columns per session.
+
+## Damage-driven frame update
+
+`Screen::advance` no longer converts and diffs the whole grid per call. After
+the bytes are fed, `refresh` asks the engine (`Term::damage`, then
+`Term::reset_damage`) which lines it touched.
+
+- **Partial damage** (same size, no forced redraw): only the damaged rows are
+  converted into scratch, compared with the row already in the `Frame`, and
+  copied in only if they differ. The rows that differ are what `row_seq` and
+  `damage_since` report, so damage stays exact, not the engine's superset (the
+  engine always damages the cursor line). The cursor, modes, title and pen are
+  recomputed on every call as before, and the old and new cursor rows are still
+  damaged when the cursor moves.
+- **Full damage**, a resize, the first frame, or an engine that reports `Full`
+  takes the previous path: convert every row and diff every row. The engine
+  reports `Full` for any scroll, clear of the screen, alternate-screen switch,
+  `ESC c`, DECALN, colour change, and every call while insert mode is on, so a
+  stream that scrolls on most calls (ordinary command output) sees little
+  change. Cursor-addressed repaints (status lines, TUIs that redraw rows in
+  place) are where it helps.
+- **Cluster table.** `Cell::cluster` indexes a table that a full rebuild fills
+  in row-major order. When any cluster exists in the frame or in a changed row,
+  the table is renumbered over the whole frame so it is byte-identical to a full
+  rebuild; frames without clusters (the common case) pay nothing for this.
+- **Unchanged.** `snapshot`, `frame`, `damage_since`, sequence numbers and the
+  full-redraw rules (resize, alternate screen, restore) behave as before. The
+  combining-mark trim still scans the visible grid after each 4 KiB slice; it
+  was left alone because it is cheap next to conversion.
+- **No selection.** `Screen` exposes no selection, so there is nothing to
+  redraw on a selection change.
+
+Correctness is checked by `tests/damage.rs`. It feeds two screens the same
+input, one normal and one in the hidden reference mode (`set_full_rebuild`,
+which rebuilds the whole grid each call) and compares the whole `Frame`
+including `seq`, `damage_since` for the last 12 baselines, snapshots and
+replies after every step. It also checks, without the reference, that every row
+whose content differs from a remembered baseline is inside the damage reported
+for that baseline. Inputs: the conformance-style fixtures whole and one byte at
+a time, resize, alternate screen and snapshot restore after each fixture, the
+synthetic stream at three sizes and read sizes, and seeded pseudo-random
+streams (escape sequences, wide and combining text, resizes, snapshot restores,
+random split points).
+
+`cargo test --locked --test perf` prints, besides the rows above, the mixed
+stream and a no-scroll cursor-addressed repaint workload for both paths
+(`REFERENCE full rebuild` against incremental). Numbers from CI are recorded
+below once a run has printed them.
