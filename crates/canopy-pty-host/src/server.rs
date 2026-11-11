@@ -7,7 +7,7 @@
 //! the oldest bytes fall off (the client sees `gap` when it returns).
 
 use crate::protocol::{AttachReply, Request, Response, SessionInfo, SpawnSpec, PROTOCOL_VERSION};
-use portable_pty::{native_pty_system, Child, CommandBuilder, MasterPty, PtySize};
+use portable_pty::{native_pty_system, CommandBuilder, MasterPty, PtySize};
 use std::collections::{HashMap, VecDeque};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::os::unix::fs::PermissionsExt;
@@ -192,8 +192,8 @@ pub fn run(config: ServerConfig) -> std::io::Result<()> {
 
     // SAFETY: the handler only stores to an atomic.
     unsafe {
-        libc::signal(libc::SIGTERM, on_signal as libc::sighandler_t);
-        libc::signal(libc::SIGINT, on_signal as libc::sighandler_t);
+        libc::signal(libc::SIGTERM, on_signal as *const () as libc::sighandler_t);
+        libc::signal(libc::SIGINT, on_signal as *const () as libc::sighandler_t);
         libc::signal(libc::SIGPIPE, libc::SIG_IGN);
     }
     let stop = Arc::new(AtomicBool::new(false));

@@ -191,9 +191,11 @@ impl HostClient {
         idle_secs: u64,
         extra_args: &[&str],
     ) -> std::io::Result<HostClient> {
-        let client = HostClient::new(socket).with_host_exe(host_exe);
+        // Probe with a client that cannot restart the host: `call` retries through
+        // this function, so probing with the retrying client would recurse forever.
+        let client = HostClient::new(socket);
         if client.hello().is_ok() {
-            return Ok(client);
+            return Ok(client.with_host_exe(host_exe));
         }
         let dir = socket
             .parent()
@@ -210,7 +212,7 @@ impl HostClient {
             return Err(std::io::Error::last_os_error());
         }
         if client.hello().is_ok() {
-            return Ok(client);
+            return Ok(client.with_host_exe(host_exe));
         }
         let mut command = Command::new(host_exe);
         command
@@ -237,7 +239,7 @@ impl HostClient {
                 std::thread::spawn(move || {
                     let _ = child.wait();
                 });
-                return Ok(client);
+                return Ok(client.with_host_exe(host_exe));
             }
             if let Ok(Some(status)) = child.try_wait() {
                 return Err(other(format!("host exited at startup: {status}")));

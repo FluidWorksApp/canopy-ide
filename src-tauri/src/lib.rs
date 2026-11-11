@@ -60,6 +60,7 @@ mod profiles;
 mod provenance;
 mod prwatch;
 mod pty;
+mod pty_hosted;
 mod punch;
 mod receipt;
 mod relay;

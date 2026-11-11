@@ -1709,15 +1709,25 @@ impl PtyManager {
             .try_state::<crate::governor::TerminalGovernor>()
             .map(|_| crate::watchdog::memory_info());
 
+        // Opt-in (CANOPY_PTY_HOST=1): the child lives in the detached PTY host.
+        // Decided before any local PTY exists; any failure falls back in-process.
+        let hosted_client = crate::pty_hosted::client();
         let pty_system = native_pty_system();
-        let pair = pty_system
-            .openpty(PtySize {
-                rows,
-                cols,
-                pixel_width: 0,
-                pixel_height: 0,
-            })
-            .map_err(|e| e.to_string())?;
+        let open_local = || {
+            pty_system
+                .openpty(PtySize {
+                    rows,
+                    cols,
+                    pixel_width: 0,
+                    pixel_height: 0,
+                })
+                .map_err(|e| e.to_string())
+        };
+        let mut local_pair = if hosted_client.is_some() {
+            None
+        } else {
+            Some(open_local()?)
+        };
 
         // Allocated before spawn so the child can carry its own session id in env.
         let (id, session_generation) = state.allocate_session_identity()?;
@@ -1958,25 +1968,28 @@ impl PtyManager {
         // may replace argv with a gate launcher, but it never changes the
         // command's environment, cwd, terminal geometry, or stdio contract.
         // Mock apps do not manage containment and therefore remain monitor-only.
-        let prepared_containment =
-            if let Some(containment) = app.try_state::<crate::containment::ContainmentManager>() {
-                let host = host.expect("the production app manages both governor and containment");
-                Some(
-                    containment
-                        .prepare(
-                            id,
-                            crate::governor::base_allowance(host.total_bytes),
-                            &mut cmd,
-                        )
-                        .inspect_err(|_| {
-                            if let Some(ide) = app.try_state::<crate::claude_ide::ClaudeIde>() {
-                                ide.close(id);
-                            }
-                        })?,
-                )
-            } else {
-                None
-            };
+        let prepared_containment = if let Some(containment) = app
+            .try_state::<crate::containment::ContainmentManager>()
+            // Hosted sessions are monitor-only: the host owns the child.
+            .filter(|_| hosted_client.is_none())
+        {
+            let host = host.expect("the production app manages both governor and containment");
+            Some(
+                containment
+                    .prepare(
+                        id,
+                        crate::governor::base_allowance(host.total_bytes),
+                        &mut cmd,
+                    )
+                    .inspect_err(|_| {
+                        if let Some(ide) = app.try_state::<crate::claude_ide::ClaudeIde>() {
+                            ide.close(id);
+                        }
+                    })?,
+            )
+        } else {
+            None
+        };
 
         // The credential was minted before the child so it could be in its
         // environment from the first instruction. Every failure between there
@@ -1992,11 +2005,41 @@ impl PtyManager {
                 ide.close(id);
             }
         };
-        let mut child = match pair.slave.spawn_command(cmd) {
-            Ok(child) => child,
-            Err(e) => {
-                retire();
-                return Err(e.to_string());
+        let hosted = hosted_client.as_ref().and_then(|client| {
+            match crate::pty_hosted::spawn(client, &cmd, cols, rows) {
+                Ok(parts) => Some(parts),
+                Err(error) => {
+                    eprintln!(
+                        "canopy: PTY host spawn failed, using an in-process terminal: {error}"
+                    );
+                    None
+                }
+            }
+        });
+        let (mut child, master_box, slave): (
+            Box<dyn Child + Send + Sync>,
+            Box<dyn MasterPty + Send>,
+            Option<Box<dyn portable_pty::SlavePty + Send>>,
+        ) = match hosted {
+            Some((child, master)) => (child, master, None),
+            None => {
+                let pair = match local_pair.take() {
+                    Some(pair) => pair,
+                    None => match open_local() {
+                        Ok(pair) => pair,
+                        Err(e) => {
+                            retire();
+                            return Err(e);
+                        }
+                    },
+                };
+                match pair.slave.spawn_command(cmd) {
+                    Ok(child) => (child, pair.master, Some(pair.slave)),
+                    Err(e) => {
+                        retire();
+                        return Err(e.to_string());
+                    }
+                }
             }
         };
         let pid = child.process_id();
@@ -2009,12 +2052,11 @@ impl PtyManager {
                 return Err(failure.cleanup_after_child_exit());
             }
         }
-        drop(pair.slave);
+        drop(slave);
 
-        let (mut reader, mut writer) = match pair
-            .master
+        let (mut reader, mut writer) = match master_box
             .try_clone_reader()
-            .and_then(|r| pair.master.take_writer().map(|w| (r, w)))
+            .and_then(|r| master_box.take_writer().map(|w| (r, w)))
         {
             Ok(pair) => pair,
             Err(e) => {
@@ -2068,7 +2110,7 @@ impl PtyManager {
             cwd,
             input: Mutex::new(Vec::new()),
             input_ready: Condvar::new(),
-            master: Mutex::new(pair.master),
+            master: Mutex::new(master_box),
             killer: Mutex::new(killer),
             child: Mutex::new(Some(child)),
             shutdown: AtomicBool::new(false),

@@ -712,6 +712,7 @@ dependencies = [
  "block2",
  "cairo-rs",
  "canopy-core",
+ "canopy-pty-host",
  "chacha20poly1305",
  "chrono",
  "cpal",
