@@ -1916,6 +1916,8 @@ const ProjectViewBody = memo(function ProjectViewBody({
   // (running ones only; nothing is woken). Each terminal gets a tab attached
   // through the same alias path as a launch; letting go of the mode removes
   // those tabs without touching the sessions.
+  // The agent card docked beside the terminal: the terminal narrows to leave its column.
+  const [cardDocked, setCardDocked] = useState(false);
   const allWorkspaces = useAllWorkspaces();
   useEffect(() => {
     if (!visible) return;
@@ -14364,7 +14366,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
           </button>
         </div>
       )}
-      <div className="project-content" ref={contentRef}>
+      <div className="project-content" ref={contentRef} data-agent-card-dock={cardDocked ? "1" : undefined}>
         {tabs
           .filter((t): t is TermSubTab => t.type === "terminal")
           .map((tab) => {
@@ -15164,6 +15166,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
                 ports={projectStats.find((s) => s.id === agentTermWs.ptyId)?.ports}
                 life={lifeForPty(agentTermWs.ptyId)}
                 onOpenWorkspace={() => setWsDrawerOpen(true)}
+                onDockChange={setCardDocked}
                 onSendToWorkspace={isRemoteHost() ? undefined : () => {
                   const tab = tabs.find((t): t is TermSubTab => t.type === "terminal" && t.ptyId === agentTermWs.ptyId);
                   const candidate = tab ? teleportCandidate(tab) : null;

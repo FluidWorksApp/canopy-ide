@@ -324,3 +324,38 @@ describe("raising a PR from the card", () => {
     await waitFor(() => expect(runCommitPushPr).toHaveBeenCalledWith(expect.objectContaining({ repo: "/ahead", commit: false })));
   });
 });
+
+describe("AgentDetailsCard docking", () => {
+  it("is docked beside the terminal by default and says so, so the terminal can make room", () => {
+    const onDockChange = vi.fn();
+    setup({ onDockChange });
+    expect(screen.getByLabelText("Agent details")).toHaveClass("agent-card--docked");
+    expect(onDockChange).toHaveBeenLastCalledWith(true);
+  });
+
+  it("floats over the terminal when asked, remembers that, and gives the room back", () => {
+    const onDockChange = vi.fn();
+    setup({ onDockChange });
+    fireEvent.click(screen.getByRole("button", { name: "Float agent details over the terminal" }));
+    expect(screen.getByLabelText("Agent details")).not.toHaveClass("agent-card--docked");
+    expect(onDockChange).toHaveBeenLastCalledWith(false);
+    expect(localStorage.getItem("canopy:agentCard:docked")).toBe("0");
+    fireEvent.click(screen.getByRole("button", { name: "Dock agent details beside the terminal" }));
+    expect(onDockChange).toHaveBeenLastCalledWith(true);
+  });
+
+  it("takes no room while hidden to its pill", () => {
+    const onDockChange = vi.fn();
+    setup({ onDockChange });
+    fireEvent.click(screen.getByRole("button", { name: "Hide agent details" }));
+    expect(onDockChange).toHaveBeenLastCalledWith(false);
+  });
+
+  it("stays floating on the next mount once the person floated it", () => {
+    localStorage.setItem("canopy:agentCard:docked", "0");
+    const onDockChange = vi.fn();
+    setup({ onDockChange });
+    expect(screen.getByLabelText("Agent details")).not.toHaveClass("agent-card--docked");
+    expect(onDockChange).not.toHaveBeenCalledWith(true);
+  });
+});

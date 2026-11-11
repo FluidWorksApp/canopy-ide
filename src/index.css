@@ -6621,6 +6621,28 @@ body.dragging-tab * {
   padding: 6px;
   font-size: 12px;
 }
+/* Docked: its own column at the right edge, full height. The terminal narrows to
+   the space left (a multiplexed group keeps its own layout and sits under it). */
+.project-content {
+  --agent-card-dock-w: 300px;
+}
+.agent-card--docked {
+  top: 0;
+  right: 0;
+  bottom: 0;
+  width: var(--agent-card-dock-w);
+  max-height: none;
+  border-radius: 0;
+  border-width: 0 0 0 1px;
+  box-shadow: none;
+  padding: 8px 6px;
+  background: var(--bg-raised);
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+}
+.project-content[data-agent-card-dock] > .term-host:not(.term-host-multiplexed) {
+  width: calc(100% - var(--agent-card-dock-w));
+}
 .agent-card-pill {
   display: inline-flex;
   align-items: center;
