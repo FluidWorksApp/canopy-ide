@@ -33,6 +33,29 @@ use crate::procedural;
 /// row capacity are dropped, never overrun into the next row.
 pub const INSTANCES_PER_COL: usize = 6;
 
+/// Instances reserved after the grid for the overlay (IME preedit): a
+/// background, up to this minus two glyphs, and an underline.
+pub const OVERLAY_INSTANCES: usize = 256;
+
+/// Text drawn over the grid without being in the frame, for example an IME
+/// preedit. Setting or clearing it rewrites only the overlay region.
+#[derive(Clone, Copy, Debug)]
+pub struct Overlay<'a> {
+    pub row: u16,
+    pub col: u16,
+    /// Cells as for `GlyphSource::shape_run`; cells past the right edge of the
+    /// grid are dropped.
+    pub cells: &'a [TextCell<'a>],
+    pub style: FontStyle,
+}
+
+struct OverlayState {
+    row: u16,
+    col: u16,
+    cells: Vec<(String, u8)>,
+    style: FontStyle,
+}
+
 /// What changes how a frame looks without being in the frame.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct RenderState {
@@ -134,6 +157,10 @@ pub struct QuadBuilder {
     scratch: Scratch,
     /// Reused every build so a quiet frame allocates nothing.
     dirty: Vec<bool>,
+    /// Surface pixel position of the grid's top-left corner.
+    origin: (u32, u32),
+    overlay: Option<OverlayState>,
+    overlay_used: usize,
 }
 
 impl QuadBuilder {
@@ -152,6 +179,9 @@ impl QuadBuilder {
             epoch: 0,
             scratch: Scratch::default(),
             dirty: Vec::new(),
+            origin: (0, 0),
+            overlay: None,
+            overlay_used: 0,
         }
     }
 
@@ -167,6 +197,23 @@ impl QuadBuilder {
             self.theme = theme;
             self.needs_full = true;
         }
+    }
+
+    /// Where the grid's top-left corner sits on the surface, in physical
+    /// pixels (padding, or a viewport inside a larger window). Everything the
+    /// builder emits is shifted by it; the area outside the grid shows the
+    /// render clear colour. Changing it rebuilds every row. Positions from
+    /// `geometry` (for example `cursor_rect` for IME placement) are relative
+    /// to the grid: add the origin.
+    pub fn set_origin(&mut self, x: u32, y: u32) {
+        if (x, y) != self.origin {
+            self.origin = (x, y);
+            self.needs_full = true;
+        }
+    }
+
+    pub fn origin(&self) -> (u32, u32) {
+        self.origin
     }
 
     pub fn layout(&self) -> &CellLayout {
@@ -192,6 +239,112 @@ impl QuadBuilder {
         self.last_seq
     }
 
+    fn grid_len(&self) -> usize {
+        self.cols as usize * self.rows as usize * INSTANCES_PER_COL
+    }
+
+    /// Draws `overlay` (or removes the current one) over the grid and returns
+    /// the one range of `instances()` to upload, if anything changed. No row is
+    /// rebuilt and the frame is not touched, so a preedit that changes on every
+    /// keystroke costs one small write. Call after a `build` has sized the grid
+    /// (before that it does nothing); a resize drops the overlay. The next
+    /// full build redraws it (origin or atlas changes move it), and its
+    /// upload is in that build's report.
+    pub fn set_overlay(
+        &mut self,
+        overlay: Option<Overlay<'_>>,
+        glyphs: &mut dyn GlyphSource,
+    ) -> Option<InstanceRange> {
+        if self.instances.len() <= self.grid_len() {
+            return None;
+        }
+        self.overlay = overlay
+            .filter(|o| o.row < self.rows && o.col < self.cols)
+            .map(|o| OverlayState {
+                row: o.row,
+                col: o.col,
+                cells: o
+                    .cells
+                    .iter()
+                    .map(|c| (c.text.to_owned(), c.cols))
+                    .collect(),
+                style: o.style,
+            });
+        self.emit_overlay(glyphs)
+    }
+
+    fn emit_overlay(&mut self, glyphs: &mut dyn GlyphSource) -> Option<InstanceRange> {
+        let grid = self.grid_len();
+        let prev = self.overlay_used;
+        let mut out: Vec<Instance> = Vec::new();
+        if let Some(o) = self.overlay.take() {
+            let avail = self.cols - o.col;
+            let (mut kept, mut span) = (0usize, 0u16);
+            for (_, w) in &o.cells {
+                if span + *w as u16 > avail {
+                    break;
+                }
+                span += *w as u16;
+                kept += 1;
+            }
+            if kept > 0 {
+                let cells: Vec<TextCell<'_>> = o.cells[..kept]
+                    .iter()
+                    .map(|(t, w)| TextCell {
+                        text: t.as_str(),
+                        cols: *w,
+                    })
+                    .collect();
+                let mut starts = Vec::with_capacity(kept);
+                let mut c = o.col;
+                for (_, w) in &o.cells[..kept] {
+                    starts.push(c);
+                    c += *w as u16;
+                }
+                let span_rect = cell_rect(&self.layout, o.row, o.col, span);
+                out.push(Instance::solid(span_rect, self.theme.bg));
+                let mut placed = Vec::new();
+                glyphs.shape_run(o.style, &cells, &mut placed);
+                for g in placed.iter().take(OVERLAY_INSTANCES - 2) {
+                    let Some(&gcol) = starts.get(g.cell as usize) else {
+                        continue;
+                    };
+                    let origin = cell_rect(&self.layout, o.row, gcol, 1);
+                    let x = origin.x + g.left;
+                    let y = origin.y + self.layout.baseline as i32 - g.top;
+                    if let Some(i) =
+                        Instance::glyph(g.rect, x, y, self.theme.fg, g.color, span_rect)
+                    {
+                        out.push(i);
+                    }
+                }
+                out.push(Instance::solid(
+                    underline_rect(&self.layout, o.row, o.col, span),
+                    self.theme.fg,
+                ));
+                if self.origin != (0, 0) {
+                    let (ox, oy) = (self.origin.0 as f32, self.origin.1 as f32);
+                    for i in out.iter_mut().filter(|i| !i.is_empty()) {
+                        i.pos[0] += ox;
+                        i.pos[1] += oy;
+                    }
+                }
+            }
+            self.overlay = Some(o);
+        }
+        let used = out.len();
+        self.instances[grid..grid + used].copy_from_slice(&out);
+        let written = used.max(prev);
+        for slot in &mut self.instances[grid + used..grid + written] {
+            *slot = Instance::EMPTY;
+        }
+        self.overlay_used = used;
+        (written > 0).then_some(InstanceRange {
+            start: grid,
+            len: written,
+        })
+    }
+
     fn row_capacity(&self) -> usize {
         self.cols as usize * INSTANCES_PER_COL
     }
@@ -199,8 +352,10 @@ impl QuadBuilder {
     fn resize(&mut self, cols: u16, rows: u16) {
         self.cols = cols;
         self.rows = rows;
-        let total = cols as usize * rows as usize * INSTANCES_PER_COL;
+        let total = cols as usize * rows as usize * INSTANCES_PER_COL + OVERLAY_INSTANCES;
         self.instances = vec![Instance::EMPTY; total];
+        self.overlay = None;
+        self.overlay_used = 0;
         self.row_used = vec![0; rows as usize];
         self.prev_cursor = None;
         self.prev_selection = None;
@@ -311,6 +466,14 @@ impl QuadBuilder {
             // this pass may point at stale texels, so build everything again.
             full = true;
         }
+        if report.full && self.overlay.is_some() {
+            // A full build moved or invalidated what the overlay points at.
+            let before = glyphs.epoch();
+            report.uploads.extend(self.emit_overlay(glyphs));
+            if glyphs.epoch() != before {
+                settled = false;
+            }
+        }
         let overflowed = glyphs.overflowed();
         if !settled || overflowed {
             report.atlas_overflow = true;
@@ -392,6 +555,13 @@ impl QuadBuilder {
             .out
             .extend(cursor_parts.iter().copied().take(cap - scratch.out.len()));
         scratch.cursor = cursor_parts;
+        if self.origin != (0, 0) {
+            let (ox, oy) = (self.origin.0 as f32, self.origin.1 as f32);
+            for i in scratch.out.iter_mut().filter(|i| !i.is_empty()) {
+                i.pos[0] += ox;
+                i.pos[1] += oy;
+            }
+        }
         let used = scratch.out.len();
         let prev_used = self.row_used[row as usize];
         let base = row as usize * cap;
@@ -761,6 +931,78 @@ mod tests {
     }
 
     #[test]
+    fn the_origin_shifts_every_quad_and_a_change_rebuilds_everything() {
+        let f = with_cursor(text_frame(&["ab", "cd"], 1), 1, 1, CursorShape::Bar);
+        let mut plain = builder();
+        plain.build(&f, &RenderState::default(), &mut Stub::default());
+        let mut shifted = builder();
+        shifted.set_origin(10, 20);
+        shifted.build(&f, &RenderState::default(), &mut Stub::default());
+        let mut seen = 0;
+        for (a, b) in plain.instances().iter().zip(shifted.instances()) {
+            if a.is_empty() {
+                assert!(b.is_empty());
+                continue;
+            }
+            seen += 1;
+            assert_eq!([b.pos[0] - a.pos[0], b.pos[1] - a.pos[1]], [10.0, 20.0]);
+            assert_eq!((a.size, a.uv, a.color), (b.size, b.uv, b.color));
+        }
+        assert!(seen >= 5, "glyphs and the cursor were compared");
+        // Same frame again: nothing to do, until the origin moves.
+        let again = damaged(f.clone(), 1, &[]);
+        let r = shifted.build(&again, &RenderState::default(), &mut Stub::default());
+        assert!(r.rows.is_empty());
+        shifted.set_origin(0, 0);
+        let r = shifted.build(&again, &RenderState::default(), &mut Stub::default());
+        assert!(r.full);
+        assert_eq!(shifted.instances(), plain.instances());
+    }
+
+    #[test]
+    fn an_overlay_draws_on_top_without_rebuilding_a_row() {
+        let f = text_frame(&["abcd", "efgh"], 1);
+        let mut b = builder();
+        let mut g = Stub::default();
+        b.build(&f, &RenderState::default(), &mut g);
+        let grid = 2 * 4 * INSTANCES_PER_COL;
+        let cells = [
+            TextCell { text: "x", cols: 1 },
+            TextCell { text: "y", cols: 1 },
+        ];
+        let o = Overlay {
+            row: 1,
+            col: 1,
+            cells: &cells,
+            style: FontStyle::default(),
+        };
+        let r = b.set_overlay(Some(o), &mut g).unwrap();
+        assert_eq!(r.start, grid);
+        // Background, two glyphs, underline.
+        assert_eq!(r.len, 4);
+        let bg = b.instances()[grid];
+        assert_eq!((bg.pos, bg.size), ([8.0, 16.0], [16.0, 16.0]));
+        let same = damaged(f.clone(), 1, &[]);
+        let rep = b.build(&same, &RenderState::default(), &mut g);
+        assert!(rep.rows.is_empty() && rep.uploads.is_empty());
+        // A full rebuild redraws it, with the upload in the report.
+        b.set_origin(5, 0);
+        let rep = b.build(&same, &RenderState::default(), &mut g);
+        assert!(rep.full);
+        assert!(rep.uploads.iter().any(|u| u.start == grid && u.len == 4));
+        assert_eq!(b.instances()[grid].pos, [13.0, 16.0]);
+        // Cells past the right edge are dropped; clearing blanks the region.
+        let wide = [TextCell { text: "z", cols: 1 }; 9];
+        let o = Overlay { cells: &wide, ..o };
+        b.set_overlay(Some(o), &mut g);
+        assert_eq!(b.instances()[grid].size, [24.0, 16.0]);
+        let r = b.set_overlay(None, &mut g).unwrap();
+        assert_eq!(r.start, grid);
+        assert!(b.instances()[grid..].iter().all(|i| i.is_empty()));
+        assert!(b.set_overlay(None, &mut g).is_none());
+    }
+
+    #[test]
     fn the_first_frame_builds_every_row() {
         let mut b = builder();
         let mut g = Stub::default();
@@ -860,7 +1102,10 @@ mod tests {
         let f = damaged(text_frame(&["abc", "def", "ghi"], 2), 1, &[(0, 0)]);
         let r = b.build(&f, &RenderState::default(), &mut g);
         assert!(r.full);
-        assert_eq!(b.instances().len(), 3 * 3 * INSTANCES_PER_COL);
+        assert_eq!(
+            b.instances().len(),
+            3 * 3 * INSTANCES_PER_COL + OVERLAY_INSTANCES
+        );
     }
 
     #[test]
@@ -1420,7 +1665,10 @@ mod tests {
         f.cells[0].bg = Color::Rgb(1, 1, 1);
         let f = with_cursor(f, 0, 0, CursorShape::Bar);
         b.build(&f, &RenderState::default(), &mut g);
-        assert_eq!(b.instances().len(), 2 * INSTANCES_PER_COL);
+        assert_eq!(
+            b.instances().len(),
+            2 * INSTANCES_PER_COL + OVERLAY_INSTANCES
+        );
         // Row 1 starts with its own glyph, untouched by row 0.
         assert!(!b.instances()[INSTANCES_PER_COL].is_empty());
     }

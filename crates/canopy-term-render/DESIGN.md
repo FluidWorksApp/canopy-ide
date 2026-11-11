@@ -30,12 +30,19 @@ Everything is `pub` for testing, but a window layer only needs:
 * `metrics::{FontMetrics::from_font_data, layout, Scale, CellLayout}`: cell size
   from a font and the window scale factor.
 * `fonts::FontBook` (`bundled()`, `with_primary`, `add_font_data`,
-  `load_system_fonts`) and `text::TextEngine::new(book, layout, atlas_size)` with
-  `set_layout`.
+  `load_system_fonts`, `index_fallbacks`; `BUNDLED_FONT` is a `static`) and
+  `text::TextEngine::new(book, layout, atlas_size)` with `set_layout` and
+  `set_ligatures`. Size the atlas with `atlas::atlas_size_for(cell_w, cell_h,
+  device max_texture_dimension_2d)`.
 * `color::Theme` and `builder::{QuadBuilder, RenderState}`:
-  `QuadBuilder::build(&frame, &state, &mut engine) -> BuildReport`.
+  `QuadBuilder::build(&frame, &state, &mut engine) -> BuildReport`;
+  `QuadBuilder::set_origin(x, y)` places the grid inside the surface (padding or
+  a viewport; physical pixels, rebuilds every row when it changes). When
+  `BuildReport::atlas_overflow` is set (fed by `GlyphSource::overflowed`), build
+  a new engine with a larger atlas.
 * `renderer::Renderer::{new, sync, render}` and, for tests,
-  `renderer::Offscreen`.
+  `renderer::Offscreen`. `Renderer::new` panics on an sRGB target format: use a
+  non-sRGB surface format, or a non-sRGB entry in the surface's `view_formats`.
 * `geometry::{cursor_rect, Selection}` for IME placement and selection.
 
 The loop is `build` -> (skip when `report.held` or nothing changed) -> `sync` ->
@@ -72,6 +79,9 @@ glyphs. Using the three pieces directly keeps the grid in charge.
 
 ## The grid is in charge
 
+* The font size is converted to physical pixels and rounded first; the cell
+  metrics and the glyph raster both use that rounded size, so fractional scale
+  factors cannot make them disagree.
 * Cell width/height are whole physical pixels (`metrics::layout`). Cell origins
   are `col * width`, `row * height`: integers, so cells tile with no seams.
 * Glyphs are rasterised at the physical size and blitted at integer offsets.
@@ -123,8 +133,9 @@ sequence does not advance, so the release frame's damage still applies.
 Adjacent cells with the same background share one quad; underline and strike
 merge across neighbours of one colour. Default-background cells emit no quad at
 all (the target is cleared to the theme background). A cluster that shapes to
-many glyphs can exceed a row's capacity; extras are dropped rather than
-overrunning the next row.
+many glyphs can exceed a row's capacity; extra glyphs are dropped rather than
+overrunning the next row, and the cursor's quads are kept (they are placed
+after the cut).
 
 Fonts: a used face's parsed shaping face is `'static` and built once, not per
 run, and shaping plans are cached per (face, script, ligature setting), so a
@@ -232,11 +243,24 @@ To verify by hand with VoiceOver/NVDA once a window exists.
 Winit `Window::set_ime_allowed(true)` while the terminal has focus. The IME
 candidate window is placed with `set_ime_cursor_area(position, size)` using the
 physical-pixel rectangle `geometry::cursor_rect(layout, row, col, cols, shape)`
-(for placement use the Block rect even for bar/underline cursors, and refresh
-it whenever the cursor moves). `Ime::Preedit(text, range)` is drawn inline at
-the cursor as an underlined overlay and is never sent to the PTY; only
+plus `QuadBuilder::origin()` (for placement use the Block rect even for
+bar/underline cursors, and refresh it whenever the cursor moves).
+`Ime::Preedit(text, range)` is drawn inline at the cursor as an underlined
+overlay and is never sent to the PTY; only
 `Ime::Commit(text)` is, as UTF-8 (wrapped in bracketed-paste markers only if the
 program enabled them and the text is multi-line).
+
+The preedit is drawn without rebuilding the frame:
+`QuadBuilder::set_overlay(Some(Overlay { row, col, cells, style }), &mut engine)`
+fills a fixed region of `OVERLAY_INSTANCES` after the grid in the instance
+buffer (background, glyphs shaped as one run, underline; cells past the right
+edge are dropped) and returns the one `InstanceRange` for `Renderer::sync` to
+write, so a keystroke in a composition touches no row. `set_overlay(None, ..)`
+blanks it. A full build (origin, atlas epoch, theme or layout change) redraws
+the overlay and lists its upload in that build's report; a grid resize drops
+it, so set it again after the resize. If shaping the preedit moves the atlas
+epoch, the next `build` is full, as for any epoch change. Not yet exercised on a
+real GPU: the unit test checks the instances, not the pixels.
 
 ### Key encoding
 
@@ -298,7 +322,8 @@ first draws a character from it; resolving the characters of new output ahead
 of the frame (`choose` on a worker, results cached) is the integration
 point if that ever shows up in a frame time. When no face has the character the primary face's missing-glyph
 box is drawn. Emoji use colour bitmap (CBDT/sbix) or colour outline (COLR)
-strikes and are area-resampled to the cell height. Bold and italic missing from
+strikes and are area-resampled to fit within two cells (cell height, twice the
+cell width). Bold and italic missing from
 a face are synthesised (embolden, 14 degree skew).
 
 ## What CI can run (probe results)

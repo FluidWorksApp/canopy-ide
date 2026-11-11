@@ -298,6 +298,13 @@ fn main() {
         "build_one_row_steady allocs={} alloc_bytes={}",
         warm_row.0, warm_row.1
     ));
+    // Budget: twice the steady count measured on all three CI runners (36
+    // allocations, run 43005045932); what remains was not broken down.
+    assert!(
+        warm_row.0 <= 72,
+        "a steady one-row build allocated {} times (budget 72)",
+        warm_row.0
+    );
     let a = engine.atlas().stats();
     say(&format!(
         "atlas entries={} inserts={} hits={} evicted_shelves={}",
