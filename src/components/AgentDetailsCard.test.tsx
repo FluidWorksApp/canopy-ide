@@ -171,15 +171,32 @@ describe("AgentDetailsCard", () => {
     expect(onOpenAsset).toHaveBeenLastCalledWith("/r/hero.png", { system: true });
   });
 
-  it("lists a server the agent is running as a preview and opens it on click", async () => {
+  it("shows a running server in its own section and opens it on click", () => {
     const onOpenAsset = vi.fn();
     setup({ onOpenAsset, ports: [5173], digest: { session_id: "s" } });
-    fireEvent.click(screen.getByRole("button", { name: /Assets/ }));
-    fireEvent.mouseEnter(screen.getByRole("button", { name: /localhost:5173/ }));
-    expect(await screen.findByText(/Running now/)).toBeInTheDocument();
-    fireEvent.click(screen.getByRole("button", { name: /localhost:5173/ }));
+    expect(screen.queryByRole("button", { name: /Assets/ })).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Open localhost:5173" }));
     expect(onOpenAsset).toHaveBeenCalledWith("http://localhost:5173", { system: false });
+    fireEvent.click(screen.getByRole("button", { name: "Open localhost:5173" }), { metaKey: true });
+    expect(onOpenAsset).toHaveBeenLastCalledWith("http://localhost:5173", { system: true });
   });
+
+  it("shows task progress as a bar", () => {
+    setup({
+      digest: {
+        session_id: "s",
+        tasks: [
+          { text: "a", status: "completed" },
+          { text: "b", status: "running" },
+          { text: "c", status: "pending" },
+        ],
+      },
+    });
+    const bar = screen.getByRole("progressbar", { name: "Tasks done" });
+    expect(bar).toHaveAttribute("aria-valuenow", "1");
+    expect(bar).toHaveAttribute("aria-valuemax", "3");
+  });
+
 
   it("offers to send the project to a workspace only when asked to, and calls back", () => {
     const onSendToWorkspace = vi.fn();

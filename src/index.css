@@ -6993,6 +6993,69 @@ body.dragging-tab * {
   flex: 0 0 auto;
   font-variant-numeric: tabular-nums;
 }
+.agent-card-servers {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin: 0 4px 6px;
+  padding: 8px;
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--accent, #4a8cff) 9%, transparent);
+}
+.agent-card-label {
+  display: flex;
+  gap: 6px;
+  font-size: 10px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+}
+.agent-card-server {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+.agent-card-live {
+  flex: 0 0 auto;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: #46c07a;
+  box-shadow: 0 0 0 3px rgba(70, 192, 122, 0.18);
+}
+.agent-card-server-open {
+  flex: 0 0 auto;
+  border: 0;
+  border-radius: 7px;
+  padding: 2px 9px;
+  font: inherit;
+  font-weight: 600;
+  cursor: pointer;
+  color: var(--accent, #4a8cff);
+  background: color-mix(in srgb, var(--accent, #4a8cff) 16%, transparent);
+}
+.agent-card-server-open:hover {
+  background: color-mix(in srgb, var(--accent, #4a8cff) 28%, transparent);
+}
+.agent-card-progress {
+  display: flex;
+  height: 5px;
+  margin: 0 10px 6px;
+  border-radius: 9px;
+  overflow: hidden;
+  background: color-mix(in srgb, var(--text-dim) 20%, transparent);
+}
+.agent-card-progress i {
+  display: block;
+  height: 100%;
+}
+.agent-card-progress-done {
+  background: #46c07a;
+}
+.agent-card-progress-run {
+  background: #f2a93b;
+}
 .agent-card-current {
   margin: -2px 8px 4px 30px;
   color: var(--text-dim);
