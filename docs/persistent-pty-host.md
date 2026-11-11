@@ -79,6 +79,15 @@ host memory. Control ops (`spawn`, `list`, `resize`, `kill`, `pgrp`, `rawmode`,
 tolerated; on a version mismatch the app can still `list` and `kill`, so agents
 are never invisible. No multiplexing, framing or fd passing in this PR.
 
+A plain `attach` replaces whatever client is attached (the app reclaiming its own
+terminal after a reload depends on that). Protocol 3 adds two ops for other
+clients such as the `canopy-term` CLI: `attach` with `exclusive: true` checks and
+takes the session in one step inside the host and answers `busy` if a client is
+attached, and `read_ring` returns ring bytes from an offset without attaching, so
+`capture` never disconnects the app and never starts the linger clock. A host
+older than 3 ignores `exclusive`, so `HostClient::attach_exclusive` checks
+`hello` first and refuses such a host.
+
 **Versioning and containers.** `hello` carries the client's protocol version and
 the host replies with its own and the oldest client it accepts; `attach` repeats
 the client version. A client too old is refused with a clear message, and a
