@@ -74,6 +74,15 @@ export function parseAnswers(
   return out;
 }
 
+/** After the server has been missing or slow, skip it for a while: with no model
+ *  installed (the usual state) every prompt and reply would otherwise pay a
+ *  connect attempt. */
+const BACKOFF_MS = 60_000;
+let downUntil = 0;
+export const resetBackoff = () => {
+  downUntil = 0;
+};
+
 export interface DecideOptions {
   baseUrl?: string;
   timeoutMs?: number;
@@ -87,6 +96,7 @@ export async function decide(
   questions: Record<string, Question>,
   opts: DecideOptions = {},
 ): Promise<Decision> {
+  if (Date.now() < downUntil) return { ok: false, reason: "unavailable" };
   const doFetch = opts.fetchImpl ?? fetch;
   const ctl = new AbortController();
   const timer = setTimeout(() => ctl.abort(), opts.timeoutMs ?? DEFAULT_TIMEOUT_MS);
@@ -103,6 +113,7 @@ export async function decide(
     if (!answers) return { ok: false, reason: "invalid" };
     return { ok: true, answers, latencyMs: Date.now() - started };
   } catch (e) {
+    downUntil = Date.now() + BACKOFF_MS;
     return { ok: false, reason: ctl.signal.aborted ? "timeout" : "unavailable" };
   } finally {
     clearTimeout(timer);

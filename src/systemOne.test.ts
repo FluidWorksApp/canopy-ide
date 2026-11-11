@@ -1,9 +1,10 @@
-import { describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it } from "vitest";
 import {
   buildRequest,
   confident,
   decide,
   parseAnswers,
+  resetBackoff,
   promptQuestions,
   readPrompt,
   readReply,
@@ -16,6 +17,21 @@ const reply = (body: unknown, ok = true) =>
   (async () => ({ ok, json: async () => body })) as unknown as typeof fetch;
 
 describe("System One client", () => {
+  beforeEach(resetBackoff);
+
+  it("stops trying a server that is not there, for a while", async () => {
+    let calls = 0;
+    const down = (async () => {
+      calls++;
+      throw new Error("ECONNREFUSED");
+    }) as unknown as typeof fetch;
+    const q = replyQuestions([]);
+    await decide("x", q, { fetchImpl: down });
+    await decide("x", q, { fetchImpl: down });
+    await decide("x", q, { fetchImpl: down });
+    expect(calls).toBe(1);
+  });
+
   it("builds the request the wire expects", () => {
     const q = promptQuestions(["Fix the card"]);
     const req = buildRequest("hello there", q);
@@ -61,8 +77,10 @@ describe("System One client", () => {
       throw new Error("ECONNREFUSED");
     }) as unknown as typeof fetch;
     expect(await decide("x", q, { fetchImpl: down })).toEqual({ ok: false, reason: "unavailable" });
+    resetBackoff();
     expect(await decide("x", q, { fetchImpl: reply({}, false) })).toEqual({ ok: false, reason: "http" });
     expect(await decide("x", q, { fetchImpl: reply({ nope: 1 }) })).toEqual({ ok: false, reason: "invalid" });
+    resetBackoff();
     const slow = ((_: string, init: RequestInit) =>
       new Promise((_r, rej) => init.signal!.addEventListener("abort", () => rej(new Error("aborted"))))) as unknown as typeof fetch;
     expect(await decide("x", q, { fetchImpl: slow, timeoutMs: 20 })).toEqual({ ok: false, reason: "timeout" });
