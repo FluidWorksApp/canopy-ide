@@ -739,13 +739,15 @@ fn a_replaced_client_sees_eof_and_its_typing_no_longer_reaches_the_child() {
     let h = Harness::start("rp", 60);
     let (id, _) = h.client.spawn(spec("cat")).unwrap();
     let mut first = h.client.attach(id, 0).unwrap();
-    let mut second = h.client.attach(id, 0).unwrap();
-
-    // The first connection is closed by the host, not left frozen.
+    // Set before the host closes it: macOS refuses setsockopt (EINVAL) on a
+    // socket whose peer has already gone.
     first
         .stream
         .set_read_timeout(Some(Duration::from_secs(5)))
         .unwrap();
+    let mut second = h.client.attach(id, 0).unwrap();
+
+    // The first connection is closed by the host, not left frozen.
     let mut buf = [0u8; 256];
     let mut saw_eof = false;
     let deadline = Instant::now() + Duration::from_secs(5);
