@@ -29,6 +29,7 @@ import { AgentIcon, GitBranchIcon, TasksIcon } from "./icons";
 import type { Life } from "../../shared/agentLife";
 
 const COLLAPSED_KEY = "canopy:agentCard:collapsed";
+const DOCKED_KEY = "canopy:agentCard:docked";
 const PR_TTL_MS = 60_000;
 
 const prCache = new Map<string, { at: number; prs: ipc.PrInfo[] }>();
@@ -52,6 +53,15 @@ async function prsFor(repo: string): Promise<ipc.PrInfo[]> {
   } catch (error) {
     prFailures.set(repo, Date.now());
     throw error;
+  }
+}
+
+/** Docked is the default: a card floating over the terminal hides its text. */
+function readDocked(): boolean {
+  try {
+    return localStorage.getItem(DOCKED_KEY) !== "0";
+  } catch {
+    return true;
   }
 }
 
@@ -160,6 +170,9 @@ interface AgentDetailsCardProps {
    *  compared here: it can be stale or unproven. */
   life?: Life;
   onOpenWorkspace: () => void;
+  /** Told whether the card is docked beside the terminal (taking its own column)
+   *  rather than floating over it, so the terminal can make room. */
+  onDockChange?: (docked: boolean) => void;
   /** Open an asset the agent made. Default: in a tab of its own. `system` when
    *  a modifier was held: the person's own app for that file. */
   onOpenAsset?: (path: string, opts: { system: boolean }) => void;
@@ -188,6 +201,7 @@ export function AgentDetailsCard({
   ports,
   life,
   onOpenWorkspace,
+  onDockChange,
   onOpenAsset,
   onSendToWorkspace,
   settled,
@@ -197,6 +211,7 @@ export function AgentDetailsCard({
   machine: remoteMachine,
 }: AgentDetailsCardProps) {
   const [collapsed, setCollapsed] = useState(readCollapsed);
+  const [docked, setDocked] = useState(readDocked);
   const [tasksOpen, setTasksOpen] = useState(false);
   const [assetsOpen, setAssetsOpen] = useState(false);
   const [hovered, setHovered] = useState<{ asset: Asset; anchor: DOMRect } | null>(null);
@@ -209,6 +224,21 @@ export function AgentDetailsCard({
   /** The merge action awaiting its confirm click, and whether one is running. */
   const [pending, setPending] = useState<null | "squash" | "merge" | "rebase" | "close">(null);
   const [merging, setMerging] = useState(false);
+
+  const dockedNow = docked && !collapsed;
+  useEffect(() => {
+    onDockChange?.(dockedNow);
+    return () => onDockChange?.(false);
+  }, [dockedNow, onDockChange]);
+  const toggleDock = () => {
+    const next = !docked;
+    setDocked(next);
+    try {
+      localStorage.setItem(DOCKED_KEY, next ? "1" : "0");
+    } catch {
+      /* A remembered state is a convenience. */
+    }
+  };
 
   const toggle = (value: boolean) => {
     setCollapsed(value);
@@ -322,7 +352,7 @@ export function AgentDetailsCard({
   };
 
   return (
-    <aside className="agent-card" aria-label="Agent details">
+    <aside className={`agent-card${docked ? " agent-card--docked" : ""}`} aria-label="Agent details">
       <header className="agent-card-head">
         <span className="agent-card-title">
           <AgentIcon id={agent} size={15} />
@@ -331,6 +361,16 @@ export function AgentDetailsCard({
         <span className="agent-card-machine" title="Where this agent runs">
           {machine}
         </span>
+        <button
+          type="button"
+          className="agent-card-icon-btn"
+          onClick={toggleDock}
+          aria-label={docked ? "Float agent details over the terminal" : "Dock agent details beside the terminal"}
+          aria-pressed={docked}
+          title={docked ? "Float over the terminal" : "Dock beside the terminal"}
+        >
+          ◧
+        </button>
         <button
           type="button"
           className="agent-card-icon-btn"
