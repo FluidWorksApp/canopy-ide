@@ -58,7 +58,7 @@ jobs:
           $root = 'src-tauri/target/x86_64-pc-windows-msvc/release'
           $helper = Get-Item 'src-tauri/binaries/canopy-hook-x86_64-pc-windows-msvc.exe'
           if ($helper.Length -eq 0) { throw 'Empty hook helper' }
-          # The PTY host is a stub on Windows (nothing launches it yet), but it
+          # The app does not launch the PTY host on Windows yet, but it
           # is staged and bundled like every other externalBin entry.
           $ptyHost = Get-Item 'src-tauri/binaries/canopy-pty-host-x86_64-pc-windows-msvc.exe'
           if ($ptyHost.Length -eq 0) { throw 'Empty PTY host' }

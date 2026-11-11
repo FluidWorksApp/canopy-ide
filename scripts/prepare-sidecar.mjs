@@ -22,7 +22,8 @@
 // tauri-build never runs for it either. The app installs a copy of it outside
 // the bundle at runtime (src-tauri/src/pty_hosted/install.rs), so an update
 // that replaces the bundle never deletes the binary a running host came from.
-// On Windows it is a stub that exits; it is staged so every bundle has it.
+// On Windows it is the named-pipe host (the app does not launch it there yet);
+// it is staged so every bundle has it.
 import { execFileSync } from "node:child_process";
 import { copyFileSync, mkdirSync, existsSync, statSync } from "node:fs";
 import { dirname, join } from "node:path";

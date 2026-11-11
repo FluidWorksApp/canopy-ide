@@ -3,7 +3,13 @@
 // quitStopAll.ts.
 
 import { useState } from "react";
-import { errorText, stopAllMeta, stopAllTitle, type QuitStopAllAsk } from "../quitStopAll";
+import {
+  errorText,
+  lingerText,
+  stopAllMeta,
+  stopAllTitle,
+  type QuitStopAllAsk,
+} from "../quitStopAll";
 import { format } from "../shortcuts";
 import { Dialog, type DialogAction } from "./Dialog";
 
@@ -42,7 +48,19 @@ export function QuitStopAllDialog({
       hint={format("quit-stop-all") || undefined}
       body={
         <>
-          {ask.counts.agents > 0 && "Their work stops mid-turn."}
+          {ask.counts.agents > 0 && <div>Their work stops mid-turn.</div>}
+          {(ask.background ?? 0) > 0 && (
+            <div>
+              {ask.background} of these {ask.background === 1 ? "is" : "are"} still running in the
+              background from an earlier launch.
+            </div>
+          )}
+          {(ask.counts.unknown ?? 0) > 0 && (
+            <div>Unidentified ones could be agents.</div>
+          )}
+          {ask.hostOn && (ask.lingerSecs ?? 0) > 0 && (
+            <div>Quit only keeps terminals running for {lingerText(ask.lingerSecs!)}.</div>
+          )}
           {error && (
             <div role="alert" style={{ color: "var(--danger)" }}>
               {error}
