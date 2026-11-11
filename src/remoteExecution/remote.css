@@ -26,5 +26,5 @@ input:focus, button:focus-visible, textarea:focus, select:focus { outline: 2px s
 .mirror-repo small, .mirror-project small { color: var(--text-dim); overflow-wrap: anywhere; }
 .mirror-setup small.mirror-problem { color: var(--danger, #e5484d); }
 
-.mirror-setup fieldset { display: grid; gap: 4px; min-width: 0; margin: 0; padding: 6px 10px; max-height: 200px; overflow-y: auto; border: 1px solid var(--border); border-radius: 6px; }
+.mirror-setup fieldset { display: grid; gap: 4px; min-width: 0; margin: 0; padding: 6px 10px; border: 1px solid var(--border); border-radius: 6px; }
 .mirror-setup fieldset > * { min-width: 0; overflow-wrap: anywhere; }
