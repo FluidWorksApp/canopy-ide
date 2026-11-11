@@ -74,13 +74,16 @@ rendering library is bundled, so nothing is redistributed for that feature.
 
 ## Models downloaded at runtime
 
-Voice dictation downloads a speech model on first use. Canopy does not
-redistribute these — they are fetched to the user's own machine — but their
-terms govern use of the model:
+Voice dictation downloads a speech model on first use, and after install
+Canopy fetches the local System One decision model and the llama.cpp runtime
+that serves it. Canopy does not redistribute these — they are fetched to the
+user's own machine, never packaged in the app — but their terms govern use:
 
 - **Parakeet TDT 0.6B v3 (int8)** — CC-BY-4.0, by NVIDIA. <https://huggingface.co/nvidia/parakeet-tdt-0.6b-v3>
 - **SenseVoice Small (int8)** — FunASR MODEL_LICENSE (custom) — <https://github.com/modelscope/FunASR/blob/main/MODEL_LICENSE>, by FunAudioLLM / Alibaba. <https://huggingface.co/FunAudioLLM/SenseVoiceSmall>
 - **Moonshine Base** — MIT, by Useful Sensors. <https://huggingface.co/UsefulSensors/moonshine>
+- **Laya (Q8_0 GGUF, the local System One decision model)** — Apache-2.0, by Convai Innovations (convaiinnovations/laya); GGUF conversion by ggml-org. <https://huggingface.co/ggml-org/Laya-GGUF>
+- **llama.cpp b12262 (`llama-server`, the runtime that serves Laya)** — MIT, by The ggml authors. <https://github.com/ggml-org/llama.cpp>
 
 ## Tools downloaded at runtime
 

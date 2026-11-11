@@ -43,17 +43,24 @@ describe("System One client", () => {
   });
 
   it("reads the answers the server returns, and only those", () => {
-    const q = replyQuestions(["a", "b"]);
+    const q = replyQuestions(["a", "b", "c"]);
     const body = {
       answers: {
         raised_pr: { type: "noul", noul: 0.93 },
         made_asset: { type: "noul", noul: 0.1 },
         blocked: { type: "noul", noul: 0.5 },
-        finished: { type: "choice", choice: "task_1", confidence: 0.8, probabilities: { task_1: 0.8, none: 0.2 } },
+        done_0: { type: "noul", noul: 0.04 },
+        done_1: { type: "noul", noul: 0.31 },
+        done_2: { type: "noul", noul: 0.9 },
       },
     };
     const got = parseAnswers(body, q)!;
-    expect(readReply(got)).toEqual({ raisedPr: true, madeAsset: false, blocked: null, finished: 1 });
+    expect(readReply(got)).toEqual({ raisedPr: true, madeAsset: false, blocked: null, doneCandidates: [1, 2] });
+  });
+
+  it("asks about every open task, each on its own", () => {
+    expect(Object.keys(replyQuestions(["x", "y"]))).toEqual(["raised_pr", "made_asset", "blocked", "done_0", "done_1"]);
+    expect(Object.keys(replyQuestions(Array(30).fill("t"))).filter((k) => k.startsWith("done_"))).toHaveLength(20);
   });
 
   it("refuses a reply that is wrong in any part", () => {
@@ -64,8 +71,7 @@ describe("System One client", () => {
       answers: {
         raised_pr: { type: "noul", noul: 0.9 },
         made_asset: { type: "noul", noul: 0.9 },
-        blocked: { type: "noul", noul: 0.9 },
-        finished: { type: "choice", choice: "invented", confidence: 0.9, probabilities: {} },
+        blocked: { type: "choice", choice: "yes", confidence: 0.9, probabilities: {} },
       },
     };
     expect(parseAnswers(bad, q)).toBeNull();

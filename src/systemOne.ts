@@ -6,16 +6,21 @@
 // event Canopy sees (a prompt, a reply, a PR) and decide what it is.
 //
 // Canopy talks to the wire, not to a model, so the model behind it is a swap.
-// Nothing here is a setting: the layer is used when a server answers on the
-// local port and skipped when it does not (`decide` never throws, and says why
-// it gave no answer), and everything stays on this machine.
+// The model is Laya, served by llama.cpp, downloaded after install and run by the
+// Rust side (src-tauri/src/system_one.rs) on a private port behind a key, so the
+// webview never holds the address: it asks the backend (`system_one_decide`).
+// Nothing here is a setting: the layer is used when the model is installed and
+// skipped when it is not (`decide` never throws, and says why it gave no
+// answer), and everything stays on this machine.
 //
 // The agent CLI brain (brainCall.ts `askBrain`) stays the second opinion: a
 // feature calls `decide` first and escalates only when the local answer is
 // absent or not confident (`confident`). Nothing in this file calls the CLI.
 
-export const SYSTEM_ONE_URL = "http://127.0.0.1:8009";
-const DEFAULT_TIMEOUT_MS = 2500;
+import { invoke } from "@tauri-apps/api/core";
+
+// The first call of a session starts the model (about a second).
+const DEFAULT_TIMEOUT_MS = 5000;
 
 export type Question =
   | { type: "choice"; instructions: string; criteria: Record<string, string | null> }
@@ -84,9 +89,23 @@ export const resetBackoff = () => {
 };
 
 export interface DecideOptions {
-  baseUrl?: string;
   timeoutMs?: number;
+  /** Test seam. Defaults to the Rust-side proxy. */
   fetchImpl?: typeof fetch;
+}
+
+/** The backend proxy dressed as a fetch, so `decide` has one code path. */
+const viaBackend = (async (_url: string, init: RequestInit) => {
+  const json = await invoke("system_one_decide", { request: JSON.parse(String(init.body)) });
+  return { ok: true, json: async () => json };
+}) as unknown as typeof fetch;
+
+/** `viaBackend` cannot be aborted, so the timeout races it. */
+function raceAbort<T>(p: Promise<T>, signal: AbortSignal): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    signal.addEventListener("abort", () => reject(new Error("aborted")));
+    p.then(resolve, reject);
+  });
 }
 
 /** One call. Never throws: a model that is not running, is slow, or answers
@@ -97,22 +116,22 @@ export async function decide(
   opts: DecideOptions = {},
 ): Promise<Decision> {
   if (Date.now() < downUntil) return { ok: false, reason: "unavailable" };
-  const doFetch = opts.fetchImpl ?? fetch;
+  const doFetch = opts.fetchImpl ?? viaBackend;
   const ctl = new AbortController();
   const timer = setTimeout(() => ctl.abort(), opts.timeoutMs ?? DEFAULT_TIMEOUT_MS);
   const started = Date.now();
   try {
-    const res = await doFetch(`${opts.baseUrl ?? SYSTEM_ONE_URL}/v1/systemone`, {
+    const res = await raceAbort(doFetch("system_one", {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify(buildRequest(state, questions)),
       signal: ctl.signal,
-    });
+    }), ctl.signal);
     if (!res.ok) return { ok: false, reason: "http" };
     const answers = parseAnswers(await res.json(), questions);
     if (!answers) return { ok: false, reason: "invalid" };
     return { ok: true, answers, latencyMs: Date.now() - started };
-  } catch (e) {
+  } catch {
     downUntil = Date.now() + BACKOFF_MS;
     return { ok: false, reason: ctl.signal.aborted ? "timeout" : "unavailable" };
   } finally {
@@ -187,40 +206,46 @@ export function readPrompt(answers: Record<string, Answer>, existing: string[]):
   return Number.isInteger(index) && index < existing.length ? { is: "follow-up", taskIndex: index } : { is: "unsure" };
 }
 
-/** What a reply from the agent shows: a PR raised, a file or page made, a task
- *  finished. `open` are the tasks not yet done. */
+/** Open tasks checked against one reply, each its own yes/no. A task list is
+ *  short and the model is local, so every task is asked about every reply. */
+export const MAX_OPEN_CHECKED = 20;
+
+/** What a reply from the agent shows: a PR raised, a file or page made, the
+ *  agent blocked, and for each open task whether this reply finishes it. */
 export function replyQuestions(open: string[]): Record<string, Question> {
-  const tasks: Record<string, string | null> = { none: "No listed task was finished in this reply" };
-  open.slice(0, 10).forEach((t, i) => {
-    tasks[`task_${i}`] = t;
-  });
-  return {
+  const q: Record<string, Question> = {
     raised_pr: { type: "noul", instructions: "Does this reply say a pull request was raised or opened?" },
     made_asset: { type: "noul", instructions: "Does this reply say a file, page, image or server was produced?" },
-    finished: { type: "choice", instructions: "Which task does this reply say is now finished?", criteria: tasks },
     blocked: { type: "noul", instructions: "Does this reply say the agent is blocked or needs the person?" },
   };
+  open.slice(0, MAX_OPEN_CHECKED).forEach((t, i) => {
+    q[`done_${i}`] = { type: "noul", instructions: `Does this reply show that this task is finished: ${t}` };
+  });
+  return q;
 }
+
+/** A missed finished task is silently lost; a false alarm only costs one check
+ *  by System 2. So anything this far above "no" goes to System 2 to confirm. */
+export const ESCALATE_AT = 0.15;
 
 export interface ReplyVerdict {
   raisedPr: boolean | null;
   madeAsset: boolean | null;
   blocked: boolean | null;
-  /** index into `open`, or null when none / not sure */
-  finished: number | null;
+  /** indices into `open` that System 2 must confirm; never marked done on this alone */
+  doneCandidates: number[];
 }
 
 export function readReply(answers: Record<string, Answer>): ReplyVerdict {
-  const f = answers.finished;
-  let finished: number | null = null;
-  if (f?.type === "choice" && confident(f) && f.choice !== "none") {
-    const i = Number(f.choice.replace("task_", ""));
-    finished = Number.isInteger(i) ? i : null;
+  const doneCandidates: number[] = [];
+  for (let i = 0; i < MAX_OPEN_CHECKED; i++) {
+    const a = answers[`done_${i}`];
+    if (a?.type === "noul" && a.noul >= ESCALATE_AT) doneCandidates.push(i);
   }
   return {
     raisedPr: yes(answers.raised_pr),
     madeAsset: yes(answers.made_asset),
     blocked: yes(answers.blocked),
-    finished,
+    doneCandidates,
   };
 }
