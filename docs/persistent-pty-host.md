@@ -13,11 +13,10 @@ are the parent, and tmux would re-emulate the byte stream.
 
 ## Scope of the first PR
 
-- Unix only (macOS, Linux). Windows keeps in-process PTYs for now; the host
-  binary compiles on Windows as a stub so the sidecar packaging step does not
-  break. A real Windows host (named pipe, ConPTY, job objects) is a stacked
-  follow-up PR.
-- Off by default behind `CANOPY_PTY_HOST=1`. No UI change in this PR.
+- The app uses the host on Unix (macOS, Linux) only. Windows keeps in-process
+  PTYs in the app; the host itself runs on Windows (see "Windows host" below)
+  but nothing in the app calls it there yet.
+- Off by default behind `CANOPY_PTY_HOST=1`. No UI change in this PR, so no mock is owed yet.
   With it on, Quit leaves adoptable terminals running in the host (micro-tasks
   and run-bound tabs are still stopped) and the next launch adopts them.
   "Quit and Stop All…" (stacked PR #794; app menu under Quit, ⌥⌘Q on macOS,
@@ -227,7 +226,47 @@ the host on:
   but the app only reads events written after it starts.
 
 **Not in this PR (stacked follow-ups):** packaging the host so an update does not
-delete it, Windows (no socket transport). Quit and Stop All is #794.
+delete it, the app using the host on Windows. Quit and Stop All is #794.
+
+## Windows host
+
+The same protocol, server core and client run on Windows; only the transport,
+the PTY and the launch differ (`crates/canopy-pty-host/src/windows.rs`).
+
+- **Transport.** A per-user named pipe, `\\.\pipe\canopy-pty-host-<user SID>`
+  (`windows::default_pipe_name`), passed as `--socket`. Each instance has owner
+  and DACL `O:<sid>D:P(A;;GA;;;<sid>)(A;;GA;;;SY)` plus
+  `PIPE_REJECT_REMOTE_CLIENTS`. The host relies on that DACL (checked by the
+  kernel at open) instead of looking the client up by pid, which races with pid
+  reuse and fails for elevated peers. The name is predictable, so the client
+  checks the pipe's owner is its own SID and opens it with
+  `SECURITY_IDENTIFICATION` before sending an environment full of tokens. All
+  pipe I/O is overlapped: one connection is read and written from two threads.
+  There is no half-close; `shutdown` ends the connection for every clone.
+- **Single instance.** The first instance is created with
+  `FILE_FLAG_FIRST_PIPE_INSTANCE`. A second host fails to bind and exits 0, and
+  the client keeps asking (or starts another) instead of taking a lock file. A
+  dead host leaves no stale pipe.
+- **PTYs.** ConPTY directly (not portable-pty): portable-pty cannot create the
+  child suspended, and always sets `PSEUDOCONSOLE_INHERIT_CURSOR`, with which
+  conhost is believed (not verified) to wait for a cursor report that an
+  unattached host session never sends. Each child starts suspended, joins its
+  own Job Object with `KILL_ON_JOB_CLOSE`, then resumes. `kill`, linger and
+  host shutdown close the pseudoconsole first (`CTRL_CLOSE_EVENT`), then after
+  the grace period `TerminateJobObject`, even if the main child already exited,
+  so descendants on another console die too. The
+  host closes the pseudoconsole when the child exits, because ConPTY's output
+  pipe never reaches EOF on its own. If the host dies, even by
+  `TerminateProcess`, the job handles close and the sessions die with it.
+  `pgrp` and `raw_mode` answer "unknown". Exit codes are the full `u32`.
+- **Launch.** `CreateProcessW` with `DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP
+  | CREATE_BREAKAWAY_FROM_JOB` (retried without breakaway if the launcher's job
+  refuses it), no inherited handles, and the system directory as the working
+  directory.
+- **Differences from Unix.** Bytes are ConPTY's rendering, not the child's raw
+  output. Background processes still attached to the console are hung up when
+  the main child exits. There is no signal to stop the host gracefully; it stops
+  on `shutdown` or idle exit.
 
 ## Remote runner (follow-up, investigated)
 
@@ -315,4 +354,4 @@ runs the first and last of these as well.
 ## Non-goals
 
 Survival across reboot; surviving a host crash; tmux compatibility; fd passing to
-a new host; Windows in this PR.
+a new host.

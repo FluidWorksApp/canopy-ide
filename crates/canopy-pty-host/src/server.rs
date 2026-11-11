@@ -1,5 +1,6 @@
 //! The host: owns PTYs and their child processes, keeps a bounded replay ring per
-//! session, and serves the protocol on a Unix socket.
+//! session, and serves the protocol on a Unix socket (a named pipe on Windows,
+//! see `windows.rs`; everything below the transport is shared).
 //!
 //! Backpressure: while a client is attached the reader stops once the client is
 //! `HIGH_WATER` bytes behind, so a stalled client blocks the child instead of
@@ -9,11 +10,16 @@
 use crate::protocol::{
     AttachReply, Request, Response, SessionInfo, SpawnSpec, BUSY, PROTOCOL_VERSION,
 };
-use portable_pty::{native_pty_system, CommandBuilder, MasterPty, PtySize};
+#[cfg(unix)]
+use portable_pty::{native_pty_system, CommandBuilder};
+use portable_pty::{Child, MasterPty, PtySize};
 use std::collections::{HashMap, VecDeque};
 use std::io::{Read, Write};
+#[cfg(unix)]
 use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt};
+#[cfg(unix)]
 use std::os::unix::io::AsRawFd;
+#[cfg(unix)]
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
@@ -21,6 +27,23 @@ use std::sync::mpsc::{sync_channel, SyncSender, TrySendError};
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
+
+#[cfg(unix)]
+type Conn = UnixStream;
+#[cfg(windows)]
+type Conn = crate::windows::PipeStream;
+#[cfg(windows)]
+pub use crate::windows::{harden_process, PipeListener};
+
+/// Windows has no signals; these name the two stops `signal_group` maps onto
+/// closing the pseudoconsole (soft) and terminating the job (hard).
+#[cfg(windows)]
+mod libc {
+    #[allow(non_camel_case_types)]
+    pub type c_int = i32;
+    pub const SIGTERM: c_int = 15;
+    pub const SIGKILL: c_int = 9;
+}
 
 /// Replay kept per session.
 pub const RING_CAP: usize = 4 * 1024 * 1024;
@@ -66,7 +89,7 @@ struct Ring {
     /// The attached client's connection, so a newer attach can close it: a
     /// replaced client then sees EOF instead of a frozen screen whose typing
     /// still reaches the child.
-    conn: Option<UnixStream>,
+    conn: Option<Conn>,
     eof: bool,
 }
 
@@ -89,6 +112,9 @@ struct Session {
     /// while a client is attached.
     detached_at: Mutex<Option<Instant>>,
     lingered: AtomicBool,
+    /// The session's pseudoconsole and Job Object.
+    #[cfg(windows)]
+    group: crate::windows::Group,
 }
 
 impl Session {
@@ -96,7 +122,22 @@ impl Session {
         *self.exited.lock().unwrap()
     }
 
+    /// Soft stop closes the pseudoconsole; hard stop terminates the job. The
+    /// hard stop runs even after the main child has exited: closing the console
+    /// usually ends the shell within the grace period, but descendants on their
+    /// own console (or none) survive that, and a job handle, unlike a pid, is
+    /// never recycled.
+    #[cfg(windows)]
+    fn signal_group(&self, signal: libc::c_int) {
+        if signal == libc::SIGKILL {
+            self.group.kill();
+        } else if self.exit_code().is_none() {
+            self.group.hang_up();
+        }
+    }
+
     /// Never signal a pid that has been reaped: it can be recycled.
+    #[cfg(unix)]
     fn signal_group(&self, signal: libc::c_int) {
         if self.exit_code().is_none() {
             // SAFETY: plain kill(2) on the child's own process group.
@@ -147,12 +188,15 @@ fn id_seed() -> u32 {
     ((mixed >> 8) as u32 & 0x3fff_ffff).max(1)
 }
 
+#[cfg(unix)]
 static SIGNALLED: AtomicBool = AtomicBool::new(false);
 
+#[cfg(unix)]
 extern "C" fn on_signal(_: libc::c_int) {
     SIGNALLED.store(true, Ordering::SeqCst);
 }
 
+#[cfg(unix)]
 fn peer_uid(stream: &UnixStream) -> Option<u32> {
     let fd = stream.as_raw_fd();
     #[cfg(target_os = "linux")]
@@ -187,6 +231,27 @@ fn peer_uid(stream: &UnixStream) -> Option<u32> {
     }
 }
 
+/// One accepted same-user connection, or `None` when none is waiting.
+#[cfg(unix)]
+fn next_connection(listener: &UnixListener, my_uid: u32) -> std::io::Result<Option<UnixStream>> {
+    match listener.accept() {
+        Ok((stream, _)) => {
+            // An unknown peer is refused, not trusted.
+            if peer_uid(&stream) != Some(my_uid) {
+                return Ok(None);
+            }
+            let _ = stream.set_nonblocking(false);
+            Ok(Some(stream))
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+            thread::sleep(Duration::from_millis(30));
+            Ok(None)
+        }
+        Err(e) => Err(e),
+    }
+}
+
+#[cfg(unix)]
 fn raise_fd_limit() {
     // SAFETY: get/setrlimit with a properly initialised struct.
     unsafe {
@@ -204,6 +269,7 @@ fn raise_fd_limit() {
 /// Closes every inherited descriptor and leaves the launcher's directory: the
 /// host lives for days and must not pin a socket or a working directory the app
 /// happened to hold when it started us.
+#[cfg(unix)]
 pub fn harden_process() {
     // SAFETY: closing descriptors this process does not use, chdir to root.
     unsafe {
@@ -225,6 +291,7 @@ pub fn harden_process() {
 /// does not exist is created here with mode 0700. One that already exists is never
 /// chmod-ed (the caller may have pointed us at `/tmp` or `$HOME`): it must already
 /// belong to this user and grant nothing to group or others, or it is refused.
+#[cfg(unix)]
 pub fn prepare_socket_dir(dir: &Path) -> std::io::Result<()> {
     let dir = if dir.as_os_str().is_empty() {
         Path::new(".")
@@ -253,6 +320,7 @@ pub fn prepare_socket_dir(dir: &Path) -> std::io::Result<()> {
 /// Binds the socket, replacing a stale one, and serves until SIGTERM/SIGINT, a
 /// `shutdown` request or idle exit. Exits quietly (Ok) if a live host already
 /// owns the socket.
+#[cfg(unix)]
 pub fn run(config: ServerConfig) -> std::io::Result<()> {
     raise_fd_limit();
     if let Some(dir) = config.socket.parent() {
@@ -261,27 +329,15 @@ pub fn run(config: ServerConfig) -> std::io::Result<()> {
     // Held from the liveness probe to the bind: two hosts starting at once must
     // not both find the socket dead, or the loser's unlink would remove the
     // winner's live socket and orphan its sessions.
-    let bind_lock = {
-        let mut path = config.socket.clone().into_os_string();
-        path.push(".lock");
-        let file = std::fs::OpenOptions::new()
-            .create(true)
-            .truncate(false)
-            .write(true)
-            .mode(0o600)
-            .open(path)?;
-        // SAFETY: flock on a descriptor we own; released when `file` drops.
-        if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) } != 0 {
-            return Err(std::io::Error::last_os_error());
-        }
-        file
-    };
+    let bind_lock = lock_bind(&config.socket)?;
     if UnixStream::connect(&config.socket).is_ok() {
         return Ok(());
     }
     let _ = std::fs::remove_file(&config.socket);
     let listener = UnixListener::bind(&config.socket)?;
     std::fs::set_permissions(&config.socket, std::fs::Permissions::from_mode(0o600))?;
+    // Which file is ours, read under the lock so it cannot be a successor's.
+    let bound = socket_identity(&config.socket);
     // Bound and listening: later hosts now find a live socket and exit. Holding
     // the lock for the host's lifetime would block them here instead.
     drop(bind_lock);
@@ -302,7 +358,21 @@ pub fn run(config: ServerConfig) -> std::io::Result<()> {
             stop.store(true, Ordering::SeqCst);
         });
     }
-    serve(listener, &config, stop)
+    serve_bound(listener, &config, stop, bound)
+}
+
+/// Creates the pipe's first instance and serves until a `shutdown` request or
+/// idle exit (a detached host gets no console control events). Exits quietly
+/// (Ok) if the pipe already exists: a live host owns it. A dead host leaves no
+/// stale pipe behind, so there is nothing to replace.
+#[cfg(windows)]
+pub fn run(config: ServerConfig) -> std::io::Result<()> {
+    let listener = match PipeListener::bind(&config.socket) {
+        Ok(listener) => listener,
+        Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => return Ok(()),
+        Err(e) => return Err(e),
+    };
+    serve(listener, &config, Arc::new(AtomicBool::new(false)))
 }
 
 /// The serving core, with no signal handling, so tests can run a host on a
@@ -310,10 +380,85 @@ pub fn run(config: ServerConfig) -> std::io::Result<()> {
 /// so a client arriving mid-shutdown fails fast instead of reaching a host that
 /// is about to disappear.
 pub fn serve(
-    listener: UnixListener,
+    #[cfg(unix)] listener: UnixListener,
+    #[cfg(windows)] mut listener: PipeListener,
     config: &ServerConfig,
     stop: Arc<AtomicBool>,
 ) -> std::io::Result<()> {
+    let bound = socket_identity(&config.socket);
+    serve_bound(listener, config, stop, bound)
+}
+
+/// What a host remembers of the endpoint it bound, to remove only that one when
+/// it exits: the socket file's (device, inode) on Unix. On Windows there is
+/// nothing to remember or remove: the pipe's first instance is the single-host
+/// lock, and the pipe disappears with the last handle when the listener drops,
+/// so a successor's pipe can never be mistaken for ours.
+#[cfg(unix)]
+type Bound = Option<(u64, u64)>;
+#[cfg(windows)]
+type Bound = ();
+
+#[cfg(windows)]
+fn socket_identity(_socket: &Path) -> Bound {}
+
+#[cfg(windows)]
+fn unlink_if_bound(_socket: &Path, _bound: Bound) {}
+
+/// The bind lock's path for a socket.
+#[cfg(unix)]
+fn lock_path(socket: &Path) -> PathBuf {
+    let mut path = socket.to_path_buf().into_os_string();
+    path.push(".lock");
+    PathBuf::from(path)
+}
+
+/// Takes the exclusive lock that serialises binding and unlinking the socket.
+#[cfg(unix)]
+fn lock_bind(socket: &Path) -> std::io::Result<std::fs::File> {
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .mode(0o600)
+        .open(lock_path(socket))?;
+    // SAFETY: flock on a descriptor we own; released when `file` drops.
+    if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) } != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(file)
+}
+
+/// (device, inode) of whatever is at `socket` now, without following a symlink.
+#[cfg(unix)]
+fn socket_identity(socket: &Path) -> Option<(u64, u64)> {
+    std::fs::symlink_metadata(socket)
+        .ok()
+        .map(|m| (m.dev(), m.ino()))
+}
+
+/// Unlinks `socket` only if it is still the file this host bound, and does it
+/// under the bind lock: a host that started after this one began exiting has
+/// already replaced the file, and unlinking by name would orphan its sessions.
+/// If the lock cannot be taken the file is left (a later host removes a stale
+/// socket itself).
+#[cfg(unix)]
+fn unlink_if_bound(socket: &Path, bound: Option<(u64, u64)>) {
+    let Some(bound) = bound else { return };
+    let Ok(_lock) = lock_bind(socket) else { return };
+    if socket_identity(socket) == Some(bound) {
+        let _ = std::fs::remove_file(socket);
+    }
+}
+
+fn serve_bound(
+    #[cfg(unix)] listener: UnixListener,
+    #[cfg(windows)] mut listener: PipeListener,
+    config: &ServerConfig,
+    stop: Arc<AtomicBool>,
+    bound: Bound,
+) -> std::io::Result<()> {
+    #[cfg(unix)]
     listener.set_nonblocking(true)?;
     let host = Arc::new(Host {
         spawn_lock: Mutex::new(()),
@@ -326,22 +471,23 @@ pub fn serve(
     });
     let mut quiet_since = Instant::now();
     // SAFETY: geteuid has no preconditions.
+    #[cfg(unix)]
     let my_uid = unsafe { libc::geteuid() };
 
     loop {
         if host.stop.load(Ordering::SeqCst) {
             break;
         }
-        match listener.accept() {
-            Ok((stream, _)) => {
-                // An unknown peer is refused, not trusted.
-                if peer_uid(&stream) != Some(my_uid) {
-                    continue;
-                }
+        // The pipe's DACL already limits who can connect (see windows.rs).
+        #[cfg(unix)]
+        let next = next_connection(&listener, my_uid);
+        #[cfg(windows)]
+        let next = listener.accept_timeout(Duration::from_millis(30));
+        match next {
+            Ok(Some(stream)) => {
                 if host.connections.load(Ordering::SeqCst) >= MAX_CONNECTIONS {
                     continue;
                 }
-                let _ = stream.set_nonblocking(false);
                 host.connections.fetch_add(1, Ordering::SeqCst);
                 let host = Arc::clone(&host);
                 thread::spawn(move || {
@@ -349,9 +495,7 @@ pub fn serve(
                     host.connections.fetch_sub(1, Ordering::SeqCst);
                 });
             }
-            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                thread::sleep(Duration::from_millis(30));
-            }
+            Ok(None) => {}
             Err(_) => thread::sleep(Duration::from_millis(100)),
         }
         let live = {
@@ -389,7 +533,7 @@ pub fn serve(
     }
 
     drop(listener);
-    let _ = std::fs::remove_file(&config.socket);
+    unlink_if_bound(&config.socket, bound);
     shutdown_sessions(&host);
     Ok(())
 }
@@ -410,7 +554,7 @@ fn shutdown_sessions(host: &Host) {
     thread::sleep(Duration::from_millis(100));
 }
 
-fn write_line<T: serde::Serialize>(stream: &mut UnixStream, value: &T) -> std::io::Result<()> {
+fn write_line<T: serde::Serialize>(stream: &mut Conn, value: &T) -> std::io::Result<()> {
     let mut line = serde_json::to_vec(value).map_err(std::io::Error::other)?;
     line.push(b'\n');
     stream.write_all(&line)
@@ -419,6 +563,7 @@ fn write_line<T: serde::Serialize>(stream: &mut UnixStream, value: &T) -> std::i
 /// Reads up to and including the first newline and not a byte more (raw bytes
 /// may follow an attach), by peeking at what is queued and then consuming only
 /// the line. Bounded in length and in total time.
+#[cfg(unix)]
 fn read_request_line(stream: &UnixStream) -> std::io::Result<Vec<u8>> {
     let fd = stream.as_raw_fd();
     let deadline = Instant::now() + REQUEST_TIMEOUT;
@@ -466,7 +611,37 @@ fn read_request_line(stream: &UnixStream) -> std::io::Result<Vec<u8>> {
     }
 }
 
-fn handle(host: &Arc<Host>, mut stream: UnixStream) -> std::io::Result<()> {
+/// The pipe has no peek, so this reads one byte at a time (an attach may be
+/// followed by raw bytes, so nothing past the newline may be consumed). Bounded
+/// in length and in total time; each read is bounded by the stream's read
+/// timeout, which `handle` sets to `REQUEST_TIMEOUT`.
+#[cfg(windows)]
+fn read_request_line(stream: &Conn) -> std::io::Result<Vec<u8>> {
+    let deadline = Instant::now() + REQUEST_TIMEOUT;
+    let mut line = Vec::new();
+    let mut byte = [0u8; 1];
+    let mut reader = stream;
+    loop {
+        if Instant::now() >= deadline {
+            return Err(std::io::ErrorKind::TimedOut.into());
+        }
+        if reader.read(&mut byte)? == 0 {
+            return Ok(line); // closed before a full line
+        }
+        line.push(byte[0]);
+        if byte[0] == b'\n' {
+            return Ok(line);
+        }
+        if line.len() >= MAX_REQUEST_LINE {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "request line too long",
+            ));
+        }
+    }
+}
+
+fn handle(host: &Arc<Host>, mut stream: Conn) -> std::io::Result<()> {
     let min_client = host.min_client;
     stream.set_read_timeout(Some(REQUEST_TIMEOUT))?;
     let line = read_request_line(&stream)?;
@@ -617,7 +792,14 @@ fn handle(host: &Arc<Host>, mut stream: UnixStream) -> std::io::Result<()> {
         }
         Request::Pgrp { id } => {
             let reply = with_session(host, id, |s| {
+                // Windows has no foreground process group to report.
+                #[cfg(unix)]
                 let pgrp = s.master.lock().unwrap().process_group_leader();
+                #[cfg(windows)]
+                let pgrp: Option<i32> = {
+                    let _ = s;
+                    None
+                };
                 Ok(Response {
                     ok: true,
                     pgrp,
@@ -629,6 +811,7 @@ fn handle(host: &Arc<Host>, mut stream: UnixStream) -> std::io::Result<()> {
         Request::RawMode { id } => {
             let reply = with_session(host, id, |s| {
                 let master = s.master.lock().unwrap();
+                #[cfg(unix)]
                 let raw = master.as_raw_fd().map(|fd| {
                     // SAFETY: fd belongs to the live master held under the lock.
                     unsafe {
@@ -636,6 +819,12 @@ fn handle(host: &Arc<Host>, mut stream: UnixStream) -> std::io::Result<()> {
                         libc::tcgetattr(fd, &mut t) == 0 && t.c_lflag & libc::ICANON == 0
                     }
                 });
+                // ConPTY exposes no line discipline: unknown.
+                #[cfg(windows)]
+                let raw: Option<bool> = {
+                    drop(master);
+                    None
+                };
                 Ok(Response {
                     ok: true,
                     raw,
@@ -735,33 +924,22 @@ fn spawn(host: &Arc<Host>, spec: SpawnSpec) -> Result<(Arc<Session>, bool), Stri
             return Ok((session, true));
         }
     }
-    let Some(program) = spec.argv.first() else {
+    if spec.argv.is_empty() {
         return Err("empty argv".into());
-    };
+    }
     let size = PtySize {
         rows: spec.rows.max(1),
         cols: spec.cols.max(1),
         pixel_width: 0,
         pixel_height: 0,
     };
-    let pair = native_pty_system()
-        .openpty(size)
-        .map_err(|e| e.to_string())?;
-    let mut cmd = CommandBuilder::new(program);
-    cmd.args(&spec.argv[1..]);
-    // Exactly the caller's environment, never the host's own.
-    cmd.env_clear();
-    for (k, v) in &spec.env {
-        cmd.env(k, v);
-    }
-    if let Some(cwd) = &spec.cwd {
-        cmd.cwd(cwd);
-    }
-    let mut child = pair.slave.spawn_command(cmd).map_err(|e| e.to_string())?;
-    drop(pair.slave);
+    #[cfg(unix)]
+    let (master, mut child) = start_child(&spec, size)?;
+    #[cfg(windows)]
+    let (master, mut child, group) = crate::windows::spawn_session(&spec, size)?;
     let pid = child.process_id().ok_or("child has no pid")?;
-    let mut reader = pair.master.try_clone_reader().map_err(|e| e.to_string())?;
-    let mut writer = pair.master.take_writer().map_err(|e| e.to_string())?;
+    let mut reader = master.try_clone_reader().map_err(|e| e.to_string())?;
+    let mut writer = master.take_writer().map_err(|e| e.to_string())?;
     let (input_tx, input_rx) = sync_channel::<Vec<u8>>(INPUT_QUEUE);
     thread::spawn(move || {
         while let Ok(chunk) = input_rx.recv() {
@@ -777,7 +955,7 @@ fn spawn(host: &Arc<Host>, spec: SpawnSpec) -> Result<(Arc<Session>, bool), Stri
         pid,
         meta: Mutex::new(spec.meta),
         key: spec.key,
-        master: Mutex::new(pair.master),
+        master: Mutex::new(master),
         input: input_tx,
         size: Mutex::new((size.cols, size.rows)),
         ring: Mutex::new(Ring {
@@ -794,6 +972,8 @@ fn spawn(host: &Arc<Host>, spec: SpawnSpec) -> Result<(Arc<Session>, bool), Stri
         linger: Mutex::new(spec.linger_secs.map(Duration::from_secs)),
         detached_at: Mutex::new(Some(Instant::now())),
         lingered: AtomicBool::new(false),
+        #[cfg(windows)]
+        group,
     });
 
     // Reaper: records the exit status. Only after this may the pid be reused.
@@ -804,6 +984,9 @@ fn spawn(host: &Arc<Host>, spec: SpawnSpec) -> Result<(Arc<Session>, bool), Stri
                 Ok(status) => status.exit_code() as i32,
                 Err(_) => -1,
             };
+            // ConPTY's output pipe only ends once the console is closed.
+            #[cfg(windows)]
+            session.group.child_exited();
             *session.exited.lock().unwrap() = Some(code);
             *session.exited_at.lock().unwrap() = Some(Instant::now());
             session.cv.notify_all();
@@ -847,6 +1030,29 @@ fn spawn(host: &Arc<Host>, spec: SpawnSpec) -> Result<(Arc<Session>, bool), Stri
     Ok((session, false))
 }
 
+#[cfg(unix)]
+type Started = (Box<dyn MasterPty + Send>, Box<dyn Child + Send + Sync>);
+
+#[cfg(unix)]
+fn start_child(spec: &SpawnSpec, size: PtySize) -> Result<Started, String> {
+    let pair = native_pty_system()
+        .openpty(size)
+        .map_err(|e| e.to_string())?;
+    let mut cmd = CommandBuilder::new(&spec.argv[0]);
+    cmd.args(&spec.argv[1..]);
+    // Exactly the caller's environment, never the host's own.
+    cmd.env_clear();
+    for (k, v) in &spec.env {
+        cmd.env(k, v);
+    }
+    if let Some(cwd) = &spec.cwd {
+        cmd.cwd(cwd);
+    }
+    let child = pair.slave.spawn_command(cmd).map_err(|e| e.to_string())?;
+    drop(pair.slave);
+    Ok((pair.master, child))
+}
+
 /// Append child output, trimming the oldest bytes past `RING_CAP` but never
 /// bytes the attached client has not been sent yet. The reader checks the
 /// high-water mark only before it reads, so a read already in flight when a
@@ -885,7 +1091,7 @@ fn ring_slice(ring: &Ring, start: u64, take: usize) -> Vec<u8> {
 
 fn read_ring(
     session: &Session,
-    mut stream: UnixStream,
+    mut stream: Conn,
     after: u64,
     max: Option<u64>,
 ) -> std::io::Result<()> {
@@ -936,24 +1142,32 @@ fn release(session: &Session, generation: u64) {
     session.cv.notify_all();
 }
 
+/// What became of one chunk of client input.
+#[derive(Debug, PartialEq, Eq)]
+enum Queued {
+    Sent,
+    /// The child did not read for `INPUT_STALL` and the queue stayed full: the
+    /// chunk was not delivered.
+    Dropped,
+    /// The PTY is gone.
+    Gone,
+}
+
 /// Queues client input for the session's writer thread. A child that is not
-/// reading its terminal fills the queue; after `INPUT_STALL` the chunk is dropped
-/// (and later ones at once until room appears) rather than blocking the caller,
-/// which must keep reading so it notices the client leaving. Returns false once
-/// the PTY is gone.
-fn queue_input(tx: &SyncSender<Vec<u8>>, mut chunk: Vec<u8>, stalled: &mut bool) -> bool {
+/// reading its terminal fills the queue; after `INPUT_STALL` the chunk is
+/// dropped rather than blocking the caller, which must keep reading so it
+/// notices the client leaving. The caller must then deliver nothing further
+/// from that attachment (see `forward_input`): a later chunk landing after a
+/// dropped one would be a paste with a hole in it.
+fn queue_input(tx: &SyncSender<Vec<u8>>, mut chunk: Vec<u8>) -> Queued {
     let deadline = Instant::now() + INPUT_STALL;
     loop {
         match tx.try_send(chunk) {
-            Ok(()) => {
-                *stalled = false;
-                return true;
-            }
-            Err(TrySendError::Disconnected(_)) => return false,
+            Ok(()) => return Queued::Sent,
+            Err(TrySendError::Disconnected(_)) => return Queued::Gone,
             Err(TrySendError::Full(back)) => {
-                if *stalled || Instant::now() >= deadline {
-                    *stalled = true;
-                    return true;
+                if Instant::now() >= deadline {
+                    return Queued::Dropped;
                 }
                 chunk = back;
                 thread::sleep(Duration::from_millis(5));
@@ -962,9 +1176,37 @@ fn queue_input(tx: &SyncSender<Vec<u8>>, mut chunk: Vec<u8>, stalled: &mut bool)
     }
 }
 
+/// How `forward_input` ended.
+#[derive(Debug, PartialEq, Eq)]
+enum InputEnd {
+    /// The client closed or errored; everything it sent was queued.
+    Closed,
+    /// A chunk was dropped, so input stopped there. The attachment is ended
+    /// (the client sees EOF and reconnects) instead of delivering the tail.
+    Lost,
+    Gone,
+}
+
+/// Client -> writer queue, in order. On the first dropped chunk it stops for
+/// good: nothing after the hole is ever queued from this attachment.
+fn forward_input(mut from: impl Read, tx: &SyncSender<Vec<u8>>) -> InputEnd {
+    let mut buf = [0u8; 8192];
+    while let Ok(n) = from.read(&mut buf) {
+        if n == 0 {
+            return InputEnd::Closed;
+        }
+        match queue_input(tx, buf[..n].to_vec()) {
+            Queued::Sent => {}
+            Queued::Dropped => return InputEnd::Lost,
+            Queued::Gone => return InputEnd::Gone,
+        }
+    }
+    InputEnd::Closed
+}
+
 fn attach(
     session: Arc<Session>,
-    mut stream: UnixStream,
+    mut stream: Conn,
     after: u64,
     exclusive: bool,
 ) -> std::io::Result<()> {
@@ -1029,12 +1271,12 @@ fn attach(
         let session = Arc::clone(&session);
         let closed = Arc::clone(&closed);
         thread::spawn(move || {
-            let mut buf = [0u8; 8192];
-            let mut stalled = false;
-            while let Ok(n) = input.read(&mut buf) {
-                if n == 0 || !queue_input(&session.input, buf[..n].to_vec(), &mut stalled) {
-                    break;
-                }
+            if forward_input(&mut input, &session.input) == InputEnd::Lost {
+                eprintln!(
+                    "canopy-pty-host: a terminal stopped reading input; ending the attachment so the lost input is not followed by the rest"
+                );
+                // The client sees EOF, not a silent hole in what it typed.
+                let _ = input.shutdown(std::net::Shutdown::Both);
             }
             closed.store(true, Ordering::SeqCst);
             release(&session, generation);
@@ -1136,22 +1378,55 @@ mod tests {
     #[test]
     fn full_input_queue_drops_instead_of_blocking_and_a_gone_pty_is_reported() {
         let (tx, rx) = sync_channel::<Vec<u8>>(1);
-        let mut stalled = false;
-        assert!(queue_input(&tx, vec![1], &mut stalled));
-        assert!(!stalled);
-        // Full: waits out the stall once, then drops at once.
+        assert_eq!(queue_input(&tx, vec![1]), Queued::Sent);
         let t = Instant::now();
-        assert!(queue_input(&tx, vec![2], &mut stalled));
-        assert!(stalled && t.elapsed() >= INPUT_STALL);
-        let t = Instant::now();
-        assert!(queue_input(&tx, vec![3], &mut stalled));
-        assert!(t.elapsed() < INPUT_STALL);
-        // Room again: delivered, and the stall clears.
+        assert_eq!(queue_input(&tx, vec![2]), Queued::Dropped);
+        assert!(t.elapsed() >= INPUT_STALL);
         assert_eq!(rx.recv().unwrap(), vec![1]);
-        assert!(queue_input(&tx, vec![4], &mut stalled));
-        assert!(!stalled);
         drop(rx);
-        assert!(!queue_input(&tx, vec![5], &mut stalled));
+        assert_eq!(queue_input(&tx, vec![5]), Queued::Gone);
+    }
+
+    #[test]
+    fn a_stalled_child_never_gets_a_chunk_after_a_dropped_one() {
+        // A paste of 5 chunks into a queue of 1 whose reader is stalled.
+        let paste: Vec<u8> = (0..5u8).flat_map(|i| vec![i; 8192]).collect();
+        let (tx, rx) = sync_channel::<Vec<u8>>(1);
+        // Cursor yields at most 8192 bytes per read, so chunk i is all `i`.
+        assert_eq!(
+            forward_input(std::io::Cursor::new(paste), &tx),
+            InputEnd::Lost
+        );
+        // The child wakes up and drains: only the head of the paste arrived,
+        // and nothing from after the dropped chunk ever does.
+        let got: Vec<Vec<u8>> = rx.try_iter().collect();
+        assert_eq!(got.len(), 1);
+        assert!(got[0].iter().all(|b| *b == 0));
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_exiting_host_unlinks_only_the_socket_it_bound() {
+        let dir = std::env::temp_dir().join(format!("pty-unlink-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let socket = dir.join("h.sock");
+        let old = UnixListener::bind(&socket).unwrap();
+        let bound = socket_identity(&socket);
+        assert!(bound.is_some());
+        // A new host replaced the file while the old one was exiting.
+        // (Renamed over, so both inodes exist at once and cannot be the same.)
+        let _new = UnixListener::bind(dir.join("n.sock")).unwrap();
+        std::fs::rename(dir.join("n.sock"), &socket).unwrap();
+        drop(old);
+        unlink_if_bound(&socket, bound);
+        assert!(socket.exists(), "the successor's live socket survived");
+        // Its own file is removed.
+        let now = socket_identity(&socket);
+        unlink_if_bound(&socket, now);
+        assert!(!socket.exists());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

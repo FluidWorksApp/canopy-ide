@@ -96,10 +96,12 @@ jobs:
   pty-host:
     name: PTY host (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
+    # A hung host test must fail the job, not hold the runner for hours.
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
-        # Windows only builds the wire types and the stub binary.
+        # Windows runs the real host: named pipe, ConPTY and Job Objects.
         os: [ubuntu-latest, macos-15, windows-2022]
     steps:
       - uses: actions/checkout@v4
