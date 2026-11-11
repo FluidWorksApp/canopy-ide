@@ -33,7 +33,11 @@ function useDesktopInstalled(): Record<string, boolean> {
  * that feature's own controls (the companion's row in Mascot).
  */
 export function BrainExceptions({ only }: { only?: string }) {
-  const settings = useSyncExternalStore(subscribeSettings, getSettings, getSettings);
+  const settings = useSyncExternalStore(
+    subscribeSettings,
+    getSettings,
+    getSettings,
+  );
   const installed = useDesktopInstalled();
   const all = brainExceptions(settings, (bin) => Boolean(installed[bin]));
   const list = only ? all.filter((e) => e.feature === only) : all;
@@ -60,17 +64,33 @@ export function BrainExceptions({ only }: { only?: string }) {
 
 /** The automatic brain work, each switchable off. */
 export function BrainAutomation() {
-  const settings = useSyncExternalStore(subscribeSettings, getSettings, getSettings);
+  const settings = useSyncExternalStore(
+    subscribeSettings,
+    getSettings,
+    getSettings,
+  );
   return (
-    <Checkbox
-      checked={settings.brainSessionTitles}
-      onChange={(v) => updateSettings({ brainSessionTitles: v })}
-      label="Let the brain name sessions"
-      hint={
-        settings.brainSessionTitles
-          ? "Titles each tab and writes its one-line summary."
-          : "Tabs keep the opening prompt's first words."
-      }
-    />
+    <>
+      <Checkbox
+        checked={settings.systemOne}
+        onChange={(v) => updateSettings({ systemOne: v })}
+        label="Local fast model"
+        hint={
+          settings.systemOne
+            ? "Downloads Laya (450 MB). Runs on this computer."
+            : "Off. Nothing downloaded; any copy deleted."
+        }
+      />
+      <Checkbox
+        checked={settings.brainSessionTitles}
+        onChange={(v) => updateSettings({ brainSessionTitles: v })}
+        label="Let the brain name sessions"
+        hint={
+          settings.brainSessionTitles
+            ? "Titles each tab and writes its one-line summary."
+            : "Tabs keep the opening prompt's first words."
+        }
+      />
+    </>
   );
 }

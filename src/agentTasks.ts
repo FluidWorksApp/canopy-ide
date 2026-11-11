@@ -7,6 +7,8 @@ export type TaskStatus = "pending" | "running" | "completed";
 export interface AgentTask {
   text: string;
   status: TaskStatus;
+  /** A request the person made that the agent never listed. */
+  fromUser?: boolean;
 }
 
 export interface TaskSummary {
@@ -36,7 +38,9 @@ export function normalizeTasks(raw: unknown): AgentTask[] {
     if (!clean) continue;
     out.push({
       text: clean.slice(0, 200),
-      status: STATUSES.has(status as TaskStatus) ? (status as TaskStatus) : "pending",
+      status: STATUSES.has(status as TaskStatus)
+        ? (status as TaskStatus)
+        : "pending",
     });
   }
   return out;
@@ -71,6 +75,44 @@ export function focusPrompt(task: AgentTask): string {
   return `Please focus on this task next and finish it before continuing with the others: ${task.text}`;
 }
 
+/** Hand the task to a sub agent so this agent can carry on. */
+export function subAgentPrompt(task: AgentTask): string {
+  return `Please run this task as a sub agent (canopy_spawn_agent, or your own sub-agent tool). Give it the context it needs, and mark the task done in your task list when it reports back: ${task.text}`;
+}
+
 export function completePrompt(task: AgentTask): string {
   return `Please complete this task now: ${task.text}. Mark it done in your task list when it is finished.`;
+}
+
+const words = (s: string) =>
+  new Set(
+    s
+      .toLowerCase()
+      .split(/[^a-z0-9]+/)
+      .filter((w) => w.length > 2),
+  );
+
+/** True when two task texts are about the same thing (most words shared). */
+export function sameTask(a: string, b: string): boolean {
+  const x = words(a);
+  const y = words(b);
+  if (!x.size || !y.size) return false;
+  let hit = 0;
+  for (const w of x) if (y.has(w)) hit++;
+  return hit / Math.min(x.size, y.size) >= 0.6;
+}
+
+/** The agent's tasks plus the person's requests the agent did not list. */
+export function withRequests(
+  tasks: AgentTask[],
+  requests: readonly { title: string; status: "open" | "done" }[],
+): AgentTask[] {
+  const extra: AgentTask[] = requests
+    .filter((r) => !tasks.some((t) => sameTask(t.text, r.title)))
+    .map((r) => ({
+      text: r.title,
+      status: r.status === "done" ? "completed" : "pending",
+      fromUser: true,
+    }));
+  return [...tasks, ...extra];
 }

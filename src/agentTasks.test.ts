@@ -1,5 +1,12 @@
 import { describe, expect, it } from "vitest";
-import { completePrompt, focusPrompt, normalizeTasks, summarizeTasks, taskHeadline } from "./agentTasks";
+import {
+  completePrompt,
+  focusPrompt,
+  normalizeTasks,
+  summarizeTasks,
+  taskHeadline,
+  withRequests,
+} from "./agentTasks";
 
 describe("normalizeTasks", () => {
   it("keeps valid steps, drops blanks, and treats unknown status as pending", () => {
@@ -23,7 +30,10 @@ describe("normalizeTasks", () => {
     expect(normalizeTasks({})).toEqual([]);
   });
   it("is bounded", () => {
-    const many = Array.from({ length: 80 }, (_, i) => ({ text: `t${i}`, status: "pending" }));
+    const many = Array.from({ length: 80 }, (_, i) => ({
+      text: `t${i}`,
+      status: "pending",
+    }));
     expect(normalizeTasks(many)).toHaveLength(50);
   });
 });
@@ -41,11 +51,18 @@ describe("summarizeTasks", () => {
     expect(taskHeadline(s)).toBe("1 done · 2 pending");
   });
   it("falls back to the first pending step when nothing is running", () => {
-    const s = summarizeTasks(normalizeTasks([{ text: "a", status: "completed" }, { text: "b", status: "pending" }]));
+    const s = summarizeTasks(
+      normalizeTasks([
+        { text: "a", status: "completed" },
+        { text: "b", status: "pending" },
+      ]),
+    );
     expect(s.current?.text).toBe("b");
   });
   it("reads as done when everything is", () => {
-    const s = summarizeTasks(normalizeTasks([{ text: "a", status: "completed" }]));
+    const s = summarizeTasks(
+      normalizeTasks([{ text: "a", status: "completed" }]),
+    );
     expect(s.current).toBeNull();
     expect(taskHeadline(s)).toBe("All 1 done");
     expect(taskHeadline(summarizeTasks([]))).toBe("No tasks");
@@ -58,9 +75,35 @@ describe("summarizeTasks", () => {
 
 describe("task text is safe to type into a terminal", () => {
   it("turns control characters and newlines into spaces", () => {
-    expect(normalizeTasks([{ text: "fix it\n\u001b[31mnow\u0007", status: "pending" }])[0].text).toBe("fix it [31mnow");
+    expect(
+      normalizeTasks([
+        { text: "fix it\n\u001b[31mnow\u0007", status: "pending" },
+      ])[0].text,
+    ).toBe("fix it [31mnow");
   });
   it("drops a task that is only control characters", () => {
-    expect(normalizeTasks([{ text: "\n\t\u001b", status: "pending" }])).toEqual([]);
+    expect(normalizeTasks([{ text: "\n\t\u001b", status: "pending" }])).toEqual(
+      [],
+    );
+  });
+});
+
+describe("withRequests", () => {
+  it("adds only the requests the agent did not list", () => {
+    const agent = [
+      { text: "Fix the login redirect", status: "running" as const },
+    ];
+    const out = withRequests(agent, [
+      { title: "Fix login redirect", status: "open" },
+      { title: "Rename settings page", status: "open" },
+      { title: "Add dark mode", status: "done" },
+    ]);
+    expect(out.map((t) => t.text)).toEqual([
+      "Fix the login redirect",
+      "Rename settings page",
+      "Add dark mode",
+    ]);
+    expect(out[1]).toMatchObject({ fromUser: true, status: "pending" });
+    expect(out[2]).toMatchObject({ fromUser: true, status: "completed" });
   });
 });

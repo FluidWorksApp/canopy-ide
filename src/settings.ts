@@ -507,6 +507,11 @@ export interface Settings {
    *  background call per opening prompt, cached by its text
    *  (brainSessionTitle.ts). Off = the prompt's first words, as before. */
   brainSessionTitles: boolean;
+  /** The local System One model (Laya): fast on-device decisions in front of the
+   *  brain. On = it is downloaded after install and runs on this machine; off =
+   *  nothing is downloaded, anything already downloaded is deleted, none of its
+   *  features run and the brain dot leaves the status bar. */
+  systemOne: boolean;
   /** Proof receipts (src/receipts/): "auto" re-runs the project's checks after
    *  every agent turn that changed files and asks the brain for a verdict;
    *  "manual" only on "Verify now"; "off" hides receipts entirely. */
@@ -761,6 +766,7 @@ export const DEFAULTS: Settings = {
   budgetPauseAtLimit: true,
   outcomesInsight: true,
   brainSessionTitles: true,
+  systemOne: true,
   receiptMode: "auto",
   receiptCommands: {},
   sessionDocAutoSummary: true,
@@ -1011,6 +1017,7 @@ export function getSettings(): Settings {
     // Team memory was removed; drop its retired keys so they are not written back.
     for (const key of RETIRED_MEMORY_KEYS) delete (value as unknown as Record<string, unknown>)[key];
     if (typeof value.brainSessionTitles !== "boolean") value.brainSessionTitles = true;
+    if (typeof value.systemOne !== "boolean") value.systemOne = true;
     if (
       !Number.isFinite(value.reviewSliceBudgetLines) ||
       value.reviewSliceBudgetLines < 20

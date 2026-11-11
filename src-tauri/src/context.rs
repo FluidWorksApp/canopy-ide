@@ -4318,6 +4318,15 @@ async fn device(
     if !authorized(&app, &headers) {
         return (StatusCode::UNAUTHORIZED, "bad token".into());
     }
+    // Tell the IDE an agent is acting on a device, so a floating phone preview
+    // can show "Agent driving". Reading ops (screenshot, snapshot) stay quiet.
+    if matches!(op.op.as_str(), "tap" | "type" | "key" | "swipe" | "run") {
+        use tauri::Emitter;
+        let _ = app.emit(
+            "device:agent-op",
+            serde_json::json!({ "serial": op.serial, "op": op.op }),
+        );
+    }
     match run_device_op(op).await {
         Ok(value) => (StatusCode::OK, value.to_string()),
         Err(e) => (StatusCode::BAD_REQUEST, e),

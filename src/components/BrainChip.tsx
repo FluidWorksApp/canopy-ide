@@ -188,7 +188,7 @@ export function BrainProjectSpend() {
   );
 }
 
-export function BrainChip() {
+function BrainChipInner() {
   const conn = useBrainConnection();
   const text = brainStateText(conn);
   const needs = brainNeedsConnect(conn.state);
@@ -304,4 +304,10 @@ export function BrainChip() {
         )}
     </span>
   );
+}
+
+/** The footer dot for the brain. It goes away with System One when that is off. */
+export function BrainChip() {
+  const on = useSyncExternalStore(subscribeSettings, () => getSettings().systemOne, () => true);
+  return on ? <BrainChipInner /> : null;
 }

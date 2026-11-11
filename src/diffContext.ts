@@ -5,32 +5,12 @@
 // when there is one, and falls back to a plain "review this" brief when empty.
 import type { ReviewPayload } from "./components/ReviewView";
 
-// Keep the file list from ballooning the seed text on a huge changeset.
-const MAX_LISTED = 40;
-
 /** Attach the user's question, or a default review brief, to a base pointer. */
 function withQuery(base: string, query: string): string {
   return query
     ? `${base} Then: ${query}`
     : `${base} Give it a thorough review — correctness, edge cases, tests, and risks — ` +
         `and summarize what you find. Don't commit or push.`;
-}
-
-/** The whole session changeset: which files git reports changed, grouped by
- *  component, and where to read the actual diff. */
-export function sessionChangesContext(
-  groups: { component: string; paths: string[] }[],
-  query: string,
-): string {
-  const total = groups.reduce((n, g) => n + g.paths.length, 0);
-  const flat = groups.flatMap((g) => g.paths);
-  const listed = flat.slice(0, MAX_LISTED).join(", ");
-  const more = flat.length > MAX_LISTED ? `, and ${flat.length - MAX_LISTED} more` : "";
-  const base =
-    `Look at the current uncommitted changes in this project's working tree — ` +
-    `${total} changed file${total === 1 ? "" : "s"}${listed ? `: ${listed}${more}` : ""}. ` +
-    `Run \`git diff\` and \`git diff --staged\` to see them.`;
-  return withQuery(base, query);
 }
 
 /** One file's working-tree diff. */

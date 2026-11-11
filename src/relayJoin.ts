@@ -8,6 +8,9 @@ export interface RelayJoinDetail {
   from: string;
 }
 
+// "Stop sharing" on the request card in team chat. App ends the relay.
+export const RELAY_STOP_EVENT = "canopy:relay-stop";
+
 // The other side: a teammate asked to connect remotely (a relay-request card)
 // and this person pressed Accept. App starts the internet link and the relay,
 // then answers with a relay-offer card addressed to the requester.
@@ -16,4 +19,6 @@ export interface RelayAcceptDetail {
   /** Teammate id to answer. */
   to: string;
   from: string;
+  /** Called when sharing could not start, so Accept can be tried again. */
+  onFail?: () => void;
 }

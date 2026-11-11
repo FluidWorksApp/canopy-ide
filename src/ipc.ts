@@ -4924,6 +4924,13 @@ export const deskSendInput = (
   session: string,
   event: import("./desk").InputEvent,
 ) => invoke<void>("desk_send_input", { session, event });
+export interface DeskPerms {
+  screen: boolean;
+  input: boolean;
+}
+export const deskPermissions = () => invoke<DeskPerms>("desk_permissions");
+export const deskRequestPermission = (kind: "screen" | "input") =>
+  invoke<void>("desk_request_permission", { kind });
 export const deskEnd = (session: string) =>
   invoke<void>("desk_end", { session });
 export const deskStatus = () =>
@@ -5121,6 +5128,8 @@ export const dictationStart = (
 export const dictationStop = (language?: string) =>
   invoke<string>("dictation_stop", { language: language || null });
 export const dictationCancel = () => invoke<void>("dictation_cancel");
+/** Turn the local System One model on (download after install) or off (stop and delete). */
+export const systemOneEnable = (enabled: boolean) => invoke<void>("system_one_enable", { enabled });
 /** Whether this build/platform can run dictation (false on Intel macOS, which
  *  has no compatible ONNX Runtime). The UI hides dictation entirely when false. */
 export const dictationSupported = () => invoke<boolean>("dictation_supported");

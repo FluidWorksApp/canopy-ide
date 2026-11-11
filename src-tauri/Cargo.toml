@@ -1,6 +1,6 @@
 [package]
 name = "canopy"
-version = "0.5.13"
+version = "0.5.14"
 description = "Local-first, memory-light, vibe-coding-first IDE"
 authors = ["Cause Connect Pte Ltd <sam@fluidwords.app>"]
 license = "MIT"
@@ -52,8 +52,6 @@ dictation = [
     "dep:ort",
     "dep:cpal",
     "dep:rubato",
-    "dep:flate2",
-    "dep:tar",
 ]
 
 [dependencies]
@@ -184,8 +182,9 @@ rubato = { version = "0.16", optional = true }
 # reporting POSTs its payload from the backend (CORS-proof, unlike a webview
 # fetch to an arbitrary collector).
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream"] }
-flate2 = { version = "1", optional = true }
-tar = { version = "0.4", optional = true }
+# Unpack the .tar.gz model bundles (dictation) and the System One server (system_one.rs).
+flate2 = "1"
+tar = "0.4"
 tauri-plugin-updater = "2.10.1"
 tauri-plugin-process = "2.3.1"
 tauri-plugin-opener = "2"

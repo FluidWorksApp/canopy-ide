@@ -27,7 +27,7 @@ type Stream = { id:number; receivedSnapshot:boolean; pendingExit?:number; socket
 const LOCAL_UI = new Set(['js_log','watchdog_ack','watchdog_incidents','memory_info','selftest_config','set_shortcut_profile','notify_native','set_window_zoom','window_zoom','crash_pending','crash_clear','crash_upload','take_pending_crash','dictation_supported','remote_set_theme','remote_set_clis','remote_set_companion','remote_set_hibernated','remote_set_attention','execution_mode_get','execution_mode_set','execution_remote_get','execution_remote_set']);
 // The clipboard and microphone belong to the computer displaying the IDE.
 // Remote execution must not redirect their native services into the VM.
-for(const command of ['clipboard_image_png','clipboard_write_text','clipboard_read_text','clipboard_watch_set','clipboard_recent','clipboard_read','clipboard_forget','clipboard_clear','clipboard_status','dictation_models','dictation_status','dictation_download','dictation_delete_model','dictation_start','dictation_stop','dictation_cancel'])LOCAL_UI.add(command);
+for(const command of ['clipboard_image_png','clipboard_write_text','clipboard_read_text','clipboard_watch_set','clipboard_recent','clipboard_read','clipboard_forget','clipboard_clear','clipboard_status','dictation_models','dictation_status','dictation_download','dictation_delete_model','dictation_start','dictation_stop','dictation_cancel','system_one_status','system_one_enable','system_one_decide'])LOCAL_UI.add(command);
 // The scratchpad is the person's own thoughts and screenshots, kept on the
 // computer showing the IDE like the clipboard; the workspace has no notes store
 // (it answered "does not support notes_create"). Attaching a file stays with the
@@ -61,7 +61,7 @@ for(const command of ['android_sdk_status','android_devices','android_avds','and
 for(const command of ['fs_set_link_grants','fs_grant_link_file','workspace_forward_probe','gates_set_global'])LOCAL_UI.add(command);
 // The LAN relay is hosted by the desktop app between people's computers; its
 // file offers use this computer's dialogs and paths. Its status goes with it.
-for(const command of ['relay_status','relay_host_start','relay_host_stop','relay_regenerate_code','relay_connect','relay_disconnect','relay_send_chat','relay_send_collab','relay_send_command','relay_offer_file','relay_accept_file','desk_request','desk_respond','desk_send_input','desk_end','desk_status'])LOCAL_UI.add(command);
+for(const command of ['relay_status','relay_host_start','relay_host_stop','relay_regenerate_code','relay_connect','relay_disconnect','relay_send_chat','relay_send_collab','relay_send_command','relay_offer_file','relay_accept_file','desk_request','desk_respond','desk_permissions','desk_request_permission','desk_send_input','desk_end','desk_status'])LOCAL_UI.add(command);
 // Public links expose this computer's own portal port (tunnel.rs); Linear is a
 // plain HTTPS API called with a key from this computer's settings.
 for(const command of ['tunnel_start','tunnel_stop','tunnel_status','linear_issues','linear_issue_detail','linear_issue_set_state','linear_issue_comment'])LOCAL_UI.add(command);
