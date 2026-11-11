@@ -4,6 +4,20 @@
 
 pub use canopy_term_core::frame;
 
+pub mod atlas;
+pub mod builder;
+pub mod color;
+pub mod fonts;
+pub mod geometry;
+pub mod glyphs;
+pub mod gpu;
+pub mod instance;
+pub mod metrics;
+pub mod procedural;
+pub mod reference;
+pub mod renderer;
+pub mod text;
+
 /// Pixel size of one cell for a given font. The grid is cells, the surface is
 /// pixels, and every other number here derives from this one.
 #[derive(Clone, Copy, Debug, PartialEq)]
