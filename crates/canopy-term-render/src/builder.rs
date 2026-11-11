@@ -293,6 +293,14 @@ impl QuadBuilder {
             // this pass may point at stale texels, so build everything again.
             full = true;
         }
+        if resized && !self.instances.is_empty() {
+            // The renderer may keep a larger buffer from before; unwritten slots
+            // would still hold old instances, so rewrite the whole thing.
+            report.uploads = vec![InstanceRange {
+                start: 0,
+                len: self.instances.len(),
+            }];
+        }
         self.epoch = glyphs.epoch();
         self.last_seq = Some(frame.seq);
         self.needs_full = false;
@@ -815,6 +823,30 @@ mod tests {
         let r = b.build(&f, &RenderState::default(), &mut g);
         assert!(r.full);
         assert_eq!(b.instances().len(), 3 * 3 * INSTANCES_PER_COL);
+    }
+
+    #[test]
+    fn a_resize_uploads_the_whole_buffer_so_no_stale_instances_survive_a_shrink() {
+        let mut b = builder();
+        let mut g = Stub::default();
+        b.build(
+            &text_frame(&["abc", "def", "ghi"], 1),
+            &RenderState::default(),
+            &mut g,
+        );
+        let r = b.build(
+            &text_frame(&["ab", "cd"], 2),
+            &RenderState::default(),
+            &mut g,
+        );
+        assert!(r.full);
+        assert_eq!(
+            r.uploads,
+            vec![InstanceRange {
+                start: 0,
+                len: 2 * 2 * INSTANCES_PER_COL
+            }]
+        );
     }
 
     #[test]

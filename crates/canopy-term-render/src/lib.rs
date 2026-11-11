@@ -14,6 +14,8 @@ pub mod gpu;
 pub mod instance;
 pub mod metrics;
 pub mod procedural;
+pub mod reference;
+pub mod renderer;
 pub mod text;
 
 /// Pixel size of one cell for a given font. The grid is cells, the surface is

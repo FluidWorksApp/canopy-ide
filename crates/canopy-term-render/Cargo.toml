@@ -33,5 +33,9 @@ name = "gpu_probe"
 harness = false
 
 [[test]]
+name = "golden"
+harness = false
+
+[[test]]
 name = "perf_report"
 harness = false
