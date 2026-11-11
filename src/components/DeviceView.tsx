@@ -15,6 +15,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
   actionableFor,
+  type DeviceNode,
   centerOf,
   deviceFeedbackContext,
   labelFor,
@@ -107,7 +108,9 @@ export default function DeviceView({
   const [simulators, setSimulators] = useState<HostDevice[]>([]);
   // Device pixels of the screen, for annotation on a stream (whose video may
   // be scaled); read off the accessibility tree's root.
-  const [deviceSize, setDeviceSize] = useState<{ w: number; h: number } | null>(null);
+  const [deviceSize, setDeviceSize] = useState<{ w: number; h: number } | null>(
+    null,
+  );
   // The user chose stills over a stream that is running (e.g. it cannot decode).
   const [preferStills, setPreferStills] = useState(false);
 
@@ -168,9 +171,14 @@ export default function DeviceView({
   }, [visible, declined]);
 
   const hubRunning = !!hub?.running && !declined;
-  const iosAvailable = !!hub?.platforms.some((p) => p.platform === "ios" && p.available);
-  const streaming = hubRunning && !!serial && !(preferStills && platform === "android");
-  const { access, refresh: refreshAccess } = useDeviceHubAccess(streaming && visible);
+  const iosAvailable = !!hub?.platforms.some(
+    (p) => p.platform === "ios" && p.available,
+  );
+  const streaming =
+    hubRunning && !!serial && !(preferStills && platform === "android");
+  const { access, refresh: refreshAccess } = useDeviceHubAccess(
+    streaming && visible,
+  );
 
   // iOS Simulators come from the hub; adb knows nothing about them.
   useEffect(() => {
@@ -178,7 +186,8 @@ export default function DeviceView({
     let cancelled = false;
     deviceHubDevices().then(
       (listing) => {
-        if (!cancelled) setSimulators(listing.devices.filter((d) => d.platform === "ios"));
+        if (!cancelled)
+          setSimulators(listing.devices.filter((d) => d.platform === "ios"));
       },
       () => {},
     );
@@ -199,7 +208,9 @@ export default function DeviceView({
       try {
         const bytes = await ipc.androidScreencap(serial, dir);
         if (stopped) return;
-        const url = URL.createObjectURL(new Blob([bytes], { type: "image/png" }));
+        const url = URL.createObjectURL(
+          new Blob([bytes], { type: "image/png" }),
+        );
         // Revoke the previous frame only after the next one exists, or the
         // <img> briefly has nothing to show and the tab flickers.
         const prev = frameUrl.current;
@@ -239,7 +250,8 @@ export default function DeviceView({
           const ok = await ipc.androidReverse(serial, fresh, dir);
           for (const p of ok) reversed.current.add(p);
           failures = 0;
-          if (!stopped) setReachable([...reversed.current].sort((a, b) => a - b));
+          if (!stopped)
+            setReachable([...reversed.current].sort((a, b) => a - b));
         } catch {
           // adb refused (device offline or unauthorized): the tab already says
           // so. Ask less and less often rather than spawning adb every 5s.
@@ -247,7 +259,10 @@ export default function DeviceView({
         }
       }
       if (!stopped) {
-        timer = setTimeout(() => void sync(), Math.min(60_000, 5_000 * 2 ** Math.min(failures, 4)));
+        timer = setTimeout(
+          () => void sync(),
+          Math.min(60_000, 5_000 * 2 ** Math.min(failures, 4)),
+        );
       }
     };
     void sync();
@@ -263,7 +278,8 @@ export default function DeviceView({
     return () => {
       const ports = [...done];
       done.clear();
-      if (serial && ports.length > 0) void ipc.androidReverseRemove(serial, ports, dir).catch(() => {});
+      if (serial && ports.length > 0)
+        void ipc.androidReverseRemove(serial, ports, dir).catch(() => {});
     };
   }, [serial, dir]);
 
@@ -278,21 +294,80 @@ export default function DeviceView({
 
   // ---- annotate ----
 
+  // While annotating, the accessibility tree is kept fresh in the background, so
+  // the element under the pointer can be outlined as it moves and a click is
+  // answered from memory instead of waiting on a fresh dump (a second or two).
+  const treeRef = useRef<{ nodes: DeviceNode[]; at: number } | null>(null);
+  const [hover, setHover] = useState<DeviceNode | null>(null);
+  useEffect(() => {
+    if (!picking || !visible || !serial || platform !== "android") {
+      treeRef.current = null;
+      setHover(null);
+      return;
+    }
+    let stopped = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const pull = async () => {
+      if (stopped) return;
+      try {
+        const nodes = parseUiDump(await ipc.androidUiDump(serial, dir));
+        if (!stopped && nodes.length)
+          treeRef.current = { nodes, at: Date.now() };
+      } catch {
+        /* the next pull tries again; a click falls back to a fresh dump */
+      }
+      if (!stopped) timer = setTimeout(() => void pull(), 150);
+    };
+    void pull();
+    return () => {
+      stopped = true;
+      if (timer) clearTimeout(timer);
+    };
+  }, [picking, visible, serial, dir, platform]);
+
+  /** The element a click at `point` would select, from the cached tree. */
+  const targetAt = (point: { x: number; y: number }) => {
+    const tree = treeRef.current;
+    if (!tree) return null;
+    const hit = nodeAt(tree.nodes, point.x, point.y);
+    return hit ? actionableFor(tree.nodes, hit) : null;
+  };
+  const hoverAt = (point: { x: number; y: number } | null) => {
+    const next = point ? targetAt(point) : null;
+    setHover((prev) =>
+      prev === next ||
+      (prev &&
+        next &&
+        prev.bounds.x1 === next.bounds.x1 &&
+        prev.bounds.y1 === next.bounds.y1 &&
+        prev.bounds.x2 === next.bounds.x2 &&
+        prev.bounds.y2 === next.bounds.y2)
+        ? prev
+        : next,
+    );
+  };
+
   /** Resolve a click at `point` (device pixels) to an annotation. */
   const annotateAt = async (point: { x: number; y: number }) => {
     setResolving(true);
     try {
-      // Dumped at click time rather than cached with the frame: the tree has to
-      // describe what is on screen now, and an agent may have moved the app on
-      // since the picture the user is looking at was taken.
-      const nodes = parseUiDump(await ipc.androidUiDump(serial, dir));
+      // The background tree when it is recent (it is refreshed continuously
+      // while annotating); a fresh dump when it is missing or stale, because an
+      // agent may have moved the app on since.
+      const tree = treeRef.current;
+      const nodes =
+        tree && Date.now() - tree.at < 6000
+          ? tree.nodes
+          : parseUiDump(await ipc.androidUiDump(serial, dir));
       const hit = nodes.length ? nodeAt(nodes, point.x, point.y) : null;
       if (!hit) {
         setError("Nothing in the app's accessibility tree covers that point.");
         return;
       }
       const target = actionableFor(nodes, hit);
-      const component = await ipc.androidForeground(serial, dir).catch(() => "");
+      const component = await ipc
+        .androidForeground(serial, dir)
+        .catch(() => "");
       const next: DeviceAnnotation = {
         n: annotationsRef.current.length + 1,
         serial,
@@ -343,7 +418,14 @@ export default function DeviceView({
     if (!streaming || platform !== "android" || !visible) return;
     if (!picking && annotations.length === 0) return;
     void readDeviceSize().catch(() => {});
-  }, [streaming, platform, visible, picking, annotations.length, readDeviceSize]);
+  }, [
+    streaming,
+    platform,
+    visible,
+    picking,
+    annotations.length,
+    readDeviceSize,
+  ]);
 
   const onStreamClick = async (e: React.MouseEvent<HTMLDivElement>) => {
     if (!picking || resolving) return;
@@ -359,7 +441,9 @@ export default function DeviceView({
 
   const setComment = (n: number, comment: string) =>
     onPatch({
-      annotations: annotationsRef.current.map((a) => (a.n === n ? { ...a, comment } : a)),
+      annotations: annotationsRef.current.map((a) =>
+        a.n === n ? { ...a, comment } : a,
+      ),
     });
 
   const removeAnnotation = (n: number) =>
@@ -392,7 +476,9 @@ export default function DeviceView({
     try {
       // DeviceHubOperations: boot attaches serve-sim's helper; a running
       // simulator only needs the attach.
-      const id = sim.booted ? (await deviceHubAttach(sim), sim.id) : await deviceHubBoot(sim);
+      const id = sim.booted
+        ? (await deviceHubAttach(sim), sim.id)
+        : await deviceHubBoot(sim);
       onPatch({ serial: id, platform: "ios" });
     } catch (e) {
       setError(String(e));
@@ -414,7 +500,11 @@ export default function DeviceView({
           <div className="device-picker-card">
             <h3>Pick a device to watch</h3>
             {hub && !hub.installed && !declined && (
-              <DeviceSetup status={hub} onChange={setHub} onDecline={() => setDeclined(true)} />
+              <DeviceSetup
+                status={hub}
+                onChange={setHub}
+                onDecline={() => setDeclined(true)}
+              />
             )}
             {hub && !hub.installed && declined && (
               <Button
@@ -428,8 +518,12 @@ export default function DeviceView({
               </Button>
             )}
             {hubStartError && !declined && (
-              <p className="preview-error device-picker-error" title={hubStartError}>
-                Streaming is unavailable, so this tab will show screenshots: {hubStartError}
+              <p
+                className="preview-error device-picker-error"
+                title={hubStartError}
+              >
+                Streaming is unavailable, so this tab will show screenshots:{" "}
+                {hubStartError}
               </p>
             )}
             {missing.length > 0 && (
@@ -467,11 +561,16 @@ export default function DeviceView({
                     <li key={d.serial}>
                       <button
                         className="device-row"
-                        onClick={() => onPatch({ serial: d.serial, platform: "android" })}
+                        onClick={() =>
+                          onPatch({ serial: d.serial, platform: "android" })
+                        }
                       >
-                        <span className="device-row-name">{d.model || d.serial}</span>
+                        <span className="device-row-name">
+                          {d.model || d.serial}
+                        </span>
                         <span className="device-row-sub">
-                          {d.emulator ? "emulator" : "connected device"} · {d.serial}
+                          {d.emulator ? "emulator" : "connected device"} ·{" "}
+                          {d.serial}
                         </span>
                       </button>
                     </li>
@@ -482,7 +581,11 @@ export default function DeviceView({
 
             {avds.length > 0 && (
               <div className="device-block">
-                <h4>{running.length ? "Or start another emulator" : "Start an emulator"}</h4>
+                <h4>
+                  {running.length
+                    ? "Or start another emulator"
+                    : "Start an emulator"}
+                </h4>
                 <ul className="device-list">
                   {avds.map((avd) => (
                     <li key={avd.name}>
@@ -495,7 +598,9 @@ export default function DeviceView({
                         onClick={() => void startEmulator(avd.name)}
                       >
                         <span className="device-row-name">
-                          {booting === avd.name ? `Starting ${avd.name}…` : avd.name}
+                          {booting === avd.name
+                            ? `Starting ${avd.name}…`
+                            : avd.name}
                         </span>
                         <span className="device-row-sub">
                           {avd.problem ??
@@ -522,10 +627,15 @@ export default function DeviceView({
                         onClick={() => void openSimulator(sim)}
                       >
                         <span className="device-row-name">
-                          {booting === sim.id ? `Starting ${sim.name}…` : sim.name}
+                          {booting === sim.id
+                            ? `Starting ${sim.name}…`
+                            : sim.name}
                         </span>
                         <span className="device-row-sub">
-                          {sim.version} · {sim.booted ? "running" : "not running — click to boot it"}
+                          {sim.version} ·{" "}
+                          {sim.booted
+                            ? "running"
+                            : "not running — click to boot it"}
                         </span>
                       </button>
                     </li>
@@ -540,7 +650,9 @@ export default function DeviceView({
                 <ul className="device-list">
                   {notReady.map((d) => (
                     <li key={d.serial} className="device-row device-row-dead">
-                      <span className="device-row-name">{d.model || d.serial}</span>
+                      <span className="device-row-name">
+                        {d.model || d.serial}
+                      </span>
                       <span className="device-row-sub">
                         {d.state === "unauthorized"
                           ? "accept the USB debugging prompt on the device"
@@ -552,15 +664,19 @@ export default function DeviceView({
               </div>
             )}
 
-            {devices.length === 0 && avds.length === 0 && missing.length === 0 && (
-              <div className="device-block">
-                <p title="Create an emulator in Android Studio, or plug in a phone with USB debugging on.">
-                  No devices.
-                </p>
-              </div>
-            )}
+            {devices.length === 0 &&
+              avds.length === 0 &&
+              missing.length === 0 && (
+                <div className="device-block">
+                  <p title="Create an emulator in Android Studio, or plug in a phone with USB debugging on.">
+                    No devices.
+                  </p>
+                </div>
+              )}
 
-            {error && <p className="preview-error device-picker-error">{error}</p>}
+            {error && (
+              <p className="preview-error device-picker-error">{error}</p>
+            )}
 
             <Button size="sm" onClick={() => void refreshDevices()}>
               Refresh
@@ -576,7 +692,9 @@ export default function DeviceView({
       <div className="preview-head">
         <span
           className="preview-component-badge"
-          title={platform === "ios" ? `Simulator ${serial}` : `adb serial ${serial}`}
+          title={
+            platform === "ios" ? `Simulator ${serial}` : `adb serial ${serial}`
+          }
         >
           {platform === "ios"
             ? simulators.find((d) => d.id === serial)?.name || serial
@@ -586,14 +704,14 @@ export default function DeviceView({
           Change device
         </Button>
         {platform === "android" && (
-        <Button
-          size="sm"
-          className={`preview-annotate-toggle ${picking ? "preview-annotate-on" : ""}`}
-          title="Annotate: click anything on the device to attach feedback to it"
-          onClick={() => setPicking((p) => !p)}
-        >
-          ◎ Annotate{annotations.length > 0 ? ` (${annotations.length})` : ""}
-        </Button>
+          <Button
+            size="sm"
+            className={`preview-annotate-toggle ${picking ? "preview-annotate-on" : ""}`}
+            title="Annotate: click anything on the device to attach feedback to it"
+            onClick={() => setPicking((p) => !p)}
+          >
+            ◎ Annotate{annotations.length > 0 ? ` (${annotations.length})` : ""}
+          </Button>
         )}
         {hubRunning && platform === "android" && (
           <Button
@@ -604,11 +722,18 @@ export default function DeviceView({
             {preferStills ? "Live stream" : "Screenshots"}
           </Button>
         )}
-        {!streaming && hub && !hub.installed && !declined && platform === "android" && (
-          <span className="device-row-sub" title="Install the device tools from the device picker">
-            Screenshots only. Change device to set up live streaming.
-          </span>
-        )}
+        {!streaming &&
+          hub &&
+          !hub.installed &&
+          !declined &&
+          platform === "android" && (
+            <span
+              className="device-row-sub"
+              title="Install the device tools from the device picker"
+            >
+              Screenshots only. Change device to set up live streaming.
+            </span>
+          )}
         {reachable.length > 0 && (
           <span
             className="device-row-sub"
@@ -657,19 +782,49 @@ export default function DeviceView({
                     </Button>
                   ))}
                   {platform === "ios" && (
-                    <Button size="sm" disabled={!handle?.inputConnected} onClick={() => handle?.rotate()}>
+                    <Button
+                      size="sm"
+                      disabled={!handle?.inputConnected}
+                      onClick={() => handle?.rotate()}
+                    >
                       Rotate
                     </Button>
                   )}
                 </div>
               )}
               overlay={
-                platform === "android" && (picking || annotations.length > 0) ? (
+                platform === "android" &&
+                (picking || annotations.length > 0) ? (
                   <div
                     className={`dsv-overlay ${picking ? "dsv-picking" : ""}`}
                     style={picking ? undefined : { pointerEvents: "none" }}
                     onClick={(e) => void onStreamClick(e)}
+                    onMouseMove={(e) => {
+                      if (!picking || !deviceSize) return;
+                      const rect = e.currentTarget.getBoundingClientRect();
+                      hoverAt(
+                        toDevicePoint(
+                          e.clientX,
+                          e.clientY,
+                          rect,
+                          deviceSize.w,
+                          deviceSize.h,
+                        ),
+                      );
+                    }}
+                    onMouseLeave={() => hoverAt(null)}
                   >
+                    {deviceSize && picking && hover && (
+                      <span
+                        className="device-hover"
+                        style={{
+                          left: `${(hover.bounds.x1 / deviceSize.w) * 100}%`,
+                          top: `${(hover.bounds.y1 / deviceSize.h) * 100}%`,
+                          width: `${((hover.bounds.x2 - hover.bounds.x1) / deviceSize.w) * 100}%`,
+                          height: `${((hover.bounds.y2 - hover.bounds.y1) / deviceSize.h) * 100}%`,
+                        }}
+                      />
+                    )}
                     {deviceSize &&
                       annotations.map((a) => (
                         <span
@@ -691,7 +846,8 @@ export default function DeviceView({
             />
           ) : platform === "ios" ? (
             <p className="preview-panel-hint">
-              iOS Simulators stream through the device hub, which is not running.
+              iOS Simulators stream through the device hub, which is not
+              running.
             </p>
           ) : frame ? (
             // The box is given the device's aspect ratio and told to fit the
@@ -701,7 +857,9 @@ export default function DeviceView({
             // how the frame ended up overflowing the pane.
             <div
               className="device-screen"
-              style={size ? { aspectRatio: `${size.w} / ${size.h}` } : undefined}
+              style={
+                size ? { aspectRatio: `${size.w} / ${size.h}` } : undefined
+              }
             >
               <img
                 ref={imgRef}
@@ -709,6 +867,14 @@ export default function DeviceView({
                 alt={`Screen of ${serial}`}
                 className={picking ? "device-picking" : ""}
                 onClick={(e) => void onFrameClick(e)}
+                onMouseMove={(e) => {
+                  if (!picking || !size) return;
+                  const rect = e.currentTarget.getBoundingClientRect();
+                  hoverAt(
+                    toDevicePoint(e.clientX, e.clientY, rect, size.w, size.h),
+                  );
+                }}
+                onMouseLeave={() => hoverAt(null)}
                 onLoad={(e) =>
                   setSize({
                     w: e.currentTarget.naturalWidth,
@@ -716,6 +882,17 @@ export default function DeviceView({
                   })
                 }
               />
+              {size && picking && hover && (
+                <span
+                  className="device-hover"
+                  style={{
+                    left: `${(hover.bounds.x1 / size.w) * 100}%`,
+                    top: `${(hover.bounds.y1 / size.h) * 100}%`,
+                    width: `${((hover.bounds.x2 - hover.bounds.x1) / size.w) * 100}%`,
+                    height: `${((hover.bounds.y2 - hover.bounds.y1) / size.h) * 100}%`,
+                  }}
+                />
+              )}
               {size &&
                 annotations.map((a) => (
                   <span
@@ -750,9 +927,7 @@ export default function DeviceView({
               )}
             </div>
             {annotations.length === 0 && (
-              <p className="preview-panel-hint">
-                Click to tag.
-              </p>
+              <p className="preview-panel-hint">Click to tag.</p>
             )}
             <div className="preview-panel-list">
               {annotations.map((a) => (
@@ -769,20 +944,32 @@ export default function DeviceView({
                         ? a.resourceId.replace(/^.*:id\//, "#")
                         : shortClass(a.className)}
                     </span>
-                    <Button icon className="preview-note-remove"
+                    <Button
+                      icon
+                      className="preview-note-remove"
                       title="Remove"
-                      onClick={() => removeAnnotation(a.n)}>
+                      onClick={() => removeAnnotation(a.n)}
+                    >
                       ✕
                     </Button>
                   </div>
-                  {a.text && <div className="preview-note-text">“{a.text.slice(0, 120)}”</div>}
+                  {a.text && (
+                    <div className="preview-note-text">
+                      “{a.text.slice(0, 120)}”
+                    </div>
+                  )}
                   {a.clickable && (
-                    <Button size="sm" className="device-tap"
+                    <Button
+                      size="sm"
+                      className="device-tap"
                       title="Tap this element on the device"
                       onClick={() => {
                         const c = centerOf(a.bounds);
-                        void ipc.androidTap(serial, c.x, c.y, dir).catch((e) => setError(String(e)));
-                      }}>
+                        void ipc
+                          .androidTap(serial, c.x, c.y, dir)
+                          .catch((e) => setError(String(e)));
+                      }}
+                    >
                       Tap it
                     </Button>
                   )}
@@ -804,7 +991,9 @@ export default function DeviceView({
                   placement={placement}
                   newAgentLabel="New agent on this feedback"
                   primaryTitle={(cli) => `Start ${cli} on this feedback`}
-                  onStart={(agentId) => onStartNew(agentId, feedback(), projectDir || null)}
+                  onStart={(agentId) =>
+                    onStartNew(agentId, feedback(), projectDir || null)
+                  }
                   onSend={(target) => onSendToAgent(target, feedback())}
                 />
               </div>

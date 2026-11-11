@@ -23211,6 +23211,14 @@ a.btn-sm {
   corner-shape: squircle;
   pointer-events: none;
 }
+.device-hover {
+  position: absolute;
+  border: 2px solid var(--accent);
+  background: color-mix(in oklab, var(--accent) 16%, transparent);
+  border-radius: var(--r-sm);
+  corner-shape: squircle;
+  pointer-events: none;
+}
 .device-mark b {
   position: absolute;
   top: -9px;
