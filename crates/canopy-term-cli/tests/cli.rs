@@ -189,6 +189,14 @@ fn kill_codes() {
     let h = Host::start("e");
     assert_eq!(h.run(&["kill", "999"]).status.code(), Some(3));
     assert_eq!(h.run(&["kill", "notanumber"]).status.code(), Some(2));
+    let missing: [&[&str]; 3] = [
+        &["send", "999", "x"],
+        &["capture", "999"],
+        &["attach", "999"],
+    ];
+    for args in missing {
+        assert_eq!(h.run(args).status.code(), Some(3), "{args:?}");
+    }
     let id = h.new_session(None, &["sleep", "30"]);
     assert_eq!(h.run(&["kill", &id]).status.code(), Some(0));
     assert!(wait_until(Duration::from_secs(10), || {
@@ -362,7 +370,17 @@ fn attach_passes_bytes_detaches_and_restores_the_tty() {
     );
 
     // Someone else cannot take it over without --force.
-    assert_eq!(h.run(&["capture", &id]).status.code(), Some(5));
+    assert_eq!(h.run(&["send", &id, "x"]).status.code(), Some(5));
+    // A second interactive attach is refused too.
+    let second = h
+        .term(&["attach", &id])
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    assert_eq!(second.status.code(), Some(5), "{}", lossy(&second.stderr));
+    // capture reads the ring without attaching: it works and leaves us attached.
+    assert_eq!(h.run(&["capture", &id]).status.code(), Some(0));
+    assert_eq!(h.ls()[0]["attached"], true);
 
     // Detach key, split across two writes.
     pty.write(&[0x1d]);
@@ -481,11 +499,10 @@ fn send_reads_text_from_stdin() {
     }));
 }
 
-/// A host that predates the `attached` field: "unknown" must never read as
-/// "free", so send, capture and attach refuse without ever opening a data
-/// connection.
+/// A host older than protocol 3 would ignore `exclusive` and take the session
+/// over, so send and attach must fail with an error and never send an attach.
 #[test]
-fn a_host_that_omits_attached_is_never_treated_as_free() {
+fn an_old_host_is_never_attached_to_without_exclusivity() {
     use std::io::{BufRead, BufReader, Write};
     use std::os::unix::net::UnixListener;
     use std::sync::{Arc, Mutex};
@@ -508,8 +525,8 @@ fn a_host_that_omits_attached_is_never_treated_as_free() {
                     .and_then(|v| v["op"].as_str().map(String::from))
                     .unwrap_or_default();
                 ops.lock().unwrap().push(op.clone());
-                let reply = if op == "list" {
-                    r#"{"ok":true,"sessions":[{"id":1,"pid":42,"cols":80,"rows":24}]}"#
+                let reply = if op == "hello" {
+                    r#"{"ok":true,"version":2}"#
                 } else {
                     r#"{"ok":false,"error":"unexpected"}"#
                 };
@@ -526,19 +543,24 @@ fn a_host_that_omits_attached_is_never_treated_as_free() {
             .output()
             .unwrap()
     };
-    let cases: [&[&str]; 3] = [&["capture", "1"], &["send", "1", "x"], &["attach", "1"]];
+    let cases: [&[&str]; 2] = [&["send", "1", "x"], &["attach", "1"]];
     for args in cases {
         let out = term(args);
         assert_eq!(
             out.status.code(),
-            Some(5),
+            Some(1),
             "{args:?}: {}",
+            lossy(&out.stderr)
+        );
+        assert!(
+            lossy(&out.stderr).contains("protocol"),
+            "{}",
             lossy(&out.stderr)
         );
     }
     assert!(
-        ops.lock().unwrap().iter().all(|op| op == "list"),
-        "opened a data connection to a host that did not say it was free: {:?}",
+        ops.lock().unwrap().iter().all(|op| op == "hello"),
+        "sent more than a hello to an old host: {:?}",
         ops.lock().unwrap()
     );
     let _ = std::fs::remove_dir_all(&dir);

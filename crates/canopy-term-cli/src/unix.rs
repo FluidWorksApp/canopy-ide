@@ -31,7 +31,7 @@ commands:
                                     existing one); prints its id
   attach ID [--after N] [--force]   interactive passthrough; detach with Ctrl-] d
                                     (Ctrl-] Ctrl-] sends a literal Ctrl-])
-  send ID TEXT [--enter]            type TEXT into the session (--enter adds CR);
+  send ID TEXT [--enter] [--force]  type TEXT into the session (--enter adds CR);
                                     TEXT is `-` to read it from stdin (argv is
                                     visible in process lists, stdin is not)
   capture ID [--lines N]            print the tail of the replay ring as text
@@ -46,19 +46,16 @@ options:
   --version       print the version and exit
 
 exit codes: 0 ok, 1 error, 2 usage, 3 no such session, 4 host not running,
-5 session is attached elsewhere, or the host does not say (see below).
+5 session is attached elsewhere (see below).
 
-The host has no read-only or input-only operation: attach, send and capture all
-open the session's one data connection, and the host gives that connection to
-the newest client, disconnecting whoever held it (for example the Canopy app's
-terminal). So all three refuse (exit 5) unless the host reports the session as
-not attached; an old host that does not report it counts as unknown, never as
-free. Only `attach --force` takes a session over on purpose. send and capture
-have no override. When they do connect, the session's linger clock starts at
-the moment they close.
-The check and the attach are two calls, so a client that attaches in between
-is still disconnected. Closing that gap needs a host-side `attach` that only
-succeeds if the session is free (not implemented; proposed to the host).
+attach and send open the session's one data connection, which the host would
+otherwise hand to the newest client, disconnecting whoever held it (for example
+the Canopy app's terminal). They use an exclusive attach: the host refuses
+atomically (exit 5) if a client is attached, and only --force takes a session
+over on purpose. Both need a host speaking protocol 3 or newer and report an
+error against an older one. When send connects, the session's linger clock
+starts at the moment it closes. capture reads the replay ring without
+attaching and never disturbs the attached client.
 
 capture prints a byte replay of the host's ring buffer (escape sequences kept,
 CRLF turned into LF), not a rendered screen.
@@ -400,7 +397,24 @@ fn cmd_new(socket: &Path, mut args: Vec<String>) -> Res<i32> {
     Ok(0)
 }
 
-/// Opens the session's data connection after checking nobody else holds it.
+/// Maps a host refusal to its exit code; anything else goes through `io_fail`.
+fn host_fail(error: io::Error, socket: &Path, id: u32) -> Fail {
+    let text = error.to_string();
+    if text.contains(canopy_pty_host::protocol::BUSY) {
+        fail(
+            EXIT_BUSY,
+            format!("session {id} is attached elsewhere (--force takes it over)"),
+        )
+    } else if text.contains("no such session") {
+        fail(EXIT_NO_SESSION, format!("no such session {id}"))
+    } else {
+        io_fail(error, socket)
+    }
+}
+
+/// Opens the session's data connection. Unless `force`, the host refuses
+/// atomically when a client is attached (exclusive attach, protocol 3). A host
+/// older than that is an error, never a fallback to a racy client-side check.
 fn open_data(
     client: &HostClient,
     socket: &Path,
@@ -408,30 +422,17 @@ fn open_data(
     after: u64,
     force: bool,
 ) -> Res<canopy_pty_host::client::Attached> {
-    let info = find(client, socket, id)?;
-    // None is "unknown" (a host that predates the field), never "free".
-    if !force {
-        match info.attached {
-            Some(false) => {}
-            Some(true) => {
-                return Err(fail(
-                    EXIT_BUSY,
-                    format!("session {id} is attached by another client"),
-                ))
-            }
-            None => {
-                return Err(fail(
-                    EXIT_BUSY,
-                    format!("the host does not report whether session {id} is attached"),
-                ))
-            }
-        }
-    }
-    client.attach(id, after).map_err(|e| io_fail(e, socket))
+    let attached = if force {
+        client.attach(id, after)
+    } else {
+        client.attach_exclusive(id, after)
+    };
+    attached.map_err(|e| host_fail(e, socket, id))
 }
 
 fn cmd_send(client: &HostClient, socket: &Path, mut args: Vec<String>) -> Res<i32> {
     let enter = take_flag(&mut args, "--enter");
+    let force = take_flag(&mut args, "--force");
     let (head, tail) = split_dd(args);
     reject_unknown_options(&head)?;
     let positional: Vec<String> = head.into_iter().chain(tail).collect();
@@ -452,7 +453,7 @@ fn cmd_send(client: &HostClient, socket: &Path, mut args: Vec<String>) -> Res<i3
         data.push(b'\r');
     }
     // A start past the end clamps to it, so nothing is replayed.
-    let attached = open_data(client, socket, id, u64::MAX, false)?;
+    let attached = open_data(client, socket, id, u64::MAX, force)?;
     let mut stream = attached.stream;
     stream
         .write_all(&data)
@@ -479,20 +480,10 @@ fn close_cleanly(mut stream: std::os::unix::net::UnixStream) {
 fn cmd_capture(client: &HostClient, socket: &Path, mut args: Vec<String>) -> Res<i32> {
     let lines: Option<usize> = take_number(&mut args, "--lines")?;
     let id = only_id(args)?;
-    let attached = open_data(client, socket, id, 0, false)?;
-    let want = attached.end.saturating_sub(attached.start) as usize;
-    let mut stream = attached.stream;
-    let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
-    let mut bytes = Vec::with_capacity(want);
-    let mut buf = [0u8; 16384];
-    while bytes.len() < want {
-        match stream.read(&mut buf) {
-            Ok(0) | Err(_) => break,
-            Ok(n) => bytes.extend_from_slice(&buf[..n]),
-        }
-    }
-    bytes.truncate(want);
-    close_cleanly(stream);
+    // Read-only: never takes the data connection from whoever is attached.
+    let (_, bytes) = client
+        .read_ring(id, 0, None)
+        .map_err(|e| host_fail(e, socket, id))?;
     let tail = match lines {
         Some(n) => last_lines(&bytes, n),
         None => &bytes[..],
