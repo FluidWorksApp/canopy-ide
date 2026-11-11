@@ -631,6 +631,7 @@ impl PtyManager {
                 }
             };
             let meta = taken.meta;
+            let meta_id = meta.id;
             self.next_id.fetch_max(meta.id, Ordering::SeqCst);
             self.next_session_generation
                 .fetch_max(meta.generation, Ordering::SeqCst);
@@ -663,7 +664,13 @@ impl PtyManager {
                 history_start: taken.history_start,
             };
             match self.start_session(app.clone(), parts) {
-                Ok(_) => adopted += 1,
+                Ok(_) => {
+                    adopted += 1;
+                    if let Some(session) = self.get(meta_id) {
+                        // Off the launch path: it sleeps between the two sizes.
+                        thread::spawn(move || session.nudge_redraw());
+                    }
+                }
                 Err(error) => eprintln!("canopy: could not start adopted terminal: {error}"),
             }
         }
@@ -1330,6 +1337,28 @@ impl Session {
         let mut ring = self.scrollback.lock().unwrap();
         let start = self.record_output_locked(&mut ring, &data);
         self.send_desktop(start, data);
+    }
+
+    /// Make a full-screen program repaint without changing its final size. A
+    /// resize to the size a terminal already has sends no SIGWINCH, so shrink by
+    /// one row and restore. Used after adoption, where the replayed history may
+    /// start mid-screen and a TUI needs to redraw over it.
+    fn nudge_redraw(&self) {
+        let (cols, rows) = *self.size.lock().unwrap();
+        if rows < 2 {
+            return;
+        }
+        let resize = |rows: u16| {
+            let _ = self.master.lock().unwrap().resize(PtySize {
+                rows,
+                cols,
+                pixel_width: 0,
+                pixel_height: 0,
+            });
+        };
+        resize(rows - 1);
+        thread::sleep(Duration::from_millis(80));
+        resize(rows);
     }
 
     /// Record a new grid size and tell remote subscribers, so a remote terminal
@@ -4567,7 +4596,7 @@ mod tests {
         let host = InProcessHost::start("adoptmgr");
         let (child, master) = crate::pty_hosted::spawn(
             &host.client,
-            &command("echo before-quit; sleep 300"),
+            &command("trap 'echo got-winch' WINCH; echo before-quit; while :; do sleep 0.1; done"),
             80,
             24,
             Some(meta_for(41, 9, "desktop", "inst-t")),
@@ -4611,6 +4640,20 @@ mod tests {
                 .collect::<Vec<u8>>()
         )
         .contains("before-quit"));
+        // A resize to the size it already has sends no SIGWINCH, so adoption
+        // nudges one row and back; the program's own handler proves it ran.
+        assert!(wait(&|| {
+            String::from_utf8_lossy(
+                &session
+                    .scrollback
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .copied()
+                    .collect::<Vec<u8>>(),
+            )
+            .contains("got-winch")
+        }));
         // The next terminal lands above the adopted ones.
         let (id, generation) = pm.allocate_session_identity().unwrap();
         assert!(id > 41 && generation > 9, "{id} {generation}");
