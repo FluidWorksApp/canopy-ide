@@ -106,7 +106,16 @@ confuse them.
 
 - One QUIC link per peer, cached; `connect` opens a new bidirectional stream
   (cheap). A dead cached link is dropped and redialed once.
-- ALPN `canopy-term/session/1` for the session protocol.
+- ALPN `canopy-term/session/1` for the session protocol. It is advertised only
+  after an explicit `listen()`; before that the endpoint only dials out, and
+  `accept()` is an error.
+- Accepted streams wait in a bounded queue (64); when it is full a new stream
+  is dropped, never queued without bound. Refusal notices have their own small
+  cap (8) so strangers cannot crowd out admitted peers.
+- The allowlist is checked when the link comes up, for every new stream, and
+  again after the stream preface; a revoked key's link is closed.
+- `LocalUnix` only unlinks its socket on drop if the path still holds the same
+  inode it bound. Allowlist saves are serialised and read the list once.
 - Address string: `<64 hex key>[@ip:port[,ip:port]]`. Without socket addresses
   the n0 discovery and relay are used (`IrohOptions { bind: None }`); the
   loopback options disable relay and discovery and bind only 127.0.0.1.
@@ -157,18 +166,30 @@ timeout, and collects output with a deadline too, so a grandchild holding a
 pipe cannot hang it.
 
 **Which binary.** The CLI decides who is authorised, so it must not be one an
-attacker planted. Fixed install paths are tried first on every OS (macOS app
-bundle, Homebrew, `/usr/local/bin`; Linux `/usr/bin`, `/usr/local/bin`;
-Windows Program Files), then only ABSOLUTE `PATH` entries (`.`,
-`node_modules/.bin` and empty entries are skipped). The choice is canonicalised
-once and the absolute path kept, so nothing re-resolves it at spawn. On unix the
-resolved file must be owned by root and not group or world writable. On this
-kind of setup the macOS app bundle binary passes; a Homebrew binary owned by the
-user does not, and is skipped (so a Homebrew-only install reports
-`NotInstalled`): a deliberate consequence of the rule, raise it if Homebrew
-installs must work. Windows has no ownership check; the Program Files paths are
-admin-writable only and come first. The CLI version is checked once, when a
-transport is created.
+attacker planted. Only fixed install paths are tried (macOS app bundle,
+Homebrew, `/usr/local/bin`; Linux `/usr/bin`, `/usr/local/bin`; Windows
+Program Files); `PATH` is not consulted at all. The candidate is canonicalised
+once and the absolute path kept, so nothing re-resolves it at spawn. On unix
+the resolved file must be owned by root OR the current user, and not group or
+world writable. Root covers pkg, App Store and distribution packages; the
+current user covers a drag-installed app and a user-owned Homebrew prefix. A
+binary owned by the current user is no stronger than that user's account,
+the same trust boundary as the local socket transport. Anything else is
+`InstallProblem::Untrusted` (via `ProcessRunner::locate()`, so a UI can say
+"untrusted install" rather than "not installed"); `installed()` returns `None`.
+The file's (device, inode) is recorded and re-checked (not a symlink, owner and
+mode) immediately before every spawn; a replaced binary is not run. The tiny
+window between that check and the spawn is not closed (no portable fexecve),
+which is why the file must be unwritable to everyone else. Parent directories
+are not checked: `/Applications` is group-writable on macOS by design.
+The child runs with an EMPTY environment (no `TS_SOCKET`, `LD_PRELOAD`,
+`DYLD_*`, proxy variables or `PATH`), only a fixed `PATH` on unix and
+`SystemRoot`/`windir` on Windows. A non-default `TS_SOCKET` therefore does not
+work; that is deliberate. Whether the CLI needs anything more on a real macOS
+or Linux install (for example `HOME`) is UNVERIFIED and is the first thing the
+manual test checks. Windows has no ownership check; the Program Files paths
+are admin-writable only. The CLI version is checked once, when a transport is
+created, and `Probe` carries it.
 
 **States.** `TailnetState`: `NotInstalled`, `DaemonUnreachable`, `NeedsLogin`,
 `NeedsMachineAuth`, `Stopped`, `Starting`, `Running`, `TooOld(version)`,
@@ -187,8 +208,12 @@ the user id, never by node or login name (display values that can be renamed):
 These sit in the same `Allowlist` as device keys but in a separate namespace
 (`tailnet:` prefix), so they can never collide with a 64 hex iroh key. A whois
 answer with neither tags nor a real user is an error and a refusal.
-**Tailnet membership is not authorisation**: the identity must also be in the
-allowlist, on both the accepting and the dialing side.
+**Tailnet membership is not authorisation**: on the ACCEPTING side the
+identity must also be in the allowlist. The DIALING side needs no allowlist
+entry (connecting out is the user's own act); instead `whois` on the address
+must return the same stable node id the status listed for that node, so an
+address cannot be swapped for another machine's. This machine's own addresses
+are never dialed.
 
 **An entry authorises a machine, not a person.** whois names the node that owns
 the source address. Anyone using that machine (another account on a shared
@@ -199,7 +224,8 @@ it could come from any machine behind it; so is a source address that whois
 attributes to a node but that is not one of the node's own `Addresses`.
 
 **Fail closed.** Accept decides from the peer's socket address alone, so no
-byte is read before the decision. A whois error, timeout or empty answer is a
+byte is read before the decision. A source address outside the tailnet ranges
+is refused before any lookup. A whois error, timeout or empty answer is a
 refusal. Successful answers are cached 10 seconds and failures 5 seconds, keyed
 by address. The short positive cache bounds how long a retag or a reassigned
 address keeps a stale identity, at the cost of one CLI spawn per expiry for a
@@ -207,7 +233,10 @@ busy peer. The allowlist is consulted on every use, so removing an entry takes
 effect at once. Whois runs on four worker threads fed by a bounded queue (64);
 a full queue drops the connection unread. Failed lookups and refusals are rate
 limited per source address (20 per minute); admitted peers never count, since the
-session protocol opens a connection per control operation.
+session protocol opens a connection per control operation. Fresh lookups are
+also limited globally (120 spawns per minute across all sources; over it a
+lookup is refused). The result channel is bounded (64) too, so no queue grows
+without limit.
 
 **Listener.** Binds only the node's own tailnet addresses from the status, only
 while running, never an unspecified address, and only addresses inside
@@ -222,11 +251,13 @@ and refuses addresses the tailnet does not list.
 command, CLI location per OS, each state, unknown backend states, version
 comparison, status and whois parsing including nulls, missing fields and
 malformed JSON, the real runner against `/bin/sh` for large output, timeout
-and a grandchild holding the pipe (unix), relative `PATH` entries skipped and
-fixed paths first, the owner/mode trust rule, bind refusals including
+and a grandchild holding the pipe (unix), fixed install paths only, the owner/mode trust rule (root or
+the current user), re-check before spawn, empty child environment, bind refusals including
 addresses outside the tailnet ranges, refusal of an unknown peer, of a whois
 failure and of a subnet router, echo for an allowlisted peer through the
-worker pool, name and address dialing, read deadline, positive and negative
+worker pool, name and address dialing (no allowlist entry needed; a whois id
+mismatch, whois failure and the machine's own address refused),
+the global lookup limit, read deadline, positive and negative
 caching, rate limiting, revocation, a too-old CLI, and redacted `Debug`.
 
 **NOT verified.**
@@ -241,8 +272,9 @@ caching, rate limiting, revocation, a too-old CLI, and redacted `Debug`.
   MagicDNS names, key expiry.
 - The real runner and CLI location on a real install (only exercised against
   `/bin/sh` and a missing path).
-- The ownership check against real installs on Linux (only the pure rule is
-  tested); a full worker queue dropping connections (not exercised).
+- The ownership check against real installs on Linux (only the pure rule and
+  files in a temp directory are tested);
+- That the CLI works with the empty environment on real installs; a full worker queue dropping connections (not exercised).
 - Official Tailscale download signing and checksums: unverified, and belong to
   the later bundling step.
 
@@ -251,7 +283,8 @@ caching, rate limiting, revocation, a too-old CLI, and redacted `Debug`.
    `Running`; check the state the code reports.
 2. Machine A listens, machine B dials by short name, full name and address;
    both allowlisted: session works.
-3. B not in A's allowlist: refused, no session bytes.
+3. B not in A's allowlist: refused, no session bytes. A dials B with B's
+   allowlist irrelevant on A's side: dialing out works with an empty list.
 4. Remove B from A's allowlist while connected: B's next connection is refused.
 5. Tagged node as B: entry kind `tagged`; a `user` entry for the same node
    must not work.

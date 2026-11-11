@@ -22,8 +22,15 @@
 //!   Answers are cached briefly (successes [`WHOIS_TTL`], failures
 //!   [`NEGATIVE_TTL`]), and failed lookups plus refusals are rate limited per
 //!   source address (admitted peers never count).
-//! - Dialing resolves names from the status peer list (never system DNS), only
-//!   to nodes the tailnet lists, and checks the allowlist before connecting.
+//! - Only tailnet source addresses are considered on accept: a connection from
+//!   any other address is refused before any lookup runs.
+//! - Dialing needs no allowlist entry (connecting out is the user's own act).
+//!   It resolves names from the status peer list (never system DNS), only to
+//!   nodes the tailnet lists, refuses this machine's own addresses, and checks
+//!   with `whois` that the address belongs to the node the status listed (same
+//!   stable node id) before connecting. The allowlist governs inbound only.
+//! - Every channel and queue is bounded; whois spawns are limited per source
+//!   and globally.
 //! - The CLI version is checked once, when the transport is created.
 //!
 //! No stream preface: a TCP connection is visible to the acceptor on connect,
@@ -55,6 +62,10 @@ pub const NEGATIVE_TTL: Duration = Duration::from_secs(5);
 /// Failed lookups plus refusals allowed per source address per [`RATE_WINDOW`].
 pub const RATE_LIMIT: u32 = 20;
 pub const RATE_WINDOW: Duration = Duration::from_secs(60);
+/// Whois spawns allowed across ALL sources per [`RATE_WINDOW`]. Past it a new
+/// lookup is refused (fail closed), so many tailnet addresses together cannot
+/// make this process spawn the CLI without bound.
+pub const GLOBAL_LOOKUP_LIMIT: u32 = 120;
 const DIAL_TIMEOUT: Duration = Duration::from_secs(10);
 const CACHE_LIMIT: usize = 256;
 const WORKERS: usize = 4;
@@ -114,6 +125,8 @@ struct GateState {
     negative: HashMap<IpAddr, Instant>,
     /// Count and window start per source address.
     rate: HashMap<IpAddr, (u32, Instant)>,
+    /// Count and window start for whois spawns from any source.
+    global: Option<(u32, Instant)>,
 }
 
 fn trim<V>(map: &mut HashMap<IpAddr, V>, keep: impl Fn(&V) -> bool) {
@@ -131,6 +144,8 @@ struct Gate {
     allow: Allowlist,
     state: Mutex<GateState>,
     clock: Clock,
+    /// Test only: also treat loopback as an acceptable source.
+    loopback_ok: AtomicBool,
 }
 
 impl Gate {
@@ -145,16 +160,25 @@ impl Gate {
         e.0 <= RATE_LIMIT
     }
 
+    /// Count one whois spawn against the global budget; `false` once over.
+    fn global_lookup_ok(st: &mut GateState, now: Instant) -> bool {
+        let e = st.global.get_or_insert((0, now));
+        if now >= e.1 + RATE_WINDOW {
+            *e = (0, now);
+        }
+        e.0 = e.0.saturating_add(1);
+        e.0 <= GLOBAL_LOOKUP_LIMIT
+    }
+
     fn over_limit(st: &GateState, ip: IpAddr, now: Instant) -> bool {
         st.rate
             .get(&ip)
             .is_some_and(|(n, start)| now < *start + RATE_WINDOW && *n >= RATE_LIMIT)
     }
 
-    /// From the peer's address alone: its identity entry if the tailnet vouches
-    /// for it AND the allowlist holds it, else `None`. Any failure, including
-    /// a poisoned lock, is `None`.
-    fn authorize(&self, ip: IpAddr) -> Option<String> {
+    /// Who the tailnet says owns `ip`, from the cache or a fresh whois. Any
+    /// failure, a limit hit, or a poisoned lock is `None`.
+    fn identify(&self, ip: IpAddr) -> Option<TailnetIdentity> {
         let ip = ip.to_canonical();
         let now = (self.clock)();
         let cached = {
@@ -178,9 +202,15 @@ impl Gate {
                 }
             }
         };
-        let identity = match cached {
-            Some(id) => id,
+        match cached {
+            Some(id) => Some(id),
             None => {
+                {
+                    let mut st = self.state.lock().ok()?;
+                    if !Gate::global_lookup_ok(&mut st, now) {
+                        return None;
+                    }
+                }
                 // The lock is not held while the CLI runs.
                 let looked_up = self.ts.whois(ip);
                 let mut st = self.state.lock().ok()?;
@@ -188,17 +218,26 @@ impl Gate {
                     Ok(id) => {
                         trim(&mut st.positive, |(_, exp)| now < *exp);
                         st.positive.insert(ip, (id.clone(), now + WHOIS_TTL));
-                        id
+                        Some(id)
                     }
                     Err(_) => {
                         Gate::charge(&mut st, ip, now);
                         trim(&mut st.negative, |exp| now < *exp);
                         st.negative.insert(ip, now + NEGATIVE_TTL);
-                        return None;
+                        None
                     }
                 }
             }
-        };
+        }
+    }
+
+    /// From the peer's address alone: its identity entry if the tailnet vouches
+    /// for it AND the allowlist holds it, else `None`. Any failure, including
+    /// a poisoned lock, is `None`.
+    fn authorize(&self, ip: IpAddr) -> Option<String> {
+        let ip = ip.to_canonical();
+        let now = (self.clock)();
+        let identity = self.identify(ip)?;
         let entry = identity.allowlist_entry();
         if self.allow.contains(&entry) {
             Some(entry)
@@ -212,6 +251,12 @@ impl Gate {
 
     fn admit(&self, stream: TcpStream, peer: SocketAddr) -> Result<Box<dyn Connection>, Refusal> {
         // Nothing has been read from `stream`; the decision uses the address.
+        // Only tailnet addresses are looked up at all.
+        let ip = peer.ip().to_canonical();
+        if !(is_tailnet_addr(ip) || (ip.is_loopback() && self.loopback_ok.load(Ordering::SeqCst))) {
+            drop(stream);
+            return Err(Refusal::UnknownPeer);
+        }
         let Some(entry) = self.authorize(peer.ip()) else {
             drop(stream);
             return Err(Refusal::UnknownPeer);
@@ -261,6 +306,7 @@ impl TailnetTcp {
                 allow,
                 state: Mutex::new(GateState::default()),
                 clock,
+                loopback_ok: AtomicBool::new(false),
             }),
             version,
             local: Vec::new(),
@@ -297,6 +343,7 @@ impl TailnetTcp {
         allow_loopback: bool,
     ) -> Result<Self, BindError> {
         let mut t = Self::client_with_clock(runner, allow, clock);
+        t.gate.loopback_ok.store(allow_loopback, Ordering::SeqCst);
         let probe = t.gate.ts.probe();
         if probe.state != TailnetState::Running {
             return Err(BindError::NotRunning(probe.state));
@@ -346,7 +393,7 @@ impl TailnetTcp {
     /// the (possibly slow) authorisation and post results for `accept`.
     fn start(&mut self, listeners: Vec<TcpListener>) {
         let (job_tx, job_rx) = mpsc::sync_channel::<(TcpStream, SocketAddr)>(QUEUE);
-        let (res_tx, res_rx) = mpsc::channel::<Admitted>();
+        let (res_tx, res_rx) = mpsc::sync_channel::<Admitted>(QUEUE);
         let job_rx = Arc::new(Mutex::new(job_rx));
         for _ in 0..WORKERS {
             let job_rx = job_rx.clone();
@@ -419,18 +466,47 @@ fn nodes(status: &TailnetStatus) -> impl Iterator<Item = &NodeInfo> {
     status.peers.iter().chain(status.self_node.iter())
 }
 
-/// Addresses for `host`, from the tailnet's own node list only.
-fn resolve(status: &TailnetStatus, host: &Result<IpAddr, String>) -> io::Result<Vec<IpAddr>> {
+/// The node a dial name or address resolved to.
+struct Resolved {
+    /// The stable node id the status lists for it, checked against whois.
+    stable_id: Option<String>,
+    addrs: Vec<IpAddr>,
+}
+
+fn own_addresses(status: &TailnetStatus) -> Vec<IpAddr> {
+    status
+        .self_node
+        .iter()
+        .flat_map(|n| n.addrs.iter().map(|a| a.to_canonical()))
+        .collect()
+}
+
+fn refuse_own() -> io::Error {
+    io::Error::new(
+        io::ErrorKind::PermissionDenied,
+        "refusing to dial this machine's own address",
+    )
+}
+
+/// The node for `host`, from the tailnet's own node list only. This machine's
+/// own addresses are refused.
+fn resolve(status: &TailnetStatus, host: &Result<IpAddr, String>) -> io::Result<Resolved> {
+    let own = own_addresses(status);
     match host {
         Ok(ip) => {
             let ip = ip.to_canonical();
-            if nodes(status).any(|n| n.addrs.iter().any(|a| a.to_canonical() == ip)) {
-                Ok(vec![ip])
-            } else {
-                Err(io::Error::new(
+            if own.contains(&ip) {
+                return Err(refuse_own());
+            }
+            match nodes(status).find(|n| n.addrs.iter().any(|a| a.to_canonical() == ip)) {
+                Some(n) => Ok(Resolved {
+                    stable_id: n.stable_id.clone(),
+                    addrs: vec![ip],
+                }),
+                None => Err(io::Error::new(
                     io::ErrorKind::PermissionDenied,
                     "address is not a node on this tailnet",
-                ))
+                )),
             }
         }
         Err(name) => {
@@ -447,6 +523,14 @@ fn resolve(status: &TailnetStatus, host: &Result<IpAddr, String>) -> io::Result<
                     "no such node on this tailnet",
                 )),
                 [one] => {
+                    let is_self = status
+                        .self_node
+                        .as_ref()
+                        .is_some_and(|s| std::ptr::eq(s, *one))
+                        || one.addrs.iter().any(|a| own.contains(&a.to_canonical()));
+                    if is_self {
+                        return Err(refuse_own());
+                    }
                     let mut addrs = one.addrs.clone();
                     addrs.sort_by_key(|a| a.is_ipv6());
                     if addrs.is_empty() {
@@ -455,7 +539,10 @@ fn resolve(status: &TailnetStatus, host: &Result<IpAddr, String>) -> io::Result<
                             "node has no address",
                         ))
                     } else {
-                        Ok(addrs)
+                        Ok(Resolved {
+                            stable_id: one.stable_id.clone(),
+                            addrs,
+                        })
                     }
                 }
                 _ => Err(io::Error::new(
@@ -470,7 +557,9 @@ fn resolve(status: &TailnetStatus, host: &Result<IpAddr, String>) -> io::Result<
 impl Transport for TailnetTcp {
     /// `address` is `<node name or tailnet ip>:<port>`. The name may be the
     /// short name or the full MagicDNS name. Only nodes in the tailnet's own
-    /// status are dialed, and only if the allowlist holds their identity.
+    /// status are dialed, never this machine, and only after `whois` confirms
+    /// the address belongs to the node the status listed (same stable id).
+    /// No allowlist entry is needed to dial out.
     fn connect(&self, address: &str) -> io::Result<Box<dyn Connection>> {
         if let Err(s) = &self.version {
             return Err(io::Error::new(
@@ -486,15 +575,31 @@ impl Transport for TailnetTcp {
             )
         })?;
         let mut last: Option<io::Error> = None;
-        for ip in resolve(&status, &host)? {
-            // Identity and allowlist first: an unapproved node is never dialed.
-            let Some(entry) = self.gate.authorize(ip) else {
+        let target = resolve(&status, &host)?;
+        let Some(want) = target.stable_id.as_deref() else {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "the tailnet lists no stable id for this node",
+            ));
+        };
+        for ip in target.addrs {
+            // Identity first: an address whose owner is not the listed node
+            // is never dialed.
+            let Some(identity) = self.gate.identify(ip) else {
                 last = Some(io::Error::new(
                     io::ErrorKind::PermissionDenied,
-                    "peer is not allowlisted",
+                    "the tailnet does not vouch for this address",
                 ));
                 continue;
             };
+            if identity.stable_id() != want {
+                last = Some(io::Error::new(
+                    io::ErrorKind::PermissionDenied,
+                    "the address belongs to a different node than listed",
+                ));
+                continue;
+            }
+            let entry = identity.allowlist_entry();
             match TcpStream::connect_timeout(&SocketAddr::new(ip, port), DIAL_TIMEOUT) {
                 Ok(stream) => {
                     let _ = stream.set_nodelay(true);
@@ -962,14 +1067,93 @@ mod tests {
     }
 
     #[test]
-    fn dialing_an_unallowlisted_node_never_connects() {
-        // Nothing listens on this port; reaching the allowlist check first
-        // means the error is PermissionDenied, not a connection failure.
-        let client = TailnetTcp::client(client_runner(), allow(&[]));
+    fn dialing_needs_no_allowlist_entry() {
+        watchdog(60, || {
+            let server =
+                Arc::new(TailnetTcp::bind_for_test(server_runner(), allow(&[ENTRY]), 0).unwrap());
+            let port = port_of(&server);
+            let s = server.clone();
+            let t = std::thread::spawn(move || s.accept().unwrap().is_ok());
+            // The dialer's own allowlist is empty.
+            let client = TailnetTcp::client(client_runner(), allow(&[]));
+            let conn = client.connect(&format!("node-b:{port}")).unwrap();
+            assert_eq!(conn.peer(), &PeerIdentity::Device(ENTRY.to_string()));
+            assert!(t.join().unwrap());
+        });
+    }
+
+    #[test]
+    fn dialing_refuses_an_address_owned_by_a_different_node() {
+        // The status lists node-b as nPEERB1CNTRL, but whois says the address
+        // belongs to another node: never dialed (nothing listens on port 1,
+        // so a connect attempt would be a different error).
+        let r = client_runner();
+        r.set_whois(loopback(), Ok(whois_user("nOTHERX1CNTRL", 42)));
+        let client = TailnetTcp::client(r, allow(&[ENTRY]));
         assert_eq!(
             client.connect("node-b:1").err().unwrap().kind(),
             io::ErrorKind::PermissionDenied
         );
+    }
+
+    #[test]
+    fn dialing_refuses_when_whois_fails() {
+        let r = client_runner();
+        r.set_whois(loopback(), Err(crate::tailscale::CliError::TimedOut));
+        let client = TailnetTcp::client(r, allow(&[ENTRY]));
+        assert_eq!(
+            client.connect("node-b:1").err().unwrap().kind(),
+            io::ErrorKind::PermissionDenied
+        );
+    }
+
+    #[test]
+    fn dialing_this_machine_is_refused() {
+        let client = TailnetTcp::client(client_runner(), allow(&[ENTRY]));
+        for a in ["100.64.0.1:1", "node-a:1", "node-a.example.ts.net:1"] {
+            assert_eq!(
+                client.connect(a).err().unwrap().kind(),
+                io::ErrorKind::PermissionDenied,
+                "{a}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_non_tailnet_source_is_refused_before_any_lookup() {
+        let r = server_runner();
+        let gate_t = TailnetTcp::client(r.clone(), allow(&[ENTRY]));
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let _c = TcpStream::connect(addr).unwrap();
+        let (stream, peer) = listener.accept().unwrap();
+        // Loopback is not a tailnet address and loopback_ok is off here.
+        assert!(matches!(
+            gate_t.gate.admit(stream, peer),
+            Err(Refusal::UnknownPeer)
+        ));
+        assert_eq!(r.whois_calls(), 0);
+    }
+
+    #[test]
+    fn lookups_are_limited_across_all_sources() {
+        let r = Arc::new(FakeRunner::new(&status_running(&["127.0.0.1"], &[])));
+        let (t, offset) = clocked(r.clone(), &[ENTRY]);
+        let n = GLOBAL_LOOKUP_LIMIT + 10;
+        for i in 0..n {
+            let ip: IpAddr = format!("100.64.{}.{}", 1 + i / 200, 1 + i % 200)
+                .parse()
+                .unwrap();
+            assert_eq!(t.authorize(ip), None);
+        }
+        // Each unknown address failed its lookup, but only the budgeted
+        // number ever spawned the CLI.
+        assert_eq!(r.whois_calls() as u32, GLOBAL_LOOKUP_LIMIT);
+        // A new window allows lookups again.
+        *offset.lock().unwrap() = RATE_WINDOW + Duration::from_secs(1);
+        let ip: IpAddr = "100.64.9.9".parse().unwrap();
+        assert_eq!(t.authorize(ip), None);
+        assert_eq!(r.whois_calls() as u32, GLOBAL_LOOKUP_LIMIT + 1);
     }
 
     #[test]
