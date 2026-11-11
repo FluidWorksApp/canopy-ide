@@ -20,8 +20,14 @@ are the parent, and tmux would re-emulate the byte stream.
 - Off by default behind `CANOPY_PTY_HOST=1`. No UI change in this PR.
   With it on, Quit leaves adoptable terminals running in the host (micro-tasks
   and run-bound tabs are still stopped) and the next launch adopts them.
-  "Quit and Stop All…" (decided from a mock: ⌥⌘Q, Ctrl+Shift+Q elsewhere, asks
-  "Stop N running agents?" only when agents run) is a stacked follow-up PR.
+  "Quit and Stop All…" (stacked PR #794; app menu under Quit, ⌥⌘Q on macOS,
+  Ctrl+Shift+Q elsewhere) stops everything. On every platform, host on or off,
+  it asks "Stop N running agents?" whenever agents run (Cancel, Quit only, Stop
+  all; no Quit only with the host off, where Quit stops everything anyway). Stop
+  all first asks the host to stop every Canopy session no live app is attached
+  to, plus this launch's strays, and a failure there is shown in the dialog
+  and nothing quits; then exit stops this app's terminals, hosted ones
+  included, and the host idles out.
 - Hosted sessions are monitor-only for containment.
 - New crate `crates/canopy-pty-host`: protocol, server, client, tests. Nothing in
   `pty.rs` changes until CI is green on the crate.
@@ -169,7 +175,7 @@ as a second agent on the same conversation. Ids are seeded past the adopted max.
   attached after the `list` is refused rather than silently disconnected.
 
 **Not in this PR (stacked follow-ups):** context-bridge continuity, Quit and Stop
-All, packaging the host so an update does not delete it, Windows.
+All (#794), packaging the host so an update does not delete it, Windows.
 
 ## Remote runner (follow-up, investigated)
 

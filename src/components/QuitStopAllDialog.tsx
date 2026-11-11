@@ -1,33 +1,61 @@
-// "Quit and Stop All…" asking first, because agents are running. The decision
-// to ask, and the counts, live in quitStopAll.ts.
+// "Quit and Stop All…" asking first, because agents are running (or to report
+// that stopping failed). The decision to ask, and the counts, live in
+// quitStopAll.ts.
 
-import { stopAllMeta, stopAllTitle, type TerminalCounts } from "../quitStopAll";
+import { useState } from "react";
+import { errorText, stopAllMeta, stopAllTitle, type QuitStopAllAsk } from "../quitStopAll";
 import { format } from "../shortcuts";
-import { Dialog } from "./Dialog";
+import { Dialog, type DialogAction } from "./Dialog";
 
 export function QuitStopAllDialog({
-  counts,
+  ask,
   onCancel,
   onQuit,
 }: {
-  counts: TerminalCounts;
+  ask: QuitStopAllAsk;
   onCancel: () => void;
-  /** `true` for Stop all, `false` for Quit only (the normal Quit). */
-  onQuit: (stopAll: boolean) => void;
+  /** `true` for Stop all, `false` for Quit only (the normal Quit). Resolves
+   *  as the app quits; a rejection is shown here and the dialog stays. */
+  onQuit: (stopAll: boolean) => Promise<unknown>;
 }) {
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState(ask.error);
+  const run = (stopAll: boolean) => {
+    if (busy) return;
+    setBusy(true);
+    setError(undefined);
+    onQuit(stopAll).catch((e) => {
+      setError(errorText(e));
+      setBusy(false);
+    });
+  };
+  const actions: DialogAction[] = [
+    // With the host off a plain Quit stops everything too, so there is no
+    // "Quit only" to offer.
+    ...(ask.hostOn ? [{ label: "Quit only", disabled: busy, onClick: () => run(false) }] : []),
+    { label: "Stop all", primary: true, disabled: busy, onClick: () => run(true) },
+  ];
   return (
     <Dialog
       variant="danger"
-      title={stopAllTitle(counts.agents)}
+      title={stopAllTitle(ask.counts.agents)}
       hint={format("quit-stop-all") || undefined}
-      body="Their work stops mid-turn."
-      meta={stopAllMeta(counts)}
+      body={
+        <>
+          {ask.counts.agents > 0 && "Their work stops mid-turn."}
+          {error && (
+            <div role="alert" style={{ color: "var(--danger)" }}>
+              {error}
+            </div>
+          )}
+        </>
+      }
+      meta={stopAllMeta(ask.counts)}
       dismissLabel="Cancel"
-      onDismiss={onCancel}
-      actions={[
-        { label: "Quit only", onClick: () => onQuit(false) },
-        { label: "Stop all", primary: true, onClick: () => onQuit(true) },
-      ]}
+      onDismiss={() => {
+        if (!busy) onCancel();
+      }}
+      actions={actions}
     />
   );
 }

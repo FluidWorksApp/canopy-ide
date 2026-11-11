@@ -170,16 +170,33 @@ pub fn launch_id() -> String {
     launch_token().to_string()
 }
 
-/// Quit the app. `stop_all` is "Quit and Stop All": hosted terminals are
-/// stopped too instead of left running for the next launch. Teardown itself
-/// stays in `RunEvent::Exit`, so both quits share one path.
+/// Whether terminals are hosted, so Quit leaves them running. Windows can have
+/// the switch set but never hosts.
 #[tauri::command]
-pub fn app_quit(app: AppHandle, state: State<'_, PtyManager>, stop_all: bool) {
+pub fn pty_host_enabled() -> bool {
+    cfg!(unix) && crate::pty_hosted::enabled()
+}
+
+/// Quit the app. `stop_all` is "Quit and Stop All": first the host is asked to
+/// stop what this app does not hold (an earlier launch's terminals nobody is
+/// attached to, this launch's strays); a failure there is returned for the
+/// dialog to show, and nothing quits. Then exit stops this app's terminals,
+/// hosted ones included. Teardown itself stays in `RunEvent::Exit`, so both
+/// quits share one path. Async: the host calls must not block the main thread.
+#[tauri::command(async)]
+pub fn app_quit(app: AppHandle, stop_all: bool) -> Result<(), String> {
     if stop_all {
-        state.stop_all_on_quit();
+        let pty = app.state::<PtyManager>();
+        pty.stop_left_running(STOP_ALL_HOST_WAIT)?;
+        pty.stop_all_on_quit();
     }
     app.exit(0);
+    Ok(())
 }
+
+/// How long "Quit and Stop All" waits for the host to list its sessions: the
+/// user asked, so longer than the launch path's one second.
+const STOP_ALL_HOST_WAIT: Duration = Duration::from_secs(5);
 
 /// What `PtyManager::start_session` needs once a child and its master exist.
 struct SessionParts {
@@ -1006,16 +1023,28 @@ impl PtyManager {
         }
     }
 
-    /// Stop every session, hosted ones included, then ask the host to stop any
-    /// session of this launch it still runs that is not in the map (one
-    /// adoption did not reach). The host then idles out on its own.
+    /// Stop every session, hosted ones included, then, best effort, ask the
+    /// host once more to stop anything left (`stop_left_running`). The host
+    /// then idles out on its own.
     pub fn kill_all_including_hosted(&self) -> KillAllReport {
         let report = self.stop_sessions(true);
+        let _ = self.stop_left_running(Duration::from_secs(1));
+        report
+    }
+
+    /// Ask the host to stop the Canopy sessions this app does not hold: any no
+    /// live app is attached to, and this launch's own that are not in the map.
+    /// The map's terminals are left to app exit. No host means nothing to stop;
+    /// any other failure is logged and returned.
+    pub fn stop_left_running(&self, wait: Duration) -> Result<usize, String> {
         #[cfg(unix)]
         if crate::pty_hosted::enabled() {
-            crate::pty_hosted::stop_instance(instance_token());
+            let held: Vec<u32> = self.sessions.lock().unwrap().keys().copied().collect();
+            return crate::pty_hosted::stop_left_running(instance_token(), &held, wait)
+                .inspect_err(|error| eprintln!("canopy: Quit and Stop All: {error}"));
         }
-        report
+        let _ = wait;
+        Ok(0)
     }
 
     fn stop_sessions(&self, include_hosted: bool) -> KillAllReport {
