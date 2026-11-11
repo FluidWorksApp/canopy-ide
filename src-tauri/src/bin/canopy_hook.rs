@@ -852,6 +852,16 @@ fn real_main() -> Result<(), Box<dyn std::error::Error>> {
                     (Some(p), Some(r)) => Some(format!("{r}\n{p}")),
                     (p, r) => p.or(r),
                 };
+                // Every message: the agent, not a filter here, judges what is a
+                // request, and keeps the card's task list current.
+                let context = if hook_event == "UserPromptSubmit" && agent_override.is_none() {
+                    Some(match context {
+                        Some(c) => format!("{c}\n{TASK_LIST_REMINDER}"),
+                        None => TASK_LIST_REMINDER.to_string(),
+                    })
+                } else {
+                    context
+                };
                 if let Some(context) = context {
                     let out = serde_json::json!({
                         "hookSpecificOutput": {
@@ -1609,27 +1619,6 @@ fn update_digest(
     } else if hook_event == "SubagentStop" {
         let n = digest["subagents"].as_u64().unwrap_or(0) + 1;
         digest["subagents"] = serde_json::json!(n);
-    }
-
-    // What the person just asked becomes a pending task, so the card lists their
-    // requests even when the agent keeps no list of its own. The agent's next
-    // TodoWrite / canopy_tasks replaces the list, folding this in.
-    if hook_event == "UserPromptSubmit" {
-        if let Some(text) = event["prompt"].as_str().and_then(task_from_prompt) {
-            let mut list = digest["tasks"].as_array().cloned().unwrap_or_default();
-            if !list.iter().any(|t| t["text"] == text.as_str()) {
-                list.push(serde_json::json!({ "text": text, "status": "pending" }));
-                while list.len() > 30 {
-                    let at = list
-                        .iter()
-                        .position(|t| t["status"] == "completed")
-                        .unwrap_or(0);
-                    list.remove(at);
-                }
-                digest["tasks"] = serde_json::Value::Array(list);
-                digest["tasks_updated"] = serde_json::json!(now);
-            }
-        }
     }
 
     // The agent's own task list. Claude's TodoWrite sends the whole list on
@@ -2467,29 +2456,9 @@ fn plan_as_todos(input: &serde_json::Value) -> serde_json::Value {
     serde_json::json!({ "todos": todos })
 }
 
-/// A short task line from a prompt: its first line, without image markers,
-/// cut to 80 characters. Hook feedback, command output and one-word replies
-/// ("ok", "fixed it?") are not requests, so they give nothing.
-fn task_from_prompt(prompt: &str) -> Option<String> {
-    let line = prompt.lines().map(str::trim).find(|l| !l.is_empty())?;
-    let mut line = line;
-    while let Some(rest) = line.strip_prefix("[Image #") {
-        line = rest.split_once(']').map_or("", |(_, r)| r.trim_start());
-    }
-    let lower = line.to_lowercase();
-    if line.chars().count() < 15
-        || line.starts_with('<')
-        || lower.starts_with("stop hook feedback")
-        || lower.starts_with("caveat:")
-    {
-        return None;
-    }
-    let mut out: String = line.chars().take(80).collect();
-    if line.chars().count() > 80 {
-        out.push('…');
-    }
-    Some(out)
-}
+/// Added to every message the person sends, so the task list on the agent card
+/// is kept by the one who understands the message.
+const TASK_LIST_REMINDER: &str = "[canopy: if this message asks for something new, add it to your task list; mark what you finished. Send the WHOLE list with TodoWrite, or canopy_tasks if you have no TodoWrite. The person reads it on the agent card.]";
 
 /// The tools that send a whole task list at once: Claude's TodoWrite, Codex's
 /// `update_plan`, and Canopy's own `canopy_tasks` (same shape as TodoWrite, for
@@ -7386,23 +7355,9 @@ fn urlencode(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     #[test]
-    fn a_prompt_becomes_a_short_task_line() {
-        use super::task_from_prompt as t;
-        assert_eq!(
-            t("Fix the docked card overlapping text\nmore detail").unwrap(),
-            "Fix the docked card overlapping text"
-        );
-        assert_eq!(
-            t("[Image #26] open in a side panel please").unwrap(),
-            "open in a side panel please"
-        );
-        assert!(t("ok").is_none());
-        assert!(t("fixed it?").is_none());
-        assert!(t("<command-name>/clear</command-name>").is_none());
-        assert!(t("Stop hook feedback: keep going").is_none());
-        assert!(t("   \n  ").is_none());
-        let long = "x".repeat(200);
-        assert_eq!(t(&long).unwrap().chars().count(), 81);
+    fn the_task_reminder_asks_for_the_whole_list() {
+        assert!(super::TASK_LIST_REMINDER.contains("WHOLE list"));
+        assert!(super::TASK_LIST_REMINDER.contains("canopy_tasks"));
     }
 
     #[test]
