@@ -41,7 +41,7 @@ are the parent, and tmux would re-emulate the byte stream.
 - `next_id` / `next_session_generation` start at 0 each launch (`pty.rs:407`), so
   they must be seeded past adopted sessions.
 - The Canopy hook already accepts `CANOPY_CTX_SOCKET` as well as `CANOPY_CTX_PORT`
-  (`canopy_hook.rs:3404`). The context bridge port is ephemeral
+  (`src-tauri/src/bin/canopy_hook.rs:3404`). The context bridge port is ephemeral
   (`context.rs:551`). A stable per-profile socket could keep tools alive across an
   app restart. Not yet checked: whether the socket transport speaks the same API.
 - Sidecars ship through `externalBin` in `tauri.conf.json`; CI stubs them with
@@ -101,6 +101,29 @@ stores an opaque metadata blob per session (project, name, execution context).
 The first app hands its instance token to the host; later launches read it back
 before anything calls `instance_token()`, so adopted agents are not also resumed
 as a second agent on the same conversation. Ids are seeded past the adopted max.
+
+**Adoption design notes (from reading the code).**
+- The instance token is not only a staleness marker. A hosted child's env, digests
+  and sidecar actions carry the token it was spawned with, and mesh delivery
+  (`pty.rs` `write`), job updates and sidecar actions (`context.rs`) and digest
+  pairing in the session panel all compare against the current token. A fresh
+  token would silence every adopted agent, so an adopting launch reuses the host's
+  stored token (first launch writes it with `set_state(..., if_unset)`).
+- Reusing it breaks the stale sweep, which matches `appInstance` by inequality
+  (`tasks.rs interrupt_stale`). The sweep and `appInstance` stamps need their own
+  per-launch id, separate from the pairing token.
+- A pty id must never repeat under one token, including ids of dead terminals, so
+  the id high-water mark is kept in the host store, not just seeded past the
+  adopted maximum.
+- Two app instances cannot run at once (`tauri-plugin-single-instance`), so no
+  claim op is needed; a second launch is handed to the first.
+- The terminal view already reattaches to an existing pty id (`Term.tsx`
+  `attachId`, used when the web view reloads). Whether tabs persist across a quit,
+  and so whether adoption fills an existing tab or needs a new surface, is still
+  open.
+- Adopted agents' hooks point at the dead context-bridge port. Until the bridge
+  has a stable socket, adoption only promises terminal-level survival: bytes,
+  input, resize, exit. Agent tools and attention do not come back.
 
 **Not in the first PR:** context-bridge continuity (second commit), quit
 semantics UI, Windows.

@@ -458,8 +458,12 @@ fn handle(host: &Arc<Host>, mut stream: UnixStream) -> std::io::Result<()> {
                 *s.linger.lock().unwrap() = linger_secs.map(Duration::from_secs);
                 // Restart the clock from now so lifting then re-imposing a
                 // limit does not kill a session that has been unattended a while.
-                if s.detached_at.lock().unwrap().is_some() {
-                    *s.detached_at.lock().unwrap() = Some(Instant::now());
+                // Under the ring lock, like attach, so the check and the stamp
+                // cannot straddle an attach that clears `detached_at`.
+                let _ring = s.ring.lock().unwrap();
+                let mut detached = s.detached_at.lock().unwrap();
+                if detached.is_some() {
+                    *detached = Some(Instant::now());
                 }
                 Ok(Response::ok())
             });

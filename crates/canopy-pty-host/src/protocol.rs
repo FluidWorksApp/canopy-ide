@@ -6,7 +6,9 @@
 use serde::{Deserialize, Serialize};
 
 /// Bumped when the wire format changes in a way an old peer would misread.
-pub const PROTOCOL_VERSION: u32 = 1;
+/// 2: `set_linger`, `set_state` and `get_state` ops (a version 1 host rejects
+/// them as unknown, so a client that needs them checks `hello` first).
+pub const PROTOCOL_VERSION: u32 = 2;
 /// The oldest client this host will serve, and the oldest host a client will
 /// use. Raised only when compatibility is deliberately dropped.
 pub const MIN_CLIENT_VERSION: u32 = 1;
