@@ -1,14 +1,14 @@
-:root {
-  /* No dialog is taller than this share of the window. */
-  --dialog-max-h: 70dvh;
-}
-
 @import "../shared/tokens.css";
 @import "../shared/chrome.css";
 @import "../shared/fileTree.css";
 /* One token block per skin. See src/skins/skins.css — and src/skins/types.ts
    for why a skin is a directory entry rather than an edit in five files. */
 @import "./skins/skins.css";
+
+:root {
+  /* No dialog is taller than this share of the window. */
+  --dialog-max-h: 70dvh;
+}
 
 /* ---------- theme ----------
    Every color in this file (with a handful of deliberate exceptions — a docx
