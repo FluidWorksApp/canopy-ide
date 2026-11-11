@@ -132,9 +132,9 @@ import { setBrainProjectResolver } from "./brainMeter";
 import { startLensApprovals } from "./lensApprovals";
 import { startLensClaimSync } from "./lensClaimSync";
 import { teamIdentity } from "./teamIdentity";
-import { RELAY_JOIN_EVENT, RELAY_ACCEPT_EVENT, type RelayJoinDetail, type RelayAcceptDetail } from "./relayJoin";
+import { RELAY_JOIN_EVENT, RELAY_ACCEPT_EVENT, RELAY_STOP_EVENT, type RelayJoinDetail, type RelayAcceptDetail } from "./relayJoin";
 import { ensureInternetLink } from "./internetLink";
-import { accountTeam, post as postTeamCard } from "./components/RelayConnect";
+import { accountTeam, post as postTeamCard, setActiveOffer, stopSharing } from "./components/RelayConnect";
 import {
   dismissTerminalMemoryPromptsForWindow,
   subscribeTerminalMemoryPromptVisibility,
@@ -206,7 +206,7 @@ import { BrainConnectHost } from "./components/BrainConnect";
 import { openBrainConnect } from "./brainConnect";
 import { Welcome } from "./components/Welcome";
 import { Dialog } from "./components/Dialog";
-import { DeskOverlay } from "./components/RemoteDesktopView";
+import { DeskOverlay, SharingBanner } from "./components/RemoteDesktopView";
 import { createDeskHydrationGate, createFrameBus, deskReducer, type DeskMode } from "./desk";
 import { TerminalGovernorCard } from "./components/TerminalGovernorDialog";
 import {
@@ -3483,7 +3483,8 @@ export default function App() {
           setRelayStatus(st);
           const target = await accountTeam();
           if (!target || !st.code) throw new Error("Not signed in to a team.");
-          await postTeamCard(target.team, target.self, { type: "relay-offer", v: 1, addr: origin, code: st.code }, to);
+          const offerId = await postTeamCard(target.team, target.self, { type: "relay-offer", v: 1, addr: origin, code: st.code }, to);
+          setActiveOffer({ team: target.team, self: target.self, id: offerId });
           notify(`Sharing your desktop with ${from}.`, "success");
         } catch (err) {
           onFail?.();
@@ -3557,6 +3558,15 @@ export default function App() {
       unread,
     ],
   );
+
+  // "Stop sharing" on the request card in team chat.
+  useEffect(() => {
+    const onStop = () => {
+      void stopSharing(relay).catch((err) => notify(`Could not stop sharing: ${String(err)}`, "error"));
+    };
+    window.addEventListener(RELAY_STOP_EVENT, onStop);
+    return () => window.removeEventListener(RELAY_STOP_EVENT, onStop);
+  }, [relay, notify]);
 
   const openProjects = useMemo(
     () =>
@@ -4238,6 +4248,7 @@ export default function App() {
         relay={relay}
         onDismiss={() => dispatchDesk({ type: "dismiss" })}
       />
+      <SharingBanner relay={relay} onStop={() => void stopSharing(relay).catch(() => {})} />
       {/* Transient zoom level, shown ~1s after Cmd +/-/0. */}
       {zoomPct !== null && <div className="zoom-indicator">{zoomPct}%</div>}
       {cloudWorkspace && <WorkspaceHooksNotice />}
