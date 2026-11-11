@@ -14,6 +14,8 @@ rust-version = "1.91"
 [features]
 default = ["iroh"]
 iroh = ["dep:iroh", "dep:tokio"]
+# A public scripted CliRunner and anonymised fixtures for dependents' tests.
+test-support = []
 
 [dependencies]
 # tls-ring is required: with no crypto provider an endpoint cannot be built.

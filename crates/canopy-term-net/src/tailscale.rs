@@ -105,34 +105,12 @@ impl Os {
     }
 }
 
-/// Whether `dir` is an absolute path for `os`, decided from the string so the
-/// rule is the same whichever OS runs the test.
-pub fn is_absolute_for(os: Os, dir: &str) -> bool {
+/// Pure: the install locations, in order. Only these fixed paths are ever
+/// used. `PATH` is deliberately not consulted: this binary decides who is
+/// authorised, so it must come from a place an installer puts it, never from
+/// whatever the environment points at.
+pub fn cli_candidates(os: Os) -> Vec<PathBuf> {
     match os {
-        Os::Windows => {
-            let b = dir.as_bytes();
-            dir.starts_with(r"\\")
-                || (b.len() >= 3
-                    && b[0].is_ascii_alphabetic()
-                    && b[1] == b':'
-                    && (b[2] == b'\\' || b[2] == b'/'))
-        }
-        _ => dir.starts_with('/'),
-    }
-}
-
-/// Pure: the places to look, in order. Fixed install paths come first on every
-/// OS; `PATH` is consulted only after them and only for ABSOLUTE entries, so a
-/// relative entry (`.`, `node_modules/.bin`, an empty entry) can never supply
-/// the binary that decides who is authorised.
-pub fn cli_candidates(os: Os, path_env: Option<&str>) -> Vec<PathBuf> {
-    let exe = if os == Os::Windows {
-        "tailscale.exe"
-    } else {
-        "tailscale"
-    };
-    let sep = if os == Os::Windows { ';' } else { ':' };
-    let mut candidates: Vec<PathBuf> = match os {
         Os::Mac => vec![
             PathBuf::from("/Applications/Tailscale.app/Contents/MacOS/Tailscale"),
             PathBuf::from("/opt/homebrew/bin/tailscale"),
@@ -146,64 +124,96 @@ pub fn cli_candidates(os: Os, path_env: Option<&str>) -> Vec<PathBuf> {
             PathBuf::from(r"C:\Program Files\Tailscale\tailscale.exe"),
             PathBuf::from(r"C:\Program Files (x86)\Tailscale\tailscale.exe"),
         ],
-    };
-    for d in path_env.unwrap_or("").split(sep) {
-        let d = d.trim();
-        if !is_absolute_for(os, d) {
-            continue;
-        }
-        let p = if os == Os::Windows {
-            PathBuf::from(format!("{}\\{exe}", d.trim_end_matches('\\')))
-        } else {
-            PathBuf::from(format!("{}/{exe}", d.trim_end_matches('/')))
-        };
-        if !candidates.contains(&p) {
-            candidates.push(p);
-        }
     }
-    candidates
 }
 
 /// Pure: the first candidate the predicate accepts.
-pub fn locate_cli(
-    os: Os,
-    path_env: Option<&str>,
-    accept: &dyn Fn(&Path) -> bool,
-) -> Option<PathBuf> {
-    cli_candidates(os, path_env).into_iter().find(|c| accept(c))
+pub fn locate_cli(os: Os, accept: &dyn Fn(&Path) -> bool) -> Option<PathBuf> {
+    cli_candidates(os).into_iter().find(|c| accept(c))
 }
 
-/// Pure trust rule for the resolved binary on unix: owned by root and not
-/// writable by group or others. A binary anyone else could replace must not
-/// decide who is authorised.
-pub fn trusted_owner_mode(uid: u32, mode: u32) -> bool {
-    uid == 0 && mode & 0o022 == 0
+/// Pure trust rule for the resolved binary on unix: owned by root or by the
+/// current user, and not writable by group or others. Root covers the pkg,
+/// App Store and distribution packages; the current user covers a drag-installed
+/// app or a Homebrew prefix. Anyone else able to replace the file (another
+/// user, a group, or the world) must not decide who is authorised. A binary the
+/// current user owns is no stronger than that user's own account, which is the
+/// same trust boundary as the local socket transport.
+pub fn trusted_owner_mode(uid: u32, mode: u32, our_uid: u32) -> bool {
+    (uid == 0 || uid == our_uid) && mode & 0o022 == 0
 }
 
-/// Resolve a candidate to the absolute path of the real file and check it.
+/// Why no CLI could be used.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InstallProblem {
+    /// Nothing at any known install path.
+    NotInstalled,
+    /// Something is there but is not trusted (wrong owner or writable by
+    /// others), so it is never run.
+    Untrusted,
+}
+
+/// The resolved binary and the (device, inode) it had when it was checked.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Located {
+    path: PathBuf,
+    id: (u64, u64),
+}
+
+/// Check one resolved file now. `symlink_metadata`, so a symlink swapped in
+/// since the last check is not followed and is refused.
 #[cfg(unix)]
-fn trusted_file(p: &Path) -> Option<PathBuf> {
+fn check_file(real: &Path) -> Option<(u64, u64)> {
     use std::os::unix::fs::MetadataExt;
-    let real = std::fs::canonicalize(p).ok()?;
-    let m = std::fs::metadata(&real).ok()?;
-    (m.is_file() && trusted_owner_mode(m.uid(), m.mode())).then_some(real)
+    let m = std::fs::symlink_metadata(real).ok()?;
+    (m.is_file() && trusted_owner_mode(m.uid(), m.mode(), crate::local_unix::current_uid()))
+        .then(|| (m.dev(), m.ino()))
 }
 
 /// Windows: no ownership check (documented); the fixed Program Files paths
-/// come first and are admin-writable only.
+/// are admin-writable only.
 #[cfg(not(unix))]
-fn trusted_file(p: &Path) -> Option<PathBuf> {
-    p.is_file().then(|| p.to_path_buf())
+fn check_file(real: &Path) -> Option<(u64, u64)> {
+    std::fs::symlink_metadata(real)
+        .ok()
+        .filter(|m| m.is_file())
+        .map(|_| (0, 0))
+}
+
+/// Resolve a candidate to the real file (unix), or `None` if absent.
+#[cfg(unix)]
+fn resolve_candidate(c: &Path) -> Option<PathBuf> {
+    std::fs::canonicalize(c).ok()
+}
+
+#[cfg(not(unix))]
+fn resolve_candidate(c: &Path) -> Option<PathBuf> {
+    std::fs::symlink_metadata(c).ok().map(|_| c.to_path_buf())
+}
+
+fn locate(os: Os) -> Result<Located, InstallProblem> {
+    let mut present = false;
+    for c in cli_candidates(os) {
+        let Some(real) = resolve_candidate(&c) else {
+            continue;
+        };
+        present = true;
+        if let Some(id) = check_file(&real) {
+            return Ok(Located { path: real, id });
+        }
+    }
+    Err(if present {
+        InstallProblem::Untrusted
+    } else {
+        InstallProblem::NotInstalled
+    })
 }
 
 /// The CLI on this machine as one absolute, resolved path (so nothing
 /// re-resolves it through `PATH` at spawn), or `None` when there is no
 /// trusted install.
 pub fn find_cli() -> Option<PathBuf> {
-    let path = std::env::var("PATH").ok();
-    cli_candidates(Os::current(), path.as_deref())
-        .iter()
-        .find_map(|c| trusted_file(c))
+    locate(Os::current()).ok().map(|l| l.path)
 }
 
 // ---- the real runner ----
@@ -220,27 +230,73 @@ pub const WHOIS_TIMEOUT: Duration = Duration::from_secs(2);
 /// open cannot hang the caller.
 pub struct ProcessRunner {
     cli: PathBuf,
+    /// The (device, inode) the binary had when it was trusted. Checked again
+    /// just before every spawn. `None` only for the test constructor.
+    expect: Option<(u64, u64)>,
     timeout: Duration,
 }
 
 impl ProcessRunner {
-    /// Private: `installed()` is the only public way in, so the location and
-    /// ownership checks cannot be skipped.
+    /// Test only: no re-check before spawn. `locate()` / `installed()` are the
+    /// only public ways in, so the location and ownership checks cannot be
+    /// skipped.
+    #[cfg(test)]
     fn new(cli: PathBuf, timeout: Duration) -> Self {
-        Self { cli, timeout }
+        Self {
+            cli,
+            expect: None,
+            timeout,
+        }
+    }
+
+    fn from_located(l: Located, timeout: Duration) -> Self {
+        Self {
+            cli: l.path,
+            expect: Some(l.id),
+            timeout,
+        }
+    }
+
+    /// A runner for the installed, trusted CLI, or the reason there is none
+    /// (so a UI can say "untrusted install" instead of "not installed").
+    pub fn locate() -> Result<Self, InstallProblem> {
+        locate(Os::current()).map(|l| Self::from_located(l, DEFAULT_TIMEOUT))
     }
 
     /// A runner for the installed, trusted CLI, or `None`.
     pub fn installed() -> Option<Self> {
-        find_cli().map(|p| Self::new(p, DEFAULT_TIMEOUT))
+        Self::locate().ok()
     }
 
     fn run_argv(&self, argv: &[String], timeout: Duration) -> Result<CliOutput, CliError> {
+        // Re-check the file right before the spawn: a binary replaced since it
+        // was trusted is not run. A swap in the instant between this check and
+        // the spawn is not closed (there is no portable fexecve); the file
+        // must be unwritable to everyone else, which is what the trust rule
+        // already requires.
+        if let Some(id) = self.expect {
+            if check_file(&self.cli) != Some(id) {
+                return Err(CliError::Io(std::io::ErrorKind::PermissionDenied));
+            }
+        }
         let mut cmd = Command::new(&self.cli);
         cmd.args(argv)
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
+        // The child starts from an empty environment: nothing inherited
+        // (`TS_SOCKET`, `LD_PRELOAD`, `DYLD_*`, proxy variables, `PATH`) can
+        // redirect it or load code into it. Only a fixed PATH on unix and the
+        // system root on Windows (Winsock needs it) are set.
+        cmd.env_clear();
+        #[cfg(unix)]
+        cmd.env("PATH", "/usr/bin:/bin:/usr/sbin:/sbin");
+        #[cfg(windows)]
+        for k in ["SystemRoot", "windir"] {
+            if let Some(v) = std::env::var_os(k) {
+                cmd.env(k, v);
+            }
+        }
         #[cfg(windows)]
         {
             use std::os::windows::process::CommandExt;
@@ -256,7 +312,7 @@ impl ProcessRunner {
         })?;
         let out = child.stdout.take();
         let err = child.stderr.take();
-        let (out_tx, out_rx) = mpsc::channel();
+        let (out_tx, out_rx) = mpsc::sync_channel(1);
         std::thread::spawn(move || {
             let _ = out_tx.send(drain(out, MAX_OUTPUT));
         });
@@ -390,15 +446,25 @@ pub struct NodeInfo {
     pub addrs: Vec<IpAddr>,
     pub online: bool,
     pub stable_id: Option<String>,
+    /// The machine's own host name (`HostName`), for display. Capped, with
+    /// control characters removed.
+    pub host_name: Option<String>,
+    /// The owning user id (`UserID`); absent for a tagged node.
+    pub user_id: Option<i64>,
+    /// ACL tags (`Tags`), sorted and unique; invalid entries are dropped.
+    pub tags: Vec<String>,
 }
 
 impl std::fmt::Debug for NodeInfo {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("NodeInfo")
             .field("dns_name", &"<redacted>")
+            .field("host_name", &"<redacted>")
             .field("addrs", &self.addrs)
             .field("online", &self.online)
             .field("stable_id", &self.stable_id)
+            .field("user_id", &self.user_id)
+            .field("tags", &self.tags)
             .finish()
     }
 }
@@ -452,11 +518,36 @@ fn parse_node(v: &Json, dns_field: &'static str) -> Result<NodeInfo, StatusError
         .and_then(Json::as_str)
         .filter(|s| valid_stable_id(s))
         .map(str::to_string);
+    let host_name = v
+        .get("HostName")
+        .and_then(Json::as_str)
+        .map(|h| {
+            h.chars()
+                .filter(|c| !c.is_control())
+                .take(63)
+                .collect::<String>()
+        })
+        .filter(|h| !h.is_empty());
+    let user_id = v.get("UserID").and_then(Json::as_i64).filter(|id| *id > 0);
+    let mut tags: Vec<String> = match v.get("Tags") {
+        Some(Json::Arr(items)) => items
+            .iter()
+            .filter_map(Json::as_str)
+            .filter(|t| valid_tag(t))
+            .map(str::to_string)
+            .collect(),
+        _ => Vec::new(),
+    };
+    tags.sort_unstable();
+    tags.dedup();
     Ok(NodeInfo {
         dns_name: dns.trim_end_matches('.').to_ascii_lowercase(),
         addrs: addr_list(v.get("TailscaleIPs"), "TailscaleIPs")?,
         online: v.get("Online").and_then(Json::as_bool).unwrap_or(false),
         stable_id,
+        host_name,
+        user_id,
+        tags,
     })
 }
 
@@ -518,6 +609,9 @@ pub enum TailnetState {
 pub struct Probe {
     pub state: TailnetState,
     pub status: Option<TailnetStatus>,
+    /// The CLI version, when it could be read (so a caller need not run
+    /// `version` a second time).
+    pub version: Option<(u32, u32, u32)>,
 }
 
 /// Only exactly `Running` is running; anything unrecognised is `Unknown`.
@@ -534,10 +628,11 @@ pub fn classify(b: &BackendState) -> TailnetState {
     }
 }
 
-fn probe_of(state: TailnetState) -> Probe {
+fn probe_of(state: TailnetState, version: Option<(u32, u32, u32)>) -> Probe {
     Probe {
         state,
         status: None,
+        version,
     }
 }
 
@@ -587,6 +682,15 @@ impl std::fmt::Debug for TailnetIdentity {
 }
 
 impl TailnetIdentity {
+    /// The stable node id this identity is keyed on.
+    pub fn stable_id(&self) -> &str {
+        match self {
+            TailnetIdentity::User { stable_id, .. } | TailnetIdentity::Tagged { stable_id, .. } => {
+                stable_id
+            }
+        }
+    }
+
     /// The allowlist entry for this identity; always a valid
     /// [`canonical_tailnet_entry`].
     pub fn allowlist_entry(&self) -> String {
@@ -754,21 +858,30 @@ impl Tailscale {
     /// Classify the local Tailscale. Output is judged by its content whatever
     /// the exit code; only when it does not parse is the daemon unreachable.
     pub fn probe(&self) -> Probe {
-        if let Err(state) = self.check_version() {
-            return probe_of(state);
-        }
+        let version = match self.version() {
+            Ok(v) => v,
+            Err(state) => {
+                let seen = match &state {
+                    TailnetState::TooOld(t) => parse_version(t),
+                    _ => None,
+                };
+                return probe_of(state, seen);
+            }
+        };
+        let v = Some(version);
         let out = match self.runner.run(&CliCommand::StatusJson) {
             Ok(o) => o,
-            Err(CliError::NotInstalled) => return probe_of(TailnetState::NotInstalled),
-            Err(_) => return probe_of(TailnetState::DaemonUnreachable),
+            Err(CliError::NotInstalled) => return probe_of(TailnetState::NotInstalled, v),
+            Err(_) => return probe_of(TailnetState::DaemonUnreachable, v),
         };
         let status = match parse_status(&out.stdout) {
             Ok(s) => s,
-            Err(_) => return probe_of(TailnetState::DaemonUnreachable),
+            Err(_) => return probe_of(TailnetState::DaemonUnreachable, v),
         };
         Probe {
             state: classify(&status.backend_state),
             status: Some(status),
+            version: v,
         }
     }
 
@@ -790,6 +903,13 @@ impl Tailscale {
 
     /// The CLI version verdict alone: `Ok` if it is at least [`MIN_VERSION`].
     pub fn check_version(&self) -> Result<(), TailnetState> {
+        self.version().map(|_| ())
+    }
+
+    /// The CLI version, if it is at least [`MIN_VERSION`], else the state to
+    /// show. A too-old version is reported as text that [`parse_version`]
+    /// reads back.
+    pub fn version(&self) -> Result<(u32, u32, u32), TailnetState> {
         let out = match self.runner.run(&CliCommand::Version) {
             Ok(o) => o,
             Err(CliError::NotInstalled) => return Err(TailnetState::NotInstalled),
@@ -800,7 +920,7 @@ impl Tailscale {
             Some(v) if v < MIN_VERSION => {
                 Err(TailnetState::TooOld(format!("{}.{}.{}", v.0, v.1, v.2)))
             }
-            Some(_) => Ok(()),
+            Some(v) => Ok(v),
         }
     }
 
@@ -822,9 +942,11 @@ impl Tailscale {
     }
 }
 
-/// Test support: a scripted CLI with invented, anonymised fixtures.
-#[cfg(test)]
-pub(crate) mod fake {
+/// Test support: a scripted CLI with invented, anonymised fixtures. Compiled
+/// for this crate's tests and, for dependents' tests, behind the
+/// `test-support` feature (never enable it in a release build).
+#[cfg(any(test, feature = "test-support"))]
+pub mod fake {
     use super::*;
     use std::collections::HashMap;
     use std::sync::Mutex;
@@ -972,77 +1094,120 @@ mod tests {
     }
 
     #[test]
-    fn fixed_install_paths_come_before_path_on_every_os() {
+    fn only_fixed_install_paths_are_candidates_and_path_is_ignored() {
         let mac = "/Applications/Tailscale.app/Contents/MacOS/Tailscale";
-        let c = cli_candidates(Os::Mac, Some("/opt/x"));
+        let c = cli_candidates(Os::Mac);
         assert_eq!(c[0], PathBuf::from(mac));
         assert_eq!(c[1], PathBuf::from("/opt/homebrew/bin/tailscale"));
         assert_eq!(c[2], PathBuf::from("/usr/local/bin/tailscale"));
-        assert_eq!(c.last().unwrap(), &PathBuf::from("/opt/x/tailscale"));
-        let c = cli_candidates(Os::Linux, Some("/opt/x"));
+        assert_eq!(c.len(), 3);
+        let c = cli_candidates(Os::Linux);
         assert_eq!(c[0], PathBuf::from("/usr/bin/tailscale"));
-        assert_eq!(c[1], PathBuf::from("/usr/local/bin/tailscale"));
-        assert_eq!(c[2], PathBuf::from("/opt/x/tailscale"));
-        let c = cli_candidates(Os::Windows, Some(r"C:\y\"));
+        assert_eq!(c.len(), 2);
+        let c = cli_candidates(Os::Windows);
         assert_eq!(
             c[0],
             PathBuf::from(r"C:\Program Files\Tailscale\tailscale.exe")
         );
-        assert_eq!(c.last().unwrap(), &PathBuf::from(r"C:\y\tailscale.exe"));
-        // Everything in both installed: the fixed path wins, not PATH.
-        assert_eq!(
-            locate_cli(Os::Linux, Some("/opt/x"), &|_| true),
-            Some(PathBuf::from("/usr/bin/tailscale"))
-        );
-        assert_eq!(locate_cli(Os::Linux, None, &|_| false), None);
-    }
-
-    #[test]
-    fn relative_and_empty_path_entries_are_ignored() {
-        let unix_path = ".:node_modules/.bin::bin:./x:/abs";
-        for os in [Os::Mac, Os::Linux] {
-            let c = cli_candidates(os, Some(unix_path));
-            for p in &c {
-                assert!(p.to_string_lossy().starts_with('/'), "{p:?}");
-            }
-            assert!(c.contains(&PathBuf::from("/abs/tailscale")));
-            // A planted relative binary is never picked even if it "exists".
-            let pick = locate_cli(os, Some(unix_path), &|p: &Path| {
-                !p.to_string_lossy().starts_with('/') || p == Path::new("/abs/tailscale")
-            });
-            assert_eq!(pick, Some(PathBuf::from("/abs/tailscale")));
+        assert_eq!(c.len(), 2);
+        for os in [Os::Mac, Os::Linux, Os::Windows] {
+            // Everything "installed": the first fixed path wins.
+            assert_eq!(
+                locate_cli(os, &|_| true),
+                Some(cli_candidates(os)[0].clone())
+            );
+            assert_eq!(locate_cli(os, &|_| false), None);
         }
-        let c = cli_candidates(
-            Os::Windows,
-            Some(r".;node_modules\.bin;;bin;D:\t;\\srv\share"),
-        );
-        assert!(c.contains(&PathBuf::from(r"D:\t\tailscale.exe")));
-        assert!(c.contains(&PathBuf::from(r"\\srv\share\tailscale.exe")));
-        assert_eq!(c.len(), 4);
     }
 
     #[test]
-    fn absoluteness_is_decided_per_target_os() {
-        assert!(is_absolute_for(Os::Linux, "/usr/bin"));
-        assert!(!is_absolute_for(Os::Linux, "usr/bin"));
-        assert!(!is_absolute_for(Os::Mac, "."));
-        assert!(!is_absolute_for(Os::Mac, ""));
-        assert!(is_absolute_for(Os::Windows, r"C:\x"));
-        assert!(is_absolute_for(Os::Windows, "C:/x"));
-        assert!(is_absolute_for(Os::Windows, r"\\srv\share"));
-        assert!(!is_absolute_for(Os::Windows, r"C:x"));
-        assert!(!is_absolute_for(Os::Windows, r"\x"));
-        assert!(!is_absolute_for(Os::Windows, "/usr/bin"));
+    fn root_or_the_current_user_may_own_the_binary_but_nobody_else() {
+        assert!(trusted_owner_mode(0, 0o100755, 501));
+        assert!(trusted_owner_mode(0, 0o100555, 501));
+        assert!(trusted_owner_mode(501, 0o100755, 501));
+        assert!(trusted_owner_mode(501, 0o100700, 501));
+        // Another user's file is never trusted.
+        assert!(!trusted_owner_mode(502, 0o100755, 501));
+        // Group or world writable is never trusted, whoever owns it.
+        assert!(!trusted_owner_mode(0, 0o100775, 501));
+        assert!(!trusted_owner_mode(0, 0o100757, 501));
+        assert!(!trusted_owner_mode(0, 0o100777, 501));
+        assert!(!trusted_owner_mode(501, 0o100775, 501));
+        assert!(!trusted_owner_mode(501, 0o100757, 501));
+        // Root as the current user is still root-or-self.
+        assert!(trusted_owner_mode(0, 0o100755, 0));
+        assert!(!trusted_owner_mode(501, 0o100755, 0));
     }
 
+    #[cfg(unix)]
+    fn script(dir: &Path, name: &str, body: &str, mode: u32) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        let p = dir.join(name);
+        std::fs::write(&p, body).unwrap();
+        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(mode)).unwrap();
+        p
+    }
+
+    #[cfg(unix)]
+    fn scratch_dir(tag: &str) -> PathBuf {
+        let d = std::env::temp_dir().join(format!("ctn-ts-{}-{tag}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    #[cfg(unix)]
     #[test]
-    fn only_a_root_owned_unwritable_binary_is_trusted() {
-        assert!(trusted_owner_mode(0, 0o100755));
-        assert!(trusted_owner_mode(0, 0o100555));
-        assert!(!trusted_owner_mode(501, 0o100755));
-        assert!(!trusted_owner_mode(0, 0o100775));
-        assert!(!trusted_owner_mode(0, 0o100757));
-        assert!(!trusted_owner_mode(0, 0o100777));
+    fn check_file_accepts_own_file_and_refuses_writable_or_symlink() {
+        let d = scratch_dir("check");
+        let good = script(&d, "good", "#!/bin/sh\n", 0o755);
+        assert!(check_file(&good).is_some());
+        let loose = script(&d, "loose", "#!/bin/sh\n", 0o775);
+        assert!(check_file(&loose).is_none());
+        let link = d.join("link");
+        std::os::unix::fs::symlink(&good, &link).unwrap();
+        assert!(check_file(&link).is_none());
+        assert!(check_file(&d.join("missing")).is_none());
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_binary_replaced_after_trust_is_not_spawned() {
+        crate::watchdog(30, || {
+            let d = scratch_dir("restat");
+            let real = script(&d, "ts", "#!/bin/sh\necho one\n", 0o755);
+            let id = check_file(&real).unwrap();
+            let r = ProcessRunner::from_located(
+                Located {
+                    path: real.clone(),
+                    id,
+                },
+                Duration::from_secs(5),
+            );
+            let out = r.run_argv(&[], Duration::from_secs(5)).unwrap();
+            assert_eq!(out.stdout.trim(), "one");
+            // Replace it with a different file (new inode) at the same path.
+            let other = script(&d, "other", "#!/bin/sh\necho two\n", 0o755);
+            std::fs::rename(&other, &real).unwrap();
+            assert_eq!(
+                r.run_argv(&[], Duration::from_secs(5)),
+                Err(CliError::Io(std::io::ErrorKind::PermissionDenied))
+            );
+            let _ = std::fs::remove_dir_all(&d);
+        });
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_child_gets_an_empty_environment() {
+        crate::watchdog(30, || {
+            std::env::set_var("CTN_TEST_SECRET", "leak");
+            let r = ProcessRunner::new(PathBuf::from("/bin/sh"), Duration::from_secs(5));
+            let argv = vec!["-c".to_string(), "echo \"[$CTN_TEST_SECRET]\"".into()];
+            let out = r.run_argv(&argv, Duration::from_secs(5)).unwrap();
+            assert_eq!(out.stdout.trim(), "[]");
+        });
     }
 
     #[test]
@@ -1469,5 +1634,33 @@ mod tests {
             Duration::from_secs(1),
         );
         assert_eq!(r.run(&CliCommand::Version), Err(CliError::NotInstalled));
+    }
+
+    #[test]
+    fn status_carries_host_name_user_and_tags() {
+        let text = r#"{"BackendState":"Running","Self":{"ID":"nSELFA1CNTRL","DNSName":"a.example.ts.net.","HostName":"Node A","UserID":7,"TailscaleIPs":["100.64.0.1"]},
+            "Peer":{"k":{"ID":"nPEERB1CNTRL","DNSName":"b.example.ts.net.","HostName":"bo\u0007x","Tags":["tag:z","tag:a","tag:a","bad tag"],"TailscaleIPs":["100.64.0.2"]}}}"#;
+        let st = parse_status(text).unwrap();
+        let me = st.self_node.unwrap();
+        assert_eq!(me.host_name.as_deref(), Some("Node A"));
+        assert_eq!(me.user_id, Some(7));
+        assert!(me.tags.is_empty());
+        let peer = &st.peers[0];
+        assert_eq!(peer.host_name.as_deref(), Some("box"));
+        assert_eq!(peer.user_id, None);
+        assert_eq!(peer.tags, vec!["tag:a".to_string(), "tag:z".to_string()]);
+        assert!(!format!("{peer:?}").contains("box"));
+    }
+
+    #[test]
+    fn probe_carries_the_version() {
+        let p = probe_with(
+            Ok(status_running(&["100.64.0.1"], &[])),
+            Ok("1.78.1\n".into()),
+        );
+        assert_eq!(p.version, Some((1, 78, 1)));
+        let old = probe_with(Ok(String::new()), Ok("1.20.0\n".into()));
+        assert_eq!(old.version, Some((1, 20, 0)));
+        assert!(matches!(old.state, TailnetState::TooOld(_)));
     }
 }
