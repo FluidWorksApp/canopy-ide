@@ -4519,7 +4519,8 @@ fn output_schema(name: &str) -> Option<serde_json::Value> {
         "canopy_annotations" => serde_json::json!({ "annotations": { "type": "array" } }),
         "canopy_device_list" => serde_json::json!({
             "devices": { "type": "array" },
-            "emulators": { "type": "array", "items": { "type": "string" } },
+            // Each is { name, ready, problem } (android.rs Avd), not a bare name.
+            "emulators": { "type": "array", "items": { "type": "object" } },
             "missing": { "type": "array", "items": { "type": "string" } }
         }),
         "canopy_device_snapshot" => serde_json::json!({ "layout": { "type": "string" } }),
@@ -7303,6 +7304,18 @@ fn urlencode(s: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    /// android.rs `Avd` serializes to { name, ready, problem }. A schema that said
+    /// each emulator was a string made the host reject the whole listing as soon
+    /// as the machine had one.
+    #[test]
+    fn device_list_schema_accepts_the_emulators_it_returns() {
+        let schema =
+            super::output_schema("canopy_device_list").expect("device list has an output schema");
+        let avd = serde_json::json!({ "name": "Pixel_8", "ready": true, "problem": null });
+        assert!(avd.is_object());
+        assert_eq!(schema["properties"]["emulators"]["items"]["type"], "object");
+    }
+
     #[test]
     fn bash_outputs_are_found_when_they_exist() {
         let dir = std::env::temp_dir().join(format!("hook-bash-{}", std::process::id()));
