@@ -488,7 +488,7 @@ impl<S: FrameSource> App<S> {
                     .and_then(|cb| cb.get_text().ok());
                 if let Some(text) = text {
                     let modes = self.modes();
-                    self.encode_and_write(|out| input::encode_paste(&text, modes, out));
+                    self.encode_and_write(|out| input::encode_paste(&text, modes, out).written);
                 }
             }
             Shortcut::ZoomIn => {
