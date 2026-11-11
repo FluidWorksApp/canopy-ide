@@ -35,7 +35,7 @@ pub use link::{LinkRead, SessionLink};
 pub use memory::{MemoryLink, MemoryPeer};
 pub use session::{
     Session, SessionConfig, Stats, Tick, DEFAULT_MAX_PENDING_WRITE, DEFAULT_SYNC_TIMEOUT,
-    DEFAULT_TICK_BUDGET, MIN_TICK_BUDGET,
+    DEFAULT_TICK_BUDGET, DEFAULT_WRITE_RETRY, MAX_TICK_BUDGET, MIN_TICK_BUDGET,
 };
 pub use source::{FrameSource, Waker};
 

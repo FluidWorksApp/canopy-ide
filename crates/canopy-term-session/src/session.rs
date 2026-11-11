@@ -1,6 +1,7 @@
 //! [`Session`]: a [`Screen`] fed from a [`SessionLink`], publishing
 //! [`Frame`]s and turning input events into bytes for the link.
 
+use std::collections::VecDeque;
 use std::io;
 use std::time::{Duration, Instant};
 
@@ -23,14 +24,24 @@ pub const DEFAULT_TICK_BUDGET: usize = 1 << 20;
 /// Smallest per-tick budget accepted; smaller values are raised to this.
 pub const MIN_TICK_BUDGET: usize = 4096;
 
+/// Largest per-tick budget accepted (the read buffer is allocated at this
+/// size); larger values are lowered to this.
+pub const MAX_TICK_BUDGET: usize = 64 << 20;
+
+/// How long after input the link refused before the session wants another
+/// tick to offer it again ([`Tick::write_pending`], [`Session::deadline`]).
+pub const DEFAULT_WRITE_RETRY: Duration = Duration::from_millis(10);
+
 /// How long synchronized output (mode 2026) may hold a frame back, the same
 /// bound alacritty uses. A program that sets 2026 and never clears it gets its
 /// frames published after this.
 pub const DEFAULT_SYNC_TIMEOUT: Duration = Duration::from_millis(150);
 
 /// Bytes for the program held while the link is not accepting them. Input
-/// past this is refused (the input methods return false); one write larger
-/// than this is still taken when nothing else is waiting.
+/// that would take the queue past this is refused whole (the input methods
+/// return false), so one input larger than this is never accepted; a caller
+/// with more splits it. Terminal replies queued behind a full queue have
+/// their own bound of the same size.
 pub const DEFAULT_MAX_PENDING_WRITE: usize = 1 << 20;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -43,6 +54,8 @@ pub struct SessionConfig {
     pub tick_budget: usize,
     pub sync_timeout: Duration,
     pub max_pending_write: usize,
+    /// How soon to offer refused input to the link again.
+    pub write_retry: Duration,
     /// Start in replay: publish nothing until the link sends
     /// [`LinkRead::ReplayEnd`] or live data. Set this when attaching to a
     /// host that sends history first, so the blank screen is never shown and
@@ -59,6 +72,7 @@ impl Default for SessionConfig {
             tick_budget: DEFAULT_TICK_BUDGET,
             sync_timeout: DEFAULT_SYNC_TIMEOUT,
             max_pending_write: DEFAULT_MAX_PENDING_WRITE,
+            write_retry: DEFAULT_WRITE_RETRY,
             starts_with_replay: false,
         }
     }
@@ -73,7 +87,11 @@ pub struct Tick {
     /// (a link's waker may be edge-triggered and will not fire again for
     /// bytes it already announced).
     pub more: bool,
-    /// Tick again at this time even without a wake (end of a sync hold).
+    /// Input is still waiting for the link to take it: tick again at
+    /// `deadline` (a link has no wake for "writable").
+    pub write_pending: bool,
+    /// Tick again at this time even without a wake (end of a sync hold, or
+    /// the next attempt to write waiting input).
     pub deadline: Option<Instant>,
 }
 
@@ -93,6 +111,9 @@ pub struct Stats {
     pub reply_bytes: u64,
     /// Reply bytes dropped because they were produced during replay.
     pub dropped_reply_bytes: u64,
+    /// Reply bytes dropped because the reply queue behind a stalled link was
+    /// full, or the link could no longer be written to.
+    pub overflowed_reply_bytes: u64,
     /// Writes refused because too much was already waiting.
     pub refused_writes: u64,
 }
@@ -130,16 +151,29 @@ enum SyncState {
 /// * **Backpressure.** Once a frame is published, the session reads nothing
 ///   more until a viewer has taken it (during a sync hold or a replay it keeps
 ///   reading, since those end only on more output). Unread output stays in
-///   the link, whose bounded queue stops the program.
+///   the link, whose bounded queue stops the program. This is one session-wide
+///   count: a frame counts as taken when any viewer takes it, so with several
+///   viewers the fastest sets the pace and a slower one skips frames (its
+///   damage is computed against its own `since`, so it still draws correctly).
 /// * **Synchronized output (2026).** While the program has it set, frames are
 ///   held (the screen still advances) for at most
 ///   [`SessionConfig::sync_timeout`]. Resize and close publish through a hold.
 ///   The session sees the mode at the end of each batch, so a `2026l` followed
-///   by a `2026h` inside one batch reads as one long hold.
+///   by a `2026h` inside one batch is seen: the frame as of the `2026l` is
+///   published and a fresh hold starts, so a program drawing steady
+///   `2026h`..`2026l` frames is never shown half drawn.
 /// * **Replay.** History bytes ([`LinkRead::Replay`] or [`Session::replay`])
 ///   are parsed with every terminal reply they produce dropped, and nothing is
 ///   published until the replay ends. Input sent during a replay is encoded
-///   with the modes replayed so far and written at once.
+///   with the modes replayed so far and written at once. A resize during a
+///   replay applies to the screen at once, so history still to come is parsed
+///   at the new size: size the session (`SessionConfig::cols`/`rows`) before
+///   attaching instead.
+/// * **Closing.** A failed write stops writing but not reading: output the
+///   program produced just before it exited (`cmd; exit`) is still read. The
+///   session ends when the link reports [`LinkRead::Closed`] (or a read
+///   fails, or [`Session::close`] is called); [`FrameSource::closed`] turns
+///   true once the final frame has been taken.
 pub struct Session<L: SessionLink> {
     screen: Screen,
     link: L,
@@ -147,7 +181,23 @@ pub struct Session<L: SessionLink> {
     /// Read buffer, grown once to the tick budget and reused.
     buf: Vec<u8>,
     /// Bytes for the program the link has not accepted yet.
-    pending: Vec<u8>,
+    pending: VecDeque<u8>,
+    /// Terminal replies waiting for room in `pending`, bounded by
+    /// `max_pending_write`. Moved over whole, so a reply is never split by
+    /// input queued in between.
+    replies: Vec<u8>,
+    /// The link refused a write or resize with a hard error: nothing more is
+    /// written, but output is still read until the link says `Closed`.
+    write_dead: bool,
+    /// When to offer waiting input to the link again.
+    retry_at: Option<Instant>,
+    /// Finds `2026l` in live output.
+    sync_scan: SyncScan,
+    /// A `2026l` was in the live bytes of this batch.
+    esu_seen: bool,
+    /// The frame as of the last `2026l` inside this batch, when more output
+    /// followed it in the same batch.
+    boundary: Option<Frame>,
     /// Encoder output, reused.
     scratch: Vec<u8>,
     published: Option<Frame>,
@@ -165,17 +215,72 @@ pub struct Session<L: SessionLink> {
     stats: Stats,
 }
 
-fn soft_error(e: &io::Error) -> bool {
-    matches!(
-        e.kind(),
-        io::ErrorKind::WouldBlock | io::ErrorKind::Interrupted
-    )
+fn interrupted(e: &io::Error) -> bool {
+    e.kind() == io::ErrorKind::Interrupted
+}
+
+fn would_block(e: &io::Error) -> bool {
+    e.kind() == io::ErrorKind::WouldBlock
+}
+
+/// Retries of an `Interrupted` call within one read batch or flush before
+/// giving up until the next tick.
+const MAX_INTERRUPTS: u32 = 8;
+
+/// Encoder output buffers larger than this are dropped after use, so one huge
+/// paste does not pin its memory for the life of the session.
+const SCRATCH_KEEP: usize = 64 << 10;
+
+/// Finds `ESC [ ? 2 0 2 6 l` (end of synchronized output) across reads.
+#[derive(Default)]
+struct SyncScan {
+    /// Bytes of `ESC [ ? 2 0 2 6` matched so far (0..=7).
+    matched: usize,
+}
+
+impl SyncScan {
+    const PREFIX: &'static [u8; 7] = b"\x1b[?2026";
+
+    fn reset(&mut self) {
+        self.matched = 0;
+    }
+
+    /// Offset just past the last `2026l` that ends inside `data`.
+    fn scan(&mut self, data: &[u8]) -> Option<usize> {
+        let mut end = None;
+        let mut i = 0;
+        while i < data.len() {
+            if self.matched == 0 {
+                match data[i..].iter().position(|&b| b == 0x1b) {
+                    Some(at) => i += at,
+                    None => break,
+                }
+            }
+            let b = data[i];
+            if self.matched < Self::PREFIX.len() {
+                self.matched = if b == Self::PREFIX[self.matched] {
+                    self.matched + 1
+                } else if b == 0x1b {
+                    1
+                } else {
+                    0
+                };
+            } else {
+                if b == b'l' {
+                    end = Some(i + 1);
+                }
+                self.matched = usize::from(b == 0x1b);
+            }
+            i += 1;
+        }
+        end
+    }
 }
 
 impl<L: SessionLink> Session<L> {
     pub fn new(link: L, config: SessionConfig) -> Self {
         let mut config = config;
-        config.tick_budget = config.tick_budget.max(MIN_TICK_BUDGET);
+        config.tick_budget = config.tick_budget.clamp(MIN_TICK_BUDGET, MAX_TICK_BUDGET);
         let screen = Screen::with_scrollback(config.cols, config.rows, config.scrollback);
         let replaying = config.starts_with_replay;
         Session {
@@ -183,7 +288,13 @@ impl<L: SessionLink> Session<L> {
             link,
             config,
             buf: Vec::new(),
-            pending: Vec::new(),
+            pending: VecDeque::new(),
+            replies: Vec::new(),
+            write_dead: false,
+            retry_at: None,
+            sync_scan: SyncScan::default(),
+            esu_seen: false,
+            boundary: None,
             scratch: Vec::new(),
             published: None,
             taken: 0,
@@ -264,10 +375,28 @@ impl<L: SessionLink> Session<L> {
             more = self.read_batch();
         }
         let candidate = self.refresh_modes();
+        // A frame ended inside the batch: whatever hold or timeout covered
+        // the one before is over, and if the mode is set again a new frame
+        // began, which gets a fresh hold.
+        let esu = std::mem::take(&mut self.esu_seen);
+        let boundary = self.boundary.take();
+        if esu {
+            self.sync = SyncState::Off;
+        }
         self.update_sync(now);
         let mut published = false;
         let holding = matches!(self.sync, SyncState::Holding(_));
-        if !self.replaying && (!holding || self.force) {
+        if !self.replaying && holding && !self.force {
+            // Show the frame as of the last `2026l` rather than nothing: the
+            // screen is already partway into the next one.
+            if let Some(b) = boundary {
+                if self.published.as_ref().is_none_or(|p| p.seq < b.seq) {
+                    self.published = Some(b);
+                    self.stats.frames += 1;
+                    published = true;
+                }
+            }
+        } else if !self.replaying {
             let seq = self.screen.seq();
             let stale = self.published.as_ref().is_none_or(|p| p.seq != seq);
             if stale {
@@ -282,9 +411,13 @@ impl<L: SessionLink> Session<L> {
             self.force = false;
         }
         self.flush();
+        self.retry_at = self
+            .write_waiting()
+            .then(|| now.checked_add(self.config.write_retry).unwrap_or(now));
         Tick {
             published,
             more,
+            write_pending: self.write_waiting(),
             deadline: self.deadline_at(),
         }
     }
@@ -360,42 +493,70 @@ impl<L: SessionLink> Session<L> {
     /// refused: the session is closed, or more than
     /// [`SessionConfig::max_pending_write`] is already waiting.
     pub fn send(&mut self, bytes: &[u8]) -> bool {
-        if self.closed {
+        if self.closed || self.write_dead {
             return false;
         }
         if bytes.is_empty() {
             return true;
         }
-        if !self.pending.is_empty()
-            && self.pending.len() + bytes.len() > self.config.max_pending_write
-        {
+        if self.pending.len() + bytes.len() > self.config.max_pending_write {
             self.stats.refused_writes += 1;
             return false;
         }
-        self.pending.extend_from_slice(bytes);
+        self.pending.extend(bytes);
         self.flush();
+        if self.write_waiting() && self.retry_at.is_none() {
+            let now = Instant::now();
+            self.retry_at = Some(now.checked_add(self.config.write_retry).unwrap_or(now));
+        }
         true
     }
 
-    /// Bytes for the program the link has not accepted yet.
+    /// Bytes for the program the link has not accepted yet (input and queued
+    /// replies).
     pub fn pending_write(&self) -> usize {
-        self.pending.len()
+        self.pending.len() + self.replies.len()
+    }
+
+    fn write_waiting(&self) -> bool {
+        !self.write_dead && !(self.pending.is_empty() && self.replies.is_empty())
+    }
+
+    /// Stops writing (the link failed a write or resize) but keeps reading,
+    /// so the program's last output is not lost.
+    fn kill_writes(&mut self) {
+        self.write_dead = true;
+        self.pending.clear();
+        self.replies.clear();
+        self.retry_at = None;
     }
 
     /// Closes the link. The last frame stays available.
     pub fn close(&mut self) {
-        if !self.closed {
-            self.link.close();
-        }
         self.mark_closed();
     }
 
+    /// The session is over: reading stops, the link is closed (once), and
+    /// the final frame is published through any hold or replay.
     fn mark_closed(&mut self) {
-        self.closed = true;
+        if !self.closed {
+            self.closed = true;
+            self.link.close();
+        }
         self.force = true;
         // A link that breaks mid-replay still shows what was replayed.
         self.replaying = false;
-        self.pending.clear();
+        self.sync = SyncState::Off;
+        self.kill_writes();
+    }
+
+    /// Closed and the final frame is out and taken.
+    fn finished(&self) -> bool {
+        self.closed
+            && self
+                .published
+                .as_ref()
+                .is_some_and(|p| p.seq == self.screen.seq() && self.taken >= p.seq)
     }
 
     fn may_read(&self) -> bool {
@@ -418,6 +579,8 @@ impl<L: SessionLink> Session<L> {
         }
         let mut filled = 0usize;
         let mut kind = Segment::Live;
+        let mut interrupts = 0;
+        let mut gave_up = false;
         loop {
             if filled >= budget {
                 break;
@@ -458,7 +621,14 @@ impl<L: SessionLink> Session<L> {
                     kind = Segment::Live;
                 }
                 Ok(LinkRead::Empty) => break,
-                Err(e) if soft_error(&e) => break,
+                Err(e) if interrupted(&e) => {
+                    interrupts += 1;
+                    if interrupts > MAX_INTERRUPTS {
+                        gave_up = true;
+                        break;
+                    }
+                }
+                Err(e) if would_block(&e) => break,
                 Ok(LinkRead::Closed) | Err(_) => {
                     self.feed(kind, filled);
                     self.mark_closed();
@@ -467,30 +637,73 @@ impl<L: SessionLink> Session<L> {
             }
         }
         self.feed(kind, filled);
-        filled >= budget
+        filled >= budget || gave_up
     }
 
     /// Advances the screen over `buf[..len]` and routes its replies: written
-    /// for live bytes, dropped for replay.
+    /// for live bytes, dropped for replay. Live bytes are split after the last
+    /// `2026l` when more follows it, to keep the frame as of that point.
     fn feed(&mut self, kind: Segment, len: usize) {
         if len == 0 {
             return;
         }
-        self.screen.advance(&self.buf[..len]);
-        self.stats.advances += 1;
-        let replies = self.screen.take_replies();
         match kind {
             Segment::Replay => {
-                self.stats.replay_bytes += len as u64;
+                self.sync_scan.reset();
+                self.run(kind, 0, len);
+            }
+            Segment::Live => match self.sync_scan.scan(&self.buf[..len]) {
+                Some(end) if end < len => {
+                    self.esu_seen = true;
+                    self.run(kind, 0, end);
+                    self.boundary = Some(self.screen.frame());
+                    self.run(kind, end, len);
+                }
+                Some(_) => {
+                    self.esu_seen = true;
+                    self.boundary = None;
+                    self.run(kind, 0, len);
+                }
+                None => self.run(kind, 0, len),
+            },
+        }
+    }
+
+    fn run(&mut self, kind: Segment, from: usize, to: usize) {
+        self.screen.advance(&self.buf[from..to]);
+        self.stats.advances += 1;
+        let replies = self.screen.take_replies();
+        let n = (to - from) as u64;
+        match kind {
+            Segment::Replay => {
+                self.stats.replay_bytes += n;
                 self.stats.dropped_reply_bytes += replies.len() as u64;
             }
             Segment::Live => {
-                self.stats.live_bytes += len as u64;
-                if !replies.is_empty() {
-                    self.stats.reply_bytes += replies.len() as u64;
-                    self.send(&replies);
-                }
+                self.stats.live_bytes += n;
+                self.queue_replies(&replies);
             }
+        }
+    }
+
+    /// Queues a terminal reply: straight to `pending` when it fits, behind it
+    /// in `replies` (own bound) when input is filling `pending`, dropped only
+    /// past that or when nothing can be written any more.
+    fn queue_replies(&mut self, replies: &[u8]) {
+        if replies.is_empty() {
+            return;
+        }
+        let cap = self.config.max_pending_write;
+        if self.closed || self.write_dead {
+            self.stats.overflowed_reply_bytes += replies.len() as u64;
+        } else if self.replies.is_empty() && self.pending.len() + replies.len() <= cap {
+            self.stats.reply_bytes += replies.len() as u64;
+            self.pending.extend(replies);
+        } else if self.replies.len() + replies.len() <= cap {
+            self.stats.reply_bytes += replies.len() as u64;
+            self.replies.extend_from_slice(replies);
+        } else {
+            self.stats.overflowed_reply_bytes += replies.len() as u64;
         }
     }
 
@@ -509,7 +722,7 @@ impl<L: SessionLink> Session<L> {
     }
 
     fn update_sync(&mut self, now: Instant) {
-        if self.replaying || !self.modes.sync_output {
+        if self.closed || self.replaying || !self.modes.sync_output {
             self.sync = SyncState::Off;
             return;
         }
@@ -525,9 +738,13 @@ impl<L: SessionLink> Session<L> {
     }
 
     fn deadline_at(&self) -> Option<Instant> {
-        match self.sync {
+        let hold = match self.sync {
             SyncState::Holding(until) => Some(until),
             _ => None,
+        };
+        match (hold, self.retry_at) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (a, b) => a.or(b),
         }
     }
 
@@ -544,21 +761,40 @@ impl<L: SessionLink> Session<L> {
         damage
     }
 
-    /// Offers waiting bytes to the link until it stops accepting them.
+    /// Offers waiting bytes to the link until it stops accepting them. A hard
+    /// error stops writing (see `kill_writes`) but not reading.
     fn flush(&mut self) {
-        let mut done = 0;
-        while done < self.pending.len() {
-            match self.link.try_write(&self.pending[done..]) {
+        if self.write_dead {
+            return;
+        }
+        let mut interrupts = 0;
+        loop {
+            if self.pending.is_empty() {
+                if self.replies.is_empty() {
+                    break;
+                }
+                self.pending.extend(self.replies.drain(..));
+            }
+            let front = self.pending.as_slices().0;
+            let len = front.len();
+            match self.link.try_write(front) {
                 Ok(0) => break,
-                Ok(n) => done += n.min(self.pending.len() - done),
-                Err(e) if soft_error(&e) => break,
+                Ok(n) => {
+                    drop(self.pending.drain(..n.min(len)));
+                }
+                Err(e) if interrupted(&e) => {
+                    interrupts += 1;
+                    if interrupts > MAX_INTERRUPTS {
+                        break;
+                    }
+                }
+                Err(e) if would_block(&e) => break,
                 Err(_) => {
-                    self.mark_closed();
+                    self.kill_writes();
                     return;
                 }
             }
         }
-        self.pending.drain(..done);
     }
 
     fn resize_grid(&mut self, cols: u16, rows: u16) {
@@ -569,8 +805,8 @@ impl<L: SessionLink> Session<L> {
             return;
         }
         self.force = true;
-        if !self.closed && self.link.resize(after.0, after.1).is_err() {
-            self.mark_closed();
+        if !self.closed && !self.write_dead && self.link.resize(after.0, after.1).is_err() {
+            self.kill_writes();
         }
     }
 
@@ -578,7 +814,11 @@ impl<L: SessionLink> Session<L> {
         let mut out = std::mem::take(&mut self.scratch);
         out.clear();
         let sent = encode(self.modes, &mut out) && self.send(&out);
-        self.scratch = out;
+        self.scratch = if out.capacity() > SCRATCH_KEEP {
+            Vec::new()
+        } else {
+            out
+        };
         sent
     }
 }
@@ -609,7 +849,7 @@ impl<L: SessionLink> FrameSource for Session<L> {
     }
 
     fn closed(&self) -> bool {
-        self.closed
+        self.finished()
     }
 
     fn deadline(&self) -> Option<Instant> {

@@ -42,20 +42,27 @@ pub enum LinkRead {
 /// A non-blocking byte pipe to a terminal program.
 pub trait SessionLink {
     /// Copies available output into `buf` (never more than `buf.len()`).
-    /// `Data(0)` and `Replay(0)` are read as `Empty`. An error closes the
-    /// session, except `WouldBlock` and `Interrupted`, which are `Empty`.
+    /// `Data(0)` and `Replay(0)` are read as `Empty`. `Interrupted` is retried
+    /// a few times, `WouldBlock` is `Empty`, and any other error closes the
+    /// session.
     fn try_read(&mut self, buf: &mut [u8]) -> io::Result<LinkRead>;
 
     /// Accepts as many bytes as it can without blocking and returns how many
-    /// (0 when full). The session keeps the rest and offers them again on its
-    /// next tick. An error closes the session, except `WouldBlock` and
-    /// `Interrupted`, which are 0.
+    /// (0 when full). The session keeps the rest and offers them again on a
+    /// later tick (it asks for one at its deadline while input waits).
+    /// `Interrupted` is retried and `WouldBlock` is 0. Any other error stops
+    /// the session writing but not reading: it keeps reading the program's
+    /// last output until `try_read` returns `Closed`, so a link whose write
+    /// side broke must report `Closed` from `try_read` once its output is
+    /// drained.
     fn try_write(&mut self, bytes: &[u8]) -> io::Result<usize>;
 
-    /// The grid size changed; the far end resizes the PTY (`TIOCSWINSZ`).
+    /// The grid size changed; the far end resizes the PTY (`TIOCSWINSZ`). An
+    /// error is treated like a failed write.
     fn resize(&mut self, cols: u16, rows: u16) -> io::Result<()>;
 
-    /// The session is done with the link.
+    /// The session is done with the link (called once, when the session ends
+    /// for any reason).
     fn close(&mut self);
 
     /// Installs the callback to run (from any thread) when output becomes

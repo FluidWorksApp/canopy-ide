@@ -24,6 +24,11 @@ struct Inner {
     queued: usize,
     written: Vec<u8>,
     write_capacity: Option<usize>,
+    /// Writes fail with `BrokenPipe` (the program's input side is gone).
+    fail_writes: bool,
+    /// Reads and writes that fail with `Interrupted` before working.
+    read_interrupts: u32,
+    write_interrupts: u32,
     resizes: Vec<(u16, u16)>,
     closed_by_session: bool,
     waker: Option<Waker>,
@@ -105,6 +110,22 @@ impl MemoryPeer {
         lock(&self.inner).write_capacity = capacity;
     }
 
+    /// Makes every write fail with `BrokenPipe` while output can still be
+    /// read, like a program that closed its input and is about to exit.
+    pub fn fail_writes(&self, fail: bool) {
+        lock(&self.inner).fail_writes = fail;
+    }
+
+    /// The next `n` reads fail with `Interrupted`.
+    pub fn interrupt_reads(&self, n: u32) {
+        lock(&self.inner).read_interrupts = n;
+    }
+
+    /// The next `n` writes fail with `Interrupted`.
+    pub fn interrupt_writes(&self, n: u32) {
+        lock(&self.inner).write_interrupts = n;
+    }
+
     /// Every resize the session sent, in order.
     pub fn resizes(&self) -> Vec<(u16, u16)> {
         lock(&self.inner).resizes.clone()
@@ -136,6 +157,10 @@ impl SessionLink for MemoryLink {
         let inner = &mut *g;
         if inner.closed_by_session {
             return Ok(LinkRead::Closed);
+        }
+        if inner.read_interrupts > 0 {
+            inner.read_interrupts -= 1;
+            return Err(io::ErrorKind::Interrupted.into());
         }
         loop {
             let (n, replay, whole) = match inner.queue.front() {
@@ -171,6 +196,13 @@ impl SessionLink for MemoryLink {
     fn try_write(&mut self, bytes: &[u8]) -> io::Result<usize> {
         let mut g = lock(&self.inner);
         if g.closed_by_session {
+            return Err(io::ErrorKind::BrokenPipe.into());
+        }
+        if g.write_interrupts > 0 {
+            g.write_interrupts -= 1;
+            return Err(io::ErrorKind::Interrupted.into());
+        }
+        if g.fail_writes {
             return Err(io::ErrorKind::BrokenPipe.into());
         }
         let n = match g.write_capacity {

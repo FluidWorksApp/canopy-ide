@@ -6,6 +6,7 @@ use canopy_term_session::frame::{Attrs, Frame};
 use canopy_term_session::input::{Key, KeyEvent, Mods, MouseButton, MouseEvent, MouseEventKind};
 use canopy_term_session::{
     FrameSource, MemoryLink, MemoryPeer, Session, SessionConfig, DEFAULT_SYNC_TIMEOUT,
+    DEFAULT_WRITE_RETRY,
 };
 
 fn session_with(config: SessionConfig) -> (Session<MemoryLink>, MemoryPeer) {
@@ -439,8 +440,9 @@ fn closing_the_session_closes_the_link() {
     let (mut s, peer) = session(20, 5);
     s.close();
     assert!(peer.closed_by_session());
-    assert!(s.closed());
+    assert!(!s.closed(), "the final frame has not been taken yet");
     assert!(s.frame_since_at(0, Instant::now()).is_some());
+    assert!(s.closed());
 }
 
 #[test]
@@ -467,4 +469,217 @@ fn the_waker_fires_on_output_and_when_more_is_waiting() {
     s.frame_since(f.seq);
     s.frame_since(f.seq + 1);
     assert_eq!(s.stats().live_bytes, 10_000);
+}
+
+// ---- review fixes ----
+
+#[test]
+fn a_failed_write_does_not_drop_the_programs_last_output() {
+    let (mut s, peer) = session(20, 5);
+    let t = Instant::now();
+    let f0 = s.frame_since_at(0, t).unwrap();
+    // The shell has closed its input and is about to print and exit.
+    peer.fail_writes(true);
+    assert!(s.text("x"), "accepted, then the link failed");
+    assert!(!s.closed(), "a write error does not end the session");
+    assert!(!peer.closed_by_session());
+    assert!(!s.send(b"y"), "nothing more is written");
+    assert_eq!(s.pending_write(), 0);
+
+    peer.send_output(b"final words\r\n");
+    let f1 = s.frame_since_at(f0.seq, t).expect("output is still read");
+    assert_eq!(row_text(&f1, 0), "final words");
+    assert!(!s.closed());
+
+    peer.close();
+    s.frame_since_at(f1.seq, t);
+    assert!(s.closed(), "ends when the link says Closed");
+    assert!(peer.closed_by_session(), "and the link is closed once");
+}
+
+#[test]
+fn closed_waits_for_the_final_frame_and_resets_sync() {
+    let (mut s, peer) = session(20, 5);
+    let t = Instant::now();
+    let f0 = s.frame_since_at(0, t).unwrap();
+    peer.send_output(b"\x1b[?2026hlast");
+    assert_eq!(s.frame_since_at(f0.seq, t), None, "held");
+    peer.close();
+    s.tick(t);
+    assert!(!s.closed(), "the final frame is published but not taken");
+    assert_eq!(s.deadline(), None, "no sync hold left after close");
+    let f1 = s.take_frame(f0.seq).expect("final frame through the hold");
+    assert_eq!(row_text(&f1, 0), "last");
+    assert!(s.closed());
+}
+
+#[test]
+fn refused_input_asks_for_another_tick() {
+    let (mut s, peer) = session(20, 5);
+    let t = Instant::now();
+    peer.set_write_capacity(Some(4));
+    assert!(s.send(b"abcdef"));
+    let tick = s.tick(t);
+    assert!(tick.write_pending);
+    let retry = t + DEFAULT_WRITE_RETRY;
+    assert_eq!(tick.deadline, Some(retry));
+    assert_eq!(s.deadline(), Some(retry));
+
+    // Still full at the retry: asks again.
+    let tick = s.tick(retry);
+    assert!(tick.write_pending);
+    assert_eq!(tick.deadline, Some(retry + DEFAULT_WRITE_RETRY));
+
+    peer.take_written();
+    let tick = s.tick(retry + DEFAULT_WRITE_RETRY);
+    assert!(!tick.write_pending);
+    assert_eq!(tick.deadline, None);
+    assert_eq!(peer.take_written(), b"ef");
+}
+
+#[test]
+fn replies_behind_a_full_write_queue_are_kept_not_dropped() {
+    let (mut s, peer) = session_with(SessionConfig {
+        cols: 20,
+        rows: 5,
+        max_pending_write: 16,
+        ..SessionConfig::default()
+    });
+    let t = Instant::now();
+    peer.set_write_capacity(Some(0));
+    assert!(s.send(b"0123456789abcd"));
+    // 14 queued; the 4-byte reply to a status query does not fit behind it.
+    peer.send_output(b"\x1b[5n");
+    s.tick(t);
+    assert_eq!(s.stats().reply_bytes, 4);
+    assert_eq!(s.stats().overflowed_reply_bytes, 0);
+    assert_eq!(s.pending_write(), 18);
+    // Input cannot jump the queue past the cap.
+    assert!(!s.send(b"zzz"));
+
+    peer.set_write_capacity(None);
+    s.tick(t + ms(20));
+    assert_eq!(peer.take_written(), b"0123456789abcd\x1b[0n");
+    assert_eq!(s.pending_write(), 0);
+}
+
+#[test]
+fn replies_past_their_own_bound_are_counted_as_dropped() {
+    let (mut s, peer) = session_with(SessionConfig {
+        cols: 20,
+        rows: 5,
+        max_pending_write: 8,
+        ..SessionConfig::default()
+    });
+    let t = Instant::now();
+    peer.set_write_capacity(Some(0));
+    assert!(s.send(b"01234567"));
+    // Each reply is 4 bytes: two fit in the reply queue, the third does not.
+    for _ in 0..3 {
+        peer.send_output(b"\x1b[5n");
+        s.tick(t);
+        let _ = s.take_frame(0);
+    }
+    assert_eq!(s.stats().reply_bytes, 8);
+    assert_eq!(s.stats().overflowed_reply_bytes, 4);
+}
+
+#[test]
+fn steady_sync_frames_after_a_timeout_are_not_shown_half_drawn() {
+    let (mut s, peer) = session(20, 5);
+    let t0 = Instant::now();
+    let f0 = s.frame_since_at(0, t0).unwrap();
+    peer.send_output(b"\x1b[?2026hA");
+    assert_eq!(s.frame_since_at(f0.seq, t0), None);
+    let f1 = s
+        .frame_since_at(f0.seq, t0 + DEFAULT_SYNC_TIMEOUT)
+        .expect("released at the timeout");
+    assert_eq!(row_text(&f1, 0), "A");
+
+    // From here on the program sends whole frames, each ending 2026l and the
+    // next starting 2026h in the same read. Each is shown complete, none
+    // half drawn, and each starts a fresh hold.
+    let mut seen = f1.seq;
+    let mut now = t0 + DEFAULT_SYNC_TIMEOUT;
+    let mut expect = String::from("A");
+    for i in 0..3u8 {
+        now += ms(200);
+        let word = (b'b' + i) as char;
+        peer.send_output(format!("{word}\x1b[?2026l\x1b[?2026hp").as_bytes());
+        expect.push(word);
+        let f = s
+            .frame_since_at(seen, now)
+            .expect("the finished frame is published");
+        assert_eq!(row_text(&f, 0), expect, "frame {i} is whole");
+        seen = f.seq;
+        assert_eq!(
+            s.deadline(),
+            Some(now + DEFAULT_SYNC_TIMEOUT),
+            "a fresh hold started for the next frame"
+        );
+        // The rest of the frame arrives later and completes it.
+        peer.send_output(b"r\x1b[?2026l\x1b[?2026h");
+        let g = s.frame_since_at(seen, now + ms(10)).unwrap();
+        assert_eq!(row_text(&g, 0), format!("{expect}pr"));
+        seen = g.seq;
+        // Next iteration's text continues after the longer line.
+        expect = format!("{expect}pr");
+    }
+}
+
+#[test]
+fn a_2026l_split_across_reads_is_still_seen() {
+    let (mut s, peer) = session(20, 5);
+    let t = Instant::now();
+    let f0 = s.frame_since_at(0, t).unwrap();
+    peer.send_output(b"\x1b[?2026hone");
+    assert_eq!(s.frame_since_at(f0.seq, t), None);
+    peer.send_output(b"\x1b[?20");
+    s.tick(t);
+    peer.send_output(b"26l\x1b[?2026hmore");
+    let f = s.frame_since_at(f0.seq, t).expect("frame at the 2026l");
+    assert_eq!(row_text(&f, 0), "one");
+}
+
+#[test]
+fn an_interrupted_read_is_retried_in_the_same_tick() {
+    let (mut s, peer) = session(20, 5);
+    let t = Instant::now();
+    peer.send_output(b"hello");
+    peer.interrupt_reads(2);
+    let f = s.frame_since_at(0, t).unwrap();
+    assert_eq!(row_text(&f, 0), "hello");
+    assert!(!s.closed());
+}
+
+#[test]
+fn an_interrupted_write_is_retried() {
+    let (mut s, peer) = session(20, 5);
+    peer.interrupt_writes(2);
+    assert!(s.send(b"abc"));
+    assert_eq!(peer.take_written(), b"abc");
+    assert_eq!(s.pending_write(), 0);
+}
+
+#[test]
+fn one_input_larger_than_the_cap_is_refused() {
+    let (mut s, peer) = session_with(SessionConfig {
+        cols: 20,
+        rows: 5,
+        max_pending_write: 8,
+        ..SessionConfig::default()
+    });
+    assert!(!s.send(b"0123456789"));
+    assert_eq!(s.stats().refused_writes, 1);
+    assert!(peer.take_written().is_empty());
+    assert!(s.send(b"01234567"));
+}
+
+#[test]
+fn the_tick_budget_is_clamped() {
+    let (s, _peer) = session_with(SessionConfig {
+        tick_budget: usize::MAX,
+        ..SessionConfig::default()
+    });
+    assert_eq!(s.config().tick_budget, canopy_term_session::MAX_TICK_BUDGET);
 }
