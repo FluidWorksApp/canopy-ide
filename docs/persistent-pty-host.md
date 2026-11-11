@@ -90,6 +90,12 @@ attached, and `read_ring` returns ring bytes from an offset without attaching, s
 older than 3 ignores `exclusive`, so `HostClient::attach_exclusive` checks
 `hello` first and refuses such a host.
 
+A replaced client is disconnected: the host closes its connection, so it sees
+EOF instead of a frozen screen whose typing would still reach the child. In the
+app that only happens when something takes a session with `--force`; the app's
+terminal then stops updating while the child keeps running in the host (a later
+launch can adopt it). Reattaching automatically is a follow-up.
+
 **Versioning and containers.** `hello` carries the client's protocol version and
 the host replies with its own and the oldest client it accepts; `attach` repeats
 the client version. A client too old is refused with a clear message, and a
