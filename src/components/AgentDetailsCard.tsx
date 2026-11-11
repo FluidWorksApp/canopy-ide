@@ -351,7 +351,10 @@ export function AgentDetailsCard({
     { fast: life?.state === "working" },
   );
   const subagents = activity?.subagents ?? [];
-  const assets = [...previewAssets(ports), ...collectAssets(digest?.files, cwd)];
+  // Servers the terminal is running get their own section with a link; the
+  // Assets list keeps only the files the agent made.
+  const servers = previewAssets(ports);
+  const assets = collectAssets(digest?.files, cwd);
   const tasks = normalizeTasks(digest?.tasks);
   const summary = summarizeTasks(tasks);
   const cli = agentCliFor(agent);
@@ -434,6 +437,29 @@ export function AgentDetailsCard({
           ×
         </button>
       </header>
+
+      {servers.length > 0 && (
+        <section className="agent-card-servers" aria-label="Running servers">
+          <div className="agent-card-label">
+            Running <span className="agent-card-dim">{servers.length}</span>
+          </div>
+          {servers.map((server) => (
+            <div key={server.path} className="agent-card-server">
+              <span className="agent-card-live" aria-hidden="true" />
+              <span className="agent-card-grow agent-card-ellipsis">{server.name}</span>
+              <button
+                type="button"
+                className="agent-card-server-open"
+                title={`Open ${server.path} in the preview (⌘-click: your browser)`}
+                aria-label={`Open ${server.name}`}
+                onClick={(e) => onOpenAsset?.(server.path, { system: e.metaKey || e.ctrlKey })}
+              >
+                Open ↗
+              </button>
+            </div>
+          ))}
+        </section>
+      )}
 
       {branch && (
         <div className="agent-card-row" title={branch}>
@@ -683,6 +709,20 @@ export function AgentDetailsCard({
         <span className="agent-card-dim">{taskHeadline(summary)}</span>
         {summary.total > 0 && <span aria-hidden="true">{tasksOpen ? "▾" : "▸"}</span>}
       </button>
+
+      {summary.total > 0 && (
+        <div
+          className="agent-card-progress"
+          role="progressbar"
+          aria-label="Tasks done"
+          aria-valuemin={0}
+          aria-valuemax={summary.total}
+          aria-valuenow={summary.done}
+        >
+          <i className="agent-card-progress-done" style={{ width: `${(summary.done / summary.total) * 100}%` }} />
+          <i className="agent-card-progress-run" style={{ width: `${(summary.running / summary.total) * 100}%` }} />
+        </div>
+      )}
 
       {summary.current && !tasksOpen && (
         <div className="agent-card-current" title={summary.current.text}>
