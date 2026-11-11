@@ -51,7 +51,7 @@ pub fn spawn(
 #[cfg(unix)]
 mod unix {
     use super::*;
-    use canopy_pty_host::client::{HostChild, HostClient, HostMaster};
+    use canopy_pty_host::client::{HostChild, HostClient, HostMaster, LaunchCheck};
     use canopy_pty_host::protocol::SpawnSpec;
     use std::path::{Path, PathBuf};
     use std::sync::OnceLock;
@@ -93,9 +93,9 @@ mod unix {
     /// installed under the socket directory (`true`). Never the bundled path
     /// itself: an update replaces the bundle, and a translocated or AppImage
     /// bundle disappears when the app quits (see `install`).
-    fn host_exe(socket: &Path) -> Result<(PathBuf, bool), String> {
+    fn host_exe(socket: &Path) -> Result<(PathBuf, Option<LaunchCheck>), String> {
         if let Ok(path) = std::env::var("CANOPY_PTY_HOST_EXE") {
-            return Ok((PathBuf::from(path), false));
+            return Ok((PathBuf::from(path), None));
         }
         let bundled = std::env::current_exe()
             .map_err(|e| e.to_string())?
@@ -104,7 +104,28 @@ mod unix {
             .join(super::install::HOST_BIN);
         let bin = super::install::bin_dir(socket).ok_or("the socket has no directory")?;
         let installed = super::install::install(&bundled, &bin, env!("CARGO_PKG_VERSION"))?;
-        Ok((installed, true))
+        let digest = installed.digest.clone();
+        // The shared lock on the install directory is held for as long as the
+        // app runs, so no other app's prune deletes the copy this one may start.
+        static HOLD: OnceLock<std::fs::File> = OnceLock::new();
+        let _ = HOLD.set(installed.hold);
+        // Hashed again right before every start, restarts included.
+        let check = LaunchCheck(std::sync::Arc::new(move |exe: &Path| {
+            super::install::verify(exe, &digest)
+        }));
+        Ok((installed.exe, Some(check)))
+    }
+
+    /// Said once with a start failure: a copy under the home directory that
+    /// cannot be executed usually means a `noexec` mount.
+    fn start_hint(error: &std::io::Error, installed: bool) -> &'static str {
+        if installed && error.kind() == std::io::ErrorKind::PermissionDenied {
+            " (permission denied starting the installed host: is the home directory \
+             mounted noexec? Set CANOPY_PTY_HOST_EXE to a host binary on an executable \
+             filesystem)"
+        } else {
+            ""
+        }
     }
 
     /// With a host running, remove install directories that neither this app
@@ -143,14 +164,21 @@ mod unix {
                     eprintln!("canopy: CANOPY_PTY_HOST=1 but no socket directory; using in-process terminals");
                     return None;
                 };
-                let (exe, installed) = match host_exe(&socket) {
+                let (exe, check) = match host_exe(&socket) {
                     Ok(found) => found,
                     Err(error) => {
                         eprintln!("canopy: CANOPY_PTY_HOST=1 but the PTY host could not be installed ({error}); using in-process terminals");
                         return None;
                     }
                 };
-                match HostClient::ensure_running(&exe, &socket, HOST_IDLE_SECS) {
+                let installed = check.is_some();
+                match HostClient::ensure_running_checked(
+                    &exe,
+                    &socket,
+                    HOST_IDLE_SECS,
+                    &[],
+                    check,
+                ) {
                     Ok(client) => {
                         if installed {
                             prune_installs_later(socket.clone(), &exe);
@@ -159,7 +187,8 @@ mod unix {
                     }
                     Err(error) => {
                         eprintln!(
-                            "canopy: PTY host unavailable, using in-process terminals: {error}"
+                            "canopy: PTY host unavailable, using in-process terminals: {error}{}",
+                            start_hint(&error, installed)
                         );
                         None
                     }
@@ -242,7 +271,7 @@ pub struct HostedMeta {
 mod adoption {
     use super::unix::{socket_path, Client};
     use super::*;
-    use canopy_pty_host::client::{HostChild, HostClient, HostMaster};
+    use canopy_pty_host::client::{HostChild, HostClient, HostMaster, LaunchCheck};
     use canopy_pty_host::protocol::{SessionInfo, EXCLUSIVE_ATTACH_VERSION};
     use std::io::Read;
     use std::sync::atomic::{AtomicU64, Ordering};

@@ -303,7 +303,24 @@ jobs:
             exit 1
           fi
           codesign --verify --strict --verbose=2 "$host"
-          codesign -dvvv "$host" 2>&1 | grep -E "Authority=|Timestamp=|flags=" || true
+          info="$(codesign -dvvv "$host" 2>&1)"
+          echo "$info" | grep -E "Authority=|Timestamp=|flags=" || true
+          # Hardened runtime and a secure timestamp are what notarisation needs
+          # of the copy that runs from ~/.canopy.
+          echo "$info" | grep -E "flags=.*\(runtime\)" >/dev/null \
+            || { echo "::error::canopy-pty-host is not signed with the hardened runtime."; exit 1; }
+          echo "$info" | grep -E "^Timestamp=" >/dev/null \
+            || { echo "::error::canopy-pty-host has no secure timestamp."; exit 1; }
+          # The host needs no entitlements (src-tauri/pty-host-entitlements.plist).
+          # tauri-bundler signs sidecars with the app's entitlements, so report
+          # anything broader than that as a warning until it can be narrowed.
+          ents="$(codesign -d --entitlements - --xml "$host" 2>/dev/null || true)"
+          echo "$ents"
+          for key in allow-jit device.audio-input disable-library-validation allow-dyld-environment-variables; do
+            if echo "$ents" | grep -q "$key"; then
+              echo "::warning::canopy-pty-host carries the $key entitlement; it needs none."
+            fi
+          done
 
       # `tauri build` exits 0 even when signing fails ("a public key has been
       # found, but no private key"), so a missing or bad secret would publish a

@@ -330,7 +330,7 @@ fn hello_reports_the_protocol_version_and_the_minimum_client() {
 #[test]
 fn a_client_older_than_the_host_accepts_is_refused_at_hello_and_attach() {
     // A host whose minimum is above this client's version. It is started by hand:
-    // `ensure_running` would (rightly, today) treat a refusing host as no host.
+    // `ensure_running` would replace it (it runs no terminals yet).
     let dir = std::env::temp_dir().join(format!("cph{}skew", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
@@ -368,6 +368,187 @@ fn a_client_older_than_the_host_accepts_is_refused_at_hello_and_attach() {
     let _ = host.kill();
     let _ = host.wait();
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A host started by hand that refuses this client (its minimum is one above
+/// our protocol), the way a newer app's host looks after a downgrade, or an
+/// older one after a minimum-version bump.
+fn refusing_host(name: &str) -> (PathBuf, PathBuf, std::process::Child) {
+    let dir = std::env::temp_dir().join(format!("cph{}{name}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let socket = dir.join("h.sock");
+    let host = std::process::Command::new(host_exe())
+        .arg("--socket")
+        .arg(&socket)
+        .args([
+            "--min-client",
+            &(canopy_pty_host::protocol::PROTOCOL_VERSION + 1).to_string(),
+            "--idle-secs",
+            "60",
+        ])
+        .spawn()
+        .unwrap();
+    assert!(wait_until(Duration::from_secs(5), || socket.exists()));
+    (dir, socket, host)
+}
+
+/// Waits (bounded) for a child to exit; true if it did.
+fn exits_within(child: &mut std::process::Child, timeout: Duration) -> bool {
+    wait_until(timeout, || matches!(child.try_wait(), Ok(Some(_))))
+}
+
+#[test]
+fn an_idle_incompatible_host_is_replaced_by_ours() {
+    let (dir, socket, mut old) = refusing_host("skewr");
+    let old_pid = old.id();
+    let client = HostClient::ensure_running(&host_exe(), &socket, 60)
+        .expect("an idle incompatible host is replaced");
+    let hello = client.hello().expect("the new host accepts this client");
+    assert_ne!(hello.host_pid, Some(old_pid));
+    assert!(
+        exits_within(&mut old, Duration::from_secs(10)),
+        "the old host was not shut down"
+    );
+    let _ = client.shutdown();
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn an_incompatible_host_with_terminals_is_left_running_for_them() {
+    let (dir, socket, mut old) = refusing_host("skewk");
+    // Spawning is not version-gated, so the old host can be given a terminal.
+    let (id, _) = HostClient::new(&socket).spawn(spec("sleep 300")).unwrap();
+    let error = HostClient::ensure_running(&host_exe(), &socket, 60)
+        .expect_err("a host with terminals must not be replaced");
+    let message = error.to_string();
+    assert!(message.contains("still running 1 terminal"), "{message}");
+    // Still the old host, still running the terminal.
+    assert!(
+        matches!(old.try_wait(), Ok(None)),
+        "the old host was stopped"
+    );
+    let listed = HostClient::new(&socket).list().unwrap();
+    assert!(listed.iter().any(|s| s.id == id && s.exited.is_none()));
+    let _ = old.kill();
+    let _ = exits_within(&mut old, Duration::from_secs(10));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn the_launch_check_runs_before_every_start_and_can_stop_it() {
+    use canopy_pty_host::client::LaunchCheck;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+    let dir = std::env::temp_dir().join(format!("cph{}chk", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let socket = dir.join("h.sock");
+    let refuse = LaunchCheck(Arc::new(|_: &std::path::Path| {
+        Err(std::io::Error::other("copy no longer matches"))
+    }));
+    let error = HostClient::ensure_running_checked(&host_exe(), &socket, 60, &[], Some(refuse))
+        .expect_err("a failed check stops the start");
+    assert!(error.to_string().contains("no longer matches"), "{error}");
+    assert!(!socket.exists(), "nothing was started");
+
+    let calls = Arc::new(AtomicUsize::new(0));
+    let counted = Arc::clone(&calls);
+    let count = LaunchCheck(Arc::new(move |_: &std::path::Path| {
+        counted.fetch_add(1, Ordering::SeqCst);
+        Ok(())
+    }));
+    let client =
+        HostClient::ensure_running_checked(&host_exe(), &socket, 60, &[], Some(count)).unwrap();
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    // A restart by the client's spawn runs the same check again.
+    client.shutdown().unwrap();
+    assert!(wait_until(Duration::from_secs(5), || !socket.exists()));
+    let (_, _) = client.spawn(spec("sleep 300")).unwrap();
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
+    let _ = client.shutdown();
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_host_binary_that_cannot_be_executed_reports_permission_denied() {
+    // What a noexec home looks like from here: exec fails with EACCES.
+    use std::os::unix::fs::PermissionsExt;
+    let dir = std::env::temp_dir().join(format!("cph{}nox", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let exe = dir.join("canopy-pty-host");
+    std::fs::copy(host_exe(), &exe).unwrap();
+    std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o644)).unwrap();
+    let error = HostClient::ensure_running(&exe, &dir.join("h.sock"), 60)
+        .expect_err("a non-executable host cannot start");
+    assert_eq!(
+        error.kind(),
+        std::io::ErrorKind::PermissionDenied,
+        "{error}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn hello_outcomes_and_skew_actions_are_classified() {
+    use canopy_pty_host::client::{classify_hello, skew_action, HelloOutcome, SkewAction};
+    use canopy_pty_host::protocol::{Response, SessionInfo, MIN_HOST_VERSION};
+    use std::io::{Error, ErrorKind};
+    let reply = |ok: bool, version: Option<u32>| -> std::io::Result<Response> {
+        Ok(Response {
+            ok,
+            version,
+            ..Default::default()
+        })
+    };
+    assert!(matches!(
+        classify_hello(reply(true, Some(MIN_HOST_VERSION))),
+        HelloOutcome::Compatible
+    ));
+    // The host refuses us (its minimum is above our version).
+    assert!(matches!(
+        classify_hello(reply(false, Some(MIN_HOST_VERSION + 5))),
+        HelloOutcome::Skewed { .. }
+    ));
+    // The host accepts us but is older than we can use, or does not say.
+    assert!(matches!(
+        classify_hello(reply(true, Some(MIN_HOST_VERSION - 1))),
+        HelloOutcome::Skewed { .. }
+    ));
+    assert!(matches!(
+        classify_hello(reply(true, None)),
+        HelloOutcome::Skewed { .. }
+    ));
+    for kind in [ErrorKind::NotFound, ErrorKind::ConnectionRefused] {
+        assert!(matches!(
+            classify_hello(Err(Error::from(kind))),
+            HelloOutcome::NoHost
+        ));
+    }
+    // A timeout says nothing about versions: never treated as skew.
+    assert!(matches!(
+        classify_hello(Err(Error::from(ErrorKind::TimedOut))),
+        HelloOutcome::Unknown(_)
+    ));
+
+    let session = |exited: Option<i32>| SessionInfo {
+        exited,
+        ..Default::default()
+    };
+    assert_eq!(skew_action(&Ok(vec![])), SkewAction::Replace);
+    assert_eq!(
+        skew_action(&Ok(vec![session(Some(0)), session(Some(1))])),
+        SkewAction::Replace
+    );
+    // Every running session counts, adoptable or not.
+    assert_eq!(
+        skew_action(&Ok(vec![session(None), session(Some(0)), session(None)])),
+        SkewAction::Keep(Some(2))
+    );
+    assert_eq!(
+        skew_action(&Err(Error::from(ErrorKind::TimedOut))),
+        SkewAction::Keep(None)
+    );
 }
 
 #[test]
