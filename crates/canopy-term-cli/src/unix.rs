@@ -875,10 +875,18 @@ impl Terminal {
                 libc::cfmakeraw(&mut attrs);
                 raw = libc::tcsetattr(0, libc::TCSANOW, &attrs) == 0;
             }
+            // Read both before changing either: stdin and stdout are usually
+            // one open file description, and a read after the first change
+            // would save O_NONBLOCK as the "original".
             for (fd, slot) in SAVED_FL.iter().enumerate() {
-                let flags = libc::fcntl(fd as libc::c_int, libc::F_GETFL);
+                slot.store(
+                    libc::fcntl(fd as libc::c_int, libc::F_GETFL),
+                    Ordering::Relaxed,
+                );
+            }
+            for (fd, slot) in SAVED_FL.iter().enumerate() {
+                let flags = slot.load(Ordering::Relaxed);
                 if flags >= 0 {
-                    slot.store(flags, Ordering::Relaxed);
                     libc::fcntl(fd as libc::c_int, libc::F_SETFL, flags | libc::O_NONBLOCK);
                 }
             }
