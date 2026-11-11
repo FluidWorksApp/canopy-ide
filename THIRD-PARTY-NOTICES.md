@@ -96,9 +96,9 @@ redistribute them:
 - **serve-sim (vendored in expo-device-hub)** — Apache-2.0, by Evan Bacon, with changes by Expo. <https://github.com/EvanBacon/serve-sim>
 - **scrcpy-server v4.0 (downloaded by serve-emu when an Android device is first streamed)** — Apache-2.0, by Genymobile and Romain Vimont. <https://github.com/Genymobile/scrcpy>
 
-## Rust crates (800)
+## Rust crates (801)
 
-### MIT — 730
+### MIT — 731
 
 - **adler2 2.0.1** — Copyright (C) Jonas Schievink <jonasschievink@gmail.com>
 - **aead 0.5.2** — Copyright (c) 2019 The RustCrypto Project Developers; Copyright (c) 2019 MobileCoin, LLC
