@@ -57,7 +57,10 @@ The loop is `build` -> (skip when `report.held` or nothing changed) -> `sync` ->
 
 `cargo metadata` over the lock found no GPL, LGPL, AGPL or MPL package. Licences
 outside the plain MIT/Apache set: `libloading` (ISC), `hexf-parse` (CC0-1.0),
-Zlib-only packages, and two `Unicode-3.0` data packages. The repo-level
+Zlib-only packages (`foldhash`, `slotmap`, `zlib-rs`), and two packages
+under `(MIT OR Apache-2.0) AND Unicode-3.0` (`unicode-ident`,
+`unicode-properties`). A fresh scan of the 164 locked packages found no missing
+licence field and no GPL/LGPL/AGPL/MPL. The repo-level
 `THIRD-PARTY-NOTICES.md` is generated outside this crate and needs these added
 when the crate is wired into the app; the bundled font needs its OFL notice there
 too. No code was taken from other terminals' renderers (ideas only).
