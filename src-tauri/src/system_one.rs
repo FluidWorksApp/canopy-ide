@@ -150,7 +150,10 @@ pub struct Status {
 }
 
 fn emit(app: &tauri::AppHandle, phase: &str, pct: f64) {
-    let _ = app.emit("system-one:progress", serde_json::json!({ "phase": phase, "pct": pct }));
+    let _ = app.emit(
+        "system-one:progress",
+        serde_json::json!({ "phase": phase, "pct": pct }),
+    );
 }
 
 /// Stream a URL to `dest`, verifying the SHA-256 before it is moved into place.
@@ -175,9 +178,14 @@ async fn fetch_verified(
     let mut file = std::fs::File::create(&part).map_err(|e| format!("create {label}: {e}"))?;
     let mut hasher = Sha256::new();
     let (mut got, mut last) = (0u64, -1i64);
-    while let Some(chunk) = resp.chunk().await.map_err(|e| format!("download {label}: {e}"))? {
+    while let Some(chunk) = resp
+        .chunk()
+        .await
+        .map_err(|e| format!("download {label}: {e}"))?
+    {
         hasher.update(&chunk);
-        file.write_all(&chunk).map_err(|e| format!("write {label}: {e}"))?;
+        file.write_all(&chunk)
+            .map_err(|e| format!("write {label}: {e}"))?;
         got += chunk.len() as u64;
         let pct = (got as f64 / total as f64 * 100.0).min(100.0);
         if pct as i64 > last {
@@ -190,7 +198,9 @@ async fn fetch_verified(
     let digest = hex::encode(hasher.finalize());
     if digest != sha256 {
         let _ = std::fs::remove_file(&part);
-        return Err(format!("{label}: checksum mismatch, refusing to install it"));
+        return Err(format!(
+            "{label}: checksum mismatch, refusing to install it"
+        ));
     }
     std::fs::rename(&part, dest).map_err(|e| format!("install {label}: {e}"))
 }
@@ -209,14 +219,25 @@ async fn install(app: &tauri::AppHandle) -> Result<(), String> {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
         let archive = root.join("llama.tar.gz");
-        fetch_verified(app, server.url, server.sha256, &archive, 20_000_000, "runtime").await?;
+        fetch_verified(
+            app,
+            server.url,
+            server.sha256,
+            &archive,
+            20_000_000,
+            "runtime",
+        )
+        .await?;
         if !is_enabled(app) {
             return Err("turned off".into());
         }
         let (a, d) = (archive.clone(), dir.clone());
         tauri::async_runtime::spawn_blocking(move || -> Result<(), String> {
-            let gz = flate2::read::GzDecoder::new(std::fs::File::open(&a).map_err(|e| e.to_string())?);
-            tar::Archive::new(gz).unpack(&d).map_err(|e| format!("unpack runtime: {e}"))
+            let gz =
+                flate2::read::GzDecoder::new(std::fs::File::open(&a).map_err(|e| e.to_string())?);
+            tar::Archive::new(gz)
+                .unpack(&d)
+                .map_err(|e| format!("unpack runtime: {e}"))
         })
         .await
         .map_err(|e| e.to_string())??;
@@ -226,7 +247,10 @@ async fn install(app: &tauri::AppHandle) -> Result<(), String> {
         if let Ok(rd) = std::fs::read_dir(&root) {
             for e in rd.flatten() {
                 let name = e.file_name().to_string_lossy().to_string();
-                if name.starts_with("llama-") && name != format!("llama-{LLAMA_TAG}") && e.path().is_dir() {
+                if name.starts_with("llama-")
+                    && name != format!("llama-{LLAMA_TAG}")
+                    && e.path().is_dir()
+                {
                     let _ = std::fs::remove_dir_all(e.path());
                 }
             }
@@ -272,8 +296,14 @@ pub fn system_one_enable(app: tauri::AppHandle, state: tauri::State<'_, SystemOn
 /// or unsupported. Failure is recorded and retried at the next launch.
 pub fn install_in_background(app: tauri::AppHandle) {
     // A selftest runs in a throwaway home and must not pull half a gigabyte.
-    let isolated = root().map(|r| r.to_string_lossy().contains("canopy-selftest")).unwrap_or(true);
-    if isolated || std::env::var_os("CANOPY_NO_SYSTEM_ONE").is_some() || server_asset().is_none() || installed() {
+    let isolated = root()
+        .map(|r| r.to_string_lossy().contains("canopy-selftest"))
+        .unwrap_or(true);
+    if isolated
+        || std::env::var_os("CANOPY_NO_SYSTEM_ONE").is_some()
+        || server_asset().is_none()
+        || installed()
+    {
         return;
     }
     tauri::async_runtime::spawn(async move {
@@ -333,7 +363,12 @@ fn spawn_server() -> Result<Running, String> {
         .stdout(Stdio::null())
         .stderr(Stdio::null());
     let child = cmd.spawn().map_err(|e| format!("start System One: {e}"))?;
-    Ok(Running { child, port, key, last_used: Instant::now() })
+    Ok(Running {
+        child,
+        port,
+        key,
+        last_used: Instant::now(),
+    })
 }
 
 async fn healthy(port: u16, key: &str) -> bool {
@@ -404,20 +439,38 @@ pub fn start_idle_watch(app: tauri::AppHandle) {
 #[tauri::command]
 pub fn system_one_status(state: tauri::State<'_, SystemOne>) -> Status {
     if server_asset().is_none() {
-        return Status { phase: Phase::Unsupported, detail: None };
+        return Status {
+            phase: Phase::Unsupported,
+            detail: None,
+        };
     }
     if !state.enabled.load(Ordering::SeqCst) {
-        return Status { phase: Phase::Missing, detail: None };
+        return Status {
+            phase: Phase::Missing,
+            detail: None,
+        };
     }
     if installed() {
-        return Status { phase: Phase::Ready, detail: None };
+        return Status {
+            phase: Phase::Ready,
+            detail: None,
+        };
     }
     if *state.installing.lock().unwrap() {
-        return Status { phase: Phase::Downloading, detail: None };
+        return Status {
+            phase: Phase::Downloading,
+            detail: None,
+        };
     }
     match state.failure.lock().unwrap().clone() {
-        Some(e) => Status { phase: Phase::Failed, detail: Some(e) },
-        None => Status { phase: Phase::Missing, detail: None },
+        Some(e) => Status {
+            phase: Phase::Failed,
+            detail: Some(e),
+        },
+        None => Status {
+            phase: Phase::Missing,
+            detail: None,
+        },
     }
 }
 
