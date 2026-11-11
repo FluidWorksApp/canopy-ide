@@ -13,6 +13,7 @@ import type { Restorable } from "./restorable";
 import { resumeSessionId } from "./projects";
 import { agentIdForCommand } from "./agentIdentity";
 import { withoutConversationNames } from "./tabName";
+import { isAliasPty } from "./environments/ptyRoute";
 
 export interface RememberedTerminal {
   cwd: string;
@@ -123,9 +124,18 @@ export function rememberedTerminalState(
       ? legacy
       : undefined;
   const stored = store[storageKey(projectId, scope)] ?? fallback;
-  if (Array.isArray(stored)) return { terminals: stored, terminalGroups: {} };
-  return stored ?? { terminals: [], terminalGroups: {} };
+  if (Array.isArray(stored)) return { terminals: ownTerminals(stored), terminalGroups: {} };
+  if (!stored) return { terminals: [], terminalGroups: {} };
+  return { ...stored, terminals: ownTerminals(stored.terminals) };
 }
+
+/** A terminal that was running on another machine reached this window through
+ *  an alias id (ptyRoute.ts: far above any id a host hands out). Rows written
+ *  before such tabs were kept out of the snapshot still hold one; they would
+ *  reopen as a shell in a folder that is on the other machine, so they are
+ *  never offered. Rows that never attached have no id and are not caught. */
+const ownTerminals = (rows: RememberedTerminal[]): RememberedTerminal[] =>
+  rows.filter((t) => t.ptyId == null || !isAliasPty(t.ptyId));
 
 export function forgetTerminals(projectId: string, scope = "local") {
   const store = read();

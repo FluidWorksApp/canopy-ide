@@ -57,3 +57,25 @@ export function sessionsNeedingTabs(
 
 /** The machine's short label for a tab: the workspace's own name. */
 export const machineBadge = (name: string): string => name.trim().slice(0, 14) || "workspace";
+
+/** The environment id of the desktop this window runs on, while a workspace is
+ *  the window's own machine and the desktop therefore joins as one of the others. */
+export const THIS_MAC_ENV = "local";
+
+/** The running workspaces "All workspaces" should read terminals from: ready,
+ *  connectable, and never the one that already is this window's own machine.
+ *  That one's terminals are the window's primary tabs (no `machine`, plain ids),
+ *  so reading it as a second machine would add every one of them again. */
+export function workspacesToJoin<W extends { id: string; state?: string; access?: { canConnect?: boolean } }>(
+  workspaces: readonly W[],
+  activeWorkspaceId?: string,
+): W[] {
+  return workspaces.filter((w) => w.state === "ready" && w.access?.canConnect !== false && w.id !== activeWorkspaceId);
+}
+
+/** Whether a tab belongs in the project's remembered terminals (the Resume
+ *  list). A remembered row carries only a folder and a command, so it can only
+ *  be reopened on this window's own machine: a terminal shown from another
+ *  machine, or only because "All workspaces" is on, would come back as a shell
+ *  in a folder that exists somewhere else. */
+export const rememberableTab = (tab: { viaAll?: boolean; machine?: string }): boolean => !tab.viaAll && !tab.machine;

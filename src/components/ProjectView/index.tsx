@@ -4,13 +4,13 @@ import { effectivePreference } from "../../placement/balancer";
 import { getAgentPreference, getGlobalPreference, getProjectPreference } from "../../placement/preferences";
 import { remoteComponentFor } from "../../environments/remoteLaunch";
 import { prepareRemoteWorkspace } from "../../environments/remoteWorkspace";
-import { connectedMachines, liveEnvironments } from "../../environments/live";
+import { connectedMachines, joinThisMac, leaveThisMac, liveEnvironments } from "../../environments/live";
 import { fetchMachineDigests } from "../../environments/remoteDigests";
 import { activeExecutionTarget, canLaunchOnActiveTarget, requestTargetTransition } from "../../placement/transitions";
 import { TELEPORT_TO_MAC, TeleportFlow } from "../TeleportFlow";
 import { useAllWorkspaces } from "../../remoteExecution/allMode";
 import { connectMachine } from "../../environments/live";
-import { machineBadge, parseMachineSessions, sessionsNeedingTabs } from "../../environments/allWorkspaceTabs";
+import { machineBadge, parseMachineSessions, rememberableTab, sessionsNeedingTabs, THIS_MAC_ENV, workspacesToJoin } from "../../environments/allWorkspaceTabs";
 import { peekWorkspaceList } from "../../remoteExecution/workspaceListCache";
 import { setPendingLaunch, takePendingLaunch, type PendingLaunch } from "../../placement/pendingLaunch";
 import { canonicalProjectId } from "../../placement/identity";
@@ -25,7 +25,7 @@ import {
   withoutLiveSessions,
 } from "../../terminalRecovery";
 import {subscribeTeamUnread,getTeamUnread,getUnreadSummary} from "../../teamMessaging/session";
-import {isReadOnlyHost,isRemoteHost} from "../../host";
+import {isReadOnlyHost,isRemoteHost,isWorkspaceHost} from "../../host";
 import { AgentIntegrationWarning } from "../AgentIntegrationWarning";
 import {AccountChatView,type AccountConversation} from "../AccountChatView";
 // One open project: icon rail + collapsible side panel (components / source
@@ -708,7 +708,8 @@ import {
 } from "./helpers";
 import { Button } from "../ui";
 import { RemoteReconnect } from "../RemoteReconnect";
-import { remoteTabReconnect, machineLabel } from "../../environments/remoteReconnect";
+import { remoteTabReconnect, localTabReconnect, machineLabel } from "../../environments/remoteReconnect";
+import { nativeHost } from "../../host/native";
 import { dispatchWithPlan, restoreWaitingPlans, type PlanResumer } from "../../plans/planGate";
 import { PLAN_ENV, planEnvForCommand } from "../../plans/planLaunch";
 import { armPlanTracking, expectRun } from "../../plans/planStore";
@@ -1919,6 +1920,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
   useEffect(() => {
     if (!visible) return;
     if (!allWorkspaces) {
+      leaveThisMac();
       setTabs((prev) => {
         const kept = prev.filter((t) => !(t.type === "terminal" && t.viaAll));
         if (kept.length === prev.length) return prev;
@@ -1928,48 +1930,81 @@ const ProjectViewBody = memo(function ProjectViewBody({
       return;
     }
     let live = true;
+    // One machine's live terminals, each given a tab and attached right away:
+    // the person chose this mode, so nothing waits on a button.
+    const addFrom = async (
+      machine: { env: string; name: string; invoke: <T>(command: string) => Promise<T> },
+      reconnect: (env: string, sessionId: number) => ReturnType<typeof remoteTabReconnect>,
+    ) => {
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const raw = await Promise.race([
+        machine.invoke<unknown>("pty_stats"),
+        new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new Error("timed out")), 10_000); }),
+      ]).finally(() => clearTimeout(timer));
+      if (!live) return;
+      const need = sessionsNeedingTabs(machine.env, parseMachineSessions(raw), tabsRef.current);
+      if (need.length === 0) return;
+      const added = need.map((session) => ({
+        id: tabId(),
+        type: "terminal" as const,
+        cwd: session.cwd ?? "",
+        ptyId: null,
+        machine: machine.env,
+        machineName: machineBadge(machine.name),
+        viaAll: true,
+        command: undefined,
+        icon: undefined,
+        name: session.title || `terminal ${session.id}`,
+        reconnect: { sessionId: session.id },
+      }));
+      setTabs((prev) => [...prev, ...(added as unknown as SubTab[])]);
+      for (const tab of added) {
+        const result = await reconnect(machine.env, tab.reconnect.sessionId);
+        if (!live) return;
+        if (result.kind === "attached") {
+          setTabs((prev) =>
+            prev.map((t) =>
+              t.id === tab.id && t.type === "terminal"
+                ? { ...t, ptyId: result.alias, attachId: result.alias, killAttachedOnClose: false, reconnect: undefined }
+                : t,
+            ),
+          );
+        } else if (result.kind === "gone") {
+          setTabs((prev) => prev.filter((t) => t.id !== tab.id));
+        }
+      }
+    };
+    // A slow machine can keep one pass going past the next poll; a second pass
+    // would read the same tabs before the first has added its own and add them again.
+    let syncing = false;
     const sync = async () => {
-      const running = (peekWorkspaceList()?.workspaces ?? []).filter((w) => w.state === "ready" && w.access?.canConnect !== false);
+      if (syncing) return;
+      syncing = true;
+      try {
+        await syncOnce();
+      } finally {
+        syncing = false;
+      }
+    };
+    const syncOnce = async () => {
+      // While a workspace is this window's own machine, this Mac is just
+      // another machine: its terminals join the strip like any other's.
+      if (isWorkspaceHost()) {
+        try {
+          joinThisMac();
+          await addFrom(
+            { env: THIS_MAC_ENV, name: "This Mac", invoke: (command) => nativeHost.invoke(command) },
+            (_env, sessionId) => localTabReconnect(sessionId),
+          );
+        } catch {
+          /* This Mac could not be read; the strip stays as it is. */
+        }
+      }
+      const running = workspacesToJoin(peekWorkspaceList()?.workspaces ?? [], activeWorkspace()?.connection.workspaceId);
       for (const workspace of running) {
         try {
           const machine = await connectMachine(workspace.id);
-          const raw = await Promise.race([
-            machine.invoke<unknown>("pty_stats"),
-            new Promise<never>((_, reject) => setTimeout(() => reject(new Error("timed out")), 10_000)),
-          ]);
-          if (!live) return;
-          const need = sessionsNeedingTabs(machine.env, parseMachineSessions(raw), tabsRef.current);
-          if (need.length === 0) continue;
-          const added = need.map((session) => ({
-            id: tabId(),
-            type: "terminal" as const,
-            cwd: session.cwd ?? "",
-            ptyId: null,
-            machine: machine.env,
-            machineName: machineBadge(machine.name),
-            viaAll: true,
-            command: undefined,
-            icon: undefined,
-            name: session.title || `terminal ${session.id}`,
-            reconnect: { sessionId: session.id },
-          }));
-          setTabs((prev) => [...prev, ...(added as unknown as SubTab[])]);
-          // Attach right away: the person chose this mode, so nothing waits on a button.
-          for (const tab of added) {
-            const result = await remoteTabReconnect(machine.env, tab.reconnect.sessionId);
-            if (!live) return;
-            if (result.kind === "attached") {
-              setTabs((prev) =>
-                prev.map((t) =>
-                  t.id === tab.id && t.type === "terminal"
-                    ? { ...t, ptyId: result.alias, attachId: result.alias, killAttachedOnClose: false, reconnect: undefined }
-                    : t,
-                ),
-              );
-            } else if (result.kind === "gone") {
-              setTabs((prev) => prev.filter((t) => t.id !== tab.id));
-            }
-          }
+          await addFrom(machine, (env, sessionId) => remoteTabReconnect(env, sessionId));
         } catch {
           /* A workspace that cannot be read adds nothing; the strip stays as it is. */
         }
@@ -3080,7 +3115,8 @@ const ProjectViewBody = memo(function ProjectViewBody({
     const open: RememberedTerminal[] = tabs
       .filter(
         (t): t is TermSubTab =>
-          t.type === "terminal" && !t.exited && !t.micro && !t.chore,
+          t.type === "terminal" && !t.exited && !t.micro && !t.chore &&
+          rememberableTab(t),
       )
       .map((t) => ({
         cwd: t.cwd,
