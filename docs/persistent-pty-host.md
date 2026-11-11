@@ -13,9 +13,9 @@ are the parent, and tmux would re-emulate the byte stream.
 
 ## Scope of the first PR
 
-- Unix only (macOS, Linux). Windows keeps in-process PTYs (job-object lifetime,
-  untestable here). The host binary still compiles on Windows as a stub so the
-  sidecar packaging step does not break.
+- The app uses the host on Unix (macOS, Linux) only. Windows keeps in-process
+  PTYs in the app; the host itself runs on Windows (see "Windows host" below)
+  but nothing in the app calls it there yet.
 - Off by default behind `CANOPY_PTY_HOST=1`. No UI change, so no mock is owed yet.
   With it on, Quit leaves adoptable terminals running in the host (micro-tasks
   and run-bound tabs are still stopped). A separate "Quit and stop all" entry is
@@ -159,7 +159,45 @@ as a second agent on the same conversation. Ids are seeded past the adopted max.
   input, resize, exit. Agent tools and attention do not come back.
 
 **Not in the first PR:** context-bridge continuity (second commit), quit
-semantics UI, Windows.
+semantics UI, the app using the host on Windows.
+
+## Windows host
+
+The same protocol, server core and client run on Windows; only the transport,
+the PTY and the launch differ (`crates/canopy-pty-host/src/windows.rs`).
+
+- **Transport.** A per-user named pipe, `\\.\pipe\canopy-pty-host-<user SID>`
+  (`windows::default_pipe_name`), passed as `--socket`. Each instance has owner
+  and DACL `O:<sid>D:P(A;;GA;;;<sid>)(A;;GA;;;SY)` plus
+  `PIPE_REJECT_REMOTE_CLIENTS`. The host relies on that DACL (checked by the
+  kernel at open) instead of looking the client up by pid, which races with pid
+  reuse and fails for elevated peers. The name is predictable, so the client
+  checks the pipe's owner is its own SID and opens it with
+  `SECURITY_IDENTIFICATION` before sending an environment full of tokens. All
+  pipe I/O is overlapped: one connection is read and written from two threads.
+  There is no half-close; `shutdown` ends the connection for every clone.
+- **Single instance.** The first instance is created with
+  `FILE_FLAG_FIRST_PIPE_INSTANCE`. A second host fails to bind and exits 0, and
+  the client keeps asking (or starts another) instead of taking a lock file. A
+  dead host leaves no stale pipe.
+- **PTYs.** ConPTY directly (not portable-pty): portable-pty always sets
+  `PSEUDOCONSOLE_INHERIT_CURSOR`, which makes conhost wait for a cursor report
+  that an unattached host session never gets, and cannot create the child
+  suspended. Each child starts suspended, joins its own Job Object with
+  `KILL_ON_JOB_CLOSE`, then resumes. Kill (`SIGKILL`) is `TerminateJobObject`;
+  the soft stop (`SIGTERM`) closes the pseudoconsole (`CTRL_CLOSE_EVENT`). The
+  host closes the pseudoconsole when the child exits, because ConPTY's output
+  pipe never reaches EOF on its own. If the host dies, even by
+  `TerminateProcess`, the job handles close and the sessions die with it.
+  `pgrp` and `raw_mode` answer "unknown". Exit codes are the full `u32`.
+- **Launch.** `CreateProcessW` with `DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP
+  | CREATE_BREAKAWAY_FROM_JOB` (retried without breakaway if the launcher's job
+  refuses it), no inherited handles, and the system directory as the working
+  directory.
+- **Differences from Unix.** Bytes are ConPTY's rendering, not the child's raw
+  output. Background processes still attached to the console are hung up when
+  the main child exits. There is no signal to stop the host gracefully; it stops
+  on `shutdown` or idle exit.
 
 ## Remote runner (follow-up, investigated)
 
@@ -238,4 +276,4 @@ leaves no orphans. Existing `pty.rs` tests must pass with the switch off.
 ## Non-goals
 
 Survival across reboot; surviving a host crash; tmux compatibility; fd passing to
-a new host; Windows in this PR.
+a new host.

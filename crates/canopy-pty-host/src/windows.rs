@@ -190,10 +190,10 @@ fn query_user_sid() -> io::Result<String> {
 pub fn user_sid() -> io::Result<&'static str> {
     static SID: OnceLock<String> = OnceLock::new();
     if let Some(sid) = SID.get() {
-        return Ok(sid);
+        return Ok(sid.as_str());
     }
     let sid = query_user_sid()?;
-    Ok(SID.get_or_init(|| sid))
+    Ok(SID.get_or_init(|| sid).as_str())
 }
 
 /// The per-user pipe name: `\\.\pipe\canopy-pty-host-<SID>`, with `-<tag>`
