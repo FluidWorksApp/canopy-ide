@@ -1044,7 +1044,10 @@ impl Session {
             return false;
         };
         // A hosted session has no local fd; the host answers instead.
-        if let Some(hosted) = master.downcast_ref::<canopy_pty_host::client::HostMaster>() {
+        // The downcast methods exist only on plain `dyn MasterPty`, not on the
+        // `dyn MasterPty + Send` the session stores, so drop the auto trait first.
+        let plain: &dyn MasterPty = &**master;
+        if let Some(hosted) = plain.downcast_ref::<canopy_pty_host::client::HostMaster>() {
             return hosted.raw_mode();
         }
         let Some(fd) = master.as_raw_fd() else {
