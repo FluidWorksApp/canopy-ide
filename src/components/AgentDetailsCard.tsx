@@ -427,7 +427,29 @@ export function AgentDetailsCard({
   const requests = useSyncExternalStore(subscribeRequestTasks, () =>
     requestTasksFor(digest?.session_id ?? ""),
   );
-  const tasks = withRequests(normalizeTasks(digest?.tasks), requests);
+  // Tasks the person removed from this card (kept per session, on this
+  // computer only; the agent's own list is not touched).
+  const hideKey = `canopy.hiddenTasks.${digest?.session_id ?? ""}`;
+  const [hiddenTasks, setHiddenTasks] = useState<string[]>(() => {
+    try {
+      const raw = JSON.parse(localStorage.getItem(hideKey) ?? "[]");
+      return Array.isArray(raw) ? raw.filter((t) => typeof t === "string") : [];
+    } catch {
+      return [];
+    }
+  });
+  const hideTask = (text: string) => {
+    const next = [...hiddenTasks, text];
+    setHiddenTasks(next);
+    try {
+      localStorage.setItem(hideKey, JSON.stringify(next.slice(-200)));
+    } catch {
+      /* storage may be unavailable */
+    }
+  };
+  const tasks = withRequests(normalizeTasks(digest?.tasks), requests).filter(
+    (t) => !hiddenTasks.includes(t.text),
+  );
   const summary = summarizeTasks(tasks);
   const cli = agentCliFor(agent);
   const ws = activeWorkspace();
@@ -957,6 +979,15 @@ export function AgentDetailsCard({
                     ? "●"
                     : "○"}
               </span>
+              <button
+                type="button"
+                className="agent-card-task-x"
+                title="Remove from list"
+                aria-label={`Remove ${task.text}`}
+                onClick={() => hideTask(task.text)}
+              >
+                ×
+              </button>
               <span className="agent-card-task-text">
                 {task.text}
                 {task.fromUser && (
