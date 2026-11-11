@@ -158,9 +158,16 @@ fn disambiguate() {
             (c('i').with_mods(CTRL), &b"\x1b[105;5u"[..]),
             (c(' ').with_mods(CTRL), &b"\x1b[32;5u"[..]),
             (c('[').with_mods(ALT), &b"\x1b[91;3u"[..]),
-            // Lock bits are reported once the key is escaped.
-            (c('a').with_mods(CTRL | CAPS), &b"\x1b[97;69u"[..]),
-            (c('a').with_mods(CTRL | NUM), &b"\x1b[97;133u"[..]),
+            // Spec "Disambiguate escape codes": "Note that the Lock modifiers
+            // are not reported for text producing keys, to keep them usable in
+            // legacy programs. To get lock modifiers for all keys use the
+            // report_all_keys enhancement." (rst 372-374)
+            (c('a').with_mods(CTRL | CAPS), &b"\x1b[97;5u"[..]),
+            (c('a').with_mods(CTRL | NUM), &b"\x1b[97;5u"[..]),
+            (c('a').with_mods(SUPER | CAPS | NUM), &b"\x1b[97;9u"[..]),
+            // Functional keys do report them.
+            (k(Key::Up).with_mods(CAPS), &b"\x1b[1;65A"[..]),
+            (k(Key::F(5)).with_mods(NUM | CTRL), &b"\x1b[15;133~"[..]),
             // Esc is disambiguated.
             (k(Key::Escape), &b"\x1b[27u"[..]),
             (k(Key::Escape).with_mods(SHIFT), &b"\x1b[27;2u"[..]),
@@ -210,6 +217,14 @@ fn disambiguate() {
     );
 }
 
+/// The SS3 forms are in the spec's "Legacy key event encoding" section
+/// ("This form is used only in *cursor key mode* and only when no modifiers
+/// are present", rst 494-496). Under disambiguate the spec instead says: "With
+/// this flag turned on, all key events that do not generate text are
+/// represented in one of the following two forms: `CSI number; modifier u` /
+/// `CSI 1; modifier [~ABCDEFHPQS]`" (rst 359-363), and "all non text keypad
+/// keys will be reported as separate keys with CSI u encoding" (rst 356-357).
+/// So DECCKM and DECKPAM do not apply once disambiguate (or report-all) is on.
 #[test]
 fn disambiguate_ignores_decckm_and_deckpam() {
     let modes = Modes {
@@ -278,10 +293,12 @@ fn report_event_types() {
 
 #[test]
 fn report_event_types_without_disambiguate() {
-    // Presses keep their legacy bytes; releases are CSI u; functional keys use
-    // the kitty CSI forms (no SS3).
+    // Presses are exactly the legacy bytes, DECCKM and DECKPAM included (spec
+    // "Report event types" only adds repeat and release; rst 494-496 for the
+    // SS3 forms). Repeats and releases are kitty escapes.
     let modes = Modes {
         app_cursor_keys: true,
+        app_keypad: true,
         kitty_keyboard: REPORT_EVENT_TYPES,
         ..Modes::default()
     };
@@ -300,15 +317,193 @@ fn report_event_types_without_disambiguate() {
             (k(Key::Enter).with_mods(CTRL), &b"\r"[..]),
             (k(Key::Tab).with_mods(SHIFT), &b"\x1b[Z"[..]),
             (k(Key::Backspace).with_mods(CTRL), &b"\x08"[..]),
-            (k(Key::Up), &b"\x1b[A"[..]),
+            (k(Key::Up), &b"\x1bOA"[..]),
+            (k(Key::Up).with_mods(SHIFT), &b"\x1b[1;2A"[..]),
             (k(Key::Up).with_kind(RELEASE), &b"\x1b[1;1:3A"[..]),
-            (k(Key::F(1)), &b"\x1b[P"[..]),
-            (k(Key::Menu), &b"\x1b[57363u"[..]),
-            (k(Key::Keypad(Keypad::Num1)), &b"1"[..]),
-            (k(Key::Keypad(Keypad::Enter)), &b"\r"[..]),
-            (k(Key::Keypad(Keypad::Home)), &b"\x1b[H"[..]),
+            (k(Key::Up).with_kind(REPEAT), &b"\x1b[1;1:2A"[..]),
+            (k(Key::Home), &b"\x1bOH"[..]),
+            (k(Key::F(1)), &b"\x1bOP"[..]),
+            (k(Key::F(1)).with_kind(RELEASE), &b"\x1b[1;1:3P"[..]),
+            (k(Key::Menu), &b"\x1b[29~"[..]),
+            (k(Key::Menu).with_kind(RELEASE), &b"\x1b[57363;1:3u"[..]),
+            (k(Key::F(13)), &b"\x1b[1;2P"[..]),
+            (k(Key::Media(Media::Play)), &b"\x1b[57428u"[..]),
+            (k(Key::Keypad(Keypad::Num1)).with_text("1"), &b"\x1bOq"[..]),
+            (k(Key::Keypad(Keypad::Num1)).with_mods(ALT), &b"\x1b1"[..]),
+            (k(Key::Keypad(Keypad::Enter)), &b"\x1bOM"[..]),
+            (k(Key::Keypad(Keypad::Home)), &b"\x1bOH"[..]),
+            (
+                k(Key::Keypad(Keypad::Home)).with_kind(RELEASE),
+                &b"\x1b[1;1:3H"[..],
+            ),
         ],
     );
+}
+
+#[test]
+fn alternates_never_change_whether_a_press_is_escaped() {
+    // Spec "Report alternate keys": "only key events represented as escape
+    // codes due to the other enhancements in effect will be affected by this
+    // enhancement. In other words, only if a key event was already going to be
+    // represented as an escape code due to one of the other enhancements will
+    // this enhancement affect it." (rst 401-405)
+    let cyr_es = '\u{441}'; // с
+    let cyr_es_upper = '\u{421}'; // С
+    check_keys(
+        kitty(REPORT_EVENT_TYPES | REPORT_ALTERNATES),
+        &[
+            (
+                c('a').with_mods(CTRL | SHIFT).with_shifted_key('A'),
+                &b"\x01"[..],
+            ),
+            (
+                c(cyr_es).with_mods(CTRL).with_base_layout_key('c'),
+                &b"\x03"[..],
+            ),
+            (
+                c(cyr_es)
+                    .with_mods(CTRL | SHIFT)
+                    .with_shifted_key(cyr_es_upper)
+                    .with_base_layout_key('c'),
+                &b"\x03"[..],
+            ),
+            // Releases are escaped by event types, so alternates decorate them.
+            (
+                c('a')
+                    .with_mods(CTRL | SHIFT)
+                    .with_shifted_key('A')
+                    .with_kind(RELEASE),
+                &b"\x1b[97:65;6:3u"[..],
+            ),
+            (
+                c(cyr_es)
+                    .with_mods(CTRL)
+                    .with_base_layout_key('c')
+                    .with_kind(RELEASE),
+                &b"\x1b[1089::99;5:3u"[..],
+            ),
+            // A press legacy cannot express is escaped, and decorated.
+            (
+                c(cyr_es).with_mods(SUPER).with_base_layout_key('c'),
+                &b"\x1b[1089::99;9u"[..],
+            ),
+        ],
+    );
+}
+
+#[test]
+fn presses_are_legacy_bytes_without_disambiguate_or_report_all() {
+    // Invariant: any press that legacy encodes gives identical bytes under
+    // 0b10, 0b100, 0b110 and 0b10110, in every cursor/keypad mode.
+    let mut events = vec![
+        k(Key::Escape),
+        k(Key::Enter),
+        k(Key::Tab),
+        k(Key::Backspace),
+        k(Key::Insert),
+        k(Key::Delete),
+        k(Key::Left),
+        k(Key::Right),
+        k(Key::Up),
+        k(Key::Down),
+        k(Key::PageUp),
+        k(Key::PageDown),
+        k(Key::Home),
+        k(Key::End),
+        k(Key::Menu),
+        k(Key::Keypad(Keypad::Begin)),
+        k(Key::Keypad(Keypad::Num5)).with_text("5"),
+        k(Key::Keypad(Keypad::Enter)),
+        k(Key::Keypad(Keypad::Up)),
+        c('a').with_text("a"),
+        c('a').with_shifted_key('A'),
+        c('3').with_shifted_key('#'),
+        c(' '),
+        c('\u{441}').with_base_layout_key('c'),
+    ];
+    for n in 1..=24 {
+        events.push(k(Key::F(n)));
+    }
+    let mod_sets = [
+        Mods::NONE,
+        SHIFT,
+        ALT,
+        CTRL,
+        CTRL | SHIFT,
+        CTRL | ALT,
+        SHIFT | ALT,
+        CAPS | NUM,
+    ];
+    for app_cursor_keys in [false, true] {
+        for app_keypad in [false, true] {
+            let base = Modes {
+                app_cursor_keys,
+                app_keypad,
+                ..Modes::default()
+            };
+            for ev in &events {
+                for m in mod_sets {
+                    let ev = ev.with_mods(ev.mods | m);
+                    let legacy = common::key(ev, base);
+                    if legacy.is_empty() {
+                        continue;
+                    }
+                    for flags in [
+                        REPORT_EVENT_TYPES,
+                        REPORT_ALTERNATES,
+                        REPORT_EVENT_TYPES | REPORT_ALTERNATES,
+                        REPORT_EVENT_TYPES | REPORT_ALTERNATES | REPORT_TEXT,
+                    ] {
+                        let got = common::key(
+                            ev,
+                            Modes {
+                                kitty_keyboard: flags,
+                                ..base
+                            },
+                        );
+                        assert_eq!(
+                            show(&got),
+                            show(&legacy),
+                            "{ev:?} flags {flags:#b} DECCKM {app_cursor_keys} DECKPAM {app_keypad}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn control_characters_in_char_keys() {
+    // A Char holding a control character is the named key, or nothing.
+    for flags in [0, DISAMBIGUATE, REPORT_EVENT_TYPES, REPORT_ALL_KEYS] {
+        let m = kitty(flags);
+        for (ch, named) in [
+            ('\r', Key::Enter),
+            ('\n', Key::Enter),
+            ('\t', Key::Tab),
+            ('\x1b', Key::Escape),
+            ('\x7f', Key::Backspace),
+            ('\x08', Key::Backspace),
+        ] {
+            for mods in [Mods::NONE, CTRL, ALT | SHIFT] {
+                assert_eq!(
+                    common::key(c(ch).with_mods(mods), m),
+                    common::key(k(named).with_mods(mods), m),
+                    "{ch:?} {mods:?} flags {flags:#b}"
+                );
+            }
+        }
+        for ch in ['\u{0}', '\u{1}', '\u{1f}', '\u{80}', '\u{9b}', '\u{9f}'] {
+            assert!(common::key(c(ch), m).is_empty(), "{ch:?} flags {flags:#b}");
+            assert!(
+                common::key(c(ch).with_mods(CTRL), m).is_empty(),
+                "{ch:?} flags {flags:#b}"
+            );
+        }
+    }
+    assert_eq!(common::key(c('\r'), Modes::default()), b"\r");
+    assert_eq!(common::key(c('\x1b'), kitty(DISAMBIGUATE)), b"\x1b[27u");
 }
 
 #[test]
