@@ -10,7 +10,8 @@ import { activeExecutionTarget, canLaunchOnActiveTarget, requestTargetTransition
 import { TELEPORT_TO_MAC, TeleportFlow } from "../TeleportFlow";
 import { useAllWorkspaces } from "../../remoteExecution/allMode";
 import { connectMachine } from "../../environments/live";
-import { machineBadge, parseMachineSessions, rememberableTab, sessionsNeedingTabs, THIS_MAC_ENV, workspacesToJoin } from "../../environments/allWorkspaceTabs";
+import { closedKey, machineBadge, parseMachineSessions, rememberableTab, sessionsNeedingTabs, THIS_MAC_ENV, withoutClosed, workspacesToJoin } from "../../environments/allWorkspaceTabs";
+import { routeOf } from "../../environments/ptyRoute";
 import { peekWorkspaceList } from "../../remoteExecution/workspaceListCache";
 import { setPendingLaunch, takePendingLaunch, type PendingLaunch } from "../../placement/pendingLaunch";
 import { canonicalProjectId } from "../../placement/identity";
@@ -1919,9 +1920,13 @@ const ProjectViewBody = memo(function ProjectViewBody({
   // The agent card docked beside the terminal: the terminal narrows to leave its column.
   const [cardDocked, setCardDocked] = useState(false);
   const allWorkspaces = useAllWorkspaces();
+  // Sessions whose tab the person closed here. The refresh below must not add
+  // them back while they keep running on their machine.
+  const closedViaAllRef = useRef(new Set<string>());
   useEffect(() => {
     if (!visible) return;
     if (!allWorkspaces) {
+      closedViaAllRef.current.clear();
       leaveThisMac();
       setTabs((prev) => {
         const kept = prev.filter((t) => !(t.type === "terminal" && t.viaAll));
@@ -1944,7 +1949,11 @@ const ProjectViewBody = memo(function ProjectViewBody({
         new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new Error("timed out")), 10_000); }),
       ]).finally(() => clearTimeout(timer));
       if (!live) return;
-      const need = sessionsNeedingTabs(machine.env, parseMachineSessions(raw), tabsRef.current);
+      const need = sessionsNeedingTabs(
+        machine.env,
+        withoutClosed(machine.env, parseMachineSessions(raw), closedViaAllRef.current),
+        tabsRef.current,
+      );
       if (need.length === 0) return;
       const added = need.map((session) => ({
         id: tabId(),
@@ -4242,7 +4251,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
         // reservation already made above — so job_done's recordTaskEnd finds
         // it, settles the attempt as completed, and the run shows in history
         // instead of vanishing with the pane.
-        const appInstance = await ipc.instanceId().catch(() => undefined);
+        const appInstance = await ipc.launchId().catch(() => undefined);
         adoptTaskReservation(reservation, {
           taskId: "agent-delegation",
           label: title,
@@ -4455,7 +4464,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
       let reservation: TaskReservation;
       let durableHistory;
       try {
-        const appInstance = await ipc.instanceId();
+        const appInstance = await ipc.launchId();
         durableHistory = { ...history, appInstance };
         reservation = existingReservation ?? await reserveTask({
             kind: def.id,
@@ -7420,6 +7429,14 @@ const ProjectViewBody = memo(function ProjectViewBody({
       closingTab.attachId != null
     ) {
       terminalAttachmentQueue.forget(project.id, closingTab.attachId);
+    }
+    if (origin === "user" && closingTab?.type === "terminal" && closingTab.viaAll) {
+      // Closing the tab lets go of the session; remember that, or the next
+      // refresh of "All workspaces" would add it straight back.
+      const route = closingTab.ptyId != null ? routeOf(closingTab.ptyId) : null;
+      const sessionId = closingTab.reconnect?.sessionId ?? route?.id;
+      const env = closingTab.machine ?? route?.env;
+      if (sessionId != null && env) closedViaAllRef.current.add(closedKey(env, sessionId));
     }
     if (closingTab?.type === "preview") forgetBrowserTarget(id);
     if (
