@@ -7,6 +7,8 @@ export type TaskStatus = "pending" | "running" | "completed";
 export interface AgentTask {
   text: string;
   status: TaskStatus;
+  /** A request the person made that the agent never listed. */
+  fromUser?: boolean;
 }
 
 export interface TaskSummary {
@@ -80,4 +82,37 @@ export function subAgentPrompt(task: AgentTask): string {
 
 export function completePrompt(task: AgentTask): string {
   return `Please complete this task now: ${task.text}. Mark it done in your task list when it is finished.`;
+}
+
+const words = (s: string) =>
+  new Set(
+    s
+      .toLowerCase()
+      .split(/[^a-z0-9]+/)
+      .filter((w) => w.length > 2),
+  );
+
+/** True when two task texts are about the same thing (most words shared). */
+export function sameTask(a: string, b: string): boolean {
+  const x = words(a);
+  const y = words(b);
+  if (!x.size || !y.size) return false;
+  let hit = 0;
+  for (const w of x) if (y.has(w)) hit++;
+  return hit / Math.min(x.size, y.size) >= 0.6;
+}
+
+/** The agent's tasks plus the person's requests the agent did not list. */
+export function withRequests(
+  tasks: AgentTask[],
+  requests: readonly { title: string; status: "open" | "done" }[],
+): AgentTask[] {
+  const extra: AgentTask[] = requests
+    .filter((r) => !tasks.some((t) => sameTask(t.text, r.title)))
+    .map((r) => ({
+      text: r.title,
+      status: r.status === "done" ? "completed" : "pending",
+      fromUser: true,
+    }));
+  return [...tasks, ...extra];
 }

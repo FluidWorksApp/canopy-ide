@@ -31,7 +31,9 @@ const CANDIDATE_FILE_MAX_BYTES: u64 = 10 * 1024 * 1024;
 const CANDIDATES_MAX_BYTES: u64 = 100 * 1024 * 1024;
 const EXTRA_MAX: usize = 200;
 /// Folders that are rebuilt or reinstalled remotely, never worth copying.
-const HEAVY_DIRS: [&str; 12] = [
+const HEAVY_DIRS: [&str; 13] = [
+    // Canopy's own folder (screenshots, notes, state): never sent to a workspace.
+    ".canopy",
     "node_modules",
     "target",
     ".git",
@@ -1002,6 +1004,13 @@ mod tests {
         std::fs::write(mac.join("local/settings.json"), "{}").unwrap();
         std::fs::create_dir_all(mac.join("node_modules/pkg")).unwrap();
         std::fs::write(mac.join("node_modules/pkg/a.js"), "x").unwrap();
+        std::fs::create_dir_all(mac.join(".canopy/spot")).unwrap();
+        std::fs::write(mac.join(".canopy/spot/shot.png"), "x").unwrap();
+        std::fs::write(
+            mac.join(".gitignore"),
+            ".env\nnode_modules\nlocal/\n*.sqlite\n.canopy/\n",
+        )
+        .unwrap();
         let found = ignored_candidates(&mac);
         let summary: Vec<_> = found
             .iter()

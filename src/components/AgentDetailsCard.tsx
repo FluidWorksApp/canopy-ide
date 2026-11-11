@@ -6,7 +6,7 @@
 //
 // It only reads: the digest the hook wrote, `git status`, and the PR list. The
 // task actions send the agent a message, exactly as typing it would.
-import { useEffect, useState } from "react";
+import { useEffect, useState, useSyncExternalStore } from "react";
 import { runCommitPushPr } from "../commitPushPrIpc";
 import * as ipc from "../ipc";
 import { agentCliFor } from "../projects";
@@ -18,6 +18,7 @@ import {
   focusPrompt,
   subAgentPrompt,
   normalizeTasks,
+  withRequests,
   summarizeTasks,
   taskHeadline,
   type AgentTask,
@@ -27,6 +28,7 @@ import { liveEnvironments } from "../environments/live";
 import { openRemoteFile } from "../environments/remoteFiles";
 import { collectAssets, previewAssets, type Asset } from "../agentAssets";
 import { AssetPreview } from "./AssetPreview";
+import { requestTasksFor, subscribeRequestTasks } from "../requestTasks";
 import { AgentIcon, GitBranchIcon, TasksIcon } from "./icons";
 import type { Life } from "../../shared/agentLife";
 
@@ -422,7 +424,10 @@ export function AgentDetailsCard({
   // Assets list keeps only the files the agent made.
   const servers = previewAssets(ports);
   const assets = collectAssets(digest?.files, cwd);
-  const tasks = normalizeTasks(digest?.tasks);
+  const requests = useSyncExternalStore(subscribeRequestTasks, () =>
+    requestTasksFor(digest?.session_id ?? ""),
+  );
+  const tasks = withRequests(normalizeTasks(digest?.tasks), requests);
   const summary = summarizeTasks(tasks);
   const cli = agentCliFor(agent);
   const ws = activeWorkspace();
@@ -952,7 +957,12 @@ export function AgentDetailsCard({
                     ? "●"
                     : "○"}
               </span>
-              <span className="agent-card-task-text">{task.text}</span>
+              <span className="agent-card-task-text">
+                {task.text}
+                {task.fromUser && (
+                  <span className="agent-card-task-you">You asked</span>
+                )}
+              </span>
               {task.status !== "completed" && (
                 <span className="agent-card-task-actions">
                   <button
