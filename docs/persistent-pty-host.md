@@ -101,12 +101,45 @@ and PR. The Unix host protocol here is intended to be reusable by it.
 
 ## Tailscale (follow-up, separate PR)
 
-User requirement: native Tailscale support with an in-app login. It fronts the
-Canopy Remote portal; the PTY-host socket stays local-only. Findings: on this Mac
-the Homebrew `tailscale` on PATH cannot reach the daemon, while the app's own
-binary `/Applications/Tailscale.app/Contents/MacOS/Tailscale` works, so binary
-discovery must probe candidates. `tunnel.rs` currently only runs
-`tailscale funnel PORT` via PATH.
+User requirement: native Tailscale support, with an in-app login when one is
+needed. It fronts the Canopy Remote portal (`portal.rs`); the PTY-host socket
+stays local-only.
+
+**Binary discovery.** On this Mac the Homebrew `tailscale` on PATH fails ("failed
+to connect to local Tailscale service") while the app's own binary,
+`/Applications/Tailscale.app/Contents/MacOS/Tailscale`, answers. `tunnel.rs` only
+runs `tailscale funnel PORT` via PATH, so it is broken here. Discovery must probe
+candidates (app bundle, PATH, Linux and Windows install paths) and keep the first
+whose `status --json` parses. That is a pure function and can be tested.
+
+**Commands Canopy would run** (CLI help read locally; doc claims are from
+tailscale.com and third-party reports, and the docs themselves say the JSON
+format may change):
+- State: `tailscale status --json`. `BackendState` is `Running` when connected;
+  other values reported include `NeedsLogin`, `NeedsMachineAuth` (waiting for an
+  admin to approve the node, no login URL), `Stopped` and `Starting`. `AuthURL`
+  carries the login link when there is one; with the control plane unreachable it
+  can be empty. Observed locally: `Self.DNSName`, `TailscaleIPs`, `Health`.
+- Login: `tailscale up --json` (flag exists; its `AuthURL` field is reported by a
+  third-party write-up, not confirmed in official docs, so verify against
+  `cmd/tailscale/cli/up.go` before relying on it). Open the URL in the system
+  browser and poll `status --json` until `Running`, since identity providers often
+  refuse embedded webviews (recalled). Headless alternatives: `--auth-key`,
+  `--login-server` (self-hosted control server).
+- Tailnet-only portal: `tailscale serve --bg --https=443 http://127.0.0.1:6680`,
+  which needs HTTPS certificates enabled for the tailnet. Inspect with
+  `serve status --json` first so a user's own serve config is never overwritten;
+  undo with `serve reset`.
+- Public link: `tailscale funnel --bg PORT`, only on ports 443, 8443 and 10000,
+  needs the `funnel` node attribute in the tailnet policy.
+- Addresses and checks: `tailscale ip -4`, `whois`, `ping`.
+
+**Do not run** `up`, `login`, `logout`, `serve` or `funnel` while testing on a
+developer machine: they change the user's network. Fixtures must be synthetic,
+since a real `status --json` holds tailnet names and peers.
+
+**Login UX** goes in the existing remote-link section with no new settings page,
+and gets a mock before it is built.
 
 ## Tests (CI is the compiler; local cargo builds are off)
 
