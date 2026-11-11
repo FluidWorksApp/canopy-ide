@@ -30433,3 +30433,18 @@ a.btn-sm {
 .floating-phone-error {
   color: var(--danger, #e5484d);
 }
+
+.desk-perms {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.desk-perm {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 5px 10px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+}

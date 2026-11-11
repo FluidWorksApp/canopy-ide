@@ -41,13 +41,20 @@ function shortFingerprint(key: string | null): string | null {
   if (!key) return null;
   const compact = key.replace(/[^a-fA-F0-9]/g, "").toUpperCase();
   if (!compact) return null;
-  return compact.slice(0, 12).match(/.{1,4}/g)?.join(" ") ?? null;
+  return (
+    compact
+      .slice(0, 12)
+      .match(/.{1,4}/g)
+      ?.join(" ") ?? null
+  );
 }
 
 function trustEvidence(member?: RelayMember): string {
   if (!member) return "Device identity is unavailable for this member.";
   const fingerprint = shortFingerprint(member.key);
-  const key = fingerprint ? ` Key ${fingerprint}.` : " Key fingerprint unavailable.";
+  const key = fingerprint
+    ? ` Key ${fingerprint}.`
+    : " Key fingerprint unavailable.";
   switch (member.trust) {
     case "known":
       return `Known device.${key}`;
@@ -73,6 +80,24 @@ export function ConsentDialog({
 }) {
   const [answering, setAnswering] = useState<DeskMode | "deny" | null>(null);
   const [error, setError] = useState("");
+  // What the OS allows (macOS asks for Screen recording and Accessibility).
+  const [perms, setPerms] = useState<ipc.DeskPerms | null>(null);
+  useEffect(() => {
+    let live = true;
+    const check = () =>
+      void ipc
+        .deskPermissions()
+        .then((p) => live && setPerms(p))
+        .catch(() => live && setPerms({ screen: true, input: true }));
+    check();
+    window.addEventListener("focus", check);
+    return () => {
+      live = false;
+      window.removeEventListener("focus", check);
+    };
+  }, []);
+  const viewOk = !perms || perms.screen;
+  const controlOk = !perms || (perms.screen && perms.input);
   const answer = (accept: boolean, mode: DeskMode) => {
     if (answering) return;
     setAnswering(accept ? mode : "deny");
@@ -90,33 +115,75 @@ export function ConsentDialog({
       body={
         <>
           <span>
-            {viewOnly ? "They asked to view only. " : ""}Nothing is shared until you choose.
-            You can stop the session at any time from the banner at the top of the window.
+            {viewOnly ? "They asked to view only. " : ""}Nothing is shared until
+            you choose. You can stop the session at any time from the banner at
+            the top of the window.
           </span>
-          <span className={`desk-trust ${member?.trust === "changed" ? "changed" : ""}`}>
-            {trustEvidence(member)} Names are chosen by each person, so only accept from someone
-            you expect.
+          <span
+            className={`desk-trust ${member?.trust === "changed" ? "changed" : ""}`}
+          >
+            {trustEvidence(member)} Names are chosen by each person, so only
+            accept from someone you expect.
           </span>
-          {error && <span role="alert" className="desk-inline-error">{error}</span>}
+          {perms && (!perms.screen || !perms.input) && (
+            <span className="desk-perms">
+              {(
+                [
+                  ["screen", "Screen recording", perms.screen],
+                  ["input", "Accessibility (control)", perms.input],
+                ] as const
+              ).map(([kind, label, ok]) => (
+                <span key={kind} className="desk-perm">
+                  <span>{label}</span>
+                  {ok ? (
+                    <span aria-label="Allowed">✓</span>
+                  ) : (
+                    <Button
+                      size="sm"
+                      variant="accent"
+                      onClick={() =>
+                        void ipc.deskRequestPermission(kind).catch(() => {})
+                      }
+                    >
+                      Allow
+                    </Button>
+                  )}
+                </span>
+              ))}
+              <span>Allow it in System Settings, then restart Canopy.</span>
+            </span>
+          )}
+          {error && (
+            <span role="alert" className="desk-inline-error">
+              {error}
+            </span>
+          )}
         </>
       }
-      meta={viewOnly ? "They will not be able to move your mouse or type." : "Control lets them move your mouse and type on this computer."}
+      meta={
+        viewOnly
+          ? "They will not be able to move your mouse or type."
+          : "Control lets them move your mouse and type on this computer."
+      }
       dismissLabel={answering === "deny" ? "Denying…" : "Deny"}
       onDismiss={() => answer(false, "view-only")}
       actions={[
         {
           label: answering === "view-only" ? "Accepting…" : "Accept view-only",
           primary: true,
-          disabled: answering !== null,
+          disabled: answering !== null || !viewOk,
           onClick: () => answer(true, "view-only"),
         },
         ...(viewOnly
           ? []
-          : [{
-              label: answering === "control" ? "Accepting…" : "Accept control",
-              disabled: answering !== null,
-              onClick: () => answer(true, "control"),
-            }]),
+          : [
+              {
+                label:
+                  answering === "control" ? "Accepting…" : "Accept control",
+                disabled: answering !== null || !controlOk,
+                onClick: () => answer(true, "control"),
+              },
+            ]),
       ]}
     />
   );
@@ -126,7 +193,11 @@ export function ControlledBanner({ session }: { session: DeskStateEvent }) {
   return (
     <div className="desk-banner" role="alert">
       <span>{bannerText(session)}</span>
-      <Button size="sm" variant="danger" onClick={() => void ipc.deskEnd(session.session).catch(() => {})}>
+      <Button
+        size="sm"
+        variant="danger"
+        onClick={() => void ipc.deskEnd(session.session).catch(() => {})}
+      >
         Stop
       </Button>
     </div>
@@ -174,14 +245,17 @@ export function RemoteDesktopView({
           f.h <= 0 ||
           f.w > MAX_FRAME_DIMENSION ||
           f.h > MAX_FRAME_DIMENSION
-        ) return;
+        )
+          return;
         const el = canvas.current;
         if (!el || typeof createImageBitmap !== "function") return;
         void (async () => {
           try {
             const bin = atob(f.jpeg_b64);
             const bytes = Uint8Array.from(bin, (c) => c.charCodeAt(0));
-            const bmp = await createImageBitmap(new Blob([bytes], { type: "image/jpeg" }));
+            const bmp = await createImageBitmap(
+              new Blob([bytes], { type: "image/jpeg" }),
+            );
             const valid =
               bmp.width > 0 &&
               bmp.height > 0 &&
@@ -217,7 +291,10 @@ export function RemoteDesktopView({
   );
 
   useEffect(() => {
-    restoreFocus.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    restoreFocus.current =
+      document.activeElement instanceof HTMLElement
+        ? document.activeElement
+        : null;
     return () => restoreFocus.current?.focus({ preventScroll: true });
   }, []);
 
@@ -246,7 +323,13 @@ export function RemoteDesktopView({
     const el = canvas.current;
     if (!el) return null;
     const r = el.getBoundingClientRect();
-    return pointerToNormalized(clientX, clientY, r, size.current.w, size.current.h);
+    return pointerToNormalized(
+      clientX,
+      clientY,
+      r,
+      size.current.w,
+      size.current.h,
+    );
   }, []);
 
   const releaseHeld = useCallback(() => {
@@ -259,7 +342,10 @@ export function RemoteDesktopView({
       if (k.startsWith("b:")) {
         send(session, {
           kind: "mouse-button",
-          button: k.slice(2) as Extract<InputEvent, { kind: "mouse-button" }>["button"],
+          button: k.slice(2) as Extract<
+            InputEvent,
+            { kind: "mouse-button" }
+          >["button"],
           down: false,
         });
       } else {
@@ -281,7 +367,8 @@ export function RemoteDesktopView({
   );
 
   useEffect(() => {
-    if (held.current.size && (heldSession.current !== view.session || !control)) releaseHeld();
+    if (held.current.size && (heldSession.current !== view.session || !control))
+      releaseHeld();
   }, [control, releaseHeld, view.session]);
 
   // Pointer capture keeps a drag owned by the canvas. The window listener is
@@ -321,9 +408,11 @@ export function RemoteDesktopView({
 
   const containFocus = (event: React.KeyboardEvent) => {
     if (event.key !== "Tab" || !viewer.current) return;
-    const focusable = [...viewer.current.querySelectorAll<HTMLElement>(
-      'button:not([disabled]),[href],input:not([disabled]),select:not([disabled]),textarea:not([disabled]),[tabindex]:not([tabindex="-1"])',
-    )];
+    const focusable = [
+      ...viewer.current.querySelectorAll<HTMLElement>(
+        'button:not([disabled]),[href],input:not([disabled]),select:not([disabled]),textarea:not([disabled]),[tabindex]:not([tabindex="-1"])',
+      ),
+    ];
     if (focusable.length === 0) return;
     event.preventDefault();
     event.stopPropagation();
@@ -353,11 +442,17 @@ export function RemoteDesktopView({
         </span>
         <span className="desk-spacer" />
         {live ? (
-          <Button size="sm" variant="danger" onClick={() => void ipc.deskEnd(view.session).catch(() => {})}>
+          <Button
+            size="sm"
+            variant="danger"
+            onClick={() => void ipc.deskEnd(view.session).catch(() => {})}
+          >
             End
           </Button>
         ) : (
-          <Button size="sm" onClick={onClose}>Close</Button>
+          <Button size="sm" onClick={onClose}>
+            Close
+          </Button>
         )}
       </div>
       <canvas
@@ -396,7 +491,11 @@ export function RemoteDesktopView({
           event.preventDefault();
           event.stopPropagation();
           if (!control) return;
-          emit({ kind: "scroll", dx: clampScroll(event.deltaX), dy: clampScroll(event.deltaY) });
+          emit({
+            kind: "scroll",
+            dx: clampScroll(event.deltaX),
+            dy: clampScroll(event.deltaY),
+          });
         }}
         onKeyDown={(event) => {
           const code = mapKeyCode(event.code);
@@ -430,7 +529,9 @@ export function DeskOverlay({
   const [hidden, setHidden] = useState<string | null>(null);
   if (!desk) return null;
   if (needsConsent(desk)) {
-    const member = relay?.status.members.find((candidate) => candidate.id === desk.peer);
+    const member = relay?.status.members.find(
+      (candidate) => candidate.id === desk.peer,
+    );
     return <ConsentDialog session={desk} member={member} />;
   }
   if (isBeingViewed(desk)) return <ControlledBanner session={desk} />;
@@ -458,8 +559,13 @@ export function RemoteDesktopMembers({
   relay: RelayHandle;
   onNotice?: Notify;
 }) {
-  const [pending, setPending] = useState<{ peer: string; mode: DeskMode } | null>(null);
-  const [error, setError] = useState<{ peer: string; message: string } | null>(null);
+  const [pending, setPending] = useState<{
+    peer: string;
+    mode: DeskMode;
+  } | null>(null);
+  const [error, setError] = useState<{ peer: string; message: string } | null>(
+    null,
+  );
   const { self_id: selfId, role, members } = relay.status;
   if (role === "off") return null;
   const others = members.filter((member) => member.id !== selfId);
@@ -470,27 +576,41 @@ export function RemoteDesktopMembers({
     if (pending || busy) return;
     setPending({ peer, mode });
     setError(null);
-    void relay.deskRequest(peer, mode).catch((reason) => {
-      const message = String(reason);
-      setError({ peer, message });
-      onNotice?.(message, "error");
-    }).finally(() => setPending(null));
+    void relay
+      .deskRequest(peer, mode)
+      .catch((reason) => {
+        const message = String(reason);
+        setError({ peer, message });
+        onNotice?.(message, "error");
+      })
+      .finally(() => setPending(null));
   };
 
   return (
     <section className="desk-members" aria-label="Remote desktop">
       <h3 className="team-hub-section">Remote desktop</h3>
       {others.map((member) => {
-        const requestingView = pending?.peer === member.id && pending.mode === "view-only";
-        const requestingControl = pending?.peer === member.id && pending.mode === "control";
+        const requestingView =
+          pending?.peer === member.id && pending.mode === "view-only";
+        const requestingControl =
+          pending?.peer === member.id && pending.mode === "control";
         return (
           <div key={member.id} className="team-row desk-member-row">
             <span className="team-row-text">
               <strong>{member.name}</strong>
-              {error?.peer === member.id && <span role="alert" className="desk-inline-error">{error.message}</span>}
+              {error?.peer === member.id && (
+                <span role="alert" className="desk-inline-error">
+                  {error.message}
+                </span>
+              )}
               {pending?.peer === member.id && (
-                <span role="status" aria-live="polite" className="desk-request-status">
-                  Requesting {pending.mode === "control" ? "control" : "view only"}…
+                <span
+                  role="status"
+                  aria-live="polite"
+                  className="desk-request-status"
+                >
+                  Requesting{" "}
+                  {pending.mode === "control" ? "control" : "view only"}…
                 </span>
               )}
             </span>
