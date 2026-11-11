@@ -126,3 +126,61 @@ jobs:
           path: ${{ runner.temp }}/test-build/
           if-no-files-found: error
           retention-days: 7
+
+  # The native terminal window example from PR #797, from its own branch. The
+  # README template comes from this branch's checkout.
+  term-window:
+    name: macOS arm64 term_window example (PR #797)
+    runs-on: macos-15
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/checkout@v4
+        with:
+          ref: feat/term-window
+          path: term-window
+
+      - id: ref
+        working-directory: term-window
+        run: echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: "term-window/crates/canopy-term-window -> target"
+          key: test-build-term-window
+
+      - name: Build the example (release)
+        working-directory: term-window/crates/canopy-term-window
+        run: cargo build --release --locked --example term_window
+
+      - name: Stage the artifact
+        env:
+          SHA: ${{ steps.ref.outputs.sha }}
+          RUN_ID: ${{ github.run_id }}
+          REPO: ${{ github.repository }}
+          ARTIFACT: canopy-term-window-example-macos-${{ github.sha }}
+        run: |
+          stage="$RUNNER_TEMP/term-window"
+          mkdir -p "$stage"
+          bin="term-window/crates/canopy-term-window/target/release/examples/term_window"
+          if [ ! -s "$bin" ]; then
+            echo "::error::$bin is missing or empty."
+            exit 1
+          fi
+          cp "$bin" "$stage/term_window"
+          file "$stage/term_window"
+          sed -e "s|@SHA@|$SHA|g" -e "s|@RUN_ID@|$RUN_ID|g" \
+              -e "s|@REPO@|$REPO|g" -e "s|@ARTIFACT@|$ARTIFACT|g" \
+              .github/test-build/term-window-README.md > "$stage/README.md"
+          ls -la "$stage"
+          cat "$stage/README.md"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: canopy-term-window-example-macos-${{ github.sha }}
+          path: ${{ runner.temp }}/term-window/
+          if-no-files-found: error
+          retention-days: 7
