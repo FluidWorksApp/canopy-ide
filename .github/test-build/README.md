@@ -5,6 +5,12 @@ Built by `.github/workflows/test-build.yml` from branch `@BRANCH@`, commit
 shipped app). It is **unsigned and not notarized**, has no updater signature,
 and is not a release.
 
+This build is `release/v0.5.15` (which already contains the whole PTY host
+stack: #780, #791, #794, #795, #801 and the rest) **plus #792 (host
+packaging), which is not in the release yet**. The test build therefore
+exercises the packaged host: the app installs the bundled `canopy-pty-host`
+under `~/.canopy/pty-host/bin/<version>-<hash>/` and starts it from there.
+
 Files: `Canopy.app.zip` (the app, zipped with `ditto`), the `.dmg` if one was
 built, and this README.
 
@@ -75,10 +81,16 @@ b. **Context bridge.** In the adopted Claude agent, call a canopy tool (for
    work against the new app, through `~/.canopy/pty-host/ctx.sock`.
 
 c. **Quit and Stop All.** With an agent running, press ⌥⌘Q (or pick the app
-   menu item under Quit). On every platform, with the host on or off, a dialog
-   asks "Stop 1 running agent?" whenever agents run (there is no "Quit only"
-   button with the host off). With the host on, choose **Stop all**. Relaunch with the flag: the terminal shows Resume, not
-   Reconnecting. After about 60 s, `pgrep canopy-pty-host` prints nothing.
+   menu item under Quit). With the host on or off, on every platform, a dialog
+   asks "Stop N running agents?" whenever any agent runs. The count includes
+   leftover hosted sessions from earlier launches that this launch did not take
+   over (check this: leave one behind, relaunch, and the count includes it).
+   With the host on, the dialog offers **Quit only**, and its copy says the
+   terminals keep running for up to 2 hours (the linger), and **Stop all**.
+   With the host off there is no **Quit only** button, because quitting ends
+   the terminals anyway. Choose **Stop all** with the host on, then relaunch
+   with the flag: the terminal shows Resume, not Reconnecting. After about 60 s,
+   `pgrep canopy-pty-host` prints nothing.
 
 d. **Flag off.** Launch without the flag (see above), open a terminal and quit.
    The terminals are killed as before, and nothing is adopted on the next
@@ -95,6 +107,17 @@ e. **No quarantine on the installed host.** After a launch with the flag:
    browser, unzip it in Finder, open it with Open Anyway, and do not run `xattr
    -dr`. A `gh run download` copy has no quarantine to begin with.
 
+f. **Unusable host notice.** Only if you can make the host unusable (for
+   example a stale non-host process holding `~/.canopy/pty-host/host.sock`).
+   Launch with the flag. A one-time notice appears saying the host was unusable
+   and this launch's terminals run in-process, so Quit ends them. It does not
+   repeat on the next terminal.
+
+g. **Dropped paste.** With the host on, paste a very large block of text (a few
+   MB) into a hosted terminal. If the host cannot take all of it, the terminal
+   now disconnects instead of delivering a partial paste into the shell. A
+   normal-size paste must still arrive whole.
+
 Useful while testing: `pgrep -fl canopy-pty-host`, `ls ~/.canopy/pty-host`.
 
 ## When you are done
@@ -102,3 +125,18 @@ Useful while testing: `pgrep -fl canopy-pty-host`, `ls ~/.canopy/pty-host`.
 A host left by a plain ⌘Q can linger for up to two hours. Use Quit and Stop All,
 or `pkill canopy-pty-host`. Then run `launchctl unsetenv CANOPY_PTY_HOST` if you
 set it, and delete the test app.
+
+## Native terminal example (not built here)
+
+The `canopy-term-app` binaries come from PR #800's CI (run 43042958377), not
+from this workflow. Artifacts: `canopy-term-app-macos-15`,
+`canopy-term-app-windows-2022`, `canopy-term-app-ubuntu-latest`. On the Mac:
+
+```sh
+mkdir -p ~/Downloads/canopy-term-app && cd ~/Downloads/canopy-term-app
+gh run download 43042958377 -R FluidWorksApp/canopy-ide -n canopy-term-app-macos-15
+```
+
+The artifact zip drops the exec bit and the binary is unsigned: `chmod +x` the
+binary and run `xattr -d com.apple.quarantine <binary>` if macOS blocks it.
+(Artifacts expire; if the download fails, rerun that PR's CI.)
