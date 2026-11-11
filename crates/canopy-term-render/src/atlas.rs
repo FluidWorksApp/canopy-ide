@@ -58,6 +58,10 @@ pub struct Atlas<K> {
     pixels: Vec<u8>,
     dirty: Vec<Rect>,
     frame: u64,
+    /// Bumped whenever a placed glyph's texels may be overwritten (shelf
+    /// reuse, tail pop, clear). Instances built earlier may then point at
+    /// stale texels, so a consumer that caches instances must rebuild them.
+    epoch: u64,
     stats: AtlasStats,
 }
 
@@ -80,6 +84,7 @@ impl<K: Hash + Eq + Copy> Atlas<K> {
             pixels: vec![0; width as usize * height as usize * 4],
             dirty: Vec::new(),
             frame: 1,
+            epoch: 0,
             stats: AtlasStats::default(),
         };
         // Pinned first shelf holding the white block.
@@ -97,6 +102,10 @@ impl<K: Hash + Eq + Copy> Atlas<K> {
 
     pub fn size(&self) -> (u16, u16) {
         (self.width, self.height)
+    }
+
+    pub fn epoch(&self) -> u64 {
+        self.epoch
     }
 
     pub fn pixels(&self) -> &[u8] {
@@ -152,6 +161,7 @@ impl<K: Hash + Eq + Copy> Atlas<K> {
     /// Drops every glyph (the white block stays). Marks nothing dirty: stale
     /// texels are never sampled because no instance refers to them.
     pub fn clear(&mut self) {
+        self.epoch += 1;
         self.map.clear();
         self.shelves.truncate(1);
         self.shelves[0].x = WHITE.w;
@@ -279,6 +289,7 @@ impl<K: Hash + Eq + Copy> Atlas<K> {
     }
 
     fn drop_shelf_entries(&mut self, shelf: usize) {
+        self.epoch += 1;
         self.map.retain(|_, e| e.shelf != shelf);
     }
 }
@@ -322,10 +333,14 @@ mod tests {
         for (i, x) in rects.iter().enumerate() {
             assert!(x.x + x.w <= 64 && x.y + x.h <= 64);
             for y in &rects[i + 1..] {
-                let apart = x.x + x.w <= y.x || y.x + y.w <= x.x || x.y + x.h <= y.y || y.y + y.h <= x.y;
+                let apart =
+                    x.x + x.w <= y.x || y.x + y.w <= x.x || x.y + x.h <= y.y || y.y + y.h <= x.y;
                 assert!(apart, "{x:?} overlaps {y:?}");
             }
-            assert!(!(x.x < WHITE.w && x.y < WHITE.h), "overlaps the white block");
+            assert!(
+                !(x.x < WHITE.w && x.y < WHITE.h),
+                "overlaps the white block"
+            );
         }
     }
 
@@ -345,7 +360,9 @@ mod tests {
         assert!(a.insert(9999, 8, 8, &bitmap(8, 8, 2)).is_none());
         // Next frame: stale shelves can be reclaimed.
         a.begin_frame();
-        let r = a.insert(9999, 8, 8, &bitmap(8, 8, 2)).expect("evicts a shelf");
+        let r = a
+            .insert(9999, 8, 8, &bitmap(8, 8, 2))
+            .expect("evicts a shelf");
         assert!(r.x + r.w <= 32 && r.y + r.h <= 32);
         assert!(a.stats().evicted_shelves >= 1);
         assert_eq!(a.size(), (32, 32));
@@ -375,6 +392,23 @@ mod tests {
         let d = a.take_dirty();
         assert_eq!(d.len(), 1);
         assert_eq!(d[0].w, 24);
+    }
+
+    #[test]
+    fn the_epoch_changes_only_when_texels_may_be_overwritten() {
+        let mut a: Atlas<u32> = Atlas::new(32, 32);
+        let e0 = a.epoch();
+        let mut k = 0;
+        while a.insert(k, 8, 8, &bitmap(8, 8, 1)).is_some() {
+            k += 1;
+        }
+        assert_eq!(a.epoch(), e0, "plain inserts never move existing glyphs");
+        a.begin_frame();
+        a.insert(9999, 8, 8, &bitmap(8, 8, 2)).unwrap();
+        assert!(a.epoch() > e0, "eviction must be visible to consumers");
+        let e1 = a.epoch();
+        a.clear();
+        assert!(a.epoch() > e1);
     }
 
     #[test]

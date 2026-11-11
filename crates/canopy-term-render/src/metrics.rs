@@ -177,7 +177,10 @@ mod tests {
             for s in [1.0f32, 1.25, 1.5, 2.0, 3.0] {
                 let l = layout(&fm(), px, Scale(s));
                 assert!(l.underline_thickness >= 1 && l.strike_thickness >= 1);
-                assert!(l.underline_top + l.underline_thickness <= l.height, "{px} {s}");
+                assert!(
+                    l.underline_top + l.underline_thickness <= l.height,
+                    "{px} {s}"
+                );
                 assert!(l.strike_top + l.strike_thickness <= l.height, "{px} {s}");
                 assert!(l.baseline <= l.height);
                 assert!(l.strike_top < l.underline_top, "strike is above underline");
@@ -196,7 +199,13 @@ mod tests {
     #[test]
     fn layout_converts_to_cell_metrics() {
         let l = layout(&fm(), 14.0, Scale(1.0));
-        assert_eq!(l.metrics(), CellMetrics { width: 8.0, height: 18.0 });
+        assert_eq!(
+            l.metrics(),
+            CellMetrics {
+                width: 8.0,
+                height: 18.0
+            }
+        );
     }
 
     #[test]

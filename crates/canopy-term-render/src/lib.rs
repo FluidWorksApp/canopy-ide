@@ -4,7 +4,12 @@
 
 pub use canopy_term_core::frame;
 
+pub mod atlas;
+pub mod color;
+pub mod geometry;
 pub mod gpu;
+pub mod metrics;
+pub mod procedural;
 
 /// Pixel size of one cell for a given font. The grid is cells, the surface is
 /// pixels, and every other number here derives from this one.
