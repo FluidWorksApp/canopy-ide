@@ -14,18 +14,36 @@
 //! Rules enforced here:
 //! - a code is single use and burns on success;
 //! - it expires (`now_ms >= expires_at_ms` is expired);
-//! - wrong guesses are counted across all live offers, and after
-//!   [`MAX_FAILED_ATTEMPTS`] every live offer is burned (a short code is
-//!   guessable by brute force otherwise);
+//! - wrong guesses are counted per proven peer key. A key that reaches
+//!   [`MAX_FAILED_ATTEMPTS`] is locked for [`LOCKOUT_MS`] and its later
+//!   attempts count nowhere, so one peer cannot lock another out. A higher
+//!   global cap ([`MAX_GLOBAL_FAILED_ATTEMPTS`]) burns every live offer as a
+//!   backstop (a short code is guessable by brute force otherwise). Each key
+//!   adds at most `MAX_FAILED_ATTEMPTS` to the global count, so no single key
+//!   can reach the global cap. Residual: many distinct keys together still
+//!   can, which burns live offers and forces the host to mint new ones;
+//! - offers are minted only on an explicit user action, never on a timer, and
+//!   minting one resets NOTHING (an attacker's budget must not refill when a
+//!   UI refreshes); a key's counter clears only on its own success or when its
+//!   lockout expires by the clock;
 //! - codes compare in constant time, with no early exit on the first match;
 //! - secrets never appear in `Debug` output, and this crate logs nothing.
 
 use crate::allowlist::{canonical_key, Allowlist};
+use std::collections::HashMap;
 
 /// Characters in a code. 16 characters of a 32 symbol alphabet is 80 bits.
 pub const CODE_LEN: usize = 16;
-/// Wrong codes tolerated before all live offers are burned.
+/// Wrong codes one peer key may send before it is locked.
 pub const MAX_FAILED_ATTEMPTS: u32 = 5;
+/// Wrong codes, across all peers, before every live offer is burned.
+pub const MAX_GLOBAL_FAILED_ATTEMPTS: u32 = 25;
+/// Peer keys tracked at once. When full, an untracked key's wrong guesses count
+/// only globally, and a correct code from it still redeems, so filling the
+/// table cannot lock anyone out.
+pub const MAX_TRACKED_PEERS: usize = 64;
+/// How long a lock (and the global count) lasts after the last counted failure.
+pub const LOCKOUT_MS: u64 = 10 * 60 * 1000;
 /// Crockford base32: no I, L, O, U, so a typed code is not misread.
 const ALPHABET: &[u8; 32] = b"0123456789ABCDEFGHJKMNPQRSTVWXYZ";
 const PAYLOAD_PREFIX: &str = "canopy-pair:v1:";
@@ -50,7 +68,8 @@ pub enum PairError {
     /// No live offer matches. Also the answer for a code already used.
     Invalid,
     Expired,
-    /// Too many wrong codes; every live offer has been burned.
+    /// This peer is locked, or the global cap was hit and every live offer was
+    /// burned.
     TooManyAttempts,
     /// The transport-proven key is not a valid device key.
     BadPeerKey,
@@ -141,6 +160,13 @@ struct Live {
     expires_at_ms: u64,
 }
 
+struct Budget {
+    failures: u32,
+    /// Clock time at which this record is forgotten (last counted failure plus
+    /// `LOCKOUT_MS`), which is also when a lock ends.
+    expires_ms: u64,
+}
+
 /// The host's pairing state: live offers, the failure count, and the allowlist
 /// a successful redeem adds to.
 pub struct Pairing<E: Entropy> {
@@ -148,14 +174,17 @@ pub struct Pairing<E: Entropy> {
     host_key: String,
     entropy: E,
     live: Vec<Live>,
-    failures: u32,
+    peers: HashMap<String, Budget>,
+    global_failures: u32,
+    global_expires_ms: u64,
 }
 
 impl<E: Entropy> std::fmt::Debug for Pairing<E> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Pairing")
             .field("live_offers", &self.live.len())
-            .field("failures", &self.failures)
+            .field("tracked_peers", &self.peers.len())
+            .field("global_failures", &self.global_failures)
             .finish()
     }
 }
@@ -168,7 +197,9 @@ impl<E: Entropy> Pairing<E> {
             host_key: canonical_key(host_key).ok_or(PairError::BadPeerKey)?,
             entropy,
             live: Vec::new(),
-            failures: 0,
+            peers: HashMap::new(),
+            global_failures: 0,
+            global_expires_ms: 0,
         })
     }
 
@@ -190,8 +221,7 @@ impl<E: Entropy> Pairing<E> {
             code: code.clone(),
             expires_at_ms,
         });
-        // A fresh offer is the host's own act: start the guess budget over.
-        self.failures = 0;
+        // Deliberately resets no failure counter: see the module docs.
         Offer {
             code,
             host_key: self.host_key.clone(),
@@ -210,6 +240,15 @@ impl<E: Entropy> Pairing<E> {
     ) -> Result<String, PairError> {
         let peer = canonical_key(proven_peer_key).ok_or(PairError::BadPeerKey)?;
         self.prune(now_ms);
+        // A locked peer is refused outright, even with the right code, and its
+        // attempts count nowhere (so it cannot push the global count).
+        if self
+            .peers
+            .get(&peer)
+            .is_some_and(|b| b.failures >= MAX_FAILED_ATTEMPTS)
+        {
+            return Err(PairError::TooManyAttempts);
+        }
         let candidate = normalize_code(code);
         // Compare against every live offer, never stopping at a match.
         let mut hit: Option<usize> = None;
@@ -220,31 +259,55 @@ impl<E: Entropy> Pairing<E> {
                 }
             }
         }
-        // Once the budget is spent nothing redeems until the host makes a new
-        // offer, even a correct code that raced the lockout.
-        let locked = self.failures >= MAX_FAILED_ATTEMPTS;
-        match hit.filter(|_| !locked) {
-            Some(i) => {
-                self.live.swap_remove(i);
-                self.allow.add(&peer).map_err(|_| PairError::BadPeerKey)?;
-                self.failures = 0;
-                Ok(peer)
-            }
-            None => {
-                self.failures += 1;
-                if self.failures >= MAX_FAILED_ATTEMPTS {
-                    self.live.clear();
-                    Err(PairError::TooManyAttempts)
-                } else {
-                    Err(PairError::Invalid)
-                }
-            }
+        if let Some(i) = hit {
+            self.live.swap_remove(i);
+            self.peers.remove(&peer);
+            self.allow.add(&peer).map_err(|_| PairError::BadPeerKey)?;
+            return Ok(peer);
+        }
+        // A wrong code. Count it against this peer if there is room to track
+        // it, and always against the global total.
+        let expires = now_ms.saturating_add(LOCKOUT_MS);
+        let mut locked = false;
+        if let Some(b) = self.peers.get_mut(&peer) {
+            b.failures += 1;
+            b.expires_ms = expires;
+            locked = b.failures >= MAX_FAILED_ATTEMPTS;
+        } else if self.peers.len() < MAX_TRACKED_PEERS {
+            self.peers.insert(
+                peer,
+                Budget {
+                    failures: 1,
+                    expires_ms: expires,
+                },
+            );
+        }
+        if self.global_failures == 0 {
+            self.global_expires_ms = expires;
+        }
+        self.global_failures += 1;
+        if self.global_failures >= MAX_GLOBAL_FAILED_ATTEMPTS {
+            // Backstop: burn every live offer; the host must mint new ones.
+            self.live.clear();
+            self.global_failures = 0;
+            return Err(PairError::TooManyAttempts);
+        }
+        if locked {
+            Err(PairError::TooManyAttempts)
+        } else {
+            Err(PairError::Invalid)
         }
     }
 
     /// Drop expired offers. An offer expired exactly at `now_ms`.
     fn prune(&mut self, now_ms: u64) {
         self.live.retain(|l| now_ms < l.expires_at_ms);
+        // Locks and counts lapse by the clock, so a mistyped code is not
+        // remembered until restart.
+        self.peers.retain(|_, b| now_ms < b.expires_ms);
+        if self.global_failures > 0 && now_ms >= self.global_expires_ms {
+            self.global_failures = 0;
+        }
     }
 }
 
@@ -318,31 +381,129 @@ mod tests {
         assert!(p.redeem(&offer.reveal_code(), PEER, 1_499).is_ok());
     }
 
-    #[test]
-    fn repeated_wrong_codes_burn_every_live_offer() {
-        let (mut p, allow) = pairing();
-        let a = p.create_offer(0, 60_000);
-        let b = p.create_offer(0, 60_000);
+    const WRONG: &str = "0000-0000-0000-0000";
+
+    fn key(n: u32) -> String {
+        format!("{n:064x}")
+    }
+
+    /// Spend the whole per-peer budget as `who`; the last attempt reports the lock.
+    fn lock_out(p: &mut Pairing<Counter>, who: &str, now: u64) {
         for _ in 0..MAX_FAILED_ATTEMPTS - 1 {
-            assert_eq!(
-                p.redeem("0000-0000-0000-0000", OTHER, 1),
-                Err(PairError::Invalid)
-            );
+            assert_eq!(p.redeem(WRONG, who, now), Err(PairError::Invalid));
         }
+        assert_eq!(p.redeem(WRONG, who, now), Err(PairError::TooManyAttempts));
+    }
+
+    #[test]
+    fn a_locked_peer_does_not_lock_anyone_else_out() {
+        let (mut p, allow) = pairing();
+        let offer = p.create_offer(0, 60_000);
+        lock_out(&mut p, OTHER, 1);
+        // X is locked even with the right code, and the refusal changes nothing.
         assert_eq!(
-            p.redeem("0000-0000-0000-0000", OTHER, 1),
+            p.redeem(&offer.reveal_code(), OTHER, 2),
             Err(PairError::TooManyAttempts)
         );
-        // The right codes no longer work: the budget is spent.
+        assert!(!allow.contains(OTHER));
+        // Y is unaffected and the offer is still live.
         assert_eq!(
-            p.redeem(&a.reveal_code(), PEER, 2),
-            Err(PairError::TooManyAttempts)
+            p.redeem(&offer.reveal_code(), PEER, 3),
+            Ok(PEER.to_string())
         );
+    }
+
+    #[test]
+    fn one_peer_hammering_never_reaches_the_global_cap() {
+        let (mut p, _) = pairing();
+        let offer = p.create_offer(0, 60_000);
+        for _ in 0..(MAX_GLOBAL_FAILED_ATTEMPTS * 4) {
+            let _ = p.redeem(WRONG, OTHER, 1);
+        }
+        // The offer was not burned by the hammering.
+        assert_eq!(p.live_offers(), 1);
+        assert!(p.redeem(&offer.reveal_code(), PEER, 2).is_ok());
+    }
+
+    #[test]
+    fn many_peers_together_burn_live_offers_as_the_backstop() {
+        let (mut p, allow) = pairing();
+        let offer = p.create_offer(0, 60_000);
+        // Distinct keys, each within its own budget, reach the global cap.
+        let keys = MAX_GLOBAL_FAILED_ATTEMPTS / MAX_FAILED_ATTEMPTS;
+        for n in 0..keys {
+            let k = key(100 + n);
+            for _ in 0..MAX_FAILED_ATTEMPTS {
+                let _ = p.redeem(WRONG, &k, 1);
+            }
+        }
+        assert_eq!(p.live_offers(), 0);
         assert_eq!(
-            p.redeem(&b.reveal_code(), PEER, 2),
-            Err(PairError::TooManyAttempts)
+            p.redeem(&offer.reveal_code(), PEER, 2),
+            Err(PairError::Invalid)
         );
         assert!(allow.is_empty());
+        // The host mints a fresh offer and pairing works again.
+        let fresh = p.create_offer(3, 60_000);
+        assert!(p.redeem(&fresh.reveal_code(), PEER, 4).is_ok());
+    }
+
+    #[test]
+    fn a_full_tracking_table_does_not_lock_out_a_real_joiner() {
+        let (mut p, _) = pairing();
+        // Fill the table: one wrong guess from each of many distinct keys.
+        for n in 0..MAX_TRACKED_PEERS as u32 {
+            let _ = p.redeem(WRONG, &key(1000 + n), 1);
+        }
+        let offer = p.create_offer(2, 60_000);
+        // An untracked key's correct code still redeems.
+        assert!(p.redeem(&offer.reveal_code(), PEER, 3).is_ok());
+    }
+
+    #[test]
+    fn minting_an_offer_does_not_unlock_a_locked_peer() {
+        let (mut p, allow) = pairing();
+        p.create_offer(0, 60_000);
+        lock_out(&mut p, OTHER, 1);
+        let fresh = p.create_offer(2, 60_000);
+        assert_eq!(
+            p.redeem(&fresh.reveal_code(), OTHER, 3),
+            Err(PairError::TooManyAttempts)
+        );
+        assert!(!allow.contains(OTHER));
+    }
+
+    #[test]
+    fn a_lock_expires_by_the_clock() {
+        let (mut p, _) = pairing();
+        p.create_offer(0, 10 * LOCKOUT_MS);
+        lock_out(&mut p, OTHER, 1);
+        // Still locked just before the lockout ends.
+        assert_eq!(
+            p.redeem(WRONG, OTHER, LOCKOUT_MS),
+            Err(PairError::TooManyAttempts)
+        );
+        // After it, the peer is forgotten and can redeem.
+        let fresh = p.create_offer(LOCKOUT_MS + 2, 60_000);
+        assert!(p
+            .redeem(&fresh.reveal_code(), OTHER, LOCKOUT_MS + 3)
+            .is_ok());
+    }
+
+    #[test]
+    fn a_peers_own_success_clears_its_counter() {
+        let (mut p, _) = pairing();
+        let offer = p.create_offer(0, 60_000);
+        for _ in 0..MAX_FAILED_ATTEMPTS - 1 {
+            let _ = p.redeem(WRONG, PEER, 1);
+        }
+        assert!(p.redeem(&offer.reveal_code(), PEER, 2).is_ok());
+        // Back to a full budget.
+        let again = p.create_offer(3, 60_000);
+        for _ in 0..MAX_FAILED_ATTEMPTS - 1 {
+            assert_eq!(p.redeem(WRONG, PEER, 4), Err(PairError::Invalid));
+        }
+        assert!(p.redeem(&again.reveal_code(), PEER, 5).is_ok());
     }
 
     #[test]
@@ -353,17 +514,6 @@ mod tests {
             assert_eq!(p.redeem("short", OTHER, 1), Err(PairError::Invalid));
         }
         assert_eq!(p.redeem("", OTHER, 1), Err(PairError::TooManyAttempts));
-    }
-
-    #[test]
-    fn new_offer_resets_the_guess_budget() {
-        let (mut p, _) = pairing();
-        p.create_offer(0, 60_000);
-        for _ in 0..MAX_FAILED_ATTEMPTS {
-            let _ = p.redeem("0000-0000-0000-0000", OTHER, 1);
-        }
-        let fresh = p.create_offer(2, 60_000);
-        assert!(p.redeem(&fresh.reveal_code(), PEER, 3).is_ok());
     }
 
     #[test]

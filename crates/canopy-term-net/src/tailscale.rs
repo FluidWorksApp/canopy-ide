@@ -23,7 +23,7 @@ use std::io::Read;
 use std::net::IpAddr;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::Arc;
+use std::sync::{mpsc, Arc};
 use std::time::{Duration, Instant};
 
 /// Oldest Tailscale this module will talk to. UNVERIFIED: chosen as a
@@ -61,12 +61,22 @@ pub enum CliError {
     Io(std::io::ErrorKind),
 }
 
-/// What a command produced. Stderr is never kept.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// What a command produced. Stderr is never kept. `Debug` shows only the
+/// length: the raw output holds tailnet names and peers.
+#[derive(Clone, PartialEq, Eq)]
 pub struct CliOutput {
     pub stdout: String,
     /// Exit status, informational only: output is judged by its content.
     pub success: bool,
+}
+
+impl std::fmt::Debug for CliOutput {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CliOutput")
+            .field("stdout_len", &self.stdout.len())
+            .field("success", &self.success)
+            .finish()
+    }
 }
 
 /// Runs a [`CliCommand`]. Tests inject a fake.
@@ -95,90 +105,137 @@ impl Os {
     }
 }
 
-/// Pure: where the CLI is, given the OS, the `PATH` string and an existence
-/// predicate. No process is spawned and no file is touched, so every OS's rules
-/// are tested on every OS.
-pub fn locate_cli(
-    os: Os,
-    path_env: Option<&str>,
-    exists: &dyn Fn(&Path) -> bool,
-) -> Option<PathBuf> {
+/// Whether `dir` is an absolute path for `os`, decided from the string so the
+/// rule is the same whichever OS runs the test.
+pub fn is_absolute_for(os: Os, dir: &str) -> bool {
+    match os {
+        Os::Windows => {
+            let b = dir.as_bytes();
+            dir.starts_with(r"\\")
+                || (b.len() >= 3
+                    && b[0].is_ascii_alphabetic()
+                    && b[1] == b':'
+                    && (b[2] == b'\\' || b[2] == b'/'))
+        }
+        _ => dir.starts_with('/'),
+    }
+}
+
+/// Pure: the places to look, in order. Fixed install paths come first on every
+/// OS; `PATH` is consulted only after them and only for ABSOLUTE entries, so a
+/// relative entry (`.`, `node_modules/.bin`, an empty entry) can never supply
+/// the binary that decides who is authorised.
+pub fn cli_candidates(os: Os, path_env: Option<&str>) -> Vec<PathBuf> {
     let exe = if os == Os::Windows {
         "tailscale.exe"
     } else {
         "tailscale"
     };
     let sep = if os == Os::Windows { ';' } else { ':' };
-    let on_path = || -> Vec<PathBuf> {
-        path_env
-            .unwrap_or("")
-            .split(sep)
-            .filter(|d| !d.is_empty())
-            .map(|d| {
-                if os == Os::Windows {
-                    PathBuf::from(format!("{}\\{exe}", d.trim_end_matches('\\')))
-                } else {
-                    PathBuf::from(format!("{}/{exe}", d.trim_end_matches('/')))
-                }
-            })
-            .collect()
+    let mut candidates: Vec<PathBuf> = match os {
+        Os::Mac => vec![
+            PathBuf::from("/Applications/Tailscale.app/Contents/MacOS/Tailscale"),
+            PathBuf::from("/opt/homebrew/bin/tailscale"),
+            PathBuf::from("/usr/local/bin/tailscale"),
+        ],
+        Os::Linux => vec![
+            PathBuf::from("/usr/bin/tailscale"),
+            PathBuf::from("/usr/local/bin/tailscale"),
+        ],
+        Os::Windows => vec![
+            PathBuf::from(r"C:\Program Files\Tailscale\tailscale.exe"),
+            PathBuf::from(r"C:\Program Files (x86)\Tailscale\tailscale.exe"),
+        ],
     };
-    let mut candidates: Vec<PathBuf> = Vec::new();
-    match os {
-        Os::Mac => {
-            candidates.push(PathBuf::from(
-                "/Applications/Tailscale.app/Contents/MacOS/Tailscale",
-            ));
-            candidates.extend(on_path());
-            candidates.push(PathBuf::from("/usr/local/bin/tailscale"));
-            candidates.push(PathBuf::from("/opt/homebrew/bin/tailscale"));
+    for d in path_env.unwrap_or("").split(sep) {
+        let d = d.trim();
+        if !is_absolute_for(os, d) {
+            continue;
         }
-        Os::Linux => {
-            candidates.extend(on_path());
-            candidates.push(PathBuf::from("/usr/bin/tailscale"));
-            candidates.push(PathBuf::from("/usr/local/bin/tailscale"));
-        }
-        Os::Windows => {
-            candidates.push(PathBuf::from(r"C:\Program Files\Tailscale\tailscale.exe"));
-            candidates.push(PathBuf::from(
-                r"C:\Program Files (x86)\Tailscale\tailscale.exe",
-            ));
-            candidates.extend(on_path());
+        let p = if os == Os::Windows {
+            PathBuf::from(format!("{}\\{exe}", d.trim_end_matches('\\')))
+        } else {
+            PathBuf::from(format!("{}/{exe}", d.trim_end_matches('/')))
+        };
+        if !candidates.contains(&p) {
+            candidates.push(p);
         }
     }
-    candidates.into_iter().find(|c| exists(c))
+    candidates
 }
 
-/// The CLI on this machine, or `None` when Tailscale is not installed.
+/// Pure: the first candidate the predicate accepts.
+pub fn locate_cli(
+    os: Os,
+    path_env: Option<&str>,
+    accept: &dyn Fn(&Path) -> bool,
+) -> Option<PathBuf> {
+    cli_candidates(os, path_env).into_iter().find(|c| accept(c))
+}
+
+/// Pure trust rule for the resolved binary on unix: owned by root and not
+/// writable by group or others. A binary anyone else could replace must not
+/// decide who is authorised.
+pub fn trusted_owner_mode(uid: u32, mode: u32) -> bool {
+    uid == 0 && mode & 0o022 == 0
+}
+
+/// Resolve a candidate to the absolute path of the real file and check it.
+#[cfg(unix)]
+fn trusted_file(p: &Path) -> Option<PathBuf> {
+    use std::os::unix::fs::MetadataExt;
+    let real = std::fs::canonicalize(p).ok()?;
+    let m = std::fs::metadata(&real).ok()?;
+    (m.is_file() && trusted_owner_mode(m.uid(), m.mode())).then_some(real)
+}
+
+/// Windows: no ownership check (documented); the fixed Program Files paths
+/// come first and are admin-writable only.
+#[cfg(not(unix))]
+fn trusted_file(p: &Path) -> Option<PathBuf> {
+    p.is_file().then(|| p.to_path_buf())
+}
+
+/// The CLI on this machine as one absolute, resolved path (so nothing
+/// re-resolves it through `PATH` at spawn), or `None` when there is no
+/// trusted install.
 pub fn find_cli() -> Option<PathBuf> {
     let path = std::env::var("PATH").ok();
-    locate_cli(Os::current(), path.as_deref(), &|p| p.is_file())
+    cli_candidates(Os::current(), path.as_deref())
+        .iter()
+        .find_map(|c| trusted_file(c))
 }
 
 // ---- the real runner ----
 
 const MAX_OUTPUT: usize = 8 * 1024 * 1024;
 pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(10);
+/// `whois` sits on the accept path: a short bound.
+pub const WHOIS_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// Runs the real CLI with stdin closed, both output pipes drained on their own
 /// threads (a large `status --json` would otherwise fill the pipe and
 /// deadlock), a hard deadline, and the child killed and reaped on timeout.
+/// Output is collected with a deadline too, so a grandchild that keeps a pipe
+/// open cannot hang the caller.
 pub struct ProcessRunner {
     cli: PathBuf,
     timeout: Duration,
 }
 
 impl ProcessRunner {
-    pub fn new(cli: PathBuf, timeout: Duration) -> Self {
+    /// Private: `installed()` is the only public way in, so the location and
+    /// ownership checks cannot be skipped.
+    fn new(cli: PathBuf, timeout: Duration) -> Self {
         Self { cli, timeout }
     }
 
-    /// A runner for the installed CLI, or `None` when it is not installed.
+    /// A runner for the installed, trusted CLI, or `None`.
     pub fn installed() -> Option<Self> {
         find_cli().map(|p| Self::new(p, DEFAULT_TIMEOUT))
     }
 
-    fn run_argv(&self, argv: &[String]) -> Result<CliOutput, CliError> {
+    fn run_argv(&self, argv: &[String], timeout: Duration) -> Result<CliOutput, CliError> {
         let mut cmd = Command::new(&self.cli);
         cmd.args(argv)
             .stdin(Stdio::null())
@@ -199,10 +256,15 @@ impl ProcessRunner {
         })?;
         let out = child.stdout.take();
         let err = child.stderr.take();
-        let t_out = std::thread::spawn(move || drain(out, MAX_OUTPUT));
+        let (out_tx, out_rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = out_tx.send(drain(out, MAX_OUTPUT));
+        });
         // Stderr is read so the child never blocks on it, then thrown away.
-        let t_err = std::thread::spawn(move || drain(err, 0));
-        let deadline = Instant::now() + self.timeout;
+        std::thread::spawn(move || {
+            drain(err, 0);
+        });
+        let deadline = Instant::now() + timeout;
         let status = loop {
             match child.try_wait() {
                 Ok(Some(s)) => break Some(s),
@@ -221,14 +283,21 @@ impl ProcessRunner {
                 }
             }
         };
-        let stdout = t_out.join().unwrap_or_default();
-        let _ = t_err.join();
-        match status {
-            None => Err(CliError::TimedOut),
-            Some(s) => Ok(CliOutput {
+        let Some(status) = status else {
+            return Err(CliError::TimedOut);
+        };
+        // The child has exited, but a grandchild may still hold the pipe:
+        // wait for the output only until the deadline (at least briefly).
+        let wait = deadline
+            .saturating_duration_since(Instant::now())
+            .max(Duration::from_millis(200));
+        match out_rx.recv_timeout(wait) {
+            Ok(stdout) => Ok(CliOutput {
                 stdout: String::from_utf8_lossy(&stdout).into_owned(),
-                success: s.success(),
+                success: status.success(),
             }),
+            // Incomplete output is never parsed as an answer.
+            Err(_) => Err(CliError::TimedOut),
         }
     }
 }
@@ -252,7 +321,11 @@ fn drain<R: Read>(r: Option<R>, cap: usize) -> Vec<u8> {
 
 impl CliRunner for ProcessRunner {
     fn run(&self, cmd: &CliCommand) -> Result<CliOutput, CliError> {
-        self.run_argv(&cmd.argv())
+        let timeout = match cmd {
+            CliCommand::WhoisJson(_) => self.timeout.min(WHOIS_TIMEOUT),
+            _ => self.timeout,
+        };
+        self.run_argv(&cmd.argv(), timeout)
     }
 }
 
@@ -308,13 +381,26 @@ impl BackendState {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// A node in the status. `Debug` redacts the name (tailnet names must not
+/// reach a log through a stray `{:?}`).
+#[derive(Clone, PartialEq, Eq)]
 pub struct NodeInfo {
     /// Lowercase, without the trailing dot.
     pub dns_name: String,
     pub addrs: Vec<IpAddr>,
     pub online: bool,
     pub stable_id: Option<String>,
+}
+
+impl std::fmt::Debug for NodeInfo {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("NodeInfo")
+            .field("dns_name", &"<redacted>")
+            .field("addrs", &self.addrs)
+            .field("online", &self.online)
+            .field("stable_id", &self.stable_id)
+            .finish()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -458,8 +544,10 @@ fn probe_of(state: TailnetState) -> Probe {
 // ---- who is calling ----
 
 /// Who the tailnet says a peer address belongs to. Keyed on stable ids, not on
-/// names (display values that can be renamed).
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// names (display values that can be renamed). This identifies a MACHINE (a
+/// tailnet node), not a person: anyone using that machine is that identity.
+/// `Debug` redacts the node name.
+#[derive(Clone, PartialEq, Eq)]
 pub enum TailnetIdentity {
     User {
         stable_id: String,
@@ -473,6 +561,29 @@ pub enum TailnetIdentity {
         tags: Vec<String>,
         node_name: Option<String>,
     },
+}
+
+impl std::fmt::Debug for TailnetIdentity {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            TailnetIdentity::User {
+                stable_id, user_id, ..
+            } => f
+                .debug_struct("User")
+                .field("stable_id", stable_id)
+                .field("user_id", user_id)
+                .field("node_name", &"<redacted>")
+                .finish(),
+            TailnetIdentity::Tagged {
+                stable_id, tags, ..
+            } => f
+                .debug_struct("Tagged")
+                .field("stable_id", stable_id)
+                .field("tags", tags)
+                .field("node_name", &"<redacted>")
+                .finish(),
+        }
+    }
 }
 
 impl TailnetIdentity {
@@ -497,6 +608,12 @@ pub enum WhoisError {
     Invalid(&'static str),
     /// Neither tags nor a real user: nothing to key an identity on.
     NoUser,
+    /// The node routes more than its own addresses (a subnet router or exit
+    /// node): a connection through it could come from any machine behind it.
+    RoutesBeyondSelf,
+    /// The asked address is not one of the node's own addresses (it was routed
+    /// through the node), so the node does not vouch for the sender.
+    NotNodeAddress,
     Cli(CliError),
 }
 
@@ -506,9 +623,38 @@ impl From<JsonError> for WhoisError {
     }
 }
 
-/// Parse `tailscale whois --json <ip>`: `{Node: {StableID, Tags, Name, ...},
-/// UserProfile: {ID, LoginName, ...}}`.
-pub fn parse_whois(text: &str) -> Result<TailnetIdentity, WhoisError> {
+/// A `netip.Prefix` as text, `100.64.0.2/32`, to (address, prefix length).
+fn parse_prefix(s: &str) -> Option<(IpAddr, u8)> {
+    let (ip, len) = s.split_once('/')?;
+    let ip: IpAddr = ip.parse().ok()?;
+    let len: u8 = len.parse().ok()?;
+    let max = if ip.is_ipv4() { 32 } else { 128 };
+    (len <= max).then_some((ip.to_canonical(), len))
+}
+
+fn prefix_list(v: Option<&Json>, what: &'static str) -> Result<Vec<(IpAddr, u8)>, WhoisError> {
+    match v {
+        None | Some(Json::Null) => Ok(Vec::new()),
+        Some(Json::Arr(items)) => items
+            .iter()
+            .map(|p| {
+                p.as_str()
+                    .and_then(parse_prefix)
+                    .ok_or(WhoisError::Invalid(what))
+            })
+            .collect(),
+        Some(_) => Err(WhoisError::Invalid(what)),
+    }
+}
+
+fn is_host_prefix(p: &(IpAddr, u8)) -> bool {
+    p.1 == if p.0.is_ipv4() { 32 } else { 128 }
+}
+
+/// Parse `tailscale whois --json <ip>` into the identity and the node's own
+/// addresses. Shape: `{Node: {StableID, Tags, Name, Addresses, AllowedIPs,
+/// PrimaryRoutes, ...}, UserProfile: {ID, ...}}`.
+fn parse_whois_full(text: &str) -> Result<(TailnetIdentity, Vec<IpAddr>), WhoisError> {
     let root = json::parse(text)?;
     let node = match root.get("Node") {
         Some(n @ Json::Obj(_)) => n,
@@ -541,12 +687,37 @@ pub fn parse_whois(text: &str) -> Result<TailnetIdentity, WhoisError> {
     };
     tags.sort_unstable();
     tags.dedup();
+    // The node's own addresses are required: without them nothing can be
+    // checked about where a connection came from.
+    let own = match node.get("Addresses") {
+        None | Some(Json::Null) => return Err(WhoisError::Missing("Node.Addresses")),
+        v => prefix_list(v, "Node.Addresses")?,
+    };
+    if own.is_empty() || !own.iter().all(is_host_prefix) {
+        return Err(WhoisError::Invalid("Node.Addresses"));
+    }
+    let own_ips: Vec<IpAddr> = own.iter().map(|p| p.0).collect();
+    // AllowedIPs absent or null means "the same as Addresses". Anything beyond
+    // the node's own host addresses is a route: refuse.
+    let allowed = prefix_list(node.get("AllowedIPs"), "Node.AllowedIPs")?;
+    if allowed
+        .iter()
+        .any(|p| !is_host_prefix(p) || !own_ips.contains(&p.0))
+    {
+        return Err(WhoisError::RoutesBeyondSelf);
+    }
+    if !prefix_list(node.get("PrimaryRoutes"), "Node.PrimaryRoutes")?.is_empty() {
+        return Err(WhoisError::RoutesBeyondSelf);
+    }
     if !tags.is_empty() {
-        return Ok(TailnetIdentity::Tagged {
-            stable_id: stable_id.to_string(),
-            tags,
-            node_name,
-        });
+        return Ok((
+            TailnetIdentity::Tagged {
+                stable_id: stable_id.to_string(),
+                tags,
+                node_name,
+            },
+            own_ips,
+        ));
     }
     let user_id = root
         .get("UserProfile")
@@ -554,11 +725,19 @@ pub fn parse_whois(text: &str) -> Result<TailnetIdentity, WhoisError> {
         .and_then(Json::as_i64)
         .filter(|id| *id > 0)
         .ok_or(WhoisError::NoUser)?;
-    Ok(TailnetIdentity::User {
-        stable_id: stable_id.to_string(),
-        user_id,
-        node_name,
-    })
+    Ok((
+        TailnetIdentity::User {
+            stable_id: stable_id.to_string(),
+            user_id,
+            node_name,
+        },
+        own_ips,
+    ))
+}
+
+/// Parse `tailscale whois --json <ip>` into an identity.
+pub fn parse_whois(text: &str) -> Result<TailnetIdentity, WhoisError> {
+    parse_whois_full(text).map(|(id, _)| id)
 }
 
 // ---- the client ----
@@ -575,17 +754,8 @@ impl Tailscale {
     /// Classify the local Tailscale. Output is judged by its content whatever
     /// the exit code; only when it does not parse is the daemon unreachable.
     pub fn probe(&self) -> Probe {
-        let version = match self.runner.run(&CliCommand::Version) {
-            Ok(o) => o,
-            Err(CliError::NotInstalled) => return probe_of(TailnetState::NotInstalled),
-            Err(_) => return probe_of(TailnetState::DaemonUnreachable),
-        };
-        match parse_version(&version.stdout) {
-            None => return probe_of(TailnetState::TooOld("unreadable".into())),
-            Some(v) if v < MIN_VERSION => {
-                return probe_of(TailnetState::TooOld(format!("{}.{}.{}", v.0, v.1, v.2)))
-            }
-            Some(_) => {}
+        if let Err(state) = self.check_version() {
+            return probe_of(state);
         }
         let out = match self.runner.run(&CliCommand::StatusJson) {
             Ok(o) => o,
@@ -618,14 +788,37 @@ impl Tailscale {
         }
     }
 
+    /// The CLI version verdict alone: `Ok` if it is at least [`MIN_VERSION`].
+    pub fn check_version(&self) -> Result<(), TailnetState> {
+        let out = match self.runner.run(&CliCommand::Version) {
+            Ok(o) => o,
+            Err(CliError::NotInstalled) => return Err(TailnetState::NotInstalled),
+            Err(_) => return Err(TailnetState::DaemonUnreachable),
+        };
+        match parse_version(&out.stdout) {
+            None => Err(TailnetState::TooOld("unreadable".into())),
+            Some(v) if v < MIN_VERSION => {
+                Err(TailnetState::TooOld(format!("{}.{}.{}", v.0, v.1, v.2)))
+            }
+            Some(_) => Ok(()),
+        }
+    }
+
     /// Who owns `ip`. Any failure, timeout or empty answer is an error, which
-    /// callers treat as a refusal.
+    /// callers treat as a refusal. `ip` must be one of the node's own
+    /// addresses, and the node must route nothing beyond them.
     pub fn whois(&self, ip: IpAddr) -> Result<TailnetIdentity, WhoisError> {
+        // One canonical form: a v4-mapped address is asked as plain v4.
+        let ip = ip.to_canonical();
         let out = self
             .runner
             .run(&CliCommand::WhoisJson(ip))
             .map_err(WhoisError::Cli)?;
-        parse_whois(&out.stdout)
+        let (id, own) = parse_whois_full(&out.stdout)?;
+        if !own.contains(&ip) {
+            return Err(WhoisError::NotNodeAddress);
+        }
+        Ok(id)
     }
 }
 
@@ -708,7 +901,7 @@ pub(crate) mod fake {
 
     pub fn whois_user(stable: &str, user: i64) -> String {
         format!(
-            r#"{{"Node":{{"ID":11,"StableID":"{stable}","Name":"node-b.example.ts.net.","User":{user},"Addresses":["100.64.0.2/32"],"Hostinfo":{{}}}},
+            r#"{{"Node":{{"ID":11,"StableID":"{stable}","Name":"node-b.example.ts.net.","User":{user},"Addresses":["100.64.0.2/32","127.0.0.1/32"],"Hostinfo":{{}}}},
             "UserProfile":{{"ID":{user},"LoginName":"user-b@example.com","DisplayName":"User B"}},"CapMap":null}}"#
         )
     }
@@ -720,7 +913,7 @@ pub(crate) mod fake {
             .collect::<Vec<_>>()
             .join(",");
         format!(
-            r#"{{"Node":{{"ID":12,"StableID":"{stable}","Name":"box-c.example.ts.net.","User":99,"Tags":[{t}]}},
+            r#"{{"Node":{{"ID":12,"StableID":"{stable}","Name":"box-c.example.ts.net.","User":99,"Tags":[{t}],"Addresses":["100.64.0.3/32","127.0.0.1/32"]}},
             "UserProfile":{{"ID":99,"LoginName":"tagged-devices","DisplayName":"Tagged"}}}}"#
         )
     }
@@ -779,41 +972,77 @@ mod tests {
     }
 
     #[test]
-    fn locate_cli_per_os() {
-        let only = |want: &'static str| move |p: &Path| p == Path::new(want);
+    fn fixed_install_paths_come_before_path_on_every_os() {
         let mac = "/Applications/Tailscale.app/Contents/MacOS/Tailscale";
-        // The app bundle wins over PATH on macOS.
-        let both = |p: &Path| p == Path::new(mac) || p == Path::new("/opt/x/tailscale");
+        let c = cli_candidates(Os::Mac, Some("/opt/x"));
+        assert_eq!(c[0], PathBuf::from(mac));
+        assert_eq!(c[1], PathBuf::from("/opt/homebrew/bin/tailscale"));
+        assert_eq!(c[2], PathBuf::from("/usr/local/bin/tailscale"));
+        assert_eq!(c.last().unwrap(), &PathBuf::from("/opt/x/tailscale"));
+        let c = cli_candidates(Os::Linux, Some("/opt/x"));
+        assert_eq!(c[0], PathBuf::from("/usr/bin/tailscale"));
+        assert_eq!(c[1], PathBuf::from("/usr/local/bin/tailscale"));
+        assert_eq!(c[2], PathBuf::from("/opt/x/tailscale"));
+        let c = cli_candidates(Os::Windows, Some(r"C:\y\"));
         assert_eq!(
-            locate_cli(Os::Mac, Some("/opt/x"), &both),
-            Some(PathBuf::from(mac))
+            c[0],
+            PathBuf::from(r"C:\Program Files\Tailscale\tailscale.exe")
         );
+        assert_eq!(c.last().unwrap(), &PathBuf::from(r"C:\y\tailscale.exe"));
+        // Everything in both installed: the fixed path wins, not PATH.
         assert_eq!(
-            locate_cli(Os::Mac, Some("/bin:/opt/x"), &only("/opt/x/tailscale")),
-            Some(PathBuf::from("/opt/x/tailscale"))
-        );
-        assert_eq!(
-            locate_cli(Os::Linux, Some("/bin"), &only("/usr/local/bin/tailscale")),
-            Some(PathBuf::from("/usr/local/bin/tailscale"))
-        );
-        assert_eq!(
-            locate_cli(Os::Linux, Some("/bin"), &only("/usr/bin/tailscale")),
+            locate_cli(Os::Linux, Some("/opt/x"), &|_| true),
             Some(PathBuf::from("/usr/bin/tailscale"))
         );
-        let win = r"C:\Program Files\Tailscale\tailscale.exe";
-        assert_eq!(
-            locate_cli(Os::Windows, Some(r"C:\x;C:\y\"), &only(win)),
-            Some(PathBuf::from(win))
-        );
-        assert_eq!(
-            locate_cli(
-                Os::Windows,
-                Some(r"C:\x;C:\y\"),
-                &only(r"C:\y\tailscale.exe")
-            ),
-            Some(PathBuf::from(r"C:\y\tailscale.exe"))
-        );
         assert_eq!(locate_cli(Os::Linux, None, &|_| false), None);
+    }
+
+    #[test]
+    fn relative_and_empty_path_entries_are_ignored() {
+        let unix_path = ".:node_modules/.bin::bin:./x:/abs";
+        for os in [Os::Mac, Os::Linux] {
+            let c = cli_candidates(os, Some(unix_path));
+            for p in &c {
+                assert!(p.to_string_lossy().starts_with('/'), "{p:?}");
+            }
+            assert!(c.contains(&PathBuf::from("/abs/tailscale")));
+            // A planted relative binary is never picked even if it "exists".
+            let pick = locate_cli(os, Some(unix_path), &|p: &Path| {
+                !p.to_string_lossy().starts_with('/') || p == Path::new("/abs/tailscale")
+            });
+            assert_eq!(pick, Some(PathBuf::from("/abs/tailscale")));
+        }
+        let c = cli_candidates(
+            Os::Windows,
+            Some(r".;node_modules\.bin;;bin;D:\t;\\srv\share"),
+        );
+        assert!(c.contains(&PathBuf::from(r"D:\t\tailscale.exe")));
+        assert!(c.contains(&PathBuf::from(r"\\srv\share\tailscale.exe")));
+        assert_eq!(c.len(), 4);
+    }
+
+    #[test]
+    fn absoluteness_is_decided_per_target_os() {
+        assert!(is_absolute_for(Os::Linux, "/usr/bin"));
+        assert!(!is_absolute_for(Os::Linux, "usr/bin"));
+        assert!(!is_absolute_for(Os::Mac, "."));
+        assert!(!is_absolute_for(Os::Mac, ""));
+        assert!(is_absolute_for(Os::Windows, r"C:\x"));
+        assert!(is_absolute_for(Os::Windows, "C:/x"));
+        assert!(is_absolute_for(Os::Windows, r"\\srv\share"));
+        assert!(!is_absolute_for(Os::Windows, r"C:x"));
+        assert!(!is_absolute_for(Os::Windows, r"\x"));
+        assert!(!is_absolute_for(Os::Windows, "/usr/bin"));
+    }
+
+    #[test]
+    fn only_a_root_owned_unwritable_binary_is_trusted() {
+        assert!(trusted_owner_mode(0, 0o100755));
+        assert!(trusted_owner_mode(0, 0o100555));
+        assert!(!trusted_owner_mode(501, 0o100755));
+        assert!(!trusted_owner_mode(0, 0o100775));
+        assert!(!trusted_owner_mode(0, 0o100757));
+        assert!(!trusted_owner_mode(0, 0o100777));
     }
 
     #[test]
@@ -1030,9 +1259,10 @@ mod tests {
 
     #[test]
     fn whois_without_tags_or_user_is_an_error() {
-        let no_user = r#"{"Node":{"StableID":"nX1CNTRL"},"UserProfile":null}"#;
+        let no_user =
+            r#"{"Node":{"StableID":"nX1CNTRL","Addresses":["100.64.0.5/32"]},"UserProfile":null}"#;
         assert_eq!(parse_whois(no_user), Err(WhoisError::NoUser));
-        let zero_user = r#"{"Node":{"StableID":"nX1CNTRL"},"UserProfile":{"ID":0}}"#;
+        let zero_user = r#"{"Node":{"StableID":"nX1CNTRL","Addresses":["100.64.0.5/32"]},"UserProfile":{"ID":0}}"#;
         assert_eq!(parse_whois(zero_user), Err(WhoisError::NoUser));
     }
 
@@ -1089,7 +1319,7 @@ mod tests {
                 "head -c 600000 /dev/zero | tr '\\0' x; head -c 300000 /dev/zero >&2; exit 3"
                     .into(),
             ];
-            let out = r.run_argv(&argv).unwrap();
+            let out = r.run_argv(&argv, Duration::from_secs(20)).unwrap();
             assert_eq!(out.stdout.len(), 600_000);
             assert!(!out.success);
         });
@@ -1102,11 +1332,134 @@ mod tests {
             let r = ProcessRunner::new(PathBuf::from("/bin/sh"), Duration::from_millis(300));
             let started = Instant::now();
             let err = r
-                .run_argv(&["-c".to_string(), "exec sleep 20".to_string()])
+                .run_argv(
+                    &["-c".to_string(), "exec sleep 20".to_string()],
+                    Duration::from_millis(300),
+                )
                 .unwrap_err();
             assert_eq!(err, CliError::TimedOut);
             assert!(started.elapsed() < Duration::from_secs(10));
         });
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_grandchild_holding_the_pipe_cannot_hang_the_caller() {
+        crate::watchdog(30, || {
+            let r = ProcessRunner::new(PathBuf::from("/bin/sh"), Duration::from_secs(1));
+            let started = Instant::now();
+            // The shell exits at once; its background sleep keeps stdout open.
+            let err = r
+                .run_argv(
+                    &["-c".to_string(), "sleep 20 & exit 0".to_string()],
+                    Duration::from_secs(1),
+                )
+                .unwrap_err();
+            assert_eq!(err, CliError::TimedOut);
+            assert!(started.elapsed() < Duration::from_secs(10));
+        });
+    }
+
+    #[test]
+    fn whois_uses_the_short_timeout() {
+        let r = ProcessRunner::new(PathBuf::from("/x"), Duration::from_secs(10));
+        // The bound is applied per command; checked through the constant.
+        assert!(WHOIS_TIMEOUT <= Duration::from_secs(2));
+        assert!(r.timeout > WHOIS_TIMEOUT);
+    }
+
+    #[test]
+    fn routes_beyond_the_nodes_own_addresses_are_refused() {
+        let base = |extra: &str| {
+            format!(
+                r#"{{"Node":{{"StableID":"nR1CNTRL","Addresses":["100.64.0.7/32","fd7a:115c:a1e0::7/128"]{extra}}},"UserProfile":{{"ID":5}}}}"#
+            )
+        };
+        // AllowedIPs equal to the own addresses is fine; absent or null too.
+        assert!(parse_whois(&base(
+            r#","AllowedIPs":["100.64.0.7/32","fd7a:115c:a1e0::7/128"]"#
+        ))
+        .is_ok());
+        assert!(parse_whois(&base("")).is_ok());
+        assert!(parse_whois(&base(r#","AllowedIPs":null"#)).is_ok());
+        // A subnet route, an exit route, or another host's address: refused.
+        for extra in [
+            r#","AllowedIPs":["100.64.0.7/32","192.168.1.0/24"]"#,
+            r#","AllowedIPs":["0.0.0.0/0"]"#,
+            r#","AllowedIPs":["100.64.0.8/32"]"#,
+            r#","PrimaryRoutes":["10.0.0.0/8"]"#,
+        ] {
+            assert_eq!(
+                parse_whois(&base(extra)),
+                Err(WhoisError::RoutesBeyondSelf),
+                "{extra}"
+            );
+        }
+        assert_eq!(
+            parse_whois(&base(r#","AllowedIPs":["nope"]"#)),
+            Err(WhoisError::Invalid("Node.AllowedIPs"))
+        );
+    }
+
+    #[test]
+    fn whois_needs_the_nodes_own_addresses() {
+        assert_eq!(
+            parse_whois(r#"{"Node":{"StableID":"nX1CNTRL"},"UserProfile":{"ID":5}}"#),
+            Err(WhoisError::Missing("Node.Addresses"))
+        );
+        assert_eq!(
+            parse_whois(
+                r#"{"Node":{"StableID":"nX1CNTRL","Addresses":[]},"UserProfile":{"ID":5}}"#
+            ),
+            Err(WhoisError::Invalid("Node.Addresses"))
+        );
+        assert_eq!(
+            parse_whois(
+                r#"{"Node":{"StableID":"nX1CNTRL","Addresses":["100.64.0.0/24"]},"UserProfile":{"ID":5}}"#
+            ),
+            Err(WhoisError::Invalid("Node.Addresses"))
+        );
+    }
+
+    #[test]
+    fn whois_refuses_an_address_routed_through_the_node() {
+        let r = Arc::new(FakeRunner::new(""));
+        // The fixture node owns 100.64.0.2 and 127.0.0.1, not 100.64.0.99.
+        r.set_whois(ip("100.64.0.99"), Ok(whois_user("nPEERB1CNTRL", 42)));
+        r.set_whois(ip("100.64.0.2"), Ok(whois_user("nPEERB1CNTRL", 42)));
+        let ts = Tailscale::new(r);
+        assert_eq!(ts.whois(ip("100.64.0.99")), Err(WhoisError::NotNodeAddress));
+        assert!(ts.whois(ip("100.64.0.2")).is_ok());
+        assert!(ts.whois(ip("::ffff:100.64.0.2")).is_ok());
+    }
+
+    #[test]
+    fn check_version_alone() {
+        let r = FakeRunner::new("");
+        *r.version.lock().unwrap() = Ok("1.40.0".into());
+        assert_eq!(
+            Tailscale::new(Arc::new(r)).check_version(),
+            Err(TailnetState::TooOld("1.40.0".into()))
+        );
+        assert_eq!(
+            Tailscale::new(Arc::new(FakeRunner::new(""))).check_version(),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn debug_output_never_shows_tailnet_names() {
+        let status = parse_status(&status_running(&["100.64.0.1"], &["100.64.0.2"])).unwrap();
+        let id = parse_whois(&whois_user("nPEERB1CNTRL", 42)).unwrap();
+        let tagged = parse_whois(&whois_tagged("nBOXC1CNTRL", &["tag:a"])).unwrap();
+        let out = CliOutput {
+            stdout: status_running(&["100.64.0.1"], &[]),
+            success: true,
+        };
+        let shown = format!("{status:?} {id:?} {tagged:?} {out:?}");
+        assert!(!shown.contains("example.ts.net"), "{shown}");
+        assert!(!shown.contains("user-b@"), "{shown}");
+        assert!(shown.contains("redacted"));
     }
 
     #[test]

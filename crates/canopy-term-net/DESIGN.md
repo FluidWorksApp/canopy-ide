@@ -54,16 +54,28 @@ different host, not a warning.
 **Pairing** (`pairing`, pure logic). The host creates a one-time offer. The
 payload carries the host key and a 16 character code (80 bits). The joiner
 dials, the transport proves the joiner key, and `redeem` adds that proven key,
-never one the joiner claims. Single use, expiry, a global failure budget that
-burns all live offers (5 wrong codes), constant-time comparison, redacted
-`Debug`, and no logging anywhere in the crate. The pairing exchange itself is
-not yet wired to a network ALPN: when it is, it must use its own ALPN that is
+never one the joiner claims. Single use, expiry, constant-time comparison,
+redacted `Debug`, and no logging anywhere in the crate. Wrong codes are counted
+per proven peer key (5, then a 10 minute lock, with at most 64 keys tracked), so
+one peer cannot lock another out; a key's attempts after its lock count nowhere,
+so no single key can reach the global backstop (25 wrong codes across all keys
+burns every live offer). Minting an offer resets no counter, so a UI that
+refreshes offers on a timer would not refill an attacker's budget: offers are
+minted only on an explicit user action. Locks lapse by the clock. A full
+tracking table never blocks a correct code. Residual: many distinct keys
+together can still reach the global cap, which burns live offers and makes the
+host mint new ones; that is a nuisance, not a way to pair. The pairing exchange
+itself is not yet wired to a network ALPN: when it is, it must use its own ALPN that is
 open only while an offer is live, so the main session ALPN keeps refusing
 strangers.
 
 **Allowlist storage.** `Allowlist` is an in-memory shared set with a text file
-form (one 64 hex key per line, written atomically, mode 0600). Public keys are
-not secret; the file is the access policy, so it must not be writable by other
+form (one 64 hex key per line). A save writes a temp file beside the target with an
+unpredictable name, `create_new` (so a planted symlink is never followed), mode
+0600 from creation, fsyncs it, then renames; the directory is fsynced best
+effort on unix. A poisoned lock (a thread panicked holding it) fails closed:
+nothing is allowed, `add` errors and `save` refuses, until restart. Public keys
+are not secret; the file is the access policy, so it must not be writable by other
 users. The file lives in the per-user profile directory next to the host's own
 data; the caller chooses the path. A malformed line is an error, never skipped.
 
@@ -127,6 +139,11 @@ line client. `tailscale-rs` is dropped (its compile probe passed on all three
 OSes but it brought MPL-2.0 code, 156 packages and a lock the secret scanner
 flags). Bundling a Tailscale build is a later step.
 
+**Out of scope: hosted workspaces.** Workspace containers do not run
+`tailscaled`, so hosted workspaces are not a tailnet target and nothing here is
+specific to them. Tagged-node support exists only because a tagged node has no
+real user and must not be mistaken for one; it is not a workspace feature.
+
 **Commands.** `CliCommand` is an enum, `Version`, `StatusJson`,
 `WhoisJson(IpAddr)`, `Ip4`, and its `argv()` is the only place a command line is
 built. `up`, `login`, `logout`, `serve`, `funnel` and `set` cannot be
@@ -135,8 +152,23 @@ string reaches a command. Output is read from stdout only; stderr is drained and
 discarded, which tolerates the version-mismatch warning a Homebrew CLI prints
 against the app's daemon. Raw output is never logged (it holds tailnet names).
 The real runner closes stdin, drains both pipes on threads, enforces a deadline
-and kills and reaps on timeout. CLI location is a pure function (macOS app
-bundle, then `PATH`, then the usual Linux and Windows install paths).
+(2 seconds for `whois`, which sits on the accept path), kills and reaps on
+timeout, and collects output with a deadline too, so a grandchild holding a
+pipe cannot hang it.
+
+**Which binary.** The CLI decides who is authorised, so it must not be one an
+attacker planted. Fixed install paths are tried first on every OS (macOS app
+bundle, Homebrew, `/usr/local/bin`; Linux `/usr/bin`, `/usr/local/bin`;
+Windows Program Files), then only ABSOLUTE `PATH` entries (`.`,
+`node_modules/.bin` and empty entries are skipped). The choice is canonicalised
+once and the absolute path kept, so nothing re-resolves it at spawn. On unix the
+resolved file must be owned by root and not group or world writable. On this
+kind of setup the macOS app bundle binary passes; a Homebrew binary owned by the
+user does not, and is skipped (so a Homebrew-only install reports
+`NotInstalled`): a deliberate consequence of the rule, raise it if Homebrew
+installs must work. Windows has no ownership check; the Program Files paths are
+admin-writable only and come first. The CLI version is checked once, when a
+transport is created.
 
 **States.** `TailnetState`: `NotInstalled`, `DaemonUnreachable`, `NeedsLogin`,
 `NeedsMachineAuth`, `Stopped`, `Starting`, `Running`, `TooOld(version)`,
@@ -149,8 +181,7 @@ the user id, never by node or login name (display values that can be renamed):
 
 - `tailnet:user/<stable node id>/<user id>`
 - `tailnet:tagged/<stable node id>/<sorted tags>` for nodes owned by ACL tags,
-  which have no real user (workspace containers are likely tagged). Its own
-  kind, so a user entry never authorises a tagged node. Retagging changes the
+  which have no real user. Its own kind, so a user entry never authorises a tagged node. Retagging changes the
   entry, so a retagged node is refused until re-approved.
 
 These sit in the same `Allowlist` as device keys but in a separate namespace
@@ -159,14 +190,30 @@ answer with neither tags nor a real user is an error and a refusal.
 **Tailnet membership is not authorisation**: the identity must also be in the
 allowlist, on both the accepting and the dialing side.
 
+**An entry authorises a machine, not a person.** whois names the node that owns
+the source address. Anyone using that machine (another account on a shared
+computer, a process of any user) is that identity. A node that routes more than
+its own addresses (a subnet router or exit node: `AllowedIPs` beyond its own
+host addresses, or any `PrimaryRoutes`) is refused, because connections through
+it could come from any machine behind it; so is a source address that whois
+attributes to a node but that is not one of the node's own `Addresses`.
+
 **Fail closed.** Accept decides from the peer's socket address alone, so no
 byte is read before the decision. A whois error, timeout or empty answer is a
-refusal. Only successful whois answers are cached (30 seconds, keyed by
-address), and the allowlist is consulted on every use, so removing an entry
-takes effect at once.
+refusal. Successful answers are cached 10 seconds and failures 5 seconds, keyed
+by address. The short positive cache bounds how long a retag or a reassigned
+address keeps a stale identity, at the cost of one CLI spawn per expiry for a
+busy peer. The allowlist is consulted on every use, so removing an entry takes
+effect at once. Whois runs on four worker threads fed by a bounded queue (64);
+a full queue drops the connection unread. Failed lookups and refusals are rate
+limited per source address (20 per minute); admitted peers never count, since the
+session protocol opens a connection per control operation.
 
 **Listener.** Binds only the node's own tailnet addresses from the status, only
-while running, and never an unspecified address. With no tailnet interface
+while running, never an unspecified address, and only addresses inside
+Tailscale's ranges (100.64.0.0/10, fd7a:115c:a1e0::/48): the status is not
+trusted enough to choose an arbitrary address. Loopback is allowed only by a
+test-only constructor. With no tailnet interface
 (userspace-mode `tailscaled`) the bind fails with `NoTailnetInterface` and does
 not widen. Dialing resolves names from the status peer list, not system DNS,
 and refuses addresses the tailnet does not list.
@@ -174,10 +221,13 @@ and refuses addresses the tailnet does not list.
 **Verified by CI (fake CLI, anonymised fixtures, loopback only).** Argv per
 command, CLI location per OS, each state, unknown backend states, version
 comparison, status and whois parsing including nulls, missing fields and
-malformed JSON, the real runner against `/bin/sh` for large output and
-timeout (unix), bind refusals, refusal of an unknown peer and of a whois
-failure, echo for an allowlisted peer, name and address dialing, read
-deadline, whois caching and revocation.
+malformed JSON, the real runner against `/bin/sh` for large output, timeout
+and a grandchild holding the pipe (unix), relative `PATH` entries skipped and
+fixed paths first, the owner/mode trust rule, bind refusals including
+addresses outside the tailnet ranges, refusal of an unknown peer, of a whois
+failure and of a subnet router, echo for an allowlisted peer through the
+worker pool, name and address dialing, read deadline, positive and negative
+caching, rate limiting, revocation, a too-old CLI, and redacted `Debug`.
 
 **NOT verified.**
 - The minimum version (1.60.0) is a conservative floor, not taken from the
@@ -191,6 +241,8 @@ deadline, whois caching and revocation.
   MagicDNS names, key expiry.
 - The real runner and CLI location on a real install (only exercised against
   `/bin/sh` and a missing path).
+- The ownership check against real installs on Linux (only the pure rule is
+  tested); a full worker queue dropping connections (not exercised).
 - Official Tailscale download signing and checksums: unverified, and belong to
   the later bundling step.
 
