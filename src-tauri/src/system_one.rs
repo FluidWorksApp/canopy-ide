@@ -23,6 +23,7 @@ use sha2::{Digest, Sha256};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 use tauri::{Emitter, Manager};
@@ -125,6 +126,11 @@ impl Drop for Running {
 
 #[derive(Default)]
 pub struct SystemOne {
+    /// The `systemOne` setting. False until the frontend says otherwise, so
+    /// nothing is downloaded or started before the person's choice is known.
+    enabled: AtomicBool,
+    /// Serialises starting the server: two callers must not each spawn one.
+    starting: tokio::sync::Mutex<()>,
     running: Mutex<Option<Running>>,
     installing: Mutex<bool>,
     failure: Mutex<Option<String>>,
@@ -189,6 +195,10 @@ async fn fetch_verified(
     std::fs::rename(&part, dest).map_err(|e| format!("install {label}: {e}"))
 }
 
+fn is_enabled(app: &tauri::AppHandle) -> bool {
+    app.state::<SystemOne>().enabled.load(Ordering::SeqCst)
+}
+
 async fn install(app: &tauri::AppHandle) -> Result<(), String> {
     let server = server_asset().ok_or("no llama.cpp build for this platform")?;
     let root = root()?;
@@ -200,6 +210,9 @@ async fn install(app: &tauri::AppHandle) -> Result<(), String> {
         std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
         let archive = root.join("llama.tar.gz");
         fetch_verified(app, server.url, server.sha256, &archive, 20_000_000, "runtime").await?;
+        if !is_enabled(app) {
+            return Err("turned off".into());
+        }
         let (a, d) = (archive.clone(), dir.clone());
         tauri::async_runtime::spawn_blocking(move || -> Result<(), String> {
             let gz = flate2::read::GzDecoder::new(std::fs::File::open(&a).map_err(|e| e.to_string())?);
@@ -226,7 +239,32 @@ async fn install(app: &tauri::AppHandle) -> Result<(), String> {
     if !model.exists() {
         fetch_verified(app, MODEL_URL, MODEL_SHA256, &model, MODEL_BYTES, "model").await?;
     }
+    if !is_enabled(app) {
+        return Err("turned off".into());
+    }
     Ok(())
+}
+
+/// Stop the server and delete everything System One put on disk.
+fn remove_all() {
+    if let Ok(dir) = root() {
+        let _ = std::fs::remove_dir_all(dir);
+    }
+}
+
+/// The `systemOne` setting changed (or was read at startup). On: fetch the
+/// runtime and model in the background. Off: stop the server and delete the
+/// files, and download nothing.
+#[tauri::command]
+pub fn system_one_enable(app: tauri::AppHandle, state: tauri::State<'_, SystemOne>, enabled: bool) {
+    state.enabled.store(enabled, Ordering::SeqCst);
+    if enabled {
+        install_in_background(app);
+    } else {
+        state.stop();
+        remove_all();
+        *state.failure.lock().unwrap() = None;
+    }
 }
 
 /// Post-install step: fetch the runtime and model in the background if they are
@@ -250,6 +288,9 @@ pub fn install_in_background(app: tauri::AppHandle) {
         let result = install(&app).await;
         *state.installing.lock().unwrap() = false;
         match result {
+            // Turned off mid-download: the switch already deleted what it could;
+            // delete again in case a file landed after.
+            Err(_) if !is_enabled(&app) => remove_all(),
             Ok(()) => {
                 *state.failure.lock().unwrap() = None;
                 emit(&app, "ready", 100.0);
@@ -308,6 +349,7 @@ async fn healthy(port: u16, key: &str) -> bool {
 
 /// (port, key) of a running, healthy server, starting it if needed.
 async fn endpoint(state: &SystemOne) -> Result<(u16, String), String> {
+    let _starting = state.starting.lock().await;
     let existing = {
         let mut g = state.running.lock().unwrap();
         let alive = match g.as_mut() {
@@ -364,6 +406,9 @@ pub fn system_one_status(state: tauri::State<'_, SystemOne>) -> Status {
     if server_asset().is_none() {
         return Status { phase: Phase::Unsupported, detail: None };
     }
+    if !state.enabled.load(Ordering::SeqCst) {
+        return Status { phase: Phase::Missing, detail: None };
+    }
     if installed() {
         return Status { phase: Phase::Ready, detail: None };
     }
@@ -383,7 +428,7 @@ pub async fn system_one_decide(
     state: tauri::State<'_, SystemOne>,
     request: serde_json::Value,
 ) -> Result<serde_json::Value, String> {
-    if !installed() {
+    if !state.enabled.load(Ordering::SeqCst) || !installed() {
         return Err("not installed".into());
     }
     let (port, key) = endpoint(&state).await?;

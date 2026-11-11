@@ -13,11 +13,14 @@
 // skipped when it is not (`decide` never throws, and says why it gave no
 // answer), and everything stays on this machine.
 //
-// The agent CLI brain (brainCall.ts `askBrain`) stays the second opinion: a
-// feature calls `decide` first and escalates only when the local answer is
-// absent or not confident (`confident`). Nothing in this file calls the CLI.
+// The agent CLI brain (brainCall.ts `askBrain`) is System 2: a feature asks System
+// One first and sends only what it flags to System 2 to confirm. With no answer
+// from System One (off, still downloading, unsupported) a feature does nothing;
+// it does not fall back to asking the CLI about everything.
 
 import { invoke } from "@tauri-apps/api/core";
+import * as ipc from "./ipc";
+import { getSettings, subscribeSettings } from "./settings";
 
 // The first call of a session starts the model (about a second).
 const DEFAULT_TIMEOUT_MS = 5000;
@@ -132,8 +135,11 @@ export async function decide(
     if (!answers) return { ok: false, reason: "invalid" };
     return { ok: true, answers, latencyMs: Date.now() - started };
   } catch {
+    // A slow answer (a cold start, a long input) is not a missing model: only
+    // a model that is not there backs off.
+    if (ctl.signal.aborted) return { ok: false, reason: "timeout" };
     downUntil = Date.now() + BACKOFF_MS;
-    return { ok: false, reason: ctl.signal.aborted ? "timeout" : "unavailable" };
+    return { ok: false, reason: "unavailable" };
   } finally {
     clearTimeout(timer);
   }
@@ -249,3 +255,23 @@ export function readReply(answers: Record<string, Answer>): ReplyVerdict {
     doneCandidates,
   };
 }
+
+// ---- the switch ----------------------------------------------------------------
+
+/** Keep the backend in step with the `systemOne` setting: on starts the
+ *  after-install download, off stops the server and deletes the files. Called
+ *  once at startup; returns the unsubscribe. */
+export function startSystemOneSync(): () => void {
+  let last: boolean | null = null;
+  const sync = () => {
+    const on = getSettings().systemOne;
+    if (on === last) return;
+    last = on;
+    void ipc.systemOneEnable(on).catch(() => {});
+  };
+  sync();
+  return subscribeSettings(sync);
+}
+
+/** Whether features may use System One at all. */
+export const systemOneOn = () => getSettings().systemOne;

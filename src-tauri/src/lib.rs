@@ -668,8 +668,7 @@ pub fn run() {
             watchdog::start(app.handle().clone());
             // Only does anything when this launch asked to test itself.
             selftest::start(app.handle());
-            // Post-install: fetch the local System One model in the background.
-            system_one::install_in_background(app.handle().clone());
+            // The System One download starts when the frontend reports the setting is on.
             system_one::start_idle_watch(app.handle().clone());
             let menu = build_menu(app.handle(), "canopy")?;
             app.set_menu(menu)?;
@@ -1161,6 +1160,7 @@ pub fn run() {
             dictation::dictation_cancel,
             dictation::dictation_supported,
             system_one::system_one_status,
+            system_one::system_one_enable,
             system_one::system_one_decide,
             watchdog::watchdog_generation,
             watchdog::watchdog_ack,
