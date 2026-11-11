@@ -23253,6 +23253,14 @@ a.btn-sm {
   corner-shape: squircle;
   pointer-events: none;
 }
+.device-hover {
+  position: absolute;
+  border: 2px solid var(--accent);
+  background: color-mix(in oklab, var(--accent) 16%, transparent);
+  border-radius: var(--r-sm);
+  corner-shape: squircle;
+  pointer-events: none;
+}
 .device-mark b {
   position: absolute;
   top: -9px;
@@ -30349,4 +30357,79 @@ a.btn-sm {
   top: -10px;
   z-index: 1;
   background: var(--bg-alt);
+}
+
+/* ---- Floating phone preview ---- */
+.floating-phone {
+  position: fixed;
+  z-index: 480;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg-overlay);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--r-lg);
+  corner-shape: squircle;
+  box-shadow: var(--shadow-3);
+  overflow: hidden;
+  font-size: var(--fs-xs);
+  color: var(--text-dim);
+}
+.floating-phone-bar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 6px 5px 9px;
+  border-bottom: 1px solid var(--border);
+  cursor: grab;
+  touch-action: none;
+  user-select: none;
+}
+.floating-phone-bar:active {
+  cursor: grabbing;
+}
+.floating-phone-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--ok, #46c07a);
+  flex: none;
+}
+.floating-phone-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text);
+  font-weight: 600;
+}
+.floating-phone-screen {
+  display: block;
+  width: calc(100% - 16px);
+  margin: 8px;
+  border-radius: var(--r-md);
+  corner-shape: squircle;
+  cursor: pointer;
+}
+.floating-phone-wait {
+  margin: 0;
+  padding: 24px 12px;
+  text-align: center;
+}
+.floating-phone-foot {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  padding: 0 9px 8px;
+}
+.floating-phone-pill {
+  background: color-mix(in oklab, var(--warn) 18%, transparent);
+  color: var(--warn);
+  font-weight: 700;
+  padding: 1px 7px;
+  border-radius: 99px;
+  white-space: nowrap;
+}
+.floating-phone-error {
+  color: var(--danger, #e5484d);
 }
