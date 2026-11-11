@@ -134,6 +134,25 @@ mod tests {
     }
 
     #[test]
+    fn whole_pixel_cells_change_the_grid_across_scales() {
+        // The bundled font at 14 px: 8 px wide at 1x but 17 px (16.8 rounded)
+        // at 2x. A window keeping its logical size across displays therefore
+        // gains or loses columns; the window sizes itself from the real cell
+        // when it opens.
+        let cell1 = CellPx {
+            width: 8,
+            height: 17,
+        };
+        let cell2 = CellPx {
+            width: 17,
+            height: 35,
+        };
+        assert_eq!(grid_size((800, 510), cell1), (100, 30));
+        assert_eq!(grid_size((1600, 1020), cell2), (94, 29));
+        assert_eq!(grid_size((1700, 1050), cell2), (100, 30));
+    }
+
+    #[test]
     fn a_tiny_or_minimised_window_still_has_one_cell() {
         assert_eq!(grid_size((0, 0), CELL), (1, 1));
         assert_eq!(grid_size((3, 5), CELL), (1, 1));

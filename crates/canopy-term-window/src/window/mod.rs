@@ -275,7 +275,17 @@ impl<S: FrameSource> App<S> {
         let adapter =
             accesskit_winit::Adapter::with_event_loop_proxy(el, &window, self.proxy.clone());
         let cell_layout = layout(&metrics, self.font.px, Scale(window.scale_factor() as f32));
-        let size = window.inner_size();
+        // The logical size above used the 1x cell. Cells are whole physical
+        // pixels, so at 2x a cell can be 17 px, not 2 x 8: size the window from
+        // the real cell so it opens at the requested grid. A platform that
+        // applies this later sends `Resized`.
+        let wanted = PhysicalSize::new(
+            cell_layout.width * cols.max(1) as u32,
+            cell_layout.height * rows.max(1) as u32,
+        );
+        let size = window
+            .request_inner_size(wanted)
+            .unwrap_or_else(|| window.inner_size());
         let gpu = gpu::SurfaceState::new(window.clone(), size.width, size.height)?;
         let renderer = Renderer::new(
             gpu.device.clone(),
