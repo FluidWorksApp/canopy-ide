@@ -62,6 +62,11 @@ pub struct TextEngine {
     meta: HashMap<GlyphKey, Meta>,
     /// Glyphs that rasterise to nothing (spaces, marks without ink).
     blanks: HashSet<GlyphKey>,
+    /// The atlas was already cleared during this frame.
+    cleared_this_frame: bool,
+    /// A glyph was dropped because the atlas stayed full.
+    overflowed: bool,
+    ligatures: bool,
 }
 
 /// Index of the cell whose text contains byte offset `byte`, given each cell's
@@ -113,6 +118,19 @@ impl TextEngine {
             layout,
             meta: HashMap::new(),
             blanks: HashSet::new(),
+            cleared_this_frame: false,
+            overflowed: false,
+            ligatures: true,
+        }
+    }
+
+    /// Turns ligatures and contextual alternates (`liga`, `clig`, `calt`) on or
+    /// off. Changing it redraws everything.
+    pub fn set_ligatures(&mut self, on: bool) {
+        if on != self.ligatures {
+            self.ligatures = on;
+            self.atlas.clear();
+            self.meta.clear();
         }
     }
 
@@ -219,15 +237,31 @@ impl TextEngine {
         }
     }
 
-    /// Inserts into the atlas; when it is full, drops everything (bumping the
-    /// epoch so the builder redraws) and tries once more.
+    /// Inserts into the atlas. A bitmap that can never fit is remembered as
+    /// blank (no clear). When the atlas is full it is cleared at most once per
+    /// frame (bumping the epoch so the builder redraws); a second overflow in
+    /// the same frame leaves the glyph blank and raises `overflowed`.
     fn pack(&mut self, key: GlyphKey, w: u16, h: u16, rgba: &[u8]) -> Option<Rect> {
+        if !self.atlas.can_ever_fit(w, h) {
+            self.blanks.insert(key);
+            return None;
+        }
         if let Some(r) = self.atlas.insert(key, w, h, rgba) {
             return Some(r);
         }
+        if self.cleared_this_frame {
+            self.overflowed = true;
+            return None;
+        }
+        self.cleared_this_frame = true;
         self.atlas.clear();
         self.meta.clear();
-        self.atlas.insert(key, w, h, rgba)
+        let placed = self.atlas.insert(key, w, h, rgba);
+        if placed.is_none() {
+            // It does not fit even in an empty atlas: stop retrying it.
+            self.blanks.insert(key);
+        }
+        placed
     }
 
     fn glyph(&mut self, key: GlyphKey) -> Option<(Rect, Meta)> {
@@ -272,7 +306,12 @@ impl TextEngine {
         buffer.push_str(&text);
         buffer.guess_segment_properties();
         buffer.set_direction(Direction::LeftToRight);
-        let shaped = rustybuzz::shape(&loaded.buzz, &[], buffer);
+        let off = |tag: &[u8; 4]| {
+            rustybuzz::Feature::new(rustybuzz::ttf_parser::Tag::from_bytes(tag), 0, ..)
+        };
+        let no_ligatures = [off(b"liga"), off(b"clig"), off(b"calt")];
+        let features: &[rustybuzz::Feature] = if self.ligatures { &[] } else { &no_ligatures };
+        let shaped = rustybuzz::shape(&loaded.buzz, features, buffer);
         let k = self.layout.font_px as f32 / upem;
         let infos = shaped.glyph_infos();
         let positions = shaped.glyph_positions();
@@ -296,6 +335,11 @@ impl TextEngine {
 impl GlyphSource for TextEngine {
     fn begin_frame(&mut self) {
         self.atlas.begin_frame();
+        self.cleared_this_frame = false;
+    }
+
+    fn overflowed(&mut self) -> bool {
+        std::mem::take(&mut self.overflowed)
     }
 
     fn epoch(&self) -> u64 {
@@ -451,6 +495,70 @@ mod tests {
             !changed.is_empty(),
             "no ligature substitution observed in any pair"
         );
+    }
+
+    #[test]
+    fn with_ligatures_off_a_pair_shapes_like_its_parts() {
+        let mut e = engine();
+        e.set_ligatures(false);
+        for pair in ["->", "=>", "==", "!=", ">=", "<=", "::", "//", "<-", "|>"] {
+            let chars: Vec<String> = pair.chars().map(|c| c.to_string()).collect();
+            let refs: Vec<&str> = chars.iter().map(|s| s.as_str()).collect();
+            let mut together = Vec::new();
+            e.shape_run(REGULAR, &cells(&refs), &mut together);
+            let mut apart = Vec::new();
+            for (i, r) in refs.iter().enumerate() {
+                let mut one = Vec::new();
+                e.shape_run(REGULAR, &cells(&[*r]), &mut one);
+                apart.extend(one.into_iter().map(|mut g| {
+                    g.cell = i as u16;
+                    g
+                }));
+            }
+            assert_eq!(together, apart, "{pair}");
+        }
+    }
+
+    #[test]
+    fn a_full_atlas_clears_once_per_frame_then_leaves_glyphs_blank() {
+        let fm = FontMetrics::from_font_data(BUNDLED_FONT, 0).unwrap();
+        let l = layout(&fm, 14.0, Scale(1.0));
+        let mut e = TextEngine::new(FontBook::bundled(), l, 32);
+        e.begin_frame();
+        let before = e.epoch();
+        let letters: Vec<String> = ('a'..='z').map(|c| c.to_string()).collect();
+        let refs: Vec<&str> = letters.iter().map(|s| s.as_str()).collect();
+        let mut out = Vec::new();
+        e.shape_run(REGULAR, &cells(&refs), &mut out);
+        assert!(e.epoch() > before, "the atlas was cleared");
+        let after = e.epoch();
+        assert!(out.len() < 26, "the rest are blank, not wrong");
+        let mut again_same_frame = Vec::new();
+        e.shape_run(REGULAR, &cells(&refs), &mut again_same_frame);
+        assert_eq!(e.epoch(), after, "no second clear within the frame");
+        assert!(e.overflowed(), "overflow is reported");
+        assert!(!e.overflowed(), "and then reset");
+        // A new frame may clear again.
+        e.begin_frame();
+        let mut again = Vec::new();
+        e.shape_run(REGULAR, &cells(&refs), &mut again);
+        assert!(e.epoch() > after, "a new frame may clear again");
+    }
+
+    #[test]
+    fn a_glyph_that_can_never_fit_is_blank_and_does_not_thrash_the_atlas() {
+        let fm = FontMetrics::from_font_data(BUNDLED_FONT, 0).unwrap();
+        let l = layout(&fm, 14.0, Scale(1.0));
+        let mut e = TextEngine::new(FontBook::bundled(), l, 8);
+        let before = e.epoch();
+        for _ in 0..3 {
+            e.begin_frame();
+            let mut out = Vec::new();
+            e.shape_run(REGULAR, &cells(&["H", "W"]), &mut out);
+            assert!(out.is_empty());
+        }
+        assert_eq!(e.epoch(), before, "no clear for a glyph that cannot fit");
+        assert!(!e.overflowed());
     }
 
     #[test]

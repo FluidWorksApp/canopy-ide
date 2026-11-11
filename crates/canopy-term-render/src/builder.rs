@@ -73,6 +73,11 @@ pub struct BuildReport {
     pub uploads: Vec<InstanceRange>,
     /// Visible (non-degenerate) instances written for the rebuilt rows.
     pub quads: usize,
+    /// The glyph atlas was too small for this screen: some glyphs were left
+    /// blank (never drawn wrong). The window layer should build a larger atlas
+    /// (`atlas::atlas_size_for`). If the atlas also kept changing under the
+    /// build, the next build is full.
+    pub atlas_overflow: bool,
 }
 
 impl BuildReport {
@@ -109,6 +114,9 @@ struct Scratch {
     /// (start, end, cols, col) per cell of the current run.
     ranges: Vec<(usize, usize, u8, u16)>,
     placed: Vec<PlacedGlyph>,
+    /// Cursor parts, appended after the row is truncated so a crowded row
+    /// loses glyphs before it loses its cursor.
+    cursor: Vec<Instance>,
 }
 
 pub struct QuadBuilder {
@@ -269,7 +277,8 @@ impl QuadBuilder {
         }
 
         let mut report = BuildReport::default();
-        for attempt in 0..2 {
+        let mut settled = false;
+        for _ in 0..3 {
             let epoch_before = glyphs.epoch();
             let rows: Vec<u16> = if full {
                 (0..frame.rows).collect()
@@ -282,16 +291,22 @@ impl QuadBuilder {
                 rows: rows.clone(),
                 uploads: Vec::new(),
                 quads: 0,
+                atlas_overflow: false,
             };
             for &row in &rows {
                 self.build_row(frame, row, state, cursor, glyphs, &mut report);
             }
-            if glyphs.epoch() == epoch_before || attempt == 1 {
+            if glyphs.epoch() == epoch_before {
+                settled = true;
                 break;
             }
             // The atlas overwrote glyphs while building: rows built earlier in
             // this pass may point at stale texels, so build everything again.
             full = true;
+        }
+        let overflowed = glyphs.overflowed();
+        if !settled || overflowed {
+            report.atlas_overflow = true;
         }
         if resized && !self.instances.is_empty() {
             // The renderer may keep a larger buffer from before; unwritten slots
@@ -303,7 +318,11 @@ impl QuadBuilder {
         }
         self.epoch = glyphs.epoch();
         self.last_seq = Some(frame.seq);
-        self.needs_full = false;
+        // If the atlas never settled, rows may still point at overwritten
+        // texels: rebuild everything next time rather than trust them. A
+        // settled build that overflowed is valid (blank glyphs, correct
+        // rects), so it is not rebuilt, or a full screen would thrash.
+        self.needs_full = !settled;
         self.prev_cursor = cursor;
         self.prev_selection = state.selection;
         report
@@ -347,6 +366,7 @@ impl QuadBuilder {
         let cap = self.row_capacity();
         let mut scratch = std::mem::take(&mut self.scratch);
         scratch.out.clear();
+        scratch.cursor.clear();
         emit_row(
             &self.layout,
             &self.theme,
@@ -357,7 +377,13 @@ impl QuadBuilder {
             glyphs,
             &mut scratch,
         );
-        scratch.out.truncate(cap);
+        let keep = cap.saturating_sub(scratch.cursor.len());
+        scratch.out.truncate(keep);
+        let cursor_parts = std::mem::take(&mut scratch.cursor);
+        scratch
+            .out
+            .extend(cursor_parts.iter().copied().take(cap - scratch.out.len()));
+        scratch.cursor = cursor_parts;
         let used = scratch.out.len();
         let prev_used = self.row_used[row as usize];
         let base = row as usize * cap;
@@ -589,7 +615,7 @@ fn emit_row(
     // 5. Cursor parts that are not a recoloured cell.
     if let Some(c) = cursor_here {
         if c.shape != CursorShape::Block {
-            s.out.push(Instance::solid(
+            s.cursor.push(Instance::solid(
                 cursor_rect(layout, row, c.col, c.cols, c.shape),
                 theme.cursor,
             ));
@@ -611,7 +637,7 @@ fn emit_row(
                 },
             ];
             for e in edges {
-                s.out.push(Instance::solid(e, theme.cursor));
+                s.cursor.push(Instance::solid(e, theme.cursor));
             }
         }
     }
@@ -644,6 +670,7 @@ mod tests {
         shape_calls: usize,
         frames: usize,
         big: bool,
+        overflow: bool,
     }
 
     impl GlyphSource for Stub {
@@ -652,6 +679,9 @@ mod tests {
         }
         fn epoch(&self) -> u64 {
             self.epoch
+        }
+        fn overflowed(&mut self) -> bool {
+            std::mem::take(&mut self.overflow)
         }
         fn procedural(&mut self, _ch: char) -> Option<Rect> {
             Some(Rect {
@@ -880,6 +910,142 @@ mod tests {
         let f = damaged(text_frame(&["ab", "cd"], 2), 1, &[(0, 0)]);
         let r = b.build(&f, &RenderState::default(), &mut g);
         assert!(r.full, "undamaged rows may now point at overwritten glyphs");
+    }
+
+    /// Bumps its epoch during shaping, as an atlas that clears mid-build does.
+    struct Bumpy {
+        epoch: u64,
+        /// Bump on every shape call (never settles) instead of just once.
+        always: bool,
+        pending: bool,
+    }
+
+    impl GlyphSource for Bumpy {
+        fn begin_frame(&mut self) {}
+        fn epoch(&self) -> u64 {
+            self.epoch
+        }
+        fn procedural(&mut self, _: char) -> Option<Rect> {
+            None
+        }
+        fn shape_run(&mut self, _: FontStyle, cells: &[TextCell<'_>], out: &mut Vec<PlacedGlyph>) {
+            if self.always || self.pending {
+                self.epoch += 1;
+                self.pending = false;
+            }
+            for (i, _) in cells.iter().enumerate() {
+                out.push(PlacedGlyph {
+                    cell: i as u16,
+                    rect: Rect {
+                        x: 1,
+                        y: 1,
+                        w: 4,
+                        h: 4,
+                    },
+                    left: 0,
+                    top: 8,
+                    color: false,
+                });
+            }
+        }
+    }
+
+    #[test]
+    fn an_epoch_change_during_the_build_gives_a_full_rebuild_then_quiet() {
+        let mut b = builder();
+        let mut g = Bumpy {
+            epoch: 0,
+            always: false,
+            pending: true,
+        };
+        let r = b.build(
+            &text_frame(&["ab", "cd"], 1),
+            &RenderState::default(),
+            &mut g,
+        );
+        assert!(r.full && !r.atlas_overflow, "settled on the second pass");
+        let next = damaged(text_frame(&["ab", "cd"], 1), 1, &[]);
+        let r = b.build(&next, &RenderState::default(), &mut g);
+        assert!(r.rows.is_empty(), "the recorded epoch is the settled one");
+    }
+
+    #[test]
+    fn a_settled_overflow_is_reported_but_not_rebuilt_every_frame() {
+        let mut b = builder();
+        let mut g = Stub {
+            overflow: true,
+            ..Stub::default()
+        };
+        let f = text_frame(&["ab", "cd"], 1);
+        let r = b.build(&f, &RenderState::default(), &mut g);
+        assert!(r.atlas_overflow);
+        let again = damaged(text_frame(&["ab", "cd"], 1), 1, &[]);
+        let r = b.build(&again, &RenderState::default(), &mut g);
+        assert!(!r.atlas_overflow);
+        assert!(!r.full && r.rows.is_empty(), "no rebuild for a valid build");
+    }
+
+    #[test]
+    fn an_epoch_that_never_settles_is_reported_and_the_next_build_is_full() {
+        let mut b = builder();
+        let mut g = Bumpy {
+            epoch: 0,
+            always: true,
+            pending: false,
+        };
+        let f = text_frame(&["ab", "cd"], 1);
+        let r = b.build(&f, &RenderState::default(), &mut g);
+        assert!(r.atlas_overflow);
+        let next = damaged(text_frame(&["ab", "cd"], 1), 1, &[]);
+        g.always = false;
+        let r = b.build(&next, &RenderState::default(), &mut g);
+        assert!(r.full, "rows of an unsettled build are not trusted");
+        assert!(!r.atlas_overflow);
+    }
+
+    #[test]
+    fn a_crowded_row_loses_glyphs_before_it_loses_its_cursor() {
+        struct Many;
+        impl GlyphSource for Many {
+            fn begin_frame(&mut self) {}
+            fn epoch(&self) -> u64 {
+                0
+            }
+            fn procedural(&mut self, _: char) -> Option<Rect> {
+                None
+            }
+            fn shape_run(&mut self, _: FontStyle, _: &[TextCell<'_>], out: &mut Vec<PlacedGlyph>) {
+                for _ in 0..8 {
+                    out.push(PlacedGlyph {
+                        cell: 0,
+                        rect: Rect {
+                            x: 1,
+                            y: 1,
+                            w: 3,
+                            h: 3,
+                        },
+                        left: 0,
+                        top: 8,
+                        color: false,
+                    });
+                }
+            }
+        }
+        let mut b = builder();
+        let mut f = text_frame(&["a"], 1);
+        f.cells[0].bg = Color::Rgb(1, 1, 1);
+        f.cells[0].attrs = Attrs(Attrs::UNDERLINE);
+        let f = with_cursor(f, 0, 0, CursorShape::Bar);
+        b.build(&f, &RenderState::default(), &mut Many);
+        let row = &b.instances()[..INSTANCES_PER_COL];
+        let last = row[INSTANCES_PER_COL - 1];
+        let rgb = |i: &Instance| {
+            let c = i.color.to_le_bytes();
+            [c[0], c[1], c[2]]
+        };
+        assert_eq!(rgb(&last), Theme::default().cursor);
+        assert_eq!(last.size, [1.0, 16.0], "the bar survived");
+        assert_eq!(rgb(&row[0]), [1, 1, 1], "background kept");
     }
 
     #[test]

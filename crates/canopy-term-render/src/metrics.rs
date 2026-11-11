@@ -98,7 +98,8 @@ impl CellLayout {
 
 /// Derives the cell layout. `logical_px` is the font size in logical pixels.
 pub fn layout(fm: &FontMetrics, logical_px: f32, scale: Scale) -> CellLayout {
-    let px = scale.to_physical(logical_px).max(1.0);
+    // Physical size first, rounded: the cell and the glyph raster agree on it.
+    let px = scale.to_physical(logical_px).round().max(1.0);
     let k = px / fm.units_per_em as f32;
     let round = |v: f32| Scale::snap(v).max(0) as u32;
     let width = round(fm.advance as f32 * k).max(1);
@@ -186,6 +187,17 @@ mod tests {
                 assert!(l.strike_top < l.underline_top, "strike is above underline");
             }
         }
+    }
+
+    #[test]
+    fn fractional_scales_use_the_rounded_physical_size_everywhere() {
+        // 13 px at 1.5x is 19.5 physical px; it rounds to 20 and the cell
+        // metrics must come from that, the same size the glyphs are drawn at.
+        assert_eq!(
+            layout(&fm(), 13.0, Scale(1.5)),
+            layout(&fm(), 20.0, Scale(1.0))
+        );
+        assert_eq!(layout(&fm(), 13.0, Scale(1.5)).font_px, 20);
     }
 
     #[test]

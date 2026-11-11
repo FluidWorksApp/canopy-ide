@@ -131,8 +131,14 @@ shaping face is `'static` and built once, not per run; the leak is bounded by th
 faces actually used.
 
 Atlas limit: the atlas must hold the glyphs of one frame. If it fills during a
-build it is cleared and the build repeats once; a screen needing more distinct
-glyphs than the atlas holds will draw some blank.
+build it is cleared (at most once per frame) and the build repeats; a screen
+needing more distinct glyphs than that leaves some glyphs blank, never wrong,
+and reports it (`BuildReport::atlas_overflow`; the build itself is valid, so
+unchanged frames are not rebuilt, and only an atlas that kept changing under
+the build forces a full rebuild next time). A bitmap larger than the atlas can ever hold is left blank without clearing.
+`atlas::atlas_size_for(cell_w, cell_h, max_texture_dimension)` sizes the atlas
+for about 4096 glyph cells, capped by the device limit; the window layer should
+call it and rebuild with a larger atlas when `atlas_overflow` is set.
 
 ## GPU layer
 
@@ -146,7 +152,9 @@ glyphs than the atlas holds will draw some blank.
 * Sampling is `textureLoad` on integer texels (no filtering), blending is
   premultiplied (One, OneMinusSrcAlpha), the target should be a non-sRGB format
   so the theme's bytes are written unchanged. A window surface that only
-  offers sRGB formats needs a non-sRGB view format.
+  offers sRGB formats needs a non-sRGB view format. `Renderer::new` panics on
+  an sRGB format, so pick a non-sRGB surface format or list a non-sRGB entry in
+  the surface's `view_formats` and render to that view.
 * Uploads: instance rows that were rebuilt, and atlas rectangles written since
   the last sync (adjacent ones merged). The instance buffer is recreated only
   when the grid grew; the atlas texture is never reallocated.
