@@ -1617,6 +1617,11 @@ mod tests {
                 Ok(0) | Err(_) => {}
                 Ok(n) => panic!("a revoked peer received {n} bytes"),
             }
+            // The peer saw the shutdown. Close this side too: on Windows a read
+            // already blocked on the server side is not woken by a shutdown from
+            // another handle, so the echo loop ends when the peer closes.
+            drop(r);
+            drop(w);
             echo.join().unwrap();
         });
     }

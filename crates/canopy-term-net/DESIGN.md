@@ -264,7 +264,7 @@ busy peer. The allowlist is consulted on every use, so removing an entry takes
 effect at once for new connections, and a sweep every 250 ms shuts down any live
 connection whose entry has been removed (or whose tailnet is no longer this
 machine's), so removal ends running sessions within about a quarter of a second.
-The shutdown is abrupt: the peer's reads and writes fail. The tailnet's own view of
+The shutdown is abrupt: the peer's reads and writes fail. (On Windows a read already blocked on the server side is not woken by the shutdown; the peer sees it at once and the server's reader ends when the peer closes.) The tailnet's own view of
 the peer (a retag, a deleted node) is decided at admission and not re-checked while
 the connection lives; the tailnet stops carrying packets its ACLs forbid.
 
