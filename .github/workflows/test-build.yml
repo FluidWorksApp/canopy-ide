@@ -1,0 +1,128 @@
+# Downloadable macOS test build from a throwaway `test-build/**` branch.
+#
+# Release profile, so the app behaves like a shipped one (single instance,
+# `~/.canopy/pty-host`), but unsigned, not notarized, with no updater
+# signature, and nothing is published: no release, no tag, no tauri-action.
+# The only output is a 7-day workflow artifact with the zipped .app, the .dmg
+# and a README (.github/test-build/README.md).
+#
+# workflow_dispatch only shows up once this file is on the default branch; the
+# push trigger is what runs it from a test-build branch.
+name: test-build
+
+on:
+  push:
+    branches:
+      - "test-build/**"
+  workflow_dispatch:
+
+concurrency:
+  group: test-build-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  macos:
+    name: macOS arm64 test build (unsigned)
+    runs-on: macos-15
+    timeout-minutes: 90
+    env:
+      TARGET: aarch64-apple-darwin
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin
+
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: "./src-tauri -> target"
+          key: test-build-aarch64-apple-darwin
+
+      - run: npm ci
+
+      # Same as release.yml's arm64 case: bundle.resources needs onnxruntime/*.
+      # Not re-signed here (unsigned build).
+      - name: Stage ONNX Runtime (arm64, for load-dynamic)
+        run: |
+          ORT_VER=1.24.2
+          PKG="onnxruntime-osx-arm64-${ORT_VER}"
+          curl -fSL -o ort.tgz \
+            "https://github.com/microsoft/onnxruntime/releases/download/v${ORT_VER}/${PKG}.tgz"
+          tar -xzf ort.tgz
+          mkdir -p src-tauri/onnxruntime
+          cp "${PKG}/lib/libonnxruntime.${ORT_VER}.dylib" src-tauri/onnxruntime/libonnxruntime.dylib
+          rm -rf "${PKG}" ort.tgz
+          ls -la src-tauri/onnxruntime/
+
+      # beforeBuildCommand builds both sidecars (canopy-hook, canopy-pty-host)
+      # through scripts/prepare-sidecar.mjs --release, and the frontend.
+      # No signing identity or updater key is set, so nothing is signed; the
+      # updater artifacts are switched off as in windows-packaging.yml.
+      - name: Build the app (release profile, unsigned)
+        run: |
+          echo '{"bundle":{"createUpdaterArtifacts":false}}' > test-build-config.json
+          npm run tauri -- build --target "$TARGET" --features desk-native \
+            --bundles app,dmg --config test-build-config.json
+
+      - name: Check the bundle
+        id: bundle
+        run: |
+          root="src-tauri/target/$TARGET/release/bundle"
+          app="$(find "$root/macos" -maxdepth 1 -name '*.app' | head -1)"
+          if [ -z "$app" ]; then
+            echo "::error::No .app under $root/macos"
+            exit 1
+          fi
+          binary="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$app/Contents/Info.plist")"
+          ls -la "$app/Contents/MacOS"
+          for f in "$binary" canopy-hook canopy-pty-host; do
+            if [ ! -s "$app/Contents/MacOS/$f" ]; then
+              echo "::error::$f is missing or empty in the app bundle."
+              exit 1
+            fi
+          done
+          file "$app/Contents/MacOS/canopy-pty-host"
+          echo "Signature info (informational, unsigned build):"
+          codesign -dv "$app/Contents/MacOS/$binary" 2>&1 || true
+          codesign -dv "$app/Contents/MacOS/canopy-pty-host" 2>&1 || true
+          echo "app=$app" >> "$GITHUB_OUTPUT"
+          echo "binary=$binary" >> "$GITHUB_OUTPUT"
+
+      - name: Stage the artifact
+        env:
+          APP: ${{ steps.bundle.outputs.app }}
+          BINARY: ${{ steps.bundle.outputs.binary }}
+          BRANCH: ${{ github.ref_name }}
+          SHA: ${{ github.sha }}
+          RUN_ID: ${{ github.run_id }}
+          REPO: ${{ github.repository }}
+          ARTIFACT: canopy-test-build-macos-${{ github.sha }}
+        run: |
+          stage="$RUNNER_TEMP/test-build"
+          mkdir -p "$stage"
+          # ditto keeps the bundle's symlinks and exec bits, which
+          # upload-artifact would drop.
+          ditto -c -k --keepParent "$APP" "$stage/Canopy.app.zip"
+          cp src-tauri/target/"$TARGET"/release/bundle/dmg/*.dmg "$stage/" 2>/dev/null \
+            || echo "No .dmg produced."
+          sed -e "s|@BRANCH@|$BRANCH|g" -e "s|@SHA@|$SHA|g" -e "s|@RUN_ID@|$RUN_ID|g" \
+              -e "s|@REPO@|$REPO|g" -e "s|@ARTIFACT@|$ARTIFACT|g" -e "s|@BINARY@|$BINARY|g" \
+              .github/test-build/README.md > "$stage/README.md"
+          ls -la "$stage"
+          cat "$stage/README.md"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: canopy-test-build-macos-${{ github.sha }}
+          path: ${{ runner.temp }}/test-build/
+          if-no-files-found: error
+          retention-days: 7
