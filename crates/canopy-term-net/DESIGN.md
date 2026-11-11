@@ -54,16 +54,28 @@ different host, not a warning.
 **Pairing** (`pairing`, pure logic). The host creates a one-time offer. The
 payload carries the host key and a 16 character code (80 bits). The joiner
 dials, the transport proves the joiner key, and `redeem` adds that proven key,
-never one the joiner claims. Single use, expiry, a global failure budget that
-burns all live offers (5 wrong codes), constant-time comparison, redacted
-`Debug`, and no logging anywhere in the crate. The pairing exchange itself is
-not yet wired to a network ALPN: when it is, it must use its own ALPN that is
+never one the joiner claims. Single use, expiry, constant-time comparison,
+redacted `Debug`, and no logging anywhere in the crate. Wrong codes are counted
+per proven peer key (5, then a 10 minute lock, with at most 64 keys tracked), so
+one peer cannot lock another out; a key's attempts after its lock count nowhere,
+so no single key can reach the global backstop (25 wrong codes across all keys
+burns every live offer). Minting an offer resets no counter, so a UI that
+refreshes offers on a timer would not refill an attacker's budget: offers are
+minted only on an explicit user action. Locks lapse by the clock. A full
+tracking table never blocks a correct code. Residual: many distinct keys
+together can still reach the global cap, which burns live offers and makes the
+host mint new ones; that is a nuisance, not a way to pair. The pairing exchange
+itself is not yet wired to a network ALPN: when it is, it must use its own ALPN that is
 open only while an offer is live, so the main session ALPN keeps refusing
 strangers.
 
 **Allowlist storage.** `Allowlist` is an in-memory shared set with a text file
-form (one 64 hex key per line, written atomically, mode 0600). Public keys are
-not secret; the file is the access policy, so it must not be writable by other
+form (one 64 hex key per line). A save writes a temp file beside the target with an
+unpredictable name, `create_new` (so a planted symlink is never followed), mode
+0600 from creation, fsyncs it, then renames; the directory is fsynced best
+effort on unix. A poisoned lock (a thread panicked holding it) fails closed:
+nothing is allowed, `add` errors and `save` refuses, until restart. Public keys
+are not secret; the file is the access policy, so it must not be writable by other
 users. The file lives in the per-user profile directory next to the host's own
 data; the caller chooses the path. A malformed line is an error, never skipped.
 

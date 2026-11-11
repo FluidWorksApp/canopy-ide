@@ -136,12 +136,13 @@ impl IrohTransport {
 
     /// Live cached peer links (one per peer, however many streams).
     pub fn link_count(&self) -> usize {
-        self.links
-            .lock()
-            .unwrap()
-            .values()
-            .filter(|c| c.close_reason().is_none())
-            .count()
+        match self.links.lock() {
+            Ok(links) => links
+                .values()
+                .filter(|c| c.close_reason().is_none())
+                .count(),
+            Err(_) => 0,
+        }
     }
 
     /// Close every link and the endpoint, flushing queued close frames.
@@ -226,7 +227,7 @@ impl Transport for IrohTransport {
             // dead, so drop it and dial once.
             for attempt in 0..2 {
                 let cached = if attempt == 0 {
-                    self.links.lock().unwrap().get(&id).cloned()
+                    self.links.lock().ok().and_then(|l| l.get(&id).cloned())
                 } else {
                     None
                 };
@@ -238,7 +239,9 @@ impl Transport for IrohTransport {
                             .connect(target.clone(), ALPN)
                             .await
                             .map_err(|e| other("dial", e))?;
-                        self.links.lock().unwrap().insert(id, l.clone());
+                        if let Ok(mut links) = self.links.lock() {
+                            links.insert(id, l.clone());
+                        }
                         l
                     }
                 };
@@ -249,7 +252,9 @@ impl Transport for IrohTransport {
                     },
                     Err(e) => last = Some(other("open stream", e)),
                 }
-                self.links.lock().unwrap().remove(&id);
+                if let Ok(mut links) = self.links.lock() {
+                    links.remove(&id);
+                }
             }
             Err(last.unwrap_or_else(|| io::Error::other("connect failed")))
         })?;
@@ -266,9 +271,12 @@ impl Transport for IrohTransport {
     /// Blocks until a peer connects. An unknown peer yields
     /// `Ok(Err(Refusal::UnknownPeer))`; the peer never got a stream.
     fn accept(&self) -> io::Result<Result<Box<dyn Connection>, Refusal>> {
-        self.incoming
+        // A poisoned lock is an error, never a panic and never a connection.
+        let incoming = self
+            .incoming
             .lock()
-            .unwrap()
+            .map_err(|_| io::Error::other("transport state poisoned"))?;
+        incoming
             .recv()
             .map_err(|_| io::Error::new(io::ErrorKind::BrokenPipe, "transport closed"))
     }
