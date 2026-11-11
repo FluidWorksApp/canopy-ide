@@ -4,7 +4,8 @@
 //! keep their shapes).
 
 use crate::protocol::{
-    AttachReply, Request, Response, SessionInfo, SpawnSpec, MIN_HOST_VERSION, PROTOCOL_VERSION,
+    AttachReply, Request, Response, SessionInfo, SpawnSpec, EXCLUSIVE_ATTACH_VERSION,
+    MIN_HOST_VERSION, PROTOCOL_VERSION,
 };
 use portable_pty::{Child, ChildKiller, ExitStatus, MasterPty, PtySize};
 use std::io::{Read, Write};
@@ -232,12 +233,66 @@ impl HostClient {
     }
 
     /// Opens the data connection: the reply, then raw bytes from `start` both ways.
+    /// Replaces any client already attached.
     pub fn attach(&self, id: u32, after: u64) -> std::io::Result<Attached> {
+        self.attach_with(id, after, false)
+    }
+
+    /// As `attach`, but fails with the error "busy"
+    /// if another client is attached, checked atomically by the host. Refuses an
+    /// older host, which would ignore the flag and take the session over.
+    pub fn attach_exclusive(&self, id: u32, after: u64) -> std::io::Result<Attached> {
+        self.require_version(EXCLUSIVE_ATTACH_VERSION, "exclusive attach")?;
+        self.attach_with(id, after, true)
+    }
+
+    /// Replay-ring bytes from `after` (at most `max`), without attaching: the
+    /// attached client, backpressure and linger are untouched.
+    pub fn read_ring(
+        &self,
+        id: u32,
+        after: u64,
+        max: Option<u64>,
+    ) -> std::io::Result<(AttachReply, Vec<u8>)> {
+        let mut stream = self.connect()?;
+        let mut line =
+            serde_json::to_vec(&Request::ReadRing { id, after, max }).map_err(other_err)?;
+        line.push(b'\n');
+        stream.write_all(&line)?;
+        let reply: AttachReply = serde_json::from_str(&read_line(&mut stream).map_err(|e| {
+            // A version 1-2 host answers an unknown op with a `Response` error line
+            // or closes; say what is missing rather than a parse error.
+            other(format!(
+                "host cannot read the ring (needs protocol {EXCLUSIVE_ATTACH_VERSION}): {e}"
+            ))
+        })?)
+        .map_err(other_err)?;
+        if !reply.ok {
+            return Err(other(
+                reply.error.unwrap_or_else(|| "read_ring refused".into()),
+            ));
+        }
+        let mut bytes = vec![0u8; reply.len as usize];
+        stream.read_exact(&mut bytes)?;
+        Ok((reply, bytes))
+    }
+
+    fn require_version(&self, needed: u32, what: &str) -> std::io::Result<()> {
+        match self.hello()?.version {
+            Some(v) if v >= needed => Ok(()),
+            seen => Err(other(format!(
+                "host speaks protocol {seen:?}; {what} needs {needed} or newer"
+            ))),
+        }
+    }
+
+    fn attach_with(&self, id: u32, after: u64, exclusive: bool) -> std::io::Result<Attached> {
         let mut stream = self.connect()?;
         let mut line = serde_json::to_vec(&Request::Attach {
             id,
             after,
             client_version: PROTOCOL_VERSION,
+            exclusive,
         })
         .map_err(other_err)?;
         line.push(b'\n');
