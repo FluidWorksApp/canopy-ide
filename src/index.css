@@ -30485,3 +30485,17 @@ a.btn-sm {
   border: 1px solid var(--border);
   border-radius: 10px;
 }
+
+.pr-check-list { list-style: none; margin: 6px 0 0; padding: 0; display: flex; flex-direction: column; gap: 3px; font-size: 12px; }
+.pr-check-list li { display: flex; gap: 8px; align-items: baseline; min-width: 0; }
+.pr-check-state { flex: none; width: 56px; opacity: 0.7; }
+.pr-check-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pr-check-failed .pr-check-state { color: var(--danger, #f87171); opacity: 1; }
+.pr-check-running .pr-check-state { color: var(--warn, #f5a524); opacity: 1; }
+.aw-pr-checks { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 4px; }
+.aw-pr-check-failed { color: var(--danger, #f87171); }
+.agent-card-checks { list-style: none; margin: 0; padding: 0 12px 6px; display: flex; flex-direction: column; gap: 2px; font-size: 12px; }
+.agent-card-checks li { display: flex; gap: 8px; min-width: 0; }
+.agent-card-check-state { flex: none; width: 52px; opacity: 0.7; }
+.agent-card-check-failed .agent-card-check-state { color: var(--danger, #f87171); opacity: 1; }
+.agent-card-check-running .agent-card-check-state { color: var(--warn, #f5a524); opacity: 1; }

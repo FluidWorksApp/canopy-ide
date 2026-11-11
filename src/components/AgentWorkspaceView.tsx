@@ -1842,6 +1842,7 @@ export function AgentWorkspaceView({
       {repo && branchable && (
         <div className="aw-pr">
           {pr === undefined ? null : pr ? (
+            <>
             <button className="aw-pr-card" onClick={() => onOpenPr(repo, pr)}>
               <span className="aw-pr-num">#{pr.number}</span>
               <span className="aw-pr-title">{pr.title}</span>
@@ -1856,6 +1857,16 @@ export function AgentWorkspaceView({
               )}
               <span className="loose-chip">{pr.state.toLowerCase()}</span>
             </button>
+            {!!pr.check_runs?.length && (
+              <div className="aw-pr-checks" aria-label="Checks not yet passed">
+                {pr.check_runs.map((c, i) => (
+                  <span key={`${i}:${c.name}`} className={`loose-chip aw-pr-check-${c.state}`}>
+                    {c.name} · {c.state}
+                  </span>
+                ))}
+              </div>
+            )}
+            </>
           ) : (
             <div className="aw-pr-none">
               No open PR from {ws?.branch}

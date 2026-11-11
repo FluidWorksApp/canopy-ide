@@ -503,6 +503,34 @@ describe("failing PR", () => {
   });
 });
 
+describe("checks still running", () => {
+  it("names the checks that have not passed", async () => {
+    vi.mocked(ipc.ghPrList).mockResolvedValue([
+      {
+        number: 5,
+        title: "Ship it",
+        url: "u",
+        branch: "feat/x",
+        base: "main",
+        state: "OPEN",
+        draft: false,
+        checks: "PENDING",
+        checks_summary: "3/7 checks passed",
+        check_runs: [
+          { name: "Frontend", state: "running" },
+          { name: "Secret scan", state: "queued" },
+        ],
+        mergeable: "MERGEABLE",
+        additions: 1,
+        deletions: 0,
+      },
+    ] as never);
+    setup({ repo: "/pending-checks", cwd: "/pending-checks" });
+    expect(await screen.findByText("Frontend")).toBeTruthy();
+    expect(screen.getByText("Secret scan")).toBeTruthy();
+  });
+});
+
 describe("PRs raised by the agent", () => {
   it("lists every one on hover", async () => {
     vi.mocked(ipc.ghPrList).mockResolvedValue([
