@@ -198,6 +198,9 @@ fn kill_codes() {
 
 // ------------------------------------------------------------ attach on a pty
 
+/// The mode bits that matter; macOS also toggles PENDIN on a restore.
+const MODE_MASK: libc::tcflag_t = libc::ICANON | libc::ECHO | libc::ISIG | libc::IEXTEN;
+
 struct Pty {
     master: RawFd,
     slave: RawFd,
@@ -367,7 +370,11 @@ fn attach_passes_bytes_detaches_and_restores_the_tty() {
     pty.write(b"d");
     let status = wait_exit(&mut child, Duration::from_secs(5)).expect("attach exited");
     assert_eq!(status.code(), Some(0));
-    assert_eq!(pty.lflag(), before, "tty not restored after detach");
+    assert_eq!(
+        pty.lflag() & MODE_MASK,
+        before & MODE_MASK,
+        "tty not restored after detach"
+    );
     // The session lives on.
     assert!(wait_until(Duration::from_secs(5), || {
         let rows = h.ls();
@@ -387,7 +394,11 @@ fn attach_restores_the_tty_on_sigterm_and_sigint() {
         unsafe { libc::kill(child.0.id() as libc::pid_t, sig) };
         let status = wait_exit(&mut child, Duration::from_secs(5)).expect("attach exited");
         assert_eq!(status.code(), Some(code));
-        assert_eq!(pty.lflag(), before, "tty not restored after signal {sig}");
+        assert_eq!(
+            pty.lflag() & MODE_MASK,
+            before & MODE_MASK,
+            "tty not restored after signal {sig}"
+        );
         // Wait for the host to notice the detach before the next round.
         assert!(wait_until(Duration::from_secs(5), || h.ls()[0]["attached"] == false));
     }

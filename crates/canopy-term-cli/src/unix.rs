@@ -575,7 +575,7 @@ impl Drop for RawMode {
     fn drop(&mut self) {
         // SAFETY: restores the attributes read in `enter`.
         unsafe {
-            libc::tcsetattr(self.fd, libc::TCSADRAIN, &self.saved);
+            libc::tcsetattr(self.fd, libc::TCSANOW, &self.saved);
         }
     }
 }
@@ -662,7 +662,7 @@ fn cmd_attach(client: &HostClient, socket: &Path, mut args: Vec<String>) -> Res<
             revents: 0,
         },
     ];
-    let readable = libc::POLLIN | libc::POLLHUP | libc::POLLERR;
+    let readable = libc::POLLIN | libc::POLLHUP | libc::POLLERR | libc::POLLNVAL;
     let mut pending_escape = false;
     let mut buf = [0u8; 8192];
     let outcome = 'main: loop {
