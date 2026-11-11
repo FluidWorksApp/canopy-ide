@@ -6,7 +6,9 @@
 //! growing host memory. With no client attached, output drains into the ring and
 //! the oldest bytes fall off (the client sees `gap` when it returns).
 
-use crate::protocol::{AttachReply, Request, Response, SessionInfo, SpawnSpec, PROTOCOL_VERSION};
+use crate::protocol::{
+    AttachReply, Request, Response, SessionInfo, SpawnSpec, BUSY, PROTOCOL_VERSION,
+};
 use portable_pty::{native_pty_system, CommandBuilder, MasterPty, PtySize};
 use std::collections::{HashMap, VecDeque};
 use std::io::{BufRead, BufReader, Read, Write};
@@ -49,6 +51,10 @@ struct Ring {
     attached: Option<u64>,
     /// Bumped per attach so a replaced connection stops quietly.
     generation: u64,
+    /// The attached client's connection, so a newer attach can close it: a
+    /// replaced client then sees EOF instead of a frozen screen whose typing
+    /// still reaches the child.
+    conn: Option<UnixStream>,
     eof: bool,
 }
 
@@ -541,6 +547,7 @@ fn handle(host: &Arc<Host>, mut stream: UnixStream) -> std::io::Result<()> {
             id,
             after,
             client_version,
+            exclusive,
         } => {
             if client_version != 0 && client_version < min_client {
                 return write_line(
@@ -555,7 +562,20 @@ fn handle(host: &Arc<Host>, mut stream: UnixStream) -> std::io::Result<()> {
             }
             let session = host.sessions.lock().unwrap().get(&id).cloned();
             match session {
-                Some(session) => attach(session, stream, after),
+                Some(session) => attach(session, stream, after, exclusive),
+                None => write_line(
+                    &mut stream,
+                    &AttachReply {
+                        error: Some("no such session".into()),
+                        ..Default::default()
+                    },
+                ),
+            }
+        }
+        Request::ReadRing { id, after, max } => {
+            let session = host.sessions.lock().unwrap().get(&id).cloned();
+            match session {
+                Some(session) => read_ring(&session, stream, after, max),
                 None => write_line(
                     &mut stream,
                     &AttachReply {
@@ -641,6 +661,7 @@ fn spawn(host: &Arc<Host>, spec: SpawnSpec) -> Result<(Arc<Session>, bool), Stri
             base: 0,
             attached: None,
             generation: 0,
+            conn: None,
             eof: false,
         }),
         cv: Condvar::new(),
@@ -707,13 +728,86 @@ fn spawn(host: &Arc<Host>, spec: SpawnSpec) -> Result<(Arc<Session>, bool), Stri
     Ok((session, false))
 }
 
-fn attach(session: Arc<Session>, mut stream: UnixStream, after: u64) -> std::io::Result<()> {
+/// Copy ring bytes `[start, start + take)`; the caller holds the lock.
+fn ring_slice(ring: &Ring, start: u64, take: usize) -> Vec<u8> {
+    let offset = (start - ring.base) as usize;
+    let (a, b) = ring.bytes.as_slices();
+    let mut out = Vec::with_capacity(take);
+    if offset < a.len() {
+        let from_a = (a.len() - offset).min(take);
+        out.extend_from_slice(&a[offset..offset + from_a]);
+        out.extend_from_slice(&b[..take - from_a]);
+    } else {
+        let o = offset - a.len();
+        out.extend_from_slice(&b[o..o + take]);
+    }
+    out
+}
+
+fn read_ring(
+    session: &Session,
+    mut stream: UnixStream,
+    after: u64,
+    max: Option<u64>,
+) -> std::io::Result<()> {
+    let (reply, bytes) = {
+        let ring = session.ring.lock().unwrap();
+        let end = ring.base + ring.bytes.len() as u64;
+        let start = after.max(ring.base).min(end);
+        let limit = max.unwrap_or(RING_CAP as u64).min(RING_CAP as u64);
+        let take = (end - start).min(limit) as usize;
+        let (cols, rows) = *session.size.lock().unwrap();
+        (
+            AttachReply {
+                ok: true,
+                error: None,
+                version: PROTOCOL_VERSION,
+                start,
+                end,
+                gap: after < ring.base,
+                cols,
+                rows,
+                len: take as u64,
+            },
+            ring_slice(&ring, start, take),
+        )
+    };
+    // A reader that stops reading must not pin this thread (and the host's
+    // connection count, which keeps it from idling out) forever.
+    stream.set_write_timeout(Some(Duration::from_secs(10)))?;
+    write_line(&mut stream, &reply)?;
+    stream.write_all(&bytes)?;
+    let _ = stream.shutdown(std::net::Shutdown::Write);
+    Ok(())
+}
+
+fn attach(
+    session: Arc<Session>,
+    mut stream: UnixStream,
+    after: u64,
+    exclusive: bool,
+) -> std::io::Result<()> {
+    let handle = stream.try_clone()?;
     let (start, generation, cols, rows) = {
         let mut ring = session.ring.lock().unwrap();
+        if exclusive && ring.attached.is_some() {
+            drop(ring);
+            return write_line(
+                &mut stream,
+                &AttachReply {
+                    error: Some(BUSY.into()),
+                    version: PROTOCOL_VERSION,
+                    ..Default::default()
+                },
+            );
+        }
         let end = ring.base + ring.bytes.len() as u64;
         let start = after.max(ring.base).min(end);
         ring.generation += 1;
         ring.attached = Some(start);
+        if let Some(old) = ring.conn.replace(handle) {
+            let _ = old.shutdown(std::net::Shutdown::Both);
+        }
         // Under the ring lock and after the bump: an older connection's input
         // thread stamps `detached_at` only while it still owns the generation,
         // so clearing earlier would let that stamp land after ours and start a
@@ -734,6 +828,7 @@ fn attach(session: Arc<Session>, mut stream: UnixStream, after: u64) -> std::io:
             gap: after < ring.base,
             cols,
             rows,
+            len: 0,
         }
     };
     write_line(&mut stream, &reply)?;
@@ -763,6 +858,7 @@ fn attach(session: Arc<Session>, mut stream: UnixStream, after: u64) -> std::io:
             let mut ring = session.ring.lock().unwrap();
             if ring.generation == generation {
                 ring.attached = None;
+                ring.conn = None;
                 *session.detached_at.lock().unwrap() = Some(Instant::now());
             }
             session.cv.notify_all();
@@ -780,22 +876,14 @@ fn attach(session: Arc<Session>, mut stream: UnixStream, after: u64) -> std::io:
                 }
                 let end = ring.base + ring.bytes.len() as u64;
                 if pos < end {
-                    let offset = (pos - ring.base) as usize;
                     let take = (end - pos).min(SEND_CHUNK as u64) as usize;
-                    let (a, b) = ring.bytes.as_slices();
-                    let mut out = Vec::with_capacity(take);
-                    if offset < a.len() {
-                        let from_a = (a.len() - offset).min(take);
-                        out.extend_from_slice(&a[offset..offset + from_a]);
-                        out.extend_from_slice(&b[..take - from_a]);
-                    } else {
-                        let o = offset - a.len();
-                        out.extend_from_slice(&b[o..o + take]);
-                    }
-                    break out;
+                    break ring_slice(&ring, pos, take);
                 }
                 if ring.eof {
-                    ring.attached = None;
+                    if ring.generation == generation {
+                        ring.attached = None;
+                        ring.conn = None;
+                    }
                     session.cv.notify_all();
                     drop(ring);
                     let _ = stream.shutdown(std::net::Shutdown::Write);
@@ -812,6 +900,7 @@ fn attach(session: Arc<Session>, mut stream: UnixStream, after: u64) -> std::io:
             let mut ring = session.ring.lock().unwrap();
             if ring.generation == generation {
                 ring.attached = None;
+                ring.conn = None;
                 *session.detached_at.lock().unwrap() = Some(Instant::now());
             }
             session.cv.notify_all();

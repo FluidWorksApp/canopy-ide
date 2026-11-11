@@ -653,3 +653,124 @@ fn list_reports_whether_a_client_is_attached_and_an_old_host_reads_as_unknown() 
     let info: canopy_pty_host::protocol::SessionInfo = serde_json::from_str(r#"{"id":1}"#).unwrap();
     assert_eq!(info.attached, None);
 }
+
+#[test]
+fn an_exclusive_attach_is_refused_while_a_client_is_attached_and_taken_when_free() {
+    let h = Harness::start("ex", 60);
+    let (id, _) = h.client.spawn(spec("cat")).unwrap();
+    let mut first = h.client.attach_exclusive(id, 0).expect("free session");
+    let refused = h
+        .client
+        .attach_exclusive(id, 0)
+        .err()
+        .expect("second exclusive attach");
+    assert!(
+        refused
+            .to_string()
+            .contains(canopy_pty_host::protocol::BUSY),
+        "{refused}"
+    );
+    // The refused attempt must not have disturbed the first client.
+    first.stream.write_all(b"still-mine\n").unwrap();
+    let out = read_until(&mut first, Duration::from_secs(5), |b| {
+        contains(b, "still-mine")
+    });
+    assert!(
+        contains(&out, "still-mine"),
+        "first client lost its session"
+    );
+    drop(first);
+    assert!(wait_until(Duration::from_secs(5), || {
+        h.client.list().unwrap()[0].attached == Some(false)
+    }));
+    assert!(
+        h.client.attach_exclusive(id, 0).is_ok(),
+        "free again after detach"
+    );
+}
+
+#[test]
+fn read_ring_returns_history_without_detaching_or_starting_the_linger() {
+    let h = Harness::start("rr", 60);
+    let mut with_linger = spec("echo first-line; echo second-line; sleep 300");
+    with_linger.linger_secs = Some(1);
+    let (id, pid) = h.client.spawn(with_linger).unwrap();
+    let mut attached = h.client.attach(id, 0).unwrap();
+    read_until(&mut attached, Duration::from_secs(5), |b| {
+        contains(b, "second-line")
+    });
+
+    let (reply, bytes) = h.client.read_ring(id, 0, None).unwrap();
+    assert!(contains(&bytes, "first-line") && contains(&bytes, "second-line"));
+    assert_eq!(reply.len as usize, bytes.len());
+    assert_eq!(reply.start, 0);
+    assert_eq!(reply.end, bytes.len() as u64);
+    let (capped, few) = h.client.read_ring(id, 0, Some(5)).unwrap();
+    assert_eq!(few.len(), 5);
+    assert_eq!(capped.len, 5);
+
+    // Still attached, so the one-second linger never started.
+    assert_eq!(h.client.list().unwrap()[0].attached, Some(true));
+    std::thread::sleep(Duration::from_millis(1500));
+    assert!(
+        alive(pid),
+        "read_ring detached the client and the linger fired"
+    );
+    attached.stream.write_all(b"x").unwrap();
+}
+
+#[test]
+fn read_ring_past_the_end_returns_nothing() {
+    let h = Harness::start("re", 60);
+    let (id, _) = h.client.spawn(spec("echo done; sleep 300")).unwrap();
+    assert!(wait_until(Duration::from_secs(5), || {
+        h.client.list().unwrap()[0].end > 0
+    }));
+    let end = h.client.list().unwrap()[0].end;
+    let (reply, bytes) = h.client.read_ring(id, end + 100, None).unwrap();
+    assert!(bytes.is_empty());
+    assert_eq!(reply.start, reply.end);
+    assert_eq!(reply.len, 0);
+    assert!(h.client.read_ring(id + 1000, 0, None).is_err());
+}
+
+#[test]
+fn a_replaced_client_sees_eof_and_its_typing_no_longer_reaches_the_child() {
+    let h = Harness::start("rp", 60);
+    let (id, _) = h.client.spawn(spec("cat")).unwrap();
+    let mut first = h.client.attach(id, 0).unwrap();
+    let mut second = h.client.attach(id, 0).unwrap();
+
+    // The first connection is closed by the host, not left frozen.
+    first
+        .stream
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
+    let mut buf = [0u8; 256];
+    let mut saw_eof = false;
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while Instant::now() < deadline {
+        match first.stream.read(&mut buf) {
+            Ok(0) => {
+                saw_eof = true;
+                break;
+            }
+            Ok(_) => {}
+            Err(_) => break,
+        }
+    }
+    assert!(saw_eof, "replaced client was not disconnected");
+
+    // Whatever the replaced client still tries to type is not delivered.
+    let _ = first.stream.write_all(b"from-the-old-client\n");
+    second.stream.write_all(b"from-the-new-client\n").unwrap();
+    let out = read_until(&mut second, Duration::from_secs(5), |b| {
+        contains(b, "from-the-new-client")
+    });
+    assert!(contains(&out, "from-the-new-client"));
+    assert!(
+        !contains(&out, "from-the-old-client"),
+        "a replaced client's input reached the child"
+    );
+    assert_eq!(h.client.list().unwrap()[0].attached, Some(true));
+}

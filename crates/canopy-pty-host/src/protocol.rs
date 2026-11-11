@@ -8,7 +8,14 @@ use serde::{Deserialize, Serialize};
 /// Bumped when the wire format changes in a way an old peer would misread.
 /// 2: `set_linger`, `set_state` and `get_state` ops (a version 1 host rejects
 /// them as unknown, so a client that needs them checks `hello` first).
-pub const PROTOCOL_VERSION: u32 = 2;
+/// 3: `attach` takes `exclusive`, and the `read_ring` op. An older host ignores
+/// `exclusive` and would take the session over, so a client checks `hello`
+/// before relying on it; `HostClient::attach_exclusive` does.
+pub const PROTOCOL_VERSION: u32 = 3;
+/// The first host version that honours `exclusive` and serves `read_ring`.
+pub const EXCLUSIVE_ATTACH_VERSION: u32 = 3;
+/// The `error` of an exclusive attach refused because a client is attached.
+pub const BUSY: &str = "busy";
 /// The oldest client this host will serve, and the oldest host a client will
 /// use. Raised only when compatibility is deliberately dropped.
 pub const MIN_CLIENT_VERSION: u32 = 1;
@@ -66,6 +73,21 @@ pub enum Request {
         after: u64,
         #[serde(default)]
         client_version: u32,
+        /// Refuse (`error: BUSY`) instead of replacing a client that is
+        /// already attached. Checked and taken in one step inside the host.
+        #[serde(default)]
+        exclusive: bool,
+    },
+    /// Read replay-ring bytes without attaching: the reply line (an
+    /// `AttachReply` whose `len` says how many bytes follow), then exactly `len`
+    /// raw bytes, then the host closes. Never touches the attached client,
+    /// backpressure or the linger clock.
+    ReadRing {
+        id: u32,
+        after: u64,
+        /// At most this many bytes (the ring capacity if absent).
+        #[serde(default)]
+        max: Option<u64>,
     },
     Shutdown,
 }
@@ -165,6 +187,8 @@ pub struct AttachReply {
     pub gap: bool,
     pub cols: u16,
     pub rows: u16,
+    /// `read_ring` only: how many raw bytes follow the reply line.
+    pub len: u64,
 }
 
 #[cfg(test)]
@@ -208,6 +232,27 @@ mod tests {
         let info: SessionInfo = serde_json::from_str(r#"{"id":3}"#).unwrap();
         assert_eq!(info.id, 3);
         assert!(info.exited.is_none());
+    }
+
+    #[test]
+    fn attach_from_an_older_client_is_not_exclusive() {
+        let r: Request = serde_json::from_str(r#"{"op":"attach","id":1,"after":0}"#).unwrap();
+        assert!(matches!(
+            r,
+            Request::Attach {
+                exclusive: false,
+                ..
+            }
+        ));
+        let r: Request = serde_json::from_str(r#"{"op":"read_ring","id":1,"after":5}"#).unwrap();
+        assert!(matches!(
+            r,
+            Request::ReadRing {
+                id: 1,
+                after: 5,
+                max: None
+            }
+        ));
     }
 
     #[test]

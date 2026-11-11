@@ -225,7 +225,7 @@ mod adoption {
     use super::unix::{socket_path, Client};
     use super::*;
     use canopy_pty_host::client::{HostChild, HostClient, HostMaster};
-    use canopy_pty_host::protocol::SessionInfo;
+    use canopy_pty_host::protocol::{SessionInfo, EXCLUSIVE_ATTACH_VERSION};
     use std::io::Read;
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::OnceLock;
@@ -383,8 +383,21 @@ mod adoption {
     pub fn adopt(client: &Client, found: &Adoptable) -> Result<Adopted, String> {
         let id = found.info.id;
         let pid = found.info.pid.ok_or("session has no pid")?;
-        let (master, attached) =
-            HostMaster::attach(client.clone(), id, 0).map_err(|e| e.to_string())?;
+        // `list` said nobody was attached, but a CLI client may attach before we
+        // do; an exclusive attach (protocol 3) checks and takes it in one step
+        // instead of silently disconnecting that client. An older host has no
+        // such flag, and the list check is all there is.
+        let exclusive = client
+            .hello()
+            .ok()
+            .and_then(|h| h.version)
+            .is_some_and(|v| v >= EXCLUSIVE_ATTACH_VERSION);
+        let (master, attached) = if exclusive {
+            HostMaster::attach_exclusive(client.clone(), id, 0)
+        } else {
+            HostMaster::attach(client.clone(), id, 0)
+        }
+        .map_err(|e| e.to_string())?;
         let want = attached.end.saturating_sub(attached.start) as usize;
         let mut history = vec![0u8; want];
         let mut stream = attached.stream.try_clone().map_err(|e| e.to_string())?;

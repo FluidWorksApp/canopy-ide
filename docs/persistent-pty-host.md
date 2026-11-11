@@ -13,22 +13,24 @@ are the parent, and tmux would re-emulate the byte stream.
 
 ## Scope of the first PR
 
-- Unix only (macOS, Linux). Windows keeps in-process PTYs (job-object lifetime,
-  untestable here). The host binary still compiles on Windows as a stub so the
-  sidecar packaging step does not break.
-- Off by default behind `CANOPY_PTY_HOST=1`. No UI change, so no mock is owed yet.
+- Unix only (macOS, Linux). Windows keeps in-process PTYs for now; the host
+  binary compiles on Windows as a stub so the sidecar packaging step does not
+  break. A real Windows host (named pipe, ConPTY, job objects) is a stacked
+  follow-up PR.
+- Off by default behind `CANOPY_PTY_HOST=1`. No UI change in this PR.
   With it on, Quit leaves adoptable terminals running in the host (micro-tasks
-  and run-bound tabs are still stopped). A separate "Quit and stop all" entry is
-  UI and needs a mock and the user's decision first.
+  and run-bound tabs are still stopped) and the next launch adopts them.
+  "Quit and Stop All…" (decided from a mock: ⌥⌘Q, Ctrl+Shift+Q elsewhere, asks
+  "Stop N running agents?" only when agents run) is a stacked follow-up PR.
 - Hosted sessions are monitor-only for containment.
 - New crate `crates/canopy-pty-host`: protocol, server, client, tests. Nothing in
   `pty.rs` changes until CI is green on the crate.
 
-## Decisions needed from the user
+## Decisions
 
-1. What does Quit mean once the host is on? Default: Quit detaches, plus a
-   separate "Quit and stop all terminals".
-2. Should surviving agents be visible with no app open (tray entry)? Default: no.
+1. Quit detaches; "Quit and Stop All…" stops everything (user, 2026-11-11).
+2. Should surviving agents be visible with no app open (tray entry)? Open;
+   default no.
 
 ## Verified facts
 
@@ -78,6 +80,21 @@ host memory. Control ops (`spawn`, `list`, `resize`, `kill`, `pgrp`, `rawmode`,
 `stats`) are short request/response calls with timeouts. Unknown JSON fields are
 tolerated; on a version mismatch the app can still `list` and `kill`, so agents
 are never invisible. No multiplexing, framing or fd passing in this PR.
+
+A plain `attach` replaces whatever client is attached (the app reclaiming its own
+terminal after a reload depends on that). Protocol 3 adds two ops for other
+clients such as the `canopy-term` CLI: `attach` with `exclusive: true` checks and
+takes the session in one step inside the host and answers `busy` if a client is
+attached, and `read_ring` returns ring bytes from an offset without attaching, so
+`capture` never disconnects the app and never starts the linger clock. A host
+older than 3 ignores `exclusive`, so `HostClient::attach_exclusive` checks
+`hello` first and refuses such a host.
+
+A replaced client is disconnected: the host closes its connection, so it sees
+EOF instead of a frozen screen whose typing would still reach the child. In the
+app that only happens when something takes a session with `--force`; the app's
+terminal then stops updating while the child keeps running in the host (a later
+launch can adopt it). Reattaching automatically is a follow-up.
 
 **Versioning and containers.** `hello` carries the client's protocol version and
 the host replies with its own and the oldest client it accepts; `attach` repeats
@@ -146,6 +163,8 @@ as a second agent on the same conversation. Ids are seeded past the adopted max.
   `attachId`, used when the web view reloads). Whether tabs persist across a quit,
   and so whether adoption fills an existing tab or needs a new surface, is still
   open.
+- Adoption attaches with `exclusive` on a protocol 3 host, so a CLI client that
+  attached after the `list` is refused rather than silently disconnected.
 
 **Context bridge continuity.** An agent's environment is fixed at spawn, so a
 surviving agent keeps the port and token of the launch that started it. With
@@ -188,7 +207,8 @@ the host on:
   Hook events go through `~/.canopy/agent-events.jsonl`, which is already stable,
   but the app only reads events written after it starts.
 
-**Not in the first PR:** quit semantics UI, Windows (no socket transport).
+**Not in this PR (stacked follow-ups):** Quit and Stop All, packaging the host so
+an update does not delete it, Windows (no socket transport).
 
 ## Remote runner (follow-up, investigated)
 
