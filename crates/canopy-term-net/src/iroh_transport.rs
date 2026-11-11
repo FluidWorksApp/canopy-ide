@@ -26,6 +26,7 @@ use iroh::{Endpoint, EndpointAddr, EndpointId, SecretKey};
 use std::collections::HashMap;
 use std::io::{self, Read, Write};
 use std::net::SocketAddr;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -36,6 +37,37 @@ use tokio::runtime::{Handle, Runtime};
 pub const ALPN: &[u8] = b"canopy-term/session/1";
 const PREFACE: &[u8; 4] = b"CTN1";
 const PREFACE_TIMEOUT: Duration = Duration::from_secs(5);
+/// Accepted streams waiting for `accept`. When full, new ones are dropped
+/// (the peer sees the stream reset) rather than queued without bound.
+const QUEUE: usize = 64;
+/// Refusal notices waiting for `accept`, capped separately so strangers can
+/// never crowd out admitted connections.
+const MAX_PENDING_REFUSALS: usize = 8;
+
+type Item = Result<Box<dyn Connection>, Refusal>;
+
+/// The bounded hand-off from the async side to `accept`.
+struct Queue {
+    tx: mpsc::SyncSender<Item>,
+    pending_refusals: AtomicUsize,
+}
+
+impl Queue {
+    fn admit(&self, c: Box<dyn Connection>) {
+        // Never blocks a runtime thread; a full queue drops the stream.
+        let _ = self.tx.try_send(Ok(c));
+    }
+
+    fn refuse(&self) {
+        if self.pending_refusals.fetch_add(1, Ordering::SeqCst) < MAX_PENDING_REFUSALS {
+            if self.tx.try_send(Err(Refusal::UnknownPeer)).is_err() {
+                self.pending_refusals.fetch_sub(1, Ordering::SeqCst);
+            }
+        } else {
+            self.pending_refusals.fetch_sub(1, Ordering::SeqCst);
+        }
+    }
+}
 
 /// How to bind. `loopback` is for tests and same-machine use: no relay, no
 /// address lookup, one IPv4 socket on 127.0.0.1.
@@ -62,7 +94,9 @@ pub struct IrohTransport {
     endpoint: Endpoint,
     allow: Allowlist,
     links: Arc<Mutex<HashMap<EndpointId, IrohConnection>>>,
-    incoming: Mutex<mpsc::Receiver<Result<Box<dyn Connection>, Refusal>>>,
+    queue: Arc<Queue>,
+    incoming: Mutex<mpsc::Receiver<Item>>,
+    listening: AtomicBool,
 }
 
 fn other<E: std::fmt::Display>(what: &str, e: E) -> io::Error {
@@ -76,7 +110,7 @@ impl IrohTransport {
             .enable_all()
             .build()?;
         let allow = opts.allowlist.clone();
-        let (tx, rx) = mpsc::channel();
+        let (tx, rx) = mpsc::sync_channel(QUEUE);
         let endpoint = rt.block_on(async {
             let builder = match opts.bind {
                 Some(addr) => Endpoint::builder(presets::Minimal)
@@ -85,32 +119,50 @@ impl IrohTransport {
                     .map_err(|e| other("bind address", e))?,
                 None => Endpoint::builder(presets::N0),
             };
+            // No ALPN yet: incoming connections are refused by the handshake
+            // until `listen` is called. Dialing out works regardless.
             builder
                 .secret_key(opts.secret_key)
-                .alpns(vec![ALPN.to_vec()])
                 .bind()
                 .await
                 .map_err(|e| other("bind endpoint", e))
         })?;
-        let ep = endpoint.clone();
-        let al = allow.clone();
-        rt.spawn(async move {
-            while let Some(incoming) = ep.accept().await {
-                let al = al.clone();
-                let tx = tx.clone();
-                tokio::spawn(async move {
-                    let Ok(conn) = incoming.await else { return };
-                    serve_link(conn, al, tx).await;
-                });
-            }
-        });
         Ok(Self {
             rt,
             endpoint,
             allow,
             links: Arc::new(Mutex::new(HashMap::new())),
+            queue: Arc::new(Queue {
+                tx,
+                pending_refusals: AtomicUsize::new(0),
+            }),
             incoming: Mutex::new(rx),
+            listening: AtomicBool::new(false),
         })
+    }
+
+    /// Start accepting: advertise the session ALPN and run the accept loop.
+    /// Until this is called the endpoint only dials out. Calling it twice is
+    /// harmless.
+    pub fn listen(&self) -> io::Result<()> {
+        if self.listening.swap(true, Ordering::SeqCst) {
+            return Ok(());
+        }
+        self.endpoint.set_alpns(vec![ALPN.to_vec()]);
+        let ep = self.endpoint.clone();
+        let al = self.allow.clone();
+        let queue = self.queue.clone();
+        self.rt.spawn(async move {
+            while let Some(incoming) = ep.accept().await {
+                let al = al.clone();
+                let queue = queue.clone();
+                tokio::spawn(async move {
+                    let Ok(conn) = incoming.await else { return };
+                    serve_link(conn, al, queue).await;
+                });
+            }
+        });
+        Ok(())
     }
 
     /// This device's identity: 64 lowercase hex characters.
@@ -172,15 +224,11 @@ fn parse_address(address: &str) -> io::Result<EndpointAddr> {
 }
 
 /// Serve one authenticated link: check the key, then hand out its streams.
-async fn serve_link(
-    conn: IrohConnection,
-    allow: Allowlist,
-    tx: mpsc::Sender<Result<Box<dyn Connection>, Refusal>>,
-) {
+async fn serve_link(conn: IrohConnection, allow: Allowlist, queue: Arc<Queue>) {
     let peer = conn.remote_id().to_string();
     if !allow.contains(&peer) {
         conn.close(1u32.into(), b"unknown peer");
-        let _ = tx.send(Err(Refusal::UnknownPeer));
+        queue.refuse();
         return;
     }
     loop {
@@ -190,16 +238,24 @@ async fn serve_link(
         // Revocation: a key removed after the link came up gets no new stream.
         if !allow.contains(&peer) {
             conn.close(1u32.into(), b"unknown peer");
-            let _ = tx.send(Err(Refusal::UnknownPeer));
+            queue.refuse();
             return;
         }
-        let tx = tx.clone();
+        let queue = queue.clone();
+        let allow = allow.clone();
         let conn = conn.clone();
         let peer = peer.clone();
         tokio::spawn(async move {
             let mut preface = [0u8; 4];
             let read = tokio::time::timeout(PREFACE_TIMEOUT, recv.read_exact(&mut preface)).await;
             if !matches!(read, Ok(Ok(()))) || &preface != PREFACE {
+                return;
+            }
+            // Checked again after the preface wait: a key revoked meanwhile
+            // gets nothing, and its link is closed.
+            if !allow.contains(&peer) {
+                conn.close(1u32.into(), b"unknown peer");
+                queue.refuse();
                 return;
             }
             let c: Box<dyn Connection> = Box::new(IrohConn {
@@ -210,7 +266,7 @@ async fn serve_link(
                 link: conn,
                 deadline: None,
             });
-            let _ = tx.send(Ok(c));
+            queue.admit(c);
         });
     }
 }
@@ -269,16 +325,27 @@ impl Transport for IrohTransport {
     }
 
     /// Blocks until a peer connects. An unknown peer yields
-    /// `Ok(Err(Refusal::UnknownPeer))`; the peer never got a stream.
+    /// `Ok(Err(Refusal::UnknownPeer))`; the peer never got a stream. An error
+    /// until [`IrohTransport::listen`] has been called.
     fn accept(&self) -> io::Result<Result<Box<dyn Connection>, Refusal>> {
+        if !self.listening.load(Ordering::SeqCst) {
+            return Err(io::Error::new(
+                io::ErrorKind::NotConnected,
+                "call listen() before accept()",
+            ));
+        }
         // A poisoned lock is an error, never a panic and never a connection.
         let incoming = self
             .incoming
             .lock()
             .map_err(|_| io::Error::other("transport state poisoned"))?;
-        incoming
+        let item = incoming
             .recv()
-            .map_err(|_| io::Error::new(io::ErrorKind::BrokenPipe, "transport closed"))
+            .map_err(|_| io::Error::new(io::ErrorKind::BrokenPipe, "transport closed"))?;
+        if item.is_err() {
+            self.queue.pending_refusals.fetch_sub(1, Ordering::SeqCst);
+        }
+        Ok(item)
     }
 }
 
@@ -433,6 +500,7 @@ mod tests {
                 return;
             };
             server.allow.add(&client.key).unwrap();
+            server.t.listen().unwrap();
             let t = echo_server(server.t.clone());
             let conn = client.t.connect(&server.t.address()).unwrap();
             assert_eq!(conn.peer(), &PeerIdentity::Device(server.key.clone()));
@@ -453,6 +521,7 @@ mod tests {
                 return;
             };
             server.allow.add(&client.key).unwrap();
+            server.t.listen().unwrap();
             let s = server.t.clone();
             let t = std::thread::spawn(move || s.accept().unwrap().unwrap().peer().clone());
             let _conn = client.t.connect(&server.t.address()).unwrap();
@@ -467,6 +536,7 @@ mod tests {
                 return;
             };
             server.allow.add(&client.key).unwrap();
+            server.t.listen().unwrap();
             let t = echo_server(server.t.clone());
             let conn = client.t.connect(&server.t.address()).unwrap();
             let (mut r, mut w) = conn.split();
@@ -492,6 +562,7 @@ mod tests {
                 return;
             };
             server.allow.add(&client.key).unwrap();
+            server.t.listen().unwrap();
             let s = server.t.clone();
             let t = std::thread::spawn(move || {
                 let conn = s.accept().unwrap().unwrap();
@@ -523,6 +594,7 @@ mod tests {
                 return;
             };
             // The server's allowlist is empty: the client is a stranger.
+            server.t.listen().unwrap();
             let s = server.t.clone();
             let t = std::thread::spawn(move || s.accept().unwrap());
             let dialed = client.t.connect(&server.t.address());
@@ -549,6 +621,7 @@ mod tests {
                 return;
             };
             server.allow.add(&client.key).unwrap();
+            server.t.listen().unwrap();
             let s = server.t.clone();
             let first = std::thread::spawn(move || s.accept().unwrap().is_ok());
             let _c1 = client.t.connect(&server.t.address()).unwrap();
@@ -568,6 +641,7 @@ mod tests {
                 return;
             };
             server.allow.add(&client.key).unwrap();
+            server.t.listen().unwrap();
             let s = server.t.clone();
             let t = std::thread::spawn(move || {
                 let a = s.accept().unwrap().unwrap();
@@ -578,6 +652,30 @@ mod tests {
             let _b = client.t.connect(&server.t.address()).unwrap();
             let _held = t.join().unwrap();
             assert_eq!(client.t.link_count(), 1);
+        });
+    }
+
+    #[test]
+    fn nothing_is_accepted_before_listen() {
+        watchdog(60, || {
+            let (Some(server), Some(client)) = (node(), node()) else {
+                return;
+            };
+            server.allow.add(&client.key).unwrap();
+            // accept() without listen() is an error, not a hang.
+            assert_eq!(
+                server.t.accept().err().unwrap().kind(),
+                io::ErrorKind::NotConnected
+            );
+            // The endpoint advertises no ALPN yet, so a dial fails.
+            assert!(client.t.connect(&server.t.address()).is_err());
+            // After listen() the same peer gets in.
+            server.t.listen().unwrap();
+            server.t.listen().unwrap();
+            let s = server.t.clone();
+            let t = std::thread::spawn(move || s.accept().unwrap().is_ok());
+            let _c = client.t.connect(&server.t.address()).unwrap();
+            assert!(t.join().unwrap());
         });
     }
 
