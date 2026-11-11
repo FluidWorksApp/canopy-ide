@@ -313,10 +313,34 @@ fn scene_b_checks(ctx: Option<&GpuContext>, failures: &mut Vec<String>) {
         report1.quads,
         reference::hash(&cpu1)
     ));
-    say(&format!(
-        "scene_b_png_hex {}",
-        hex(&encode_png(w, h, &cpu1))
-    ));
+    // The CPU image was byte-identical on Linux, macOS and Windows runners
+    // (same bundled font, same swash and rustybuzz), so it is stored and
+    // compared exactly. Regenerate by decoding `scene_b_png_hex` from the log.
+    let stored =
+        decode_png(&PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/golden/scene_b.png"));
+    match stored {
+        Some((sw, sh, px)) if (sw, sh) == (w, h) => {
+            let d = reference::max_diff(&cpu1, &px);
+            say(&format!("scene_b cpu_vs_golden max_diff={d}"));
+            if d != 0 {
+                failures.push(format!(
+                    "scene_b CPU reference differs from stored image by {d}"
+                ));
+                say(&format!(
+                    "scene_b_png_hex {}",
+                    hex(&encode_png(w, h, &cpu1))
+                ));
+            }
+        }
+        _ => {
+            say("scene_b stored image missing or wrong size");
+            say(&format!(
+                "scene_b_png_hex {}",
+                hex(&encode_png(w, h, &cpu1))
+            ));
+            failures.push("scene_b stored image missing".into());
+        }
+    }
 
     let Some(ctx) = ctx else {
         say("scene_b gpu: skipped (no adapter)");

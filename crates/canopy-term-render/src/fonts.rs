@@ -6,10 +6,8 @@
 //! never depend on what the machine has installed; system fonts are loaded only
 //! when asked.
 
-use std::collections::HashMap;
-use std::sync::Arc;
-
 use crate::glyphs::FontStyle;
+use std::collections::HashMap;
 
 pub const BUNDLED_FONT: &[u8] = include_bytes!("../fonts/JetBrainsMono-Regular.ttf");
 pub const BUNDLED_FAMILY: &str = "JetBrains Mono";
@@ -44,10 +42,15 @@ pub fn pick_fallback(candidates: &[Candidate], want: FontStyle) -> Option<usize>
 }
 
 /// A face whose bytes are held for shaping and rasterising.
+///
+/// The font bytes are leaked (`Box::leak`) so the parsed shaping face can be
+/// `'static` and built once instead of once per shaped run. The leak is bounded
+/// by the number of distinct faces actually used.
 pub struct LoadedFace {
-    pub data: Arc<Vec<u8>>,
+    pub data: &'static [u8],
     pub index: u32,
     pub units_per_em: u16,
+    pub buzz: rustybuzz::Face<'static>,
 }
 
 /// A face and which styles must be faked because the face lacks them.
@@ -122,10 +125,13 @@ impl FontBook {
                 .unwrap_or(1000);
             (data.to_vec(), index, upem)
         })?;
+        let data: &'static [u8] = Box::leak(data.into_boxed_slice());
+        let buzz = rustybuzz::Face::from_slice(data, index)?;
         self.loaded.push(LoadedFace {
-            data: Arc::new(data),
+            data,
             index,
             units_per_em: upem,
+            buzz,
         });
         let i = (self.loaded.len() - 1) as u32;
         self.by_id.insert(id, i);

@@ -267,16 +267,12 @@ impl TextEngine {
             text.push_str(c.text);
         }
         let loaded = self.fonts.face(choice.face);
-        let data = loaded.data.clone();
         let upem = loaded.units_per_em.max(1) as f32;
-        let Some(face) = rustybuzz::Face::from_slice(&data[..], loaded.index) else {
-            return;
-        };
         let mut buffer = UnicodeBuffer::new();
         buffer.push_str(&text);
         buffer.guess_segment_properties();
         buffer.set_direction(Direction::LeftToRight);
-        let shaped = rustybuzz::shape(&face, &[], buffer);
+        let shaped = rustybuzz::shape(&loaded.buzz, &[], buffer);
         let k = self.layout.font_px as f32 / upem;
         let infos = shaped.glyph_infos();
         let positions = shaped.glyph_positions();

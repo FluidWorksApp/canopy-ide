@@ -105,6 +105,10 @@ all (the target is cleared to the theme background). A cluster that shapes to
 many glyphs can exceed a row's capacity; extras are dropped rather than
 overrunning the next row.
 
+Fonts: each used face's bytes are leaked once (`Box::leak`) so its parsed
+shaping face is `'static` and built once, not per run; the leak is bounded by the
+faces actually used.
+
 Atlas limit: the atlas must hold the glyphs of one frame. If it fills during a
 build it is cleared and the build repeats once; a screen needing more distinct
 glyphs than the atlas holds will draw some blank.

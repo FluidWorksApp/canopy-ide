@@ -39,3 +39,22 @@ harness = false
 [[test]]
 name = "perf_report"
 harness = false
+
+# `cargo test` builds dependencies unoptimised, which makes shaping and
+# rasterising far slower than a shipping build. Optimise only the text
+# dependencies (small compile cost); this crate itself stays a debug build, so
+# PERF numbers are still pessimistic.
+[profile.dev.package.rustybuzz]
+opt-level = 3
+[profile.dev.package.ttf-parser]
+opt-level = 3
+[profile.dev.package.swash]
+opt-level = 3
+[profile.dev.package.zeno]
+opt-level = 3
+[profile.dev.package.yazi]
+opt-level = 3
+[profile.dev.package.skrifa]
+opt-level = 3
+[profile.dev.package.read-fonts]
+opt-level = 3

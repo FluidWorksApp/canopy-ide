@@ -78,6 +78,18 @@ fn main() {
         l.width, l.height, l.font_px
     ));
 
+    // 0. Parsing a font face for shaping (done once per face, not per run).
+    let t0 = Instant::now();
+    let parses = 200u32;
+    for _ in 0..parses {
+        let face = rustybuzz::Face::from_slice(BUNDLED_FONT, 0);
+        std::hint::black_box(&face);
+    }
+    say(&format!(
+        "face_parse iters={parses} micros_each={}",
+        t0.elapsed().as_micros() / parses as u128
+    ));
+
     // 1. Glyph rasterising and packing: every printable ASCII glyph, cold.
     let mut engine = TextEngine::new(FontBook::bundled(), l, 1024);
     let text: Vec<String> = (33u8..127).map(|b| (b as char).to_string()).collect();
