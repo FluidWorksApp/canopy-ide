@@ -79,13 +79,30 @@ pub fn claim(dir: &Path) -> io::Result<Option<Owned>> {
     }))
 }
 
-/// Create `dir` if needed and make it 0700. Refused if it is a symlink or
-/// belongs to another user, since then its mode says nothing about who can
-/// reach the socket inside. The checks and the chmod all go through one
-/// descriptor opened with `O_NOFOLLOW`, so the path cannot be swapped for a
-/// symlink between the check and the mode change.
+/// Make sure `dir` is a private directory of ours. One that does not exist is
+/// created here with mode 0700 (and only then is its mode set). One that
+/// already exists is never chmod-ed, exactly as the PTY host treats its own
+/// directory: `CANOPY_PTY_HOST_DIR` may point at `$HOME` or a project, and
+/// tightening that is not ours to do. It is refused unless it already belongs
+/// to us and grants nothing to group or others, or if it is a symlink, since
+/// then its mode says nothing about who can reach the socket inside. The checks
+/// all go through one descriptor opened with `O_NOFOLLOW`, so the path cannot
+/// be swapped for a symlink between the check and the mode change. Whichever
+/// of this and the host's `prepare_socket_dir` runs first, the other finds a
+/// directory it accepts.
 fn private_dir(dir: &Path) -> io::Result<()> {
-    std::fs::create_dir_all(dir)?;
+    let created = match std::fs::symlink_metadata(dir) {
+        Ok(_) => false,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => {
+            use std::os::unix::fs::DirBuilderExt;
+            std::fs::DirBuilder::new()
+                .recursive(true)
+                .mode(0o700)
+                .create(dir)?;
+            true
+        }
+        Err(e) => return Err(e),
+    };
     let handle = std::fs::OpenOptions::new()
         .read(true)
         .custom_flags(libc::O_NOFOLLOW | libc::O_DIRECTORY)
@@ -110,7 +127,18 @@ fn private_dir(dir: &Path) -> io::Result<()> {
             dir.display()
         )));
     }
-    handle.set_permissions(std::fs::Permissions::from_mode(0o700))
+    if created {
+        // Past the umask, which a mode passed at creation is subject to.
+        return handle.set_permissions(std::fs::Permissions::from_mode(0o700));
+    }
+    if meta.mode() & 0o077 != 0 {
+        return Err(io::Error::other(format!(
+            "refusing {}: it already exists with mode {:o}; it must be 0700 (it is not changed here)",
+            dir.display(),
+            meta.mode() & 0o777
+        )));
+    }
+    Ok(())
 }
 
 /// Whether a peer may talk to the bridge at all: only our own uid.
@@ -257,7 +285,7 @@ mod tests {
     #[test]
     fn a_stale_socket_file_is_replaced() {
         let dir = Dir::new("stale");
-        std::fs::create_dir_all(&dir.0).unwrap();
+        make_private(&dir.0);
         // A socket file nobody listens on, as a killed app leaves it.
         drop(UnixListener::bind(dir.0.join(SOCKET_NAME)).unwrap());
         assert!(UnixStream::connect(dir.0.join(SOCKET_NAME)).is_err());
@@ -302,6 +330,41 @@ mod tests {
         };
         rt.spawn(serve(owned.listener, router("launch-2")));
         assert!(get(&path).unwrap().ends_with("launch-2"));
+    }
+
+    fn make_private(dir: &Path) {
+        use std::os::unix::fs::DirBuilderExt;
+        std::fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(dir)
+            .unwrap();
+        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+    }
+
+    #[test]
+    fn an_existing_directory_is_never_chmoded_and_a_loose_one_is_refused() {
+        let dir = Dir::new("loose");
+        std::fs::create_dir_all(&dir.0).unwrap();
+        std::fs::set_permissions(&dir.0, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let err = claim(&dir.0).err().expect("a 0755 directory is refused");
+        assert!(err.to_string().contains("0700"), "{err}");
+        let mode = std::fs::metadata(&dir.0).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o755, "left exactly as it was");
+        assert!(!dir.0.join(SOCKET_NAME).exists());
+        // Tightened by its owner, it is accepted, and stays as the owner set it.
+        std::fs::set_permissions(&dir.0, std::fs::Permissions::from_mode(0o700)).unwrap();
+        assert!(claim(&dir.0).unwrap().is_some());
+    }
+
+    #[test]
+    fn a_directory_it_creates_is_0700_whatever_the_umask() {
+        let dir = Dir::new("fresh");
+        assert!(!dir.0.exists());
+        let owned = claim(&dir.0).unwrap().unwrap();
+        let mode = std::fs::metadata(&dir.0).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o700);
+        drop(owned);
     }
 
     #[test]
