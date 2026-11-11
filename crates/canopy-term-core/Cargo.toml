@@ -12,11 +12,13 @@ rust-version = "1.85"
 [workspace]
 
 [dependencies]
+# Apache-2.0. Chosen by measurement: see PERF.md and tests/compare.rs. Its
+# types never appear in this crate's public API. `serde` is off.
+alacritty_terminal = { version = "0.26.0", default-features = false }
 
 [dev-dependencies]
 # Candidate emulators for the conformance and throughput harness (tests/).
 vt100 = "0.18.1"
-alacritty_terminal = "0.26.0"
 
 # `cargo test` builds unoptimised by default; parse throughput numbers from an
 # unoptimised build mean nothing, so the dev profile is optimised. The crate is
@@ -37,4 +39,10 @@ overflow-checks = false
 # on timing or on which candidate wins.
 [[test]]
 name = "compare"
+harness = false
+
+# Report-only numbers for Screen (throughput, memory, per-frame cost), printed
+# as markdown rows to the CI log and copied into PERF.md.
+[[test]]
+name = "perf"
 harness = false

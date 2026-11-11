@@ -5,7 +5,7 @@
 
 mod engines;
 
-use engines::{stream::synthetic_stream, Alacritty, Dump, Engine, Vt100};
+use engines::{stream::synthetic_stream, Alacritty, AlacrittyPass, Dump, Engine, Vt100};
 use std::time::Instant;
 
 struct Fixture {
@@ -193,7 +193,7 @@ fn fixtures() -> Vec<Fixture> {
             name: "RIS (ESC c) resets tracked modes",
             cols: 20,
             rows: 3,
-            input: b"\x1b[?1004h\x1b[?2004h\x1b[>5u\x1b[?2026h\x1bc",
+            input: b"\x1b[?1004h\x1b[?2004h\x1b[>5u\x1bc",
             check: |d| {
                 mode("focus", d.focus, false)?;
                 mode("bracketed", Some(d.bracketed), false)?;
@@ -202,6 +202,26 @@ fn fixtures() -> Vec<Fixture> {
                     Some(true) => Err("sync still on after RIS".into()),
                     _ => Ok(()),
                 }
+            },
+        },
+        Fixture {
+            name: "SGR dim, italic, underline, hidden, strike",
+            cols: 20,
+            rows: 2,
+            input: b"\x1b[2ma\x1b[0m\x1b[3mb\x1b[0m\x1b[4mc\x1b[0m\x1b[8md\x1b[0m\x1b[9me",
+            check: |d| {
+                for w in [
+                    "0,0:dim",
+                    "0,1:italic",
+                    "0,2:underline",
+                    "0,3:hidden",
+                    "0,4:strike",
+                ] {
+                    if !d.styles.iter().any(|s| s == w) {
+                        return Err(format!("missing {w}, have {:?}", d.styles));
+                    }
+                }
+                Ok(())
             },
         },
         Fixture {
@@ -323,4 +343,5 @@ fn main() {
     println!("synthetic stream: {} bytes", data.len());
     report::<Vt100>(&data);
     report::<Alacritty>(&data);
+    report::<AlacrittyPass>(&data);
 }

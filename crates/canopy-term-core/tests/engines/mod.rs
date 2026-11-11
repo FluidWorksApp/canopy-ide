@@ -136,6 +136,15 @@ impl Engine for Vt100 {
                 if cell.bold() {
                     a.push("bold".to_string());
                 }
+                if cell.dim() {
+                    a.push("dim".to_string());
+                }
+                if cell.italic() {
+                    a.push("italic".to_string());
+                }
+                if cell.underline() {
+                    a.push("underline".to_string());
+                }
                 if cell.inverse() {
                     a.push("inverse".to_string());
                 }
@@ -175,7 +184,8 @@ use alacritty_terminal::grid::Dimensions;
 use alacritty_terminal::index::{Column, Line, Point};
 use alacritty_terminal::term::cell::Flags;
 use alacritty_terminal::term::{Config, Term, TermMode};
-use alacritty_terminal::vte::ansi::{Color as AColor, Processor, StdSyncHandler};
+use alacritty_terminal::vte::ansi::{Color as AColor, Processor, StdSyncHandler, Timeout};
+use std::time::Duration;
 
 struct Quiet;
 impl EventListener for Quiet {}
@@ -196,9 +206,35 @@ impl Dimensions for Size {
     }
 }
 
-pub struct Alacritty {
+/// Runs synchronized-output sequences straight through (no timer).
+#[derive(Default)]
+pub struct PassThrough;
+impl Timeout for PassThrough {
+    fn set_timeout(&mut self, _: Duration) {}
+    fn clear_timeout(&mut self) {}
+    fn pending_timeout(&self) -> bool {
+        false
+    }
+}
+
+pub struct Alac<T: Timeout> {
     term: Term<Quiet>,
-    proc: Processor<StdSyncHandler>,
+    proc: Processor<T>,
+}
+
+/// alacritty_terminal as shipped: sync output buffered behind a wall-clock timer.
+pub type Alacritty = Alac<StdSyncHandler>;
+/// alacritty_terminal with the timer removed (what `Screen` uses).
+pub type AlacrittyPass = Alac<PassThrough>;
+
+pub trait Label {
+    const NAME: &'static str;
+}
+impl Label for StdSyncHandler {
+    const NAME: &'static str = "alacritty_terminal (default sync timer)";
+}
+impl Label for PassThrough {
+    const NAME: &'static str = "alacritty_terminal (pass-through sync)";
 }
 
 fn acolor(c: AColor) -> Option<String> {
@@ -216,9 +252,9 @@ fn acolor(c: AColor) -> Option<String> {
     }
 }
 
-impl Engine for Alacritty {
+impl<T: Timeout + Label> Engine for Alac<T> {
     fn name() -> &'static str {
-        "alacritty_terminal"
+        T::NAME
     }
     fn new(cols: u16, rows: u16, scrollback: usize) -> Self {
         let cfg = Config {
@@ -230,9 +266,9 @@ impl Engine for Alacritty {
             cols: cols as usize,
             rows: rows as usize,
         };
-        Alacritty {
+        Alac {
             term: Term::new(cfg, &size, Quiet),
-            proc: Processor::<StdSyncHandler>::new(),
+            proc: Processor::<T>::new(),
         }
     }
     fn feed(&mut self, bytes: &[u8]) {
@@ -263,8 +299,23 @@ impl Engine for Alacritty {
                 if cell.flags.contains(Flags::BOLD) {
                     a.push("bold".to_string());
                 }
+                if cell.flags.contains(Flags::DIM) {
+                    a.push("dim".to_string());
+                }
+                if cell.flags.contains(Flags::ITALIC) {
+                    a.push("italic".to_string());
+                }
+                if cell.flags.intersects(Flags::ALL_UNDERLINES) {
+                    a.push("underline".to_string());
+                }
                 if cell.flags.contains(Flags::INVERSE) {
                     a.push("inverse".to_string());
+                }
+                if cell.flags.contains(Flags::HIDDEN) {
+                    a.push("hidden".to_string());
+                }
+                if cell.flags.contains(Flags::STRIKEOUT) {
+                    a.push("strike".to_string());
                 }
                 if let Some(f) = acolor(cell.fg) {
                     a.push(format!("fg={f}"));
