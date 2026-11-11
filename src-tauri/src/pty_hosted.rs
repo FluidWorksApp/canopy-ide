@@ -193,6 +193,7 @@ mod tests {
             let stop = Arc::new(AtomicBool::new(false));
             let config = ServerConfig {
                 socket: socket.clone(),
+                min_client: canopy_pty_host::protocol::MIN_CLIENT_VERSION,
                 idle_exit: Duration::from_secs(3600),
                 exited_ttl: EXITED_TTL,
             };

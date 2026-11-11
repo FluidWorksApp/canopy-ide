@@ -122,6 +122,9 @@ impl Response {
 pub struct AttachReply {
     pub ok: bool,
     pub error: Option<String>,
+    /// The host's protocol version, so a client can check the host at attach
+    /// without a separate hello. 0 from a host that predates the field.
+    pub version: u32,
     pub start: u64,
     pub end: u64,
     /// True when the requested offset had already left the ring.

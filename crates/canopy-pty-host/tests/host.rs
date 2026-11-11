@@ -49,6 +49,7 @@ fn spec(script: &str) -> SpawnSpec {
         cols: 80,
         rows: 24,
         meta: Some("test-meta".into()),
+        ..Default::default()
     }
 }
 
@@ -317,21 +318,47 @@ fn hello_reports_the_protocol_version_and_the_minimum_client() {
 
 #[test]
 fn a_client_older_than_the_host_accepts_is_refused_at_hello_and_attach() {
-    let h = Harness::start("x", 60);
-    // Version 0 means "did not say" and is always accepted, so use a raw request
-    // with a version the host cannot accept once its minimum is above 1; until
-    // then assert only that the field is understood and a current client passes.
-    let mut stream = UnixStream::connect(h.client.socket()).unwrap();
-    stream
-        .write_all(b"{\"op\":\"hello\",\"client_version\":1}\n")
+    // A host whose minimum is above this client's version. It is started by hand:
+    // `ensure_running` would (rightly, today) treat a refusing host as no host.
+    let dir = std::env::temp_dir().join(format!("cph{}skew", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let socket = dir.join("h.sock");
+    let mut host = std::process::Command::new(host_exe())
+        .arg("--socket")
+        .arg(&socket)
+        .args(["--min-client", "2", "--idle-secs", "60"])
+        .spawn()
         .unwrap();
-    let mut reply = String::new();
-    let mut byte = [0u8; 1];
-    while stream.read(&mut byte).unwrap() == 1 && byte[0] != b'\n' {
-        reply.push(byte[0] as char);
-    }
-    let accepted = canopy_pty_host::protocol::MIN_CLIENT_VERSION <= 1;
-    assert_eq!(reply.contains("\"ok\":true"), accepted, "{reply}");
+    assert!(wait_until(Duration::from_secs(5), || socket.exists()));
+    let client = HostClient::new(&socket);
+
+    let refused = client.hello().expect_err("hello must be refused");
+    assert!(
+        refused.to_string().contains("older than this host accepts"),
+        "{refused}"
+    );
+
+    // Spawning does not check the version; attaching does.
+    let (id, _) = client.spawn(spec("sleep 300")).unwrap();
+    let error = client.attach(id, 0).err().expect("attach must be refused");
+    assert!(
+        error.to_string().contains("older than this host accepts"),
+        "{error}"
+    );
+
+    let _ = host.kill();
+    let _ = host.wait();
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn an_attach_reply_carries_the_host_version() {
+    let h = Harness::start("y", 60);
+    let (id, _) = h.client.spawn(spec("sleep 300")).unwrap();
+    // `attach` checks the reply version; reaching here means the host's was ok.
+    let attached = h.client.attach(id, 0).unwrap();
+    assert!(attached.start <= attached.end);
 }
 
 #[test]

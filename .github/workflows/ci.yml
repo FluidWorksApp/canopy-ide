@@ -116,12 +116,14 @@ jobs:
       - name: Static (musl) host binary
         if: runner.os == 'Linux'
         run: |
+          sudo apt-get update
           sudo apt-get install -y musl-tools
           rustup target add x86_64-unknown-linux-musl
           cargo build --locked --release --target x86_64-unknown-linux-musl --manifest-path crates/canopy-pty-host/Cargo.toml --bin canopy-pty-host
           bin=src-tauri/target/x86_64-unknown-linux-musl/release/canopy-pty-host
           file "$bin"
-          if ldd "$bin" 2>&1 | grep -q "not a dynamic executable"; then echo static; else ldd "$bin"; exit 1; fi
+          # static and static-pie report differently from ldd and file
+          if file "$bin" | grep -q "statically linked\|static-pie" || ldd "$bin" 2>&1 | grep -q "not a dynamic executable\|statically linked"; then echo static; else ldd "$bin"; exit 1; fi
           # Runs, takes its socket from the environment, and creates it.
           dir=$(mktemp -d)
           CANOPY_PTY_HOST_SOCKET="$dir/h.sock" "$bin" --idle-secs 5 &

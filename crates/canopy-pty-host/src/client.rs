@@ -190,6 +190,12 @@ impl HostClient {
                 reply.error.unwrap_or_else(|| "attach refused".into()),
             ));
         }
+        if reply.version != 0 && reply.version < MIN_HOST_VERSION {
+            return Err(other(format!(
+                "host speaks protocol {}, this client needs {MIN_HOST_VERSION} or newer",
+                reply.version
+            )));
+        }
         // From here the connection carries raw output; reads block until bytes.
         stream.set_read_timeout(None)?;
         stream.set_write_timeout(None)?;

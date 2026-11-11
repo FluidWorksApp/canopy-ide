@@ -6,9 +6,7 @@
 //! growing host memory. With no client attached, output drains into the ring and
 //! the oldest bytes fall off (the client sees `gap` when it returns).
 
-use crate::protocol::{
-    AttachReply, Request, Response, SessionInfo, SpawnSpec, MIN_CLIENT_VERSION, PROTOCOL_VERSION,
-};
+use crate::protocol::{AttachReply, Request, Response, SessionInfo, SpawnSpec, PROTOCOL_VERSION};
 use portable_pty::{native_pty_system, CommandBuilder, MasterPty, PtySize};
 use std::collections::{HashMap, VecDeque};
 use std::io::{BufRead, BufReader, Read, Write};
@@ -32,6 +30,8 @@ const TERM_GRACE: Duration = Duration::from_secs(3);
 
 pub struct ServerConfig {
     pub socket: PathBuf,
+    /// The oldest client protocol this host serves (default `MIN_CLIENT_VERSION`).
+    pub min_client: u32,
     /// Exit after this long with no live session and no connection.
     pub idle_exit: Duration,
     /// An exited session nobody reaped is dropped after this long.
@@ -102,6 +102,7 @@ impl Session {
 }
 
 struct Host {
+    min_client: u32,
     sessions: Mutex<HashMap<u32, Arc<Session>>>,
     next_id: AtomicU32,
     connections: AtomicUsize,
@@ -240,6 +241,7 @@ pub fn serve(
 ) -> std::io::Result<()> {
     listener.set_nonblocking(true)?;
     let host = Arc::new(Host {
+        min_client: config.min_client,
         sessions: Mutex::new(HashMap::new()),
         next_id: AtomicU32::new(id_seed()),
         connections: AtomicUsize::new(0),
@@ -334,6 +336,7 @@ fn write_line<T: serde::Serialize>(stream: &mut UnixStream, value: &T) -> std::i
 }
 
 fn handle(host: &Arc<Host>, mut stream: UnixStream) -> std::io::Result<()> {
+    let min_client = host.min_client;
     stream.set_read_timeout(Some(Duration::from_secs(10)))?;
     let mut line = String::new();
     {
@@ -351,15 +354,15 @@ fn handle(host: &Arc<Host>, mut stream: UnixStream) -> std::io::Result<()> {
             // A client too old for this host is refused up front, so skew between
             // the app, a runner and a long-lived host fails at attach with a clear
             // message instead of as garbage later. 0 means "did not say".
-            if client_version != 0 && client_version < MIN_CLIENT_VERSION {
+            if client_version != 0 && client_version < min_client {
                 return write_line(
                     &mut stream,
                     &Response {
                         error: Some(format!(
-                            "client protocol {client_version} is older than this host accepts ({MIN_CLIENT_VERSION})"
+                            "client protocol {client_version} is older than this host accepts ({min_client})"
                         )),
                         version: Some(PROTOCOL_VERSION),
-                        min_client: Some(MIN_CLIENT_VERSION),
+                        min_client: Some(min_client),
                         host_pid: Some(std::process::id()),
                         ..Default::default()
                     },
@@ -370,7 +373,7 @@ fn handle(host: &Arc<Host>, mut stream: UnixStream) -> std::io::Result<()> {
                 &Response {
                     ok: true,
                     version: Some(PROTOCOL_VERSION),
-                    min_client: Some(MIN_CLIENT_VERSION),
+                    min_client: Some(min_client),
                     host_pid: Some(std::process::id()),
                     ..Default::default()
                 },
@@ -489,12 +492,12 @@ fn handle(host: &Arc<Host>, mut stream: UnixStream) -> std::io::Result<()> {
             after,
             client_version,
         } => {
-            if client_version != 0 && client_version < MIN_CLIENT_VERSION {
+            if client_version != 0 && client_version < min_client {
                 return write_line(
                     &mut stream,
                     &AttachReply {
                         error: Some(format!(
-                            "client protocol {client_version} is older than this host accepts ({MIN_CLIENT_VERSION})"
+                            "client protocol {client_version} is older than this host accepts ({min_client})"
                         )),
                         ..Default::default()
                     },
@@ -660,6 +663,7 @@ fn attach(session: Arc<Session>, mut stream: UnixStream, after: u64) -> std::io:
         AttachReply {
             ok: true,
             error: None,
+            version: PROTOCOL_VERSION,
             start,
             end: ring.base + ring.bytes.len() as u64,
             gap: after < ring.base,
