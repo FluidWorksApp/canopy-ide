@@ -76,7 +76,8 @@ unpredictable name, `create_new` (so a planted symlink is never followed), mode
 effort on unix. A poisoned lock (a thread panicked holding it) fails closed:
 nothing is allowed, `add` errors and `save` refuses, until restart. Public keys
 are not secret; the file is the access policy, so it must not be writable by other
-users. The file lives in the per-user profile directory next to the host's own
+users: `Allowlist::load` refuses (on unix) a file that is not a regular file owned by
+the current user or root, or that is group or world writable. The file lives in the per-user profile directory next to the host's own
 data; the caller chooses the path. A malformed line is an error, never skipped.
 
 **Device key storage.** The iroh secret key is the device identity. It must be
@@ -113,7 +114,17 @@ confuse them.
   is dropped, never queued without bound. Refusal notices have their own small
   cap (8) so strangers cannot crowd out admitted peers.
 - The allowlist is checked when the link comes up, for every new stream, and
-  again after the stream preface; a revoked key's link is closed.
+  again after the stream preface; a revoked key's link is closed. A watcher also
+  re-checks every live link each second (`REVOCATION_INTERVAL`), so removing a key
+  ends the sessions already running over its link within about a second, not only
+  its next stream. The close is abrupt: the peer's reads and writes fail.
+- At most 256 incoming connections are handled at once (`MAX_LINKS`); past that
+  the handshake is refused and no task is spawned.
+- `LocalUnix::bind` creates the socket under a umask of 0o177 (restored before it
+  returns, binds serialised) so it never exists with a wider mode than 0600, not
+  even briefly. The umask is process wide: a file another thread creates in those
+  few microseconds gets a stricter mode, which is harmless. A failed descriptor
+  dup in `split` makes both halves return that error; it never panics.
 - `LocalUnix` only unlinks its socket on drop if the path still holds the same
   inode it bound. Allowlist saves are serialised and read the list once.
 - Address string: `<64 hex key>[@ip:port[,ip:port]]`. Without socket addresses
