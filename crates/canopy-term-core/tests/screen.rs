@@ -1,6 +1,7 @@
 //! Must-prove behaviour of `Screen`. Synthetic fixtures only.
 
-use canopy_term_core::frame::{Attrs, Color, Damage, Frame, MouseEncoding, MouseMode};
+use canopy_term_core::frame::{Attrs, Color, CursorShape, Damage, Frame, MouseEncoding, MouseMode};
+use canopy_term_core::screen::{MAX_CLUSTER_SCALARS, MAX_OSC_BYTES, MAX_TITLE_BYTES};
 use canopy_term_core::Screen;
 
 /// A frame with the per-observer fields cleared, so two screens in the same
@@ -83,12 +84,38 @@ fn snapshot_round_trip_equals_the_live_frame() {
             "main\x1b[?1049h\x1b[2J\x1b[Halt text\x1b[2;5H",
         ),
         ("tabs", 30, 3, "a\tb\tc\r\n\x1b[41mx\ty"),
+        ("soft wrap", 10, 4, "0123456789ABCDE\r\nnext"),
+        ("soft wrap into a blank row", 5, 4, "abcde\r\n"),
+        (
+            "terminal modes",
+            20,
+            6,
+            "\x1b[2;5r\x1b[?6h\x1b[4h\x1b[20h\x1b[?1007l\x1b[3;2Hx",
+        ),
+        (
+            "both mouse encodings and X10",
+            10,
+            3,
+            "\x1b[?1000h\x1b[?9h\x1b[?1005h\x1b[?1006h",
+        ),
+        ("blinking bar", 10, 3, "\x1b[5 q"),
+        (
+            "kitty on both screens",
+            10,
+            3,
+            "\x1b[>1u\x1b[>3u\x1b[?1049h\x1b[>5u\x1b[=4;2u",
+        ),
     ];
     for (name, cols, rows, input) in cases {
         let live = fed(*cols, *rows, input.as_bytes());
         let snap = live.snapshot();
         let restored = Screen::restore(*cols, *rows, &snap);
         assert_same(&live.frame(), &restored.frame(), name);
+        assert_eq!(
+            String::from_utf8_lossy(&restored.snapshot()),
+            String::from_utf8_lossy(&snap),
+            "{name}: snapshot of the restored screen"
+        );
     }
 }
 
@@ -404,4 +431,261 @@ fn colours_and_attributes_reach_the_frame() {
     let a = fed(20, 2, b"\x1b[9ms\x1b[8mh").frame();
     assert!(a.cell(0, 0).unwrap().attrs.has(Attrs::STRIKE));
     assert!(a.cell(0, 1).unwrap().attrs.has(Attrs::HIDDEN));
+}
+
+#[test]
+fn scroll_region_survives_a_snapshot() {
+    // Rows 2..=4 scroll; rows 1 and 5 stay put. The restored screen must
+    // scroll the same rows when more output arrives.
+    let input = "\x1b[2;4r\x1b[1;1Htop\x1b[5;1Hbottom\x1b[2;1Hr1\r\nr2\r\nr3";
+    let extra = "\r\nX\r\nY";
+    let mut live = fed(20, 6, input.as_bytes());
+    let mut restored = Screen::restore(20, 6, &live.snapshot());
+    assert_same(&live.frame(), &restored.frame(), "before scrolling");
+    live.advance(extra.as_bytes());
+    restored.advance(extra.as_bytes());
+    assert_eq!(
+        screen_text(&live.frame()),
+        vec!["top", "r3", "X", "Y", "bottom", ""],
+        "the region scrolled, the rows outside it did not"
+    );
+    assert_same(&live.frame(), &restored.frame(), "after scrolling");
+
+    // Reset to the whole screen, and the snapshot carries that too.
+    let mut live = fed(20, 6, format!("{input}\x1b[r").as_bytes());
+    let mut restored = Screen::restore(20, 6, &live.snapshot());
+    live.advance(b"\x1b[6;1H\r\nZ");
+    restored.advance(b"\x1b[6;1H\r\nZ");
+    assert_same(&live.frame(), &restored.frame(), "region reset");
+}
+
+#[test]
+fn cursor_style_survives_a_snapshot() {
+    for (seq, shape) in [
+        ("\x1b[2 q", CursorShape::Block),
+        ("\x1b[4 q", CursorShape::Underline),
+        ("\x1b[6 q", CursorShape::Bar),
+        ("\x1b[5 q", CursorShape::Bar),
+    ] {
+        let live = fed(10, 3, seq.as_bytes());
+        assert_eq!(live.frame().cursor.shape, shape, "{seq:?}");
+        let restored = Screen::restore(10, 3, &live.snapshot());
+        assert_eq!(restored.frame().cursor.shape, shape, "{seq:?} restored");
+    }
+}
+
+/// Deterministic noise biased towards escape-sequence bytes.
+fn hostile_bytes(len: usize) -> Vec<u8> {
+    let mut x: u64 = 0x0bad_5eed;
+    let alphabet = b"\x1b[]?;0123456789mHJKrhlqu>c\x07\\ PX\r\n\t";
+    (0..len)
+        .map(|_| {
+            x = x
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            let r = (x >> 33) as usize;
+            if r % 4 == 0 {
+                (r >> 8) as u8
+            } else {
+                alphabet[(r >> 8) % alphabet.len()]
+            }
+        })
+        .collect()
+}
+
+#[test]
+fn hostile_input_stays_bounded() {
+    let (cols, rows) = (40u16, 10u16);
+    let mut s = Screen::new(cols, rows);
+
+    // Out-of-range parameters are clamped, never panic or resize.
+    s.advance(b"\x1b[99999;99999HX\x1b[65535L\x1b[65535M\x1b[65535@\x1b[65535P");
+    s.advance(b"\x1b[65535X\x1b[65535S\x1b[65535T\x1b[65535;65535r\x1b[0;0r\x1b[9;2r");
+    s.advance(b"a\x1b[65535b\x1b[65535C\x1b[65535B");
+    let f = s.frame();
+    assert_eq!((f.cols, f.rows), (cols, rows));
+    assert!(f.cursor.row < rows && f.cursor.col < cols);
+
+    // A huge title is cut to the bound in the frame and the snapshot.
+    let mut title = b"\x1b]2;".to_vec();
+    title.extend(std::iter::repeat_n(b't', 1 << 20));
+    title.push(0x07);
+    s.advance(&title);
+    let t = s.frame().title.unwrap_or_default();
+    assert_eq!(t.chars().count(), MAX_TITLE_BYTES);
+
+    // Thousands of combining marks on one cell: the cluster is bounded.
+    let mut marks = "\x1b[Hq".to_string();
+    marks.extend(std::iter::repeat_n('\u{301}', 10_000));
+    s.advance(marks.as_bytes());
+    let f = s.frame();
+    let q = f.cell(0, 0).unwrap();
+    assert_eq!(f.text(q).chars().count(), MAX_CLUSTER_SCALARS);
+
+    // Kitty keyboard pushes far beyond any sane depth.
+    s.advance("\x1b[>1u".repeat(10_000).as_bytes());
+    assert_eq!(s.frame().modes.kitty_keyboard, 1);
+
+    // Noise: no panic, frame and snapshot stay within fixed bounds, and the
+    // snapshot restores without panicking.
+    let noise = hostile_bytes(512 * 1024);
+    for chunk in noise.chunks(997) {
+        s.advance(chunk);
+    }
+    let f = s.frame();
+    assert_eq!(f.cells.len(), cols as usize * rows as usize);
+    assert!(f.clusters.len() <= f.cells.len() + 1);
+    let snap = s.snapshot();
+    // Per cell: one full SGR (under 64 bytes) plus a maximal cluster; per row a
+    // cursor move; plus title and modes.
+    let bound = f.cells.len() * (64 + 4 * MAX_CLUSTER_SCALARS)
+        + rows as usize * 16
+        + 4 * MAX_TITLE_BYTES
+        + 1024;
+    assert!(
+        snap.len() <= bound,
+        "snapshot {} > bound {bound}",
+        snap.len()
+    );
+    let restored = Screen::restore(cols, rows, &snap);
+    assert_eq!(restored.frame().cells.len(), f.cells.len());
+}
+
+#[test]
+fn degenerate_sizes_are_clamped() {
+    let mut s = Screen::new(0, 0);
+    assert_eq!((s.cols(), s.rows()), (2, 1));
+    s.advance("日本語 wide on a tiny screen\r\n\x1b[?1049h".as_bytes());
+    s.resize(0, 0);
+    let f = s.frame();
+    assert_eq!((f.cols, f.rows), (2, 1));
+    assert_eq!(f.cells.len(), 2);
+    let restored = Screen::restore(0, 0, &s.snapshot());
+    assert_same(&s.frame(), &restored.frame(), "tiny screen");
+}
+
+#[test]
+fn terminal_modes_continue_identically_after_restore() {
+    // DECSTBM, DECOM, IRM and LNM all change what the next bytes do.
+    let input = "top\x1b[6;1Hbottom\x1b[2;5r\x1b[?6h\x1b[4h\x1b[20h\x1b[2;1Habc\x1b[1;1H";
+    let extra = "XY\nZ\n1\n2\n3\n4\x1b[1;1Hins";
+    let mut live = fed(20, 6, input.as_bytes());
+    let mut restored = Screen::restore(20, 6, &live.snapshot());
+    assert_same(&live.frame(), &restored.frame(), "before");
+    live.advance(extra.as_bytes());
+    restored.advance(extra.as_bytes());
+    let f = live.frame();
+    assert_eq!(row_text(&f, 0), "top", "row outside the region untouched");
+    assert_eq!(
+        row_text(&f, 5),
+        "bottom",
+        "row outside the region untouched"
+    );
+    assert_same(&f, &restored.frame(), "after");
+}
+
+#[test]
+fn cursor_blink_survives_a_snapshot() {
+    for (seq, blink) in [("\x1b[5 q", true), ("\x1b[6 q", false), ("\x1b[1 q", true)] {
+        let live = fed(10, 3, seq.as_bytes());
+        assert_eq!(live.cursor_blinking(), blink, "{seq:?}");
+        let restored = Screen::restore(10, 3, &live.snapshot());
+        assert_eq!(restored.cursor_blinking(), blink, "{seq:?} restored");
+    }
+}
+
+#[test]
+fn kitty_flags_of_both_screens_survive_a_snapshot() {
+    let mut live = fed(10, 3, b"\x1b[>1u\x1b[?1049h\x1b[>5u");
+    assert_eq!(live.frame().modes.kitty_keyboard, 5);
+    let mut restored = Screen::restore(10, 3, &live.snapshot());
+    assert_eq!(restored.frame().modes.kitty_keyboard, 5);
+    live.advance(b"\x1b[?1049l");
+    restored.advance(b"\x1b[?1049l");
+    assert_eq!(live.frame().modes.kitty_keyboard, 1, "main screen's flags");
+    assert_eq!(restored.frame().modes.kitty_keyboard, 1);
+}
+
+#[test]
+fn soft_wraps_survive_a_snapshot_and_reflow_the_same() {
+    let mut live = fed(10, 4, b"0123456789ABCDE");
+    let mut restored = Screen::restore(10, 4, &live.snapshot());
+    live.resize(20, 4);
+    restored.resize(20, 4);
+    assert_eq!(row_text(&live.frame(), 0), "0123456789ABCDE");
+    assert_same(&live.frame(), &restored.frame(), "after reflow");
+}
+
+#[test]
+fn queries_are_answered_in_order() {
+    let mut s = fed(20, 3, b"ab\x1b[6n");
+    assert_eq!(s.take_replies(), b"\x1b[1;3R");
+    assert!(s.take_replies().is_empty(), "drained");
+
+    s.advance(b"\x1b[c");
+    assert_eq!(s.take_replies(), b"\x1b[?6c");
+
+    // Engine replies and the kitty reply (answered here) keep stream order.
+    s.advance(b"\x1b[>5u\x1b[6n\x1b[?u\x1b[5n");
+    assert_eq!(s.take_replies(), b"\x1b[1;3R\x1b[?5u\x1b[0n");
+}
+
+#[test]
+fn colour_queries_are_answered_only_when_colours_are_known() {
+    let mut s = fed(10, 2, b"\x1b]11;?\x07");
+    assert!(s.take_replies().is_empty(), "no theme known, no reply");
+    s.set_reply_colors(Some((0xee, 0xee, 0xee)), Some((0x10, 0x20, 0x30)), None);
+    s.advance(b"\x1b]11;?\x07");
+    assert_eq!(s.take_replies(), b"\x1b]11;rgb:1010/2020/3030\x07");
+    s.advance(b"\x1b]10;?\x1b\\");
+    assert_eq!(s.take_replies(), b"\x1b]10;rgb:eeee/eeee/eeee\x1b\\");
+}
+
+#[test]
+fn restoring_a_snapshot_sends_no_replies() {
+    let live = fed(30, 8, format!("{MIXED}{ALL_MODES}").as_bytes());
+    let mut restored = Screen::restore(30, 8, &live.snapshot());
+    assert!(restored.take_replies().is_empty());
+}
+
+#[test]
+fn long_osc_bodies_are_cut_before_the_engine() {
+    let mut s = Screen::new(20, 3);
+    let mut osc = b"\x1b]52;c;".to_vec();
+    osc.extend(std::iter::repeat_n(b'A', 4 * MAX_OSC_BYTES));
+    osc.extend_from_slice(b"\x07ok");
+    for chunk in osc.chunks(4096) {
+        s.advance(chunk);
+    }
+    assert_eq!(
+        row_text(&s.frame(), 0),
+        "ok",
+        "the terminator still ends it"
+    );
+}
+
+#[test]
+fn combining_marks_cannot_grow_one_cell_by_moving_the_cursor() {
+    // Each round prints a new base character next to `a` and moves back, so a
+    // per-burst limit alone would let `a` collect marks without end.
+    let mut s = fed(20, 2, b"a");
+    let round = format!("{}b\x1b[D", "\u{301}".repeat(15));
+    for _ in 0..200 {
+        s.advance(round.as_bytes());
+    }
+    let f = s.frame();
+    let a = f.cell(0, 0).unwrap();
+    assert_eq!(f.text(a).chars().count(), MAX_CLUSTER_SCALARS);
+}
+
+#[test]
+fn sizes_are_capped() {
+    let s = Screen::with_scrollback(u16::MAX, u16::MAX, usize::MAX);
+    assert_eq!(
+        (s.cols(), s.rows()),
+        (
+            canopy_term_core::screen::MAX_COLS,
+            canopy_term_core::screen::MAX_ROWS
+        )
+    );
 }
