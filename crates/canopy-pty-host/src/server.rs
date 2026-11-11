@@ -56,6 +56,7 @@ struct Session {
     id: u32,
     pid: u32,
     meta: Mutex<Option<String>>,
+    key: Option<String>,
     master: Mutex<Box<dyn MasterPty + Send>>,
     writer: Mutex<Box<dyn Write + Send>>,
     size: Mutex<(u16, u16)>,
@@ -97,11 +98,14 @@ impl Session {
             end: ring.base + ring.bytes.len() as u64,
             exited: self.exit_code(),
             meta: self.meta.lock().unwrap().clone(),
+            key: self.key.clone(),
         }
     }
 }
 
 struct Host {
+    /// Serialises spawn so two requests with one key cannot both start a session.
+    spawn_lock: Mutex<()>,
     min_client: u32,
     sessions: Mutex<HashMap<u32, Arc<Session>>>,
     next_id: AtomicU32,
@@ -241,6 +245,7 @@ pub fn serve(
 ) -> std::io::Result<()> {
     listener.set_nonblocking(true)?;
     let host = Arc::new(Host {
+        spawn_lock: Mutex::new(()),
         min_client: config.min_client,
         sessions: Mutex::new(HashMap::new()),
         next_id: AtomicU32::new(id_seed()),
@@ -381,10 +386,11 @@ fn handle(host: &Arc<Host>, mut stream: UnixStream) -> std::io::Result<()> {
         }
         Request::Spawn(spec) => {
             let reply = match spawn(host, spec) {
-                Ok(session) => Response {
+                Ok((session, existing)) => Response {
                     ok: true,
                     id: Some(session.id),
                     pid: Some(session.pid),
+                    existing: Some(existing),
                     ..Default::default()
                 },
                 Err(e) => Response::err(e),
@@ -535,7 +541,21 @@ fn with_session(
     }
 }
 
-fn spawn(host: &Arc<Host>, spec: SpawnSpec) -> Result<Arc<Session>, String> {
+/// Returns the session and whether it already existed for the spawn's key.
+fn spawn(host: &Arc<Host>, spec: SpawnSpec) -> Result<(Arc<Session>, bool), String> {
+    let _one_spawn_at_a_time = host.spawn_lock.lock().unwrap();
+    if let Some(key) = &spec.key {
+        let existing = host
+            .sessions
+            .lock()
+            .unwrap()
+            .values()
+            .find(|s| s.key.as_deref() == Some(key.as_str()))
+            .cloned();
+        if let Some(session) = existing {
+            return Ok((session, true));
+        }
+    }
     let Some(program) = spec.argv.first() else {
         return Err("empty argv".into());
     };
@@ -568,6 +588,7 @@ fn spawn(host: &Arc<Host>, spec: SpawnSpec) -> Result<Arc<Session>, String> {
         id: host.next_id.fetch_add(1, Ordering::SeqCst),
         pid,
         meta: Mutex::new(spec.meta),
+        key: spec.key,
         master: Mutex::new(pair.master),
         writer: Mutex::new(writer),
         size: Mutex::new((size.cols, size.rows)),
@@ -639,7 +660,7 @@ fn spawn(host: &Arc<Host>, spec: SpawnSpec) -> Result<Arc<Session>, String> {
         .lock()
         .unwrap()
         .insert(session.id, Arc::clone(&session));
-    Ok(session)
+    Ok((session, false))
 }
 
 fn attach(session: Arc<Session>, mut stream: UnixStream, after: u64) -> std::io::Result<()> {

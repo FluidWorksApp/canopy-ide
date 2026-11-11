@@ -84,6 +84,13 @@ older peers). The host is one static-capable binary (CI builds it for
 `--socket` or `CANOPY_PTY_HOST_SOCKET`, so a Linux container can run it without
 the app. Not yet exercised in a container.
 
+**Idempotent spawn.** `SpawnSpec.key` is a caller-supplied key (for example a
+runner's session id plus request id). A second spawn with the same key returns the
+existing session, even if it has exited, so a retried spawn gets its first answer
+instead of a second run, like the runner's receipts. `list` returns the key, so
+the caller never has to learn the host's own id. The key is freed when the
+session is reaped.
+
 **Spawn.** The client sends argv, cwd and the full environment taken from the
 `CommandBuilder`. The host applies exactly that, never its own env. It carries
 tokens, so it is never logged or persisted.

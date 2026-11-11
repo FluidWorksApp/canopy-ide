@@ -376,6 +376,67 @@ fn a_hello_without_a_version_is_still_accepted() {
 }
 
 #[test]
+fn a_repeated_spawn_key_returns_the_existing_session() {
+    let h = Harness::start("z", 60);
+    let mut keyed = spec("sleep 300");
+    keyed.key = Some("sess-1:req-1".into());
+    let (id, pid, existing) = h.client.spawn_keyed(keyed.clone()).unwrap();
+    assert!(!existing);
+    let (id2, pid2, existing2) = h.client.spawn_keyed(keyed.clone()).unwrap();
+    assert!(existing2, "a repeated key started a second session");
+    assert_eq!((id, pid), (id2, pid2));
+    let listed = h.client.list().unwrap();
+    assert_eq!(listed.len(), 1);
+    assert_eq!(listed[0].key.as_deref(), Some("sess-1:req-1"));
+
+    // A different key is a different session.
+    let mut other_key = spec("sleep 300");
+    other_key.key = Some("sess-1:req-2".into());
+    let (id3, _, existing3) = h.client.spawn_keyed(other_key).unwrap();
+    assert!(!existing3);
+    assert_ne!(id, id3);
+}
+
+#[test]
+fn concurrent_spawns_with_one_key_start_one_session() {
+    let h = Harness::start("zz", 60);
+    let handles: Vec<_> = (0..6)
+        .map(|_| {
+            let client = h.client.clone();
+            std::thread::spawn(move || {
+                let mut keyed = spec("sleep 300");
+                keyed.key = Some("race-key".into());
+                client.spawn_keyed(keyed).unwrap()
+            })
+        })
+        .collect();
+    let results: Vec<(u32, u32, bool)> = handles.into_iter().map(|t| t.join().unwrap()).collect();
+    assert!(results.windows(2).all(|w| w[0].0 == w[1].0), "{results:?}");
+    assert_eq!(results.iter().filter(|r| !r.2).count(), 1, "{results:?}");
+    assert_eq!(h.client.list().unwrap().len(), 1);
+}
+
+#[test]
+fn a_key_still_returns_its_first_answer_after_the_session_exits_and_is_freed_by_reap() {
+    let h = Harness::start("zy", 60);
+    let mut keyed = spec("exit 5");
+    keyed.key = Some("retry-me".into());
+    let (id, _, _) = h.client.spawn_keyed(keyed.clone()).unwrap();
+    assert!(wait_until(Duration::from_secs(5), || {
+        h.client.list().unwrap()[0].exited == Some(5)
+    }));
+    // A retried spawn gets the first session, not a fresh run of the command.
+    let (again, _, existing) = h.client.spawn_keyed(keyed.clone()).unwrap();
+    assert!(existing);
+    assert_eq!(again, id);
+    // Once reaped the key is free.
+    h.client.reap(id).unwrap();
+    let (fresh, _, existing) = h.client.spawn_keyed(keyed).unwrap();
+    assert!(!existing);
+    assert_ne!(fresh, id);
+}
+
+#[test]
 fn an_idle_host_exits_by_itself() {
     let h = Harness::start("j", 1);
     let host_pid = h.client.hello().unwrap().host_pid.unwrap();

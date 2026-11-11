@@ -123,6 +123,12 @@ impl HostClient {
     /// The one call that may start a host: an idle host can be exiting just as we
     /// arrive, and a new terminal should not fail for that.
     pub fn spawn(&self, spec: SpawnSpec) -> std::io::Result<(u32, u32)> {
+        self.spawn_keyed(spec).map(|(id, pid, _)| (id, pid))
+    }
+
+    /// As `spawn`, also reporting whether the spec's `key` matched an existing
+    /// session (idempotent spawn): `(id, pid, existing)`.
+    pub fn spawn_keyed(&self, spec: SpawnSpec) -> std::io::Result<(u32, u32, bool)> {
         if let Some((exe, idle_secs)) = &self.launch {
             if self.hello().is_err() {
                 HostClient::ensure_running(exe, &self.socket, *idle_secs)?;
@@ -132,6 +138,7 @@ impl HostClient {
         Ok((
             reply.id.ok_or_else(|| other("no id in reply"))?,
             reply.pid.ok_or_else(|| other("no pid in reply"))?,
+            reply.existing.unwrap_or(false),
         ))
     }
 

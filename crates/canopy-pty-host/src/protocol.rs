@@ -69,6 +69,11 @@ pub struct SpawnSpec {
     /// A crashed app leaves nothing to adopt a session, so callers that cannot
     /// yet be adopted must set this.
     pub linger_secs: Option<u64>,
+    /// Caller-supplied idempotency key (a runner's session id plus request id).
+    /// A second spawn with the same key returns the existing session instead of
+    /// starting another, even if that session has exited, so a retried spawn gets
+    /// its first answer. The key is freed when the session is reaped.
+    pub key: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, Default)]
@@ -83,6 +88,8 @@ pub struct SessionInfo {
     pub end: u64,
     pub exited: Option<i32>,
     pub meta: Option<String>,
+    /// The caller's key from spawn, if any.
+    pub key: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, Default)]
@@ -95,6 +102,8 @@ pub struct Response {
     pub host_pid: Option<u32>,
     pub id: Option<u32>,
     pub pid: Option<u32>,
+    /// True when a spawn returned an existing session for its key.
+    pub existing: Option<bool>,
     pub sessions: Option<Vec<SessionInfo>>,
     pub pgrp: Option<i32>,
     pub raw: Option<bool>,

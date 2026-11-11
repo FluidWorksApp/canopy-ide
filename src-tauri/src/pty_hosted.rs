@@ -150,6 +150,7 @@ mod unix {
                 rows,
                 meta: None,
                 linger_secs: Some(LINGER_SECS),
+                key: None,
             })
             .map_err(|e| e.to_string())?;
         match HostMaster::attach(client.clone(), id, 0) {
