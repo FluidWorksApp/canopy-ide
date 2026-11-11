@@ -1,0 +1,24 @@
+# Optional cargo-fuzz targets for canopy-term-input. NOT part of CI: the
+# `Terminal crates` job only globs crates/canopy-term-*/ and runs `cargo test`
+# there, and this directory is its own workspace root. See README.md.
+[package]
+name = "canopy-term-input-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+canopy-term-input = { path = ".." }
+
+[workspace]
+
+[[bin]]
+name = "encode"
+path = "fuzz_targets/encode.rs"
+test = false
+doc = false
+bench = false

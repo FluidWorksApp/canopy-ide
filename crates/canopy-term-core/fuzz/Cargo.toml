@@ -1,0 +1,25 @@
+# Optional cargo-fuzz targets for canopy-term-core. NOT part of CI: the
+# `Terminal crates` job only globs crates/canopy-term-*/ and runs `cargo test`
+# there, and this directory is its own workspace root, so nothing in the crate
+# or the app's lock sees it. See README.md for how to run it by hand.
+[package]
+name = "canopy-term-core-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+canopy-term-core = { path = "..", features = ["screen"] }
+
+[workspace]
+
+[[bin]]
+name = "screen"
+path = "fuzz_targets/screen.rs"
+test = false
+doc = false
+bench = false
