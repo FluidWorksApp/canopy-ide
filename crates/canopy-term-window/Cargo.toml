@@ -1,0 +1,47 @@
+[package]
+name = "canopy-term-window"
+version = "0.1.0"
+description = "Native window shell for the terminal: winit, wgpu surface, IME, clipboard and AccessKit"
+authors = ["Cause Connect Pte Ltd <sam@fluidwords.app>"]
+license = "MIT"
+edition = "2021"
+# accesskit 0.25.1+ and accesskit_winit 0.34.1+ declare 1.87.
+rust-version = "1.87"
+
+# Its own workspace root with its own lock: parallel work on other crates, and
+# dependencies a track adds, never touch the app's Cargo.lock.
+[workspace]
+
+[features]
+# On by default so `cargo run --example term_window` and the CI `cargo test`
+# loop compile the window code on every OS. The logic modules (grid, a11y, ime,
+# blink, selection, compose) build with `--no-default-features`.
+default = ["window"]
+window = [
+    "dep:canopy-term-render",
+    "dep:winit",
+    "dep:wgpu",
+    "dep:pollster",
+    "dep:accesskit_winit",
+    "dep:arboard",
+]
+
+[dependencies]
+canopy-term-core = { path = "../canopy-term-core" }
+# Licences (all MIT, Apache-2.0, BSD, ISC, Zlib or Unicode; no copyleft): see
+# the crate docs in src/lib.rs.
+accesskit = "0.25"
+unicode-width = "0.2"
+
+canopy-term-render = { path = "../canopy-term-render", optional = true }
+winit = { version = "0.30", optional = true }
+# Same major as canopy-term-render.
+wgpu = { version = "25", optional = true }
+pollster = { version = "0.4", optional = true }
+accesskit_winit = { version = "0.34", optional = true }
+# Text only: no image stack.
+arboard = { version = "3", default-features = false, optional = true }
+
+[[example]]
+name = "term_window"
+required-features = ["window"]
