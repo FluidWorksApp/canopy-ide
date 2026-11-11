@@ -17,8 +17,8 @@ mod install;
 
 #[cfg(unix)]
 pub use adoption::{
-    adopt, adoptable, identity_floor, lineage, note_identity, note_lineage, reused_instance,
-    stop_left_running, Adoptable, Adopted,
+    adopt, adoptable, identity_floor, note_identity, reused_instance, stop_left_running, Adoptable,
+    Adopted,
 };
 #[cfg(unix)]
 pub use sealed::{forget_sealed, remember_sealed, reseal_lineage};
@@ -413,7 +413,7 @@ mod sealed {
 mod adoption {
     use super::unix::{socket_path, Client};
     use super::*;
-    use canopy_pty_host::client::{HostChild, HostClient, HostMaster, LaunchCheck};
+    use canopy_pty_host::client::{HostClient, HostMaster};
     use canopy_pty_host::protocol::{SessionInfo, EXCLUSIVE_ATTACH_VERSION};
     use std::io::Read;
     use std::sync::atomic::{AtomicU64, Ordering};
@@ -756,9 +756,8 @@ use adoption::Resolution;
 #[cfg(all(test, unix))]
 pub(crate) mod tests {
     use super::adoption::{
-        adoptable_from as adoption_adoptable, choose_token as adoption_choose, lineage_key,
-        lineage_value, parse_lineage, resolve_from, stop_left_running_with, stop_targets,
-        Resolution as Resolved, PROBE_RETRY_AFTER,
+        adoptable_from as adoption_adoptable, choose_token as adoption_choose, resolve_from,
+        stop_left_running_with, stop_targets, Resolution as Resolved, PROBE_RETRY_AFTER,
     };
     use super::*;
     use canopy_pty_host::client::HostClient;
