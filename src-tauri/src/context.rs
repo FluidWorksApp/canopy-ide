@@ -408,9 +408,9 @@ fn app_stamp() -> Option<String> {
     STAMP
         .get_or_init(|| {
             let pid = std::process::id();
-            let out = std::process::Command::new("/bin/ps")
-                .args(["-o", "lstart=", "-p", &pid.to_string()])
-                .output()
+            let mut command = std::process::Command::new("/bin/ps");
+            command.args(["-o", "lstart=", "-p", &pid.to_string()]);
+            let out = crate::process_capture::output(&mut command, 4096)
                 .ok()
                 .filter(|out| out.status.success())?;
             let text = String::from_utf8_lossy(&out.stdout);
