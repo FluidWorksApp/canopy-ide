@@ -14,7 +14,8 @@ pub fn enabled() -> bool {
 
 #[cfg(unix)]
 pub use adoption::{
-    adopt, adoptable, identity_floor, note_identity, reused_instance, Adoptable, Adopted,
+    adopt, adoptable, identity_floor, note_identity, reused_instance, stop_left_running, Adoptable,
+    Adopted,
 };
 #[cfg(unix)]
 pub use sealed::{forget_sealed, remember_sealed, reseal_lineage};
@@ -151,6 +152,13 @@ mod unix {
             .clone()
     }
 
+    /// A session's child handle (wait, kill) on a client that can never start a
+    /// host: only spawn may launch one, and stopping a terminal must not bring
+    /// a host back just to answer.
+    pub(super) fn child_handle(client: &Client, id: u32, pid: u32) -> HostChild {
+        HostChild::new(HostClient::new(client.socket()), id, pid)
+    }
+
     /// Starts `cmd` in the host and attaches to it from offset 0. The host gets
     /// exactly the command's argv, cwd and environment, never its own. A
     /// non-UTF-8 argv or cwd is refused (the caller falls back in-process), and
@@ -189,10 +197,9 @@ mod unix {
             })
             .map_err(|e| e.to_string())?;
         match HostMaster::attach(client.clone(), id, 0) {
-            Ok((master, _attached)) => Ok((
-                Box::new(HostChild::new(client.clone(), id, pid)),
-                Box::new(master),
-            )),
+            Ok((master, _attached)) => {
+                Ok((Box::new(child_handle(client, id, pid)), Box::new(master)))
+            }
             Err(error) => {
                 let _ = client.kill(id);
                 Err(error.to_string())
@@ -372,7 +379,7 @@ mod sealed {
 mod adoption {
     use super::unix::{socket_path, Client};
     use super::*;
-    use canopy_pty_host::client::{HostChild, HostClient, HostMaster};
+    use canopy_pty_host::client::{HostClient, HostMaster};
     use canopy_pty_host::protocol::{SessionInfo, EXCLUSIVE_ATTACH_VERSION};
     use std::io::Read;
     use std::sync::atomic::{AtomicU64, Ordering};
@@ -591,7 +598,7 @@ mod adoption {
         Ok(Adopted {
             meta: found.meta.clone(),
             pid,
-            child: Box::new(HostChild::new(client.clone(), id, pid)),
+            child: Box::new(super::unix::child_handle(client, id, pid)),
             master: Box::new(master),
             history,
             history_start: attached.start,
@@ -620,6 +627,79 @@ mod adoption {
         );
     }
 
+    /// Host ids "Quit and Stop All" stops: running Canopy sessions (ours by
+    /// their metadata) that no live app is attached to, or that belong to this
+    /// launch (`instance`). This launch's terminals still in its map (`skip`,
+    /// by pty id) are left to app exit, which stops them itself. A session
+    /// another live app is attached to is that app's, and an old host that
+    /// cannot say whether one is attached never offers a foreign one.
+    pub(super) fn stop_targets(sessions: &[SessionInfo], instance: &str, skip: &[u32]) -> Vec<u32> {
+        sessions
+            .iter()
+            .filter(|s| s.exited.is_none())
+            .filter_map(|s| {
+                let meta = parse(s)?;
+                let mine = meta.instance == instance;
+                if mine && skip.contains(&meta.id) {
+                    return None;
+                }
+                (mine || s.attached == Some(false)).then_some(s.id)
+            })
+            .collect()
+    }
+
+    /// Ask the host to stop every `stop_targets` session (it sends SIGTERM,
+    /// then SIGKILL after its own grace, so this returns at once). Nothing
+    /// listening is no host and nothing to stop; any other failure is an error
+    /// for the caller to show, never a silent zero.
+    pub fn stop_left_running_with(
+        client: &Client,
+        instance: &str,
+        skip: &[u32],
+        wait: Duration,
+    ) -> Result<usize, String> {
+        let sessions = match client.list_within(wait) {
+            Ok(sessions) => sessions,
+            Err(e)
+                if matches!(
+                    e.kind(),
+                    std::io::ErrorKind::NotFound | std::io::ErrorKind::ConnectionRefused
+                ) =>
+            {
+                return Ok(0)
+            }
+            Err(e) => return Err(format!("Could not reach the terminal host: {e}")),
+        };
+        let targets = stop_targets(&sessions, instance, skip);
+        let failed: Vec<String> = targets
+            .iter()
+            .filter_map(|id| client.kill(*id).err().map(|e| e.to_string()))
+            .collect();
+        match failed.first() {
+            None => Ok(targets.len()),
+            Some(first) => Err(format!(
+                "The terminal host did not stop {} of {} terminals: {first}",
+                failed.len(),
+                targets.len()
+            )),
+        }
+    }
+
+    /// `stop_left_running_with` on this app's host, through a non-launching
+    /// client: with no host running there is nothing to stop, so none starts.
+    pub fn stop_left_running(
+        instance: &str,
+        skip: &[u32],
+        wait: Duration,
+    ) -> Result<usize, String> {
+        match socket_path() {
+            Some(socket) if socket.exists() => {
+                stop_left_running_with(&HostClient::new(socket), instance, skip, wait)
+            }
+            _ => Ok(0),
+        }
+    }
+
     pub fn stored_identity(client: &Client) -> Option<(u32, u64)> {
         let value = client.get_state("identity_high_water").ok()??;
         let (id, generation) = value.split_once(':')?;
@@ -634,7 +714,10 @@ use adoption::Resolution;
 
 #[cfg(all(test, unix))]
 pub(crate) mod tests {
-    use super::adoption::{adoptable_from as adoption_adoptable, choose_token as adoption_choose};
+    use super::adoption::{
+        adoptable_from as adoption_adoptable, choose_token as adoption_choose,
+        stop_left_running_with, stop_targets,
+    };
     use super::*;
     use canopy_pty_host::client::HostClient;
     use canopy_pty_host::server::{serve, ServerConfig, EXITED_TTL};
@@ -966,6 +1049,109 @@ pub(crate) mod tests {
             .iter()
             .any(|s| s.meta.is_none() && s.attached == Some(false))));
         assert!(adoptable(&host.client, "inst-a").is_empty());
+    }
+
+    #[test]
+    fn stop_all_targets_unattached_canopy_sessions_and_this_launchs_strays() {
+        let a = |i, kind| Some(meta_for(i, i as u64, kind, "inst-a"));
+        let b = |i| Some(meta_for(i, i as u64, "desktop", "inst-b"));
+        let sessions = vec![
+            info(1, a(1, "desktop"), Some(false), None), // ours, waiting
+            info(2, a(2, "desktop"), Some(true), None),  // ours, in the map
+            info(3, a(3, "desktop"), Some(true), None),  // ours, held elsewhere
+            info(4, a(4, "detached"), Some(false), None), // ours, micro-task
+            info(5, a(5, "desktop"), Some(false), Some(0)), // exited
+            info(6, b(6), Some(false), None),            // earlier launch, waiting
+            info(7, b(7), Some(true), None),             // another live app's
+            info(8, b(8), None, None),                   // old host: unknown
+            info(9, None, Some(false), None),            // not Canopy's
+        ];
+        assert_eq!(stop_targets(&sessions, "inst-a", &[2]), vec![1, 3, 4, 6]);
+    }
+
+    #[test]
+    fn stop_all_stops_a_foreign_unattached_session_and_leaves_attached_ones() {
+        let host = InProcessHost::start("stopall");
+        let spawn_as = |id: u32, instance: &str| {
+            spawn(
+                &host.client,
+                &command("sleep 300"),
+                80,
+                24,
+                Some(meta_for(id, id as u64, "desktop", instance)),
+            )
+            .unwrap()
+        };
+        // This launch: one terminal still in its map (attached), one stray the
+        // app detached from. An earlier launch that was never adopted: one
+        // left waiting. Another live app: one it is attached to.
+        let (_in_map_child, _in_map_master) = spawn_as(1, "inst-a");
+        let stray = spawn_as(2, "inst-a");
+        let earlier = spawn_as(3, "inst-b");
+        let (_live_child, _live_master) = spawn_as(4, "inst-b");
+        drop((stray, earlier));
+        assert!(wait_for(|| host
+            .client
+            .list()
+            .unwrap()
+            .iter()
+            .filter(|s| s.attached == Some(false))
+            .count()
+            == 2));
+
+        let wait = Duration::from_secs(5);
+        assert_eq!(
+            stop_left_running_with(&host.client, "inst-a", &[1], wait),
+            Ok(2)
+        );
+        let running = |meta_id: u32| {
+            host.client.list().unwrap().iter().any(|s| {
+                s.exited.is_none() && super::adoption::parse(s).is_some_and(|m| m.id == meta_id)
+            })
+        };
+        assert!(wait_for(|| !running(2) && !running(3)));
+        // The map's terminal is app exit's to stop; the other app's is its own.
+        assert!(running(1) && running(4));
+        // Nothing left to stop the second time.
+        assert_eq!(
+            stop_left_running_with(&host.client, "inst-a", &[1], wait),
+            Ok(0)
+        );
+    }
+
+    #[test]
+    fn stop_all_reports_a_host_it_cannot_read_and_treats_no_host_as_nothing_to_stop() {
+        let dir = std::env::temp_dir().join(format!("cph{}stopfail", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let wait = Duration::from_secs(2);
+
+        // No socket at all, and a socket file nobody listens on: no host.
+        let missing = HostClient::new(dir.join("missing.sock"));
+        assert_eq!(stop_left_running_with(&missing, "inst-a", &[], wait), Ok(0));
+        let stale = dir.join("stale.sock");
+        drop(UnixListener::bind(&stale).unwrap());
+        assert_eq!(
+            stop_left_running_with(&HostClient::new(&stale), "inst-a", &[], wait),
+            Ok(0)
+        );
+
+        // A host that answers with garbage: an error to show, not a silent 0.
+        let broken = dir.join("broken.sock");
+        let listener = UnixListener::bind(&broken).unwrap();
+        std::thread::spawn(move || {
+            for stream in listener.incoming().flatten() {
+                let mut stream = stream;
+                let mut line = String::new();
+                let _ =
+                    std::io::BufRead::read_line(&mut std::io::BufReader::new(&stream), &mut line);
+                let _ = stream.write_all(b"not json\n");
+            }
+        });
+        let error = stop_left_running_with(&HostClient::new(&broken), "inst-a", &[], wait)
+            .expect_err("a garbled host must not read as nothing to stop");
+        assert!(error.contains("terminal host"), "{error}");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

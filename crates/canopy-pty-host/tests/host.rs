@@ -262,8 +262,10 @@ fn ticks(bytes: &[u8]) -> Vec<u64> {
 const TICKER: &str = "i=0; while [ $i -lt 100000 ]; do i=$((i+1)); echo tick$i; sleep 0.02; done";
 const TICKER_PS: &str =
     "for ($i = 1; $i -le 100000; $i++) { \"tick$i\"; Start-Sleep -Milliseconds 20 }";
-/// Echoes each input line back in upper case (`cat` on Unix).
-const ECHO_PS: &str = "while ($true) { $l = [Console]::ReadLine(); if ($null -eq $l) { break }; 'got-' + $l.ToUpper() }";
+/// Echoes each input line back in upper case (`cat` on Unix). Prints `ready`
+/// once it is about to read, so a test can wait for that instead of typing into
+/// a PowerShell that is still starting (which may discard typed-ahead input).
+const ECHO_PS: &str = "'ready'; while ($true) { $l = [Console]::ReadLine(); if ($null -eq $l) { break }; 'got-' + $l.ToUpper() }";
 
 #[test]
 fn child_survives_client_death_and_reattach_is_contiguous() {
@@ -305,11 +307,26 @@ fn child_survives_client_death_and_reattach_is_contiguous() {
     );
 }
 
+/// On Windows, waits until the `ECHO_PS` child is reading its input. Unix `cat`
+/// has no start-up to wait out.
+fn wait_until_echo_ready(attached: &mut Attached) {
+    if cfg!(windows) {
+        let out = read_until(attached, t(15), |b| contains(b, "ready"));
+        assert!(
+            contains(&out, "ready"),
+            "the child never became ready: {:?}",
+            String::from_utf8_lossy(&out)
+        );
+        attached.stream.set_read_timeout(Some(t(5))).unwrap();
+    }
+}
+
 #[test]
 fn input_from_a_second_client_reaches_the_child() {
     let h = Harness::start("b", 60);
     let (id, _) = h.client.spawn(spec(pick("cat", ECHO_PS))).unwrap();
     let mut a = h.client.attach(id, 0).unwrap();
+    wait_until_echo_ready(&mut a);
     a.stream
         .write_all(pick("hello-from-client\n", "hello-from-client\r").as_bytes())
         .unwrap();
@@ -741,9 +758,17 @@ fn a_key_still_returns_its_first_answer_after_the_session_exits_and_is_freed_by_
     let mut keyed = spec("exit 5");
     keyed.key = Some("retry-me".into());
     let (id, _, _) = h.client.spawn_keyed(keyed.clone()).unwrap();
-    assert!(wait_until(t(5), || {
-        h.client.list().unwrap()[0].exited == Some(5)
-    }));
+    assert!(
+        wait_until(t(10), || h.client.list().unwrap()[0].exited.is_some()),
+        "the session never exited: {:?}",
+        h.client.list().unwrap()
+    );
+    assert_eq!(
+        h.client.list().unwrap()[0].exited,
+        Some(5),
+        "exited with another code: {:?}",
+        h.client.list().unwrap()
+    );
     // A retried spawn gets the first session, not a fresh run of the command.
     let (again, _, existing) = h.client.spawn_keyed(keyed.clone()).unwrap();
     assert!(existing);
@@ -1033,6 +1058,7 @@ fn a_replaced_client_sees_eof_and_its_typing_no_longer_reaches_the_child() {
     let h = Harness::start("rp", 60);
     let (id, _) = h.client.spawn(spec(pick("cat", ECHO_PS))).unwrap();
     let mut first = h.client.attach(id, 0).unwrap();
+    wait_until_echo_ready(&mut first);
     // Set before the host closes it: macOS refuses setsockopt (EINVAL) on a
     // socket whose peer has already gone.
     first.stream.set_read_timeout(Some(t(5))).unwrap();
