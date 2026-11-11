@@ -1043,6 +1043,10 @@ impl Session {
         let Ok(master) = self.master.lock() else {
             return false;
         };
+        // A hosted session has no local fd; the host answers instead.
+        if let Some(hosted) = master.downcast_ref::<canopy_pty_host::client::HostMaster>() {
+            return hosted.raw_mode();
+        }
         let Some(fd) = master.as_raw_fd() else {
             return false;
         };

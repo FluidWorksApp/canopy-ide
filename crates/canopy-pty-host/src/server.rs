@@ -61,6 +61,11 @@ struct Session {
     cv: Condvar,
     exited: Mutex<Option<i32>>,
     exited_at: Mutex<Option<Instant>>,
+    linger: Option<Duration>,
+    /// When the last client detached (spawn time if none ever attached); None
+    /// while a client is attached.
+    detached_at: Mutex<Option<Instant>>,
+    lingered: AtomicBool,
 }
 
 impl Session {
@@ -99,6 +104,18 @@ struct Host {
     next_id: AtomicU32,
     connections: AtomicUsize,
     stop: Arc<AtomicBool>,
+}
+
+/// Session ids must not repeat across host lifetimes: a stale id held by an app
+/// after the host restarted would otherwise address a different terminal.
+fn id_seed() -> u32 {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.subsec_nanos() as u64 ^ d.as_secs().wrapping_mul(0x9E37_79B9))
+        .unwrap_or(1);
+    let mixed = nanos.wrapping_mul(0x2545_F491_4F6C_DD1D) ^ (std::process::id() as u64) << 7;
+    // Leave room to count up without wrapping to 0.
+    ((mixed >> 8) as u32 & 0x3fff_ffff).max(1)
 }
 
 static SIGNALLED: AtomicBool = AtomicBool::new(false);
@@ -221,7 +238,7 @@ pub fn serve(
     listener.set_nonblocking(true)?;
     let host = Arc::new(Host {
         sessions: Mutex::new(HashMap::new()),
-        next_id: AtomicU32::new(1),
+        next_id: AtomicU32::new(id_seed()),
         connections: AtomicUsize::new(0),
         stop,
     });
@@ -261,6 +278,21 @@ pub fn serve(
                     .unwrap()
                     .is_none_or(|at| at.elapsed() < config.exited_ttl)
             });
+            for s in sessions.values() {
+                if let (Some(linger), None) = (s.linger, s.exit_code()) {
+                    let detached = *s.detached_at.lock().unwrap();
+                    if detached.is_some_and(|at| at.elapsed() >= linger)
+                        && !s.lingered.swap(true, Ordering::SeqCst)
+                    {
+                        s.signal_group(libc::SIGTERM);
+                        let s = Arc::clone(s);
+                        thread::spawn(move || {
+                            thread::sleep(TERM_GRACE);
+                            s.signal_group(libc::SIGKILL);
+                        });
+                    }
+                }
+            }
             sessions.values().any(|s| s.exit_code().is_none())
         };
         if live || host.connections.load(Ordering::SeqCst) > 0 {
@@ -508,6 +540,9 @@ fn spawn(host: &Arc<Host>, spec: SpawnSpec) -> Result<Arc<Session>, String> {
         cv: Condvar::new(),
         exited: Mutex::new(None),
         exited_at: Mutex::new(None),
+        linger: spec.linger_secs.map(Duration::from_secs),
+        detached_at: Mutex::new(Some(Instant::now())),
+        lingered: AtomicBool::new(false),
     });
 
     // Reaper: records the exit status. Only after this may the pid be reused.
@@ -567,6 +602,7 @@ fn spawn(host: &Arc<Host>, spec: SpawnSpec) -> Result<Arc<Session>, String> {
 }
 
 fn attach(session: Arc<Session>, mut stream: UnixStream, after: u64) -> std::io::Result<()> {
+    *session.detached_at.lock().unwrap() = None;
     let (start, generation, cols, rows) = {
         let mut ring = session.ring.lock().unwrap();
         let end = ring.base + ring.bytes.len() as u64;
@@ -591,10 +627,15 @@ fn attach(session: Arc<Session>, mut stream: UnixStream, after: u64) -> std::io:
     };
     write_line(&mut stream, &reply)?;
 
-    // Client -> PTY. Dropping the connection only detaches.
+    // Client -> PTY. Dropping the connection only detaches. This thread is also
+    // what notices the client is gone while the child is silent, so the output
+    // loop below (which only finds out on a write) stops, a paused reader is
+    // released, and the linger clock starts.
     let mut input = stream.try_clone()?;
+    let closed = Arc::new(AtomicBool::new(false));
     {
         let session = Arc::clone(&session);
+        let closed = Arc::clone(&closed);
         thread::spawn(move || {
             let mut buf = [0u8; 8192];
             while let Ok(n) = input.read(&mut buf) {
@@ -607,6 +648,13 @@ fn attach(session: Arc<Session>, mut stream: UnixStream, after: u64) -> std::io:
                 }
                 let _ = writer.flush();
             }
+            closed.store(true, Ordering::SeqCst);
+            let mut ring = session.ring.lock().unwrap();
+            if ring.generation == generation {
+                ring.attached = None;
+                *session.detached_at.lock().unwrap() = Some(Instant::now());
+            }
+            session.cv.notify_all();
         });
     }
 
@@ -616,8 +664,8 @@ fn attach(session: Arc<Session>, mut stream: UnixStream, after: u64) -> std::io:
         let chunk: Vec<u8> = {
             let mut ring = session.ring.lock().unwrap();
             loop {
-                if ring.generation != generation {
-                    return Ok(()); // replaced by a newer attach
+                if ring.generation != generation || closed.load(Ordering::SeqCst) {
+                    return Ok(()); // replaced by a newer attach, or the client left
                 }
                 let end = ring.base + ring.bytes.len() as u64;
                 if pos < end {
@@ -653,6 +701,7 @@ fn attach(session: Arc<Session>, mut stream: UnixStream, after: u64) -> std::io:
             let mut ring = session.ring.lock().unwrap();
             if ring.generation == generation {
                 ring.attached = None;
+                *session.detached_at.lock().unwrap() = Some(Instant::now());
             }
             session.cv.notify_all();
             return Ok(());

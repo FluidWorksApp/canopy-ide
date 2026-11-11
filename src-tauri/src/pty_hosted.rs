@@ -43,6 +43,15 @@ mod unix {
 
     pub type Client = HostClient;
 
+    /// An idle host exits after this long, so quitting the app does not leave a
+    /// helper behind for an hour.
+    const HOST_IDLE_SECS: u64 = 60;
+    /// A hosted session is killed this long after its app connection drops. A
+    /// crash or force-quit leaves nothing to adopt the session yet, and the host
+    /// would otherwise keep it, and its agent, running invisibly forever. The
+    /// adoption change lifts this.
+    const LINGER_SECS: u64 = 30;
+
     /// A dedicated directory: the host chmods its parent to 0700, so it must
     /// never be a shared one. Debug builds use their own so a dev app never
     /// attaches to an installed app's host.
@@ -87,7 +96,7 @@ mod unix {
         CLIENT
             .get_or_init(|| {
                 let (socket, exe) = (socket_path()?, host_exe()?);
-                match HostClient::ensure_running(&exe, &socket, 60 * 60) {
+                match HostClient::ensure_running(&exe, &socket, HOST_IDLE_SECS) {
                     Ok(client) => Some(client),
                     Err(error) => {
                         eprintln!(
@@ -132,6 +141,7 @@ mod unix {
                 cols,
                 rows,
                 meta: None,
+                linger_secs: Some(LINGER_SECS),
             })
             .map_err(|e| e.to_string())?;
         match HostMaster::attach(client.clone(), id, 0) {
@@ -198,20 +208,41 @@ mod tests {
         }
     }
 
-    fn read_until(reader: &mut dyn Read, needle: &str) -> String {
-        let mut out = Vec::new();
-        let mut buf = [0u8; 1024];
-        let deadline = std::time::Instant::now() + Duration::from_secs(10);
-        while std::time::Instant::now() < deadline {
-            match reader.read(&mut buf) {
-                Ok(0) | Err(_) => break,
-                Ok(n) => out.extend_from_slice(&buf[..n]),
-            }
-            if String::from_utf8_lossy(&out).contains(needle) {
-                break;
+    /// Reads on a thread so a missed needle fails the test instead of hanging
+    /// the job on a blocking read.
+    struct Pump {
+        rx: std::sync::mpsc::Receiver<Vec<u8>>,
+        seen: Vec<u8>,
+    }
+
+    impl Pump {
+        fn new(mut reader: Box<dyn Read + Send>) -> Pump {
+            let (tx, rx) = std::sync::mpsc::channel();
+            std::thread::spawn(move || {
+                let mut buf = [0u8; 1024];
+                while let Ok(n) = reader.read(&mut buf) {
+                    if n == 0 || tx.send(buf[..n].to_vec()).is_err() {
+                        break;
+                    }
+                }
+            });
+            Pump {
+                rx,
+                seen: Vec::new(),
             }
         }
-        String::from_utf8_lossy(&out).into_owned()
+
+        fn until(&mut self, needle: &str) -> String {
+            let deadline = std::time::Instant::now() + Duration::from_secs(10);
+            while !String::from_utf8_lossy(&self.seen).contains(needle) {
+                let left = deadline.saturating_duration_since(std::time::Instant::now());
+                match self.rx.recv_timeout(left) {
+                    Ok(chunk) => self.seen.extend_from_slice(&chunk),
+                    Err(_) => break,
+                }
+            }
+            String::from_utf8_lossy(&self.seen).into_owned()
+        }
     }
 
     fn command(script: &str) -> CommandBuilder {
@@ -227,16 +258,23 @@ mod tests {
     #[test]
     fn the_child_gets_the_apps_environment_not_the_hosts() {
         let host = InProcessHost::start("env");
+        // The in-process host shares this process's environment, which has HOME.
+        // The command cleared its own, so HOME showing up in the child would mean
+        // the host used its environment instead of the one it was sent.
         let (mut child, master) = spawn(
             &host.client,
-            &command("echo probe=$CANOPY_HOSTED_PROBE"),
+            &command("echo probe=$CANOPY_HOSTED_PROBE home=[$HOME]"),
             80,
             24,
         )
         .unwrap();
-        let mut reader = master.try_clone_reader().unwrap();
-        let out = read_until(&mut *reader, "probe=from-the-app");
+        let mut pump = Pump::new(master.try_clone_reader().unwrap());
+        let out = pump.until("home=[");
         assert!(out.contains("probe=from-the-app"), "got {out:?}");
+        assert!(
+            out.contains("home=[]"),
+            "the host leaked its environment: {out:?}"
+        );
         assert!(child.wait().unwrap().success());
     }
 
@@ -245,15 +283,24 @@ mod tests {
         let host = InProcessHost::start("io");
         let script = "stty size; read line; echo got=$line; exit 3";
         let (mut child, master) = spawn(&host.client, &command(script), 100, 30).unwrap();
-        let mut reader = master.try_clone_reader().unwrap();
+        let mut pump = Pump::new(master.try_clone_reader().unwrap());
         let mut writer = master.take_writer().unwrap();
-        assert!(read_until(&mut *reader, "30 100").contains("30 100"));
+        assert!(pump.until("30 100").contains("30 100"));
         writer.write_all(b"hello\n").unwrap();
-        assert!(read_until(&mut *reader, "got=hello").contains("got=hello"));
-        let status = child.wait().unwrap();
-        assert_eq!(status.exit_code(), 3);
+        assert!(pump.until("got=hello").contains("got=hello"));
+        assert_eq!(child.wait().unwrap().exit_code(), 3);
         let size = master.get_size().unwrap();
         assert_eq!((size.cols, size.rows), (100, 30));
+    }
+
+    #[test]
+    fn resize_reaches_a_running_hosted_child() {
+        let host = InProcessHost::start("rs");
+        let script =
+            "trap 'echo size=$(stty size)' WINCH; echo ready; while :; do sleep 0.05; done";
+        let (mut child, master) = spawn(&host.client, &command(script), 80, 24).unwrap();
+        let mut pump = Pump::new(master.try_clone_reader().unwrap());
+        pump.until("ready");
         master
             .resize(portable_pty::PtySize {
                 rows: 40,
@@ -261,7 +308,9 @@ mod tests {
                 pixel_width: 0,
                 pixel_height: 0,
             })
-            .ok(); // the session has exited; only the call shape matters here
+            .unwrap();
+        assert!(pump.until("size=40 120").contains("size=40 120"));
+        child.kill().unwrap();
     }
 
     #[test]
@@ -280,12 +329,22 @@ mod tests {
         let (mut child, _master) = spawn(&host.client, &command("sleep 300"), 80, 24).unwrap();
         assert!(child.try_wait().unwrap().is_none());
         child.kill().unwrap();
-        assert!(!child.wait().unwrap().success());
+        child.wait().unwrap(); // must return, not hang
+        assert!(child.try_wait().unwrap().is_some());
     }
 
     #[test]
-    fn the_switch_is_off_unless_set_to_one() {
-        // Not asserting on the live environment: just the parse.
-        assert!(!"0".eq("1") && !"".eq("1"));
+    fn raw_mode_is_answered_by_the_host_not_assumed_false() {
+        let host = InProcessHost::start("raw");
+        // `stty raw` takes the tty out of canonical mode, like a full-screen TUI.
+        let script = "stty raw -echo; echo raw-set; sleep 300";
+        let (mut child, master) = spawn(&host.client, &command(script), 80, 24).unwrap();
+        let mut pump = Pump::new(master.try_clone_reader().unwrap());
+        pump.until("raw-set");
+        let hosted = master
+            .downcast_ref::<canopy_pty_host::client::HostMaster>()
+            .expect("a hosted master downcasts to HostMaster");
+        assert!(hosted.raw_mode());
+        child.kill().unwrap();
     }
 }

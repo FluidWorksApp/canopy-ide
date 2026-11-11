@@ -16,7 +16,9 @@ use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 const CALL_TIMEOUT: Duration = Duration::from_secs(5);
-const DEFAULT_IDLE_SECS: u64 = 60;
+/// pgrp and raw-mode answers are asked under the app's `master` lock, so a hung
+/// host must not hold it for the full call timeout.
+const PROBE_TIMEOUT: Duration = Duration::from_millis(500);
 
 fn other(message: impl Into<String>) -> std::io::Error {
     std::io::Error::other(message.into())
@@ -44,9 +46,10 @@ fn read_line(stream: &mut UnixStream) -> std::io::Result<String> {
 #[derive(Clone, Debug)]
 pub struct HostClient {
     socket: PathBuf,
-    /// When set, a call that cannot connect starts the host again and retries
-    /// once, covering the window where an idle host was exiting as we arrived.
-    host_exe: Option<PathBuf>,
+    /// Where to start a host from and how long it idles. Used only by `spawn`:
+    /// restarting the host from any other call would resurrect a dead host from a
+    /// liveness probe and let a stale id address a different terminal.
+    launch: Option<(PathBuf, u64)>,
 }
 
 pub struct Attached {
@@ -62,12 +65,12 @@ impl HostClient {
     pub fn new(socket: impl Into<PathBuf>) -> Self {
         HostClient {
             socket: socket.into(),
-            host_exe: None,
+            launch: None,
         }
     }
 
-    pub fn with_host_exe(mut self, host_exe: impl Into<PathBuf>) -> Self {
-        self.host_exe = Some(host_exe.into());
+    pub fn with_launch(mut self, host_exe: impl Into<PathBuf>, idle_secs: u64) -> Self {
+        self.launch = Some((host_exe.into(), idle_secs));
         self
     }
 
@@ -83,16 +86,13 @@ impl HostClient {
     }
 
     fn call(&self, request: &Request) -> std::io::Result<Response> {
-        let mut stream = match self.connect() {
-            Ok(stream) => stream,
-            Err(first) => match &self.host_exe {
-                Some(exe) => {
-                    HostClient::ensure_running(exe, &self.socket, DEFAULT_IDLE_SECS)?;
-                    self.connect().map_err(|_| first)?
-                }
-                None => return Err(first),
-            },
-        };
+        self.call_timeout(request, CALL_TIMEOUT)
+    }
+
+    fn call_timeout(&self, request: &Request, timeout: Duration) -> std::io::Result<Response> {
+        let mut stream = UnixStream::connect(&self.socket)?;
+        stream.set_read_timeout(Some(timeout))?;
+        stream.set_write_timeout(Some(timeout))?;
         let mut line = serde_json::to_vec(request).map_err(other_err)?;
         line.push(b'\n');
         stream.write_all(&line)?;
@@ -108,7 +108,14 @@ impl HostClient {
         self.call(&Request::Hello)
     }
 
+    /// The one call that may start a host: an idle host can be exiting just as we
+    /// arrive, and a new terminal should not fail for that.
     pub fn spawn(&self, spec: SpawnSpec) -> std::io::Result<(u32, u32)> {
+        if let Some((exe, idle_secs)) = &self.launch {
+            if self.hello().is_err() {
+                HostClient::ensure_running(exe, &self.socket, *idle_secs)?;
+            }
+        }
         let reply = self.call(&Request::Spawn(spec))?;
         Ok((
             reply.id.ok_or_else(|| other("no id in reply"))?,
@@ -137,11 +144,16 @@ impl HostClient {
     }
 
     pub fn pgrp(&self, id: u32) -> std::io::Result<Option<i32>> {
-        Ok(self.call(&Request::Pgrp { id })?.pgrp)
+        Ok(self
+            .call_timeout(&Request::Pgrp { id }, PROBE_TIMEOUT)?
+            .pgrp)
     }
 
     pub fn raw_mode(&self, id: u32) -> std::io::Result<bool> {
-        Ok(self.call(&Request::RawMode { id })?.raw.unwrap_or(false))
+        Ok(self
+            .call_timeout(&Request::RawMode { id }, PROBE_TIMEOUT)?
+            .raw
+            .unwrap_or(false))
     }
 
     pub fn shutdown(&self) -> std::io::Result<()> {
@@ -195,7 +207,7 @@ impl HostClient {
         // this function, so probing with the retrying client would recurse forever.
         let client = HostClient::new(socket);
         if client.hello().is_ok() {
-            return Ok(client.with_host_exe(host_exe));
+            return Ok(client.with_launch(host_exe, idle_secs));
         }
         let dir = socket
             .parent()
@@ -212,7 +224,7 @@ impl HostClient {
             return Err(std::io::Error::last_os_error());
         }
         if client.hello().is_ok() {
-            return Ok(client.with_host_exe(host_exe));
+            return Ok(client.with_launch(host_exe, idle_secs));
         }
         let mut command = Command::new(host_exe);
         command
@@ -239,7 +251,7 @@ impl HostClient {
                 std::thread::spawn(move || {
                     let _ = child.wait();
                 });
-                return Ok(client.with_host_exe(host_exe));
+                return Ok(client.with_launch(host_exe, idle_secs));
             }
             if let Ok(Some(status)) = child.try_wait() {
                 return Err(other(format!("host exited at startup: {status}")));
@@ -278,6 +290,14 @@ impl HostMaster {
             size: Mutex::new((attached.cols, attached.rows)),
         };
         Ok((master, attached))
+    }
+}
+
+impl HostMaster {
+    /// Whether the foreground program has taken the terminal out of canonical
+    /// mode. A hosted session has no local fd to ask, so the host answers.
+    pub fn raw_mode(&self) -> bool {
+        self.client.raw_mode(self.id).unwrap_or(false)
     }
 }
 

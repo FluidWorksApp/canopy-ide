@@ -354,8 +354,7 @@ fn host_child_wait_returns_when_the_session_is_gone() {
     assert!(child.try_wait().unwrap().is_none());
     h.client.kill(id).unwrap();
     let status = child.wait().unwrap(); // must not hang
-    assert!(!status.success() || status.exit_code() == 0);
-    // A second wait answers from the cached status, even after the reap.
+                                        // A second wait answers from the cached status, even after the reap.
     assert!(child.try_wait().unwrap().is_some());
 }
 
@@ -368,13 +367,60 @@ fn set_meta_updates_what_a_later_list_reports() {
 }
 
 #[test]
-fn a_call_after_the_host_exits_restarts_it_once() {
+fn only_spawn_restarts_a_dead_host_and_a_stale_id_cannot_reach_a_new_one() {
     let h = Harness::start("n", 60);
     let client = h.client.clone();
+    let (old_id, _) = client.spawn(spec("sleep 300")).unwrap();
     let before = client.hello().unwrap().host_pid.unwrap();
     // SAFETY: terminating the host this test started.
     unsafe { libc::kill(before as libc::pid_t, libc::SIGTERM) };
     assert!(wait_until(Duration::from_secs(10), || !alive(before)));
-    let after = client.hello().unwrap().host_pid.unwrap();
-    assert_ne!(before, after, "the client did not start a replacement host");
+
+    // Liveness probes and id-addressed calls must not resurrect the host.
+    assert!(client.pgrp(old_id).is_err());
+    assert!(client.kill(old_id).is_err());
+    assert!(client.hello().is_err(), "a probe started a host");
+
+    // Spawning may start a replacement, and its ids never collide with old ones.
+    let (new_id, _) = client.spawn(spec("sleep 300")).unwrap();
+    assert_ne!(old_id, new_id, "a stale id would address the new terminal");
+    assert!(
+        client.kill(old_id).is_err(),
+        "stale id reached a live session"
+    );
+    assert!(client.list().unwrap().iter().all(|s| s.id == new_id));
+}
+
+#[test]
+fn a_session_with_a_linger_is_killed_after_its_client_drops() {
+    let h = Harness::start("o", 60);
+    let mut with_linger = spec("sleep 300");
+    with_linger.linger_secs = Some(1);
+    let (id, pid) = h.client.spawn(with_linger).unwrap();
+    let attached = h.client.attach(id, 0).unwrap();
+    std::thread::sleep(Duration::from_millis(1500));
+    assert!(alive(pid), "killed while its client was still attached");
+    drop(attached);
+    assert!(
+        wait_until(Duration::from_secs(10), || !alive(pid)),
+        "a detached session outlived its linger"
+    );
+}
+
+#[test]
+fn a_session_with_a_linger_that_is_never_attached_is_killed() {
+    let h = Harness::start("p", 60);
+    let mut with_linger = spec("sleep 300");
+    with_linger.linger_secs = Some(1);
+    let (_, pid) = h.client.spawn(with_linger).unwrap();
+    assert!(wait_until(Duration::from_secs(10), || !alive(pid)));
+}
+
+#[test]
+fn a_session_without_a_linger_survives_a_dropped_client() {
+    let h = Harness::start("q", 60);
+    let (id, pid) = h.client.spawn(spec("sleep 300")).unwrap();
+    drop(h.client.attach(id, 0).unwrap());
+    std::thread::sleep(Duration::from_secs(3));
+    assert!(alive(pid), "a session with no linger was killed");
 }

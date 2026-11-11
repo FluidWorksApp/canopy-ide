@@ -36,6 +36,11 @@ pub struct SpawnSpec {
     pub rows: u16,
     /// Opaque to the host: what the app needs to rebuild a tab after a restart.
     pub meta: Option<String>,
+    /// Kill the session this many seconds after its last client detaches (or
+    /// after spawn if none ever attaches). None means it lives until killed.
+    /// A crashed app leaves nothing to adopt a session, so callers that cannot
+    /// yet be adopted must set this.
+    pub linger_secs: Option<u64>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, Default)]

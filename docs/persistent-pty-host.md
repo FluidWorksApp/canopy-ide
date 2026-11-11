@@ -54,12 +54,17 @@ are the parent, and tmux would re-emulate the byte stream.
 
 ## Design
 
-**Process.** `canopy-pty-host`, one per profile, started by the app on demand with
+**Process.** `canopy-pty-host`, one per user (debug builds use their own directory), started by the app on demand with
 `setsid` and stdio on `/dev/null` (never `fork()` from the Tauri process). It
 exits after a quiet period with no sessions and no clients. SIGTERM stops the
 children, then exits. A lock file prevents a start race; a stale socket is
 removed; directory mode 0700 and a peer-uid check; short socket path (macOS limit
 is about 104 bytes, recalled).
+
+**Linger.** `SpawnSpec.linger_secs` kills a session that long after its last
+client detaches (or after spawn if none attaches). Until the app can adopt
+sessions, a crash or force-quit would otherwise leave invisible agents running,
+so the app sets a short linger and the adoption change lifts it.
 
 **Wire.** One raw connection per session: a one-line JSON attach handshake, then
 plain bytes both ways. The host blocks on a slow client and drains into its ring
@@ -93,16 +98,19 @@ with it, because stopping a container ends its whole PID namespace.** So a holde
 only helps for in-container restarts of the runner or gateway, not image updates.
 
 Direction from the owner (relayed by the remote-workspace session, not yet
-designed or tested): agent CLIs have their own update cycle and must never force
-a restart. They are baked into the image today (`install-agents.sh`,
-`agents.lock.json`). The target is for agent CLIs and the runner code to live in
-versioned directories outside the image, so running processes keep their old
-files and only new sessions get the new version, while the image holds only the
-OS and Node and swaps rarely, gated on idle. Untested: whether the agent CLIs run
-from a volume. Options for keeping PTYs across the rare image swap are still a
-separate decision: a long-lived holder in a sidecar container that the workspace
-container joins (shared PID/IPC namespaces, needs a security review), or updating
-in place without replacing the container. This is a separate design and PR; the
+designed or tested): remote agent CLIs stay **pinned** (`agents.lock.json`,
+root-owned, sha-checked, self-update disabled via `PINNED_CLI_ENV_KEYS` in
+`runner.mjs`), but should be delivered from versioned root-owned directories
+outside the image, so a CLI bump never swaps the container. New sessions get the
+new version; old versions must be kept until their sessions exit (today
+`install-agents.sh` removes the old `vendor/<name>` directory, which would break
+running lazy loaders). Runner and gateway code likewise live outside the image
+and restart through a holder. The image holds only the OS and Node and swaps
+rarely, gated on idle; a `recoverRuntime` SIGKILL still kills PTYs. Untested:
+CLIs running from a volume, and whether `canopy-hook` and browser assets can
+leave the image. Keeping PTYs across the rare image swap is a separate decision
+(a long-lived sidecar holder the workspace container joins, which needs shared
+PID/IPC namespaces and a security review). This is a separate design and PR; the
 Unix host protocol here is meant to be reusable by it.
 
 ## Tailscale (follow-up, separate PR)
