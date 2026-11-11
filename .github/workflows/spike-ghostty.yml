@@ -86,9 +86,17 @@ jobs:
         if: always()
         run: crates/spike-ghostty-vt/target/release/ghostty conf
 
+      - name: Calibrate libghostty-vt scrollback cap (it is bytes, not lines)
+        id: calib
+        if: always()
+        run: |
+          out=$(crates/spike-ghostty-vt/target/release/ghostty calib)
+          echo "$out"
+          echo "cap=$(echo "$out" | sed -n 's/^CAP=//p')" >> "$GITHUB_OUTPUT"
+
       - name: Throughput, libghostty-vt
         if: always()
-        run: crates/spike-ghostty-vt/target/release/ghostty perf
+        run: crates/spike-ghostty-vt/target/release/ghostty perf ${{ steps.calib.outputs.cap }}
 
       - name: Throughput, current engine
         if: always()
@@ -101,12 +109,14 @@ jobs:
           B=crates/spike-ghostty-vt/target/release
           for eng in ghostty current; do
             for m in rss-idle rss-fill; do
+              arg=""
+              if [ "$eng" = ghostty ]; then arg="${{ steps.calib.outputs.cap }}"; fi
               if [ "$(uname -s)" = Darwin ]; then
-                /usr/bin/time -l "$B/$eng" "$m" 2> "$RUNNER_TEMP/t.txt"
+                /usr/bin/time -l "$B/$eng" "$m" $arg 2> "$RUNNER_TEMP/t.txt"
                 cat "$RUNNER_TEMP/t.txt"
                 echo "RESULT $eng $m peak RSS (time -l): $(grep 'maximum resident set size' "$RUNNER_TEMP/t.txt" | awk '{print $1/1024}') KiB"
               else
-                "$B/$eng" "$m"
+                "$B/$eng" "$m" $arg
               fi
             done
           done

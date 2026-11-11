@@ -6,9 +6,7 @@ use libghostty_vt::style::{StyleColor, Underline};
 use libghostty_vt::terminal::{Mode, Point, PointCoordinate};
 use libghostty_vt::{Terminal, TerminalOptions};
 use spike_ghostty_vt::conformance::{fixtures, Dump};
-use spike_ghostty_vt::{
-    peak_rss_kib, scrollback_line, stream::synthetic_stream, throughput, SCROLLBACK_LINES_FED,
-};
+use spike_ghostty_vt::{peak_rss_kib, scrollback_line, stream::synthetic_stream, throughput};
 
 fn new_term(cols: u16, rows: u16, scrollback: usize) -> Terminal<'static, 'static> {
     Terminal::new(TerminalOptions {
@@ -137,6 +135,26 @@ fn dump(t: &Terminal<'_, '_>) -> Dump {
     d
 }
 
+/// `max_scrollback` is measured in bytes, not lines (observed in the first CI run:
+/// 10_000 held 976 lines at 80 columns). Find the smallest power-of-two-KiB cap
+/// that holds 10_000 scrollback lines of the rss-fill content.
+fn calibrate() -> usize {
+    let mut cap = 64 * 1024;
+    loop {
+        let mut t = new_term(80, 24, cap);
+        for i in 0..(10_000 + 24) {
+            t.vt_write(scrollback_line(i, 80).as_bytes());
+        }
+        let held = t.scrollback_rows().unwrap_or(0);
+        if held >= 10_000 || cap >= 512 * 1024 * 1024 {
+            println!("RESULT ghostty calibrated max_scrollback={cap} bytes holds {held} lines (cap is bytes, not lines)");
+            println!("CAP={cap}");
+            return cap;
+        }
+        cap *= 2;
+    }
+}
+
 fn conformance() {
     let fx = fixtures();
     let mut pass = 0;
@@ -205,16 +223,19 @@ fn main() {
     );
     match mode.as_str() {
         "conf" => conformance(),
+        "calib" => {
+            calibrate();
+        }
         "perf" => {
             let data = synthetic_stream(32 * 1024 * 1024);
             println!("stream_bytes={}", data.len());
+            let cap: usize = std::env::args()
+                .nth(2)
+                .and_then(|a| a.parse().ok())
+                .unwrap_or(10_000);
+            println!("RESULT ghostty perf uses max_scrollback={cap} bytes");
             for chunk in [4096usize, 65536] {
-                let v = throughput(
-                    &data,
-                    chunk,
-                    || new_term(80, 24, 10_000),
-                    |t, c| t.vt_write(c),
-                );
+                let v = throughput(&data, chunk, || new_term(80, 24, cap), |t, c| t.vt_write(c));
                 println!(
                     "RESULT ghostty throughput 80x24 {} KiB reads: {:.1} MiB/s",
                     chunk / 1024,
@@ -223,9 +244,13 @@ fn main() {
             }
         }
         "rss-idle" | "rss-fill" => {
-            let mut t = new_term(80, 24, 10_000);
+            let cap: usize = std::env::args()
+                .nth(2)
+                .and_then(|a| a.parse().ok())
+                .unwrap_or(10_000);
+            let mut t = new_term(80, 24, cap);
             if mode == "rss-fill" {
-                for i in 0..SCROLLBACK_LINES_FED {
+                for i in 0..(10_000 + 24) {
                     t.vt_write(scrollback_line(i, 80).as_bytes());
                 }
                 println!("scrollback_lines_held={}", t.scrollback_rows().unwrap_or(0));
