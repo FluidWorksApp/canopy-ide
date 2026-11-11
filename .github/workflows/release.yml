@@ -281,6 +281,30 @@ jobs:
           includeUpdaterJson: true
           args: ${{ matrix.args }}
 
+      # tauri-bundler signs every externalBin entry with the app's identity,
+      # hardened runtime and entitlements. The app copies canopy-pty-host out
+      # of the bundle and runs it from there (pty_hosted/install.rs), so that
+      # copy carries only its own signature: check it is a valid one. Read-only.
+      - name: Verify the PTY host sidecar is signed (macOS)
+        if: startsWith(matrix.platform, 'macos')
+        shell: bash
+        env:
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+        run: |
+          if [ -z "$APPLE_SIGNING_IDENTITY" ]; then
+            echo "APPLE_SIGNING_IDENTITY not set — unsigned build, nothing to verify."
+            exit 0
+          fi
+          root="src-tauri/target/${{ matrix.target }}/release/bundle"
+          [ -d "$root" ] || root="src-tauri/target/release/bundle"
+          host="$(find "$root/macos" -path '*.app/Contents/MacOS/canopy-pty-host' | head -1)"
+          if [ -z "$host" ]; then
+            echo "::error::canopy-pty-host is missing from the app bundle."
+            exit 1
+          fi
+          codesign --verify --strict --verbose=2 "$host"
+          codesign -dvvv "$host" 2>&1 | grep -E "Authority=|Timestamp=|flags=" || true
+
       # `tauri build` exits 0 even when signing fails ("a public key has been
       # found, but no private key"), so a missing or bad secret would publish a
       # release whose update artifacts have no .sig — and every installed copy

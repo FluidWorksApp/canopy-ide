@@ -46,7 +46,8 @@
       "debugApplicationIdSuffix": ".debug"
     },
     "externalBin": [
-      "binaries/canopy-hook"
+      "binaries/canopy-hook",
+      "binaries/canopy-pty-host"
     ],
     "resources": [
       "onnxruntime/*"

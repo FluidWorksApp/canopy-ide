@@ -6,6 +6,8 @@ on:
       - 'scripts/prepare-sidecar.mjs'
       - 'src-tauri/build.rs'
       - 'packages/agent-hook/**'
+      - 'crates/canopy-pty-host/**'
+      - 'src-tauri/tauri.conf.json'
       - '.github/workflows/windows-packaging.yml'
 permissions:
   contents: read
@@ -56,6 +58,10 @@ jobs:
           $root = 'src-tauri/target/x86_64-pc-windows-msvc/release'
           $helper = Get-Item 'src-tauri/binaries/canopy-hook-x86_64-pc-windows-msvc.exe'
           if ($helper.Length -eq 0) { throw 'Empty hook helper' }
+          # The PTY host is a stub on Windows (nothing launches it yet), but it
+          # is staged and bundled like every other externalBin entry.
+          $ptyHost = Get-Item 'src-tauri/binaries/canopy-pty-host-x86_64-pc-windows-msvc.exe'
+          if ($ptyHost.Length -eq 0) { throw 'Empty PTY host' }
           $installer = Get-ChildItem "$root/bundle/nsis/*-setup.exe"
           if (!$installer) { throw 'NSIS installer missing' }
           $mt = Get-ChildItem "${env:ProgramFiles(x86)}/Windows Kits/10/bin/*/x64/mt.exe" | Sort-Object FullName | Select-Object -Last 1

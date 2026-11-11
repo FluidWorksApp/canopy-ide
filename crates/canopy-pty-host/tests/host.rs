@@ -319,6 +319,12 @@ fn hello_reports_the_protocol_version_and_the_minimum_client() {
     let hello = h.client.hello().unwrap();
     assert_eq!(hello.version, Some(PROTOCOL_VERSION));
     assert_eq!(hello.min_client, Some(MIN_CLIENT_VERSION));
+    // The app keeps the installed copy a live host was started from.
+    let exe = std::path::PathBuf::from(hello.exe.expect("hello names the host's exe"));
+    assert_eq!(
+        exe.canonicalize().unwrap(),
+        host_exe().canonicalize().unwrap()
+    );
 }
 
 #[test]
