@@ -68,6 +68,7 @@ mod remote;
 mod research;
 mod secure_store;
 mod selftest;
+mod system_one;
 mod session_activity;
 mod session_doc;
 mod session_transfer;
@@ -570,6 +571,7 @@ pub fn run() {
         .manage(devicehub::DeviceHubManager::default())
         .manage(prwatch::PrWatcher::default())
         .manage(dictation::DictationManager::default())
+        .manage(system_one::SystemOne::default())
         .manage(selftest::SelftestState::default())
         .manage(client_mode::RemoteConnectionState::default())
         .manage(t3_socket::T3Sockets::default())
@@ -666,6 +668,8 @@ pub fn run() {
             watchdog::start(app.handle().clone());
             // Only does anything when this launch asked to test itself.
             selftest::start(app.handle());
+            // The System One download starts when the frontend reports the setting is on.
+            system_one::start_idle_watch(app.handle().clone());
             let menu = build_menu(app.handle(), "canopy")?;
             app.set_menu(menu)?;
             app.on_menu_event(|app, event| {
@@ -1155,6 +1159,9 @@ pub fn run() {
             dictation::dictation_stop,
             dictation::dictation_cancel,
             dictation::dictation_supported,
+            system_one::system_one_status,
+            system_one::system_one_enable,
+            system_one::system_one_decide,
             watchdog::watchdog_generation,
             watchdog::watchdog_ack,
             watchdog::memory_info,
@@ -1168,6 +1175,7 @@ pub fn run() {
                 // the app quit mid-dictation. Cheap, and the one piece of state
                 // here that outlives the process.
                 sysaudio::restore();
+                app.state::<system_one::SystemOne>().stop();
                 let pty = app.state::<pty::PtyManager>();
                 app.state::<std::sync::Arc<watchdog::WatchdogState>>()
                     .app_exiting(pty.live_count() as u64);
