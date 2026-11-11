@@ -51,6 +51,11 @@ const INPUT_HIGH_WATER: usize = 1024 * 1024;
 const WRITER_POLL: Duration = Duration::from_millis(250);
 /// Replay retained while no desktop or remote viewer is attached.
 const SCROLLBACK_CAP: usize = 4 * 1024 * 1024;
+/// How long the output clock ignores the repaint a redraw nudge provokes.
+const NUDGE_QUIET_MS: u64 = 1500;
+/// The most time adoption may spend at launch across all sessions; sessions it
+/// does not reach stay in the host (their linger still applies).
+const ADOPT_BUDGET: Duration = Duration::from_secs(10);
 /// Bounded fan-out queue to remote subscribers. Lossy on lag by design: a slow
 /// phone is dropped to a resync, never allowed to stall the agent.
 const BROADCAST_CAP: usize = 512;
@@ -126,6 +131,24 @@ fn group_alive(group: u32) -> bool {
 pub fn instance_token() -> &'static str {
     static TOKEN: OnceLock<String> = OnceLock::new();
     TOKEN.get_or_init(|| {
+        // With the host on and a previous launch's terminals still running, this
+        // launch carries their token, so the agents inside keep pairing: their
+        // env, digests and sidecars already name it.
+        if let Some(token) = crate::pty_hosted::reused_instance() {
+            return token;
+        }
+        launch_token().to_string()
+    })
+}
+
+/// A tag unique to this app launch and never reused. Equal to `instance_token()`
+/// except when this launch adopted a previous launch's hosted terminals (the
+/// token is then theirs). What marks "which launch started this task": the stale
+/// sweep must see every earlier launch's runs as stale even when the pairing
+/// token is carried over.
+pub fn launch_token() -> &'static str {
+    static TOKEN: OnceLock<String> = OnceLock::new();
+    TOKEN.get_or_init(|| {
         let pid = std::process::id();
         let ms = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -139,6 +162,43 @@ pub fn instance_token() -> &'static str {
 #[tauri::command]
 pub fn instance_id() -> String {
     instance_token().to_string()
+}
+
+/// This launch's own tag, for stamping tasks and sweeping the previous launch's.
+#[tauri::command]
+pub fn launch_id() -> String {
+    launch_token().to_string()
+}
+
+/// What `PtyManager::start_session` needs once a child and its master exist.
+struct SessionParts {
+    id: u32,
+    session_generation: u64,
+    pid: Option<u32>,
+    kind: SessionKind,
+    execution_context: Option<crate::execution::ExecutionContext>,
+    recovered_run: bool,
+    recovered_command: Option<String>,
+    run_command_id: Option<String>,
+    shell: String,
+    cwd: String,
+    child: Box<dyn Child + Send + Sync>,
+    master_box: Box<dyn MasterPty + Send>,
+    reader: Box<dyn Read + Send>,
+    writer: Box<dyn Write + Send>,
+    desktop: Option<DesktopSink>,
+    high_water: Option<usize>,
+    cols: u16,
+    rows: u16,
+    /// Output the session produced before this app attached (an adopted
+    /// session's replay from the host). It goes straight into the replay ring so
+    /// a new tab can show it, without stamping "last output" or waking the
+    /// attention machinery as if the agent had just spoken. Empty for a spawn.
+    history: Vec<u8>,
+    /// Absolute offset of `history[0]` in the session's output stream.
+    history_start: u64,
+    /// See `Session::survives_quit`.
+    survives_quit: bool,
 }
 
 pub struct Session {
@@ -206,6 +266,13 @@ pub struct Session {
     /// counter is here because a terminal repainting the same frame is still
     /// output — diffing rendered text would call that silence.
     last_output_ms: AtomicU64,
+    /// Quitting the app leaves this terminal running in the PTY host instead of
+    /// stopping it: a hosted terminal that a later launch can adopt (not a
+    /// micro-task or run-bound one, which are never adopted).
+    survives_quit: bool,
+    /// Output before this time does not stamp `last_output_ms`: the repaint a
+    /// redraw nudge provokes is not the agent speaking.
+    stamp_quiet_until_ms: AtomicU64,
     output_bytes: AtomicU64,
     /// Bytes evicted from the front of the replay ring. A reattaching terminal
     /// gets an explicit marker instead of silently presenting a partial history
@@ -513,6 +580,130 @@ impl PtyManager {
         Ok((id, generation))
     }
 
+    /// Take over terminals a previous launch left running in the PTY host, before
+    /// the renderer registers, so the existing recovery path routes them to tabs
+    /// like any surviving session. Same id, generation and instance as before;
+    /// history goes into the replay ring without counting as fresh output.
+    /// Returns how many were adopted. A session that cannot be taken is left in
+    /// the host untouched (its linger still applies).
+    #[cfg(unix)]
+    pub fn adopt_hosted<R: tauri::Runtime>(&self, app: AppHandle<R>) -> usize {
+        // Only a launch that found a previous launch's terminals has anything to
+        // do; otherwise starting the app must not start a host just to ask it.
+        let Some(instance) = crate::pty_hosted::reused_instance() else {
+            return 0;
+        };
+        // Raise the id and generation floor before anything can fail below: a
+        // session that cannot be adopted is still running, and its id must not
+        // be handed to a new terminal under the same token. Asked with a
+        // non-launching client, so it holds even when hosting is unavailable.
+        self.seed_identity_floor(&instance);
+        let Some(client) = crate::pty_hosted::client() else {
+            return 0;
+        };
+        self.adopt_from(app, &client, &instance)
+    }
+
+    #[cfg(unix)]
+    fn seed_identity_floor(&self, instance: &str) {
+        if let Some((id, generation)) = crate::pty_hosted::identity_floor(instance) {
+            self.next_id.fetch_max(id, Ordering::SeqCst);
+            self.next_session_generation
+                .fetch_max(generation, Ordering::SeqCst);
+        }
+    }
+
+    #[cfg(unix)]
+    fn adopt_from<R: tauri::Runtime>(
+        &self,
+        app: AppHandle<R>,
+        client: &crate::pty_hosted::Client,
+        instance: &str,
+    ) -> usize {
+        let client = client.clone();
+        let mut adopted = 0;
+        let deadline = std::time::Instant::now() + ADOPT_BUDGET;
+        for found in crate::pty_hosted::adoptable(&client, instance) {
+            if std::time::Instant::now() >= deadline {
+                eprintln!(
+                    "canopy: adoption budget spent; remaining hosted terminals left in the host"
+                );
+                break;
+            }
+            if self.sessions.lock().unwrap().contains_key(&found.meta.id) {
+                continue;
+            }
+            let taken = match crate::pty_hosted::adopt(&client, &found) {
+                Ok(taken) => taken,
+                Err(error) => {
+                    eprintln!("canopy: could not adopt hosted terminal: {error}");
+                    continue;
+                }
+            };
+            let (reader, writer) = match taken
+                .master
+                .try_clone_reader()
+                .and_then(|r| taken.master.take_writer().map(|w| (r, w)))
+            {
+                Ok(pair) => pair,
+                Err(error) => {
+                    eprintln!("canopy: could not adopt hosted terminal: {error}");
+                    continue;
+                }
+            };
+            let meta = taken.meta;
+            let meta_id = meta.id;
+            self.next_id.fetch_max(meta.id, Ordering::SeqCst);
+            self.next_session_generation
+                .fetch_max(meta.generation, Ordering::SeqCst);
+            let kind = if meta.kind == "remote" {
+                SessionKind::Remote
+            } else {
+                SessionKind::Desktop
+            };
+            let shell = meta.command.clone().unwrap_or_else(default_shell);
+            let parts = SessionParts {
+                id: meta.id,
+                session_generation: meta.generation,
+                pid: Some(taken.pid),
+                kind,
+                execution_context: meta.execution_context,
+                recovered_run: meta.run,
+                recovered_command: meta.command,
+                run_command_id: meta.run_command_id,
+                shell,
+                cwd: meta.cwd,
+                child: taken.child,
+                master_box: taken.master,
+                reader,
+                writer,
+                desktop: None,
+                high_water: None,
+                cols: taken.cols,
+                rows: taken.rows,
+                history: taken.history,
+                history_start: taken.history_start,
+                survives_quit: true,
+            };
+            match self.start_session(app.clone(), parts) {
+                Ok(_) => {
+                    adopted += 1;
+                    if let Some(session) = self.get(meta_id) {
+                        // Off the launch path: it sleeps between the two sizes.
+                        thread::spawn(move || session.nudge_redraw());
+                    }
+                }
+                Err(error) => eprintln!("canopy: could not start adopted terminal: {error}"),
+            }
+        }
+        adopted
+    }
+
+    #[cfg(not(unix))]
+    pub fn adopt_hosted<R: tauri::Runtime>(&self, _app: AppHandle<R>) -> usize {
+        0
+    }
+
     pub fn sessions(&self) -> Arc<Mutex<HashMap<u32, Arc<Session>>>> {
         self.sessions.clone()
     }
@@ -780,7 +971,16 @@ impl PtyManager {
     /// one at a time: the grace period is for agents to flush their transcripts,
     /// and serialising it would cost GRACE per terminal on every quit.
     pub fn kill_all(&self) -> KillAllReport {
-        let sessions: Vec<Arc<Session>> = self.sessions.lock().unwrap().values().cloned().collect();
+        // Hosted terminals a later launch can adopt are left running in the
+        // host: quitting only drops this app's connection to them.
+        let sessions: Vec<Arc<Session>> = self
+            .sessions
+            .lock()
+            .unwrap()
+            .values()
+            .filter(|s| !s.survives_quit)
+            .cloned()
+            .collect();
         for s in &sessions {
             s.request_stop();
         }
@@ -1043,6 +1243,13 @@ impl Session {
         let Ok(master) = self.master.lock() else {
             return false;
         };
+        // A hosted session has no local fd; the host answers instead.
+        // The downcast methods exist only on plain `dyn MasterPty`, not on the
+        // `dyn MasterPty + Send` the session stores, so drop the auto trait first.
+        let plain: &dyn MasterPty = &**master;
+        if let Some(hosted) = plain.downcast_ref::<canopy_pty_host::client::HostMaster>() {
+            return hosted.raw_mode();
+        }
         let Some(fd) = master.as_raw_fd() else {
             return false;
         };
@@ -1130,7 +1337,10 @@ impl Session {
     /// every pty, headless ones included, and the bytes are already in hand —
     /// so "when did this terminal last say anything" costs two relaxed stores.
     fn record_output_locked(&self, ring: &mut VecDeque<u8>, data: &[u8]) -> u64 {
-        self.last_output_ms.store(now_ms(), Ordering::Relaxed);
+        let now = now_ms();
+        if now >= self.stamp_quiet_until_ms.load(Ordering::Relaxed) {
+            self.last_output_ms.store(now, Ordering::Relaxed);
+        }
         let start = self.output_bytes.load(Ordering::Relaxed);
         ring.extend(data.iter().copied());
         let overflow = ring.len().saturating_sub(SCROLLBACK_CAP);
@@ -1161,6 +1371,37 @@ impl Session {
         let mut ring = self.scrollback.lock().unwrap();
         let start = self.record_output_locked(&mut ring, &data);
         self.send_desktop(start, data);
+    }
+
+    /// Make a full-screen program repaint without changing its final size. A
+    /// resize to the size a terminal already has sends no SIGWINCH, so shrink by
+    /// one row and restore. Used after adoption, where the replayed history may
+    /// start mid-screen and a TUI needs to redraw over it.
+    fn nudge_redraw(&self) {
+        let (_, rows) = *self.size.lock().unwrap();
+        if rows < 2 {
+            return;
+        }
+        // The repaint is not "the agent just spoke": keep it out of the output
+        // clock for a moment longer than the nudge takes.
+        self.stamp_quiet_until_ms
+            .store(now_ms() + NUDGE_QUIET_MS, Ordering::Relaxed);
+        // One lock across both sizes, so a real resize cannot land in between and
+        // be overwritten; the restore reads the size as it is after the pause.
+        let master = self.master.lock().unwrap();
+        let shrink = |cols: u16, rows: u16| {
+            let _ = master.resize(PtySize {
+                rows,
+                cols,
+                pixel_width: 0,
+                pixel_height: 0,
+            });
+        };
+        let (cols, rows) = *self.size.lock().unwrap();
+        shrink(cols, rows - 1);
+        thread::sleep(Duration::from_millis(80));
+        let (cols, rows) = *self.size.lock().unwrap();
+        shrink(cols, rows);
     }
 
     /// Record a new grid size and tell remote subscribers, so a remote terminal
@@ -1709,18 +1950,32 @@ impl PtyManager {
             .try_state::<crate::governor::TerminalGovernor>()
             .map(|_| crate::watchdog::memory_info());
 
+        // Opt-in (CANOPY_PTY_HOST=1): the child lives in the detached PTY host.
+        // Decided before any local PTY exists; any failure falls back in-process.
+        let hosted_client = crate::pty_hosted::client();
         let pty_system = native_pty_system();
-        let pair = pty_system
-            .openpty(PtySize {
-                rows,
-                cols,
-                pixel_width: 0,
-                pixel_height: 0,
-            })
-            .map_err(|e| e.to_string())?;
+        let open_local = || {
+            pty_system
+                .openpty(PtySize {
+                    rows,
+                    cols,
+                    pixel_width: 0,
+                    pixel_height: 0,
+                })
+                .map_err(|e| e.to_string())
+        };
+        let mut local_pair = if hosted_client.is_some() {
+            None
+        } else {
+            Some(open_local()?)
+        };
 
         // Allocated before spawn so the child can carry its own session id in env.
         let (id, session_generation) = state.allocate_session_identity()?;
+        #[cfg(unix)]
+        if let Some(client) = &hosted_client {
+            crate::pty_hosted::note_identity(client, id, session_generation);
+        }
 
         let shell = shell.unwrap_or_else(default_shell);
         let mut cmd = match &run {
@@ -1958,25 +2213,28 @@ impl PtyManager {
         // may replace argv with a gate launcher, but it never changes the
         // command's environment, cwd, terminal geometry, or stdio contract.
         // Mock apps do not manage containment and therefore remain monitor-only.
-        let prepared_containment =
-            if let Some(containment) = app.try_state::<crate::containment::ContainmentManager>() {
-                let host = host.expect("the production app manages both governor and containment");
-                Some(
-                    containment
-                        .prepare(
-                            id,
-                            crate::governor::base_allowance(host.total_bytes),
-                            &mut cmd,
-                        )
-                        .inspect_err(|_| {
-                            if let Some(ide) = app.try_state::<crate::claude_ide::ClaudeIde>() {
-                                ide.close(id);
-                            }
-                        })?,
-                )
-            } else {
-                None
-            };
+        let prepared_containment = if let Some(containment) = app
+            .try_state::<crate::containment::ContainmentManager>()
+            // Hosted sessions are monitor-only: the host owns the child.
+            .filter(|_| hosted_client.is_none())
+        {
+            let host = host.expect("the production app manages both governor and containment");
+            Some(
+                containment
+                    .prepare(
+                        id,
+                        crate::governor::base_allowance(host.total_bytes),
+                        &mut cmd,
+                    )
+                    .inspect_err(|_| {
+                        if let Some(ide) = app.try_state::<crate::claude_ide::ClaudeIde>() {
+                            ide.close(id);
+                        }
+                    })?,
+            )
+        } else {
+            None
+        };
 
         // The credential was minted before the child so it could be in its
         // environment from the first instruction. Every failure between there
@@ -1992,11 +2250,62 @@ impl PtyManager {
                 ide.close(id);
             }
         };
-        let mut child = match pair.slave.spawn_command(cmd) {
-            Ok(child) => child,
-            Err(e) => {
-                retire();
-                return Err(e.to_string());
+        let hosted = hosted_client.as_ref().and_then(|client| {
+            // Written with the spawn, not after: a crash in between would leave a
+            // session nothing can identify. Identity only, never env or tokens.
+            let meta = serde_json::json!({
+                "v": 1,
+                "id": id,
+                "generation": session_generation,
+                "kind": kind,
+                "cwd": cwd.clone(),
+                "run": recovered_run,
+                "command": recovered_command.clone(),
+                "run_command_id": recovered_run.then(|| run_command_id.clone()).flatten(),
+                "execution_context": execution_context.clone(),
+                "run_id": task_identity.as_ref().map(|t| t.run_id.clone()),
+                "attempt_id": task_identity.as_ref().map(|t| t.attempt_id.clone()),
+                "instance": instance_token(),
+            })
+            .to_string();
+            match crate::pty_hosted::spawn(client, &cmd, cols, rows, Some(meta)) {
+                Ok(parts) => Some(parts),
+                Err(error) => {
+                    eprintln!(
+                        "canopy: PTY host spawn failed, using an in-process terminal: {error}"
+                    );
+                    None
+                }
+            }
+        });
+        // Only a hosted terminal that a later launch could adopt outlives the app:
+        // micro-tasks and run-bound tabs are never adopted, so quitting stops them.
+        let survives_quit =
+            hosted.is_some() && kind != SessionKind::Detached && task_identity.is_none();
+        let (mut child, master_box, slave): (
+            Box<dyn Child + Send + Sync>,
+            Box<dyn MasterPty + Send>,
+            Option<Box<dyn portable_pty::SlavePty + Send>>,
+        ) = match hosted {
+            Some((child, master)) => (child, master, None),
+            None => {
+                let pair = match local_pair.take() {
+                    Some(pair) => pair,
+                    None => match open_local() {
+                        Ok(pair) => pair,
+                        Err(e) => {
+                            retire();
+                            return Err(e);
+                        }
+                    },
+                };
+                match pair.slave.spawn_command(cmd) {
+                    Ok(child) => (child, pair.master, Some(pair.slave)),
+                    Err(e) => {
+                        retire();
+                        return Err(e.to_string());
+                    }
+                }
             }
         };
         let pid = child.process_id();
@@ -2009,12 +2318,11 @@ impl PtyManager {
                 return Err(failure.cleanup_after_child_exit());
             }
         }
-        drop(pair.slave);
+        drop(slave);
 
-        let (mut reader, mut writer) = match pair
-            .master
+        let (reader, writer) = match master_box
             .try_clone_reader()
-            .and_then(|r| pair.master.take_writer().map(|w| (r, w)))
+            .and_then(|r| master_box.take_writer().map(|w| (r, w)))
         {
             Ok(pair) => pair,
             Err(e) => {
@@ -2032,6 +2340,83 @@ impl PtyManager {
             }
         };
 
+        state.start_session(
+            app,
+            SessionParts {
+                id,
+                session_generation,
+                pid,
+                kind,
+                execution_context,
+                recovered_run,
+                recovered_command,
+                run_command_id,
+                shell,
+                cwd,
+                child,
+                master_box,
+                reader,
+                writer,
+                desktop,
+                high_water,
+                cols,
+                rows,
+                history: Vec::new(),
+                history_start: 0,
+                survives_quit,
+            },
+        )
+    }
+
+    /// Everything after the child and its master exist: build the `Session`, put
+    /// it in the map and start its reader, writer and flusher threads. Split out
+    /// so a session adopted from the PTY host starts exactly like a spawned one.
+    fn start_session<R: tauri::Runtime>(
+        &self,
+        app: AppHandle<R>,
+        parts: SessionParts,
+    ) -> Result<SpawnResult, String> {
+        let state = self;
+        let SessionParts {
+            id,
+            session_generation,
+            pid,
+            kind,
+            execution_context,
+            recovered_run,
+            recovered_command,
+            run_command_id,
+            shell,
+            cwd,
+            child,
+            master_box,
+            mut reader,
+            mut writer,
+            desktop,
+            high_water,
+            cols,
+            rows,
+            history,
+            history_start,
+            survives_quit,
+        } = parts;
+        // History enters the ring directly: only the newest SCROLLBACK_CAP bytes
+        // fit, and everything older counts as dropped so offsets stay absolute.
+        let kept_from = history.len().saturating_sub(SCROLLBACK_CAP);
+        let history_total = history_start.saturating_add(history.len() as u64);
+        let history_dropped = history_start.saturating_add(kept_from as u64);
+        let history_ring: VecDeque<u8> = history[kept_from..].iter().copied().collect();
+        // Hands the bridge credential back on the failure paths below, as in
+        // `spawn_bound`: nothing watches for an exit before the session is
+        // registered.
+        let retire = || {
+            if let Some(ctx) = app.try_state::<crate::context::ContextBridge>() {
+                ctx.retire_agent(id);
+            }
+            if let Some(ide) = app.try_state::<crate::claude_ide::ClaudeIde>() {
+                ide.close(id);
+            }
+        };
         let killer = child.clone_killer();
 
         let desktop_renderer_generation = desktop.as_ref().map(|sink| sink.renderer_generation);
@@ -2068,7 +2453,7 @@ impl PtyManager {
             cwd,
             input: Mutex::new(Vec::new()),
             input_ready: Condvar::new(),
-            master: Mutex::new(pair.master),
+            master: Mutex::new(master_box),
             killer: Mutex::new(killer),
             child: Mutex::new(Some(child)),
             shutdown: AtomicBool::new(false),
@@ -2078,7 +2463,7 @@ impl PtyManager {
             desktop_delivery_gate: Arc::clone(&state.desktop_delivery_gate),
             next_attachment: AtomicU64::new(generation.unwrap_or(0)),
             high_water: high_water.unwrap_or(DEFAULT_HIGH_WATER),
-            scrollback: Mutex::new(VecDeque::new()),
+            scrollback: Mutex::new(history_ring),
             size: Mutex::new((cols, rows)),
             subscribers: broadcast::channel(BROADCAST_CAP).0,
             // Zero means "has never happened", which is why these are not
@@ -2086,8 +2471,10 @@ impl PtyManager {
             // is an unanswered question, not a terminal that has been silent
             // since it started.
             last_output_ms: AtomicU64::new(0),
-            output_bytes: AtomicU64::new(0),
-            dropped_output_bytes: AtomicU64::new(0),
+            survives_quit,
+            stamp_quiet_until_ms: AtomicU64::new(0),
+            output_bytes: AtomicU64::new(history_total),
+            dropped_output_bytes: AtomicU64::new(history_dropped),
             desktop_delivery_chunks: AtomicU64::new(0),
             desktop_delivery_bytes: AtomicU64::new(0),
             desktop_acked_bytes: AtomicU64::new(0),
@@ -4251,5 +4638,95 @@ mod tests {
         let session = pm.get(id).expect("session");
         pm.kill(id).expect("kill");
         assert!(session.shutdown.load(Ordering::SeqCst));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn adopt_from_restores_identity_and_history_without_a_fresh_output_stamp() {
+        use crate::pty_hosted::tests::{command, meta_for, InProcessHost};
+        let host = InProcessHost::start("adoptmgr");
+        let (child, master) = crate::pty_hosted::spawn(
+            &host.client,
+            &command("trap 'echo got-winch' WINCH; echo before-quit; while :; do sleep 0.1; done"),
+            80,
+            24,
+            Some(meta_for(41, 9, "desktop", "inst-t")),
+        )
+        .expect("hosted spawn");
+        let wait = |f: &dyn Fn() -> bool| {
+            let deadline = std::time::Instant::now() + Duration::from_secs(10);
+            while std::time::Instant::now() < deadline && !f() {
+                thread::sleep(Duration::from_millis(50));
+            }
+            f()
+        };
+        assert!(wait(&|| host.client.list().unwrap()[0].end > 0));
+        // The app quits: the connection drops, which only detaches.
+        drop(master);
+        drop(child);
+        assert!(wait(
+            &|| host.client.list().unwrap()[0].attached == Some(false)
+        ));
+
+        let app = tauri::test::mock_app();
+        let pm = PtyManager::default();
+        assert_eq!(
+            pm.adopt_from(app.handle().clone(), &host.client, "inst-t"),
+            1
+        );
+
+        let session = pm.get(41).expect("adopted under its original id");
+        assert_eq!(session.session_generation, 9);
+        assert_eq!(session.pid, host.client.list().unwrap()[0].pid);
+        // History is in the ring but is not "the agent just spoke".
+        assert_eq!(session.quiet_ms(now_ms()), None);
+        assert!(session.output_bytes() >= "before-quit".len() as u64);
+        assert!(String::from_utf8_lossy(
+            &session
+                .scrollback
+                .lock()
+                .unwrap()
+                .iter()
+                .copied()
+                .collect::<Vec<u8>>()
+        )
+        .contains("before-quit"));
+        // A resize to the size it already has sends no SIGWINCH, so adoption
+        // nudges one row and back; the program's own handler proves it ran.
+        assert!(wait(&|| {
+            String::from_utf8_lossy(
+                &session
+                    .scrollback
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .copied()
+                    .collect::<Vec<u8>>(),
+            )
+            .contains("got-winch")
+        }));
+        // The repaint the nudge provoked is not the agent speaking.
+        assert_eq!(session.quiet_ms(now_ms()), None);
+        // Quitting leaves an adopted terminal running in the host.
+        let report = pm.kill_all();
+        assert_eq!(report.requested, 0);
+        assert!(host.client.list().unwrap()[0].exited.is_none());
+        assert!(!session.shutdown.load(Ordering::SeqCst));
+        // The next terminal lands above the adopted ones.
+        let (id, generation) = pm.allocate_session_identity().unwrap();
+        assert!(id > 41 && generation > 9, "{id} {generation}");
+        // A second pass finds nothing free: the session is now attached.
+        assert_eq!(
+            pm.adopt_from(app.handle().clone(), &host.client, "inst-t"),
+            0
+        );
+        let _ = pm.kill(41);
+    }
+
+    #[test]
+    fn without_the_host_the_launch_tag_is_the_instance_tag() {
+        if !crate::pty_hosted::enabled() {
+            assert_eq!(launch_token(), instance_token());
+        }
     }
 }

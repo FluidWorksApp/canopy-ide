@@ -60,6 +60,7 @@ mod profiles;
 mod provenance;
 mod prwatch;
 mod pty;
+mod pty_hosted;
 mod punch;
 mod receipt;
 mod relay;
@@ -595,6 +596,14 @@ pub fn run() {
             // to speak on, and a write that happens first would be silent.
             change::install(app.handle().clone());
             cli::install_deep_links(app);
+            // Terminals a previous launch left in the PTY host (CANOPY_PTY_HOST=1)
+            // come back before the first renderer registers.
+            let adopted = app
+                .state::<pty::PtyManager>()
+                .adopt_hosted(app.handle().clone());
+            if adopted > 0 {
+                eprintln!("canopy: adopted {adopted} hosted terminal(s)");
+            }
             // Claude Code's IDE servers emit to the window, so the hub needs a
             // handle before the first agent PTY asks for one.
             app.manage(claude_ide::ClaudeIde::new(std::sync::Arc::new(
@@ -807,6 +816,7 @@ pub fn run() {
             pty::pty_set_name,
             pty::pty_set_name_theme,
             pty::instance_id,
+            pty::launch_id,
             android::android_sdk_status,
             android::android_devices,
             android::android_avds,

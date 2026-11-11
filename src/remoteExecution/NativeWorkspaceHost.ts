@@ -75,7 +75,7 @@ for(const command of ['process_capture_metrics','snapshot_capture_metrics','brow
 const DESKTOP_EVENTS=['relay:state','relay:chat','relay:command','relay:collab','relay:transfer','relay:transfer-progress','desk:state','relay:desk','tunnel:state'];
 /** Commands this adapter answers itself (below) rather than passing to the
  *  host by name: terminals, preview forwarding, uploads and clone progress. */
-export const WORKSPACE_ADAPTER_COMMANDS=['spot_save_context_image','notes_attach_file','spot_stage_drop_images','preview_start','preview_stop','execution_remote_upload','execution_remote_upload_cancel','git_clone','browser_supported','environment_identity','pty_renderer_register','pty_renderer_sessions','instance_id','pty_spawn','pty_spawn_attached_argv','pty_spawn_argv','pty_spawn_detached','pty_attach_desktop','pty_read_desktop','pty_detach_desktop','pty_ack','pty_write_binary','pty_write','pty_resize','pty_kill','pty_set_name_theme','cli_set_native_update_env','pty_set_title','pty_set_name','pty_stats'] as const;
+export const WORKSPACE_ADAPTER_COMMANDS=['spot_save_context_image','notes_attach_file','spot_stage_drop_images','preview_start','preview_stop','execution_remote_upload','execution_remote_upload_cancel','git_clone','browser_supported','environment_identity','pty_renderer_register','pty_renderer_sessions','instance_id','launch_id','pty_spawn','pty_spawn_attached_argv','pty_spawn_argv','pty_spawn_detached','pty_attach_desktop','pty_read_desktop','pty_detach_desktop','pty_ack','pty_write_binary','pty_write','pty_resize','pty_kill','pty_set_name_theme','cli_set_native_update_env','pty_set_title','pty_set_name','pty_stats'] as const;
 /** Whether a command runs on the computer showing the IDE in remote mode. */
 export const isDesktopLocal=(command:string)=>LOCAL_UI.has(command);
 class WorkspaceChannel<T> implements HostChannel<T>{onmessage:(message:T)=>void=()=>{};}
@@ -410,7 +410,7 @@ export class NativeWorkspaceHost implements Host {
       this.rendererGeneration=registration.generation;this.metadata=metadata;this.beginPoll();this.scheduleHostVersionCheck();
       value={generation:this.rendererGeneration,instance,sessions:sessions.filter(s=>s.exitCode==null).map(s=>this.summary(s))};
     }else if(command==='pty_renderer_sessions')value=(await this.sessions(INTERACTIVE)).filter(s=>s.exitCode==null).map(s=>this.summary(s));
-    else if(command==='instance_id')value=await this.instanceId();
+    else if(command==='instance_id'||command==='launch_id')value=await this.instanceId();
     else if(['pty_spawn','pty_spawn_attached_argv','pty_spawn_argv','pty_spawn_detached'].includes(command)){
       const cwd=String(args.cwd??'/workspace');if(cwd!=='/workspace'&&!cwd.startsWith('/workspace/'))throw Error('Choose a directory in the remote workspace');
       const env=(args.env??[]) as [string,string][];
