@@ -211,10 +211,25 @@ is judged from stdout JSON whatever the exit code.
 **Identity and the allowlist.** A peer is identified by the stable node id plus
 the user id, never by node or login name (display values that can be renamed):
 
-- `tailnet:user/<stable node id>/<user id>`
-- `tailnet:tagged/<stable node id>/<sorted tags>` for nodes owned by ACL tags,
+- `tailnet:user/<stable node id>/<user id>@<tailnet domain>`
+- `tailnet:tagged/<stable node id>/<sorted tags>@<tailnet domain>` for nodes owned by ACL tags,
   which have no real user. Its own kind, so a user entry never authorises a tagged node. Retagging changes the
   entry, so a retagged node is refused until re-approved.
+
+The user id has no leading zeros. The trailing `@<tailnet domain>` (the node's DNS
+domain, such as `example.ts.net` or a Headscale base domain) binds the entry to the
+tailnet it was approved on: stable ids and user ids are only unique within one
+tailnet or control server, so after switching account or control server the same
+numbers could name a different machine. The accepting side reads its own tailnet
+from the status and admits a peer only if whois places the peer in that same
+tailnet and the entry carries it, so an entry recorded elsewhere, a node shared in
+from another tailnet, and an entry with no `@<domain>` at all (unbound; it parses
+so it can be listed and removed, but authorises nothing) never match. If this
+machine's tailnet cannot be read, everything is refused. The domain is a tailnet
+name: it is kept out of logs and fixtures use only invented names. A caller that
+builds an entry from a fresh whois answer should use
+`TailnetIdentity::allowlist_entry()`, which includes it. A source that is this
+machine (one of its own tailnet addresses, or whois naming this node) is refused.
 
 These sit in the same `Allowlist` as device keys but in a separate namespace
 (`tailnet:` prefix), so they can never collide with a 64 hex iroh key. A whois
@@ -224,7 +239,10 @@ identity must also be in the allowlist. The DIALING side needs no allowlist
 entry (connecting out is the user's own act); instead `whois` on the address
 must return the same stable node id the status listed for that node, so an
 address cannot be swapped for another machine's. This machine's own addresses
-are never dialed.
+are never dialed. Dialing only reaches nodes in this machine's own tailnet: a node
+shared in from another tailnet is never matched by short name, full name or address
+(so it can neither be reached through, nor make ambiguous, a name that is also a
+local one), and whois must place the address in the same tailnet.
 
 **An entry authorises a machine, not a person.** whois names the node that owns
 the source address. Anyone using that machine (another account on a shared
@@ -232,7 +250,9 @@ computer, a process of any user) is that identity. A node that routes more than
 its own addresses (a subnet router or exit node: `AllowedIPs` beyond its own
 host addresses, or any `PrimaryRoutes`) is refused, because connections through
 it could come from any machine behind it; so is a source address that whois
-attributes to a node but that is not one of the node's own `Addresses`.
+attributes to a node but that is not one of the node's own `Addresses`. A whois
+answer with `AllowedIPs` missing, null or empty is an error too: on the wire it may
+mean "same as Addresses", but absence is not evidence that the node routes nothing.
 
 **Fail closed.** Accept decides from the peer's socket address alone, so no
 byte is read before the decision. A source address outside the tailnet ranges
@@ -241,13 +261,26 @@ refusal. Successful answers are cached 10 seconds and failures 5 seconds, keyed
 by address. The short positive cache bounds how long a retag or a reassigned
 address keeps a stale identity, at the cost of one CLI spawn per expiry for a
 busy peer. The allowlist is consulted on every use, so removing an entry takes
-effect at once. Whois runs on four worker threads fed by a bounded queue (64);
-a full queue drops the connection unread. Failed lookups and refusals are rate
-limited per source address (20 per minute); admitted peers never count, since the
-session protocol opens a connection per control operation. Fresh lookups are
-also limited globally (120 spawns per minute across all sources; over it a
-lookup is refused). The result channel is bounded (64) too, so no queue grows
-without limit.
+effect at once for new connections, and a sweep every 250 ms shuts down any live
+connection whose entry has been removed (or whose tailnet is no longer this
+machine's), so removal ends running sessions within about a quarter of a second.
+The shutdown is abrupt: the peer's reads and writes fail. The tailnet's own view of
+the peer (a retag, a deleted node) is decided at admission and not re-checked while
+the connection lives; the tailnet stops carrying packets its ACLs forbid.
+
+Whois runs on four worker threads fed by a bounded queue (64); a full queue drops
+the connection unread, and a source address may have at most 8 connections waiting
+in it at once, so one address cannot fill it. The lookup budget is split into
+lanes of 60 spawns per minute each: known peers (listed in the status, with a
+stable id the allowlist holds), every other source, and dialing. A flood of unknown
+addresses can therefore exhaust only its own lane; known peers and dials keep
+theirs. A peer that has never been seen and arrives during such a flood waits for
+the next window. Refusals and failed lookups are rate limited per source address
+(20 per minute) but never for known peers, so a transient whois failure cannot lock
+an approved peer out. A full cache evicts its single oldest entry; a flood of
+addresses never empties it. This machine's own view (addresses, node id, tailnet,
+peer list) is read from `status --json` at most once per 10 seconds, one spawn at a
+time. The result channel is bounded (64) too, so no queue grows without limit.
 
 **Listener.** Binds only the node's own tailnet addresses from the status, only
 while running, never an unspecified address, and only addresses inside
@@ -268,8 +301,14 @@ addresses outside the tailnet ranges, refusal of an unknown peer, of a whois
 failure and of a subnet router, echo for an allowlisted peer through the
 worker pool, name and address dialing (no allowlist entry needed; a whois id
 mismatch, whois failure and the machine's own address refused),
-the global lookup limit, read deadline, positive and negative
-caching, rate limiting, revocation, a too-old CLI, and redacted `Debug`.
+the per-lane lookup budgets (a stranger flood leaves a known peer and a dial
+working), the per-source queue cap, oldest-first eviction, tailnet binding (an entry
+for another tailnet, an unbound entry, a moved machine, a shared-in peer, an
+unknown own tailnet), this machine refused as a source, name resolution that never
+reaches a shared-in node, `AllowedIPs` required, user ids without leading zeros,
+read deadline, positive and negative caching, rate limiting, revocation of live
+connections (allowlist removal and a tailnet switch), a too-old CLI, and redacted
+`Debug`.
 
 **NOT verified.**
 - The minimum version (1.60.0) is a conservative floor, not taken from the
@@ -296,7 +335,8 @@ caching, rate limiting, revocation, a too-old CLI, and redacted `Debug`.
    both allowlisted: session works.
 3. B not in A's allowlist: refused, no session bytes. A dials B with B's
    allowlist irrelevant on A's side: dialing out works with an empty list.
-4. Remove B from A's allowlist while connected: B's next connection is refused.
+4. Remove B from A's allowlist while connected: B's running connection is closed
+   within about a second and its next connection is refused.
 5. Tagged node as B: entry kind `tagged`; a `user` entry for the same node
    must not work.
 6. Homebrew CLI against the app daemon: version warning present, still works.

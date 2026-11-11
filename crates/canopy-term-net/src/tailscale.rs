@@ -17,7 +17,7 @@
 //! `tailcfg.Node`), and the whois key set was checked against a live CLI by
 //! listing keys only.
 
-use crate::allowlist::{canonical_tailnet_entry, valid_stable_id, valid_tag};
+use crate::allowlist::{canonical_tailnet_entry, tailnet_domain_of, valid_stable_id, valid_tag};
 use crate::json::{self, Json, JsonError};
 use std::io::Read;
 use std::net::IpAddr;
@@ -691,16 +691,37 @@ impl TailnetIdentity {
         }
     }
 
+    /// The node's full DNS name as whois reported it (lowercase, no trailing
+    /// dot). A display value; never log it.
+    pub fn node_name(&self) -> Option<&str> {
+        match self {
+            TailnetIdentity::User { node_name, .. } | TailnetIdentity::Tagged { node_name, .. } => {
+                node_name.as_deref()
+            }
+        }
+    }
+
+    /// The tailnet (DNS domain) the node belongs to, from its full name. `None`
+    /// when whois gave no usable name; such an identity can never be matched to
+    /// an entry bound to a tailnet, so it is refused where a tailnet is needed.
+    pub fn tailnet(&self) -> Option<String> {
+        self.node_name().and_then(tailnet_domain_of)
+    }
+
     /// The allowlist entry for this identity; always a valid
-    /// [`canonical_tailnet_entry`].
+    /// [`canonical_tailnet_entry`]. It carries the node's tailnet
+    /// (`@<domain>`) when whois named one, which binds the entry to that
+    /// tailnet; without a name it is the unbound form, which authorises
+    /// nothing.
     pub fn allowlist_entry(&self) -> String {
+        let bound = self.tailnet().map(|d| format!("@{d}")).unwrap_or_default();
         match self {
             TailnetIdentity::User {
                 stable_id, user_id, ..
-            } => format!("tailnet:user/{stable_id}/{user_id}"),
+            } => format!("tailnet:user/{stable_id}/{user_id}{bound}"),
             TailnetIdentity::Tagged {
                 stable_id, tags, ..
-            } => format!("tailnet:tagged/{stable_id}/{}", tags.join(",")),
+            } => format!("tailnet:tagged/{stable_id}/{}{bound}", tags.join(",")),
         }
     }
 }
@@ -801,9 +822,19 @@ fn parse_whois_full(text: &str) -> Result<(TailnetIdentity, Vec<IpAddr>), WhoisE
         return Err(WhoisError::Invalid("Node.Addresses"));
     }
     let own_ips: Vec<IpAddr> = own.iter().map(|p| p.0).collect();
-    // AllowedIPs absent or null means "the same as Addresses". Anything beyond
-    // the node's own host addresses is a route: refuse.
-    let allowed = prefix_list(node.get("AllowedIPs"), "Node.AllowedIPs")?;
+    // AllowedIPs must be present: on the wire it may be omitted to mean "the
+    // same as Addresses", but the answer for a peer comes from the local node's
+    // own view, where it is always filled in. A missing or null value is not
+    // evidence the node routes nothing, so it is an error, not a guess. An empty
+    // list is just as unusable. Anything beyond the node's own host addresses
+    // is a route: refuse.
+    let allowed = match node.get("AllowedIPs") {
+        None | Some(Json::Null) => return Err(WhoisError::Missing("Node.AllowedIPs")),
+        v => prefix_list(v, "Node.AllowedIPs")?,
+    };
+    if allowed.is_empty() {
+        return Err(WhoisError::Invalid("Node.AllowedIPs"));
+    }
     if allowed
         .iter()
         .any(|p| !is_host_prefix(p) || !own_ips.contains(&p.0))
@@ -1023,7 +1054,7 @@ pub mod fake {
 
     pub fn whois_user(stable: &str, user: i64) -> String {
         format!(
-            r#"{{"Node":{{"ID":11,"StableID":"{stable}","Name":"node-b.example.ts.net.","User":{user},"Addresses":["100.64.0.2/32","127.0.0.1/32"],"Hostinfo":{{}}}},
+            r#"{{"Node":{{"ID":11,"StableID":"{stable}","Name":"node-b.example.ts.net.","User":{user},"Addresses":["100.64.0.2/32","127.0.0.1/32"],"AllowedIPs":["100.64.0.2/32","127.0.0.1/32"],"Hostinfo":{{}}}},
             "UserProfile":{{"ID":{user},"LoginName":"user-b@example.com","DisplayName":"User B"}},"CapMap":null}}"#
         )
     }
@@ -1035,7 +1066,7 @@ pub mod fake {
             .collect::<Vec<_>>()
             .join(",");
         format!(
-            r#"{{"Node":{{"ID":12,"StableID":"{stable}","Name":"box-c.example.ts.net.","User":99,"Tags":[{t}],"Addresses":["100.64.0.3/32","127.0.0.1/32"]}},
+            r#"{{"Node":{{"ID":12,"StableID":"{stable}","Name":"box-c.example.ts.net.","User":99,"Tags":[{t}],"Addresses":["100.64.0.3/32","127.0.0.1/32"],"AllowedIPs":["100.64.0.3/32","127.0.0.1/32"]}},
             "UserProfile":{{"ID":99,"LoginName":"tagged-devices","DisplayName":"Tagged"}}}}"#
         )
     }
@@ -1400,7 +1431,11 @@ mod tests {
                 node_name: Some("node-b.example.ts.net".into()),
             }
         );
-        assert_eq!(id.allowlist_entry(), "tailnet:user/nPEERB1CNTRL/42");
+        assert_eq!(
+            id.allowlist_entry(),
+            "tailnet:user/nPEERB1CNTRL/42@example.ts.net"
+        );
+        assert_eq!(id.tailnet().as_deref(), Some("example.ts.net"));
         assert_eq!(
             canonical_tailnet_entry(&id.allowlist_entry()),
             Some(id.allowlist_entry())
@@ -1412,22 +1447,24 @@ mod tests {
         let id = parse_whois(&whois_tagged("nBOXC1CNTRL", &["tag:z", "tag:a", "tag:a"])).unwrap();
         assert_eq!(
             id.allowlist_entry(),
-            "tailnet:tagged/nBOXC1CNTRL/tag:a,tag:z"
+            "tailnet:tagged/nBOXC1CNTRL/tag:a,tag:z@example.ts.net"
         );
         assert_eq!(
             canonical_tailnet_entry(&id.allowlist_entry()),
             Some(id.allowlist_entry())
         );
         // The same stable id as a user entry is a different entry.
-        assert_ne!(id.allowlist_entry(), "tailnet:user/nBOXC1CNTRL/99");
+        assert_ne!(
+            id.allowlist_entry(),
+            "tailnet:user/nBOXC1CNTRL/99@example.ts.net"
+        );
     }
 
     #[test]
     fn whois_without_tags_or_user_is_an_error() {
-        let no_user =
-            r#"{"Node":{"StableID":"nX1CNTRL","Addresses":["100.64.0.5/32"]},"UserProfile":null}"#;
+        let no_user = r#"{"Node":{"StableID":"nX1CNTRL","Addresses":["100.64.0.5/32"],"AllowedIPs":["100.64.0.5/32"]},"UserProfile":null}"#;
         assert_eq!(parse_whois(no_user), Err(WhoisError::NoUser));
-        let zero_user = r#"{"Node":{"StableID":"nX1CNTRL","Addresses":["100.64.0.5/32"]},"UserProfile":{"ID":0}}"#;
+        let zero_user = r#"{"Node":{"StableID":"nX1CNTRL","Addresses":["100.64.0.5/32"],"AllowedIPs":["100.64.0.5/32"]},"UserProfile":{"ID":0}}"#;
         assert_eq!(parse_whois(zero_user), Err(WhoisError::NoUser));
     }
 
@@ -1540,19 +1577,30 @@ mod tests {
                 r#"{{"Node":{{"StableID":"nR1CNTRL","Addresses":["100.64.0.7/32","fd7a:115c:a1e0::7/128"]{extra}}},"UserProfile":{{"ID":5}}}}"#
             )
         };
-        // AllowedIPs equal to the own addresses is fine; absent or null too.
+        // AllowedIPs equal to the own addresses is fine.
         assert!(parse_whois(&base(
             r#","AllowedIPs":["100.64.0.7/32","fd7a:115c:a1e0::7/128"]"#
         ))
         .is_ok());
-        assert!(parse_whois(&base("")).is_ok());
-        assert!(parse_whois(&base(r#","AllowedIPs":null"#)).is_ok());
+        // Absent, null or empty is an error, never read as "same as Addresses".
+        assert_eq!(
+            parse_whois(&base("")),
+            Err(WhoisError::Missing("Node.AllowedIPs"))
+        );
+        assert_eq!(
+            parse_whois(&base(r#","AllowedIPs":null"#)),
+            Err(WhoisError::Missing("Node.AllowedIPs"))
+        );
+        assert_eq!(
+            parse_whois(&base(r#","AllowedIPs":[]"#)),
+            Err(WhoisError::Invalid("Node.AllowedIPs"))
+        );
         // A subnet route, an exit route, or another host's address: refused.
         for extra in [
             r#","AllowedIPs":["100.64.0.7/32","192.168.1.0/24"]"#,
             r#","AllowedIPs":["0.0.0.0/0"]"#,
             r#","AllowedIPs":["100.64.0.8/32"]"#,
-            r#","PrimaryRoutes":["10.0.0.0/8"]"#,
+            r#","AllowedIPs":["100.64.0.7/32"],"PrimaryRoutes":["10.0.0.0/8"]"#,
         ] {
             assert_eq!(
                 parse_whois(&base(extra)),
@@ -1564,6 +1612,22 @@ mod tests {
             parse_whois(&base(r#","AllowedIPs":["nope"]"#)),
             Err(WhoisError::Invalid("Node.AllowedIPs"))
         );
+    }
+
+    #[test]
+    fn an_entry_without_a_node_name_is_unbound() {
+        let id = parse_whois(
+            r#"{"Node":{"StableID":"nX1CNTRL","Addresses":["100.64.0.5/32"],"AllowedIPs":["100.64.0.5/32"]},"UserProfile":{"ID":5}}"#,
+        )
+        .unwrap();
+        assert_eq!(id.tailnet(), None);
+        assert_eq!(id.allowlist_entry(), "tailnet:user/nX1CNTRL/5");
+        // A name with no domain part is unbound too.
+        let id = parse_whois(
+            r#"{"Node":{"StableID":"nX1CNTRL","Name":"lonely.","Addresses":["100.64.0.5/32"],"AllowedIPs":["100.64.0.5/32"]},"UserProfile":{"ID":5}}"#,
+        )
+        .unwrap();
+        assert_eq!(id.tailnet(), None);
     }
 
     #[test]
