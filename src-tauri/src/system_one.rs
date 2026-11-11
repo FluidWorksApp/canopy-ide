@@ -143,7 +143,7 @@ fn is_our_server(cmdline: &str, bin: &Path) -> bool {
 
 #[cfg(unix)]
 fn command_of(pid: u32) -> String {
-    Command::new("ps")
+    Command::new(crate::procenv::resolve_command("ps"))
         .args(["-p", &pid.to_string(), "-o", "command="])
         .output()
         .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
@@ -159,7 +159,9 @@ fn reap_stale(bin: &Path) {
         .and_then(|t| t.trim().parse::<u32>().ok())
     {
         if is_our_server(&command_of(pid), bin) {
-            let _ = Command::new("kill").arg(pid.to_string()).status();
+            let _ = Command::new(crate::procenv::resolve_command("kill"))
+                .arg(pid.to_string())
+                .status();
         }
     }
     let _ = std::fs::remove_file(file);
@@ -177,7 +179,7 @@ fn guard_child(child_pid: u32, bin: &Path) {
         parent = std::process::id(),
         child = child_pid,
     );
-    let _ = Command::new("sh")
+    let _ = Command::new(crate::procenv::resolve_command("sh"))
         .args(["-c", &script])
         .env("BIN", bin)
         .stdin(Stdio::null())
