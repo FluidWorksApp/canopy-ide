@@ -189,6 +189,30 @@ fn stalled_client_blocks_the_child_instead_of_growing_memory() {
 }
 
 #[test]
+fn attaching_to_a_full_ring_while_the_child_floods_keeps_the_session_usable() {
+    // Regression: output read just as a client attached to a full ring trimmed
+    // bytes the client had not been sent, and the sender then panicked holding
+    // the ring lock; every later request for the session lost its connection.
+    let h = Harness::start("fr", 60);
+    let (id, _) = h.client.spawn(spec("yes")).unwrap();
+    assert!(
+        wait_until(Duration::from_secs(10), || {
+            h.client.list().unwrap()[0].start > 0
+        }),
+        "ring never filled"
+    );
+    for _ in 0..40 {
+        let attached = h.client.attach(id, 0).unwrap();
+        let listed = h.client.list().unwrap();
+        assert_eq!(listed.len(), 1);
+        drop(attached);
+    }
+    let mut last = h.client.attach(id, 0).unwrap();
+    let out = read_until(&mut last, Duration::from_secs(5), |b| b.len() > 64 * 1024);
+    assert!(out.len() > 64 * 1024, "no output after the attaches");
+}
+
+#[test]
 fn unattached_output_drains_into_a_bounded_ring_and_reports_a_gap() {
     let h = Harness::start("d", 60);
     let (id, _) = h
@@ -926,13 +950,15 @@ fn a_replaced_client_sees_eof_and_its_typing_no_longer_reaches_the_child() {
     let h = Harness::start("rp", 60);
     let (id, _) = h.client.spawn(spec("cat")).unwrap();
     let mut first = h.client.attach(id, 0).unwrap();
-    let mut second = h.client.attach(id, 0).unwrap();
-
-    // The first connection is closed by the host, not left frozen.
+    // Set before the host closes it: macOS refuses setsockopt (EINVAL) on a
+    // socket whose peer has already gone.
     first
         .stream
         .set_read_timeout(Some(Duration::from_secs(5)))
         .unwrap();
+    let mut second = h.client.attach(id, 0).unwrap();
+
+    // The first connection is closed by the host, not left frozen.
     let mut buf = [0u8; 256];
     let mut saw_eof = false;
     let deadline = Instant::now() + Duration::from_secs(5);
