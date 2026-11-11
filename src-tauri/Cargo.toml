@@ -11,7 +11,7 @@ rust-version.workspace = true
 default-run = "canopy"
 
 [workspace]
-members = ["../crates/canopy-core", "../crates/canopy-service"]
+members = ["../crates/canopy-core", "../crates/canopy-service", "../crates/canopy-pty-host"]
 
 [workspace.package]
 rust-version = "1.82"
@@ -204,6 +204,8 @@ tauri-plugin-notification = "2"
 # Unix signals for killing whole PTY process groups (no zombies)
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
+# Opt-in hosted terminals (pty_hosted.rs); the host binary is its own crate.
+canopy-pty-host = { path = "../crates/canopy-pty-host" }
 
 # desk.rs screen capture. xcap on Linux pulls libpipewire (libspa-sys) which the
 # build and CI images do not carry, so Linux capture is not wired up and

@@ -161,6 +161,7 @@ redistribute them:
 - **cairo-sys-rs 0.18.2** — Copyright The gtk-rs Project Developers (per package manifest; the distributed license file carries no copyright line)
 - **camino 1.2.4** — Copyright Without Boats, Ashley Williams, Steve Klabnik, Rain (per package manifest; the distributed license file carries no copyright line)
 - **canopy-core 0.1.0** — Copyright Cause Connect Pte Ltd (per package manifest; the distributed license file carries no copyright line)
+- **canopy-pty-host 0.1.0** — Copyright Cause Connect Pte Ltd (per package manifest; the distributed license file carries no copyright line)
 - **canopy-term-net 0.1.0** — Copyright Cause Connect Pte Ltd (per package manifest; the distributed license file carries no copyright line)
 - **cargo_metadata 0.19.2** — Copyright Oliver Schneider (per package manifest; the distributed license file carries no copyright line)
 - **cargo_toml 0.22.3** — Copyright Kornel (per package manifest; the distributed license file carries no copyright line)

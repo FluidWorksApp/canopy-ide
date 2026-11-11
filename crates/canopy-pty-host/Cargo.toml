@@ -1,0 +1,22 @@
+[package]
+name = "canopy-pty-host"
+version = "0.1.0"
+description = "Detached host that owns terminal PTYs so they outlive the Canopy app"
+authors = ["Cause Connect Pte Ltd <sam@fluidwords.app>"]
+license = "MIT"
+edition = "2021"
+rust-version.workspace = true
+workspace = "../../src-tauri"
+
+[[bin]]
+name = "canopy-pty-host"
+path = "src/main.rs"
+
+[dependencies]
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+[target.'cfg(unix)'.dependencies]
+anyhow = "1"
+libc = "0.2"
+portable-pty = "0.9"

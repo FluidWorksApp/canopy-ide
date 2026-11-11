@@ -142,6 +142,10 @@ pub struct ContextBridge {
     /// Per-project snapshots the frontend publishes, keyed by project id.
     snapshots: Mutex<HashMap<String, serde_json::Value>>,
     port: OnceLock<u16>,
+    /// The stable Unix socket (`ctx_socket.rs`), set only with the PTY host on
+    /// and only in the instance that holds its lock. Terminals then also get
+    /// `CANOPY_CTX_SOCKET`, which outlives this launch's port.
+    socket: OnceLock<std::path::PathBuf>,
     /// The process-wide credential, for callers Canopy starts itself that are
     /// not a terminal — the companion. It names nobody, so anything that has to
     /// know *which* agent is asking refuses it; see `Caller`.
@@ -151,6 +155,11 @@ pub struct ContextBridge {
     /// token every identity claim had to be a body field the caller filled in
     /// itself, so an agent could name any owner, release anyone's claim, and be
     /// believed. The token is the identity, and the caller cannot choose it.
+    ///
+    /// Keyed by `verifier(token)`, not the token: a terminal adopted from the
+    /// PTY host comes back with only the verifier its spawn metadata carried,
+    /// and one map keyed the same way for both means every lookup, sweep and
+    /// retirement treats an adopted terminal exactly like a fresh one.
     agents: Mutex<HashMap<String, AgentIdentity>>,
     /// Managed non-PTY attempts (structured Build sessions), keyed by their
     /// private bridge credential just like terminal agents.
@@ -163,6 +172,10 @@ pub struct ContextBridge {
     /// Kept beside `pending` so depth/count gates are enforced by the bridge,
     /// never by caller-supplied fields or a racy UI snapshot.
     pending_spawns: Mutex<HashMap<u64, PendingAgentSpawn>>,
+    /// Until when a spawn that was abandoned (timed out, or its request was
+    /// dropped) may still produce a child the bridge never bound. Terminals
+    /// sealed meanwhile are sealed with an unknown position, not as roots.
+    spawn_unbound_until: Mutex<Option<std::time::Instant>>,
     next_op: AtomicU64,
     /// Advisory file claims, held and ended together in the durable mesh store. Several
     /// agents routinely share one checkout; a claim is how one says "I'm editing
@@ -328,11 +341,13 @@ impl Default for ContextBridge {
         Self {
             snapshots: Mutex::new(HashMap::new()),
             port: OnceLock::new(),
+            socket: OnceLock::new(),
             token: hex::encode(bytes),
             agents: Mutex::new(HashMap::new()),
             attempts: Mutex::new(HashMap::new()),
             pending: Mutex::new(HashMap::new()),
             pending_spawns: Mutex::new(HashMap::new()),
+            spawn_unbound_until: Mutex::new(None),
             next_op: AtomicU64::new(1),
             claims: crate::mesh::load_claims(),
             disabled_tools: Mutex::new(None),
@@ -349,6 +364,65 @@ fn random_token() -> String {
     let mut bytes = [0u8; 16];
     let _ = getrandom::getrandom(&mut bytes);
     hex::encode(bytes)
+}
+
+/// What the bridge keys a terminal's credential by, and what a hosted
+/// terminal's spawn metadata records: SHA-256 of the token, hex. The token is
+/// 128 random bits, so the verifier cannot be turned back into it, and storing
+/// it with the host hands nobody a credential.
+pub fn verifier(token: &str) -> String {
+    use sha2::{Digest, Sha256};
+    hex::encode(Sha256::digest(token.as_bytes()))
+}
+
+/// The variables a terminal needs to reach this bridge. The socket rides
+/// beside the port when there is one; `canopy-hook` prefers it.
+pub fn agent_env(
+    port: u16,
+    token: &str,
+    socket: Option<&std::path::Path>,
+) -> Vec<(&'static str, String)> {
+    let mut env = vec![
+        ("CANOPY_CTX_PORT", port.to_string()),
+        ("CANOPY_CTX_TOKEN", token.to_string()),
+    ];
+    if let Some(socket) = socket.and_then(|s| s.to_str()) {
+        // Who stamped the port above. A terminal adopted by a later launch
+        // keeps this launch's port, which by then is dead or reused; `canopy-hook`
+        // uses the port beside the socket only while this app is still running.
+        if let Some(app) = app_stamp() {
+            env.push(("CANOPY_CTX_APP", app));
+        }
+        env.push(("CANOPY_CTX_SOCKET", socket.to_string()));
+    }
+    env
+}
+
+/// This process's pid and start time, as `canopy-hook` checks them
+/// (`<pid>:<start>`, the start with its whitespace turned to `_`). None when
+/// `ps` cannot say, in which case the stamp is omitted and the port is never
+/// used beside the socket.
+#[cfg(unix)]
+fn app_stamp() -> Option<String> {
+    static STAMP: OnceLock<Option<String>> = OnceLock::new();
+    STAMP
+        .get_or_init(|| {
+            let pid = std::process::id();
+            let mut command = std::process::Command::new("/bin/ps");
+            command.args(["-o", "lstart=", "-p", &pid.to_string()]);
+            let out = crate::process_capture::output(&mut command, 4096)
+                .ok()
+                .filter(|out| out.status.success())?;
+            let text = String::from_utf8_lossy(&out.stdout);
+            let start: Vec<&str> = text.split_whitespace().collect();
+            (!start.is_empty()).then(|| format!("{pid}:{}", start.join("_")))
+        })
+        .clone()
+}
+
+#[cfg(not(unix))]
+fn app_stamp() -> Option<String> {
+    None
 }
 
 impl ContextBridge {
@@ -438,6 +512,42 @@ impl ContextBridge {
         self.port.get().map(|p| (*p, self.token.clone()))
     }
 
+    /// The stable socket this instance serves, if it holds one.
+    pub fn socket(&self) -> Option<&std::path::Path> {
+        self.socket.get().map(|p| p.as_path())
+    }
+
+    /// Whether any agent-created terminal is waiting to be bound into its
+    /// parent's spawn tree. A terminal spawned meanwhile may be that child, so
+    /// its sealed metadata must not claim to be a root.
+    ///
+    /// Only unbound spawns count: a child already bound is resealed with its
+    /// position, and is not any other terminal. An abandoned spawn counts for
+    /// `ABANDONED_SPAWN_GRACE`, since the frontend may still create its child.
+    pub fn spawn_pending(&self) -> bool {
+        self.pending_spawns
+            .lock()
+            .unwrap()
+            .values()
+            .any(|spawn| spawn.child_pty_id.is_none())
+            || self
+                .spawn_unbound_until
+                .lock()
+                .unwrap()
+                .is_some_and(|until| until > std::time::Instant::now())
+    }
+
+    /// Forget a spawn request. `abandoned` when nothing answered it: its child
+    /// may yet appear unbound, so the grace window opens.
+    fn end_spawn(&self, id: u64, abandoned: bool) {
+        self.pending.lock().unwrap().remove(&id);
+        self.pending_spawns.lock().unwrap().remove(&id);
+        if abandoned {
+            *self.spawn_unbound_until.lock().unwrap() =
+                Some(std::time::Instant::now() + ABANDONED_SPAWN_GRACE);
+        }
+    }
+
     /// Mint this terminal's own credential. Called once per spawn, before the
     /// child exists, so the token is in its environment from its first
     /// instruction and there is no window in which it holds someone else's.
@@ -450,7 +560,7 @@ impl ContextBridge {
         let port = *self.port.get()?;
         let token = random_token();
         self.agents.lock().unwrap().insert(
-            token.clone(),
+            verifier(&token),
             AgentIdentity {
                 pty_id,
                 instance: crate::pty::instance_token().to_string(),
@@ -462,6 +572,54 @@ impl ContextBridge {
             },
         );
         Some((port, token))
+    }
+
+    /// Recognise the credential an adopted terminal already holds. A previous
+    /// launch minted it and the terminal's environment still carries it; the
+    /// host kept only its verifier. Refused if the verifier is malformed or
+    /// already names a terminal, so a session cannot take over another's
+    /// identity by repeating its metadata.
+    ///
+    /// `lineage` is the spawn-tree position the sealed metadata carried. When it
+    /// is missing the terminal comes back at the delegation cap: it can still
+    /// use its tools but cannot spawn further agents.
+    pub fn readopt_agent(
+        &self,
+        verifier: &str,
+        mut identity: AgentIdentity,
+        lineage: Option<crate::pty_hosted::Lineage>,
+    ) -> bool {
+        let (spawn_depth, parent_pty_id) = lineage.unwrap_or((MAX_AGENT_SPAWN_DEPTH, None));
+        identity.spawn_depth = spawn_depth;
+        identity.parent_pty_id = parent_pty_id;
+        let well_formed = verifier.len() == 64
+            && verifier
+                .bytes()
+                .all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'));
+        if !well_formed {
+            return false;
+        }
+        let mut agents = self.agents.lock().unwrap();
+        if agents.contains_key(verifier)
+            || agents
+                .values()
+                .any(|a| a.pty_id == identity.pty_id && a.instance == identity.instance)
+        {
+            return false;
+        }
+        agents.insert(verifier.to_string(), identity);
+        true
+    }
+
+    /// `identify` for tests in other modules (adoption in pty.rs).
+    #[cfg(test)]
+    pub(crate) fn caller_for_test(&self, presented: &str) -> Option<Caller> {
+        self.identify(presented)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_port_for_test(&self, port: u16) {
+        let _ = self.port.set(port);
     }
 
     /// Drop a terminal's credential when the terminal goes. Returns the
@@ -512,12 +670,13 @@ impl ContextBridge {
         }
         // Not constant-time against the agent map, and it does not need to be:
         // a hit is a full-length random token the attacker would have to
-        // possess, and the map is keyed by the token itself, so there is no
+        // possess, and the map is keyed by its hash, so there is no
         // per-candidate comparison to time.
+        let key = verifier(presented);
         self.agents
             .lock()
             .unwrap()
-            .get(presented)
+            .get(&key)
             .cloned()
             .map(Caller::Agent)
             .or_else(|| {
@@ -547,6 +706,28 @@ pub(crate) fn constant_time_eq(a: &str, b: &str) -> bool {
 /// setup; failures are logged, not fatal — the IDE works without the bridge,
 /// agents just lose the context tools.
 pub fn start(app: tauri::AppHandle) {
+    // Claimed here, before the first terminal can spawn, so every terminal of
+    // this launch carries the socket. Only with the PTY host on: nothing else
+    // outlives the app, and with it off nothing about the bridge changes.
+    #[cfg(unix)]
+    let stable = crate::pty_hosted::enabled()
+        .then(crate::pty_hosted::host_dir)
+        .flatten()
+        .map(|dir| match crate::ctx_socket::claim(&dir) {
+            Ok(owned) => (dir, owned),
+            Err(e) => {
+                // Not given up on: `serve_stable` keeps trying, so a transient
+                // failure does not cost every terminal the stable address.
+                log::warn!("context bridge: no stable socket yet ({e}); will retry");
+                (dir, None)
+            }
+        });
+    // Published as soon as it is bound: a connection made before the accept
+    // loop starts waits in the listen backlog, so no terminal misses it.
+    #[cfg(unix)]
+    if let Some((_, Some(owned))) = &stable {
+        let _ = app.state::<ContextBridge>().socket.set(owned.path.clone());
+    }
     tauri::async_runtime::spawn(async move {
         let listener = match tokio::net::TcpListener::bind(("127.0.0.1", 0)).await {
             Ok(l) => l,
@@ -584,8 +765,59 @@ pub fn start(app: tauri::AppHandle) {
             .route("/ctx/mcp-task", post(mcp_task_op))
             .route("/ctx/tools", get(tools))
             .with_state(app.clone());
+        #[cfg(unix)]
+        if let Some((dir, owned)) = stable {
+            tauri::async_runtime::spawn(serve_stable(app.clone(), dir, owned, router.clone()));
+        }
         let _ = axum::serve(listener, router).await;
     });
+}
+
+/// Serve the bridge on its stable socket. Another app holding it (an update's
+/// old process still exiting, or a second debug app) is waited out for as long
+/// as this process lives: the holder may be gone at any time, and terminals
+/// that adopted this launch's address would otherwise stay cut off until the
+/// next restart. Meanwhile this launch serves TCP only, and terminals it
+/// spawned before the socket was ready carry the port alone.
+#[cfg(unix)]
+async fn serve_stable(
+    app: tauri::AppHandle,
+    dir: std::path::PathBuf,
+    owned: Option<crate::ctx_socket::Owned>,
+    router: Router,
+) {
+    let mut owned = owned;
+    let mut waited = 0u32;
+    let mut failures = 0u32;
+    let owned = loop {
+        if let Some(owned) = owned.take() {
+            break owned;
+        }
+        if waited == 10 && failures == 0 {
+            log::warn!(
+                "context bridge: another Canopy holds {}; serving TCP only until it lets go",
+                dir.join(crate::ctx_socket::SOCKET_NAME).display()
+            );
+        }
+        // Brisk for the first seconds (an updater's old process exiting), then
+        // a slow poll.
+        let pause = if waited < 10 { 500 } else { 5000 };
+        tokio::time::sleep(std::time::Duration::from_millis(pause)).await;
+        waited = waited.saturating_add(1);
+        owned = match crate::ctx_socket::claim(&dir) {
+            Ok(owned) => owned,
+            Err(e) => {
+                // Said on the first failure and then about once a minute.
+                if failures % 12 == 0 {
+                    log::warn!("context bridge: cannot claim the stable socket: {e}");
+                }
+                failures = failures.saturating_add(1);
+                None
+            }
+        };
+    };
+    let _ = app.state::<ContextBridge>().socket.set(owned.path.clone());
+    crate::ctx_socket::serve_owned(owned, router).await;
 }
 
 #[derive(serde::Deserialize)]
@@ -1151,9 +1383,16 @@ pub fn context_agent_spawn_ready(
     }
     child.spawn_depth = pending.child_depth;
     child.parent_pty_id = Some(pending.parent.pty_id);
+    let (depth, parent) = (child.spawn_depth, child.parent_pty_id);
+    drop(agents);
     if let Some(spawn) = state.pending_spawns.lock().unwrap().get_mut(&id) {
         spawn.child_pty_id = Some(pty_id);
     }
+    // A hosted child can outlive this launch. Its position goes into its sealed
+    // metadata now, before its brief is submitted, so the next launch does not
+    // adopt it any shallower than this; until then it is sealed as unknown,
+    // which adoption caps.
+    crate::pty_hosted::reseal_lineage(pty_id, depth, parent);
     Ok(())
 }
 
@@ -2252,6 +2491,7 @@ fn end_claims_for_attempt(claims: &mut [Claim], attempt_id: &str, now: u64, how:
 /// row and pressed Release: the store is in memory, nothing watched pty exits,
 /// and the claim carried no terminal to sweep by even if something had.
 pub fn release_claims_for_pty<R: tauri::Runtime>(app: &tauri::AppHandle<R>, pty_id: u32) {
+    crate::pty_hosted::forget_sealed(pty_id);
     let Some(identity) = app
         .try_state::<ContextBridge>()
         .and_then(|b| b.retire_agent(pty_id))
@@ -3190,6 +3430,32 @@ struct Action {
 const MAX_AGENT_SPAWN_DEPTH: u8 = 2;
 const MAX_AGENT_SPAWN_CHILDREN: usize = 4;
 const AGENT_SPAWN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(75);
+/// How long after an abandoned agent spawn a new terminal may still be its child.
+const ABANDONED_SPAWN_GRACE: std::time::Duration = std::time::Duration::from_secs(120);
+
+/// Ends an agent spawn's bookkeeping however its request future ends, so a
+/// dropped request (client gone, handler cancelled) cannot leave an entry that
+/// keeps `spawn_pending()` true. Unless `settle`d it counts as abandoned.
+struct SpawnGuard<'a> {
+    bridge: &'a ContextBridge,
+    id: u64,
+    settled: bool,
+}
+
+impl SpawnGuard<'_> {
+    fn settle(&mut self) {
+        self.settled = true;
+        self.bridge.end_spawn(self.id, false);
+    }
+}
+
+impl Drop for SpawnGuard<'_> {
+    fn drop(&mut self) {
+        if !self.settled {
+            self.bridge.end_spawn(self.id, true);
+        }
+    }
+}
 
 fn next_agent_spawn_depth(
     parent_depth: u8,
@@ -3618,6 +3884,11 @@ async fn action(
                     child_pty_id: None,
                 },
             );
+            let mut guard = SpawnGuard {
+                bridge: &*snaps,
+                id,
+                settled: false,
+            };
             let delivered = format!("{} {body}", sender_tag(&app, &who, None));
             let _ = app.emit(
                 "agent:action",
@@ -3640,7 +3911,7 @@ async fn action(
             );
             return match tokio::time::timeout(AGENT_SPAWN_TIMEOUT, rx).await {
                 Ok(Ok((true, data))) => {
-                    snaps.pending_spawns.lock().unwrap().remove(&id);
+                    guard.settle();
                     let Some(child_id) = data.get("ptyId").and_then(|value| value.as_u64()) else {
                         return (
                             StatusCode::INTERNAL_SERVER_ERROR,
@@ -3692,19 +3963,17 @@ async fn action(
                     )
                 }
                 Ok(Ok((false, data))) => {
-                    snaps.pending_spawns.lock().unwrap().remove(&id);
+                    guard.settle();
                     (StatusCode::BAD_REQUEST, body_text(data))
                 }
-                Ok(Err(_)) => {
-                    snaps.pending_spawns.lock().unwrap().remove(&id);
-                    (
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        "Canopy dropped this agent spawn request".into(),
-                    )
-                }
+                // Nobody answered: the guard abandons the spawn on the way out.
+                Ok(Err(_)) => (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "Canopy dropped this agent spawn request".into(),
+                ),
                 Err(_) => {
-                    snaps.pending.lock().unwrap().remove(&id);
-                    snaps.pending_spawns.lock().unwrap().remove(&id);
+                    // The child may still appear: the guard keeps new terminals
+                    // from being sealed as roots for a while.
                     (
                         StatusCode::GATEWAY_TIMEOUT,
                         "Canopy did not report the child launch in time; check canopy_agents before retrying"
@@ -6428,6 +6697,253 @@ mod tests {
         assert!(bridge_disabled_tools(&bridge)
             .iter()
             .any(|tool| tool == "canopy_spawn_agent"));
+    }
+
+    /// A relaunch that adopts a hosted terminal has only what the host kept:
+    /// identity and the verifier. The token the agent already holds must name
+    /// the same terminal on the new bridge, and nothing else may.
+    #[test]
+    fn an_adopted_terminal_keeps_its_credential_across_a_relaunch() {
+        let instance = crate::pty::instance_token().to_string();
+        let first = ContextBridge::default();
+        let _ = first.port.set(4242);
+        let (_, token) = first.mint_agent(7, "/w/app", None).unwrap();
+        let verifier = super::verifier(&token);
+        assert_eq!(verifier.len(), 64);
+        assert!(
+            !verifier.contains(&token),
+            "the verifier must not carry the token"
+        );
+
+        // The next launch: a fresh bridge, a different port, no tokens at all.
+        let next = ContextBridge::default();
+        let _ = next.port.set(5353);
+        assert_eq!(next.identify(&token), None);
+        let identity = |pty_id| AgentIdentity {
+            pty_id,
+            instance: instance.clone(),
+            cwd: "/w/app".into(),
+            run_id: None,
+            attempt_id: None,
+            spawn_depth: 1,
+            parent_pty_id: Some(3),
+        };
+        assert!(next.readopt_agent(&verifier, identity(7), Some((1, Some(3)))));
+        match next.identify(&token) {
+            Some(Caller::Agent(a)) => {
+                assert_eq!(
+                    (a.pty_id, a.instance.as_str(), a.cwd.as_str()),
+                    (7, instance.as_str(), "/w/app")
+                );
+                assert_eq!((a.spawn_depth, a.parent_pty_id), (1, Some(3)));
+            }
+            other => panic!("the held token must name the adopted terminal, got {other:?}"),
+        }
+        assert_eq!(next.identify("not a token"), None);
+        assert_eq!(
+            next.identify(&verifier),
+            None,
+            "the verifier is not a credential"
+        );
+
+        // A second claim on the same verifier or the same terminal is refused,
+        // and so is anything that is not a verifier.
+        assert!(!next.readopt_agent(&verifier, identity(8), None));
+        assert!(!next.readopt_agent(&super::verifier("other"), identity(7), None));
+        assert!(!next.readopt_agent("short", identity(9), None));
+        assert!(!next.readopt_agent(&"G".repeat(64), identity(9), None));
+
+        // Exit retires it like any terminal.
+        assert_eq!(next.retire_agent(7).map(|a| a.pty_id), Some(7));
+        assert_eq!(next.identify(&token), None);
+    }
+
+    /// HIGH 2 of the review: a delegated child whose position was never sealed
+    /// (an old host, a write that did not land, a quit in between) must not
+    /// come back as an uncapped root.
+    #[test]
+    fn an_adopted_terminal_with_no_sealed_lineage_cannot_delegate() {
+        let instance = crate::pty::instance_token().to_string();
+        let bridge = ContextBridge::default();
+        let token = "1".repeat(32);
+        let identity = AgentIdentity {
+            pty_id: 71,
+            instance: instance.clone(),
+            cwd: "/w".into(),
+            run_id: None,
+            attempt_id: None,
+            spawn_depth: 0,
+            parent_pty_id: None,
+        };
+        assert!(bridge.readopt_agent(&super::verifier(&token), identity, None));
+        let Some(Caller::Agent(agent)) = bridge.identify(&token) else {
+            panic!("the token must still name the terminal");
+        };
+        assert_eq!(
+            (agent.spawn_depth, agent.parent_pty_id),
+            (MAX_AGENT_SPAWN_DEPTH, None)
+        );
+        assert!(next_agent_spawn_depth(agent.spawn_depth, 0, 0).is_err());
+        // A sealed root position is honoured, and may delegate.
+        let token = "2".repeat(32);
+        let root = AgentIdentity {
+            pty_id: 72,
+            instance,
+            cwd: "/w".into(),
+            run_id: None,
+            attempt_id: None,
+            spawn_depth: 0,
+            parent_pty_id: None,
+        };
+        assert!(bridge.readopt_agent(&super::verifier(&token), root, Some((0, None))));
+        let Some(Caller::Agent(agent)) = bridge.identify(&token) else {
+            panic!("the token must name the root");
+        };
+        assert_eq!(next_agent_spawn_depth(agent.spawn_depth, 0, 0), Ok(1));
+        let _ = bridge.retire_agent(71);
+        let _ = bridge.retire_agent(72);
+    }
+
+    fn pending_spawn_for(bridge: &ContextBridge, id: u64, bound: Option<u32>) {
+        let parent = AgentIdentity {
+            pty_id: 1,
+            instance: "i".into(),
+            cwd: "/w".into(),
+            run_id: None,
+            attempt_id: None,
+            spawn_depth: 0,
+            parent_pty_id: None,
+        };
+        bridge.pending.lock().unwrap().insert(id, {
+            let (tx, _rx) = tokio::sync::oneshot::channel();
+            tx
+        });
+        bridge.pending_spawns.lock().unwrap().insert(
+            id,
+            PendingAgentSpawn {
+                parent,
+                child_depth: 1,
+                child_pty_id: bound,
+            },
+        );
+    }
+
+    /// Review finding 4: a request future that is dropped must not leave its
+    /// entry behind, and an abandoned spawn must not let a late child be sealed
+    /// as a root.
+    #[test]
+    fn a_dropped_or_timed_out_agent_spawn_cleans_up_and_seals_the_late_child_as_unknown() {
+        let bridge = ContextBridge::default();
+        // Answered: gone, and nothing lingers.
+        pending_spawn_for(&bridge, 1, None);
+        let mut guard = SpawnGuard {
+            bridge: &bridge,
+            id: 1,
+            settled: false,
+        };
+        assert!(bridge.spawn_pending());
+        guard.settle();
+        drop(guard);
+        assert!(!bridge.spawn_pending());
+        assert!(bridge.pending.lock().unwrap().is_empty());
+
+        // Dropped without an answer: the entry is gone, the child may still
+        // come, so new terminals are sealed with an unknown position for a while.
+        pending_spawn_for(&bridge, 2, None);
+        drop(SpawnGuard {
+            bridge: &bridge,
+            id: 2,
+            settled: false,
+        });
+        assert!(bridge.pending_spawns.lock().unwrap().is_empty());
+        assert!(bridge.pending.lock().unwrap().is_empty());
+        assert!(bridge.spawn_pending());
+        let mut meta = crate::pty_hosted::HostedMeta {
+            v: 1,
+            id: 3,
+            bridge: Some("ab".repeat(32)),
+            ..Default::default()
+        };
+        crate::pty_hosted::seal_for_spawn(
+            &mut meta,
+            &crate::adoption_seal::key().unwrap(),
+            bridge.spawn_pending(),
+        );
+        assert_eq!(meta.depth, None);
+        // The window closes.
+        *bridge.spawn_unbound_until.lock().unwrap() =
+            Some(std::time::Instant::now() - std::time::Duration::from_secs(1));
+        assert!(!bridge.spawn_pending());
+    }
+
+    #[test]
+    fn a_spawn_already_bound_to_its_child_is_not_pending_for_other_terminals() {
+        let bridge = ContextBridge::default();
+        pending_spawn_for(&bridge, 4, Some(9));
+        assert!(!bridge.spawn_pending());
+    }
+
+    #[test]
+    fn a_terminal_spawned_while_an_agent_spawn_is_pending_is_not_sealed_as_a_root() {
+        let bridge = ContextBridge::default();
+        assert!(!bridge.spawn_pending());
+        let parent = AgentIdentity {
+            pty_id: 1,
+            instance: "i".into(),
+            cwd: "/w".into(),
+            run_id: None,
+            attempt_id: None,
+            spawn_depth: 0,
+            parent_pty_id: None,
+        };
+        bridge.pending_spawns.lock().unwrap().insert(
+            5,
+            PendingAgentSpawn {
+                parent,
+                child_depth: 1,
+                child_pty_id: None,
+            },
+        );
+        assert!(bridge.spawn_pending());
+        let mut meta = crate::pty_hosted::HostedMeta {
+            v: 1,
+            id: 2,
+            bridge: Some("ab".repeat(32)),
+            ..Default::default()
+        };
+        crate::pty_hosted::seal_for_spawn(
+            &mut meta,
+            &crate::adoption_seal::key().unwrap(),
+            bridge.spawn_pending(),
+        );
+        assert_eq!(meta.depth, None, "unknown, so adoption caps it");
+    }
+
+    #[test]
+    fn the_socket_rides_beside_the_port_only_when_there_is_one() {
+        let bridge = ContextBridge::default();
+        assert_eq!(
+            bridge.socket(),
+            None,
+            "no socket unless start() claimed one"
+        );
+        let keys =
+            |env: Vec<(&'static str, String)>| env.into_iter().map(|(k, _)| k).collect::<Vec<_>>();
+        assert_eq!(
+            keys(super::agent_env(4242, "t", None)),
+            ["CANOPY_CTX_PORT", "CANOPY_CTX_TOKEN"]
+        );
+        let socket = std::path::Path::new("/h/.canopy/pty-host/ctx.sock");
+        let env = super::agent_env(4242, "t", Some(socket));
+        assert_eq!(
+            env.last(),
+            Some(&(
+                "CANOPY_CTX_SOCKET",
+                "/h/.canopy/pty-host/ctx.sock".to_string()
+            ))
+        );
+        assert_eq!(env[0], ("CANOPY_CTX_PORT", "4242".to_string()));
+        assert_eq!(env[1], ("CANOPY_CTX_TOKEN", "t".to_string()));
     }
 
     /// The registry is what makes "who is calling" answerable, and what tells

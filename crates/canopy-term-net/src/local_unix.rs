@@ -13,13 +13,18 @@
 //! the client refuses a socket owned by another user (a rogue process cannot
 //! pose as the host by binding the path first).
 
-use crate::{Connection, PeerIdentity, Refusal, Transport, TIMEOUT_KIND};
+use crate::{Connection, FailedHalf, PeerIdentity, Refusal, Transport, TIMEOUT_KIND};
 use std::io::{self, Read, Write};
 use std::net::Shutdown;
 use std::os::unix::io::AsRawFd;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 use std::time::Duration;
+
+/// Serialises the umask change in `bind`, so two binds never restore each
+/// other's value.
+static UMASK_LOCK: Mutex<()> = Mutex::new(());
 
 /// The decision, pure so it can be tested without a second user: only the same
 /// effective uid is served.
@@ -80,8 +85,22 @@ fn dev_ino(path: &Path) -> io::Result<(u64, u64)> {
 impl LocalUnix {
     /// Listen on `path` (mode 0600). The path must be short: macOS limits a
     /// socket path to about 104 bytes.
+    ///
+    /// The socket file is created under a umask of 0o177, so it never exists
+    /// with a wider mode, not even for an instant. The umask is process wide:
+    /// a file another thread creates during the few microseconds of the bind
+    /// gets a stricter mode than usual, which is harmless. The previous umask
+    /// is restored before returning, and binds in this crate are serialised.
     pub fn bind(path: &Path) -> io::Result<Self> {
-        let listener = UnixListener::bind(path)?;
+        let listener = {
+            let _serial = UMASK_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+            // SAFETY: umask(2) has no preconditions and cannot fail.
+            let previous = unsafe { libc::umask(0o177) };
+            let bound = UnixListener::bind(path);
+            // SAFETY: as above; restores the value read just before.
+            unsafe { libc::umask(previous) };
+            bound?
+        };
         {
             use std::os::unix::fs::PermissionsExt;
             std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
@@ -171,9 +190,16 @@ impl Connection for UnixConn {
 
     fn split(self: Box<Self>) -> (Box<dyn Read + Send>, Box<dyn Write + Send>) {
         // try_clone dups the descriptor; the read timeout is a property of the
-        // shared socket, so a deadline set before the split still applies.
-        let read = self.stream.try_clone().expect("dup unix socket");
-        (Box::new(ReadHalf(read)), Box::new(WriteHalf(self.stream)))
+        // shared socket, so a deadline set before the split still applies. If
+        // the dup fails (out of descriptors) both halves report that error.
+        let UnixConn { stream, .. } = *self;
+        match stream.try_clone() {
+            Ok(read) => (Box::new(ReadHalf(read)), Box::new(WriteHalf(stream))),
+            Err(e) => {
+                let kind = e.kind();
+                (Box::new(FailedHalf(kind)), Box::new(FailedHalf(kind)))
+            }
+        }
     }
 }
 
@@ -238,6 +264,20 @@ mod tests {
         assert_eq!(std::fs::read(&path).unwrap(), b"not ours");
         let _ = std::fs::remove_file(&path);
         let _ = std::fs::remove_file(&moved);
+    }
+
+    #[test]
+    fn the_bound_socket_is_0600() {
+        use std::os::unix::fs::PermissionsExt;
+        let path = sock_path();
+        let server = LocalUnix::bind(&path).unwrap();
+        let mode = std::fs::symlink_metadata(&path)
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(mode, 0o600);
+        drop(server);
     }
 
     #[test]

@@ -1,3 +1,4 @@
+mod adoption_seal;
 mod agent_cli;
 mod agent_instructions;
 mod agent_life;
@@ -22,6 +23,8 @@ mod companion_requests;
 mod containment;
 mod context;
 mod crash;
+#[cfg(unix)]
+mod ctx_socket;
 mod desk;
 mod devicehub;
 mod devicehub_mjpeg;
@@ -60,6 +63,7 @@ mod profiles;
 mod provenance;
 mod prwatch;
 mod pty;
+mod pty_hosted;
 mod punch;
 mod receipt;
 mod relay;
@@ -124,6 +128,7 @@ pub(crate) const MENU_SHORTCUT_IDS: &[&str] = &[
     "find-in-files",
     "spot-search",
     "help",
+    "quit-stop-all",
 ];
 
 /// Custom menu: keeps Edit (clipboard in WKWebView needs it) but replaces the
@@ -165,6 +170,17 @@ fn build_menu(app: &tauri::AppHandle, profile: &str) -> tauri::Result<Menu<tauri
             &PredefinedMenuItem::hide(app, None)?,
             &PredefinedMenuItem::separator(app)?,
             &PredefinedMenuItem::quit(app, None)?,
+            // With the terminal host on, Quit leaves terminals running for the
+            // next launch to adopt; this is the quit that stops them. It asks
+            // first whenever agents are running (the frontend's dialog), host
+            // on or off.
+            &MenuItem::with_id(
+                app,
+                "quit-stop-all",
+                "Quit and Stop All…",
+                true,
+                accel("quit-stop-all").as_deref(),
+            )?,
         ],
     )?;
     let edit = Submenu::with_items(
@@ -495,6 +511,13 @@ pub fn run() {
     #[cfg(target_os = "macos")]
     raise_file_descriptor_limit();
 
+    // Start reading the adoption sealing key now, off this thread, so the launch
+    // path finds it loaded (or keeps going without it) instead of waiting.
+    #[cfg(unix)]
+    if pty_hosted::enabled() {
+        adoption_seal::prefetch();
+    }
+
     // Install the ring crypto provider process-wide so rustls has a default —
     // the team relay's internet path dials wss:// through a tunnel via
     // tokio-tungstenite, whose rustls connector builds its config from the
@@ -596,6 +619,14 @@ pub fn run() {
             // to speak on, and a write that happens first would be silent.
             change::install(app.handle().clone());
             cli::install_deep_links(app);
+            // Terminals a previous launch left in the PTY host (CANOPY_PTY_HOST=1)
+            // come back before the first renderer registers.
+            let adopted = app
+                .state::<pty::PtyManager>()
+                .adopt_hosted(app.handle().clone());
+            if adopted > 0 {
+                eprintln!("canopy: adopted {adopted} hosted terminal(s)");
+            }
             // Claude Code's IDE servers emit to the window, so the hub needs a
             // handle before the first agent PTY asks for one.
             app.manage(claude_ide::ClaudeIde::new(std::sync::Arc::new(
@@ -808,6 +839,9 @@ pub fn run() {
             pty::pty_set_name,
             pty::pty_set_name_theme,
             pty::instance_id,
+            pty::launch_id,
+            pty::app_quit,
+            pty::pty_host_enabled,
             android::android_sdk_status,
             android::android_devices,
             android::android_avds,
@@ -1187,7 +1221,9 @@ pub fn run() {
                 app.state::<std::sync::Arc<watchdog::WatchdogState>>()
                     .app_exiting(pty.live_count() as u64);
                 // Guarantee no child processes outlive the app.
-                let pty_cleanup = pty.kill_all();
+                // Hosted terminals keep running unless the user chose "Quit
+                // and Stop All".
+                let pty_cleanup = pty.kill_all_on_exit();
                 app.state::<std::sync::Arc<watchdog::WatchdogState>>()
                     .app_exit_cleanup_returned(pty_cleanup.requested, pty_cleanup.force_signals);
                 app.state::<lsp::LspManager>().kill_all();
