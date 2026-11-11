@@ -367,6 +367,7 @@ function RestorePreview({
     <div className="modal-backdrop" onClick={onClose}>
       <div className="modal aw-turns-modal" onClick={(e) => e.stopPropagation()}>
         <h3>{pending.label}</h3>
+        <div className="modal-body">
         {pending.action.caveat && <p className="aw-turns-caveat">{pending.action.caveat}</p>}
         {error && <p className="aw-turns-error">{error}</p>}
         {!preview && !error && <p className="aw-turns-note">Comparing with the saved snapshot…</p>}
@@ -407,6 +408,7 @@ function RestorePreview({
           </>
         )}
         <p className="aw-turns-note">{IRREVERSIBLE_NOTE}</p>
+        </div>
         <div className="modal-actions">
           <Button onClick={onClose}>Cancel</Button>
           <Button variant="accent" disabled={!preview || count === 0 || busy} onClick={() => void apply()}>

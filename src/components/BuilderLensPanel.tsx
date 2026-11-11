@@ -518,6 +518,7 @@ function RestoreDialog({
         onClick={(e) => e.stopPropagation()}
       >
         <h3>Go back to “{target.title}”</h3>
+        <div className="modal-body">
         {error && (
           <p className="builder-lens-note" role="alert">
             Couldn’t go back: {error}
@@ -558,6 +559,7 @@ function RestoreDialog({
             )}
           </>
         )}
+        </div>
         <div className="modal-actions">
           <Button disabled={busy} onClick={onClose}>
             Cancel

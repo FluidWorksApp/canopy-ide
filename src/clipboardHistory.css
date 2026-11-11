@@ -27,7 +27,7 @@
 .clipboard-history-menu {
   width: 420px;
   max-width: calc(100vw - 24px);
-  max-height: calc(100vh - 44px);
+  max-height: min(70dvh, calc(100vh - 44px));
   padding: 6px;
   overflow: hidden;
   white-space: normal;
