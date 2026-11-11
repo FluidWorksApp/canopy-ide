@@ -197,6 +197,8 @@ struct SessionParts {
     history: Vec<u8>,
     /// Absolute offset of `history[0]` in the session's output stream.
     history_start: u64,
+    /// See `Session::survives_quit`.
+    survives_quit: bool,
 }
 
 pub struct Session {
@@ -264,6 +266,10 @@ pub struct Session {
     /// counter is here because a terminal repainting the same frame is still
     /// output — diffing rendered text would call that silence.
     last_output_ms: AtomicU64,
+    /// Quitting the app leaves this terminal running in the PTY host instead of
+    /// stopping it: a hosted terminal that a later launch can adopt (not a
+    /// micro-task or run-bound one, which are never adopted).
+    survives_quit: bool,
     /// Output before this time does not stamp `last_output_ms`: the repaint a
     /// redraw nudge provokes is not the agent speaking.
     stamp_quiet_until_ms: AtomicU64,
@@ -677,6 +683,7 @@ impl PtyManager {
                 rows: taken.rows,
                 history: taken.history,
                 history_start: taken.history_start,
+                survives_quit: true,
             };
             match self.start_session(app.clone(), parts) {
                 Ok(_) => {
@@ -964,7 +971,16 @@ impl PtyManager {
     /// one at a time: the grace period is for agents to flush their transcripts,
     /// and serialising it would cost GRACE per terminal on every quit.
     pub fn kill_all(&self) -> KillAllReport {
-        let sessions: Vec<Arc<Session>> = self.sessions.lock().unwrap().values().cloned().collect();
+        // Hosted terminals a later launch can adopt are left running in the
+        // host: quitting only drops this app's connection to them.
+        let sessions: Vec<Arc<Session>> = self
+            .sessions
+            .lock()
+            .unwrap()
+            .values()
+            .filter(|s| !s.survives_quit)
+            .cloned()
+            .collect();
         for s in &sessions {
             s.request_stop();
         }
@@ -2262,6 +2278,10 @@ impl PtyManager {
                 }
             }
         });
+        // Only a hosted terminal that a later launch could adopt outlives the app:
+        // micro-tasks and run-bound tabs are never adopted, so quitting stops them.
+        let survives_quit =
+            hosted.is_some() && kind != SessionKind::Detached && task_identity.is_none();
         let (mut child, master_box, slave): (
             Box<dyn Child + Send + Sync>,
             Box<dyn MasterPty + Send>,
@@ -2343,6 +2363,7 @@ impl PtyManager {
                 rows,
                 history: Vec::new(),
                 history_start: 0,
+                survives_quit,
             },
         )
     }
@@ -2377,6 +2398,7 @@ impl PtyManager {
             rows,
             history,
             history_start,
+            survives_quit,
         } = parts;
         // History enters the ring directly: only the newest SCROLLBACK_CAP bytes
         // fit, and everything older counts as dropped so offsets stay absolute.
@@ -2449,6 +2471,7 @@ impl PtyManager {
             // is an unanswered question, not a terminal that has been silent
             // since it started.
             last_output_ms: AtomicU64::new(0),
+            survives_quit,
             stamp_quiet_until_ms: AtomicU64::new(0),
             output_bytes: AtomicU64::new(history_total),
             dropped_output_bytes: AtomicU64::new(history_dropped),
@@ -4684,6 +4707,11 @@ mod tests {
         }));
         // The repaint the nudge provoked is not the agent speaking.
         assert_eq!(session.quiet_ms(now_ms()), None);
+        // Quitting leaves an adopted terminal running in the host.
+        let report = pm.kill_all();
+        assert_eq!(report.requested, 0);
+        assert!(host.client.list().unwrap()[0].exited.is_none());
+        assert!(!session.shutdown.load(Ordering::SeqCst));
         // The next terminal lands above the adopted ones.
         let (id, generation) = pm.allocate_session_identity().unwrap();
         assert!(id > 41 && generation > 9, "{id} {generation}");

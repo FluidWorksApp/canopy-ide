@@ -58,11 +58,11 @@ mod unix {
     /// An idle host exits after this long, so quitting the app does not leave a
     /// helper behind for an hour.
     const HOST_IDLE_SECS: u64 = 60;
-    /// A hosted session is killed this long after its app connection drops. A
-    /// crash or force-quit leaves nothing to adopt the session yet, and the host
-    /// would otherwise keep it, and its agent, running invisibly forever. The
-    /// adoption change lifts this.
-    const LINGER_SECS: u64 = 30;
+    /// A hosted session is killed this long after its app connection drops, so
+    /// an agent whose app never comes back does not run unseen forever. Long
+    /// enough to quit, update and relaunch; the app that returns adopts it. How
+    /// long is the user's Quit decision (default here: two hours).
+    const LINGER_SECS: u64 = 2 * 60 * 60;
 
     /// A dedicated directory: the host chmods its parent to 0700, so it must
     /// never be a shared one. Debug builds use their own so a dev app never
