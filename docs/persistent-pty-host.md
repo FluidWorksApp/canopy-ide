@@ -180,12 +180,14 @@ the PTY and the launch differ (`crates/canopy-pty-host/src/windows.rs`).
   `FILE_FLAG_FIRST_PIPE_INSTANCE`. A second host fails to bind and exits 0, and
   the client keeps asking (or starts another) instead of taking a lock file. A
   dead host leaves no stale pipe.
-- **PTYs.** ConPTY directly (not portable-pty): portable-pty always sets
-  `PSEUDOCONSOLE_INHERIT_CURSOR`, which makes conhost wait for a cursor report
-  that an unattached host session never gets, and cannot create the child
-  suspended. Each child starts suspended, joins its own Job Object with
-  `KILL_ON_JOB_CLOSE`, then resumes. Kill (`SIGKILL`) is `TerminateJobObject`;
-  the soft stop (`SIGTERM`) closes the pseudoconsole (`CTRL_CLOSE_EVENT`). The
+- **PTYs.** ConPTY directly (not portable-pty): portable-pty cannot create the
+  child suspended, and always sets `PSEUDOCONSOLE_INHERIT_CURSOR`, with which
+  conhost is believed (not verified) to wait for a cursor report that an
+  unattached host session never sends. Each child starts suspended, joins its
+  own Job Object with `KILL_ON_JOB_CLOSE`, then resumes. `kill`, linger and
+  host shutdown close the pseudoconsole first (`CTRL_CLOSE_EVENT`), then after
+  the grace period `TerminateJobObject`, even if the main child already exited,
+  so descendants on another console die too. The
   host closes the pseudoconsole when the child exits, because ConPTY's output
   pipe never reaches EOF on its own. If the host dies, even by
   `TerminateProcess`, the job handles close and the sessions die with it.

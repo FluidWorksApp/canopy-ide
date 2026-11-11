@@ -25,17 +25,19 @@
 //! peer; `DisconnectNamedPipe` is never used because it discards them).
 //!
 //! PTYs. ConPTY driven directly rather than through portable-pty, for three
-//! reasons: portable-pty always passes `PSEUDOCONSOLE_INHERIT_CURSOR`, which
-//! makes conhost ask the terminal for the cursor position and wait for the
-//! answer, and a host session often has no terminal attached; it cannot create
-//! the child suspended, so a Job Object could only be assigned after the child
-//! had started (and possibly spawned children of its own); and the host has to
-//! close the pseudoconsole itself when the child exits, because the output pipe
-//! does not reach EOF until it is closed. Each session's process tree lives in
-//! its own Job Object with `KILL_ON_JOB_CLOSE`: kill is `TerminateJobObject`, and
-//! a host that dies (even by `TerminateProcess`) takes its sessions with it,
-//! like a hung-up PTY on Unix. A soft stop (`SIGTERM` on Unix) closes the
-//! pseudoconsole, which sends console programs `CTRL_CLOSE_EVENT`.
+//! reasons: it cannot create the child suspended, so a Job Object could only be
+//! assigned after the child had started (and possibly spawned children of its
+//! own); the host has to close the pseudoconsole itself when the child exits,
+//! because the output pipe does not reach EOF until it is closed; and
+//! portable-pty always passes `PSEUDOCONSOLE_INHERIT_CURSOR`, with which conhost
+//! is believed (not verified here) to wait for a cursor report from the
+//! terminal, and a host session often has no terminal attached. Each session's
+//! process tree lives in its own Job Object with `KILL_ON_JOB_CLOSE`. `kill` (and
+//! linger, and host shutdown) first closes the pseudoconsole, which sends
+//! console programs `CTRL_CLOSE_EVENT`, then after the grace period terminates
+//! the job whether or not the main child has exited, so descendants on another
+//! console go too. A host that dies (even by `TerminateProcess`) closes the job
+//! handles and takes its sessions with it, like a hung-up PTY on Unix.
 
 #![allow(clippy::upper_case_acronyms)]
 

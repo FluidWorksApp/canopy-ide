@@ -439,40 +439,76 @@ fn kill_stops_the_whole_process_group_and_reports_exit() {
     assert!(h.client.list().unwrap().is_empty());
 }
 
-/// The job takes the whole tree: a grandchild started from the shell dies too.
+/// Spawns a shell with two grandchildren: one on the session's console and one
+/// on a console of its own, which closing the pseudoconsole does not reach, so
+/// only the Job Object can stop it. Returns (id, pid, on-console, off-console).
+#[cfg(windows)]
+fn spawn_with_grandchildren(h: &Harness) -> (u32, u32, u32, u32) {
+    let (id, pid) = h
+        .client
+        .spawn(spec(
+            "$a = Start-Process -PassThru -NoNewWindow -FilePath ping.exe -ArgumentList '-n','300','127.0.0.1'; \
+             $b = Start-Process -PassThru -WindowStyle Hidden -FilePath ping.exe -ArgumentList '-n','300','127.0.0.1'; \
+             \"oncon=$($a.Id); offcon=$($b.Id);\"; Start-Sleep 300",
+        ))
+        .unwrap();
+    let mut found = None;
+    assert!(
+        wait_until(t(10), || {
+            let (_, bytes) = h.client.read_ring(id, 0, None).unwrap();
+            found = number_after(&bytes, "oncon=").zip(number_after(&bytes, "offcon="));
+            found.is_some()
+        }),
+        "the script never reported its grandchildren"
+    );
+    let (on, off) = found.unwrap();
+    assert!(alive(pid));
+    assert!(alive(on), "on-console grandchild {on} not running");
+    assert!(alive(off), "off-console grandchild {off} not running");
+    (id, pid, on, off)
+}
+
+/// The job takes the whole tree, including a grandchild on another console
+/// that outlives the pseudoconsole: kill must end in `TerminateJobObject` even
+/// though closing the console already ended the shell.
 #[cfg(windows)]
 #[test]
 fn kill_stops_the_whole_process_group_and_reports_exit() {
     let h = Harness::start("f", 60);
-    let (id, pid) = h
-        .client
-        .spawn(spec(
-            "$p = Start-Process -PassThru -NoNewWindow -FilePath ping.exe -ArgumentList '-n','300','127.0.0.1'; \"grandchild=$($p.Id);\"; Start-Sleep 300",
-        ))
-        .unwrap();
-    let mut grandchild = None;
-    assert!(
-        wait_until(t(10), || {
-            let (_, bytes) = h.client.read_ring(id, 0, None).unwrap();
-            grandchild = number_after(&bytes, "grandchild=");
-            grandchild.is_some()
-        }),
-        "the script never reported its grandchild"
-    );
-    let grandchild = grandchild.unwrap();
-    assert!(alive(pid));
-    assert!(alive(grandchild), "grandchild {grandchild} not running");
+    let (id, pid, on, off) = spawn_with_grandchildren(&h);
     h.client.kill(id).unwrap();
     assert!(wait_until(t(10), || {
         h.client.list().unwrap()[0].exited.is_some()
     }));
     assert!(wait_until(t(5), || !alive(pid)));
     assert!(
-        wait_until(t(5), || !alive(grandchild)),
-        "the grandchild escaped the kill"
+        wait_until(t(5), || !alive(on)),
+        "the on-console grandchild escaped the kill"
+    );
+    assert!(
+        wait_until(t(5), || !alive(off)),
+        "the off-console grandchild escaped the kill (job not terminated)"
     );
     h.client.reap(id).unwrap();
     assert!(h.client.list().unwrap().is_empty());
+}
+
+/// A host killed outright closes its job handles; `KILL_ON_JOB_CLOSE` then
+/// takes even the descendant that console teardown cannot reach.
+#[cfg(windows)]
+#[test]
+fn a_terminated_host_takes_off_console_descendants_with_it() {
+    let h = Harness::start("hk", 60);
+    let (_, pid, on, off) = spawn_with_grandchildren(&h);
+    let host_pid = h.client.hello().unwrap().host_pid.unwrap();
+    stop_host(host_pid);
+    assert!(
+        wait_until(t(10), || !alive(pid) && !alive(on) && !alive(off)),
+        "descendants outlived a terminated host: shell {}, on-console {}, off-console {}",
+        alive(pid),
+        alive(on),
+        alive(off)
+    );
 }
 
 #[test]

@@ -104,16 +104,17 @@ impl Session {
         *self.exited.lock().unwrap()
     }
 
-    /// Soft stop closes the pseudoconsole, hard stop terminates the job. Like
-    /// Unix, nothing is sent once the child has been reaped.
+    /// Soft stop closes the pseudoconsole; hard stop terminates the job. The
+    /// hard stop runs even after the main child has exited: closing the console
+    /// usually ends the shell within the grace period, but descendants on their
+    /// own console (or none) survive that, and a job handle, unlike a pid, is
+    /// never recycled.
     #[cfg(windows)]
     fn signal_group(&self, signal: libc::c_int) {
-        if self.exit_code().is_none() {
-            if signal == libc::SIGKILL {
-                self.group.kill();
-            } else {
-                self.group.hang_up();
-            }
+        if signal == libc::SIGKILL {
+            self.group.kill();
+        } else if self.exit_code().is_none() {
+            self.group.hang_up();
         }
     }
 
