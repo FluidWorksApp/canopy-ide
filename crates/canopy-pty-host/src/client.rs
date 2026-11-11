@@ -91,6 +91,19 @@ impl HostClient {
         self.call_timeout(request, CALL_TIMEOUT)
     }
 
+    /// For read-only requests: one connection that the host drops without a reply
+    /// (seen on macOS while a session floods output) is retried once on a fresh
+    /// connection. A host that is really gone fails the retry too, with its own
+    /// error. Never used for spawn, which must not run twice.
+    fn call_read_only(&self, request: &Request, timeout: Duration) -> std::io::Result<Response> {
+        match self.call_timeout(request, timeout) {
+            Err(e) if e.to_string().contains("host closed the connection") => {
+                self.call_timeout(request, timeout)
+            }
+            other => other,
+        }
+    }
+
     fn call_timeout(&self, request: &Request, timeout: Duration) -> std::io::Result<Response> {
         let mut stream = UnixStream::connect(&self.socket)?;
         stream.set_read_timeout(Some(timeout))?;
@@ -146,13 +159,16 @@ impl HostClient {
     /// wait out the default five seconds on a host that does not answer.
     pub fn list_within(&self, timeout: Duration) -> std::io::Result<Vec<SessionInfo>> {
         Ok(self
-            .call_timeout(&Request::List, timeout)?
+            .call_read_only(&Request::List, timeout)?
             .sessions
             .unwrap_or_default())
     }
 
     pub fn list(&self) -> std::io::Result<Vec<SessionInfo>> {
-        Ok(self.call(&Request::List)?.sessions.unwrap_or_default())
+        Ok(self
+            .call_read_only(&Request::List, CALL_TIMEOUT)?
+            .sessions
+            .unwrap_or_default())
     }
 
     pub fn resize(&self, id: u32, cols: u16, rows: u16) -> std::io::Result<()> {
@@ -200,13 +216,13 @@ impl HostClient {
 
     pub fn pgrp(&self, id: u32) -> std::io::Result<Option<i32>> {
         Ok(self
-            .call_timeout(&Request::Pgrp { id }, PROBE_TIMEOUT)?
+            .call_read_only(&Request::Pgrp { id }, PROBE_TIMEOUT)?
             .pgrp)
     }
 
     pub fn raw_mode(&self, id: u32) -> std::io::Result<bool> {
         Ok(self
-            .call_timeout(&Request::RawMode { id }, PROBE_TIMEOUT)?
+            .call_read_only(&Request::RawMode { id }, PROBE_TIMEOUT)?
             .raw
             .unwrap_or(false))
     }
