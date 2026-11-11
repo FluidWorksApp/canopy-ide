@@ -9,6 +9,7 @@
 import { useEffect, useState, useSyncExternalStore } from "react";
 import { runCommitPushPr } from "../commitPushPrIpc";
 import * as ipc from "../ipc";
+import { offersAutoMerge } from "../prMergeAuto";
 import { agentCliFor } from "../projects";
 import { prConflictContext, prFixChecksContext } from "../prs";
 import { openInOsBrowser } from "../links";
@@ -284,6 +285,12 @@ export function AgentDetailsCard({
     null | "squash" | "merge" | "rebase" | "close"
   >(null);
   const [merging, setMerging] = useState(false);
+  /** A merge GitHub refused for its branch policy: offered as "merge when checks pass". */
+  const [autoOffer, setAutoOffer] = useState<null | {
+    repo: string;
+    number: number;
+    method: "squash" | "merge" | "rebase";
+  }>(null);
   const [mergeMenu, setMergeMenu] = useState(false);
   const [method, setMethod] = useState<"squash" | "merge" | "rebase">(
     readMergeMethod,
@@ -684,7 +691,48 @@ export function AgentDetailsCard({
           role="group"
           aria-label={`Merge pull request #${pr.number}`}
         >
-          {pending ? (
+          {autoOffer &&
+          autoOffer.repo === repo &&
+          autoOffer.number === pr.number &&
+          !pending ? (
+            <>
+              <span className="agent-card-grow agent-card-ellipsis">
+                Merge not allowed yet
+              </span>
+              <button
+                type="button"
+                className="agent-card-fix"
+                disabled={merging}
+                autoFocus
+                onClick={() => {
+                  const offer = autoOffer;
+                  setMerging(true);
+                  void ipc
+                    .ghPrAutoMerge(offer.repo, offer.number, offer.method, true)
+                    .then((message) => {
+                      prCache.delete(repo);
+                      setPrEpoch((n) => n + 1);
+                      onNotice?.(message);
+                    })
+                    .catch((err) => onNotice?.(String(err)))
+                    .finally(() => {
+                      setMerging(false);
+                      setAutoOffer(null);
+                    });
+                }}
+              >
+                {merging ? "Working…" : "Merge when checks pass"}
+              </button>
+              <button
+                type="button"
+                className="agent-card-fix agent-card-fix-quiet"
+                disabled={merging}
+                onClick={() => setAutoOffer(null)}
+              >
+                Dismiss
+              </button>
+            </>
+          ) : pending ? (
             <>
               <span className="agent-card-grow agent-card-ellipsis">
                 {pending === "close"
@@ -728,7 +776,11 @@ export function AgentDetailsCard({
                           : `#${pr.number} ${method === "close" ? "closed" : "merged"}.`,
                       );
                     })
-                    .catch((err) => onNotice?.(String(err)))
+                    .catch((err) => {
+                      if (method !== "close" && offersAutoMerge(err))
+                        setAutoOffer({ repo, number: pr.number, method });
+                      onNotice?.(String(err));
+                    })
                     .finally(() => {
                       setMerging(false);
                       setPending(null);

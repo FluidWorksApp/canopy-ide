@@ -116,6 +116,7 @@ import {
 } from "../prPolicy";
 import { IntentEvidenceView } from "./IntentEvidenceView";
 import { resolveAgentForPr } from "../agentForPr";
+import { offersAutoMerge } from "../prMergeAuto";
 // NB: PR diffs arrive as real patches from `gh pr diff`, so they go straight
 // into the renderer. Working-tree diffs (components/DiffView.tsx) have to build
 // their patch first — see the note there about Monaco's diff not computing.
@@ -357,6 +358,8 @@ export function PrView({
   const [confirm, setConfirm] = useState<Review | null>(null);
   const [mergeOpen, setMergeOpen] = useState(false);
   const [mergeConfirm, setMergeConfirm] = useState<MergeMethod | null>(null);
+  /** The merge GitHub refused for its branch policy, offered as "merge when checks pass". */
+  const [autoOffer, setAutoOffer] = useState<MergeMethod | null>(null);
   const [closeConfirm, setCloseConfirm] = useState(false);
   const [closeDelBranch, setCloseDelBranch] = useState(false);
   /** What merging or closing it here answered — MERGED or CLOSED. Believed at
@@ -1381,6 +1384,8 @@ export function PrView({
       persist(markDone(loop));
       void refreshConv();
     } catch (err) {
+      // The branch policy is not met yet: GitHub can merge it when it is.
+      if (offersAutoMerge(err) && !conv?.auto_merge) setAutoOffer(method);
       onNotice(String(err), "error");
     } finally {
       setBusy(false);
@@ -3078,6 +3083,43 @@ export function PrView({
                 const a = confirm;
                 setConfirm(null);
                 void submit(a);
+              },
+            },
+          ]}
+        />
+      )}
+
+      {autoOffer && (
+        <Dialog
+          variant="accent"
+          title="Merge when checks pass?"
+          body={
+            <>
+              GitHub won't merge <code>{pr.branch}</code> yet because{" "}
+              <code>{pr.base}</code> requires more first. It can merge it for
+              you as soon as those conditions are met.
+            </>
+          }
+          meta={`#${pr.number} ${pr.title}`}
+          dismissLabel="Not now"
+          onDismiss={() => setAutoOffer(null)}
+          actions={[
+            {
+              label: "Merge when checks pass",
+              primary: true,
+              disabled: busy,
+              onClick: () => {
+                const m = autoOffer;
+                setAutoOffer(null);
+                setBusy(true);
+                void ipc
+                  .ghPrAutoMerge(repo, pr.number, m, true)
+                  .then((message) => {
+                    onNotice(message, "info");
+                    void refreshConv();
+                  })
+                  .catch((err) => onNotice(String(err), "error"))
+                  .finally(() => setBusy(false));
               },
             },
           ]}
