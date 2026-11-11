@@ -117,6 +117,9 @@ describe("AgentDetailsCard", () => {
     expect(onSendToAgent).toHaveBeenLastCalledWith(expect.stringContaining("Ship"));
     fireEvent.click(screen.getByLabelText("Complete Wire it up"));
     expect(onSendToAgent).toHaveBeenLastCalledWith(expect.stringContaining("Wire it up"));
+    fireEvent.click(screen.getByLabelText("Run Ship as a sub agent"));
+    expect(onSendToAgent).toHaveBeenLastCalledWith(expect.stringMatching(/sub agent.*Ship/));
+    expect(screen.queryByLabelText("Run Write the parser as a sub agent")).toBeNull();
   });
 
   it("will not type into an agent that is waiting for an answer or has ended", () => {

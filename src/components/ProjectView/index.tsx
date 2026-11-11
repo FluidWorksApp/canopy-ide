@@ -531,6 +531,7 @@ import { isPreviewUrl } from "../../agentAssets";
 import { AgentDetailsCard } from "../AgentDetailsCard";
 import { BROWSER_INPUT_EVENT, PreviewView } from "../PreviewView";
 import DeviceView from "../DeviceView";
+import FloatingPhone from "../FloatingPhone";
 import type { PreviewServer } from "../../preview";
 import { dispatchBrowserOp, forgetBrowserTarget } from "../../previewAgent";
 import { suppressBrowserViewsOver, useBrowserEngine } from "../../browserHost";
@@ -2615,6 +2616,13 @@ const ProjectViewBody = memo(function ProjectViewBody({
   /** Open an Android device tab. With no serial it opens on the pick-a-device
    *  form; the project defaults to the first component, which is what resolves
    *  the SDK (a project's local.properties pins one). */
+  // The phone preview that floats over the IDE (FloatingPhone), if one is open.
+  const [floatPhone, setFloatPhone] = useState<{
+    serial: string;
+    label: string;
+    projectDir: string;
+  } | null>(null);
+
   const openDevice = useCallback((serial = "") => {
     const id = tabId();
     setTabs((prev) => [
@@ -13844,6 +13852,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
             projectDir={tab.projectDir}
             annotations={tab.annotations}
             visible={active}
+            onFloat={(d) => setFloatPhone({ ...d, projectDir: tab.projectDir })}
             onPatch={(patch) => patchTabRaw(tab.id, patch as Partial<SubTab>)}
             agentTargets={agentTargets}
             installed={installed}
@@ -15867,6 +15876,14 @@ const ProjectViewBody = memo(function ProjectViewBody({
       className={`project-view ${vibe ? "project-view-vibe" : ""}`}
       style={{ display: visible ? "flex" : "none" }}
     >
+      {visible && floatPhone && (
+        <FloatingPhone
+          serial={floatPhone.serial}
+          projectDir={floatPhone.projectDir}
+          label={floatPhone.label}
+          onClose={() => setFloatPhone(null)}
+        />
+      )}
       {/* Rail + panels share a row; the status bar sits below it so it spans the
           full window width (rail + sidebar + main), not just the editor column. */}
       <div className="project-body">
