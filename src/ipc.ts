@@ -4924,6 +4924,13 @@ export const deskSendInput = (
   session: string,
   event: import("./desk").InputEvent,
 ) => invoke<void>("desk_send_input", { session, event });
+export interface DeskPerms {
+  screen: boolean;
+  input: boolean;
+}
+export const deskPermissions = () => invoke<DeskPerms>("desk_permissions");
+export const deskRequestPermission = (kind: "screen" | "input") =>
+  invoke<void>("desk_request_permission", { kind });
 export const deskEnd = (session: string) =>
   invoke<void>("desk_end", { session });
 export const deskStatus = () =>

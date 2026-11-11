@@ -699,7 +699,7 @@ pub async fn desk_respond(
 ) -> Result<(), String> {
     // Refuse up front, and tell the viewer why, when this build cannot share.
     let unavailable = if accept {
-        native::unavailable_reason()
+        native::unavailable_reason().or_else(|| permission_gap(os_perms::current(), mode))
     } else {
         None
     };
@@ -806,6 +806,88 @@ pub async fn desk_respond(
             }
         }
     }
+}
+
+/// What the OS has allowed Canopy to do. Only macOS asks; elsewhere both are on.
+#[derive(Serialize, Clone, Copy, PartialEq, Eq, Debug)]
+pub struct DeskPerms {
+    pub screen: bool,
+    pub input: bool,
+}
+
+/// Why sharing cannot start with these permissions, or None. View-only needs
+/// only the screen; control also needs input.
+pub fn permission_gap(p: DeskPerms, mode: Mode) -> Option<&'static str> {
+    if !p.screen {
+        return Some("Allow Screen recording for Canopy in System Settings, then restart Canopy.");
+    }
+    if mode == Mode::Control && !p.input {
+        return Some("Allow Accessibility for Canopy in System Settings, then restart Canopy.");
+    }
+    None
+}
+
+#[cfg(target_os = "macos")]
+mod os_perms {
+    #[link(name = "CoreGraphics", kind = "framework")]
+    extern "C" {
+        fn CGPreflightScreenCaptureAccess() -> bool;
+        fn CGRequestScreenCaptureAccess() -> bool;
+    }
+    #[link(name = "ApplicationServices", kind = "framework")]
+    extern "C" {
+        fn AXIsProcessTrusted() -> bool;
+    }
+    pub fn current() -> super::DeskPerms {
+        // SAFETY: plain C calls with no arguments.
+        unsafe {
+            super::DeskPerms {
+                screen: CGPreflightScreenCaptureAccess(),
+                input: AXIsProcessTrusted(),
+            }
+        }
+    }
+    pub fn request(kind: &str) -> Result<(), String> {
+        let pane = if kind == "screen" {
+            // SAFETY: plain C call; shows the system prompt once.
+            unsafe { CGRequestScreenCaptureAccess() };
+            "Privacy_ScreenCapture"
+        } else {
+            "Privacy_Accessibility"
+        };
+        std::process::Command::new("open")
+            .arg(format!(
+                "x-apple.systempreferences:com.apple.preference.security?{pane}"
+            ))
+            .spawn()
+            .map(|_| ())
+            .map_err(|e| format!("Couldn't open System Settings: {e}"))
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+mod os_perms {
+    pub fn current() -> super::DeskPerms {
+        super::DeskPerms {
+            screen: true,
+            input: true,
+        }
+    }
+    pub fn request(_kind: &str) -> Result<(), String> {
+        Ok(())
+    }
+}
+
+/// Screen recording and Accessibility, as the OS reports them right now.
+#[tauri::command]
+pub fn desk_permissions() -> DeskPerms {
+    os_perms::current()
+}
+
+/// Ask for one permission ("screen" or "input") and open its System Settings page.
+#[tauri::command]
+pub fn desk_request_permission(kind: String) -> Result<(), String> {
+    os_perms::request(&kind)
 }
 
 /// Viewer: send one input event. Fails fast on a view-only session.
@@ -1042,6 +1124,53 @@ mod tests {
             assert!(canopy_core::desk::is_known_key(c));
             assert!(native::key_char(c).is_some());
         }
+    }
+
+    /// Run by hand: `cargo test --features desk-native --lib desk_capture_smoke -- --ignored`.
+    /// Captures one real frame (the numbers are printed, the pixels are not kept)
+    /// and checks it is not blank. May ask the terminal for Screen recording.
+    #[test]
+    #[ignore]
+    #[cfg(feature = "desk-native")]
+    fn desk_capture_smoke() {
+        let mut src = native::new_source().expect("capture backend");
+        let frame = src.capture().expect("one frame");
+        assert!(frame.w > 0 && frame.h > 0, "empty frame size");
+        let mut seen = std::collections::HashSet::new();
+        for px in frame.pixels.chunks(4).step_by(997) {
+            seen.insert([px[0], px[1], px[2]]);
+        }
+        println!(
+            "frame {}x{}, {} distinct colours sampled",
+            frame.w,
+            frame.h,
+            seen.len()
+        );
+        assert!(seen.len() > 16, "frame looks blank");
+    }
+
+    #[test]
+    fn permission_gap_blocks_sharing_until_allowed() {
+        let none = DeskPerms {
+            screen: false,
+            input: false,
+        };
+        let screen = DeskPerms {
+            screen: true,
+            input: false,
+        };
+        let all = DeskPerms {
+            screen: true,
+            input: true,
+        };
+        assert!(permission_gap(none, Mode::ViewOnly)
+            .unwrap()
+            .contains("Screen recording"));
+        assert_eq!(permission_gap(screen, Mode::ViewOnly), None);
+        assert!(permission_gap(screen, Mode::Control)
+            .unwrap()
+            .contains("Accessibility"));
+        assert_eq!(permission_gap(all, Mode::Control), None);
     }
 
     #[test]
