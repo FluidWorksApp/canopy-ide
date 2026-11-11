@@ -141,6 +141,28 @@ pub fn instance_id() -> String {
     instance_token().to_string()
 }
 
+/// What `PtyManager::start_session` needs once a child and its master exist.
+struct SessionParts {
+    id: u32,
+    session_generation: u64,
+    pid: Option<u32>,
+    kind: SessionKind,
+    execution_context: Option<crate::execution::ExecutionContext>,
+    recovered_run: bool,
+    recovered_command: Option<String>,
+    run_command_id: Option<String>,
+    shell: String,
+    cwd: String,
+    child: Box<dyn Child + Send + Sync>,
+    master_box: Box<dyn MasterPty + Send>,
+    reader: Box<dyn Read + Send>,
+    writer: Box<dyn Write + Send>,
+    desktop: Option<DesktopSink>,
+    high_water: Option<usize>,
+    cols: u16,
+    rows: u16,
+}
+
 pub struct Session {
     pub id: u32,
     /// Rust-owned lifetime identity, independent of renderer and attachment
@@ -2061,7 +2083,7 @@ impl PtyManager {
         }
         drop(slave);
 
-        let (mut reader, mut writer) = match master_box
+        let (reader, writer) = match master_box
             .try_clone_reader()
             .and_then(|r| master_box.take_writer().map(|w| (r, w)))
         {
@@ -2081,6 +2103,71 @@ impl PtyManager {
             }
         };
 
+        state.start_session(
+            app,
+            SessionParts {
+                id,
+                session_generation,
+                pid,
+                kind,
+                execution_context,
+                recovered_run,
+                recovered_command,
+                run_command_id,
+                shell,
+                cwd,
+                child,
+                master_box,
+                reader,
+                writer,
+                desktop,
+                high_water,
+                cols,
+                rows,
+            },
+        )
+    }
+
+    /// Everything after the child and its master exist: build the `Session`, put
+    /// it in the map and start its reader, writer and flusher threads. Split out
+    /// so a session adopted from the PTY host starts exactly like a spawned one.
+    fn start_session<R: tauri::Runtime>(
+        &self,
+        app: AppHandle<R>,
+        parts: SessionParts,
+    ) -> Result<SpawnResult, String> {
+        let state = self;
+        let SessionParts {
+            id,
+            session_generation,
+            pid,
+            kind,
+            execution_context,
+            recovered_run,
+            recovered_command,
+            run_command_id,
+            shell,
+            cwd,
+            child,
+            master_box,
+            mut reader,
+            mut writer,
+            desktop,
+            high_water,
+            cols,
+            rows,
+        } = parts;
+        // Hands the bridge credential back on the failure paths below, as in
+        // `spawn_bound`: nothing watches for an exit before the session is
+        // registered.
+        let retire = || {
+            if let Some(ctx) = app.try_state::<crate::context::ContextBridge>() {
+                ctx.retire_agent(id);
+            }
+            if let Some(ide) = app.try_state::<crate::claude_ide::ClaudeIde>() {
+                ide.close(id);
+            }
+        };
         let killer = child.clone_killer();
 
         let desktop_renderer_generation = desktop.as_ref().map(|sink| sink.renderer_generation);
