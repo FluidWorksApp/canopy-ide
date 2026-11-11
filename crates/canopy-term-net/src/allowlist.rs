@@ -8,7 +8,7 @@
 //! identities use a second, namespaced entry form ([`canonical_tailnet_entry`]).
 
 use std::collections::BTreeSet;
-use std::io;
+use std::io::{self, Write};
 use std::path::Path;
 use std::sync::{Arc, RwLock};
 
@@ -87,37 +87,51 @@ pub fn canonical_key(raw: &str) -> Option<String> {
 #[derive(Clone, Default, Debug)]
 pub struct Allowlist(Arc<RwLock<BTreeSet<String>>>);
 
+/// A poisoned lock (a thread panicked while holding it) fails closed: reads
+/// say "not allowed" and "empty", `add` is an error, and `save` refuses so an
+/// empty view is never written over the real file. The poison is not cleared;
+/// a poisoned list refuses until the process restarts.
 impl Allowlist {
     pub fn new() -> Self {
         Self::default()
     }
 
-    /// Add a key. Returns whether it was new.
+    /// True if a thread panicked while holding the list.
+    pub fn is_poisoned(&self) -> bool {
+        self.0.is_poisoned()
+    }
+
+    /// Add a key. Returns whether it was new. Errors on an invalid key, and on
+    /// a poisoned list (never `Ok`).
     pub fn add(&self, key: &str) -> Result<bool, InvalidKey> {
         let k = canonical_entry(key).ok_or(InvalidKey)?;
-        Ok(self.0.write().unwrap().insert(k))
+        let mut set = self.0.write().map_err(|_| InvalidKey)?;
+        Ok(set.insert(k))
     }
 
     pub fn remove(&self, key: &str) -> bool {
-        match canonical_entry(key) {
-            Some(k) => self.0.write().unwrap().remove(&k),
-            None => false,
+        match (canonical_entry(key), self.0.write()) {
+            (Some(k), Ok(mut set)) => set.remove(&k),
+            _ => false,
         }
     }
 
     pub fn contains(&self, key: &str) -> bool {
-        match canonical_entry(key) {
-            Some(k) => self.0.read().unwrap().contains(&k),
-            None => false,
+        match (canonical_entry(key), self.0.read()) {
+            (Some(k), Ok(set)) => set.contains(&k),
+            _ => false,
         }
     }
 
     pub fn keys(&self) -> Vec<String> {
-        self.0.read().unwrap().iter().cloned().collect()
+        match self.0.read() {
+            Ok(set) => set.iter().cloned().collect(),
+            Err(_) => Vec::new(),
+        }
     }
 
     pub fn len(&self) -> usize {
-        self.0.read().unwrap().len()
+        self.0.read().map(|set| set.len()).unwrap_or(0)
     }
 
     pub fn is_empty(&self) -> bool {
@@ -155,18 +169,66 @@ impl Allowlist {
         })
     }
 
-    /// Write via a temp file then rename, mode 0600 on unix. Public keys are
-    /// not secret, but who may connect is the access policy: not world
-    /// writable.
+    /// Write the list to `path` safely. The temp file is created beside the
+    /// target with an unpredictable name, `create_new` (so it never follows a
+    /// planted symlink or reuses a file), mode 0600 from the start on unix (no
+    /// window under the default umask), then written, fsynced and renamed. The
+    /// directory is fsynced best-effort on unix. Public keys are not secret,
+    /// but who may connect is the access policy: not world writable. A
+    /// poisoned list refuses to save.
     pub fn save(&self, path: &Path) -> io::Result<()> {
-        let tmp = path.with_extension("tmp");
-        std::fs::write(&tmp, self.to_text())?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600))?;
+        if self.is_poisoned() {
+            return Err(io::Error::other("allowlist is poisoned; not saving"));
         }
-        std::fs::rename(&tmp, path)
+        let text = self.to_text();
+        let dir = match path.parent() {
+            Some(p) if !p.as_os_str().is_empty() => p.to_path_buf(),
+            _ => std::path::PathBuf::from("."),
+        };
+        let name = path
+            .file_name()
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "no file name"))?
+            .to_string_lossy()
+            .into_owned();
+        for _ in 0..8 {
+            let mut rnd = [0u8; 8];
+            getrandom::getrandom(&mut rnd).map_err(|e| io::Error::other(e.to_string()))?;
+            let suffix: String = rnd.iter().map(|b| format!("{b:02x}")).collect();
+            let tmp = dir.join(format!(".{name}.{suffix}.tmp"));
+            let mut opts = std::fs::OpenOptions::new();
+            opts.write(true).create_new(true);
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::OpenOptionsExt;
+                opts.mode(0o600);
+            }
+            let mut file = match opts.open(&tmp) {
+                Ok(f) => f,
+                // Only a name clash is retried, with a new suffix.
+                Err(e) if e.kind() == io::ErrorKind::AlreadyExists => continue,
+                Err(e) => return Err(e),
+            };
+            let written = file
+                .write_all(text.as_bytes())
+                .and_then(|_| file.sync_all());
+            drop(file);
+            let result = written.and_then(|_| std::fs::rename(&tmp, path));
+            if result.is_err() {
+                let _ = std::fs::remove_file(&tmp);
+                return result;
+            }
+            #[cfg(unix)]
+            {
+                if let Ok(d) = std::fs::File::open(&dir) {
+                    let _ = d.sync_all();
+                }
+            }
+            return Ok(());
+        }
+        Err(io::Error::new(
+            io::ErrorKind::AlreadyExists,
+            "could not create a unique temp file",
+        ))
     }
 }
 
@@ -264,6 +326,63 @@ mod tests {
         l.add(A).unwrap();
         l.save(&path).unwrap();
         assert_eq!(Allowlist::load(&path).unwrap().keys(), l.keys());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn save_is_0600_and_ignores_a_planted_symlink() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("ctn-al-sym-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let victim = dir.join("victim.txt");
+        std::fs::write(&victim, "keep me").unwrap();
+        // The old fixed temp name, planted as a symlink to a file we must not touch.
+        std::os::unix::fs::symlink(&victim, dir.join("allow.tmp")).unwrap();
+        let path = dir.join("allow.txt");
+        let l = Allowlist::new();
+        l.add(A).unwrap();
+        l.save(&path).unwrap();
+        assert_eq!(std::fs::read_to_string(&victim).unwrap(), "keep me");
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600);
+        // No temp file is left behind, and saving again works.
+        l.add(B).unwrap();
+        l.save(&path).unwrap();
+        assert_eq!(Allowlist::load(&path).unwrap().keys(), l.keys());
+        let leftovers = std::fs::read_dir(&dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_name().to_string_lossy().ends_with(".tmp"))
+            .count();
+        // Only the planted symlink remains.
+        assert_eq!(leftovers, 1);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_poisoned_list_fails_closed_and_never_saves() {
+        let l = Allowlist::new();
+        l.add(A).unwrap();
+        let h = l.clone();
+        let _ = std::thread::spawn(move || {
+            let _guard = h.0.write().unwrap();
+            panic!("poison the allowlist");
+        })
+        .join();
+        assert!(l.is_poisoned());
+        assert!(!l.contains(A));
+        assert!(l.keys().is_empty());
+        assert_eq!(l.len(), 0);
+        assert!(l.is_empty());
+        assert!(!l.remove(A));
+        assert_eq!(l.add(B), Err(InvalidKey));
+        let dir = std::env::temp_dir().join(format!("ctn-al-poison-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("allow.txt");
+        std::fs::write(&path, "real contents").unwrap();
+        assert!(l.save(&path).is_err());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "real contents");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

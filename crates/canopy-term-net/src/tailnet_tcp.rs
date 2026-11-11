@@ -145,7 +145,9 @@ impl TailnetTcp {
         let ip = ip.to_canonical();
         let now = (self.clock)();
         let cached = {
-            let cache = self.cache.lock().unwrap();
+            // A poisoned cache refuses (fail closed) rather than panicking on
+            // the accept path.
+            let cache = self.cache.lock().ok()?;
             cache
                 .get(&ip)
                 .filter(|(_, expires)| now < *expires)
@@ -156,7 +158,7 @@ impl TailnetTcp {
             None => {
                 // Failures are not cached: a later success must be seen.
                 let id = self.ts.whois(ip).ok()?;
-                let mut cache = self.cache.lock().unwrap();
+                let mut cache = self.cache.lock().ok()?;
                 if cache.len() >= CACHE_LIMIT {
                     cache.retain(|_, (_, expires)| now < *expires);
                     if cache.len() >= CACHE_LIMIT {
@@ -602,6 +604,21 @@ mod tests {
         *offset.lock().unwrap() = WHOIS_TTL + Duration::from_secs(1);
         assert_eq!(t.authorize(loopback()).as_deref(), Some(ENTRY));
         assert_eq!(r.whois_calls(), 3);
+    }
+
+    #[test]
+    fn a_poisoned_cache_refuses_instead_of_panicking() {
+        let r = Arc::new(FakeRunner::new(&status_running(&["127.0.0.1"], &[])));
+        r.set_whois(loopback(), Ok(whois_user("nPEERB1CNTRL", 42)));
+        let t = Arc::new(TailnetTcp::client(r, allow(&[ENTRY])));
+        assert_eq!(t.authorize(loopback()).as_deref(), Some(ENTRY));
+        let t2 = t.clone();
+        let _ = std::thread::spawn(move || {
+            let _guard = t2.cache.lock().unwrap();
+            panic!("poison the cache");
+        })
+        .join();
+        assert_eq!(t.authorize(loopback()), None);
     }
 
     #[test]
