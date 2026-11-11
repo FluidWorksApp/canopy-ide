@@ -5,7 +5,8 @@
 //!
 //! Keys are one canonical string everywhere: 64 lowercase hex characters (an
 //! ed25519 public key). Transports, pairing and the file format all go through
-//! [`canonical_key`], so `PeerIdentity::Device` values compare equal.
+//! [`canonical_key`], so `PeerIdentity::Device` values compare equal. Tailnet
+//! identities use a second, namespaced entry form ([`canonical_tailnet_entry`]).
 
 use std::collections::BTreeSet;
 use std::io::{self, Write};
@@ -14,6 +15,110 @@ use std::sync::{Arc, Mutex, RwLock};
 
 #[derive(Debug, PartialEq, Eq)]
 pub struct InvalidKey;
+
+/// A tailnet stable node id: letters, digits, `-` and `_`, short.
+pub fn valid_stable_id(s: &str) -> bool {
+    !s.is_empty()
+        && s.len() <= 64
+        && s.bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+}
+
+/// A tailnet ACL tag such as `tag:server`. No `/` or `,`, which the entry
+/// grammar uses as separators.
+pub fn valid_tag(s: &str) -> bool {
+    !s.is_empty()
+        && s.len() <= 64
+        && s.bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_' || b == b':')
+}
+
+/// A tailnet's DNS domain (`example.ts.net`, a Headscale base domain): dot
+/// separated labels of letters, digits and `-`, none empty or over 63 bytes, and
+/// none starting or ending with `-`. Case is not significant.
+pub fn valid_domain(s: &str) -> bool {
+    !s.is_empty()
+        && s.len() <= 253
+        && s.split('.').all(|l| {
+            !l.is_empty()
+                && l.len() <= 63
+                && !l.starts_with('-')
+                && !l.ends_with('-')
+                && l.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
+        })
+}
+
+/// The tailnet a node's full DNS name belongs to: the name without its first
+/// label, lowercase and without a trailing dot (`node-a.example.ts.net.` gives
+/// `example.ts.net`). `None` if there is no domain part or it is not a valid
+/// domain. A node shared in from another tailnet carries that tailnet's domain,
+/// which is how it is told apart from this machine's own.
+pub fn tailnet_domain_of(dns_name: &str) -> Option<String> {
+    let name = dns_name.trim().trim_end_matches('.').to_ascii_lowercase();
+    let (_, domain) = name.split_once('.')?;
+    valid_domain(domain).then(|| domain.to_string())
+}
+
+/// A tailnet identity entry, in one of two namespaced forms that can never be
+/// mistaken for a 64 hex device key, each bound to the tailnet it was approved
+/// on by a trailing `@<tailnet domain>`:
+///
+/// - `tailnet:user/<stable node id>/<numeric user id>@<domain>`
+/// - `tailnet:tagged/<stable node id>/<tag>[,<tag>...]@<domain>` (tags sorted, unique)
+///
+/// Keyed on the stable node id and user id, never on node or login names,
+/// which are display values that can be renamed. The entry says which kind it
+/// is, so a tagged node (no real user) can never match a user entry.
+///
+/// The domain binds the entry to one tailnet or control server: stable ids and
+/// user ids are only unique within one, so after switching account or moving to
+/// another control server the same numbers could name a different machine. The
+/// transport only honours an entry whose domain is the one this machine is on
+/// now. An entry without `@<domain>` still parses (so it can be listed and
+/// removed) but never matches a peer: it is unbound, and an unbound entry
+/// authorises nothing. The domain is the tailnet's name, so it is kept out of
+/// logs like any other tailnet name.
+///
+/// The numeric user id has no leading zeros, so one machine has one spelling.
+pub fn canonical_tailnet_entry(raw: &str) -> Option<String> {
+    let rest = raw.trim().strip_prefix("tailnet:")?;
+    let (kind, rest) = rest.split_once('/')?;
+    let (stable, last) = rest.split_once('/')?;
+    if !valid_stable_id(stable) {
+        return None;
+    }
+    let (last, domain) = match last.split_once('@') {
+        Some((l, d)) if valid_domain(d) => (l, Some(d.to_ascii_lowercase())),
+        Some(_) => return None,
+        None => (last, None),
+    };
+    let bound = domain.map(|d| format!("@{d}")).unwrap_or_default();
+    match kind {
+        "user" => {
+            let ok = !last.is_empty()
+                && last.len() <= 19
+                && !last.starts_with('0')
+                && last.bytes().all(|b| b.is_ascii_digit())
+                && last.parse::<i64>().is_ok();
+            ok.then(|| format!("tailnet:user/{stable}/{last}{bound}"))
+        }
+        "tagged" => {
+            let mut tags: Vec<&str> = last.split(',').collect();
+            if tags.iter().any(|t| !valid_tag(t)) {
+                return None;
+            }
+            tags.sort_unstable();
+            tags.dedup();
+            Some(format!("tailnet:tagged/{stable}/{}{bound}", tags.join(",")))
+        }
+        _ => None,
+    }
+}
+
+/// Any allowlist entry: a device key (hex path unchanged) or a tailnet identity.
+pub fn canonical_entry(raw: &str) -> Option<String> {
+    canonical_key(raw).or_else(|| canonical_tailnet_entry(raw))
+}
 
 /// Normalise a device key, or `None` if it is not 64 hex characters.
 pub fn canonical_key(raw: &str) -> Option<String> {
@@ -67,22 +172,36 @@ impl Allowlist {
     /// Add a key. Returns whether it was new. Errors on an invalid key, and on
     /// a poisoned list (never `Ok`).
     pub fn add(&self, key: &str) -> Result<bool, InvalidKey> {
-        let k = canonical_key(key).ok_or(InvalidKey)?;
+        let k = canonical_entry(key).ok_or(InvalidKey)?;
         let mut set = self.0.set.write().map_err(|_| InvalidKey)?;
         Ok(set.insert(k))
     }
 
     pub fn remove(&self, key: &str) -> bool {
-        match (canonical_key(key), self.0.set.write()) {
+        match (canonical_entry(key), self.0.set.write()) {
             (Some(k), Ok(mut set)) => set.remove(&k),
             _ => false,
         }
     }
 
     pub fn contains(&self, key: &str) -> bool {
-        match (canonical_key(key), self.0.set.read()) {
+        match (canonical_entry(key), self.0.set.read()) {
             (Some(k), Ok(set)) => set.contains(&k),
             _ => false,
+        }
+    }
+
+    /// True if any tailnet entry, user or tagged, names this stable node id.
+    /// Used to tell a peer the user has approved from a stranger, to reserve
+    /// lookup budget for it; it authorises nothing by itself.
+    pub fn has_stable_id(&self, stable: &str) -> bool {
+        let user = format!("tailnet:user/{stable}/");
+        let tagged = format!("tailnet:tagged/{stable}/");
+        match self.0.set.read() {
+            Ok(set) => set
+                .iter()
+                .any(|e| e.starts_with(&user) || e.starts_with(&tagged)),
+            Err(_) => false,
         }
     }
 
@@ -250,6 +369,107 @@ mod tests {
         assert!(!l.contains(B));
         assert_eq!(l.add("short"), Err(InvalidKey));
         assert_eq!(l.add(&"g".repeat(64)), Err(InvalidKey));
+    }
+
+    #[test]
+    fn tailnet_entries_are_namespaced_and_canonical() {
+        assert_eq!(
+            canonical_entry("tailnet:user/nTEST1CNTRL/42@example.ts.net").as_deref(),
+            Some("tailnet:user/nTEST1CNTRL/42@example.ts.net")
+        );
+        // The domain is case insensitive and stored lowercase.
+        assert_eq!(
+            canonical_entry("tailnet:user/nTEST1CNTRL/42@Example.TS.net").as_deref(),
+            Some("tailnet:user/nTEST1CNTRL/42@example.ts.net")
+        );
+        // An unbound entry parses (it can be listed and removed).
+        assert_eq!(
+            canonical_entry("tailnet:user/nTEST1CNTRL/42").as_deref(),
+            Some("tailnet:user/nTEST1CNTRL/42")
+        );
+        // Tags are sorted and de-duplicated; the entry names its kind.
+        assert_eq!(
+            canonical_entry("tailnet:tagged/nTEST1CNTRL/tag:b,tag:a,tag:b@example.ts.net")
+                .as_deref(),
+            Some("tailnet:tagged/nTEST1CNTRL/tag:a,tag:b@example.ts.net")
+        );
+        // A stable id is case sensitive: no lowercasing.
+        assert!(canonical_entry("tailnet:user/nTEST1CNTRL/42")
+            .unwrap()
+            .contains("nTEST"));
+        for bad in [
+            "tailnet:user/nTEST1CNTRL/",
+            "tailnet:user/nTEST1CNTRL/0",
+            "tailnet:user/nTEST1CNTRL/042",
+            "tailnet:user/nTEST1CNTRL/00",
+            "tailnet:user/nTEST1CNTRL/9223372036854775808",
+            "tailnet:user/nTEST1CNTRL/-1",
+            "tailnet:user/nTEST1CNTRL/42@",
+            "tailnet:user/nTEST1CNTRL/42@.ts.net",
+            "tailnet:user/nTEST1CNTRL/42@bad domain",
+            "tailnet:user/nTEST1CNTRL/42@-a.example",
+            "tailnet:user/nTEST1CNTRL/42@a..b",
+            "tailnet:tagged/nTEST1CNTRL/tag:a@",
+            "tailnet:user//42",
+            "tailnet:user/bad id/42",
+            "tailnet:tagged/nTEST1CNTRL/",
+            "tailnet:tagged/nTEST1CNTRL/tag:a,,tag:b",
+            "tailnet:tagged/nTEST1CNTRL/tag:a/x",
+            "tailnet:other/nTEST1CNTRL/42",
+            "tailnet:nTEST1CNTRL",
+            "node-a.example.ts.net",
+        ] {
+            assert_eq!(canonical_entry(bad), None, "{bad}");
+        }
+        // The two namespaces never collide: a hex key is not a tailnet entry.
+        assert_eq!(canonical_tailnet_entry(A), None);
+        assert_eq!(canonical_key("tailnet:user/nTEST1CNTRL/42"), None);
+    }
+
+    #[test]
+    fn tailnet_domains_and_names() {
+        assert!(valid_domain("example.ts.net"));
+        assert!(valid_domain("internal"));
+        assert!(!valid_domain(""));
+        assert!(!valid_domain("a..b"));
+        assert!(!valid_domain("a b.example"));
+        assert!(!valid_domain(&"a".repeat(64)));
+        assert_eq!(
+            tailnet_domain_of("Node-A.Example.ts.net.").as_deref(),
+            Some("example.ts.net")
+        );
+        assert_eq!(tailnet_domain_of("node-a"), None);
+        assert_eq!(tailnet_domain_of("node-a."), None);
+        assert_eq!(tailnet_domain_of(""), None);
+        assert_eq!(tailnet_domain_of("a.b c"), None);
+    }
+
+    #[test]
+    fn an_entry_is_bound_to_its_tailnet() {
+        let l = Allowlist::new();
+        l.add("tailnet:user/nTEST1CNTRL/42@example.ts.net").unwrap();
+        // Same node id and user id on another tailnet, or unbound: not the same entry.
+        assert!(!l.contains("tailnet:user/nTEST1CNTRL/42@other.ts.net"));
+        assert!(!l.contains("tailnet:user/nTEST1CNTRL/42"));
+        assert!(l.contains("tailnet:user/nTEST1CNTRL/42@EXAMPLE.ts.net"));
+        assert!(l.has_stable_id("nTEST1CNTRL"));
+        assert!(!l.has_stable_id("nTEST1"));
+        assert!(!l.has_stable_id("nOTHER1CNTRL"));
+        l.add("tailnet:tagged/nBOX1CNTRL/tag:a@example.ts.net")
+            .unwrap();
+        assert!(l.has_stable_id("nBOX1CNTRL"));
+    }
+
+    #[test]
+    fn tailnet_entries_live_in_the_same_list() {
+        let l = Allowlist::new();
+        l.add("tailnet:user/nTEST1CNTRL/42@example.ts.net").unwrap();
+        l.add(A).unwrap();
+        assert!(l.contains("tailnet:user/nTEST1CNTRL/42@example.ts.net"));
+        assert!(!l.contains("tailnet:user/nTEST1CNTRL/43@example.ts.net"));
+        assert!(!l.contains("tailnet:tagged/nTEST1CNTRL/tag:a@example.ts.net"));
+        let back = Allowlist::from_text(&l.to_text()).unwrap();
+        assert_eq!(back.keys(), l.keys());
     }
 
     #[test]
