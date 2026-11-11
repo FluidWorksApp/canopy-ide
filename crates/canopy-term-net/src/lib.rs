@@ -10,9 +10,12 @@
 pub mod allowlist;
 #[cfg(feature = "iroh")]
 pub mod iroh_transport;
+mod json;
 #[cfg(unix)]
 pub mod local_unix;
 pub mod pairing;
+pub mod tailnet_tcp;
+pub mod tailscale;
 
 use std::io::{Read, Write};
 use std::time::Duration;
