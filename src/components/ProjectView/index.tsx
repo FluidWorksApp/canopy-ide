@@ -1,18 +1,42 @@
 import { activeWorkspace } from "../../remoteExecution/workspace";
 import { TELEPORT_CLI_ID } from "../../../shared/agentCliIdentity";
 import { effectivePreference } from "../../placement/balancer";
-import { getAgentPreference, getGlobalPreference, getProjectPreference } from "../../placement/preferences";
+import {
+  getAgentPreference,
+  getGlobalPreference,
+  getProjectPreference,
+} from "../../placement/preferences";
 import { remoteComponentFor } from "../../environments/remoteLaunch";
 import { prepareRemoteWorkspace } from "../../environments/remoteWorkspace";
-import { connectedMachines, joinThisMac, leaveThisMac, liveEnvironments } from "../../environments/live";
+import {
+  connectedMachines,
+  joinThisMac,
+  leaveThisMac,
+  liveEnvironments,
+} from "../../environments/live";
 import { fetchMachineDigests } from "../../environments/remoteDigests";
-import { activeExecutionTarget, canLaunchOnActiveTarget, requestTargetTransition } from "../../placement/transitions";
+import {
+  activeExecutionTarget,
+  canLaunchOnActiveTarget,
+  requestTargetTransition,
+} from "../../placement/transitions";
 import { TELEPORT_TO_MAC, TeleportFlow } from "../TeleportFlow";
 import { useAllWorkspaces } from "../../remoteExecution/allMode";
 import { connectMachine } from "../../environments/live";
-import { machineBadge, parseMachineSessions, rememberableTab, sessionsNeedingTabs, THIS_MAC_ENV, workspacesToJoin } from "../../environments/allWorkspaceTabs";
+import {
+  machineBadge,
+  parseMachineSessions,
+  rememberableTab,
+  sessionsNeedingTabs,
+  THIS_MAC_ENV,
+  workspacesToJoin,
+} from "../../environments/allWorkspaceTabs";
 import { peekWorkspaceList } from "../../remoteExecution/workspaceListCache";
-import { setPendingLaunch, takePendingLaunch, type PendingLaunch } from "../../placement/pendingLaunch";
+import {
+  setPendingLaunch,
+  takePendingLaunch,
+  type PendingLaunch,
+} from "../../placement/pendingLaunch";
 import { canonicalProjectId } from "../../placement/identity";
 import type { DisplayTarget, Preference, Target } from "../../placement/types";
 import { resolveProjectMachineLaunch } from "./placement";
@@ -24,10 +48,14 @@ import {
   recoverLiveGroups,
   withoutLiveSessions,
 } from "../../terminalRecovery";
-import {subscribeTeamUnread,getTeamUnread,getUnreadSummary} from "../../teamMessaging/session";
-import {isReadOnlyHost,isRemoteHost,isWorkspaceHost} from "../../host";
+import {
+  subscribeTeamUnread,
+  getTeamUnread,
+  getUnreadSummary,
+} from "../../teamMessaging/session";
+import { isReadOnlyHost, isRemoteHost, isWorkspaceHost } from "../../host";
 import { AgentIntegrationWarning } from "../AgentIntegrationWarning";
-import {AccountChatView,type AccountConversation} from "../AccountChatView";
+import { AccountChatView, type AccountConversation } from "../AccountChatView";
 // One open project: icon rail + collapsible side panel (components / source
 // control / agents) + the main area where the AGENT is the hero. Agents and reference
 // docs are sub-tabs; plain shells and long-running commands sit in compact
@@ -72,8 +100,23 @@ import {
   type TerminalSplitNode,
 } from "../../terminalGroups";
 import { terminalMinimumContrast } from "../../terminalContrast";
-import { getSettings, SETTINGS_CHANGE_EVENT, updateSettings } from "../../settings";
-import { canHandOver, carriedFlags, CONTINUE_PROMPT, earliestReset, handoverLine, limitKey, limitResetAt, nextAccount, windowSpent, withPrompt } from "../../accountPool";
+import {
+  getSettings,
+  SETTINGS_CHANGE_EVENT,
+  updateSettings,
+} from "../../settings";
+import {
+  canHandOver,
+  carriedFlags,
+  CONTINUE_PROMPT,
+  earliestReset,
+  handoverLine,
+  limitKey,
+  limitResetAt,
+  nextAccount,
+  windowSpent,
+  withPrompt,
+} from "../../accountPool";
 import { handOver, type HandoverResult } from "../../accountHandover";
 import { agentLife as lifeOfSession } from "../../../shared/agentLife";
 import {
@@ -136,14 +179,22 @@ import {
   tickAgentWatchdogAttention,
   type AgentWatchdogTarget,
 } from "../../agentWatchdogAttention";
-import { DIGEST_FALLBACK_MS, subscribeSessionDigests } from "../../sessionDigests";
+import {
+  DIGEST_FALLBACK_MS,
+  subscribeSessionDigests,
+} from "../../sessionDigests";
 
 /** The one CPU floor. There used to be four numbers answering this question in
  *  this file and its neighbours — 0, 2, 10 and 300 — for two genuinely
  *  different questions ("is anything running" and "is this runaway") that had
  *  drifted into sharing a threshold. */
 const QUIET_CPU = POLICY.quietCpuPercent;
-import { contentLeft, expandedStackScroll, GROUP_ATTR, revealScroll } from "../../tabSticky";
+import {
+  contentLeft,
+  expandedStackScroll,
+  GROUP_ATTR,
+  revealScroll,
+} from "../../tabSticky";
 import { clearActiveTab, setActiveTab } from "../../activeView";
 import { useFlipStrip } from "../../tabFlip";
 import { modelFor, monaco, languageForPath } from "../../monaco-setup";
@@ -189,7 +240,11 @@ import {
   PROFILE_CHANGE_EVENT,
 } from "../../profiles";
 import { signedInClis } from "../../accountState";
-import { profileFromEnv, tabAccount, unresolvedLaunchAccount } from "../../tabAccount";
+import {
+  profileFromEnv,
+  tabAccount,
+  unresolvedLaunchAccount,
+} from "../../tabAccount";
 import { fleetGate, type FleetKind } from "../../fleetState";
 import {
   inspectFleetRoute,
@@ -436,9 +491,9 @@ import { ensureLanguageServer } from "../../lsp/client";
 import { Term, type TermHandle } from "../Term";
 import { ContextMenu, useContextMenu, type MenuItem } from "../ContextMenu";
 import { FileTree } from "../FileTree";
-import {useRemoteUpload} from "../../remoteExecution/useRemoteUpload";
-import {ProjectSetupDialog} from "../../remoteExecution/ProjectSetupDialog";
-import {SendToWorkspace} from "../../remoteExecution/SendToWorkspace";
+import { useRemoteUpload } from "../../remoteExecution/useRemoteUpload";
+import { ProjectSetupDialog } from "../../remoteExecution/ProjectSetupDialog";
+import { SendToWorkspace } from "../../remoteExecution/SendToWorkspace";
 import { FileView, hasDiffToolbar } from "../FileView";
 import { ChangesPanel, type ChangeGroup } from "../ChangesPanel";
 import { Dialog } from "../Dialog";
@@ -451,10 +506,7 @@ import {
   identifyAgent,
   rememberAgentPtys,
 } from "../../agentIdentity";
-import {
-  agentDisplayName,
-  tabNamesByPty,
-} from "../../agentDisplayName";
+import { agentDisplayName, tabNamesByPty } from "../../agentDisplayName";
 import {
   tabName,
   multiplexTabName,
@@ -467,12 +519,16 @@ import {
   openingPrompt,
   isUserNamed,
 } from "../../tabName";
-import { rememberSessionNames, rememberedSessionNames } from "../../sessionNames";
-import { renameSession, reassertSessionName, onSessionRenamed } from "../../sessionRename";
 import {
-  modelCommandLine,
-  type ModelChoice,
-} from "../../agentModels";
+  rememberSessionNames,
+  rememberedSessionNames,
+} from "../../sessionNames";
+import {
+  renameSession,
+  reassertSessionName,
+  onSessionRenamed,
+} from "../../sessionRename";
+import { modelCommandLine, type ModelChoice } from "../../agentModels";
 import { refreshChoices } from "../../modelCatalog";
 import { AgentsPanel } from "../AgentsPanel";
 import { AgentsView } from "../AgentsView";
@@ -481,7 +537,11 @@ import { StatusBar } from "../StatusBar";
 import { Palette, type PaletteMode } from "../Palette";
 import { LaunchPalette } from "../LaunchPalette";
 import { ComponentPicker } from "../ComponentPicker";
-import { recentComponentIds, recordRecentComponent, type PickerComponent } from "../../componentPicker";
+import {
+  recentComponentIds,
+  recordRecentComponent,
+  type PickerComponent,
+} from "../../componentPicker";
 import { SpotSearch } from "../SpotSearch";
 import type { SpotAction } from "../../spotSources";
 import { capturePageContext, composeTaskBrief } from "../../spotContext";
@@ -509,12 +569,7 @@ import {
   normalizeProjectIntegrations,
   type IntegrationProviderId,
 } from "../../projectIntegrations";
-import {
-  agentsIn,
-  ensureLeases,
-  portEnv,
-  portForPath,
-} from "../../workspaces";
+import { agentsIn, ensureLeases, portEnv, portForPath } from "../../workspaces";
 import { needsYouCount } from "../../prInbox";
 import { usePrWatch } from "../../usePrWatch";
 import { TicketView } from "../TicketView";
@@ -531,6 +586,7 @@ import { isPreviewUrl } from "../../agentAssets";
 import { AgentDetailsCard } from "../AgentDetailsCard";
 import { BROWSER_INPUT_EVENT, PreviewView } from "../PreviewView";
 import DeviceView from "../DeviceView";
+import FloatingPhone from "../FloatingPhone";
 import type { PreviewServer } from "../../preview";
 import { dispatchBrowserOp, forgetBrowserTarget } from "../../previewAgent";
 import { suppressBrowserViewsOver, useBrowserEngine } from "../../browserHost";
@@ -551,7 +607,14 @@ import {
   type ShareOpen,
 } from "../../gitLinkRouting";
 import { previewAgentTarget, serverForUrl } from "../../preview";
-import { TRACKERS, ticketBranch, ticketContext, ticketResearchQuestion, ticketTaskLabel, ticketWorktree } from "../../trackers";
+import {
+  TRACKERS,
+  ticketBranch,
+  ticketContext,
+  ticketResearchQuestion,
+  ticketTaskLabel,
+  ticketWorktree,
+} from "../../trackers";
 import { prConflictContext, prReviewContext } from "../../prs";
 import {
   fileDiffContext,
@@ -594,7 +657,12 @@ import {
 import { PrView } from "../PrView";
 import { ErrorBoundary } from "../ErrorBoundary";
 import { TeamPanel } from "../TeamPanel";
-import { publishShareableTerminals, shareAvailability, shareTerminal, type ShareableTerminal } from "../shareTerminal";
+import {
+  publishShareableTerminals,
+  shareAvailability,
+  shareTerminal,
+  type ShareableTerminal,
+} from "../shareTerminal";
 import { OPEN_TEAM_EVENT } from "../../readableLinks";
 import { McpToolsPanel } from "../McpToolsPanel";
 import { McpView } from "../McpView";
@@ -708,9 +776,17 @@ import {
 } from "./helpers";
 import { Button } from "../ui";
 import { RemoteReconnect } from "../RemoteReconnect";
-import { remoteTabReconnect, localTabReconnect, machineLabel } from "../../environments/remoteReconnect";
+import {
+  remoteTabReconnect,
+  localTabReconnect,
+  machineLabel,
+} from "../../environments/remoteReconnect";
 import { nativeHost } from "../../host/native";
-import { dispatchWithPlan, restoreWaitingPlans, type PlanResumer } from "../../plans/planGate";
+import {
+  dispatchWithPlan,
+  restoreWaitingPlans,
+  type PlanResumer,
+} from "../../plans/planGate";
 import { PLAN_ENV, planEnvForCommand } from "../../plans/planLaunch";
 import { armPlanTracking, expectRun } from "../../plans/planStore";
 import {
@@ -761,7 +837,11 @@ const decoder = new TextDecoder();
 /** Workflow run folders and EGM resources live inside the project, so the
  *  ordinary scoped fs commands reach them. */
 const workflowRunFilesIo: WorkflowRunFilesIo = {
-  exists: (path) => ipc.fsStat(path).then(() => true, () => false),
+  exists: (path) =>
+    ipc.fsStat(path).then(
+      () => true,
+      () => false,
+    ),
   create: (path) => ipc.fsCreateFile(path),
   write: (path, content) => ipc.fsWriteFile(path, content),
   read: (path, maxBytes) => ipc.fsReadText(path, maxBytes),
@@ -909,7 +989,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
   // — once, at the seam the whole tree receives — rather than asking each of
   // the dozens of call sites below to remember, which is how the notification
   // list filled with rows that couldn't say which project they were about.
-  const readOnly=project.readOnly===true||isReadOnlyHost();
+  const readOnly = project.readOnly === true || isReadOnlyHost();
   const onNotice = useCallback<Notify>(
     (text, kind, opts) =>
       onNoticeRaw(text, kind, { projectId: project.id, ...opts }),
@@ -927,7 +1007,9 @@ const ProjectViewBody = memo(function ProjectViewBody({
   // other. Keyed by tab because the tab IS the browser session; a session that
   // moves to another tab takes its pip with it rather than leaving a second one
   // streaming a page it no longer looks at.
-  const [browserPips, setBrowserPips] = useState<{ tabId: string; ptyId: number }[]>([]);
+  const [browserPips, setBrowserPips] = useState<
+    { tabId: string; ptyId: number }[]
+  >([]);
   const dismissedBrowserPips = useRef(new Set<string>());
   /** Which preview tab each session is ON, which is not the same list as the
    *  pips: closing a pip hides the view, it does not move the agent off the page
@@ -942,7 +1024,10 @@ const ProjectViewBody = memo(function ProjectViewBody({
     setBrowserPips((prev) =>
       prev.some((p) => p.tabId === tabId && p.ptyId === ptyId)
         ? prev
-        : [...prev.filter((p) => p.tabId !== tabId && p.ptyId !== ptyId), { tabId, ptyId }],
+        : [
+            ...prev.filter((p) => p.tabId !== tabId && p.ptyId !== ptyId),
+            { tabId, ptyId },
+          ],
     );
   }, []);
   // The side panel is a hover overlay, not a docked column. `pinned` is the
@@ -982,14 +1067,21 @@ const ProjectViewBody = memo(function ProjectViewBody({
     .join("|");
   const bootstrapComponents = useRef(project.components);
   bootstrapComponents.current = project.components;
-  const [bootstrapState, setBootstrapState] = useState<{ key: string; empty: boolean } | null>(null);
+  const [bootstrapState, setBootstrapState] = useState<{
+    key: string;
+    empty: boolean;
+  } | null>(null);
   useEffect(() => {
     if (!vibe || vibeTarget.kind !== "needs-setup") return;
     let cancelled = false;
-    void emptyBuildProject(bootstrapComponents.current).catch(() => false).then((empty) => {
-      if (!cancelled) setBootstrapState({ key: vibePackageKey, empty });
-    });
-    return () => { cancelled = true; };
+    void emptyBuildProject(bootstrapComponents.current)
+      .catch(() => false)
+      .then((empty) => {
+        if (!cancelled) setBootstrapState({ key: vibePackageKey, empty });
+      });
+    return () => {
+      cancelled = true;
+    };
   }, [vibe, vibeTarget.kind, vibePackageKey]);
   const [vibePackageState, setVibePackageState] = useState<{
     key: string;
@@ -1008,11 +1100,15 @@ const ProjectViewBody = memo(function ProjectViewBody({
       cancelled = true;
     };
   }, [vibe, vibeTarget.kind, vibePackageKey, project.components]);
-  const [vibeProjectSetupSession, setVibeProjectSetupSession] = useState<
-    ReturnType<typeof createVibeProjectSetupSession> | null
-  >(null);
+  const [vibeProjectSetupSession, setVibeProjectSetupSession] =
+    useState<ReturnType<typeof createVibeProjectSetupSession> | null>(null);
   useEffect(() => {
-    if (!vibe || vibeTarget.kind !== "needs-setup" || bootstrapState?.key !== vibePackageKey || bootstrapState.empty) {
+    if (
+      !vibe ||
+      vibeTarget.kind !== "needs-setup" ||
+      bootstrapState?.key !== vibePackageKey ||
+      bootstrapState.empty
+    ) {
       setVibeProjectSetupSession(null);
       return;
     }
@@ -1026,7 +1122,15 @@ const ProjectViewBody = memo(function ProjectViewBody({
     return () => {
       void session.stop();
     };
-  }, [vibe, vibeTarget.kind, project, onPersistVibeSetup, vibeSetupAttempt, bootstrapState, vibePackageKey]);
+  }, [
+    vibe,
+    vibeTarget.kind,
+    project,
+    onPersistVibeSetup,
+    vibeSetupAttempt,
+    bootstrapState,
+    vibePackageKey,
+  ]);
   const requestVibeProjectDiscovery = useCallback(async () => {
     // Clear the saved target only after the workspace write succeeds. The
     // explicit retry token is consumed by the setup session created from the
@@ -1120,20 +1224,19 @@ const ProjectViewBody = memo(function ProjectViewBody({
    *
    *  A pip whose tab is in front is not among them: the full browser IS the live
    *  view there, and the small duplicate would only cover its corner. */
-  const shownBrowserPips = useMemo(
-    () => {
-      const terminals = visibleTabs.filter(
-        (tab): tab is TermSubTab => tab.type === "terminal",
-      );
-      return livePips.filter(
-        (pip) =>
-          pip.tabId !== activeTabId &&
-          pipOwnerVisible(pip.ptyId, terminals, activeTabId),
-      );
-    },
-    [livePips, activeTabId, visibleTabs],
-  );
-  const [terminalGroups, setTerminalGroups] = useState<Record<string, TerminalGroup>>({});
+  const shownBrowserPips = useMemo(() => {
+    const terminals = visibleTabs.filter(
+      (tab): tab is TermSubTab => tab.type === "terminal",
+    );
+    return livePips.filter(
+      (pip) =>
+        pip.tabId !== activeTabId &&
+        pipOwnerVisible(pip.ptyId, terminals, activeTabId),
+    );
+  }, [livePips, activeTabId, visibleTabs]);
+  const [terminalGroups, setTerminalGroups] = useState<
+    Record<string, TerminalGroup>
+  >({});
   const terminalGroupsRef = useRef(terminalGroups);
   terminalGroupsRef.current = terminalGroups;
   /** Briefly ringed after a jump — with several similar terminal tabs open,
@@ -1183,8 +1286,14 @@ const ProjectViewBody = memo(function ProjectViewBody({
       setActiveProfileId(id);
       // Primed on the signals that change it, so launches never await IPC.
       void primeLaunchEnv();
-      void ipc.profilesList().then(setProfiles).catch(() => {});
-      void ipc.profileAccounts(id).then(setActiveAccounts).catch(() => {});
+      void ipc
+        .profilesList()
+        .then(setProfiles)
+        .catch(() => {});
+      void ipc
+        .profileAccounts(id)
+        .then(setActiveAccounts)
+        .catch(() => {});
     };
     pull();
     // The event covers create/switch; focus covers a sign-in, which finishes
@@ -1216,9 +1325,19 @@ const ProjectViewBody = memo(function ProjectViewBody({
         agentId: a.agentId,
         cwd: a.cwd,
         label: a.title,
-        sessionId: liveSessionByPtyRef.current.get(a.ptyId)
-          || resumeSessionId((tabsRef.current.find(t => t.id === a.tabId) as TermSubTab | undefined)?.command) || undefined,
-        profile: (tabsRef.current.find(t => t.id === a.tabId) as TermSubTab | undefined)?.profile,
+        sessionId:
+          liveSessionByPtyRef.current.get(a.ptyId) ||
+          resumeSessionId(
+            (
+              tabsRef.current.find((t) => t.id === a.tabId) as
+                TermSubTab | undefined
+            )?.command,
+          ) ||
+          undefined,
+        profile: (
+          tabsRef.current.find((t) => t.id === a.tabId) as
+            TermSubTab | undefined
+        )?.profile,
       }));
       if (open.length === 0) return;
       void Promise.all([
@@ -1236,7 +1355,8 @@ const ProjectViewBody = memo(function ProjectViewBody({
             ),
             profile: to,
           });
-          const label = profilesRef.current.find((p) => p.id === to)?.label ?? to;
+          const label =
+            profilesRef.current.find((p) => p.id === to)?.label ?? to;
           // Nothing this account can take over: no dialog whose only answer is
           // "no", but say why, or the switch looks like a lost confirmation.
           if (reloading(plan).length === 0) {
@@ -1250,7 +1370,6 @@ const ProjectViewBody = memo(function ProjectViewBody({
     window.addEventListener(PROFILE_CHANGE_EVENT, onSwitch);
     return () => window.removeEventListener(PROFILE_CHANGE_EVENT, onSwitch);
   }, []);
-
 
   /** What the ＋ menu says about the account it launches into. Null on the
    *  default one. `missing` is the footgun: an account holding a Claude login
@@ -1286,7 +1405,9 @@ const ProjectViewBody = memo(function ProjectViewBody({
   // ⌘⇧N asks for a workspace for this one opening; ⌘N leaves ↵ to the
   // agentWorkspaceByDefault setting. ⇧↵ and the row's side action are always
   // the other choice.
-  const [launcherWhere, setLauncherWhere] = useState<"workspace" | undefined>(undefined);
+  const [launcherWhere, setLauncherWhere] = useState<"workspace" | undefined>(
+    undefined,
+  );
   const [pendingSplit, setPendingSplit] = useState<{
     sourceTabId: string;
     axis: SplitAxis;
@@ -1413,43 +1534,54 @@ const ProjectViewBody = memo(function ProjectViewBody({
 
   const editorDisk = useRef(new EditorDiskState());
   useEffect(() => {
-    editorDisk.current.retain(new Set(tabs.filter((tab): tab is FileSubTab => tab.type === 'file').map(tab => tab.file.path)));
+    editorDisk.current.retain(
+      new Set(
+        tabs
+          .filter((tab): tab is FileSubTab => tab.type === "file")
+          .map((tab) => tab.file.path),
+      ),
+    );
   }, [tabs]);
-  const viewerByteReads = useRef(
-    new Map<string, Promise<Uint8Array | null>>(),
-  );
+  const viewerByteReads = useRef(new Map<string, Promise<Uint8Array | null>>());
   const termHandles = useRef(new Map<string, TermHandle | null>());
   const livePtyByTab = useRef(new Map<string, number>());
   /** Tab id → the `then` marker its opener asked to hear back on exit. */
   const exitMarkers = useRef(new Map<string, string>());
   const vibeServerHealth = useRef(new Map<string, VibeServerHealthState>());
   const openVibeServerIncident = useRef(new Set<string>());
-  const [vibeVerifiedReadinessPtys, setVibeVerifiedReadinessPtys] = useState<Set<number>>(
-    () => new Set(),
-  );
+  const [vibeVerifiedReadinessPtys, setVibeVerifiedReadinessPtys] = useState<
+    Set<number>
+  >(() => new Set());
   const completedVibeOneShots = useRef(new Set<string>());
-  const vibeRunSupervision = useRef(new Map<number, {
-    startedAt: number;
-    lastChangedAt: number;
-    outputBytes: number;
-    handledPrompt: string | null;
-    handledPromptAt: number | null;
-    readinessVerified: boolean;
-    unhealthySince: number | null;
-    reported: boolean;
-  }>());
-  const vibeServerWatch = useRef<Array<{
-    targetKey: string;
-    componentId: string;
-    runCommandId: string;
-    path: string;
-    command: string;
-    kind: "serve" | "worker";
-    session: ReturnType<typeof createVibeBuilderSession>;
-  }>>([]);
-  const vibeServerExit = useRef<
-    (tabId: string, event: ipc.PtyExit) => void
-  >(() => {});
+  const vibeRunSupervision = useRef(
+    new Map<
+      number,
+      {
+        startedAt: number;
+        lastChangedAt: number;
+        outputBytes: number;
+        handledPrompt: string | null;
+        handledPromptAt: number | null;
+        readinessVerified: boolean;
+        unhealthySince: number | null;
+        reported: boolean;
+      }
+    >(),
+  );
+  const vibeServerWatch = useRef<
+    Array<{
+      targetKey: string;
+      componentId: string;
+      runCommandId: string;
+      path: string;
+      command: string;
+      kind: "serve" | "worker";
+      session: ReturnType<typeof createVibeBuilderSession>;
+    }>
+  >([]);
+  const vibeServerExit = useRef<(tabId: string, event: ipc.PtyExit) => void>(
+    () => {},
+  );
   /** The live tail of a terminal tab, for its thumbnail: a read of the xterm
    *  buffer that is already in memory. No capture and no screenshot — what it
    *  returns is what the pty has painted by the moment it is asked, which is
@@ -1467,7 +1599,8 @@ const ProjectViewBody = memo(function ProjectViewBody({
   const contentRef = useRef<HTMLDivElement>(null);
   const workspaceConnection = activeWorkspace()?.connection;
   const terminalMemoryScope = workspaceConnection
-    ? `workspace:${workspaceConnection.workspaceId}` : "local";
+    ? `workspace:${workspaceConnection.workspaceId}`
+    : "local";
   const terminalMemoryScopeRef = useRef(terminalMemoryScope);
   terminalMemoryScopeRef.current = terminalMemoryScope;
   // Keep the pre-recovery snapshot until all live panes have committed. An
@@ -1479,15 +1612,24 @@ const ProjectViewBody = memo(function ProjectViewBody({
   const expectedRecoveredTabs = useRef(new Set<string>());
   const restoredLiveGroups = useRef(new Set<string>());
   const terminalRecoveryComplete = useRef(false);
-  const recoveryNativeSessions = useRef<ipc.PtySummary[]>(ipc.rendererPtySessions());
-  const [thisInstance, setThisInstance] = useState<string | null>(ipc.rendererInstanceId);
+  const recoveryNativeSessions = useRef<ipc.PtySummary[]>(
+    ipc.rendererPtySessions(),
+  );
+  const [thisInstance, setThisInstance] = useState<string | null>(
+    ipc.rendererInstanceId,
+  );
   const thisInstanceRef = useRef(thisInstance);
   thisInstanceRef.current = thisInstance;
   const tabsRef = useRef(tabs);
   tabsRef.current = tabs;
-  useEffect(() => registerExecutionModeGuard(
-    () => !tabsRef.current.some(tab => tab.type === "file" && tab.file.dirty),
-  ), []);
+  useEffect(
+    () =>
+      registerExecutionModeGuard(
+        () =>
+          !tabsRef.current.some((tab) => tab.type === "file" && tab.file.dirty),
+      ),
+    [],
+  );
   const governorByPty = useMemo(
     () => terminalGovernorByPty(terminalGovernor),
     [terminalGovernor],
@@ -1497,7 +1639,8 @@ const ProjectViewBody = memo(function ProjectViewBody({
       tab.paneGroup
         ? tabs.filter(
             (candidate): candidate is TermSubTab =>
-              candidate.type === "terminal" && candidate.paneGroup === tab.paneGroup,
+              candidate.type === "terminal" &&
+              candidate.paneGroup === tab.paneGroup,
           )
         : [tab],
     [tabs],
@@ -1519,13 +1662,19 @@ const ProjectViewBody = memo(function ProjectViewBody({
   useEffect(() => {
     return () => onTerminalQuotaGroupsChange?.(project.id, []);
   }, [onTerminalQuotaGroupsChange, project.id]);
-  const accountTeamUnread = useSyncExternalStore(subscribeTeamUnread, getTeamUnread);
-  const accountUnreadSummary = useSyncExternalStore(subscribeTeamUnread, getUnreadSummary);
+  const accountTeamUnread = useSyncExternalStore(
+    subscribeTeamUnread,
+    getTeamUnread,
+  );
+  const accountUnreadSummary = useSyncExternalStore(
+    subscribeTeamUnread,
+    getUnreadSummary,
+  );
   /** Unread count on an account conversation tab that is not in front. */
   const accountTabUnread = (tab: SubTab) => {
     if (tab.type !== "chat" || !tab.accountConversation) return 0;
     if (visible && tab.id === activeTabId) return 0;
-    const {teamId, userId, peer} = tab.accountConversation;
+    const { teamId, userId, peer } = tab.accountConversation;
     const counts = accountUnreadSummary[`${userId}:${teamId}`];
     if (!counts) return 0;
     return (peer === null ? counts.channel : counts.peers[peer]) ?? 0;
@@ -1580,19 +1729,21 @@ const ProjectViewBody = memo(function ProjectViewBody({
   useEffect(() => {
     if (getSettings().tabSwitchMode !== "items") return;
     const byId = new Map(visibleTabs.map((t) => [t.id, t]));
-    const digest = buildWorkItemDigest(clusterWorkItems(visibleTabs, workItemJoins), (id) => {
-      const tab = byId.get(id);
-      return tab ? `${tabKind(tab).label} ${tabDisplayLabel(tab)}` : id;
-    });
+    const digest = buildWorkItemDigest(
+      clusterWorkItems(visibleTabs, workItemJoins),
+      (id) => {
+        const tab = byId.get(id);
+        return tab ? `${tabKind(tab).label} ${tabDisplayLabel(tab)}` : id;
+      },
+    );
     noteWorkItems(digest);
   }, [visibleTabs]);
   /** The tabs in the order the pane bar draws them — what ⌘1..9 counts, and
    *  filled in below once the groups are known. */
   const barTabsRef = useRef<SubTab[]>([]);
-  const closeTabRef = useRef<(
-    id: string,
-    origin?: "automatic" | "user",
-  ) => void>(() => {});
+  const closeTabRef = useRef<
+    (id: string, origin?: "automatic" | "user") => void
+  >(() => {});
   const isAgentTabRef = useRef<(tab: SubTab) => boolean>(() => false);
   const splitActiveRef = useRef<(axis: SplitAxis) => void>(() => {});
   const focusPaneRef = useRef<(direction: PaneDirection) => void>(() => {});
@@ -1606,7 +1757,10 @@ const ProjectViewBody = memo(function ProjectViewBody({
    *  project it was launched from. */
   const stopMicroRunRef = useRef<(ptyId: number) => void>(() => {});
   const openFileRef = useRef<
-    (path: string, opts?: { diff?: boolean; activate?: boolean }) => Promise<void>
+    (
+      path: string,
+      opts?: { diff?: boolean; activate?: boolean },
+    ) => Promise<void>
   >(async () => {});
 
   // Process stats for THIS project's terminals only. Subscribed here rather
@@ -1660,7 +1814,9 @@ const ProjectViewBody = memo(function ProjectViewBody({
   // even repeated missing agent hints must preserve the tab and its scrollback.
   // rememberAgentPtys keeps its agent identity until the actual tab is closed.
   const visibleRef = useRef(visible);
-  const vibeSessionRef = useRef<ReturnType<typeof createVibeBuilderSession> | null>(null);
+  const vibeSessionRef = useRef<ReturnType<
+    typeof createVibeBuilderSession
+  > | null>(null);
   visibleRef.current = visible;
   useEffect(() => {
     const sub = ipc.onPtyStats((all) => {
@@ -1754,7 +1910,8 @@ const ProjectViewBody = memo(function ProjectViewBody({
       project.components.map((c) => {
         if (
           worktreeEnv &&
-          (c.path === worktreeEnv.repo || c.path.startsWith(worktreeEnv.repo + "/"))
+          (c.path === worktreeEnv.repo ||
+            c.path.startsWith(worktreeEnv.repo + "/"))
         ) {
           return {
             ...c,
@@ -1778,7 +1935,11 @@ const ProjectViewBody = memo(function ProjectViewBody({
   // Interactive agent launches always pass through this dialog, including a
   // one-component project, because machine placement remains a real choice.
   // Shells retain their old shortcut for a one-component project.
-  type ComponentLaunchPick = { component: PickerComponent; machine?: Preference; profileId?: string };
+  type ComponentLaunchPick = {
+    component: PickerComponent;
+    machine?: Preference;
+    profileId?: string;
+  };
   const [componentPick, setComponentPick] = useState<{
     title: string;
     machineTargets?: DisplayTarget[];
@@ -1800,7 +1961,13 @@ const ProjectViewBody = memo(function ProjectViewBody({
           resolve(list[0] ? { component: list[0] } : null);
           return;
         }
-        const show = (machineTargets?: DisplayTarget[], accounts?: { profiles: { id: string; label: string }[]; initial: string }) => {
+        const show = (
+          machineTargets?: DisplayTarget[],
+          accounts?: {
+            profiles: { id: string; label: string }[];
+            initial: string;
+          },
+        ) => {
           const initialMachine = agentKind
             ? effectivePreference({
                 preference: getGlobalPreference(),
@@ -1815,15 +1982,26 @@ const ProjectViewBody = memo(function ProjectViewBody({
           // With several components the question is a type-and-pick list, the one
           // in front first, so Enter alone still opens there and typing narrows
           // it: no mouse. With one component there is nothing to pick.
-          const fixedComponent = agentKind && list.length === 1 ? list[0] : undefined;
-          const machineChoices = (machineTargets ?? []).filter((target) => target.online).length;
+          const fixedComponent =
+            agentKind && list.length === 1 ? list[0] : undefined;
+          const machineChoices = (machineTargets ?? []).filter(
+            (target) => target.online,
+          ).length;
           if (agentKind && fixedComponent && machineChoices <= 1 && !accounts) {
             resolve({ component: fixedComponent, machine: initialMachine });
             return;
           }
           setComponentPick((previous) => {
             previous?.resolve(null);
-            return { title, machineTargets, initialMachine, accounts, fixedComponent, preferPath, resolve };
+            return {
+              title,
+              machineTargets,
+              initialMachine,
+              accounts,
+              fixedComponent,
+              preferPath,
+              resolve,
+            };
           });
         };
         if (!agentKind) {
@@ -1835,11 +2013,20 @@ const ProjectViewBody = memo(function ProjectViewBody({
         // offered and the launch uses its usual default.
         const loadAccounts = async () => {
           try {
-            const profiles = launchableProfiles(await ipc.profilesList(), agentKind);
+            const profiles = launchableProfiles(
+              await ipc.profilesList(),
+              agentKind,
+            );
             if (profiles.length === 0) return undefined;
             return {
-              profiles: [...profiles.map((p) => ({ id: p.id, label: p.label })), { id: AUTO_PROFILE, label: "Automatic" }],
-              initial: lastProfileFor(agentKind, profiles.map((p) => p.id)),
+              profiles: [
+                ...profiles.map((p) => ({ id: p.id, label: p.label })),
+                { id: AUTO_PROFILE, label: "Automatic" },
+              ],
+              initial: lastProfileFor(
+                agentKind,
+                profiles.map((p) => p.id),
+              ),
             };
           } catch {
             return undefined;
@@ -1854,8 +2041,14 @@ const ProjectViewBody = memo(function ProjectViewBody({
               show(inventory.targets, accounts);
             })
             .catch((error) => {
-              onNotice(`Could not read connected machines: ${String(error)}`, "warn");
-              show([{ target: { kind: "local" }, name: "This Mac", online: true }], accounts);
+              onNotice(
+                `Could not read connected machines: ${String(error)}`,
+                "warn",
+              );
+              show(
+                [{ target: { kind: "local" }, name: "This Mac", online: true }],
+                accounts,
+              );
             }),
         );
       }),
@@ -1864,21 +2057,55 @@ const ProjectViewBody = memo(function ProjectViewBody({
   const [sendOpen, setSendOpen] = useState(false);
   // A Claude agent being moved to a workspace (teleport): the tab it runs in
   // and the session, folder and state it had when the person asked.
-  const [teleport, setTeleport] = useState<{ tabId: string; sessionId: string; cwd: string; idle: boolean } | null>(null);
+  const [teleport, setTeleport] = useState<{
+    tabId: string;
+    sessionId: string;
+    cwd: string;
+    idle: boolean;
+  } | null>(null);
   /** What a teleport of this terminal tab would move, or null when it is not a
    *  Claude session with a known conversation (those keep the project dialog). */
   const teleportCandidate = (tab: TermSubTab) => {
     if (tab.ptyId == null) return null;
     if (agentIdForCommand(tab.command) !== TELEPORT_CLI_ID) return null;
-    const sessionId = liveSessionByPtyRef.current.get(tab.ptyId) ?? resumeSessionId(tab.command);
+    const sessionId =
+      liveSessionByPtyRef.current.get(tab.ptyId) ??
+      resumeSessionId(tab.command);
     if (!sessionId) return null;
-    return { tabId: tab.id, sessionId, cwd: tab.cwd, idle: lifeForPtyRef.current(tab.ptyId)?.state !== "working" };
+    return {
+      tabId: tab.id,
+      sessionId,
+      cwd: tab.cwd,
+      idle: lifeForPtyRef.current(tab.ptyId)?.state !== "working",
+    };
   };
   const teleportCandidateRef = useRef(teleportCandidate);
   teleportCandidateRef.current = teleportCandidate;
-  type RemoteStart = { kind: "started" } | { kind: "failed" } | { kind: "not-set-up"; invoke: <T>(command: string, args?: Record<string, unknown>) => Promise<T> };
-  const [machineTransition, setMachineTransition] = useState<{ target: Target; name: string; resumeAgent?: string; resumeLabel?: string; resumeThen?: PendingLaunch["then"] } | null>(null);
-  const [placementSetup, setPlacementSetup] = useState<{ name: string; resolve: (ready: boolean) => void; remoteInvoke?: <T>(command: string, args?: Record<string, unknown>) => Promise<T> } | null>(null);
+  type RemoteStart =
+    | { kind: "started" }
+    | { kind: "failed" }
+    | {
+        kind: "not-set-up";
+        invoke: <T>(
+          command: string,
+          args?: Record<string, unknown>,
+        ) => Promise<T>;
+      };
+  const [machineTransition, setMachineTransition] = useState<{
+    target: Target;
+    name: string;
+    resumeAgent?: string;
+    resumeLabel?: string;
+    resumeThen?: PendingLaunch["then"];
+  } | null>(null);
+  const [placementSetup, setPlacementSetup] = useState<{
+    name: string;
+    resolve: (ready: boolean) => void;
+    remoteInvoke?: <T>(
+      command: string,
+      args?: Record<string, unknown>,
+    ) => Promise<T>;
+  } | null>(null);
   const [placementSetupReady, setPlacementSetupReady] = useState(false);
   // The setup finished cleanly: start the launch that was waiting for it, with
   // no further click. Launch stays as the manual route if this never fires.
@@ -1893,8 +2120,12 @@ const ProjectViewBody = memo(function ProjectViewBody({
   const reconnectRemoteTab = useCallback(
     async (tabId: string): Promise<string | null> => {
       const tab = tabsRef.current.find((t) => t.id === tabId);
-      if (!tab || tab.type !== "terminal" || !tab.machine || !tab.reconnect) return null;
-      const result = await remoteTabReconnect(tab.machine, tab.reconnect.sessionId);
+      if (!tab || tab.type !== "terminal" || !tab.machine || !tab.reconnect)
+        return null;
+      const result = await remoteTabReconnect(
+        tab.machine,
+        tab.reconnect.sessionId,
+      );
       if (result.kind === "gone") {
         onNotice(`That session has ended on ${result.machineName}.`, "info");
         return `That session is no longer running on ${result.machineName}.`;
@@ -1903,7 +2134,14 @@ const ProjectViewBody = memo(function ProjectViewBody({
       setTabs((prev) =>
         prev.map((t) =>
           t.id === tabId && t.type === "terminal"
-            ? { ...t, ptyId: result.alias, attachId: result.alias, killAttachedOnClose: true, reconnect: undefined, launchedAt: t.launchedAt }
+            ? {
+                ...t,
+                ptyId: result.alias,
+                attachId: result.alias,
+                killAttachedOnClose: true,
+                reconnect: undefined,
+                launchedAt: t.launchedAt,
+              }
             : t,
         ),
       );
@@ -1926,7 +2164,9 @@ const ProjectViewBody = memo(function ProjectViewBody({
       setTabs((prev) => {
         const kept = prev.filter((t) => !(t.type === "terminal" && t.viaAll));
         if (kept.length === prev.length) return prev;
-        for (const t of prev) if (t.type === "terminal" && t.viaAll) pendingAllDetach.current.push(t);
+        for (const t of prev)
+          if (t.type === "terminal" && t.viaAll)
+            pendingAllDetach.current.push(t);
         return kept;
       });
       return;
@@ -1935,16 +2175,29 @@ const ProjectViewBody = memo(function ProjectViewBody({
     // One machine's live terminals, each given a tab and attached right away:
     // the person chose this mode, so nothing waits on a button.
     const addFrom = async (
-      machine: { env: string; name: string; invoke: <T>(command: string) => Promise<T> },
-      reconnect: (env: string, sessionId: number) => ReturnType<typeof remoteTabReconnect>,
+      machine: {
+        env: string;
+        name: string;
+        invoke: <T>(command: string) => Promise<T>;
+      },
+      reconnect: (
+        env: string,
+        sessionId: number,
+      ) => ReturnType<typeof remoteTabReconnect>,
     ) => {
       let timer: ReturnType<typeof setTimeout> | undefined;
       const raw = await Promise.race([
         machine.invoke<unknown>("pty_stats"),
-        new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new Error("timed out")), 10_000); }),
+        new Promise<never>((_, reject) => {
+          timer = setTimeout(() => reject(new Error("timed out")), 10_000);
+        }),
       ]).finally(() => clearTimeout(timer));
       if (!live) return;
-      const need = sessionsNeedingTabs(machine.env, parseMachineSessions(raw), tabsRef.current);
+      const need = sessionsNeedingTabs(
+        machine.env,
+        parseMachineSessions(raw),
+        tabsRef.current,
+      );
       if (need.length === 0) return;
       const added = need.map((session) => ({
         id: tabId(),
@@ -1967,7 +2220,13 @@ const ProjectViewBody = memo(function ProjectViewBody({
           setTabs((prev) =>
             prev.map((t) =>
               t.id === tab.id && t.type === "terminal"
-                ? { ...t, ptyId: result.alias, attachId: result.alias, killAttachedOnClose: false, reconnect: undefined }
+                ? {
+                    ...t,
+                    ptyId: result.alias,
+                    attachId: result.alias,
+                    killAttachedOnClose: false,
+                    reconnect: undefined,
+                  }
                 : t,
             ),
           );
@@ -1995,18 +2254,27 @@ const ProjectViewBody = memo(function ProjectViewBody({
         try {
           joinThisMac();
           await addFrom(
-            { env: THIS_MAC_ENV, name: "This Mac", invoke: (command) => nativeHost.invoke(command) },
+            {
+              env: THIS_MAC_ENV,
+              name: "This Mac",
+              invoke: (command) => nativeHost.invoke(command),
+            },
             (_env, sessionId) => localTabReconnect(sessionId),
           );
         } catch {
           /* This Mac could not be read; the strip stays as it is. */
         }
       }
-      const running = workspacesToJoin(peekWorkspaceList()?.workspaces ?? [], activeWorkspace()?.connection.workspaceId);
+      const running = workspacesToJoin(
+        peekWorkspaceList()?.workspaces ?? [],
+        activeWorkspace()?.connection.workspaceId,
+      );
       for (const workspace of running) {
         try {
           const machine = await connectMachine(workspace.id);
-          await addFrom(machine, (env, sessionId) => remoteTabReconnect(env, sessionId));
+          await addFrom(machine, (env, sessionId) =>
+            remoteTabReconnect(env, sessionId),
+          );
         } catch {
           /* A workspace that cannot be read adds nothing; the strip stays as it is. */
         }
@@ -2021,59 +2289,83 @@ const ProjectViewBody = memo(function ProjectViewBody({
   }, [allWorkspaces, visible]);
   const pendingAllDetach = useRef<unknown[]>([]);
 
-  const prepareMachineLaunch = useCallback(async (agentKind: string, machine: Preference, resume: false | { label?: string; then?: PendingLaunch["then"] } = false,
-    /** Start the launch on that machine without switching the window to it.
-     *  Resolves true when it did; false falls back to the switch dialog. */
-    onRemote?: (target: Target, name: string) => Promise<RemoteStart>) => {
-    const outcome = await resolveProjectMachineLaunch({
-      project: { id: project.id, name: project.name },
-      agentKind,
-      requested: machine,
-    });
-    if (outcome.kind === "refusal") {
-      onNotice(outcome.reason, "warn");
-      return false;
-    }
-    if (outcome.kind === "transition") {
-      // Another workspace, from a window on this Mac or on a workspace: run it
-      // there, stay here.
-      // Only when that cannot be done (not reachable, project not set up there)
-      // does the old "switch to it" dialog come up.
-      if (onRemote && outcome.target.kind === "remote") {
-        const first = await onRemote(outcome.target, outcome.name);
-        if (first.kind === "started") return false;
-        if (first.kind === "not-set-up") {
-          // The project is not on that machine yet: set it up there (compact,
-          // everything pre-selected), then start. Never a switch dialog.
-          const ready = await new Promise<boolean>((resolve) => {
-            setPlacementSetupReady(false);
-            setPlacementSetup({ name: outcome.name, resolve, remoteInvoke: first.invoke });
-          });
-          if (ready) {
-            const second = await onRemote(outcome.target, outcome.name);
-            // Never silent: setup finished but the machine still does not list a
-            // complete copy of this project, so nothing could be started.
-            if (second.kind === "not-set-up")
-              onNotice(`${outcome.name} still doesn't list a complete copy of ${project.name}, so nothing was started. Run the setup again, or open ${project.name} there once.`, "warn");
-          }
-        }
-        // "failed" already said why; nothing else to ask.
+  const prepareMachineLaunch = useCallback(
+    async (
+      agentKind: string,
+      machine: Preference,
+      resume: false | { label?: string; then?: PendingLaunch["then"] } = false,
+      /** Start the launch on that machine without switching the window to it.
+       *  Resolves true when it did; false falls back to the switch dialog. */
+      onRemote?: (target: Target, name: string) => Promise<RemoteStart>,
+    ) => {
+      const outcome = await resolveProjectMachineLaunch({
+        project: { id: project.id, name: project.name },
+        agentKind,
+        requested: machine,
+      });
+      if (outcome.kind === "refusal") {
+        onNotice(outcome.reason, "warn");
         return false;
       }
-      setMachineTransition({ target: outcome.target, name: outcome.name, ...(resume ? { resumeAgent: agentKind, ...(resume.label ? { resumeLabel: resume.label } : {}), ...(resume.then ? { resumeThen: resume.then } : {}) } : {}) });
-      return false;
-    }
-    if (outcome.kind === "setup") {
-      setPlacementSetupReady(false);
-      return new Promise<boolean>((resolve) =>
-        setPlacementSetup({ name: outcome.name, resolve }),
-      );
-    }
-    // The launch goes ahead; a full machine or an unreadable workspace list is
-    // something to know, never a reason to refuse an agent.
-    if (outcome.decision.warning) onNotice(outcome.decision.warning, "warn");
-    return true;
-  }, [onNotice, project.id, project.name]);
+      if (outcome.kind === "transition") {
+        // Another workspace, from a window on this Mac or on a workspace: run it
+        // there, stay here.
+        // Only when that cannot be done (not reachable, project not set up there)
+        // does the old "switch to it" dialog come up.
+        if (onRemote && outcome.target.kind === "remote") {
+          const first = await onRemote(outcome.target, outcome.name);
+          if (first.kind === "started") return false;
+          if (first.kind === "not-set-up") {
+            // The project is not on that machine yet: set it up there (compact,
+            // everything pre-selected), then start. Never a switch dialog.
+            const ready = await new Promise<boolean>((resolve) => {
+              setPlacementSetupReady(false);
+              setPlacementSetup({
+                name: outcome.name,
+                resolve,
+                remoteInvoke: first.invoke,
+              });
+            });
+            if (ready) {
+              const second = await onRemote(outcome.target, outcome.name);
+              // Never silent: setup finished but the machine still does not list a
+              // complete copy of this project, so nothing could be started.
+              if (second.kind === "not-set-up")
+                onNotice(
+                  `${outcome.name} still doesn't list a complete copy of ${project.name}, so nothing was started. Run the setup again, or open ${project.name} there once.`,
+                  "warn",
+                );
+            }
+          }
+          // "failed" already said why; nothing else to ask.
+          return false;
+        }
+        setMachineTransition({
+          target: outcome.target,
+          name: outcome.name,
+          ...(resume
+            ? {
+                resumeAgent: agentKind,
+                ...(resume.label ? { resumeLabel: resume.label } : {}),
+                ...(resume.then ? { resumeThen: resume.then } : {}),
+              }
+            : {}),
+        });
+        return false;
+      }
+      if (outcome.kind === "setup") {
+        setPlacementSetupReady(false);
+        return new Promise<boolean>((resolve) =>
+          setPlacementSetup({ name: outcome.name, resolve }),
+        );
+      }
+      // The launch goes ahead; a full machine or an unreadable workspace list is
+      // something to know, never a reason to refuse an agent.
+      if (outcome.decision.warning) onNotice(outcome.decision.warning, "warn");
+      return true;
+    },
+    [onNotice, project.id, project.name],
+  );
   const rootsRef = useRef(roots);
   rootsRef.current = roots;
 
@@ -2097,7 +2389,9 @@ const ProjectViewBody = memo(function ProjectViewBody({
   const pendingTerminalPrompts = useRef(new Map<string, string>());
   /** Prompt to type into the next agent started on another machine. */
   const remoteSeedRef = useRef<string | undefined>(undefined);
-  const remotePrRef = useRef<{ number: number; branch: string } | undefined>(undefined);
+  const remotePrRef = useRef<{ number: number; branch: string } | undefined>(
+    undefined,
+  );
   const pendingAgentSpawnOps = useRef(
     new Map<
       string,
@@ -2185,7 +2479,12 @@ const ProjectViewBody = memo(function ProjectViewBody({
       /** Run on this other machine ("remote:<workspaceId>", already connected). */
       machine?: string,
     ) => {
-      if(project.readOnly||isReadOnlyHost()){onNotice("This project is read-only. Terminal and agent execution is unavailable.");return "";}
+      if (project.readOnly || isReadOnlyHost()) {
+        onNotice(
+          "This project is read-only. Terminal and agent execution is unavailable.",
+        );
+        return "";
+      }
       const id = tabId();
       // Every terminal opened inside a workspace gets that workspace's port,
       // not just the ones started from the Servers panel — an agent told to
@@ -2206,13 +2505,15 @@ const ProjectViewBody = memo(function ProjectViewBody({
       // account has no env to hand yet. Launching anyway put the CLI on the
       // Default login: it ran, renewed and was billed as an account the user
       // had not chosen. Hold the terminal until the account's env resolves.
-      const pendingAccount = machine ? null : unresolvedLaunchAccount({
-        cli: launchedCli,
-        extraEnv,
-        profile,
-        syncEnv: accountEnv,
-        active: activeProfile(),
-      });
+      const pendingAccount = machine
+        ? null
+        : unresolvedLaunchAccount({
+            cli: launchedCli,
+            extraEnv,
+            profile,
+            syncEnv: accountEnv,
+            active: activeProfile(),
+          });
       const managedEnv = runIdentity ? [...MANAGED_PROCESS_ENV] : [];
       // A task's unattended mode, where its CLI needs environment as well as a
       // flag for it (opencode's permission pin, omp's approval overlay).
@@ -2223,7 +2524,8 @@ const ProjectViewBody = memo(function ProjectViewBody({
         ...unattendedEnvFor(command),
       ];
       // Planned work: the plan id rides in the agent's env (planLaunch.ts).
-      if (!env.some(([k]) => k === PLAN_ENV)) env.push(...planEnvForCommand(command));
+      if (!env.some(([k]) => k === PLAN_ENV))
+        env.push(...planEnvForCommand(command));
       // The account is what the process is actually given, not what a caller
       // remembered: the badge, the plan chip and a later restore all read it.
       const accountProfile = tabAccount({
@@ -2264,7 +2566,11 @@ const ProjectViewBody = memo(function ProjectViewBody({
             setTabs((prev) =>
               prev.map((t) =>
                 t.id === id && t.type === "terminal"
-                  ? { ...t, env: [...(t.env ?? []), ...resolved], accountPending: undefined }
+                  ? {
+                      ...t,
+                      env: [...(t.env ?? []), ...resolved],
+                      accountPending: undefined,
+                    }
                   : t,
               ),
             );
@@ -2307,7 +2613,13 @@ const ProjectViewBody = memo(function ProjectViewBody({
       name?: string,
       presentation?: Pick<
         TerminalAttachment,
-        "run" | "command" | "componentId" | "runCommandId" | "sessionGeneration" | "recovered" | "resumedFrom"
+        | "run"
+        | "command"
+        | "componentId"
+        | "runCommandId"
+        | "sessionGeneration"
+        | "recovered"
+        | "resumedFrom"
       >,
     ): string => {
       const existing = tabsRef.current.find(
@@ -2320,61 +2632,88 @@ const ProjectViewBody = memo(function ProjectViewBody({
       // A remote host resumed this agent after a workspace restart: it takes
       // the place, names and pane of the tab its predecessor left behind.
       const resumedFrom = presentation?.resumedFrom;
-      const predecessor = resumedFrom != null
-        ? tabsRef.current.find(
-            (t): t is TermSubTab =>
-              t.type === "terminal" && t.ptyId === resumedFrom &&
-              (t.sessionGeneration == null || t.sessionGeneration === resumedFrom),
-          )
-        : undefined;
+      const predecessor =
+        resumedFrom != null
+          ? tabsRef.current.find(
+              (t): t is TermSubTab =>
+                t.type === "terminal" &&
+                t.ptyId === resumedFrom &&
+                (t.sessionGeneration == null ||
+                  t.sessionGeneration === resumedFrom),
+            )
+          : undefined;
       if (predecessor) {
         const id = tabId();
-        const group = predecessor.paneGroup ? terminalGroupsRef.current[predecessor.paneGroup] : undefined;
+        const group = predecessor.paneGroup
+          ? terminalGroupsRef.current[predecessor.paneGroup]
+          : undefined;
         if (group) {
           terminalGroupsRef.current = {
             ...terminalGroupsRef.current,
             [group.id]: {
               ...group,
               root: swapLeaves(group.root, predecessor.id, id),
-              activeTabId: group.activeTabId === predecessor.id ? id : group.activeTabId,
-              ...(group.zoomedTabId === predecessor.id ? { zoomedTabId: id } : {}),
+              activeTabId:
+                group.activeTabId === predecessor.id ? id : group.activeTabId,
+              ...(group.zoomedTabId === predecessor.id
+                ? { zoomedTabId: id }
+                : {}),
             },
           };
           setTerminalGroups(terminalGroupsRef.current);
         }
-        setTabs((prev) => prev.map((tab) => tab.id !== predecessor.id ? tab : {
-          id,
-          type: "terminal",
-          cwd,
-          nativeName: name,
-          launchTitle: title || undefined,
-          ...durableNames(predecessor),
-          paneGroup: predecessor.paneGroup,
-          ptyId,
-          sessionGeneration: presentation?.sessionGeneration,
-          attachId: ptyId,
-          killAttachedOnClose: killOnClose || undefined,
-          icon: predecessor.icon ?? icon,
-          command: presentation?.command,
-        }));
-        if (activate || activeTabIdRef.current === predecessor.id) setActiveTabId(id);
+        setTabs((prev) =>
+          prev.map((tab) =>
+            tab.id !== predecessor.id
+              ? tab
+              : {
+                  id,
+                  type: "terminal",
+                  cwd,
+                  nativeName: name,
+                  launchTitle: title || undefined,
+                  ...durableNames(predecessor),
+                  paneGroup: predecessor.paneGroup,
+                  ptyId,
+                  sessionGeneration: presentation?.sessionGeneration,
+                  attachId: ptyId,
+                  killAttachedOnClose: killOnClose || undefined,
+                  icon: predecessor.icon ?? icon,
+                  command: presentation?.command,
+                },
+          ),
+        );
+        if (activate || activeTabIdRef.current === predecessor.id)
+          setActiveTabId(id);
         return id;
       }
-      const saved = presentation && thisInstanceRef.current
-        ? rememberedLiveTerminal(
-            terminalRecoveryMemory,
-            { ptyId, sessionGeneration: presentation.sessionGeneration, cwd, name, resumedFrom },
-            thisInstanceRef.current,
-          )
-        : undefined;
-      const id = saved?.tabId && !tabsRef.current.some(tab => tab.id === saved.tabId)
-        ? saved.tabId : tabId();
+      const saved =
+        presentation && thisInstanceRef.current
+          ? rememberedLiveTerminal(
+              terminalRecoveryMemory,
+              {
+                ptyId,
+                sessionGeneration: presentation.sessionGeneration,
+                cwd,
+                name,
+                resumedFrom,
+              },
+              thisInstanceRef.current,
+            )
+          : undefined;
+      const id =
+        saved?.tabId && !tabsRef.current.some((tab) => tab.id === saved.tabId)
+          ? saved.tabId
+          : tabId();
       if (saved?.tabId) recoveredTabIds.current.set(saved.tabId, id);
-      const configured = presentation?.componentId && presentation.runCommandId
-        ? componentsRef.current
-            .find((component) => component.id === presentation.componentId)
-            ?.commands?.find((command) => command.id === presentation.runCommandId)
-        : undefined;
+      const configured =
+        presentation?.componentId && presentation.runCommandId
+          ? componentsRef.current
+              .find((component) => component.id === presentation.componentId)
+              ?.commands?.find(
+                (command) => command.id === presentation.runCommandId,
+              )
+          : undefined;
       const identity = recoveredIdentity(saved, {
         command: presentation?.command,
         run: presentation?.run,
@@ -2418,12 +2757,21 @@ const ProjectViewBody = memo(function ProjectViewBody({
     if (!thisInstance) return;
     const existing = [
       ...terminalAttachmentQueue.attachments(project.id),
-      ...recoveryNativeSessions.current.filter(s => s.kind !== "detached").map(s => ({
-        ptyId: s.id, sessionGeneration: s.session_generation, cwd: s.cwd, name: s.name,
-      })),
+      ...recoveryNativeSessions.current
+        .filter((s) => s.kind !== "detached")
+        .map((s) => ({
+          ptyId: s.id,
+          sessionGeneration: s.session_generation,
+          cwd: s.cwd,
+          name: s.name,
+        })),
     ];
     for (const attachment of existing) {
-      const saved = rememberedLiveTerminal(terminalRecoveryMemory, attachment, thisInstance);
+      const saved = rememberedLiveTerminal(
+        terminalRecoveryMemory,
+        attachment,
+        thisInstance,
+      );
       if (saved?.tabId) expectedRecoveredTabs.current.add(saved.tabId);
     }
     return terminalAttachmentQueue.subscribe(project.id, (d) => {
@@ -2450,31 +2798,52 @@ const ProjectViewBody = memo(function ProjectViewBody({
   useEffect(() => {
     if (!thisInstance) return;
     const groups = recoverLiveGroups(
-      terminalRecoveryMemory, recoveredTabIds.current, expectedRecoveredTabs.current,
+      terminalRecoveryMemory,
+      recoveredTabIds.current,
+      expectedRecoveredTabs.current,
     );
-    const fresh = Object.entries(groups).filter(([id]) => !restoredLiveGroups.current.has(id));
+    const fresh = Object.entries(groups).filter(
+      ([id]) => !restoredLiveGroups.current.has(id),
+    );
     if (fresh.length) {
-      const membership = new Map(fresh.flatMap(([id, group]) =>
-        leafIds(group.root).map(tabId => [tabId, id] as const),
-      ));
+      const membership = new Map(
+        fresh.flatMap(([id, group]) =>
+          leafIds(group.root).map((tabId) => [tabId, id] as const),
+        ),
+      );
       for (const [id] of fresh) restoredLiveGroups.current.add(id);
-      terminalGroupsRef.current = { ...terminalGroupsRef.current, ...Object.fromEntries(fresh) };
+      terminalGroupsRef.current = {
+        ...terminalGroupsRef.current,
+        ...Object.fromEntries(fresh),
+      };
       setTerminalGroups(terminalGroupsRef.current);
-      setTabs(prev => prev.map(tab =>
-        tab.type === "terminal" && membership.has(tab.id)
-          ? { ...tab, paneGroup: membership.get(tab.id) } : tab,
-      ));
+      setTabs((prev) =>
+        prev.map((tab) =>
+          tab.type === "terminal" && membership.has(tab.id)
+            ? { ...tab, paneGroup: membership.get(tab.id) }
+            : tab,
+        ),
+      );
       const focusedGroup = fresh.find(([, group]) =>
         leafIds(group.root).includes(activeTabIdRef.current ?? ""),
       );
       if (focusedGroup) setActiveTabId(focusedGroup[1].activeTabId);
       return; // Persist after both group and pane membership have committed.
     }
-    const attached = [...expectedRecoveredTabs.current].every(id => recoveredTabIds.current.has(id));
-    const hydrated = Object.entries(groups).every(([id, group]) =>
-      !!terminalGroups[id] && leafIds(group.root).every(member =>
-        tabs.some(tab => tab.type === "terminal" && tab.id === member && tab.paneGroup === id),
-      ),
+    const attached = [...expectedRecoveredTabs.current].every((id) =>
+      recoveredTabIds.current.has(id),
+    );
+    const hydrated = Object.entries(groups).every(
+      ([id, group]) =>
+        !!terminalGroups[id] &&
+        leafIds(group.root).every((member) =>
+          tabs.some(
+            (tab) =>
+              tab.type === "terminal" &&
+              tab.id === member &&
+              tab.paneGroup === id,
+          ),
+        ),
     );
     if (attached && hydrated) terminalRecoveryComplete.current = true;
   }, [tabs, terminalGroups, thisInstance, terminalRecoveryMemory]);
@@ -2527,11 +2896,16 @@ const ProjectViewBody = memo(function ProjectViewBody({
               path,
               remote: await ipc.gitRemoteUrl(path).catch(() => ""),
             })),
-          ).then((repos) =>
-            repos.find((r) => r.remote.toLowerCase() === repo.toLowerCase())?.path,
+          ).then(
+            (repos) =>
+              repos.find((r) => r.remote.toLowerCase() === repo.toLowerCase())
+                ?.path,
           );
       if (!localRepo) {
-        if (url) void import("@tauri-apps/plugin-opener").then(({ openUrl }) => openUrl(url));
+        if (url)
+          void import("@tauri-apps/plugin-opener").then(({ openUrl }) =>
+            openUrl(url),
+          );
         return;
       }
       const pr = await ipc
@@ -2556,12 +2930,18 @@ const ProjectViewBody = memo(function ProjectViewBody({
     );
   }, []);
 
-  const restoreTerminalNames = useCallback((id: string, snapshot: Parameters<typeof adoptSnapshotNames>[0]) => {
-    setTabs(prev => prev.map(tab =>
-      tab.type === "terminal" && tab.id === id && !isUserNamed(tab)
-        ? { ...tab, ...adoptSnapshotNames(snapshot) } : tab,
-    ));
-  }, []);
+  const restoreTerminalNames = useCallback(
+    (id: string, snapshot: Parameters<typeof adoptSnapshotNames>[0]) => {
+      setTabs((prev) =>
+        prev.map((tab) =>
+          tab.type === "terminal" && tab.id === id && !isUserNamed(tab)
+            ? { ...tab, ...adoptSnapshotNames(snapshot) }
+            : tab,
+        ),
+      );
+    },
+    [],
+  );
 
   /** Record a user rename, whichever surface it came from — the inline tab
    *  rename, a pane header, or the Agents page editor, which addresses a
@@ -2576,9 +2956,10 @@ const ProjectViewBody = memo(function ProjectViewBody({
             if (t.type !== "terminal" || t.ptyId !== ptyId) return t;
             // Clearing the field asks for the generated label back: forget the
             // user's name rather than adopting native's fallback as a choice.
-            const patch = source === "intent"
-              ? namePatch(t, "user", cleared ? undefined : requested)
-              : namePatch(t, "native", accepted);
+            const patch =
+              source === "intent"
+                ? namePatch(t, "user", cleared ? undefined : requested)
+                : namePatch(t, "native", accepted);
             return patch ? { ...t, ...patch } : t;
           }),
         );
@@ -2616,6 +2997,13 @@ const ProjectViewBody = memo(function ProjectViewBody({
   /** Open an Android device tab. With no serial it opens on the pick-a-device
    *  form; the project defaults to the first component, which is what resolves
    *  the SDK (a project's local.properties pins one). */
+  // The phone preview that floats over the IDE (FloatingPhone), if one is open.
+  const [floatPhone, setFloatPhone] = useState<{
+    serial: string;
+    label: string;
+    projectDir: string;
+  } | null>(null);
+
   const openDevice = useCallback((serial = "") => {
     const id = tabId();
     setTabs((prev) => [
@@ -2637,7 +3025,8 @@ const ProjectViewBody = memo(function ProjectViewBody({
    *  null) or a DM — reusing one already open for it. */
   const openChat = useCallback((peer: string | null, name: string) => {
     const existing = tabsRef.current.find(
-      (t): t is ChatSubTab => t.type === "chat" && !t.accountConversation && t.peer === peer,
+      (t): t is ChatSubTab =>
+        t.type === "chat" && !t.accountConversation && t.peer === peer,
     );
     if (existing) {
       setActiveTabId(existing.id);
@@ -2649,15 +3038,43 @@ const ProjectViewBody = memo(function ProjectViewBody({
   }, []);
 
   const openAccountChat = useCallback((conversation: AccountConversation) => {
-    const existing = tabsRef.current.find(t => t.type === "chat" && t.accountConversation?.teamId === conversation.teamId && t.accountConversation?.userId === conversation.userId && t.peer === conversation.peer);
+    const existing = tabsRef.current.find(
+      (t) =>
+        t.type === "chat" &&
+        t.accountConversation?.teamId === conversation.teamId &&
+        t.accountConversation?.userId === conversation.userId &&
+        t.peer === conversation.peer,
+    );
     if (existing) {
       // A message link into an open conversation: carry the message to focus.
-      if (conversation.focusMessage) setTabs(prev => prev.map(t => t.id === existing.id && t.type === "chat" && t.accountConversation ? {...t, accountConversation:{...t.accountConversation, focusMessage:conversation.focusMessage}} : t));
+      if (conversation.focusMessage)
+        setTabs((prev) =>
+          prev.map((t) =>
+            t.id === existing.id && t.type === "chat" && t.accountConversation
+              ? {
+                  ...t,
+                  accountConversation: {
+                    ...t.accountConversation,
+                    focusMessage: conversation.focusMessage,
+                  },
+                }
+              : t,
+          ),
+        );
       setActiveTabId(existing.id);
       return;
     }
     const id = tabId();
-    setTabs(prev => [...prev, {id, type:"chat", peer:conversation.peer, name:conversation.name, accountConversation:conversation}]);
+    setTabs((prev) => [
+      ...prev,
+      {
+        id,
+        type: "chat",
+        peer: conversation.peer,
+        name: conversation.name,
+        accountConversation: conversation,
+      },
+    ]);
     setActiveTabId(id);
     dismissPeekRef.current();
   }, []);
@@ -2768,7 +3185,10 @@ const ProjectViewBody = memo(function ProjectViewBody({
           let model = monaco.editor.getModel(monaco.Uri.file(abs));
           if (!model) {
             try {
-              model = modelFor(abs, await ipc.fsReadText(abs, sizeLimitFor("code")));
+              model = modelFor(
+                abs,
+                await ipc.fsReadText(abs, sizeLimitFor("code")),
+              );
             } catch {
               onNotice(`Couldn't open ${relPath} to share.`, "error");
               return;
@@ -2982,7 +3402,9 @@ const ProjectViewBody = memo(function ProjectViewBody({
    *  see, covering the terminal you did. A Set also means A stays open when you
    *  duck over to B and come back. */
   const [wsOpenPtys, setWsOpenPtys] = useState<ReadonlySet<number>>(new Set());
-  const [memoryFlyoutTabId, setMemoryFlyoutTabId] = useState<string | null>(null);
+  const [memoryFlyoutTabId, setMemoryFlyoutTabId] = useState<string | null>(
+    null,
+  );
   // Mirrored for the agent-action handler, which is mounted once and must not
   // re-subscribe every time a digest poll lands.
   const wsDigestsRef = useRef(wsDigests);
@@ -2999,13 +3421,22 @@ const ProjectViewBody = memo(function ProjectViewBody({
     if (ipc.rendererInstanceId()) return;
     let cancelled = false;
     let retry: ReturnType<typeof setTimeout> | undefined;
-    const load = () => void Promise.all([ipc.instanceId(), ipc.rendererPtySessionsLive()]).then(([id, sessions]) => {
-      if (!cancelled) { recoveryNativeSessions.current = sessions; setThisInstance(id); }
-    }).catch(() => {
-      if (!cancelled) retry = setTimeout(load, 1000);
-    });
+    const load = () =>
+      void Promise.all([ipc.instanceId(), ipc.rendererPtySessionsLive()])
+        .then(([id, sessions]) => {
+          if (!cancelled) {
+            recoveryNativeSessions.current = sessions;
+            setThisInstance(id);
+          }
+        })
+        .catch(() => {
+          if (!cancelled) retry = setTimeout(load, 1000);
+        });
     load();
-    return () => { cancelled = true; if (retry) clearTimeout(retry); };
+    return () => {
+      cancelled = true;
+      if (retry) clearTimeout(retry);
+    };
   }, []);
   useEffect(() => {
     const load = () =>
@@ -3038,8 +3469,18 @@ const ProjectViewBody = memo(function ProjectViewBody({
               // same id on that machine is another terminal's.
               const launchedAt = new Map<number, number>();
               for (const t of tabsRef.current)
-                if (t.type === "terminal" && t.machine && t.ptyId != null && t.launchedAt) launchedAt.set(t.ptyId, t.launchedAt);
-              return fetchMachineDigests(machines, thisInstanceRef.current, launchedAt);
+                if (
+                  t.type === "terminal" &&
+                  t.machine &&
+                  t.ptyId != null &&
+                  t.launchedAt
+                )
+                  launchedAt.set(t.ptyId, t.launchedAt);
+              return fetchMachineDigests(
+                machines,
+                thisInstanceRef.current,
+                launchedAt,
+              );
             })
             .catch(() => [])
             .then((remote) => {
@@ -3117,7 +3558,10 @@ const ProjectViewBody = memo(function ProjectViewBody({
     const open: RememberedTerminal[] = tabs
       .filter(
         (t): t is TermSubTab =>
-          t.type === "terminal" && !t.exited && !t.micro && !t.chore &&
+          t.type === "terminal" &&
+          !t.exited &&
+          !t.micro &&
+          !t.chore &&
           rememberableTab(t),
       )
       .map((t) => ({
@@ -3136,14 +3580,23 @@ const ProjectViewBody = memo(function ProjectViewBody({
         instance: thisInstanceRef.current ?? undefined,
         paneGroup: t.paneGroup,
         sessionId:
-          (t.ptyId != null ? liveSessionByPtyRef.current.get(t.ptyId) : undefined) ??
+          (t.ptyId != null
+            ? liveSessionByPtyRef.current.get(t.ptyId)
+            : undefined) ??
           resumeSessionId(t.command) ??
           t.rememberedSessionId ??
           undefined,
         profile: t.profile,
       }));
     rememberTerminals(project.id, open, terminalGroups, terminalMemoryScope);
-  }, [tabs, terminalGroups, project.id, events, thisInstance, terminalMemoryScope]);
+  }, [
+    tabs,
+    terminalGroups,
+    project.id,
+    events,
+    thisInstance,
+    terminalMemoryScope,
+  ]);
 
   const [remembered, setRemembered] = useState<RememberedTerminal[]>([]);
   const [rememberedLayouts, setRememberedLayouts] = useState<
@@ -3169,7 +3622,10 @@ const ProjectViewBody = memo(function ProjectViewBody({
         .filter(
           (s) =>
             s.kind !== "detached" &&
-            !terminalAttachmentQueue.hasSeen({ ptyId: s.id, sessionGeneration: s.session_generation }) &&
+            !terminalAttachmentQueue.hasSeen({
+              ptyId: s.id,
+              sessionGeneration: s.session_generation,
+            }) &&
             (s.project_id === project.id ||
               projectForTerminalCwd([project], s.cwd) === project.id),
         )
@@ -3214,13 +3670,15 @@ const ProjectViewBody = memo(function ProjectViewBody({
       if (agent) {
         const sessionId = t.sessionId || resumeSessionId(t.command);
         const target = agentCliFor(agent)?.capabilities?.conversationTransfer
-          ? activeProfile() : profile;
+          ? activeProfile()
+          : profile;
         try {
           if (sessionId && target !== profile) {
             await ipc.profilePrepareSession(agent, sessionId, profile, target);
           }
           env = await ipc.profileEnv(agent, target);
-          if (!envReachesProfile(target, env)) throw new Error("Selected account is unavailable");
+          if (!envReachesProfile(target, env))
+            throw new Error("Selected account is unavailable");
           profile = target;
         } catch (error) {
           void ipc.notifyNative("Could not reopen terminal", String(error));
@@ -3269,7 +3727,8 @@ const ProjectViewBody = memo(function ProjectViewBody({
         return open.id;
       }
       const sourceProfile = r.profile || "default";
-      const targetProfile = agentCliFor(r.agentId)?.capabilities?.conversationTransfer
+      const targetProfile = agentCliFor(r.agentId)?.capabilities
+        ?.conversationTransfer
         ? activeProfile()
         : sourceProfile;
       let env: [string, string][];
@@ -3277,7 +3736,12 @@ const ProjectViewBody = memo(function ProjectViewBody({
         // Prepare only this conversation; account credentials stay separate.
         // Do not hide the restore card or launch under a fallback account on failure.
         if (targetProfile !== sourceProfile) {
-          await ipc.profilePrepareSession(r.agentId, r.digest.session_id, sourceProfile, targetProfile);
+          await ipc.profilePrepareSession(
+            r.agentId,
+            r.digest.session_id,
+            sourceProfile,
+            targetProfile,
+          );
         }
         env = await ipc.profileEnv(r.agentId, targetProfile);
         if (targetProfile !== "default" && !env.length) {
@@ -3327,14 +3791,16 @@ const ProjectViewBody = memo(function ProjectViewBody({
         }
       }
 
-      const root = card.group && !only ? mapSplitTabIds(card.group.root, ids) : null;
+      const root =
+        card.group && !only ? mapSplitTabIds(card.group.root, ids) : null;
       const memberIds = root ? leafIds(root) : [];
       if (card.group && root && memberIds.length >= 2) {
         const existingGroup = terminalGroupsRef.current[card.group.id];
         const group: TerminalGroup = {
           ...card.group,
           ...(existingGroup && isUserNamed(existingGroup)
-            ? namePatch({}, "user", tabName(existingGroup)) : {}),
+            ? namePatch({}, "user", tabName(existingGroup))
+            : {}),
           root,
           activeTabId: ids.get(card.group.activeTabId) ?? memberIds[0],
           zoomedTabId: card.group.zoomedTabId
@@ -3368,43 +3834,88 @@ const ProjectViewBody = memo(function ProjectViewBody({
    *  Locally the agent moves inside its own terminal (accountHandover.ts), so a
    *  failure leaves it on its original account. A workspace session still stops
    *  and relaunches, because its host cannot yet stop only the agent. */
-  const moveAgentRef = useRef<(tabId: string, to: string, opts?: { prompt?: boolean; sessionId?: string }) => Promise<HandoverResult | null>>(async () => null);
-  const runReload = useCallback(async (ask: NonNullable<typeof reloadAsk>) => {
-    setReloadAsk(null);
-    for (const item of reloading(ask.plan)) {
-      const cli = agentCliFor(item.agent.agentId);
-      if (!cli || !item.action) continue;
-      try {
-        // Resolve the explicitly confirmed account, even if the global picker
-        // changed again while the confirmation was open.
-        const env = await ipc.profileEnv(cli.id, ask.profile);
-        if (!envReachesProfile(ask.profile, env)) throw new Error("Selected account is unavailable");
-        const tab = tabsRef.current.find(t => t.id === item.agent.tabId && t.type === "terminal") as TermSubTab | undefined;
-        if (!tab) continue;
-        if (item.action.kind === "resume" && item.action.sourceProfile === ask.profile) continue;
-        if (item.action.kind === "resume" && item.action.sourceProfile && !isRemoteHost() && canHandOver()) {
-          const moved = await moveAgentRef.current(tab.id, ask.profile, { sessionId: item.action.sessionId });
-          if (moved?.outcome === "restored") onNoticeRef.current(`${item.agent.label} stayed on its account: ${moved.reason}`, "error");
-          if (moved?.outcome === "failed") onNoticeRef.current(`${item.agent.label} could not move: ${moved.reason}`, "error");
-          continue;
+  const moveAgentRef = useRef<
+    (
+      tabId: string,
+      to: string,
+      opts?: { prompt?: boolean; sessionId?: string },
+    ) => Promise<HandoverResult | null>
+  >(async () => null);
+  const runReload = useCallback(
+    async (ask: NonNullable<typeof reloadAsk>) => {
+      setReloadAsk(null);
+      for (const item of reloading(ask.plan)) {
+        const cli = agentCliFor(item.agent.agentId);
+        if (!cli || !item.action) continue;
+        try {
+          // Resolve the explicitly confirmed account, even if the global picker
+          // changed again while the confirmation was open.
+          const env = await ipc.profileEnv(cli.id, ask.profile);
+          if (!envReachesProfile(ask.profile, env))
+            throw new Error("Selected account is unavailable");
+          const tab = tabsRef.current.find(
+            (t) => t.id === item.agent.tabId && t.type === "terminal",
+          ) as TermSubTab | undefined;
+          if (!tab) continue;
+          if (
+            item.action.kind === "resume" &&
+            item.action.sourceProfile === ask.profile
+          )
+            continue;
+          if (
+            item.action.kind === "resume" &&
+            item.action.sourceProfile &&
+            !isRemoteHost() &&
+            canHandOver()
+          ) {
+            const moved = await moveAgentRef.current(tab.id, ask.profile, {
+              sessionId: item.action.sessionId,
+            });
+            if (moved?.outcome === "restored")
+              onNoticeRef.current(
+                `${item.agent.label} stayed on its account: ${moved.reason}`,
+                "error",
+              );
+            if (moved?.outcome === "failed")
+              onNoticeRef.current(
+                `${item.agent.label} could not move: ${moved.reason}`,
+                "error",
+              );
+            continue;
+          }
+          if (item.action.kind === "resume" && item.action.sourceProfile) {
+            if (tab.ptyId != null) await ipc.ptyStopAndWait(tab.ptyId);
+            await ipc.profilePrepareSession(
+              cli.id,
+              item.action.sessionId,
+              item.action.sourceProfile,
+              ask.profile,
+            );
+          }
+          closeTabRef.current(item.agent.tabId);
+          if (item.action.kind === "resume")
+            markRestored(item.action.sessionId);
+          addTerminal(
+            item.action.kind === "resume" ? item.action.cwd : item.agent.cwd,
+            item.action.kind === "resume"
+              ? item.action.command
+              : launchCommand(cli),
+            cli.name,
+            cli.icon,
+            false,
+            env,
+            ask.profile === DEFAULT_PROFILE ? undefined : ask.profile,
+          );
+        } catch (error) {
+          void ipc.notifyNative(
+            "Account switch could not finish",
+            String(error),
+          );
         }
-        if (item.action.kind === "resume" && item.action.sourceProfile) {
-          if (tab.ptyId != null) await ipc.ptyStopAndWait(tab.ptyId);
-          await ipc.profilePrepareSession(cli.id, item.action.sessionId, item.action.sourceProfile, ask.profile);
-        }
-        closeTabRef.current(item.agent.tabId);
-        if (item.action.kind === "resume") markRestored(item.action.sessionId);
-        addTerminal(
-          item.action.kind === "resume" ? item.action.cwd : item.agent.cwd,
-          item.action.kind === "resume" ? item.action.command : launchCommand(cli),
-          cli.name, cli.icon, false, env,
-          ask.profile === DEFAULT_PROFILE ? undefined : ask.profile,
-        );
-      } catch (error) {
-        void ipc.notifyNative("Account switch could not finish", String(error));
       }
-    }
-  }, [addTerminal]);
+    },
+    [addTerminal],
+  );
 
   // Which rows "Restore all" would actually reopen. Every row in the block, in
   // the order the block renders them, each with the thunk that opens it — so
@@ -3427,12 +3938,17 @@ const ProjectViewBody = memo(function ProjectViewBody({
   // A machine can take a few agents starting at once; ten is where it stops
   // being a choice you can take back, so that one gets confirmed.
   const RESUME_CONFIRM_OVER = 10;
-  const resumeTerminalCount = resumeItems.reduce((sum, item) => sum + item.count, 0);
+  const resumeTerminalCount = resumeItems.reduce(
+    (sum, item) => sum + item.count,
+    0,
+  );
   const pickable = resumeTerminalCount > RESUME_PICK_FROM;
   const [picked, setPicked] = useState<string[]>([]);
   // Rows come and go as sessions are restored or forgotten; a key left behind
   // would keep "Restore selected (3)" claiming a row nobody can see.
-  const chosen = pickable ? picked.filter((k) => resumeItems.some((i) => i.key === k)) : [];
+  const chosen = pickable
+    ? picked.filter((k) => resumeItems.some((i) => i.key === k))
+    : [];
   const [confirmResume, setConfirmResume] = useState<{
     count: number;
     go: () => void;
@@ -3487,7 +4003,13 @@ const ProjectViewBody = memo(function ProjectViewBody({
    *  ticket's worktree, on `seed` (planned or not). Also what a plan approved
    *  after a restart resumes through (restoreWaitingPlans). */
   const continueTicketWork = useCallback(
-    async (ticket: ipc.TicketInfo, repo: string, agentId: string, seed: string, planId?: string) => {
+    async (
+      ticket: ipc.TicketInfo,
+      repo: string,
+      agentId: string,
+      seed: string,
+      planId?: string,
+    ) => {
       const installedHere = getInstalled();
       const cli = pickLaunchCli(agentId, (bin) => Boolean(installedHere[bin]));
       if (!cli) {
@@ -3535,15 +4057,18 @@ const ProjectViewBody = memo(function ProjectViewBody({
         .catch(() => [] as ipc.BranchInfo[]);
       const r = await switchTo(
         repo,
-        { kind: "workspace", branch, create: !branches.some((b) => b.name === branch) },
+        {
+          kind: "workspace",
+          branch,
+          create: !branches.some((b) => b.name === branch),
+        },
         { because: `the ticket ${ticket.id}` },
       );
       if (r.kind !== "settled") return; // already asked and answered on screen
       setTicketWorktrees(await ipc.gitWorktrees(repo).catch(() => worktrees));
       expectIn(r.path);
       const id = addTerminal(r.path, start.command, title, cli.icon);
-      if (id && start.typePrompt)
-        pendingTerminalPrompts.current.set(id, seed);
+      if (id && start.typePrompt) pendingTerminalPrompts.current.set(id, seed);
     },
     [addTerminal, onNotice, getInstalled, switchTo],
   );
@@ -3552,7 +4077,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
    *  implementation both the Issues panel and the ticket tab call. */
   const startTicketWork = useCallback(
     async (ticket: ipc.TicketInfo, requestedRepo: string, agentId?: string) => {
-      const repo = requestedRepo || await ticketRepo();
+      const repo = requestedRepo || (await ticketRepo());
       if (!repo) {
         onNotice("No git repository in this project.");
         return;
@@ -3583,7 +4108,10 @@ const ProjectViewBody = memo(function ProjectViewBody({
           source: "ticket",
           mode: "interactive",
           ticketId: ticket.id,
-          resume: { kind: "ticket-work", payload: { ticket, repo, agentId: agent } },
+          resume: {
+            kind: "ticket-work",
+            payload: { ticket, repo, agentId: agent },
+          },
         },
         (planned, id) => {
           seed = planned;
@@ -3852,16 +4380,19 @@ const ProjectViewBody = memo(function ProjectViewBody({
     setActiveTabId(id);
   }, []);
 
-  const openCollectionPage = useCallback((type: "research-list" | "notes-list" | "prs-list" | "issues-list") => {
-    const existing = tabsRef.current.find((t) => t.type === type);
-    if (existing) {
-      setActiveTabId(existing.id);
-      return;
-    }
-    const id = tabId();
-    setTabs((prev) => [...prev, { id, type }]);
-    setActiveTabId(id);
-  }, []);
+  const openCollectionPage = useCallback(
+    (type: "research-list" | "notes-list" | "prs-list" | "issues-list") => {
+      const existing = tabsRef.current.find((t) => t.type === type);
+      if (existing) {
+        setActiveTabId(existing.id);
+        return;
+      }
+      const id = tabId();
+      setTabs((prev) => [...prev, { id, type }]);
+      setActiveTabId(id);
+    },
+    [],
+  );
 
   /** Open one MCP server as its own tab, reusing the one already open for it.
    *  Identity is the server key — the same server reached through two CLIs is
@@ -3899,7 +4430,10 @@ const ProjectViewBody = memo(function ProjectViewBody({
         return;
       }
       const id = tabId();
-      setTabs((prev) => [...prev, { id, type: "claim", claimId: claim.id, claim }]);
+      setTabs((prev) => [
+        ...prev,
+        { id, type: "claim", claimId: claim.id, claim },
+      ]);
       setActiveTabId(id);
     },
     [patchTabRaw],
@@ -4014,20 +4548,27 @@ const ProjectViewBody = memo(function ProjectViewBody({
       // (the same default the picker uses), which is the active account when it
       // has none of its own.
       const ids = profilesRef.current.map((p) => p.id);
-      const wanted = await resolveProfile(cli.id, requestedProfile || lastProfileFor(cli.id, ids), ids);
+      const wanted = await resolveProfile(
+        cli.id,
+        requestedProfile || lastProfileFor(cli.id, ids),
+        ids,
+      );
       const profile = wanted || DEFAULT_PROFILE;
       const env =
         wanted === DEFAULT_PROFILE
           ? []
           : wanted && wanted !== launchProfile(cli.id)
-            ? await ipc.profileEnv(cli.id, wanted).catch(() => [] as [string, string][])
+            ? await ipc
+                .profileEnv(cli.id, wanted)
+                .catch(() => [] as [string, string][])
             : launchEnvSync(cli.id);
       const route = await inspectFleetRoute(cli, profile, installed);
       const gate = fleetGate(route.state);
       const profileName =
         profile === DEFAULT_PROFILE
           ? "default"
-          : (profilesRef.current.find((item) => item.id === profile)?.label ?? profile);
+          : (profilesRef.current.find((item) => item.id === profile)?.label ??
+            profile);
       const label = `${cli.name} · ${profileName}`;
       if (!gate.allowed) {
         const text = `${label} can't start: ${gate.why ?? "route unavailable"}.`;
@@ -4053,7 +4594,12 @@ const ProjectViewBody = memo(function ProjectViewBody({
    *  the agent just opens in the existing checkout. Same resolve-CLI-then-seed
    *  shape as startTicketWork/startPrAgent. */
   const startAgentInDir = useCallback(
-    async (dir: string, agentId: string | undefined, seed: string, title: string) => {
+    async (
+      dir: string,
+      agentId: string | undefined,
+      seed: string,
+      title: string,
+    ) => {
       const installed = await getInstalledForLaunch();
       const cli = pickLaunchCli(agentId, (bin) => Boolean(installed[bin]));
       if (!cli) {
@@ -4079,8 +4625,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
           ? undefined
           : fleet.route.profile,
       );
-      if (id && start.typePrompt)
-        pendingTerminalPrompts.current.set(id, seed);
+      if (id && start.typePrompt) pendingTerminalPrompts.current.set(id, seed);
       return Boolean(id);
     },
     [addTerminal, onNotice, getInstalledForLaunch, gateManagedLaunch],
@@ -4111,7 +4656,8 @@ const ProjectViewBody = memo(function ProjectViewBody({
       if (
         placement.mode === "split" &&
         !tabsRef.current.some(
-          (tab) => tab.type === "terminal" && tab.ptyId === placement.relativeToPtyId,
+          (tab) =>
+            tab.type === "terminal" && tab.ptyId === placement.relativeToPtyId,
         )
       ) {
         throw new Error(
@@ -4122,7 +4668,8 @@ const ProjectViewBody = memo(function ProjectViewBody({
       const cli = pickLaunchCli(a.agent, (bin) => Boolean(installed[bin]));
       if (!cli) throw new Error(`Unknown agent "${a.agent}".`);
       const fleet = await gateManagedLaunch(cli, installed);
-      if (!fleet.allowed) throw new Error("Canopy's fleet gate refused this agent launch");
+      if (!fleet.allowed)
+        throw new Error("Canopy's fleet gate refused this agent launch");
       // autoClose = the micro-task contract, reused whole: the env below
       // exposes canopy_job_done to the child, and the protocol line tells it
       // to report and stop — after which the same teardown a Tasks run gets
@@ -4134,7 +4681,8 @@ const ProjectViewBody = memo(function ProjectViewBody({
       const component = [...project.components]
         .filter(
           (candidate) =>
-            a.route === candidate.path || a.route.startsWith(`${candidate.path}/`),
+            a.route === candidate.path ||
+            a.route.startsWith(`${candidate.path}/`),
         )
         .sort((left, right) => right.path.length - left.path.length)[0];
       const title = a.title?.trim() || "Delegated task";
@@ -4144,7 +4692,9 @@ const ProjectViewBody = memo(function ProjectViewBody({
         componentId: component?.id ?? project.id,
         worktreePath: a.route,
         goal: a.brief,
-        acceptance: ["Complete the brief and report the outcome to the parent or user."],
+        acceptance: [
+          "Complete the brief and report the outcome to the parent or user.",
+        ],
         taskClasses: { agent_delegation: 1 },
         contextSummary: `Delegated by terminal ${a.parentPtyId} at depth ${a.spawnDepth}.`,
         riskClass: "writes",
@@ -4190,7 +4740,9 @@ const ProjectViewBody = memo(function ProjectViewBody({
         cli.icon,
         false,
         spawnEnv,
-        fleet.route.profile === DEFAULT_PROFILE ? undefined : fleet.route.profile,
+        fleet.route.profile === DEFAULT_PROFILE
+          ? undefined
+          : fleet.route.profile,
         activate,
         undefined,
         undefined,
@@ -4359,7 +4911,11 @@ const ProjectViewBody = memo(function ProjectViewBody({
         onNotice(`No agent CLI installed to run "${def.label}".`);
         return false;
       }
-      const fleet = await gateManagedLaunch(cli, installed, launchOptions?.profileId);
+      const fleet = await gateManagedLaunch(
+        cli,
+        installed,
+        launchOptions?.profileId,
+      );
       if (!fleet.allowed) return false;
       // A task that edits files gets the PR's branch in a worktree of its own,
       // same deal as startPrAgent: reuse the worktree already holding it, else
@@ -4415,7 +4971,13 @@ const ProjectViewBody = memo(function ProjectViewBody({
       const seed = oneLine(
         `${brief} ${progressBrief(def, payload)} ${microTaskProtocol()}`,
       );
-      const start = await startCommandParked(agent, seed, dir, launchOptions, sandbox);
+      const start = await startCommandParked(
+        agent,
+        seed,
+        dir,
+        launchOptions,
+        sandbox,
+      );
       if (!start) {
         onNotice(`No agent CLI installed to run "${def.label}".`);
         return false;
@@ -4450,7 +5012,9 @@ const ProjectViewBody = memo(function ProjectViewBody({
       try {
         const appInstance = await ipc.instanceId();
         durableHistory = { ...history, appInstance };
-        reservation = existingReservation ?? await reserveTask({
+        reservation =
+          existingReservation ??
+          (await reserveTask({
             kind: def.id,
             projectId: project.id,
             componentId: component?.id ?? project.id,
@@ -4474,7 +5038,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
               toolPolicyVersion: "micro-task-v1",
               executionMode: "pty",
             },
-          });
+          }));
       } catch (err) {
         onNotice(`Couldn't reserve "${def.label}": ${String(err)}`, "error");
         return false;
@@ -4551,7 +5115,10 @@ const ProjectViewBody = memo(function ProjectViewBody({
       // The tab path prefixes the same variables onto the command line, since
       // there is no env channel here — single-quoted so a value with a space
       // (an entry directory under a path with one) survives the shell.
-      const envPrefix = [["CANOPY_MICRO_TASK", "1"] as [string, string], ...extraEnv]
+      const envPrefix = [
+        ["CANOPY_MICRO_TASK", "1"] as [string, string],
+        ...extraEnv,
+      ]
         .map(([k, v]) => `${k}='${v.replace(/'/g, `'\\''`)}'`)
         .join(" ");
       const id = addTerminal(
@@ -4572,8 +5139,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
       patchTabRaw(id, {
         micro: { taskId: def.id, runId, attemptId },
       } as Partial<SubTab>);
-      if (start.typePrompt)
-        pendingTerminalPrompts.current.set(id, seed);
+      if (start.typePrompt) pendingTerminalPrompts.current.set(id, seed);
       return true;
     },
     [
@@ -4624,14 +5190,21 @@ const ProjectViewBody = memo(function ProjectViewBody({
       const body = text.trim();
       if (!body && attachments.length === 0) return;
       const dir = componentsRef.current[0]?.path;
-      const active = tabsRef.current.find((t) => t.id === activeTabIdRef.current);
+      const active = tabsRef.current.find(
+        (t) => t.id === activeTabIdRef.current,
+      );
       const termText =
         active?.type === "terminal"
           ? (termHandles.current.get(active.id)?.captureText(2000) ?? undefined)
           : undefined;
       try {
         const context = dir
-          ? await capturePageContext({ activeTab: active, dir, termText, rect: null })
+          ? await capturePageContext({
+              activeTab: active,
+              dir,
+              termText,
+              rect: null,
+            })
           : "";
         const note = await createNote({
           projectId: project.id,
@@ -4649,7 +5222,12 @@ const ProjectViewBody = memo(function ProjectViewBody({
         let lost = 0;
         for (const path of attachments) {
           await ipc
-            .notesAttachFile({ projectId: project.id, id: note.id, path, kind: "image" })
+            .notesAttachFile({
+              projectId: project.id,
+              id: note.id,
+              path,
+              kind: "image",
+            })
             .catch(() => {
               lost += 1;
             });
@@ -4674,9 +5252,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
    *  a button press. */
   const workOnNote = useCallback(
     async (note: ipc.NoteDetail, userQuery = "", agentId?: string) => {
-      const dir = await ipc
-        .notesDir(project.id, note.id)
-        .catch(() => note.dir);
+      const dir = await ipc.notesDir(project.id, note.id).catch(() => note.dir);
       const ok = await startMicroTask(
         noteTask,
         {
@@ -4703,7 +5279,11 @@ const ProjectViewBody = memo(function ProjectViewBody({
   );
 
   const startResearch = useCallback(
-    async (question: string, userQuery = "", ticket?: ipc.ResearchTicketLink) => {
+    async (
+      question: string,
+      userQuery = "",
+      ticket?: ipc.ResearchTicketLink,
+    ) => {
       const draft = researchRequestDraft(question);
       const q = draft.question;
       if (!q) return false;
@@ -4713,51 +5293,68 @@ const ProjectViewBody = memo(function ProjectViewBody({
       const title = q.length > 80 ? `${q.slice(0, 77).trimEnd()}…` : q;
       try {
         const result = await dispatchResearch({
-          create: () => researchStart({
-            projectId: project.id,
-            projectName: project.name,
-            roots,
-            title,
-            question: q,
-            body: draft.body,
-            cwd: roots[0],
-          }),
+          create: () =>
+            researchStart({
+              projectId: project.id,
+              projectName: project.name,
+              roots,
+              title,
+              question: q,
+              body: draft.body,
+              cwd: roots[0],
+            }),
           // Link before opening the tab, so the entry carries the ticket it
           // came from the first time anyone looks at it.
           link: ticket
             ? async (entry) => {
-                await researchLinkEntry({ projectId: project.id, id: entry.id, ticket });
+                await researchLinkEntry({
+                  projectId: project.id,
+                  id: entry.id,
+                  ticket,
+                });
               }
             : undefined,
           directory: (entry) => ipc.researchDir(project.id, entry.id),
-          launch: (entry, entryDir) => startMicroTask(researchTask, {
-            dir: roots[0] ?? "",
-            entryId: entry.id,
-            entryDir,
-            title: entry.title,
-            question: q,
-            // What the question is being asked *about*. Without it the agent
-            // has a working directory and no idea what project it is in, and
-            // answers a product question as general software design.
-            projectName: project.name,
-            components: componentsRef.current.map((c) => ({
-              label: c.label,
-              path: c.path,
-            })),
-          }, userQuery),
-          block: (entry, error) => researchSetStatus(
-            project.id,
-            entry.id,
-            "blocked",
-            "Canopy",
-            error ? `research setup failed — ${String(error)}` : "the agent never started",
-          ),
+          launch: (entry, entryDir) =>
+            startMicroTask(
+              researchTask,
+              {
+                dir: roots[0] ?? "",
+                entryId: entry.id,
+                entryDir,
+                title: entry.title,
+                question: q,
+                // What the question is being asked *about*. Without it the agent
+                // has a working directory and no idea what project it is in, and
+                // answers a product question as general software design.
+                projectName: project.name,
+                components: componentsRef.current.map((c) => ({
+                  label: c.label,
+                  path: c.path,
+                })),
+              },
+              userQuery,
+            ),
+          block: (entry, error) =>
+            researchSetStatus(
+              project.id,
+              entry.id,
+              "blocked",
+              "Canopy",
+              error
+                ? `research setup failed — ${String(error)}`
+                : "the agent never started",
+            ),
           open: (entry) => openResearch(entry.id, entry.title),
         });
         if (result.error) {
-          onNotice(`Research was saved, but couldn't start: ${String(result.error)}`, "error", {
-            dedupe: `research-start:${project.id}`,
-          });
+          onNotice(
+            `Research was saved, but couldn't start: ${String(result.error)}`,
+            "error",
+            {
+              dedupe: `research-start:${project.id}`,
+            },
+          );
         }
         return true;
       } catch (err) {
@@ -4800,8 +5397,13 @@ const ProjectViewBody = memo(function ProjectViewBody({
         // Back to researching, so the rail and the polling wake up — and so a
         // finished entry does not sit at "researched" while an agent works.
         if (entry.status !== "researching")
-          await researchSetStatus(project.id, entry.id, "researching", "you",
-            steer ? `continued — ${steer}` : "continued");
+          await researchSetStatus(
+            project.id,
+            entry.id,
+            "researching",
+            "you",
+            steer ? `continued — ${steer}` : "continued",
+          );
         await startMicroTask(
           researchTask,
           {
@@ -4858,7 +5460,11 @@ const ProjectViewBody = memo(function ProjectViewBody({
         );
         if (!ok) return;
         await researchSetStatus(project.id, entry.id, "implementing", "you");
-        await researchLinkEntry({ projectId: project.id, id: entry.id, branch });
+        await researchLinkEntry({
+          projectId: project.id,
+          id: entry.id,
+          branch,
+        });
       } catch (err) {
         onNotice(`Couldn't start implementation: ${String(err)}`, "error");
       }
@@ -4914,7 +5520,14 @@ const ProjectViewBody = memo(function ProjectViewBody({
       if (opts?.plan === false) void launch(brief);
       else
         void dispatchWithPlan(
-          { request: brief, dir, label: name, source: "task", mode: "one-shot", resume: { kind: "adhoc", payload: { dir, label: name } } },
+          {
+            request: brief,
+            dir,
+            label: name,
+            source: "task",
+            mode: "one-shot",
+            resume: { kind: "adhoc", payload: { dir, label: name } },
+          },
           launch,
         );
     },
@@ -4922,28 +5535,42 @@ const ProjectViewBody = memo(function ProjectViewBody({
   );
 
   const workflowRuntime = useCallback(
-    async (definition: WorkflowDefinition): Promise<{
+    async (
+      definition: WorkflowDefinition,
+    ): Promise<{
       context: WorkflowExecutionContext;
       deps: WorkflowExecutorDeps;
     }> => {
       const installed = await getInstalledForLaunch();
-      const inheritedCli = pickLaunchCli(undefined, (bin) => Boolean(installed[bin]));
-      if (!inheritedCli) throw new Error("No agent CLI is installed for workflow steps");
+      const inheritedCli = pickLaunchCli(undefined, (bin) =>
+        Boolean(installed[bin]),
+      );
+      if (!inheritedCli)
+        throw new Error("No agent CLI is installed for workflow steps");
 
       const projectRoot = roots[0] ?? project.components[0]?.path;
       if (!projectRoot) throw new Error("This project has no component root");
-      const declaredRoot = definition.constraints.componentRoots[0] ?? projectRoot;
+      const declaredRoot =
+        definition.constraints.componentRoots[0] ?? projectRoot;
       const worktreePath = /^(?:[A-Za-z]:[\\/]|\/)/.test(declaredRoot)
         ? declaredRoot
         : `${projectRoot.replace(/[\\/]+$/, "")}/${declaredRoot.replace(/^\.?[\\/]/, "")}`;
-      const component = [...project.components]
-        .filter((candidate) =>
-          worktreePath === candidate.path || worktreePath.startsWith(`${candidate.path}/`),
-        )
-        .sort((left, right) => right.path.length - left.path.length)[0] ?? project.components[0];
-      if (!component) throw new Error("This workflow does not target a project component");
+      const component =
+        [...project.components]
+          .filter(
+            (candidate) =>
+              worktreePath === candidate.path ||
+              worktreePath.startsWith(`${candidate.path}/`),
+          )
+          .sort((left, right) => right.path.length - left.path.length)[0] ??
+        project.components[0];
+      if (!component)
+        throw new Error("This workflow does not target a project component");
 
-      const snapshotFor = (agent: string, profileId: string): TaskRouteSnapshot => ({
+      const snapshotFor = (
+        agent: string,
+        profileId: string,
+      ): TaskRouteSnapshot => ({
         cli: agent,
         profileId,
         requestedModel: null,
@@ -4952,18 +5579,28 @@ const ProjectViewBody = memo(function ProjectViewBody({
         promptVersion: "workflow-p1",
         toolPolicyVersion: "workflow-p1",
         executionMode: "pty",
-        selection: { policy: "workflow-default-agent", eligible: [`${agent}:${profileId}`] },
+        selection: {
+          policy: "workflow-default-agent",
+          eligible: [`${agent}:${profileId}`],
+        },
       });
       const deps: WorkflowExecutorDeps = {
         ...DEFAULT_WORKFLOW_STORE_DEPS,
         routeFor: (step, selected) => {
           const block = workflowAgentForStep(definition, step);
           const config = workflowAgentSelection(block);
-          const requestedCli = block?.type && block.type !== "inherit" ? block.type : inheritedCli.id;
-          const requestedProfile = config.profileId ?? launchProfile(requestedCli) ?? DEFAULT_PROFILE;
+          const requestedCli =
+            block?.type && block.type !== "inherit"
+              ? block.type
+              : inheritedCli.id;
+          const requestedProfile =
+            config.profileId ?? launchProfile(requestedCli) ?? DEFAULT_PROFILE;
           const route = selected
-            ? { ...snapshotFor(selected.cli, selected.profileId), requestedModel: selected.requestedModel }
-              : {
+            ? {
+                ...snapshotFor(selected.cli, selected.profileId),
+                requestedModel: selected.requestedModel,
+              }
+            : {
                 ...snapshotFor(requestedCli, requestedProfile),
                 requestedProvider: config.provider ?? null,
                 requestedModel: config.model ?? null,
@@ -4983,18 +5620,36 @@ const ProjectViewBody = memo(function ProjectViewBody({
             snapshotFor: (next) => snapshotFor(next.cli, next.profileId),
           };
         },
-        launchAgent: async ({ step, reservation, prompt, runDir, workflowRunId }) => {
+        launchAgent: async ({
+          step,
+          reservation,
+          prompt,
+          runDir,
+          workflowRunId,
+        }) => {
           const block = workflowAgentForStep(definition, step);
           const selection = workflowAgentSelection(block);
-          const requestedCli = block?.type && block.type !== "inherit" ? block.type : inheritedCli.id;
+          const requestedCli =
+            block?.type && block.type !== "inherit"
+              ? block.type
+              : inheritedCli.id;
           // The run folder exists before any step needs it: a read-only step
           // may write nowhere else, so it has to be there to be written to.
           try {
-            await prepareWorkflowRunDir(worktreePath, workflowRunId, workflowRunFilesIo);
+            await prepareWorkflowRunDir(
+              worktreePath,
+              workflowRunId,
+              workflowRunFilesIo,
+            );
           } catch (error) {
-            await settleAttempt({ attemptId: reservation.attempt.attemptId, state: "failed" })
-              .catch(() => {});
-            return { ok: false, failureText: `workflow run folder could not be prepared: ${String(error)}` };
+            await settleAttempt({
+              attemptId: reservation.attempt.attemptId,
+              state: "failed",
+            }).catch(() => {});
+            return {
+              ok: false,
+              failureText: `workflow run folder could not be prepared: ${String(error)}`,
+            };
           }
           const writes = step.capabilities.includes("workspace-write");
           const task: MicroTaskDef<{ dir: string }> = {
@@ -5020,8 +5675,10 @@ const ProjectViewBody = memo(function ProjectViewBody({
             selection,
           );
           if (!started) {
-            await settleAttempt({ attemptId: reservation.attempt.attemptId, state: "failed" })
-              .catch(() => {});
+            await settleAttempt({
+              attemptId: reservation.attempt.attemptId,
+              state: "failed",
+            }).catch(() => {});
             return { ok: false, failureText: "workflow agent did not start" };
           }
           return waitForWorkflowAttempt(reservation.attempt.attemptId);
@@ -5030,7 +5687,11 @@ const ProjectViewBody = memo(function ProjectViewBody({
         runGitOp: (step) => executeWorkflowGitOp(step, worktreePath),
       };
       return {
-        context: { projectId: project.id, componentId: component.id, worktreePath },
+        context: {
+          projectId: project.id,
+          componentId: component.id,
+          worktreePath,
+        },
         deps,
       };
     },
@@ -5059,13 +5720,17 @@ const ProjectViewBody = memo(function ProjectViewBody({
         runtime.context,
         runtime.deps,
       );
-      void run.catch((error) => onNotice(`Workflow stopped: ${String(error)}`, "error"));
+      void run.catch((error) =>
+        onNotice(`Workflow stopped: ${String(error)}`, "error"),
+      );
     },
     [onNotice, workflowRuntime],
   );
 
   const dispatchedWorkflowEvents = useRef(new Set<string>());
-  const lastIssueWorkflowEvent = useRef(new Map<string, { kind: string; body: string; at: number }>());
+  const lastIssueWorkflowEvent = useRef(
+    new Map<string, { kind: string; body: string; at: number }>(),
+  );
   const dispatchWorkflowEvent = useCallback(
     async (event: WorkflowTriggerProvenance) => {
       if (dispatchedWorkflowEvents.current.has(event.eventId)) return;
@@ -5074,8 +5739,11 @@ const ProjectViewBody = memo(function ProjectViewBody({
           event.payload.source,
           event.payload.repo,
           event.payload.issueId,
-        ].map(String).join("\0");
-        const body = typeof event.payload.body === "string" ? event.payload.body : "";
+        ]
+          .map(String)
+          .join("\0");
+        const body =
+          typeof event.payload.body === "string" ? event.payload.body : "";
         const previous = lastIssueWorkflowEvent.current.get(identity);
         // A mutation is emitted immediately by TicketView, then observed once
         // more by the provider refresh. Keep the immediate launch and discard
@@ -5086,7 +5754,8 @@ const ProjectViewBody = memo(function ProjectViewBody({
           previous.kind === event.kind &&
           previous.body === body &&
           event.occurredAt - previous.at < 60_000
-        ) return;
+        )
+          return;
         lastIssueWorkflowEvent.current.set(identity, {
           kind: event.kind,
           body,
@@ -5107,29 +5776,53 @@ const ProjectViewBody = memo(function ProjectViewBody({
           const run = await workflowGet(summary.runId);
           if (!run) continue;
           const runtime = await workflowRuntime(run.definition);
-          await deliverWorkflowEvent(run.runId, event, runtime.context, runtime.deps);
-        } catch (error) { onNotice(`Workflow event could not resume its waiting run: ${String(error)}`, "error"); }
+          await deliverWorkflowEvent(
+            run.runId,
+            event,
+            runtime.context,
+            runtime.deps,
+          );
+        } catch (error) {
+          onNotice(
+            `Workflow event could not resume its waiting run: ${String(error)}`,
+            "error",
+          );
+        }
       }
       const catalog = await loadWorkflowDefinitions(projectRoot, {
         projectRoot,
         componentRoots: new Set(roots),
       });
       if (!catalog.ok) {
-        onNotice(`Workflow event ignored: ${catalog.errors[0] ?? "the workflow catalog is invalid"}`, "error");
+        onNotice(
+          `Workflow event ignored: ${catalog.errors[0] ?? "the workflow catalog is invalid"}`,
+          "error",
+        );
         return;
       }
       const matching = catalog.definitions.filter((definition) =>
         workflowAcceptsTrigger(definition, event),
       );
-      await Promise.all(matching.map(async (definition) => {
-        try {
-          const runtime = await workflowRuntime(definition);
-          void startWorkflow(definition, event, runtime.context, runtime.deps)
-            .catch((error) => onNotice(`Workflow stopped: ${String(error)}`, "error"));
-        } catch (error) {
-          onNotice(`Couldn't start workflow “${definition.name}”: ${String(error)}`, "error");
-        }
-      }));
+      await Promise.all(
+        matching.map(async (definition) => {
+          try {
+            const runtime = await workflowRuntime(definition);
+            void startWorkflow(
+              definition,
+              event,
+              runtime.context,
+              runtime.deps,
+            ).catch((error) =>
+              onNotice(`Workflow stopped: ${String(error)}`, "error"),
+            );
+          } catch (error) {
+            onNotice(
+              `Couldn't start workflow “${definition.name}”: ${String(error)}`,
+              "error",
+            );
+          }
+        }),
+      );
     },
     [onNotice, project.id, project.components, roots, workflowRuntime],
   );
@@ -5139,8 +5832,14 @@ const ProjectViewBody = memo(function ProjectViewBody({
       const run = await workflowGet(runId);
       if (!run) throw new Error("Workflow run not found");
       const runtime = await workflowRuntime(run.definition);
-      void answerWorkflowHuman(runId, response, runtime.context, runtime.deps)
-        .catch((error) => onNotice(`Workflow stopped: ${String(error)}`, "error"));
+      void answerWorkflowHuman(
+        runId,
+        response,
+        runtime.context,
+        runtime.deps,
+      ).catch((error) =>
+        onNotice(`Workflow stopped: ${String(error)}`, "error"),
+      );
     },
     [onNotice, workflowRuntime],
   );
@@ -5151,8 +5850,9 @@ const ProjectViewBody = memo(function ProjectViewBody({
       if (!run) throw new Error("Workflow run not found");
       const runtime = await workflowRuntime(run.definition);
       await runtime.deps.resume(runId);
-      void continueWorkflow(runId, runtime.context, runtime.deps)
-        .catch((error) => onNotice(`Workflow stopped: ${String(error)}`, "error"));
+      void continueWorkflow(runId, runtime.context, runtime.deps).catch(
+        (error) => onNotice(`Workflow stopped: ${String(error)}`, "error"),
+      );
     },
     [onNotice, workflowRuntime],
   );
@@ -5162,36 +5862,47 @@ const ProjectViewBody = memo(function ProjectViewBody({
     if (!projectRoot) throw new Error("This project has no component root");
     const path = `${projectRoot.replace(/[\\/]+$/, "")}/.canopy/workflows/review-change.json`;
     await ipc.fsCreateFile(path);
-    await ipc.fsWriteFile(path, `${JSON.stringify(STARTER_WORKFLOW_DEFINITION, null, 2)}\n`);
+    await ipc.fsWriteFile(
+      path,
+      `${JSON.stringify(STARTER_WORKFLOW_DEFINITION, null, 2)}\n`,
+    );
   }, [project.components, roots]);
 
   /** Put the Elephant-Goldfish spec workflow and the personas and standards it
    *  reads into the project. Never overwrites: an existing definition or
    *  resource is the project's own copy. Returns the definition to run — the
    *  project's, when it has a valid one. */
-  const ensureEgmWorkflow = useCallback(async (): Promise<WorkflowDefinition> => {
-    const projectRoot = roots[0] ?? project.components[0]?.path;
-    if (!projectRoot) throw new Error("This project has no component root");
-    const root = projectRoot.replace(/[\\/]+$/, "");
-    await installEgmResources(root, {
-      exists: workflowRunFilesIo.exists,
-      create: (path) => ipc.fsCreateFile(path),
-      write: (path, content) => ipc.fsWriteFile(path, content),
-    });
-    const path = `${root}/.canopy/workflows/${EGM_WORKFLOW_ID}.json`;
-    if (!(await workflowRunFilesIo.exists(path))) {
-      await ipc.fsCreateFile(path);
-      await ipc.fsWriteFile(path, `${JSON.stringify(EGM_SPEC_WORKFLOW_DEFINITION, null, 2)}\n`);
-      return EGM_SPEC_WORKFLOW_DEFINITION;
-    }
-    const catalog = await loadWorkflowDefinitions(projectRoot, {
-      projectRoot,
-      componentRoots: new Set(roots),
-    });
-    if (!catalog.ok) throw new Error(catalog.errors[0] ?? "the workflow catalog is invalid");
-    return catalog.definitions.find((definition) => definition.id === EGM_WORKFLOW_ID)
-      ?? EGM_SPEC_WORKFLOW_DEFINITION;
-  }, [project.components, roots]);
+  const ensureEgmWorkflow =
+    useCallback(async (): Promise<WorkflowDefinition> => {
+      const projectRoot = roots[0] ?? project.components[0]?.path;
+      if (!projectRoot) throw new Error("This project has no component root");
+      const root = projectRoot.replace(/[\\/]+$/, "");
+      await installEgmResources(root, {
+        exists: workflowRunFilesIo.exists,
+        create: (path) => ipc.fsCreateFile(path),
+        write: (path, content) => ipc.fsWriteFile(path, content),
+      });
+      const path = `${root}/.canopy/workflows/${EGM_WORKFLOW_ID}.json`;
+      if (!(await workflowRunFilesIo.exists(path))) {
+        await ipc.fsCreateFile(path);
+        await ipc.fsWriteFile(
+          path,
+          `${JSON.stringify(EGM_SPEC_WORKFLOW_DEFINITION, null, 2)}\n`,
+        );
+        return EGM_SPEC_WORKFLOW_DEFINITION;
+      }
+      const catalog = await loadWorkflowDefinitions(projectRoot, {
+        projectRoot,
+        componentRoots: new Set(roots),
+      });
+      if (!catalog.ok)
+        throw new Error(catalog.errors[0] ?? "the workflow catalog is invalid");
+      return (
+        catalog.definitions.find(
+          (definition) => definition.id === EGM_WORKFLOW_ID,
+        ) ?? EGM_SPEC_WORKFLOW_DEFINITION
+      );
+    }, [project.components, roots]);
 
   const createEgmWorkflow = useCallback(async () => {
     await ensureEgmWorkflow();
@@ -5209,18 +5920,26 @@ const ProjectViewBody = memo(function ProjectViewBody({
         const definition = await ensureEgmWorkflow();
         const linked = entry.links.files.find(isDesignSpec);
         const specPath = linked
-          ? linked.startsWith(`${root}/`) ? linked.slice(root.length + 1) : linked
+          ? linked.startsWith(`${root}/`)
+            ? linked.slice(root.length + 1)
+            : linked
           : specPathFor(entry.title);
         if (!linked) {
-          await researchLinkEntry({ projectId: project.id, id: entry.id, files: [`${root}/${specPath}`] });
+          await researchLinkEntry({
+            projectId: project.id,
+            id: entry.id,
+            files: [`${root}/${specPath}`],
+          });
         }
-        await ipc.researchUpdate({
-          projectId: project.id,
-          id: entry.id,
-          append:
-            `Started the Elephant-Goldfish spec workflow: the spec goes to \`${specPath}\` and is ` +
-            `reviewed by fresh Goldfish reviewers before it is approved.`,
-        }).catch(() => {});
+        await ipc
+          .researchUpdate({
+            projectId: project.id,
+            id: entry.id,
+            append:
+              `Started the Elephant-Goldfish spec workflow: the spec goes to \`${specPath}\` and is ` +
+              `reviewed by fresh Goldfish reviewers before it is approved.`,
+          })
+          .catch(() => {});
         const runtime = await workflowRuntime(definition);
         openWorkflows();
         void startWorkflow(
@@ -5233,25 +5952,43 @@ const ProjectViewBody = memo(function ProjectViewBody({
           },
           runtime.context,
           runtime.deps,
-        ).catch((error) => onNotice(`Spec workflow stopped: ${String(error)}`, "error"));
+        ).catch((error) =>
+          onNotice(`Spec workflow stopped: ${String(error)}`, "error"),
+        );
       } catch (err) {
         onNotice(`Couldn't start the spec workflow: ${String(err)}`, "error");
       }
     },
-    [ensureEgmWorkflow, onNotice, openWorkflows, project.components, project.id, roots, workflowRuntime],
+    [
+      ensureEgmWorkflow,
+      onNotice,
+      openWorkflows,
+      project.components,
+      project.id,
+      roots,
+      workflowRuntime,
+    ],
   );
 
-  const saveWorkflowDefinition = useCallback(async (definition: WorkflowDefinition) => {
-    const projectRoot = roots[0] ?? project.components[0]?.path;
-    if (!projectRoot) throw new Error("This project has no component root");
-    const path = `${projectRoot.replace(/[\\/]+$/, "")}/.canopy/workflows/${definition.id}.json`;
-    await Promise.all((definition.agents ?? []).map(async (agent) => {
-      const agentPath = `${projectRoot.replace(/[\\/]+$/, "")}/.canopy/agents/${agent.id}.json`;
-      await ipc.fsCreateFile(agentPath).catch(() => {});
-      await ipc.fsWriteFile(agentPath, `${JSON.stringify(agent, null, 2)}\n`);
-    }));
-    await ipc.fsWriteFile(path, `${JSON.stringify(definition, null, 2)}\n`);
-  }, [project.components, roots]);
+  const saveWorkflowDefinition = useCallback(
+    async (definition: WorkflowDefinition) => {
+      const projectRoot = roots[0] ?? project.components[0]?.path;
+      if (!projectRoot) throw new Error("This project has no component root");
+      const path = `${projectRoot.replace(/[\\/]+$/, "")}/.canopy/workflows/${definition.id}.json`;
+      await Promise.all(
+        (definition.agents ?? []).map(async (agent) => {
+          const agentPath = `${projectRoot.replace(/[\\/]+$/, "")}/.canopy/agents/${agent.id}.json`;
+          await ipc.fsCreateFile(agentPath).catch(() => {});
+          await ipc.fsWriteFile(
+            agentPath,
+            `${JSON.stringify(agent, null, 2)}\n`,
+          );
+        }),
+      );
+      await ipc.fsWriteFile(path, `${JSON.stringify(definition, null, 2)}\n`);
+    },
+    [project.components, roots],
+  );
 
   /** Ticket work is a Task by default: prepare the same durable worktree a
    *  normal agent would receive, then let the one-shot lifecycle run there.
@@ -5259,7 +5996,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
    *  without committing or opening a PR. */
   const startTicketTask = useCallback(
     async (ticket: ipc.TicketInfo, requestedRepo?: string) => {
-      const repo = requestedRepo || await ticketRepo();
+      const repo = requestedRepo || (await ticketRepo());
       if (!repo) {
         onNotice("No git repository in this project.");
         return;
@@ -5301,10 +6038,17 @@ const ProjectViewBody = memo(function ProjectViewBody({
             source: "ticket",
             mode: "one-shot",
             ticketId: ticket.id,
-            resume: { kind: "adhoc", payload: { dir: workDir, label: ticketTaskLabel(ticket) } },
+            resume: {
+              kind: "adhoc",
+              payload: { dir: workDir, label: ticketTaskLabel(ticket) },
+            },
           },
           (planned) =>
-            startMicroTask(adhocTaskDef(planned, ticketTaskLabel(ticket)), { dir: workDir }, ""),
+            startMicroTask(
+              adhocTaskDef(planned, ticketTaskLabel(ticket)),
+              { dir: workDir },
+              "",
+            ),
         );
       } catch (err) {
         onNotice(`Couldn't start task: ${String(err)}`, "error");
@@ -5319,9 +6063,19 @@ const ProjectViewBody = memo(function ProjectViewBody({
   const planResumers = useRef<Record<string, PlanResumer>>({});
   planResumers.current = {
     adhoc: (brief, _planId, p) =>
-      startMicroTask(adhocTaskDef(brief, typeof p.label === "string" ? p.label : undefined), { dir: String(p.dir ?? "") }, ""),
+      startMicroTask(
+        adhocTaskDef(brief, typeof p.label === "string" ? p.label : undefined),
+        { dir: String(p.dir ?? "") },
+        "",
+      ),
     "ticket-work": (brief, planId, p) =>
-      continueTicketWork(p.ticket as ipc.TicketInfo, String(p.repo ?? ""), String(p.agentId ?? ""), brief, planId),
+      continueTicketWork(
+        p.ticket as ipc.TicketInfo,
+        String(p.repo ?? ""),
+        String(p.agentId ?? ""),
+        brief,
+        planId,
+      ),
   };
   useEffect(() => {
     armPlanTracking();
@@ -5349,7 +6103,9 @@ const ProjectViewBody = memo(function ProjectViewBody({
   const continueTaskSession = useCallback(
     (run: TaskRun) => {
       if (!run.sessionId) {
-        onNotice("This run never reported a session, so there is nothing to reopen.");
+        onNotice(
+          "This run never reported a session, so there is nothing to reopen.",
+        );
         return;
       }
       if (run.ephemeralCwd) {
@@ -5664,90 +6420,94 @@ const ProjectViewBody = memo(function ProjectViewBody({
 
   /** Re-run a run tab's command in place, reusing the tab (and its position in
    *  the rail) rather than spawning a new one. */
-  const restartRun = useCallback((
-    id: string,
-    configured?: Pick<
-      ServerEntry,
-      "command" | "name" | "componentId" | "runCommandId"
-    >,
-    origin: "explicit" | "watchdog" = "explicit",
-  ) => {
-    const tab = tabsRef.current.find((t) => t.id === id);
-    if (tab?.type !== "terminal") return;
-    const watched = vibeServerWatch.current.find(
-      (candidate) =>
-        tab.cwd === candidate.path &&
-        (tab.runCommandId
-          ? tab.componentId === candidate.componentId &&
-            tab.runCommandId === candidate.runCommandId
-          : tab.command === candidate.command),
-    );
-    if (origin === "explicit" && watched) {
-      vibeServerHealth.current.set(
-        watched.targetKey,
-        resetVibeServerHealth(watched.targetKey),
+  const restartRun = useCallback(
+    (
+      id: string,
+      configured?: Pick<
+        ServerEntry,
+        "command" | "name" | "componentId" | "runCommandId"
+      >,
+      origin: "explicit" | "watchdog" = "explicit",
+    ) => {
+      const tab = tabsRef.current.find((t) => t.id === id);
+      if (tab?.type !== "terminal") return;
+      const watched = vibeServerWatch.current.find(
+        (candidate) =>
+          tab.cwd === candidate.path &&
+          (tab.runCommandId
+            ? tab.componentId === candidate.componentId &&
+              tab.runCommandId === candidate.runCommandId
+            : tab.command === candidate.command),
       );
-    }
-    const component = tab.componentId
-      ? componentsRef.current.find((item) => item.id === tab.componentId)
-      : undefined;
-    const command = tab.runCommandId
-      ? component?.commands?.find((item) => item.id === tab.runCommandId)
-      : undefined;
-    const current =
-      component && command
-        ? {
-            command: unattendedManagedRunCommand(command),
-            name: command.name || command.command,
-            componentId: component.id,
-            runCommandId: command.id,
-          }
+      if (origin === "explicit" && watched) {
+        vibeServerHealth.current.set(
+          watched.targetKey,
+          resetVibeServerHealth(watched.targetKey),
+        );
+      }
+      const component = tab.componentId
+        ? componentsRef.current.find((item) => item.id === tab.componentId)
         : undefined;
-    const nextConfigured = configured ?? current;
-    if (origin === "explicit" && tab.ptyId != null) void ipc.ptyKill(tab.ptyId);
-    // Remount Term with a fresh key by clearing the pty and exit state; the
-    // effect below respawns it.
-    setTabs((prev) =>
-      prev.map((t) =>
-        t.id === id
-          ? ({
-              ...t,
-              ptyId: null,
-              exited: false,
-              exitCode: undefined,
-              epoch: (t as TermSubTab).epoch ?? 0,
-              ...(nextConfigured
-                ? {
-                    command: nextConfigured.command,
-                    // The configured name only. A restart used to write over
-                    // whatever the tab was called, which is how a renamed
-                    // server came back as something else.
-                    launchTitle: nextConfigured.name,
-                    componentId: nextConfigured.componentId ?? undefined,
-                    runCommandId: nextConfigured.runCommandId ?? undefined,
-                  }
-                : {}),
-            } as SubTab)
-          : t,
-      ),
-    );
-    setTimeout(() => {
+      const command = tab.runCommandId
+        ? component?.commands?.find((item) => item.id === tab.runCommandId)
+        : undefined;
+      const current =
+        component && command
+          ? {
+              command: unattendedManagedRunCommand(command),
+              name: command.name || command.command,
+              componentId: component.id,
+              runCommandId: command.id,
+            }
+          : undefined;
+      const nextConfigured = configured ?? current;
+      if (origin === "explicit" && tab.ptyId != null)
+        void ipc.ptyKill(tab.ptyId);
+      // Remount Term with a fresh key by clearing the pty and exit state; the
+      // effect below respawns it.
       setTabs((prev) =>
         prev.map((t) =>
-          t.id === id && t.type === "terminal"
-            ? // Re-clear exit state here too: the old pty's kill can emit a
-              // late pty:exit in the gap since t=0 that flips `exited` back on.
-              {
+          t.id === id
+            ? ({
                 ...t,
-                epoch: (t.epoch ?? 0) + 1,
+                ptyId: null,
                 exited: false,
                 exitCode: undefined,
-              }
+                epoch: (t as TermSubTab).epoch ?? 0,
+                ...(nextConfigured
+                  ? {
+                      command: nextConfigured.command,
+                      // The configured name only. A restart used to write over
+                      // whatever the tab was called, which is how a renamed
+                      // server came back as something else.
+                      launchTitle: nextConfigured.name,
+                      componentId: nextConfigured.componentId ?? undefined,
+                      runCommandId: nextConfigured.runCommandId ?? undefined,
+                    }
+                  : {}),
+              } as SubTab)
             : t,
         ),
       );
-    }, 200);
-  }, []);
+      setTimeout(() => {
+        setTabs((prev) =>
+          prev.map((t) =>
+            t.id === id && t.type === "terminal"
+              ? // Re-clear exit state here too: the old pty's kill can emit a
+                // late pty:exit in the gap since t=0 that flips `exited` back on.
+                {
+                  ...t,
+                  epoch: (t.epoch ?? 0) + 1,
+                  exited: false,
+                  exitCode: undefined,
+                }
+              : t,
+          ),
+        );
+      }, 200);
+    },
+    [],
+  );
 
   // Looking at a tab is what marks it read. As an effect rather than something
   // hung off the tab's onClick, so every route in — clicking, Ctrl+Tab cycling,
@@ -5809,7 +6569,9 @@ const ProjectViewBody = memo(function ProjectViewBody({
         closeTabRef.current(activeTabIdRef.current, "user");
     };
     const newTerminalHandler = () => {
-      void pickComponent("New shell").then((selection) => selection && addTerminal(selection.component.path));
+      void pickComponent("New shell").then(
+        (selection) => selection && addTerminal(selection.component.path),
+      );
     };
     const toggleSidebarHandler = () => {
       setPinned((v) => !v);
@@ -5850,10 +6612,15 @@ const ProjectViewBody = memo(function ProjectViewBody({
     const cycleTabs = (dir: 1 | -1) => {
       const list = visualTabs();
       if (list.length < 2) return;
-      const active = tabsRef.current.find((t) => t.id === activeTabIdRef.current);
-      const activeGroup = active?.type === "terminal" ? active.paneGroup : undefined;
+      const active = tabsRef.current.find(
+        (t) => t.id === activeTabIdRef.current,
+      );
+      const activeGroup =
+        active?.type === "terminal" ? active.paneGroup : undefined;
       const i = list.findIndex(
-        (t) => t.id === activeTabIdRef.current || (activeGroup && t.type === "terminal" && t.paneGroup === activeGroup),
+        (t) =>
+          t.id === activeTabIdRef.current ||
+          (activeGroup && t.type === "terminal" && t.paneGroup === activeGroup),
       );
       activateVisualTab(list[(i + dir + list.length) % list.length].id);
     };
@@ -5864,12 +6631,14 @@ const ProjectViewBody = memo(function ProjectViewBody({
       const list = visualTabs();
       if (list.length < 2) return;
       const openIds = list.map((t) => t.id);
-      const active = tabsRef.current.find((t) => t.id === activeTabIdRef.current);
+      const active = tabsRef.current.find(
+        (t) => t.id === activeTabIdRef.current,
+      );
       const currentVisualId =
         active?.type === "terminal" && active.paneGroup
-          ? list.find(
+          ? (list.find(
               (t) => t.type === "terminal" && t.paneGroup === active.paneGroup,
-            )?.id ?? activeTabIdRef.current
+            )?.id ?? activeTabIdRef.current)
           : activeTabIdRef.current;
       const current = switcherRef.current;
       const mode = getSettings().tabSwitchMode;
@@ -5896,12 +6665,19 @@ const ProjectViewBody = memo(function ProjectViewBody({
           return {
             key: item.key,
             ids: item.ids,
-            label: labels[item.key] ?? (founder ? tabDisplayLabel(founder) : item.key),
+            label:
+              labels[item.key] ??
+              (founder ? tabDisplayLabel(founder) : item.key),
           };
         });
         ids = rows.flatMap((row) => row.ids);
       } else {
-        ids = tabSwitchSnapshot(openIds, currentVisualId, recentTabsRef.current, mode);
+        ids = tabSwitchSnapshot(
+          openIds,
+          currentVisualId,
+          recentTabsRef.current,
+          mode,
+        );
         rows =
           mode === "recent"
             ? groupTabSwitch(ids, (id) => {
@@ -5912,8 +6688,18 @@ const ProjectViewBody = memo(function ProjectViewBody({
       }
       const selectedId =
         mode === "items" && rows
-          ? stepWorkItem(rows, current?.selectedId ?? currentVisualId, openIds, dir)
-          : stepTabSwitch(ids, current?.selectedId ?? currentVisualId, openIds, dir);
+          ? stepWorkItem(
+              rows,
+              current?.selectedId ?? currentVisualId,
+              openIds,
+              dir,
+            )
+          : stepTabSwitch(
+              ids,
+              current?.selectedId ?? currentVisualId,
+              openIds,
+              dir,
+            );
       if (!selectedId) return;
       const next = { ids, rows, selectedId };
       switcherRef.current = next;
@@ -5925,16 +6711,25 @@ const ProjectViewBody = memo(function ProjectViewBody({
     const stepSwitcherArrow = (e: KeyboardEvent): boolean => {
       const current = switcherRef.current;
       if (!current?.rows) return false;
-      const horiz =
-        e.key === "ArrowRight" ? 1 : e.key === "ArrowLeft" ? -1 : 0;
+      const horiz = e.key === "ArrowRight" ? 1 : e.key === "ArrowLeft" ? -1 : 0;
       const vert = e.key === "ArrowDown" ? 1 : e.key === "ArrowUp" ? -1 : 0;
       if (!horiz && !vert) return false;
       e.preventDefault();
       e.stopPropagation();
       const openIds = visualTabs().map((t) => t.id);
       const selectedId = horiz
-        ? stepTabSwitchInRow(current.rows, current.selectedId, openIds, horiz as 1 | -1)
-        : stepTabSwitchAcrossRows(current.rows, current.selectedId, openIds, vert as 1 | -1);
+        ? stepTabSwitchInRow(
+            current.rows,
+            current.selectedId,
+            openIds,
+            horiz as 1 | -1,
+          )
+        : stepTabSwitchAcrossRows(
+            current.rows,
+            current.selectedId,
+            openIds,
+            vert as 1 | -1,
+          );
       if (selectedId && selectedId !== current.selectedId) {
         const next = { ...current, selectedId };
         switcherRef.current = next;
@@ -6134,9 +6929,18 @@ const ProjectViewBody = memo(function ProjectViewBody({
       window.removeEventListener("menu:find-in-files", findInFiles);
       window.removeEventListener("menu:spot-search", spotSearch);
       window.removeEventListener("menu:new-launcher", newLauncherHere);
-      window.removeEventListener("menu:new-agent-workspace", newLauncherWorkspace);
+      window.removeEventListener(
+        "menu:new-agent-workspace",
+        newLauncherWorkspace,
+      );
     };
-  }, [visible, project.components, addTerminal, refreshInstalled, refreshUpdates]);
+  }, [
+    visible,
+    project.components,
+    addTerminal,
+    refreshInstalled,
+    refreshUpdates,
+  ]);
 
   const switcherOpen = switcher !== null;
   const navigableTabs = useMemo(
@@ -6294,9 +7098,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
         if (!hasIdentity(named) && !description) return;
         const tab = tabsRef.current.find(
           (t): t is TermSubTab =>
-            t.type === "terminal" &&
-            a.ptyId != null &&
-            t.ptyId === a.ptyId,
+            t.type === "terminal" && a.ptyId != null && t.ptyId === a.ptyId,
         );
         const detached = findRun(microRunsRef.current, a.ptyId);
         const ptyId = tab?.ptyId ?? detached?.ptyId;
@@ -6486,7 +7288,9 @@ const ProjectViewBody = memo(function ProjectViewBody({
       // for a fresh one. Same route as the PR tab's "Send a change".
       if (a.kind === "message_agent_start" && a.pr && a.text) {
         const opId = a.opId;
-        const number = Number(parsePrUrl(a.pr)?.number ?? a.pr.replace(/^#/, ""));
+        const number = Number(
+          parsePrUrl(a.pr)?.number ?? a.pr.replace(/^#/, ""),
+        );
         const row = prWatchSnapshot().rows.find(
           (r) =>
             r.number === number &&
@@ -6496,7 +7300,11 @@ const ProjectViewBody = memo(function ProjectViewBody({
         );
         if (!row) {
           if (opId != null)
-            void ipc.browserResult(opId, false, `No open PR #${number} in this project.`);
+            void ipc.browserResult(
+              opId,
+              false,
+              `No open PR #${number} in this project.`,
+            );
           return;
         }
         void startMicroTask(
@@ -6552,11 +7360,9 @@ const ProjectViewBody = memo(function ProjectViewBody({
             t.type === "terminal" &&
             Boolean(t.run) &&
             t.cwd === a.dir &&
-            (a.componentId &&
-              a.runCommandId &&
-              t.componentId &&
-              t.runCommandId
-              ? t.componentId === a.componentId && t.runCommandId === a.runCommandId
+            (a.componentId && a.runCommandId && t.componentId && t.runCommandId
+              ? t.componentId === a.componentId &&
+                t.runCommandId === a.runCommandId
               : t.command === a.command),
         );
         const configured =
@@ -6570,8 +7376,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
             : undefined;
         if (existing && !existing.exited) {
           if (getSettings().agentAskForAttention) setActiveTabId(existing.id);
-        }
-        else if (existing) restartRun(existing.id, configured);
+        } else if (existing) restartRun(existing.id, configured);
         else
           addTerminal(
             a.dir,
@@ -6652,7 +7457,12 @@ const ProjectViewBody = memo(function ProjectViewBody({
       const answer = (started: boolean, note: string) =>
         window.dispatchEvent(
           new CustomEvent("canopy:start-session-result", {
-            detail: { ticket: d.ticket, started, note, runId: started ? runId : undefined },
+            detail: {
+              ticket: d.ticket,
+              started,
+              note,
+              runId: started ? runId : undefined,
+            },
           }),
         );
       void startMicroTask(
@@ -6673,7 +7483,8 @@ const ProjectViewBody = memo(function ProjectViewBody({
                 // caller gets the fact, which is what it can act on.
                 `Couldn't start an agent in ${d.dir} — Canopy refused the launch (no agent CLI installed, or the workspace it needed could not be prepared).`,
           ),
-        (err) => answer(false, `Couldn't start an agent in ${d.dir}: ${String(err)}`),
+        (err) =>
+          answer(false, `Couldn't start an agent in ${d.dir}: ${String(err)}`),
       );
     };
     window.addEventListener("canopy:start-session", onStart);
@@ -6689,20 +7500,26 @@ const ProjectViewBody = memo(function ProjectViewBody({
     return tab?.type === "terminal" ? tab.ptyId : null;
   }, [tabs, activeTabId]);
   useEffect(() => {
-    if (visible && activeTerminalPty != null) noteActiveTerminal(activeTerminalPty);
+    if (visible && activeTerminalPty != null)
+      noteActiveTerminal(activeTerminalPty);
   }, [visible, activeTerminalPty]);
   useEffect(() => {
     const onMentioned = (e: Event) => {
       const ptyId = (e as CustomEvent<{ ptyId: number }>).detail?.ptyId;
-      const tab = tabsRef.current.find((t) => t.type === "terminal" && t.ptyId === ptyId);
+      const tab = tabsRef.current.find(
+        (t) => t.type === "terminal" && t.ptyId === ptyId,
+      );
       if (tab) setActiveTabId(tab.id);
     };
     window.addEventListener(CLAUDE_MENTIONED_EVENT, onMentioned);
-    return () => window.removeEventListener(CLAUDE_MENTIONED_EVENT, onMentioned);
+    return () =>
+      window.removeEventListener(CLAUDE_MENTIONED_EVENT, onMentioned);
   }, []);
   const terminalPtys = useMemo(
     () =>
-      tabs.flatMap((t) => (t.type === "terminal" && t.ptyId != null ? [t.ptyId] : [])),
+      tabs.flatMap((t) =>
+        t.type === "terminal" && t.ptyId != null ? [t.ptyId] : [],
+      ),
     [tabs],
   );
 
@@ -6771,21 +7588,28 @@ const ProjectViewBody = memo(function ProjectViewBody({
           setSideTab("trackers");
           setPinned(true);
         } else {
-          void provider.fetch(repo).then((tickets) => {
-            const ticket = tickets.find((item) => item.id === act.issueId);
-            if (ticket) openTicket(ticket, act.source);
-            else {
+          void provider
+            .fetch(repo)
+            .then((tickets) => {
+              const ticket = tickets.find((item) => item.id === act.issueId);
+              if (ticket) openTicket(ticket, act.source);
+              else {
+                setSideTab("trackers");
+                setPinned(true);
+                onNotice(
+                  `Issue ${act.issueId} is no longer in the active list.`,
+                  "info",
+                  {
+                    projectId: project.id,
+                    dedupe: `link-fallback:${project.id}:trackers`,
+                  },
+                );
+              }
+            })
+            .catch(() => {
               setSideTab("trackers");
               setPinned(true);
-              onNotice(`Issue ${act.issueId} is no longer in the active list.`, "info", {
-                projectId: project.id,
-                dedupe: `link-fallback:${project.id}:trackers`,
-              });
-            }
-          }).catch(() => {
-            setSideTab("trackers");
-            setPinned(true);
-          });
+            });
         }
       } else if (act.do === "file") {
         const { path, line } = act;
@@ -6872,7 +7696,9 @@ const ProjectViewBody = memo(function ProjectViewBody({
           ptyId: op.ptyId,
           navigating: op.op === "navigate" && !!op.url,
           currentTabId:
-            op.ptyId == null ? null : sessionPreview.current.get(op.ptyId) ?? null,
+            op.ptyId == null
+              ? null
+              : (sessionPreview.current.get(op.ptyId) ?? null),
           attemptTabId,
         },
         activeTabIdRef.current,
@@ -6886,7 +7712,12 @@ const ProjectViewBody = memo(function ProjectViewBody({
         }
         if (!op.quiet && op.ptyId != null) showBrowserPip(tab.id, op.ptyId);
         dispatchBrowserOp(tab.id, op);
-      } else if (!op.quiet && attemptTabId === undefined && op.op === "navigate" && op.url) {
+      } else if (
+        !op.quiet &&
+        attemptTabId === undefined &&
+        op.op === "navigate" &&
+        op.url
+      ) {
         const id = openPreview(op.url, op.ptyId, false);
         if (op.ptyId != null) showBrowserPip(id, op.ptyId);
         dispatchBrowserOp(id, op);
@@ -6903,7 +7734,13 @@ const ProjectViewBody = memo(function ProjectViewBody({
     window.addEventListener("canopy:agent-browser", onBrowserOp);
     return () =>
       window.removeEventListener("canopy:agent-browser", onBrowserOp);
-  }, [project.id, project.components, openPreview, patchTabRaw, showBrowserPip]);
+  }, [
+    project.id,
+    project.components,
+    openPreview,
+    patchTabRaw,
+    showBrowserPip,
+  ]);
 
   /** A pull request, commit, issue or file on a git host, opened as the tab
    *  Canopy already has for it rather than as a page of github.com. False for
@@ -6948,7 +7785,9 @@ const ProjectViewBody = memo(function ProjectViewBody({
           if (line)
             requestAnimationFrame(() =>
               window.dispatchEvent(
-                new CustomEvent("canopy:reveal-line", { detail: { path, line } }),
+                new CustomEvent("canopy:reveal-line", {
+                  detail: { path, line },
+                }),
               ),
             );
           return true;
@@ -6961,7 +7800,9 @@ const ProjectViewBody = memo(function ProjectViewBody({
     async (url: string): Promise<boolean> => {
       const action = await resolveGitLink(
         url,
-        ipcGitLinkLookups(componentsRef.current.map((component) => component.path)),
+        ipcGitLinkLookups(
+          componentsRef.current.map((component) => component.path),
+        ),
       );
       return action ? openGitTarget(action) : false;
     },
@@ -7026,7 +7867,8 @@ const ProjectViewBody = memo(function ProjectViewBody({
   useEffect(() => {
     if (!visible) return;
     const onUrl = (e: Event) => {
-      const { url, anyProject } = (e as CustomEvent<OpenUrlDetail>).detail ?? {};
+      const { url, anyProject } =
+        (e as CustomEvent<OpenUrlDetail>).detail ?? {};
       if (!url) return;
       e.preventDefault();
       void openGitLink(url)
@@ -7037,7 +7879,8 @@ const ProjectViewBody = memo(function ProjectViewBody({
           // repo may open it natively (gitLinkRouting.ts). Otherwise, or if
           // none can, the page — exactly as before.
           const fallback = () => openPreview(url);
-          if (anyProject && routeGitLinkElsewhere(url, project.id, fallback)) return;
+          if (anyProject && routeGitLinkElsewhere(url, project.id, fallback))
+            return;
           fallback();
         });
     };
@@ -7079,17 +7922,21 @@ const ProjectViewBody = memo(function ProjectViewBody({
               .spotStageDropImages(cwd, [path])
               .then(([staged]) => staged ?? path)
           : Promise.resolve(path);
-      void ready.then(async (target) => {
-        await openFileRef.current(target);
-        if (!line) return;
-        requestAnimationFrame(() =>
-          window.dispatchEvent(
-            new CustomEvent("canopy:reveal-line", {
-              detail: { path: target, line },
-            }),
-          ),
+      void ready
+        .then(async (target) => {
+          await openFileRef.current(target);
+          if (!line) return;
+          requestAnimationFrame(() =>
+            window.dispatchEvent(
+              new CustomEvent("canopy:reveal-line", {
+                detail: { path: target, line },
+              }),
+            ),
+          );
+        })
+        .catch((error) =>
+          onNotice(`Can't open ${basename(path)} — ${String(error)}`, "error"),
         );
-      }).catch(error => onNotice(`Can't open ${basename(path)} — ${String(error)}`, "error"));
     };
     window.addEventListener(OPEN_FILE_EVENT, onFile);
     return () => window.removeEventListener(OPEN_FILE_EVENT, onFile);
@@ -7145,7 +7992,9 @@ const ProjectViewBody = memo(function ProjectViewBody({
             ...group,
             root,
             activeTabId:
-              group.activeTabId === tabId ? leafIds(root)[0] : group.activeTabId,
+              group.activeTabId === tabId
+                ? leafIds(root)[0]
+                : group.activeTabId,
             zoomedTabId:
               group.zoomedTabId === tabId ? undefined : group.zoomedTabId,
           };
@@ -7195,10 +8044,23 @@ const ProjectViewBody = memo(function ProjectViewBody({
       // A squash or rebase merge leaves the branch's commits out of the base, so
       // git calls them unpushed. When the branch's PR is merged and its recorded
       // head is the local tip, they landed: nothing exists only here.
-      if (decision.kind === "ask" && decision.dirty === 0 && decision.unpushed > 0) {
+      if (
+        decision.kind === "ask" &&
+        decision.dirty === 0 &&
+        decision.unpushed > 0
+      ) {
         try {
-          if (prLanded(await ipc.ghPrBranchState(ws.repo, decision.branch), worktree?.head ?? ""))
-            decision = { kind: "remove", branch: decision.branch, deleteBranch: true };
+          if (
+            prLanded(
+              await ipc.ghPrBranchState(ws.repo, decision.branch),
+              worktree?.head ?? "",
+            )
+          )
+            decision = {
+              kind: "remove",
+              branch: decision.branch,
+              deleteBranch: true,
+            };
         } catch {
           /* No PR, no gh, offline: the question stays, which is the safe answer. */
         }
@@ -7224,8 +8086,18 @@ const ProjectViewBody = memo(function ProjectViewBody({
           body: `${basename(ws.root)} holds unsaved ${held.join(" and ")}.`,
           detail: ws.root,
           choices: [
-            { action: "push", label: "Commit, push and open a pull request", sub: "Recommended. Secrets are left out.", recommended: true },
-            { action: "cleanup", label: "Discard and remove the workspace", sub: "Uncommitted files are lost; commits stay on the branch.", danger: true },
+            {
+              action: "push",
+              label: "Commit, push and open a pull request",
+              sub: "Recommended. Secrets are left out.",
+              recommended: true,
+            },
+            {
+              action: "cleanup",
+              label: "Discard and remove the workspace",
+              sub: "Uncommitted files are lost; commits stay on the branch.",
+              danger: true,
+            },
             { action: "cancel", label: "Cancel" },
           ],
         }),
@@ -7246,19 +8118,28 @@ const ProjectViewBody = memo(function ProjectViewBody({
           if (result.prUrl) onNotice(`Opened ${result.prUrl}`, "success");
         } catch (error) {
           // Nothing is removed after a failure: the work is still where it was.
-          onNotice(`Could not save the work, so the workspace was kept: ${String((error as Error).message ?? error)}`, "error");
+          onNotice(
+            `Could not save the work, so the workspace was kept: ${String((error as Error).message ?? error)}`,
+            "error",
+          );
           return;
         }
         // Everything is on the remote now. Removed without force: a folder that
         // still holds anything git objects to is left, not overridden.
         await ipc.gitWorktreeRemove(ws.repo, ws.root, 0).catch((error) => {
-          onNotice(`Saved, but the workspace could not be removed: ${String(error)}`, "warn");
+          onNotice(
+            `Saved, but the workspace could not be removed: ${String(error)}`,
+            "warn",
+          );
         });
         return;
       }
       if (action !== "cleanup") {
         // The agent is already closed; cancelling only declines the removal.
-        onNotice(`Left ${basename(ws.root)} in place, with its unsaved work.`, "info");
+        onNotice(
+          `Left ${basename(ws.root)} in place, with its unsaved work.`,
+          "info",
+        );
         return;
       }
       await ipc.gitWorktreeRemove(ws.repo, ws.root, 1);
@@ -7281,24 +8162,55 @@ const ProjectViewBody = memo(function ProjectViewBody({
       swept.current = true;
       for (const repo of repoPaths) {
         try {
-          const [worktrees, audit] = await Promise.all([ipc.gitWorktrees(repo), ipc.gitWorkAudit(repo)]);
+          const [worktrees, audit] = await Promise.all([
+            ipc.gitWorktrees(repo),
+            ipc.gitWorkAudit(repo),
+          ]);
           for (const worktree of worktrees) {
-            const work = audit.items.find((item) => item.branch === worktree.branch);
+            const work = audit.items.find(
+              (item) => item.branch === worktree.branch,
+            );
             if (!work) continue;
             const inUse =
-              tabsRef.current.some((t) => t.type === "terminal" && (t.cwd === worktree.path || t.cwd.startsWith(`${worktree.path}/`))) ||
+              tabsRef.current.some(
+                (t) =>
+                  t.type === "terminal" &&
+                  (t.cwd === worktree.path ||
+                    t.cwd.startsWith(`${worktree.path}/`)),
+              ) ||
               wsDigestsRef.current.some(
                 (d) =>
-                  d.cwd && (d.cwd === worktree.path || d.cwd.startsWith(`${worktree.path}/`)) &&
-                  lifeFor({ digest: d as never, now: Date.now() / 1000 }).state !== "ended",
+                  d.cwd &&
+                  (d.cwd === worktree.path ||
+                    d.cwd.startsWith(`${worktree.path}/`)) &&
+                  lifeFor({ digest: d as never, now: Date.now() / 1000 })
+                    .state !== "ended",
               );
             if (!sweepEligible(work, worktree.dirty, inUse)) continue;
-            if (tabsRef.current.some((t) => t.type === "terminal" && (t.cwd === worktree.path || t.cwd.startsWith(`${worktree.path}/`)))) continue;
+            if (
+              tabsRef.current.some(
+                (t) =>
+                  t.type === "terminal" &&
+                  (t.cwd === worktree.path ||
+                    t.cwd.startsWith(`${worktree.path}/`)),
+              )
+            )
+              continue;
             let decision = reapDecision(worktree, work);
             if (decision.kind !== "remove" && decision.kind !== "ask") continue;
             let landed = work.merged;
-            if (!landed && decision.kind === "ask" && decision.dirty === 0 && worktree.branch) {
-              landed = prLanded(await ipc.ghPrBranchState(repo, worktree.branch).catch(() => ""), worktree.head);
+            if (
+              !landed &&
+              decision.kind === "ask" &&
+              decision.dirty === 0 &&
+              worktree.branch
+            ) {
+              landed = prLanded(
+                await ipc
+                  .ghPrBranchState(repo, worktree.branch)
+                  .catch(() => ""),
+                worktree.head,
+              );
             }
             if (!landed || !worktree.branch) continue;
             await ipc.gitWorktreeRemove(repo, worktree.path, 0).catch(() => {});
@@ -7319,7 +8231,9 @@ const ProjectViewBody = memo(function ProjectViewBody({
   // `ghPrState` decides; a closed, unmerged PR leaves the tab alone. Never while
   // the agent is working or waiting on you.
   const watchedPrs = useRef(new Map<string, Map<string, number>>());
-  const lifeForPtyRef = useRef<(ptyId: number | null | undefined) => Life | undefined>(() => undefined);
+  const lifeForPtyRef = useRef<
+    (ptyId: number | null | undefined) => Life | undefined
+  >(() => undefined);
   useEffect(() => {
     const tick = async () => {
       const byRepo = new Map<string, Map<string, string[]>>();
@@ -7338,7 +8252,10 @@ const ProjectViewBody = memo(function ProjectViewBody({
           const branch = worktrees.find((w) => w.path === root)?.branch;
           if (branch?.startsWith("agent/")) branchOf.set(root, branch);
         }
-        const open = (await ipc.ghPrList(repo)).map((pr) => ({ branch: pr.branch, number: pr.number }));
+        const open = (await ipc.ghPrList(repo)).map((pr) => ({
+          branch: pr.branch,
+          number: pr.number,
+        }));
         const { tracked, vanished } = diffOpenPrs(
           watchedPrs.current.get(repo) ?? new Map(),
           open,
@@ -7351,206 +8268,219 @@ const ProjectViewBody = memo(function ProjectViewBody({
             if (branch !== gone.branch) continue;
             for (const id of roots.get(root) ?? []) {
               const tab = tabsRef.current.find((t) => t.id === id);
-              const state = tab?.type === "terminal" ? lifeForPtyRef.current(tab.ptyId)?.state : undefined;
+              const state =
+                tab?.type === "terminal"
+                  ? lifeForPtyRef.current(tab.ptyId)?.state
+                  : undefined;
               // Only a session known to be finished or idle: anything else
               // (working, waiting, unknown) keeps its tab.
               if (state !== "idle" && state !== "ended") continue;
               // A merged PR means this work is done: put the tab away, and close
               // it as well when the setting says so.
               patchTabRaw(id, { settled: true } as Partial<SubTab>);
-              if (getSettings().closeAgentOnMerge) closeTabRef.current(id, "automatic");
+              if (getSettings().closeAgentOnMerge)
+                closeTabRef.current(id, "automatic");
             }
           }
         }
       }
     };
-    const timer = window.setInterval(() => void tick().catch(() => {}), 120_000);
+    const timer = window.setInterval(
+      () => void tick().catch(() => {}),
+      120_000,
+    );
     return () => window.clearInterval(timer);
   }, [repoPaths, patchTabRaw]);
 
-  const finalizeTabClose = useCallback((
-    id: string,
-    origin: "automatic" | "user" = "automatic",
-  ) => {
-    const pendingClose = [...pendingAgentClosesRef.current.values()].find(
-      (close) => close.tabIds.includes(id),
-    );
-    if (pendingClose && Object.keys(pendingClose.groups).length > 0) {
-      const restored = {
-        ...terminalGroupsRef.current,
-        ...pendingClose.groups,
-      };
-      terminalGroupsRef.current = restored;
-      setTerminalGroups(restored);
-    }
-    // A process can exit while its tab is in the grace period. Remove only that
-    // member from the pending transaction; surviving panes can still be
-    // restored until their shared deadline.
-    dropPendingAgentTab(id);
-    // The last moment the terminal's scrollback exists: the handle goes on the
-    // next line and the buffer dies with the unmount. Both endings pass through
-    // here — job_done's self-close and the user closing the tab — so capturing
-    // once here covers a finished task and an abandoned one alike. recordTaskEnd
-    // ignores a run that already settled, so "stopped" can't clobber "done".
-    const closingTab = tabsRef.current.find((t) => t.id === id);
-    // A terminal on another machine has no local folder to reap: its cwd is a
-    // path on that machine, and no git call here may be made from it.
-    if (closingTab?.type === "terminal" && closingTab.cwd && !closingTab.machine) {
-      const closingCwd = closingTab.cwd;
-      // After the unmount's PTY kill, not during it: git won't remove a
-      // folder a live process still holds open.
-      setTimeout(
-        () =>
-          void maybeReapAgentWorkspaceRef
-            .current(closingCwd, id)
-            .catch(() => {}),
-        1500,
+  const finalizeTabClose = useCallback(
+    (id: string, origin: "automatic" | "user" = "automatic") => {
+      const pendingClose = [...pendingAgentClosesRef.current.values()].find(
+        (close) => close.tabIds.includes(id),
       );
-    }
-    if (
-      origin === "user" &&
-      closingTab?.type === "terminal" &&
-      closingTab.attachId != null
-    ) {
-      terminalAttachmentQueue.forget(project.id, closingTab.attachId);
-    }
-    if (closingTab?.type === "preview") forgetBrowserTarget(id);
-    if (
-      origin === "user" &&
-      closingTab?.type === "terminal" &&
-      closingTab.ptyId != null &&
-      (closingTab.attachId == null || closingTab.killAttachedOnClose)
-    ) {
-      // Hook events are the authoritative bond. Store-only agents have no
-      // events, so fall back to the current-launch digest for this surface.
-      const sessionId =
-        liveSessionByPtyRef.current.get(closingTab.ptyId) ??
-        digestBySurface(
-          wsDigestsRef.current,
-          thisInstanceRef.current,
-        ).get(String(closingTab.ptyId))?.session_id;
-      if (sessionId) markUserClosed(sessionId);
-    }
-    if (closingTab?.type === "terminal" && closingTab.micro?.runId) {
-      const runId = closingTab.micro.runId;
-      const output =
-        termHandles.current.get(id)?.captureText(8000) || undefined;
-      if (output) updateTaskRun(runId, { output });
-      // A no-op for a run that already reported done; otherwise it settles as
-      // "blocked" if the agent had asked for the user, else "stopped".
-      endAbandonedRun(runId, output);
-    }
-    if (
-      origin === "user" &&
-      closingTab?.type === "terminal" &&
-      closingTab.spawnedTask
-    ) {
-      void settleAttempt({
-        attemptId: closingTab.spawnedTask.attemptId,
-        state: "cancelled",
-        failureClass: "route",
-        failureCode: "user-closed",
-      }).catch(() => {});
-    }
-    termHandles.current.delete(id);
-    const closingGroup =
-      closingTab?.type === "terminal" && closingTab.paneGroup
-        ? terminalGroupsRef.current[closingTab.paneGroup]
-        : undefined;
-    const nextGroupRoot = closingGroup
-      ? removeLeaf(closingGroup.root, id)
-      : null;
-    const nextGroupIds = nextGroupRoot ? leafIds(nextGroupRoot) : [];
-    const nextGroupActive = closingGroup
-      ? closingGroup.activeTabId === id
-        ? nextGroupIds[0] ?? null
-        : closingGroup.activeTabId
-      : null;
-    if (closingGroup) {
-      setTerminalGroups((prev) => {
-        const next = { ...prev };
-        if (!nextGroupRoot || nextGroupIds.length < 2) delete next[closingGroup.id];
-        else {
-          next[closingGroup.id] = {
-            ...closingGroup,
-            root: nextGroupRoot,
-            activeTabId: nextGroupActive ?? nextGroupIds[0],
-            zoomedTabId:
-              closingGroup.zoomedTabId === id
-                ? undefined
-                : closingGroup.zoomedTabId,
-          };
+      if (pendingClose && Object.keys(pendingClose.groups).length > 0) {
+        const restored = {
+          ...terminalGroupsRef.current,
+          ...pendingClose.groups,
+        };
+        terminalGroupsRef.current = restored;
+        setTerminalGroups(restored);
+      }
+      // A process can exit while its tab is in the grace period. Remove only that
+      // member from the pending transaction; surviving panes can still be
+      // restored until their shared deadline.
+      dropPendingAgentTab(id);
+      // The last moment the terminal's scrollback exists: the handle goes on the
+      // next line and the buffer dies with the unmount. Both endings pass through
+      // here — job_done's self-close and the user closing the tab — so capturing
+      // once here covers a finished task and an abandoned one alike. recordTaskEnd
+      // ignores a run that already settled, so "stopped" can't clobber "done".
+      const closingTab = tabsRef.current.find((t) => t.id === id);
+      // A terminal on another machine has no local folder to reap: its cwd is a
+      // path on that machine, and no git call here may be made from it.
+      if (
+        closingTab?.type === "terminal" &&
+        closingTab.cwd &&
+        !closingTab.machine
+      ) {
+        const closingCwd = closingTab.cwd;
+        // After the unmount's PTY kill, not during it: git won't remove a
+        // folder a live process still holds open.
+        setTimeout(
+          () =>
+            void maybeReapAgentWorkspaceRef
+              .current(closingCwd, id)
+              .catch(() => {}),
+          1500,
+        );
+      }
+      if (
+        origin === "user" &&
+        closingTab?.type === "terminal" &&
+        closingTab.attachId != null
+      ) {
+        terminalAttachmentQueue.forget(project.id, closingTab.attachId);
+      }
+      if (closingTab?.type === "preview") forgetBrowserTarget(id);
+      if (
+        origin === "user" &&
+        closingTab?.type === "terminal" &&
+        closingTab.ptyId != null &&
+        (closingTab.attachId == null || closingTab.killAttachedOnClose)
+      ) {
+        // Hook events are the authoritative bond. Store-only agents have no
+        // events, so fall back to the current-launch digest for this surface.
+        const sessionId =
+          liveSessionByPtyRef.current.get(closingTab.ptyId) ??
+          digestBySurface(wsDigestsRef.current, thisInstanceRef.current).get(
+            String(closingTab.ptyId),
+          )?.session_id;
+        if (sessionId) markUserClosed(sessionId);
+      }
+      if (closingTab?.type === "terminal" && closingTab.micro?.runId) {
+        const runId = closingTab.micro.runId;
+        const output =
+          termHandles.current.get(id)?.captureText(8000) || undefined;
+        if (output) updateTaskRun(runId, { output });
+        // A no-op for a run that already reported done; otherwise it settles as
+        // "blocked" if the agent had asked for the user, else "stopped".
+        endAbandonedRun(runId, output);
+      }
+      if (
+        origin === "user" &&
+        closingTab?.type === "terminal" &&
+        closingTab.spawnedTask
+      ) {
+        void settleAttempt({
+          attemptId: closingTab.spawnedTask.attemptId,
+          state: "cancelled",
+          failureClass: "route",
+          failureCode: "user-closed",
+        }).catch(() => {});
+      }
+      termHandles.current.delete(id);
+      const closingGroup =
+        closingTab?.type === "terminal" && closingTab.paneGroup
+          ? terminalGroupsRef.current[closingTab.paneGroup]
+          : undefined;
+      const nextGroupRoot = closingGroup
+        ? removeLeaf(closingGroup.root, id)
+        : null;
+      const nextGroupIds = nextGroupRoot ? leafIds(nextGroupRoot) : [];
+      const nextGroupActive = closingGroup
+        ? closingGroup.activeTabId === id
+          ? (nextGroupIds[0] ?? null)
+          : closingGroup.activeTabId
+        : null;
+      if (closingGroup) {
+        setTerminalGroups((prev) => {
+          const next = { ...prev };
+          if (!nextGroupRoot || nextGroupIds.length < 2)
+            delete next[closingGroup.id];
+          else {
+            next[closingGroup.id] = {
+              ...closingGroup,
+              root: nextGroupRoot,
+              activeTabId: nextGroupActive ?? nextGroupIds[0],
+              zoomedTabId:
+                closingGroup.zoomedTabId === id
+                  ? undefined
+                  : closingGroup.zoomedTabId,
+            };
+          }
+          terminalGroupsRef.current = next;
+          return next;
+        });
+      }
+      setTabs((prev) => {
+        const closing = prev.find((t) => t.id === id);
+        if (
+          closing?.type === "terminal" &&
+          closing.micro &&
+          closing.ptyId != null
+        ) {
+          // A micro-task session never reaches restorables, however it ends —
+          // that includes the user closing the tab mid-run. Forget after the
+          // unmount-kill's grace window so the delete lands on the CLI's final
+          // digest write instead of racing it.
+          const sid = liveSessionByPtyRef.current.get(closing.ptyId);
+          if (sid)
+            setTimeout(() => void ipc.sessionForget(sid).catch(() => {}), 4000);
         }
-        terminalGroupsRef.current = next;
+        if (closing?.type === "file") {
+          // Closing the tab disposes the model the OwnerSession is subscribed
+          // to, so the share has to end first — otherwise it sits there holding
+          // a dead model and every remote edit throws.
+          const share = shared.current.get(closing.file.path);
+          if (share) {
+            collabRef.current.close(share.doc);
+            shared.current.delete(closing.file.path);
+          }
+          const uri = monaco.Uri.file(closing.file.path);
+          closeEditorModelOwner(
+            `${project.id}:${closing.id}`,
+            uri.toString(),
+            monaco.editor.getModel(uri) ?? undefined,
+          );
+        }
+        if (closing?.type === "collab") {
+          collabRef.current.close(closing.doc);
+          monaco.editor
+            .getModels()
+            .find(
+              (m) =>
+                m.uri.scheme === "canopy-collab" &&
+                m.uri.path.startsWith(`/${closing.doc}/`),
+            )
+            ?.dispose();
+        }
+        if (closing?.type === "shared-project") {
+          collabRef.current.leaveProject(closing.doc);
+        }
+        const closingIndex = prev.findIndex((t) => t.id === id);
+        const next = prev
+          .filter((t) => t.id !== id)
+          .map((t) =>
+            closingGroup &&
+            nextGroupIds.length === 1 &&
+            t.id === nextGroupIds[0]
+              ? ({ ...t, paneGroup: undefined } as SubTab)
+              : t,
+          );
+        setActiveTabId((active) => {
+          if (active !== id) return active;
+          if (nextGroupActive && next.some((t) => t.id === nextGroupActive))
+            return nextGroupActive;
+          if (next.length === 0) return null;
+          // Land on the neighbour that took the closed tab's place (the tab to
+          // its right), or the new last one when the last tab was closed — so
+          // closing left-to-right stays predictable instead of jumping away.
+          return next[Math.min(closingIndex, next.length - 1)].id;
+        });
         return next;
       });
-    }
-    setTabs((prev) => {
-      const closing = prev.find((t) => t.id === id);
-      if (
-        closing?.type === "terminal" &&
-        closing.micro &&
-        closing.ptyId != null
-      ) {
-        // A micro-task session never reaches restorables, however it ends —
-        // that includes the user closing the tab mid-run. Forget after the
-        // unmount-kill's grace window so the delete lands on the CLI's final
-        // digest write instead of racing it.
-        const sid = liveSessionByPtyRef.current.get(closing.ptyId);
-        if (sid)
-          setTimeout(() => void ipc.sessionForget(sid).catch(() => {}), 4000);
-      }
-      if (closing?.type === "file") {
-        // Closing the tab disposes the model the OwnerSession is subscribed
-        // to, so the share has to end first — otherwise it sits there holding
-        // a dead model and every remote edit throws.
-        const share = shared.current.get(closing.file.path);
-        if (share) {
-          collabRef.current.close(share.doc);
-          shared.current.delete(closing.file.path);
-        }
-        const uri = monaco.Uri.file(closing.file.path);
-        closeEditorModelOwner(
-          `${project.id}:${closing.id}`,
-          uri.toString(),
-          monaco.editor.getModel(uri) ?? undefined,
-        );
-      }
-      if (closing?.type === "collab") {
-        collabRef.current.close(closing.doc);
-        monaco.editor
-          .getModels()
-          .find(
-            (m) =>
-              m.uri.scheme === "canopy-collab" &&
-              m.uri.path.startsWith(`/${closing.doc}/`),
-          )
-          ?.dispose();
-      }
-      if (closing?.type === "shared-project") {
-        collabRef.current.leaveProject(closing.doc);
-      }
-      const closingIndex = prev.findIndex((t) => t.id === id);
-      const next = prev
-        .filter((t) => t.id !== id)
-        .map((t) =>
-          closingGroup && nextGroupIds.length === 1 && t.id === nextGroupIds[0]
-            ? ({ ...t, paneGroup: undefined } as SubTab)
-            : t,
-        );
-      setActiveTabId((active) => {
-        if (active !== id) return active;
-        if (nextGroupActive && next.some((t) => t.id === nextGroupActive))
-          return nextGroupActive;
-        if (next.length === 0) return null;
-        // Land on the neighbour that took the closed tab's place (the tab to
-        // its right), or the new last one when the last tab was closed — so
-        // closing left-to-right stays predictable instead of jumping away.
-        return next[Math.min(closingIndex, next.length - 1)].id;
-      });
-      return next;
-    });
-  }, [dropPendingAgentTab]);
+    },
+    [dropPendingAgentTab],
+  );
 
   const finalizePendingAgentClose = useCallback(
     (closeId: string) => {
@@ -7676,7 +8606,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
         .find((tabId) => tabIds.includes(tabId));
       const restoreTabId = tabIds.includes(activeTabIdRef.current ?? "")
         ? (activeTabIdRef.current as string)
-        : groupRestoreTabId ?? tabIds[0];
+        : (groupRestoreTabId ?? tabIds[0]);
       const first = closingTabs[0];
       const baseTitle =
         first.type === "terminal"
@@ -7685,7 +8615,8 @@ const ProjectViewBody = memo(function ProjectViewBody({
       const close: PendingAgentClose = {
         id,
         tabIds,
-        title: tabIds.length > 1 ? `${baseTitle} +${tabIds.length - 1}` : baseTitle,
+        title:
+          tabIds.length > 1 ? `${baseTitle} +${tabIds.length - 1}` : baseTitle,
         deadline: Date.now() + AGENT_CLOSE_UNDO_MS,
         restoreTabId,
         groups,
@@ -7703,11 +8634,14 @@ const ProjectViewBody = memo(function ProjectViewBody({
 
       if (tabIds.includes(activeTabIdRef.current ?? "")) {
         const remaining = tabsRef.current.filter((tab) => !hidden.has(tab.id));
-        const firstIndex = tabsRef.current.findIndex((tab) => tab.id === tabIds[0]);
+        const firstIndex = tabsRef.current.findIndex(
+          (tab) => tab.id === tabIds[0],
+        );
         setActiveTabId(
           remaining.length === 0
             ? null
-            : remaining[Math.min(Math.max(firstIndex, 0), remaining.length - 1)].id,
+            : remaining[Math.min(Math.max(firstIndex, 0), remaining.length - 1)]
+                .id,
         );
       }
       return true;
@@ -7741,29 +8675,27 @@ const ProjectViewBody = memo(function ProjectViewBody({
     [commitPendingAgentCloses],
   );
 
-  const closeTab = useCallback((
-    id: string,
-    origin: "automatic" | "user" = "automatic",
-  ) => {
-    if (origin === "user" && requestAgentClose([id])) return;
-    finalizeTabClose(id, origin);
-  }, [finalizeTabClose, requestAgentClose]);
+  const closeTab = useCallback(
+    (id: string, origin: "automatic" | "user" = "automatic") => {
+      if (origin === "user" && requestAgentClose([id])) return;
+      finalizeTabClose(id, origin);
+    },
+    [finalizeTabClose, requestAgentClose],
+  );
   closeTabRef.current = closeTab;
 
-  const splitActiveTerminal = useCallback(
-    (axis: SplitAxis) => {
-      const active = tabsRef.current.find(
-        (t): t is TermSubTab => t.id === activeTabIdRef.current && t.type === "terminal",
-      );
-      if (!active || active.run) return;
-      const pending = { sourceTabId: active.id, axis };
-      pendingSplitRef.current = pending;
-      setPendingSplit(pending);
-      setLauncherWhere(undefined);
-      setLauncherOpen(true);
-    },
-    [],
-  );
+  const splitActiveTerminal = useCallback((axis: SplitAxis) => {
+    const active = tabsRef.current.find(
+      (t): t is TermSubTab =>
+        t.id === activeTabIdRef.current && t.type === "terminal",
+    );
+    if (!active || active.run) return;
+    const pending = { sourceTabId: active.id, axis };
+    pendingSplitRef.current = pending;
+    setPendingSplit(pending);
+    setLauncherWhere(undefined);
+    setLauncherOpen(true);
+  }, []);
   splitActiveRef.current = splitActiveTerminal;
 
   const completePendingSplit = useCallback(
@@ -7827,7 +8759,8 @@ const ProjectViewBody = memo(function ProjectViewBody({
 
   const focusPane = useCallback((direction: PaneDirection) => {
     const active = tabsRef.current.find(
-      (t): t is TermSubTab => t.id === activeTabIdRef.current && t.type === "terminal",
+      (t): t is TermSubTab =>
+        t.id === activeTabIdRef.current && t.type === "terminal",
     );
     if (!active?.paneGroup) return;
     const group = terminalGroupsRef.current[active.paneGroup];
@@ -7870,7 +8803,8 @@ const ProjectViewBody = memo(function ProjectViewBody({
 
   const togglePaneZoom = useCallback(() => {
     const active = tabsRef.current.find(
-      (t): t is TermSubTab => t.id === activeTabIdRef.current && t.type === "terminal",
+      (t): t is TermSubTab =>
+        t.id === activeTabIdRef.current && t.type === "terminal",
     );
     if (!active?.paneGroup) return;
     const group = terminalGroupsRef.current[active.paneGroup];
@@ -7889,7 +8823,8 @@ const ProjectViewBody = memo(function ProjectViewBody({
 
   const equalizePanes = useCallback(() => {
     const active = tabsRef.current.find(
-      (t): t is TermSubTab => t.id === activeTabIdRef.current && t.type === "terminal",
+      (t): t is TermSubTab =>
+        t.id === activeTabIdRef.current && t.type === "terminal",
     );
     if (!active?.paneGroup) return;
     const group = terminalGroupsRef.current[active.paneGroup];
@@ -7982,7 +8917,8 @@ const ProjectViewBody = memo(function ProjectViewBody({
     setTabs((prev) =>
       prev.map((item) =>
         item.type === "terminal" &&
-        (item.id === tabId || (remaining.length === 1 && item.id === remaining[0]))
+        (item.id === tabId ||
+          (remaining.length === 1 && item.id === remaining[0]))
           ? { ...item, paneGroup: undefined }
           : item,
       ),
@@ -8202,18 +9138,34 @@ const ProjectViewBody = memo(function ProjectViewBody({
             .catch((e) => onNotice(String(e), "error"));
       }
     },
-    [project.id, project.name, roots, openNote, openResearch, openFile, onNotice],
+    [
+      project.id,
+      project.name,
+      roots,
+      openNote,
+      openResearch,
+      openFile,
+      onNotice,
+    ],
   );
 
   const saveFile = useCallback(
     async (path: string) => {
-      if(project.readOnly||isReadOnlyHost()){onNotice("This project is read-only.");return false;}
+      if (project.readOnly || isReadOnlyHost()) {
+        onNotice("This project is read-only.");
+        return false;
+      }
       const model = monaco.editor.getModel(monaco.Uri.file(path));
       if (!model) return false;
       const content = model.getValue();
       try {
-        await editorDisk.current.write(path, content, () => ipc.fsWriteFile(path, content));
-        patchFile(path, { dirty: model.getValue() !== content, external: null });
+        await editorDisk.current.write(path, content, () =>
+          ipc.fsWriteFile(path, content),
+        );
+        patchFile(path, {
+          dirty: model.getValue() !== content,
+          external: null,
+        });
         return true;
       } catch (err) {
         onNotice(`Can't save ${basename(path)} — ${String(err)}`, "error");
@@ -8389,7 +9341,10 @@ const ProjectViewBody = memo(function ProjectViewBody({
     // any repo's commit — including the projects sitting behind `display: none`.
     const gitSub = ipc.onGitChange((e) => {
       const mine = rootsRef.current.some(
-        (r) => e.root === r || r.startsWith(e.root + "/") || e.root.startsWith(r + "/"),
+        (r) =>
+          e.root === r ||
+          r.startsWith(e.root + "/") ||
+          e.root.startsWith(r + "/"),
       );
       if (mine) void refreshChanges();
     });
@@ -8418,7 +9373,8 @@ const ProjectViewBody = memo(function ProjectViewBody({
               normalizedPath.startsWith(normalizedRoot + "/")
             );
           })
-        ) continue;
+        )
+          continue;
         const file = findFile(path);
         if (!file || e.kind === "remove") continue;
         // A tab that refused to load the file in the first place must not
@@ -8430,7 +9386,8 @@ const ProjectViewBody = memo(function ProjectViewBody({
           const bytes = await ipc.fsReadFile(path, sizeLimitFor(file.kind));
           if (file.kind === "code") {
             const newText = decoder.decode(bytes);
-            if (!await editorDisk.current.changed(path, newText, revision)) continue;
+            if (!(await editorDisk.current.changed(path, newText, revision)))
+              continue;
             const model = monaco.editor.getModel(monaco.Uri.file(path));
             const currentText =
               model?.getValue() ??
@@ -8617,18 +9574,29 @@ const ProjectViewBody = memo(function ProjectViewBody({
         // message in. The conversation's own names come back first, and the
         // stand-in is the prompt that opened the session — never this one.
         const restored = d.sessionId
-          ? adoptDurableNames(tab, rememberedSessionNames(terminalMemoryScopeRef.current, d.sessionId))
+          ? adoptDurableNames(
+              tab,
+              rememberedSessionNames(
+                terminalMemoryScopeRef.current,
+                d.sessionId,
+              ),
+            )
           : null;
         const current = { ...tab, ...restored };
         const opening = d.sessionId
-          ? openingPrompt(wsDigestsRef.current.find((x) => x.session_id === d.sessionId), d.prompt)
+          ? openingPrompt(
+              wsDigestsRef.current.find((x) => x.session_id === d.sessionId),
+              d.prompt,
+            )
           : d.prompt;
         // Only the first one ever lands: namePatch keeps later messages out of
         // the slot, and a micro-task's durable launch label out of reach.
         // Nothing here can touch a name the user typed — that is a different
         // slot, and this caller has no way to reach it.
         const name = namePatch(
-          current, "prompt", promptTaskIdentity(opening).title ?? baseline.title,
+          current,
+          "prompt",
+          promptTaskIdentity(opening).title ?? baseline.title,
         );
         // The focus line follows the latest message, yielding to the agent's
         // own description as soon as canopy_name_task publishes one.
@@ -8645,13 +9613,18 @@ const ProjectViewBody = memo(function ProjectViewBody({
             prompt: opening,
             tab: () =>
               tabsRef.current.find(
-                (t): t is TermSubTab => t.type === "terminal" && t.id === tab.id,
+                (t): t is TermSubTab =>
+                  t.type === "terminal" && t.id === tab.id,
               ),
             apply: (patch) => patchTabRaw(tab.id, patch),
           });
       }
       if (tab && tab.id === activeTabIdRef.current && visibleRef.current)
-        attentionRef.current(d.pty, { t: "focus", at: e.ts, visible: true }, cli);
+        attentionRef.current(
+          d.pty,
+          { t: "focus", at: e.ts, visible: true },
+          cli,
+        );
     }
   }, [projectEvents]);
 
@@ -8677,11 +9650,16 @@ const ProjectViewBody = memo(function ProjectViewBody({
       const key = JSON.stringify([scope, sid]);
       if (namesBoundTo.current.get(t.id) !== key) {
         namesBoundTo.current.set(t.id, key);
-        const restored = adoptDurableNames(t, rememberedSessionNames(scope, sid));
+        const restored = adoptDurableNames(
+          t,
+          rememberedSessionNames(scope, sid),
+        );
         const seeded = namePatch(
           { ...t, ...restored },
           "prompt",
-          promptTaskIdentity(openingPrompt(wsDigests.find((d) => d.session_id === sid))).title,
+          promptTaskIdentity(
+            openingPrompt(wsDigests.find((d) => d.session_id === sid)),
+          ).title,
         );
         if (restored || seeded) {
           adopt.set(t.id, { ...restored, ...seeded });
@@ -8699,7 +9677,9 @@ const ProjectViewBody = memo(function ProjectViewBody({
     if (adopt.size)
       setTabs((prev) =>
         prev.map((tab) =>
-          tab.type === "terminal" && adopt.has(tab.id) ? { ...tab, ...adopt.get(tab.id) } : tab,
+          tab.type === "terminal" && adopt.has(tab.id)
+            ? { ...tab, ...adopt.get(tab.id) }
+            : tab,
         ),
       );
   }, [tabs, liveSessionByPty, wsDigests, terminalMemoryScope]);
@@ -8715,7 +9695,9 @@ const ProjectViewBody = memo(function ProjectViewBody({
     const m = new Map<string, number | null>();
     for (const d of wsDigests) {
       if (!d.session_id) continue;
-      if (lifeFor({ digest: d as never, now: lifeClock / 1000 }).state === "ended")
+      if (
+        lifeFor({ digest: d as never, now: lifeClock / 1000 }).state === "ended"
+      )
         continue;
       m.set(d.session_id, null);
     }
@@ -8959,7 +9941,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
             ticket: t.ticket,
             source: t.source,
             // Older snapshots predate repository identity on ticket tabs.
-            repo: t.repo ?? await ticketRepo(),
+            repo: t.repo ?? (await ticketRepo()),
           });
         case "commit":
           return push({
@@ -9008,7 +9990,12 @@ const ProjectViewBody = memo(function ProjectViewBody({
         case "mcp":
           return push({ id: tabId(), type: "mcp", server: t.server });
         case "claim":
-          return push({ id: tabId(), type: "claim", claimId: t.claim.id, claim: t.claim });
+          return push({
+            id: tabId(),
+            type: "claim",
+            claimId: t.claim.id,
+            claim: t.claim,
+          });
         case "chat":
           return push({
             id: tabId(),
@@ -9134,7 +10121,10 @@ const ProjectViewBody = memo(function ProjectViewBody({
         if (opts.deliver !== false) typeInto(opts.ptyId);
         return {
           delivered: true,
-          note: opts.deliver === false ? `Found ${agentId}.` : `Sent to ${agentId}.`,
+          note:
+            opts.deliver === false
+              ? `Found ${agentId}.`
+              : `Sent to ${agentId}.`,
           ptyId: opts.ptyId,
         };
       }
@@ -9144,7 +10134,10 @@ const ProjectViewBody = memo(function ProjectViewBody({
         if (opts.deliver !== false) typeInto(moved);
         return {
           delivered: true,
-          note: opts.deliver === false ? `Found ${agentId}.` : `Sent to ${agentId}.`,
+          note:
+            opts.deliver === false
+              ? `Found ${agentId}.`
+              : `Sent to ${agentId}.`,
           ptyId: moved,
         };
       }
@@ -9190,12 +10183,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
         };
       }
       const runIn = resumeCwd(digest, cwd);
-      addTerminal(
-        runIn,
-        cmd,
-        agentId,
-        agentCliFor(agentId)?.icon,
-      );
+      addTerminal(runIn, cmd, agentId, agentCliFor(agentId)?.icon);
       for (let i = 0; i < 40; i++) {
         await new Promise((r) => setTimeout(r, 400));
         const back = livePtyForSession();
@@ -9299,7 +10287,12 @@ const ProjectViewBody = memo(function ProjectViewBody({
       }
       const edges = await ipc.provenanceForPr(row.repo, number).catch(() => []);
       const dirs = await Promise.all(
-        edges.map((e) => ipc.fsStat(e.cwd).then(() => e.cwd, () => null)),
+        edges.map((e) =>
+          ipc.fsStat(e.cwd).then(
+            () => e.cwd,
+            () => null,
+          ),
+        ),
       );
       const alive = new Set(dirs.filter(Boolean) as string[]);
       const to = resolveAgentForPr(edges, {
@@ -9838,10 +10831,15 @@ const ProjectViewBody = memo(function ProjectViewBody({
   //
   // A CLI may declare that its launch-time menu can be refined from a donor
   // catalogue. Probe lazily only after that type is actually present.
-  const [refinedModels, setRefinedModels] = useState<Record<string, ModelChoice[]>>({});
+  const [refinedModels, setRefinedModels] = useState<
+    Record<string, ModelChoice[]>
+  >({});
   const modelCatalogProbed = useRef(new Set<string>());
   useEffect(() => {
-    const present = new Map<string, NonNullable<AgentCli["capabilities"]>["refreshModelCatalog"]>();
+    const present = new Map<
+      string,
+      NonNullable<AgentCli["capabilities"]>["refreshModelCatalog"]
+    >();
     for (const t of tabs) {
       if (t.type !== "terminal" || t.ptyId == null) continue;
       const s = projectStats.find((x) => x.id === t.ptyId);
@@ -9949,13 +10947,19 @@ const ProjectViewBody = memo(function ProjectViewBody({
       const cwd = at ?? activeContextRoot ?? componentsRef.current[0]?.path;
       if (!cwd) return;
       const target =
-        where ?? (getSettings().agentWorkspaceByDefault ? "workspace" : "current");
-      const startOnMachine = async (remote: Target, name: string): Promise<RemoteStart> => {
+        where ??
+        (getSettings().agentWorkspaceByDefault ? "workspace" : "current");
+      const startOnMachine = async (
+        remote: Target,
+        name: string,
+      ): Promise<RemoteStart> => {
         if (remote.kind !== "remote") return { kind: "failed" };
         try {
           onNotice(`Starting ${cli.name} on ${name}…`, "info");
           const connected = await connectMachine(remote.workspaceId);
-          const component = componentsRef.current.find((c) => c.path === cwd) ?? componentsRef.current[0];
+          const component =
+            componentsRef.current.find((c) => c.path === cwd) ??
+            componentsRef.current[0];
           const found = await remoteComponentFor(
             () => connected.invoke<string>("store_load"),
             connected.env,
@@ -9963,7 +10967,8 @@ const ProjectViewBody = memo(function ProjectViewBody({
             component,
           );
           // No complete copy of the project there: the setup flow owns that.
-          if (found.kind !== "found") return { kind: "not-set-up", invoke: connected.invoke };
+          if (found.kind !== "found")
+            return { kind: "not-set-up", invoke: connected.invoke };
           // The agent's own workspace on that machine, by the same setting the
           // local launch honours, made through that machine's git.
           const prepared = await prepareRemoteWorkspace({
@@ -9982,24 +10987,54 @@ const ProjectViewBody = memo(function ProjectViewBody({
           // config directory on THIS Mac, so none is carried. Said once, only
           // when a non-default account was chosen.
           if (profileId && profileId !== DEFAULT_PROFILE)
-            onNotice(`${cli.name} on ${name} uses that workspace's own sign-in, not the account chosen here.`, "info");
+            onNotice(
+              `${cli.name} on ${name} uses that workspace's own sign-in, not the account chosen here.`,
+              "info",
+            );
           const seed = remoteSeedRef.current;
           remoteSeedRef.current = undefined;
-          const terminalId = addTerminal(prepared.cwd, launchCommand(cli), cli.name, cli.icon, false, undefined, undefined, true, undefined, undefined, undefined, connected.env);
-          if (terminalId && seed) pendingTerminalPrompts.current.set(terminalId, seed);
+          const terminalId = addTerminal(
+            prepared.cwd,
+            launchCommand(cli),
+            cli.name,
+            cli.icon,
+            false,
+            undefined,
+            undefined,
+            true,
+            undefined,
+            undefined,
+            undefined,
+            connected.env,
+          );
+          if (terminalId && seed)
+            pendingTerminalPrompts.current.set(terminalId, seed);
           return { kind: "started" };
         } catch (error) {
-          onNotice(`Could not start ${cli.name} on ${name}: ${String((error as Error)?.message ?? error)}`, "warn");
+          onNotice(
+            `Could not start ${cli.name} on ${name}: ${String((error as Error)?.message ?? error)}`,
+            "warn",
+          );
           return { kind: "failed" };
         }
       };
-      if (machine && !(await prepareMachineLaunch(cli.id, machine, { label: componentsRef.current.find((c) => c.path === cwd)?.label }, startOnMachine))) return;
+      if (
+        machine &&
+        !(await prepareMachineLaunch(
+          cli.id,
+          machine,
+          { label: componentsRef.current.find((c) => c.path === cwd)?.label },
+          startOnMachine,
+        ))
+      )
+        return;
       // `undefined` is a probe that hasn't answered, never "not installed".
       // Ask now; if it still can't say, launch anyway: a missing binary fails
       // visibly in its own terminal, while guessing "missing" would run the
       // installer over a CLI the user already has.
       let present = installed[cli.bin];
-      if (present === undefined) present = (await getInstalledForLaunch())[cli.bin];
+      if (present === undefined)
+        present = (await getInstalledForLaunch())[cli.bin];
       if (present !== false) {
         let launchCwd = cwd;
         if (target === "workspace") {
@@ -10012,7 +11047,8 @@ const ProjectViewBody = memo(function ProjectViewBody({
                   cwd.startsWith(`${path}/`) ||
                   cwd.startsWith(`${path}-wt-`),
               ) ??
-            (await ipc.gitRepos([[project.name, cwd]]).catch(() => []))[0]?.path;
+            (await ipc.gitRepos([[project.name, cwd]]).catch(() => []))[0]
+              ?.path;
           if (!repo) {
             onNotice(
               `${cli.name} opened in the current folder because it is not inside a Git repository.`,
@@ -10030,7 +11066,10 @@ const ProjectViewBody = memo(function ProjectViewBody({
               // The worktree checkout plus config copy below take seconds on a
               // big repo, and nothing is on screen until they finish — without
               // this the launch reads as the app hanging.
-              onNotice(`Preparing an isolated workspace for ${cli.name}…`, "info");
+              onNotice(
+                `Preparing an isolated workspace for ${cli.name}…`,
+                "info",
+              );
               const result = await switchTo(
                 repo,
                 { kind: "workspace", branch, create: true },
@@ -10081,12 +11120,17 @@ const ProjectViewBody = memo(function ProjectViewBody({
         // Before the terminal opens: the CLI reads the config-dir variable at
         // startup, so exporting it afterwards is too late.
         const profileIds = profilesRef.current.map((p) => p.id);
-        const profile = await resolveProfile(cli.id, profileId ?? lastProfileFor(cli.id, profileIds), profileIds);
+        const profile = await resolveProfile(
+          cli.id,
+          profileId ?? lastProfileFor(cli.id, profileIds),
+          profileIds,
+        );
         noteProfileUsed(cli.id, profile);
         const env = await launchEnvFor(cli.id, profile);
         // Remembered only when the CLI can hold an account and the launch
         // actually carries one, so the default follows what was really used.
-        if (env.length || profile === DEFAULT_PROFILE) rememberProfile(cli.id, profile);
+        if (env.length || profile === DEFAULT_PROFILE)
+          rememberProfile(cli.id, profile);
         const terminal = {
           cwd: launchCwd,
           command: launchCommand(cli),
@@ -10152,22 +11196,56 @@ const ProjectViewBody = memo(function ProjectViewBody({
   repoPathsRef.current = repoPaths;
   useEffect(() => {
     if (!visible) return;
-    const intent = takePendingLaunch(activeExecutionTarget(), canonicalProjectId(project));
+    const intent = takePendingLaunch(
+      activeExecutionTarget(),
+      canonicalProjectId(project),
+    );
     if (!intent) return;
     const cli = AGENT_CLIS.find((c) => c.id === intent.agentId);
     if (!cli) return;
     onNotice(`Starting ${cli.name} here.`, "info");
     const at = intent.componentLabel
-      ? componentsRef.current.find((c) => c.label === intent.componentLabel)?.path
+      ? componentsRef.current.find((c) => c.label === intent.componentLabel)
+          ?.path
       : undefined;
     const first = at ?? componentsRef.current[0]?.path;
-    const repo = [...repoPathsRef.current].sort((a, b) => b.length - a.length).find((r) => first && (first === r || first.startsWith(`${r}/`))) ?? repoPathsRef.current[0] ?? "";
+    const repo =
+      [...repoPathsRef.current]
+        .sort((a, b) => b.length - a.length)
+        .find((r) => first && (first === r || first.startsWith(`${r}/`))) ??
+      repoPathsRef.current[0] ??
+      "";
     if (intent.then?.kind === "resume") {
-      const { sessionId, cwd } = intent.then.payload as { sessionId: string; cwd: string };
-      addTerminalRef.current(cwd, restoreCommand(TELEPORT_CLI_ID, sessionId) || undefined, TELEPORT_CLI_ID, cli.icon);
-    } else if (intent.then?.kind === "pr-review") void startPrAgentRef.current("review", repo, intent.then.payload as ipc.PrInfo, cli.id);
-    else if (intent.then?.kind === "pr-resolve") void startPrAgentRef.current("resolve", repo, intent.then.payload as ipc.PrInfo, cli.id);
-    else if (intent.then?.kind === "ticket") void startTicketWorkRef.current(intent.then.payload as ipc.TicketInfo, repo, cli.id);
+      const { sessionId, cwd } = intent.then.payload as {
+        sessionId: string;
+        cwd: string;
+      };
+      addTerminalRef.current(
+        cwd,
+        restoreCommand(TELEPORT_CLI_ID, sessionId) || undefined,
+        TELEPORT_CLI_ID,
+        cli.icon,
+      );
+    } else if (intent.then?.kind === "pr-review")
+      void startPrAgentRef.current(
+        "review",
+        repo,
+        intent.then.payload as ipc.PrInfo,
+        cli.id,
+      );
+    else if (intent.then?.kind === "pr-resolve")
+      void startPrAgentRef.current(
+        "resolve",
+        repo,
+        intent.then.payload as ipc.PrInfo,
+        cli.id,
+      );
+    else if (intent.then?.kind === "ticket")
+      void startTicketWorkRef.current(
+        intent.then.payload as ipc.TicketInfo,
+        repo,
+        cli.id,
+      );
     else void launchCliRef.current(cli, at);
     // Once per mount of a visible project: the intent is removed as it is taken.
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -10194,11 +11272,32 @@ const ProjectViewBody = memo(function ProjectViewBody({
   /** The launcher list — shell plus every agent CLI — for a given directory.
    *  Shared by the ＋ menu, the empty-state grid and the component right-click
    *  menu so the three can't drift apart. */
-  const upload = useRemoteUpload(onNotice,()=>setTreeRefreshRevision(v=>v+1));
-  const uploadItems = (dir:string,chooseDestination=false):MenuItem[] => upload.startUpload ? [
-    {label:"Upload files…",onClick:()=>void (chooseDestination?upload.chooseUploadDestination!:upload.startUpload!)(dir,"files")},
-    {label:"Upload folder…",onClick:()=>void (chooseDestination?upload.chooseUploadDestination!:upload.startUpload!)(dir,"folder")},
-  ] : [];
+  const upload = useRemoteUpload(onNotice, () =>
+    setTreeRefreshRevision((v) => v + 1),
+  );
+  const uploadItems = (dir: string, chooseDestination = false): MenuItem[] =>
+    upload.startUpload
+      ? [
+          {
+            label: "Upload files…",
+            onClick: () =>
+              void (
+                chooseDestination
+                  ? upload.chooseUploadDestination!
+                  : upload.startUpload!
+              )(dir, "files"),
+          },
+          {
+            label: "Upload folder…",
+            onClick: () =>
+              void (
+                chooseDestination
+                  ? upload.chooseUploadDestination!
+                  : upload.startUpload!
+              )(dir, "folder"),
+          },
+        ]
+      : [];
   const launcherItems = (cwd: string): MenuItem[] => [
     ...uploadItems(cwd),
     {
@@ -10220,7 +11319,14 @@ const ProjectViewBody = memo(function ProjectViewBody({
             : undefined,
       onClick: () => {
         void pickComponent(`New ${cli.name}`, cli.id, cwd).then((selection) => {
-          if (selection) void launchCli(cli, selection.component.path, "current", selection.machine, selection.profileId);
+          if (selection)
+            void launchCli(
+              cli,
+              selection.component.path,
+              "current",
+              selection.machine,
+              selection.profileId,
+            );
         });
       },
     })),
@@ -10271,7 +11377,8 @@ const ProjectViewBody = memo(function ProjectViewBody({
         // `query` is what a saved task is told about this particular item —
         // empty for a surface whose seed is only a prefix ("About the changes
         // in `x`: "), the whole brief for one that already has the full story.
-        onRunSaved: (t) => void startMicroTask(customTaskDef(t), { dir }, query),
+        onRunSaved: (t) =>
+          void startMicroTask(customTaskDef(t), { dir }, query),
       }),
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [seedTaskFrom, openTaskComposer, startMicroTask, project.customTasks],
@@ -10318,10 +11425,17 @@ const ProjectViewBody = memo(function ProjectViewBody({
 
   const startRename = useCallback(
     (tab: TermSubTab, scope: "tab" | "pane" = "tab") => {
-      const group = scope === "tab" && tab.paneGroup ? terminalGroupsRef.current[tab.paneGroup] : undefined;
+      const group =
+        scope === "tab" && tab.paneGroup
+          ? terminalGroupsRef.current[tab.paneGroup]
+          : undefined;
       renamingGroupId.current = group?.id ?? null;
       setRenamingTabId(tab.id);
-      setRenameDraft(group && isUserNamed(group) ? tabName(group) : tabName(tab, { agent: isAgentTabRef.current(tab) }));
+      setRenameDraft(
+        group && isUserNamed(group)
+          ? tabName(group)
+          : tabName(tab, { agent: isAgentTabRef.current(tab) }),
+      );
     },
     [],
   );
@@ -10379,7 +11493,9 @@ const ProjectViewBody = memo(function ProjectViewBody({
   // actually closed; otherwise the Workspace overlay is conditionally
   // unmounted on that sample and every click/draft inside it disappears.
   const liveTerminalPtys = tabs
-    .filter((tab): tab is TermSubTab => tab.type === "terminal" && tab.ptyId != null)
+    .filter(
+      (tab): tab is TermSubTab => tab.type === "terminal" && tab.ptyId != null,
+    )
     .map((tab) => tab.ptyId as number);
   const boundAgentDigests = new Map<number, ipc.SessionDigest>();
   for (const [ptyId, sessionId] of liveSessionByPty) {
@@ -10387,11 +11503,16 @@ const ProjectViewBody = memo(function ProjectViewBody({
     if (digest) boundAgentDigests.set(ptyId, digest as ipc.SessionDigest);
   }
   rememberAgentPtys(
-    rememberedAgentPtys.current, liveTerminalPtys, projectStats, boundAgentDigests,
+    rememberedAgentPtys.current,
+    liveTerminalPtys,
+    projectStats,
+    boundAgentDigests,
   );
   const agentPtyList = [
     ...new Set([
-      ...projectStats.filter((s) => identifyAgent(s.agent_hint)).map((s) => s.id),
+      ...projectStats
+        .filter((s) => identifyAgent(s.agent_hint))
+        .map((s) => s.id),
       ...rememberedAgentPtys.current.keys(),
     ]),
   ];
@@ -10424,7 +11545,10 @@ const ProjectViewBody = memo(function ProjectViewBody({
   // terminal in every open project, and a fresh object per tick re-renders
   // every strip in the app.
   const statsKey = projectStats
-    .map((s) => `${s.id}:${Math.round(s.total_cpu)}:${s.quiet_ms ?? -1}:${s.agent_hint ? 1 : 0}`)
+    .map(
+      (s) =>
+        `${s.id}:${Math.round(s.total_cpu)}:${s.quiet_ms ?? -1}:${s.agent_hint ? 1 : 0}`,
+    )
     .sort()
     .join("|");
   // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -10442,7 +11566,8 @@ const ProjectViewBody = memo(function ProjectViewBody({
   // never invalidate a consumer's memo — the version is what says an
   // attention-only change happened.
   const attentionFor = useCallback(
-    (ptyId: number): Attention => attentionMemory.current.get(ptyId) ?? NO_ATTENTION,
+    (ptyId: number): Attention =>
+      attentionMemory.current.get(ptyId) ?? NO_ATTENTION,
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [attentionVersion],
   );
@@ -10480,7 +11605,8 @@ const ProjectViewBody = memo(function ProjectViewBody({
   const watchdogViews = useStableViews(() => {
     const views: AgentLifeView[] = [];
     for (const tab of tabs) {
-      if (tab.type !== "terminal" || tab.ptyId == null || !isAgentTab(tab)) continue;
+      if (tab.type !== "terminal" || tab.ptyId == null || !isAgentTab(tab))
+        continue;
       const life = lifeForPty(tab.ptyId);
       views.push({
         ptyId: tab.ptyId,
@@ -10521,10 +11647,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
       at: lifeClock,
     });
   }, [lifeClock, project.id, project.name, watchdogTargets, watchdogViews]);
-  useEffect(
-    () => () => clearAgentWatchdogAttention(project.id),
-    [project.id],
-  );
+  useEffect(() => () => clearAgentWatchdogAttention(project.id), [project.id]);
   const tabLife = useCallback(
     (t: TermSubTab): Life => {
       // Agent panes only. A plain shell split into the same group has no
@@ -10600,14 +11723,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
           icon: t.icon,
         })),
     ],
-    [
-      microRuns,
-      tabs,
-      tabState,
-      lifeForPty,
-      projectEvents,
-      microClock,
-    ],
+    [microRuns, tabs, tabState, lifeForPty, projectEvents, microClock],
   );
   const stripTabs = useMemo(() => {
     const seen = new Set<string>();
@@ -10634,16 +11750,20 @@ const ProjectViewBody = memo(function ProjectViewBody({
       out.push({
         ...tab,
         multiplexCount: ids.length,
-        multiplexTitle: multiplexTabName(group, tab, focused, ids.length, { agent: isAgentTabRef.current(focused) }),
+        multiplexTitle: multiplexTabName(group, tab, focused, ids.length, {
+          agent: isAgentTabRef.current(focused),
+        }),
       });
     }
     return out;
   }, [visibleTabs, tabs, terminalGroups]);
   const activeVisualTabId = useMemo(() => {
-    if (activeTab?.type !== "terminal" || !activeTab.paneGroup) return activeTabId;
+    if (activeTab?.type !== "terminal" || !activeTab.paneGroup)
+      return activeTabId;
     return (
       stripTabs.find(
-        (tab) => tab.type === "terminal" && tab.paneGroup === activeTab.paneGroup,
+        (tab) =>
+          tab.type === "terminal" && tab.paneGroup === activeTab.paneGroup,
       )?.id ?? activeTabId
     );
   }, [activeTab, activeTabId, stripTabs]);
@@ -10763,10 +11883,17 @@ const ProjectViewBody = memo(function ProjectViewBody({
   // Pinned tabs sit first and outside the status groups, so they never move
   // with their agent's state (see isPinnedTab).
   const pinnedTabs = useMemo(() => splitPinned(stripTabs).pinned, [stripTabs]);
-  const unpinnedAgentTabs = useMemo(() => agentTabs.filter((t) => !isPinnedTab(t) && !isSettledTab(t)), [agentTabs]);
-  const settledTabs = useMemo(() => agentTabs.filter((t) => isSettledTab(t)), [agentTabs]);
+  const unpinnedAgentTabs = useMemo(
+    () => agentTabs.filter((t) => !isPinnedTab(t) && !isSettledTab(t)),
+    [agentTabs],
+  );
+  const settledTabs = useMemo(
+    () => agentTabs.filter((t) => isSettledTab(t)),
+    [agentTabs],
+  );
   const byStatus = useCallback(
-    (s: TabStatus) => (grouped ? unpinnedAgentTabs.filter((t) => groupOf(t.id) === s) : []),
+    (s: TabStatus) =>
+      grouped ? unpinnedAgentTabs.filter((t) => groupOf(t.id) === s) : [],
     [grouped, unpinnedAgentTabs, groupOf],
   );
   const attentionTabs = useMemo(() => byStatus("attention"), [byStatus]);
@@ -10798,7 +11925,9 @@ const ProjectViewBody = memo(function ProjectViewBody({
       // chip instead of behind it.
       requestAnimationFrame(() => {
         const root = stripRef.current;
-        const group = root?.querySelector<HTMLElement>(`[${GROUP_ATTR}="${key}"]`);
+        const group = root?.querySelector<HTMLElement>(
+          `[${GROUP_ATTR}="${key}"]`,
+        );
         if (!root || !group) return;
         const left = contentLeft(root, group);
         const next = expandedStackScroll(root.scrollLeft, left);
@@ -10818,7 +11947,9 @@ const ProjectViewBody = memo(function ProjectViewBody({
     const arrived = [...now].some((id) => !seenAttention.current.has(id));
     seenAttention.current = now;
     if (arrived)
-      setOpenStacks((p) => (p.attention === false ? { ...p, attention: true } : p));
+      setOpenStacks((p) =>
+        p.attention === false ? { ...p, attention: true } : p,
+      );
   }, [attentionKey]);
 
   const tabGroups: StripGroup[] = useMemo(() => {
@@ -10837,7 +11968,9 @@ const ProjectViewBody = memo(function ProjectViewBody({
       shown: shownInStack(group, label == null || openStacks[key] !== false),
     });
     return [
-      ...(pinnedTabs.length > 0 ? [run("pinned", null, null, null, pinnedTabs)] : []),
+      ...(pinnedTabs.length > 0
+        ? [run("pinned", null, null, null, pinnedTabs)]
+        : []),
       ...(grouped
         ? [
             // Always this order, whatever is in them: needs you, working,
@@ -10845,18 +11978,32 @@ const ProjectViewBody = memo(function ProjectViewBody({
             // there is one place that says what the priority is — the strip
             // stays stable even while sessions move between states.
             ...STATUS_ORDER.map((s) =>
-              run(s, STATUS_LABEL[s], s, null, { attention: attentionTabs, active: workingTabs, quiet: quietTabs }[s]),
+              run(
+                s,
+                STATUS_LABEL[s],
+                s,
+                null,
+                {
+                  attention: attentionTabs,
+                  active: workingTabs,
+                  quiet: quietTabs,
+                }[s],
+              ),
             ),
           ]
         : [run("all", null, null, null, unpinnedAgentTabs)]),
-      ...(settledTabs.length > 0 ? [run("settled", "SETTLED", null, null, settledTabs)] : []),
+      ...(settledTabs.length > 0
+        ? [run("settled", "SETTLED", null, null, settledTabs)]
+        : []),
       ...DOC_STACKS.map((d) =>
         run(
           d.key,
           d.label,
           null,
           DOC_STACK_ICONS[d.key],
-          refTabs.filter((t) => !isPinnedTab(t) && docStackFor(t.type) === d.key),
+          refTabs.filter(
+            (t) => !isPinnedTab(t) && docStackFor(t.type) === d.key,
+          ),
         ),
       ),
     ];
@@ -11075,7 +12222,9 @@ const ProjectViewBody = memo(function ProjectViewBody({
       shellTabs.map((tab) => ({
         id: tab.id,
         active: tab.id === activeVisualTabId,
-        className: terminalMemoryWarning(tab) ? "run-chip-memory-warning" : undefined,
+        className: terminalMemoryWarning(tab)
+          ? "run-chip-memory-warning"
+          : undefined,
         dot: <TerminalIcon size={11} className="run-chip-shell-dot" />,
         title: tab.multiplexTitle ?? tabName(tab),
         tooltip: `${tab.command ?? "shell"} — ${tab.cwd}`,
@@ -11093,7 +12242,13 @@ const ProjectViewBody = memo(function ProjectViewBody({
             : closeTab(tab.id, "user"),
       })),
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [shellTabs, activeVisualTabId, closeTab, closeTerminalGroup, terminalMemoryWarning],
+    [
+      shellTabs,
+      activeVisualTabId,
+      closeTab,
+      closeTerminalGroup,
+      terminalMemoryWarning,
+    ],
   );
   const runChips: RailChip[] = useMemo(
     () =>
@@ -11116,12 +12271,15 @@ const ProjectViewBody = memo(function ProjectViewBody({
             ? `${ok ? "finished" : `exited ${tab.exitCode ?? "?"}`} — ${tab.command ?? ""}`
             : `running — ${tab.command ?? ""}`,
           action: tab.exited ? (
-            <Button icon className="run-chip-btn"
+            <Button
+              icon
+              className="run-chip-btn"
               title="Run again"
               onClick={(e) => {
                 e.stopPropagation();
                 restartRun(tab.id);
-              }}>
+              }}
+            >
               <RestartIcon size={11} />
             </Button>
           ) : undefined,
@@ -11306,144 +12464,302 @@ const ProjectViewBody = memo(function ProjectViewBody({
   // ---- subscription pool: move a session on when its account reaches a limit.
   const movingTabs = useRef(new Set<string>());
   const waitingTabs = useRef(new Set<string>());
-  const [poolExhausted, setPoolExhausted] = useState<{ cli: string; name: string; until: number; dismissed?: true } | null>(null);
-  const moveAgent = useCallback(async (
-    tabId: string,
-    to: string,
-    opts: { prompt?: boolean; sessionId?: string } = {},
-  ): Promise<HandoverResult | null> => {
-    const tab = tabsRef.current.find(t => t.id === tabId && t.type === "terminal") as TermSubTab | undefined;
-    const target = agentTargetsRef.current.find(a => a.tabId === tabId);
-    const cli = target && agentCliFor(target.agentId);
-    if (!tab || tab.ptyId == null || !cli || movingTabs.current.has(tabId)) return null;
-    movingTabs.current.add(tabId);
-    const ptyId = tab.ptyId;
-    const from = tab.profile || DEFAULT_PROFILE;
-    const log = (step: string, detail?: string) =>
-      void ipc.jsLog("info", `account-handover pty=${ptyId} ${cli.id} ${from}->${to} ${step}${detail ? `: ${detail}` : ""}`);
-    try {
-      const sessionId = opts.sessionId || liveSessionByPtyRef.current.get(ptyId) || resumeSessionId(tab.command) || tab.rememberedSessionId;
-      const envOf = (profile: string) => (profile === DEFAULT_PROFILE ? Promise.resolve([] as [string, string][]) : ipc.profileEnv(cli.id, profile));
-      const [fromEnv, toEnv, digests] = await Promise.all([envOf(from), envOf(to), ipc.sessionDigests(rootsRef.current)]);
-      if (!envReachesProfile(to, toEnv)) throw new Error("Selected account is unavailable");
-      const digest = digests.find(d => d.session_id === sessionId);
-      const cwd = resumeCwd(digest, tab.cwd);
-      const without = (env: [string, string][], other: [string, string][]) =>
-        env.map(([key]) => key).filter(key => !other.some(([name]) => name === key));
-      const flags = carriedFlags(cli.capabilities?.resumeKeeps ?? [], tab.command);
-      const resume = sessionId ? restoreCommand(cli.id, sessionId) : null;
-      const command = resume ? [resume, ...flags].join(" ") : null;
-      const fresh = launchCommand(cli);
-      const onTarget = (line: string) => handoverLine({ cwd, set: toEnv, clear: without(fromEnv, toEnv), command: line });
-      const midTurn = digest && lifeOfSession({ digest: digest as never, now: Date.now() / 1000 }).state === "working";
-      const prompted = command && (opts.prompt || midTurn) ? withPrompt(command, sessionId!, CONTINUE_PROMPT) : command;
-      const result = await handOver({
-        target: { line: onTarget(prompted ?? fresh), profile: to },
-        // Never with the prompt: a way back that spent a turn on a limited
-        // account would report the limit again and start the move over.
-        original: { line: handoverLine({ cwd, set: fromEnv, clear: without(toEnv, fromEnv), command: command ?? fresh }), profile: from },
-        fresh: { line: onTarget(fresh), profile: to },
-      }, {
-        stop: () => ipc.ptyStopForeground(ptyId),
-        transfer: async () => {
-          // Best effort: without it the CLI waits at a prompt, which the
-          // started check below reports. It is no reason to stay on a limit.
-          await ipc.profileCarryTrust(cli.id, cwd, from, to).catch(error => log("trust-not-carried", String(error)));
-          if (!sessionId) throw new Error("Saved conversation not found");
-          await ipc.profilePrepareSession(cli.id, sessionId, from, to);
-        },
-        write: line => ipc.ptyWrite(ptyId, line),
-        running: () => ipc.ptyForegroundRunning(ptyId),
-        sleep: ms => new Promise(resolve => setTimeout(resolve, ms)),
-        log,
-      });
-      log(result.outcome, "reason" in result ? result.reason : undefined);
-      if (result.outcome === "moved" || result.outcome === "started-fresh") {
-        const accountKeys = [...fromEnv, ...toEnv].map(([key]) => key);
-        setTabs(prev => prev.map(t => (t.id === tabId && t.type === "terminal" ? {
-          ...t,
-          profile: to === DEFAULT_PROFILE ? undefined : to,
-          env: [...(t.env ?? []).filter(([key]) => !accountKeys.includes(key)), ...toEnv],
-          command: result.outcome === "moved" && command ? command : fresh,
-        } : t)));
+  const [poolExhausted, setPoolExhausted] = useState<{
+    cli: string;
+    name: string;
+    until: number;
+    dismissed?: true;
+  } | null>(null);
+  const moveAgent = useCallback(
+    async (
+      tabId: string,
+      to: string,
+      opts: { prompt?: boolean; sessionId?: string } = {},
+    ): Promise<HandoverResult | null> => {
+      const tab = tabsRef.current.find(
+        (t) => t.id === tabId && t.type === "terminal",
+      ) as TermSubTab | undefined;
+      const target = agentTargetsRef.current.find((a) => a.tabId === tabId);
+      const cli = target && agentCliFor(target.agentId);
+      if (!tab || tab.ptyId == null || !cli || movingTabs.current.has(tabId))
+        return null;
+      movingTabs.current.add(tabId);
+      const ptyId = tab.ptyId;
+      const from = tab.profile || DEFAULT_PROFILE;
+      const log = (step: string, detail?: string) =>
+        void ipc.jsLog(
+          "info",
+          `account-handover pty=${ptyId} ${cli.id} ${from}->${to} ${step}${detail ? `: ${detail}` : ""}`,
+        );
+      try {
+        const sessionId =
+          opts.sessionId ||
+          liveSessionByPtyRef.current.get(ptyId) ||
+          resumeSessionId(tab.command) ||
+          tab.rememberedSessionId;
+        const envOf = (profile: string) =>
+          profile === DEFAULT_PROFILE
+            ? Promise.resolve([] as [string, string][])
+            : ipc.profileEnv(cli.id, profile);
+        const [fromEnv, toEnv, digests] = await Promise.all([
+          envOf(from),
+          envOf(to),
+          ipc.sessionDigests(rootsRef.current),
+        ]);
+        if (!envReachesProfile(to, toEnv))
+          throw new Error("Selected account is unavailable");
+        const digest = digests.find((d) => d.session_id === sessionId);
+        const cwd = resumeCwd(digest, tab.cwd);
+        const without = (env: [string, string][], other: [string, string][]) =>
+          env
+            .map(([key]) => key)
+            .filter((key) => !other.some(([name]) => name === key));
+        const flags = carriedFlags(
+          cli.capabilities?.resumeKeeps ?? [],
+          tab.command,
+        );
+        const resume = sessionId ? restoreCommand(cli.id, sessionId) : null;
+        const command = resume ? [resume, ...flags].join(" ") : null;
+        const fresh = launchCommand(cli);
+        const onTarget = (line: string) =>
+          handoverLine({
+            cwd,
+            set: toEnv,
+            clear: without(fromEnv, toEnv),
+            command: line,
+          });
+        const midTurn =
+          digest &&
+          lifeOfSession({ digest: digest as never, now: Date.now() / 1000 })
+            .state === "working";
+        const prompted =
+          command && (opts.prompt || midTurn)
+            ? withPrompt(command, sessionId!, CONTINUE_PROMPT)
+            : command;
+        const result = await handOver(
+          {
+            target: { line: onTarget(prompted ?? fresh), profile: to },
+            // Never with the prompt: a way back that spent a turn on a limited
+            // account would report the limit again and start the move over.
+            original: {
+              line: handoverLine({
+                cwd,
+                set: fromEnv,
+                clear: without(toEnv, fromEnv),
+                command: command ?? fresh,
+              }),
+              profile: from,
+            },
+            fresh: { line: onTarget(fresh), profile: to },
+          },
+          {
+            stop: () => ipc.ptyStopForeground(ptyId),
+            transfer: async () => {
+              // Best effort: without it the CLI waits at a prompt, which the
+              // started check below reports. It is no reason to stay on a limit.
+              await ipc
+                .profileCarryTrust(cli.id, cwd, from, to)
+                .catch((error) => log("trust-not-carried", String(error)));
+              if (!sessionId) throw new Error("Saved conversation not found");
+              await ipc.profilePrepareSession(cli.id, sessionId, from, to);
+            },
+            write: (line) => ipc.ptyWrite(ptyId, line),
+            running: () => ipc.ptyForegroundRunning(ptyId),
+            sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+            log,
+          },
+        );
+        log(result.outcome, "reason" in result ? result.reason : undefined);
+        if (result.outcome === "moved" || result.outcome === "started-fresh") {
+          const accountKeys = [...fromEnv, ...toEnv].map(([key]) => key);
+          setTabs((prev) =>
+            prev.map((t) =>
+              t.id === tabId && t.type === "terminal"
+                ? {
+                    ...t,
+                    profile: to === DEFAULT_PROFILE ? undefined : to,
+                    env: [
+                      ...(t.env ?? []).filter(
+                        ([key]) => !accountKeys.includes(key),
+                      ),
+                      ...toEnv,
+                    ],
+                    command:
+                      result.outcome === "moved" && command ? command : fresh,
+                  }
+                : t,
+            ),
+          );
+        }
+        return result;
+      } catch (error) {
+        log("failed", String(error));
+        return {
+          outcome: "failed",
+          reason: error instanceof Error ? error.message : String(error),
+        };
+      } finally {
+        movingTabs.current.delete(tabId);
       }
-      return result;
-    } catch (error) {
-      log("failed", String(error));
-      return { outcome: "failed", reason: error instanceof Error ? error.message : String(error) };
-    } finally {
-      movingTabs.current.delete(tabId);
-    }
-  }, []);
+    },
+    [],
+  );
   moveAgentRef.current = moveAgent;
 
   /** A live process is not proof: first-run dialogs hold a CLI before it does
    *  anything. A hook reporting from the new account is. */
-  const agentStarted = useCallback(async (sessionId: string | undefined, profile: string) => {
-    const since = Date.now() / 1000 - 30;
-    for (let waited = 0; sessionId && waited < 20_000; waited += 1000) {
-      const digests = await ipc.sessionDigests(rootsRef.current).catch(() => []);
-      const digest = digests.find(d => d.session_id === sessionId);
-      if (digest && (digest.profile || DEFAULT_PROFILE) === profile && (digest.updated ?? 0) >= since) return true;
-      await new Promise(resolve => setTimeout(resolve, 1000));
-    }
-    return false;
-  }, []);
+  const agentStarted = useCallback(
+    async (sessionId: string | undefined, profile: string) => {
+      const since = Date.now() / 1000 - 30;
+      for (let waited = 0; sessionId && waited < 20_000; waited += 1000) {
+        const digests = await ipc
+          .sessionDigests(rootsRef.current)
+          .catch(() => []);
+        const digest = digests.find((d) => d.session_id === sessionId);
+        if (
+          digest &&
+          (digest.profile || DEFAULT_PROFILE) === profile &&
+          (digest.updated ?? 0) >= since
+        )
+          return true;
+        await new Promise((resolve) => setTimeout(resolve, 1000));
+      }
+      return false;
+    },
+    [],
+  );
 
   /** Send a tab to the next account with room, or wait for the first reset. */
-  const continueOnNextAccount = useCallback(async (tabId: string, sessionId?: string) => {
-    const tab = tabsRef.current.find(t => t.id === tabId && t.type === "terminal") as TermSubTab | undefined;
-    const target = agentTargetsRef.current.find(a => a.tabId === tabId);
-    const cli = target && agentCliFor(target.agentId);
-    if (!tab || !cli) return;
-    const order = profilesRef.current.map(p => p.id);
-    const from = tab.profile || DEFAULT_PROFILE;
-    const signedIn = (await Promise.all(order.map(id => ipc.profileAccounts(id)
-      .then(list => (list.find(a => a.agent === cli.id)?.state === "in" ? id : null))
-      .catch(() => null)))).filter((id): id is string => id != null);
-    const refused: Record<string, { until: number }> = {};
-    for (let tries = 0; tries < order.length; tries++) {
-      const now = Date.now();
-      const limits = { ...getSettings().accountLimits, ...refused };
-      const to = nextAccount({ cli: cli.id, from, order, signedIn, limits, now });
-      if (!to) {
-        waitingTabs.current.add(tabId);
-        setPoolExhausted({ cli: cli.id, name: cli.name, until: earliestReset(cli.id, signedIn, getSettings().accountLimits, now) });
-        return;
+  const continueOnNextAccount = useCallback(
+    async (tabId: string, sessionId?: string) => {
+      const tab = tabsRef.current.find(
+        (t) => t.id === tabId && t.type === "terminal",
+      ) as TermSubTab | undefined;
+      const target = agentTargetsRef.current.find((a) => a.tabId === tabId);
+      const cli = target && agentCliFor(target.agentId);
+      if (!tab || !cli) return;
+      const order = profilesRef.current.map((p) => p.id);
+      const from = tab.profile || DEFAULT_PROFILE;
+      const signedIn = (
+        await Promise.all(
+          order.map((id) =>
+            ipc
+              .profileAccounts(id)
+              .then((list) =>
+                list.find((a) => a.agent === cli.id)?.state === "in"
+                  ? id
+                  : null,
+              )
+              .catch(() => null),
+          ),
+        )
+      ).filter((id): id is string => id != null);
+      const refused: Record<string, { until: number }> = {};
+      for (let tries = 0; tries < order.length; tries++) {
+        const now = Date.now();
+        const limits = { ...getSettings().accountLimits, ...refused };
+        const to = nextAccount({
+          cli: cli.id,
+          from,
+          order,
+          signedIn,
+          limits,
+          now,
+        });
+        if (!to) {
+          waitingTabs.current.add(tabId);
+          setPoolExhausted({
+            cli: cli.id,
+            name: cli.name,
+            until: earliestReset(
+              cli.id,
+              signedIn,
+              getSettings().accountLimits,
+              now,
+            ),
+          });
+          return;
+        }
+        const label = profilesRef.current.find((p) => p.id === to)?.label ?? to;
+        const result = await moveAgent(tabId, to, { prompt: true, sessionId });
+        if (!result) return;
+        if (result.outcome === "moved") {
+          waitingTabs.current.delete(tabId);
+          const moved =
+            sessionId || liveSessionByPtyRef.current.get(tab.ptyId ?? -1);
+          const started = await agentStarted(moved, to);
+          onNoticeRef.current(
+            started
+              ? `Continuing conversation on ${label}`
+              : `${cli.name} moved to ${label} and is waiting for an answer in its terminal`,
+            started ? "info" : "error",
+          );
+          return;
+        }
+        if (result.outcome === "started-fresh") {
+          waitingTabs.current.delete(tabId);
+          onNoticeRef.current(
+            `${cli.name} started on ${label}; it had no saved conversation to carry`,
+            "info",
+          );
+          return;
+        }
+        if (result.outcome === "failed") {
+          onNoticeRef.current(
+            `${cli.name} could not change account: ${result.reason}`,
+            "error",
+          );
+          return;
+        }
+        refused[limitKey(cli.id, to)] = { until: now + 60_000 };
       }
-      const label = profilesRef.current.find(p => p.id === to)?.label ?? to;
-      const result = await moveAgent(tabId, to, { prompt: true, sessionId });
-      if (!result) return;
-      if (result.outcome === "moved") {
-        waitingTabs.current.delete(tabId);
-        const moved = sessionId || liveSessionByPtyRef.current.get(tab.ptyId ?? -1);
-        const started = await agentStarted(moved, to);
-        onNoticeRef.current(started
-          ? `Continuing conversation on ${label}`
-          : `${cli.name} moved to ${label} and is waiting for an answer in its terminal`, started ? "info" : "error");
-        return;
-      }
-      if (result.outcome === "started-fresh") { waitingTabs.current.delete(tabId); onNoticeRef.current(`${cli.name} started on ${label}; it had no saved conversation to carry`, "info"); return; }
-      if (result.outcome === "failed") { onNoticeRef.current(`${cli.name} could not change account: ${result.reason}`, "error"); return; }
-      refused[limitKey(cli.id, to)] = { until: now + 60_000 };
-    }
-    onNoticeRef.current(`${cli.name} stayed on its account: no other account could open this conversation`, "error");
-  }, [agentStarted, moveAgent]);
+      onNoticeRef.current(
+        `${cli.name} stayed on its account: no other account could open this conversation`,
+        "error",
+      );
+    },
+    [agentStarted, moveAgent],
+  );
 
-  const onAccountLimit = useCallback(async (tabId: string, limit: { message: string; sessionId?: string }) => {
-    if (isRemoteHost() || !canHandOver() || !getSettings().accountRotation || movingTabs.current.has(tabId)) return;
-    const tab = tabsRef.current.find(t => t.id === tabId && t.type === "terminal") as TermSubTab | undefined;
-    const target = agentTargetsRef.current.find(a => a.tabId === tabId);
-    const cli = target && agentCliFor(target.agentId);
-    if (!tab || !cli?.capabilities?.conversationTransfer) return;
-    const profile = tab.profile || DEFAULT_PROFILE;
-    const plans = await ipc.planUsage(limit.sessionId).catch(() => []);
-    const windows = plans.find(p => p.agent === cli.id && p.profile === profile)?.windows ?? [];
-    const now = new Date();
-    const live = Object.fromEntries(Object.entries(getSettings().accountLimits).filter(([, value]) => value.until > now.getTime()));
-    updateSettings({ accountLimits: { ...live, [limitKey(cli.id, profile)]: { until: limitResetAt(limit.message, windows, now), message: limit.message } } });
-    await continueOnNextAccount(tabId, limit.sessionId);
-  }, [continueOnNextAccount]);
+  const onAccountLimit = useCallback(
+    async (tabId: string, limit: { message: string; sessionId?: string }) => {
+      if (
+        isRemoteHost() ||
+        !canHandOver() ||
+        !getSettings().accountRotation ||
+        movingTabs.current.has(tabId)
+      )
+        return;
+      const tab = tabsRef.current.find(
+        (t) => t.id === tabId && t.type === "terminal",
+      ) as TermSubTab | undefined;
+      const target = agentTargetsRef.current.find((a) => a.tabId === tabId);
+      const cli = target && agentCliFor(target.agentId);
+      if (!tab || !cli?.capabilities?.conversationTransfer) return;
+      const profile = tab.profile || DEFAULT_PROFILE;
+      const plans = await ipc.planUsage(limit.sessionId).catch(() => []);
+      const windows =
+        plans.find((p) => p.agent === cli.id && p.profile === profile)
+          ?.windows ?? [];
+      const now = new Date();
+      const live = Object.fromEntries(
+        Object.entries(getSettings().accountLimits).filter(
+          ([, value]) => value.until > now.getTime(),
+        ),
+      );
+      updateSettings({
+        accountLimits: {
+          ...live,
+          [limitKey(cli.id, profile)]: {
+            until: limitResetAt(limit.message, windows, now),
+            message: limit.message,
+          },
+        },
+      });
+      await continueOnNextAccount(tabId, limit.sessionId);
+    },
+    [continueOnNextAccount],
+  );
   const onAccountLimitRef = useRef(onAccountLimit);
   onAccountLimitRef.current = onAccountLimit;
 
@@ -11452,17 +12768,37 @@ const ProjectViewBody = memo(function ProjectViewBody({
     if (isRemoteHost()) return;
     let stale = false;
     let stop: (() => void) | undefined;
-    void ipc.onAgentEvents(lines => {
-      for (const line of lines) {
-        if (!line.includes('"canopy_limit"')) continue;
-        try {
-          const event = JSON.parse(line) as { canopy_pty?: number; session_id?: string; canopy_limit?: { message?: string } };
-          const tab = tabsRef.current.find(t => t.type === "terminal" && t.ptyId === event.canopy_pty);
-          if (tab) void onAccountLimitRef.current(tab.id, { message: event.canopy_limit?.message ?? "", sessionId: event.session_id });
-        } catch { /* A torn line is the next line's problem. */ }
-      }
-    }).then(unlisten => { if (stale) unlisten(); else stop = unlisten; });
-    return () => { stale = true; stop?.(); };
+    void ipc
+      .onAgentEvents((lines) => {
+        for (const line of lines) {
+          if (!line.includes('"canopy_limit"')) continue;
+          try {
+            const event = JSON.parse(line) as {
+              canopy_pty?: number;
+              session_id?: string;
+              canopy_limit?: { message?: string };
+            };
+            const tab = tabsRef.current.find(
+              (t) => t.type === "terminal" && t.ptyId === event.canopy_pty,
+            );
+            if (tab)
+              void onAccountLimitRef.current(tab.id, {
+                message: event.canopy_limit?.message ?? "",
+                sessionId: event.session_id,
+              });
+          } catch {
+            /* A torn line is the next line's problem. */
+          }
+        }
+      })
+      .then((unlisten) => {
+        if (stale) unlisten();
+        else stop = unlisten;
+      });
+    return () => {
+      stale = true;
+      stop?.();
+    };
   }, []);
 
   // The second way to notice. A CLI with no failure hook stops at a limit and
@@ -11474,36 +12810,65 @@ const ProjectViewBody = memo(function ProjectViewBody({
     void ensureAccountIntegration();
     const look = async () => {
       if (!getSettings().accountRotation) return;
-      const agents = agentTargetsRef.current.filter(a => agentCliFor(a.agentId)?.capabilities?.conversationTransfer);
+      const agents = agentTargetsRef.current.filter(
+        (a) => agentCliFor(a.agentId)?.capabilities?.conversationTransfer,
+      );
       if (!agents.length) return;
-      const digests = await ipc.sessionDigests(rootsRef.current).catch(() => []);
+      const digests = await ipc
+        .sessionDigests(rootsRef.current)
+        .catch(() => []);
       for (const agent of agents) {
-        const tab = tabsRef.current.find(t => t.id === agent.tabId && t.type === "terminal") as TermSubTab | undefined;
+        const tab = tabsRef.current.find(
+          (t) => t.id === agent.tabId && t.type === "terminal",
+        ) as TermSubTab | undefined;
         const sessionId = liveSessionByPtyRef.current.get(agent.ptyId);
-        const digest = digests.find(d => d.session_id === sessionId);
+        const digest = digests.find((d) => d.session_id === sessionId);
         if (!tab || !digest) continue;
-        if (lifeOfSession({ digest: digest as never, now: Date.now() / 1000 }).state !== "unknown") continue;
+        if (
+          lifeOfSession({ digest: digest as never, now: Date.now() / 1000 })
+            .state !== "unknown"
+        )
+          continue;
         const profile = tab.profile || DEFAULT_PROFILE;
         const plans = await ipc.planUsage(sessionId).catch(() => []);
-        const windows = plans.find(p => p.agent === agent.agentId && p.profile === profile)?.windows ?? [];
-        if (windowSpent(windows, new Date())) await onAccountLimitRef.current(agent.tabId, { message: "", sessionId });
+        const windows =
+          plans.find((p) => p.agent === agent.agentId && p.profile === profile)
+            ?.windows ?? [];
+        if (windowSpent(windows, new Date()))
+          await onAccountLimitRef.current(agent.tabId, {
+            message: "",
+            sessionId,
+          });
       }
     };
     const timer = setInterval(() => void look(), 60_000);
     return () => clearInterval(timer);
   }, []);
 
-  const retryExhausted = useCallback((clearLimits: boolean) => {
-    const cli = poolExhausted?.cli;
-    setPoolExhausted(null);
-    if (clearLimits && cli) {
-      updateSettings({ accountLimits: Object.fromEntries(Object.entries(getSettings().accountLimits).filter(([key]) => !key.startsWith(`${cli}:`))) });
-    }
-    for (const tabId of [...waitingTabs.current]) void continueOnNextAccount(tabId);
-  }, [continueOnNextAccount, poolExhausted]);
+  const retryExhausted = useCallback(
+    (clearLimits: boolean) => {
+      const cli = poolExhausted?.cli;
+      setPoolExhausted(null);
+      if (clearLimits && cli) {
+        updateSettings({
+          accountLimits: Object.fromEntries(
+            Object.entries(getSettings().accountLimits).filter(
+              ([key]) => !key.startsWith(`${cli}:`),
+            ),
+          ),
+        });
+      }
+      for (const tabId of [...waitingTabs.current])
+        void continueOnNextAccount(tabId);
+    },
+    [continueOnNextAccount, poolExhausted],
+  );
   useEffect(() => {
     if (!poolExhausted) return;
-    const timer = setTimeout(() => retryExhausted(false), Math.max(poolExhausted.until - Date.now(), 0) + 30_000);
+    const timer = setTimeout(
+      () => retryExhausted(false),
+      Math.max(poolExhausted.until - Date.now(), 0) + 30_000,
+    );
     return () => clearTimeout(timer);
   }, [poolExhausted, retryExhausted]);
 
@@ -11624,7 +12989,9 @@ const ProjectViewBody = memo(function ProjectViewBody({
     () => [
       ...new Set([
         ...roots,
-        ...serverComponents.flatMap((c) => (c.workspaces ?? []).map((w) => w.path)),
+        ...serverComponents.flatMap((c) =>
+          (c.workspaces ?? []).map((w) => w.path),
+        ),
         ...allWorktrees.flatMap(({ trees }) =>
           trees.filter((t) => !t.bare && !t.prunable).map((t) => t.path),
         ),
@@ -11659,11 +13026,14 @@ const ProjectViewBody = memo(function ProjectViewBody({
   const localIntegrationServices = useMemo<LocalIntegrationService[]>(() => {
     const rows: LocalIntegrationService[] = [];
     const add = (path: string, component: string, entry: ServerEntry) => {
-      const command = entry.componentId && entry.runCommandId
-        ? project.components
-            .find((candidate) => candidate.id === entry.componentId)
-            ?.commands?.find((candidate) => candidate.id === entry.runCommandId)
-        : undefined;
+      const command =
+        entry.componentId && entry.runCommandId
+          ? project.components
+              .find((candidate) => candidate.id === entry.componentId)
+              ?.commands?.find(
+                (candidate) => candidate.id === entry.runCommandId,
+              )
+          : undefined;
       if (command?.purpose === "check" || command?.purpose === "setup") return;
       rows.push({
         id: `${path}\0${entry.key}`,
@@ -11689,7 +13059,9 @@ const ProjectViewBody = memo(function ProjectViewBody({
   const localIntegrationEntry = useCallback(
     (id: string) => {
       for (const group of serverGroups) {
-        const main = group.entries.find((entry) => `${group.path}\0${entry.key}` === id);
+        const main = group.entries.find(
+          (entry) => `${group.path}\0${entry.key}` === id,
+        );
         if (main) return { path: group.path, entry: main };
         for (const workspace of group.workspaces) {
           const entry = workspace.entries.find(
@@ -11709,7 +13081,10 @@ const ProjectViewBody = memo(function ProjectViewBody({
       const dir = project.components[0]?.path;
       if (!provider || !dir) return;
       const topology = project.components
-        .map((component) => `${component.label}${component.role ? ` (${component.role})` : ""}: ${component.path}`)
+        .map(
+          (component) =>
+            `${component.label}${component.role ? ` (${component.role})` : ""}: ${component.path}`,
+        )
         .join("\n");
       const seed = [
         `Connect and configure ${provider.label} for the project “${project.name}”.`,
@@ -11748,7 +13123,6 @@ const ProjectViewBody = memo(function ProjectViewBody({
 
   const serversRunning = runningCount(serverGroups);
 
-
   /** Start a configured run command, from the Servers panel. Same call the
    *  files panel's run rows make, so both surfaces drive one tab. */
   const startServer = useCallback(
@@ -11776,13 +13150,15 @@ const ProjectViewBody = memo(function ProjectViewBody({
 
   const vibeComponent =
     vibeTarget.kind === "ready"
-      ? components.find((component) => component.id === vibeTarget.component.id) ?? null
+      ? (components.find(
+          (component) => component.id === vibeTarget.component.id,
+        ) ?? null)
       : null;
   const vibeRun =
     vibeTarget.kind === "ready"
-      ? vibeComponent?.commands?.find(
+      ? (vibeComponent?.commands?.find(
           (command) => command.id === vibeTarget.runCommand.id,
-        ) ?? null
+        ) ?? null)
       : null;
   const vibeRequiredRuns = useMemo(() => {
     const configured = project.vibe?.requiredProcesses?.length
@@ -11791,8 +13167,12 @@ const ProjectViewBody = memo(function ProjectViewBody({
         ? [{ componentId: vibeComponent.id, runCommandId: vibeRun.id }]
         : [];
     return configured.flatMap((identity) => {
-      const component = project.components.find((candidate) => candidate.id === identity.componentId);
-      const command = component?.commands?.find((candidate) => candidate.id === identity.runCommandId);
+      const component = project.components.find(
+        (candidate) => candidate.id === identity.componentId,
+      );
+      const command = component?.commands?.find(
+        (candidate) => candidate.id === identity.runCommandId,
+      );
       return component && command ? [{ component, command, identity }] : [];
     });
   }, [project.vibe, project.components, vibeComponent, vibeRun]);
@@ -11809,8 +13189,13 @@ const ProjectViewBody = memo(function ProjectViewBody({
       vibeComponent
         ? inferVibeCheck(
             components,
-            { componentId: vibeComponent.id, runCommandId: vibeRun?.id ?? null },
-            vibePackageState.key === vibePackageKey ? vibePackageState.facts : {},
+            {
+              componentId: vibeComponent.id,
+              runCommandId: vibeRun?.id ?? null,
+            },
+            vibePackageState.key === vibePackageKey
+              ? vibePackageState.facts
+              : {},
           )
         : null,
     [vibeComponent, vibeRun?.id, components, vibePackageState, vibePackageKey],
@@ -11841,7 +13226,8 @@ const ProjectViewBody = memo(function ProjectViewBody({
   const configuredSetupCheck = vibeComponent?.commands?.find(
     (command) => command.purpose === "check",
   );
-  const vibeCheckCommand = configuredSetupCheck?.argv ??
+  const vibeCheckCommand =
+    configuredSetupCheck?.argv ??
     (vibeCheckInference?.kind === "check" ? vibeCheckInference.command : null);
   // Both a chosen check's caveat ("I'm checking with X, not Y") and a gap's
   // ("there's no check I can run") reach the session the same way: it is the
@@ -11863,8 +13249,9 @@ const ProjectViewBody = memo(function ProjectViewBody({
   // Build and Engineer share one mounted runtime but not the presented tab.
   // This exact id also drives doc-host display and every heavyweight child's
   // ownership; using activeTabId here would retain the hidden Engineer pane.
-  const surfaceTabId = vibe ? vibePreview?.id ?? null : activeTabId;
-  if (vibeOwnedPreviewId.current && !vibePreview) vibeOwnedPreviewId.current = null;
+  const surfaceTabId = vibe ? (vibePreview?.id ?? null) : activeTabId;
+  if (vibeOwnedPreviewId.current && !vibePreview)
+    vibeOwnedPreviewId.current = null;
   const vibePreviewIdRef = useRef<string | null>(null);
   vibePreviewIdRef.current = vibePreview?.id ?? null;
   const vibePrimaryCli = resolveBrain((bin) => Boolean(installed[bin]));
@@ -11965,23 +13352,48 @@ const ProjectViewBody = memo(function ProjectViewBody({
   const bootstrapSession = useMemo(() => {
     const components = bootstrapComponents.current;
     const component = components[0];
-    if (!vibe || vibeTarget.kind !== "needs-setup" || !bootstrapState?.empty || !component) return null;
+    if (
+      !vibe ||
+      vibeTarget.kind !== "needs-setup" ||
+      !bootstrapState?.empty ||
+      !component
+    )
+      return null;
     // The same brain as the Build session above, not the raw setting: the
     // setting names a CLI whether or not it is installed, and its id is not
     // its binary once the person has rebound it.
     const brain = vibePrimaryCliRef.current;
     return createVibeBuilderSession({
-      projectId: project.id, projectName: project.name, componentId: component.id, componentPath: component.path,
-      cliId: brain?.id ?? chosenBrainId(), cliBin: brain?.bin ?? chosenBrainId(),
-      projectComponents: components, siblingPaths: components.slice(1).map((item) => item.path),
-      previewTabId: () => null, recoverRoute: recoverVibeRoute,
+      projectId: project.id,
+      projectName: project.name,
+      componentId: component.id,
+      componentPath: component.path,
+      cliId: brain?.id ?? chosenBrainId(),
+      cliBin: brain?.bin ?? chosenBrainId(),
+      projectComponents: components,
+      siblingPaths: components.slice(1).map((item) => item.path),
+      previewTabId: () => null,
+      recoverRoute: recoverVibeRoute,
       onBootstrapReady: async () => {
         setBootstrapState({ key: vibePackageKey, empty: false });
         await bootstrapDiscovery.current();
       },
     });
-  }, [vibe, vibeTarget.kind, bootstrapState?.empty, project.id, project.name, vibePackageKey, recoverVibeRoute]);
-  useEffect(() => () => { void bootstrapSession?.stop(); }, [bootstrapSession]);
+  }, [
+    vibe,
+    vibeTarget.kind,
+    bootstrapState?.empty,
+    project.id,
+    project.name,
+    vibePackageKey,
+    recoverVibeRoute,
+  ]);
+  useEffect(
+    () => () => {
+      void bootstrapSession?.stop();
+    },
+    [bootstrapSession],
+  );
   vibeSessionRef.current = vibeSession ?? bootstrapSession;
   useEffect(() => () => void vibeSession?.stop(), [vibeSession]);
   // A Build request whose plan waited for approval across a restart goes to
@@ -11995,20 +13407,22 @@ const ProjectViewBody = memo(function ProjectViewBody({
       (kind) => (kind === "build" ? send : undefined),
     );
   }, [vibeSession, project.components, project.readOnly]);
-  vibeServerWatch.current =
-    vibeSession
-      ? vibeRequiredRuns
-          .filter(({ command }) => command.purpose !== "setup" && command.purpose !== "check")
-          .map(({ component, command }) => ({
-            targetKey: `${component.path}:${component.id}:${command.id}:${command.command}`,
-            componentId: component.id,
-            runCommandId: command.id,
-            path: command.cwd ?? component.path,
-            command: command.command,
-            kind: command.purpose === "worker" ? "worker" : "serve",
-            session: vibeSession,
-          }))
-      : [];
+  vibeServerWatch.current = vibeSession
+    ? vibeRequiredRuns
+        .filter(
+          ({ command }) =>
+            command.purpose !== "setup" && command.purpose !== "check",
+        )
+        .map(({ component, command }) => ({
+          targetKey: `${component.path}:${component.id}:${command.id}:${command.command}`,
+          componentId: component.id,
+          runCommandId: command.id,
+          path: command.cwd ?? component.path,
+          command: command.command,
+          kind: command.purpose === "worker" ? "worker" : "serve",
+          session: vibeSession,
+        }))
+    : [];
   useEffect(() => {
     if (!vibeSession) return;
     for (const watched of vibeServerWatch.current) {
@@ -12026,11 +13440,20 @@ const ProjectViewBody = memo(function ProjectViewBody({
         candidate.type === "terminal" && candidate.id === tabId,
     );
     if (!tab) return;
-    const owner = componentsRef.current.find((component) => component.id === tab.componentId);
-    const command = owner?.commands?.find((candidate) => candidate.id === tab.runCommandId);
-    if (owner && command && (command.purpose === "setup" || command.readiness?.kind === "one-shot")) {
+    const owner = componentsRef.current.find(
+      (component) => component.id === tab.componentId,
+    );
+    const command = owner?.commands?.find(
+      (candidate) => candidate.id === tab.runCommandId,
+    );
+    if (
+      owner &&
+      command &&
+      (command.purpose === "setup" || command.readiness?.kind === "one-shot")
+    ) {
       const key = `${owner.path}:${owner.id}:${command.id}:${command.command}`;
-      if (event.exit_code === 0 && !event.requested) completedVibeOneShots.current.add(key);
+      if (event.exit_code === 0 && !event.requested)
+        completedVibeOneShots.current.add(key);
       else completedVibeOneShots.current.delete(key);
     }
     const watched = vibeServerWatch.current.find(
@@ -12043,7 +13466,8 @@ const ProjectViewBody = memo(function ProjectViewBody({
     );
     if (!watched) return;
     const decision = judgeVibeServerExit(
-      vibeServerHealth.current.get(watched.targetKey) ?? INITIAL_VIBE_SERVER_HEALTH,
+      vibeServerHealth.current.get(watched.targetKey) ??
+        INITIAL_VIBE_SERVER_HEALTH,
       watched.targetKey,
       {
         at: Date.now(),
@@ -12083,7 +13507,8 @@ const ProjectViewBody = memo(function ProjectViewBody({
         "withdrawn",
       );
     }
-    if (classification.exit !== "repair" || decision.action === "ignore") return;
+    if (classification.exit !== "repair" || decision.action === "ignore")
+      return;
     openVibeServerIncident.current.add(watched.targetKey);
 
     const log =
@@ -12120,7 +13545,12 @@ const ProjectViewBody = memo(function ProjectViewBody({
           }
         : {}),
       ...(crashedCommand
-        ? { command: { name: crashedCommand.name, command: crashedCommand.command } }
+        ? {
+            command: {
+              name: crashedCommand.name,
+              command: crashedCommand.command,
+            },
+          }
         : {}),
     };
     if (decision.action === "repair") {
@@ -12155,22 +13585,16 @@ const ProjectViewBody = memo(function ProjectViewBody({
       });
     };
     const record = (attempt: number) => {
-      incident.present =
-        openVibeServerIncident.current.has(watched.targetKey);
-      void watched.session
-        .reportServerIncident(incident)
-        .then((result) => {
-          if (result === "recorded-unsettled") {
-            repairSettlements(watched.session, 0);
-          } else if (result === "failed" && attempt < 2) {
-            repairSettlements(watched.session, 0, () => {
-              window.setTimeout(
-                () => record(attempt + 1),
-                (attempt + 1) * 1000,
-              );
-            });
-          }
-        });
+      incident.present = openVibeServerIncident.current.has(watched.targetKey);
+      void watched.session.reportServerIncident(incident).then((result) => {
+        if (result === "recorded-unsettled") {
+          repairSettlements(watched.session, 0);
+        } else if (result === "failed" && attempt < 2) {
+          repairSettlements(watched.session, 0, () => {
+            window.setTimeout(() => record(attempt + 1), (attempt + 1) * 1000);
+          });
+        }
+      });
     };
     record(0);
     postAttention({
@@ -12194,36 +13618,56 @@ const ProjectViewBody = memo(function ProjectViewBody({
     if (!vibe || !vibeSession) return;
     for (const { component, command, identity } of vibeRequiredRuns) {
       const key = `${component.path}:${component.id}:${command.id}`;
-      const running = runTabs.some((tab) => matchesVibeRun(tab, component, command));
+      const running = runTabs.some((tab) =>
+        matchesVibeRun(tab, component, command),
+      );
       if (running || autoStartedVibeRuns.current.has(key)) continue;
-      const dependenciesReady = (identity.dependsOn ?? []).every((dependency) => {
-        const dependencyComponent = project.components.find(
-          (candidate) => candidate.id === dependency.componentId,
-        );
-        const dependencyCommand = dependencyComponent?.commands?.find(
-          (candidate) => candidate.id === dependency.runCommandId,
-        );
-        if (!dependencyComponent || !dependencyCommand) return false;
-        if (completedVibeOneShots.current.has(`${dependencyComponent.path}:${dependencyComponent.id}:${dependencyCommand.id}:${dependencyCommand.command}`)) return true;
-        const dependencyTab = runTabs.find((tab) =>
-          matchesVibeRun(tab, dependencyComponent, dependencyCommand),
-        );
-        return vibeRunReady(
-          dependencyTab,
-          dependencyCommand,
-          projectStats,
-          vibeVerifiedReadinessPtys,
-        );
-      });
+      const dependenciesReady = (identity.dependsOn ?? []).every(
+        (dependency) => {
+          const dependencyComponent = project.components.find(
+            (candidate) => candidate.id === dependency.componentId,
+          );
+          const dependencyCommand = dependencyComponent?.commands?.find(
+            (candidate) => candidate.id === dependency.runCommandId,
+          );
+          if (!dependencyComponent || !dependencyCommand) return false;
+          if (
+            completedVibeOneShots.current.has(
+              `${dependencyComponent.path}:${dependencyComponent.id}:${dependencyCommand.id}:${dependencyCommand.command}`,
+            )
+          )
+            return true;
+          const dependencyTab = runTabs.find((tab) =>
+            matchesVibeRun(tab, dependencyComponent, dependencyCommand),
+          );
+          return vibeRunReady(
+            dependencyTab,
+            dependencyCommand,
+            projectStats,
+            vibeVerifiedReadinessPtys,
+          );
+        },
+      );
       if (!dependenciesReady) continue;
       // Setup commands the survey found (`purpose: "setup"`) run to completion
       // before the server does — see vibeSetupGate for the rules.
-      const gate = vibeSetupGate(command, component, runTabs,
-        (setupId) => autoStartedVibeRuns.current.has(`${component.path}:${component.id}:${setupId}`),
-        (setupId) => completedVibeOneShots.current.has(`${component.path}:${component.id}:${setupId}:${component.commands?.find((item) => item.id === setupId)?.command}`),
+      const gate = vibeSetupGate(
+        command,
+        component,
+        runTabs,
+        (setupId) =>
+          autoStartedVibeRuns.current.has(
+            `${component.path}:${component.id}:${setupId}`,
+          ),
+        (setupId) =>
+          completedVibeOneShots.current.has(
+            `${component.path}:${component.id}:${setupId}:${component.commands?.find((item) => item.id === setupId)?.command}`,
+          ),
       );
       for (const setup of gate.start) {
-        autoStartedVibeRuns.current.add(`${component.path}:${component.id}:${setup.id}`);
+        autoStartedVibeRuns.current.add(
+          `${component.path}:${component.id}:${setup.id}`,
+        );
         addTerminal(
           setup.cwd ?? component.path,
           unattendedManagedRunCommand(setup),
@@ -12270,8 +13714,11 @@ const ProjectViewBody = memo(function ProjectViewBody({
         void vibeSession.reportManagedProcessFailure({
           key: setupKey,
           onRepaired: () => {
-            const current = tabsRef.current.find((tab) => tab.id === failedTab.id);
-            if (current?.type === "terminal" && current.exited) restartRun(current.id);
+            const current = tabsRef.current.find(
+              (tab) => tab.id === failedTab.id,
+            );
+            if (current?.type === "terminal" && current.exited)
+              restartRun(current.id);
           },
           kind: "setup",
           componentId: component.id,
@@ -12308,7 +13755,20 @@ const ProjectViewBody = memo(function ProjectViewBody({
         { componentId: component.id, runCommandId: command.id },
       );
     }
-  }, [visible, vibe, vibeSession, vibeRequiredRuns, runTabs, projectStats, addTerminal, project.id, project.name, project.components, vibeVerifiedReadinessPtys, restartRun]);
+  }, [
+    visible,
+    vibe,
+    vibeSession,
+    vibeRequiredRuns,
+    runTabs,
+    projectStats,
+    addTerminal,
+    project.id,
+    project.name,
+    project.components,
+    vibeVerifiedReadinessPtys,
+    restartRun,
+  ]);
 
   // A live PTY is not proof that its command started. Package runners,
   // authentication flows, and project pickers can all wait forever while the
@@ -12353,7 +13813,8 @@ const ProjectViewBody = memo(function ProjectViewBody({
             tab.ptyId == null ||
             !tab.componentId ||
             !tab.runCommandId
-          ) return [];
+          )
+            return [];
           const component = componentsRef.current.find(
             (candidate) => candidate.id === tab.componentId,
           );
@@ -12366,92 +13827,150 @@ const ProjectViewBody = memo(function ProjectViewBody({
         for (const ptyId of [...vibeRunSupervision.current.keys()]) {
           if (!live.has(ptyId)) vibeRunSupervision.current.delete(ptyId);
         }
-        await Promise.all(active.map(async ({ tab, component, command }) => {
-          const ptyId = tab.ptyId as number;
-          const stat = statsRef.current.find((sample) => sample.id === ptyId);
-          let observed = vibeRunSupervision.current.get(ptyId);
-          if (!observed) {
-            observed = {
-              startedAt: now,
-              lastChangedAt: now,
-              outputBytes: stat?.output_bytes ?? 0,
-              handledPrompt: null,
-              handledPromptAt: null,
-              readinessVerified: false,
-              unhealthySince: null,
-              reported: false,
-            };
-            vibeRunSupervision.current.set(ptyId, observed);
-          }
-          const outputBytes = stat?.output_bytes ?? observed.outputBytes;
-          if (outputBytes !== observed.outputBytes) {
-            observed.outputBytes = outputBytes;
-            observed.lastChangedAt = now;
-          }
-          const raw = (await ipc.ptyOutput(ptyId, 16 * 1024).catch(() => null)) ?? "";
-          if (disposed) return;
-          const output = plainManagedOutput(raw);
-          const readiness = command.readiness?.kind ?? "process-alive";
-          // Readiness releases dependency startup once. Runtime regressions
-          // belong to browser/server health evidence, not a second startup
-          // incident wearing the wrong label.
-          if (observed.readinessVerified && readiness !== "http") {
-            verify(ptyId);
-            return;
-          }
-          const ports = stat?.ports ?? [];
-          const httpPath =
-            command.readiness?.kind === "http" ? command.readiness.path : null;
-          const httpReady =
-            httpPath != null && ports.length > 0
-              ? (await Promise.all(
-                  ports.map((port) =>
-                    ipc.probeHttpReadiness(port, httpPath).catch(() => false),
-                  ),
-                )).some(Boolean)
-              : false;
-          if (disposed) return;
-          if (observed.readinessVerified && readiness === "http") {
-            if (httpReady) { observed.unhealthySince = null; verify(ptyId); return; }
-            observed.unhealthySince ??= now;
-            if (now - observed.unhealthySince < 10_000) return;
-          }
-          const classification = classifyManagedProcess({
-            kind: command.purpose ?? "serve",
-            now,
-            spawnedAt: observed.startedAt,
-            outputBytes,
-            quietMs: stat?.quiet_ms ?? now - observed.lastChangedAt,
-            ports,
-            readinessKind: readiness,
-            httpReady,
-            readinessTimeoutMs: observed.readinessVerified ? 1 : command.readiness?.timeoutMs,
-            rawOutput: raw,
-            safePromptHandledAt: observed.handledPromptAt,
-          });
-          const prompt = classification.prompt;
-          if (classification.state === "waiting-on-input" && prompt) {
-            unverify(ptyId);
-            const promptKey = `${prompt.code}:${prompt.excerpt}`;
-            if (classification.exit === "auto-answer" && prompt.kind === "safe-confirmation") {
-              if (observed.handledPrompt !== promptKey) {
-                observed.handledPrompt = promptKey;
-                observed.handledPromptAt = now;
-                observed.lastChangedAt = now;
-                await ipc.ptyWrite(ptyId, prompt.response).catch(() => {});
+        await Promise.all(
+          active.map(async ({ tab, component, command }) => {
+            const ptyId = tab.ptyId as number;
+            const stat = statsRef.current.find((sample) => sample.id === ptyId);
+            let observed = vibeRunSupervision.current.get(ptyId);
+            if (!observed) {
+              observed = {
+                startedAt: now,
+                lastChangedAt: now,
+                outputBytes: stat?.output_bytes ?? 0,
+                handledPrompt: null,
+                handledPromptAt: null,
+                readinessVerified: false,
+                unhealthySince: null,
+                reported: false,
+              };
+              vibeRunSupervision.current.set(ptyId, observed);
+            }
+            const outputBytes = stat?.output_bytes ?? observed.outputBytes;
+            if (outputBytes !== observed.outputBytes) {
+              observed.outputBytes = outputBytes;
+              observed.lastChangedAt = now;
+            }
+            const raw =
+              (await ipc.ptyOutput(ptyId, 16 * 1024).catch(() => null)) ?? "";
+            if (disposed) return;
+            const output = plainManagedOutput(raw);
+            const readiness = command.readiness?.kind ?? "process-alive";
+            // Readiness releases dependency startup once. Runtime regressions
+            // belong to browser/server health evidence, not a second startup
+            // incident wearing the wrong label.
+            if (observed.readinessVerified && readiness !== "http") {
+              verify(ptyId);
+              return;
+            }
+            const ports = stat?.ports ?? [];
+            const httpPath =
+              command.readiness?.kind === "http"
+                ? command.readiness.path
+                : null;
+            const httpReady =
+              httpPath != null && ports.length > 0
+                ? (
+                    await Promise.all(
+                      ports.map((port) =>
+                        ipc
+                          .probeHttpReadiness(port, httpPath)
+                          .catch(() => false),
+                      ),
+                    )
+                  ).some(Boolean)
+                : false;
+            if (disposed) return;
+            if (observed.readinessVerified && readiness === "http") {
+              if (httpReady) {
+                observed.unhealthySince = null;
+                verify(ptyId);
+                return;
+              }
+              observed.unhealthySince ??= now;
+              if (now - observed.unhealthySince < 10_000) return;
+            }
+            const classification = classifyManagedProcess({
+              kind: command.purpose ?? "serve",
+              now,
+              spawnedAt: observed.startedAt,
+              outputBytes,
+              quietMs: stat?.quiet_ms ?? now - observed.lastChangedAt,
+              ports,
+              readinessKind: readiness,
+              httpReady,
+              readinessTimeoutMs: observed.readinessVerified
+                ? 1
+                : command.readiness?.timeoutMs,
+              rawOutput: raw,
+              safePromptHandledAt: observed.handledPromptAt,
+            });
+            const prompt = classification.prompt;
+            if (classification.state === "waiting-on-input" && prompt) {
+              unverify(ptyId);
+              const promptKey = `${prompt.code}:${prompt.excerpt}`;
+              if (
+                classification.exit === "auto-answer" &&
+                prompt.kind === "safe-confirmation"
+              ) {
+                if (observed.handledPrompt !== promptKey) {
+                  observed.handledPrompt = promptKey;
+                  observed.handledPromptAt = now;
+                  observed.lastChangedAt = now;
+                  await ipc.ptyWrite(ptyId, prompt.response).catch(() => {});
+                }
+                return;
+              }
+              if (!observed.reported) {
+                observed.reported = true;
+                const key = `${component.path}:${component.id}:${command.id}:${command.command}`;
+                openVibeServerIncident.current.add(key);
+                void vibeSession.reportServerStartupStall({
+                  key,
+                  componentId: component.id,
+                  runCommandId: command.id,
+                  reason: "interactive-prompt",
+                  promptCode: prompt.code,
+                  ports: stat?.ports ?? [],
+                  outputBytes: stat?.output_bytes ?? null,
+                  totalCpu: stat?.total_cpu ?? null,
+                  totalMemBytes: stat?.total_mem_bytes ?? null,
+                  logTail: output,
+                  component: {
+                    label: component.label,
+                    path: component.path,
+                    ...(component.role ? { role: component.role } : {}),
+                  },
+                  commands: component.commands ?? [],
+                  command: { name: command.name, command: command.command },
+                });
               }
               return;
             }
-            if (!observed.reported) {
+            if (classification.state === "ready") {
+              if (readiness === "process-alive" || readiness === "http") {
+                observed.readinessVerified = true;
+                verify(ptyId);
+              }
+              // A process-alive worker is allowed to become quiet after its
+              // prompt-free settling window. Only a later exit invalidates it.
+              return;
+            }
+            if (
+              !observed.reported &&
+              classification.state === "hung" &&
+              classification.exit === "repair"
+            ) {
               observed.reported = true;
+              unverify(ptyId);
               const key = `${component.path}:${component.id}:${command.id}:${command.command}`;
               openVibeServerIncident.current.add(key);
               void vibeSession.reportServerStartupStall({
                 key,
                 componentId: component.id,
                 runCommandId: command.id,
-                reason: "interactive-prompt",
-                promptCode: prompt.code,
+                reason: observed.readinessVerified
+                  ? "health-regression"
+                  : "readiness-timeout",
                 ports: stat?.ports ?? [],
                 outputBytes: stat?.output_bytes ?? null,
                 totalCpu: stat?.total_cpu ?? null,
@@ -12466,46 +13985,8 @@ const ProjectViewBody = memo(function ProjectViewBody({
                 command: { name: command.name, command: command.command },
               });
             }
-            return;
-          }
-          if (classification.state === "ready") {
-            if (readiness === "process-alive" || readiness === "http") {
-              observed.readinessVerified = true;
-              verify(ptyId);
-            }
-            // A process-alive worker is allowed to become quiet after its
-            // prompt-free settling window. Only a later exit invalidates it.
-            return;
-          }
-          if (
-            !observed.reported &&
-            classification.state === "hung" &&
-            classification.exit === "repair"
-          ) {
-            observed.reported = true;
-            unverify(ptyId);
-            const key = `${component.path}:${component.id}:${command.id}:${command.command}`;
-            openVibeServerIncident.current.add(key);
-            void vibeSession.reportServerStartupStall({
-              key,
-              componentId: component.id,
-              runCommandId: command.id,
-              reason: observed.readinessVerified ? "health-regression" : "readiness-timeout",
-              ports: stat?.ports ?? [],
-              outputBytes: stat?.output_bytes ?? null,
-              totalCpu: stat?.total_cpu ?? null,
-              totalMemBytes: stat?.total_mem_bytes ?? null,
-              logTail: output,
-              component: {
-                label: component.label,
-                path: component.path,
-                ...(component.role ? { role: component.role } : {}),
-              },
-              commands: component.commands ?? [],
-              command: { name: command.name, command: command.command },
-            });
-          }
-        }));
+          }),
+        );
       } finally {
         inspecting = false;
       }
@@ -12525,11 +14006,21 @@ const ProjectViewBody = memo(function ProjectViewBody({
   const vibeRuntimeReady =
     vibeRequiredRuns.length > 0 &&
     vibeRequiredRuns.every(({ component, command }) => {
-      if (completedVibeOneShots.current.has(`${component.path}:${component.id}:${command.id}:${command.command}`)) return true;
+      if (
+        completedVibeOneShots.current.has(
+          `${component.path}:${component.id}:${command.id}:${command.command}`,
+        )
+      )
+        return true;
       const tab = runTabs.find((candidate) =>
         matchesVibeRun(candidate, component, command),
       );
-      return vibeRunReady(tab, command, projectStats, vibeVerifiedReadinessPtys);
+      return vibeRunReady(
+        tab,
+        command,
+        projectStats,
+        vibeVerifiedReadinessPtys,
+      );
     });
   const vibeInputUnlock = useRef<{ key: string | null; unlocked: boolean }>({
     key: null,
@@ -12547,18 +14038,22 @@ const ProjectViewBody = memo(function ProjectViewBody({
       if (!openVibeServerIncident.current.has(watched.targetKey)) continue;
       const resolved = vibeRequiredRuns.find(
         ({ component, command }) =>
-          component.id === watched.componentId && command.id === watched.runCommandId,
+          component.id === watched.componentId &&
+          command.id === watched.runCommandId,
       );
       if (!resolved) continue;
       const running = runTabs.find((tab) =>
         matchesVibeRun(tab, resolved.component, resolved.command),
       );
-      if (!vibeRunReady(
-        running,
-        resolved.command,
-        projectStats,
-        vibeVerifiedReadinessPtys,
-      )) continue;
+      if (
+        !vibeRunReady(
+          running,
+          resolved.command,
+          projectStats,
+          vibeVerifiedReadinessPtys,
+        )
+      )
+        continue;
       vibeSession.resolveServerIncident(watched.targetKey);
       openVibeServerIncident.current.delete(watched.targetKey);
       vibeServerHealth.current.set(
@@ -12608,15 +14103,23 @@ const ProjectViewBody = memo(function ProjectViewBody({
   }, [visible, vibe, vibePreview?.id, openPreview]);
 
   useEffect(() => {
-    if (!visible || !vibe || !vibeComponent || !vibeRun || !vibePreview || vibePreview.url) {
+    if (
+      !visible ||
+      !vibe ||
+      !vibeComponent ||
+      !vibeRun ||
+      !vibePreview ||
+      vibePreview.url
+    ) {
       return;
     }
     const running = runTabs.find((tab) =>
       matchesVibeRun(tab, vibeComponent, vibeRun),
     );
-    const port = running?.ptyId == null
-      ? null
-      : projectStats.find((stat) => stat.id === running.ptyId)?.ports[0];
+    const port =
+      running?.ptyId == null
+        ? null
+        : projectStats.find((stat) => stat.id === running.ptyId)?.ports[0];
     if (port) patchTabRaw(vibePreview.id, { url: `http://localhost:${port}` });
   }, [
     visible,
@@ -12654,7 +14157,9 @@ const ProjectViewBody = memo(function ProjectViewBody({
               tab: describeTab(visibleTabs.find((t) => t.id === activeTabId)),
               caret:
                 caret &&
-                visibleTabs.some((t) => t.type === "file" && t.file.path === caret.path)
+                visibleTabs.some(
+                  (t) => t.type === "file" && t.file.path === caret.path,
+                )
                   ? { path: caret.path, line: caret.line }
                   : null,
             }
@@ -12754,7 +14259,9 @@ const ProjectViewBody = memo(function ProjectViewBody({
           openTabs: visibleTabs.map(describeTab).filter(Boolean),
           caret:
             caret &&
-            visibleTabs.some((t) => t.type === "file" && t.file.path === caret.path)
+            visibleTabs.some(
+              (t) => t.type === "file" && t.file.path === caret.path,
+            )
               ? caret
               : null,
         },
@@ -12863,7 +14370,12 @@ const ProjectViewBody = memo(function ProjectViewBody({
             digest,
             ptyId: activeTab.ptyId as number,
             machine: activeTab.machine
-              ? { env: activeTab.machine, name: liveEnvironments.get(activeTab.machine)?.name ?? "Workspace" }
+              ? {
+                  env: activeTab.machine,
+                  name:
+                    liveEnvironments.get(activeTab.machine)?.name ??
+                    "Workspace",
+                }
               : undefined,
           };
         })()
@@ -13005,10 +14517,15 @@ const ProjectViewBody = memo(function ProjectViewBody({
   const shareableOf = useCallback(
     (tab: TermSubTab): ShareableTerminal | null => {
       if (tab.ptyId == null) return null;
-      let branch: string | undefined, depth = -1;
+      let branch: string | undefined,
+        depth = -1;
       for (const { trees } of allWorktrees)
         for (const w of trees)
-          if (w.branch && (tab.cwd === w.path || tab.cwd.startsWith(`${w.path}/`)) && w.path.length > depth) {
+          if (
+            w.branch &&
+            (tab.cwd === w.path || tab.cwd.startsWith(`${w.path}/`)) &&
+            w.path.length > depth
+          ) {
             branch = w.branch.replace(/^refs\/heads\//, "");
             depth = w.path.length;
           }
@@ -13047,7 +14564,10 @@ const ProjectViewBody = memo(function ProjectViewBody({
       ),
     );
   }, [tabs, shareableOf, canShareTerminals, shareWorkspaceId, project.id]);
-  useEffect(() => () => publishShareableTerminals(project.id, []), [project.id]);
+  useEffect(
+    () => () => publishShareableTerminals(project.id, []),
+    [project.id],
+  );
   const onTabContextMenu = useCallback(
     (e: React.MouseEvent, tab: SubTab) => {
       // Every tab kind that names a concrete thing can seed a task about it —
@@ -13172,7 +14692,11 @@ const ProjectViewBody = memo(function ProjectViewBody({
             ]
           : [
               ...taskItem,
-              { label: "Close", danger: true, onClick: () => closeTab(tab.id, "user") },
+              {
+                label: "Close",
+                danger: true,
+                onClick: () => closeTab(tab.id, "user"),
+              },
             ];
       // Pinning keeps a tab at the front of the strip, whatever its agent is
       // doing, until it is unpinned.
@@ -13181,7 +14705,8 @@ const ProjectViewBody = memo(function ProjectViewBody({
       tabMenu.open(e, [
         {
           label: pinned ? "Unpin tab" : "Pin tab",
-          onClick: () => patchTabRaw(tab.id, { pinned: !pinned } as Partial<SubTab>),
+          onClick: () =>
+            patchTabRaw(tab.id, { pinned: !pinned } as Partial<SubTab>),
         },
         // Finished work, put away: the tab moves to the collapsed Settled group
         // and out of the way of what is still running.
@@ -13190,7 +14715,8 @@ const ProjectViewBody = memo(function ProjectViewBody({
               {
                 label: settled ? "Unsettle" : "Settle",
                 hint: settled ? undefined : "puts finished work away",
-                onClick: () => patchTabRaw(tab.id, { settled: !settled } as Partial<SubTab>),
+                onClick: () =>
+                  patchTabRaw(tab.id, { settled: !settled } as Partial<SubTab>),
               },
             ]
           : []),
@@ -13205,7 +14731,18 @@ const ProjectViewBody = memo(function ProjectViewBody({
         ...items,
       ]);
     },
-    [startRename, closeTab, closeVisualTab, tabMenu.open, taskMenu, startMicroTask, canShareTerminals, shareTerminalTab, patchTabRaw, isAgentTab],
+    [
+      startRename,
+      closeTab,
+      closeVisualTab,
+      tabMenu.open,
+      taskMenu,
+      startMicroTask,
+      canShareTerminals,
+      shareTerminalTab,
+      patchTabRaw,
+      isAgentTab,
+    ],
   );
   const onClearScrollback = useCallback(() => {
     if (activeTermTab)
@@ -13242,12 +14779,21 @@ const ProjectViewBody = memo(function ProjectViewBody({
       completePendingSplit({ title: "shell" });
       return;
     }
-    void pickComponent("New shell").then((selection) => selection && addTerminal(selection.component.path));
+    void pickComponent("New shell").then(
+      (selection) => selection && addTerminal(selection.component.path),
+    );
   }, [addTerminal, completePendingSplit, pickComponent]);
   const onLaunchCli = useCallback(
     async (cli: AgentCli, where?: "workspace" | "current") => {
       const selection = await pickComponent(`New ${cli.name}`, cli.id);
-      if (selection) await launchCli(cli, selection.component.path, where, selection.machine, selection.profileId);
+      if (selection)
+        await launchCli(
+          cli,
+          selection.component.path,
+          where,
+          selection.machine,
+          selection.profileId,
+        );
     },
     [launchCli, pickComponent],
   );
@@ -13417,7 +14963,9 @@ const ProjectViewBody = memo(function ProjectViewBody({
                 // No chord in the copy: paste is the OS's shortcut, not one of
                 // ours, so there is nothing in the registry to format and
                 // spelling it here is exactly what the guard test forbids.
-                onNotice("Clip is back on the clipboard — paste it where you want it.");
+                onNotice(
+                  "Clip is back on the clipboard — paste it where you want it.",
+                );
               }
             })
             .catch(() => onNotice("That clip is gone.", "error"));
@@ -13588,11 +15136,18 @@ const ProjectViewBody = memo(function ProjectViewBody({
               project: {
                 id: project.id,
                 name: project.name,
-                components: project.components.map((c) => ({ componentId: c.id, label: c.label })),
+                components: project.components.map((c) => ({
+                  componentId: c.id,
+                  label: c.label,
+                })),
               },
             }}
             onStartNew={(agentId, decision) => {
-              if (decision?.target && decision.target.kind === "remote" && !canLaunchOnActiveTarget(decision.target)) {
+              if (
+                decision?.target &&
+                decision.target.kind === "remote" &&
+                !canLaunchOnActiveTarget(decision.target)
+              ) {
                 // Just start it there, seeded with the ticket. No switch dialog.
                 const remoteCli = AGENT_CLIS.find((c) => c.id === agentId);
                 if (remoteCli) {
@@ -13621,12 +15176,20 @@ const ProjectViewBody = memo(function ProjectViewBody({
                     } else proceed = true;
                     if (!proceed) return;
                     remoteSeedRef.current = seed;
-                    await launchCliRef.current(remoteCli, undefined, "workspace", { mode: "target", target: remoteTarget });
+                    await launchCliRef.current(
+                      remoteCli,
+                      undefined,
+                      "workspace",
+                      { mode: "target", target: remoteTarget },
+                    );
                   })();
                   return;
                 }
               }
-              if (decision?.target && !canLaunchOnActiveTarget(decision.target)) {
+              if (
+                decision?.target &&
+                !canLaunchOnActiveTarget(decision.target)
+              ) {
                 setMachineTransition({
                   target: decision.target,
                   name: decision.targetName ?? "the selected machine",
@@ -13668,7 +15231,10 @@ const ProjectViewBody = memo(function ProjectViewBody({
               project: {
                 id: project.id,
                 name: project.name,
-                components: project.components.map((c) => ({ componentId: c.id, label: c.label })),
+                components: project.components.map((c) => ({
+                  componentId: c.id,
+                  label: c.label,
+                })),
               },
             }}
             onImplement={(entry, agentId) =>
@@ -13682,9 +15248,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
             // Continuing works on the same entry rather than opening a new
             // one — the point is to go further on this question, not to ask it
             // again — so the steer is passed through as the run's user context.
-            onContinue={(entry, steer) =>
-              void continueResearch(entry, steer)
-            }
+            onContinue={(entry, steer) => void continueResearch(entry, steer)}
             onOpenPr={(pr) => void openPrByNumber(pr.repo, pr.number, pr.url)}
             onOpenFile={(path) => {
               const entry = researchEntryForFile(path);
@@ -13696,7 +15260,9 @@ const ProjectViewBody = memo(function ProjectViewBody({
             // The tab strip keeps its own copy of the title so it has a label
             // before the first read; a rename has to reach it or the tab keeps
             // showing the name the entry no longer has.
-            onRenamed={(title) => patchTabRaw(tab.id, { title } as Partial<SubTab>)}
+            onRenamed={(title) =>
+              patchTabRaw(tab.id, { title } as Partial<SubTab>)
+            }
             onNotice={onNotice}
           />
         );
@@ -13711,7 +15277,10 @@ const ProjectViewBody = memo(function ProjectViewBody({
               project: {
                 id: project.id,
                 name: project.name,
-                components: project.components.map((c) => ({ componentId: c.id, label: c.label })),
+                components: project.components.map((c) => ({
+                  componentId: c.id,
+                  label: c.label,
+                })),
               },
             }}
             onStartNew={(note, agentId) => void workOnNote(note, "", agentId)}
@@ -13734,33 +15303,84 @@ const ProjectViewBody = memo(function ProjectViewBody({
             agentTargets={agentTargets}
             installed={installed}
             onStartReview={(agentId) => {
-              void pickComponent(`Review PR with an agent`, agentId).then(async (selection) => {
-                const remoteTarget = selection?.machine?.mode === "target" && selection.machine.target.kind === "remote" ? selection.machine : undefined;
-                const remoteCli = remoteTarget ? AGENT_CLIS.find((c) => c.id === agentId) : undefined;
-                if (remoteTarget && remoteCli && !canLaunchOnActiveTarget(remoteTarget.target)) {
-                  remoteSeedRef.current = prReviewContext(tab.pr);
-                  remotePrRef.current = { number: tab.pr.number, branch: tab.pr.branch };
-                  void launchCliRef.current(remoteCli, undefined, "workspace", remoteTarget);
-                  return;
-                }
-                if (selection?.machine && await prepareMachineLaunch(agentId, selection.machine, { then: { kind: "pr-review", payload: tab.pr } }))
-                  await startPrReview(tab.repo, tab.pr, agentId);
-              });
+              void pickComponent(`Review PR with an agent`, agentId).then(
+                async (selection) => {
+                  const remoteTarget =
+                    selection?.machine?.mode === "target" &&
+                    selection.machine.target.kind === "remote"
+                      ? selection.machine
+                      : undefined;
+                  const remoteCli = remoteTarget
+                    ? AGENT_CLIS.find((c) => c.id === agentId)
+                    : undefined;
+                  if (
+                    remoteTarget &&
+                    remoteCli &&
+                    !canLaunchOnActiveTarget(remoteTarget.target)
+                  ) {
+                    remoteSeedRef.current = prReviewContext(tab.pr);
+                    remotePrRef.current = {
+                      number: tab.pr.number,
+                      branch: tab.pr.branch,
+                    };
+                    void launchCliRef.current(
+                      remoteCli,
+                      undefined,
+                      "workspace",
+                      remoteTarget,
+                    );
+                    return;
+                  }
+                  if (
+                    selection?.machine &&
+                    (await prepareMachineLaunch(agentId, selection.machine, {
+                      then: { kind: "pr-review", payload: tab.pr },
+                    }))
+                  )
+                    await startPrReview(tab.repo, tab.pr, agentId);
+                },
+              );
             }}
             onSendToAgent={(target) =>
               sendTicketToAgent(target, prReviewContext(tab.pr))
             }
             onStartResolve={(agentId) => {
-              void pickComponent(`Resolve conflicts with an agent`, agentId).then(async (selection) => {
-                const remoteTarget = selection?.machine?.mode === "target" && selection.machine.target.kind === "remote" ? selection.machine : undefined;
-                const remoteCli = remoteTarget ? AGENT_CLIS.find((c) => c.id === agentId) : undefined;
-                if (remoteTarget && remoteCli && !canLaunchOnActiveTarget(remoteTarget.target)) {
+              void pickComponent(
+                `Resolve conflicts with an agent`,
+                agentId,
+              ).then(async (selection) => {
+                const remoteTarget =
+                  selection?.machine?.mode === "target" &&
+                  selection.machine.target.kind === "remote"
+                    ? selection.machine
+                    : undefined;
+                const remoteCli = remoteTarget
+                  ? AGENT_CLIS.find((c) => c.id === agentId)
+                  : undefined;
+                if (
+                  remoteTarget &&
+                  remoteCli &&
+                  !canLaunchOnActiveTarget(remoteTarget.target)
+                ) {
                   remoteSeedRef.current = prConflictContext(tab.pr);
-                  remotePrRef.current = { number: tab.pr.number, branch: tab.pr.branch };
-                  void launchCliRef.current(remoteCli, undefined, "workspace", remoteTarget);
+                  remotePrRef.current = {
+                    number: tab.pr.number,
+                    branch: tab.pr.branch,
+                  };
+                  void launchCliRef.current(
+                    remoteCli,
+                    undefined,
+                    "workspace",
+                    remoteTarget,
+                  );
                   return;
                 }
-                if (selection?.machine && await prepareMachineLaunch(agentId, selection.machine, { then: { kind: "pr-resolve", payload: tab.pr } }))
+                if (
+                  selection?.machine &&
+                  (await prepareMachineLaunch(agentId, selection.machine, {
+                    then: { kind: "pr-resolve", payload: tab.pr },
+                  }))
+                )
                   await startPrConflictResolve(tab.repo, tab.pr, agentId);
               });
             }}
@@ -13823,7 +15443,10 @@ const ProjectViewBody = memo(function ProjectViewBody({
               project: {
                 id: project.id,
                 name: project.name,
-                components: project.components.map((c) => ({ componentId: c.id, label: c.label })),
+                components: project.components.map((c) => ({
+                  componentId: c.id,
+                  label: c.label,
+                })),
               },
             }}
             onSendToAgent={sendTicketToAgent}
@@ -13853,6 +15476,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
             projectDir={tab.projectDir}
             annotations={tab.annotations}
             visible={active}
+            onFloat={(d) => setFloatPhone({ ...d, projectDir: tab.projectDir })}
             onPatch={(patch) => patchTabRaw(tab.id, patch as Partial<SubTab>)}
             agentTargets={agentTargets}
             installed={installed}
@@ -13860,7 +15484,10 @@ const ProjectViewBody = memo(function ProjectViewBody({
               project: {
                 id: project.id,
                 name: project.name,
-                components: project.components.map((c) => ({ componentId: c.id, label: c.label })),
+                components: project.components.map((c) => ({
+                  componentId: c.id,
+                  label: c.label,
+                })),
               },
             }}
             onSendToAgent={sendTicketToAgent}
@@ -13897,12 +15524,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
             onShareContext={onShareContext}
             liveSessionIds={liveSessionIds}
             onRestore={(cwd, cmd, title, agentId) =>
-              addTerminal(
-                cwd,
-                cmd,
-                title,
-                agentCliFor(agentId)?.icon,
-              )
+              addTerminal(cwd, cmd, title, agentCliFor(agentId)?.icon)
             }
             onOpenInstructions={openInstructions}
             onOpenClaim={openClaim}
@@ -13912,19 +15534,59 @@ const ProjectViewBody = memo(function ProjectViewBody({
         );
       case "research-list":
         return (
-          <ResearchPanel page projectId={project.id} onOpen={(e) => openResearch(e.id, e.title)} onStart={startResearch} canStart={AGENT_CLIS.some((c) => getInstalled()[c.bin])} />
+          <ResearchPanel
+            page
+            projectId={project.id}
+            onOpen={(e) => openResearch(e.id, e.title)}
+            onStart={startResearch}
+            canStart={AGENT_CLIS.some((c) => getInstalled()[c.bin])}
+          />
         );
       case "notes-list":
         return (
-          <NotesPanel page projectId={project.id} projectName={project.name} roots={roots} onOpen={(n) => openNote(n.id, n.title)} />
+          <NotesPanel
+            page
+            projectId={project.id}
+            projectName={project.name}
+            roots={roots}
+            onOpen={(n) => openNote(n.id, n.title)}
+          />
         );
       case "prs-list":
         return (
-          <PrsPanel page localRepos={repoPaths} onOpen={(repo, pr) => openPr(repo, pr)} onQuickTask={startPrQuickTask} relay={relay} onNotice={onNotice} onOpenChat={openChat} />
+          <PrsPanel
+            page
+            localRepos={repoPaths}
+            onOpen={(repo, pr) => openPr(repo, pr)}
+            onQuickTask={startPrQuickTask}
+            relay={relay}
+            onNotice={onNotice}
+            onOpenChat={openChat}
+          />
         );
       case "issues-list":
         return (
-          <TicketsPanel page components={project.components.map((c) => ({ label: c.label, path: c.path }))} agentTargets={agentTargets} installed={installed} onStartWork={startTicketWork} onSendToAgent={sendTicketToAgent} onResearch={(t) => void researchTicket(t)} onOpenTicket={openTicket} onOpenIntegrations={() => window.dispatchEvent(new CustomEvent("canopy:open-settings", { detail: { tab: "integrations" } }))} onWorkflowEvent={dispatchWorkflowEvent} />
+          <TicketsPanel
+            page
+            components={project.components.map((c) => ({
+              label: c.label,
+              path: c.path,
+            }))}
+            agentTargets={agentTargets}
+            installed={installed}
+            onStartWork={startTicketWork}
+            onSendToAgent={sendTicketToAgent}
+            onResearch={(t) => void researchTicket(t)}
+            onOpenTicket={openTicket}
+            onOpenIntegrations={() =>
+              window.dispatchEvent(
+                new CustomEvent("canopy:open-settings", {
+                  detail: { tab: "integrations" },
+                }),
+              )
+            }
+            onWorkflowEvent={dispatchWorkflowEvent}
+          />
         );
       case "task-history":
         return (
@@ -13988,7 +15650,13 @@ const ProjectViewBody = memo(function ProjectViewBody({
           />
         );
       case "chat":
-        if (tab.accountConversation) return <AccountChatView conversation={tab.accountConversation} active={active && visible}/>;
+        if (tab.accountConversation)
+          return (
+            <AccountChatView
+              conversation={tab.accountConversation}
+              active={active && visible}
+            />
+          );
         return (
           <ChatView
             peer={tab.peer}
@@ -14044,56 +15712,58 @@ const ProjectViewBody = memo(function ProjectViewBody({
           <div className="file-tab-wrap">
             {!inToolbar && cta}
             <FileView
-            active={active}
-            readOnly={readOnly}
-            modelOwnerId={`${project.id}:${tab.id}`}
-            toolbarExtra={inToolbar ? cta : undefined}
-            file={tab.file}
-            onReleaseBytes={() => patchFile(tab.file.path, { bytes: null })}
-            onNeedBytes={async () =>
-              Boolean(await reloadViewerBytes(tab.file.path))
-            }
-            onCursor={
-              // Only a shared file broadcasts a caret; every other tab passes
-              // undefined and the subscription in MonacoEditor short-circuits.
-              sharedDocFor(tab.file.path)
-                ? (anchor, head) => sendOwnerCursor(tab.file.path, anchor, head)
-                : undefined
-            }
-            onSave={() => void saveFile(tab.file.path)}
-            onDirty={(dirty) => {
-              if (tab.file.dirty !== dirty) patchFile(tab.file.path, { dirty });
-            }}
-            onAcceptExternal={() => acceptExternal(tab.file.path)}
-            onKeepMine={() => keepMine(tab.file.path)}
-            onCloseDiff={() =>
-              patchFile(tab.file.path, { view: "source", diffOriginal: null })
-            }
-            onOpenAnyway={() => void openFile(tab.file.path, { force: true })}
-            diffAgentBar={
-              <AgentQueryBar
-                placeholder="Ask an agent about this file's changes…"
-                onRunTask={(query) => {
-                  const dir = repoForFile(tab.file.path);
-                  if (!dir)
-                    return onNotice("No git repository in this project.");
-                  runAdhocTask(
-                    fileDiffContext(tab.file.path, query),
-                    dir,
-                    tab.file.name,
-                  );
-                }}
-                tasks={
-                  hasTasksToList({ saved: project.customTasks })
-                    ? () =>
-                        taskRows(
-                          `About the changes in \`${tab.file.path}\`: `,
-                          repoForFile(tab.file.path) ?? "",
-                        )
-                    : undefined
-                }
-              />
-            }
+              active={active}
+              readOnly={readOnly}
+              modelOwnerId={`${project.id}:${tab.id}`}
+              toolbarExtra={inToolbar ? cta : undefined}
+              file={tab.file}
+              onReleaseBytes={() => patchFile(tab.file.path, { bytes: null })}
+              onNeedBytes={async () =>
+                Boolean(await reloadViewerBytes(tab.file.path))
+              }
+              onCursor={
+                // Only a shared file broadcasts a caret; every other tab passes
+                // undefined and the subscription in MonacoEditor short-circuits.
+                sharedDocFor(tab.file.path)
+                  ? (anchor, head) =>
+                      sendOwnerCursor(tab.file.path, anchor, head)
+                  : undefined
+              }
+              onSave={() => void saveFile(tab.file.path)}
+              onDirty={(dirty) => {
+                if (tab.file.dirty !== dirty)
+                  patchFile(tab.file.path, { dirty });
+              }}
+              onAcceptExternal={() => acceptExternal(tab.file.path)}
+              onKeepMine={() => keepMine(tab.file.path)}
+              onCloseDiff={() =>
+                patchFile(tab.file.path, { view: "source", diffOriginal: null })
+              }
+              onOpenAnyway={() => void openFile(tab.file.path, { force: true })}
+              diffAgentBar={
+                <AgentQueryBar
+                  placeholder="Ask an agent about this file's changes…"
+                  onRunTask={(query) => {
+                    const dir = repoForFile(tab.file.path);
+                    if (!dir)
+                      return onNotice("No git repository in this project.");
+                    runAdhocTask(
+                      fileDiffContext(tab.file.path, query),
+                      dir,
+                      tab.file.name,
+                    );
+                  }}
+                  tasks={
+                    hasTasksToList({ saved: project.customTasks })
+                      ? () =>
+                          taskRows(
+                            `About the changes in \`${tab.file.path}\`: `,
+                            repoForFile(tab.file.path) ?? "",
+                          )
+                      : undefined
+                  }
+                />
+              }
             />
           </div>
         );
@@ -14219,7 +15889,11 @@ const ProjectViewBody = memo(function ProjectViewBody({
               ...prev,
               [groupId]: {
                 ...group,
-                root: updateSplitRatio(group.root, divider.nodeId, pendingRatio),
+                root: updateSplitRatio(
+                  group.root,
+                  divider.nodeId,
+                  pendingRatio,
+                ),
               },
             };
             terminalGroupsRef.current = next;
@@ -14244,7 +15918,22 @@ const ProjectViewBody = memo(function ProjectViewBody({
 
   const mainArea = (
     <div className="project-main">
-      {readOnly?<div className="workspace-readonly-notice" role="status">Read-only</div>:<AgentIntegrationWarning agents={agentTargets.map(a => a.agentId)} targets={agentTargets.map(a=>({agent:a.agentId,ptyId:a.ptyId,profile:(tabs.find(t=>t.id===a.tabId) as TermSubTab|undefined)?.profile||"default"}))} />}
+      {readOnly ? (
+        <div className="workspace-readonly-notice" role="status">
+          Read-only
+        </div>
+      ) : (
+        <AgentIntegrationWarning
+          agents={agentTargets.map((a) => a.agentId)}
+          targets={agentTargets.map((a) => ({
+            agent: a.agentId,
+            ptyId: a.ptyId,
+            profile:
+              (tabs.find((t) => t.id === a.tabId) as TermSubTab | undefined)
+                ?.profile || "default",
+          }))}
+        />
+      )}
       {tabMenu.menu && (
         <ContextMenu
           x={tabMenu.menu.x}
@@ -14273,13 +15962,15 @@ const ProjectViewBody = memo(function ProjectViewBody({
         activeTabId={activeVisualTabId}
         flashTabId={
           tabs.find((t) => t.id === flashTabId)?.type === "terminal" &&
-          (tabs.find((t) => t.id === flashTabId) as TermSubTab | undefined)?.paneGroup
-            ? stripTabs.find(
+          (tabs.find((t) => t.id === flashTabId) as TermSubTab | undefined)
+            ?.paneGroup
+            ? (stripTabs.find(
                 (t) =>
                   t.type === "terminal" &&
                   t.paneGroup ===
-                    (tabs.find((x) => x.id === flashTabId) as TermSubTab).paneGroup,
-              )?.id ?? flashTabId
+                    (tabs.find((x) => x.id === flashTabId) as TermSubTab)
+                      .paneGroup,
+              )?.id ?? flashTabId)
             : flashTabId
         }
         renamingTabId={renamingTabId}
@@ -14336,7 +16027,9 @@ const ProjectViewBody = memo(function ProjectViewBody({
         onClearScrollback={onClearScrollback}
         onHardReset={onHardReset}
         onShareTerminal={
-          canShareTerminals && activeTermTab?.ptyId != null && !activeTermTab.run
+          canShareTerminals &&
+          activeTermTab?.ptyId != null &&
+          !activeTermTab.run
             ? onShareTerminal
             : undefined
         }
@@ -14366,7 +16059,11 @@ const ProjectViewBody = memo(function ProjectViewBody({
           </button>
         </div>
       )}
-      <div className="project-content" ref={contentRef} data-agent-card-dock={cardDocked ? "1" : undefined}>
+      <div
+        className="project-content"
+        ref={contentRef}
+        data-agent-card-dock={cardDocked ? "1" : undefined}
+      >
         {tabs
           .filter((t): t is TermSubTab => t.type === "terminal")
           .map((tab) => {
@@ -14374,9 +16071,10 @@ const ProjectViewBody = memo(function ProjectViewBody({
             const group = tab.paneGroup
               ? terminalGroups[tab.paneGroup]
               : undefined;
-            const pane = group?.id === activeTerminalGroup?.id
-              ? activePaneRects.get(tab.id)
-              : undefined;
+            const pane =
+              group?.id === activeTerminalGroup?.id
+                ? activePaneRects.get(tab.id)
+                : undefined;
             const grouped = Boolean(group && leafIds(group.root).length > 1);
             const paneFocus = group
               ? multiplexPaneFocusState(group, activeTabId, tab.id)
@@ -14386,7 +16084,9 @@ const ProjectViewBody = memo(function ProjectViewBody({
                 ? identifyAgent(statsByPty.get(tab.ptyId)?.agent_hint)
                 : null;
             const executionComponent =
-              components.find((component) => component.id === tab.componentId) ??
+              components.find(
+                (component) => component.id === tab.componentId,
+              ) ??
               [...components]
                 .filter(
                   (component) =>
@@ -14410,422 +16110,454 @@ const ProjectViewBody = memo(function ProjectViewBody({
                 }
               : { display: shown ? "block" : "none" };
             return (
-            <div
-              key={tab.id}
-              // Which tab's pane this is, for the switcher's thumbnails: they
-              // are clones of the live host, and a hidden host has to be
-              // findable without the pane knowing anything about them.
-              data-tab-id={tab.id}
-              className={`fill term-host ${grouped ? "term-host-multiplexed" : ""} ${paneFocus === "normal" ? "" : `term-host-${paneFocus}`} ${paneReposition?.sourceTabId === tab.id ? "term-host-pane-moving" : ""} ${paneReposition?.targetTabId === tab.id && paneReposition.sourceTabId !== tab.id ? "term-host-pane-target" : ""}`}
-              style={paneStyle}
-              onPointerDown={() => {
-                if (!group) return;
-                if (group.activeTabId !== tab.id) {
-                  const next = { ...group, activeTabId: tab.id };
-                  terminalGroupsRef.current = {
-                    ...terminalGroupsRef.current,
-                    [group.id]: next,
-                  };
-                  setTerminalGroups(terminalGroupsRef.current);
-                }
-                // A recovered group can remember this pane as active while no
-                // live tab owns focus yet. Clicking it must still establish
-                // the live focus id and re-enable terminal input.
-                setActiveTabId(tab.id);
-              }}
-              // Selected text is a task waiting to be written down — an error,
-              // a TODO the shell just printed, a command worth automating.
-              // Right-click offers to make one; without a selection the event
-              // passes through untouched.
-              onContextMenu={(e) => {
-                const sel = termHandles.current
-                  .get(tab.id)
-                  ?.getSelection()
-                  .trim();
-                if (!sel) return;
-                termMenu.open(e, [taskMenu(sel)]);
-              }}
-            >
-              {grouped && (
-                <div className="multiplex-pane-head">
-                  <button
-                    type="button"
-                    className="multiplex-pane-drag"
-                    aria-label={`Reposition ${tabName(tab, { agent: !!paneAgent?.id })}`}
-                    title="Drag onto another pane to swap positions"
-                    onPointerDown={(event) =>
-                      startPaneReposition(tab.id, event)
-                    }
-                    onClick={(event) => event.stopPropagation()}
-                  >
-                    ⠿
-                  </button>
-                  {paneAgent?.id ? (
-                    <AgentIcon id={paneAgent.id} size={12} />
-                  ) : (
-                    <TerminalIcon size={12} />
-                  )}
-                  <span
-                    className={`tab-status tab-status-${lifeForPty(tab.ptyId).state} ${
-                      tab.ptyId != null &&
-                      ringFor(attention.get(tab.ptyId) ?? NO_ATTENTION)
-                        ? "tab-status-unread"
-                        : ""
-                    }`}
-                    aria-hidden
-                  />
-                  {renamingTabId === tab.id && !renamingGroupId.current ? (
-                    <input
-                      className="multiplex-pane-rename"
-                      autoFocus
-                      value={renameDraft}
-                      aria-label="Agent name"
-                      onPointerDown={(event) => event.stopPropagation()}
+              <div
+                key={tab.id}
+                // Which tab's pane this is, for the switcher's thumbnails: they
+                // are clones of the live host, and a hidden host has to be
+                // findable without the pane knowing anything about them.
+                data-tab-id={tab.id}
+                className={`fill term-host ${grouped ? "term-host-multiplexed" : ""} ${paneFocus === "normal" ? "" : `term-host-${paneFocus}`} ${paneReposition?.sourceTabId === tab.id ? "term-host-pane-moving" : ""} ${paneReposition?.targetTabId === tab.id && paneReposition.sourceTabId !== tab.id ? "term-host-pane-target" : ""}`}
+                style={paneStyle}
+                onPointerDown={() => {
+                  if (!group) return;
+                  if (group.activeTabId !== tab.id) {
+                    const next = { ...group, activeTabId: tab.id };
+                    terminalGroupsRef.current = {
+                      ...terminalGroupsRef.current,
+                      [group.id]: next,
+                    };
+                    setTerminalGroups(terminalGroupsRef.current);
+                  }
+                  // A recovered group can remember this pane as active while no
+                  // live tab owns focus yet. Clicking it must still establish
+                  // the live focus id and re-enable terminal input.
+                  setActiveTabId(tab.id);
+                }}
+                // Selected text is a task waiting to be written down — an error,
+                // a TODO the shell just printed, a command worth automating.
+                // Right-click offers to make one; without a selection the event
+                // passes through untouched.
+                onContextMenu={(e) => {
+                  const sel = termHandles.current
+                    .get(tab.id)
+                    ?.getSelection()
+                    .trim();
+                  if (!sel) return;
+                  termMenu.open(e, [taskMenu(sel)]);
+                }}
+              >
+                {grouped && (
+                  <div className="multiplex-pane-head">
+                    <button
+                      type="button"
+                      className="multiplex-pane-drag"
+                      aria-label={`Reposition ${tabName(tab, { agent: !!paneAgent?.id })}`}
+                      title="Drag onto another pane to swap positions"
+                      onPointerDown={(event) =>
+                        startPaneReposition(tab.id, event)
+                      }
                       onClick={(event) => event.stopPropagation()}
-                      onChange={(event) => setRenameDraft(event.target.value)}
-                      onBlur={commitRename}
-                      onKeyDown={(event) => {
-                        if (event.key === "Enter") {
-                          event.preventDefault();
-                          commitRename();
-                        } else if (event.key === "Escape") {
-                          event.preventDefault();
-                          cancelRename();
-                        }
-                      }}
-                    />
-                  ) : (
+                    >
+                      ⠿
+                    </button>
+                    {paneAgent?.id ? (
+                      <AgentIcon id={paneAgent.id} size={12} />
+                    ) : (
+                      <TerminalIcon size={12} />
+                    )}
                     <span
-                      className="multiplex-pane-title"
-                      title="Double-click to rename"
-                      onDoubleClick={(event) => {
-                        event.stopPropagation();
-                        startRename(tab, "pane");
+                      className={`tab-status tab-status-${lifeForPty(tab.ptyId).state} ${
+                        tab.ptyId != null &&
+                        ringFor(attention.get(tab.ptyId) ?? NO_ATTENTION)
+                          ? "tab-status-unread"
+                          : ""
+                      }`}
+                      aria-hidden
+                    />
+                    {renamingTabId === tab.id && !renamingGroupId.current ? (
+                      <input
+                        className="multiplex-pane-rename"
+                        autoFocus
+                        value={renameDraft}
+                        aria-label="Agent name"
+                        onPointerDown={(event) => event.stopPropagation()}
+                        onClick={(event) => event.stopPropagation()}
+                        onChange={(event) => setRenameDraft(event.target.value)}
+                        onBlur={commitRename}
+                        onKeyDown={(event) => {
+                          if (event.key === "Enter") {
+                            event.preventDefault();
+                            commitRename();
+                          } else if (event.key === "Escape") {
+                            event.preventDefault();
+                            cancelRename();
+                          }
+                        }}
+                      />
+                    ) : (
+                      <span
+                        className="multiplex-pane-title"
+                        title="Double-click to rename"
+                        onDoubleClick={(event) => {
+                          event.stopPropagation();
+                          startRename(tab, "pane");
+                        }}
+                      >
+                        {tabName(tab, { agent: !!paneAgent?.id })}
+                      </span>
+                    )}
+                    <span className="multiplex-pane-path" title={tab.cwd}>
+                      {basename(tab.cwd)}
+                    </span>
+                    <button
+                      type="button"
+                      className="multiplex-pane-action"
+                      title="Split right"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        const pending = {
+                          sourceTabId: tab.id,
+                          axis: "horizontal" as const,
+                        };
+                        pendingSplitRef.current = pending;
+                        setPendingSplit(pending);
+                        setLauncherOpen(true);
                       }}
                     >
-                      {tabName(tab, { agent: !!paneAgent?.id })}
-                    </span>
-                  )}
-                  <span className="multiplex-pane-path" title={tab.cwd}>
-                    {basename(tab.cwd)}
-                  </span>
-                  <button
-                    type="button"
-                    className="multiplex-pane-action"
-                    title="Split right"
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      const pending = { sourceTabId: tab.id, axis: "horizontal" as const };
-                      pendingSplitRef.current = pending;
-                      setPendingSplit(pending);
-                      setLauncherOpen(true);
-                    }}
-                  >
-                    ◫
-                  </button>
-                  <button
-                    type="button"
-                    className="multiplex-pane-action"
-                    title="Move pane to its own tab"
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      breakPaneOut(tab.id);
-                    }}
-                  >
-                    ↗
-                  </button>
-                  <button
-                    type="button"
-                    className="multiplex-pane-action"
-                    title="Close pane"
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      closeTab(tab.id, "user");
-                    }}
-                  >
-                    ×
-                  </button>
-                </div>
-              )}
-              <TermPorts
-                ptyId={tab.ptyId}
-                stats={stats}
-                onPreview={openPreview}
-              />
-              {tab.reconnect && tab.machine ? (
-                <RemoteReconnect
-                  machineName={machineLabel(tab.machine)}
-                  onReconnect={() => reconnectRemoteTab(tab.id)}
-                  onClose={() => closeTab(tab.id)}
-                />
-              ) : tab.accountPending ? (
-                <div className="term-account-pending" role="status">
-                  Starting under {profileLabels[tab.profile ?? ""] ?? tab.profile}…
-                </div>
-              ) : (
-              <Term
-                // epoch remounts the Term (fresh PTY) when a run tab restarts
-                key={`${tab.id}:${tab.epoch ?? 0}`}
-                ref={(h) => {
-                  termHandles.current.set(tab.id, h);
-                }}
-                cwd={tab.cwd}
-                projectId={project.id}
-                componentId={executionComponent?.id}
-                runCommandId={tab.runCommandId}
-                workspacePath={executionComponent?.path ?? tab.cwd}
-                minimumContrastRatio={terminalMinimumContrast(
-                  agentIdForCommand(tab.command),
-                )}
-                active={
-                  !vibe && !softClosed && tab.id === activeTabId && visible
-                }
-                streaming={shown}
-                attachId={tab.attachId}
-                killAttachedOnClose={tab.killAttachedOnClose}
-                machine={tab.machine}
-                // A run tab hands its command to the shell to run-and-exit
-                // (runCommand) so the pty's exit code is the command's own —
-                // one-shot runs (build, install) report truthfully instead of
-                // sitting at a prompt looking "running" forever — and it's
-                // correct on cmd.exe / PowerShell, not just POSIX. A non-run tab
-                // types its command (e.g. launching an agent CLI).
-                //
-                // Micro-tasks go the runCommand way too, for a different
-                // reason: their brief is a whole paragraph on one line, and a
-                // command that long typed at a shell that is still starting
-                // loses its Enter to zsh's line editor — the task sat unrun at
-                // a prompt. As an argv it never touches the tty.
-                initialCommand={tab.run || tab.micro ? undefined : tab.command}
-                beforeInitialCommand={
-                  tab.spawnedTask
-                    ? (ptyId) => {
-                        const spawn = pendingAgentSpawnOps.current.get(tab.id);
-                        if (!spawn)
-                          return Promise.reject(
-                            new Error("agent spawn handshake is missing"),
-                          );
-                        spawn.ready ??= ipc.agentSpawnReady(spawn.opId, ptyId);
-                        return spawn.ready;
-                      }
-                    : undefined
-                }
-                runCommand={
-                  (tab.run || tab.micro) && tab.command
-                    ? tab.command
-                    : undefined
-                }
-                runArgv={
-                  tab.run && tab.componentId && tab.runCommandId
-                    ? unattendedManagedRunArgv(
-                        componentsRef.current
-                          .find((component) => component.id === tab.componentId)
-                          ?.commands?.find((command) => command.id === tab.runCommandId),
-                      )
-                    : undefined
-                }
-                env={tab.env}
-                runId={tab.micro?.runId ?? tab.spawnedTask?.runId}
-                attemptId={tab.micro?.attemptId ?? tab.spawnedTask?.attemptId}
-                onSpawned={(ptyId, assignedName, sessionGeneration) => {
-                  livePtyByTab.current.set(tab.id, ptyId);
-                  // A freshly spawned pty is alive by definition, so clear any
-                  // stale exited/failed state. Restart kills the old pty and
-                  // remounts a beat later; that kill's late pty:exit can land in
-                  // the gap and wrongly mark the tab failed while THIS new
-                  // process is the one now running (a red ✕ on a live server).
-                  patchTab(tab.id, {
-                    ptyId,
-                    sessionGeneration: sessionGeneration ?? tab.sessionGeneration,
-                    // The generated label, into its own slot. A restart used to
-                    // write it over whatever the tab was called, so a renamed
-                    // server came back as "Moss"; now it cannot reach the
-                    // user's slot, and a refused spawn — which reports no name
-                    // at all — no longer erases one either.
-                    ...(namePatch(tab, "native", assignedName) ?? {}),
-                    exited: false,
-                    exitCode: undefined,
-                  });
-                  // A name the user chose outlives the pty that held it, so the
-                  // new session is told about it rather than the other way
-                  // round. Native is where the mesh and the Agents page look.
-                  if (isUserNamed(tab) && tab.userName)
-                    void reassertSessionName(ptyId, tab.userName).catch((error) =>
-                      onNotice(String(error), "error"),
-                    );
-                  if (tab.micro?.runId) updateTaskRun(tab.micro.runId, { ptyId });
-                  const prompt = pendingTerminalPrompts.current.get(tab.id);
-                  const spawn = pendingAgentSpawnOps.current.get(tab.id);
-                  if (prompt == null && !spawn) return;
-                  if (spawn)
-                    spawn.ready ??= ipc.agentSpawnReady(spawn.opId, ptyId);
-                  const lineageReady = spawn?.ready;
-                  if (prompt != null) pendingTerminalPrompts.current.delete(tab.id);
-                  // The shell has only just started the CLI. Give its TUI time
-                  // to enter raw mode, then type and submit as separate writes
-                  // so autocomplete cannot swallow the Enter.
-                  setTimeout(async () => {
-                    try {
-                      await lineageReady;
-                      if (prompt != null) await ipc.ptyWrite(ptyId, prompt);
-                      if (prompt != null) {
-                        await new Promise((resolve) => setTimeout(resolve, 250));
-                        await ipc.ptyWrite(ptyId, "\r");
-                      }
-                      if (spawn)
-                        await ipc.browserResult(spawn.opId, true, {
-                          ptyId,
-                          cwd: spawn.cwd,
-                          runId: spawn.runId,
-                          attemptId: spawn.attemptId,
-                        });
-                      if (spawn) pendingAgentSpawnOps.current.delete(tab.id);
-                    } catch (error) {
-                      if (spawn) {
-                        pendingAgentSpawnOps.current.delete(tab.id);
-                        await settleAttempt({
-                          attemptId: spawn.attemptId,
-                          state: "failed",
-                          failureClass: "route",
-                          failureCode: "opening-brief",
-                        }).catch(() => {});
-                        await ipc.browserResult(spawn.opId, false, String(error));
-                      }
-                    }
-                  }, 2500);
-                }}
-                onExited={(event) => {
-                  if (livePtyByTab.current.get(tab.id) !== event.id) return;
-                  livePtyByTab.current.delete(tab.id);
-                  const code = event.exit_code;
-                  const then = exitMarkers.current.get(tab.id);
-                  if (then) {
-                    exitMarkers.current.delete(tab.id);
-                    window.dispatchEvent(
-                      new CustomEvent(TERMINAL_EXITED_EVENT, { detail: { then, code } }),
-                    );
-                  }
-                  if (tab.spawnedTask) {
-                    void settleAttempt({
-                      attemptId: tab.spawnedTask.attemptId,
-                      state: code === 0 ? "completed" : "failed",
-                      failureClass: code === 0 ? null : "runtime",
-                      failureCode: code === 0 ? null : "process-exit",
-                    }).catch(() => {});
-                  }
-                  // Shell tabs close on exit; run tabs stay so the output and
-                  // exit status remain readable.
-                  if (tab.run) {
-                    patchTab(tab.id, {
-                      exited: true,
-                      exitCode: code,
-                      ptyId: null,
-                    });
-                    // An installer or updater finishing is the moment
-                    // "install" labels and update badges go stale — re-probe
-                    // right now, not on a timer. Announced rather than
-                    // refreshed in place: what changed is on this machine, and
-                    // every open project draws its own launcher from its own
-                    // probe, so the other tabs must hear about it too.
-                    if (
-                      tab.command?.startsWith("brew upgrade ") ||
-                      AGENT_CLIS.some(
-                        (c) =>
-                          c.install != null &&
-                          (c.install === tab.command ||
-                            updateCommand(c) === tab.command),
-                      )
-                    ) {
-                      announceCliInstallsChanged();
-                    }
-                    // A chore that worked has nothing left to show: let the ✓
-                    // land, then take the chip away. Re-checked when the timer
-                    // fires, because "Run again" in the meantime puts a live
-                    // process on this same tab.
-                    scheduleReap(
-                      tab.id,
-                      code,
-                      tab,
-                      reapTimers.current,
-                      (id) =>
-                        tabsRef.current.find(
-                          (t): t is TermSubTab =>
-                            t.type === "terminal" && t.id === id,
-                        ),
-                      closeTab,
-                    );
-                    vibeServerExit.current(tab.id, event);
-                  } else closeTab(tab.id);
-                }}
-                onTitle={(title) => {
-                  // Raw, into the OSC slot. Deciding whether it says anything —
-                  // `/bin/zsh` does not — and shortening cmd.exe's full path
-                  // belong to tabName, not to every writer of this field.
-                  const patch = namePatch(tab, "osc", title);
-                  if (patch) patchTab(tab.id, patch);
-                }}
-                onNotify={(notice) => {
-                  // Only a ring if you aren't already looking at it — a ring on
-                  // the tab you're watching is noise. The notice itself is
-                  // still the tab's, but where the tab *sits* is no longer this
-                  // decision's to make: a bell is unseen activity, and unseen
-                  // activity selects no bucket.
-                  patchTab(tab.id, { notice });
-                  if (
-                    tab.ptyId != null &&
-                    !(tab.id === activeTabId && visible && !vibe)
-                  ) {
-                    pushAttention(
-                      tab.ptyId,
-                      { t: "osc", at: Date.now(), body: notice },
-                      agentIdForCommand(tab.command) ?? null,
-                    );
-                  }
-                }}
-              />
-              )}
-              {livePips
-                .filter((pip) => pip.ptyId === tab.ptyId)
-                .map(({ tabId, ptyId }) => {
-                  const preview = tabs.find(
-                    (item): item is PreviewSubTab =>
-                      item.type === "preview" && item.id === tabId,
-                  );
-                  if (!preview?.url) return null;
-                  const agent = agentTargets.find((item) => item.ptyId === ptyId);
-                  const slot = shownBrowserPips.findIndex(
-                    (pip) => pip.tabId === tabId,
-                  );
-                  return (
-                    <AgentBrowserPip
-                      key={tabId}
-                      tabId={tabId}
-                      url={preview.url}
-                      agentId={agent?.agentId ?? "agent"}
-                      agentTitle={agent?.title || "Agent browser"}
-                      supported={browserEngine === "webview"}
-                      projectId={project.id}
-                      slot={Math.max(0, slot)}
-                      hidden={slot < 0}
-                      onClose={() => {
-                        dismissedBrowserPips.current.add(tabId);
-                        setBrowserPips((prev) =>
-                          prev.filter((pip) => pip.tabId !== tabId),
-                        );
+                      ◫
+                    </button>
+                    <button
+                      type="button"
+                      className="multiplex-pane-action"
+                      title="Move pane to its own tab"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        breakPaneOut(tab.id);
                       }}
-                    />
-                  );
-                })}
-              {/* What a team rule or the irreversible-action gate just stopped
+                    >
+                      ↗
+                    </button>
+                    <button
+                      type="button"
+                      className="multiplex-pane-action"
+                      title="Close pane"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        closeTab(tab.id, "user");
+                      }}
+                    >
+                      ×
+                    </button>
+                  </div>
+                )}
+                <TermPorts
+                  ptyId={tab.ptyId}
+                  stats={stats}
+                  onPreview={openPreview}
+                />
+                {tab.reconnect && tab.machine ? (
+                  <RemoteReconnect
+                    machineName={machineLabel(tab.machine)}
+                    onReconnect={() => reconnectRemoteTab(tab.id)}
+                    onClose={() => closeTab(tab.id)}
+                  />
+                ) : tab.accountPending ? (
+                  <div className="term-account-pending" role="status">
+                    Starting under{" "}
+                    {profileLabels[tab.profile ?? ""] ?? tab.profile}…
+                  </div>
+                ) : (
+                  <Term
+                    // epoch remounts the Term (fresh PTY) when a run tab restarts
+                    key={`${tab.id}:${tab.epoch ?? 0}`}
+                    ref={(h) => {
+                      termHandles.current.set(tab.id, h);
+                    }}
+                    cwd={tab.cwd}
+                    projectId={project.id}
+                    componentId={executionComponent?.id}
+                    runCommandId={tab.runCommandId}
+                    workspacePath={executionComponent?.path ?? tab.cwd}
+                    minimumContrastRatio={terminalMinimumContrast(
+                      agentIdForCommand(tab.command),
+                    )}
+                    active={
+                      !vibe && !softClosed && tab.id === activeTabId && visible
+                    }
+                    streaming={shown}
+                    attachId={tab.attachId}
+                    killAttachedOnClose={tab.killAttachedOnClose}
+                    machine={tab.machine}
+                    // A run tab hands its command to the shell to run-and-exit
+                    // (runCommand) so the pty's exit code is the command's own —
+                    // one-shot runs (build, install) report truthfully instead of
+                    // sitting at a prompt looking "running" forever — and it's
+                    // correct on cmd.exe / PowerShell, not just POSIX. A non-run tab
+                    // types its command (e.g. launching an agent CLI).
+                    //
+                    // Micro-tasks go the runCommand way too, for a different
+                    // reason: their brief is a whole paragraph on one line, and a
+                    // command that long typed at a shell that is still starting
+                    // loses its Enter to zsh's line editor — the task sat unrun at
+                    // a prompt. As an argv it never touches the tty.
+                    initialCommand={
+                      tab.run || tab.micro ? undefined : tab.command
+                    }
+                    beforeInitialCommand={
+                      tab.spawnedTask
+                        ? (ptyId) => {
+                            const spawn = pendingAgentSpawnOps.current.get(
+                              tab.id,
+                            );
+                            if (!spawn)
+                              return Promise.reject(
+                                new Error("agent spawn handshake is missing"),
+                              );
+                            spawn.ready ??= ipc.agentSpawnReady(
+                              spawn.opId,
+                              ptyId,
+                            );
+                            return spawn.ready;
+                          }
+                        : undefined
+                    }
+                    runCommand={
+                      (tab.run || tab.micro) && tab.command
+                        ? tab.command
+                        : undefined
+                    }
+                    runArgv={
+                      tab.run && tab.componentId && tab.runCommandId
+                        ? unattendedManagedRunArgv(
+                            componentsRef.current
+                              .find(
+                                (component) => component.id === tab.componentId,
+                              )
+                              ?.commands?.find(
+                                (command) => command.id === tab.runCommandId,
+                              ),
+                          )
+                        : undefined
+                    }
+                    env={tab.env}
+                    runId={tab.micro?.runId ?? tab.spawnedTask?.runId}
+                    attemptId={
+                      tab.micro?.attemptId ?? tab.spawnedTask?.attemptId
+                    }
+                    onSpawned={(ptyId, assignedName, sessionGeneration) => {
+                      livePtyByTab.current.set(tab.id, ptyId);
+                      // A freshly spawned pty is alive by definition, so clear any
+                      // stale exited/failed state. Restart kills the old pty and
+                      // remounts a beat later; that kill's late pty:exit can land in
+                      // the gap and wrongly mark the tab failed while THIS new
+                      // process is the one now running (a red ✕ on a live server).
+                      patchTab(tab.id, {
+                        ptyId,
+                        sessionGeneration:
+                          sessionGeneration ?? tab.sessionGeneration,
+                        // The generated label, into its own slot. A restart used to
+                        // write it over whatever the tab was called, so a renamed
+                        // server came back as "Moss"; now it cannot reach the
+                        // user's slot, and a refused spawn — which reports no name
+                        // at all — no longer erases one either.
+                        ...(namePatch(tab, "native", assignedName) ?? {}),
+                        exited: false,
+                        exitCode: undefined,
+                      });
+                      // A name the user chose outlives the pty that held it, so the
+                      // new session is told about it rather than the other way
+                      // round. Native is where the mesh and the Agents page look.
+                      if (isUserNamed(tab) && tab.userName)
+                        void reassertSessionName(ptyId, tab.userName).catch(
+                          (error) => onNotice(String(error), "error"),
+                        );
+                      if (tab.micro?.runId)
+                        updateTaskRun(tab.micro.runId, { ptyId });
+                      const prompt = pendingTerminalPrompts.current.get(tab.id);
+                      const spawn = pendingAgentSpawnOps.current.get(tab.id);
+                      if (prompt == null && !spawn) return;
+                      if (spawn)
+                        spawn.ready ??= ipc.agentSpawnReady(spawn.opId, ptyId);
+                      const lineageReady = spawn?.ready;
+                      if (prompt != null)
+                        pendingTerminalPrompts.current.delete(tab.id);
+                      // The shell has only just started the CLI. Give its TUI time
+                      // to enter raw mode, then type and submit as separate writes
+                      // so autocomplete cannot swallow the Enter.
+                      setTimeout(async () => {
+                        try {
+                          await lineageReady;
+                          if (prompt != null) await ipc.ptyWrite(ptyId, prompt);
+                          if (prompt != null) {
+                            await new Promise((resolve) =>
+                              setTimeout(resolve, 250),
+                            );
+                            await ipc.ptyWrite(ptyId, "\r");
+                          }
+                          if (spawn)
+                            await ipc.browserResult(spawn.opId, true, {
+                              ptyId,
+                              cwd: spawn.cwd,
+                              runId: spawn.runId,
+                              attemptId: spawn.attemptId,
+                            });
+                          if (spawn)
+                            pendingAgentSpawnOps.current.delete(tab.id);
+                        } catch (error) {
+                          if (spawn) {
+                            pendingAgentSpawnOps.current.delete(tab.id);
+                            await settleAttempt({
+                              attemptId: spawn.attemptId,
+                              state: "failed",
+                              failureClass: "route",
+                              failureCode: "opening-brief",
+                            }).catch(() => {});
+                            await ipc.browserResult(
+                              spawn.opId,
+                              false,
+                              String(error),
+                            );
+                          }
+                        }
+                      }, 2500);
+                    }}
+                    onExited={(event) => {
+                      if (livePtyByTab.current.get(tab.id) !== event.id) return;
+                      livePtyByTab.current.delete(tab.id);
+                      const code = event.exit_code;
+                      const then = exitMarkers.current.get(tab.id);
+                      if (then) {
+                        exitMarkers.current.delete(tab.id);
+                        window.dispatchEvent(
+                          new CustomEvent(TERMINAL_EXITED_EVENT, {
+                            detail: { then, code },
+                          }),
+                        );
+                      }
+                      if (tab.spawnedTask) {
+                        void settleAttempt({
+                          attemptId: tab.spawnedTask.attemptId,
+                          state: code === 0 ? "completed" : "failed",
+                          failureClass: code === 0 ? null : "runtime",
+                          failureCode: code === 0 ? null : "process-exit",
+                        }).catch(() => {});
+                      }
+                      // Shell tabs close on exit; run tabs stay so the output and
+                      // exit status remain readable.
+                      if (tab.run) {
+                        patchTab(tab.id, {
+                          exited: true,
+                          exitCode: code,
+                          ptyId: null,
+                        });
+                        // An installer or updater finishing is the moment
+                        // "install" labels and update badges go stale — re-probe
+                        // right now, not on a timer. Announced rather than
+                        // refreshed in place: what changed is on this machine, and
+                        // every open project draws its own launcher from its own
+                        // probe, so the other tabs must hear about it too.
+                        if (
+                          tab.command?.startsWith("brew upgrade ") ||
+                          AGENT_CLIS.some(
+                            (c) =>
+                              c.install != null &&
+                              (c.install === tab.command ||
+                                updateCommand(c) === tab.command),
+                          )
+                        ) {
+                          announceCliInstallsChanged();
+                        }
+                        // A chore that worked has nothing left to show: let the ✓
+                        // land, then take the chip away. Re-checked when the timer
+                        // fires, because "Run again" in the meantime puts a live
+                        // process on this same tab.
+                        scheduleReap(
+                          tab.id,
+                          code,
+                          tab,
+                          reapTimers.current,
+                          (id) =>
+                            tabsRef.current.find(
+                              (t): t is TermSubTab =>
+                                t.type === "terminal" && t.id === id,
+                            ),
+                          closeTab,
+                        );
+                        vibeServerExit.current(tab.id, event);
+                      } else closeTab(tab.id);
+                    }}
+                    onTitle={(title) => {
+                      // Raw, into the OSC slot. Deciding whether it says anything —
+                      // `/bin/zsh` does not — and shortening cmd.exe's full path
+                      // belong to tabName, not to every writer of this field.
+                      const patch = namePatch(tab, "osc", title);
+                      if (patch) patchTab(tab.id, patch);
+                    }}
+                    onNotify={(notice) => {
+                      // Only a ring if you aren't already looking at it — a ring on
+                      // the tab you're watching is noise. The notice itself is
+                      // still the tab's, but where the tab *sits* is no longer this
+                      // decision's to make: a bell is unseen activity, and unseen
+                      // activity selects no bucket.
+                      patchTab(tab.id, { notice });
+                      if (
+                        tab.ptyId != null &&
+                        !(tab.id === activeTabId && visible && !vibe)
+                      ) {
+                        pushAttention(
+                          tab.ptyId,
+                          { t: "osc", at: Date.now(), body: notice },
+                          agentIdForCommand(tab.command) ?? null,
+                        );
+                      }
+                    }}
+                  />
+                )}
+                {livePips
+                  .filter((pip) => pip.ptyId === tab.ptyId)
+                  .map(({ tabId, ptyId }) => {
+                    const preview = tabs.find(
+                      (item): item is PreviewSubTab =>
+                        item.type === "preview" && item.id === tabId,
+                    );
+                    if (!preview?.url) return null;
+                    const agent = agentTargets.find(
+                      (item) => item.ptyId === ptyId,
+                    );
+                    const slot = shownBrowserPips.findIndex(
+                      (pip) => pip.tabId === tabId,
+                    );
+                    return (
+                      <AgentBrowserPip
+                        key={tabId}
+                        tabId={tabId}
+                        url={preview.url}
+                        agentId={agent?.agentId ?? "agent"}
+                        agentTitle={agent?.title || "Agent browser"}
+                        supported={browserEngine === "webview"}
+                        projectId={project.id}
+                        slot={Math.max(0, slot)}
+                        hidden={slot < 0}
+                        onClose={() => {
+                          dismissedBrowserPips.current.add(tabId);
+                          setBrowserPips((prev) =>
+                            prev.filter((pip) => pip.tabId !== tabId),
+                          );
+                        }}
+                      />
+                    );
+                  })}
+                {/* What a team rule or the irreversible-action gate just stopped
                   in this agent, with Allow once / Approve once (gates/events.ts). */}
-              <GateNotices
-                ptyId={tab.ptyId}
-                onEditRule={(ruleId) => openInstructions(rulesFocus(ruleId))}
-              />
-            </div>
+                <GateNotices
+                  ptyId={tab.ptyId}
+                  onEditRule={(ruleId) => openInstructions(rulesFocus(ruleId))}
+                />
+              </div>
             );
           })}
-        {!vibe && activeTerminalGroup &&
+        {!vibe &&
+          activeTerminalGroup &&
           activeTerminalLayout?.dividers.map((divider) => (
             <div
               key={divider.nodeId}
@@ -14895,7 +16627,10 @@ const ProjectViewBody = memo(function ProjectViewBody({
             onRestart={() => {
               const members = terminalMemoryMembers(memoryFlyoutTab);
               if (members.some((member) => member.attachId != null)) {
-                onNotice("An attached terminal cannot be restarted from this window.", "info");
+                onNotice(
+                  "An attached terminal cannot be restarted from this window.",
+                  "info",
+                );
                 return;
               }
               setMemoryFlyoutTabId(null);
@@ -14942,9 +16677,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
                 the tab's exit re-probes so the banner clears itself. */}
             {PREREQS.some((p) => prereqs[p.bin] === false) && (
               <div className="prereq-banner">
-                <span className="prereq-note">
-                  Missing:
-                </span>
+                <span className="prereq-note">Missing:</span>
                 <div className="prereq-actions">
                   {PREREQS.filter((p) => prereqs[p.bin] === false).map((p) => (
                     <button
@@ -14970,10 +16703,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
             )}
             {/* Same launchers as the ＋ menu, surfaced where the eye already is. */}
             <div className="launch-grid">
-              <button
-                className="launch-card"
-                onClick={() => onNewShell()}
-              >
+              <button className="launch-card" onClick={() => onNewShell()}>
                 <TerminalIcon size={26} />
                 <span>Shell</span>
               </button>
@@ -15015,7 +16745,10 @@ const ProjectViewBody = memo(function ProjectViewBody({
                     </span>
                   )}
                   {installed[cli.bin] && (
-                    <CliVersionFloor cliId={cli.id} installed={cliUpdates[cli.bin]?.installed} />
+                    <CliVersionFloor
+                      cliId={cli.id}
+                      installed={cliUpdates[cli.bin]?.installed}
+                    />
                   )}
                 </button>
               ))}
@@ -15025,7 +16758,9 @@ const ProjectViewBody = memo(function ProjectViewBody({
                 <div className="resume-head">
                   <span>
                     Reconnecting
-                    <span className="badge">{hostLive.reconnecting.length} terminals</span>
+                    <span className="badge">
+                      {hostLive.reconnecting.length} terminals
+                    </span>
                   </span>
                 </div>
                 {hostLive.reconnecting.map((t) => (
@@ -15042,7 +16777,9 @@ const ProjectViewBody = memo(function ProjectViewBody({
                 <div className="resume-head">
                   <span>
                     Resume
-                    <span className="badge">{resumeTerminalCount} terminals</span>
+                    <span className="badge">
+                      {resumeTerminalCount} terminals
+                    </span>
                   </span>
                   <span className="resume-head-actions">
                     <Button
@@ -15050,7 +16787,10 @@ const ProjectViewBody = memo(function ProjectViewBody({
                         chosen.length > 0
                           ? `Reopen ${resumeItems
                               .filter((item) => chosen.includes(item.key))
-                              .reduce((sum, item) => sum + item.count, 0)} selected terminals`
+                              .reduce(
+                                (sum, item) => sum + item.count,
+                                0,
+                              )} selected terminals`
                           : "Reopen all"
                       }
                       onClick={() =>
@@ -15059,14 +16799,16 @@ const ProjectViewBody = memo(function ProjectViewBody({
                             ? resumeItems.filter((i) => chosen.includes(i.key))
                             : resumeItems,
                         )
-                      }>
+                      }
+                    >
                       {chosen.length > 0
                         ? `Restore selected (${resumeItems
                             .filter((item) => chosen.includes(item.key))
                             .reduce((sum, item) => sum + item.count, 0)})`
                         : "Restore all"}
                     </Button>
-                    <Button icon
+                    <Button
+                      icon
                       title="Forget all"
                       onClick={() => {
                         forgetTerminals(project.id, terminalMemoryScope);
@@ -15075,10 +16817,14 @@ const ProjectViewBody = memo(function ProjectViewBody({
                         // happens to be showing — otherwise "forget everything
                         // here" leaves the next-oldest behind in each.
                         forgetSessions(
-                          restorable.flatMap((r) => [r.digest, ...r.superseded]),
+                          restorable.flatMap((r) => [
+                            r.digest,
+                            ...r.superseded,
+                          ]),
                         );
                         setRestorable([]);
-                      }}>
+                      }}
+                    >
                       ✕
                     </Button>
                   </span>
@@ -15086,14 +16832,20 @@ const ProjectViewBody = memo(function ProjectViewBody({
                 {resumeCards.map((card) => (
                   <div
                     key={card.key}
-                    className={card.group ? "resume-group" : "resume-standalone"}
+                    className={
+                      card.group ? "resume-group" : "resume-standalone"
+                    }
                   >
                     {card.group && (
                       <div className="resume-group-head">
                         {pickBox(card.key)}
-                        <span className="tab-multiplex-icon" aria-hidden>▦</span>
+                        <span className="tab-multiplex-icon" aria-hidden>
+                          ▦
+                        </span>
                         <strong>Multiplexed agents</strong>
-                        <span className="resume-branch">{card.leaves.length} panes</span>
+                        <span className="resume-branch">
+                          {card.leaves.length} panes
+                        </span>
                         <Button
                           size="sm"
                           variant="accent"
@@ -15106,8 +16858,10 @@ const ProjectViewBody = memo(function ProjectViewBody({
                     {card.leaves.map((leaf) => {
                       const r = leaf.restorable;
                       const t = leaf.remembered;
-                      const agentId = r?.agentId ?? agentIdForCommand(t?.command);
-                      const title = r?.prompt || t?.title || t?.command || "shell";
+                      const agentId =
+                        r?.agentId ?? agentIdForCommand(t?.command);
+                      const title =
+                        r?.prompt || t?.title || t?.command || "shell";
                       const cwd = r?.cwd ?? t?.cwd ?? "";
                       return (
                         <div
@@ -15125,9 +16879,15 @@ const ProjectViewBody = memo(function ProjectViewBody({
                           <span className="resume-prompt">{title}</span>
                           <span className="resume-dir">{basename(cwd)}</span>
                           {r?.digest.branch && (
-                            <span className="resume-branch">⑂ {r.digest.branch}</span>
+                            <span className="resume-branch">
+                              ⑂ {r.digest.branch}
+                            </span>
                           )}
-                          {r && <span className="resume-age">{ago(r.digest.updated)}</span>}
+                          {r && (
+                            <span className="resume-age">
+                              {ago(r.digest.updated)}
+                            </span>
+                          )}
                           <Button
                             size="sm"
                             variant={!card.group && r ? "accent" : "default"}
@@ -15136,7 +16896,11 @@ const ProjectViewBody = memo(function ProjectViewBody({
                               void restoreResumeCard(card, leaf);
                             }}
                           >
-                            {card.group ? "Resume separately" : r ? "Resume" : "Reopen"}
+                            {card.group
+                              ? "Resume separately"
+                              : r
+                                ? "Resume"
+                                : "Reopen"}
                           </Button>
                         </div>
                       );
@@ -15163,20 +16927,39 @@ const ProjectViewBody = memo(function ProjectViewBody({
                 cwd={agentTermWs.cwd}
                 digest={agentTermWs.digest}
                 machine={agentTermWs.machine}
-                ports={projectStats.find((s) => s.id === agentTermWs.ptyId)?.ports}
+                ports={
+                  projectStats.find((s) => s.id === agentTermWs.ptyId)?.ports
+                }
                 life={lifeForPty(agentTermWs.ptyId)}
                 onOpenWorkspace={() => setWsDrawerOpen(true)}
                 onDockChange={setCardDocked}
-                onSendToWorkspace={isRemoteHost() ? undefined : () => {
-                  const tab = tabs.find((t): t is TermSubTab => t.type === "terminal" && t.ptyId === agentTermWs.ptyId);
-                  const candidate = tab ? teleportCandidate(tab) : null;
-                  if (candidate) setTeleport(candidate);
-                  else setSendOpen(true);
-                }}
-                settled={isSettledTab(tabs.find((t) => t.type === "terminal" && t.ptyId === agentTermWs.ptyId) ?? {})}
+                onSendToWorkspace={
+                  isRemoteHost()
+                    ? undefined
+                    : () => {
+                        const tab = tabs.find(
+                          (t): t is TermSubTab =>
+                            t.type === "terminal" &&
+                            t.ptyId === agentTermWs.ptyId,
+                        );
+                        const candidate = tab ? teleportCandidate(tab) : null;
+                        if (candidate) setTeleport(candidate);
+                        else setSendOpen(true);
+                      }
+                }
+                settled={isSettledTab(
+                  tabs.find(
+                    (t) =>
+                      t.type === "terminal" && t.ptyId === agentTermWs.ptyId,
+                  ) ?? {},
+                )}
                 onSettle={(settle) => {
-                  const tab = tabs.find((t) => t.type === "terminal" && t.ptyId === agentTermWs.ptyId);
-                  if (tab) patchTabRaw(tab.id, { settled: settle } as Partial<SubTab>);
+                  const tab = tabs.find(
+                    (t) =>
+                      t.type === "terminal" && t.ptyId === agentTermWs.ptyId,
+                  );
+                  if (tab)
+                    patchTabRaw(tab.id, { settled: settle } as Partial<SubTab>);
                 }}
                 onOpenAsset={(path, opts) => {
                   // A click is the person's own say-so. With a modifier: their
@@ -15184,16 +16967,25 @@ const ProjectViewBody = memo(function ProjectViewBody({
                   // project opens only if Privacy allows it, as for a link.
                   // A running server opens in a preview tab (or the browser with a modifier).
                   if (isPreviewUrl(path)) {
-                    if (opts.system) void import("@tauri-apps/plugin-opener").then(({ openUrl }) => openUrl(path)).catch(() => {});
+                    if (opts.system)
+                      void import("@tauri-apps/plugin-opener")
+                        .then(({ openUrl }) => openUrl(path))
+                        .catch(() => {});
                     else openPreview(path);
                     return;
                   }
                   if (opts.system) {
-                    void import("@tauri-apps/plugin-opener").then(({ openPath }) => openPath(path)).catch(() => {});
+                    void import("@tauri-apps/plugin-opener")
+                      .then(({ openPath }) => openPath(path))
+                      .catch(() => {});
                     return;
                   }
                   const open = () => void openFileRef.current(path);
-                  if (getSettings().allowOutsideFileLinks) void ipc.fsGrantLinkFile(path).catch(() => {}).then(open);
+                  if (getSettings().allowOutsideFileLinks)
+                    void ipc
+                      .fsGrantLinkFile(path)
+                      .catch(() => {})
+                      .then(open);
                   else open();
                 }}
                 onSendToAgent={(text) =>
@@ -15330,8 +17122,13 @@ const ProjectViewBody = memo(function ProjectViewBody({
     new Map<SideTab, { active: boolean; el: ReactNode }>(),
   );
   const sidePane = (key: SideTab, build: () => ReactNode) => {
-    if (!sideSeen.includes(key) && !(key === "files" && sideSeen.includes("servers"))) return null;
-    const active = sideTab === key || (key === "files" && sideTab === "servers");
+    if (
+      !sideSeen.includes(key) &&
+      !(key === "files" && sideSeen.includes("servers"))
+    )
+      return null;
+    const active =
+      sideTab === key || (key === "files" && sideTab === "servers");
     const cached = sidePanes.current.get(key);
     // Rebuilt while in front, and once more on the way out — that last build is
     // what hands a polling panel `visible: false`. After that it sits still.
@@ -15411,7 +17208,9 @@ const ProjectViewBody = memo(function ProjectViewBody({
               ? () =>
                   taskRows(
                     "About the current changes: ",
-                    changeGroups[0]?.repo ?? componentsRef.current[0]?.path ?? "",
+                    changeGroups[0]?.repo ??
+                      componentsRef.current[0]?.path ??
+                      "",
                   )
               : undefined
           }
@@ -15485,31 +17284,69 @@ const ProjectViewBody = memo(function ProjectViewBody({
           <div className="side-panel-head">
             <span>Components & files</span>
             <span className="side-head-actions">
-              {upload.startUpload&&<Button size="sm" variant="ghost" disabled={upload.busy} onClick={e=>compMenu.open(e,uploadItems(components[0]?.path??'/workspace',true))}>Upload…</Button>}
-              <Button icon size="sm" variant="ghost" title="Refresh files" onClick={() => setTreeRefreshRevision(v => v + 1)}><RestartIcon size={14}/></Button>
-              <Button icon size="sm" variant="ghost" title="Edit project" onClick={onEdit}><SettingsIcon size={14}/></Button>
+              {upload.startUpload && (
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  disabled={upload.busy}
+                  onClick={(e) =>
+                    compMenu.open(
+                      e,
+                      uploadItems(components[0]?.path ?? "/workspace", true),
+                    )
+                  }
+                >
+                  Upload…
+                </Button>
+              )}
+              <Button
+                icon
+                size="sm"
+                variant="ghost"
+                title="Refresh files"
+                onClick={() => setTreeRefreshRevision((v) => v + 1)}
+              >
+                <RestartIcon size={14} />
+              </Button>
+              <Button
+                icon
+                size="sm"
+                variant="ghost"
+                title="Edit project"
+                onClick={onEdit}
+              >
+                <SettingsIcon size={14} />
+              </Button>
             </span>
           </div>
           <details className="component-servers">
-            <summary>Servers <span>{serversRunning > 0 ? `${serversRunning} running` : "Start and manage"}</span></summary>
-        <ServersPanel
-          groups={serverGroups}
-          onStart={startServer}
-          onRestart={restartRun}
-          onStop={(ptyId) => void ipc.ptyKill(ptyId)}
-          onOpenRun={setActiveTabId}
-          onOpenPreview={(url) => openPreview(url)}
-          onNewTerminal={(path) => addTerminal(path)}
-          // The agent named on a workspace row is a terminal this project
-          // already owns, so this focuses it rather than attaching a new view.
-          onOpenAgent={(ptyId) => {
-            const tab = tabs.find(
-              (t): t is TermSubTab => t.type === "terminal" && t.ptyId === ptyId,
-            );
-            if (tab) setActiveTabId(tab.id);
-          }}
-          onEdit={onEdit}
-        />
+            <summary>
+              Servers{" "}
+              <span>
+                {serversRunning > 0
+                  ? `${serversRunning} running`
+                  : "Start and manage"}
+              </span>
+            </summary>
+            <ServersPanel
+              groups={serverGroups}
+              onStart={startServer}
+              onRestart={restartRun}
+              onStop={(ptyId) => void ipc.ptyKill(ptyId)}
+              onOpenRun={setActiveTabId}
+              onOpenPreview={(url) => openPreview(url)}
+              onNewTerminal={(path) => addTerminal(path)}
+              // The agent named on a workspace row is a terminal this project
+              // already owns, so this focuses it rather than attaching a new view.
+              onOpenAgent={(ptyId) => {
+                const tab = tabs.find(
+                  (t): t is TermSubTab =>
+                    t.type === "terminal" && t.ptyId === ptyId,
+                );
+                if (tab) setActiveTabId(tab.id);
+              }}
+              onEdit={onEdit}
+            />
           </details>
           {/* Which checkout these files come from. Always visible while a
               worktree is active, so you can never edit the wrong tree without
@@ -15521,9 +17358,11 @@ const ProjectViewBody = memo(function ProjectViewBody({
             >
               <span className="wt-env-mark">⑂</span>
               <span className="wt-env-branch">{worktreeEnv.branch}</span>
-              <Button icon
+              <Button
+                icon
                 title="Go back to your own checkout"
-                onClick={() => void leaveWorktreeEnv(worktreeEnv)}>
+                onClick={() => void leaveWorktreeEnv(worktreeEnv)}
+              >
                 ✕
               </Button>
             </div>
@@ -15547,12 +17386,14 @@ const ProjectViewBody = memo(function ProjectViewBody({
                 </span>
                 <span className="component-title">{c.label}</span>
                 <span className="component-actions">
-                  <Button icon
+                  <Button
+                    icon
                     title={`New terminal in ${c.label}`}
                     onClick={(e) => {
                       e.stopPropagation();
                       addTerminal(c.path);
-                    }}>
+                    }}
+                  >
                     <TerminalIcon size={13} />
                   </Button>
                 </span>
@@ -15571,7 +17412,8 @@ const ProjectViewBody = memo(function ProjectViewBody({
                               Boolean(t.run) &&
                               t.cwd === c.path &&
                               (t.runCommandId
-                                ? t.componentId === c.id && t.runCommandId === cmd.id
+                                ? t.componentId === c.id &&
+                                  t.runCommandId === cmd.id
                                 : t.command === cmd.command),
                           );
                           // An open-but-finished tab isn't running: one-shot
@@ -15651,24 +17493,31 @@ const ProjectViewBody = memo(function ProjectViewBody({
                               >
                                 {running ? (
                                   <>
-                                    <Button icon
+                                    <Button
+                                      icon
                                       title="Restart"
-                                      onClick={() => restartRun(running.id)}>
+                                      onClick={() => restartRun(running.id)}
+                                    >
                                       <RestartIcon size={14} />
                                     </Button>
-                                    <Button icon variant="danger"
+                                    <Button
+                                      icon
+                                      variant="danger"
                                       title="Stop"
                                       onClick={() => {
                                         if (running.ptyId != null)
                                           void ipc.ptyKill(running.ptyId);
-                                      }}>
+                                      }}
+                                    >
                                       <StopIcon size={13} />
                                     </Button>
                                   </>
                                 ) : (
-                                  <Button icon
+                                  <Button
+                                    icon
                                     title={finished ? "Run again" : "Run"}
-                                    onClick={start}>
+                                    onClick={start}
+                                  >
                                     {finished ? (
                                       <RestartIcon size={14} />
                                     ) : (
@@ -15684,7 +17533,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
                   )}
                   <FileTree
                     readOnly={readOnly}
-                    onUpload={readOnly?undefined:upload.startUpload}
+                    onUpload={readOnly ? undefined : upload.startUpload}
                     refreshRevision={treeRefreshRevision}
                     roots={[c.path]}
                     changedPaths={changedPaths}
@@ -15867,12 +17716,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
           onShareContext={onShareContext}
           liveSessionIds={liveSessionIds}
           onRestore={(cwd, cmd, title, agentId) =>
-            addTerminal(
-              cwd,
-              cmd,
-              title,
-              agentCliFor(agentId)?.icon,
-            )
+            addTerminal(cwd, cmd, title, agentCliFor(agentId)?.icon)
           }
           onNotice={onNotice}
           onOpenInstructions={openInstructions}
@@ -15899,6 +17743,14 @@ const ProjectViewBody = memo(function ProjectViewBody({
       className={`project-view ${vibe ? "project-view-vibe" : ""}`}
       style={{ display: visible ? "flex" : "none" }}
     >
+      {visible && floatPhone && (
+        <FloatingPhone
+          serial={floatPhone.serial}
+          projectDir={floatPhone.projectDir}
+          label={floatPhone.label}
+          onClose={() => setFloatPhone(null)}
+        />
+      )}
       {/* Rail + panels share a row; the status bar sits below it so it spans the
           full window width (rail + sidebar + main), not just the editor column. */}
       <div className="project-body">
@@ -15926,7 +17778,9 @@ const ProjectViewBody = memo(function ProjectViewBody({
           />
         )}
         {!zen && vibe && (
-          <div className={`vibe-settings-peek ${buildSettingsOpen ? "open" : ""}`}>
+          <div
+            className={`vibe-settings-peek ${buildSettingsOpen ? "open" : ""}`}
+          >
             {buildSettingsOpen && (
               <button
                 className="vibe-settings-backdrop"
@@ -15937,20 +17791,32 @@ const ProjectViewBody = memo(function ProjectViewBody({
             <button
               className="vibe-settings-tab"
               type="button"
-              aria-label={buildSettingsOpen ? "Close Build settings" : "Open Build settings"}
+              aria-label={
+                buildSettingsOpen
+                  ? "Close Build settings"
+                  : "Open Build settings"
+              }
               aria-expanded={buildSettingsOpen}
               onClick={() => setBuildSettingsOpen((open) => !open)}
             >
               <SettingsIcon size={17} />
             </button>
             {buildSettingsOpen && (
-              <aside className="vibe-settings-panel" aria-label="Build settings">
+              <aside
+                className="vibe-settings-panel"
+                aria-label="Build settings"
+              >
                 <div className="vibe-settings-panel-head">
                   <span>
                     <strong>Build settings</strong>
                     <small>Project setup, services, and deployment</small>
                   </span>
-                  <button type="button" onClick={() => setBuildSettingsOpen(false)}>Close</button>
+                  <button
+                    type="button"
+                    onClick={() => setBuildSettingsOpen(false)}
+                  >
+                    Close
+                  </button>
                 </div>
                 <section className="vibe-settings-discovery">
                   <span>
@@ -15974,7 +17840,13 @@ const ProjectViewBody = memo(function ProjectViewBody({
                       </Button>
                       <Button
                         size="sm"
-                        onClick={() => window.dispatchEvent(new CustomEvent("canopy:open-settings", { detail: { tab: "agents" } }))}
+                        onClick={() =>
+                          window.dispatchEvent(
+                            new CustomEvent("canopy:open-settings", {
+                              detail: { tab: "agents" },
+                            }),
+                          )
+                        }
                       >
                         Agent access
                       </Button>
@@ -15996,7 +17868,9 @@ const ProjectViewBody = memo(function ProjectViewBody({
                     const ptyId = localIntegrationEntry(id)?.entry.ptyId;
                     if (ptyId != null) void ipc.ptyKill(ptyId);
                   }}
-                  onOpenLocal={(port) => openPreview(`http://localhost:${port}`)}
+                  onOpenLocal={(port) =>
+                    openPreview(`http://localhost:${port}`)
+                  }
                   onOpenRemote={openPreview}
                 />
               </aside>
@@ -16053,20 +17927,25 @@ const ProjectViewBody = memo(function ProjectViewBody({
         <aside className="vibe-chat-placeholder" aria-label="Build chat">
           {/* Builder lens tools: plain-language history, diagnose-first
               repair, layers and owners. Edits only through the Build session. */}
-          {vibe && <BuilderLensPanel project={project} session={vibeSession ?? null} />}
+          {vibe && (
+            <BuilderLensPanel project={project} session={vibeSession ?? null} />
+          )}
           <VibeBuilderPane
             project={project}
             phase={
-              bootstrapSession ? "build" : vibeSession
-                ? vibeInputUnlock.current.unlocked
-                  ? "build"
-                  : "waiting"
-                : vibeProjectSetupSession
-                  ? "discovering"
-                  : "waiting"
+              bootstrapSession
+                ? "build"
+                : vibeSession
+                  ? vibeInputUnlock.current.unlocked
+                    ? "build"
+                    : "waiting"
+                  : vibeProjectSetupSession
+                    ? "discovering"
+                    : "waiting"
             }
             session={
-              bootstrapSession ?? vibeSession ??
+              bootstrapSession ??
+              vibeSession ??
               vibeProjectSetupSession ??
               vibeWaitingSession
             }
@@ -16145,8 +18024,18 @@ const ProjectViewBody = memo(function ProjectViewBody({
           title="All subscriptions are exhausted"
           body={`Every signed-in ${poolExhausted.name} account has reached a limit. Canopy will retry around ${new Date(poolExhausted.until).toLocaleString([], { weekday: "short", hour: "numeric", minute: "2-digit" })}.`}
           dismissLabel="OK"
-          onDismiss={() => setPoolExhausted(current => (current ? { ...current, dismissed: true } : current))}
-          actions={[{ label: "Retry now", primary: true, onClick: () => retryExhausted(true) }]}
+          onDismiss={() =>
+            setPoolExhausted((current) =>
+              current ? { ...current, dismissed: true } : current,
+            )
+          }
+          actions={[
+            {
+              label: "Retry now",
+              primary: true,
+              onClick: () => retryExhausted(true),
+            },
+          ]}
         />
       )}
       {reloadAsk && (
@@ -16234,33 +18123,46 @@ const ProjectViewBody = memo(function ProjectViewBody({
           }
           dismissLabel="Cancel"
           onDismiss={() => setMachineTransition(null)}
-          actions={[{
-            label: machineTransition.target.kind === "local" ? "Switch to This Mac" : `Open ${machineTransition.name}`,
-            primary: true,
-            onClick: () => {
-              const target = machineTransition.target;
-              // Carry the start across the switch: it happens by itself once
-              // this project is open on that machine.
-              if (machineTransition.resumeAgent && target.kind !== "t3") {
-                setPendingLaunch({
-                  agentId: machineTransition.resumeAgent,
-                  projectId: canonicalProjectId(project),
-                  ...(machineTransition.resumeLabel ? { componentLabel: machineTransition.resumeLabel } : {}),
-                  ...(machineTransition.resumeThen ? { then: machineTransition.resumeThen } : {}),
-                  target,
-                });
-              }
-              setMachineTransition(null);
-              void requestTargetTransition(target, machineTransition.name);
+          actions={[
+            {
+              label:
+                machineTransition.target.kind === "local"
+                  ? "Switch to This Mac"
+                  : `Open ${machineTransition.name}`,
+              primary: true,
+              onClick: () => {
+                const target = machineTransition.target;
+                // Carry the start across the switch: it happens by itself once
+                // this project is open on that machine.
+                if (machineTransition.resumeAgent && target.kind !== "t3") {
+                  setPendingLaunch({
+                    agentId: machineTransition.resumeAgent,
+                    projectId: canonicalProjectId(project),
+                    ...(machineTransition.resumeLabel
+                      ? { componentLabel: machineTransition.resumeLabel }
+                      : {}),
+                    ...(machineTransition.resumeThen
+                      ? { then: machineTransition.resumeThen }
+                      : {}),
+                    target,
+                  });
+                }
+                setMachineTransition(null);
+                void requestTargetTransition(target, machineTransition.name);
+              },
             },
-          }]}
+          ]}
         />
       )}
       {teleport && visible && (
         <TeleportFlow
           project={project}
           direction={isRemoteHost() ? "toMac" : "toWorkspace"}
-          agent={{ sessionId: teleport.sessionId, cwd: teleport.cwd, idle: teleport.idle }}
+          agent={{
+            sessionId: teleport.sessionId,
+            cwd: teleport.cwd,
+            idle: teleport.idle,
+          }}
           onClose={() => setTeleport(null)}
           onNotice={onNotice}
           stopAgent={async () => {
@@ -16270,16 +18172,28 @@ const ProjectViewBody = memo(function ProjectViewBody({
             await new Promise((resolve) => setTimeout(resolve, 1500));
           }}
           restoreAgent={async () => {
-            addTerminal(teleport.cwd, restoreCommand(TELEPORT_CLI_ID, teleport.sessionId) || undefined, TELEPORT_CLI_ID, agentCliFor(TELEPORT_CLI_ID)?.icon);
+            addTerminal(
+              teleport.cwd,
+              restoreCommand(TELEPORT_CLI_ID, teleport.sessionId) || undefined,
+              TELEPORT_CLI_ID,
+              agentCliFor(TELEPORT_CLI_ID)?.icon,
+            );
           }}
           continueOnDestination={async (workspaceId, sessionId, cwd) => {
             setPendingLaunch({
               agentId: TELEPORT_CLI_ID,
               projectId: canonicalProjectId(project),
-              target: workspaceId === TELEPORT_TO_MAC ? { kind: "local" } : { kind: "remote", workspaceId },
+              target:
+                workspaceId === TELEPORT_TO_MAC
+                  ? { kind: "local" }
+                  : { kind: "remote", workspaceId },
               then: { kind: "resume", payload: { sessionId, cwd } },
             });
-            await requestTargetTransition(workspaceId === TELEPORT_TO_MAC ? { kind: "local" } : { kind: "remote", workspaceId });
+            await requestTargetTransition(
+              workspaceId === TELEPORT_TO_MAC
+                ? { kind: "local" }
+                : { kind: "remote", workspaceId },
+            );
           }}
           onLinkProject={(env, id) => onLinkProject?.(env, id)}
         />
@@ -16294,7 +18208,10 @@ const ProjectViewBody = memo(function ProjectViewBody({
             <SendToWorkspace
               projectId={project.id}
               projectName={project.name}
-              components={project.components.map((component) => ({ componentId: component.id, label: component.label }))}
+              components={project.components.map((component) => ({
+                componentId: component.id,
+                label: component.label,
+              }))}
             />
           }
         />
@@ -16309,22 +18226,27 @@ const ProjectViewBody = memo(function ProjectViewBody({
             setPlacementSetup(null);
             resolve(false);
           }}
-          actions={[{
-            label: "Launch",
-            primary: true,
-            disabled: !placementSetupReady,
-            onClick: () => {
-              const { resolve } = placementSetup;
-              setPlacementSetup(null);
-              resolve(true);
+          actions={[
+            {
+              label: "Launch",
+              primary: true,
+              disabled: !placementSetupReady,
+              onClick: () => {
+                const { resolve } = placementSetup;
+                setPlacementSetup(null);
+                resolve(true);
+              },
             },
-          }]}
+          ]}
           body={
             <ProjectSetupDialog
               projectId={project.id}
               projectName={project.name}
               workspaceName={placementSetup.name}
-              components={project.components.map((component) => ({ componentId: component.id, label: component.label }))}
+              components={project.components.map((component) => ({
+                componentId: component.id,
+                label: component.label,
+              }))}
               onComplete={setPlacementSetupReady}
               remoteInvoke={placementSetup.remoteInvoke}
               autoStart
@@ -16379,9 +18301,15 @@ const ProjectViewBody = memo(function ProjectViewBody({
             void pickComponent(`New ${cli.name}`, cli.id).then((selection) => {
               if (!selection) return;
               const path = pendingSplitRef.current
-                ? activeContextRoot ?? selection.component.path
+                ? (activeContextRoot ?? selection.component.path)
                 : selection.component.path;
-              void launchCli(cli, path, where, selection.machine, selection.profileId).finally(() => {
+              void launchCli(
+                cli,
+                path,
+                where,
+                selection.machine,
+                selection.profileId,
+              ).finally(() => {
                 // A successful split consumes this itself. Clear only a launch
                 // that stopped before it reached completePendingSplit.
                 if (pendingSplitRef.current) {

@@ -75,6 +75,8 @@ interface DeviceViewProps {
   /** This project's components. The chosen one resolves the SDK (its
    *  local.properties pins one) and is the codebase feedback names. */
   projects: { label: string; path: string }[];
+  /** Pop this device out as a floating preview. */
+  onFloat?: (device: { serial: string; label: string }) => void;
 }
 
 export default function DeviceView({
@@ -90,6 +92,7 @@ export default function DeviceView({
   onSendToAgent,
   onStartNew,
   projects,
+  onFloat,
 }: DeviceViewProps) {
   const [status, setStatus] = useState<ipc.AndroidSdkStatus | null>(null);
   const [devices, setDevices] = useState<ipc.AndroidDevice[]>([]);
@@ -737,6 +740,21 @@ export default function DeviceView({
         <Button size="sm" onClick={() => onPatch({ serial: "" })}>
           Change device
         </Button>
+        {platform === "android" && onFloat && (
+          <Button
+            size="sm"
+            title="Keep this phone in view in a floating window"
+            onClick={() =>
+              onFloat({
+                serial,
+                label:
+                  devices.find((d) => d.serial === serial)?.model || serial,
+              })
+            }
+          >
+            ⧉ Float
+          </Button>
+        )}
         {platform === "android" && (
           <Button
             size="sm"
