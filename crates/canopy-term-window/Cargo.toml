@@ -5,8 +5,8 @@ description = "Native window shell for the terminal: winit, wgpu surface, IME, c
 authors = ["Cause Connect Pte Ltd <sam@fluidwords.app>"]
 license = "MIT"
 edition = "2021"
-# accesskit 0.25.1+ and accesskit_winit 0.34.1+ declare 1.87.
-rust-version = "1.87"
+# The highest in the locked graph: uuid (via accesskit) declares 1.89.
+rust-version = "1.89"
 
 # Its own workspace root with its own lock: parallel work on other crates, and
 # dependencies a track adds, never touch the app's Cargo.lock.

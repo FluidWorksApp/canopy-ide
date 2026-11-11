@@ -350,20 +350,20 @@ fn full_update(
 /// Rows that are new output: the best scroll offset is found by matching
 /// non-empty old rows against new rows (the cursor row is not evidence: a fresh
 /// prompt often equals an old one); rows with no match (scrolled in, or changed
-/// in place) are new. The cursor row and blank rows are left out.
+/// in place) are new. The cursor row and blank rows are left out. Rows are
+/// compared without trailing blanks: the cursor row keeps them and the same
+/// row loses them once the cursor leaves, which is not new output.
 pub fn new_output(old: &[LineText], new: &[LineText], cursor_row: u16) -> Vec<String> {
     let n = new.len();
     if old.len() != n || n == 0 {
         return Vec::new();
     }
+    let o = |r: usize| old[r].text.trim_end();
+    let w = |r: usize| new[r].text.trim_end();
     let mut best = (0usize, 0usize); // (matches, offset)
     for s in 0..n {
         let matches = (0..n - s)
-            .filter(|&r| {
-                r != cursor_row as usize
-                    && !new[r].text.is_empty()
-                    && old[r + s].text == new[r].text
-            })
+            .filter(|&r| r != cursor_row as usize && !w(r).is_empty() && o(r + s) == w(r))
             .count();
         if matches > best.0 {
             best = (matches, s);
@@ -372,7 +372,7 @@ pub fn new_output(old: &[LineText], new: &[LineText], cursor_row: u16) -> Vec<St
     let s = best.1;
     let mut out: Vec<String> = (0..n)
         .filter(|&r| r != cursor_row as usize)
-        .filter(|&r| r + s >= n || old[r + s].text != new[r].text)
+        .filter(|&r| r + s >= n || o(r + s) != w(r))
         .map(|r| new[r].text.trim_end().to_string())
         .filter(|t| !t.trim().is_empty())
         .collect();
@@ -790,6 +790,32 @@ mod tests {
         let u = t.update(&g, CELL, None).unwrap();
         let root = node(&u, ROOT_ID);
         assert_eq!(node(&u, root.children()[1]).value(), Some("a.txt"));
+    }
+
+    #[test]
+    fn enter_on_an_empty_prompt_announces_nothing() {
+        // In place: the old prompt loses its trailing space when the cursor
+        // leaves it; that is not output.
+        let mut f = frame_of(&["$ ", "", ""], 6);
+        f.cursor.col = 2;
+        let mut t = A11yTree::new();
+        t.full(&f, CELL, None);
+        let mut g = frame_of(&["$ ", "$ ", ""], 6);
+        g.cursor.row = 1;
+        g.cursor.col = 2;
+        let u = t.update(&g, CELL, None).unwrap();
+        assert!(!u.nodes.iter().any(|(i, _)| *i == ROOT_ID));
+        // At the bottom: the screen scrolls by one.
+        let mut f = frame_of(&["a", "b", "$ "], 6);
+        f.cursor.row = 2;
+        f.cursor.col = 2;
+        let mut t = A11yTree::new();
+        t.full(&f, CELL, None);
+        let mut g = frame_of(&["b", "$ ", "$ "], 6);
+        g.cursor.row = 2;
+        g.cursor.col = 2;
+        let u = t.update(&g, CELL, None).unwrap();
+        assert!(!u.nodes.iter().any(|(i, _)| *i == ROOT_ID));
     }
 
     #[test]

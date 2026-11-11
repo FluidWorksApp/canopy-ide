@@ -787,7 +787,9 @@ impl<S: FrameSource> App<S> {
                     self.exit = true;
                 }
                 Err(wgpu::SurfaceError::Timeout | wgpu::SurfaceError::Other) => {
+                    // Try again on the next frame rather than leave it stale.
                     self.needs_present = true;
+                    v.window.request_redraw();
                 }
             }
         }
