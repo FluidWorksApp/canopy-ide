@@ -9,7 +9,6 @@ use crate::protocol::{
 };
 use portable_pty::{Child, ChildKiller, ExitStatus, MasterPty, PtySize};
 use std::io::{Read, Write};
-use std::os::unix::fs::PermissionsExt;
 use std::os::unix::io::AsRawFd;
 use std::os::unix::net::UnixStream;
 use std::os::unix::process::CommandExt;
@@ -522,8 +521,7 @@ impl HostClient {
         let dir = socket
             .parent()
             .ok_or_else(|| other("socket has no parent"))?;
-        std::fs::create_dir_all(dir)?;
-        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))?;
+        crate::server::prepare_socket_dir(dir)?;
         let lock = std::fs::OpenOptions::new()
             .create(true)
             .truncate(false)
