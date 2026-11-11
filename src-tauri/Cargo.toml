@@ -279,6 +279,8 @@ codegen-units = 1
 
 [dev-dependencies]
 keepass = { version = "0.13", default-features = false, features = ["save_kdbx4"] }
+# The crate's scripted CliRunner and anonymised fixtures, for tailnet.rs tests only.
+canopy-term-net = { path = "../crates/canopy-term-net", default-features = false, features = ["test-support"] }
 # `test` feature enables tauri::test::mock_app for exercising PTY spawn/attach
 # against a mock runtime. Dev-only, so the release build is unaffected.
 tauri = { version = "2.11.3", features = ["test", "unstable"] }

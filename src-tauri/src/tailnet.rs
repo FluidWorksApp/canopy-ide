@@ -19,8 +19,8 @@
 
 use canopy_term_net::allowlist::{canonical_tailnet_entry, valid_stable_id, Allowlist};
 use canopy_term_net::tailscale::{
-    parse_version, CliCommand, CliRunner, NodeInfo, ProcessRunner, TailnetIdentity, TailnetState,
-    Tailscale, WhoisError, MIN_VERSION,
+    CliRunner, InstallProblem, NodeInfo, ProcessRunner, TailnetIdentity, TailnetState, Tailscale,
+    WhoisError, MIN_VERSION,
 };
 use serde::Serialize;
 use std::collections::BTreeSet;
@@ -66,7 +66,8 @@ pub fn kind_of(state: &TailnetState) -> Kind {
 #[derive(Serialize, Clone, Debug, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct Machine {
-    /// The first label of the MagicDNS name.
+    /// The machine's own host name when the tailnet gives one, else the first
+    /// label of the MagicDNS name.
     pub name: String,
     pub dns_name: String,
     /// IPv4 when it has one.
@@ -108,11 +109,14 @@ fn preferred_addr(addrs: &[IpAddr]) -> Option<IpAddr> {
 
 fn machine(n: &NodeInfo, allowed: &BTreeSet<String>) -> Machine {
     let ip = preferred_addr(&n.addrs).map(|a| a.to_string());
-    let label = n.dns_name.split('.').next().unwrap_or("").to_string();
-    let name = if label.is_empty() {
-        ip.clone().unwrap_or_else(|| "Unnamed".to_string())
+    let host = n.host_name.as_deref().map(str::trim).unwrap_or("");
+    let label = n.dns_name.split('.').next().unwrap_or("");
+    let name = if !host.is_empty() {
+        host.to_string()
+    } else if !label.is_empty() {
+        label.to_string()
     } else {
-        label
+        ip.clone().unwrap_or_else(|| "Unnamed".to_string())
     };
     Machine {
         name,
@@ -165,9 +169,11 @@ fn save_allow(path: &Path, list: &Allowlist) -> Result<(), String> {
         .map_err(|e| format!("Can't save the allow list: {e}"))
 }
 
-/// The row's state. `runner` is `None` when no Tailscale CLI was found.
+/// The row's state. `runner` is the reason there is no usable CLI. Both
+/// reasons show the one "not installed" card: an install Canopy will not run
+/// (wrong owner, or writable by others) is, to Canopy, no install.
 pub fn view(
-    runner: Option<Arc<dyn CliRunner>>,
+    runner: Result<Arc<dyn CliRunner>, InstallProblem>,
     allow: &Result<Allowlist, String>,
     can_open_app: bool,
 ) -> TailscaleView {
@@ -180,20 +186,15 @@ pub fn view(
         machines: Vec::new(),
         allow_error: allow.as_ref().err().cloned(),
     };
-    let Some(runner) = runner else { return v };
-    let probe = Tailscale::new(runner.clone()).probe();
+    let runner = match runner {
+        Ok(r) => r,
+        Err(InstallProblem::NotInstalled | InstallProblem::Untrusted) => return v,
+    };
+    let probe = Tailscale::new(runner).probe();
     v.kind = kind_of(&probe.state);
+    v.version = probe.version.map(version_string);
     match &probe.state {
-        TailnetState::TooOld(found) => {
-            v.version = parse_version(found).map(version_string);
-        }
         TailnetState::Running => {
-            // The probe checked the version but does not return it.
-            v.version = runner
-                .run(&CliCommand::Version)
-                .ok()
-                .and_then(|o| parse_version(&o.stdout))
-                .map(version_string);
             let ids = allow.as_ref().map(allowed_ids).unwrap_or_default();
             if let Some(status) = &probe.status {
                 v.this_machine = status
@@ -298,8 +299,8 @@ fn allow_path() -> Result<PathBuf, String> {
     Ok(PathBuf::from(home).join(".canopy").join(ALLOW_FILE))
 }
 
-fn installed_runner() -> Option<Arc<dyn CliRunner>> {
-    ProcessRunner::installed().map(|r| Arc::new(r) as Arc<dyn CliRunner>)
+fn installed_runner() -> Result<Arc<dyn CliRunner>, InstallProblem> {
+    ProcessRunner::locate().map(|r| Arc::new(r) as Arc<dyn CliRunner>)
 }
 
 fn can_open_app() -> bool {
@@ -320,7 +321,7 @@ pub async fn tailscale_status() -> Result<TailscaleView, String> {
 pub async fn tailscale_allow_set(stable_id: String, allowed: bool) -> Result<(), String> {
     tauri::async_runtime::spawn_blocking(move || {
         let path = allow_path()?;
-        let ts = installed_runner().map(Tailscale::new);
+        let ts = installed_runner().ok().map(Tailscale::new);
         set_allowed_at(&path, ts.as_ref(), &stable_id, allowed)
     })
     .await
@@ -389,49 +390,13 @@ fn open_app() -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use canopy_term_net::tailscale::{CliError, CliOutput};
-    use std::collections::HashMap;
-
-    /// A scripted CLI. Invented names and addresses only.
-    struct Fake {
-        version: Result<String, CliError>,
-        status: Result<String, CliError>,
-        whois: HashMap<IpAddr, String>,
-        calls: Mutex<Vec<CliCommand>>,
-    }
-
-    impl Fake {
-        fn new(status: &str) -> Self {
-            Self {
-                version: Ok("1.78.1\n  tailscale commit: fake\n".to_string()),
-                status: Ok(status.to_string()),
-                whois: HashMap::new(),
-                calls: Mutex::new(Vec::new()),
-            }
-        }
-    }
-
-    impl CliRunner for Fake {
-        fn run(&self, cmd: &CliCommand) -> Result<CliOutput, CliError> {
-            self.calls.lock().unwrap().push(cmd.clone());
-            #[allow(unreachable_patterns)]
-            let r = match cmd {
-                CliCommand::Version => self.version.clone(),
-                CliCommand::StatusJson => self.status.clone(),
-                CliCommand::WhoisJson(ip) => self.whois.get(ip).cloned().ok_or(CliError::TimedOut),
-                _ => Err(CliError::TimedOut),
-            };
-            r.map(|stdout| CliOutput {
-                stdout,
-                success: true,
-            })
-        }
-    }
+    use canopy_term_net::tailscale::fake::{whois_tagged, whois_user, FakeRunner};
+    use canopy_term_net::tailscale::{CliCommand, CliError};
 
     const RUNNING: &str = r#"{"Version":"1.78.1-tfake","BackendState":"Running","TailscaleIPs":["100.64.0.1"],
         "Self":{"ID":"nSELFA1CNTRL","DNSName":"node-a.example.ts.net.","TailscaleIPs":["100.64.0.1","fd7a:115c:a1e0::1"],"Online":true},
         "Peer":{
-          "k1":{"ID":"nLAPTOP1CNTRL","DNSName":"laptop.example.ts.net.","TailscaleIPs":["fd7a:115c:a1e0::2","100.64.0.2"],"Online":true},
+          "k1":{"ID":"nLAPTOP1CNTRL","HostName":"laptop-1","DNSName":"laptop.example.ts.net.","TailscaleIPs":["fd7a:115c:a1e0::2","100.64.0.2"],"Online":true},
           "k2":{"ID":"nBUILD1CNTRL","DNSName":"build-box.example.ts.net.","TailscaleIPs":["100.64.0.3"],"Online":true},
           "k3":{"ID":"nNODEB1CNTRL","DNSName":"node-b.example.ts.net.","TailscaleIPs":["100.64.0.4"],"Online":false},
           "k4":{"DNSName":"old-box.example.ts.net.","TailscaleIPs":["100.64.0.5"],"Online":false}
@@ -444,21 +409,7 @@ mod tests {
         s.parse().unwrap()
     }
 
-    fn whois_user(stable: &str, user: i64) -> String {
-        format!(
-            r#"{{"Node":{{"ID":11,"StableID":"{stable}","Name":"laptop.example.ts.net.",
-            "Addresses":["100.64.0.2/32","fd7a:115c:a1e0::2/128"]}},
-            "UserProfile":{{"ID":{user},"LoginName":"user-b@example.com"}}}}"#
-        )
-    }
-
-    fn whois_tagged(stable: &str) -> String {
-        format!(
-            r#"{{"Node":{{"ID":12,"StableID":"{stable}","Name":"build-box.example.ts.net.","Tags":["tag:ci"],
-            "Addresses":["100.64.0.3/32"]}},
-            "UserProfile":{{"ID":99,"LoginName":"tagged-devices"}}}}"#
-        )
-    }
+    type Fake = FakeRunner;
 
     fn shared(f: Fake) -> (Arc<Fake>, Arc<dyn CliRunner>) {
         let fake = Arc::new(f);
@@ -468,7 +419,7 @@ mod tests {
 
     fn view_of(f: Fake) -> TailscaleView {
         let (_, r) = shared(f);
-        view(Some(r), &Ok(Allowlist::new()), true)
+        view(Ok(r), &Ok(Allowlist::new()), true)
     }
 
     fn with_backend(state: &str) -> Kind {
@@ -489,12 +440,24 @@ mod tests {
 
     #[test]
     fn not_installed_when_no_cli_is_found() {
-        let v = view(None, &Ok(Allowlist::new()), true);
+        let v = view(
+            Err(InstallProblem::NotInstalled),
+            &Ok(Allowlist::new()),
+            true,
+        );
         assert_eq!(v.kind, Kind::NotInstalled);
         assert!(v.this_machine.is_none() && v.machines.is_empty());
-        let mut f = Fake::new("");
-        f.version = Err(CliError::NotInstalled);
+        let f = Fake::new("");
+        *f.version.lock().unwrap() = Err(CliError::NotInstalled);
         assert_eq!(view_of(f).kind, Kind::NotInstalled);
+    }
+
+    #[test]
+    fn an_untrusted_install_shows_the_not_installed_card_and_never_runs() {
+        let v = view(Err(InstallProblem::Untrusted), &Ok(Allowlist::new()), true);
+        assert_eq!(v.kind, Kind::NotInstalled);
+        assert_eq!(v.version, None);
+        assert!(v.this_machine.is_none() && v.machines.is_empty());
     }
 
     #[test]
@@ -503,8 +466,8 @@ mod tests {
             view_of(Fake::new("failed to connect to local tailscaled")).kind,
             Kind::Off
         );
-        let mut f = Fake::new("");
-        f.status = Err(CliError::TimedOut);
+        let f = Fake::new("");
+        *f.status.lock().unwrap() = Err(CliError::TimedOut);
         assert_eq!(view_of(f).kind, Kind::Off);
         assert_eq!(with_backend("Stopped"), Kind::Off);
     }
@@ -527,16 +490,16 @@ mod tests {
 
     #[test]
     fn too_old_reports_the_found_and_minimum_versions() {
-        let mut f = Fake::new(RUNNING);
-        f.version = Ok("1.40.2".to_string());
+        let f = Fake::new(RUNNING);
+        *f.version.lock().unwrap() = Ok("1.40.2".to_string());
         let v = view_of(f);
         assert_eq!(v.kind, Kind::TooOld);
         assert_eq!(v.version.as_deref(), Some("1.40.2"));
         assert_eq!(v.min_version, version_string(MIN_VERSION));
         assert!(v.machines.is_empty());
 
-        let mut f = Fake::new(RUNNING);
-        f.version = Ok("garbage".to_string());
+        let f = Fake::new(RUNNING);
+        *f.version.lock().unwrap() = Ok("garbage".to_string());
         let v = view_of(f);
         assert_eq!(v.kind, Kind::TooOld);
         assert_eq!(v.version, None);
@@ -546,10 +509,20 @@ mod tests {
     fn running_lists_this_machine_and_every_peer_with_allowed_flags() {
         let list = Allowlist::new();
         list.add(&format!("tailnet:user/{LAPTOP}/42")).unwrap();
-        let (_, r) = shared(Fake::new(RUNNING));
-        let v = view(Some(r), &Ok(list), false);
+        let (fake, r) = shared(Fake::new(RUNNING));
+        let v = view(Ok(r), &Ok(list), false);
         assert_eq!(v.kind, Kind::Running);
         assert_eq!(v.version.as_deref(), Some("1.78.1"));
+        // One `version` call: the probe's own, not a second one for the row.
+        assert_eq!(
+            fake.calls
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|c| **c == CliCommand::Version)
+                .count(),
+            1
+        );
         assert!(!v.can_open_app);
 
         let me = v.this_machine.unwrap();
@@ -558,7 +531,9 @@ mod tests {
         assert_eq!(me.ip.as_deref(), Some("100.64.0.1"));
 
         let names: Vec<&str> = v.machines.iter().map(|m| m.name.as_str()).collect();
-        assert_eq!(names, ["build-box", "laptop", "node-b", "old-box"]);
+        // A host name wins over the MagicDNS label; without one the label is used.
+        assert_eq!(names, ["build-box", "laptop-1", "node-b", "old-box"]);
+        assert_eq!(v.machines[1].dns_name, "laptop.example.ts.net");
         let laptop = &v.machines[1];
         assert!(laptop.allowed && laptop.online);
         // IPv4 is preferred even when listed second.
@@ -573,7 +548,7 @@ mod tests {
     #[test]
     fn an_unreadable_allowlist_is_reported_and_nothing_shows_allowed() {
         let (_, r) = shared(Fake::new(RUNNING));
-        let v = view(Some(r), &Err("bad".to_string()), true);
+        let v = view(Ok(r), &Err("bad".to_string()), true);
         assert_eq!(v.kind, Kind::Running);
         assert_eq!(v.allow_error.as_deref(), Some("bad"));
         assert!(v.machines.iter().all(|m| !m.allowed));
@@ -615,8 +590,8 @@ mod tests {
     #[test]
     fn allowing_records_the_whois_identity_of_the_listed_address() {
         let path = temp_path("allow-user");
-        let mut f = Fake::new(RUNNING);
-        f.whois.insert(ip("100.64.0.2"), whois_user(LAPTOP, 42));
+        let f = Fake::new(RUNNING);
+        f.set_whois(ip("100.64.0.2"), Ok(whois_user(LAPTOP, 42)));
         let (fake, r) = shared(f);
         let ts = Tailscale::new(r);
         set_allowed_at(&path, Some(&ts), LAPTOP, true).unwrap();
@@ -642,8 +617,8 @@ mod tests {
     #[test]
     fn a_tagged_machine_gets_a_tagged_entry() {
         let path = temp_path("allow-tagged");
-        let mut f = Fake::new(RUNNING);
-        f.whois.insert(ip("100.64.0.3"), whois_tagged(BUILD));
+        let f = Fake::new(RUNNING);
+        f.set_whois(ip("100.64.0.3"), Ok(whois_tagged(BUILD, &["tag:ci"])));
         let (_, r) = shared(f);
         set_allowed_at(&path, Some(&Tailscale::new(r)), BUILD, true).unwrap();
         assert_eq!(
@@ -656,13 +631,13 @@ mod tests {
     #[test]
     fn a_subnet_router_is_refused_with_its_own_reason() {
         let path = temp_path("allow-router");
-        let mut f = Fake::new(RUNNING);
-        f.whois.insert(
+        let f = Fake::new(RUNNING);
+        f.set_whois(
             ip("100.64.0.3"),
-            format!(
+            Ok(format!(
                 r#"{{"Node":{{"StableID":"{BUILD}","Addresses":["100.64.0.3/32"],
                 "AllowedIPs":["100.64.0.3/32","192.168.50.0/24"]}},"UserProfile":{{"ID":7}}}}"#
-            ),
+            )),
         );
         let (_, r) = shared(f);
         let err = set_allowed_at(&path, Some(&Tailscale::new(r)), BUILD, true).unwrap_err();
@@ -676,8 +651,8 @@ mod tests {
         let old = Allowlist::new();
         old.add(&format!("tailnet:user/{LAPTOP}/7")).unwrap();
         save_allow(&path, &old).unwrap();
-        let mut f = Fake::new(RUNNING);
-        f.whois.insert(ip("100.64.0.2"), whois_user(LAPTOP, 42));
+        let f = Fake::new(RUNNING);
+        f.set_whois(ip("100.64.0.2"), Ok(whois_user(LAPTOP, 42)));
         let (_, r) = shared(f);
         set_allowed_at(&path, Some(&Tailscale::new(r)), LAPTOP, true).unwrap();
         assert_eq!(entries_at(&path), vec![format!("tailnet:user/{LAPTOP}/42")]);
@@ -694,9 +669,8 @@ mod tests {
         // whois cannot answer.
         assert!(set_allowed_at(&path, Some(&ts), LAPTOP, true).is_err());
         // whois names a different machine.
-        let mut f = Fake::new(RUNNING);
-        f.whois
-            .insert(ip("100.64.0.2"), whois_user("nOTHER1CNTRL", 42));
+        let f = Fake::new(RUNNING);
+        f.set_whois(ip("100.64.0.2"), Ok(whois_user("nOTHER1CNTRL", 42)));
         let (_, r) = shared(f);
         assert!(set_allowed_at(&path, Some(&Tailscale::new(r)), LAPTOP, true).is_err());
         // Tailscale stopped, or not installed.
