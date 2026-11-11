@@ -6,6 +6,7 @@ use canopy_pty_host::client::{Attached, HostClient};
 use canopy_pty_host::protocol::SpawnSpec;
 use canopy_pty_host::server::{HIGH_WATER, RING_CAP};
 use std::io::{Read, Write};
+use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
@@ -428,6 +429,8 @@ fn refusing_host(name: &str) -> (PathBuf, PathBuf, std::process::Child) {
     let dir = std::env::temp_dir().join(format!("cph{}{name}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
+    // The host refuses a socket directory that is not private.
+    std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).unwrap();
     let socket = dir.join("h.sock");
     let host = std::process::Command::new(host_exe())
         .arg("--socket")
@@ -1102,6 +1105,8 @@ fn a_host_started_from_an_install_directory_holds_its_lock_while_it_lives() {
     let _ = std::fs::remove_dir_all(&dir);
     let install = dir.join("bin").join("0.0.0-0123456789abcdef");
     std::fs::create_dir_all(&install).unwrap();
+    // The socket directory (`dir`) must be private for the host to use it.
+    std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).unwrap();
     let exe = install.join("canopy-pty-host");
     std::fs::copy(host_exe(), &exe).unwrap();
     let lock_path = install.join(canopy_pty_host::server::INSTALL_LOCK);
