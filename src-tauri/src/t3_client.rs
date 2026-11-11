@@ -33,6 +33,9 @@ pub const REQUESTED_SCOPES: &[&str] = &[
     "filesystem:write",
     "terminal:read",
     "terminal:operate",
+    // Thread launch (orchestration.launchThread). Granted only if the pairing
+    // link carries it; a machine paired before this lacks it.
+    "orchestration:operate",
 ];
 const GRANT_TYPE: &str = "urn:ietf:params:oauth:grant-type:token-exchange";
 const SUBJECT_TOKEN_TYPE: &str = "urn:t3:params:oauth:token-type:environment-bootstrap";
@@ -964,7 +967,7 @@ mod tests {
     fn t3_client_scope_is_space_separated_and_validated() {
         assert_eq!(
             encode_oauth_scope(REQUESTED_SCOPES).unwrap(),
-            "orchestration:read filesystem:read filesystem:write terminal:read terminal:operate"
+            "orchestration:read filesystem:read filesystem:write terminal:read terminal:operate orchestration:operate"
         );
         assert!(encode_oauth_scope(&[]).is_err());
         assert!(encode_oauth_scope(&["a", "a"]).is_err());

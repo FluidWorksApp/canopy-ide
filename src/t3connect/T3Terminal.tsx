@@ -13,8 +13,10 @@ import { CANOPY_TERMINAL_THREAD_ID, t3 } from "./methods";
 const MAX_WRITE = 65_536;
 const clamp = (value: number, max: number) => Math.min(max, Math.max(1, Math.floor(value)));
 
-export function T3Terminal({ rpc, cwd, terminalId, writable }: {
+export function T3Terminal({ rpc, cwd, terminalId, writable, startup }: {
   rpc: T3RpcClient; cwd: string; terminalId: string; writable: boolean;
+  /** Typed into the shell once it is running, e.g. an agent CLI's command. */
+  startup?: string;
 }) {
   const surface = useRef<HTMLDivElement>(null);
   const [status, setStatus] = useState("Opening…");
@@ -27,6 +29,7 @@ export function T3Terminal({ rpc, cwd, terminalId, writable }: {
     fit.fit();
     let disposed = false;
     let writes = Promise.resolve();
+    let started = false;
     const report = (error: unknown) => { if (!disposed) setStatus(error instanceof Error ? error.message : String(error)); };
     const geometry = coalesced<{ cols: number; rows: number }>(size =>
       t3.terminalResize(rpc, { threadId, terminalId, ...size }));
@@ -56,6 +59,10 @@ export function T3Terminal({ rpc, cwd, terminalId, writable }: {
             term.reset();
             term.write(event.snapshot.history);
             setStatus(event.snapshot.status === "running" ? "Connected" : `Terminal ${event.snapshot.status}`);
+            if (startup && writable && !started && event.type === "snapshot" && event.snapshot.status === "running") {
+              started = true;
+              writes = writes.then(() => t3.terminalWrite(rpc, { threadId, terminalId, data: `${startup}\r` })).catch(report);
+            }
             return;
           case "output":
             return new Promise<void>(resolve => term.write(event.data, resolve));
