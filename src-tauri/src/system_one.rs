@@ -121,8 +121,75 @@ impl Drop for Running {
     fn drop(&mut self) {
         let _ = self.child.kill();
         let _ = self.child.wait();
+        if let Ok(p) = pid_file() {
+            let _ = std::fs::remove_file(p);
+        }
     }
 }
+
+// -- no orphans --------------------------------------------------------------------
+// A killed app (SIGKILL, crash, `kill`) never runs Drop, so the server would
+// live on holding ~0.5 GB. Two guards: a watcher that ends the server when this
+// process is gone, and a pid file so the next launch ends any survivor.
+
+fn pid_file() -> Result<PathBuf, String> {
+    Ok(root()?.join("server.pid"))
+}
+
+/// True when `cmdline` is our llama-server (so a reused pid is never killed).
+fn is_our_server(cmdline: &str, bin: &Path) -> bool {
+    cmdline.contains(&*bin.to_string_lossy())
+}
+
+#[cfg(unix)]
+fn command_of(pid: u32) -> String {
+    Command::new("ps")
+        .args(["-p", &pid.to_string(), "-o", "command="])
+        .output()
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .unwrap_or_default()
+}
+
+/// End a server left by an earlier run of the app.
+#[cfg(unix)]
+fn reap_stale(bin: &Path) {
+    let Ok(file) = pid_file() else { return };
+    if let Some(pid) = std::fs::read_to_string(&file)
+        .ok()
+        .and_then(|t| t.trim().parse::<u32>().ok())
+    {
+        if is_our_server(&command_of(pid), bin) {
+            let _ = Command::new("kill").arg(pid.to_string()).status();
+        }
+    }
+    let _ = std::fs::remove_file(file);
+}
+
+/// Record the pid and watch this process: when it is gone, end the server.
+#[cfg(unix)]
+fn guard_child(child_pid: u32, bin: &Path) {
+    if let Ok(file) = pid_file() {
+        let _ = std::fs::write(file, child_pid.to_string());
+    }
+    let script = format!(
+        "while kill -0 {parent} 2>/dev/null; do sleep 2; done; \
+         ps -p {child} -o command= | grep -qF \"$BIN\" && kill {child}",
+        parent = std::process::id(),
+        child = child_pid,
+    );
+    let _ = Command::new("sh")
+        .args(["-c", &script])
+        .env("BIN", bin)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn();
+}
+
+#[cfg(not(unix))]
+fn reap_stale(_bin: &Path) {}
+#[cfg(not(unix))]
+fn guard_child(_child_pid: u32, _bin: &Path) {}
 
 #[derive(Default)]
 pub struct SystemOne {
@@ -348,6 +415,7 @@ fn random_key() -> Result<String, String> {
 fn spawn_server() -> Result<Running, String> {
     let bin = server_binary().ok_or("System One is not installed yet")?;
     let (port, key) = (free_port()?, random_key()?);
+    reap_stale(&bin);
     let mut cmd = Command::new(&bin);
     cmd.current_dir(bin.parent().unwrap_or(Path::new(".")))
         .arg("-m")
@@ -363,6 +431,7 @@ fn spawn_server() -> Result<Running, String> {
         .stdout(Stdio::null())
         .stderr(Stdio::null());
     let child = cmd.spawn().map_err(|e| format!("start System One: {e}"))?;
+    guard_child(child.id(), &bin);
     Ok(Running {
         child,
         port,
@@ -503,6 +572,17 @@ pub async fn system_one_decide(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn only_our_server_is_reaped() {
+        let bin = Path::new("/home/a/.canopy/system-one/llama-b1/llama-server");
+        assert!(is_our_server(
+            "/home/a/.canopy/system-one/llama-b1/llama-server -m x --port 1",
+            bin
+        ));
+        assert!(!is_our_server("/usr/bin/vim notes.txt", bin));
+        assert!(!is_our_server("", bin));
+    }
+
     use super::*;
 
     #[test]
