@@ -3,48 +3,76 @@
 //! open a session.
 //!
 //! - The listener binds ONLY the node's own tailnet addresses, as the CLI's
-//!   status reports them, and only while the backend is running. An unspecified
-//!   address (0.0.0.0, ::) is refused outright. If no tailnet interface exists
-//!   (a userspace-mode tailscaled has none) the bind fails with a typed error;
-//!   it never widens to another address.
+//!   status reports them, only while the backend is running, and only if each
+//!   address is inside Tailscale's ranges (100.64.0.0/10 or fd7a:115c:a1e0::/48):
+//!   the status is not trusted enough to pick an arbitrary address. If no
+//!   tailnet interface exists (a userspace-mode tailscaled has none) the bind
+//!   fails with a typed error; it never widens to another address.
 //! - A peer's identity comes from `whois --json <its address>`, keyed on the
-//!   stable node id and user id (or tags), never on names.
+//!   stable node id and user id (or tags), never on names. It identifies a
+//!   MACHINE, not a person. A node that routes more than its own addresses
+//!   (subnet router, exit node) is refused, as is an address routed through a
+//!   node rather than owned by it.
 //! - Tailnet membership is NOT authorisation: the identity must also be in the
 //!   [`Allowlist`]. The decision takes only the peer's socket address, so no
 //!   byte of the stream is read before it, by construction. A whois failure,
 //!   timeout or empty answer is a refusal (fail closed).
+//! - Whois runs on a small worker pool fed by a bounded queue, so one slow
+//!   lookup does not stall the listener; a full queue drops the connection.
+//!   Answers are cached briefly (successes [`WHOIS_TTL`], failures
+//!   [`NEGATIVE_TTL`]), and failed lookups plus refusals are rate limited per
+//!   source address (admitted peers never count).
 //! - Dialing resolves names from the status peer list (never system DNS), only
 //!   to nodes the tailnet lists, and checks the allowlist before connecting.
+//! - The CLI version is checked once, when the transport is created.
 //!
 //! No stream preface: a TCP connection is visible to the acceptor on connect,
 //! so `accept` returns when a peer connects. The session protocol's hello and
 //! spawn key travel on the stream unchanged.
 
 use crate::allowlist::Allowlist;
-use crate::tailscale::{CliRunner, NodeInfo, TailnetState, TailnetStatus, Tailscale};
+use crate::tailscale::{
+    CliRunner, NodeInfo, TailnetIdentity, TailnetState, TailnetStatus, Tailscale,
+};
 use crate::{Connection, PeerIdentity, Refusal, Transport, TIMEOUT_KIND};
 use std::collections::HashMap;
 use std::io::{self, Read, Write};
 use std::net::{IpAddr, Shutdown, SocketAddr, TcpListener, TcpStream};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-/// How long an address's whois answer is reused. Only successes are cached,
-/// and the allowlist is checked afresh every time, so removing an entry takes
-/// effect at once.
-pub const WHOIS_TTL: Duration = Duration::from_secs(30);
+/// How long a successful whois answer is reused. Short, because a cached
+/// identity outlives a retag or a node handing its address to another; the
+/// cost of shortening it is one CLI spawn per expiry on a busy peer. The
+/// allowlist itself is consulted on every use, so removing an entry is
+/// immediate regardless.
+pub const WHOIS_TTL: Duration = Duration::from_secs(10);
+/// How long a failed whois is remembered, so a stranger cannot make every
+/// connection spawn the CLI.
+pub const NEGATIVE_TTL: Duration = Duration::from_secs(5);
+/// Failed lookups plus refusals allowed per source address per [`RATE_WINDOW`].
+pub const RATE_LIMIT: u32 = 20;
+pub const RATE_WINDOW: Duration = Duration::from_secs(60);
 const DIAL_TIMEOUT: Duration = Duration::from_secs(10);
 const CACHE_LIMIT: usize = 256;
+const WORKERS: usize = 4;
+const QUEUE: usize = 64;
+
+pub type Clock = Arc<dyn Fn() -> Instant + Send + Sync>;
 
 /// Why a listener could not be bound.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BindError {
-    /// Tailscale is not in the running state.
+    /// Tailscale is not running, too old, or not installed.
     NotRunning(TailnetState),
     /// The status lists no address for this node.
     NoTailnetAddress,
     /// An address that must never be bound (unspecified or multicast).
     UnsafeAddress(IpAddr),
+    /// An address outside Tailscale's ranges.
+    NotTailnetAddress(IpAddr),
     /// None of the node's tailnet addresses could be bound: no tailnet
     /// interface, as with a userspace-mode daemon. Not widened.
     NoTailnetInterface(io::ErrorKind),
@@ -53,9 +81,10 @@ pub enum BindError {
 impl std::fmt::Display for BindError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            BindError::NotRunning(s) => write!(f, "tailscale is not running ({s:?})"),
+            BindError::NotRunning(s) => write!(f, "tailscale is not usable ({s:?})"),
             BindError::NoTailnetAddress => write!(f, "no tailnet address for this node"),
             BindError::UnsafeAddress(a) => write!(f, "refusing to bind {a}"),
+            BindError::NotTailnetAddress(a) => write!(f, "{a} is not a tailnet address"),
             BindError::NoTailnetInterface(k) => {
                 write!(f, "no tailnet interface to bind ({k:?})")
             }
@@ -65,112 +94,120 @@ impl std::fmt::Display for BindError {
 
 impl std::error::Error for BindError {}
 
-pub struct TailnetTcp {
-    ts: Tailscale,
-    allow: Allowlist,
-    listeners: Vec<TcpListener>,
-    cache: Mutex<HashMap<IpAddr, (crate::tailscale::TailnetIdentity, Instant)>>,
-    clock: Arc<dyn Fn() -> Instant + Send + Sync>,
+/// Inside Tailscale's address ranges: 100.64.0.0/10 or fd7a:115c:a1e0::/48.
+pub fn is_tailnet_addr(ip: IpAddr) -> bool {
+    match ip.to_canonical() {
+        IpAddr::V4(v4) => {
+            let o = v4.octets();
+            o[0] == 100 && (o[1] & 0xC0) == 64
+        }
+        IpAddr::V6(v6) => {
+            let s = v6.segments();
+            s[0] == 0xfd7a && s[1] == 0x115c && s[2] == 0xa1e0
+        }
+    }
 }
 
-impl TailnetTcp {
-    /// A dial-only transport.
-    pub fn client(runner: Arc<dyn CliRunner>, allow: Allowlist) -> Self {
-        Self {
-            ts: Tailscale::new(runner),
-            allow,
-            listeners: Vec::new(),
-            cache: Mutex::new(HashMap::new()),
-            clock: Arc::new(Instant::now),
+#[derive(Default)]
+struct GateState {
+    positive: HashMap<IpAddr, (TailnetIdentity, Instant)>,
+    negative: HashMap<IpAddr, Instant>,
+    /// Count and window start per source address.
+    rate: HashMap<IpAddr, (u32, Instant)>,
+}
+
+fn trim<V>(map: &mut HashMap<IpAddr, V>, keep: impl Fn(&V) -> bool) {
+    if map.len() >= CACHE_LIMIT {
+        map.retain(|_, v| keep(v));
+        if map.len() >= CACHE_LIMIT {
+            map.clear();
         }
     }
+}
 
-    /// Listen on the node's tailnet addresses at `port`. With port 0 each
-    /// address gets its own port (see [`local_addrs`](Self::local_addrs)).
-    pub fn bind(
-        runner: Arc<dyn CliRunner>,
-        allow: Allowlist,
-        port: u16,
-    ) -> Result<Self, BindError> {
-        let mut t = Self::client(runner, allow);
-        let status = t.ts.running_status().map_err(BindError::NotRunning)?;
-        let addrs = status.self_node.map(|n| n.addrs).unwrap_or_default();
-        if addrs.is_empty() {
-            return Err(BindError::NoTailnetAddress);
+/// The authorisation decision and its caches, shared with the worker threads.
+struct Gate {
+    ts: Tailscale,
+    allow: Allowlist,
+    state: Mutex<GateState>,
+    clock: Clock,
+}
+
+impl Gate {
+    /// Count a lookup or refusal for `ip`; `false` once it is over the limit.
+    fn charge(st: &mut GateState, ip: IpAddr, now: Instant) -> bool {
+        trim(&mut st.rate, |(_, start)| now < *start + RATE_WINDOW);
+        let e = st.rate.entry(ip).or_insert((0, now));
+        if now >= e.1 + RATE_WINDOW {
+            *e = (0, now);
         }
-        if let Some(bad) = addrs
-            .iter()
-            .find(|a| a.is_unspecified() || a.is_multicast())
-        {
-            return Err(BindError::UnsafeAddress(*bad));
-        }
-        let mut last = io::ErrorKind::Other;
-        for a in addrs {
-            match TcpListener::bind(SocketAddr::new(a, port)) {
-                Ok(l) => match l.set_nonblocking(true) {
-                    Ok(()) => t.listeners.push(l),
-                    Err(e) => last = e.kind(),
-                },
-                Err(e) => last = e.kind(),
-            }
-        }
-        if t.listeners.is_empty() {
-            return Err(BindError::NoTailnetInterface(last));
-        }
-        Ok(t)
+        e.0 = e.0.saturating_add(1);
+        e.0 <= RATE_LIMIT
     }
 
-    /// Replace the clock (tests).
-    pub fn with_clock(mut self, clock: Arc<dyn Fn() -> Instant + Send + Sync>) -> Self {
-        self.clock = clock;
-        self
+    fn over_limit(st: &GateState, ip: IpAddr, now: Instant) -> bool {
+        st.rate
+            .get(&ip)
+            .is_some_and(|(n, start)| now < *start + RATE_WINDOW && *n >= RATE_LIMIT)
     }
 
-    /// The addresses actually bound.
-    pub fn local_addrs(&self) -> Vec<SocketAddr> {
-        self.listeners
-            .iter()
-            .filter_map(|l| l.local_addr().ok())
-            .collect()
-    }
-
-    pub fn allowlist(&self) -> &Allowlist {
-        &self.allow
-    }
-
-    /// The authorisation decision, from the peer's address alone: its identity
-    /// entry if the tailnet vouches for it AND the allowlist holds it, else
-    /// `None`. Any failure is `None`.
-    pub(crate) fn authorize(&self, ip: IpAddr) -> Option<String> {
+    /// From the peer's address alone: its identity entry if the tailnet vouches
+    /// for it AND the allowlist holds it, else `None`. Any failure, including
+    /// a poisoned lock, is `None`.
+    fn authorize(&self, ip: IpAddr) -> Option<String> {
         let ip = ip.to_canonical();
         let now = (self.clock)();
         let cached = {
-            // A poisoned cache refuses (fail closed) rather than panicking on
-            // the accept path.
-            let cache = self.cache.lock().ok()?;
-            cache
-                .get(&ip)
-                .filter(|(_, expires)| now < *expires)
-                .map(|(id, _)| id.clone())
+            let mut st = self.state.lock().ok()?;
+            let hit = st.positive.get(&ip).map(|(id, exp)| (id.clone(), *exp));
+            match hit {
+                Some((id, exp)) if now < exp => Some(id),
+                _ => {
+                    st.positive.remove(&ip);
+                    if st.negative.get(&ip).is_some_and(|exp| now < *exp) {
+                        Gate::charge(&mut st, ip, now);
+                        return None;
+                    }
+                    if Gate::over_limit(&st, ip, now) {
+                        return None;
+                    }
+                    // The lookup itself is not charged (an allowlisted peer's
+                    // periodic lookups must never use up its budget); its
+                    // failure is.
+                    None
+                }
+            }
         };
         let identity = match cached {
             Some(id) => id,
             None => {
-                // Failures are not cached: a later success must be seen.
-                let id = self.ts.whois(ip).ok()?;
-                let mut cache = self.cache.lock().ok()?;
-                if cache.len() >= CACHE_LIMIT {
-                    cache.retain(|_, (_, expires)| now < *expires);
-                    if cache.len() >= CACHE_LIMIT {
-                        cache.clear();
+                // The lock is not held while the CLI runs.
+                let looked_up = self.ts.whois(ip);
+                let mut st = self.state.lock().ok()?;
+                match looked_up {
+                    Ok(id) => {
+                        trim(&mut st.positive, |(_, exp)| now < *exp);
+                        st.positive.insert(ip, (id.clone(), now + WHOIS_TTL));
+                        id
+                    }
+                    Err(_) => {
+                        Gate::charge(&mut st, ip, now);
+                        trim(&mut st.negative, |exp| now < *exp);
+                        st.negative.insert(ip, now + NEGATIVE_TTL);
+                        return None;
                     }
                 }
-                cache.insert(ip, (id.clone(), now + WHOIS_TTL));
-                id
             }
         };
         let entry = identity.allowlist_entry();
-        self.allow.contains(&entry).then_some(entry)
+        if self.allow.contains(&entry) {
+            Some(entry)
+        } else {
+            if let Ok(mut st) = self.state.lock() {
+                Gate::charge(&mut st, ip, now);
+            }
+            None
+        }
     }
 
     fn admit(&self, stream: TcpStream, peer: SocketAddr) -> Result<Box<dyn Connection>, Refusal> {
@@ -187,6 +224,177 @@ impl TailnetTcp {
             stream,
             peer: PeerIdentity::Device(entry),
         }))
+    }
+}
+
+type Admitted = Result<Box<dyn Connection>, Refusal>;
+
+pub struct TailnetTcp {
+    gate: Arc<Gate>,
+    /// The CLI version verdict, taken once at creation.
+    version: Result<(), TailnetState>,
+    local: Vec<SocketAddr>,
+    results: Option<Mutex<mpsc::Receiver<Admitted>>>,
+    stop: Arc<AtomicBool>,
+}
+
+impl Drop for TailnetTcp {
+    /// Stops the listener thread; the workers follow when its queue closes.
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::SeqCst);
+    }
+}
+
+impl TailnetTcp {
+    /// A dial-only transport.
+    pub fn client(runner: Arc<dyn CliRunner>, allow: Allowlist) -> Self {
+        Self::client_with_clock(runner, allow, Arc::new(Instant::now))
+    }
+
+    /// A dial-only transport with an injected clock (tests).
+    pub fn client_with_clock(runner: Arc<dyn CliRunner>, allow: Allowlist, clock: Clock) -> Self {
+        let ts = Tailscale::new(runner);
+        let version = ts.check_version();
+        Self {
+            gate: Arc::new(Gate {
+                ts,
+                allow,
+                state: Mutex::new(GateState::default()),
+                clock,
+            }),
+            version,
+            local: Vec::new(),
+            results: None,
+            stop: Arc::new(AtomicBool::new(false)),
+        }
+    }
+
+    /// Listen on the node's tailnet addresses at `port`. With port 0 each
+    /// address gets its own port (see [`local_addrs`](Self::local_addrs)).
+    pub fn bind(
+        runner: Arc<dyn CliRunner>,
+        allow: Allowlist,
+        port: u16,
+    ) -> Result<Self, BindError> {
+        Self::bind_inner(runner, allow, port, Arc::new(Instant::now), false)
+    }
+
+    /// Test only: also accepts loopback, so CI can run a real listener.
+    #[cfg(test)]
+    pub(crate) fn bind_for_test(
+        runner: Arc<dyn CliRunner>,
+        allow: Allowlist,
+        port: u16,
+    ) -> Result<Self, BindError> {
+        Self::bind_inner(runner, allow, port, Arc::new(Instant::now), true)
+    }
+
+    fn bind_inner(
+        runner: Arc<dyn CliRunner>,
+        allow: Allowlist,
+        port: u16,
+        clock: Clock,
+        allow_loopback: bool,
+    ) -> Result<Self, BindError> {
+        let mut t = Self::client_with_clock(runner, allow, clock);
+        let probe = t.gate.ts.probe();
+        if probe.state != TailnetState::Running {
+            return Err(BindError::NotRunning(probe.state));
+        }
+        let addrs: Vec<IpAddr> = probe
+            .status
+            .and_then(|s| s.self_node)
+            .map(|n| n.addrs)
+            .unwrap_or_default()
+            .into_iter()
+            .map(|a| a.to_canonical())
+            .collect();
+        if addrs.is_empty() {
+            return Err(BindError::NoTailnetAddress);
+        }
+        for a in &addrs {
+            if a.is_unspecified() || a.is_multicast() {
+                return Err(BindError::UnsafeAddress(*a));
+            }
+            if !(is_tailnet_addr(*a) || (allow_loopback && a.is_loopback())) {
+                return Err(BindError::NotTailnetAddress(*a));
+            }
+        }
+        let mut listeners = Vec::new();
+        let mut last = io::ErrorKind::Other;
+        for a in addrs {
+            match TcpListener::bind(SocketAddr::new(a, port)) {
+                Ok(l) => match l.set_nonblocking(true) {
+                    Ok(()) => listeners.push(l),
+                    Err(e) => last = e.kind(),
+                },
+                Err(e) => last = e.kind(),
+            }
+        }
+        if listeners.is_empty() {
+            return Err(BindError::NoTailnetInterface(last));
+        }
+        t.local = listeners
+            .iter()
+            .filter_map(|l| l.local_addr().ok())
+            .collect();
+        t.start(listeners);
+        Ok(t)
+    }
+
+    /// One listener thread feeding a bounded queue, and a few workers that run
+    /// the (possibly slow) authorisation and post results for `accept`.
+    fn start(&mut self, listeners: Vec<TcpListener>) {
+        let (job_tx, job_rx) = mpsc::sync_channel::<(TcpStream, SocketAddr)>(QUEUE);
+        let (res_tx, res_rx) = mpsc::channel::<Admitted>();
+        let job_rx = Arc::new(Mutex::new(job_rx));
+        for _ in 0..WORKERS {
+            let job_rx = job_rx.clone();
+            let res_tx = res_tx.clone();
+            let gate = self.gate.clone();
+            std::thread::spawn(move || loop {
+                let job = match job_rx.lock() {
+                    Ok(rx) => rx.recv(),
+                    Err(_) => break,
+                };
+                let Ok((stream, peer)) = job else { break };
+                if res_tx.send(gate.admit(stream, peer)).is_err() {
+                    break;
+                }
+            });
+        }
+        let stop = self.stop.clone();
+        std::thread::spawn(move || {
+            while !stop.load(Ordering::SeqCst) {
+                let mut busy = false;
+                for l in &listeners {
+                    if let Ok((stream, peer)) = l.accept() {
+                        busy = true;
+                        // A full queue drops the connection unread.
+                        let _ = job_tx.try_send((stream, peer));
+                    }
+                }
+                if !busy {
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+            }
+            // Dropping job_tx ends the workers.
+        });
+        self.results = Some(Mutex::new(res_rx));
+    }
+
+    /// The addresses actually bound.
+    pub fn local_addrs(&self) -> Vec<SocketAddr> {
+        self.local.clone()
+    }
+
+    pub fn allowlist(&self) -> &Allowlist {
+        &self.gate.allow
+    }
+
+    #[cfg(test)]
+    pub(crate) fn authorize(&self, ip: IpAddr) -> Option<String> {
+        self.gate.authorize(ip)
     }
 }
 
@@ -264,8 +472,14 @@ impl Transport for TailnetTcp {
     /// short name or the full MagicDNS name. Only nodes in the tailnet's own
     /// status are dialed, and only if the allowlist holds their identity.
     fn connect(&self, address: &str) -> io::Result<Box<dyn Connection>> {
+        if let Err(s) = &self.version {
+            return Err(io::Error::new(
+                io::ErrorKind::NotConnected,
+                format!("tailscale is not usable: {s:?}"),
+            ));
+        }
         let (host, port) = split_host_port(address)?;
-        let status = self.ts.running_status().map_err(|s| {
+        let status = self.gate.ts.running_status().map_err(|s| {
             io::Error::new(
                 io::ErrorKind::NotConnected,
                 format!("tailnet not running: {s:?}"),
@@ -274,7 +488,7 @@ impl Transport for TailnetTcp {
         let mut last: Option<io::Error> = None;
         for ip in resolve(&status, &host)? {
             // Identity and allowlist first: an unapproved node is never dialed.
-            let Some(entry) = self.authorize(ip) else {
+            let Some(entry) = self.gate.authorize(ip) else {
                 last = Some(io::Error::new(
                     io::ErrorKind::PermissionDenied,
                     "peer is not allowlisted",
@@ -295,32 +509,20 @@ impl Transport for TailnetTcp {
         Err(last.unwrap_or_else(|| io::Error::new(io::ErrorKind::NotFound, "no address")))
     }
 
-    /// Blocks until an allowlisted peer connects. Unknown peers yield
-    /// `Ok(Err(Refusal::UnknownPeer))` with nothing read from them.
+    /// Blocks until a peer has been decided. An unknown peer yields
+    /// `Ok(Err(Refusal::UnknownPeer))` with nothing read from it.
     fn accept(&self) -> io::Result<Result<Box<dyn Connection>, Refusal>> {
-        if self.listeners.is_empty() {
+        let Some(results) = &self.results else {
             return Err(io::Error::new(
                 io::ErrorKind::Unsupported,
                 "dial-only transport cannot accept",
             ));
-        }
-        loop {
-            for l in &self.listeners {
-                match l.accept() {
-                    Ok((stream, peer)) => return Ok(self.admit(stream, peer)),
-                    Err(e)
-                        if matches!(
-                            e.kind(),
-                            io::ErrorKind::WouldBlock
-                                | io::ErrorKind::Interrupted
-                                | io::ErrorKind::ConnectionAborted
-                                | io::ErrorKind::ConnectionReset
-                        ) => {}
-                    Err(e) => return Err(e),
-                }
-            }
-            std::thread::sleep(Duration::from_millis(10));
-        }
+        };
+        let rx = results
+            .lock()
+            .map_err(|_| io::Error::other("transport state poisoned"))?;
+        rx.recv()
+            .map_err(|_| io::Error::new(io::ErrorKind::BrokenPipe, "transport closed"))
     }
 }
 
@@ -448,7 +650,7 @@ mod tests {
         );
         let r = Arc::new(FakeRunner::new(&status_running(&["127.0.0.1", "::"], &[])));
         assert_eq!(
-            TailnetTcp::bind(r, allow(&[]), 0).err().unwrap(),
+            TailnetTcp::bind_for_test(r, allow(&[]), 0).err().unwrap(),
             BindError::UnsafeAddress("::".parse().unwrap())
         );
         let r = Arc::new(FakeRunner::new(&status_running(&[], &[])));
@@ -460,16 +662,19 @@ mod tests {
 
     #[test]
     fn bind_without_a_tailnet_interface_fails_and_never_widens() {
-        // 192.0.2.1 (TEST-NET-1) is on no interface here, like the tailnet
-        // address of a userspace-mode daemon.
-        let r = Arc::new(FakeRunner::new(&status_running(&["192.0.2.1"], &[])));
+        // In-range tailnet addresses that are on no interface here, like the
+        // tailnet addresses of a userspace-mode daemon.
+        let r = Arc::new(FakeRunner::new(&status_running(
+            &["100.64.0.77", "fd7a:115c:a1e0::77"],
+            &[],
+        )));
         let e = TailnetTcp::bind(r, allow(&[]), 0).err().unwrap();
         assert!(matches!(e, BindError::NoTailnetInterface(_)), "{e:?}");
     }
 
     #[test]
     fn listener_binds_only_the_reported_address() {
-        let t = TailnetTcp::bind(server_runner(), allow(&[]), 0).unwrap();
+        let t = TailnetTcp::bind_for_test(server_runner(), allow(&[]), 0).unwrap();
         let addrs = t.local_addrs();
         assert_eq!(addrs.len(), 1);
         assert_eq!(addrs[0].ip(), loopback());
@@ -479,7 +684,8 @@ mod tests {
     #[test]
     fn allowlisted_peer_connects_and_echoes() {
         watchdog(60, || {
-            let server = Arc::new(TailnetTcp::bind(server_runner(), allow(&[ENTRY]), 0).unwrap());
+            let server =
+                Arc::new(TailnetTcp::bind_for_test(server_runner(), allow(&[ENTRY]), 0).unwrap());
             let port = port_of(&server);
             let s = server.clone();
             let t = std::thread::spawn(move || {
@@ -504,7 +710,8 @@ mod tests {
     #[test]
     fn short_name_full_name_and_address_reach_the_same_node() {
         watchdog(60, || {
-            let server = Arc::new(TailnetTcp::bind(server_runner(), allow(&[ENTRY]), 0).unwrap());
+            let server =
+                Arc::new(TailnetTcp::bind_for_test(server_runner(), allow(&[ENTRY]), 0).unwrap());
             let port = port_of(&server);
             let s = server.clone();
             let t = std::thread::spawn(move || {
@@ -531,7 +738,8 @@ mod tests {
         watchdog(60, || {
             // The server's allowlist is empty: the tailnet vouches for the
             // caller but the allowlist does not.
-            let server = Arc::new(TailnetTcp::bind(server_runner(), allow(&[]), 0).unwrap());
+            let server =
+                Arc::new(TailnetTcp::bind_for_test(server_runner(), allow(&[]), 0).unwrap());
             let port = port_of(&server);
             let s = server.clone();
             let t = std::thread::spawn(move || s.accept().unwrap());
@@ -554,7 +762,7 @@ mod tests {
             // Allowlisted identity exists, but this server's whois cannot answer.
             let r = Arc::new(FakeRunner::new(&status_running(&["127.0.0.1"], &[])));
             r.set_whois(loopback(), Err(crate::tailscale::CliError::TimedOut));
-            let server = Arc::new(TailnetTcp::bind(r, allow(&[ENTRY]), 0).unwrap());
+            let server = Arc::new(TailnetTcp::bind_for_test(r, allow(&[ENTRY]), 0).unwrap());
             let port = port_of(&server);
             let s = server.clone();
             let t = std::thread::spawn(move || s.accept().unwrap());
@@ -578,21 +786,34 @@ mod tests {
         );
     }
 
-    #[test]
-    fn whois_is_cached_briefly_failures_are_not_and_removal_is_immediate() {
-        let r = Arc::new(FakeRunner::new(&status_running(&["127.0.0.1"], &[])));
+    fn clocked(r: Arc<FakeRunner>, entries: &[&str]) -> (TailnetTcp, Arc<Mutex<Duration>>) {
         let base = Instant::now();
         let offset = Arc::new(Mutex::new(Duration::ZERO));
         let o = offset.clone();
-        let t = TailnetTcp::client(r.clone(), allow(&[ENTRY]))
-            .with_clock(Arc::new(move || base + *o.lock().unwrap()));
-        // A failure is not cached: the next attempt asks again and succeeds.
+        let t = TailnetTcp::client_with_clock(
+            r,
+            allow(entries),
+            Arc::new(move || base + *o.lock().unwrap()),
+        );
+        (t, offset)
+    }
+
+    #[test]
+    fn whois_answers_are_cached_briefly_and_removal_is_immediate() {
+        let r = Arc::new(FakeRunner::new(&status_running(&["127.0.0.1"], &[])));
+        let (t, offset) = clocked(r.clone(), &[ENTRY]);
+        // A failure is remembered for NEGATIVE_TTL: no second CLI spawn.
         r.set_whois(loopback(), Err(crate::tailscale::CliError::TimedOut));
         assert_eq!(t.authorize(loopback()), None);
         r.set_whois(loopback(), Ok(whois_user("nPEERB1CNTRL", 42)));
+        assert_eq!(t.authorize(loopback()), None);
+        assert_eq!(r.whois_calls(), 1);
+        // After it, the lookup runs again and succeeds.
+        let t1 = NEGATIVE_TTL + Duration::from_secs(1);
+        *offset.lock().unwrap() = t1;
         assert_eq!(t.authorize(loopback()).as_deref(), Some(ENTRY));
         assert_eq!(r.whois_calls(), 2);
-        // Within the TTL the answer is reused.
+        // Within WHOIS_TTL the answer is reused.
         assert_eq!(t.authorize(loopback()).as_deref(), Some(ENTRY));
         assert_eq!(r.whois_calls(), 2);
         // The allowlist is still consulted every time.
@@ -600,10 +821,107 @@ mod tests {
         assert_eq!(t.authorize(loopback()), None);
         assert_eq!(r.whois_calls(), 2);
         t.allowlist().add(ENTRY).unwrap();
-        // Past the TTL it asks again.
-        *offset.lock().unwrap() = WHOIS_TTL + Duration::from_secs(1);
+        // Past WHOIS_TTL it asks again.
+        *offset.lock().unwrap() = t1 + WHOIS_TTL + Duration::from_secs(1);
         assert_eq!(t.authorize(loopback()).as_deref(), Some(ENTRY));
         assert_eq!(r.whois_calls(), 3);
+    }
+
+    #[test]
+    fn lookups_and_refusals_are_rate_limited_per_source() {
+        // The tailnet vouches for the caller, the allowlist does not.
+        let r = Arc::new(FakeRunner::new(&status_running(&["127.0.0.1"], &[])));
+        r.set_whois(loopback(), Ok(whois_user("nPEERB1CNTRL", 42)));
+        let (t, offset) = clocked(r.clone(), &[]);
+        for _ in 0..(RATE_LIMIT * 2) {
+            assert_eq!(t.authorize(loopback()), None);
+        }
+        assert_eq!(r.whois_calls(), 1);
+        // The cached answer expires inside the window: over the limit, no new
+        // lookup is spawned.
+        *offset.lock().unwrap() = WHOIS_TTL + Duration::from_secs(1);
+        assert_eq!(t.authorize(loopback()), None);
+        assert_eq!(r.whois_calls(), 1);
+        // A new window allows lookups again.
+        *offset.lock().unwrap() = RATE_WINDOW + Duration::from_secs(1);
+        assert_eq!(t.authorize(loopback()), None);
+        assert_eq!(r.whois_calls(), 2);
+    }
+
+    #[test]
+    fn admitted_peers_never_count_against_the_limit() {
+        let r = Arc::new(FakeRunner::new(&status_running(&["127.0.0.1"], &[])));
+        r.set_whois(loopback(), Ok(whois_user("nPEERB1CNTRL", 42)));
+        let (t, offset) = clocked(r.clone(), &[ENTRY]);
+        for _ in 0..(RATE_LIMIT * 5) {
+            assert_eq!(t.authorize(loopback()).as_deref(), Some(ENTRY));
+        }
+        // Many control connections later, a lookup after expiry still runs.
+        *offset.lock().unwrap() = WHOIS_TTL + Duration::from_secs(1);
+        assert_eq!(t.authorize(loopback()).as_deref(), Some(ENTRY));
+        assert_eq!(r.whois_calls(), 2);
+        // Nothing was charged to this address.
+        assert!(!t.gate.state.lock().unwrap().rate.contains_key(&loopback()));
+    }
+
+    #[test]
+    fn subnet_routers_are_refused() {
+        let r = Arc::new(FakeRunner::new(&status_running(&["127.0.0.1"], &[])));
+        r.set_whois(
+            loopback(),
+            Ok(
+                r#"{"Node":{"StableID":"nRTR1CNTRL","Addresses":["127.0.0.1/32"],
+                "AllowedIPs":["127.0.0.1/32","192.168.1.0/24"]},"UserProfile":{"ID":42}}"#
+                    .to_string(),
+            ),
+        );
+        let t = TailnetTcp::client(r, allow(&["tailnet:user/nRTR1CNTRL/42"]));
+        assert_eq!(t.authorize(loopback()), None);
+    }
+
+    #[test]
+    fn public_bind_refuses_addresses_outside_tailnet_ranges() {
+        for addr in ["127.0.0.1", "192.0.2.1", "100.128.0.1", "fd7a:115c:a1e1::1"] {
+            let r = Arc::new(FakeRunner::new(&status_running(&[addr], &[])));
+            assert_eq!(
+                TailnetTcp::bind(r, allow(&[]), 0).err().unwrap(),
+                BindError::NotTailnetAddress(addr.parse().unwrap()),
+                "{addr}"
+            );
+        }
+    }
+
+    #[test]
+    fn tailnet_range_boundaries() {
+        let yes = |s: &str| is_tailnet_addr(s.parse().unwrap());
+        assert!(yes("100.64.0.0"));
+        assert!(yes("100.100.100.100"));
+        assert!(yes("100.127.255.255"));
+        assert!(!yes("100.63.255.255"));
+        assert!(!yes("100.128.0.0"));
+        assert!(!yes("10.0.0.1"));
+        assert!(yes("fd7a:115c:a1e0::"));
+        assert!(yes("fd7a:115c:a1e0:ffff:ffff:ffff:ffff:ffff"));
+        assert!(!yes("fd7a:115c:a1e1::"));
+        assert!(!yes("fd7a:115c:a1df:ffff::"));
+        assert!(yes("::ffff:100.64.0.1"));
+        assert!(!yes("::ffff:127.0.0.1"));
+    }
+
+    #[test]
+    fn a_too_old_cli_is_refused_at_creation() {
+        let r = FakeRunner::new(&status_running(&["100.64.0.1"], &["127.0.0.1"]));
+        *r.version.lock().unwrap() = Ok("1.40.0".into());
+        let r = Arc::new(r);
+        assert_eq!(
+            TailnetTcp::bind(r.clone(), allow(&[]), 0).err().unwrap(),
+            BindError::NotRunning(TailnetState::TooOld("1.40.0".into()))
+        );
+        let client = TailnetTcp::client(r, allow(&[ENTRY]));
+        assert_eq!(
+            client.connect("node-b:1").err().unwrap().kind(),
+            io::ErrorKind::NotConnected
+        );
     }
 
     #[test]
@@ -614,7 +932,7 @@ mod tests {
         assert_eq!(t.authorize(loopback()).as_deref(), Some(ENTRY));
         let t2 = t.clone();
         let _ = std::thread::spawn(move || {
-            let _guard = t2.cache.lock().unwrap();
+            let _guard = t2.gate.state.lock().unwrap();
             panic!("poison the cache");
         })
         .join();
@@ -688,7 +1006,8 @@ mod tests {
     #[test]
     fn read_deadline_times_out_a_silent_peer_and_loses_nothing() {
         watchdog(60, || {
-            let server = Arc::new(TailnetTcp::bind(server_runner(), allow(&[ENTRY]), 0).unwrap());
+            let server =
+                Arc::new(TailnetTcp::bind_for_test(server_runner(), allow(&[ENTRY]), 0).unwrap());
             let port = port_of(&server);
             let s = server.clone();
             let t = std::thread::spawn(move || {
