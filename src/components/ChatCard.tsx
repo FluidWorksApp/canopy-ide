@@ -20,7 +20,7 @@ import {LAYER_WORDS,OUTCOME_ICON,OUTCOME_LABEL,cardDraft,cardOf,cardUrl,foldLaye
 import {applyLayerApprovalAnswer} from '../lensApprovals';
 import {openSessionDoc} from '../sessionDoc/events';
 import {applyChatApproval} from '../plans/planStore';
-import {RELAY_JOIN_EVENT,RELAY_ACCEPT_EVENT,type RelayJoinDetail,type RelayAcceptDetail} from '../relayJoin';
+import {RELAY_JOIN_EVENT,RELAY_ACCEPT_EVENT,RELAY_STOP_EVENT,type RelayJoinDetail,type RelayAcceptDetail} from '../relayJoin';
 import './chatCard.css';
 
 /** Everything a card reaches outside itself, injectable for tests. */
@@ -346,7 +346,7 @@ export function relayOfferOpen(request:ChatMessage,messages:readonly ChatMessage
 /** Someone asked to connect to this desktop. Accepting shares the whole screen
  *  and answers with the link; nothing starts before the click. */
 function RelayRequest({message,userId,messages,name}:{message:ChatMessage;userId:string;messages:readonly ChatMessage[];name:(id:string)=>string}){
- const own=message.sender===userId,[sent,setSent]=useState(false);
+ const own=message.sender===userId,[sent,setSent]=useState(false),[stopped,setStopped]=useState(false);
  const answered=sent||messages.some(m=>m.sender===userId&&m.created>message.created&&cardOf(m)?.type==='relay-offer');
  const fresh=Date.now()-message.created<RELAY_OFFER_TTL_MS;
  return <div className="chat-card" data-type="relay-request">
@@ -354,7 +354,8 @@ function RelayRequest({message,userId,messages,name}:{message:ChatMessage;userId
   <div className="chat-card-title">{own?'You asked to connect remotely':`${name(message.sender)} wants to connect remotely`}</div>
   <small className="chat-card-byline">{own?'Waiting for them to accept.':'They will see and control your whole screen until you stop sharing.'}</small>
   {!own&&fresh&&!answered&&<div className="chat-card-actions"><Button size="sm" variant="accent" onClick={()=>{setSent(true);window.dispatchEvent(new CustomEvent<RelayAcceptDetail>(RELAY_ACCEPT_EVENT,{detail:{to:message.sender,from:name(message.sender),onFail:()=>setSent(false)}}));}}>Accept</Button></div>}
-  {!own&&answered&&<small className="chat-card-byline">Sharing with {name(message.sender)}.</small>}
+  {!own&&answered&&!stopped&&<><small className="chat-card-byline">Sharing with {name(message.sender)}.</small><div className="chat-card-actions"><Button size="sm" variant="danger" onClick={()=>{setStopped(true);window.dispatchEvent(new Event(RELAY_STOP_EVENT));}}>Stop sharing</Button></div></>}
+  {!own&&answered&&stopped&&<small className="chat-card-byline">Sharing stopped.</small>}
  </div>;
 }
 /** One click to join a teammate's desktop relay. Nothing happens until the

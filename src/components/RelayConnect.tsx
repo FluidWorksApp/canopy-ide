@@ -11,9 +11,18 @@
 import { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { getSettings, updateSettings } from "../settings";
-import { peekTeamIdentity, subscribeTeamIdentity, teamIdentity, type TeamIdentity } from "../teamIdentity";
+import {
+  peekTeamIdentity,
+  subscribeTeamIdentity,
+  teamIdentity,
+  type TeamIdentity,
+} from "../teamIdentity";
 import { teamSession } from "../teamMessaging/session";
-import { cardDraft, validRelayAddr, type Card } from "../teamMessaging/cardSchema";
+import {
+  cardDraft,
+  validRelayAddr,
+  type Card,
+} from "../teamMessaging/cardSchema";
 import type { Notify, RelayHandle } from "../types";
 import { selectedAccountTeam } from "./TeamHub";
 import { Button } from "./ui";
@@ -25,17 +34,47 @@ const prettyCode = (code: string) => code.replace(/(\d{3})(\d+)/, "$1 $2");
  *  panel was closed and reopened. */
 let activeOffer: { team: string; self: string; id: string } | null = null;
 
+/** Remember the offer just posted, so Stop can end it later. */
+export function setActiveOffer(
+  offer: { team: string; self: string; id: string } | null,
+) {
+  activeOffer = offer;
+}
+
+/** End sharing: tell the team the offer is over, then stop the relay. */
+export async function stopSharing(relay: Pick<RelayHandle, "hostStop">) {
+  const offer = activeOffer;
+  activeOffer = null;
+  if (offer)
+    await post(offer.team, offer.self, {
+      type: "relay-offer-ended",
+      v: 1,
+      request: offer.id,
+    }).catch(() => {});
+  await relay.hostStop();
+}
+
 /** The address a teammate on this network would dial, if the relay has one a
  *  card may carry. */
-export function offerAddress(ips: readonly string[], port: number | null): string | null {
+export function offerAddress(
+  ips: readonly string[],
+  port: number | null,
+): string | null {
   if (!port) return null;
-  for (const ip of ips) if (validRelayAddr(`${ip}:${port}`)) return `${ip}:${port}`;
+  for (const ip of ips)
+    if (validRelayAddr(`${ip}:${port}`)) return `${ip}:${port}`;
   return null;
 }
 
-export async function accountTeam(): Promise<{ team: string; self: string } | null> {
+export async function accountTeam(): Promise<{
+  team: string;
+  self: string;
+} | null> {
   try {
-    const dir = await invoke<{ teams?: { id: string }[]; selfId?: string }>("canopy_account_request", { route: "/api/teams", body: null });
+    const dir = await invoke<{ teams?: { id: string }[]; selfId?: string }>(
+      "canopy_account_request",
+      { route: "/api/teams", body: null },
+    );
     const teams = dir.teams ?? [];
     const picked = selectedAccountTeam();
     const team = teams.find((t) => t.id === picked)?.id ?? teams[0]?.id;
@@ -45,15 +84,33 @@ export async function accountTeam(): Promise<{ team: string; self: string } | nu
   }
 }
 
-export async function post(team: string, self: string, card: Card, peer: string | null = null): Promise<string> {
+export async function post(
+  team: string,
+  self: string,
+  card: Card,
+  peer: string | null = null,
+): Promise<string> {
   const draft = cardDraft(card);
-  const sent = await teamSession(team, self).send(draft.text, peer, [], draft.ext);
+  const sent = await teamSession(team, self).send(
+    draft.text,
+    peer,
+    [],
+    draft.ext,
+  );
   return sent.id;
 }
 
-export function RelayConnect({ relay, onNotice }: { relay: RelayHandle; onNotice?: Notify }) {
+export function RelayConnect({
+  relay,
+  onNotice,
+}: {
+  relay: RelayHandle;
+  onNotice?: Notify;
+}) {
   const s = relay.status;
-  const [me, setMe] = useState<TeamIdentity | null | undefined>(() => peekTeamIdentity() ?? undefined);
+  const [me, setMe] = useState<TeamIdentity | null | undefined>(
+    () => peekTeamIdentity() ?? undefined,
+  );
   const [name, setName] = useState(() => getSettings().relayName);
   const [addr, setAddr] = useState(() => getSettings().relayAddr);
   const [code, setCode] = useState("");
@@ -80,22 +137,22 @@ export function RelayConnect({ relay, onNotice }: { relay: RelayHandle; onNotice
     }
   };
 
-  const stop = () =>
-    run(async () => {
-      const offer = activeOffer;
-      activeOffer = null;
-      if (offer) await post(offer.team, offer.self, { type: "relay-offer-ended", v: 1, request: offer.id }).catch(() => {});
-      await relay.hostStop();
-    });
+  const stop = () => run(() => stopSharing(relay));
 
   if (s.role === "host") {
     const lan = s.ips[0] && s.port ? `${s.ips[0]}:${s.port}` : null;
+    const others = s.members.filter((m) => m.id !== s.self_id);
     return (
       <section className="desk-members" aria-label="Relay">
-        <h3 className="team-hub-section">Remote desktop</h3>
+        <h3 className="team-hub-section">Sharing</h3>
         <div className="team-row">
           <span className="team-row-text">
             <strong>Sharing your desktop</strong>
+            <span>
+              {others.length
+                ? `${others.map((m) => m.name).join(", ")} connected`
+                : "No one connected yet"}
+            </span>
             <span>
               {lan ?? `port ${s.port}`}
               {s.code ? ` · code ${prettyCode(s.code)}` : ""}
@@ -118,7 +175,12 @@ export function RelayConnect({ relay, onNotice }: { relay: RelayHandle; onNotice
             <strong>Connected to {s.addr}</strong>
             <span>as {s.name}</span>
           </span>
-          <Button size="sm" variant="danger" disabled={busy} onClick={() => run(() => relay.disconnect())}>
+          <Button
+            size="sm"
+            variant="danger"
+            disabled={busy}
+            onClick={() => run(() => relay.disconnect())}
+          >
             Disconnect
           </Button>
         </div>
@@ -130,15 +192,22 @@ export function RelayConnect({ relay, onNotice }: { relay: RelayHandle; onNotice
   // (Connect remotely), and the host/client rows above cover an active session.
   if (me === undefined || me) return null;
 
-
   return (
     <section className="desk-members" aria-label="Relay">
       <h3 className="team-hub-section">Remote desktop</h3>
       <details className="relay-advanced">
         <summary>Advanced: host or join by address</summary>
         <div className="relay-form">
-          <label className="relay-label" htmlFor="relay-name">Your name</label>
-          <input id="relay-name" className="relay-input" placeholder="how teammates see you" value={name} onChange={(e) => setName(e.target.value)} />
+          <label className="relay-label" htmlFor="relay-name">
+            Your name
+          </label>
+          <input
+            id="relay-name"
+            className="relay-input"
+            placeholder="how teammates see you"
+            value={name}
+            onChange={(e) => setName(e.target.value)}
+          />
           <Button
             variant="accent"
             disabled={busy || !name.trim()}
@@ -152,9 +221,19 @@ export function RelayConnect({ relay, onNotice }: { relay: RelayHandle; onNotice
             {busy ? "Starting…" : "Host a relay"}
           </Button>
           <div className="relay-sep">or join one</div>
-          <label className="relay-label" htmlFor="relay-addr">Host address</label>
-          <input id="relay-addr" className="relay-input" placeholder="192.168.1.20:6679" value={addr} onChange={(e) => setAddr(e.target.value)} />
-          <label className="relay-label" htmlFor="relay-code">Code</label>
+          <label className="relay-label" htmlFor="relay-addr">
+            Host address
+          </label>
+          <input
+            id="relay-addr"
+            className="relay-input"
+            placeholder="192.168.1.20:6679"
+            value={addr}
+            onChange={(e) => setAddr(e.target.value)}
+          />
+          <label className="relay-label" htmlFor="relay-code">
+            Code
+          </label>
           <input
             id="relay-code"
             className="relay-input"
@@ -165,11 +244,23 @@ export function RelayConnect({ relay, onNotice }: { relay: RelayHandle; onNotice
             onChange={(e) => setCode(e.target.value)}
           />
           <Button
-            disabled={busy || !name.trim() || !addr.trim() || code.replace(/\D/g, "").length !== 7}
+            disabled={
+              busy ||
+              !name.trim() ||
+              !addr.trim() ||
+              code.replace(/\D/g, "").length !== 7
+            }
             onClick={() =>
               run(async () => {
-                updateSettings({ relayName: name.trim(), relayAddr: addr.trim() });
-                await relay.connect(addr.trim(), code.replace(/\D/g, ""), name.trim());
+                updateSettings({
+                  relayName: name.trim(),
+                  relayAddr: addr.trim(),
+                });
+                await relay.connect(
+                  addr.trim(),
+                  code.replace(/\D/g, ""),
+                  name.trim(),
+                );
                 setCode("");
               })
             }

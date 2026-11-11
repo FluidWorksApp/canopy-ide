@@ -189,6 +189,33 @@ export function ConsentDialog({
   );
 }
 
+/** Shown on every screen while this desktop is shared (relay host), so sharing
+ *  is never invisible and always has a Stop. The live-session banner covers a
+ *  desk session; this covers the link itself. */
+export function SharingBanner({
+  relay,
+  onStop,
+}: {
+  relay: RelayHandle;
+  onStop: () => void;
+}) {
+  const s = relay.status;
+  if (s.role !== "host" || relay.desk) return null;
+  const others = s.members.filter((m) => m.id !== s.self_id).map((m) => m.name);
+  return (
+    <div className="desk-banner" role="alert">
+      <span>
+        {others.length
+          ? `Sharing your desktop with ${others.join(", ")}`
+          : "Sharing your desktop"}
+      </span>
+      <Button size="sm" variant="danger" onClick={onStop}>
+        Stop
+      </Button>
+    </div>
+  );
+}
+
 export function ControlledBanner({ session }: { session: DeskStateEvent }) {
   return (
     <div className="desk-banner" role="alert">

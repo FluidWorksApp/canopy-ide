@@ -7,6 +7,7 @@ import {
   DeskOverlay,
   RemoteDesktopMembers,
   RemoteDesktopView,
+  SharingBanner,
 } from "./RemoteDesktopView";
 
 const ev = (o: Partial<DeskStateEvent> = {}): DeskStateEvent => ({
@@ -242,6 +243,40 @@ describe("permissions in the consent dialog", () => {
           .closest("button") as HTMLButtonElement
       ).disabled,
     ).toBe(true);
+  });
+});
+
+describe("sharing banner", () => {
+  const host = (others: string[], desk: unknown = null) =>
+    ({
+      status: {
+        role: "host",
+        self_id: "me",
+        members: [
+          { id: "me", name: "Me" },
+          ...others.map((n) => ({ id: n, name: n })),
+        ],
+      },
+      desk,
+    }) as unknown as RelayHandle;
+
+  it("shows who is connected and Stop while this desktop is shared", () => {
+    const stop = vi.fn();
+    render(<SharingBanner relay={host(["Vijay"])} onStop={stop} />);
+    expect(screen.getByText("Sharing your desktop with Vijay")).toBeTruthy();
+    fireEvent.click(screen.getByText("Stop"));
+    expect(stop).toHaveBeenCalled();
+  });
+
+  it("shows nothing when not hosting", () => {
+    const off = {
+      status: { role: "off", members: [] },
+      desk: null,
+    } as unknown as RelayHandle;
+    const { container } = render(
+      <SharingBanner relay={off} onStop={() => {}} />,
+    );
+    expect(container.textContent).toBe("");
   });
 });
 
