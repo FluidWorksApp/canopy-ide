@@ -4764,6 +4764,64 @@ mod tests {
         let _ = pm.kill(41);
     }
 
+    /// The agent in an adopted terminal still holds the token the previous
+    /// launch minted. Adoption must make this launch's bridge accept it under
+    /// the same identity, spawn-tree position included.
+    #[cfg(unix)]
+    #[test]
+    fn adopt_from_gives_the_held_bridge_token_back_its_identity() {
+        use crate::pty_hosted::tests::{command, InProcessHost};
+        use tauri::Manager;
+        let instance = instance_token().to_string();
+        let token = "f".repeat(32);
+        let meta = serde_json::json!({
+            "v": 1, "id": 52, "generation": 4, "kind": "desktop", "cwd": "/tmp",
+            "run": false, "instance": instance,
+            "bridge": crate::context::verifier(&token),
+        })
+        .to_string();
+        let host = InProcessHost::start("adoptctx");
+        let (child, master) = crate::pty_hosted::spawn(
+            &host.client,
+            &command("while :; do sleep 0.1; done"),
+            80,
+            24,
+            Some(meta),
+        )
+        .expect("hosted spawn");
+        host.client
+            .set_state(&format!("lineage:{instance}:52"), "2:17", false)
+            .unwrap();
+        drop(master);
+        drop(child);
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while std::time::Instant::now() < deadline
+            && host.client.list().unwrap()[0].attached != Some(false)
+        {
+            thread::sleep(Duration::from_millis(50));
+        }
+
+        let app = tauri::test::mock_app();
+        app.manage(crate::context::ContextBridge::default());
+        let bridge = app.state::<crate::context::ContextBridge>();
+        assert_eq!(bridge.caller_for_test(&token), None);
+        let pm = PtyManager::default();
+        assert_eq!(
+            pm.adopt_from(app.handle().clone(), &host.client, &instance),
+            1
+        );
+        match bridge.caller_for_test(&token) {
+            Some(crate::context::Caller::Agent(agent)) => {
+                assert_eq!((agent.pty_id, agent.cwd.as_str()), (52, "/tmp"));
+                assert_eq!(agent.instance, instance);
+                assert_eq!((agent.spawn_depth, agent.parent_pty_id), (2, Some(17)));
+            }
+            other => panic!("the held token must name the adopted terminal: {other:?}"),
+        }
+        assert_eq!(bridge.caller_for_test(&"0".repeat(32)), None);
+        let _ = pm.kill(52);
+    }
+
     #[test]
     fn without_the_host_the_launch_tag_is_the_instance_tag() {
         if !crate::pty_hosted::enabled() {

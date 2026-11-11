@@ -178,7 +178,10 @@ the host on:
 - Apps started from another Canopy's terminal drop an inherited
   `CANOPY_CTX_SOCKET` before stamping their own (terminals, companion,
   structured runs), since the socket would win over their port.
-- With the flag off nothing changes: no socket, no lock, no new variable.
+- With the flag off: no socket, no lock, no new variable. The one change that
+  applies regardless is dropping an inherited `CANOPY_CTX_SOCKET` above, which
+  only matters for an app launched from inside another Canopy's terminal.
+- Lineage fails open: a missing or unreadable entry adopts the child as a root.
 - Still not restored for adopted agents: the Claude IDE server (diff and
   selection link) and anything keyed to the old launch's port. A hook call made
   while no app is running fails with "Canopy isn't reachable at ...ctx.sock".
@@ -262,7 +265,9 @@ stalled client blocks the child; drain with the gap flag; start race; SIGTERM
 leaves no orphans. Existing `pty.rs` tests must pass with the switch off.
 Bridge continuity: `ctx_socket::tests` (private modes, a held lock refuses a
 second claim without unlinking, a stale socket is replaced, a relaunch answers
-at the same path over HTTP), `context::tests` (a token minted on one bridge
+at the same path over HTTP), `pty::tests` (adoption from an in-process host
+makes the held token name the terminal again, lineage included),
+`context::tests` (a token minted on one bridge
 names the same terminal on a fresh bridge fed only the verifier; wrong tokens,
 duplicates and malformed verifiers refused), `pty_hosted::tests` (verifier in
 the metadata, lineage stored and read back from an in-process host). macOS CI

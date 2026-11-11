@@ -214,6 +214,17 @@ impl HostClient {
         Ok(self.call(&Request::GetState { key: key.into() })?.value)
     }
 
+    /// `get_state` with its own bound, for the app's launch path.
+    pub fn get_state_within(
+        &self,
+        key: &str,
+        timeout: Duration,
+    ) -> std::io::Result<Option<String>> {
+        Ok(self
+            .call_read_only(&Request::GetState { key: key.into() }, timeout)?
+            .value)
+    }
+
     pub fn pgrp(&self, id: u32) -> std::io::Result<Option<i32>> {
         Ok(self
             .call_read_only(&Request::Pgrp { id }, PROBE_TIMEOUT)?

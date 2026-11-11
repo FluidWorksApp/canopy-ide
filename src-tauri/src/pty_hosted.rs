@@ -474,7 +474,10 @@ mod adoption {
 
     /// The spawn-tree position stored by `note_lineage`, if any.
     pub fn lineage(client: &Client, instance: &str, pty_id: u32) -> Option<(u8, Option<u32>)> {
-        let value = client.get_state(&lineage_key(instance, pty_id)).ok()??;
+        // Bounded like every other launch-path call to the host.
+        let value = client
+            .get_state_within(&lineage_key(instance, pty_id), LAUNCH_WAIT)
+            .ok()??;
         parse_lineage(&value)
     }
 }

@@ -530,6 +530,12 @@ impl ContextBridge {
         true
     }
 
+    /// `identify` for tests in other modules (adoption in pty.rs).
+    #[cfg(test)]
+    pub(crate) fn caller_for_test(&self, presented: &str) -> Option<Caller> {
+        self.identify(presented)
+    }
+
     /// Drop a terminal's credential when the terminal goes. Returns the
     /// identity it named, which is what the claim sweep needs — after this the
     /// bridge can no longer answer "who was pty 7", so the caller must be given
