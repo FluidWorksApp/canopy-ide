@@ -236,9 +236,12 @@ the host on:
   host's directory (`~/.canopy/pty-host`, `pty-host-dev` for debug builds, or
   `CANOPY_PTY_HOST_DIR`), and every terminal gets `CANOPY_CTX_SOCKET` beside
   `CANOPY_CTX_PORT`/`_TOKEN` (`ctx_socket.rs`, `context.rs` `start`). The hook
-  prefers the socket, so after a relaunch its calls reach the new app. There is
-  no fallback from the socket to the port: an old port can belong to anything.
-- Access is unchanged: the directory is 0700 and must be ours and not a symlink,
+  prefers the socket, so after a relaunch its calls reach the new app. A missing
+  or refused socket never falls back to the port: an old port can belong to
+  anything. The one exception is a sandbox that denies the connect itself
+  (`PermissionDenied`), which uses the port from the same environment.
+- Access is unchanged: the directory is 0700 and must be ours and not a symlink
+  (opened `O_NOFOLLOW`, checked and `fchmod`ed through that one descriptor),
   the socket is 0600, a connection from another uid is dropped (`peer_cred`),
   and every request still needs the same bearer credential. No TCP port is added.
 - The credential survives without being stored: the bridge keys terminal
@@ -246,15 +249,26 @@ the host on:
   verifier (`bridge`), and adoption re-registers it under the terminal's id,
   instance, cwd and spawn-tree position (`ContextBridge::readopt_agent`). The
   token the agent already holds then authenticates on the new launch. A verifier
-  already registered, or a pty already holding one, is refused.
-- Spawn-tree position (`spawn_depth`, parent) is assigned after the spawn, so it
-  goes to the host's state store (`lineage:<instance>:<pty>`, `note_lineage`)
-  and adoption reads it back; without it a delegated child would return as a
-  root. Best effort: a host too old for `set_state` loses it.
+  already registered, or a pty already holding one, is refused. A failed
+  adoption retires the credential only if this adoption registered it.
+- Any process of this user can write session metadata through the host, so what
+  adoption acts on (`bridge`, depth, parent, identity fields) is sealed with an
+  HMAC-SHA256 (`adoption_seal.rs`) whose key lives in the platform secret store,
+  not the host. Unsealed or wrongly sealed metadata is adopted as a plain
+  terminal with no credential, and sealed sessions alone vote on the instance
+  token. On Linux the secret store is readable by any process of the same user,
+  so there the seal only stops a forgery that does not also read the key.
+- Spawn-tree position (`spawn_depth`, parent) is assigned after the spawn, so
+  the app reseals the metadata with it (`reseal_lineage`, from its own copy, never
+  from what the host returns). Lineage fails closed: a position that is unknown
+  (a spawn made while a delegation was pending and not resealed, a failed
+  write) is adopted at the delegation cap, so it keeps its tools but cannot
+  spawn further agents.
 - One app per directory holds the socket: an exclusive `flock` on `ctx.lock`,
-  held as long as the listener lives. A launch that finds it held retries for
-  five seconds (an updater's old process still exiting), then serves TCP only
-  and exports no socket; it never unlinks a socket it does not hold. A stale
+  held as long as the listener lives. A launch that finds it held keeps
+  retrying for as long as it runs (every half second for five seconds, an
+  updater's old process still exiting, then every five seconds), serving TCP
+  meanwhile; it never unlinks a socket it does not hold. A stale
   socket file is removed by the next owner. Two debug apps share
   `pty-host-dev`: the first holds the socket, the second runs port-only.
 - Apps started from another Canopy's terminal drop an inherited
@@ -263,7 +277,6 @@ the host on:
 - With the flag off: no socket, no lock, no new variable. The one change that
   applies regardless is dropping an inherited `CANOPY_CTX_SOCKET` above, which
   only matters for an app launched from inside another Canopy's terminal.
-- Lineage fails open: a missing or unreadable entry adopts the child as a root.
 - Still not restored for adopted agents: the Claude IDE server (diff and
   selection link) and anything keyed to the old launch's port. A hook call made
   while no app is running fails with "Canopy isn't reachable at ...ctx.sock".

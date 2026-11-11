@@ -81,10 +81,22 @@ pub fn claim(dir: &Path) -> io::Result<Option<Owned>> {
 
 /// Create `dir` if needed and make it 0700. Refused if it is a symlink or
 /// belongs to another user, since then its mode says nothing about who can
-/// reach the socket inside.
+/// reach the socket inside. The checks and the chmod all go through one
+/// descriptor opened with `O_NOFOLLOW`, so the path cannot be swapped for a
+/// symlink between the check and the mode change.
 fn private_dir(dir: &Path) -> io::Result<()> {
     std::fs::create_dir_all(dir)?;
-    let meta = std::fs::symlink_metadata(dir)?;
+    let handle = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_DIRECTORY)
+        .open(dir)
+        .map_err(|e| {
+            io::Error::other(format!(
+                "{} is not a plain directory of ours ({e})",
+                dir.display()
+            ))
+        })?;
+    let meta = handle.metadata()?;
     if !meta.file_type().is_dir() {
         return Err(io::Error::other(format!(
             "{} is not a directory",
@@ -98,7 +110,7 @@ fn private_dir(dir: &Path) -> io::Result<()> {
             dir.display()
         )));
     }
-    std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))
+    handle.set_permissions(std::fs::Permissions::from_mode(0o700))
 }
 
 /// Whether a peer may talk to the bridge at all: only our own uid.
