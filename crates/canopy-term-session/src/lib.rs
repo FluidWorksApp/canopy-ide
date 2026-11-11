@@ -39,6 +39,7 @@ pub use session::{
 };
 pub use source::{FrameSource, Waker};
 
+pub use canopy_term_core::event;
 pub use canopy_term_core::frame;
 pub use canopy_term_core::Screen;
 pub use canopy_term_input as input;

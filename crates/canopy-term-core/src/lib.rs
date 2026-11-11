@@ -6,6 +6,7 @@
 //! ones. `screen` is the headless emulator behind a small `Screen` type; no
 //! emulator types leak through its API.
 
+pub mod event;
 #[cfg(feature = "screen")]
 mod filter;
 pub mod frame;

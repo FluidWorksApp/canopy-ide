@@ -1,7 +1,15 @@
 //! Must-prove behaviour of `Screen`. Synthetic fixtures only.
 
-use canopy_term_core::frame::{Attrs, Color, CursorShape, Damage, Frame, MouseEncoding, MouseMode};
-use canopy_term_core::screen::{MAX_CLUSTER_SCALARS, MAX_OSC_BYTES, MAX_TITLE_BYTES};
+use canopy_term_core::event::{
+    ClipboardPolicy, ClipboardTarget, Event, SemanticMark, MAX_CLIPBOARD_TEXT,
+};
+use canopy_term_core::frame::{
+    Attrs, Color, CursorShape, Damage, Frame, MouseEncoding, MouseMode, RowMark,
+};
+use canopy_term_core::screen::{
+    MAX_CLUSTER_SCALARS, MAX_FRAME_LINKS, MAX_OSC_BYTES, MAX_TITLE_BYTES, MAX_URI_BYTES,
+    PALETTE_BACKGROUND, PALETTE_CURSOR, PALETTE_FOREGROUND,
+};
 use canopy_term_core::Screen;
 
 /// A frame with the per-observer fields cleared, so two screens in the same
@@ -50,6 +58,13 @@ fn assert_same(a: &Frame, b: &Frame, what: &str) {
     assert_eq!(a.alt_screen, b.alt_screen, "{what}: alt screen");
     assert_eq!(a.title, b.title, "{what}: title");
     assert_eq!(a.clusters, b.clusters, "{what}: cluster table");
+    assert_eq!(a.links, b.links, "{what}: link table");
+    assert_eq!(a.link_ids, b.link_ids, "{what}: link ids");
+    assert_eq!(
+        a.underline_colors, b.underline_colors,
+        "{what}: underline colours"
+    );
+    assert_eq!(a.marks, b.marks, "{what}: marks");
     panic!("{what}: frames differ in a field this helper does not name");
 }
 
@@ -538,8 +553,13 @@ fn hostile_input_stays_bounded() {
     let snap = s.snapshot();
     // Per cell: one full SGR (under 64 bytes) plus a maximal cluster; per row a
     // cursor move; plus title and modes.
-    let bound = f.cells.len() * (64 + 4 * MAX_CLUSTER_SCALARS)
+    // Per linked cell: an OSC 8 with a whole URI, and its end.
+    let linked = f.link_ids.iter().filter(|&&id| id != 0).count();
+    let bound = f.cells.len() * (96 + 4 * MAX_CLUSTER_SCALARS)
+        + linked * (2 * MAX_URI_BYTES + 128)
         + rows as usize * 16
+        + f.marks.len() * 48
+        + f.cols as usize * 12
         + 4 * MAX_TITLE_BYTES
         + 1024;
     assert!(
@@ -688,4 +708,637 @@ fn sizes_are_capped() {
             canopy_term_core::screen::MAX_ROWS
         )
     );
+}
+
+// ---- hyperlinks, underlines, palette, tab stops, charsets, marks ----
+
+/// Feeds `input`, snapshots, restores, checks the restored screen is the same
+/// in every way a client could see, then feeds `more` to both and checks
+/// they still are.
+fn round_trip(name: &str, cols: u16, rows: u16, input: &str, more: &str) -> (Screen, Screen) {
+    let mut live = fed(cols, rows, input.as_bytes());
+    let snap = live.snapshot();
+    let mut restored = Screen::restore(cols, rows, &snap);
+    assert_same(&live.frame(), &restored.frame(), name);
+    assert_eq!(
+        String::from_utf8_lossy(&restored.snapshot()),
+        String::from_utf8_lossy(&snap),
+        "{name}: snapshot of the restored screen"
+    );
+    assert_eq!(
+        live.palette_overrides(),
+        restored.palette_overrides(),
+        "{name}: palette"
+    );
+    assert_eq!(live.tab_stops(), restored.tab_stops(), "{name}: tab stops");
+    assert!(
+        restored.take_events().is_empty(),
+        "{name}: restoring raises no events"
+    );
+    assert!(restored.take_replies().is_empty(), "{name}: no replies");
+    live.advance(more.as_bytes());
+    restored.advance(more.as_bytes());
+    assert_same(
+        &live.frame(),
+        &restored.frame(),
+        &format!("{name}: continued"),
+    );
+    assert_eq!(
+        live.tab_stops(),
+        restored.tab_stops(),
+        "{name}: tab stops after"
+    );
+    (live, restored)
+}
+
+#[test]
+fn hyperlinks_are_in_the_frame() {
+    let s = fed(
+        30,
+        3,
+        b"\x1b]8;id=x;https://example.com/a\x1b\\click\x1b]8;;\x1b\\ \x1b]8;;https://example.org/b\x07two\x1b]8;;\x07!",
+    );
+    let f = s.frame();
+    let a = f.link_at(0, 0).expect("link on c");
+    assert_eq!(
+        (a.id.as_str(), a.uri.as_str()),
+        ("x", "https://example.com/a")
+    );
+    assert_eq!(f.link_at(0, 4), Some(a), "same link across the run");
+    assert!(f.link_at(0, 5).is_none(), "the gap");
+    let b = f.link_at(0, 6).expect("second link");
+    assert_eq!(b.uri, "https://example.org/b");
+    assert!(!b.id.is_empty(), "a link without an id gets one");
+    assert!(f.link_at(0, 9).is_none(), "after the link ended");
+    assert_eq!(f.links.len(), 3, "placeholder and two links");
+    assert_eq!(f.link_ids.len(), f.cells.len());
+    assert!(fed(10, 2, b"plain").frame().link_ids.is_empty());
+}
+
+#[test]
+fn a_link_with_one_id_spans_rows_and_shares_an_entry() {
+    let s = fed(
+        10,
+        3,
+        b"\x1b]8;id=w;https://example.com/\x07abcdefghijklmno\x1b]8;;\x07",
+    );
+    let f = s.frame();
+    assert_eq!(f.link_at(0, 0), f.link_at(1, 4));
+    assert_eq!(f.links.len(), 2);
+}
+
+#[test]
+fn unsafe_and_oversized_link_uris_are_not_exposed() {
+    // Control character (DEL passes the parser) and over the length cap.
+    let mut input = b"\x1b]8;;http://a\x7fb\x07ctl\x1b]8;;\x07 ".to_vec();
+    input.extend_from_slice(b"\x1b]8;;http://");
+    input.extend(std::iter::repeat_n(b'a', 2 * MAX_URI_BYTES));
+    input.extend_from_slice(b"\x07long\x1b]8;;\x07 ");
+    input.extend_from_slice(b"\x1b]8;;http://ok\x07fine");
+    let f = fed(40, 2, &input).frame();
+    assert!(f.link_at(0, 0).is_none(), "control character");
+    assert!(f.link_at(0, 4).is_none(), "over the cap");
+    let ok = (0..40).find_map(|c| f.link_at(0, c)).expect("the good one");
+    assert_eq!(ok.uri, "http://ok");
+    assert_eq!(f.links.len(), 2);
+
+    // A URI exactly at the cap is exposed whole.
+    let uri = format!("h:{}", "b".repeat(MAX_URI_BYTES - 2));
+    let input = format!("\x1b]8;;{uri}\x07x");
+    let f = fed(10, 2, input.as_bytes()).frame();
+    assert_eq!(f.link_at(0, 0).unwrap().uri, uri);
+}
+
+#[test]
+fn the_link_table_is_bounded() {
+    let (cols, rows) = (100u16, 60u16);
+    let mut s = Screen::new(cols, rows);
+    let mut input = String::new();
+    for i in 0..(cols as usize * rows as usize) {
+        input.push_str(&format!("\x1b]8;;http://e/{i}\x07x"));
+    }
+    s.advance(input.as_bytes());
+    let f = s.frame();
+    assert!(f.links.len() <= MAX_FRAME_LINKS + 1);
+    assert!(f.links.len() > MAX_FRAME_LINKS, "the table filled");
+    assert!(
+        f.link_at(rows - 1, cols - 1).is_none(),
+        "past the bound: none"
+    );
+    assert!(f.link_at(0, 0).is_some());
+}
+
+#[test]
+fn hyperlinks_survive_a_snapshot() {
+    let (live, restored) = round_trip(
+        "links",
+        30,
+        4,
+        "\x1b]8;id=x;https://example.com/a\x1b\\click\x1b]8;;\x1b\\ \x1b]8;;https://example.org/b\x07two\x1b]8;;\x07\r\n\x1b[2;3Hmore",
+        "\x1b]8;id=x;https://example.com/a\x07again\x1b]8;;\x07 end",
+    );
+    for s in [&live, &restored] {
+        let f = s.frame();
+        assert_eq!(f.link_at(0, 0).unwrap().id, "x");
+        assert_eq!(f.link_at(0, 0), f.link_at(1, 6), "one link, two rows");
+    }
+}
+
+#[test]
+fn a_link_the_program_is_in_the_middle_of_survives_a_snapshot() {
+    let (_, restored) = round_trip(
+        "open link",
+        20,
+        3,
+        "\x1b]8;id=p;https://example.com/pen\x07abc",
+        "def",
+    );
+    let f = restored.frame();
+    assert_eq!(f.link_at(0, 3).unwrap().uri, "https://example.com/pen");
+    assert_eq!(f.link_at(0, 5), f.link_at(0, 0));
+}
+
+#[test]
+fn links_and_underlines_on_wide_and_combined_cells_survive_a_snapshot() {
+    round_trip(
+        "wide link",
+        20,
+        3,
+        "\x1b]8;;https://example.com/\x07日e\u{301}x\x1b]8;;\x07\x1b[4:3;58;2;9;8;7m日",
+        "\x1b[0mz",
+    );
+}
+
+#[test]
+fn underline_styles_and_colours_are_in_the_frame_and_survive_a_snapshot() {
+    let input = "\x1b[4:3;58;2;255;0;0mcurl\x1b[0m \x1b[4:2;58;5;9mdbl\x1b[4:4mdot\x1b[4:5mdash\x1b[0mplain\x1b[4mone";
+    let (live, _) = round_trip(
+        "underlines",
+        40,
+        2,
+        input,
+        "\x1b[4:3;58;2;1;2;3m\x1b[1;30Hpen",
+    );
+    let f = live.frame();
+    let at = |c: u16| *f.cell(0, c).unwrap();
+    let curl = at(0);
+    assert!(curl.attrs.has(Attrs::UNDERLINE) && curl.attrs.has(Attrs::UNDERLINE_CURLY));
+    assert_eq!(f.underline_color_at(0, 0), Some(Color::Rgb(255, 0, 0)));
+    assert!(!at(4).attrs.has(Attrs::UNDERLINE), "reset ends it");
+    assert_eq!(f.underline_color_at(0, 4), None);
+    assert!(at(5).attrs.has(Attrs::UNDERLINE_DOUBLE));
+    assert_eq!(f.underline_color_at(0, 5), Some(Color::Indexed(9)));
+    assert!(at(8).attrs.has(Attrs::UNDERLINE_DOTTED));
+    assert!(at(11).attrs.has(Attrs::UNDERLINE_DASHED));
+    assert!(!at(15).attrs.has(Attrs::UNDERLINE));
+    let one = at(20);
+    assert!(one.attrs.has(Attrs::UNDERLINE));
+    assert_eq!(
+        one.attrs.0 & Attrs::UNDERLINE_STYLES,
+        0,
+        "a plain underline"
+    );
+    assert_eq!(f.underline_color_at(0, 20), None);
+    // The pen's colour and style carried into the next text.
+    let g = live.frame();
+    assert!(g.cell(0, 29).unwrap().attrs.has(Attrs::UNDERLINE_CURLY));
+    assert_eq!(g.underline_color_at(0, 29), Some(Color::Rgb(1, 2, 3)));
+}
+
+#[test]
+fn a_changed_link_or_underline_colour_is_damage_even_if_the_text_is_not() {
+    let mut s = fed(20, 3, b"abc\r\ndef");
+    let before = s.seq();
+    s.advance(b"\x1b[1;1H\x1b]8;;https://example.com/\x07abc\x1b]8;;\x07\x1b[2;4H");
+    assert!(s.seq() > before, "linking existing text changes the frame");
+    assert_eq!(s.damage_since(before).rows, vec![(0, 0)]);
+    let before = s.seq();
+    s.advance(b"\x1b[2;1H\x1b[4;58;5;1mdef\x1b[0m\x1b[2;4H");
+    assert_eq!(s.damage_since(before).rows, vec![(1, 1)]);
+    let before = s.seq();
+    s.advance(b"\x1b[2;1H\x1b[4;58;5;2mdef\x1b[0m\x1b[2;4H");
+    assert!(s.seq() > before, "only the underline colour changed");
+    assert_eq!(s.damage_since(before).rows, vec![(1, 1)]);
+}
+
+#[test]
+fn palette_overrides_survive_a_snapshot() {
+    let input = "\x1b]4;1;rgb:12/34/56\x1b\\\x1b]4;200;#abcdef\x07\x1b]10;rgb:aa/bb/cc\x07\x1b]11;rgb:00/11/22\x07\x1b]12;rgb:ff/00/ff\x07";
+    let (mut live, mut restored) = round_trip("palette", 20, 3, input, "x");
+    assert_eq!(
+        live.palette_overrides(),
+        vec![
+            (1, (0x12, 0x34, 0x56)),
+            (200, (0xab, 0xcd, 0xef)),
+            (PALETTE_FOREGROUND, (0xaa, 0xbb, 0xcc)),
+            (PALETTE_BACKGROUND, (0x00, 0x11, 0x22)),
+            (PALETTE_CURSOR, (0xff, 0x00, 0xff)),
+        ]
+    );
+    // The restored screen answers colour queries from what was set.
+    for q in ["\x1b]4;1;?\x07", "\x1b]10;?\x07", "\x1b]4;200;?\x07"] {
+        live.advance(q.as_bytes());
+        restored.advance(q.as_bytes());
+        let (a, b) = (live.take_replies(), restored.take_replies());
+        assert!(!a.is_empty());
+        assert_eq!(a, b, "reply to {q:?}");
+    }
+    // A reset the program sends after the snapshot applies to the restored one.
+    restored.advance(b"\x1b]104;1\x07\x1b]110\x07");
+    assert_eq!(restored.palette_overrides().len(), 3);
+    assert!(Screen::new(10, 2).palette_overrides().is_empty());
+}
+
+#[test]
+fn tab_stops_are_mirrored_and_survive_a_snapshot() {
+    let s = Screen::new(20, 2);
+    assert_eq!(s.tab_stops(), vec![0, 8, 16]);
+
+    let input = "\x1b[3g\x1b[1;5H\x1bH\x1b[1;12H\x1bH\x1b[1;1H";
+    let (live, _) = round_trip("custom tabs", 30, 3, input, "\ta\tb\tc");
+    assert_eq!(live.tab_stops(), vec![4, 11]);
+
+    let (live, _) = round_trip("cleared tabs", 30, 3, "\x1b[3g", "a\tb");
+    assert!(live.tab_stops().is_empty());
+
+    let (live, _) = round_trip("one cleared", 30, 3, "\x1b[1;9H\x1b[0g\x1b[1;1H", "\t\tx");
+    assert_eq!(live.tab_stops(), vec![0, 16, 24]);
+
+    let (live, _) = round_trip("reset", 30, 3, "\x1b[3g\x1bc", "\tx");
+    assert_eq!(live.tab_stops(), vec![0, 8, 16, 24]);
+}
+
+/// Walking right with TAB lands on each mirrored stop in turn.
+fn assert_tabs_match_the_engine(s: &mut Screen) {
+    let stops = s.tab_stops();
+    s.advance(b"\x1b[1;1H");
+    for want in stops.iter().skip(1) {
+        s.advance(b"\t");
+        assert_eq!(s.frame().cursor.col, *want, "stops {stops:?}");
+    }
+}
+
+#[test]
+fn the_tab_mirror_matches_the_engine_through_resizes() {
+    let mut s = Screen::new(10, 3);
+    assert_tabs_match_the_engine(&mut s);
+    s.resize(30, 3);
+    assert_eq!(s.tab_stops(), vec![0, 8, 16, 24]);
+    assert_tabs_match_the_engine(&mut s);
+    s.advance(b"\x1b[1;5H\x1bH\x1b[1;9H\x1b[g");
+    assert_tabs_match_the_engine(&mut s);
+    s.resize(6, 3);
+    assert_eq!(s.tab_stops(), vec![0, 4]);
+    assert_tabs_match_the_engine(&mut s);
+    s.resize(20, 3);
+    assert_eq!(s.tab_stops(), vec![0, 4, 8, 16]);
+    assert_tabs_match_the_engine(&mut s);
+}
+
+#[test]
+fn character_sets_survive_a_snapshot() {
+    // G0 drawing left active.
+    let (live, restored) = round_trip("g0 drawing", 20, 3, "abc\x1b(0lqk\x1b[1;1H", "qqxx\x1b(Bqq");
+    assert_eq!(live.frame().cell(0, 0).unwrap().ch, '─');
+    assert_eq!(restored.frame().cell(0, 0).unwrap().ch, '─');
+    // G1 designated and shifted out; G2 and G3 designated (state only).
+    round_trip(
+        "g1 shifted out",
+        20,
+        3,
+        "\x1b)0\x0eqq\x1b*0\x1b+0",
+        "lqk\x0fqq\x0eqq",
+    );
+    // Designated but shifted back in.
+    round_trip("g1 not active", 20, 3, "\x1b)0\x0e\x0fqq", "\x0eqq\x0fqq");
+    // The plain case still has nothing to carry.
+    let snap = fed(20, 3, b"q").snapshot();
+    assert!(!snap.contains(&0x0e) && !snap.windows(3).any(|w| w == b"\x1b(0"));
+}
+
+fn clipboard_screen(policy: ClipboardPolicy) -> Screen {
+    let mut s = Screen::new(20, 3);
+    s.set_clipboard_policy(policy);
+    s
+}
+
+#[test]
+fn clipboard_sets_are_off_by_default() {
+    let mut s = Screen::new(20, 3);
+    assert_eq!(s.clipboard_policy(), ClipboardPolicy::Off);
+    s.advance(b"\x1b]52;c;aGVsbG8=\x07shown");
+    assert!(s.take_events().is_empty(), "no event, nothing to write");
+    assert_eq!(row_text(&s.frame(), 0), "shown", "and nothing printed");
+    assert!(s.take_replies().is_empty());
+}
+
+#[test]
+fn clipboard_sets_become_events_under_the_policy() {
+    let mut s = clipboard_screen(ClipboardPolicy::Set);
+    s.advance(b"\x1b]52;c;aGVsbG8=\x07\x1b]52;p;d29ybGQ\x1b\\\x1b]52;;aGk=\x07");
+    assert_eq!(
+        s.take_events(),
+        vec![
+            Event::ClipboardSet {
+                target: ClipboardTarget::Clipboard,
+                text: "hello".into()
+            },
+            Event::ClipboardSet {
+                target: ClipboardTarget::Selection,
+                text: "world".into()
+            },
+            Event::ClipboardSet {
+                target: ClipboardTarget::Clipboard,
+                text: "hi".into()
+            },
+        ]
+    );
+    assert!(s.take_events().is_empty(), "taken once");
+}
+
+#[test]
+fn clipboard_reads_are_never_answered() {
+    for policy in [ClipboardPolicy::Off, ClipboardPolicy::Set] {
+        let mut s = clipboard_screen(policy);
+        s.advance(b"\x1b]52;c;?\x07\x1b]52;p;?\x1b\\");
+        assert!(s.take_replies().is_empty(), "{policy:?}: no reply");
+        assert_eq!(
+            s.take_events(),
+            vec![
+                Event::ClipboardReadDenied {
+                    target: ClipboardTarget::Clipboard
+                },
+                Event::ClipboardReadDenied {
+                    target: ClipboardTarget::Selection
+                },
+            ],
+            "{policy:?}: reported"
+        );
+    }
+}
+
+#[test]
+fn bad_oversized_or_cancelled_clipboard_sets_are_dropped_whole() {
+    let mut s = clipboard_screen(ClipboardPolicy::Set);
+    // Not base64, not UTF-8, cancelled by CAN, and a cut buffer.
+    s.advance(b"\x1b]52;c;a$k=\x07\x1b]52;c;/w==\x07\x1b]52;c;aGk=\x18\x1b]52;0;aGk=\x07");
+    assert!(s.take_events().is_empty());
+
+    // Just within the cap, then just over: the larger is dropped, not cut.
+    let b64 = |n: usize| {
+        let mut v = b"\x1b]52;c;".to_vec();
+        v.extend(std::iter::repeat_n(b'Q', n / 3 * 4));
+        v.push(0x07);
+        v
+    };
+    s.advance(&b64(MAX_CLIPBOARD_TEXT));
+    match s.take_events().as_slice() {
+        [Event::ClipboardSet { text, .. }] => assert_eq!(text.len(), MAX_CLIPBOARD_TEXT / 3 * 3),
+        other => panic!("expected one set, got {other:?}"),
+    }
+    s.advance(&b64(MAX_CLIPBOARD_TEXT + 3000));
+    assert!(s.take_events().is_empty(), "over the cap");
+    s.advance(&b64(8 * MAX_CLIPBOARD_TEXT));
+    assert!(s.take_events().is_empty(), "far over the cap");
+    assert_eq!(row_text(&s.frame(), 0), "", "and the screen is untouched");
+}
+
+#[test]
+fn clipboard_events_do_not_depend_on_how_the_bytes_are_split() {
+    let input = b"a\x1b]52;c;aGk=\x07b\x1b]133;A\x1b\\c\x1b]52;c;?\x07";
+    let mut whole = clipboard_screen(ClipboardPolicy::Set);
+    whole.advance(input);
+    let want = whole.take_events();
+    assert_eq!(want.len(), 3);
+    for i in 1..input.len() {
+        let mut s = clipboard_screen(ClipboardPolicy::Set);
+        s.advance(&input[..i]);
+        s.advance(&input[i..]);
+        assert_eq!(s.take_events(), want, "split at {i}");
+    }
+}
+
+#[test]
+fn unread_events_are_bounded() {
+    let mut s = Screen::new(20, 3);
+    s.advance("\x1b]52;c;?\x07".repeat(5000).as_bytes());
+    assert_eq!(
+        s.take_events().len(),
+        canopy_term_core::event::MAX_PENDING_EVENTS
+    );
+}
+
+const PROMPT_SESSION: &str =
+    "\x1b]133;A\x07$ \x1b]133;B\x07ls\r\n\x1b]133;C\x07out\r\n\x1b]133;D;3\x07\x1b]133;A\x07$ ";
+
+#[test]
+fn prompt_marks_are_events_and_in_the_frame() {
+    let mut s = Screen::new(20, 6);
+    s.advance(PROMPT_SESSION.as_bytes());
+    use SemanticMark::*;
+    assert_eq!(
+        s.take_events(),
+        [
+            (PromptStart, 0),
+            (CommandStart, 0),
+            (OutputStart, 1),
+            (CommandFinished(Some(3)), 2),
+            (PromptStart, 2),
+        ]
+        .map(|(kind, line)| Event::Mark { kind, line })
+    );
+    let f = s.frame();
+    assert_eq!(
+        f.marks,
+        [
+            (0, PromptStart),
+            (0, CommandStart),
+            (1, OutputStart),
+            (2, CommandFinished(Some(3))),
+            (2, PromptStart),
+        ]
+        .map(|(row, kind)| RowMark { row, kind })
+    );
+    // The frame changed because of the marks alone.
+    let before = s.seq();
+    s.advance(b"\x1b]133;B\x07");
+    assert!(s.seq() > before);
+    // Exit code absent or garbled is just no code.
+    s.advance(b"\x1b]133;D\x07\x1b]133;D;x\x07");
+    assert_eq!(
+        s.take_events().iter().skip(1).count(),
+        2,
+        "two more finished marks"
+    );
+}
+
+#[test]
+fn marks_follow_their_rows_into_scrollback() {
+    let mut s = Screen::with_scrollback(20, 4, 100);
+    s.advance(b"\x1b]133;A\x07$ ls\r\n");
+    for i in 0..10 {
+        s.advance(format!("l{i}\r\n").as_bytes());
+    }
+    s.advance(b"\x1b]133;A\x07$ ");
+    assert!(
+        s.frame().marks.iter().all(|m| m.row == 3),
+        "only the new one"
+    );
+    let marks = s.marks();
+    assert_eq!(marks.len(), 2);
+    assert!(marks[0].index < s.scrollback_len());
+    assert_eq!(s.scrollback_row(marks[0].index).unwrap().text(), "$ ls");
+    assert_eq!(marks[0].line, 0);
+    assert_eq!(marks[1].index, s.scrollback_len() + 3);
+}
+
+fn text_at(s: &Screen, index: usize) -> String {
+    let len = s.scrollback_len();
+    if index < len {
+        s.scrollback_row(index).unwrap().text()
+    } else {
+        row_text(&s.frame(), (index - len) as u16)
+    }
+}
+
+#[test]
+fn marks_stay_exact_once_the_history_is_full() {
+    let mut s = Screen::with_scrollback(20, 4, 5);
+    s.advance(b"\x1b]133;A\x07first\r\n");
+    for i in 0..30 {
+        s.advance(format!("x{i}\r\n").as_bytes());
+    }
+    assert!(s.marks().is_empty(), "the first prompt left the history");
+    s.advance(b"\x1b]133;A\x07second\r\n");
+    for i in 0..2 {
+        s.advance(format!("y{i}\r\n").as_bytes());
+    }
+    let marks = s.marks();
+    assert_eq!(marks.len(), 1);
+    assert_eq!(text_at(&s, marks[0].index), "second");
+    // And again, a few lines at a time inside one advance.
+    s.advance(b"\x1b]133;A\x07third\r\n");
+    s.advance(b"p\r\nq\r\nr\r\n");
+    let marks = s.marks();
+    assert_eq!(marks.len(), 2);
+    assert_eq!(text_at(&s, marks[1].index), "third");
+}
+
+#[test]
+fn marks_lost_to_a_bulk_scroll_are_dropped_not_misplaced() {
+    let mut s = Screen::with_scrollback(20, 4, 5);
+    s.advance(b"\x1b]133;A\x07marked\r\n");
+    // More lines in one advance than the history holds.
+    s.advance("z\r\n".repeat(50).as_bytes());
+    assert!(s.marks().is_empty());
+    s.advance(b"\x1b]133;A\x07fresh");
+    let marks = s.marks();
+    assert_eq!(marks.len(), 1);
+    assert_eq!(text_at(&s, marks[0].index), "fresh");
+}
+
+#[test]
+fn marks_survive_the_alternate_screen_and_are_not_taken_on_it() {
+    let mut s = Screen::with_scrollback(20, 4, 50);
+    s.advance(b"\x1b]133;A\x07$ vim\r\n");
+    let before = s.marks();
+    assert_eq!(before.len(), 1);
+    s.take_events();
+    // A full-screen program: lots of output, and its own marks (ignored).
+    s.advance(b"\x1b[?1049h\x1b]133;A\x07");
+    s.advance("full screen\r\n".repeat(30).as_bytes());
+    assert!(s.marks().is_empty() && s.frame().marks.is_empty());
+    assert!(s.take_events().is_empty(), "not reported on the alt screen");
+    s.advance(b"\x1b[?1049l");
+    assert_eq!(s.marks(), before);
+    assert_eq!(s.frame().marks.len(), 1);
+}
+
+#[test]
+fn marks_that_cannot_be_followed_are_dropped() {
+    // Resize reflows lines.
+    let mut s = Screen::with_scrollback(20, 4, 50);
+    s.advance(b"\x1b]133;A\x07x");
+    s.resize(10, 4);
+    assert!(s.marks().is_empty());
+    // Reset.
+    s.advance(b"\x1b]133;A\x07x\x1bc");
+    assert!(s.marks().is_empty());
+    // Clearing the scrollback.
+    s.advance("\x1b]133;A\x07m\r\n".as_bytes());
+    s.advance("l\r\n".repeat(8).as_bytes());
+    assert!(!s.marks().is_empty());
+    s.advance(b"\x1b[3J");
+    assert!(s.marks().is_empty());
+    // Reverse scrolling moves the visible rows: those marks go, history stays.
+    let mut s = Screen::with_scrollback(20, 4, 50);
+    s.advance(b"\x1b]133;A\x07old\r\n");
+    s.advance("l\r\n".repeat(6).as_bytes());
+    s.advance(b"\x1b]133;A\x07$ \x1b[1;1H\x1bM");
+    let marks = s.marks();
+    assert_eq!(marks.len(), 1);
+    assert_eq!(text_at(&s, marks[0].index), "old");
+    // No scrollback, no marks.
+    let mut s = Screen::with_scrollback(20, 4, 0);
+    s.advance(b"\x1b]133;A\x07x");
+    assert!(s.marks().is_empty() && s.take_events().is_empty());
+}
+
+#[test]
+fn prompt_marks_survive_a_snapshot() {
+    let (live, restored) = round_trip(
+        "marks",
+        20,
+        6,
+        PROMPT_SESSION,
+        "ls\r\n\x1b]133;C\x07\x1b]133;D;0\x07",
+    );
+    assert_eq!(live.frame().marks.len(), 7);
+    assert_eq!(live.frame().marks, restored.frame().marks);
+    assert_eq!(live.marks().len(), restored.marks().len());
+}
+
+#[test]
+fn marks_do_not_change_what_is_drawn() {
+    let a = fed(20, 3, b"abc\r\ndef");
+    let b = fed(20, 3, b"a\x1b]133;A\x07bc\r\nd\x1b]133;D;0\x1b\\ef");
+    let (fa, fb) = (a.frame(), b.frame());
+    assert_eq!(fa.cells, fb.cells);
+    assert_eq!(fa.cursor, fb.cursor);
+}
+
+#[test]
+fn hostile_osc_input_does_not_break_the_new_state() {
+    let mut s = Screen::with_scrollback(30, 6, 20);
+    s.set_clipboard_policy(ClipboardPolicy::Set);
+    let mut bytes = Vec::new();
+    for i in 0..400u32 {
+        bytes.extend_from_slice(
+            format!(
+                "\x1b]133;{}\x07",
+                ["A", "B", "C", "D;1", "Z", ""][i as usize % 6]
+            )
+            .as_bytes(),
+        );
+        bytes.extend_from_slice(
+            format!("\x1b]8;id={i};http://h/{i}\x07t{i}\x1b]8;;\x07\r\n").as_bytes(),
+        );
+        bytes.extend_from_slice(
+            b"\x1b]52;c;QQ==\x07\x1bH\x1b[g\x1b[3g\x1bM\x1b[2L\x1b[?1049h\x1b]133;A\x07\x1b[?1049l",
+        );
+    }
+    bytes.extend(hostile_bytes(64 * 1024));
+    for chunk in bytes.chunks(509) {
+        s.advance(chunk);
+        let _ = s.take_events();
+    }
+    let f = s.frame();
+    assert_eq!(f.cells.len(), 30 * 6);
+    assert!(f.link_ids.is_empty() || f.link_ids.len() == f.cells.len());
+    assert!(f.marks.iter().all(|m| m.row < 6));
+    let restored = Screen::restore(30, 6, &s.snapshot());
+    assert_eq!(restored.frame().cells.len(), f.cells.len());
+    for m in s.marks() {
+        assert!(m.index < s.scrollback_len() + 6);
+    }
 }

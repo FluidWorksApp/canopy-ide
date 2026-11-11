@@ -2,6 +2,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use canopy_term_session::event::{ClipboardPolicy, ClipboardTarget, Event, SemanticMark};
 use canopy_term_session::frame::{Attrs, Frame};
 use canopy_term_session::input::{Key, KeyEvent, Mods, MouseButton, MouseEvent, MouseEventKind};
 use canopy_term_session::{
@@ -682,4 +683,69 @@ fn the_tick_budget_is_clamped() {
         ..SessionConfig::default()
     });
     assert_eq!(s.config().tick_budget, canopy_term_session::MAX_TICK_BUDGET);
+}
+
+#[test]
+fn events_pass_through_and_replayed_history_raises_none() {
+    let (mut s, peer) = session(20, 5);
+    s.set_clipboard_policy(ClipboardPolicy::Set);
+    let t = Instant::now();
+    // History, both ways it can arrive: a direct replay and a replay segment.
+    s.replay(b"\x1b]52;c;aGk=\x07\x1b]133;A\x07");
+    peer.send_replay(b"\x1b]52;c;aGk=\x07\x1b]133;D;1\x07");
+    peer.end_replay();
+    s.frame_since_at(0, t);
+    assert_eq!(s.take_events(), Vec::<Event>::new());
+
+    peer.send_output(b"\x1b]52;c;aGk=\x07\x1b]133;A\x07$ ");
+    s.frame_since_at(0, t);
+    assert_eq!(
+        FrameSource::take_events(&mut s),
+        vec![
+            Event::ClipboardSet {
+                target: ClipboardTarget::Clipboard,
+                text: "hi".into()
+            },
+            Event::Mark {
+                kind: SemanticMark::PromptStart,
+                line: 0
+            },
+        ]
+    );
+    assert!(s.take_events().is_empty(), "taken once");
+}
+
+#[test]
+fn clipboard_requests_are_not_events_unless_the_policy_allows() {
+    let (mut s, peer) = session(20, 5);
+    let t = Instant::now();
+    peer.send_output(b"\x1b]52;c;aGk=\x07\x1b]52;c;?\x07");
+    s.frame_since_at(0, t);
+    assert_eq!(
+        s.take_events(),
+        vec![Event::ClipboardReadDenied {
+            target: ClipboardTarget::Clipboard
+        }]
+    );
+    assert!(peer.take_written().is_empty(), "a read is never answered");
+}
+
+#[test]
+fn links_and_marks_reach_a_viewers_frame() {
+    let (mut s, peer) = session(20, 5);
+    let t = Instant::now();
+    peer.send_output(
+        b"\x1b]133;A\x07\x1b]8;;https://example.com/\x07go\x1b]8;;\x07\x1b[4:3;58;5;2mu",
+    );
+    s.frame_since_at(0, t);
+    let mut out = Frame::default();
+    assert!(s.take_frame_into(0, &mut out));
+    assert_eq!(out.link_at(0, 1).unwrap().uri, "https://example.com/");
+    assert!(out.link_at(0, 2).is_none());
+    assert_eq!(out.marks.len(), 1);
+    let u = out.cell(0, 2).unwrap();
+    assert!(u.attrs.has(Attrs::UNDERLINE) && u.attrs.has(Attrs::UNDERLINE_CURLY));
+    assert!(out.underline_color_at(0, 2).is_some());
+    // A viewer's copy is the published frame.
+    assert_eq!(out.links, s.screen().frame().links);
 }

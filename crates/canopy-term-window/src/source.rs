@@ -8,6 +8,7 @@
 
 use std::sync::Arc;
 
+use canopy_term_core::event::Event;
 use canopy_term_core::frame::Frame;
 
 /// Called from any thread when a new frame is ready; the window then pulls it.
@@ -32,5 +33,13 @@ pub trait FrameSource {
     /// The program exited: the window closes.
     fn closed(&self) -> bool {
         false
+    }
+
+    /// Events the program raised since the last call, oldest first: prompt
+    /// marks and, when the source's policy allows, clipboard requests. Never
+    /// act on a clipboard request without the user's say-so. Nothing in the
+    /// window calls this yet; the data is here for the UI that will.
+    fn take_events(&mut self) -> Vec<Event> {
+        Vec::new()
     }
 }

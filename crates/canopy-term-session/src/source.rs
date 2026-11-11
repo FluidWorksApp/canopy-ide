@@ -8,6 +8,7 @@
 use std::sync::Arc;
 use std::time::Instant;
 
+use canopy_term_core::event::Event;
 use canopy_term_core::frame::{Frame, Modes};
 use canopy_term_input::{
     encode_focus, encode_key, encode_mouse, encode_paste, encode_text, KeyEvent, MouseEvent,
@@ -45,6 +46,14 @@ pub trait FrameSource {
     /// the end of a synchronized-output hold. `None` when nothing is pending.
     fn deadline(&self) -> Option<Instant> {
         None
+    }
+
+    /// Events the program raised since the last call (prompt marks, and
+    /// clipboard requests when the policy allows them), oldest first. The
+    /// source never acts on them: a window decides what to do, and for a
+    /// clipboard request whether to write the clipboard at all.
+    fn take_events(&mut self) -> Vec<Event> {
+        Vec::new()
     }
 
     /// The program's current input modes. These can be newer than the last

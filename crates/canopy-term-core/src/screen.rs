@@ -23,6 +23,41 @@
 //! [`Screen::advance`]. Colour queries (OSC 10/11/12/4) are answered from
 //! colours the program set, else from [`Screen::set_reply_colors`]; with
 //! neither there is no reply. Pixel-size queries (`CSI 14 t`) are not answered.
+//! Clipboard queries (OSC 52 `?`) are never answered.
+//!
+//! # Events
+//!
+//! What the program announced rather than drew is queued as
+//! [`Event`]s and taken with [`Screen::take_events`]: OSC 133 prompt marks, and
+//! OSC 52 clipboard requests. The core never writes a clipboard. A set request
+//! only becomes an event under [`ClipboardPolicy::Set`], which is off by
+//! default: a program that prints an escape sequence must not overwrite the
+//! user's clipboard unless the application layer has chosen to allow it, and
+//! even then the application decides per event. Requests over
+//! [`MAX_CLIPBOARD_TEXT`] decoded bytes, or that are not base64 of UTF-8, are
+//! dropped whole. The engine's own OSC 52 handling is switched off; the filter
+//! parses the sequence instead.
+//!
+//! # Hyperlinks, underlines and marks in the frame
+//!
+//! OSC 8 hyperlinks are in [`Frame::links`] and [`Frame::link_ids`] (a bounded
+//! table: URIs of more than [`MAX_URI_BYTES`] bytes, with control characters,
+//! or past [`MAX_FRAME_LINKS`] distinct links on screen are not exposed).
+//! Underline styles are extra [`Attrs`] bits and underline colours are
+//! [`Frame::underline_colors`]. OSC 133 marks on visible rows are
+//! [`Frame::marks`]; [`Screen::marks`] has the ones in scrollback too, as row
+//! indexes that count scrollback rows first.
+//!
+//! Marks follow their row as it scrolls: the screen counts lines pushed into
+//! scrollback (by pinning the engine's viewport one line up while it parses, so
+//! the engine's own display offset counts them, which stays exact when the
+//! history is full). Marks are kept for the primary screen only, need
+//! scrollback of at least one line, and are dropped when the lines they sit on
+//! cannot be followed: a resize, `ESC c`, clearing the scrollback, more lines
+//! scrolled in one go than the history holds, and, for the visible rows,
+//! reverse scrolling and insert or delete lines. A program that scrolls inside
+//! a partial scroll region on the main screen can misplace older marks once
+//! the scrollback is full (the engine counts those scrolls too).
 //!
 //! # What a snapshot contains
 //!
@@ -32,8 +67,13 @@
 //! shape, blink and visibility, the title, the pen (the style the next
 //! character is drawn with), the scroll region, insert/origin/newline/autowrap
 //! and alternate-scroll modes, every mouse mode and encoding bit, the kitty
-//! flags of both screens, and every mode in [`Modes`]. If the program is on the
-//! alternate screen, the snapshot enters it first.
+//! flags of both screens, and every mode in [`Modes`]; and also hyperlinks
+//! (OSC 8) on the visible cells and on the pen, underline styles and colours,
+//! the palette the program set (OSC 4, 10, 11, 12), tab stops, the G0-G3
+//! character sets and which is shifted in, and the OSC 133 marks on visible
+//! rows. If the program is on the alternate screen, the snapshot enters it
+//! first. Restoring raises no events (the marks it replays are not reported)
+//! and never carries OSC 52 data.
 //!
 //! **Scrollback is not in the snapshot.** Read it with
 //! [`Screen::scrollback_len`] and [`Screen::scrollback_row`]; on the alternate
@@ -41,10 +81,10 @@
 //! expose the primary grid behind it).
 //!
 //! Not carried: the primary screen contents behind an active alternate screen,
-//! tab stops, saved-cursor (DECSC) slots, character sets, a pending autowrap at
-//! the last column, an empty scroll region, kitty stack entries below the top,
-//! a soft wrap on the bottom row, the palette (OSC 4/10/11/12), underline
-//! styles and colour, and hyperlinks (OSC 8).
+//! saved-cursor (DECSC) slots, a pending autowrap at the last column, an empty
+//! scroll region, kitty stack entries below the top, a soft wrap on the bottom
+//! row, hyperlinks on blank trailing cells of a row, marks in scrollback, and
+//! on the alternate screen the marks of the primary one behind it.
 //!
 //! # Bounds
 //!
@@ -58,19 +98,26 @@
 
 pub use crate::filter::{KITTY_STACK_MAX, MAX_OSC_BYTES, MAX_TITLE_BYTES};
 
+pub use crate::event::{
+    ClipboardPolicy, ClipboardTarget, Event, SemanticMark, MAX_CLIPBOARD_TEXT, MAX_PENDING_EVENTS,
+};
+pub use crate::filter::MAX_URI_BYTES;
+
 use crate::filter::{Action, Filter};
 use crate::frame::{
-    Attrs, Cell, Color, Cursor, CursorShape, Damage, Frame, Modes, MouseEncoding, MouseMode,
+    Attrs, Cell, Color, Cursor, CursorShape, Damage, Frame, Link, Modes, MouseEncoding, MouseMode,
+    RowMark, UnderlineColor,
 };
-use alacritty_terminal::event::{Event, EventListener};
-use alacritty_terminal::grid::Dimensions;
+use alacritty_terminal::event::{Event as EngineEvent, EventListener};
+use alacritty_terminal::grid::{Dimensions, Scroll};
 use alacritty_terminal::index::{Column, Line};
 use alacritty_terminal::term::cell::{Cell as EngineCell, Flags};
-use alacritty_terminal::term::{Config, Term, TermMode};
+use alacritty_terminal::term::{Config, Osc52, Term, TermMode};
 use alacritty_terminal::vte::ansi::{
-    Color as EngineColor, CursorShape as EngineShape, NamedColor, Processor, Rgb, Timeout,
+    CharsetIndex, Color as EngineColor, CursorShape as EngineShape, NamedColor, Processor, Rgb,
+    StandardCharset, Timeout,
 };
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::fmt::Write as _;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -82,6 +129,19 @@ pub const MAX_COLS: u16 = 2000;
 pub const MAX_ROWS: u16 = 1000;
 /// Most scrollback lines accepted.
 pub const MAX_SCROLLBACK: usize = 100_000;
+
+/// Most distinct hyperlinks exposed in one frame; cells with further ones have
+/// none.
+pub const MAX_FRAME_LINKS: usize = 4096;
+/// Most OSC 133 marks kept; the oldest are dropped past this.
+pub const MAX_MARKS: usize = 4096;
+
+/// [`Screen::palette_overrides`] index of the foreground colour (OSC 10).
+pub const PALETTE_FOREGROUND: u16 = 256;
+/// [`Screen::palette_overrides`] index of the background colour (OSC 11).
+pub const PALETTE_BACKGROUND: u16 = 257;
+/// [`Screen::palette_overrides`] index of the cursor colour (OSC 12).
+pub const PALETTE_CURSOR: u16 = 258;
 
 /// Most scalars kept in one cell's cluster (base plus combining marks).
 pub const MAX_CLUSTER_SCALARS: usize = 16;
@@ -137,12 +197,12 @@ fn push_reply(q: &Mutex<VecDeque<Pending>>, p: Pending) {
 const TRIM_SLICE: usize = 4096;
 
 impl EventListener for Listener {
-    fn send_event(&self, event: Event) {
+    fn send_event(&self, event: EngineEvent) {
         match event {
-            Event::Title(t) => *lock(&self.title) = Some(t),
-            Event::ResetTitle => *lock(&self.title) = None,
-            Event::PtyWrite(s) => push_reply(&self.replies, Pending::Bytes(s)),
-            Event::ColorRequest(i, f) => push_reply(&self.replies, Pending::Color(i, f)),
+            EngineEvent::Title(t) => *lock(&self.title) = Some(t),
+            EngineEvent::ResetTitle => *lock(&self.title) = None,
+            EngineEvent::PtyWrite(s) => push_reply(&self.replies, Pending::Bytes(s)),
+            EngineEvent::ColorRequest(i, f) => push_reply(&self.replies, Pending::Color(i, f)),
             _ => {}
         }
     }
@@ -208,6 +268,51 @@ pub struct Screen {
     /// The cursor's template cell: the pen the next character is drawn with.
     pen: Cell,
     blinking: bool,
+    events: VecDeque<Event>,
+    clipboard: ClipboardPolicy,
+    /// Tab stops, one per column, mirrored from HTS and TBC (the engine keeps
+    /// its own private).
+    tabs: Vec<bool>,
+    marks: Vec<MarkRec>,
+    /// Lines pushed into scrollback since marks began to be tracked.
+    scrolled: u64,
+    /// Scrollback the engine was configured with.
+    scroll_cap: usize,
+    /// Marks have been seen, so scrolling is being counted.
+    tracking: bool,
+    armed: Option<Armed>,
+}
+
+/// An OSC 133 mark; `line` is `Screen::scrolled` plus the visible row it was
+/// recorded on, so it does not change as the row scrolls.
+#[derive(Clone, Copy)]
+struct MarkRec {
+    line: u64,
+    kind: SemanticMark,
+}
+
+/// The engine's viewport state when scroll counting began for one slice.
+#[derive(Clone, Copy)]
+struct Armed {
+    offset: usize,
+    history: usize,
+    alt: bool,
+}
+
+/// One mark as [`Screen::marks`] reports it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Mark {
+    pub kind: SemanticMark,
+    /// A number that does not change as the row scrolls (the `line` of the
+    /// matching [`Event::Mark`]).
+    pub line: u64,
+    /// The row now: `0..scrollback_len()` is [`Screen::scrollback_row`]; from
+    /// `scrollback_len()` on, row `index - scrollback_len()` of the frame.
+    pub index: usize,
+}
+
+fn default_tabs(cols: usize) -> Vec<bool> {
+    (0..cols).map(|i| i % 8 == 0).collect()
 }
 
 fn convert_color(c: EngineColor) -> Color {
@@ -240,6 +345,15 @@ fn convert_cell(cell: &EngineCell, clusters: &mut Vec<String>) -> Cell {
     }
     if f.intersects(Flags::ALL_UNDERLINES) {
         attrs |= Attrs::UNDERLINE;
+        if f.contains(Flags::DOUBLE_UNDERLINE) {
+            attrs |= Attrs::UNDERLINE_DOUBLE;
+        } else if f.contains(Flags::UNDERCURL) {
+            attrs |= Attrs::UNDERLINE_CURLY;
+        } else if f.contains(Flags::DOTTED_UNDERLINE) {
+            attrs |= Attrs::UNDERLINE_DOTTED;
+        } else if f.contains(Flags::DASHED_UNDERLINE) {
+            attrs |= Attrs::UNDERLINE_DASHED;
+        }
     }
     if f.contains(Flags::INVERSE) {
         attrs |= Attrs::INVERSE;
@@ -342,19 +456,40 @@ fn rows_equal(a: &Frame, b_cells: &[Cell], b_clusters: &[String], row: usize) ->
     true
 }
 
-fn write_sgr(out: &mut String, fg: Color, bg: Color, attrs: Attrs) {
+fn write_sgr(out: &mut String, fg: Color, bg: Color, attrs: Attrs, underline: Color) {
     out.push_str("\x1b[0");
     for (flag, code) in [
         (Attrs::BOLD, 1),
         (Attrs::DIM, 2),
         (Attrs::ITALIC, 3),
-        (Attrs::UNDERLINE, 4),
         (Attrs::INVERSE, 7),
         (Attrs::HIDDEN, 8),
         (Attrs::STRIKE, 9),
     ] {
         if attrs.has(flag) {
             let _ = write!(out, ";{code}");
+        }
+    }
+    if attrs.has(Attrs::UNDERLINE) {
+        out.push_str(if attrs.has(Attrs::UNDERLINE_DOUBLE) {
+            ";4:2"
+        } else if attrs.has(Attrs::UNDERLINE_CURLY) {
+            ";4:3"
+        } else if attrs.has(Attrs::UNDERLINE_DOTTED) {
+            ";4:4"
+        } else if attrs.has(Attrs::UNDERLINE_DASHED) {
+            ";4:5"
+        } else {
+            ";4"
+        });
+    }
+    match underline {
+        Color::Default => {}
+        Color::Indexed(i) => {
+            let _ = write!(out, ";58;5;{i}");
+        }
+        Color::Rgb(r, g, b) => {
+            let _ = write!(out, ";58;2;{r};{g};{b}");
         }
     }
     match fg {
@@ -378,6 +513,160 @@ fn write_sgr(out: &mut String, fg: Color, bg: Color, attrs: Attrs) {
     out.push('m');
 }
 
+/// Everything the frame carries beyond the cells: hyperlinks and underline
+/// colours.
+#[derive(Default)]
+struct Extras {
+    /// Index 0 is a placeholder once any link exists.
+    links: Vec<Link>,
+    link_ids: Vec<u16>,
+    underline_colors: Vec<UnderlineColor>,
+    /// Link index for each (id, uri) seen; 0 for one that is not exposed.
+    index: HashMap<(String, String), u16>,
+    /// Index of the link of the previous linked cell, so a run of cells with
+    /// one link costs no lookup.
+    last: usize,
+}
+
+fn exposable(uri: &str) -> bool {
+    uri.len() <= MAX_URI_BYTES && !uri.chars().any(char::is_control)
+}
+
+impl Extras {
+    fn note(&mut self, cell: &EngineCell, row: usize, col: usize, cols: usize, total: usize) {
+        if cell.extra.is_none() {
+            return;
+        }
+        if cell.flags.intersects(Flags::ALL_UNDERLINES) {
+            if let Some(color) = cell.underline_color() {
+                self.underline_colors.push(UnderlineColor {
+                    row: row as u16,
+                    col: col as u16,
+                    color: convert_color(color),
+                });
+            }
+        }
+        if let Some(h) = cell.hyperlink() {
+            let id = self.link_index(h.id(), h.uri());
+            if id != 0 {
+                if self.link_ids.is_empty() {
+                    self.link_ids = vec![0; total];
+                }
+                self.link_ids[row * cols + col] = id;
+            }
+        }
+    }
+
+    fn link_index(&mut self, id: &str, uri: &str) -> u16 {
+        if self.last != 0 && self.links[self.last].id == id && self.links[self.last].uri == uri {
+            return self.last as u16;
+        }
+        let key = (id.to_string(), uri.to_string());
+        if let Some(&i) = self.index.get(&key) {
+            if i != 0 {
+                self.last = i as usize;
+            }
+            return i;
+        }
+        let room = self.links.len() <= MAX_FRAME_LINKS;
+        let i = if room && exposable(uri) {
+            if self.links.is_empty() {
+                self.links.push(Link::default());
+            }
+            self.links.push(Link {
+                id: key.0.clone(),
+                uri: key.1.clone(),
+            });
+            (self.links.len() - 1) as u16
+        } else {
+            0
+        };
+        self.index.insert(key, i);
+        if i != 0 {
+            self.last = i as usize;
+        }
+        i
+    }
+}
+
+fn link_of<'a>(ids: &[u16], links: &'a [Link], i: usize) -> Option<&'a Link> {
+    match ids.get(i) {
+        Some(&id) if id != 0 => links.get(id as usize),
+        _ => None,
+    }
+}
+
+fn row_underlines(v: &[UnderlineColor], row: usize) -> &[UnderlineColor] {
+    let r = row as u16;
+    let start = v.partition_point(|u| u.row < r);
+    let end = v.partition_point(|u| u.row <= r);
+    &v[start..end]
+}
+
+/// Whether a row's hyperlinks and underline colours are unchanged from the
+/// last frame.
+fn extras_equal(old: &Frame, new: &Extras, row: usize) -> bool {
+    if !(old.underline_colors.is_empty() && new.underline_colors.is_empty())
+        && row_underlines(&old.underline_colors, row) != row_underlines(&new.underline_colors, row)
+    {
+        return false;
+    }
+    if !(old.link_ids.is_empty() && new.link_ids.is_empty()) {
+        let cols = old.cols as usize;
+        for i in row * cols..(row + 1) * cols {
+            if link_of(&old.link_ids, &old.links, i) != link_of(&new.link_ids, &new.links, i) {
+                return false;
+            }
+        }
+    }
+    true
+}
+
+/// The marks on visible rows, top to bottom.
+fn frame_marks(marks: &[MarkRec], scrolled: u64, rows: u16, alt: bool) -> Vec<RowMark> {
+    if alt {
+        return Vec::new();
+    }
+    let mut out: Vec<RowMark> = marks
+        .iter()
+        .filter(|m| m.line >= scrolled && m.line - scrolled < rows as u64)
+        .map(|m| RowMark {
+            row: (m.line - scrolled) as u16,
+            kind: m.kind,
+        })
+        .collect();
+    out.sort_by_key(|m| m.row);
+    out
+}
+
+/// An OSC 8 sequence that sets (or, with `None`, ends) the link.
+fn write_link(out: &mut String, link: Option<&Link>) {
+    match link {
+        None => out.push_str("\x1b]8;;\x1b\\"),
+        Some(l) => {
+            let clean =
+                !l.id.is_empty() && !l.id.chars().any(|c| c.is_control() || c == ':' || c == ';');
+            if clean {
+                let _ = write!(out, "\x1b]8;id={};{}\x1b\\", l.id, l.uri);
+            } else {
+                let _ = write!(out, "\x1b]8;;{}\x1b\\", l.uri);
+            }
+        }
+    }
+}
+
+fn write_mark(out: &mut String, kind: SemanticMark) {
+    match kind {
+        SemanticMark::PromptStart => out.push_str("\x1b]133;A\x1b\\"),
+        SemanticMark::CommandStart => out.push_str("\x1b]133;B\x1b\\"),
+        SemanticMark::OutputStart => out.push_str("\x1b]133;C\x1b\\"),
+        SemanticMark::CommandFinished(None) => out.push_str("\x1b]133;D\x1b\\"),
+        SemanticMark::CommandFinished(Some(code)) => {
+            let _ = write!(out, "\x1b]133;D;{code}\x1b\\");
+        }
+    }
+}
+
 fn clamp_size(cols: u16, rows: u16) -> (u16, u16) {
     (
         cols.clamp(MIN_COLS, MAX_COLS),
@@ -399,6 +688,9 @@ impl Screen {
             scrolling_history: scrollback.min(MAX_SCROLLBACK),
             // Tracked by the filter instead: see the module docs.
             kitty_keyboard: false,
+            // Parsed by the filter instead, and never answered: see the module
+            // docs.
+            osc52: Osc52::Disabled,
             ..Config::default()
         };
         let size = Size {
@@ -421,6 +713,14 @@ impl Screen {
             full_seq: 1,
             pen: Cell::default(),
             blinking: false,
+            events: VecDeque::new(),
+            clipboard: ClipboardPolicy::Off,
+            tabs: default_tabs(cols as usize),
+            marks: Vec::new(),
+            scrolled: 0,
+            scroll_cap: scrollback.min(MAX_SCROLLBACK),
+            tracking: false,
+            armed: None,
         };
         screen.frame.seq = 1;
         screen.refresh(true);
@@ -451,8 +751,42 @@ impl Screen {
             self.feed_engine(&filtered[start..at]);
             start = at;
             match action {
-                Action::Reset => *lock(&self.title) = None,
+                Action::Reset => {
+                    *lock(&self.title) = None;
+                    self.tabs = default_tabs(self.cols as usize);
+                    self.marks.clear();
+                }
                 Action::Reply(s) => push_reply(&self.replies, Pending::Bytes(s)),
+                Action::ClipboardSet { target, text } => {
+                    if self.clipboard == ClipboardPolicy::Set {
+                        self.push_event(Event::ClipboardSet { target, text });
+                    }
+                }
+                Action::ClipboardRead(target) => {
+                    self.push_event(Event::ClipboardReadDenied { target });
+                }
+                Action::Mark(kind) => self.record_mark(kind),
+                Action::TabSet => {
+                    let col = self.term.grid().cursor.point.column.0;
+                    if let Some(t) = self.tabs.get_mut(col) {
+                        *t = true;
+                    }
+                }
+                Action::TabClear { all } => {
+                    if all {
+                        self.tabs.iter_mut().for_each(|t| *t = false);
+                    } else {
+                        let col = self.term.grid().cursor.point.column.0;
+                        if let Some(t) = self.tabs.get_mut(col) {
+                            *t = false;
+                        }
+                    }
+                }
+                Action::ShiftRows => {
+                    let top = self.scrolled;
+                    self.marks.retain(|m| m.line < top);
+                }
+                Action::Split => {}
             }
         }
         if start < filtered.len() {
@@ -465,9 +799,149 @@ impl Screen {
 
     fn feed_engine(&mut self, bytes: &[u8]) {
         for slice in bytes.chunks(TRIM_SLICE) {
+            self.arm_scroll();
             self.processor.advance(&mut self.term, slice);
+            self.sync_scroll();
             self.trim_visible();
         }
+    }
+
+    /// Start counting the lines the next slice pushes into scrollback: pin the
+    /// engine's viewport one line up, so each scroll adds to its display
+    /// offset (which, unlike the history size, keeps counting once the history
+    /// is full).
+    fn arm_scroll(&mut self) {
+        if !self.tracking || self.scroll_cap == 0 {
+            return;
+        }
+        let alt = self.term.mode().contains(TermMode::ALT_SCREEN);
+        let grid = self.term.grid_mut();
+        grid.scroll_display(Scroll::Bottom);
+        grid.scroll_display(Scroll::Delta(1));
+        self.armed = Some(Armed {
+            offset: grid.display_offset(),
+            history: grid.history_size(),
+            alt,
+        });
+    }
+
+    /// Add what the slice scrolled to the count, forget marks that left the
+    /// history or cannot be followed, and unpin the viewport.
+    fn sync_scroll(&mut self) {
+        let Some(armed) = self.armed.take() else {
+            return;
+        };
+        let alt = self.term.mode().contains(TermMode::ALT_SCREEN);
+        let grid = self.term.grid_mut();
+        let (offset, history) = (grid.display_offset(), grid.history_size());
+        grid.scroll_display(Scroll::Bottom);
+        // The alternate screen has no history and leaves the primary one
+        // alone; a switch is fed to the engine on its own (`Action::Split`).
+        if armed.alt || alt {
+            return;
+        }
+        let cap = self.scroll_cap;
+        let (lines, lost) = if history < cap {
+            // Not full: nothing was evicted, so the growth is the count. A
+            // shrink is the history being cleared.
+            (
+                history.saturating_sub(armed.history),
+                history < armed.history,
+            )
+        } else if armed.offset == 1 && offset >= 1 && offset < cap {
+            (offset - 1, false)
+        } else {
+            // At least a whole history of lines in one slice (or a clear): no
+            // older mark is still there, and the count is unknown.
+            (cap, true)
+        };
+        if lost {
+            self.marks.clear();
+        }
+        self.scrolled += lines as u64;
+        let (scrolled, history) = (self.scrolled, history as u64);
+        self.marks.retain(|m| m.line + history >= scrolled);
+    }
+
+    fn push_event(&mut self, event: Event) {
+        if self.events.len() >= MAX_PENDING_EVENTS {
+            self.events.pop_front();
+        }
+        self.events.push_back(event);
+    }
+
+    fn record_mark(&mut self, kind: SemanticMark) {
+        if self.scroll_cap == 0 || self.term.mode().contains(TermMode::ALT_SCREEN) {
+            return;
+        }
+        self.tracking = true;
+        let row = self.term.grid().cursor.point.line.0.max(0) as u64;
+        let line = self.scrolled + row;
+        if !self.marks.iter().any(|m| m.line == line && m.kind == kind) {
+            if self.marks.len() >= MAX_MARKS {
+                self.marks.remove(0);
+            }
+            self.marks.push(MarkRec { line, kind });
+        }
+        self.push_event(Event::Mark { kind, line });
+    }
+
+    /// Events the program raised since the last call, oldest first (at most
+    /// [`MAX_PENDING_EVENTS`] are held; drain after every `advance`). See
+    /// [`Event`] and [`ClipboardPolicy`].
+    pub fn take_events(&mut self) -> Vec<Event> {
+        self.events.drain(..).collect()
+    }
+
+    /// What to do with OSC 52 set requests. [`ClipboardPolicy::Off`] until the
+    /// application layer says otherwise.
+    pub fn set_clipboard_policy(&mut self, policy: ClipboardPolicy) {
+        self.clipboard = policy;
+    }
+
+    pub fn clipboard_policy(&self) -> ClipboardPolicy {
+        self.clipboard
+    }
+
+    /// The OSC 133 marks in scrollback and on the visible rows, top to bottom.
+    /// Empty on the alternate screen.
+    pub fn marks(&self) -> Vec<Mark> {
+        if self.term.mode().contains(TermMode::ALT_SCREEN) {
+            return Vec::new();
+        }
+        let history = self.term.history_size() as u64;
+        let mut out: Vec<Mark> = self
+            .marks
+            .iter()
+            .filter(|m| m.line + history >= self.scrolled)
+            .map(|m| Mark {
+                kind: m.kind,
+                line: m.line,
+                index: (m.line + history - self.scrolled) as usize,
+            })
+            .collect();
+        out.sort_by_key(|m| m.index);
+        out
+    }
+
+    /// Colours the program set with OSC 4 (index 0..=255) and OSC 10, 11, 12
+    /// ([`PALETTE_FOREGROUND`], [`PALETTE_BACKGROUND`], [`PALETTE_CURSOR`]),
+    /// as (index, (r, g, b)), in index order. Colours the program never set
+    /// are not listed: the theme applies.
+    pub fn palette_overrides(&self) -> Vec<(u16, (u8, u8, u8))> {
+        let colors = self.term.colors();
+        let mut out = Vec::new();
+        for i in 0..=PALETTE_CURSOR {
+            if let Some(c) = colors[i as usize] {
+                out.push((i, (c.r, c.g, c.b)));
+            }
+        }
+        out
+    }
+
+    /// Columns that have a tab stop, in order.
+    pub fn tab_stops(&self) -> Vec<u16> {
+        (0..self.cols).filter(|&c| self.tabs[c as usize]).collect()
     }
 
     /// Drop combining marks past the cluster bound from every visible cell.
@@ -538,6 +1012,14 @@ impl Screen {
         self.cols = cols;
         self.rows = rows;
         self.filter.tracker.resize(rows);
+        // Reflow moves lines under the marks; the engine extends tab stops
+        // with the default pattern and truncates them.
+        self.marks.clear();
+        let mut next = self.tabs.len();
+        self.tabs.resize_with(cols as usize, || {
+            next += 1;
+            (next - 1) % 8 == 0
+        });
         self.refresh(true);
     }
 
@@ -611,11 +1093,14 @@ impl Screen {
         let (cols, rows) = (self.cols as usize, self.rows as usize);
         let mut clusters = vec![String::new()];
         let mut cells = Vec::with_capacity(cols * rows);
+        let mut extras = Extras::default();
         let grid = self.term.grid();
         for r in 0..rows {
             let row = &grid[Line(r as i32)];
             for c in 0..cols {
-                cells.push(convert_cell(&row[Column(c)], &mut clusters));
+                let cell = &row[Column(c)];
+                cells.push(convert_cell(cell, &mut clusters));
+                extras.note(cell, r, c, cols, cols * rows);
             }
         }
         let p = grid.cursor.point;
@@ -662,6 +1147,7 @@ impl Screen {
             kitty_keyboard: tracker.kitty_active(),
         };
         let alt_screen = mode.contains(TermMode::ALT_SCREEN);
+        let marks = frame_marks(&self.marks, self.scrolled, self.rows, alt_screen);
         let title = lock(&self.title).clone();
         self.pen = pen;
         self.blinking = style.blinking;
@@ -671,14 +1157,15 @@ impl Screen {
         let mut changed: Vec<usize> = Vec::new();
         if !size_changed {
             for r in 0..rows {
-                if !rows_equal(old, &cells, &clusters, r) {
+                if !rows_equal(old, &cells, &clusters, r) || !extras_equal(old, &extras, r) {
                     changed.push(r);
                 }
             }
         }
         let alt_changed = old.alt_screen != alt_screen;
         let cursor_changed = old.cursor != cursor;
-        let meta_changed = cursor_changed || old.modes != modes || old.title != title;
+        let meta_changed =
+            cursor_changed || old.modes != modes || old.title != title || old.marks != marks;
         if !(force_full || size_changed || alt_changed || meta_changed || !changed.is_empty()) {
             return;
         }
@@ -714,6 +1201,10 @@ impl Screen {
             },
             alt_screen,
             title,
+            links: extras.links,
+            link_ids: extras.link_ids,
+            underline_colors: extras.underline_colors,
+            marks,
         };
     }
 
@@ -755,7 +1246,9 @@ impl Screen {
                     .contains(Flags::WRAPLINE)
         };
         let blank = Cell::default();
-        let mut cur: (Color, Color, Attrs) = (Color::Default, Color::Default, Attrs(0));
+        let mut cur: (Color, Color, Attrs, Color) =
+            (Color::Default, Color::Default, Attrs(0), Color::Default);
+        let mut cur_link = 0u16;
         for r in 0..rows {
             let row = &f.cells[r * cols..(r + 1) * cols];
             let chained = r > 0 && wrapped(r - 1);
@@ -772,14 +1265,22 @@ impl Screen {
             if !chained {
                 let _ = write!(out, "\x1b[{};1H", r + 1);
             }
-            for cell in &row[..=end] {
+            for (c, cell) in row[..=end].iter().enumerate() {
                 if cell.attrs.has(Attrs::WIDE_TAIL) {
                     continue;
                 }
                 let attrs = Attrs(cell.attrs.0 & !Attrs::WIDE_TAIL);
-                if (cell.fg, cell.bg, attrs) != cur {
-                    write_sgr(&mut out, cell.fg, cell.bg, attrs);
-                    cur = (cell.fg, cell.bg, attrs);
+                let underline = f
+                    .underline_color_at(r as u16, c as u16)
+                    .unwrap_or(Color::Default);
+                if (cell.fg, cell.bg, attrs, underline) != cur {
+                    write_sgr(&mut out, cell.fg, cell.bg, attrs, underline);
+                    cur = (cell.fg, cell.bg, attrs, underline);
+                }
+                let link = f.link_ids.get(r * cols + c).copied().unwrap_or(0);
+                if link != cur_link {
+                    write_link(&mut out, f.links.get(link as usize).filter(|_| link != 0));
+                    cur_link = link;
                 }
                 match f.clusters.get(cell.cluster as usize) {
                     Some(text) if cell.cluster != 0 => out.push_str(text),
@@ -787,16 +1288,66 @@ impl Screen {
                 }
             }
         }
-        // Pen: what the next character is drawn with.
+        if cur_link != 0 {
+            write_link(&mut out, None);
+        }
+        // Pen: what the next character is drawn with, hyperlink included.
+        let template = &self.term.grid().cursor.template;
+        let pen_underline = template
+            .underline_color()
+            .map(convert_color)
+            .unwrap_or(Color::Default);
         write_sgr(
             &mut out,
             self.pen.fg,
             self.pen.bg,
             Attrs(self.pen.attrs.0 & !Attrs::WIDE_TAIL),
+            pen_underline,
         );
+        if let Some(h) = template.hyperlink() {
+            if exposable(h.uri()) {
+                write_link(
+                    &mut out,
+                    Some(&Link {
+                        id: h.id().to_string(),
+                        uri: h.uri().to_string(),
+                    }),
+                );
+            }
+        }
         if let Some(title) = &f.title {
             let clean: String = title.chars().filter(|c| !c.is_control()).collect();
             let _ = write!(out, "\x1b]2;{clean}\x07");
+        }
+
+        // The palette the program set.
+        let colors = self.term.colors();
+        for i in 0..=PALETTE_CURSOR {
+            if let Some(c) = colors[i as usize] {
+                let code = match i {
+                    PALETTE_FOREGROUND => "10".to_string(),
+                    PALETTE_BACKGROUND => "11".to_string(),
+                    PALETTE_CURSOR => "12".to_string(),
+                    _ => format!("4;{i}"),
+                };
+                let _ = write!(
+                    out,
+                    "\x1b]{code};rgb:{:02x}/{:02x}/{:02x}\x1b\\",
+                    c.r, c.g, c.b
+                );
+            }
+        }
+        // Tab stops: clear them all, then set each (CHA, then HTS).
+        if self.tabs != default_tabs(cols) {
+            out.push_str("\x1b[3g");
+            for (c, _) in self.tabs.iter().enumerate().filter(|(_, on)| **on) {
+                let _ = write!(out, "\x1b[{}G\x1bH", c + 1);
+            }
+        }
+        // Marks on visible rows: each is written with the cursor on its row.
+        for m in &f.marks {
+            let _ = write!(out, "\x1b[{};1H", m.row + 1);
+            write_mark(&mut out, m.kind);
         }
 
         // Modes, after the grid so insert and newline modes do not touch it.
@@ -841,6 +1392,25 @@ impl Screen {
             out.push_str("\x1b[?1004h");
         }
         kitty_restore(&mut out, &t.kitty[f.alt_screen as usize]);
+        // Character sets (after the grid, whose cells are already translated)
+        // and which one is shifted in.
+        let charsets = &self.term.grid().cursor.charsets;
+        for (index, intro) in [
+            (CharsetIndex::G0, '('),
+            (CharsetIndex::G1, ')'),
+            (CharsetIndex::G2, '*'),
+            (CharsetIndex::G3, '+'),
+        ] {
+            if matches!(
+                charsets[index],
+                StandardCharset::SpecialCharacterAndLineDrawing
+            ) {
+                let _ = write!(out, "\x1b{intro}0");
+            }
+        }
+        if t.shift_out {
+            out.push('\x0e');
+        }
 
         // Scroll region (homes the cursor), origin mode (homes it again,
         // relative to the region), then the cursor itself.
@@ -885,6 +1455,8 @@ impl Screen {
     pub fn restore(cols: u16, rows: u16, snapshot: &[u8]) -> Screen {
         let mut s = Screen::new(cols, rows);
         s.advance(snapshot);
+        // The marks it replayed are state, not news.
+        s.events.clear();
         s
     }
 }

@@ -5,6 +5,7 @@ use std::collections::VecDeque;
 use std::io;
 use std::time::{Duration, Instant};
 
+use canopy_term_core::event::{ClipboardPolicy, Event, MAX_PENDING_EVENTS};
 use canopy_term_core::frame::{Damage, Frame, Modes};
 use canopy_term_core::screen::DEFAULT_SCROLLBACK;
 use canopy_term_core::Screen;
@@ -213,6 +214,8 @@ pub struct Session<L: SessionLink> {
     closed: bool,
     waker: Option<Waker>,
     stats: Stats,
+    /// Events from live output, for the application layer; bounded.
+    events: VecDeque<Event>,
 }
 
 fn interrupted(e: &io::Error) -> bool {
@@ -306,7 +309,23 @@ impl<L: SessionLink> Session<L> {
             closed: false,
             waker: None,
             stats: Stats::default(),
+            events: VecDeque::new(),
         }
+    }
+
+    /// Events the program raised in live output since the last call, oldest
+    /// first: OSC 133 prompt marks and, when the policy allows, OSC 52
+    /// clipboard requests (see `canopy_term_core::event`). History replayed on
+    /// attach raises none, so an old clipboard request in the host's ring never
+    /// fires again. At most `MAX_PENDING_EVENTS` are held.
+    pub fn take_events(&mut self) -> Vec<Event> {
+        self.events.drain(..).collect()
+    }
+
+    /// What to do with OSC 52 set requests in live output. Off until the
+    /// application layer turns it on.
+    pub fn set_clipboard_policy(&mut self, policy: ClipboardPolicy) {
+        self.screen.set_clipboard_policy(policy);
     }
 
     /// The screen, for what frames do not carry (scrollback, snapshot).
@@ -357,6 +376,7 @@ impl<L: SessionLink> Session<L> {
             self.stats.advances += 1;
             self.stats.replay_bytes += chunk.len() as u64;
             self.stats.dropped_reply_bytes += self.screen.take_replies().len() as u64;
+            let _ = self.screen.take_events();
         }
         let _ = self.refresh_modes();
     }
@@ -473,6 +493,10 @@ impl<L: SessionLink> Session<L> {
             damage: _,
             alt_screen,
             title,
+            links,
+            link_ids,
+            underline_colors,
+            marks,
         } = p;
         out.seq = *seq;
         out.cols = *cols;
@@ -483,6 +507,10 @@ impl<L: SessionLink> Session<L> {
         out.modes = *modes;
         out.alt_screen = *alt_screen;
         out.title.clone_from(title);
+        out.links.clone_from(links);
+        out.link_ids.clone_from(link_ids);
+        out.underline_colors.clone_from(underline_colors);
+        out.marks.clone_from(marks);
         let seq = *seq;
         out.damage = self.damage_for(since, seq);
         self.taken = self.taken.max(seq);
@@ -673,6 +701,7 @@ impl<L: SessionLink> Session<L> {
         self.screen.advance(&self.buf[from..to]);
         self.stats.advances += 1;
         let replies = self.screen.take_replies();
+        let events = self.screen.take_events();
         let n = (to - from) as u64;
         match kind {
             Segment::Replay => {
@@ -682,6 +711,12 @@ impl<L: SessionLink> Session<L> {
             Segment::Live => {
                 self.stats.live_bytes += n;
                 self.queue_replies(&replies);
+                for event in events {
+                    if self.events.len() >= MAX_PENDING_EVENTS {
+                        self.events.pop_front();
+                    }
+                    self.events.push_back(event);
+                }
             }
         }
     }
@@ -850,6 +885,10 @@ impl<L: SessionLink> FrameSource for Session<L> {
 
     fn closed(&self) -> bool {
         self.finished()
+    }
+
+    fn take_events(&mut self) -> Vec<Event> {
+        Session::take_events(self)
     }
 
     fn deadline(&self) -> Option<Instant> {
