@@ -327,7 +327,14 @@ fn a_client_older_than_the_host_accepts_is_refused_at_hello_and_attach() {
     let mut host = std::process::Command::new(host_exe())
         .arg("--socket")
         .arg(&socket)
-        .args(["--min-client", "2", "--idle-secs", "60"])
+        // One above whatever this client speaks, so a protocol bump never turns
+        // this into a host that accepts it.
+        .args([
+            "--min-client",
+            &(canopy_pty_host::protocol::PROTOCOL_VERSION + 1).to_string(),
+            "--idle-secs",
+            "60",
+        ])
         .spawn()
         .unwrap();
     assert!(wait_until(Duration::from_secs(5), || socket.exists()));
