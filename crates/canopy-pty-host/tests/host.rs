@@ -309,8 +309,21 @@ fn unknown_request_fields_are_tolerated() {
 #[test]
 fn an_idle_host_exits_by_itself() {
     let h = Harness::start("j", 1);
+    let host_pid = h.client.hello().unwrap().host_pid.unwrap();
+    // Do not poll over the socket: a connection counts as activity and would
+    // keep the host alive. Watch the process instead.
     assert!(
-        wait_until(Duration::from_secs(8), || h.client.hello().is_err()),
+        wait_until(Duration::from_secs(8), || !alive(host_pid)),
         "an idle host never exited"
     );
+    assert!(h.client.hello().is_err(), "socket still answers after exit");
+}
+
+#[test]
+fn a_host_with_a_live_session_does_not_idle_out() {
+    let h = Harness::start("k", 1);
+    let (_, pid) = h.client.spawn(spec("sleep 300")).unwrap();
+    std::thread::sleep(Duration::from_secs(3));
+    assert!(alive(pid), "idle exit killed a live session");
+    assert!(h.client.hello().is_ok());
 }
