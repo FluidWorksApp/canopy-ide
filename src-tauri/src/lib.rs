@@ -1,3 +1,4 @@
+mod adoption_seal;
 mod agent_cli;
 mod agent_instructions;
 mod agent_life;
@@ -22,6 +23,8 @@ mod companion_requests;
 mod containment;
 mod context;
 mod crash;
+#[cfg(unix)]
+mod ctx_socket;
 mod desk;
 mod devicehub;
 mod devicehub_mjpeg;
@@ -494,6 +497,13 @@ pub fn run() {
 
     #[cfg(target_os = "macos")]
     raise_file_descriptor_limit();
+
+    // Start reading the adoption sealing key now, off this thread, so the launch
+    // path finds it loaded (or keeps going without it) instead of waiting.
+    #[cfg(unix)]
+    if pty_hosted::enabled() {
+        adoption_seal::prefetch();
+    }
 
     // Install the ring crypto provider process-wide so rustls has a default —
     // the team relay's internet path dials wss:// through a tunnel via
