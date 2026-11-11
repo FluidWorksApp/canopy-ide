@@ -305,6 +305,7 @@ fn write_cache(bin: &Path, key: &BundleKey, digest: &str) {
 /// The installed host: the path to start it from, the hash it must have, and
 /// the shared lock that keeps its directory from being pruned (hold it for as
 /// long as the app runs).
+#[derive(Debug)]
 pub(super) struct Installed {
     pub exe: PathBuf,
     pub digest: String,
