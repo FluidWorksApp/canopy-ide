@@ -51,8 +51,9 @@
 //! Frame, snapshot and per-cell clusters are bounded ([`MAX_CLUSTER_SCALARS`],
 //! [`MAX_TITLE_BYTES`]); OSC bodies are cut at [`MAX_OSC_BYTES`] before the
 //! engine; combining marks beyond the cluster bound are trimmed from the
-//! engine's cells after each `advance` (so one call can grow a cell by at most
-//! the bytes it was given); sizes are capped at [`MAX_COLS`] x [`MAX_ROWS`]
+//! engine's cells after every 4 KiB fed to it (so a line that scrolls into
+//! history inside one large `advance` holds at most about 2,000 marks per
+//! cell); replies held for the owner are capped; sizes are capped at [`MAX_COLS`] x [`MAX_ROWS`]
 //! and scrollback at [`MAX_SCROLLBACK`].
 
 pub use crate::filter::{KITTY_STACK_MAX, MAX_OSC_BYTES, MAX_TITLE_BYTES};
@@ -69,6 +70,7 @@ use alacritty_terminal::term::{Config, Term, TermMode};
 use alacritty_terminal::vte::ansi::{
     Color as EngineColor, CursorShape as EngineShape, NamedColor, Processor, Rgb, Timeout,
 };
+use std::collections::VecDeque;
 use std::fmt::Write as _;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -110,20 +112,37 @@ enum Pending {
 #[derive(Clone, Default)]
 struct Listener {
     title: Arc<Mutex<Option<String>>>,
-    replies: Arc<Mutex<Vec<Pending>>>,
+    replies: Arc<Mutex<VecDeque<Pending>>>,
 }
 
 fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     m.lock().unwrap_or_else(|e| e.into_inner())
 }
 
+/// Most replies held for the owner; the oldest are dropped past this, so a
+/// screen nobody drains (a mirror replaying output) cannot grow without end.
+pub const MAX_PENDING_REPLIES: usize = 1024;
+
+fn push_reply(q: &Mutex<VecDeque<Pending>>, p: Pending) {
+    let mut q = lock(q);
+    if q.len() >= MAX_PENDING_REPLIES {
+        q.pop_front();
+    }
+    q.push_back(p);
+}
+
+/// The engine is fed at most this many bytes between passes that trim
+/// combining marks from its cells, so a line that scrolls into history inside
+/// one large `advance` carries at most about this many bytes of marks.
+const TRIM_SLICE: usize = 4096;
+
 impl EventListener for Listener {
     fn send_event(&self, event: Event) {
         match event {
             Event::Title(t) => *lock(&self.title) = Some(t),
             Event::ResetTitle => *lock(&self.title) = None,
-            Event::PtyWrite(s) => lock(&self.replies).push(Pending::Bytes(s)),
-            Event::ColorRequest(i, f) => lock(&self.replies).push(Pending::Color(i, f)),
+            Event::PtyWrite(s) => push_reply(&self.replies, Pending::Bytes(s)),
+            Event::ColorRequest(i, f) => push_reply(&self.replies, Pending::Color(i, f)),
             _ => {}
         }
     }
@@ -175,7 +194,7 @@ pub struct Screen {
     processor: Processor<PassThrough>,
     filter: Filter,
     title: Arc<Mutex<Option<String>>>,
-    replies: Arc<Mutex<Vec<Pending>>>,
+    replies: Arc<Mutex<VecDeque<Pending>>>,
     reply_colors: [Option<Rgb>; 3],
     filtered: Vec<u8>,
     actions: Vec<(usize, Action)>,
@@ -429,23 +448,43 @@ impl Screen {
         self.filter.feed(bytes, &mut filtered, &mut actions);
         let mut start = 0;
         for (at, action) in actions.drain(..) {
-            self.processor.advance(&mut self.term, &filtered[start..at]);
+            self.feed_engine(&filtered[start..at]);
             start = at;
             match action {
                 Action::Reset => *lock(&self.title) = None,
-                Action::Reply(s) => lock(&self.replies).push(Pending::Bytes(s)),
+                Action::Reply(s) => push_reply(&self.replies, Pending::Bytes(s)),
             }
         }
         if start < filtered.len() {
-            self.processor.advance(&mut self.term, &filtered[start..]);
+            self.feed_engine(&filtered[start..]);
         }
         self.filtered = filtered;
         self.actions = actions;
         self.refresh(false);
     }
 
+    fn feed_engine(&mut self, bytes: &[u8]) {
+        for slice in bytes.chunks(TRIM_SLICE) {
+            self.processor.advance(&mut self.term, slice);
+            self.trim_visible();
+        }
+    }
+
+    /// Drop combining marks past the cluster bound from every visible cell.
+    fn trim_visible(&mut self) {
+        let (cols, rows) = (self.cols as usize, self.rows as usize);
+        let grid = self.term.grid_mut();
+        for r in 0..rows {
+            let row = &mut grid[Line(r as i32)];
+            for c in 0..cols {
+                trim_marks(&mut row[Column(c)]);
+            }
+        }
+    }
+
     /// Bytes the program asked to have written back to it (answers to its
-    /// queries), in order. Drains the queue.
+    /// queries), in order. Drains the queue (at most [`MAX_PENDING_REPLIES`]
+    /// are held; drain after every `advance`).
     pub fn take_replies(&mut self) -> Vec<u8> {
         let pending = std::mem::take(&mut *lock(&self.replies));
         let mut out = Vec::new();
@@ -572,18 +611,13 @@ impl Screen {
         let (cols, rows) = (self.cols as usize, self.rows as usize);
         let mut clusters = vec![String::new()];
         let mut cells = Vec::with_capacity(cols * rows);
-        {
-            let grid = self.term.grid_mut();
-            for r in 0..rows {
-                let row = &mut grid[Line(r as i32)];
-                for c in 0..cols {
-                    let cell = &mut row[Column(c)];
-                    trim_marks(cell);
-                    cells.push(convert_cell(cell, &mut clusters));
-                }
+        let grid = self.term.grid();
+        for r in 0..rows {
+            let row = &grid[Line(r as i32)];
+            for c in 0..cols {
+                cells.push(convert_cell(&row[Column(c)], &mut clusters));
             }
         }
-        let grid = self.term.grid();
         let p = grid.cursor.point;
         let mut scratch = Vec::new();
         let pen = convert_cell(&grid.cursor.template, &mut scratch);
@@ -852,5 +886,58 @@ impl Screen {
         let mut s = Screen::new(cols, rows);
         s.advance(snapshot);
         s
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Most combining marks held by any engine cell, visible or in history.
+    fn most_marks(s: &Screen) -> usize {
+        let grid = s.term.grid();
+        let top = -(s.term.history_size() as i32);
+        let mut most = 0;
+        for line in top..s.rows as i32 {
+            let row = &grid[Line(line)];
+            for c in 0..s.cols as usize {
+                most = most.max(row[Column(c)].zerowidth().map_or(0, |z| z.len()));
+            }
+        }
+        most
+    }
+
+    #[test]
+    fn engine_cells_are_trimmed_when_the_cursor_moves_back() {
+        let mut s = Screen::new(20, 2);
+        s.advance(b"a");
+        let round = format!("{}b\x1b[D", "\u{301}".repeat(15));
+        for _ in 0..200 {
+            s.advance(round.as_bytes());
+        }
+        assert!(most_marks(&s) < MAX_CLUSTER_SCALARS);
+    }
+
+    #[test]
+    fn marks_that_scroll_off_inside_one_advance_stay_bounded() {
+        let mut s = Screen::with_scrollback(20, 5, 100);
+        let mut bytes = b"a".to_vec();
+        bytes.extend("\u{301}".repeat(200_000).as_bytes());
+        bytes.extend_from_slice(b"\x1b[30S");
+        s.advance(&bytes);
+        assert!(s.term.history_size() > 0, "the marked line reached history");
+        // U+0301 is two bytes: one slice adds at most TRIM_SLICE / 2 marks.
+        assert!(most_marks(&s) <= MAX_CLUSTER_SCALARS + TRIM_SLICE / 2);
+    }
+
+    #[test]
+    fn replies_nobody_drains_are_capped() {
+        let mut s = Screen::new(10, 2);
+        s.advance("\x1b[5n".repeat(5 * MAX_PENDING_REPLIES).as_bytes());
+        assert_eq!(lock(&s.replies).len(), MAX_PENDING_REPLIES);
+        assert_eq!(
+            s.take_replies().len(),
+            MAX_PENDING_REPLIES * b"\x1b[0n".len()
+        );
     }
 }
