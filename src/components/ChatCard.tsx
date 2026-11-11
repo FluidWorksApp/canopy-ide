@@ -353,7 +353,7 @@ function RelayRequest({message,userId,messages,name}:{message:ChatMessage;userId
   <div className="chat-card-head"><span className="chat-card-icon" aria-hidden="true">🖥</span><span className="chat-card-kind">Remote access</span></div>
   <div className="chat-card-title">{own?'You asked to connect remotely':`${name(message.sender)} wants to connect remotely`}</div>
   <small className="chat-card-byline">{own?'Waiting for them to accept.':'They will see and control your whole screen until you stop sharing.'}</small>
-  {!own&&fresh&&!answered&&<div className="chat-card-actions"><Button size="sm" variant="accent" onClick={()=>{setSent(true);window.dispatchEvent(new CustomEvent<RelayAcceptDetail>(RELAY_ACCEPT_EVENT,{detail:{to:message.sender,from:name(message.sender)}}));}}>Accept</Button></div>}
+  {!own&&fresh&&!answered&&<div className="chat-card-actions"><Button size="sm" variant="accent" onClick={()=>{setSent(true);window.dispatchEvent(new CustomEvent<RelayAcceptDetail>(RELAY_ACCEPT_EVENT,{detail:{to:message.sender,from:name(message.sender),onFail:()=>setSent(false)}}));}}>Accept</Button></div>}
   {!own&&answered&&<small className="chat-card-byline">Sharing with {name(message.sender)}.</small>}
  </div>;
 }

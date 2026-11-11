@@ -3473,7 +3473,7 @@ export default function App() {
       })();
     };
     const onAccept = (event: Event) => {
-      const { to, from } = (event as CustomEvent<RelayAcceptDetail>).detail ?? {};
+      const { to, from, onFail } = (event as CustomEvent<RelayAcceptDetail>).detail ?? {};
       if (!to) return;
       void (async () => {
         try {
@@ -3486,6 +3486,7 @@ export default function App() {
           await postTeamCard(target.team, target.self, { type: "relay-offer", v: 1, addr: origin, code: st.code }, to);
           notify(`Sharing your desktop with ${from}.`, "success");
         } catch (err) {
+          onFail?.();
           notify(`Could not share your desktop with ${from}: ${String(err)}`, "error");
         }
       })();
