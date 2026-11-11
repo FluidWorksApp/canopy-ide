@@ -4,6 +4,8 @@
 
 pub use canopy_term_core::frame;
 
+pub mod gpu;
+
 /// Pixel size of one cell for a given font. The grid is cells, the surface is
 /// pixels, and every other number here derives from this one.
 #[derive(Clone, Copy, Debug, PartialEq)]
