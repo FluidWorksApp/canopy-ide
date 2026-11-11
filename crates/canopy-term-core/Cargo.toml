@@ -5,10 +5,29 @@ description = "Terminal screen state and the frame contract between emulator and
 authors = ["Cause Connect Pte Ltd <sam@fluidwords.app>"]
 license = "MIT"
 edition = "2021"
-rust-version = "1.82"
+rust-version = "1.85"
 
 # Its own workspace root with its own lock: parallel work on other crates, and
 # dependencies a track adds, never touch the app's Cargo.lock.
 [workspace]
 
 [dependencies]
+
+[dev-dependencies]
+# Candidate emulators for the conformance and throughput harness (tests/).
+vt100 = "0.18.1"
+alacritty_terminal = "0.26.0"
+
+# `cargo test` builds unoptimised by default; parse throughput numbers from an
+# unoptimised build mean nothing, so the dev profile is optimised. The crate is
+# its own workspace root, so this affects no other crate.
+[profile.dev]
+opt-level = 3
+
+# Candidate comparison: prints a conformance table and throughput numbers.
+# harness = false so the output reaches the CI log (libtest would capture it)
+# and nothing runs in parallel to skew timings. Report only: it never asserts
+# on timing or on which candidate wins.
+[[test]]
+name = "compare"
+harness = false
