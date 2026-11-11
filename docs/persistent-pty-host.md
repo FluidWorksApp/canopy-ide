@@ -115,8 +115,14 @@ as a second agent on the same conversation. Ids are seeded past the adopted max.
 - A pty id must never repeat under one token, including ids of dead terminals, so
   the id high-water mark is kept in the host store, not just seeded past the
   adopted maximum.
-- Two app instances cannot run at once (`tauri-plugin-single-instance`), so no
-  claim op is needed; a second launch is handed to the first.
+- Release builds allow one app instance (`tauri-plugin-single-instance`, compiled
+  out of debug builds), so no claim op is planned. Debug instances can coexist
+  and would share the `pty-host-dev` directory; a second one attaching to the
+  first's sessions would replace its connection, so adoption is for release
+  builds, or debug builds get a per-instance directory.
+- A resize to the size a terminal already has delivers no SIGWINCH (checked on
+  macOS with a python pty). After replaying history, adoption has to nudge a
+  redraw by resizing one row and back.
 - The terminal view already reattaches to an existing pty id (`Term.tsx`
   `attachId`, used when the web view reloads). Whether tabs persist across a quit,
   and so whether adoption fills an existing tab or needs a new surface, is still

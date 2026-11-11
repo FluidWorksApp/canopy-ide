@@ -611,3 +611,22 @@ fn lifting_linger_keeps_an_unattached_session_alive_and_a_new_limit_restarts_the
         std::thread::sleep(Duration::from_millis(200));
     }
 }
+
+#[test]
+fn an_unknown_op_gets_an_error_line_and_the_host_stays_up() {
+    // Adoption on an older host falls back to list and kill when a newer op is
+    // refused, which only works if the refusal is a reply, not a hang-up.
+    let h = Harness::start("uo", 60);
+    let mut stream = UnixStream::connect(h.client.socket()).unwrap();
+    stream.write_all(b"{\"op\":\"from_the_future\"}\n").unwrap();
+    let mut reply = String::new();
+    let mut byte = [0u8; 1];
+    while stream.read(&mut byte).unwrap() == 1 && byte[0] != b'\n' {
+        reply.push(byte[0] as char);
+    }
+    assert!(reply.contains("\"ok\":false"), "{reply}");
+    assert!(reply.contains("bad request"), "{reply}");
+    h.client
+        .hello()
+        .expect("host still serves after a bad request");
+}
