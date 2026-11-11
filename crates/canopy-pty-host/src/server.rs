@@ -1,5 +1,6 @@
 //! The host: owns PTYs and their child processes, keeps a bounded replay ring per
-//! session, and serves the protocol on a Unix socket.
+//! session, and serves the protocol on a Unix socket (a named pipe on Windows,
+//! see `windows.rs`; everything below the transport is shared).
 //!
 //! Backpressure: while a client is attached the reader stops once the client is
 //! `HIGH_WATER` bytes behind, so a stalled client blocks the child instead of
@@ -9,17 +10,39 @@
 use crate::protocol::{
     AttachReply, Request, Response, SessionInfo, SpawnSpec, BUSY, PROTOCOL_VERSION,
 };
-use portable_pty::{native_pty_system, CommandBuilder, MasterPty, PtySize};
+#[cfg(unix)]
+use portable_pty::{native_pty_system, CommandBuilder};
+use portable_pty::{Child, MasterPty, PtySize};
 use std::collections::{HashMap, VecDeque};
 use std::io::{BufRead, BufReader, Read, Write};
+#[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
+#[cfg(unix)]
 use std::os::unix::io::AsRawFd;
+#[cfg(unix)]
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
+
+#[cfg(unix)]
+type Conn = UnixStream;
+#[cfg(windows)]
+type Conn = crate::windows::PipeStream;
+#[cfg(windows)]
+pub use crate::windows::{harden_process, PipeListener};
+
+/// Windows has no signals; these name the two stops `signal_group` maps onto
+/// closing the pseudoconsole (soft) and terminating the job (hard).
+#[cfg(windows)]
+mod libc {
+    #[allow(non_camel_case_types)]
+    pub type c_int = i32;
+    pub const SIGTERM: c_int = 15;
+    pub const SIGKILL: c_int = 9;
+}
 
 /// Replay kept per session.
 pub const RING_CAP: usize = 4 * 1024 * 1024;
@@ -71,6 +94,9 @@ struct Session {
     /// while a client is attached.
     detached_at: Mutex<Option<Instant>>,
     lingered: AtomicBool,
+    /// The session's pseudoconsole and Job Object.
+    #[cfg(windows)]
+    group: crate::windows::Group,
 }
 
 impl Session {
@@ -78,7 +104,21 @@ impl Session {
         *self.exited.lock().unwrap()
     }
 
+    /// Soft stop closes the pseudoconsole, hard stop terminates the job. Like
+    /// Unix, nothing is sent once the child has been reaped.
+    #[cfg(windows)]
+    fn signal_group(&self, signal: libc::c_int) {
+        if self.exit_code().is_none() {
+            if signal == libc::SIGKILL {
+                self.group.kill();
+            } else {
+                self.group.hang_up();
+            }
+        }
+    }
+
     /// Never signal a pid that has been reaped: it can be recycled.
+    #[cfg(unix)]
     fn signal_group(&self, signal: libc::c_int) {
         if self.exit_code().is_none() {
             // SAFETY: plain kill(2) on the child's own process group.
@@ -129,12 +169,15 @@ fn id_seed() -> u32 {
     ((mixed >> 8) as u32 & 0x3fff_ffff).max(1)
 }
 
+#[cfg(unix)]
 static SIGNALLED: AtomicBool = AtomicBool::new(false);
 
+#[cfg(unix)]
 extern "C" fn on_signal(_: libc::c_int) {
     SIGNALLED.store(true, Ordering::SeqCst);
 }
 
+#[cfg(unix)]
 fn peer_uid(stream: &UnixStream) -> Option<u32> {
     let fd = stream.as_raw_fd();
     #[cfg(target_os = "linux")]
@@ -169,6 +212,26 @@ fn peer_uid(stream: &UnixStream) -> Option<u32> {
     }
 }
 
+/// One accepted same-user connection, or `None` when none is waiting.
+#[cfg(unix)]
+fn next_connection(listener: &UnixListener, my_uid: u32) -> std::io::Result<Option<UnixStream>> {
+    match listener.accept() {
+        Ok((stream, _)) => {
+            if peer_uid(&stream).is_some_and(|uid| uid != my_uid) {
+                return Ok(None);
+            }
+            let _ = stream.set_nonblocking(false);
+            Ok(Some(stream))
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+            thread::sleep(Duration::from_millis(30));
+            Ok(None)
+        }
+        Err(e) => Err(e),
+    }
+}
+
+#[cfg(unix)]
 fn raise_fd_limit() {
     // SAFETY: get/setrlimit with a properly initialised struct.
     unsafe {
@@ -186,6 +249,7 @@ fn raise_fd_limit() {
 /// Closes every inherited descriptor and leaves the launcher's directory: the
 /// host lives for days and must not pin a socket or a working directory the app
 /// happened to hold when it started us.
+#[cfg(unix)]
 pub fn harden_process() {
     // SAFETY: closing descriptors this process does not use, chdir to root.
     unsafe {
@@ -206,6 +270,7 @@ pub fn harden_process() {
 /// Binds the socket, replacing a stale one, and serves until SIGTERM/SIGINT, a
 /// `shutdown` request or idle exit. Exits quietly (Ok) if a live host already
 /// owns the socket.
+#[cfg(unix)]
 pub fn run(config: ServerConfig) -> std::io::Result<()> {
     raise_fd_limit();
     if let Some(dir) = config.socket.parent() {
@@ -238,15 +303,31 @@ pub fn run(config: ServerConfig) -> std::io::Result<()> {
     serve(listener, &config, stop)
 }
 
+/// Creates the pipe's first instance and serves until a `shutdown` request or
+/// idle exit (a detached host gets no console control events). Exits quietly
+/// (Ok) if the pipe already exists: a live host owns it. A dead host leaves no
+/// stale pipe behind, so there is nothing to replace.
+#[cfg(windows)]
+pub fn run(config: ServerConfig) -> std::io::Result<()> {
+    let listener = match PipeListener::bind(&config.socket) {
+        Ok(listener) => listener,
+        Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => return Ok(()),
+        Err(e) => return Err(e),
+    };
+    serve(listener, &config, Arc::new(AtomicBool::new(false)))
+}
+
 /// The serving core, with no signal handling, so tests can run a host on a
 /// thread. Unlinks the socket and stops accepting before it stops the children,
 /// so a client arriving mid-shutdown fails fast instead of reaching a host that
 /// is about to disappear.
 pub fn serve(
-    listener: UnixListener,
+    #[cfg(unix)] listener: UnixListener,
+    #[cfg(windows)] mut listener: PipeListener,
     config: &ServerConfig,
     stop: Arc<AtomicBool>,
 ) -> std::io::Result<()> {
+    #[cfg(unix)]
     listener.set_nonblocking(true)?;
     let host = Arc::new(Host {
         spawn_lock: Mutex::new(()),
@@ -259,18 +340,20 @@ pub fn serve(
     });
     let mut quiet_since = Instant::now();
     // SAFETY: geteuid has no preconditions.
+    #[cfg(unix)]
     let my_uid = unsafe { libc::geteuid() };
 
     loop {
         if host.stop.load(Ordering::SeqCst) {
             break;
         }
-        match listener.accept() {
-            Ok((stream, _)) => {
-                if peer_uid(&stream).is_some_and(|uid| uid != my_uid) {
-                    continue;
-                }
-                let _ = stream.set_nonblocking(false);
+        // The pipe's DACL already limits who can connect (see windows.rs).
+        #[cfg(unix)]
+        let next = next_connection(&listener, my_uid);
+        #[cfg(windows)]
+        let next = listener.accept_timeout(Duration::from_millis(30));
+        match next {
+            Ok(Some(stream)) => {
                 host.connections.fetch_add(1, Ordering::SeqCst);
                 let host = Arc::clone(&host);
                 thread::spawn(move || {
@@ -278,9 +361,7 @@ pub fn serve(
                     host.connections.fetch_sub(1, Ordering::SeqCst);
                 });
             }
-            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                thread::sleep(Duration::from_millis(30));
-            }
+            Ok(None) => {}
             Err(_) => thread::sleep(Duration::from_millis(100)),
         }
         let live = {
@@ -318,6 +399,7 @@ pub fn serve(
     }
 
     drop(listener);
+    #[cfg(unix)]
     let _ = std::fs::remove_file(&config.socket);
     shutdown_sessions(&host);
     Ok(())
@@ -339,13 +421,13 @@ fn shutdown_sessions(host: &Host) {
     thread::sleep(Duration::from_millis(100));
 }
 
-fn write_line<T: serde::Serialize>(stream: &mut UnixStream, value: &T) -> std::io::Result<()> {
+fn write_line<T: serde::Serialize>(stream: &mut Conn, value: &T) -> std::io::Result<()> {
     let mut line = serde_json::to_vec(value).map_err(std::io::Error::other)?;
     line.push(b'\n');
     stream.write_all(&line)
 }
 
-fn handle(host: &Arc<Host>, mut stream: UnixStream) -> std::io::Result<()> {
+fn handle(host: &Arc<Host>, mut stream: Conn) -> std::io::Result<()> {
     let min_client = host.min_client;
     stream.set_read_timeout(Some(Duration::from_secs(10)))?;
     let mut line = String::new();
@@ -499,7 +581,14 @@ fn handle(host: &Arc<Host>, mut stream: UnixStream) -> std::io::Result<()> {
         }
         Request::Pgrp { id } => {
             let reply = with_session(host, id, |s| {
+                // Windows has no foreground process group to report.
+                #[cfg(unix)]
                 let pgrp = s.master.lock().unwrap().process_group_leader();
+                #[cfg(windows)]
+                let pgrp: Option<i32> = {
+                    let _ = s;
+                    None
+                };
                 Ok(Response {
                     ok: true,
                     pgrp,
@@ -511,6 +600,7 @@ fn handle(host: &Arc<Host>, mut stream: UnixStream) -> std::io::Result<()> {
         Request::RawMode { id } => {
             let reply = with_session(host, id, |s| {
                 let master = s.master.lock().unwrap();
+                #[cfg(unix)]
                 let raw = master.as_raw_fd().map(|fd| {
                     // SAFETY: fd belongs to the live master held under the lock.
                     unsafe {
@@ -518,6 +608,12 @@ fn handle(host: &Arc<Host>, mut stream: UnixStream) -> std::io::Result<()> {
                         libc::tcgetattr(fd, &mut t) == 0 && t.c_lflag & libc::ICANON == 0
                     }
                 });
+                // ConPTY exposes no line discipline: unknown.
+                #[cfg(windows)]
+                let raw: Option<bool> = {
+                    drop(master);
+                    None
+                };
                 Ok(Response {
                     ok: true,
                     raw,
@@ -616,40 +712,29 @@ fn spawn(host: &Arc<Host>, spec: SpawnSpec) -> Result<(Arc<Session>, bool), Stri
             return Ok((session, true));
         }
     }
-    let Some(program) = spec.argv.first() else {
+    if spec.argv.is_empty() {
         return Err("empty argv".into());
-    };
+    }
     let size = PtySize {
         rows: spec.rows.max(1),
         cols: spec.cols.max(1),
         pixel_width: 0,
         pixel_height: 0,
     };
-    let pair = native_pty_system()
-        .openpty(size)
-        .map_err(|e| e.to_string())?;
-    let mut cmd = CommandBuilder::new(program);
-    cmd.args(&spec.argv[1..]);
-    // Exactly the caller's environment, never the host's own.
-    cmd.env_clear();
-    for (k, v) in &spec.env {
-        cmd.env(k, v);
-    }
-    if let Some(cwd) = &spec.cwd {
-        cmd.cwd(cwd);
-    }
-    let mut child = pair.slave.spawn_command(cmd).map_err(|e| e.to_string())?;
-    drop(pair.slave);
+    #[cfg(unix)]
+    let (master, mut child) = start_child(&spec, size)?;
+    #[cfg(windows)]
+    let (master, mut child, group) = crate::windows::spawn_session(&spec, size)?;
     let pid = child.process_id().ok_or("child has no pid")?;
-    let mut reader = pair.master.try_clone_reader().map_err(|e| e.to_string())?;
-    let writer = pair.master.take_writer().map_err(|e| e.to_string())?;
+    let mut reader = master.try_clone_reader().map_err(|e| e.to_string())?;
+    let writer = master.take_writer().map_err(|e| e.to_string())?;
 
     let session = Arc::new(Session {
         id: host.next_id.fetch_add(1, Ordering::SeqCst),
         pid,
         meta: Mutex::new(spec.meta),
         key: spec.key,
-        master: Mutex::new(pair.master),
+        master: Mutex::new(master),
         writer: Mutex::new(writer),
         size: Mutex::new((size.cols, size.rows)),
         ring: Mutex::new(Ring {
@@ -665,6 +750,8 @@ fn spawn(host: &Arc<Host>, spec: SpawnSpec) -> Result<(Arc<Session>, bool), Stri
         linger: Mutex::new(spec.linger_secs.map(Duration::from_secs)),
         detached_at: Mutex::new(Some(Instant::now())),
         lingered: AtomicBool::new(false),
+        #[cfg(windows)]
+        group,
     });
 
     // Reaper: records the exit status. Only after this may the pid be reused.
@@ -675,6 +762,9 @@ fn spawn(host: &Arc<Host>, spec: SpawnSpec) -> Result<(Arc<Session>, bool), Stri
                 Ok(status) => status.exit_code() as i32,
                 Err(_) => -1,
             };
+            // ConPTY's output pipe only ends once the console is closed.
+            #[cfg(windows)]
+            session.group.child_exited();
             *session.exited.lock().unwrap() = Some(code);
             *session.exited_at.lock().unwrap() = Some(Instant::now());
             session.cv.notify_all();
@@ -723,6 +813,29 @@ fn spawn(host: &Arc<Host>, spec: SpawnSpec) -> Result<(Arc<Session>, bool), Stri
     Ok((session, false))
 }
 
+#[cfg(unix)]
+type Started = (Box<dyn MasterPty + Send>, Box<dyn Child + Send + Sync>);
+
+#[cfg(unix)]
+fn start_child(spec: &SpawnSpec, size: PtySize) -> Result<Started, String> {
+    let pair = native_pty_system()
+        .openpty(size)
+        .map_err(|e| e.to_string())?;
+    let mut cmd = CommandBuilder::new(&spec.argv[0]);
+    cmd.args(&spec.argv[1..]);
+    // Exactly the caller's environment, never the host's own.
+    cmd.env_clear();
+    for (k, v) in &spec.env {
+        cmd.env(k, v);
+    }
+    if let Some(cwd) = &spec.cwd {
+        cmd.cwd(cwd);
+    }
+    let child = pair.slave.spawn_command(cmd).map_err(|e| e.to_string())?;
+    drop(pair.slave);
+    Ok((pair.master, child))
+}
+
 /// Copy ring bytes `[start, start + take)`; the caller holds the lock.
 fn ring_slice(ring: &Ring, start: u64, take: usize) -> Vec<u8> {
     let offset = (start - ring.base) as usize;
@@ -741,7 +854,7 @@ fn ring_slice(ring: &Ring, start: u64, take: usize) -> Vec<u8> {
 
 fn read_ring(
     session: &Session,
-    mut stream: UnixStream,
+    mut stream: Conn,
     after: u64,
     max: Option<u64>,
 ) -> std::io::Result<()> {
@@ -778,7 +891,7 @@ fn read_ring(
 
 fn attach(
     session: Arc<Session>,
-    mut stream: UnixStream,
+    mut stream: Conn,
     after: u64,
     exclusive: bool,
 ) -> std::io::Result<()> {
