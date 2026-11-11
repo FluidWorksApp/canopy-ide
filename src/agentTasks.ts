@@ -36,7 +36,9 @@ export function normalizeTasks(raw: unknown): AgentTask[] {
     if (!clean) continue;
     out.push({
       text: clean.slice(0, 200),
-      status: STATUSES.has(status as TaskStatus) ? (status as TaskStatus) : "pending",
+      status: STATUSES.has(status as TaskStatus)
+        ? (status as TaskStatus)
+        : "pending",
     });
   }
   return out;
@@ -69,6 +71,11 @@ export function taskHeadline(s: TaskSummary): string {
  *  dropped. */
 export function focusPrompt(task: AgentTask): string {
   return `Please focus on this task next and finish it before continuing with the others: ${task.text}`;
+}
+
+/** Hand the task to a sub agent so this agent can carry on. */
+export function subAgentPrompt(task: AgentTask): string {
+  return `Please run this task as a sub agent (canopy_spawn_agent, or your own sub-agent tool). Give it the context it needs, and mark the task done in your task list when it reports back: ${task.text}`;
 }
 
 export function completePrompt(task: AgentTask): string {

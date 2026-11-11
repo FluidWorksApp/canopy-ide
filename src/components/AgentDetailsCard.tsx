@@ -16,6 +16,7 @@ import { activeWorkspace } from "../remoteExecution/workspace";
 import {
   completePrompt,
   focusPrompt,
+  subAgentPrompt,
   normalizeTasks,
   summarizeTasks,
   taskHeadline,
@@ -75,7 +76,11 @@ function readCollapsed(): boolean {
 }
 
 const METHOD_KEY = "canopy.prMergeMethod";
-const METHOD_LABEL = { squash: "Squash & merge", merge: "Merge commit", rebase: "Rebase & merge" } as const;
+const METHOD_LABEL = {
+  squash: "Squash & merge",
+  merge: "Merge commit",
+  rebase: "Rebase & merge",
+} as const;
 function readMergeMethod(): "squash" | "merge" | "rebase" {
   try {
     const v = localStorage.getItem(METHOD_KEY);
@@ -88,7 +93,10 @@ function readMergeMethod(): "squash" | "merge" | "rebase" {
 const DEFAULT_BRANCHES = new Set(["main", "master", "develop"]);
 /** "fix/hub-prefetch-scrcpy" becomes "Fix hub prefetch scrcpy". */
 export function titleFromBranch(branch: string): string {
-  const text = branch.replace(/^[^/]+\//, "").replace(/[-_]+/g, " ").trim();
+  const text = branch
+    .replace(/^[^/]+\//, "")
+    .replace(/[-_]+/g, " ")
+    .trim();
   return text ? text[0].toUpperCase() + text.slice(1) : branch;
 }
 
@@ -140,12 +148,26 @@ function Lineage({ subagents }: { subagents: readonly ipc.SubagentRun[] }) {
           onClick={() => setOpenId(open ? null : s.id)}
         >
           <span className="agent-card-sub-dot" aria-hidden="true" />
-          <span className="agent-card-sub-name">{s.description || "(no description)"}</span>
-          {span != null && <span className="agent-card-dim agent-card-sub-age">{fmtSpan(span)}</span>}
+          <span className="agent-card-sub-name">
+            {s.description || "(no description)"}
+          </span>
+          {span != null && (
+            <span className="agent-card-dim agent-card-sub-age">
+              {fmtSpan(span)}
+            </span>
+          )}
         </button>
         {open && (
-          <div className="agent-card-sub-result" role="region" aria-label={`${s.description || "Agent"} result`}>
-            {s.result?.trim() ? s.result : s.status === "running" ? "Still working…" : "No text was returned."}
+          <div
+            className="agent-card-sub-result"
+            role="region"
+            aria-label={`${s.description || "Agent"} result`}
+          >
+            {s.result?.trim()
+              ? s.result
+              : s.status === "running"
+                ? "Still working…"
+                : "No text was returned."}
           </div>
         )}
       </li>
@@ -154,9 +176,13 @@ function Lineage({ subagents }: { subagents: readonly ipc.SubagentRun[] }) {
   return (
     <div className="agent-card-lineage">
       <div className="agent-card-lineage-head">
-        <span>Lineage{running.length > 0 ? ` · ${running.length} running` : ""}</span>
+        <span>
+          Lineage{running.length > 0 ? ` · ${running.length} running` : ""}
+        </span>
       </div>
-      {running.length > 0 && <ul className="agent-card-subs">{running.map(row)}</ul>}
+      {running.length > 0 && (
+        <ul className="agent-card-subs">{running.map(row)}</ul>
+      )}
       {previous.length > 0 && (
         <button
           type="button"
@@ -166,12 +192,18 @@ function Lineage({ subagents }: { subagents: readonly ipc.SubagentRun[] }) {
         >
           <span>Previous agents</span>
           <span className="agent-card-grow" />
-          {failed > 0 && <span className="agent-card-del">{failed} failed</span>}
+          {failed > 0 && (
+            <span className="agent-card-del">{failed} failed</span>
+          )}
           <span className="agent-card-dim">{previous.length}</span>
           <span aria-hidden="true">{showPrevious ? "▾" : "▸"}</span>
         </button>
       )}
-      {showPrevious && <ul className="agent-card-subs">{previous.slice(0, MAX_PREVIOUS).map(row)}</ul>}
+      {showPrevious && (
+        <ul className="agent-card-subs">
+          {previous.slice(0, MAX_PREVIOUS).map(row)}
+        </ul>
+      )}
     </div>
   );
 }
@@ -207,7 +239,9 @@ interface AgentDetailsCardProps {
   onSettle?: (settle: boolean) => void;
   /** Type a message to this agent (its terminal), as the person would. Resolves
    *  with whether it was delivered and, when not, why. */
-  onSendToAgent: (text: string) => Promise<{ delivered: boolean; note: string }> | void;
+  onSendToAgent: (
+    text: string,
+  ) => Promise<{ delivered: boolean; note: string }> | void;
   /** Say why a send failed. */
   onNotice?: (message: string) => void;
 }
@@ -233,7 +267,10 @@ export function AgentDetailsCard({
   const [docked, setDocked] = useState(readDocked);
   const [tasksOpen, setTasksOpen] = useState(false);
   const [assetsOpen, setAssetsOpen] = useState(false);
-  const [hovered, setHovered] = useState<{ asset: Asset; anchor: DOMRect } | null>(null);
+  const [hovered, setHovered] = useState<{
+    asset: Asset;
+    anchor: DOMRect;
+  } | null>(null);
   const [branch, setBranch] = useState<string | null>(digest?.branch ?? null);
   const [changed, setChanged] = useState<number | null>(null);
   const [pr, setPr] = useState<ipc.PrInfo | null>(null);
@@ -241,12 +278,19 @@ export function AgentDetailsCard({
   const [agentPrs, setAgentPrs] = useState<ipc.PrInfo[]>([]);
   const [prListOpen, setPrListOpen] = useState(false);
   /** The merge action awaiting its confirm click, and whether one is running. */
-  const [pending, setPending] = useState<null | "squash" | "merge" | "rebase" | "close">(null);
+  const [pending, setPending] = useState<
+    null | "squash" | "merge" | "rebase" | "close"
+  >(null);
   const [merging, setMerging] = useState(false);
   const [mergeMenu, setMergeMenu] = useState(false);
-  const [method, setMethod] = useState<"squash" | "merge" | "rebase">(readMergeMethod);
+  const [method, setMethod] = useState<"squash" | "merge" | "rebase">(
+    readMergeMethod,
+  );
   /** The "Commit & raise PR" form, and bumped to re-read the branch's PR after one is raised. */
-  const [raising, setRaising] = useState<null | { title: string; busy: boolean }>(null);
+  const [raising, setRaising] = useState<null | {
+    title: string;
+    busy: boolean;
+  }>(null);
   const [prEpoch, setPrEpoch] = useState(0);
   /** Commits on this branch beyond its base, when nothing is left uncommitted. */
   const [ahead, setAhead] = useState(0);
@@ -280,7 +324,10 @@ export function AgentDetailsCard({
     if (collapsed || !cwd) return;
     let stale = false;
     const status = remoteMachine
-      ? (liveEnvironments.get(remoteMachine.env)?.host.invoke<ipc.GitStatusResult>("git_status", { path: cwd }) ?? Promise.reject(new Error("not connected")))
+      ? (liveEnvironments
+          .get(remoteMachine.env)
+          ?.host.invoke<ipc.GitStatusResult>("git_status", { path: cwd }) ??
+        Promise.reject(new Error("not connected")))
       : ipc.gitStatus(cwd);
     status
       .then((s) => {
@@ -308,12 +355,17 @@ export function AgentDetailsCard({
         // on its current branch.
         let edges: ipc.ProvenanceEdge[] = [];
         try {
-          if (digest?.session_id) edges = await ipc.provenanceForSession(digest.session_id);
+          if (digest?.session_id)
+            edges = await ipc.provenanceForSession(digest.session_id);
         } catch {
           /* No record: the branch's own PR still shows. */
         }
         if (stale) return;
-        const raised = new Set(edges.filter((e) => e.repo === repo || !e.repo).map((e) => e.pr_number));
+        const raised = new Set(
+          edges
+            .filter((e) => e.repo === repo || !e.repo)
+            .map((e) => e.pr_number),
+        );
         const mine = prs
           .filter((p) => p.branch === branch || raised.has(p.number))
           .sort((a, b) => b.number - a.number);
@@ -329,7 +381,16 @@ export function AgentDetailsCard({
   // A branch with everything committed can still have work with no PR.
   useEffect(() => {
     setAhead(0);
-    if (collapsed || pr || !cwd || !branch || remoteMachine || DEFAULT_BRANCHES.has(branch) || changed !== 0) return;
+    if (
+      collapsed ||
+      pr ||
+      !cwd ||
+      !branch ||
+      remoteMachine ||
+      DEFAULT_BRANCHES.has(branch) ||
+      changed !== 0
+    )
+      return;
     let stale = false;
     ipc
       .gitPrContext(cwd, "")
@@ -346,7 +407,13 @@ export function AgentDetailsCard({
   // agent is working.
   const activity = useSessionActivity(
     digest?.session_id && !collapsed
-      ? { agent, sessionId: digest.session_id, cwd, profile: digest.profile ?? null, ...(remoteMachine ? { env: remoteMachine.env } : {}) }
+      ? {
+          agent,
+          sessionId: digest.session_id,
+          cwd,
+          profile: digest.profile ?? null,
+          ...(remoteMachine ? { env: remoteMachine.env } : {}),
+        }
       : null,
     { fast: life?.state === "working" },
   );
@@ -359,9 +426,15 @@ export function AgentDetailsCard({
   const summary = summarizeTasks(tasks);
   const cli = agentCliFor(agent);
   const ws = activeWorkspace();
-  const machine = remoteMachine ? remoteMachine.name : ws ? ws.connection.workspaceName : "This Mac";
+  const machine = remoteMachine
+    ? remoteMachine.name
+    : ws
+      ? ws.connection.workspaceName
+      : "This Mac";
   const helpers = digest?.subagents ?? 0;
-  const blocked = !!pr && (pr.draft || pr.checks === "FAIL" || pr.mergeable === "CONFLICTING");
+  const blocked =
+    !!pr &&
+    (pr.draft || pr.checks === "FAIL" || pr.mergeable === "CONFLICTING");
   const blockedWhy = !pr
     ? undefined
     : pr.draft
@@ -371,7 +444,13 @@ export function AgentDetailsCard({
         : pr.mergeable === "CONFLICTING"
           ? "Resolve the conflicts first"
           : undefined;
-  const canRaise = !pr && !!repo && !remoteMachine && !!branch && !DEFAULT_BRANCHES.has(branch) && ((changed ?? 0) > 0 || ahead > 0);
+  const canRaise =
+    !pr &&
+    !!repo &&
+    !remoteMachine &&
+    !!branch &&
+    !DEFAULT_BRANCHES.has(branch) &&
+    ((changed ?? 0) > 0 || ahead > 0);
 
   if (collapsed) {
     return (
@@ -380,7 +459,11 @@ export function AgentDetailsCard({
         className="agent-card-pill"
         onClick={() => toggle(false)}
         aria-label="Show agent details"
-        title={summary.total ? `Tasks ${summary.done}/${summary.total}` : "Agent details"}
+        title={
+          summary.total
+            ? `Tasks ${summary.done}/${summary.total}`
+            : "Agent details"
+        }
       >
         <AgentIcon id={agent} size={14} />
         {summary.total > 0 && (
@@ -403,12 +486,16 @@ export function AgentDetailsCard({
       : "The agent isn't running.";
   const act = (task: AgentTask, make: (t: AgentTask) => string) => {
     void Promise.resolve(onSendToAgent(make(task))).then((result) => {
-      if (result && !result.delivered) onNotice?.(result.note || "The agent did not receive that.");
+      if (result && !result.delivered)
+        onNotice?.(result.note || "The agent did not receive that.");
     });
   };
 
   return (
-    <aside className={`agent-card${docked ? " agent-card--docked" : ""}`} aria-label="Agent details">
+    <aside
+      className={`agent-card${docked ? " agent-card--docked" : ""}`}
+      aria-label="Agent details"
+    >
       <header className="agent-card-head">
         <span className="agent-card-title">
           <AgentIcon id={agent} size={15} />
@@ -421,9 +508,15 @@ export function AgentDetailsCard({
           type="button"
           className="agent-card-icon-btn"
           onClick={toggleDock}
-          aria-label={docked ? "Float agent details over the terminal" : "Dock agent details beside the terminal"}
+          aria-label={
+            docked
+              ? "Float agent details over the terminal"
+              : "Dock agent details beside the terminal"
+          }
           aria-pressed={docked}
-          title={docked ? "Float over the terminal" : "Dock beside the terminal"}
+          title={
+            docked ? "Float over the terminal" : "Dock beside the terminal"
+          }
         >
           ◧
         </button>
@@ -446,13 +539,17 @@ export function AgentDetailsCard({
           {servers.map((server) => (
             <div key={server.path} className="agent-card-server">
               <span className="agent-card-live" aria-hidden="true" />
-              <span className="agent-card-grow agent-card-ellipsis">{server.name}</span>
+              <span className="agent-card-grow agent-card-ellipsis">
+                {server.name}
+              </span>
               <button
                 type="button"
                 className="agent-card-server-open"
                 title={`Open ${server.path} in the preview (⌘-click: your browser)`}
                 aria-label={`Open ${server.name}`}
-                onClick={(e) => onOpenAsset?.(server.path, { system: e.metaKey || e.ctrlKey })}
+                onClick={(e) =>
+                  onOpenAsset?.(server.path, { system: e.metaKey || e.ctrlKey })
+                }
               >
                 Open ↗
               </button>
@@ -477,20 +574,35 @@ export function AgentDetailsCard({
           onMouseLeave={() => setPrListOpen(false)}
           onFocus={() => setPrListOpen(true)}
           onBlur={(event) => {
-            if (!event.currentTarget.contains(event.relatedTarget as Node | null)) setPrListOpen(false);
+            if (
+              !event.currentTarget.contains(event.relatedTarget as Node | null)
+            )
+              setPrListOpen(false);
           }}
           onKeyDown={(event) => {
             if (event.key === "Escape") setPrListOpen(false);
           }}
         >
           {prListOpen && agentPrs.length > 1 && (
-            <ul className="agent-card-prlist" aria-label="Pull requests from this agent">
+            <ul
+              className="agent-card-prlist"
+              aria-label="Pull requests from this agent"
+            >
               {agentPrs.map((p) => (
                 <li key={p.number}>
-                  <button type="button" className="agent-card-prlist-row" onClick={() => openInOsBrowser(p.url)} title={p.title}>
+                  <button
+                    type="button"
+                    className="agent-card-prlist-row"
+                    onClick={() => openInOsBrowser(p.url)}
+                    title={p.title}
+                  >
                     <span className="agent-card-pr-num">#{p.number}</span>
-                    <span className="agent-card-grow agent-card-ellipsis">{p.title}</span>
-                    <span className={`agent-card-chip agent-card-chip-${prStatusLabel(p).toLowerCase().replace(/\s+/g, "-")}`}>
+                    <span className="agent-card-grow agent-card-ellipsis">
+                      {p.title}
+                    </span>
+                    <span
+                      className={`agent-card-chip agent-card-chip-${prStatusLabel(p).toLowerCase().replace(/\s+/g, "-")}`}
+                    >
                       {prStatusLabel(p)}
                     </span>
                   </button>
@@ -499,8 +611,12 @@ export function AgentDetailsCard({
             </ul>
           )}
           <span className="agent-card-pr-num">#{pr.number}</span>
-          <span className="agent-card-grow agent-card-ellipsis">{pr.title}</span>
-          <span className={`agent-card-chip agent-card-chip-${prStatusLabel(pr).toLowerCase().replace(/\s+/g, "-")}`}>
+          <span className="agent-card-grow agent-card-ellipsis">
+            {pr.title}
+          </span>
+          <span
+            className={`agent-card-chip agent-card-chip-${prStatusLabel(pr).toLowerCase().replace(/\s+/g, "-")}`}
+          >
             {prStatusLabel(pr)}
           </span>
           {(pr.checks === "FAIL" || pr.mergeable === "CONFLICTING") && (
@@ -508,11 +624,26 @@ export function AgentDetailsCard({
               type="button"
               className="agent-card-fix"
               disabled={!canAct}
-              title={actHint ?? (pr.checks === "FAIL" ? "Ask this agent to fix the failing checks" : "Ask this agent to resolve the conflicts")}
+              title={
+                actHint ??
+                (pr.checks === "FAIL"
+                  ? "Ask this agent to fix the failing checks"
+                  : "Ask this agent to resolve the conflicts")
+              }
               onClick={() =>
-                void Promise.resolve(onSendToAgent(pr.checks === "FAIL" ? prFixChecksContext(pr) : prConflictContext(pr))).then((result) => {
-                  if (result && !result.delivered) onNotice?.(result.note || "The agent did not receive that.");
-                })}
+                void Promise.resolve(
+                  onSendToAgent(
+                    pr.checks === "FAIL"
+                      ? prFixChecksContext(pr)
+                      : prConflictContext(pr),
+                  ),
+                ).then((result) => {
+                  if (result && !result.delivered)
+                    onNotice?.(
+                      result.note || "The agent did not receive that.",
+                    );
+                })
+              }
             >
               {pr.checks === "FAIL" ? "Fix it" : "Resolve"}
             </button>
@@ -521,11 +652,22 @@ export function AgentDetailsCard({
       )}
 
       {pr && repo && !remoteMachine && pr.state.toUpperCase() === "OPEN" && (
-        <div className="agent-card-row agent-card-merge" role="group" aria-label={`Merge pull request #${pr.number}`}>
+        <div
+          className="agent-card-row agent-card-merge"
+          role="group"
+          aria-label={`Merge pull request #${pr.number}`}
+        >
           {pending ? (
             <>
               <span className="agent-card-grow agent-card-ellipsis">
-                {pending === "close" ? "Close" : pending === "squash" ? "Squash and merge" : pending === "merge" ? "Merge" : "Rebase and merge"} #{pr.number}?
+                {pending === "close"
+                  ? "Close"
+                  : pending === "squash"
+                    ? "Squash and merge"
+                    : pending === "merge"
+                      ? "Merge"
+                      : "Rebase and merge"}{" "}
+                #{pr.number}?
               </span>
               <button
                 type="button"
@@ -535,17 +677,29 @@ export function AgentDetailsCard({
                 onClick={() => {
                   const method = pending;
                   setMerging(true);
-                  const run = method === "close" ? ipc.ghPrClose(repo, pr.number, false) : ipc.ghPrMerge(repo, pr.number, method);
+                  const run =
+                    method === "close"
+                      ? ipc.ghPrClose(repo, pr.number, false)
+                      : ipc.ghPrMerge(repo, pr.number, method);
                   void Promise.resolve(run)
                     .then((result) => {
                       prCache.delete(repo);
                       const done = method === "close" ? "CLOSED" : "MERGED";
-                      const pendingBg = typeof result === "object" && result?.pending;
+                      const pendingBg =
+                        typeof result === "object" && result?.pending;
                       if (!pendingBg) {
                         setPr((p) => (p ? { ...p, state: done } : p));
-                        setAgentPrs((list) => list.map((x) => (x.number === pr.number ? { ...x, state: done } : x)));
+                        setAgentPrs((list) =>
+                          list.map((x) =>
+                            x.number === pr.number ? { ...x, state: done } : x,
+                          ),
+                        );
                       }
-                      onNotice?.(typeof result === "object" && result?.message ? result.message : `#${pr.number} ${method === "close" ? "closed" : "merged"}.`);
+                      onNotice?.(
+                        typeof result === "object" && result?.message
+                          ? result.message
+                          : `#${pr.number} ${method === "close" ? "closed" : "merged"}.`,
+                      );
                     })
                     .catch((err) => onNotice?.(String(err)))
                     .finally(() => {
@@ -556,7 +710,12 @@ export function AgentDetailsCard({
               >
                 {merging ? "Working…" : "Confirm"}
               </button>
-              <button type="button" className="agent-card-fix agent-card-fix-quiet" disabled={merging} onClick={() => setPending(null)}>
+              <button
+                type="button"
+                className="agent-card-fix agent-card-fix-quiet"
+                disabled={merging}
+                onClick={() => setPending(null)}
+              >
                 Cancel
               </button>
             </>
@@ -583,7 +742,11 @@ export function AgentDetailsCard({
                   ▾
                 </button>
                 {mergeMenu && (
-                  <ul className="agent-card-mergemenu" role="menu" onKeyDown={(e) => e.key === "Escape" && setMergeMenu(false)}>
+                  <ul
+                    className="agent-card-mergemenu"
+                    role="menu"
+                    onKeyDown={(e) => e.key === "Escape" && setMergeMenu(false)}
+                  >
                     {(["squash", "merge", "rebase"] as const).map((m) => (
                       <li key={m}>
                         <button
@@ -611,7 +774,11 @@ export function AgentDetailsCard({
                 )}
               </span>
               <span className="agent-card-grow" />
-              <button type="button" className="agent-card-fix agent-card-fix-quiet agent-card-close" onClick={() => setPending("close")}>
+              <button
+                type="button"
+                className="agent-card-fix agent-card-fix-quiet agent-card-close"
+                onClick={() => setPending("close")}
+              >
                 Close
               </button>
             </>
@@ -620,7 +787,11 @@ export function AgentDetailsCard({
       )}
 
       {canRaise && (
-        <div className="agent-card-row agent-card-merge" role="group" aria-label="Raise a pull request">
+        <div
+          className="agent-card-row agent-card-merge"
+          role="group"
+          aria-label="Raise a pull request"
+        >
           {raising ? (
             <>
               <input
@@ -629,7 +800,9 @@ export function AgentDetailsCard({
                 value={raising.title}
                 autoFocus
                 disabled={raising.busy}
-                onChange={(e) => setRaising({ ...raising, title: e.target.value })}
+                onChange={(e) =>
+                  setRaising({ ...raising, title: e.target.value })
+                }
                 onKeyDown={(e) => {
                   if (e.key === "Escape") setRaising(null);
                 }}
@@ -641,28 +814,55 @@ export function AgentDetailsCard({
                 onClick={() => {
                   const title = raising.title.trim();
                   setRaising({ ...raising, busy: true });
-                  void runCommitPushPr({ repo: cwd || repo!, message: title, title, commit: (changed ?? 0) > 0 })
+                  void runCommitPushPr({
+                    repo: cwd || repo!,
+                    message: title,
+                    title,
+                    commit: (changed ?? 0) > 0,
+                  })
                     .then((result) => {
-                      if (result.skipped.length > 0) onNotice?.(`Left out because they look like secrets: ${result.skipped.join(", ")}`);
-                      onNotice?.(result.prUrl ? `Opened ${result.prUrl}` : result.prExisted ? "A pull request already exists for this branch." : "Committed and pushed.");
+                      if (result.skipped.length > 0)
+                        onNotice?.(
+                          `Left out because they look like secrets: ${result.skipped.join(", ")}`,
+                        );
+                      onNotice?.(
+                        result.prUrl
+                          ? `Opened ${result.prUrl}`
+                          : result.prExisted
+                            ? "A pull request already exists for this branch."
+                            : "Committed and pushed.",
+                      );
                       prCache.delete(repo!);
                       setPrEpoch((n) => n + 1);
                       setRaising(null);
                     })
                     .catch((err) => {
-                      onNotice?.(String(err instanceof Error ? err.message : err));
+                      onNotice?.(
+                        String(err instanceof Error ? err.message : err),
+                      );
                       setRaising((r) => (r ? { ...r, busy: false } : r));
                     });
                 }}
               >
                 {raising.busy ? "Working…" : "Raise PR"}
               </button>
-              <button type="button" className="agent-card-fix agent-card-fix-quiet" disabled={raising.busy} onClick={() => setRaising(null)}>
+              <button
+                type="button"
+                className="agent-card-fix agent-card-fix-quiet"
+                disabled={raising.busy}
+                onClick={() => setRaising(null)}
+              >
                 Cancel
               </button>
             </>
           ) : (
-            <button type="button" className="agent-card-fix" onClick={() => setRaising({ title: titleFromBranch(branch!), busy: false })}>
+            <button
+              type="button"
+              className="agent-card-fix"
+              onClick={() =>
+                setRaising({ title: titleFromBranch(branch!), busy: false })
+              }
+            >
               {(changed ?? 0) > 0 ? "Commit & raise PR" : "Raise PR"}
             </button>
           )}
@@ -707,7 +907,9 @@ export function AgentDetailsCard({
         <span>Tasks</span>
         <span className="agent-card-grow" />
         <span className="agent-card-dim">{taskHeadline(summary)}</span>
-        {summary.total > 0 && <span aria-hidden="true">{tasksOpen ? "▾" : "▸"}</span>}
+        {summary.total > 0 && (
+          <span aria-hidden="true">{tasksOpen ? "▾" : "▸"}</span>
+        )}
       </button>
 
       {summary.total > 0 && (
@@ -719,8 +921,14 @@ export function AgentDetailsCard({
           aria-valuemax={summary.total}
           aria-valuenow={summary.done}
         >
-          <i className="agent-card-progress-done" style={{ width: `${(summary.done / summary.total) * 100}%` }} />
-          <i className="agent-card-progress-run" style={{ width: `${(summary.running / summary.total) * 100}%` }} />
+          <i
+            className="agent-card-progress-done"
+            style={{ width: `${(summary.done / summary.total) * 100}%` }}
+          />
+          <i
+            className="agent-card-progress-run"
+            style={{ width: `${(summary.running / summary.total) * 100}%` }}
+          />
         </div>
       )}
 
@@ -733,9 +941,16 @@ export function AgentDetailsCard({
       {tasksOpen && (
         <ul className="agent-card-tasks">
           {tasks.map((task, i) => (
-            <li key={`${i}:${task.text}`} className={`agent-card-task agent-card-task-${task.status}`}>
+            <li
+              key={`${i}:${task.text}`}
+              className={`agent-card-task agent-card-task-${task.status}`}
+            >
               <span className="agent-card-task-mark" aria-hidden="true">
-                {task.status === "completed" ? "✓" : task.status === "running" ? "●" : "○"}
+                {task.status === "completed"
+                  ? "✓"
+                  : task.status === "running"
+                    ? "●"
+                    : "○"}
               </span>
               <span className="agent-card-task-text">{task.text}</span>
               {task.status !== "completed" && (
@@ -757,6 +972,17 @@ export function AgentDetailsCard({
                     aria-label={`Complete ${task.text}`}
                   >
                     Complete
+                  </button>
+                  <button
+                    type="button"
+                    disabled={!canAct}
+                    onClick={() => act(task, subAgentPrompt)}
+                    title={
+                      actHint ?? "Ask the agent to run this as a sub agent"
+                    }
+                    aria-label={`Run ${task.text} as a sub agent`}
+                  >
+                    Sub agent
                   </button>
                 </span>
               )}
@@ -782,15 +1008,28 @@ export function AgentDetailsCard({
             <span aria-hidden="true">{assetsOpen ? "▾" : "▸"}</span>
           </button>
           {assetsOpen && (
-            <ul className="agent-card-assets" onMouseLeave={() => setHovered(null)}>
+            <ul
+              className="agent-card-assets"
+              onMouseLeave={() => setHovered(null)}
+            >
               {assets.map((asset) => (
                 <li key={asset.path}>
                   <button
                     type="button"
                     className="agent-card-asset"
                     title={asset.path}
-                    onMouseEnter={(e) => setHovered({ asset, anchor: e.currentTarget.getBoundingClientRect() })}
-                    onFocus={(e) => setHovered({ asset, anchor: e.currentTarget.getBoundingClientRect() })}
+                    onMouseEnter={(e) =>
+                      setHovered({
+                        asset,
+                        anchor: e.currentTarget.getBoundingClientRect(),
+                      })
+                    }
+                    onFocus={(e) =>
+                      setHovered({
+                        asset,
+                        anchor: e.currentTarget.getBoundingClientRect(),
+                      })
+                    }
                     onBlur={() => setHovered(null)}
                     onClick={(e) => {
                       setHovered(null);
@@ -798,10 +1037,16 @@ export function AgentDetailsCard({
                       // A file on another machine opens read-only through that machine; a
                       // running server (a URL) still goes to the preview.
                       if (remoteMachine && !/^https?:\/\//i.test(asset.path)) {
-                        openRemoteFile({ env: remoteMachine.env, machine: remoteMachine.name, path: asset.path });
+                        openRemoteFile({
+                          env: remoteMachine.env,
+                          machine: remoteMachine.name,
+                          path: asset.path,
+                        });
                         return;
                       }
-                      onOpenAsset?.(asset.path, { system: e.metaKey || e.ctrlKey });
+                      onOpenAsset?.(asset.path, {
+                        system: e.metaKey || e.ctrlKey,
+                      });
                     }}
                   >
                     <span className="agent-card-asset-kind">{asset.kind}</span>
@@ -811,20 +1056,32 @@ export function AgentDetailsCard({
               ))}
             </ul>
           )}
-          {hovered && assetsOpen && <AssetPreview asset={hovered.asset} anchor={hovered.anchor} />}
+          {hovered && assetsOpen && (
+            <AssetPreview asset={hovered.asset} anchor={hovered.anchor} />
+          )}
         </>
       )}
 
       {onSettle && (
-        <button type="button" className="agent-card-row agent-card-btn" onClick={() => onSettle(!settled)}>
+        <button
+          type="button"
+          className="agent-card-row agent-card-btn"
+          onClick={() => onSettle(!settled)}
+        >
           <span>{settled ? "Unsettle" : "Settle"}</span>
           <span className="agent-card-grow" />
-          <span className="agent-card-dim">{settled ? "Back to the strip" : "Put finished work away"}</span>
+          <span className="agent-card-dim">
+            {settled ? "Back to the strip" : "Put finished work away"}
+          </span>
         </button>
       )}
 
       {onSendToWorkspace && (
-        <button type="button" className="agent-card-row agent-card-btn" onClick={onSendToWorkspace}>
+        <button
+          type="button"
+          className="agent-card-row agent-card-btn"
+          onClick={onSendToWorkspace}
+        >
           <span>To a workspace</span>
           <span className="agent-card-grow" />
           <span className="agent-card-dim">Send this project</span>
@@ -832,7 +1089,11 @@ export function AgentDetailsCard({
         </button>
       )}
 
-      <button type="button" className="agent-card-row agent-card-btn agent-card-workspace" onClick={onOpenWorkspace}>
+      <button
+        type="button"
+        className="agent-card-row agent-card-btn agent-card-workspace"
+        onClick={onOpenWorkspace}
+      >
         <span>Workspace</span>
         <span className="agent-card-grow" />
         <span className="agent-card-dim">Files, diffs, commits</span>
