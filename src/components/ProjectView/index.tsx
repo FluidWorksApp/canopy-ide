@@ -1936,10 +1936,11 @@ const ProjectViewBody = memo(function ProjectViewBody({
       machine: { env: string; name: string; invoke: <T>(command: string) => Promise<T> },
       reconnect: (env: string, sessionId: number) => ReturnType<typeof remoteTabReconnect>,
     ) => {
+      let timer: ReturnType<typeof setTimeout> | undefined;
       const raw = await Promise.race([
         machine.invoke<unknown>("pty_stats"),
-        new Promise<never>((_, reject) => setTimeout(() => reject(new Error("timed out")), 10_000)),
-      ]);
+        new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new Error("timed out")), 10_000); }),
+      ]).finally(() => clearTimeout(timer));
       if (!live) return;
       const need = sessionsNeedingTabs(machine.env, parseMachineSessions(raw), tabsRef.current);
       if (need.length === 0) return;
@@ -1973,7 +1974,19 @@ const ProjectViewBody = memo(function ProjectViewBody({
         }
       }
     };
+    // A slow machine can keep one pass going past the next poll; a second pass
+    // would read the same tabs before the first has added its own and add them again.
+    let syncing = false;
     const sync = async () => {
+      if (syncing) return;
+      syncing = true;
+      try {
+        await syncOnce();
+      } finally {
+        syncing = false;
+      }
+    };
+    const syncOnce = async () => {
       // While a workspace is this window's own machine, this Mac is just
       // another machine: its terminals join the strip like any other's.
       if (isWorkspaceHost()) {
