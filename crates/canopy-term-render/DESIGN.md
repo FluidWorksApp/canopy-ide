@@ -129,10 +129,11 @@ overrunning the next row.
 Fonts: a used face's parsed shaping face is `'static` and built once, not per
 run. Its bytes are not copied: fontdb memory-maps system font files (one
 mapping per file, shared by all its faces) and the bundled font is the static
-bytes themselves. A process-wide table keeps one handle per distinct byte
-range for the life of the process, so many books or faces cost address space
-and page cache, not heap; what stays pinned is bounded by the font files
-actually used. The mapping is the usual one: a font file rewritten in place by
+bytes themselves. A process-wide table keeps one handle per font file path
+(and per distinct byte range for in-memory fonts) for the life of the process,
+so many books or faces, including a new engine built for a larger atlas, cost
+address space and page cache, not heap, and what stays pinned is bounded by the
+font files actually used. Bytes passed to `add_font_data` are pinned per call. The mapping is the usual one: a font file rewritten in place by
 another process while the app runs could fault (`FontBook::load` carries the
 safety note).
 

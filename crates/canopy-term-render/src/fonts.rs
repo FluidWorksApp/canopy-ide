@@ -8,11 +8,13 @@
 
 use crate::glyphs::FontStyle;
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex, OnceLock};
+use std::path::PathBuf;
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 
 type SharedBytes = Arc<dyn AsRef<[u8]> + Send + Sync>;
 
-pub const BUNDLED_FONT: &[u8] = include_bytes!("../fonts/JetBrainsMono-Regular.ttf");
+/// A `static`, so every use is the same bytes at the same address.
+pub static BUNDLED_FONT: &[u8] = include_bytes!("../fonts/JetBrainsMono-Regular.ttf");
 pub const BUNDLED_FAMILY: &str = "JetBrains Mono";
 
 /// What the fallback chooser needs to know about a face, separated from fontdb
@@ -112,22 +114,35 @@ impl Coverage {
 /// handle is leaked; the mapping lives as long as the process, bounded by the
 /// font files actually used.
 fn pin(shared: &SharedBytes) -> &'static [u8] {
-    static PINNED: OnceLock<Mutex<HashMap<(usize, usize), &'static [u8]>>> = OnceLock::new();
     let inner: &(dyn AsRef<[u8]> + Send + Sync) = &**shared;
     let bytes: &[u8] = inner.as_ref();
     let key = (bytes.as_ptr() as usize, bytes.len());
-    let mut map = PINNED
-        .get_or_init(Default::default)
-        .lock()
-        .unwrap_or_else(|e| e.into_inner());
-    if let Some(&pinned) = map.get(&key) {
+    let mut table = pinned();
+    if let Some(&pinned) = table.by_range.get(&key) {
         return pinned;
     }
     let handle: &'static SharedBytes = Box::leak(Box::new(shared.clone()));
     let inner: &'static (dyn AsRef<[u8]> + Send + Sync) = &**handle;
     let pinned: &'static [u8] = inner.as_ref();
-    map.insert(key, pinned);
+    table.by_range.insert(key, pinned);
     pinned
+}
+
+/// Pinned font bytes for the whole process: by byte range (in-memory fonts)
+/// and by file path (so a second book loading the same system font reuses the
+/// first mapping instead of mapping and pinning the file again).
+#[derive(Default)]
+struct Pinned {
+    by_range: HashMap<(usize, usize), &'static [u8]>,
+    by_path: HashMap<PathBuf, &'static [u8]>,
+}
+
+fn pinned() -> MutexGuard<'static, Pinned> {
+    static PINNED: OnceLock<Mutex<Pinned>> = OnceLock::new();
+    PINNED
+        .get_or_init(Default::default)
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
 }
 
 /// A face whose bytes are held for shaping and rasterising (see `pin`).
@@ -239,12 +254,31 @@ impl FontBook {
         if let Some(&i) = self.by_id.get(&id) {
             return Some(i);
         }
-        // SAFETY: fontdb maps the font file read-only. As with any mapped file,
-        // another process truncating or rewriting an installed font while the
-        // app runs could fault; installed system fonts are not rewritten in
-        // place in practice, and every text stack that maps fonts accepts this.
-        let (shared, index) = unsafe { self.db.make_shared_face_data(id)? };
-        let data = pin(&shared);
+        let (index, path) = {
+            let info = self.db.face(id)?;
+            let path = match &info.source {
+                fontdb::Source::File(p) | fontdb::Source::SharedFile(p, _) => Some(p.clone()),
+                fontdb::Source::Binary(_) => None,
+            };
+            (info.index, path)
+        };
+        let known = path.as_ref().and_then(|p| pinned().by_path.get(p).copied());
+        let data = match known {
+            Some(data) => data,
+            None => {
+                // SAFETY: fontdb maps the font file read-only. As with any
+                // mapped file, another process truncating or rewriting an
+                // installed font while the app runs could fault; installed
+                // fonts are not rewritten in place in practice, and every text
+                // stack that maps fonts accepts this.
+                let (shared, _) = unsafe { self.db.make_shared_face_data(id)? };
+                let data = pin(&shared);
+                if let Some(p) = path {
+                    pinned().by_path.insert(p, data);
+                }
+                data
+            }
+        };
         let upem = rustybuzz::ttf_parser::Face::parse(data, index)
             .map(|f| f.units_per_em())
             .unwrap_or(1000);
@@ -525,6 +559,34 @@ mod tests {
         );
         assert_eq!(db.as_ptr(), da.as_ptr(), "one copy across books");
         assert_eq!(da.len(), BUNDLED_FONT.len());
+    }
+
+    #[test]
+    fn a_font_file_is_mapped_once_for_every_book() {
+        // The bundled font written to a temporary file stands in for a system
+        // font, so the memory-mapped path runs on CI.
+        let path = std::env::temp_dir().join(format!(
+            "canopy-term-render-test-{}.ttf",
+            std::process::id()
+        ));
+        std::fs::write(&path, BUNDLED_FONT).unwrap();
+        let mut a = FontBook::with_primary(BUNDLED_FAMILY);
+        a.db.load_font_file(&path).unwrap();
+        let mut b = FontBook::with_primary(BUNDLED_FAMILY);
+        b.db.load_font_file(&path).unwrap();
+        let fa = a.choose('a', REGULAR).expect("face from the file").face;
+        let fb = b.choose('a', REGULAR).expect("face from the file").face;
+        let (da, db) = (a.face(fa).data, b.face(fb).data);
+        assert!(da == BUNDLED_FONT, "the mapping holds the file's bytes");
+        assert_ne!(da.as_ptr(), BUNDLED_FONT.as_ptr(), "mapped, not the static");
+        assert_eq!(
+            db.as_ptr(),
+            da.as_ptr(),
+            "the second book reuses the mapping"
+        );
+        // The mapping stays valid even though the file goes away (or, on
+        // Windows, cannot be removed while mapped).
+        let _ = std::fs::remove_file(&path);
     }
 
     #[test]

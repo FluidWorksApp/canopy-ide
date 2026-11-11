@@ -298,10 +298,11 @@ impl QuadBuilder {
                 quads: 0,
                 atlas_overflow: false,
             };
-            for i in 0..report.rows.len() {
-                let row = report.rows[i];
+            let rows = std::mem::take(&mut report.rows);
+            for &row in &rows {
                 self.build_row(frame, row, state, cursor, glyphs, &mut report);
             }
+            report.rows = rows;
             if glyphs.epoch() == epoch_before {
                 settled = true;
                 break;
