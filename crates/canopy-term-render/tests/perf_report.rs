@@ -3,7 +3,9 @@
 //! captured. Note the build profile: `cargo test` builds with the dev profile
 //! unless told otherwise, so absolute numbers are pessimistic.
 
+use std::alloc::{GlobalAlloc, Layout, System};
 use std::io::Write;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 
 use canopy_term_render::atlas::Atlas;
@@ -14,6 +16,44 @@ use canopy_term_render::frame::{Attrs, Color, Damage, Frame};
 use canopy_term_render::glyphs::{FontStyle, GlyphSource, TextCell};
 use canopy_term_render::metrics::{layout, FontMetrics, Scale};
 use canopy_term_render::text::TextEngine;
+
+/// Counts heap allocations so the per-frame allocation numbers are measured,
+/// not guessed. Only counting: everything is forwarded to the system allocator.
+struct Counting;
+
+static ALLOCS: AtomicU64 = AtomicU64::new(0);
+static ALLOC_BYTES: AtomicU64 = AtomicU64::new(0);
+
+unsafe impl GlobalAlloc for Counting {
+    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+        ALLOCS.fetch_add(1, Ordering::Relaxed);
+        ALLOC_BYTES.fetch_add(layout.size() as u64, Ordering::Relaxed);
+        System.alloc(layout)
+    }
+    unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
+        ALLOCS.fetch_add(1, Ordering::Relaxed);
+        ALLOC_BYTES.fetch_add(layout.size() as u64, Ordering::Relaxed);
+        System.alloc_zeroed(layout)
+    }
+    unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
+        ALLOCS.fetch_add(1, Ordering::Relaxed);
+        ALLOC_BYTES.fetch_add(new_size as u64, Ordering::Relaxed);
+        System.realloc(ptr, layout, new_size)
+    }
+    unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+        System.dealloc(ptr, layout)
+    }
+}
+
+#[global_allocator]
+static COUNTING: Counting = Counting;
+
+fn allocs() -> (u64, u64) {
+    (
+        ALLOCS.load(Ordering::Relaxed),
+        ALLOC_BYTES.load(Ordering::Relaxed),
+    )
+}
 
 const COLS: u16 = 120;
 const ROWS: u16 = 40;
@@ -58,6 +98,27 @@ fn synthetic_frame() -> Frame {
     }
     f.cursor.visible = false;
     f
+}
+
+/// Allocations of one more one-row build after everything is warm.
+fn frame_row_allocs(
+    builder: &mut QuadBuilder,
+    engine: &mut TextEngine,
+    frame: &mut Frame,
+    state: &RenderState,
+) -> (u64, u64) {
+    let prev = frame.seq;
+    frame.seq += 1;
+    frame.damage = Damage {
+        since: prev,
+        full: false,
+        rows: vec![(3, 3)],
+    };
+    let a0 = allocs();
+    let r = builder.build(frame, state, engine);
+    let a1 = allocs();
+    std::hint::black_box(r);
+    (a1.0 - a0.0, a1.1 - a0.1)
 }
 
 fn main() {
@@ -152,6 +213,7 @@ fn main() {
     let full_iters = 30u32;
     let mut quads_full = 0usize;
     let mut bytes_full = 0usize;
+    let a0 = allocs();
     let t0 = Instant::now();
     for _ in 0..full_iters {
         let prev = frame.seq;
@@ -166,15 +228,19 @@ fn main() {
         bytes_full = r.upload_bytes();
     }
     let full = t0.elapsed();
+    let a1 = allocs();
     say(&format!(
-        "build_full_frame quads={quads_full} upload_bytes={bytes_full} iters={full_iters} micros_per_frame={} quads_per_sec={:.0}",
+        "build_full_frame quads={quads_full} upload_bytes={bytes_full} iters={full_iters} micros_per_frame={} quads_per_sec={:.0} allocs_per_frame={} alloc_bytes_per_frame={}",
         full.as_micros() / full_iters as u128,
-        quads_full as f64 * full_iters as f64 / full.as_secs_f64()
+        quads_full as f64 * full_iters as f64 / full.as_secs_f64(),
+        (a1.0 - a0.0) / full_iters as u64,
+        (a1.1 - a0.1) / full_iters as u64
     ));
 
     let row_iters = 500u32;
     let mut quads_row = 0usize;
     let mut bytes_row = 0usize;
+    let a0 = allocs();
     let t0 = Instant::now();
     for i in 0..row_iters {
         let prev = frame.seq;
@@ -190,13 +256,17 @@ fn main() {
         bytes_row = r.upload_bytes();
     }
     let one = t0.elapsed();
+    let a1 = allocs();
     say(&format!(
-        "build_one_row quads={quads_row} upload_bytes={bytes_row} iters={row_iters} micros_per_frame={} quads_per_sec={:.0}",
+        "build_one_row quads={quads_row} upload_bytes={bytes_row} iters={row_iters} micros_per_frame={} quads_per_sec={:.0} allocs_per_frame={} alloc_bytes_per_frame={}",
         one.as_micros() / row_iters as u128,
-        quads_row as f64 * row_iters as f64 / one.as_secs_f64()
+        quads_row as f64 * row_iters as f64 / one.as_secs_f64(),
+        (a1.0 - a0.0) / row_iters as u64,
+        (a1.1 - a0.1) / row_iters as u64
     ));
 
     let idle_iters = 5000u32;
+    let a0 = allocs();
     let t0 = Instant::now();
     let mut idle_quads = 0usize;
     for _ in 0..idle_iters {
@@ -209,14 +279,24 @@ fn main() {
         };
         idle_quads += builder.build(&frame, &state, &mut engine).quads;
     }
+    let idle_time = t0.elapsed();
+    let a1 = allocs();
     say(&format!(
-        "build_unchanged quads={idle_quads} iters={idle_iters} micros_per_frame={}",
-        t0.elapsed().as_micros() / idle_iters as u128
+        "build_unchanged quads={idle_quads} iters={idle_iters} micros_per_frame={} allocs_total={}",
+        idle_time.as_micros() / idle_iters as u128,
+        a1.0 - a0.0
     ));
+    // The one hard budget: a frame with nothing to redraw must not allocate.
+    assert_eq!(a1.0 - a0.0, 0, "an unchanged frame allocated");
     say(&format!(
         "instance_bytes={} buffer_bytes={}",
         std::mem::size_of::<canopy_term_render::instance::Instance>(),
         builder.instances().len() * std::mem::size_of::<canopy_term_render::instance::Instance>()
+    ));
+    let warm_row = frame_row_allocs(&mut builder, &mut engine, &mut frame, &state);
+    say(&format!(
+        "build_one_row_steady allocs={} alloc_bytes={}",
+        warm_row.0, warm_row.1
     ));
     let a = engine.atlas().stats();
     say(&format!(

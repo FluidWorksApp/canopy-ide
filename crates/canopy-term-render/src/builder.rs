@@ -132,6 +132,8 @@ pub struct QuadBuilder {
     prev_selection: Option<Selection>,
     epoch: u64,
     scratch: Scratch,
+    /// Reused every build so a quiet frame allocates nothing.
+    dirty: Vec<bool>,
 }
 
 impl QuadBuilder {
@@ -149,6 +151,7 @@ impl QuadBuilder {
             prev_selection: None,
             epoch: 0,
             scratch: Scratch::default(),
+            dirty: Vec::new(),
         }
     }
 
@@ -245,7 +248,9 @@ impl QuadBuilder {
             self.resize(frame.cols, frame.rows);
         }
         let cursor = self.cursor_snap(frame, state);
-        let mut dirty = vec![false; frame.rows as usize];
+        let mut dirty = std::mem::take(&mut self.dirty);
+        dirty.clear();
+        dirty.resize(frame.rows as usize, false);
 
         let mut full = self.needs_full
             || resized
@@ -288,12 +293,13 @@ impl QuadBuilder {
             report = BuildReport {
                 held: false,
                 full,
-                rows: rows.clone(),
+                rows,
                 uploads: Vec::new(),
                 quads: 0,
                 atlas_overflow: false,
             };
-            for &row in &rows {
+            for i in 0..report.rows.len() {
+                let row = report.rows[i];
                 self.build_row(frame, row, state, cursor, glyphs, &mut report);
             }
             if glyphs.epoch() == epoch_before {
@@ -325,6 +331,7 @@ impl QuadBuilder {
         self.needs_full = !settled;
         self.prev_cursor = cursor;
         self.prev_selection = state.selection;
+        self.dirty = dirty;
         report
     }
 

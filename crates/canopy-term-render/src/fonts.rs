@@ -8,6 +8,9 @@
 
 use crate::glyphs::FontStyle;
 use std::collections::HashMap;
+use std::sync::{Arc, Mutex, OnceLock};
+
+type SharedBytes = Arc<dyn AsRef<[u8]> + Send + Sync>;
 
 pub const BUNDLED_FONT: &[u8] = include_bytes!("../fonts/JetBrainsMono-Regular.ttf");
 pub const BUNDLED_FAMILY: &str = "JetBrains Mono";
@@ -41,11 +44,93 @@ pub fn pick_fallback(candidates: &[Candidate], want: FontStyle) -> Option<usize>
     best.map(|(_, i)| i)
 }
 
-/// A face whose bytes are held for shaping and rasterising.
+/// The codepoints a face maps, as sorted, non-overlapping inclusive ranges, so
+/// "does this face have U+XXXX" is a binary search instead of a font parse.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct Coverage {
+    ranges: Vec<(u32, u32)>,
+}
+
+impl Coverage {
+    pub fn from_codepoints(mut cps: Vec<u32>) -> Coverage {
+        cps.sort_unstable();
+        cps.dedup();
+        let mut ranges: Vec<(u32, u32)> = Vec::new();
+        for c in cps {
+            match ranges.last_mut() {
+                Some(last) if last.1.saturating_add(1) == c => last.1 = c,
+                _ => ranges.push((c, c)),
+            }
+        }
+        Coverage { ranges }
+    }
+
+    /// Reads the Unicode `cmap` subtables of one face. A face that cannot be
+    /// parsed covers nothing.
+    pub fn from_face(data: &[u8], index: u32) -> Coverage {
+        let Ok(face) = rustybuzz::ttf_parser::Face::parse(data, index) else {
+            return Coverage::default();
+        };
+        let Some(cmap) = face.tables().cmap else {
+            return Coverage::default();
+        };
+        let mut cps = Vec::new();
+        for sub in cmap.subtables {
+            if sub.is_unicode() {
+                sub.codepoints(|c| cps.push(c));
+            }
+        }
+        // Keep exactly what the parser would draw, so the index never
+        // disagrees with `glyph_index` (ranges can include unmapped slots).
+        cps.retain(|&c| char::from_u32(c).is_some_and(|ch| face.glyph_index(ch).is_some()));
+        Coverage::from_codepoints(cps)
+    }
+
+    pub fn contains(&self, ch: char) -> bool {
+        let c = ch as u32;
+        self.ranges
+            .binary_search_by(|&(lo, hi)| {
+                if hi < c {
+                    std::cmp::Ordering::Less
+                } else if lo > c {
+                    std::cmp::Ordering::Greater
+                } else {
+                    std::cmp::Ordering::Equal
+                }
+            })
+            .is_ok()
+    }
+}
+
+/// Keeps `shared` alive for the rest of the process and returns its bytes as
+/// `'static`, once per distinct byte range however many books or faces use it.
 ///
-/// The font bytes are leaked (`Box::leak`) so the parsed shaping face can be
-/// `'static` and built once instead of once per shaped run. The leak is bounded
-/// by the number of distinct faces actually used.
+/// This is what lets a parsed shaping face be `'static` and built once instead
+/// of once per shaped run, without copying the font: system fonts are memory
+/// mapped (by fontdb) and the mapping is shared by every face of the file, so
+/// the cost is address space and page cache, not heap. Only the small `Arc`
+/// handle is leaked; the mapping lives as long as the process, bounded by the
+/// font files actually used.
+fn pin(shared: &SharedBytes) -> &'static [u8] {
+    static PINNED: OnceLock<Mutex<HashMap<(usize, usize), &'static [u8]>>> = OnceLock::new();
+    let inner: &(dyn AsRef<[u8]> + Send + Sync) = &**shared;
+    let bytes: &[u8] = inner.as_ref();
+    let key = (bytes.as_ptr() as usize, bytes.len());
+    let mut map = PINNED
+        .get_or_init(Default::default)
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    if let Some(&pinned) = map.get(&key) {
+        return pinned;
+    }
+    let handle: &'static SharedBytes = Box::leak(Box::new(shared.clone()));
+    let inner: &'static (dyn AsRef<[u8]> + Send + Sync) = &**handle;
+    let pinned: &'static [u8] = inner.as_ref();
+    map.insert(key, pinned);
+    pinned
+}
+
+/// A face whose bytes are held for shaping and rasterising (see `pin`).
 pub struct LoadedFace {
     pub data: &'static [u8],
     pub index: u32,
@@ -68,6 +153,8 @@ pub struct FontBook {
     loaded: Vec<LoadedFace>,
     by_id: HashMap<fontdb::ID, u32>,
     cache: HashMap<(char, FontStyle), Option<FaceChoice>>,
+    coverage: HashMap<fontdb::ID, Coverage>,
+    primary_ids: HashMap<FontStyle, Option<fontdb::ID>>,
 }
 
 fn is_bold(w: fontdb::Weight) -> bool {
@@ -78,13 +165,16 @@ impl FontBook {
     /// Only the bundled font.
     pub fn bundled() -> Self {
         let mut db = fontdb::Database::new();
-        db.load_font_data(BUNDLED_FONT.to_vec());
+        // The static bytes themselves, not a copy.
+        db.load_font_source(fontdb::Source::Binary(Arc::new(BUNDLED_FONT)));
         FontBook {
             db,
             primary: BUNDLED_FAMILY.to_string(),
             loaded: Vec::new(),
             by_id: HashMap::new(),
             cache: HashMap::new(),
+            coverage: HashMap::new(),
+            primary_ids: HashMap::new(),
         }
     }
 
@@ -97,18 +187,48 @@ impl FontBook {
             loaded: Vec::new(),
             by_id: HashMap::new(),
             cache: HashMap::new(),
+            coverage: HashMap::new(),
+            primary_ids: HashMap::new(),
         }
     }
 
     pub fn add_font_data(&mut self, data: Vec<u8>) {
         self.db.load_font_data(data);
+        self.invalidate();
+    }
+
+    fn invalidate(&mut self) {
         self.cache.clear();
+        self.primary_ids.clear();
     }
 
     /// Loads the machine's fonts. Not used by tests: results differ per machine.
     pub fn load_system_fonts(&mut self) {
         self.db.load_system_fonts();
-        self.cache.clear();
+        self.invalidate();
+    }
+
+    /// Reads every face's character coverage now. Fallback lookups need it, and
+    /// otherwise build it face by face the first time a character is missing
+    /// from the primary font. Call this at startup, off the frame path (the
+    /// book is plain data and can be moved to a worker thread and back), so no
+    /// frame pays for it.
+    pub fn index_fallbacks(&mut self) {
+        let ids: Vec<fontdb::ID> = self.db.faces().map(|f| f.id).collect();
+        for id in ids {
+            self.coverage_of(id);
+        }
+    }
+
+    fn coverage_of(&mut self, id: fontdb::ID) -> &Coverage {
+        if !self.coverage.contains_key(&id) {
+            let cov = self
+                .db
+                .with_face_data(id, Coverage::from_face)
+                .unwrap_or_default();
+            self.coverage.insert(id, cov);
+        }
+        &self.coverage[&id]
     }
 
     pub fn face(&self, index: u32) -> &LoadedFace {
@@ -119,13 +239,15 @@ impl FontBook {
         if let Some(&i) = self.by_id.get(&id) {
             return Some(i);
         }
-        let (data, index, upem) = self.db.with_face_data(id, |data, index| {
-            let upem = rustybuzz::ttf_parser::Face::parse(data, index)
-                .map(|f| f.units_per_em())
-                .unwrap_or(1000);
-            (data.to_vec(), index, upem)
-        })?;
-        let data: &'static [u8] = Box::leak(data.into_boxed_slice());
+        // SAFETY: fontdb maps the font file read-only. As with any mapped file,
+        // another process truncating or rewriting an installed font while the
+        // app runs could fault; installed system fonts are not rewritten in
+        // place in practice, and every text stack that maps fonts accepts this.
+        let (shared, index) = unsafe { self.db.make_shared_face_data(id)? };
+        let data = pin(&shared);
+        let upem = rustybuzz::ttf_parser::Face::parse(data, index)
+            .map(|f| f.units_per_em())
+            .unwrap_or(1000);
         let buzz = rustybuzz::Face::from_slice(data, index)?;
         self.loaded.push(LoadedFace {
             data,
@@ -138,17 +260,20 @@ impl FontBook {
         Some(i)
     }
 
-    fn covers(&self, id: fontdb::ID, ch: char) -> bool {
-        self.db
-            .with_face_data(id, |data, index| {
-                rustybuzz::ttf_parser::Face::parse(data, index)
-                    .map(|f| f.glyph_index(ch).is_some())
-                    .unwrap_or(false)
-            })
-            .unwrap_or(false)
+    fn covers(&mut self, id: fontdb::ID, ch: char) -> bool {
+        self.coverage_of(id).contains(ch)
     }
 
-    fn primary_id(&self, style: FontStyle) -> Option<fontdb::ID> {
+    fn primary_id(&mut self, style: FontStyle) -> Option<fontdb::ID> {
+        if let Some(&id) = self.primary_ids.get(&style) {
+            return id;
+        }
+        let id = self.query_primary(style);
+        self.primary_ids.insert(style, id);
+        id
+    }
+
+    fn query_primary(&self, style: FontStyle) -> Option<fontdb::ID> {
         let families = [fontdb::Family::Name(&self.primary)];
         let found = self.db.query(&fontdb::Query {
             families: &families,
@@ -192,21 +317,31 @@ impl FontBook {
         let result = match primary {
             Some(id) if blank || self.covers(id, ch) => self.choice_for(id, style),
             _ => {
-                let ids: Vec<fontdb::ID> = self.db.faces().map(|f| f.id).collect();
-                let candidates: Vec<Candidate> = ids
+                // Coverage is a binary search per face; nothing is parsed here
+                // once the index exists (see `index_fallbacks`).
+                let faces: Vec<(fontdb::ID, bool, bool, bool)> = self
+                    .db
+                    .faces()
+                    .map(|f| {
+                        (
+                            f.id,
+                            f.monospaced,
+                            is_bold(f.weight),
+                            f.style != fontdb::Style::Normal,
+                        )
+                    })
+                    .collect();
+                let candidates: Vec<Candidate> = faces
                     .iter()
-                    .map(|&id| {
-                        let info = self.db.face(id).expect("listed face");
-                        Candidate {
-                            covers: self.covers(id, ch),
-                            monospaced: info.monospaced,
-                            bold: is_bold(info.weight),
-                            italic: info.style != fontdb::Style::Normal,
-                        }
+                    .map(|&(id, monospaced, bold, italic)| Candidate {
+                        covers: self.covers(id, ch),
+                        monospaced,
+                        bold,
+                        italic,
                     })
                     .collect();
                 match pick_fallback(&candidates, style) {
-                    Some(i) => self.choice_for(ids[i], style),
+                    Some(i) => self.choice_for(faces[i].0, style),
                     None => None,
                 }
             }
@@ -326,6 +461,84 @@ mod tests {
         let mut book = FontBook::bundled();
         assert!(book.choose(' ', REGULAR).is_some());
         assert!(book.choose('\0', REGULAR).is_some());
+    }
+
+    #[test]
+    fn coverage_merges_runs_and_answers_by_binary_search() {
+        let c = Coverage::from_codepoints(vec![5, 3, 4, 4, 10, 11, 20]);
+        assert_eq!(c.ranges, vec![(3, 5), (10, 11), (20, 20)]);
+        for (ch, want) in [
+            (2u32, false),
+            (3, true),
+            (5, true),
+            (6, false),
+            (11, true),
+            (12, false),
+            (20, true),
+            (21, false),
+        ] {
+            assert_eq!(c.contains(char::from_u32(ch).unwrap()), want, "{ch}");
+        }
+        assert!(!Coverage::default().contains('a'));
+    }
+
+    #[test]
+    fn the_coverage_index_agrees_with_the_font_parser() {
+        let cov = Coverage::from_face(BUNDLED_FONT, 0);
+        let face = rustybuzz::ttf_parser::Face::parse(BUNDLED_FONT, 0).unwrap();
+        for cp in (0x20u32..0x3000).chain(0xE000..0xE100) {
+            let Some(ch) = char::from_u32(cp) else {
+                continue;
+            };
+            assert_eq!(
+                cov.contains(ch),
+                face.glyph_index(ch).is_some(),
+                "U+{cp:04X}"
+            );
+        }
+        assert!(cov.contains('a') && !cov.contains('\u{10FFF0}'));
+    }
+
+    #[test]
+    fn indexing_covers_every_face_once() {
+        let mut book = FontBook::bundled();
+        assert!(book.coverage.is_empty());
+        book.index_fallbacks();
+        assert_eq!(book.coverage.len(), 1);
+        book.index_fallbacks();
+        assert_eq!(book.coverage.len(), 1);
+        // A miss uses the index and still answers.
+        assert_eq!(book.choose('\u{10FFF0}', REGULAR), None);
+    }
+
+    #[test]
+    fn font_bytes_are_shared_not_copied_per_book_or_face() {
+        let mut a = FontBook::bundled();
+        let mut b = FontBook::bundled();
+        let fa = a.choose('a', REGULAR).unwrap().face;
+        let fb = b.choose('a', BOLD).unwrap().face;
+        let (da, db) = (a.face(fa).data, b.face(fb).data);
+        assert_eq!(
+            da.as_ptr(),
+            BUNDLED_FONT.as_ptr(),
+            "the bundled bytes themselves"
+        );
+        assert_eq!(db.as_ptr(), da.as_ptr(), "one copy across books");
+        assert_eq!(da.len(), BUNDLED_FONT.len());
+    }
+
+    #[test]
+    fn a_font_book_can_move_to_a_worker_thread() {
+        fn is_send<T: Send>() {}
+        is_send::<FontBook>();
+        let mut book = FontBook::bundled();
+        let book = std::thread::spawn(move || {
+            book.index_fallbacks();
+            book
+        })
+        .join()
+        .unwrap();
+        assert_eq!(book.coverage.len(), 1);
     }
 
     #[test]

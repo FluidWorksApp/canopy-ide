@@ -126,9 +126,15 @@ all (the target is cleared to the theme background). A cluster that shapes to
 many glyphs can exceed a row's capacity; extras are dropped rather than
 overrunning the next row.
 
-Fonts: each used face's bytes are leaked once (`Box::leak`) so its parsed
-shaping face is `'static` and built once, not per run; the leak is bounded by the
-faces actually used.
+Fonts: a used face's parsed shaping face is `'static` and built once, not per
+run. Its bytes are not copied: fontdb memory-maps system font files (one
+mapping per file, shared by all its faces) and the bundled font is the static
+bytes themselves. A process-wide table keeps one handle per distinct byte
+range for the life of the process, so many books or faces cost address space
+and page cache, not heap; what stays pinned is bounded by the font files
+actually used. The mapping is the usual one: a font file rewritten in place by
+another process while the app runs could fault (`FontBook::load` carries the
+safety note).
 
 Atlas limit: the atlas must hold the glyphs of one frame. If it fills during a
 build it is cleared (at most once per frame) and the build repeats; a screen
@@ -278,7 +284,17 @@ Reported only when `modes.mouse != Off`, in `modes.mouse_encoding`:
 `FontBook::choose(ch, style)`: the primary family's face for the style if it has
 the glyph; otherwise the best covering face among all loaded ones (matching
 weight and slant first, then monospaced). Results are cached per
-(char, style). When no face has the character the primary face's missing-glyph
+(char, style). Which face has which character comes from a per-face coverage
+index (sorted codepoint ranges read from the `cmap` once, binary search per
+lookup, checked against the font parser's own `glyph_index`), so a lookup never
+parses a font. `FontBook::index_fallbacks` builds the index for every face; call
+it at startup off the frame path (the book is plain data and `Send`, so it can
+move to a worker thread and back), otherwise each face is indexed lazily the
+first time a character is missing from the primary font. Opening a fallback
+face the first time (mapping and parsing it) still happens on whichever thread
+first draws a character from it; resolving the characters of new output ahead
+of the frame (`choose` on a worker, results cached) is the integration
+point if that ever shows up in a frame time. When no face has the character the primary face's missing-glyph
 box is drawn. Emoji use colour bitmap (CBDT/sbix) or colour outline (COLR)
 strikes and are area-resampled to the cell height. Bold and italic missing from
 a face are synthesised (embolden, 14 degree skew).

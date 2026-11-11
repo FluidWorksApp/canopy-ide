@@ -67,6 +67,12 @@ pub struct TextEngine {
     /// A glyph was dropped because the atlas stayed full.
     overflowed: bool,
     ligatures: bool,
+    /// Buffers reused across runs so steady-state shaping does not allocate
+    /// them again.
+    shape_text: String,
+    shape_starts: Vec<usize>,
+    shape_choices: Vec<Option<FaceChoice>>,
+    buzz_buffer: Option<UnicodeBuffer>,
 }
 
 /// Index of the cell whose text contains byte offset `byte`, given each cell's
@@ -121,6 +127,10 @@ impl TextEngine {
             cleared_this_frame: false,
             overflowed: false,
             ligatures: true,
+            shape_text: String::new(),
+            shape_starts: Vec::new(),
+            shape_choices: Vec::new(),
+            buzz_buffer: None,
         }
     }
 
@@ -294,15 +304,17 @@ impl TextEngine {
         first_cell: usize,
         out: &mut Vec<PlacedGlyph>,
     ) {
-        let mut text = String::new();
-        let mut starts = Vec::with_capacity(cells.len());
+        let mut text = std::mem::take(&mut self.shape_text);
+        text.clear();
+        let mut starts = std::mem::take(&mut self.shape_starts);
+        starts.clear();
         for c in cells {
             starts.push(text.len());
             text.push_str(c.text);
         }
         let loaded = self.fonts.face(choice.face);
         let upem = loaded.units_per_em.max(1) as f32;
-        let mut buffer = UnicodeBuffer::new();
+        let mut buffer = self.buzz_buffer.take().unwrap_or_else(UnicodeBuffer::new);
         buffer.push_str(&text);
         buffer.guess_segment_properties();
         buffer.set_direction(Direction::LeftToRight);
@@ -329,6 +341,9 @@ impl TextEngine {
                 color: m.color,
             });
         }
+        self.buzz_buffer = Some(shaped.clear());
+        self.shape_text = text;
+        self.shape_starts = starts;
     }
 }
 
@@ -366,15 +381,16 @@ impl GlyphSource for TextEngine {
     }
 
     fn shape_run(&mut self, style: FontStyle, cells: &[TextCell<'_>], out: &mut Vec<PlacedGlyph>) {
-        let choices: Vec<Option<FaceChoice>> = cells
-            .iter()
-            .map(|c| {
-                let ch = c.text.chars().next().unwrap_or(' ');
-                self.fonts
-                    .choose(ch, style)
-                    .or_else(|| self.fonts.primary_choice(style))
-            })
-            .collect();
+        let mut choices = std::mem::take(&mut self.shape_choices);
+        choices.clear();
+        for c in cells {
+            let ch = c.text.chars().next().unwrap_or(' ');
+            let choice = self
+                .fonts
+                .choose(ch, style)
+                .or_else(|| self.fonts.primary_choice(style));
+            choices.push(choice);
+        }
         let mut i = 0;
         while i < cells.len() {
             let mut j = i + 1;
@@ -386,6 +402,7 @@ impl GlyphSource for TextEngine {
             }
             i = j;
         }
+        self.shape_choices = choices;
     }
 }
 
