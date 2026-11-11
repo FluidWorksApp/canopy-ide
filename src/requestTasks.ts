@@ -70,7 +70,8 @@ const queues = new Map<string, Promise<void>>();
 const listeners = new Set<() => void>();
 let seq = 0;
 
-export const requestTasksFor = (sessionId: string): readonly RequestTask[] => tasks.get(sessionId) ?? [];
+const NONE: readonly RequestTask[] = [];
+export const requestTasksFor = (sessionId: string): readonly RequestTask[] => tasks.get(sessionId) ?? NONE;
 export const subscribeRequestTasks = (cb: () => void) => {
   listeners.add(cb);
   return () => void listeners.delete(cb);

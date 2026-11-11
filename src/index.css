@@ -7193,6 +7193,15 @@ body.dragging-tab * {
 .agent-card-task-running .agent-card-task-mark {
   color: var(--accent);
 }
+.agent-card-task-you {
+  margin-left: 6px;
+  padding: 0 6px;
+  border-radius: 99px;
+  font-size: 10px;
+  color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
+  white-space: nowrap;
+}
 .agent-card-task-actions {
   grid-column: 2;
   display: flex;
