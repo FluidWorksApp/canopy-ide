@@ -768,6 +768,7 @@ fn an_incompatible_host_with_terminals_is_left_running_for_them() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+#[cfg(unix)]
 #[test]
 fn the_launch_check_runs_before_every_start_and_can_stop_it() {
     use canopy_pty_host::client::LaunchCheck;

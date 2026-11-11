@@ -299,6 +299,7 @@ pub const INSTALL_LOCK: &str = ".lock";
 /// host outlives the app, and a pruning app must not delete the directory of a
 /// host it could not reach. The descriptor is close-on-exec, so no terminal
 /// inherits the lock. Best effort: no lock file means not installed that way.
+#[cfg(unix)]
 fn hold_install_dir() {
     static HELD: std::sync::OnceLock<std::fs::File> = std::sync::OnceLock::new();
     let Some(dir) = std::env::current_exe()

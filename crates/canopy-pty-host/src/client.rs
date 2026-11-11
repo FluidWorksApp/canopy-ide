@@ -516,6 +516,7 @@ impl HostClient {
     /// and exit. If it runs no terminals it is shut down and ours started; if it
     /// does, it is left running for them and this fails with a message saying
     /// so, and the caller uses in-process terminals until they are gone.
+    #[cfg(unix)]
     pub fn ensure_running_checked(
         host_exe: &Path,
         socket: &Path,
@@ -623,10 +624,27 @@ impl HostClient {
         idle_secs: u64,
         extra_args: &[&str],
     ) -> std::io::Result<HostClient> {
+        Self::ensure_running_checked(host_exe, socket, idle_secs, extra_args, None)
+    }
+
+    /// As `ensure_running_with`, running `check` on `host_exe` right before any
+    /// start, including restarts by the returned client's `spawn`. Skew handling
+    /// (replacing an incompatible host) is Unix only for now.
+    #[cfg(windows)]
+    pub fn ensure_running_checked(
+        host_exe: &Path,
+        socket: &Path,
+        idle_secs: u64,
+        extra_args: &[&str],
+        check: Option<LaunchCheck>,
+    ) -> std::io::Result<HostClient> {
         // Probe with a client that cannot restart the host (see the Unix twin).
         let client = HostClient::new(socket);
         if client.hello().is_ok() {
-            return Ok(client.with_launch(host_exe, idle_secs));
+            return Ok(client.with_launch_checked(host_exe, idle_secs, check));
+        }
+        if let Some(check) = &check {
+            (check.0)(host_exe)?;
         }
         let mut args: Vec<std::ffi::OsString> = vec![
             "--socket".into(),
@@ -640,13 +658,13 @@ impl HostClient {
         let deadline = Instant::now() + Duration::from_secs(10);
         while Instant::now() < deadline {
             if client.hello().is_ok() {
-                return Ok(client.with_launch(host_exe, idle_secs));
+                return Ok(client.with_launch_checked(host_exe, idle_secs, check.clone()));
             }
             match crate::windows::exited(&child) {
                 Some(0) if relaunches < 20 => {
                     std::thread::sleep(Duration::from_millis(100));
                     if client.hello().is_ok() {
-                        return Ok(client.with_launch(host_exe, idle_secs));
+                        return Ok(client.with_launch_checked(host_exe, idle_secs, check.clone()));
                     }
                     child = crate::windows::launch_detached(host_exe, &args)?;
                     relaunches += 1;
@@ -662,6 +680,7 @@ impl HostClient {
     }
 }
 
+#[cfg(unix)]
 enum SkewStop {
     Stopping,
     Keep(Option<usize>),
@@ -671,6 +690,7 @@ enum SkewStop {
 /// compatible client started since. A host that serves `shutdown_if_idle`
 /// decides atomically. An older one cannot: it is listed once more right before
 /// `shutdown`, which narrows that window to the gap between those two calls.
+#[cfg(unix)]
 fn stop_skewed_host(client: &HostClient) -> SkewStop {
     match client.shutdown_if_idle() {
         Ok(IdleShutdown::Stopping) => SkewStop::Stopping,
@@ -686,6 +706,7 @@ fn stop_skewed_host(client: &HostClient) -> SkewStop {
     }
 }
 
+#[cfg(unix)]
 fn skew_kept_error(
     version: Option<u32>,
     min_client: Option<u32>,
@@ -705,8 +726,10 @@ fn skew_kept_error(
 }
 
 /// How long a skewed host gets to answer `list`.
+#[cfg(unix)]
 const SKEW_LIST_WAIT: Duration = Duration::from_secs(1);
 /// How long a skewed host gets to go after `shutdown`.
+#[cfg(unix)]
 const SKEW_EXIT_WAIT: Duration = Duration::from_secs(5);
 
 /// After `shutdown`: the old host removes its socket path once, after it stops
@@ -714,6 +737,7 @@ const SKEW_EXIT_WAIT: Duration = Duration::from_secs(5);
 /// that removal or the old one would delete the new socket, so wait for the
 /// path itself to go (not just for connections to be refused), then, best
 /// effort, for the old process to exit.
+#[cfg(unix)]
 fn wait_for_host_gone(socket: &Path, host_pid: Option<u32>) -> std::io::Result<()> {
     let deadline = Instant::now() + SKEW_EXIT_WAIT;
     while std::fs::symlink_metadata(socket).is_ok() {
