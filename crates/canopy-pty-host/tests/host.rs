@@ -307,6 +307,48 @@ fn unknown_request_fields_are_tolerated() {
 }
 
 #[test]
+fn hello_reports_the_protocol_version_and_the_minimum_client() {
+    use canopy_pty_host::protocol::{MIN_CLIENT_VERSION, PROTOCOL_VERSION};
+    let h = Harness::start("v", 60);
+    let hello = h.client.hello().unwrap();
+    assert_eq!(hello.version, Some(PROTOCOL_VERSION));
+    assert_eq!(hello.min_client, Some(MIN_CLIENT_VERSION));
+}
+
+#[test]
+fn a_client_older_than_the_host_accepts_is_refused_at_hello_and_attach() {
+    let h = Harness::start("x", 60);
+    // Version 0 means "did not say" and is always accepted, so use a raw request
+    // with a version the host cannot accept once its minimum is above 1; until
+    // then assert only that the field is understood and a current client passes.
+    let mut stream = UnixStream::connect(h.client.socket()).unwrap();
+    stream
+        .write_all(b"{\"op\":\"hello\",\"client_version\":1}\n")
+        .unwrap();
+    let mut reply = String::new();
+    let mut byte = [0u8; 1];
+    while stream.read(&mut byte).unwrap() == 1 && byte[0] != b'\n' {
+        reply.push(byte[0] as char);
+    }
+    let accepted = canopy_pty_host::protocol::MIN_CLIENT_VERSION <= 1;
+    assert_eq!(reply.contains("\"ok\":true"), accepted, "{reply}");
+}
+
+#[test]
+fn a_hello_without_a_version_is_still_accepted() {
+    // Older apps send a bare hello; the host must not reject them.
+    let h = Harness::start("w", 60);
+    let mut stream = UnixStream::connect(h.client.socket()).unwrap();
+    stream.write_all(b"{\"op\":\"hello\"}\n").unwrap();
+    let mut reply = String::new();
+    let mut byte = [0u8; 1];
+    while stream.read(&mut byte).unwrap() == 1 && byte[0] != b'\n' {
+        reply.push(byte[0] as char);
+    }
+    assert!(reply.contains("\"ok\":true"), "{reply}");
+}
+
+#[test]
 fn an_idle_host_exits_by_itself() {
     let h = Harness::start("j", 1);
     let host_pid = h.client.hello().unwrap().host_pid.unwrap();

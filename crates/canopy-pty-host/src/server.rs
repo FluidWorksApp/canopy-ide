@@ -6,7 +6,9 @@
 //! growing host memory. With no client attached, output drains into the ring and
 //! the oldest bytes fall off (the client sees `gap` when it returns).
 
-use crate::protocol::{AttachReply, Request, Response, SessionInfo, SpawnSpec, PROTOCOL_VERSION};
+use crate::protocol::{
+    AttachReply, Request, Response, SessionInfo, SpawnSpec, MIN_CLIENT_VERSION, PROTOCOL_VERSION,
+};
 use portable_pty::{native_pty_system, CommandBuilder, MasterPty, PtySize};
 use std::collections::{HashMap, VecDeque};
 use std::io::{BufRead, BufReader, Read, Write};
@@ -180,7 +182,8 @@ pub fn harden_process() {
     unsafe {
         let mut limit: libc::rlimit = std::mem::zeroed();
         let max = if libc::getrlimit(libc::RLIMIT_NOFILE, &mut limit) == 0 {
-            (limit.rlim_cur as i64).min(65_536) as libc::c_int
+            // RLIM_INFINITY would wrap negative as an int and close nothing.
+            limit.rlim_cur.min(65_536) as libc::c_int
         } else {
             1024
         };
@@ -344,15 +347,35 @@ fn handle(host: &Arc<Host>, mut stream: UnixStream) -> std::io::Result<()> {
         Err(e) => return write_line(&mut stream, &Response::err(format!("bad request: {e}"))),
     };
     match request {
-        Request::Hello => write_line(
-            &mut stream,
-            &Response {
-                ok: true,
-                version: Some(PROTOCOL_VERSION),
-                host_pid: Some(std::process::id()),
-                ..Default::default()
-            },
-        ),
+        Request::Hello { client_version } => {
+            // A client too old for this host is refused up front, so skew between
+            // the app, a runner and a long-lived host fails at attach with a clear
+            // message instead of as garbage later. 0 means "did not say".
+            if client_version != 0 && client_version < MIN_CLIENT_VERSION {
+                return write_line(
+                    &mut stream,
+                    &Response {
+                        error: Some(format!(
+                            "client protocol {client_version} is older than this host accepts ({MIN_CLIENT_VERSION})"
+                        )),
+                        version: Some(PROTOCOL_VERSION),
+                        min_client: Some(MIN_CLIENT_VERSION),
+                        host_pid: Some(std::process::id()),
+                        ..Default::default()
+                    },
+                );
+            }
+            write_line(
+                &mut stream,
+                &Response {
+                    ok: true,
+                    version: Some(PROTOCOL_VERSION),
+                    min_client: Some(MIN_CLIENT_VERSION),
+                    host_pid: Some(std::process::id()),
+                    ..Default::default()
+                },
+            )
+        }
         Request::Spawn(spec) => {
             let reply = match spawn(host, spec) {
                 Ok(session) => Response {
@@ -461,7 +484,22 @@ fn handle(host: &Arc<Host>, mut stream: UnixStream) -> std::io::Result<()> {
             drop(sessions);
             write_line(&mut stream, &reply)
         }
-        Request::Attach { id, after } => {
+        Request::Attach {
+            id,
+            after,
+            client_version,
+        } => {
+            if client_version != 0 && client_version < MIN_CLIENT_VERSION {
+                return write_line(
+                    &mut stream,
+                    &AttachReply {
+                        error: Some(format!(
+                            "client protocol {client_version} is older than this host accepts ({MIN_CLIENT_VERSION})"
+                        )),
+                        ..Default::default()
+                    },
+                );
+            }
             let session = host.sessions.lock().unwrap().get(&id).cloned();
             match session {
                 Some(session) => attach(session, stream, after),
@@ -602,13 +640,17 @@ fn spawn(host: &Arc<Host>, spec: SpawnSpec) -> Result<Arc<Session>, String> {
 }
 
 fn attach(session: Arc<Session>, mut stream: UnixStream, after: u64) -> std::io::Result<()> {
-    *session.detached_at.lock().unwrap() = None;
     let (start, generation, cols, rows) = {
         let mut ring = session.ring.lock().unwrap();
         let end = ring.base + ring.bytes.len() as u64;
         let start = after.max(ring.base).min(end);
         ring.generation += 1;
         ring.attached = Some(start);
+        // Under the ring lock and after the bump: an older connection's input
+        // thread stamps `detached_at` only while it still owns the generation,
+        // so clearing earlier would let that stamp land after ours and start a
+        // linger clock on a session that is attached.
+        *session.detached_at.lock().unwrap() = None;
         session.cv.notify_all();
         let (cols, rows) = *session.size.lock().unwrap();
         (start, ring.generation, cols, rows)

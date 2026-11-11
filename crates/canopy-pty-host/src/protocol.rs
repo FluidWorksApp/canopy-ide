@@ -5,21 +5,49 @@
 
 use serde::{Deserialize, Serialize};
 
+/// Bumped when the wire format changes in a way an old peer would misread.
 pub const PROTOCOL_VERSION: u32 = 1;
+/// The oldest client this host will serve, and the oldest host a client will
+/// use. Raised only when compatibility is deliberately dropped.
+pub const MIN_CLIENT_VERSION: u32 = 1;
+pub const MIN_HOST_VERSION: u32 = 1;
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 #[serde(tag = "op", rename_all = "snake_case")]
 pub enum Request {
-    Hello,
+    Hello {
+        #[serde(default)]
+        client_version: u32,
+    },
     Spawn(SpawnSpec),
     List,
-    Resize { id: u32, cols: u16, rows: u16 },
-    Kill { id: u32 },
-    SetMeta { id: u32, meta: Option<String> },
-    Pgrp { id: u32 },
-    RawMode { id: u32 },
-    Reap { id: u32 },
-    Attach { id: u32, after: u64 },
+    Resize {
+        id: u32,
+        cols: u16,
+        rows: u16,
+    },
+    Kill {
+        id: u32,
+    },
+    SetMeta {
+        id: u32,
+        meta: Option<String>,
+    },
+    Pgrp {
+        id: u32,
+    },
+    RawMode {
+        id: u32,
+    },
+    Reap {
+        id: u32,
+    },
+    Attach {
+        id: u32,
+        after: u64,
+        #[serde(default)]
+        client_version: u32,
+    },
     Shutdown,
 }
 
@@ -63,6 +91,7 @@ pub struct Response {
     pub ok: bool,
     pub error: Option<String>,
     pub version: Option<u32>,
+    pub min_client: Option<u32>,
     pub host_pid: Option<u32>,
     pub id: Option<u32>,
     pub pid: Option<u32>,
@@ -108,7 +137,7 @@ mod tests {
     #[test]
     fn unknown_fields_are_ignored() {
         let r: Request = serde_json::from_str(r#"{"op":"hello","future":1}"#).unwrap();
-        assert!(matches!(r, Request::Hello));
+        assert!(matches!(r, Request::Hello { client_version: 0 }));
         let r: Response = serde_json::from_str(r#"{"ok":true,"added_later":[1]}"#).unwrap();
         assert!(r.ok);
     }

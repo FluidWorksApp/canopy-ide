@@ -74,6 +74,16 @@ host memory. Control ops (`spawn`, `list`, `resize`, `kill`, `pgrp`, `rawmode`,
 tolerated; on a version mismatch the app can still `list` and `kill`, so agents
 are never invisible. No multiplexing, framing or fd passing in this PR.
 
+**Versioning and containers.** `hello` carries the client's protocol version and
+the host replies with its own and the oldest client it accepts; `attach` repeats
+the client version. A client too old is refused with a clear message, and a
+client refuses a host older than it can use, so app, runner and a long-lived host
+can skew without misreading bytes (0 means "did not say" and is accepted, for
+older peers). The host is one static-capable binary (CI builds it for
+`x86_64-unknown-linux-musl` and checks it is static) whose socket comes from
+`--socket` or `CANOPY_PTY_HOST_SOCKET`, so a Linux container can run it without
+the app. Not yet exercised in a container.
+
 **Spawn.** The client sends argv, cwd and the full environment taken from the
 `CommandBuilder`. The host applies exactly that, never its own env. It carries
 tokens, so it is never logged or persisted.

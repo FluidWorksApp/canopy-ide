@@ -95,7 +95,15 @@ mod unix {
         static CLIENT: OnceLock<Option<Client>> = OnceLock::new();
         CLIENT
             .get_or_init(|| {
-                let (socket, exe) = (socket_path()?, host_exe()?);
+                // Said once, so a missing host is not mistaken for a working one.
+                let Some(socket) = socket_path() else {
+                    eprintln!("canopy: CANOPY_PTY_HOST=1 but no socket directory; using in-process terminals");
+                    return None;
+                };
+                let Some(exe) = host_exe() else {
+                    eprintln!("canopy: CANOPY_PTY_HOST=1 but canopy-pty-host was not found next to the app (set CANOPY_PTY_HOST_EXE); using in-process terminals");
+                    return None;
+                };
                 match HostClient::ensure_running(&exe, &socket, HOST_IDLE_SECS) {
                     Ok(client) => Some(client),
                     Err(error) => {
@@ -258,21 +266,23 @@ mod tests {
     #[test]
     fn the_child_gets_the_apps_environment_not_the_hosts() {
         let host = InProcessHost::start("env");
-        // The in-process host shares this process's environment, which has HOME.
-        // The command cleared its own, so HOME showing up in the child would mean
+        // The in-process host shares this process's environment. cargo sets
+        // CARGO_MANIFEST_DIR for a test run and no shell invents it, while the
+        // command cleared its own environment: seeing it in the child would mean
         // the host used its environment instead of the one it was sent.
+        assert!(std::env::var("CARGO_MANIFEST_DIR").is_ok());
         let (mut child, master) = spawn(
             &host.client,
-            &command("echo probe=$CANOPY_HOSTED_PROBE home=[$HOME]"),
+            &command("echo probe=$CANOPY_HOSTED_PROBE leak=[$CARGO_MANIFEST_DIR]"),
             80,
             24,
         )
         .unwrap();
         let mut pump = Pump::new(master.try_clone_reader().unwrap());
-        let out = pump.until("home=[");
+        let out = pump.until("leak=[");
         assert!(out.contains("probe=from-the-app"), "got {out:?}");
         assert!(
-            out.contains("home=[]"),
+            out.contains("leak=[]"),
             "the host leaked its environment: {out:?}"
         );
         assert!(child.wait().unwrap().success());
@@ -341,7 +351,8 @@ mod tests {
         let (mut child, master) = spawn(&host.client, &command(script), 80, 24).unwrap();
         let mut pump = Pump::new(master.try_clone_reader().unwrap());
         pump.until("raw-set");
-        let hosted = master
+        let plain: &dyn MasterPty = &*master;
+        let hosted = plain
             .downcast_ref::<canopy_pty_host::client::HostMaster>()
             .expect("a hosted master downcasts to HostMaster");
         assert!(hosted.raw_mode());

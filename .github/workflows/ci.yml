@@ -112,6 +112,21 @@ jobs:
           key: pty-host-${{ matrix.os }}
       - run: cargo test --locked --manifest-path crates/canopy-pty-host/Cargo.toml -p canopy-pty-host
       - run: cargo fmt --manifest-path crates/canopy-pty-host/Cargo.toml -p canopy-pty-host --check
+      # A Linux container wants one static file with a configurable socket path.
+      - name: Static (musl) host binary
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get install -y musl-tools
+          rustup target add x86_64-unknown-linux-musl
+          cargo build --locked --release --target x86_64-unknown-linux-musl --manifest-path crates/canopy-pty-host/Cargo.toml --bin canopy-pty-host
+          bin=src-tauri/target/x86_64-unknown-linux-musl/release/canopy-pty-host
+          file "$bin"
+          if ldd "$bin" 2>&1 | grep -q "not a dynamic executable"; then echo static; else ldd "$bin"; exit 1; fi
+          # Runs, takes its socket from the environment, and creates it.
+          dir=$(mktemp -d)
+          CANOPY_PTY_HOST_SOCKET="$dir/h.sock" "$bin" --idle-secs 5 &
+          for _ in $(seq 50); do [ -S "$dir/h.sock" ] && break; sleep 0.1; done
+          [ -S "$dir/h.sock" ]
 
   rust:
     name: Rust (cargo test)
@@ -208,6 +223,11 @@ jobs:
       - name: Compile containment launcher
         working-directory: src-tauri
         run: cargo check --no-default-features --bin canopy-hook
+
+      - name: Run hosted-terminal glue tests (macOS)
+        if: runner.os == 'macOS'
+        working-directory: src-tauri
+        run: cargo test --no-default-features --lib pty_hosted::tests
 
       - name: Run containment unit contract
         working-directory: src-tauri

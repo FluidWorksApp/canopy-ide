@@ -3,7 +3,9 @@
 //! app's existing `Session` unchanged (reader, writer, resize, kill and wait all
 //! keep their shapes).
 
-use crate::protocol::{AttachReply, Request, Response, SessionInfo, SpawnSpec};
+use crate::protocol::{
+    AttachReply, Request, Response, SessionInfo, SpawnSpec, MIN_HOST_VERSION, PROTOCOL_VERSION,
+};
 use portable_pty::{Child, ChildKiller, ExitStatus, MasterPty, PtySize};
 use std::io::{Read, Write};
 use std::os::unix::fs::PermissionsExt;
@@ -104,8 +106,18 @@ impl HostClient {
         }
     }
 
+    /// Fails if the host is older than this client can use, or refuses this
+    /// client as too old, so skew shows up here and not as misread bytes later.
     pub fn hello(&self) -> std::io::Result<Response> {
-        self.call(&Request::Hello)
+        let reply = self.call(&Request::Hello {
+            client_version: PROTOCOL_VERSION,
+        })?;
+        match reply.version {
+            Some(version) if version >= MIN_HOST_VERSION => Ok(reply),
+            seen => Err(other(format!(
+                "host speaks protocol {seen:?}, this client needs {MIN_HOST_VERSION} or newer"
+            ))),
+        }
     }
 
     /// The one call that may start a host: an idle host can be exiting just as we
@@ -163,7 +175,12 @@ impl HostClient {
     /// Opens the data connection: the reply, then raw bytes from `start` both ways.
     pub fn attach(&self, id: u32, after: u64) -> std::io::Result<Attached> {
         let mut stream = self.connect()?;
-        let mut line = serde_json::to_vec(&Request::Attach { id, after }).map_err(other_err)?;
+        let mut line = serde_json::to_vec(&Request::Attach {
+            id,
+            after,
+            client_version: PROTOCOL_VERSION,
+        })
+        .map_err(other_err)?;
         line.push(b'\n');
         stream.write_all(&line)?;
         let reply: AttachReply =

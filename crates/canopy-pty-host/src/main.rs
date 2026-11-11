@@ -3,13 +3,15 @@
 #[cfg(unix)]
 fn main() {
     canopy_pty_host::server::harden_process();
-    let mut socket = None;
+    // The socket path is configurable for containers: --socket, else the
+    // CANOPY_PTY_HOST_SOCKET environment variable.
+    let mut socket = std::env::var("CANOPY_PTY_HOST_SOCKET").ok();
     let mut idle = 60u64;
     let mut exited_ttl = canopy_pty_host::server::EXITED_TTL.as_secs();
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         match arg.as_str() {
-            "--socket" => socket = args.next(),
+            "--socket" => socket = args.next().or(socket),
             "--idle-secs" => idle = args.next().and_then(|v| v.parse().ok()).unwrap_or(idle),
             "--exited-ttl-secs" => {
                 exited_ttl = args
