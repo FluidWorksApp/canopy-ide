@@ -162,6 +162,33 @@ impl HostClient {
         self.call(&Request::SetMeta { id, meta }).map(|_| ())
     }
 
+    /// Change a session's linger; `None` lifts the limit.
+    pub fn set_linger(&self, id: u32, linger_secs: Option<u64>) -> std::io::Result<()> {
+        self.call(&Request::SetLinger { id, linger_secs })
+            .map(|_| ())
+    }
+
+    /// Store `value` under `key` for this host's lifetime. With `if_unset` the
+    /// first caller wins; either way the stored value is returned.
+    pub fn set_state(
+        &self,
+        key: &str,
+        value: &str,
+        if_unset: bool,
+    ) -> std::io::Result<Option<String>> {
+        Ok(self
+            .call(&Request::SetState {
+                key: key.into(),
+                value: value.into(),
+                if_unset,
+            })?
+            .value)
+    }
+
+    pub fn get_state(&self, key: &str) -> std::io::Result<Option<String>> {
+        Ok(self.call(&Request::GetState { key: key.into() })?.value)
+    }
+
     pub fn pgrp(&self, id: u32) -> std::io::Result<Option<i32>> {
         Ok(self
             .call_timeout(&Request::Pgrp { id }, PROBE_TIMEOUT)?

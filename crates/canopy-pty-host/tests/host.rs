@@ -554,3 +554,53 @@ fn a_session_without_a_linger_survives_a_dropped_client() {
     std::thread::sleep(Duration::from_secs(3));
     assert!(alive(pid), "a session with no linger was killed");
 }
+
+#[test]
+fn state_first_writer_wins_and_survives_client_reconnects() {
+    let h = Harness::start("st", 60);
+    assert_eq!(h.client.get_state("instance").unwrap(), None);
+    let first = h.client.set_state("instance", "aaa", true).unwrap();
+    assert_eq!(first.as_deref(), Some("aaa"));
+    // A second app launch offering its own token gets the first one back.
+    let second = h.client.set_state("instance", "bbb", true).unwrap();
+    assert_eq!(second.as_deref(), Some("aaa"));
+    assert_eq!(
+        h.client.get_state("instance").unwrap().as_deref(),
+        Some("aaa")
+    );
+    // Without if_unset it overwrites.
+    h.client.set_state("instance", "ccc", false).unwrap();
+    assert_eq!(
+        h.client.get_state("instance").unwrap().as_deref(),
+        Some("ccc")
+    );
+}
+
+#[test]
+fn lifting_linger_keeps_an_unattached_session_alive_and_a_new_limit_restarts_the_clock() {
+    let h = Harness::start("sl", 60);
+    let mut s = spec("sleep 300");
+    s.linger_secs = Some(1);
+    let (id, _) = h.client.spawn(s).unwrap();
+    h.client.set_linger(id, None).unwrap();
+    std::thread::sleep(Duration::from_millis(2500));
+    assert!(
+        h.client.list().unwrap()[0].exited.is_none(),
+        "limit was lifted"
+    );
+    // Re-imposing a limit counts from now, not from the original detach.
+    h.client.set_linger(id, Some(2)).unwrap();
+    std::thread::sleep(Duration::from_millis(800));
+    assert!(
+        h.client.list().unwrap()[0].exited.is_none(),
+        "clock restarted"
+    );
+    let deadline = Instant::now() + Duration::from_secs(8);
+    loop {
+        if h.client.list().unwrap()[0].exited.is_some() {
+            break;
+        }
+        assert!(Instant::now() < deadline, "session never lingered out");
+        std::thread::sleep(Duration::from_millis(200));
+    }
+}

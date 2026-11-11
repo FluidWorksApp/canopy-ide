@@ -64,7 +64,7 @@ struct Session {
     cv: Condvar,
     exited: Mutex<Option<i32>>,
     exited_at: Mutex<Option<Instant>>,
-    linger: Option<Duration>,
+    linger: Mutex<Option<Duration>>,
     /// When the last client detached (spawn time if none ever attached); None
     /// while a client is attached.
     detached_at: Mutex<Option<Instant>>,
@@ -111,6 +111,7 @@ struct Host {
     next_id: AtomicU32,
     connections: AtomicUsize,
     stop: Arc<AtomicBool>,
+    state: Mutex<HashMap<String, String>>,
 }
 
 /// Session ids must not repeat across host lifetimes: a stale id held by an app
@@ -251,6 +252,7 @@ pub fn serve(
         next_id: AtomicU32::new(id_seed()),
         connections: AtomicUsize::new(0),
         stop,
+        state: Mutex::new(HashMap::new()),
     });
     let mut quiet_since = Instant::now();
     // SAFETY: geteuid has no preconditions.
@@ -289,7 +291,7 @@ pub fn serve(
                     .is_none_or(|at| at.elapsed() < config.exited_ttl)
             });
             for s in sessions.values() {
-                if let (Some(linger), None) = (s.linger, s.exit_code()) {
+                if let (Some(linger), None) = (*s.linger.lock().unwrap(), s.exit_code()) {
                     let detached = *s.detached_at.lock().unwrap();
                     if detached.is_some_and(|at| at.elapsed() >= linger)
                         && !s.lingered.swap(true, Ordering::SeqCst)
@@ -451,6 +453,43 @@ fn handle(host: &Arc<Host>, mut stream: UnixStream) -> std::io::Result<()> {
             });
             write_line(&mut stream, &reply)
         }
+        Request::SetLinger { id, linger_secs } => {
+            let reply = with_session(host, id, |s| {
+                *s.linger.lock().unwrap() = linger_secs.map(Duration::from_secs);
+                // Restart the clock from now so lifting then re-imposing a
+                // limit does not kill a session that has been unattended a while.
+                if s.detached_at.lock().unwrap().is_some() {
+                    *s.detached_at.lock().unwrap() = Some(Instant::now());
+                }
+                Ok(Response::ok())
+            });
+            write_line(&mut stream, &reply)
+        }
+        Request::SetState {
+            key,
+            value,
+            if_unset,
+        } => {
+            let mut state = host.state.lock().unwrap();
+            if !(if_unset && state.contains_key(&key)) {
+                state.insert(key.clone(), value);
+            }
+            let reply = Response {
+                ok: true,
+                value: state.get(&key).cloned(),
+                ..Default::default()
+            };
+            drop(state);
+            write_line(&mut stream, &reply)
+        }
+        Request::GetState { key } => {
+            let reply = Response {
+                ok: true,
+                value: host.state.lock().unwrap().get(&key).cloned(),
+                ..Default::default()
+            };
+            write_line(&mut stream, &reply)
+        }
         Request::Pgrp { id } => {
             let reply = with_session(host, id, |s| {
                 let pgrp = s.master.lock().unwrap().process_group_leader();
@@ -602,7 +641,7 @@ fn spawn(host: &Arc<Host>, spec: SpawnSpec) -> Result<(Arc<Session>, bool), Stri
         cv: Condvar::new(),
         exited: Mutex::new(None),
         exited_at: Mutex::new(None),
-        linger: spec.linger_secs.map(Duration::from_secs),
+        linger: Mutex::new(spec.linger_secs.map(Duration::from_secs)),
         detached_at: Mutex::new(Some(Instant::now())),
         lingered: AtomicBool::new(false),
     });

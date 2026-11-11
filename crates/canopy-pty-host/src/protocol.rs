@@ -42,6 +42,23 @@ pub enum Request {
     Reap {
         id: u32,
     },
+    /// Change how long a session may sit with no client before the host kills
+    /// it. `None` lifts the limit (adoption does this once the app owns it).
+    SetLinger {
+        id: u32,
+        linger_secs: Option<u64>,
+    },
+    /// A small per-host-lifetime store for the app (the instance token). With
+    /// `if_unset`, the first caller wins and every caller gets the stored value.
+    SetState {
+        key: String,
+        value: String,
+        #[serde(default)]
+        if_unset: bool,
+    },
+    GetState {
+        key: String,
+    },
     Attach {
         id: u32,
         after: u64,
@@ -107,6 +124,8 @@ pub struct Response {
     pub sessions: Option<Vec<SessionInfo>>,
     pub pgrp: Option<i32>,
     pub raw: Option<bool>,
+    /// Reply to `get_state` / `set_state`: the value now stored, if any.
+    pub value: Option<String>,
 }
 
 impl Response {
