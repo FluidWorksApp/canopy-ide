@@ -132,6 +132,23 @@ fn take_frame_into_reuses_the_viewer_frame() {
 }
 
 #[test]
+fn frame_into_ticks_and_fills_the_viewer_frame() {
+    let (mut s, peer) = session(20, 5);
+    let mut mine = Frame::default();
+    peer.send_output(b"hi");
+    assert!(FrameSource::frame_into(&mut s, 0, &mut mine));
+    assert_eq!(row_text(&mine, 0), "hi");
+    // Nothing newer: false, and the frame is left alone.
+    let seq = mine.seq;
+    assert!(!FrameSource::frame_into(&mut s, seq, &mut mine));
+    assert_eq!(mine.seq, seq);
+    peer.send_output(b"!");
+    assert!(FrameSource::frame_into(&mut s, seq, &mut mine));
+    assert_eq!(row_text(&mine, 0), "hi!");
+    assert!(!mine.damage.full);
+}
+
+#[test]
 fn synchronized_output_holds_then_releases() {
     let (mut s, peer) = session(20, 5);
     let t0 = Instant::now();

@@ -196,6 +196,53 @@ jobs:
       - run: cargo test --locked --manifest-path crates/canopy-term-cli/Cargo.toml
       - run: cargo fmt --manifest-path crates/canopy-term-cli/Cargo.toml --check
 
+  # The terminal window app, built in release on each OS and kept as an artifact
+  # so it can be downloaded and tried on a real display (CI has none). Its tests
+  # run in the Terminal crates job above (the glob finds crates/canopy-term-app).
+  term-app:
+    name: canopy-term-app binary (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-15, windows-2022]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            ./src-tauri -> target
+            ./crates/canopy-term-app -> target
+          key: term-app-${{ matrix.os }}
+      - name: Build the app
+        run: cargo build --locked --release --manifest-path crates/canopy-term-app/Cargo.toml
+      - name: Build the host it starts
+        if: runner.os != 'Windows'
+        run: cargo build --locked --release --manifest-path crates/canopy-pty-host/Cargo.toml --bin canopy-pty-host
+      - name: Gather the binaries
+        shell: bash
+        run: |
+          mkdir dist
+          ext=""
+          if [ "$RUNNER_OS" = "Windows" ]; then ext=".exe"; fi
+          cp "crates/canopy-term-app/target/release/canopy-term-app$ext" dist/
+          if [ "$RUNNER_OS" != "Windows" ]; then cp src-tauri/target/release/canopy-pty-host dist/; fi
+          ls -l dist
+      # No window is opened: this checks the binary loads and parses arguments.
+      - name: Smoke test
+        shell: bash
+        run: |
+          ext=""
+          if [ "$RUNNER_OS" = "Windows" ]; then ext=".exe"; fi
+          "dist/canopy-term-app$ext" --version
+          "dist/canopy-term-app$ext" --help > /dev/null
+      - uses: actions/upload-artifact@v4
+        with:
+          name: canopy-term-app-${{ matrix.os }}
+          path: dist
+          retention-days: 7
+
   rust:
     name: Rust (cargo test)
     runs-on: ubuntu-22.04

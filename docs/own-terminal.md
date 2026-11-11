@@ -17,7 +17,7 @@ working with an agent, not measurements.
 | 4 Remote protocol | not started | Build (ideas from mosh, tmux) | Snapshot on attach, per-device keys and pairing, per-client backpressure |
 | 5 Network | `canopy-term-net` (#785, #789) | Build on iroh and the installed Tailscale | Local unix socket stays its own transport |
 | 6 Service forwarding | not started | Build | Remote spawn (`--on <machine>`) and port forwarding |
-| 7 Native window | `canopy-term-render` (#782), `canopy-term-input`, `canopy-term-window` | Build renderer, input and window | wgpu, glyph atlas, shaping; kitty keyboard; IME; AccessKit |
+| 7 Native window | `canopy-term-render` (#782), `canopy-term-input`, `canopy-term-window`, `canopy-term-session`, `canopy-term-app` | Build renderer, input, window, session and the app that joins them | wgpu, glyph atlas, shaping; kitty keyboard; IME; AccessKit; `canopy-term-app` opens a window on a host session (unix; never run on a real display yet) |
 
 ## Decisions
 
