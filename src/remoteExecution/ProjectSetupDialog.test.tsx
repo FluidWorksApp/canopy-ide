@@ -30,7 +30,7 @@ it('groups candidate files by category and leaves secret-looking ones unchecked 
  expect((screen.getByLabelText(/^\.env/) as HTMLInputElement).checked).toBe(false);
  expect((screen.getByLabelText(/config\/local\.json/) as HTMLInputElement).checked).toBe(true);
  expect((screen.getByLabelText(/data\/dev\.sqlite/) as HTMLInputElement).checked).toBe(true);
- expect(screen.getByText(/look like credentials/i)).toBeTruthy();
+ expect(screen.getByText(/Credentials\. Copied only if ticked/)).toBeTruthy();
  for(const heading of ['Secrets','Config','Data','Other'])expect(screen.getByText(heading)).toBeTruthy();
  expect((screen.getByLabelText(/Install dependencies/) as HTMLInputElement).checked).toBe(true);
 });
@@ -75,7 +75,7 @@ it('skips a folder that no longer exists here instead of failing the whole list'
  });
  render(<ProjectSetupDialog projectId="p1" projectName="Shop" workspaceName="Studio" components={[component,{componentId:'gone',label:'old'}]}/>);
  expect(await screen.findByLabelText(/config\/local\.json/)).toBeTruthy();
- expect(screen.getByText(/Skipped, folder no longer exists on this Mac: old/)).toBeTruthy();
+ expect(screen.getByText(/Skipped, folder missing: old/)).toBeTruthy();
  expect(screen.queryByText(/no longer exists on this device/)).toBeNull();
 });
 

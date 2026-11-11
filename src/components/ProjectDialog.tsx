@@ -176,6 +176,7 @@ export function ProjectDialog({ existing, initialCloneUrl, onSave, onCancel }: P
     <div className="modal-backdrop" onClick={onCancel}>
       <div className="modal" onClick={(e) => e.stopPropagation()}>
         <h3>{existing ? "Edit project" : "New project"}</h3>
+        <div className="modal-body">
         <label className="field">
           <span>Project name</span>
           <input
@@ -366,6 +367,7 @@ export function ProjectDialog({ existing, initialCloneUrl, onSave, onCancel }: P
             allowInherit
           />
         )}
+        </div>
         <div className="modal-actions">
           <Button onClick={onCancel}>
             Cancel

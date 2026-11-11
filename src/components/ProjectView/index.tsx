@@ -557,7 +557,6 @@ import { prConflictContext, prReviewContext } from "../../prs";
 import {
   fileDiffContext,
   reviewContext,
-  sessionChangesContext,
 } from "../../diffContext";
 import { AgentQueryBar } from "../AgentQueryBar";
 import { AgentCloseUndo } from "../AgentCloseUndo";
@@ -11515,14 +11514,6 @@ const ProjectViewBody = memo(function ProjectViewBody({
     return () => clearTimeout(timer);
   }, [poolExhausted, retryExhausted]);
 
-  // The session changeset shaped for the agent context builder: component
-  // label plus each file's repo-relative path.
-  const changeContextGroups = () =>
-    changeGroups.map((g) => ({
-      component: g.component,
-      paths: g.files.map((f) => f.path),
-    }));
-
   // Which component checkout an absolute path lives in — the cwd a fresh agent
   // opened on that file should start in. Falls back to the first component.
   const repoForFile = (abs: string) =>
@@ -15402,29 +15393,6 @@ const ProjectViewBody = memo(function ProjectViewBody({
           relay.collab.markOwnerSaved(p);
           void refreshChanges();
         })
-      }
-      agentBar={
-        <AgentQueryBar
-          placeholder="Ask an agent about these changes…"
-          onRunTask={(query) => {
-            const dir = changeGroups[0]?.repo ?? componentsRef.current[0]?.path;
-            if (!dir) return onNotice("No git repository in this project.");
-            runAdhocTask(
-              sessionChangesContext(changeContextGroups(), query),
-              dir,
-              "Changes",
-            );
-          }}
-          tasks={
-            hasTasksToList({ saved: project.customTasks })
-              ? () =>
-                  taskRows(
-                    "About the current changes: ",
-                    changeGroups[0]?.repo ?? componentsRef.current[0]?.path ?? "",
-                  )
-              : undefined
-          }
-        />
       }
     />
   );

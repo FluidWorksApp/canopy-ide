@@ -62,6 +62,8 @@ import {
 } from "./vibeTargetInference";
 import { observeTurnEvents } from "./turnRollback";
 import { observeAgentTurns } from "./agentTurns";
+import { startSystemOneSync } from "./systemOne";
+import { startRequestTasks } from "./requestTasks";
 import { startAwareness } from "./awareness/engine";
 import { setCloudNoteSender, setCloudRosterProvider } from "./awareness/roster";
 import { isWorkspaceHost } from "./host";
@@ -336,6 +338,8 @@ function publishScopes(state: WorkspaceState) {
 
 export default function App() {
   useEffect(() => startBackgroundTeams(), []);
+  useEffect(() => startSystemOneSync(), []);
+  useEffect(() => startRequestTasks(), []);
   // Tab stays inside whichever modal layer is open.
   useEffect(() => installModalFocusTrap(), []);
   // Live device streaming ships with the app: fetch its pinned tools once, in

@@ -2,7 +2,7 @@
 // component they live in. Git is the source of truth — not the raw fs watcher —
 // so this list already excludes everything in .gitignore (build output, object
 // files, editor temp files) and reflects real staged/unstaged/untracked state.
-import { useState, type ReactNode } from "react";
+import { useState } from "react";
 import type { FileChange } from "../ipc";
 import { ContextMenu, useContextMenu, type MenuItem } from "./ContextMenu";
 import { Dialog } from "./Dialog";
@@ -47,8 +47,6 @@ interface ChangesPanelProps {
   collab?: CollabChange[];
   onOpenCollab?: (path: string) => void;
   onSaveCollab?: (path: string) => void;
-  /** "Ask an agent about these changes" control, shown when the tree isn't clean. */
-  agentBar?: ReactNode;
   /** Stage or unstage one file. Given together with `onCommit`, the list stops
    *  being a read-only view and becomes the place you actually commit from. */
   onStage?: (repo: string, paths: string[]) => void;
@@ -98,7 +96,6 @@ export function ChangesPanel({
   collab,
   onOpenCollab,
   onSaveCollab,
-  agentBar,
   onStage,
   onUnstage,
   onCommit,
@@ -223,7 +220,6 @@ export function ChangesPanel({
           ↻
         </Button>
       </div>
-      {total > 0 && agentBar}
       {collabEdited.length > 0 && (
         <div className="change-group changes-collab">
           <div className="git-section-head change-group-head">

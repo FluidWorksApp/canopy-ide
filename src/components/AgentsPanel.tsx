@@ -194,6 +194,7 @@ function SharedDialog({
     <div className="modal-backdrop" onClick={onClose}>
       <div className="modal share-modal" onClick={(e) => e.stopPropagation()}>
         <h3>What's shared</h3>
+        <div className="modal-body">
         <p className="share-modal-note">{SHARE_EXPLAIN}</p>
         {shared.length === 0 ? (
           <p className="share-none">Nothing yet.</p>
@@ -230,6 +231,7 @@ function SharedDialog({
             );
           })
         )}
+        </div>
         <div className="modal-actions">
           <Button onClick={onClose}>
             Close
