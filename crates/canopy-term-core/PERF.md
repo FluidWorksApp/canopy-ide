@@ -140,5 +140,28 @@ random split points).
 
 `cargo test --locked --test perf` prints, besides the rows above, the mixed
 stream and a no-scroll cursor-addressed repaint workload for both paths
-(`REFERENCE full rebuild` against incremental). Numbers from CI are recorded
-below once a run has printed them.
+(`REFERENCE full rebuild` against incremental).
+
+Numbers printed by CI run 43121745392 (commit 48ee9d0 of PR 802, `Terminal
+crates` job; a different run and different runners from the tables above, so
+do not subtract across them). All six `tests/damage.rs` tests passed on all
+three operating systems.
+
+| metric | ubuntu | macOS (arm64) | windows |
+| --- | --- | --- | --- |
+| mixed stream 80x24, 4 KiB reads, incremental | 56.1 MiB/s | 52.6 MiB/s | 51.0 MiB/s |
+| mixed stream 80x24, 4 KiB reads, reference full rebuild | 57.1 MiB/s | 56.0 MiB/s | 50.8 MiB/s |
+| mixed stream 200x50, 4 KiB reads, incremental | 24.1 MiB/s | 26.3 MiB/s | 21.1 MiB/s |
+| mixed stream 80x24, 256 KiB reads, incremental | 78.7 MiB/s | 76.5 MiB/s | 71.5 MiB/s |
+| cursor-addressed repaint 80x24 (55 B per call), incremental | 4.2 us | 7.0 us | 5.9 us |
+| cursor-addressed repaint 80x24, reference full rebuild | 21.1 us | 19.0 us | 24.6 us |
+| cursor-addressed repaint 200x50 (56 B per call), incremental | 13.0 us | 31.7 us | 18.9 us |
+| cursor-addressed repaint 200x50, reference full rebuild | 107.3 us | 126.6 us | 125.1 us |
+| advance with a one-line update, 80x24 / 200x50 | 3.3 / 10.8 us | 9.2 / 31.3 us | 5.5 / 16.8 us |
+
+Reading these: on the scrolling mixed stream the two paths are within run noise
+of each other (the reference was marginally faster on every OS), as expected,
+since nearly every call is full damage. The mixed 80x24 and 256 KiB figures
+above are single runs on shared runners. The gain is in the no-scroll repaint
+workload, where the incremental path took roughly 3 to 8 times less time per
+call in this run.
