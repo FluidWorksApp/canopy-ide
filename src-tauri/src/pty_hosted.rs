@@ -279,6 +279,7 @@ mod tests {
             &command("echo probe=$CANOPY_HOSTED_PROBE leak=[$CARGO_MANIFEST_DIR]"),
             80,
             24,
+            None,
         )
         .unwrap();
         let mut pump = Pump::new(master.try_clone_reader().unwrap());
