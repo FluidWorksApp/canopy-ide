@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Entitlements for the canopy-pty-host sidecar: none, on purpose.
+
+  The host only owns PTYs and forks the user's shell. It does not run JIT code
+  (allow-jit), record audio (audio-input), or load third-party libraries into
+  itself (disable-library-validation). The children it forks are separate
+  processes: the hardened runtime of the host does not constrain their own
+  signing. The host also strips DYLD_* from its own environment, so
+  allow-dyld-environment-variables would only widen what a long-lived process
+  accepts. It is a long-lived process that outlives the app, so it gets the
+  least the hardened runtime allows.
+-->
+<plist version="1.0">
+<dict>
+</dict>
+</plist>

@@ -270,7 +270,8 @@ the host on:
   Hook events go through `~/.canopy/agent-events.jsonl`, which is already stable,
   but the app only reads events written after it starts.
 
-**Not in this PR (stacked follow-ups):** Windows (no socket transport).
+**Not in this PR (stacked follow-ups):** Quit and Stop All, Windows (no socket transport).
+Packaging is the stacked packaging PR described above.
 
 ## Remote runner (follow-up, investigated)
 

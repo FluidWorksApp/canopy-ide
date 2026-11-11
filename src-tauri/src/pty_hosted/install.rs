@@ -16,16 +16,29 @@
 //!   downloaded app). The code signature is inside the Mach-O and travels with
 //!   the bytes. The copy is read back and must hash the same before it is used.
 //! - Older directories are kept while the host they started is alive (the host
-//!   reports its own path in `hello`) and pruned on a later launch. When it is
-//!   not certain which directory is live, nothing is pruned.
+//!   reports its own path in `hello`) or while any app holds their lock, and
+//!   pruned on a later launch. When it is not certain which directory is live,
+//!   nothing is pruned.
+//! - Every directory here must be a real directory owned by this user.
+//! - The copy is hashed again right before each start (`verify`), since it is
+//!   executed long after it was installed.
 
 use canopy_pty_host::protocol::Response;
 use sha2::{Digest, Sha256};
+use std::fs::File;
 use std::io::Write;
-use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
+use std::os::unix::io::AsRawFd;
 use std::path::{Path, PathBuf};
 
 pub(super) const HOST_BIN: &str = "canopy-pty-host";
+
+/// In `bin/`: held exclusively by one install or one prune at a time.
+const BIN_LOCK: &str = ".lock";
+/// In `bin/`: the last bundle's identity and hash.
+const CACHE: &str = ".bundled-cache";
+/// In each install dir: held shared by every app that uses it.
+pub(super) const DIR_LOCK: &str = ".lock";
 
 /// Hex digits of the content hash in a directory name.
 const DIGEST_LEN: usize = 16;
@@ -141,34 +154,210 @@ fn hashes_to(path: &Path, digest: &str) -> bool {
     std::fs::read(path).is_ok_and(|bytes| sha256_hex(&bytes) == digest)
 }
 
+/// Run right before the host is started from `exe` (first start and every
+/// restart): the copy must still hash to what was installed, because it is
+/// executed long after `install` checked it.
+pub(super) fn verify(exe: &Path, digest: &str) -> std::io::Result<()> {
+    if hashes_to(exe, digest) {
+        Ok(())
+    } else {
+        Err(std::io::Error::other(format!(
+            "{} no longer matches the installed PTY host",
+            exe.display()
+        )))
+    }
+}
+
+/// Create `dir` if needed and make it 0700. Refused if it is a symlink or
+/// belongs to another user (checked before the chmod, which follows
+/// symlinks), since then its mode says nothing about who can replace the
+/// binary inside. The same rule as the context bridge's socket directory.
 fn private_dir(dir: &Path) -> std::io::Result<()> {
     std::fs::create_dir_all(dir)?;
+    let meta = std::fs::symlink_metadata(dir)?;
+    if !meta.file_type().is_dir() {
+        return Err(std::io::Error::other(format!(
+            "{} is not a directory",
+            dir.display()
+        )));
+    }
+    // SAFETY: geteuid has no preconditions and cannot fail.
+    if meta.uid() != unsafe { libc::geteuid() } {
+        return Err(std::io::Error::other(format!(
+            "{} belongs to another user",
+            dir.display()
+        )));
+    }
     std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))
 }
 
-/// Installs `bundled` under `bin` for `version` and returns the path to start
-/// the host from. An existing copy with the right hash is reused as is; a
-/// missing or damaged one is replaced through a temporary file and a rename.
-/// An empty bundled file (CI builds stage a zero-byte placeholder) is refused.
-pub(super) fn install(bundled: &Path, bin: &Path, version: &str) -> Result<PathBuf, String> {
+fn flock(file: &File, op: libc::c_int) -> std::io::Result<()> {
+    // SAFETY: flock on a descriptor we own; released when `file` is closed.
+    if unsafe { libc::flock(file.as_raw_fd(), op) } == 0 {
+        Ok(())
+    } else {
+        Err(std::io::Error::last_os_error())
+    }
+}
+
+/// `<bin>/.lock`, held exclusively for the length of one install or one
+/// prune, so a directory is never claimed while a pruner is deciding to
+/// delete it.
+fn lock_bin(bin: &Path) -> std::io::Result<File> {
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(bin.join(BIN_LOCK))?;
+    flock(&file, libc::LOCK_EX)?;
+    Ok(file)
+}
+
+/// Creates the install dir for `name` and takes a shared lock on its `.lock`.
+/// Every app using that copy holds it for its whole run, so a prune by
+/// another app (debug builds in several worktrees share `pty-host-dev`)
+/// never deletes it. Call with the bin lock held.
+fn claim(bin: &Path, name: &str) -> std::io::Result<(PathBuf, File)> {
+    let dir = bin.join(name);
+    private_dir(&dir)?;
+    let hold = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(dir.join(DIR_LOCK))?;
+    flock(&hold, libc::LOCK_SH)?;
+    Ok((dir, hold))
+}
+
+/// Whether no app holds `dir`. A missing lock file means it was never
+/// claimed (an older build); anything but a clean acquire means keep it.
+fn unclaimed(dir: &Path) -> bool {
+    match File::open(dir.join(DIR_LOCK)) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => true,
+        Err(_) => false,
+        Ok(file) => flock(&file, libc::LOCK_EX | libc::LOCK_NB).is_ok(),
+    }
+}
+
+/// The bundled file's identity, so an unchanged bundle is not re-read and
+/// re-hashed on every launch. An update writes a new file: a new inode and
+/// mtime at least.
+#[derive(Debug, PartialEq)]
+struct BundleKey {
+    len: u64,
+    mtime: i64,
+    mtime_nsec: i64,
+    ino: u64,
+    dev: u64,
+    path: String,
+}
+
+impl BundleKey {
+    fn of(path: &Path, meta: &std::fs::Metadata) -> Self {
+        BundleKey {
+            len: meta.len(),
+            mtime: meta.mtime(),
+            mtime_nsec: meta.mtime_nsec(),
+            ino: meta.ino(),
+            dev: meta.dev(),
+            path: path.to_string_lossy().into_owned(),
+        }
+    }
+}
+
+/// One line: `len mtime mtime_nsec ino dev sha256 path`.
+fn cache_line(key: &BundleKey, digest: &str) -> String {
+    format!(
+        "{} {} {} {} {} {digest} {}",
+        key.len, key.mtime, key.mtime_nsec, key.ino, key.dev, key.path
+    )
+}
+
+/// The digest the cache holds for `key`; anything unparseable is a miss.
+fn cached_digest(line: &str, key: &BundleKey) -> Option<String> {
+    let mut parts = line.trim_end_matches('\n').splitn(7, ' ');
+    let mut next = || parts.next();
+    let found = BundleKey {
+        len: next()?.parse().ok()?,
+        mtime: next()?.parse().ok()?,
+        mtime_nsec: next()?.parse().ok()?,
+        ino: next()?.parse().ok()?,
+        dev: next()?.parse().ok()?,
+        path: String::new(),
+    };
+    let digest = next()?.to_string();
+    let path = next()?.to_string();
+    let found = BundleKey { path, ..found };
+    let hex = digest.len() == 64 && digest.bytes().all(|b| b.is_ascii_hexdigit());
+    (found == *key && hex).then_some(digest)
+}
+
+/// Best effort, through a temporary file and a rename.
+fn write_cache(bin: &Path, key: &BundleKey, digest: &str) {
+    let tmp = bin.join(format!("{CACHE}.tmp-{}", std::process::id()));
+    if std::fs::write(&tmp, cache_line(key, digest)).is_ok() {
+        if std::fs::rename(&tmp, bin.join(CACHE)).is_err() {
+            let _ = std::fs::remove_file(&tmp);
+        }
+    }
+}
+
+/// The installed host: the path to start it from, the hash it must have, and
+/// the shared lock that keeps its directory from being pruned (hold it for as
+/// long as the app runs).
+#[derive(Debug)]
+pub(super) struct Installed {
+    pub exe: PathBuf,
+    pub digest: String,
+    pub hold: File,
+}
+
+/// Installs `bundled` under `bin` for `version`. An existing copy with the
+/// right hash is reused as is; a missing or damaged one is replaced through a
+/// temporary file and a rename. An unchanged bundle (same size, mtime, inode)
+/// is not re-read: its hash comes from a cache, but the installed copy is
+/// always hashed. An empty bundled file (CI builds stage a zero-byte
+/// placeholder) is refused before anything is created.
+pub(super) fn install(bundled: &Path, bin: &Path, version: &str) -> Result<Installed, String> {
+    let meta = std::fs::metadata(bundled)
+        .map_err(|e| format!("reading bundled host {}: {e}", bundled.display()))?;
+    if meta.len() == 0 {
+        return Err(format!("bundled host {} is empty", bundled.display()));
+    }
+    let io = |e: std::io::Error| e.to_string();
+    // The socket directory is the host's own and must stay private; the host
+    // and the launcher chmod it too, but this runs before either.
+    if let Some(parent) = bin.parent() {
+        private_dir(parent).map_err(io)?;
+    }
+    private_dir(bin).map_err(io)?;
+    let _bin_lock = lock_bin(bin).map_err(io)?;
+    let key = BundleKey::of(bundled, &meta);
+
+    let cached = std::fs::read_to_string(bin.join(CACHE))
+        .ok()
+        .and_then(|line| cached_digest(&line, &key));
+    if let Some(digest) = cached {
+        let (dir, hold) = claim(bin, &dir_name(version, &digest)).map_err(io)?;
+        let exe = dir.join(HOST_BIN);
+        if hashes_to(&exe, &digest) {
+            return Ok(Installed { exe, digest, hold });
+        }
+        // Missing or damaged: install it again from the bundle below.
+    }
+
     let bytes = std::fs::read(bundled)
         .map_err(|e| format!("reading bundled host {}: {e}", bundled.display()))?;
     if bytes.is_empty() {
         return Err(format!("bundled host {} is empty", bundled.display()));
     }
     let digest = sha256_hex(&bytes);
-    let dir = bin.join(dir_name(version, &digest));
-    let target = dir.join(HOST_BIN);
-    if hashes_to(&target, &digest) {
-        return Ok(target);
+    write_cache(bin, &key, &digest);
+    let (dir, hold) = claim(bin, &dir_name(version, &digest)).map_err(io)?;
+    let exe = dir.join(HOST_BIN);
+    if hashes_to(&exe, &digest) {
+        return Ok(Installed { exe, digest, hold });
     }
-    // The socket directory is the host's own and must stay private; the host
-    // and the launcher chmod it too, but this runs before either.
-    if let Some(parent) = bin.parent() {
-        private_dir(parent).map_err(|e| e.to_string())?;
-    }
-    private_dir(bin).map_err(|e| e.to_string())?;
-    private_dir(&dir).map_err(|e| e.to_string())?;
     let tmp = dir.join(format!(".{HOST_BIN}.tmp-{}", std::process::id()));
     let _ = std::fs::remove_file(&tmp);
     let written = (|| -> std::io::Result<()> {
@@ -190,17 +379,21 @@ pub(super) fn install(bundled: &Path, bin: &Path, version: &str) -> Result<PathB
         let _ = std::fs::remove_file(&tmp);
         return Err(format!("{} did not read back intact", tmp.display()));
     }
-    std::fs::rename(&tmp, &target).map_err(|e| {
+    std::fs::rename(&tmp, &exe).map_err(|e| {
         let _ = std::fs::remove_file(&tmp);
-        format!("installing {}: {e}", target.display())
+        format!("installing {}: {e}", exe.display())
     })?;
-    Ok(target)
+    Ok(Installed { exe, digest, hold })
 }
 
-/// Deletes stale install directories under `bin`. Only real directories are
-/// considered (a symlink is never followed into), and failures are ignored:
-/// pruning is housekeeping.
+/// Deletes stale install directories under `bin`: ours by name, neither the
+/// current nor the live host's, and claimed by no running app. Only real
+/// directories are considered (a symlink is never followed into), and
+/// failures are ignored: pruning is housekeeping.
 pub(super) fn prune(bin: &Path, current: &str, live: &Liveness) {
+    let Ok(_bin_lock) = lock_bin(bin) else {
+        return;
+    };
     let Ok(entries) = std::fs::read_dir(bin) else {
         return;
     };
@@ -210,7 +403,10 @@ pub(super) fn prune(bin: &Path, current: &str, live: &Liveness) {
         .filter_map(|entry| entry.file_name().into_string().ok())
         .collect();
     for name in plan_prune(&names, current, live) {
-        let _ = std::fs::remove_dir_all(bin.join(name));
+        let dir = bin.join(name);
+        if unclaimed(&dir) {
+            let _ = std::fs::remove_dir_all(dir);
+        }
     }
 }
 
@@ -356,7 +552,8 @@ mod tests {
         let bundled = root.join("bundled");
         std::fs::write(&bundled, b"#!/bin/sh\necho host\n").unwrap();
         let bin = root.join("pty-host").join("bin");
-        let first = install(&bundled, &bin, "0.5.15").unwrap();
+        let first_install = install(&bundled, &bin, "0.5.15").unwrap();
+        let first = first_install.exe.clone();
         assert_eq!(
             std::fs::read(&first).unwrap(),
             std::fs::read(&bundled).unwrap()
@@ -383,17 +580,26 @@ mod tests {
             .flatten()
             .map(|e| e.file_name())
             .collect();
-        assert_eq!(leftovers, vec![std::ffi::OsString::from(HOST_BIN)]);
+        let mut leftovers = leftovers;
+        leftovers.sort();
+        assert_eq!(
+            leftovers,
+            vec![
+                std::ffi::OsString::from(DIR_LOCK),
+                std::ffi::OsString::from(HOST_BIN)
+            ]
+        );
+        assert!(verify(&first, &first_install.digest).is_ok());
 
         // Same bytes: the same file, untouched (a running host keeps its inode).
         let inode = std::fs::metadata(&first).unwrap().ino();
-        let again = install(&bundled, &bin, "0.5.15").unwrap();
+        let again = install(&bundled, &bin, "0.5.15").unwrap().exe;
         assert_eq!(again, first);
         assert_eq!(std::fs::metadata(&again).unwrap().ino(), inode);
 
         // New bytes (an update): a new directory, the old one left alone.
         std::fs::write(&bundled, b"#!/bin/sh\necho newer host\n").unwrap();
-        let updated = install(&bundled, &bin, "0.5.16").unwrap();
+        let updated = install(&bundled, &bin, "0.5.16").unwrap().exe;
         assert_ne!(updated.parent(), first.parent());
         assert!(first.exists());
         let _ = std::fs::remove_dir_all(&root);
@@ -405,7 +611,7 @@ mod tests {
         let bundled = root.join("bundled");
         std::fs::write(&bundled, b"the real host").unwrap();
         let bin = root.join("bin");
-        let target = install(&bundled, &bin, "1.0.0").unwrap();
+        let target = install(&bundled, &bin, "1.0.0").unwrap().exe;
         let old_inode = std::fs::metadata(&target).unwrap().ino();
         // Hard-link the old inode so we can see it was never written to.
         let witness = root.join("witness");
@@ -414,7 +620,7 @@ mod tests {
         std::fs::write(&target, b"truncated").unwrap();
         let damaged_inode = std::fs::metadata(&target).unwrap().ino();
 
-        let fixed = install(&bundled, &bin, "1.0.0").unwrap();
+        let fixed = install(&bundled, &bin, "1.0.0").unwrap().exe;
         assert_eq!(fixed, target);
         assert_eq!(std::fs::read(&fixed).unwrap(), b"the real host");
         let new_inode = std::fs::metadata(&fixed).unwrap().ino();
@@ -472,6 +678,97 @@ mod tests {
         assert!(bin.join("0.5.15-cccccccccccccccc").exists());
         assert!(bin.join("keep-me").exists());
         assert!(outside.join("precious").exists());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn verify_refuses_a_copy_that_changed_after_install() {
+        let root = scratch("ver");
+        let bundled = root.join("bundled");
+        std::fs::write(&bundled, b"the real host").unwrap();
+        let installed = install(&bundled, &root.join("bin"), "1.0.0").unwrap();
+        assert!(verify(&installed.exe, &installed.digest).is_ok());
+        std::fs::remove_file(&installed.exe).unwrap();
+        std::fs::write(&installed.exe, b"swapped").unwrap();
+        assert!(verify(&installed.exe, &installed.digest)
+            .unwrap_err()
+            .to_string()
+            .contains("no longer matches"));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn an_unchanged_bundle_is_not_hashed_again_but_a_changed_one_is() {
+        let root = scratch("cache");
+        let bundled = root.join("bundled");
+        std::fs::write(&bundled, b"one").unwrap();
+        let bin = root.join("bin");
+        let a = install(&bundled, &bin, "1.0.0").unwrap();
+        assert!(bin.join(CACHE).exists());
+        let b = install(&bundled, &bin, "1.0.0").unwrap();
+        assert_eq!(a.digest, b.digest);
+        // Same size, new content, new file: the key differs, so the hash does.
+        std::fs::remove_file(&bundled).unwrap();
+        std::fs::write(&bundled, b"two").unwrap();
+        let c = install(&bundled, &bin, "1.0.0").unwrap();
+        assert_ne!(a.digest, c.digest);
+        // A damaged cache is a miss, not an error.
+        std::fs::write(bin.join(CACHE), b"garbage").unwrap();
+        assert_eq!(install(&bundled, &bin, "1.0.0").unwrap().digest, c.digest);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn prune_leaves_a_directory_another_app_holds() {
+        let root = scratch("held");
+        let bundled = root.join("bundled");
+        std::fs::write(&bundled, b"old").unwrap();
+        let bin = root.join("bin");
+        let old = install(&bundled, &bin, "0.5.14").unwrap();
+        let old_dir = old.exe.parent().unwrap().to_path_buf();
+        let old_name = old_dir.file_name().unwrap().to_str().unwrap().to_owned();
+        std::fs::write(&bundled, b"new").unwrap();
+        let new = install(&bundled, &bin, "0.5.15").unwrap();
+        let current = new
+            .exe
+            .parent()
+            .unwrap()
+            .file_name()
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .to_owned();
+        let live = Liveness::Known(None);
+
+        // `old.hold` is still open: another app is using that copy.
+        prune(&bin, &current, &live);
+        assert!(old_dir.exists());
+
+        drop(old);
+        prune(&bin, &current, &live);
+        assert!(!old_dir.exists(), "{old_name} should have been pruned");
+        assert!(new.exe.exists());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_symlinked_or_foreign_directory_is_refused() {
+        let root = scratch("priv");
+        let real = root.join("real");
+        std::fs::create_dir_all(&real).unwrap();
+        let link = root.join("link");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        assert!(private_dir(&link)
+            .unwrap_err()
+            .to_string()
+            .contains("not a directory"));
+        // The target was not chmodded through the link.
+        let mode = std::fs::metadata(&real).unwrap().permissions().mode() & 0o777;
+        assert_ne!(mode, 0o700);
+        let file = root.join("file");
+        std::fs::write(&file, b"x").unwrap();
+        assert!(private_dir(&file).is_err());
+        assert!(private_dir(&root.join("fresh")).is_ok());
         let _ = std::fs::remove_dir_all(&root);
     }
 }
