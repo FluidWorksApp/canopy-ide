@@ -481,6 +481,25 @@ impl HostMaster {
         after: u64,
     ) -> std::io::Result<(HostMaster, Attached)> {
         let attached = client.attach(id, after)?;
+        HostMaster::wrap(client, id, attached)
+    }
+
+    /// As `attach`, but refused with `BUSY` if another client holds the session
+    /// (and refused by a host older than protocol 3).
+    pub fn attach_exclusive(
+        client: HostClient,
+        id: u32,
+        after: u64,
+    ) -> std::io::Result<(HostMaster, Attached)> {
+        let attached = client.attach_exclusive(id, after)?;
+        HostMaster::wrap(client, id, attached)
+    }
+
+    fn wrap(
+        client: HostClient,
+        id: u32,
+        attached: Attached,
+    ) -> std::io::Result<(HostMaster, Attached)> {
         let stream = attached.stream.try_clone()?;
         let master = HostMaster {
             client,
