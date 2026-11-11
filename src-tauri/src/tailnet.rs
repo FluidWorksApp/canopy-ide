@@ -9,18 +9,25 @@
 //!
 //! The allowlist is the crate's `Allowlist`, in its text form at
 //! `~/.canopy/tailnet-allow.txt` (mode 0600, written atomically). Entries are
-//! the crate's tailnet identities (`tailnet:user/<stable id>/<user id>` or
-//! `tailnet:tagged/<stable id>/<tags>`), built from a fresh `whois` answer for
-//! an address the tailnet itself lists for that machine, never from strings the
-//! webview sends. Allowing a machine only records policy: nothing listens on
-//! the tailnet yet. Connecting out needs no entry here.
+//! the crate's tailnet identities, bound to this machine's own tailnet
+//! (`tailnet:user/<stable id>/<user id>@<domain>` or
+//! `tailnet:tagged/<stable id>/<tags>@<domain>`), built from a fresh `whois`
+//! answer for an address the tailnet itself lists for that machine, never from
+//! strings the webview sends. An entry without `@<domain>` (or bound to another
+//! tailnet) never admits anyone, so the row shows it as not allowed. Only
+//! machines in this machine's own tailnet are listed or allowed: nodes shared in
+//! from another tailnet are neither dialled nor admitted. Allowing a machine only
+//! records policy: nothing listens on the tailnet yet. Connecting out needs no
+//! entry here.
 //!
 //! Raw CLI output is never logged or returned.
 
-use canopy_term_net::allowlist::{canonical_tailnet_entry, valid_stable_id, Allowlist};
+use canopy_term_net::allowlist::{
+    canonical_tailnet_entry, tailnet_domain_of, valid_stable_id, Allowlist,
+};
 use canopy_term_net::tailscale::{
-    CliRunner, InstallProblem, NodeInfo, ProcessRunner, TailnetIdentity, TailnetState, Tailscale,
-    WhoisError, MIN_VERSION,
+    CliRunner, InstallProblem, NodeInfo, ProcessRunner, TailnetIdentity, TailnetState,
+    TailnetStatus, Tailscale, WhoisError, MIN_VERSION,
 };
 use serde::Serialize;
 use std::collections::BTreeSet;
@@ -75,7 +82,8 @@ pub struct Machine {
     /// The stable node id, the only key Allow takes. `None` cannot be allowed.
     pub stable_id: Option<String>,
     pub online: bool,
-    /// An allowlist entry carries this stable id.
+    /// An allowlist entry for this stable id is bound to this machine's own
+    /// tailnet, so it admits the machine.
     pub allowed: bool,
 }
 
@@ -89,7 +97,8 @@ pub struct TailscaleView {
     /// Whether "Open Tailscale" can launch an app on this OS.
     pub can_open_app: bool,
     pub this_machine: Option<Machine>,
-    /// Every other machine on the tailnet, online or not, sorted by name.
+    /// Every other machine on this machine's own tailnet (not nodes shared in
+    /// from another), online or not, sorted by name.
     pub machines: Vec<Machine>,
     /// The allowlist file could not be read; Allow is unavailable until fixed.
     pub allow_error: Option<String>,
@@ -134,9 +143,26 @@ fn entry_stable_id(entry: &str) -> Option<String> {
     canon.splitn(3, '/').nth(1).map(str::to_string)
 }
 
-fn allowed_ids(list: &Allowlist) -> BTreeSet<String> {
+/// The tailnet (DNS domain) this machine is on, from its own full name.
+fn own_domain(status: &TailnetStatus) -> Option<String> {
+    status
+        .self_node
+        .as_ref()
+        .and_then(|n| tailnet_domain_of(&n.dns_name))
+}
+
+/// Whether `n` belongs to the tailnet `domain`. Without a known own tailnet
+/// nothing does, so nothing is listed or allowed.
+fn in_tailnet(n: &NodeInfo, domain: Option<&str>) -> bool {
+    domain.is_some() && tailnet_domain_of(&n.dns_name).as_deref() == domain
+}
+
+/// Stable ids with an entry bound to `domain`; only those are admitted.
+fn allowed_ids(list: &Allowlist, domain: &str) -> BTreeSet<String> {
+    let suffix = format!("@{domain}");
     list.keys()
         .iter()
+        .filter(|k| canonical_tailnet_entry(k).is_some_and(|c| c.ends_with(&suffix)))
         .filter_map(|k| entry_stable_id(k))
         .collect()
 }
@@ -195,13 +221,22 @@ pub fn view(
     v.version = probe.version.map(version_string);
     match &probe.state {
         TailnetState::Running => {
-            let ids = allow.as_ref().map(allowed_ids).unwrap_or_default();
             if let Some(status) = &probe.status {
+                let domain = own_domain(status);
+                let ids = match (allow, &domain) {
+                    (Ok(list), Some(d)) => allowed_ids(list, d),
+                    _ => BTreeSet::new(),
+                };
                 v.this_machine = status
                     .self_node
                     .as_ref()
                     .map(|n| machine(n, &BTreeSet::new()));
-                v.machines = status.peers.iter().map(|n| machine(n, &ids)).collect();
+                v.machines = status
+                    .peers
+                    .iter()
+                    .filter(|n| in_tailnet(n, domain.as_deref()))
+                    .map(|n| machine(n, &ids))
+                    .collect();
                 v.machines.sort_by(|a, b| {
                     a.name
                         .cmp(&b.name)
@@ -246,9 +281,11 @@ pub fn apply_allow(
     let status = ts
         .running_status()
         .map_err(|_| "Tailscale isn't running.".to_string())?;
+    let domain = own_domain(&status);
     let peer = status
         .peers
         .iter()
+        .filter(|p| in_tailnet(p, domain.as_deref()))
         .find(|p| p.stable_id.as_deref() == Some(stable_id))
         .ok_or_else(|| "That machine isn't on your tailnet.".to_string())?;
     let ip = preferred_addr(&peer.addrs)
@@ -261,7 +298,7 @@ pub fn apply_allow(
         }
         _ => "Tailscale couldn't confirm that machine.".to_string(),
     })?;
-    if identity_stable_id(&identity) != stable_id {
+    if identity_stable_id(&identity) != stable_id || identity.tailnet() != domain {
         return Err("Tailscale couldn't confirm that machine.".to_string());
     }
     let entry = identity.allowlist_entry();
@@ -404,6 +441,8 @@ mod tests {
 
     const LAPTOP: &str = "nLAPTOP1CNTRL";
     const BUILD: &str = "nBUILD1CNTRL";
+    /// The invented tailnet every fixture machine is on.
+    const DOMAIN: &str = "@example.ts.net";
 
     fn ip(s: &str) -> IpAddr {
         s.parse().unwrap()
@@ -508,7 +547,8 @@ mod tests {
     #[test]
     fn running_lists_this_machine_and_every_peer_with_allowed_flags() {
         let list = Allowlist::new();
-        list.add(&format!("tailnet:user/{LAPTOP}/42")).unwrap();
+        list.add(&format!("tailnet:user/{LAPTOP}/42{DOMAIN}"))
+            .unwrap();
         let (fake, r) = shared(Fake::new(RUNNING));
         let v = view(Ok(r), &Ok(list), false);
         assert_eq!(v.kind, Kind::Running);
@@ -580,7 +620,11 @@ mod tests {
             Some("nX1CNTRL")
         );
         assert_eq!(
-            entry_stable_id("tailnet:tagged/nX1CNTRL/tag:a").as_deref(),
+            entry_stable_id("tailnet:user/nX1CNTRL/42@example.ts.net").as_deref(),
+            Some("nX1CNTRL")
+        );
+        assert_eq!(
+            entry_stable_id("tailnet:tagged/nX1CNTRL/tag:a@example.ts.net").as_deref(),
             Some("nX1CNTRL")
         );
         assert_eq!(entry_stable_id(&"a".repeat(64)), None);
@@ -595,7 +639,10 @@ mod tests {
         let (fake, r) = shared(f);
         let ts = Tailscale::new(r);
         set_allowed_at(&path, Some(&ts), LAPTOP, true).unwrap();
-        assert_eq!(entries_at(&path), vec![format!("tailnet:user/{LAPTOP}/42")]);
+        assert_eq!(
+            entries_at(&path),
+            vec![format!("tailnet:user/{LAPTOP}/42{DOMAIN}")]
+        );
         // whois asked about the address the tailnet lists for that machine.
         assert!(fake
             .calls
@@ -623,7 +670,7 @@ mod tests {
         set_allowed_at(&path, Some(&Tailscale::new(r)), BUILD, true).unwrap();
         assert_eq!(
             entries_at(&path),
-            vec![format!("tailnet:tagged/{BUILD}/tag:ci")]
+            vec![format!("tailnet:tagged/{BUILD}/tag:ci{DOMAIN}")]
         );
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
     }
@@ -649,13 +696,17 @@ mod tests {
     fn allowing_again_replaces_a_stale_identity_for_the_same_machine() {
         let path = temp_path("allow-stale");
         let old = Allowlist::new();
-        old.add(&format!("tailnet:user/{LAPTOP}/7")).unwrap();
+        old.add(&format!("tailnet:user/{LAPTOP}/7{DOMAIN}"))
+            .unwrap();
         save_allow(&path, &old).unwrap();
         let f = Fake::new(RUNNING);
         f.set_whois(ip("100.64.0.2"), Ok(whois_user(LAPTOP, 42)));
         let (_, r) = shared(f);
         set_allowed_at(&path, Some(&Tailscale::new(r)), LAPTOP, true).unwrap();
-        assert_eq!(entries_at(&path), vec![format!("tailnet:user/{LAPTOP}/42")]);
+        assert_eq!(
+            entries_at(&path),
+            vec![format!("tailnet:user/{LAPTOP}/42{DOMAIN}")]
+        );
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
     }
 
@@ -688,17 +739,21 @@ mod tests {
         let path = temp_path("remove");
         let device = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
         let list = Allowlist::new();
-        list.add(&format!("tailnet:user/{LAPTOP}/42")).unwrap();
-        list.add(&format!("tailnet:tagged/{LAPTOP}/tag:ci"))
+        list.add(&format!("tailnet:user/{LAPTOP}/42{DOMAIN}"))
             .unwrap();
-        list.add(&format!("tailnet:user/{BUILD}/42")).unwrap();
+        list.add(&format!("tailnet:tagged/{LAPTOP}/tag:ci{DOMAIN}"))
+            .unwrap();
+        // An unbound entry still parses, so it can be removed.
+        list.add(&format!("tailnet:user/{LAPTOP}/9")).unwrap();
+        list.add(&format!("tailnet:user/{BUILD}/42{DOMAIN}"))
+            .unwrap();
         list.add(device).unwrap();
         save_allow(&path, &list).unwrap();
         set_allowed_at(&path, None, LAPTOP, false).unwrap();
         let left = load_allow(&path).unwrap();
         assert_eq!(
             allowed_entries(&left),
-            vec![format!("tailnet:user/{BUILD}/42")]
+            vec![format!("tailnet:user/{BUILD}/42{DOMAIN}")]
         );
         assert!(left.contains(device));
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
@@ -714,5 +769,80 @@ mod tests {
         assert!(set_allowed_at(&path, None, LAPTOP, false).is_err());
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "not-an-entry\n");
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn only_entries_bound_to_this_tailnet_show_as_allowed() {
+        let list = Allowlist::new();
+        // Unbound: parses, never admits. Another tailnet: never admits either.
+        list.add(&format!("tailnet:user/{LAPTOP}/42")).unwrap();
+        list.add(&format!("tailnet:user/{BUILD}/42@other.example.net"))
+            .unwrap();
+        let (_, r) = shared(Fake::new(RUNNING));
+        let v = view(Ok(r), &Ok(list), true);
+        assert!(v.machines.iter().all(|m| !m.allowed));
+    }
+
+    #[test]
+    fn allowing_replaces_an_unbound_entry_with_a_bound_one() {
+        let path = temp_path("allow-unbound");
+        let old = Allowlist::new();
+        old.add(&format!("tailnet:user/{LAPTOP}/42")).unwrap();
+        save_allow(&path, &old).unwrap();
+        let f = Fake::new(RUNNING);
+        f.set_whois(ip("100.64.0.2"), Ok(whois_user(LAPTOP, 42)));
+        let (_, r) = shared(f);
+        set_allowed_at(&path, Some(&Tailscale::new(r)), LAPTOP, true).unwrap();
+        assert_eq!(
+            entries_at(&path),
+            vec![format!("tailnet:user/{LAPTOP}/42{DOMAIN}")]
+        );
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn a_node_shared_in_from_another_tailnet_is_not_listed_or_allowed() {
+        let status = RUNNING.replace(
+            "laptop.example.ts.net.",
+            "laptop.other-tailnet.example.net.",
+        );
+        let (_, r) = shared(Fake::new(&status));
+        let v = view(Ok(r), &Ok(Allowlist::new()), true);
+        assert!(v
+            .machines
+            .iter()
+            .all(|m| m.stable_id.as_deref() != Some(LAPTOP)));
+        assert_eq!(v.machines.len(), 3);
+
+        let path = temp_path("allow-shared-in");
+        let f = Fake::new(&status);
+        f.set_whois(ip("100.64.0.2"), Ok(whois_user(LAPTOP, 42)));
+        let (_, r) = shared(f);
+        assert!(set_allowed_at(&path, Some(&Tailscale::new(r)), LAPTOP, true).is_err());
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn a_whois_from_another_tailnet_or_without_allowed_ips_is_refused() {
+        let path = temp_path("allow-whois-refused");
+        // The node is listed in this tailnet but whois names another one.
+        let f = Fake::new(RUNNING);
+        f.set_whois(
+            ip("100.64.0.2"),
+            Ok(whois_user(LAPTOP, 42)
+                .replace("node-b.example.ts.net.", "node-b.other.example.net.")),
+        );
+        let (_, r) = shared(f);
+        assert!(set_allowed_at(&path, Some(&Tailscale::new(r)), LAPTOP, true).is_err());
+        // whois without AllowedIPs is an error in the crate.
+        let f = Fake::new(RUNNING);
+        f.set_whois(
+            ip("100.64.0.2"),
+            Ok(whois_user(LAPTOP, 42)
+                .replace(r#","AllowedIPs":["100.64.0.2/32","127.0.0.1/32"]"#, "")),
+        );
+        let (_, r) = shared(f);
+        assert!(set_allowed_at(&path, Some(&Tailscale::new(r)), LAPTOP, true).is_err());
+        assert!(!path.exists());
     }
 }
