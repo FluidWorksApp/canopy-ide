@@ -126,6 +126,12 @@ fn group_alive(group: u32) -> bool {
 pub fn instance_token() -> &'static str {
     static TOKEN: OnceLock<String> = OnceLock::new();
     TOKEN.get_or_init(|| {
+        // With the host on and a previous launch's terminals still running, this
+        // launch carries their token, so the agents inside keep pairing: their
+        // env, digests and sidecars already name it.
+        if let Some(token) = crate::pty_hosted::reused_instance() {
+            return token;
+        }
         let pid = std::process::id();
         let ms = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -161,6 +167,13 @@ struct SessionParts {
     high_water: Option<usize>,
     cols: u16,
     rows: u16,
+    /// Output the session produced before this app attached (an adopted
+    /// session's replay from the host). It goes straight into the replay ring so
+    /// a new tab can show it, without stamping "last output" or waking the
+    /// attention machinery as if the agent had just spoken. Empty for a spawn.
+    history: Vec<u8>,
+    /// Absolute offset of `history[0]` in the session's output stream.
+    history_start: u64,
 }
 
 pub struct Session {
@@ -533,6 +546,90 @@ impl PtyManager {
             .map(|previous| previous + 1)
             .map_err(|_| "terminal session generation space exhausted".to_string())?;
         Ok((id, generation))
+    }
+
+    /// Take over terminals a previous launch left running in the PTY host, before
+    /// the renderer registers, so the existing recovery path routes them to tabs
+    /// like any surviving session. Same id, generation and instance as before;
+    /// history goes into the replay ring without counting as fresh output.
+    /// Returns how many were adopted. A session that cannot be taken is left in
+    /// the host untouched (its linger still applies).
+    #[cfg(unix)]
+    pub fn adopt_hosted<R: tauri::Runtime>(&self, app: AppHandle<R>) -> usize {
+        let Some(client) = crate::pty_hosted::client() else {
+            return 0;
+        };
+        if let Some((id, generation)) = crate::pty_hosted::stored_identity(&client) {
+            self.next_id.fetch_max(id, Ordering::SeqCst);
+            self.next_session_generation
+                .fetch_max(generation, Ordering::SeqCst);
+        }
+        let mut adopted = 0;
+        for found in crate::pty_hosted::adoptable(&client, instance_token()) {
+            if self.sessions.lock().unwrap().contains_key(&found.meta.id) {
+                continue;
+            }
+            let taken = match crate::pty_hosted::adopt(&client, &found) {
+                Ok(taken) => taken,
+                Err(error) => {
+                    eprintln!("canopy: could not adopt hosted terminal: {error}");
+                    continue;
+                }
+            };
+            let (reader, writer) = match taken
+                .master
+                .try_clone_reader()
+                .and_then(|r| taken.master.take_writer().map(|w| (r, w)))
+            {
+                Ok(pair) => pair,
+                Err(error) => {
+                    eprintln!("canopy: could not adopt hosted terminal: {error}");
+                    continue;
+                }
+            };
+            let meta = taken.meta;
+            self.next_id.fetch_max(meta.id, Ordering::SeqCst);
+            self.next_session_generation
+                .fetch_max(meta.generation, Ordering::SeqCst);
+            let kind = if meta.kind == "remote" {
+                SessionKind::Remote
+            } else {
+                SessionKind::Desktop
+            };
+            let shell = meta.command.clone().unwrap_or_else(default_shell);
+            let parts = SessionParts {
+                id: meta.id,
+                session_generation: meta.generation,
+                pid: Some(taken.pid),
+                kind,
+                execution_context: meta.execution_context,
+                recovered_run: meta.run,
+                recovered_command: meta.command,
+                run_command_id: meta.run_command_id,
+                shell,
+                cwd: meta.cwd,
+                child: taken.child,
+                master_box: taken.master,
+                reader,
+                writer,
+                desktop: None,
+                high_water: None,
+                cols: taken.cols,
+                rows: taken.rows,
+                history: taken.history,
+                history_start: taken.history_start,
+            };
+            match self.start_session(app.clone(), parts) {
+                Ok(_) => adopted += 1,
+                Err(error) => eprintln!("canopy: could not start adopted terminal: {error}"),
+            }
+        }
+        adopted
+    }
+
+    #[cfg(not(unix))]
+    pub fn adopt_hosted<R: tauri::Runtime>(&self, _app: AppHandle<R>) -> usize {
+        0
     }
 
     pub fn sessions(&self) -> Arc<Mutex<HashMap<u32, Arc<Session>>>> {
@@ -1760,6 +1857,10 @@ impl PtyManager {
 
         // Allocated before spawn so the child can carry its own session id in env.
         let (id, session_generation) = state.allocate_session_identity()?;
+        #[cfg(unix)]
+        if let Some(client) = &hosted_client {
+            crate::pty_hosted::note_identity(client, id, session_generation);
+        }
 
         let shell = shell.unwrap_or_else(default_shell);
         let mut cmd = match &run {
@@ -2141,6 +2242,8 @@ impl PtyManager {
                 high_water,
                 cols,
                 rows,
+                history: Vec::new(),
+                history_start: 0,
             },
         )
     }
@@ -2173,7 +2276,15 @@ impl PtyManager {
             high_water,
             cols,
             rows,
+            history,
+            history_start,
         } = parts;
+        // History enters the ring directly: only the newest SCROLLBACK_CAP bytes
+        // fit, and everything older counts as dropped so offsets stay absolute.
+        let kept_from = history.len().saturating_sub(SCROLLBACK_CAP);
+        let history_total = history_start.saturating_add(history.len() as u64);
+        let history_dropped = history_start.saturating_add(kept_from as u64);
+        let history_ring: VecDeque<u8> = history[kept_from..].iter().copied().collect();
         // Hands the bridge credential back on the failure paths below, as in
         // `spawn_bound`: nothing watches for an exit before the session is
         // registered.
@@ -2231,7 +2342,7 @@ impl PtyManager {
             desktop_delivery_gate: Arc::clone(&state.desktop_delivery_gate),
             next_attachment: AtomicU64::new(generation.unwrap_or(0)),
             high_water: high_water.unwrap_or(DEFAULT_HIGH_WATER),
-            scrollback: Mutex::new(VecDeque::new()),
+            scrollback: Mutex::new(history_ring),
             size: Mutex::new((cols, rows)),
             subscribers: broadcast::channel(BROADCAST_CAP).0,
             // Zero means "has never happened", which is why these are not
@@ -2239,8 +2350,8 @@ impl PtyManager {
             // is an unanswered question, not a terminal that has been silent
             // since it started.
             last_output_ms: AtomicU64::new(0),
-            output_bytes: AtomicU64::new(0),
-            dropped_output_bytes: AtomicU64::new(0),
+            output_bytes: AtomicU64::new(history_total),
+            dropped_output_bytes: AtomicU64::new(history_dropped),
             desktop_delivery_chunks: AtomicU64::new(0),
             desktop_delivery_bytes: AtomicU64::new(0),
             desktop_acked_bytes: AtomicU64::new(0),

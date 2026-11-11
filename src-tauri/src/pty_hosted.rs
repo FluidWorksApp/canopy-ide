@@ -13,6 +13,10 @@ pub fn enabled() -> bool {
 }
 
 #[cfg(unix)]
+pub use adoption::{
+    adopt, adoptable, note_identity, reused_instance, stored_identity, Adoptable, Adopted,
+};
+#[cfg(unix)]
 pub use unix::{client, spawn, Client};
 
 #[cfg(not(unix))]
@@ -23,12 +27,20 @@ pub fn client() -> Option<Client> {
     None
 }
 
+/// The instance token of a previous launch whose hosted sessions are still
+/// running, so adopted agents keep pairing with this launch. None here.
+#[cfg(not(unix))]
+pub fn reused_instance() -> Option<String> {
+    None
+}
+
 #[cfg(not(unix))]
 pub fn spawn(
     _client: &Client,
     _cmd: &CommandBuilder,
     _cols: u16,
     _rows: u16,
+    _meta: Option<String>,
 ) -> Result<(Box<dyn Child + Send + Sync>, Box<dyn MasterPty + Send>), String> {
     Err("hosted terminals are not supported on this platform".into())
 }
@@ -55,7 +67,7 @@ mod unix {
     /// A dedicated directory: the host chmods its parent to 0700, so it must
     /// never be a shared one. Debug builds use their own so a dev app never
     /// attaches to an installed app's host.
-    fn socket_path() -> Option<PathBuf> {
+    pub(super) fn socket_path() -> Option<PathBuf> {
         if let Ok(dir) = std::env::var("CANOPY_PTY_HOST_DIR") {
             return Some(PathBuf::from(dir).join("host.sock"));
         }
@@ -90,6 +102,11 @@ mod unix {
     /// host cannot be reached; callers then use an in-process terminal.
     pub fn client() -> Option<Client> {
         if !super::enabled() {
+            return None;
+        }
+        // A host that exists but could not be read: hosting this run would
+        // create sessions no later launch could adopt, so stay in-process.
+        if matches!(resolution(), Resolution::HostUnusable) {
             return None;
         }
         static CLIENT: OnceLock<Option<Client>> = OnceLock::new();
@@ -166,6 +183,195 @@ mod unix {
         }
     }
 }
+
+/// Everything adoption needs, read from a session's metadata. Versioned, and
+/// identity only: no environment and no tokens besides the instance tag.
+#[cfg(unix)]
+#[derive(Debug, Clone, Default, serde::Deserialize)]
+#[serde(default)]
+pub struct HostedMeta {
+    pub v: u32,
+    pub id: u32,
+    pub generation: u64,
+    pub kind: String,
+    pub cwd: String,
+    pub run: bool,
+    pub command: Option<String>,
+    pub run_command_id: Option<String>,
+    pub execution_context: Option<crate::execution::ExecutionContext>,
+    pub run_id: Option<String>,
+    pub attempt_id: Option<String>,
+    pub instance: String,
+}
+
+#[cfg(unix)]
+mod adoption {
+    use super::unix::{socket_path, Client};
+    use super::*;
+    use canopy_pty_host::client::{HostChild, HostClient, HostMaster};
+    use canopy_pty_host::protocol::SessionInfo;
+    use std::io::Read;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::OnceLock;
+    use std::time::Duration;
+
+    pub(super) fn parse(info: &SessionInfo) -> Option<HostedMeta> {
+        let meta: HostedMeta = serde_json::from_str(info.meta.as_deref()?).ok()?;
+        (meta.v == 1 && meta.id != 0).then_some(meta)
+    }
+
+    /// A session this launch may take over.
+    pub struct Adoptable {
+        pub info: SessionInfo,
+        pub meta: HostedMeta,
+    }
+
+    /// Sessions that are running, not attached to anyone (a host that predates
+    /// the `attached` field reports unknown, which is never taken), whose
+    /// metadata is ours and not a micro-task's, and that belong to `instance`.
+    pub fn adoptable(client: &Client, instance: &str) -> Vec<Adoptable> {
+        let Ok(sessions) = client.list() else {
+            return Vec::new();
+        };
+        sessions
+            .into_iter()
+            .filter(|s| s.exited.is_none() && s.attached == Some(false) && s.pid.is_some())
+            .filter_map(|info| {
+                let meta = parse(&info)?;
+                (meta.kind != "detached" && meta.instance == instance)
+                    .then_some(Adoptable { info, meta })
+            })
+            .collect()
+    }
+
+    pub(super) enum Resolution {
+        /// No host, or nothing in it to adopt: a fresh launch.
+        Fresh,
+        /// A previous launch's sessions are waiting under this token.
+        Reuse(String),
+        /// A host answers but could not be read; do not host this run.
+        HostUnusable,
+    }
+
+    /// Decided once, before the first `instance_token()`, with a non-launching
+    /// client so starting the app never starts a host just to ask it.
+    pub(super) fn resolution() -> &'static Resolution {
+        static RESOLUTION: OnceLock<Resolution> = OnceLock::new();
+        RESOLUTION.get_or_init(|| {
+            if !super::enabled() {
+                return Resolution::Fresh;
+            }
+            let Some(socket) = socket_path() else {
+                return Resolution::Fresh;
+            };
+            if !socket.exists() {
+                return Resolution::Fresh;
+            }
+            let probe = HostClient::new(socket);
+            let Ok(sessions) = probe.list() else {
+                return Resolution::HostUnusable;
+            };
+            // The token most waiting sessions agree on.
+            let mut counts: std::collections::HashMap<String, usize> = Default::default();
+            for info in &sessions {
+                if info.exited.is_some() || info.attached != Some(false) {
+                    continue;
+                }
+                if let Some(meta) = parse(info) {
+                    if meta.kind != "detached" && !meta.instance.is_empty() {
+                        *counts.entry(meta.instance).or_default() += 1;
+                    }
+                }
+            }
+            match counts.into_iter().max_by_key(|(_, n)| *n) {
+                Some((token, _)) => Resolution::Reuse(token),
+                None => Resolution::Fresh,
+            }
+        })
+    }
+
+    pub fn reused_instance() -> Option<String> {
+        match resolution() {
+            Resolution::Reuse(token) => Some(token.clone()),
+            _ => None,
+        }
+    }
+
+    /// A session taken over: its child and master are host handles, and
+    /// `history` is what it printed before this app attached.
+    pub struct Adopted {
+        pub meta: HostedMeta,
+        pub pid: u32,
+        pub child: Box<dyn Child + Send + Sync>,
+        pub master: Box<dyn MasterPty + Send>,
+        pub history: Vec<u8>,
+        pub history_start: u64,
+        pub cols: u16,
+        pub rows: u16,
+    }
+
+    /// Attach from the start of the host's ring and read exactly the history the
+    /// attach reply describes (its own `start`/`end`, not the listing's: the ring
+    /// can move between the two calls). Live bytes then continue on the same
+    /// stream. On any failure the connection drops, which only detaches.
+    pub fn adopt(client: &Client, found: &Adoptable) -> Result<Adopted, String> {
+        let id = found.info.id;
+        let pid = found.info.pid.ok_or("session has no pid")?;
+        let (master, attached) =
+            HostMaster::attach(client.clone(), id, 0).map_err(|e| e.to_string())?;
+        let want = attached.end.saturating_sub(attached.start) as usize;
+        let mut history = vec![0u8; want];
+        let mut stream = attached.stream.try_clone().map_err(|e| e.to_string())?;
+        stream
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .map_err(|e| e.to_string())?;
+        stream
+            .read_exact(&mut history)
+            .map_err(|e| format!("reading history: {e}"))?;
+        let _ = stream.set_read_timeout(None);
+        Ok(Adopted {
+            meta: found.meta.clone(),
+            pid,
+            child: Box::new(HostChild::new(client.clone(), id, pid)),
+            master: Box::new(master),
+            history,
+            history_start: attached.start,
+            cols: attached.cols,
+            rows: attached.rows,
+        })
+    }
+
+    static HIGH_WATER_ID: AtomicU64 = AtomicU64::new(0);
+    const HIGH_WATER_BLOCK: u64 = 64;
+
+    /// Remember, in the host, how far ids and generations have gone, written
+    /// ahead in blocks so a crash cannot make a later launch reuse a pair that
+    /// an adopted terminal's sidecars already name. Best effort: an older host
+    /// refuses the op and nothing is lost but the guarantee.
+    pub fn note_identity(client: &Client, id: u32, generation: u64) {
+        if (id as u64) < HIGH_WATER_ID.load(Ordering::Relaxed) {
+            return;
+        }
+        let ahead = id as u64 + HIGH_WATER_BLOCK;
+        HIGH_WATER_ID.store(ahead, Ordering::Relaxed);
+        let _ = client.set_state(
+            "identity_high_water",
+            &format!("{ahead}:{}", generation + HIGH_WATER_BLOCK),
+            false,
+        );
+    }
+
+    pub fn stored_identity(client: &Client) -> Option<(u32, u64)> {
+        let value = client.get_state("identity_high_water").ok()??;
+        let (id, generation) = value.split_once(':')?;
+        Some((id.parse().ok()?, generation.parse().ok()?))
+    }
+}
+
+#[cfg(unix)]
+use adoption::resolution;
+#[cfg(unix)]
+use adoption::Resolution;
 
 #[cfg(all(test, unix))]
 mod tests {
@@ -346,6 +552,103 @@ mod tests {
         child.kill().unwrap();
         child.wait().unwrap(); // must return, not hang
         assert!(child.try_wait().unwrap().is_some());
+    }
+
+    fn wait_for(mut f: impl FnMut() -> bool) -> bool {
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while std::time::Instant::now() < deadline {
+            if f() {
+                return true;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        false
+    }
+
+    fn meta_for(id: u32, generation: u64, kind: &str, instance: &str) -> String {
+        serde_json::json!({
+            "v": 1, "id": id, "generation": generation, "kind": kind,
+            "cwd": "/tmp", "run": false, "instance": instance,
+        })
+        .to_string()
+    }
+
+    #[test]
+    fn a_relaunch_adopts_the_session_with_its_history_and_then_live_output() {
+        let host = InProcessHost::start("adopt");
+        let (child, master) = spawn(
+            &host.client,
+            &command("echo before-quit; read x; echo got-$x; sleep 300"),
+            80,
+            24,
+            Some(meta_for(7, 3, "desktop", "inst-a")),
+        )
+        .unwrap();
+        assert!(wait_for(|| host.client.list().unwrap()[0].end > 0));
+        // The app quits: its connection drops, which only detaches.
+        drop(master);
+        drop(child);
+        assert!(wait_for(|| {
+            host.client.list().unwrap()[0].attached == Some(false)
+        }));
+
+        assert!(adoptable(&host.client, "someone-else").is_empty());
+        let found = adoptable(&host.client, "inst-a");
+        assert_eq!(found.len(), 1);
+        assert_eq!((found[0].meta.id, found[0].meta.generation), (7, 3));
+
+        let taken = adopt(&host.client, &found[0]).unwrap();
+        assert_eq!(taken.history_start, 0);
+        assert!(
+            String::from_utf8_lossy(&taken.history).contains("before-quit"),
+            "history was {:?}",
+            String::from_utf8_lossy(&taken.history)
+        );
+        assert_eq!(
+            Some(taken.pid),
+            found[0].info.pid,
+            "same child, not a new one"
+        );
+        // Taken: a second launch-time pass must not see it as free.
+        assert!(adoptable(&host.client, "inst-a").is_empty());
+
+        // Input and live output continue, with no history repeated.
+        let mut writer = taken.master.take_writer().unwrap();
+        let mut pump = Pump::new(taken.master.try_clone_reader().unwrap());
+        writer.write_all(b"hi\n").unwrap();
+        let seen = pump.until("got-hi");
+        assert!(seen.contains("got-hi"), "{seen:?}");
+        assert!(
+            !seen.contains("before-quit"),
+            "history leaked into live: {seen:?}"
+        );
+        let mut child = taken.child;
+        child.kill().unwrap();
+    }
+
+    #[test]
+    fn micro_tasks_exited_and_attached_sessions_are_not_adopted() {
+        let host = InProcessHost::start("noadopt");
+        let (_c1, _m1) = spawn(
+            &host.client,
+            &command("sleep 300"),
+            80,
+            24,
+            Some(meta_for(1, 1, "detached", "inst-a")),
+        )
+        .unwrap();
+        // Still attached through _m1, and detached kind anyway.
+        assert!(adoptable(&host.client, "inst-a").is_empty());
+        // A session with no metadata at all is not ours to adopt.
+        let (c2, m2) = spawn(&host.client, &command("sleep 300"), 80, 24, None).unwrap();
+        drop((c2, m2));
+        assert!(wait_for(|| host
+            .client
+            .list()
+            .unwrap()
+            .iter()
+            .any(|s| s.meta.is_none() && s.attached == Some(false))));
+        assert!(adoptable(&host.client, "inst-a").is_empty());
     }
 
     #[test]

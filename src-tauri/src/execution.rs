@@ -6,7 +6,7 @@ use std::sync::Mutex;
 
 const VERSION: u8 = 1;
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ExecutionContext {
     pub environment_id: String,
