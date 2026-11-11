@@ -7,8 +7,19 @@
 //! spawn key live in the session protocol (hello and attach), not here, so they
 //! behave the same on every transport.
 
+pub mod allowlist;
+#[cfg(feature = "iroh")]
+pub mod iroh_transport;
+#[cfg(unix)]
+pub mod local_unix;
+pub mod pairing;
+
 use std::io::{Read, Write};
 use std::time::Duration;
+
+/// The error kind every transport returns when a read deadline expires, so the
+/// session protocol handles a silent peer the same way on each of them.
+pub const TIMEOUT_KIND: std::io::ErrorKind = std::io::ErrorKind::TimedOut;
 
 /// Who is on the other end, as the transport proved it.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -48,6 +59,37 @@ pub enum Refusal {
 pub trait Transport {
     fn connect(&self, address: &str) -> std::io::Result<Box<dyn Connection>>;
     fn accept(&self) -> std::io::Result<Result<Box<dyn Connection>, Refusal>>;
+}
+
+/// Test helper: run a test body on its own thread and fail instead of hanging
+/// forever, so a stuck transport costs seconds, not a whole CI run.
+#[cfg(test)]
+pub(crate) fn watchdog<F: FnOnce() + Send + 'static>(secs: u64, body: F) {
+    let (tx, rx) = std::sync::mpsc::channel();
+    let handle = std::thread::spawn(move || {
+        body();
+        let _ = tx.send(());
+    });
+    match rx.recv_timeout(Duration::from_secs(secs)) {
+        Ok(()) => handle.join().unwrap(),
+        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+            // The body panicked: surface its panic.
+            if let Err(e) = handle.join() {
+                std::panic::resume_unwind(e);
+            }
+        }
+        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+            panic!("test hung for more than {secs}s")
+        }
+    }
+}
+
+/// Test helper: print a skip reason where a passing test's output still shows
+/// it (`eprintln!` is captured, a direct stderr write is not).
+#[cfg(test)]
+pub(crate) fn skip(reason: &str) {
+    use std::io::Write as _;
+    let _ = writeln!(std::io::stderr(), "SKIPPED: {reason}");
 }
 
 #[cfg(test)]
