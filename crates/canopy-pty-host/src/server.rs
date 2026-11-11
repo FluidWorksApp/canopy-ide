@@ -389,6 +389,9 @@ fn handle(host: &Arc<Host>, mut stream: UnixStream) -> std::io::Result<()> {
                     version: Some(PROTOCOL_VERSION),
                     min_client: Some(min_client),
                     host_pid: Some(std::process::id()),
+                    exe: std::env::current_exe()
+                        .ok()
+                        .map(|p| p.to_string_lossy().into_owned()),
                     ..Default::default()
                 },
             )

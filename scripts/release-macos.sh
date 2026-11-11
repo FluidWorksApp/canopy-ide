@@ -138,6 +138,8 @@ for target in "${TARGETS[@]}"; do
   # The sidecar ships inside the bundle and is copied out to ~/.canopy/bin at
   # runtime; if it isn't signed, that copy is what Gatekeeper kills.
   codesign --verify --strict "$APP/Contents/MacOS/canopy-hook"
+  # Same for the PTY host, copied to ~/.canopy/pty-host/bin/<version>-<hash>/.
+  codesign --verify --strict "$APP/Contents/MacOS/canopy-pty-host"
 
   if $NOTARIZE; then
     echo "==> notarising $(basename "$DMG")"

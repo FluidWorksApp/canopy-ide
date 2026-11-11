@@ -9,7 +9,8 @@ This file is generated. Do not edit it by hand:
     node scripts/generate-third-party-notices.mjs
 
 It covers what Canopy **distributes**: the Rust dependency closure of the app
-binary (dev-only crates pruned), the production npm closure that is bundled into
+binary and of the `canopy-pty-host` sidecar that ships inside the app bundle
+(dev-only crates pruned), the production npm closure that is bundled into
 the frontend, and the prebuilt binaries shipped inside the app bundle. Build-only
 tooling — Vite, Rolldown, oxlint, TypeScript, lightningcss and friends — is not
 listed, because it never leaves the build machine. Hand-ported source is

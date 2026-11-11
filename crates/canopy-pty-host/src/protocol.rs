@@ -154,6 +154,10 @@ pub struct Response {
     pub raw: Option<bool>,
     /// Reply to `get_state` / `set_state`: the value now stored, if any.
     pub value: Option<String>,
+    /// Reply to `hello`: the path this host was started from, so the app keeps
+    /// that installed copy while the host lives. `None` from an older host.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub exe: Option<String>,
 }
 
 impl Response {
