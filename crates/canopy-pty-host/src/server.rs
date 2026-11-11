@@ -290,7 +290,7 @@ pub fn run(config: ServerConfig) -> std::io::Result<()> {
     // Held from the liveness probe to the bind: two hosts starting at once must
     // not both find the socket dead, or the loser's unlink would remove the
     // winner's live socket and orphan its sessions.
-    let _bind_lock = {
+    let bind_lock = {
         let mut path = config.socket.clone().into_os_string();
         path.push(".lock");
         let file = std::fs::OpenOptions::new()
@@ -312,6 +312,9 @@ pub fn run(config: ServerConfig) -> std::io::Result<()> {
     let listener = UnixListener::bind(&config.socket)?;
     hold_install_dir();
     std::fs::set_permissions(&config.socket, std::fs::Permissions::from_mode(0o600))?;
+    // Bound and listening: later hosts now find a live socket and exit. Holding
+    // the lock for the host's lifetime would block them here instead.
+    drop(bind_lock);
 
     // SAFETY: the handler only stores to an atomic.
     unsafe {
