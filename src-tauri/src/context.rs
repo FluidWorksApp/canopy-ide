@@ -142,6 +142,10 @@ pub struct ContextBridge {
     /// Per-project snapshots the frontend publishes, keyed by project id.
     snapshots: Mutex<HashMap<String, serde_json::Value>>,
     port: OnceLock<u16>,
+    /// The stable Unix socket (`ctx_socket.rs`), set only with the PTY host on
+    /// and only in the instance that holds its lock. Terminals then also get
+    /// `CANOPY_CTX_SOCKET`, which outlives this launch's port.
+    socket: OnceLock<std::path::PathBuf>,
     /// The process-wide credential, for callers Canopy starts itself that are
     /// not a terminal — the companion. It names nobody, so anything that has to
     /// know *which* agent is asking refuses it; see `Caller`.
@@ -151,6 +155,11 @@ pub struct ContextBridge {
     /// token every identity claim had to be a body field the caller filled in
     /// itself, so an agent could name any owner, release anyone's claim, and be
     /// believed. The token is the identity, and the caller cannot choose it.
+    ///
+    /// Keyed by `verifier(token)`, not the token: a terminal adopted from the
+    /// PTY host comes back with only the verifier its spawn metadata carried,
+    /// and one map keyed the same way for both means every lookup, sweep and
+    /// retirement treats an adopted terminal exactly like a fresh one.
     agents: Mutex<HashMap<String, AgentIdentity>>,
     /// Managed non-PTY attempts (structured Build sessions), keyed by their
     /// private bridge credential just like terminal agents.
@@ -328,6 +337,7 @@ impl Default for ContextBridge {
         Self {
             snapshots: Mutex::new(HashMap::new()),
             port: OnceLock::new(),
+            socket: OnceLock::new(),
             token: hex::encode(bytes),
             agents: Mutex::new(HashMap::new()),
             attempts: Mutex::new(HashMap::new()),
@@ -349,6 +359,32 @@ fn random_token() -> String {
     let mut bytes = [0u8; 16];
     let _ = getrandom::getrandom(&mut bytes);
     hex::encode(bytes)
+}
+
+/// What the bridge keys a terminal's credential by, and what a hosted
+/// terminal's spawn metadata records: SHA-256 of the token, hex. The token is
+/// 128 random bits, so the verifier cannot be turned back into it, and storing
+/// it with the host hands nobody a credential.
+pub fn verifier(token: &str) -> String {
+    use sha2::{Digest, Sha256};
+    hex::encode(Sha256::digest(token.as_bytes()))
+}
+
+/// The variables a terminal needs to reach this bridge. The socket rides
+/// beside the port when there is one; `canopy-hook` prefers it.
+pub fn agent_env(
+    port: u16,
+    token: &str,
+    socket: Option<&std::path::Path>,
+) -> Vec<(&'static str, String)> {
+    let mut env = vec![
+        ("CANOPY_CTX_PORT", port.to_string()),
+        ("CANOPY_CTX_TOKEN", token.to_string()),
+    ];
+    if let Some(socket) = socket.and_then(|s| s.to_str()) {
+        env.push(("CANOPY_CTX_SOCKET", socket.to_string()));
+    }
+    env
 }
 
 impl ContextBridge {
@@ -438,6 +474,11 @@ impl ContextBridge {
         self.port.get().map(|p| (*p, self.token.clone()))
     }
 
+    /// The stable socket this instance serves, if it holds one.
+    pub fn socket(&self) -> Option<&std::path::Path> {
+        self.socket.get().map(|p| p.as_path())
+    }
+
     /// Mint this terminal's own credential. Called once per spawn, before the
     /// child exists, so the token is in its environment from its first
     /// instruction and there is no window in which it holds someone else's.
@@ -450,7 +491,7 @@ impl ContextBridge {
         let port = *self.port.get()?;
         let token = random_token();
         self.agents.lock().unwrap().insert(
-            token.clone(),
+            verifier(&token),
             AgentIdentity {
                 pty_id,
                 instance: crate::pty::instance_token().to_string(),
@@ -462,6 +503,37 @@ impl ContextBridge {
             },
         );
         Some((port, token))
+    }
+
+    /// Recognise the credential an adopted terminal already holds. A previous
+    /// launch minted it and the terminal's environment still carries it; the
+    /// host kept only its verifier. Refused if the verifier is malformed or
+    /// already names a terminal, so a session cannot take over another's
+    /// identity by repeating its metadata.
+    pub fn readopt_agent(&self, verifier: &str, identity: AgentIdentity) -> bool {
+        let well_formed = verifier.len() == 64
+            && verifier
+                .bytes()
+                .all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'));
+        if !well_formed {
+            return false;
+        }
+        let mut agents = self.agents.lock().unwrap();
+        if agents.contains_key(verifier)
+            || agents
+                .values()
+                .any(|a| a.pty_id == identity.pty_id && a.instance == identity.instance)
+        {
+            return false;
+        }
+        agents.insert(verifier.to_string(), identity);
+        true
+    }
+
+    /// `identify` for tests in other modules (adoption in pty.rs).
+    #[cfg(test)]
+    pub(crate) fn caller_for_test(&self, presented: &str) -> Option<Caller> {
+        self.identify(presented)
     }
 
     /// Drop a terminal's credential when the terminal goes. Returns the
@@ -512,12 +584,13 @@ impl ContextBridge {
         }
         // Not constant-time against the agent map, and it does not need to be:
         // a hit is a full-length random token the attacker would have to
-        // possess, and the map is keyed by the token itself, so there is no
+        // possess, and the map is keyed by its hash, so there is no
         // per-candidate comparison to time.
+        let key = verifier(presented);
         self.agents
             .lock()
             .unwrap()
-            .get(presented)
+            .get(&key)
             .cloned()
             .map(Caller::Agent)
             .or_else(|| {
@@ -547,6 +620,26 @@ pub(crate) fn constant_time_eq(a: &str, b: &str) -> bool {
 /// setup; failures are logged, not fatal — the IDE works without the bridge,
 /// agents just lose the context tools.
 pub fn start(app: tauri::AppHandle) {
+    // Claimed here, before the first terminal can spawn, so every terminal of
+    // this launch carries the socket. Only with the PTY host on: nothing else
+    // outlives the app, and with it off nothing about the bridge changes.
+    #[cfg(unix)]
+    let stable = crate::pty_hosted::enabled()
+        .then(crate::pty_hosted::host_dir)
+        .flatten()
+        .and_then(|dir| match crate::ctx_socket::claim(&dir) {
+            Ok(owned) => Some((dir, owned)),
+            Err(e) => {
+                log::warn!("context bridge: no stable socket: {e}");
+                None
+            }
+        });
+    // Published as soon as it is bound: a connection made before the accept
+    // loop starts waits in the listen backlog, so no terminal misses it.
+    #[cfg(unix)]
+    if let Some((_, Some(owned))) = &stable {
+        let _ = app.state::<ContextBridge>().socket.set(owned.path.clone());
+    }
     tauri::async_runtime::spawn(async move {
         let listener = match tokio::net::TcpListener::bind(("127.0.0.1", 0)).await {
             Ok(l) => l,
@@ -584,8 +677,42 @@ pub fn start(app: tauri::AppHandle) {
             .route("/ctx/mcp-task", post(mcp_task_op))
             .route("/ctx/tools", get(tools))
             .with_state(app.clone());
+        #[cfg(unix)]
+        if let Some((dir, owned)) = stable {
+            tauri::async_runtime::spawn(serve_stable(app.clone(), dir, owned, router.clone()));
+        }
         let _ = axum::serve(listener, router).await;
     });
+}
+
+/// Serve the bridge on its stable socket. Another app holding it (an update's
+/// old process still exiting, or a second debug app) is waited out briefly,
+/// then this launch serves TCP only: terminals it spawned before the socket
+/// was ready carry the port alone, like a launch with the host off.
+#[cfg(unix)]
+async fn serve_stable(
+    app: tauri::AppHandle,
+    dir: std::path::PathBuf,
+    owned: Option<crate::ctx_socket::Owned>,
+    router: Router,
+) {
+    let mut owned = owned;
+    for _ in 0..10 {
+        if owned.is_some() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        owned = crate::ctx_socket::claim(&dir).ok().flatten();
+    }
+    let Some(owned) = owned else {
+        log::warn!(
+            "context bridge: another Canopy holds {}; serving TCP only",
+            dir.join(crate::ctx_socket::SOCKET_NAME).display()
+        );
+        return;
+    };
+    let _ = app.state::<ContextBridge>().socket.set(owned.path.clone());
+    crate::ctx_socket::serve_owned(owned, router).await;
 }
 
 #[derive(serde::Deserialize)]
@@ -1151,6 +1278,14 @@ pub fn context_agent_spawn_ready(
     }
     child.spawn_depth = pending.child_depth;
     child.parent_pty_id = Some(pending.parent.pty_id);
+    // A hosted child can outlive this launch; the next one must not adopt it
+    // as a root (see `pty_hosted::note_lineage`).
+    crate::pty_hosted::note_lineage(
+        &child.instance,
+        pty_id,
+        child.spawn_depth,
+        child.parent_pty_id,
+    );
     if let Some(spawn) = state.pending_spawns.lock().unwrap().get_mut(&id) {
         spawn.child_pty_id = Some(pty_id);
     }
@@ -6428,6 +6563,92 @@ mod tests {
         assert!(bridge_disabled_tools(&bridge)
             .iter()
             .any(|tool| tool == "canopy_spawn_agent"));
+    }
+
+    /// A relaunch that adopts a hosted terminal has only what the host kept:
+    /// identity and the verifier. The token the agent already holds must name
+    /// the same terminal on the new bridge, and nothing else may.
+    #[test]
+    fn an_adopted_terminal_keeps_its_credential_across_a_relaunch() {
+        let instance = crate::pty::instance_token().to_string();
+        let first = ContextBridge::default();
+        let _ = first.port.set(4242);
+        let (_, token) = first.mint_agent(7, "/w/app", None).unwrap();
+        let verifier = super::verifier(&token);
+        assert_eq!(verifier.len(), 64);
+        assert!(
+            !verifier.contains(&token),
+            "the verifier must not carry the token"
+        );
+
+        // The next launch: a fresh bridge, a different port, no tokens at all.
+        let next = ContextBridge::default();
+        let _ = next.port.set(5353);
+        assert_eq!(next.identify(&token), None);
+        let identity = |pty_id| AgentIdentity {
+            pty_id,
+            instance: instance.clone(),
+            cwd: "/w/app".into(),
+            run_id: None,
+            attempt_id: None,
+            spawn_depth: 1,
+            parent_pty_id: Some(3),
+        };
+        assert!(next.readopt_agent(&verifier, identity(7)));
+        match next.identify(&token) {
+            Some(Caller::Agent(a)) => {
+                assert_eq!(
+                    (a.pty_id, a.instance.as_str(), a.cwd.as_str()),
+                    (7, instance.as_str(), "/w/app")
+                );
+                assert_eq!((a.spawn_depth, a.parent_pty_id), (1, Some(3)));
+            }
+            other => panic!("the held token must name the adopted terminal, got {other:?}"),
+        }
+        assert_eq!(next.identify("not a token"), None);
+        assert_eq!(
+            next.identify(&verifier),
+            None,
+            "the verifier is not a credential"
+        );
+
+        // A second claim on the same verifier or the same terminal is refused,
+        // and so is anything that is not a verifier.
+        assert!(!next.readopt_agent(&verifier, identity(8)));
+        assert!(!next.readopt_agent(&super::verifier("other"), identity(7)));
+        assert!(!next.readopt_agent("short", identity(9)));
+        assert!(!next.readopt_agent(&"G".repeat(64), identity(9)));
+
+        // Exit retires it like any terminal.
+        assert_eq!(next.retire_agent(7).map(|a| a.pty_id), Some(7));
+        assert_eq!(next.identify(&token), None);
+    }
+
+    #[test]
+    fn the_socket_rides_beside_the_port_only_when_there_is_one() {
+        let bridge = ContextBridge::default();
+        assert_eq!(
+            bridge.socket(),
+            None,
+            "no socket unless start() claimed one"
+        );
+        let keys =
+            |env: Vec<(&'static str, String)>| env.into_iter().map(|(k, _)| k).collect::<Vec<_>>();
+        assert_eq!(
+            keys(super::agent_env(4242, "t", None)),
+            ["CANOPY_CTX_PORT", "CANOPY_CTX_TOKEN"]
+        );
+        let socket = std::path::Path::new("/h/.canopy/pty-host/ctx.sock");
+        let env = super::agent_env(4242, "t", Some(socket));
+        assert_eq!(
+            env.last(),
+            Some(&(
+                "CANOPY_CTX_SOCKET",
+                "/h/.canopy/pty-host/ctx.sock".to_string()
+            ))
+        );
+        assert_eq!(env[0], ("CANOPY_CTX_PORT", "4242".to_string()));
+        assert_eq!(env[1], ("CANOPY_CTX_TOKEN", "t".to_string()));
     }
 
     /// The registry is what makes "who is calling" answerable, and what tells

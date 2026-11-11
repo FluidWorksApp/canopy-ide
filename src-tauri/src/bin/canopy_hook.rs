@@ -3489,7 +3489,10 @@ fn parent_of(pid: u32) -> Option<u32> {
 }
 
 /// Where the bridge listens. A host service hands agents a Unix socket
-/// (`CANOPY_CTX_SOCKET`); the desktop app a loopback port.
+/// (`CANOPY_CTX_SOCKET`); the desktop app a loopback port, plus a stable socket
+/// when its PTY host is on, so a terminal that outlives the app reaches the
+/// next launch. There is deliberately no fallback from a socket to the port: a
+/// previous launch's port can belong to anything by now.
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum Endpoint {
     Port(String),
@@ -7266,7 +7269,7 @@ fn request_at(
         #[cfg(unix)]
         Endpoint::Socket(socket) => {
             let stream = std::os::unix::net::UnixStream::connect(socket).map_err(|e| {
-                format!("Canopy isn't reachable at {socket} ({e}) — is the service still running?")
+                format!("Canopy isn't reachable at {socket} ({e}) — is Canopy (or its service) still running?")
             })?;
             let _ = stream.set_read_timeout(Some(timeout));
             let _ = stream.set_write_timeout(Some(timeout));

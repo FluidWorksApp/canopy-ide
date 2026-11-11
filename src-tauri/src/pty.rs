@@ -653,6 +653,29 @@ impl PtyManager {
             };
             let meta = taken.meta;
             let meta_id = meta.id;
+            // The agent still holds the credential the previous launch minted,
+            // and its hooks reach this launch through the stable socket.
+            // Recognise that credential under the identity it had, spawn-tree
+            // position included. Metadata from before the verifier existed
+            // gets no credential, as before.
+            if let Some(verifier) = meta.bridge.as_deref() {
+                if let Some(ctx) = app.try_state::<crate::context::ContextBridge>() {
+                    let (spawn_depth, parent_pty_id) =
+                        crate::pty_hosted::lineage(&client, instance, meta.id).unwrap_or((0, None));
+                    let identity = crate::context::AgentIdentity {
+                        pty_id: meta.id,
+                        instance: meta.instance.clone(),
+                        cwd: meta.cwd.clone(),
+                        run_id: meta.run_id.clone(),
+                        attempt_id: meta.attempt_id.clone(),
+                        spawn_depth,
+                        parent_pty_id,
+                    };
+                    if !ctx.readopt_agent(verifier, identity) {
+                        eprintln!("canopy: adopted terminal {meta_id} keeps no bridge credential");
+                    }
+                }
+            }
             self.next_id.fetch_max(meta.id, Ordering::SeqCst);
             self.next_session_generation
                 .fetch_max(meta.generation, Ordering::SeqCst);
@@ -693,7 +716,12 @@ impl PtyManager {
                         thread::spawn(move || session.nudge_redraw());
                     }
                 }
-                Err(error) => eprintln!("canopy: could not start adopted terminal: {error}"),
+                Err(error) => {
+                    if let Some(ctx) = app.try_state::<crate::context::ContextBridge>() {
+                        ctx.retire_agent(meta_id);
+                    }
+                    eprintln!("canopy: could not start adopted terminal: {error}");
+                }
             }
         }
         adopted
@@ -2171,10 +2199,20 @@ impl PtyManager {
         // which session is calling without taking its word for it. Every PTY
         // used to carry the same one, which left "who is asking" answerable
         // only from body fields the caller filled in itself.
+        //
+        // With the PTY host on, the stable socket rides beside the port: the
+        // hook prefers it, so an agent that outlives this launch reaches the
+        // next one. An inherited socket (an app started from another Canopy's
+        // terminal) is dropped first, since it would win over our port and
+        // carry this terminal's token to the other instance.
+        cmd.env_remove("CANOPY_CTX_SOCKET");
+        let mut bridge_verifier = None;
         if let Some(ctx) = app.try_state::<crate::context::ContextBridge>() {
             if let Some((port, token)) = ctx.mint_agent(id, &cwd, task_identity.as_ref()) {
-                cmd.env("CANOPY_CTX_PORT", port.to_string());
-                cmd.env("CANOPY_CTX_TOKEN", token);
+                for (key, value) in crate::context::agent_env(port, &token, ctx.socket()) {
+                    cmd.env(key, value);
+                }
+                bridge_verifier = Some(crate::context::verifier(&token));
             }
         }
         // The IDE server is bound before the child exists so its port is in
@@ -2252,7 +2290,9 @@ impl PtyManager {
         };
         let hosted = hosted_client.as_ref().and_then(|client| {
             // Written with the spawn, not after: a crash in between would leave a
-            // session nothing can identify. Identity only, never env or tokens.
+            // session nothing can identify. Identity only, never env or tokens:
+            // `bridge` is the credential's SHA-256, so a later launch can
+            // recognise the token the agent holds without the host storing it.
             let meta = serde_json::json!({
                 "v": 1,
                 "id": id,
@@ -2266,6 +2306,7 @@ impl PtyManager {
                 "run_id": task_identity.as_ref().map(|t| t.run_id.clone()),
                 "attempt_id": task_identity.as_ref().map(|t| t.attempt_id.clone()),
                 "instance": instance_token(),
+                "bridge": bridge_verifier.clone(),
             })
             .to_string();
             match crate::pty_hosted::spawn(client, &cmd, cols, rows, Some(meta)) {
@@ -4721,6 +4762,64 @@ mod tests {
             0
         );
         let _ = pm.kill(41);
+    }
+
+    /// The agent in an adopted terminal still holds the token the previous
+    /// launch minted. Adoption must make this launch's bridge accept it under
+    /// the same identity, spawn-tree position included.
+    #[cfg(unix)]
+    #[test]
+    fn adopt_from_gives_the_held_bridge_token_back_its_identity() {
+        use crate::pty_hosted::tests::{command, InProcessHost};
+        use tauri::Manager;
+        let instance = instance_token().to_string();
+        let token = "f".repeat(32);
+        let meta = serde_json::json!({
+            "v": 1, "id": 52, "generation": 4, "kind": "desktop", "cwd": "/tmp",
+            "run": false, "instance": instance,
+            "bridge": crate::context::verifier(&token),
+        })
+        .to_string();
+        let host = InProcessHost::start("adoptctx");
+        let (child, master) = crate::pty_hosted::spawn(
+            &host.client,
+            &command("while :; do sleep 0.1; done"),
+            80,
+            24,
+            Some(meta),
+        )
+        .expect("hosted spawn");
+        host.client
+            .set_state(&format!("lineage:{instance}:52"), "2:17", false)
+            .unwrap();
+        drop(master);
+        drop(child);
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while std::time::Instant::now() < deadline
+            && host.client.list().unwrap()[0].attached != Some(false)
+        {
+            thread::sleep(Duration::from_millis(50));
+        }
+
+        let app = tauri::test::mock_app();
+        app.manage(crate::context::ContextBridge::default());
+        let bridge = app.state::<crate::context::ContextBridge>();
+        assert_eq!(bridge.caller_for_test(&token), None);
+        let pm = PtyManager::default();
+        assert_eq!(
+            pm.adopt_from(app.handle().clone(), &host.client, &instance),
+            1
+        );
+        match bridge.caller_for_test(&token) {
+            Some(crate::context::Caller::Agent(agent)) => {
+                assert_eq!((agent.pty_id, agent.cwd.as_str()), (52, "/tmp"));
+                assert_eq!(agent.instance, instance);
+                assert_eq!((agent.spawn_depth, agent.parent_pty_id), (2, Some(17)));
+            }
+            other => panic!("the held token must name the adopted terminal: {other:?}"),
+        }
+        assert_eq!(bridge.caller_for_test(&"0".repeat(32)), None);
+        let _ = pm.kill(52);
     }
 
     #[test]
