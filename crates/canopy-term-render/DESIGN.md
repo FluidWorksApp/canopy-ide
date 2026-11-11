@@ -127,7 +127,8 @@ many glyphs can exceed a row's capacity; extras are dropped rather than
 overrunning the next row.
 
 Fonts: a used face's parsed shaping face is `'static` and built once, not per
-run. Its bytes are not copied: fontdb memory-maps system font files (one
+run, and shaping plans are cached per (face, script, ligature setting), so a
+steady-state shaping call does not rebuild one. Its bytes are not copied: fontdb memory-maps system font files (one
 mapping per file, shared by all its faces) and the bundled font is the static
 bytes themselves. A process-wide table keeps one handle per font file path
 (and per distinct byte range for in-memory fonts) for the life of the process,
@@ -312,8 +313,9 @@ a face are synthesised (embolden, 14 degree skew).
   opens.
 
 The golden test renders on the GPU where one exists and is skipped (and says so
-in the log) where none does. The CPU reference and the WGSL validation run
-everywhere.
+in the log) where none does. In every run so far the GPU golden ran on macOS
+(Metal, max difference 0) and Windows (WARP, max difference 1) and was skipped on
+Linux. The CPU reference and the WGSL validation run everywhere.
 
 ## What is not proven here
 
@@ -326,6 +328,12 @@ everywhere.
   shader is validated by naga and its maths by the CPU reference, not executed.
 * IME, VoiceOver/NVDA and key/mouse encoding: design only.
 * Right-to-left text (shaping is forced left-to-right).
+* The cost of `FontBook::index_fallbacks` and of the first fallback lookup on a
+  real system font set (hundreds of faces): not measured.
+* Emoji width and presentation: a colour glyph is scaled to fit two cells and
+  variation selector 16 is not looked at; the cell width comes from the frame.
+* Ligatures are not broken under the cursor (only switched off as a whole with
+  `TextEngine::set_ligatures`).
 
 ## Hand test list once a window exists
 

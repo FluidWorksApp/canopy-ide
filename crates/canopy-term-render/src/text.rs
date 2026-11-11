@@ -14,7 +14,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use rustybuzz::{Direction, UnicodeBuffer};
+use rustybuzz::{Direction, Script, ShapePlan, UnicodeBuffer};
 use swash::scale::image::Content;
 use swash::scale::{Render, ScaleContext, Source, StrikeWith};
 use swash::zeno::{Angle, Format, Transform};
@@ -73,6 +73,9 @@ pub struct TextEngine {
     shape_starts: Vec<usize>,
     shape_choices: Vec<Option<FaceChoice>>,
     buzz_buffer: Option<UnicodeBuffer>,
+    /// Shaping plans by (face, script, ligatures): a plan depends only on
+    /// these, and building one allocates, so it is built once per key.
+    plans: HashMap<(u32, Script, bool), ShapePlan>,
 }
 
 /// Index of the cell whose text contains byte offset `byte`, given each cell's
@@ -131,6 +134,7 @@ impl TextEngine {
             shape_starts: Vec::new(),
             shape_choices: Vec::new(),
             buzz_buffer: None,
+            plans: HashMap::new(),
         }
     }
 
@@ -318,12 +322,28 @@ impl TextEngine {
         buffer.push_str(&text);
         buffer.guess_segment_properties();
         buffer.set_direction(Direction::LeftToRight);
-        let off = |tag: &[u8; 4]| {
-            rustybuzz::Feature::new(rustybuzz::ttf_parser::Tag::from_bytes(tag), 0, ..)
-        };
-        let no_ligatures = [off(b"liga"), off(b"clig"), off(b"calt")];
-        let features: &[rustybuzz::Feature] = if self.ligatures { &[] } else { &no_ligatures };
-        let shaped = rustybuzz::shape(&loaded.buzz, features, buffer);
+        // The language is never set (rustybuzz does not guess one), so the
+        // plan depends on the face, the script, the direction (always left to
+        // right) and the features alone.
+        let script = buffer.script();
+        let key = (choice.face, script, self.ligatures);
+        if !self.plans.contains_key(&key) {
+            let off = |tag: &[u8; 4]| {
+                rustybuzz::Feature::new(rustybuzz::ttf_parser::Tag::from_bytes(tag), 0, ..)
+            };
+            let no_ligatures = [off(b"liga"), off(b"clig"), off(b"calt")];
+            let features: &[rustybuzz::Feature] = if self.ligatures { &[] } else { &no_ligatures };
+            let plan_script = (script != rustybuzz::script::UNKNOWN).then_some(script);
+            let plan = ShapePlan::new(
+                &loaded.buzz,
+                Direction::LeftToRight,
+                plan_script,
+                None,
+                features,
+            );
+            self.plans.insert(key, plan);
+        }
+        let shaped = rustybuzz::shape_with_plan(&loaded.buzz, &self.plans[&key], buffer);
         let k = self.layout.font_px as f32 / upem;
         let infos = shaped.glyph_infos();
         let positions = shaped.glyph_positions();
@@ -512,6 +532,22 @@ mod tests {
             !changed.is_empty(),
             "no ligature substitution observed in any pair"
         );
+    }
+
+    #[test]
+    fn shaping_plans_are_built_once_and_give_the_same_glyphs() {
+        let mut e = engine();
+        let mut first = Vec::new();
+        e.shape_run(REGULAR, &cells(&["a", "-", ">", "b"]), &mut first);
+        assert_eq!(e.plans.len(), 1);
+        let mut second = Vec::new();
+        e.shape_run(REGULAR, &cells(&["a", "-", ">", "b"]), &mut second);
+        assert_eq!(e.plans.len(), 1, "reused");
+        assert_eq!(first, second);
+        e.set_ligatures(false);
+        let mut third = Vec::new();
+        e.shape_run(REGULAR, &cells(&["a", "-", ">", "b"]), &mut third);
+        assert_eq!(e.plans.len(), 2, "features are part of the plan");
     }
 
     #[test]
