@@ -31,8 +31,10 @@ commands:
                                     existing one); prints its id
   attach ID [--after N] [--force]   interactive passthrough; detach with Ctrl-] d
                                     (Ctrl-] Ctrl-] sends a literal Ctrl-])
-  send ID TEXT [--enter] [--force]  type TEXT into the session (--enter adds CR)
-  capture ID [--lines N] [--force]  print the tail of the replay ring as text
+  send ID TEXT [--enter]            type TEXT into the session (--enter adds CR);
+                                    TEXT is `-` to read it from stdin (argv is
+                                    visible in process lists, stdin is not)
+  capture ID [--lines N]            print the tail of the replay ring as text
   wait ID                           block until the session exits, then exit with
                                     its exit code
   kill ID                           kill the session
@@ -44,12 +46,19 @@ options:
   --version       print the version and exit
 
 exit codes: 0 ok, 1 error, 2 usage, 3 no such session, 4 host not running,
-5 session is attached elsewhere (use --force to take it over).
+5 session is attached elsewhere, or the host does not say (see below).
 
 The host has no read-only or input-only operation: attach, send and capture all
-open the session's one data connection, which replaces whoever is attached
-(for example the Canopy app) and starts the session's linger clock when it
-closes. Without --force they refuse if a client is attached.
+open the session's one data connection, and the host gives that connection to
+the newest client, disconnecting whoever held it (for example the Canopy app's
+terminal). So all three refuse (exit 5) unless the host reports the session as
+not attached; an old host that does not report it counts as unknown, never as
+free. Only `attach --force` takes a session over on purpose. send and capture
+have no override. When they do connect, the session's linger clock starts at
+the moment they close.
+The check and the attach are two calls, so a client that attaches in between
+is still disconnected. Closing that gap needs a host-side `attach` that only
+succeeds if the session is free (not implemented; proposed to the host).
 
 capture prints a byte replay of the host's ring buffer (escape sequences kept,
 CRLF turned into LF), not a rendered screen.
@@ -400,18 +409,29 @@ fn open_data(
     force: bool,
 ) -> Res<canopy_pty_host::client::Attached> {
     let info = find(client, socket, id)?;
-    if !force && info.attached == Some(true) {
-        return Err(fail(
-            EXIT_BUSY,
-            format!("session {id} is attached by another client (--force takes it over)"),
-        ));
+    // None is "unknown" (a host that predates the field), never "free".
+    if !force {
+        match info.attached {
+            Some(false) => {}
+            Some(true) => {
+                return Err(fail(
+                    EXIT_BUSY,
+                    format!("session {id} is attached by another client"),
+                ))
+            }
+            None => {
+                return Err(fail(
+                    EXIT_BUSY,
+                    format!("the host does not report whether session {id} is attached"),
+                ))
+            }
+        }
     }
     client.attach(id, after).map_err(|e| io_fail(e, socket))
 }
 
 fn cmd_send(client: &HostClient, socket: &Path, mut args: Vec<String>) -> Res<i32> {
     let enter = take_flag(&mut args, "--enter");
-    let force = take_flag(&mut args, "--force");
     let (head, tail) = split_dd(args);
     reject_unknown_options(&head)?;
     let positional: Vec<String> = head.into_iter().chain(tail).collect();
@@ -419,12 +439,20 @@ fn cmd_send(client: &HostClient, socket: &Path, mut args: Vec<String>) -> Res<i3
         return Err(usage("usage: send ID TEXT [--enter]"));
     };
     let id = parse_id(id)?;
-    let mut data = text.clone().into_bytes();
+    let mut data = if text == "-" {
+        let mut bytes = Vec::new();
+        io::stdin()
+            .read_to_end(&mut bytes)
+            .map_err(|e| fail(EXIT_ERROR, e.to_string()))?;
+        bytes
+    } else {
+        text.clone().into_bytes()
+    };
     if enter {
         data.push(b'\r');
     }
     // A start past the end clamps to it, so nothing is replayed.
-    let attached = open_data(client, socket, id, u64::MAX, force)?;
+    let attached = open_data(client, socket, id, u64::MAX, false)?;
     let mut stream = attached.stream;
     stream
         .write_all(&data)
@@ -450,9 +478,8 @@ fn close_cleanly(mut stream: std::os::unix::net::UnixStream) {
 
 fn cmd_capture(client: &HostClient, socket: &Path, mut args: Vec<String>) -> Res<i32> {
     let lines: Option<usize> = take_number(&mut args, "--lines")?;
-    let force = take_flag(&mut args, "--force");
     let id = only_id(args)?;
-    let attached = open_data(client, socket, id, 0, force)?;
+    let attached = open_data(client, socket, id, 0, false)?;
     let want = attached.end.saturating_sub(attached.start) as usize;
     let mut stream = attached.stream;
     let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
@@ -519,7 +546,7 @@ fn set_nonblocking_cloexec(fd: RawFd) {
     }
 }
 
-/// Routes SIGINT, SIGTERM, SIGHUP and SIGWINCH into a pipe the main loop polls,
+/// Routes SIGINT, SIGTERM, SIGHUP, SIGQUIT, SIGTSTP and SIGWINCH into a pipe the main loop polls,
 /// so none of them can end the process with the terminal still in raw mode.
 fn install_signals() -> io::Result<RawFd> {
     let mut fds = [0 as libc::c_int; 2];
@@ -530,17 +557,28 @@ fn install_signals() -> io::Result<RawFd> {
     set_nonblocking_cloexec(fds[0]);
     set_nonblocking_cloexec(fds[1]);
     SIGNAL_PIPE.store(fds[1], Ordering::Relaxed);
-    for sig in [libc::SIGINT, libc::SIGTERM, libc::SIGHUP, libc::SIGWINCH] {
-        // SAFETY: a zeroed sigaction is valid; the handler only calls write(2).
-        unsafe {
-            let mut action: libc::sigaction = std::mem::zeroed();
-            action.sa_sigaction = on_signal as extern "C" fn(libc::c_int) as libc::sighandler_t;
-            libc::sigemptyset(&mut action.sa_mask);
-            action.sa_flags = libc::SA_RESTART;
-            libc::sigaction(sig, &action, std::ptr::null_mut());
-        }
+    for sig in [
+        libc::SIGINT,
+        libc::SIGTERM,
+        libc::SIGHUP,
+        libc::SIGQUIT,
+        libc::SIGTSTP,
+        libc::SIGWINCH,
+    ] {
+        install_handler(sig);
     }
     Ok(fds[0])
+}
+
+fn install_handler(sig: libc::c_int) {
+    // SAFETY: a zeroed sigaction is valid; the handler only calls write(2).
+    unsafe {
+        let mut action: libc::sigaction = std::mem::zeroed();
+        action.sa_sigaction = on_signal as extern "C" fn(libc::c_int) as libc::sighandler_t;
+        libc::sigemptyset(&mut action.sa_mask);
+        action.sa_flags = libc::SA_RESTART;
+        libc::sigaction(sig, &action, std::ptr::null_mut());
+    }
 }
 
 /// Puts a terminal into raw mode and puts it back when dropped, which covers
@@ -632,6 +670,19 @@ fn push_size(client: &HostClient, id: u32) {
     }
 }
 
+/// A resize to the size a terminal already has sends no SIGWINCH, so on attach
+/// shrink by one row and restore, like the app's adopt path: an idle full-screen
+/// program then redraws instead of leaving a blank screen.
+fn nudge_redraw(client: &HostClient, id: u32) {
+    if let Some((cols, rows)) = winsize() {
+        if rows >= 2 {
+            let _ = client.resize(id, cols, rows - 1);
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        let _ = client.resize(id, cols, rows);
+    }
+}
+
 fn cmd_attach(client: &HostClient, socket: &Path, mut args: Vec<String>) -> Res<i32> {
     let after: Option<u64> = take_number(&mut args, "--after")?;
     let force = take_flag(&mut args, "--force");
@@ -642,8 +693,8 @@ fn cmd_attach(client: &HostClient, socket: &Path, mut args: Vec<String>) -> Res<
     let mut stream = attached.stream;
     let sock_fd = stream.as_raw_fd();
 
-    let raw = RawMode::enter(0);
-    push_size(client, id);
+    let mut raw = RawMode::enter(0);
+    nudge_redraw(client, id);
 
     let mut fds = [
         libc::pollfd {
@@ -684,6 +735,18 @@ fn cmd_attach(client: &HostClient, socket: &Path, mut args: Vec<String>) -> Res<
             for &sig in sigs.iter().take(n.max(0) as usize) {
                 if sig as i32 == libc::SIGWINCH {
                     push_size(client, id);
+                } else if sig as i32 == libc::SIGTSTP {
+                    // Give the terminal back, stop for real, and take it again
+                    // when continued. (SIGSTOP cannot be caught.)
+                    drop(raw.take());
+                    // SAFETY: default disposition, then stop ourselves.
+                    unsafe {
+                        libc::signal(libc::SIGTSTP, libc::SIG_DFL);
+                        libc::raise(libc::SIGTSTP);
+                    }
+                    install_handler(libc::SIGTSTP);
+                    raw = RawMode::enter(0);
+                    nudge_redraw(client, id);
                 } else {
                     break 'main Outcome::Signal(sig as i32);
                 }

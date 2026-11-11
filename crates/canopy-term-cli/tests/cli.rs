@@ -386,7 +386,11 @@ fn attach_passes_bytes_detaches_and_restores_the_tty() {
 fn attach_restores_the_tty_on_sigterm_and_sigint() {
     let h = Host::start("g");
     let id = h.new_session(None, &["cat"]);
-    for (sig, code) in [(libc::SIGTERM, 143), (libc::SIGINT, 130)] {
+    for (sig, code) in [
+        (libc::SIGTERM, 143),
+        (libc::SIGINT, 130),
+        (libc::SIGQUIT, 131),
+    ] {
         let pty = Pty::open(80, 24);
         let before = pty.lflag();
         let mut child = start_attach(&h, &pty, &id);
@@ -424,4 +428,118 @@ fn attach_forwards_window_resizes() {
         wait_exit(&mut child, Duration::from_secs(5)).and_then(|s| s.code()),
         Some(0)
     );
+}
+
+#[test]
+fn attach_nudges_a_redraw_so_an_idle_app_repaints() {
+    let h = Host::start("i");
+    // Repaints only on SIGWINCH (28 on Linux and macOS), like an idle full-screen app.
+    let id = h.new_session(
+        None,
+        &[
+            "sh",
+            "-c",
+            "trap 'echo REPAINTED' 28; echo READY; while :; do sleep 0.1; done",
+        ],
+    );
+    // The trap is installed once READY shows in the ring.
+    assert!(wait_until(Duration::from_secs(5), || {
+        lossy(&h.run(&["capture", &id]).stdout).contains("READY")
+    }));
+    let pty = Pty::open(80, 24);
+    let mut child = start_attach(&h, &pty, &id);
+    let seen = pty.read_until("REPAINTED", Duration::from_secs(5));
+    assert!(seen.contains("REPAINTED"), "no repaint on attach: {seen:?}");
+    pty.write(&[0x1d]);
+    pty.write(b"d");
+    assert_eq!(
+        wait_exit(&mut child, Duration::from_secs(5)).and_then(|s| s.code()),
+        Some(0)
+    );
+}
+
+#[test]
+fn send_reads_text_from_stdin() {
+    use std::io::Write;
+    let h = Host::start("j");
+    let id = h.new_session(None, &["cat"]);
+    let mut child = h
+        .term(&["send", &id, "-"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(b"from-stdin-text\r")
+        .unwrap();
+    assert_eq!(child.wait().unwrap().code(), Some(0));
+    assert!(wait_until(Duration::from_secs(5), || {
+        lossy(&h.run(&["capture", &id]).stdout).contains("from-stdin-text")
+    }));
+}
+
+/// A host that predates the `attached` field: "unknown" must never read as
+/// "free", so send, capture and attach refuse without ever opening a data
+/// connection.
+#[test]
+fn a_host_that_omits_attached_is_never_treated_as_free() {
+    use std::io::{BufRead, BufReader, Write};
+    use std::os::unix::net::UnixListener;
+    use std::sync::{Arc, Mutex};
+
+    let dir = std::env::temp_dir().join(format!("ct{}k", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let sock = dir.join("h.sock");
+    let listener = UnixListener::bind(&sock).unwrap();
+    let ops: Arc<Mutex<Vec<String>>> = Arc::default();
+    {
+        let ops = Arc::clone(&ops);
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else { break };
+                let mut line = String::new();
+                let _ = BufReader::new(&stream).read_line(&mut line);
+                let op = serde_json::from_str::<Value>(&line)
+                    .ok()
+                    .and_then(|v| v["op"].as_str().map(String::from))
+                    .unwrap_or_default();
+                ops.lock().unwrap().push(op.clone());
+                let reply = if op == "list" {
+                    r#"{"ok":true,"sessions":[{"id":1,"pid":42,"cols":80,"rows":24}]}"#
+                } else {
+                    r#"{"ok":false,"error":"unexpected"}"#
+                };
+                let _ = stream.write_all(format!("{reply}\n").as_bytes());
+            }
+        });
+    }
+    let term = |args: &[&str]| {
+        Command::new(env!("CARGO_BIN_EXE_canopy-term"))
+            .arg("--socket")
+            .arg(&sock)
+            .args(args)
+            .stdin(Stdio::null())
+            .output()
+            .unwrap()
+    };
+    let cases: [&[&str]; 3] = [&["capture", "1"], &["send", "1", "x"], &["attach", "1"]];
+    for args in cases {
+        let out = term(args);
+        assert_eq!(
+            out.status.code(),
+            Some(5),
+            "{args:?}: {}",
+            lossy(&out.stderr)
+        );
+    }
+    assert!(
+        ops.lock().unwrap().iter().all(|op| op == "list"),
+        "opened a data connection to a host that did not say it was free: {:?}",
+        ops.lock().unwrap()
+    );
+    let _ = std::fs::remove_dir_all(&dir);
 }
