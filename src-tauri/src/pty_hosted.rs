@@ -245,7 +245,7 @@ mod adoption {
             .filter(|s| s.exited.is_none() && s.attached == Some(false) && s.pid.is_some())
             .filter_map(|info| {
                 let meta = parse(&info)?;
-                (meta.kind != "detached" && meta.instance == instance)
+                (meta.kind != "detached" && meta.run_id.is_none() && meta.instance == instance)
                     .then_some(Adoptable { info, meta })
             })
             .collect()
@@ -309,7 +309,7 @@ mod adoption {
                 continue;
             }
             if let Some(meta) = parse(info) {
-                if meta.kind != "detached" && !meta.instance.is_empty() {
+                if meta.kind != "detached" && meta.run_id.is_none() && !meta.instance.is_empty() {
                     *counts.entry(meta.instance).or_default() += 1;
                 }
             }
@@ -716,6 +716,20 @@ pub(crate) mod tests {
             info(5, None, Some(false), None),        // no metadata
             info(6, Some("{not json".into()), Some(false), None),
         ];
+        assert_eq!(adoption_choose(&sessions), None);
+        assert!(adoption_adoptable(sessions, "inst-a").is_empty());
+    }
+
+    #[test]
+    fn a_run_bound_session_is_a_micro_task_tab_and_is_never_adopted() {
+        // Micro-task tabs are ephemeral and never restored; the stale sweep
+        // settles their run, so adopting the terminal would contradict it.
+        let bound = serde_json::json!({
+            "v": 1, "id": 5, "generation": 5, "kind": "desktop", "cwd": "/tmp",
+            "run": false, "instance": "inst-a", "run_id": "run-1", "attempt_id": "att-1",
+        })
+        .to_string();
+        let sessions = vec![info(5, Some(bound), Some(false), None)];
         assert_eq!(adoption_choose(&sessions), None);
         assert!(adoption_adoptable(sessions, "inst-a").is_empty());
     }

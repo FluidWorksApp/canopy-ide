@@ -62,9 +62,10 @@ removed; directory mode 0700 and a peer-uid check; short socket path (macOS limi
 is about 104 bytes, recalled).
 
 **Linger.** `SpawnSpec.linger_secs` kills a session that long after its last
-client detaches (or after spawn if none attaches). Until the app can adopt
-sessions, a crash or force-quit would otherwise leave invisible agents running,
-so the app sets a short linger and the adoption change lifts it.
+client detaches (or after spawn if none attaches), so a crash or force-quit does
+not leave invisible agents running forever. The clock only runs while nothing is
+attached, so adoption does not need to lift it; how long a session may outlive the
+app is the user's Quit decision, and the app sets 30 seconds for now.
 
 **Wire.** One raw connection per session: a one-line JSON attach handshake, then
 plain bytes both ways. The host blocks on a slow client and drains into its ring
@@ -107,14 +108,27 @@ as a second agent on the same conversation. Ids are seeded past the adopted max.
   and sidecar actions carry the token it was spawned with, and mesh delivery
   (`pty.rs` `write`), job updates and sidecar actions (`context.rs`) and digest
   pairing in the session panel all compare against the current token. A fresh
-  token would silence every adopted agent, so an adopting launch reuses the host's
-  stored token (first launch writes it with `set_state(..., if_unset)`).
+  token would silence every adopted agent, so an adopting launch reuses the token
+  found in the metadata of the waiting sessions (the token most free, ours,
+  non-micro-task sessions agree on). Debug instances can coexist, so it is read
+  from the sessions, not from a first-writer-wins store.
 - Reusing it breaks the stale sweep, which matches `appInstance` by inequality
-  (`tasks.rs interrupt_stale`). The sweep and `appInstance` stamps need their own
-  per-launch id, separate from the pairing token.
+  (`tasks.rs interrupt_stale`). The sweep and the `appInstance` stamps use a
+  separate per-launch tag (`launch_token`, command `launch_id`), equal to the
+  pairing token whenever nothing was adopted.
 - A pty id must never repeat under one token, including ids of dead terminals, so
-  the id high-water mark is kept in the host store, not just seeded past the
-  adopted maximum.
+  adoption raises the id and generation floor from every session carrying the
+  token (before attempting any adopt, with a non-launching client) and from a
+  high-water mark the app writes ahead in blocks to the host.
+- Run-bound sessions (a task run id in the metadata) are micro-task tabs: they
+  are never adopted, matching "micro-task tabs are never restored" and the sweep.
+- An adopted session skips what a fresh spawn registers by pty id: no bridge
+  credential (its hooks keep the dead port), no containment lease, no IDE server.
+  The exit-path releases for those are no-ops. Adoption starts with a one-second
+  bound per host call and ten seconds in total; sessions it does not reach stay
+  in the host.
+- Replayed history goes straight into the replay ring and does not stamp the
+  output clock; the redraw nudge's repaint is masked from it for a moment.
 - Release builds allow one app instance (`tauri-plugin-single-instance`, compiled
   out of debug builds), so no claim op is planned. Debug instances can coexist
   and would share the `pty-host-dev` directory; a second one attaching to the

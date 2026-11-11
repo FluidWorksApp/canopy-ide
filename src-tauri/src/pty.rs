@@ -51,6 +51,11 @@ const INPUT_HIGH_WATER: usize = 1024 * 1024;
 const WRITER_POLL: Duration = Duration::from_millis(250);
 /// Replay retained while no desktop or remote viewer is attached.
 const SCROLLBACK_CAP: usize = 4 * 1024 * 1024;
+/// How long the output clock ignores the repaint a redraw nudge provokes.
+const NUDGE_QUIET_MS: u64 = 1500;
+/// The most time adoption may spend at launch across all sessions; sessions it
+/// does not reach stay in the host (their linger still applies).
+const ADOPT_BUDGET: Duration = Duration::from_secs(10);
 /// Bounded fan-out queue to remote subscribers. Lossy on lag by design: a slow
 /// phone is dropped to a resync, never allowed to stall the agent.
 const BROADCAST_CAP: usize = 512;
@@ -259,6 +264,9 @@ pub struct Session {
     /// counter is here because a terminal repainting the same frame is still
     /// output — diffing rendered text would call that silence.
     last_output_ms: AtomicU64,
+    /// Output before this time does not stamp `last_output_ms`: the repaint a
+    /// redraw nudge provokes is not the agent speaking.
+    stamp_quiet_until_ms: AtomicU64,
     output_bytes: AtomicU64,
     /// Bytes evicted from the front of the replay ring. A reattaching terminal
     /// gets an explicit marker instead of silently presenting a partial history
@@ -608,7 +616,14 @@ impl PtyManager {
     ) -> usize {
         let client = client.clone();
         let mut adopted = 0;
+        let deadline = std::time::Instant::now() + ADOPT_BUDGET;
         for found in crate::pty_hosted::adoptable(&client, instance) {
+            if std::time::Instant::now() >= deadline {
+                eprintln!(
+                    "canopy: adoption budget spent; remaining hosted terminals left in the host"
+                );
+                break;
+            }
             if self.sessions.lock().unwrap().contains_key(&found.meta.id) {
                 continue;
             }
@@ -1306,7 +1321,10 @@ impl Session {
     /// every pty, headless ones included, and the bytes are already in hand —
     /// so "when did this terminal last say anything" costs two relaxed stores.
     fn record_output_locked(&self, ring: &mut VecDeque<u8>, data: &[u8]) -> u64 {
-        self.last_output_ms.store(now_ms(), Ordering::Relaxed);
+        let now = now_ms();
+        if now >= self.stamp_quiet_until_ms.load(Ordering::Relaxed) {
+            self.last_output_ms.store(now, Ordering::Relaxed);
+        }
         let start = self.output_bytes.load(Ordering::Relaxed);
         ring.extend(data.iter().copied());
         let overflow = ring.len().saturating_sub(SCROLLBACK_CAP);
@@ -1344,21 +1362,30 @@ impl Session {
     /// one row and restore. Used after adoption, where the replayed history may
     /// start mid-screen and a TUI needs to redraw over it.
     fn nudge_redraw(&self) {
-        let (cols, rows) = *self.size.lock().unwrap();
+        let (_, rows) = *self.size.lock().unwrap();
         if rows < 2 {
             return;
         }
-        let resize = |rows: u16| {
-            let _ = self.master.lock().unwrap().resize(PtySize {
+        // The repaint is not "the agent just spoke": keep it out of the output
+        // clock for a moment longer than the nudge takes.
+        self.stamp_quiet_until_ms
+            .store(now_ms() + NUDGE_QUIET_MS, Ordering::Relaxed);
+        // One lock across both sizes, so a real resize cannot land in between and
+        // be overwritten; the restore reads the size as it is after the pause.
+        let master = self.master.lock().unwrap();
+        let shrink = |cols: u16, rows: u16| {
+            let _ = master.resize(PtySize {
                 rows,
                 cols,
                 pixel_width: 0,
                 pixel_height: 0,
             });
         };
-        resize(rows - 1);
+        let (cols, rows) = *self.size.lock().unwrap();
+        shrink(cols, rows - 1);
         thread::sleep(Duration::from_millis(80));
-        resize(rows);
+        let (cols, rows) = *self.size.lock().unwrap();
+        shrink(cols, rows);
     }
 
     /// Record a new grid size and tell remote subscribers, so a remote terminal
@@ -2422,6 +2449,7 @@ impl PtyManager {
             // is an unanswered question, not a terminal that has been silent
             // since it started.
             last_output_ms: AtomicU64::new(0),
+            stamp_quiet_until_ms: AtomicU64::new(0),
             output_bytes: AtomicU64::new(history_total),
             dropped_output_bytes: AtomicU64::new(history_dropped),
             desktop_delivery_chunks: AtomicU64::new(0),
@@ -4654,6 +4682,8 @@ mod tests {
             )
             .contains("got-winch")
         }));
+        // The repaint the nudge provoked is not the agent speaking.
+        assert_eq!(session.quiet_ms(now_ms()), None);
         // The next terminal lands above the adopted ones.
         let (id, generation) = pm.allocate_session_identity().unwrap();
         assert!(id > 41 && generation > 9, "{id} {generation}");
@@ -4663,5 +4693,12 @@ mod tests {
             0
         );
         let _ = pm.kill(41);
+    }
+
+    #[test]
+    fn without_the_host_the_launch_tag_is_the_instance_tag() {
+        if !crate::pty_hosted::enabled() {
+            assert_eq!(launch_token(), instance_token());
+        }
     }
 }
