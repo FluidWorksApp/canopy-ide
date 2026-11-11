@@ -15,7 +15,8 @@
 //! * [`compose`]: the composition drawn over a copy of the frame.
 //! * [`blink`], [`selection`], [`shortcuts`]: cursor blink timing, copied text,
 //!   copy/paste/zoom keys.
-//! * [`source`]: the `FrameSource` boundary the window pulls frames from.
+//! * [`source`]: TEMPORARY frame-source adapter, replaced by
+//!   `canopy-term-session`'s `FrameSource` when that crate lands.
 //!
 //! The `window` feature (on by default) adds [`window::run`], which owns the
 //! winit loop, the wgpu surface and the AccessKit adapter, and maps winit key,
