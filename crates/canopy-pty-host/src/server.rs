@@ -32,7 +32,12 @@ pub struct ServerConfig {
     pub socket: PathBuf,
     /// Exit after this long with no live session and no connection.
     pub idle_exit: Duration,
+    /// An exited session nobody reaped is dropped after this long.
+    pub exited_ttl: Duration,
 }
+
+/// Default for `ServerConfig::exited_ttl`.
+pub const EXITED_TTL: Duration = Duration::from_secs(600);
 
 struct Ring {
     bytes: VecDeque<u8>,
@@ -48,13 +53,14 @@ struct Ring {
 struct Session {
     id: u32,
     pid: u32,
-    meta: Option<String>,
+    meta: Mutex<Option<String>>,
     master: Mutex<Box<dyn MasterPty + Send>>,
     writer: Mutex<Box<dyn Write + Send>>,
     size: Mutex<(u16, u16)>,
     ring: Mutex<Ring>,
     cv: Condvar,
     exited: Mutex<Option<i32>>,
+    exited_at: Mutex<Option<Instant>>,
 }
 
 impl Session {
@@ -83,7 +89,7 @@ impl Session {
             start: ring.base,
             end: ring.base + ring.bytes.len() as u64,
             exited: self.exit_code(),
-            meta: self.meta.clone(),
+            meta: self.meta.lock().unwrap().clone(),
         }
     }
 }
@@ -92,7 +98,7 @@ struct Host {
     sessions: Mutex<HashMap<u32, Arc<Session>>>,
     next_id: AtomicU32,
     connections: AtomicUsize,
-    stop: AtomicBool,
+    stop: Arc<AtomicBool>,
 }
 
 static SIGNALLED: AtomicBool = AtomicBool::new(false);
@@ -149,8 +155,28 @@ fn raise_fd_limit() {
     }
 }
 
-/// Binds the socket, replacing a stale one. Exits quietly (Ok) if a live host
-/// already owns it.
+/// Closes every inherited descriptor and leaves the launcher's directory: the
+/// host lives for days and must not pin a socket or a working directory the app
+/// happened to hold when it started us.
+pub fn harden_process() {
+    // SAFETY: closing descriptors this process does not use, chdir to root.
+    unsafe {
+        let mut limit: libc::rlimit = std::mem::zeroed();
+        let max = if libc::getrlimit(libc::RLIMIT_NOFILE, &mut limit) == 0 {
+            (limit.rlim_cur as i64).min(65_536) as libc::c_int
+        } else {
+            1024
+        };
+        for fd in 3..max {
+            libc::close(fd);
+        }
+        libc::chdir(c"/".as_ptr());
+    }
+}
+
+/// Binds the socket, replacing a stale one, and serves until SIGTERM/SIGINT, a
+/// `shutdown` request or idle exit. Exits quietly (Ok) if a live host already
+/// owns the socket.
 pub fn run(config: ServerConfig) -> std::io::Result<()> {
     raise_fd_limit();
     if let Some(dir) = config.socket.parent() {
@@ -163,7 +189,6 @@ pub fn run(config: ServerConfig) -> std::io::Result<()> {
     let _ = std::fs::remove_file(&config.socket);
     let listener = UnixListener::bind(&config.socket)?;
     std::fs::set_permissions(&config.socket, std::fs::Permissions::from_mode(0o600))?;
-    listener.set_nonblocking(true)?;
 
     // SAFETY: the handler only stores to an atomic.
     unsafe {
@@ -171,19 +196,41 @@ pub fn run(config: ServerConfig) -> std::io::Result<()> {
         libc::signal(libc::SIGINT, on_signal as libc::sighandler_t);
         libc::signal(libc::SIGPIPE, libc::SIG_IGN);
     }
+    let stop = Arc::new(AtomicBool::new(false));
+    {
+        let stop = Arc::clone(&stop);
+        thread::spawn(move || {
+            while !SIGNALLED.load(Ordering::SeqCst) {
+                thread::sleep(Duration::from_millis(50));
+            }
+            stop.store(true, Ordering::SeqCst);
+        });
+    }
+    serve(listener, &config, stop)
+}
 
+/// The serving core, with no signal handling, so tests can run a host on a
+/// thread. Unlinks the socket and stops accepting before it stops the children,
+/// so a client arriving mid-shutdown fails fast instead of reaching a host that
+/// is about to disappear.
+pub fn serve(
+    listener: UnixListener,
+    config: &ServerConfig,
+    stop: Arc<AtomicBool>,
+) -> std::io::Result<()> {
+    listener.set_nonblocking(true)?;
     let host = Arc::new(Host {
         sessions: Mutex::new(HashMap::new()),
         next_id: AtomicU32::new(1),
         connections: AtomicUsize::new(0),
-        stop: AtomicBool::new(false),
+        stop,
     });
     let mut quiet_since = Instant::now();
     // SAFETY: geteuid has no preconditions.
     let my_uid = unsafe { libc::geteuid() };
 
     loop {
-        if SIGNALLED.load(Ordering::SeqCst) || host.stop.load(Ordering::SeqCst) {
+        if host.stop.load(Ordering::SeqCst) {
             break;
         }
         match listener.accept() {
@@ -204,12 +251,18 @@ pub fn run(config: ServerConfig) -> std::io::Result<()> {
             }
             Err(_) => thread::sleep(Duration::from_millis(100)),
         }
-        let live = host
-            .sessions
-            .lock()
-            .unwrap()
-            .values()
-            .any(|s| s.exit_code().is_none());
+        let live = {
+            let mut sessions = host.sessions.lock().unwrap();
+            // Drop exited sessions nobody reaped, so each cannot hold a ring
+            // for the host's whole lifetime.
+            sessions.retain(|_, s| {
+                s.exited_at
+                    .lock()
+                    .unwrap()
+                    .is_none_or(|at| at.elapsed() < config.exited_ttl)
+            });
+            sessions.values().any(|s| s.exit_code().is_none())
+        };
         if live || host.connections.load(Ordering::SeqCst) > 0 {
             quiet_since = Instant::now();
         } else if quiet_since.elapsed() >= config.idle_exit {
@@ -217,8 +270,9 @@ pub fn run(config: ServerConfig) -> std::io::Result<()> {
         }
     }
 
-    shutdown_sessions(&host);
+    drop(listener);
     let _ = std::fs::remove_file(&config.socket);
+    shutdown_sessions(&host);
     Ok(())
 }
 
@@ -322,6 +376,13 @@ fn handle(host: &Arc<Host>, mut stream: UnixStream) -> std::io::Result<()> {
                     thread::sleep(TERM_GRACE);
                     s.signal_group(libc::SIGKILL);
                 });
+                Ok(Response::ok())
+            });
+            write_line(&mut stream, &reply)
+        }
+        Request::SetMeta { id, meta } => {
+            let reply = with_session(host, id, |s| {
+                *s.meta.lock().unwrap() = meta;
                 Ok(Response::ok())
             });
             write_line(&mut stream, &reply)
@@ -433,7 +494,7 @@ fn spawn(host: &Arc<Host>, spec: SpawnSpec) -> Result<Arc<Session>, String> {
     let session = Arc::new(Session {
         id: host.next_id.fetch_add(1, Ordering::SeqCst),
         pid,
-        meta: spec.meta,
+        meta: Mutex::new(spec.meta),
         master: Mutex::new(pair.master),
         writer: Mutex::new(writer),
         size: Mutex::new((size.cols, size.rows)),
@@ -446,6 +507,7 @@ fn spawn(host: &Arc<Host>, spec: SpawnSpec) -> Result<Arc<Session>, String> {
         }),
         cv: Condvar::new(),
         exited: Mutex::new(None),
+        exited_at: Mutex::new(None),
     });
 
     // Reaper: records the exit status. Only after this may the pid be reused.
@@ -457,6 +519,7 @@ fn spawn(host: &Arc<Host>, spec: SpawnSpec) -> Result<Arc<Session>, String> {
                 Err(_) => -1,
             };
             *session.exited.lock().unwrap() = Some(code);
+            *session.exited_at.lock().unwrap() = Some(Instant::now());
             session.cv.notify_all();
         });
     }

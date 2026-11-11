@@ -16,6 +16,7 @@ use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 const CALL_TIMEOUT: Duration = Duration::from_secs(5);
+const DEFAULT_IDLE_SECS: u64 = 60;
 
 fn other(message: impl Into<String>) -> std::io::Error {
     std::io::Error::other(message.into())
@@ -43,6 +44,9 @@ fn read_line(stream: &mut UnixStream) -> std::io::Result<String> {
 #[derive(Clone, Debug)]
 pub struct HostClient {
     socket: PathBuf,
+    /// When set, a call that cannot connect starts the host again and retries
+    /// once, covering the window where an idle host was exiting as we arrived.
+    host_exe: Option<PathBuf>,
 }
 
 pub struct Attached {
@@ -58,7 +62,13 @@ impl HostClient {
     pub fn new(socket: impl Into<PathBuf>) -> Self {
         HostClient {
             socket: socket.into(),
+            host_exe: None,
         }
+    }
+
+    pub fn with_host_exe(mut self, host_exe: impl Into<PathBuf>) -> Self {
+        self.host_exe = Some(host_exe.into());
+        self
     }
 
     pub fn socket(&self) -> &Path {
@@ -73,7 +83,16 @@ impl HostClient {
     }
 
     fn call(&self, request: &Request) -> std::io::Result<Response> {
-        let mut stream = self.connect()?;
+        let mut stream = match self.connect() {
+            Ok(stream) => stream,
+            Err(first) => match &self.host_exe {
+                Some(exe) => {
+                    HostClient::ensure_running(exe, &self.socket, DEFAULT_IDLE_SECS)?;
+                    self.connect().map_err(|_| first)?
+                }
+                None => return Err(first),
+            },
+        };
         let mut line = serde_json::to_vec(request).map_err(other_err)?;
         line.push(b'\n');
         stream.write_all(&line)?;
@@ -111,6 +130,10 @@ impl HostClient {
 
     pub fn reap(&self, id: u32) -> std::io::Result<()> {
         self.call(&Request::Reap { id }).map(|_| ())
+    }
+
+    pub fn set_meta(&self, id: u32, meta: Option<String>) -> std::io::Result<()> {
+        self.call(&Request::SetMeta { id, meta }).map(|_| ())
     }
 
     pub fn pgrp(&self, id: u32) -> std::io::Result<Option<i32>> {
@@ -158,7 +181,17 @@ impl HostClient {
         socket: &Path,
         idle_secs: u64,
     ) -> std::io::Result<HostClient> {
-        let client = HostClient::new(socket);
+        Self::ensure_running_with(host_exe, socket, idle_secs, &[])
+    }
+
+    /// As `ensure_running`, passing extra arguments to a host it has to start.
+    pub fn ensure_running_with(
+        host_exe: &Path,
+        socket: &Path,
+        idle_secs: u64,
+        extra_args: &[&str],
+    ) -> std::io::Result<HostClient> {
+        let client = HostClient::new(socket).with_host_exe(host_exe);
         if client.hello().is_ok() {
             return Ok(client);
         }
@@ -185,6 +218,7 @@ impl HostClient {
             .arg(socket)
             .arg("--idle-secs")
             .arg(idle_secs.to_string())
+            .args(extra_args)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null());
@@ -299,10 +333,16 @@ impl ChildKiller for HostKiller {
     }
 }
 
+/// How many unreachable-host answers in a row mean the host (and so the child)
+/// is gone.
+const HOST_GONE_AFTER: u32 = 3;
+
 #[derive(Debug)]
 pub struct HostChild {
     killer: HostKiller,
     pid: u32,
+    done: Option<ExitStatus>,
+    unreachable: u32,
 }
 
 impl HostChild {
@@ -310,6 +350,8 @@ impl HostChild {
         HostChild {
             killer: HostKiller { client, id },
             pid,
+            done: None,
+            unreachable: 0,
         }
     }
 }
@@ -325,14 +367,39 @@ impl ChildKiller for HostChild {
 }
 
 impl Child for HostChild {
+    /// Gone from the host's list, or listed under a different pid (a restarted
+    /// host numbers sessions from 1 again), counts as exited, as does a host
+    /// that stays unreachable. Without that `wait` could spin forever.
     fn try_wait(&mut self) -> std::io::Result<Option<ExitStatus>> {
+        if let Some(status) = &self.done {
+            return Ok(Some(status.clone()));
+        }
         let id = self.killer.id;
-        let sessions = self.killer.client.list()?;
-        Ok(sessions
-            .into_iter()
-            .find(|s| s.id == id)
-            .and_then(|s| s.exited)
-            .map(|code| ExitStatus::with_exit_code(code.max(0) as u32)))
+        let status = match self.killer.client.list() {
+            Ok(sessions) => {
+                self.unreachable = 0;
+                match sessions
+                    .into_iter()
+                    .find(|s| s.id == id && s.pid == Some(self.pid))
+                {
+                    Some(s) => match s.exited {
+                        Some(code) => {
+                            // Seen: free the host's ring.
+                            let _ = self.killer.client.reap(id);
+                            Some(ExitStatus::with_exit_code(code.max(0) as u32))
+                        }
+                        None => None,
+                    },
+                    None => Some(ExitStatus::with_exit_code(1)),
+                }
+            }
+            Err(_) => {
+                self.unreachable += 1;
+                (self.unreachable >= HOST_GONE_AFTER).then(|| ExitStatus::with_exit_code(1))
+            }
+        };
+        self.done = status.clone();
+        Ok(status)
     }
 
     fn wait(&mut self) -> std::io::Result<ExitStatus> {

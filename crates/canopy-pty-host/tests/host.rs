@@ -327,3 +327,54 @@ fn a_host_with_a_live_session_does_not_idle_out() {
     assert!(alive(pid), "idle exit killed a live session");
     assert!(h.client.hello().is_ok());
 }
+
+#[test]
+fn exited_sessions_are_dropped_after_the_ttl() {
+    let dir = std::env::temp_dir().join(format!("cph{}ttl", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let socket = dir.join("h.sock");
+    let client =
+        HostClient::ensure_running_with(&host_exe(), &socket, 60, &["--exited-ttl-secs", "1"])
+            .unwrap();
+    client.spawn(spec("exit 0")).unwrap();
+    assert!(wait_until(Duration::from_secs(5), || {
+        client.list().unwrap().is_empty()
+    }));
+    let _ = client.shutdown();
+    std::thread::sleep(Duration::from_millis(200));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn host_child_wait_returns_when_the_session_is_gone() {
+    use portable_pty::Child;
+    let h = Harness::start("l", 60);
+    let (id, pid) = h.client.spawn(spec("sleep 300")).unwrap();
+    let mut child = canopy_pty_host::client::HostChild::new(h.client.clone(), id, pid);
+    assert!(child.try_wait().unwrap().is_none());
+    h.client.kill(id).unwrap();
+    let status = child.wait().unwrap(); // must not hang
+    assert!(!status.success() || status.exit_code() == 0);
+    // A second wait answers from the cached status, even after the reap.
+    assert!(child.try_wait().unwrap().is_some());
+}
+
+#[test]
+fn set_meta_updates_what_a_later_list_reports() {
+    let h = Harness::start("m", 60);
+    let (id, _) = h.client.spawn(spec("sleep 300")).unwrap();
+    h.client.set_meta(id, Some("renamed".into())).unwrap();
+    assert_eq!(h.client.list().unwrap()[0].meta.as_deref(), Some("renamed"));
+}
+
+#[test]
+fn a_call_after_the_host_exits_restarts_it_once() {
+    let h = Harness::start("n", 60);
+    let client = h.client.clone();
+    let before = client.hello().unwrap().host_pid.unwrap();
+    // SAFETY: terminating the host this test started.
+    unsafe { libc::kill(before as libc::pid_t, libc::SIGTERM) };
+    assert!(wait_until(Duration::from_secs(10), || !alive(before)));
+    let after = client.hello().unwrap().host_pid.unwrap();
+    assert_ne!(before, after, "the client did not start a replacement host");
+}

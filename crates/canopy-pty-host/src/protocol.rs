@@ -15,6 +15,7 @@ pub enum Request {
     List,
     Resize { id: u32, cols: u16, rows: u16 },
     Kill { id: u32 },
+    SetMeta { id: u32, meta: Option<String> },
     Pgrp { id: u32 },
     RawMode { id: u32 },
     Reap { id: u32 },
@@ -26,6 +27,7 @@ pub enum Request {
 /// be much older than the app, and the environment carries per-terminal tokens,
 /// so it must never be logged or persisted.
 #[derive(Serialize, Deserialize, Debug, Clone, Default)]
+#[serde(default)]
 pub struct SpawnSpec {
     pub argv: Vec<String>,
     pub cwd: Option<String>,
@@ -37,6 +39,7 @@ pub struct SpawnSpec {
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, Default)]
+#[serde(default)]
 pub struct SessionInfo {
     pub id: u32,
     pub pid: Option<u32>,
@@ -122,6 +125,18 @@ mod tests {
             }
             other => panic!("wrong variant {other:?}"),
         }
+    }
+
+    #[test]
+    fn older_peers_that_omit_fields_still_parse() {
+        // A host frozen at an older release must accept a newer app's spawn, and
+        // the reverse, so every struct field is optional on the wire.
+        let spec: SpawnSpec = serde_json::from_str(r#"{"argv":["sh"]}"#).unwrap();
+        assert_eq!(spec.argv, vec!["sh".to_string()]);
+        assert!(spec.env.is_empty() && spec.cwd.is_none());
+        let info: SessionInfo = serde_json::from_str(r#"{"id":3}"#).unwrap();
+        assert_eq!(info.id, 3);
+        assert!(info.exited.is_none());
     }
 
     #[test]
