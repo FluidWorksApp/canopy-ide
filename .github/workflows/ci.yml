@@ -107,19 +107,30 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt
+      # Every crates/canopy-term-* crate is its own workspace root with its own
+      # lock. Found by glob, so a new crate needs no edit here. The CLI crate
+      # has its own job.
+      - name: List terminal crates
+        id: crates
+        shell: bash
+        run: |
+          list=$(ls -d crates/canopy-term-*/ | sed 's#/$##' | grep -v '^crates/canopy-term-cli$' | sort)
+          echo "Crates: $list"
+          { echo 'dirs<<EOF'; echo "$list"; echo 'EOF'; } >> "$GITHUB_OUTPUT"
       - uses: swatinem/rust-cache@v2
         with:
-          workspaces: |
-            crates/canopy-term-core
-            crates/canopy-term-render
-            crates/canopy-term-net
+          workspaces: ${{ steps.crates.outputs.dirs }}
           key: term-${{ matrix.os }}
       - name: Test and format each crate
         shell: bash
+        env:
+          DIRS: ${{ steps.crates.outputs.dirs }}
         run: |
-          for crate in canopy-term-core canopy-term-render canopy-term-net; do
-            cargo test --locked --manifest-path "crates/$crate/Cargo.toml"
-            cargo fmt --manifest-path "crates/$crate/Cargo.toml" --check
+          for dir in $DIRS; do
+            echo "::group::$dir"
+            cargo test --locked --manifest-path "$dir/Cargo.toml"
+            cargo fmt --manifest-path "$dir/Cargo.toml" --check
+            echo "::endgroup::"
           done
 
   rust:
