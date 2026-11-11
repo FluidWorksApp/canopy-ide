@@ -1,0 +1,112 @@
+# THROWAWAY SPIKE (do not merge): libghostty-vt vs the current terminal engine.
+# Lives outside the `crates/canopy-term-*` glob that the `Terminal crates` job
+# builds, because libghostty-vt needs Zig and that job has none.
+name: spike-ghostty
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - 'crates/spike-ghostty-vt/**'
+      - '.github/workflows/spike-ghostty.yml'
+
+permissions:
+  contents: read
+
+env:
+  # libghostty-vt-sys 0.2.2 pins ghostty a887df42; its build.zig.zon says
+  # minimum_zig_version = 0.15.2 and PACKAGING-LIBGHOSTTY.md requires the same
+  # major.minor. Official ziglang.org release, checksum from ziglang.org/download/index.json.
+  ZIG_VERSION: 0.15.2
+
+jobs:
+  spike:
+    name: spike (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            zig_target: x86_64-linux
+            zig_sha256: 02aa270f183da276e5b5920b1dac44a63f1a49e55050ebde3aecc9eb82f93239
+          - os: macos-15
+            zig_target: aarch64-macos
+            zig_sha256: 3cc2bab367e185cdfb27501c4b30b1b0653c28d9f73df8dc91488e66ece5fa6b
+    env:
+      MANIFEST: crates/spike-ghostty-vt/Cargo.toml
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Install Zig ${{ env.ZIG_VERSION }} (official release, checksum verified)
+        run: |
+          set -euo pipefail
+          f="zig-${{ matrix.zig_target }}-${ZIG_VERSION}.tar.xz"
+          curl -fsSL -o "$RUNNER_TEMP/$f" "https://ziglang.org/download/${ZIG_VERSION}/$f"
+          echo "${{ matrix.zig_sha256 }}  $RUNNER_TEMP/$f" | shasum -a 256 -c -
+          mkdir -p "$RUNNER_TEMP/zig"
+          tar -xJf "$RUNNER_TEMP/$f" -C "$RUNNER_TEMP/zig" --strip-components=1
+          echo "$RUNNER_TEMP/zig" >> "$GITHUB_PATH"
+
+      - name: Toolchain versions
+        run: |
+          echo "RESULT zig $(zig version)"
+          echo "RESULT $(rustc --version)"
+          echo "RESULT runner os=$(uname -s) arch=$(uname -m)"
+
+      - name: Build current engine bench (timed)
+        run: |
+          s=$(date +%s)
+          cargo build --release --locked --manifest-path "$MANIFEST" --features current --bin current
+          echo "RESULT build time, current engine bench (cold, no Zig): $(( $(date +%s) - s )) s"
+
+      - name: Build libghostty-vt bench (timed, includes git clone of ghostty, Zig fetch and zig build)
+        run: |
+          s=$(date +%s)
+          cargo build --release --locked --manifest-path "$MANIFEST" --features ghostty --bin ghostty
+          echo "RESULT build time, libghostty-vt bench (cold, includes Zig): $(( $(date +%s) - s )) s"
+
+      - name: Binding ergonomics counts
+        run: |
+          reg="$HOME/.cargo/registry/src"
+          vt=$(ls -d "$reg"/*/libghostty-vt-0.2.2)
+          sys=$(ls -d "$reg"/*/libghostty-vt-sys-0.2.2)
+          echo "RESULT unsafe blocks in our spike code (safe wrapper only): $(grep -rho 'unsafe {' crates/spike-ghostty-vt/src | wc -l | tr -d ' ')"
+          echo "RESULT unsafe blocks inside libghostty-vt 0.2.2 wrapper (upstream-owned): $(grep -rho 'unsafe {' "$vt/src" | wc -l | tr -d ' ')"
+          echo "RESULT unsafe blocks inside libghostty-vt-sys 0.2.2: $(grep -rho 'unsafe {' "$sys/src" "$sys/build.rs" | wc -l | tr -d ' ')"
+          echo "RESULT unsafe blocks in canopy-term-core/src (current engine wrapper): $(grep -rho 'unsafe {' crates/canopy-term-core/src | wc -l | tr -d ' ')"
+          echo "RESULT Send/Sync: $(grep -n 'not\*\* thread-safe\|!Send\|!Sync' "$vt/src/lib.rs" | head -3 | tr '\n' ' ')"
+          grep -n 'GHOSTTY_COMMIT\|git clone\|GHOSTTY_ZIG_SYSTEM_DIR' "$sys/build.rs" | head -8
+          ls -la target 2>/dev/null || true
+          ls -la crates/spike-ghostty-vt/target/release/ghostty crates/spike-ghostty-vt/target/release/current
+
+      - name: Conformance, libghostty-vt
+        if: always()
+        run: crates/spike-ghostty-vt/target/release/ghostty conf
+
+      - name: Throughput, libghostty-vt
+        if: always()
+        run: crates/spike-ghostty-vt/target/release/ghostty perf
+
+      - name: Throughput, current engine
+        if: always()
+        run: crates/spike-ghostty-vt/target/release/current perf
+
+      - name: Peak RSS, 10k lines scrollback at 80 columns
+        if: always()
+        shell: bash
+        run: |
+          B=crates/spike-ghostty-vt/target/release
+          for eng in ghostty current; do
+            for m in rss-idle rss-fill; do
+              if [ "$(uname -s)" = Darwin ]; then
+                /usr/bin/time -l "$B/$eng" "$m" 2> "$RUNNER_TEMP/t.txt"
+                cat "$RUNNER_TEMP/t.txt"
+                echo "RESULT $eng $m peak RSS (time -l): $(grep 'maximum resident set size' "$RUNNER_TEMP/t.txt" | awk '{print $1/1024}') KiB"
+              else
+                "$B/$eng" "$m"
+              fi
+            done
+          done

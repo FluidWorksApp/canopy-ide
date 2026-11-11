@@ -1,0 +1,34 @@
+[package]
+name = "spike-ghostty-vt"
+version = "0.0.0"
+description = "THROWAWAY spike: libghostty-vt vs the current terminal engine. Never merge."
+license = "MIT"
+edition = "2021"
+publish = false
+
+# Its own workspace root with its own lock; outside the `crates/canopy-term-*`
+# glob that the `Terminal crates` CI job builds (that job has no Zig).
+[workspace]
+
+[features]
+default = []
+ghostty = ["dep:libghostty-vt"]
+current = ["dep:canopy-term-core"]
+
+[dependencies]
+# Pinned exactly: pre-1.0, API not stable. Needs Rust 1.90 (edition 2024) and Zig.
+libghostty-vt = { version = "=0.2.2", optional = true }
+canopy-term-core = { path = "../canopy-term-core", features = ["screen"], optional = true }
+
+[[bin]]
+name = "ghostty"
+path = "src/bin/ghostty.rs"
+required-features = ["ghostty"]
+
+[[bin]]
+name = "current"
+path = "src/bin/current.rs"
+required-features = ["current"]
+
+[profile.release]
+opt-level = 3
