@@ -1127,7 +1127,7 @@ mod tests {
             r.uploads,
             vec![InstanceRange {
                 start: 0,
-                len: 2 * 2 * INSTANCES_PER_COL
+                len: 2 * 2 * INSTANCES_PER_COL + OVERLAY_INSTANCES
             }]
         );
     }
