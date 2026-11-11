@@ -719,6 +719,14 @@ mod tests {
         // Same size, new content, new file: the key differs, so the hash does.
         std::fs::remove_file(&bundled).unwrap();
         std::fs::write(&bundled, b"two").unwrap();
+        // A new file can get the freed inode and the same coarse mtime on a
+        // fast filesystem, so make the "new file" differ in time for certain.
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(&bundled)
+            .unwrap()
+            .set_modified(std::time::SystemTime::now() + std::time::Duration::from_secs(5))
+            .unwrap();
         let c = install(&bundled, &bin, "1.0.0").unwrap();
         assert_ne!(a.digest, c.digest);
         // A damaged cache is a miss, not an error.
