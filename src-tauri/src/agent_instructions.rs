@@ -83,6 +83,10 @@ IDE the user is watching, and their results stay inspectable:\n\
 - Starting any task -> call canopy_name_task before substantive work with a \
   short `title` and one-line `description`; call it again whenever your focus \
   materially changes so the tab and live status say what you are doing\n\
+- Keeping a task list (no TodoWrite/TaskCreate of your own) -> canopy_tasks \
+  with the WHOLE list each time: every request the person has made that is not \
+  finished, each pending, in_progress or completed; add a new request the \
+  moment it arrives\n\
 - Mesh duty -> answer lead pings promptly, and send agent-to-agent coordination \
   through canopy_message_agent or \
   canopy_mesh_send rather than leaving it only in terminal prose\n\
