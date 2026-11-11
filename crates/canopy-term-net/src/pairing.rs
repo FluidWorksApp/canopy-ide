@@ -257,12 +257,15 @@ mod tests {
     const OTHER: &str = "3333333333333333333333333333333333333333333333333333333333333333";
 
     /// Deterministic, and different on every call.
-    struct Counter(u8);
+    struct Counter(u64);
     impl Entropy for Counter {
         fn fill(&mut self, buf: &mut [u8]) {
+            // xorshift64: full period, so no two draws repeat.
             for b in buf {
-                self.0 = self.0.wrapping_mul(31).wrapping_add(7);
-                *b = self.0;
+                self.0 ^= self.0 << 13;
+                self.0 ^= self.0 >> 7;
+                self.0 ^= self.0 << 17;
+                *b = (self.0 >> 32) as u8;
             }
         }
     }
