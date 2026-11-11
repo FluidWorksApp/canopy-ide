@@ -841,6 +841,8 @@ pub fn run() {
             pty::launch_id,
             pty::app_quit,
             pty::pty_host_enabled,
+            pty::pty_stop_all_preview,
+            pty::pty_host_notice,
             android::android_sdk_status,
             android::android_devices,
             android::android_avds,

@@ -2,8 +2,12 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
 import type { AgentHint } from "../ipc";
 import {
+  countStopTargets,
   countTerminals,
+  hostNoticeMessages,
+  lingerText,
   startQuitStopAll,
+  type StopTarget,
   stopAllMeta,
   stopAllTitle,
   type QuitStopAllAsk,
@@ -44,11 +48,16 @@ describe("counting terminals", () => {
 });
 
 describe("Quit and Stop All", () => {
-  const run = (stats: { agent_hint: AgentHint | null }[], opts: { hostOn?: boolean; quit?: () => Promise<unknown> } = {}) => {
+  const run = (
+    stats: { agent_hint: AgentHint | null }[],
+    opts: { hostOn?: boolean; quit?: () => Promise<unknown>; foreign?: StopTarget[]; linger?: number } = {},
+  ) => {
     const quit = vi.fn(opts.quit ?? (async () => {}));
     const ask = vi.fn<(a: QuitStopAllAsk) => void>();
     const done = startQuitStopAll({
       stats: async () => stats,
+      foreign: async () => opts.foreign ?? [],
+      lingerSecs: async () => opts.linger ?? 7200,
       hostOn: async () => opts.hostOn ?? true,
       quit,
       ask,
@@ -67,7 +76,12 @@ describe("Quit and Stop All", () => {
     it(`asks first when agents are running, and does not quit yet (host ${hostOn ? "on" : "off"})`, async () => {
       const { quit, ask, done } = run([agent("claude"), agent("codex"), shell], { hostOn });
       await done;
-      expect(ask).toHaveBeenCalledWith({ counts: { agents: 2, shells: 1 }, hostOn });
+      expect(ask).toHaveBeenCalledWith({
+        counts: { agents: 2, shells: 1 },
+        hostOn,
+        background: 0,
+        lingerSecs: 7200,
+      });
       expect(quit).not.toHaveBeenCalled();
     });
   }
@@ -88,15 +102,82 @@ describe("Quit and Stop All", () => {
     expect(ask).toHaveBeenCalledWith({
       counts: { agents: 0, shells: 1 },
       hostOn: true,
+      background: 0,
+      lingerSecs: 7200,
       error: "Could not reach the terminal host: timed out",
     });
+  });
+
+  const claude: StopTarget = { command: "claude --resume", unreadable: false };
+  const zsh: StopTarget = { command: null, unreadable: false };
+  const garbled: StopTarget = { command: null, unreadable: true };
+
+  it("asks first when only shells are open but Stop All would also kill an agent left in the host", async () => {
+    const { quit, ask, done } = run([shell], { foreign: [claude, zsh] });
+    await done;
+    expect(quit).not.toHaveBeenCalled();
+    expect(ask).toHaveBeenCalledWith({
+      counts: { agents: 1, shells: 2 },
+      hostOn: true,
+      background: 2,
+      lingerSecs: 7200,
+    });
+  });
+
+  it("asks first for a session it cannot identify, which may be an agent", async () => {
+    const { quit, ask, done } = run([shell], { foreign: [garbled] });
+    await done;
+    expect(quit).not.toHaveBeenCalled();
+    expect(ask.mock.calls[0][0].counts).toEqual({ agents: 0, shells: 1, unknown: 1 });
+  });
+
+  it("still quits at once when what is left in the host is only shells", async () => {
+    const { quit, ask, done } = run([shell], { foreign: [zsh] });
+    await done;
+    expect(quit).toHaveBeenCalledWith(true);
+    expect(ask).not.toHaveBeenCalled();
+  });
+
+  it("goes on to the stop, which reports the failure, when the host's sessions cannot be read", async () => {
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    const quit = vi.fn(async () => {});
+    const ask = vi.fn();
+    await startQuitStopAll({
+      stats: async () => [shell],
+      foreign: () => Promise.reject("timed out"),
+      lingerSecs: async () => 0,
+      hostOn: async () => true,
+      quit,
+      ask,
+    });
+    expect(quit).toHaveBeenCalledWith(true);
+  });
+
+  it("counts host sessions the way tabs are counted", () => {
+    expect(countStopTargets([claude, zsh, garbled, claude])).toEqual({ agents: 2, shells: 1, unknown: 1 });
+    expect(stopAllMeta({ agents: 1, shells: 2, unknown: 1 })).toBe("1 agent · 2 shells · 1 unidentified");
+    expect(stopAllMeta({ agents: 0, shells: 0, unknown: 1 })).toBe("1 unidentified");
+  });
+
+  it("spells the linger and the host notices", () => {
+    expect(lingerText(7200)).toBe("2 hours");
+    expect(lingerText(3600)).toBe("1 hour");
+    expect(lingerText(5400)).toBe("90 minutes");
+    expect(hostNoticeMessages({ fell_back: false, left_behind: [], linger_secs: 7200 })).toEqual([]);
+    const both = hostNoticeMessages({
+      fell_back: true,
+      left_behind: [{ terminal: 3, reason: "x" }],
+      linger_secs: 7200,
+    });
+    expect(both.map((m) => m[2])).toEqual(["pty-host-fell-back", "pty-host-left-behind"]);
+    expect(both[0][1]).toContain("end when you quit");
   });
 
   it("does nothing when the terminals cannot be read, rather than stop blind", async () => {
     vi.spyOn(console, "warn").mockImplementation(() => {});
     const quit = vi.fn();
     const ask = vi.fn();
-    await startQuitStopAll({ stats: () => Promise.reject(new Error("gone")), hostOn: async () => true, quit, ask });
+    await startQuitStopAll({ stats: () => Promise.reject(new Error("gone")), foreign: async () => [], lingerSecs: async () => 0, hostOn: async () => true, quit, ask });
     expect(quit).not.toHaveBeenCalled();
     expect(ask).not.toHaveBeenCalled();
   });
@@ -121,6 +202,17 @@ describe("the dialog", () => {
     expect(screen.getByRole("dialog", { name: "Stop 3 running agents?" })).toBeTruthy();
     expect(screen.getByText("3 agents · 2 shells")).toBeTruthy();
     expect(screen.getByText("Their work stops mid-turn.")).toBeTruthy();
+  });
+
+  it("says Quit only keeps terminals for the linger, and that some are from an earlier launch", () => {
+    open({ lingerSecs: 7200, background: 2 });
+    expect(screen.getByText("Quit only keeps terminals running for 2 hours.")).toBeTruthy();
+    expect(screen.getByText(/2 of these are still running in the background/)).toBeTruthy();
+  });
+
+  it("does not mention the linger when the host is off", () => {
+    open({ hostOn: false, lingerSecs: 7200 });
+    expect(screen.queryByText(/keeps terminals running/)).toBeNull();
   });
 
   it("Stop all stops everything", () => {
