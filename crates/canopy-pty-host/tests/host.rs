@@ -340,6 +340,32 @@ fn stalled_client_blocks_the_child_instead_of_growing_memory() {
     );
 }
 
+#[test]
+fn attaching_to_a_full_ring_while_the_child_floods_keeps_the_session_usable() {
+    // Regression: output read just as a client attached to a full ring trimmed
+    // bytes the client had not been sent, and the sender then panicked holding
+    // the ring lock; every later request for the session lost its connection.
+    let h = Harness::start("fr", 60);
+    let flood = pick(
+        "yes",
+        "$pad = 'x' * 100; $i = 0; while ($true) { [Console]::Out.WriteLine(\"$i $pad\"); $i++ }",
+    );
+    let (id, _) = h.client.spawn(spec(flood)).unwrap();
+    assert!(
+        wait_until(t(10), || { h.client.list().unwrap()[0].start > 0 }),
+        "ring never filled"
+    );
+    for _ in 0..40 {
+        let attached = h.client.attach(id, 0).unwrap();
+        let listed = h.client.list().unwrap();
+        assert_eq!(listed.len(), 1);
+        drop(attached);
+    }
+    let mut last = h.client.attach(id, 0).unwrap();
+    let out = read_until(&mut last, t(5), |b| b.len() > 64 * 1024);
+    assert!(out.len() > 64 * 1024, "no output after the attaches");
+}
+
 #[cfg(unix)]
 #[test]
 fn unattached_output_drains_into_a_bounded_ring_and_reports_a_gap() {
@@ -979,4 +1005,49 @@ fn read_ring_past_the_end_returns_nothing() {
     assert_eq!(reply.start, reply.end);
     assert_eq!(reply.len, 0);
     assert!(h.client.read_ring(id + 1000, 0, None).is_err());
+}
+
+#[test]
+fn a_replaced_client_sees_eof_and_its_typing_no_longer_reaches_the_child() {
+    let h = Harness::start("rp", 60);
+    let (id, _) = h.client.spawn(spec(pick("cat", ECHO_PS))).unwrap();
+    let mut first = h.client.attach(id, 0).unwrap();
+    // Set before the host closes it: macOS refuses setsockopt (EINVAL) on a
+    // socket whose peer has already gone.
+    first.stream.set_read_timeout(Some(t(5))).unwrap();
+    let mut second = h.client.attach(id, 0).unwrap();
+
+    // The first connection is closed by the host, not left frozen.
+    let mut buf = [0u8; 256];
+    let mut saw_eof = false;
+    let deadline = Instant::now() + t(5);
+    while Instant::now() < deadline {
+        match first.stream.read(&mut buf) {
+            Ok(0) => {
+                saw_eof = true;
+                break;
+            }
+            Ok(_) => {}
+            Err(_) => break,
+        }
+    }
+    assert!(saw_eof, "replaced client was not disconnected");
+
+    // Whatever the replaced client still tries to type is not delivered.
+    let _ = first
+        .stream
+        .write_all(pick("from-the-old-client\n", "from-the-old-client\r").as_bytes());
+    second
+        .stream
+        .write_all(pick("from-the-new-client\n", "from-the-new-client\r").as_bytes())
+        .unwrap();
+    // On Windows the child's own answer, not conhost's echo of the typing.
+    let expect = pick("from-the-new-client", "got-FROM-THE-NEW-CLIENT");
+    let out = read_until(&mut second, t(5), |b| contains(b, expect));
+    assert!(contains(&out, expect));
+    assert!(
+        !contains(&out, "from-the-old-client") && !contains(&out, "FROM-THE-OLD-CLIENT"),
+        "a replaced client's input reached the child"
+    );
+    assert_eq!(h.client.list().unwrap()[0].attached, Some(true));
 }

@@ -74,6 +74,10 @@ struct Ring {
     attached: Option<u64>,
     /// Bumped per attach so a replaced connection stops quietly.
     generation: u64,
+    /// The attached client's connection, so a newer attach can close it: a
+    /// replaced client then sees EOF instead of a frozen screen whose typing
+    /// still reaches the child.
+    conn: Option<Conn>,
     eof: bool,
 }
 
@@ -743,6 +747,7 @@ fn spawn(host: &Arc<Host>, spec: SpawnSpec) -> Result<(Arc<Session>, bool), Stri
             base: 0,
             attached: None,
             generation: 0,
+            conn: None,
             eof: false,
         }),
         cv: Condvar::new(),
@@ -793,12 +798,7 @@ fn spawn(host: &Arc<Host>, spec: SpawnSpec) -> Result<(Arc<Session>, bool), Stri
                     Ok(n) => n,
                 };
                 let mut ring = session.ring.lock().unwrap();
-                ring.bytes.extend(&buf[..n]);
-                let over = ring.bytes.len().saturating_sub(RING_CAP);
-                if over > 0 {
-                    ring.bytes.drain(..over);
-                    ring.base += over as u64;
-                }
+                push_output(&mut ring, &buf[..n]);
                 session.cv.notify_all();
             }
             let mut ring = session.ring.lock().unwrap();
@@ -835,6 +835,26 @@ fn start_child(spec: &SpawnSpec, size: PtySize) -> Result<Started, String> {
     let child = pair.slave.spawn_command(cmd).map_err(|e| e.to_string())?;
     drop(pair.slave);
     Ok((pair.master, child))
+}
+
+/// Append child output, trimming the oldest bytes past `RING_CAP` but never
+/// bytes the attached client has not been sent yet. The reader checks the
+/// high-water mark only before it reads, so a read already in flight when a
+/// client attaches to a ring that is full lands on top of unsent bytes; trimming
+/// them would put `base` past the sender's position, and `ring_slice` would then
+/// underflow and panic while holding the ring lock (poisoning it, so every later
+/// request for that session dropped its connection). The ring may exceed
+/// `RING_CAP` by at most one read; the reader then pauses at the high-water mark.
+fn push_output(ring: &mut Ring, data: &[u8]) {
+    ring.bytes.extend(data);
+    let mut over = ring.bytes.len().saturating_sub(RING_CAP);
+    if let Some(sent) = ring.attached {
+        over = over.min(sent.saturating_sub(ring.base) as usize);
+    }
+    if over > 0 {
+        ring.bytes.drain(..over);
+        ring.base += over as u64;
+    }
 }
 
 /// Copy ring bytes `[start, start + take)`; the caller holds the lock.
@@ -896,6 +916,7 @@ fn attach(
     after: u64,
     exclusive: bool,
 ) -> std::io::Result<()> {
+    let handle = stream.try_clone()?;
     let (start, generation, cols, rows) = {
         let mut ring = session.ring.lock().unwrap();
         if exclusive && ring.attached.is_some() {
@@ -913,6 +934,9 @@ fn attach(
         let start = after.max(ring.base).min(end);
         ring.generation += 1;
         ring.attached = Some(start);
+        if let Some(old) = ring.conn.replace(handle) {
+            let _ = old.shutdown(std::net::Shutdown::Both);
+        }
         // Under the ring lock and after the bump: an older connection's input
         // thread stamps `detached_at` only while it still owns the generation,
         // so clearing earlier would let that stamp land after ours and start a
@@ -963,6 +987,7 @@ fn attach(
             let mut ring = session.ring.lock().unwrap();
             if ring.generation == generation {
                 ring.attached = None;
+                ring.conn = None;
                 *session.detached_at.lock().unwrap() = Some(Instant::now());
             }
             session.cv.notify_all();
@@ -984,7 +1009,10 @@ fn attach(
                     break ring_slice(&ring, pos, take);
                 }
                 if ring.eof {
-                    ring.attached = None;
+                    if ring.generation == generation {
+                        ring.attached = None;
+                        ring.conn = None;
+                    }
                     session.cv.notify_all();
                     drop(ring);
                     let _ = stream.shutdown(std::net::Shutdown::Write);
@@ -1001,6 +1029,7 @@ fn attach(
             let mut ring = session.ring.lock().unwrap();
             if ring.generation == generation {
                 ring.attached = None;
+                ring.conn = None;
                 *session.detached_at.lock().unwrap() = Some(Instant::now());
             }
             session.cv.notify_all();
@@ -1018,6 +1047,43 @@ fn attach(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn ring_with(len: usize, attached: Option<u64>) -> Ring {
+        Ring {
+            bytes: std::iter::repeat_n(b'x', len).collect(),
+            base: 0,
+            attached,
+            generation: 1,
+            conn: None,
+            eof: false,
+        }
+    }
+
+    #[test]
+    fn output_trims_the_oldest_bytes_when_nobody_is_attached() {
+        let mut ring = ring_with(RING_CAP, None);
+        push_output(&mut ring, &[b'y'; 1000]);
+        assert_eq!(ring.bytes.len(), RING_CAP);
+        assert_eq!(ring.base, 1000);
+    }
+
+    #[test]
+    fn output_never_trims_bytes_the_attached_client_has_not_been_sent() {
+        // A client attached at offset 0 to a full ring, with a read in flight.
+        let mut ring = ring_with(RING_CAP, Some(0));
+        push_output(&mut ring, &[b'y'; READ_BUF]);
+        assert_eq!(ring.base, 0, "unsent bytes were trimmed");
+        assert_eq!(ring.bytes.len(), RING_CAP + READ_BUF);
+        // The sender can still slice from where it is.
+        assert_eq!(ring_slice(&ring, 0, SEND_CHUNK).len(), SEND_CHUNK);
+    }
+
+    #[test]
+    fn output_trims_up_to_what_the_attached_client_has_been_sent() {
+        let mut ring = ring_with(RING_CAP, Some(10));
+        push_output(&mut ring, &[b'y'; 1000]);
+        assert_eq!(ring.base, 10);
+    }
 
     #[test]
     fn high_water_is_below_ring_capacity() {
