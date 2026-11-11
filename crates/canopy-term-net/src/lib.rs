@@ -44,6 +44,34 @@ pub trait Connection: Send {
     fn split(self: Box<Self>) -> (Box<dyn Read + Send>, Box<dyn Write + Send>);
 }
 
+/// What `Connection::split` returns when the socket cannot be duplicated (out of
+/// descriptors, say). `split` has no error channel in the contract, so rather
+/// than panic each half reports the failure on its first use.
+#[allow(dead_code)]
+pub(crate) struct FailedHalf(pub(crate) std::io::ErrorKind);
+
+#[allow(dead_code)]
+impl FailedHalf {
+    fn error(&self) -> std::io::Error {
+        std::io::Error::new(self.0, "the connection could not be split")
+    }
+}
+
+impl Read for FailedHalf {
+    fn read(&mut self, _buf: &mut [u8]) -> std::io::Result<usize> {
+        Err(self.error())
+    }
+}
+
+impl Write for FailedHalf {
+    fn write(&mut self, _buf: &[u8]) -> std::io::Result<usize> {
+        Err(self.error())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Err(self.error())
+    }
+}
+
 /// A peer this side will not serve.
 #[derive(Debug, PartialEq, Eq)]
 pub enum Refusal {
@@ -95,6 +123,15 @@ pub(crate) fn skip(reason: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_failed_split_reports_errors_instead_of_panicking() {
+        let mut half = FailedHalf(std::io::ErrorKind::Other);
+        let mut buf = [0u8; 4];
+        assert!(half.read(&mut buf).is_err());
+        assert!(half.write(b"x").is_err());
+        assert!(half.flush().is_err());
+    }
 
     #[test]
     fn identities_compare_by_kind_and_value() {

@@ -1,6 +1,7 @@
 //! The set of device keys this side will serve. Shared (`Clone` is a handle to
 //! the same set) so pairing can add a key while a transport is accepting, and a
-//! removal takes effect on the next stream, not only the next restart.
+//! removal takes effect at once for new streams and, on the iroh transport,
+//! ends live links within `REVOCATION_INTERVAL` (not only at the next restart).
 //!
 //! Keys are one canonical string everywhere: 64 lowercase hex characters (an
 //! ed25519 public key). Transports, pairing and the file format all go through
@@ -33,6 +34,12 @@ struct Inner {
 
 #[derive(Clone, Default, Debug)]
 pub struct Allowlist(Arc<Inner>);
+
+/// Pure trust rule for the allowlist file on unix: owned by the current user or
+/// root, and not writable by group or others.
+pub fn file_trusted(uid: u32, mode: u32, our_uid: u32) -> bool {
+    (uid == our_uid || uid == 0) && mode & 0o022 == 0
+}
 
 fn render(set: &BTreeSet<String>) -> String {
     let mut out = String::from("# canopy device allowlist: one public key per line\n");
@@ -127,8 +134,27 @@ impl Allowlist {
         .join();
     }
 
+    /// Read the list from `path`. On unix the file must be a regular file
+    /// owned by this user (or root) and not writable by group or others: the
+    /// file is the access policy, so one anyone else can edit is refused, not
+    /// trusted. The check is on the open handle, so it cannot be raced by a
+    /// swap between the check and the read.
     pub fn load(path: &Path) -> io::Result<Self> {
-        let text = std::fs::read_to_string(path)?;
+        use std::io::Read;
+        let mut file = std::fs::File::open(path)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            let m = file.metadata()?;
+            if !m.is_file() || !file_trusted(m.uid(), m.mode(), crate::local_unix::current_uid()) {
+                return Err(io::Error::new(
+                    io::ErrorKind::PermissionDenied,
+                    "allowlist file must be owned by this user and not writable by others",
+                ));
+            }
+        }
+        let mut text = String::new();
+        file.read_to_string(&mut text)?;
         Self::from_text(&text).map_err(|_| {
             io::Error::new(io::ErrorKind::InvalidData, "invalid key in allowlist file")
         })
@@ -255,6 +281,38 @@ mod tests {
         l.add(A).unwrap();
         l.save(&path).unwrap();
         assert_eq!(Allowlist::load(&path).unwrap().keys(), l.keys());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_file_trust_rule() {
+        assert!(file_trusted(501, 0o100600, 501));
+        assert!(file_trusted(501, 0o100644, 501));
+        assert!(file_trusted(0, 0o100644, 501));
+        assert!(!file_trusted(502, 0o100600, 501));
+        assert!(!file_trusted(501, 0o100664, 501));
+        assert!(!file_trusted(501, 0o100666, 501));
+        assert!(!file_trusted(501, 0o100602, 501));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn load_refuses_a_file_others_can_write() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("ctn-al-mode-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("allow.txt");
+        let l = Allowlist::new();
+        l.add(A).unwrap();
+        l.save(&path).unwrap();
+        assert_eq!(Allowlist::load(&path).unwrap().keys(), l.keys());
+        for mode in [0o666, 0o664, 0o620] {
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(mode)).unwrap();
+            let err = Allowlist::load(&path).unwrap_err();
+            assert_eq!(err.kind(), io::ErrorKind::PermissionDenied, "{mode:o}");
+        }
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        assert!(Allowlist::load(&path).is_ok());
         let _ = std::fs::remove_dir_all(&dir);
     }
 

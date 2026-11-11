@@ -10,8 +10,11 @@
 //! Refusal. The acceptor learns the dialer's key from the handshake. An unknown
 //! key gets the link closed and `Refusal::UnknownPeer` queued; no stream is ever
 //! accepted, so no session bytes are read from it. The allowlist is checked
-//! again for every new stream on a live link, so removing a key stops its next
-//! stream rather than waiting for the link to end.
+//! again for every new stream on a live link, and a watcher re-checks every
+//! live link each [`REVOCATION_INTERVAL`]: removing a key closes its link, and
+//! with it every session already running over it, within about that interval.
+//! Closing the link is abrupt by design (the peer's reads and writes fail); a
+//! session protocol that wants a goodbye must send it before the key is removed.
 //!
 //! Stream preface. A QUIC stream is invisible to the acceptor until its opener
 //! writes. `connect` therefore writes a four byte preface immediately and the
@@ -43,6 +46,32 @@ const QUEUE: usize = 64;
 /// Refusal notices waiting for `accept`, capped separately so strangers can
 /// never crowd out admitted connections.
 const MAX_PENDING_REFUSALS: usize = 8;
+/// How often a live link is re-checked against the allowlist, so a removed key
+/// ends its running sessions and not only its next stream.
+pub const REVOCATION_INTERVAL: Duration = Duration::from_secs(1);
+/// Incoming connections handled at once (handshaking or live). Past it a new
+/// connection is refused at the handshake instead of spawning another task.
+pub const MAX_LINKS: usize = 256;
+
+/// One of the [`MAX_LINKS`] slots, released when dropped.
+struct LinkSlot(Arc<AtomicUsize>);
+
+impl LinkSlot {
+    fn take(active: &Arc<AtomicUsize>, max: usize) -> Option<LinkSlot> {
+        if active.fetch_add(1, Ordering::SeqCst) >= max {
+            active.fetch_sub(1, Ordering::SeqCst);
+            None
+        } else {
+            Some(LinkSlot(active.clone()))
+        }
+    }
+}
+
+impl Drop for LinkSlot {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::SeqCst);
+    }
+}
 
 type Item = Result<Box<dyn Connection>, Refusal>;
 
@@ -152,11 +181,19 @@ impl IrohTransport {
         let ep = self.endpoint.clone();
         let al = self.allow.clone();
         let queue = self.queue.clone();
+        let active = Arc::new(AtomicUsize::new(0));
         self.rt.spawn(async move {
             while let Some(incoming) = ep.accept().await {
+                // A bounded number of connections at once: past it the
+                // handshake is refused, no task is spawned for it.
+                let Some(slot) = LinkSlot::take(&active, MAX_LINKS) else {
+                    incoming.refuse();
+                    continue;
+                };
                 let al = al.clone();
                 let queue = queue.clone();
                 tokio::spawn(async move {
+                    let _slot = slot;
                     let Ok(conn) = incoming.await else { return };
                     serve_link(conn, al, queue).await;
                 });
@@ -223,6 +260,28 @@ fn parse_address(address: &str) -> io::Result<EndpointAddr> {
     Ok(addr)
 }
 
+/// Close `conn` once `peer` is no longer allowed, however many sessions run
+/// over it. Ends when the link does. A poisoned allowlist reads as "not
+/// allowed", so it closes the link too (fail closed).
+///
+/// The revocation is also queued as a refusal notice, like the per-stream one,
+/// so an `accept` caller sees that the peer is no longer known.
+fn watch_revocation(conn: IrohConnection, allow: Allowlist, peer: String, queue: Arc<Queue>) {
+    tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(REVOCATION_INTERVAL).await;
+            if conn.close_reason().is_some() {
+                return;
+            }
+            if !allow.contains(&peer) {
+                conn.close(1u32.into(), b"revoked");
+                queue.refuse();
+                return;
+            }
+        }
+    });
+}
+
 /// Serve one authenticated link: check the key, then hand out its streams.
 async fn serve_link(conn: IrohConnection, allow: Allowlist, queue: Arc<Queue>) {
     let peer = conn.remote_id().to_string();
@@ -231,6 +290,7 @@ async fn serve_link(conn: IrohConnection, allow: Allowlist, queue: Arc<Queue>) {
         queue.refuse();
         return;
     }
+    watch_revocation(conn.clone(), allow.clone(), peer.clone(), queue.clone());
     loop {
         let Ok((send, mut recv)) = conn.accept_bi().await else {
             return;
@@ -632,6 +692,49 @@ mod tests {
             let _ = client.t.connect(&server.t.address());
             assert!(matches!(second.join().unwrap(), Err(Refusal::UnknownPeer)));
         });
+    }
+
+    #[test]
+    fn removing_a_key_ends_its_live_session() {
+        watchdog(60, || {
+            let (Some(server), Some(client)) = (node(), node()) else {
+                return;
+            };
+            server.allow.add(&client.key).unwrap();
+            server.t.listen().unwrap();
+            let s = server.t.clone();
+            let echo = std::thread::spawn(move || {
+                let conn = s.accept().unwrap().unwrap();
+                let (mut r, mut w) = conn.split();
+                // Ends with an error or EOF once the link is closed.
+                let _ = std::io::copy(&mut r, &mut w);
+            });
+            let conn = client.t.connect(&server.t.address()).unwrap();
+            let (mut r, mut w) = conn.split();
+            w.write_all(b"ping").unwrap();
+            let mut out = [0u8; 4];
+            r.read_exact(&mut out).unwrap();
+            assert_eq!(&out, b"ping");
+            // The session is live and idle. Removing the key must end it.
+            server.allow.remove(&client.key);
+            let mut buf = [0u8; 8];
+            match r.read(&mut buf) {
+                Ok(0) | Err(_) => {}
+                Ok(n) => panic!("a revoked peer received {n} bytes"),
+            }
+            echo.join().unwrap();
+        });
+    }
+
+    #[test]
+    fn link_slots_are_capped_and_released() {
+        let active = Arc::new(AtomicUsize::new(0));
+        let a = LinkSlot::take(&active, 2).unwrap();
+        let _b = LinkSlot::take(&active, 2).unwrap();
+        assert!(LinkSlot::take(&active, 2).is_none());
+        assert_eq!(active.load(Ordering::SeqCst), 2);
+        drop(a);
+        assert!(LinkSlot::take(&active, 2).is_some());
     }
 
     #[test]
