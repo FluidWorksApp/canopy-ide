@@ -170,6 +170,17 @@ pub fn launch_id() -> String {
     launch_token().to_string()
 }
 
+/// Quit the app. `stop_all` is "Quit and Stop All": hosted terminals are
+/// stopped too instead of left running for the next launch. Teardown itself
+/// stays in `RunEvent::Exit`, so both quits share one path.
+#[tauri::command]
+pub fn app_quit(app: AppHandle, state: State<'_, PtyManager>, stop_all: bool) {
+    if stop_all {
+        state.stop_all_on_quit();
+    }
+    app.exit(0);
+}
+
 /// What `PtyManager::start_session` needs once a child and its master exist.
 struct SessionParts {
     id: u32,
@@ -460,6 +471,9 @@ pub struct PtyManager {
     /// macOS `Channel::send` calls `Webview::eval`; allowing that call to race a
     /// reload can wedge WebKit's dispatcher beyond the lifetime of either page.
     desktop_delivery_gate: Arc<RwLock<()>>,
+    /// Set by "Quit and Stop All": this quit stops hosted terminals too,
+    /// instead of leaving them running for a later launch to adopt.
+    stop_hosted_on_quit: AtomicBool,
 }
 
 impl Default for PtyManager {
@@ -476,6 +490,7 @@ impl Default for PtyManager {
             renderer_generation: AtomicU64::new(0),
             renderer_gate: Mutex::new(()),
             desktop_delivery_gate: Arc::new(RwLock::new(())),
+            stop_hosted_on_quit: AtomicBool::new(false),
         }
     }
 }
@@ -1001,12 +1016,43 @@ impl PtyManager {
     pub fn kill_all(&self) -> KillAllReport {
         // Hosted terminals a later launch can adopt are left running in the
         // host: quitting only drops this app's connection to them.
+        self.stop_sessions(false)
+    }
+
+    /// "Quit and Stop All": make this quit stop hosted terminals as well.
+    pub fn stop_all_on_quit(&self) {
+        self.stop_hosted_on_quit.store(true, Ordering::SeqCst);
+    }
+
+    /// What app exit runs: `kill_all`, or `kill_all_including_hosted` when the
+    /// user chose "Quit and Stop All".
+    pub fn kill_all_on_exit(&self) -> KillAllReport {
+        if self.stop_hosted_on_quit.load(Ordering::SeqCst) {
+            self.kill_all_including_hosted()
+        } else {
+            self.kill_all()
+        }
+    }
+
+    /// Stop every session, hosted ones included, then ask the host to stop any
+    /// session of this launch it still runs that is not in the map (one
+    /// adoption did not reach). The host then idles out on its own.
+    pub fn kill_all_including_hosted(&self) -> KillAllReport {
+        let report = self.stop_sessions(true);
+        #[cfg(unix)]
+        if crate::pty_hosted::enabled() {
+            crate::pty_hosted::stop_instance(instance_token());
+        }
+        report
+    }
+
+    fn stop_sessions(&self, include_hosted: bool) -> KillAllReport {
         let sessions: Vec<Arc<Session>> = self
             .sessions
             .lock()
             .unwrap()
             .values()
-            .filter(|s| !s.survives_quit)
+            .filter(|s| include_hosted || !s.survives_quit)
             .cloned()
             .collect();
         for s in &sessions {
@@ -4761,7 +4807,17 @@ mod tests {
             pm.adopt_from(app.handle().clone(), &host.client, "inst-t"),
             0
         );
-        let _ = pm.kill(41);
+        // "Quit and Stop All" stops it in the host as well.
+        pm.stop_all_on_quit();
+        let report = pm.kill_all_on_exit();
+        assert_eq!(report.requested, 1);
+        assert!(session.shutdown.load(Ordering::SeqCst));
+        assert!(wait(&|| host
+            .client
+            .list()
+            .unwrap()
+            .iter()
+            .all(|s| s.exited.is_some())));
     }
 
     /// The agent in an adopted terminal still holds the token the previous

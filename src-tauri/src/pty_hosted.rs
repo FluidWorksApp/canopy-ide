@@ -18,7 +18,7 @@ mod install;
 #[cfg(unix)]
 pub use adoption::{
     adopt, adoptable, identity_floor, lineage, note_identity, note_lineage, reused_instance,
-    Adoptable, Adopted,
+    stop_instance, Adoptable, Adopted,
 };
 #[cfg(unix)]
 pub use unix::{client, host_dir, spawn, Client};
@@ -501,6 +501,41 @@ mod adoption {
         );
     }
 
+    /// Host ids of the sessions "Quit and Stop All" must stop: still running and
+    /// carrying `instance`, attached or not, micro-task or not.
+    pub(super) fn stop_targets(sessions: &[SessionInfo], instance: &str) -> Vec<u32> {
+        sessions
+            .iter()
+            .filter(|s| s.exited.is_none())
+            .filter(|s| parse(s).is_some_and(|meta| meta.instance == instance))
+            .map(|s| s.id)
+            .collect()
+    }
+
+    /// Ask the host to stop every running session of `instance` (it sends
+    /// SIGTERM, then SIGKILL after its own grace, so this returns at once).
+    /// Returns how many it was asked to stop.
+    pub fn stop_instance_with(client: &Client, instance: &str) -> usize {
+        let Ok(sessions) = client.list_within(LAUNCH_WAIT) else {
+            return 0;
+        };
+        stop_targets(&sessions, instance)
+            .into_iter()
+            .filter(|id| client.kill(*id).is_ok())
+            .count()
+    }
+
+    /// `stop_instance_with` on this app's host, through a non-launching client:
+    /// with no host running there is nothing to stop, so none is started.
+    pub fn stop_instance(instance: &str) -> usize {
+        match socket_path() {
+            Some(socket) if socket.exists() => {
+                stop_instance_with(&HostClient::new(socket), instance)
+            }
+            _ => 0,
+        }
+    }
+
     pub fn stored_identity(client: &Client) -> Option<(u32, u64)> {
         let value = client.get_state("identity_high_water").ok()??;
         let (id, generation) = value.split_once(':')?;
@@ -565,7 +600,8 @@ use adoption::Resolution;
 pub(crate) mod tests {
     use super::adoption::{
         adoptable_from as adoption_adoptable, choose_token as adoption_choose, lineage_key,
-        lineage_value, parse_lineage, resolve_from, Resolution as Resolved, PROBE_RETRY_AFTER,
+        lineage_value, parse_lineage, resolve_from, stop_instance_with, stop_targets,
+        Resolution as Resolved, PROBE_RETRY_AFTER,
     };
     use super::*;
     use canopy_pty_host::client::HostClient;
@@ -974,6 +1010,74 @@ pub(crate) mod tests {
         let (probe, calls) = scripted(vec![Ok(Vec::new())]);
         assert_eq!(resolve_from(probe, |_| panic!("no pause")), Resolved::Fresh);
         assert_eq!(calls.get(), 1);
+    }
+
+    #[test]
+    fn stop_all_targets_every_running_session_of_this_launch_only() {
+        let a = |i, kind| Some(meta_for(i, i as u64, kind, "inst-a"));
+        let sessions = vec![
+            info(1, a(1, "desktop"), Some(false), None), // waiting for adoption
+            info(2, a(2, "desktop"), Some(true), None),  // attached
+            info(3, a(3, "detached"), Some(false), None), // micro-task
+            info(4, a(4, "desktop"), Some(false), Some(0)), // already exited
+            info(
+                5,
+                Some(meta_for(5, 5, "desktop", "inst-b")),
+                Some(false),
+                None,
+            ),
+            info(6, None, Some(false), None), // not ours
+        ];
+        assert_eq!(stop_targets(&sessions, "inst-a"), vec![1, 2, 3]);
+    }
+
+    #[test]
+    fn stop_all_asks_the_host_to_stop_this_launchs_waiting_sessions() {
+        let host = InProcessHost::start("stopall");
+        let spawn_as = |id: u32, instance: &str| {
+            spawn(
+                &host.client,
+                &command("sleep 300"),
+                80,
+                24,
+                Some(meta_for(id, id as u64, "desktop", instance)),
+            )
+            .unwrap()
+        };
+        // Two of this launch's terminals left waiting in the host (the app
+        // detached from them), and one of another launch's.
+        let mine = [spawn_as(1, "inst-a"), spawn_as(2, "inst-a")];
+        let (_other_child, _other_master) = spawn_as(3, "inst-b");
+        drop(mine);
+        assert!(wait_for(|| host
+            .client
+            .list()
+            .unwrap()
+            .iter()
+            .filter(|s| s.attached == Some(false))
+            .count()
+            == 2));
+
+        assert_eq!(stop_instance_with(&host.client, "inst-a"), 2);
+        let instance_of = |s: &canopy_pty_host::protocol::SessionInfo| {
+            super::adoption::parse(s).map(|m| m.instance)
+        };
+        assert!(wait_for(|| host
+            .client
+            .list()
+            .unwrap()
+            .iter()
+            .filter(|s| instance_of(s).as_deref() == Some("inst-a"))
+            .all(|s| s.exited.is_some())));
+        // Another launch's session is not this quit's to stop.
+        assert!(host
+            .client
+            .list()
+            .unwrap()
+            .iter()
+            .any(|s| instance_of(s).as_deref() == Some("inst-b") && s.exited.is_none()));
+        // Nothing left to stop the second time.
+        assert_eq!(stop_instance_with(&host.client, "inst-a"), 0);
     }
 
     #[test]

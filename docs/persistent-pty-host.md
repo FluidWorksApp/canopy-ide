@@ -19,9 +19,12 @@ are the parent, and tmux would re-emulate the byte stream.
   follow-up PR.
 - Off by default behind `CANOPY_PTY_HOST=1`. No UI change in this PR.
   With it on, Quit leaves adoptable terminals running in the host (micro-tasks
-  and run-bound tabs are still stopped) and the next launch adopts them.
-  "Quit and Stop All…" (decided from a mock: ⌥⌘Q, Ctrl+Shift+Q elsewhere, asks
-  "Stop N running agents?" only when agents run) is a stacked follow-up PR.
+  and run-bound tabs are still stopped). "Quit and Stop All…" (app menu, under
+  Quit; ⌥⌘Q on macOS, Ctrl+Shift+Q elsewhere) stops them too: it asks first
+  ("Stop N running agents?": Cancel, Quit only, Stop all) only when an agent is
+  running, stops every terminal in the map including hosted ones, then asks the
+  host to stop any other running session carrying this launch's instance token,
+  and the host idles out. With the host off the item is a plain Quit.
 - Hosted sessions are monitor-only for containment.
 - New crate `crates/canopy-pty-host`: protocol, server, client, tests. Nothing in
   `pty.rs` changes until CI is green on the crate.
@@ -267,8 +270,7 @@ the host on:
   Hook events go through `~/.canopy/agent-events.jsonl`, which is already stable,
   but the app only reads events written after it starts.
 
-**Not in this PR (stacked follow-ups):** Quit and Stop All, Windows (no socket
-transport).
+**Not in this PR (stacked follow-ups):** Windows (no socket transport).
 
 ## Remote runner (follow-up, investigated)
 
