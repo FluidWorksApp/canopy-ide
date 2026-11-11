@@ -1,0 +1,11 @@
+[package]
+name = "canopy-term-core"
+version = "0.1.0"
+description = "Terminal screen state and the frame contract between emulator and renderer"
+authors = ["Cause Connect Pte Ltd <sam@fluidwords.app>"]
+license = "MIT"
+edition = "2021"
+rust-version.workspace = true
+workspace = "../../src-tauri"
+
+[dependencies]

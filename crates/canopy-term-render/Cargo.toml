@@ -1,0 +1,12 @@
+[package]
+name = "canopy-term-render"
+version = "0.1.0"
+description = "Native terminal renderer: layout, glyph atlas and damage tracking over frames"
+authors = ["Cause Connect Pte Ltd <sam@fluidwords.app>"]
+license = "MIT"
+edition = "2021"
+rust-version.workspace = true
+workspace = "../../src-tauri"
+
+[dependencies]
+canopy-term-core = { path = "../canopy-term-core" }

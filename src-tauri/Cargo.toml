@@ -11,7 +11,13 @@ rust-version.workspace = true
 default-run = "canopy"
 
 [workspace]
-members = ["../crates/canopy-core", "../crates/canopy-service"]
+members = [
+    "../crates/canopy-core",
+    "../crates/canopy-service",
+    "../crates/canopy-term-core",
+    "../crates/canopy-term-render",
+    "../crates/canopy-term-net",
+]
 
 [workspace.package]
 rust-version = "1.82"

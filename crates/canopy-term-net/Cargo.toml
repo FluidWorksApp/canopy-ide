@@ -1,0 +1,11 @@
+[package]
+name = "canopy-term-net"
+version = "0.1.0"
+description = "Transport contract for local and remote terminal sessions"
+authors = ["Cause Connect Pte Ltd <sam@fluidwords.app>"]
+license = "MIT"
+edition = "2021"
+rust-version.workspace = true
+workspace = "../../src-tauri"
+
+[dependencies]
