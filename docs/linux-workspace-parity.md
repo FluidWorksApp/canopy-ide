@@ -387,6 +387,10 @@ Counts: **(a) 11 · (b) 62 · (c) 148 · (d) 13 · test 2**.
 | `structured_runner_kill` | c | Host: `structured-runner.mjs` (mirrors structured_runner.rs) |
 | `structured_runner_spawn` | c | Host: `structured-runner.mjs` (mirrors structured_runner.rs) |
 | `structured_runner_write` | c | Host: `structured-runner.mjs` (mirrors structured_runner.rs) |
+| `tailscale_allow_set` | b | LOCAL_UI: The Tailscale installed on the desktop and the desktop's own allow list (tailnet.rs). |
+| `tailscale_allowed_list` | b | LOCAL_UI: The Tailscale installed on the desktop and the desktop's own allow list (tailnet.rs). |
+| `tailscale_open_app` | b | LOCAL_UI: The Tailscale installed on the desktop and the desktop's own allow list (tailnet.rs). |
+| `tailscale_status` | b | LOCAL_UI: The Tailscale installed on the desktop and the desktop's own allow list (tailnet.rs). |
 | `task_artifact_read` | c | Host: `task-store.mjs` (mirrors tasks.rs) |
 | `task_artifact_write` | c | Host: `task-store.mjs` (mirrors tasks.rs) |
 | `task_attempt_reserve` | c | Host: `task-store.mjs` (mirrors tasks.rs) |

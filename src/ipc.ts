@@ -4865,6 +4865,41 @@ export const onTunnelState = (
 ): Promise<UnlistenFn> =>
   listen<TunnelState>("tunnel:state", (e) => cb(e.payload));
 
+/** The installed Tailscale on this desktop (tailnet.rs). Canopy only reads its
+ *  status and opens its app; it never signs in or changes Tailscale. */
+export type TailscaleKind =
+  | "notInstalled"
+  | "off"
+  | "needsLogin"
+  | "needsApproval"
+  | "starting"
+  | "tooOld"
+  | "running";
+export interface TailscaleMachine {
+  name: string;
+  dnsName: string;
+  ip: string | null;
+  /** The only key Allow takes; null cannot be allowed. */
+  stableId: string | null;
+  online: boolean;
+  /** May connect in to terminals on this machine. */
+  allowed: boolean;
+}
+export interface TailscaleView {
+  kind: TailscaleKind;
+  version: string | null;
+  minVersion: string;
+  canOpenApp: boolean;
+  thisMachine: TailscaleMachine | null;
+  machines: TailscaleMachine[];
+  allowError: string | null;
+}
+export const tailscaleStatus = () => invoke<TailscaleView>("tailscale_status");
+export const tailscaleAllowSet = (stableId: string, allowed: boolean) =>
+  invoke<void>("tailscale_allow_set", { stableId, allowed });
+export const tailscaleAllowedList = () => invoke<string[]>("tailscale_allowed_list");
+export const tailscaleOpenApp = () => invoke<void>("tailscale_open_app");
+
 /** Which of these commands are installed (login-shell PATH). */
 export const whichCheck = (commands: string[]) =>
   invoke<Record<string, boolean>>("which_check", { commands });
