@@ -53,6 +53,33 @@ fn spec(script: &str) -> SpawnSpec {
     }
 }
 
+/// A socket directory the host will accept: it refuses one it does not own
+/// exclusively rather than chmod it.
+fn private_dir(dir: &std::path::Path) {
+    use std::os::unix::fs::DirBuilderExt;
+    std::fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(dir)
+        .unwrap();
+}
+
+/// One raw request line, one reply line.
+fn raw_call(socket: &std::path::Path, line: &str) -> String {
+    let mut stream = UnixStream::connect(socket).unwrap();
+    stream
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
+    stream.write_all(line.as_bytes()).unwrap();
+    stream.write_all(b"\n").unwrap();
+    let mut reply = String::new();
+    let mut byte = [0u8; 1];
+    while stream.read(&mut byte).unwrap_or(0) == 1 && byte[0] != b'\n' {
+        reply.push(byte[0] as char);
+    }
+    reply
+}
+
 fn alive(pid: u32) -> bool {
     // SAFETY: signal 0 only probes for existence.
     unsafe { libc::kill(pid as libc::pid_t, 0) == 0 }
@@ -351,7 +378,7 @@ fn a_client_older_than_the_host_accepts_is_refused_at_hello_and_attach() {
     // `ensure_running` would (rightly, today) treat a refusing host as no host.
     let dir = std::env::temp_dir().join(format!("cph{}skew", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).unwrap();
+    private_dir(&dir);
     let socket = dir.join("h.sock");
     let mut host = std::process::Command::new(host_exe())
         .arg("--socket")
@@ -799,4 +826,162 @@ fn a_replaced_client_sees_eof_and_its_typing_no_longer_reaches_the_child() {
         "a replaced client's input reached the child"
     );
     assert_eq!(h.client.list().unwrap()[0].attached, Some(true));
+}
+
+#[test]
+fn a_client_that_dies_before_reading_the_attach_reply_does_not_leave_the_session_attached() {
+    let h = Harness::start("dr", 60);
+    let (id, _) = h.client.spawn(spec("cat")).unwrap();
+    let request = format!(r#"{{"op":"attach","id":{id},"after":0,"client_version":3}}"#);
+    for _ in 0..30 {
+        let mut stream = UnixStream::connect(h.client.socket()).unwrap();
+        stream.write_all(request.as_bytes()).unwrap();
+        stream.write_all(b"\n").unwrap();
+        drop(stream); // gone before the host can answer
+    }
+    assert!(
+        wait_until(Duration::from_secs(10), || {
+            h.client.list().unwrap()[0].attached == Some(false)
+        }),
+        "session stuck attached to a client that is gone"
+    );
+    assert!(
+        h.client.attach_exclusive(id, 0).is_ok(),
+        "an exclusive attach is refused as busy"
+    );
+}
+
+#[test]
+fn hosts_starting_together_leave_one_host_and_do_not_unlink_the_winners_socket() {
+    let dir = std::env::temp_dir().join(format!("cph{}lk", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    private_dir(&dir);
+    let socket = dir.join("h.sock");
+    // Started directly, not through `ensure_running`, which serialises on its own lock.
+    let mut hosts: Vec<std::process::Child> = (0..8)
+        .map(|_| {
+            std::process::Command::new(host_exe())
+                .arg("--socket")
+                .arg(&socket)
+                .args(["--idle-secs", "60"])
+                .spawn()
+                .unwrap()
+        })
+        .collect();
+    assert!(wait_until(Duration::from_secs(5), || HostClient::new(
+        &socket
+    )
+    .hello()
+    .is_ok()));
+    std::thread::sleep(Duration::from_secs(1));
+    let running = hosts
+        .iter_mut()
+        .filter(|h| h.try_wait().unwrap().is_none())
+        .count();
+    let winner = HostClient::new(&socket).hello().unwrap().host_pid.unwrap();
+    // The host the socket reaches is one of the running processes, the only one.
+    assert_eq!(running, 1, "several hosts are serving");
+    assert!(hosts.iter().any(|h| h.id() == winner));
+    for h in &mut hosts {
+        let _ = h.kill();
+        let _ = h.wait();
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_hello_or_attach_without_a_version_is_held_to_the_minimum_client() {
+    let dir = std::env::temp_dir().join(format!("cph{}v0", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    private_dir(&dir);
+    let socket = dir.join("h.sock");
+    let mut host = std::process::Command::new(host_exe())
+        .arg("--socket")
+        .arg(&socket)
+        .args([
+            "--min-client",
+            &(canopy_pty_host::protocol::PROTOCOL_VERSION + 1).to_string(),
+            "--idle-secs",
+            "60",
+        ])
+        .spawn()
+        .unwrap();
+    assert!(wait_until(Duration::from_secs(5), || socket.exists()));
+    let reply = raw_call(&socket, r#"{"op":"hello"}"#);
+    assert!(reply.contains("older than this host accepts"), "{reply}");
+    let reply = raw_call(&socket, r#"{"op":"hello","client_version":0}"#);
+    assert!(reply.contains("older than this host accepts"), "{reply}");
+    let reply = raw_call(&socket, r#"{"op":"attach","id":1,"after":0}"#);
+    assert!(reply.contains("older than this host accepts"), "{reply}");
+    let _ = host.kill();
+    let _ = host.wait();
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_child_that_never_reads_its_input_does_not_keep_a_gone_client_attached() {
+    let h = Harness::start("nr", 60);
+    // `sleep` never reads the terminal, so input piles up in the PTY.
+    let (id, _) = h.client.spawn(spec("sleep 300")).unwrap();
+    let mut a = h.client.attach(id, 0).unwrap();
+    a.stream
+        .set_write_timeout(Some(Duration::from_millis(500)))
+        .unwrap();
+    let chunk = vec![b'x'; 64 * 1024];
+    let deadline = Instant::now() + Duration::from_secs(5);
+    // Enough to fill the PTY's input, so the host's writer to the child is stuck.
+    let mut sent = 0usize;
+    while Instant::now() < deadline && sent < 64 * 1024 * 1024 && a.stream.write_all(&chunk).is_ok()
+    {
+        sent += chunk.len();
+    }
+    drop(a);
+    assert!(
+        wait_until(Duration::from_secs(15), || {
+            h.client.list().unwrap()[0].attached == Some(false)
+        }),
+        "detach was never recorded"
+    );
+}
+
+#[test]
+fn an_oversized_request_line_is_dropped_and_the_host_stays_up() {
+    let h = Harness::start("big", 60);
+    let mut stream = UnixStream::connect(h.client.socket()).unwrap();
+    stream
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
+    let junk = vec![b'a'; 64 * 1024];
+    let mut closed = false;
+    for _ in 0..40 {
+        if stream.write_all(&junk).is_err() {
+            closed = true;
+            break;
+        }
+    }
+    let mut buf = [0u8; 16];
+    closed |= matches!(stream.read(&mut buf), Ok(0) | Err(_));
+    assert!(closed, "an unbounded request line was accepted");
+    assert!(h.client.hello().is_ok());
+}
+
+#[test]
+fn a_socket_directory_that_is_not_private_is_refused_and_not_chmoded() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = std::env::temp_dir().join(format!("cph{}pub", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let status = std::process::Command::new(host_exe())
+        .arg("--socket")
+        .arg(dir.join("h.sock"))
+        .status()
+        .unwrap();
+    assert!(!status.success());
+    let mode = std::fs::metadata(&dir).unwrap().permissions().mode() & 0o777;
+    assert_eq!(
+        mode, 0o755,
+        "the host chmod-ed a directory it did not create"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
 }
