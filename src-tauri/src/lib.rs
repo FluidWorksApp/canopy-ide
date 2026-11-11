@@ -127,6 +127,7 @@ pub(crate) const MENU_SHORTCUT_IDS: &[&str] = &[
     "find-in-files",
     "spot-search",
     "help",
+    "quit-stop-all",
 ];
 
 /// Custom menu: keeps Edit (clipboard in WKWebView needs it) but replaces the
@@ -168,6 +169,17 @@ fn build_menu(app: &tauri::AppHandle, profile: &str) -> tauri::Result<Menu<tauri
             &PredefinedMenuItem::hide(app, None)?,
             &PredefinedMenuItem::separator(app)?,
             &PredefinedMenuItem::quit(app, None)?,
+            // With the terminal host on, Quit leaves terminals running for the
+            // next launch to adopt; this is the quit that stops them. It asks
+            // first whenever agents are running (the frontend's dialog), host
+            // on or off.
+            &MenuItem::with_id(
+                app,
+                "quit-stop-all",
+                "Quit and Stop All…",
+                true,
+                accel("quit-stop-all").as_deref(),
+            )?,
         ],
     )?;
     let edit = Submenu::with_items(
@@ -827,6 +839,8 @@ pub fn run() {
             pty::pty_set_name_theme,
             pty::instance_id,
             pty::launch_id,
+            pty::app_quit,
+            pty::pty_host_enabled,
             android::android_sdk_status,
             android::android_devices,
             android::android_avds,
@@ -1202,7 +1216,9 @@ pub fn run() {
                 app.state::<std::sync::Arc<watchdog::WatchdogState>>()
                     .app_exiting(pty.live_count() as u64);
                 // Guarantee no child processes outlive the app.
-                let pty_cleanup = pty.kill_all();
+                // Hosted terminals keep running unless the user chose "Quit
+                // and Stop All".
+                let pty_cleanup = pty.kill_all_on_exit();
                 app.state::<std::sync::Arc<watchdog::WatchdogState>>()
                     .app_exit_cleanup_returned(pty_cleanup.requested, pty_cleanup.force_signals);
                 app.state::<lsp::LspManager>().kill_all();
