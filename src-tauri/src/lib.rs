@@ -498,6 +498,13 @@ pub fn run() {
     #[cfg(target_os = "macos")]
     raise_file_descriptor_limit();
 
+    // Start reading the adoption sealing key now, off this thread, so the launch
+    // path finds it loaded (or keeps going without it) instead of waiting.
+    #[cfg(unix)]
+    if pty_hosted::enabled() {
+        adoption_seal::prefetch();
+    }
+
     // Install the ring crypto provider process-wide so rustls has a default —
     // the team relay's internet path dials wss:// through a tunnel via
     // tokio-tungstenite, whose rustls connector builds its config from the

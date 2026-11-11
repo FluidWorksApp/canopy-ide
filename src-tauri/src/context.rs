@@ -172,6 +172,10 @@ pub struct ContextBridge {
     /// Kept beside `pending` so depth/count gates are enforced by the bridge,
     /// never by caller-supplied fields or a racy UI snapshot.
     pending_spawns: Mutex<HashMap<u64, PendingAgentSpawn>>,
+    /// Until when a spawn that was abandoned (timed out, or its request was
+    /// dropped) may still produce a child the bridge never bound. Terminals
+    /// sealed meanwhile are sealed with an unknown position, not as roots.
+    spawn_unbound_until: Mutex<Option<std::time::Instant>>,
     next_op: AtomicU64,
     /// Advisory file claims, held and ended together in the durable mesh store. Several
     /// agents routinely share one checkout; a claim is how one says "I'm editing
@@ -343,6 +347,7 @@ impl Default for ContextBridge {
             attempts: Mutex::new(HashMap::new()),
             pending: Mutex::new(HashMap::new()),
             pending_spawns: Mutex::new(HashMap::new()),
+            spawn_unbound_until: Mutex::new(None),
             next_op: AtomicU64::new(1),
             claims: crate::mesh::load_claims(),
             disabled_tools: Mutex::new(None),
@@ -382,9 +387,42 @@ pub fn agent_env(
         ("CANOPY_CTX_TOKEN", token.to_string()),
     ];
     if let Some(socket) = socket.and_then(|s| s.to_str()) {
+        // Who stamped the port above. A terminal adopted by a later launch
+        // keeps this launch's port, which by then is dead or reused; `canopy-hook`
+        // uses the port beside the socket only while this app is still running.
+        if let Some(app) = app_stamp() {
+            env.push(("CANOPY_CTX_APP", app));
+        }
         env.push(("CANOPY_CTX_SOCKET", socket.to_string()));
     }
     env
+}
+
+/// This process's pid and start time, as `canopy-hook` checks them
+/// (`<pid>:<start>`, the start with its whitespace turned to `_`). None when
+/// `ps` cannot say, in which case the stamp is omitted and the port is never
+/// used beside the socket.
+#[cfg(unix)]
+fn app_stamp() -> Option<String> {
+    static STAMP: OnceLock<Option<String>> = OnceLock::new();
+    STAMP
+        .get_or_init(|| {
+            let pid = std::process::id();
+            let out = std::process::Command::new("/bin/ps")
+                .args(["-o", "lstart=", "-p", &pid.to_string()])
+                .output()
+                .ok()
+                .filter(|out| out.status.success())?;
+            let text = String::from_utf8_lossy(&out.stdout);
+            let start: Vec<&str> = text.split_whitespace().collect();
+            (!start.is_empty()).then(|| format!("{pid}:{}", start.join("_")))
+        })
+        .clone()
+}
+
+#[cfg(not(unix))]
+fn app_stamp() -> Option<String> {
+    None
 }
 
 impl ContextBridge {
@@ -482,8 +520,32 @@ impl ContextBridge {
     /// Whether any agent-created terminal is waiting to be bound into its
     /// parent's spawn tree. A terminal spawned meanwhile may be that child, so
     /// its sealed metadata must not claim to be a root.
+    ///
+    /// Only unbound spawns count: a child already bound is resealed with its
+    /// position, and is not any other terminal. An abandoned spawn counts for
+    /// `ABANDONED_SPAWN_GRACE`, since the frontend may still create its child.
     pub fn spawn_pending(&self) -> bool {
-        !self.pending_spawns.lock().unwrap().is_empty()
+        self.pending_spawns
+            .lock()
+            .unwrap()
+            .values()
+            .any(|spawn| spawn.child_pty_id.is_none())
+            || self
+                .spawn_unbound_until
+                .lock()
+                .unwrap()
+                .is_some_and(|until| until > std::time::Instant::now())
+    }
+
+    /// Forget a spawn request. `abandoned` when nothing answered it: its child
+    /// may yet appear unbound, so the grace window opens.
+    fn end_spawn(&self, id: u64, abandoned: bool) {
+        self.pending.lock().unwrap().remove(&id);
+        self.pending_spawns.lock().unwrap().remove(&id);
+        if abandoned {
+            *self.spawn_unbound_until.lock().unwrap() =
+                Some(std::time::Instant::now() + ABANDONED_SPAWN_GRACE);
+        }
     }
 
     /// Mint this terminal's own credential. Called once per spawn, before the
@@ -651,11 +713,13 @@ pub fn start(app: tauri::AppHandle) {
     let stable = crate::pty_hosted::enabled()
         .then(crate::pty_hosted::host_dir)
         .flatten()
-        .and_then(|dir| match crate::ctx_socket::claim(&dir) {
-            Ok(owned) => Some((dir, owned)),
+        .map(|dir| match crate::ctx_socket::claim(&dir) {
+            Ok(owned) => (dir, owned),
             Err(e) => {
-                log::warn!("context bridge: no stable socket: {e}");
-                None
+                // Not given up on: `serve_stable` keeps trying, so a transient
+                // failure does not cost every terminal the stable address.
+                log::warn!("context bridge: no stable socket yet ({e}); will retry");
+                (dir, None)
             }
         });
     // Published as soon as it is bound: a connection made before the accept
@@ -724,11 +788,12 @@ async fn serve_stable(
 ) {
     let mut owned = owned;
     let mut waited = 0u32;
+    let mut failures = 0u32;
     let owned = loop {
         if let Some(owned) = owned.take() {
             break owned;
         }
-        if waited == 10 {
+        if waited == 10 && failures == 0 {
             log::warn!(
                 "context bridge: another Canopy holds {}; serving TCP only until it lets go",
                 dir.join(crate::ctx_socket::SOCKET_NAME).display()
@@ -739,7 +804,17 @@ async fn serve_stable(
         let pause = if waited < 10 { 500 } else { 5000 };
         tokio::time::sleep(std::time::Duration::from_millis(pause)).await;
         waited = waited.saturating_add(1);
-        owned = crate::ctx_socket::claim(&dir).ok().flatten();
+        owned = match crate::ctx_socket::claim(&dir) {
+            Ok(owned) => owned,
+            Err(e) => {
+                // Said on the first failure and then about once a minute.
+                if failures % 12 == 0 {
+                    log::warn!("context bridge: cannot claim the stable socket: {e}");
+                }
+                failures = failures.saturating_add(1);
+                None
+            }
+        };
     };
     let _ = app.state::<ContextBridge>().socket.set(owned.path.clone());
     crate::ctx_socket::serve_owned(owned, router).await;
@@ -3355,6 +3430,32 @@ struct Action {
 const MAX_AGENT_SPAWN_DEPTH: u8 = 2;
 const MAX_AGENT_SPAWN_CHILDREN: usize = 4;
 const AGENT_SPAWN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(75);
+/// How long after an abandoned agent spawn a new terminal may still be its child.
+const ABANDONED_SPAWN_GRACE: std::time::Duration = std::time::Duration::from_secs(120);
+
+/// Ends an agent spawn's bookkeeping however its request future ends, so a
+/// dropped request (client gone, handler cancelled) cannot leave an entry that
+/// keeps `spawn_pending()` true. Unless `settle`d it counts as abandoned.
+struct SpawnGuard<'a> {
+    bridge: &'a ContextBridge,
+    id: u64,
+    settled: bool,
+}
+
+impl SpawnGuard<'_> {
+    fn settle(&mut self) {
+        self.settled = true;
+        self.bridge.end_spawn(self.id, false);
+    }
+}
+
+impl Drop for SpawnGuard<'_> {
+    fn drop(&mut self) {
+        if !self.settled {
+            self.bridge.end_spawn(self.id, true);
+        }
+    }
+}
 
 fn next_agent_spawn_depth(
     parent_depth: u8,
@@ -3783,6 +3884,11 @@ async fn action(
                     child_pty_id: None,
                 },
             );
+            let mut guard = SpawnGuard {
+                bridge: &*snaps,
+                id,
+                settled: false,
+            };
             let delivered = format!("{} {body}", sender_tag(&app, &who, None));
             let _ = app.emit(
                 "agent:action",
@@ -3805,7 +3911,7 @@ async fn action(
             );
             return match tokio::time::timeout(AGENT_SPAWN_TIMEOUT, rx).await {
                 Ok(Ok((true, data))) => {
-                    snaps.pending_spawns.lock().unwrap().remove(&id);
+                    guard.settle();
                     let Some(child_id) = data.get("ptyId").and_then(|value| value.as_u64()) else {
                         return (
                             StatusCode::INTERNAL_SERVER_ERROR,
@@ -3857,19 +3963,17 @@ async fn action(
                     )
                 }
                 Ok(Ok((false, data))) => {
-                    snaps.pending_spawns.lock().unwrap().remove(&id);
+                    guard.settle();
                     (StatusCode::BAD_REQUEST, body_text(data))
                 }
-                Ok(Err(_)) => {
-                    snaps.pending_spawns.lock().unwrap().remove(&id);
-                    (
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        "Canopy dropped this agent spawn request".into(),
-                    )
-                }
+                // Nobody answered: the guard abandons the spawn on the way out.
+                Ok(Err(_)) => (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "Canopy dropped this agent spawn request".into(),
+                ),
                 Err(_) => {
-                    snaps.pending.lock().unwrap().remove(&id);
-                    snaps.pending_spawns.lock().unwrap().remove(&id);
+                    // The child may still appear: the guard keeps new terminals
+                    // from being sealed as roots for a while.
                     (
                         StatusCode::GATEWAY_TIMEOUT,
                         "Canopy did not report the child launch in time; check canopy_agents before retrying"
@@ -6698,6 +6802,85 @@ mod tests {
         assert_eq!(next_agent_spawn_depth(agent.spawn_depth, 0, 0), Ok(1));
         let _ = bridge.retire_agent(71);
         let _ = bridge.retire_agent(72);
+    }
+
+    fn pending_spawn_for(bridge: &ContextBridge, id: u64, bound: Option<u32>) {
+        let parent = AgentIdentity {
+            pty_id: 1,
+            instance: "i".into(),
+            cwd: "/w".into(),
+            run_id: None,
+            attempt_id: None,
+            spawn_depth: 0,
+            parent_pty_id: None,
+        };
+        bridge.pending.lock().unwrap().insert(id, {
+            let (tx, _rx) = tokio::sync::oneshot::channel();
+            tx
+        });
+        bridge.pending_spawns.lock().unwrap().insert(
+            id,
+            PendingAgentSpawn {
+                parent,
+                child_depth: 1,
+                child_pty_id: bound,
+            },
+        );
+    }
+
+    /// Review finding 4: a request future that is dropped must not leave its
+    /// entry behind, and an abandoned spawn must not let a late child be sealed
+    /// as a root.
+    #[test]
+    fn a_dropped_or_timed_out_agent_spawn_cleans_up_and_seals_the_late_child_as_unknown() {
+        let bridge = ContextBridge::default();
+        // Answered: gone, and nothing lingers.
+        pending_spawn_for(&bridge, 1, None);
+        let mut guard = SpawnGuard {
+            bridge: &bridge,
+            id: 1,
+            settled: false,
+        };
+        assert!(bridge.spawn_pending());
+        guard.settle();
+        drop(guard);
+        assert!(!bridge.spawn_pending());
+        assert!(bridge.pending.lock().unwrap().is_empty());
+
+        // Dropped without an answer: the entry is gone, the child may still
+        // come, so new terminals are sealed with an unknown position for a while.
+        pending_spawn_for(&bridge, 2, None);
+        drop(SpawnGuard {
+            bridge: &bridge,
+            id: 2,
+            settled: false,
+        });
+        assert!(bridge.pending_spawns.lock().unwrap().is_empty());
+        assert!(bridge.pending.lock().unwrap().is_empty());
+        assert!(bridge.spawn_pending());
+        let mut meta = crate::pty_hosted::HostedMeta {
+            v: 1,
+            id: 3,
+            bridge: Some("ab".repeat(32)),
+            ..Default::default()
+        };
+        crate::pty_hosted::seal_for_spawn(
+            &mut meta,
+            &crate::adoption_seal::key().unwrap(),
+            bridge.spawn_pending(),
+        );
+        assert_eq!(meta.depth, None);
+        // The window closes.
+        *bridge.spawn_unbound_until.lock().unwrap() =
+            Some(std::time::Instant::now() - std::time::Duration::from_secs(1));
+        assert!(!bridge.spawn_pending());
+    }
+
+    #[test]
+    fn a_spawn_already_bound_to_its_child_is_not_pending_for_other_terminals() {
+        let bridge = ContextBridge::default();
+        pending_spawn_for(&bridge, 4, Some(9));
+        assert!(!bridge.spawn_pending());
     }
 
     #[test]

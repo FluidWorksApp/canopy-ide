@@ -6,7 +6,9 @@
 //! credential it holds, where it sits in the spawn tree) is therefore sealed with
 //! an HMAC whose key the app keeps outside the host, in the platform secret store.
 //! A session whose seal is missing or wrong is still adopted as a terminal, but
-//! gets no bridge credential back.
+//! gets no bridge credential back. The seal also covers the host's own id for
+//! the session (`HostedMeta::host`), checked against the session it is listed
+//! on, so metadata copied onto a decoy session verifies for nobody.
 //!
 //! What this resists depends on the store. On macOS the Keychain item is
 //! readable by Canopy without a prompt and by other processes only with the
@@ -15,8 +17,6 @@
 //! the seal only stops a forgery through the host that does not also read the
 //! key. It never protects a token another same-user process reads from an
 //! agent's environment, which that process can already do.
-
-use std::sync::OnceLock;
 
 const SERVICE: &str = "Canopy PTY host";
 const DOMAIN: &str = "canopy-adopt-v1";
@@ -63,6 +63,7 @@ fn canonical(meta: &crate::pty_hosted::HostedMeta) -> Vec<u8> {
         meta.bridge,
         meta.depth,
         meta.parent,
+        meta.host,
     ]))
     .unwrap_or_default()
 }
@@ -77,39 +78,96 @@ pub fn verify(key: &[u8], meta: &crate::pty_hosted::HostedMeta) -> bool {
         .is_some_and(|seal| crate::context::constant_time_eq(seal, &self::seal(key, meta)))
 }
 
-/// The sealing key, created on first use. Read only with the PTY host on, on
-/// its own thread with a bound, so a store that prompts or hangs costs the
-/// launch two seconds and adopted agents their credentials, never the launch.
-/// None when the store cannot be reached: nothing is sealed and nothing sealed
-/// is trusted.
+/// The sealing key, created on first use, never cached as absent. The secret
+/// store is read on its own thread (a store that prompts or hangs must not take
+/// the launch with it), once at a time; a load that fails or is still waiting
+/// is simply asked again on a later call.
+///
+/// `key()` waits up to two seconds for the first answer, and after one wait
+/// that ran out it stops waiting (a pending Keychain prompt must not stall every
+/// spawn) and just reports what is loaded. `key_nowait()` never waits: the
+/// launch-path resolution uses it. None means nothing is sealed and nothing
+/// sealed is trusted, for that call only.
 #[cfg(not(test))]
 pub fn key() -> Option<[u8; 32]> {
-    static KEY: OnceLock<Option<[u8; 32]>> = OnceLock::new();
-    *KEY.get_or_init(|| {
-        let (tx, rx) = std::sync::mpsc::channel();
-        std::thread::spawn(move || {
-            let _ = tx.send(load_or_create());
+    key_with(Some(std::time::Duration::from_secs(2)))
+}
+
+#[cfg(not(test))]
+#[cfg_attr(not(unix), allow(dead_code))]
+pub fn key_nowait() -> Option<[u8; 32]> {
+    key_with(None)
+}
+
+/// Start the load now, so a later `key_nowait()` finds it done.
+#[cfg(not(test))]
+#[cfg_attr(not(unix), allow(dead_code))]
+pub fn prefetch() {
+    let _ = key_with(None);
+}
+
+#[cfg(not(test))]
+fn key_with(wait: Option<std::time::Duration>) -> Option<[u8; 32]> {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::{Condvar, Mutex};
+    struct State {
+        key: Option<[u8; 32]>,
+        loading: bool,
+    }
+    static STATE: Mutex<State> = Mutex::new(State {
+        key: None,
+        loading: false,
+    });
+    static DONE: Condvar = Condvar::new();
+    static GAVE_UP_WAITING: AtomicBool = AtomicBool::new(false);
+
+    let mut state = STATE.lock().unwrap();
+    if state.key.is_some() {
+        return state.key;
+    }
+    if !state.loading {
+        state.loading = true;
+        std::thread::spawn(|| {
+            let loaded = load_or_create();
+            let mut state = STATE.lock().unwrap();
+            state.loading = false;
+            match loaded {
+                Ok(key) => state.key = Some(key),
+                Err(e) => log::warn!(
+                    "adoption seal key unavailable ({e}); adopted terminals keep no bridge credential until it loads"
+                ),
+            }
+            DONE.notify_all();
         });
-        match rx.recv_timeout(std::time::Duration::from_secs(2)) {
-            Ok(Ok(key)) => Some(key),
-            Ok(Err(e)) => {
-                log::warn!("adoption seal key unavailable ({e}); adopted terminals keep no bridge credential");
-                None
-            }
-            Err(_) => {
-                log::warn!("adoption seal key: the secret store did not answer in time");
-                None
-            }
-        }
-    })
+    }
+    let wait = wait.filter(|_| !GAVE_UP_WAITING.load(Ordering::Relaxed))?;
+    let (state, timeout) = DONE
+        .wait_timeout_while(state, wait, |s| s.loading && s.key.is_none())
+        .unwrap();
+    if timeout.timed_out() {
+        GAVE_UP_WAITING.store(true, Ordering::Relaxed);
+        log::warn!(
+            "adoption seal key: the secret store did not answer in time; asking again later"
+        );
+    }
+    state.key
 }
 
 /// Tests never touch the real secret store.
 #[cfg(test)]
 pub fn key() -> Option<[u8; 32]> {
-    static KEY: OnceLock<Option<[u8; 32]>> = OnceLock::new();
-    *KEY.get_or_init(|| Some([7u8; 32]))
+    Some([7u8; 32])
 }
+
+#[cfg(test)]
+#[cfg_attr(not(unix), allow(dead_code))]
+pub fn key_nowait() -> Option<[u8; 32]> {
+    key()
+}
+
+#[cfg(test)]
+#[cfg_attr(not(unix), allow(dead_code))]
+pub fn prefetch() {}
 
 #[cfg_attr(test, allow(dead_code))]
 fn account() -> &'static str {
@@ -185,7 +243,7 @@ mod tests {
         let back: HostedMeta =
             serde_json::from_str(&serde_json::to_string(&sealed).unwrap()).unwrap();
         assert!(verify(&key, &back));
-        let tamper: [fn(&mut HostedMeta); 7] = [
+        let tamper: [fn(&mut HostedMeta); 8] = [
             |m| m.id = 8,
             |m| m.instance = "inst-b".into(),
             |m| m.bridge = Some("cd".repeat(32)),
@@ -193,6 +251,7 @@ mod tests {
             |m| m.depth = None,
             |m| m.parent = None,
             |m| m.kind = "detached".into(),
+            |m| m.host = Some(9),
         ];
         for change in tamper {
             let mut forged = sealed.clone();

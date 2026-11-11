@@ -659,7 +659,7 @@ impl PtyManager {
             // position included, but only from sealed metadata: anything else
             // may have been written by any process of this user, and is adopted
             // as a terminal with no credential.
-            let readopted = readopt_credential(&app, &meta);
+            let readopted = readopt_credential(&app, &meta, found.info.id);
             self.next_id.fetch_max(meta.id, Ordering::SeqCst);
             self.next_session_generation
                 .fetch_max(meta.generation, Ordering::SeqCst);
@@ -722,6 +722,7 @@ impl PtyManager {
 fn readopt_credential<R: tauri::Runtime>(
     app: &AppHandle<R>,
     meta: &crate::pty_hosted::HostedMeta,
+    host_id: u32,
 ) -> bool {
     let Some(ctx) = app.try_state::<crate::context::ContextBridge>() else {
         return false;
@@ -731,7 +732,8 @@ fn readopt_credential<R: tauri::Runtime>(
         return false;
     }
     let key = crate::adoption_seal::key();
-    let Some((verifier, lineage)) = crate::pty_hosted::trusted_credential(meta, key.as_ref())
+    let Some((verifier, lineage)) =
+        crate::pty_hosted::trusted_credential(meta, key.as_ref(), host_id)
     else {
         eprintln!(
             "canopy: adopted terminal {} has unsealed or invalid metadata; it keeps no bridge credential",
@@ -4851,9 +4853,6 @@ mod tests {
             ..Default::default()
         };
         crate::pty_hosted::seal_for_spawn(&mut sealed, &key, true);
-        sealed.depth = Some(2);
-        sealed.parent = Some(17);
-        sealed.seal = Some(crate::adoption_seal::seal(&key, &sealed));
         let meta = serde_json::to_string(&sealed).unwrap();
         let host = InProcessHost::start("adoptctx");
         let (child, master) = crate::pty_hosted::spawn(
@@ -4864,6 +4863,15 @@ mod tests {
             Some(meta),
         )
         .expect("hosted spawn");
+        // The reseal after binding, bound to the host's own id for the session.
+        let host_id = host.client.list().unwrap()[0].id;
+        sealed.depth = Some(2);
+        sealed.parent = Some(17);
+        sealed.host = Some(host_id);
+        sealed.seal = Some(crate::adoption_seal::seal(&key, &sealed));
+        host.client
+            .set_meta(host_id, Some(serde_json::to_string(&sealed).unwrap()))
+            .unwrap();
         drop(master);
         drop(child);
         let deadline = std::time::Instant::now() + Duration::from_secs(10);
@@ -4916,10 +4924,11 @@ mod tests {
             cwd: "/w/other".into(),
             instance: instance_token().to_string(),
             bridge: Some(crate::context::verifier(&"9".repeat(32))),
+            host: Some(7),
             ..Default::default()
         };
         crate::pty_hosted::seal_for_spawn(&mut meta, &key, false);
-        let readopted = readopt_credential(app.handle(), &meta);
+        let readopted = readopt_credential(app.handle(), &meta, 7);
         assert!(!readopted, "pty 53 already has a credential");
         undo_readopt(app.handle(), 53, readopted);
         match bridge.caller_for_test(&live) {
@@ -4932,7 +4941,7 @@ mod tests {
         meta.id = 54;
         meta.seal = None;
         crate::pty_hosted::seal_for_spawn(&mut meta, &key, false);
-        let readopted = readopt_credential(app.handle(), &meta);
+        let readopted = readopt_credential(app.handle(), &meta, 7);
         assert!(readopted);
         assert!(bridge.caller_for_test(&"9".repeat(32)).is_some());
         undo_readopt(app.handle(), 54, readopted);
@@ -4958,7 +4967,7 @@ mod tests {
             depth: Some(0),
             ..Default::default()
         };
-        assert!(!readopt_credential(app.handle(), &meta));
+        assert!(!readopt_credential(app.handle(), &meta, 7));
         let bridge = app.state::<crate::context::ContextBridge>();
         assert_eq!(bridge.caller_for_test(&token), None);
     }

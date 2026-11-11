@@ -3404,6 +3404,7 @@ fn bridge_env() -> Option<(Endpoint, String)> {
         std::env::var("CANOPY_CTX_SOCKET").ok(),
         std::env::var("CANOPY_CTX_PORT").ok(),
         std::env::var("CANOPY_CTX_TOKEN").ok(),
+        std::env::var("CANOPY_CTX_APP").ok(),
     ) {
         return Some(found);
     }
@@ -3496,6 +3497,10 @@ fn parent_of(pid: u32) -> Option<u32> {
 /// exception is a sandbox that forbids connecting to the socket at all
 /// (`PermissionDenied`, which a stale or absent socket never produces): the
 /// port then beside it in the same environment is the only way the tools work.
+/// It is kept only while the app that stamped it is provably still running
+/// (`CANOPY_CTX_APP`, a pid and start time): a terminal adopted by a later
+/// launch carries the previous launch's port, which is dead or reused, and the
+/// bearer token must never be sent to whatever holds it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum Endpoint {
     Port(String),
@@ -3510,14 +3515,50 @@ fn bridge_from(
     socket: Option<String>,
     port: Option<String>,
     token: Option<String>,
+    app: Option<String>,
 ) -> Option<(Endpoint, String)> {
     let socket = socket.filter(|path| cfg!(unix) && !path.is_empty());
     let endpoint = match (socket, port) {
-        (Some(path), port) => Endpoint::Socket(path, port.filter(|p| !p.is_empty())),
+        (Some(path), port) => {
+            let port = port
+                .filter(|p| !p.is_empty())
+                .filter(|_| app.as_deref().is_some_and(app_is_running));
+            Endpoint::Socket(path, port)
+        }
         (None, Some(port)) => Endpoint::Port(port),
         (None, None) => return None,
     };
     Some((endpoint, token.unwrap_or_default()))
+}
+
+/// When the process `pid` started, as one token (no whitespace), or None when it
+/// is not running or cannot be asked. Absolute `ps`: see `parent_of`.
+#[cfg(unix)]
+fn process_start(pid: u32) -> Option<String> {
+    let mut command = std::process::Command::new("/bin/ps");
+    command.args(["-o", "lstart=", "-p", &pid.to_string()]);
+    let (status, stdout) = small_process_output(&mut command)?;
+    let text = String::from_utf8_lossy(&stdout);
+    let start: Vec<&str> = text.split_whitespace().collect();
+    (status.success() && !start.is_empty()).then(|| start.join("_"))
+}
+
+#[cfg(not(unix))]
+fn process_start(_pid: u32) -> Option<String> {
+    None
+}
+
+/// Whether the app that stamped `CANOPY_CTX_APP` (`<pid>:<start>`) is still
+/// running: that pid, with that start time. A reused pid has another start
+/// time, and a stamp that is missing or malformed is not running.
+fn app_is_running(stamp: &str) -> bool {
+    let Some((pid, start)) = stamp.split_once(':') else {
+        return false;
+    };
+    let Ok(pid) = pid.parse::<u32>() else {
+        return false;
+    };
+    !start.is_empty() && process_start(pid).as_deref() == Some(start)
 }
 
 /// One process's CANOPY_CTX_SOCKET/_PORT/_TOKEN, or None if it has no address.
@@ -3529,6 +3570,7 @@ fn bridge_in(environ: Vec<String>) -> Option<(Endpoint, String)> {
     let mut socket = None;
     let mut port = None;
     let mut token = None;
+    let mut app = None;
     for entry in environ {
         if let Some(v) = entry.strip_prefix("CANOPY_CTX_SOCKET=") {
             socket = Some(v.to_string());
@@ -3536,9 +3578,11 @@ fn bridge_in(environ: Vec<String>) -> Option<(Endpoint, String)> {
             port = Some(v.to_string());
         } else if let Some(v) = entry.strip_prefix("CANOPY_CTX_TOKEN=") {
             token = Some(v.to_string());
+        } else if let Some(v) = entry.strip_prefix("CANOPY_CTX_APP=") {
+            app = Some(v.to_string());
         }
     }
-    bridge_from(socket, port, token)
+    bridge_from(socket, port, token, app)
 }
 
 fn read_environ(pid: u32) -> Option<Vec<String>> {
@@ -8004,7 +8048,7 @@ mod tests {
         assert_eq!(
             bridge_env(),
             Some((
-                Endpoint::Socket("/run/canopy-ctx/ctx.sock".into(), Some("12345".into())),
+                Endpoint::Socket("/run/canopy-ctx/ctx.sock".into(), None),
                 "tok".into()
             ))
         );
@@ -8051,7 +8095,7 @@ mod tests {
             assert_eq!(
                 both,
                 Some((
-                    Endpoint::Socket("/run/canopy-ctx/ctx.sock".into(), Some("4100".into())),
+                    Endpoint::Socket("/run/canopy-ctx/ctx.sock".into(), None),
                     "t2".into()
                 ))
             );
@@ -8069,6 +8113,39 @@ mod tests {
             bridge_in(environ(&["CANOPY_CTX_SOCKET=/run/canopy-ctx/ctx.sock"])),
             None
         );
+    }
+
+    /// A terminal adopted by a later launch carries the previous launch's port
+    /// beside the stable socket. The port is only worth keeping when the app
+    /// that stamped it is still the process it was.
+    #[cfg(unix)]
+    #[test]
+    fn the_port_beside_a_socket_is_kept_only_for_a_running_stamping_app() {
+        let environ = |app: Option<String>| {
+            let mut env: Vec<String> = vec![
+                "CANOPY_CTX_TOKEN=t".into(),
+                "CANOPY_CTX_SOCKET=/h/ctx.sock".into(),
+                "CANOPY_CTX_PORT=4100".into(),
+            ];
+            env.extend(app.map(|a| format!("CANOPY_CTX_APP={a}")));
+            bridge_in(env)
+        };
+        let me = std::process::id();
+        let alive = format!("{me}:{}", process_start(me).expect("ps knows this process"));
+        let port_of = |found: Option<(Endpoint, String)>| match found {
+            Some((Endpoint::Socket(_, port), _)) => port,
+            other => panic!("expected a socket endpoint, got {other:?}"),
+        };
+        assert_eq!(port_of(environ(Some(alive))).as_deref(), Some("4100"));
+        // No stamp (an older app), a dead or reused pid, or junk: no port.
+        assert_eq!(port_of(environ(None)), None);
+        assert_eq!(
+            port_of(environ(Some(format!("{me}:Mon_Jan_1_00:00:00_1990")))),
+            None
+        );
+        assert_eq!(port_of(environ(Some("4294967294:x".into()))), None);
+        assert_eq!(port_of(environ(Some("nonsense".into()))), None);
+        assert_eq!(port_of(environ(Some(format!("{me}:")))), None);
     }
 
     /// Reads one HTTP request off `stream` and answers it with `status` and

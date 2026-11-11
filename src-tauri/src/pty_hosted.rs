@@ -229,6 +229,10 @@ pub struct HostedMeta {
     pub bridge: Option<String>,
     pub depth: Option<u8>,
     pub parent: Option<u32>,
+    /// The host's own id for this session, bound under the seal so metadata
+    /// copied from another session's listing does not verify on the copy. None
+    /// until the app has spawned the session and learned the id.
+    pub host: Option<u32>,
     pub seal: Option<String>,
 }
 
@@ -237,14 +241,18 @@ pub type Lineage = (u8, Option<u32>);
 
 /// What adoption may believe about a session's bridge credential: its verifier
 /// and, when it was known at sealing, its spawn-tree position (`None` inside
-/// means unknown). Nothing at all without a valid seal under `key`.
+/// means unknown). Nothing at all without a valid seal under `key`, and none
+/// unless the seal is bound to `host_id`, the session it was listed on: a
+/// same-user process can copy sealed metadata onto a decoy session, but not
+/// make the decoy carry the victim's host id.
 #[cfg_attr(not(unix), allow(dead_code))]
 pub fn trusted_credential(
     meta: &HostedMeta,
     key: Option<&[u8; 32]>,
+    host_id: u32,
 ) -> Option<(String, Option<Lineage>)> {
     let verifier = meta.bridge.clone()?;
-    if !crate::adoption_seal::verify(key?, meta) {
+    if meta.host != Some(host_id) || !crate::adoption_seal::verify(key?, meta) {
         return None;
     }
     Some((verifier, meta.depth.map(|depth| (depth, meta.parent))))
@@ -275,13 +283,48 @@ mod sealed {
     }
 
     /// Remember a freshly spawned hosted terminal's sealed metadata under its
-    /// pty id, with the host's own id for the session.
-    pub fn remember_sealed(pty_id: u32, master: &dyn MasterPty, meta: HostedMeta) {
+    /// pty id, with the host's own id for the session, and bind the seal to
+    /// that id: the spawn-time blob could not carry it (the host assigns it),
+    /// and until this write lands the session's seal verifies for no session,
+    /// so it adopts as a terminal with no credential (the safe side).
+    pub fn remember_sealed(pty_id: u32, master: &dyn MasterPty, mut meta: HostedMeta) {
         if meta.seal.is_none() {
             return;
         }
-        if let Some(hosted) = master.downcast_ref::<canopy_pty_host::client::HostMaster>() {
-            table().lock().unwrap().insert(pty_id, (hosted.id(), meta));
+        let Some(hosted) = master.downcast_ref::<canopy_pty_host::client::HostMaster>() else {
+            return;
+        };
+        let Some(key) = crate::adoption_seal::key() else {
+            return;
+        };
+        let host_id = hosted.id();
+        meta.host = Some(host_id);
+        meta.seal = Some(crate::adoption_seal::seal(&key, &meta));
+        table()
+            .lock()
+            .unwrap()
+            .insert(pty_id, (host_id, meta.clone()));
+        write_meta(pty_id, host_id, &meta);
+    }
+
+    /// Write sealed metadata to the host, bounded to a second so neither the
+    /// spawn path nor a Tauri command can hang on it.
+    fn write_meta(pty_id: u32, host_id: u32, meta: &HostedMeta) {
+        let Some(client) = super::client() else {
+            return;
+        };
+        let Ok(json) = serde_json::to_string(meta) else {
+            return;
+        };
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(client.set_meta(host_id, Some(json)));
+        });
+        if !matches!(
+            rx.recv_timeout(std::time::Duration::from_secs(1)),
+            Ok(Ok(()))
+        ) {
+            eprintln!("canopy: could not record terminal {pty_id}'s sealed metadata in the host; it would come back with no bridge credential or at the delegation cap");
         }
     }
 
@@ -302,6 +345,7 @@ mod sealed {
         let (host_id, meta) = table.get_mut(&pty_id)?;
         meta.depth = Some(depth);
         meta.parent = parent;
+        meta.host = Some(*host_id);
         meta.seal = Some(crate::adoption_seal::seal(key, meta));
         Some((*host_id, meta.clone()))
     }
@@ -320,22 +364,7 @@ mod sealed {
         let Some((host_id, meta)) = resealed(pty_id, depth, parent, &key) else {
             return;
         };
-        let Some(client) = super::client() else {
-            return;
-        };
-        let Ok(json) = serde_json::to_string(&meta) else {
-            return;
-        };
-        let (tx, rx) = std::sync::mpsc::channel();
-        std::thread::spawn(move || {
-            let _ = tx.send(client.set_meta(host_id, Some(json)));
-        });
-        if !matches!(
-            rx.recv_timeout(std::time::Duration::from_secs(1)),
-            Ok(Ok(()))
-        ) {
-            eprintln!("canopy: could not record terminal {pty_id}'s spawn depth in the host; it would come back at the delegation cap");
-        }
+        write_meta(pty_id, host_id, &meta);
     }
 }
 
@@ -374,14 +403,35 @@ mod adoption {
         }
     }
 
+    /// One session per terminal id. Two eligible sessions claiming the same
+    /// id (a decoy carrying copied metadata, say) cannot be told apart by what
+    /// they say about themselves, so neither is adopted: the terminal stays in
+    /// the host rather than being handed to whichever listed first.
     pub(super) fn adoptable_from(sessions: Vec<SessionInfo>, instance: &str) -> Vec<Adoptable> {
-        sessions
+        let found: Vec<Adoptable> = sessions
             .into_iter()
             .filter(|s| s.exited.is_none() && s.attached == Some(false) && s.pid.is_some())
             .filter_map(|info| {
                 let meta = parse(&info)?;
                 (meta.kind != "detached" && meta.run_id.is_none() && meta.instance == instance)
                     .then_some(Adoptable { info, meta })
+            })
+            .collect();
+        let mut seen: std::collections::HashMap<u32, usize> = Default::default();
+        for a in &found {
+            *seen.entry(a.meta.id).or_default() += 1;
+        }
+        found
+            .into_iter()
+            .filter(|a| {
+                let unique = seen[&a.meta.id] == 1;
+                if !unique {
+                    eprintln!(
+                        "canopy: several hosted sessions claim terminal {}; none of them is adopted",
+                        a.meta.id
+                    );
+                }
+                unique
             })
             .collect()
     }
@@ -411,11 +461,12 @@ mod adoption {
             }
             let probe = HostClient::new(socket);
             match probe.list_within(LAUNCH_WAIT) {
-                Ok(sessions) => match choose_token(&sessions, crate::adoption_seal::key().as_ref())
-                {
-                    Some(token) => Resolution::Reuse(token),
-                    None => Resolution::Fresh,
-                },
+                Ok(sessions) => {
+                    match choose_token(&sessions, crate::adoption_seal::key_nowait().as_ref()) {
+                        Some(token) => Resolution::Reuse(token),
+                        None => Resolution::Fresh,
+                    }
+                }
                 // A socket file left by a host that is gone, or one that is not
                 // listening, is "no host": the next spawn cleans it up and
                 // starts a fresh one. Only a host that connects and then fails
@@ -449,7 +500,9 @@ mod adoption {
             }
             if let Some(meta) = parse(info) {
                 if meta.kind != "detached" && meta.run_id.is_none() && !meta.instance.is_empty() {
-                    if key.is_some_and(|key| crate::adoption_seal::verify(key, &meta)) {
+                    if meta.host == Some(info.id)
+                        && key.is_some_and(|key| crate::adoption_seal::verify(key, &meta))
+                    {
                         *sealed.entry(meta.instance.clone()).or_default() += 1;
                     }
                     *counts.entry(meta.instance).or_default() += 1;
@@ -985,6 +1038,8 @@ pub(crate) mod tests {
             bridge: Some(verifier.into()),
             ..Default::default()
         };
+        // Bound to the host id the test sessions list under (`info(id, ..)`).
+        meta.host = Some(id);
         seal_for_spawn(&mut meta, &crate::adoption_seal::key().unwrap(), pending);
         meta
     }
@@ -995,26 +1050,65 @@ pub(crate) mod tests {
         let v = "ab".repeat(32);
         let root = sealed_meta(4, "inst-a", &v, false);
         assert_eq!(
-            trusted_credential(&root, Some(&key)),
+            trusted_credential(&root, Some(&key), 4),
             Some((v.clone(), Some((0, None))))
         );
         // Spawned while an agent spawn was pending: position unknown.
         let pending = sealed_meta(5, "inst-a", &v, true);
         assert_eq!(
-            trusted_credential(&pending, Some(&key)),
+            trusted_credential(&pending, Some(&key), 5),
             Some((v.clone(), None))
         );
         // No key, no seal, a forged seal, or a field changed under the seal.
-        assert_eq!(trusted_credential(&root, None), None);
+        assert_eq!(trusted_credential(&root, None, 4), None);
         let mut unsealed = root.clone();
         unsealed.seal = None;
-        assert_eq!(trusted_credential(&unsealed, Some(&key)), None);
+        assert_eq!(trusted_credential(&unsealed, Some(&key), 4), None);
         let mut forged = root.clone();
         forged.seal = Some("00".repeat(32));
-        assert_eq!(trusted_credential(&forged, Some(&key)), None);
+        assert_eq!(trusted_credential(&forged, Some(&key), 4), None);
         let mut swapped = root.clone();
         swapped.bridge = Some("cd".repeat(32));
-        assert_eq!(trusted_credential(&swapped, Some(&key)), None);
+        assert_eq!(trusted_credential(&swapped, Some(&key), 4), None);
+        // Sealed for host session 4, offered by any other session: no credential.
+        assert_eq!(trusted_credential(&root, Some(&key), 5), None);
+    }
+
+    /// Review finding 1: a same-user process copies a victim's sealed metadata
+    /// from `list` onto a decoy session. The copy carries the victim's host id
+    /// under a valid seal, so it must verify for neither vote nor credential
+    /// on the decoy's own id, and two sessions claiming one terminal id are
+    /// adopted as neither.
+    #[test]
+    fn metadata_copied_onto_a_decoy_session_is_neither_trusted_nor_adopted() {
+        let key = crate::adoption_seal::key().unwrap();
+        let v = "ab".repeat(32);
+        let victim = serde_json::to_string(&sealed_meta(4, "inst-a", &v, false)).unwrap();
+        let sessions = vec![
+            info(4, Some(victim.clone()), Some(false), None),
+            info(40, Some(victim.clone()), Some(false), None),
+        ];
+        // Only the session the seal was made for gets a sealed vote: the decoy
+        // counts as unsealed, so two plain inst-b sessions outvote it.
+        let b = |i| Some(meta_for(i, i as u64, "desktop", "inst-b"));
+        let mut decoy_vs = vec![sessions[1].clone()];
+        decoy_vs.push(info(2, b(2), Some(false), None));
+        decoy_vs.push(info(3, b(3), Some(false), None));
+        assert_eq!(
+            adoption_choose(&decoy_vs, Some(&key)).as_deref(),
+            Some("inst-b")
+        );
+        assert_eq!(
+            adoption_choose(&sessions[..1], Some(&key)).as_deref(),
+            Some("inst-a")
+        );
+        let decoy: HostedMeta = serde_json::from_str(&victim).unwrap();
+        assert_eq!(trusted_credential(&decoy, Some(&key), 40), None);
+        assert!(trusted_credential(&decoy, Some(&key), 4).is_some());
+        // Listed first or last, neither claimant is adopted.
+        assert!(adoption_adoptable(sessions.clone(), "inst-a").is_empty());
+        let reversed: Vec<_> = sessions.into_iter().rev().collect();
+        assert!(adoption_adoptable(reversed, "inst-a").is_empty());
     }
 
     /// The review's attack: any process of this user can spawn a session through
@@ -1030,7 +1124,7 @@ pub(crate) mod tests {
         let found = adoption_adoptable(vec![info(9, Some(forged), Some(false), None)], "inst-a");
         assert_eq!(found.len(), 1, "adopted as a terminal");
         let key = crate::adoption_seal::key().unwrap();
-        assert_eq!(trusted_credential(&found[0].meta, Some(&key)), None);
+        assert_eq!(trusted_credential(&found[0].meta, Some(&key), 9), None);
     }
 
     #[test]
@@ -1076,7 +1170,7 @@ pub(crate) mod tests {
         let listed = host.client.list().unwrap();
         let parsed: HostedMeta = serde_json::from_str(listed[0].meta.as_deref().unwrap()).unwrap();
         assert_eq!(
-            trusted_credential(&parsed, Some(&key)),
+            trusted_credential(&parsed, Some(&key), host_id),
             Some((v, Some((2, Some(17)))))
         );
         forget_sealed(61);
