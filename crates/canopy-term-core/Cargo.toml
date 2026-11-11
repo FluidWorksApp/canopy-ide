@@ -1,0 +1,14 @@
+[package]
+name = "canopy-term-core"
+version = "0.1.0"
+description = "Terminal screen state and the frame contract between emulator and renderer"
+authors = ["Cause Connect Pte Ltd <sam@fluidwords.app>"]
+license = "MIT"
+edition = "2021"
+rust-version = "1.82"
+
+# Its own workspace root with its own lock: parallel work on other crates, and
+# dependencies a track adds, never touch the app's Cargo.lock.
+[workspace]
+
+[dependencies]
