@@ -142,6 +142,15 @@ impl HostClient {
         ))
     }
 
+    /// `list` with its own bound, for the launch path where the app must not
+    /// wait out the default five seconds on a host that does not answer.
+    pub fn list_within(&self, timeout: Duration) -> std::io::Result<Vec<SessionInfo>> {
+        Ok(self
+            .call_timeout(&Request::List, timeout)?
+            .sessions
+            .unwrap_or_default())
+    }
+
     pub fn list(&self) -> std::io::Result<Vec<SessionInfo>> {
         Ok(self.call(&Request::List)?.sessions.unwrap_or_default())
     }

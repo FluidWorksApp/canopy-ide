@@ -556,16 +556,41 @@ impl PtyManager {
     /// the host untouched (its linger still applies).
     #[cfg(unix)]
     pub fn adopt_hosted<R: tauri::Runtime>(&self, app: AppHandle<R>) -> usize {
+        // Only a launch that found a previous launch's terminals has anything to
+        // do; otherwise starting the app must not start a host just to ask it.
+        let Some(instance) = crate::pty_hosted::reused_instance() else {
+            return 0;
+        };
+        // Raise the id and generation floor before anything can fail below: a
+        // session that cannot be adopted is still running, and its id must not
+        // be handed to a new terminal under the same token. Asked with a
+        // non-launching client, so it holds even when hosting is unavailable.
+        self.seed_identity_floor(&instance);
         let Some(client) = crate::pty_hosted::client() else {
             return 0;
         };
-        if let Some((id, generation)) = crate::pty_hosted::stored_identity(&client) {
+        self.adopt_from(app, &client, &instance)
+    }
+
+    #[cfg(unix)]
+    fn seed_identity_floor(&self, instance: &str) {
+        if let Some((id, generation)) = crate::pty_hosted::identity_floor(instance) {
             self.next_id.fetch_max(id, Ordering::SeqCst);
             self.next_session_generation
                 .fetch_max(generation, Ordering::SeqCst);
         }
+    }
+
+    #[cfg(unix)]
+    fn adopt_from<R: tauri::Runtime>(
+        &self,
+        app: AppHandle<R>,
+        client: &crate::pty_hosted::Client,
+        instance: &str,
+    ) -> usize {
+        let client = client.clone();
         let mut adopted = 0;
-        for found in crate::pty_hosted::adoptable(&client, instance_token()) {
+        for found in crate::pty_hosted::adoptable(&client, instance) {
             if self.sessions.lock().unwrap().contains_key(&found.meta.id) {
                 continue;
             }
@@ -4515,5 +4540,67 @@ mod tests {
         let session = pm.get(id).expect("session");
         pm.kill(id).expect("kill");
         assert!(session.shutdown.load(Ordering::SeqCst));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn adopt_from_restores_identity_and_history_without_a_fresh_output_stamp() {
+        use crate::pty_hosted::tests::{command, meta_for, InProcessHost};
+        let host = InProcessHost::start("adoptmgr");
+        let (child, master) = crate::pty_hosted::spawn(
+            &host.client,
+            &command("echo before-quit; sleep 300"),
+            80,
+            24,
+            Some(meta_for(41, 9, "desktop", "inst-t")),
+        )
+        .expect("hosted spawn");
+        let wait = |f: &dyn Fn() -> bool| {
+            let deadline = std::time::Instant::now() + Duration::from_secs(10);
+            while std::time::Instant::now() < deadline && !f() {
+                thread::sleep(Duration::from_millis(50));
+            }
+            f()
+        };
+        assert!(wait(&|| host.client.list().unwrap()[0].end > 0));
+        // The app quits: the connection drops, which only detaches.
+        drop(master);
+        drop(child);
+        assert!(wait(
+            &|| host.client.list().unwrap()[0].attached == Some(false)
+        ));
+
+        let app = tauri::test::mock_app();
+        let pm = PtyManager::default();
+        assert_eq!(
+            pm.adopt_from(app.handle().clone(), &host.client, "inst-t"),
+            1
+        );
+
+        let session = pm.get(41).expect("adopted under its original id");
+        assert_eq!(session.session_generation, 9);
+        assert_eq!(session.pid, host.client.list().unwrap()[0].pid);
+        // History is in the ring but is not "the agent just spoke".
+        assert_eq!(session.quiet_ms(now_ms()), None);
+        assert!(session.output_bytes() >= "before-quit".len() as u64);
+        assert!(String::from_utf8_lossy(
+            &session
+                .scrollback
+                .lock()
+                .unwrap()
+                .iter()
+                .copied()
+                .collect::<Vec<u8>>()
+        )
+        .contains("before-quit"));
+        // The next terminal lands above the adopted ones.
+        let (id, generation) = pm.allocate_session_identity().unwrap();
+        assert!(id > 41 && generation > 9, "{id} {generation}");
+        // A second pass finds nothing free: the session is now attached.
+        assert_eq!(
+            pm.adopt_from(app.handle().clone(), &host.client, "inst-t"),
+            0
+        );
+        let _ = pm.kill(41);
     }
 }

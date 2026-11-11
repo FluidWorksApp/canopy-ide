@@ -14,7 +14,7 @@ pub fn enabled() -> bool {
 
 #[cfg(unix)]
 pub use adoption::{
-    adopt, adoptable, note_identity, reused_instance, stored_identity, Adoptable, Adopted,
+    adopt, adoptable, identity_floor, note_identity, reused_instance, Adoptable, Adopted,
 };
 #[cfg(unix)]
 pub use unix::{client, spawn, Client};
@@ -226,13 +226,20 @@ mod adoption {
         pub meta: HostedMeta,
     }
 
+    /// The longest the launch path waits on the host for any one answer.
+    const LAUNCH_WAIT: Duration = Duration::from_secs(1);
+
     /// Sessions that are running, not attached to anyone (a host that predates
     /// the `attached` field reports unknown, which is never taken), whose
     /// metadata is ours and not a micro-task's, and that belong to `instance`.
     pub fn adoptable(client: &Client, instance: &str) -> Vec<Adoptable> {
-        let Ok(sessions) = client.list() else {
-            return Vec::new();
-        };
+        match client.list_within(LAUNCH_WAIT) {
+            Ok(sessions) => adoptable_from(sessions, instance),
+            Err(_) => Vec::new(),
+        }
+    }
+
+    pub(super) fn adoptable_from(sessions: Vec<SessionInfo>, instance: &str) -> Vec<Adoptable> {
         sessions
             .into_iter()
             .filter(|s| s.exited.is_none() && s.attached == Some(false) && s.pid.is_some())
@@ -268,26 +275,69 @@ mod adoption {
                 return Resolution::Fresh;
             }
             let probe = HostClient::new(socket);
-            let Ok(sessions) = probe.list() else {
-                return Resolution::HostUnusable;
-            };
-            // The token most waiting sessions agree on.
-            let mut counts: std::collections::HashMap<String, usize> = Default::default();
-            for info in &sessions {
-                if info.exited.is_some() || info.attached != Some(false) {
-                    continue;
+            match probe.list_within(LAUNCH_WAIT) {
+                Ok(sessions) => match choose_token(&sessions) {
+                    Some(token) => Resolution::Reuse(token),
+                    None => Resolution::Fresh,
+                },
+                // A socket file left by a host that is gone, or one that is not
+                // listening, is "no host": the next spawn cleans it up and
+                // starts a fresh one. Only a host that connects and then fails
+                // to answer sensibly is unusable.
+                Err(e)
+                    if matches!(
+                        e.kind(),
+                        std::io::ErrorKind::NotFound
+                            | std::io::ErrorKind::ConnectionRefused
+                            | std::io::ErrorKind::ConnectionReset
+                            | std::io::ErrorKind::BrokenPipe
+                    ) =>
+                {
+                    Resolution::Fresh
                 }
-                if let Some(meta) = parse(info) {
-                    if meta.kind != "detached" && !meta.instance.is_empty() {
-                        *counts.entry(meta.instance).or_default() += 1;
-                    }
-                }
-            }
-            match counts.into_iter().max_by_key(|(_, n)| *n) {
-                Some((token, _)) => Resolution::Reuse(token),
-                None => Resolution::Fresh,
+                Err(_) => Resolution::HostUnusable,
             }
         })
+    }
+
+    /// The token most waiting sessions agree on: running, free (an old host with
+    /// no `attached` field is never counted), ours, not a micro-task's.
+    pub(super) fn choose_token(sessions: &[SessionInfo]) -> Option<String> {
+        let mut counts: std::collections::HashMap<String, usize> = Default::default();
+        for info in sessions {
+            if info.exited.is_some() || info.attached != Some(false) {
+                continue;
+            }
+            if let Some(meta) = parse(info) {
+                if meta.kind != "detached" && !meta.instance.is_empty() {
+                    *counts.entry(meta.instance).or_default() += 1;
+                }
+            }
+        }
+        // Ties broken by the token itself so the choice never depends on map order.
+        counts
+            .into_iter()
+            .max_by(|a, b| a.1.cmp(&b.1).then_with(|| b.0.cmp(&a.0)))
+            .map(|(token, _)| token)
+    }
+
+    /// The least id and generation a new terminal may use under `instance`: past
+    /// every session that carries the token (running or not, attached or not,
+    /// adoptable or not), and past the host's stored high-water mark. Asked with
+    /// a non-launching client, so it works even when hosting is unavailable.
+    pub fn identity_floor(instance: &str) -> Option<(u32, u64)> {
+        let probe = HostClient::new(socket_path()?);
+        let sessions = probe.list_within(LAUNCH_WAIT).ok()?;
+        let mut floor: Option<(u32, u64)> = stored_identity(&probe);
+        for info in &sessions {
+            if let Some(meta) = parse(info) {
+                if meta.instance == instance {
+                    let (id, generation) = floor.unwrap_or((0, 0));
+                    floor = Some((id.max(meta.id), generation.max(meta.generation)));
+                }
+            }
+        }
+        floor
     }
 
     pub fn reused_instance() -> Option<String> {
@@ -374,7 +424,8 @@ use adoption::resolution;
 use adoption::Resolution;
 
 #[cfg(all(test, unix))]
-mod tests {
+pub(crate) mod tests {
+    use super::adoption::{adoptable_from as adoption_adoptable, choose_token as adoption_choose};
     use super::*;
     use canopy_pty_host::client::HostClient;
     use canopy_pty_host::server::{serve, ServerConfig, EXITED_TTL};
@@ -385,14 +436,14 @@ mod tests {
     use std::time::Duration;
 
     /// A host on a thread, so these tests need no separate binary.
-    struct InProcessHost {
-        client: HostClient,
+    pub(crate) struct InProcessHost {
+        pub(crate) client: HostClient,
         stop: Arc<AtomicBool>,
         dir: std::path::PathBuf,
     }
 
     impl InProcessHost {
-        fn start(name: &str) -> Self {
+        pub(crate) fn start(name: &str) -> Self {
             let dir = std::env::temp_dir().join(format!("cph{}{}", std::process::id(), name));
             let _ = std::fs::remove_dir_all(&dir);
             std::fs::create_dir_all(&dir).unwrap();
@@ -462,7 +513,7 @@ mod tests {
         }
     }
 
-    fn command(script: &str) -> CommandBuilder {
+    pub(crate) fn command(script: &str) -> CommandBuilder {
         let mut cmd = CommandBuilder::new("sh");
         cmd.arg("-c");
         cmd.arg(script);
@@ -565,7 +616,7 @@ mod tests {
         false
     }
 
-    fn meta_for(id: u32, generation: u64, kind: &str, instance: &str) -> String {
+    pub(crate) fn meta_for(id: u32, generation: u64, kind: &str, instance: &str) -> String {
         serde_json::json!({
             "v": 1, "id": id, "generation": generation, "kind": kind,
             "cwd": "/tmp", "run": false, "instance": instance,
@@ -624,6 +675,49 @@ mod tests {
         );
         let mut child = taken.child;
         child.kill().unwrap();
+    }
+
+    fn info(
+        id: u32,
+        meta: Option<String>,
+        attached: Option<bool>,
+        exited: Option<i32>,
+    ) -> canopy_pty_host::protocol::SessionInfo {
+        canopy_pty_host::protocol::SessionInfo {
+            id,
+            pid: Some(1000 + id),
+            meta,
+            attached,
+            exited,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn the_token_is_the_one_most_free_sessions_carry() {
+        let a = |i| Some(meta_for(i, i as u64, "desktop", "inst-a"));
+        let b = |i| Some(meta_for(i, i as u64, "desktop", "inst-b"));
+        let sessions = vec![
+            info(1, a(1), Some(false), None),
+            info(2, a(2), Some(false), None),
+            info(3, b(3), Some(false), None),
+        ];
+        assert_eq!(adoption_choose(&sessions).as_deref(), Some("inst-a"));
+    }
+
+    #[test]
+    fn an_old_host_exited_attached_and_micro_task_sessions_never_count() {
+        let m = |kind: &str| Some(meta_for(1, 1, kind, "inst-a"));
+        let sessions = vec![
+            info(1, m("desktop"), None, None),       // host without the field
+            info(2, m("desktop"), Some(true), None), // someone is attached
+            info(3, m("desktop"), Some(false), Some(0)), // exited
+            info(4, m("detached"), Some(false), None), // micro-task
+            info(5, None, Some(false), None),        // no metadata
+            info(6, Some("{not json".into()), Some(false), None),
+        ];
+        assert_eq!(adoption_choose(&sessions), None);
+        assert!(adoption_adoptable(sessions, "inst-a").is_empty());
     }
 
     #[test]
