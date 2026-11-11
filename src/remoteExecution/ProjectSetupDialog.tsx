@@ -70,8 +70,8 @@ export function ProjectSetupDialog({projectId,projectName,workspaceName,componen
  const usable=components.filter(c=>!skipped.includes(c.label));
  const failed=progress?.done&&progress.projects.some(p=>p.state==='failed');
  return <div className="mirror-setup" role="group" aria-label={`Set up ${projectName} on ${workspaceName}`}>
-  <p className="workspace-description">Copy {projectName} to {workspaceName}: the repository on the same branch with your unpushed commits and changes. Pick any git-ignored files it also needs. Only names and sizes are listed here; files are read when you press the button.</p>
-  {skipped.length>0&&<small className="mirror-problem">Skipped, folder no longer exists on this Mac: {skipped.join(', ')}.</small>}
+  <p className="workspace-description">Copy {projectName} to {workspaceName} with your branch and unpushed changes. Tick any ignored files it needs.</p>
+  {skipped.length>0&&<small className="mirror-problem">Skipped, folder missing: {skipped.join(', ')}.</small>}
   {usable.map(c=>{
    const list=files[c.componentId]??[];
    return <section key={c.componentId} className="mirror-project">
@@ -81,7 +81,7 @@ export function ProjectSetupDialog({projectId,projectName,workspaceName,componen
      if(!group.length)return null;
      return <fieldset key={category} disabled={running}>
       <legend>{title}</legend>
-      {category==='secret'&&<small className="mirror-problem">These look like credentials. They are copied to the workspace only if you tick them.</small>}
+      {category==='secret'&&<small className="mirror-problem">Credentials. Copied only if ticked.</small>}
       {group.map(f=><Checkbox key={f.path} checked={(chosen[c.componentId]??[]).includes(f.path)} onChange={on=>toggle(c.componentId,f.path,on)} label={f.path} hint={size(f.size)}/>)}
      </fieldset>;
     })}

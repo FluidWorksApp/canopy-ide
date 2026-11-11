@@ -32,8 +32,8 @@
 .chat-card-chip.is-changes-requested{border-color:var(--danger);color:var(--danger)}
 
 .share-dialog-backdrop{position:fixed;inset:0;z-index:1000;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,.4)}
-.share-dialog{display:flex;flex-direction:column;gap:10px;width:min(620px,calc(100vw - 32px));max-height:calc(100vh - 48px);overflow:auto;padding:16px;border:1px solid var(--border);border-radius:var(--r-md,8px);background:var(--bg-raised);color:var(--text);box-shadow:0 12px 40px rgba(0,0,0,.35)}
-.share-dialog h2{margin:0;font-size:14px}
+.share-dialog{display:flex;flex-direction:column;gap:10px;width:min(620px,calc(100vw - 32px));max-height:var(--dialog-max-h);overflow:auto;padding:16px;border:1px solid var(--border);border-radius:var(--r-md,8px);background:var(--bg-raised);color:var(--text);box-shadow:0 12px 40px rgba(0,0,0,.35)}
+.share-dialog h2{position:sticky;top:-16px;z-index:1;margin:-16px -16px 0;padding:16px 16px 8px;font-size:14px;background:var(--bg-raised)}
 .share-dialog label{display:flex;flex-direction:column;gap:3px;font-size:12px;color:var(--text-muted)}
 .share-dialog textarea{font:inherit;font-size:12.5px;padding:5px 7px;border:1px solid var(--border);border-radius:var(--r-sm);background:var(--bg);color:var(--text);resize:vertical}
 .share-dialog-row{display:flex;gap:8px}
@@ -44,7 +44,7 @@
 .share-dialog-meter meter{flex:1}
 .share-dialog-warning{margin:0;padding:6px 8px;border-radius:var(--r-sm);background:color-mix(in srgb,var(--warn) 14%,transparent);color:var(--text);font-size:12px}
 .share-dialog-error{margin:0;color:var(--danger);font-size:12px}
-.share-dialog-actions{display:flex;justify-content:flex-end;gap:6px}
+.share-dialog-actions{display:flex;justify-content:flex-end;gap:6px;position:sticky;bottom:-16px;z-index:1;margin:0 -16px -16px;padding:10px 16px 16px;background:var(--bg-raised);border-top:1px solid var(--border)}
 .share-dialog-reviewers{display:flex;flex-wrap:wrap;gap:4px 12px;font-size:12px}
 .share-dialog-reviewers label{flex-direction:row;align-items:center;gap:4px;color:var(--text)}
 .chat-card-plan-section ul{margin:2px 0 0;padding-left:18px;font-size:12px}

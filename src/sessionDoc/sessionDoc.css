@@ -3,7 +3,7 @@
 /* The document scrolls inside its own frame, so the title and the close
    button stay in view however long it gets. */
 .sdoc-backdrop{position:fixed;inset:0;z-index:950;display:flex;align-items:center;justify-content:center;padding:32px 16px;background:rgba(0,0,0,.55);overflow:hidden}
-.sdoc{display:flex;flex-direction:column;width:min(820px,100%);max-height:100%;min-height:0;border:1px solid var(--border);border-radius:var(--r-md,8px);background:var(--bg-raised);color:var(--text);box-shadow:0 12px 40px rgba(0,0,0,.35)}
+.sdoc{display:flex;flex-direction:column;width:min(820px,100%);max-height:var(--dialog-max-h);min-height:0;border:1px solid var(--border);border-radius:var(--r-md,8px);background:var(--bg-raised);color:var(--text);box-shadow:0 12px 40px rgba(0,0,0,.35)}
 .sdoc-head{flex-shrink:0;display:flex;gap:12px;align-items:flex-start;padding:14px 16px;border-bottom:1px solid var(--border)}
 .sdoc-head-main{flex:1;min-width:0}
 .sdoc-head h2{margin:0 0 4px;font-size:15px;line-height:1.35;overflow-wrap:anywhere}

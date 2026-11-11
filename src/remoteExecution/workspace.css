@@ -92,7 +92,7 @@
 .workspace-selected {flex:0 0 auto;white-space:nowrap;word-break:normal;}
 .workspace-detail-heading > div {flex:1;}
 .workspace-detail-heading strong {overflow-wrap:anywhere;}
-.dlg-panel:has(.workspace-tools) {max-height:calc(100dvh - 48px);display:flex;flex-direction:column;overflow:hidden;}
+.dlg-panel:has(.workspace-tools) {max-height:var(--dialog-max-h);display:flex;flex-direction:column;overflow:hidden;}
 .dlg-panel:has(.workspace-tools) > .dlg-children {min-height:0;overflow-y:auto;}
 .dlg-panel:has(.workspace-tools) > .dlg-header,.dlg-panel:has(.workspace-tools) > .dlg-actions {flex-shrink:0;}
 .workspace-startup-heading {display:flex;justify-content:space-between;gap:12px;align-items:baseline;}
@@ -141,7 +141,7 @@
 .preview-body > .remote-desktop { width:100%; height:100%; min-height:0; display:flex; flex-direction:column; }
 .preview-body .remote-desktop-surface { flex:1; min-height:0; overflow:hidden; }
 
-.workspace-panel {position:fixed;right:24px;top:76px;z-index:9000;width:min(760px,calc(100vw - 48px));max-height:calc(100dvh - 100px);display:flex;flex-direction:column;background:var(--bg-overlay);border:1px solid var(--border-strong,var(--border));border-radius:12px;box-shadow:0 18px 60px #0006;color:var(--text);outline:none;}
+.workspace-panel {position:fixed;right:24px;top:76px;z-index:9000;width:min(760px,calc(100vw - 48px));max-height:var(--dialog-max-h);display:flex;flex-direction:column;background:var(--bg-overlay);border:1px solid var(--border-strong,var(--border));border-radius:12px;box-shadow:0 18px 60px #0006;color:var(--text);outline:none;}
 .workspace-panel[hidden] {display:none;}
 .workspace-panel > header {display:flex;align-items:center;justify-content:space-between;padding:18px 24px;border-bottom:1px solid var(--border);}
 .workspace-panel h2 {font-size:var(--fs-lg);margin:0;}
@@ -257,14 +257,14 @@
 @media(max-width:620px){.workspace-hero{align-items:flex-start;flex-direction:column;gap:16px;}.workspace-hero-right{width:100%;flex-direction:row;align-items:center;justify-content:space-between;gap:12px;}.workspace-panel-content{padding:0 16px 20px;}.workspace-panel > header{padding:14px 16px;}.workspace-panel .workspace-navigation{flex-wrap:wrap;}.workspace-panel .workspace-navigation > .tabs{flex-basis:100%;}.workspace-section-tabs{gap:20px;}.workspace-hero h3{font-size:var(--fs-md);}}
 .workspace-panel .workspace-tools label {line-height:1.5;}
 .workspace-hero-billing {display:block;margin-top:8px;font-size:var(--fs-xs);color:var(--text-dim);}
-@media(max-height:650px){.workspace-panel{top:48px;max-height:calc(100dvh - 72px);}.workspace-panel > header{padding-top:10px;padding-bottom:10px;}.workspace-panel .workspace-navigation{padding-top:8px;padding-bottom:8px;}.workspace-panel .workspace-lifecycle{padding-top:16px;padding-bottom:16px;}.workspace-section-tabs{margin-bottom:16px;}.workspace-section-tabs button{padding-top:8px;padding-bottom:8px;}.workspace-hero-icon{width:40px;height:40px;}.workspace-hero-right{gap:8px;}}
+@media(max-height:650px){.workspace-panel{top:48px;max-height:var(--dialog-max-h);}.workspace-panel > header{padding-top:10px;padding-bottom:10px;}.workspace-panel .workspace-navigation{padding-top:8px;padding-bottom:8px;}.workspace-panel .workspace-lifecycle{padding-top:16px;padding-bottom:16px;}.workspace-section-tabs{margin-bottom:16px;}.workspace-section-tabs button{padding-top:8px;padding-bottom:8px;}.workspace-hero-icon{width:40px;height:40px;}.workspace-hero-right{gap:8px;}}
 
 /* The utility stays anchored while refresh, startup and selected content change. */
-.workspace-panel {height:min(720px,calc(100dvh - 100px));}
+.workspace-panel {height:min(720px,var(--dialog-max-h));}
 .workspace-panel > header {flex-shrink:0;}
 .workspace-panel-content {flex:1;scrollbar-gutter:stable;}
 .workspace-panel .workspace-navigation {position:sticky;top:0;z-index:2;background:var(--bg-overlay);}
-@media(max-height:650px){.workspace-panel{height:calc(100dvh - 72px);}}
+@media(max-height:650px){.workspace-panel{height:var(--dialog-max-h);}}
 @media(max-width:600px){.workspace-panel{left:12px;right:12px;width:auto;}}
 
 /* Header switcher: a real dropdown. One row per workspace; a click switches. */
@@ -293,7 +293,7 @@
 .workspace-menu-note {margin:4px 10px;font-size:var(--fs-xs);color:var(--text-muted);overflow-wrap:anywhere;}
 
 /* All workspaces: one named-machine dashboard in a bounded dialog. */
-.dlg-panel:has(> .dlg-children > .unified-dialog-body) {width:min(1040px,100%);max-width:1040px;max-height:calc(100dvh - 48px);overflow:hidden;}
+.dlg-panel:has(> .dlg-children > .unified-dialog-body) {width:min(1040px,100%);max-width:1040px;max-height:var(--dialog-max-h);overflow:hidden;}
 .dlg-panel:has(> .dlg-children > .unified-dialog-body) > .dlg-children {padding:12px 20px 20px;scrollbar-gutter:stable;}
 .unified-dialog-body {min-width:0;}
 .unified-workspace {display:grid;gap:14px;min-width:0;font-size:var(--fs-sm);}
@@ -338,7 +338,7 @@
 }
 @media(max-width:620px){
  .dlg-scrim:has(.unified-dialog-body) {padding:10px;}
- .dlg-panel:has(> .dlg-children > .unified-dialog-body) {max-height:calc(100dvh - 20px);}
+ .dlg-panel:has(> .dlg-children > .unified-dialog-body) {max-height:var(--dialog-max-h);}
  .dlg-panel:has(> .dlg-children > .unified-dialog-body) > .dlg-header {padding:14px 14px 4px;}
  .dlg-panel:has(> .dlg-children > .unified-dialog-body) > .dlg-children {padding:10px 14px 14px;}
  .unified-toolbar {grid-template-columns:minmax(0,1fr) minmax(0,1fr);}
@@ -359,7 +359,7 @@
 }
 
 /* Manage panel: compact, app type scale, list on the left and detail on the right. */
-.workspace-panel {width:min(880px,calc(100vw - 48px));height:auto;min-height:min(420px,calc(100dvh - 100px));max-height:calc(100dvh - 100px);font-family:var(--font-ui);font-size:var(--fs-sm);line-height:1.45;}
+.workspace-panel {width:min(880px,calc(100vw - 48px));height:auto;min-height:min(420px,var(--dialog-max-h));max-height:var(--dialog-max-h);font-family:var(--font-ui);font-size:var(--fs-sm);line-height:1.45;}
 .workspace-panel > header {padding:10px 14px;}
 .workspace-panel h2 {font-size:var(--fs-md);}
 .workspace-panel-content {padding:0;display:flex;overflow:hidden;}
@@ -425,7 +425,7 @@
 /* Workspaces is a modal: centred over a backdrop, below the shared Dialog (z 900). */
 .workspace-panel-backdrop {position:fixed;inset:0;z-index:800;display:grid;place-items:center;padding:24px;background:color-mix(in oklab,var(--bg-deep) 62%,transparent);}
 .workspace-panel-backdrop[hidden] {display:none;}
-.workspace-panel-backdrop > .workspace-panel {position:relative;inset:auto;right:auto;top:auto;left:auto;margin:0;max-height:calc(100dvh - 48px);}
+.workspace-panel-backdrop > .workspace-panel {position:relative;inset:auto;right:auto;top:auto;left:auto;margin:0;max-height:var(--dialog-max-h);}
 @media(max-width:600px){.workspace-panel-backdrop{padding:12px;}.workspace-panel-backdrop > .workspace-panel{width:100%;}}
 /* Snapshot storage: usage meter (80% / 95% warnings) and warm-up progress. */
 .workspace-storage {display:grid;gap:4px;margin-top:8px;max-width:320px;}

@@ -140,6 +140,22 @@ const RUNTIME_DOWNLOADS = [
     by: "Useful Sensors",
     url: "https://huggingface.co/UsefulSensors/moonshine",
   },
+  {
+    name: "Laya (Q8_0 GGUF, the local System One decision model)",
+    // The model card (and its base model's) declare Apache-2.0 in metadata; neither
+    // repository carries a LICENSE or NOTICE file, so there is no further notice to reproduce.
+    license: "Apache-2.0",
+    by: "Convai Innovations (convaiinnovations/laya); GGUF conversion by ggml-org",
+    url: "https://huggingface.co/ggml-org/Laya-GGUF",
+  },
+  {
+    name: "llama.cpp b12262 (`llama-server`, the runtime that serves Laya)",
+    // Its release archive also carries MIT-licensed vendored code (cpp-httplib,
+    // nlohmann/json, stb) under the same terms.
+    license: "MIT",
+    by: "The ggml authors",
+    url: "https://github.com/ggml-org/llama.cpp",
+  },
 ];
 
 // Tools the Device tab installs from npm into ~/.canopy/device-tools only after
@@ -600,9 +616,10 @@ ${BUNDLED_BINARIES.map(
 
 ## Models downloaded at runtime
 
-Voice dictation downloads a speech model on first use. Canopy does not
-redistribute these — they are fetched to the user's own machine — but their
-terms govern use of the model:
+Voice dictation downloads a speech model on first use, and after install
+Canopy fetches the local System One decision model and the llama.cpp runtime
+that serves it. Canopy does not redistribute these — they are fetched to the
+user's own machine, never packaged in the app — but their terms govern use:
 
 ${RUNTIME_DOWNLOADS.map((m) => `- **${m.name}** — ${m.license}, by ${m.by}. <${m.url}>`).join("\n")}
 
