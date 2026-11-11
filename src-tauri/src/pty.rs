@@ -653,6 +653,13 @@ impl PtyManager {
             };
             let meta = taken.meta;
             let meta_id = meta.id;
+            // The agent still holds the credential the previous launch minted,
+            // and its hooks reach this launch through the stable socket.
+            // Recognise that credential under the identity it had, spawn-tree
+            // position included, but only from sealed metadata: anything else
+            // may have been written by any process of this user, and is adopted
+            // as a terminal with no credential.
+            let readopted = readopt_credential(&app, &meta, found.info.id);
             self.next_id.fetch_max(meta.id, Ordering::SeqCst);
             self.next_session_generation
                 .fetch_max(meta.generation, Ordering::SeqCst);
@@ -693,7 +700,10 @@ impl PtyManager {
                         thread::spawn(move || session.nudge_redraw());
                     }
                 }
-                Err(error) => eprintln!("canopy: could not start adopted terminal: {error}"),
+                Err(error) => {
+                    undo_readopt(&app, meta_id, readopted);
+                    eprintln!("canopy: could not start adopted terminal: {error}");
+                }
             }
         }
         adopted
@@ -703,7 +713,67 @@ impl PtyManager {
     pub fn adopt_hosted<R: tauri::Runtime>(&self, _app: AppHandle<R>) -> usize {
         0
     }
+}
 
+/// Register an adopted terminal's credential from its sealed metadata.
+/// Returns whether this call registered it, which is the only case in which a
+/// failed adoption may retire it again.
+#[cfg(unix)]
+fn readopt_credential<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    meta: &crate::pty_hosted::HostedMeta,
+    host_id: u32,
+) -> bool {
+    let Some(ctx) = app.try_state::<crate::context::ContextBridge>() else {
+        return false;
+    };
+    if meta.bridge.is_none() {
+        // Spawned before verifiers existed: terminal only, as before.
+        return false;
+    }
+    let key = crate::adoption_seal::key();
+    let Some((verifier, lineage)) =
+        crate::pty_hosted::trusted_credential(meta, key.as_ref(), host_id)
+    else {
+        eprintln!(
+            "canopy: adopted terminal {} has unsealed or invalid metadata; it keeps no bridge credential",
+            meta.id
+        );
+        return false;
+    };
+    let identity = crate::context::AgentIdentity {
+        pty_id: meta.id,
+        instance: meta.instance.clone(),
+        cwd: meta.cwd.clone(),
+        run_id: meta.run_id.clone(),
+        attempt_id: meta.attempt_id.clone(),
+        spawn_depth: 0,
+        parent_pty_id: None,
+    };
+    let registered = ctx.readopt_agent(&verifier, identity, lineage);
+    if !registered {
+        eprintln!(
+            "canopy: adopted terminal {} keeps no bridge credential",
+            meta.id
+        );
+    }
+    registered
+}
+
+/// Hand back a credential `readopt_credential` registered, when the adoption it
+/// was for failed. A refused readopt registered nothing, and retiring by pty id
+/// then would remove a live terminal's credential instead.
+#[cfg(unix)]
+fn undo_readopt<R: tauri::Runtime>(app: &AppHandle<R>, pty_id: u32, readopted: bool) {
+    if !readopted {
+        return;
+    }
+    if let Some(ctx) = app.try_state::<crate::context::ContextBridge>() {
+        ctx.retire_agent(pty_id);
+    }
+}
+
+impl PtyManager {
     pub fn sessions(&self) -> Arc<Mutex<HashMap<u32, Arc<Session>>>> {
         self.sessions.clone()
     }
@@ -2171,10 +2241,20 @@ impl PtyManager {
         // which session is calling without taking its word for it. Every PTY
         // used to carry the same one, which left "who is asking" answerable
         // only from body fields the caller filled in itself.
+        //
+        // With the PTY host on, the stable socket rides beside the port: the
+        // hook prefers it, so an agent that outlives this launch reaches the
+        // next one. An inherited socket (an app started from another Canopy's
+        // terminal) is dropped first, since it would win over our port and
+        // carry this terminal's token to the other instance.
+        cmd.env_remove("CANOPY_CTX_SOCKET");
+        let mut bridge_verifier = None;
         if let Some(ctx) = app.try_state::<crate::context::ContextBridge>() {
             if let Some((port, token)) = ctx.mint_agent(id, &cwd, task_identity.as_ref()) {
-                cmd.env("CANOPY_CTX_PORT", port.to_string());
-                cmd.env("CANOPY_CTX_TOKEN", token);
+                for (key, value) in crate::context::agent_env(port, &token, ctx.socket()) {
+                    cmd.env(key, value);
+                }
+                bridge_verifier = Some(crate::context::verifier(&token));
             }
         }
         // The IDE server is bound before the child exists so its port is in
@@ -2252,8 +2332,12 @@ impl PtyManager {
         };
         let hosted = hosted_client.as_ref().and_then(|client| {
             // Written with the spawn, not after: a crash in between would leave a
-            // session nothing can identify. Identity only, never env or tokens.
-            let meta = serde_json::json!({
+            // session nothing can identify. Identity only, never env or tokens:
+            // `bridge` is the credential's SHA-256, so a later launch can
+            // recognise the token the agent holds without the host storing it.
+            // It is written only under a seal (adoption_seal.rs), since any
+            // process of this user can write metadata through the host.
+            let value = serde_json::json!({
                 "v": 1,
                 "id": id,
                 "generation": session_generation,
@@ -2266,10 +2350,32 @@ impl PtyManager {
                 "run_id": task_identity.as_ref().map(|t| t.run_id.clone()),
                 "attempt_id": task_identity.as_ref().map(|t| t.attempt_id.clone()),
                 "instance": instance_token(),
-            })
-            .to_string();
+            });
+            let mut sealed = None;
+            let meta = match (
+                bridge_verifier.clone(),
+                serde_json::from_value::<crate::pty_hosted::HostedMeta>(value.clone()),
+                crate::adoption_seal::key(),
+            ) {
+                (Some(verifier), Ok(mut meta), Some(key)) => {
+                    meta.bridge = Some(verifier);
+                    let pending = app
+                        .try_state::<crate::context::ContextBridge>()
+                        .is_some_and(|ctx| ctx.spawn_pending());
+                    crate::pty_hosted::seal_for_spawn(&mut meta, &key, pending);
+                    let json = serde_json::to_string(&meta).unwrap_or_else(|_| value.to_string());
+                    sealed = Some(meta);
+                    json
+                }
+                _ => value.to_string(),
+            };
             match crate::pty_hosted::spawn(client, &cmd, cols, rows, Some(meta)) {
-                Ok(parts) => Some(parts),
+                Ok(parts) => {
+                    if let Some(meta) = sealed {
+                        crate::pty_hosted::remember_sealed(id, &*parts.1, meta);
+                    }
+                    Some(parts)
+                }
                 Err(error) => {
                     eprintln!(
                         "canopy: PTY host spawn failed, using an in-process terminal: {error}"
@@ -4721,6 +4827,149 @@ mod tests {
             0
         );
         let _ = pm.kill(41);
+    }
+
+    /// The agent in an adopted terminal still holds the token the previous
+    /// launch minted. Adoption must make this launch's bridge accept it under
+    /// the same identity, spawn-tree position included.
+    #[cfg(unix)]
+    #[test]
+    fn adopt_from_gives_the_held_bridge_token_back_its_identity() {
+        use crate::pty_hosted::tests::{command, InProcessHost};
+        use tauri::Manager;
+        let instance = instance_token().to_string();
+        let token = "f".repeat(32);
+        let key = crate::adoption_seal::key().unwrap();
+        // As a spawn while a delegation is pending seals it, then as the
+        // reseal after binding writes it: depth 2 under pty 17.
+        let mut sealed = crate::pty_hosted::HostedMeta {
+            v: 1,
+            id: 52,
+            generation: 4,
+            kind: "desktop".into(),
+            cwd: "/tmp".into(),
+            instance: instance.clone(),
+            bridge: Some(crate::context::verifier(&token)),
+            ..Default::default()
+        };
+        crate::pty_hosted::seal_for_spawn(&mut sealed, &key, true);
+        let meta = serde_json::to_string(&sealed).unwrap();
+        let host = InProcessHost::start("adoptctx");
+        let (child, master) = crate::pty_hosted::spawn(
+            &host.client,
+            &command("while :; do sleep 0.1; done"),
+            80,
+            24,
+            Some(meta),
+        )
+        .expect("hosted spawn");
+        // The reseal after binding, bound to the host's own id for the session.
+        let host_id = host.client.list().unwrap()[0].id;
+        sealed.depth = Some(2);
+        sealed.parent = Some(17);
+        sealed.host = Some(host_id);
+        sealed.seal = Some(crate::adoption_seal::seal(&key, &sealed));
+        host.client
+            .set_meta(host_id, Some(serde_json::to_string(&sealed).unwrap()))
+            .unwrap();
+        drop(master);
+        drop(child);
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while std::time::Instant::now() < deadline
+            && host.client.list().unwrap()[0].attached != Some(false)
+        {
+            thread::sleep(Duration::from_millis(50));
+        }
+
+        let app = tauri::test::mock_app();
+        app.manage(crate::context::ContextBridge::default());
+        let bridge = app.state::<crate::context::ContextBridge>();
+        assert_eq!(bridge.caller_for_test(&token), None);
+        let pm = PtyManager::default();
+        assert_eq!(
+            pm.adopt_from(app.handle().clone(), &host.client, &instance),
+            1
+        );
+        match bridge.caller_for_test(&token) {
+            Some(crate::context::Caller::Agent(agent)) => {
+                assert_eq!((agent.pty_id, agent.cwd.as_str()), (52, "/tmp"));
+                assert_eq!(agent.instance, instance);
+                assert_eq!((agent.spawn_depth, agent.parent_pty_id), (2, Some(17)));
+            }
+            other => panic!("the held token must name the adopted terminal: {other:?}"),
+        }
+        assert_eq!(bridge.caller_for_test(&"0".repeat(32)), None);
+        let _ = pm.kill(52);
+    }
+
+    /// LOW 4 of the review: when the readopt is refused because a live terminal
+    /// already holds that pty id, a failed adoption must not retire the live
+    /// terminal's credential.
+    #[cfg(unix)]
+    #[test]
+    fn a_refused_readopt_never_retires_the_live_terminals_credential() {
+        use tauri::Manager;
+        let app = tauri::test::mock_app();
+        app.manage(crate::context::ContextBridge::default());
+        let bridge = app.state::<crate::context::ContextBridge>();
+        bridge.set_port_for_test(4242);
+        let (_, live) = bridge.mint_agent(53, "/w/live", None).unwrap();
+
+        let key = crate::adoption_seal::key().unwrap();
+        let mut meta = crate::pty_hosted::HostedMeta {
+            v: 1,
+            id: 53,
+            generation: 1,
+            kind: "desktop".into(),
+            cwd: "/w/other".into(),
+            instance: instance_token().to_string(),
+            bridge: Some(crate::context::verifier(&"9".repeat(32))),
+            host: Some(7),
+            ..Default::default()
+        };
+        crate::pty_hosted::seal_for_spawn(&mut meta, &key, false);
+        let readopted = readopt_credential(app.handle(), &meta, 7);
+        assert!(!readopted, "pty 53 already has a credential");
+        undo_readopt(app.handle(), 53, readopted);
+        match bridge.caller_for_test(&live) {
+            Some(crate::context::Caller::Agent(agent)) => assert_eq!(agent.cwd, "/w/live"),
+            other => panic!("the live terminal lost its credential: {other:?}"),
+        }
+
+        // A readopt that did register is what a failed adoption hands back.
+        let mut meta = meta.clone();
+        meta.id = 54;
+        meta.seal = None;
+        crate::pty_hosted::seal_for_spawn(&mut meta, &key, false);
+        let readopted = readopt_credential(app.handle(), &meta, 7);
+        assert!(readopted);
+        assert!(bridge.caller_for_test(&"9".repeat(32)).is_some());
+        undo_readopt(app.handle(), 54, readopted);
+        assert_eq!(bridge.caller_for_test(&"9".repeat(32)), None);
+        let _ = bridge.retire_agent(53);
+    }
+
+    /// Unsealed metadata (anything a process could write through the host) is
+    /// adopted as a terminal, with no credential.
+    #[cfg(unix)]
+    #[test]
+    fn unsealed_metadata_never_registers_a_credential() {
+        use tauri::Manager;
+        let app = tauri::test::mock_app();
+        app.manage(crate::context::ContextBridge::default());
+        let token = "8".repeat(32);
+        let meta = crate::pty_hosted::HostedMeta {
+            v: 1,
+            id: 55,
+            kind: "desktop".into(),
+            instance: instance_token().to_string(),
+            bridge: Some(crate::context::verifier(&token)),
+            depth: Some(0),
+            ..Default::default()
+        };
+        assert!(!readopt_credential(app.handle(), &meta, 7));
+        let bridge = app.state::<crate::context::ContextBridge>();
+        assert_eq!(bridge.caller_for_test(&token), None);
     }
 
     #[test]

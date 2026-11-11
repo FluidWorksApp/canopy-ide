@@ -10,8 +10,6 @@ use crate::protocol::{
 use portable_pty::{Child, ChildKiller, ExitStatus, MasterPty, PtySize};
 use std::io::{Read, Write};
 #[cfg(unix)]
-use std::os::unix::fs::PermissionsExt;
-#[cfg(unix)]
 use std::os::unix::io::AsRawFd;
 #[cfg(unix)]
 use std::os::unix::net::UnixStream;
@@ -361,8 +359,7 @@ impl HostClient {
         let dir = socket
             .parent()
             .ok_or_else(|| other("socket has no parent"))?;
-        std::fs::create_dir_all(dir)?;
-        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))?;
+        crate::server::prepare_socket_dir(dir)?;
         let lock = std::fs::OpenOptions::new()
             .create(true)
             .truncate(false)
@@ -512,6 +509,11 @@ impl HostMaster {
 }
 
 impl HostMaster {
+    /// The host's id for this session, for ops such as `set_meta`.
+    pub fn id(&self) -> u32 {
+        self.id
+    }
+
     /// Whether the foreground program has taken the terminal out of canonical
     /// mode. A hosted session has no local fd to ask, so the host answers.
     pub fn raw_mode(&self) -> bool {
