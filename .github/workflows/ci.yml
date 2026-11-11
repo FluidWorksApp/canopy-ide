@@ -232,7 +232,7 @@ jobs:
       - name: Run hosted-terminal glue tests (macOS)
         if: runner.os == 'macOS'
         working-directory: src-tauri
-        run: cargo test --no-default-features --lib -- pty_hosted:: ctx_socket::tests
+        run: "cargo test --no-default-features --lib -- pty_hosted:: ctx_socket::tests"
 
       - name: Run containment unit contract
         working-directory: src-tauri
