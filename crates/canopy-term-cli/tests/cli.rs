@@ -54,8 +54,13 @@ impl Host {
     fn start(name: &str) -> Host {
         // Short on purpose: macOS caps unix socket paths at about 104 bytes.
         let dir = std::env::temp_dir().join(format!("ct{}{}", std::process::id(), name));
-        let _ = std::fs::remove_dir_all(&dir);
         let sock = dir.join("h.sock");
+        Host::start_at(dir, sock)
+    }
+
+    /// A host whose socket is `sock`, somewhere under `dir` (removed on drop).
+    fn start_at(dir: PathBuf, sock: PathBuf) -> Host {
+        let _ = std::fs::remove_dir_all(&dir);
         let client = HostClient::ensure_running(host_exe(), &sock, 60).expect("host starts");
         Host { dir, sock, client }
     }
@@ -321,8 +326,12 @@ impl Drop for Kill {
 }
 
 fn start_attach(h: &Host, pty: &Pty, id: &str) -> Kill {
+    start_attach_with(h, pty, &["attach", id])
+}
+
+fn start_attach_with(h: &Host, pty: &Pty, args: &[&str]) -> Kill {
     let child = h
-        .term(&["attach", id])
+        .term(args)
         .stdin(pty.stdio())
         .stdout(pty.stdio())
         .stderr(pty.stdio())
@@ -564,4 +573,154 @@ fn an_old_host_is_never_attached_to_without_exclusivity() {
         ops.lock().unwrap()
     );
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+fn detach(pty: &Pty, child: &mut Kill) -> Option<i32> {
+    pty.write(&[0x1d]);
+    pty.write(b"d");
+    wait_exit(child, Duration::from_secs(5)).and_then(|s| s.code())
+}
+
+/// `--force` hands the session to the new client. The host does not yet close
+/// the replaced connection (its input thread keeps it open), so this only
+/// checks that output moves to the new client and that the old one can still
+/// detach cleanly; it does not require the old client to see EOF.
+#[test]
+fn attach_force_takes_the_session_over() {
+    let h = Host::start("l");
+    let id = h.new_session(None, &["cat"]);
+    let pty_a = Pty::open(80, 24);
+    let before_a = pty_a.lflag();
+    let mut a = start_attach(&h, &pty_a, &id);
+    let pty_b = Pty::open(80, 24);
+    let mut b = start_attach_with(&h, &pty_b, &["attach", &id, "--force"]);
+
+    pty_b.write(b"via-b\n");
+    let seen_b = pty_b.read_until("via-b", Duration::from_secs(5));
+    assert!(
+        seen_b.contains("via-b"),
+        "new client got no output: {seen_b:?}"
+    );
+    let seen_a = pty_a.read_until("via-b", Duration::from_millis(700));
+    assert!(
+        !seen_a.contains("via-b"),
+        "replaced client still gets output"
+    );
+
+    // The replaced client can still leave, with its tty restored.
+    assert!(
+        detach(&pty_a, &mut a).is_some(),
+        "replaced client did not exit"
+    );
+    assert_eq!(pty_a.lflag() & MODE_MASK, before_a & MODE_MASK);
+    // ...without disturbing the new one.
+    assert_eq!(h.ls()[0]["attached"], true);
+    pty_b.write(b"again-b\n");
+    let seen_b = pty_b.read_until("again-b", Duration::from_secs(5));
+    assert!(
+        seen_b.contains("again-b"),
+        "new client lost the session: {seen_b:?}"
+    );
+    assert_eq!(detach(&pty_b, &mut b), Some(0));
+}
+
+#[test]
+fn send_force_types_into_an_attached_session() {
+    let h = Host::start("m");
+    let id = h.new_session(None, &["cat"]);
+    let pty = Pty::open(80, 24);
+    let before = pty.lflag();
+    let mut a = start_attach(&h, &pty, &id);
+    let out = h.run(&["send", &id, "forced-text", "--enter", "--force"]);
+    assert_eq!(out.status.code(), Some(0), "{}", lossy(&out.stderr));
+    assert!(wait_until(Duration::from_secs(5), || {
+        lossy(&h.run(&["capture", &id]).stdout).contains("forced-text")
+    }));
+    assert!(
+        detach(&pty, &mut a).is_some(),
+        "replaced client did not exit"
+    );
+    assert_eq!(pty.lflag() & MODE_MASK, before & MODE_MASK);
+}
+
+/// Without --socket: $CANOPY_PTY_HOST_SOCKET, then $HOME/.canopy/pty-host.
+#[test]
+fn socket_comes_from_env_or_the_default_dir() {
+    let home = std::env::temp_dir().join(format!("ct{}n", std::process::id()));
+    let sock = home.join(".canopy").join("pty-host").join("host.sock");
+    let h = Host::start_at(home.clone(), sock.clone());
+    h.new_session(Some("resolve-key"), &["sleep", "30"]);
+    let nowhere = home.join("empty");
+    std::fs::create_dir_all(&nowhere).unwrap();
+    fn ls(envs: &[(&str, &std::path::Path)], extra: &[&str]) -> Output {
+        let mut c = Command::new(env!("CARGO_BIN_EXE_canopy-term"));
+        c.args(extra)
+            .args(["ls"])
+            .env_remove("CANOPY_PTY_HOST_SOCKET")
+            .env_remove("CANOPY_PTY_HOST_DIR");
+        for (k, v) in envs {
+            c.env(k, v);
+        }
+        c.output().unwrap()
+    }
+    let out = ls(&[("HOME", home.as_path())], &[]);
+    assert_eq!(out.status.code(), Some(0), "{}", lossy(&out.stderr));
+    assert!(lossy(&out.stdout).contains("resolve-key"));
+
+    let out = ls(
+        &[
+            ("HOME", nowhere.as_path()),
+            ("CANOPY_PTY_HOST_SOCKET", sock.as_path()),
+        ],
+        &[],
+    );
+    assert_eq!(out.status.code(), Some(0), "{}", lossy(&out.stderr));
+    assert!(lossy(&out.stdout).contains("resolve-key"));
+
+    let dir = sock.parent().unwrap();
+    let out = ls(
+        &[("HOME", nowhere.as_path()), ("CANOPY_PTY_HOST_DIR", dir)],
+        &[],
+    );
+    assert_eq!(out.status.code(), Some(0), "{}", lossy(&out.stderr));
+    assert!(lossy(&out.stdout).contains("resolve-key"));
+
+    assert_eq!(
+        ls(&[("HOME", nowhere.as_path())], &[]).status.code(),
+        Some(4)
+    );
+    // --dev looks in pty-host-dev, where nothing runs.
+    assert_eq!(
+        ls(&[("HOME", home.as_path())], &["--dev"]).status.code(),
+        Some(4)
+    );
+}
+
+#[test]
+fn attach_after_resumes_at_the_offset() {
+    let h = Host::start("o");
+    let id = h.new_session(None, &["sh", "-c", "printf ONE; printf TWO; exec cat"]);
+    assert!(wait_until(Duration::from_secs(5), || h.ls()[0]["end"] == 6));
+    let pty = Pty::open(80, 24);
+    let mut child = start_attach_with(&h, &pty, &["attach", &id, "--after", "3"]);
+    let seen = pty.read_until("TWO", Duration::from_secs(5));
+    assert!(seen.contains("TWO"), "no replay from the offset: {seen:?}");
+    assert!(
+        !seen.contains("ONE"),
+        "replayed bytes before the offset: {seen:?}"
+    );
+    assert_eq!(detach(&pty, &mut child), Some(0));
+}
+
+#[test]
+fn attach_exits_with_the_sessions_exit_code() {
+    let h = Host::start("p");
+    let id = h.new_session(None, &["sh", "-c", "read x; exit 7"]);
+    let pty = Pty::open(80, 24);
+    let before = pty.lflag();
+    let mut child = start_attach(&h, &pty, &id);
+    pty.write(b"go\n");
+    let status = wait_exit(&mut child, Duration::from_secs(10)).expect("attach exited");
+    assert_eq!(status.code(), Some(7));
+    assert_eq!(pty.lflag() & MODE_MASK, before & MODE_MASK);
 }
