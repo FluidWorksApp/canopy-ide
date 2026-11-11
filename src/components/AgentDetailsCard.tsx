@@ -9,6 +9,7 @@
 import { useEffect, useState, useSyncExternalStore } from "react";
 import { runCommitPushPr } from "../commitPushPrIpc";
 import * as ipc from "../ipc";
+import { PROVENANCE_WRITTEN_EVENT, prIdentity } from "../provenance";
 import { agentCliFor } from "../projects";
 import { prConflictContext, prFixChecksContext } from "../prs";
 import { openInOsBrowser } from "../links";
@@ -294,6 +295,16 @@ export function AgentDetailsCard({
     busy: boolean;
   }>(null);
   const [prEpoch, setPrEpoch] = useState(0);
+  // The session raised a PR (or any edge changed): drop the minute cache so the
+  // new PR is in the list, and read again.
+  useEffect(() => {
+    const onChange = () => {
+      prCache.clear();
+      setPrEpoch((n) => n + 1);
+    };
+    window.addEventListener(PROVENANCE_WRITTEN_EVENT, onChange);
+    return () => window.removeEventListener(PROVENANCE_WRITTEN_EVENT, onChange);
+  }, []);
   /** Commits on this branch beyond its base, when nothing is left uncommitted. */
   const [ahead, setAhead] = useState(0);
 
@@ -363,13 +374,17 @@ export function AgentDetailsCard({
           /* No record: the branch's own PR still shows. */
         }
         if (stale) return;
-        const raised = new Set(
-          edges
-            .filter((e) => e.repo === repo || !e.repo)
-            .map((e) => e.pr_number),
-        );
+        // By URL: the ledger keys a repo by its main checkout and a card may
+        // sit in a worktree, and a bare number is ambiguous across repos.
+        const isRaised = (url: string) =>
+          edges.some(
+            (e) =>
+              e.pr_url === url ||
+              (prIdentity(e.pr_url) !== null &&
+                prIdentity(e.pr_url) === prIdentity(url)),
+          );
         const mine = prs
-          .filter((p) => p.branch === branch || raised.has(p.number))
+          .filter((p) => p.branch === branch || isRaised(p.url))
           .sort((a, b) => b.number - a.number);
         setAgentPrs(mine);
         setPr(prs.find((p) => p.branch === branch) ?? mine[0] ?? null);
