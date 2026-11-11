@@ -1,6 +1,9 @@
 //! `canopy-pty-host --socket PATH [--idle-secs N]`
+//!
+//! On Windows PATH is a pipe name (`\\.\pipe\...`, see
+//! `windows::default_pipe_name`).
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 fn main() {
     canopy_pty_host::server::harden_process();
     // The socket path is configurable for containers: --socket, else the
@@ -48,7 +51,7 @@ fn main() {
     }
 }
 
-#[cfg(not(unix))]
+#[cfg(not(any(unix, windows)))]
 fn main() {
     eprintln!("canopy-pty-host is not supported on this platform");
     std::process::exit(1);
