@@ -11,12 +11,13 @@ use crate::protocol::{
 };
 use portable_pty::{native_pty_system, CommandBuilder, MasterPty, PtySize};
 use std::collections::{HashMap, VecDeque};
-use std::io::{BufRead, BufReader, Read, Write};
-use std::os::unix::fs::PermissionsExt;
+use std::io::{Read, Write};
+use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::os::unix::io::AsRawFd;
 use std::os::unix::net::{UnixListener, UnixStream};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
+use std::sync::mpsc::{sync_channel, SyncSender, TrySendError};
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -29,6 +30,17 @@ pub const HIGH_WATER: usize = 2 * 1024 * 1024;
 const READ_BUF: usize = 64 * 1024;
 const SEND_CHUNK: usize = 64 * 1024;
 const TERM_GRACE: Duration = Duration::from_secs(3);
+/// Longest request line a client may send before it is dropped.
+const MAX_REQUEST_LINE: usize = 1024 * 1024;
+/// Time a client has to deliver its request line.
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
+/// Most simultaneous connections served; further ones are dropped.
+const MAX_CONNECTIONS: usize = 512;
+/// Chunks of client input queued for a session's writer thread.
+const INPUT_QUEUE: usize = 256;
+/// How long client input waits for room in a full queue (a child that is not
+/// reading its terminal) before it is dropped instead of blocking.
+const INPUT_STALL: Duration = Duration::from_secs(1);
 
 pub struct ServerConfig {
     pub socket: PathBuf,
@@ -64,7 +76,9 @@ struct Session {
     meta: Mutex<Option<String>>,
     key: Option<String>,
     master: Mutex<Box<dyn MasterPty + Send>>,
-    writer: Mutex<Box<dyn Write + Send>>,
+    /// Client input, written to the PTY by a dedicated thread so a child that
+    /// never reads stdin blocks only that thread, not a connection's thread.
+    input: SyncSender<Vec<u8>>,
     size: Mutex<(u16, u16)>,
     ring: Mutex<Ring>,
     cv: Condvar,
@@ -207,21 +221,70 @@ pub fn harden_process() {
     }
 }
 
+/// Makes sure the socket's directory is private to this user. A directory that
+/// does not exist is created here with mode 0700. One that already exists is never
+/// chmod-ed (the caller may have pointed us at `/tmp` or `$HOME`): it must already
+/// belong to this user and grant nothing to group or others, or it is refused.
+pub fn prepare_socket_dir(dir: &Path) -> std::io::Result<()> {
+    let dir = if dir.as_os_str().is_empty() {
+        Path::new(".")
+    } else {
+        dir
+    };
+    std::fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(dir)?;
+    let meta = std::fs::metadata(dir)?;
+    // SAFETY: geteuid has no preconditions.
+    let me = unsafe { libc::geteuid() };
+    if !meta.is_dir() || meta.uid() != me || meta.mode() & 0o077 != 0 {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            format!(
+                "refusing socket directory {}: it must be a directory owned by this user with mode 0700",
+                dir.display()
+            ),
+        ));
+    }
+    Ok(())
+}
+
 /// Binds the socket, replacing a stale one, and serves until SIGTERM/SIGINT, a
 /// `shutdown` request or idle exit. Exits quietly (Ok) if a live host already
 /// owns the socket.
 pub fn run(config: ServerConfig) -> std::io::Result<()> {
     raise_fd_limit();
     if let Some(dir) = config.socket.parent() {
-        std::fs::create_dir_all(dir)?;
-        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))?;
+        prepare_socket_dir(dir)?;
     }
+    // Held from the liveness probe to the bind: two hosts starting at once must
+    // not both find the socket dead, or the loser's unlink would remove the
+    // winner's live socket and orphan its sessions.
+    let bind_lock = {
+        let mut path = config.socket.clone().into_os_string();
+        path.push(".lock");
+        let file = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .mode(0o600)
+            .open(path)?;
+        // SAFETY: flock on a descriptor we own; released when `file` drops.
+        if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) } != 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        file
+    };
     if UnixStream::connect(&config.socket).is_ok() {
         return Ok(());
     }
     let _ = std::fs::remove_file(&config.socket);
     let listener = UnixListener::bind(&config.socket)?;
     std::fs::set_permissions(&config.socket, std::fs::Permissions::from_mode(0o600))?;
+    // Bound and listening: later hosts now find a live socket and exit. Holding
+    // the lock for the host's lifetime would block them here instead.
+    drop(bind_lock);
 
     // SAFETY: the handler only stores to an atomic.
     unsafe {
@@ -271,7 +334,11 @@ pub fn serve(
         }
         match listener.accept() {
             Ok((stream, _)) => {
-                if peer_uid(&stream).is_some_and(|uid| uid != my_uid) {
+                // An unknown peer is refused, not trusted.
+                if peer_uid(&stream) != Some(my_uid) {
+                    continue;
+                }
+                if host.connections.load(Ordering::SeqCst) >= MAX_CONNECTIONS {
                     continue;
                 }
                 let _ = stream.set_nonblocking(false);
@@ -349,17 +416,62 @@ fn write_line<T: serde::Serialize>(stream: &mut UnixStream, value: &T) -> std::i
     stream.write_all(&line)
 }
 
+/// Reads up to and including the first newline and not a byte more (raw bytes
+/// may follow an attach), by peeking at what is queued and then consuming only
+/// the line. Bounded in length and in total time.
+fn read_request_line(stream: &UnixStream) -> std::io::Result<Vec<u8>> {
+    let fd = stream.as_raw_fd();
+    let deadline = Instant::now() + REQUEST_TIMEOUT;
+    let mut line = Vec::new();
+    let mut buf = [0u8; 4096];
+    loop {
+        if Instant::now() >= deadline {
+            return Err(std::io::ErrorKind::TimedOut.into());
+        }
+        // SAFETY: recv writes at most buf.len() bytes into buf; MSG_PEEK
+        // leaves them queued.
+        let n = unsafe {
+            libc::recv(
+                fd,
+                buf.as_mut_ptr() as *mut libc::c_void,
+                buf.len(),
+                libc::MSG_PEEK,
+            )
+        };
+        if n < 0 {
+            let e = std::io::Error::last_os_error();
+            if e.kind() == std::io::ErrorKind::Interrupted {
+                continue;
+            }
+            return Err(e);
+        }
+        let n = n as usize;
+        if n == 0 {
+            return Ok(line); // closed before a full line
+        }
+        let newline = buf[..n].iter().position(|b| *b == b'\n');
+        let take = newline.map_or(n, |i| i + 1);
+        if line.len() + take > MAX_REQUEST_LINE {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "request line too long",
+            ));
+        }
+        let mut reader = stream;
+        reader.read_exact(&mut buf[..take])?;
+        line.extend_from_slice(&buf[..take]);
+        if newline.is_some() {
+            return Ok(line);
+        }
+    }
+}
+
 fn handle(host: &Arc<Host>, mut stream: UnixStream) -> std::io::Result<()> {
     let min_client = host.min_client;
-    stream.set_read_timeout(Some(Duration::from_secs(10)))?;
-    let mut line = String::new();
-    {
-        // Read just the request line; raw bytes may follow an attach.
-        let mut reader = BufReader::with_capacity(1, &stream);
-        reader.read_line(&mut line)?;
-    }
+    stream.set_read_timeout(Some(REQUEST_TIMEOUT))?;
+    let line = read_request_line(&stream)?;
     stream.set_read_timeout(None)?;
-    let request: Request = match serde_json::from_str(line.trim()) {
+    let request: Request = match serde_json::from_slice(line.trim_ascii()) {
         Ok(request) => request,
         Err(e) => return write_line(&mut stream, &Response::err(format!("bad request: {e}"))),
     };
@@ -367,8 +479,10 @@ fn handle(host: &Arc<Host>, mut stream: UnixStream) -> std::io::Result<()> {
         Request::Hello { client_version } => {
             // A client too old for this host is refused up front, so skew between
             // the app, a runner and a long-lived host fails at attach with a clear
-            // message instead of as garbage later. 0 means "did not say".
-            if client_version != 0 && client_version < min_client {
+            // message instead of as garbage later. 0 means "did not say" (an app
+            // from before the field existed), which is protocol 1, not exempt.
+            let client_version = client_version.max(1);
+            if client_version < min_client {
                 return write_line(
                     &mut stream,
                     &Response {
@@ -549,7 +663,8 @@ fn handle(host: &Arc<Host>, mut stream: UnixStream) -> std::io::Result<()> {
             client_version,
             exclusive,
         } => {
-            if client_version != 0 && client_version < min_client {
+            let client_version = client_version.max(1);
+            if client_version < min_client {
                 return write_line(
                     &mut stream,
                     &AttachReply {
@@ -646,7 +761,16 @@ fn spawn(host: &Arc<Host>, spec: SpawnSpec) -> Result<(Arc<Session>, bool), Stri
     drop(pair.slave);
     let pid = child.process_id().ok_or("child has no pid")?;
     let mut reader = pair.master.try_clone_reader().map_err(|e| e.to_string())?;
-    let writer = pair.master.take_writer().map_err(|e| e.to_string())?;
+    let mut writer = pair.master.take_writer().map_err(|e| e.to_string())?;
+    let (input_tx, input_rx) = sync_channel::<Vec<u8>>(INPUT_QUEUE);
+    thread::spawn(move || {
+        while let Ok(chunk) = input_rx.recv() {
+            if writer.write_all(&chunk).is_err() {
+                break;
+            }
+            let _ = writer.flush();
+        }
+    });
 
     let session = Arc::new(Session {
         id: host.next_id.fetch_add(1, Ordering::SeqCst),
@@ -654,7 +778,7 @@ fn spawn(host: &Arc<Host>, spec: SpawnSpec) -> Result<(Arc<Session>, bool), Stri
         meta: Mutex::new(spec.meta),
         key: spec.key,
         master: Mutex::new(pair.master),
-        writer: Mutex::new(writer),
+        input: input_tx,
         size: Mutex::new((size.cols, size.rows)),
         ring: Mutex::new(Ring {
             bytes: VecDeque::new(),
@@ -796,14 +920,60 @@ fn read_ring(
     Ok(())
 }
 
+/// Ends the attachment `generation` made, unless a newer attach has replaced it.
+/// Every path that stops serving a client runs this, so a session is never left
+/// attached to a connection nobody serves.
+fn release(session: &Session, generation: u64) {
+    let mut ring = session.ring.lock().unwrap();
+    if ring.generation == generation {
+        ring.attached = None;
+        ring.conn = None;
+        let mut detached = session.detached_at.lock().unwrap();
+        if detached.is_none() {
+            *detached = Some(Instant::now());
+        }
+    }
+    session.cv.notify_all();
+}
+
+/// Queues client input for the session's writer thread. A child that is not
+/// reading its terminal fills the queue; after `INPUT_STALL` the chunk is dropped
+/// (and later ones at once until room appears) rather than blocking the caller,
+/// which must keep reading so it notices the client leaving. Returns false once
+/// the PTY is gone.
+fn queue_input(tx: &SyncSender<Vec<u8>>, mut chunk: Vec<u8>, stalled: &mut bool) -> bool {
+    let deadline = Instant::now() + INPUT_STALL;
+    loop {
+        match tx.try_send(chunk) {
+            Ok(()) => {
+                *stalled = false;
+                return true;
+            }
+            Err(TrySendError::Disconnected(_)) => return false,
+            Err(TrySendError::Full(back)) => {
+                if *stalled || Instant::now() >= deadline {
+                    *stalled = true;
+                    return true;
+                }
+                chunk = back;
+                thread::sleep(Duration::from_millis(5));
+            }
+        }
+    }
+}
+
 fn attach(
     session: Arc<Session>,
     mut stream: UnixStream,
     after: u64,
     exclusive: bool,
 ) -> std::io::Result<()> {
+    // Everything that can fail for a client that has already gone happens before
+    // the session is touched, so a failure here leaves nothing to undo.
     let handle = stream.try_clone()?;
-    let (start, generation, cols, rows) = {
+    let mut input = stream.try_clone()?;
+    stream.set_write_timeout(Some(Duration::from_secs(10)))?;
+    let (start, generation, reply) = {
         let mut ring = session.ring.lock().unwrap();
         if exclusive && ring.attached.is_some() {
             drop(ring);
@@ -830,53 +1000,44 @@ fn attach(
         *session.detached_at.lock().unwrap() = None;
         session.cv.notify_all();
         let (cols, rows) = *session.size.lock().unwrap();
-        (start, ring.generation, cols, rows)
-    };
-    let reply = {
-        let ring = session.ring.lock().unwrap();
-        AttachReply {
+        let reply = AttachReply {
             ok: true,
             error: None,
             version: PROTOCOL_VERSION,
             start,
-            end: ring.base + ring.bytes.len() as u64,
+            end,
             gap: after < ring.base,
             cols,
             rows,
             len: 0,
-        }
+        };
+        (start, ring.generation, reply)
     };
-    write_line(&mut stream, &reply)?;
+    // The client may have died before reading its reply: detach again, or the
+    // session would stay attached to nobody (child blocked, no linger, BUSY).
+    if let Err(e) = write_line(&mut stream, &reply).and_then(|()| stream.set_write_timeout(None)) {
+        release(&session, generation);
+        return Err(e);
+    }
 
     // Client -> PTY. Dropping the connection only detaches. This thread is also
     // what notices the client is gone while the child is silent, so the output
     // loop below (which only finds out on a write) stops, a paused reader is
     // released, and the linger clock starts.
-    let mut input = stream.try_clone()?;
     let closed = Arc::new(AtomicBool::new(false));
     {
         let session = Arc::clone(&session);
         let closed = Arc::clone(&closed);
         thread::spawn(move || {
             let mut buf = [0u8; 8192];
+            let mut stalled = false;
             while let Ok(n) = input.read(&mut buf) {
-                if n == 0 {
+                if n == 0 || !queue_input(&session.input, buf[..n].to_vec(), &mut stalled) {
                     break;
                 }
-                let mut writer = session.writer.lock().unwrap();
-                if writer.write_all(&buf[..n]).is_err() {
-                    break;
-                }
-                let _ = writer.flush();
             }
             closed.store(true, Ordering::SeqCst);
-            let mut ring = session.ring.lock().unwrap();
-            if ring.generation == generation {
-                ring.attached = None;
-                ring.conn = None;
-                *session.detached_at.lock().unwrap() = Some(Instant::now());
-            }
-            session.cv.notify_all();
+            release(&session, generation);
         });
     }
 
@@ -896,8 +1057,15 @@ fn attach(
                 }
                 if ring.eof {
                     if ring.generation == generation {
+                        // Nothing more will be sent, so the session is no longer
+                        // attached for backpressure or linger. The connection stays
+                        // registered until the input thread ends, so a newer attach
+                        // can still shut this client down.
                         ring.attached = None;
-                        ring.conn = None;
+                        let mut detached = session.detached_at.lock().unwrap();
+                        if detached.is_none() {
+                            *detached = Some(Instant::now());
+                        }
                     }
                     session.cv.notify_all();
                     drop(ring);
@@ -912,13 +1080,7 @@ fn attach(
             }
         };
         if stream.write_all(&chunk).is_err() {
-            let mut ring = session.ring.lock().unwrap();
-            if ring.generation == generation {
-                ring.attached = None;
-                ring.conn = None;
-                *session.detached_at.lock().unwrap() = Some(Instant::now());
-            }
-            session.cv.notify_all();
+            release(&session, generation);
             return Ok(());
         }
         pos += chunk.len() as u64;
@@ -969,6 +1131,27 @@ mod tests {
         let mut ring = ring_with(RING_CAP, Some(10));
         push_output(&mut ring, &[b'y'; 1000]);
         assert_eq!(ring.base, 10);
+    }
+
+    #[test]
+    fn full_input_queue_drops_instead_of_blocking_and_a_gone_pty_is_reported() {
+        let (tx, rx) = sync_channel::<Vec<u8>>(1);
+        let mut stalled = false;
+        assert!(queue_input(&tx, vec![1], &mut stalled));
+        assert!(!stalled);
+        // Full: waits out the stall once, then drops at once.
+        let t = Instant::now();
+        assert!(queue_input(&tx, vec![2], &mut stalled));
+        assert!(stalled && t.elapsed() >= INPUT_STALL);
+        let t = Instant::now();
+        assert!(queue_input(&tx, vec![3], &mut stalled));
+        assert!(t.elapsed() < INPUT_STALL);
+        // Room again: delivered, and the stall clears.
+        assert_eq!(rx.recv().unwrap(), vec![1]);
+        assert!(queue_input(&tx, vec![4], &mut stalled));
+        assert!(!stalled);
+        drop(rx);
+        assert!(!queue_input(&tx, vec![5], &mut stalled));
     }
 
     #[test]
