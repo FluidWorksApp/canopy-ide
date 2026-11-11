@@ -17,6 +17,8 @@ built, and this README.
 - Keep this app out of `/Applications`. Run it from its own folder, for example
   `~/Downloads/canopy-test`, so it does not replace or shadow the real app.
 - It uses your real `~/.canopy` (projects, settings, agent state).
+- This build is ad hoc signed with a different code identity from the shipped
+  app, so macOS may ask again for folder, microphone or keychain access.
 - If the updater offers a new version, decline. Installing it would replace this
   build with a release.
 
