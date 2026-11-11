@@ -91,6 +91,7 @@ pub const SUPPORTED_TOOLS: &[&str] = &[
     "canopy_start_session",
     "canopy_stop_server",
     "canopy_symbols",
+    "canopy_tasks",
     "canopy_team_people",
     "canopy_team_send",
     "canopy_tickets",

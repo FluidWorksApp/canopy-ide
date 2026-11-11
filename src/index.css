@@ -6621,6 +6621,28 @@ body.dragging-tab * {
   padding: 6px;
   font-size: 12px;
 }
+/* Docked: its own column at the right edge, full height. The terminal narrows to
+   the space left (a multiplexed group keeps its own layout and sits under it). */
+.project-content {
+  --agent-card-dock-w: 300px;
+}
+.agent-card--docked {
+  top: 0;
+  right: 0;
+  bottom: 0;
+  width: var(--agent-card-dock-w);
+  max-height: none;
+  border-radius: 0;
+  border-width: 0 0 0 1px;
+  box-shadow: none;
+  padding: 8px 6px;
+  background: var(--bg-raised);
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+}
+.project-content[data-agent-card-dock] > .term-host:not(.term-host-multiplexed) {
+  width: calc(100% - var(--agent-card-dock-w));
+}
 .agent-card-pill {
   display: inline-flex;
   align-items: center;
@@ -6736,13 +6758,14 @@ body.dragging-tab * {
 }
 .agent-card-prlist {
   position: absolute;
+  left: 0;
   right: 0;
   bottom: calc(100% + 6px);
   z-index: 20;
-  width: max-content;
-  min-width: 100%;
-  max-width: 420px;
+  box-sizing: border-box;
+  width: 100%;
   max-height: 260px;
+  overflow-x: hidden;
   overflow-y: auto;
   margin: 0;
   padding: 4px;
@@ -6754,6 +6777,8 @@ body.dragging-tab * {
   box-shadow: 0 8px 28px rgba(0, 0, 0, 0.45);
 }
 .agent-card-prlist-row {
+  min-width: 0;
+  box-sizing: border-box;
   display: flex;
   align-items: center;
   gap: 8px;
@@ -6789,6 +6814,64 @@ body.dragging-tab * {
 .agent-card-fix:disabled {
   opacity: 0.45;
   cursor: default;
+}
+.agent-card-split {
+  position: relative;
+  display: inline-flex;
+}
+.agent-card-split-main {
+  border-radius: 999px 0 0 999px;
+  padding-inline: 12px;
+}
+.agent-card-split-chev {
+  border-radius: 0 999px 999px 0;
+  border-left: 0;
+  padding-inline: 8px;
+}
+.agent-card-mergemenu {
+  position: absolute;
+  top: calc(100% + 4px);
+  left: 0;
+  z-index: 30;
+  min-width: 170px;
+  margin: 0;
+  padding: 4px;
+  list-style: none;
+  background: var(--bg-raised);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  box-shadow: 0 10px 28px rgba(0, 0, 0, 0.4);
+}
+.agent-card-mergemenu button {
+  width: 100%;
+  display: flex;
+  gap: 8px;
+  padding: 6px 8px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  font-size: 12px;
+  text-align: left;
+  cursor: pointer;
+}
+.agent-card-mergemenu button:hover,
+.agent-card-mergemenu button:focus-visible {
+  background: color-mix(in srgb, var(--accent) 22%, transparent);
+}
+.agent-card-mergemenu span {
+  width: 12px;
+}
+.agent-card-title-input {
+  min-width: 0;
+  padding: 3px 8px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  font-size: 12px;
 }
 .agent-card-merge {
   gap: 6px;
@@ -6992,6 +7075,69 @@ body.dragging-tab * {
 .agent-card-sub-age {
   flex: 0 0 auto;
   font-variant-numeric: tabular-nums;
+}
+.agent-card-servers {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin: 0 4px 6px;
+  padding: 8px;
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--accent, #4a8cff) 9%, transparent);
+}
+.agent-card-label {
+  display: flex;
+  gap: 6px;
+  font-size: 10px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+}
+.agent-card-server {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+.agent-card-live {
+  flex: 0 0 auto;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: #46c07a;
+  box-shadow: 0 0 0 3px rgba(70, 192, 122, 0.18);
+}
+.agent-card-server-open {
+  flex: 0 0 auto;
+  border: 0;
+  border-radius: 7px;
+  padding: 2px 9px;
+  font: inherit;
+  font-weight: 600;
+  cursor: pointer;
+  color: var(--accent, #4a8cff);
+  background: color-mix(in srgb, var(--accent, #4a8cff) 16%, transparent);
+}
+.agent-card-server-open:hover {
+  background: color-mix(in srgb, var(--accent, #4a8cff) 28%, transparent);
+}
+.agent-card-progress {
+  display: flex;
+  height: 5px;
+  margin: 0 10px 6px;
+  border-radius: 9px;
+  overflow: hidden;
+  background: color-mix(in srgb, var(--text-dim) 20%, transparent);
+}
+.agent-card-progress i {
+  display: block;
+  height: 100%;
+}
+.agent-card-progress-done {
+  background: #46c07a;
+}
+.agent-card-progress-run {
+  background: #f2a93b;
 }
 .agent-card-current {
   margin: -2px 8px 4px 30px;

@@ -1615,12 +1615,7 @@ fn update_digest(
     // every call, so the latest call is the truth and replaces what was kept.
     // Only Claude's tool is read here: it is the shape verified against T3
     // Code's adapter; other agents' plan tools are not guessed at.
-    if hook_event == "PostToolUse"
-        && matches!(
-            event["tool_name"].as_str(),
-            Some("TodoWrite") | Some("update_plan")
-        )
-    {
+    if hook_event == "PostToolUse" && is_task_list_tool(event["tool_name"].as_str()) {
         // Codex's `update_plan` sends the whole plan each call too, as
         // `{plan:[{step,status}]}`; same replace-the-list rule.
         let input = if event["tool_name"].as_str() == Some("update_plan") {
@@ -2449,6 +2444,15 @@ fn plan_as_todos(input: &serde_json::Value) -> serde_json::Value {
         .map(|p| serde_json::json!({ "content": p["step"], "status": p["status"] }))
         .collect();
     serde_json::json!({ "todos": todos })
+}
+
+/// The tools that send a whole task list at once: Claude's TodoWrite, Codex's
+/// `update_plan`, and Canopy's own `canopy_tasks` (same shape as TodoWrite, for
+/// an agent that has no task tool of its own). A client may prefix MCP tool
+/// names (`mcp__canopy__canopy_tasks`).
+fn is_task_list_tool(name: Option<&str>) -> bool {
+    matches!(name, Some("TodoWrite") | Some("update_plan"))
+        || name.is_some_and(|n| n == "canopy_tasks" || n.ends_with("__canopy_tasks"))
 }
 
 /// Claude's TodoWrite input (`{todos:[{content,status,activeForm?}]}`) as the
@@ -4438,6 +4442,7 @@ fn static_tool_defs() -> Vec<serde_json::Value> {
     tools.extend(mesh_tool_defs());
     tools.extend(session_tool_defs());
     tools.extend(task_tool_defs());
+    tools.extend(task_list_tool_defs());
     tools.extend(agent_spawn_tool_defs());
     // The cross-project set, and only for the one session that is allowed to
     // think across projects. An ordinary coding agent never sees these exist.
@@ -4519,7 +4524,8 @@ fn output_schema(name: &str) -> Option<serde_json::Value> {
         "canopy_annotations" => serde_json::json!({ "annotations": { "type": "array" } }),
         "canopy_device_list" => serde_json::json!({
             "devices": { "type": "array" },
-            "emulators": { "type": "array", "items": { "type": "string" } },
+            // Each is { name, ready, problem } (android.rs Avd), not a bare name.
+            "emulators": { "type": "array", "items": { "type": "object" } },
             "missing": { "type": "array", "items": { "type": "string" } }
         }),
         "canopy_device_snapshot" => serde_json::json!({ "layout": { "type": "string" } }),
@@ -4905,6 +4911,22 @@ fn task_tool_defs() -> Vec<serde_json::Value> {
             }, "required": ["status", "summary"], "additionalProperties": false }
         }),
     ]
+}
+
+/// Its own function for the same macro-recursion reason as `task_tool_defs`.
+/// Nothing is stored by the tool itself: the PostToolUse hook reads the list
+/// from the call, exactly as it does for TodoWrite, and the agent card shows it.
+fn task_list_tool_defs() -> Vec<serde_json::Value> {
+    vec![serde_json::json!({
+        "name": "canopy_tasks",
+        "description": "Publish your task list to the agent card, where the person sees it. Send the WHOLE list every time (it replaces the last one): every request they have made that is not finished, each pending, in_progress or completed. Keep it current as you work, and add a new request the moment it arrives. Use it when you have no TodoWrite/TaskCreate tool of your own.",
+        "inputSchema": { "type": "object", "properties": {
+            "todos": { "type": "array", "items": { "type": "object", "properties": {
+                "content": { "type": "string", "description": "The task, in a short line" },
+                "status": { "type": "string", "enum": ["pending", "in_progress", "completed"] }
+            }, "required": ["content", "status"], "additionalProperties": false }, "description": "The whole list, in order" }
+        }, "required": ["todos"], "additionalProperties": false }
+    })]
 }
 
 fn tool_defs() -> serde_json::Value {
@@ -6272,6 +6294,22 @@ fn call_tool(name: &str, args: &serde_json::Value) -> Result<ToolOutput, String>
                 "tags": args.get("tags").cloned(),
             })))
         }
+        "canopy_tasks" => {
+            // Nothing to store here: the post-tool hook reads the list from this
+            // very call. The reply says what was recorded so a malformed list
+            // is not mistaken for a published one.
+            let todos = args.get("todos").and_then(|v| v.as_array());
+            match todos {
+                Some(list) => text(Ok(format!(
+                    "Task list shown on your agent card: {} task(s), {} done.",
+                    list.len(),
+                    list.iter().filter(|t| t["status"] == "completed").count()
+                ))),
+                None => {
+                    Err("canopy_tasks needs `todos`: the whole list, each {content, status}".into())
+                }
+            }
+        }
         "canopy_close_session" => {
             // Which terminal to close is not the agent's to say: it comes from
             // the environment this sidecar was launched with, so the only tab
@@ -7303,6 +7341,40 @@ fn urlencode(s: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    /// android.rs `Avd` serializes to { name, ready, problem }. A schema that said
+    /// each emulator was a string made the host reject the whole listing as soon
+    /// as the machine had one.
+    #[test]
+    fn device_list_schema_accepts_the_emulators_it_returns() {
+        let schema =
+            super::output_schema("canopy_device_list").expect("device list has an output schema");
+        let avd = serde_json::json!({ "name": "Pixel_8", "ready": true, "problem": null });
+        assert!(avd.is_object());
+        assert_eq!(schema["properties"]["emulators"]["items"]["type"], "object");
+    }
+
+    #[test]
+    fn canopy_tasks_is_read_like_a_todo_write() {
+        assert!(super::is_task_list_tool(Some("TodoWrite")));
+        assert!(super::is_task_list_tool(Some("update_plan")));
+        assert!(super::is_task_list_tool(Some("canopy_tasks")));
+        assert!(super::is_task_list_tool(Some("mcp__canopy__canopy_tasks")));
+        assert!(!super::is_task_list_tool(Some("canopy_name_task")));
+        assert!(!super::is_task_list_tool(Some(
+            "mcp__other__my_canopy_tasks_x"
+        )));
+        assert!(!super::is_task_list_tool(None));
+        let tasks = super::tasks_from_todo_write(&serde_json::json!({ "todos": [
+            { "content": "Mirror the phone", "status": "completed" },
+            { "content": "Task list on the card", "status": "in_progress" },
+            { "content": "Servers with links", "status": "pending" },
+        ]}))
+        .unwrap();
+        assert_eq!(tasks[0]["status"], "completed");
+        assert_eq!(tasks[1]["status"], "running");
+        assert_eq!(tasks[2]["text"], "Servers with links");
+    }
+
     #[test]
     fn bash_outputs_are_found_when_they_exist() {
         let dir = std::env::temp_dir().join(format!("hook-bash-{}", std::process::id()));

@@ -50,6 +50,18 @@ describe("terminal memory", () => {
     });
   });
 
+  it("does not offer rows written from another machine's terminals", () => {
+    // What All workspaces left behind before those tabs were kept out of the
+    // snapshot: the terminal's id is an alias, far above any real one.
+    rememberTerminals("p1", [
+      { cwd: "/home/coraa/workspace", title: "shell", tabId: "x", ptyId: 2 ** 40 + 3 },
+      { cwd: "/repo", title: "dev server", tabId: "y", ptyId: 7 },
+      { cwd: "/repo", title: "never attached", tabId: "z" },
+    ]);
+    expect(rememberedTerminalState("p1").terminals.map((t) => t.title)).toEqual(["dev server", "never attached"]);
+    expect(rememberedTerminals("p1").map((t) => t.title)).toEqual(["dev server", "never attached"]);
+  });
+
   it("round-trips exact session and account identity per pane", () => {
     rememberTerminals("p1", [
       {

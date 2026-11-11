@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { machineBadge, parseMachineSessions, sessionsNeedingTabs } from "./allWorkspaceTabs";
+import { machineBadge, parseMachineSessions, rememberableTab, sessionsNeedingTabs, workspacesToJoin } from "./allWorkspaceTabs";
 
 describe("parseMachineSessions", () => {
   it("keeps well-formed rows and drops the rest", () => {
@@ -30,5 +30,34 @@ describe("machineBadge", () => {
   it("is short and never empty", () => {
     expect(machineBadge("Coraa Workstation Production")).toHaveLength(14);
     expect(machineBadge("  ")).toBe("workspace");
+  });
+});
+
+describe("workspacesToJoin", () => {
+  const list = [
+    { id: "a", state: "ready" },
+    { id: "own", state: "ready" },
+    { id: "asleep", state: "stopped" },
+    { id: "view-only", state: "ready", access: { canConnect: false } },
+  ];
+  it("never reads the window's own workspace as a second machine", () => {
+    expect(workspacesToJoin(list, "own").map((w) => w.id)).toEqual(["a"]);
+  });
+  it("takes every running, connectable workspace when the window is local", () => {
+    expect(workspacesToJoin(list).map((w) => w.id)).toEqual(["a", "own"]);
+  });
+});
+
+describe("rememberableTab", () => {
+  it("keeps the window's own terminals", () => {
+    expect(rememberableTab({})).toBe(true);
+  });
+  it("leaves out terminals shown only because All workspaces is on", () => {
+    expect(rememberableTab({ viaAll: true, machine: "remote:w" })).toBe(false);
+    expect(rememberableTab({ viaAll: true })).toBe(false);
+  });
+  it("leaves out terminals running on another machine, including this Mac from a workspace window", () => {
+    expect(rememberableTab({ machine: "remote:w" })).toBe(false);
+    expect(rememberableTab({ machine: "local" })).toBe(false);
   });
 });

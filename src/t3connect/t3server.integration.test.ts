@@ -13,7 +13,7 @@ import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { T3_CANOPY_SCOPES } from "./contracts";
+import { T3_CANOPY_SCOPES, type ServerProvider } from "./contracts";
 import {
   exchangePairingCredential,
   fetchEnvironmentDescriptor,
@@ -21,7 +21,7 @@ import {
   issueWebSocketTicket,
   rpcSocketUrl,
 } from "./http";
-import { CANOPY_TERMINAL_THREAD_ID, listProjects, t3 } from "./methods";
+import { CANOPY_TERMINAL_THREAD_ID, defaultModel, listProjects, t3, threadStatus, usableProviders } from "./methods";
 import { parseT3PairingLink } from "./pairing";
 import { RpcError, T3RpcClient } from "./rpc";
 
@@ -162,25 +162,15 @@ describe.skipIf(!BIN)("T3 Code server (T3_BIN)", () => {
       const config = await t3.getConfig(rpc);
       expect(config.environment.environmentId).toBe(descriptor.environmentId);
 
-      // Canopy's token cannot add projects (projects.mutate needs
-      // orchestration:operate, which Canopy never asks for).
-      const refused = await rpc.call("projects.mutate", { type: "project.create", commandId: crypto.randomUUID(), projectId: crypto.randomUUID(), title: "nope", workspaceRoot: projectDir }).catch(error => error);
-      log(`projects.mutate with Canopy's scopes: ${refused instanceof RpcError ? refused.tag : refused}`);
-      expect(refused).toBeInstanceOf(RpcError);
-      expect((refused as RpcError).tag).toBe("EnvironmentAuthorizationError");
+      // With orchestration:operate (asked for since thread launch), Canopy's own
+      // token can add the project, as T3's own app does.
+      expect(token.scope.split(" ")).toContain("orchestration:operate");
+      await rpc.call("projects.mutate", { type: "project.create", commandId: crypto.randomUUID(), projectId: crypto.randomUUID(), title: "project", workspaceRoot: projectDir });
 
-      // So the test adds the project the way T3's own app does, with a
-      // second, full-scope pairing.
-      const admin = parseT3PairingLink((await pairingLink(BIN!, baseDir, env)).link);
-      const adminToken = await exchangePairingCredential({ httpBaseUrl: admin.httpBaseUrl, credential: admin.credential });
-      const adminRpc = new T3RpcClient(rpcSocketUrl(admin.httpBaseUrl, (await issueWebSocketTicket(admin.httpBaseUrl, adminToken.access_token)).ticket));
-      try {
-        await adminRpc.ready();
-        await adminRpc.call("projects.mutate", { type: "project.create", commandId: crypto.randomUUID(), projectId: crypto.randomUUID(), title: "project", workspaceRoot: projectDir });
-      } finally {
-        adminRpc.close();
-      }
 
+      const providers = usableProviders(config);
+      log(`providers: ${JSON.stringify((config as { providers?: unknown }).providers ?? null).slice(0, 1500)}`);
+      log(`usable: ${providers.map(p => `${p.instanceId}(${defaultModel(p)})`).join(" ") || "none"}`);
       const projects = await listProjects(rpc);
       log(`projects: ${projects.map(p => `${p.title} @ ${p.workspaceRoot}`).join("; ")}`);
       const project = projects.find(p => p.workspaceRoot === projectDir || p.workspaceRoot.endsWith("/project"));
@@ -211,6 +201,35 @@ describe.skipIf(!BIN)("T3 Code server (T3_BIN)", () => {
         error => `refused (${error instanceof RpcError ? error.tag : String(error)})`,
       );
       log(`readFile with a non-project cwd: ${outside}`);
+
+
+      // Start an agent thread the way the machine view does. No provider on a
+      // test machine is signed in, so the run may fail; the thread, its first
+      // message and the commands that talk to it are what matter here.
+      // A test machine has none signed in, so take any installed one with a model.
+      const provider = providers[0] ?? ((config as { providers?: ServerProvider[] }).providers ?? []).find(p => p.installed && defaultModel(p));
+      if (provider) {
+        const projectId = project!.id;
+        const first = await t3.launchThread(rpc, {
+          commandId: crypto.randomUUID(), creationSource: "mobile", projectId, title: "Canopy thread", generateTitle: false,
+          modelSelection: { instanceId: provider.instanceId, model: defaultModel(provider)! },
+          runtimeMode: "approval-required", interactionMode: "default", workspaceStrategy: { type: "root" },
+          initialMessage: { text: "Say hi", attachments: [] },
+        });
+        log(`launchThread: thread=${first.threadId} resumed=${first.resumed} messages=${first.projection.messages.length} runs=${first.projection.runs.map(r => r.status).join(",")}`);
+        expect(first.projection.thread.id).toBe(first.threadId);
+        expect(first.projection.messages.some(m => m.role === "user" && m.text === "Say hi")).toBe(true);
+        const sent = await t3.dispatchCommand(rpc, {
+          type: "message.dispatch", commandId: crypto.randomUUID(), threadId: first.threadId, messageId: crypto.randomUUID(),
+          text: "And again", attachments: [], createdBy: "user", creationSource: "mobile", dispatchMode: { type: "queue_after_active" },
+        });
+        log(`message.dispatch: sequence=${sent.sequence}`);
+        const after = await t3.getThreadProjection(rpc, first.threadId);
+        log(`projection: ${after.messages.map(m => `${m.role}:${m.text.slice(0, 20)}`).join(" | ")} status=${threadStatus(after)}`);
+        expect(after.messages.filter(m => m.role === "user").map(m => m.text)).toEqual(expect.arrayContaining(["Say hi", "And again"]));
+        await t3.dispatchCommand(rpc, { type: "thread.stop", commandId: crypto.randomUUID(), threadId: first.threadId, reason: "Canopy test" });
+        log("thread.stop accepted");
+      } else log("no usable provider on this machine; thread launch not exercised");
 
       const terminalId = "canopy-it";
       const opened = await t3.terminalOpen(rpc, { threadId: CANOPY_TERMINAL_THREAD_ID, terminalId, cwd, cols: 100, rows: 30 });

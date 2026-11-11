@@ -241,6 +241,28 @@ async fn install_into(
             None,
         ));
     }
+    // Android streaming downloads scrcpy's server on first use, which made the
+    // first stream wait on the network. Fetch it now, as part of the install.
+    // Best effort: offline, the hub still fetches it when a stream starts.
+    if let Ok(node) = resolve_node(env, host) {
+        let pkg = staging.join("node_modules").join(DEVICE_HUB_PACKAGE);
+        let script = pkg.join("vendor/serve-emu/dist/scrcpy-server.js");
+        if script.is_file() {
+            let mut prefetch = std::process::Command::new(node);
+            prefetch
+                .arg("--input-type=module")
+                .arg("-e")
+                .arg("import('node:url').then(u => import(u.pathToFileURL(process.argv[1]).href)).then(m => m.ensureScrcpyServer())")
+                .arg(script.to_string_lossy().into_owned())
+                .env_clear()
+                .envs(env)
+                .no_console_window();
+            let _ = tokio::task::spawn_blocking(move || {
+                run_with_timeout(prefetch, std::time::Duration::from_secs(90))
+            })
+            .await;
+        }
+    }
     tokio::fs::write(
         staging.join(".install-complete"),
         format!("{DEVICE_HUB_VERSION}\n"),

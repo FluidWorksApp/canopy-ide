@@ -7,6 +7,7 @@
 // It only reads: the digest the hook wrote, `git status`, and the PR list. The
 // task actions send the agent a message, exactly as typing it would.
 import { useEffect, useState } from "react";
+import { runCommitPushPr } from "../commitPushPrIpc";
 import * as ipc from "../ipc";
 import { agentCliFor } from "../projects";
 import { prConflictContext, prFixChecksContext } from "../prs";
@@ -29,6 +30,7 @@ import { AgentIcon, GitBranchIcon, TasksIcon } from "./icons";
 import type { Life } from "../../shared/agentLife";
 
 const COLLAPSED_KEY = "canopy:agentCard:collapsed";
+const DOCKED_KEY = "canopy:agentCard:docked";
 const PR_TTL_MS = 60_000;
 
 const prCache = new Map<string, { at: number; prs: ipc.PrInfo[] }>();
@@ -55,12 +57,39 @@ async function prsFor(repo: string): Promise<ipc.PrInfo[]> {
   }
 }
 
+/** Docked is the default: a card floating over the terminal hides its text. */
+function readDocked(): boolean {
+  try {
+    return localStorage.getItem(DOCKED_KEY) !== "0";
+  } catch {
+    return true;
+  }
+}
+
 function readCollapsed(): boolean {
   try {
     return localStorage.getItem(COLLAPSED_KEY) === "1";
   } catch {
     return false;
   }
+}
+
+const METHOD_KEY = "canopy.prMergeMethod";
+const METHOD_LABEL = { squash: "Squash & merge", merge: "Merge commit", rebase: "Rebase & merge" } as const;
+function readMergeMethod(): "squash" | "merge" | "rebase" {
+  try {
+    const v = localStorage.getItem(METHOD_KEY);
+    if (v === "squash" || v === "merge" || v === "rebase") return v;
+  } catch {
+    /* default */
+  }
+  return "squash";
+}
+const DEFAULT_BRANCHES = new Set(["main", "master", "develop"]);
+/** "fix/hub-prefetch-scrcpy" becomes "Fix hub prefetch scrcpy". */
+export function titleFromBranch(branch: string): string {
+  const text = branch.replace(/^[^/]+\//, "").replace(/[-_]+/g, " ").trim();
+  return text ? text[0].toUpperCase() + text.slice(1) : branch;
 }
 
 export function prStatusLabel(pr: ipc.PrInfo): string {
@@ -160,6 +189,9 @@ interface AgentDetailsCardProps {
    *  compared here: it can be stale or unproven. */
   life?: Life;
   onOpenWorkspace: () => void;
+  /** Told whether the card is docked beside the terminal (taking its own column)
+   *  rather than floating over it, so the terminal can make room. */
+  onDockChange?: (docked: boolean) => void;
   /** Open an asset the agent made. Default: in a tab of its own. `system` when
    *  a modifier was held: the person's own app for that file. */
   onOpenAsset?: (path: string, opts: { system: boolean }) => void;
@@ -188,6 +220,7 @@ export function AgentDetailsCard({
   ports,
   life,
   onOpenWorkspace,
+  onDockChange,
   onOpenAsset,
   onSendToWorkspace,
   settled,
@@ -197,6 +230,7 @@ export function AgentDetailsCard({
   machine: remoteMachine,
 }: AgentDetailsCardProps) {
   const [collapsed, setCollapsed] = useState(readCollapsed);
+  const [docked, setDocked] = useState(readDocked);
   const [tasksOpen, setTasksOpen] = useState(false);
   const [assetsOpen, setAssetsOpen] = useState(false);
   const [hovered, setHovered] = useState<{ asset: Asset; anchor: DOMRect } | null>(null);
@@ -209,6 +243,28 @@ export function AgentDetailsCard({
   /** The merge action awaiting its confirm click, and whether one is running. */
   const [pending, setPending] = useState<null | "squash" | "merge" | "rebase" | "close">(null);
   const [merging, setMerging] = useState(false);
+  const [mergeMenu, setMergeMenu] = useState(false);
+  const [method, setMethod] = useState<"squash" | "merge" | "rebase">(readMergeMethod);
+  /** The "Commit & raise PR" form, and bumped to re-read the branch's PR after one is raised. */
+  const [raising, setRaising] = useState<null | { title: string; busy: boolean }>(null);
+  const [prEpoch, setPrEpoch] = useState(0);
+  /** Commits on this branch beyond its base, when nothing is left uncommitted. */
+  const [ahead, setAhead] = useState(0);
+
+  const dockedNow = docked && !collapsed;
+  useEffect(() => {
+    onDockChange?.(dockedNow);
+    return () => onDockChange?.(false);
+  }, [dockedNow, onDockChange]);
+  const toggleDock = () => {
+    const next = !docked;
+    setDocked(next);
+    try {
+      localStorage.setItem(DOCKED_KEY, next ? "1" : "0");
+    } catch {
+      /* A remembered state is a convenience. */
+    }
+  };
 
   const toggle = (value: boolean) => {
     setCollapsed(value);
@@ -268,7 +324,23 @@ export function AgentDetailsCard({
     return () => {
       stale = true;
     };
-  }, [collapsed, repo, branch, remoteMachine, digest?.session_id]);
+  }, [collapsed, repo, branch, remoteMachine, digest?.session_id, prEpoch]);
+
+  // A branch with everything committed can still have work with no PR.
+  useEffect(() => {
+    setAhead(0);
+    if (collapsed || pr || !cwd || !branch || remoteMachine || DEFAULT_BRANCHES.has(branch) || changed !== 0) return;
+    let stale = false;
+    ipc
+      .gitPrContext(cwd, "")
+      .then((ctx) => {
+        if (!stale) setAhead(ctx.commit_count);
+      })
+      .catch(() => {});
+    return () => {
+      stale = true;
+    };
+  }, [collapsed, pr, cwd, branch, changed, remoteMachine, prEpoch]);
 
   // The sub-agents, read from the session's transcript, polled faster while the
   // agent is working.
@@ -279,13 +351,27 @@ export function AgentDetailsCard({
     { fast: life?.state === "working" },
   );
   const subagents = activity?.subagents ?? [];
-  const assets = [...previewAssets(ports), ...collectAssets(digest?.files, cwd)];
+  // Servers the terminal is running get their own section with a link; the
+  // Assets list keeps only the files the agent made.
+  const servers = previewAssets(ports);
+  const assets = collectAssets(digest?.files, cwd);
   const tasks = normalizeTasks(digest?.tasks);
   const summary = summarizeTasks(tasks);
   const cli = agentCliFor(agent);
   const ws = activeWorkspace();
   const machine = remoteMachine ? remoteMachine.name : ws ? ws.connection.workspaceName : "This Mac";
   const helpers = digest?.subagents ?? 0;
+  const blocked = !!pr && (pr.draft || pr.checks === "FAIL" || pr.mergeable === "CONFLICTING");
+  const blockedWhy = !pr
+    ? undefined
+    : pr.draft
+      ? "Mark the PR ready first"
+      : pr.checks === "FAIL"
+        ? "Checks are failing"
+        : pr.mergeable === "CONFLICTING"
+          ? "Resolve the conflicts first"
+          : undefined;
+  const canRaise = !pr && !!repo && !remoteMachine && !!branch && !DEFAULT_BRANCHES.has(branch) && ((changed ?? 0) > 0 || ahead > 0);
 
   if (collapsed) {
     return (
@@ -322,7 +408,7 @@ export function AgentDetailsCard({
   };
 
   return (
-    <aside className="agent-card" aria-label="Agent details">
+    <aside className={`agent-card${docked ? " agent-card--docked" : ""}`} aria-label="Agent details">
       <header className="agent-card-head">
         <span className="agent-card-title">
           <AgentIcon id={agent} size={15} />
@@ -334,6 +420,16 @@ export function AgentDetailsCard({
         <button
           type="button"
           className="agent-card-icon-btn"
+          onClick={toggleDock}
+          aria-label={docked ? "Float agent details over the terminal" : "Dock agent details beside the terminal"}
+          aria-pressed={docked}
+          title={docked ? "Float over the terminal" : "Dock beside the terminal"}
+        >
+          ◧
+        </button>
+        <button
+          type="button"
+          className="agent-card-icon-btn"
           onClick={() => toggle(true)}
           aria-label="Hide agent details"
           title="Hide"
@@ -341,6 +437,29 @@ export function AgentDetailsCard({
           ×
         </button>
       </header>
+
+      {servers.length > 0 && (
+        <section className="agent-card-servers" aria-label="Running servers">
+          <div className="agent-card-label">
+            Running <span className="agent-card-dim">{servers.length}</span>
+          </div>
+          {servers.map((server) => (
+            <div key={server.path} className="agent-card-server">
+              <span className="agent-card-live" aria-hidden="true" />
+              <span className="agent-card-grow agent-card-ellipsis">{server.name}</span>
+              <button
+                type="button"
+                className="agent-card-server-open"
+                title={`Open ${server.path} in the preview (⌘-click: your browser)`}
+                aria-label={`Open ${server.name}`}
+                onClick={(e) => onOpenAsset?.(server.path, { system: e.metaKey || e.ctrlKey })}
+              >
+                Open ↗
+              </button>
+            </div>
+          ))}
+        </section>
+      )}
 
       {branch && (
         <div className="agent-card-row" title={branch}>
@@ -443,20 +562,109 @@ export function AgentDetailsCard({
             </>
           ) : (
             <>
-              <button type="button" className="agent-card-fix" disabled={pr.draft || pr.checks === "FAIL" || pr.mergeable === "CONFLICTING"} title={pr.draft ? "Mark the PR ready first" : pr.checks === "FAIL" ? "Checks are failing" : pr.mergeable === "CONFLICTING" ? "Resolve the conflicts first" : "Squash and merge"} onClick={() => setPending("squash")}>
-                Squash
-              </button>
-              <button type="button" className="agent-card-fix agent-card-fix-quiet" disabled={pr.draft || pr.checks === "FAIL" || pr.mergeable === "CONFLICTING"} onClick={() => setPending("merge")}>
-                Merge
-              </button>
-              <button type="button" className="agent-card-fix agent-card-fix-quiet" disabled={pr.draft || pr.checks === "FAIL" || pr.mergeable === "CONFLICTING"} onClick={() => setPending("rebase")}>
-                Rebase
-              </button>
+              <span className="agent-card-split">
+                <button
+                  type="button"
+                  className="agent-card-fix agent-card-split-main"
+                  disabled={blocked}
+                  title={blockedWhy ?? METHOD_LABEL[method]}
+                  onClick={() => setPending(method)}
+                >
+                  {METHOD_LABEL[method]}
+                </button>
+                <button
+                  type="button"
+                  className="agent-card-fix agent-card-split-chev"
+                  disabled={blocked}
+                  aria-label="Choose how to merge"
+                  aria-expanded={mergeMenu}
+                  onClick={() => setMergeMenu((open) => !open)}
+                >
+                  ▾
+                </button>
+                {mergeMenu && (
+                  <ul className="agent-card-mergemenu" role="menu" onKeyDown={(e) => e.key === "Escape" && setMergeMenu(false)}>
+                    {(["squash", "merge", "rebase"] as const).map((m) => (
+                      <li key={m}>
+                        <button
+                          type="button"
+                          role="menuitemradio"
+                          aria-checked={m === method}
+                          autoFocus={m === method}
+                          onClick={() => {
+                            setMethod(m);
+                            try {
+                              localStorage.setItem(METHOD_KEY, m);
+                            } catch {
+                              /* remembered only as a convenience */
+                            }
+                            setMergeMenu(false);
+                            setPending(m);
+                          }}
+                        >
+                          <span>{m === method ? "✓" : ""}</span>
+                          {METHOD_LABEL[m]}
+                        </button>
+                      </li>
+                    ))}
+                  </ul>
+                )}
+              </span>
               <span className="agent-card-grow" />
-              <button type="button" className="agent-card-fix agent-card-fix-quiet" onClick={() => setPending("close")}>
+              <button type="button" className="agent-card-fix agent-card-fix-quiet agent-card-close" onClick={() => setPending("close")}>
                 Close
               </button>
             </>
+          )}
+        </div>
+      )}
+
+      {canRaise && (
+        <div className="agent-card-row agent-card-merge" role="group" aria-label="Raise a pull request">
+          {raising ? (
+            <>
+              <input
+                className="agent-card-title-input agent-card-grow"
+                aria-label="Pull request title"
+                value={raising.title}
+                autoFocus
+                disabled={raising.busy}
+                onChange={(e) => setRaising({ ...raising, title: e.target.value })}
+                onKeyDown={(e) => {
+                  if (e.key === "Escape") setRaising(null);
+                }}
+              />
+              <button
+                type="button"
+                className="agent-card-fix"
+                disabled={raising.busy || !raising.title.trim()}
+                onClick={() => {
+                  const title = raising.title.trim();
+                  setRaising({ ...raising, busy: true });
+                  void runCommitPushPr({ repo: cwd || repo!, message: title, title, commit: (changed ?? 0) > 0 })
+                    .then((result) => {
+                      if (result.skipped.length > 0) onNotice?.(`Left out because they look like secrets: ${result.skipped.join(", ")}`);
+                      onNotice?.(result.prUrl ? `Opened ${result.prUrl}` : result.prExisted ? "A pull request already exists for this branch." : "Committed and pushed.");
+                      prCache.delete(repo!);
+                      setPrEpoch((n) => n + 1);
+                      setRaising(null);
+                    })
+                    .catch((err) => {
+                      onNotice?.(String(err instanceof Error ? err.message : err));
+                      setRaising((r) => (r ? { ...r, busy: false } : r));
+                    });
+                }}
+              >
+                {raising.busy ? "Working…" : "Raise PR"}
+              </button>
+              <button type="button" className="agent-card-fix agent-card-fix-quiet" disabled={raising.busy} onClick={() => setRaising(null)}>
+                Cancel
+              </button>
+            </>
+          ) : (
+            <button type="button" className="agent-card-fix" onClick={() => setRaising({ title: titleFromBranch(branch!), busy: false })}>
+              {(changed ?? 0) > 0 ? "Commit & raise PR" : "Raise PR"}
+            </button>
           )}
         </div>
       )}
@@ -501,6 +709,20 @@ export function AgentDetailsCard({
         <span className="agent-card-dim">{taskHeadline(summary)}</span>
         {summary.total > 0 && <span aria-hidden="true">{tasksOpen ? "▾" : "▸"}</span>}
       </button>
+
+      {summary.total > 0 && (
+        <div
+          className="agent-card-progress"
+          role="progressbar"
+          aria-label="Tasks done"
+          aria-valuemin={0}
+          aria-valuemax={summary.total}
+          aria-valuenow={summary.done}
+        >
+          <i className="agent-card-progress-done" style={{ width: `${(summary.done / summary.total) * 100}%` }} />
+          <i className="agent-card-progress-run" style={{ width: `${(summary.running / summary.total) * 100}%` }} />
+        </div>
+      )}
 
       {summary.current && !tasksOpen && (
         <div className="agent-card-current" title={summary.current.text}>

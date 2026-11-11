@@ -4,7 +4,9 @@
 // machine's own process list, and re-registers it under an alias exactly as a
 // fresh spawn would.
 import { adoptMachineTerminal, type PtyMachine } from "../ipc";
+import { nativeHost } from "../host/native";
 import { connectMachine, type ConnectedMachine } from "./live";
+import { THIS_MAC_ENV } from "./allWorkspaceTabs";
 import { peekWorkspaceList } from "../remoteExecution/workspaceListCache";
 
 export type ReconnectResult =
@@ -47,4 +49,26 @@ export async function remoteTabReconnect(
   }
   const alias = deps.adopt({ id: machine.env, host: machine.host, readOnly: machine.readOnly }, sessionId);
   return { kind: "attached", alias, machineName: machine.name };
+}
+
+export interface LocalReconnectDeps {
+  invoke: <T>(command: string) => Promise<T>;
+  adopt: (machine: PtyMachine, realId: number) => number;
+}
+
+/** The same for a terminal running on this Mac while a workspace is the
+ *  window's own machine ("All workspaces"): this Mac is then one of the other
+ *  machines, reached through the desktop host. */
+export async function localTabReconnect(
+  sessionId: number,
+  deps: LocalReconnectDeps = { invoke: (command) => nativeHost.invoke(command), adopt: adoptMachineTerminal },
+): Promise<ReconnectResult> {
+  try {
+    const live = await deps.invoke<{ id: number }[]>("pty_stats");
+    if (!live.some((s) => s.id === sessionId)) return { kind: "gone", machineName: "This Mac" };
+  } catch (error) {
+    return { kind: "failed", reason: `Could not read this Mac's terminals: ${String((error as Error)?.message ?? error)}` };
+  }
+  const alias = deps.adopt({ id: THIS_MAC_ENV, host: nativeHost, readOnly: false }, sessionId);
+  return { kind: "attached", alias, machineName: "This Mac" };
 }
