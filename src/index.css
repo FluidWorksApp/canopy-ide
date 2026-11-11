@@ -7154,7 +7154,15 @@ body.dragging-tab * {
 }
 .agent-card-progress i {
   display: block;
+  flex: none;
   height: 100%;
+}
+.agent-card-progress-done,
+.agent-card-progress-run {
+  min-width: 3px;
+}
+.agent-card-progress i[style*="width: 0%"] {
+  min-width: 0;
 }
 .agent-card-progress-done {
   background: #46c07a;
