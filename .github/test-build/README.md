@@ -75,8 +75,9 @@ b. **Context bridge.** In the adopted Claude agent, call a canopy tool (for
    work against the new app, through `~/.canopy/pty-host/ctx.sock`.
 
 c. **Quit and Stop All.** With an agent running, press ⌥⌘Q (or pick the app
-   menu item under Quit). A dialog asks "Stop 1 running agent?". Choose
-   **Stop all**. Relaunch with the flag: the terminal shows Resume, not
+   menu item under Quit). On every platform, with the host on or off, a dialog
+   asks "Stop 1 running agent?" whenever agents run (there is no "Quit only"
+   button with the host off). With the host on, choose **Stop all**. Relaunch with the flag: the terminal shows Resume, not
    Reconnecting. After about 60 s, `pgrep canopy-pty-host` prints nothing.
 
 d. **Flag off.** Launch without the flag (see above), open a terminal and quit.

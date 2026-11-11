@@ -171,7 +171,8 @@ fn build_menu(app: &tauri::AppHandle, profile: &str) -> tauri::Result<Menu<tauri
             &PredefinedMenuItem::quit(app, None)?,
             // With the terminal host on, Quit leaves terminals running for the
             // next launch to adopt; this is the quit that stops them. It asks
-            // first only when agents are running (the frontend's dialog).
+            // first whenever agents are running (the frontend's dialog), host
+            // on or off.
             &MenuItem::with_id(
                 app,
                 "quit-stop-all",
@@ -696,12 +697,6 @@ pub fn run() {
             let menu = build_menu(app.handle(), "canopy")?;
             app.set_menu(menu)?;
             app.on_menu_event(|app, event| {
-                // With the terminal host off, Quit already stops every
-                // terminal, so there is nothing to ask: just quit.
-                if event.id().0 == "quit-stop-all" && !pty_hosted::enabled() {
-                    app.exit(0);
-                    return;
-                }
                 let _ = app.emit("menu", event.id().0.clone());
             });
             Ok(())
@@ -838,6 +833,7 @@ pub fn run() {
             pty::instance_id,
             pty::launch_id,
             pty::app_quit,
+            pty::pty_host_enabled,
             android::android_sdk_status,
             android::android_devices,
             android::android_avds,
