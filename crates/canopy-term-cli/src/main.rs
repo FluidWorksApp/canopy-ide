@@ -11,7 +11,8 @@ fn main() {
         .take_while(|a| a.as_str() != "--")
         .any(|a| a == "--version" || a == "-V")
     {
-        println!("canopy-term {VERSION}");
+        use std::io::Write;
+        let _ = writeln!(std::io::stdout(), "canopy-term {VERSION}");
         return;
     }
     run(args);
@@ -27,7 +28,9 @@ fn run(args: Vec<String>) {
 
 #[cfg(not(unix))]
 fn run(_args: Vec<String>) {
-    eprintln!(
+    use std::io::Write;
+    let _ = writeln!(
+        std::io::stderr(),
         "canopy-term: the persistent terminal host is not available on this platform (it is unix only)"
     );
     std::process::exit(4);

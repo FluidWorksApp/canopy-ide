@@ -258,6 +258,37 @@ impl Pty {
         t.c_lflag
     }
 
+    /// O_NONBLOCK lives on the open file description the attach client shares.
+    fn nonblocking(&self) -> bool {
+        // SAFETY: F_GETFL on our own descriptor.
+        unsafe { libc::fcntl(self.slave, libc::F_GETFL) & libc::O_NONBLOCK != 0 }
+    }
+
+    /// Writes as much as the terminal takes within `limit`.
+    fn write_bounded(&self, data: &[u8], limit: Duration) -> usize {
+        let deadline = Instant::now() + limit;
+        let mut sent = 0;
+        while sent < data.len() && Instant::now() < deadline {
+            let mut p = libc::pollfd {
+                fd: self.master,
+                events: libc::POLLOUT,
+                revents: 0,
+            };
+            // SAFETY: one valid pollfd, then a write from a live slice.
+            unsafe {
+                if libc::poll(&mut p, 1, 100) > 0 {
+                    let rest = &data[sent..];
+                    let n =
+                        libc::write(self.master, rest.as_ptr() as *const _, rest.len().min(4096));
+                    if n > 0 {
+                        sent += n as usize;
+                    }
+                }
+            }
+        }
+        sent
+    }
+
     fn raw_now(&self) -> bool {
         self.lflag() & libc::ICANON == 0
     }
@@ -402,6 +433,12 @@ fn attach_passes_bytes_detaches_and_restores_the_tty() {
         before & MODE_MASK,
         "tty not restored after detach"
     );
+    assert!(!pty.nonblocking(), "O_NONBLOCK left on the terminal");
+    let tail = pty.read_until("\x1b[?1049l", Duration::from_secs(2));
+    assert!(
+        tail.contains("\x1b[?1049l"),
+        "no mode reset on detach: {tail:?}"
+    );
     // The session lives on.
     assert!(wait_until(Duration::from_secs(5), || {
         let rows = h.ls();
@@ -417,6 +454,7 @@ fn attach_restores_the_tty_on_sigterm_and_sigint() {
         (libc::SIGTERM, 143),
         (libc::SIGINT, 130),
         (libc::SIGQUIT, 131),
+        (libc::SIGHUP, 129),
     ] {
         let pty = Pty::open(80, 24);
         let before = pty.lflag();
@@ -430,6 +468,7 @@ fn attach_restores_the_tty_on_sigterm_and_sigint() {
             before & MODE_MASK,
             "tty not restored after signal {sig}"
         );
+        assert!(!pty.nonblocking(), "O_NONBLOCK left on after signal {sig}");
         // Wait for the host to notice the detach before the next round.
         assert!(wait_until(Duration::from_secs(5), || h.ls()[0]["attached"] == false));
     }
@@ -508,22 +547,24 @@ fn send_reads_text_from_stdin() {
     }));
 }
 
-/// A host older than protocol 3 would ignore `exclusive` and take the session
-/// over, so send and attach must fail with an error and never send an attach.
-#[test]
-fn an_old_host_is_never_attached_to_without_exclusivity() {
+type Ops = std::sync::Arc<std::sync::Mutex<Vec<String>>>;
+
+/// A scripted host: `reply(op, n)` answers the `n`th request of kind `op`.
+fn fake_host(
+    name: &str,
+    reply: impl Fn(&str, usize) -> String + Send + 'static,
+) -> (PathBuf, PathBuf, Ops) {
     use std::io::{BufRead, BufReader, Write};
     use std::os::unix::net::UnixListener;
-    use std::sync::{Arc, Mutex};
 
-    let dir = std::env::temp_dir().join(format!("ct{}k", std::process::id()));
+    let dir = std::env::temp_dir().join(format!("ct{}{}", std::process::id(), name));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
     let sock = dir.join("h.sock");
     let listener = UnixListener::bind(&sock).unwrap();
-    let ops: Arc<Mutex<Vec<String>>> = Arc::default();
+    let ops: Ops = Ops::default();
     {
-        let ops = Arc::clone(&ops);
+        let ops = ops.clone();
         std::thread::spawn(move || {
             for stream in listener.incoming() {
                 let Ok(mut stream) = stream else { break };
@@ -533,28 +574,40 @@ fn an_old_host_is_never_attached_to_without_exclusivity() {
                     .ok()
                     .and_then(|v| v["op"].as_str().map(String::from))
                     .unwrap_or_default();
-                ops.lock().unwrap().push(op.clone());
-                let reply = if op == "hello" {
-                    r#"{"ok":true,"version":2}"#
-                } else {
-                    r#"{"ok":false,"error":"unexpected"}"#
+                let n = {
+                    let mut ops = ops.lock().unwrap();
+                    ops.push(op.clone());
+                    ops.iter().filter(|o| **o == op).count() - 1
                 };
-                let _ = stream.write_all(format!("{reply}\n").as_bytes());
+                let _ = stream.write_all(format!("{}\n", reply(&op, n)).as_bytes());
             }
         });
     }
-    let term = |args: &[&str]| {
-        Command::new(env!("CARGO_BIN_EXE_canopy-term"))
-            .arg("--socket")
-            .arg(&sock)
-            .args(args)
-            .stdin(Stdio::null())
-            .output()
-            .unwrap()
-    };
+    (dir, sock, ops)
+}
+
+fn term_at(sock: &std::path::Path, args: &[&str]) -> Output {
+    Command::new(env!("CARGO_BIN_EXE_canopy-term"))
+        .arg("--socket")
+        .arg(sock)
+        .args(args)
+        .stdin(Stdio::null())
+        .output()
+        .unwrap()
+}
+
+/// A host older than protocol 3 would ignore `exclusive` and take the session
+/// over, so send and attach must fail with an error and never send an attach.
+#[test]
+fn an_old_host_is_never_attached_to_without_exclusivity() {
+    let (dir, sock, ops) = fake_host("k", |op, _| match op {
+        "hello" => r#"{"ok":true,"version":2}"#.into(),
+        "list" => r#"{"ok":true,"sessions":[{"id":1,"pid":42}]}"#.into(),
+        _ => r#"{"ok":false,"error":"unexpected"}"#.into(),
+    });
     let cases: [&[&str]; 2] = [&["send", "1", "x"], &["attach", "1"]];
     for args in cases {
-        let out = term(args);
+        let out = term_at(&sock, args);
         assert_eq!(
             out.status.code(),
             Some(1),
@@ -568,10 +621,42 @@ fn an_old_host_is_never_attached_to_without_exclusivity() {
         );
     }
     assert!(
-        ops.lock().unwrap().iter().all(|op| op == "hello"),
-        "sent more than a hello to an old host: {:?}",
+        !ops.lock().unwrap().iter().any(|op| op == "attach"),
+        "sent an attach to an old host: {:?}",
         ops.lock().unwrap()
     );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// `wait` must not report success for a session it lost: reaped by someone
+/// else (gone from the list) or replaced under the same id (another pid).
+#[test]
+fn wait_reports_a_vanished_or_replaced_session() {
+    let (dir, sock, _) = fake_host("v", |op, n| match (op, n) {
+        ("list", 0) => r#"{"ok":true,"sessions":[{"id":1,"pid":42}]}"#.into(),
+        ("list", _) => r#"{"ok":true,"sessions":[]}"#.into(),
+        _ => r#"{"ok":false,"error":"unexpected"}"#.into(),
+    });
+    assert_eq!(term_at(&sock, &["wait", "1"]).status.code(), Some(6));
+    let _ = std::fs::remove_dir_all(&dir);
+
+    let (dir, sock, _) = fake_host("w", |op, n| match (op, n) {
+        ("list", 0) => r#"{"ok":true,"sessions":[{"id":1,"pid":42}]}"#.into(),
+        ("list", _) => r#"{"ok":true,"sessions":[{"id":1,"pid":43,"exited":0}]}"#.into(),
+        _ => r#"{"ok":false,"error":"unexpected"}"#.into(),
+    });
+    assert_eq!(term_at(&sock, &["wait", "1"]).status.code(), Some(6));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn kill_of_a_session_that_vanished_meanwhile_is_3() {
+    let (dir, sock, _) = fake_host("x", |op, _| match op {
+        "list" => r#"{"ok":true,"sessions":[{"id":1,"pid":42}]}"#.into(),
+        "kill" => r#"{"ok":false,"error":"no such session"}"#.into(),
+        _ => r#"{"ok":false,"error":"unexpected"}"#.into(),
+    });
+    assert_eq!(term_at(&sock, &["kill", "1"]).status.code(), Some(3));
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -581,10 +666,8 @@ fn detach(pty: &Pty, child: &mut Kill) -> Option<i32> {
     wait_exit(child, Duration::from_secs(5)).and_then(|s| s.code())
 }
 
-/// `--force` hands the session to the new client. The host does not yet close
-/// the replaced connection (its input thread keeps it open), so this only
-/// checks that output moves to the new client and that the old one can still
-/// detach cleanly; it does not require the old client to see EOF.
+/// `--force` hands the session to the new client; the host disconnects the old
+/// one, which exits on its own (5, taken over) with its terminal restored.
 #[test]
 fn attach_force_takes_the_session_over() {
     let h = Host::start("l");
@@ -595,32 +678,18 @@ fn attach_force_takes_the_session_over() {
     let pty_b = Pty::open(80, 24);
     let mut b = start_attach_with(&h, &pty_b, &["attach", &id, "--force"]);
 
+    let status = wait_exit(&mut a, Duration::from_secs(5)).expect("replaced client exited");
+    assert_eq!(status.code(), Some(5));
+    assert_eq!(pty_a.lflag() & MODE_MASK, before_a & MODE_MASK);
+    assert!(!pty_a.nonblocking());
+
     pty_b.write(b"via-b\n");
     let seen_b = pty_b.read_until("via-b", Duration::from_secs(5));
     assert!(
         seen_b.contains("via-b"),
         "new client got no output: {seen_b:?}"
     );
-    let seen_a = pty_a.read_until("via-b", Duration::from_millis(700));
-    assert!(
-        !seen_a.contains("via-b"),
-        "replaced client still gets output"
-    );
-
-    // The replaced client can still leave, with its tty restored.
-    assert!(
-        detach(&pty_a, &mut a).is_some(),
-        "replaced client did not exit"
-    );
-    assert_eq!(pty_a.lflag() & MODE_MASK, before_a & MODE_MASK);
-    // ...without disturbing the new one.
     assert_eq!(h.ls()[0]["attached"], true);
-    pty_b.write(b"again-b\n");
-    let seen_b = pty_b.read_until("again-b", Duration::from_secs(5));
-    assert!(
-        seen_b.contains("again-b"),
-        "new client lost the session: {seen_b:?}"
-    );
     assert_eq!(detach(&pty_b, &mut b), Some(0));
 }
 
@@ -636,10 +705,9 @@ fn send_force_types_into_an_attached_session() {
     assert!(wait_until(Duration::from_secs(5), || {
         lossy(&h.run(&["capture", &id]).stdout).contains("forced-text")
     }));
-    assert!(
-        detach(&pty, &mut a).is_some(),
-        "replaced client did not exit"
-    );
+    // The attached client was disconnected by the takeover.
+    let status = wait_exit(&mut a, Duration::from_secs(5)).expect("replaced client exited");
+    assert_eq!(status.code(), Some(5));
     assert_eq!(pty.lflag() & MODE_MASK, before & MODE_MASK);
 }
 
@@ -723,4 +791,135 @@ fn attach_exits_with_the_sessions_exit_code() {
     let status = wait_exit(&mut child, Duration::from_secs(10)).expect("attach exited");
     assert_eq!(status.code(), Some(7));
     assert_eq!(pty.lflag() & MODE_MASK, before & MODE_MASK);
+}
+
+#[test]
+fn double_escape_is_literal_and_kitty_escape_detaches() {
+    let h = Host::start("s");
+    let id = h.new_session(None, &["sh", "-c", "stty -echo; echo READY; exec cat -v"]);
+    assert!(wait_until(Duration::from_secs(5), || {
+        lossy(&h.run(&["capture", &id]).stdout).contains("READY")
+    }));
+    let pty = Pty::open(80, 24);
+    let mut child = start_attach(&h, &pty, &id);
+    pty.write(&[0x1d, 0x1d]);
+    pty.write(b"x\n");
+    let seen = pty.read_until("^]x", Duration::from_secs(5));
+    assert!(
+        seen.contains("^]x"),
+        "Ctrl-] Ctrl-] did not send one: {seen:?}"
+    );
+    assert!(!seen.contains("^]^]"), "sent two: {seen:?}");
+    // Ctrl-] as the kitty keyboard protocol encodes it, then d.
+    pty.write(b"\x1b[93;5u");
+    pty.write(b"d");
+    assert_eq!(
+        wait_exit(&mut child, Duration::from_secs(5)).and_then(|s| s.code()),
+        Some(0)
+    );
+}
+
+/// Resumes a stopped host even if the test fails. Declared after the `Host`,
+/// so it runs before the host is shut down.
+struct Cont(libc::pid_t);
+
+impl Drop for Cont {
+    fn drop(&mut self) {
+        // SAFETY: signalling the test's own host process.
+        unsafe { libc::kill(self.0, libc::SIGCONT) };
+    }
+}
+
+/// A session that stops reading must not freeze the client: with the host
+/// stopped and a large paste queued, the detach key and SIGTERM still work and
+/// the terminal comes back.
+#[test]
+fn attach_stays_responsive_when_the_host_stalls() {
+    for (name, by_signal) in [("q", false), ("r", true)] {
+        let h = Host::start(name);
+        let host_pid = h.client.hello().unwrap().host_pid.expect("host pid") as libc::pid_t;
+        let id = h.new_session(None, &["cat"]);
+        let pty = Pty::open(80, 24);
+        let before = pty.lflag();
+        let mut child = start_attach(&h, &pty, &id);
+        pty.write(b"ping\n");
+        assert!(pty
+            .read_until("ping", Duration::from_secs(5))
+            .contains("ping"));
+
+        // SAFETY: stopping the test's own host process; `Cont` resumes it.
+        unsafe { libc::kill(host_pid, libc::SIGSTOP) };
+        let _cont = Cont(host_pid);
+        let paste = vec![b'a'; 512 * 1024];
+        let sent = pty.write_bounded(&paste, Duration::from_secs(5));
+        assert!(sent > 0);
+
+        if by_signal {
+            // SAFETY: signalling our own child.
+            unsafe { libc::kill(child.0.id() as libc::pid_t, libc::SIGTERM) };
+        } else {
+            pty.write(&[0x1d]);
+            pty.write(b"d");
+        }
+        let status = wait_exit(&mut child, Duration::from_secs(10)).expect("attach exited");
+        assert_eq!(status.code(), Some(if by_signal { 143 } else { 0 }));
+        assert_eq!(pty.lflag() & MODE_MASK, before & MODE_MASK);
+        assert!(!pty.nonblocking());
+    }
+}
+
+#[test]
+fn send_to_an_exited_session_fails() {
+    let h = Host::start("t");
+    let id = h.new_session(None, &["sh", "-c", "exit 0"]);
+    assert!(wait_until(Duration::from_secs(5), || h.ls()[0]["exited"].is_number()));
+    let out = h.run(&["send", &id, "x"]);
+    assert_eq!(out.status.code(), Some(1));
+    assert!(
+        lossy(&out.stderr).contains("exited"),
+        "{}",
+        lossy(&out.stderr)
+    );
+}
+
+/// Removes a directory and shuts down any host listening under it.
+struct Cleanup(PathBuf, PathBuf);
+
+impl Drop for Cleanup {
+    fn drop(&mut self) {
+        let _ = HostClient::new(&self.1).shutdown();
+        std::thread::sleep(Duration::from_millis(200));
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+/// `new` starts a host only in the default directory: starting one chmods the
+/// socket's directory, which must never happen to an arbitrary --socket path.
+#[test]
+fn new_starts_a_host_only_for_the_default_socket() {
+    let home = std::env::temp_dir().join(format!("ct{}u", std::process::id()));
+    let _ = std::fs::remove_dir_all(&home);
+    std::fs::create_dir_all(&home).unwrap();
+    let default_sock = home.join(".canopy").join("pty-host").join("host.sock");
+    let _cleanup = Cleanup(home.clone(), default_sock.clone());
+    let new = |extra: &[&str]| {
+        Command::new(env!("CARGO_BIN_EXE_canopy-term"))
+            .args(extra)
+            .args(["new", "--", "sleep", "30"])
+            .env_remove("CANOPY_PTY_HOST_SOCKET")
+            .env_remove("CANOPY_PTY_HOST_DIR")
+            .env("HOME", &home)
+            .env("CANOPY_PTY_HOST_EXE", host_exe())
+            .output()
+            .unwrap()
+    };
+    let other = home.join("x");
+    let other_sock = other.join("h.sock");
+    let out = new(&["--socket", other_sock.to_str().unwrap()]);
+    assert_eq!(out.status.code(), Some(4), "{}", lossy(&out.stderr));
+    assert!(!other.exists(), "created the --socket directory");
+
+    let out = new(&[]);
+    assert_eq!(out.status.code(), Some(0), "{}", lossy(&out.stderr));
+    assert!(default_sock.exists());
 }

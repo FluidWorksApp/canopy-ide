@@ -5,7 +5,7 @@ use canopy_pty_host::protocol::{SessionInfo, SpawnSpec};
 use std::io::{self, Read, Write};
 use std::os::unix::io::{AsRawFd, RawFd};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicI32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicPtr, Ordering};
 use std::time::{Duration, Instant};
 
 const EXIT_ERROR: i32 = 1;
@@ -13,9 +13,9 @@ const EXIT_USAGE: i32 = 2;
 const EXIT_NO_SESSION: i32 = 3;
 const EXIT_NO_HOST: i32 = 4;
 const EXIT_BUSY: i32 = 5;
+const EXIT_GONE: i32 = 6;
+const EXIT_TIMEOUT: i32 = 124;
 
-/// Ctrl-]; followed by `d` it detaches, followed by itself it sends one Ctrl-].
-const ESCAPE: u8 = 0x1d;
 /// An idle host started by `new` exits after this long, like the app's.
 const HOST_IDLE_SECS: u64 = 60;
 
@@ -30,13 +30,15 @@ commands:
                                     start a session (a repeated KEY returns the
                                     existing one); prints its id
   attach ID [--after N] [--force]   interactive passthrough; detach with Ctrl-] d
-                                    (Ctrl-] Ctrl-] sends a literal Ctrl-])
+                                    (Ctrl-] Ctrl-] sends a literal Ctrl-]); on
+                                    exit the outer terminal's modes are reset
   send ID TEXT [--enter] [--force]  type TEXT into the session (--enter adds CR);
                                     TEXT is `-` to read it from stdin (argv is
                                     visible in process lists, stdin is not)
   capture ID [--lines N]            print the tail of the replay ring as text
-  wait ID                           block until the session exits, then exit with
-                                    its exit code
+  wait ID [--timeout SECS]          block until the session exits, then exit with
+                                    its exit code (124 on timeout, 6 if the session
+                                    went away without a recorded exit code)
   kill ID                           kill the session
 
 options:
@@ -46,7 +48,14 @@ options:
   --version       print the version and exit
 
 exit codes: 0 ok, 1 error, 2 usage, 3 no such session, 4 host not running,
-5 session is attached elsewhere (see below).
+5 session is attached elsewhere (see below), or taken over while attached,
+6 session gone without an exit code (wait), 124 timeout (wait). wait otherwise
+exits with the session's own code, which can coincide with these.
+
+new starts a host only for the default socket (~/.canopy/pty-host, or
+pty-host-dev with --dev), because starting one makes its directory private
+(mode 0700). For --socket, CANOPY_PTY_HOST_SOCKET or CANOPY_PTY_HOST_DIR the
+host must already be running.
 
 attach and send open the session's one data connection, which the host would
 otherwise hand to the newest client, disconnecting whoever held it (for example
@@ -93,7 +102,7 @@ pub fn run(args: Vec<String>) -> i32 {
     match dispatch(args) {
         Ok(code) => code,
         Err(f) => {
-            eprintln!("canopy-term: {}", f.msg);
+            let _ = writeln!(io::stderr(), "canopy-term: {}", f.msg);
             f.code
         }
     }
@@ -182,18 +191,20 @@ fn only_id(args: Vec<String>) -> Res<u32> {
     }
 }
 
-fn socket_path(explicit: Option<String>, dev: bool) -> Res<PathBuf> {
+/// The socket, and whether it is the default dedicated directory, the only
+/// place `new` may start a host (starting one chmods the directory to 0700).
+fn socket_path(explicit: Option<String>, dev: bool) -> Res<(PathBuf, bool)> {
     if let Some(path) = explicit {
-        return Ok(PathBuf::from(path));
+        return Ok((PathBuf::from(path), false));
     }
     if let Ok(path) = std::env::var("CANOPY_PTY_HOST_SOCKET") {
         if !path.is_empty() {
-            return Ok(PathBuf::from(path));
+            return Ok((PathBuf::from(path), false));
         }
     }
     if let Ok(dir) = std::env::var("CANOPY_PTY_HOST_DIR") {
         if !dir.is_empty() {
-            return Ok(PathBuf::from(dir).join("host.sock"));
+            return Ok((PathBuf::from(dir).join("host.sock"), false));
         }
     }
     let home = std::env::var("HOME").map_err(|_| {
@@ -203,35 +214,38 @@ fn socket_path(explicit: Option<String>, dev: bool) -> Res<PathBuf> {
         )
     })?;
     let leaf = if dev { "pty-host-dev" } else { "pty-host" };
-    Ok(PathBuf::from(home)
-        .join(".canopy")
-        .join(leaf)
-        .join("host.sock"))
+    Ok((
+        PathBuf::from(home)
+            .join(".canopy")
+            .join(leaf)
+            .join("host.sock"),
+        true,
+    ))
 }
 
 fn dispatch(mut args: Vec<String>) -> Res<i32> {
     let socket = take_opt(&mut args, "--socket")?;
     let dev = take_flag(&mut args, "--dev");
     if args.is_empty() {
-        eprint!("{USAGE}");
+        let _ = write!(io::stderr(), "{USAGE}");
         return Ok(EXIT_USAGE);
     }
     let command = args.remove(0);
     if matches!(command.as_str(), "help" | "--help" | "-h") {
-        print!("{USAGE}");
+        let _ = write!(io::stdout(), "{USAGE}");
         return Ok(0);
     }
     if take_flag(&mut args, "--help") || take_flag(&mut args, "-h") {
-        print!("{USAGE}");
+        let _ = write!(io::stdout(), "{USAGE}");
         return Ok(0);
     }
-    let socket = socket_path(socket, dev)?;
+    let (socket, launchable) = socket_path(socket, dev)?;
     let client = HostClient::new(&socket);
     match command.as_str() {
         "ls" => cmd_ls(&client, &socket, args),
         "kill" => cmd_kill(&client, &socket, args),
         "wait" => cmd_wait(&client, &socket, args),
-        "new" => cmd_new(&socket, args),
+        "new" => cmd_new(&socket, launchable, args),
         "send" => cmd_send(&client, &socket, args),
         "capture" => cmd_capture(&client, &socket, args),
         "attach" => cmd_attach(&client, &socket, args),
@@ -316,18 +330,42 @@ fn cmd_ls(client: &HostClient, socket: &Path, mut args: Vec<String>) -> Res<i32>
 fn cmd_kill(client: &HostClient, socket: &Path, args: Vec<String>) -> Res<i32> {
     let id = only_id(args)?;
     find(client, socket, id)?;
-    client.kill(id).map_err(|e| io_fail(e, socket))?;
+    // It can vanish between the two calls.
+    client.kill(id).map_err(|e| host_fail(e, socket, id))?;
     Ok(0)
 }
 
-fn cmd_wait(client: &HostClient, socket: &Path, args: Vec<String>) -> Res<i32> {
+/// Polls every 20 ms: the app reaps an exited session within about 50 ms, and a
+/// reaped session's exit code is gone. A blocking `wait` op on the host would
+/// remove that race (requested as a follow-up).
+fn cmd_wait(client: &HostClient, socket: &Path, mut args: Vec<String>) -> Res<i32> {
+    let timeout: Option<f64> = take_number(&mut args, "--timeout")?;
     let id = only_id(args)?;
+    let deadline = timeout.map(|t| Instant::now() + Duration::from_secs_f64(t.max(0.0)));
+    // Pinned to the pid first seen, so a restarted host reusing the id is not
+    // mistaken for the same session.
+    let first = find(client, socket, id)?;
+    let pid = first.pid;
+    let mut info = Some(first);
     loop {
-        let info = find(client, socket, id)?;
-        if let Some(code) = info.exited {
-            return Ok(code.rem_euclid(256));
+        match info {
+            Some(s) if s.pid == pid => {
+                if let Some(code) = s.exited {
+                    return Ok(code.rem_euclid(256));
+                }
+            }
+            _ => {
+                return Err(fail(
+                    EXIT_GONE,
+                    format!("session {id} went away without a recorded exit code (reaped by another client?)"),
+                ))
+            }
         }
-        std::thread::sleep(Duration::from_millis(100));
+        if deadline.is_some_and(|d| Instant::now() >= d) {
+            return Err(fail(EXIT_TIMEOUT, format!("session {id} still running")));
+        }
+        std::thread::sleep(Duration::from_millis(20));
+        info = list(client, socket)?.into_iter().find(|s| s.id == id);
     }
 }
 
@@ -343,7 +381,7 @@ fn host_exe() -> Option<PathBuf> {
     exe.is_file().then_some(exe)
 }
 
-fn cmd_new(socket: &Path, mut args: Vec<String>) -> Res<i32> {
+fn cmd_new(socket: &Path, launchable: bool, mut args: Vec<String>) -> Res<i32> {
     let key = take_opt(&mut args, "--key")?;
     let cwd = take_opt(&mut args, "--cwd")?;
     let (head, command) = split_dd(args);
@@ -385,14 +423,25 @@ fn cmd_new(socket: &Path, mut args: Vec<String>) -> Res<i32> {
         ..Default::default()
     };
     let mut client = HostClient::new(socket);
-    if let Some(exe) = host_exe() {
-        // Only `new` may start a host; every other command reports "not running".
-        client = client.with_launch(exe, HOST_IDLE_SECS);
+    if launchable {
+        if let Some(exe) = host_exe() {
+            // Only `new`, and only for the default directory, may start a host.
+            client = client.with_launch(exe, HOST_IDLE_SECS);
+        }
     }
-    let (id, _pid, existing) = client.spawn_keyed(spec).map_err(|e| io_fail(e, socket))?;
-    println!("{id}");
+    let (id, _pid, existing) = client.spawn_keyed(spec).map_err(|e| {
+        let mut f = io_fail(e, socket);
+        if f.code == EXIT_NO_HOST && !launchable {
+            f.msg
+                .push_str("; canopy-term starts a host only for the default socket");
+        }
+        f
+    })?;
+    let _ = writeln!(io::stdout(), "{id}");
     if existing {
-        eprintln!("canopy-term: key already in use, returned the existing session");
+        say(format_args!(
+            "canopy-term: key already in use, returned the existing session"
+        ));
     }
     Ok(0)
 }
@@ -400,7 +449,7 @@ fn cmd_new(socket: &Path, mut args: Vec<String>) -> Res<i32> {
 /// Maps a host refusal to its exit code; anything else goes through `io_fail`.
 fn host_fail(error: io::Error, socket: &Path, id: u32) -> Fail {
     let text = error.to_string();
-    if text.contains(canopy_pty_host::protocol::BUSY) {
+    if text == canopy_pty_host::protocol::BUSY {
         fail(
             EXIT_BUSY,
             format!("session {id} is attached elsewhere (--force takes it over)"),
@@ -452,9 +501,14 @@ fn cmd_send(client: &HostClient, socket: &Path, mut args: Vec<String>) -> Res<i3
     if enter {
         data.push(b'\r');
     }
+    if find(client, socket, id)?.exited.is_some() {
+        return Err(fail(EXIT_ERROR, format!("session {id} has exited")));
+    }
     // A start past the end clamps to it, so nothing is replayed.
     let attached = open_data(client, socket, id, u64::MAX, force)?;
     let mut stream = attached.stream;
+    // A session that never reads its input must not hang send.
+    let _ = stream.set_write_timeout(Some(Duration::from_secs(5)));
     stream
         .write_all(&data)
         .map_err(|e| fail(EXIT_ERROR, e.to_string()))?;
@@ -513,8 +567,169 @@ fn last_lines(bytes: &[u8], n: usize) -> &[u8] {
 
 // ------------------------------------------------------------------- attach
 
+/// Escape keys: Ctrl-] as a plain byte, or as the kitty keyboard protocol sends
+/// it once an inner program has pushed kitty flags onto the outer terminal.
+const ESCAPE_KEYS: [&[u8]; 3] = [b"\x1d", b"\x1b[93;5u", b"\x1b[93;5:1u"];
+/// The kitty release event for Ctrl-]; ignored between the two keys.
+const ESCAPE_RELEASE: [&[u8]; 1] = [b"\x1b[93;5:3u"];
+/// `d`, plain or kitty-encoded.
+const DETACH_KEYS: [&[u8]; 4] = [b"d", b"\x1b[100u", b"\x1b[100;1u", b"\x1b[100;1:1u"];
+
+/// Undoes terminal modes an inner program may have turned on in the outer
+/// terminal: attributes, alternate screen, mouse tracking, bracketed paste,
+/// application cursor keys and keypad, one level of kitty keyboard flags, and a
+/// hidden cursor.
+const RESET: &[u8] = b"\x1b[0m\x1b[?1049l\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1006l\x1b[?1015l\x1b[?2004l\x1b[?1l\x1b>\x1b[<u\x1b[?25h";
+
+/// Stop reading stdin only past this much unsent input (far more than any real
+/// paste), so Ctrl-] and signals are never stuck behind a stalled host.
+const HOST_QUEUE_CAP: usize = 64 << 20;
+/// Stop reading the session while this much output waits for the terminal.
+const OUT_QUEUE_CAP: usize = 1 << 20;
+/// How long a lone ESC or a partial escape sequence is held before it is sent.
+const HOLD_MS: libc::c_int = 50;
+
+enum Match {
+    Full(usize),
+    Partial,
+    No,
+}
+
+fn match_any(rest: &[u8], keys: &[&[u8]]) -> Match {
+    let mut partial = false;
+    for key in keys {
+        if rest.starts_with(key) {
+            return Match::Full(key.len());
+        }
+        if key.starts_with(rest) {
+            partial = true;
+        }
+    }
+    if partial {
+        Match::Partial
+    } else {
+        Match::No
+    }
+}
+
+/// Finds the detach sequence (an escape key, then `d`) in stdin, across reads.
+/// Everything else passes through unchanged; the escape key twice sends one.
+#[derive(Default)]
+struct EscapeFilter {
+    /// The tail of the last read that may be the start of a key sequence.
+    held: Vec<u8>,
+    /// The escape key just seen, still waiting for the next key.
+    pending: Option<Vec<u8>>,
+}
+
+impl EscapeFilter {
+    /// Appends what should reach the session to `out`; true means detach.
+    fn feed(&mut self, input: &[u8], out: &mut Vec<u8>) -> bool {
+        let mut buf = std::mem::take(&mut self.held);
+        buf.extend_from_slice(input);
+        let mut i = 0;
+        while i < buf.len() {
+            let rest = &buf[i..];
+            if self.pending.is_some() {
+                let mut partial = false;
+                match match_any(rest, &DETACH_KEYS) {
+                    Match::Full(_) => {
+                        self.pending = None;
+                        return true;
+                    }
+                    Match::Partial => partial = true,
+                    Match::No => {}
+                }
+                match match_any(rest, &ESCAPE_RELEASE) {
+                    Match::Full(n) => {
+                        i += n;
+                        continue;
+                    }
+                    Match::Partial => partial = true,
+                    Match::No => {}
+                }
+                match match_any(rest, &ESCAPE_KEYS) {
+                    Match::Full(n) => {
+                        // Escape twice: send it once, literally.
+                        out.extend_from_slice(&rest[..n]);
+                        self.pending = None;
+                        i += n;
+                        continue;
+                    }
+                    Match::Partial => partial = true,
+                    Match::No => {}
+                }
+                if partial {
+                    self.held = rest.to_vec();
+                    return false;
+                }
+                // Not a detach: the escape key goes through, then this byte is
+                // read again normally.
+                if let Some(key) = self.pending.take() {
+                    out.extend_from_slice(&key);
+                }
+                continue;
+            }
+            if rest[0] != 0x1d && rest[0] != 0x1b {
+                out.push(rest[0]);
+                i += 1;
+                continue;
+            }
+            match match_any(rest, &ESCAPE_KEYS) {
+                Match::Full(n) => {
+                    self.pending = Some(rest[..n].to_vec());
+                    i += n;
+                }
+                Match::Partial => {
+                    self.held = rest.to_vec();
+                    return false;
+                }
+                Match::No => {
+                    out.push(rest[0]);
+                    i += 1;
+                }
+            }
+        }
+        false
+    }
+
+    /// Whether bytes are held waiting for the rest of a sequence.
+    fn holding(&self) -> bool {
+        !self.held.is_empty()
+    }
+
+    /// The hold timed out: what was held was a key of its own (a lone ESC).
+    fn flush(&mut self, out: &mut Vec<u8>) {
+        if self.held.is_empty() {
+            return;
+        }
+        if let Some(key) = self.pending.take() {
+            out.extend_from_slice(&key);
+        }
+        out.append(&mut self.held);
+    }
+}
+
 /// Write end of the signal self-pipe, for the async signal handler.
 static SIGNAL_PIPE: AtomicI32 = AtomicI32::new(-1);
+/// The terminal attributes to restore, for the backstop in the alarm handler.
+static SAVED_TERMIOS: AtomicPtr<libc::termios> = AtomicPtr::new(std::ptr::null_mut());
+/// Original file status flags of fds 0 and 1 (-1: not changed).
+static SAVED_FL: [AtomicI32; 2] = [AtomicI32::new(-1), AtomicI32::new(-1)];
+/// Whether stdout is a terminal, so the reset sequence is worth writing.
+static OUT_IS_TTY: AtomicBool = AtomicBool::new(false);
+/// The terminating signal the main loop has not yet acted on.
+static PENDING_SIGNAL: AtomicI32 = AtomicI32::new(0);
+
+const TERMINATING: [libc::c_int; 4] = [libc::SIGINT, libc::SIGTERM, libc::SIGHUP, libc::SIGQUIT];
+const ROUTED: [libc::c_int; 6] = [
+    libc::SIGINT,
+    libc::SIGTERM,
+    libc::SIGHUP,
+    libc::SIGQUIT,
+    libc::SIGTSTP,
+    libc::SIGWINCH,
+];
 
 extern "C" fn on_signal(sig: libc::c_int) {
     let fd = SIGNAL_PIPE.load(Ordering::Relaxed);
@@ -524,6 +739,37 @@ extern "C" fn on_signal(sig: libc::c_int) {
         unsafe {
             libc::write(fd, &byte as *const u8 as *const libc::c_void, 1);
         }
+    }
+    if TERMINATING.contains(&sig) {
+        PENDING_SIGNAL.store(sig, Ordering::Relaxed);
+        // Backstop: if the main loop has not restored the terminal within a
+        // second, the alarm handler does it and exits.
+        // SAFETY: alarm(2) is async-signal-safe.
+        unsafe {
+            libc::alarm(1);
+        }
+    }
+}
+
+/// Only async-signal-safe calls: write, fcntl, tcsetattr, _exit.
+extern "C" fn on_alarm(_sig: libc::c_int) {
+    // SAFETY: every call here is async-signal-safe and reads saved plain data.
+    unsafe {
+        if OUT_IS_TTY.load(Ordering::Relaxed) {
+            // Before the flags are restored, so a stuck terminal cannot block it.
+            libc::write(1, RESET.as_ptr() as *const libc::c_void, RESET.len());
+        }
+        for (fd, saved) in SAVED_FL.iter().enumerate() {
+            let flags = saved.load(Ordering::Relaxed);
+            if flags >= 0 {
+                libc::fcntl(fd as libc::c_int, libc::F_SETFL, flags);
+            }
+        }
+        let termios = SAVED_TERMIOS.load(Ordering::Relaxed);
+        if !termios.is_null() {
+            libc::tcsetattr(0, libc::TCSANOW, termios);
+        }
+        libc::_exit(128 + PENDING_SIGNAL.load(Ordering::Relaxed));
     }
 }
 
@@ -537,8 +783,8 @@ fn set_nonblocking_cloexec(fd: RawFd) {
     }
 }
 
-/// Routes SIGINT, SIGTERM, SIGHUP, SIGQUIT, SIGTSTP and SIGWINCH into a pipe the main loop polls,
-/// so none of them can end the process with the terminal still in raw mode.
+/// Routes the terminating signals, SIGTSTP and SIGWINCH into a pipe the main
+/// loop polls, so none of them can end the process with the terminal raw.
 fn install_signals() -> io::Result<RawFd> {
     let mut fds = [0 as libc::c_int; 2];
     // SAFETY: pipe fills the two-element array.
@@ -548,63 +794,116 @@ fn install_signals() -> io::Result<RawFd> {
     set_nonblocking_cloexec(fds[0]);
     set_nonblocking_cloexec(fds[1]);
     SIGNAL_PIPE.store(fds[1], Ordering::Relaxed);
-    for sig in [
-        libc::SIGINT,
-        libc::SIGTERM,
-        libc::SIGHUP,
-        libc::SIGQUIT,
-        libc::SIGTSTP,
-        libc::SIGWINCH,
-    ] {
-        install_handler(sig);
+    for sig in ROUTED {
+        install_handler(sig, on_signal);
     }
+    install_handler(libc::SIGALRM, on_alarm);
     Ok(fds[0])
 }
 
-fn install_handler(sig: libc::c_int) {
-    // SAFETY: a zeroed sigaction is valid; the handler only calls write(2).
+fn install_handler(sig: libc::c_int, handler: extern "C" fn(libc::c_int)) {
+    // SAFETY: a zeroed sigaction is valid; the handlers are async-signal-safe.
     unsafe {
         let mut action: libc::sigaction = std::mem::zeroed();
-        action.sa_sigaction = on_signal as extern "C" fn(libc::c_int) as libc::sighandler_t;
+        action.sa_sigaction = handler as libc::sighandler_t;
         libc::sigemptyset(&mut action.sa_mask);
         action.sa_flags = libc::SA_RESTART;
         libc::sigaction(sig, &action, std::ptr::null_mut());
     }
 }
 
-/// Puts a terminal into raw mode and puts it back when dropped, which covers
-/// returns, errors and panics (not SIGKILL, which nothing can).
-struct RawMode {
-    fd: RawFd,
-    saved: libc::termios,
+fn uninstall_signals() {
+    // SAFETY: cancels the backstop, then back to the default dispositions.
+    unsafe {
+        libc::alarm(0);
+        for sig in ROUTED {
+            libc::signal(sig, libc::SIG_DFL);
+        }
+        libc::signal(libc::SIGALRM, libc::SIG_DFL);
+    }
 }
 
-impl RawMode {
-    fn enter(fd: RawFd) -> Option<RawMode> {
-        // SAFETY: termios is plain data; tcgetattr fills it for a tty descriptor.
-        unsafe {
-            if libc::isatty(fd) != 1 {
-                return None;
+/// Writes what it can within `limit`, for output that must not hang an exit.
+fn write_with_deadline(fd: RawFd, mut data: &[u8], limit: Duration) {
+    let deadline = Instant::now() + limit;
+    while !data.is_empty() && Instant::now() < deadline {
+        // SAFETY: the pointer and length come from a live slice.
+        let n = unsafe { libc::write(fd, data.as_ptr() as *const libc::c_void, data.len()) };
+        if n > 0 {
+            data = &data[n as usize..];
+            continue;
+        }
+        let error = io::Error::last_os_error();
+        match error.kind() {
+            io::ErrorKind::Interrupted => {}
+            io::ErrorKind::WouldBlock => {
+                let mut p = libc::pollfd {
+                    fd,
+                    events: libc::POLLOUT,
+                    revents: 0,
+                };
+                // SAFETY: one valid pollfd.
+                unsafe { libc::poll(&mut p, 1, 50) };
             }
-            let mut saved: libc::termios = std::mem::zeroed();
-            if libc::tcgetattr(fd, &mut saved) != 0 {
-                return None;
-            }
-            let mut raw = saved;
-            libc::cfmakeraw(&mut raw);
-            if libc::tcsetattr(fd, libc::TCSANOW, &raw) != 0 {
-                return None;
-            }
-            Some(RawMode { fd, saved })
+            _ => return,
         }
     }
 }
 
-impl Drop for RawMode {
-    fn drop(&mut self) {
-        // SAFETY: restores the attributes read in `enter`.
+/// The local terminal while attached: raw mode, fds 0 and 1 non-blocking (both
+/// flags live on the open file description the shell shares, so they must go
+/// back). Dropping it writes the mode reset and restores both, on every path
+/// out of the loop including errors and panics (SIGKILL aside).
+struct Terminal {
+    raw: bool,
+}
+
+impl Terminal {
+    fn enter() -> Terminal {
+        // SAFETY: termios is plain data; tcgetattr fills it for a tty; fcntl
+        // only changes status flags, whose originals are saved first.
         unsafe {
-            libc::tcsetattr(self.fd, libc::TCSANOW, &self.saved);
+            OUT_IS_TTY.store(libc::isatty(1) == 1, Ordering::Relaxed);
+            let mut raw = false;
+            let mut saved: libc::termios = std::mem::zeroed();
+            if libc::isatty(0) == 1 && libc::tcgetattr(0, &mut saved) == 0 {
+                if SAVED_TERMIOS.load(Ordering::Relaxed).is_null() {
+                    // Leaked on purpose: the alarm handler may read it at any time.
+                    SAVED_TERMIOS.store(Box::into_raw(Box::new(saved)), Ordering::Relaxed);
+                }
+                let mut attrs = saved;
+                libc::cfmakeraw(&mut attrs);
+                raw = libc::tcsetattr(0, libc::TCSANOW, &attrs) == 0;
+            }
+            for (fd, slot) in SAVED_FL.iter().enumerate() {
+                let flags = libc::fcntl(fd as libc::c_int, libc::F_GETFL);
+                if flags >= 0 {
+                    slot.store(flags, Ordering::Relaxed);
+                    libc::fcntl(fd as libc::c_int, libc::F_SETFL, flags | libc::O_NONBLOCK);
+                }
+            }
+            Terminal { raw }
+        }
+    }
+}
+
+impl Drop for Terminal {
+    fn drop(&mut self) {
+        if OUT_IS_TTY.load(Ordering::Relaxed) {
+            write_with_deadline(1, RESET, Duration::from_millis(300));
+        }
+        // SAFETY: restores the flags and attributes saved in `enter`.
+        unsafe {
+            for (fd, slot) in SAVED_FL.iter().enumerate() {
+                let flags = slot.swap(-1, Ordering::Relaxed);
+                if flags >= 0 {
+                    libc::fcntl(fd as libc::c_int, libc::F_SETFL, flags);
+                }
+            }
+            let termios = SAVED_TERMIOS.load(Ordering::Relaxed);
+            if self.raw && !termios.is_null() {
+                libc::tcsetattr(0, libc::TCSANOW, termios);
+            }
         }
     }
 }
@@ -623,32 +922,6 @@ fn winsize() -> Option<(u16, u16)> {
     None
 }
 
-fn write_all_fd(fd: RawFd, mut data: &[u8]) -> io::Result<()> {
-    while !data.is_empty() {
-        // SAFETY: the pointer and length come from a live slice.
-        let n = unsafe { libc::write(fd, data.as_ptr() as *const libc::c_void, data.len()) };
-        if n < 0 {
-            let error = io::Error::last_os_error();
-            match error.kind() {
-                io::ErrorKind::Interrupted => continue,
-                io::ErrorKind::WouldBlock => {
-                    let mut p = libc::pollfd {
-                        fd,
-                        events: libc::POLLOUT,
-                        revents: 0,
-                    };
-                    // SAFETY: one valid pollfd.
-                    unsafe { libc::poll(&mut p, 1, 1000) };
-                    continue;
-                }
-                _ => return Err(error),
-            }
-        }
-        data = &data[n as usize..];
-    }
-    Ok(())
-}
-
 enum Outcome {
     Detached,
     Ended,
@@ -663,7 +936,8 @@ fn push_size(client: &HostClient, id: u32) {
 
 /// A resize to the size a terminal already has sends no SIGWINCH, so on attach
 /// shrink by one row and restore, like the app's adopt path: an idle full-screen
-/// program then redraws instead of leaving a blank screen.
+/// program then redraws instead of leaving a blank screen. The pause keeps the
+/// two resizes from reaching the program as one SIGWINCH at the old size.
 fn nudge_redraw(client: &HostClient, id: u32) {
     if let Some((cols, rows)) = winsize() {
         if rows >= 2 {
@@ -674,72 +948,108 @@ fn nudge_redraw(client: &HostClient, id: u32) {
     }
 }
 
+fn is_would_block(error: &io::Error) -> bool {
+    matches!(
+        error.kind(),
+        io::ErrorKind::WouldBlock | io::ErrorKind::Interrupted
+    )
+}
+
+/// A status line on stderr that never panics, even with stderr gone (SIGHUP).
+fn say(text: std::fmt::Arguments) {
+    let _ = writeln!(io::stderr(), "{text}");
+}
+
 fn cmd_attach(client: &HostClient, socket: &Path, mut args: Vec<String>) -> Res<i32> {
     let after: Option<u64> = take_number(&mut args, "--after")?;
     let force = take_flag(&mut args, "--force");
     let id = only_id(args)?;
-    // Without --after nothing is replayed: the screen redraws on the resize below.
+    // Without --after nothing is replayed: the screen redraws on the nudge below.
     let attached = open_data(client, socket, id, after.unwrap_or(u64::MAX), force)?;
     let signals = install_signals().map_err(|e| fail(EXIT_ERROR, e.to_string()))?;
     let mut stream = attached.stream;
+    stream
+        .set_nonblocking(true)
+        .map_err(|e| fail(EXIT_ERROR, e.to_string()))?;
     let sock_fd = stream.as_raw_fd();
 
-    let mut raw = RawMode::enter(0);
+    let mut terminal = Some(Terminal::enter());
     nudge_redraw(client, id);
 
-    let mut fds = [
-        libc::pollfd {
-            fd: 0,
-            events: libc::POLLIN,
-            revents: 0,
-        },
-        libc::pollfd {
-            fd: sock_fd,
-            events: libc::POLLIN,
-            revents: 0,
-        },
-        libc::pollfd {
-            fd: signals,
-            events: libc::POLLIN,
-            revents: 0,
-        },
-    ];
     let readable = libc::POLLIN | libc::POLLHUP | libc::POLLERR | libc::POLLNVAL;
-    let mut pending_escape = false;
-    let mut buf = [0u8; 8192];
+    let writable = libc::POLLOUT | libc::POLLHUP | libc::POLLERR | libc::POLLNVAL;
+    let mut filter = EscapeFilter::default();
+    let mut to_host: Vec<u8> = Vec::new();
+    let mut to_out: Vec<u8> = Vec::new();
+    let mut buf = vec![0u8; 65536];
+    // Nothing in this loop blocks except poll itself, so signals and the detach
+    // key are always handled.
     let outcome = 'main: loop {
-        for f in fds.iter_mut() {
-            f.revents = 0;
-        }
-        // SAFETY: three valid pollfds.
-        let ready = unsafe { libc::poll(fds.as_mut_ptr(), fds.len() as libc::nfds_t, -1) };
+        // A descriptor of -1 is skipped by poll; a zero event mask would still
+        // report hang-ups and spin.
+        let gate = |on: bool, fd: RawFd| if on { fd } else { -1 };
+        let mut fds = [
+            libc::pollfd {
+                fd: gate(to_host.len() < HOST_QUEUE_CAP, 0),
+                events: libc::POLLIN,
+                revents: 0,
+            },
+            libc::pollfd {
+                fd: gate(to_out.len() < OUT_QUEUE_CAP, sock_fd),
+                events: libc::POLLIN,
+                revents: 0,
+            },
+            libc::pollfd {
+                fd: gate(!to_host.is_empty(), sock_fd),
+                events: libc::POLLOUT,
+                revents: 0,
+            },
+            libc::pollfd {
+                fd: gate(!to_out.is_empty(), 1),
+                events: libc::POLLOUT,
+                revents: 0,
+            },
+            libc::pollfd {
+                fd: signals,
+                events: libc::POLLIN,
+                revents: 0,
+            },
+        ];
+        let timeout = if filter.holding() { HOLD_MS } else { -1 };
+        // SAFETY: five valid pollfds.
+        let ready = unsafe { libc::poll(fds.as_mut_ptr(), fds.len() as libc::nfds_t, timeout) };
         if ready < 0 {
             if io::Error::last_os_error().kind() == io::ErrorKind::Interrupted {
                 continue;
             }
             break Outcome::Ended;
         }
-        if fds[2].revents & libc::POLLIN != 0 {
+        if ready == 0 {
+            filter.flush(&mut to_host);
+            continue;
+        }
+        if fds[4].revents & libc::POLLIN != 0 {
             let mut sigs = [0u8; 64];
             // SAFETY: reads into a local buffer from our own non-blocking pipe.
             let n = unsafe { libc::read(signals, sigs.as_mut_ptr() as *mut libc::c_void, 64) };
             for &sig in sigs.iter().take(n.max(0) as usize) {
-                if sig as i32 == libc::SIGWINCH {
+                let sig = sig as i32;
+                if sig == libc::SIGWINCH {
                     push_size(client, id);
-                } else if sig as i32 == libc::SIGTSTP {
+                } else if sig == libc::SIGTSTP {
                     // Give the terminal back, stop for real, and take it again
                     // when continued. (SIGSTOP cannot be caught.)
-                    drop(raw.take());
+                    drop(terminal.take());
                     // SAFETY: default disposition, then stop ourselves.
                     unsafe {
                         libc::signal(libc::SIGTSTP, libc::SIG_DFL);
                         libc::raise(libc::SIGTSTP);
                     }
-                    install_handler(libc::SIGTSTP);
-                    raw = RawMode::enter(0);
+                    install_handler(libc::SIGTSTP, on_signal);
+                    terminal = Some(Terminal::enter());
                     nudge_redraw(client, id);
                 } else {
-                    break 'main Outcome::Signal(sig as i32);
+                    break 'main Outcome::Signal(sig);
                 }
             }
         }
@@ -750,100 +1060,169 @@ fn cmd_attach(client: &HostClient, socket: &Path, mut args: Vec<String>) -> Res<
                 break Outcome::Detached; // stdin closed
             }
             if n < 0 {
-                match io::Error::last_os_error().kind() {
-                    io::ErrorKind::Interrupted | io::ErrorKind::WouldBlock => continue,
-                    _ => break Outcome::Detached,
+                if !is_would_block(&io::Error::last_os_error()) {
+                    break Outcome::Detached;
                 }
-            }
-            let mut out = Vec::with_capacity(n as usize + 1);
-            let mut detach = false;
-            for &b in &buf[..n as usize] {
-                if pending_escape {
-                    pending_escape = false;
-                    match b {
-                        b'd' => {
-                            detach = true;
-                            break;
-                        }
-                        ESCAPE => out.push(ESCAPE),
-                        other => {
-                            out.push(ESCAPE);
-                            out.push(other);
-                        }
-                    }
-                } else if b == ESCAPE {
-                    pending_escape = true;
-                } else {
-                    out.push(b);
-                }
-            }
-            if !out.is_empty() && stream.write_all(&out).is_err() {
-                break Outcome::Ended;
-            }
-            if detach {
+            } else if filter.feed(&buf[..n as usize], &mut to_host) {
                 break Outcome::Detached;
             }
         }
         if fds[1].revents & readable != 0 {
             match stream.read(&mut buf) {
                 Ok(0) => break Outcome::Ended,
-                Ok(n) => {
-                    if write_all_fd(1, &buf[..n]).is_err() {
-                        break Outcome::Detached;
-                    }
-                }
-                Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
+                Ok(n) => to_out.extend_from_slice(&buf[..n]),
+                Err(e) if is_would_block(&e) => {}
                 Err(_) => break Outcome::Ended,
             }
         }
+        if fds[2].revents & writable != 0 {
+            match stream.write(&to_host) {
+                Ok(n) => {
+                    to_host.drain(..n);
+                }
+                Err(e) if is_would_block(&e) => {}
+                Err(_) => break Outcome::Ended,
+            }
+        }
+        if fds[3].revents & writable != 0 {
+            // SAFETY: the pointer and length come from a live Vec.
+            let n = unsafe { libc::write(1, to_out.as_ptr() as *const libc::c_void, to_out.len()) };
+            if n > 0 {
+                to_out.drain(..n as usize);
+            } else if n < 0 && !is_would_block(&io::Error::last_os_error()) {
+                break Outcome::Detached;
+            }
+        }
     };
-    // Terminal back to normal before anything is printed.
-    drop(raw);
+    // Terminal back to normal first; then the backstop is no longer needed.
+    drop(terminal);
+    uninstall_signals();
+    // Input not yet delivered is dropped on purpose: a detach must not wait for
+    // a stalled session.
+    let _ = stream.set_nonblocking(false);
     close_cleanly(stream);
     match outcome {
         Outcome::Detached => {
-            eprintln!("[detached from session {id}]");
+            say(format_args!("[detached from session {id}]"));
             Ok(0)
         }
         Outcome::Signal(sig) => {
-            eprintln!("[detached from session {id}: signal {sig}]");
+            say(format_args!("[detached from session {id}: signal {sig}]"));
             Ok(128 + sig)
         }
-        Outcome::Ended => {
-            // The reaper records the status a moment after the output ends.
-            let deadline = Instant::now() + Duration::from_secs(2);
-            let mut code = None;
-            while Instant::now() < deadline {
-                match client.list() {
-                    Ok(sessions) => match sessions.into_iter().find(|s| s.id == id) {
-                        Some(s) if s.exited.is_some() => {
-                            code = s.exited;
-                            break;
-                        }
-                        Some(_) => {}
-                        None => break,
-                    },
-                    Err(_) => break,
-                }
-                std::thread::sleep(Duration::from_millis(50));
-            }
-            match code {
-                Some(c) => {
-                    eprintln!("[session {id} ended, exit code {c}]");
-                    Ok(c.rem_euclid(256))
+        Outcome::Ended => ended(client, id),
+    }
+}
+
+/// The host closed the connection: the session ended, or another client took
+/// it over (`attach --force`), which leaves it running.
+fn ended(client: &HostClient, id: u32) -> Res<i32> {
+    // The reaper records the status a moment after the output ends.
+    let deadline = Instant::now() + Duration::from_secs(1);
+    let mut running = false;
+    loop {
+        match client.list() {
+            Ok(sessions) => match sessions.into_iter().find(|s| s.id == id) {
+                Some(s) => {
+                    if let Some(code) = s.exited {
+                        say(format_args!("[session {id} ended, exit code {code}]"));
+                        return Ok(code.rem_euclid(256));
+                    }
+                    running = true;
                 }
                 None => {
-                    eprintln!("[connection to session {id} closed]");
-                    Ok(EXIT_ERROR)
+                    running = false;
+                    break;
                 }
-            }
+            },
+            Err(_) => break,
         }
+        if Instant::now() >= deadline {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(50));
     }
+    if running {
+        say(format_args!(
+            "[session {id} was taken over by another client]"
+        ));
+        return Ok(EXIT_BUSY);
+    }
+    say(format_args!("[connection to session {id} closed]"));
+    Ok(EXIT_ERROR)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn feed(f: &mut EscapeFilter, input: &[u8]) -> (Vec<u8>, bool) {
+        let mut out = Vec::new();
+        let detach = f.feed(input, &mut out);
+        (out, detach)
+    }
+
+    #[test]
+    fn plain_input_passes_through() {
+        let mut f = EscapeFilter::default();
+        assert_eq!(feed(&mut f, b"ab\x1b[Ac"), (b"ab\x1b[Ac".to_vec(), false));
+        assert!(!f.holding());
+    }
+
+    #[test]
+    fn ctrl_bracket_then_d_detaches() {
+        let mut f = EscapeFilter::default();
+        assert_eq!(feed(&mut f, b"x\x1d"), (b"x".to_vec(), false));
+        assert_eq!(feed(&mut f, b"d"), (vec![], true));
+    }
+
+    #[test]
+    fn kitty_escape_split_across_reads_detaches() {
+        let mut f = EscapeFilter::default();
+        assert_eq!(feed(&mut f, b"\x1b[93;"), (vec![], false));
+        assert!(f.holding());
+        assert_eq!(feed(&mut f, b"5u"), (vec![], false));
+        assert_eq!(feed(&mut f, b"d"), (vec![], true));
+        let mut f = EscapeFilter::default();
+        assert_eq!(
+            feed(&mut f, b"\x1b[93;5:1u\x1b[93;5:3u\x1b[100;1u"),
+            (vec![], true)
+        );
+    }
+
+    #[test]
+    fn double_escape_sends_one() {
+        let mut f = EscapeFilter::default();
+        assert_eq!(feed(&mut f, b"\x1d\x1dz"), (b"\x1dz".to_vec(), false));
+        let mut f = EscapeFilter::default();
+        assert_eq!(
+            feed(&mut f, b"\x1b[93;5u\x1b[93;5u"),
+            (b"\x1b[93;5u".to_vec(), false)
+        );
+    }
+
+    #[test]
+    fn escape_then_other_key_sends_both() {
+        let mut f = EscapeFilter::default();
+        assert_eq!(feed(&mut f, b"\x1dq"), (b"\x1dq".to_vec(), false));
+    }
+
+    #[test]
+    fn lone_esc_is_sent_after_the_hold() {
+        let mut f = EscapeFilter::default();
+        assert_eq!(feed(&mut f, b"\x1b"), (vec![], false));
+        assert!(f.holding());
+        let mut out = Vec::new();
+        f.flush(&mut out);
+        assert_eq!(out, b"\x1b");
+        assert!(!f.holding());
+    }
+
+    #[test]
+    fn near_miss_sequence_passes_intact() {
+        let mut f = EscapeFilter::default();
+        assert_eq!(feed(&mut f, b"\x1b[93;6u"), (b"\x1b[93;6u".to_vec(), false));
+    }
 
     #[test]
     fn last_lines_counts_from_the_end() {
