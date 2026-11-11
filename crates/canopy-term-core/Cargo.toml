@@ -24,6 +24,13 @@ alacritty_terminal = "0.26.0"
 [profile.dev]
 opt-level = 3
 
+# Debug assertions and overflow checks in dependencies would skew an emulator
+# comparison by however many asserts each crate happens to contain.
+[profile.dev.package."*"]
+opt-level = 3
+debug-assertions = false
+overflow-checks = false
+
 # Candidate comparison: prints a conformance table and throughput numbers.
 # harness = false so the output reaches the CI log (libtest would capture it)
 # and nothing runs in parallel to skew timings. Report only: it never asserts

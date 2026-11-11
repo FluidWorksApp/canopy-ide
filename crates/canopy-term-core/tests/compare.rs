@@ -183,6 +183,28 @@ fn fixtures() -> Vec<Fixture> {
             check: |d| mode("kitty", d.kitty, 5),
         },
         Fixture {
+            name: "text sent during sync (2026) reaches the grid",
+            cols: 20,
+            rows: 3,
+            input: b"\x1b[?2026hX",
+            check: |d| row(d, 0, "X"),
+        },
+        Fixture {
+            name: "RIS (ESC c) resets tracked modes",
+            cols: 20,
+            rows: 3,
+            input: b"\x1b[?1004h\x1b[?2004h\x1b[>5u\x1b[?2026h\x1bc",
+            check: |d| {
+                mode("focus", d.focus, false)?;
+                mode("bracketed", Some(d.bracketed), false)?;
+                mode("kitty", d.kitty, 0)?;
+                match d.sync {
+                    Some(true) => Err("sync still on after RIS".into()),
+                    _ => Ok(()),
+                }
+            },
+        },
+        Fixture {
             name: "cursor hidden",
             cols: 20,
             rows: 3,
@@ -293,7 +315,7 @@ fn report<E: Engine>(data: &[u8]) {
 
 fn main() {
     println!(
-        "profile: dev with opt-level=3; os={} arch={}",
+        "profile: dev, opt-level=3, dependency debug-assertions off; os={} arch={}",
         std::env::consts::OS,
         std::env::consts::ARCH
     );
