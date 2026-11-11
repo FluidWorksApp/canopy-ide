@@ -51,6 +51,10 @@ struct Ring {
     attached: Option<u64>,
     /// Bumped per attach so a replaced connection stops quietly.
     generation: u64,
+    /// The attached client's connection, so a newer attach can close it: a
+    /// replaced client then sees EOF instead of a frozen screen whose typing
+    /// still reaches the child.
+    conn: Option<UnixStream>,
     eof: bool,
 }
 
@@ -660,6 +664,7 @@ fn spawn(host: &Arc<Host>, spec: SpawnSpec) -> Result<(Arc<Session>, bool), Stri
             base: 0,
             attached: None,
             generation: 0,
+            conn: None,
             eof: false,
         }),
         cv: Condvar::new(),
@@ -785,6 +790,7 @@ fn attach(
     after: u64,
     exclusive: bool,
 ) -> std::io::Result<()> {
+    let handle = stream.try_clone()?;
     let (start, generation, cols, rows) = {
         let mut ring = session.ring.lock().unwrap();
         if exclusive && ring.attached.is_some() {
@@ -802,6 +808,9 @@ fn attach(
         let start = after.max(ring.base).min(end);
         ring.generation += 1;
         ring.attached = Some(start);
+        if let Some(old) = ring.conn.replace(handle) {
+            let _ = old.shutdown(std::net::Shutdown::Both);
+        }
         // Under the ring lock and after the bump: an older connection's input
         // thread stamps `detached_at` only while it still owns the generation,
         // so clearing earlier would let that stamp land after ours and start a
@@ -852,6 +861,7 @@ fn attach(
             let mut ring = session.ring.lock().unwrap();
             if ring.generation == generation {
                 ring.attached = None;
+                ring.conn = None;
                 *session.detached_at.lock().unwrap() = Some(Instant::now());
             }
             session.cv.notify_all();
@@ -873,7 +883,10 @@ fn attach(
                     break ring_slice(&ring, pos, take);
                 }
                 if ring.eof {
-                    ring.attached = None;
+                    if ring.generation == generation {
+                        ring.attached = None;
+                        ring.conn = None;
+                    }
                     session.cv.notify_all();
                     drop(ring);
                     let _ = stream.shutdown(std::net::Shutdown::Write);
@@ -890,6 +903,7 @@ fn attach(
             let mut ring = session.ring.lock().unwrap();
             if ring.generation == generation {
                 ring.attached = None;
+                ring.conn = None;
                 *session.detached_at.lock().unwrap() = Some(Instant::now());
             }
             session.cv.notify_all();

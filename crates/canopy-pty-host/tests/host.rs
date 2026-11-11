@@ -739,3 +739,44 @@ fn read_ring_past_the_end_returns_nothing() {
     assert_eq!(reply.len, 0);
     assert!(h.client.read_ring(id + 1000, 0, None).is_err());
 }
+
+#[test]
+fn a_replaced_client_sees_eof_and_its_typing_no_longer_reaches_the_child() {
+    let h = Harness::start("rp", 60);
+    let (id, _) = h.client.spawn(spec("cat")).unwrap();
+    let mut first = h.client.attach(id, 0).unwrap();
+    let mut second = h.client.attach(id, 0).unwrap();
+
+    // The first connection is closed by the host, not left frozen.
+    first
+        .stream
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
+    let mut buf = [0u8; 256];
+    let mut saw_eof = false;
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while Instant::now() < deadline {
+        match first.stream.read(&mut buf) {
+            Ok(0) => {
+                saw_eof = true;
+                break;
+            }
+            Ok(_) => {}
+            Err(_) => break,
+        }
+    }
+    assert!(saw_eof, "replaced client was not disconnected");
+
+    // Whatever the replaced client still tries to type is not delivered.
+    let _ = first.stream.write_all(b"from-the-old-client\n");
+    second.stream.write_all(b"from-the-new-client\n").unwrap();
+    let out = read_until(&mut second, Duration::from_secs(5), |b| {
+        contains(b, "from-the-new-client")
+    });
+    assert!(contains(&out, "from-the-new-client"));
+    assert!(
+        !contains(&out, "from-the-old-client"),
+        "a replaced client's input reached the child"
+    );
+    assert_eq!(h.client.list().unwrap()[0].attached, Some(true));
+}
