@@ -18,16 +18,20 @@ are the parent, and tmux would re-emulate the byte stream.
   sidecar packaging step does not break.
 - Off by default behind `CANOPY_PTY_HOST=1`. No UI change, so no mock is owed yet.
   With it on, Quit leaves adoptable terminals running in the host (micro-tasks
-  and run-bound tabs are still stopped). A separate "Quit and stop all" entry is
-  UI and needs a mock and the user's decision first.
+  and run-bound tabs are still stopped). "Quit and Stop All…" (app menu, under
+  Quit; ⌥⌘Q on macOS, Ctrl+Shift+Q elsewhere) stops them too: it asks first
+  ("Stop N running agents?": Cancel, Quit only, Stop all) only when an agent is
+  running, stops every terminal in the map including hosted ones, then asks the
+  host to stop any other running session carrying this launch's instance token,
+  and the host idles out. With the host off the item is a plain Quit.
 - Hosted sessions are monitor-only for containment.
 - New crate `crates/canopy-pty-host`: protocol, server, client, tests. Nothing in
   `pty.rs` changes until CI is green on the crate.
 
 ## Decisions needed from the user
 
-1. What does Quit mean once the host is on? Default: Quit detaches, plus a
-   separate "Quit and stop all terminals".
+1. What does Quit mean once the host is on? Decided: Quit detaches, plus a
+   separate "Quit and Stop All…" that confirms when agents are running.
 2. Should surviving agents be visible with no app open (tray entry)? Default: no.
 
 ## Verified facts
@@ -158,8 +162,8 @@ as a second agent on the same conversation. Ids are seeded past the adopted max.
   has a stable socket, adoption only promises terminal-level survival: bytes,
   input, resize, exit. Agent tools and attention do not come back.
 
-**Not in the first PR:** context-bridge continuity (second commit), quit
-semantics UI, Windows.
+**Not in the first PR:** context-bridge continuity (second commit), Windows.
+Quit semantics UI ("Quit and Stop All…") is a follow-up PR on this branch.
 
 ## Remote runner (follow-up, investigated)
 
