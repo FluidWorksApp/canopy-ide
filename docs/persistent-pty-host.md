@@ -92,12 +92,18 @@ runs `docker stop --time 30`). **A holder process inside the same container dies
 with it, because stopping a container ends its whole PID namespace.** So a holder
 only helps for in-container restarts of the runner or gateway, not image updates.
 
-Options, to be decided separately: (a) keep the holder in a long-lived sidecar
-container that the updated workspace container joins, which needs shared PID and
-IPC namespaces and a careful security review; (b) update code in place inside the
-running container instead of replacing it; (c) accept a clean stop and rely on
-agent resume (`session-resume.mjs`), which exists today. This is a separate design
-and PR. The Unix host protocol here is intended to be reusable by it.
+Direction from the owner (relayed by the remote-workspace session, not yet
+designed or tested): agent CLIs have their own update cycle and must never force
+a restart. They are baked into the image today (`install-agents.sh`,
+`agents.lock.json`). The target is for agent CLIs and the runner code to live in
+versioned directories outside the image, so running processes keep their old
+files and only new sessions get the new version, while the image holds only the
+OS and Node and swaps rarely, gated on idle. Untested: whether the agent CLIs run
+from a volume. Options for keeping PTYs across the rare image swap are still a
+separate decision: a long-lived holder in a sidecar container that the workspace
+container joins (shared PID/IPC namespaces, needs a security review), or updating
+in place without replacing the container. This is a separate design and PR; the
+Unix host protocol here is meant to be reusable by it.
 
 ## Tailscale (follow-up, separate PR)
 
