@@ -11,12 +11,19 @@ rust-version = "1.85"
 # dependencies a track adds, never touch the app's Cargo.lock.
 [workspace]
 
+[features]
+# The headless emulator behind `Screen`. Off by default so crates that only need
+# the frame contract (the renderer) do not pull in an emulator. Tests turn it on
+# through the self dev-dependency below, so plain `cargo test` covers it.
+screen = ["dep:alacritty_terminal"]
+
 [dependencies]
 # Apache-2.0. Chosen by measurement: see PERF.md and tests/compare.rs. Its
 # types never appear in this crate's public API. `serde` is off.
-alacritty_terminal = { version = "0.26.0", default-features = false }
+alacritty_terminal = { version = "0.26.0", default-features = false, optional = true }
 
 [dev-dependencies]
+canopy-term-core = { path = ".", features = ["screen"] }
 # Candidate emulators for the conformance and throughput harness (tests/).
 vt100 = "0.18.1"
 

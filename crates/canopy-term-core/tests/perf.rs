@@ -67,10 +67,12 @@ fn row(metric: &str, value: String) {
 fn fill_scrollback(s: &mut Screen, cols: u16) -> usize {
     let word = "lorem ipsum dolor sit amet ";
     let mut line = String::new();
-    while line.len() < cols as usize - 2 {
+    // Each line is "NNNNN " plus this text: exactly cols - 1 wide, so it is one
+    // row and never wraps.
+    while line.len() < cols as usize - 7 {
         line.push_str(word);
     }
-    line.truncate(cols as usize - 2);
+    line.truncate(cols as usize - 7);
     for i in 0..12_000 {
         s.advance(format!("{i:05} {line}\r\n").as_bytes());
     }

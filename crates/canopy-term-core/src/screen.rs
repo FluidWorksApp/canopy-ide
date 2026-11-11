@@ -119,6 +119,8 @@ impl Perform for Tap {
                 match p.first().copied() {
                     Some(2026) => self.sync = on,
                     Some(9) => self.x10 = on,
+                    // Any of the other mouse modes supersedes X10.
+                    Some(1000) | Some(1002) | Some(1003) => self.x10 = false,
                     _ => {}
                 }
             }
@@ -223,7 +225,9 @@ fn convert_cell(cell: &EngineCell, clusters: &mut Vec<String>) -> Cell {
             attrs: Attrs(attrs | Attrs::WIDE_TAIL),
         };
     }
-    let ch = if f.contains(Flags::LEADING_WIDE_CHAR_SPACER) {
+    // A tab leaves '\t' in the cell where it started; the grid position is what
+    // matters, so show a blank (and never print a TAB in a snapshot).
+    let ch = if f.contains(Flags::LEADING_WIDE_CHAR_SPACER) || cell.c == '\t' {
         ' '
     } else {
         cell.c

@@ -7,6 +7,8 @@
 //! emulator types leak through its API.
 
 pub mod frame;
+#[cfg(feature = "screen")]
 pub mod screen;
 
+#[cfg(feature = "screen")]
 pub use screen::Screen;

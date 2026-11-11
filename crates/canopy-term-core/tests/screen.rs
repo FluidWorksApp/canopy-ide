@@ -82,6 +82,7 @@ fn snapshot_round_trip_equals_the_live_frame() {
             4,
             "main\x1b[?1049h\x1b[2J\x1b[Halt text\x1b[2;5H",
         ),
+        ("tabs", 30, 3, "a\tb\tc\r\n\x1b[41mx\ty"),
     ];
     for (name, cols, rows, input) in cases {
         let live = fed(*cols, *rows, input.as_bytes());
@@ -95,7 +96,7 @@ fn snapshot_round_trip_equals_the_live_frame() {
 fn restored_screen_continues_identically() {
     // A plain round trip passes even if the pen, wrap mode or scrolling were
     // not restored; feeding more output to both would expose that.
-    let extra = "Z\r\nl1\r\nl2\r\nl3\r\nl4\r\nl5\r\nl6\r\nl7\r\n\x1b[2Kend\x1b[1;1Hhome";
+    let extra = "\ttab\r\nZ\r\nl1\r\nl2\r\nl3\r\nl4\r\nl5\r\nl6\r\nl7\r\n\x1b[2Kend\x1b[1;1Hhome";
     for (name, input) in [("mixed", MIXED), ("modes", ALL_MODES)] {
         let mut live = fed(30, 8, input.as_bytes());
         let mut restored = Screen::restore(30, 8, &live.snapshot());
@@ -125,6 +126,7 @@ fn input_split_at_every_byte_gives_identical_frames() {
         "ab\x1b[?1049hx\x1b[2;3Hy\x1b[?1049lz",
         "\x1b[?1004h\x1bc\x1b[?1004h",
         "\x1b[?1004h\x1bc",
+        "a\tb\tc\x1b[?9h\x1b[?1000h\x1b[?1000l",
         "q\x1b]2;t\x07\x1bcr\x1b]2;u\x1b\\",
         "日本e\u{301}\x1b[?9h\x1b[>3u\x1b[<u\x1b[>9u",
     ];
@@ -141,6 +143,16 @@ fn input_split_at_every_byte_gives_identical_frames() {
                 &format!("{input:?} split at {i}"),
             );
         }
+        // And one byte at a time, which exercises the ESC carry on every byte.
+        let mut s = Screen::new(20, 5);
+        for b in bytes {
+            s.advance(std::slice::from_ref(b));
+        }
+        assert_same(
+            &whole.frame(),
+            &s.frame(),
+            &format!("{input:?} byte by byte"),
+        );
     }
 }
 
@@ -209,6 +221,22 @@ fn modes_survive_a_snapshot() {
         "synchronized output must be the last thing a restore sets"
     );
     assert_eq!(Screen::restore(30, 8, &snap).frame().modes, m);
+}
+
+#[test]
+fn a_later_mouse_mode_supersedes_x10() {
+    let live = fed(10, 3, b"\x1b[?9h\x1b[?1000h\x1b[?1000l");
+    assert_eq!(live.frame().modes.mouse, MouseMode::Off);
+    let restored = Screen::restore(10, 3, &live.snapshot());
+    assert_eq!(restored.frame().modes.mouse, MouseMode::Off);
+}
+
+#[test]
+fn tabs_move_the_cursor_and_leave_blanks() {
+    let f = fed(20, 2, b"a\tb").frame();
+    assert_eq!(f.cell(0, 0).unwrap().ch, 'a');
+    assert_eq!(f.cell(0, 1).unwrap().ch, ' ', "no TAB character in a cell");
+    assert_eq!(f.cell(0, 8).unwrap().ch, 'b', "default tab stop every 8");
 }
 
 #[test]
