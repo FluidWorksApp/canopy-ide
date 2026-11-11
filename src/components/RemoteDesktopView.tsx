@@ -80,6 +80,24 @@ export function ConsentDialog({
 }) {
   const [answering, setAnswering] = useState<DeskMode | "deny" | null>(null);
   const [error, setError] = useState("");
+  // What the OS allows (macOS asks for Screen recording and Accessibility).
+  const [perms, setPerms] = useState<ipc.DeskPerms | null>(null);
+  useEffect(() => {
+    let live = true;
+    const check = () =>
+      void ipc
+        .deskPermissions()
+        .then((p) => live && setPerms(p))
+        .catch(() => live && setPerms({ screen: true, input: true }));
+    check();
+    window.addEventListener("focus", check);
+    return () => {
+      live = false;
+      window.removeEventListener("focus", check);
+    };
+  }, []);
+  const viewOk = !perms || perms.screen;
+  const controlOk = !perms || (perms.screen && perms.input);
   const answer = (accept: boolean, mode: DeskMode) => {
     if (answering) return;
     setAnswering(accept ? mode : "deny");
@@ -107,6 +125,34 @@ export function ConsentDialog({
             {trustEvidence(member)} Names are chosen by each person, so only
             accept from someone you expect.
           </span>
+          {perms && (!perms.screen || !perms.input) && (
+            <span className="desk-perms">
+              {(
+                [
+                  ["screen", "Screen recording", perms.screen],
+                  ["input", "Accessibility (control)", perms.input],
+                ] as const
+              ).map(([kind, label, ok]) => (
+                <span key={kind} className="desk-perm">
+                  <span>{label}</span>
+                  {ok ? (
+                    <span aria-label="Allowed">✓</span>
+                  ) : (
+                    <Button
+                      size="sm"
+                      variant="accent"
+                      onClick={() =>
+                        void ipc.deskRequestPermission(kind).catch(() => {})
+                      }
+                    >
+                      Allow
+                    </Button>
+                  )}
+                </span>
+              ))}
+              <span>Allow it in System Settings, then restart Canopy.</span>
+            </span>
+          )}
           {error && (
             <span role="alert" className="desk-inline-error">
               {error}
@@ -125,7 +171,7 @@ export function ConsentDialog({
         {
           label: answering === "view-only" ? "Accepting…" : "Accept view-only",
           primary: true,
-          disabled: answering !== null,
+          disabled: answering !== null || !viewOk,
           onClick: () => answer(true, "view-only"),
         },
         ...(viewOnly
@@ -134,7 +180,7 @@ export function ConsentDialog({
               {
                 label:
                   answering === "control" ? "Accepting…" : "Accept control",
-                disabled: answering !== null,
+                disabled: answering !== null || !controlOk,
                 onClick: () => answer(true, "control"),
               },
             ]),

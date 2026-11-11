@@ -186,6 +186,66 @@ describe("consent dialog", () => {
   });
 });
 
+describe("permissions in the consent dialog", () => {
+  it("keeps Accept off and offers Allow until Screen recording is on", async () => {
+    const ask = vi.fn(() => null);
+    mockCommands({
+      desk_permissions: () => ({ screen: false, input: false }),
+      desk_request_permission: ask,
+    });
+    render(
+      <DeskOverlay
+        desk={ev()}
+        frames={createFrameBus()}
+        onDismiss={() => {}}
+      />,
+    );
+    await waitFor(() => expect(screen.getAllByText("Allow").length).toBe(2));
+    expect(
+      (
+        screen
+          .getByText("Accept view-only")
+          .closest("button") as HTMLButtonElement
+      ).disabled,
+    ).toBe(true);
+    expect(
+      (
+        screen
+          .getByText("Accept control")
+          .closest("button") as HTMLButtonElement
+      ).disabled,
+    ).toBe(true);
+    fireEvent.click(screen.getAllByText("Allow")[0]);
+    await waitFor(() => expect(ask).toHaveBeenCalledWith({ kind: "screen" }));
+  });
+
+  it("view-only needs only Screen recording", async () => {
+    mockCommands({ desk_permissions: () => ({ screen: true, input: false }) });
+    render(
+      <DeskOverlay
+        desk={ev()}
+        frames={createFrameBus()}
+        onDismiss={() => {}}
+      />,
+    );
+    await waitFor(() => expect(screen.getAllByText("Allow").length).toBe(1));
+    expect(
+      (
+        screen
+          .getByText("Accept view-only")
+          .closest("button") as HTMLButtonElement
+      ).disabled,
+    ).toBe(false);
+    expect(
+      (
+        screen
+          .getByText("Accept control")
+          .closest("button") as HTMLButtonElement
+      ).disabled,
+    ).toBe(true);
+  });
+});
+
 describe("sharing banner", () => {
   const host = (others: string[], desk: unknown = null) =>
     ({

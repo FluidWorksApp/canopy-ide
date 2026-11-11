@@ -1084,6 +1084,8 @@ pub fn run() {
             relay::relay_accept_file,
             desk::desk_request,
             desk::desk_respond,
+            desk::desk_permissions,
+            desk::desk_request_permission,
             desk::desk_send_input,
             desk::desk_end,
             desk::desk_status,

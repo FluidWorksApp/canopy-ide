@@ -61,7 +61,7 @@ for(const command of ['android_sdk_status','android_devices','android_avds','and
 for(const command of ['fs_set_link_grants','fs_grant_link_file','workspace_forward_probe','gates_set_global'])LOCAL_UI.add(command);
 // The LAN relay is hosted by the desktop app between people's computers; its
 // file offers use this computer's dialogs and paths. Its status goes with it.
-for(const command of ['relay_status','relay_host_start','relay_host_stop','relay_regenerate_code','relay_connect','relay_disconnect','relay_send_chat','relay_send_collab','relay_send_command','relay_offer_file','relay_accept_file','desk_request','desk_respond','desk_send_input','desk_end','desk_status'])LOCAL_UI.add(command);
+for(const command of ['relay_status','relay_host_start','relay_host_stop','relay_regenerate_code','relay_connect','relay_disconnect','relay_send_chat','relay_send_collab','relay_send_command','relay_offer_file','relay_accept_file','desk_request','desk_respond','desk_permissions','desk_request_permission','desk_send_input','desk_end','desk_status'])LOCAL_UI.add(command);
 // Public links expose this computer's own portal port (tunnel.rs); Linear is a
 // plain HTTPS API called with a key from this computer's settings.
 for(const command of ['tunnel_start','tunnel_stop','tunnel_status','linear_issues','linear_issue_detail','linear_issue_set_state','linear_issue_comment'])LOCAL_UI.add(command);

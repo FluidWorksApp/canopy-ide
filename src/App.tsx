@@ -3473,7 +3473,7 @@ export default function App() {
       })();
     };
     const onAccept = (event: Event) => {
-      const { to, from } = (event as CustomEvent<RelayAcceptDetail>).detail ?? {};
+      const { to, from, onFail } = (event as CustomEvent<RelayAcceptDetail>).detail ?? {};
       if (!to) return;
       void (async () => {
         try {
@@ -3487,6 +3487,7 @@ export default function App() {
           setActiveOffer({ team: target.team, self: target.self, id: offerId });
           notify(`Sharing your desktop with ${from}.`, "success");
         } catch (err) {
+          onFail?.();
           notify(`Could not share your desktop with ${from}: ${String(err)}`, "error");
         }
       })();

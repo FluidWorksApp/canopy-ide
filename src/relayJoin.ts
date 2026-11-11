@@ -19,4 +19,6 @@ export interface RelayAcceptDetail {
   /** Teammate id to answer. */
   to: string;
   from: string;
+  /** Called when sharing could not start, so Accept can be tried again. */
+  onFail?: () => void;
 }
