@@ -7183,6 +7183,35 @@ body.dragging-tab * {
   padding: 5px 6px;
   border-radius: 8px;
 }
+.agent-card-task {
+  position: relative;
+}
+.agent-card-task-x {
+  position: absolute;
+  top: 3px;
+  right: 3px;
+  width: 18px;
+  height: 18px;
+  line-height: 16px;
+  padding: 0;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-dim);
+  cursor: pointer;
+  opacity: 0;
+}
+.agent-card-task:hover .agent-card-task-x,
+.agent-card-task-x:focus-visible {
+  opacity: 1;
+}
+.agent-card-task-x:hover {
+  background: color-mix(in srgb, var(--text) 12%, transparent);
+  color: var(--text);
+}
+.agent-card-task-text {
+  padding-right: 20px;
+}
 .agent-card-task:hover {
   background: color-mix(in srgb, var(--text) 6%, transparent);
 }
