@@ -93,6 +93,8 @@ jobs:
       - run: cargo test --locked --manifest-path crates/canopy-service/Cargo.toml -p canopy-service
       - run: cargo fmt --manifest-path crates/canopy-service/Cargo.toml -p canopy-service --check
 
+  # Each terminal crate is its own workspace root with its own Cargo.lock, so
+  # tracks adding dependencies never touch the app's lock or each other.
   terminal-crates:
     name: Terminal crates (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
@@ -107,10 +109,18 @@ jobs:
           components: rustfmt
       - uses: swatinem/rust-cache@v2
         with:
-          workspaces: "./src-tauri -> target"
+          workspaces: |
+            crates/canopy-term-core
+            crates/canopy-term-render
+            crates/canopy-term-net
           key: term-${{ matrix.os }}
-      - run: cargo test --locked --manifest-path src-tauri/Cargo.toml -p canopy-term-core -p canopy-term-render -p canopy-term-net
-      - run: cargo fmt --manifest-path src-tauri/Cargo.toml -p canopy-term-core -p canopy-term-render -p canopy-term-net --check
+      - name: Test and format each crate
+        shell: bash
+        run: |
+          for crate in canopy-term-core canopy-term-render canopy-term-net; do
+            cargo test --locked --manifest-path "crates/$crate/Cargo.toml"
+            cargo fmt --manifest-path "crates/$crate/Cargo.toml" --check
+          done
 
   rust:
     name: Rust (cargo test)

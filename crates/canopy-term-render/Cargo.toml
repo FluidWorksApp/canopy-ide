@@ -5,8 +5,11 @@ description = "Native terminal renderer: layout, glyph atlas and damage tracking
 authors = ["Cause Connect Pte Ltd <sam@fluidwords.app>"]
 license = "MIT"
 edition = "2021"
-rust-version.workspace = true
-workspace = "../../src-tauri"
+rust-version = "1.82"
+
+# Its own workspace root with its own lock: parallel work on other crates, and
+# dependencies a track adds, never touch the app's Cargo.lock.
+[workspace]
 
 [dependencies]
 canopy-term-core = { path = "../canopy-term-core" }
