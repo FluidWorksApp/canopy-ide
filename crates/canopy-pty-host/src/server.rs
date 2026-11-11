@@ -99,6 +99,7 @@ impl Session {
             exited: self.exit_code(),
             meta: self.meta.lock().unwrap().clone(),
             key: self.key.clone(),
+            attached: Some(ring.attached.is_some()),
         }
     }
 }

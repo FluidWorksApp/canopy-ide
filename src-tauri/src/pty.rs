@@ -2035,7 +2035,24 @@ impl PtyManager {
             }
         };
         let hosted = hosted_client.as_ref().and_then(|client| {
-            match crate::pty_hosted::spawn(client, &cmd, cols, rows) {
+            // Written with the spawn, not after: a crash in between would leave a
+            // session nothing can identify. Identity only, never env or tokens.
+            let meta = serde_json::json!({
+                "v": 1,
+                "id": id,
+                "generation": session_generation,
+                "kind": kind,
+                "cwd": cwd.clone(),
+                "run": recovered_run,
+                "command": recovered_command.clone(),
+                "run_command_id": recovered_run.then(|| run_command_id.clone()).flatten(),
+                "execution_context": execution_context.clone(),
+                "run_id": task_identity.as_ref().map(|t| t.run_id.clone()),
+                "attempt_id": task_identity.as_ref().map(|t| t.attempt_id.clone()),
+                "instance": instance_token(),
+            })
+            .to_string();
+            match crate::pty_hosted::spawn(client, &cmd, cols, rows, Some(meta)) {
                 Ok(parts) => Some(parts),
                 Err(error) => {
                     eprintln!(

@@ -109,6 +109,10 @@ pub struct SessionInfo {
     pub meta: Option<String>,
     /// The caller's key from spawn, if any.
     pub key: Option<String>,
+    /// Whether a client is attached right now. `None` from a host that predates
+    /// the field, which must read as "unknown", never as "free": adoption only
+    /// takes sessions reported `Some(false)`.
+    pub attached: Option<bool>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, Default)]

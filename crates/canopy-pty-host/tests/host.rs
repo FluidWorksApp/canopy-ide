@@ -630,3 +630,21 @@ fn an_unknown_op_gets_an_error_line_and_the_host_stays_up() {
         .hello()
         .expect("host still serves after a bad request");
 }
+
+#[test]
+fn list_reports_whether_a_client_is_attached_and_an_old_host_reads_as_unknown() {
+    let h = Harness::start("at", 60);
+    let (id, _) = h.client.spawn(spec("sleep 300")).unwrap();
+    assert_eq!(h.client.list().unwrap()[0].attached, Some(false));
+    let attached = h.client.attach(id, 0).unwrap();
+    assert!(wait_until(Duration::from_secs(5), || {
+        h.client.list().unwrap()[0].attached == Some(true)
+    }));
+    drop(attached);
+    assert!(wait_until(Duration::from_secs(5), || {
+        h.client.list().unwrap()[0].attached == Some(false)
+    }));
+    // A host from before the field omits it; that must not look like "free".
+    let info: canopy_pty_host::protocol::SessionInfo = serde_json::from_str(r#"{"id":1}"#).unwrap();
+    assert_eq!(info.attached, None);
+}

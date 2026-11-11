@@ -126,6 +126,7 @@ mod unix {
         cmd: &CommandBuilder,
         cols: u16,
         rows: u16,
+        meta: Option<String>,
     ) -> Result<(Box<dyn Child + Send + Sync>, Box<dyn MasterPty + Send>), String> {
         let argv = cmd
             .get_argv()
@@ -148,7 +149,7 @@ mod unix {
                 env,
                 cols,
                 rows,
-                meta: None,
+                meta,
                 linger_secs: Some(LINGER_SECS),
                 key: None,
             })
@@ -294,7 +295,7 @@ mod tests {
     fn input_resize_and_exit_status_work_through_the_portable_pty_traits() {
         let host = InProcessHost::start("io");
         let script = "stty size; read line; echo got=$line; exit 3";
-        let (mut child, master) = spawn(&host.client, &command(script), 100, 30).unwrap();
+        let (mut child, master) = spawn(&host.client, &command(script), 100, 30, None).unwrap();
         let mut pump = Pump::new(master.try_clone_reader().unwrap());
         let mut writer = master.take_writer().unwrap();
         assert!(pump.until("30 100").contains("30 100"));
@@ -310,7 +311,7 @@ mod tests {
         let host = InProcessHost::start("rs");
         let script =
             "trap 'echo size=$(stty size)' WINCH; echo ready; while :; do sleep 0.05; done";
-        let (mut child, master) = spawn(&host.client, &command(script), 80, 24).unwrap();
+        let (mut child, master) = spawn(&host.client, &command(script), 80, 24, None).unwrap();
         let mut pump = Pump::new(master.try_clone_reader().unwrap());
         pump.until("ready");
         master
@@ -331,14 +332,15 @@ mod tests {
         let host = InProcessHost::start("utf8");
         let mut cmd = CommandBuilder::new("sh");
         cmd.arg(std::ffi::OsString::from_vec(vec![0xff, 0xfe]));
-        let error = spawn(&host.client, &cmd, 80, 24).err().unwrap();
+        let error = spawn(&host.client, &cmd, 80, 24, None).err().unwrap();
         assert!(error.contains("UTF-8"), "{error}");
     }
 
     #[test]
     fn killing_through_the_child_handle_stops_a_hosted_session() {
         let host = InProcessHost::start("kill");
-        let (mut child, _master) = spawn(&host.client, &command("sleep 300"), 80, 24).unwrap();
+        let (mut child, _master) =
+            spawn(&host.client, &command("sleep 300"), 80, 24, None).unwrap();
         assert!(child.try_wait().unwrap().is_none());
         child.kill().unwrap();
         child.wait().unwrap(); // must return, not hang
@@ -346,11 +348,28 @@ mod tests {
     }
 
     #[test]
+    fn spawn_writes_the_identity_metadata_with_the_session() {
+        let host = InProcessHost::start("meta");
+        let meta = r#"{"v":1,"id":7,"generation":3}"#.to_string();
+        let (mut child, _master) = spawn(
+            &host.client,
+            &command("sleep 300"),
+            80,
+            24,
+            Some(meta.clone()),
+        )
+        .unwrap();
+        let listed = host.client.list().unwrap();
+        assert_eq!(listed[0].meta.as_deref(), Some(meta.as_str()));
+        let _ = child.kill();
+    }
+
+    #[test]
     fn raw_mode_is_answered_by_the_host_not_assumed_false() {
         let host = InProcessHost::start("raw");
         // `stty raw` takes the tty out of canonical mode, like a full-screen TUI.
         let script = "stty raw -echo; echo raw-set; sleep 300";
-        let (mut child, master) = spawn(&host.client, &command(script), 80, 24).unwrap();
+        let (mut child, master) = spawn(&host.client, &command(script), 80, 24, None).unwrap();
         let mut pump = Pump::new(master.try_clone_reader().unwrap());
         pump.until("raw-set");
         let plain: &dyn MasterPty = &*master;
