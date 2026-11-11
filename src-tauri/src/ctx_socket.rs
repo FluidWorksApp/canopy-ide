@@ -276,7 +276,18 @@ mod tests {
         assert!(path.exists());
         assert!(get(&path).is_err(), "nobody is listening between launches");
         let rt = runtime();
-        let owned = claim(&dir.0).unwrap().expect("the old launch released it");
+        // Polled like `serve_stable` does: a child another test thread forked
+        // but has not exec'd yet shares the lock's descriptor for a moment.
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        let owned = loop {
+            match claim(&dir.0).unwrap() {
+                Some(owned) => break owned,
+                None if std::time::Instant::now() < deadline => {
+                    std::thread::sleep(Duration::from_millis(50))
+                }
+                None => panic!("the old launch never released the socket"),
+            }
+        };
         rt.spawn(serve(owned.listener, router("launch-2")));
         assert!(get(&path).unwrap().ends_with("launch-2"));
     }
