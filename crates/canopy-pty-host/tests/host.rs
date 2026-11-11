@@ -874,10 +874,12 @@ fn hosts_starting_together_leave_one_host_and_do_not_unlink_the_winners_socket()
     .hello()
     .is_ok()));
     std::thread::sleep(Duration::from_secs(1));
-    let running = hosts
-        .iter_mut()
-        .filter(|h| h.try_wait().unwrap().is_none())
-        .count();
+    let mut running = 0;
+    for h in &mut hosts {
+        if h.try_wait().unwrap().is_none() {
+            running += 1;
+        }
+    }
     let winner = HostClient::new(&socket).hello().unwrap().host_pid.unwrap();
     // The host the socket reaches is one of the running processes, the only one.
     assert_eq!(running, 1, "several hosts are serving");
