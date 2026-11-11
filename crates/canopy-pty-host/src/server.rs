@@ -168,6 +168,9 @@ impl Session {
 struct Host {
     /// Serialises spawn so two requests with one key cannot both start a session.
     spawn_lock: Mutex<()>,
+    /// Set (under `spawn_lock`) once the host has agreed to stop: no spawn may
+    /// start a session after that, since shutdown would kill it.
+    closing: AtomicBool,
     min_client: u32,
     sessions: Mutex<HashMap<u32, Arc<Session>>>,
     next_id: AtomicU32,
@@ -287,6 +290,32 @@ pub fn harden_process() {
     }
 }
 
+/// The file in an install directory that the app and a running host share-lock.
+pub const INSTALL_LOCK: &str = ".lock";
+
+/// A host started from an install directory (`.../bin/<name>/canopy-pty-host`,
+/// which the app creates with a `.lock` in it) takes a shared lock on that file
+/// for as long as it lives. The app holds the same lock while it runs, but the
+/// host outlives the app, and a pruning app must not delete the directory of a
+/// host it could not reach. The descriptor is close-on-exec, so no terminal
+/// inherits the lock. Best effort: no lock file means not installed that way.
+fn hold_install_dir() {
+    static HELD: std::sync::OnceLock<std::fs::File> = std::sync::OnceLock::new();
+    let Some(dir) = std::env::current_exe()
+        .ok()
+        .and_then(|exe| exe.parent().map(|p| p.to_path_buf()))
+    else {
+        return;
+    };
+    let Ok(file) = std::fs::File::open(dir.join(INSTALL_LOCK)) else {
+        return;
+    };
+    // SAFETY: flock on a descriptor we own; released when the process exits.
+    if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_SH) } == 0 {
+        let _ = HELD.set(file);
+    }
+}
+
 /// Makes sure the socket's directory is private to this user. A directory that
 /// does not exist is created here with mode 0700. One that already exists is never
 /// chmod-ed (the caller may have pointed us at `/tmp` or `$HOME`): it must already
@@ -335,6 +364,7 @@ pub fn run(config: ServerConfig) -> std::io::Result<()> {
     }
     let _ = std::fs::remove_file(&config.socket);
     let listener = UnixListener::bind(&config.socket)?;
+    hold_install_dir();
     std::fs::set_permissions(&config.socket, std::fs::Permissions::from_mode(0o600))?;
     // Which file is ours, read under the lock so it cannot be a successor's.
     let bound = socket_identity(&config.socket);
@@ -462,6 +492,7 @@ fn serve_bound(
     listener.set_nonblocking(true)?;
     let host = Arc::new(Host {
         spawn_lock: Mutex::new(()),
+        closing: AtomicBool::new(false),
         min_client: config.min_client,
         sessions: Mutex::new(HashMap::new()),
         next_id: AtomicU32::new(id_seed()),
@@ -897,7 +928,39 @@ fn handle(host: &Arc<Host>, mut stream: Conn) -> std::io::Result<()> {
             host.stop.store(true, Ordering::SeqCst);
             Ok(())
         }
+        Request::ShutdownIfIdle => {
+            let reply = shutdown_if_idle(host);
+            let stopping = reply.ok;
+            write_line(&mut stream, &reply)?;
+            if stopping {
+                host.stop.store(true, Ordering::SeqCst);
+            }
+            Ok(())
+        }
     }
+}
+
+/// The decision half of `shutdown_if_idle`. Holding `spawn_lock` makes "nothing
+/// is running" and "no spawn may start one from now on" one step: a spawn either
+/// finished first (and is counted) or is refused afterwards.
+fn shutdown_if_idle(host: &Host) -> Response {
+    let _no_spawn_meanwhile = host.spawn_lock.lock().unwrap();
+    let running = host
+        .sessions
+        .lock()
+        .unwrap()
+        .values()
+        .filter(|s| s.exit_code().is_none())
+        .count();
+    if running > 0 {
+        return Response {
+            error: Some(crate::protocol::BUSY.into()),
+            running: Some(running),
+            ..Default::default()
+        };
+    }
+    host.closing.store(true, Ordering::SeqCst);
+    Response::ok()
 }
 
 fn with_session(
@@ -915,6 +978,9 @@ fn with_session(
 /// Returns the session and whether it already existed for the spawn's key.
 fn spawn(host: &Arc<Host>, spec: SpawnSpec) -> Result<(Arc<Session>, bool), String> {
     let _one_spawn_at_a_time = host.spawn_lock.lock().unwrap();
+    if host.closing.load(Ordering::SeqCst) {
+        return Err("host is shutting down".into());
+    }
     if let Some(key) = &spec.key {
         let existing = host
             .sessions

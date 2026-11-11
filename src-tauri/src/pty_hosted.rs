@@ -12,6 +12,9 @@ pub fn enabled() -> bool {
     std::env::var("CANOPY_PTY_HOST").is_ok_and(|v| v == "1")
 }
 
+#[cfg(unix)]
+mod install;
+
 /// A hosted session "Quit and Stop All" would stop that this app does not hold
 /// in a tab. `command` is what its metadata says it runs (None when the
 /// metadata is unreadable: it is then a Canopy session of this instance only by
@@ -127,10 +130,11 @@ pub fn spawn(
 #[cfg(unix)]
 mod unix {
     use super::*;
-    use canopy_pty_host::client::{HostChild, HostClient, HostMaster};
+    use canopy_pty_host::client::{HostChild, HostClient, HostMaster, LaunchCheck};
     use canopy_pty_host::protocol::SpawnSpec;
-    use std::path::PathBuf;
-    use std::sync::OnceLock;
+    use std::path::{Path, PathBuf};
+    use std::sync::{Mutex, OnceLock};
+    use std::time::{Duration, Instant};
 
     pub type Client = HostClient;
 
@@ -173,17 +177,61 @@ mod unix {
         socket_path()?.parent().map(PathBuf::from)
     }
 
-    /// `CANOPY_PTY_HOST_EXE`, else next to this executable. Packaging the host
-    /// where it survives an app update is not done yet.
-    fn host_exe() -> Option<PathBuf> {
+    /// The binary to start a host from: `CANOPY_PTY_HOST_EXE` as given (a
+    /// developer override, `false` = not installed), else the bundled host
+    /// installed under the socket directory (`true`). Never the bundled path
+    /// itself: an update replaces the bundle, and a translocated or AppImage
+    /// bundle disappears when the app quits (see `install`).
+    fn host_exe(socket: &Path) -> Result<(PathBuf, Option<LaunchCheck>), String> {
         if let Ok(path) = std::env::var("CANOPY_PTY_HOST_EXE") {
-            return Some(PathBuf::from(path));
+            return Ok((PathBuf::from(path), None));
         }
-        let exe = std::env::current_exe()
-            .ok()?
-            .parent()?
-            .join("canopy-pty-host");
-        exe.is_file().then_some(exe)
+        let bundled = std::env::current_exe()
+            .map_err(|e| e.to_string())?
+            .parent()
+            .ok_or("the app has no directory")?
+            .join(super::install::HOST_BIN);
+        let bin = super::install::bin_dir(socket).ok_or("the socket has no directory")?;
+        let installed = super::install::install(&bundled, &bin, env!("CARGO_PKG_VERSION"))?;
+        let digest = installed.digest.clone();
+        // The shared lock on the install directory is held for as long as the
+        // app runs, so no other app's prune deletes the copy this one may start.
+        static HOLD: OnceLock<std::fs::File> = OnceLock::new();
+        let _ = HOLD.set(installed.hold);
+        // Hashed again right before every start, restarts included.
+        let check = LaunchCheck(std::sync::Arc::new(move |exe: &Path| {
+            super::install::verify(exe, &digest)
+        }));
+        Ok((installed.exe, Some(check)))
+    }
+
+    /// Said once with a start failure: a copy under the home directory that
+    /// cannot be executed usually means a `noexec` mount.
+    fn start_hint(error: &std::io::Error, installed: bool) -> &'static str {
+        if installed && error.kind() == std::io::ErrorKind::PermissionDenied {
+            " (permission denied starting the installed host: is the home directory \
+             mounted noexec? Set CANOPY_PTY_HOST_EXE to a host binary on an executable \
+             filesystem)"
+        } else {
+            ""
+        }
+    }
+
+    /// With a host running, remove install directories that neither this app
+    /// nor the live host uses. In the background: housekeeping only.
+    fn prune_installs_later(socket: PathBuf, installed: &Path) {
+        let Some(dir) = installed.parent() else {
+            return;
+        };
+        let (Some(bin), Some(current)) = (dir.parent(), dir.file_name().and_then(|n| n.to_str()))
+        else {
+            return;
+        };
+        let (bin, current) = (bin.to_path_buf(), current.to_owned());
+        std::thread::spawn(move || {
+            let live = super::install::liveness(&HostClient::new(socket).hello());
+            super::install::prune(&bin, &current, &live);
+        });
     }
 
     /// The host client, started on first use. None when the switch is off or the
@@ -198,32 +246,93 @@ mod unix {
             super::note_fell_back();
             return None;
         }
-        static CLIENT: OnceLock<Option<Client>> = OnceLock::new();
-        CLIENT
-            .get_or_init(|| {
+        // A failure is not final: a host that was busy for incompatible
+        // terminals, or not yet startable, is tried again after RETRY_AFTER.
+        static CLIENT: Mutex<RetryCell<Client>> = Mutex::new(RetryCell::new());
+        let mut cell = CLIENT.lock().unwrap_or_else(|e| e.into_inner());
+        cell.get(RETRY_AFTER, || {
                 // Said once, so a missing host is not mistaken for a working one.
                 let Some(socket) = socket_path() else {
                     eprintln!("canopy: CANOPY_PTY_HOST=1 but no socket directory; using in-process terminals");
                     super::note_fell_back();
                     return None;
                 };
-                let Some(exe) = host_exe() else {
-                    eprintln!("canopy: CANOPY_PTY_HOST=1 but canopy-pty-host was not found next to the app (set CANOPY_PTY_HOST_EXE); using in-process terminals");
-                    super::note_fell_back();
-                    return None;
+                let (exe, check) = match host_exe(&socket) {
+                    Ok(found) => found,
+                    Err(error) => {
+                        eprintln!("canopy: CANOPY_PTY_HOST=1 but the PTY host could not be installed ({error}); using in-process terminals");
+                        super::note_fell_back();
+                        return None;
+                    }
                 };
-                match HostClient::ensure_running(&exe, &socket, HOST_IDLE_SECS) {
-                    Ok(client) => Some(client),
+                let installed = check.is_some();
+                match HostClient::ensure_running_checked(
+                    &exe,
+                    &socket,
+                    HOST_IDLE_SECS,
+                    &[],
+                    check,
+                ) {
+                    Ok(client) => {
+                        if installed {
+                            prune_installs_later(socket.clone(), &exe);
+                        }
+                        Some(client)
+                    }
                     Err(error) => {
                         eprintln!(
-                            "canopy: PTY host unavailable, using in-process terminals: {error}"
+                            "canopy: PTY host unavailable, using in-process terminals: {error}{}",
+                            start_hint(&error, installed)
                         );
                         super::note_fell_back();
                         None
                     }
                 }
-            })
-            .clone()
+        })
+    }
+
+    /// How long after a failed start the next terminal waits before trying again.
+    pub(super) const RETRY_AFTER: Duration = Duration::from_secs(30);
+
+    /// A value made on first use. A failure is remembered only for `retry_after`,
+    /// so one bad moment does not cost the app its host for its whole lifetime,
+    /// and a down host is not retried (a start can take seconds) on every spawn.
+    pub(super) struct RetryCell<T> {
+        value: Option<T>,
+        failed_at: Option<Instant>,
+    }
+
+    impl<T: Clone> RetryCell<T> {
+        pub(super) const fn new() -> Self {
+            RetryCell {
+                value: None,
+                failed_at: None,
+            }
+        }
+
+        pub(super) fn get(
+            &mut self,
+            retry_after: Duration,
+            init: impl FnOnce() -> Option<T>,
+        ) -> Option<T> {
+            if let Some(value) = &self.value {
+                return Some(value.clone());
+            }
+            if self.failed_at.is_some_and(|at| at.elapsed() < retry_after) {
+                return None;
+            }
+            match init() {
+                Some(value) => {
+                    self.failed_at = None;
+                    self.value = Some(value.clone());
+                    Some(value)
+                }
+                None => {
+                    self.failed_at = Some(Instant::now());
+                    None
+                }
+            }
+        }
     }
 
     /// A session's child handle (wait, kill) on a client that can never start a
@@ -647,31 +756,61 @@ mod adoption {
                 return Resolution::Fresh;
             }
             let probe = HostClient::new(socket);
-            match probe.list_within(LAUNCH_WAIT) {
-                Ok(sessions) => {
-                    match choose_token(&sessions, crate::adoption_seal::key_nowait().as_ref()) {
-                        Some(token) => Resolution::Reuse(token),
-                        None => Resolution::Fresh,
-                    }
-                }
-                // A socket file left by a host that is gone, or one that is not
-                // listening, is "no host": the next spawn cleans it up and
-                // starts a fresh one. Only a host that connects and then fails
-                // to answer sensibly is unusable.
-                Err(e)
-                    if matches!(
-                        e.kind(),
-                        std::io::ErrorKind::NotFound
-                            | std::io::ErrorKind::ConnectionRefused
-                            | std::io::ErrorKind::ConnectionReset
-                            | std::io::ErrorKind::BrokenPipe
-                    ) =>
-                {
-                    Resolution::Fresh
-                }
-                Err(_) => Resolution::HostUnusable,
-            }
+            let key = crate::adoption_seal::key_nowait();
+            resolve_from(
+                || probe.list_within(LAUNCH_WAIT),
+                std::thread::sleep,
+                key.as_ref(),
+            )
         })
+    }
+
+    /// How long the launch probe waits before asking a second time.
+    pub(super) const PROBE_RETRY_AFTER: Duration = Duration::from_millis(250);
+
+    /// The launch decision from `list` answers. Right after a quit the host can
+    /// briefly fail to answer (a timeout, or a connection dropped unanswered),
+    /// so anything but "no socket" or "nobody listening" is asked once more
+    /// after a short pause before it counts.
+    pub(super) fn resolve_from(
+        mut probe: impl FnMut() -> std::io::Result<Vec<SessionInfo>>,
+        sleep: impl FnOnce(Duration),
+        key: Option<&[u8; 32]>,
+    ) -> Resolution {
+        let answer = match probe() {
+            Err(e)
+                if !matches!(
+                    e.kind(),
+                    std::io::ErrorKind::NotFound | std::io::ErrorKind::ConnectionRefused
+                ) =>
+            {
+                sleep(PROBE_RETRY_AFTER);
+                probe()
+            }
+            first => first,
+        };
+        match answer {
+            Ok(sessions) => match choose_token(&sessions, key) {
+                Some(token) => Resolution::Reuse(token),
+                None => Resolution::Fresh,
+            },
+            // A socket file left by a host that is gone, or one that is not
+            // listening, is "no host": the next spawn cleans it up and
+            // starts a fresh one. Only a host that connects and then fails
+            // to answer sensibly is unusable.
+            Err(e)
+                if matches!(
+                    e.kind(),
+                    std::io::ErrorKind::NotFound
+                        | std::io::ErrorKind::ConnectionRefused
+                        | std::io::ErrorKind::ConnectionReset
+                        | std::io::ErrorKind::BrokenPipe
+                ) =>
+            {
+                Resolution::Fresh
+            }
+            Err(_) => Resolution::HostUnusable,
+        }
     }
 
     /// The token most waiting sessions agree on: running, free (an old host with
@@ -953,8 +1092,9 @@ use adoption::Resolution;
 #[cfg(all(test, unix))]
 pub(crate) mod tests {
     use super::adoption::{
-        adoptable_from as adoption_adoptable, choose_token as adoption_choose, classify, spawn_key,
-        stop_candidates, stop_left_running_with, stop_preview_with, stop_targets,
+        adoptable_from as adoption_adoptable, choose_token as adoption_choose, classify,
+        resolve_from, spawn_key, stop_candidates, stop_left_running_with, stop_preview_with,
+        stop_targets, Resolution as Resolved, PROBE_RETRY_AFTER,
     };
     use super::*;
     use canopy_pty_host::client::HostClient;
@@ -1290,6 +1430,85 @@ pub(crate) mod tests {
         assert!(adoptable(&host.client, "inst-a").is_empty());
     }
 
+    type Listing = std::io::Result<Vec<canopy_pty_host::protocol::SessionInfo>>;
+
+    /// A probe that gives the scripted answers in order and counts its calls.
+    fn scripted(
+        answers: Vec<Listing>,
+    ) -> (impl FnMut() -> Listing, std::rc::Rc<std::cell::Cell<usize>>) {
+        let calls = std::rc::Rc::new(std::cell::Cell::new(0));
+        let seen = std::rc::Rc::clone(&calls);
+        let mut answers = answers.into_iter();
+        let probe = move || {
+            seen.set(seen.get() + 1);
+            answers.next().expect("probed more often than scripted")
+        };
+        (probe, calls)
+    }
+
+    fn waiting() -> Vec<canopy_pty_host::protocol::SessionInfo> {
+        vec![info(
+            1,
+            Some(meta_for(1, 1, "desktop", "inst-a")),
+            Some(false),
+            None,
+        )]
+    }
+
+    #[test]
+    fn the_launch_probe_asks_once_more_when_a_host_just_after_quit_does_not_answer() {
+        use std::io::{Error, ErrorKind};
+        for first in [
+            ErrorKind::TimedOut,
+            ErrorKind::WouldBlock,
+            ErrorKind::ConnectionReset,
+            ErrorKind::BrokenPipe,
+        ] {
+            let (probe, calls) = scripted(vec![Err(Error::from(first)), Ok(waiting())]);
+            let mut slept = None;
+            let resolved = resolve_from(probe, |d| slept = Some(d), None);
+            assert_eq!(resolved, Resolved::Reuse("inst-a".into()), "{first:?}");
+            assert_eq!(calls.get(), 2);
+            assert_eq!(slept, Some(PROBE_RETRY_AFTER));
+        }
+    }
+
+    #[test]
+    fn the_launch_probe_retries_only_once_and_then_maps_the_error_as_before() {
+        use std::io::{Error, ErrorKind};
+        let (probe, calls) = scripted(vec![
+            Err(Error::from(ErrorKind::TimedOut)),
+            Err(Error::from(ErrorKind::TimedOut)),
+        ]);
+        assert_eq!(resolve_from(probe, |_| {}, None), Resolved::HostUnusable);
+        assert_eq!(calls.get(), 2);
+        // A connection dropped twice is a host on its way out: fresh, as before.
+        let (probe, calls) = scripted(vec![
+            Err(Error::from(ErrorKind::ConnectionReset)),
+            Err(Error::from(ErrorKind::BrokenPipe)),
+        ]);
+        assert_eq!(resolve_from(probe, |_| {}, None), Resolved::Fresh);
+        assert_eq!(calls.get(), 2);
+    }
+
+    #[test]
+    fn no_host_at_all_is_fresh_at_once_with_no_retry_or_pause() {
+        use std::io::{Error, ErrorKind};
+        for kind in [ErrorKind::NotFound, ErrorKind::ConnectionRefused] {
+            let (probe, calls) = scripted(vec![Err(Error::from(kind))]);
+            let resolved = resolve_from(probe, |_| panic!("no pause for a missing host"), None);
+            assert_eq!(resolved, Resolved::Fresh, "{kind:?}");
+            assert_eq!(calls.get(), 1);
+        }
+        // A first answer is used as is.
+        let (probe, calls) = scripted(vec![Ok(Vec::new())]);
+        assert_eq!(
+            resolve_from(probe, |_| panic!("no pause"), None),
+            Resolved::Fresh
+        );
+        assert_eq!(calls.get(), 1);
+    }
+
     #[test]
     fn stop_all_targets_unattached_canopy_sessions_and_this_launchs_strays() {
         let a = |i, kind| Some(meta_for(i, i as u64, kind, "inst-a"));
@@ -1517,6 +1736,36 @@ pub(crate) mod tests {
             .expect("a hosted master downcasts to HostMaster");
         assert!(hosted.raw_mode());
         child.kill().unwrap();
+    }
+
+    #[test]
+    fn a_failed_host_start_is_retried_not_final() {
+        use super::unix::RetryCell;
+        let mut cell: RetryCell<u32> = RetryCell::new();
+        let mut calls = 0;
+        // Failing, with a long back-off: asked once, then not again.
+        assert_eq!(
+            cell.get(Duration::from_secs(3600), || {
+                calls += 1;
+                None
+            }),
+            None
+        );
+        assert_eq!(
+            cell.get(Duration::from_secs(3600), || {
+                calls += 1;
+                Some(1)
+            }),
+            None
+        );
+        assert_eq!(calls, 1, "a down host must not be retried on every spawn");
+        // Once the back-off has passed, the next ask tries again and can succeed.
+        assert_eq!(cell.get(Duration::ZERO, || Some(7)), Some(7));
+        // A success is kept for good and never re-made.
+        assert_eq!(
+            cell.get(Duration::ZERO, || panic!("must not run again")),
+            Some(7)
+        );
     }
 
     #[test]

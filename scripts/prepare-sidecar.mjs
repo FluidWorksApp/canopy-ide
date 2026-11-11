@@ -118,4 +118,47 @@ for (const { name, manifest } of SIDECARS) {
 
   copyFileSync(src, dest);
   console.log(`prepare-sidecar: staged ${dest} (${profile}, ${triple})`);
+
+  if (name === "canopy-pty-host" && release && triple.includes("-apple-darwin")) {
+    stageSignedHost(dest);
+  }
+}
+
+// tauri-bundler signs every externalBin entry with the app's own entitlements
+// (JIT, library-validation off, DYLD variables, microphone), one set for every
+// binary and no per-binary setting. The PTY host is a long-lived process that
+// needs none of them, so for macOS release builds it is not an externalBin:
+// this stages a copy signed here with src-tauri/pty-host-entitlements.plist, and
+// src-tauri/tauri.release-macos.conf.json (passed with --config by the release
+// build) places that copy at Contents/MacOS/canopy-pty-host. The bundler signs
+// only frameworks, externalBin and the app itself, never `macOS.files`, so
+// this signature is the one that ships.
+//
+// With APPLE_SIGNING_IDENTITY unset the copy is staged unsigned, so a build
+// without signing still produces a complete bundle.
+function stageSignedHost(unsigned) {
+  const staged = join(destDir, "canopy-pty-host-signed");
+  copyFileSync(unsigned, staged);
+  const identity = process.env.APPLE_SIGNING_IDENTITY;
+  if (!identity) {
+    console.log("prepare-sidecar: APPLE_SIGNING_IDENTITY not set, staged the PTY host unsigned");
+    return;
+  }
+  execFileSync(
+    "codesign",
+    [
+      "--force",
+      "--options",
+      "runtime",
+      "--timestamp",
+      "--entitlements",
+      join(root, "src-tauri", "pty-host-entitlements.plist"),
+      "--sign",
+      identity,
+      staged,
+    ],
+    { stdio: "inherit" },
+  );
+  execFileSync("codesign", ["--verify", "--strict", staged], { stdio: "inherit" });
+  console.log(`prepare-sidecar: signed ${staged} with its own entitlements`);
 }

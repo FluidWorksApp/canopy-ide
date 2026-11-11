@@ -107,3 +107,101 @@ test('a zero-length artifact is rejected instead of staging a broken sidecar', a
     }
   }
 });
+
+// A fake `codesign` that logs its arguments, next to the fake cargo.
+async function withFakeCodesign(f, { fail = false } = {}) {
+  const log = join(f.root, 'codesign.jsonl');
+  await writeFile(
+    join(f.root, 'tools/codesign'),
+    `#!/usr/bin/env node
+require('node:fs').appendFileSync(${JSON.stringify(log)}, JSON.stringify(process.argv.slice(2)) + '\\n');
+process.exit(${fail ? 1 : 0});
+`,
+    { mode: 0o755 },
+  );
+  return async () => {
+    try {
+      return (await readFile(log, 'utf8')).trim().split('\n').map((l) => JSON.parse(l));
+    } catch {
+      return [];
+    }
+  };
+}
+
+const MAC = 'aarch64-apple-darwin';
+
+test('a macOS release signs a separate copy of the host with its own entitlements', { skip: process.platform === 'win32' }, async () => {
+  const f = await fixture();
+  try {
+    const codesigns = await withFakeCodesign(f);
+    run({ ...f, env: { ...f.env, TAURI_ENV_TARGET_TRIPLE: MAC, APPLE_SIGNING_IDENTITY: 'Developer ID: Test' } });
+    const staged = join(f.root, 'src-tauri/binaries/canopy-pty-host-signed');
+    assert.equal((await readFile(staged)).toString(), 'synthetic canopy-pty-host');
+    const calls = await codesigns();
+    assert.equal(calls.length, 2);
+    const [sign, verify] = calls;
+    assert.ok(sign.includes('--force') && sign.includes('--timestamp'));
+    assert.equal(sign[sign.indexOf('--options') + 1], 'runtime');
+    assert.equal(
+      sign[sign.indexOf('--entitlements') + 1],
+      join(f.root, 'src-tauri/pty-host-entitlements.plist'),
+    );
+    assert.equal(sign[sign.indexOf('--sign') + 1], 'Developer ID: Test');
+    assert.equal(sign.at(-1), staged);
+    assert.deepEqual(verify, ['--verify', '--strict', staged]);
+    // The hook helper is left to the bundler: only the host gets a signed copy.
+    await assert.rejects(stat(join(f.root, 'src-tauri/binaries/canopy-hook-signed')));
+  } finally {
+    await rm(f.root, { recursive: true, force: true });
+  }
+});
+
+test('without a signing identity the host copy is staged unsigned and codesign is never run', { skip: process.platform === 'win32' }, async () => {
+  const f = await fixture();
+  try {
+    const codesigns = await withFakeCodesign(f);
+    const env = { ...f.env, TAURI_ENV_TARGET_TRIPLE: MAC };
+    delete env.APPLE_SIGNING_IDENTITY;
+    run({ ...f, env });
+    assert.ok((await stat(join(f.root, 'src-tauri/binaries/canopy-pty-host-signed'))).size > 0);
+    assert.deepEqual(await codesigns(), []);
+  } finally {
+    await rm(f.root, { recursive: true, force: true });
+  }
+});
+
+test('a codesign failure fails the build before anything is bundled', { skip: process.platform === 'win32' }, async () => {
+  const f = await fixture();
+  try {
+    await withFakeCodesign(f, { fail: true });
+    assert.throws(() =>
+      run(
+        { ...f, env: { ...f.env, TAURI_ENV_TARGET_TRIPLE: MAC, APPLE_SIGNING_IDENTITY: 'x' } },
+        { stdio: 'pipe' },
+      ),
+    );
+  } finally {
+    await rm(f.root, { recursive: true, force: true });
+  }
+});
+
+test('non-macOS targets stage no signed host copy', async () => {
+  const f = await fixture();
+  try {
+    run(f);
+    await assert.rejects(stat(join(f.root, 'src-tauri/binaries/canopy-pty-host-signed')));
+  } finally {
+    await rm(f.root, { recursive: true, force: true });
+  }
+});
+
+test('the macOS release config swaps the host from externalBin to an unsigned-by-bundler file', async () => {
+  const base = JSON.parse(await readFile(new URL('../src-tauri/tauri.conf.json', import.meta.url), 'utf8'));
+  const over = JSON.parse(await readFile(new URL('../src-tauri/tauri.release-macos.conf.json', import.meta.url), 'utf8'));
+  assert.ok(base.bundle.externalBin.includes('binaries/canopy-pty-host'));
+  assert.deepEqual(over.bundle.externalBin, base.bundle.externalBin.filter((b) => b !== 'binaries/canopy-pty-host'));
+  assert.equal(over.bundle.macOS.files['MacOS/canopy-pty-host'], 'binaries/canopy-pty-host-signed');
+  // The host's plist must really grant nothing.
+  const plist = await readFile(new URL('../src-tauri/pty-host-entitlements.plist', import.meta.url), 'utf8');
+  assert.ok(!/<key>/.test(plist));
+});
