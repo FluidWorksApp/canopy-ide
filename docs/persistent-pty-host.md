@@ -17,7 +17,9 @@ are the parent, and tmux would re-emulate the byte stream.
   untestable here). The host binary still compiles on Windows as a stub so the
   sidecar packaging step does not break.
 - Off by default behind `CANOPY_PTY_HOST=1`. No UI change, so no mock is owed yet.
-  What Quit should mean when it is on is an open product decision (below).
+  With it on, Quit leaves adoptable terminals running in the host (micro-tasks
+  and run-bound tabs are still stopped). A separate "Quit and stop all" entry is
+  UI and needs a mock and the user's decision first.
 - Hosted sessions are monitor-only for containment.
 - New crate `crates/canopy-pty-host`: protocol, server, client, tests. Nothing in
   `pty.rs` changes until CI is green on the crate.
@@ -65,7 +67,9 @@ is about 104 bytes, recalled).
 client detaches (or after spawn if none attaches), so a crash or force-quit does
 not leave invisible agents running forever. The clock only runs while nothing is
 attached, so adoption does not need to lift it; how long a session may outlive the
-app is the user's Quit decision, and the app sets 30 seconds for now.
+app is the user's Quit decision, and the app sets two hours for now (long enough
+to quit, update and relaunch; an app that never returns does not leave agents
+running unseen for longer).
 
 **Wire.** One raw connection per session: a one-line JSON attach handshake, then
 plain bytes both ways. The host blocks on a slow client and drains into its ring
