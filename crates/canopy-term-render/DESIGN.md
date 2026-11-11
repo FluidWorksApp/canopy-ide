@@ -23,6 +23,31 @@ Chrome needs a mockup from the user first.
 | `renderer` + `shader.wgsl` | wgpu pipeline, uploads, one draw call, offscreen readback | adapter (skipped without) |
 | `gpu` | Adapter probe and headless device | adapter |
 
+## Public API a window layer needs
+
+Everything is `pub` for testing, but a window layer only needs:
+
+* `metrics::{FontMetrics::from_font_data, layout, Scale, CellLayout}`: cell size
+  from a font and the window scale factor.
+* `fonts::FontBook` (`bundled()`, `with_primary`, `add_font_data`,
+  `load_system_fonts`, `index_fallbacks`; `BUNDLED_FONT` is a `static`) and
+  `text::TextEngine::new(book, layout, atlas_size)` with `set_layout` and
+  `set_ligatures`. Size the atlas with `atlas::atlas_size_for(cell_w, cell_h,
+  device max_texture_dimension_2d)`.
+* `color::Theme` and `builder::{QuadBuilder, RenderState}`:
+  `QuadBuilder::build(&frame, &state, &mut engine) -> BuildReport`;
+  `QuadBuilder::set_origin(x, y)` places the grid inside the surface (padding or
+  a viewport; physical pixels, rebuilds every row when it changes). When
+  `BuildReport::atlas_overflow` is set (fed by `GlyphSource::overflowed`), build
+  a new engine with a larger atlas.
+* `renderer::Renderer::{new, sync, render}` and, for tests,
+  `renderer::Offscreen`. `Renderer::new` panics on an sRGB target format: use a
+  non-sRGB surface format, or a non-sRGB entry in the surface's `view_formats`.
+* `geometry::{cursor_rect, Selection}` for IME placement and selection.
+
+The loop is `build` -> (skip when `report.held` or nothing changed) -> `sync` ->
+`render` -> present; see "Winit integration point".
+
 ## Dependencies and licences
 
 | Crate | Use | Licence |
@@ -39,7 +64,10 @@ Chrome needs a mockup from the user first.
 
 `cargo metadata` over the lock found no GPL, LGPL, AGPL or MPL package. Licences
 outside the plain MIT/Apache set: `libloading` (ISC), `hexf-parse` (CC0-1.0),
-Zlib-only packages, and two `Unicode-3.0` data packages. The repo-level
+Zlib-only packages (`foldhash`, `slotmap`, `zlib-rs`), and two packages
+under `(MIT OR Apache-2.0) AND Unicode-3.0` (`unicode-ident`,
+`unicode-properties`). A fresh scan of the 164 locked packages found no missing
+licence field and no GPL/LGPL/AGPL/MPL. The repo-level
 `THIRD-PARTY-NOTICES.md` is generated outside this crate and needs these added
 when the crate is wired into the app; the bundled font needs its OFL notice there
 too. No code was taken from other terminals' renderers (ideas only).
@@ -51,6 +79,9 @@ glyphs. Using the three pieces directly keeps the grid in charge.
 
 ## The grid is in charge
 
+* The font size is converted to physical pixels and rounded first; the cell
+  metrics and the glyph raster both use that rounded size, so fractional scale
+  factors cannot make them disagree.
 * Cell width/height are whole physical pixels (`metrics::layout`). Cell origins
   are `col * width`, `row * height`: integers, so cells tile with no seams.
 * Glyphs are rasterised at the physical size and blitted at integer offsets.
@@ -102,16 +133,31 @@ sequence does not advance, so the release frame's damage still applies.
 Adjacent cells with the same background share one quad; underline and strike
 merge across neighbours of one colour. Default-background cells emit no quad at
 all (the target is cleared to the theme background). A cluster that shapes to
-many glyphs can exceed a row's capacity; extras are dropped rather than
-overrunning the next row.
+many glyphs can exceed a row's capacity; extra glyphs are dropped rather than
+overrunning the next row, and the cursor's quads are kept (they are placed
+after the cut).
 
-Fonts: each used face's bytes are leaked once (`Box::leak`) so its parsed
-shaping face is `'static` and built once, not per run; the leak is bounded by the
-faces actually used.
+Fonts: a used face's parsed shaping face is `'static` and built once, not per
+run, and shaping plans are cached per (face, script, ligature setting), so a
+steady-state shaping call does not rebuild one. Its bytes are not copied: fontdb memory-maps system font files (one
+mapping per file, shared by all its faces) and the bundled font is the static
+bytes themselves. A process-wide table keeps one handle per font file path
+(and per distinct byte range for in-memory fonts) for the life of the process,
+so many books or faces, including a new engine built for a larger atlas, cost
+address space and page cache, not heap, and what stays pinned is bounded by the
+font files actually used. Bytes passed to `add_font_data` are pinned per call. The mapping is the usual one: a font file rewritten in place by
+another process while the app runs could fault (`FontBook::load` carries the
+safety note).
 
 Atlas limit: the atlas must hold the glyphs of one frame. If it fills during a
-build it is cleared and the build repeats once; a screen needing more distinct
-glyphs than the atlas holds will draw some blank.
+build it is cleared (at most once per frame) and the build repeats; a screen
+needing more distinct glyphs than that leaves some glyphs blank, never wrong,
+and reports it (`BuildReport::atlas_overflow`; the build itself is valid, so
+unchanged frames are not rebuilt, and only an atlas that kept changing under
+the build forces a full rebuild next time). A bitmap larger than the atlas can ever hold is left blank without clearing.
+`atlas::atlas_size_for(cell_w, cell_h, max_texture_dimension)` sizes the atlas
+for about 4096 glyph cells, capped by the device limit; the window layer should
+call it and rebuild with a larger atlas when `atlas_overflow` is set.
 
 ## GPU layer
 
@@ -125,7 +171,9 @@ glyphs than the atlas holds will draw some blank.
 * Sampling is `textureLoad` on integer texels (no filtering), blending is
   premultiplied (One, OneMinusSrcAlpha), the target should be a non-sRGB format
   so the theme's bytes are written unchanged. A window surface that only
-  offers sRGB formats needs a non-sRGB view format.
+  offers sRGB formats needs a non-sRGB view format. `Renderer::new` panics on
+  an sRGB format, so pick a non-sRGB surface format or list a non-sRGB entry in
+  the surface's `view_formats` and render to that view.
 * Uploads: instance rows that were rebuilt, and atlas rectangles written since
   the last sync (adjacent ones merged). The instance buffer is recreated only
   when the grid grew; the atlas texture is never reallocated.
@@ -195,11 +243,24 @@ To verify by hand with VoiceOver/NVDA once a window exists.
 Winit `Window::set_ime_allowed(true)` while the terminal has focus. The IME
 candidate window is placed with `set_ime_cursor_area(position, size)` using the
 physical-pixel rectangle `geometry::cursor_rect(layout, row, col, cols, shape)`
-(for placement use the Block rect even for bar/underline cursors, and refresh
-it whenever the cursor moves). `Ime::Preedit(text, range)` is drawn inline at
-the cursor as an underlined overlay and is never sent to the PTY; only
+plus `QuadBuilder::origin()` (for placement use the Block rect even for
+bar/underline cursors, and refresh it whenever the cursor moves).
+`Ime::Preedit(text, range)` is drawn inline at the cursor as an underlined
+overlay and is never sent to the PTY; only
 `Ime::Commit(text)` is, as UTF-8 (wrapped in bracketed-paste markers only if the
 program enabled them and the text is multi-line).
+
+The preedit is drawn without rebuilding the frame:
+`QuadBuilder::set_overlay(Some(Overlay { row, col, cells, style }), &mut engine)`
+fills a fixed region of `OVERLAY_INSTANCES` after the grid in the instance
+buffer (background, glyphs shaped as one run, underline; cells past the right
+edge are dropped) and returns the one `InstanceRange` for `Renderer::sync` to
+write, so a keystroke in a composition touches no row. `set_overlay(None, ..)`
+blanks it. A full build (origin, atlas epoch, theme or layout change) redraws
+the overlay and lists its upload in that build's report; a grid resize drops
+it, so set it again after the resize. If shaping the preedit moves the atlas
+epoch, the next `build` is full, as for any epoch change. Not yet exercised on a
+real GPU: the unit test checks the instances, not the pixels.
 
 ### Key encoding
 
@@ -249,10 +310,37 @@ Reported only when `modes.mouse != Off`, in `modes.mouse_encoding`:
 `FontBook::choose(ch, style)`: the primary family's face for the style if it has
 the glyph; otherwise the best covering face among all loaded ones (matching
 weight and slant first, then monospaced). Results are cached per
-(char, style). When no face has the character the primary face's missing-glyph
+(char, style). Which face has which character comes from a per-face coverage
+index (sorted codepoint ranges read from the `cmap` once, binary search per
+lookup, checked against the font parser's own `glyph_index`), so a lookup never
+parses a font. `FontBook::index_fallbacks` builds the index for every face; call
+it at startup off the frame path (the book is plain data and `Send`, so it can
+move to a worker thread and back), otherwise each face is indexed lazily the
+first time a character is missing from the primary font. Opening a fallback
+face the first time (mapping and parsing it) still happens on whichever thread
+first draws a character from it; resolving the characters of new output ahead
+of the frame (`choose` on a worker, results cached) is the integration
+point if that ever shows up in a frame time. When no face has the character the primary face's missing-glyph
 box is drawn. Emoji use colour bitmap (CBDT/sbix) or colour outline (COLR)
-strikes and are area-resampled to the cell height. Bold and italic missing from
+strikes and are area-resampled to fit within two cells (cell height, twice the
+cell width). Bold and italic missing from
 a face are synthesised (embolden, 14 degree skew).
+
+## What CI can run (probe results)
+
+`tests/gpu_probe.rs` enumerates every backend on each runner:
+
+* ubuntu-latest: no adapter (Vulkan and GL libraries cannot be loaded). A CI
+  change outside this crate could add `libvulkan1` and `mesa-vulkan-drivers`
+  (lavapipe software Vulkan) to the Terminal crates job; this is untested.
+* macos-15: Metal, "Apple Paravirtual device", device opens.
+* windows-2022: DX12, "Microsoft Basic Render Driver" (WARP, software), device
+  opens.
+
+The golden test renders on the GPU where one exists and is skipped (and says so
+in the log) where none does. In every run so far the GPU golden ran on macOS
+(Metal, max difference 0) and Windows (WARP, max difference 1) and was skipped on
+Linux. The CPU reference and the WGSL validation run everywhere.
 
 ## What is not proven here
 
@@ -265,6 +353,12 @@ a face are synthesised (embolden, 14 degree skew).
   shader is validated by naga and its maths by the CPU reference, not executed.
 * IME, VoiceOver/NVDA and key/mouse encoding: design only.
 * Right-to-left text (shaping is forced left-to-right).
+* The cost of `FontBook::index_fallbacks` and of the first fallback lookup on a
+  real system font set (hundreds of faces): not measured.
+* Emoji width and presentation: a colour glyph is scaled to fit two cells and
+  variation selector 16 is not looked at; the cell width comes from the frame.
+* Ligatures are not broken under the cursor (only switched off as a whole with
+  `TextEngine::set_ligatures`).
 
 ## Hand test list once a window exists
 

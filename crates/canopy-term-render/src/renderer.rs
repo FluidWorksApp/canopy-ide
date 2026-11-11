@@ -61,6 +61,12 @@ impl Renderer {
         format: wgpu::TextureFormat,
         atlas_size: (u32, u32),
     ) -> Self {
+        assert!(
+            !format.is_srgb(),
+            "the shader writes sRGB-encoded bytes as they are: use a non-sRGB \
+             target format (on a window surface, pick a non-sRGB format or add \
+             a non-sRGB view format), got {format:?}"
+        );
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("term shader"),
             source: wgpu::ShaderSource::Wgsl(SHADER_SOURCE.into()),

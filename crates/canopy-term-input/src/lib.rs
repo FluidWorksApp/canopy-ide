@@ -5,7 +5,9 @@
 //! [`Modes`](canopy_term_core::frame::Modes) by value (it is `Copy`, taken
 //! from the latest frame) and **appends** to a caller-owned `Vec<u8>`: keep
 //! one buffer, clear it between writes, and the hot path does not allocate
-//! once it has grown. Each encoder returns `true` if it wrote anything.
+//! once it has grown. Each encoder returns `true` if it wrote anything
+//! ([`encode_paste`] returns a [`PasteResult`] that also says whether control
+//! characters were removed).
 //!
 //! ```
 //! use canopy_term_input::{encode_key, Key, KeyEvent, Mods, Modes};
@@ -48,4 +50,6 @@ pub use mods::Mods;
 pub use mouse::{
     encode_mouse, MouseButton, MouseEvent, MouseEventKind, LEGACY_COORD_LIMIT, UTF8_COORD_LIMIT,
 };
-pub use paste::{encode_focus, encode_paste, encode_text, PASTE_END, PASTE_START};
+pub use paste::{
+    encode_focus, encode_paste, encode_paste_with, encode_text, PasteResult, PASTE_END, PASTE_START,
+};

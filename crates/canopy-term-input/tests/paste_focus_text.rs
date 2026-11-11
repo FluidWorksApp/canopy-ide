@@ -1,5 +1,6 @@
-//! Paste, focus, text, and a property test that a bracketed paste can never
-//! close its own bracket.
+//! Paste, focus, text, and property tests that a bracketed paste can never
+//! close its own bracket and that no paste carries a control character other
+//! than Tab, LF and CR.
 
 mod common;
 
@@ -13,15 +14,26 @@ fn bracketed() -> Modes {
     }
 }
 
-fn paste(text: &str, m: Modes) -> Vec<u8> {
+fn paste_full(text: &str, m: Modes) -> (Vec<u8>, PasteResult) {
     let mut out = Vec::new();
-    let wrote = encode_paste(text, m, &mut out);
-    assert_eq!(wrote, !out.is_empty());
-    out
+    let r = encode_paste(text, m, &mut out);
+    assert_eq!(r.written, !out.is_empty());
+    (out, r)
+}
+
+fn paste(text: &str, m: Modes) -> Vec<u8> {
+    paste_full(text, m).0
 }
 
 fn contains(hay: &[u8], needle: &[u8]) -> bool {
     hay.windows(needle.len()).any(|w| w == needle)
+}
+
+/// The removal rule, written independently of the crate: every control
+/// character except Tab, LF and CR.
+fn removed(c: char) -> bool {
+    let n = c as u32;
+    (n < 0x20 && !matches!(c, '\t' | '\n' | '\r')) || (0x7f..=0x9f).contains(&n)
 }
 
 #[test]
@@ -33,53 +45,98 @@ fn bracketed_paste_wraps_and_keeps_newlines() {
     );
     assert_eq!(paste("", bracketed()), b"\x1b[200~\x1b[201~");
     assert_eq!(
-        paste("héllo 😀", bracketed()),
-        "\x1b[200~héllo 😀\x1b[201~".as_bytes()
+        paste("héllo 😀\tx", bracketed()),
+        "\x1b[200~héllo 😀\tx\x1b[201~".as_bytes()
+    );
+    let (_, r) = paste_full("a\nb\tc", bracketed());
+    assert_eq!(
+        r,
+        PasteResult {
+            written: true,
+            removed_controls: false
+        }
     );
 }
 
 #[test]
-fn bracketed_paste_strips_escapes_and_c1() {
-    let cases: &[(&str, &str)] = &[
-        ("\x1b[201~rm -rf ~\n", "[201~rm -rf ~\n"),
-        ("a\x1bb", "ab"),
-        ("\x1b\x1b\x1b", ""),
+fn bracketed_paste_strips_controls() {
+    // (input, inner text, controls removed)
+    let cases: &[(&str, &str, bool)] = &[
+        ("\x1b[201~rm -rf ~\n", "[201~rm -rf ~\n", true),
+        ("a\x1bb", "ab", true),
+        ("\x1b\x1b\x1b", "", true),
         // Removing only the marker would splice a new one; removing ESC cannot.
-        ("\x1b[20\x1b[201~1~", "[20[201~1~"),
+        ("\x1b[20\x1b[201~1~", "[20[201~1~", true),
         // 8-bit CSI (U+009B) and the rest of C1.
-        ("\u{9b}201~", "201~"),
-        ("x\u{80}y\u{9f}z", "xyz"),
-        // Neighbours of C1 in UTF-8 survive.
-        ("\u{a0}\u{7f}\u{100}", "\u{a0}\u{7f}\u{100}"),
-        // Other C0 controls are the program's business inside the bracket.
-        ("\t\x03\x08", "\t\x03\x08"),
+        ("\u{9b}201~", "201~", true),
+        ("x\u{80}y\u{9f}z", "xyz", true),
+        // C0 other than Tab/LF/CR: ^C would raise SIGINT mid-bracket under ISIG.
+        ("\t\x03\x08", "\t", true),
+        ("a\x00b\x07c\x1fd", "abcd", true),
+        // DEL is a control too.
+        ("\u{a0}\u{7f}\u{100}", "\u{a0}\u{100}", true),
+        // Tab, LF and CR are kept; neighbours of C1 in UTF-8 survive.
+        ("\t\n\r\u{a0}\u{7e}", "\t\n\r\u{a0}\u{7e}", false),
     ];
-    for &(input, inner) in cases {
+    for &(input, inner, flag) in cases {
         let want = format!("\x1b[200~{inner}\x1b[201~");
-        assert_eq!(
-            show(&paste(input, bracketed())),
-            show(want.as_bytes()),
-            "{input:?}"
-        );
+        let (out, r) = paste_full(input, bracketed());
+        assert_eq!(show(&out), show(want.as_bytes()), "{input:?}");
+        assert_eq!(r.removed_controls, flag, "{input:?}");
+        assert!(r.written);
     }
 }
 
 #[test]
-fn unbracketed_paste_sends_newlines_as_cr() {
+fn unbracketed_paste_strips_controls_then_sends_newlines_as_cr() {
     let m = Modes::default();
-    assert_eq!(paste("a\nb", m), b"a\rb");
-    assert_eq!(paste("a\r\nb", m), b"a\rb");
-    assert_eq!(paste("a\n\nb\r\n", m), b"a\r\rb\r");
-    assert_eq!(paste("a\rb", m), b"a\rb");
-    assert_eq!(paste("\r\r\n", m), b"\r\r");
-    assert_eq!(paste("plain", m), b"plain");
-    assert!(paste("", m).is_empty());
+    // (input, output, controls removed)
+    let cases: &[(&str, &[u8], bool)] = &[
+        ("a\nb", b"a\rb", false),
+        ("a\r\nb", b"a\rb", false),
+        ("a\n\nb\r\n", b"a\r\rb\r", false),
+        ("a\rb", b"a\rb", false),
+        ("\r\r\n", b"\r\r", false),
+        ("plain\t", b"plain\t", false),
+        // Pasting into vim insert mode must not run a command.
+        ("x\x1b:!cmd\ry", b"x:!cmd\ry", true),
+        ("\x03\x04\x1a", b"", true),
+        ("a\u{9b}201~", b"a201~", true),
+        ("a\x7fb", b"ab", true),
+        // Strip first, then convert: CR, removed control, LF is one CR.
+        ("\r\x1b\n", b"\r", true),
+        ("\r\x00\x00\nz", b"\rz", true),
+    ];
+    for &(input, want, flag) in cases {
+        let (out, r) = paste_full(input, m);
+        assert_eq!(show(&out), show(want), "{input:?}");
+        assert_eq!(r.removed_controls, flag, "{input:?}");
+    }
+    let (out, r) = paste_full("", m);
+    assert!(out.is_empty());
+    assert_eq!(r, PasteResult::default());
+}
+
+#[test]
+fn stripping_can_be_switched_off() {
+    let mut out = Vec::new();
+    let r = encode_paste_with("a\x1bb\n", Modes::default(), false, &mut out);
+    assert_eq!(out, b"a\x1bb\r");
+    assert!(r.written && !r.removed_controls);
+    out.clear();
+    let r = encode_paste_with("a\x1bb\n", bracketed(), false, &mut out);
+    assert_eq!(out, b"\x1b[200~a\x1bb\n\x1b[201~");
+    assert!(!r.removed_controls);
+    out.clear();
+    encode_paste_with("a\x1bb", bracketed(), true, &mut out);
+    assert_eq!(out, b"\x1b[200~ab\x1b[201~");
 }
 
 #[test]
 fn paste_appends() {
     let mut out = b"x".to_vec();
-    assert!(encode_paste("y", bracketed(), &mut out));
+    let r = encode_paste("y", bracketed(), &mut out);
+    assert!(r.written && !r.removed_controls);
     assert_eq!(out, b"x\x1b[200~y\x1b[201~");
 }
 
@@ -101,8 +158,8 @@ impl Rng {
     }
 }
 
-/// Random text biased toward bracket-marker fragments, so splices and nested
-/// markers actually occur.
+/// Random text biased toward bracket-marker fragments, controls and CR/LF
+/// pairs, so splices, nested markers and split CRLFs actually occur.
 fn random_paste(rng: &mut Rng) -> String {
     const FRAGMENTS: &[&str] = &[
         "\x1b",
@@ -124,7 +181,12 @@ fn random_paste(rng: &mut Rng) -> String {
         "\u{85}",
         "\u{c2}",
         "\n",
+        "\r",
         "\r\n",
+        "\t",
+        "\x03",
+        "\x7f",
+        "\x00",
         "a",
         "é",
         "😀",
@@ -155,21 +217,19 @@ fn property_bracketed_paste_never_closes_early() {
     let mut rng = Rng(0x9E37_79B9_7F4A_7C15);
     for i in 0..20_000 {
         let input = random_paste(&mut rng);
-        let out = paste(&input, bracketed());
+        let (out, r) = paste_full(&input, bracketed());
         assert!(out.starts_with(PASTE_START), "case {i}");
         assert!(out.ends_with(PASTE_END), "case {i}");
         let inner = &out[PASTE_START.len()..out.len() - PASTE_END.len()];
         assert!(!contains(inner, PASTE_END), "case {i}: {input:?}");
         assert!(!inner.contains(&0x1b), "case {i}: {input:?}");
-        // Still valid UTF-8 with no C1 controls (no 8-bit CSI).
+        // Still valid UTF-8 with no control but Tab, LF and CR.
         let inner = std::str::from_utf8(inner).expect("valid UTF-8");
-        assert!(!inner.chars().any(|c| ('\u{80}'..='\u{9f}').contains(&c)));
-        // Exactly the input minus ESC and C1, nothing else lost.
-        let expected: String = input
-            .chars()
-            .filter(|&c| c != '\x1b' && !('\u{80}'..='\u{9f}').contains(&c))
-            .collect();
+        assert!(!inner.chars().any(removed), "case {i}: {input:?}");
+        // Exactly the input minus the removed controls, nothing else lost.
+        let expected: String = input.chars().filter(|&c| !removed(c)).collect();
         assert_eq!(inner, expected, "case {i}");
+        assert_eq!(r.removed_controls, input.chars().any(removed), "case {i}");
         // The end marker appears exactly once in the whole output.
         let ends = out
             .windows(PASTE_END.len())
@@ -180,14 +240,22 @@ fn property_bracketed_paste_never_closes_early() {
 }
 
 #[test]
-fn property_unbracketed_paste_has_no_line_feeds() {
+fn property_unbracketed_paste_has_no_line_feeds_or_controls() {
     let mut rng = Rng(0x0123_4567_89AB_CDEF);
     for i in 0..5_000 {
         let input = random_paste(&mut rng);
-        let out = paste(&input, Modes::default());
+        let (out, r) = paste_full(&input, Modes::default());
         assert!(!out.contains(&b'\n'), "case {i}: {input:?}");
-        let expected = input.replace("\r\n", "\r").replace('\n', "\r");
-        assert_eq!(out, expected.into_bytes(), "case {i}");
+        let text = std::str::from_utf8(&out).expect("valid UTF-8");
+        assert!(
+            !text.chars().any(|c| removed(c) || c == '\n'),
+            "case {i}: {input:?}"
+        );
+        // Oracle: strip, then CRLF -> CR, then LF -> CR.
+        let stripped: String = input.chars().filter(|&c| !removed(c)).collect();
+        let expected = stripped.replace("\r\n", "\r").replace('\n', "\r");
+        assert_eq!(text, expected, "case {i}: {input:?}");
+        assert_eq!(r.removed_controls, input.chars().any(removed), "case {i}");
     }
 }
 

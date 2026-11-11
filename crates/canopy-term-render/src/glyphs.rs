@@ -45,6 +45,13 @@ pub trait GlyphSource {
     /// overwritten. A cache of built instances is stale after a change.
     fn epoch(&self) -> u64;
 
+    /// True (once, then reset) when a glyph could not be placed because the
+    /// atlas was full even after a clear this frame. Those glyphs were left
+    /// blank, never drawn wrong; the window layer should build a bigger atlas.
+    fn overflowed(&mut self) -> bool {
+        false
+    }
+
     /// A code-drawn glyph (box drawing, blocks, Powerline) covering exactly one
     /// cell: its bitmap is `cell width x cell height` and is drawn at the cell
     /// origin.

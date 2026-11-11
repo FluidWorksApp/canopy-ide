@@ -119,6 +119,12 @@ impl<K: Hash + Eq + Copy> Atlas<K> {
         }
     }
 
+    /// Whether a `w x h` bitmap could ever be placed, even in an empty atlas.
+    /// The pinned first shelf (the white block) is not available to it.
+    pub fn can_ever_fit(&self, w: u16, h: u16) -> bool {
+        w > 0 && h > 0 && w <= self.width && h <= self.height.saturating_sub(4)
+    }
+
     /// Starts a frame. Glyphs used from now on are protected from eviction
     /// until the next call.
     pub fn begin_frame(&mut self) {
@@ -294,6 +300,16 @@ impl<K: Hash + Eq + Copy> Atlas<K> {
     }
 }
 
+/// Side length (a power of two, at least 512) of a square atlas that holds the
+/// distinct glyphs of a busy screen. Budget: 4096 glyph cells (ASCII in a few
+/// styles plus a screenful of CJK or symbols) with 25% packing waste, capped by
+/// the device's `max_texture_dimension_2d` and by `u16`.
+pub fn atlas_size_for(cell_w: u32, cell_h: u32, max_texture_dimension: u32) -> u16 {
+    let area = 4096.0 * cell_w.max(1) as f64 * cell_h.max(1) as f64 * 1.25;
+    let side = (area.sqrt().ceil() as u32).next_power_of_two().max(512);
+    side.min(max_texture_dimension.max(4)).min(16384) as u16
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -409,6 +425,23 @@ mod tests {
         let e1 = a.epoch();
         a.clear();
         assert!(a.epoch() > e1);
+    }
+
+    #[test]
+    fn can_ever_fit_accounts_for_the_pinned_shelf() {
+        let a: Atlas<u32> = Atlas::new(32, 32);
+        assert!(a.can_ever_fit(32, 28));
+        assert!(!a.can_ever_fit(33, 4));
+        assert!(!a.can_ever_fit(8, 29));
+        assert!(!a.can_ever_fit(0, 4));
+    }
+
+    #[test]
+    fn atlas_size_grows_with_the_cell_and_respects_the_device_limit() {
+        assert_eq!(atlas_size_for(8, 18, 16384), 1024);
+        assert_eq!(atlas_size_for(16, 36, 16384), 2048);
+        assert_eq!(atlas_size_for(16, 36, 1024), 1024, "capped by the device");
+        assert_eq!(atlas_size_for(2, 4, 16384), 512, "never below 512");
     }
 
     #[test]

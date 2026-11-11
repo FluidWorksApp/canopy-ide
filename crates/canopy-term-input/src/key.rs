@@ -27,10 +27,26 @@
 //! * Application keypad (DECKPAM) uses the VT220 table (`SS3 p`..`SS3 y` for
 //!   digits) and only applies to unmodified keypad keys; a modified keypad key
 //!   is sent as its numeric-mode character.
-//! * Kitty flags `0b100` (alternates) and `0b10000` (associated text) on their
-//!   own change nothing, as the spec says: alternates only decorate keys that
-//!   other flags already escape, and associated text is undefined without
-//!   `0b1000`.
+//! * Without kitty `0b1` (disambiguate) or `0b1000` (report all keys), a key
+//!   **press** is sent exactly as legacy would send it, DECCKM and DECKPAM
+//!   included; `0b10` only adds repeat and release reports and `0b100` only
+//!   decorates keys that are escaped anyway (spec "Report alternate keys":
+//!   "only key events represented as escape codes due to the other
+//!   enhancements in effect will be affected"). Associated text (`0b10000`) is
+//!   undefined without `0b1000`. A press legacy cannot express (Super+A, media
+//!   keys) falls back to `CSI u`.
+//! * Under `0b1` or `0b1000` DECCKM and DECKPAM do not apply: the spec's SS3
+//!   forms are in "Legacy key event encoding", while "Disambiguate escape
+//!   codes" says every non-text key is `CSI number; modifier u` or
+//!   `CSI 1; modifier [~ABCDEFHPQS]`, and keypad keys get their own numbers.
+//! * Kitty: lock bits are not reported for `Char` keys unless `0b1000` is set
+//!   (spec "Disambiguate escape codes": "the Lock modifiers are not reported
+//!   for text producing keys").
+//! * A `Char` holding a control character is mapped to the named key (`\r`
+//!   and `\n` Enter, `\t` Tab, ESC Escape, DEL and BS Backspace); any other
+//!   control character sends nothing.
+//! * Legacy Ctrl on a non-ASCII key uses its ASCII `base_layout_key`, so
+//!   Ctrl+С on a Cyrillic layout sends `0x03`.
 //! * Kitty: a key that produces text is sent as that text and its release is
 //!   not reported unless `0b1000` is set (spec "Event types", note). Enter,
 //!   Tab and Backspace have no release events without `0b1000`.
@@ -291,11 +307,26 @@ impl<'a> KeyEvent<'a> {
 /// Never clears `out` and never allocates except to grow it.
 pub fn encode_key(ev: &KeyEvent<'_>, modes: Modes, out: &mut Vec<u8>) -> bool {
     let start = out.len();
+    let normalized;
+    let ev = match ev.key {
+        Key::Char(c) if c.is_control() => {
+            let key = match c {
+                '\r' | '\n' => Key::Enter,
+                '\t' => Key::Tab,
+                '\x1b' => Key::Escape,
+                '\x7f' | '\x08' => Key::Backspace,
+                _ => return false,
+            };
+            normalized = KeyEvent { key, ..*ev };
+            &normalized
+        }
+        _ => ev,
+    };
     let flags = modes.kitty_keyboard & kitty_flags::ALL;
     if flags & (DISAMBIGUATE | REPORT_EVENT_TYPES | REPORT_ALL_KEYS) == 0 {
         legacy(ev, modes, out);
     } else {
-        kitty(ev, flags, out);
+        kitty(ev, flags, modes, out);
     }
     out.len() != start
 }
@@ -808,12 +839,25 @@ impl KittySeq<'_> {
     }
 }
 
-fn kitty(ev: &KeyEvent<'_>, flags: u8, out: &mut Vec<u8>) {
+fn kitty(ev: &KeyEvent<'_>, flags: u8, modes: Modes, out: &mut Vec<u8>) {
     let disambiguate = flags & DISAMBIGUATE != 0;
     let events = flags & REPORT_EVENT_TYPES != 0;
     let all_keys = flags & REPORT_ALL_KEYS != 0;
     let alternates = flags & REPORT_ALTERNATES != 0;
     let embed_text = all_keys && flags & REPORT_TEXT != 0;
+
+    // Without disambiguation or report-all, a press is exactly the legacy
+    // bytes: event types add releases and repeats, and alternates only
+    // decorate keys some other flag escapes. This is decided before anything
+    // else so neither flag can change whether a press is escaped.
+    if !disambiguate && !all_keys && ev.kind == KeyEventKind::Press {
+        let start = out.len();
+        legacy(ev, modes, out);
+        if out.len() != start {
+            return;
+        }
+        // Nothing in legacy (Super+A, media keys, F25+): fall through to CSI u.
+    }
 
     let kind = match ev.kind {
         KeyEventKind::Release if !events => return,
@@ -843,7 +887,12 @@ fn kitty(ev: &KeyEvent<'_>, flags: u8, out: &mut Vec<u8>) {
         Key::Keypad(k) if !disambiguate && !all_keys => keypad_as_main(k),
         k => k,
     };
-    let legacy_press = !disambiguate && !all_keys && kind == KeyEventKind::Press;
+    // "The Lock modifiers are not reported for text producing keys" unless
+    // report-all is on (spec "Disambiguate escape codes").
+    let mods = match key {
+        Key::Char(_) if !all_keys => mods.difference(Mods::LOCKS),
+        _ => mods,
+    };
 
     let mut shifted = None;
     let mut base = None;
@@ -857,34 +906,16 @@ fn kitty(ev: &KeyEvent<'_>, flags: u8, out: &mut Vec<u8>) {
         }
     }
 
-    match key {
-        Key::Enter | Key::Tab | Key::Backspace if !all_keys => {
-            if kind == KeyEventKind::Release {
-                return;
-            }
-            if no_locks.is_empty() || !disambiguate {
-                legacy_functional(key, no_locks, false, out);
-                return;
-            }
+    if matches!(key, Key::Enter | Key::Tab | Key::Backspace) && !all_keys {
+        // No release events for these without report-all (spec "Report event
+        // types", note), and unmodified they keep their legacy bytes.
+        if kind == KeyEventKind::Release {
+            return;
         }
-        Key::Escape if legacy_press => {
+        if no_locks.is_empty() || !disambiguate {
             legacy_functional(key, no_locks, false, out);
             return;
         }
-        Key::Char(c) if legacy_press && shifted.is_none() && base.is_none() => {
-            let given = given_text(ev);
-            if legacy_char(
-                unshifted(c),
-                given,
-                ev.shifted_key,
-                ev.base_layout_key,
-                no_locks,
-                out,
-            ) {
-                return;
-            }
-        }
-        _ => {}
     }
 
     let Some((code, final_byte)) = kitty_code(key) else {

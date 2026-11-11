@@ -33,6 +33,29 @@ use crate::procedural;
 /// row capacity are dropped, never overrun into the next row.
 pub const INSTANCES_PER_COL: usize = 6;
 
+/// Instances reserved after the grid for the overlay (IME preedit): a
+/// background, up to this minus two glyphs, and an underline.
+pub const OVERLAY_INSTANCES: usize = 256;
+
+/// Text drawn over the grid without being in the frame, for example an IME
+/// preedit. Setting or clearing it rewrites only the overlay region.
+#[derive(Clone, Copy, Debug)]
+pub struct Overlay<'a> {
+    pub row: u16,
+    pub col: u16,
+    /// Cells as for `GlyphSource::shape_run`; cells past the right edge of the
+    /// grid are dropped.
+    pub cells: &'a [TextCell<'a>],
+    pub style: FontStyle,
+}
+
+struct OverlayState {
+    row: u16,
+    col: u16,
+    cells: Vec<(String, u8)>,
+    style: FontStyle,
+}
+
 /// What changes how a frame looks without being in the frame.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct RenderState {
@@ -73,6 +96,11 @@ pub struct BuildReport {
     pub uploads: Vec<InstanceRange>,
     /// Visible (non-degenerate) instances written for the rebuilt rows.
     pub quads: usize,
+    /// The glyph atlas was too small for this screen: some glyphs were left
+    /// blank (never drawn wrong). The window layer should build a larger atlas
+    /// (`atlas::atlas_size_for`). If the atlas also kept changing under the
+    /// build, the next build is full.
+    pub atlas_overflow: bool,
 }
 
 impl BuildReport {
@@ -109,6 +137,9 @@ struct Scratch {
     /// (start, end, cols, col) per cell of the current run.
     ranges: Vec<(usize, usize, u8, u16)>,
     placed: Vec<PlacedGlyph>,
+    /// Cursor parts, appended after the row is truncated so a crowded row
+    /// loses glyphs before it loses its cursor.
+    cursor: Vec<Instance>,
 }
 
 pub struct QuadBuilder {
@@ -124,6 +155,12 @@ pub struct QuadBuilder {
     prev_selection: Option<Selection>,
     epoch: u64,
     scratch: Scratch,
+    /// Reused every build so a quiet frame allocates nothing.
+    dirty: Vec<bool>,
+    /// Surface pixel position of the grid's top-left corner.
+    origin: (u32, u32),
+    overlay: Option<OverlayState>,
+    overlay_used: usize,
 }
 
 impl QuadBuilder {
@@ -141,6 +178,10 @@ impl QuadBuilder {
             prev_selection: None,
             epoch: 0,
             scratch: Scratch::default(),
+            dirty: Vec::new(),
+            origin: (0, 0),
+            overlay: None,
+            overlay_used: 0,
         }
     }
 
@@ -156,6 +197,23 @@ impl QuadBuilder {
             self.theme = theme;
             self.needs_full = true;
         }
+    }
+
+    /// Where the grid's top-left corner sits on the surface, in physical
+    /// pixels (padding, or a viewport inside a larger window). Everything the
+    /// builder emits is shifted by it; the area outside the grid shows the
+    /// render clear colour. Changing it rebuilds every row. Positions from
+    /// `geometry` (for example `cursor_rect` for IME placement) are relative
+    /// to the grid: add the origin.
+    pub fn set_origin(&mut self, x: u32, y: u32) {
+        if (x, y) != self.origin {
+            self.origin = (x, y);
+            self.needs_full = true;
+        }
+    }
+
+    pub fn origin(&self) -> (u32, u32) {
+        self.origin
     }
 
     pub fn layout(&self) -> &CellLayout {
@@ -181,6 +239,112 @@ impl QuadBuilder {
         self.last_seq
     }
 
+    fn grid_len(&self) -> usize {
+        self.cols as usize * self.rows as usize * INSTANCES_PER_COL
+    }
+
+    /// Draws `overlay` (or removes the current one) over the grid and returns
+    /// the one range of `instances()` to upload, if anything changed. No row is
+    /// rebuilt and the frame is not touched, so a preedit that changes on every
+    /// keystroke costs one small write. Call after a `build` has sized the grid
+    /// (before that it does nothing); a resize drops the overlay. The next
+    /// full build redraws it (origin or atlas changes move it), and its
+    /// upload is in that build's report.
+    pub fn set_overlay(
+        &mut self,
+        overlay: Option<Overlay<'_>>,
+        glyphs: &mut dyn GlyphSource,
+    ) -> Option<InstanceRange> {
+        if self.instances.len() <= self.grid_len() {
+            return None;
+        }
+        self.overlay = overlay
+            .filter(|o| o.row < self.rows && o.col < self.cols)
+            .map(|o| OverlayState {
+                row: o.row,
+                col: o.col,
+                cells: o
+                    .cells
+                    .iter()
+                    .map(|c| (c.text.to_owned(), c.cols))
+                    .collect(),
+                style: o.style,
+            });
+        self.emit_overlay(glyphs)
+    }
+
+    fn emit_overlay(&mut self, glyphs: &mut dyn GlyphSource) -> Option<InstanceRange> {
+        let grid = self.grid_len();
+        let prev = self.overlay_used;
+        let mut out: Vec<Instance> = Vec::new();
+        if let Some(o) = self.overlay.take() {
+            let avail = self.cols - o.col;
+            let (mut kept, mut span) = (0usize, 0u16);
+            for (_, w) in &o.cells {
+                if span + *w as u16 > avail {
+                    break;
+                }
+                span += *w as u16;
+                kept += 1;
+            }
+            if kept > 0 {
+                let cells: Vec<TextCell<'_>> = o.cells[..kept]
+                    .iter()
+                    .map(|(t, w)| TextCell {
+                        text: t.as_str(),
+                        cols: *w,
+                    })
+                    .collect();
+                let mut starts = Vec::with_capacity(kept);
+                let mut c = o.col;
+                for (_, w) in &o.cells[..kept] {
+                    starts.push(c);
+                    c += *w as u16;
+                }
+                let span_rect = cell_rect(&self.layout, o.row, o.col, span);
+                out.push(Instance::solid(span_rect, self.theme.bg));
+                let mut placed = Vec::new();
+                glyphs.shape_run(o.style, &cells, &mut placed);
+                for g in placed.iter().take(OVERLAY_INSTANCES - 2) {
+                    let Some(&gcol) = starts.get(g.cell as usize) else {
+                        continue;
+                    };
+                    let origin = cell_rect(&self.layout, o.row, gcol, 1);
+                    let x = origin.x + g.left;
+                    let y = origin.y + self.layout.baseline as i32 - g.top;
+                    if let Some(i) =
+                        Instance::glyph(g.rect, x, y, self.theme.fg, g.color, span_rect)
+                    {
+                        out.push(i);
+                    }
+                }
+                out.push(Instance::solid(
+                    underline_rect(&self.layout, o.row, o.col, span),
+                    self.theme.fg,
+                ));
+                if self.origin != (0, 0) {
+                    let (ox, oy) = (self.origin.0 as f32, self.origin.1 as f32);
+                    for i in out.iter_mut().filter(|i| !i.is_empty()) {
+                        i.pos[0] += ox;
+                        i.pos[1] += oy;
+                    }
+                }
+            }
+            self.overlay = Some(o);
+        }
+        let used = out.len();
+        self.instances[grid..grid + used].copy_from_slice(&out);
+        let written = used.max(prev);
+        for slot in &mut self.instances[grid + used..grid + written] {
+            *slot = Instance::EMPTY;
+        }
+        self.overlay_used = used;
+        (written > 0).then_some(InstanceRange {
+            start: grid,
+            len: written,
+        })
+    }
+
     fn row_capacity(&self) -> usize {
         self.cols as usize * INSTANCES_PER_COL
     }
@@ -188,8 +352,10 @@ impl QuadBuilder {
     fn resize(&mut self, cols: u16, rows: u16) {
         self.cols = cols;
         self.rows = rows;
-        let total = cols as usize * rows as usize * INSTANCES_PER_COL;
+        let total = cols as usize * rows as usize * INSTANCES_PER_COL + OVERLAY_INSTANCES;
         self.instances = vec![Instance::EMPTY; total];
+        self.overlay = None;
+        self.overlay_used = 0;
         self.row_used = vec![0; rows as usize];
         self.prev_cursor = None;
         self.prev_selection = None;
@@ -237,7 +403,9 @@ impl QuadBuilder {
             self.resize(frame.cols, frame.rows);
         }
         let cursor = self.cursor_snap(frame, state);
-        let mut dirty = vec![false; frame.rows as usize];
+        let mut dirty = std::mem::take(&mut self.dirty);
+        dirty.clear();
+        dirty.resize(frame.rows as usize, false);
 
         let mut full = self.needs_full
             || resized
@@ -269,7 +437,8 @@ impl QuadBuilder {
         }
 
         let mut report = BuildReport::default();
-        for attempt in 0..2 {
+        let mut settled = false;
+        for _ in 0..3 {
             let epoch_before = glyphs.epoch();
             let rows: Vec<u16> = if full {
                 (0..frame.rows).collect()
@@ -279,19 +448,35 @@ impl QuadBuilder {
             report = BuildReport {
                 held: false,
                 full,
-                rows: rows.clone(),
+                rows,
                 uploads: Vec::new(),
                 quads: 0,
+                atlas_overflow: false,
             };
+            let rows = std::mem::take(&mut report.rows);
             for &row in &rows {
                 self.build_row(frame, row, state, cursor, glyphs, &mut report);
             }
-            if glyphs.epoch() == epoch_before || attempt == 1 {
+            report.rows = rows;
+            if glyphs.epoch() == epoch_before {
+                settled = true;
                 break;
             }
             // The atlas overwrote glyphs while building: rows built earlier in
             // this pass may point at stale texels, so build everything again.
             full = true;
+        }
+        if report.full && self.overlay.is_some() {
+            // A full build moved or invalidated what the overlay points at.
+            let before = glyphs.epoch();
+            report.uploads.extend(self.emit_overlay(glyphs));
+            if glyphs.epoch() != before {
+                settled = false;
+            }
+        }
+        let overflowed = glyphs.overflowed();
+        if !settled || overflowed {
+            report.atlas_overflow = true;
         }
         if resized && !self.instances.is_empty() {
             // The renderer may keep a larger buffer from before; unwritten slots
@@ -303,9 +488,14 @@ impl QuadBuilder {
         }
         self.epoch = glyphs.epoch();
         self.last_seq = Some(frame.seq);
-        self.needs_full = false;
+        // If the atlas never settled, rows may still point at overwritten
+        // texels: rebuild everything next time rather than trust them. A
+        // settled build that overflowed is valid (blank glyphs, correct
+        // rects), so it is not rebuilt, or a full screen would thrash.
+        self.needs_full = !settled;
         self.prev_cursor = cursor;
         self.prev_selection = state.selection;
+        self.dirty = dirty;
         report
     }
 
@@ -347,6 +537,7 @@ impl QuadBuilder {
         let cap = self.row_capacity();
         let mut scratch = std::mem::take(&mut self.scratch);
         scratch.out.clear();
+        scratch.cursor.clear();
         emit_row(
             &self.layout,
             &self.theme,
@@ -357,7 +548,20 @@ impl QuadBuilder {
             glyphs,
             &mut scratch,
         );
-        scratch.out.truncate(cap);
+        let keep = cap.saturating_sub(scratch.cursor.len());
+        scratch.out.truncate(keep);
+        let cursor_parts = std::mem::take(&mut scratch.cursor);
+        scratch
+            .out
+            .extend(cursor_parts.iter().copied().take(cap - scratch.out.len()));
+        scratch.cursor = cursor_parts;
+        if self.origin != (0, 0) {
+            let (ox, oy) = (self.origin.0 as f32, self.origin.1 as f32);
+            for i in scratch.out.iter_mut().filter(|i| !i.is_empty()) {
+                i.pos[0] += ox;
+                i.pos[1] += oy;
+            }
+        }
         let used = scratch.out.len();
         let prev_used = self.row_used[row as usize];
         let base = row as usize * cap;
@@ -589,7 +793,7 @@ fn emit_row(
     // 5. Cursor parts that are not a recoloured cell.
     if let Some(c) = cursor_here {
         if c.shape != CursorShape::Block {
-            s.out.push(Instance::solid(
+            s.cursor.push(Instance::solid(
                 cursor_rect(layout, row, c.col, c.cols, c.shape),
                 theme.cursor,
             ));
@@ -611,7 +815,7 @@ fn emit_row(
                 },
             ];
             for e in edges {
-                s.out.push(Instance::solid(e, theme.cursor));
+                s.cursor.push(Instance::solid(e, theme.cursor));
             }
         }
     }
@@ -644,6 +848,7 @@ mod tests {
         shape_calls: usize,
         frames: usize,
         big: bool,
+        overflow: bool,
     }
 
     impl GlyphSource for Stub {
@@ -652,6 +857,9 @@ mod tests {
         }
         fn epoch(&self) -> u64 {
             self.epoch
+        }
+        fn overflowed(&mut self) -> bool {
+            std::mem::take(&mut self.overflow)
         }
         fn procedural(&mut self, _ch: char) -> Option<Rect> {
             Some(Rect {
@@ -720,6 +928,78 @@ mod tests {
 
     fn builder() -> QuadBuilder {
         QuadBuilder::new(layout(), Theme::default())
+    }
+
+    #[test]
+    fn the_origin_shifts_every_quad_and_a_change_rebuilds_everything() {
+        let f = with_cursor(text_frame(&["ab", "cd"], 1), 1, 1, CursorShape::Bar);
+        let mut plain = builder();
+        plain.build(&f, &RenderState::default(), &mut Stub::default());
+        let mut shifted = builder();
+        shifted.set_origin(10, 20);
+        shifted.build(&f, &RenderState::default(), &mut Stub::default());
+        let mut seen = 0;
+        for (a, b) in plain.instances().iter().zip(shifted.instances()) {
+            if a.is_empty() {
+                assert!(b.is_empty());
+                continue;
+            }
+            seen += 1;
+            assert_eq!([b.pos[0] - a.pos[0], b.pos[1] - a.pos[1]], [10.0, 20.0]);
+            assert_eq!((a.size, a.uv, a.color), (b.size, b.uv, b.color));
+        }
+        assert!(seen >= 5, "glyphs and the cursor were compared");
+        // Same frame again: nothing to do, until the origin moves.
+        let again = damaged(f.clone(), 1, &[]);
+        let r = shifted.build(&again, &RenderState::default(), &mut Stub::default());
+        assert!(r.rows.is_empty());
+        shifted.set_origin(0, 0);
+        let r = shifted.build(&again, &RenderState::default(), &mut Stub::default());
+        assert!(r.full);
+        assert_eq!(shifted.instances(), plain.instances());
+    }
+
+    #[test]
+    fn an_overlay_draws_on_top_without_rebuilding_a_row() {
+        let f = text_frame(&["abcd", "efgh"], 1);
+        let mut b = builder();
+        let mut g = Stub::default();
+        b.build(&f, &RenderState::default(), &mut g);
+        let grid = 2 * 4 * INSTANCES_PER_COL;
+        let cells = [
+            TextCell { text: "x", cols: 1 },
+            TextCell { text: "y", cols: 1 },
+        ];
+        let o = Overlay {
+            row: 1,
+            col: 1,
+            cells: &cells,
+            style: FontStyle::default(),
+        };
+        let r = b.set_overlay(Some(o), &mut g).unwrap();
+        assert_eq!(r.start, grid);
+        // Background, two glyphs, underline.
+        assert_eq!(r.len, 4);
+        let bg = b.instances()[grid];
+        assert_eq!((bg.pos, bg.size), ([8.0, 16.0], [16.0, 16.0]));
+        let same = damaged(f.clone(), 1, &[]);
+        let rep = b.build(&same, &RenderState::default(), &mut g);
+        assert!(rep.rows.is_empty() && rep.uploads.is_empty());
+        // A full rebuild redraws it, with the upload in the report.
+        b.set_origin(5, 0);
+        let rep = b.build(&same, &RenderState::default(), &mut g);
+        assert!(rep.full);
+        assert!(rep.uploads.iter().any(|u| u.start == grid && u.len == 4));
+        assert_eq!(b.instances()[grid].pos, [13.0, 16.0]);
+        // Cells past the right edge are dropped; clearing blanks the region.
+        let wide = [TextCell { text: "z", cols: 1 }; 9];
+        let o = Overlay { cells: &wide, ..o };
+        b.set_overlay(Some(o), &mut g);
+        assert_eq!(b.instances()[grid].size, [24.0, 16.0]);
+        let r = b.set_overlay(None, &mut g).unwrap();
+        assert_eq!(r.start, grid);
+        assert!(b.instances()[grid..].iter().all(|i| i.is_empty()));
+        assert!(b.set_overlay(None, &mut g).is_none());
     }
 
     #[test]
@@ -822,7 +1102,10 @@ mod tests {
         let f = damaged(text_frame(&["abc", "def", "ghi"], 2), 1, &[(0, 0)]);
         let r = b.build(&f, &RenderState::default(), &mut g);
         assert!(r.full);
-        assert_eq!(b.instances().len(), 3 * 3 * INSTANCES_PER_COL);
+        assert_eq!(
+            b.instances().len(),
+            3 * 3 * INSTANCES_PER_COL + OVERLAY_INSTANCES
+        );
     }
 
     #[test]
@@ -844,7 +1127,7 @@ mod tests {
             r.uploads,
             vec![InstanceRange {
                 start: 0,
-                len: 2 * 2 * INSTANCES_PER_COL
+                len: 2 * 2 * INSTANCES_PER_COL + OVERLAY_INSTANCES
             }]
         );
     }
@@ -880,6 +1163,142 @@ mod tests {
         let f = damaged(text_frame(&["ab", "cd"], 2), 1, &[(0, 0)]);
         let r = b.build(&f, &RenderState::default(), &mut g);
         assert!(r.full, "undamaged rows may now point at overwritten glyphs");
+    }
+
+    /// Bumps its epoch during shaping, as an atlas that clears mid-build does.
+    struct Bumpy {
+        epoch: u64,
+        /// Bump on every shape call (never settles) instead of just once.
+        always: bool,
+        pending: bool,
+    }
+
+    impl GlyphSource for Bumpy {
+        fn begin_frame(&mut self) {}
+        fn epoch(&self) -> u64 {
+            self.epoch
+        }
+        fn procedural(&mut self, _: char) -> Option<Rect> {
+            None
+        }
+        fn shape_run(&mut self, _: FontStyle, cells: &[TextCell<'_>], out: &mut Vec<PlacedGlyph>) {
+            if self.always || self.pending {
+                self.epoch += 1;
+                self.pending = false;
+            }
+            for (i, _) in cells.iter().enumerate() {
+                out.push(PlacedGlyph {
+                    cell: i as u16,
+                    rect: Rect {
+                        x: 1,
+                        y: 1,
+                        w: 4,
+                        h: 4,
+                    },
+                    left: 0,
+                    top: 8,
+                    color: false,
+                });
+            }
+        }
+    }
+
+    #[test]
+    fn an_epoch_change_during_the_build_gives_a_full_rebuild_then_quiet() {
+        let mut b = builder();
+        let mut g = Bumpy {
+            epoch: 0,
+            always: false,
+            pending: true,
+        };
+        let r = b.build(
+            &text_frame(&["ab", "cd"], 1),
+            &RenderState::default(),
+            &mut g,
+        );
+        assert!(r.full && !r.atlas_overflow, "settled on the second pass");
+        let next = damaged(text_frame(&["ab", "cd"], 1), 1, &[]);
+        let r = b.build(&next, &RenderState::default(), &mut g);
+        assert!(r.rows.is_empty(), "the recorded epoch is the settled one");
+    }
+
+    #[test]
+    fn a_settled_overflow_is_reported_but_not_rebuilt_every_frame() {
+        let mut b = builder();
+        let mut g = Stub {
+            overflow: true,
+            ..Stub::default()
+        };
+        let f = text_frame(&["ab", "cd"], 1);
+        let r = b.build(&f, &RenderState::default(), &mut g);
+        assert!(r.atlas_overflow);
+        let again = damaged(text_frame(&["ab", "cd"], 1), 1, &[]);
+        let r = b.build(&again, &RenderState::default(), &mut g);
+        assert!(!r.atlas_overflow);
+        assert!(!r.full && r.rows.is_empty(), "no rebuild for a valid build");
+    }
+
+    #[test]
+    fn an_epoch_that_never_settles_is_reported_and_the_next_build_is_full() {
+        let mut b = builder();
+        let mut g = Bumpy {
+            epoch: 0,
+            always: true,
+            pending: false,
+        };
+        let f = text_frame(&["ab", "cd"], 1);
+        let r = b.build(&f, &RenderState::default(), &mut g);
+        assert!(r.atlas_overflow);
+        let next = damaged(text_frame(&["ab", "cd"], 1), 1, &[]);
+        g.always = false;
+        let r = b.build(&next, &RenderState::default(), &mut g);
+        assert!(r.full, "rows of an unsettled build are not trusted");
+        assert!(!r.atlas_overflow);
+    }
+
+    #[test]
+    fn a_crowded_row_loses_glyphs_before_it_loses_its_cursor() {
+        struct Many;
+        impl GlyphSource for Many {
+            fn begin_frame(&mut self) {}
+            fn epoch(&self) -> u64 {
+                0
+            }
+            fn procedural(&mut self, _: char) -> Option<Rect> {
+                None
+            }
+            fn shape_run(&mut self, _: FontStyle, _: &[TextCell<'_>], out: &mut Vec<PlacedGlyph>) {
+                for _ in 0..8 {
+                    out.push(PlacedGlyph {
+                        cell: 0,
+                        rect: Rect {
+                            x: 1,
+                            y: 1,
+                            w: 3,
+                            h: 3,
+                        },
+                        left: 0,
+                        top: 8,
+                        color: false,
+                    });
+                }
+            }
+        }
+        let mut b = builder();
+        let mut f = text_frame(&["a"], 1);
+        f.cells[0].bg = Color::Rgb(1, 1, 1);
+        f.cells[0].attrs = Attrs(Attrs::UNDERLINE);
+        let f = with_cursor(f, 0, 0, CursorShape::Bar);
+        b.build(&f, &RenderState::default(), &mut Many);
+        let row = &b.instances()[..INSTANCES_PER_COL];
+        let last = row[INSTANCES_PER_COL - 1];
+        let rgb = |i: &Instance| {
+            let c = i.color.to_le_bytes();
+            [c[0], c[1], c[2]]
+        };
+        assert_eq!(rgb(&last), Theme::default().cursor);
+        assert_eq!(last.size, [1.0, 16.0], "the bar survived");
+        assert_eq!(rgb(&row[0]), [1, 1, 1], "background kept");
     }
 
     #[test]
@@ -1246,7 +1665,10 @@ mod tests {
         f.cells[0].bg = Color::Rgb(1, 1, 1);
         let f = with_cursor(f, 0, 0, CursorShape::Bar);
         b.build(&f, &RenderState::default(), &mut g);
-        assert_eq!(b.instances().len(), 2 * INSTANCES_PER_COL);
+        assert_eq!(
+            b.instances().len(),
+            2 * INSTANCES_PER_COL + OVERLAY_INSTANCES
+        );
         // Row 1 starts with its own glyph, untouched by row 0.
         assert!(!b.instances()[INSTANCES_PER_COL].is_empty());
     }

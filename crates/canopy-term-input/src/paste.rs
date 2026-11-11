@@ -2,8 +2,6 @@
 
 use canopy_term_core::frame::Modes;
 
-use crate::buf::ESC;
-
 /// Start of a bracketed paste (xterm ctlseqs, "Bracketed Paste Mode").
 pub const PASTE_START: &[u8] = b"\x1b[200~";
 /// End of a bracketed paste.
@@ -23,79 +21,93 @@ pub fn encode_text(text: &str, modes: Modes, out: &mut Vec<u8>) -> bool {
     !text.is_empty()
 }
 
+/// What [`encode_paste`] did.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default, Hash)]
+pub struct PasteResult {
+    /// Anything was appended to `out`.
+    pub written: bool,
+    /// Control characters were removed from the pasted text, so the UI can
+    /// tell the user the paste was altered. Newline conversion does not count.
+    pub removed_controls: bool,
+}
+
 /// Appends a paste to `out`.
 ///
-/// * Bracketed paste on (2004): `ESC[200~`, the text, `ESC[201~`. Every ESC
-///   and every C1 control (U+0080-U+009F, which includes the 8-bit CSI U+009B)
-///   is removed from the text first, so the pasted bytes cannot end the
-///   bracket early or smuggle in any other sequence. Removing all ESC rather
-///   than only `ESC[201~` matters: deleting the marker alone can splice a new
-///   one together out of its neighbours. Newlines are kept as they are.
-/// * Bracketed paste off: `\r\n` and `\n` become `\r`, which is what the Enter
-///   key sends. Nothing else changes.
+/// In both modes every control character except Tab, LF and CR is removed
+/// first: C0 (including ESC, and `0x03`, which would raise SIGINT mid-paste),
+/// DEL, and C1 (U+0080-U+009F, including the 8-bit CSI U+009B). So a paste can
+/// neither end the bracket early nor type a key sequence into the program
+/// (pasting `ESC:!cmd` into vim). Removing every ESC rather than only
+/// `ESC[201~` matters: deleting the marker alone can splice a new one together
+/// out of its neighbours.
 ///
-/// Returns `true` if anything was written. Bracketed mode always writes the
-/// markers, even for empty text.
-pub fn encode_paste(text: &str, modes: Modes, out: &mut Vec<u8>) -> bool {
+/// * Bracketed paste on (2004): `ESC[200~`, the text, `ESC[201~`. Newlines are
+///   kept as they are. The markers are written even for empty text.
+/// * Bracketed paste off: after the removal, `\r\n` and `\n` become `\r`, which
+///   is what the Enter key sends.
+pub fn encode_paste(text: &str, modes: Modes, out: &mut Vec<u8>) -> PasteResult {
+    encode_paste_with(text, modes, true, out)
+}
+
+/// [`encode_paste`] with the control stripping switchable. `strip_controls:
+/// false` leaves every control character in the text (newline conversion when
+/// bracketed paste is off still applies). That lets a pasted `ESC[201~` close
+/// the bracket early and lets a paste type key sequences into the program, so
+/// only pass `false` for text the user typed or explicitly trusts.
+pub fn encode_paste_with(
+    text: &str,
+    modes: Modes,
+    strip_controls: bool,
+    out: &mut Vec<u8>,
+) -> PasteResult {
     let start = out.len();
-    if modes.bracketed_paste {
+    let removed_controls = if modes.bracketed_paste {
         out.reserve(text.len() + PASTE_START.len() + PASTE_END.len());
         out.extend_from_slice(PASTE_START);
-        push_without_escapes(text.as_bytes(), out);
+        let removed = push_sanitized(text, strip_controls, false, out);
         out.extend_from_slice(PASTE_END);
+        removed
     } else {
-        push_newlines_as_cr(text.as_bytes(), out);
+        push_sanitized(text, strip_controls, true, out)
+    };
+    PasteResult {
+        written: out.len() != start,
+        removed_controls,
     }
-    out.len() != start
 }
 
-/// Copies `bytes` (valid UTF-8) without ESC and without C1 code points, which
-/// in UTF-8 are exactly the pairs `C2 80` to `C2 9F`. Runs between removals
-/// are copied whole.
-fn push_without_escapes(bytes: &[u8], out: &mut Vec<u8>) {
+/// Removed from every paste: all control characters but Tab, LF and CR.
+fn is_removed(c: char) -> bool {
+    c.is_control() && !matches!(c, '\t' | '\n' | '\r')
+}
+
+/// Copies `text` without the removed controls, copying the runs between
+/// removals whole. With `newlines_to_cr`, `\n` becomes `\r` unless the last
+/// character kept was a `\r` (so `\r\n`, even with removed controls between,
+/// becomes one `\r`). Returns whether anything was removed.
+fn push_sanitized(text: &str, strip: bool, newlines_to_cr: bool, out: &mut Vec<u8>) -> bool {
+    let bytes = text.as_bytes();
+    let mut removed = false;
     let mut run = 0;
-    let mut i = 0;
-    while i < bytes.len() {
-        let b = bytes[i];
-        let skip = if b == ESC {
-            1
-        } else if b == 0xC2 && i + 1 < bytes.len() && (0x80..=0x9F).contains(&bytes[i + 1]) {
-            2
-        } else {
-            0
-        };
-        if skip == 0 {
-            i += 1;
-        } else {
+    let mut last_kept_cr = false;
+    for (i, c) in text.char_indices() {
+        if strip && is_removed(c) {
             out.extend_from_slice(&bytes[run..i]);
-            i += skip;
-            run = i;
+            run = i + c.len_utf8();
+            removed = true;
+        } else if newlines_to_cr && c == '\n' {
+            out.extend_from_slice(&bytes[run..i]);
+            run = i + 1;
+            if !last_kept_cr {
+                out.push(b'\r');
+            }
+            last_kept_cr = false;
+        } else {
+            last_kept_cr = c == '\r';
         }
     }
     out.extend_from_slice(&bytes[run..]);
-}
-
-fn push_newlines_as_cr(bytes: &[u8], out: &mut Vec<u8>) {
-    let mut run = 0;
-    let mut i = 0;
-    while i < bytes.len() {
-        match bytes[i] {
-            b'\n' => {
-                out.extend_from_slice(&bytes[run..i]);
-                out.push(b'\r');
-                i += 1;
-                run = i;
-            }
-            b'\r' if bytes.get(i + 1) == Some(&b'\n') => {
-                out.extend_from_slice(&bytes[run..i]);
-                out.push(b'\r');
-                i += 2;
-                run = i;
-            }
-            _ => i += 1,
-        }
-    }
-    out.extend_from_slice(&bytes[run..]);
+    removed
 }
 
 /// Appends a focus report, `CSI I` on gaining focus and `CSI O` on losing it,

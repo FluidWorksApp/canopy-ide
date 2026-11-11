@@ -14,7 +14,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use rustybuzz::{Direction, UnicodeBuffer};
+use rustybuzz::{Direction, Script, ShapePlan, UnicodeBuffer};
 use swash::scale::image::Content;
 use swash::scale::{Render, ScaleContext, Source, StrikeWith};
 use swash::zeno::{Angle, Format, Transform};
@@ -62,6 +62,20 @@ pub struct TextEngine {
     meta: HashMap<GlyphKey, Meta>,
     /// Glyphs that rasterise to nothing (spaces, marks without ink).
     blanks: HashSet<GlyphKey>,
+    /// The atlas was already cleared during this frame.
+    cleared_this_frame: bool,
+    /// A glyph was dropped because the atlas stayed full.
+    overflowed: bool,
+    ligatures: bool,
+    /// Buffers reused across runs so steady-state shaping does not allocate
+    /// them again.
+    shape_text: String,
+    shape_starts: Vec<usize>,
+    shape_choices: Vec<Option<FaceChoice>>,
+    buzz_buffer: Option<UnicodeBuffer>,
+    /// Shaping plans by (face, script, ligatures): a plan depends only on
+    /// these, and building one allocates, so it is built once per key.
+    plans: HashMap<(u32, Script, bool), ShapePlan>,
 }
 
 /// Index of the cell whose text contains byte offset `byte`, given each cell's
@@ -113,6 +127,24 @@ impl TextEngine {
             layout,
             meta: HashMap::new(),
             blanks: HashSet::new(),
+            cleared_this_frame: false,
+            overflowed: false,
+            ligatures: true,
+            shape_text: String::new(),
+            shape_starts: Vec::new(),
+            shape_choices: Vec::new(),
+            buzz_buffer: None,
+            plans: HashMap::new(),
+        }
+    }
+
+    /// Turns ligatures and contextual alternates (`liga`, `clig`, `calt`) on or
+    /// off. Changing it redraws everything.
+    pub fn set_ligatures(&mut self, on: bool) {
+        if on != self.ligatures {
+            self.ligatures = on;
+            self.atlas.clear();
+            self.meta.clear();
         }
     }
 
@@ -219,15 +251,31 @@ impl TextEngine {
         }
     }
 
-    /// Inserts into the atlas; when it is full, drops everything (bumping the
-    /// epoch so the builder redraws) and tries once more.
+    /// Inserts into the atlas. A bitmap that can never fit is remembered as
+    /// blank (no clear). When the atlas is full it is cleared at most once per
+    /// frame (bumping the epoch so the builder redraws); a second overflow in
+    /// the same frame leaves the glyph blank and raises `overflowed`.
     fn pack(&mut self, key: GlyphKey, w: u16, h: u16, rgba: &[u8]) -> Option<Rect> {
+        if !self.atlas.can_ever_fit(w, h) {
+            self.blanks.insert(key);
+            return None;
+        }
         if let Some(r) = self.atlas.insert(key, w, h, rgba) {
             return Some(r);
         }
+        if self.cleared_this_frame {
+            self.overflowed = true;
+            return None;
+        }
+        self.cleared_this_frame = true;
         self.atlas.clear();
         self.meta.clear();
-        self.atlas.insert(key, w, h, rgba)
+        let placed = self.atlas.insert(key, w, h, rgba);
+        if placed.is_none() {
+            // It does not fit even in an empty atlas: stop retrying it.
+            self.blanks.insert(key);
+        }
+        placed
     }
 
     fn glyph(&mut self, key: GlyphKey) -> Option<(Rect, Meta)> {
@@ -260,19 +308,42 @@ impl TextEngine {
         first_cell: usize,
         out: &mut Vec<PlacedGlyph>,
     ) {
-        let mut text = String::new();
-        let mut starts = Vec::with_capacity(cells.len());
+        let mut text = std::mem::take(&mut self.shape_text);
+        text.clear();
+        let mut starts = std::mem::take(&mut self.shape_starts);
+        starts.clear();
         for c in cells {
             starts.push(text.len());
             text.push_str(c.text);
         }
         let loaded = self.fonts.face(choice.face);
         let upem = loaded.units_per_em.max(1) as f32;
-        let mut buffer = UnicodeBuffer::new();
+        let mut buffer = self.buzz_buffer.take().unwrap_or_else(UnicodeBuffer::new);
         buffer.push_str(&text);
         buffer.guess_segment_properties();
         buffer.set_direction(Direction::LeftToRight);
-        let shaped = rustybuzz::shape(&loaded.buzz, &[], buffer);
+        // The language is never set (rustybuzz does not guess one), so the
+        // plan depends on the face, the script, the direction (always left to
+        // right) and the features alone.
+        let script = buffer.script();
+        let key = (choice.face, script, self.ligatures);
+        if !self.plans.contains_key(&key) {
+            let off = |tag: &[u8; 4]| {
+                rustybuzz::Feature::new(rustybuzz::ttf_parser::Tag::from_bytes(tag), 0, ..)
+            };
+            let no_ligatures = [off(b"liga"), off(b"clig"), off(b"calt")];
+            let features: &[rustybuzz::Feature] = if self.ligatures { &[] } else { &no_ligatures };
+            let plan_script = (script != rustybuzz::script::UNKNOWN).then_some(script);
+            let plan = ShapePlan::new(
+                &loaded.buzz,
+                Direction::LeftToRight,
+                plan_script,
+                None,
+                features,
+            );
+            self.plans.insert(key, plan);
+        }
+        let shaped = rustybuzz::shape_with_plan(&loaded.buzz, &self.plans[&key], buffer);
         let k = self.layout.font_px as f32 / upem;
         let infos = shaped.glyph_infos();
         let positions = shaped.glyph_positions();
@@ -290,12 +361,20 @@ impl TextEngine {
                 color: m.color,
             });
         }
+        self.buzz_buffer = Some(shaped.clear());
+        self.shape_text = text;
+        self.shape_starts = starts;
     }
 }
 
 impl GlyphSource for TextEngine {
     fn begin_frame(&mut self) {
         self.atlas.begin_frame();
+        self.cleared_this_frame = false;
+    }
+
+    fn overflowed(&mut self) -> bool {
+        std::mem::take(&mut self.overflowed)
     }
 
     fn epoch(&self) -> u64 {
@@ -322,15 +401,16 @@ impl GlyphSource for TextEngine {
     }
 
     fn shape_run(&mut self, style: FontStyle, cells: &[TextCell<'_>], out: &mut Vec<PlacedGlyph>) {
-        let choices: Vec<Option<FaceChoice>> = cells
-            .iter()
-            .map(|c| {
-                let ch = c.text.chars().next().unwrap_or(' ');
-                self.fonts
-                    .choose(ch, style)
-                    .or_else(|| self.fonts.primary_choice(style))
-            })
-            .collect();
+        let mut choices = std::mem::take(&mut self.shape_choices);
+        choices.clear();
+        for c in cells {
+            let ch = c.text.chars().next().unwrap_or(' ');
+            let choice = self
+                .fonts
+                .choose(ch, style)
+                .or_else(|| self.fonts.primary_choice(style));
+            choices.push(choice);
+        }
         let mut i = 0;
         while i < cells.len() {
             let mut j = i + 1;
@@ -342,6 +422,7 @@ impl GlyphSource for TextEngine {
             }
             i = j;
         }
+        self.shape_choices = choices;
     }
 }
 
@@ -451,6 +532,86 @@ mod tests {
             !changed.is_empty(),
             "no ligature substitution observed in any pair"
         );
+    }
+
+    #[test]
+    fn shaping_plans_are_built_once_and_give_the_same_glyphs() {
+        let mut e = engine();
+        let mut first = Vec::new();
+        e.shape_run(REGULAR, &cells(&["a", "-", ">", "b"]), &mut first);
+        assert_eq!(e.plans.len(), 1);
+        let mut second = Vec::new();
+        e.shape_run(REGULAR, &cells(&["a", "-", ">", "b"]), &mut second);
+        assert_eq!(e.plans.len(), 1, "reused");
+        assert_eq!(first, second);
+        e.set_ligatures(false);
+        let mut third = Vec::new();
+        e.shape_run(REGULAR, &cells(&["a", "-", ">", "b"]), &mut third);
+        assert_eq!(e.plans.len(), 2, "features are part of the plan");
+    }
+
+    #[test]
+    fn with_ligatures_off_a_pair_shapes_like_its_parts() {
+        let mut e = engine();
+        e.set_ligatures(false);
+        for pair in ["->", "=>", "==", "!=", ">=", "<=", "::", "//", "<-", "|>"] {
+            let chars: Vec<String> = pair.chars().map(|c| c.to_string()).collect();
+            let refs: Vec<&str> = chars.iter().map(|s| s.as_str()).collect();
+            let mut together = Vec::new();
+            e.shape_run(REGULAR, &cells(&refs), &mut together);
+            let mut apart = Vec::new();
+            for (i, r) in refs.iter().enumerate() {
+                let mut one = Vec::new();
+                e.shape_run(REGULAR, &cells(&[*r]), &mut one);
+                apart.extend(one.into_iter().map(|mut g| {
+                    g.cell = i as u16;
+                    g
+                }));
+            }
+            assert_eq!(together, apart, "{pair}");
+        }
+    }
+
+    #[test]
+    fn a_full_atlas_clears_once_per_frame_then_leaves_glyphs_blank() {
+        let fm = FontMetrics::from_font_data(BUNDLED_FONT, 0).unwrap();
+        let l = layout(&fm, 14.0, Scale(1.0));
+        let mut e = TextEngine::new(FontBook::bundled(), l, 32);
+        e.begin_frame();
+        let before = e.epoch();
+        let letters: Vec<String> = ('a'..='z').map(|c| c.to_string()).collect();
+        let refs: Vec<&str> = letters.iter().map(|s| s.as_str()).collect();
+        let mut out = Vec::new();
+        e.shape_run(REGULAR, &cells(&refs), &mut out);
+        assert!(e.epoch() > before, "the atlas was cleared");
+        let after = e.epoch();
+        assert!(out.len() < 26, "the rest are blank, not wrong");
+        let mut again_same_frame = Vec::new();
+        e.shape_run(REGULAR, &cells(&refs), &mut again_same_frame);
+        assert_eq!(e.epoch(), after, "no second clear within the frame");
+        assert!(e.overflowed(), "overflow is reported");
+        assert!(!e.overflowed(), "and then reset");
+        // A new frame may clear again.
+        e.begin_frame();
+        let mut again = Vec::new();
+        e.shape_run(REGULAR, &cells(&refs), &mut again);
+        assert!(e.epoch() > after, "a new frame may clear again");
+    }
+
+    #[test]
+    fn a_glyph_that_can_never_fit_is_blank_and_does_not_thrash_the_atlas() {
+        let fm = FontMetrics::from_font_data(BUNDLED_FONT, 0).unwrap();
+        let l = layout(&fm, 14.0, Scale(1.0));
+        let mut e = TextEngine::new(FontBook::bundled(), l, 8);
+        let before = e.epoch();
+        for _ in 0..3 {
+            e.begin_frame();
+            let mut out = Vec::new();
+            e.shape_run(REGULAR, &cells(&["H", "W"]), &mut out);
+            assert!(out.is_empty());
+        }
+        assert_eq!(e.epoch(), before, "no clear for a glyph that cannot fit");
+        assert!(!e.overflowed());
     }
 
     #[test]
