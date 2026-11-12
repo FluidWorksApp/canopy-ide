@@ -20899,8 +20899,13 @@ a.btn-sm {
   right: 0;
   z-index: 2;
 }
-.preview-chrome-popup-bar span,
-.preview-chrome-fallback span {
+.preview-chrome-actions {
+  display: flex;
+  flex: 0 0 auto;
+  gap: 6px;
+}
+.preview-chrome-popup-bar > span:first-child,
+.preview-chrome-fallback > span:first-child {
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;

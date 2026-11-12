@@ -43,6 +43,11 @@ import {
   previewOp,
   previewProfile,
   PreviewHostError,
+  browserOfferDismissed,
+  dismissBrowserOffer,
+  installPreviewBrowser,
+  previewBrowserState,
+  type PreviewInstallerStatus,
   previewStreamUrl,
   retryPreviewHost,
   startPreviewHost,
@@ -253,9 +258,14 @@ export function PreviewView({
   /** Remounts the stream after the host closed the tab (a crash, Sign out, window.close()). */
   const [streamAttempt, setStreamAttempt] = useState(0);
   const chromeFailed = wantChrome ? (hostState.status === "failed" ? hostState.error : tabError) : null;
+  // No Chrome-family browser on this computer: the host runs, and the strip
+  // offers Chromium (previewHost.ts). The embedded browser serves meanwhile.
+  const browser = useSyncExternalStore(subscribePreviewHost, previewBrowserState);
+  const offerDismissed = useSyncExternalStore(subscribePreviewHost, browserOfferDismissed);
+  const needsBrowser = wantChrome && hostState.status === "ready" && browser?.executable === "";
   const proxyOrWebview = previewEngine({ remote: !!remoteWorkspace, buildMode, chosen: chosenEngine });
   const engine: "webview" | "proxy" | "chrome" | null =
-    wantChrome && !chromeFailed ? (hostState.status === "ready" ? "chrome" : null) : proxyOrWebview;
+    wantChrome && !chromeFailed && !needsBrowser ? (hostState.status === "ready" ? "chrome" : null) : proxyOrWebview;
   const native = engine === "webview";
   const chrome = engine === "chrome";
   const profile = previewProfile(projectId);
@@ -1630,6 +1640,7 @@ export function PreviewView({
                 : undefined
             }
           >
+            {needsBrowser && !chromeFailed && !offerDismissed && <BrowserOfferStrip status={browser?.installer ?? null} />}
             {chromeFailed && (
               <div className="preview-chrome-fallback" role="status">
                 <span>
@@ -1874,4 +1885,55 @@ async function answerFileChooser(
   const paths =
     picked === null ? [] : Array.isArray(picked) ? picked : [picked];
   surface?.send({ type: "fileChooser", id: chooser.id, paths });
+}
+
+const megabytes = (bytes: number) => Math.round(bytes / 1_000_000);
+
+/** The offer to download Chromium, its progress, and its failure (approved mock, 2026-11-12). */
+function BrowserOfferStrip({ status }: { status: PreviewInstallerStatus | null }) {
+  const [asking, setAsking] = useState(false);
+  const install = () => {
+    setAsking(true);
+    void installPreviewBrowser()
+      .catch(() => {})
+      .finally(() => setAsking(false));
+  };
+  if (status?.state === "downloading" || (asking && status?.state !== "failed")) {
+    const percent = status && status.total > 0 ? Math.floor((100 * status.received) / status.total) : 0;
+    return (
+      <div className="preview-chrome-fallback" role="status">
+        <span>
+          Downloading Chromium… {percent}%{status?.total ? ` of ${megabytes(status.total)} MB` : ""}
+        </span>
+      </div>
+    );
+  }
+  if (status?.state === "failed") {
+    return (
+      <div className="preview-chrome-fallback" role="status">
+        <span>Download failed: {status.error ?? "unknown error"}</span>
+        <Button size="sm" onClick={install}>
+          Try again
+        </Button>
+      </div>
+    );
+  }
+  const unsupported = status?.state === "unsupported";
+  return (
+    <div className="preview-chrome-fallback" role="status">
+      <span>
+        No Chrome found — logins won't stick here.{unsupported ? " Install Google Chrome to keep them." : ""}
+      </span>
+      <span className="preview-chrome-actions">
+        {!unsupported && (
+          <Button size="sm" variant="accent" onClick={install}>
+            Download Chromium{status?.total ? ` (~${megabytes(status.total)} MB)` : ""}
+          </Button>
+        )}
+        <Button size="sm" variant="ghost" onClick={dismissBrowserOffer}>
+          Not now
+        </Button>
+      </span>
+    </div>
+  );
 }

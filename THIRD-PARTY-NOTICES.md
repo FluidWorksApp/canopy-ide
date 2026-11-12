@@ -106,6 +106,14 @@ redistribute them:
 - **serve-sim (vendored in expo-device-hub)** — Apache-2.0, by Evan Bacon, with changes by Expo. <https://github.com/EvanBacon/serve-sim>
 - **scrcpy-server v4.0 (downloaded by serve-emu when an Android device is first streamed)** — Apache-2.0, by Genymobile and Romain Vimont. <https://github.com/Genymobile/scrcpy>
 
+The preview browser downloads this on a computer with no Chrome, Edge,
+Chromium or Brave, only after the user chooses "Download Chromium" in a
+preview tab, and checks it against a pinned SHA-256
+(`packages/remote-host/browser-pins.json`). Canopy does not bundle or
+redistribute it:
+
+- **Chrome Headless Shell** (Chrome for Testing, via Playwright's CDN, with Playwright's FFmpeg build) — BSD-3-Clause and other open-source licenses listed in its own `about:credits`, by The Chromium Authors; FFmpeg — LGPL-2.1, by the FFmpeg developers. <https://developer.chrome.com/blog/chrome-for-testing>
+
 ## Rust crates (801)
 
 ### MIT — 731

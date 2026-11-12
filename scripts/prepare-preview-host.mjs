@@ -11,7 +11,7 @@ const root = fileURLToPath(new URL('../', import.meta.url));
 const source = resolve(root, 'packages/remote-host');
 const require = createRequire(resolve(source, 'package.json'));
 const target = resolve(root, 'src-tauri/preview-host');
-export const PREVIEW_HOST_FILES = ['preview-host.mjs', 'agent-browser.mjs', 'browser-contexts.mjs', 'session-control.mjs', 'browser-stream.mjs'];
+export const PREVIEW_HOST_FILES = ['preview-host.mjs', 'agent-browser.mjs', 'browser-contexts.mjs', 'session-control.mjs', 'browser-stream.mjs', 'browser-install.mjs', 'browser-pins.json'];
 
 await rm(resolve(target, 'node_modules'), { recursive: true, force: true });
 await mkdir(resolve(target, 'node_modules'), { recursive: true });

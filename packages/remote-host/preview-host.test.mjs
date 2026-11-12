@@ -306,3 +306,66 @@ test('a file input is answered by the person controlling the page', { skip: CHRO
     await rm(profilesDir, { recursive: true, force: true });
   }
 });
+
+test('two tabs stream at once, not only the active one', { skip: CHROMIUM ? false : 'no Chromium in this environment', timeout: 120_000 }, async () => {
+  // Headless Chromium casts only an active page (1064b87d); each preview tab
+  // has its own viewer and both must keep painting.
+  const profilesDir = await mkdtemp(join(tmpdir(), 'canopy-preview-two-'));
+  const { server, origin } = await site();
+  const host = new PreviewHost({ profilesDir, executablePath: CHROMIUM, picker: PICKER, timeoutMs: 60_000 });
+  const viewers = [];
+  try {
+    const frames = { a: 0, b: 0 };
+    for (const tabId of ['a', 'b']) {
+      await host.ensure(tabId, { url: `${origin}/opener` });
+      const viewer = await host.tabs.get(tabId).browser.attachViewer({ maxWidth: 640, maxHeight: 400, quality: 50, canOperate: true });
+      viewers.push(viewer);
+      void (async () => { for (;;) { const item = await viewer.output.take(); if (!item) return; if (item._tag === 'frame') frames[tabId] += 1; item.ack?.(); } })();
+    }
+    // Both pages repaint: each viewer must see a frame after the change.
+    const before = { ...frames };
+    for (const tabId of ['a', 'b']) await host.tabs.get(tabId).browser.current.page.evaluate(() => { document.body.style.background = '#0a0'; });
+    const deadline = Date.now() + 15_000;
+    while ((frames.a <= before.a || frames.b <= before.b) && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 100));
+    assert.ok(frames.a > before.a, 'tab a painted');
+    assert.ok(frames.b > before.b, 'tab b painted');
+  } finally {
+    for (const viewer of viewers) await viewer.close();
+    await host.shutdown();
+    server.close();
+    await rm(profilesDir, { recursive: true, force: true });
+  }
+});
+
+test('with no browser the host still runs, refuses tabs, and opens them once Chromium is downloaded', { skip: CHROMIUM ? false : 'no Chromium in this environment', timeout: 120_000 }, async () => {
+  const profilesDir = await mkdtemp(join(tmpdir(), 'canopy-preview-nobrowser-'));
+  const { server: site_, origin } = await site();
+  let state = 'missing';
+  const installer = {
+    status: () => ({ state, received: state === 'installed' ? 10 : 0, total: 10, version: '1' }),
+    install: async () => { state = 'installed'; return CHROMIUM; },
+    stop() {},
+  };
+  const host = new PreviewHost({ profilesDir, picker: PICKER, installer, timeoutMs: 60_000 });
+  const token = 'test-token-0123456789';
+  const server = createPreviewServer(host, { token });
+  server.listen(0, '127.0.0.1');
+  await once(server, 'listening');
+  const call = (path, init = {}) => fetch(`http://127.0.0.1:${server.address().port}${path}`, { ...init, headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' } });
+  try {
+    assert.deepEqual(await (await call('/browser')).json(), { executable: '', installer: { state: 'missing', received: 0, total: 10, version: '1' } });
+    const refused = await call('/tabs/a/ensure', { method: 'POST', body: JSON.stringify({ url: `${origin}/me` }) });
+    assert.equal(refused.status, 424);
+    assert.equal((await call('/browser/install', { method: 'POST' })).status, 202);
+    const deadline = Date.now() + 5_000;
+    while ((await (await call('/browser')).json()).executable === '' && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 50));
+    assert.equal((await (await call('/browser')).json()).executable, CHROMIUM);
+    const opened = await call('/tabs/a/ensure', { method: 'POST', body: JSON.stringify({ url: `${origin}/me` }) });
+    assert.equal(opened.status, 200);
+  } finally {
+    server.close();
+    await host.shutdown();
+    site_.close();
+    await rm(profilesDir, { recursive: true, force: true });
+  }
+});

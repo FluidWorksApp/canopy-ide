@@ -16,6 +16,7 @@ import {
   useContext,
   useRef,
   useState,
+  useSyncExternalStore,
   type CSSProperties,
   type RefObject,
 } from "react";
@@ -71,7 +72,7 @@ import { AcpAgentToggle } from "./AcpAgentToggle";
 import { joinArgv, splitArgv } from "../acp/providers";
 import { SlackSettings } from "./SlackSettings";
 import { VaultSettings } from "./VaultSettings";
-import { clearAllPreviewProfiles } from "../previewHost";
+import { clearAllPreviewProfiles, previewBrowserState, subscribePreviewHost, usesDownloadedChromium } from "../previewHost";
 import { availableMonoFonts, fontLabel, fontStack } from "../fonts";
 import {
   AgentIcon,
@@ -4015,8 +4016,14 @@ function DictationSettings() {
 function PreviewBrowserSetting({ enabled, onChange }: { enabled: boolean; onChange: (enabled: boolean) => void }) {
   const [note, setNote] = useState("");
   const [busy, setBusy] = useState(false);
+  const browser = useSyncExternalStore(subscribePreviewHost, previewBrowserState);
+  const desc = !enabled
+    ? "Runs inside Canopy. Logins may not stick."
+    : usesDownloadedChromium(browser)
+      ? `Using downloaded Chromium ${browser?.installer?.version.split(".")[0] ?? ""}`.trim() + "."
+      : "Chrome keeps logins, one profile per project.";
   return (
-    <Item name="Preview browser" desc={enabled ? "Chrome keeps logins, one profile per project." : "Runs inside Canopy. Logins may not stick."}>
+    <Item name="Preview browser" desc={desc}>
       <span className="rc-settings">
         <Segmented<"chrome" | "embedded">
           aria-label="Preview browser"

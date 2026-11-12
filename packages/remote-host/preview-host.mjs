@@ -26,12 +26,13 @@ import os from 'node:os';
 import { access, constants, readdir } from 'node:fs/promises';
 import { realpathSync } from 'node:fs';
 import { randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { createRequire } from 'node:module';
 import { fileURLToPath } from 'node:url';
 import { AgentBrowser } from './agent-browser.mjs';
 import { BrowserContexts } from './browser-contexts.mjs';
 import { TAB_GONE_CODE, browserStreamServer, handleBrowserStream } from './browser-stream.mjs';
+import { BrowserInstaller } from './browser-install.mjs';
 
 // T3's constants (ServerBrowser.ts).
 export const SERVER_TAB_LIMIT = 32;
@@ -157,8 +158,10 @@ export class PreviewHost {
     this.emptySince = new Map();
     this.now = options.now ?? Date.now;
     const launch = options.launch ?? (async directory => {
+      // No browser yet: the IDE offers the download (browser-install.mjs).
+      if (!this.options.executablePath) throw Object.assign(new Error('No Chrome-family browser is installed for the preview yet.'), { status: 424, code: 'needs-browser' });
       const { chromium } = createRequire(import.meta.url)('playwright-core');
-      return chromium.launchPersistentContext(directory, launchOptions(options.executablePath));
+      return chromium.launchPersistentContext(directory, launchOptions(this.options.executablePath));
     });
     this.contexts = new BrowserContexts({
       profilesDir: options.profilesDir,
@@ -173,6 +176,7 @@ export class PreviewHost {
   /** T3's ensureTab: the tab if it exists, else a new one (opened at `url` when given). */
   async ensure(tabId, { url, profile = DEFAULT_PROFILE, adopt, openerId, held = !adopt, wait = true, owner } = {}) {
     if (!validTabId(tabId)) throw Object.assign(new Error('invalid tab id'), { status: 400 });
+    if (!this.options.executablePath && !this.options.launch) throw Object.assign(new Error('No Chrome-family browser is installed for the preview yet.'), { status: 424, code: 'needs-browser' });
     // A popup exists only as the page that opened it; one that has closed is gone, not blank.
     if (!adopt && isPopupId(tabId) && !this.tabs.has(tabId)) throw Object.assign(new Error('The sign-in window closed.'), { status: 404 });
     if (!validProfile(profile)) throw Object.assign(new Error('invalid profile'), { status: 400 });
@@ -329,7 +333,21 @@ export class PreviewHost {
     await this.contexts.clearProfile(profile);
   }
 
+  /** Which browser runs the preview, and the on-demand download's progress. */
+  browser() {
+    return { executable: this.options.executablePath ?? '', installer: this.options.installer?.status() ?? null };
+  }
+
+  /** Downloads Chromium (single-flight) and runs the preview on it. */
+  async installBrowser() {
+    if (!this.options.installer) throw Object.assign(new Error('Chromium cannot be downloaded here.'), { status: 501 });
+    const binary = await this.options.installer.install();
+    this.options.executablePath ??= binary;
+    return this.browser();
+  }
+
   async shutdown() {
+    this.options.installer?.stop();
     await Promise.allSettled([...this.tabs.keys()].map(tabId => this.close(tabId)));
     await this.contexts.close();
   }
@@ -403,6 +421,12 @@ export function createPreviewServer(host, { token, origins = [], now = Date.now 
       if (request.method === 'GET' && pathname === '/health') return send(response, 200, { ok: true, tabs: host.tabs.size });
       if (request.method === 'GET' && pathname === '/tabs') return send(response, 200, { tabs: host.list() });
       if (request.method === 'GET' && pathname === '/profiles') return send(response, 200, { profiles: await host.profiles() });
+      if (request.method === 'GET' && pathname === '/browser') return send(response, 200, host.browser());
+      if (request.method === 'POST' && pathname === '/browser/install') {
+        // Answers at once; the IDE follows progress through GET /browser.
+        void host.installBrowser().catch(() => undefined);
+        return send(response, 202, host.browser());
+      }
       if (request.method === 'POST' && pathname === '/tickets') {
         const body = await readJson(request);
         if (!validTabId(body.tabId)) return send(response, 400, { error: 'invalid tab id' });
@@ -487,15 +511,17 @@ export function createPreviewServer(host, { token, origins = [], now = Date.now 
 /** The process entry: find Chrome, listen on loopback, print `{port, token}`, exit when stdin closes. */
 export async function main({ env = process.env, stdin = process.stdin, stdout = process.stdout } = {}) {
   const print = value => stdout.write(`${JSON.stringify(value)}\n`);
-  const executablePath = await findChrome(process.platform, env);
-  if (!executablePath) {
-    print({ code: 'no-chrome', error: 'No Chrome, Edge, Chromium or Brave was found on this computer.' });
-    return 1;
-  }
   const home = env.HOME ?? os.homedir();
+  const profilesDir = env.CANOPY_PREVIEW_PROFILES ?? join(home, '.canopy', 'preview-browser', 'profiles');
+  // Beside the profiles, never inside: signing out removes every profile directory.
+  const installer = new BrowserInstaller({ browsersDir: env.CANOPY_PREVIEW_BROWSERS ?? join(dirname(profilesDir), 'browsers') });
+  // The computer's own Chrome-family browser first, then a Chromium downloaded
+  // earlier. With neither, the host still runs and the IDE offers the download.
+  const executablePath = (await findChrome(process.platform, env)) ?? installer.executable() ?? undefined;
   const host = new PreviewHost({
-    profilesDir: env.CANOPY_PREVIEW_PROFILES ?? join(home, '.canopy', 'preview-browser', 'profiles'),
+    profilesDir,
     executablePath,
+    installer,
     picker: env.CANOPY_PREVIEW_PICKER ?? new URL('./preview_picker.js', import.meta.url),
   });
   // One failed page call must not take every tab down with the process.
@@ -520,7 +546,7 @@ export async function main({ env = process.env, stdin = process.stdin, stdout = 
   stdin.resume();
   process.on('SIGTERM', stop);
   process.on('SIGINT', stop);
-  print({ port: server.address().port, token, executable: executablePath });
+  print({ port: server.address().port, token, executable: executablePath ?? '' });
   return 0;
 }
 

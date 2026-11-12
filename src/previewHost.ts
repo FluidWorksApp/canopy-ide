@@ -42,7 +42,10 @@ export function startPreviewHost(): Promise<PreviewHostInfo> {
   if (state.status === "failed") return Promise.reject(new Error(state.error));
   starting ??= invokeDesktop<PreviewHostInfo>("preview_host_start").then(
     (info) => {
+      // Known from the start line; refreshed from the host after that.
+      browserState = { executable: info.executable, installer: null };
       publish({ status: "ready", info });
+      void refreshPreviewBrowser();
       return info;
     },
     (error: unknown) => {
@@ -243,3 +246,66 @@ export function closePreviewTabSoon(
     }, delayMs),
   );
 }
+
+// ---------- the browser the preview runs on ----------
+// The host runs even on a computer with no Chrome, Edge, Chromium or Brave,
+// and says so (`executable: ""`). The preview then offers Playwright's Chrome
+// Headless Shell, downloaded once on request and checked against pinned
+// SHA-256 digests (packages/remote-host/browser-install.mjs).
+
+export interface PreviewInstallerStatus {
+  readonly state: "missing" | "downloading" | "installed" | "failed" | "unsupported";
+  readonly received: number;
+  readonly total: number;
+  readonly version: string;
+  readonly error?: string;
+}
+
+export interface PreviewBrowserState {
+  /** The browser preview tabs run on; empty until one is found or downloaded. */
+  readonly executable: string;
+  readonly installer: PreviewInstallerStatus | null;
+}
+
+let browserState: PreviewBrowserState | null = null;
+let browserPoll: ReturnType<typeof setTimeout> | null = null;
+let offerDismissed = false;
+const BROWSER_POLL_MS = 1_000;
+
+export const previewBrowserState = (): PreviewBrowserState | null => browserState;
+
+/** Reads the host's browser, and keeps reading while a download runs (every window sees it finish). */
+export async function refreshPreviewBrowser(): Promise<PreviewBrowserState | null> {
+  if (browserPoll !== null) clearTimeout(browserPoll);
+  browserPoll = null;
+  try {
+    const next = await call<PreviewBrowserState>("/browser");
+    browserState = next;
+    for (const listener of listeners) listener();
+    if (next.installer?.state === "downloading") {
+      browserPoll = setTimeout(() => void refreshPreviewBrowser(), BROWSER_POLL_MS);
+    }
+    return next;
+  } catch {
+    return browserState;
+  }
+}
+
+/** Starts the one download every window shares, then follows it. */
+export async function installPreviewBrowser(): Promise<void> {
+  offerDismissed = false;
+  await call("/browser/install", { method: "POST" });
+  await refreshPreviewBrowser();
+}
+
+/** "Not now": the offer stays hidden until the app restarts. */
+export function dismissBrowserOffer(): void {
+  offerDismissed = true;
+  for (const listener of listeners) listener();
+}
+
+export const browserOfferDismissed = (): boolean => offerDismissed;
+
+/** Whether the preview runs on a Chromium Canopy downloaded (Settings says so). */
+export const usesDownloadedChromium = (state: PreviewBrowserState | null): boolean =>
+  !!state?.executable && /chromium_headless_shell-/.test(state.executable);

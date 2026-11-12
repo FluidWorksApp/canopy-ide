@@ -12,7 +12,12 @@ const mocks = vi.hoisted(() => ({
   previewStreamUrl: vi.fn(),
   browserResult: vi.fn(async () => {}),
   surfaces: [] as Array<Record<string, unknown>>,
+  browser: { executable: "/chrome", installer: null } as { executable: string; installer: Record<string, unknown> | null },
+  dismissed: false,
+  listeners: new Set<() => void>(),
+  install: vi.fn(async () => {}),
 }));
+const notify = () => mocks.listeners.forEach((listener) => listener());
 
 vi.mock("./AgentLaunchButton", () => ({ AgentLaunchButton: () => null }));
 vi.mock("../remoteExecution/workspace", () => ({ activeWorkspace: () => null }));
@@ -56,7 +61,17 @@ vi.mock("../previewHost", () => {
   return {
     PreviewHostError,
     previewHostState: () => ready,
-    subscribePreviewHost: () => () => {},
+    subscribePreviewHost: (listener: () => void) => {
+      mocks.listeners.add(listener);
+      return () => mocks.listeners.delete(listener);
+    },
+    previewBrowserState: () => mocks.browser,
+    browserOfferDismissed: () => mocks.dismissed,
+    dismissBrowserOffer: () => {
+      mocks.dismissed = true;
+      notify();
+    },
+    installPreviewBrowser: mocks.install,
     startPreviewHost: vi.fn(async () => ready.info),
     retryPreviewHost: vi.fn(async () => ready.info),
     previewProfile: (projectId: string) => `p-${projectId}`,
@@ -74,6 +89,9 @@ vi.mock("../remoteExecution/StreamSurface", () => ({
 }));
 
 beforeEach(() => {
+  mocks.browser = { executable: "/chrome", installer: null };
+  mocks.dismissed = false;
+  mocks.install.mockClear();
   mocks.surfaces.length = 0;
   mocks.previewOp.mockReset();
   mocks.previewStreamUrl.mockReset();
@@ -137,4 +155,52 @@ it("falls back to the embedded browser with the host's reason when Chrome cannot
   });
   expect(screen.getByRole("status").textContent).toContain("Another copy of Canopy is using this preview profile.");
   expect(screen.queryByTestId("surface")).toBeNull();
+});
+
+it("offers Chromium where there is no Chrome, and the embedded browser serves meanwhile", async () => {
+  const { fireEvent } = await import("@testing-library/react");
+  mocks.browser = { executable: "", installer: { state: "missing", received: 0, total: 99_928_434, version: "153.0.8010.12" } };
+  mount();
+  // No Chrome stream: the page is the embedded one.
+  expect(screen.queryByTestId("surface")).toBeNull();
+  expect(screen.getByRole("status").textContent).toContain("No Chrome found — logins won't stick here.");
+  fireEvent.click(screen.getByRole("button", { name: "Download Chromium (~100 MB)" }));
+  expect(mocks.install).toHaveBeenCalledTimes(1);
+
+  // Progress, then failure with a retry.
+  act(() => {
+    mocks.browser = { executable: "", installer: { state: "downloading", received: 42_000_000, total: 99_928_434, version: "153" } };
+    notify();
+  });
+  await waitFor(() => expect(screen.getByRole("status").textContent).toBe("Downloading Chromium… 42% of 100 MB"));
+  act(() => {
+    mocks.browser = { executable: "", installer: { state: "failed", received: 0, total: 99_928_434, version: "153", error: "network unreachable" } };
+    notify();
+  });
+  await waitFor(() => expect(screen.getByRole("status").textContent).toContain("Download failed: network unreachable"));
+  fireEvent.click(screen.getByRole("button", { name: "Try again" }));
+  expect(mocks.install).toHaveBeenCalledTimes(2);
+
+  // Done: every preview switches to Chrome.
+  act(() => {
+    mocks.browser = { executable: "/browsers/chromium_headless_shell-1243/chrome-headless-shell", installer: { state: "installed", received: 1, total: 1, version: "153" } };
+    notify();
+  });
+  await waitFor(() => expect(screen.getByTestId("surface")).toBeTruthy());
+  expect(screen.queryByRole("status")).toBeNull();
+});
+
+it("hides the offer for the session on Not now, and says to install Chrome where Chromium has no build", async () => {
+  const { fireEvent, cleanup } = await import("@testing-library/react");
+  mocks.browser = { executable: "", installer: { state: "missing", received: 0, total: 1, version: "1" } };
+  mount();
+  fireEvent.click(screen.getByRole("button", { name: "Not now" }));
+  await waitFor(() => expect(screen.queryByRole("status")).toBeNull());
+  cleanup();
+
+  mocks.dismissed = false;
+  mocks.browser = { executable: "", installer: { state: "unsupported", received: 0, total: 0, version: "1" } };
+  mount();
+  expect(screen.getByRole("status").textContent).toContain("Install Google Chrome to keep them.");
+  expect(screen.queryByRole("button", { name: /Download Chromium/ })).toBeNull();
 });
