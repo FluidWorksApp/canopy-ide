@@ -303,6 +303,28 @@ fn scrollback_is_capped_in_lines_though_the_engine_counts_bytes() {
     assert!(s.scrollback_row(5).is_none());
 }
 
+#[test]
+fn scrollback_rows_fetches_a_run_in_order_and_stops_at_the_end() {
+    let mut s = Screen::with_scrollback(10, 3, 50);
+    for i in 0..20 {
+        s.advance(format!("{i}\r\n").as_bytes());
+    }
+    let len = s.scrollback_len();
+    assert!(len >= 10);
+    let run = s.scrollback_rows(2, 3);
+    assert_eq!(run.len(), 3);
+    for (k, row) in run.iter().enumerate() {
+        assert_eq!(row.text(), s.scrollback_row(2 + k).unwrap().text());
+    }
+    // A run past the end is cut, not padded.
+    assert_eq!(s.scrollback_rows(len - 2, 10).len(), 2);
+    assert!(s.scrollback_rows(len, 5).is_empty());
+    // The engine's own frame is always live.
+    let f = s.frame();
+    assert_eq!(f.viewport_offset, 0);
+    assert!(!f.scrolled_back);
+}
+
 /// Found by the split-at-every-byte tests: the engine does not mark a row dirty
 /// when a combining mark is attached to the cell before the cursor, so a render
 /// state that kept rows between updates lost marks sent in a later write than
