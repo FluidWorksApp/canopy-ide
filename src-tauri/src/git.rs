@@ -1712,6 +1712,13 @@ pub async fn git_log(
 // The GitHub CLI is used rather than the REST API directly: it already holds
 // the user's auth in the system keyring, so we never handle a token.
 
+/// One check that has not passed. `state` is "running", "queued" or "failed".
+#[derive(Serialize, Clone, Debug, PartialEq, Eq)]
+pub struct PrCheckRun {
+    pub name: String,
+    pub state: String,
+}
+
 #[derive(Serialize, Clone)]
 pub struct PrInfo {
     pub number: u32,
@@ -1734,6 +1741,9 @@ pub struct PrInfo {
     pub checks: String,
     /// Human count for a tooltip, e.g. "3/4 checks passed" ("" when none).
     pub checks_summary: String,
+    /// The checks that have not passed, by name, so a panel can say which are
+    /// running rather than only how many. Passed checks are left out.
+    pub check_runs: Vec<PrCheckRun>,
     /// Full object id of the head commit ("" when gh did not say) — what a
     /// review request pins, and what a reviewer re-checks before submitting.
     pub head_sha: String,
@@ -1741,7 +1751,7 @@ pub struct PrInfo {
     pub base_sha: String,
 }
 
-/// Collapse gh's `statusCheckRollup` (a mix of CheckRun and StatusContext
+/// Collapse gh's `statusCheckRollup` (a mix of PrCheckRun and StatusContext
 /// entries with different shapes) into one state plus a "passed/total" summary.
 /// Any failure wins over pending, pending over success — the same precedence
 /// GitHub shows on the merge box.
@@ -1783,6 +1793,50 @@ fn roll_up_checks(rollup: &serde_json::Value) -> (String, String) {
         "PASS"
     };
     (state.to_string(), format!("{passed}/{total} checks passed"))
+}
+
+/// The checks in gh's `statusCheckRollup` that have not passed, named.
+/// Same classification as `roll_up_checks`, so the two never disagree.
+fn unfinished_checks(rollup: &serde_json::Value) -> Vec<PrCheckRun> {
+    let Some(items) = rollup.as_array() else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for it in items {
+        let name = it["name"]
+            .as_str()
+            .or_else(|| it["context"].as_str())
+            .unwrap_or("")
+            .to_string();
+        let state = if let Some(state) = it["state"].as_str() {
+            match state {
+                "SUCCESS" => continue,
+                "PENDING" | "EXPECTED" => "running",
+                _ => "failed",
+            }
+        } else {
+            match it["status"].as_str().unwrap_or("") {
+                "COMPLETED" => match it["conclusion"].as_str().unwrap_or("") {
+                    "SUCCESS" | "NEUTRAL" | "SKIPPED" => continue,
+                    _ => "failed",
+                },
+                "QUEUED" | "WAITING" | "PENDING" | "REQUESTED" => "queued",
+                _ => "running",
+            }
+        };
+        // The rollup repeats a name (push and pull_request runs, matrix legs).
+        if !name.is_empty()
+            && !out
+                .iter()
+                .any(|c: &PrCheckRun| c.name == name && c.state == state)
+        {
+            out.push(PrCheckRun {
+                name,
+                state: state.to_string(),
+            });
+        }
+    }
+    out
 }
 
 /// gh infers the repository from the working directory, which avoids parsing
@@ -1943,6 +1997,7 @@ pub async fn gh_pr_list(
                         mergeable: p["mergeable"].as_str().unwrap_or("UNKNOWN").to_string(),
                         checks,
                         checks_summary,
+                        check_runs: unfinished_checks(&p["statusCheckRollup"]),
                         head_sha: full_sha(p["headRefOid"].as_str()),
                         base_sha: full_sha(p["baseRefOid"].as_str()),
                     }
@@ -6305,6 +6360,33 @@ index 333..444 100644
         assert!(is_protected_branch("release", "origin/release"));
         // A normal feature branch is not protected.
         assert!(!is_protected_branch("feature/x", "origin/main"));
+    }
+
+    #[test]
+    fn unfinished_checks_names_what_has_not_passed() {
+        let rollup = json!([
+            {"name": "build", "status": "COMPLETED", "conclusion": "SUCCESS"},
+            {"name": "lint", "status": "IN_PROGRESS"},
+            {"name": "e2e", "status": "QUEUED"},
+            {"name": "unit", "status": "COMPLETED", "conclusion": "FAILURE"},
+            {"context": "ci/legacy", "state": "PENDING"},
+            {"context": "ci/ok", "state": "SUCCESS"},
+            {"name": "lint", "status": "IN_PROGRESS"}
+        ]);
+        let got: Vec<(String, String)> = unfinished_checks(&rollup)
+            .into_iter()
+            .map(|c| (c.name, c.state))
+            .collect();
+        assert_eq!(
+            got,
+            vec![
+                ("lint".to_string(), "running".to_string()),
+                ("e2e".to_string(), "queued".to_string()),
+                ("unit".to_string(), "failed".to_string()),
+                ("ci/legacy".to_string(), "running".to_string()),
+            ]
+        );
+        assert!(unfinished_checks(&json!(null)).is_empty());
     }
 
     #[test]

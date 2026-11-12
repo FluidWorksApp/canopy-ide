@@ -2681,6 +2681,16 @@ export function PrView({
                       <span className="pr-round-took">{pr.checks_summary}</span>
                     )}
                   </div>
+                  {!!pr.check_runs?.length && liveChecks !== "PASS" && (
+                    <ul className="pr-check-list" aria-label="Checks not yet passed">
+                      {pr.check_runs.map((c, i) => (
+                        <li key={`${i}:${c.name}`} className={`pr-check-${c.state}`}>
+                          <span className="pr-check-state">{c.state}</span>
+                          <span className="pr-check-name">{c.name}</span>
+                        </li>
+                      ))}
+                    </ul>
+                  )}
                   {liveChecks === "FAIL" && (
                     <div className="pr-thread-actions">
                       <Button size="sm"

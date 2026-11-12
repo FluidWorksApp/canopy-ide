@@ -3860,6 +3860,8 @@ export interface PrInfo {
   checks: string;
   /** Human count for a tooltip, e.g. "3/4 checks passed" ("" when none). */
   checks_summary: string;
+  /** Checks that have not passed, by name (absent from an older backend). */
+  check_runs?: { name: string; state: "running" | "queued" | "failed" }[];
   /** Full head commit id ("" or absent when gh did not say). */
   head_sha?: string;
   /** Full base branch tip id ("" or absent when gh did not say). */

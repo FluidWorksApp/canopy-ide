@@ -685,6 +685,20 @@ export function AgentDetailsCard({
         </div>
       )}
 
+      {pr && !!pr.check_runs?.length && (
+        <ul className="agent-card-checks" aria-label="Checks not yet passed">
+          {pr.check_runs.slice(0, 5).map((c, i) => (
+            <li key={`${i}:${c.name}`} className={`agent-card-check-${c.state}`}>
+              <span className="agent-card-check-state">{c.state}</span>
+              <span className="agent-card-grow agent-card-ellipsis">{c.name}</span>
+            </li>
+          ))}
+          {pr.check_runs.length > 5 && (
+            <li>+{pr.check_runs.length - 5} more</li>
+          )}
+        </ul>
+      )}
+
       {pr && repo && !remoteMachine && pr.state.toUpperCase() === "OPEN" && (
         <div
           className="agent-card-row agent-card-merge"
