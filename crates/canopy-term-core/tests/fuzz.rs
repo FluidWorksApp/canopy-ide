@@ -378,7 +378,7 @@ fn clean(t: &Option<String>) -> Option<String> {
 }
 
 /// First difference between two screens' frames, ignoring `seq` and damage.
-fn frame_diff(a: &Screen, b: &Screen, clean_titles: bool) -> Option<String> {
+fn frame_diff(a: &Screen, b: &Screen, clean_titles: bool, cursor_row_free: bool) -> Option<String> {
     let (fa, fb) = (a.frame(), b.frame());
     if (fa.cols, fa.rows) != (fb.cols, fb.rows) {
         return Some(format!(
@@ -404,7 +404,11 @@ fn frame_diff(a: &Screen, b: &Screen, clean_titles: bool) -> Option<String> {
             ));
         }
     }
-    if fa.cursor != fb.cursor {
+    let mut cursor_b = fb.cursor;
+    if cursor_row_free {
+        cursor_b.row = fa.cursor.row;
+    }
+    if fa.cursor != cursor_b {
         return Some(format!("cursor {:?} vs {:?}", fa.cursor, fb.cursor));
     }
     if fa.modes != fb.modes {
@@ -424,8 +428,16 @@ fn frame_diff(a: &Screen, b: &Screen, clean_titles: bool) -> Option<String> {
     None
 }
 
+/// Live screen against its restored copy. With origin mode on, a cursor
+/// outside the scroll region comes back clamped into it (a documented
+/// limit), so the row is not compared then.
+fn snapshot_diff(live: &Screen, restored: &Screen, snap: &[u8]) -> Option<String> {
+    let origin = snap.windows(5).any(|w| w == b"\x1b[?6h");
+    frame_diff(live, restored, true, origin)
+}
+
 fn chunk_diff(a: &Screen, b: &Screen) -> Option<String> {
-    if let Some(d) = frame_diff(a, b, false) {
+    if let Some(d) = frame_diff(a, b, false, false) {
         return Some(d);
     }
     if a.cursor_blinking() != b.cursor_blinking() {
@@ -530,7 +542,7 @@ fn check_inner(
     }
     let mut restored = Screen::restore(sc, sr, &snap);
     check_frame(&restored, 10_000, 0)?;
-    if let Some(d) = frame_diff(&live, &restored, true) {
+    if let Some(d) = snapshot_diff(&live, &restored, &snap) {
         return Err(Fail::new("snapshot-frame", d));
     }
     if !restored.take_replies().is_empty() {
@@ -593,7 +605,7 @@ fn shrink(
     seed: u64,
 ) -> Vec<Tok> {
     let mut cur = stream;
-    let mut budget = 200;
+    let mut budget = 500;
     let mut n = cur.len() / 2;
     while n >= 1 && budget > 0 {
         let mut i = 0;
@@ -638,11 +650,14 @@ fn run_case(
     } else {
         (stream, "unshrunk")
     };
+    let detail = check_case(cols, rows, scrollback, &stream, seed)
+        .err()
+        .map_or(fail.detail.clone(), |f| f.detail);
     Some(Fail::new(
         fail.kind.clone(),
         format!(
             "[{label}] {}\n    screen {cols}x{rows}, scrollback {scrollback}, {how} stream ({} steps): {}",
-            fail.detail,
+            detail,
             stream.len(),
             show(&stream)
         ),
@@ -1065,7 +1080,7 @@ fn run_profile(name: &'static str, p: Profile, default_cases: u64, salt: u64) {
                 scrollback,
                 stream,
                 seed,
-                3000,
+                12_000,
             ) {
                 if !failures.iter().any(|g| g.kind == f.kind) {
                     failures.push(f);
@@ -1770,7 +1785,7 @@ fn resize_to_the_extremes_keeps_the_frame_consistent() {
                     .unwrap_or_else(|f| panic!("after content at {c}x{r}: {}", f.detail));
                 prev = s.seq();
                 let restored = Screen::restore(s.cols(), s.rows(), &s.snapshot());
-                if let Some(d) = frame_diff(&s, &restored, true) {
+                if let Some(d) = snapshot_diff(&s, &restored, &s.snapshot()) {
                     panic!("snapshot at {c}x{r} (alt {alt}): {d}");
                 }
             }

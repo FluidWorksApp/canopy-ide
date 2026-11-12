@@ -43,7 +43,9 @@
 //! Not carried: the primary screen contents behind an active alternate screen,
 //! tab stops, saved-cursor (DECSC) slots, character sets, a pending autowrap at
 //! the last column, an empty scroll region, kitty stack entries below the top,
-//! a soft wrap on the bottom row, the palette (OSC 4/10/11/12), underline
+//! a soft wrap on the bottom row, a one-row scroll region, a cursor outside
+//! the scroll region while origin mode is on (it is put at the nearest row of
+//! the region), the palette (OSC 4/10/11/12), underline
 //! styles and colour, and hyperlinks (OSC 8).
 //!
 //! # Bounds
@@ -198,6 +200,9 @@ pub struct Screen {
     reply_colors: [Option<Rgb>; 3],
     filtered: Vec<u8>,
     actions: Vec<(usize, Action)>,
+    /// An incomplete UTF-8 sequence at the end of the last `advance`, held
+    /// until its remaining bytes arrive: see `incomplete_utf8_tail`.
+    utf8_tail: Vec<u8>,
     cols: u16,
     rows: u16,
     frame: Frame,
@@ -208,6 +213,21 @@ pub struct Screen {
     /// The cursor's template cell: the pen the next character is drawn with.
     pen: Cell,
     blinking: bool,
+}
+
+/// Length of the incomplete UTF-8 sequence at the end of `bytes` (0 when the
+/// bytes end on a character boundary or in bytes that can never complete).
+fn incomplete_utf8_tail(bytes: &[u8]) -> usize {
+    for k in 1..=3usize.min(bytes.len()) {
+        let tail = &bytes[bytes.len() - k..];
+        if tail[0] >= 0xC0 {
+            return match std::str::from_utf8(tail) {
+                Err(e) if e.valid_up_to() == 0 && e.error_len().is_none() => k,
+                _ => 0,
+            };
+        }
+    }
+    0
 }
 
 fn convert_color(c: EngineColor) -> Color {
@@ -414,6 +434,7 @@ impl Screen {
             reply_colors: [None; 3],
             filtered: Vec::new(),
             actions: Vec::new(),
+            utf8_tail: Vec::new(),
             cols,
             rows,
             frame: Frame::blank(cols, rows),
@@ -441,11 +462,24 @@ impl Screen {
         if bytes.is_empty() {
             return;
         }
+        // The engine's parser loses the bytes after a UTF-8 sequence that
+        // straddles two feeds, so no feed it gets ends inside one: an
+        // incomplete sequence at the end is held until the next call.
+        let tail = std::mem::take(&mut self.utf8_tail);
+        let joined;
+        let input: &[u8] = if tail.is_empty() {
+            bytes
+        } else {
+            joined = [tail.as_slice(), bytes].concat();
+            &joined
+        };
+        let (input, held) = input.split_at(input.len() - incomplete_utf8_tail(input));
+        self.utf8_tail = held.to_vec();
         let mut filtered = std::mem::take(&mut self.filtered);
         let mut actions = std::mem::take(&mut self.actions);
         filtered.clear();
         actions.clear();
-        self.filter.feed(bytes, &mut filtered, &mut actions);
+        self.filter.feed(input, &mut filtered, &mut actions);
         let mut start = 0;
         for (at, action) in actions.drain(..) {
             self.feed_engine(&filtered[start..at]);
@@ -464,9 +498,20 @@ impl Screen {
     }
 
     fn feed_engine(&mut self, bytes: &[u8]) {
-        for slice in bytes.chunks(TRIM_SLICE) {
+        let mut rest = bytes;
+        while !rest.is_empty() {
+            let mut n = rest.len().min(TRIM_SLICE);
+            if n < rest.len() {
+                // Do not cut a UTF-8 sequence in two.
+                let keep = incomplete_utf8_tail(&rest[..n]);
+                if keep < n {
+                    n -= keep;
+                }
+            }
+            let (slice, tail) = rest.split_at(n);
             self.processor.advance(&mut self.term, slice);
             self.trim_visible();
+            rest = tail;
         }
     }
 
@@ -845,7 +890,8 @@ impl Screen {
         // Scroll region (homes the cursor), origin mode (homes it again,
         // relative to the region), then the cursor itself.
         let top = match t.region {
-            Some((start, end)) if start < end => {
+            // A one-row region cannot be written (`CSI t;b r` needs t < b).
+            Some((start, end)) if start + 1 < end => {
                 let _ = write!(out, "\x1b[{};{}r", start + 1, end);
                 start
             }
