@@ -33,6 +33,11 @@ use std::sync::Arc;
 /// feeds image protocols and size reports, neither of which we answer.
 const CELL_PX: (u32, u32) = (8, 16);
 
+/// Read every row every time. CI showed a combining mark fed in a later write
+/// than its base character missing from the frame; until it is known whether
+/// that is the engine or the Clean shortcut below, nothing is skipped.
+const ALWAYS_READ: bool = true;
+
 /// Longest hyperlink URI kept, in bytes. Longer links are dropped.
 const MAX_URI_BYTES: usize = 2048;
 
@@ -336,7 +341,7 @@ fn read_grid(
     // partly dirty one is read in full: its per-row dirty bits are reset below
     // but not yet trusted to skip rows (a scroll moves rows whose bits are
     // clear), and damage is found by comparing rows either way.
-    let full = force_full || prev.is_none() || dirty != Dirty::Clean;
+    let full = ALWAYS_READ || force_full || prev.is_none() || dirty != Dirty::Clean;
     let mut g = Grid {
         cells: Vec::with_capacity(cols * rows),
         clusters: vec![String::new()],

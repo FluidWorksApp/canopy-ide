@@ -222,7 +222,7 @@ jobs:
       - name: Test canopy-term-core with the ghostty feature
         run: >
           cargo test --locked --manifest-path crates/canopy-term-core/Cargo.toml
-          --features ghostty --lib --test screen --test conformance --test fuzz --test ghostty
+          --features ghostty --no-fail-fast --lib --test screen --test conformance --test fuzz --test ghostty
 
   term-cli:
     name: canopy-term (${{ matrix.os }})
