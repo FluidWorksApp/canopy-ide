@@ -20,6 +20,8 @@
 //! * [`lines`]: selection over scrollback and the live screen (absolute
 //!   lines), word and line boundaries, multi-click and drag extension.
 //! * [`overlay`]: text drawn over a copy of the frame (the scrollback badge).
+//! * [`search`], [`findbar`]: searching scrollback and the screen, and the find
+//!   bar (editing, keys, layout, drawing, match highlighting).
 //!
 //! The `window` feature (on by default) adds [`window::run`], which owns the
 //! winit loop, the wgpu surface and the AccessKit adapter, and maps winit key,
@@ -36,10 +38,12 @@
 pub mod a11y;
 pub mod blink;
 pub mod compose;
+pub mod findbar;
 pub mod grid;
 pub mod ime;
 pub mod lines;
 pub mod overlay;
+pub mod search;
 pub mod selection;
 pub mod shortcuts;
 pub mod viewport;

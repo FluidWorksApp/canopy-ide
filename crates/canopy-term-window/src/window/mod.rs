@@ -40,9 +40,13 @@ pub use gpu::choose_format;
 
 use keymap::{map_key, mods_from, mouse_button, reports_mouse, wheel_steps, KeyParts};
 
-use crate::a11y::{A11yTree, UiExtras};
+use crate::a11y::{find_button_of, A11yTree, UiExtras, FIND_INPUT_ID};
 use crate::blink::CursorBlink;
 use crate::compose::Composer;
+use crate::findbar::{
+    draw as draw_find_bar, highlight, key_to_find, layout as find_layout, FindBar, FindButton,
+    FindEvent, FindKey, Nav,
+};
 use crate::grid::{cell_at, grid_size, CellPx, FontZoom, PxRect};
 use crate::ime::{cursor_area, preedit_cols, ImeAction, ImeEvent, ImeGate};
 use crate::lines::{self, AbsSelection, ClickTracker, Granularity, Lines, SelectionDrag};
@@ -223,9 +227,10 @@ fn scrolled_frame<S: FrameSource>(
 }
 
 /// What the accessibility tree says besides the screen.
-fn extras_for(viewport: &Viewport, total: usize) -> UiExtras {
+fn extras_for(viewport: &Viewport, total: usize, find: &FindBar, cols: u16, rows: u16) -> UiExtras {
     UiExtras {
         scrollback: (!viewport.is_live()).then(|| (viewport.offset(), total)),
+        find: find.is_open().then(|| find.a11y(cols, rows)),
     }
 }
 
@@ -305,9 +310,16 @@ struct App<S> {
     viewport: Viewport,
     history_len: usize,
     alt_seen: bool,
-    /// The last frame drawn was a scrolled view (so the next live frame must
-    /// be redrawn in full).
-    scrolled_drawn: bool,
+    /// The last frame drawn carried an overlay (the scrollback badge or the
+    /// find bar), so the next frame without one must be redrawn in full.
+    overlay_drawn: bool,
+    /// The find bar: its query and results (open or closed).
+    find: FindBar,
+    /// Where the bar drew its caret last (row, column), for the IME window.
+    find_caret: Option<(u16, u16)>,
+    /// The next refresh of the results must search everything again (resize,
+    /// alternate-screen switch).
+    find_full: bool,
     pointer: Option<(f64, f64)>,
     mods: ModifiersState,
     focused: bool,
@@ -354,7 +366,10 @@ impl<S: FrameSource> App<S> {
             viewport: Viewport::default(),
             history_len: 0,
             alt_seen: false,
-            scrolled_drawn: false,
+            overlay_drawn: false,
+            find: FindBar::default(),
+            find_caret: None,
+            find_full: false,
             pointer: None,
             mods: ModifiersState::empty(),
             focused: true,
@@ -451,8 +466,163 @@ impl<S: FrameSource> App<S> {
             self.drag = None;
             self.clicks.reset();
             self.viewport.to_bottom();
+            self.find_full = true;
         }
         self.viewport.follow(prev, self.history_len);
+    }
+
+    /// The absolute line shown on the bottom screen row.
+    fn view_bottom(&self) -> usize {
+        let rows = self.frame.as_ref().map_or(self.grid.1, |f| f.rows);
+        self.top_line() + rows.saturating_sub(1) as usize
+    }
+
+    /// Brings the find results up to date with the transcript.
+    fn refresh_find(&mut self) {
+        let Some(frame) = self.frame.as_ref() else {
+            return;
+        };
+        if std::mem::take(&mut self.find_full) {
+            self.find.state_mut().reset_cache();
+        }
+        let src = SourceLines {
+            source: &self.source,
+            live: frame,
+            total: self.history_len,
+        };
+        self.find.state_mut().refresh(&src, self.history_len);
+    }
+
+    /// Scrolls the current match into view and redraws.
+    fn reveal_current(&mut self) {
+        let rows = self.frame.as_ref().map(|f| f.rows);
+        if let (Some(m), Some(rows)) = (self.find.state().current(), rows) {
+            if self.viewport.reveal(m.line, self.history_len, rows) {
+                self.clicks.reset();
+            }
+        }
+        self.request_redraw();
+    }
+
+    /// Does what a find bar key or button asked.
+    fn apply_find(&mut self, ev: FindEvent) {
+        match ev {
+            FindEvent::Nothing => {}
+            FindEvent::Redraw => self.request_redraw(),
+            FindEvent::QueryChanged | FindEvent::CaseChanged => {
+                self.find_full = true;
+                self.refresh_find();
+                if self.find.state().current().is_none() {
+                    let bottom = self.view_bottom();
+                    self.find.state_mut().pick_initial(bottom);
+                }
+                self.reveal_current();
+            }
+            FindEvent::Next | FindEvent::Prev => {
+                self.refresh_find();
+                if ev == FindEvent::Next {
+                    self.find.state_mut().next();
+                } else {
+                    self.find.state_mut().prev();
+                }
+                self.reveal_current();
+            }
+            FindEvent::Close => self.close_find(),
+        }
+    }
+
+    /// The selected text, when it is one short line (what Cmd+F starts with).
+    fn selected_line_text(&self) -> Option<String> {
+        let (s, frame) = (self.sel?, self.frame.as_ref()?);
+        if s.block || s.anchor.0 != s.head.0 {
+            return None;
+        }
+        let src = SourceLines {
+            source: &self.source,
+            live: frame,
+            total: self.history_len,
+        };
+        let text = lines::selection_text(&s, &src);
+        let t = text.trim();
+        (!t.is_empty() && t.chars().count() <= 200).then(|| t.to_string())
+    }
+
+    fn open_find(&mut self) {
+        let prefill = self.selected_line_text();
+        self.find.open(prefill.as_deref());
+        self.drag = None;
+        self.ime_area = None;
+        let ev = if self.find.state().query().is_empty() {
+            FindEvent::Redraw
+        } else {
+            FindEvent::QueryChanged
+        };
+        self.apply_find(ev);
+    }
+
+    fn close_find(&mut self) {
+        self.find.close();
+        self.find_caret = None;
+        self.ime_area = None;
+        self.request_redraw();
+    }
+
+    /// A key press while the find bar is open.
+    fn find_key(&mut self, event: &KeyEvent) {
+        let nav = match &event.logical_key {
+            Key::Named(n) => match n {
+                NamedKey::Enter => Nav::Enter,
+                NamedKey::Escape => Nav::Escape,
+                NamedKey::Backspace => Nav::Backspace,
+                NamedKey::Delete => Nav::Delete,
+                NamedKey::ArrowLeft => Nav::Left,
+                NamedKey::ArrowRight => Nav::Right,
+                NamedKey::Home => Nav::Home,
+                NamedKey::End => Nav::End,
+                NamedKey::F3 => Nav::F3,
+                _ => Nav::Other,
+            },
+            _ => Nav::Other,
+        };
+        let unmodified = unmodified_key(event);
+        let un = match &unmodified {
+            Key::Character(s) => s.as_str(),
+            _ => "",
+        };
+        let key = key_to_find(
+            nav,
+            un,
+            event.text.as_deref(),
+            mods_of(self.mods),
+            Platform::current(),
+        );
+        let ev = match key {
+            Some(k) => self.find.on_key(k),
+            None => FindEvent::Nothing,
+        };
+        self.apply_find(ev);
+    }
+
+    fn find_button(&mut self, b: FindButton) {
+        let ev = match b {
+            FindButton::Case => self.find.on_key(FindKey::ToggleCase),
+            FindButton::Prev => FindEvent::Prev,
+            FindButton::Next => FindEvent::Next,
+            FindButton::Close => FindEvent::Close,
+        };
+        self.apply_find(ev);
+    }
+
+    /// With the bar open and the pointer on its row: the button under the
+    /// pointer, if any.
+    fn bar_hit(&self) -> Option<Option<FindButton>> {
+        if !self.find.is_open() {
+            return None;
+        }
+        let (row, col) = self.pointer_cell()?;
+        let f = self.frame.as_ref()?;
+        let l = find_layout(f.cols, f.rows);
+        (row == l.row).then(|| l.hit(col))
     }
 
     /// The program's current modes, from the source: they can be newer than
@@ -499,6 +669,9 @@ impl<S: FrameSource> App<S> {
         if got || had {
             self.frame = Some(frame);
         }
+        if got && self.find.is_open() {
+            self.refresh_find();
+        }
         if self.source.closed() {
             self.exit = true;
         }
@@ -522,6 +695,7 @@ impl<S: FrameSource> App<S> {
             self.sel = None;
             self.drag = None;
             self.clicks.reset();
+            self.find_full = true;
             self.source.resize(grid.0, grid.1);
             self.pull();
         }
@@ -592,7 +766,11 @@ impl<S: FrameSource> App<S> {
             if self.scroll_key(&event.logical_key) {
                 return;
             }
-        } else if self.ime.composing() {
+            if self.find.is_open() {
+                self.find_key(&event);
+                return;
+            }
+        } else if self.ime.composing() || self.find.is_open() {
             return;
         }
         let unmodified = unmodified_key(&event);
@@ -687,6 +865,7 @@ impl<S: FrameSource> App<S> {
                     let _ = cb.set_text(text);
                 }
             }
+            Shortcut::Find => self.open_find(),
             Shortcut::Paste => {
                 let text = self
                     .view
@@ -694,6 +873,12 @@ impl<S: FrameSource> App<S> {
                     .and_then(|v| v.clipboard.as_mut())
                     .and_then(|cb| cb.get_text().ok());
                 if let Some(text) = text {
+                    // With the find bar open a paste goes into the query.
+                    if self.find.is_open() {
+                        let ev = self.find.insert_text(&text);
+                        self.apply_find(ev);
+                        return;
+                    }
                     let sent = self.source.paste(&text);
                     if self.input_sent(sent) {
                         self.snap_to_bottom();
@@ -724,16 +909,21 @@ impl<S: FrameSource> App<S> {
             ImeAction::Redraw => {
                 self.ime_area = None;
                 // The composition is drawn at the live cursor.
-                if self.ime.composing() {
+                if self.ime.composing() && !self.find.is_open() {
                     self.snap_to_bottom();
                 }
                 self.request_redraw();
             }
             ImeAction::Send(text) => {
                 self.ime_area = None;
-                let sent = self.source.text(&text);
-                if self.input_sent(sent) {
-                    self.snap_to_bottom();
+                if self.find.is_open() {
+                    let ev = self.find.insert_text(&text);
+                    self.apply_find(ev);
+                } else {
+                    let sent = self.source.text(&text);
+                    if self.input_sent(sent) {
+                        self.snap_to_bottom();
+                    }
                 }
             }
         }
@@ -746,12 +936,13 @@ impl<S: FrameSource> App<S> {
             return;
         };
         let cols = self.ime.preedit().map_or(0, preedit_cols);
-        let area = cursor_area(
-            (f.cursor.row, f.cursor.col),
-            cols,
-            cell_px(&v.layout),
-            f.cols,
-        );
+        // While the find bar is open the composition is in its text box.
+        let at = match (self.find.is_open(), self.find_caret) {
+            (true, Some((row, col))) => (row, col.saturating_sub(cols)),
+            (true, None) => (f.rows.saturating_sub(1), 0),
+            (false, _) => (f.cursor.row, f.cursor.col),
+        };
+        let area = cursor_area(at, cols, cell_px(&v.layout), f.cols);
         if self.ime_area != Some(area) {
             v.window.set_ime_cursor_area(
                 PhysicalPosition::new(area.x, area.y),
@@ -821,6 +1012,15 @@ impl<S: FrameSource> App<S> {
     }
 
     fn on_mouse_button(&mut self, state: ElementState, button: MouseButton) {
+        // A click on the find bar is the bar's, not the program's or a selection's.
+        if state == ElementState::Pressed && button == MouseButton::Left {
+            if let Some(hit) = self.bar_hit() {
+                if let Some(b) = hit {
+                    self.find_button(b);
+                }
+                return;
+            }
+        }
         // The program asked for the mouse (and Shift is not held): report it.
         // A release is reported for a press that was, even if Shift came down
         // in between.
@@ -956,8 +1156,13 @@ impl<S: FrameSource> App<S> {
                 let sel = self
                     .sel
                     .and_then(|s| s.to_screen(top, shown.rows, shown.cols));
-                self.a11y
-                    .set_extras(extras_for(&self.viewport, self.history_len));
+                self.a11y.set_extras(extras_for(
+                    &self.viewport,
+                    self.history_len,
+                    &self.find,
+                    shown.cols,
+                    shown.rows,
+                ));
                 let cell = cell_px(&v.layout);
                 let a11y = &mut self.a11y;
                 v.adapter
@@ -977,6 +1182,29 @@ impl<S: FrameSource> App<S> {
                 if let Some(v) = &self.view {
                     v.window.focus_window();
                 }
+            }
+            Action::Click => {
+                if let Some(b) = find_button_of(req.target_node) {
+                    if self.find.is_open() {
+                        self.find_button(b);
+                    }
+                }
+            }
+            Action::SetValue => {
+                if req.target_node != FIND_INPUT_ID || !self.find.is_open() {
+                    return;
+                }
+                let Some(ActionData::Value(text)) = req.data else {
+                    return;
+                };
+                // A screen reader or voice control replaces the whole query.
+                self.find.on_key(FindKey::Clear);
+                let ev = if text.is_empty() {
+                    FindEvent::QueryChanged
+                } else {
+                    self.find.insert_text(&text)
+                };
+                self.apply_find(ev);
             }
             Action::SetTextSelection => {
                 let Some(ActionData::SetTextSelection(ts)) = req.data else {
@@ -1033,12 +1261,25 @@ impl<S: FrameSource> App<S> {
             .and_then(|s| s.to_screen(top, base.rows, base.cols));
         // The drawn copy carries the badge; leaving the scrolled view redraws
         // the live frame in full once, which wipes it.
-        let marked: Option<Frame> = if scrolled {
+        let find_open = self.find.is_open();
+        let marked: Option<Frame> = if scrolled || find_open {
             let mut f = base.clone();
-            let text = indicator_text(self.viewport.offset(), self.history_len, f.cols);
-            draw_badge(&mut f, &text);
+            if scrolled {
+                let text = indicator_text(self.viewport.offset(), self.history_len, f.cols);
+                draw_badge(&mut f, &text);
+            }
+            if find_open {
+                let rows = f.rows;
+                let state = self.find.state();
+                highlight(&mut f, top, state.visible(top, rows), state.current());
+                // The caret is in the bar, not on the screen.
+                f.cursor.visible = false;
+                let drawn = draw_find_bar(&mut f, &self.find, self.ime.preedit());
+                self.find_caret = drawn.map(|d| d.caret);
+            }
+            f.damage.full = true;
             Some(f)
-        } else if self.scrolled_drawn {
+        } else if self.overlay_drawn {
             let mut f = frame.clone();
             f.damage.full = true;
             Some(f)
@@ -1052,7 +1293,9 @@ impl<S: FrameSource> App<S> {
             focused: self.focused,
         };
         let report = {
-            let composed = self.composer.view(shown, self.ime.preedit());
+            // With the find bar open the composition is drawn in the bar.
+            let preedit = if find_open { None } else { self.ime.preedit() };
+            let composed = self.composer.view(shown, preedit);
             v.builder.build(&composed, &state, &mut v.engine)
         };
         self.composer.drawn(report.held);
@@ -1061,14 +1304,19 @@ impl<S: FrameSource> App<S> {
             // presented or announced until it finishes.
             return;
         }
-        self.scrolled_drawn = scrolled;
+        self.overlay_drawn = scrolled || find_open;
 
         // Screen reader tree: only while one is listening, from the screen
         // as shown without the badge (the badge is a status node, and the
         // composition is the input method's to announce).
         if self.a11y_active {
-            self.a11y
-                .set_extras(extras_for(&self.viewport, self.history_len));
+            self.a11y.set_extras(extras_for(
+                &self.viewport,
+                self.history_len,
+                &self.find,
+                base.cols,
+                base.rows,
+            ));
             if let Some(update) = self
                 .a11y
                 .update(base, cell_px(&v.layout), screen_sel.as_ref())

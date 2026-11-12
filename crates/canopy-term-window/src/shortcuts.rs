@@ -39,6 +39,9 @@ pub enum Shortcut {
     ZoomIn,
     ZoomOut,
     ZoomReset,
+    /// Open the find bar (Cmd+F; Ctrl+Shift+F elsewhere, because plain Ctrl+F
+    /// is the program's forward-char or page-down).
+    Find,
 }
 
 /// The shortcut for a key press, given the character its logical key produces
@@ -59,6 +62,7 @@ pub fn shortcut(key: &str, mods: Mods, platform: Platform) -> Option<Shortcut> {
     match ch.to_ascii_lowercase() {
         'c' => Some(Shortcut::Copy),
         'v' => Some(Shortcut::Paste),
+        'f' => Some(Shortcut::Find),
         '=' | '+' => Some(Shortcut::ZoomIn),
         '-' | '_' => Some(Shortcut::ZoomOut),
         '0' | ')' => Some(Shortcut::ZoomReset),
@@ -117,6 +121,10 @@ mod tests {
         assert_eq!(shortcut("=", CMD, m), Some(Shortcut::ZoomIn));
         assert_eq!(shortcut("-", CMD, m), Some(Shortcut::ZoomOut));
         assert_eq!(shortcut("0", CMD, m), Some(Shortcut::ZoomReset));
+        assert_eq!(shortcut("f", CMD, m), Some(Shortcut::Find));
+        assert_eq!(shortcut("F", CMD, m), Some(Shortcut::Find));
+        // Ctrl+F on macOS is the program's.
+        assert_eq!(shortcut("f", CTRL, m), None);
         // Ctrl+C on macOS is the program's interrupt.
         assert_eq!(shortcut("c", CTRL, m), None);
     }
@@ -129,6 +137,9 @@ mod tests {
         assert_eq!(shortcut("+", CTRL_SHIFT, o), Some(Shortcut::ZoomIn));
         assert_eq!(shortcut("_", CTRL_SHIFT, o), Some(Shortcut::ZoomOut));
         assert_eq!(shortcut(")", CTRL_SHIFT, o), Some(Shortcut::ZoomReset));
+        assert_eq!(shortcut("F", CTRL_SHIFT, o), Some(Shortcut::Find));
+        // Plain Ctrl+F stays the program's (readline forward-char, less).
+        assert_eq!(shortcut("f", CTRL, o), None);
         assert_eq!(shortcut("c", CTRL, o), None);
         assert_eq!(shortcut("-", CTRL, o), None);
         assert_eq!(shortcut("c", CMD, o), None);
