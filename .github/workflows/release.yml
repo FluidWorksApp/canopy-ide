@@ -6,6 +6,11 @@
 #
 # Trigger: push a tag (`git tag v0.1.0 && git push --tags`), or run it by hand
 # from the Actions tab to get artifacts without cutting a release.
+#
+# Terminal app dry run: run it by hand with `term_app_dry_run` ticked to prove
+# that canopy-term-app and canopy-pty-host build for every platform the release
+# will bundle them on. Only the `term-app-dry-run` job runs; no tag, no draft,
+# no signing, no upload.
 name: release
 
 on:
@@ -22,6 +27,10 @@ on:
         description: 'Publish only after all platforms and updater signatures have been verified'
         type: boolean
         default: false
+      term_app_dry_run:
+        description: 'Dry run: only build and verify canopy-term-app (no tag, no signing, no publish; the release jobs are skipped)'
+        type: boolean
+        default: false
 
 concurrency:
   group: release-${{ github.ref }}
@@ -33,6 +42,8 @@ permissions:
 
 jobs:
   preflight:
+    # inputs.* is empty on a tag push, so this is true there.
+    if: ${{ !inputs.term_app_dry_run }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -50,6 +61,96 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           CANOPY_RELEASE_TAG: ${{ github.ref_name }}
         run: node scripts/release-assets.mjs --preflight
+
+  # Proves the terminal app builds where the release will bundle it, without
+  # cutting a release. workflow_dispatch only, and only with term_app_dry_run
+  # ticked. It uses no secrets (not even GITHUB_TOKEN beyond checkout), never
+  # signs (so macOS signing and notarisation are NOT exercised here), creates no
+  # tag or draft, and uploads nothing to a release. Intel macOS is a cross
+  # build from the arm64 runner with the arm64 Zig, like the release build.
+  term-app-dry-run:
+    name: Terminal app dry run (${{ matrix.target }})
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.term_app_dry_run }}
+    runs-on: ${{ matrix.platform }}
+    timeout-minutes: 60
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # macos-15, not macos-latest: macos-latest is now macOS 26, and Zig
+          # 0.15.2 cannot link against its SDK (libghostty-vt-sys fails with
+          # undefined libc symbols: _abort, _bzero, _clock_gettime; seen in
+          # dry run 43159356455). macos-15 is what ci.yml's term-app job uses.
+          - platform: macos-15
+            target: aarch64-apple-darwin
+            arch: arm64
+          - platform: macos-15
+            target: x86_64-apple-darwin
+            arch: x86_64
+          - platform: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+            arch: x86-64
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: ./.github/actions/install-zig
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            ./src-tauri -> target
+            ./crates/canopy-term-app -> target
+          key: release-term-app-${{ matrix.target }}
+      - name: Toolchain versions
+        run: |
+          echo "zig $(zig version)"
+          rustc --version
+          cargo --version
+      - name: Build canopy-term-app
+        run: cargo build --locked --release --target ${{ matrix.target }} --manifest-path crates/canopy-term-app/Cargo.toml
+      - name: Build canopy-pty-host
+        run: cargo build --locked --release --target ${{ matrix.target }} --manifest-path crates/canopy-pty-host/Cargo.toml --bin canopy-pty-host
+      - name: Verify the binaries
+        shell: bash
+        run: |
+          set -euo pipefail
+          app="crates/canopy-term-app/target/${{ matrix.target }}/release/canopy-term-app"
+          host="src-tauri/target/${{ matrix.target }}/release/canopy-pty-host"
+          for b in "$app" "$host"; do
+            [ -s "$b" ] || { echo "::error::$b is missing or empty"; exit 1; }
+            ls -l "$b"
+            file "$b"
+            # The architecture must be the target's, not the runner's.
+            if [ "$RUNNER_OS" = "macOS" ]; then
+              archs="$(lipo -archs "$b")"
+              [ "$archs" = "${{ matrix.arch }}" ] || { echo "::error::$b is $archs, expected ${{ matrix.arch }}"; exit 1; }
+            else
+              file "$b" | grep -q "${{ matrix.arch }}" || { echo "::error::$b is not ${{ matrix.arch }}"; exit 1; }
+            fi
+          done
+          # Sizes go to the job summary: the bundle grows by about this much.
+          {
+            echo "### ${{ matrix.target }}"
+            echo '| binary | bytes |'
+            echo '| --- | --- |'
+            echo "| canopy-term-app | $(wc -c < "$app" | tr -d ' ') |"
+            echo "| canopy-pty-host | $(wc -c < "$host" | tr -d ' ') |"
+          } >> "$GITHUB_STEP_SUMMARY"
+          # No window is opened: this checks the binary loads and parses
+          # arguments. The Intel macOS binary runs under Rosetta where the runner
+          # has it; if it cannot run there, say so rather than fail the build.
+          if [ "${{ matrix.target }}" = "x86_64-apple-darwin" ]; then
+            if arch -x86_64 "$app" --version; then
+              echo "Intel binary ran under Rosetta."
+            else
+              echo "::warning::could not run the Intel binary on this arm64 runner; only its architecture was verified."
+            fi
+          else
+            "$app" --version
+          fi
 
   build:
     needs: preflight

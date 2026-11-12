@@ -1,0 +1,33 @@
+name: Install pinned Zig
+description: >
+  Installs Zig 0.15.2 from the official ziglang.org release and verifies its
+  sha256 before unpacking. libghostty-vt-sys (the engine behind
+  canopy-term-core, so behind canopy-term-app) runs `zig build` from its build
+  script; its build.zig.zon needs 0.15.x. Same pin and checksums as the
+  `Terminal crates` job in ci.yml (checksums from
+  https://ziglang.org/download/index.json). Unix runners only: the release
+  workflow does not ship the terminal app on Windows.
+runs:
+  using: composite
+  steps:
+    - name: Install Zig 0.15.2 (official release, checksum verified)
+      shell: bash
+      env:
+        ZIG_VERSION: 0.15.2
+      run: |
+        set -euo pipefail
+        case "$RUNNER_OS-$RUNNER_ARCH" in
+          Linux-X64)  zig_target=x86_64-linux;  zig_sha256=02aa270f183da276e5b5920b1dac44a63f1a49e55050ebde3aecc9eb82f93239 ;;
+          macOS-ARM64) zig_target=aarch64-macos; zig_sha256=3cc2bab367e185cdfb27501c4b30b1b0653c28d9f73df8dc91488e66ece5fa6b ;;
+          *) echo "::error::no pinned Zig for $RUNNER_OS-$RUNNER_ARCH"; exit 1 ;;
+        esac
+        f="zig-${zig_target}-${ZIG_VERSION}.tar.xz"
+        curl -fsSL -o "$RUNNER_TEMP/$f" "https://ziglang.org/download/${ZIG_VERSION}/$f"
+        echo "${zig_sha256}  $RUNNER_TEMP/$f" | shasum -a 256 -c -
+        mkdir -p "$RUNNER_TEMP/zig"
+        tar -xJf "$RUNNER_TEMP/$f" -C "$RUNNER_TEMP/zig" --strip-components=1
+        echo "$RUNNER_TEMP/zig" >> "$GITHUB_PATH"
+        # Fail here, not deep inside a cargo build, if the toolchain is wrong.
+        got="$("$RUNNER_TEMP/zig/zig" version)"
+        echo "zig $got"
+        [ "$got" = "$ZIG_VERSION" ] || { echo "::error::expected zig $ZIG_VERSION, got $got"; exit 1; }
