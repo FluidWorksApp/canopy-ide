@@ -120,3 +120,300 @@ jobs:
               fi
             done
           done
+
+  # ---------------------------------------------------------------------------
+  # BUILD PROOF (throwaway). Every claim comes from RESULT lines printed here.
+  # ---------------------------------------------------------------------------
+
+  windows:
+    name: proof, windows-2022 (MSVC, native)
+    runs-on: windows-2022
+    timeout-minutes: 60
+    env:
+      MANIFEST: crates/spike-ghostty-vt/Cargo.toml
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Install Zig ${{ env.ZIG_VERSION }} (official zip, checksum verified)
+        shell: pwsh
+        run: |
+          $f = "zig-x86_64-windows-$env:ZIG_VERSION.zip"
+          $out = Join-Path $env:RUNNER_TEMP $f
+          Invoke-WebRequest -Uri "https://ziglang.org/download/$env:ZIG_VERSION/$f" -OutFile $out
+          $want = "3a0ed1e8799a2f8ce2a6e6290a9ff22e6906f8227865911fb7ddedc3cc14cb0c"
+          $got = (Get-FileHash -Algorithm SHA256 $out).Hash.ToLower()
+          if ($got -ne $want) { throw "zig sha256 mismatch: $got" }
+          Write-Output "RESULT zig zip sha256 verified: $got"
+          Expand-Archive -Path $out -DestinationPath (Join-Path $env:RUNNER_TEMP "zigx")
+          $dir = Join-Path $env:RUNNER_TEMP "zigx\zig-x86_64-windows-$env:ZIG_VERSION"
+          Add-Content -Path $env:GITHUB_PATH -Value $dir
+
+      - name: Toolchain versions
+        run: |
+          echo "RESULT zig $(zig version)"
+          echo "RESULT $(rustc --version) host=$(rustc -vV | sed -n 's/^host: //p')"
+          echo "RESULT $(git --version)"
+          echo "RESULT longpaths: system=$(git config --system core.longpaths || echo unset) global=$(git config --global core.longpaths || echo unset)"
+          echo "RESULT $(cmd //c ver | tr -d '\r' | tr -s '\n' ' ')"
+
+      - name: Build libghostty-vt bench, no extra env or flags (timed)
+        id: build
+        continue-on-error: true
+        run: |
+          s=$(date +%s)
+          set +e
+          cargo build --release --locked --manifest-path "$MANIFEST" --features ghostty --bin ghostty
+          rc=$?
+          echo "RESULT windows msvc build exit=$rc time=$(( $(date +%s) - s )) s (cold, includes git clone, Zig fetch, zig build)"
+          exit $rc
+
+      - name: Artifacts produced
+        if: always()
+        run: |
+          ls -la crates/spike-ghostty-vt/target/release/ghostty.exe || true
+          find crates/spike-ghostty-vt/target/release/build -name 'ghostty-vt*' -o -name 'libghostty-vt*' 2>/dev/null | head -20 || true
+
+      - name: Conformance, libghostty-vt on Windows
+        id: conf
+        if: steps.build.outcome == 'success'
+        continue-on-error: true
+        run: |
+          set +e
+          crates/spike-ghostty-vt/target/release/ghostty.exe conf
+          rc=$?
+          echo "RESULT windows conformance exit=$rc"
+          exit $rc
+
+      - name: Outcomes
+        if: always()
+        run: |
+          echo "RESULT windows build=${{ steps.build.outcome }} conformance=${{ steps.conf.outcome }}"
+
+  cross:
+    name: proof, cross ${{ matrix.rust_target }} on ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            rust_target: x86_64-unknown-linux-musl
+            zig_target: x86_64-linux
+            zig_sha256: 02aa270f183da276e5b5920b1dac44a63f1a49e55050ebde3aecc9eb82f93239
+          - os: macos-15
+            rust_target: x86_64-apple-darwin
+            zig_target: aarch64-macos
+            zig_sha256: 3cc2bab367e185cdfb27501c4b30b1b0653c28d9f73df8dc91488e66ece5fa6b
+    env:
+      MANIFEST: crates/spike-ghostty-vt/Cargo.toml
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.rust_target }}
+
+      - name: Install Zig ${{ env.ZIG_VERSION }} (official release, checksum verified)
+        run: |
+          set -euo pipefail
+          f="zig-${{ matrix.zig_target }}-${ZIG_VERSION}.tar.xz"
+          curl -fsSL -o "$RUNNER_TEMP/$f" "https://ziglang.org/download/${ZIG_VERSION}/$f"
+          echo "${{ matrix.zig_sha256 }}  $RUNNER_TEMP/$f" | shasum -a 256 -c -
+          mkdir -p "$RUNNER_TEMP/zig"
+          tar -xJf "$RUNNER_TEMP/$f" -C "$RUNNER_TEMP/zig" --strip-components=1
+          echo "$RUNNER_TEMP/zig" >> "$GITHUB_PATH"
+
+      - name: Toolchain versions
+        run: |
+          echo "RESULT zig $(zig version)"
+          echo "RESULT $(rustc --version) host=$(rustc -vV | sed -n 's/^host: //p') target=${{ matrix.rust_target }}"
+          echo "RESULT runner os=$(uname -s) arch=$(uname -m)"
+
+      - name: Cross build (timed)
+        id: build
+        continue-on-error: true
+        run: |
+          s=$(date +%s)
+          set +e
+          cargo build --release --locked --manifest-path "$MANIFEST" --features ghostty --bin ghostty --target ${{ matrix.rust_target }}
+          rc=$?
+          echo "RESULT cross ${{ matrix.rust_target }} build exit=$rc time=$(( $(date +%s) - s )) s (cold)"
+          exit $rc
+
+      - name: Inspect binary
+        if: steps.build.outcome == 'success'
+        run: |
+          B=crates/spike-ghostty-vt/target/${{ matrix.rust_target }}/release/ghostty
+          ls -la "$B"
+          file "$B" || true
+          echo "RESULT cross ${{ matrix.rust_target }} binary: $(file -b "$B")"
+          if [ "$(uname -s)" = Linux ]; then ldd "$B" 2>&1 || true; else otool -L "$B" || true; fi
+
+      - name: Run conformance (musl runs natively on glibc host; x86_64 macOS via Rosetta)
+        id: conf
+        if: steps.build.outcome == 'success'
+        continue-on-error: true
+        run: |
+          B=crates/spike-ghostty-vt/target/${{ matrix.rust_target }}/release/ghostty
+          set +e
+          if [ "$(uname -s)" = Darwin ]; then
+            echo "RESULT rosetta present: $(/usr/bin/pgrep oahd >/dev/null && echo yes || echo 'oahd not running')"
+            arch -x86_64 "$B" conf
+          else
+            "$B" conf
+          fi
+          rc=$?
+          echo "RESULT cross ${{ matrix.rust_target }} conformance exit=$rc"
+          exit $rc
+
+      - name: Outcomes
+        if: always()
+        run: |
+          echo "RESULT cross ${{ matrix.rust_target }} build=${{ steps.build.outcome }} conformance=${{ steps.conf.outcome }}"
+
+  offline:
+    name: proof, offline vendored build (ubuntu, network namespace)
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      MANIFEST: crates/spike-ghostty-vt/Cargo.toml
+      VENDOR: /home/runner/vendor
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Install Zig ${{ env.ZIG_VERSION }} (official release, checksum verified)
+        run: |
+          set -euo pipefail
+          f="zig-x86_64-linux-${ZIG_VERSION}.tar.xz"
+          curl -fsSL -o "$RUNNER_TEMP/$f" "https://ziglang.org/download/${ZIG_VERSION}/$f"
+          echo "02aa270f183da276e5b5920b1dac44a63f1a49e55050ebde3aecc9eb82f93239  $RUNNER_TEMP/$f" | sha256sum -c -
+          mkdir -p "$RUNNER_TEMP/zig"
+          tar -xJf "$RUNNER_TEMP/$f" -C "$RUNNER_TEMP/zig" --strip-components=1
+          echo "$RUNNER_TEMP/zig" >> "$GITHUB_PATH"
+
+      - name: Online prefetch 1/3, Cargo crates (cargo fetch --locked)
+        run: |
+          cargo fetch --locked --manifest-path "$MANIFEST"
+          du -sh "$HOME/.cargo/registry" | sed 's/^/RESULT cargo registry (all crates, spike graph): /'
+          sys=$(ls -d "$HOME"/.cargo/registry/src/*/libghostty-vt-sys-0.2.2)
+          commit=$(sed -n 's/^const GHOSTTY_COMMIT: &str = "\(.*\)";/\1/p' "$sys/build.rs")
+          repo=$(sed -n 's/^const GHOSTTY_REPO: &str = "\(.*\)";/\1/p' "$sys/build.rs")
+          echo "RESULT -sys crate pins repo=$repo commit=$commit"
+          echo "GHOSTTY_COMMIT=$commit" >> "$GITHUB_ENV"
+          echo "GHOSTTY_REPO=$repo" >> "$GITHUB_ENV"
+          echo "RESULT Cargo.lock sha256: $(sha256sum crates/spike-ghostty-vt/Cargo.lock | cut -d' ' -f1)"
+          grep -A2 'name = "libghostty-vt' crates/spike-ghostty-vt/Cargo.lock
+
+      - name: Online prefetch 2/3, ghostty source at the pinned commit (no .git kept)
+        run: |
+          set -euo pipefail
+          fetch_src() {
+            d="$1"; rm -rf "$d"; mkdir -p "$d"
+            git -C "$d" init -q
+            git -C "$d" remote add origin "$GHOSTTY_REPO"
+            git -C "$d" fetch -q --depth 1 origin "$GHOSTTY_COMMIT"
+            git -C "$d" checkout -q FETCH_HEAD
+            test "$(git -C "$d" rev-parse HEAD)" = "$GHOSTTY_COMMIT"
+          }
+          fetch_src "$VENDOR/ghostty-src"
+          echo "RESULT ghostty HEAD = $(git -C "$VENDOR/ghostty-src" rev-parse HEAD)"
+          # Deterministic checksum of the tree (git archive is reproducible for a commit).
+          git -C "$VENDOR/ghostty-src" archive --format=tar HEAD | sha256sum | sed 's/ .*//' | sed 's/^/RESULT ghostty-src git-archive tar sha256: /'
+          echo "RESULT ghostty-src build.zig.zon minimum_zig_version: $(sed -n 's/.*minimum_zig_version = "\(.*\)".*/\1/p' "$VENDOR/ghostty-src/build.zig.zon")"
+          rm -rf "$VENDOR/ghostty-src/.git"
+          du -sh "$VENDOR/ghostty-src" | sed 's/^/RESULT size ghostty-src (without .git): /'
+          test -f "$VENDOR/ghostty-src/build.zig"
+
+      - name: Online prefetch 3/3, Zig package cache (zig build --fetch=all)
+        run: |
+          set -euo pipefail
+          fetch_zig() {
+            g="$1"; rm -rf "$g"; mkdir -p "$g"
+            ( cd "$VENDOR/ghostty-src" && zig build --fetch=all --global-cache-dir "$g" --cache-dir "$RUNNER_TEMP/zig-local-cache-$$" )
+          }
+          s=$(date +%s)
+          fetch_zig "$VENDOR/zig-global-cache"
+          echo "RESULT zig fetch time: $(( $(date +%s) - s )) s"
+          echo "RESULT zig global cache top level: $(ls -A "$VENDOR/zig-global-cache" | tr '\n' ' ')"
+          test -d "$VENDOR/zig-global-cache/p"
+          echo "RESULT zig package count in p/: $(ls "$VENDOR/zig-global-cache/p" | wc -l)"
+          ls "$VENDOR/zig-global-cache/p" | sed 's/^/RESULT zig pkg: /'
+          du -sh "$VENDOR/zig-global-cache/p" | sed 's/^/RESULT size zig-global-cache\/p (GHOSTTY_ZIG_SYSTEM_DIR): /'
+          du -sh "$VENDOR/zig-global-cache" | sed 's/^/RESULT size zig-global-cache (whole): /'
+          pkgsum() { tar --sort=name --mtime=@0 --owner=0 --group=0 --numeric-owner -cf - -C "$1/p" . | sha256sum | cut -d' ' -f1; }
+          a=$(pkgsum "$VENDOR/zig-global-cache")
+          echo "RESULT zig p/ deterministic tar sha256 (fetch 1): $a"
+          # Reproducibility: second independent fetch into another dir must match.
+          fetch_zig "$VENDOR/zig-global-cache-2"
+          b=$(pkgsum "$VENDOR/zig-global-cache-2")
+          echo "RESULT zig p/ deterministic tar sha256 (fetch 2): $b"
+          if [ "$a" = "$b" ] && [ "$(ls "$VENDOR/zig-global-cache/p")" = "$(ls "$VENDOR/zig-global-cache-2/p")" ]; then echo "RESULT zig package cache reproducible: yes"; else echo "RESULT zig package cache reproducible: NO"; fi
+          rm -rf "$VENDOR/zig-global-cache-2"
+          # Per-package checksum manifest (what to commit next to the vendored dir).
+          ( cd "$VENDOR/zig-global-cache/p" && find . -type f -print0 | sort -z | xargs -0 sha256sum ) > "$RUNNER_TEMP/zig-p.sha256"
+          echo "RESULT zig p/ file checksum manifest: $(wc -l < "$RUNNER_TEMP/zig-p.sha256") files, manifest sha256 $(sha256sum "$RUNNER_TEMP/zig-p.sha256" | cut -d' ' -f1)"
+          # Zig's own default cache must not exist, so the build cannot be using it.
+          ls -la "$HOME/.cache/zig" 2>&1 | sed 's/^/RESULT default zig cache check: /' || true
+
+      - name: Show the network is blocked in the namespace
+        run: |
+          sudo unshare --net -- bash -c '
+            echo "RESULT netns links:"; ip -o link
+            echo "RESULT netns addrs:"; ip -o addr
+            echo "RESULT netns routes: [$(ip route)]"
+            if curl -sS -m 8 -o /dev/null https://github.com 2>/tmp/c.err; then echo "RESULT netns github reachable: YES (block FAILED)"; else echo "RESULT netns github reachable: no ($(cat /tmp/c.err))"; fi
+            if curl -sS -m 8 -o /dev/null https://deps.files.ghostty.org 2>/tmp/c.err; then echo "RESULT netns deps.files.ghostty.org reachable: YES (block FAILED)"; else echo "RESULT netns deps.files.ghostty.org reachable: no ($(cat /tmp/c.err))"; fi
+            if curl -sS -m 8 -o /dev/null https://index.crates.io/config.json 2>/tmp/c.err; then echo "RESULT netns crates index reachable: YES (block FAILED)"; else echo "RESULT netns crates index reachable: no ($(cat /tmp/c.err))"; fi
+          '
+
+      - name: Offline build, GHOSTTY_SOURCE_DIR and GHOSTTY_ZIG_SYSTEM_DIR set, network namespace with no interfaces
+        id: build
+        continue-on-error: true
+        run: |
+          set +e
+          s=$(date +%s)
+          # Fresh target dir so build.rs reruns from scratch (no reused clone or OUT_DIR).
+          sudo unshare --net -- \
+            setpriv --reuid="$(id -u)" --regid="$(id -g)" --init-groups -- \
+            env "PATH=$PATH" "HOME=$HOME" "CARGO_HOME=${CARGO_HOME:-$HOME/.cargo}" "RUSTUP_HOME=${RUSTUP_HOME:-$HOME/.rustup}" \
+                "GHOSTTY_SOURCE_DIR=$VENDOR/ghostty-src" \
+                "GHOSTTY_ZIG_SYSTEM_DIR=$VENDOR/zig-global-cache/p" \
+                "CARGO_TARGET_DIR=$PWD/target-offline" \
+            bash -c '
+              echo "RESULT inside build: links=[$(ip -o link | awk "{print \$2}" | tr "\n" " ")] curl github: $(curl -sS -m 5 -o /dev/null https://github.com 2>&1 | head -1)"
+              cargo build --release --locked --offline --manifest-path '"$MANIFEST"' --features ghostty --bin ghostty
+            '
+          rc=$?
+          echo "RESULT offline build exit=$rc time=$(( $(date +%s) - s )) s"
+          exit $rc
+
+      - name: Offline-built binary conformance
+        id: conf
+        if: steps.build.outcome == 'success'
+        continue-on-error: true
+        run: |
+          set +e
+          target-offline/release/ghostty conf
+          rc=$?
+          echo "RESULT offline-built conformance exit=$rc"
+          exit $rc
+
+      - name: Confirm the offline build did not clone or fetch
+        if: always()
+        run: |
+          o=$(ls -d target-offline/release/build/libghostty-vt-sys-*/out 2>/dev/null | head -1 || true)
+          echo "RESULT OUT_DIR: $o"
+          ls -la "$o" 2>&1 | sed 's/^/RESULT out: /' || true
+          echo "RESULT ghostty-src inside OUT_DIR exists: $(test -e "$o/ghostty-src" && echo yes || echo no)"
+          echo "RESULT stdout of build script mentions Fetching: $(grep -rl 'Fetching ghostty' target-offline/release/build/libghostty-vt-sys-*/output target-offline/release/build/libghostty-vt-sys-*/stderr 2>/dev/null | wc -l)"
+          du -sh target-offline 2>/dev/null | sed 's/^/RESULT size target-offline: /' || true
+
+      - name: Outcomes
+        if: always()
+        run: |
+          echo "RESULT offline build=${{ steps.build.outcome }} conformance=${{ steps.conf.outcome }}"
