@@ -27,6 +27,8 @@ use tauri::ipc::{Channel, InvokeResponseBody};
 use tauri::{AppHandle, Emitter, Manager, State};
 use tokio::sync::broadcast;
 
+pub(crate) mod handover;
+
 const FLUSH_INTERVAL: Duration = Duration::from_millis(10);
 const PENDING_ACK_BATCHES_MAX: usize = 256;
 /// How long the flusher polls for the child's exit status once its output has
@@ -352,6 +354,10 @@ pub struct Session {
     /// When the human last typed, so the CLI's echo of a keystroke is not read
     /// as the agent working.
     last_input_ms: AtomicU64,
+    /// Set when this app gave the terminal to a native window on purpose
+    /// (`handover.rs`): its output ending is then not an exit, so the flusher
+    /// drops the session quietly instead of reporting the terminal gone.
+    handed_over: AtomicBool,
 }
 
 struct DesktopAttachment {
@@ -530,6 +536,11 @@ pub struct PtyManager {
     /// listing and lookup that would treat its working directory or output as
     /// something on this machine.
     proxies: Arc<Mutex<HashMap<u32, Arc<dyn ProxyLink>>>>,
+    /// Terminals a native window holds right now (`handover.rs`), by pty id.
+    /// They are out of `sessions`, because this app has no connection to them,
+    /// but they are still this app's terminals: what it keeps here is what it
+    /// needs to take one back.
+    handed: Mutex<HashMap<u32, handover::Handed>>,
 }
 
 /// The control surface of a proxy session's link to another machine. Closing
@@ -571,6 +582,7 @@ impl Default for PtyManager {
             desktop_delivery_gate: Arc::new(RwLock::new(())),
             stop_hosted_on_quit: AtomicBool::new(false),
             proxies: Default::default(),
+            handed: Default::default(),
         }
     }
 }
@@ -1179,6 +1191,14 @@ impl PtyManager {
     /// Tear a session down (SIGTERM, grace, SIGKILL) on a detached thread, as
     /// `pty_kill` does. Shared with the remote portal's kill/restart controls.
     pub fn kill(&self, id: u32) -> Result<(), String> {
+        // A terminal a native window holds is not this app's to stop from a
+        // stale close (a tab that was showing it, torn down, says kill): the
+        // window owns it until it is taken back or forgotten.
+        if self.handed.lock().unwrap().contains_key(&id) {
+            return Err(format!(
+                "terminal {id} is open in a native window; take it back first"
+            ));
+        }
         let session = self.get(id).ok_or_else(|| format!("no pty session {id}"))?;
         // Mark intent before yielding to the teardown thread. A fast child can
         // exit in this gap; the pty:exit consumer must still know it was asked.
@@ -2887,6 +2907,7 @@ impl PtyManager {
             desktop_ack_latency_total_ms: AtomicU64::new(0),
             desktop_ack_latency_samples: AtomicU64::new(0),
             last_input_ms: AtomicU64::new(0),
+            handed_over: AtomicBool::new(false),
         });
 
         // Commit a desktop session under the same gate as renderer replacement.
@@ -3024,6 +3045,23 @@ impl PtyManager {
                                 }
                             }
                         }
+                    }
+                    // Handed to a native window on purpose: the terminal goes on in
+                    // the host, so this is not an exit. No reap, no `pty:exit`, and
+                    // nothing of the terminal's identity is let go (its bridge
+                    // credential, claims and IDE server stay, for taking it back).
+                    // Removed only if the map still holds this very session: a take
+                    // back may already have put a new one under the same id.
+                    if session.handed_over.load(Ordering::SeqCst) {
+                        drop(session.child.lock().unwrap().take());
+                        let mut map = sessions.lock().unwrap();
+                        if map
+                            .get(&session.id)
+                            .is_some_and(|s| Arc::ptr_eq(s, &session))
+                        {
+                            map.remove(&session.id);
+                        }
+                        return;
                     }
                     // Reap the child so it never lingers as a zombie — but never
                     // let the tab's fate hang on it. A process can wedge partway

@@ -818,6 +818,16 @@ impl HostMaster {
     pub fn raw_mode(&self) -> bool {
         self.client.raw_mode(self.id).unwrap_or(false)
     }
+
+    /// Lets go of the session now, without waiting for every handle to drop:
+    /// the one connection is shut down, so a reader or writer cloned from this
+    /// master is at end-of-file at once, and the host sees its client leave (the
+    /// session is then attached to nobody and its linger clock runs). The child
+    /// is not touched. Used to hand a session to another client on purpose.
+    #[cfg(unix)]
+    pub fn detach(&self) {
+        let _ = self.stream.shutdown(std::net::Shutdown::Both);
+    }
 }
 
 impl MasterPty for HostMaster {
