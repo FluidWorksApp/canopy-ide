@@ -1,4 +1,4 @@
-import { memo, useEffect, useLayoutEffect, useRef, useState } from "react";
+import { Fragment, memo, useEffect, useLayoutEffect, useRef, useState } from "react";
 import type React from "react";
 import { format } from "../shortcuts";
 import type { LifeState } from "../../shared/agentLife";
@@ -11,6 +11,7 @@ import {
   CommitIcon,
   GitBranchIcon,
   GlobeIcon,
+  LinkIcon,
   LiveShareIcon,
   PinIcon,
   PlugIcon,
@@ -44,6 +45,8 @@ import { Button } from "./ui";
 import { CliVersionFloor } from "./CliVersionFloor";
 import { badgeLabel } from "../teamMessaging/unread";
 import { ClaudeIdeBadge } from "./ClaudeIdeBadge";
+import { remoteTabTitle, useTailnetRemote, type TailnetLink } from "../tailnetRemote";
+import * as ipc from "../ipc";
 import { nextTickMs, PREVIEW_TICK_MS } from "../tabPreview";
 import {
   TabPreviewShot,
@@ -123,6 +126,43 @@ function HoverPreview({
       </div>
     </div>
   );
+}
+
+/** The tailnet link behind a terminal tab, if it is one. */
+function tailnetLinkOf(tab: TermSubTab, links: ReadonlyMap<number, TailnetLink>) {
+  const id = tab.attachId ?? tab.ptyId;
+  return id == null ? undefined : links.get(id);
+}
+
+/** Beside a tab whose link dropped: what is happening and what can be done.
+ *  Nothing is shown while connected (or after the remote process ended: the tab
+ *  keeps its output and says "Process exited" itself). */
+function TailnetLinkState({ link, onClose }: { link: TailnetLink; onClose: () => void }) {
+  const phase = link.phase;
+  if (phase.kind === "reconnecting")
+    return (
+      <span className="tab-tailnet-state" role="status">
+        <span>
+          Reconnecting to {link.machine}… (attempt {phase.attempt})
+        </span>
+        <Button size="sm" onClick={onClose}>
+          Close
+        </Button>
+      </span>
+    );
+  if (phase.kind === "lost")
+    return (
+      <span className="tab-tailnet-state" role="status">
+        <span>Lost connection to {link.machine}.</span>
+        <Button size="sm" onClick={() => void ipc.tailnetRemoteReconnect(link.ptyId).catch(() => {})}>
+          Reconnect
+        </Button>
+        <Button size="sm" onClick={onClose}>
+          Close tab
+        </Button>
+      </span>
+    );
+  return null;
 }
 
 function tabTitle(tab: SubTab): string {
@@ -362,6 +402,7 @@ function PaneBarImpl({
   onRefreshInstalled, onRefreshUpdates, onOpenAllTabs,
   activeTabElRef,
 }: PaneBarProps) {
+  const { links: tailnetLinks } = useTailnetRemote();
   // Harbor tabs: the docked active-tab shape is a single element that glides
   // between tabs, staying fused with the editor surface below, instead of the
   // .tab-active styling teleporting. We measure the active tab (via the ref the
@@ -570,9 +611,11 @@ function PaneBarImpl({
                   </span>
                 </>
               )}
-              {group.shown.map((tab) => (
+              {group.shown.map((tab) => {
+                const link = tab.type === "terminal" ? tailnetLinkOf(tab, tailnetLinks) : undefined;
+                return (
+                <Fragment key={tab.id}>
                 <div
-                  key={tab.id}
                   data-flip-id={tab.id}
                   ref={tab.id === activeTabId ? (activeTabElRef as React.RefObject<HTMLDivElement>) : undefined}
                   className={`tab ${isNewTab(tab.id) ? "tab-new" : ""} ${tab.id === activeTabId ? "tab-active" : ""} ${
@@ -583,7 +626,9 @@ function PaneBarImpl({
                     tab.id === stripDrag.dragId ? "tab-dragging" : ""
                   } ${
                     tab.type === "terminal" && tabMemoryWarning?.(tab) ? "tab-memory-warning" : ""
-                  } ${tab.type === "terminal" && tab.machine && tab.machine !== "local" ? "tab-remote" : ""}`}
+                  } ${tab.type === "terminal" && tab.machine && tab.machine !== "local" ? "tab-remote" : ""} ${
+                    link ? "tab-tailnet" : ""
+                  }`}
                   {...stripDrag.itemProps(tab.id)}
                   onMouseEnter={(e) => armHoverPreview(tab, e.currentTarget)}
                   onMouseLeave={cancelHoverPreview}
@@ -593,10 +638,15 @@ function PaneBarImpl({
                     onSelectTab(tab.id, e.detail);
                   }}
                   onContextMenu={(e) => onTabContextMenu(e, tab)}
-                  aria-label={tabTitle(tab)}
+                  aria-label={link ? remoteTabTitle(link.machine, tabTitle(tab)) : tabTitle(tab)}
                 >
                   {tab.type === "terminal" ? (
                     <>
+                      {link && (
+                        <span className="tab-tailnet-glyph" title={`Terminal on ${link.machine}, over Tailscale`}>
+                          <LinkIcon size={11} />
+                        </span>
+                      )}
                       {Boolean(tab.multiplexCount && tab.multiplexCount > 1) && (
                         <span className="tab-multiplex-icon" aria-hidden>▦</span>
                       )}
@@ -671,7 +721,9 @@ function PaneBarImpl({
                       className="tab-title"
                       title={tab.type === "terminal" ? "Double-click or right-click to rename" : undefined}
                     >
-                      {tabText(tab, tab.type === "terminal" && isAgentTab(tab))}
+                      {link
+                        ? remoteTabTitle(link.machine, tabText(tab, tab.type === "terminal" && isAgentTab(tab)))
+                        : tabText(tab, tab.type === "terminal" && isAgentTab(tab))}
                     </span>
                   )}
                   {/* Non-default accounts only — the point is telling two
@@ -710,7 +762,10 @@ function PaneBarImpl({
                     <CloseIcon size={12} />
                   </span>
                 </div>
-              ))}
+                {link && <TailnetLinkState link={link} onClose={() => onCloseTab(tab.id)} />}
+                </Fragment>
+                );
+              })}
               {run === drawn.length - 1 && <span className="tab-strip-tail" aria-hidden />}
             </div>
           );
