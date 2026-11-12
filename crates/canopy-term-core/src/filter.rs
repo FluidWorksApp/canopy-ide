@@ -444,14 +444,16 @@ impl Filter {
                     _ => self.anywhere(b),
                 },
                 St::CsiParam => match b {
+                    // Digits and `;` first: they are most of an SGR, and do not
+                    // overlap the executable C0 bytes tested next.
+                    0x30..=0x39 => self.digit(b),
+                    0x3B => self.param_sep(),
                     _ if is_exec(b) => {}
                     0x20..=0x2F => {
                         self.collect(b);
                         self.st = St::CsiInter;
                     }
-                    0x30..=0x39 => self.digit(b),
                     0x3A => self.subparam_sep(),
-                    0x3B => self.param_sep(),
                     0x3C..=0x3F => self.st = St::CsiIgnore,
                     0x40..=0x7E => self.csi_dispatch(b, actions, out.len() + (i - start)),
                     0x7F => {}

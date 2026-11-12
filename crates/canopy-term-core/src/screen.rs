@@ -688,8 +688,34 @@ impl Screen {
             // old frame or the new row, takes the exact comparison instead.
             let mut diff = false;
             let mut slow = false;
+            // Neighbouring cells mostly share flags and colours: reuse the
+            // last conversion of those and take only the character from the
+            // cell. Cells with extra data or a wide spacer always convert.
+            let mut pen: Option<(u16, EngineColor, EngineColor, Color, Color, u16)> = None;
             for (cell, old) in row[..].iter().zip(old_row) {
-                let nc = convert_cell(cell, &mut local);
+                let f = cell.flags.bits();
+                let nc = match pen {
+                    Some((pf, pfg, pbg, ofg, obg, at))
+                        if pf == f && pfg == cell.fg && pbg == cell.bg && cell.extra.is_none() =>
+                    {
+                        let blank =
+                            cell.c == '\t' || f & Flags::LEADING_WIDE_CHAR_SPACER.bits() != 0;
+                        Cell {
+                            ch: if blank { ' ' } else { cell.c },
+                            cluster: 0,
+                            fg: ofg,
+                            bg: obg,
+                            attrs: Attrs(at),
+                        }
+                    }
+                    _ => {
+                        let nc = convert_cell(cell, &mut local);
+                        if cell.extra.is_none() && f & Flags::WIDE_CHAR_SPACER.bits() == 0 {
+                            pen = Some((f, cell.fg, cell.bg, nc.fg, nc.bg, nc.attrs.0));
+                        }
+                        nc
+                    }
+                };
                 if nc.cluster != 0 || old.cluster != 0 {
                     slow = true;
                 } else if nc != *old {
