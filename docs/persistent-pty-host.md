@@ -1,6 +1,6 @@
 # Persistent PTY host: terminals that outlive the Canopy app
 
-Status: in progress. Local (Unix) host first, off by default. Remote runner and
+Status: in progress. Local (Unix) host first, on by default on Mac and Linux with a Settings → Terminal toggle. Remote runner and
 Tailscale are separate follow-ups described below.
 
 Goal: quitting, updating or crashing the desktop app does not kill the
@@ -16,7 +16,7 @@ are the parent, and tmux would re-emulate the byte stream.
 - The app uses the host on Unix (macOS, Linux) only. Windows keeps in-process
   PTYs in the app; the host itself runs on Windows (see "Windows host" below)
   but nothing in the app calls it there yet.
-- Off by default behind `CANOPY_PTY_HOST=1`. No UI change in this PR, so no mock is owed yet.
+- On by default on Mac and Linux. Settings → Terminal has "Keep terminals running after quit", saved as `terminal.keepRunningAfterQuit` in `~/.canopy/terminal-settings.json` and read once at startup (a restart applies it). `CANOPY_PTY_HOST=0` forces it off and `=1` forces it on, for debugging; the env beats the setting, which beats the platform default (on for Unix, off for Windows).
   With it on, Quit leaves adoptable terminals running in the host (micro-tasks
   and run-bound tabs are still stopped) and the next launch adopts them.
   "Quit and Stop All…" (stacked PR #794; app menu under Quit, ⌥⌘Q on macOS,
@@ -257,7 +257,7 @@ through its own manifest). Tauri places it next to the app binary
 - A host never runs from the bundle. An update replaces the bundle while the
   host keeps running. A translocated app, or an AppImage, runs from a mount that
   goes away when the app quits. And a later launch must never exec a path the
-  update removed. So on first use (`CANOPY_PTY_HOST=1`, Unix) the app reads the
+  update removed. So on first use (host on, Unix) the app reads the
   bundled bytes and installs them as
   `<socket dir>/bin/<app version>-<sha256 prefix>/canopy-pty-host`. The socket
   dir is `~/.canopy/pty-host` (or `pty-host-dev`, or `CANOPY_PTY_HOST_DIR`),

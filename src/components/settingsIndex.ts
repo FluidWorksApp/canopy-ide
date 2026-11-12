@@ -70,6 +70,7 @@ export const SETTINGS_INDEX: SettingEntry[] = [
   { tab: "terminal", name: "Automatic session names", desc: "Agent callsign words.", tag: "New terminals only", keywords: ["titles", "rename", "tab names"] },
   { tab: "terminal", name: "Font and cursor", desc: "Monospace fonts found on this machine.", tag: "New terminals only", keywords: ["font size", "typeface", "cursor style", "blink", "line height"] },
   { tab: "terminal", name: "Scrollback", desc: "Lines kept per terminal. New terminals only.", keywords: ["history", "buffer", "lines", "memory"] },
+  { tab: "terminal", name: "Keep terminals running after quit", desc: "Terminals and agents stay alive for 2 hours after you quit or update, and reconnect on next launch. Applies after restart. Mac and Linux.", keywords: ["persistent", "quit", "update", "background", "reconnect", "survive", "host"] },
   { tab: "privacy", name: "Files outside projects", desc: "Open them from terminal links.", keywords: ["links", "terminal", "outside", "folders", "open file", "privacy"] },
   { tab: "privacy", name: "Crash reporting", desc: "Send crash details anonymously.", keywords: ["telemetry", "diagnostics", "errors", "privacy"] },
   { tab: "remote", name: "Remote access", desc: "Use your agents from your phone.", keywords: ["phone", "mobile", "tunnel", "pairing"] },

@@ -53,7 +53,7 @@ const EXPECTED:Record<string,string[]>={
   "rules":["Rules"],
   "sessions":["At the budget", "Ctrl+Tab switching", "Hibernate idle agents", "Live agents per project", "New agents get a workspace", "Prototype session cap", "Restore sessions I close", "Session budget", "Set up new workspaces", "Settle into Idle after", "Spend & outcomes", "Stack tabs by status", "Workspace ports"],
   "spotsearch":["Conversations to index", "Keep history for", "Scope", "Terminal scrollback", "The index"],
-  "terminal":["Automatic session names", "Font and cursor", "Scrollback"],
+  "terminal":["Automatic session names", "Font and cursor", "Keep terminals running after quit", "Scrollback"],
 };
 
 describe('the settings index',()=>{
@@ -69,7 +69,7 @@ describe('the settings index',()=>{
     for(const r of itemsInSource())(found[r.tab]??=[]).push(r.name);
     for(const tab of Object.keys(found))found[tab].sort();
     expect(found).toEqual(EXPECTED);
-    expect(Object.values(found).flat().length).toBe(82);// none lost, none doubled
+    expect(Object.values(found).flat().length).toBe(83);// none lost, none doubled
   });
   it('shows each setting\'s current description, so a reworded one cannot leave search showing the old text',()=>{
     const stale:string[]=[];

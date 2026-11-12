@@ -178,7 +178,7 @@ automatically build the crate's second binary. It is then bundled through
 `externalBin` in `src-tauri/tauri.conf.json`.
 
 The same script stages `canopy-pty-host` (`crates/canopy-pty-host`), the
-detached process that owns hosted terminals (`CANOPY_PTY_HOST=1`). The app runs
+detached process that owns hosted terminals (on by default on Mac and Linux; Settings → Terminal, or `CANOPY_PTY_HOST=0/1` to force). The app runs
 it from a versioned copy outside the bundle, so an update does not remove it
 from under a running host. See `docs/persistent-pty-host.md`.
 

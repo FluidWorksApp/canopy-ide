@@ -204,7 +204,7 @@ tauri-plugin-notification = "2"
 # Unix signals for killing whole PTY process groups (no zombies)
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
-# Opt-in hosted terminals (pty_hosted.rs); the host binary is its own crate.
+# Hosted terminals (on by default on Unix, a Settings toggle) (pty_hosted.rs); the host binary is its own crate.
 canopy-pty-host = { path = "../crates/canopy-pty-host" }
 
 # desk.rs screen capture. xcap on Linux pulls libpipewire (libspa-sys) which the
