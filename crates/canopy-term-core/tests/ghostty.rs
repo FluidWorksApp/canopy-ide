@@ -1,12 +1,11 @@
 //! What only the libghostty-vt engine offers (events, hyperlinks, prompt marks,
 //! clipboard policy) and what its threading promises. Synthetic input only.
-#![cfg(feature = "ghostty")]
 
 use canopy_term_core::frame::Attrs;
 use canopy_term_core::ghostty::{
     Event, PromptKind, PromptMark, RowMark, MAX_CLIPBOARD_BYTES, MAX_OSC_BYTES,
 };
-use canopy_term_core::GhosttyScreen as Screen;
+use canopy_term_core::Screen;
 
 fn b64(data: &[u8]) -> String {
     const T: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";

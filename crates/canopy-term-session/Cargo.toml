@@ -5,15 +5,16 @@ description = "Headless terminal session: bytes from a session link become frame
 authors = ["Cause Connect Pte Ltd <sam@fluidwords.app>"]
 license = "MIT"
 edition = "2021"
-rust-version = "1.85"
+rust-version = "1.90"
 
 # Its own workspace root with its own lock: parallel work on other crates, and
 # dependencies a track adds, never touch the app's Cargo.lock.
 [workspace]
 
-# Only the two sibling terminal crates; no third-party dependency of its own.
+# The two sibling terminal crates; the engine (libghostty-vt) comes through
+# canopy-term-core.
 [dependencies]
-canopy-term-core = { path = "../canopy-term-core", features = ["screen"] }
+canopy-term-core = { path = "../canopy-term-core" }
 canopy-term-input = { path = "../canopy-term-input" }
 
 # Profiles in a path dependency are ignored, so the emulator's optimised test
@@ -24,6 +25,8 @@ opt-level = 3
 
 [profile.dev.package."*"]
 opt-level = 3
+# Zig ReleaseFast for libghostty-vt-sys: see canopy-term-core/Cargo.toml.
+debug = false
 debug-assertions = false
 overflow-checks = false
 

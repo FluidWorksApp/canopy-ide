@@ -1,6 +1,5 @@
-//! Plain data and limits shared by both emulator back ends (`screen`, on
-//! `alacritty_terminal`, and `ghostty`, on libghostty-vt), so a consumer sees the
-//! same constants and the same [`Row`] whichever engine is behind `Screen`.
+//! Plain data and limits of the emulator (`ghostty`, on libghostty-vt): the
+//! constants and the [`Row`] a consumer sees through `Screen`.
 
 use crate::frame::{Attrs, Cell};
 
