@@ -516,7 +516,7 @@ mod tests {
             ("font_px = 300.5", vec!["font_px", "between 4 and 200"]),
             (
                 "font_px = \"big\"",
-                &["font_px", "expected a number", "string"],
+                vec!["font_px", "expected a number", "string"],
             ),
             (
                 "line_height = 0.1",
@@ -524,13 +524,13 @@ mod tests {
             ),
             (
                 "line_height = true",
-                &["line_height", "expected a number", "boolean"],
+                vec!["line_height", "expected a number", "boolean"],
             ),
             ("padding = -1", vec!["padding", "between 0 and 200"]),
             ("blink = \"no\"", vec!["blink", "true or false", "string"]),
             (
                 "font_family = 3",
-                &["font_family", "expected a string", "integer"],
+                vec!["font_family", "expected a string", "integer"],
             ),
             ("font_family = \"  \"", vec!["font_family", "empty"]),
             ("theme = \"solarized\"", vec!["theme", "solarized", "dark"]),
@@ -538,21 +538,21 @@ mod tests {
             ("fontsize = 3", vec!["fontsize", "known keys", "font_px"]),
             (
                 "[theme]\nforeground = \"red\"",
-                &["theme.foreground", "red", "#rrggbb"],
+                vec!["theme.foreground", "red", "#rrggbb"],
             ),
             (
                 "[theme]\nbackground = 5",
-                &["theme.background", "expected a string"],
+                vec!["theme.background", "expected a string"],
             ),
             ("[theme]\nbase = \"neon\"", vec!["theme.base", "neon"]),
             (
                 "[theme]\nfg = \"#000000\"",
-                &["theme", "fg", "known keys", "foreground"],
+                vec!["theme", "fg", "known keys", "foreground"],
             ),
             ("[theme]\nansi = \"#000000\"", vec!["theme.ansi", "array"]),
             (
                 "[theme]\nansi = [\"#000000\"]",
-                &["theme.ansi", "16", "got 1"],
+                vec!["theme.ansi", "16", "got 1"],
             ),
         ];
         for (text, needles) in &cases {
