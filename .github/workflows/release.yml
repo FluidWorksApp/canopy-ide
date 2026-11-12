@@ -235,7 +235,7 @@ jobs:
           root="src-tauri/target/release/bundle"
           deb="$(find "$root/deb" -name '*.deb' | head -1)"
           [ -n "$deb" ] || { echo "::error::no deb was produced."; exit 1; }
-          dpkg-deb -c "$deb" | grep -E ' \./usr/bin/canopy-term-app$' \
+          dpkg-deb -c "$deb" | grep -E ' (\./)?usr/bin/canopy-term-app$' \
             || { echo "::error::canopy-term-app is missing from $deb."; exit 1; }
           tmp="$(mktemp -d)"
           dpkg-deb -x "$deb" "$tmp"
@@ -624,8 +624,9 @@ jobs:
           deb="$(find "$root/deb" -name '*.deb' | head -1)"
           [ -n "$deb" ] || { echo "::error::no deb was produced."; exit 1; }
           # Log the deb's listing first, so a failure shows what is inside.
+          # Tauri's deb lists paths as `usr/bin/...` (no `./`), other tools' as `./usr/bin/...`.
           dpkg-deb -c "$deb"
-          dpkg-deb -c "$deb" | grep -E ' \./usr/bin/canopy-term-app$' \
+          dpkg-deb -c "$deb" | grep -E ' (\./)?usr/bin/canopy-term-app$' \
             || { echo "::error::canopy-term-app is missing from $deb."; exit 1; }
           tmp="$(mktemp -d)"
           dpkg-deb -x "$deb" "$tmp"
