@@ -3,8 +3,10 @@
 The session protocol (hello/attach, the caller-supplied spawn key, protocol
 version check) is one thing. A `Transport` only delivers a byte stream whose
 peer identity the transport itself proved. The version check and the spawn key
-live above this crate and behave identically on every transport; nothing here
-reads or interprets session bytes.
+live above this crate and behave identically on every transport; nothing in a
+transport reads or interprets session bytes. The one session protocol written so
+far, v1 (terminal sharing without spawn), is the `session` module and is
+described at the end of this file.
 
 ## Transports
 
@@ -342,3 +344,48 @@ connections (allowlist removal and a tailnet switch), a too-old CLI, and redacte
 6. Homebrew CLI against the app daemon: version warning present, still works.
 7. Userspace-mode `tailscaled` as A: bind reports `NoTailnetInterface`.
 8. Disconnect Tailscale mid-session: the connection errors, no panic.
+
+## Session protocol v1 (`session` module)
+
+Runs on any `Connection`; written for the tailnet app-to-app share (list, attach,
+type, resize) and deliberately smaller than the pty-host's local protocol.
+
+**Framing** is the pty-host's: one JSON line, then raw bytes. Every connection
+opens with `hello{version}`; the reply carries the server's `version` and
+`min_client`. The server refuses a client below its minimum, the client refuses
+a server below its own minimum (or one whose minimum is above the client), both
+as a typed `VersionMismatch`, so skew is caught from either side. A missing
+`version` reads as 0. Unknown fields are ignored. After `hello` a connection is
+either **control** (`list`, `resize`, repeatable, one reply line each) or becomes
+**attached** with `attach{id}`: the reply line, then the snapshot and live output
+one way and keystrokes the other. `resize` cannot ride an attached connection
+(it carries raw bytes), so a client keeps a control connection for it.
+
+**Not in v1:** spawn, kill, environment, working directory, `read_ring`, any
+view-only mode. An allowed peer can read and type into every listed terminal;
+that is the "full peer" model above, and the allowlist wording must say so.
+
+**Server.** `serve_connection(conn, handler)` over a `SessionHandler`
+(`list`/`attach`/`write`/`resize`/`close`) that the app implements on its pty
+manager. It runs one connection on the calling thread (the caller spawns the
+thread and owns connection caps: per peer and total are not enforced here). A
+refused peer never reaches it: the transport closes such a connection with zero
+bytes read.
+
+**Caps** (all in `ServeLimits`, defaults are the contract): 5 s to complete
+`hello` (absolute, a dribbled hello does not extend it); request lines at most
+1 MiB, answered `too_large` and dropped; a control connection idle 60 s is
+closed; one accepted `resize` per 100 ms per connection (faster ones get
+`rate_limited`, a client coalesces); input is read in chunks of at most 16 KiB
+into a queue of 32, and when it is full the server stops reading the socket so
+the peer's TCP window throttles it; `list` carries at most 256 sessions with
+title, cwd and command cut to 160 characters so a reply cannot approach the line
+cap. An attached connection has **no input idle limit by default** (a person
+reading output sends nothing); `attached_idle` is there if the app wants one.
+Every read wakes every 100 ms to check deadlines, so they hold to within that.
+
+**Known limits.** There is no write deadline: a peer that stops reading output
+stalls its own pump until the transport errors (the queue is bounded, but the
+output is the handler's channel). A handler stuck inside `write` is not
+joined; it finishes once its write returns. Only exercised on loopback with the
+fake Tailscale CLI; nothing here has run over a real tailnet.

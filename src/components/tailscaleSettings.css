@@ -12,12 +12,21 @@
 .ts-me-name{font-weight:600}
 .ts-machines.resume-block{width:100%;margin:0}
 .ts-machines .resume-head .badge{margin-left:4px}
-.ts-machines .ts-col{margin-left:auto;margin-right:76px}
+.ts-machines .ts-col{margin-left:auto;margin-right:104px}
 .ts-machines .ts-name{flex:0 1 auto;font-weight:600}
 .ts-machines .resume-dir{flex:1 1 auto;max-width:none}
 .ts-machines .resume-row>.ctl-switch,.ts-machines .ts-connect{flex:0 0 auto}
-.ts-machines .ts-connect .btn{width:64px}
+.ts-machines .ts-connect .btn{width:92px}
 .ts-dot{flex:none;width:6px;height:6px;border-radius:50%;background:var(--ok)}
 .ts-empty{color:var(--text-dim)}
 .ts-foot{padding:7px 12px;border-top:1px solid var(--border);font-size:10.5px;color:var(--text-dim)}
+.ts-detail{display:flex;flex-wrap:wrap;align-items:center;gap:8px 12px;padding:8px 12px 8px 30px;border-top:1px solid var(--border);font-size:12px;min-width:0}
+.ts-fail-text{display:flex;flex-direction:column;gap:2px;flex:1 1 240px;min-width:0}
+.ts-terminals{flex-direction:column;align-items:stretch;gap:0;padding:0 0 0 18px}
+.ts-terminals-head{display:flex;align-items:center;gap:6px;padding:7px 12px;font-family:var(--font-mono);font-size:9.5px;letter-spacing:.1em;text-transform:uppercase;color:var(--text-dim)}
+.ts-terminal{display:flex;align-items:center;gap:12px;padding:6px 12px;border-top:1px solid var(--border);min-width:0}
+.ts-terminal-title{flex:0 0 auto;min-width:56px;font-weight:600}
+.ts-terminal-cwd{flex:1 1 auto;max-width:none}
+.ts-terminal-status{flex:0 0 auto;font-size:11px;color:var(--text-dim)}
+.ts-terminal .btn,.ts-terminal-none{flex:0 0 auto;width:64px}
 @media (max-width:760px){.ts-machines .resume-dir{display:none}.ts-machines .ts-name{flex:1 1 auto}}

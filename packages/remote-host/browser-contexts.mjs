@@ -80,6 +80,16 @@ export class BrowserContexts {
     );
   }
 
+  /** Closes a profile's Chromium and keeps its directory (the desktop host's idle profiles). */
+  async closeProfile(profileId) {
+    const key = JSON.stringify([profileId, null]);
+    const pending = this.contexts.get(key);
+    if (!pending) return;
+    this.contexts.delete(key);
+    const context = await pending.catch(() => undefined);
+    await context?.close().catch(constVoid);
+  }
+
   async clearProfile(profileId) {
     const key = JSON.stringify([profileId, null]);
     const existing = this.clearing.get(key);

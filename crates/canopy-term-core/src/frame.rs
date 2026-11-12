@@ -180,6 +180,14 @@ pub struct Frame {
     pub alt_screen: bool,
     /// Window title set by the program, if any.
     pub title: Option<String>,
+    /// How many lines the view is scrolled back from the live screen. The
+    /// engine's own frame is always live (0); a viewer that shows history
+    /// (`canopy-term-window`) sets it on the copy it draws.
+    pub viewport_offset: u32,
+    /// True when this frame shows history instead of the live screen, so a
+    /// consumer can draw an indicator and an accessibility layer can say so.
+    /// Always `viewport_offset > 0`.
+    pub scrolled_back: bool,
 }
 
 impl Frame {

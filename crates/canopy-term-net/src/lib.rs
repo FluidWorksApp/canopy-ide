@@ -5,7 +5,8 @@
 //! The local unix-socket, same-uid transport stays its own transport; network
 //! transports sit beside it. The protocol version check and the caller-supplied
 //! spawn key live in the session protocol (hello and attach), not here, so they
-//! behave the same on every transport.
+//! behave the same on every transport. The protocol's first version, a
+//! terminal-sharing subset without spawn, is the [`session`] module.
 
 pub mod allowlist;
 #[cfg(feature = "iroh")]
@@ -14,6 +15,7 @@ mod json;
 #[cfg(unix)]
 pub mod local_unix;
 pub mod pairing;
+pub mod session;
 pub mod tailnet_tcp;
 pub mod tailscale;
 

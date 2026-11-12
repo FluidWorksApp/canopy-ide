@@ -24,22 +24,180 @@
 //! when a screen reader is running, so its baseline is its own.
 
 use accesskit::{
-    Action, Live, Node, NodeId, Rect, Role, TextDirection, TextPosition, TextSelection, TreeId,
-    TreeInfo, TreeUpdate,
+    Action, Live, Node, NodeId, Rect, Role, TextDirection, TextPosition, TextSelection, Toggled,
+    TreeId, TreeInfo, TreeUpdate,
 };
 use canopy_term_core::frame::{Attrs, Frame};
 
+use crate::findbar::{FindA11y, FindButton};
 use crate::grid::CellPx;
 use crate::selection::Selection;
 
 pub const ROOT_ID: NodeId = NodeId(1);
 pub const TERMINAL_ID: NodeId = NodeId(2);
+/// "Scrolled back N of M lines": present only while the view is scrolled back.
+pub const STATUS_ID: NodeId = NodeId(3);
+/// The find bar (a search landmark) and its parts, present while it is open.
+pub const FIND_ID: NodeId = NodeId(4);
+pub const FIND_INPUT_ID: NodeId = NodeId(5);
+pub const FIND_STATUS_ID: NodeId = NodeId(6);
+pub const FIND_CASE_ID: NodeId = NodeId(7);
+pub const FIND_PREV_ID: NodeId = NodeId(8);
+pub const FIND_NEXT_ID: NodeId = NodeId(9);
+pub const FIND_CLOSE_ID: NodeId = NodeId(10);
+
+/// The node of a find bar button.
+pub fn find_button_id(b: FindButton) -> NodeId {
+    match b {
+        FindButton::Case => FIND_CASE_ID,
+        FindButton::Prev => FIND_PREV_ID,
+        FindButton::Next => FIND_NEXT_ID,
+        FindButton::Close => FIND_CLOSE_ID,
+    }
+}
+
+/// The find bar button an accessibility action targets.
+pub fn find_button_of(id: NodeId) -> Option<FindButton> {
+    [
+        FindButton::Case,
+        FindButton::Prev,
+        FindButton::Next,
+        FindButton::Close,
+    ]
+    .into_iter()
+    .find(|b| find_button_id(*b) == id)
+}
 const LINE_BASE: u64 = 1 << 16;
 const ANNOUNCE_BASE: u64 = 1 << 32;
 /// At most this many lines go into one announcement (the newest ones).
 pub const MAX_ANNOUNCE_LINES: usize = 20;
 /// And at most this many bytes.
 pub const MAX_ANNOUNCE_BYTES: usize = 4000;
+
+/// What the window shows besides the screen, for the tree to describe.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct UiExtras {
+    /// (lines above the live screen, lines of history) while scrolled back.
+    pub scrollback: Option<(usize, usize)>,
+    /// The find bar, while it is open.
+    pub find: Option<FindA11y>,
+}
+
+impl UiExtras {
+    fn child_ids(&self) -> Vec<NodeId> {
+        let mut ids = Vec::new();
+        if self.scrollback.is_some() {
+            ids.push(STATUS_ID);
+        }
+        if self.find.is_some() {
+            ids.push(FIND_ID);
+        }
+        ids
+    }
+
+    fn nodes(&self, cell: CellPx) -> Vec<(NodeId, Node)> {
+        let mut nodes = Vec::new();
+        if let Some((offset, total)) = self.scrollback {
+            nodes.push((STATUS_ID, status_node(offset, total)));
+        }
+        if let Some(find) = &self.find {
+            nodes.extend(find_nodes(find, cell));
+        }
+        nodes
+    }
+
+    /// The node that has keyboard focus: the find box while the bar is open.
+    fn focus(&self) -> NodeId {
+        if self.find.is_some() {
+            FIND_INPUT_ID
+        } else {
+            TERMINAL_ID
+        }
+    }
+}
+
+fn cell_rect(cell: CellPx, row: u16, col: u16, cols: u16) -> Rect {
+    let (w, h) = (cell.width as f64, cell.height as f64);
+    Rect {
+        x0: col as f64 * w,
+        y0: row as f64 * h,
+        x1: (col as f64 + cols as f64) * w,
+        y1: (row as f64 + 1.0) * h,
+    }
+}
+
+/// The find bar: a search landmark holding the text box, the live result
+/// line, the case toggle and the buttons.
+fn find_nodes(find: &FindA11y, cell: CellPx) -> Vec<(NodeId, Node)> {
+    let l = &find.layout;
+    let bar = cell_rect(cell, l.row, 0, l.cols);
+    let mut root = Node::new(Role::Search);
+    root.set_label("Find in terminal".to_string());
+    root.set_bounds(bar);
+    root.set_children(vec![
+        FIND_INPUT_ID,
+        FIND_STATUS_ID,
+        FIND_CASE_ID,
+        FIND_PREV_ID,
+        FIND_NEXT_ID,
+        FIND_CLOSE_ID,
+    ]);
+
+    let mut input = Node::new(Role::SearchInput);
+    input.set_label("Find".to_string());
+    input.set_value(find.query.clone());
+    input.set_bounds(cell_rect(cell, l.row, l.query.0, l.query.1));
+    input.add_action(Action::Focus);
+    input.add_action(Action::SetValue);
+
+    let mut status = Node::new(Role::Label);
+    status.set_value(find.status.clone());
+    status.set_label(find.status.clone());
+    // Polite: "3 of 12" is spoken as the match moves.
+    status.set_live(Live::Polite);
+    status.set_bounds(cell_rect(cell, l.row, l.status.0, l.status.1));
+
+    let mut nodes = vec![
+        (FIND_ID, root),
+        (FIND_INPUT_ID, input),
+        (FIND_STATUS_ID, status),
+    ];
+    for b in [
+        FindButton::Case,
+        FindButton::Prev,
+        FindButton::Next,
+        FindButton::Close,
+    ] {
+        let mut node = Node::new(if b == FindButton::Case {
+            Role::CheckBox
+        } else {
+            Role::Button
+        });
+        node.set_label(b.name().to_string());
+        node.add_action(Action::Click);
+        if b == FindButton::Case {
+            node.set_toggled(Toggled::from(find.case_sensitive));
+        }
+        // A button the narrow bar does not draw is still there, on the bar.
+        let bounds = match l.buttons.iter().find(|x| x.0 == b) {
+            Some((_, c, w)) => cell_rect(cell, l.row, *c, *w),
+            None => bar,
+        };
+        node.set_bounds(bounds);
+        nodes.push((find_button_id(b), node));
+    }
+    nodes
+}
+
+fn status_node(offset: usize, total: usize) -> Node {
+    let text = format!("Scrolled back {offset} of {total} lines");
+    let mut node = Node::new(Role::Label);
+    node.set_value(text.clone());
+    node.set_label(text);
+    // Polite: a screen reader says where the view moved to, briefly.
+    node.set_live(Live::Polite);
+    node
+}
 
 pub fn line_id(row: u16) -> NodeId {
     NodeId(LINE_BASE + row as u64)
@@ -244,10 +402,11 @@ pub fn text_selection(
     })
 }
 
-fn root_node(title: &str, announce: Option<NodeId>) -> Node {
+fn root_node(title: &str, announce: Option<NodeId>, extras: &UiExtras) -> Node {
     let mut node = Node::new(Role::Window);
     node.set_label(title.to_string());
     let mut children = vec![TERMINAL_ID];
+    children.extend(extras.child_ids());
     children.extend(announce);
     node.set_children(children);
     node
@@ -314,7 +473,7 @@ fn tree_info() -> TreeInfo {
 /// when a screen reader first asks.
 pub fn tree_for(frame: &Frame, cell: CellPx, selection: Option<&Selection>) -> TreeUpdate {
     let lines = all_lines(frame);
-    full_update(frame, cell, &lines, selection, None)
+    full_update(frame, cell, &lines, selection, None, &UiExtras::default())
 }
 
 fn full_update(
@@ -323,10 +482,14 @@ fn full_update(
     lines: &[LineText],
     selection: Option<&Selection>,
     announce: Option<(NodeId, &str)>,
+    extras: &UiExtras,
 ) -> TreeUpdate {
     let sel = text_selection(lines, frame, selection);
     let mut nodes = Vec::with_capacity(lines.len() + 3);
-    nodes.push((ROOT_ID, root_node(&title_of(frame), announce.map(|a| a.0))));
+    nodes.push((
+        ROOT_ID,
+        root_node(&title_of(frame), announce.map(|a| a.0), extras),
+    ));
     nodes.push((
         TERMINAL_ID,
         terminal_node(frame.rows, frame.cols, cell, sel.as_ref()),
@@ -336,6 +499,7 @@ fn full_update(
         let r = r as u16;
         nodes.push((line_id(r), line_node(line, r, r == last, cell, frame.cols)));
     }
+    nodes.extend(extras.nodes(cell));
     if let Some((id, text)) = announce {
         nodes.push((id, announce_node(text)));
     }
@@ -343,7 +507,7 @@ fn full_update(
         nodes,
         tree: Some(tree_info()),
         tree_id: TreeId::ROOT,
-        focus: TERMINAL_ID,
+        focus: extras.focus(),
     }
 }
 
@@ -396,6 +560,7 @@ struct Published {
     lines: Vec<LineText>,
     selection: Option<TextSelection>,
     announce: Option<NodeId>,
+    extras: UiExtras,
 }
 
 /// Incremental tree updates against what was last published.
@@ -403,11 +568,18 @@ struct Published {
 pub struct A11yTree {
     published: Option<Published>,
     announcements: u64,
+    extras: UiExtras,
 }
 
 impl A11yTree {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// What the window shows besides the screen (scrollback badge). Takes
+    /// effect with the next [`A11yTree::update`] or [`A11yTree::full`].
+    pub fn set_extras(&mut self, extras: UiExtras) {
+        self.extras = extras;
     }
 
     /// The full tree (a screen reader just started), which becomes the
@@ -419,7 +591,7 @@ impl A11yTree {
         selection: Option<&Selection>,
     ) -> TreeUpdate {
         let lines = all_lines(frame);
-        let update = full_update(frame, cell, &lines, selection, None);
+        let update = full_update(frame, cell, &lines, selection, None, &self.extras);
         self.published = Some(Published {
             cols: frame.cols,
             rows: frame.rows,
@@ -429,6 +601,7 @@ impl A11yTree {
             selection: text_selection(&lines, frame, selection),
             lines,
             announce: None,
+            extras: self.extras.clone(),
         });
         update
     }
@@ -457,7 +630,10 @@ impl A11yTree {
         let mut nodes = Vec::new();
 
         let mut announce = None;
-        if !reshaped && !frame.alt_screen && !prev.alt_screen {
+        // Moving through history is not new output, and neither is output
+        // that arrives while the view is scrolled back.
+        let scrolled = self.extras.scrollback.is_some() || prev.extras.scrollback.is_some();
+        if !reshaped && !frame.alt_screen && !prev.alt_screen && !scrolled {
             let output = new_output(&prev.lines, &lines, frame.cursor.row);
             if !output.is_empty() {
                 self.announcements += 1;
@@ -466,10 +642,16 @@ impl A11yTree {
             }
         }
 
-        let root_changed = title != prev.title || announce.is_some();
+        // The bar's and badge's bounds depend on the grid and cell size too.
+        let extras_changed =
+            self.extras != prev.extras || (reshaped && self.extras != UiExtras::default());
+        let root_changed = title != prev.title || announce.is_some() || extras_changed;
         if root_changed {
             let id = announce.as_ref().map(|a| a.0).or(prev.announce);
-            nodes.push((ROOT_ID, root_node(&title, id)));
+            nodes.push((ROOT_ID, root_node(&title, id, &self.extras)));
+        }
+        if extras_changed {
+            nodes.extend(self.extras.nodes(cell));
         }
         if reshaped || sel != prev.selection {
             nodes.push((
@@ -503,6 +685,7 @@ impl A11yTree {
         prev.title = title;
         prev.lines = lines;
         prev.selection = sel;
+        prev.extras = self.extras.clone();
         if let Some((id, _)) = announce {
             prev.announce = Some(id);
         }
@@ -514,7 +697,7 @@ impl A11yTree {
             nodes,
             tree: None,
             tree_id: TreeId::ROOT,
-            focus: TERMINAL_ID,
+            focus: self.extras.focus(),
         })
     }
 
@@ -944,5 +1127,189 @@ mod tests {
         let out = new_output(&old, &new, 29);
         assert_eq!(out.len(), MAX_ANNOUNCE_LINES);
         assert_eq!(out.last().unwrap(), "line 28");
+    }
+
+    fn scrolled(offset: usize, total: usize) -> UiExtras {
+        UiExtras {
+            scrollback: Some((offset, total)),
+            ..UiExtras::default()
+        }
+    }
+
+    #[test]
+    fn scrolled_back_adds_a_polite_status_node_under_the_root() {
+        let f = frame_of(&["a", "b"], 5);
+        let mut t = A11yTree::new();
+        t.set_extras(scrolled(12, 340));
+        let u = t.full(&f, CELL, None);
+        let root = node(&u, ROOT_ID);
+        assert_eq!(root.children(), &[TERMINAL_ID, STATUS_ID]);
+        let status = node(&u, STATUS_ID);
+        assert_eq!(status.role(), Role::Label);
+        assert_eq!(status.value(), Some("Scrolled back 12 of 340 lines"));
+        assert_eq!(status.live(), Some(Live::Polite));
+        // Without extras the tree has no status node.
+        let plain = tree_for(&f, CELL, None);
+        assert!(!plain.nodes.iter().any(|(i, _)| *i == STATUS_ID));
+    }
+
+    #[test]
+    fn moving_through_history_updates_the_status_and_is_not_announced_as_output() {
+        let mut f = frame_of(&["one", "two", "three"], 8);
+        f.cursor.row = 2;
+        let mut t = A11yTree::new();
+        t.full(&f, CELL, None);
+        // Scroll back: different rows appear, the status node is added, and
+        // nothing is announced.
+        let mut g = frame_of(&["old a", "old b", "one"], 8);
+        g.cursor.row = 2;
+        g.scrolled_back = true;
+        g.viewport_offset = 2;
+        t.set_extras(scrolled(2, 10));
+        let u = t.update(&g, CELL, None).unwrap();
+        assert!(u.nodes.iter().any(|(i, _)| *i == STATUS_ID));
+        assert!(
+            u.nodes.iter().all(|(i, _)| i.0 < ANNOUNCE_BASE),
+            "no announcement node"
+        );
+        assert_eq!(node(&u, line_id(0)).value(), Some("old a\n"));
+        // Further up: the status text changes.
+        let mut h = frame_of(&["older", "old a", "old b"], 8);
+        h.cursor.row = 2;
+        t.set_extras(scrolled(3, 10));
+        let u = t.update(&h, CELL, None).unwrap();
+        assert_eq!(
+            node(&u, STATUS_ID).value(),
+            Some("Scrolled back 3 of 10 lines")
+        );
+        // Back to live: the status node leaves the root's children.
+        let mut live = frame_of(&["one", "two", "three"], 8);
+        live.cursor.row = 2;
+        t.set_extras(UiExtras::default());
+        let u = t.update(&live, CELL, None).unwrap();
+        assert_eq!(node(&u, ROOT_ID).children(), &[TERMINAL_ID]);
+        assert!(!u.nodes.iter().any(|(i, _)| *i == STATUS_ID));
+    }
+
+    #[test]
+    fn an_unchanged_scrolled_state_produces_no_update() {
+        let f = frame_of(&["a", "b"], 5);
+        let mut t = A11yTree::new();
+        t.set_extras(scrolled(1, 5));
+        t.full(&f, CELL, None);
+        t.set_extras(scrolled(1, 5));
+        assert!(t.update(&f, CELL, None).is_none());
+    }
+
+    fn finding(query: &str, case: bool, status_of: &str) -> UiExtras {
+        use crate::findbar::{FindBar, FindKey};
+        let mut bar = FindBar::default();
+        bar.open(None);
+        bar.insert_text(query);
+        if case {
+            bar.on_key(FindKey::ToggleCase);
+        }
+        let mut a = bar.a11y(40, 2);
+        a.status = status_of.to_string();
+        UiExtras {
+            find: Some(a),
+            ..UiExtras::default()
+        }
+    }
+
+    #[test]
+    fn an_open_find_bar_is_a_search_landmark_with_a_text_box_buttons_and_focus() {
+        let f = frame_of(&["a", "b"], 40);
+        let mut t = A11yTree::new();
+        t.set_extras(finding("needle", true, "2 of 5"));
+        let u = t.full(&f, CELL, None);
+        assert_eq!(node(&u, ROOT_ID).children(), &[TERMINAL_ID, FIND_ID]);
+        assert_eq!(u.focus, FIND_INPUT_ID, "keyboard focus is in the find box");
+        let bar = node(&u, FIND_ID);
+        assert_eq!(bar.role(), Role::Search);
+        assert_eq!(bar.label(), Some("Find in terminal"));
+        assert_eq!(bar.children().len(), 6);
+        let input = node(&u, FIND_INPUT_ID);
+        assert_eq!(input.role(), Role::SearchInput);
+        assert_eq!(input.value(), Some("needle"));
+        assert!(input.supports_action(Action::SetValue));
+        let status = node(&u, FIND_STATUS_ID);
+        assert_eq!(status.value(), Some("2 of 5"));
+        assert_eq!(status.live(), Some(Live::Polite));
+        let case = node(&u, FIND_CASE_ID);
+        assert_eq!(case.role(), Role::CheckBox);
+        assert_eq!(case.toggled(), Some(Toggled::True));
+        assert_eq!(case.label(), Some("Match case"));
+        for (id, name) in [
+            (FIND_PREV_ID, "Previous match"),
+            (FIND_NEXT_ID, "Next match"),
+            (FIND_CLOSE_ID, "Close find bar"),
+        ] {
+            let b = node(&u, id);
+            assert_eq!(b.role(), Role::Button);
+            assert_eq!(b.label(), Some(name));
+            assert!(b.supports_action(Action::Click));
+        }
+        // The bar sits on the last row.
+        let b = bar.bounds().unwrap();
+        assert_eq!((b.y0, b.y1), (20.0, 40.0));
+    }
+
+    #[test]
+    fn find_bar_state_changes_send_only_what_changed_and_closing_returns_focus() {
+        let f = frame_of(&["a", "b"], 40);
+        let mut t = A11yTree::new();
+        t.full(&f, CELL, None);
+        // Open.
+        t.set_extras(finding("ab", false, "1 of 2"));
+        let u = t.update(&f, CELL, None).unwrap();
+        assert_eq!(u.focus, FIND_INPUT_ID);
+        assert!(u.nodes.iter().any(|(i, _)| *i == FIND_ID));
+        // The match moves: the status text changes and is announced.
+        t.set_extras(finding("ab", false, "2 of 2"));
+        let u = t.update(&f, CELL, None).unwrap();
+        assert_eq!(node(&u, FIND_STATUS_ID).value(), Some("2 of 2"));
+        assert_eq!(u.focus, FIND_INPUT_ID);
+        // Nothing changed: no update.
+        t.set_extras(finding("ab", false, "2 of 2"));
+        assert!(t.update(&f, CELL, None).is_none());
+        // Case toggled: the checkbox state changes.
+        t.set_extras(finding("ab", true, "2 of 2"));
+        let u = t.update(&f, CELL, None).unwrap();
+        assert_eq!(node(&u, FIND_CASE_ID).toggled(), Some(Toggled::True));
+        // Close.
+        t.set_extras(UiExtras::default());
+        let u = t.update(&f, CELL, None).unwrap();
+        assert_eq!(u.focus, TERMINAL_ID);
+        assert_eq!(node(&u, ROOT_ID).children(), &[TERMINAL_ID]);
+        assert!(!u.nodes.iter().any(|(i, _)| *i == FIND_ID));
+    }
+
+    #[test]
+    fn scrollback_status_and_find_bar_can_both_be_present() {
+        let f = frame_of(&["a", "b"], 40);
+        let mut t = A11yTree::new();
+        let mut e = finding("x", false, "1 of 1");
+        e.scrollback = Some((3, 9));
+        t.set_extras(e);
+        let u = t.full(&f, CELL, None);
+        assert_eq!(
+            node(&u, ROOT_ID).children(),
+            &[TERMINAL_ID, STATUS_ID, FIND_ID]
+        );
+    }
+
+    #[test]
+    fn find_actions_map_back_to_buttons() {
+        for b in [
+            FindButton::Case,
+            FindButton::Prev,
+            FindButton::Next,
+            FindButton::Close,
+        ] {
+            assert_eq!(find_button_of(find_button_id(b)), Some(b));
+        }
+        assert_eq!(find_button_of(TERMINAL_ID), None);
+        assert_eq!(find_button_of(FIND_INPUT_ID), None);
     }
 }

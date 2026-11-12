@@ -40,6 +40,11 @@ portal/dist/*
 
 # Sidecar binaries staged by scripts/prepare-sidecar.mjs (built artifacts)
 /src-tauri/binaries/
+# Preview browser host staged by scripts/prepare-preview-host.mjs. The committed
+# placeholder keeps tauri.conf.json's `preview-host/**/*` resource glob matching
+# on a fresh checkout (cargo test/check in CI never stages it).
+/src-tauri/preview-host/*
+!/src-tauri/preview-host/.gitkeep
 
 # design-sync: staged scripts, build output, and all sync state/inputs
 /.ds-sync/

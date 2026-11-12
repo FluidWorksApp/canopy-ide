@@ -58,6 +58,7 @@ mod notes;
 mod notify;
 mod portal;
 mod preview;
+mod preview_host;
 mod procenv;
 mod process_capture;
 mod profiles;
@@ -585,6 +586,7 @@ pub fn run() {
         .manage(desk::DeskManager::default())
         .manage(portal::RemoteManager::default())
         .manage(preview::PreviewManager::default())
+        .manage(preview_host::PreviewHost::default())
         .manage(browser::BrowserManager::default())
         .manage(workspace_forward::WorkspaceForwards::default())
         .manage(context::ContextBridge::default())
@@ -620,7 +622,7 @@ pub fn run() {
             // to speak on, and a write that happens first would be silent.
             change::install(app.handle().clone());
             cli::install_deep_links(app);
-            // Terminals a previous launch left in the PTY host (CANOPY_PTY_HOST=1)
+            // Terminals a previous launch left in the PTY host (when terminals are hosted)
             // come back before the first renderer registers.
             let adopted = app
                 .state::<pty::PtyManager>()
@@ -844,6 +846,8 @@ pub fn run() {
             pty::launch_id,
             pty::app_quit,
             pty::pty_host_enabled,
+            pty::pty_host_setting,
+            pty::pty_host_set_setting,
             pty::pty_stop_all_preview,
             pty::pty_host_notice,
             android::android_sdk_status,
@@ -865,6 +869,7 @@ pub fn run() {
             android::android_describe,
             android::android_run,
             android::android_stage_file,
+            preview_host::preview_host_start,
             devicehub::device_hub_status,
             devicehub::device_hub_install,
             devicehub::device_hub_start,
@@ -1231,6 +1236,8 @@ pub fn run() {
                 app.state::<std::sync::Arc<watchdog::WatchdogState>>()
                     .app_exit_cleanup_returned(pty_cleanup.requested, pty_cleanup.force_signals);
                 app.state::<lsp::LspManager>().kill_all();
+                // ... and no preview Chromium: its pages run beforeunload as it goes.
+                app.state::<preview_host::PreviewHost>().shutdown();
                 // ... and no Claude Code IDE lock naming a pid that is about
                 // to be gone.
                 if let Some(ide) = app.try_state::<claude_ide::ClaudeIde>() {

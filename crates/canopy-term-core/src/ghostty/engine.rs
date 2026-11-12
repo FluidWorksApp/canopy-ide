@@ -1165,6 +1165,8 @@ impl Engine {
             },
             alt_screen,
             title,
+            viewport_offset: 0,
+            scrolled_back: false,
         };
     }
 

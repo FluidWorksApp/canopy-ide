@@ -1,15 +1,124 @@
-//! Opt-in hosted terminals: with `CANOPY_PTY_HOST=1` (Unix only) a new terminal's
-//! child lives in the detached `canopy-pty-host` process instead of this one.
-//! Off by default. Any failure to reach or start the host falls back to an
-//! ordinary in-process terminal, so enabling it can never stop a terminal opening.
+//! Hosted terminals: a new terminal's child lives in the detached
+//! `canopy-pty-host` process instead of this one, so it survives Quit and an
+//! app update. On by default on macOS and Linux, switchable in Settings →
+//! Terminal ("Keep terminals running after quit"); the Windows host is a stub,
+//! so it is never on there by default. Any failure to reach or start the host
+//! falls back to an ordinary in-process terminal, so enabling it can never stop
+//! a terminal opening.
+//!
+//! Whether it is on is decided once per launch, in this order:
+//!   1. env `CANOPY_PTY_HOST`: `0` forces off, `1` forces on (debugging; any
+//!      other value is ignored),
+//!   2. the saved setting `terminal.keepRunningAfterQuit` (see `setting_path`),
+//!   3. the platform default: on for Unix, off elsewhere.
+//! A change in Settings is saved at once but only read at the next launch, so
+//! Quit, Stop All and the spawn path always agree with what is actually running.
 //!
 //! Hosted sessions are monitor-only for containment: the host, not the app, owns
 //! the child, so the app's cgroup / job-object leases do not apply to them.
 
 use portable_pty::{Child, CommandBuilder, MasterPty};
+use std::path::{Path, PathBuf};
 
+/// Key of the saved setting, as the file stores it.
+pub const SETTING_KEY: &str = "terminal.keepRunningAfterQuit";
+
+/// What the platform does with no env override and no saved setting.
+pub const fn platform_default() -> bool {
+    cfg!(unix)
+}
+
+/// The resolution order: env override, then saved setting, then default.
+pub(crate) fn resolve(env: Option<&str>, setting: Option<bool>, default: bool) -> bool {
+    match env {
+        Some("1") => true,
+        Some("0") => false,
+        _ => setting.unwrap_or(default),
+    }
+}
+
+/// The env override alone: `Some(true)` for `1`, `Some(false)` for `0`.
+pub(crate) fn env_override(env: Option<&str>) -> Option<bool> {
+    match env {
+        Some("1") => Some(true),
+        Some("0") => Some(false),
+        _ => None,
+    }
+}
+
+fn env_value() -> Option<String> {
+    std::env::var("CANOPY_PTY_HOST").ok()
+}
+
+/// `~/.canopy/terminal-settings.json`, a flat JSON object of settings the
+/// backend needs before any renderer exists (the webview's own settings live in
+/// localStorage, which Rust cannot read at startup).
+pub fn setting_path() -> Option<PathBuf> {
+    std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"))
+        .map(|home| {
+            PathBuf::from(home)
+                .join(".canopy")
+                .join("terminal-settings.json")
+        })
+}
+
+pub(crate) fn read_setting(path: &Path) -> Option<bool> {
+    let raw = std::fs::read_to_string(path).ok()?;
+    serde_json::from_str::<serde_json::Value>(&raw)
+        .ok()?
+        .get(SETTING_KEY)?
+        .as_bool()
+}
+
+pub(crate) fn write_setting(path: &Path, on: bool) -> Result<(), String> {
+    let mut value = std::fs::read_to_string(path)
+        .ok()
+        .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok())
+        .filter(|v| v.is_object())
+        .unwrap_or_else(|| serde_json::json!({}));
+    value[SETTING_KEY] = serde_json::Value::Bool(on);
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+    let body = serde_json::to_vec_pretty(&value).map_err(|e| e.to_string())?;
+    let tmp = path.with_extension("json.tmp");
+    std::fs::write(&tmp, body).map_err(|e| e.to_string())?;
+    std::fs::rename(&tmp, path).map_err(|e| e.to_string())
+}
+
+/// Whether terminals are hosted in this launch. Resolved once and then fixed,
+/// so a Settings change applies after restart and every caller agrees. Test
+/// runs and the in-app self-test default to off so they never start a host.
 pub fn enabled() -> bool {
-    std::env::var("CANOPY_PTY_HOST").is_ok_and(|v| v == "1")
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| {
+        let selftest =
+            crate::selftest::requested(std::env::args(), std::env::var("CANOPY_SELFTEST").ok())
+                .is_some();
+        let default = platform_default() && !cfg!(test) && !selftest;
+        let setting = setting_path().and_then(|p| read_setting(&p));
+        resolve(env_value().as_deref(), setting, default)
+    })
+}
+
+/// What Settings shows: the saved choice (or default), whether this platform
+/// can host at all, and an env override that makes the switch moot.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct HostSetting {
+    pub supported: bool,
+    pub on: bool,
+    pub forced: Option<bool>,
+}
+
+pub fn host_setting() -> HostSetting {
+    HostSetting {
+        supported: cfg!(unix),
+        on: setting_path()
+            .and_then(|p| read_setting(&p))
+            .unwrap_or(platform_default()),
+        forced: env_override(env_value().as_deref()),
+    }
 }
 
 /// A hosted session "Quit and Stop All" would stop that this app does not hold
@@ -253,14 +362,14 @@ mod unix {
         cell.get(RETRY_AFTER, || {
                 // Said once, so a missing host is not mistaken for a working one.
                 let Some(socket) = socket_path() else {
-                    eprintln!("canopy: CANOPY_PTY_HOST=1 but no socket directory; using in-process terminals");
+                    eprintln!("canopy: the terminal host is on but there is no socket directory; using in-process terminals");
                     super::note_fell_back();
                     return None;
                 };
                 let (exe, check) = match host_exe(&socket) {
                     Ok(found) => found,
                     Err(error) => {
-                        eprintln!("canopy: CANOPY_PTY_HOST=1 but the PTY host could not be installed ({error}); using in-process terminals");
+                        eprintln!("canopy: the terminal host is on but the PTY host could not be installed ({error}); using in-process terminals");
                         super::note_fell_back();
                         return None;
                     }
@@ -1954,5 +2063,79 @@ pub(crate) mod tests {
         forget_sealed(61);
         assert!(super::sealed::resealed(61, 2, Some(17), &key).is_none());
         let _ = child.kill();
+    }
+}
+
+#[cfg(test)]
+mod setting_tests {
+    use super::*;
+
+    fn temp(name: &str) -> PathBuf {
+        let dir =
+            std::env::temp_dir().join(format!("canopy-host-setting-{}-{name}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        dir.join("terminal-settings.json")
+    }
+
+    #[test]
+    fn env_beats_setting_beats_default() {
+        // Nothing set: the platform default.
+        assert!(resolve(None, None, true));
+        assert!(!resolve(None, None, false));
+        // The saved setting beats the default, both ways.
+        assert!(!resolve(None, Some(false), true));
+        assert!(resolve(None, Some(true), false));
+        // The env beats the saved setting, both ways.
+        assert!(!resolve(Some("0"), Some(true), true));
+        assert!(resolve(Some("1"), Some(false), false));
+        // Anything but 0 or 1 is ignored.
+        assert!(!resolve(Some(""), Some(false), true));
+        assert!(resolve(Some("true"), None, true));
+        assert!(!resolve(Some("yes"), None, false));
+    }
+
+    #[test]
+    fn env_override_only_for_zero_and_one() {
+        assert_eq!(env_override(Some("1")), Some(true));
+        assert_eq!(env_override(Some("0")), Some(false));
+        assert_eq!(env_override(Some("2")), None);
+        assert_eq!(env_override(None), None);
+    }
+
+    #[test]
+    fn platform_default_is_on_only_for_unix() {
+        assert_eq!(platform_default(), cfg!(unix));
+    }
+
+    #[test]
+    fn setting_round_trips_and_keeps_other_keys() {
+        let path = temp("roundtrip");
+        assert_eq!(read_setting(&path), None);
+        write_setting(&path, false).unwrap();
+        assert_eq!(read_setting(&path), Some(false));
+        std::fs::write(
+            &path,
+            r#"{"other":1,"terminal.keepRunningAfterQuit":false}"#,
+        )
+        .unwrap();
+        write_setting(&path, true).unwrap();
+        assert_eq!(read_setting(&path), Some(true));
+        let raw = std::fs::read_to_string(&path).unwrap();
+        assert!(raw.contains("\"other\""));
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn unreadable_setting_falls_to_default() {
+        let path = temp("corrupt");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, "not json").unwrap();
+        assert_eq!(read_setting(&path), None);
+        std::fs::write(&path, r#"{"terminal.keepRunningAfterQuit":"yes"}"#).unwrap();
+        assert_eq!(read_setting(&path), None);
+        // A corrupt file is replaced, not an error, on the next save.
+        write_setting(&path, true).unwrap();
+        assert_eq!(read_setting(&path), Some(true));
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
     }
 }

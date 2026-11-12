@@ -707,7 +707,7 @@ pub(crate) fn constant_time_eq(a: &str, b: &str) -> bool {
 /// agents just lose the context tools.
 pub fn start(app: tauri::AppHandle) {
     // Claimed here, before the first terminal can spawn, so every terminal of
-    // this launch carries the socket. Only with the PTY host on: nothing else
+    // this launch carries the socket. Only with the PTY host on (the "Keep terminals running" setting): nothing else
     // outlives the app, and with it off nothing about the bridge changes.
     #[cfg(unix)]
     let stable = crate::pty_hosted::enabled()
@@ -3750,23 +3750,22 @@ async fn action(
                     format!("{path} isn't a file on this machine"),
                 );
             }
-            // Inside a workspace, like every other path the bridge accepts. The
-            // check used to be `is_file()` alone, which made this a way to put
-            // any readable file on the machine — ~/.ssh/id_rsa, another
-            // project's source — in front of the user in their own editor.
-            if !within_a_workspace(&app, path) {
-                return (
-                    StatusCode::FORBIDDEN,
-                    format!(
-                        "{path} is outside every open project, and the bridge only opens files \
-                         inside one"
-                    ),
-                );
+            // Outside every workspace (an agent's scratchpad, say) it follows
+            // Settings → Privacy → Files outside projects, and never opens a
+            // credential folder like ~/.ssh.
+            let inside = within_a_workspace(&app, path);
+            if !inside {
+                let ws = app.state::<crate::fsx::WorkspaceManager>();
+                if let Err(reason) = crate::fsx::grant_outside_file(&ws, path) {
+                    return (StatusCode::FORBIDDEN, format!("{path}: {reason}"));
+                }
             }
             // The file's own directory routes it: an agent naming a path in a
-            // project other than its cwd's still lands in the right window.
+            // project other than its cwd's still lands in the right window. A
+            // file outside every project goes to the asking agent's window.
             let route = std::path::Path::new(path)
                 .parent()
+                .filter(|_| inside)
                 .map(|p| p.to_string_lossy().to_string())
                 .unwrap_or_else(|| act.cwd.clone().unwrap_or_default());
             let _ = app.emit(

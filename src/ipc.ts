@@ -4909,6 +4909,67 @@ export const tailscaleAllowSet = (stableId: string, allowed: boolean) =>
 export const tailscaleAllowedList = () => invoke<string[]>("tailscale_allowed_list");
 export const tailscaleOpenApp = () => invoke<void>("tailscale_open_app");
 
+/** Terminals on another machine in this tailnet (tailnet_client.rs on this
+ *  side, tailnet_serve.rs on the other). Contract, shared by both Rust halves:
+ *
+ *  - `tailnet_remote_list { stableId }` -> TailnetRemoteTerminal[]. Connects to
+ *    the machine (whois-pinned), checks the session version and lists its
+ *    terminals. It is also what Connect does.
+ *  - `tailnet_remote_open { stableId, remoteId }` -> TailnetRemoteOpened.
+ *    Registers a proxy session in the local PtyManager, attached to that remote
+ *    terminal. The UI then opens an ordinary terminal tab on `ptyId`.
+ *  - `tailnet_remote_close { ptyId }` -> void. Detaches and drops the proxy
+ *    session; never ends the process on the other machine.
+ *  - `tailnet_remote_reconnect { ptyId }` -> void. Restarts a link that gave up
+ *    ("lost"); progress arrives as `tailnet:remote_state`.
+ *
+ *  A rejection is one of TailnetRemoteError. The UI shows the same "didn't
+ *  accept the connection" text for every other rejection (and for a missing
+ *  command), so a refused machine learns nothing about why. */
+export type TailnetRemoteError = "tailscale_off" | "older_canopy" | "refused";
+export interface TailnetRemoteTerminal {
+  /** The terminal's id on the other machine. */
+  remoteId: number;
+  title: string;
+  cwd: string;
+  command: string | null;
+  status: "running" | "exited";
+  exitCode: number | null;
+}
+export interface TailnetRemoteOpened {
+  /** The proxy session's id in this machine's PtyManager. */
+  ptyId: number;
+  sessionGeneration: number;
+  cwd: string;
+  title: string;
+  /** Display name of the other machine, for the tab prefix. */
+  machine: string;
+}
+/** Event `tailnet:remote_state`, once per change of an open link. After
+ *  "reconnecting" attempts count up from 1 (backoff 1/2/4/8/16/30 s); "lost"
+ *  is sent after 5 minutes without a link; "revoked" means the other machine
+ *  turned Allow off (the tab is closed by the UI); "ended" means the remote
+ *  process exited. */
+export interface TailnetRemoteState {
+  ptyId: number;
+  stableId: string;
+  state: "connected" | "reconnecting" | "lost" | "revoked" | "ended";
+  attempt: number | null;
+  exitCode: number | null;
+}
+export const tailnetRemoteList = (stableId: string) =>
+  invoke<TailnetRemoteTerminal[]>("tailnet_remote_list", { stableId });
+export const tailnetRemoteOpen = (stableId: string, remoteId: number) =>
+  invoke<TailnetRemoteOpened>("tailnet_remote_open", { stableId, remoteId });
+export const tailnetRemoteClose = (ptyId: number) =>
+  invoke<void>("tailnet_remote_close", { ptyId });
+export const tailnetRemoteReconnect = (ptyId: number) =>
+  invoke<void>("tailnet_remote_reconnect", { ptyId });
+export const onTailnetRemoteState = (
+  cb: (s: TailnetRemoteState) => void,
+): Promise<UnlistenFn> =>
+  listen<TailnetRemoteState>("tailnet:remote_state", (e) => cb(e.payload));
+
 /** Which of these commands are installed (login-shell PATH). */
 export const whichCheck = (commands: string[]) =>
   invoke<Record<string, boolean>>("which_check", { commands });

@@ -385,6 +385,16 @@ impl Screen {
         self.call(move |e| e.scrollback_row(index))
     }
 
+    /// Up to `count` scrollback lines from index `start` (0 is the oldest), in
+    /// one engine round trip. Fewer when the history ends first.
+    pub fn scrollback_rows(&self, start: usize, count: usize) -> Vec<Row> {
+        self.call(move |e| {
+            (start..start.saturating_add(count))
+                .map_while(|i| e.scrollback_row(i))
+                .collect()
+        })
+    }
+
     /// The target of the OSC 8 hyperlink on a visible cell, if any.
     pub fn hyperlink_at(&self, row: u16, col: u16) -> Option<String> {
         self.call(move |e| e.hyperlink_at(row, col))
