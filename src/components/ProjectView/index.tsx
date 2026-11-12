@@ -15679,6 +15679,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
                   <FileTree
                     readOnly={readOnly}
                     onUpload={readOnly?undefined:upload.startUpload}
+                    onDownload={upload.startDownload}
                     refreshRevision={treeRefreshRevision}
                     roots={[c.path]}
                     changedPaths={changedPaths}

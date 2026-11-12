@@ -1537,6 +1537,8 @@ export interface RemoteUploadProgress {
   files:number; totalFiles:number; skipped:number; cancelled:boolean;
 }
 export const remoteUpload=(destination:string,kind:'files'|'folder',id:string)=>invoke<RemoteUploadProgress>('execution_remote_upload',{destination,kind,id});
+export const remoteDownload=(source:string,kind:'file'|'folder',id:string)=>invoke<RemoteUploadProgress>('execution_remote_download',{source,kind,id});
+export const onRemoteDownloadProgress=(cb:(progress:RemoteUploadProgress)=>void)=>listen<RemoteUploadProgress>('remote:download-progress',event=>cb(event.payload));
 export const remoteUploadCancel=(id:string)=>invoke<void>('execution_remote_upload_cancel',{id});
 export type MirrorCandidateCategory='secret'|'config'|'data'|'other';
 export interface MirrorCandidate{path:string;size:number;category:MirrorCandidateCategory}

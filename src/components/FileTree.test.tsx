@@ -169,8 +169,14 @@ it('remote upload actions target the selected directory and refresh after comple
  await act(async()=>{});expect(ipc.fsReadDir).toHaveBeenCalledWith('/proj/src');
  fireEvent.contextMenu(folder,{clientX:30,clientY:30});await userEvent.click(await screen.findByText('Upload folder…'));expect(upload).toHaveBeenCalledWith('/proj/src','folder');
 });
+it('remote trees offer Download on files and folders, and local trees do not',async()=>{
+ const download=vi.fn().mockResolvedValue(undefined);
+ render(<FileTree roots={[ROOT]} changedPaths={new Set()} onOpenFile={()=>{}} onDownload={download} hideRootHeader/>);
+ fireEvent.contextMenu(await screen.findByText('src'),{clientX:30,clientY:30});
+ await userEvent.click(await screen.findByText('Download…'));expect(download).toHaveBeenCalledWith('/proj/src',true);
+});
 it('local trees retain their existing menus without remote upload actions',async()=>{
- await renderTree();fireEvent.contextMenu(screen.getByText('src'),{clientX:30,clientY:30});expect(screen.queryByText('Upload files…')).toBeNull();
+ await renderTree();fireEvent.contextMenu(screen.getByText('src'),{clientX:30,clientY:30});expect(screen.queryByText('Upload files…')).toBeNull();expect(screen.queryByText('Download…')).toBeNull();
 });
 
 it('offers uploads from the component root header',async()=>{

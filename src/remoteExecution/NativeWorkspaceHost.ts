@@ -77,7 +77,7 @@ for(const command of ['app_quit','pty_host_enabled'])LOCAL_UI.add(command);
 const DESKTOP_EVENTS=['relay:state','relay:chat','relay:command','relay:collab','relay:transfer','relay:transfer-progress','desk:state','relay:desk','tunnel:state'];
 /** Commands this adapter answers itself (below) rather than passing to the
  *  host by name: terminals, preview forwarding, uploads and clone progress. */
-export const WORKSPACE_ADAPTER_COMMANDS=['spot_save_context_image','notes_attach_file','spot_stage_drop_images','preview_start','preview_stop','execution_remote_upload','execution_remote_upload_cancel','git_clone','browser_supported','environment_identity','pty_renderer_register','pty_renderer_sessions','instance_id','launch_id','pty_spawn','pty_spawn_attached_argv','pty_spawn_argv','pty_spawn_detached','pty_attach_desktop','pty_read_desktop','pty_detach_desktop','pty_ack','pty_write_binary','pty_write','pty_resize','pty_kill','pty_set_name_theme','cli_set_native_update_env','pty_set_title','pty_set_name','pty_stats'] as const;
+export const WORKSPACE_ADAPTER_COMMANDS=['spot_save_context_image','notes_attach_file','spot_stage_drop_images','preview_start','preview_stop','execution_remote_upload','execution_remote_upload_cancel','execution_remote_download','git_clone','browser_supported','environment_identity','pty_renderer_register','pty_renderer_sessions','instance_id','launch_id','pty_spawn','pty_spawn_attached_argv','pty_spawn_argv','pty_spawn_detached','pty_attach_desktop','pty_read_desktop','pty_detach_desktop','pty_ack','pty_write_binary','pty_write','pty_resize','pty_kill','pty_set_name_theme','cli_set_native_update_env','pty_set_title','pty_set_name','pty_stats'] as const;
 /** Whether a command runs on the computer showing the IDE in remote mode. */
 export const isDesktopLocal=(command:string)=>LOCAL_UI.has(command);
 class WorkspaceChannel<T> implements HostChannel<T>{onmessage:(message:T)=>void=()=>{};}
@@ -362,6 +362,7 @@ export class NativeWorkspaceHost implements Host {
     if(command==='notes_attach_file')return await this.attachWorkspaceFile(args) as T;
     if(command==='spot_stage_drop_images'){await this.call('/resources');return this.desktopCall<T>('execution_remote_stage_images',{...args,workspaceId:this.connection.workspaceId,endpoint:this.connection.endpoint});}
     if(command==='execution_remote_upload')return this.desktopCall<T>(command,{...args,workspaceId:this.connection.workspaceId,endpoint:this.connection.endpoint});
+    if(command==='execution_remote_download')return this.desktopCall<T>(command,{...args,workspaceId:this.connection.workspaceId,endpoint:this.connection.endpoint});
     if(command==='execution_remote_upload_cancel')return this.desktopCall<T>(command,args);
     // A device here, the project in the VM: android_run stages the VM's APK here first (androidBridge.ts).
     if(wantsWorkspaceAndroid(command,args))return await workspaceAndroid(command,args,(name,body)=>this.native(name,body),(name,body)=>this.desktopCall(name,body)) as T;
@@ -576,7 +577,7 @@ export class NativeWorkspaceHost implements Host {
   }
   async listen<T>(event:string,handler:(event:HostEvent<T>)=>void):Promise<UnlistenFn>{
     if(this.disposed)throw Error('Workspace disconnected');
-    if(['remote:upload-progress','menu','deep-link','memory:pressure','window:fullscreen','clipboard:changed','clipboard:blocked','dictation:progress','dictation:partial','dictation:level','ledger-appended',...COMPANION_DESKTOP_EVENTS,...DESKTOP_EVENTS].includes(event)){const companionOnly=event.startsWith('agent:');const release=await this.desktop.listen<T>(event,value=>{if(this.disposed)return;if(companionOnly&&(value.payload as {ptyId?:unknown}|null)?.ptyId!=null)return;handler(value);});if(this.disposed){release();return()=>{};}const cancel=()=>{this.desktopListeners.delete(cancel);release();};this.desktopListeners.add(cancel);return cancel;}
+    if(['remote:upload-progress','remote:download-progress','menu','deep-link','memory:pressure','window:fullscreen','clipboard:changed','clipboard:blocked','dictation:progress','dictation:partial','dictation:level','ledger-appended',...COMPANION_DESKTOP_EVENTS,...DESKTOP_EVENTS].includes(event)){const companionOnly=event.startsWith('agent:');const release=await this.desktop.listen<T>(event,value=>{if(this.disposed)return;if(companionOnly&&(value.payload as {ptyId?:unknown}|null)?.ptyId!=null)return;handler(value);});if(this.disposed){release();return()=>{};}const cancel=()=>{this.desktopListeners.delete(cancel);release();};this.desktopListeners.add(cancel);return cancel;}
     const list=this.listeners.get(event)??new Set();this.listeners.set(event,list);list.add(handler as (event:HostEvent<unknown>)=>void);this.beginPoll();return ()=>{list.delete(handler as (event:HostEvent<unknown>)=>void);};
   }
   channel<T>():HostChannel<T>{return new WorkspaceChannel<T>();}
