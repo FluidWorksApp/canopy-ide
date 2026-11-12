@@ -5,6 +5,11 @@
 //!
 //! Output is an alpha mask of exactly `w * h` bytes (row-major, 255 = ink).
 //!
+//! Also the media triangles U+23F4..U+23F7 (left, right, up and down black
+//! medium triangles), which Claude Code and other TUIs use as "play" and
+//! "mode" markers: no system font is guaranteed to have them, and a missing
+//! glyph there is a tofu box.
+//!
 //! Known approximations: double-line junctions are plain overlaps of the two
 //! lines (no gap toward the crossing), dashed box characters render as solid
 //! lines, rounded corners render square, and diagonals (U+2571..2573) are left
@@ -16,6 +21,7 @@ pub fn is_procedural(ch: char) -> bool {
     match c {
         0x2500..=0x257F => BOX[(c - 0x2500) as usize] != [0, 0, 0, 0],
         0x2580..=0x259F => true,
+        0x23F4..=0x23F7 => true,
         0xE0B0..=0xE0B3 => true,
         _ => false,
     }
@@ -31,6 +37,7 @@ pub fn rasterize(ch: char, w: u32, h: u32) -> Option<Vec<u8>> {
     match c {
         0x2500..=0x257F => box_drawing(&mut m, BOX[(c - 0x2500) as usize]),
         0x2580..=0x259F => block_element(&mut m, c),
+        0x23F4..=0x23F7 => media_triangle(&mut m, c),
         0xE0B0..=0xE0B3 => powerline(&mut m, c),
         _ => return None,
     }
@@ -201,6 +208,111 @@ fn powerline(m: &mut Mask, c: u32) {
     }
 }
 
+/// The replacement box for a character no font has: a one-pixel-ish outline
+/// inset from the edge of its `w * h` area (so two in a row, or one next to
+/// text, never touch), hollow inside. Never wider than `w`.
+pub fn missing_box(w: u32, h: u32) -> Vec<u8> {
+    let mut m = Mask::new(w, h);
+    if w == 0 || h == 0 {
+        return m.data;
+    }
+    // Stroke scales with the cell; the inset keeps boxes apart.
+    let stroke = ((h as f32 / 16.0).round() as u32).max(1);
+    let inset = stroke.max(1);
+    if w <= 2 * inset + 2 * stroke || h <= 2 * inset + 2 * stroke {
+        // Too small for a hollow box: a solid mark in the middle.
+        m.fill(w / 4, h / 4, w - w / 4, h - h / 4, 255);
+        return m.data;
+    }
+    let (x0, y0, x1, y1) = (inset, inset, w - inset, h - inset);
+    m.fill(x0, y0, x1, y0 + stroke, 255);
+    m.fill(x0, y1 - stroke, x1, y1, 255);
+    m.fill(x0, y0, x0 + stroke, y1, 255);
+    m.fill(x1 - stroke, y0, x1, y1, 255);
+    m.data
+}
+
+/// U+23F4 left, U+23F5 right, U+23F6 up, U+23F7 down: a solid, roughly
+/// equilateral triangle centred in the cell, inset by an eighth of the width on
+/// the left and right so two in a row stay two shapes. Edges are 4x4
+/// supersampled. Left is the mirror of right and down the flip of up, by
+/// construction, so the pairs match pixel for pixel.
+fn media_triangle(m: &mut Mask, c: u32) {
+    let (w, h) = (m.w as f32, m.h as f32);
+    let margin = if m.w >= 4 {
+        (w / 8.0).round().max(1.0)
+    } else {
+        0.0
+    };
+    let ext = (w - 2.0 * margin).max(1.0);
+    let cy = h / 2.0;
+    // Vertices of the triangle pointing right (left is its mirror) or up
+    // (down is its flip), in cell pixels.
+    let tri: [(f32, f32); 3] = match c {
+        0x23F4 | 0x23F5 => {
+            // Base on the left, as tall as an equilateral triangle of this
+            // width, but never taller than the cell.
+            let th = (ext * 1.1547).min((h - 2.0).max(1.0));
+            [
+                (margin, cy - th / 2.0),
+                (margin, cy + th / 2.0),
+                (margin + ext, cy),
+            ]
+        }
+        _ => {
+            // Base along the bottom of its box.
+            let vh = (ext * 0.866).min((h - 2.0).max(1.0));
+            [
+                (margin, cy + vh / 2.0),
+                (margin + ext, cy + vh / 2.0),
+                (w / 2.0, cy - vh / 2.0),
+            ]
+        }
+    };
+    const N: u32 = 4;
+    let side = |a: (f32, f32), b: (f32, f32), p: (f32, f32)| {
+        (b.0 - a.0) * (p.1 - a.1) - (b.1 - a.1) * (p.0 - a.0)
+    };
+    for y in 0..m.h {
+        for x in 0..m.w {
+            let mut hits = 0;
+            for sy in 0..N {
+                for sx in 0..N {
+                    let p = (
+                        x as f32 + (sx as f32 + 0.5) / N as f32,
+                        y as f32 + (sy as f32 + 0.5) / N as f32,
+                    );
+                    let d = [
+                        side(tri[0], tri[1], p),
+                        side(tri[1], tri[2], p),
+                        side(tri[2], tri[0], p),
+                    ];
+                    if d.iter().all(|&v| v >= 0.0) || d.iter().all(|&v| v <= 0.0) {
+                        hits += 1;
+                    }
+                }
+            }
+            m.data[(y * m.w + x) as usize] = (hits * 255 / (N * N)) as u8;
+        }
+    }
+    let (w, h) = (m.w as usize, m.h as usize);
+    match c {
+        0x23F4 => {
+            for row in m.data.chunks_mut(w) {
+                row.reverse();
+            }
+        }
+        0x23F7 => {
+            for y in 0..h / 2 {
+                for x in 0..w {
+                    m.data.swap(y * w + x, (h - 1 - y) * w + x);
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -343,6 +455,134 @@ mod tests {
                 assert_eq!(m.len(), 9 * 18);
                 assert!(m.iter().any(|&a| a != 0), "{c:X} is blank");
             }
+        }
+    }
+
+    fn ink(m: &[u8]) -> u64 {
+        m.iter().map(|&a| a as u64).sum()
+    }
+
+    #[test]
+    fn media_triangles_are_procedural_and_nothing_next_to_them_is() {
+        for c in 0x23F4u32..=0x23F7 {
+            assert!(is_procedural(char::from_u32(c).unwrap()), "{c:X}");
+        }
+        assert!(!is_procedural('\u{23F3}'));
+        assert!(!is_procedural('\u{23F8}'), "pause is not drawn here");
+    }
+
+    #[test]
+    fn a_right_triangle_has_its_base_on_the_left_and_its_tip_on_the_right() {
+        let (w, h) = (9, 18);
+        let m = rasterize('\u{23F5}', w, h).unwrap();
+        assert_eq!(m.len(), (w * h) as usize);
+        let cy = h / 2;
+        // Solid at the base, in the middle and a few rows off the middle.
+        assert_eq!(at(&m, w, 1, cy), 255);
+        assert_eq!(at(&m, w, 1, cy - 3), 255);
+        assert_eq!(at(&m, w, 1, cy + 2), 255);
+        // The tip is thin: at the base column the shape is tall, at the tip
+        // column only the middle rows carry ink.
+        let col_ink = |x: u32| (0..h).filter(|&y| at(&m, w, x, y) > 127).count();
+        assert!(col_ink(1) > col_ink(5) && col_ink(5) > col_ink(w - 2));
+        assert!(col_ink(w - 2) <= 3);
+        assert_eq!(at(&m, w, w - 2, 1), 0, "nothing in the corners");
+        assert_eq!(at(&m, w, 1, h - 1), 0);
+    }
+
+    #[test]
+    fn media_triangles_fit_inside_the_cell_with_a_side_margin() {
+        for (w, h) in [(8u32, 16u32), (9, 18), (10, 21), (17, 35), (6, 12)] {
+            for c in 0x23F4u32..=0x23F7 {
+                let ch = char::from_u32(c).unwrap();
+                let m = rasterize(ch, w, h).unwrap();
+                assert_eq!(m.len(), (w * h) as usize);
+                assert!(ink(&m) > 0, "{c:X} {w}x{h} is blank");
+                for y in 0..h {
+                    assert_eq!(at(&m, w, 0, y), 0, "{c:X} {w}x{h}: left margin");
+                    assert_eq!(at(&m, w, w - 1, y), 0, "{c:X} {w}x{h}: right margin");
+                }
+                for x in 0..w {
+                    assert_eq!(at(&m, w, x, 0), 0, "{c:X} {w}x{h}: top row");
+                    assert_eq!(at(&m, w, x, h - 1), 0, "{c:X} {w}x{h}: bottom row");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn left_mirrors_right_and_down_flips_up_exactly() {
+        for (w, h) in [(8u32, 16u32), (9, 17), (13, 27)] {
+            let right = rasterize('\u{23F5}', w, h).unwrap();
+            let left = rasterize('\u{23F4}', w, h).unwrap();
+            let up = rasterize('\u{23F6}', w, h).unwrap();
+            let down = rasterize('\u{23F7}', w, h).unwrap();
+            for y in 0..h {
+                for x in 0..w {
+                    assert_eq!(at(&left, w, x, y), at(&right, w, w - 1 - x, y));
+                    assert_eq!(at(&down, w, x, y), at(&up, w, x, h - 1 - y));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn media_triangle_area_is_close_to_the_geometry() {
+        // 16 x 32 cell: margin 2, width 12, height 12 * 1.1547 = 13.86, so
+        // the area is 12 * 13.86 / 2 = 83.1 px.
+        let (w, h) = (16u32, 32u32);
+        let m = rasterize('\u{23F5}', w, h).unwrap();
+        let area = ink(&m) as f64 / 255.0;
+        assert!((area - 83.1).abs() < 4.0, "area {area}");
+        // The upward triangle: 12 wide and 12 * 0.866 = 10.4 tall.
+        let up = rasterize('\u{23F6}', w, h).unwrap();
+        let area = ink(&up) as f64 / 255.0;
+        assert!((area - 62.4).abs() < 4.0, "area {area}");
+    }
+
+    #[test]
+    fn media_triangles_survive_tiny_and_huge_cells() {
+        for (w, h) in [(1u32, 1u32), (2, 3), (3, 7), (4, 4), (64, 128)] {
+            for c in 0x23F4u32..=0x23F7 {
+                let m = rasterize(char::from_u32(c).unwrap(), w, h).unwrap();
+                assert_eq!(m.len(), (w * h) as usize);
+                assert!(ink(&m) > 0, "{c:X} {w}x{h} is blank");
+            }
+        }
+    }
+
+    #[test]
+    fn the_missing_box_is_a_hollow_outline_inside_its_area() {
+        for (w, h) in [(8u32, 16u32), (9, 18), (17, 35), (16, 32)] {
+            let m = missing_box(w, h);
+            assert_eq!(m.len(), (w * h) as usize);
+            assert!(ink(&m) > 0);
+            // Margin: the outer ring is empty, so neighbours never touch.
+            for y in 0..h {
+                assert_eq!(at(&m, w, 0, y), 0);
+                assert_eq!(at(&m, w, w - 1, y), 0);
+            }
+            for x in 0..w {
+                assert_eq!(at(&m, w, x, 0), 0);
+                assert_eq!(at(&m, w, x, h - 1), 0);
+            }
+            // Hollow: the middle is empty, the outline is solid.
+            assert_eq!(at(&m, w, w / 2, h / 2), 0, "{w}x{h}");
+            assert!(m.iter().filter(|&&a| a == 255).count() < (w * h / 2) as usize);
+        }
+        // Two cells wide is one box, not two: its middle column is empty too.
+        let wide = missing_box(16, 16);
+        assert_eq!(at(&wide, 16, 8, 8), 0);
+        assert_eq!(at(&wide, 16, 8, 1), 255, "a single top edge across both");
+    }
+
+    #[test]
+    fn the_missing_box_survives_tiny_and_empty_areas() {
+        assert!(missing_box(0, 5).is_empty());
+        for (w, h) in [(1u32, 1u32), (2, 2), (3, 5), (5, 3)] {
+            let m = missing_box(w, h);
+            assert_eq!(m.len(), (w * h) as usize);
+            assert!(ink(&m) > 0, "{w}x{h}");
         }
     }
 

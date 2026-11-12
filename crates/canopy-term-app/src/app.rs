@@ -13,6 +13,7 @@ pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 pub fn window_config(o: &Options) -> WindowConfig {
     WindowConfig {
         font_px: o.font_px,
+        padding_px: o.padding_px,
         initial_grid: (o.cols, o.rows),
         system_fonts: o.system_fonts,
         cursor_blink: o.cursor_blink,
@@ -143,15 +144,21 @@ mod tests {
             "40",
             "--font-px",
             "18",
+            "--padding",
+            "6",
             "--no-blink",
             "--no-system-fonts",
         ]);
         let w = window_config(&o);
+        assert_eq!(w.padding_px, 6.0);
         assert_eq!(w.initial_grid, (120, 40));
         assert_eq!(w.font_px, 18.0);
         assert!(!w.cursor_blink && !w.system_fonts);
         // What the command line does not set keeps the window's default.
         assert_eq!(w.title, WindowConfig::default().title);
+        // The command line's default padding is the window's default.
+        let d = window_config(&options(&[]));
+        assert_eq!(d.padding_px, WindowConfig::default().padding_px);
     }
 
     #[test]

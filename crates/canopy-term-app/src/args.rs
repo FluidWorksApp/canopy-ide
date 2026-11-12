@@ -30,6 +30,8 @@ options:
   --dev               use the debug-build directory ~/.canopy/pty-host-dev
   --cols N, --rows N  the grid a new window opens at (default 100x30)
   --font-px N         font size in logical pixels (default 14)
+  --padding PX        space between the window edge and the text, on every side,
+                      in logical pixels (default 8; 0 for none)
   --no-blink          never blink the cursor
   --no-system-fonts   use only the bundled font (no CJK or emoji fallback)
   -h, --help          this text
@@ -63,6 +65,8 @@ pub struct Options {
     pub cols: u16,
     pub rows: u16,
     pub font_px: f32,
+    /// Space around the grid in logical pixels.
+    pub padding_px: f32,
     pub cursor_blink: bool,
     pub system_fonts: bool,
 }
@@ -77,6 +81,9 @@ pub enum Parsed {
 /// The default `--linger`: long enough to close the window, update and come
 /// back, the same as the Canopy app's own.
 pub const DEFAULT_LINGER_SECS: u64 = 2 * 60 * 60;
+
+/// The default `--padding`, in logical pixels (the window's own default).
+pub const DEFAULT_PADDING_PX: f32 = 8.0;
 
 fn value(it: &mut std::vec::IntoIter<String>, flag: &str) -> Result<String, String> {
     it.next().ok_or_else(|| format!("{flag} needs a value"))
@@ -116,6 +123,7 @@ pub fn parse(args: impl IntoIterator<Item = String>) -> Result<Parsed, String> {
     let mut cols = 100;
     let mut rows = 30;
     let mut font_px = 14.0f32;
+    let mut padding_px = DEFAULT_PADDING_PX;
     let mut cursor_blink = true;
     let mut system_fonts = true;
 
@@ -147,6 +155,14 @@ pub fn parse(args: impl IntoIterator<Item = String>) -> Result<Parsed, String> {
                     return Err("--font-px must be between 4 and 200".into());
                 }
                 font_px = px;
+            }
+            "--padding" => {
+                let v = value(&mut it, "--padding")?;
+                let px: f32 = number(&v, "--padding")?;
+                if !(0.0..=200.0).contains(&px) {
+                    return Err("--padding must be between 0 and 200".into());
+                }
+                padding_px = px;
             }
             "--no-blink" => cursor_blink = false,
             "--no-system-fonts" => system_fonts = false,
@@ -192,6 +208,7 @@ pub fn parse(args: impl IntoIterator<Item = String>) -> Result<Parsed, String> {
         cols,
         rows,
         font_px,
+        padding_px,
         cursor_blink,
         system_fonts,
     })))
@@ -220,6 +237,7 @@ mod tests {
             }
         );
         assert_eq!((o.cols, o.rows), (100, 30));
+        assert_eq!(o.padding_px, 8.0);
         assert_eq!(o.linger_secs, DEFAULT_LINGER_SECS);
         assert!(o.cursor_blink && o.system_fonts && !o.kill_on_close && !o.dev);
     }
@@ -269,6 +287,20 @@ mod tests {
         assert!(o.kill_on_close && !o.cursor_blink && !o.system_fonts);
         assert_eq!((o.cols, o.rows, o.font_px), (120, 40, 16.5));
         assert!(matches!(o.target, Target::New { key: Some(ref k), .. } if k == "k1"));
+    }
+
+    #[test]
+    fn padding_takes_logical_pixels_and_allows_none() {
+        assert_eq!(run(&["--padding", "12"]).unwrap().padding_px, 12.0);
+        assert_eq!(run(&["--padding", "0"]).unwrap().padding_px, 0.0);
+        assert_eq!(run(&["--padding", "2.5"]).unwrap().padding_px, 2.5);
+        for bad in ["-1", "201", "nan", "abc", ""] {
+            assert!(
+                run(&["--padding", bad]).is_err(),
+                "{bad:?} should be refused"
+            );
+        }
+        assert!(run(&["--padding"]).is_err());
     }
 
     #[test]

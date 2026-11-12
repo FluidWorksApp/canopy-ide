@@ -25,25 +25,92 @@ pub struct Candidate {
     pub monospaced: bool,
     pub bold: bool,
     pub italic: bool,
+    /// A face to use only when no other covering face exists: a colour emoji
+    /// font asked for a character whose default look is text (a dingbat such
+    /// as U+2733 must not turn into a coloured picture).
+    pub demoted: bool,
+    /// Tie-break between otherwise equal faces: higher is better (see
+    /// `preference_rank`). 0 for a face nobody has a view on.
+    pub preferred: u8,
 }
 
 /// Picks the best covering candidate: matching the requested weight and slant
-/// matters most (a wrong-weight fallback looks like a bug), then monospaced.
-/// Ties go to the earliest candidate.
+/// matters most (a wrong-weight fallback looks like a bug), then monospaced,
+/// then the platform's preferred symbol faces. A `demoted` face is chosen only
+/// when nothing else covers. Ties go to the earliest candidate.
 pub fn pick_fallback(candidates: &[Candidate], want: FontStyle) -> Option<usize> {
     let mut best: Option<(u32, usize)> = None;
+    let any_plain = candidates.iter().any(|c| c.covers && !c.demoted);
     for (i, c) in candidates.iter().enumerate() {
-        if !c.covers {
+        if !c.covers || (c.demoted && any_plain) {
             continue;
         }
-        let score = (c.bold == want.bold) as u32 * 4
+        let style = (c.bold == want.bold) as u32 * 4
             + (c.italic == want.italic) as u32 * 2
             + c.monospaced as u32;
+        let score = style * 256 + c.preferred as u32;
         if best.map_or(true, |(s, _)| score > s) {
             best = Some((score, i));
         }
     }
     best.map(|(_, i)| i)
+}
+
+/// macOS keeps `.LastResort` among its fonts: a face whose every code point
+/// maps to a glyph that is a tofu box naming the Unicode block. It is for the
+/// system to show "nothing has this", never for a terminal to pick as a
+/// fallback (it was what drew U+23F5 as a box with a question mark). Matches
+/// the family names "LastResort" and "Last Resort" with or without the leading
+/// dot.
+pub fn is_last_resort(family: &str) -> bool {
+    let f = family.to_ascii_lowercase();
+    f.contains("lastresort") || f.contains("last resort")
+}
+
+/// A colour emoji font, by family name (Apple Color Emoji, Noto Color Emoji,
+/// Segoe UI Emoji, Twemoji, ...).
+pub fn is_color_emoji(family: &str) -> bool {
+    family.to_ascii_lowercase().contains("emoji")
+}
+
+/// Code points whose default presentation is the coloured emoji picture
+/// (Unicode `Emoji_Presentation=Yes`), as opposed to a text symbol that merely
+/// has an emoji variant (U+2733, U+26A0, U+2764).
+pub fn has_emoji_presentation(ch: char) -> bool {
+    matches!(ch as u32,
+        0x1F000..=0x1FAFF
+        | 0x231A..=0x231B | 0x23E9..=0x23EC | 0x23F0 | 0x23F3
+        | 0x25FD..=0x25FE | 0x2614..=0x2615 | 0x2648..=0x2653 | 0x267F | 0x2693
+        | 0x26A1 | 0x26AA..=0x26AB | 0x26BD..=0x26BE | 0x26C4..=0x26C5 | 0x26CE
+        | 0x26D4 | 0x26EA | 0x26F2..=0x26F3 | 0x26F5 | 0x26FA | 0x26FD
+        | 0x2705 | 0x270A..=0x270B | 0x2728 | 0x274C | 0x274E | 0x2753..=0x2755
+        | 0x2757 | 0x2795..=0x2797 | 0x27B0 | 0x27BF | 0x2B1B..=0x2B1C | 0x2B50
+        | 0x2B55)
+}
+
+/// Faces that carry the technical, arrow, dingbat and geometric symbols a
+/// terminal UI uses, best first: monospaced ones where there is a choice, then
+/// the platform's symbol fonts. Only a tie-break between faces that already
+/// cover the character equally well.
+const PREFERRED_SYMBOL_FACES: &[&str] = &[
+    "Menlo",
+    "Apple Symbols",
+    "DejaVu Sans Mono",
+    "Noto Sans Mono",
+    "Noto Sans Symbols 2",
+    "Noto Sans Symbols",
+    "Segoe UI Symbol",
+    "Cascadia Mono",
+    "DejaVu Sans",
+];
+
+/// 0 for a face not in `PREFERRED_SYMBOL_FACES`, else higher for an earlier
+/// entry.
+pub fn preference_rank(family: &str) -> u8 {
+    PREFERRED_SYMBOL_FACES
+        .iter()
+        .position(|f| f.eq_ignore_ascii_case(family))
+        .map_or(0, |i| (PREFERRED_SYMBOL_FACES.len() - i) as u8)
 }
 
 /// The codepoints a face maps, as sorted, non-overlapping inclusive ranges, so
@@ -361,7 +428,7 @@ impl FontBook {
             _ => {
                 // Coverage is a binary search per face; nothing is parsed here
                 // once the index exists (see `index_fallbacks`).
-                let faces: Vec<(fontdb::ID, bool, bool, bool)> = self
+                let faces: Vec<(fontdb::ID, bool, bool, bool, String)> = self
                     .db
                     .faces()
                     .map(|f| {
@@ -370,16 +437,24 @@ impl FontBook {
                             f.monospaced,
                             is_bold(f.weight),
                             f.style != fontdb::Style::Normal,
+                            f.families
+                                .first()
+                                .map(|(n, _)| n.clone())
+                                .unwrap_or_default(),
                         )
                     })
                     .collect();
+                let text_default = !has_emoji_presentation(ch);
                 let candidates: Vec<Candidate> = faces
                     .iter()
-                    .map(|&(id, monospaced, bold, italic)| Candidate {
-                        covers: self.covers(id, ch),
-                        monospaced,
-                        bold,
-                        italic,
+                    .map(|(id, monospaced, bold, italic, family)| Candidate {
+                        // The system's "nothing has this" face never counts.
+                        covers: !is_last_resort(family) && self.covers(*id, ch),
+                        monospaced: *monospaced,
+                        bold: *bold,
+                        italic: *italic,
+                        demoted: text_default && is_color_emoji(family),
+                        preferred: preference_rank(family),
                     })
                     .collect();
                 match pick_fallback(&candidates, style) {
@@ -441,6 +516,8 @@ mod tests {
             monospaced,
             bold,
             italic,
+            demoted: false,
+            preferred: 0,
         }
     }
 
@@ -498,6 +575,75 @@ mod tests {
             italic: true,
         };
         assert_eq!(pick_fallback(&c, want), Some(1));
+    }
+
+    #[test]
+    fn the_systems_last_resort_face_is_never_a_fallback() {
+        // What drew U+23F5 as a tofu box on macOS (CI probe: the only faces
+        // covering it were .LastResort and STIX Two Math).
+        for name in [".LastResort", "LastResort", "Last Resort", ".lastresort"] {
+            assert!(is_last_resort(name), "{name}");
+        }
+        for name in ["STIX Two Math", "Apple Symbols", "Menlo", "Resort Sans"] {
+            assert!(!is_last_resort(name), "{name}");
+        }
+    }
+
+    #[test]
+    fn a_colour_emoji_font_does_not_take_text_symbols_but_still_serves_emoji() {
+        for name in [
+            "Apple Color Emoji",
+            ".Apple Color Emoji UI",
+            "Noto Color Emoji",
+            "Segoe UI Emoji",
+        ] {
+            assert!(is_color_emoji(name), "{name}");
+        }
+        assert!(!is_color_emoji("DejaVu Sans Mono"));
+        // U+2733 and U+26A0 are text symbols; U+1F600 and U+2705 are emoji.
+        assert!(!has_emoji_presentation('\u{2733}'));
+        assert!(!has_emoji_presentation('\u{26A0}'));
+        assert!(!has_emoji_presentation('\u{23F5}'));
+        assert!(has_emoji_presentation('\u{1F600}'));
+        assert!(has_emoji_presentation('\u{2705}'));
+        // Demoted: the emoji face loses to any other covering face, however
+        // monospaced, but wins when it is the only one.
+        let emoji = Candidate {
+            demoted: true,
+            ..cand(true, false, false, false)
+        };
+        let text = cand(true, false, false, false);
+        assert_eq!(pick_fallback(&[emoji, text], REGULAR), Some(1));
+        assert_eq!(pick_fallback(&[emoji], REGULAR), Some(0));
+        assert_eq!(
+            pick_fallback(&[emoji, cand(false, true, false, false)], REGULAR),
+            Some(0)
+        );
+    }
+
+    #[test]
+    fn preferred_symbol_faces_break_ties_but_never_beat_style() {
+        let pref = |covers, bold, preferred| Candidate {
+            preferred,
+            ..cand(covers, false, bold, false)
+        };
+        let menlo = preference_rank("Menlo");
+        let dejavu = preference_rank("DejaVu Sans");
+        assert!(menlo > dejavu && dejavu > 0);
+        assert_eq!(preference_rank("menlo"), menlo, "case-insensitive");
+        assert_eq!(preference_rank("Comic Sans MS"), 0);
+        // Equal style: the preferred face wins even though it is later.
+        assert_eq!(
+            pick_fallback(&[pref(true, false, 0), pref(true, false, menlo)], REGULAR),
+            Some(1)
+        );
+        // A better style match wins over preference.
+        assert_eq!(
+            pick_fallback(&[pref(true, true, 0), pref(true, false, menlo)], BOLD),
+            Some(0)
+        );
+        // Preference alone does not make a face cover.
+        assert_eq!(pick_fallback(&[pref(false, false, menlo)], REGULAR), None);
     }
 
     #[test]

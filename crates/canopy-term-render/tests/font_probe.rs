@@ -8,6 +8,7 @@
 
 use canopy_term_render::fonts::FontBook;
 use canopy_term_render::glyphs::FontStyle;
+use canopy_term_render::procedural::is_procedural;
 use std::io::Write;
 
 const REGULAR: FontStyle = FontStyle {
@@ -76,12 +77,14 @@ fn main() {
         fams.sort();
         fams.dedup();
         let shown = fams.len().min(12);
-        let _ = writeln!(
+        let _ =
+            writeln!(
             out,
-            "FONT_PROBE os={} U+{:04X} {:<10} regular={:?} bold={:?} covering={} [{}{}]",
+            "FONT_PROBE os={} U+{:04X} {:<10} drawn={} regular={:?} bold={:?} covering={} [{}{}]",
             std::env::consts::OS,
             ch as u32,
             ch,
+            if is_procedural(ch) { "procedural" } else { "font" },
             reg,
             bold,
             fams.len(),

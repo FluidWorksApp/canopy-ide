@@ -47,7 +47,10 @@ use crate::findbar::{
     draw as draw_find_bar, highlight, key_to_find, layout as find_layout, FindBar, FindButton,
     FindEvent, FindKey, Nav,
 };
-use crate::grid::{cell_at, grid_size, CellPx, FontZoom, PxRect};
+use crate::grid::{
+    cell_at, grid_origin, grid_size, padding_px, surface_for_grid, to_grid, CellPx, FontZoom,
+    PxRect, DEFAULT_PADDING_PX,
+};
 use crate::ime::{cursor_area, preedit_cols, ImeAction, ImeEvent, ImeGate};
 use crate::lines::{self, AbsSelection, ClickTracker, Granularity, Lines, SelectionDrag};
 use crate::links;
@@ -88,6 +91,10 @@ pub struct WindowConfig {
     pub system_fonts: bool,
     /// Off: the cursor never blinks (also the right setting under reduced motion).
     pub cursor_blink: bool,
+    /// Space between the window's edge and the grid, on every side, in logical
+    /// pixels (times the display scale = physical). The area is drawn in the
+    /// terminal background colour.
+    pub padding_px: f32,
 }
 
 impl Default for WindowConfig {
@@ -99,6 +106,7 @@ impl Default for WindowConfig {
             theme: Theme::default(),
             system_fonts: true,
             cursor_blink: true,
+            padding_px: DEFAULT_PADDING_PX,
         }
     }
 }
@@ -268,8 +276,19 @@ struct View {
     engine: TextEngine,
     metrics: FontMetrics,
     layout: CellLayout,
+    /// Padding on every side in physical pixels (the logical padding times the
+    /// scale factor); the grid's top-left is `(pad, pad)`.
+    pad: u32,
     adapter: accesskit_winit::Adapter,
     clipboard: Option<arboard::Clipboard>,
+}
+
+impl View {
+    /// The grid's top-left corner on the surface: the one origin the renderer,
+    /// pointer, IME area and accessibility tree all share.
+    fn origin(&self) -> (u32, u32) {
+        grid_origin(self.pad)
+    }
 }
 
 /// winit's key without modifiers ("1" for Shift+1), where winit provides it.
@@ -392,8 +411,10 @@ impl<S: FrameSource> App<S> {
             // AccessKit's adapter must exist before the window is first shown.
             .with_visible(false)
             .with_inner_size(LogicalSize::new(
-                logical.width as f64 * cols.max(1) as f64,
-                logical.height as f64 * rows.max(1) as f64,
+                logical.width as f64 * cols.max(1) as f64
+                    + 2.0 * self.config.padding_px.max(0.0) as f64,
+                logical.height as f64 * rows.max(1) as f64
+                    + 2.0 * self.config.padding_px.max(0.0) as f64,
             ));
         let window = Arc::new(el.create_window(attrs).map_err(|e| e.to_string())?);
         let adapter =
@@ -403,10 +424,9 @@ impl<S: FrameSource> App<S> {
         // pixels, so at 2x a cell can be 17 px, not 2 x 8: size the window from
         // the real cell so it opens at the requested grid. A platform that
         // applies this later sends `Resized`.
-        let wanted = PhysicalSize::new(
-            cell_layout.width * cols.max(1) as u32,
-            cell_layout.height * rows.max(1) as u32,
-        );
+        let pad = padding_px(self.config.padding_px, window.scale_factor() as f32);
+        let (wanted_w, wanted_h) = surface_for_grid(cell_px(&cell_layout), cols, rows, pad);
+        let wanted = PhysicalSize::new(wanted_w, wanted_h);
         let size = window
             .request_inner_size(wanted)
             .unwrap_or_else(|| window.inner_size());
@@ -422,7 +442,9 @@ impl<S: FrameSource> App<S> {
             fonts.load_system_fonts();
         }
         let engine = TextEngine::new(fonts, cell_layout, ATLAS_SIZE);
-        let builder = QuadBuilder::new(cell_layout, self.config.theme);
+        let mut builder = QuadBuilder::new(cell_layout, self.config.theme);
+        builder.set_origin(pad, pad);
+        self.a11y.set_origin(grid_origin(pad));
         let clipboard = arboard::Clipboard::new().ok();
         window.set_ime_allowed(true);
         window.set_visible(true);
@@ -434,6 +456,7 @@ impl<S: FrameSource> App<S> {
             engine,
             metrics,
             layout: cell_layout,
+            pad,
             adapter,
             clipboard,
         })
@@ -691,7 +714,7 @@ impl<S: FrameSource> App<S> {
         if size.width == 0 || size.height == 0 {
             return;
         }
-        let grid = grid_size((size.width, size.height), cell_px(&v.layout));
+        let grid = grid_size((size.width, size.height), cell_px(&v.layout), v.pad);
         if grid != self.grid {
             self.grid = grid;
             // Reflow moves text between lines: a selection or click count no
@@ -713,6 +736,10 @@ impl<S: FrameSource> App<S> {
         let scale = v.window.scale_factor() as f32;
         let l = layout(&v.metrics, self.font.px, Scale(scale));
         v.layout = l;
+        v.pad = padding_px(self.config.padding_px, scale);
+        let origin = v.origin();
+        v.builder.set_origin(origin.0, origin.1);
+        self.a11y.set_origin(origin);
         v.builder.set_layout(l);
         v.engine.set_layout(l);
         self.needs_present = true;
@@ -946,7 +973,7 @@ impl<S: FrameSource> App<S> {
             (true, None) => (f.rows.saturating_sub(1), 0),
             (false, _) => (f.cursor.row, f.cursor.col),
         };
-        let area = cursor_area(at, cols, cell_px(&v.layout), f.cols);
+        let area = cursor_area(at, cols, cell_px(&v.layout), f.cols).offset(v.origin());
         if self.ime_area != Some(area) {
             v.window.set_ime_cursor_area(
                 PhysicalPosition::new(area.x, area.y),
@@ -958,7 +985,7 @@ impl<S: FrameSource> App<S> {
 
     fn pointer_cell(&self) -> Option<(u16, u16)> {
         let (pos, v) = (self.pointer?, self.view.as_ref()?);
-        cell_at(pos, cell_px(&v.layout), self.grid)
+        cell_at(to_grid(pos, v.origin()), cell_px(&v.layout), self.grid)
     }
 
     /// Reports a mouse event to the program at the pointer's cell.
@@ -986,16 +1013,20 @@ impl<S: FrameSource> App<S> {
             }
             return;
         }
-        let (Some(drag), Some(px)) = (self.drag, self.view.as_ref().map(|v| cell_px(&v.layout)))
-        else {
+        let (Some(drag), Some((px, origin))) = (
+            self.drag,
+            self.view.as_ref().map(|v| (cell_px(&v.layout), v.origin())),
+        ) else {
             return;
         };
-        let Some(cell) = cell_at((pos.x, pos.y), px, self.grid) else {
+        // Everything below is measured from the grid's corner, not the window's.
+        let rel = to_grid((pos.x, pos.y), origin);
+        let Some(cell) = cell_at(rel, px, self.grid) else {
             return;
         };
-        // Dragging past the top or bottom edge scrolls through history.
+        // Dragging past the top or bottom edge of the grid scrolls through history.
         let height = (self.grid.1 as u32 * px.height) as f64;
-        let edge = edge_scroll(pos.y, height, px.height);
+        let edge = edge_scroll(rel.1, height, px.height);
         let scrolled = edge != 0 && self.viewport.scroll_by(edge, self.history_len);
         let Some(frame) = self.frame.as_ref() else {
             return;
@@ -1054,12 +1085,13 @@ impl<S: FrameSource> App<S> {
         }
         match state {
             ElementState::Pressed => {
-                let (Some(pos), Some(px)) =
-                    (self.pointer, self.view.as_ref().map(|v| cell_px(&v.layout)))
-                else {
+                let (Some(pos), Some((px, origin))) = (
+                    self.pointer,
+                    self.view.as_ref().map(|v| (cell_px(&v.layout), v.origin())),
+                ) else {
                     return;
                 };
-                let Some(cell) = cell_at(pos, px, self.grid) else {
+                let Some(cell) = cell_at(to_grid(pos, origin), px, self.grid) else {
                     return;
                 };
                 // One click starts a cell selection, two select the word, three
