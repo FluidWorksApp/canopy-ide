@@ -215,6 +215,7 @@ pub struct Screen {
     full_rebuild: bool,
 }
 
+#[inline(always)]
 fn convert_color(c: EngineColor) -> Color {
     match c {
         EngineColor::Indexed(i) => Color::Indexed(i),
@@ -234,7 +235,7 @@ fn convert_color(c: EngineColor) -> Color {
     }
 }
 
-#[inline]
+#[inline(always)]
 fn convert_cell(cell: &EngineCell, clusters: &mut Vec<String>) -> Cell {
     // Attribute bits without a branch per flag. Engine bits: INVERSE 0, BOLD 1,
     // ITALIC 2, UNDERLINE 3, DIM 7, HIDDEN 8, STRIKEOUT 9, and the other
@@ -681,16 +682,27 @@ impl Screen {
             row_buf.clear();
             local.truncate(1);
             let row = &grid[Line(r as i32)];
-            for c in 0..cols {
-                row_buf.push(convert_cell(&row[Column(c)], &mut local));
-            }
             let range = r * cols..(r + 1) * cols;
-            if rows_equal(
-                &self.frame.cells[range.clone()],
-                &self.frame.clusters,
-                &row_buf,
-                &local,
-            ) {
+            let old_row = &self.frame.cells[range.clone()];
+            // Convert and compare in one pass. A row with a cluster, in the
+            // old frame or the new row, takes the exact comparison instead.
+            let mut diff = false;
+            let mut slow = false;
+            for (cell, old) in row[..].iter().zip(old_row) {
+                let nc = convert_cell(cell, &mut local);
+                if nc.cluster != 0 || old.cluster != 0 {
+                    slow = true;
+                } else if nc != *old {
+                    diff = true;
+                }
+                row_buf.push(nc);
+            }
+            let same = if slow {
+                rows_equal(old_row, &self.frame.clusters, &row_buf, &local)
+            } else {
+                !diff
+            };
+            if same {
                 continue;
             }
             self.frame.cells[range].copy_from_slice(&row_buf);

@@ -352,14 +352,15 @@ impl Filter {
     /// Filter `input` into `out`, recording actions at offsets into `out`.
     pub fn feed(&mut self, input: &[u8], out: &mut Vec<u8>, actions: &mut Vec<(usize, Action)>) {
         out.reserve(input.len());
+        // `input[start..i]` is kept but not yet copied to `out`; it is copied in
+        // one piece when a byte is dropped, at `ESC c`, and at the end.
+        let mut start = 0;
         let mut i = 0;
         while i < input.len() {
             // Ground passes every byte through except ESC, which starts a
-            // sequence: copy the whole run up to the next ESC at once.
+            // sequence: skip the whole run up to the next ESC at once.
             if self.st == St::Ground {
-                let n = find_esc(&input[i..]);
-                out.extend_from_slice(&input[i..i + n]);
-                i += n;
+                i += find_esc(&input[i..]);
                 if i >= input.len() {
                     break;
                 }
@@ -401,7 +402,8 @@ impl Filter {
                         self.st = St::Ground;
                         if b == b'c' && self.inter.is_empty() && !self.ignoring {
                             self.tracker.reset();
-                            out.push(b);
+                            out.extend_from_slice(&input[start..i]);
+                            start = i;
                             actions.push((out.len(), Action::Reset));
                             continue;
                         }
@@ -438,7 +440,7 @@ impl Filter {
                         self.collect(b);
                         self.st = St::CsiParam;
                     }
-                    0x40..=0x7E => self.csi_dispatch(b, actions, out.len() + 1),
+                    0x40..=0x7E => self.csi_dispatch(b, actions, out.len() + (i - start)),
                     _ => self.anywhere(b),
                 },
                 St::CsiParam => match b {
@@ -451,7 +453,7 @@ impl Filter {
                     0x3A => self.subparam_sep(),
                     0x3B => self.param_sep(),
                     0x3C..=0x3F => self.st = St::CsiIgnore,
-                    0x40..=0x7E => self.csi_dispatch(b, actions, out.len() + 1),
+                    0x40..=0x7E => self.csi_dispatch(b, actions, out.len() + (i - start)),
                     0x7F => {}
                     _ => self.anywhere(b),
                 },
@@ -459,7 +461,7 @@ impl Filter {
                     _ if is_exec(b) => {}
                     0x20..=0x2F => self.collect(b),
                     0x30..=0x3F => self.st = St::CsiIgnore,
-                    0x40..=0x7E => self.csi_dispatch(b, actions, out.len() + 1),
+                    0x40..=0x7E => self.csi_dispatch(b, actions, out.len() + (i - start)),
                     _ => self.anywhere(b),
                 },
                 St::CsiIgnore => match b {
@@ -501,10 +503,12 @@ impl Filter {
                     _ => {}
                 },
             }
-            if keep {
-                out.push(b);
+            if !keep {
+                out.extend_from_slice(&input[start..i - 1]);
+                start = i;
             }
         }
+        out.extend_from_slice(&input[start..]);
     }
 
     /// Count an OSC body byte; false means drop it.
