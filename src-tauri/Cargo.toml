@@ -106,6 +106,8 @@ tauri-plugin-log = "2"
 tauri-plugin-dialog = "2"
 # PTY: cross-platform pseudo-terminal, the core of the terminal feature
 portable-pty = "0.9"
+# portable-pty's error type, which the proxy MasterPty (tailnet_client.rs) must name
+anyhow = "1"
 # File watching for external-change detection (diff-first workflow)
 notify = "8"
 # .gitignore semantics for the file walk behind quick-open, find-in-files and

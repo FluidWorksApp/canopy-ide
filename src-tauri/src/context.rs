@@ -1712,6 +1712,8 @@ fn terminal_for_name(
         .collect();
     let mut matches = sessions
         .into_iter()
+        // A window onto a terminal on another machine is not an agent here.
+        .filter(|session| !manager.is_proxy(session.id))
         .filter(|session| session.name.lock().unwrap().eq_ignore_ascii_case(requested))
         .filter(|session| {
             caller_project.as_ref().is_none_or(|project_id| {

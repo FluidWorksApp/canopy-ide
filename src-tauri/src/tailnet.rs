@@ -116,7 +116,7 @@ fn preferred_addr(addrs: &[IpAddr]) -> Option<IpAddr> {
         .or_else(|| addrs.first().copied())
 }
 
-fn machine(n: &NodeInfo, allowed: &BTreeSet<String>) -> Machine {
+pub(crate) fn machine(n: &NodeInfo, allowed: &BTreeSet<String>) -> Machine {
     let ip = preferred_addr(&n.addrs).map(|a| a.to_string());
     let host = n.host_name.as_deref().map(str::trim).unwrap_or("");
     let label = n.dns_name.split('.').next().unwrap_or("");
@@ -138,13 +138,13 @@ fn machine(n: &NodeInfo, allowed: &BTreeSet<String>) -> Machine {
 }
 
 /// The stable node id inside a tailnet allowlist entry.
-fn entry_stable_id(entry: &str) -> Option<String> {
+pub(crate) fn entry_stable_id(entry: &str) -> Option<String> {
     let canon = canonical_tailnet_entry(entry)?;
     canon.splitn(3, '/').nth(1).map(str::to_string)
 }
 
 /// The tailnet (DNS domain) this machine is on, from its own full name.
-fn own_domain(status: &TailnetStatus) -> Option<String> {
+pub(crate) fn own_domain(status: &TailnetStatus) -> Option<String> {
     status
         .self_node
         .as_ref()
@@ -153,7 +153,7 @@ fn own_domain(status: &TailnetStatus) -> Option<String> {
 
 /// Whether `n` belongs to the tailnet `domain`. Without a known own tailnet
 /// nothing does, so nothing is listed or allowed.
-fn in_tailnet(n: &NodeInfo, domain: Option<&str>) -> bool {
+pub(crate) fn in_tailnet(n: &NodeInfo, domain: Option<&str>) -> bool {
     domain.is_some() && tailnet_domain_of(&n.dns_name).as_deref() == domain
 }
 
@@ -336,7 +336,7 @@ fn allow_path() -> Result<PathBuf, String> {
     Ok(PathBuf::from(home).join(".canopy").join(ALLOW_FILE))
 }
 
-fn installed_runner() -> Result<Arc<dyn CliRunner>, InstallProblem> {
+pub(crate) fn installed_runner() -> Result<Arc<dyn CliRunner>, InstallProblem> {
     ProcessRunner::locate().map(|r| Arc::new(r) as Arc<dyn CliRunner>)
 }
 
