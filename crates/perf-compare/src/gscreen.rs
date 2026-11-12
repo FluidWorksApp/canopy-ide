@@ -20,7 +20,7 @@
 #[path = "stream.rs"]
 mod stream;
 
-use canopy_term_core::GhosttyScreen;
+use canopy_term_core::Screen as GhosttyScreen;
 use std::time::Instant;
 use stream::synthetic_stream;
 

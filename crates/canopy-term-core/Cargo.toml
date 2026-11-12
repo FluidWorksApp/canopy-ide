@@ -5,37 +5,22 @@ description = "Terminal screen state and the frame contract between emulator and
 authors = ["Cause Connect Pte Ltd <sam@fluidwords.app>"]
 license = "MIT"
 edition = "2021"
-rust-version = "1.85"
+# Needed by libghostty-vt (edition 2024).
+rust-version = "1.90"
 
 # Its own workspace root with its own lock: parallel work on other crates, and
 # dependencies a track adds, never touch the app's Cargo.lock.
 [workspace]
 
-[features]
-# The headless emulator behind `Screen`. Off by default so crates that only need
-# the frame contract (the renderer) do not pull in an emulator. Tests turn it on
-# through the self dev-dependency below, so plain `cargo test` covers it.
-screen = ["dep:alacritty_terminal"]
-# The same `Screen` on libghostty-vt (MIT OR Apache-2.0), exported as
-# `GhosttyScreen`. Off by default: it needs Zig 0.15.2 at build time (the sys
-# crate's build script runs `zig build`) and Rust 1.90, and it fetches ghostty
-# and Zig packages unless GHOSTTY_SOURCE_DIR / GHOSTTY_ZIG_SYSTEM_DIR are set.
-# Independent of `screen`; enable both to test the two engines side by side.
-ghostty = ["dep:libghostty-vt"]
-
 [dependencies]
-# Apache-2.0. Chosen by measurement: see PERF.md and tests/compare.rs. Its
-# types never appear in this crate's public API. `serde` is off.
-alacritty_terminal = { version = "0.26.0", default-features = false, optional = true }
-# Pinned exactly: pre-1.0, breaking changes expected (it pins ghostty a887df42
-# in its build script, so the engine version moves only with this line). Its
-# types never appear in this crate's public API. Rust 1.90, edition 2024.
-libghostty-vt = { version = "=0.2.2", optional = true }
-
-[dev-dependencies]
-canopy-term-core = { path = ".", features = ["screen"] }
-# Candidate emulators for the conformance and throughput harness (tests/).
-vt100 = "0.18.1"
+# The terminal engine: libghostty-vt (MIT OR Apache-2.0). Pinned exactly:
+# pre-1.0, breaking changes expected (it pins ghostty a887df42 in its build
+# script, so the engine version moves only with this line). Its types never
+# appear in this crate's public API. Needs Zig 0.15.2 at build time (the sys
+# crate's build script runs `zig build`) and Rust 1.90 (edition 2024); it
+# fetches ghostty and Zig packages unless GHOSTTY_SOURCE_DIR /
+# GHOSTTY_ZIG_SYSTEM_DIR are set. See README.md.
+libghostty-vt = "=0.2.2"
 
 # `cargo test` builds unoptimised by default; parse throughput numbers from an
 # unoptimised build mean nothing, so the dev profile is optimised. The crate is
@@ -43,8 +28,8 @@ vt100 = "0.18.1"
 [profile.dev]
 opt-level = 3
 
-# Debug assertions and overflow checks in dependencies would skew an emulator
-# comparison by however many asserts each crate happens to contain.
+# Debug assertions and overflow checks in dependencies would skew the
+# throughput numbers by however many asserts each crate happens to contain.
 [profile.dev.package."*"]
 opt-level = 3
 # libghostty-vt-sys picks Zig's optimize mode from the profile: debug info on
@@ -53,14 +38,6 @@ opt-level = 3
 debug = false
 debug-assertions = false
 overflow-checks = false
-
-# Candidate comparison: prints a conformance table and throughput numbers.
-# harness = false so the output reaches the CI log (libtest would capture it)
-# and nothing runs in parallel to skew timings. Report only: it never asserts
-# on timing or on which candidate wins.
-[[test]]
-name = "compare"
-harness = false
 
 # Report-only numbers for Screen (throughput, memory, per-frame cost), printed
 # as markdown rows to the CI log and copied into PERF.md.

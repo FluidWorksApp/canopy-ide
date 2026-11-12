@@ -134,52 +134,19 @@ jobs:
 
   # Each terminal crate is its own workspace root with its own Cargo.lock, so
   # tracks adding dependencies never touch the app's lock or each other.
+  #
+  # canopy-term-core is built on libghostty-vt, whose sys crate runs `zig build`
+  # from its build script, so every crate that depends on it (core, input,
+  # render, session, window: `cargo metadata` over crates/canopy-term-*) needs
+  # the pinned Zig, and so does the job as a whole: it is installed once, before
+  # the loop over the glob below, so a crate added later is covered too. The sys
+  # crate also needs network (a git clone of ghostty at its pinned commit and
+  # Zig package fetches); the offline build is in canopy-term-core/README.md.
+  # canopy-term-cli and canopy-pty-host do not depend on it and have their own
+  # job. The test-build workflow on release/test-build branches is not in this
+  # repository's workflows on this branch, so it is not covered here.
   terminal-crates:
     name: Terminal crates (${{ matrix.os }})
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, macos-15, windows-2022]
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: rustfmt
-      # Every crates/canopy-term-* crate is its own workspace root with its own
-      # lock. Found by glob, so a new crate needs no edit here. The CLI crate
-      # has its own job.
-      - name: List terminal crates
-        id: crates
-        shell: bash
-        run: |
-          list=$(ls -d crates/canopy-term-*/ | sed 's#/$##' | grep -v '^crates/canopy-term-cli$' | sort)
-          echo "Crates: $list"
-          { echo 'dirs<<EOF'; echo "$list"; echo 'EOF'; } >> "$GITHUB_OUTPUT"
-      - uses: swatinem/rust-cache@v2
-        with:
-          workspaces: ${{ steps.crates.outputs.dirs }}
-          key: term-${{ matrix.os }}
-      - name: Test and format each crate
-        shell: bash
-        env:
-          DIRS: ${{ steps.crates.outputs.dirs }}
-        run: |
-          for dir in $DIRS; do
-            echo "::group::$dir"
-            cargo test --locked --manifest-path "$dir/Cargo.toml"
-            cargo fmt --manifest-path "$dir/Cargo.toml" --check
-            echo "::endgroup::"
-          done
-
-  # canopy-term-core on libghostty-vt (feature `ghostty`, off by default). Separate
-  # from the job above because the engine's build script runs `zig build`, so it
-  # needs the pinned Zig, and it needs network (a git clone of ghostty at the
-  # crate's pinned commit and Zig package fetches); the offline build and
-  # Windows are proven elsewhere. Runs the same engine-agnostic suites that the
-  # job above runs for the default engine, plus the ghostty-only tests.
-  terminal-ghostty:
-    name: Terminal crates (ghostty feature) (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     timeout-minutes: 60
     strategy:
@@ -204,6 +171,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
       - name: Install Zig ${{ env.ZIG_VERSION }} (official zip, checksum verified)
         if: runner.os == 'Windows'
         shell: pwsh
@@ -232,15 +201,31 @@ jobs:
           echo "zig $(zig version)"
           rustc --version
           cargo --version
+      # Every crates/canopy-term-* crate is its own workspace root with its own
+      # lock. Found by glob, so a new crate needs no edit here. The CLI crate
+      # has its own job.
+      - name: List terminal crates
+        id: crates
+        shell: bash
+        run: |
+          list=$(ls -d crates/canopy-term-*/ | sed 's#/$##' | grep -v '^crates/canopy-term-cli$' | sort)
+          echo "Crates: $list"
+          { echo 'dirs<<EOF'; echo "$list"; echo 'EOF'; } >> "$GITHUB_OUTPUT"
       - uses: swatinem/rust-cache@v2
         with:
-          workspaces: crates/canopy-term-core
-          key: term-ghostty-${{ matrix.os }}
-      - name: Test canopy-term-core with the ghostty feature
+          workspaces: ${{ steps.crates.outputs.dirs }}
+          key: term-${{ matrix.os }}
+      - name: Test and format each crate
         shell: bash
-        run: >
-          cargo test --locked --manifest-path crates/canopy-term-core/Cargo.toml
-          --features ghostty --no-fail-fast --lib --test screen --test conformance --test fuzz --test ghostty
+        env:
+          DIRS: ${{ steps.crates.outputs.dirs }}
+        run: |
+          for dir in $DIRS; do
+            echo "::group::$dir"
+            cargo test --locked --manifest-path "$dir/Cargo.toml"
+            cargo fmt --manifest-path "$dir/Cargo.toml" --check
+            echo "::endgroup::"
+          done
 
   term-cli:
     name: canopy-term (${{ matrix.os }})

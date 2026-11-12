@@ -53,6 +53,21 @@ impl Default for Cell {
     }
 }
 
+/// Whether opening an OSC 8 link is reasonable without asking: `http`, `https`
+/// and `mailto` only. The URI comes from whatever printed to the terminal, so
+/// `file:`, `javascript:`, custom schemes and anything else need a prompt or a
+/// refusal, decided by the application. Pair it with `Screen::hyperlink_at`.
+pub fn is_safe_link(uri: &str) -> bool {
+    let Some((scheme, rest)) = uri.split_once(':') else {
+        return false;
+    };
+    match scheme.to_ascii_lowercase().as_str() {
+        "http" | "https" => rest.starts_with("//") && rest.len() > 2,
+        "mailto" => !rest.is_empty(),
+        _ => false,
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum CursorShape {
     #[default]
@@ -217,5 +232,19 @@ mod tests {
         };
         assert_eq!(f.text(&f.cells[0]), "e\u{301}");
         assert_eq!(f.text(&f.cells[1]), " ");
+    }
+
+    #[test]
+    fn only_web_and_mail_links_are_safe_to_open_unasked() {
+        assert!(is_safe_link("https://example.com/x"));
+        assert!(is_safe_link("HTTP://example.com"));
+        assert!(is_safe_link("mailto:someone@example.com"));
+        assert!(!is_safe_link("file:///etc/passwd"));
+        assert!(!is_safe_link("javascript:alert(1)"));
+        assert!(!is_safe_link("ssh://host"));
+        assert!(!is_safe_link("https:"));
+        assert!(!is_safe_link("https://"));
+        assert!(!is_safe_link("example.com"));
+        assert!(!is_safe_link(""));
     }
 }

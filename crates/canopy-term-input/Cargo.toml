@@ -5,7 +5,7 @@ description = "Encodes key, text, mouse, paste and focus events into the bytes a
 authors = ["Cause Connect Pte Ltd <sam@fluidwords.app>"]
 license = "MIT"
 edition = "2021"
-rust-version = "1.82"
+rust-version = "1.90"
 
 # Its own workspace root with its own lock: parallel work on other crates, and
 # dependencies a track adds, never touch the app's Cargo.lock.
@@ -13,3 +13,10 @@ rust-version = "1.82"
 
 [dependencies]
 canopy-term-core = { path = "../canopy-term-core" }
+
+# Profiles in a path dependency are ignored. libghostty-vt-sys (the engine behind
+# canopy-term-core) picks Zig's optimize mode from the profile: debug info on
+# means a Zig Debug build (slow, safety checks that abort); off gives
+# ReleaseFast, which is what a release build gets.
+[profile.dev.package.libghostty-vt-sys]
+debug = false

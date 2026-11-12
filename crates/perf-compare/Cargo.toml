@@ -10,16 +10,11 @@ publish = false
 # glob that the `Terminal crates` job builds.
 [workspace]
 
-# `ghostty` builds the GhosttyScreen bench (needs Zig 0.15.2, like the spike).
-# Off by default so `ours` builds without Zig.
-[features]
-ghostty = ["canopy-term-core/ghostty", "dep:libghostty-vt"]
-
 [dependencies]
-canopy-term-core = { path = "../canopy-term-core", features = ["screen"] }
+canopy-term-core = { path = "../canopy-term-core" }
 # Same pin as canopy-term-core; only used by `gscreen bare` (a callgrind target
 # for the bare vt_write loop).
-libghostty-vt = { version = "=0.2.2", optional = true }
+libghostty-vt = "=0.2.2"
 
 [[bin]]
 name = "ours"
@@ -28,7 +23,6 @@ path = "src/main.rs"
 [[bin]]
 name = "gscreen"
 path = "src/gscreen.rs"
-required-features = ["ghostty"]
 
 # Same as the spike's `current` and `ghostty` bins: plain release.
 [profile.release]

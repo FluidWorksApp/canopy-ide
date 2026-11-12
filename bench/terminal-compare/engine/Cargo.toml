@@ -10,5 +10,5 @@ publish = false
 [workspace]
 
 [dependencies]
-canopy-term-core = { path = "../../../crates/canopy-term-core", features = ["screen"] }
+canopy-term-core = { path = "../../../crates/canopy-term-core" }
 libc = "0.2"

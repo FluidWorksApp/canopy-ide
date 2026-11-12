@@ -1,8 +1,6 @@
-//! `Screen` on libghostty-vt (feature `ghostty`, off by default).
+//! `Screen` on libghostty-vt, the terminal engine.
 //!
-//! The same API as [`crate::screen::Screen`], so a consumer can switch engine
-//! by changing one type. No libghostty-vt type appears in this module's public
-//! API.
+//! No libghostty-vt type appears in this module's public API.
 //!
 //! # Threading
 //!
