@@ -1,0 +1,46 @@
+name: Ghostty source and Zig package cache
+description: >
+  Gives libghostty-vt-sys its Ghostty source tree and Zig package cache from
+  actions/cache (keyed on the pinned commit and the installed Zig version), so the
+  cargo build makes no git clone and no Zig package fetch. On a miss it fetches
+  with 3 attempts and backoff, verifies the pinned checksums, then saves.
+  All pins are in pins.env. Zig must already be on PATH.
+runs:
+  using: composite
+  steps:
+    - name: Check pins and compute the cache key
+      id: pins
+      shell: bash
+      env:
+        ACTION_PATH: ${{ github.action_path }}
+      run: bash "$ACTION_PATH/vendor.sh" prepare
+
+    - name: Restore the Ghostty source and Zig package cache
+      id: restore
+      uses: actions/cache/restore@v4.2.3
+      with:
+        path: ${{ steps.pins.outputs.dir }}
+        key: ${{ steps.pins.outputs.key }}
+
+    - name: Fetch (on a miss) and verify the checksums
+      id: ensure
+      shell: bash
+      env:
+        ACTION_PATH: ${{ github.action_path }}
+        CACHE_HIT: ${{ steps.restore.outputs.cache-hit }}
+      run: bash "$ACTION_PATH/vendor.sh" ensure
+
+    # Only after the checksums passed, so a bad fetch is never cached. Saving is
+    # best effort (a lost race with a parallel job is a warning, not a failure).
+    - name: Save the cache
+      if: steps.ensure.outputs.fetched == 'true'
+      uses: actions/cache/save@v4.2.3
+      with:
+        path: ${{ steps.pins.outputs.dir }}
+        key: ${{ steps.pins.outputs.key }}
+
+    - name: Point the cargo build at the vendored inputs
+      shell: bash
+      env:
+        ACTION_PATH: ${{ github.action_path }}
+      run: bash "$ACTION_PATH/vendor.sh" export

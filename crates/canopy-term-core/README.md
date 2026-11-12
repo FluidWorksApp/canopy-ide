@@ -91,6 +91,13 @@ GHOSTTY_ZIG_SYSTEM_DIR=<vendor>/zig-global-cache/p \
 cargo build --locked --offline
 ```
 
+CI does this for you: `.github/actions/ghostty-vendor` restores the source and
+the Zig package cache from actions/cache (keyed on the commit and the Zig
+version), fetches with retries and checks the pinned checksums on a miss, and
+sets `GHOSTTY_SOURCE_DIR` / `GHOSTTY_ZIG_SYSTEM_DIR`. Its `pins.env` is the one
+file to edit when `libghostty-vt` is bumped. Its checksums are per-file manifests
+(portable to macOS and Windows) rather than the tar hashes above.
+
 The checksums above belong to libghostty-vt-sys 0.2.2 / ghostty `a887df42`.
 Bumping the crate changes the commit and therefore all of them. Not verified:
 whether 565 MB is the minimum needed, a read-only vendor dir, an offline build

@@ -1,0 +1,2 @@
+# Run by bash on Windows runners too: a CRLF checkout would break them.
+* text eol=lf
