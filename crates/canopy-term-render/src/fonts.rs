@@ -151,6 +151,8 @@ pub struct LoadedFace {
     pub index: u32,
     pub units_per_em: u16,
     pub buzz: rustybuzz::Face<'static>,
+    /// The face's first family name (diagnostics, the CI coverage probe).
+    pub family: String,
 }
 
 /// A face and which styles must be faked because the face lacks them.
@@ -254,13 +256,18 @@ impl FontBook {
         if let Some(&i) = self.by_id.get(&id) {
             return Some(i);
         }
-        let (index, path) = {
+        let (index, path, family) = {
             let info = self.db.face(id)?;
             let path = match &info.source {
                 fontdb::Source::File(p) | fontdb::Source::SharedFile(p, _) => Some(p.clone()),
                 fontdb::Source::Binary(_) => None,
             };
-            (info.index, path)
+            let family = info
+                .families
+                .first()
+                .map(|(n, _)| n.clone())
+                .unwrap_or_else(|| info.post_script_name.clone());
+            (info.index, path, family)
         };
         let known = path.as_ref().and_then(|p| pinned().by_path.get(p).copied());
         let data = match known {
@@ -288,6 +295,7 @@ impl FontBook {
             index,
             units_per_em: upem,
             buzz,
+            family,
         });
         let i = (self.loaded.len() - 1) as u32;
         self.by_id.insert(id, i);
@@ -382,6 +390,38 @@ impl FontBook {
         };
         self.cache.insert((ch, style), result);
         result
+    }
+
+    /// Every loaded face (family, bold, italic, monospaced) that maps `ch`, in
+    /// database order. Diagnostics: the CI coverage probe prints this so a
+    /// missing glyph can be traced to the fonts a machine really has.
+    pub fn covering_faces(&mut self, ch: char) -> Vec<(String, bool, bool, bool)> {
+        let faces: Vec<(fontdb::ID, String, bool, bool, bool)> = self
+            .db
+            .faces()
+            .map(|f| {
+                (
+                    f.id,
+                    f.families
+                        .first()
+                        .map(|(n, _)| n.clone())
+                        .unwrap_or_else(|| f.post_script_name.clone()),
+                    is_bold(f.weight),
+                    f.style != fontdb::Style::Normal,
+                    f.monospaced,
+                )
+            })
+            .collect();
+        faces
+            .into_iter()
+            .filter(|(id, ..)| self.covers(*id, ch))
+            .map(|(_, n, b, i, m)| (n, b, i, m))
+            .collect()
+    }
+
+    /// Number of faces in the database.
+    pub fn face_count(&self) -> usize {
+        self.db.len()
     }
 
     /// The primary face, whether or not it has `ch`; used for missing glyphs.
