@@ -890,7 +890,9 @@ describe("raising a PR from the card", () => {
     };
     const submitted = async () => {
       const { runCommitPushPr } = await import("../commitPushPrIpc");
-      await waitFor(() => expect(runCommitPushPr).toHaveBeenCalled());
+      // The default 1 s wait is too short for a loaded CI runner: the click goes
+      // through a dynamic import and a promise race before the IPC is called.
+      await waitFor(() => expect(runCommitPushPr).toHaveBeenCalled(), { timeout: 5000 });
       return vi.mocked(runCommitPushPr).mock.calls.at(-1)![0];
     };
 
@@ -898,7 +900,7 @@ describe("raising a PR from the card", () => {
       const { draftPrWithBrain } = await import("../prDraftBrain");
       vi.mocked(draftPrWithBrain).mockResolvedValueOnce(draft);
       const input = await openForm();
-      await waitFor(() => expect(input.value).toBe(draft.title));
+      await waitFor(() => expect(input.value).toBe(draft.title), { timeout: 5000 });
       fireEvent.click(screen.getByRole("button", { name: "Raise PR" }));
       expect(await submitted()).toMatchObject({
         title: draft.title,
@@ -934,7 +936,7 @@ describe("raising a PR from the card", () => {
       const { runCommitPushPr } = await import("../commitPushPrIpc");
       vi.mocked(runCommitPushPr).mockClear();
       fireEvent.click(screen.getByRole("button", { name: "Raise PR" }));
-      expect(await screen.findByText("Working…")).toBeInTheDocument();
+      expect(await screen.findByText("Working…", {}, { timeout: 5000 })).toBeInTheDocument();
       expect(runCommitPushPr).not.toHaveBeenCalled();
       resolve(draft);
       expect(await submitted()).toMatchObject({
