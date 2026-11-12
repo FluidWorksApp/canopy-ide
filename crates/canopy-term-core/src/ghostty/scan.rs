@@ -114,115 +114,155 @@ impl Scanner {
     /// OSC the offset is that of its terminator, which is not yet fed; for
     /// every other step it is just past the last byte of the sequence.
     pub fn feed(&mut self, bytes: &[u8], out: &mut Vec<(usize, Step)>) {
-        for (i, &b) in bytes.iter().enumerate() {
-            if self.st == St::Osc {
-                match b {
-                    0x07 => {
-                        let s = self.finish_osc(true);
-                        out.push((i, s));
-                        self.st = St::Ground;
-                    }
-                    0x1b => {
-                        let s = self.finish_osc(false);
-                        out.push((i, s));
-                        self.st = St::Esc;
-                    }
-                    0x18 | 0x1a => {
-                        self.body.clear();
-                        self.overflow = false;
-                        self.st = St::Ground;
-                    }
-                    0x00..=0x1f => {}
-                    _ => {
-                        if self.body.len() < MAX_OSC_BYTES {
-                            self.body.push(b);
-                        } else {
-                            self.overflow = true;
-                        }
-                    }
+        let mut i = 0;
+        while i < bytes.len() {
+            // In the ground state only BEL, CAN, SUB and ESC matter; skip the
+            // printable run in between without touching the state machine.
+            if self.st == St::Ground {
+                while i < bytes.len() && !GROUND_SPECIAL[bytes[i] as usize] {
+                    i += 1;
                 }
-                continue;
+                if i == bytes.len() {
+                    return;
+                }
             }
-            // Transitions that apply in every other state.
+            // A CSI with no `<=>?` prefix reports nothing, so a run of
+            // parameter bytes followed by its final byte can be skipped whole.
+            // (A run that ends the chunk or is followed by anything else goes
+            // through the state machine, which keeps split input identical.)
+            if self.st == St::Csi(None) {
+                let mut j = i;
+                while j < bytes.len() && (bytes[j].is_ascii_digit() || bytes[j] == b';') {
+                    j += 1;
+                }
+                if j > i && j < bytes.len() && (0x40..=0x7e).contains(&bytes[j]) {
+                    i = j;
+                }
+            }
+            self.byte(i, bytes[i], out);
+            i += 1;
+        }
+    }
+
+    #[inline]
+    fn byte(&mut self, i: usize, b: u8, out: &mut Vec<(usize, Step)>) {
+        if self.st == St::Osc {
             match b {
-                0x18 | 0x1a => {
+                0x07 => {
+                    let s = self.finish_osc(true);
+                    out.push((i, s));
                     self.st = St::Ground;
-                    continue;
                 }
                 0x1b => {
+                    let s = self.finish_osc(false);
+                    out.push((i, s));
                     self.st = St::Esc;
-                    continue;
                 }
-                _ => {}
+                0x18 | 0x1a => {
+                    self.body.clear();
+                    self.overflow = false;
+                    self.st = St::Ground;
+                }
+                0x00..=0x1f => {}
+                _ => {
+                    if self.body.len() < MAX_OSC_BYTES {
+                        self.body.push(b);
+                    } else {
+                        self.overflow = true;
+                    }
+                }
             }
-            match self.st {
-                St::Ground => {
-                    if b == 0x07 {
-                        out.push((i + 1, Step::Bell));
-                    }
+            return;
+        }
+        // Transitions that apply in every other state.
+        match b {
+            0x18 | 0x1a => {
+                self.st = St::Ground;
+                return;
+            }
+            0x1b => {
+                self.st = St::Esc;
+                return;
+            }
+            _ => {}
+        }
+        match self.st {
+            St::Ground => {
+                if b == 0x07 {
+                    out.push((i + 1, Step::Bell));
                 }
-                St::Esc => match b {
-                    b']' => {
-                        self.body.clear();
-                        self.overflow = false;
-                        self.st = St::Osc;
+            }
+            St::Esc => match b {
+                b']' => {
+                    self.body.clear();
+                    self.overflow = false;
+                    self.st = St::Osc;
+                }
+                b'c' => {
+                    out.push((i + 1, Step::Reset));
+                    self.st = St::Ground;
+                }
+                b'P' | b'X' | b'^' | b'_' => self.st = St::Str,
+                b'[' => self.start_csi(),
+                0x20..=0x2f => self.st = St::EscInter,
+                0x00..=0x1f => {}
+                _ => self.st = St::Ground,
+            },
+            St::EscInter => match b {
+                0x30..=0x7e => self.st = St::Ground,
+                _ => {}
+            },
+            St::Csi(prefix) => match b {
+                b'<' | b'=' | b'>' | b'?' if prefix.is_none() => {
+                    self.st = St::Csi(Some(b));
+                }
+                b'0'..=b'9' => {
+                    let d = (b - b'0') as u32;
+                    self.cur = Some(self.cur.unwrap_or(0).saturating_mul(10).saturating_add(d));
+                }
+                b';' => {
+                    if self.params.len() < MAX_MODE_PARAMS {
+                        self.params
+                            .push(self.cur.unwrap_or(0).min(u16::MAX as u32) as u16);
                     }
-                    b'c' => {
-                        out.push((i + 1, Step::Reset));
-                        self.st = St::Ground;
-                    }
-                    b'P' | b'X' | b'^' | b'_' => self.st = St::Str,
-                    b'[' => self.start_csi(),
-                    0x20..=0x2f => self.st = St::EscInter,
-                    0x00..=0x1f => {}
-                    _ => self.st = St::Ground,
-                },
-                St::EscInter => match b {
-                    0x30..=0x7e => self.st = St::Ground,
-                    _ => {}
-                },
-                St::Csi(prefix) => match b {
-                    b'<' | b'=' | b'>' | b'?' if prefix.is_none() => {
-                        self.st = St::Csi(Some(b));
-                    }
-                    b'0'..=b'9' => {
-                        let d = (b - b'0') as u32;
-                        self.cur = Some(self.cur.unwrap_or(0).saturating_mul(10).saturating_add(d));
-                    }
-                    b';' => {
+                    self.cur = None;
+                }
+                0x20..=0x2f => self.inter = true,
+                0x40..=0x7e => {
+                    if b == b'u' && matches!(prefix, Some(b'<' | b'=' | b'>')) {
+                        out.push((i + 1, Step::KittyChanged));
+                    } else if matches!(b, b'h' | b'l') && prefix == Some(b'?') && !self.inter {
                         if self.params.len() < MAX_MODE_PARAMS {
                             self.params
                                 .push(self.cur.unwrap_or(0).min(u16::MAX as u32) as u16);
                         }
-                        self.cur = None;
+                        out.push((
+                            i + 1,
+                            Step::PrivateMode {
+                                set: b == b'h',
+                                params: std::mem::take(&mut self.params),
+                            },
+                        ));
                     }
-                    0x20..=0x2f => self.inter = true,
-                    0x40..=0x7e => {
-                        if b == b'u' && matches!(prefix, Some(b'<' | b'=' | b'>')) {
-                            out.push((i + 1, Step::KittyChanged));
-                        } else if matches!(b, b'h' | b'l') && prefix == Some(b'?') && !self.inter {
-                            if self.params.len() < MAX_MODE_PARAMS {
-                                self.params
-                                    .push(self.cur.unwrap_or(0).min(u16::MAX as u32) as u16);
-                            }
-                            out.push((
-                                i + 1,
-                                Step::PrivateMode {
-                                    set: b == b'h',
-                                    params: std::mem::take(&mut self.params),
-                                },
-                            ));
-                        }
-                        self.st = St::Ground;
-                    }
-                    _ => {}
-                },
-                St::Str => {}
-                St::Osc => unreachable!("handled above"),
-            }
+                    self.st = St::Ground;
+                }
+                _ => {}
+            },
+            St::Str => {}
+            St::Osc => unreachable!("handled above"),
         }
     }
 }
+
+/// Bytes that do something in the ground state: BEL, CAN, SUB, ESC.
+static GROUND_SPECIAL: [bool; 256] = {
+    let mut t = [false; 256];
+    t[0x07] = true;
+    t[0x18] = true;
+    t[0x1a] = true;
+    t[0x1b] = true;
+    t
+};
 
 /// Split an OSC body at its first `;` into the command number and the rest.
 /// `None` when the body does not start with a number.

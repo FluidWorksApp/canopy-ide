@@ -48,7 +48,7 @@ describe("summarizeTasks", () => {
     const s = summarizeTasks(tasks);
     expect(s).toMatchObject({ total: 3, done: 1, running: 1, pending: 1 });
     expect(s.current?.text).toBe("b");
-    expect(taskHeadline(s)).toBe("1 done · 2 pending");
+    expect(taskHeadline(s)).toBe("1 done · 1 in progress · 1 not started");
   });
   it("falls back to the first pending step when nothing is running", () => {
     const s = summarizeTasks(

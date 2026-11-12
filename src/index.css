@@ -30533,4 +30533,14 @@ a.btn-sm {
   text-overflow: ellipsis;
   white-space: nowrap;
   font-size: 11px;
+
+/* One line, never wrapped: the three-state count is the long one, so it gives
+   way with an ellipsis (its full text is the title) rather than pushing the
+   row to two lines. */
+.agent-card-tasks-headline {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
 }

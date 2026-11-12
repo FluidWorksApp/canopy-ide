@@ -229,7 +229,7 @@ describe("AgentDetailsCard", () => {
     expect(screen.getByText("Ready")).toBeInTheDocument();
     expect(screen.getByText("+40")).toBeInTheDocument();
     expect(screen.getByText("Lineage · 1 running")).toBeInTheDocument();
-    expect(screen.getByText("1 done · 2 pending")).toBeInTheDocument();
+    expect(screen.getByText("1 done · 1 in progress · 1 not started")).toBeInTheDocument();
     expect(screen.getByText("Wire it up")).toBeInTheDocument(); // current step while collapsed
   });
 
@@ -637,6 +637,30 @@ describe("a PR from another branch", () => {
     expect(await screen.findByText(/Commit & raise PR/)).toBeInTheDocument();
     delete (ipc as unknown as { provenanceForSession?: unknown })
       .provenanceForSession;
+  });
+});
+
+describe("the task list", () => {
+  it("shows all three states in words, on one line", () => {
+    setup();
+    const headline = screen.getByText("1 done · 1 in progress · 1 not started");
+    expect(headline.className).toContain("agent-card-tasks-headline");
+    expect(headline.getAttribute("title")).toBe(headline.textContent);
+  });
+  it("stays open when the card remounts", () => {
+    try {
+      localStorage.removeItem("canopy:agentCard:tasksOpen");
+    } catch {
+      /* no storage */
+    }
+    const first = setup();
+    fireEvent.click(screen.getByRole("button", { name: /Tasks/ }));
+    expect(screen.getAllByRole("button", { name: /Focus on/ })[0]).toBeInTheDocument();
+    cleanup();
+    setup();
+    expect(screen.getAllByRole("button", { name: /Focus on/ })[0]).toBeInTheDocument();
+    void first;
+    localStorage.removeItem("canopy:agentCard:tasksOpen");
   });
 });
 
