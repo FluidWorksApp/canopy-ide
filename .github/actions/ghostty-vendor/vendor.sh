@@ -36,7 +36,10 @@ sha_stdin() { $SHA256 | cut -d' ' -f1; }
 # Sorted per-file manifest of a directory, hashed. Content only (no modes, no
 # mtimes, symlinks skipped), so it is the same on every OS.
 manifest_sha() {
-  ( cd "$1" && find . -type f | LC_ALL=C sort | tr '\n' '\0' | xargs -0 $SHA256 ) | sha_stdin
+  # The sed folds the Windows (Git Bash) "hash *path" binary-mode marker into the
+  # "hash  path" form every other sha256sum / shasum prints.
+  ( cd "$1" && find . -type f | LC_ALL=C sort | tr '\n' '\0' | xargs -0 $SHA256 \
+      | sed 's/^\([0-9a-f]\{64\}\) [ *]/\1  /' ) | sha_stdin
 }
 
 # retry <attempts> <command...>: backoff 10 s, then 30 s between attempts.
@@ -99,6 +102,7 @@ cmd_prepare() {
 
 verify_src() {
   [ -f "$SRC_DIR/build.zig" ] || { echo "::error::$SRC_DIR has no build.zig" >&2; MISMATCH=1; return; }
+  echo "ghostty source files: $(find "$SRC_DIR" -type f | wc -l | tr -d ' ')"
   check_eq GHOSTTY_SRC_MANIFEST_SHA256 "$GHOSTTY_SRC_MANIFEST_SHA256" "$(manifest_sha "$SRC_DIR")" "ghostty source tree manifest"
 }
 
