@@ -1,6 +1,6 @@
 [package]
 name = "canopy-term-app"
-version = "0.1.0"
+version = "0.5.15"
 description = "Canopy's own terminal: a native window on a session of the persistent PTY host"
 authors = ["Cause Connect Pte Ltd <sam@fluidwords.app>"]
 license = "MIT"
