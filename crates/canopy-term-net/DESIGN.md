@@ -23,20 +23,68 @@ and never reuse its trust rule.
 
 ## Threat model
 
-**What an authenticated peer may do.** An allowlisted device is a full peer of
-the session host: it can spawn processes (argv, cwd, environment) as the host
-user, attach to and read any session's output, send input, resize, and kill.
-That is equivalent to a shell as the host user. There is no per-session scoping
-at this layer. Pair only devices you would give a login. Narrower roles
-(read-only attach) belong in the session protocol, not in the allowlist, and
-are not designed yet.
+**What an authenticated peer may do.** What an allowed peer can do is set by the
+session protocol the host serves, not by the transport. Under session v1 (the
+only protocol wired to the tailnet listener) an allowed peer can: list every
+terminal that has a tab (id, title, working directory, command), attach to one
+and read its output, type into it, and resize any listed terminal (no attach
+needed; sizes are capped and rate limited, see below). It cannot spawn, kill,
+set environment or a working directory, read files, or read a ring buffer.
+Typing into a terminal is still a shell as the host user, so the model is a
+full peer for every listed terminal; there is no per-terminal scope and no
+view-only mode (narrower roles belong in the session protocol, not in the
+allowlist, and are not designed yet). Pair only devices you would give a login.
+
+The spawn/kill model of the earlier iroh-era design (an allowed key could spawn
+processes with chosen argv, cwd and environment, and kill) is not what the
+tailnet listener serves; a future transport that carries a richer protocol must
+restate its own model here.
+
+Consequences of v1 that the allow switch does not spell out, and that a user
+turning it on should know:
+
+- **History is readable.** An attach returns the terminal's scrollback first,
+  up to 4 MiB, including output from before the machine was allowed.
+- **The allowance persists.** The entry is kept in the allowlist file across
+  app restarts, and the listener starts again by itself whenever Tailscale runs
+  and an entry exists. Allow off is the only way to end it.
+- **It covers the machine and anyone using it.** whois names the node that owns
+  the source address, so another account on that computer, or any process there
+  that can open a connection, is the allowed identity (see "An entry authorises a
+  machine, not a person" below).
+- **Titles and working directories are listed** to the peer, and a peer can
+  resize terminals it never attached to.
+- **A window onto another machine's terminal is never shared on.** Proxy
+  sessions (this app attached to a terminal elsewhere) are excluded from list,
+  attach, write and resize, so there is no second hop.
+
+Bounds on what an allowed peer can cost the host: 8 attached terminals per peer
+and 32 in total; 16 and 64 open connections; a resize is at most 1000 x 1000,
+one per 100 ms per connection and one per 100 ms per peer across all its
+connections; a write to a peer that does not read is dropped after 30 s; each
+attach has its own token, so closing one attach of a terminal never ends another
+attach of the same terminal by the same peer.
+
+Residual risks, accepted and documented rather than fixed: the ingress interface
+is not pinned (identity is the source address; on hosts that accept a packet for
+a tailnet address from another interface, only blind TCP spoofing remains, since
+non-tailnet sources are refused and replies to a tailnet source route into the
+tailnet); the domain binding is only as unique as the DNS domain (fine for
+`*.ts.net`; two control servers sharing a base domain with small integer ids
+could collide); a local process can take the fixed port before the app starts
+(reported as "port in use") and could answer dialers after the app exits; the
+Allow switch is a single IPC command with no extra confirmation, so script
+injection in the webview could allow a machine; the peer's host name is the
+Settings row's main label, next to its DNS name and address; and peer input is
+stamped as human input, so idle and notification heuristics treat it as typing.
 
 **What it may not do.** An unauthenticated or unknown peer reaches no session
 code: on iroh the link is closed straight after the handshake and no stream is
 accepted, so no request bytes are read. The refusal is per key and is
 re-checked on every new stream, so removing a key stops its next stream
-(streams already open keep running until closed; closing them on removal is a
-follow-up). An authenticated peer cannot impersonate another: the key is the
+(on iroh, streams already open keep running until closed, apart from the link
+watcher below; the tailnet transport cuts live connections on removal, see its
+section). An authenticated peer cannot impersonate another: the key is the
 TLS identity, not a field in a message.
 
 **In scope.** Passive and active network attackers (QUIC with TLS 1.3, peer key
@@ -384,9 +432,21 @@ cap. An attached connection has **no input idle limit by default** (a person
 reading output sends nothing); `attached_idle` is there if the app wants one.
 Every read wakes every 100 ms to check deadlines, so they hold to within that.
 
-**Known limits.** There is no write deadline: a peer that stops reading output
-stalls its own pump until the transport errors (the queue is bounded, but the
-output is the handler's channel). A handler stuck inside `write` is not
+**Write deadline.** The server sets a write deadline (`write_deadline`, 30 s) on
+the connection when the transport supports one (`Connection::set_write_deadline`;
+the tailnet TCP transport does, the default does nothing). A peer that stops
+reading output is dropped when a write stalls that long, which frees its attach
+slot and the output queued for it. `resize` is accepted up to 1000 x 1000.
+
+**Client side.** The dialer does not trust the host's `list`: it keeps at most
+256 rows and cuts every title, cwd and command to 160 characters with control
+characters removed before anything reaches the UI, a tab title or the reconnect
+check. Reconnect still matches a terminal on `(id, command)` only, so after the
+host app restarts, another terminal with the same command and a reused id would
+be attached; pinning a per-session generation needs a protocol change and is not
+done.
+
+**Known limits.** A handler stuck inside `write` is not
 joined; it finishes once its write returns. Only exercised on loopback with the
 fake Tailscale CLI; nothing here has run over a real tailnet.
 
@@ -409,4 +469,9 @@ attached terminals per peer and 32 total (in `attach`), 16 and 64 open
 connections per peer and total (in the accept loop). Output is bridged through
 a bounded queue; a peer that falls behind is detached and re-attaches for a
 fresh snapshot. Allow off removes the entry from the listener's in-memory list
-first and the transport's sweep closes that peer's connections.
+first and the transport's sweep closes that peer's connections. The allowlist
+file is read and applied to that list under one lock, so the 15 s tick cannot put
+back an entry that an Allow off has just removed. The sweep decides revocation
+before it asks Tailscale for a status, so a stuck status call cannot delay
+closing a revoked peer. The handler also excludes proxy sessions from resize and
+write, limits resizes per peer, and releases an attach by its own token.

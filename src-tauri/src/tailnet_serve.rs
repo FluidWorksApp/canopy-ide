@@ -40,18 +40,19 @@ use crate::tailnet::{allowed_ids, installed_runner, load_allow, own_domain, TAIL
 use canopy_term_net::allowlist::{canonical_tailnet_entry, Allowlist};
 use canopy_term_net::session::{
     serve_connection, AttachedSession, SessionError, SessionHandler, SessionSummary,
+    RESIZE_INTERVAL,
 };
 use canopy_term_net::tailnet_tcp::{BindError, TailnetTcp};
 use canopy_term_net::tailscale::{CliRunner, InstallProblem, TailnetState, Tailscale};
 use canopy_term_net::{PeerIdentity, Transport};
 use serde::Serialize;
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
 use std::io;
 use std::net::IpAddr;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tauri::{AppHandle, Manager};
 use tokio::sync::broadcast;
 
@@ -139,10 +140,13 @@ pub trait Terminals: Send + Sync + 'static {
 
 impl PtyManager {
     /// Terminals with a tab. A background task's terminal has none and is not
-    /// for a peer to see.
+    /// for a peer to see, and neither is a window onto another machine's
+    /// terminal (`SessionKind::Remote` too, but not this machine's to share).
     fn peer_visible(&self, id: u32) -> bool {
-        self.get(id)
-            .is_some_and(|s| s.kind != SessionKind::Detached)
+        !self.is_proxy(id)
+            && self
+                .get(id)
+                .is_some_and(|s| s.kind != SessionKind::Detached)
     }
 }
 
@@ -228,8 +232,9 @@ fn peer_key(peer: &PeerIdentity) -> String {
 }
 
 struct Open {
+    /// Unique per attach: the same peer may attach the same terminal twice.
+    token: u64,
     peer: String,
-    id: u32,
     /// Stops this attach's output bridge.
     stop: Arc<AtomicBool>,
 }
@@ -240,6 +245,10 @@ pub struct Handler {
     per_peer: usize,
     total: usize,
     open: Mutex<Vec<Open>>,
+    next_token: AtomicU64,
+    /// When each peer last resized, so the limit holds across its connections.
+    resized: Mutex<HashMap<String, Instant>>,
+    resize_interval: Duration,
 }
 
 impl Handler {
@@ -253,7 +262,17 @@ impl Handler {
             per_peer,
             total,
             open: Mutex::new(Vec::new()),
+            next_token: AtomicU64::new(1),
+            resized: Mutex::new(HashMap::new()),
+            resize_interval: RESIZE_INTERVAL,
         }
+    }
+
+    /// Minimum spacing of one peer's accepted resizes, over all its connections.
+    #[cfg(test)]
+    fn with_resize_interval(mut self, interval: Duration) -> Self {
+        self.resize_interval = interval;
+        self
     }
 
     /// Attached terminals right now.
@@ -262,11 +281,12 @@ impl Handler {
         self.open.lock().map(|o| o.len()).unwrap_or(0)
     }
 
-    fn release(&self, peer: &str, id: u32) {
+    /// Let go of exactly one attach, by its token.
+    fn release(&self, peer: &str, token: u64) {
         let Ok(mut open) = self.open.lock() else {
             return;
         };
-        if let Some(at) = open.iter().position(|o| o.peer == peer && o.id == id) {
+        if let Some(at) = open.iter().position(|o| o.token == token && o.peer == peer) {
             open.remove(at).stop.store(true, Ordering::SeqCst);
         }
     }
@@ -280,6 +300,7 @@ impl SessionHandler for Handler {
     fn attach(&self, peer: &PeerIdentity, id: u32) -> Result<AttachedSession, SessionError> {
         let key = peer_key(peer);
         let stop = Arc::new(AtomicBool::new(false));
+        let token = self.next_token.fetch_add(1, Ordering::SeqCst);
         // Take the place first, so two racing attaches cannot both pass a cap.
         {
             let mut open = self
@@ -292,13 +313,13 @@ impl SessionHandler for Handler {
                 return Err(SessionError::Failed("too many open terminals".into()));
             }
             open.push(Open {
+                token,
                 peer: key.clone(),
-                id,
                 stop: stop.clone(),
             });
         }
         let Some(att) = self.terms.attach_terminal(id) else {
-            self.release(&key, id);
+            self.release(&key, token);
             return Err(SessionError::NotFound);
         };
         let (tx, rx) = mpsc::sync_channel::<Vec<u8>>(OUTPUT_QUEUE);
@@ -324,6 +345,7 @@ impl SessionHandler for Handler {
             // Dropping `tx` is "session ended" to the server.
         });
         Ok(AttachedSession {
+            token,
             cols: att.cols,
             rows: att.rows,
             snapshot: att.snapshot,
@@ -340,11 +362,28 @@ impl SessionHandler for Handler {
 
     fn resize(
         &self,
-        _peer: &PeerIdentity,
+        peer: &PeerIdentity,
         id: u32,
         cols: u16,
         rows: u16,
     ) -> Result<(), SessionError> {
+        // Per peer, not per connection: 16 connections must not be 16 times
+        // the resizes.
+        {
+            let key = peer_key(peer);
+            let mut last = self
+                .resized
+                .lock()
+                .map_err(|_| SessionError::Failed("unavailable".into()))?;
+            let now = Instant::now();
+            if last
+                .get(&key)
+                .is_some_and(|t| now.duration_since(*t) < self.resize_interval)
+            {
+                return Err(SessionError::RateLimited);
+            }
+            last.insert(key, now);
+        }
         self.terms
             .resize_terminal(id, cols, rows)
             .map_err(|e| match e {
@@ -353,8 +392,8 @@ impl SessionHandler for Handler {
             })
     }
 
-    fn close(&self, peer: &PeerIdentity, id: u32) {
-        self.release(&peer_key(peer), id);
+    fn close(&self, peer: &PeerIdentity, _id: u32, token: u64) {
+        self.release(&peer_key(peer), token);
     }
 }
 
@@ -527,6 +566,11 @@ impl TailnetServe {
     /// machine's live connections end within the transport's sweep interval.
     fn sync_allow_to(&self, new: &Allowlist) {
         let _g = self.sync.lock().unwrap_or_else(|e| e.into_inner());
+        self.apply_allow(new);
+    }
+
+    /// The caller holds `sync`.
+    fn apply_allow(&self, new: &Allowlist) {
         let want: BTreeSet<String> = new.keys().into_iter().collect();
         let have: BTreeSet<String> = self.live_allow.keys().into_iter().collect();
         for k in have.difference(&want) {
@@ -538,9 +582,20 @@ impl TailnetServe {
     }
 
     /// An unreadable file is an empty list: nothing is admitted.
+    ///
+    /// The file is read and applied under one hold of the `sync` lock. Were it
+    /// read first, the 15 s tick could carry a list from before an Allow-off
+    /// and put the entry back after the revocation had applied.
     fn sync_allow(&self) {
-        let list = load_allow(&self.cfg.allow_path).unwrap_or_default();
-        self.sync_allow_to(&list);
+        self.sync_allow_with(|| load_allow(&self.cfg.allow_path).unwrap_or_default());
+    }
+
+    /// [`sync_allow`](Self::sync_allow) with the read injected, so a test can
+    /// act between the read and the apply.
+    fn sync_allow_with(&self, load: impl FnOnce() -> Allowlist) {
+        let _g = self.sync.lock().unwrap_or_else(|e| e.into_inner());
+        let new = load();
+        self.apply_allow(&new);
     }
 
     fn set_status(&self, state: ListenState, port: u16) {
@@ -1003,9 +1058,161 @@ mod tests {
         // A fifth peer has room per peer but not in total.
         assert!(h.attach(&peer(5), 1).is_err());
         // The same peer is over its own cap even when total had room.
-        h.close(&peer(4), 1);
+        h.close(&peer(4), 1, kept[24].token);
         assert!(h.attach(&peer(1), 1).is_err());
         assert!(h.attach(&peer(5), 1).is_ok());
+    }
+
+    #[test]
+    fn two_attaches_of_one_terminal_by_one_peer_close_independently() {
+        let terms = FakeTerms::with_session(1);
+        let h = Handler::new(terms.clone());
+        let p = PeerIdentity::Device("p".into());
+        let first = h.attach(&p, 1).ok().expect("first");
+        let second = h.attach(&p, 1).ok().expect("second");
+        assert_ne!(first.token, second.token);
+        assert_eq!(h.open_count(), 2);
+        // The second tab closes first: only its own attach ends.
+        h.close(&p, 1, second.token);
+        assert_eq!(h.open_count(), 1);
+        assert!(matches!(
+            second.output.recv_timeout(Duration::from_secs(5)),
+            Err(mpsc::RecvTimeoutError::Disconnected)
+        ));
+        // The first is still attached and still gets output.
+        terms.emit(1, b"still here");
+        assert_eq!(
+            first.output.recv_timeout(Duration::from_secs(5)).unwrap(),
+            b"still here"
+        );
+        // A stale or foreign token releases nothing.
+        h.close(&p, 1, second.token);
+        h.close(&PeerIdentity::Device("other".into()), 1, first.token);
+        assert_eq!(h.open_count(), 1);
+        h.close(&p, 1, first.token);
+        assert_eq!(h.open_count(), 0);
+    }
+
+    #[test]
+    fn resizes_are_limited_per_peer_across_connections() {
+        let terms = FakeTerms::with_session(1);
+        let h = Handler::new(terms.clone()).with_resize_interval(Duration::from_millis(400));
+        let a = PeerIdentity::Device("a".into());
+        let b = PeerIdentity::Device("b".into());
+        // The handler is shared by every connection, so this is what two
+        // connections of one peer reach.
+        assert!(h.resize(&a, 1, 100, 30).is_ok());
+        assert!(matches!(
+            h.resize(&a, 1, 101, 30),
+            Err(SessionError::RateLimited)
+        ));
+        // Another peer has its own allowance.
+        assert!(h.resize(&b, 1, 102, 30).is_ok());
+        std::thread::sleep(Duration::from_millis(450));
+        assert!(h.resize(&a, 1, 103, 30).is_ok());
+        assert_eq!(
+            *terms.resized.lock().unwrap(),
+            vec![(1, 100, 30), (1, 102, 30), (1, 103, 30)]
+        );
+    }
+
+    #[test]
+    fn a_stale_allowlist_read_cannot_undo_an_allow_off() {
+        let f = fixture("sync-race", &[ENTRY]);
+        f.serve.reconcile();
+        assert!(f.serve.live_allow.keys().iter().any(|k| k == ENTRY));
+        let path = f.path.clone();
+        let serve = f.serve.clone();
+        let (done_tx, done_rx) = mpsc::channel();
+        // The tick reads the file while the entry is still in it ...
+        f.serve.sync_allow_with(|| {
+            let stale = load_allow(&path).unwrap_or_default();
+            assert!(stale.keys().iter().any(|k| k == ENTRY));
+            // ... and Allow-off lands before the tick applies what it read.
+            crate::tailnet::set_allowed_at(&path, None, PEER, false).unwrap();
+            std::thread::spawn(move || {
+                serve.allow_changed();
+                let _ = done_tx.send(());
+            });
+            // The revocation may only finish once the tick has let go. Either
+            // way the outcome below must be the same, so a timeout is fine.
+            let _ = done_rx.recv_timeout(Duration::from_millis(500));
+            stale
+        });
+        let end = Instant::now() + Duration::from_secs(5);
+        while f.serve.live_allow.keys().iter().any(|k| k == ENTRY) {
+            assert!(
+                Instant::now() < end,
+                "a stale read put a revoked machine back"
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        let end = Instant::now() + Duration::from_secs(5);
+        while f.serve.status().state != ListenState::Off {
+            assert!(Instant::now() < end, "the listener stayed up");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+
+    /// Proxy sessions (a window onto another machine's terminal) are not this
+    /// machine's to share: not listed, not attachable, not resizable, not
+    /// writable, through the same handler a peer's connection reaches.
+    #[cfg(unix)]
+    #[test]
+    fn a_proxy_session_is_not_listed_attachable_or_resizable_by_a_peer() {
+        use crate::pty::RunSpec;
+        let app = tauri::test::mock_app();
+        let pm = Arc::new(PtyManager::default());
+        let spawn = || {
+            pm.spawn(
+                app.handle().clone(),
+                80,
+                24,
+                Some("/tmp".into()),
+                None,
+                None,
+                Some(RunSpec::Argv(vec!["sleep".into(), "30".into()])),
+                SessionKind::Remote,
+                None,
+                None,
+                None,
+            )
+            .expect("spawn")
+            .id
+        };
+        let own = spawn();
+        let proxy = spawn();
+        pm.mark_proxy_for_test(proxy);
+        let h = Handler::new(pm.clone()).with_resize_interval(Duration::ZERO);
+        let peer = PeerIdentity::Device("p".into());
+        // list
+        let ids: Vec<u32> = h.list(&peer).iter().map(|s| s.id).collect();
+        assert_eq!(ids, vec![own]);
+        // attach
+        assert!(h.attach(&peer, own).is_ok());
+        assert!(matches!(
+            h.attach(&peer, proxy),
+            Err(SessionError::NotFound)
+        ));
+        assert_eq!(h.open_count(), 1);
+        // resize: the proxy is not found, like an id that does not exist
+        assert!(h.resize(&peer, own, 100, 30).is_ok());
+        assert!(matches!(
+            h.resize(&peer, proxy, 100, 30),
+            Err(SessionError::NotFound)
+        ));
+        assert!(matches!(
+            h.resize(&peer, 9999, 100, 30),
+            Err(SessionError::NotFound)
+        ));
+        // write
+        assert!(h.write(own, b"x").is_ok());
+        assert_eq!(
+            h.write(proxy, b"x").unwrap_err().kind(),
+            io::ErrorKind::NotFound
+        );
+        let _ = pm.kill(own);
+        let _ = pm.kill(proxy);
     }
 
     #[test]
