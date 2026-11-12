@@ -674,6 +674,7 @@ mod tests {
     use super::*;
     use canopy_term_net::session::SessionClient;
     use canopy_term_net::tailscale::fake::{status_running, whois_user, FakeRunner};
+    use canopy_term_net::Connection;
     use std::collections::HashMap;
     use std::io::{Read, Write};
     use std::sync::atomic::AtomicUsize;
