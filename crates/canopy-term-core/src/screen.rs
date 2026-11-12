@@ -75,19 +75,11 @@ use std::fmt::Write as _;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-const MIN_COLS: u16 = 2;
-const MIN_ROWS: u16 = 1;
-/// Largest grid accepted; larger requests are clamped.
-pub const MAX_COLS: u16 = 2000;
-pub const MAX_ROWS: u16 = 1000;
-/// Most scrollback lines accepted.
-pub const MAX_SCROLLBACK: usize = 100_000;
-
-/// Most scalars kept in one cell's cluster (base plus combining marks).
-pub const MAX_CLUSTER_SCALARS: usize = 16;
-
-/// Default scrollback, in lines.
-pub const DEFAULT_SCROLLBACK: usize = 10_000;
+use crate::shared::clamp_size;
+pub use crate::shared::{
+    Row, DEFAULT_SCROLLBACK, MAX_CLUSTER_SCALARS, MAX_COLS, MAX_PENDING_REPLIES, MAX_ROWS,
+    MAX_SCROLLBACK,
+};
 
 /// Lets the engine run synchronized-output sequences straight through instead
 /// of buffering them behind a timer.
@@ -118,10 +110,6 @@ struct Listener {
 fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     m.lock().unwrap_or_else(|e| e.into_inner())
 }
-
-/// Most replies held for the owner; the oldest are dropped past this, so a
-/// screen nobody drains (a mirror replaying output) cannot grow without end.
-pub const MAX_PENDING_REPLIES: usize = 1024;
 
 fn push_reply(q: &Mutex<VecDeque<Pending>>, p: Pending) {
     let mut q = lock(q);
@@ -162,30 +150,6 @@ impl Dimensions for Size {
     }
     fn columns(&self) -> usize {
         self.cols
-    }
-}
-
-/// One line of scrollback. `Cell::cluster` indexes `clusters` (index 0 unused).
-#[derive(Clone, Debug, PartialEq, Eq, Default)]
-pub struct Row {
-    pub cells: Vec<Cell>,
-    pub clusters: Vec<String>,
-}
-
-impl Row {
-    /// The line as text, trailing blanks trimmed.
-    pub fn text(&self) -> String {
-        let mut out = String::new();
-        for cell in &self.cells {
-            if cell.attrs.has(Attrs::WIDE_TAIL) {
-                continue;
-            }
-            match self.clusters.get(cell.cluster as usize) {
-                Some(t) if cell.cluster != 0 => out.push_str(t),
-                _ => out.push(cell.ch),
-            }
-        }
-        out.trim_end().to_string()
     }
 }
 
@@ -376,13 +340,6 @@ fn write_sgr(out: &mut String, fg: Color, bg: Color, attrs: Attrs) {
         }
     }
     out.push('m');
-}
-
-fn clamp_size(cols: u16, rows: u16) -> (u16, u16) {
-    (
-        cols.clamp(MIN_COLS, MAX_COLS),
-        rows.clamp(MIN_ROWS, MAX_ROWS),
-    )
 }
 
 impl Screen {
