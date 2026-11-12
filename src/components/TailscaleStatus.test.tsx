@@ -185,6 +185,37 @@ describe("Allow", () => {
     expect(await screen.findByRole("switch", { name: "Allow node-e" })).toBeDisabled();
   });
 
+  it("says plainly that an allowed machine gets full access", async () => {
+    show(base);
+    expect(await screen.findByText(/read and type into every terminal on this machine, as you/)).toBeInTheDocument();
+    expect(screen.getByText("Allow")).toHaveAttribute(
+      "title",
+      "An allowed machine can read and type into every terminal on this machine",
+    );
+  });
+
+  it("says when the listener cannot start, only while someone is allowed", async () => {
+    show(view({ listener: { state: "portInUse", port: 28617 } }));
+    expect(await screen.findByRole("status")).toHaveTextContent("Another program is using port 28617");
+  });
+
+  it("is quiet about the listener when nothing is wrong", async () => {
+    show(view({ listener: { state: "listening", port: 28617 } }));
+    await screen.findByRole("switch", { name: "Allow laptop" });
+    expect(screen.queryByRole("status")).toBeNull();
+  });
+
+  it("is quiet about a listener problem while nobody is allowed", async () => {
+    show(
+      view({
+        listener: { state: "noInterface", port: 28617 },
+        machines: base.machines.map((m) => ({ ...m, allowed: false })),
+      }),
+    );
+    await screen.findByRole("switch", { name: "Allow laptop" });
+    expect(screen.queryByRole("status")).toBeNull();
+  });
+
   it("an unreadable allow list is said, and every switch is off limits", async () => {
     show(view({ allowError: "Can't read ~/.canopy/tailnet-allow.txt. Fix or remove it." }));
     expect(await screen.findByText(/tailnet-allow\.txt/)).toHaveClass("set-warn");
@@ -411,6 +442,8 @@ describe("Connect", () => {
     show(one, calls, { tailnet_remote_list: () => terminals });
     await userEvent.click(await screen.findByRole("switch", { name: "Allow work-mac" }));
     await waitFor(() => expect(calls).toEqual([`allow ${WORK} true`]));
-    expect(screen.getByTitle("May connect in to terminals on this machine")).toHaveTextContent("Allow");
+    expect(
+      screen.getByTitle("An allowed machine can read and type into every terminal on this machine"),
+    ).toHaveTextContent("Allow");
   });
 });

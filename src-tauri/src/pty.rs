@@ -425,7 +425,7 @@ pub enum SessionKind {
     Detached,
 }
 
-struct DesktopSink {
+pub(crate) struct DesktopSink {
     renderer_generation: u64,
     channel: Channel<InvokeResponseBody>,
 }
@@ -1134,6 +1134,34 @@ impl PtyManager {
     pub fn write(&self, id: u32, data: &str) -> Result<(), String> {
         let session = self.get(id).ok_or_else(|| format!("no pty session {id}"))?;
         session.enqueue_input(data.as_bytes())
+    }
+
+    /// Queue raw input bytes (not necessarily UTF-8) for the session's writer
+    /// thread. Same bounded queue as `write`.
+    pub fn write_bytes(&self, id: u32, data: &[u8]) -> Result<(), String> {
+        let session = self.get(id).ok_or_else(|| format!("no pty session {id}"))?;
+        session.enqueue_input(data)
+    }
+
+    /// Resize a session's pty and tell its viewers. Sizes are clamped to at
+    /// least 1x1, as in `pty_resize`, which delegates here.
+    pub fn resize(&self, id: u32, cols: u16, rows: u16) -> Result<(u16, u16), String> {
+        let (cols, rows) = (cols.max(1), rows.max(1));
+        let session = self.get(id).ok_or_else(|| format!("no pty session {id}"))?;
+        session
+            .master
+            .lock()
+            .unwrap()
+            .resize(PtySize {
+                rows,
+                cols,
+                pixel_width: 0,
+                pixel_height: 0,
+            })
+            .map_err(|e| e.to_string())?;
+        // Mirror the new grid to any remote viewers so they re-size to match.
+        session.record_resize(cols, rows);
+        Ok((cols, rows))
     }
 
     /// Tear a session down (SIGTERM, grace, SIGKILL) on a detached thread, as
@@ -2202,7 +2230,7 @@ impl PtyManager {
     /// skip WebView backpressure so no absent renderer can stall their output.
     /// Generic over the runtime so it can be exercised with a mock app in tests.
     #[allow(clippy::too_many_arguments)]
-    fn spawn<R: tauri::Runtime>(
+    pub(crate) fn spawn<R: tauri::Runtime>(
         &self,
         app: AppHandle<R>,
         cols: u16,
@@ -3232,21 +3260,7 @@ pub fn pty_resize(
     cols: u16,
     rows: u16,
 ) -> Result<PtyGeometry, String> {
-    let (cols, rows) = (cols.max(1), rows.max(1));
-    let session = get_session(&state, id)?;
-    session
-        .master
-        .lock()
-        .unwrap()
-        .resize(PtySize {
-            rows,
-            cols,
-            pixel_width: 0,
-            pixel_height: 0,
-        })
-        .map_err(|e| e.to_string())?;
-    // Mirror the new grid to any remote viewers so they re-size to match.
-    session.record_resize(cols, rows);
+    let (cols, rows) = state.resize(id, cols, rows)?;
     Ok(PtyGeometry { cols, rows })
 }
 

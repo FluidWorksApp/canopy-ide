@@ -89,6 +89,7 @@ mod t3_client;
 mod t3_socket;
 mod tailnet;
 mod tailnet_client;
+mod tailnet_serve;
 mod tasks;
 mod tunnel;
 mod turn_rollback;
@@ -630,6 +631,17 @@ pub fn run() {
                 .adopt_hosted(app.handle().clone());
             if adopted > 0 {
                 eprintln!("canopy: adopted {adopted} hosted terminal(s)");
+            }
+            // The tailnet listener: off until a machine is allowed, so this
+            // reads no Tailscale state at startup when none is. It needs the
+            // PtyManager, which is already managed.
+            {
+                let serve = tailnet_serve::TailnetServe::production(
+                    app.handle().clone(),
+                    tailnet::allow_path().unwrap_or_default(),
+                );
+                app.manage(serve.clone());
+                serve.start();
             }
             // Claude Code's IDE servers emit to the window, so the hub needs a
             // handle before the first agent PTY asks for one.
@@ -1230,6 +1242,11 @@ pub fn run() {
                 // the app quit mid-dictation. Cheap, and the one piece of state
                 // here that outlives the process.
                 sysaudio::restore();
+                // No peer keeps typing into terminals that are being closed.
+                if let Some(serve) = app.try_state::<std::sync::Arc<tailnet_serve::TailnetServe>>()
+                {
+                    serve.shutdown();
+                }
                 app.state::<system_one::SystemOne>().stop();
                 let pty = app.state::<pty::PtyManager>();
                 app.state::<std::sync::Arc<watchdog::WatchdogState>>()

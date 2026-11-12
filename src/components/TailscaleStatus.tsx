@@ -2,9 +2,10 @@
 // in SettingsDialog.tsx). Canopy uses the Tailscale app already on this
 // machine: it reads its status and can open the app, and never signs in or
 // changes Tailscale (tailnet.rs). Allow is per machine, off by default, and
-// means that machine may connect in to terminals here; connecting out needs no
-// switch. Connect opens the other machine's terminal list inline (commands in
-// ipc.ts, state in tailnetRemote.ts); an opened terminal is a normal tab.
+// means that machine may read and type into every terminal here (full trust),
+// while Canopy runs; connecting out needs no switch. Connect opens the other
+// machine's terminal list inline (commands in ipc.ts, state in
+// tailnetRemote.ts); an opened terminal is a normal tab.
 import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import * as ipc from "../ipc";
 import { openLink } from "../links";
@@ -31,6 +32,20 @@ function Status({ tone, label }: { tone: "ok" | "warn" | "off"; label: string })
       {label}
     </span>
   );
+}
+
+/** Why allowed machines cannot connect, when the listener could not start. */
+function listenerProblem(l: ipc.TailscaleListener | undefined): string | null {
+  switch (l?.state) {
+    case "portInUse":
+      return `Another program is using port ${l.port}, so allowed machines can't connect.`;
+    case "noInterface":
+      return "Tailscale has no network interface on this machine (userspace mode), so allowed machines can't connect.";
+    case "unavailable":
+      return "Canopy couldn't start listening for allowed machines.";
+    default:
+      return null;
+  }
 }
 
 const shortVersion = (v: string) => v.replace(/\.0$/, "");
@@ -206,6 +221,7 @@ function Running({
   const online = view.machines.filter((m) => m.online);
   const offline = view.machines.length - online.length;
   const me = view.thisMachine;
+  const problem = listenerProblem(view.listener);
   return (
     <div className="ts-running">
       <div className="set-inline">
@@ -227,9 +243,16 @@ function Running({
           <span>
             Online <span className="badge">{online.length}</span>
           </span>
-          <span className="ts-col" title="May connect in to terminals on this machine">
+          <span
+            className="ts-col"
+            title="An allowed machine can read and type into every terminal on this machine"
+          >
             Allow
           </span>
+        </div>
+        <div className="ts-foot">
+          An allowed machine can read and type into every terminal on this machine, as you. Only
+          allow machines you fully trust. It works only while Canopy is running.
         </div>
         {online.length === 0 && <div className="resume-row ts-empty">No other machines online.</div>}
         {online.map((m) => (
@@ -244,6 +267,11 @@ function Running({
           />
         ))}
         {offline > 0 && <div className="ts-foot">{offline} offline</div>}
+        {problem && online.some((m) => m.allowed) && (
+          <div className="ts-foot set-warn" role="status">
+            {problem}
+          </div>
+        )}
       </div>
     </div>
   );
