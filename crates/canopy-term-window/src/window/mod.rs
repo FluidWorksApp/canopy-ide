@@ -50,6 +50,7 @@ use crate::findbar::{
 use crate::grid::{cell_at, grid_size, CellPx, FontZoom, PxRect};
 use crate::ime::{cursor_area, preedit_cols, ImeAction, ImeEvent, ImeGate};
 use crate::lines::{self, AbsSelection, ClickTracker, Granularity, Lines, SelectionDrag};
+use crate::links;
 use crate::overlay::draw_badge;
 use crate::selection::Selection;
 use crate::shortcuts::{shortcut_with_selection, Mods, Platform, Shortcut};
@@ -304,6 +305,8 @@ struct App<S> {
     sel: Option<AbsSelection>,
     /// A mouse selection in progress (press seen, release not yet).
     drag: Option<SelectionDrag>,
+    /// The screen cell the left button went down on, for a link click.
+    press: Option<(u16, u16)>,
     clicks: ClickTracker,
     /// Where the view sits in the scrollback, and the history length last
     /// seen (0 on the alternate screen).
@@ -362,6 +365,7 @@ impl<S: FrameSource> App<S> {
             a11y_active: false,
             sel: None,
             drag: None,
+            press: None,
             clicks: ClickTracker::default(),
             viewport: Viewport::default(),
             history_len: 0,
@@ -1077,6 +1081,7 @@ impl<S: FrameSource> App<S> {
                     _ => Some(drag.selection(self.mods.alt_key())),
                 };
                 self.drag = Some(drag);
+                self.press = Some(cell);
                 if sel != self.sel {
                     self.sel = sel;
                     self.request_redraw();
@@ -1084,6 +1089,21 @@ impl<S: FrameSource> App<S> {
             }
             ElementState::Released => {
                 let gran = self.drag.take().map(|d| d.gran);
+                let pressed = self.press.take();
+                // A click (no drag) on the live screen with the link modifier
+                // follows the OSC 8 link under it. `links::follow` opens
+                // nothing but http, https and mailto (`frame::is_safe_link`);
+                // the find bar, selection and copy never open anything.
+                if gran == Some(Granularity::Cell)
+                    && self.viewport.is_live()
+                    && pressed.is_some()
+                    && pressed == self.pointer_cell()
+                    && links::is_link_click(mods_of(self.mods), Platform::current())
+                {
+                    if let Some((row, col)) = pressed {
+                        links::follow(self.source.hyperlink_at(row, col), links::open);
+                    }
+                }
                 // A click without a drag selects nothing.
                 if gran == Some(Granularity::Cell) && self.sel.is_some_and(|s| s.anchor == s.head) {
                     self.sel = None;

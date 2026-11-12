@@ -15,6 +15,8 @@
 //! * [`compose`]: the composition drawn over a copy of the frame.
 //! * [`blink`], [`selection`], [`shortcuts`]: cursor blink timing, copied text,
 //!   copy/paste/zoom keys.
+//! * [`links`]: which OSC 8 links a click may open (`http`, `https`, `mailto`,
+//!   through `frame::is_safe_link`) and how the system opener is started.
 //! * [`viewport`]: scrollback position, the frame drawn for a scrolled view,
 //!   wheel and scroll-key routing.
 //! * [`lines`]: selection over scrollback and the live screen (absolute
@@ -42,6 +44,7 @@ pub mod findbar;
 pub mod grid;
 pub mod ime;
 pub mod lines;
+pub mod links;
 pub mod overlay;
 pub mod search;
 pub mod selection;

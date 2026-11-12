@@ -78,6 +78,7 @@ pub fn draw_text(
             fg: style.fg,
             bg: style.bg,
             attrs: Attrs(style.attrs),
+            ..Cell::default()
         };
         if w == 2 {
             frame.cells[i + 1] = Cell {
@@ -86,6 +87,7 @@ pub fn draw_text(
                 fg: style.fg,
                 bg: style.bg,
                 attrs: Attrs(style.attrs | Attrs::WIDE_TAIL),
+                ..Cell::default()
             };
         }
         last_head = Some(i);

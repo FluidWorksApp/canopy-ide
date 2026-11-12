@@ -875,6 +875,10 @@ impl<L: SessionLink> FrameSource for Session<L> {
         self.modes
     }
 
+    fn hyperlink_at(&self, row: u16, col: u16) -> Option<String> {
+        self.screen.hyperlink_at(row, col)
+    }
+
     fn scrollback_len(&self) -> usize {
         self.screen.scrollback_len()
     }

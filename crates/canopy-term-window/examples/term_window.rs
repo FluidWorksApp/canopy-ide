@@ -144,6 +144,7 @@ impl Demo {
             fg,
             bg: Color::Default,
             attrs: Attrs(attrs),
+            ..Cell::default()
         };
         if w == 2 {
             self.frame.cells[i + 1] = Cell {

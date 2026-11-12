@@ -319,11 +319,16 @@ macro_rules! define {
             }
 
             /// Bytes in a snapshot are bounded by the grid: per cell one full SGR
-            /// and a maximal cluster, per row a cursor move, plus fixed extras
-            /// (title, modes, hyperlinks).
+            /// (with underline shape and colour) and a maximal cluster, per row a
+            /// cursor move and a prompt mark, per column a tab stop, plus fixed
+            /// extras (title, modes, hyperlinks, up to 256 palette entries and
+            /// three colours, character sets).
             fn snapshot_bound(cols: u16, rows: u16) -> usize {
                 let cells = cols as usize * rows as usize;
-                cells * (64 + 4 * MAX_CLUSTER_SCALARS) + rows as usize * 16
+                cells * (96 + 4 * MAX_CLUSTER_SCALARS)
+                    + rows as usize * 80
+                    + cols as usize * 12
+                    + 259 * 32
                     + 4 * 4 * MAX_TITLE_BYTES
                     + 32 * 1024
             }

@@ -2,7 +2,7 @@
 //! strike lines, cursor shapes and selection ranges. All integers in physical
 //! pixels; nothing here allocates or touches a GPU.
 
-use crate::frame::CursorShape;
+use crate::frame::{CursorShape, UnderlineStyle};
 use crate::metrics::CellLayout;
 
 /// A pixel rectangle. Origin is top-left of the surface.
@@ -30,6 +30,96 @@ pub fn underline_rect(l: &CellLayout, row: u16, col: u16, cols: u16) -> PxRect {
         y: c.y + l.underline_top as i32,
         h: l.underline_thickness,
         ..c
+    }
+}
+
+/// The rectangles that draw an underline of `style` across the `cols` cells
+/// starting at (`row`, `col`), handed to `put` one by one (nothing allocates).
+/// Every piece stays inside its cell row. `Single` is one rectangle for the
+/// whole span; the other styles are at most two pieces per cell: `Double` is
+/// two lines, `Curly` a two-step wave per cell, `Dotted` two dots per cell and
+/// `Dashed` one dash per cell. `None` draws nothing.
+pub fn underline_pieces(
+    l: &CellLayout,
+    row: u16,
+    col: u16,
+    cols: u16,
+    style: UnderlineStyle,
+    mut put: impl FnMut(PxRect),
+) {
+    let base = underline_rect(l, row, col, cols);
+    let cell_top = row as i32 * l.height as i32;
+    let t = base.h.max(1);
+    let w = l.width;
+    match style {
+        UnderlineStyle::None => {}
+        UnderlineStyle::Single => put(base),
+        UnderlineStyle::Double => {
+            put(base);
+            let y = (base.y - 2 * t as i32).max(cell_top);
+            if y != base.y {
+                put(PxRect { y, ..base });
+            }
+        }
+        UnderlineStyle::Curly => {
+            let up = (base.y - t as i32).max(cell_top);
+            for c in col..col + cols {
+                let x = c as i32 * w as i32;
+                let half = w / 2;
+                if half == 0 {
+                    put(PxRect {
+                        x,
+                        y: base.y,
+                        w,
+                        h: t,
+                    });
+                    continue;
+                }
+                put(PxRect {
+                    x,
+                    y: up,
+                    w: half,
+                    h: t,
+                });
+                put(PxRect {
+                    x: x + half as i32,
+                    y: base.y,
+                    w: w - half,
+                    h: t,
+                });
+            }
+        }
+        UnderlineStyle::Dotted => {
+            let dot = (w / 4).max(1);
+            for c in col..col + cols {
+                let x = c as i32 * w as i32;
+                put(PxRect {
+                    x,
+                    y: base.y,
+                    w: dot,
+                    h: t,
+                });
+                if w >= 4 {
+                    put(PxRect {
+                        x: x + (w / 2) as i32,
+                        y: base.y,
+                        w: dot,
+                        h: t,
+                    });
+                }
+            }
+        }
+        UnderlineStyle::Dashed => {
+            let dash = (w * 3 / 4).max(1);
+            for c in col..col + cols {
+                put(PxRect {
+                    x: c as i32 * w as i32,
+                    y: base.y,
+                    w: dash,
+                    h: t,
+                });
+            }
+        }
     }
 }
 
@@ -146,6 +236,59 @@ mod tests {
             assert_eq!((r.x, r.w), (c.x, c.w));
         }
         assert_eq!(underline_rect(&l, 0, 0, 1).y, 14);
+    }
+
+    fn pieces(style: UnderlineStyle, col: u16, cols: u16) -> Vec<PxRect> {
+        let mut v = Vec::new();
+        underline_pieces(&layout(), 3, col, cols, style, |r| v.push(r));
+        v
+    }
+
+    #[test]
+    fn a_single_underline_is_the_whole_span_in_one_piece() {
+        let l = layout();
+        assert_eq!(
+            pieces(UnderlineStyle::Single, 2, 3),
+            vec![underline_rect(&l, 3, 2, 3)]
+        );
+        assert!(pieces(UnderlineStyle::None, 0, 5).is_empty());
+    }
+
+    #[test]
+    fn every_underline_style_stays_inside_its_cells() {
+        let l = layout();
+        for style in [
+            UnderlineStyle::Single,
+            UnderlineStyle::Double,
+            UnderlineStyle::Curly,
+            UnderlineStyle::Dotted,
+            UnderlineStyle::Dashed,
+        ] {
+            let span = cell_rect(&l, 3, 2, 3);
+            let got = pieces(style, 2, 3);
+            assert!(!got.is_empty(), "{style:?}");
+            for r in got {
+                assert!(r.h >= 1 && r.w >= 1, "{style:?} {r:?}");
+                assert!(r.x >= span.x && r.x + r.w as i32 <= span.x + span.w as i32);
+                assert!(r.y >= span.y && r.y + r.h as i32 <= span.y + span.h as i32);
+            }
+        }
+    }
+
+    #[test]
+    fn the_styles_differ_in_shape() {
+        // 8 pixel cells: double is two lines, curly two steps per cell, dotted
+        // two dots per cell, dashed one dash per cell.
+        assert_eq!(pieces(UnderlineStyle::Double, 0, 2).len(), 2);
+        assert_eq!(pieces(UnderlineStyle::Curly, 0, 2).len(), 4);
+        assert_eq!(pieces(UnderlineStyle::Dotted, 0, 2).len(), 4);
+        assert_eq!(pieces(UnderlineStyle::Dashed, 0, 2).len(), 2);
+        let curly = pieces(UnderlineStyle::Curly, 0, 1);
+        assert_ne!(curly[0].y, curly[1].y, "the wave goes up and down");
+        let dashed = pieces(UnderlineStyle::Dashed, 0, 1);
+        assert!(dashed[0].w < layout().width, "a dash leaves a gap");
+        let double = pieces(UnderlineStyle::Double, 0, 1);
+        assert_ne!(double[0].y, double[1].y);
     }
 
     #[test]

@@ -7,6 +7,7 @@ use super::scan::{base64_decode, split_osc, Osc, Scanner, Step};
 use super::{Event, PromptKind, PromptMark, RowMark, MAX_CLIPBOARD_BYTES, MAX_PENDING_EVENTS};
 use crate::frame::{
     Attrs, Cell, Color, Cursor, CursorShape, Damage, Frame, Modes, MouseEncoding, MouseMode,
+    UnderlineStyle,
 };
 use crate::shared::{
     clamp_size, Row, MAX_CLUSTER_SCALARS, MAX_PENDING_REPLIES, MAX_SCROLLBACK, MAX_TITLE_BYTES,
@@ -97,6 +98,17 @@ pub(crate) struct Engine {
     /// engine only reads back the active screen's flags, so the other one is
     /// remembered when its flags change (`Step::KittyChanged`).
     kitty: [u8; 2],
+    /// The cursor's OSC 133 state on the primary and alternate screens, as the
+    /// program last set it (the engine does not expose it).
+    semantic: [Semantic; 2],
+    /// The OSC 8 link the program has open on the primary and alternate
+    /// screens: text printed next gets it. The engine keeps it on its cursor
+    /// and has no getter, so the host follows the stream.
+    open_link: [Option<Arc<str>>; 2],
+    /// The alternate screen was active after the last mode change, to spot the
+    /// switch into it: the engine copies the cursor, so the prompt state and
+    /// open link carry over.
+    in_alt: bool,
     /// Mouse reporting as the engine's stream handler applies it: setting
     /// 9, 1000, 1002 or 1003 selects that mode (the last one wins), resetting
     /// any of them turns reporting off; the same for the encodings. The
@@ -119,6 +131,18 @@ fn color_of(c: StyleColor) -> Color {
         StyleColor::Palette(p) => Color::Indexed(p.0),
         StyleColor::Rgb(c) => Color::Rgb(c.r, c.g, c.b),
         _ => Color::Default,
+    }
+}
+
+fn underline_of(s: &Style) -> UnderlineStyle {
+    match s.underline {
+        Underline::None => UnderlineStyle::None,
+        Underline::Double => UnderlineStyle::Double,
+        Underline::Curly => UnderlineStyle::Curly,
+        Underline::Dotted => UnderlineStyle::Dotted,
+        Underline::Dashed => UnderlineStyle::Dashed,
+        // `Single`, and any style a later engine adds: a plain line.
+        _ => UnderlineStyle::Single,
     }
 }
 
@@ -168,6 +192,10 @@ fn make_cell(style: &Style, raw: GCell, text: &str, clusters: &mut Vec<String>) 
         _ => {}
     }
     let attrs = attrs_of(style);
+    let underline = underline_of(style);
+    // Kept even without an underline: the engine keeps it on the pen, and a
+    // later `SGR 4` shows it.
+    let underline_color = color_of(style.underline_color);
     let wide = raw.wide();
     if matches!(wide, Ok(CellWide::SpacerTail)) {
         return Cell {
@@ -176,6 +204,8 @@ fn make_cell(style: &Style, raw: GCell, text: &str, clusters: &mut Vec<String>) 
             fg,
             bg,
             attrs: Attrs(attrs | Attrs::WIDE_TAIL),
+            underline,
+            underline_color,
         };
     }
     // A spacer head is a blank at the end of a row where a wide character did
@@ -202,6 +232,8 @@ fn make_cell(style: &Style, raw: GCell, text: &str, clusters: &mut Vec<String>) 
         fg,
         bg,
         attrs: Attrs(attrs),
+        underline,
+        underline_color,
     }
 }
 
@@ -233,7 +265,13 @@ fn rows_equal(
     }
     let (ac, bc) = (&old.cells[range.clone()], &cells[range]);
     for (x, y) in ac.iter().zip(bc) {
-        if x.fg != y.fg || x.bg != y.bg || x.attrs != y.attrs || x.ch != y.ch {
+        if x.fg != y.fg
+            || x.bg != y.bg
+            || x.attrs != y.attrs
+            || x.ch != y.ch
+            || x.underline != y.underline
+            || x.underline_color != y.underline_color
+        {
             return false;
         }
         if (x.cluster == 0) != (y.cluster == 0) {
@@ -249,13 +287,29 @@ fn rows_equal(
     true
 }
 
-fn write_sgr(out: &mut String, fg: Color, bg: Color, attrs: Attrs) {
+/// What a cell is drawn with, apart from its text: the key that decides when a
+/// snapshot must write a new SGR.
+type PenKey = (Color, Color, Attrs, UnderlineStyle, Color);
+
+fn pen_key(c: &Cell) -> PenKey {
+    (
+        c.fg,
+        c.bg,
+        Attrs(c.attrs.0 & !Attrs::WIDE_TAIL),
+        c.underline,
+        c.underline_color,
+    )
+}
+
+/// One SGR that sets exactly this pen, from a reset. The underline shape is
+/// `4:n` (colon sub-parameter) and its colour is `58`.
+fn write_sgr(out: &mut String, key: PenKey) {
+    let (fg, bg, attrs, underline, underline_color) = key;
     out.push_str("\x1b[0");
     for (flag, code) in [
         (Attrs::BOLD, 1),
         (Attrs::DIM, 2),
         (Attrs::ITALIC, 3),
-        (Attrs::UNDERLINE, 4),
         (Attrs::INVERSE, 7),
         (Attrs::HIDDEN, 8),
         (Attrs::STRIKE, 9),
@@ -264,25 +318,156 @@ fn write_sgr(out: &mut String, fg: Color, bg: Color, attrs: Attrs) {
             let _ = write!(out, ";{code}");
         }
     }
-    match fg {
-        Color::Default => {}
-        Color::Indexed(i) => {
-            let _ = write!(out, ";38;5;{i}");
+    match underline {
+        UnderlineStyle::None => {
+            if attrs.has(Attrs::UNDERLINE) {
+                out.push_str(";4");
+            }
         }
-        Color::Rgb(r, g, b) => {
-            let _ = write!(out, ";38;2;{r};{g};{b}");
-        }
+        UnderlineStyle::Single => out.push_str(";4"),
+        UnderlineStyle::Double => out.push_str(";4:2"),
+        UnderlineStyle::Curly => out.push_str(";4:3"),
+        UnderlineStyle::Dotted => out.push_str(";4:4"),
+        UnderlineStyle::Dashed => out.push_str(";4:5"),
     }
-    match bg {
-        Color::Default => {}
-        Color::Indexed(i) => {
-            let _ = write!(out, ";48;5;{i}");
-        }
-        Color::Rgb(r, g, b) => {
-            let _ = write!(out, ";48;2;{r};{g};{b}");
+    for (base, color) in [(38, fg), (48, bg), (58, underline_color)] {
+        match color {
+            Color::Default => {}
+            Color::Indexed(i) => {
+                let _ = write!(out, ";{base};5;{i}");
+            }
+            Color::Rgb(r, g, b) => {
+                let _ = write!(out, ";{base};2;{r};{g};{b}");
+            }
         }
     }
     out.push('m');
+}
+
+/// What the engine's VT formatter says about state the terminal has no getter
+/// for. Parsed out of its output; see [`parse_extras`].
+#[derive(Debug, Default, PartialEq, Eq)]
+struct Extras {
+    /// Scroll region, zero-based `start..end`; `None` for the whole screen.
+    region: Option<(u16, u16)>,
+    /// Zero-based columns with a tab stop; `None` when the formatter said
+    /// nothing (then the stops are left at their defaults).
+    tabs: Option<Vec<u16>>,
+    /// Character set designations and shifts, as the escape sequences that
+    /// restore them (empty when every set is the default).
+    charsets: Vec<u8>,
+}
+
+/// Reads what the formatter wrote for one cell with scrolling region, tab stops
+/// and character sets switched on. The cell's own text and style come first and
+/// are skipped over: the designations are two escape bytes and a letter, which
+/// nothing a cell can hold looks like, and the tab stops follow the last
+/// `CSI 3 g`.
+fn parse_extras(bytes: &[u8]) -> Extras {
+    let mut out = Extras {
+        region: parse_decstbm(bytes),
+        ..Extras::default()
+    };
+
+    const TBC: &[u8] = b"\x1b[3g";
+    if let Some(at) = bytes.windows(TBC.len()).rposition(|w| w == TBC) {
+        let mut tabs = Vec::new();
+        let mut i = at + TBC.len();
+        // `CSI n G` then `ESC H`, once per stop.
+        while i + 1 < bytes.len() && bytes[i] == 0x1b && bytes[i + 1] == b'[' {
+            let mut j = i + 2;
+            let mut n: u32 = 0;
+            while j < bytes.len() && bytes[j].is_ascii_digit() {
+                n = n
+                    .saturating_mul(10)
+                    .saturating_add((bytes[j] - b'0') as u32);
+                j += 1;
+            }
+            if j + 2 < bytes.len()
+                && bytes[j] == b'G'
+                && bytes[j + 1] == 0x1b
+                && bytes[j + 2] == b'H'
+                && n >= 1
+            {
+                tabs.push((n - 1).min(u16::MAX as u32) as u16);
+                i = j + 3;
+            } else {
+                break;
+            }
+        }
+        out.tabs = Some(tabs);
+    }
+
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == 0x1b && i + 1 < bytes.len() {
+            match bytes[i + 1] {
+                b'(' | b')' | b'*' | b'+' if i + 2 < bytes.len() => {
+                    if matches!(bytes[i + 2], b'B' | b'A' | b'0') {
+                        out.charsets.extend_from_slice(&bytes[i..i + 3]);
+                        i += 3;
+                        continue;
+                    }
+                }
+                b'n' | b'o' | b'~' | b'|' => {
+                    out.charsets.extend_from_slice(&bytes[i..i + 2]);
+                    i += 2;
+                    continue;
+                }
+                _ => {}
+            }
+        } else if bytes[i] == 0x0e {
+            out.charsets.push(0x0e);
+        }
+        i += 1;
+    }
+    out
+}
+
+/// Where the cursor's semantic state (OSC 133) stands, as the program last set
+/// it. The engine keeps it on its cursor and has no getter.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Semantic {
+    /// Program output (the default), or a command that has finished.
+    Output,
+    /// Inside a prompt (`A`, `N`, `P`); `cont` for a continuation line.
+    Prompt { cont: bool },
+    /// Typing a command (`B`, or `I` which ends at the end of the line).
+    Input { eol: bool },
+}
+
+/// The semantic state OSC 133's body (`A`, `B;...`, `P;k=s`) puts the cursor
+/// in, or `None` when the body does not change it (`L`, anything invalid).
+fn semantic_of(body: &[u8]) -> Option<Semantic> {
+    let first = *body.first()?;
+    if body.len() > 1 && body[1] != b';' {
+        return None;
+    }
+    match first {
+        b'A' | b'N' | b'P' => {
+            let cont = body
+                .split(|&b| b == b';')
+                .skip(1)
+                .find_map(|o| o.strip_prefix(b"k="))
+                .is_some_and(|k| matches!(k, b"c" | b"s"));
+            Some(Semantic::Prompt { cont })
+        }
+        b'B' => Some(Semantic::Input { eol: false }),
+        b'I' => Some(Semantic::Input { eol: true }),
+        b'C' | b'D' => Some(Semantic::Output),
+        _ => None,
+    }
+}
+
+/// The OSC 133 that marks the cursor's row as a prompt row without moving
+/// anything and then returns the cursor to plain output, so text printed next
+/// is not taken for a prompt.
+fn write_row_mark(out: &mut String, mark: RowMark) {
+    match mark {
+        RowMark::None => {}
+        RowMark::Prompt => out.push_str("\x1b]133;P;k=i\x1b\\\x1b]133;D\x1b\\"),
+        RowMark::PromptContinuation => out.push_str("\x1b]133;P;k=s\x1b\\\x1b]133;D\x1b\\"),
+    }
 }
 
 /// The first `CSI Pt ; Pb r` (DECSTBM) in `bytes`, as zero-based `start..end`.
@@ -503,6 +688,9 @@ impl Engine {
             pen: Cell::default(),
             blinking: false,
             kitty: [0; 2],
+            semantic: [Semantic::Output; 2],
+            open_link: [None, None],
+            in_alt: false,
             mouse: MouseMode::Off,
             mouse_encoding: MouseEncoding::Default,
             clipboard_read_events: false,
@@ -566,10 +754,19 @@ impl Engine {
             Step::Reset => {
                 self.title = None;
                 self.kitty = [0; 2];
+                self.semantic = [Semantic::Output; 2];
+                self.open_link = [None, None];
+                self.in_alt = false;
                 self.mouse = MouseMode::Off;
                 self.mouse_encoding = MouseEncoding::Default;
             }
             Step::PrivateMode { set, params } => {
+                let alt = self.on_alt();
+                if alt && !self.in_alt {
+                    self.semantic[1] = self.semantic[0];
+                    self.open_link[1] = self.open_link[0].clone();
+                }
+                self.in_alt = alt;
                 for p in params {
                     match (p, set) {
                         (9, true) => self.mouse = MouseMode::Press,
@@ -622,12 +819,23 @@ impl Engine {
                 }
                 self.title = if title.is_empty() { None } else { Some(title) };
             }
+            8 => {
+                // `OSC 8 ; params ; uri`: an empty uri closes the link.
+                let uri = rest.splitn(2, |&b| b == b';').nth(1).unwrap_or(&[]);
+                let link = if osc.overflow { None } else { clean_uri(uri) };
+                let screen = self.on_alt() as usize;
+                self.open_link[screen] = link;
+            }
             // OSC 4, 10, 11, 12 queries are answered by the engine itself (CI
             // showed a second reply when we answered too), mirroring the
             // terminator, from the colours the program set or the defaults
             // from `set_reply_colors`.
             52 => self.osc52(&osc, rest),
             133 => {
+                if let Some(state) = semantic_of(rest) {
+                    let screen = self.on_alt() as usize;
+                    self.semantic[screen] = state;
+                }
                 let mut parts = rest.split(|&b| b == b';');
                 let kind = match parts.next().and_then(|p| p.first()) {
                     Some(b'A') => PromptKind::PromptStart,
@@ -887,13 +1095,18 @@ impl Engine {
             visible: term.is_cursor_visible().unwrap_or(true),
         };
         let pen = match term.cursor_style() {
-            Ok(style) => Cell {
-                ch: ' ',
-                cluster: 0,
-                fg: color_of(style.fg_color),
-                bg: color_of(style.bg_color),
-                attrs: Attrs(attrs_of(&style)),
-            },
+            Ok(style) => {
+                let underline = underline_of(&style);
+                Cell {
+                    ch: ' ',
+                    cluster: 0,
+                    fg: color_of(style.fg_color),
+                    bg: color_of(style.bg_color),
+                    attrs: Attrs(attrs_of(&style)),
+                    underline,
+                    underline_color: color_of(style.underline_color),
+                }
+            }
             Err(_) => Cell::default(),
         };
         self.kitty[alt_screen as usize] = modes.kitty_keyboard;
@@ -957,33 +1170,83 @@ impl Engine {
         };
     }
 
-    /// The scroll region, as the engine's own VT formatter writes it (the
-    /// terminal has no getter for it). Zero-based `start..end`; `None` for the
-    /// whole screen.
-    fn scroll_region(&self) -> Option<(u16, u16)> {
+    /// Scroll region, tab stops and character sets, as the engine's own VT
+    /// formatter writes them (the terminal has no getter for any of them). The
+    /// formatter is asked about one cell so the output is those extras and a
+    /// single character, which [`parse_extras`] skips.
+    fn extras(&self) -> Extras {
         let at = Point::Active(PointCoordinate { x: 0, y: 0 });
-        let a = self.term.grid_ref(at).ok()?;
-        let b = self.term.grid_ref(at).ok()?;
+        let (Ok(a), Ok(b)) = (self.term.grid_ref(at), self.term.grid_ref(at)) else {
+            return Extras::default();
+        };
         let sel = Selection::new(a, b, false);
         let opts = FormatterOptions::new()
             .with_format(Format::Vt)
             .with_scrolling_region(true)
+            .with_tabstops(true)
+            .with_charsets(true)
             .with_selection(&sel);
-        let mut fmt = Formatter::new(&self.term, opts).ok()?;
-        let n = fmt.format_len().ok()?;
+        let Ok(mut fmt) = Formatter::new(&self.term, opts) else {
+            return Extras::default();
+        };
+        let Ok(n) = fmt.format_len() else {
+            return Extras::default();
+        };
         let mut buf = vec![0u8; n];
-        let got = fmt.format_buf(&mut buf).ok()?;
-        parse_decstbm(buf.get(..got)?)
+        match fmt.format_buf(&mut buf) {
+            Ok(got) => parse_extras(buf.get(..got).unwrap_or(&[])),
+            Err(_) => Extras::default(),
+        }
+    }
+
+    /// OSC 4, 10, 11 and 12 for what the program changed: palette entries that
+    /// differ from the default palette, and foreground, background and cursor
+    /// colours that differ from their defaults.
+    fn write_colors(&self, out: &mut String) {
+        if let (Ok(now), Ok(default)) =
+            (self.term.color_palette(), self.term.default_color_palette())
+        {
+            for (i, (c, d)) in now.0.iter().zip(default.0.iter()).enumerate() {
+                if c != d {
+                    let _ = write!(
+                        out,
+                        "\x1b]4;{i};rgb:{:02x}/{:02x}/{:02x}\x1b\\",
+                        c.r, c.g, c.b
+                    );
+                }
+            }
+        }
+        let t = &self.term;
+        for (osc, now, default) in [
+            (10, t.fg_color(), t.default_fg_color()),
+            (11, t.bg_color(), t.default_bg_color()),
+            (12, t.cursor_color(), t.default_cursor_color()),
+        ] {
+            if let Ok(Some(c)) = now {
+                if default.ok().flatten() != Some(c) {
+                    let _ = write!(
+                        out,
+                        "\x1b]{osc};rgb:{:02x}/{:02x}/{:02x}\x1b\\",
+                        c.r, c.g, c.b
+                    );
+                }
+            }
+        }
     }
 
     /// Escape sequences that bring a fresh `Screen` of the same size to this
-    /// screen's visible grid, cursor, pen, title and modes. Scrollback is not
-    /// carried, nor is the primary screen behind an active alternate screen.
-    /// Built from our own frame (plus the engine's soft-wrap flags and scroll
-    /// region) rather than the engine's VT formatter, which has no notion of
-    /// the visible area only, and drops soft wraps.
+    /// screen's visible grid, cursor, pen, title and modes, plus what the grid
+    /// does not show but later output depends on: tab stops, character sets and
+    /// shift state, palette and colour overrides, underline styles and colours,
+    /// hyperlinks, prompt row marks and the cursor's prompt state. Scrollback is
+    /// not carried, nor is the primary screen behind an active alternate screen.
+    /// Built from our own frame (plus the engine's soft-wrap flags, and its VT
+    /// formatter for the scroll region, tab stops and character sets) rather
+    /// than the engine's formatter alone, which has no notion of the visible
+    /// area only, and drops soft wraps.
     pub(crate) fn snapshot(&mut self) -> Vec<u8> {
         self.fresh();
+        let extras = self.extras();
         let f = &self.frame;
         let mut out = String::new();
         let kitty = |out: &mut String, flags: u8| {
@@ -992,6 +1255,7 @@ impl Engine {
             }
         };
         out.push_str("\x1bc");
+        self.write_colors(&mut out);
         if f.alt_screen {
             kitty(&mut out, self.kitty[0]);
             out.push_str("\x1b[?1049h");
@@ -1000,12 +1264,13 @@ impl Engine {
         let (cols, rows) = (f.cols as usize, f.rows as usize);
         let wrapped = |r: usize| r + 1 < rows && self.wraps.get(r).copied().unwrap_or(false);
         let blank = Cell::default();
-        let mut cur: (Color, Color, Attrs) = (Color::Default, Color::Default, Attrs(0));
+        let mut cur: PenKey = pen_key(&blank);
         let mut link: Option<&Arc<str>> = None;
         let mut link_bytes = 0usize;
         for r in 0..rows {
             let row = &f.cells[r * cols..(r + 1) * cols];
             let links = &self.links[r * cols..(r + 1) * cols];
+            let mark = self.marks.get(r).copied().unwrap_or_default();
             let chained = r > 0 && wrapped(r - 1);
             let end = if wrapped(r) {
                 Some(cols - 1)
@@ -1017,7 +1282,14 @@ impl Engine {
             let end = match (end, chained) {
                 (Some(e), _) => e,
                 (None, true) => 0,
-                (None, false) => continue,
+                (None, false) => {
+                    // A blank row can still be a prompt row.
+                    if mark != RowMark::None {
+                        let _ = write!(out, "\x1b[{};1H", r + 1);
+                        write_row_mark(&mut out, mark);
+                    }
+                    continue;
+                }
             };
             if !chained {
                 let _ = write!(out, "\x1b[{};1H", r + 1);
@@ -1039,10 +1311,10 @@ impl Engine {
                         }
                     }
                 }
-                let attrs = Attrs(cell.attrs.0 & !Attrs::WIDE_TAIL);
-                if (cell.fg, cell.bg, attrs) != cur {
-                    write_sgr(&mut out, cell.fg, cell.bg, attrs);
-                    cur = (cell.fg, cell.bg, attrs);
+                let key = pen_key(cell);
+                if key != cur {
+                    write_sgr(&mut out, key);
+                    cur = key;
                 }
                 match f.clusters.get(cell.cluster as usize) {
                     Some(text) if cell.cluster != 0 => out.push_str(text),
@@ -1053,17 +1325,64 @@ impl Engine {
             if link.take().is_some() {
                 out.push_str("\x1b]8;;\x1b\\");
             }
+            // The mark goes after the text, while the cursor is still on this
+            // row (a pending wrap leaves it there), and the semantic state is
+            // put back to output so a wrap into the next row is not marked.
+            write_row_mark(&mut out, mark);
         }
         // Pen: what the next character is drawn with.
-        write_sgr(
-            &mut out,
-            self.pen.fg,
-            self.pen.bg,
-            Attrs(self.pen.attrs.0 & !Attrs::WIDE_TAIL),
-        );
+        write_sgr(&mut out, pen_key(&self.pen));
         if let Some(title) = &f.title {
             let clean: String = title.chars().filter(|c| !c.is_control()).collect();
             let _ = write!(out, "\x1b]2;{clean}\x07");
+        }
+
+        // Tab stops: clear them all, then set each one (the cursor moves, and
+        // is placed below).
+        if let Some(tabs) = &extras.tabs {
+            out.push_str("\x1b[3g");
+            for &col in tabs {
+                let _ = write!(out, "\x1b[{}G\x1bH", col as u32 + 1);
+            }
+        }
+
+        // The cursor's prompt state (OSC 133), which decides how the next line
+        // feed marks rows. A prompt state marks the row the cursor is on, so it
+        // is written on a row already marked the same way (the cursor's own if
+        // it is, else the first such row); with no such row it cannot be written
+        // and the cursor is left in plain output. Written before the modes and
+        // the final cursor move, so origin mode and the scroll region cannot
+        // redirect the jump.
+        match self.semantic[self.on_alt() as usize] {
+            Semantic::Output => {}
+            Semantic::Prompt { cont } => {
+                let want = if cont {
+                    RowMark::PromptContinuation
+                } else {
+                    RowMark::Prompt
+                };
+                let at = |r: usize| self.marks.get(r).copied() == Some(want);
+                let host = if at(f.cursor.row as usize) {
+                    Some(f.cursor.row as usize)
+                } else {
+                    (0..rows).find(|&r| at(r))
+                };
+                if let Some(r) = host {
+                    let _ = write!(
+                        out,
+                        "\x1b[{};1H\x1b]133;P;k={}\x1b\\",
+                        r + 1,
+                        if cont { 's' } else { 'i' }
+                    );
+                }
+            }
+            Semantic::Input { eol } => {
+                out.push_str(if eol {
+                    "\x1b]133;I\x1b\\"
+                } else {
+                    "\x1b]133;B\x1b\\"
+                });
+            }
         }
 
         // Modes, after the grid so insert and newline modes do not touch it.
@@ -1108,7 +1427,7 @@ impl Engine {
 
         // Scroll region (homes the cursor), origin mode (homes it again,
         // relative to the region), then the cursor itself.
-        let top = match self.scroll_region() {
+        let top = match extras.region {
             Some((start, end)) if start < end => {
                 let _ = write!(out, "\x1b[{};{}r", start + 1, end);
                 start
@@ -1144,18 +1463,35 @@ impl Engine {
             let i = f.cursor.row as usize * cols + cols - 1;
             if let Some(cell) = f.cells.get(i) {
                 if !cell.attrs.has(Attrs::WIDE_TAIL) && f.cursor.row < f.rows {
-                    write_sgr(&mut out, cell.fg, cell.bg, cell.attrs);
+                    // The cell keeps its own link: printing it again with none
+                    // open would clear it.
+                    let own = self.links.get(i).and_then(|l| l.as_ref());
+                    let own = own.filter(|u| link_bytes + u.len() <= MAX_SNAPSHOT_LINK_BYTES);
+                    if let Some(uri) = own {
+                        link_bytes += uri.len();
+                        let _ = write!(out, "\x1b]8;;{uri}\x1b\\");
+                    }
+                    write_sgr(&mut out, pen_key(cell));
                     match f.clusters.get(cell.cluster as usize) {
                         Some(text) if cell.cluster != 0 => out.push_str(text),
                         _ => out.push(cell.ch),
                     }
-                    write_sgr(
-                        &mut out,
-                        self.pen.fg,
-                        self.pen.bg,
-                        Attrs(self.pen.attrs.0 & !Attrs::WIDE_TAIL),
-                    );
+                    write_sgr(&mut out, pen_key(&self.pen));
+                    if own.is_some() {
+                        out.push_str("\x1b]8;;\x1b\\");
+                    }
                 }
+            }
+        }
+        // Character sets last: the grid and the reprint above were written
+        // under the default sets, and the designations and shifts change how
+        // the next characters print, not what is already there.
+        out.extend(extras.charsets.iter().map(|&b| b as char));
+        // The link the program left open, for the text it prints next.
+        let screen = self.on_alt() as usize;
+        if let Some(uri) = &self.open_link[screen] {
+            if link_bytes + uri.len() <= MAX_SNAPSHOT_LINK_BYTES {
+                let _ = write!(out, "\x1b]8;;{uri}\x1b\\");
             }
         }
         out.push_str(if f.cursor.visible {
@@ -1192,6 +1528,96 @@ mod tests {
         assert_eq!(parse_decstbm(b"\x1b[r"), None);
         assert_eq!(parse_decstbm(b"\x1b[5;2r"), None);
         assert_eq!(parse_decstbm(b"plain"), None);
+    }
+
+    #[test]
+    fn the_formatters_extras_are_read_out_of_its_output() {
+        // One cell of content (with its own SGR), then the extras in the order
+        // the engine writes them: scroll region, tab stops.
+        let out = parse_extras(b"\x1b[1mx\x1b[0m\x1b[2;5r\x1b[3g\x1b[9G\x1bH\x1b[17G\x1bH");
+        assert_eq!(out.region, Some((1, 5)));
+        assert_eq!(out.tabs, Some(vec![8, 16]));
+        assert!(out.charsets.is_empty());
+
+        // Character sets come with the screen's extras, before the cursor.
+        let out = parse_extras(b"x\x1b(0\x1b)A\x0e\x1b~\x1b[3g");
+        assert_eq!(out.charsets, b"\x1b(0\x1b)A\x0e\x1b~");
+        assert_eq!(out.tabs, Some(vec![]), "all stops cleared");
+
+        // Nothing from the formatter, nothing carried.
+        assert_eq!(parse_extras(b""), Extras::default());
+        assert_eq!(parse_extras(b"plain"), Extras::default());
+        // A cell's own SGR and hyperlink are not charset designations.
+        let out = parse_extras(b"\x1b]8;;http://x/\x1b\\\x1b[4:3;58;2;1;2;3mq\x1b[3g");
+        assert!(out.charsets.is_empty());
+        // A malformed stop list ends the list instead of reading past it.
+        let out = parse_extras(b"\x1b[3g\x1b[5G\x1bH\x1b[7G");
+        assert_eq!(out.tabs, Some(vec![4]));
+    }
+
+    #[test]
+    fn osc_133_bodies_map_to_the_cursors_prompt_state() {
+        assert_eq!(semantic_of(b"A"), Some(Semantic::Prompt { cont: false }));
+        assert_eq!(semantic_of(b"A;k=s"), Some(Semantic::Prompt { cont: true }));
+        assert_eq!(
+            semantic_of(b"P;aid=1;k=c"),
+            Some(Semantic::Prompt { cont: true })
+        );
+        assert_eq!(
+            semantic_of(b"N;k=i"),
+            Some(Semantic::Prompt { cont: false })
+        );
+        assert_eq!(semantic_of(b"B"), Some(Semantic::Input { eol: false }));
+        assert_eq!(semantic_of(b"I"), Some(Semantic::Input { eol: true }));
+        assert_eq!(semantic_of(b"C"), Some(Semantic::Output));
+        assert_eq!(semantic_of(b"D;0"), Some(Semantic::Output));
+        assert_eq!(semantic_of(b"L"), None);
+        assert_eq!(semantic_of(b"AB"), None, "the engine rejects this too");
+        assert_eq!(semantic_of(b""), None);
+    }
+
+    #[test]
+    fn an_sgr_names_the_underline_shape_and_colour() {
+        let key = |u, c| {
+            (
+                Color::Default,
+                Color::Default,
+                Attrs(Attrs::UNDERLINE),
+                u,
+                c,
+            )
+        };
+        let sgr = |u, c| {
+            let mut s = String::new();
+            write_sgr(&mut s, key(u, c));
+            s
+        };
+        assert_eq!(sgr(UnderlineStyle::Single, Color::Default), "\x1b[0;4m");
+        assert_eq!(sgr(UnderlineStyle::Curly, Color::Default), "\x1b[0;4:3m");
+        assert_eq!(
+            sgr(UnderlineStyle::Dashed, Color::Indexed(9)),
+            "\x1b[0;4:5;58;5;9m"
+        );
+        assert_eq!(
+            sgr(UnderlineStyle::Double, Color::Rgb(1, 2, 3)),
+            "\x1b[0;4:2;58;2;1;2;3m"
+        );
+        let mut plain = String::new();
+        write_sgr(&mut plain, pen_key(&Cell::default()));
+        assert_eq!(plain, "\x1b[0m");
+        // A colour with no underline is still written: the pen keeps it.
+        let mut s = String::new();
+        write_sgr(
+            &mut s,
+            (
+                Color::Default,
+                Color::Default,
+                Attrs(0),
+                UnderlineStyle::None,
+                Color::Rgb(9, 8, 7),
+            ),
+        );
+        assert_eq!(s, "\x1b[0;58;2;9;8;7m");
     }
 
     #[test]
