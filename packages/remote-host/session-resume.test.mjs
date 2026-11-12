@@ -283,3 +283,19 @@ test('the roster learns which files each agent wrote, relative to its checkout, 
  await resume.describeOne('w','req-12345678',{agent:'x',files:[],repo:null,root:'/workspace/api'});
  assert.deepEqual(sent,[{agent:'x',files:[],repo:null,root:'/workspace/api'},{agent:'x'},{agent:'x'}]);
 });
+
+test('runningAgents counts live sessions that host an agent that has not ended, never plain shells',async()=>{
+ const sessions=[{id:1,exitCode:null},{id:2,exitCode:null},{id:3,exitCode:null},{id:4,exitCode:0}];
+ const events=[event(1,{hook_event_name:'UserPromptSubmit',prompt:'go'}),event(3,{hook_event_name:'SessionEnd',reason:'exit'}),event(4,{hook_event_name:'UserPromptSubmit',prompt:'old'})];
+ const resume=new SessionResume({directory:'/nonexistent',host:{},config:{workspaces:[]},log:()=>{},fetch:async()=>Response.json(sessions)});
+ resume.native=async(runtime,command,args)=>({cursor:'ino:'+events.length,lines:args.cursor==null?[]:events});
+ assert.equal(await resume.runningAgents({id:'alice'},{url:'http://r',token:'t'}),1,'1 runs an agent; 2 is a shell; 3 ended; 4 exited');
+ const shells=new SessionResume({directory:'/nonexistent',host:{},config:{workspaces:[]},log:()=>{},fetch:async()=>Response.json([{id:2,exitCode:null}])});
+ shells.native=async()=>({cursor:'ino:0',lines:[]});
+ assert.equal(await shells.runningAgents({id:'alice'},{url:'http://r',token:'t'}),0,'only a shell is running');
+ const idle=new SessionResume({directory:'/nonexistent',host:{},config:{workspaces:[]},log:()=>{},fetch:async()=>Response.json([{id:4,exitCode:0}])});
+ idle.native=async()=>{throw Error('events are not read when nothing is running');};
+ assert.equal(await idle.runningAgents({id:'alice'},{url:'http://r',token:'t'}),0);
+ const bad=new SessionResume({directory:'/nonexistent',host:{},config:{workspaces:[]},log:()=>{},fetch:async()=>Response.json({not:'a list'})});
+ await assert.rejects(bad.runningAgents({id:'alice'},{url:'http://r',token:'t'}),/Invalid workspace sessions/);
+});

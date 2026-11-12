@@ -250,6 +250,19 @@ export class SessionResume{
    if(!advanced||!result.lines.length)return;
   }
  }
+ /** Running agents in this workspace: live runner sessions whose terminal hosts
+  * an agent that has not ended. A plain shell is not counted. Reads recent hook
+  * events itself, since the saved state can be up to one poll old; nothing is
+  * written. Throws when the runner cannot be asked. */
+ async runningAgents(workspace,runtime){
+  const sessions=await this.runner(runtime,'/sessions');
+  if(!Array.isArray(sessions))throw Error('Invalid workspace sessions');
+  const live=sessions.filter(session=>session?.exitCode===null);
+  if(!live.length)return 0;
+  const state=await this.load(workspace.id);
+  await this.readEvents(runtime,state);
+  return live.filter(session=>{const agent=state.agents[session.id];return agent&&!agent.ended;}).length;
+ }
  async observeArgv(workspace,state,sessions){
   const wanted=sessions.filter(s=>s.exitCode==null&&Number.isSafeInteger(s.pid)&&state.agents[s.id]&&!state.agents[s.id].ended&&CLIS[state.agents[s.id].agent]&&!state.agents[s.id].argv);
   if(!wanted.length||!this.host.docker)return;

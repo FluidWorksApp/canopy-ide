@@ -116,7 +116,7 @@ export async function requestOwnerImageUpdate(image,{socketPath=HOST_ADMIN_SOCKE
   try{return await once();}catch(error){if(!['ENOENT','ECONNREFUSED'].includes(error?.code)||now()>=deadline)throw error;await sleep(1000);}
  }
 }
-const SEVERITY=['current','updated','rolled-back','failed'];
+const SEVERITY=['current','updated','deferred','rolled-back','failed'];
 /** The whole `update-host` action: (a) the gateway tree when the release's
  * runtime differs, then (b) the owner's container when its image differs.
  * Returns {code, host, image}, each step {code, detail?}; `code` is the worst
