@@ -148,6 +148,10 @@ export class BrowserInstaller {
     this.error = null;
     const abort = new AbortController();
     this.abort = abort;
+    // A run cut short (the app quit mid-download) leaves archives and a
+    // half-extracted folder behind; neither is ever used, so they go first.
+    await rm(join(this.options.browsersDir, '.downloads'), { recursive: true, force: true }).catch(constVoid);
+    if (!this.executable()) await rm(this.browserDir, { recursive: true, force: true }).catch(constVoid);
     const staging = join(this.options.browsersDir, '.downloads', randomUUID());
     await mkdir(staging, { recursive: true });
     let refused = null;

@@ -41,11 +41,16 @@ export function subscribePreviewHost(listener: () => void): () => void {
 export function startPreviewHost(): Promise<PreviewHostInfo> {
   if (state.status === "failed") return Promise.reject(new Error(state.error));
   starting ??= invokeDesktop<PreviewHostInfo>("preview_host_start").then(
-    (info) => {
-      // Known from the start line; refreshed from the host after that.
-      browserState = { executable: info.executable, installer: null };
+    async (info) => {
+      // The app keeps the host's first line for the session, so an empty
+      // executable there may be stale (Chromium was downloaded since). Ask the
+      // host before saying "ready", or every new window flashes the offer.
+      browserState =
+        info.executable === ""
+          ? await readBrowser(info).catch(() => ({ executable: "", installer: null }))
+          : { executable: info.executable, installer: null };
       publish({ status: "ready", info });
-      void refreshPreviewBrowser();
+      followBrowser();
       return info;
     },
     (error: unknown) => {
@@ -91,7 +96,14 @@ async function call<T>(
   path: string,
   init: { method?: string; body?: unknown } = {},
 ): Promise<T> {
-  const info = await startPreviewHost();
+  return callWith<T>(await startPreviewHost(), path, init);
+}
+
+async function callWith<T>(
+  info: PreviewHostInfo,
+  path: string,
+  init: { method?: string; body?: unknown } = {},
+): Promise<T> {
   let response: Response;
   try {
     response = await fetch(`http://127.0.0.1:${info.port}${path}`, {
@@ -270,25 +282,36 @@ export interface PreviewBrowserState {
 let browserState: PreviewBrowserState | null = null;
 let browserPoll: ReturnType<typeof setTimeout> | null = null;
 let offerDismissed = false;
+/** While a download runs. */
 const BROWSER_POLL_MS = 1_000;
+/** While there is no browser: another window may start the download. */
+const BROWSER_IDLE_POLL_MS = 5_000;
+
+const readBrowser = (info: PreviewHostInfo) => callWith<PreviewBrowserState>(info, "/browser");
+
+/** Keeps reading the host's browser until there is one, faster during a download. */
+function followBrowser(): void {
+  if (browserPoll !== null) clearTimeout(browserPoll);
+  browserPoll = null;
+  if (!browserState || browserState.executable !== "") return;
+  const delay = browserState.installer?.state === "downloading" ? BROWSER_POLL_MS : BROWSER_IDLE_POLL_MS;
+  browserPoll = setTimeout(() => void refreshPreviewBrowser(), delay);
+}
 
 export const previewBrowserState = (): PreviewBrowserState | null => browserState;
 
-/** Reads the host's browser, and keeps reading while a download runs (every window sees it finish). */
+/** Reads the host's browser and keeps following it while there is none, so
+ *  every window sees a download start, progress and finish. */
 export async function refreshPreviewBrowser(): Promise<PreviewBrowserState | null> {
-  if (browserPoll !== null) clearTimeout(browserPoll);
-  browserPoll = null;
+  if (state.status !== "ready") return browserState;
   try {
-    const next = await call<PreviewBrowserState>("/browser");
-    browserState = next;
+    browserState = await call<PreviewBrowserState>("/browser");
     for (const listener of listeners) listener();
-    if (next.installer?.state === "downloading") {
-      browserPoll = setTimeout(() => void refreshPreviewBrowser(), BROWSER_POLL_MS);
-    }
-    return next;
   } catch {
-    return browserState;
+    /* the host went away; starting it again reads the browser afresh */
   }
+  followBrowser();
+  return browserState;
 }
 
 /** Starts the one download every window shares, then follows it. */

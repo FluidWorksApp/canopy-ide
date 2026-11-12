@@ -117,6 +117,43 @@ test('one verified download serves every caller, and a mismatch is refused, then
   }
 });
 
+test('a download stopped part way leaves nothing behind, and the next one installs', async () => {
+  const browsersDir = await mkdtemp(join(tmpdir(), 'canopy-browsers-stop-'));
+  const shell = Buffer.alloc(1_000, 1);
+  const ffmpeg = Buffer.alloc(10, 2);
+  const cdn = await fakeCdn({ [SHELL]: shell, [FFMPEG]: ffmpeg });
+  const pins = {
+    browserVersion: '1.0', revision: '7', ffmpegRevision: '9',
+    files: { [SHELL]: { sha256: sha(shell), bytes: shell.length }, [FFMPEG]: { sha256: sha(ffmpeg), bytes: ffmpeg.length } },
+  };
+  let runs = 0;
+  const calls = [];
+  const finish = fakeInstaller(calls);
+  const installer = new BrowserInstaller({
+    browsersDir, pins, key: 'mac-arm64', upstream: cdn.upstream,
+    runInstaller: async options => {
+      if (++runs > 1) return finish(options);
+      // The first run is cut off half way: a partial folder and a staged archive exist.
+      await mkdir(join(browsersDir, 'chromium_headless_shell-7', 'chrome-headless-shell-mac-arm64'), { recursive: true });
+      await writeFile(join(browsersDir, '.downloads', 'leftover.zip'), 'partial').catch(() => {});
+      await new Promise((_, reject) => options.signal.addEventListener('abort', () => reject(new Error('killed')), { once: true }));
+    },
+  });
+  try {
+    const first = installer.install();
+    await new Promise(resolve => setTimeout(resolve, 50));
+    installer.stop();
+    await assert.rejects(first, /stopped/);
+    assert.equal(installer.status().state, 'failed');
+    assert.equal(await installer.install().then(path => path.endsWith('chrome-headless-shell')), true);
+    // The leftovers of the stopped run are gone.
+    await assert.rejects(readFile(join(browsersDir, '.downloads', 'leftover.zip')));
+  } finally {
+    cdn.server.close();
+    await rm(browsersDir, { recursive: true, force: true });
+  }
+});
+
 test('a computer with no published build is told so instead of downloading', async () => {
   const installer = new BrowserInstaller({ browsersDir: '/nonexistent', key: null });
   assert.equal(installer.status().state, 'unsupported');
