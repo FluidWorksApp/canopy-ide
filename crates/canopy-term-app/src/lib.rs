@@ -23,6 +23,8 @@
 //! * `host` (unix): spawn or attach through the host's client and wrap the data
 //!   connection in a `StreamLink`. Tested against a stand-in host that speaks
 //!   the real wire format.
+//! * `skew` and `host_install` (unix): whether a running host is the same app
+//!   version and can be shared, and the copy of the host this program starts.
 //! * [`app`]: wires the three together and runs the window.
 //!
 //! [`SessionLink`]: canopy_term_session::SessionLink
@@ -34,7 +36,11 @@ pub mod args;
 pub mod config;
 #[cfg(unix)]
 pub mod host;
+#[cfg(unix)]
+pub mod host_install;
 pub mod link;
 pub mod paths;
+#[cfg(unix)]
+pub mod skew;
 
 pub use app::run;

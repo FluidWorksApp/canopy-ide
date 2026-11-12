@@ -16,7 +16,11 @@ use std::time::Duration;
 use canopy_pty_host::client::{Attached, HostClient};
 use canopy_pty_host::protocol::{SpawnSpec, BUSY};
 
+use canopy_pty_host::client::{skew_action, IdleShutdown, SkewAction};
+
+use crate::host_install;
 use crate::link::{resize_plan, Limits, StreamLink};
+use crate::skew::{self, Verdict};
 
 /// A host this program starts exits this long after its last session and
 /// client are gone.
@@ -45,6 +49,29 @@ pub struct NewSession {
     pub linger_secs: u64,
     pub cols: u16,
     pub rows: u16,
+    /// Start the user's shell as a login shell. Set when this program was not
+    /// started from a terminal (double-clicked, or from a launcher), which gives
+    /// it none of the environment a shell's profile files would have set up.
+    pub login: bool,
+}
+
+/// The shell when `$SHELL` is unset, as it is for a program the Finder starts.
+pub fn fallback_shell() -> &'static str {
+    if cfg!(target_os = "macos") {
+        "/bin/zsh"
+    } else {
+        "/bin/sh"
+    }
+}
+
+/// Where a session starts when no directory was asked for. A program started
+/// from the Finder has `/` as its directory, which is never where anyone wants
+/// a shell; use the home directory then.
+pub fn default_cwd(current: PathBuf, home: Option<String>) -> PathBuf {
+    match home.filter(|h| !h.is_empty()) {
+        Some(home) if current == Path::new("/") => PathBuf::from(home),
+        _ => current,
+    }
 }
 
 /// The host's own binary: `CANOPY_PTY_HOST_EXE`, else beside this one.
@@ -71,6 +98,96 @@ pub fn client_for(socket: &Path, launchable: bool) -> HostClient {
     }
 }
 
+/// This program's app version, which is the Canopy release it ships in.
+pub const VERSION: &str = env!("CARGO_PKG_VERSION");
+
+/// How long a host that was told to stop gets to go away.
+const STOP_WAIT: Duration = Duration::from_secs(3);
+
+/// A client ready to spawn or attach. On the default socket the host beside
+/// this program is first installed outside the app (`host_install`), so the host
+/// it starts never runs from Downloads, a mounted image or a bundle an update is
+/// about to replace; a `CANOPY_PTY_HOST_EXE` is used as given. Then the host
+/// already running at the socket, if any, must be the same app version
+/// (`skew`): an idle one of another version is stopped and replaced, one that
+/// still runs terminals is left alone and the error says why.
+pub fn prepare_client(socket: &Path, launchable: bool) -> Result<HostClient, String> {
+    let explicit = std::env::var("CANOPY_PTY_HOST_EXE").is_ok_and(|p| !p.is_empty());
+    let mut client = HostClient::new(socket);
+    let mut installed = None;
+    if launchable {
+        if let Some(exe) = host_exe() {
+            let exe = match (explicit, host_install::bin_dir(socket)) {
+                (false, Some(bin)) => {
+                    let copy = host_install::install(&exe, VERSION, &bin)
+                        .map_err(|e| format!("cannot install the terminal host: {e}"))?;
+                    installed = Some((bin, copy.clone()));
+                    copy
+                }
+                _ => exe,
+            };
+            client = client.with_launch(exe, HOST_IDLE_SECS);
+        }
+    }
+    vet(&client, socket, VERSION, launchable, STOP_WAIT)?;
+    if let Some((bin, copy)) = installed {
+        let hello = client.hello_raw();
+        let live = hello.as_ref().ok().and_then(|r| r.exe.clone());
+        let known = match &hello {
+            Ok(_) => true,
+            Err(e) => e.kind() == io::ErrorKind::NotFound,
+        };
+        host_install::prune(&bin, &copy, live.as_deref(), known);
+    }
+    Ok(client)
+}
+
+fn running_sessions(
+    listed: &io::Result<Vec<canopy_pty_host::protocol::SessionInfo>>,
+) -> Option<usize> {
+    listed
+        .as_ref()
+        .ok()
+        .map(|s| s.iter().filter(|s| s.exited.is_none()).count())
+}
+
+/// Checks that the host at the socket can be shared with `ours`, replacing an
+/// idle one of another version when `replaceable`. `Err` is the message for the
+/// user.
+pub fn vet(
+    client: &HostClient,
+    socket: &Path,
+    ours: &str,
+    replaceable: bool,
+    wait: Duration,
+) -> Result<(), String> {
+    let Verdict::Mismatch(m) = skew::judge(client.hello_raw(), ours) else {
+        return Ok(());
+    };
+    let listed = client.list();
+    let mut running = running_sessions(&listed);
+    if replaceable && skew_action(&listed) == SkewAction::Replace {
+        match client.shutdown_if_idle() {
+            Ok(IdleShutdown::Stopping) => {
+                let start = std::time::Instant::now();
+                while start.elapsed() < wait {
+                    if skew::judge(client.hello_raw(), ours) == Verdict::NoHost {
+                        return Ok(());
+                    }
+                    thread::sleep(Duration::from_millis(50));
+                }
+                return Err(format!(
+                    "{} (it was idle and was asked to stop, but is still running)",
+                    skew::explain(&m, ours, socket, Some(0))
+                ));
+            }
+            Ok(IdleShutdown::Busy(n)) => running = Some(n),
+            _ => running = None,
+        }
+    }
+    Err(skew::explain(&m, ours, socket, running))
+}
+
 /// The spawn request. The host gives the child exactly this environment, so
 /// this is where it is built: the caller's, except that this program is the
 /// terminal, so `TERM` and friends are ours whatever the parent terminal said.
@@ -81,9 +198,13 @@ pub fn build_spec(
     env: impl IntoIterator<Item = (String, String)>,
 ) -> SpawnSpec {
     let argv = if new.argv.is_empty() {
-        vec![shell
+        let mut argv = vec![shell
             .filter(|s| !s.is_empty())
-            .unwrap_or_else(|| "/bin/sh".to_string())]
+            .unwrap_or_else(|| fallback_shell().to_string())];
+        if new.login {
+            argv.push("-l".to_string());
+        }
+        argv
     } else {
         new.argv.clone()
     };
@@ -217,13 +338,42 @@ mod tests {
 
     /// A stand-in for the host: answers `hello`, `resize` and `attach` in the
     /// real wire format, and records every request line and all input bytes.
+    /// What the stand-in answers to the calls the version check makes.
+    #[derive(Clone)]
+    struct Behaviour {
+        hello: String,
+        list: String,
+        /// Reply to `shutdown_if_idle`.
+        idle: String,
+        /// Whether an accepted shutdown takes the socket away, as a host that
+        /// exits does.
+        vanish: bool,
+    }
+
+    impl Default for Behaviour {
+        fn default() -> Self {
+            Behaviour {
+                hello: "{\"ok\":true,\"version\":3,\"min_client\":1}".into(),
+                list: "{\"ok\":true,\"sessions\":[]}".into(),
+                idle: "{\"ok\":true}".into(),
+                vanish: true,
+            }
+        }
+    }
+
     struct FakeHost {
         socket: PathBuf,
         lines: Arc<Mutex<Vec<String>>>,
         input: Arc<Mutex<Vec<u8>>>,
     }
 
-    fn serve(stream: UnixStream, lines: Arc<Mutex<Vec<String>>>, input: Arc<Mutex<Vec<u8>>>) {
+    fn serve(
+        stream: UnixStream,
+        lines: Arc<Mutex<Vec<String>>>,
+        input: Arc<Mutex<Vec<u8>>>,
+        behaviour: Behaviour,
+        socket: PathBuf,
+    ) {
         let Ok(clone) = stream.try_clone() else {
             return;
         };
@@ -236,7 +386,14 @@ mod tests {
         let line = line.trim().to_string();
         lines.lock().unwrap().push(line.clone());
         if line.contains("\"op\":\"hello\"") {
-            let _ = out.write_all(b"{\"ok\":true,\"version\":3,\"min_client\":1}\n");
+            let _ = out.write_all(format!("{}\n", behaviour.hello).as_bytes());
+        } else if line.contains("\"op\":\"list\"") {
+            let _ = out.write_all(format!("{}\n", behaviour.list).as_bytes());
+        } else if line.contains("\"op\":\"shutdown_if_idle\"") {
+            let _ = out.write_all(format!("{}\n", behaviour.idle).as_bytes());
+            if behaviour.vanish && behaviour.idle.contains("\"ok\":true") {
+                let _ = std::fs::remove_file(&socket);
+            }
         } else if line.contains("\"op\":\"resize\"") {
             let _ = out.write_all(b"{\"ok\":true}\n");
         } else if line.contains("\"op\":\"attach\"") {
@@ -259,6 +416,10 @@ mod tests {
     }
 
     fn fake_host() -> FakeHost {
+        fake_host_with(Behaviour::default())
+    }
+
+    fn fake_host_with(behaviour: Behaviour) -> FakeHost {
         static COUNTER: AtomicUsize = AtomicUsize::new(0);
         let socket = std::env::temp_dir().join(format!(
             "cta{}-{}.sock",
@@ -270,10 +431,12 @@ mod tests {
         let lines = Arc::new(Mutex::new(Vec::new()));
         let input = Arc::new(Mutex::new(Vec::new()));
         let (l, i) = (lines.clone(), input.clone());
+        let path = socket.clone();
         thread::spawn(move || {
             for stream in listener.incoming().flatten() {
                 let (l, i) = (l.clone(), i.clone());
-                thread::spawn(move || serve(stream, l, i));
+                let (b, s) = (behaviour.clone(), path.clone());
+                thread::spawn(move || serve(stream, l, i, b, s));
             }
         });
         FakeHost {
@@ -411,6 +574,7 @@ mod tests {
             linger_secs: 99,
             cols: 100,
             rows: 30,
+            login: false,
         };
         let env = vec![
             ("PATH".to_string(), "/bin".to_string()),
@@ -447,6 +611,7 @@ mod tests {
             linger_secs: 1,
             cols: 80,
             rows: 24,
+            login: false,
         };
         assert_eq!(
             build_spec(&new, Some("/bin/zsh".into()), vec![]).argv,
@@ -455,11 +620,131 @@ mod tests {
         new.argv.clear();
         assert_eq!(
             build_spec(&new, None, vec![]).argv,
-            vec!["/bin/sh".to_string()]
+            vec![fallback_shell().to_string()]
         );
         assert_eq!(
             build_spec(&new, Some(String::new()), vec![]).argv,
-            vec!["/bin/sh".to_string()]
+            vec![fallback_shell().to_string()]
         );
+    }
+
+    #[test]
+    fn a_launcher_start_gets_a_login_shell_and_the_home_directory() {
+        let mut new = NewSession {
+            argv: vec![],
+            cwd: PathBuf::from("/"),
+            key: None,
+            linger_secs: 1,
+            cols: 80,
+            rows: 24,
+            login: true,
+        };
+        assert_eq!(
+            build_spec(&new, Some("/bin/zsh".into()), vec![]).argv,
+            vec!["/bin/zsh".to_string(), "-l".to_string()]
+        );
+        // A command is run as asked, whatever the flag.
+        new.argv = vec!["claude".into()];
+        assert_eq!(
+            build_spec(&new, Some("/bin/zsh".into()), vec![]).argv,
+            vec!["claude".to_string()]
+        );
+        let home = Some("/Users/u".to_string());
+        assert_eq!(
+            default_cwd(PathBuf::from("/"), home.clone()),
+            PathBuf::from("/Users/u")
+        );
+        assert_eq!(
+            default_cwd(PathBuf::from("/work"), home.clone()),
+            PathBuf::from("/work")
+        );
+        assert_eq!(default_cwd(PathBuf::from("/"), None), PathBuf::from("/"));
+        assert_eq!(
+            default_cwd(PathBuf::from("/"), Some(String::new())),
+            PathBuf::from("/")
+        );
+    }
+
+    const DIGEST: &str = "0123456789abcdef";
+
+    fn behaviour_of(app_version: Option<&str>, list: &str) -> Behaviour {
+        let exe = app_version
+            .map(|v| format!(",\"exe\":\"/h/.canopy/pty-host/bin/{v}-{DIGEST}/canopy-pty-host\""))
+            .unwrap_or_default();
+        Behaviour {
+            hello: format!("{{\"ok\":true,\"version\":4,\"min_client\":1{exe}}}"),
+            list: format!("{{\"ok\":true,\"sessions\":{list}}}"),
+            ..Behaviour::default()
+        }
+    }
+
+    const NONE: Duration = Duration::from_millis(300);
+
+    #[test]
+    fn a_host_of_the_same_version_is_shared_untouched() {
+        let host = fake_host_with(behaviour_of(Some("0.5.15"), "[{\"id\":1}]"));
+        vet(&host.client(), &host.socket, "0.5.15", true, NONE).unwrap();
+        assert!(host.requests("shutdown_if_idle").is_empty());
+    }
+
+    #[test]
+    fn a_host_of_another_version_with_terminals_is_refused_with_a_clear_message() {
+        let host = fake_host_with(behaviour_of(
+            Some("0.5.14"),
+            "[{\"id\":1},{\"id\":2,\"exited\":0}]",
+        ));
+        let text = vet(&host.client(), &host.socket, "0.5.15", true, NONE).unwrap_err();
+        assert!(text.contains("Canopy 0.5.14"), "{text}");
+        assert!(text.contains("Canopy Terminal 0.5.15"), "{text}");
+        assert!(text.contains("1 terminal(s)"), "{text}");
+        assert!(text.contains("--socket"), "{text}");
+        // It runs a terminal, so it was not asked to stop.
+        assert!(host.requests("shutdown_if_idle").is_empty());
+    }
+
+    #[test]
+    fn an_idle_host_of_another_version_is_stopped_so_ours_can_start() {
+        let host = fake_host_with(behaviour_of(Some("0.5.14"), "[{\"id\":1,\"exited\":0}]"));
+        vet(&host.client(), &host.socket, "0.5.15", true, NONE).unwrap();
+        assert_eq!(host.requests("shutdown_if_idle").len(), 1);
+    }
+
+    #[test]
+    fn a_socket_the_user_named_is_never_replaced() {
+        let host = fake_host_with(behaviour_of(Some("0.5.14"), "[]"));
+        let text = vet(&host.client(), &host.socket, "0.5.15", false, NONE).unwrap_err();
+        assert!(text.contains("Canopy 0.5.14"), "{text}");
+        assert!(host.requests("shutdown_if_idle").is_empty());
+    }
+
+    #[test]
+    fn a_host_that_turns_out_busy_is_left_alone() {
+        let mut b = behaviour_of(Some("0.5.14"), "[]");
+        b.idle = "{\"ok\":false,\"error\":\"busy\",\"running\":2}".into();
+        let host = fake_host_with(b);
+        let text = vet(&host.client(), &host.socket, "0.5.15", true, NONE).unwrap_err();
+        assert!(text.contains("2 terminal(s)"), "{text}");
+    }
+
+    #[test]
+    fn a_host_that_will_not_stop_is_reported() {
+        let mut b = behaviour_of(Some("0.5.14"), "[]");
+        b.vanish = false;
+        let host = fake_host_with(b);
+        let text = vet(&host.client(), &host.socket, "0.5.15", true, NONE).unwrap_err();
+        assert!(text.contains("still running"), "{text}");
+    }
+
+    #[test]
+    fn a_host_too_old_to_name_its_origin_is_called_older() {
+        let host = fake_host_with(behaviour_of(None, "[{\"id\":1}]"));
+        let text = vet(&host.client(), &host.socket, "0.5.15", true, NONE).unwrap_err();
+        assert!(text.contains("an older Canopy"), "{text}");
+    }
+
+    #[test]
+    fn no_host_is_fine() {
+        let socket = std::env::temp_dir().join("cta-vet-nobody.sock");
+        vet(&HostClient::new(&socket), &socket, "0.5.15", true, NONE).unwrap();
     }
 }
