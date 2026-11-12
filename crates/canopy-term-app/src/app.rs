@@ -133,15 +133,25 @@ fn launch(o: &Options, r: &Resolved) -> Result<(), String> {
     use crate::{host, paths};
     use canopy_term_session::Session;
     use canopy_term_window::window;
+    use std::io::IsTerminal;
 
     let env = |key: &str| std::env::var(key).ok();
     let (socket, launchable) = paths::socket_path(o.socket.as_deref(), o.dev, &env)?;
-    let client = host::client_for(&socket, launchable);
+    let client = host::prepare_client(&socket, launchable)?;
     let opened = match &o.target {
         Target::New { argv, cwd, key } => {
+            // Started by the Finder or a launcher (not from a shell): the
+            // directory is `/` and there is no terminal. Only then is the shell a
+            // login shell, so a window the IDE opens keeps the environment it gave.
+            let from_launcher = cwd.is_none()
+                && !std::io::stdin().is_terminal()
+                && std::env::current_dir().is_ok_and(|d| d == std::path::Path::new("/"));
             let cwd = match cwd {
                 Some(dir) => std::path::absolute(dir).map_err(|e| e.to_string())?,
-                None => std::env::current_dir().map_err(|e| e.to_string())?,
+                None => host::default_cwd(
+                    std::env::current_dir().map_err(|e| e.to_string())?,
+                    std::env::var("HOME").ok(),
+                ),
             };
             let new = host::NewSession {
                 argv: argv.clone(),
@@ -150,6 +160,7 @@ fn launch(o: &Options, r: &Resolved) -> Result<(), String> {
                 linger_secs: o.linger_secs,
                 cols: o.cols,
                 rows: o.rows,
+                login: from_launcher,
             };
             // Entries that are not valid UTF-8 cannot go over the JSON wire.
             let vars = std::env::vars_os()

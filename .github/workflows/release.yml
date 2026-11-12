@@ -12,10 +12,21 @@
 # app next to the PTY host, and on macOS signed separately from the app; see
 # the verification steps in the build job. Not on Windows.
 #
+# Standalone Canopy Terminal (beta): the same canopy-term-app, also published on
+# its own as extra release assets for macOS Apple silicon (a signed, notarized,
+# stapled `Canopy Terminal.app` in a zip) and Linux x86_64 (a tar.gz), each with
+# a .sha256. scripts/package-term-app.mjs builds them in the build matrix jobs
+# from the binaries prepare-sidecar.mjs already built; they are uploaded to the
+# draft only for tags. Windows has none (no host launch there).
+#
 # Terminal app dry run: run it by hand with `term_app_dry_run` ticked to prove
 # that canopy-term-app and canopy-pty-host build for every platform the release
 # will bundle them on. Only the `term-app-dry-run` job runs; no tag, no draft,
 # no signing, no upload.
+#
+# Standalone dry run: tick `term_app_standalone_dry_run` to build and package
+# both standalone downloads WITHOUT secrets (unsigned, not notarized, and the
+# job says so) and keep them as an artifact. Only that job runs.
 name: release
 
 on:
@@ -36,6 +47,10 @@ on:
         description: 'Dry run: only build and verify canopy-term-app (no tag, no signing, no publish; the release jobs are skipped)'
         type: boolean
         default: false
+      term_app_standalone_dry_run:
+        description: 'Dry run: only build and package the standalone Canopy Terminal downloads, UNSIGNED and NOT notarized (no tag, no secrets, no publish; the release jobs are skipped)'
+        type: boolean
+        default: false
 
 concurrency:
   group: release-${{ github.ref }}
@@ -48,7 +63,7 @@ permissions:
 jobs:
   preflight:
     # inputs.* is empty on a tag push, so this is true there.
-    if: ${{ !inputs.term_app_dry_run }}
+    if: ${{ !inputs.term_app_dry_run && !inputs.term_app_standalone_dry_run }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -56,7 +71,7 @@ jobs:
         with:
           node-version: 22
       - name: Release boundary regression checks
-        run: node --test scripts/release-assets.test.mjs scripts/workspace-host-release.test.mjs scripts/workspace-host-fingerprint.test.mjs
+        run: node --test scripts/release-assets.test.mjs scripts/package-term-app.test.mjs scripts/workspace-host-release.test.mjs scripts/workspace-host-fingerprint.test.mjs
       # Also creates the one draft release, before the build matrix starts, so
       # the jobs' uploads cannot race into separate drafts. Needs this
       # version's docs/releases/<version>.md, so missing notes fail here.
@@ -156,6 +171,112 @@ jobs:
           else
             "$app" --version
           fi
+
+  # Proves the standalone downloads can be built and packaged, without secrets
+  # and without a release. workflow_dispatch only, with
+  # term_app_standalone_dry_run ticked. Nothing is signed or notarized here (the
+  # job summary says so), so Developer ID signing, notarization, stapling and
+  # Gatekeeper are NOT exercised: only the build, the package layout, the
+  # archives, their checksums and that the packaged programs start.
+  term-app-standalone-dry-run:
+    name: Standalone terminal dry run (${{ matrix.asset }})
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.term_app_standalone_dry_run }}
+    runs-on: ${{ matrix.platform }}
+    timeout-minutes: 60
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: macos-15
+            target: aarch64-apple-darwin
+            asset: Canopy-Terminal-macos-arm64.zip
+          - platform: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+            asset: Canopy-Terminal-linux-x86_64.tar.gz
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: ./.github/actions/install-zig
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            ./src-tauri -> target
+            ./crates/canopy-term-app -> target
+          key: release-term-app-${{ matrix.target }}
+      - name: Packaging and release-gate tests
+        run: node --test scripts/package-term-app.test.mjs scripts/release-assets.test.mjs
+      - name: Build canopy-term-app and canopy-pty-host
+        run: |
+          cargo build --locked --release --target ${{ matrix.target }} --manifest-path crates/canopy-term-app/Cargo.toml
+          cargo build --locked --release --target ${{ matrix.target }} --manifest-path crates/canopy-pty-host/Cargo.toml --bin canopy-pty-host
+      - name: Package the standalone download (unsigned)
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "::notice::UNSIGNED, NOT NOTARIZED: this is a dry run without secrets."
+          node scripts/package-term-app.mjs \
+            --target ${{ matrix.target }} \
+            --version "$(node -p 'require("./package.json").version')" \
+            --term-app "crates/canopy-term-app/target/${{ matrix.target }}/release/canopy-term-app" \
+            --host "src-tauri/target/${{ matrix.target }}/release/canopy-pty-host" \
+            --out "$RUNNER_TEMP/canopy-terminal"
+      - name: Verify the package
+        shell: bash
+        run: |
+          set -euo pipefail
+          out="$RUNNER_TEMP/canopy-terminal"
+          ls -l "$out"
+          [ -s "$out/${{ matrix.asset }}" ] && [ -s "$out/${{ matrix.asset }}.sha256" ]
+          if [ "$RUNNER_OS" = "macOS" ]; then (cd "$out" && shasum -a 256 -c "${{ matrix.asset }}.sha256"); else (cd "$out" && sha256sum -c "${{ matrix.asset }}.sha256"); fi
+          x="$(mktemp -d)"
+          if [ "$RUNNER_OS" = "macOS" ]; then
+            ditto -x -k "$out/${{ matrix.asset }}" "$x"
+            app="$x/Canopy Terminal.app"
+            plutil -lint "$app/Contents/Info.plist"
+            [ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$app/Contents/Info.plist")" = "app.causeconnect.canopy.terminal" ]
+            for b in canopy-term-app canopy-pty-host; do
+              [ "$(lipo -archs "$app/Contents/MacOS/$b")" = "arm64" ]
+            done
+            [ -s "$app/Contents/Resources/icon.icns" ]
+            # The dry run must really be unsigned, not accidentally half signed.
+            if codesign -dv "$app" 2>/dev/null; then echo "::warning::the dry-run app carries a signature (expected none; arm64 linkers ad-hoc sign)"; fi
+            "$app/Contents/MacOS/canopy-term-app" --version
+          else
+            tar -xzf "$out/${{ matrix.asset }}" -C "$x"
+            dir="$(ls -d "$x"/canopy-terminal-*-linux-x86_64)"
+            ls -l "$dir"
+            for f in canopy-term-app canopy-pty-host README.txt LICENSE.md; do [ -s "$dir/$f" ]; done
+            file "$dir/canopy-term-app" "$dir/canopy-pty-host" | grep -c "x86-64" | grep -qx 2
+            "$dir/canopy-term-app" --version
+          fi
+      - name: Sizes and what was not proven
+        shell: bash
+        run: |
+          out="$RUNNER_TEMP/canopy-terminal"
+          {
+            echo "### Standalone terminal dry run: ${{ matrix.target }}"
+            echo
+            echo "UNSIGNED and NOT NOTARIZED (no secrets in a dry run). Signing, notarization, stapling and the Gatekeeper first launch are not proven by this run."
+            echo
+            echo '| asset | bytes |'
+            echo '| --- | --- |'
+            for f in "$out"/*; do echo "| $(basename "$f") | $(wc -c < "$f" | tr -d ' ') |"; done
+            echo "| canopy-term-app (binary) | $(wc -c < crates/canopy-term-app/target/${{ matrix.target }}/release/canopy-term-app | tr -d ' ') |"
+            echo "| canopy-pty-host (binary) | $(wc -c < src-tauri/target/${{ matrix.target }}/release/canopy-pty-host | tr -d ' ') |"
+          } >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: standalone-terminal-dry-run-${{ matrix.target }}
+          path: ${{ runner.temp }}/canopy-terminal/*
+          if-no-files-found: error
+          retention-days: 7
 
   build:
     needs: preflight
@@ -544,6 +665,170 @@ jobs:
           # No display on the runner; this checks it loads and parses arguments.
           "$tmp/usr/bin/canopy-term-app" --version
           rm -rf "$tmp"
+
+      # Standalone Canopy Terminal downloads (macOS arm64 and Linux x86_64 only;
+      # Intel and Windows have none). The binaries are the ones prepare-sidecar
+      # built and staged for the IDE (unsigned copies in src-tauri/binaries), so
+      # the standalone and the bundled terminal are the same build.
+      #
+      # macOS: signed with the same Developer ID as the app (hardened runtime,
+      # timestamp, no entitlements, scripts/package-term-app.mjs), notarized and
+      # stapled whenever notarization is on. A tag build must be signed and
+      # notarized or this fails; a manual run without APPLE_CERTIFICATE builds it
+      # unsigned (and says so), one with skip_notarization signs but does not
+      # notarize (disclose it in the notes, as for the IDE).
+      - name: Package the standalone Canopy Terminal
+        if: matrix.target == 'aarch64-apple-darwin' || matrix.target == 'x86_64-unknown-linux-gnu'
+        shell: bash
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ !inputs.skip_notarization && secrets.APPLE_ID || '' }}
+          APPLE_PASSWORD: ${{ !inputs.skip_notarization && secrets.APPLE_PASSWORD || '' }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          set -euo pipefail
+          flags=()
+          if [ "${{ matrix.target }}" = "aarch64-apple-darwin" ]; then
+            if [ -n "$APPLE_CERTIFICATE" ]; then
+              [ -n "$APPLE_SIGNING_IDENTITY" ] || { echo "::error::APPLE_CERTIFICATE is set but APPLE_SIGNING_IDENTITY is not."; exit 1; }
+              flags+=(--sign)
+              if [ -n "$APPLE_ID" ] && [ -n "$APPLE_PASSWORD" ] && [ -n "$APPLE_TEAM_ID" ]; then
+                flags+=(--notarize)
+              elif [ "${{ github.ref_type }}" = "tag" ]; then
+                echo "::error::a tag build must notarize the standalone Canopy Terminal; APPLE_ID, APPLE_PASSWORD and APPLE_TEAM_ID are required."
+                exit 1
+              else
+                echo "::warning::the standalone Canopy Terminal is signed but NOT notarized in this run."
+              fi
+            elif [ "${{ github.ref_type }}" = "tag" ]; then
+              echo "::error::a tag build must sign the standalone Canopy Terminal; APPLE_CERTIFICATE is not set."
+              exit 1
+            else
+              echo "::warning::APPLE_CERTIFICATE not set: the standalone Canopy Terminal is UNSIGNED and NOT notarized in this run."
+            fi
+          fi
+          node scripts/package-term-app.mjs \
+            --target "${{ matrix.target }}" \
+            --version "$(node -p 'require("./package.json").version')" \
+            --term-app "src-tauri/binaries/canopy-term-app-${{ matrix.target }}" \
+            --host "src-tauri/binaries/canopy-pty-host-${{ matrix.target }}" \
+            --out "$RUNNER_TEMP/canopy-terminal" \
+            ${flags[@]+"${flags[@]}"}
+          # Remember what this run did for the verify step. (An empty array is
+          # an unbound variable to the macOS runner's bash 3.2 under `set -u`,
+          # hence the ${flags[@]+...} form.)
+          echo "flags: ${flags[*]-}" > "$RUNNER_TEMP/canopy-terminal-flags"
+
+      # Checks the shipped zip, not the staging tree: it is unpacked and judged
+      # the way a user's Mac will judge it. Signature, hardened runtime, secure
+      # timestamp, Developer ID, zero entitlements on both programs, a sibling
+      # bundle id; and, when notarized, a valid stapled ticket and a Gatekeeper
+      # assessment (`spctl`) that says "Notarized Developer ID".
+      - name: Verify the standalone Canopy Terminal (macOS)
+        if: matrix.target == 'aarch64-apple-darwin'
+        shell: bash
+        run: |
+          set -euo pipefail
+          out="$RUNNER_TEMP/canopy-terminal"
+          zip="$out/Canopy-Terminal-macos-arm64.zip"
+          ls -l "$out"
+          [ -s "$zip" ] || { echo "::error::$zip is missing."; exit 1; }
+          (cd "$out" && shasum -a 256 -c Canopy-Terminal-macos-arm64.zip.sha256)
+          x="$(mktemp -d)"
+          ditto -x -k "$zip" "$x"
+          app="$x/Canopy Terminal.app"
+          [ -d "$app" ] || { echo "::error::Canopy Terminal.app is not in the zip."; exit 1; }
+          plutil -lint "$app/Contents/Info.plist"
+          id="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$app/Contents/Info.plist")"
+          [ "$id" = "app.causeconnect.canopy.terminal" ] || { echo "::error::unexpected bundle id $id"; exit 1; }
+          [ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleName' "$app/Contents/Info.plist")" = "Canopy Terminal" ]
+          want_version="$(node -p 'require("./package.json").version')"
+          [ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$app/Contents/Info.plist")" = "$want_version" ]
+          [ -s "$app/Contents/Resources/icon.icns" ] || { echo "::error::icon is missing."; exit 1; }
+          for b in canopy-term-app canopy-pty-host; do
+            [ -x "$app/Contents/MacOS/$b" ] || { echo "::error::$b is missing from the app."; exit 1; }
+            [ "$(lipo -archs "$app/Contents/MacOS/$b")" = "arm64" ] || { echo "::error::$b is not arm64."; exit 1; }
+          done
+          out_version="$("$app/Contents/MacOS/canopy-term-app" --version 2>&1)" || { echo "::error::--version failed: $out_version"; exit 1; }
+          echo "canopy-term-app --version: $out_version"
+          case "$out_version" in *"$want_version"*) ;; *) echo "::warning::--version does not mention $want_version." ;; esac
+          if [ -z "${APPLE_CERTIFICATE:-}" ]; then
+            echo "APPLE_CERTIFICATE not set: unsigned build, signature not checked."
+            exit 0
+          fi
+          codesign --verify --strict --verbose=2 "$app"
+          codesign --verify --strict --verbose=2 "$app/Contents/MacOS/canopy-pty-host"
+          for target in "$app" "$app/Contents/MacOS/canopy-pty-host"; do
+            info="$(codesign -dvvv "$target" 2>&1)"
+            echo "$info" | grep -E "Identifier=|Authority=|Timestamp=|flags=" || true
+            echo "$info" | grep -E "flags=.*\(runtime\)" >/dev/null \
+              || { echo "::error::$target is not signed with the hardened runtime."; exit 1; }
+            echo "$info" | grep -E "^Timestamp=" >/dev/null \
+              || { echo "::error::$target has no secure timestamp."; exit 1; }
+            echo "$info" | grep -E "^Authority=Developer ID Application" >/dev/null \
+              || { echo "::error::$target is not signed with a Developer ID Application identity."; exit 1; }
+            ents="$(codesign -d --entitlements - --xml "$target")" \
+              || { echo "::error::could not read the entitlements of $target."; exit 1; }
+            echo "$ents"
+            if echo "$ents" | grep -q "<key>"; then
+              echo "::error::$target carries entitlements; it must carry none."
+              exit 1
+            fi
+          done
+          if grep -q -- '--notarize' "$RUNNER_TEMP/canopy-terminal-flags"; then
+            xcrun stapler validate "$app"
+            spctl --assess --type execute --verbose=4 "$app" 2>&1 | tee "$RUNNER_TEMP/spctl.txt"
+            grep -q "source=Notarized Developer ID" "$RUNNER_TEMP/spctl.txt" \
+              || { echo "::error::Gatekeeper did not report a notarized Developer ID app."; exit 1; }
+          else
+            echo "::warning::not notarized in this run: stapler and spctl were not checked."
+          fi
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+
+      - name: Verify the standalone Canopy Terminal (Linux)
+        if: matrix.target == 'x86_64-unknown-linux-gnu'
+        shell: bash
+        run: |
+          set -euo pipefail
+          out="$RUNNER_TEMP/canopy-terminal"
+          tgz="$out/Canopy-Terminal-linux-x86_64.tar.gz"
+          ls -l "$out"
+          [ -s "$tgz" ] || { echo "::error::$tgz is missing."; exit 1; }
+          (cd "$out" && sha256sum -c Canopy-Terminal-linux-x86_64.tar.gz.sha256)
+          x="$(mktemp -d)"
+          tar -xzf "$tgz" -C "$x"
+          dir="$(ls -d "$x"/canopy-terminal-*-linux-x86_64)"
+          for f in canopy-term-app canopy-pty-host README.txt LICENSE.md; do
+            [ -s "$dir/$f" ] || { echo "::error::$f is missing from the tarball."; exit 1; }
+          done
+          file "$dir/canopy-term-app" "$dir/canopy-pty-host"
+          [ "$(file "$dir/canopy-term-app" "$dir/canopy-pty-host" | grep -c x86-64)" = 2 ] \
+            || { echo "::error::a program in the tarball is not x86-64."; exit 1; }
+          "$dir/canopy-term-app" --version
+
+      - name: Upload the standalone Canopy Terminal downloads
+        if: github.ref_type == 'tag' && (matrix.target == 'aarch64-apple-darwin' || matrix.target == 'x86_64-unknown-linux-gnu')
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          out="$RUNNER_TEMP/canopy-terminal"
+          ls -l "$out"
+          # The release is still a draft; gh resolves drafts by tag name.
+          # --clobber makes a re-run of the workflow idempotent.
+          gh release upload "${{ github.ref_name }}" "$out"/* --clobber
+
+      - name: Preserve the standalone Canopy Terminal downloads
+        if: matrix.target == 'aarch64-apple-darwin' || matrix.target == 'x86_64-unknown-linux-gnu'
+        uses: actions/upload-artifact@v4
+        with:
+          name: canopy-terminal-${{ matrix.target }}-${{ github.sha }}
+          path: ${{ runner.temp }}/canopy-terminal/*
+          if-no-files-found: error
+          retention-days: 30
 
       # `tauri build` exits 0 even when signing fails ("a public key has been
       # found, but no private key"), so a missing or bad secret would publish a

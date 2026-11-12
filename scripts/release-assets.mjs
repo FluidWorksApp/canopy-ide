@@ -5,6 +5,19 @@ import {execFileSync} from 'node:child_process';
 import {createHash} from 'node:crypto';
 import {fileURLToPath} from 'node:url';
 
+// Standalone Canopy Terminal downloads (macOS Apple silicon and Linux x86_64;
+// Windows has no host launch yet). Stable names only, like the installer
+// aliases; each has a `<name>.sha256` beside it. Keep in lockstep with
+// scripts/package-term-app.mjs and the release workflow.
+export const TERMINAL_ASSETS=['Canopy-Terminal-macos-arm64.zip','Canopy-Terminal-linux-x86_64.tar.gz'];
+export const terminalAssetNames=()=>TERMINAL_ASSETS.flatMap(n=>[n,n+'.sha256']);
+// A `.sha256` asset must hold the digest of the asset it names, in
+// `sha256sum` format (`<hex>  <name>`), so a user's `shasum -c` works.
+export function checkSha256File(text,name,digest){
+ const m=/^([a-f0-9]{64})  (\S+)\n?$/.exec(String(text??''));
+ if(!m||m[2]!==name)throw Error('Malformed checksum file for '+name);
+ if('sha256:'+m[1]!==digest)throw Error('Checksum file does not match '+name);
+}
 export function expectedRelease(version) {
  if(!/^\d+\.\d+\.\d+$/.test(version))throw Error('Invalid release version');
  const payloads={
@@ -17,7 +30,7 @@ export function expectedRelease(version) {
   'windows-x86_64':`Canopy_${version}_x64-setup.exe`,
   'windows-x86_64-nsis':`Canopy_${version}_x64-setup.exe`,
  };
- const installers=[`Canopy_${version}_aarch64.dmg`,`Canopy_${version}_x64.dmg`,'Canopy-macos-arm64.dmg','Canopy-macos-intel.dmg','Canopy-linux-x86_64.AppImage','Canopy-linux-x86_64.deb','Canopy-linux-x86_64.rpm','Canopy-windows-x86_64-setup.exe'];
+ const installers=[`Canopy_${version}_aarch64.dmg`,`Canopy_${version}_x64.dmg`,'Canopy-macos-arm64.dmg','Canopy-macos-intel.dmg','Canopy-linux-x86_64.AppImage','Canopy-linux-x86_64.deb','Canopy-linux-x86_64.rpm','Canopy-windows-x86_64-setup.exe',...terminalAssetNames()];
  return {payloads,names:[...new Set([...Object.values(payloads).flatMap(n=>[n,n+'.sig']),...installers])]};
 }
 export function requireDraft(release) {
@@ -78,6 +91,7 @@ async function main(){
    gh('release','download',tag,'--repo','FluidWorksApp/canopy-ide','--pattern',name,'--dir',stage);
    const data=fs.readFileSync(path.join(stage,name));
    if('sha256:'+createHash('sha256').update(data).digest('hex')!==assets.get(name).digest)throw Error('Asset digest mismatch: '+name);
+   if(TERMINAL_ASSETS.includes(name.replace(/\.sha256$/,''))&&name.endsWith('.sha256')){const base=name.slice(0,-7);checkSha256File(data.toString('utf8'),base,assets.get(base).digest);}
   }
   for(const name of new Set(Object.values(expected.payloads))){
    const encoded=fs.readFileSync(path.join(stage,name+'.sig'),'utf8').trim(),sig=path.join(stage,name+'.minisig');

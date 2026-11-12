@@ -1,5 +1,5 @@
 import {execFileSync} from 'node:child_process';import test from 'node:test';import assert from 'node:assert/strict';
-import {expectedRelease,requireDraft,requireAssets,releaseManifest,requireReleaseTag,releaseMetadataQuery,parseReleaseMetadata,draftCreateArgs} from './release-assets.mjs';
+import {expectedRelease,requireDraft,requireAssets,releaseManifest,requireReleaseTag,releaseMetadataQuery,parseReleaseMetadata,draftCreateArgs,TERMINAL_ASSETS,terminalAssetNames,checkSha256File} from './release-assets.mjs';
 const version='0.4.1';
 const complete=()=>({draft:true,immutable:false,assets:expectedRelease(version).names.map(name=>({name,state:'uploaded',size:42,digest:'sha256:'+'a'.repeat(64)}))});
 test('published or immutable targets are rejected before building or uploading',()=>{assert.doesNotThrow(()=>requireDraft(undefined));assert.throws(()=>requireDraft({...complete(),draft:false}),/published/);assert.throws(()=>requireDraft({...complete(),immutable:true}),/immutable/);});
@@ -40,4 +40,39 @@ test('preflight creates the single draft every build uploads into',()=>{
  assert.deepEqual(draftCreateArgs('v0.4.4','0.4.4','/r/docs/releases/0.4.4.md'),['release','create','v0.4.4','--repo','FluidWorksApp/canopy-ide','--draft','--verify-tag','--title','Canopy 0.4.4','--notes-file','/r/docs/releases/0.4.4.md']);
  assert.equal(draftCreateArgs('v0.4.4-rebuild.1','0.4.4','n.md')[2],'v0.4.4-rebuild.1');
  assert.throws(()=>draftCreateArgs('v0.4.5','0.4.4','n.md'),/disagree/);
+});
+
+test('the standalone terminal downloads and their checksums are required before finalize',()=>{
+ const {expected}=requireAssets(complete(),version);
+ assert.deepEqual(terminalAssetNames(),['Canopy-Terminal-macos-arm64.zip','Canopy-Terminal-macos-arm64.zip.sha256','Canopy-Terminal-linux-x86_64.tar.gz','Canopy-Terminal-linux-x86_64.tar.gz.sha256']);
+ for(const n of terminalAssetNames()){
+  assert.ok(expected.names.includes(n),n);
+  const r=complete();r.assets=r.assets.filter(a=>a.name!==n);assert.throws(()=>requireAssets(r,version),new RegExp('Incomplete release assets: .*'+n.replaceAll('.','\\.')));
+  const empty=complete();empty.assets.find(a=>a.name===n).size=0;assert.throws(()=>requireAssets(empty,version),/Incomplete release assets/);
+  const nodigest=complete();delete nodigest.assets.find(a=>a.name===n).digest;assert.throws(()=>requireAssets(nodigest,version),/Missing asset digest/);
+ }
+ // They are downloads, not updater payloads: nothing about them reaches latest.json.
+ assert.ok(!Object.values(expected.payloads).some(n=>n.startsWith('Canopy-Terminal')));
+ const signatures=new Map(Object.values(expected.payloads).map(n=>[n,'s']));
+ assert.ok(!JSON.stringify(releaseManifest(version,'',expected.payloads,signatures)).includes('Canopy-Terminal'));
+ // Windows has no standalone terminal.
+ assert.ok(!expected.names.some(n=>n.startsWith('Canopy-Terminal')&&/windows|\.exe/.test(n)));
+});
+
+test('a standalone checksum file must be sha256sum format and match the asset it names',()=>{
+ const hex='b'.repeat(64),digest='sha256:'+hex,name=TERMINAL_ASSETS[0];
+ assert.doesNotThrow(()=>checkSha256File(`${hex}  ${name}\n`,name,digest));
+ assert.doesNotThrow(()=>checkSha256File(`${hex}  ${name}`,name,digest));
+ assert.throws(()=>checkSha256File(`${'c'.repeat(64)}  ${name}\n`,name,digest),/does not match/);
+ assert.throws(()=>checkSha256File(`${hex}  other.zip\n`,name,digest),/Malformed/);
+ assert.throws(()=>checkSha256File(`${hex} ${name}\n`,name,digest),/Malformed/);
+ assert.throws(()=>checkSha256File('',name,digest),/Malformed/);
+ assert.throws(()=>checkSha256File(undefined,name,digest),/Malformed/);
+});
+
+test('the stable-name aliases of the installers stay required (preflight keeps rejecting published targets)',()=>{
+ const {expected}=requireAssets(complete(),version);
+ for(const n of ['Canopy-macos-arm64.dmg','Canopy-macos-intel.dmg','Canopy-linux-x86_64.AppImage','Canopy-windows-x86_64-setup.exe'])assert.ok(expected.names.includes(n),n);
+ assert.throws(()=>requireDraft({...complete(),draft:false}),/published/);
+ assert.throws(()=>requireAssets({...complete(),draft:false},version),/published/);
 });
