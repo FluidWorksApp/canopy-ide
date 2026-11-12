@@ -706,6 +706,7 @@ dependencies = [
 name = "canopy"
 version = "0.5.15"
 dependencies = [
+ "anyhow",
  "argon2",
  "axum",
  "base64 0.22.1",

@@ -320,7 +320,10 @@ pub async fn spot_ingest(
     let live: Vec<(u32, String, String)> = if want_terminals {
         let sessions = ptys.sessions();
         let map = sessions.lock().unwrap();
+        // Not a window onto another machine's terminal: its output is not
+        // this machine's to index.
         map.values()
+            .filter(|s| !ptys.is_proxy(s.id))
             .map(|s| (s.id, s.title.lock().unwrap().clone(), s.cwd.clone()))
             .collect()
     } else {

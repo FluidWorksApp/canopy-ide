@@ -88,6 +88,7 @@ mod system_one;
 mod t3_client;
 mod t3_socket;
 mod tailnet;
+mod tailnet_client;
 mod tasks;
 mod tunnel;
 mod turn_rollback;
@@ -1201,6 +1202,10 @@ pub fn run() {
             tailnet::tailscale_allow_set,
             tailnet::tailscale_allowed_list,
             tailnet::tailscale_open_app,
+            tailnet_client::tailnet_remote_list,
+            tailnet_client::tailnet_remote_open,
+            tailnet_client::tailnet_remote_close,
+            tailnet_client::tailnet_remote_reconnect,
             dictation::dictation_models,
             dictation::dictation_status,
             dictation::dictation_download,

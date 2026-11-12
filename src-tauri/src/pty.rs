@@ -524,6 +524,35 @@ pub struct PtyManager {
     /// Set by "Quit and Stop All": this quit stops hosted terminals too,
     /// instead of leaving them running for a later launch to adopt.
     stop_hosted_on_quit: AtomicBool,
+    /// Sessions that are only a window onto a terminal on another machine
+    /// (tailnet_client.rs). Keyed by session id; an entry goes when its session
+    /// ends. Such a session has no local process, so it is kept out of every
+    /// listing and lookup that would treat its working directory or output as
+    /// something on this machine.
+    proxies: Arc<Mutex<HashMap<u32, Arc<dyn ProxyLink>>>>,
+}
+
+/// The control surface of a proxy session's link to another machine. Closing
+/// only lets go of the link: the process over there is never touched.
+pub trait ProxyLink: Send + Sync {
+    /// Drop the link. The session ends with it.
+    fn close(&self);
+    /// Try again after the link gave up ("lost").
+    fn reconnect(&self);
+}
+
+/// What a proxy session is made of, built by `tailnet_client` (the same pattern
+/// as a hosted session's `HostMaster`: a `MasterPty` that is not a local tty).
+pub(crate) struct ProxyParts {
+    pub child: Box<dyn Child + Send + Sync>,
+    pub master: Box<dyn MasterPty + Send>,
+    pub reader: Box<dyn Read + Send>,
+    pub writer: Box<dyn Write + Send>,
+    pub link: Arc<dyn ProxyLink>,
+    pub cols: u16,
+    pub rows: u16,
+    pub cwd: String,
+    pub title: String,
 }
 
 impl Default for PtyManager {
@@ -541,6 +570,7 @@ impl Default for PtyManager {
             renderer_gate: Mutex::new(()),
             desktop_delivery_gate: Arc::new(RwLock::new(())),
             stop_hosted_on_quit: AtomicBool::new(false),
+            proxies: Default::default(),
         }
     }
 }
@@ -863,10 +893,12 @@ impl PtyManager {
     /// answers the same question but builds a whole record per session, and the
     /// mesh gate calls this on an HTTP path.
     pub fn live_cwds(&self) -> Vec<String> {
+        let proxies = self.proxy_ids();
         self.sessions
             .lock()
             .unwrap()
             .values()
+            .filter(|s| !proxies.contains(&s.id))
             .map(|s| s.cwd.clone())
             .collect()
     }
@@ -875,11 +907,16 @@ impl PtyManager {
     /// agents are attachable authoritatively — without waiting on (or trusting)
     /// the periodic `pty:stats` event.
     pub fn summaries(&self) -> Vec<PtySummary> {
+        // A window onto another machine's terminal is not a terminal of this
+        // one: listing it would have a reloaded page rebuild its tab without
+        // the link, and would offer it to anyone this machine shares with.
+        let proxies = self.proxy_ids();
         let mut summaries = self
             .sessions
             .lock()
             .unwrap()
             .values()
+            .filter(|s| !proxies.contains(&s.id))
             .map(|s| {
                 let (cols, rows) = *s.size.lock().unwrap();
                 let execution_context = s.execution_context.clone();
@@ -907,6 +944,92 @@ impl PtyManager {
             .collect::<Vec<_>>();
         summaries.sort_by_key(|s| s.id);
         summaries
+    }
+
+    /// Copied out so the sessions lock is never taken while this one is held.
+    fn proxy_ids(&self) -> std::collections::HashSet<u32> {
+        self.proxies.lock().unwrap().keys().copied().collect()
+    }
+
+    /// Whether `id` is a window onto a terminal on another machine.
+    pub fn is_proxy(&self, id: u32) -> bool {
+        self.proxies.lock().unwrap().contains_key(&id)
+    }
+
+    /// The link behind a proxy session.
+    pub fn proxy(&self, id: u32) -> Option<Arc<dyn ProxyLink>> {
+        self.proxies.lock().unwrap().get(&id).cloned()
+    }
+
+    /// Let go of every link to another machine (a replaced page has lost the
+    /// tabs that showed them). The processes over there keep running.
+    pub fn close_proxies(&self) {
+        let links: Vec<Arc<dyn ProxyLink>> =
+            self.proxies.lock().unwrap().values().cloned().collect();
+        for link in links {
+            link.close();
+        }
+    }
+
+    pub(crate) fn allocate_proxy_identity(&self) -> Result<(u32, u64), String> {
+        self.allocate_session_identity()
+    }
+
+    /// Register a session whose terminal lives on another machine. It starts
+    /// exactly like a spawned one (reader, writer and flusher threads, replay
+    /// ring) but has no local process: `pid` is None, so no signal is ever sent
+    /// from here and the process monitor skips it. It is never announced as
+    /// `pty:spawned`; the caller opens the tab itself.
+    pub(crate) fn start_proxy_session<R: tauri::Runtime>(
+        &self,
+        app: AppHandle<R>,
+        id: u32,
+        session_generation: u64,
+        parts: ProxyParts,
+    ) -> Result<SpawnResult, String> {
+        let ProxyParts {
+            child,
+            master,
+            reader,
+            writer,
+            link,
+            cols,
+            rows,
+            cwd,
+            title,
+        } = parts;
+        // Before the session can exist, so its end always finds the entry.
+        self.proxies.lock().unwrap().insert(id, link);
+        let started = self.start_session(
+            app,
+            SessionParts {
+                id,
+                session_generation,
+                pid: None,
+                kind: SessionKind::Remote,
+                execution_context: None,
+                recovered_run: false,
+                recovered_command: None,
+                run_command_id: None,
+                shell: title,
+                cwd,
+                child,
+                master_box: master,
+                reader,
+                writer,
+                desktop: None,
+                high_water: None,
+                cols,
+                rows,
+                history: Vec::new(),
+                history_start: 0,
+                survives_quit: false,
+            },
+        );
+        if started.is_err() {
+            self.proxies.lock().unwrap().remove(&id);
+        }
+        started
     }
 
     /// Make this JavaScript page authoritative and cut every stream still
@@ -1081,6 +1204,11 @@ impl PtyManager {
     /// The receiver is bounded and lossy — on `Lagged` the caller re-`attach`es
     /// for a fresh snapshot rather than expecting every byte.
     pub fn attach(&self, id: u32) -> Option<(u16, u16, Vec<u8>, broadcast::Receiver<PtyEvent>)> {
+        // Never a second hop: whoever attaches here (the portal, a peer on the
+        // tailnet) gets this machine's own terminals, not another machine's.
+        if self.is_proxy(id) {
+            return None;
+        }
         let session = self.get(id)?;
         let ring = session.scrollback.lock().unwrap();
         let rx = session.subscribers.subscribe();
@@ -2822,6 +2950,7 @@ impl PtyManager {
         {
             let session = session.clone();
             let sessions = state.sessions.clone();
+            let proxies = state.proxies.clone();
             let reaped = state.reaped.clone();
             let exits = state.exits.clone();
             let next_exit_sequence = state.next_exit_sequence.clone();
@@ -2889,6 +3018,7 @@ impl PtyManager {
                     // woken by the pty:exit below can still read what ran.
                     reap_output(&reaped, session.id, &session);
                     sessions.lock().unwrap().remove(&session.id);
+                    proxies.lock().unwrap().remove(&session.id);
                     if let Some(containment) =
                         app.try_state::<crate::containment::ContainmentManager>()
                     {
@@ -3018,6 +3148,8 @@ pub fn pty_renderer_register(
     if let Some(error) = crate::selftest::renderer_registration_failure() {
         return Err(error);
     }
+    // A replaced page has lost its tabs, and a link is only ever shown by one.
+    state.close_proxies();
     let registration = state.register_renderer();
     app.state::<crate::browser::BrowserManager>()
         .renderer_registered(&app, registration.generation);
