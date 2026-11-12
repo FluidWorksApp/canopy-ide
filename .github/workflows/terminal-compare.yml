@@ -8,6 +8,7 @@ on:
     paths:
       - "bench/terminal-compare/**"
       - ".github/workflows/terminal-compare.yml"
+      - ".github/actions/ghostty-vendor/**"
 
 permissions:
   contents: read
@@ -59,6 +60,9 @@ jobs:
           echo "$RUNNER_TEMP/zig" >> "$GITHUB_PATH"
 
       - uses: dtolnay/rust-toolchain@1.92.0
+
+      - name: Ghostty source and Zig package cache (no network clone in the build)
+        uses: ./.github/actions/ghostty-vendor
 
       - uses: swatinem/rust-cache@v2.8.0
         with:

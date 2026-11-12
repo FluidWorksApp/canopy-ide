@@ -13,6 +13,7 @@ on:
       - 'crates/canopy-term-core/**'
       - 'crates/perf-compare/**'
       - '.github/workflows/perf-compare.yml'
+      - '.github/actions/ghostty-vendor/**'
 
 permissions:
   contents: read
@@ -64,6 +65,9 @@ jobs:
           echo "RESULT runner os=$(uname -s) arch=$(uname -m)"
           echo "RESULT ours head $(git rev-parse HEAD)"
           echo "RESULT spike head $(git -C spike rev-parse HEAD)"
+
+      - name: Ghostty source and Zig package cache (no network clone in the build)
+        uses: ./.github/actions/ghostty-vendor
 
       - name: Build ours (Screen::advance bench)
         run: cargo build --release --locked --manifest-path "$OURS_MANIFEST" --bin ours
