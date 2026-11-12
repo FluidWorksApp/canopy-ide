@@ -35,6 +35,8 @@ const MAX_INTERMEDIATES: usize = 2;
 pub enum Action {
     /// `ESC c` ended here.
     Reset,
+    /// `CSI 3 J` (erase saved lines) ended here.
+    ClearScrollback,
     /// Bytes to send back to the program, after everything before this point.
     Reply(String),
 }
@@ -310,6 +312,9 @@ impl Filter {
         }
         let params = std::mem::take(&mut self.params);
         let inter = std::mem::take(&mut self.inter);
+        if action == b'J' && inter.is_empty() && params.first() == Some(&3) {
+            actions.push((at, Action::ClearScrollback));
+        }
         if let Some(reply) = self.tracker.csi(&params, &inter, action as char) {
             actions.push((at, Action::Reply(reply)));
         }

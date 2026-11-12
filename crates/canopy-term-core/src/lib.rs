@@ -10,6 +10,8 @@
 mod filter;
 pub mod frame;
 #[cfg(feature = "screen")]
+mod history;
+#[cfg(feature = "screen")]
 pub mod screen;
 
 #[cfg(feature = "screen")]

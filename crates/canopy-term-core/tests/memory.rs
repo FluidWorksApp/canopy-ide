@@ -93,7 +93,10 @@ fn measure(mode: &str) -> (Option<u64>, String) {
 }
 
 fn main() {
-    if let Some(mode) = std::env::args().nth(1).filter(|a| a == "idle" || a == "filled") {
+    if let Some(mode) = std::env::args()
+        .nth(1)
+        .filter(|a| a == "idle" || a == "filled")
+    {
         child(&mode);
         return;
     }

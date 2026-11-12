@@ -62,8 +62,10 @@ use crate::filter::{Action, Filter};
 use crate::frame::{
     Attrs, Cell, Color, Cursor, CursorShape, Damage, Frame, Modes, MouseEncoding, MouseMode,
 };
+use crate::history::{engine_extra, PackedRow};
 use alacritty_terminal::event::{Event, EventListener};
 use alacritty_terminal::grid::Dimensions;
+use alacritty_terminal::grid::Row as EngineRow;
 use alacritty_terminal::index::{Column, Line};
 use alacritty_terminal::term::cell::{Cell as EngineCell, Flags};
 use alacritty_terminal::term::{Config, Term, TermDamage, TermMode};
@@ -72,6 +74,7 @@ use alacritty_terminal::vte::ansi::{
 };
 use std::collections::VecDeque;
 use std::fmt::Write as _;
+use std::ops::Range;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -135,6 +138,13 @@ fn push_reply(q: &Mutex<VecDeque<Pending>>, p: Pending) {
 /// combining marks from its cells, so a line that scrolls into history inside
 /// one large `advance` carries at most about this many bytes of marks.
 const TRIM_SLICE: usize = 4096;
+
+/// Lines the engine itself may hold between two drains into the compact
+/// scrollback. A slice of `TRIM_SLICE` bytes scrolls at most that many lines
+/// with line feeds, so nothing is dropped by the engine's own cap in practice
+/// (a single `CSI n S` repeated past it can, as it could never exceed the
+/// configured scrollback before).
+const ENGINE_BUFFER: usize = TRIM_SLICE + 64;
 
 impl EventListener for Listener {
     fn send_event(&self, event: Event) {
@@ -210,6 +220,12 @@ pub struct Screen {
     blinking: bool,
     /// Rows the engine reports as damaged since the last refresh (scratch).
     dirty: Vec<usize>,
+    /// Scrollback, oldest first, in compact form. The engine's own history is
+    /// emptied into this after every slice fed to it, so it holds at most one
+    /// slice's worth of lines and the rest costs a few bytes per cell.
+    history: VecDeque<PackedRow>,
+    /// Most lines of scrollback kept.
+    hist_limit: usize,
     /// Reference mode: convert and diff the whole grid on every refresh, as
     /// the incremental path must be indistinguishable from. Tests only.
     full_rebuild: bool,
@@ -402,8 +418,9 @@ impl Screen {
         let listener = Listener::default();
         let title = listener.title.clone();
         let replies = listener.replies.clone();
+        let hist_limit = scrollback.min(MAX_SCROLLBACK);
         let config = Config {
-            scrolling_history: scrollback.min(MAX_SCROLLBACK),
+            scrolling_history: hist_limit.min(ENGINE_BUFFER),
             // Tracked by the filter instead: see the module docs.
             kitty_keyboard: false,
             ..Config::default()
@@ -429,6 +446,8 @@ impl Screen {
             pen: Cell::default(),
             blinking: false,
             dirty: Vec::new(),
+            history: VecDeque::new(),
+            hist_limit,
             full_rebuild: false,
         };
         screen.frame.seq = 1;
@@ -460,7 +479,16 @@ impl Screen {
             self.feed_engine(&filtered[start..at]);
             start = at;
             match action {
-                Action::Reset => *lock(&self.title) = None,
+                Action::Reset => {
+                    *lock(&self.title) = None;
+                    self.history.clear();
+                }
+                Action::ClearScrollback => {
+                    // The engine ignores it on the alternate screen.
+                    if !self.in_alt() {
+                        self.history.clear();
+                    }
+                }
                 Action::Reply(s) => push_reply(&self.replies, Pending::Bytes(s)),
             }
         }
@@ -476,6 +504,72 @@ impl Screen {
         for slice in bytes.chunks(TRIM_SLICE) {
             self.processor.advance(&mut self.term, slice);
             self.trim_visible();
+            self.drain_history();
+        }
+    }
+
+    fn in_alt(&self) -> bool {
+        self.term.mode().contains(TermMode::ALT_SCREEN)
+    }
+
+    /// Move every line the engine holds in history into the compact scrollback
+    /// and empty the engine's history. Oldest first; past the limit the oldest
+    /// line goes.
+    fn drain_history(&mut self) {
+        let n = self.term.history_size();
+        if n == 0 {
+            return;
+        }
+        let cols = self.cols as usize;
+        let grid = self.term.grid_mut();
+        let mut cells: Vec<(Cell, u16)> = Vec::with_capacity(cols);
+        for i in 0..n {
+            let row = &grid[Line(-((n - i) as i32))];
+            let mut clusters = vec![String::new()];
+            cells.clear();
+            for c in 0..cols {
+                let cell = &row[Column(c)];
+                cells.push((convert_cell(cell, &mut clusters), engine_extra(cell)));
+            }
+            if self.hist_limit == 0 {
+                continue;
+            }
+            if self.history.len() >= self.hist_limit {
+                self.history.pop_front();
+            }
+            self.history
+                .push_back(PackedRow::pack(&cells, &mut clusters));
+        }
+        grid.clear_history();
+    }
+
+    /// Hand the newest `k` compact lines back to the engine's history, so a
+    /// resize can reflow them or pull them into view as it always did.
+    fn rehydrate(&mut self, k: usize) {
+        let cols = self.cols as usize;
+        let rows = self.rows as usize;
+        let tail: Vec<PackedRow> = self.history.drain(self.history.len() - k..).collect();
+        let grid = self.term.grid_mut();
+        grid.update_history(self.hist_limit.max(k));
+        let saved: Vec<EngineRow<EngineCell>> =
+            (0..rows).map(|r| grid[Line(r as i32)].clone()).collect();
+        // Push k lines into history by scrolling the whole screen, then
+        // overwrite those lines with the packed ones and put the screen back.
+        let region: Range<Line> = Line(0)..Line(rows as i32);
+        let mut left = k;
+        while left > 0 {
+            let step = left.min(rows);
+            grid.scroll_up::<EngineColor>(&region, step);
+            left -= step;
+        }
+        for (j, packed) in tail.iter().enumerate() {
+            let row = &mut grid[Line(-((k - j) as i32))];
+            for (c, cell) in packed.to_engine(cols).into_iter().enumerate() {
+                row[Column(c)] = cell;
+            }
+        }
+        for (r, row) in saved.into_iter().enumerate() {
+            grid[Line(r as i32)] = row;
         }
     }
 
@@ -540,12 +634,37 @@ impl Screen {
         if (cols, rows) == (self.cols, self.rows) {
             return;
         }
+        // The engine reflows its history and pulls lines into view when the
+        // screen grows, but its history is empty between calls: give it back
+        // what it needs (all of it when the width changes), let it resize,
+        // and take it again. Not possible on the alternate screen, where the
+        // primary screen's grid is out of reach.
+        let alt = self.in_alt();
+        if !alt {
+            let k = if cols != self.cols {
+                self.history.len()
+            } else {
+                (rows as usize)
+                    .saturating_sub(self.rows as usize)
+                    .min(self.history.len())
+            };
+            if k > 0 {
+                self.rehydrate(k);
+            }
+            self.term.grid_mut().update_history(self.hist_limit);
+        }
         self.term.resize(Size {
             cols: cols as usize,
             rows: rows as usize,
         });
         self.cols = cols;
         self.rows = rows;
+        self.drain_history();
+        if !alt {
+            self.term
+                .grid_mut()
+                .update_history(self.hist_limit.min(ENGINE_BUFFER));
+        }
         self.filter.tracker.resize(rows);
         self.refresh(true);
     }
@@ -598,7 +717,11 @@ impl Screen {
     /// the primary screen's scrollback is behind it and the engine does not
     /// expose it.
     pub fn scrollback_len(&self) -> usize {
-        self.term.history_size()
+        if self.in_alt() {
+            0
+        } else {
+            self.history.len()
+        }
     }
 
     /// A scrollback line; index 0 is the oldest. Not part of the snapshot.
@@ -607,13 +730,7 @@ impl Screen {
         if index >= len {
             return None;
         }
-        let line = Line(-((len - index) as i32));
-        let row = &self.term.grid()[line];
-        let mut clusters = vec![String::new()];
-        let cells = (0..self.cols as usize)
-            .map(|c| convert_cell(&row[Column(c)], &mut clusters))
-            .collect();
-        Some(Row { cells, clusters })
+        Some(self.history[index].to_row(self.cols as usize))
     }
 
     /// Reference mode for tests: rebuild and diff the whole grid on every
@@ -1041,9 +1158,16 @@ mod tests {
         bytes.extend("\u{301}".repeat(200_000).as_bytes());
         bytes.extend_from_slice(b"\x1b[30S");
         s.advance(&bytes);
-        assert!(s.term.history_size() > 0, "the marked line reached history");
+        assert!(s.scrollback_len() > 0, "the marked line reached history");
         // U+0301 is two bytes: one slice adds at most TRIM_SLICE / 2 marks.
         assert!(most_marks(&s) <= MAX_CLUSTER_SCALARS + TRIM_SLICE / 2);
+        // And once packed, a cluster is bounded again.
+        for i in 0..s.scrollback_len() {
+            let row = s.scrollback_row(i).unwrap();
+            for t in &row.clusters {
+                assert!(t.chars().count() <= MAX_CLUSTER_SCALARS);
+            }
+        }
     }
 
     #[test]
