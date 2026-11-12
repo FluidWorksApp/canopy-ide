@@ -13,15 +13,52 @@ import { activeWorkspace } from "../remoteExecution/workspace";
 //              view drawn OVER the window, so this component renders only a
 //              placeholder and hands its rect to browserHost, which is what
 //              actually positions and hides it.
-//   proxy    — the default and the only choice offered: an iframe onto a
-//              per-origin loopback reverse proxy (preview.rs). A workspace uses
-//              it too, with its server forwarded here (workspace_forward.rs).
+//   chrome   — the default on this computer: a real headless Chrome
+//              (previewHost.ts, preview-host.mjs), one persistent profile per
+//              project, streamed onto a canvas (StreamSurface). Cookies are
+//              first-party, so logins hold. The person's input takes the page
+//              and gives it back when it stops; agent ops run in the host.
+//   proxy    — the fallback (no Chrome or Node, or Embedded chosen) and what a
+//              workspace uses: an iframe onto a per-origin loopback reverse
+//              proxy (preview.rs), with a workspace's server forwarded here
+//              (workspace_forward.rs).
 //
 // Everything below the transport is shared. The same picker script runs in the
 // page under both, and answers the same messages; only how those messages
 // travel differs — postMessage through the iframe, or an evaluated call
 // through browser.rs (see browserTransport.ts).
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  useSyncExternalStore,
+} from "react";
+import { open as openFileDialog } from "@tauri-apps/plugin-dialog";
+import {
+  closePreviewTabSoon,
+  keepPreviewTab,
+  previewHostState,
+  previewOp,
+  previewProfile,
+  PreviewHostError,
+  browserOfferDismissed,
+  dismissBrowserOffer,
+  installPreviewBrowser,
+  previewBrowserState,
+  type PreviewInstallerStatus,
+  previewStreamUrl,
+  retryPreviewHost,
+  startPreviewHost,
+  subscribePreviewHost,
+} from "../previewHost";
+import {
+  StreamSurface,
+  type StreamSurfaceHandle,
+} from "../remoteExecution/StreamSurface";
+import type { PreviewStreamFileChooser } from "../remoteExecution/browserStream";
+import { type BrowserTransport } from "../browserTransport";
 import {
   browserPageChanged,
   browserViewChanged,
@@ -208,8 +245,34 @@ export function PreviewView({
   // cookies were host-shared and its port ephemeral; that is what preview.rs
   // now provides.
   const remoteWorkspace = activeWorkspace();
-  const engine = previewEngine({ remote: !!remoteWorkspace, buildMode, chosen: chosenEngine });
+  // The Chrome engine runs on this computer only. A workspace keeps the proxy
+  // until its forwarded ports are mapped for Chrome (workspace_forward.rs).
+  const wantChrome = !remoteWorkspace && getSettings().previewChrome;
+  const hostState = useSyncExternalStore(subscribePreviewHost, previewHostState);
+  // Started on demand, and again if the host went away (forget() publishes "starting").
+  useEffect(() => {
+    if (wantChrome && hostState.status === "starting") void startPreviewHost().catch(() => {});
+  }, [wantChrome, hostState.status]);
+  /** This tab's page would not open in Chrome (a locked profile, a launch failure). */
+  const [tabError, setTabError] = useState<string | null>(null);
+  /** Remounts the stream after the host closed the tab (a crash, Sign out, window.close()). */
+  const [streamAttempt, setStreamAttempt] = useState(0);
+  const chromeFailed = wantChrome ? (hostState.status === "failed" ? hostState.error : tabError) : null;
+  // No Chrome-family browser on this computer: the host runs, and the strip
+  // offers Chromium (previewHost.ts). The embedded browser serves meanwhile.
+  const browser = useSyncExternalStore(subscribePreviewHost, previewBrowserState);
+  const offerDismissed = useSyncExternalStore(subscribePreviewHost, browserOfferDismissed);
+  const needsBrowser = wantChrome && hostState.status === "ready" && browser?.executable === "";
+  const proxyOrWebview = previewEngine({ remote: !!remoteWorkspace, buildMode, chosen: chosenEngine });
+  const engine: "webview" | "proxy" | "chrome" | null =
+    wantChrome && !chromeFailed && !needsBrowser ? (hostState.status === "ready" ? "chrome" : null) : proxyOrWebview;
   const native = engine === "webview";
+  const chrome = engine === "chrome";
+  const profile = previewProfile(projectId);
+  const surfaceRef = useRef<StreamSurfaceHandle | null>(null);
+  const popupRef = useRef<StreamSurfaceHandle | null>(null);
+  /** A sign-in popup the page opened, shown in this pane until it closes. */
+  const [popup, setPopup] = useState<{ tabId: string; url: string } | null>(null);
   // What the placeholder stands in with while the native view is out of the
   // way: a still of the page, or the app's own background — never a white hole.
   const pane = useBrowserPane(tabId, native);
@@ -262,10 +325,55 @@ export function PreviewView({
   engineRef.current = engine;
   const nativeRef = useRef(native);
   nativeRef.current = native;
+  const chromeRef = useRef(chrome);
+  chromeRef.current = chrome;
+  /** The page is at its real origin (no proxy address to map back). */
+  const realOrigin = useCallback(
+    () => nativeRef.current || chromeRef.current,
+    [],
+  );
+  const profileRef = useRef(profile);
+  profileRef.current = profile;
+  // The Chrome engine's wire is the stream: navigation and picker commands go
+  // to the page as viewer input, so they take the page like a person's click.
+  const chromeTransport = useMemo<BrowserTransport>(
+    () => ({
+      navigate: async (id, target, action) => {
+        const input = target
+          ? ({ type: "navigate", url: target } as const)
+          : action === "back" || action === "forward"
+            ? ({ type: "history", delta: action === "back" ? -1 : 1 } as const)
+            : ({ type: "reload" } as const);
+        if (surfaceRef.current?.send(input)) return;
+        // Not connected (hidden tab): the host navigates it directly.
+        await previewOp(
+          id,
+          "navigate",
+          target ? { url: target } : { action: action ?? "reload" },
+          {
+            url: urlRef.current,
+            profile: profileRef.current,
+          },
+        );
+      },
+      runOp: async () => null,
+      command: async (_id, message) => {
+        surfaceRef.current?.send({ type: "picker", message });
+      },
+      here: async () => ({ url: urlRef.current, title: "" }),
+      close: async (id) => closePreviewTabSoon(id),
+    }),
+    [],
+  );
   // How picker messages and ops travel on this engine. Null under the proxy
   // (and while the engine is still being probed): the page is our own iframe,
   // and postMessage is the wire.
-  const transport = engine === null ? null : transportFor(engine);
+  const transport =
+    engine === null
+      ? null
+      : engine === "chrome"
+        ? chromeTransport
+        : transportFor(engine);
   const transportRef = useRef(transport);
   transportRef.current = transport;
 
@@ -314,6 +422,15 @@ export function PreviewView({
     );
     return () => window.clearTimeout(timer);
   }, [engine, proxyError, visible, proxyAttempt]);
+
+  // ---------- chrome engine: the host's tab lives as long as this tab ----------
+  // Closed a little after unmount, so a remount (a project switch, a pane
+  // move) finds its page, history and session storage where it left them.
+  useEffect(() => {
+    if (!chrome) return;
+    keepPreviewTab(tabId);
+    return () => closePreviewTabSoon(tabId);
+  }, [chrome, tabId]);
 
   // ---------- webview engine: the native view's lifecycle ----------
   // The placeholder's rect is measured by browserHost on demand rather than
@@ -413,7 +530,7 @@ export function PreviewView({
    *  playing to nobody. Under the webview engine an unpainted view is genuinely
    *  hidden, and `visible` is the whole truth. */
   const painted = useCallback(() => {
-    if (nativeRef.current) return visibleRef.current;
+    if (nativeRef.current || chromeRef.current) return visibleRef.current;
     return (
       iframeRef.current?.checkVisibility?.({
         visibilityProperty: true,
@@ -441,7 +558,7 @@ export function PreviewView({
    *  the webview engine the page lives at its real origin, so what it reports
    *  is already the truth. */
   const unproxied = useCallback((pageUrl: string): string | null => {
-    if (nativeRef.current) return pageUrl;
+    if (realOrigin()) return pageUrl;
     const p = proxyRef.current;
     if (!p) return null;
     try {
@@ -451,7 +568,7 @@ export function PreviewView({
     } catch {
       return null;
     }
-  }, []);
+  }, [realOrigin]);
   const unproxiedRef = useRef(unproxied);
   unproxiedRef.current = unproxied;
 
@@ -461,7 +578,7 @@ export function PreviewView({
   const answer = useCallback(
     (id: number, ok: boolean, data: unknown) => {
       let out = data;
-      if (!nativeRef.current && out && typeof out === "object") {
+      if (!realOrigin() && out && typeof out === "object") {
         const d = out as { url?: unknown };
         if (typeof d.url === "string") out = { ...d, url: unproxiedRef.current(d.url) ?? d.url };
       }
@@ -470,7 +587,7 @@ export function PreviewView({
       if (nativeRef.current) browserPageChanged(tabId);
       void ipc.browserResult(id, ok, out);
     },
-    [tabId],
+    [realOrigin, tabId],
   );
 
   const postAgentOp = useCallback(
@@ -551,7 +668,7 @@ export function PreviewView({
       onPatchRef.current({ url: target });
       const t = transportRef.current;
       if (t) {
-        if (opened.current) void t.navigate(tabId, target, null).catch(() => {});
+        if (opened.current || chromeRef.current) void t.navigate(tabId, target, null).catch(() => {});
         // Not open yet: the create effect picks the new URL up when the tab is
         // next shown, which is the same moment it would have loaded anyway.
         return;
@@ -756,6 +873,47 @@ export function PreviewView({
   // remount in refs; a re-render must not look like a closed tab.)
   const runOpRef = useRef<(op: ipc.AgentBrowserOp) => void>(() => {});
   runOpRef.current = (op: ipc.AgentBrowserOp) => {
+    if (chromeRef.current) {
+      // The host runs the op on the page itself, with T3's control rules: a
+      // person using the page refuses the agent's writes until they stop.
+      const {
+        id,
+        op: name,
+        ...rest
+      } = op as unknown as Record<string, unknown> & { id: number; op: string };
+      const args = Object.fromEntries(
+        Object.entries(rest).filter(
+          ([key, value]) => value != null && key !== "scope",
+        ),
+      );
+      void previewOp(tabId, name, args, {
+        url: urlRef.current,
+        profile: profileRef.current,
+      }).then(
+        (data) => {
+          if (
+            name === "navigate" &&
+            data &&
+            typeof data === "object" &&
+            typeof (data as { url?: unknown }).url === "string"
+          ) {
+            const next = (data as { url: string }).url;
+            if (next !== urlRef.current) {
+              onPatchRef.current({ url: next });
+              if (!draftFocused.current) setDraft(next);
+            }
+          }
+          void ipc.browserResult(id, true, data);
+        },
+        (error: unknown) =>
+          void ipc.browserResult(
+            id,
+            false,
+            String((error as Error)?.message ?? error),
+          ),
+      );
+      return;
+    }
     if (op.op === "navigate") {
       if (op.url) navigate(op.url);
       else if (transportRef.current)
@@ -932,6 +1090,14 @@ export function PreviewView({
    *  an image-space one. Under the webview engine the page is its own view and
    *  is captured whole; under the proxy it is one rectangle of this window. */
   const shootPane = useCallback(async (): Promise<{ png: string; cssWidth: number }> => {
+    if (chromeRef.current) {
+      // Chrome photographs its own page, front tab or not.
+      const shot = (await previewOp(tabId, "screenshot", { scale: "device" }, { url: urlRef.current, profile: profileRef.current })) as {
+        image: string;
+        width: number;
+      };
+      return { png: shot.image, cssWidth: shot.width };
+    }
     const el = nativeRef.current ? hostRef.current : iframeRef.current;
     const rect = el?.getBoundingClientRect();
     if (!rect || !painted() || rect.width < 1 || rect.height < 1) {
@@ -1201,6 +1367,87 @@ export function PreviewView({
 
   const body = useMemo(() => {
     if (engine === null) return null;
+    if (chrome) {
+      // Read when the stream connects, so a reconnect opens where the tab is now.
+      const streamUrl = (id: string, path: string) =>
+        previewStreamUrl(id, path, { url: id === tabId ? urlRef.current : undefined, profile }).catch((error: unknown) => {
+          const status = error instanceof PreviewHostError ? error.status : 0;
+          if (id !== tabId) {
+            if (status === 404) setPopup((current) => (current?.tabId === id ? null : current));
+          } else if (status === 409 || status === 429 || status >= 500) {
+            setTabError(String((error as Error).message));
+          }
+          throw error;
+        });
+      return (
+        <div className="preview-frame preview-chrome">
+          {popup && (
+            <div className="preview-chrome-popup-bar">
+              <span>Sign-in window · {hostOf(popup.url)}</span>
+              <Button
+                size="sm"
+                variant="ghost"
+                onClick={() => {
+                  closePreviewTabSoon(popup.tabId, 0);
+                  setPopup(null);
+                }}
+              >
+                ← Back to page
+              </Button>
+            </div>
+          )}
+          <StreamSurface
+            key={`${tabId}:${streamAttempt}`}
+            className={popup ? "preview-chrome-hidden" : undefined}
+            connectKey={tabId}
+            visible={visible && !popup}
+            autoControl
+            dialogHint="Click the page to respond."
+            handleRef={surfaceRef}
+            streamUrl={(path) => streamUrl(tabId, path)}
+            onGone={() => window.setTimeout(() => setStreamAttempt((n) => n + 1), 300)}
+            onNavigated={(nav) => {
+              browserViewChanged(tabId, false);
+              if (
+                nav.url &&
+                nav.url !== urlRef.current &&
+                /^https?:/i.test(nav.url)
+              ) {
+                onPatchRef.current({ url: nav.url });
+                if (!draftFocused.current) setDraft(nav.url);
+              }
+            }}
+            onPicker={handleMessage}
+            onPopup={(next) => setPopup({ tabId: next.tabId, url: next.url })}
+            onFileChooser={(chooser) =>
+              void answerFileChooser(surfaceRef.current, chooser)
+            }
+            onNote={(text) => onNoticeRef.current(text)}
+          />
+          {popup && (
+            <StreamSurface
+              key={popup.tabId}
+              connectKey={popup.tabId}
+              visible={visible}
+              autoControl
+              dialogHint="Click the page to respond."
+              handleRef={popupRef}
+              streamUrl={(path) => streamUrl(popup.tabId, path)}
+              onPopup={(next) => setPopup({ tabId: next.tabId, url: next.url })}
+              onFileChooser={(chooser) =>
+                void answerFileChooser(popupRef.current, chooser)
+              }
+              onNote={(text) => onNoticeRef.current(text)}
+              onGone={() =>
+                setPopup((current) =>
+                  current?.tabId === popup.tabId ? null : current,
+                )
+              }
+            />
+          )}
+        </div>
+      );
+    }
     if (native) {
       // Almost nothing is rendered into this div — it exists to be measured,
       // and the page is a native view browserHost parks on top of it. The one
@@ -1228,7 +1475,21 @@ export function PreviewView({
     return frameSrc ? (
       <iframe ref={iframeRef} className="preview-frame" src={frameSrc} title="preview" />
     ) : null;
-  }, [engine, native, proxyError, origin, frameSrc, pane]);
+  }, [
+    engine,
+    native,
+    chrome,
+    popup,
+    profile,
+    visible,
+    tabId,
+    streamAttempt,
+    handleMessage,
+    proxyError,
+    origin,
+    frameSrc,
+    pane,
+  ]);
 
   // ---------- empty tab: pick one of the project's own servers ----------
   // Suggest servers tied to this project's components for feedback routing.
@@ -1379,6 +1640,23 @@ export function PreviewView({
                 : undefined
             }
           >
+            {needsBrowser && !chromeFailed && !offerDismissed && <BrowserOfferStrip status={browser?.installer ?? null} />}
+            {chromeFailed && (
+              <div className="preview-chrome-fallback" role="status">
+                <span>
+                  {chromeFailed} Using the embedded browser; logins won't stick.
+                </span>
+                <Button
+                  size="sm"
+                  onClick={() => {
+                    setTabError(null);
+                    if (hostState.status === "failed") void retryPreviewHost().catch(() => {});
+                  }}
+                >
+                  Retry
+                </Button>
+              </div>
+            )}
             {body}
           </div>
         </div>
@@ -1572,4 +1850,90 @@ async function captureInBackground(url: string, width: number, height: number, m
     unlisten?.();
     void ipc.browserClose(id);
   }
+}
+
+function hostOf(url: string): string {
+  try {
+    return new URL(url).host;
+  } catch {
+    return "";
+  }
+}
+
+/** The page asked for a file: the native file dialog answers, and cancelling answers with none. */
+async function answerFileChooser(
+  surface: StreamSurfaceHandle | null,
+  chooser: PreviewStreamFileChooser,
+) {
+  const extensions = chooser.accept
+    .split(",")
+    .map((part) => part.trim())
+    .filter((part) => part.startsWith(".") && part.length > 1)
+    .map((part) => part.slice(1));
+  let picked: string | string[] | null = null;
+  try {
+    picked = await openFileDialog({
+      multiple: chooser.multiple,
+      directory: false,
+      ...(extensions.length
+        ? { filters: [{ name: "Allowed files", extensions }] }
+        : {}),
+    });
+  } catch {
+    picked = null;
+  }
+  const paths =
+    picked === null ? [] : Array.isArray(picked) ? picked : [picked];
+  surface?.send({ type: "fileChooser", id: chooser.id, paths });
+}
+
+const megabytes = (bytes: number) => Math.round(bytes / 1_000_000);
+
+/** The offer to download Chromium, its progress, and its failure (approved mock, 2026-11-12). */
+function BrowserOfferStrip({ status }: { status: PreviewInstallerStatus | null }) {
+  const [asking, setAsking] = useState(false);
+  const install = () => {
+    setAsking(true);
+    void installPreviewBrowser()
+      .catch(() => {})
+      .finally(() => setAsking(false));
+  };
+  if (status?.state === "downloading" || (asking && status?.state !== "failed")) {
+    const percent = status && status.total > 0 ? Math.floor((100 * status.received) / status.total) : 0;
+    return (
+      <div className="preview-chrome-fallback" role="status">
+        <span>
+          Downloading Chromium… {percent}%{status?.total ? ` of ${megabytes(status.total)} MB` : ""}
+        </span>
+      </div>
+    );
+  }
+  if (status?.state === "failed") {
+    return (
+      <div className="preview-chrome-fallback" role="status">
+        <span>Download failed: {status.error ?? "unknown error"}</span>
+        <Button size="sm" onClick={install}>
+          Try again
+        </Button>
+      </div>
+    );
+  }
+  const unsupported = status?.state === "unsupported";
+  return (
+    <div className="preview-chrome-fallback" role="status">
+      <span>
+        No Chrome found — logins won't stick here.{unsupported ? " Install Google Chrome to keep them." : ""}
+      </span>
+      <span className="preview-chrome-actions">
+        {!unsupported && (
+          <Button size="sm" variant="accent" onClick={install}>
+            Download Chromium{status?.total ? ` (~${megabytes(status.total)} MB)` : ""}
+          </Button>
+        )}
+        <Button size="sm" variant="ghost" onClick={dismissBrowserOffer}>
+          Not now
+        </Button>
+      </span>
+    </div>
+  );
 }

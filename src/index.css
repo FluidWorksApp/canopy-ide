@@ -20812,6 +20812,7 @@ a.btn-sm {
 .preview-frame-wrap {
   flex: 1;
   min-width: 0;
+  position: relative;
   /* The app's own colour, not white. Under the webview engine this box is
      revealed every time a panel or a menu opens over the page, and a white
      rectangle flashing against a dark skin reads as a rendering failure rather
@@ -20860,6 +20861,55 @@ a.btn-sm {
   white-space: pre-wrap;
   color: var(--danger);
   font-size: 12px;
+}
+/* The Chrome engine: the page streamed onto a canvas (StreamSurface). Plain
+   DOM, so menus, dialogs and the Build island paint over it like anything
+   else. Input goes to the page whenever no other viewer holds it, so the
+   controlled outline the workspace overlay uses would always be on. */
+.preview-chrome {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  background: var(--bg);
+}
+.preview-chrome .streamed-browser-canvas.is-controlled {
+  outline: none;
+}
+.preview-chrome-hidden {
+  display: none;
+}
+.preview-chrome-popup-bar,
+.preview-chrome-fallback {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 4px 8px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg);
+  color: var(--text-dim);
+  font-size: 12px;
+}
+/* Over the embedded page it fell back to, so the page keeps its full height. */
+.preview-chrome-fallback {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  z-index: 2;
+}
+.preview-chrome-actions {
+  display: flex;
+  flex: 0 0 auto;
+  gap: 6px;
+}
+.preview-chrome-popup-bar > span:first-child,
+.preview-chrome-fallback > span:first-child {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .preview-panel {
   width: 280px;

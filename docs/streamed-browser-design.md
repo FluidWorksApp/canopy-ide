@@ -1,11 +1,26 @@
 # Streamed browsers and devices
 
-Status: phase 1 (the workspace agent's streamed browser, with T3 Code's
-control lock and profile lock) and phase 3 (devices through expo-device-hub)
-are built as ports of T3 Code; see `packages/remote-host/session-control.mjs`,
-`browser-contexts.mjs`, `browser-stream.mjs`, `src/remoteExecution/StreamedBrowser.tsx`,
-`src-tauri/src/devicehub*.rs` and `src/devices/`. Phase 2 (local and SSH
-browsers) is not built.
+Status:
+- **Phase 1** (the workspace agent's streamed browser, with T3 Code's control
+  lock and profile lock) is built: `packages/remote-host/session-control.mjs`,
+  `browser-contexts.mjs`, `browser-stream.mjs`, `agent-browser.mjs`, and the
+  viewer `src/remoteExecution/StreamSurface.tsx` inside `StreamedBrowser.tsx`.
+- **Phase 2, local** is built: preview tabs on this computer run in a real
+  headless Chrome, one persistent profile per project, streamed with the same
+  code (`packages/remote-host/preview-host.mjs`, started by
+  `src-tauri/src/preview_host.rs`, used by `PreviewView` through
+  `src/previewHost.ts`). It replaces the proxy iframe as the default, because
+  the iframe's third-party cookies could not hold a login. A person's input
+  takes the page and gives it back 1.5 s after it stops; agent writes are
+  refused while they hold it (T3's rule). Without Node or Chrome the preview
+  falls back to the proxy and says so. Settings › Browser & Vault switches it
+  off and signs every project's profile out.
+- **Phase 2, workspaces and SSH** is not built: remote workspaces still use the
+  proxy. Their forwarded ports are already plain loopback listeners
+  (`workspace_forward.rs`), so the remaining work is mapping a workspace URL to
+  its local port for Chrome.
+- **Phase 3** (devices through expo-device-hub) is built: `src-tauri/src/devicehub*.rs`
+  and `src/devices/`.
 
 The goal is what T3 Code does: a browser tab, simulator or emulator runs on
 one machine (the local computer, an SSH host or a cloud workspace), its screen
@@ -89,8 +104,8 @@ installed at pinned versions and run as child processes:
 | Piece | Where | What it does | What it lacks |
 |---|---|---|---|
 | Native browser | `src-tauri/src/browser.rs` | A real child WKWebView per tab | macOS only (`SUPPORTED`), local only, nothing to stream |
-| Proxy preview | `src-tauri/src/preview.rs` | Loopback reverse proxy plus iframe; the engine for other platforms and remote workspaces | Shares one cookie jar; it isn't a real browser |
-| Agent browser in a cloud workspace | `packages/remote-host/agent-browser.mjs` | Playwright over CDP on the workspace's Chromium, one headless page | **The user can't see it.** Agents drive a page nobody is watching |
+| Proxy preview | `src-tauri/src/preview.rs` | Loopback reverse proxy plus iframe; the fallback, and remote workspaces' engine | Third-party cookies in an iframe, so logins don't hold |
+| Agent browser in a cloud workspace | `packages/remote-host/agent-browser.mjs` | Playwright over CDP on the workspace's Chromium, one headless page, streamed to `StreamedBrowser` | Built in phase 1 |
 | Workspace desktop | `RemoteDesktop.tsx`, `runner.mjs` | Xvfb plus x11vnc over noVNC, with input | A whole desktop at VNC quality, not a browser tab, and not the page the agent drives |
 | Android | `src-tauri/src/android.rs`, `DeviceView.tsx` | `adb exec-out screencap` stills, pulled | Not video, local adb only |
 | iOS | none | none | everything |
