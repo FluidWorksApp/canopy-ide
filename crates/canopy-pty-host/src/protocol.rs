@@ -11,11 +11,15 @@ use serde::{Deserialize, Serialize};
 /// 3: `attach` takes `exclusive`, and the `read_ring` op. An older host ignores
 /// `exclusive` and would take the session over, so a client checks `hello`
 /// before relying on it; `HostClient::attach_exclusive` does.
-pub const PROTOCOL_VERSION: u32 = 3;
+/// 4: the `shutdown_if_idle` op. An older host rejects it as unknown, which a
+/// client reads as "cannot stop this host atomically".
+pub const PROTOCOL_VERSION: u32 = 4;
 /// The first host version that honours `exclusive` and serves `read_ring`.
 pub const EXCLUSIVE_ATTACH_VERSION: u32 = 3;
 /// The `error` of an exclusive attach refused because a client is attached.
 pub const BUSY: &str = "busy";
+/// The first host version that serves `shutdown_if_idle`.
+pub const SHUTDOWN_IF_IDLE_VERSION: u32 = 4;
 /// The oldest client this host will serve, and the oldest host a client will
 /// use. Raised only when compatibility is deliberately dropped.
 pub const MIN_CLIENT_VERSION: u32 = 1;
@@ -90,6 +94,11 @@ pub enum Request {
         max: Option<u64>,
     },
     Shutdown,
+    /// Stop the host only if no session is running, decided and acted on under
+    /// the same lock `spawn` takes: a spawn that wins the race makes this reply
+    /// `busy`, and one that loses is refused. Replies `ok` (stopping) or
+    /// `error: "busy"` with `running` set.
+    ShutdownIfIdle,
 }
 
 /// Exactly what the child gets. The host never adds its own environment: it can
@@ -150,10 +159,16 @@ pub struct Response {
     /// True when a spawn returned an existing session for its key.
     pub existing: Option<bool>,
     pub sessions: Option<Vec<SessionInfo>>,
+    /// Reply to a refused `shutdown_if_idle`: how many sessions are running.
+    pub running: Option<usize>,
     pub pgrp: Option<i32>,
     pub raw: Option<bool>,
     /// Reply to `get_state` / `set_state`: the value now stored, if any.
     pub value: Option<String>,
+    /// Reply to `hello`: the path this host was started from, so the app keeps
+    /// that installed copy while the host lives. `None` from an older host.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub exe: Option<String>,
 }
 
 impl Response {
@@ -253,6 +268,19 @@ mod tests {
                 max: None
             }
         ));
+    }
+
+    #[test]
+    fn shutdown_if_idle_round_trips_and_an_old_host_calls_it_unknown() {
+        let line = serde_json::to_string(&Request::ShutdownIfIdle).unwrap();
+        assert_eq!(line, r#"{"op":"shutdown_if_idle"}"#);
+        assert!(matches!(
+            serde_json::from_str::<Request>(&line).unwrap(),
+            Request::ShutdownIfIdle
+        ));
+        let r: Response =
+            serde_json::from_str(r#"{"ok":false,"error":"busy","running":2}"#).unwrap();
+        assert_eq!(r.running, Some(2));
     }
 
     #[test]
