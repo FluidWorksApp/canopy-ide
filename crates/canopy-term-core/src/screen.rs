@@ -662,11 +662,16 @@ impl Screen {
             for c in 0..cols {
                 let engine = &row[Column(c)];
                 let mut cell = convert_cell(engine, &mut clusters);
-                if c + 1 == cols && engine.flags.contains(Flags::WIDE_CHAR) {
-                    // Insert mode can push a wide character's head into the
-                    // last column with no room for its tail. Show it blank:
-                    // drawn (or restored from a snapshot) it would overflow
-                    // the row, and a snapshot would scroll the screen.
+                let orphan = engine.flags.contains(Flags::WIDE_CHAR)
+                    && (c + 1 == cols
+                        || !row[Column(c + 1)].flags.contains(Flags::WIDE_CHAR_SPACER));
+                if orphan {
+                    // A wide character's head with no tail after it: insert
+                    // mode can push one into the last column, and erasing a
+                    // tail leaves its head. Show it blank: drawn it would
+                    // overflow onto the next cell, and a snapshot would
+                    // write it as a full pair (wrapping and scrolling the
+                    // screen at the last column).
                     cell.ch = ' ';
                     cell.cluster = 0;
                 }
