@@ -425,7 +425,7 @@ pub enum SessionKind {
     Detached,
 }
 
-struct DesktopSink {
+pub(crate) struct DesktopSink {
     renderer_generation: u64,
     channel: Channel<InvokeResponseBody>,
 }

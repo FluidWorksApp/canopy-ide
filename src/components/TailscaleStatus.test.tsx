@@ -442,6 +442,8 @@ describe("Connect", () => {
     show(one, calls, { tailnet_remote_list: () => terminals });
     await userEvent.click(await screen.findByRole("switch", { name: "Allow work-mac" }));
     await waitFor(() => expect(calls).toEqual([`allow ${WORK} true`]));
-    expect(screen.getByTitle("May connect in to terminals on this machine")).toHaveTextContent("Allow");
+    expect(
+      screen.getByTitle("An allowed machine can read and type into every terminal on this machine"),
+    ).toHaveTextContent("Allow");
   });
 });
