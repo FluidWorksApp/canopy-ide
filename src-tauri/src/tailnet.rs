@@ -16,12 +16,13 @@
 //! strings the webview sends. An entry without `@<domain>` (or bound to another
 //! tailnet) never admits anyone, so the row shows it as not allowed. Only
 //! machines in this machine's own tailnet are listed or allowed: nodes shared in
-//! from another tailnet are neither dialled nor admitted. Allowing a machine only
-//! records policy: nothing listens on the tailnet yet. Connecting out needs no
-//! entry here.
+//! from another tailnet are neither dialled nor admitted. Allowing a machine writes
+//! the entry and then tells the tailnet listener (`tailnet_serve`), which exists
+//! only while at least one such entry does. Connecting out needs no entry here.
 //!
 //! Raw CLI output is never logged or returned.
 
+use crate::tailnet_serve::{ListenerStatus, TailnetServe};
 use canopy_term_net::allowlist::{
     canonical_tailnet_entry, tailnet_domain_of, valid_stable_id, Allowlist,
 };
@@ -102,6 +103,8 @@ pub struct TailscaleView {
     pub machines: Vec<Machine>,
     /// The allowlist file could not be read; Allow is unavailable until fixed.
     pub allow_error: Option<String>,
+    /// Whether this app is listening for allowed machines, and why not.
+    pub listener: ListenerStatus,
 }
 
 fn version_string(v: (u32, u32, u32)) -> String {
@@ -144,7 +147,7 @@ fn entry_stable_id(entry: &str) -> Option<String> {
 }
 
 /// The tailnet (DNS domain) this machine is on, from its own full name.
-fn own_domain(status: &TailnetStatus) -> Option<String> {
+pub(crate) fn own_domain(status: &TailnetStatus) -> Option<String> {
     status
         .self_node
         .as_ref()
@@ -158,7 +161,7 @@ fn in_tailnet(n: &NodeInfo, domain: Option<&str>) -> bool {
 }
 
 /// Stable ids with an entry bound to `domain`; only those are admitted.
-fn allowed_ids(list: &Allowlist, domain: &str) -> BTreeSet<String> {
+pub(crate) fn allowed_ids(list: &Allowlist, domain: &str) -> BTreeSet<String> {
     let suffix = format!("@{domain}");
     list.keys()
         .iter()
@@ -177,7 +180,7 @@ pub fn allowed_entries(list: &Allowlist) -> Vec<String> {
 
 /// A missing file is an empty list. A bad file is an error and is never
 /// overwritten: silently replacing it would drop entries someone relies on.
-fn load_allow(path: &Path) -> Result<Allowlist, String> {
+pub(crate) fn load_allow(path: &Path) -> Result<Allowlist, String> {
     match Allowlist::load(path) {
         Ok(list) => Ok(list),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Allowlist::new()),
@@ -211,6 +214,7 @@ pub fn view(
         this_machine: None,
         machines: Vec::new(),
         allow_error: allow.as_ref().err().cloned(),
+        listener: ListenerStatus::off(),
     };
     let runner = match runner {
         Ok(r) => r,
@@ -329,14 +333,14 @@ pub fn set_allowed_at(
     Ok(())
 }
 
-fn allow_path() -> Result<PathBuf, String> {
+pub(crate) fn allow_path() -> Result<PathBuf, String> {
     let home = std::env::var_os("HOME")
         .or_else(|| std::env::var_os("USERPROFILE"))
         .ok_or_else(|| "No home folder.".to_string())?;
     Ok(PathBuf::from(home).join(".canopy").join(ALLOW_FILE))
 }
 
-fn installed_runner() -> Result<Arc<dyn CliRunner>, InstallProblem> {
+pub(crate) fn installed_runner() -> Result<Arc<dyn CliRunner>, InstallProblem> {
     ProcessRunner::locate().map(|r| Arc::new(r) as Arc<dyn CliRunner>)
 }
 
@@ -345,21 +349,35 @@ fn can_open_app() -> bool {
 }
 
 #[tauri::command]
-pub async fn tailscale_status() -> Result<TailscaleView, String> {
-    tauri::async_runtime::spawn_blocking(|| {
+pub async fn tailscale_status(
+    serve: tauri::State<'_, Arc<TailnetServe>>,
+) -> Result<TailscaleView, String> {
+    let serve = serve.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
         let allow = allow_path().and_then(|p| load_allow(&p));
-        view(installed_runner(), &allow, can_open_app())
+        let mut v = view(installed_runner(), &allow, can_open_app());
+        v.listener = serve.status();
+        v
     })
     .await
     .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
-pub async fn tailscale_allow_set(stable_id: String, allowed: bool) -> Result<(), String> {
+pub async fn tailscale_allow_set(
+    serve: tauri::State<'_, Arc<TailnetServe>>,
+    stable_id: String,
+    allowed: bool,
+) -> Result<(), String> {
+    let serve = serve.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
         let path = allow_path()?;
         let ts = installed_runner().ok().map(Tailscale::new);
-        set_allowed_at(&path, ts.as_ref(), &stable_id, allowed)
+        set_allowed_at(&path, ts.as_ref(), &stable_id, allowed)?;
+        // The entry is on disk: start, keep or drop the listener to match, and
+        // cut a revoked machine's connections.
+        serve.allow_changed();
+        Ok(())
     })
     .await
     .map_err(|e| e.to_string())?
@@ -602,6 +620,8 @@ mod tests {
         assert!(j["minVersion"].is_string());
         assert!(j["canOpenApp"].is_boolean());
         assert_eq!(j["machines"][1]["stableId"], LAPTOP);
+        assert_eq!(j["listener"]["state"], "off");
+        assert!(j["listener"]["port"].is_u64());
         assert_eq!(
             serde_json::to_value(Kind::NotInstalled).unwrap(),
             "notInstalled"

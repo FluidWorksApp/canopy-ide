@@ -389,3 +389,24 @@ stalls its own pump until the transport errors (the queue is bounded, but the
 output is the handler's channel). A handler stuck inside `write` is not
 joined; it finishes once its write returns. Only exercised on loopback with the
 fake Tailscale CLI; nothing here has run over a real tailnet.
+
+## The app's tailnet listener (`src-tauri/src/tailnet_serve.rs`)
+
+The app, not the pty-host, listens, so a machine's terminals are reachable only
+while its Canopy runs. The listener exists only while Tailscale is `Running` and
+at least one allowlist entry bound to this machine's own tailnet exists (Allow
+on starts it, the last Allow off drops it and closes every connection; with no
+entry Tailscale is not even queried). It is `TailnetTcp::bind` on the fixed port
+`TAILNET_PORT` (28617, chosen below the OS dynamic ranges and away from the
+portal's 6680); a busy port or a userspace-mode daemon is reported in the
+Settings status, with no fallback port and nothing wider. It re-checks every
+15 s so it follows Tailscale stopping and starting.
+
+The `SessionHandler` is implemented over `PtyManager` (list, attach with
+snapshot and live output plus input, resize) and nothing else. Terminals with
+no tab (`SessionKind::Detached`) are neither listed nor attachable. Caps: 8
+attached terminals per peer and 32 total (in `attach`), 16 and 64 open
+connections per peer and total (in the accept loop). Output is bridged through
+a bounded queue; a peer that falls behind is detached and re-attaches for a
+fresh snapshot. Allow off removes the entry from the listener's in-memory list
+first and the transport's sweep closes that peer's connections.

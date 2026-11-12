@@ -614,9 +614,10 @@ impl TailnetTcp {
         Self::bind_inner(runner, allow, port, Arc::new(Instant::now), false)
     }
 
-    /// Test only: also accepts loopback, so CI can run a real listener.
-    #[cfg(test)]
-    pub(crate) fn bind_for_test(
+    /// Test only: also accepts loopback, so CI can run a real listener. Public
+    /// under the `test-support` feature so the app's tests can bind one too.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn bind_for_test(
         runner: Arc<dyn CliRunner>,
         allow: Allowlist,
         port: u16,
@@ -734,6 +735,24 @@ impl TailnetTcp {
             }
         });
         self.results = Some(Mutex::new(res_rx));
+    }
+
+    /// Stop listening and end every admitted connection now, without waiting
+    /// for the revocation sweep. The caller drops this value afterwards; a
+    /// peer whose admission was already in flight is dropped by the caller's
+    /// accept loop, which sees the listener stopped.
+    pub fn shutdown(&self) {
+        self.stop.store(true, Ordering::SeqCst);
+        if let Ok(mut live) = self.gate.live.lock() {
+            for l in live.drain(..) {
+                let _ = l.stream.shutdown(Shutdown::Both);
+            }
+        }
+    }
+
+    /// Whether [`shutdown`](Self::shutdown) has been called.
+    pub fn is_shut_down(&self) -> bool {
+        self.stop.load(Ordering::SeqCst)
     }
 
     /// The addresses actually bound.
