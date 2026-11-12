@@ -36,6 +36,7 @@ import type { Life } from "../../shared/agentLife";
 
 const COLLAPSED_KEY = "canopy:agentCard:collapsed";
 const DOCKED_KEY = "canopy:agentCard:docked";
+const TASKS_OPEN_KEY = "canopy:agentCard:tasksOpen";
 const PR_TTL_MS = 60_000;
 
 const prCache = new Map<string, { at: number; prs: ipc.PrInfo[] }>();
@@ -68,6 +69,17 @@ function readDocked(): boolean {
     return localStorage.getItem(DOCKED_KEY) !== "0";
   } catch {
     return true;
+  }
+}
+
+/** Whether the task list is open. The card remounts when the terminal tab or
+ *  the workspace drawer changes, and a plain `useState(false)` closed the list
+ *  each time, so a list you opened vanished after your next request. */
+function readTasksOpen(): boolean {
+  try {
+    return localStorage.getItem(TASKS_OPEN_KEY) === "1";
+  } catch {
+    return false;
   }
 }
 
@@ -269,7 +281,15 @@ export function AgentDetailsCard({
 }: AgentDetailsCardProps) {
   const [collapsed, setCollapsed] = useState(readCollapsed);
   const [docked, setDocked] = useState(readDocked);
-  const [tasksOpen, setTasksOpen] = useState(false);
+  const [tasksOpen, setTasksOpenState] = useState(readTasksOpen);
+  const setTasksOpen = (next: boolean) => {
+    setTasksOpenState(next);
+    try {
+      localStorage.setItem(TASKS_OPEN_KEY, next ? "1" : "0");
+    } catch {
+      /* A remembered state is a convenience. */
+    }
+  };
   const [assetsOpen, setAssetsOpen] = useState(false);
   const [hovered, setHovered] = useState<{
     asset: Asset;
@@ -1016,13 +1036,18 @@ export function AgentDetailsCard({
         type="button"
         className="agent-card-row agent-card-btn"
         aria-expanded={tasksOpen}
-        onClick={() => setTasksOpen((v) => !v)}
+        onClick={() => setTasksOpen(!tasksOpen)}
         disabled={summary.total === 0}
       >
         <TasksIcon size={14} />
         <span>Tasks</span>
         <span className="agent-card-grow" />
-        <span className="agent-card-dim">{taskHeadline(summary)}</span>
+        <span
+          className="agent-card-dim agent-card-tasks-headline"
+          title={taskHeadline(summary)}
+        >
+          {taskHeadline(summary)}
+        </span>
         {summary.total > 0 && (
           <span aria-hidden="true">{tasksOpen ? "▾" : "▸"}</span>
         )}
