@@ -70,7 +70,7 @@ describe('the settings index',()=>{
     for(const r of itemsInSource())(found[r.tab]??=[]).push(r.name);
     for(const tab of Object.keys(found))found[tab].sort();
     expect(found).toEqual(EXPECTED);
-    expect(Object.values(found).flat().length).toBe(83);// none lost, none doubled
+    expect(Object.values(found).flat().length).toBe(84);// none lost, none doubled
   });
   it('shows each setting\'s current description, so a reworded one cannot leave search showing the old text',()=>{
     const stale:string[]=[];
