@@ -10,12 +10,62 @@ Report only: nothing in the test suite asserts on timing. Reproduce the
 because `cargo test` is otherwise unoptimised and, with debug info on, would
 build libghostty-vt in Zig's Debug mode.
 
-Numbers for `Screen` on libghostty-vt are not recorded here yet. Everything
-below the line was measured on the `alacritty_terminal` based `Screen`, which
-has been removed; it is kept as the record of why an engine was chosen at the
-time and of what the project moved away from. Do not read it as the cost of
-the current engine. The libghostty-vt comparison (bare `vt_write`, `Screen`) is
-being measured separately.
+## Screen on libghostty-vt: what CI printed
+
+Copied from CI run 43160936234 (PR #830, commit 92dbb04b), GitHub-hosted
+runners, so noisy (the old engine's own numbers moved by 1.7x between runs).
+One run each, no repeats; nothing here was measured anywhere else.
+
+`cargo test --locked --test perf` in the "Terminal crates" job (dev profile,
+`opt-level = 3`). The `snapshot()` rows are the snapshot with tab stops, which
+every snapshot now carries.
+
+| metric | ubuntu | macos (aarch64) | windows |
+| --- | --- | --- | --- |
+| idle session 80x24, 10k scrollback allowed, empty | 79 KiB | 78 KiB | 78 KiB |
+| 80x24 with scrollback filled (10000 lines held) | 79 KiB | 79 KiB | 79 KiB |
+| idle session 200x50, empty | 394 KiB | 395 KiB | 394 KiB |
+| 200x50 with scrollback filled (10000 lines held) | 394 KiB | 395 KiB | 394 KiB |
+| parse throughput 80x24 (4 KiB reads, 32 MiB mixed stream) | 108.1 MiB/s | 78.4 MiB/s | 130.5 MiB/s |
+| parse throughput 200x50 (4 KiB reads) | 90.4 MiB/s | 65.3 MiB/s | 113.9 MiB/s |
+| parse throughput 80x24 (256 KiB reads) | 108.2 MiB/s | 76.5 MiB/s | 130.7 MiB/s |
+| 80x24 advance with one-line update | 0.1 us | 0.1 us | 0.1 us |
+| 80x24 frame() clone (1920 cells) | 36.6 us | 20.9 us | 6.9 us |
+| 80x24 snapshot() (611 bytes) | 41.3 us | 24.6 us | 31.7 us |
+| 80x24 damage_since() (2 damaged rows) | 36.54 us | 8.42 us | 1.63 us |
+| 200x50 frame() clone (10000 cells) | 39.1 us | 22.2 us | 31.4 us |
+| 200x50 snapshot() (1223 bytes) | 55.5 us | 35.3 us | 34.6 us |
+| 200x50 damage_since() (2 damaged rows) | 28.82 us | 12.18 us | 1.24 us |
+
+The test also prints "per scrollback line: 0 B" and idle and filled sizes that
+are equal; that probe does not show a scrollback cost (why was not
+investigated), so do not read it as a cost of zero. The peak process RSS from
+the perf-compare workflow below does show one.
+
+perf-compare workflow (`crates/perf-compare`, same stream and read sizes,
+interleaved, 5 runs, median with min..max and the ratio to bare `vt_write`).
+The last column is headed "old Screen" by `summarize.py`, but it times
+`canopy_term_core::Screen::advance` (`src/main.rs` uses the current `Screen`),
+which is the current engine behind its worker thread. The label is stale.
+
+| os | reads | bare vt_write | GhosttyScreen end-barrier | GhosttyScreen seq() per read | GhosttyScreen frame() per read | `Screen::advance` ("old Screen") |
+| --- | --- | --- | --- | --- | --- | --- |
+| ubuntu | 4 KiB | 81.0 (80.9..81.4) | 68.9 (68.4..69.3) (0.85) | 13.0 (13.0..13.2) (0.16) | 12.7 (12.6..12.8) (0.16) | 78.4 (77.3..78.5) (0.97) |
+| ubuntu | 64 KiB | 80.4 (79.0..81.5) | 68.5 (68.2..68.9) (0.85) | 53.7 (53.4..54.0) (0.67) | 53.5 (53.3..53.6) (0.67) | 78.3 (76.7..78.5) (0.97) |
+| macos | 4 KiB | 78.8 (74.8..86.5) | 69.2 (66.3..78.3) (0.88) | 21.6 (17.6..24.1) (0.27) | 22.0 (20.5..23.4) (0.28) | 69.4 (65.2..90.6) (0.88) |
+| macos | 64 KiB | 86.2 (81.0..93.2) | 63.5 (59.5..78.5) (0.74) | 59.3 (57.5..73.8) (0.69) | 68.6 (60.0..68.9) (0.80) | 84.3 (71.8..88.3) (0.98) |
+
+Peak RSS, one process each, 10k scrollback lines (KiB): bare ghostty idle /
+filled, `GhosttyScreen`, `Screen`.
+
+| os | bare idle | bare filled | GhosttyScreen idle | GhosttyScreen filled | Screen idle | Screen filled |
+| --- | --- | --- | --- | --- | --- | --- |
+| ubuntu (VmHWM) | 3488 | 10148 | 4128 | 13000 | 3796 | 12448 |
+| macos (time -l) | 1840 | 8736 | 2512 | 11552 | 2400 | 11264 |
+
+Not measured: windows in perf-compare (the workflow does not run there), CPU
+profile of this change, the cost of the larger snapshot against the previous
+one (no baseline was run on this commit's parent).
 
 Costs of the new engine that do not depend on a benchmark: one OS thread per
 `Screen` (the engine's handles are `!Send`, see `src/ghostty/mod.rs`), a cold
