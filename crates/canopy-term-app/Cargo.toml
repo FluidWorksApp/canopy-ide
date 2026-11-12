@@ -29,3 +29,10 @@ canopy-pty-host = { path = "../canopy-pty-host" }
 [profile.release]
 lto = "thin"
 strip = true
+
+# Profiles in a path dependency are ignored. libghostty-vt-sys (the engine behind
+# canopy-term-core) picks Zig's optimize mode from the profile: debug info on
+# means a Zig Debug build (slow, safety checks that abort); off gives
+# ReleaseFast, which is what a release build gets.
+[profile.dev.package.libghostty-vt-sys]
+debug = false

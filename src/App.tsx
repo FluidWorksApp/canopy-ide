@@ -72,6 +72,7 @@ import { WorkspaceHooksNotice } from "./remoteExecution/WorkspaceHooksNotice";
 import { installOutcomes } from "./outcomes";
 import { startReceiptEngine } from "./receipts/engine";
 import { observeGateEvents, openRules } from "./gates/events";
+import { observePrCreated } from "./prCreatedObserver";
 import {
   derivePending,
   parseAgentEvent,
@@ -1314,6 +1315,8 @@ export default function App() {
         // What a team rule or the irreversible-action gate stopped, for the
         // cards over the agent's terminal and the approve-once question.
         observeGateEvents(parsed.map((p) => p.data), ts);
+        // A PR the agent itself just created is on record as its own.
+        void observePrCreated(parsed.map((p) => p.data));
         setAgentEvents((prev) =>
           // Not a bare slice: the cap is app-wide and one of this list's
           // consumers is per-pty, so a busy project used to evict a quiet

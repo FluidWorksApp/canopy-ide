@@ -1,17 +1,35 @@
-# canopy-term-core: emulator choice and measured cost
+# canopy-term-core: engine and measured cost
 
-Report only: nothing in the test suite asserts on timing. The numbers come from
-CI run 43002266592 (commit 297673bf), from the `Terminal crates` job on
-GitHub-hosted runners.
+The terminal engine is **libghostty-vt** 0.2.2 (ghostty `a887df42`). Build
+requirements, the Zig pin and the offline recipe are in `README.md`.
 
-- **Build.** The `dev` profile at `opt-level = 3`, with dependency debug
-  assertions off. Both are set in `Cargo.toml`, because `cargo test` is
-  otherwise unoptimised.
-- **Noise.** Runners are shared and noisy. The same unchanged engine measured
-  79 MiB/s in this run and 138 MiB/s in an earlier run on ubuntu, so read these
-  as orders of magnitude, not as benchmarks.
-- **Reproduce.** Run `cargo test --locked --test compare --test perf`. Both
-  targets have `harness = false`, so they print without `--nocapture`.
+Report only: nothing in the test suite asserts on timing. Reproduce the
+`Screen` numbers with `cargo test --locked --test perf`; the target has
+`harness = false`, so it prints without `--nocapture`. The `dev` profile is
+`opt-level = 3` with dependency debug assertions off (set in `Cargo.toml`),
+because `cargo test` is otherwise unoptimised and, with debug info on, would
+build libghostty-vt in Zig's Debug mode.
+
+Numbers for `Screen` on libghostty-vt are not recorded here yet. Everything
+below the line was measured on the `alacritty_terminal` based `Screen`, which
+has been removed; it is kept as the record of why an engine was chosen at the
+time and of what the project moved away from. Do not read it as the cost of
+the current engine. The libghostty-vt comparison (bare `vt_write`, `Screen`) is
+being measured separately.
+
+Costs of the new engine that do not depend on a benchmark: one OS thread per
+`Screen` (the engine's handles are `!Send`, see `src/ghostty/mod.rs`), a cold
+build that is 90 to 145 s longer, and a 565 MB Zig package cache for an offline
+build.
+
+---
+
+# History: the previous engine (removed)
+
+The numbers below come from CI run 43002266592 (commit 297673bf) on
+GitHub-hosted runners, noisy: the same unchanged engine measured 79 MiB/s in
+that run and 138 MiB/s in an earlier run on ubuntu. `tests/compare.rs`, the
+`alacritty_terminal` adapter, `src/filter.rs` and `vt100` are deleted.
 
 ## Emulator choice
 

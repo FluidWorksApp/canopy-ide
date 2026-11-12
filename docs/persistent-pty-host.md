@@ -55,6 +55,9 @@ are the parent, and tmux would re-emulate the byte stream.
   over either. The context bridge port is ephemeral (`context.rs` `start`).
 - Sidecars ship through `externalBin` in `tauri.conf.json`; CI stubs them with
   `touch` and releases build them through `scripts/prepare-sidecar.mjs`.
+  tauri-build copies them into the target dir with the triple stripped, and
+  tauri-bundler 2.10 signs them on macOS (`bundle/macos/app.rs`, sidecars added
+  to the sign list as executables).
 - POC (python stdlib, not committed): a `setsid` host survives SIGKILL of its
   launcher with the same child pid; a new client reattaches from a byte offset
   with no gap; a non-parent client can resize (SIGWINCH observed) and send input;
@@ -168,6 +171,12 @@ as a second agent on the same conversation. Ids are seeded past the adopted max.
   `attachId`, used when the web view reloads). Whether tabs persist across a quit,
   and so whether adoption fills an existing tab or needs a new surface, is still
   open.
+- Replacing an incompatible, idle host uses the protocol 4 `shutdown_if_idle`
+  op: the host checks that nothing runs and stops accepting spawns under the one
+  lock spawns take, so a terminal another client starts meanwhile is never
+  killed. A host older than 4 lacks the op; there the client lists again right
+  before `shutdown`, which leaves a small window. A failed start of the host
+  client is retried after 30 s rather than kept for the app's lifetime.
 - Adoption attaches with `exclusive` on a protocol 3 host, so a CLI client that
   attached after the `list` is refused rather than silently disconnected.
 
@@ -225,8 +234,76 @@ the host on:
   Hook events go through `~/.canopy/agent-events.jsonl`, which is already stable,
   but the app only reads events written after it starts.
 
-**Not in this PR (stacked follow-ups):** packaging the host so an update does not
-delete it, the app using the host on Windows. Quit and Stop All is #794.
+**Packaging and updates.** The host ships inside the app as a Tauri sidecar
+(`externalBin: binaries/canopy-pty-host`, built by `scripts/prepare-sidecar.mjs`
+through its own manifest). Tauri places it next to the app binary
+(`Canopy.app/Contents/MacOS`, `/usr/bin` for deb and rpm, the AppImage's
+`usr/bin`, next to `canopy.exe` on Windows).
+- macOS signing. tauri-bundler 2.10 signs every externalBin entry with the app's
+  one entitlements file (`entitlements.plist`: JIT, library validation off, DYLD
+  variables, microphone) and has no per-binary setting, and `codesign --force`
+  would overwrite any signature put on the file beforehand. A long-lived process
+  that outlives the app should not carry those. So for macOS release builds the
+  host is not an externalBin: `prepare-sidecar.mjs --release` signs a copy
+  (`binaries/canopy-pty-host-signed`) with the hardened runtime, a timestamp and
+  the empty `pty-host-entitlements.plist`, and `tauri.release-macos.conf.json`
+  (passed with `--config` by `release.yml` and `release-macos.sh`) removes the
+  externalBin entry and copies that file to `Contents/MacOS/canopy-pty-host`
+  through `bundle.macOS.files`, which the bundler never signs. Without
+  `APPLE_SIGNING_IDENTITY` the copy is staged unsigned. Dev and CI builds do not
+  use the override. The release workflow then checks the shipped host: valid
+  signature, hardened runtime, timestamp, and no entitlement key at all; it fails
+  the job when `APPLE_CERTIFICATE` is set and any of that is wrong.
+- A host never runs from the bundle. An update replaces the bundle while the
+  host keeps running. A translocated app, or an AppImage, runs from a mount that
+  goes away when the app quits. And a later launch must never exec a path the
+  update removed. So on first use (`CANOPY_PTY_HOST=1`, Unix) the app reads the
+  bundled bytes and installs them as
+  `<socket dir>/bin/<app version>-<sha256 prefix>/canopy-pty-host`. The socket
+  dir is `~/.canopy/pty-host` (or `pty-host-dev`, or `CANOPY_PTY_HOST_DIR`),
+  mode 0700. The host is then started from that copy, and a later restart reuses
+  the same path (`src-tauri/src/pty_hosted/install.rs`).
+  `CANOPY_PTY_HOST_EXE` still overrides this, with no copy.
+- The copy is written from the hashed bytes, not with a file copy. So it has no
+  extended attributes, in particular no quarantine flag from a downloaded app.
+  The Mach-O signature travels inside the bytes. The copy is read back and must
+  hash the same before it is renamed into place. A file under `bin/` is never
+  rewritten in place: macOS kills a signed process whose file changes, and a
+  rename leaves a running host on its old inode. If installing fails, terminals
+  stay in-process. The app never falls back to the bundled path.
+- After an update, the new app reaches the old host through the same socket.
+  Protocol versions handle skew. `hello` now reports the host's own path, so the
+  directory a live host came from is kept. Other install directories are pruned
+  on a later launch. Pruning happens only when it is certain which directory is
+  live: from a `hello` answer, or no socket. A refused
+  connection (a live host with a full accept queue is refused too) and any other
+  failure prune nothing. A running host also holds a shared lock on its own
+  install directory, which a prune respects.
+- Windows: the host builds and runs there (see below). It is staged and bundled
+  like the others, but the app does not launch it on Windows yet.
+- The launch probe asks `list` once more after 250 ms on anything but "no
+  socket" or "nobody listening". Right after a quit, the host can briefly fail
+  to answer, and that failure used to read as an unusable host (or as no host).
+
+**Unproven: needs a real signed build, cannot be shown by PR CI.**
+- The release-workflow signing of the sidecar. The verify step only runs on a
+  tag build with the signing identity set.
+- An app update on a signed build while terminals are running. The relaunched
+  app should adopt them from the host started from the old version's install
+  directory, which should be kept, and then pruned once that host exits.
+- Whether macOS folder-permission prompts (for example `~/Documents`) name the
+  host binary instead of Canopy. Hosted children are spawned by
+  `canopy-pty-host`, which runs from outside the bundle.
+- AppImage: quit and relaunch with hosted terminals, checking that the host
+  keeps running after the AppImage mount is gone.
+- A notarized build's copied host executing under Gatekeeper. Expected to work,
+  since it is not quarantined and carries a valid Developer ID signature. On
+  first launch of a freshly downloaded build, `xattr -l` on the installed copy
+  should show no `com.apple.quarantine`.
+- The sidecar's placement in the macOS and Linux bundles. PR CI builds a real
+  bundle only on Windows.
+- The whole launch path (install, `ensure_running`, prune) run end to end with
+  a real host binary. Unit tests cover each step on its own.
 
 ## Windows host
 

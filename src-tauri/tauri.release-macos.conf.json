@@ -1,0 +1,13 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "bundle": {
+    "externalBin": [
+      "binaries/canopy-hook"
+    ],
+    "macOS": {
+      "files": {
+        "MacOS/canopy-pty-host": "binaries/canopy-pty-host-signed"
+      }
+    }
+  }
+}

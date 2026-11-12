@@ -33,6 +33,7 @@ mod devicehub_proxy;
 mod dictation;
 mod execution;
 mod mirror;
+mod remote_download;
 mod remote_upload;
 mod teleport;
 // Intel macOS builds compile dictation out (no compatible ONNX Runtime); a stub
@@ -85,6 +86,7 @@ mod sysaudio;
 mod system_one;
 mod t3_client;
 mod t3_socket;
+mod tailnet;
 mod tasks;
 mod tunnel;
 mod turn_rollback;
@@ -812,6 +814,7 @@ pub fn run() {
             mirror::execution_mirror_inspect,
             mirror::execution_mirror_send,
             mirror::execution_mirror_candidates,
+            remote_download::execution_remote_download,
             remote_upload::execution_remote_upload,
             remote_upload::execution_remote_upload_cancel,
             remote_upload::execution_remote_stage_images,
@@ -1189,6 +1192,10 @@ pub fn run() {
             tunnel::tunnel_start,
             tunnel::tunnel_stop,
             tunnel::tunnel_status,
+            tailnet::tailscale_status,
+            tailnet::tailscale_allow_set,
+            tailnet::tailscale_allowed_list,
+            tailnet::tailscale_open_app,
             dictation::dictation_models,
             dictation::dictation_status,
             dictation::dictation_download,

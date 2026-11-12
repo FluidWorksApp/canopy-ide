@@ -1,7 +1,9 @@
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("../ipc", () => ({
+  // provenance.ts subscribes to the change channel at module load.
+  onStoreChange: vi.fn(() => new Promise<never>(() => {})),
   fsReadFile: vi.fn(async (path: string) =>
     new TextEncoder().encode(
       path.endsWith(".md") ? "# Risk report\nThe store policy changed." : "x",
@@ -14,6 +16,7 @@ vi.mock("../ipc", () => ({
     entries: [{}, {}, {}],
   })),
   ghPrMerge: vi.fn(async () => ({ message: "Merged #21", pending: false })),
+  ghPrAutoMerge: vi.fn(async () => "#21 will merge automatically once its checks and reviews pass"),
   ghPrClose: vi.fn(async () => "closed"),
   ghPrList: vi.fn(async () => [
     {
@@ -29,6 +32,10 @@ vi.mock("../ipc", () => ({
       deletions: 3,
     },
   ]),
+}));
+vi.mock("../links", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../links")>()),
+  openInOsBrowser: vi.fn(),
 }));
 vi.mock("../commitPushPrIpc", () => ({
   runCommitPushPr: vi.fn(async () => ({
@@ -97,6 +104,7 @@ vi.mock("../remoteExecution/workspace", () => ({
 import { AgentDetailsCard, prStatusLabel } from "./AgentDetailsCard";
 import { liveEnvironments } from "../environments/live";
 import * as ipc from "../ipc";
+import * as links from "../links";
 
 const idle = { state: "idle" } as never;
 const digest = {
@@ -221,7 +229,7 @@ describe("AgentDetailsCard", () => {
     expect(screen.getByText("Ready")).toBeInTheDocument();
     expect(screen.getByText("+40")).toBeInTheDocument();
     expect(screen.getByText("Lineage · 1 running")).toBeInTheDocument();
-    expect(screen.getByText("1 done · 2 pending")).toBeInTheDocument();
+    expect(screen.getByText("1 done · 1 in progress · 1 not started")).toBeInTheDocument();
     expect(screen.getByText("Wire it up")).toBeInTheDocument(); // current step while collapsed
   });
 
@@ -503,6 +511,34 @@ describe("failing PR", () => {
   });
 });
 
+describe("checks still running", () => {
+  it("names the checks that have not passed", async () => {
+    vi.mocked(ipc.ghPrList).mockResolvedValue([
+      {
+        number: 5,
+        title: "Ship it",
+        url: "u",
+        branch: "feat/x",
+        base: "main",
+        state: "OPEN",
+        draft: false,
+        checks: "PENDING",
+        checks_summary: "3/7 checks passed",
+        check_runs: [
+          { name: "Frontend", state: "running" },
+          { name: "Secret scan", state: "queued" },
+        ],
+        mergeable: "MERGEABLE",
+        additions: 1,
+        deletions: 0,
+      },
+    ] as never);
+    setup({ repo: "/pending-checks", cwd: "/pending-checks" });
+    expect(await screen.findByText("Frontend")).toBeTruthy();
+    expect(screen.getByText("Secret scan")).toBeTruthy();
+  });
+});
+
 describe("PRs raised by the agent", () => {
   it("lists every one on hover", async () => {
     vi.mocked(ipc.ghPrList).mockResolvedValue([
@@ -557,12 +593,117 @@ describe("PRs raised by the agent", () => {
   });
 });
 
+describe("a PR from another branch", () => {
+  it("shows the PR the session raised, and no Commit & raise PR", async () => {
+    vi.mocked(ipc.ghPrList).mockResolvedValue([
+      {
+        number: 571,
+        title: "Release: builder",
+        url: "https://github.com/o/r/pull/571",
+        branch: "release/x",
+        base: "main",
+        state: "OPEN",
+        draft: false,
+        checks: "PENDING",
+        mergeable: "MERGEABLE",
+        additions: 1,
+        deletions: 0,
+      },
+    ] as never);
+    (ipc as unknown as { provenanceForSession: unknown }).provenanceForSession =
+      vi.fn(async () => [
+        {
+          repo: "/main-checkout",
+          pr_number: 571,
+          pr_url: "https://api.github.com/repos/o/r/pulls/571",
+          branch: "release/x",
+          session_id: "s",
+        },
+      ]);
+    // Uncommitted work, so the raise button would show if nothing owned a PR.
+    vi.mocked(ipc.gitStatus).mockResolvedValue({
+      is_repo: true,
+      branch: "feat/x",
+      entries: [{ status: "M", path: "a.ts" }],
+    } as never);
+    setup({ repo: "/wt-other", cwd: "/wt-other" });
+    expect(await screen.findByText("#571")).toBeInTheDocument();
+    expect(screen.queryByText(/Commit & raise PR/)).toBeNull();
+    cleanup();
+    // Control: the same session with no edge does offer it.
+    (ipc as unknown as { provenanceForSession: unknown }).provenanceForSession =
+      vi.fn(async () => []);
+    setup({ repo: "/wt-control", cwd: "/wt-control" });
+    expect(await screen.findByText(/Commit & raise PR/)).toBeInTheDocument();
+    delete (ipc as unknown as { provenanceForSession?: unknown })
+      .provenanceForSession;
+  });
+});
+
+describe("the task list", () => {
+  it("shows all three states in words, on one line", () => {
+    setup();
+    const headline = screen.getByText("1 done · 1 in progress · 1 not started");
+    expect(headline.className).toContain("agent-card-tasks-headline");
+    expect(headline.getAttribute("title")).toBe(headline.textContent);
+  });
+  it("stays open when the card remounts", () => {
+    try {
+      localStorage.removeItem("canopy:agentCard:tasksOpen");
+    } catch {
+      /* no storage */
+    }
+    const first = setup();
+    fireEvent.click(screen.getByRole("button", { name: /Tasks/ }));
+    expect(screen.getAllByRole("button", { name: /Focus on/ })[0]).toBeInTheDocument();
+    cleanup();
+    setup();
+    expect(screen.getAllByRole("button", { name: /Focus on/ })[0]).toBeInTheDocument();
+    void first;
+    localStorage.removeItem("canopy:agentCard:tasksOpen");
+  });
+});
+
 describe("lineage rows", () => {
   it("open to show what the sub-agent returned", () => {
     setup();
     fireEvent.click(screen.getByRole("button", { name: /Previous agents/ }));
     fireEvent.click(screen.getByRole("button", { name: /planner/ }));
     expect(screen.getByText("No text was returned.")).toBeInTheDocument();
+  });
+});
+
+describe("the PR number", () => {
+  it("opens the pull request on GitHub", async () => {
+    vi.mocked(ipc.gitStatus).mockResolvedValue({
+      is_repo: true,
+      branch: "feat/x",
+      entries: [],
+    } as never);
+    vi.mocked(ipc.ghPrList).mockResolvedValue([
+      {
+        number: 779,
+        title: "All workspaces",
+        url: "https://github.com/acme/app/pull/779",
+        branch: "feat/x",
+        base: "main",
+        state: "OPEN",
+        draft: false,
+        checks: "PASS",
+        mergeable: "MERGEABLE",
+        additions: 1,
+        deletions: 0,
+      },
+    ] as never);
+    setup({ repo: "/linkable", cwd: "/linkable" });
+    fireEvent.click(
+      await screen.findByRole("button", {
+        name: "Open pull request #779 on GitHub",
+      }),
+    );
+    expect(links.openInOsBrowser).toHaveBeenCalledWith(
+      "https://github.com/acme/app/pull/779",
+    );
   });
 });
 
@@ -624,6 +765,73 @@ describe("merging from the card", () => {
     expect(
       await screen.findByRole("button", { name: "Squash & merge" }),
     ).toBeDisabled();
+  });
+
+  describe("when GitHub's branch policy refuses the merge", () => {
+    const policy =
+      "Pull request is not mergeable: the base branch policy prohibits the merge.\nTo have the pull request merged after all the requirements have been met, add the `--auto` flag.";
+    const open = async (repo: string) => {
+      vi.mocked(ipc.ghPrAutoMerge).mockClear();
+      vi.mocked(ipc.gitStatus).mockResolvedValue({
+        is_repo: true,
+        branch: "feat/x",
+        entries: [],
+      } as never);
+      vi.mocked(ipc.ghPrList).mockResolvedValue([
+        {
+          number: 21,
+          title: "Ready",
+          url: "u",
+          branch: "feat/x",
+          base: "main",
+          state: "OPEN",
+          draft: false,
+          checks: "PASS",
+          mergeable: "MERGEABLE",
+          additions: 1,
+          deletions: 0,
+        },
+      ] as never);
+      setup({ repo, cwd: repo });
+      fireEvent.click(
+        await screen.findByRole("button", { name: "Squash & merge" }),
+      );
+      fireEvent.click(screen.getByRole("button", { name: "Confirm" }));
+    };
+
+    it("offers Merge when checks pass, and asks GitHub for auto-merge only when clicked", async () => {
+      vi.mocked(ipc.ghPrMerge).mockRejectedValueOnce(new Error(policy));
+      await open("/policy");
+      const offer = await screen.findByRole("button", {
+        name: "Merge when checks pass",
+      });
+      expect(ipc.ghPrAutoMerge).not.toHaveBeenCalled();
+      fireEvent.click(offer);
+      await waitFor(() =>
+        expect(ipc.ghPrAutoMerge).toHaveBeenCalledWith("/policy", 21, "squash", true),
+      );
+      await waitFor(() =>
+        expect(screen.queryByRole("button", { name: "Merge when checks pass" })).toBeNull(),
+      );
+      expect(screen.queryByText("Merged")).toBeNull();
+    });
+
+    it("Dismiss removes the offer without calling GitHub", async () => {
+      vi.mocked(ipc.ghPrMerge).mockRejectedValueOnce(new Error(policy));
+      await open("/policy-dismiss");
+      await screen.findByRole("button", { name: "Merge when checks pass" });
+      fireEvent.click(screen.getByRole("button", { name: "Dismiss" }));
+      expect(screen.queryByRole("button", { name: "Merge when checks pass" })).toBeNull();
+      expect(ipc.ghPrAutoMerge).not.toHaveBeenCalled();
+    });
+
+    it("offers nothing for other merge failures", async () => {
+      vi.mocked(ipc.ghPrMerge).mockRejectedValueOnce(new Error("merge conflicts"));
+      await open("/conflicts");
+      // The failed merge is over: the merge button is back, with no offer.
+      await screen.findByRole("button", { name: "Squash & merge" });
+      expect(screen.queryByRole("button", { name: "Merge when checks pass" })).toBeNull();
+    });
   });
 });
 

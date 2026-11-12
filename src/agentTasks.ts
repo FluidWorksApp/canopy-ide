@@ -61,11 +61,12 @@ export function summarizeTasks(tasks: AgentTask[]): TaskSummary {
   };
 }
 
-/** One line for the collapsed row. */
+/** One line for the collapsed row: all three states, so "pending" is not a
+ *  blur of work under way and work not begun. */
 export function taskHeadline(s: TaskSummary): string {
   if (s.total === 0) return "No tasks";
-  const base = `${s.done} done · ${s.total - s.done} pending`;
-  return s.total === s.done ? `All ${s.total} done` : base;
+  if (s.total === s.done) return `All ${s.total} done`;
+  return `${s.done} done · ${s.running} in progress · ${s.pending} not started`;
 }
 
 /** What the "focus on this" action sends the agent. The agent keeps its list;

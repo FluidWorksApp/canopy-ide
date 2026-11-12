@@ -5,7 +5,7 @@ description = "Native terminal renderer: layout, glyph atlas and damage tracking
 authors = ["Cause Connect Pte Ltd <sam@fluidwords.app>"]
 license = "MIT"
 edition = "2021"
-rust-version = "1.85"
+rust-version = "1.90"
 
 # Its own workspace root with its own lock: parallel work on other crates, and
 # dependencies a track adds, never touch the app's Cargo.lock.
@@ -58,3 +58,10 @@ opt-level = 3
 opt-level = 3
 [profile.dev.package.read-fonts]
 opt-level = 3
+
+# Profiles in a path dependency are ignored. libghostty-vt-sys (the engine behind
+# canopy-term-core) picks Zig's optimize mode from the profile: debug info on
+# means a Zig Debug build (slow, safety checks that abort); off gives
+# ReleaseFast, which is what a release build gets.
+[profile.dev.package.libghostty-vt-sys]
+debug = false

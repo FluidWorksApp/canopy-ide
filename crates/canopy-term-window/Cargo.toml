@@ -5,8 +5,9 @@ description = "Native window shell for the terminal: winit, wgpu surface, IME, c
 authors = ["Cause Connect Pte Ltd <sam@fluidwords.app>"]
 license = "MIT"
 edition = "2021"
-# The highest in the locked graph: uuid (via accesskit) declares 1.89.
-rust-version = "1.89"
+# The highest in the locked graph: libghostty-vt (via canopy-term-core) needs
+# 1.90; uuid (via accesskit) declares 1.89.
+rust-version = "1.90"
 
 # Its own workspace root with its own lock: parallel work on other crates, and
 # dependencies a track adds, never touch the app's Cargo.lock.
@@ -53,3 +54,10 @@ arboard = { version = "3", default-features = false, optional = true }
 [[example]]
 name = "term_window"
 required-features = ["window"]
+
+# Profiles in a path dependency are ignored. libghostty-vt-sys (the engine behind
+# canopy-term-core) picks Zig's optimize mode from the profile: debug info on
+# means a Zig Debug build (slow, safety checks that abort); off gives
+# ReleaseFast, which is what a release build gets.
+[profile.dev.package.libghostty-vt-sys]
+debug = false

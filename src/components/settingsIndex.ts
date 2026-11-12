@@ -79,6 +79,7 @@ export const SETTINGS_INDEX: SettingEntry[] = [
   { tab: "remote", name: "Reach", keywords: ["internet", "tunnel", "access", "exposure"] },
   { tab: "remote", name: "Public link", desc: "One tunnel, shared with internet team sessions.", keywords: ["tunnel", "cloudflare", "ngrok", "tailscale", "share"] },
   { tab: "remote", name: "Scan to connect", keywords: ["qr", "phone", "pair"] },
+  { tab: "remote", name: "Tailscale", desc: "Uses the Tailscale app on this machine.", keywords: ["tailnet", "vpn", "machines", "allow", "connect", "terminal"] },
   { tab: "spotsearch", name: "Conversations to index", desc: "Search past conversations by content." },
   { tab: "spotsearch", name: "Terminal scrollback", desc: "Searchable while open; dropped on close." },
   { tab: "spotsearch", name: "Scope", desc: "This project, or every project on this machine." },
