@@ -53,3 +53,9 @@ harness = false
 [[test]]
 name = "perf"
 harness = false
+
+# Peak resident memory with 10k scrollback lines, idle and filled, one child
+# process per scenario. Report only (see the file).
+[[test]]
+name = "memory"
+harness = false
