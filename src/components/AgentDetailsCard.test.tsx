@@ -35,6 +35,7 @@ vi.mock("../ipc", () => ({
 }));
 vi.mock("../prDraftBrain", () => ({
   draftPrWithBrain: vi.fn(async () => null),
+}));
 vi.mock("../links", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../links")>()),
   openInOsBrowser: vi.fn(),
