@@ -43,7 +43,7 @@ use canopy_term_net::session::{
 };
 use canopy_term_net::tailnet_tcp::{BindError, TailnetTcp};
 use canopy_term_net::tailscale::{CliRunner, InstallProblem, TailnetState, Tailscale};
-use canopy_term_net::{Connection, PeerIdentity, Transport};
+use canopy_term_net::{PeerIdentity, Transport};
 use serde::Serialize;
 use std::collections::BTreeSet;
 use std::io;

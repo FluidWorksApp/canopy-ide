@@ -2088,7 +2088,7 @@ impl PtyManager {
     /// skip WebView backpressure so no absent renderer can stall their output.
     /// Generic over the runtime so it can be exercised with a mock app in tests.
     #[allow(clippy::too_many_arguments)]
-    fn spawn<R: tauri::Runtime>(
+    pub(crate) fn spawn<R: tauri::Runtime>(
         &self,
         app: AppHandle<R>,
         cols: u16,
