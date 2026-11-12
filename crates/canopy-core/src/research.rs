@@ -1529,13 +1529,11 @@ impl ResearchStore {
         let path = canonical_path(&path);
         let file = PathBuf::from(&path);
         let roots = roots.unwrap_or_default();
-        // Only files belonging to this project. The store is otherwise reachable
-        // with any path at all, and "import" is not a licence to read the disk.
-        if !roots.iter().any(|root| {
-            let root = canonical_path(root);
-            file.starts_with(Path::new(&root)) && file != Path::new(&root)
-        }) {
-            return Err(format!("{path} is not inside this project"));
+        // Any file the person opened may be adopted, inside the project or not:
+        // an agent's scratchpad draft is research too. The import is the
+        // person's own click on a file already open in their editor.
+        if !file.is_file() {
+            return Err(format!("{path} isn't a file on this machine"));
         }
 
         // The file path is the identity. A repeated import resolves to the entry
@@ -1634,13 +1632,6 @@ impl ResearchStore {
         let file = lexical_path(&path)?;
         let path = file.to_string_lossy().to_string();
         let roots = roots.unwrap_or_default();
-        if !roots
-            .iter()
-            .filter_map(|root| lexical_path(root).ok())
-            .any(|root| file.starts_with(&root) && file != root)
-        {
-            return Err(format!("{path} is not inside this project"));
-        }
         if let Some(meta) = self
             .load_project(&project_id)?
             .into_iter()
@@ -2642,7 +2633,7 @@ mod tests {
     }
 
     #[test]
-    fn importing_text_refuses_what_a_path_import_would() {
+    fn importing_text_refuses_bad_paths_and_text() {
         let store = TempHome::new("import-text-refuse");
         let roots = Some(vec!["/workspace".to_string()]);
         let try_import = |path: &str, text: &str| {
@@ -2655,12 +2646,6 @@ mod tests {
                 None,
             )
         };
-        assert!(try_import("/etc/passwd.md", "# x\n\ny")
-            .unwrap_err()
-            .contains("not inside this project"));
-        assert!(try_import("/workspace", "# x\n\ny")
-            .unwrap_err()
-            .contains("not inside this project"));
         assert!(try_import("/workspace/../etc/x.md", "# x\n\ny")
             .unwrap_err()
             .contains(".."));
@@ -2811,19 +2796,52 @@ mod tests {
     }
 
     #[test]
+    fn a_file_outside_the_project_imports_too() {
+        // An agent's scratchpad draft is research as much as a file in the repo.
+        let store = TempHome::new("import-outside");
+        let repo = store.0.join("repo");
+        let scratch = store.0.join("scratchpad");
+        std::fs::create_dir_all(&repo).unwrap();
+        std::fs::create_dir_all(&scratch).unwrap();
+        let md = scratch.join("draft.md");
+        std::fs::write(&md, "# Draft\n\nA finding.\n").unwrap();
+        let s = store
+            .import_impl(
+                "p1".into(),
+                None,
+                Some(vec![repo.to_string_lossy().to_string()]),
+                md.to_string_lossy().to_string(),
+                None,
+            )
+            .unwrap();
+        assert_eq!(s.title, "Draft");
+        let t = store
+            .import_text_impl(
+                "p1".into(),
+                None,
+                Some(vec!["/workspace".to_string()]),
+                "/tmp/elsewhere/notes.md".into(),
+                "# Notes\n\nAlso a finding.\n".into(),
+                None,
+            )
+            .unwrap();
+        assert_eq!(t.title, "Notes");
+    }
+
+    #[test]
     fn import_refuses_what_it_should_not_read_or_cannot_use() {
         let store = TempHome::new("import-refuse");
         let repo = store.0.join("repo");
         std::fs::create_dir_all(&repo).unwrap();
         let roots = vec![repo.to_string_lossy().to_string()];
 
-        // Outside the project: "import" is not a licence to read the disk.
+        // Not a file: nothing to read.
         assert!(store
             .import_impl(
                 "p1".into(),
                 None,
                 Some(roots.clone()),
-                "/etc/hosts".into(),
+                repo.join("missing.md").to_string_lossy().to_string(),
                 None
             )
             .is_err());
