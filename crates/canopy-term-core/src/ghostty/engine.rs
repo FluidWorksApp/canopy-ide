@@ -18,7 +18,7 @@ use libghostty_vt::screen::{
     Cell as GCell, CellContentTag, CellWide, RowSemanticPrompt, Screen as ActiveScreen,
 };
 use libghostty_vt::selection::Selection;
-use libghostty_vt::style::{RgbColor, Style, StyleColor, Underline};
+use libghostty_vt::style::{Palette, RgbColor, Style, StyleColor, Underline};
 use libghostty_vt::terminal::{
     ConformanceLevel, DeviceAttributes, DeviceType, Mode, Point, PointCoordinate,
     PrimaryDeviceAttributes, SecondaryDeviceAttributes, TertiaryDeviceAttributes,
@@ -930,6 +930,17 @@ impl Engine {
         let _ = self.term.set_default_fg_color(c(fg));
         let _ = self.term.set_default_bg_color(c(bg));
         let _ = self.term.set_default_cursor_color(c(cursor));
+    }
+
+    /// Sets the 16 ANSI colours the palette starts from (OSC 4 queries answer
+    /// with them; entries a program changed with OSC 4 keep its value). The
+    /// 6x6x6 cube and the greys stay the engine's xterm ones.
+    pub(crate) fn set_default_palette(&mut self, colors: [(u8, u8, u8); 16]) {
+        let mut palette = Palette::default();
+        for (slot, (r, g, b)) in palette.0.iter_mut().zip(colors) {
+            *slot = RgbColor { r, g, b };
+        }
+        let _ = self.term.set_default_color_palette(Some(palette));
     }
 
     pub(crate) fn resize(&mut self, cols: u16, rows: u16) {

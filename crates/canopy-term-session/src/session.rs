@@ -346,6 +346,12 @@ impl<L: SessionLink> Session<L> {
         self.screen.set_reply_colors(fg, bg, cursor);
     }
 
+    /// The 16 ANSI colours OSC 4 queries are answered with (the renderer's
+    /// palette), unless the program changed them.
+    pub fn set_default_palette(&mut self, colors: [(u8, u8, u8); 16]) {
+        self.screen.set_default_palette(colors);
+    }
+
     /// Parses history before going live: every reply it produces is dropped
     /// and nothing is published for it on its own. Call before the first tick,
     /// with bytes that came from the same program (the host's ring, or a

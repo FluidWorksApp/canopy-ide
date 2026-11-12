@@ -219,6 +219,32 @@ fn colour_queries_use_the_programs_colours_then_the_themes() {
 }
 
 #[test]
+fn palette_queries_answer_with_the_configured_ansi_colours() {
+    let mut s = Screen::new(20, 3);
+    let mut colors = [(0u8, 0u8, 0u8); 16];
+    colors[1] = (0xaa, 0xbb, 0xcc);
+    colors[15] = (0x01, 0x02, 0x03);
+    s.set_default_palette(colors);
+    s.advance(b"\x1b]4;1;?\x07\x1b]4;15;?\x07");
+    assert_eq!(
+        s.take_replies(),
+        b"\x1b]4;1;rgb:aaaa/bbbb/cccc\x07\x1b]4;15;rgb:0101/0202/0303\x07"
+    );
+
+    // A program's own OSC 4 still wins over the configured default.
+    s.advance(b"\x1b]4;1;rgb:11/22/33\x07\x1b]4;1;?\x07");
+    assert_eq!(s.take_replies(), b"\x1b]4;1;rgb:1111/2222/3333\x07");
+
+    // Foreground and background come from `set_reply_colors`, beside it.
+    s.set_reply_colors(Some((0xee, 0xee, 0xee)), Some((0x10, 0x20, 0x30)), None);
+    s.advance(b"\x1b]10;?\x07\x1b]11;?\x07");
+    assert_eq!(
+        s.take_replies(),
+        b"\x1b]10;rgb:eeee/eeee/eeee\x07\x1b]11;rgb:1010/2020/3030\x07"
+    );
+}
+
+#[test]
 fn decrqm_and_other_queries_are_answered_in_stream_order() {
     let mut s = Screen::new(20, 3);
     s.advance(b"x\x1b[?7$p\x1b[6n\x1b[?2004$p\x1b[?2004h\x1b[?2004$p");

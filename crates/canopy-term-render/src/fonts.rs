@@ -262,6 +262,88 @@ impl FontBook {
         }
     }
 
+    /// The book the terminal opens with: the bundled font as the primary face,
+    /// or `family` when it is given and installed. Returns a warning line when
+    /// `family` was asked for and not found (the bundled font is used then).
+    ///
+    /// `system_fonts` keeps its old meaning: the machine's fonts as fallbacks
+    /// for CJK and emoji. Looking a family up needs them loaded, so with a
+    /// family and `system_fonts` off they are loaded, the family is chosen,
+    /// and every face outside it (and the bundled one) is dropped again.
+    pub fn configured(family: Option<&str>, system_fonts: bool) -> (FontBook, Option<String>) {
+        let family = family
+            .map(str::trim)
+            .filter(|f| !f.is_empty() && !f.eq_ignore_ascii_case(BUNDLED_FAMILY));
+        let plain = |system_fonts: bool| {
+            let mut book = FontBook::bundled();
+            if system_fonts {
+                book.load_system_fonts();
+            }
+            book
+        };
+        let Some(family) = family else {
+            return (plain(system_fonts), None);
+        };
+        let mut book = FontBook::bundled();
+        book.load_system_fonts();
+        if book.select_primary(family) {
+            if !system_fonts {
+                book.keep_only_primary_and_bundled();
+            }
+            return (book, None);
+        }
+        let warning =
+            format!("font_family {family:?} is not installed; using the bundled {BUNDLED_FAMILY}");
+        (plain(system_fonts), Some(warning))
+    }
+
+    /// Makes the installed family called `family` (any letter case) the
+    /// primary one. False when no face has that family name.
+    fn select_primary(&mut self, family: &str) -> bool {
+        let found = self
+            .db
+            .faces()
+            .flat_map(|f| f.families.iter().map(|(n, _)| n.clone()))
+            .find(|n| n.eq_ignore_ascii_case(family));
+        match found {
+            Some(name) => {
+                self.primary = name;
+                self.invalidate();
+                true
+            }
+            None => false,
+        }
+    }
+
+    fn keep_only_primary_and_bundled(&mut self) {
+        let drop: Vec<fontdb::ID> = self
+            .db
+            .faces()
+            .filter(|f| {
+                !f.families
+                    .iter()
+                    .any(|(n, _)| *n == self.primary || n == BUNDLED_FAMILY)
+            })
+            .map(|f| f.id)
+            .collect();
+        for id in drop {
+            self.db.remove_face(id);
+        }
+        self.invalidate();
+    }
+
+    /// The name of the primary family.
+    pub fn primary_family(&self) -> &str {
+        &self.primary
+    }
+
+    /// The primary face's metrics (what the cell size derives from).
+    pub fn primary_metrics(&mut self) -> Option<crate::metrics::FontMetrics> {
+        let choice = self.primary_choice(FontStyle::default())?;
+        let face = self.face(choice.face);
+        crate::metrics::FontMetrics::from_font_data(face.data, face.index)
+    }
+
     /// An empty book whose primary family is `family` (fill it with
     /// `add_font_data` / `load_system_fonts`).
     pub fn with_primary(family: &str) -> Self {
@@ -644,6 +726,44 @@ mod tests {
         );
         // Preference alone does not make a face cover.
         assert_eq!(pick_fallback(&[pref(false, false, menlo)], REGULAR), None);
+    }
+
+    #[test]
+    fn no_family_or_the_bundled_one_is_the_default_book_without_a_warning() {
+        for family in [None, Some(""), Some("  "), Some("jetbrains mono")] {
+            let (book, warning) = FontBook::configured(family, false);
+            assert_eq!(warning, None, "{family:?}");
+            assert_eq!(book.primary_family(), BUNDLED_FAMILY);
+            assert_eq!(book.face_count(), 1);
+        }
+    }
+
+    #[test]
+    fn a_family_that_is_not_installed_warns_once_and_keeps_the_bundled_font() {
+        let (mut book, warning) = FontBook::configured(Some("No Such Family 7f3a"), false);
+        let w = warning.expect("a warning");
+        assert!(
+            w.contains("No Such Family 7f3a") && w.contains(BUNDLED_FAMILY),
+            "{w}"
+        );
+        assert!(!w.contains('\n'), "one line");
+        assert_eq!(book.primary_family(), BUNDLED_FAMILY);
+        assert!(book.choose('a', FontStyle::default()).is_some());
+    }
+
+    #[test]
+    fn selecting_a_primary_ignores_letter_case_and_rejects_strangers() {
+        let mut book = FontBook::bundled();
+        assert!(!book.select_primary("Nope"));
+        assert!(book.select_primary("JETBRAINS MONO"));
+        assert_eq!(book.primary_family(), BUNDLED_FAMILY);
+    }
+
+    #[test]
+    fn the_primary_metrics_are_the_primary_faces() {
+        let mut book = FontBook::bundled();
+        let m = book.primary_metrics().expect("metrics");
+        assert_eq!((m.units_per_em, m.advance), (1000, 600));
     }
 
     #[test]

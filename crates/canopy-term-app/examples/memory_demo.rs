@@ -100,7 +100,10 @@ fn main() {
     let (link, peer) = MemoryLink::pair();
     thread::spawn(move || program(peer));
     let session = Session::new(link, session_config(options.cols, options.rows));
-    if let Err(e) = window::run(session, window_config(&options)) {
+    if let Err(e) = window::run(
+        session,
+        window_config(&options, &canopy_term_app::config::resolve(None, &options)),
+    ) {
         eprintln!("memory_demo: {e}");
         std::process::exit(1);
     }

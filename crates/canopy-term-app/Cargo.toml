@@ -20,6 +20,9 @@ path = "src/main.rs"
 canopy-term-session = { path = "../canopy-term-session" }
 # Default features: the winit/wgpu window.
 canopy-term-window = { path = "../canopy-term-window" }
+# The config file (parsed into a `toml::Table` and walked by hand, so every error
+# names its key). Only this crate reads one.
+toml = "0.9"
 
 # The host is unix-only (the Windows host is in progress): there the binary
 # builds, says so, and the memory demo still runs.

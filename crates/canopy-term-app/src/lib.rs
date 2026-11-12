@@ -15,7 +15,8 @@
 //! canopy-pty-host session (attach, ring replay) this crate: host
 //! ```
 //!
-//! * [`args`] and [`paths`]: the command line and the socket location, pure.
+//! * [`args`], [`config`] and [`paths`]: the command line, the config file and
+//!   the socket location, pure.
 //! * [`link`]: [`link::StreamLink`], a non-blocking [`SessionLink`] over any
 //!   blocking stream, with bounded queues, coalesced wakeups and no
 //!   allocation in steady state. Tested on every OS with fake streams.
@@ -30,6 +31,7 @@
 
 pub mod app;
 pub mod args;
+pub mod config;
 #[cfg(unix)]
 pub mod host;
 pub mod link;
