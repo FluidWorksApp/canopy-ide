@@ -43,6 +43,10 @@ on:
         description: 'Publish only after all platforms and updater signatures have been verified'
         type: boolean
         default: false
+      linux_bundle_check:
+        description: 'Linux bundle check: build only the Linux deb (no signing, no secrets, no upload) and verify the terminal app is inside it; the release jobs are skipped'
+        type: boolean
+        default: false
       term_app_dry_run:
         description: 'Dry run: only build and verify canopy-term-app (no tag, no signing, no publish; the release jobs are skipped)'
         type: boolean
@@ -278,8 +282,94 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
+  # Quick Linux-only check of the deb, without a tag or a release. workflow_dispatch
+  # only, with linux_bundle_check ticked. Same system packages, Zig and sidecar
+  # preparation (beforeBuildCommand runs prepare-sidecar.mjs) as the real Linux
+  # build, but builds only the deb, uses no secrets, signs nothing and uploads
+  # nothing. The deb is listed in full so a missing file is visible.
+  linux-bundle-check:
+    name: Linux bundle check
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.linux_bundle_check }}
+    runs-on: ubuntu-22.04
+    timeout-minutes: 60
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Linux system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libappindicator3-dev \
+            librsvg2-dev \
+            libasound2-dev \
+            patchelf \
+            xdg-utils \
+            build-essential \
+            curl wget file libssl-dev libgtk-3-dev
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-gnu
+      - uses: ./.github/actions/install-zig
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            ./src-tauri -> target
+            ./crates/canopy-term-app -> target
+          key: x86_64-unknown-linux-gnu
+      - run: npm ci
+      # bundle.resources lists onnxruntime/*, so something must match the glob.
+      # The real build stages the runtime; this stages the same file.
+      - name: Stage ONNX Runtime
+        run: |
+          ORT_VER=1.24.2
+          PKG="onnxruntime-linux-x64-${ORT_VER}"
+          curl -fSL -o ort.tgz "https://github.com/microsoft/onnxruntime/releases/download/v${ORT_VER}/${PKG}.tgz"
+          tar -xzf ort.tgz
+          mkdir -p src-tauri/onnxruntime
+          cp "${PKG}/lib/libonnxruntime.so.${ORT_VER}" src-tauri/onnxruntime/libonnxruntime.so
+          cp "${PKG}"/lib/*providers_shared* src-tauri/onnxruntime/ 2>/dev/null || true
+          rm -rf "${PKG}" ort.tgz
+      - name: Build the deb
+        # No signing key here, and a configured updater key without one makes
+        # `tauri build` fail after bundling. So the check config is the real
+        # Linux config plus createUpdaterArtifacts=false; externalBin is untouched.
+        run: |
+          jq '.bundle.createUpdaterArtifacts = false' src-tauri/tauri.release-linux.conf.json \
+            > src-tauri/tauri.linux-bundle-check.conf.json
+          npx tauri build --bundles deb --config src-tauri/tauri.linux-bundle-check.conf.json
+      - name: Show what was staged and bundled
+        run: |
+          ls -l src-tauri/binaries/
+          deb="$(find src-tauri/target -path '*/bundle/deb/*.deb' | head -1)"
+          echo "deb: $deb"
+          dpkg-deb -c "$deb"
+      - name: Verify the terminal app is bundled (Linux)
+        shell: bash
+        run: |
+          set -euo pipefail
+          root="src-tauri/target/release/bundle"
+          deb="$(find "$root/deb" -name '*.deb' | head -1)"
+          [ -n "$deb" ] || { echo "::error::no deb was produced."; exit 1; }
+          dpkg-deb -c "$deb" | grep -E ' (\./)?usr/bin/canopy-term-app$' \
+            || { echo "::error::canopy-term-app is missing from $deb."; exit 1; }
+          tmp="$(mktemp -d)"
+          dpkg-deb -x "$deb" "$tmp"
+          file "$tmp/usr/bin/canopy-term-app"
+          file "$tmp/usr/bin/canopy-term-app" | grep -q "x86-64" \
+            || { echo "::error::canopy-term-app is not x86-64."; exit 1; }
+          ls -l "$tmp/usr/bin/canopy-term-app" "$tmp/usr/bin/canopy-pty-host"
+          "$tmp/usr/bin/canopy-term-app" --version
+          rm -rf "$tmp"
+
   build:
     needs: preflight
+    if: ${{ !inputs.linux_bundle_check }}
     strategy:
       # One platform failing shouldn't bin the artifacts of the others.
       fail-fast: false
@@ -654,7 +744,10 @@ jobs:
           [ -d "$root" ] || root="src-tauri/target/release/bundle"
           deb="$(find "$root/deb" -name '*.deb' | head -1)"
           [ -n "$deb" ] || { echo "::error::no deb was produced."; exit 1; }
-          dpkg-deb -c "$deb" | grep -E ' \./usr/bin/canopy-term-app$' \
+          # Log the deb's listing first, so a failure shows what is inside.
+          # Tauri's deb lists paths as `usr/bin/...` (no `./`), other tools' as `./usr/bin/...`.
+          dpkg-deb -c "$deb"
+          dpkg-deb -c "$deb" | grep -E ' (\./)?usr/bin/canopy-term-app$' \
             || { echo "::error::canopy-term-app is missing from $deb."; exit 1; }
           tmp="$(mktemp -d)"
           dpkg-deb -x "$deb" "$tmp"
@@ -858,6 +951,11 @@ jobs:
             src-tauri/target/${{ matrix.target }}/release/bundle/**
             src-tauri/target/release/bundle/**
           if-no-files-found: error
+          # upload-artifact@v4 skips dotfiles by default. Without this the
+          # downloaded Canopy.app lacks Contents/Resources/**/.gitkeep, and
+          # `codesign --verify --strict` on it fails ("a sealed resource is
+          # missing or invalid") although the DMG is fine.
+          include-hidden-files: true
           retention-days: 30
 
       # Tauri versions its filenames (Canopy_0.1.0_aarch64.dmg), but
