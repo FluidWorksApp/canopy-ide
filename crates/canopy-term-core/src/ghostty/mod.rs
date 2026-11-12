@@ -48,7 +48,8 @@
 //! * [`Screen::take_replies`]: bytes to write to the PTY (DA, CPR, DECRQM,
 //!   kitty flags, colour queries). Colour queries are answered from colours the
 //!   program set, else from [`Screen::set_reply_colors`]; with neither there is
-//!   no reply. Palette queries (OSC 4) are answered from the current palette.
+//!   no reply. Palette queries (OSC 4) are answered from the current palette, whose first
+//!   16 entries [`Screen::set_default_palette`] sets.
 //! * [`Screen::take_events`]: bell, OSC 52 clipboard writes, prompt marks
 //!   (OSC 133). The core never reads or writes a clipboard. A write is only an
 //!   event, capped at [`MAX_CLIPBOARD_BYTES`] (larger or malformed ones are
@@ -336,6 +337,13 @@ impl Screen {
         cursor: Option<(u8, u8, u8)>,
     ) {
         self.send(Box::new(move |e| e.set_reply_colors(fg, bg, cursor)));
+    }
+
+    /// The 16 ANSI colours (indices 0 to 15) a program's OSC 4 queries are
+    /// answered with, unless it changed them itself. The renderer's palette
+    /// goes here so a program sees the colours it is drawn in.
+    pub fn set_default_palette(&mut self, colors: [(u8, u8, u8); 16]) {
+        self.send(Box::new(move |e| e.set_default_palette(colors)));
     }
 
     /// Surface OSC 52 read requests as [`Event::ClipboardReadRequest`] (off by
