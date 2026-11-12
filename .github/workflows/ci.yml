@@ -32,7 +32,7 @@ jobs:
       - run: npm run typecheck
       - run: npm run lint
       - run: npm run test
-      - run: node --test scripts/release-assets.test.mjs scripts/workspace-host-release.test.mjs scripts/workspace-host-fingerprint.test.mjs scripts/prepare-sidecar.test.mjs
+      - run: node --test scripts/release-assets.test.mjs scripts/workspace-host-release.test.mjs scripts/workspace-host-fingerprint.test.mjs scripts/prepare-sidecar.test.mjs scripts/bump-version.test.mjs
       - name: Install runtime search dependency
         run: sudo apt-get update && sudo apt-get install -y ripgrep
       - run: npm run test --workspace @canopy/remote-host
@@ -140,8 +140,9 @@ jobs:
   # render, session, window: `cargo metadata` over crates/canopy-term-*) needs
   # the pinned Zig, and so does the job as a whole: it is installed once, before
   # the loop over the glob below, so a crate added later is covered too. The sys
-  # crate also needs network (a git clone of ghostty at its pinned commit and
-  # Zig package fetches); the offline build is in canopy-term-core/README.md.
+  # crate would also clone ghostty from GitHub and fetch Zig packages during the
+  # build; the ghostty-vendor action (pins in its pins.env) supplies both from
+  # actions/cache and sets GHOSTTY_SOURCE_DIR / GHOSTTY_ZIG_SYSTEM_DIR instead.
   # canopy-term-cli and canopy-pty-host do not depend on it and have their own
   # job. The test-build workflow on release/test-build branches is not in this
   # repository's workflows on this branch, so it is not covered here.
@@ -201,6 +202,8 @@ jobs:
           echo "zig $(zig version)"
           rustc --version
           cargo --version
+      - name: Ghostty source and Zig package cache (no network clone in the build)
+        uses: ./.github/actions/ghostty-vendor
       # Every crates/canopy-term-* crate is its own workspace root with its own
       # lock. Found by glob, so a new crate needs no edit here. The CLI crate
       # has its own job.
@@ -307,6 +310,8 @@ jobs:
         shell: bash
         run: |
           echo "zig $(zig version)"
+      - name: Ghostty source and Zig package cache (no network clone in the build)
+        uses: ./.github/actions/ghostty-vendor
       - uses: swatinem/rust-cache@v2
         with:
           workspaces: |

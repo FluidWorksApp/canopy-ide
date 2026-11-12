@@ -38,6 +38,11 @@ use std::sync::{Arc, Mutex};
 
 const ALLOW_FILE: &str = "tailnet-allow.txt";
 
+/// The one TCP port of the session protocol on the tailnet: the listening half
+/// (`tailnet_serve.rs`) binds it and the dialling half (`tailnet_client.rs`)
+/// connects to it. Defined once, here, so they cannot drift apart.
+pub const TAILNET_SESSION_PORT: u16 = 28617;
+
 /// Serialises read-change-write of the allowlist file.
 static ALLOW_LOCK: Mutex<()> = Mutex::new(());
 
@@ -119,7 +124,7 @@ fn preferred_addr(addrs: &[IpAddr]) -> Option<IpAddr> {
         .or_else(|| addrs.first().copied())
 }
 
-fn machine(n: &NodeInfo, allowed: &BTreeSet<String>) -> Machine {
+pub(crate) fn machine(n: &NodeInfo, allowed: &BTreeSet<String>) -> Machine {
     let ip = preferred_addr(&n.addrs).map(|a| a.to_string());
     let host = n.host_name.as_deref().map(str::trim).unwrap_or("");
     let label = n.dns_name.split('.').next().unwrap_or("");
@@ -141,7 +146,7 @@ fn machine(n: &NodeInfo, allowed: &BTreeSet<String>) -> Machine {
 }
 
 /// The stable node id inside a tailnet allowlist entry.
-fn entry_stable_id(entry: &str) -> Option<String> {
+pub(crate) fn entry_stable_id(entry: &str) -> Option<String> {
     let canon = canonical_tailnet_entry(entry)?;
     canon.splitn(3, '/').nth(1).map(str::to_string)
 }
@@ -156,7 +161,7 @@ pub(crate) fn own_domain(status: &TailnetStatus) -> Option<String> {
 
 /// Whether `n` belongs to the tailnet `domain`. Without a known own tailnet
 /// nothing does, so nothing is listed or allowed.
-fn in_tailnet(n: &NodeInfo, domain: Option<&str>) -> bool {
+pub(crate) fn in_tailnet(n: &NodeInfo, domain: Option<&str>) -> bool {
     domain.is_some() && tailnet_domain_of(&n.dns_name).as_deref() == domain
 }
 

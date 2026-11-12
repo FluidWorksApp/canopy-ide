@@ -9,6 +9,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use canopy_term_core::frame::{Frame, Modes};
+use canopy_term_core::Row;
 use canopy_term_input::{
     encode_focus, encode_key, encode_mouse, encode_paste, encode_text, KeyEvent, MouseEvent,
 };
@@ -68,6 +69,19 @@ pub trait FrameSource {
         Modes::default()
     }
 
+    /// Lines of scrollback behind the live screen (0 on the alternate screen,
+    /// and for a source that keeps none).
+    fn scrollback_len(&self) -> usize {
+        0
+    }
+
+    /// Up to `count` scrollback lines from index `start` (0 is the oldest).
+    /// Fewer when the history ends first.
+    fn scrollback_rows(&self, start: usize, count: usize) -> Vec<Row> {
+        let _ = (start, count);
+        Vec::new()
+    }
+
     /// A key event, encoded with [`FrameSource::modes`]. True if bytes were
     /// sent.
     fn key(&mut self, ev: &KeyEvent<'_>) -> bool {
@@ -88,6 +102,13 @@ pub trait FrameSource {
     /// reports.
     fn mouse(&mut self, ev: &MouseEvent) -> bool {
         encode_with(self, |modes, out| encode_mouse(ev, modes, out))
+    }
+
+    /// The target of the OSC 8 hyperlink on a visible cell, if any. It is the
+    /// raw URI the program printed: the viewer decides whether to open it, and
+    /// must check it first (`frame::is_safe_link`). The default has no links.
+    fn hyperlink_at(&self, _row: u16, _col: u16) -> Option<String> {
+        None
     }
 
     /// Focus gained or lost; sends nothing unless the program asked (1004).

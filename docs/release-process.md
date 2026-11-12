@@ -280,6 +280,16 @@ After publishing:
 Run the GitHub workflow manually with `workflow_dispatch` to exercise the build
 matrix without a release tag. With no tag, upload steps are skipped.
 
+Release builds on macOS and Linux build `canopy-term-app` and need Zig 0.15.x
+(`release.yml` installs the pinned 0.15.2; `scripts/release-macos.sh` requires it
+on PATH). Windows does not bundle it.
+
+To prove only that the terminal app (`canopy-term-app` and `canopy-pty-host`)
+builds for macOS arm64, macOS Intel (cross) and Linux, tick `term_app_dry_run`:
+the release jobs are skipped and only `term-app-dry-run` runs, with the pinned
+Zig from `.github/actions/install-zig`. It needs no secrets, signs nothing and
+creates no tag, draft or upload.
+
 For a local signed macOS build:
 
 ```sh

@@ -21,8 +21,10 @@
 //! rebuilt and the remembered sequence does not advance.
 
 use crate::color::{resolve_cell, Rgb, Theme};
-use crate::frame::{Attrs, Cell, CursorShape, Frame};
-use crate::geometry::{cell_rect, cursor_rect, strike_rect, underline_rect, PxRect, Selection};
+use crate::frame::{Attrs, Cell, CursorShape, Frame, UnderlineStyle};
+use crate::geometry::{
+    cell_rect, cursor_rect, strike_rect, underline_pieces, underline_rect, PxRect, Selection,
+};
 use crate::glyphs::{FontStyle, GlyphSource, PlacedGlyph, TextCell};
 use crate::instance::Instance;
 use crate::metrics::CellLayout;
@@ -127,6 +129,10 @@ struct CellDraw {
     bg: Rgb,
     bg_drawn: bool,
     attrs: u16,
+    /// The underline's shape (`Single` for a bare `Attrs::UNDERLINE`).
+    ul: UnderlineStyle,
+    /// The underline's own colour; `None` draws it in the text colour.
+    ul_color: Option<Rgb>,
 }
 
 #[derive(Default)]
@@ -635,6 +641,12 @@ fn emit_row(
             bg: r.bg,
             bg_drawn: r.bg_drawn,
             attrs: cell.attrs.0,
+            ul: match (cell.attrs.has(Attrs::UNDERLINE), cell.underline) {
+                (false, _) => UnderlineStyle::None,
+                (true, UnderlineStyle::None) => UnderlineStyle::Single,
+                (true, style) => style,
+            },
+            ul_color: theme.underline_rgb(cell.underline_color),
         };
         if selection.is_some_and(|(a, b)| col >= a && col < b) {
             d.bg = theme.selection_bg;
@@ -760,34 +772,45 @@ fn emit_row(
         }
     }
 
-    // 4. Underline and strike, merging neighbours of one colour.
-    for (flag, rect_of) in [
-        (
-            Attrs::UNDERLINE,
-            underline_rect as fn(&CellLayout, u16, u16, u16) -> PxRect,
-        ),
-        (
-            Attrs::STRIKE,
-            strike_rect as fn(&CellLayout, u16, u16, u16) -> PxRect,
-        ),
-    ] {
-        let has = |d: &CellDraw| d.attrs & flag != 0 && d.attrs & Attrs::HIDDEN == 0;
-        let mut col = 0u16;
-        while col < cols {
-            let d = s.draws[col as usize];
-            if !has(&d) {
-                col += 1;
-                continue;
-            }
-            let start = col;
-            while col < cols && has(&s.draws[col as usize]) && s.draws[col as usize].fg == d.fg {
-                col += 1;
-            }
-            s.out.push(Instance::solid(
-                rect_of(layout, row, start, col - start),
-                d.fg,
-            ));
+    // 4. Underline and strike, merging neighbours of one colour (and, for an
+    // underline, one style).
+    let visible = |d: &CellDraw| d.attrs & Attrs::HIDDEN == 0;
+    let mut col = 0u16;
+    while col < cols {
+        let d = s.draws[col as usize];
+        if d.ul == UnderlineStyle::None || !visible(&d) {
+            col += 1;
+            continue;
         }
+        let same = |o: &CellDraw| {
+            visible(o) && o.ul == d.ul && o.ul_color.unwrap_or(o.fg) == d.ul_color.unwrap_or(d.fg)
+        };
+        let start = col;
+        while col < cols && same(&s.draws[col as usize]) {
+            col += 1;
+        }
+        let color = d.ul_color.unwrap_or(d.fg);
+        let out = &mut s.out;
+        underline_pieces(layout, row, start, col - start, d.ul, |rect| {
+            out.push(Instance::solid(rect, color));
+        });
+    }
+    let has_strike = |d: &CellDraw| d.attrs & Attrs::STRIKE != 0 && visible(d);
+    let mut col = 0u16;
+    while col < cols {
+        let d = s.draws[col as usize];
+        if !has_strike(&d) {
+            col += 1;
+            continue;
+        }
+        let start = col;
+        while col < cols && has_strike(&s.draws[col as usize]) && s.draws[col as usize].fg == d.fg {
+            col += 1;
+        }
+        s.out.push(Instance::solid(
+            strike_rect(layout, row, start, col - start),
+            d.fg,
+        ));
     }
 
     // 5. Cursor parts that are not a recoloured cell.
@@ -1501,6 +1524,50 @@ mod tests {
         assert_eq!(r.quads, 2, "one underline and one strike over three cells");
         let u = b.instances()[0];
         assert_eq!((u.pos[1], u.size[0], u.size[1]), (14.0, 24.0, 1.0));
+    }
+
+    #[test]
+    fn underline_styles_draw_their_own_shapes_in_their_own_colour() {
+        let mut b = builder();
+        let mut g = Stub::default();
+        let mut f = text_frame(&["   "], 1);
+        for c in 0..2 {
+            f.cells[c].attrs = Attrs(Attrs::UNDERLINE);
+            f.cells[c].underline = UnderlineStyle::Curly;
+            f.cells[c].underline_color = Color::Rgb(255, 0, 0);
+        }
+        let r = b.build(&f, &RenderState::default(), &mut g);
+        assert_eq!(r.quads, 4, "two wave steps in each of two cells");
+        let red = Instance::solid(
+            PxRect {
+                x: 0,
+                y: 0,
+                w: 1,
+                h: 1,
+            },
+            [255, 0, 0],
+        );
+        assert_eq!(b.instances()[0].color, red.color);
+        // A different colour or style next door is a separate run.
+        f.cells[1].underline = UnderlineStyle::Dashed;
+        f.damage = Damage {
+            since: 0,
+            full: true,
+            rows: Vec::new(),
+        };
+        let r = b.build(&f, &RenderState::default(), &mut g);
+        assert_eq!(r.quads, 3, "two curly steps and one dash");
+    }
+
+    #[test]
+    fn a_bare_underline_flag_still_draws_a_single_line() {
+        let mut b = builder();
+        let mut g = Stub::default();
+        let mut f = text_frame(&["  "], 1);
+        f.cells[0].attrs = Attrs(Attrs::UNDERLINE);
+        assert_eq!(f.cells[0].underline, UnderlineStyle::None);
+        let r = b.build(&f, &RenderState::default(), &mut g);
+        assert_eq!(r.quads, 1);
     }
 
     fn with_cursor(mut f: Frame, row: u16, col: u16, shape: CursorShape) -> Frame {

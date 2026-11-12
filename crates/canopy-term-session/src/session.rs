@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 
 use canopy_term_core::frame::{Damage, Frame, Modes};
 use canopy_term_core::screen::DEFAULT_SCROLLBACK;
-use canopy_term_core::Screen;
+use canopy_term_core::{Row, Screen};
 use canopy_term_input::{
     encode_focus, encode_key, encode_mouse, encode_paste, encode_text, KeyEvent, MouseEvent,
 };
@@ -473,6 +473,8 @@ impl<L: SessionLink> Session<L> {
             damage: _,
             alt_screen,
             title,
+            viewport_offset,
+            scrolled_back,
         } = p;
         out.seq = *seq;
         out.cols = *cols;
@@ -483,6 +485,8 @@ impl<L: SessionLink> Session<L> {
         out.modes = *modes;
         out.alt_screen = *alt_screen;
         out.title.clone_from(title);
+        out.viewport_offset = *viewport_offset;
+        out.scrolled_back = *scrolled_back;
         let seq = *seq;
         out.damage = self.damage_for(since, seq);
         self.taken = self.taken.max(seq);
@@ -869,6 +873,18 @@ impl<L: SessionLink> FrameSource for Session<L> {
 
     fn modes(&self) -> Modes {
         self.modes
+    }
+
+    fn hyperlink_at(&self, row: u16, col: u16) -> Option<String> {
+        self.screen.hyperlink_at(row, col)
+    }
+
+    fn scrollback_len(&self) -> usize {
+        self.screen.scrollback_len()
+    }
+
+    fn scrollback_rows(&self, start: usize, count: usize) -> Vec<Row> {
+        self.screen.scrollback_rows(start, count)
     }
 
     fn key(&mut self, ev: &KeyEvent<'_>) -> bool {

@@ -32,6 +32,12 @@ naga = { version = "25", features = ["wgsl-in"] }
 name = "gpu_probe"
 harness = false
 
+# Prints which face the renderer's fallback picks for the glyphs a terminal UI
+# uses, on the machine it runs on (the CI log is the readout).
+[[test]]
+name = "font_probe"
+harness = false
+
 [[test]]
 name = "golden"
 harness = false

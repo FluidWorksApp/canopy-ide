@@ -39,6 +39,9 @@ pub enum Shortcut {
     ZoomIn,
     ZoomOut,
     ZoomReset,
+    /// Open the find bar (Cmd+F; Ctrl+Shift+F elsewhere, because plain Ctrl+F
+    /// is the program's forward-char or page-down).
+    Find,
 }
 
 /// The shortcut for a key press, given the character its logical key produces
@@ -59,11 +62,32 @@ pub fn shortcut(key: &str, mods: Mods, platform: Platform) -> Option<Shortcut> {
     match ch.to_ascii_lowercase() {
         'c' => Some(Shortcut::Copy),
         'v' => Some(Shortcut::Paste),
+        'f' => Some(Shortcut::Find),
         '=' | '+' => Some(Shortcut::ZoomIn),
         '-' | '_' => Some(Shortcut::ZoomOut),
         '0' | ')' => Some(Shortcut::ZoomReset),
         _ => None,
     }
+}
+
+/// [`shortcut`], plus plain Ctrl+C copying where there is a selection to copy
+/// (Windows Terminal's rule): with a selection Ctrl+C copies, without one it
+/// stays the program's interrupt, so a second press after copying interrupts.
+/// macOS Command+C is always copy; Ctrl+C there is always the program's.
+pub fn shortcut_with_selection(
+    key: &str,
+    mods: Mods,
+    platform: Platform,
+    has_selection: bool,
+) -> Option<Shortcut> {
+    if let Some(sc) = shortcut(key, mods, platform) {
+        return Some(sc);
+    }
+    let plain_ctrl = mods.ctrl && !mods.shift && !mods.alt && !mods.logo;
+    if has_selection && platform == Platform::Other && plain_ctrl && key.eq_ignore_ascii_case("c") {
+        return Some(Shortcut::Copy);
+    }
+    None
 }
 
 #[cfg(test)]
@@ -97,6 +121,10 @@ mod tests {
         assert_eq!(shortcut("=", CMD, m), Some(Shortcut::ZoomIn));
         assert_eq!(shortcut("-", CMD, m), Some(Shortcut::ZoomOut));
         assert_eq!(shortcut("0", CMD, m), Some(Shortcut::ZoomReset));
+        assert_eq!(shortcut("f", CMD, m), Some(Shortcut::Find));
+        assert_eq!(shortcut("F", CMD, m), Some(Shortcut::Find));
+        // Ctrl+F on macOS is the program's.
+        assert_eq!(shortcut("f", CTRL, m), None);
         // Ctrl+C on macOS is the program's interrupt.
         assert_eq!(shortcut("c", CTRL, m), None);
     }
@@ -109,6 +137,9 @@ mod tests {
         assert_eq!(shortcut("+", CTRL_SHIFT, o), Some(Shortcut::ZoomIn));
         assert_eq!(shortcut("_", CTRL_SHIFT, o), Some(Shortcut::ZoomOut));
         assert_eq!(shortcut(")", CTRL_SHIFT, o), Some(Shortcut::ZoomReset));
+        assert_eq!(shortcut("F", CTRL_SHIFT, o), Some(Shortcut::Find));
+        // Plain Ctrl+F stays the program's (readline forward-char, less).
+        assert_eq!(shortcut("f", CTRL, o), None);
         assert_eq!(shortcut("c", CTRL, o), None);
         assert_eq!(shortcut("-", CTRL, o), None);
         assert_eq!(shortcut("c", CMD, o), None);
@@ -119,5 +150,35 @@ mod tests {
         assert_eq!(shortcut("", CMD, Platform::MacOs), None);
         assert_eq!(shortcut("cv", CMD, Platform::MacOs), None);
         assert_eq!(shortcut("x", CMD, Platform::MacOs), None);
+    }
+
+    #[test]
+    fn plain_ctrl_c_copies_only_with_a_selection_and_only_off_macos() {
+        let o = Platform::Other;
+        assert_eq!(
+            shortcut_with_selection("c", CTRL, o, true),
+            Some(Shortcut::Copy)
+        );
+        assert_eq!(
+            shortcut_with_selection("C", CTRL, o, true),
+            Some(Shortcut::Copy)
+        );
+        assert_eq!(shortcut_with_selection("c", CTRL, o, false), None);
+        // The Ctrl+Shift form copies either way, and macOS is untouched.
+        assert_eq!(
+            shortcut_with_selection("C", CTRL_SHIFT, o, false),
+            Some(Shortcut::Copy)
+        );
+        assert_eq!(
+            shortcut_with_selection("c", CTRL, Platform::MacOs, true),
+            None
+        );
+        assert_eq!(
+            shortcut_with_selection("c", CMD, Platform::MacOs, false),
+            Some(Shortcut::Copy)
+        );
+        // Other keys with Ctrl are never taken.
+        assert_eq!(shortcut_with_selection("v", CTRL, o, true), None);
+        assert_eq!(shortcut_with_selection("cc", CTRL, o, true), None);
     }
 }

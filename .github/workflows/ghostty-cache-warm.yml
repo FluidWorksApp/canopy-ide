@@ -1,0 +1,72 @@
+# Keeps the Ghostty source + Zig package cache (see .github/actions/ghostty-vendor)
+# saved on the default and release branches. actions/cache only lets a pull request
+# restore entries saved by its own ref, its base branch or the default branch, so
+# without this a first run on every new PR would still clone ghostty from GitHub.
+# Entries unused for 7 days are evicted; the weekly schedule (default branch)
+# keeps them alive. A normal run of the action is a restore plus a checksum check.
+name: ghostty-cache-warm
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '17 4 * * 1'
+  push:
+    branches: [main, 'release/**']
+    paths:
+      - '.github/actions/ghostty-vendor/**'
+      - '.github/workflows/ghostty-cache-warm.yml'
+      - 'crates/**/Cargo.lock'
+  pull_request:
+    paths:
+      - '.github/workflows/ghostty-cache-warm.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  warm:
+    name: warm (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        # Same runners and Zig archives as the jobs that consume the cache (ci.yml).
+        include:
+          - os: ubuntu-latest
+            zig_target: x86_64-linux
+            zig_sha256: 02aa270f183da276e5b5920b1dac44a63f1a49e55050ebde3aecc9eb82f93239
+          - os: macos-15
+            zig_target: aarch64-macos
+            zig_sha256: 3cc2bab367e185cdfb27501c4b30b1b0653c28d9f73df8dc91488e66ece5fa6b
+          - os: windows-2022
+            zig_target: x86_64-windows
+            zig_sha256: 3a0ed1e8799a2f8ce2a6e6290a9ff22e6906f8227865911fb7ddedc3cc14cb0c
+    env:
+      ZIG_VERSION: 0.15.2
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Zig ${{ env.ZIG_VERSION }} (official zip, checksum verified)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $f = "zig-${{ matrix.zig_target }}-$env:ZIG_VERSION.zip"
+          $out = Join-Path $env:RUNNER_TEMP $f
+          Invoke-WebRequest -Uri "https://ziglang.org/download/$env:ZIG_VERSION/$f" -OutFile $out
+          $got = (Get-FileHash -Algorithm SHA256 $out).Hash.ToLower()
+          if ($got -ne "${{ matrix.zig_sha256 }}") { throw "zig sha256 mismatch: $got" }
+          Expand-Archive -Path $out -DestinationPath (Join-Path $env:RUNNER_TEMP "zigx")
+          Add-Content -Path $env:GITHUB_PATH -Value (Join-Path $env:RUNNER_TEMP "zigx\zig-${{ matrix.zig_target }}-$env:ZIG_VERSION")
+      - name: Install Zig ${{ env.ZIG_VERSION }} (official release, checksum verified)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          set -euo pipefail
+          f="zig-${{ matrix.zig_target }}-${ZIG_VERSION}.tar.xz"
+          curl -fsSL -o "$RUNNER_TEMP/$f" "https://ziglang.org/download/${ZIG_VERSION}/$f"
+          echo "${{ matrix.zig_sha256 }}  $RUNNER_TEMP/$f" | shasum -a 256 -c -
+          mkdir -p "$RUNNER_TEMP/zig"
+          tar -xJf "$RUNNER_TEMP/$f" -C "$RUNNER_TEMP/zig" --strip-components=1
+          echo "$RUNNER_TEMP/zig" >> "$GITHUB_PATH"
+      - name: Ghostty source and Zig package cache
+        uses: ./.github/actions/ghostty-vendor

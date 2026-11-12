@@ -397,7 +397,7 @@ while its Canopy runs. The listener exists only while Tailscale is `Running` and
 at least one allowlist entry bound to this machine's own tailnet exists (Allow
 on starts it, the last Allow off drops it and closes every connection; with no
 entry Tailscale is not even queried). It is `TailnetTcp::bind` on the fixed port
-`TAILNET_PORT` (28617, chosen below the OS dynamic ranges and away from the
+`TAILNET_SESSION_PORT` (28617, chosen below the OS dynamic ranges and away from the
 portal's 6680); a busy port or a userspace-mode daemon is reported in the
 Settings status, with no fallback port and nothing wider. It re-checks every
 15 s so it follows Tailscale stopping and starting.

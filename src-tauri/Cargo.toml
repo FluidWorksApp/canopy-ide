@@ -106,6 +106,8 @@ tauri-plugin-log = "2"
 tauri-plugin-dialog = "2"
 # PTY: cross-platform pseudo-terminal, the core of the terminal feature
 portable-pty = "0.9"
+# portable-pty's error type, which the proxy MasterPty (tailnet_client.rs) must name
+anyhow = "1"
 # File watching for external-change detection (diff-first workflow)
 notify = "8"
 # .gitignore semantics for the file walk behind quick-open, find-in-files and
@@ -204,7 +206,7 @@ tauri-plugin-notification = "2"
 # Unix signals for killing whole PTY process groups (no zombies)
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
-# Opt-in hosted terminals (pty_hosted.rs); the host binary is its own crate.
+# Hosted terminals (on by default on Unix, a Settings toggle) (pty_hosted.rs); the host binary is its own crate.
 canopy-pty-host = { path = "../crates/canopy-pty-host" }
 
 # desk.rs screen capture. xcap on Linux pulls libpipewire (libspa-sys) which the

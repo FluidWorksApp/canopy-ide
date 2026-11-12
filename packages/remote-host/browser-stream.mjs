@@ -113,6 +113,8 @@ export async function handleBrowserStream(browser, wss, request, socket, head) {
             break;
           }
           case 'viewport':
+          case 'navigated':
+          case 'picker':
           case 'control':
           case 'clipboard':
           case 'download':

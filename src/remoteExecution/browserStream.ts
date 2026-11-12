@@ -93,7 +93,36 @@ export type PreviewStreamInput =
   | { readonly type: "navigate"; readonly url: string }
   | { readonly type: "history"; readonly delta: -1 | 1 }
   | { readonly type: "reload"; readonly ignoreCache?: boolean }
-  | { readonly type: "probe"; readonly x: number; readonly y: number };
+  | { readonly type: "probe"; readonly x: number; readonly y: number }
+  /** Desktop preview: a command for the page's picker (annotate mode, marks). */
+  | { readonly type: "picker"; readonly message: Record<string, unknown> }
+  /** Desktop preview: answers a file chooser with paths from the native dialog; none cancels. */
+  | {
+      readonly type: "fileChooser";
+      readonly id: string;
+      readonly paths: readonly string[];
+    };
+
+/** The page's address, after each navigation (the desktop preview's URL bar). */
+export interface PreviewStreamNavigation {
+  readonly url: string;
+  readonly title: string;
+  readonly loadError?: { readonly url: string; readonly description: string };
+}
+
+/** A popup the page opened (a sign-in window), offered to the viewer that caused it. */
+export interface PreviewStreamPopup {
+  readonly tabId: string;
+  readonly openerId: string;
+  readonly url: string;
+}
+
+/** A file input the page opened, offered to the viewer controlling it. */
+export interface PreviewStreamFileChooser {
+  readonly id: string;
+  readonly multiple: boolean;
+  readonly accept: string;
+}
 
 export interface PreviewStreamProbe {
   readonly x: number;
@@ -127,6 +156,9 @@ export interface PreviewStreamTarget {
   readonly maxHeight: number;
   /** Passive viewers reduce their own access, including automatic control grants. */
   readonly interactive?: boolean;
+  /** The desktop preview: input is sent whenever no other viewer holds the page,
+   *  and the host takes and gives back control around it (preview-host.mjs). */
+  readonly autoControl?: boolean;
 }
 
 export interface PreviewStreamEvents {
@@ -138,7 +170,21 @@ export interface PreviewStreamEvents {
   readonly onClipboard?: (text: string) => void;
   readonly onConnectedChange: (connected: boolean) => void;
   readonly onGone?: () => void;
+  readonly onNavigated?: (navigation: PreviewStreamNavigation) => void;
+  readonly onPicker?: (message: Record<string, unknown>) => void;
+  readonly onPopup?: (popup: PreviewStreamPopup) => void;
+  readonly onFileChooser?: (chooser: PreviewStreamFileChooser) => void;
+  readonly onFileChooserClosed?: (id: string) => void;
 }
+
+/** Whether input may be sent under this control state. */
+export const previewStreamCanInput = (
+  control: PreviewStreamControl | null,
+  autoControl = false,
+): boolean =>
+  !!control?.canOperate &&
+  (control.controller === "you" ||
+    (autoControl && control.controller !== "another-viewer"));
 
 export interface PreviewStreamClient {
   readonly send: (input: PreviewStreamInput) => boolean;
@@ -200,6 +246,47 @@ export function createPreviewStreamClient(
       if (typeof message !== "object" || message === null) return;
       const { type, x, y, width, height, editable, canOperate, controller, generation, dialog, text, phase, sequence } =
         message as Record<string, unknown>;
+      const record = message as Record<string, unknown>;
+      if (type === "navigated" && typeof record.url === "string") {
+        const loadError = record.loadError as
+          PreviewStreamNavigation["loadError"] | undefined;
+        events.onNavigated?.({
+          url: record.url,
+          title: typeof record.title === "string" ? record.title : "",
+          ...(loadError && typeof loadError.description === "string"
+            ? { loadError }
+            : {}),
+        });
+        return;
+      }
+      if (
+        type === "picker" &&
+        typeof record.message === "object" &&
+        record.message !== null
+      ) {
+        events.onPicker?.(record.message as Record<string, unknown>);
+        return;
+      }
+      if (type === "popup" && typeof record.tabId === "string") {
+        events.onPopup?.({
+          tabId: record.tabId,
+          openerId: String(record.openerId ?? ""),
+          url: typeof record.url === "string" ? record.url : "",
+        });
+        return;
+      }
+      if (type === "fileChooser" && typeof record.id === "string") {
+        events.onFileChooser?.({
+          id: record.id,
+          multiple: record.multiple === true,
+          accept: typeof record.accept === "string" ? record.accept : "",
+        });
+        return;
+      }
+      if (type === "fileChooserClosed" && typeof record.id === "string") {
+        events.onFileChooserClosed?.(record.id);
+        return;
+      }
       if (
         type === "pointer" &&
         (phase === "move" || phase === "click") &&
@@ -258,7 +345,7 @@ export function createPreviewStreamClient(
     send: (input) => {
       if (socket?.readyState !== WebSocket.OPEN) return false;
       if (!control?.canOperate) return false;
-      if (input.type !== "takeControl" && control.controller !== "you") return false;
+      if (input.type !== "takeControl" && !previewStreamCanInput(control, target.autoControl)) return false;
       socket.send(JSON.stringify(input));
       return true;
     },

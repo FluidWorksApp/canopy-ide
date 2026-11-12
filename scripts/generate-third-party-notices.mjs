@@ -398,6 +398,16 @@ function collectNpm() {
     }
   }
 
+  // The preview browser host (scripts/prepare-preview-host.mjs) ships these
+  // as a Node resource, outside Vite's root dependency graph.
+  for (const name of ["playwright-core", "ws"]) {
+    const child = resolveDep("packages/remote-host", name);
+    if (child && !seen.has(child)) {
+      seen.add(child);
+      walk(child);
+    }
+  }
+
   const out = [];
   // The Chrome bridge is shipped as a Node resource, outside Vite's root
   // dependency graph. Its runtime dependencies need the same attribution.
@@ -580,6 +590,15 @@ file; the full text of every license in play is reproduced in the appendix.
 
 ## Notes on specific components
 
+**T3 Code — MIT.** The preview browser (\`packages/remote-host/preview-host.mjs\`,
+\`agent-browser.mjs\`, \`browser-contexts.mjs\`, \`session-control.mjs\`,
+\`browser-stream.mjs\`, shipped as the app's \`preview-host\` resource) and its
+viewer (\`src/remoteExecution/StreamSurface.tsx\`, \`browserStream.ts\`) are
+ports of T3 Code's server browser and stream (\`apps/server/src/preview\`,
+\`apps/web/src/browser\`, \`packages/client-runtime/src/preview\`).
+Copyright (c) 2026 T3 Tools Inc.; MIT text in the appendix; source:
+<https://github.com/pingdotgg/t3code>.
+
 **fzf — MIT.** \`shared/fuzzy.ts\` is a hand port of fzf's matching and scoring
 algorithm (\`algo/algo.go\`), compiled into the frontend bundle. Copyright (c)
 2013-2026 Junegunn Choi; MIT text in the appendix; source:
@@ -649,6 +668,14 @@ after the user agrees to it in the Device tab. Canopy does not bundle or
 redistribute them:
 
 ${RUNTIME_TOOLS.map((m) => `- **${m.name}** — ${m.license}, by ${m.by}. <${m.url}>`).join("\n")}
+
+The preview browser downloads this on a computer with no Chrome, Edge,
+Chromium or Brave, only after the user chooses "Download Chromium" in a
+preview tab, and checks it against a pinned SHA-256
+(\`packages/remote-host/browser-pins.json\`). Canopy does not bundle or
+redistribute it:
+
+- **Chrome Headless Shell** (Chrome for Testing, via Playwright's CDN, with Playwright's FFmpeg build) — BSD-3-Clause and other open-source licenses listed in its own \`about:credits\`, by The Chromium Authors; FFmpeg — LGPL-2.1, by the FFmpeg developers. <https://developer.chrome.com/blog/chrome-for-testing>
 
 ${renderSection("Rust crates", crates)}
 ${renderSection("npm packages", npm)}

@@ -91,6 +91,13 @@ GHOSTTY_ZIG_SYSTEM_DIR=<vendor>/zig-global-cache/p \
 cargo build --locked --offline
 ```
 
+CI does this for you: `.github/actions/ghostty-vendor` restores the source and
+the Zig package cache from actions/cache (keyed on the commit and the Zig
+version), fetches with retries and checks the pinned checksums on a miss, and
+sets `GHOSTTY_SOURCE_DIR` / `GHOSTTY_ZIG_SYSTEM_DIR`. Its `pins.env` is the one
+file to edit when `libghostty-vt` is bumped. Its checksums are per-file manifests
+(portable to macOS and Windows) rather than the tar hashes above.
+
 The checksums above belong to libghostty-vt-sys 0.2.2 / ghostty `a887df42`.
 Bumping the crate changes the commit and therefore all of them. Not verified:
 whether 565 MB is the minimum needed, a read-only vendor dir, an offline build
@@ -101,7 +108,8 @@ on macOS or Windows, aarch64 targets.
 `cargo test --locked` in this directory runs the unit tests, the behaviour suite
 (`tests/screen.rs`), the 18 conformance fixtures (`tests/conformance.rs`), the
 seeded fuzz tests (`tests/fuzz.rs`), the engine-specific tests
-(`tests/ghostty.rs`: events, OSC 8 links, OSC 52 policy, prompt marks, threading)
+(`tests/ghostty.rs`: events, OSC 8 links, OSC 52 policy, prompt marks, threading),
+the snapshot fidelity round trips (`tests/snapshot.rs`)
 and the report-only `perf` target. The suites are written once in
 `tests/suite/` and instantiated for `Screen`.
 
@@ -115,4 +123,12 @@ Rules the tests keep:
   capped; reads are denied by default and never answered, even when the host
   opts in to read-request events.
 - Snapshot and restore: a restored screen continues identically, and a replayed
-  history raises no events.
+  history raises no events. `tests/snapshot.rs` holds the round trips for what
+  the grid does not show (tab stops, G0 to G3 character sets and shifts, palette
+  and colour overrides, underline styles and colours, open and edge-cell
+  hyperlinks, prompt row marks and the cursor's prompt state): feed, snapshot,
+  restore, same frame and a byte-identical second snapshot, then more output to
+  both and the same again. Known gaps, not carried: scrollback, the primary
+  screen behind the alternate screen, saved cursor slots, a pending single shift
+  (`ESC N`, `ESC O`), cell-level semantic content, and a prompt state when no
+  row is marked.

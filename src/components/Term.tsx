@@ -40,6 +40,7 @@ async function cachedSpacedLinks(text: string, cwd: string, env?: string) {
 }
 import { matchesModifierClick } from "../shortcuts";
 import * as ipc from "../ipc";
+import { holdsInput } from "../tailnetRemote";
 import { isRemoteHost } from "../host";
 import { liveEnvironments } from "../environments/live";
 import { openRemoteFile, remoteFileExists } from "../environments/remoteFiles";
@@ -1177,10 +1178,10 @@ export const Term = forwardRef<TermHandle, TermProps>(function Term(
     void start();
 
     const dataSub = term.onData((data) => {
-      if (ptyIdRef.current != null) void ipc.ptyWrite(ptyIdRef.current, data);
+      if (ptyIdRef.current != null && !holdsInput(ptyIdRef.current)) void ipc.ptyWrite(ptyIdRef.current, data);
     });
     const binarySub = term.onBinary((data) => {
-      if (ptyIdRef.current != null) void ipc.ptyWriteBinary(ptyIdRef.current, data);
+      if (ptyIdRef.current != null && !holdsInput(ptyIdRef.current)) void ipc.ptyWriteBinary(ptyIdRef.current, data);
     });
     const titleSub = term.onTitleChange((title) => {
       onTitle?.(title);

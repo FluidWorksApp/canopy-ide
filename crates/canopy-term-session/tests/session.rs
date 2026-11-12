@@ -55,6 +55,20 @@ fn bytes_become_frame_contents() {
 }
 
 #[test]
+fn a_hyperlink_is_readable_through_the_frame_source() {
+    let (mut s, peer) = session(30, 3);
+    let t = Instant::now();
+    peer.send_output(b"\x1b]8;;https://example.com/a\x07link\x1b]8;;\x07 text");
+    s.frame_since_at(0, t).expect("frame");
+    assert_eq!(
+        FrameSource::hyperlink_at(&s, 0, 1).as_deref(),
+        Some("https://example.com/a")
+    );
+    assert_eq!(FrameSource::hyperlink_at(&s, 0, 6), None);
+    assert_eq!(FrameSource::hyperlink_at(&s, 9, 0), None);
+}
+
+#[test]
 fn a_blank_screen_is_published_before_any_output() {
     let (mut s, _peer) = session(10, 3);
     let f = s.frame_since_at(0, Instant::now()).expect("blank frame");

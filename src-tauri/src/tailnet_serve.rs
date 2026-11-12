@@ -8,7 +8,7 @@
 //!   exists. Allow on enables it, the last Allow off drops it, and with no
 //!   entries Canopy never even asks Tailscale for its status. Off by default.
 //! - It is `TailnetTcp::bind`: the node's own tailnet addresses only (never
-//!   `0.0.0.0`, never loopback) on the one fixed [`TAILNET_PORT`]. A busy port
+//!   `0.0.0.0`, never loopback) on the one fixed [`TAILNET_SESSION_PORT`]. A busy port
 //!   or a tailnet with no interface (userspace-mode daemon) is reported in the
 //!   Settings row's status ([`ListenerStatus`]); nothing binds wider and there
 //!   is no fallback port, because a client has to know the port.
@@ -36,7 +36,7 @@
 //! Nothing here logs a tailnet name, address, peer identity or key.
 
 use crate::pty::{PtyEvent, PtyManager, SessionKind};
-use crate::tailnet::{allowed_ids, installed_runner, load_allow, own_domain};
+use crate::tailnet::{allowed_ids, installed_runner, load_allow, own_domain, TAILNET_SESSION_PORT};
 use canopy_term_net::allowlist::{canonical_tailnet_entry, Allowlist};
 use canopy_term_net::session::{
     serve_connection, AttachedSession, SessionError, SessionHandler, SessionSummary,
@@ -54,16 +54,6 @@ use std::sync::{mpsc, Arc, Mutex};
 use std::time::Duration;
 use tauri::{AppHandle, Manager};
 use tokio::sync::broadcast;
-
-/// The one TCP port the listener uses on the tailnet interface. Clients dial
-/// `<machine>:28617`, so it cannot be negotiated and is never auto-changed.
-///
-/// Chosen to be: above the registered range (so no installed service wants
-/// it), below 32768 (the lowest dynamic range any supported OS hands out, so
-/// an outgoing connection is never given it), different from Canopy's other
-/// listeners (the phone portal is 6680), and not a port a well-known tool
-/// uses. If something else holds it the Settings row says "port in use".
-pub const TAILNET_PORT: u16 = 28617;
 
 /// Attached terminals one allowed machine may hold open.
 pub const MAX_SESSIONS_PER_PEER: usize = 8;
@@ -114,7 +104,7 @@ impl ListenerStatus {
     pub fn off() -> Self {
         Self {
             state: ListenState::Off,
-            port: TAILNET_PORT,
+            port: TAILNET_SESSION_PORT,
         }
     }
 }
@@ -461,7 +451,7 @@ impl TailnetServe {
             allow_path,
             runner: Arc::new(installed_runner),
             bind: Arc::new(TailnetTcp::bind),
-            port: TAILNET_PORT,
+            port: TAILNET_SESSION_PORT,
             terminals: Arc::new(AppTerminals(app)),
         })
     }
@@ -1139,11 +1129,11 @@ mod tests {
     fn the_status_serialises_in_the_shape_the_row_reads() {
         let j = serde_json::to_value(ListenerStatus {
             state: ListenState::PortInUse,
-            port: TAILNET_PORT,
+            port: TAILNET_SESSION_PORT,
         })
         .unwrap();
         assert_eq!(j["state"], "portInUse");
-        assert_eq!(j["port"], TAILNET_PORT);
+        assert_eq!(j["port"], TAILNET_SESSION_PORT);
         assert_eq!(
             serde_json::to_value(ListenState::NoInterface).unwrap(),
             "noInterface"
@@ -1152,8 +1142,8 @@ mod tests {
 
     #[test]
     fn the_port_is_fixed_and_outside_the_dynamic_ranges() {
-        assert!((1024..32768).contains(&TAILNET_PORT));
-        assert_ne!(TAILNET_PORT, 6680);
+        assert!((1024..32768).contains(&TAILNET_SESSION_PORT));
+        assert_ne!(TAILNET_SESSION_PORT, 6680);
     }
 
     /// The real `PtyManager` behind the trait: a terminal with a tab is
