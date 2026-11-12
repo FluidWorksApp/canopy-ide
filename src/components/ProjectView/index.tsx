@@ -49,7 +49,17 @@ import {
 import { Panel, PanelGroup } from "react-resizable-panels";
 import { commitMessageWithSessions } from "../../sessionDoc/trailers";
 import * as ipc from "../../ipc";
-import { openNativeTerminal, useNativeTermAvailable } from "../../nativeTerm";
+import {
+  forgetHandedOver,
+  handedState,
+  handOverToNative,
+  handoverMenuItem,
+  openNativeTerminal,
+  refreshHandoverStatus,
+  takeBackFromNative,
+  useHandoverStatus,
+  useNativeTermAvailable,
+} from "../../nativeTerm";
 import {
   closeLink,
   forgetLink,
@@ -718,6 +728,7 @@ import {
 } from "./helpers";
 import { Button } from "../ui";
 import { RemoteReconnect } from "../RemoteReconnect";
+import { NativeWindowHeld } from "../NativeWindowHeld";
 import { remoteTabReconnect, localTabReconnect, machineLabel } from "../../environments/remoteReconnect";
 import { nativeHost } from "../../host/native";
 import { dispatchWithPlan, restoreWaitingPlans, type PlanResumer } from "../../plans/planGate";
@@ -1294,6 +1305,11 @@ const ProjectViewBody = memo(function ProjectViewBody({
   /** The ⌘N launcher — the ＋ menu as a type-and-Enter list. */
   const [launcherOpen, setLauncherOpen] = useState(false);
   const nativeTermAvailable = useNativeTermAvailable();
+  // Which terminals can move to a native window, and which are in one. Read
+  // from Rust, which keeps who holds each session.
+  const handover = useHandoverStatus();
+  const handoverRef = useRef(handover);
+  handoverRef.current = handover;
   // ⌘⇧N asks for a workspace for this one opening; ⌘N leaves ↵ to the
   // agentWorkspaceByDefault setting. ⇧↵ and the row's side action are always
   // the other choice.
@@ -7495,6 +7511,16 @@ const ProjectViewBody = memo(function ProjectViewBody({
       if (sessionId != null && env) closedViaAllRef.current.add(closedKey(env, sessionId));
     }
     if (closingTab?.type === "preview") forgetBrowserTarget(id);
+    // A terminal open in a native window: this tab lets go of it, the window
+    // keeps it (nothing here stops it; see handover.rs).
+    if (
+      closingTab?.type === "terminal" &&
+      handedState(handoverRef.current, closingTab.ptyId) !== null
+    ) {
+      void forgetHandedOver(closingTab.ptyId as number)
+        .catch(() => {})
+        .then(() => refreshHandoverStatus());
+    }
     if (
       origin === "user" &&
       closingTab?.type === "terminal" &&
@@ -13120,6 +13146,40 @@ const ProjectViewBody = memo(function ProjectViewBody({
     );
   }, [tabs, shareableOf, canShareTerminals, shareWorkspaceId, project.id]);
   useEffect(() => () => publishShareableTerminals(project.id, []), [project.id]);
+  const handOverTab = useCallback(
+    async (tab: TermSubTab) => {
+      if (tab.ptyId == null) return;
+      try {
+        await handOverToNative(tab.ptyId);
+      } catch (error) {
+        onNotice(String((error as Error)?.message ?? error), "error");
+      }
+      await refreshHandoverStatus();
+    },
+    [onNotice],
+  );
+  /** Resolves with the reason when the terminal could not be taken back. */
+  const takeBackTab = useCallback(
+    async (tab: TermSubTab): Promise<string | null> => {
+      if (tab.ptyId == null) return "This terminal has no session.";
+      const ptyId = tab.ptyId;
+      // Once it is back the tab shows a viewer on the session that already
+      // exists, as a recovered tab does: a Term with no attach id would start a
+      // new shell instead. Set first, so no render between the two can.
+      const before = { attachId: tab.attachId, killAttachedOnClose: tab.killAttachedOnClose };
+      patchTab(tab.id, { attachId: ptyId, killAttachedOnClose: true });
+      try {
+        await takeBackFromNative(ptyId);
+        await refreshHandoverStatus();
+        return null;
+      } catch (error) {
+        patchTab(tab.id, before);
+        await refreshHandoverStatus();
+        return String((error as Error)?.message ?? error);
+      }
+    },
+    [patchTab],
+  );
   const onTabContextMenu = useCallback(
     (e: React.MouseEvent, tab: SubTab) => {
       // Every tab kind that names a concrete thing can seed a task about it —
@@ -13193,6 +13253,15 @@ const ProjectViewBody = memo(function ProjectViewBody({
                     ),
                   ]
                 : [];
+      const nativeWindowItem =
+        tab.type === "terminal"
+          ? handoverMenuItem({
+              available: nativeTermAvailable,
+              status: handover,
+              ptyId: tab.ptyId,
+              onOpen: () => void handOverTab(tab),
+            })
+          : null;
       const items: MenuItem[] =
         tab.type === "terminal"
           ? [
@@ -13202,6 +13271,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
                   if (tab.type === "terminal") startRename(tab);
                 },
               },
+              ...(nativeWindowItem ? [nativeWindowItem] : []),
               ...(canShareTerminals && tab.ptyId != null && !tab.run
                 ? [
                     {
@@ -13277,7 +13347,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
         ...items,
       ]);
     },
-    [startRename, closeTab, closeVisualTab, tabMenu.open, taskMenu, startMicroTask, canShareTerminals, shareTerminalTab, patchTabRaw, isAgentTab],
+    [startRename, closeTab, closeVisualTab, tabMenu.open, taskMenu, startMicroTask, canShareTerminals, shareTerminalTab, patchTabRaw, isAgentTab, nativeTermAvailable, handover, handOverTab],
   );
   const onClearScrollback = useCallback(() => {
     if (activeTermTab)
@@ -14635,6 +14705,12 @@ const ProjectViewBody = memo(function ProjectViewBody({
                 <div className="term-account-pending" role="status">
                   Starting under {profileLabels[tab.profile ?? ""] ?? tab.profile}…
                 </div>
+              ) : handedState(handover, tab.ptyId) !== null ? (
+                <NativeWindowHeld
+                  state={handedState(handover, tab.ptyId) ?? "in_window"}
+                  onTakeBack={() => takeBackTab(tab)}
+                  onClose={() => closeTab(tab.id, "user")}
+                />
               ) : (
               <Term
                 // epoch remounts the Term (fresh PTY) when a run tab restarts

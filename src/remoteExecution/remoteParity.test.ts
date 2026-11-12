@@ -43,6 +43,10 @@ const REMOTE_BRANCHED = new Set([
   // The native terminal window opens on this computer; nativeTerm.ts returns
   // false on a remote or workspace host before it asks.
   "native_term_available", "native_term_open",
+  // Handing a terminal to a native window, and back: the terminal and the window
+  // are on this computer. nativeTerm.ts returns before it asks on a remote or
+  // workspace host (the status reads nothing there).
+  "native_term_hand_over", "native_term_take_back", "native_term_forget", "native_term_handover_status",
 ]);
 
 const SRC = join(__dirname, "..");
