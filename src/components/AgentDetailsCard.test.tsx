@@ -31,6 +31,10 @@ vi.mock("../ipc", () => ({
     },
   ]),
 }));
+vi.mock("../links", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../links")>()),
+  openInOsBrowser: vi.fn(),
+}));
 vi.mock("../commitPushPrIpc", () => ({
   runCommitPushPr: vi.fn(async () => ({
     committed: true,
@@ -98,6 +102,7 @@ vi.mock("../remoteExecution/workspace", () => ({
 import { AgentDetailsCard, prStatusLabel } from "./AgentDetailsCard";
 import { liveEnvironments } from "../environments/live";
 import * as ipc from "../ipc";
+import * as links from "../links";
 
 const idle = { state: "idle" } as never;
 const digest = {
@@ -592,6 +597,40 @@ describe("lineage rows", () => {
     fireEvent.click(screen.getByRole("button", { name: /Previous agents/ }));
     fireEvent.click(screen.getByRole("button", { name: /planner/ }));
     expect(screen.getByText("No text was returned.")).toBeInTheDocument();
+  });
+});
+
+describe("the PR number", () => {
+  it("opens the pull request on GitHub", async () => {
+    vi.mocked(ipc.gitStatus).mockResolvedValue({
+      is_repo: true,
+      branch: "feat/x",
+      entries: [],
+    } as never);
+    vi.mocked(ipc.ghPrList).mockResolvedValue([
+      {
+        number: 779,
+        title: "All workspaces",
+        url: "https://github.com/acme/app/pull/779",
+        branch: "feat/x",
+        base: "main",
+        state: "OPEN",
+        draft: false,
+        checks: "PASS",
+        mergeable: "MERGEABLE",
+        additions: 1,
+        deletions: 0,
+      },
+    ] as never);
+    setup({ repo: "/linkable", cwd: "/linkable" });
+    fireEvent.click(
+      await screen.findByRole("button", {
+        name: "Open pull request #779 on GitHub",
+      }),
+    );
+    expect(links.openInOsBrowser).toHaveBeenCalledWith(
+      "https://github.com/acme/app/pull/779",
+    );
   });
 });
 
