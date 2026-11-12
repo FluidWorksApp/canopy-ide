@@ -50,7 +50,8 @@
       "binaries/canopy-pty-host"
     ],
     "resources": [
-      "onnxruntime/*"
+      "onnxruntime/*",
+      "preview-host/**/*"
     ],
     "publisher": "Cause Connect Pte Ltd",
     "copyright": "Copyright 2026 Cause Connect Pte Ltd. MIT licensed.",

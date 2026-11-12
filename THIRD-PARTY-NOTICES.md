@@ -22,6 +22,15 @@ file; the full text of every license in play is reproduced in the appendix.
 
 ## Notes on specific components
 
+**T3 Code — MIT.** The preview browser (`packages/remote-host/preview-host.mjs`,
+`agent-browser.mjs`, `browser-contexts.mjs`, `session-control.mjs`,
+`browser-stream.mjs`, shipped as the app's `preview-host` resource) and its
+viewer (`src/remoteExecution/StreamSurface.tsx`, `browserStream.ts`) are
+ports of T3 Code's server browser and stream (`apps/server/src/preview`,
+`apps/web/src/browser`, `packages/client-runtime/src/preview`).
+Copyright (c) 2026 T3 Tools Inc.; MIT text in the appendix; source:
+<https://github.com/pingdotgg/t3code>.
+
 **fzf — MIT.** `shared/fuzzy.ts` is a hand port of fzf's matching and scoring
 algorithm (`algo/algo.go`), compiled into the frontend bundle. Copyright (c)
 2013-2026 Junegunn Choi; MIT text in the appendix; source:
@@ -948,9 +957,9 @@ redistribute them:
 
 - **foldhash 0.2.0** — Copyright (c) 2024 Orson Peters
 
-## npm packages (237)
+## npm packages (239)
 
-### MIT — 174
+### MIT — 175
 
 - **@antfu/install-pkg 1.1.0** — Copyright (c) 2021 Anthony Fu <https://github.com/antfu>
 - **@braintree/sanitize-url 7.1.2** — Copyright (c) 2017 Braintree
@@ -1125,6 +1134,7 @@ redistribute them:
 - **vscode-languageserver-protocol 3.17.5** — Copyright (c) Microsoft Corporation
 - **vscode-languageserver-types 3.17.5** — Copyright (c) Microsoft Corporation
 - **vscode-ws-jsonrpc 3.5.0** — Copyright 2018 - present TypeFox GmbH
+- **ws 8.22.0** — Copyright (c) 2011 Einar Otto Stangvik <einaros@gmail.com>; Copyright (c) 2013 Arnout Kazemier and contributors; Copyright (c) 2016 Luigi Pinca and contributors
 - **xmlbuilder 10.1.1** — Copyright (c) 2013 Ozgur Ozcitak
 
 ### ISC — 36
@@ -1178,12 +1188,13 @@ redistribute them:
 - **rw 1.3.3** — Copyright (c) 2014-2016, Michael Bostock
 - **sprintf-js 1.0.3** — Copyright (c) 2007-2014, Alexandru Marasteanu <hello [at) alexei (dot] ro>
 
-### Apache-2.0 — 5
+### Apache-2.0 — 6
 
 - **@chevrotain/types 11.1.2** — Copyright Shahar Soel (per package manifest; the distributed license file carries no copyright line)
 - **dompurify 3.3.1** — Copyright 2025 Dr.-Ing. Mario Heiderich, Cure53
 - **dompurify 3.4.12** — Copyright Dr.-Ing. Mario Heiderich, Cure53 (per package manifest; the distributed license file carries no copyright line)
 - **fast-diff 1.3.0** — Copyright Jason Chen (per package manifest; the distributed license file carries no copyright line)
+- **playwright-core 1.63.0-alpha-2026-08-31** — Copyright (c) Microsoft Corporation
 - **xlsx 0.20.3** — Copyright sheetjs (per package manifest; the distributed license file carries no copyright line)
 
 ### BSD-2-Clause — 5

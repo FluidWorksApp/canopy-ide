@@ -678,6 +678,10 @@ export interface Settings {
    *  and "chrome" is Playwright (the user's Chrome session streamed into an
    *  iframe). Retired native-webview preferences migrate to Embedded. */
   browserEngine: BrowserEngine;
+  /** Preview tabs run in a real Chrome on this computer (previewHost.ts),
+   *  one persistent profile per project, so logins hold. Off is Embedded. A
+   *  computer without Chrome or Node falls back to Embedded on its own. */
+  previewChrome: boolean;
 
   /** What the preview's Screenshot button grabs when clicked without opening
    *  its menu. Remembered rather than fixed: whichever mode you picked last is
@@ -838,6 +842,7 @@ export const DEFAULTS: Settings = {
   remoteReach: "local",
   remoteTunnelProvider: "cloudflare",
   browserEngine: "proxy",
+  previewChrome: true,
   previewCaptureMode: "visible",
   workspaceBasePort: 5173,
   workspacePorts: {},
@@ -976,6 +981,7 @@ export function getSettings(): Settings {
     // established storage keys for the two remaining browsing options.
     // Every earlier browser choice lands on the one embedded engine.
     value.browserEngine = "proxy";
+    if (typeof value.previewChrome !== "boolean") value.previewChrome = true;
     // Per-agent account memory: a plain map of id to id, nothing else.
     {
       const raw = value.lastProfileByCli as unknown;

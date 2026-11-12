@@ -17,13 +17,23 @@ describe("Build previews a live page rather than a black rectangle", () => {
     // The choice lives in previewEngine (behaviour-tested there); the view must
     // still route through it with Build mode.
     expect(read("src/previewEngine.ts")).toContain('opts.buildMode && opts.chosen === "webview" ? "proxy" : opts.chosen');
-    expect(preview).toContain("previewEngine({ remote: !!remoteWorkspace, buildMode, chosen: chosenEngine })");
+    // Whitespace-insensitive: the formatter may break the call across lines.
+    expect(preview).toMatch(/previewEngine\(\{\s*remote: !!remoteWorkspace,\s*buildMode,\s*chosen: chosenEngine,?\s*\}\)/);
   });
 });
 
 describe("a project's preview cookies stay its own", () => {
   const preview = read("src/components/PreviewView.tsx");
   const ipc = read("src/ipc.ts");
+
+  it("gives each project its own Chrome profile", () => {
+    // The Chrome engine is a real browser: cookies are keyed by host, not
+    // port, so one profile would share localhost sessions across projects.
+    // The profile is the isolation, as the proxy's hostname is below.
+    expect(preview).toContain("const profile = previewProfile(projectId);");
+    // Every stream, the tab's and its popups', opens on that project profile.
+    expect(preview).toMatch(/previewStreamUrl\(id, path, \{[^}]*\bprofile \}\)/);
+  });
 
   it("scopes the proxy to a project rather than sharing one loopback host", () => {
     // Cookies are keyed by host and ignore the port, so every project on

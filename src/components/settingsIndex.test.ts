@@ -42,6 +42,7 @@ const EXPECTED:Record<string,string[]>={
   "account":["Accounts"],
   "agents":["Accounts", "Agent delegation", "CLI commands", "CLI updates", "Claude Code editor link", "Default agent", "Fleet readiness", "Intent & evidence review", "Other CLIs", "Plan before an agent starts", "Proof receipts", "Session documents", "Skip permission prompts", "Tools available", "Turn rollback", "Use ACP"],
   "appearance":["Accent color", "Side panel", "Skin"],
+  "browser":["Preview browser"],
   "brain":["Agent awareness", "Automatic brain work", "Brain", "Brain spending", "Builder lens summaries", "Features not using your brain", "Memory allowance maximums", "Memory monitoring prompts"],
   "clipboard":["Clipboard history", "How much to keep", "Keep what I copy", "Passwords and keys", "The history", "Where it's kept"],
   "dictation":["Indicator", "Key", "Language", "Live preview", "Model", "Mute while recording", "Recent dictation", "Shortcut", "Trigger"],
@@ -69,7 +70,7 @@ describe('the settings index',()=>{
     for(const r of itemsInSource())(found[r.tab]??=[]).push(r.name);
     for(const tab of Object.keys(found))found[tab].sort();
     expect(found).toEqual(EXPECTED);
-    expect(Object.values(found).flat().length).toBe(82);// none lost, none doubled
+    expect(Object.values(found).flat().length).toBe(83);// none lost, none doubled
   });
   it('shows each setting\'s current description, so a reworded one cannot leave search showing the old text',()=>{
     const stale:string[]=[];

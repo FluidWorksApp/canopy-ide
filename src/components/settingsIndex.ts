@@ -104,6 +104,7 @@ export const SETTINGS_INDEX: SettingEntry[] = [
   { tab: "account", name: "Billing and sign-in", keywords: ["billing", "balance", "credits", "subscription", "plan", "sign in", "login", "usage", "payment"], panel: true },
   { tab: "teams", name: "Organizations and members", keywords: ["organization", "org", "members", "invite", "roles", "admin", "people", "team"], panel: true },
   { tab: "integrations", name: "GitHub, Slack and other connections", keywords: ["github", "gh", "git", "slack", "linear", "jira", "connect", "oauth", "login"], panel: true },
+  { tab: "browser", name: "Preview browser", keywords: ["chrome", "embedded", "logins", "cookies", "sign out", "profile", "preview"] },
   { tab: "browser", name: "Browser and password vault", keywords: ["vault", "passwords", "logins", "cookies", "playwright", "token", "autofill", "browser"], panel: true },
   { tab: "remote", name: "Remote workspaces", keywords: ["cloud", "vm", "workspace", "tailscale", "ssh", "host", "connect", "server"], panel: true },
 ];

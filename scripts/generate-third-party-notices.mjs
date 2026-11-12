@@ -398,6 +398,16 @@ function collectNpm() {
     }
   }
 
+  // The preview browser host (scripts/prepare-preview-host.mjs) ships these
+  // as a Node resource, outside Vite's root dependency graph.
+  for (const name of ["playwright-core", "ws"]) {
+    const child = resolveDep("packages/remote-host", name);
+    if (child && !seen.has(child)) {
+      seen.add(child);
+      walk(child);
+    }
+  }
+
   const out = [];
   // The Chrome bridge is shipped as a Node resource, outside Vite's root
   // dependency graph. Its runtime dependencies need the same attribution.
@@ -579,6 +589,15 @@ Each component appears with the copyright notice taken from its own license
 file; the full text of every license in play is reproduced in the appendix.
 
 ## Notes on specific components
+
+**T3 Code — MIT.** The preview browser (\`packages/remote-host/preview-host.mjs\`,
+\`agent-browser.mjs\`, \`browser-contexts.mjs\`, \`session-control.mjs\`,
+\`browser-stream.mjs\`, shipped as the app's \`preview-host\` resource) and its
+viewer (\`src/remoteExecution/StreamSurface.tsx\`, \`browserStream.ts\`) are
+ports of T3 Code's server browser and stream (\`apps/server/src/preview\`,
+\`apps/web/src/browser\`, \`packages/client-runtime/src/preview\`).
+Copyright (c) 2026 T3 Tools Inc.; MIT text in the appendix; source:
+<https://github.com/pingdotgg/t3code>.
 
 **fzf — MIT.** \`shared/fuzzy.ts\` is a hand port of fzf's matching and scoring
 algorithm (\`algo/algo.go\`), compiled into the frontend bundle. Copyright (c)

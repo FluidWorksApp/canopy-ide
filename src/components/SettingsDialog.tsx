@@ -71,6 +71,7 @@ import { AcpAgentToggle } from "./AcpAgentToggle";
 import { joinArgv, splitArgv } from "../acp/providers";
 import { SlackSettings } from "./SlackSettings";
 import { VaultSettings } from "./VaultSettings";
+import { clearAllPreviewProfiles } from "../previewHost";
 import { availableMonoFonts, fontLabel, fontStack } from "../fonts";
 import {
   AgentIcon,
@@ -2587,6 +2588,7 @@ export function SettingsDialog({ onClose, initialTab = "appearance", projects = 
 
             {tab === "browser" && (
               <>
+                <PreviewBrowserSetting enabled={s.previewChrome} onChange={(previewChrome) => patch({ previewChrome })} />
                 {/* The vault is the browser's other half: it exists to fill
                     logins into these same preview tabs, and as its own tab it
                     read as an unrelated feature. */}
@@ -4005,5 +4007,41 @@ function DictationSettings() {
 
       {err && <div className="set-item-desc set-error">{err}</div>}
     </>
+  );
+}
+
+/** Settings › Browser & Vault: which browser preview tabs run in, and signing
+ *  the preview's Chrome profiles out of every site. */
+function PreviewBrowserSetting({ enabled, onChange }: { enabled: boolean; onChange: (enabled: boolean) => void }) {
+  const [note, setNote] = useState("");
+  const [busy, setBusy] = useState(false);
+  return (
+    <Item name="Preview browser" desc={enabled ? "Chrome keeps logins, one profile per project." : "Runs inside Canopy. Logins may not stick."}>
+      <span className="rc-settings">
+        <Segmented<"chrome" | "embedded">
+          aria-label="Preview browser"
+          options={[
+            { id: "chrome", label: "Chrome" },
+            { id: "embedded", label: "Embedded" },
+          ]}
+          value={enabled ? "chrome" : "embedded"}
+          onChange={(choice) => onChange(choice === "chrome")}
+        />
+        <Button
+          disabled={busy}
+          onClick={() => {
+            setBusy(true);
+            setNote("");
+            void clearAllPreviewProfiles()
+              .then(() => setNote("Signed out."))
+              .catch((error: unknown) => setNote(String((error as Error)?.message ?? error)))
+              .finally(() => setBusy(false));
+          }}
+        >
+          Sign out of preview sites
+        </Button>
+        {note && <span className="set-item-desc">{note}</span>}
+      </span>
+    </Item>
   );
 }
