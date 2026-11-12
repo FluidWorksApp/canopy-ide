@@ -20,6 +20,11 @@
 //!   ships a closure to the engine thread and waits for the result. The queue
 //!   is FIFO, so a read always sees every earlier `advance`, exactly as with a
 //!   single-threaded `Screen`;
+//! * the [`Frame`] is built lazily, on the engine thread, by the first read
+//!   that needs frame-derived state (`frame`, `seq`, `damage_since`,
+//!   `snapshot`, `hyperlink_at`, `row_mark`, `cursor_blinking`) after one or
+//!   more `advance`s. Several advances between two reads cost one build and
+//!   count as one frame (one `seq` step) with the union of their damage;
 //! * dropping the `Screen` closes the queue; the thread finishes what is queued,
 //!   drops the engine on the thread that made it, and is joined.
 //!
@@ -77,6 +82,7 @@ use crate::frame::{Damage, Frame};
 use crate::shared::clamp_size;
 use engine::Engine;
 use std::sync::mpsc::{self, SyncSender};
+use std::sync::Mutex;
 use std::thread::{self, JoinHandle};
 
 pub use crate::shared::{
@@ -149,6 +155,12 @@ const CHUNK: usize = 64 * 1024;
 
 pub struct Screen {
     tx: Option<SyncSender<Cmd>>,
+    /// Bytes from `advance` not yet queued. They go to the engine thread as one
+    /// message when they reach [`CHUNK`], or before any other call (read,
+    /// resize, drop), so the engine thread sees the stream in order and every
+    /// read sees every earlier `advance`. Behind a mutex only because reads
+    /// take `&self` and must flush it.
+    staged: Mutex<Vec<u8>>,
     thread: Option<JoinHandle<()>>,
     cols: u16,
     rows: u16,
@@ -196,13 +208,32 @@ impl Screen {
         }
         Screen {
             tx: Some(tx),
+            staged: Mutex::new(Vec::new()),
             thread: Some(thread),
             cols,
             rows,
         }
     }
 
+    /// Queue staged bytes (if any) for the engine thread.
+    fn flush(&self) {
+        let data = {
+            let mut st = self.staged.lock().unwrap_or_else(|e| e.into_inner());
+            if st.is_empty() {
+                return;
+            }
+            std::mem::take(&mut *st)
+        };
+        self.send_raw(Box::new(move |e| e.feed(&data)));
+    }
+
+    /// Queue a command behind everything `advance`d so far.
     fn send(&self, cmd: Cmd) {
+        self.flush();
+        self.send_raw(cmd);
+    }
+
+    fn send_raw(&self, cmd: Cmd) {
         match &self.tx {
             Some(tx) => {
                 if tx.send(cmd).is_err() {
@@ -231,16 +262,33 @@ impl Screen {
     }
 
     /// Feed bytes from the PTY. Any split of the same stream gives the same
-    /// screen. Returns once the bytes are queued; the next read waits for them.
+    /// screen. Returns once the bytes are copied into a staging buffer of at
+    /// most 64 KiB; that buffer is queued when full or before any other call,
+    /// and the next read waits for everything.
     pub fn advance(&mut self, bytes: &[u8]) {
         if bytes.is_empty() {
             return;
         }
-        for chunk in bytes.chunks(CHUNK) {
-            let data = chunk.to_vec();
-            self.send(Box::new(move |e| e.feed(&data)));
+        let mut rest = bytes;
+        while !rest.is_empty() {
+            let full = {
+                let mut st = self.staged.lock().unwrap_or_else(|e| e.into_inner());
+                if st.capacity() == 0 {
+                    st.reserve_exact(CHUNK);
+                }
+                let n = rest.len().min(CHUNK - st.len());
+                st.extend_from_slice(&rest[..n]);
+                rest = &rest[n..];
+                if st.len() == CHUNK {
+                    Some(std::mem::take(&mut *st))
+                } else {
+                    None
+                }
+            };
+            if let Some(data) = full {
+                self.send_raw(Box::new(move |e| e.feed(&data)));
+            }
         }
-        self.send(Box::new(|e| e.settle()));
     }
 
     /// Bytes the program asked to have written back to it (answers to its
@@ -344,6 +392,7 @@ impl Screen {
 impl Drop for Screen {
     fn drop(&mut self) {
         // Closing the queue ends the thread's loop after the queued work.
+        self.flush();
         drop(self.tx.take());
         if let Some(t) = self.thread.take() {
             let _ = t.join();
