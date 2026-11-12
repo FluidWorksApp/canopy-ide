@@ -161,4 +161,20 @@ describe("LaunchPalette", () => {
     await userEvent.keyboard("zzzzz");
     expect(screen.getByText("No match")).toBeInTheDocument();
   });
+
+  it("hides the native terminal row when the build has none", () => {
+    open();
+    expect(screen.queryByText("Native Terminal Window (beta)")).not.toBeInTheDocument();
+  });
+
+  it("lists the native terminal row after Shell, and Enter opens a window", async () => {
+    const onNativeTerminal = vi.fn();
+    const { onShell } = open({ onNativeTerminal });
+    expect(screen.getByText("Native Terminal Window (beta)")).toBeInTheDocument();
+    await userEvent.keyboard("nat");
+    expect(screen.queryByText("Shell")).not.toBeInTheDocument();
+    await userEvent.keyboard("{Enter}");
+    expect(onNativeTerminal).toHaveBeenCalledOnce();
+    expect(onShell).not.toHaveBeenCalled();
+  });
 });

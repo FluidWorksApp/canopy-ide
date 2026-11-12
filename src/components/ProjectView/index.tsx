@@ -49,6 +49,7 @@ import {
 import { Panel, PanelGroup } from "react-resizable-panels";
 import { commitMessageWithSessions } from "../../sessionDoc/trailers";
 import * as ipc from "../../ipc";
+import { openNativeTerminal, useNativeTermAvailable } from "../../nativeTerm";
 import {
   closeLink,
   forgetLink,
@@ -1292,6 +1293,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
   const [palette, setPalette] = useState<PaletteMode | null>(null);
   /** The ⌘N launcher — the ＋ menu as a type-and-Enter list. */
   const [launcherOpen, setLauncherOpen] = useState(false);
+  const nativeTermAvailable = useNativeTermAvailable();
   // ⌘⇧N asks for a workspace for this one opening; ⌘N leaves ↵ to the
   // agentWorkspaceByDefault setting. ⇧↵ and the row's side action are always
   // the other choice.
@@ -5867,6 +5869,15 @@ const ProjectViewBody = memo(function ProjectViewBody({
     const newTerminalHandler = () => {
       void pickComponent("New shell").then((selection) => selection && addTerminal(selection.component.path));
     };
+    const newNativeTerminalHandler = () => {
+      void pickComponent("New native terminal window").then(
+        (selection) =>
+          selection &&
+          openNativeTerminal(selection.component.path).catch((err) =>
+            onNoticeRef.current(String(err), "error"),
+          ),
+      );
+    };
     const toggleSidebarHandler = () => {
       setPinned((v) => !v);
       setPeeking(false);
@@ -6170,6 +6181,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
     window.addEventListener("canopy:run-command", runCommand);
     window.addEventListener("menu:close-tab", closeTabHandler);
     window.addEventListener("menu:new-terminal", newTerminalHandler);
+    window.addEventListener("menu:new-native-terminal", newNativeTerminalHandler);
     window.addEventListener("menu:toggle-sidebar", toggleSidebarHandler);
     window.addEventListener("menu:next-tab", next);
     window.addEventListener("menu:prev-tab", prev);
@@ -6182,6 +6194,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
       window.removeEventListener("canopy:run-command", runCommand);
       window.removeEventListener("menu:close-tab", closeTabHandler);
       window.removeEventListener("menu:new-terminal", newTerminalHandler);
+      window.removeEventListener("menu:new-native-terminal", newNativeTerminalHandler);
       window.removeEventListener("menu:toggle-sidebar", toggleSidebarHandler);
       window.removeEventListener("keydown", onKeydown, true);
       window.removeEventListener("menu:next-tab", next);
@@ -16420,6 +16433,20 @@ const ProjectViewBody = memo(function ProjectViewBody({
             onNewShell();
             setLauncherOpen(false);
           }}
+          onNativeTerminal={
+            nativeTermAvailable && !pendingSplit
+              ? () => {
+                  setLauncherOpen(false);
+                  void pickComponent("New native terminal window").then(
+                    (selection) =>
+                      selection &&
+                      openNativeTerminal(selection.component.path).catch((err) =>
+                        onNotice(String(err), "error"),
+                      ),
+                  );
+                }
+              : undefined
+          }
           onLaunchCli={(cli, where) => {
             setLauncherOpen(false);
             void pickComponent(`New ${cli.name}`, cli.id).then((selection) => {
