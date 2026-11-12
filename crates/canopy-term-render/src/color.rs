@@ -21,6 +21,13 @@ pub struct Theme {
 
 impl Default for Theme {
     fn default() -> Self {
+        Theme::dark()
+    }
+}
+
+impl Theme {
+    /// The built-in dark theme (the default).
+    pub fn dark() -> Self {
         Theme {
             fg: [0xe5, 0xe5, 0xe5],
             bg: [0x1e, 0x1e, 0x1e],
@@ -48,9 +55,38 @@ impl Default for Theme {
             bold_is_bright: false,
         }
     }
-}
 
-impl Theme {
+    /// The built-in light theme: dark text on white, with the ANSI colours
+    /// darkened so they stay readable on it.
+    pub fn light() -> Self {
+        Theme {
+            fg: [0x33, 0x33, 0x33],
+            bg: [0xff, 0xff, 0xff],
+            cursor: [0x00, 0x00, 0x00],
+            selection_bg: [0xad, 0xd6, 0xff],
+            selection_fg: None,
+            palette: [
+                [0x00, 0x00, 0x00],
+                [0xcd, 0x31, 0x31],
+                [0x00, 0xbc, 0x00],
+                [0x94, 0x98, 0x00],
+                [0x04, 0x51, 0xa5],
+                [0xbc, 0x05, 0xbc],
+                [0x05, 0x98, 0xbc],
+                [0x55, 0x55, 0x55],
+                [0x66, 0x66, 0x66],
+                [0xcd, 0x31, 0x31],
+                [0x14, 0xce, 0x14],
+                [0xb5, 0xba, 0x00],
+                [0x04, 0x51, 0xa5],
+                [0xbc, 0x05, 0xbc],
+                [0x05, 0x98, 0xbc],
+                [0xa5, 0xa5, 0xa5],
+            ],
+            bold_is_bright: false,
+        }
+    }
+
     /// xterm 256-colour table: 16 ANSI, a 6x6x6 cube, then 24 greys.
     pub fn indexed(&self, i: u8) -> Rgb {
         match i {
@@ -147,6 +183,18 @@ mod tests {
         assert_eq!(r.fg, t.fg);
         assert_eq!(r.bg, t.bg);
         assert!(!r.bg_drawn);
+    }
+
+    #[test]
+    fn the_default_theme_is_the_dark_one_and_light_is_different() {
+        assert_eq!(Theme::default(), Theme::dark());
+        let (d, l) = (Theme::dark(), Theme::light());
+        assert_eq!(d.bg, [0x1e, 0x1e, 0x1e]);
+        assert_ne!(d, l);
+        // Light is light: the background is brighter than the text.
+        let lum = |c: Rgb| c.iter().map(|&v| v as u32).sum::<u32>();
+        assert!(lum(l.bg) > lum(l.fg));
+        assert!(lum(d.bg) < lum(d.fg));
     }
 
     #[test]

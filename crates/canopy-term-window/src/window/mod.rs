@@ -21,9 +21,9 @@ use canopy_term_core::Row;
 use canopy_term_input as input;
 use canopy_term_render::builder::{QuadBuilder, RenderState};
 use canopy_term_render::color::Theme;
-use canopy_term_render::fonts::{FontBook, BUNDLED_FONT};
+use canopy_term_render::fonts::FontBook;
 use canopy_term_render::geometry::Selection as RenderSelection;
-use canopy_term_render::metrics::{layout, CellLayout, FontMetrics, Scale};
+use canopy_term_render::metrics::{layout_with, CellLayout, FontMetrics, Scale};
 use canopy_term_render::renderer::Renderer;
 use canopy_term_render::text::TextEngine;
 use winit::application::ApplicationHandler;
@@ -35,6 +35,7 @@ use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy}
 use winit::keyboard::{Key, ModifiersState, NamedKey};
 use winit::window::{Window, WindowId};
 
+pub use canopy_term_render::color::{Rgb, Theme as RenderTheme};
 pub use canopy_term_session::{FrameSource, Waker};
 pub use gpu::choose_format;
 
@@ -95,6 +96,13 @@ pub struct WindowConfig {
     /// pixels (times the display scale = physical). The area is drawn in the
     /// terminal background colour.
     pub padding_px: f32,
+    /// The primary font family, looked up among the installed fonts. `None`, or
+    /// a family that is not installed (one warning line on stderr), draws in the
+    /// bundled JetBrains Mono.
+    pub font_family: Option<String>,
+    /// Multiplier on the cell height (the font's own line is 1.0). The text
+    /// stays centred in the cell.
+    pub line_height: f32,
 }
 
 impl Default for WindowConfig {
@@ -107,6 +115,8 @@ impl Default for WindowConfig {
             system_fonts: true,
             cursor_blink: true,
             padding_px: DEFAULT_PADDING_PX,
+            font_family: None,
+            line_height: 1.0,
         }
     }
 }
@@ -402,9 +412,18 @@ impl<S: FrameSource> App<S> {
     }
 
     fn create_view(&mut self, el: &ActiveEventLoop) -> Result<View, String> {
-        let metrics = FontMetrics::from_font_data(BUNDLED_FONT, 0)
-            .ok_or("the bundled font has no metrics")?;
-        let logical = layout(&metrics, self.font.px, Scale(1.0));
+        let (mut fonts, warning) =
+            FontBook::configured(self.config.font_family.as_deref(), self.config.system_fonts);
+        if let Some(w) = warning {
+            use std::io::Write as _;
+            // Never panics, even with stderr gone.
+            let _ = writeln!(std::io::stderr(), "canopy-term-app: {w}");
+        }
+        let metrics = fonts
+            .primary_metrics()
+            .ok_or("the primary font has no metrics")?;
+        let lh = self.config.line_height;
+        let logical = layout_with(&metrics, self.font.px, Scale(1.0), lh);
         let (cols, rows) = self.config.initial_grid;
         let attrs = Window::default_attributes()
             .with_title(self.config.title.clone())
@@ -419,7 +438,12 @@ impl<S: FrameSource> App<S> {
         let window = Arc::new(el.create_window(attrs).map_err(|e| e.to_string())?);
         let adapter =
             accesskit_winit::Adapter::with_event_loop_proxy(el, &window, self.proxy.clone());
-        let cell_layout = layout(&metrics, self.font.px, Scale(window.scale_factor() as f32));
+        let cell_layout = layout_with(
+            &metrics,
+            self.font.px,
+            Scale(window.scale_factor() as f32),
+            lh,
+        );
         // The logical size above used the 1x cell. Cells are whole physical
         // pixels, so at 2x a cell can be 17 px, not 2 x 8: size the window from
         // the real cell so it opens at the requested grid. A platform that
@@ -437,10 +461,6 @@ impl<S: FrameSource> App<S> {
             gpu.view_format,
             (ATLAS_SIZE as u32, ATLAS_SIZE as u32),
         );
-        let mut fonts = FontBook::bundled();
-        if self.config.system_fonts {
-            fonts.load_system_fonts();
-        }
         let engine = TextEngine::new(fonts, cell_layout, ATLAS_SIZE);
         let mut builder = QuadBuilder::new(cell_layout, self.config.theme);
         builder.set_origin(pad, pad);
@@ -734,7 +754,12 @@ impl<S: FrameSource> App<S> {
             return;
         };
         let scale = v.window.scale_factor() as f32;
-        let l = layout(&v.metrics, self.font.px, Scale(scale));
+        let l = layout_with(
+            &v.metrics,
+            self.font.px,
+            Scale(scale),
+            self.config.line_height,
+        );
         v.layout = l;
         v.pad = padding_px(self.config.padding_px, scale);
         let origin = v.origin();

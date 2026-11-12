@@ -3,6 +3,8 @@
 
 use std::path::PathBuf;
 
+use crate::config::{self, ThemeName};
+
 pub const USAGE: &str = "\
 canopy-term-app: Canopy's own terminal window
 
@@ -30,12 +32,23 @@ options:
   --dev               use the debug-build directory ~/.canopy/pty-host-dev
   --cols N, --rows N  the grid a new window opens at (default 100x30)
   --font-px N         font size in logical pixels (default 14)
+  --font-family NAME  an installed font family for the text (default: the
+                      bundled JetBrains Mono; a missing family warns and falls
+                      back to it)
+  --line-height X     multiplier on the cell height (default 1; 0.5 to 3)
   --padding PX        space between the window edge and the text, on every side,
                       in logical pixels (default 8; 0 for none)
+  --theme NAME        dark (default) or light
   --no-blink          never blink the cursor
   --no-system-fonts   use only the bundled font (no CJK or emoji fallback)
+  --print-config      print the resolved settings (file, flags, defaults) and exit
   -h, --help          this text
   -V, --version       print the version
+
+config file: $CANOPY_TERM_CONFIG, else ~/.config/canopy-term/config.toml
+($XDG_CONFIG_HOME respected; %APPDATA%\\canopy-term\\config.toml on Windows).
+Keys: font_family, font_px, line_height, padding, blink, theme (dark, light, or
+a table of colours). Flags override the file. See config.example.toml.
 
 The host is unix only for now (macOS and Linux); on Windows the window opens
 nothing and says so.
@@ -64,11 +77,18 @@ pub struct Options {
     pub kill_on_close: bool,
     pub cols: u16,
     pub rows: u16,
-    pub font_px: f32,
+    /// The settings below are `None` when the flag was not given, so the file
+    /// (then the default) can supply them: see `config::resolve`.
+    pub font_px: Option<f32>,
+    pub font_family: Option<String>,
+    pub line_height: Option<f32>,
     /// Space around the grid in logical pixels.
-    pub padding_px: f32,
-    pub cursor_blink: bool,
+    pub padding_px: Option<f32>,
+    pub theme: Option<ThemeName>,
+    /// `Some(false)` for `--no-blink`.
+    pub cursor_blink: Option<bool>,
     pub system_fonts: bool,
+    pub print_config: bool,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -81,9 +101,6 @@ pub enum Parsed {
 /// The default `--linger`: long enough to close the window, update and come
 /// back, the same as the Canopy app's own.
 pub const DEFAULT_LINGER_SECS: u64 = 2 * 60 * 60;
-
-/// The default `--padding`, in logical pixels (the window's own default).
-pub const DEFAULT_PADDING_PX: f32 = 8.0;
 
 fn value(it: &mut std::vec::IntoIter<String>, flag: &str) -> Result<String, String> {
     it.next().ok_or_else(|| format!("{flag} needs a value"))
@@ -122,10 +139,14 @@ pub fn parse(args: impl IntoIterator<Item = String>) -> Result<Parsed, String> {
     let mut kill_on_close = false;
     let mut cols = 100;
     let mut rows = 30;
-    let mut font_px = 14.0f32;
-    let mut padding_px = DEFAULT_PADDING_PX;
-    let mut cursor_blink = true;
+    let mut font_px = None;
+    let mut font_family = None;
+    let mut line_height = None;
+    let mut padding_px = None;
+    let mut theme = None;
+    let mut cursor_blink = None;
     let mut system_fonts = true;
+    let mut print_config = false;
 
     let mut it = head.into_iter();
     while let Some(arg) = it.next() {
@@ -149,22 +170,31 @@ pub fn parse(args: impl IntoIterator<Item = String>) -> Result<Parsed, String> {
             "--cols" => cols = grid_edge(&value(&mut it, "--cols")?, "--cols")?,
             "--rows" => rows = grid_edge(&value(&mut it, "--rows")?, "--rows")?,
             "--font-px" => {
-                let v = value(&mut it, "--font-px")?;
-                let px: f32 = number(&v, "--font-px")?;
-                if !(4.0..=200.0).contains(&px) {
-                    return Err("--font-px must be between 4 and 200".into());
-                }
-                font_px = px;
+                let px: f32 = number(&value(&mut it, "--font-px")?, "--font-px")?;
+                font_px = Some(config::check_font_px(px).map_err(|e| format!("--font-px {e}"))?);
+            }
+            "--font-family" => {
+                let v = value(&mut it, "--font-family")?;
+                font_family =
+                    Some(config::check_font_family(&v).map_err(|e| format!("--font-family {e}"))?);
+            }
+            "--line-height" => {
+                let x: f32 = number(&value(&mut it, "--line-height")?, "--line-height")?;
+                line_height =
+                    Some(config::check_line_height(x).map_err(|e| format!("--line-height {e}"))?);
             }
             "--padding" => {
-                let v = value(&mut it, "--padding")?;
-                let px: f32 = number(&v, "--padding")?;
-                if !(0.0..=200.0).contains(&px) {
-                    return Err("--padding must be between 0 and 200".into());
-                }
-                padding_px = px;
+                let px: f32 = number(&value(&mut it, "--padding")?, "--padding")?;
+                padding_px = Some(config::check_padding(px).map_err(|e| format!("--padding {e}"))?);
             }
-            "--no-blink" => cursor_blink = false,
+            "--theme" => {
+                let v = value(&mut it, "--theme")?;
+                theme = Some(ThemeName::parse(&v).ok_or_else(|| {
+                    format!("--theme: {v:?} is not a theme; use \"dark\" or \"light\"")
+                })?);
+            }
+            "--no-blink" => cursor_blink = Some(false),
+            "--print-config" => print_config = true,
             "--no-system-fonts" => system_fonts = false,
             other if other.starts_with('-') => {
                 return Err(format!("unknown option {other:?}"));
@@ -208,9 +238,13 @@ pub fn parse(args: impl IntoIterator<Item = String>) -> Result<Parsed, String> {
         cols,
         rows,
         font_px,
+        font_family,
+        line_height,
         padding_px,
+        theme,
         cursor_blink,
         system_fonts,
+        print_config,
     })))
 }
 
@@ -237,9 +271,14 @@ mod tests {
             }
         );
         assert_eq!((o.cols, o.rows), (100, 30));
-        assert_eq!(o.padding_px, 8.0);
+        // Unset flags stay unset, so the config file can fill them in.
+        assert_eq!(
+            (o.font_px, o.padding_px, o.line_height, o.cursor_blink),
+            (None, None, None, None)
+        );
+        assert_eq!((o.font_family, o.theme), (None, None));
         assert_eq!(o.linger_secs, DEFAULT_LINGER_SECS);
-        assert!(o.cursor_blink && o.system_fonts && !o.kill_on_close && !o.dev);
+        assert!(o.system_fonts && !o.kill_on_close && !o.dev && !o.print_config);
     }
 
     #[test]
@@ -284,16 +323,16 @@ mod tests {
         .unwrap();
         assert_eq!(o.socket, Some(PathBuf::from("/s/h.sock")));
         assert_eq!(o.linger_secs, 30);
-        assert!(o.kill_on_close && !o.cursor_blink && !o.system_fonts);
-        assert_eq!((o.cols, o.rows, o.font_px), (120, 40, 16.5));
+        assert!(o.kill_on_close && o.cursor_blink == Some(false) && !o.system_fonts);
+        assert_eq!((o.cols, o.rows, o.font_px), (120, 40, Some(16.5)));
         assert!(matches!(o.target, Target::New { key: Some(ref k), .. } if k == "k1"));
     }
 
     #[test]
     fn padding_takes_logical_pixels_and_allows_none() {
-        assert_eq!(run(&["--padding", "12"]).unwrap().padding_px, 12.0);
-        assert_eq!(run(&["--padding", "0"]).unwrap().padding_px, 0.0);
-        assert_eq!(run(&["--padding", "2.5"]).unwrap().padding_px, 2.5);
+        assert_eq!(run(&["--padding", "12"]).unwrap().padding_px, Some(12.0));
+        assert_eq!(run(&["--padding", "0"]).unwrap().padding_px, Some(0.0));
+        assert_eq!(run(&["--padding", "2.5"]).unwrap().padding_px, Some(2.5));
         for bad in ["-1", "201", "nan", "abc", ""] {
             assert!(
                 run(&["--padding", bad]).is_err(),
@@ -301,6 +340,42 @@ mod tests {
             );
         }
         assert!(run(&["--padding"]).is_err());
+    }
+
+    #[test]
+    fn the_config_flags_are_read() {
+        let o = run(&[
+            "--font-family",
+            "Fira Code",
+            "--line-height",
+            "1.3",
+            "--theme",
+            "light",
+            "--print-config",
+        ])
+        .unwrap();
+        assert_eq!(o.font_family.as_deref(), Some("Fira Code"));
+        assert_eq!(o.line_height, Some(1.3));
+        assert_eq!(o.theme, Some(ThemeName::Light));
+        assert!(o.print_config);
+    }
+
+    #[test]
+    fn config_flag_mistakes_name_the_flag() {
+        for (bad, flag) in [
+            (&["--line-height", "0.1"][..], "--line-height"),
+            (&["--line-height", "4"], "--line-height"),
+            (&["--line-height", "x"], "--line-height"),
+            (&["--theme", "solarized"], "--theme"),
+            (&["--theme"], "--theme"),
+            (&["--font-family", " "], "--font-family"),
+            (&["--font-family"], "--font-family"),
+            (&["--font-px", "201"], "--font-px"),
+            (&["--padding", "-1"], "--padding"),
+        ] {
+            let e = run(bad).expect_err(&format!("{bad:?}"));
+            assert!(e.contains(flag), "{bad:?}: {e}");
+        }
     }
 
     #[test]
