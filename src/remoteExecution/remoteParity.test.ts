@@ -40,6 +40,9 @@ const REMOTE_BRANCHED = new Set([
   "git_project_checkouts",
   // ACP file writes: fsWriteFileConfined sends fs_write_file to a workspace host.
   "fs_write_file_confined",
+  // The native terminal window opens on this computer; nativeTerm.ts returns
+  // false on a remote or workspace host before it asks.
+  "native_term_available", "native_term_open",
 ]);
 
 const SRC = join(__dirname, "..");
