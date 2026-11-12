@@ -329,7 +329,8 @@ fn check_key(ev: &KeyEvent<'_>, modes: Modes) {
         assert!(!wrote, "{what}: a release in legacy mode wrote bytes");
     }
     if let Key::F(n) = ev.key {
-        if n == 0 || n > 35 {
+        // With text the key still types it; the number only has no encoding.
+        if (n == 0 || n > 35) && ev.text.is_none() {
             assert!(!wrote, "{what}: F{n} wrote {}", esc(&alone));
         }
     }
