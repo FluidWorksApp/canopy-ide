@@ -541,6 +541,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "canopy-term-session"
+version = "0.1.0"
+dependencies = [
+ "canopy-term-core",
+ "canopy-term-input",
+]
+
+[[package]]
 name = "canopy-term-window"
 version = "0.1.0"
 dependencies = [
@@ -550,6 +558,7 @@ dependencies = [
  "canopy-term-core",
  "canopy-term-input",
  "canopy-term-render",
+ "canopy-term-session",
  "pollster",
  "unicode-width",
  "wgpu",

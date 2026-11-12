@@ -1,0 +1,38 @@
+[package]
+name = "canopy-term-app"
+version = "0.1.0"
+description = "Canopy's own terminal: a native window on a session of the persistent PTY host"
+authors = ["Cause Connect Pte Ltd <sam@fluidwords.app>"]
+license = "MIT"
+edition = "2021"
+# The window crate's floor (uuid, via accesskit, declares 1.89).
+rust-version = "1.89"
+
+# Its own workspace root with its own lock: parallel work on other crates, and
+# dependencies a track adds, never touch the app's Cargo.lock.
+[workspace]
+
+[[bin]]
+name = "canopy-term-app"
+path = "src/main.rs"
+
+[dependencies]
+canopy-term-session = { path = "../canopy-term-session" }
+# Default features: the winit/wgpu window.
+canopy-term-window = { path = "../canopy-term-window" }
+
+# The host is unix-only (the Windows host is in progress): there the binary
+# builds, says so, and the memory demo still runs.
+[target.'cfg(unix)'.dependencies]
+canopy-pty-host = { path = "../canopy-pty-host" }
+
+[profile.release]
+lto = "thin"
+strip = true
+
+# Profiles in a path dependency are ignored. libghostty-vt-sys (the engine behind
+# canopy-term-core) picks Zig's optimize mode from the profile: debug info on
+# means a Zig Debug build (slow, safety checks that abort); off gives
+# ReleaseFast, which is what a release build gets.
+[profile.dev.package.libghostty-vt-sys]
+debug = false

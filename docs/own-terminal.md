@@ -11,13 +11,13 @@ working with an agent, not measurements.
 
 | Layer | Crate / PR | Build or adopt | Status |
 |---|---|---|---|
-| 1 Session host | `canopy-pty-host` (#780) | Built | Adoption and quit-survival under `CANOPY_PTY_HOST=1`; protocol 3; Windows host in progress |
+| 1 Session host | `canopy-pty-host` (#780) | Built | Adoption and quit-survival, on by default on Mac and Linux (Settings → Terminal; `CANOPY_PTY_HOST=0/1` forces); protocol 3; Windows host in progress |
 | 2 Screen state | `canopy-term-core` screen (#784, #812) | Adopt libghostty-vt (Zig 0.15.2, Rust 1.90), own snapshot | libghostty-vt is the only engine; the alacritty_terminal `Screen` is removed. Build: `crates/canopy-term-core/README.md` |
 | 3 CLI | `canopy-term-cli` (#783) | Build | `ls kill attach send capture wait new`; exclusive attach and `read_ring` next |
 | 4 Remote protocol | not started | Build (ideas from mosh, tmux) | Snapshot on attach, per-device keys and pairing, per-client backpressure |
 | 5 Network | `canopy-term-net` (#785, #789) | Build on iroh and the installed Tailscale | Local unix socket stays its own transport |
 | 6 Service forwarding | not started | Build | Remote spawn (`--on <machine>`) and port forwarding |
-| 7 Native window | `canopy-term-render` (#782), `canopy-term-input`, `canopy-term-window` | Build renderer, input and window | wgpu, glyph atlas, shaping; kitty keyboard; IME; AccessKit |
+| 7 Native window | `canopy-term-render` (#782), `canopy-term-input`, `canopy-term-window`, `canopy-term-session`, `canopy-term-app` | Build renderer, input, window, session and the app that joins them | wgpu, glyph atlas, shaping; kitty keyboard; IME; AccessKit; `canopy-term-app` opens a window on a host session (unix; never run on a real display yet) |
 
 ## Decisions
 

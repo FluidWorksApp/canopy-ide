@@ -54,7 +54,7 @@ const EXPECTED:Record<string,string[]>={
   "rules":["Rules"],
   "sessions":["At the budget", "Ctrl+Tab switching", "Hibernate idle agents", "Live agents per project", "New agents get a workspace", "Prototype session cap", "Restore sessions I close", "Session budget", "Set up new workspaces", "Settle into Idle after", "Spend & outcomes", "Stack tabs by status", "Workspace ports"],
   "spotsearch":["Conversations to index", "Keep history for", "Scope", "Terminal scrollback", "The index"],
-  "terminal":["Automatic session names", "Font and cursor", "Scrollback"],
+  "terminal":["Automatic session names", "Font and cursor", "Keep terminals running after quit", "Scrollback"],
 };
 
 describe('the settings index',()=>{

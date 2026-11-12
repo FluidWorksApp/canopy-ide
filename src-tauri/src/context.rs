@@ -707,7 +707,7 @@ pub(crate) fn constant_time_eq(a: &str, b: &str) -> bool {
 /// agents just lose the context tools.
 pub fn start(app: tauri::AppHandle) {
     // Claimed here, before the first terminal can spawn, so every terminal of
-    // this launch carries the socket. Only with the PTY host on: nothing else
+    // this launch carries the socket. Only with the PTY host on (the "Keep terminals running" setting): nothing else
     // outlives the app, and with it off nothing about the bridge changes.
     #[cfg(unix)]
     let stable = crate::pty_hosted::enabled()

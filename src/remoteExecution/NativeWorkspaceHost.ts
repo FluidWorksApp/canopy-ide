@@ -75,7 +75,7 @@ for(const command of ['tailscale_status','tailscale_allow_set','tailscale_allowe
 for(const command of ['t3_list','t3_describe','t3_pair','t3_remove','t3_socket_open','t3_socket_send','t3_socket_close'])LOCAL_UI.add(command);
 for(const command of ['process_capture_metrics','snapshot_capture_metrics','browser_close_metrics','browser_pressure_reload_metrics','selftest_checkpoint','selftest_checkpoint_save','selftest_finish','selftest_reload_renderer','selftest_spawn_remote','selftest_store_contains','cli_install_shim','cli_take_pending_targets','cli_take_pending_open','cli_take_pending_link','workspace_export','workspace_import'])LOCAL_UI.add(command);
 // Quitting is this computer's app; "Quit and Stop All" stops its terminals.
-for(const command of ['app_quit','pty_host_enabled'])LOCAL_UI.add(command);
+for(const command of ['app_quit','pty_host_enabled','pty_host_setting','pty_host_set_setting'])LOCAL_UI.add(command);
 /** Desktop events that belong to the commands above. */
 const DESKTOP_EVENTS=['relay:state','relay:chat','relay:command','relay:collab','relay:transfer','relay:transfer-progress','desk:state','relay:desk','tunnel:state'];
 /** Commands this adapter answers itself (below) rather than passing to the

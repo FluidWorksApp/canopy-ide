@@ -34,6 +34,7 @@ use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy}
 use winit::keyboard::{Key, ModifiersState};
 use winit::window::{Window, WindowId};
 
+pub use canopy_term_session::{FrameSource, Waker};
 pub use gpu::choose_format;
 
 use keymap::{map_key, mods_from, mouse_button, reports_mouse, wheel_steps, KeyParts};
@@ -45,7 +46,6 @@ use crate::grid::{cell_at, grid_size, CellPx, FontZoom, PxRect};
 use crate::ime::{cursor_area, preedit_cols, ImeAction, ImeEvent, ImeGate};
 use crate::selection::{selection_text, Selection};
 use crate::shortcuts::{shortcut, Mods, Platform, Shortcut};
-use crate::source::FrameSource;
 
 /// Atlas edge in pixels: room for a screen of glyphs at large zoom on HiDPI.
 const ATLAS_SIZE: u16 = 2048;
@@ -215,8 +215,9 @@ struct App<S> {
     ime_area: Option<PxRect>,
     /// The surface must be presented even if no row changed (resize, expose).
     needs_present: bool,
-    /// Reused buffer for encoded input.
-    out: Vec<u8>,
+    /// The title the window shows, to spot a change without cloning the
+    /// frame's.
+    title_shown: Option<String>,
     /// Mouse reporting: the button held (for motion reports), the last cell
     /// reported, and the wheel's fractional steps.
     mouse_held: Option<input::MouseButton>,
@@ -231,7 +232,7 @@ impl<S: FrameSource> App<S> {
         blink.enabled = config.cursor_blink;
         App {
             source,
-            out: Vec::new(),
+            title_shown: None,
             mouse_held: None,
             mouse_cell: None,
             wheel_acc: 0.0,
@@ -321,18 +322,21 @@ impl<S: FrameSource> App<S> {
         }
     }
 
+    /// The program's current modes, from the source: they can be newer than
+    /// the last frame drawn.
     fn modes(&self) -> Modes {
-        self.frame.as_ref().map(|f| f.modes).unwrap_or_default()
+        self.source.modes()
     }
 
-    fn write(&mut self, bytes: &[u8]) {
-        if bytes.is_empty() {
-            return;
+    /// After the source took input: restart the blink, and pull at once so
+    /// the echo shows without waiting for a wake. Returns `sent`.
+    fn input_sent(&mut self, sent: bool) -> bool {
+        if sent {
+            self.blink.reset(Instant::now());
+            self.pull();
+            self.request_redraw();
         }
-        self.source.write(bytes);
-        self.blink.reset(Instant::now());
-        self.pull();
-        self.request_redraw();
+        sent
     }
 
     /// Takes the newest frame from the source, relative to what was drawn.
@@ -342,17 +346,24 @@ impl<S: FrameSource> App<S> {
             .as_ref()
             .and_then(|v| v.builder.last_seq())
             .unwrap_or(0);
-        if let Some(frame) = self.source.frame_since(since) {
-            let old_title = self.frame.as_ref().and_then(|f| f.title.clone());
-            if frame.title != old_title {
+        // Into the frame already held, so a steady window allocates nothing
+        // per frame.
+        let had = self.frame.is_some();
+        let mut frame = self.frame.take().unwrap_or_default();
+        let got = self.source.frame_into(since, &mut frame);
+        if got {
+            if frame.title != self.title_shown {
+                self.title_shown.clone_from(&frame.title);
                 if let Some(v) = &self.view {
                     let title = frame.title.as_deref().unwrap_or(&self.config.title);
                     v.window.set_title(title);
                 }
             }
-            self.frame = Some(frame);
             self.blink.reset(Instant::now());
             self.request_redraw();
+        }
+        if got || had {
+            self.frame = Some(frame);
         }
         if self.source.closed() {
             self.exit = true;
@@ -410,22 +421,9 @@ impl<S: FrameSource> App<S> {
             self.ime.focus_lost();
             self.drag_anchor = None;
         }
-        let modes = self.modes();
-        self.encode_and_write(|out| input::encode_focus(focused, modes, out));
+        let sent = self.source.focus(focused);
+        self.input_sent(sent);
         self.request_redraw();
-    }
-
-    /// Runs an encoder into the reused buffer and writes what it produced.
-    /// Returns whether anything was written.
-    fn encode_and_write(&mut self, encode: impl FnOnce(&mut Vec<u8>) -> bool) -> bool {
-        let mut out = std::mem::take(&mut self.out);
-        out.clear();
-        let wrote = encode(&mut out) && !out.is_empty();
-        if wrote {
-            self.write(&out);
-        }
-        self.out = out;
-        wrote
     }
 
     fn on_key(&mut self, event: KeyEvent) {
@@ -445,7 +443,6 @@ impl<S: FrameSource> App<S> {
         } else if self.ime.composing() {
             return;
         }
-        let modes = self.modes();
         let unmodified = unmodified_key(&event);
         let parts = KeyParts {
             logical: &event.logical_key,
@@ -458,12 +455,13 @@ impl<S: FrameSource> App<S> {
         };
         let mapped = map_key(&parts, Platform::current());
         let text = parts.text;
-        let wrote = self.encode_and_write(|out| match mapped {
-            Some(ev) => input::encode_key(&ev, modes, out),
+        let sent = match mapped {
+            Some(ev) => self.source.key(&ev),
             // Dead or unidentified keys: whatever text the platform produced.
-            None if pressed => text.is_some_and(|t| input::encode_text(t, modes, out)),
+            None if pressed => text.is_some_and(|t| self.source.text(t)),
             None => false,
-        });
+        };
+        let wrote = self.input_sent(sent);
         if wrote && pressed {
             self.selection = None;
         }
@@ -487,8 +485,8 @@ impl<S: FrameSource> App<S> {
                     .and_then(|v| v.clipboard.as_mut())
                     .and_then(|cb| cb.get_text().ok());
                 if let Some(text) = text {
-                    let modes = self.modes();
-                    self.encode_and_write(|out| input::encode_paste(&text, modes, out).written);
+                    let sent = self.source.paste(&text);
+                    self.input_sent(sent);
                 }
             }
             Shortcut::ZoomIn => {
@@ -517,9 +515,9 @@ impl<S: FrameSource> App<S> {
                 self.request_redraw();
             }
             ImeAction::Send(text) => {
-                let modes = self.modes();
                 self.ime_area = None;
-                self.encode_and_write(|out| input::encode_text(&text, modes, out));
+                let sent = self.source.text(&text);
+                self.input_sent(sent);
             }
         }
         self.update_ime_area();
@@ -562,9 +560,9 @@ impl<S: FrameSource> App<S> {
             row,
             mods: mods_from(self.mods),
         };
-        let modes = self.modes();
         self.mouse_cell = Some((row, col));
-        self.encode_and_write(|out| input::encode_mouse(&ev, modes, out))
+        let sent = self.source.mouse(&ev);
+        self.input_sent(sent)
     }
 
     fn on_pointer_moved(&mut self, pos: PhysicalPosition<f64>) {
@@ -810,7 +808,9 @@ impl<S: FrameSource> App<S> {
 impl<S: FrameSource> ApplicationHandler<UserEvent> for App<S> {
     fn new_events(&mut self, _el: &ActiveEventLoop, cause: StartCause) {
         if let StartCause::ResumeTimeReached { .. } = cause {
-            // A blink phase ended.
+            // A blink phase ended, or the source's deadline passed (the end
+            // of a synchronized-output hold, or input to offer the link again).
+            self.pull();
             self.request_redraw();
         }
     }
@@ -892,7 +892,16 @@ impl<S: FrameSource> ApplicationHandler<UserEvent> for App<S> {
             el.exit();
             return;
         }
-        match self.blink.next_change(Instant::now()) {
+        // The earlier of the next blink phase and the source's deadline; with
+        // neither, sleep until an event.
+        let next = match (
+            self.blink.next_change(Instant::now()),
+            self.source.deadline(),
+        ) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (a, b) => a.or(b),
+        };
+        match next {
             Some(t) => el.set_control_flow(ControlFlow::WaitUntil(t)),
             None => el.set_control_flow(ControlFlow::Wait),
         }

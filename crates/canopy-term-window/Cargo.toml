@@ -21,6 +21,7 @@ default = ["window"]
 window = [
     "dep:canopy-term-render",
     "dep:canopy-term-input",
+    "dep:canopy-term-session",
     "dep:winit",
     "dep:wgpu",
     "dep:pollster",
@@ -39,6 +40,9 @@ canopy-term-render = { path = "../canopy-term-render", optional = true }
 # Key, text, mouse, paste and focus encoding (the window only maps winit
 # events onto its types).
 canopy-term-input = { path = "../canopy-term-input", optional = true }
+# The frame-source boundary (`FrameSource`) and the headless session that
+# implements it.
+canopy-term-session = { path = "../canopy-term-session", optional = true }
 winit = { version = "0.30", optional = true }
 # Same major as canopy-term-render.
 wgpu = { version = "25", optional = true }
