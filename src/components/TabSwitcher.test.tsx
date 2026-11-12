@@ -160,8 +160,8 @@ describe("TabSwitcher", () => {
   });
 
   it("shows a card for a tab whose page this document can't see", () => {
-    // A preview tab's page lives in a native webview — no clonable host, so the
-    // card is its header alone rather than a broken frame.
+    // A preview tab's page is an iframe a clone can't carry, so until it has
+    // been photographed the card is a tile with the address, not a broken frame.
     render(
       <TabSwitcher
         tabs={[{ id: "p1", type: "preview", url: "http://localhost:5173" } as SubTab]}
@@ -172,6 +172,7 @@ describe("TabSwitcher", () => {
       />,
     );
     expect(screen.getAllByRole("option")).toHaveLength(1);
-    expect(document.querySelector(".tsw-scale")!.children).toHaveLength(0);
+    expect(document.querySelector(".tsw-scale")).toBeNull();
+    expect(document.querySelector(".tsw-preview-blank")).not.toBeNull();
   });
 });

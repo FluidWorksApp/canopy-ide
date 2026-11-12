@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState, useSyncExternalStore } from "react";
 import type { ReactNode, RefObject } from "react";
 import {
   AgentIcon,
@@ -20,6 +20,7 @@ import {
 } from "./icons";
 import type { SubTab } from "./ProjectView/helpers";
 import { clonePane, tailLines } from "../tabPreview";
+import { subscribeTabThumbs, tabThumb } from "../tabThumbs";
 import { tabKind } from "../tabKind";
 
 export const TAB_PREVIEW_W = 236;
@@ -103,8 +104,14 @@ export function TabPreviewShot({
     setScale(width / r.width);
   }, [paneRef, width]);
 
+  const thumb = useSyncExternalStore(subscribeTabThumbs, () =>
+    tab.type === "preview" ? tabThumb(tab.id) : null,
+  );
+
   useEffect(() => {
-    if (tab.type === "terminal") return;
+    // A preview's page is an iframe, which a clone cannot carry: its thumbnail
+    // is the last picture taken of it (tabThumbs.ts), or a tile.
+    if (tab.type === "terminal" || tab.type === "preview") return;
     const box = boxRef.current;
     if (!box) return;
     const host =
@@ -143,6 +150,16 @@ export function TabPreviewShot({
       <pre className="tsw-term" aria-hidden>
         {lines.join("\n")}
       </pre>
+    );
+  }
+  if (tab.type === "preview") {
+    return thumb ? (
+      <img className="tsw-page-shot" src={thumb} alt="" aria-hidden draggable={false} />
+    ) : (
+      <div className="tsw-blank tsw-preview-blank" aria-hidden>
+        {icon}
+        {tab.url && <span className="tsw-preview-url">{tab.url.replace(/^https?:\/\//, "")}</span>}
+      </div>
     );
   }
   return (
