@@ -287,15 +287,42 @@ fn scrollback_is_capped_in_lines_though_the_engine_counts_bytes() {
     assert!(s.scrollback_row(5).is_none());
 }
 
-/// Found by the split-at-every-byte tests: a combining mark that arrives in a
-/// later `vt_write` than its base character is dropped by the engine. Real PTY
-/// reads can split anywhere, so this is a gap to close (upstream, or by carrying
-/// the last character across writes) before the engine becomes the default.
+/// Found by the split-at-every-byte tests: the engine does not mark a row dirty
+/// when a combining mark is attached to the cell before the cursor, so a render
+/// state that kept rows between updates lost marks sent in a later write than
+/// their base character. The shim now builds a fresh render state every time.
 #[test]
-#[ignore = "known gap: libghostty-vt drops a combining mark sent in a later write"]
 fn a_combining_mark_in_a_later_write_is_kept() {
     let mut s = Screen::new(10, 2);
     s.advance(b"e");
     s.advance("\u{301}x".as_bytes());
     assert_eq!(row_text(&s, 0), "e\u{301}x");
+}
+
+#[test]
+fn the_last_mouse_mode_set_wins_and_any_reset_turns_reporting_off() {
+    use canopy_term_core::frame::{MouseEncoding, MouseMode};
+    let mode = |input: &[u8]| {
+        let mut s = Screen::new(10, 3);
+        s.advance(input);
+        let m = s.frame().modes;
+        (m.mouse, m.mouse_encoding)
+    };
+    assert_eq!(mode(b"\x1b[?9h").0, MouseMode::Press);
+    assert_eq!(mode(b"\x1b[?9h\x1b[?1000h").0, MouseMode::Normal);
+    assert_eq!(mode(b"\x1b[?1000h\x1b[?9h").0, MouseMode::Press);
+    assert_eq!(mode(b"\x1b[?9h\x1b[?1000h\x1b[?1000l").0, MouseMode::Off);
+    assert_eq!(mode(b"\x1b[?1002h\x1b[?1003h").0, MouseMode::Any);
+    assert_eq!(mode(b"\x1b[?1003h\x1bc").0, MouseMode::Off);
+    assert_eq!(mode(b"\x1b[?1005h\x1b[?1006h").1, MouseEncoding::Sgr);
+    assert_eq!(
+        mode(b"\x1b[?1005h\x1b[?1006h\x1b[?1006l").1,
+        MouseEncoding::Default
+    );
+    assert_eq!(mode(b"\x1b[?1000;1006h").0, MouseMode::Normal);
+    // A restore reproduces what the program left, last-wins included.
+    let mut s = Screen::new(10, 3);
+    s.advance(b"\x1b[?1002h\x1b[?9h\x1b[?1005h");
+    let r = Screen::restore(10, 3, &s.snapshot());
+    assert_eq!(r.frame().modes, s.frame().modes);
 }

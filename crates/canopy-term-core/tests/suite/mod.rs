@@ -180,12 +180,6 @@ macro_rules! define {
                     "日本e\u{301}\x1b[?9h\x1b[>3u\x1b[<u\x1b[>9u",
                 ];
                 for input in inputs {
-                    // Known gap: libghostty-vt drops a combining mark that arrives
-                    // in a later write than its base character (see the ignored
-                    // test in tests/ghostty.rs); splits of such input are skipped.
-                    if GHOSTTY && input.contains('\u{301}') {
-                        continue;
-                    }
                     let bytes = input.as_bytes();
                     let whole = fed(20, 5, bytes);
                     for i in 1..bytes.len() {
@@ -280,11 +274,6 @@ macro_rules! define {
 
             #[test]
             fn a_later_mouse_mode_supersedes_x10() {
-                // Known gap: libghostty-vt keeps X10 on after a later mode is set
-                // and reset (xterm turns it off).
-                if GHOSTTY {
-                    return;
-                }
                 let live = fed(10, 3, b"\x1b[?9h\x1b[?1000h\x1b[?1000l");
                 assert_eq!(live.frame().modes.mouse, MouseMode::Off);
                 let restored = Screen::restore(10, 3, &live.snapshot());

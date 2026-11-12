@@ -192,6 +192,10 @@ jobs:
           - os: macos-15
             zig_target: aarch64-macos
             zig_sha256: 3cc2bab367e185cdfb27501c4b30b1b0653c28d9f73df8dc91488e66ece5fa6b
+          # Native MSVC build, no extra env or flags (proven in PR #809).
+          - os: windows-2022
+            zig_target: x86_64-windows
+            zig_sha256: 3a0ed1e8799a2f8ce2a6e6290a9ff22e6906f8227865911fb7ddedc3cc14cb0c
     env:
       # libghostty-vt-sys 0.2.2 pins ghostty a887df42; its build.zig.zon needs
       # Zig 0.15.2 (major.minor must match). Official ziglang.org release; the
@@ -200,7 +204,19 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+      - name: Install Zig ${{ env.ZIG_VERSION }} (official zip, checksum verified)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $f = "zig-${{ matrix.zig_target }}-$env:ZIG_VERSION.zip"
+          $out = Join-Path $env:RUNNER_TEMP $f
+          Invoke-WebRequest -Uri "https://ziglang.org/download/$env:ZIG_VERSION/$f" -OutFile $out
+          $got = (Get-FileHash -Algorithm SHA256 $out).Hash.ToLower()
+          if ($got -ne "${{ matrix.zig_sha256 }}") { throw "zig sha256 mismatch: $got" }
+          Expand-Archive -Path $out -DestinationPath (Join-Path $env:RUNNER_TEMP "zigx")
+          Add-Content -Path $env:GITHUB_PATH -Value (Join-Path $env:RUNNER_TEMP "zigx\zig-${{ matrix.zig_target }}-$env:ZIG_VERSION")
       - name: Install Zig ${{ env.ZIG_VERSION }} (official release, checksum verified)
+        if: runner.os != 'Windows'
         shell: bash
         run: |
           set -euo pipefail
@@ -211,6 +227,7 @@ jobs:
           tar -xJf "$RUNNER_TEMP/$f" -C "$RUNNER_TEMP/zig" --strip-components=1
           echo "$RUNNER_TEMP/zig" >> "$GITHUB_PATH"
       - name: Toolchain versions
+        shell: bash
         run: |
           echo "zig $(zig version)"
           rustc --version
@@ -220,6 +237,7 @@ jobs:
           workspaces: crates/canopy-term-core
           key: term-ghostty-${{ matrix.os }}
       - name: Test canopy-term-core with the ghostty feature
+        shell: bash
         run: >
           cargo test --locked --manifest-path crates/canopy-term-core/Cargo.toml
           --features ghostty --no-fail-fast --lib --test screen --test conformance --test fuzz --test ghostty
