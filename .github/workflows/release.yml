@@ -215,7 +215,13 @@ jobs:
           cp "${PKG}"/lib/*providers_shared* src-tauri/onnxruntime/ 2>/dev/null || true
           rm -rf "${PKG}" ort.tgz
       - name: Build the deb
-        run: npx tauri build --bundles deb --config src-tauri/tauri.release-linux.conf.json
+        # No signing key here, and a configured updater key without one makes
+        # `tauri build` fail after bundling. So the check config is the real
+        # Linux config plus createUpdaterArtifacts=false; externalBin is untouched.
+        run: |
+          jq '.bundle.createUpdaterArtifacts = false' src-tauri/tauri.release-linux.conf.json \
+            > src-tauri/tauri.linux-bundle-check.conf.json
+          npx tauri build --bundles deb --config src-tauri/tauri.linux-bundle-check.conf.json
       - name: Show what was staged and bundled
         run: |
           ls -l src-tauri/binaries/
