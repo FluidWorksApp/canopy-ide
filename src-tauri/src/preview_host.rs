@@ -81,7 +81,11 @@ fn script_paths(app: &tauri::AppHandle) -> Result<(PathBuf, PathBuf), String> {
             root.join("src/preview_picker.js"),
         ));
     }
-    let dir = app.path().resource_dir().map_err(|e| e.to_string())?.join("preview-host");
+    let dir = app
+        .path()
+        .resource_dir()
+        .map_err(|e| e.to_string())?
+        .join("preview-host");
     Ok((dir.join("preview-host.mjs"), dir.join("preview_picker.js")))
 }
 
@@ -94,7 +98,10 @@ enum Started {
 
 fn parse_first_line(line: &str) -> Started {
     let Ok(value) = serde_json::from_str::<serde_json::Value>(line.trim()) else {
-        return Started::Failed("The preview browser did not start. Check that Node.js 22 or newer is installed.".into());
+        return Started::Failed(
+            "The preview browser did not start. Check that Node.js 22 or newer is installed."
+                .into(),
+        );
     };
     if let (Some(port), Some(token)) = (value["port"].as_u64(), value["token"].as_str()) {
         if let Ok(port) = u16::try_from(port) {
@@ -123,7 +130,10 @@ impl PartialEq for PreviewHostInfo {
 impl std::fmt::Debug for PreviewHostInfo {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         // Never print the token.
-        f.debug_struct("PreviewHostInfo").field("port", &self.port).field("executable", &self.executable).finish()
+        f.debug_struct("PreviewHostInfo")
+            .field("port", &self.port)
+            .field("executable", &self.executable)
+            .finish()
     }
 }
 
@@ -148,11 +158,15 @@ pub async fn preview_host_start(app: tauri::AppHandle) -> Result<PreviewHostInfo
     }
     // A dev build shares the release app's identifier, so it keeps its own
     // profiles: two apps on one profile would fight over Chromium's lock.
-    let base = app
-        .path()
-        .app_data_dir()
-        .map_err(|e| e.to_string())?
-        .join(if cfg!(debug_assertions) { "preview-browser-dev" } else { "preview-browser" });
+    let base =
+        app.path()
+            .app_data_dir()
+            .map_err(|e| e.to_string())?
+            .join(if cfg!(debug_assertions) {
+                "preview-browser-dev"
+            } else {
+                "preview-browser"
+            });
     let profiles = base.join("profiles");
     // The host's own warnings (a page that would not open, a crash), kept for diagnosis.
     std::fs::create_dir_all(&base).map_err(|e| e.to_string())?;
@@ -202,7 +216,10 @@ pub async fn preview_host_start(app: tauri::AppHandle) -> Result<PreviewHostInfo
                         return Ok(running.info.clone());
                     }
                 }
-                *guard = Some(Running { child, info: info.clone() });
+                *guard = Some(Running {
+                    child,
+                    info: info.clone(),
+                });
                 Ok(info)
             }
             Ok(Started::Failed(error)) | Err(error) => {
@@ -223,7 +240,11 @@ mod tests {
     fn reads_the_address_line() {
         assert_eq!(
             parse_first_line("{\"port\":4312,\"token\":\"t\",\"executable\":\"/x/chrome\"}\n"),
-            Started::Ready(PreviewHostInfo { port: 4312, token: "t".into(), executable: "/x/chrome".into() })
+            Started::Ready(PreviewHostInfo {
+                port: 4312,
+                token: "t".into(),
+                executable: "/x/chrome".into()
+            })
         );
     }
 
@@ -237,13 +258,23 @@ mod tests {
 
     #[test]
     fn garbage_is_a_start_failure() {
-        assert!(matches!(parse_first_line("Error: Cannot find module"), Started::Failed(_)));
-        assert!(matches!(parse_first_line("{\"port\":99999,\"token\":\"t\"}"), Started::Failed(_)));
+        assert!(matches!(
+            parse_first_line("Error: Cannot find module"),
+            Started::Failed(_)
+        ));
+        assert!(matches!(
+            parse_first_line("{\"port\":99999,\"token\":\"t\"}"),
+            Started::Failed(_)
+        ));
     }
 
     #[test]
     fn the_token_is_never_in_debug_output() {
-        let info = PreviewHostInfo { port: 1, token: "secret-token".into(), executable: String::new() };
+        let info = PreviewHostInfo {
+            port: 1,
+            token: "secret-token".into(),
+            executable: String::new(),
+        };
         assert!(!format!("{info:?}").contains("secret-token"));
     }
 }
