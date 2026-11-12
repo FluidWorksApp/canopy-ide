@@ -97,6 +97,9 @@ pub(crate) struct Engine {
     kitty: [u8; 2],
     clipboard_read_events: bool,
     scratch: String,
+    /// Bytes were fed since the frame was last built. The frame is built only
+    /// when a reader asks (`fresh`), so a run of `advance`s costs one build.
+    stale: bool,
 }
 
 fn err<E: std::fmt::Display>(what: &str) -> impl FnOnce(E) -> String + '_ {
@@ -494,6 +497,7 @@ impl Engine {
             kitty: [0; 2],
             clipboard_read_events: false,
             scratch: String::new(),
+            stale: false,
         };
         e.frame.seq = 1;
         e.refresh(true);
@@ -520,6 +524,7 @@ impl Engine {
         if bytes.is_empty() {
             return;
         }
+        self.stale = true;
         let mut steps = std::mem::take(&mut self.steps);
         steps.clear();
         self.scan.feed(bytes, &mut steps);
@@ -537,9 +542,13 @@ impl Engine {
         self.steps = steps;
     }
 
-    /// Rebuild the frame after a run of `feed`s.
-    pub(crate) fn settle(&mut self) {
-        self.refresh(false);
+    /// Rebuild the frame if bytes were fed since it was built. Every reader of
+    /// frame-derived state calls this first, so it sees every earlier feed.
+    fn fresh(&mut self) {
+        if self.stale {
+            self.stale = false;
+            self.refresh(false);
+        }
     }
 
     fn step(&mut self, step: Step) {
@@ -692,22 +701,27 @@ impl Engine {
         let _ = self.term.resize(cols, rows, CELL_PX.0, CELL_PX.1);
         self.cols = cols;
         self.rows = rows;
+        self.stale = false;
         self.refresh(true);
     }
 
-    pub(crate) fn frame(&self) -> Frame {
+    pub(crate) fn frame(&mut self) -> Frame {
+        self.fresh();
         self.frame.clone()
     }
 
-    pub(crate) fn seq(&self) -> u64 {
+    pub(crate) fn seq(&mut self) -> u64 {
+        self.fresh();
         self.frame.seq
     }
 
-    pub(crate) fn cursor_blinking(&self) -> bool {
+    pub(crate) fn cursor_blinking(&mut self) -> bool {
+        self.fresh();
         self.blinking
     }
 
-    pub(crate) fn damage_since(&self, since: u64) -> Damage {
+    pub(crate) fn damage_since(&mut self, since: u64) -> Damage {
+        self.fresh();
         if since == 0 || since > self.frame.seq || since < self.full_seq {
             return Damage {
                 since,
@@ -732,7 +746,8 @@ impl Engine {
         }
     }
 
-    pub(crate) fn hyperlink_at(&self, row: u16, col: u16) -> Option<String> {
+    pub(crate) fn hyperlink_at(&mut self, row: u16, col: u16) -> Option<String> {
+        self.fresh();
         if row >= self.rows || col >= self.cols {
             return None;
         }
@@ -743,7 +758,8 @@ impl Engine {
             .map(|s| s.to_string())
     }
 
-    pub(crate) fn row_mark(&self, row: u16) -> RowMark {
+    pub(crate) fn row_mark(&mut self, row: u16) -> RowMark {
+        self.fresh();
         self.marks.get(row as usize).copied().unwrap_or_default()
     }
 
@@ -946,7 +962,8 @@ impl Engine {
     /// Built from our own frame (plus the engine's soft-wrap flags and scroll
     /// region) rather than the engine's VT formatter, which has no notion of
     /// the visible area only, and drops soft wraps.
-    pub(crate) fn snapshot(&self) -> Vec<u8> {
+    pub(crate) fn snapshot(&mut self) -> Vec<u8> {
+        self.fresh();
         let f = &self.frame;
         let mut out = String::new();
         let kitty = |out: &mut String, flags: u8| {

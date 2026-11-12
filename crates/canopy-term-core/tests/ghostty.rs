@@ -179,6 +179,23 @@ fn a_changed_link_is_damage_even_when_the_text_is_the_same() {
 }
 
 #[test]
+fn advances_without_a_read_between_them_are_one_frame_with_all_their_damage() {
+    // The frame is built when somebody reads, not on every advance, so three
+    // advances before the next read must still show every row they touched.
+    let mut s = Screen::new(20, 4);
+    s.advance(b"zero");
+    let before = s.seq();
+    s.advance(b"\x1b[1;1Hone");
+    s.advance(b"\x1b[2;1Htwo");
+    s.advance(b"\x1b[3;1Hthree");
+    assert!(s.seq() > before);
+    let d = s.damage_since(before);
+    assert!(!d.full);
+    assert_eq!(d.rows, vec![(0, 2)]);
+    assert_eq!(row_text(&s, 2), "three");
+}
+
+#[test]
 fn colour_queries_use_the_programs_colours_then_the_themes() {
     let mut s = Screen::new(20, 3);
     s.advance(b"\x1b]10;?\x07\x1b]11;?\x07");

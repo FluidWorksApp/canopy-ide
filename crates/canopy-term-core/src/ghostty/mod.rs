@@ -22,6 +22,11 @@
 //!   ships a closure to the engine thread and waits for the result. The queue
 //!   is FIFO, so a read always sees every earlier `advance`, exactly as with a
 //!   single-threaded `Screen`;
+//! * the [`Frame`] is built lazily, on the engine thread, by the first read
+//!   that needs frame-derived state (`frame`, `seq`, `damage_since`,
+//!   `snapshot`, `hyperlink_at`, `row_mark`, `cursor_blinking`) after one or
+//!   more `advance`s. Several advances between two reads cost one build and
+//!   count as one frame (one `seq` step) with the union of their damage;
 //! * dropping the `Screen` closes the queue; the thread finishes what is queued,
 //!   drops the engine on the thread that made it, and is joined.
 //!
@@ -242,7 +247,6 @@ impl Screen {
             let data = chunk.to_vec();
             self.send(Box::new(move |e| e.feed(&data)));
         }
-        self.send(Box::new(|e| e.settle()));
     }
 
     /// Bytes the program asked to have written back to it (answers to its
