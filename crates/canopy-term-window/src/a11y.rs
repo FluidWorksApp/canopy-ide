@@ -24,8 +24,8 @@
 //! when a screen reader is running, so its baseline is its own.
 
 use accesskit::{
-    Action, Live, Node, NodeId, Rect, Role, TextDirection, TextPosition, TextSelection, Toggled,
-    TreeId, TreeInfo, TreeUpdate,
+    Action, Affine, Live, Node, NodeId, Rect, Role, TextDirection, TextPosition, TextSelection,
+    Toggled, TreeId, TreeInfo, TreeUpdate,
 };
 use canopy_term_core::frame::{Attrs, Frame};
 
@@ -402,9 +402,16 @@ pub fn text_selection(
     })
 }
 
-fn root_node(title: &str, announce: Option<NodeId>, extras: &UiExtras) -> Node {
+/// The window node. Every other node's bounds are relative to the grid's
+/// top-left corner; the root's transform moves that corner to where the grid is
+/// drawn on the surface (the padding), so one place carries the offset for the
+/// terminal, its lines, the scrollback badge and the find bar.
+fn root_node(title: &str, announce: Option<NodeId>, extras: &UiExtras, origin: (u32, u32)) -> Node {
     let mut node = Node::new(Role::Window);
     node.set_label(title.to_string());
+    if origin != (0, 0) {
+        node.set_transform(Affine::translate((origin.0 as f64, origin.1 as f64)));
+    }
     let mut children = vec![TERMINAL_ID];
     children.extend(extras.child_ids());
     children.extend(announce);
@@ -473,12 +480,21 @@ fn tree_info() -> TreeInfo {
 /// when a screen reader first asks.
 pub fn tree_for(frame: &Frame, cell: CellPx, selection: Option<&Selection>) -> TreeUpdate {
     let lines = all_lines(frame);
-    full_update(frame, cell, &lines, selection, None, &UiExtras::default())
+    full_update(
+        frame,
+        cell,
+        (0, 0),
+        &lines,
+        selection,
+        None,
+        &UiExtras::default(),
+    )
 }
 
 fn full_update(
     frame: &Frame,
     cell: CellPx,
+    origin: (u32, u32),
     lines: &[LineText],
     selection: Option<&Selection>,
     announce: Option<(NodeId, &str)>,
@@ -488,7 +504,7 @@ fn full_update(
     let mut nodes = Vec::with_capacity(lines.len() + 3);
     nodes.push((
         ROOT_ID,
-        root_node(&title_of(frame), announce.map(|a| a.0), extras),
+        root_node(&title_of(frame), announce.map(|a| a.0), extras, origin),
     ));
     nodes.push((
         TERMINAL_ID,
@@ -555,6 +571,7 @@ struct Published {
     cols: u16,
     rows: u16,
     cell: CellPx,
+    origin: (u32, u32),
     alt_screen: bool,
     title: String,
     lines: Vec<LineText>,
@@ -569,6 +586,9 @@ pub struct A11yTree {
     published: Option<Published>,
     announcements: u64,
     extras: UiExtras,
+    /// Where the grid's top-left corner sits in the window (the padding), in
+    /// physical pixels.
+    origin: (u32, u32),
 }
 
 impl A11yTree {
@@ -582,6 +602,12 @@ impl A11yTree {
         self.extras = extras;
     }
 
+    /// Where the grid's top-left corner is in the window, in physical pixels.
+    /// Takes effect with the next [`A11yTree::update`] or [`A11yTree::full`].
+    pub fn set_origin(&mut self, origin: (u32, u32)) {
+        self.origin = origin;
+    }
+
     /// The full tree (a screen reader just started), which becomes the
     /// baseline.
     pub fn full(
@@ -591,11 +617,20 @@ impl A11yTree {
         selection: Option<&Selection>,
     ) -> TreeUpdate {
         let lines = all_lines(frame);
-        let update = full_update(frame, cell, &lines, selection, None, &self.extras);
+        let update = full_update(
+            frame,
+            cell,
+            self.origin,
+            &lines,
+            selection,
+            None,
+            &self.extras,
+        );
         self.published = Some(Published {
             cols: frame.cols,
             rows: frame.rows,
             cell,
+            origin: self.origin,
             alt_screen: frame.alt_screen,
             title: title_of(frame),
             selection: text_selection(&lines, frame, selection),
@@ -645,10 +680,13 @@ impl A11yTree {
         // The bar's and badge's bounds depend on the grid and cell size too.
         let extras_changed =
             self.extras != prev.extras || (reshaped && self.extras != UiExtras::default());
-        let root_changed = title != prev.title || announce.is_some() || extras_changed;
+        let root_changed = title != prev.title
+            || announce.is_some()
+            || extras_changed
+            || self.origin != prev.origin;
         if root_changed {
             let id = announce.as_ref().map(|a| a.0).or(prev.announce);
-            nodes.push((ROOT_ID, root_node(&title, id, &self.extras)));
+            nodes.push((ROOT_ID, root_node(&title, id, &self.extras, self.origin)));
         }
         if extras_changed {
             nodes.extend(self.extras.nodes(cell));
@@ -681,6 +719,7 @@ impl A11yTree {
         prev.cols = frame.cols;
         prev.rows = frame.rows;
         prev.cell = cell;
+        prev.origin = self.origin;
         prev.alt_screen = frame.alt_screen;
         prev.title = title;
         prev.lines = lines;
@@ -1311,5 +1350,33 @@ mod tests {
         }
         assert_eq!(find_button_of(TERMINAL_ID), None);
         assert_eq!(find_button_of(FIND_INPUT_ID), None);
+    }
+
+    #[test]
+    fn the_padding_moves_every_node_through_one_root_transform() {
+        let f = frame_of(&["ab", "cd"], 40);
+        let mut t = A11yTree::new();
+        // No padding: no transform, bounds are as before.
+        let u = t.full(&f, CELL, None);
+        assert_eq!(node(&u, ROOT_ID).transform(), None);
+        assert_eq!(node(&u, TERMINAL_ID).bounds().unwrap().x0, 0.0);
+        // Padding: the root carries the offset, children stay grid-relative.
+        t.set_origin((16, 12));
+        let u = t.update(&f, CELL, None).expect("the origin changed");
+        assert_eq!(
+            node(&u, ROOT_ID).transform(),
+            Some(&Affine::translate((16.0, 12.0)))
+        );
+        assert!(
+            t.update(&f, CELL, None).is_none(),
+            "an unchanged origin sends nothing"
+        );
+        let full = t.full(&f, CELL, None);
+        assert_eq!(
+            node(&full, ROOT_ID).transform(),
+            Some(&Affine::translate((16.0, 12.0)))
+        );
+        let term = node(&full, TERMINAL_ID).bounds().unwrap();
+        assert_eq!((term.x0, term.y0), (0.0, 0.0));
     }
 }

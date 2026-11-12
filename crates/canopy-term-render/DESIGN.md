@@ -13,7 +13,7 @@ Chrome needs a mockup from the user first.
 |---|---|---|
 | `metrics` | Font metrics to an integer `CellLayout`; HiDPI and rounding rules | bundled font in one test |
 | `atlas` | Shelf-packed glyph atlas, whole-shelf eviction, dirty rectangles, eviction epoch | no |
-| `procedural` | Box drawing, blocks, Powerline drawn from the cell size | no |
+| `procedural` | Box drawing, blocks, media triangles U+23F4..23F7, Powerline drawn from the cell size | no |
 | `color` | `Color` against a `Theme`; inverse, dim, hidden, bold-bright | no |
 | `geometry` | Cell, underline, strike, cursor rectangles; selection ranges | no |
 | `fonts` | Primary family per style, fallback faces, synthetic bold/italic | bundled font |
@@ -320,8 +320,18 @@ first time a character is missing from the primary font. Opening a fallback
 face the first time (mapping and parsing it) still happens on whichever thread
 first draws a character from it; resolving the characters of new output ahead
 of the frame (`choose` on a worker, results cached) is the integration
-point if that ever shows up in a frame time. When no face has the character the primary face's missing-glyph
-box is drawn. Emoji use colour bitmap (CBDT/sbix) or colour outline (COLR)
+point if that ever shows up in a frame time. Three rules keep the choice sane (found with the
+`tests/font_probe.rs` CI probe, which prints the face picked per character on
+each OS): macOS's `.LastResort` face (a tofu box for every code point) is never
+a candidate, which is what drew U+23F5 as a box with a question mark; a colour
+emoji face is used for a character whose default look is text (U+2733, U+26A0)
+only when nothing else has it; and among equal faces the platform's symbol
+faces (Menlo, Apple Symbols, DejaVu Sans Mono, Segoe UI Symbol, Noto Sans
+Symbols) win. A font's own `.notdef` glyph is never drawn. When no face has the
+character one replacement box (`procedural::missing_box`: a hollow outline inset
+from the cell edge, as wide as the character's cells) is drawn instead, so it
+cannot overlap a neighbour. U+23F4..23F7 (the media triangles Claude Code uses)
+are drawn by `procedural` and never reach the fonts. Emoji use colour bitmap (CBDT/sbix) or colour outline (COLR)
 strikes and are area-resampled to fit within two cells (cell height, twice the
 cell width). Bold and italic missing from
 a face are synthesised (embolden, 14 degree skew).

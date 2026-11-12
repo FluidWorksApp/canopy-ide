@@ -11,6 +11,10 @@
 //! * A cluster's glyphs (base plus combining marks) all start at the cell the
 //!   cluster starts in.
 //! * Colour bitmaps (emoji) are area-resampled to the cell height.
+//! * A font's own `.notdef` glyph is never drawn (fonts differ wildly: some
+//!   draw a wide box with a question mark). A character no face has gets one
+//!   replacement box from `procedural::missing_box`, exactly the character's
+//!   cells wide, so it can never overlap a neighbour.
 
 use std::collections::{HashMap, HashSet};
 
@@ -29,6 +33,17 @@ use crate::procedural;
 const FLAG_SYNTH_BOLD: u8 = 1;
 const FLAG_SYNTH_ITALIC: u8 = 2;
 const FLAG_PROCEDURAL: u8 = 4;
+const FLAG_MISSING: u8 = 8;
+
+/// Characters that draw nothing by design (zero-width, joiners, variation
+/// selectors, soft hyphen). One of these alone in a cell is not "missing".
+fn is_default_ignorable(ch: char) -> bool {
+    matches!(ch as u32,
+        0x00AD | 0x034F | 0x061C | 0x115F..=0x1160 | 0x17B4..=0x17B5 | 0x180B..=0x180F
+        | 0x200B..=0x200F | 0x202A..=0x202E | 0x2060..=0x206F | 0x3164
+        | 0xFE00..=0xFE0F | 0xFEFF | 0xFFA0 | 0xFFF0..=0xFFF8
+        | 0x1BCA0..=0x1BCA3 | 0x1D173..=0x1D17A | 0xE0000..=0xE0FFF)
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct GlyphKey {
@@ -301,6 +316,38 @@ impl TextEngine {
         Some((rect, m))
     }
 
+    /// The replacement box for a character no face has: one box, as wide as
+    /// the character's `cols` cells and one cell tall.
+    fn missing_box(&mut self, cell: usize, cols: u8) -> Option<PlacedGlyph> {
+        let cols = cols.max(1);
+        let key = GlyphKey {
+            face: u32::MAX,
+            glyph: cols as u32,
+            px: 0,
+            flags: FLAG_MISSING,
+        };
+        let (w, h) = (self.layout.width * cols as u32, self.layout.height);
+        let rect = match self.atlas.get(&key) {
+            Some(r) => r,
+            None => {
+                let mask = procedural::missing_box(w, h);
+                let mut rgba = Vec::with_capacity(mask.len() * 4);
+                for &a in &mask {
+                    rgba.extend_from_slice(&[255, 255, 255, a]);
+                }
+                self.pack(key, w as u16, h as u16, &rgba)?
+            }
+        };
+        Some(PlacedGlyph {
+            cell: cell as u16,
+            rect,
+            left: 0,
+            // The bitmap's top is the cell's top: baseline minus this.
+            top: self.layout.baseline as i32,
+            color: false,
+        })
+    }
+
     fn shape_segment(
         &mut self,
         choice: FaceChoice,
@@ -348,6 +395,10 @@ impl TextEngine {
         let infos = shaped.glyph_infos();
         let positions = shaped.glyph_positions();
         for (info, pos) in infos.iter().zip(positions) {
+            // Never the font's own missing-glyph shape (see the module docs).
+            if info.glyph_id == 0 {
+                continue;
+            }
             let cell = cell_for_byte(&starts, info.cluster as usize);
             let key = self.key(choice, info.glyph_id);
             let Some((rect, m)) = self.glyph(key) else {
@@ -405,10 +456,12 @@ impl GlyphSource for TextEngine {
         choices.clear();
         for c in cells {
             let ch = c.text.chars().next().unwrap_or(' ');
-            let choice = self
-                .fonts
-                .choose(ch, style)
-                .or_else(|| self.fonts.primary_choice(style));
+            let choice = self.fonts.choose(ch, style).or_else(|| {
+                // Nothing to show for these, and no box: they are not missing.
+                (is_default_ignorable(ch) || ch.is_whitespace() || ch.is_control())
+                    .then(|| self.fonts.primary_choice(style))
+                    .flatten()
+            });
             choices.push(choice);
         }
         let mut i = 0;
@@ -419,6 +472,13 @@ impl GlyphSource for TextEngine {
             }
             if let Some(choice) = choices[i] {
                 self.shape_segment(choice, &cells[i..j], i, out);
+            } else {
+                // No face has these characters: one replacement box each.
+                for (k, c) in cells[i..j].iter().enumerate() {
+                    if let Some(g) = self.missing_box(i + k, c.cols) {
+                        out.push(g);
+                    }
+                }
             }
             i = j;
         }
@@ -676,14 +736,78 @@ mod tests {
     }
 
     #[test]
-    fn a_missing_glyph_still_draws_the_primary_faces_box() {
+    fn a_missing_glyph_is_one_replacement_box_exactly_one_cell_wide() {
         let mut e = engine();
+        let l = *e.layout();
         let mut out = Vec::new();
         e.shape_run(REGULAR, &cells(&["\u{10FFF0}"]), &mut out);
-        assert!(
-            out.len() <= 1,
-            "at most the primary face's missing-glyph box"
+        assert_eq!(out.len(), 1, "one box, not the font's .notdef on top");
+        let g = out[0];
+        assert_eq!((g.rect.w as u32, g.rect.h as u32), (l.width, l.height));
+        assert_eq!((g.cell, g.left), (0, 0));
+        assert_eq!(l.baseline as i32 - g.top, 0, "it starts at the cell top");
+    }
+
+    #[test]
+    fn missing_glyphs_side_by_side_never_overlap() {
+        let mut e = engine();
+        let l = *e.layout();
+        let mut out = Vec::new();
+        e.shape_run(
+            REGULAR,
+            &cells(&["\u{10FFF0}", "a", "\u{10FFF1}", "\u{10FFF2}"]),
+            &mut out,
         );
+        assert_eq!(out.len(), 4, "three boxes and the letter");
+        let boxes: Vec<_> = out
+            .iter()
+            .filter(|g| g.rect.h as u32 == l.height && g.rect.w as u32 == l.width)
+            .collect();
+        assert_eq!(boxes.len(), 3);
+        // Each box lies inside its own cell, so none can overlap another.
+        for g in boxes {
+            let cell_x = g.cell as i32 * l.width as i32;
+            assert!(cell_x + g.left >= cell_x);
+            assert!(cell_x + g.left + g.rect.w as i32 <= cell_x + l.width as i32);
+        }
+        let cells_hit: Vec<u16> = out.iter().map(|g| g.cell).collect();
+        assert_eq!(cells_hit, vec![0, 1, 2, 3]);
+    }
+
+    #[test]
+    fn a_wide_missing_character_gets_one_box_two_cells_wide() {
+        let mut e = engine();
+        let l = *e.layout();
+        let mut out = Vec::new();
+        let wide = [TextCell {
+            text: "\u{10FFF0}",
+            cols: 2,
+        }];
+        e.shape_run(REGULAR, &wide, &mut out);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].rect.w as u32, 2 * l.width);
+    }
+
+    #[test]
+    fn invisible_characters_are_not_reported_as_missing() {
+        let mut e = engine();
+        let mut out = Vec::new();
+        e.shape_run(
+            REGULAR,
+            &cells(&["\u{200B}", "\u{FE0F}", "\u{200D}", "\u{00AD}", " "]),
+            &mut out,
+        );
+        assert!(out.is_empty(), "nothing is drawn for them: {out:?}");
+    }
+
+    #[test]
+    fn media_triangles_are_procedural_not_font_glyphs() {
+        let mut e = engine();
+        let l = *e.layout();
+        for c in ['\u{23F4}', '\u{23F5}', '\u{23F6}', '\u{23F7}'] {
+            let r = e.procedural(c).expect("drawn by code");
+            assert_eq!((r.w as u32, r.h as u32), (l.width, l.height));
+        }
     }
 
     #[test]
