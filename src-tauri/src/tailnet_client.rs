@@ -1355,7 +1355,12 @@ mod tests {
                             };
                             let _ = serve_connection(Box::new(conn), host);
                         }
-                        Mode::Refuse => drop(stream),
+                        // Shut down, not just dropped: the server keeps a clone of
+                        // every connection to sever it later, which would hold
+                        // the socket open.
+                        Mode::Refuse => {
+                            let _ = stream.shutdown(Shutdown::Both);
+                        }
                         Mode::Older | Mode::Newer => {
                             let mut line = String::new();
                             let _ =
