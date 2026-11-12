@@ -105,6 +105,10 @@ pub(crate) struct Engine {
     /// screens: text printed next gets it. The engine keeps it on its cursor
     /// and has no getter, so the host follows the stream.
     open_link: [Option<Arc<str>>; 2],
+    /// The alternate screen was active after the last mode change, to spot the
+    /// switch into it: the engine copies the cursor, so the prompt state and
+    /// open link carry over.
+    in_alt: bool,
     /// Mouse reporting as the engine's stream handler applies it: setting
     /// 9, 1000, 1002 or 1003 selects that mode (the last one wins), resetting
     /// any of them turns reporting off; the same for the encodings. The
@@ -686,6 +690,7 @@ impl Engine {
             kitty: [0; 2],
             semantic: [Semantic::Output; 2],
             open_link: [None, None],
+            in_alt: false,
             mouse: MouseMode::Off,
             mouse_encoding: MouseEncoding::Default,
             clipboard_read_events: false,
@@ -751,10 +756,17 @@ impl Engine {
                 self.kitty = [0; 2];
                 self.semantic = [Semantic::Output; 2];
                 self.open_link = [None, None];
+                self.in_alt = false;
                 self.mouse = MouseMode::Off;
                 self.mouse_encoding = MouseEncoding::Default;
             }
             Step::PrivateMode { set, params } => {
+                let alt = self.on_alt();
+                if alt && !self.in_alt {
+                    self.semantic[1] = self.semantic[0];
+                    self.open_link[1] = self.open_link[0].clone();
+                }
+                self.in_alt = alt;
                 for p in params {
                     match (p, set) {
                         (9, true) => self.mouse = MouseMode::Press,
