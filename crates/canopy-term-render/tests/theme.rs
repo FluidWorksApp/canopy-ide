@@ -132,8 +132,8 @@ fn line_height_makes_taller_rows_that_tile_without_gaps() {
     );
     assert_eq!(
         at(&px, w, x, tall.height - 1),
-        theme.bg,
-        "row 0 above it is plain"
+        theme.palette[9],
+        "row 0 above it is its own colour"
     );
     assert_eq!(
         at(&px, w, x, 2 * tall.height),
