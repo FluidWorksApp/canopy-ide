@@ -55,13 +55,119 @@ fn read_line(stream: &mut UnixStream) -> std::io::Result<String> {
     String::from_utf8(line).map_err(|_| other("reply was not utf-8"))
 }
 
+/// Run on the host executable immediately before it is started, every time
+/// (first start and restarts). An error stops the start; the app uses it to
+/// re-hash the installed copy.
+#[derive(Clone)]
+pub struct LaunchCheck(pub std::sync::Arc<dyn Fn(&Path) -> std::io::Result<()> + Send + Sync>);
+
+impl std::fmt::Debug for LaunchCheck {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("LaunchCheck")
+    }
+}
+
+#[derive(Clone, Debug)]
+struct Launch {
+    exe: PathBuf,
+    idle_secs: u64,
+    check: Option<LaunchCheck>,
+}
+
 #[derive(Clone, Debug)]
 pub struct HostClient {
     socket: PathBuf,
     /// Where to start a host from and how long it idles. Used only by `spawn`:
     /// restarting the host from any other call would resurrect a dead host from a
     /// liveness probe and let a stale id address a different terminal.
-    launch: Option<(PathBuf, u64)>,
+    launch: Option<Launch>,
+}
+
+/// What a `hello` said about the host at the socket.
+#[derive(Debug)]
+pub enum HelloOutcome {
+    /// It answers and each side accepts the other.
+    Compatible,
+    /// No socket, or nobody listening.
+    NoHost,
+    /// It answered, but it refuses this client or is older than this client can
+    /// use. It can still `list`, `kill` and `shutdown`.
+    Skewed {
+        version: Option<u32>,
+        min_client: Option<u32>,
+        host_pid: Option<u32>,
+    },
+    /// Anything else (a timeout, a garbled reply): nothing is known.
+    Unknown(std::io::Error),
+}
+
+/// Classifies a raw `hello` reply (one that is returned even when refused).
+pub fn classify_hello(reply: std::io::Result<Response>) -> HelloOutcome {
+    match reply {
+        Ok(r) if r.ok && r.version.is_some_and(|v| v >= MIN_HOST_VERSION) => {
+            HelloOutcome::Compatible
+        }
+        Ok(r) => HelloOutcome::Skewed {
+            version: r.version,
+            min_client: r.min_client,
+            host_pid: r.host_pid,
+        },
+        Err(e)
+            if matches!(
+                e.kind(),
+                std::io::ErrorKind::NotFound | std::io::ErrorKind::ConnectionRefused
+            ) =>
+        {
+            HelloOutcome::NoHost
+        }
+        Err(e) => HelloOutcome::Unknown(e),
+    }
+}
+
+/// What to do about a skewed host, from its `list`.
+#[derive(Debug, PartialEq)]
+pub enum SkewAction {
+    /// Nothing is running in it: stop it and start ours.
+    Replace,
+    /// It still runs this many terminals (`None`: it could not be listed):
+    /// leave it for them.
+    Keep(Option<usize>),
+}
+
+/// Every session that has not exited counts, adoptable or not: stopping the
+/// host would kill it.
+pub fn skew_action(listed: &std::io::Result<Vec<SessionInfo>>) -> SkewAction {
+    match listed {
+        Ok(sessions) => match sessions.iter().filter(|s| s.exited.is_none()).count() {
+            0 => SkewAction::Replace,
+            n => SkewAction::Keep(Some(n)),
+        },
+        Err(_) => SkewAction::Keep(None),
+    }
+}
+
+/// The answer to `shutdown_if_idle`.
+#[derive(Debug, PartialEq)]
+pub enum IdleShutdown {
+    /// The host was idle and is stopping; it takes no more spawns.
+    Stopping,
+    /// It runs this many sessions and was left running.
+    Busy(usize),
+    /// A host older than `SHUTDOWN_IF_IDLE_VERSION` does not know the op.
+    Unsupported,
+    /// Any other refusal.
+    Failed(String),
+}
+
+pub fn classify_idle_shutdown(reply: &Response) -> IdleShutdown {
+    if reply.ok {
+        return IdleShutdown::Stopping;
+    }
+    match reply.error.as_deref() {
+        Some(crate::protocol::BUSY) => IdleShutdown::Busy(reply.running.unwrap_or(0)),
+        Some(e) if e.starts_with("bad request") => IdleShutdown::Unsupported,
+        other => IdleShutdown::Failed(other.unwrap_or("host error").to_owned()),
+    }
 }
 
 pub struct Attached {
@@ -82,7 +188,25 @@ impl HostClient {
     }
 
     pub fn with_launch(mut self, host_exe: impl Into<PathBuf>, idle_secs: u64) -> Self {
-        self.launch = Some((host_exe.into(), idle_secs));
+        self.launch = Some(Launch {
+            exe: host_exe.into(),
+            idle_secs,
+            check: None,
+        });
+        self
+    }
+
+    fn with_launch_checked(
+        mut self,
+        host_exe: &Path,
+        idle_secs: u64,
+        check: Option<LaunchCheck>,
+    ) -> Self {
+        self.launch = Some(Launch {
+            exe: host_exe.to_path_buf(),
+            idle_secs,
+            check,
+        });
         self
     }
 
@@ -115,18 +239,35 @@ impl HostClient {
     }
 
     fn call_timeout(&self, request: &Request, timeout: Duration) -> std::io::Result<Response> {
+        let reply = self.call_raw(request, timeout)?;
+        if reply.ok {
+            Ok(reply)
+        } else {
+            Err(other(reply.error.unwrap_or_else(|| "host error".into())))
+        }
+    }
+
+    /// The parsed reply, whether or not the host said ok.
+    fn call_raw(&self, request: &Request, timeout: Duration) -> std::io::Result<Response> {
         let mut stream = UnixStream::connect(&self.socket)?;
         stream.set_read_timeout(Some(timeout))?;
         stream.set_write_timeout(Some(timeout))?;
         let mut line = serde_json::to_vec(request).map_err(other_err)?;
         line.push(b'\n');
         stream.write_all(&line)?;
-        let reply: Response = serde_json::from_str(&read_line(&mut stream)?).map_err(other_err)?;
-        if reply.ok {
-            Ok(reply)
-        } else {
-            Err(other(reply.error.unwrap_or_else(|| "host error".into())))
-        }
+        serde_json::from_str(&read_line(&mut stream)?).map_err(other_err)
+    }
+
+    /// `hello`'s reply even when the host refuses this client, so a caller can
+    /// tell a skewed host (it answered with its version) from no host or a
+    /// host that did not answer.
+    pub fn hello_raw(&self) -> std::io::Result<Response> {
+        self.call_raw(
+            &Request::Hello {
+                client_version: PROTOCOL_VERSION,
+            },
+            CALL_TIMEOUT,
+        )
     }
 
     /// Fails if the host is older than this client can use, or refuses this
@@ -152,9 +293,15 @@ impl HostClient {
     /// As `spawn`, also reporting whether the spec's `key` matched an existing
     /// session (idempotent spawn): `(id, pid, existing)`.
     pub fn spawn_keyed(&self, spec: SpawnSpec) -> std::io::Result<(u32, u32, bool)> {
-        if let Some((exe, idle_secs)) = &self.launch {
+        if let Some(launch) = &self.launch {
             if self.hello().is_err() {
-                HostClient::ensure_running(exe, &self.socket, *idle_secs)?;
+                HostClient::ensure_running_checked(
+                    &launch.exe,
+                    &self.socket,
+                    launch.idle_secs,
+                    &[],
+                    launch.check.clone(),
+                )?;
             }
         }
         let reply = self.call(&Request::Spawn(spec))?;
@@ -239,6 +386,13 @@ impl HostClient {
 
     pub fn shutdown(&self) -> std::io::Result<()> {
         self.call(&Request::Shutdown).map(|_| ())
+    }
+
+    /// Stops the host only if it runs nothing, decided by the host under the
+    /// lock spawns take (see `Request::ShutdownIfIdle`).
+    pub fn shutdown_if_idle(&self) -> std::io::Result<IdleShutdown> {
+        let reply = self.call_raw(&Request::ShutdownIfIdle, CALL_TIMEOUT)?;
+        Ok(classify_idle_shutdown(&reply))
     }
 
     /// Opens the data connection: the reply, then raw bytes from `start` both ways.
@@ -350,11 +504,31 @@ impl HostClient {
         idle_secs: u64,
         extra_args: &[&str],
     ) -> std::io::Result<HostClient> {
+        Self::ensure_running_checked(host_exe, socket, idle_secs, extra_args, None)
+    }
+
+    /// As `ensure_running_with`, running `check` on `host_exe` right before any
+    /// start, including restarts by the returned client's `spawn`.
+    ///
+    /// A host that answers but speaks an incompatible protocol (a newer app's
+    /// host after a downgrade, or an older one after a minimum-version bump)
+    /// cannot be replaced by just starting ours: ours would see the live socket
+    /// and exit. If it runs no terminals it is shut down and ours started; if it
+    /// does, it is left running for them and this fails with a message saying
+    /// so, and the caller uses in-process terminals until they are gone.
+    #[cfg(unix)]
+    pub fn ensure_running_checked(
+        host_exe: &Path,
+        socket: &Path,
+        idle_secs: u64,
+        extra_args: &[&str],
+        check: Option<LaunchCheck>,
+    ) -> std::io::Result<HostClient> {
         // Probe with a client that cannot restart the host: `call` retries through
         // this function, so probing with the retrying client would recurse forever.
         let client = HostClient::new(socket);
         if client.hello().is_ok() {
-            return Ok(client.with_launch(host_exe, idle_secs));
+            return Ok(client.with_launch_checked(host_exe, idle_secs, check));
         }
         let dir = socket
             .parent()
@@ -369,8 +543,29 @@ impl HostClient {
         if unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX) } != 0 {
             return Err(std::io::Error::last_os_error());
         }
-        if client.hello().is_ok() {
-            return Ok(client.with_launch(host_exe, idle_secs));
+        match classify_hello(client.hello_raw()) {
+            HelloOutcome::Compatible => {
+                return Ok(client.with_launch_checked(host_exe, idle_secs, check));
+            }
+            HelloOutcome::Skewed {
+                version,
+                min_client,
+                host_pid,
+            } => match skew_action(&client.list_within(SKEW_LIST_WAIT)) {
+                SkewAction::Replace => match stop_skewed_host(&client) {
+                    SkewStop::Stopping => wait_for_host_gone(socket, host_pid)?,
+                    SkewStop::Keep(running) => {
+                        return Err(skew_kept_error(version, min_client, running));
+                    }
+                },
+                SkewAction::Keep(running) => {
+                    return Err(skew_kept_error(version, min_client, running));
+                }
+            },
+            HelloOutcome::NoHost | HelloOutcome::Unknown(_) => {}
+        }
+        if let Some(check) = &check {
+            (check.0)(host_exe)?;
         }
         let mut command = Command::new(host_exe);
         command
@@ -382,6 +577,13 @@ impl HostClient {
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null());
+        // Hygiene: the long-lived host does not inherit the app's dynamic-loader
+        // overrides. (It does not stop anyone starting the binary by hand.)
+        for (key, _) in std::env::vars_os() {
+            if key.to_string_lossy().starts_with("DYLD_") {
+                command.env_remove(key);
+            }
+        }
         // SAFETY: setsid in the forked child before exec, no allocation.
         unsafe {
             command.pre_exec(|| {
@@ -389,7 +591,10 @@ impl HostClient {
                 Ok(())
             });
         }
-        let mut child = command.spawn()?;
+        // Keeps its kind (PermissionDenied on a noexec mount) for the caller.
+        let mut child = command.spawn().map_err(|e| {
+            std::io::Error::new(e.kind(), format!("starting {}: {e}", host_exe.display()))
+        })?;
         let deadline = Instant::now() + Duration::from_secs(5);
         while Instant::now() < deadline {
             if client.hello().is_ok() {
@@ -397,7 +602,7 @@ impl HostClient {
                 std::thread::spawn(move || {
                     let _ = child.wait();
                 });
-                return Ok(client.with_launch(host_exe, idle_secs));
+                return Ok(client.with_launch_checked(host_exe, idle_secs, check));
             }
             if let Ok(Some(status)) = child.try_wait() {
                 return Err(other(format!("host exited at startup: {status}")));
@@ -419,10 +624,27 @@ impl HostClient {
         idle_secs: u64,
         extra_args: &[&str],
     ) -> std::io::Result<HostClient> {
+        Self::ensure_running_checked(host_exe, socket, idle_secs, extra_args, None)
+    }
+
+    /// As `ensure_running_with`, running `check` on `host_exe` right before any
+    /// start, including restarts by the returned client's `spawn`. Skew handling
+    /// (replacing an incompatible host) is Unix only for now.
+    #[cfg(windows)]
+    pub fn ensure_running_checked(
+        host_exe: &Path,
+        socket: &Path,
+        idle_secs: u64,
+        extra_args: &[&str],
+        check: Option<LaunchCheck>,
+    ) -> std::io::Result<HostClient> {
         // Probe with a client that cannot restart the host (see the Unix twin).
         let client = HostClient::new(socket);
         if client.hello().is_ok() {
-            return Ok(client.with_launch(host_exe, idle_secs));
+            return Ok(client.with_launch_checked(host_exe, idle_secs, check));
+        }
+        if let Some(check) = &check {
+            (check.0)(host_exe)?;
         }
         let mut args: Vec<std::ffi::OsString> = vec![
             "--socket".into(),
@@ -436,13 +658,13 @@ impl HostClient {
         let deadline = Instant::now() + Duration::from_secs(10);
         while Instant::now() < deadline {
             if client.hello().is_ok() {
-                return Ok(client.with_launch(host_exe, idle_secs));
+                return Ok(client.with_launch_checked(host_exe, idle_secs, check.clone()));
             }
             match crate::windows::exited(&child) {
                 Some(0) if relaunches < 20 => {
                     std::thread::sleep(Duration::from_millis(100));
                     if client.hello().is_ok() {
-                        return Ok(client.with_launch(host_exe, idle_secs));
+                        return Ok(client.with_launch_checked(host_exe, idle_secs, check.clone()));
                     }
                     child = crate::windows::launch_detached(host_exe, &args)?;
                     relaunches += 1;
@@ -456,6 +678,83 @@ impl HostClient {
         }
         Err(other("host did not start in time"))
     }
+}
+
+#[cfg(unix)]
+enum SkewStop {
+    Stopping,
+    Keep(Option<usize>),
+}
+
+/// Stops a skewed host that `list` showed idle, without killing a session a
+/// compatible client started since. A host that serves `shutdown_if_idle`
+/// decides atomically. An older one cannot: it is listed once more right before
+/// `shutdown`, which narrows that window to the gap between those two calls.
+#[cfg(unix)]
+fn stop_skewed_host(client: &HostClient) -> SkewStop {
+    match client.shutdown_if_idle() {
+        Ok(IdleShutdown::Stopping) => SkewStop::Stopping,
+        Ok(IdleShutdown::Busy(n)) => SkewStop::Keep(Some(n)),
+        Ok(IdleShutdown::Unsupported) => match skew_action(&client.list_within(SKEW_LIST_WAIT)) {
+            SkewAction::Replace => {
+                let _ = client.shutdown();
+                SkewStop::Stopping
+            }
+            SkewAction::Keep(n) => SkewStop::Keep(n),
+        },
+        Ok(IdleShutdown::Failed(_)) | Err(_) => SkewStop::Keep(None),
+    }
+}
+
+#[cfg(unix)]
+fn skew_kept_error(
+    version: Option<u32>,
+    min_client: Option<u32>,
+    running: Option<usize>,
+) -> std::io::Error {
+    let shown = |v: Option<u32>| v.map_or_else(|| "?".into(), |v| v.to_string());
+    let running = running.map_or_else(|| "some".into(), |n| n.to_string());
+    other(format!(
+        "an incompatible PTY host is still running {running} terminal(s) \
+         (it speaks protocol {} and accepts clients from {}; this client \
+         speaks {PROTOCOL_VERSION} and needs a host of {MIN_HOST_VERSION} or \
+         newer). It is left running for them; new terminals cannot use it \
+         until they exit",
+        shown(version),
+        shown(min_client),
+    ))
+}
+
+/// How long a skewed host gets to answer `list`.
+#[cfg(unix)]
+const SKEW_LIST_WAIT: Duration = Duration::from_secs(1);
+/// How long a skewed host gets to go after `shutdown`.
+#[cfg(unix)]
+const SKEW_EXIT_WAIT: Duration = Duration::from_secs(5);
+
+/// After `shutdown`: the old host removes its socket path once, after it stops
+/// accepting and before it stops its children. A new host must not bind before
+/// that removal or the old one would delete the new socket, so wait for the
+/// path itself to go (not just for connections to be refused), then, best
+/// effort, for the old process to exit.
+#[cfg(unix)]
+fn wait_for_host_gone(socket: &Path, host_pid: Option<u32>) -> std::io::Result<()> {
+    let deadline = Instant::now() + SKEW_EXIT_WAIT;
+    while std::fs::symlink_metadata(socket).is_ok() {
+        if Instant::now() >= deadline {
+            return Err(other(
+                "an incompatible PTY host was asked to stop but its socket is still there",
+            ));
+        }
+        std::thread::sleep(Duration::from_millis(25));
+    }
+    if let Some(pid) = host_pid.and_then(|p| libc::pid_t::try_from(p).ok()) {
+        // SAFETY: signal 0 only checks that the process exists.
+        while unsafe { libc::kill(pid, 0) } == 0 && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(25));
+        }
+    }
+    Ok(())
 }
 
 fn other_err<E: std::error::Error + Send + Sync + 'static>(e: E) -> std::io::Error {
