@@ -67,7 +67,7 @@ for(const command of ['relay_status','relay_host_start','relay_host_stop','relay
 for(const command of ['tunnel_start','tunnel_stop','tunnel_status','linear_issues','linear_issue_detail','linear_issue_set_state','linear_issue_comment'])LOCAL_UI.add(command);
 // Tailscale is the one installed on this computer (tailnet.rs): its status,
 // this computer's allow list for machines that may connect in, and its app.
-for(const command of ['tailscale_status','tailscale_allow_set','tailscale_allowed_list','tailscale_open_app'])LOCAL_UI.add(command);
+for(const command of ['tailscale_status','tailscale_allow_set','tailscale_allowed_list','tailscale_open_app','tailnet_remote_list','tailnet_remote_open','tailnet_remote_close','tailnet_remote_reconnect'])LOCAL_UI.add(command);
 // This app's own diagnostics, self-test harness, `canopy` launcher, and
 // workspace files chosen in this computer's save/open dialogs.
 // Saved T3 Code machines are this computer's: their access tokens sit in its
