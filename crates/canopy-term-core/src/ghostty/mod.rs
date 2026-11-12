@@ -63,12 +63,34 @@
 //!
 //! libghostty-vt has a VT formatter, but it serialises the whole screen with
 //! its scrollback, not the visible area, and does not keep soft wraps, so
-//! [`Screen::snapshot`] is written from our own frame, the engine's soft-wrap
-//! flags and (through that formatter) its scroll region. It carries what the
-//! old snapshot carried, plus hyperlinks, a pending autowrap and every mode
-//! written explicitly. It does not carry scrollback, the primary screen behind
-//! an active alternate screen, tab stops, saved cursor slots, character sets or
-//! the palette.
+//! [`Screen::snapshot`] is written from our own frame and the engine's
+//! soft-wrap flags. Where the engine has an API for state the grid does not
+//! show, the snapshot uses it:
+//!
+//! * the palette and the foreground, background and cursor colours come from
+//!   the terminal's colour getters and are written as OSC 4, 10, 11 and 12 for
+//!   whatever differs from the defaults;
+//! * the scroll region, the tab stops and the G0 to G3 character sets with
+//!   their shift state come from the engine's own VT formatter (it is asked
+//!   about one cell and its output is parsed, because the terminal has no
+//!   getter for them).
+//!
+//! The rest is replayed as VT: underline style (`4:n`) and colour (`58`) in the
+//! SGR of every cell and of the pen, hyperlinks (OSC 8), prompt row marks (OSC
+//! 133 `P`, `k=i` or `k=s`, written after the row's text so a wrap into the next
+//! row is not marked), and two things the engine keeps on its cursor and does
+//! not expose, so the host follows them in the stream: the cursor's prompt state
+//! (`A`, `B`, `I` or output; `Semantic` in `engine.rs`), which decides how the
+//! next line feed marks rows, and the OSC 8 link the program left open, which
+//! the next text is given. A prompt state is written from a row already marked
+//! the same way (marking is a side effect of writing it), so with no such row it
+//! is not carried.
+//!
+//! The snapshot also carries a pending autowrap and every mode written
+//! explicitly. It does not carry scrollback, the primary screen behind an
+//! active alternate screen, saved cursor slots, the cell-level semantic content
+//! (prompt, input or output text; only the row marks are read back), or a
+//! pending single shift (`ESC N`, `ESC O`).
 //!
 //! # Scrollback
 //!

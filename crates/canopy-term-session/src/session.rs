@@ -871,6 +871,10 @@ impl<L: SessionLink> FrameSource for Session<L> {
         self.modes
     }
 
+    fn hyperlink_at(&self, row: u16, col: u16) -> Option<String> {
+        self.screen.hyperlink_at(row, col)
+    }
+
     fn key(&mut self, ev: &KeyEvent<'_>) -> bool {
         self.encode(|modes, out| encode_key(ev, modes, out))
     }

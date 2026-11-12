@@ -101,7 +101,8 @@ on macOS or Windows, aarch64 targets.
 `cargo test --locked` in this directory runs the unit tests, the behaviour suite
 (`tests/screen.rs`), the 18 conformance fixtures (`tests/conformance.rs`), the
 seeded fuzz tests (`tests/fuzz.rs`), the engine-specific tests
-(`tests/ghostty.rs`: events, OSC 8 links, OSC 52 policy, prompt marks, threading)
+(`tests/ghostty.rs`: events, OSC 8 links, OSC 52 policy, prompt marks, threading),
+the snapshot fidelity round trips (`tests/snapshot.rs`)
 and the report-only `perf` target. The suites are written once in
 `tests/suite/` and instantiated for `Screen`.
 
@@ -115,4 +116,12 @@ Rules the tests keep:
   capped; reads are denied by default and never answered, even when the host
   opts in to read-request events.
 - Snapshot and restore: a restored screen continues identically, and a replayed
-  history raises no events.
+  history raises no events. `tests/snapshot.rs` holds the round trips for what
+  the grid does not show (tab stops, G0 to G3 character sets and shifts, palette
+  and colour overrides, underline styles and colours, open and edge-cell
+  hyperlinks, prompt row marks and the cursor's prompt state): feed, snapshot,
+  restore, same frame and a byte-identical second snapshot, then more output to
+  both and the same again. Known gaps, not carried: scrollback, the primary
+  screen behind the alternate screen, saved cursor slots, a pending single shift
+  (`ESC N`, `ESC O`), cell-level semantic content, and a prompt state when no
+  row is marked.

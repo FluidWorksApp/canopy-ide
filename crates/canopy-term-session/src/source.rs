@@ -90,6 +90,13 @@ pub trait FrameSource {
         encode_with(self, |modes, out| encode_mouse(ev, modes, out))
     }
 
+    /// The target of the OSC 8 hyperlink on a visible cell, if any. It is the
+    /// raw URI the program printed: the viewer decides whether to open it, and
+    /// must check it first (`frame::is_safe_link`). The default has no links.
+    fn hyperlink_at(&self, _row: u16, _col: u16) -> Option<String> {
+        None
+    }
+
     /// Focus gained or lost; sends nothing unless the program asked (1004).
     fn focus(&mut self, focused: bool) -> bool {
         encode_with(self, |modes, out| encode_focus(focused, modes, out))

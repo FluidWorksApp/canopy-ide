@@ -15,6 +15,8 @@
 //! * [`compose`]: the composition drawn over a copy of the frame.
 //! * [`blink`], [`selection`], [`shortcuts`]: cursor blink timing, copied text,
 //!   copy/paste/zoom keys.
+//! * [`links`]: which OSC 8 links a click may open (`http`, `https`, `mailto`,
+//!   through `frame::is_safe_link`) and how the system opener is started.
 //!
 //! The `window` feature (on by default) adds [`window::run`], which owns the
 //! winit loop, the wgpu surface and the AccessKit adapter, and maps winit key,
@@ -33,6 +35,7 @@ pub mod blink;
 pub mod compose;
 pub mod grid;
 pub mod ime;
+pub mod links;
 pub mod selection;
 pub mod shortcuts;
 

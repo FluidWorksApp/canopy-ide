@@ -44,6 +44,7 @@ use crate::blink::CursorBlink;
 use crate::compose::Composer;
 use crate::grid::{cell_at, grid_size, CellPx, FontZoom, PxRect};
 use crate::ime::{cursor_area, preedit_cols, ImeAction, ImeEvent, ImeGate};
+use crate::links;
 use crate::selection::{selection_text, Selection};
 use crate::shortcuts::{shortcut, Mods, Platform, Shortcut};
 
@@ -630,7 +631,16 @@ impl<S: FrameSource> App<S> {
                 }
             }
             ElementState::Released => {
-                self.drag_anchor = None;
+                let anchor = self.drag_anchor.take();
+                // A click (no drag) with the link modifier follows the OSC 8
+                // link under it; `links::follow` opens nothing but http, https
+                // and mailto.
+                if let Some((row, col)) = anchor.filter(|a| Some(*a) == self.pointer_cell()) {
+                    let mods = mods_of(self.mods);
+                    if links::is_link_click(mods, Platform::current()) {
+                        links::follow(self.source.hyperlink_at(row, col), links::open);
+                    }
+                }
                 // A click without a drag selects nothing.
                 if self.selection.is_some_and(|s| s.start == s.end) {
                     self.selection = None;

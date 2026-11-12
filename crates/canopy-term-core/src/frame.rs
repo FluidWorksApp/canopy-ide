@@ -28,6 +28,19 @@ impl Attrs {
     }
 }
 
+/// How a cell's underline is drawn. `Attrs::UNDERLINE` is set for every style
+/// but `None`, so a consumer that only knows a single underline keeps working.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum UnderlineStyle {
+    #[default]
+    None,
+    Single,
+    Double,
+    Curly,
+    Dotted,
+    Dashed,
+}
+
 /// One grid position, fixed size and `Copy` so a frame is a flat buffer with no
 /// allocation per cell. `ch` is the first scalar; a grapheme cluster with more
 /// scalars sets `cluster` to a non-zero index into `Frame::clusters` (the full
@@ -39,6 +52,13 @@ pub struct Cell {
     pub fg: Color,
     pub bg: Color,
     pub attrs: Attrs,
+    /// The underline's shape (SGR `4:n`, `21`). `None` exactly when
+    /// `attrs` has no `UNDERLINE`.
+    pub underline: UnderlineStyle,
+    /// The underline's own colour (SGR 58); `Default` draws it in the
+    /// foreground colour. The engine keeps it on the pen even while there is no
+    /// underline, so it can be set without one; it only draws with one.
+    pub underline_color: Color,
 }
 
 impl Default for Cell {
@@ -49,6 +69,8 @@ impl Default for Cell {
             fg: Color::Default,
             bg: Color::Default,
             attrs: Attrs(0),
+            underline: UnderlineStyle::None,
+            underline_color: Color::Default,
         }
     }
 }
@@ -219,6 +241,8 @@ mod tests {
         fn assert_copy<T: Copy>() {}
         assert_copy::<Cell>();
         assert!(std::mem::size_of::<Cell>() <= 24);
+        assert_eq!(Cell::default().underline, UnderlineStyle::None);
+        assert_eq!(Cell::default().underline_color, Color::Default);
     }
 
     #[test]

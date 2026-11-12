@@ -67,6 +67,15 @@ impl Theme {
         }
     }
 
+    /// An underline colour (SGR 58): `None` for `Default`, which draws in the
+    /// text colour.
+    pub fn underline_rgb(&self, c: Color) -> Option<Rgb> {
+        match c {
+            Color::Default => None,
+            other => Some(self.resolve(other, self.fg)),
+        }
+    }
+
     fn resolve(&self, c: Color, default: Rgb) -> Rgb {
         match c {
             Color::Default => default,
@@ -150,6 +159,14 @@ mod tests {
         assert_eq!(t.indexed(231), [255, 255, 255]);
         assert_eq!(t.indexed(232), [8, 8, 8]);
         assert_eq!(t.indexed(255), [238, 238, 238]);
+    }
+
+    #[test]
+    fn an_underline_colour_resolves_against_the_palette_or_stays_unset() {
+        let t = Theme::default();
+        assert_eq!(t.underline_rgb(Color::Default), None);
+        assert_eq!(t.underline_rgb(Color::Indexed(1)), Some(t.palette[1]));
+        assert_eq!(t.underline_rgb(Color::Rgb(1, 2, 3)), Some([1, 2, 3]));
     }
 
     #[test]
