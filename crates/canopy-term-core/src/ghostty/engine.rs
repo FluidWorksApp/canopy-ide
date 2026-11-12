@@ -33,9 +33,11 @@ use std::sync::Arc;
 /// feeds image protocols and size reports, neither of which we answer.
 const CELL_PX: (u32, u32) = (8, 16);
 
-/// Read every row every time. CI showed a combining mark fed in a later write
-/// than its base character missing from the frame; until it is known whether
-/// that is the engine or the Clean shortcut below, nothing is skipped.
+/// Read every row every time, never copying from the last frame on the engine's
+/// say-so. Its dirty tracking misses grapheme attachments (see `refresh`), so
+/// skipping clean rows is not exact. The test `a_combining_mark_in_a_later_write_is_kept`
+/// and the split tests are the equivalence check that must pass before this is
+/// ever turned off.
 const ALWAYS_READ: bool = true;
 
 /// Longest hyperlink URI kept, in bytes. Longer links are dropped.
@@ -95,6 +97,12 @@ pub(crate) struct Engine {
     /// engine only reads back the active screen's flags, so the other one is
     /// remembered when its flags change (`Step::KittyChanged`).
     kitty: [u8; 2],
+    /// Mouse reporting as the engine's stream handler applies it: setting
+    /// 9, 1000, 1002 or 1003 selects that mode (the last one wins), resetting
+    /// any of them turns reporting off; the same for the encodings. The
+    /// engine's mode bits cannot say which was set last, so we follow it.
+    mouse: MouseMode,
+    mouse_encoding: MouseEncoding,
     clipboard_read_events: bool,
     scratch: String,
     /// Bytes were fed since the frame was last built. The frame is built only
@@ -495,6 +503,8 @@ impl Engine {
             pen: Cell::default(),
             blinking: false,
             kitty: [0; 2],
+            mouse: MouseMode::Off,
+            mouse_encoding: MouseEncoding::Default,
             clipboard_read_events: false,
             scratch: String::new(),
             stale: false,
@@ -556,6 +566,27 @@ impl Engine {
             Step::Reset => {
                 self.title = None;
                 self.kitty = [0; 2];
+                self.mouse = MouseMode::Off;
+                self.mouse_encoding = MouseEncoding::Default;
+            }
+            Step::PrivateMode { set, params } => {
+                for p in params {
+                    match (p, set) {
+                        (9, true) => self.mouse = MouseMode::Press,
+                        (1000, true) => self.mouse = MouseMode::Normal,
+                        (1002, true) => self.mouse = MouseMode::Drag,
+                        (1003, true) => self.mouse = MouseMode::Any,
+                        (9 | 1000 | 1002 | 1003, false) => self.mouse = MouseMode::Off,
+                        (1005, true) => self.mouse_encoding = MouseEncoding::Utf8,
+                        (1006, true) => self.mouse_encoding = MouseEncoding::Sgr,
+                        // URXVT and SGR-pixels have no variant of ours.
+                        (1015 | 1016, true) => self.mouse_encoding = MouseEncoding::Default,
+                        (1005 | 1006 | 1015 | 1016, false) => {
+                            self.mouse_encoding = MouseEncoding::Default
+                        }
+                        _ => {}
+                    }
+                }
             }
             Step::Bell => self.push_event(Event::Bell),
             Step::KittyChanged => {
@@ -806,6 +837,14 @@ impl Engine {
         let size_changed = self.frame.cols != self.cols || self.frame.rows != self.rows;
         let alt_changed = self.frame.alt_screen != alt_screen;
         let full = force_full || size_changed || alt_changed;
+        // A fresh render state every time, so every row is copied from the
+        // terminal. The engine's dirty tracking is not reliable: attaching a
+        // combining mark to the previous cell does not mark its row dirty, so
+        // a render state that keeps rows between updates shows the base
+        // character without its mark when the mark arrives in a later write.
+        if let Ok(fresh) = RenderState::new() {
+            self.render = fresh;
+        }
         let prev = if full {
             None
         } else {
@@ -827,30 +866,9 @@ impl Engine {
 
         let term = &self.term;
         let on = |m: Mode| term.mode(m).unwrap_or(false);
-        let tracking = term.is_mouse_tracking().unwrap_or(false);
-        let mouse = if !tracking {
-            MouseMode::Off
-        } else if on(Mode::ANY_MOUSE) {
-            MouseMode::Any
-        } else if on(Mode::BUTTON_MOUSE) {
-            MouseMode::Drag
-        } else if on(Mode::NORMAL_MOUSE) {
-            MouseMode::Normal
-        } else if on(Mode::X10_MOUSE) {
-            MouseMode::Press
-        } else {
-            MouseMode::Off
-        };
-        let mouse_encoding = if on(Mode::SGR_MOUSE) {
-            MouseEncoding::Sgr
-        } else if on(Mode::UTF8_MOUSE) {
-            MouseEncoding::Utf8
-        } else {
-            MouseEncoding::Default
-        };
         let modes = Modes {
-            mouse,
-            mouse_encoding,
+            mouse: self.mouse,
+            mouse_encoding: self.mouse_encoding,
             bracketed_paste: on(Mode::BRACKETED_PASTE),
             app_cursor_keys: on(Mode::DECCKM),
             app_keypad: on(Mode::KEYPAD_KEYS),
