@@ -56,6 +56,11 @@ dictation = [
 
 [dependencies]
 canopy-core = { path = "../crates/canopy-core" }
+# Settings → Remote access → Tailscale: talks to the INSTALLED Tailscale through
+# its CLI (version / status / whois only) and holds the tailnet allowlist.
+# No default features: the iroh transport is not used by the app yet, and
+# pulling it would add its whole dependency tree to the build and the notices.
+canopy-term-net = { path = "../crates/canopy-term-net", default-features = false }
 enigo = { version = "=0.6.1", optional = true }
 image = { version = "0.25", default-features = false, features = ["jpeg"] }
 # io-util: the MCP client reads its stdio servers a line at a time (AsyncBufReadExt).
@@ -276,6 +281,8 @@ codegen-units = 1
 
 [dev-dependencies]
 keepass = { version = "0.13", default-features = false, features = ["save_kdbx4"] }
+# The crate's scripted CliRunner and anonymised fixtures, for tailnet.rs tests only.
+canopy-term-net = { path = "../crates/canopy-term-net", default-features = false, features = ["test-support"] }
 # `test` feature enables tauri::test::mock_app for exercising PTY spawn/attach
 # against a mock runtime. Dev-only, so the release build is unaffected.
 tauri = { version = "2.11.3", features = ["test", "unstable"] }

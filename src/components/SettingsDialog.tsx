@@ -63,6 +63,7 @@ import { settingAnchor, type SettingHit } from "./settingsIndex";
 import { SettingsNavContext } from "./settingsNav";
 import { TRACKERS, setTrackerKey, trackerKey } from "../trackers";
 import * as ipc from "../ipc";
+import { TailscaleStatus } from "./TailscaleStatus";
 import { AcpProviderPicker } from "./AcpProviderPicker";
 import { partitionBuiltins } from "../agentCliVisibility";
 import { registerConnectorIcon } from "../acp/connectorIcons";
@@ -2952,8 +2953,23 @@ export function RemoteSettings({
     };
   }, []);
   if (me === undefined) return null;
-  if (me) return <CanopyLinkSettings />;
-  return <SelfHostedRemoteSettings runInTerminal={runInTerminal} />;
+  return (
+    <>
+      {me ? <CanopyLinkSettings /> : <SelfHostedRemoteSettings runInTerminal={runInTerminal} />}
+      <TailscaleSettings />
+    </>
+  );
+}
+
+/** The Tailscale already installed on this machine, signed in to Canopy or
+ *  not. Separate from the Tailscale choice under Public link, which is Funnel
+ *  for the phone portal. */
+function TailscaleSettings() {
+  return (
+    <Item name="Tailscale" desc="Uses the Tailscale app on this machine.">
+      <TailscaleStatus />
+    </Item>
+  );
 }
 
 /** The portal is served under /remote. */

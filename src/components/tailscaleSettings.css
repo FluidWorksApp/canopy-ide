@@ -1,0 +1,23 @@
+/* Settings → Remote access → Tailscale (TailscaleStatus.tsx). The machine list
+   borrows .resume-block / .resume-row from the project launcher; this file only
+   adds the status dot, the "This machine" strip and the list's footer. */
+.ts-status{display:inline-flex;align-items:center;gap:7px;font-size:12px;font-weight:600;color:var(--text)}
+.ts-status i{display:block;width:7px;height:7px;border-radius:50%;background:var(--text-faint)}
+.ts-status-ok i{background:var(--ok);box-shadow:0 0 0 3px color-mix(in oklab,var(--ok) 20%,transparent)}
+.ts-status-warn i{background:var(--warn);box-shadow:0 0 0 3px color-mix(in oklab,var(--warn) 20%,transparent)}
+.ts-mono{font-family:var(--font-mono);font-size:11px;color:var(--text-dim)}
+.ts-running{display:flex;flex-direction:column;gap:12px;min-width:0}
+.ts-me{display:flex;align-items:center;flex-wrap:wrap;gap:10px;padding:8px 12px;border:1px solid var(--border);border-radius:var(--r-sm);background:var(--bg);font-size:12px;min-width:0}
+.ts-me-label{font-family:var(--font-mono);font-size:9.5px;letter-spacing:.1em;text-transform:uppercase;color:var(--text-dim)}
+.ts-me-name{font-weight:600}
+.ts-machines.resume-block{width:100%;margin:0}
+.ts-machines .resume-head .badge{margin-left:4px}
+.ts-machines .ts-col{margin-left:auto;margin-right:76px}
+.ts-machines .ts-name{flex:0 1 auto;font-weight:600}
+.ts-machines .resume-dir{flex:1 1 auto;max-width:none}
+.ts-machines .resume-row>.ctl-switch,.ts-machines .ts-connect{flex:0 0 auto}
+.ts-machines .ts-connect .btn{width:64px}
+.ts-dot{flex:none;width:6px;height:6px;border-radius:50%;background:var(--ok)}
+.ts-empty{color:var(--text-dim)}
+.ts-foot{padding:7px 12px;border-top:1px solid var(--border);font-size:10.5px;color:var(--text-dim)}
+@media (max-width:760px){.ts-machines .resume-dir{display:none}.ts-machines .ts-name{flex:1 1 auto}}
