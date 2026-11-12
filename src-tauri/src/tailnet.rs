@@ -37,6 +37,11 @@ use std::sync::{Arc, Mutex};
 
 const ALLOW_FILE: &str = "tailnet-allow.txt";
 
+/// The one TCP port of the session protocol on the tailnet: the listening half
+/// (`tailnet_serve.rs`) binds it and the dialling half (`tailnet_client.rs`)
+/// connects to it. Defined once, here, so they cannot drift apart.
+pub const TAILNET_SESSION_PORT: u16 = 28617;
+
 /// Serialises read-change-write of the allowlist file.
 static ALLOW_LOCK: Mutex<()> = Mutex::new(());
 

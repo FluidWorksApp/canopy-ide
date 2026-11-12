@@ -45,9 +45,8 @@ use std::thread;
 use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter, Manager};
 
-/// The port the other machine's app listens on. `tailnet_serve.rs` (the
-/// listening half) must bind the same one.
-pub const SESSION_PORT: u16 = 6681;
+/// The port the other machine's app listens on, shared with the listener.
+pub const SESSION_PORT: u16 = crate::tailnet::TAILNET_SESSION_PORT;
 
 /// The event the webview listens to (`TailnetRemoteState` in `ipc.ts`).
 pub const STATE_EVENT: &str = "tailnet:remote_state";
