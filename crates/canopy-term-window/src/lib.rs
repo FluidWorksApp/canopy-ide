@@ -15,6 +15,11 @@
 //! * [`compose`]: the composition drawn over a copy of the frame.
 //! * [`blink`], [`selection`], [`shortcuts`]: cursor blink timing, copied text,
 //!   copy/paste/zoom keys.
+//! * [`viewport`]: scrollback position, the frame drawn for a scrolled view,
+//!   wheel and scroll-key routing.
+//! * [`lines`]: selection over scrollback and the live screen (absolute
+//!   lines), word and line boundaries, multi-click and drag extension.
+//! * [`overlay`]: text drawn over a copy of the frame (the scrollback badge).
 //!
 //! The `window` feature (on by default) adds [`window::run`], which owns the
 //! winit loop, the wgpu surface and the AccessKit adapter, and maps winit key,
@@ -33,8 +38,11 @@ pub mod blink;
 pub mod compose;
 pub mod grid;
 pub mod ime;
+pub mod lines;
+pub mod overlay;
 pub mod selection;
 pub mod shortcuts;
+pub mod viewport;
 
 #[cfg(feature = "window")]
 pub mod window;

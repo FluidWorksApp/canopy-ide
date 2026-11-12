@@ -34,12 +34,49 @@ use crate::selection::Selection;
 
 pub const ROOT_ID: NodeId = NodeId(1);
 pub const TERMINAL_ID: NodeId = NodeId(2);
+/// "Scrolled back N of M lines": present only while the view is scrolled back.
+pub const STATUS_ID: NodeId = NodeId(3);
 const LINE_BASE: u64 = 1 << 16;
 const ANNOUNCE_BASE: u64 = 1 << 32;
 /// At most this many lines go into one announcement (the newest ones).
 pub const MAX_ANNOUNCE_LINES: usize = 20;
 /// And at most this many bytes.
 pub const MAX_ANNOUNCE_BYTES: usize = 4000;
+
+/// What the window shows besides the screen, for the tree to describe.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct UiExtras {
+    /// (lines above the live screen, lines of history) while scrolled back.
+    pub scrollback: Option<(usize, usize)>,
+}
+
+impl UiExtras {
+    fn child_ids(&self) -> Vec<NodeId> {
+        let mut ids = Vec::new();
+        if self.scrollback.is_some() {
+            ids.push(STATUS_ID);
+        }
+        ids
+    }
+
+    fn nodes(&self) -> Vec<(NodeId, Node)> {
+        let mut nodes = Vec::new();
+        if let Some((offset, total)) = self.scrollback {
+            nodes.push((STATUS_ID, status_node(offset, total)));
+        }
+        nodes
+    }
+}
+
+fn status_node(offset: usize, total: usize) -> Node {
+    let text = format!("Scrolled back {offset} of {total} lines");
+    let mut node = Node::new(Role::Label);
+    node.set_value(text.clone());
+    node.set_label(text);
+    // Polite: a screen reader says where the view moved to, briefly.
+    node.set_live(Live::Polite);
+    node
+}
 
 pub fn line_id(row: u16) -> NodeId {
     NodeId(LINE_BASE + row as u64)
@@ -244,10 +281,11 @@ pub fn text_selection(
     })
 }
 
-fn root_node(title: &str, announce: Option<NodeId>) -> Node {
+fn root_node(title: &str, announce: Option<NodeId>, extras: &UiExtras) -> Node {
     let mut node = Node::new(Role::Window);
     node.set_label(title.to_string());
     let mut children = vec![TERMINAL_ID];
+    children.extend(extras.child_ids());
     children.extend(announce);
     node.set_children(children);
     node
@@ -314,7 +352,7 @@ fn tree_info() -> TreeInfo {
 /// when a screen reader first asks.
 pub fn tree_for(frame: &Frame, cell: CellPx, selection: Option<&Selection>) -> TreeUpdate {
     let lines = all_lines(frame);
-    full_update(frame, cell, &lines, selection, None)
+    full_update(frame, cell, &lines, selection, None, &UiExtras::default())
 }
 
 fn full_update(
@@ -323,10 +361,14 @@ fn full_update(
     lines: &[LineText],
     selection: Option<&Selection>,
     announce: Option<(NodeId, &str)>,
+    extras: &UiExtras,
 ) -> TreeUpdate {
     let sel = text_selection(lines, frame, selection);
     let mut nodes = Vec::with_capacity(lines.len() + 3);
-    nodes.push((ROOT_ID, root_node(&title_of(frame), announce.map(|a| a.0))));
+    nodes.push((
+        ROOT_ID,
+        root_node(&title_of(frame), announce.map(|a| a.0), extras),
+    ));
     nodes.push((
         TERMINAL_ID,
         terminal_node(frame.rows, frame.cols, cell, sel.as_ref()),
@@ -336,6 +378,7 @@ fn full_update(
         let r = r as u16;
         nodes.push((line_id(r), line_node(line, r, r == last, cell, frame.cols)));
     }
+    nodes.extend(extras.nodes());
     if let Some((id, text)) = announce {
         nodes.push((id, announce_node(text)));
     }
@@ -396,6 +439,7 @@ struct Published {
     lines: Vec<LineText>,
     selection: Option<TextSelection>,
     announce: Option<NodeId>,
+    extras: UiExtras,
 }
 
 /// Incremental tree updates against what was last published.
@@ -403,11 +447,18 @@ struct Published {
 pub struct A11yTree {
     published: Option<Published>,
     announcements: u64,
+    extras: UiExtras,
 }
 
 impl A11yTree {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// What the window shows besides the screen (scrollback badge). Takes
+    /// effect with the next [`A11yTree::update`] or [`A11yTree::full`].
+    pub fn set_extras(&mut self, extras: UiExtras) {
+        self.extras = extras;
     }
 
     /// The full tree (a screen reader just started), which becomes the
@@ -419,7 +470,7 @@ impl A11yTree {
         selection: Option<&Selection>,
     ) -> TreeUpdate {
         let lines = all_lines(frame);
-        let update = full_update(frame, cell, &lines, selection, None);
+        let update = full_update(frame, cell, &lines, selection, None, &self.extras);
         self.published = Some(Published {
             cols: frame.cols,
             rows: frame.rows,
@@ -429,6 +480,7 @@ impl A11yTree {
             selection: text_selection(&lines, frame, selection),
             lines,
             announce: None,
+            extras: self.extras.clone(),
         });
         update
     }
@@ -457,7 +509,10 @@ impl A11yTree {
         let mut nodes = Vec::new();
 
         let mut announce = None;
-        if !reshaped && !frame.alt_screen && !prev.alt_screen {
+        // Moving through history is not new output, and neither is output
+        // that arrives while the view is scrolled back.
+        let scrolled = self.extras.scrollback.is_some() || prev.extras.scrollback.is_some();
+        if !reshaped && !frame.alt_screen && !prev.alt_screen && !scrolled {
             let output = new_output(&prev.lines, &lines, frame.cursor.row);
             if !output.is_empty() {
                 self.announcements += 1;
@@ -466,10 +521,14 @@ impl A11yTree {
             }
         }
 
-        let root_changed = title != prev.title || announce.is_some();
+        let extras_changed = self.extras != prev.extras;
+        let root_changed = title != prev.title || announce.is_some() || extras_changed;
         if root_changed {
             let id = announce.as_ref().map(|a| a.0).or(prev.announce);
-            nodes.push((ROOT_ID, root_node(&title, id)));
+            nodes.push((ROOT_ID, root_node(&title, id, &self.extras)));
+        }
+        if extras_changed {
+            nodes.extend(self.extras.nodes());
         }
         if reshaped || sel != prev.selection {
             nodes.push((
@@ -503,6 +562,7 @@ impl A11yTree {
         prev.title = title;
         prev.lines = lines;
         prev.selection = sel;
+        prev.extras = self.extras.clone();
         if let Some((id, _)) = announce {
             prev.announce = Some(id);
         }
@@ -944,5 +1004,76 @@ mod tests {
         let out = new_output(&old, &new, 29);
         assert_eq!(out.len(), MAX_ANNOUNCE_LINES);
         assert_eq!(out.last().unwrap(), "line 28");
+    }
+
+    fn scrolled(offset: usize, total: usize) -> UiExtras {
+        UiExtras {
+            scrollback: Some((offset, total)),
+        }
+    }
+
+    #[test]
+    fn scrolled_back_adds_a_polite_status_node_under_the_root() {
+        let f = frame_of(&["a", "b"], 5);
+        let mut t = A11yTree::new();
+        t.set_extras(scrolled(12, 340));
+        let u = t.full(&f, CELL, None);
+        let root = node(&u, ROOT_ID);
+        assert_eq!(root.children(), &[TERMINAL_ID, STATUS_ID]);
+        let status = node(&u, STATUS_ID);
+        assert_eq!(status.role(), Role::Label);
+        assert_eq!(status.value(), Some("Scrolled back 12 of 340 lines"));
+        assert_eq!(status.live(), Some(Live::Polite));
+        // Without extras the tree has no status node.
+        let plain = tree_for(&f, CELL, None);
+        assert!(!plain.nodes.iter().any(|(i, _)| *i == STATUS_ID));
+    }
+
+    #[test]
+    fn moving_through_history_updates_the_status_and_is_not_announced_as_output() {
+        let mut f = frame_of(&["one", "two", "three"], 8);
+        f.cursor.row = 2;
+        let mut t = A11yTree::new();
+        t.full(&f, CELL, None);
+        // Scroll back: different rows appear, the status node is added, and
+        // nothing is announced.
+        let mut g = frame_of(&["old a", "old b", "one"], 8);
+        g.cursor.row = 2;
+        g.scrolled_back = true;
+        g.viewport_offset = 2;
+        t.set_extras(scrolled(2, 10));
+        let u = t.update(&g, CELL, None).unwrap();
+        assert!(u.nodes.iter().any(|(i, _)| *i == STATUS_ID));
+        assert!(
+            u.nodes.iter().all(|(i, _)| i.0 < ANNOUNCE_BASE),
+            "no announcement node"
+        );
+        assert_eq!(node(&u, line_id(0)).value(), Some("old a\n"));
+        // Further up: the status text changes.
+        let mut h = frame_of(&["older", "old a", "old b"], 8);
+        h.cursor.row = 2;
+        t.set_extras(scrolled(3, 10));
+        let u = t.update(&h, CELL, None).unwrap();
+        assert_eq!(
+            node(&u, STATUS_ID).value(),
+            Some("Scrolled back 3 of 10 lines")
+        );
+        // Back to live: the status node leaves the root's children.
+        let mut live = frame_of(&["one", "two", "three"], 8);
+        live.cursor.row = 2;
+        t.set_extras(UiExtras::default());
+        let u = t.update(&live, CELL, None).unwrap();
+        assert_eq!(node(&u, ROOT_ID).children(), &[TERMINAL_ID]);
+        assert!(!u.nodes.iter().any(|(i, _)| *i == STATUS_ID));
+    }
+
+    #[test]
+    fn an_unchanged_scrolled_state_produces_no_update() {
+        let f = frame_of(&["a", "b"], 5);
+        let mut t = A11yTree::new();
+        t.set_extras(scrolled(1, 5));
+        t.full(&f, CELL, None);
+        t.set_extras(scrolled(1, 5));
+        assert!(t.update(&f, CELL, None).is_none());
     }
 }

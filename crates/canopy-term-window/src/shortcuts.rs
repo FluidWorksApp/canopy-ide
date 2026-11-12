@@ -66,6 +66,26 @@ pub fn shortcut(key: &str, mods: Mods, platform: Platform) -> Option<Shortcut> {
     }
 }
 
+/// [`shortcut`], plus plain Ctrl+C copying where there is a selection to copy
+/// (Windows Terminal's rule): with a selection Ctrl+C copies, without one it
+/// stays the program's interrupt, so a second press after copying interrupts.
+/// macOS Command+C is always copy; Ctrl+C there is always the program's.
+pub fn shortcut_with_selection(
+    key: &str,
+    mods: Mods,
+    platform: Platform,
+    has_selection: bool,
+) -> Option<Shortcut> {
+    if let Some(sc) = shortcut(key, mods, platform) {
+        return Some(sc);
+    }
+    let plain_ctrl = mods.ctrl && !mods.shift && !mods.alt && !mods.logo;
+    if has_selection && platform == Platform::Other && plain_ctrl && key.eq_ignore_ascii_case("c") {
+        return Some(Shortcut::Copy);
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -119,5 +139,35 @@ mod tests {
         assert_eq!(shortcut("", CMD, Platform::MacOs), None);
         assert_eq!(shortcut("cv", CMD, Platform::MacOs), None);
         assert_eq!(shortcut("x", CMD, Platform::MacOs), None);
+    }
+
+    #[test]
+    fn plain_ctrl_c_copies_only_with_a_selection_and_only_off_macos() {
+        let o = Platform::Other;
+        assert_eq!(
+            shortcut_with_selection("c", CTRL, o, true),
+            Some(Shortcut::Copy)
+        );
+        assert_eq!(
+            shortcut_with_selection("C", CTRL, o, true),
+            Some(Shortcut::Copy)
+        );
+        assert_eq!(shortcut_with_selection("c", CTRL, o, false), None);
+        // The Ctrl+Shift form copies either way, and macOS is untouched.
+        assert_eq!(
+            shortcut_with_selection("C", CTRL_SHIFT, o, false),
+            Some(Shortcut::Copy)
+        );
+        assert_eq!(
+            shortcut_with_selection("c", CTRL, Platform::MacOs, true),
+            None
+        );
+        assert_eq!(
+            shortcut_with_selection("c", CMD, Platform::MacOs, false),
+            Some(Shortcut::Copy)
+        );
+        // Other keys with Ctrl are never taken.
+        assert_eq!(shortcut_with_selection("v", CTRL, o, true), None);
+        assert_eq!(shortcut_with_selection("cc", CTRL, o, true), None);
     }
 }
