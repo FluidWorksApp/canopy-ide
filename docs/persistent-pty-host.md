@@ -104,6 +104,31 @@ app that only happens when something takes a session with `--force`; the app's
 terminal then stops updating while the child keeps running in the host (a later
 launch can adopt it). Reattaching automatically is a follow-up.
 
+**Native windows (beta).** The bundled `canopy-term-app` is one more client of
+the same host, and a session has one client at a time, so the app and a window
+trade it:
+
+- *Hand over* (tab menu, "Open in Native Window", only for a terminal whose child
+  is in the host). The app releases first (it drops its connection and removes
+  its session without reporting an exit), then starts the window with
+  `--attach N --force`; if starting fails it attaches again at once. While a
+  window holds the session the app has no connection to it, sends it no input and
+  refuses a stale kill of it.
+- *Take back* attaches again with a plain (replacing) attach from offset 0, which
+  the host answers by disconnecting the window; the new session has the old pty
+  id and generation. A closed window leaves the session detached, running for
+  its linger time, and it can be taken back from the tab. A session the host no
+  longer lists under the same pid (it exited, or the host restarted and numbers
+  sessions from 1 again) is "ended", never taken back.
+- A window the app opens fresh starts its session under the spawn key
+  `canopy-native:<instance>:<nonce>`. The app, which alone holds the sealing key,
+  records `NativeMeta` for it under a seal bound to the host's id for the session
+  (a different domain tag from adoption's, so neither seal verifies as the other),
+  and lists it as a native window's, verified or not. No seal material is given to
+  the window: the key and nonce are not secrets, and its argv and environment
+  (a whitelist) carry nothing else. Such a session is never adopted into a tab,
+  never counted as left behind, and does not vote for an instance.
+
 **Versioning and containers.** `hello` carries the client's protocol version and
 the host replies with its own and the oldest client it accepts; `attach` repeats
 the client version. A client too old is refused with a clear message, and a

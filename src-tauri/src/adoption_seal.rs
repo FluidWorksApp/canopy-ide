@@ -20,6 +20,11 @@
 
 const SERVICE: &str = "Canopy PTY host";
 const DOMAIN: &str = "canopy-adopt-v1";
+/// A different domain for a native window's session (`NativeMeta`): the two
+/// kinds of seal are over differently shaped, differently tagged messages, so
+/// one can never be presented as the other.
+#[cfg_attr(not(unix), allow(dead_code))]
+const NATIVE_DOMAIN: &str = "canopy-native-v1";
 
 /// HMAC-SHA256 (RFC 2104), on `sha2` so no new dependency is pulled in.
 pub fn hmac_sha256(key: &[u8], message: &[u8]) -> [u8; 32] {
@@ -76,6 +81,33 @@ pub fn verify(key: &[u8], meta: &crate::pty_hosted::HostedMeta) -> bool {
     meta.seal
         .as_deref()
         .is_some_and(|seal| crate::context::constant_time_eq(seal, &self::seal(key, meta)))
+}
+
+/// The bytes a native-window seal covers: every field the listing reads, bound
+/// to the host's id for the session like `canonical`.
+#[cfg_attr(not(unix), allow(dead_code))]
+fn canonical_native(meta: &crate::pty_hosted::NativeMeta) -> Vec<u8> {
+    serde_json::to_vec(&serde_json::json!([
+        NATIVE_DOMAIN,
+        meta.native,
+        meta.instance,
+        meta.nonce,
+        meta.host,
+        meta.cwd,
+    ]))
+    .unwrap_or_default()
+}
+
+#[cfg_attr(not(unix), allow(dead_code))]
+pub fn seal_native(key: &[u8], meta: &crate::pty_hosted::NativeMeta) -> String {
+    hex::encode(hmac_sha256(key, &canonical_native(meta)))
+}
+
+#[cfg_attr(not(unix), allow(dead_code))]
+pub fn verify_native(key: &[u8], meta: &crate::pty_hosted::NativeMeta) -> bool {
+    meta.seal
+        .as_deref()
+        .is_some_and(|seal| crate::context::constant_time_eq(seal, &seal_native(key, meta)))
 }
 
 /// The sealing key, created on first use, never cached as absent. The secret
@@ -261,5 +293,63 @@ mod tests {
         let mut unsealed = meta();
         unsealed.seal = None;
         assert!(!verify(&key, &unsealed));
+    }
+
+    fn native() -> crate::pty_hosted::NativeMeta {
+        crate::pty_hosted::NativeMeta {
+            native: 1,
+            instance: "inst-a".into(),
+            nonce: "n0".into(),
+            host: Some(5),
+            cwd: "/w".into(),
+            seal: None,
+        }
+    }
+
+    #[test]
+    fn a_native_seal_verifies_only_with_its_key_and_its_fields() {
+        let key = [1u8; 32];
+        let mut sealed = native();
+        sealed.seal = Some(seal_native(&key, &sealed));
+        assert!(verify_native(&key, &sealed));
+        assert!(!verify_native(&[2u8; 32], &sealed));
+        let tamper: [fn(&mut crate::pty_hosted::NativeMeta); 5] = [
+            |m| m.instance = "inst-b".into(),
+            |m| m.nonce = "n1".into(),
+            |m| m.host = Some(6),
+            |m| m.host = None,
+            |m| m.cwd = "/elsewhere".into(),
+        ];
+        for change in tamper {
+            let mut forged = sealed.clone();
+            change(&mut forged);
+            assert!(!verify_native(&key, &forged), "{forged:?}");
+        }
+        let mut unsealed = native();
+        unsealed.seal = None;
+        assert!(!verify_native(&key, &unsealed));
+    }
+
+    /// The two kinds of seal share a key and an HMAC, so the domain tag and the
+    /// shape of the message are all that keep one from standing in for the
+    /// other. Each seal fails the other kind's check, field for field.
+    #[test]
+    fn a_native_seal_is_never_an_adoption_seal_and_the_reverse() {
+        let key = [3u8; 32];
+        let mut terminal = meta();
+        terminal.seal = Some(seal(&key, &terminal));
+        let mut window = native();
+        window.seal = Some(seal_native(&key, &window));
+        // A native seal copied onto terminal metadata (and the terminal seal
+        // onto a native window's) verifies for nothing.
+        let mut crossed = meta();
+        crossed.seal = window.seal.clone();
+        assert!(!verify(&key, &crossed));
+        let mut crossed = native();
+        crossed.seal = terminal.seal.clone();
+        assert!(!verify_native(&key, &crossed));
+        // Even the same bytes under both domains differ.
+        assert_ne!(window.seal, terminal.seal);
+        assert_ne!(canonical_native(&window), canonical(&terminal));
     }
 }

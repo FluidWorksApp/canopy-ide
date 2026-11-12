@@ -194,13 +194,13 @@ mod install;
 
 #[cfg(unix)]
 pub use adoption::{
-    adopt, adoptable, identity_floor, note_identity, reused_instance, stop_left_running,
-    stop_preview, Adoptable, Adopted,
+    adopt, adopt_with, adoptable, identity_floor, native_key, native_windows, note_identity,
+    reused_instance, seal_new_window, stop_left_running, stop_preview, Adoptable, Adopted,
 };
 #[cfg(unix)]
 pub use sealed::{forget_sealed, remember_sealed, reseal_lineage};
 #[cfg(unix)]
-pub use unix::{client, host_dir, host_share, spawn, Client};
+pub use unix::{client, host_dir, host_share, probe_client, spawn, Client};
 
 #[cfg(not(unix))]
 pub struct Client;
@@ -419,6 +419,16 @@ mod unix {
         Some((client.socket().to_path_buf(), HOST_EXE.get().cloned()))
     }
 
+    /// A client for this app's host that never starts one: for asking whether a
+    /// terminal is still there, which must not bring a host back to answer. None
+    /// when there is no socket directory.
+    pub fn probe_client() -> Option<Client> {
+        if !super::enabled() {
+            return None;
+        }
+        Some(HostClient::new(socket_path()?))
+    }
+
     /// How long after a failed start the next terminal waits before trying again.
     pub(super) const RETRY_AFTER: Duration = Duration::from_secs(30);
 
@@ -552,6 +562,45 @@ pub struct HostedMeta {
     /// until the app has spawned the session and learned the id.
     pub host: Option<u32>,
     pub seal: Option<String>,
+}
+
+/// What the app records about a session a native window started (the bundled
+/// `canopy-term-app`, launched from Canopy), so the listing can say it is "in a
+/// native window" and whose it is. The window starts the session with a spawn
+/// key that names this launch (`native_key`); the app, which alone holds the
+/// sealing key, then writes this under a seal bound to the host's id for the
+/// session (`adoption_seal::seal_native`). No seal material ever goes to the
+/// window: it carries no secret, and a session whose seal is missing or wrong
+/// is still listed, only as unverified.
+///
+/// It does not parse as `HostedMeta` (`v` is absent, so 0), so no launch, old
+/// or new, can adopt it as a terminal tab by mistake.
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+#[serde(default)]
+pub struct NativeMeta {
+    /// 1 for a native window's session. 0 is any other metadata.
+    pub native: u32,
+    pub instance: String,
+    /// The per-window nonce the key carries, so a seal is for one window.
+    pub nonce: String,
+    pub host: Option<u32>,
+    pub cwd: String,
+    pub seal: Option<String>,
+}
+
+/// A session of this launch's native windows, as the listing shows it.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct NativeWindowSession {
+    /// The host's id for the session (what `canopy-term-app --attach` takes).
+    pub host_id: u32,
+    /// A window holds it right now; false means the window was closed and the
+    /// session is still running in the host for its linger time.
+    pub in_window: bool,
+    /// The seal checks out for this session: the app recorded it for this
+    /// launch's window, not some other process claiming the key.
+    pub verified: bool,
+    /// Only from a verified record.
+    pub cwd: Option<String>,
 }
 
 /// A spawn-tree position: depth, and the parent's pty id.
@@ -737,6 +786,27 @@ mod adoption {
         ))
     }
 
+    /// Prefix of the key a native window (the bundled `canopy-term-app`) starts
+    /// its session with when Canopy launches it: instance and a per-window
+    /// nonce. Not `KEY_PREFIX`, so adoption never reads such a session as one of
+    /// its own terminals; and not a secret, like every spawn key.
+    const NATIVE_KEY_PREFIX: &str = "canopy-native:";
+
+    /// The spawn key for window `nonce` of `instance`. None when either part is
+    /// empty or would not survive the `:` separated form, or the command line.
+    pub fn native_key(instance: &str, nonce: &str) -> Option<String> {
+        let part =
+            |s: &str| !s.is_empty() && !s.contains(':') && s.chars().all(|c| c.is_ascii_graphic());
+        (part(instance) && part(nonce)).then(|| format!("{NATIVE_KEY_PREFIX}{instance}:{nonce}"))
+    }
+
+    /// (instance, nonce) a native window's spawn key names.
+    fn native_claim(key: &str) -> Option<(String, String)> {
+        let (instance, nonce) = key.strip_prefix(NATIVE_KEY_PREFIX)?.split_once(':')?;
+        (!instance.is_empty() && !nonce.is_empty() && !nonce.contains(':'))
+            .then(|| (instance.to_string(), nonce.to_string()))
+    }
+
     /// (instance, pty id) a spawn key names.
     fn key_claim(key: &str) -> Option<(String, u32)> {
         let rest = key.strip_prefix(KEY_PREFIX)?;
@@ -858,6 +928,104 @@ mod adoption {
             }
         }
         (adopt, left)
+    }
+
+    /// This launch's native windows' sessions among `sessions`, running or
+    /// not, held by a window or free. They are named by their spawn key, which
+    /// is fixed at spawn; the metadata only adds the seal, bound to the host's
+    /// id, that makes a session `verified`. None of them is ever adopted into a
+    /// tab (`classify` does not see them: their key is not `KEY_PREFIX`'s and
+    /// their metadata is not `HostedMeta`), and a session that merely claims
+    /// the key is listed as unverified, with nothing trusted from it.
+    pub(super) fn classify_native(
+        sessions: &[SessionInfo],
+        instance: &str,
+        key: Option<&[u8; 32]>,
+    ) -> Vec<NativeWindowSession> {
+        let mut out: Vec<NativeWindowSession> = sessions
+            .iter()
+            .filter(|s| s.exited.is_none())
+            .filter_map(|s| {
+                let (claimed, nonce) = s.key.as_deref().and_then(native_claim)?;
+                if claimed != instance {
+                    return None;
+                }
+                let sealed = s
+                    .meta
+                    .as_deref()
+                    .and_then(|m| serde_json::from_str::<NativeMeta>(m).ok())
+                    .filter(|m| {
+                        m.native == 1
+                            && m.instance == claimed
+                            && m.nonce == nonce
+                            && m.host == Some(s.id)
+                            && key.is_some_and(|key| crate::adoption_seal::verify_native(key, m))
+                    });
+                Some(NativeWindowSession {
+                    host_id: s.id,
+                    in_window: s.attached == Some(true),
+                    verified: sealed.is_some(),
+                    cwd: sealed.map(|m| m.cwd),
+                })
+            })
+            .collect();
+        out.sort_by_key(|w| w.host_id);
+        out
+    }
+
+    /// The native windows' sessions in the host right now.
+    pub fn native_windows(client: &Client, instance: &str) -> Vec<NativeWindowSession> {
+        match client.list_within(LAUNCH_WAIT) {
+            Ok(sessions) => {
+                classify_native(&sessions, instance, crate::adoption_seal::key().as_ref())
+            }
+            Err(_) => Vec::new(),
+        }
+    }
+
+    /// Records, under `key`'s seal, the session that native window `nonce` of
+    /// `instance` starts. The window starts it a moment after it launches, so the
+    /// host is asked up to `tries` times, `pause` apart, until a session with the
+    /// window's key is there. The seal binds the host's id for that session.
+    /// Returns whether it was recorded.
+    pub fn seal_new_window(
+        client: &Client,
+        (instance, nonce, cwd): (&str, &str, &str),
+        key: &[u8; 32],
+        tries: u32,
+        pause: Duration,
+    ) -> bool {
+        let Some(spawn_key) = native_key(instance, nonce) else {
+            return false;
+        };
+        for attempt in 0..tries {
+            if attempt > 0 {
+                std::thread::sleep(pause);
+            }
+            let Ok(sessions) = client.list_within(LAUNCH_WAIT) else {
+                continue;
+            };
+            let Some(found) = sessions
+                .iter()
+                .find(|s| s.key.as_deref() == Some(spawn_key.as_str()))
+            else {
+                continue;
+            };
+            let mut meta = NativeMeta {
+                native: 1,
+                instance: instance.to_string(),
+                nonce: nonce.to_string(),
+                host: Some(found.id),
+                cwd: cwd.to_string(),
+                seal: None,
+            };
+            meta.seal = Some(crate::adoption_seal::seal_native(key, &meta));
+            return match serde_json::to_string(&meta) {
+                Ok(json) => client.set_meta(found.id, Some(json)).is_ok(),
+                Err(_) => false,
+            };
+        }
+        false
     }
 
     #[derive(Debug, PartialEq)]
@@ -1016,17 +1184,31 @@ mod adoption {
     /// can move between the two calls). Live bytes then continue on the same
     /// stream. On any failure the connection drops, which only detaches.
     pub fn adopt(client: &Client, found: &Adoptable) -> Result<Adopted, String> {
+        adopt_with(client, found, false)
+    }
+
+    /// `adopt`, and with `replace` it takes the session from whoever holds it
+    /// (a plain attach, which the host answers by disconnecting the other
+    /// client). That is for a session the caller gave away on purpose and now
+    /// takes back, never for launch-time adoption, which must not disconnect a
+    /// client that attached after the listing.
+    pub fn adopt_with(
+        client: &Client,
+        found: &Adoptable,
+        replace: bool,
+    ) -> Result<Adopted, String> {
         let id = found.info.id;
         let pid = found.info.pid.ok_or("session has no pid")?;
         // `list` said nobody was attached, but a CLI client may attach before we
         // do; an exclusive attach (protocol 3) checks and takes it in one step
         // instead of silently disconnecting that client. An older host has no
         // such flag, and the list check is all there is.
-        let exclusive = client
-            .hello()
-            .ok()
-            .and_then(|h| h.version)
-            .is_some_and(|v| v >= EXCLUSIVE_ATTACH_VERSION);
+        let exclusive = !replace
+            && client
+                .hello()
+                .ok()
+                .and_then(|h| h.version)
+                .is_some_and(|v| v >= EXCLUSIVE_ATTACH_VERSION);
         let (master, attached) = if exclusive {
             HostMaster::attach_exclusive(client.clone(), id, 0)
         } else {
@@ -2082,6 +2264,306 @@ pub(crate) mod tests {
         forget_sealed(61);
         assert!(super::sealed::resealed(61, 2, Some(17), &key).is_none());
         let _ = child.kill();
+    }
+}
+
+/// A native window's sessions: named by a spawn key, recorded under the app's
+/// seal, listed and never adopted.
+#[cfg(all(test, unix))]
+mod native_window_tests {
+    use super::adoption::{classify, classify_native, native_key};
+    use super::tests::{command, meta_for, InProcessHost};
+    use super::*;
+    use canopy_pty_host::protocol::{SessionInfo, SpawnSpec};
+    use std::time::Duration;
+
+    const INSTANCE: &str = "inst-a";
+
+    fn key() -> [u8; 32] {
+        crate::adoption_seal::key().unwrap()
+    }
+
+    fn sealed(host: u32, instance: &str, nonce: &str, cwd: &str) -> String {
+        let mut meta = NativeMeta {
+            native: 1,
+            instance: instance.into(),
+            nonce: nonce.into(),
+            host: Some(host),
+            cwd: cwd.into(),
+            seal: None,
+        };
+        meta.seal = Some(crate::adoption_seal::seal_native(&key(), &meta));
+        serde_json::to_string(&meta).unwrap()
+    }
+
+    fn window(
+        id: u32,
+        spawn_key: Option<String>,
+        meta: Option<String>,
+        attached: Option<bool>,
+    ) -> SessionInfo {
+        SessionInfo {
+            id,
+            pid: Some(1000 + id),
+            key: spawn_key,
+            meta,
+            attached,
+            ..Default::default()
+        }
+    }
+
+    fn named(nonce: &str) -> Option<String> {
+        native_key(INSTANCE, nonce)
+    }
+
+    /// A record for `host` that is right in every field but carries a seal the
+    /// app did not make.
+    fn forged(host: u32, nonce: &str) -> String {
+        let mut meta: NativeMeta =
+            serde_json::from_str(&sealed(host, INSTANCE, nonce, "/x")).unwrap();
+        meta.seal = Some("00".repeat(32));
+        serde_json::to_string(&meta).unwrap()
+    }
+
+    #[test]
+    fn a_native_key_names_the_instance_and_the_window_and_is_never_a_terminal_key() {
+        assert_eq!(named("n0").as_deref(), Some("canopy-native:inst-a:n0"));
+        for bad in [
+            ("", "n"),
+            ("i", ""),
+            ("a:b", "n"),
+            ("i", "n:1"),
+            ("i j", "n"),
+            ("i", "n\n"),
+            ("é", "n"),
+        ] {
+            assert_eq!(native_key(bad.0, bad.1), None, "{bad:?}");
+        }
+        // The prefix adoption reads as its own is a different one.
+        assert!(!named("n0").unwrap().starts_with("canopy-pty:"));
+    }
+
+    #[test]
+    fn a_sealed_window_is_listed_as_verified_and_held_or_free() {
+        let sessions = vec![
+            window(
+                5,
+                named("n5"),
+                Some(sealed(5, INSTANCE, "n5", "/work/a")),
+                Some(true),
+            ),
+            window(
+                6,
+                named("n6"),
+                Some(sealed(6, INSTANCE, "n6", "/work/b")),
+                Some(false),
+            ),
+        ];
+        let listed = classify_native(&sessions, INSTANCE, Some(&key()));
+        assert_eq!(
+            listed,
+            vec![
+                NativeWindowSession {
+                    host_id: 5,
+                    in_window: true,
+                    verified: true,
+                    cwd: Some("/work/a".into())
+                },
+                NativeWindowSession {
+                    host_id: 6,
+                    in_window: false,
+                    verified: true,
+                    cwd: Some("/work/b".into())
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn a_session_that_only_claims_the_key_is_listed_with_nothing_trusted() {
+        let key = key();
+        let good = sealed(5, INSTANCE, "n5", "/work");
+        let sessions = vec![
+            // Key and nothing else (the app has not recorded it yet).
+            window(1, named("n1"), None, Some(true)),
+            // Unreadable metadata.
+            window(2, named("n2"), Some("not json".into()), Some(true)),
+            // Another session's record copied onto this one: bound to host 5.
+            window(3, named("n5"), Some(good.clone()), Some(true)),
+            // A record for another window (nonce) or another launch.
+            window(
+                4,
+                named("n4"),
+                Some(sealed(4, INSTANCE, "other", "/x")),
+                Some(true),
+            ),
+            window(
+                7,
+                named("n7"),
+                Some(sealed(7, "inst-b", "n7", "/x")),
+                Some(true),
+            ),
+            // Valid for its session, but a forged seal.
+            window(8, named("n8"), Some(forged(8, "n8")), Some(true)),
+        ];
+        let listed = classify_native(&sessions, INSTANCE, Some(&key));
+        assert_eq!(listed.len(), 6);
+        for w in &listed {
+            assert!(!w.verified && w.cwd.is_none(), "{w:?}");
+            assert!(w.in_window);
+        }
+        // With no sealing key at all nothing can be verified, even a good seal.
+        let one = vec![window(5, named("n5"), Some(good), Some(false))];
+        assert!(!classify_native(&one, INSTANCE, None)[0].verified);
+        assert!(classify_native(&one, INSTANCE, Some(&key))[0].verified);
+    }
+
+    #[test]
+    fn other_launches_other_keys_and_ended_sessions_are_not_listed() {
+        let mut exited = window(3, named("n3"), None, Some(false));
+        exited.exited = Some(0);
+        let sessions = vec![
+            window(1, native_key("inst-b", "n1"), None, Some(true)),
+            window(
+                2,
+                Some("canopy-pty:inst-a:2:1:x".into()),
+                Some(meta_for(2, 1, "desktop", INSTANCE)),
+                Some(false),
+            ),
+            window(4, Some("canopy-native:inst-a".into()), None, Some(false)),
+            window(5, None, None, Some(false)),
+            exited,
+        ];
+        assert!(classify_native(&sessions, INSTANCE, Some(&key())).is_empty());
+    }
+
+    /// The reverse of the plan's "ignoring or mistaking": adoption neither takes
+    /// a window's session as a terminal tab, nor counts it as a left-behind one,
+    /// nor lets it vote for an instance or be a Stop All target.
+    #[test]
+    fn adoption_never_takes_or_counts_a_native_window_s_session() {
+        let key = key();
+        let free = window(
+            6,
+            named("n6"),
+            Some(sealed(6, INSTANCE, "n6", "/w")),
+            Some(false),
+        );
+        let bare = window(7, named("n7"), None, Some(false));
+        // Even metadata that says everything a terminal's does, in a window's key.
+        let lookalike = window(
+            8,
+            named("n8"),
+            Some(meta_for(8, 8, "desktop", INSTANCE)),
+            Some(false),
+        );
+        let sessions = vec![free, bare, lookalike];
+        let (found, left) = classify(sessions.clone(), INSTANCE, Some(&key));
+        assert!(found.is_empty(), "adopted a window's session");
+        assert!(
+            left.is_empty(),
+            "reported a window's session as left behind"
+        );
+        assert_eq!(adoption_choose_for(&sessions, &key), None);
+        assert!(stop_targets_for(&sessions).is_empty());
+        // A window's record does not parse as a terminal's.
+        let record: HostedMeta = serde_json::from_str(&sealed(6, INSTANCE, "n6", "/w")).unwrap();
+        assert_eq!(record.v, 0);
+        assert!(super::adoption::parse(&sessions[0]).is_none());
+    }
+
+    fn adoption_choose_for(sessions: &[SessionInfo], key: &[u8; 32]) -> Option<String> {
+        super::adoption::choose_token(sessions, Some(key))
+    }
+
+    fn stop_targets_for(sessions: &[SessionInfo]) -> Vec<u32> {
+        super::adoption::stop_targets(sessions, INSTANCE, &[])
+    }
+
+    fn start_window_session(host: &InProcessHost, nonce: &str) -> u32 {
+        host.client
+            .spawn(SpawnSpec {
+                argv: vec!["sh".into(), "-c".into(), "sleep 300".into()],
+                env: vec![("PATH".into(), "/usr/bin:/bin".into())],
+                cols: 80,
+                rows: 24,
+                key: named(nonce),
+                ..Default::default()
+            })
+            .unwrap()
+            .0
+    }
+
+    #[test]
+    fn the_app_records_a_new_window_s_session_under_its_seal_once_it_exists() {
+        let host = InProcessHost::start("nwseal");
+        // A decoy with another window's key, and a plain terminal.
+        let other = start_window_session(&host, "other");
+        let (child, master) = spawn(
+            &host.client,
+            &command("sleep 300"),
+            80,
+            24,
+            Some(meta_for(3, 3, "desktop", INSTANCE)),
+        )
+        .unwrap();
+        // The window has not started its session yet: nothing to record, and
+        // nothing else is touched.
+        assert!(!seal_new_window_for(&host, "n1", 2));
+        // It starts a moment later; the app is already asking.
+        let id = std::thread::scope(|scope| {
+            let recorder = scope.spawn(|| seal_new_window_for(&host, "n1", 100));
+            std::thread::sleep(Duration::from_millis(150));
+            let id = start_window_session(&host, "n1");
+            assert!(recorder.join().unwrap(), "never recorded");
+            id
+        });
+        let listed = host.client.list().unwrap();
+        let record = |sid: u32| listed.iter().find(|s| s.id == sid).unwrap().meta.clone();
+        assert_eq!(record(other), None, "another window's session was touched");
+        let terminal = listed
+            .iter()
+            .find(|s| {
+                s.key
+                    .as_deref()
+                    .is_some_and(|k| k.starts_with("canopy-pty:"))
+            })
+            .unwrap();
+        assert_eq!(
+            terminal.meta.as_deref(),
+            Some(meta_for(3, 3, "desktop", INSTANCE).as_str()),
+            "a terminal's record was touched"
+        );
+        assert_eq!(
+            classify_native(&listed, INSTANCE, Some(&key()))
+                .into_iter()
+                .filter(|w| w.verified)
+                .map(|w| (w.host_id, w.cwd))
+                .collect::<Vec<_>>(),
+            vec![(id, Some("/work".to_string()))]
+        );
+        // A window of another launch's key is never recorded for this one.
+        assert!(!super::adoption::seal_new_window(
+            &host.client,
+            ("inst-b", "n1", "/work"),
+            &key(),
+            1,
+            Duration::ZERO
+        ));
+        for s in host.client.list().unwrap() {
+            let _ = host.client.kill(s.id);
+        }
+        drop((child, master));
+    }
+
+    fn seal_new_window_for(host: &InProcessHost, nonce: &str, tries: u32) -> bool {
+        super::adoption::seal_new_window(
+            &host.client,
+            (INSTANCE, nonce, "/work"),
+            &key(),
+            tries,
+            Duration::from_millis(50),
+        )
     }
 }
 
