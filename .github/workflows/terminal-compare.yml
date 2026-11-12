@@ -1,0 +1,96 @@
+name: Terminal compare
+
+# Report-only measurement harness (bench/terminal-compare): xterm.js against
+# canopy-term-core. Nothing here gates a merge or ships in the app.
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - "bench/terminal-compare/**"
+      - ".github/workflows/terminal-compare.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  compare:
+    name: Terminal compare (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        # ubuntu-latest now resolves to Ubuntu 26.04, which Playwright 1.56.1
+        # cannot install Chromium on, so Linux is pinned to 24.04.
+        os: [ubuntu-24.04, macos-15]
+    defaults:
+      run:
+        shell: bash
+        working-directory: bench/terminal-compare
+    env:
+      RESULTS: ${{ github.workspace }}/bench-results
+      STREAMS: ${{ github.workspace }}/bench-results/streams
+    steps:
+      - uses: actions/checkout@v4.2.2
+
+      - uses: actions/setup-node@v4.4.0
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: bench/terminal-compare/package-lock.json
+
+      - uses: dtolnay/rust-toolchain@1.92.0
+
+      - uses: swatinem/rust-cache@v2.8.0
+        with:
+          workspaces: bench/terminal-compare/engine
+
+      - name: Build the engine bench (release)
+        run: cargo build --release --locked --manifest-path engine/Cargo.toml
+
+      - name: Install npm dependencies (no scripts)
+        run: npm ci --ignore-scripts
+
+      - name: Install Chromium for Playwright
+        run: |
+          if [ "$RUNNER_OS" = "Linux" ]; then
+            npx playwright install --with-deps chromium
+          else
+            npx playwright install chromium
+          fi
+
+      - name: Write the shared byte streams
+        run: |
+          mkdir -p "$RESULTS"
+          engine/target/release/terminal-compare-engine dump "$STREAMS"
+
+      - name: Ours (canopy-term-core Screen::advance)
+        run: |
+          engine/target/release/terminal-compare-engine throughput "$STREAMS" "$RESULTS/ours.json"
+          engine/target/release/terminal-compare-engine mem "$RESULTS/ours-mem.json"
+
+      - name: xterm.js headless (Node)
+        run: |
+          node scripts/headless.mjs throughput "$STREAMS" "$RESULTS/headless.json"
+          node scripts/headless.mjs mem "$RESULTS/headless-mem.json"
+
+      - name: xterm.js in headless Chromium
+        continue-on-error: true
+        run: |
+          node scripts/chromium.mjs throughput "$STREAMS" "$RESULTS/chromium.json"
+          node scripts/chromium.mjs mem "$RESULTS/chromium-mem.json"
+
+      - name: Report
+        if: always()
+        run: |
+          node scripts/report.mjs "$RESULTS" "${{ matrix.os }}" | tee "$RESULTS/report.md"
+          cat "$RESULTS/report.md" >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@v4.6.2
+        if: always()
+        with:
+          name: terminal-compare-${{ matrix.os }}
+          path: |
+            bench-results/*.json
+            bench-results/report.md
+          retention-days: 14
