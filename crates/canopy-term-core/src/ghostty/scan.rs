@@ -126,6 +126,19 @@ impl Scanner {
                     return;
                 }
             }
+            // A CSI with no `<=>?` prefix reports nothing, so a run of
+            // parameter bytes followed by its final byte can be skipped whole.
+            // (A run that ends the chunk or is followed by anything else goes
+            // through the state machine, which keeps split input identical.)
+            if self.st == St::Csi(None) {
+                let mut j = i;
+                while j < bytes.len() && (bytes[j].is_ascii_digit() || bytes[j] == b';') {
+                    j += 1;
+                }
+                if j > i && j < bytes.len() && (0x40..=0x7e).contains(&bytes[j]) {
+                    i = j;
+                }
+            }
             self.byte(i, bytes[i], out);
             i += 1;
         }
