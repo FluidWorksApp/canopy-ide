@@ -84,10 +84,14 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - platform: macos-latest
+          # macos-15, not macos-latest: macos-latest is now macOS 26, and Zig
+          # 0.15.2 cannot link against its SDK (libghostty-vt-sys fails with
+          # undefined libc symbols: _abort, _bzero, _clock_gettime; seen in
+          # dry run 43159356455). macos-15 is what ci.yml's term-app job uses.
+          - platform: macos-15
             target: aarch64-apple-darwin
             arch: arm64
-          - platform: macos-latest
+          - platform: macos-15
             target: x86_64-apple-darwin
             arch: x86_64
           - platform: ubuntu-22.04
