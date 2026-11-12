@@ -16,7 +16,7 @@ function deps(over: Partial<DraftDeps> = {}): DraftDeps {
     diff: async (_r, path) => `diff of ${path}`,
     readText: async (path) => `contents of ${path}`,
     context: async () => ({ branch: "feat/x", base: "main", commits: ["c1"], stat: "2 files", template: null }),
-    ask: vi.fn(async (req) => ({ ok: true, text: "", value: req.validate!(good) as never, costUsd: null, inputTokens: null, outputTokens: null, durationMs: 1, model: null })),
+    ask: vi.fn(async (req) => ({ ok: true as const, text: "", value: req.validate!(good) as never, costUsd: null, inputTokens: null, outputTokens: null, durationMs: 1, model: null })),
     ...over,
   };
 }
