@@ -212,6 +212,26 @@ pub struct Filter {
     osc_dropping: bool,
 }
 
+/// Offset of the first ESC in `s`, or `s.len()`. Eight bytes at a time.
+#[inline]
+fn find_esc(s: &[u8]) -> usize {
+    const LO: u64 = 0x0101_0101_0101_0101;
+    const HI: u64 = 0x8080_8080_8080_8080;
+    let mut chunks = s.chunks_exact(8);
+    let mut base = 0;
+    for c in &mut chunks {
+        let w = u64::from_le_bytes([c[0], c[1], c[2], c[3], c[4], c[5], c[6], c[7]]) ^ (LO * 0x1B);
+        if w.wrapping_sub(LO) & !w & HI != 0 {
+            break;
+        }
+        base += 8;
+    }
+    base + s[base..]
+        .iter()
+        .position(|&b| b == 0x1B)
+        .unwrap_or(s.len() - base)
+}
+
 fn is_exec(b: u8) -> bool {
     matches!(b, 0x00..=0x17 | 0x19 | 0x1C..=0x1F)
 }
@@ -332,7 +352,20 @@ impl Filter {
     /// Filter `input` into `out`, recording actions at offsets into `out`.
     pub fn feed(&mut self, input: &[u8], out: &mut Vec<u8>, actions: &mut Vec<(usize, Action)>) {
         out.reserve(input.len());
-        for &b in input {
+        let mut i = 0;
+        while i < input.len() {
+            // Ground passes every byte through except ESC, which starts a
+            // sequence: copy the whole run up to the next ESC at once.
+            if self.st == St::Ground {
+                let n = find_esc(&input[i..]);
+                out.extend_from_slice(&input[i..i + n]);
+                i += n;
+                if i >= input.len() {
+                    break;
+                }
+            }
+            let b = input[i];
+            i += 1;
             let mut keep = true;
             match self.st {
                 St::Ground => {

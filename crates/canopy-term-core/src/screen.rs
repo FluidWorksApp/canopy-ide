@@ -234,33 +234,27 @@ fn convert_color(c: EngineColor) -> Color {
     }
 }
 
+#[inline]
 fn convert_cell(cell: &EngineCell, clusters: &mut Vec<String>) -> Cell {
-    let f = cell.flags;
-    let mut attrs = 0u16;
-    if f.contains(Flags::BOLD) {
-        attrs |= Attrs::BOLD;
-    }
-    if f.contains(Flags::ITALIC) {
-        attrs |= Attrs::ITALIC;
-    }
-    if f.intersects(Flags::ALL_UNDERLINES) {
-        attrs |= Attrs::UNDERLINE;
-    }
-    if f.contains(Flags::INVERSE) {
-        attrs |= Attrs::INVERSE;
-    }
-    if f.contains(Flags::STRIKEOUT) {
-        attrs |= Attrs::STRIKE;
-    }
-    if f.contains(Flags::DIM) {
-        attrs |= Attrs::DIM;
-    }
-    if f.contains(Flags::HIDDEN) {
-        attrs |= Attrs::HIDDEN;
-    }
+    // Attribute bits without a branch per flag. Engine bits: INVERSE 0, BOLD 1,
+    // ITALIC 2, UNDERLINE 3, DIM 7, HIDDEN 8, STRIKEOUT 9, and the other
+    // underline styles at 11..=14. Ours: BOLD 0, ITALIC 1, UNDERLINE 2,
+    // INVERSE 3, STRIKE 4, DIM 5, HIDDEN 6.
+    const _: () = {
+        assert!(Attrs::BOLD == 1 && Attrs::ITALIC == 2 && Attrs::UNDERLINE == 4);
+        assert!(Attrs::INVERSE == 8 && Attrs::STRIKE == 16);
+        assert!(Attrs::DIM == 32 && Attrs::HIDDEN == 64);
+    };
+    const ALL_UL: u16 = Flags::ALL_UNDERLINES.bits();
+    let f = cell.flags.bits();
+    let attrs = ((f >> 1) & 0b11)
+        | ((((f & ALL_UL) != 0) as u16) << 2)
+        | ((f & 1) << 3)
+        | (((f >> 9) & 1) << 4)
+        | ((f >> 2) & 0b110_0000);
     let fg = convert_color(cell.fg);
     let bg = convert_color(cell.bg);
-    if f.contains(Flags::WIDE_CHAR_SPACER) {
+    if f & Flags::WIDE_CHAR_SPACER.bits() != 0 {
         return Cell {
             ch: '\0',
             cluster: 0,
@@ -271,19 +265,21 @@ fn convert_cell(cell: &EngineCell, clusters: &mut Vec<String>) -> Cell {
     }
     // A tab leaves '\t' in the cell where it started; the grid position is what
     // matters, so show a blank (and never print a TAB in a snapshot).
-    let ch = if f.contains(Flags::LEADING_WIDE_CHAR_SPACER) || cell.c == '\t' {
+    let ch = if f & Flags::LEADING_WIDE_CHAR_SPACER.bits() != 0 || cell.c == '\t' {
         ' '
     } else {
         cell.c
     };
     let mut cluster = 0u32;
-    if let Some(z) = cell.zerowidth() {
-        if !z.is_empty() {
-            let mut s = String::new();
-            s.push(ch);
-            s.extend(z.iter().take(MAX_CLUSTER_SCALARS - 1));
-            cluster = clusters.len() as u32;
-            clusters.push(s);
+    if cell.extra.is_some() {
+        if let Some(z) = cell.zerowidth() {
+            if !z.is_empty() {
+                let mut s = String::new();
+                s.push(ch);
+                s.extend(z.iter().take(MAX_CLUSTER_SCALARS - 1));
+                cluster = clusters.len() as u32;
+                clusters.push(s);
+            }
         }
     }
     Cell {
@@ -333,6 +329,12 @@ fn rows_equal(
     b_clusters: &[String],
 ) -> bool {
     for (x, y) in a_cells.iter().zip(b_cells) {
+        if x.cluster == 0 && y.cluster == 0 {
+            if x != y {
+                return false;
+            }
+            continue;
+        }
         if x.fg != y.fg || x.bg != y.bg || x.attrs != y.attrs || x.ch != y.ch {
             return false;
         }
@@ -475,7 +477,13 @@ impl Screen {
     fn feed_engine(&mut self, bytes: &[u8]) {
         for slice in bytes.chunks(TRIM_SLICE) {
             self.processor.advance(&mut self.term, slice);
-            self.trim_visible();
+            // A combining mark is a non-ASCII scalar, so a slice of pure ASCII
+            // cannot have added one (an ASCII byte also cancels any partial
+            // UTF-8 sequence rather than completing it), and marks already in
+            // the grid were trimmed after the slice that wrote them.
+            if !slice.is_ascii() {
+                self.trim_visible();
+            }
         }
     }
 
@@ -732,7 +740,14 @@ impl Screen {
             }
         };
         self.term.reset_damage();
-        let whole = force_full || size_changed || engine_full || self.full_rebuild;
+        // Only a forced redraw, a resize or the reference mode rebuilds the
+        // frame wholesale. An engine `Full` converts every row through the
+        // in-place path (same result, no new buffer, unchanged rows untouched).
+        let whole = force_full || size_changed || self.full_rebuild;
+        if engine_full && !whole {
+            self.dirty.clear();
+            self.dirty.extend(0..self.rows as usize);
+        }
 
         let grid = self.term.grid();
         let p = grid.cursor.point;
