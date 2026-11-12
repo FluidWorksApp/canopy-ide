@@ -23,9 +23,11 @@
 #         check the asset list), then Publish. Publishing is the moment installed
 #         copies start auto-updating.
 #
-# The version is duplicated across package.json, src-tauri/Cargo.toml and
-# src-tauri/tauri.conf.json (plus the lockfiles); phase 1 keeps them in sync and
-# asserts they agree before committing.
+# The version is duplicated across package.json, src-tauri/Cargo.toml,
+# src-tauri/tauri.conf.json and crates/canopy-term-app/Cargo.toml (plus the
+# lockfiles); phase 1 keeps them in sync and asserts they agree before
+# committing, and phase 2 asserts them again before tagging. canopy-term-app is
+# bundled in the app, and its `--version` must be the release it shipped in.
 # =============================================================================
 set -euo pipefail
 
@@ -45,15 +47,32 @@ if ! [[ "$V" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
   exit 1
 fi
 
-# All three files must read $V. Used as a gate in both phases.
+# The terminal app is its own workspace with its own lock, whose entry for the
+# crate itself carries the version too (`cargo build --locked` rejects a lock
+# that disagrees with the manifest).
+TERM_APP_MANIFEST="crates/canopy-term-app/Cargo.toml"
+TERM_APP_LOCK="crates/canopy-term-app/Cargo.lock"
+
+term_app_lock_version() {
+  perl -0ne 'if (/\[\[package\]\]\nname = "canopy-term-app"\nversion = "([^"]+)"/) { print $1 }' "$TERM_APP_LOCK"
+}
+
+# Every file must read $V. Used as a gate in both phases. Names what disagrees.
 file_versions_agree() {
-  for f in \
-    "$(node -p 'require("./package.json").version')" \
-    "$(node -p 'require("./src-tauri/tauri.conf.json").version')" \
-    "$(perl -ne 'if (/^version = "([^"]+)"/) { print $1; exit }' src-tauri/Cargo.toml)"; do
-    [ "$f" = "$V" ] || return 1
-  done
-  return 0
+  local ok=0 label got
+  while IFS='|' read -r label got; do
+    if [ "$got" != "$V" ]; then
+      echo "  $label is '$got', expected $V" >&2
+      ok=1
+    fi
+  done <<VERSIONS
+package.json|$(node -p 'require("./package.json").version')
+src-tauri/tauri.conf.json|$(node -p 'require("./src-tauri/tauri.conf.json").version')
+src-tauri/Cargo.toml|$(perl -ne 'if (/^version = "([^"]+)"/) { print $1; exit }' src-tauri/Cargo.toml)
+$TERM_APP_MANIFEST|$(perl -ne 'if (/^version = "([^"]+)"/) { print $1; exit }' "$TERM_APP_MANIFEST")
+$TERM_APP_LOCK|$(term_app_lock_version)
+VERSIONS
+  return $ok
 }
 
 tag_exists() {
@@ -142,6 +161,14 @@ npm version "$V" --no-git-tag-version >/dev/null
 perl -pi -e 'BEGIN{$done=0} $done ||= s/^version = "[^"]+"/version = "'"$V"'"/' \
   src-tauri/Cargo.toml
 
+# The terminal app: its manifest, and its own entry in its own lock. Edited
+# directly (no cargo, no network); the entry is found by name so a dependency
+# that happens to share the old version is never touched.
+perl -pi -e 'BEGIN{$done=0} $done ||= s/^version = "[^"]+"/version = "'"$V"'"/' \
+  "$TERM_APP_MANIFEST"
+perl -0pi -e 's/(\[\[package\]\]\nname = "canopy-term-app"\nversion = ")[^"]+(")/${1}'"$V"'${2}/' \
+  "$TERM_APP_LOCK"
+
 # tauri.conf.json, preserving the 2-space formatting.
 node -e '
   const fs = require("fs");
@@ -155,7 +182,7 @@ node -e '
 # the next build anyway, but syncing it here keeps the release commit complete.
 (cd src-tauri && (cargo update -w --offline >/dev/null 2>&1 || cargo update -w >/dev/null))
 
-# Belt and braces: assert all three files now agree before committing.
+# Belt and braces: assert every version file now agrees before committing.
 if ! file_versions_agree; then
   echo "version mismatch after bump — aborting before commit" >&2
   git checkout --quiet main
