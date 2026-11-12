@@ -761,7 +761,9 @@ mod tests {
             )
             .unwrap();
             let listed = second.client.list().unwrap();
-            assert_eq!(listed[0].id, first.client.list().unwrap()[0].id);
+            // Ids are the host's own numbering, so a restart can reuse one:
+            // make the record's id the decoy's.
+            pm.handed.lock().unwrap().get_mut(&7).unwrap().host_id = listed[0].id;
             assert_ne!(
                 listed[0].pid,
                 pm.handed
