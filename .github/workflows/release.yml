@@ -170,10 +170,16 @@ jobs:
           # v1.23.0, below the >= v1.24 the ort crate needs, so the ASR stack
           # can't run there. The Intel build pulls no ONNX deps and stages no
           # dylib; the ONNX steps below skip it.
-          - platform: macos-latest
+          #
+          # macos-15, not macos-latest: the terminal app is built here, and Zig
+          # 0.15.2 (which its engine needs) cannot link against the macOS 26 SDK
+          # that macos-latest now is (proven by dry run 43159356455; it builds on
+          # macos-15, dry run 43169430278). Both arches are still built on the
+          # arm64 runner. Move back once the pinned Zig supports the new SDK.
+          - platform: macos-15
             target: aarch64-apple-darwin
             args: "--target aarch64-apple-darwin --features desk-native --config src-tauri/tauri.release-macos.conf.json"
-          - platform: macos-latest
+          - platform: macos-15
             target: x86_64-apple-darwin
             # `--` hands --no-default-features to cargo; `tauri build` has no such
             # flag of its own and errors on it otherwise.
