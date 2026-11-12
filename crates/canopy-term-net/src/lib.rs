@@ -43,6 +43,13 @@ pub trait Connection: Send {
     /// forever. `None` removes the bound.
     fn set_read_deadline(&mut self, deadline: Option<Duration>) -> std::io::Result<()>;
 
+    /// Bound how long a write may stall on a peer that stopped reading. `None`
+    /// removes the bound. The default does nothing, for transports that cannot
+    /// bound a write.
+    fn set_write_deadline(&mut self, _deadline: Option<Duration>) -> std::io::Result<()> {
+        Ok(())
+    }
+
     /// Split into independent read and write halves. A session attach streams
     /// output on one thread while another reads input, so one `Read + Write`
     /// object is not enough.

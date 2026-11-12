@@ -499,10 +499,22 @@ impl Gate {
     /// Shut down every live connection whose entry is no longer in the
     /// allowlist, or whose tailnet is no longer this machine's. An unreadable
     /// status is not evidence of a change, so it closes nothing.
+    ///
+    /// Revocation is decided first and without the status: `view` can wait on
+    /// the CLI for its whole timeout, and a revoked machine must not stay
+    /// connected for that long. Only the tailnet-moved check needs the view.
     fn sweep(&self) {
         let any = match self.live.lock() {
             Ok(mut live) => {
                 live.retain(|l| l.alive.strong_count() > 0);
+                live.retain(|l| {
+                    if self.allow.contains(&l.entry) {
+                        true
+                    } else {
+                        let _ = l.stream.shutdown(Shutdown::Both);
+                        false
+                    }
+                });
                 !live.is_empty()
             }
             Err(_) => return,
@@ -516,9 +528,8 @@ impl Gate {
             return;
         };
         live.retain(|l| {
-            let revoked = !self.allow.contains(&l.entry);
             let moved = current.as_deref().is_some_and(|d| d != l.domain);
-            if revoked || moved {
+            if moved {
                 let _ = l.stream.shutdown(Shutdown::Both);
                 false
             } else {
@@ -1004,6 +1015,11 @@ impl Connection for TcpConn {
         // A zero timeout is an error for the OS call; the shortest real bound.
         let d = deadline.map(|d| d.max(Duration::from_millis(1)));
         self.stream.set_read_timeout(d)
+    }
+
+    fn set_write_deadline(&mut self, deadline: Option<Duration>) -> io::Result<()> {
+        let d = deadline.map(|d| d.max(Duration::from_millis(1)));
+        self.stream.set_write_timeout(d)
     }
 
     fn split(self: Box<Self>) -> (Box<dyn Read + Send>, Box<dyn Write + Send>) {
@@ -1667,6 +1683,54 @@ mod tests {
             .unwrap();
         assert!(matches!(a_peer.read(&mut buf), Ok(0) | Err(_)));
         assert!(is_open(&mut b_peer));
+    }
+
+    /// A CLI whose `status` does not answer until released, like a wedged
+    /// tailscaled. Everything else is the fake.
+    struct StatusBlocked {
+        inner: Arc<FakeRunner>,
+        release: Mutex<mpsc::Receiver<()>>,
+    }
+
+    impl crate::tailscale::CliRunner for StatusBlocked {
+        fn run(
+            &self,
+            cmd: &crate::tailscale::CliCommand,
+        ) -> Result<crate::tailscale::CliOutput, crate::tailscale::CliError> {
+            if matches!(cmd, crate::tailscale::CliCommand::StatusJson) {
+                let _ = self.release.lock().unwrap().recv();
+            }
+            self.inner.run(cmd)
+        }
+    }
+
+    #[test]
+    fn a_revoked_connection_is_closed_even_while_status_is_blocked() {
+        watchdog(60, || {
+            let (release, rx) = mpsc::channel();
+            let r = Arc::new(StatusBlocked {
+                inner: Arc::new(FakeRunner::new(&status_running(&["100.64.0.1"], &[]))),
+                release: Mutex::new(rx),
+            });
+            let t = TailnetTcp::client(r, allow(&[ENTRY]));
+            let (a, mut a_peer) = tcp_pair();
+            let _token = t.gate.register(ENTRY, "example.ts.net", &a).unwrap();
+            t.allowlist().remove(ENTRY);
+            let gate = t.gate.clone();
+            let sweeping = std::thread::spawn(move || gate.sweep());
+            // The status call is stuck, yet the revoked peer is cut.
+            let mut buf = [0u8; 1];
+            a_peer
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .unwrap();
+            assert!(
+                matches!(a_peer.read(&mut buf), Ok(0) | Err(_)),
+                "revocation waited for the status call"
+            );
+            // Let the blocked call go so the sweep thread ends.
+            let _ = release.send(());
+            sweeping.join().unwrap();
+        });
     }
 
     #[test]

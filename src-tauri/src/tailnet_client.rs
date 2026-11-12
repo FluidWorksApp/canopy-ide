@@ -31,7 +31,9 @@
 
 use crate::pty::{ProxyLink, ProxyParts, PtyManager};
 use canopy_term_net::allowlist::{valid_stable_id, Allowlist};
-use canopy_term_net::session::{AttachedStream, SessionClient, SessionError, SessionSummary};
+use canopy_term_net::session::{
+    AttachedStream, SessionClient, SessionError, SessionSummary, MAX_LISTED, MAX_TEXT_CHARS,
+};
 use canopy_term_net::tailnet_tcp::TailnetTcp;
 use canopy_term_net::tailscale::{CliRunner, Tailscale};
 use canopy_term_net::{Connection, PeerIdentity, Transport};
@@ -236,6 +238,29 @@ fn connect_client(dial: &dyn Dial, stable_id: &str) -> Result<SessionClient, Fai
 
 // ---------------------------------------------------------------------------
 // What the webview sees
+
+/// Text from the host, made safe to show: control characters removed and the
+/// length cut to what a well-behaved host sends. The host's own limits are no
+/// protection against a host that does not keep them.
+fn clean_text(s: &str) -> String {
+    s.chars()
+        .filter(|c| !c.is_control())
+        .take(MAX_TEXT_CHARS)
+        .collect()
+}
+
+/// A host's `list` reply as this side will use it: at most [`MAX_LISTED`]
+/// entries, each with clean text. Everything that reaches the UI, a tab title or
+/// the reconnect identity goes through here.
+fn sanitize_listed(mut listed: Vec<SessionSummary>) -> Vec<SessionSummary> {
+    listed.truncate(MAX_LISTED);
+    for s in &mut listed {
+        s.title = clean_text(&s.title);
+        s.command = clean_text(&s.command);
+        s.cwd = s.cwd.as_deref().map(clean_text);
+    }
+    listed
+}
 
 /// One row of `tailnet_remote_list` (`TailnetRemoteTerminal` in `ipc.ts`).
 #[derive(Serialize, Clone, Debug, PartialEq, Eq)]
@@ -553,7 +578,7 @@ impl Link {
             Err(_) => return Attempt::Retry,
         };
         let listed = match client.list() {
-            Ok(l) => l,
+            Ok(l) => sanitize_listed(l),
             Err(_) => return Attempt::Retry,
         };
         // The id alone is not an identity: after the other app restarted its
@@ -986,7 +1011,7 @@ impl Child for ProxyChild {
 /// The other machine's terminals, for the Settings row.
 pub fn list_remote(dial: &dyn Dial, stable_id: &str) -> Result<Vec<RemoteTerminal>, ClientError> {
     let mut client = connect_client(dial, stable_id).map_err(Failure::into_error)?;
-    let listed = client.list().map_err(|_| ClientError::Refused)?;
+    let listed = sanitize_listed(client.list().map_err(|_| ClientError::Refused)?);
     Ok(listed.into_iter().map(RemoteTerminal::from).collect())
 }
 
@@ -1026,7 +1051,7 @@ fn open_with<R: tauri::Runtime>(
 ) -> Result<(Opened, Arc<Link>), ClientError> {
     let remote = dial.resolve(stable_id)?;
     let mut client = connect_to(&*dial, &remote).map_err(Failure::into_error)?;
-    let listed = client.list().map_err(|_| ClientError::Refused)?;
+    let listed = sanitize_listed(client.list().map_err(|_| ClientError::Refused)?);
     let found = listed
         .into_iter()
         .find(|s| s.id == remote_id && s.running)
@@ -1273,6 +1298,7 @@ mod tests {
             self.outputs.lock().unwrap().push(tx);
             self.attaches.fetch_add(1, Ordering::SeqCst);
             Ok(AttachedSession {
+                token: 0,
                 cols: 100,
                 rows: 30,
                 snapshot: self.snapshot.lock().unwrap().clone(),
@@ -1293,7 +1319,7 @@ mod tests {
             self.resizes.lock().unwrap().push((id, cols, rows));
             Ok(())
         }
-        fn close(&self, _peer: &PeerIdentity, _id: u32) {}
+        fn close(&self, _peer: &PeerIdentity, _id: u32, _token: u64) {}
     }
 
     struct Server {
@@ -1543,6 +1569,68 @@ mod tests {
         assert_eq!(json["remoteId"], 1);
         assert_eq!(json["status"], "running");
         assert!(json["exitCode"].is_null());
+    }
+
+    #[test]
+    fn text_from_the_host_is_cut_and_stripped_before_it_reaches_the_ui() {
+        let long = "x".repeat(MAX_TEXT_CHARS * 4);
+        let cleaned = sanitize_listed(vec![SessionSummary {
+            id: 1,
+            title: format!("a\u{1b}]0;pwned\u{7}b\n{long}"),
+            cwd: Some(format!("/w\u{0}\r/{long}")),
+            command: format!("z\tsh{long}"),
+            running: true,
+            exit_code: None,
+            in_use_here: None,
+        }]);
+        let s = &cleaned[0];
+        for text in [
+            s.title.as_str(),
+            s.cwd.as_deref().unwrap(),
+            s.command.as_str(),
+        ] {
+            assert!(text.chars().count() <= MAX_TEXT_CHARS, "{}", text.len());
+            assert!(!text.chars().any(|c| c.is_control()), "{text:?}");
+        }
+        assert!(s.title.starts_with("a]0;pwnedb"));
+        assert!(s.cwd.as_deref().unwrap().starts_with("/w/"));
+        assert!(s.command.starts_with("zsh"));
+        // And a host cannot send more rows than a host may.
+        let many = (0..(MAX_LISTED as u32 + 50))
+            .map(|id| SessionSummary {
+                id,
+                title: "t".into(),
+                cwd: None,
+                command: "c".into(),
+                running: true,
+                exit_code: None,
+                in_use_here: None,
+            })
+            .collect();
+        assert_eq!(sanitize_listed(many).len(), MAX_LISTED);
+    }
+
+    #[test]
+    fn a_hosts_title_and_cwd_are_cleaned_in_the_list_the_open_and_the_tab() {
+        let server = Server::start(Mode::Serve);
+        {
+            let mut sessions = server.host.sessions.lock().unwrap();
+            sessions[0].title = "evil\u{1b}[31m\u{7}title".into();
+            sessions[0].cwd = Some("/tmp/\u{1b}x\ny".into());
+        }
+        let route = Route::new(server.port);
+        let rows = list_remote(&*route, PEER_ID).expect("list");
+        assert_eq!(rows[0].title, "evil[31mtitle");
+        assert_eq!(rows[0].cwd, "/tmp/xy");
+        let pm = PtyManager::default();
+        let app = tauri::test::mock_app();
+        let (sink, _) = collecting();
+        let (opened, _link) =
+            open_with(app.handle(), &pm, route, fast(), sink, PEER_ID, 1).expect("open");
+        assert_eq!(opened.title, "evil[31mtitle");
+        assert_eq!(opened.cwd, "/tmp/xy");
+        let session = pm.get(opened.pty_id).expect("registered");
+        assert_eq!(*session.title.lock().unwrap(), "node-b: evil[31mtitle");
     }
 
     #[test]

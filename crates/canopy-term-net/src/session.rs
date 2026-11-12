@@ -57,8 +57,13 @@ pub const MAX_TEXT_CHARS: usize = 160;
 /// How long a client waits for each reply line.
 pub const CALL_TIMEOUT: Duration = Duration::from_secs(5);
 
+/// How long the server waits for a peer to take a write before it drops the
+/// connection. A peer that stops reading would otherwise pin its attach slot
+/// (and the output queued for it) for good.
+pub const WRITE_DEADLINE: Duration = Duration::from_secs(30);
+
 /// Largest terminal dimension accepted in `resize`.
-const MAX_DIM: u16 = 10_000;
+const MAX_DIM: u16 = 1_000;
 /// Read granularity: every blocking read wakes this often to check deadlines
 /// and the stop flag, so deadlines are enforced to within one tick.
 const POLL: Duration = Duration::from_millis(100);
@@ -592,11 +597,17 @@ pub trait SessionHandler: Send + Sync {
 
     /// The attached stream for `id` ended (peer left, session exited, or an
     /// error). Release whatever `attach` took.
-    fn close(&self, peer: &PeerIdentity, id: u32);
+    ///
+    /// `token` is the one [`AttachedSession::token`] carried for this attach, so
+    /// two attaches of the same id by one peer stay distinguishable.
+    fn close(&self, peer: &PeerIdentity, id: u32, token: u64);
 }
 
 /// What [`SessionHandler::attach`] returns.
 pub struct AttachedSession {
+    /// Identifies this attach to the handler's `close`. Unique per attach; the
+    /// server only hands it back.
+    pub token: u64,
     pub cols: u16,
     pub rows: u16,
     /// Sent first, before any live output.
@@ -629,6 +640,9 @@ pub struct ServeLimits {
     pub input_chunk: usize,
     /// Most sessions in a `list` reply. Default [`MAX_LISTED`].
     pub max_listed: usize,
+    /// Longest a write to the peer may stall before the connection is dropped.
+    /// Default [`WRITE_DEADLINE`].
+    pub write_deadline: Duration,
 }
 
 impl Default for ServeLimits {
@@ -642,6 +656,7 @@ impl Default for ServeLimits {
             input_queue: INPUT_QUEUE,
             input_chunk: INPUT_CHUNK,
             max_listed: MAX_LISTED,
+            write_deadline: WRITE_DEADLINE,
         }
     }
 }
@@ -689,6 +704,7 @@ fn serve_inner(
 ) -> Result<(), SessionError> {
     let peer = conn.peer().clone();
     conn.set_read_deadline(Some(POLL))?;
+    conn.set_write_deadline(Some(limits.write_deadline))?;
     let (mut r, mut w) = conn.split();
 
     // hello
@@ -789,6 +805,7 @@ fn stream_phase(
     limits: &ServeLimits,
 ) -> Result<(), SessionError> {
     let AttachedSession {
+        token,
         cols,
         rows,
         snapshot,
@@ -804,7 +821,7 @@ fn stream_phase(
         }
     });
     if let Err(e) = head {
-        handler.close(&peer, id);
+        handler.close(&peer, id, token);
         return Err(e);
     }
 
@@ -881,7 +898,7 @@ fn stream_phase(
     // Closing the write half is EOF for the peer.
     drop(w);
     let _ = reader.join();
-    handler.close(&peer, id);
+    handler.close(&peer, id, token);
     result
 }
 
@@ -1110,6 +1127,7 @@ mod tests {
             let (tx, rx) = mpsc::channel();
             self.outputs.lock().unwrap().push(tx);
             Ok(AttachedSession {
+                token: 0,
                 cols: 80,
                 rows: 24,
                 snapshot: b"snap".to_vec(),
@@ -1134,7 +1152,7 @@ mod tests {
             self.resizes.lock().unwrap().push((id, cols, rows));
             Ok(())
         }
-        fn close(&self, _peer: &PeerIdentity, id: u32) {
+        fn close(&self, _peer: &PeerIdentity, id: u32, _token: u64) {
             self.closed.lock().unwrap().push(id);
         }
     }
@@ -1552,6 +1570,52 @@ mod tests {
     }
 
     #[test]
+    fn a_resize_beyond_a_sane_terminal_is_refused() {
+        watchdog(60, || {
+            let (c, s, _k) = pair();
+            let fake = fake_with_session();
+            let limits = ServeLimits {
+                resize_interval: Duration::ZERO,
+                ..ServeLimits::default()
+            };
+            let h = serve_bg(s, &fake, limits, CURRENT);
+            let mut client = SessionClient::connect(c).unwrap();
+            assert!(client.resize(1, 10_000, 10_000).is_err());
+            assert!(client.resize(1, MAX_DIM + 1, 30).is_err());
+            assert!(client.resize(1, 100, MAX_DIM + 1).is_err());
+            client.resize(1, MAX_DIM, MAX_DIM).unwrap();
+            assert_eq!(*fake.resizes.lock().unwrap(), vec![(1, MAX_DIM, MAX_DIM)]);
+            drop(client);
+            h.join().unwrap().unwrap();
+        });
+    }
+
+    #[test]
+    fn a_peer_that_stops_reading_is_dropped_after_the_write_deadline() {
+        watchdog(60, || {
+            let (c, s, _k) = pair();
+            let fake = fake_with_session();
+            let limits = ServeLimits {
+                write_deadline: Duration::from_millis(300),
+                ..ServeLimits::default()
+            };
+            let h = serve_bg(s, &fake, limits, CURRENT);
+            let client = SessionClient::connect(c).unwrap();
+            // Attached, and then never read from: the socket buffers fill.
+            let _stream = client.attach(1).unwrap();
+            let tx = fake.take_sender();
+            let end = Instant::now() + Duration::from_secs(30);
+            while !h.is_finished() {
+                assert!(Instant::now() < end, "the stalled peer was never dropped");
+                let _ = tx.send(vec![b'x'; 64 * 1024]);
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            assert!(matches!(h.join().unwrap(), Err(SessionError::Io(_))));
+            assert_eq!(*fake.closed.lock().unwrap(), vec![1]);
+        });
+    }
+
+    #[test]
     fn list_is_capped_and_its_text_is_cut() {
         watchdog(60, || {
             let (c, s, _k) = pair();
@@ -1609,7 +1673,7 @@ mod tests {
                 Err(SessionError::Protocol(_))
             ));
             assert!(matches!(
-                client.resize(1, 100, 10_001),
+                client.resize(1, 100, 1_001),
                 Err(SessionError::Protocol(_))
             ));
             assert_eq!(client.list().unwrap().len(), 2);

@@ -956,6 +956,18 @@ impl PtyManager {
         self.proxies.lock().unwrap().contains_key(&id)
     }
 
+    /// Test only: treat the live session `id` as a window onto another machine,
+    /// without a real link.
+    #[cfg(test)]
+    pub(crate) fn mark_proxy_for_test(&self, id: u32) {
+        struct NoLink;
+        impl ProxyLink for NoLink {
+            fn close(&self) {}
+            fn reconnect(&self) {}
+        }
+        self.proxies.lock().unwrap().insert(id, Arc::new(NoLink));
+    }
+
     /// The link behind a proxy session.
     pub fn proxy(&self, id: u32) -> Option<Arc<dyn ProxyLink>> {
         self.proxies.lock().unwrap().get(&id).cloned()
