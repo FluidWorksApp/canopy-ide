@@ -660,7 +660,17 @@ impl Screen {
         for r in 0..rows {
             let row = &grid[Line(r as i32)];
             for c in 0..cols {
-                cells.push(convert_cell(&row[Column(c)], &mut clusters));
+                let engine = &row[Column(c)];
+                let mut cell = convert_cell(engine, &mut clusters);
+                if c + 1 == cols && engine.flags.contains(Flags::WIDE_CHAR) {
+                    // Insert mode can push a wide character's head into the
+                    // last column with no room for its tail. Show it blank:
+                    // drawn (or restored from a snapshot) it would overflow
+                    // the row, and a snapshot would scroll the screen.
+                    cell.ch = ' ';
+                    cell.cluster = 0;
+                }
+                cells.push(cell);
             }
         }
         let p = grid.cursor.point;

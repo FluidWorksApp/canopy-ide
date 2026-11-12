@@ -388,6 +388,14 @@ fn frame_diff(a: &Screen, b: &Screen, clean_titles: bool, cursor_row_free: bool)
     }
     for (i, (x, y)) in fa.cells.iter().zip(&fb.cells).enumerate() {
         let (xt, yt) = (fa.text(x), fb.text(y));
+        // Erasing half of a wide character leaves its head alone; a restore
+        // writes the head again and the engine adds the tail. Same picture.
+        let tail_only = (x.attrs.has(Attrs::WIDE_TAIL) != y.attrs.has(Attrs::WIDE_TAIL))
+            && (xt == " " || yt == " ")
+            && clean_titles;
+        if tail_only {
+            continue;
+        }
         if xt != yt || x.fg != y.fg || x.bg != y.bg || x.attrs != y.attrs {
             return Some(format!(
                 "cell row {} col {}: {:?} {:?} {:?} {:?} vs {:?} {:?} {:?} {:?}",
