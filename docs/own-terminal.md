@@ -11,7 +11,7 @@ working with an agent, not measurements.
 
 | Layer | Crate / PR | Build or adopt | Status |
 |---|---|---|---|
-| 1 Session host | `canopy-pty-host` (#780) | Built | Adoption and quit-survival under `CANOPY_PTY_HOST=1`; protocol 3; Windows host in progress |
+| 1 Session host | `canopy-pty-host` (#780) | Built | Adoption and quit-survival, on by default on Mac and Linux (Settings → Terminal; `CANOPY_PTY_HOST=0/1` forces); protocol 3; Windows host in progress |
 | 2 Screen state | `canopy-term-core` screen (#784, #812) | Adopt libghostty-vt (Zig 0.15.2, Rust 1.90), own snapshot | libghostty-vt is the only engine; the alacritty_terminal `Screen` is removed. Build: `crates/canopy-term-core/README.md` |
 | 3 CLI | `canopy-term-cli` (#783) | Build | `ls kill attach send capture wait new`; exclusive attach and `read_ring` next |
 | 4 Remote protocol | not started | Build (ideas from mosh, tmux) | Snapshot on attach, per-device keys and pairing, per-client backpressure |

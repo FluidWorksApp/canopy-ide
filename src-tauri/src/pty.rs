@@ -170,11 +170,25 @@ pub fn launch_id() -> String {
     launch_token().to_string()
 }
 
-/// Whether terminals are hosted, so Quit leaves them running. Windows can have
-/// the switch set but never hosts.
+/// Whether terminals are hosted in this launch, so Quit leaves them running.
+/// Fixed at startup (env, then the saved setting, then the platform default);
+/// Windows never hosts.
 #[tauri::command]
 pub fn pty_host_enabled() -> bool {
     cfg!(unix) && crate::pty_hosted::enabled()
+}
+
+/// The saved "Keep terminals running after quit" choice, for Settings.
+#[tauri::command]
+pub fn pty_host_setting() -> crate::pty_hosted::HostSetting {
+    crate::pty_hosted::host_setting()
+}
+
+/// Save the choice. It is read at the next launch, not this one.
+#[tauri::command]
+pub fn pty_host_set_setting(on: bool) -> Result<(), String> {
+    let path = crate::pty_hosted::setting_path().ok_or("no home folder to save to")?;
+    crate::pty_hosted::write_setting(&path, on)
 }
 
 /// Quit the app. `stop_all` is "Quit and Stop All": first the host is asked to
@@ -2135,7 +2149,7 @@ impl PtyManager {
             .try_state::<crate::governor::TerminalGovernor>()
             .map(|_| crate::watchdog::memory_info());
 
-        // Opt-in (CANOPY_PTY_HOST=1): the child lives in the detached PTY host.
+        // When terminals are hosted (the setting, on by default on Mac and Linux): the child lives in the detached PTY host.
         // Decided before any local PTY exists; any failure falls back in-process.
         let hosted_client = crate::pty_hosted::client();
         let pty_system = native_pty_system();

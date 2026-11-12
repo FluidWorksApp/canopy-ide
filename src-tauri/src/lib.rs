@@ -620,7 +620,7 @@ pub fn run() {
             // to speak on, and a write that happens first would be silent.
             change::install(app.handle().clone());
             cli::install_deep_links(app);
-            // Terminals a previous launch left in the PTY host (CANOPY_PTY_HOST=1)
+            // Terminals a previous launch left in the PTY host (when terminals are hosted)
             // come back before the first renderer registers.
             let adopted = app
                 .state::<pty::PtyManager>()
@@ -844,6 +844,8 @@ pub fn run() {
             pty::launch_id,
             pty::app_quit,
             pty::pty_host_enabled,
+            pty::pty_host_setting,
+            pty::pty_host_set_setting,
             pty::pty_stop_all_preview,
             pty::pty_host_notice,
             android::android_sdk_status,

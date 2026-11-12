@@ -104,6 +104,7 @@ import {
 } from "../fleetSnapshot";
 import { FleetReadinessPanel } from "./FleetReadinessPanel";
 import { AgentMemorySettings } from "./AgentMemorySettings";
+import { useKeepTerminalsRunning } from "./KeepTerminalsRunning";
 import {OrganizationSettings} from "./OrganizationSettings";
 import { AccountSettings } from "./AccountSettings";
 import {
@@ -1357,6 +1358,7 @@ export function SettingsDialog({ onClose, initialTab = "appearance", projects = 
     initialTab === "vault" ? "browser" : initialTab,
   );
   const [keyDrafts, setKeyDrafts] = useState<Record<string, string>>({});
+  const keepTerminals = useKeepTerminalsRunning();
   const [, setKeysVersion] = useState(0);
   const [gh, setGh] = useState<ipc.GhAuth | null>(null);
   const [ghBusy, setGhBusy] = useState(false);
@@ -2546,6 +2548,23 @@ export function SettingsDialog({ onClose, initialTab = "appearance", projects = 
                     }}
                   />
                 </Item>
+                {keepTerminals.visible && (
+                  <Item
+                    name="Keep terminals running after quit"
+                    desc="Terminals and agents stay alive for 2 hours after you quit or update, and reconnect on next launch. Applies after restart. Mac and Linux."
+                  >
+                    <Switch
+                      checked={keepTerminals.on}
+                      onChange={keepTerminals.set}
+                      aria-label="Keep terminals running after quit"
+                    />
+                    {keepTerminals.error && (
+                      <span className="set-warn" role="alert">
+                        {keepTerminals.error}
+                      </span>
+                    )}
+                  </Item>
+                )}
               </>
             )}
 
