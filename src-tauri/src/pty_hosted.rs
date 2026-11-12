@@ -200,10 +200,16 @@ pub use adoption::{
 #[cfg(unix)]
 pub use sealed::{forget_sealed, remember_sealed, reseal_lineage};
 #[cfg(unix)]
-pub use unix::{client, host_dir, spawn, Client};
+pub use unix::{client, host_dir, host_share, spawn, Client};
 
 #[cfg(not(unix))]
 pub struct Client;
+
+/// The host the native terminal window should share: none here.
+#[cfg(not(unix))]
+pub fn host_share() -> Option<(PathBuf, Option<PathBuf>)> {
+    None
+}
 
 #[cfg(not(unix))]
 pub fn client() -> Option<Client> {
@@ -375,6 +381,7 @@ mod unix {
                     }
                 };
                 let installed = check.is_some();
+                let _ = HOST_EXE.set(exe.clone());
                 match HostClient::ensure_running_checked(
                     &exe,
                     &socket,
@@ -398,6 +405,18 @@ mod unix {
                     }
                 }
         })
+    }
+
+    /// The binary the running host was started from (the installed copy, or the
+    /// developer override), remembered by `client`.
+    static HOST_EXE: OnceLock<PathBuf> = OnceLock::new();
+
+    /// The host the native terminal window should use: this app's socket and
+    /// host binary, started if needed. None when hosted terminals are off or
+    /// the host cannot be reached; the window then starts its own.
+    pub fn host_share() -> Option<(PathBuf, Option<PathBuf>)> {
+        let client = client()?;
+        Some((client.socket().to_path_buf(), HOST_EXE.get().cloned()))
     }
 
     /// How long after a failed start the next terminal waits before trying again.
