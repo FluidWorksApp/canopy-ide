@@ -835,6 +835,17 @@ impl<L: SessionLink> FrameSource for Session<L> {
         frame
     }
 
+    fn frame_into(&mut self, since: u64, out: &mut Frame) -> bool {
+        let tick = self.tick(Instant::now());
+        let got = self.take_frame_into(since, out);
+        if tick.more {
+            if let Some(w) = &self.waker {
+                w();
+            }
+        }
+        got
+    }
+
     fn resize(&mut self, cols: u16, rows: u16) {
         self.resize_grid(cols, rows);
     }

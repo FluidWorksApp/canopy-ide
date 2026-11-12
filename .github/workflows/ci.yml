@@ -253,6 +253,94 @@ jobs:
       - run: cargo test --locked --manifest-path crates/canopy-term-cli/Cargo.toml
       - run: cargo fmt --manifest-path crates/canopy-term-cli/Cargo.toml --check
 
+  # The terminal window app, built in release on each OS and kept as an artifact
+  # so it can be downloaded and tried on a real display (CI has none). It needs
+  # the pinned Zig (the engine is libghostty-vt). Its tests
+  # run in the Terminal crates job above (the glob finds crates/canopy-term-app).
+  term-app:
+    name: canopy-term-app binary (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            zig_target: x86_64-linux
+            zig_sha256: 02aa270f183da276e5b5920b1dac44a63f1a49e55050ebde3aecc9eb82f93239
+          - os: macos-15
+            zig_target: aarch64-macos
+            zig_sha256: 3cc2bab367e185cdfb27501c4b30b1b0653c28d9f73df8dc91488e66ece5fa6b
+          - os: windows-2022
+            zig_target: x86_64-windows
+            zig_sha256: 3a0ed1e8799a2f8ce2a6e6290a9ff22e6906f8227865911fb7ddedc3cc14cb0c
+    env:
+      # Same pin and checksums as the Terminal crates job: the app links
+      # canopy-term-core, whose libghostty-vt-sys runs `zig build`.
+      ZIG_VERSION: 0.15.2
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install Zig ${{ env.ZIG_VERSION }} (official zip, checksum verified)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $f = "zig-${{ matrix.zig_target }}-$env:ZIG_VERSION.zip"
+          $out = Join-Path $env:RUNNER_TEMP $f
+          Invoke-WebRequest -Uri "https://ziglang.org/download/$env:ZIG_VERSION/$f" -OutFile $out
+          $got = (Get-FileHash -Algorithm SHA256 $out).Hash.ToLower()
+          if ($got -ne "${{ matrix.zig_sha256 }}") { throw "zig sha256 mismatch: $got" }
+          Expand-Archive -Path $out -DestinationPath (Join-Path $env:RUNNER_TEMP "zigx")
+          Add-Content -Path $env:GITHUB_PATH -Value (Join-Path $env:RUNNER_TEMP "zigx\zig-${{ matrix.zig_target }}-$env:ZIG_VERSION")
+      - name: Install Zig ${{ env.ZIG_VERSION }} (official release, checksum verified)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          set -euo pipefail
+          f="zig-${{ matrix.zig_target }}-${ZIG_VERSION}.tar.xz"
+          curl -fsSL -o "$RUNNER_TEMP/$f" "https://ziglang.org/download/${ZIG_VERSION}/$f"
+          echo "${{ matrix.zig_sha256 }}  $RUNNER_TEMP/$f" | shasum -a 256 -c -
+          mkdir -p "$RUNNER_TEMP/zig"
+          tar -xJf "$RUNNER_TEMP/$f" -C "$RUNNER_TEMP/zig" --strip-components=1
+          echo "$RUNNER_TEMP/zig" >> "$GITHUB_PATH"
+      - name: Toolchain versions
+        shell: bash
+        run: |
+          echo "zig $(zig version)"
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            ./src-tauri -> target
+            ./crates/canopy-term-app -> target
+          key: term-app-${{ matrix.os }}
+      - name: Build the app
+        run: cargo build --locked --release --manifest-path crates/canopy-term-app/Cargo.toml
+      - name: Build the host it starts
+        if: runner.os != 'Windows'
+        run: cargo build --locked --release --manifest-path crates/canopy-pty-host/Cargo.toml --bin canopy-pty-host
+      - name: Gather the binaries
+        shell: bash
+        run: |
+          mkdir dist
+          ext=""
+          if [ "$RUNNER_OS" = "Windows" ]; then ext=".exe"; fi
+          cp "crates/canopy-term-app/target/release/canopy-term-app$ext" dist/
+          if [ "$RUNNER_OS" != "Windows" ]; then cp src-tauri/target/release/canopy-pty-host dist/; fi
+          ls -l dist
+      # No window is opened: this checks the binary loads and parses arguments.
+      - name: Smoke test
+        shell: bash
+        run: |
+          ext=""
+          if [ "$RUNNER_OS" = "Windows" ]; then ext=".exe"; fi
+          "dist/canopy-term-app$ext" --version
+          "dist/canopy-term-app$ext" --help > /dev/null
+      - uses: actions/upload-artifact@v4
+        with:
+          name: canopy-term-app-${{ matrix.os }}
+          path: dist
+          retention-days: 7
+
   rust:
     name: Rust (cargo test)
     runs-on: ubuntu-22.04

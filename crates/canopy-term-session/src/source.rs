@@ -27,6 +27,21 @@ pub trait FrameSource {
     /// wake (and at [`FrameSource::deadline`]).
     fn frame_since(&mut self, since: u64) -> Option<Frame>;
 
+    /// [`FrameSource::frame_since`] into a frame the viewer already owns,
+    /// reusing its buffers so a steady viewer allocates nothing per frame.
+    /// True when `out` was overwritten with a newer frame; false leaves it
+    /// alone. The default allocates (it moves `frame_since`'s frame in);
+    /// [`Session`](crate::Session) copies in place.
+    fn frame_into(&mut self, since: u64, out: &mut Frame) -> bool {
+        match self.frame_since(since) {
+            Some(frame) => {
+                *out = frame;
+                true
+            }
+            None => false,
+        }
+    }
+
     /// The grid size changed (window resize or zoom).
     fn resize(&mut self, cols: u16, rows: u16);
 

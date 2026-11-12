@@ -15,13 +15,13 @@
 //! * [`compose`]: the composition drawn over a copy of the frame.
 //! * [`blink`], [`selection`], [`shortcuts`]: cursor blink timing, copied text,
 //!   copy/paste/zoom keys.
-//! * [`source`]: TEMPORARY frame-source adapter, replaced by
-//!   `canopy-term-session`'s `FrameSource` when that crate lands.
 //!
 //! The `window` feature (on by default) adds [`window::run`], which owns the
 //! winit loop, the wgpu surface and the AccessKit adapter, and maps winit key,
 //! mouse, paste and focus events onto `canopy-term-input` (`window::keymap`),
-//! which does all the encoding.
+//! which does all the encoding. The window pulls frames from, and sends input
+//! to, a `canopy-term-session` `FrameSource` (re-exported as
+//! `window::FrameSource`).
 //!
 //! Dependency licences (checked with `cargo metadata` over every platform):
 //! all MIT, Apache-2.0, BSD, ISC, Zlib or Unicode, except `clipboard-win` and
@@ -35,7 +35,6 @@ pub mod grid;
 pub mod ime;
 pub mod selection;
 pub mod shortcuts;
-pub mod source;
 
 #[cfg(feature = "window")]
 pub mod window;

@@ -8,9 +8,8 @@
 
 use std::collections::{BTreeSet, VecDeque};
 
-use canopy_term_window::frame::{Attrs, Cell, Color, Cursor, Damage, Frame};
-use canopy_term_window::source::{FrameSource, Waker};
-use canopy_term_window::window::{run, WindowConfig};
+use canopy_term_window::frame::{Attrs, Cell, Color, Cursor, Damage, Frame, Modes};
+use canopy_term_window::window::{run, FrameSource, Waker, WindowConfig};
 use unicode_width::UnicodeWidthChar;
 
 const HELP: &[&str] = &[
@@ -385,6 +384,10 @@ impl FrameSource for Demo {
             rows: ranges(&rows),
         };
         Some(f)
+    }
+
+    fn modes(&self) -> Modes {
+        self.frame.modes
     }
 
     fn resize(&mut self, cols: u16, rows: u16) {
