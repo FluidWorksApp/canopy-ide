@@ -1,7 +1,9 @@
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("../ipc", () => ({
+  // provenance.ts subscribes to the change channel at module load.
+  onStoreChange: vi.fn(() => new Promise<never>(() => {})),
   fsReadFile: vi.fn(async (path: string) =>
     new TextEncoder().encode(
       path.endsWith(".md") ? "# Risk report\nThe store policy changed." : "x",
@@ -586,6 +588,53 @@ describe("PRs raised by the agent", () => {
       screen.getByRole("list", { name: "Pull requests from this agent" }),
     ).toBeInTheDocument();
     expect(screen.getAllByText("#8").length).toBeGreaterThan(0);
+    delete (ipc as unknown as { provenanceForSession?: unknown })
+      .provenanceForSession;
+  });
+});
+
+describe("a PR from another branch", () => {
+  it("shows the PR the session raised, and no Commit & raise PR", async () => {
+    vi.mocked(ipc.ghPrList).mockResolvedValue([
+      {
+        number: 571,
+        title: "Release: builder",
+        url: "https://github.com/o/r/pull/571",
+        branch: "release/x",
+        base: "main",
+        state: "OPEN",
+        draft: false,
+        checks: "PENDING",
+        mergeable: "MERGEABLE",
+        additions: 1,
+        deletions: 0,
+      },
+    ] as never);
+    (ipc as unknown as { provenanceForSession: unknown }).provenanceForSession =
+      vi.fn(async () => [
+        {
+          repo: "/main-checkout",
+          pr_number: 571,
+          pr_url: "https://api.github.com/repos/o/r/pulls/571",
+          branch: "release/x",
+          session_id: "s",
+        },
+      ]);
+    // Uncommitted work, so the raise button would show if nothing owned a PR.
+    vi.mocked(ipc.gitStatus).mockResolvedValue({
+      is_repo: true,
+      branch: "feat/x",
+      entries: [{ status: "M", path: "a.ts" }],
+    } as never);
+    setup({ repo: "/wt-other", cwd: "/wt-other" });
+    expect(await screen.findByText("#571")).toBeInTheDocument();
+    expect(screen.queryByText(/Commit & raise PR/)).toBeNull();
+    cleanup();
+    // Control: the same session with no edge does offer it.
+    (ipc as unknown as { provenanceForSession: unknown }).provenanceForSession =
+      vi.fn(async () => []);
+    setup({ repo: "/wt-control", cwd: "/wt-control" });
+    expect(await screen.findByText(/Commit & raise PR/)).toBeInTheDocument();
     delete (ipc as unknown as { provenanceForSession?: unknown })
       .provenanceForSession;
   });
