@@ -14,6 +14,7 @@ vi.mock("../ipc", () => ({
     entries: [{}, {}, {}],
   })),
   ghPrMerge: vi.fn(async () => ({ message: "Merged #21", pending: false })),
+  ghPrAutoMerge: vi.fn(async () => "#21 will merge automatically once its checks and reviews pass"),
   ghPrClose: vi.fn(async () => "closed"),
   ghPrList: vi.fn(async () => [
     {
@@ -32,6 +33,9 @@ vi.mock("../ipc", () => ({
 }));
 vi.mock("../prDraftBrain", () => ({
   draftPrWithBrain: vi.fn(async () => null),
+vi.mock("../links", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../links")>()),
+  openInOsBrowser: vi.fn(),
 }));
 vi.mock("../commitPushPrIpc", () => ({
   runCommitPushPr: vi.fn(async () => ({
@@ -100,6 +104,7 @@ vi.mock("../remoteExecution/workspace", () => ({
 import { AgentDetailsCard, prStatusLabel } from "./AgentDetailsCard";
 import { liveEnvironments } from "../environments/live";
 import * as ipc from "../ipc";
+import * as links from "../links";
 
 const idle = { state: "idle" } as never;
 const digest = {
@@ -506,6 +511,34 @@ describe("failing PR", () => {
   });
 });
 
+describe("checks still running", () => {
+  it("names the checks that have not passed", async () => {
+    vi.mocked(ipc.ghPrList).mockResolvedValue([
+      {
+        number: 5,
+        title: "Ship it",
+        url: "u",
+        branch: "feat/x",
+        base: "main",
+        state: "OPEN",
+        draft: false,
+        checks: "PENDING",
+        checks_summary: "3/7 checks passed",
+        check_runs: [
+          { name: "Frontend", state: "running" },
+          { name: "Secret scan", state: "queued" },
+        ],
+        mergeable: "MERGEABLE",
+        additions: 1,
+        deletions: 0,
+      },
+    ] as never);
+    setup({ repo: "/pending-checks", cwd: "/pending-checks" });
+    expect(await screen.findByText("Frontend")).toBeTruthy();
+    expect(screen.getByText("Secret scan")).toBeTruthy();
+  });
+});
+
 describe("PRs raised by the agent", () => {
   it("lists every one on hover", async () => {
     vi.mocked(ipc.ghPrList).mockResolvedValue([
@@ -569,6 +602,40 @@ describe("lineage rows", () => {
   });
 });
 
+describe("the PR number", () => {
+  it("opens the pull request on GitHub", async () => {
+    vi.mocked(ipc.gitStatus).mockResolvedValue({
+      is_repo: true,
+      branch: "feat/x",
+      entries: [],
+    } as never);
+    vi.mocked(ipc.ghPrList).mockResolvedValue([
+      {
+        number: 779,
+        title: "All workspaces",
+        url: "https://github.com/acme/app/pull/779",
+        branch: "feat/x",
+        base: "main",
+        state: "OPEN",
+        draft: false,
+        checks: "PASS",
+        mergeable: "MERGEABLE",
+        additions: 1,
+        deletions: 0,
+      },
+    ] as never);
+    setup({ repo: "/linkable", cwd: "/linkable" });
+    fireEvent.click(
+      await screen.findByRole("button", {
+        name: "Open pull request #779 on GitHub",
+      }),
+    );
+    expect(links.openInOsBrowser).toHaveBeenCalledWith(
+      "https://github.com/acme/app/pull/779",
+    );
+  });
+});
+
 describe("merging from the card", () => {
   it("asks to confirm, then squash-merges the PR", async () => {
     vi.mocked(ipc.gitStatus).mockResolvedValue({
@@ -627,6 +694,73 @@ describe("merging from the card", () => {
     expect(
       await screen.findByRole("button", { name: "Squash & merge" }),
     ).toBeDisabled();
+  });
+
+  describe("when GitHub's branch policy refuses the merge", () => {
+    const policy =
+      "Pull request is not mergeable: the base branch policy prohibits the merge.\nTo have the pull request merged after all the requirements have been met, add the `--auto` flag.";
+    const open = async (repo: string) => {
+      vi.mocked(ipc.ghPrAutoMerge).mockClear();
+      vi.mocked(ipc.gitStatus).mockResolvedValue({
+        is_repo: true,
+        branch: "feat/x",
+        entries: [],
+      } as never);
+      vi.mocked(ipc.ghPrList).mockResolvedValue([
+        {
+          number: 21,
+          title: "Ready",
+          url: "u",
+          branch: "feat/x",
+          base: "main",
+          state: "OPEN",
+          draft: false,
+          checks: "PASS",
+          mergeable: "MERGEABLE",
+          additions: 1,
+          deletions: 0,
+        },
+      ] as never);
+      setup({ repo, cwd: repo });
+      fireEvent.click(
+        await screen.findByRole("button", { name: "Squash & merge" }),
+      );
+      fireEvent.click(screen.getByRole("button", { name: "Confirm" }));
+    };
+
+    it("offers Merge when checks pass, and asks GitHub for auto-merge only when clicked", async () => {
+      vi.mocked(ipc.ghPrMerge).mockRejectedValueOnce(new Error(policy));
+      await open("/policy");
+      const offer = await screen.findByRole("button", {
+        name: "Merge when checks pass",
+      });
+      expect(ipc.ghPrAutoMerge).not.toHaveBeenCalled();
+      fireEvent.click(offer);
+      await waitFor(() =>
+        expect(ipc.ghPrAutoMerge).toHaveBeenCalledWith("/policy", 21, "squash", true),
+      );
+      await waitFor(() =>
+        expect(screen.queryByRole("button", { name: "Merge when checks pass" })).toBeNull(),
+      );
+      expect(screen.queryByText("Merged")).toBeNull();
+    });
+
+    it("Dismiss removes the offer without calling GitHub", async () => {
+      vi.mocked(ipc.ghPrMerge).mockRejectedValueOnce(new Error(policy));
+      await open("/policy-dismiss");
+      await screen.findByRole("button", { name: "Merge when checks pass" });
+      fireEvent.click(screen.getByRole("button", { name: "Dismiss" }));
+      expect(screen.queryByRole("button", { name: "Merge when checks pass" })).toBeNull();
+      expect(ipc.ghPrAutoMerge).not.toHaveBeenCalled();
+    });
+
+    it("offers nothing for other merge failures", async () => {
+      vi.mocked(ipc.ghPrMerge).mockRejectedValueOnce(new Error("merge conflicts"));
+      await open("/conflicts");
+      // The failed merge is over: the merge button is back, with no offer.
+      await screen.findByRole("button", { name: "Squash & merge" });
+      expect(screen.queryByRole("button", { name: "Merge when checks pass" })).toBeNull();
+    });
   });
 });
 
