@@ -670,6 +670,17 @@
       "help": false
     },
     {
+      "id": "quit-stop-all",
+      "label": "Quit and stop all terminals",
+      "surface": "menu",
+      "chord": { "mods": ["Mod", "Alt"], "key": "KeyQ" },
+      "platform": {
+        "windows": { "mods": ["Mod", "Shift"], "key": "KeyQ" },
+        "linux": { "mods": ["Mod", "Shift"], "key": "KeyQ" }
+      },
+      "note": "Off macOS Mod is Ctrl, and Ctrl+Alt is AltGr on many keyboard layouts, so the chord takes Shift, the namespace terminal emulators reserve for app commands."
+    },
+    {
       "id": "dictation",
       "label": "Voice dictation combo (optional; Esc cancels)",
       "surface": "app",

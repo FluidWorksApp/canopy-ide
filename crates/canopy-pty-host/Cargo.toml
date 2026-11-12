@@ -1,0 +1,45 @@
+[package]
+name = "canopy-pty-host"
+version = "0.1.0"
+description = "Detached host that owns terminal PTYs so they outlive the Canopy app"
+authors = ["Cause Connect Pte Ltd <sam@fluidwords.app>"]
+license = "MIT"
+edition = "2021"
+rust-version.workspace = true
+workspace = "../../src-tauri"
+
+[[bin]]
+name = "canopy-pty-host"
+path = "src/main.rs"
+
+[dependencies]
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+[target.'cfg(unix)'.dependencies]
+anyhow = "1"
+libc = "0.2"
+portable-pty = "0.9"
+
+# Windows: named-pipe transport, ConPTY sessions in Job Objects, detached launch.
+# portable-pty only for the client-side traits; the host drives ConPTY itself
+# (see src/windows.rs for why). windows-sys 0.59 is already in the lockfile.
+[target.'cfg(windows)'.dependencies]
+anyhow = "1"
+portable-pty = "0.9"
+windows-sys = { version = "0.59", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_Security_Authorization",
+    "Win32_Storage_FileSystem",
+    "Win32_System_Console",
+    "Win32_System_Diagnostics_Debug",
+    "Win32_System_IO",
+    "Win32_System_JobObjects",
+    "Win32_System_Pipes",
+    "Win32_System_SystemInformation",
+    "Win32_System_Threading",
+] }
+
+[target.'cfg(windows)'.dev-dependencies]
+windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_System_Threading"] }

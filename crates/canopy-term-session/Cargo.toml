@@ -1,0 +1,34 @@
+[package]
+name = "canopy-term-session"
+version = "0.1.0"
+description = "Headless terminal session: bytes from a session link become frames, input events become bytes"
+authors = ["Cause Connect Pte Ltd <sam@fluidwords.app>"]
+license = "MIT"
+edition = "2021"
+rust-version = "1.85"
+
+# Its own workspace root with its own lock: parallel work on other crates, and
+# dependencies a track adds, never touch the app's Cargo.lock.
+[workspace]
+
+# Only the two sibling terminal crates; no third-party dependency of its own.
+[dependencies]
+canopy-term-core = { path = "../canopy-term-core", features = ["screen"] }
+canopy-term-input = { path = "../canopy-term-input" }
+
+# Profiles in a path dependency are ignored, so the emulator's optimised test
+# profile is repeated here: the 10 MB test feeds the emulator unoptimised
+# otherwise. The crate is its own workspace root, so this affects no other crate.
+[profile.dev]
+opt-level = 3
+
+[profile.dev.package."*"]
+opt-level = 3
+debug-assertions = false
+overflow-checks = false
+
+# A counting global allocator measures the 10 MB run, so it is its own binary
+# with no harness: nothing runs beside it, and its numbers reach the CI log.
+[[test]]
+name = "memory"
+harness = false

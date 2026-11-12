@@ -48,6 +48,11 @@ test('a person watches, takes, uses and releases the agent browser while the age
   const site = http.createServer((request, response) => { response.setHeader('content-type', 'text/html'); response.end(PAGE); });
   site.listen(0, '127.0.0.1'); await once(site, 'listening');
   const browser = new AgentBrowser({ home, executablePath: CHROMIUM, picker: PICKER });
+  // Launching Chromium is not what this test checks, and a cold start on a busy CI
+  // runner can pass the browser's own 30 s operation deadline (a 504 on the first
+  // navigate). Start it here, inside the test's 90 s budget, so the operations
+  // below only time the browser's behaviour.
+  await browser.open();
   const runner = createRunner({ secret, spawnPty: () => { throw new Error('unused'); }, browser });
   runner.listen(0, '127.0.0.1'); await once(runner, 'listening');
   const sockets = new Set();

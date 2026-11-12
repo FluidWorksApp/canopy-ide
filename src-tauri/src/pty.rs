@@ -51,6 +51,11 @@ const INPUT_HIGH_WATER: usize = 1024 * 1024;
 const WRITER_POLL: Duration = Duration::from_millis(250);
 /// Replay retained while no desktop or remote viewer is attached.
 const SCROLLBACK_CAP: usize = 4 * 1024 * 1024;
+/// How long the output clock ignores the repaint a redraw nudge provokes.
+const NUDGE_QUIET_MS: u64 = 1500;
+/// The most time adoption may spend at launch across all sessions; sessions it
+/// does not reach stay in the host (their linger still applies).
+const ADOPT_BUDGET: Duration = Duration::from_secs(10);
 /// Bounded fan-out queue to remote subscribers. Lossy on lag by design: a slow
 /// phone is dropped to a resync, never allowed to stall the agent.
 const BROADCAST_CAP: usize = 512;
@@ -126,6 +131,24 @@ fn group_alive(group: u32) -> bool {
 pub fn instance_token() -> &'static str {
     static TOKEN: OnceLock<String> = OnceLock::new();
     TOKEN.get_or_init(|| {
+        // With the host on and a previous launch's terminals still running, this
+        // launch carries their token, so the agents inside keep pairing: their
+        // env, digests and sidecars already name it.
+        if let Some(token) = crate::pty_hosted::reused_instance() {
+            return token;
+        }
+        launch_token().to_string()
+    })
+}
+
+/// A tag unique to this app launch and never reused. Equal to `instance_token()`
+/// except when this launch adopted a previous launch's hosted terminals (the
+/// token is then theirs). What marks "which launch started this task": the stale
+/// sweep must see every earlier launch's runs as stale even when the pairing
+/// token is carried over.
+pub fn launch_token() -> &'static str {
+    static TOKEN: OnceLock<String> = OnceLock::new();
+    TOKEN.get_or_init(|| {
         let pid = std::process::id();
         let ms = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -139,6 +162,90 @@ pub fn instance_token() -> &'static str {
 #[tauri::command]
 pub fn instance_id() -> String {
     instance_token().to_string()
+}
+
+/// This launch's own tag, for stamping tasks and sweeping the previous launch's.
+#[tauri::command]
+pub fn launch_id() -> String {
+    launch_token().to_string()
+}
+
+/// Whether terminals are hosted, so Quit leaves them running. Windows can have
+/// the switch set but never hosts.
+#[tauri::command]
+pub fn pty_host_enabled() -> bool {
+    cfg!(unix) && crate::pty_hosted::enabled()
+}
+
+/// Quit the app. `stop_all` is "Quit and Stop All": first the host is asked to
+/// stop what this app does not hold (an earlier launch's terminals nobody is
+/// attached to, this launch's strays); a failure there is returned for the
+/// dialog to show, and nothing quits. Then exit stops this app's terminals,
+/// hosted ones included. Teardown itself stays in `RunEvent::Exit`, so both
+/// quits share one path. Async: the host calls must not block the main thread.
+#[tauri::command(async)]
+pub fn app_quit(app: AppHandle, stop_all: bool) -> Result<(), String> {
+    if stop_all {
+        let pty = app.state::<PtyManager>();
+        pty.stop_left_running(STOP_ALL_HOST_WAIT)?;
+        pty.stop_all_on_quit();
+    }
+    app.exit(0);
+    Ok(())
+}
+
+/// What "Quit and Stop All" would stop beyond the terminals this app holds:
+/// the host's sessions nobody is attached to (an earlier launch's agents that
+/// could not be adopted, say). The dialog counts these with the app's own
+/// terminals, so it asks whenever an agent would die, not only when one is in
+/// a tab. An unreachable host is an error, not "nothing".
+#[tauri::command(async)]
+pub fn pty_stop_all_preview(app: AppHandle) -> Result<Vec<crate::pty_hosted::StopTarget>, String> {
+    app.state::<PtyManager>()
+        .stop_all_preview(STOP_ALL_HOST_WAIT)
+}
+
+/// What the user should know about hosted terminals this launch: it fell back
+/// to in-process terminals (which die on Quit), or some sessions could not be
+/// adopted.
+#[tauri::command]
+pub fn pty_host_notice() -> crate::pty_hosted::HostNotice {
+    crate::pty_hosted::host_notice()
+}
+
+/// How long "Quit and Stop All" waits for the host to list its sessions: the
+/// user asked, so longer than the launch path's one second.
+const STOP_ALL_HOST_WAIT: Duration = Duration::from_secs(5);
+
+/// What `PtyManager::start_session` needs once a child and its master exist.
+struct SessionParts {
+    id: u32,
+    session_generation: u64,
+    pid: Option<u32>,
+    kind: SessionKind,
+    execution_context: Option<crate::execution::ExecutionContext>,
+    recovered_run: bool,
+    recovered_command: Option<String>,
+    run_command_id: Option<String>,
+    shell: String,
+    cwd: String,
+    child: Box<dyn Child + Send + Sync>,
+    master_box: Box<dyn MasterPty + Send>,
+    reader: Box<dyn Read + Send>,
+    writer: Box<dyn Write + Send>,
+    desktop: Option<DesktopSink>,
+    high_water: Option<usize>,
+    cols: u16,
+    rows: u16,
+    /// Output the session produced before this app attached (an adopted
+    /// session's replay from the host). It goes straight into the replay ring so
+    /// a new tab can show it, without stamping "last output" or waking the
+    /// attention machinery as if the agent had just spoken. Empty for a spawn.
+    history: Vec<u8>,
+    /// Absolute offset of `history[0]` in the session's output stream.
+    history_start: u64,
+    /// See `Session::survives_quit`.
+    survives_quit: bool,
 }
 
 pub struct Session {
@@ -206,6 +313,13 @@ pub struct Session {
     /// counter is here because a terminal repainting the same frame is still
     /// output — diffing rendered text would call that silence.
     last_output_ms: AtomicU64,
+    /// Quitting the app leaves this terminal running in the PTY host instead of
+    /// stopping it: a hosted terminal that a later launch can adopt (not a
+    /// micro-task or run-bound one, which are never adopted).
+    survives_quit: bool,
+    /// Output before this time does not stamp `last_output_ms`: the repaint a
+    /// redraw nudge provokes is not the agent speaking.
+    stamp_quiet_until_ms: AtomicU64,
     output_bytes: AtomicU64,
     /// Bytes evicted from the front of the replay ring. A reattaching terminal
     /// gets an explicit marker instead of silently presenting a partial history
@@ -393,6 +507,9 @@ pub struct PtyManager {
     /// macOS `Channel::send` calls `Webview::eval`; allowing that call to race a
     /// reload can wedge WebKit's dispatcher beyond the lifetime of either page.
     desktop_delivery_gate: Arc<RwLock<()>>,
+    /// Set by "Quit and Stop All": this quit stops hosted terminals too,
+    /// instead of leaving them running for a later launch to adopt.
+    stop_hosted_on_quit: AtomicBool,
 }
 
 impl Default for PtyManager {
@@ -409,6 +526,7 @@ impl Default for PtyManager {
             renderer_generation: AtomicU64::new(0),
             renderer_gate: Mutex::new(()),
             desktop_delivery_gate: Arc::new(RwLock::new(())),
+            stop_hosted_on_quit: AtomicBool::new(false),
         }
     }
 }
@@ -513,6 +631,207 @@ impl PtyManager {
         Ok((id, generation))
     }
 
+    /// Take over terminals a previous launch left running in the PTY host, before
+    /// the renderer registers, so the existing recovery path routes them to tabs
+    /// like any surviving session. Same id, generation and instance as before;
+    /// history goes into the replay ring without counting as fresh output.
+    /// Returns how many were adopted. A session that cannot be taken is left in
+    /// the host untouched (its linger still applies).
+    #[cfg(unix)]
+    pub fn adopt_hosted<R: tauri::Runtime>(&self, app: AppHandle<R>) -> usize {
+        // Only a launch that found a previous launch's terminals has anything to
+        // do; otherwise starting the app must not start a host just to ask it.
+        let Some(instance) = crate::pty_hosted::reused_instance() else {
+            return 0;
+        };
+        // Raise the id and generation floor before anything can fail below: a
+        // session that cannot be adopted is still running, and its id must not
+        // be handed to a new terminal under the same token. Asked with a
+        // non-launching client, so it holds even when hosting is unavailable.
+        self.seed_identity_floor(&instance);
+        let Some(client) = crate::pty_hosted::client() else {
+            return 0;
+        };
+        self.adopt_from(app, &client, &instance)
+    }
+
+    #[cfg(unix)]
+    fn seed_identity_floor(&self, instance: &str) {
+        if let Some((id, generation)) = crate::pty_hosted::identity_floor(instance) {
+            self.next_id.fetch_max(id, Ordering::SeqCst);
+            self.next_session_generation
+                .fetch_max(generation, Ordering::SeqCst);
+        }
+    }
+
+    #[cfg(unix)]
+    fn adopt_from<R: tauri::Runtime>(
+        &self,
+        app: AppHandle<R>,
+        client: &crate::pty_hosted::Client,
+        instance: &str,
+    ) -> usize {
+        let client = client.clone();
+        let mut adopted = 0;
+        let deadline = std::time::Instant::now() + ADOPT_BUDGET;
+        for found in crate::pty_hosted::adoptable(&client, instance) {
+            if std::time::Instant::now() >= deadline {
+                crate::pty_hosted::note_left_behind(
+                    Some(found.meta.id),
+                    "adoption took too long and it was left in the host",
+                );
+                continue;
+            }
+            if self.sessions.lock().unwrap().contains_key(&found.meta.id) {
+                continue;
+            }
+            let taken = match crate::pty_hosted::adopt(&client, &found) {
+                Ok(taken) => taken,
+                Err(error) => {
+                    crate::pty_hosted::note_left_behind(
+                        Some(found.meta.id),
+                        format!("could not adopt it: {error}"),
+                    );
+                    continue;
+                }
+            };
+            let (reader, writer) = match taken
+                .master
+                .try_clone_reader()
+                .and_then(|r| taken.master.take_writer().map(|w| (r, w)))
+            {
+                Ok(pair) => pair,
+                Err(error) => {
+                    crate::pty_hosted::note_left_behind(
+                        Some(found.meta.id),
+                        format!("could not adopt it: {error}"),
+                    );
+                    continue;
+                }
+            };
+            let meta = taken.meta;
+            let meta_id = meta.id;
+            // The agent still holds the credential the previous launch minted,
+            // and its hooks reach this launch through the stable socket.
+            // Recognise that credential under the identity it had, spawn-tree
+            // position included, but only from sealed metadata: anything else
+            // may have been written by any process of this user, and is adopted
+            // as a terminal with no credential.
+            let readopted = readopt_credential(&app, &meta, found.info.id);
+            self.next_id.fetch_max(meta.id, Ordering::SeqCst);
+            self.next_session_generation
+                .fetch_max(meta.generation, Ordering::SeqCst);
+            let kind = if meta.kind == "remote" {
+                SessionKind::Remote
+            } else {
+                SessionKind::Desktop
+            };
+            let shell = meta.command.clone().unwrap_or_else(default_shell);
+            let parts = SessionParts {
+                id: meta.id,
+                session_generation: meta.generation,
+                pid: Some(taken.pid),
+                kind,
+                execution_context: meta.execution_context,
+                recovered_run: meta.run,
+                recovered_command: meta.command,
+                run_command_id: meta.run_command_id,
+                shell,
+                cwd: meta.cwd,
+                child: taken.child,
+                master_box: taken.master,
+                reader,
+                writer,
+                desktop: None,
+                high_water: None,
+                cols: taken.cols,
+                rows: taken.rows,
+                history: taken.history,
+                history_start: taken.history_start,
+                survives_quit: true,
+            };
+            match self.start_session(app.clone(), parts) {
+                Ok(_) => {
+                    adopted += 1;
+                    if let Some(session) = self.get(meta_id) {
+                        // Off the launch path: it sleeps between the two sizes.
+                        thread::spawn(move || session.nudge_redraw());
+                    }
+                }
+                Err(error) => {
+                    undo_readopt(&app, meta_id, readopted);
+                    eprintln!("canopy: could not start adopted terminal: {error}");
+                }
+            }
+        }
+        adopted
+    }
+
+    #[cfg(not(unix))]
+    pub fn adopt_hosted<R: tauri::Runtime>(&self, _app: AppHandle<R>) -> usize {
+        0
+    }
+}
+
+/// Register an adopted terminal's credential from its sealed metadata.
+/// Returns whether this call registered it, which is the only case in which a
+/// failed adoption may retire it again.
+#[cfg(unix)]
+fn readopt_credential<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    meta: &crate::pty_hosted::HostedMeta,
+    host_id: u32,
+) -> bool {
+    let Some(ctx) = app.try_state::<crate::context::ContextBridge>() else {
+        return false;
+    };
+    if meta.bridge.is_none() {
+        // Spawned before verifiers existed: terminal only, as before.
+        return false;
+    }
+    let key = crate::adoption_seal::key();
+    let Some((verifier, lineage)) =
+        crate::pty_hosted::trusted_credential(meta, key.as_ref(), host_id)
+    else {
+        eprintln!(
+            "canopy: adopted terminal {} has unsealed or invalid metadata; it keeps no bridge credential",
+            meta.id
+        );
+        return false;
+    };
+    let identity = crate::context::AgentIdentity {
+        pty_id: meta.id,
+        instance: meta.instance.clone(),
+        cwd: meta.cwd.clone(),
+        run_id: meta.run_id.clone(),
+        attempt_id: meta.attempt_id.clone(),
+        spawn_depth: 0,
+        parent_pty_id: None,
+    };
+    let registered = ctx.readopt_agent(&verifier, identity, lineage);
+    if !registered {
+        eprintln!(
+            "canopy: adopted terminal {} keeps no bridge credential",
+            meta.id
+        );
+    }
+    registered
+}
+
+/// Hand back a credential `readopt_credential` registered, when the adoption it
+/// was for failed. A refused readopt registered nothing, and retiring by pty id
+/// then would remove a live terminal's credential instead.
+#[cfg(unix)]
+fn undo_readopt<R: tauri::Runtime>(app: &AppHandle<R>, pty_id: u32, readopted: bool) {
+    if !readopted {
+        return;
+    }
+    if let Some(ctx) = app.try_state::<crate::context::ContextBridge>() {
+        ctx.retire_agent(pty_id);
+    }
+}
+
+impl PtyManager {
     pub fn sessions(&self) -> Arc<Mutex<HashMap<u32, Arc<Session>>>> {
         self.sessions.clone()
     }
@@ -780,7 +1099,73 @@ impl PtyManager {
     /// one at a time: the grace period is for agents to flush their transcripts,
     /// and serialising it would cost GRACE per terminal on every quit.
     pub fn kill_all(&self) -> KillAllReport {
-        let sessions: Vec<Arc<Session>> = self.sessions.lock().unwrap().values().cloned().collect();
+        // Hosted terminals a later launch can adopt are left running in the
+        // host: quitting only drops this app's connection to them.
+        self.stop_sessions(false)
+    }
+
+    /// "Quit and Stop All": make this quit stop hosted terminals as well.
+    pub fn stop_all_on_quit(&self) {
+        self.stop_hosted_on_quit.store(true, Ordering::SeqCst);
+    }
+
+    /// What app exit runs: `kill_all`, or `kill_all_including_hosted` when the
+    /// user chose "Quit and Stop All".
+    pub fn kill_all_on_exit(&self) -> KillAllReport {
+        if self.stop_hosted_on_quit.load(Ordering::SeqCst) {
+            self.kill_all_including_hosted()
+        } else {
+            self.kill_all()
+        }
+    }
+
+    /// Stop every session, hosted ones included, then, best effort, ask the
+    /// host once more to stop anything left (`stop_left_running`). The host
+    /// then idles out on its own.
+    pub fn kill_all_including_hosted(&self) -> KillAllReport {
+        let report = self.stop_sessions(true);
+        let _ = self.stop_left_running(Duration::from_secs(1));
+        report
+    }
+
+    /// Ask the host to stop the Canopy sessions this app does not hold: any no
+    /// live app is attached to, and this launch's own that are not in the map.
+    /// The map's terminals are left to app exit. No host means nothing to stop;
+    /// any other failure is logged and returned.
+    pub fn stop_left_running(&self, wait: Duration) -> Result<usize, String> {
+        #[cfg(unix)]
+        if crate::pty_hosted::enabled() {
+            let held: Vec<u32> = self.sessions.lock().unwrap().keys().copied().collect();
+            return crate::pty_hosted::stop_left_running(instance_token(), &held, wait)
+                .inspect_err(|error| eprintln!("canopy: Quit and Stop All: {error}"));
+        }
+        let _ = wait;
+        Ok(0)
+    }
+
+    /// The sessions `stop_left_running` would stop. See `pty_stop_all_preview`.
+    pub fn stop_all_preview(
+        &self,
+        wait: Duration,
+    ) -> Result<Vec<crate::pty_hosted::StopTarget>, String> {
+        #[cfg(unix)]
+        if crate::pty_hosted::enabled() {
+            let held: Vec<u32> = self.sessions.lock().unwrap().keys().copied().collect();
+            return crate::pty_hosted::stop_preview(instance_token(), &held, wait);
+        }
+        let _ = wait;
+        Ok(Vec::new())
+    }
+
+    fn stop_sessions(&self, include_hosted: bool) -> KillAllReport {
+        let sessions: Vec<Arc<Session>> = self
+            .sessions
+            .lock()
+            .unwrap()
+            .values()
+            .filter(|s| include_hosted || !s.survives_quit)
+            .cloned()
+            .collect();
         for s in &sessions {
             s.request_stop();
         }
@@ -1043,6 +1428,13 @@ impl Session {
         let Ok(master) = self.master.lock() else {
             return false;
         };
+        // A hosted session has no local fd; the host answers instead.
+        // The downcast methods exist only on plain `dyn MasterPty`, not on the
+        // `dyn MasterPty + Send` the session stores, so drop the auto trait first.
+        let plain: &dyn MasterPty = &**master;
+        if let Some(hosted) = plain.downcast_ref::<canopy_pty_host::client::HostMaster>() {
+            return hosted.raw_mode();
+        }
         let Some(fd) = master.as_raw_fd() else {
             return false;
         };
@@ -1130,7 +1522,10 @@ impl Session {
     /// every pty, headless ones included, and the bytes are already in hand —
     /// so "when did this terminal last say anything" costs two relaxed stores.
     fn record_output_locked(&self, ring: &mut VecDeque<u8>, data: &[u8]) -> u64 {
-        self.last_output_ms.store(now_ms(), Ordering::Relaxed);
+        let now = now_ms();
+        if now >= self.stamp_quiet_until_ms.load(Ordering::Relaxed) {
+            self.last_output_ms.store(now, Ordering::Relaxed);
+        }
         let start = self.output_bytes.load(Ordering::Relaxed);
         ring.extend(data.iter().copied());
         let overflow = ring.len().saturating_sub(SCROLLBACK_CAP);
@@ -1161,6 +1556,37 @@ impl Session {
         let mut ring = self.scrollback.lock().unwrap();
         let start = self.record_output_locked(&mut ring, &data);
         self.send_desktop(start, data);
+    }
+
+    /// Make a full-screen program repaint without changing its final size. A
+    /// resize to the size a terminal already has sends no SIGWINCH, so shrink by
+    /// one row and restore. Used after adoption, where the replayed history may
+    /// start mid-screen and a TUI needs to redraw over it.
+    fn nudge_redraw(&self) {
+        let (_, rows) = *self.size.lock().unwrap();
+        if rows < 2 {
+            return;
+        }
+        // The repaint is not "the agent just spoke": keep it out of the output
+        // clock for a moment longer than the nudge takes.
+        self.stamp_quiet_until_ms
+            .store(now_ms() + NUDGE_QUIET_MS, Ordering::Relaxed);
+        // One lock across both sizes, so a real resize cannot land in between and
+        // be overwritten; the restore reads the size as it is after the pause.
+        let master = self.master.lock().unwrap();
+        let shrink = |cols: u16, rows: u16| {
+            let _ = master.resize(PtySize {
+                rows,
+                cols,
+                pixel_width: 0,
+                pixel_height: 0,
+            });
+        };
+        let (cols, rows) = *self.size.lock().unwrap();
+        shrink(cols, rows - 1);
+        thread::sleep(Duration::from_millis(80));
+        let (cols, rows) = *self.size.lock().unwrap();
+        shrink(cols, rows);
     }
 
     /// Record a new grid size and tell remote subscribers, so a remote terminal
@@ -1709,18 +2135,32 @@ impl PtyManager {
             .try_state::<crate::governor::TerminalGovernor>()
             .map(|_| crate::watchdog::memory_info());
 
+        // Opt-in (CANOPY_PTY_HOST=1): the child lives in the detached PTY host.
+        // Decided before any local PTY exists; any failure falls back in-process.
+        let hosted_client = crate::pty_hosted::client();
         let pty_system = native_pty_system();
-        let pair = pty_system
-            .openpty(PtySize {
-                rows,
-                cols,
-                pixel_width: 0,
-                pixel_height: 0,
-            })
-            .map_err(|e| e.to_string())?;
+        let open_local = || {
+            pty_system
+                .openpty(PtySize {
+                    rows,
+                    cols,
+                    pixel_width: 0,
+                    pixel_height: 0,
+                })
+                .map_err(|e| e.to_string())
+        };
+        let mut local_pair = if hosted_client.is_some() {
+            None
+        } else {
+            Some(open_local()?)
+        };
 
         // Allocated before spawn so the child can carry its own session id in env.
         let (id, session_generation) = state.allocate_session_identity()?;
+        #[cfg(unix)]
+        if let Some(client) = &hosted_client {
+            crate::pty_hosted::note_identity(client, id, session_generation);
+        }
 
         let shell = shell.unwrap_or_else(default_shell);
         let mut cmd = match &run {
@@ -1916,10 +2356,20 @@ impl PtyManager {
         // which session is calling without taking its word for it. Every PTY
         // used to carry the same one, which left "who is asking" answerable
         // only from body fields the caller filled in itself.
+        //
+        // With the PTY host on, the stable socket rides beside the port: the
+        // hook prefers it, so an agent that outlives this launch reaches the
+        // next one. An inherited socket (an app started from another Canopy's
+        // terminal) is dropped first, since it would win over our port and
+        // carry this terminal's token to the other instance.
+        cmd.env_remove("CANOPY_CTX_SOCKET");
+        let mut bridge_verifier = None;
         if let Some(ctx) = app.try_state::<crate::context::ContextBridge>() {
             if let Some((port, token)) = ctx.mint_agent(id, &cwd, task_identity.as_ref()) {
-                cmd.env("CANOPY_CTX_PORT", port.to_string());
-                cmd.env("CANOPY_CTX_TOKEN", token);
+                for (key, value) in crate::context::agent_env(port, &token, ctx.socket()) {
+                    cmd.env(key, value);
+                }
+                bridge_verifier = Some(crate::context::verifier(&token));
             }
         }
         // The IDE server is bound before the child exists so its port is in
@@ -1958,25 +2408,28 @@ impl PtyManager {
         // may replace argv with a gate launcher, but it never changes the
         // command's environment, cwd, terminal geometry, or stdio contract.
         // Mock apps do not manage containment and therefore remain monitor-only.
-        let prepared_containment =
-            if let Some(containment) = app.try_state::<crate::containment::ContainmentManager>() {
-                let host = host.expect("the production app manages both governor and containment");
-                Some(
-                    containment
-                        .prepare(
-                            id,
-                            crate::governor::base_allowance(host.total_bytes),
-                            &mut cmd,
-                        )
-                        .inspect_err(|_| {
-                            if let Some(ide) = app.try_state::<crate::claude_ide::ClaudeIde>() {
-                                ide.close(id);
-                            }
-                        })?,
-                )
-            } else {
-                None
-            };
+        let prepared_containment = if let Some(containment) = app
+            .try_state::<crate::containment::ContainmentManager>()
+            // Hosted sessions are monitor-only: the host owns the child.
+            .filter(|_| hosted_client.is_none())
+        {
+            let host = host.expect("the production app manages both governor and containment");
+            Some(
+                containment
+                    .prepare(
+                        id,
+                        crate::governor::base_allowance(host.total_bytes),
+                        &mut cmd,
+                    )
+                    .inspect_err(|_| {
+                        if let Some(ide) = app.try_state::<crate::claude_ide::ClaudeIde>() {
+                            ide.close(id);
+                        }
+                    })?,
+            )
+        } else {
+            None
+        };
 
         // The credential was minted before the child so it could be in its
         // environment from the first instruction. Every failure between there
@@ -1992,11 +2445,88 @@ impl PtyManager {
                 ide.close(id);
             }
         };
-        let mut child = match pair.slave.spawn_command(cmd) {
-            Ok(child) => child,
-            Err(e) => {
-                retire();
-                return Err(e.to_string());
+        let hosted = hosted_client.as_ref().and_then(|client| {
+            // Written with the spawn, not after: a crash in between would leave a
+            // session nothing can identify. Identity only, never env or tokens:
+            // `bridge` is the credential's SHA-256, so a later launch can
+            // recognise the token the agent holds without the host storing it.
+            // It is written only under a seal (adoption_seal.rs), since any
+            // process of this user can write metadata through the host.
+            let value = serde_json::json!({
+                "v": 1,
+                "id": id,
+                "generation": session_generation,
+                "kind": kind,
+                "cwd": cwd.clone(),
+                "run": recovered_run,
+                "command": recovered_command.clone(),
+                "run_command_id": recovered_run.then(|| run_command_id.clone()).flatten(),
+                "execution_context": execution_context.clone(),
+                "run_id": task_identity.as_ref().map(|t| t.run_id.clone()),
+                "attempt_id": task_identity.as_ref().map(|t| t.attempt_id.clone()),
+                "instance": instance_token(),
+            });
+            let mut sealed = None;
+            let meta = match (
+                bridge_verifier.clone(),
+                serde_json::from_value::<crate::pty_hosted::HostedMeta>(value.clone()),
+                crate::adoption_seal::key(),
+            ) {
+                (Some(verifier), Ok(mut meta), Some(key)) => {
+                    meta.bridge = Some(verifier);
+                    let pending = app
+                        .try_state::<crate::context::ContextBridge>()
+                        .is_some_and(|ctx| ctx.spawn_pending());
+                    crate::pty_hosted::seal_for_spawn(&mut meta, &key, pending);
+                    let json = serde_json::to_string(&meta).unwrap_or_else(|_| value.to_string());
+                    sealed = Some(meta);
+                    json
+                }
+                _ => value.to_string(),
+            };
+            match crate::pty_hosted::spawn(client, &cmd, cols, rows, Some(meta)) {
+                Ok(parts) => {
+                    if let Some(meta) = sealed {
+                        crate::pty_hosted::remember_sealed(id, &*parts.1, meta);
+                    }
+                    Some(parts)
+                }
+                Err(error) => {
+                    eprintln!(
+                        "canopy: PTY host spawn failed, using an in-process terminal: {error}"
+                    );
+                    None
+                }
+            }
+        });
+        // Only a hosted terminal that a later launch could adopt outlives the app:
+        // micro-tasks and run-bound tabs are never adopted, so quitting stops them.
+        let survives_quit =
+            hosted.is_some() && kind != SessionKind::Detached && task_identity.is_none();
+        let (mut child, master_box, slave): (
+            Box<dyn Child + Send + Sync>,
+            Box<dyn MasterPty + Send>,
+            Option<Box<dyn portable_pty::SlavePty + Send>>,
+        ) = match hosted {
+            Some((child, master)) => (child, master, None),
+            None => {
+                let pair = match local_pair.take() {
+                    Some(pair) => pair,
+                    None => match open_local() {
+                        Ok(pair) => pair,
+                        Err(e) => {
+                            retire();
+                            return Err(e);
+                        }
+                    },
+                };
+                match pair.slave.spawn_command(cmd) {
+                    Ok(child) => (child, pair.master, Some(pair.slave)),
+                    Err(e) => {
+                        retire();
+                        return Err(e.to_string());
+                    }
+                }
             }
         };
         let pid = child.process_id();
@@ -2009,12 +2539,11 @@ impl PtyManager {
                 return Err(failure.cleanup_after_child_exit());
             }
         }
-        drop(pair.slave);
+        drop(slave);
 
-        let (mut reader, mut writer) = match pair
-            .master
+        let (reader, writer) = match master_box
             .try_clone_reader()
-            .and_then(|r| pair.master.take_writer().map(|w| (r, w)))
+            .and_then(|r| master_box.take_writer().map(|w| (r, w)))
         {
             Ok(pair) => pair,
             Err(e) => {
@@ -2032,6 +2561,83 @@ impl PtyManager {
             }
         };
 
+        state.start_session(
+            app,
+            SessionParts {
+                id,
+                session_generation,
+                pid,
+                kind,
+                execution_context,
+                recovered_run,
+                recovered_command,
+                run_command_id,
+                shell,
+                cwd,
+                child,
+                master_box,
+                reader,
+                writer,
+                desktop,
+                high_water,
+                cols,
+                rows,
+                history: Vec::new(),
+                history_start: 0,
+                survives_quit,
+            },
+        )
+    }
+
+    /// Everything after the child and its master exist: build the `Session`, put
+    /// it in the map and start its reader, writer and flusher threads. Split out
+    /// so a session adopted from the PTY host starts exactly like a spawned one.
+    fn start_session<R: tauri::Runtime>(
+        &self,
+        app: AppHandle<R>,
+        parts: SessionParts,
+    ) -> Result<SpawnResult, String> {
+        let state = self;
+        let SessionParts {
+            id,
+            session_generation,
+            pid,
+            kind,
+            execution_context,
+            recovered_run,
+            recovered_command,
+            run_command_id,
+            shell,
+            cwd,
+            child,
+            master_box,
+            mut reader,
+            mut writer,
+            desktop,
+            high_water,
+            cols,
+            rows,
+            history,
+            history_start,
+            survives_quit,
+        } = parts;
+        // History enters the ring directly: only the newest SCROLLBACK_CAP bytes
+        // fit, and everything older counts as dropped so offsets stay absolute.
+        let kept_from = history.len().saturating_sub(SCROLLBACK_CAP);
+        let history_total = history_start.saturating_add(history.len() as u64);
+        let history_dropped = history_start.saturating_add(kept_from as u64);
+        let history_ring: VecDeque<u8> = history[kept_from..].iter().copied().collect();
+        // Hands the bridge credential back on the failure paths below, as in
+        // `spawn_bound`: nothing watches for an exit before the session is
+        // registered.
+        let retire = || {
+            if let Some(ctx) = app.try_state::<crate::context::ContextBridge>() {
+                ctx.retire_agent(id);
+            }
+            if let Some(ide) = app.try_state::<crate::claude_ide::ClaudeIde>() {
+                ide.close(id);
+            }
+        };
         let killer = child.clone_killer();
 
         let desktop_renderer_generation = desktop.as_ref().map(|sink| sink.renderer_generation);
@@ -2068,7 +2674,7 @@ impl PtyManager {
             cwd,
             input: Mutex::new(Vec::new()),
             input_ready: Condvar::new(),
-            master: Mutex::new(pair.master),
+            master: Mutex::new(master_box),
             killer: Mutex::new(killer),
             child: Mutex::new(Some(child)),
             shutdown: AtomicBool::new(false),
@@ -2078,7 +2684,7 @@ impl PtyManager {
             desktop_delivery_gate: Arc::clone(&state.desktop_delivery_gate),
             next_attachment: AtomicU64::new(generation.unwrap_or(0)),
             high_water: high_water.unwrap_or(DEFAULT_HIGH_WATER),
-            scrollback: Mutex::new(VecDeque::new()),
+            scrollback: Mutex::new(history_ring),
             size: Mutex::new((cols, rows)),
             subscribers: broadcast::channel(BROADCAST_CAP).0,
             // Zero means "has never happened", which is why these are not
@@ -2086,8 +2692,10 @@ impl PtyManager {
             // is an unanswered question, not a terminal that has been silent
             // since it started.
             last_output_ms: AtomicU64::new(0),
-            output_bytes: AtomicU64::new(0),
-            dropped_output_bytes: AtomicU64::new(0),
+            survives_quit,
+            stamp_quiet_until_ms: AtomicU64::new(0),
+            output_bytes: AtomicU64::new(history_total),
+            dropped_output_bytes: AtomicU64::new(history_dropped),
             desktop_delivery_chunks: AtomicU64::new(0),
             desktop_delivery_bytes: AtomicU64::new(0),
             desktop_acked_bytes: AtomicU64::new(0),
@@ -4251,5 +4859,248 @@ mod tests {
         let session = pm.get(id).expect("session");
         pm.kill(id).expect("kill");
         assert!(session.shutdown.load(Ordering::SeqCst));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn adopt_from_restores_identity_and_history_without_a_fresh_output_stamp() {
+        use crate::pty_hosted::tests::{command, meta_for, InProcessHost};
+        let host = InProcessHost::start("adoptmgr");
+        let (child, master) = crate::pty_hosted::spawn(
+            &host.client,
+            &command("trap 'echo got-winch' WINCH; echo before-quit; while :; do sleep 0.1; done"),
+            80,
+            24,
+            Some(meta_for(41, 9, "desktop", "inst-t")),
+        )
+        .expect("hosted spawn");
+        let wait = |f: &dyn Fn() -> bool| {
+            let deadline = std::time::Instant::now() + Duration::from_secs(10);
+            while std::time::Instant::now() < deadline && !f() {
+                thread::sleep(Duration::from_millis(50));
+            }
+            f()
+        };
+        assert!(wait(&|| host.client.list().unwrap()[0].end > 0));
+        // The app quits: the connection drops, which only detaches.
+        drop(master);
+        drop(child);
+        assert!(wait(
+            &|| host.client.list().unwrap()[0].attached == Some(false)
+        ));
+
+        let app = tauri::test::mock_app();
+        let pm = PtyManager::default();
+        assert_eq!(
+            pm.adopt_from(app.handle().clone(), &host.client, "inst-t"),
+            1
+        );
+
+        let session = pm.get(41).expect("adopted under its original id");
+        assert_eq!(session.session_generation, 9);
+        assert_eq!(session.pid, host.client.list().unwrap()[0].pid);
+        // History is in the ring but is not "the agent just spoke".
+        assert_eq!(session.quiet_ms(now_ms()), None);
+        assert!(session.output_bytes() >= "before-quit".len() as u64);
+        assert!(String::from_utf8_lossy(
+            &session
+                .scrollback
+                .lock()
+                .unwrap()
+                .iter()
+                .copied()
+                .collect::<Vec<u8>>()
+        )
+        .contains("before-quit"));
+        // A resize to the size it already has sends no SIGWINCH, so adoption
+        // nudges one row and back; the program's own handler proves it ran.
+        assert!(wait(&|| {
+            String::from_utf8_lossy(
+                &session
+                    .scrollback
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .copied()
+                    .collect::<Vec<u8>>(),
+            )
+            .contains("got-winch")
+        }));
+        // The repaint the nudge provoked is not the agent speaking.
+        assert_eq!(session.quiet_ms(now_ms()), None);
+        // Quitting leaves an adopted terminal running in the host.
+        let report = pm.kill_all();
+        assert_eq!(report.requested, 0);
+        assert!(host.client.list().unwrap()[0].exited.is_none());
+        assert!(!session.shutdown.load(Ordering::SeqCst));
+        // The next terminal lands above the adopted ones.
+        let (id, generation) = pm.allocate_session_identity().unwrap();
+        assert!(id > 41 && generation > 9, "{id} {generation}");
+        // A second pass finds nothing free: the session is now attached.
+        assert_eq!(
+            pm.adopt_from(app.handle().clone(), &host.client, "inst-t"),
+            0
+        );
+        // "Quit and Stop All" stops it in the host as well.
+        pm.stop_all_on_quit();
+        let report = pm.kill_all_on_exit();
+        assert_eq!(report.requested, 1);
+        assert!(session.shutdown.load(Ordering::SeqCst));
+        assert!(wait(&|| host
+            .client
+            .list()
+            .unwrap()
+            .iter()
+            .all(|s| s.exited.is_some())));
+    }
+
+    /// The agent in an adopted terminal still holds the token the previous
+    /// launch minted. Adoption must make this launch's bridge accept it under
+    /// the same identity, spawn-tree position included.
+    #[cfg(unix)]
+    #[test]
+    fn adopt_from_gives_the_held_bridge_token_back_its_identity() {
+        use crate::pty_hosted::tests::{command, InProcessHost};
+        use tauri::Manager;
+        let instance = instance_token().to_string();
+        let token = "f".repeat(32);
+        let key = crate::adoption_seal::key().unwrap();
+        // As a spawn while a delegation is pending seals it, then as the
+        // reseal after binding writes it: depth 2 under pty 17.
+        let mut sealed = crate::pty_hosted::HostedMeta {
+            v: 1,
+            id: 52,
+            generation: 4,
+            kind: "desktop".into(),
+            cwd: "/tmp".into(),
+            instance: instance.clone(),
+            bridge: Some(crate::context::verifier(&token)),
+            ..Default::default()
+        };
+        crate::pty_hosted::seal_for_spawn(&mut sealed, &key, true);
+        let meta = serde_json::to_string(&sealed).unwrap();
+        let host = InProcessHost::start("adoptctx");
+        let (child, master) = crate::pty_hosted::spawn(
+            &host.client,
+            &command("while :; do sleep 0.1; done"),
+            80,
+            24,
+            Some(meta),
+        )
+        .expect("hosted spawn");
+        // The reseal after binding, bound to the host's own id for the session.
+        let host_id = host.client.list().unwrap()[0].id;
+        sealed.depth = Some(2);
+        sealed.parent = Some(17);
+        sealed.host = Some(host_id);
+        sealed.seal = Some(crate::adoption_seal::seal(&key, &sealed));
+        host.client
+            .set_meta(host_id, Some(serde_json::to_string(&sealed).unwrap()))
+            .unwrap();
+        drop(master);
+        drop(child);
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while std::time::Instant::now() < deadline
+            && host.client.list().unwrap()[0].attached != Some(false)
+        {
+            thread::sleep(Duration::from_millis(50));
+        }
+
+        let app = tauri::test::mock_app();
+        app.manage(crate::context::ContextBridge::default());
+        let bridge = app.state::<crate::context::ContextBridge>();
+        assert_eq!(bridge.caller_for_test(&token), None);
+        let pm = PtyManager::default();
+        assert_eq!(
+            pm.adopt_from(app.handle().clone(), &host.client, &instance),
+            1
+        );
+        match bridge.caller_for_test(&token) {
+            Some(crate::context::Caller::Agent(agent)) => {
+                assert_eq!((agent.pty_id, agent.cwd.as_str()), (52, "/tmp"));
+                assert_eq!(agent.instance, instance);
+                assert_eq!((agent.spawn_depth, agent.parent_pty_id), (2, Some(17)));
+            }
+            other => panic!("the held token must name the adopted terminal: {other:?}"),
+        }
+        assert_eq!(bridge.caller_for_test(&"0".repeat(32)), None);
+        let _ = pm.kill(52);
+    }
+
+    /// LOW 4 of the review: when the readopt is refused because a live terminal
+    /// already holds that pty id, a failed adoption must not retire the live
+    /// terminal's credential.
+    #[cfg(unix)]
+    #[test]
+    fn a_refused_readopt_never_retires_the_live_terminals_credential() {
+        use tauri::Manager;
+        let app = tauri::test::mock_app();
+        app.manage(crate::context::ContextBridge::default());
+        let bridge = app.state::<crate::context::ContextBridge>();
+        bridge.set_port_for_test(4242);
+        let (_, live) = bridge.mint_agent(53, "/w/live", None).unwrap();
+
+        let key = crate::adoption_seal::key().unwrap();
+        let mut meta = crate::pty_hosted::HostedMeta {
+            v: 1,
+            id: 53,
+            generation: 1,
+            kind: "desktop".into(),
+            cwd: "/w/other".into(),
+            instance: instance_token().to_string(),
+            bridge: Some(crate::context::verifier(&"9".repeat(32))),
+            host: Some(7),
+            ..Default::default()
+        };
+        crate::pty_hosted::seal_for_spawn(&mut meta, &key, false);
+        let readopted = readopt_credential(app.handle(), &meta, 7);
+        assert!(!readopted, "pty 53 already has a credential");
+        undo_readopt(app.handle(), 53, readopted);
+        match bridge.caller_for_test(&live) {
+            Some(crate::context::Caller::Agent(agent)) => assert_eq!(agent.cwd, "/w/live"),
+            other => panic!("the live terminal lost its credential: {other:?}"),
+        }
+
+        // A readopt that did register is what a failed adoption hands back.
+        let mut meta = meta.clone();
+        meta.id = 54;
+        meta.seal = None;
+        crate::pty_hosted::seal_for_spawn(&mut meta, &key, false);
+        let readopted = readopt_credential(app.handle(), &meta, 7);
+        assert!(readopted);
+        assert!(bridge.caller_for_test(&"9".repeat(32)).is_some());
+        undo_readopt(app.handle(), 54, readopted);
+        assert_eq!(bridge.caller_for_test(&"9".repeat(32)), None);
+        let _ = bridge.retire_agent(53);
+    }
+
+    /// Unsealed metadata (anything a process could write through the host) is
+    /// adopted as a terminal, with no credential.
+    #[cfg(unix)]
+    #[test]
+    fn unsealed_metadata_never_registers_a_credential() {
+        use tauri::Manager;
+        let app = tauri::test::mock_app();
+        app.manage(crate::context::ContextBridge::default());
+        let token = "8".repeat(32);
+        let meta = crate::pty_hosted::HostedMeta {
+            v: 1,
+            id: 55,
+            kind: "desktop".into(),
+            instance: instance_token().to_string(),
+            bridge: Some(crate::context::verifier(&token)),
+            depth: Some(0),
+            ..Default::default()
+        };
+        assert!(!readopt_credential(app.handle(), &meta, 7));
+        let bridge = app.state::<crate::context::ContextBridge>();
+        assert_eq!(bridge.caller_for_test(&token), None);
+    }
+
+    #[test]
+    fn without_the_host_the_launch_tag_is_the_instance_tag() {
+        if !crate::pty_hosted::enabled() {
+            assert_eq!(launch_token(), instance_token());
+        }
     }
 }

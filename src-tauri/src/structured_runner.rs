@@ -161,6 +161,10 @@ pub async fn structured_runner_spawn(
     // Native CLI updaters off while the user's auto-update setting is off.
     cmd.envs(crate::cli_update::native_update_env());
     cmd.env("CANOPY", "1");
+    // An inherited stable socket (an app started from another Canopy's
+    // terminal) would win over the port below in canopy-hook and send this
+    // child's token to the other instance.
+    cmd.env_remove("CANOPY_CTX_SOCKET");
     if let Some(ctx) = app.try_state::<crate::context::ContextBridge>() {
         let mut bridge = ctx.mint_attempt(&cwd, &binding);
         let mut waited = std::time::Duration::ZERO;

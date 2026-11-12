@@ -57,6 +57,8 @@ export interface FileTreeFs {
   trash?(path: string): Promise<unknown>;
   reveal?(path: string): Promise<unknown>;
   upload?(directory: string, kind: "files" | "folder"): Promise<unknown>;
+  /** Save a file or folder of a remote workspace onto this computer. */
+  download?(path: string, isDir: boolean): Promise<unknown>;
 }
 
 /** Mirrors `Notify` in src/types.ts. Duplicated rather than imported because
@@ -582,6 +584,9 @@ export function FileTree({
         onClick: () => setPrompt({ kind: "new-dir", dir, value: "" }),
       },
       ...uploadItems(dir),
+      ...(fs.download
+        ? [{ label: "Download…", onClick: () => void run("Download", () => fs.download!(path, isDir), parentOf(path)) }]
+        : []),
       { separator: true, label: "" },
       {
         label: "Rename…",

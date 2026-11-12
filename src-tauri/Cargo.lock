@@ -712,6 +712,7 @@ dependencies = [
  "block2",
  "cairo-rs",
  "canopy-core",
+ "canopy-pty-host",
  "chacha20poly1305",
  "chrono",
  "cpal",
@@ -788,6 +789,18 @@ dependencies = [
  "serde_json",
  "sysinfo",
  "tokio",
+]
+
+[[package]]
+name = "canopy-pty-host"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "libc",
+ "portable-pty",
+ "serde",
+ "serde_json",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
