@@ -190,6 +190,7 @@ pub fn split_osc(body: &[u8]) -> Option<(u32, &[u8])> {
     Some((num.parse().ok()?, rest))
 }
 
+#[cfg(test)]
 /// `rgb:rrrr/gggg/bbbb` as xterm answers colour queries (each byte doubled).
 pub fn rgb_spec(r: u8, g: u8, b: u8) -> String {
     format!("rgb:{r:02x}{r:02x}/{g:02x}{g:02x}/{b:02x}{b:02x}")

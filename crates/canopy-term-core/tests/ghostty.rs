@@ -286,3 +286,16 @@ fn scrollback_is_capped_in_lines_though_the_engine_counts_bytes() {
     );
     assert!(s.scrollback_row(5).is_none());
 }
+
+/// Found by the split-at-every-byte tests: a combining mark that arrives in a
+/// later `vt_write` than its base character is dropped by the engine. Real PTY
+/// reads can split anywhere, so this is a gap to close (upstream, or by carrying
+/// the last character across writes) before the engine becomes the default.
+#[test]
+#[ignore = "known gap: libghostty-vt drops a combining mark sent in a later write"]
+fn a_combining_mark_in_a_later_write_is_kept() {
+    let mut s = Screen::new(10, 2);
+    s.advance(b"e");
+    s.advance("\u{301}x".as_bytes());
+    assert_eq!(row_text(&s, 0), "e\u{301}x");
+}

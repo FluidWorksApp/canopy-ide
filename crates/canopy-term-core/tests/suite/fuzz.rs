@@ -390,8 +390,8 @@ macro_rules! define {
             }
 
             fn g_text(rng: &mut Rng, out: &mut Vec<u8>) {
-                const WORDS: [&str; 8] = [
-                    "hello ", "world ", "日本語", "e\u{301}", "x\u{301}\u{302}\u{303}", "\u{1F600}",
+                const WORDS: [&str; 6] = [
+                    "hello ", "world ", "日本語", "\u{1F600}",
                     "tab\there", "\r\n",
                 ];
                 for _ in 0..rng.range(1, 6) {

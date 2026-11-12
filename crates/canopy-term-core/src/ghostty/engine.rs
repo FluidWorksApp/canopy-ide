@@ -3,7 +3,7 @@
 //! `!Sync`, and nothing here is `Send` either (it holds `Rc`s the engine's
 //! callbacks write to). `mod.rs` owns the thread and ships closures to it.
 
-use super::scan::{base64_decode, rgb_spec, split_osc, Osc, Scanner, Step};
+use super::scan::{base64_decode, split_osc, Osc, Scanner, Step};
 use super::{Event, PromptKind, PromptMark, RowMark, MAX_CLIPBOARD_BYTES, MAX_PENDING_EVENTS};
 use crate::frame::{
     Attrs, Cell, Color, Cursor, CursorShape, Damage, Frame, Modes, MouseEncoding, MouseMode,
@@ -17,7 +17,7 @@ use libghostty_vt::screen::{
     Cell as GCell, CellContentTag, CellWide, RowSemanticPrompt, Screen as ActiveScreen,
 };
 use libghostty_vt::selection::Selection;
-use libghostty_vt::style::{PaletteIndex, RgbColor, Style, StyleColor, Underline};
+use libghostty_vt::style::{RgbColor, Style, StyleColor, Underline};
 use libghostty_vt::terminal::{
     ConformanceLevel, DeviceAttributes, DeviceType, Mode, Point, PointCoordinate,
     PrimaryDeviceAttributes, SecondaryDeviceAttributes, TertiaryDeviceAttributes,
@@ -570,7 +570,6 @@ impl Engine {
         let Some((num, rest)) = split_osc(&osc.body) else {
             return;
         };
-        let end: &str = if osc.bel { "\x07" } else { "\x1b\\" };
         match num {
             0 | 2 => {
                 let text = String::from_utf8_lossy(rest);
@@ -583,39 +582,10 @@ impl Engine {
                 }
                 self.title = if title.is_empty() { None } else { Some(title) };
             }
-            4 => {
-                let text = String::from_utf8_lossy(rest);
-                let mut it = text.split(';');
-                while let (Some(index), Some(spec)) = (it.next(), it.next()) {
-                    if spec != "?" {
-                        continue;
-                    }
-                    let Ok(i) = index.parse::<u8>() else { continue };
-                    if let Ok(p) = self.term.color_palette() {
-                        let c = p.get(PaletteIndex(i));
-                        let s = format!("\x1b]4;{i};{}{end}", rgb_spec(c.r, c.g, c.b));
-                        self.reply(s.into_bytes());
-                    }
-                }
-            }
-            10..=12 => {
-                let text = String::from_utf8_lossy(rest);
-                for (k, piece) in text.split(';').enumerate() {
-                    let n = num + k as u32;
-                    if piece != "?" || n > 12 {
-                        continue;
-                    }
-                    let color = match n {
-                        10 => self.term.fg_color(),
-                        11 => self.term.bg_color(),
-                        _ => self.term.cursor_color(),
-                    };
-                    if let Ok(Some(c)) = color {
-                        let s = format!("\x1b]{n};{}{end}", rgb_spec(c.r, c.g, c.b));
-                        self.reply(s.into_bytes());
-                    }
-                }
-            }
+            // OSC 4, 10, 11, 12 queries are answered by the engine itself (CI
+            // showed a second reply when we answered too), mirroring the
+            // terminator, from the colours the program set or the defaults
+            // from `set_reply_colors`.
             52 => self.osc52(&osc, rest),
             133 => {
                 let mut parts = rest.split(|&b| b == b';');

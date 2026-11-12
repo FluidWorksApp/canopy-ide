@@ -37,8 +37,7 @@
 //! and prompt marks (OSC 133 rows), and answers device attributes, cursor
 //! position and mode queries itself (the DA reply is set to `CSI ? 6 c`, as
 //! before). It has no hook for colour queries, clipboard policy or reset
-//! notification, so a small scanner (`scan.rs`) walks the same stream for OSC 4,
-//! 10, 11, 12, 52, 133, BEL and `ESC c`, and the host reacts at the exact byte
+//! notification, so a small scanner (`scan.rs`) walks the same stream for OSC 52, 133, BEL and `ESC c`, and the host reacts at the exact byte
 //! offset, keeping replies in stream order.
 //!
 //! # Replies, events and policy
