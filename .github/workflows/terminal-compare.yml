@@ -20,7 +20,9 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-15]
+        # ubuntu-latest now resolves to Ubuntu 26.04, which Playwright 1.56.1
+        # cannot install Chromium on, so Linux is pinned to 24.04.
+        os: [ubuntu-24.04, macos-15]
     defaults:
       run:
         shell: bash
