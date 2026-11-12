@@ -218,13 +218,29 @@ mod hosted {
             client: &Client,
             id: u32,
         ) -> Result<(), String> {
+            // Taken out of the table for the duration: a second take back
+            // started meanwhile finds nothing and is refused, instead of
+            // replacing this one's new connection. Put back if this fails.
             let handed = self
                 .handed
                 .lock()
                 .unwrap()
-                .get(&id)
-                .cloned()
+                .remove(&id)
                 .ok_or_else(|| format!("terminal {id} is not in a native window"))?;
+            let result = self.take_back_inner(app, client, id, &handed);
+            if result.is_err() {
+                self.handed.lock().unwrap().insert(id, handed);
+            }
+            result
+        }
+
+        fn take_back_inner<R: tauri::Runtime>(
+            &self,
+            app: AppHandle<R>,
+            client: &Client,
+            id: u32,
+            handed: &Handed,
+        ) -> Result<(), String> {
             let listed = client
                 .list_within(Duration::from_secs(2))
                 .map_err(|e| format!("could not ask the terminal host: {e}"))?;
@@ -276,7 +292,6 @@ mod hosted {
                 // Off this thread: it sleeps between the two sizes.
                 thread::spawn(move || session.nudge_redraw());
             }
-            self.handed.lock().unwrap().remove(&id);
             Ok(())
         }
 
@@ -498,6 +513,14 @@ mod tests {
             ended: std::sync::Arc<AtomicBool>,
         }
 
+        impl Drop for Window {
+            /// The window's process exiting: its connection goes, whatever
+            /// still holds a copy of the socket (the reader thread).
+            fn drop(&mut self) {
+                self.master.detach();
+            }
+        }
+
         impl Window {
             fn open(client: &HostClient, host_id: u32) -> Window {
                 let (master, _) = HostMaster::attach(client.clone(), host_id, 0).unwrap();
@@ -643,6 +666,7 @@ mod tests {
             // The window's process now exits and drops its handles. That
             // connection was already replaced, so it must not release the
             // session out from under the app.
+            window.master.detach();
             drop(window);
             thread::sleep(Duration::from_millis(300));
             assert_eq!(attached(&host), Some(true));

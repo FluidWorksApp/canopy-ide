@@ -747,6 +747,15 @@ mod adoption {
     use std::time::Duration;
 
     pub(super) fn parse(info: &SessionInfo) -> Option<HostedMeta> {
+        // A native window's session is never a terminal's, whatever its
+        // metadata says: its spawn key is fixed at spawn and says what it is.
+        if info
+            .key
+            .as_deref()
+            .is_some_and(|k| native_claim(k).is_some())
+        {
+            return None;
+        }
         let meta: HostedMeta = serde_json::from_str(info.meta.as_deref()?).ok()?;
         (meta.v == 1 && meta.id != 0).then_some(meta)
     }
