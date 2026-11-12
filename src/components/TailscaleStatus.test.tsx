@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 const openLink = vi.fn();
 vi.mock("../links", async (importOriginal) => ({
@@ -8,14 +8,21 @@ vi.mock("../links", async (importOriginal) => ({
 vi.mock("../ipc", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../ipc")>()),
   onTunnelState: async () => () => {},
+  onTailnetRemoteState: async () => () => {},
 }));
-import { render, screen, waitFor, within } from "@testing-library/react";
+import { act, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { mockCommands } from "../test/setup";
 import { setTeamIdentityFetchForTests } from "../teamIdentity";
+import type * as ipc from "../ipc";
 import type { TailscaleMachine, TailscaleView } from "../ipc";
 import { TailscaleStatus } from "./TailscaleStatus";
 import { RemoteSettings } from "./SettingsDialog";
+import {
+  applyRemoteStateForTests,
+  resetTailnetRemoteForTests,
+  TAILNET_OPEN_EVENT,
+} from "../tailnetRemote";
 
 // Invented names and addresses only.
 const machine = (name: string, n: number, extra: Partial<TailscaleMachine> = {}): TailscaleMachine => ({
@@ -142,17 +149,6 @@ describe("Tailscale row states", () => {
     await screen.findByText("Running");
     expect(screen.queryByText(/offline/)).toBeNull();
   });
-
-  it("Connect is not wired yet: disabled, Coming soon", async () => {
-    show(base);
-    await screen.findByText("Running");
-    const connects = screen.getAllByRole("button", { name: "Connect" });
-    expect(connects).toHaveLength(3);
-    for (const b of connects) {
-      expect(b).toBeDisabled();
-      expect(b.parentElement).toHaveAttribute("title", "Coming soon");
-    }
-  });
 });
 
 describe("Allow", () => {
@@ -217,5 +213,204 @@ describe("Tailscale row in Remote access", () => {
     expect(await within(row).findByText("Tailscale is off")).toBeInTheDocument();
     expect(screen.getByRole("switch", { name: "Remote access" })).toBeInTheDocument();
     setTeamIdentityFetchForTests(null);
+  });
+});
+
+// Connect → the other machine's terminals. Placeholder names only.
+describe("Connect", () => {
+  afterEach(() => resetTailnetRemoteForTests());
+
+  const WORK = "nWORKMAC1CNTRL";
+  const work = machine("work-mac", 3, { stableId: WORK });
+  const one = view({ thisMachine: machine("this-mac", 1), machines: [work] });
+  const terminals: ipc.TailnetRemoteTerminal[] = [
+    { remoteId: 1, title: "zsh", cwd: "~/code/api", command: null, status: "running", exitCode: null },
+    { remoteId: 2, title: "claude", cwd: "~/code/web", command: "claude", status: "running", exitCode: null },
+    { remoteId: 3, title: "zsh", cwd: "~/scratch", command: null, status: "exited", exitCode: 0 },
+  ];
+  const row = (name: string) => screen.getByLabelText(`Allow ${name}`).closest(".resume-row") as HTMLElement;
+
+  it("A: Connect is enabled whether or not the machine is allowed", async () => {
+    show(view({ machines: [work, machine("laptop", 2, { allowed: true })] }));
+    await screen.findByText("Running");
+    for (const b of screen.getAllByRole("button", { name: "Connect" })) expect(b).toBeEnabled();
+  });
+
+  it("A: a machine without a stable id cannot be connected to", async () => {
+    show(view({ machines: [machine("node-e", 7, { stableId: null })] }));
+    await screen.findByText("Running");
+    expect(screen.getByRole("button", { name: "Connect" })).toBeDisabled();
+  });
+
+  it("B: pressing Connect shows Connecting… until the list arrives", async () => {
+    let release!: (t: unknown) => void;
+    show(one, [], {
+      tailnet_remote_list: () => new Promise((r) => (release = r)),
+    });
+    await userEvent.click(await screen.findByRole("button", { name: "Connect" }));
+    expect(await screen.findByRole("button", { name: "Connecting…" })).toBeDisabled();
+    release(terminals);
+    expect(await screen.findByRole("button", { name: "Disconnect" })).toBeInTheDocument();
+  });
+
+  it("C: the row expands with Terminals on <machine>, a count, and a row per terminal", async () => {
+    const calls: string[] = [];
+    show(one, calls, {
+      tailnet_remote_list: (a: Record<string, unknown>) => {
+        calls.push(`list ${a.stableId}`);
+        return terminals;
+      },
+    });
+    await userEvent.click(await screen.findByRole("button", { name: "Connect" }));
+    expect(await screen.findByText("Terminals on work-mac")).toBeInTheDocument();
+    expect(calls).toContain(`list ${WORK}`);
+    const list = screen.getByText("Terminals on work-mac").closest(".ts-terminals") as HTMLElement;
+    expect(within(list).getByText("3")).toBeInTheDocument();
+    expect(within(list).getByText("~/code/api")).toBeInTheDocument();
+    expect(within(list).getAllByText("running")).toHaveLength(2);
+    expect(within(list).getByText("exited")).toBeInTheDocument();
+    // Open on the two running ones; nothing to press on the exited one.
+    expect(within(list).getAllByRole("button", { name: /^Open / })).toHaveLength(2);
+  });
+
+  it("C: the list refreshes while open", async () => {
+    let n = 0;
+    mockCommands({
+      tailscale_status: one,
+      tailnet_remote_list: () => (++n === 1 ? terminals.slice(0, 1) : terminals),
+    });
+    render(<TailscaleStatus pollMs={30} />);
+    await userEvent.click(await screen.findByRole("button", { name: "Connect" }));
+    expect(await screen.findByText("Terminals on work-mac")).toBeInTheDocument();
+    await waitFor(() => expect(screen.getByText("exited")).toBeInTheDocument());
+  });
+
+  it("C: Open registers a proxy tab and tells the project view; a second Open focuses it", async () => {
+    const calls: string[] = [];
+    const seen: unknown[] = [];
+    const on = (e: Event) => seen.push((e as CustomEvent).detail);
+    window.addEventListener(TAILNET_OPEN_EVENT, on);
+    show(one, calls, {
+      tailnet_remote_list: () => terminals,
+      tailnet_remote_open: (a: Record<string, unknown>) => {
+        calls.push(`open ${a.stableId} ${a.remoteId}`);
+        return { ptyId: 41, sessionGeneration: 1, cwd: "~/code/api", title: "zsh", machine: "work-mac" };
+      },
+    });
+    await userEvent.click(await screen.findByRole("button", { name: "Connect" }));
+    await userEvent.click(await screen.findByRole("button", { name: "Open zsh ~/code/api" }));
+    await waitFor(() => expect(seen).toHaveLength(1));
+    expect(seen[0]).toMatchObject({ ptyId: 41, machine: "work-mac", cwd: "~/code/api" });
+    expect(await screen.findByText("running · in use here")).toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "Open zsh ~/code/api" }));
+    await waitFor(() => expect(seen).toHaveLength(2));
+    expect(calls.filter((c) => c.startsWith("open"))).toEqual([`open ${WORK} 1`]);
+    window.removeEventListener(TAILNET_OPEN_EVENT, on);
+  });
+
+  it("C: Disconnect closes this machine's tabs and collapses the row", async () => {
+    const calls: string[] = [];
+    show(one, calls, {
+      tailnet_remote_list: () => terminals,
+      tailnet_remote_open: () => ({ ptyId: 41, sessionGeneration: 1, cwd: "~/code/api", title: "zsh", machine: "work-mac" }),
+      tailnet_remote_close: (a: Record<string, unknown>) => void calls.push(`close ${a.ptyId}`),
+    });
+    await userEvent.click(await screen.findByRole("button", { name: "Connect" }));
+    await userEvent.click(await screen.findByRole("button", { name: "Open zsh ~/code/api" }));
+    await userEvent.click(await screen.findByRole("button", { name: "Disconnect" }));
+    expect(calls).toContain("close 41");
+    expect(screen.queryByText("Terminals on work-mac")).toBeNull();
+    expect(screen.getByRole("button", { name: "Connect" })).toBeEnabled();
+  });
+
+  it("F: Tailscale off on this Mac, with Open Tailscale", async () => {
+    const calls: string[] = [];
+    show(one, calls, {
+      tailnet_remote_list: () => {
+        throw "tailscale_off";
+      },
+    });
+    await userEvent.click(await screen.findByRole("button", { name: "Connect" }));
+    expect(await screen.findByText("Tailscale is off on this Mac.")).toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "Open Tailscale" }));
+    await waitFor(() => expect(calls).toContain("open"));
+  });
+
+  it("F: a refused or silent machine gets the same 'didn't accept' text, and Try again retries", async () => {
+    let n = 0;
+    show(one, [], {
+      tailnet_remote_list: () => {
+        if (++n === 1) throw "refused";
+        return terminals;
+      },
+    });
+    await userEvent.click(await screen.findByRole("button", { name: "Connect" }));
+    expect(await screen.findByText("work-mac didn't accept the connection.")).toBeInTheDocument();
+    expect(
+      screen.getByText("Canopy may not be running there, or work-mac hasn't allowed this Mac."),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText("On work-mac: Settings → Remote access → turn Allow on for this Mac."),
+    ).toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "Try again" }));
+    expect(await screen.findByText("Terminals on work-mac")).toBeInTheDocument();
+  });
+
+  it("F: a build with no such command shows 'didn't accept', never an error dump", async () => {
+    // No tailnet_remote_list mock: the harness throws 'Unmocked Tauri command'.
+    show(one);
+    await userEvent.click(await screen.findByRole("button", { name: "Connect" }));
+    expect(await screen.findByText("work-mac didn't accept the connection.")).toBeInTheDocument();
+    expect(screen.queryByText(/Unmocked/)).toBeNull();
+    // The rest of the row still works.
+    expect(screen.getByRole("switch", { name: "Allow work-mac" })).toBeEnabled();
+  });
+
+  it("F: an older Canopy over there", async () => {
+    show(one, [], {
+      tailnet_remote_list: () => {
+        throw "older_canopy";
+      },
+    });
+    await userEvent.click(await screen.findByRole("button", { name: "Connect" }));
+    expect(
+      await screen.findByText("work-mac runs an older Canopy that can't share terminals. Update it."),
+    ).toBeInTheDocument();
+  });
+
+  it("F: Allow turned off over there says the tabs were closed", async () => {
+    show(one, [], {
+      tailnet_remote_list: () => terminals,
+      tailnet_remote_open: () => ({ ptyId: 41, sessionGeneration: 1, cwd: "~/code/api", title: "zsh", machine: "work-mac" }),
+    });
+    await userEvent.click(await screen.findByRole("button", { name: "Connect" }));
+    await userEvent.click(await screen.findByRole("button", { name: "Open zsh ~/code/api" }));
+    act(() =>
+      applyRemoteStateForTests({ ptyId: 41, stableId: WORK, state: "revoked", attempt: null, exitCode: null }),
+    );
+    expect(await screen.findByText("work-mac turned Allow off. Your tabs were closed.")).toBeInTheDocument();
+    expect(screen.queryByText("Terminals on work-mac")).toBeNull();
+    expect(within(row("work-mac")).getByRole("button", { name: "Connect" })).toBeEnabled();
+  });
+
+  it("F: a terminal that ended over there is said with its exit code", async () => {
+    show(one, [], {
+      tailnet_remote_list: () => terminals,
+      tailnet_remote_open: () => ({ ptyId: 41, sessionGeneration: 1, cwd: "~/code/api", title: "zsh", machine: "work-mac" }),
+    });
+    await userEvent.click(await screen.findByRole("button", { name: "Connect" }));
+    await userEvent.click(await screen.findByRole("button", { name: "Open zsh ~/code/api" }));
+    act(() =>
+      applyRemoteStateForTests({ ptyId: 41, stableId: WORK, state: "ended", attempt: null, exitCode: 0 }),
+    );
+    expect(await screen.findByText("This terminal ended on work-mac (exit 0).")).toBeInTheDocument();
+  });
+
+  it("Allow is untouched: the switch and its copy still work beside Connect", async () => {
+    const calls: string[] = [];
+    show(one, calls, { tailnet_remote_list: () => terminals });
+    await userEvent.click(await screen.findByRole("switch", { name: "Allow work-mac" }));
+    await waitFor(() => expect(calls).toEqual([`allow ${WORK} true`]));
+    expect(screen.getByTitle("May connect in to terminals on this machine")).toHaveTextContent("Allow");
   });
 });

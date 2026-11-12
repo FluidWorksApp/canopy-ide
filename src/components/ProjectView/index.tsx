@@ -49,6 +49,14 @@ import {
 import { Panel, PanelGroup } from "react-resizable-panels";
 import { commitMessageWithSessions } from "../../sessionDoc/trailers";
 import * as ipc from "../../ipc";
+import {
+  closeLink,
+  forgetLink,
+  linkForPty,
+  TAILNET_OPEN_EVENT,
+  useTailnetRemote,
+  type TailnetOpenDetail,
+} from "../../tailnetRemote";
 import { EditorDiskState } from "../../editorDiskState";
 import { format, matches, matchesModifierClick } from "../../shortcuts";
 import {
@@ -2456,6 +2464,38 @@ const ProjectViewBody = memo(function ProjectViewBody({
       );
     });
   }, [project.id, attachTerminal, thisInstance, terminalRecoveryMemory]);
+  // Settings → Tailscale → Open: a terminal on another machine, proxied by a
+  // local pty. Only the visible project takes it; attachTerminal re-focuses a
+  // tab that is already open for the same pty.
+  useEffect(() => {
+    if (!visible) return;
+    const onOpen = (event: Event) => {
+      const d = (event as CustomEvent<TailnetOpenDetail>).detail;
+      if (d) attachTerminal(d.ptyId, d.cwd, d.title, "⇄", true);
+    };
+    window.addEventListener(TAILNET_OPEN_EVENT, onOpen);
+    return () => window.removeEventListener(TAILNET_OPEN_EVENT, onOpen);
+  }, [visible, attachTerminal]);
+  // Allow turned off over there, or Disconnect here: the tabs go with the link.
+  const tailnet = useTailnetRemote();
+  const tailnetSeen = useRef(new Set<number>());
+  useEffect(() => {
+    for (const tab of tabsRef.current) {
+      if (tab.type !== "terminal") continue;
+      const ptyId = tab.attachId ?? tab.ptyId;
+      if (ptyId == null) continue;
+      const link = linkForPty(ptyId);
+      if (link) {
+        tailnetSeen.current.add(ptyId);
+        if (link.phase.kind === "revoked") {
+          forgetLink(ptyId);
+          closeTabRef.current?.(tab.id, "automatic");
+        }
+      } else if (tailnetSeen.current.delete(ptyId)) {
+        closeTabRef.current?.(tab.id, "automatic");
+      }
+    }
+  }, [tailnet]);
   useEffect(() => {
     if (!thisInstance) return;
     const groups = recoverLiveGroups(
@@ -7409,6 +7449,9 @@ const ProjectViewBody = memo(function ProjectViewBody({
     // once here covers a finished task and an abandoned one alike. recordTaskEnd
     // ignores a run that already settled, so "stopped" can't clobber "done".
     const closingTab = tabsRef.current.find((t) => t.id === id);
+    // A tab opened from another machine over Tailscale: let go of the link (the
+    // process over there keeps running).
+    if (closingTab?.type === "terminal") closeLink(closingTab.attachId ?? closingTab.ptyId ?? -1);
     // A terminal on another machine has no local folder to reap: its cwd is a
     // path on that machine, and no git call here may be made from it.
     if (closingTab?.type === "terminal" && closingTab.cwd && !closingTab.machine) {

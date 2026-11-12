@@ -30004,6 +30004,10 @@ a.btn-sm {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+/* A terminal opened from another machine over Tailscale: a link glyph in front,
+   and, while its link is down, what is happening and what can be done. */
+.tab-tailnet-glyph{display:inline-flex;flex:none;color:var(--accent, #f4b13d)}
+.tab-tailnet-state{display:inline-flex;align-items:center;gap:8px;flex:none;padding:0 8px;font-size:11px;color:var(--text-dim);white-space:nowrap}
 /* In "All workspaces", a coloured left edge tells the machines apart. */
 :root[data-all-workspaces="on"] .tabs .tab {
   box-shadow: inset 3px 0 0 #6e9fff;
