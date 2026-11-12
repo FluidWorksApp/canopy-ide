@@ -7,6 +7,11 @@
 # Trigger: push a tag (`git tag v0.1.0 && git push --tags`), or run it by hand
 # from the Actions tab to get artifacts without cutting a release.
 #
+# Bundled terminal app (beta): canopy-term-app is built by prepare-sidecar.mjs
+# in the macOS and Linux build jobs (pinned Zig installed first), placed in the
+# app next to the PTY host, and on macOS signed separately from the app; see
+# the verification steps in the build job. Not on Windows.
+#
 # Terminal app dry run: run it by hand with `term_app_dry_run` ticked to prove
 # that canopy-term-app and canopy-pty-host build for every platform the release
 # will bundle them on. Only the `term-app-dry-run` job runs; no tag, no draft,
@@ -173,7 +178,8 @@ jobs:
           # what users can run. Building on 24.04 would exclude 22.04 users.
           - platform: ubuntu-22.04
             target: x86_64-unknown-linux-gnu
-            args: ""
+            # Adds canopy-term-app to the externalBin list.
+            args: "--config src-tauri/tauri.release-linux.conf.json"
           # Windows: NSIS only. `targets: "all"` would also attempt an MSI via
           # WiX, whose light.exe fails on the runner — and NSIS is the format
           # the updater is configured for (installMode: passive) anyway.
@@ -210,9 +216,17 @@ jobs:
         with:
           targets: ${{ matrix.target }}
 
+      # prepare-sidecar.mjs (beforeBuildCommand) builds canopy-term-app, whose
+      # engine runs `zig build`, so Zig must be on PATH before tauri-action.
+      # Not on Windows: the terminal app is not bundled there.
+      - uses: ./.github/actions/install-zig
+        if: matrix.platform != 'windows-latest'
+
       - uses: swatinem/rust-cache@v2
         with:
-          workspaces: "./src-tauri -> target"
+          workspaces: |
+            ./src-tauri -> target
+            ./crates/canopy-term-app -> target
           key: ${{ matrix.target }}
 
       - run: npm ci
@@ -432,6 +446,94 @@ jobs:
             echo "::error::canopy-pty-host carries entitlements; it must carry none."
             exit 1
           fi
+
+      # The native terminal (beta) follows the same rules as the PTY host: it is
+      # not an externalBin on macOS (the bundler would give it the app's broad
+      # entitlements), prepare-sidecar.mjs signs a copy with the empty
+      # src-tauri/term-app-entitlements.plist and tauri.release-macos.conf.json
+      # places it at Contents/MacOS/canopy-term-app. Unlike the host check, this
+      # always asserts the binary is in the bundle (an unsigned build ships it
+      # unsigned); signature, hardened runtime, timestamp and zero entitlements
+      # are required whenever APPLE_CERTIFICATE is set. Not run by the dry run
+      # (no signing there).
+      - name: Verify the terminal app is bundled and signed (macOS)
+        if: startsWith(matrix.platform, 'macos')
+        shell: bash
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+        run: |
+          root="src-tauri/target/${{ matrix.target }}/release/bundle"
+          [ -d "$root" ] || root="src-tauri/target/release/bundle"
+          bin="$(find "$root/macos" -path '*.app/Contents/MacOS/canopy-term-app' | head -1)"
+          if [ -z "$bin" ]; then
+            echo "::error::canopy-term-app is missing from the app bundle."
+            exit 1
+          fi
+          ls -l "$bin"
+          archs="$(lipo -archs "$bin")"
+          want=arm64; [ "${{ matrix.target }}" = "x86_64-apple-darwin" ] && want=x86_64
+          [ "$archs" = "$want" ] || { echo "::error::canopy-term-app is $archs, expected $want."; exit 1; }
+          # It starts the host from beside itself.
+          [ -x "$(dirname "$bin")/canopy-pty-host" ] \
+            || { echo "::error::canopy-pty-host is not beside canopy-term-app."; exit 1; }
+          # No window opens; this checks it loads. The Intel binary needs Rosetta.
+          want_version="$(node -p 'require("./package.json").version')"
+          if [ "$want" = "x86_64" ]; then
+            out="$(arch -x86_64 "$bin" --version 2>&1)" || out="could not run under Rosetta"
+          else
+            out="$("$bin" --version 2>&1)" || { echo "::error::canopy-term-app --version failed: $out"; exit 1; }
+          fi
+          echo "canopy-term-app --version: $out"
+          case "$out" in *"$want_version"*) ;; *) echo "::warning::canopy-term-app --version does not mention $want_version." ;; esac
+          if [ -z "$APPLE_CERTIFICATE" ]; then
+            echo "APPLE_CERTIFICATE not set: unsigned build, signature not checked."
+            exit 0
+          fi
+          if [ -z "$APPLE_SIGNING_IDENTITY" ]; then
+            echo "::error::APPLE_CERTIFICATE is set but APPLE_SIGNING_IDENTITY is not, so the build was not signed as intended."
+            exit 1
+          fi
+          codesign --verify --strict --verbose=2 "$bin"
+          info="$(codesign -dvvv "$bin" 2>&1)"
+          echo "$info" | grep -E "Authority=|Timestamp=|flags=" || true
+          echo "$info" | grep -E "flags=.*\(runtime\)" >/dev/null \
+            || { echo "::error::canopy-term-app is not signed with the hardened runtime."; exit 1; }
+          echo "$info" | grep -E "^Timestamp=" >/dev/null \
+            || { echo "::error::canopy-term-app has no secure timestamp."; exit 1; }
+          echo "$info" | grep -E "^Authority=Developer ID Application" >/dev/null \
+            || { echo "::error::canopy-term-app is not signed with a Developer ID Application identity."; exit 1; }
+          ents="$(codesign -d --entitlements - --xml "$bin")" \
+            || { echo "::error::could not read the entitlements of canopy-term-app."; exit 1; }
+          echo "$ents"
+          if echo "$ents" | grep -q "<key>"; then
+            echo "::error::canopy-term-app carries entitlements; it must carry none."
+            exit 1
+          fi
+
+      # Linux: canopy-term-app is an externalBin (tauri.release-linux.conf.json),
+      # which the bundler puts in usr/bin of the deb, rpm and AppImage. Check the
+      # deb, which can be listed without extracting, and the binary's architecture.
+      - name: Verify the terminal app is bundled (Linux)
+        if: startsWith(matrix.platform, 'ubuntu')
+        shell: bash
+        run: |
+          set -euo pipefail
+          root="src-tauri/target/${{ matrix.target }}/release/bundle"
+          [ -d "$root" ] || root="src-tauri/target/release/bundle"
+          deb="$(find "$root/deb" -name '*.deb' | head -1)"
+          [ -n "$deb" ] || { echo "::error::no deb was produced."; exit 1; }
+          dpkg-deb -c "$deb" | grep -E ' \./usr/bin/canopy-term-app$' \
+            || { echo "::error::canopy-term-app is missing from $deb."; exit 1; }
+          tmp="$(mktemp -d)"
+          dpkg-deb -x "$deb" "$tmp"
+          file "$tmp/usr/bin/canopy-term-app"
+          file "$tmp/usr/bin/canopy-term-app" | grep -q "x86-64" \
+            || { echo "::error::canopy-term-app is not x86-64."; exit 1; }
+          ls -l "$tmp/usr/bin/canopy-term-app" "$tmp/usr/bin/canopy-pty-host"
+          # No display on the runner; this checks it loads and parses arguments.
+          "$tmp/usr/bin/canopy-term-app" --version
+          rm -rf "$tmp"
 
       # `tauri build` exits 0 even when signing fails ("a public key has been
       # found, but no private key"), so a missing or bad secret would publish a

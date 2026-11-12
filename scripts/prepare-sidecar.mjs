@@ -24,6 +24,16 @@
 // that replaces the bundle never deletes the binary a running host came from.
 // On Windows it is the named-pipe host (the app does not launch it there yet);
 // it is staged so every bundle has it.
+//
+// canopy-term-app is the native terminal window (beta). It is built only for
+// --release and never for Windows (it has no Windows host yet), so `tauri dev`
+// and debug builds do not need Zig, which its engine (libghostty-vt-sys) runs
+// from its build script. Unlike the two above it is not in the base
+// tauri.conf.json: the release configs add it (tauri.release-linux.conf.json as
+// an externalBin, tauri.release-macos.conf.json as a signed bundle file), so
+// CI jobs that stub the base externalBin entries are unaffected. It is its own
+// workspace root, so cargo puts it in crates/canopy-term-app/target; the build
+// below asks cargo where it went. It finds canopy-pty-host beside its own exe.
 import { execFileSync } from "node:child_process";
 import { copyFileSync, mkdirSync, existsSync, statSync } from "node:fs";
 import { dirname, join } from "node:path";
@@ -38,6 +48,12 @@ const profile = release ? "release" : "debug";
 const SIDECARS = [
   { name: "canopy-hook", manifest: join(root, "packages", "agent-hook", "Cargo.toml") },
   { name: "canopy-pty-host", manifest: join(root, "crates", "canopy-pty-host", "Cargo.toml") },
+  {
+    name: "canopy-term-app",
+    manifest: join(root, "crates", "canopy-term-app", "Cargo.toml"),
+    // Needs Zig, and has no Windows host: release builds on macOS and Linux only.
+    wanted: (triple, release) => release && !triple.includes("-windows-"),
+  },
 ];
 
 const hostTriple = () =>
@@ -62,7 +78,11 @@ const destDir = join(root, "src-tauri", "binaries");
 // application's externalBin before it exists.
 mkdirSync(destDir, { recursive: true });
 
-for (const { name, manifest } of SIDECARS) {
+for (const { name, manifest, wanted } of SIDECARS) {
+  if (wanted && !wanted(triple, release)) {
+    console.log(`prepare-sidecar: skipping ${name} (${profile}, ${triple})`);
+    continue;
+  }
   const dest = join(destDir, `${name}-${triple}${ext}`);
 
   // Ask cargo where it put the binary rather than assuming
@@ -121,7 +141,10 @@ for (const { name, manifest } of SIDECARS) {
   console.log(`prepare-sidecar: staged ${dest} (${profile}, ${triple})`);
 
   if (name === "canopy-pty-host" && release && triple.includes("-apple-darwin")) {
-    stageSignedHost(dest);
+    stageSigned(dest, "canopy-pty-host", "pty-host-entitlements.plist");
+  }
+  if (name === "canopy-term-app" && triple.includes("-apple-darwin")) {
+    stageSigned(dest, "canopy-term-app", "term-app-entitlements.plist");
   }
 }
 
@@ -135,14 +158,17 @@ for (const { name, manifest } of SIDECARS) {
 // only frameworks, externalBin and the app itself, never `macOS.files`, so
 // this signature is the one that ships.
 //
+// canopy-term-app is handled the same way with term-app-entitlements.plist
+// (also empty), placed at Contents/MacOS/canopy-term-app.
+//
 // With APPLE_SIGNING_IDENTITY unset the copy is staged unsigned, so a build
 // without signing still produces a complete bundle.
-function stageSignedHost(unsigned) {
-  const staged = join(destDir, "canopy-pty-host-signed");
+function stageSigned(unsigned, name, plist) {
+  const staged = join(destDir, `${name}-signed`);
   copyFileSync(unsigned, staged);
   const identity = process.env.APPLE_SIGNING_IDENTITY;
   if (!identity) {
-    console.log("prepare-sidecar: APPLE_SIGNING_IDENTITY not set, staged the PTY host unsigned");
+    console.log(`prepare-sidecar: APPLE_SIGNING_IDENTITY not set, staged ${name} unsigned`);
     return;
   }
   execFileSync(
@@ -153,7 +179,7 @@ function stageSignedHost(unsigned) {
       "runtime",
       "--timestamp",
       "--entitlements",
-      join(root, "src-tauri", "pty-host-entitlements.plist"),
+      join(root, "src-tauri", plist),
       "--sign",
       identity,
       staged,
@@ -161,5 +187,5 @@ function stageSignedHost(unsigned) {
     { stdio: "inherit" },
   );
   execFileSync("codesign", ["--verify", "--strict", staged], { stdio: "inherit" });
-  console.log(`prepare-sidecar: signed ${staged} with its own entitlements`);
+  console.log(`prepare-sidecar: signed ${staged} with ${plist}`);
 }
