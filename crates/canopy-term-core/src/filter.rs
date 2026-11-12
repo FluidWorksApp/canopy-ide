@@ -18,10 +18,7 @@
 
 use std::fmt::Write as _;
 
-/// Longest OSC body passed to the engine, in bytes.
-pub const MAX_OSC_BYTES: usize = 64 * 1024;
-/// Longest title (OSC 0, 1, 2 payload after the first `;`) passed on, in bytes.
-pub const MAX_TITLE_BYTES: usize = 4096;
+pub use crate::shared::{MAX_OSC_BYTES, MAX_TITLE_BYTES};
 /// Deepest kitty keyboard stack kept per screen; the oldest entry is dropped.
 pub const KITTY_STACK_MAX: usize = 256;
 

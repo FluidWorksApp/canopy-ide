@@ -16,11 +16,21 @@ rust-version = "1.85"
 # the frame contract (the renderer) do not pull in an emulator. Tests turn it on
 # through the self dev-dependency below, so plain `cargo test` covers it.
 screen = ["dep:alacritty_terminal"]
+# The same `Screen` on libghostty-vt (MIT OR Apache-2.0), exported as
+# `GhosttyScreen`. Off by default: it needs Zig 0.15.2 at build time (the sys
+# crate's build script runs `zig build`) and Rust 1.90, and it fetches ghostty
+# and Zig packages unless GHOSTTY_SOURCE_DIR / GHOSTTY_ZIG_SYSTEM_DIR are set.
+# Independent of `screen`; enable both to test the two engines side by side.
+ghostty = ["dep:libghostty-vt"]
 
 [dependencies]
 # Apache-2.0. Chosen by measurement: see PERF.md and tests/compare.rs. Its
 # types never appear in this crate's public API. `serde` is off.
 alacritty_terminal = { version = "0.26.0", default-features = false, optional = true }
+# Pinned exactly: pre-1.0, breaking changes expected (it pins ghostty a887df42
+# in its build script, so the engine version moves only with this line). Its
+# types never appear in this crate's public API. Rust 1.90, edition 2024.
+libghostty-vt = { version = "=0.2.2", optional = true }
 
 [dev-dependencies]
 canopy-term-core = { path = ".", features = ["screen"] }
@@ -37,6 +47,10 @@ opt-level = 3
 # comparison by however many asserts each crate happens to contain.
 [profile.dev.package."*"]
 opt-level = 3
+# libghostty-vt-sys picks Zig's optimize mode from the profile: debug info on
+# means a Zig Debug build (slow, safety checks that abort). Off gives
+# ReleaseFast, which is what a release build gets.
+debug = false
 debug-assertions = false
 overflow-checks = false
 
