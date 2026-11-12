@@ -601,6 +601,8 @@ if (process.argv[1] === new URL(import.meta.url).pathname) {
   const supervisor=new RuntimeSupervisor({directory:path.join(state,'runtime-recovery'),host:workspaces});
   // Agents running when the container restarted come back with their conversation.
   const sessionResume=process.env.CANOPY_AGENT_RESUME==='off'?null:new SessionResume({directory:path.join(state,'session-resume'),host:workspaces,harness,config});
+  // An image swap stops every terminal, so it waits for running agents (never for shells).
+  if(sessionResume)workspaces.runningAgents=(workspace,runtime)=>sessionResume.runningAgents(workspace,runtime);
   // Members run inside the workspace's capacity slice. A container created
   // before it existed joins it now, while it is stopped after boot.
   if(config.managedSession)await adoptCapacityGroup({config,host:workspaces,directory:path.join(state,'migrations'),configPath:process.env.CANOPY_HOST_CONFIG??'./host.json',authorizeRuntime:authority}).catch(error=>console.warn(`Capacity group adoption skipped: ${error.message}`));

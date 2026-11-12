@@ -179,11 +179,43 @@ export class DockerWorkspaces {
     const stopped=JSON.parse((await this.docker(['inspect',name])).stdout)[0];
     if(stopped?.State?.Running!==false)throw Error('Member runtime did not stop');
   }
+  /** Why an image swap must wait, or null when no agent would be lost. Only a
+   * running agent blocks: an open shell never does. Agents keep running with
+   * the IDE closed, and the swap stops them, so this asks the workspace itself
+   * (`runningAgents`, set by the gateway from the resume tracker), not the
+   * attached clients. Without that tracker every running session counts, since
+   * agents cannot be told from shells. A runtime that cannot be asked counts as
+   * busy. */
+  async sessionsBlockingSwap(workspace,ownerRunning,memberNames,{fetchImpl=fetch}={}){
+    const running=async(target,runtime)=>{
+      if(!runtime?.url)return null;
+      try{
+        if(typeof this.runningAgents==='function'){const count=await this.runningAgents(target,runtime);return Number.isSafeInteger(count)?count:null;}
+        const response=await fetchImpl(`${runtime.url}/sessions`,{headers:{authorization:`Bearer ${runtime.token}`},redirect:'error',signal:AbortSignal.timeout(5000)});
+        if(!response.ok)return null;
+        const sessions=await response.json();
+        return Array.isArray(sessions)?sessions.filter(session=>session?.exitCode===null).length:null;
+      }catch{return null;}
+    };
+    const noun=typeof this.runningAgents==='function'?'agent':'session';
+    if(ownerRunning){
+      const count=await running(workspace,this.runtimes.get(workspace.id)?.runtime);
+      if(count===null)return `The workspace could not be asked whether ${noun}s are running; the update waits until it stops`;
+      if(count>0)return `${count} ${noun}${count===1?'':'s'} still running; the update applies after the workspace stops and resumes`;
+    }
+    for(const name of memberNames){
+      const id=name.slice('canopy-ws-'.length);
+      const count=await running({id,parentWorkspaceId:workspace.id},this.runtimes.get(id)?.runtime);
+      if(count!==0)return `A shared member workspace has running or unknown ${noun}s; the update waits until it stops`;
+    }
+    return null;
+  }
   /** Update workspace, step (b): move the owner's container onto the release
    * image `reference`, the same way a resume does (upgradeRuntimeImage keeps
    * the previous container until the new one is ready). Members' containers
    * stop and move to the release on their next open. The VM is never touched.
-   * Returns {code:'updated'|'current'|'rolled-back'|'failed', detail?}. */
+   * Returns {code:'updated'|'current'|'deferred'|'rolled-back'|'failed', detail?}.
+   * `deferred`: sessions are running, so nothing was stopped. */
   async updateOwnerImage(workspace,reference){
     try{if(!workspaceImageReference(reference).includes('@sha256:'))throw Error();}catch{return {code:'failed',detail:'The release image must be an immutable digest'};}
     if(!this.releaseChannel)return {code:'failed',detail:'This host has no workspace release channel'};
@@ -197,6 +229,11 @@ export class DockerWorkspaces {
       if(current.Image===release.imageId)return {code:'current'};
       const wasRunning=current.State?.Running===true;
       const members=(await this.docker(['ps','--filter','name=^/canopy-ws-member-','--filter','status=running','--format','{{.Names}}'])).stdout.trim().split('\n').filter(Boolean);
+      // Stopping the container ends every terminal and agent in it. The image is
+      // already pulled; the container keeps its current one and moves to the
+      // release the next time it stops and resumes (ensure() below).
+      const busy=await this.sessionsBlockingSwap(workspace,wasRunning,members);
+      if(busy)return {code:'deferred',detail:busy};
       for(const member of members){
         if(!/^canopy-ws-member-[a-f0-9]{40}$/.test(member))throw Error('Unexpected member runtime name');
         await this.stopMemberRuntime({id:member.slice('canopy-ws-'.length),parentWorkspaceId:workspace.id});

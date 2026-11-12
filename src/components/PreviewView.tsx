@@ -37,6 +37,14 @@ import { previewEngine } from "../previewEngine";
 import { transportFor } from "../browserTransport";
 import * as ipc from "../ipc";
 import {
+  forgetTabThumb,
+  overlayOpen,
+  setTabThumb,
+  THUMB_CAPTURE_W,
+  THUMB_EVERY_MS,
+  THUMB_FIRST_MS,
+} from "../tabThumbs";
+import {
   previewFeedbackContext,
   previewShotContext,
   serverForUrl,
@@ -936,6 +944,34 @@ export function PreviewView({
       : await ipc.webviewSnapshot(rect.x, rect.y, rect.width, rect.height, SHOOT_WIDTH);
     return { png, cssWidth: rect.width };
   }, [painted, tabId]);
+
+  // Keep a small picture of the page for the tab's hover card and the switcher
+  // (tabThumbs.ts). Only while the page is in front and painted under the proxy
+  // engine, and never while something floats over the window, so the picture is
+  // the page and not the card that is showing it.
+  useEffect(() => {
+    if (engine !== "proxy" || !visible || !url) return;
+    let live = true;
+    const take = async () => {
+      const el = iframeRef.current;
+      const rect = el?.getBoundingClientRect();
+      if (!live || !rect || rect.width < 1 || rect.height < 1 || !painted() || overlayOpen()) return;
+      try {
+        const png = await ipc.webviewSnapshot(rect.x, rect.y, rect.width, rect.height, THUMB_CAPTURE_W);
+        if (live && !overlayOpen()) setTabThumb(tabId, png);
+      } catch {
+        /* a thumbnail is a convenience; the tile stands in */
+      }
+    };
+    const first = window.setTimeout(() => void take(), THUMB_FIRST_MS);
+    const every = window.setInterval(() => void take(), THUMB_EVERY_MS);
+    return () => {
+      live = false;
+      window.clearTimeout(first);
+      window.clearInterval(every);
+    };
+  }, [engine, visible, url, tabId, painted]);
+  useEffect(() => () => forgetTabThumb(tabId), [tabId]);
 
   /** Put the page into region-drag mode and wait for what the user drew.
    *  Resolves null if they pressed Escape, clicked without dragging, or walked

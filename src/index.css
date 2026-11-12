@@ -30512,6 +30512,29 @@ a.btn-sm {
 .agent-card-check-failed .agent-card-check-state { color: var(--danger, #f87171); opacity: 1; }
 .agent-card-check-running .agent-card-check-state { color: var(--warn, #f5a524); opacity: 1; }
 
+/* A preview tab's thumbnail: the last picture taken of its page, cropped to the
+   card from the top, or a globe tile with the address when there is none yet. */
+.tsw-page-shot {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  object-position: top left;
+}
+.tsw-preview-blank {
+  flex-direction: column;
+  gap: 6px;
+  padding: 0 10px;
+}
+.tsw-preview-url {
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 11px;
+}
+
 /* One line, never wrapped: the three-state count is the long one, so it gives
    way with an ellipsis (its full text is the title) rather than pushing the
    row to two lines. */
