@@ -43,7 +43,7 @@ Notes on the numbers:
 - Zig pin: 0.15.2 (major.minor must match exactly, per PACKAGING-LIBGHOSTTY.md;
   from `build.zig.zon`). Rust floor of the crate is 1.90, edition 2024; ours is 1.85.
 - Build time added: see the table (about 80 to 100 s cold in the latest run).
-- Offline / vendoring (docs and source, unverified in CI): the default build does
+- Offline / vendoring: see "Build proof" below (now verified in CI). Original note: the default build does
   `git clone` of ghostty at a pinned commit and lets Zig fetch packages from
   deps.files.ghostty.org during `cargo build`. Offline needs `GHOSTTY_SOURCE_DIR`
   plus `GHOSTTY_ZIG_SYSTEM_DIR` pointing at the deps tarball from
@@ -78,6 +78,65 @@ offline vendored build in CI, and a Windows CI run.
 
 ## Not verified
 
-macOS x86_64, Linux musl and Windows builds; the offline build; throughput at the
+(Superseded by "Build proof" for builds.) Throughput at the
 `Screen` level; the current engine's conformance in this job; anything about
 scrollback bytes per line beyond the 80 column case.
+
+## Build proof (CI run 43127243847, head d4c9b4b2, PR #809)
+
+Everything below is copied from RESULT lines in that run. Same pins as above:
+libghostty-vt 0.2.2, ghostty a887df42c56f6de86c0fe6da9c4eeca37931e083, Zig 0.15.2
+(official ziglang.org archives, sha256 checked), rustc 1.99.1.
+
+| target | runner | build | cold build time | conformance (18 fixtures) |
+| --- | --- | --- | --- | --- |
+| x86_64-pc-windows-msvc (native) | windows-2022 | pass, no extra env or flags | 143 s | 18/18, split identical, exit 0 |
+| x86_64-unknown-linux-musl (cross) | ubuntu-latest | pass | 91 s | 18/18, split identical (static-pie binary, ran natively) |
+| x86_64-apple-darwin (cross) | macos-15 (arm64) | pass | 111 s | 18/18, split identical (run under Rosetta, which was present) |
+| offline vendored, x86_64-linux-gnu | ubuntu-latest | pass | 117 s | 18/18, split identical |
+
+Windows notes: Zig installed from the official zip (sha256
+3a0ed1e8799a2f8ce2a6e6290a9ff22e6906f8227865911fb7ddedc3cc14cb0c); git
+core.longpaths was unset and was not needed; no env vars, flags or MSVC setup
+beyond the stock runner. Not recorded by CI: which Zig ABI the native build used
+(build.rs passes no -Dtarget when host == target) and whether the resulting
+binary depends on any DLL. Treat those as unverified.
+
+### Offline build, exactly what was done (job "offline")
+
+1. Online prefetch: `cargo fetch --locked` (crates, 202M registry for the spike
+   graph); `git init` + `git fetch --depth 1 origin a887df42...` + checkout of
+   https://github.com/ghostty-org/ghostty.git into `$VENDOR/ghostty-src`, `.git`
+   removed (the commit was read from the -sys crate's build.rs in CI); then, in
+   that source dir, `zig build --fetch=all --global-cache-dir $VENDOR/zig-global-cache`.
+2. Network block: `sudo unshare --net -- setpriv --reuid=<runner> ... env ... bash -c '...'`.
+   The new network namespace has only `lo` (not up), no addresses, no routes. CI
+   printed that github.com, deps.files.ghostty.org and index.crates.io fail to
+   resolve inside it, and again inside the build step itself.
+3. Build inside that namespace with a fresh `CARGO_TARGET_DIR`:
+   `GHOSTTY_SOURCE_DIR=$VENDOR/ghostty-src GHOSTTY_ZIG_SYSTEM_DIR=$VENDOR/zig-global-cache/p
+   cargo build --release --locked --offline --features ghostty --bin ghostty`.
+   Result: exit 0, 117 s, conformance 18/18. OUT_DIR had no `ghostty-src` (no
+   clone) and the build script never printed "Fetching ghostty".
+
+### What to vendor, sizes, how to pin
+
+| dir | what | size (CI) | pin |
+| --- | --- | --- | --- |
+| `~/.cargo/registry` (or `cargo vendor`) | crates for the spike graph | 202M (registry incl. unpacked sources) | `Cargo.lock` (sha256 of the spike lock: 7de0772a69bcbab944e0427fb4fc8a346de44ca3c1bb020b587fd3adf599c601) |
+| `ghostty-src` | ghostty tree at the -sys crate's `GHOSTTY_COMMIT`, no `.git` | 103M | commit a887df42c56f6de86c0fe6da9c4eeca37931e083; `git archive --format=tar HEAD \| sha256sum` = c06531802ab5d241c730f66b99880edb39b2aa43d5b87b868298d431547d3c82 |
+| `zig-global-cache/p` | Zig package cache, passed as `GHOSTTY_ZIG_SYSTEM_DIR` | 565M, 36 package dirs, 29991 files | dir names are Zig content hashes taken from ghostty's build.zig.zon; `tar --sort=name --mtime=@0 --owner=0 --group=0 --numeric-owner -cf - -C p . \| sha256sum` = 658eb131516e85bbb01a64e3da337d1d16df7828d1fbe482703a9f90cbb1538c; per-file `sha256sum` manifest sha256 = 1586a0d54a3d83ae4ceb4811f9721fc1645730cb29fc919225ba353b9dcfec9a |
+
+A second independent `zig build --fetch=all` into another directory produced the
+same tar sha256 and the same package list, so the Zig cache is reproducible.
+The `zig-global-cache` dir also holds an empty-ish `tmp`; only `p` is used. The
+Zig compiler itself is a fourth pinned input (sha256 values are in the workflow).
+Bumping libghostty-vt-sys changes the commit and therefore all three checksums.
+
+Not verified: that the 565M is the minimum needed (it is everything
+`--fetch=all` pulls, including packages for non-VT targets, and no trimming was
+tried); building with a read-only vendor dir; offline on macOS or Windows;
+aarch64 targets; Windows ABI and DLL dependency of the built binary; musl
+binaries on a real musl host (it ran on glibc Ubuntu); x86_64 macOS on real
+Intel hardware (Rosetta only); build times beyond this one run (they vary about
+2x run to run).
