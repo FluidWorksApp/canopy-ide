@@ -4894,6 +4894,11 @@ export interface TailscaleMachine {
   /** May connect in to terminals on this machine. */
   allowed: boolean;
 }
+/** Whether this app is listening for allowed machines (tailnet_serve.rs). */
+export interface TailscaleListener {
+  state: "off" | "listening" | "portInUse" | "noInterface" | "unavailable";
+  port: number;
+}
 export interface TailscaleView {
   kind: TailscaleKind;
   version: string | null;
@@ -4902,6 +4907,7 @@ export interface TailscaleView {
   thisMachine: TailscaleMachine | null;
   machines: TailscaleMachine[];
   allowError: string | null;
+  listener?: TailscaleListener;
 }
 export const tailscaleStatus = () => invoke<TailscaleView>("tailscale_status");
 export const tailscaleAllowSet = (stableId: string, allowed: boolean) =>
