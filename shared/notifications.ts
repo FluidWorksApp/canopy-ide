@@ -61,6 +61,10 @@ export interface AgentEventData {
   model?: string;
   /** AskUserQuestion payload, when this event is its PreToolUse. */
   questions?: PendingQuestion[];
+  /** The agent's Bash call just created this pull request. Read from the CLI's
+   *  own structured record (`tool_response.gitOperation.pr`), never from the
+   *  command text, so `--web`, `gh pr view` and an echoed string cannot match. */
+  prCreated?: { url: string };
   /** The Canopy plan this session was launched to carry out (CANOPY_PLAN_ID,
    *  stamped by canopy-hook as `canopy_plan_id`). */
   planId?: string;
@@ -216,6 +220,15 @@ export function parseAgentEvent(raw: string): AgentEventData | null {
       findings: Array.isArray(gate.findings) ? gate.findings : [],
       reason: String(gate.reason ?? ""),
     };
+  }
+  if (event === "PostToolUse" && tool === "Bash") {
+    const op = (
+      parsed.tool_response as
+        | { gitOperation?: { pr?: { action?: unknown; url?: unknown } } }
+        | undefined
+    )?.gitOperation?.pr;
+    if (op?.action === "created" && typeof op.url === "string" && op.url)
+      data.prCreated = { url: op.url };
   }
   if (event === "PreToolUse" && tool === "AskUserQuestion") {
     const input = parsed.tool_input as { questions?: unknown[] } | undefined;

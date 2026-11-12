@@ -230,6 +230,14 @@ it('orders terminal parsing with acknowledgements and rejects obsolete detaches'
  host.dispose();
 });
 
+it('download picks its save folder on the desktop and binds to this workspace',async()=>{
+ const {host,desktop,fetcher}=setup();
+ await host.invoke('execution_remote_download',{id:'job',source:'/workspace/data',kind:'folder',workspaceId:'wrong'});
+ expect(desktop.invoke).toHaveBeenCalledWith('execution_remote_download',{id:'job',source:'/workspace/data',kind:'folder',workspaceId:'alice',endpoint:connection.endpoint});
+ await host.listen('remote:download-progress',()=>{});expect(desktop.listen).toHaveBeenCalledWith('remote:download-progress',expect.any(Function));
+ expect(fetcher).not.toHaveBeenCalled();host.dispose();
+});
+
 it('local disk upload chooser stays on the desktop and binds to this workspace',async()=>{
  const {host,desktop,fetcher}=setup();
  await host.invoke('execution_remote_upload',{id:'test-job',destination:'/workspace/data',kind:'files',workspaceId:'wrong'});

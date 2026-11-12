@@ -712,6 +712,8 @@ dependencies = [
  "block2",
  "cairo-rs",
  "canopy-core",
+ "canopy-pty-host",
+ "canopy-term-net",
  "chacha20poly1305",
  "chrono",
  "cpal",
@@ -791,6 +793,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "canopy-pty-host"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "libc",
+ "portable-pty",
+ "serde",
+ "serde_json",
+ "windows-sys 0.59.0",
+]
+
+[[package]]
 name = "canopy-service"
 version = "0.1.0"
 dependencies = [
@@ -814,6 +828,14 @@ dependencies = [
  "sha2 0.10.9",
  "tempfile",
  "tokio",
+]
+
+[[package]]
+name = "canopy-term-net"
+version = "0.1.0"
+dependencies = [
+ "getrandom 0.2.17",
+ "libc",
 ]
 
 [[package]]

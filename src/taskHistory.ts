@@ -582,7 +582,7 @@ export function updateTaskRun(
  *  new is recorded. */
 export async function sweepStaleRuns(currentInstance?: string): Promise<void> {
   if (authoritative) {
-    const instance = currentInstance ?? (await ipc.instanceId());
+    const instance = currentInstance ?? (await ipc.launchId());
     await ipc.taskInterruptStale(instance).catch(() => 0);
     await refreshTaskHistory();
     return;

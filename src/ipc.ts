@@ -1537,6 +1537,8 @@ export interface RemoteUploadProgress {
   files:number; totalFiles:number; skipped:number; cancelled:boolean;
 }
 export const remoteUpload=(destination:string,kind:'files'|'folder',id:string)=>invoke<RemoteUploadProgress>('execution_remote_upload',{destination,kind,id});
+export const remoteDownload=(source:string,kind:'file'|'folder',id:string)=>invoke<RemoteUploadProgress>('execution_remote_download',{source,kind,id});
+export const onRemoteDownloadProgress=(cb:(progress:RemoteUploadProgress)=>void)=>listen<RemoteUploadProgress>('remote:download-progress',event=>cb(event.payload));
 export const remoteUploadCancel=(id:string)=>invoke<void>('execution_remote_upload_cancel',{id});
 export type MirrorCandidateCategory='secret'|'config'|'data'|'other';
 export interface MirrorCandidate{path:string;size:number;category:MirrorCandidateCategory}
@@ -3593,6 +3595,11 @@ export const onIntegrationHealth = (
 /** This app launch's instance tag — pair with SessionDigest.instance so a
  *  digest from another instance/run can't bind to this instance's terminals. */
 export const instanceId = () => invoke<string>("instance_id");
+/** This launch's own tag: stamps tasks and sweeps the previous launch's. Equal to
+ *  `instanceId` unless this launch adopted hosted terminals (whose token it
+ *  carries). A remote workspace host without the command answers with its
+ *  instance id, which is what it always used. */
+export const launchId = () => invoke<string>("launch_id").catch(() => instanceId());
 /** One batch per hook-bridge poll (500ms): every new JSONL line since the
  *  last, so a busy agent costs one React commit per window, not one per line. */
 export const onAgentEvents = async (
@@ -3855,6 +3862,8 @@ export interface PrInfo {
   checks: string;
   /** Human count for a tooltip, e.g. "3/4 checks passed" ("" when none). */
   checks_summary: string;
+  /** Checks that have not passed, by name (absent from an older backend). */
+  check_runs?: { name: string; state: "running" | "queued" | "failed" }[];
   /** Full head commit id ("" or absent when gh did not say). */
   head_sha?: string;
   /** Full base branch tip id ("" or absent when gh did not say). */
@@ -4864,6 +4873,41 @@ export const onTunnelState = (
   cb: (s: TunnelState) => void,
 ): Promise<UnlistenFn> =>
   listen<TunnelState>("tunnel:state", (e) => cb(e.payload));
+
+/** The installed Tailscale on this desktop (tailnet.rs). Canopy only reads its
+ *  status and opens its app; it never signs in or changes Tailscale. */
+export type TailscaleKind =
+  | "notInstalled"
+  | "off"
+  | "needsLogin"
+  | "needsApproval"
+  | "starting"
+  | "tooOld"
+  | "running";
+export interface TailscaleMachine {
+  name: string;
+  dnsName: string;
+  ip: string | null;
+  /** The only key Allow takes; null cannot be allowed. */
+  stableId: string | null;
+  online: boolean;
+  /** May connect in to terminals on this machine. */
+  allowed: boolean;
+}
+export interface TailscaleView {
+  kind: TailscaleKind;
+  version: string | null;
+  minVersion: string;
+  canOpenApp: boolean;
+  thisMachine: TailscaleMachine | null;
+  machines: TailscaleMachine[];
+  allowError: string | null;
+}
+export const tailscaleStatus = () => invoke<TailscaleView>("tailscale_status");
+export const tailscaleAllowSet = (stableId: string, allowed: boolean) =>
+  invoke<void>("tailscale_allow_set", { stableId, allowed });
+export const tailscaleAllowedList = () => invoke<string[]>("tailscale_allowed_list");
+export const tailscaleOpenApp = () => invoke<void>("tailscale_open_app");
 
 /** Which of these commands are installed (login-shell PATH). */
 export const whichCheck = (commands: string[]) =>

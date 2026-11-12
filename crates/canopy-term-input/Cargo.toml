@@ -1,0 +1,15 @@
+[package]
+name = "canopy-term-input"
+version = "0.1.0"
+description = "Encodes key, text, mouse, paste and focus events into the bytes a terminal sends to the PTY"
+authors = ["Cause Connect Pte Ltd <sam@fluidwords.app>"]
+license = "MIT"
+edition = "2021"
+rust-version = "1.82"
+
+# Its own workspace root with its own lock: parallel work on other crates, and
+# dependencies a track adds, never touch the app's Cargo.lock.
+[workspace]
+
+[dependencies]
+canopy-term-core = { path = "../canopy-term-core" }

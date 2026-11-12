@@ -32,7 +32,7 @@ jobs:
       - run: npm run typecheck
       - run: npm run lint
       - run: npm run test
-      - run: node --test scripts/release-assets.test.mjs scripts/workspace-host-release.test.mjs scripts/workspace-host-fingerprint.test.mjs
+      - run: node --test scripts/release-assets.test.mjs scripts/workspace-host-release.test.mjs scripts/workspace-host-fingerprint.test.mjs scripts/prepare-sidecar.test.mjs
       - name: Install runtime search dependency
         run: sudo apt-get update && sudo apt-get install -y ripgrep
       - run: npm run test --workspace @canopy/remote-host
@@ -93,6 +93,181 @@ jobs:
       - run: cargo test --locked --manifest-path crates/canopy-service/Cargo.toml -p canopy-service
       - run: cargo fmt --manifest-path crates/canopy-service/Cargo.toml -p canopy-service --check
 
+  pty-host:
+    name: PTY host (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    # A hung host test must fail the job, not hold the runner for hours.
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        # Windows runs the real host: named pipe, ConPTY and Job Objects.
+        os: [ubuntu-latest, macos-15, windows-2022]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: "./src-tauri -> target"
+          key: pty-host-${{ matrix.os }}
+      - run: cargo test --locked --manifest-path crates/canopy-pty-host/Cargo.toml -p canopy-pty-host
+      - run: cargo fmt --manifest-path crates/canopy-pty-host/Cargo.toml -p canopy-pty-host --check
+      # A Linux container wants one static file with a configurable socket path.
+      - name: Static (musl) host binary
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y musl-tools
+          rustup target add x86_64-unknown-linux-musl
+          cargo build --locked --release --target x86_64-unknown-linux-musl --manifest-path crates/canopy-pty-host/Cargo.toml --bin canopy-pty-host
+          bin=src-tauri/target/x86_64-unknown-linux-musl/release/canopy-pty-host
+          file "$bin"
+          # static and static-pie report differently from ldd and file
+          if file "$bin" | grep -q "statically linked\|static-pie" || ldd "$bin" 2>&1 | grep -q "not a dynamic executable\|statically linked"; then echo static; else ldd "$bin"; exit 1; fi
+          # Runs, takes its socket from the environment, and creates it.
+          dir=$(mktemp -d)
+          CANOPY_PTY_HOST_SOCKET="$dir/h.sock" "$bin" --idle-secs 5 &
+          for _ in $(seq 50); do [ -S "$dir/h.sock" ] && break; sleep 0.1; done
+          [ -S "$dir/h.sock" ]
+
+  # Each terminal crate is its own workspace root with its own Cargo.lock, so
+  # tracks adding dependencies never touch the app's lock or each other.
+  terminal-crates:
+    name: Terminal crates (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-15, windows-2022]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      # Every crates/canopy-term-* crate is its own workspace root with its own
+      # lock. Found by glob, so a new crate needs no edit here. The CLI crate
+      # has its own job.
+      - name: List terminal crates
+        id: crates
+        shell: bash
+        run: |
+          list=$(ls -d crates/canopy-term-*/ | sed 's#/$##' | grep -v '^crates/canopy-term-cli$' | sort)
+          echo "Crates: $list"
+          { echo 'dirs<<EOF'; echo "$list"; echo 'EOF'; } >> "$GITHUB_OUTPUT"
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: ${{ steps.crates.outputs.dirs }}
+          key: term-${{ matrix.os }}
+      - name: Test and format each crate
+        shell: bash
+        env:
+          DIRS: ${{ steps.crates.outputs.dirs }}
+        run: |
+          for dir in $DIRS; do
+            echo "::group::$dir"
+            cargo test --locked --manifest-path "$dir/Cargo.toml"
+            cargo fmt --manifest-path "$dir/Cargo.toml" --check
+            echo "::endgroup::"
+          done
+
+  # canopy-term-core on libghostty-vt (feature `ghostty`, off by default). Separate
+  # from the job above because the engine's build script runs `zig build`, so it
+  # needs the pinned Zig, and it needs network (a git clone of ghostty at the
+  # crate's pinned commit and Zig package fetches); the offline build and
+  # Windows are proven elsewhere. Runs the same engine-agnostic suites that the
+  # job above runs for the default engine, plus the ghostty-only tests.
+  terminal-ghostty:
+    name: Terminal crates (ghostty feature) (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            zig_target: x86_64-linux
+            zig_sha256: 02aa270f183da276e5b5920b1dac44a63f1a49e55050ebde3aecc9eb82f93239
+          - os: macos-15
+            zig_target: aarch64-macos
+            zig_sha256: 3cc2bab367e185cdfb27501c4b30b1b0653c28d9f73df8dc91488e66ece5fa6b
+          # Native MSVC build, no extra env or flags (proven in PR #809).
+          - os: windows-2022
+            zig_target: x86_64-windows
+            zig_sha256: 3a0ed1e8799a2f8ce2a6e6290a9ff22e6906f8227865911fb7ddedc3cc14cb0c
+    env:
+      # libghostty-vt-sys 0.2.2 pins ghostty a887df42; its build.zig.zon needs
+      # Zig 0.15.2 (major.minor must match). Official ziglang.org release; the
+      # checksums are from https://ziglang.org/download/index.json.
+      ZIG_VERSION: 0.15.2
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install Zig ${{ env.ZIG_VERSION }} (official zip, checksum verified)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $f = "zig-${{ matrix.zig_target }}-$env:ZIG_VERSION.zip"
+          $out = Join-Path $env:RUNNER_TEMP $f
+          Invoke-WebRequest -Uri "https://ziglang.org/download/$env:ZIG_VERSION/$f" -OutFile $out
+          $got = (Get-FileHash -Algorithm SHA256 $out).Hash.ToLower()
+          if ($got -ne "${{ matrix.zig_sha256 }}") { throw "zig sha256 mismatch: $got" }
+          Expand-Archive -Path $out -DestinationPath (Join-Path $env:RUNNER_TEMP "zigx")
+          Add-Content -Path $env:GITHUB_PATH -Value (Join-Path $env:RUNNER_TEMP "zigx\zig-${{ matrix.zig_target }}-$env:ZIG_VERSION")
+      - name: Install Zig ${{ env.ZIG_VERSION }} (official release, checksum verified)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          set -euo pipefail
+          f="zig-${{ matrix.zig_target }}-${ZIG_VERSION}.tar.xz"
+          curl -fsSL -o "$RUNNER_TEMP/$f" "https://ziglang.org/download/${ZIG_VERSION}/$f"
+          echo "${{ matrix.zig_sha256 }}  $RUNNER_TEMP/$f" | shasum -a 256 -c -
+          mkdir -p "$RUNNER_TEMP/zig"
+          tar -xJf "$RUNNER_TEMP/$f" -C "$RUNNER_TEMP/zig" --strip-components=1
+          echo "$RUNNER_TEMP/zig" >> "$GITHUB_PATH"
+      - name: Toolchain versions
+        shell: bash
+        run: |
+          echo "zig $(zig version)"
+          rustc --version
+          cargo --version
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: crates/canopy-term-core
+          key: term-ghostty-${{ matrix.os }}
+      - name: Test canopy-term-core with the ghostty feature
+        shell: bash
+        run: >
+          cargo test --locked --manifest-path crates/canopy-term-core/Cargo.toml
+          --features ghostty --no-fail-fast --lib --test screen --test conformance --test fuzz --test ghostty
+
+  term-cli:
+    name: canopy-term (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-15, windows-2022]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            ./src-tauri -> target
+            ./crates/canopy-term-cli -> target
+          key: term-cli-${{ matrix.os }}
+      - name: Build the host the tests start
+        if: runner.os != 'Windows'
+        run: |
+          cargo build --locked --manifest-path crates/canopy-pty-host/Cargo.toml --bin canopy-pty-host
+          echo "CANOPY_PTY_HOST_EXE=$GITHUB_WORKSPACE/src-tauri/target/debug/canopy-pty-host" >> "$GITHUB_ENV"
+      - run: cargo test --locked --manifest-path crates/canopy-term-cli/Cargo.toml
+      - run: cargo fmt --manifest-path crates/canopy-term-cli/Cargo.toml --check
+
   rust:
     name: Rust (cargo test)
     runs-on: ubuntu-22.04
@@ -131,7 +306,7 @@ jobs:
           mkdir -p src-tauri/binaries
           triple=$(rustc -vV | grep '^host:' | awk '{print $2}')
           touch "src-tauri/binaries/canopy-hook-${triple}"
-
+          touch "src-tauri/binaries/canopy-pty-host-${triple}"
 
       # Dictation (ONNX Runtime) is compiled OUT here: staging the runtime is
       # release-only machinery, the feature has no logic these unit tests cover,
@@ -178,6 +353,7 @@ jobs:
           suffix=""
           if [[ "${RUNNER_OS}" == "Windows" ]]; then suffix=".exe"; fi
           touch "src-tauri/binaries/canopy-hook-${triple}${suffix}"
+          touch "src-tauri/binaries/canopy-pty-host-${triple}${suffix}"
 
       - name: Compile native remote desktop application library
         working-directory: src-tauri
@@ -188,6 +364,13 @@ jobs:
       - name: Compile containment launcher
         working-directory: src-tauri
         run: cargo check --no-default-features --bin canopy-hook
+
+      # pty_hosted:: covers the glue tests and the host install/prune tests
+      # (pty_hosted::install::tests).
+      - name: Run hosted-terminal glue tests (macOS)
+        if: runner.os == 'macOS'
+        working-directory: src-tauri
+        run: "cargo test --no-default-features --lib -- pty_hosted:: ctx_socket::tests"
 
       - name: Run containment unit contract
         working-directory: src-tauri

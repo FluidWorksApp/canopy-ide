@@ -72,6 +72,7 @@ import { WorkspaceHooksNotice } from "./remoteExecution/WorkspaceHooksNotice";
 import { installOutcomes } from "./outcomes";
 import { startReceiptEngine } from "./receipts/engine";
 import { observeGateEvents, openRules } from "./gates/events";
+import { observePrCreated } from "./prCreatedObserver";
 import {
   derivePending,
   parseAgentEvent,
@@ -238,6 +239,14 @@ import {
   useHeldModifier,
 } from "./useHeldModifier";
 import { commandHeld, matches, terminalOwnsCtrl } from "./shortcuts";
+import {
+  hostNoticeMessages,
+  quitApp,
+  readHostNotice,
+  startQuitStopAll,
+  type QuitStopAllAsk,
+} from "./quitStopAll";
+import { QuitStopAllDialog } from "./components/QuitStopAllDialog";
 import { startCreditWatcher } from "./credits";
 import {
   checkForUpdateAnyChannel,
@@ -375,6 +384,11 @@ export default function App() {
   }>(null);
   const [helpOpen, setHelpOpen] = useState(false);
   const [aboutOpen, setAboutOpen] = useState(false);
+  // "Quit and Stop All…" asking first, because agents are running (or
+  // reporting that stopping failed).
+  const [quitStopAll, setQuitStopAll] = useState<QuitStopAllAsk | null>(null);
+  const quitStopAllOpen = useRef(false);
+  quitStopAllOpen.current = quitStopAll !== null;
   // First-run walkthrough. Seeded once, after the workspace has loaded, so a
   // fresh install lands on the welcome flow while returning users never see it.
   const [onboarding, setOnboarding] = useState(false);
@@ -679,6 +693,22 @@ export default function App() {
       cancelled = true;
     };
   }, [notify]);
+  // Once per launch: terminals that fell back in-process (they end on Quit),
+  // or earlier ones that could not be restored. Silent when there is nothing.
+  useEffect(() => {
+    let cancelled = false;
+    void readHostNotice()
+      .then((notice) => {
+        if (cancelled) return;
+        for (const [title, body, key] of hostNoticeMessages(notice)) {
+          notify(title, "info", { body, dedupe: key });
+        }
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, [notify]);
   // A workspace host older than this app is shown as the workspace update
   // notice (WorkspaceSelector → WorkspaceUpdateNotice), not as an error.
   // A micro-task in flight when Canopy last quit has no terminal to come back
@@ -686,7 +716,7 @@ export default function App() {
   // Settle those before anything new is recorded, or they stay "running"
   // forever: hidden from the history tab, still holding one of its slots.
   useEffect(() => {
-    void Promise.all([hydrateTaskHistory(), ipc.instanceId()]).then(
+    void Promise.all([hydrateTaskHistory(), ipc.launchId()]).then(
       ([, instance]) => sweepStaleRuns(instance),
     );
     // Its question goes with it, and so does every other question that was
@@ -1285,6 +1315,8 @@ export default function App() {
         // What a team rule or the irreversible-action gate stopped, for the
         // cards over the agent's terminal and the approve-once question.
         observeGateEvents(parsed.map((p) => p.data), ts);
+        // A PR the agent itself just created is on record as its own.
+        void observePrCreated(parsed.map((p) => p.data));
         setAgentEvents((prev) =>
           // Not a bare slice: the cap is app-wide and one of this list's
           // consumers is per-pty, so a busy project used to evict a quiet
@@ -1607,6 +1639,11 @@ export default function App() {
             setHelpOpen(true);
           } else if (e.payload === "about") {
             setAboutOpen(true);
+          } else if (e.payload === "quit-stop-all") {
+            if (!quitStopAllOpen.current)
+              void startQuitStopAll({ ask: setQuitStopAll }).catch((err) =>
+                notify(`Quit failed: ${err}`, "error"),
+              );
           } else if (e.payload === "support") {
             void import("@tauri-apps/plugin-opener").then(({ openUrl }) =>
               openUrl("https://canopyide.dev/support"),
@@ -4711,6 +4748,13 @@ export default function App() {
         />
       )}
       {aboutOpen && <AboutDialog onClose={() => setAboutOpen(false)} />}
+      {quitStopAll && (
+        <QuitStopAllDialog
+          ask={quitStopAll}
+          onCancel={() => setQuitStopAll(null)}
+          onQuit={quitApp}
+        />
+      )}
       {onboarding && (
         <Onboarding
           onClose={() => {

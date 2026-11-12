@@ -3404,6 +3404,7 @@ fn bridge_env() -> Option<(Endpoint, String)> {
         std::env::var("CANOPY_CTX_SOCKET").ok(),
         std::env::var("CANOPY_CTX_PORT").ok(),
         std::env::var("CANOPY_CTX_TOKEN").ok(),
+        std::env::var("CANOPY_CTX_APP").ok(),
     ) {
         return Some(found);
     }
@@ -3489,11 +3490,22 @@ fn parent_of(pid: u32) -> Option<u32> {
 }
 
 /// Where the bridge listens. A host service hands agents a Unix socket
-/// (`CANOPY_CTX_SOCKET`); the desktop app a loopback port.
+/// (`CANOPY_CTX_SOCKET`); the desktop app a loopback port, plus a stable socket
+/// when its PTY host is on, so a terminal that outlives the app reaches the
+/// next launch. A socket that is missing or refused never falls back to the
+/// port: a previous launch's port can belong to anything by now. The one
+/// exception is a sandbox that forbids connecting to the socket at all
+/// (`PermissionDenied`, which a stale or absent socket never produces): the
+/// port then beside it in the same environment is the only way the tools work.
+/// It is kept only while the app that stamped it is provably still running
+/// (`CANOPY_CTX_APP`, a pid and start time): a terminal adopted by a later
+/// launch carries the previous launch's port, which is dead or reused, and the
+/// bearer token must never be sent to whatever holds it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum Endpoint {
     Port(String),
-    Socket(String),
+    /// The socket path, and the port beside it for the sandbox case only.
+    Socket(String, Option<String>),
 }
 
 /// One process's bridge address and token. The socket wins when both are set:
@@ -3503,14 +3515,50 @@ fn bridge_from(
     socket: Option<String>,
     port: Option<String>,
     token: Option<String>,
+    app: Option<String>,
 ) -> Option<(Endpoint, String)> {
     let socket = socket.filter(|path| cfg!(unix) && !path.is_empty());
     let endpoint = match (socket, port) {
-        (Some(path), _) => Endpoint::Socket(path),
+        (Some(path), port) => {
+            let port = port
+                .filter(|p| !p.is_empty())
+                .filter(|_| app.as_deref().is_some_and(app_is_running));
+            Endpoint::Socket(path, port)
+        }
         (None, Some(port)) => Endpoint::Port(port),
         (None, None) => return None,
     };
     Some((endpoint, token.unwrap_or_default()))
+}
+
+/// When the process `pid` started, as one token (no whitespace), or None when it
+/// is not running or cannot be asked. Absolute `ps`: see `parent_of`.
+#[cfg(unix)]
+fn process_start(pid: u32) -> Option<String> {
+    let mut command = std::process::Command::new("/bin/ps");
+    command.args(["-o", "lstart=", "-p", &pid.to_string()]);
+    let (status, stdout) = small_process_output(&mut command)?;
+    let text = String::from_utf8_lossy(&stdout);
+    let start: Vec<&str> = text.split_whitespace().collect();
+    (status.success() && !start.is_empty()).then(|| start.join("_"))
+}
+
+#[cfg(not(unix))]
+fn process_start(_pid: u32) -> Option<String> {
+    None
+}
+
+/// Whether the app that stamped `CANOPY_CTX_APP` (`<pid>:<start>`) is still
+/// running: that pid, with that start time. A reused pid has another start
+/// time, and a stamp that is missing or malformed is not running.
+fn app_is_running(stamp: &str) -> bool {
+    let Some((pid, start)) = stamp.split_once(':') else {
+        return false;
+    };
+    let Ok(pid) = pid.parse::<u32>() else {
+        return false;
+    };
+    !start.is_empty() && process_start(pid).as_deref() == Some(start)
 }
 
 /// One process's CANOPY_CTX_SOCKET/_PORT/_TOKEN, or None if it has no address.
@@ -3522,6 +3570,7 @@ fn bridge_in(environ: Vec<String>) -> Option<(Endpoint, String)> {
     let mut socket = None;
     let mut port = None;
     let mut token = None;
+    let mut app = None;
     for entry in environ {
         if let Some(v) = entry.strip_prefix("CANOPY_CTX_SOCKET=") {
             socket = Some(v.to_string());
@@ -3529,9 +3578,11 @@ fn bridge_in(environ: Vec<String>) -> Option<(Endpoint, String)> {
             port = Some(v.to_string());
         } else if let Some(v) = entry.strip_prefix("CANOPY_CTX_TOKEN=") {
             token = Some(v.to_string());
+        } else if let Some(v) = entry.strip_prefix("CANOPY_CTX_APP=") {
+            app = Some(v.to_string());
         }
     }
-    bridge_from(socket, port, token)
+    bridge_from(socket, port, token, app)
 }
 
 fn read_environ(pid: u32) -> Option<Vec<String>> {
@@ -7264,16 +7315,32 @@ fn request_at(
             exchange(stream, &request(&format!("127.0.0.1:{port}")))?
         }
         #[cfg(unix)]
-        Endpoint::Socket(socket) => {
-            let stream = std::os::unix::net::UnixStream::connect(socket).map_err(|e| {
-                format!("Canopy isn't reachable at {socket} ({e}) — is the service still running?")
-            })?;
-            let _ = stream.set_read_timeout(Some(timeout));
-            let _ = stream.set_write_timeout(Some(timeout));
-            exchange(stream, &request("localhost"))?
+        Endpoint::Socket(socket, port) => {
+            match std::os::unix::net::UnixStream::connect(socket) {
+                Ok(stream) => {
+                    let _ = stream.set_read_timeout(Some(timeout));
+                    let _ = stream.set_write_timeout(Some(timeout));
+                    exchange(stream, &request("localhost"))?
+                }
+                // Only a sandbox denial falls back, and only to the port it
+                // was given alongside the socket.
+                Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied && port.is_some() => {
+                    return request_at(
+                        &Endpoint::Port(port.clone().unwrap_or_default()),
+                        token,
+                        method,
+                        path,
+                        Some(body.clone()),
+                        timeout,
+                    );
+                }
+                Err(e) => {
+                    return Err(format!("Canopy isn't reachable at {socket} ({e}) — is Canopy (or its service) still running?"));
+                }
+            }
         }
         #[cfg(not(unix))]
-        Endpoint::Socket(socket) => {
+        Endpoint::Socket(socket, _) => {
             return Err(format!(
                 "Canopy is at {socket}, a Unix socket, which this platform cannot reach."
             ))
@@ -7981,7 +8048,7 @@ mod tests {
         assert_eq!(
             bridge_env(),
             Some((
-                Endpoint::Socket("/run/canopy-ctx/ctx.sock".into()),
+                Endpoint::Socket("/run/canopy-ctx/ctx.sock".into(), None),
                 "tok".into()
             ))
         );
@@ -8028,7 +8095,7 @@ mod tests {
             assert_eq!(
                 both,
                 Some((
-                    Endpoint::Socket("/run/canopy-ctx/ctx.sock".into()),
+                    Endpoint::Socket("/run/canopy-ctx/ctx.sock".into(), None),
                     "t2".into()
                 ))
             );
@@ -8046,6 +8113,39 @@ mod tests {
             bridge_in(environ(&["CANOPY_CTX_SOCKET=/run/canopy-ctx/ctx.sock"])),
             None
         );
+    }
+
+    /// A terminal adopted by a later launch carries the previous launch's port
+    /// beside the stable socket. The port is only worth keeping when the app
+    /// that stamped it is still the process it was.
+    #[cfg(unix)]
+    #[test]
+    fn the_port_beside_a_socket_is_kept_only_for_a_running_stamping_app() {
+        let environ = |app: Option<String>| {
+            let mut env: Vec<String> = vec![
+                "CANOPY_CTX_TOKEN=t".into(),
+                "CANOPY_CTX_SOCKET=/h/ctx.sock".into(),
+                "CANOPY_CTX_PORT=4100".into(),
+            ];
+            env.extend(app.map(|a| format!("CANOPY_CTX_APP={a}")));
+            bridge_in(env)
+        };
+        let me = std::process::id();
+        let alive = format!("{me}:{}", process_start(me).expect("ps knows this process"));
+        let port_of = |found: Option<(Endpoint, String)>| match found {
+            Some((Endpoint::Socket(_, port), _)) => port,
+            other => panic!("expected a socket endpoint, got {other:?}"),
+        };
+        assert_eq!(port_of(environ(Some(alive))).as_deref(), Some("4100"));
+        // No stamp (an older app), a dead or reused pid, or junk: no port.
+        assert_eq!(port_of(environ(None)), None);
+        assert_eq!(
+            port_of(environ(Some(format!("{me}:Mon_Jan_1_00:00:00_1990")))),
+            None
+        );
+        assert_eq!(port_of(environ(Some("4294967294:x".into()))), None);
+        assert_eq!(port_of(environ(Some("nonsense".into()))), None);
+        assert_eq!(port_of(environ(Some(format!("{me}:")))), None);
     }
 
     /// Reads one HTTP request off `stream` and answers it with `status` and
@@ -8099,7 +8199,7 @@ mod tests {
         });
 
         let reply = request_at(
-            &Endpoint::Socket(socket.to_string_lossy().into_owned()),
+            &Endpoint::Socket(socket.to_string_lossy().into_owned(), None),
             "tok",
             "POST",
             "/ctx/notes",
@@ -8115,11 +8215,50 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// A sandbox that denies the socket falls back to the port beside it, and
+    /// a socket that is merely absent does not.
+    #[cfg(unix)]
+    #[test]
+    fn only_a_denied_socket_falls_back_to_the_port() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("hk{}den", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let socket = dir.join("ctx.sock");
+        let _listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let denied = matches!(
+            std::os::unix::net::UnixStream::connect(&socket),
+            Err(ref e) if e.kind() == std::io::ErrorKind::PermissionDenied
+        );
+        if denied {
+            let tcp = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+            let port = tcp.local_addr().unwrap().port().to_string();
+            let server = std::thread::spawn(move || {
+                let (stream, _) = tcp.accept().unwrap();
+                answer_one(stream, "200 OK", "{\"ok\":true}")
+            });
+            let reply = request_at(
+                &Endpoint::Socket(socket.to_string_lossy().into_owned(), Some(port)),
+                "tok",
+                "GET",
+                "/ctx/tools",
+                None,
+                std::time::Duration::from_secs(5),
+            );
+            let seen = server.join().unwrap();
+            assert_eq!(reply, Ok("{\"ok\":true}".into()));
+            assert!(seen.contains("\r\nAuthorization: Bearer tok\r\n"), "{seen}");
+        }
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[cfg(unix)]
     #[test]
     fn a_missing_socket_says_where_it_looked() {
         let err = request_at(
-            &Endpoint::Socket("/nonexistent/canopy-ctx/ctx.sock".into()),
+            &Endpoint::Socket("/nonexistent/canopy-ctx/ctx.sock".into(), Some("1".into())),
             "tok",
             "GET",
             "/ctx/tools",
