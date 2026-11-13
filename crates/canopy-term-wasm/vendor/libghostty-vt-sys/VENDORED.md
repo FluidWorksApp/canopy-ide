@@ -6,7 +6,10 @@ https://github.com/Uzaaft/libghostty-rs). It is used only by the
 `canopy-term-wasm` workspace, through `[patch.crates-io]`, so the native
 crates (`canopy-term-core`, `canopy-term-app`, ...) keep the published crate.
 
-One change, in `build.rs` `zig_target`: the Rust target
-`wasm32-unknown-unknown` maps to Zig's `wasm32-freestanding`. Upstream panics
-on any target outside its list. Everything else, including the pinned ghostty
+Two changes in `build.rs`, both only for wasm32:
+
+- `zig_target`: the Rust target `wasm32-unknown-unknown` maps to Zig's
+  `wasm32-freestanding`. Upstream panics on any target outside its list.
+- The include directory is the source tree's `include/`: ghostty's wasm32
+  build installs the static archive but not the headers. Everything else, including the pinned ghostty
 commit (a887df42), is unchanged. Drop this copy when upstream maps the target.

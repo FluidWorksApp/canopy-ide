@@ -191,7 +191,15 @@ fn build_vendored(link_mode: LinkMode, target: &str) {
     run(build, "zig build");
 
     let lib_dir = install_prefix.join("lib");
-    let include_dir = install_prefix.join("include");
+    // Canopy patch: ghostty's wasm32 build installs the archive but not the
+    // headers (they are only installed beside a native library). The headers
+    // are plain C in the source tree; the Rust bindings are checked in, so
+    // this only feeds the `include` metadata.
+    let include_dir = if target.starts_with("wasm32") {
+        ghostty_dir.join("include")
+    } else {
+        install_prefix.join("include")
+    };
     let search_dirs = library_search_dirs(target, &install_prefix);
     warn_unused_xcframework(&lib_dir);
 
