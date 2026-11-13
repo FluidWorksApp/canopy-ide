@@ -104,8 +104,11 @@ mod scan;
 use crate::frame::{Damage, Frame};
 use crate::shared::clamp_size;
 use engine::Engine;
+#[cfg(not(target_arch = "wasm32"))]
 use std::sync::mpsc::{self, SyncSender};
+#[cfg(not(target_arch = "wasm32"))]
 use std::sync::Mutex;
+#[cfg(not(target_arch = "wasm32"))]
 use std::thread::{self, JoinHandle};
 
 pub use crate::shared::{
@@ -172,10 +175,13 @@ pub enum Event {
 type Cmd = Box<dyn FnOnce(&mut Engine) + Send>;
 
 /// Chunks queued ahead of the engine thread before `advance` waits.
+#[cfg(not(target_arch = "wasm32"))]
 const QUEUE: usize = 64;
 /// One queued chunk; a larger `advance` is split (any split is equivalent).
+#[cfg(not(target_arch = "wasm32"))]
 const CHUNK: usize = 64 * 1024;
 
+#[cfg(not(target_arch = "wasm32"))]
 pub struct Screen {
     tx: Option<SyncSender<Cmd>>,
     /// Bytes from `advance` not yet queued. They go to the engine thread as one
@@ -189,6 +195,18 @@ pub struct Screen {
     rows: u16,
 }
 
+/// On wasm32 there are no threads: the engine lives in the handle and every
+/// call runs on the caller's thread (the page's, or a worker's). Same public
+/// API and the same results; only the native build moves the engine off the
+/// caller's thread.
+#[cfg(target_arch = "wasm32")]
+pub struct Screen {
+    engine: std::cell::RefCell<Engine>,
+    cols: u16,
+    rows: u16,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
 fn dead() -> ! {
     panic!("the terminal engine thread has stopped (it panicked); this Screen is unusable")
 }
@@ -196,84 +214,6 @@ fn dead() -> ! {
 impl Screen {
     pub fn new(cols: u16, rows: u16) -> Self {
         Self::with_scrollback(cols, rows, DEFAULT_SCROLLBACK)
-    }
-
-    pub fn with_scrollback(cols: u16, rows: u16, scrollback: usize) -> Self {
-        let (cols, rows) = clamp_size(cols, rows);
-        let (tx, rx) = mpsc::sync_channel::<Cmd>(QUEUE);
-        let (ready_tx, ready_rx) = mpsc::channel::<Result<(), String>>();
-        let thread = thread::Builder::new()
-            .name("canopy-term-engine".into())
-            // Virtual reservation only; the parser is not deeply recursive but
-            // this is cheap insurance against a stack overflow in native code.
-            .stack_size(8 << 20)
-            .spawn(move || {
-                let mut engine = match Engine::new(cols, rows, scrollback) {
-                    Ok(e) => {
-                        let _ = ready_tx.send(Ok(()));
-                        e
-                    }
-                    Err(m) => {
-                        let _ = ready_tx.send(Err(m));
-                        return;
-                    }
-                };
-                while let Ok(cmd) = rx.recv() {
-                    cmd(&mut engine);
-                }
-                // `engine` drops here, on the thread that created it.
-            })
-            .expect("spawn the terminal engine thread");
-        match ready_rx.recv() {
-            Ok(Ok(())) => {}
-            Ok(Err(m)) => panic!("libghostty-vt could not start: {m}"),
-            Err(_) => dead(),
-        }
-        Screen {
-            tx: Some(tx),
-            staged: Mutex::new(Vec::new()),
-            thread: Some(thread),
-            cols,
-            rows,
-        }
-    }
-
-    /// Queue staged bytes (if any) for the engine thread.
-    fn flush(&self) {
-        let data = {
-            let mut st = self.staged.lock().unwrap_or_else(|e| e.into_inner());
-            if st.is_empty() {
-                return;
-            }
-            std::mem::take(&mut *st)
-        };
-        self.send_raw(Box::new(move |e| e.feed(&data)));
-    }
-
-    /// Queue a command behind everything `advance`d so far.
-    fn send(&self, cmd: Cmd) {
-        self.flush();
-        self.send_raw(cmd);
-    }
-
-    fn send_raw(&self, cmd: Cmd) {
-        match &self.tx {
-            Some(tx) => {
-                if tx.send(cmd).is_err() {
-                    dead()
-                }
-            }
-            None => dead(),
-        }
-    }
-
-    /// Run `f` on the engine thread and wait for its result.
-    fn call<R: Send + 'static>(&self, f: impl FnOnce(&mut Engine) -> R + Send + 'static) -> R {
-        let (rtx, rrx) = mpsc::sync_channel(1);
-        self.send(Box::new(move |e| {
-            let _ = rtx.send(f(e));
-        }));
-        rrx.recv().unwrap_or_else(|_| dead())
     }
 
     pub fn cols(&self) -> u16 {
@@ -288,6 +228,7 @@ impl Screen {
     /// screen. Returns once the bytes are copied into a staging buffer of at
     /// most 64 KiB; that buffer is queued when full or before any other call,
     /// and the next read waits for everything.
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn advance(&mut self, bytes: &[u8]) {
         if bytes.is_empty() {
             return;
@@ -311,6 +252,15 @@ impl Screen {
             if let Some(data) = full {
                 self.send_raw(Box::new(move |e| e.feed(&data)));
             }
+        }
+    }
+
+    /// Feed bytes from the PTY. Any split of the same stream gives the same
+    /// screen.
+    #[cfg(target_arch = "wasm32")]
+    pub fn advance(&mut self, bytes: &[u8]) {
+        if !bytes.is_empty() {
+            self.engine.get_mut().feed(bytes);
         }
     }
 
@@ -429,6 +379,110 @@ impl Screen {
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
+impl Screen {
+    pub fn with_scrollback(cols: u16, rows: u16, scrollback: usize) -> Self {
+        let (cols, rows) = clamp_size(cols, rows);
+        let (tx, rx) = mpsc::sync_channel::<Cmd>(QUEUE);
+        let (ready_tx, ready_rx) = mpsc::channel::<Result<(), String>>();
+        let thread = thread::Builder::new()
+            .name("canopy-term-engine".into())
+            // Virtual reservation only; the parser is not deeply recursive but
+            // this is cheap insurance against a stack overflow in native code.
+            .stack_size(8 << 20)
+            .spawn(move || {
+                let mut engine = match Engine::new(cols, rows, scrollback) {
+                    Ok(e) => {
+                        let _ = ready_tx.send(Ok(()));
+                        e
+                    }
+                    Err(m) => {
+                        let _ = ready_tx.send(Err(m));
+                        return;
+                    }
+                };
+                while let Ok(cmd) = rx.recv() {
+                    cmd(&mut engine);
+                }
+                // `engine` drops here, on the thread that created it.
+            })
+            .expect("spawn the terminal engine thread");
+        match ready_rx.recv() {
+            Ok(Ok(())) => {}
+            Ok(Err(m)) => panic!("libghostty-vt could not start: {m}"),
+            Err(_) => dead(),
+        }
+        Screen {
+            tx: Some(tx),
+            staged: Mutex::new(Vec::new()),
+            thread: Some(thread),
+            cols,
+            rows,
+        }
+    }
+
+    /// Queue staged bytes (if any) for the engine thread.
+    fn flush(&self) {
+        let data = {
+            let mut st = self.staged.lock().unwrap_or_else(|e| e.into_inner());
+            if st.is_empty() {
+                return;
+            }
+            std::mem::take(&mut *st)
+        };
+        self.send_raw(Box::new(move |e| e.feed(&data)));
+    }
+
+    /// Queue a command behind everything `advance`d so far.
+    fn send(&self, cmd: Cmd) {
+        self.flush();
+        self.send_raw(cmd);
+    }
+
+    fn send_raw(&self, cmd: Cmd) {
+        match &self.tx {
+            Some(tx) => {
+                if tx.send(cmd).is_err() {
+                    dead()
+                }
+            }
+            None => dead(),
+        }
+    }
+
+    /// Run `f` on the engine thread and wait for its result.
+    fn call<R: Send + 'static>(&self, f: impl FnOnce(&mut Engine) -> R + Send + 'static) -> R {
+        let (rtx, rrx) = mpsc::sync_channel(1);
+        self.send(Box::new(move |e| {
+            let _ = rtx.send(f(e));
+        }));
+        rrx.recv().unwrap_or_else(|_| dead())
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+impl Screen {
+    pub fn with_scrollback(cols: u16, rows: u16, scrollback: usize) -> Self {
+        let (cols, rows) = clamp_size(cols, rows);
+        let engine = Engine::new(cols, rows, scrollback)
+            .unwrap_or_else(|m| panic!("libghostty-vt could not start: {m}"));
+        Screen {
+            engine: std::cell::RefCell::new(engine),
+            cols,
+            rows,
+        }
+    }
+
+    fn send(&self, cmd: Cmd) {
+        cmd(&mut self.engine.borrow_mut());
+    }
+
+    fn call<R>(&self, f: impl FnOnce(&mut Engine) -> R) -> R {
+        f(&mut self.engine.borrow_mut())
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
 impl Drop for Screen {
     fn drop(&mut self) {
         // Closing the queue ends the thread's loop after the queued work.
@@ -454,6 +508,7 @@ impl std::fmt::Debug for Screen {
 mod tests {
     use super::*;
 
+    #[cfg(not(target_arch = "wasm32"))]
     #[test]
     fn the_handle_is_send_and_sync_though_the_engine_is_not() {
         fn assert_send_sync<T: Send + Sync>() {}
