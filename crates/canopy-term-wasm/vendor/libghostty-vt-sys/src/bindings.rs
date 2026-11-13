@@ -199,6 +199,7 @@ pub struct String {
     #[doc = " Length of the string in bytes."]
     pub len: usize,
 }
+#[cfg(target_pointer_width = "64")]
 #[allow(clippy::unnecessary_operation, clippy::identity_op)]
 const _: () = {
     ["Size of String"][::std::mem::size_of::<String>() - 16usize];
@@ -226,6 +227,7 @@ pub struct Buffer {
     #[doc = " Bytes written on success, or required byte capacity on GHOSTTY_OUT_OF_SPACE."]
     pub len: usize,
 }
+#[cfg(target_pointer_width = "64")]
 #[allow(clippy::unnecessary_operation, clippy::identity_op)]
 const _: () = {
     ["Size of Buffer"][::std::mem::size_of::<Buffer>() - 24usize];
@@ -252,6 +254,7 @@ pub struct SurfacePosition {
     #[doc = " Y position in surface pixels."]
     pub y: f64,
 }
+#[cfg(target_pointer_width = "64")]
 #[allow(clippy::unnecessary_operation, clippy::identity_op)]
 const _: () = {
     ["Size of SurfacePosition"][::std::mem::size_of::<SurfacePosition>() - 16usize];
@@ -268,6 +271,7 @@ pub struct Codepoints {
     #[doc = " Number of entries in ptr."]
     pub len: usize,
 }
+#[cfg(target_pointer_width = "64")]
 #[allow(clippy::unnecessary_operation, clippy::identity_op)]
 const _: () = {
     ["Size of Codepoints"][::std::mem::size_of::<Codepoints>() - 16usize];
@@ -334,6 +338,7 @@ pub struct AllocatorVtable {
         ),
     >,
 }
+#[cfg(target_pointer_width = "64")]
 #[allow(clippy::unnecessary_operation, clippy::identity_op)]
 const _: () = {
     ["Size of AllocatorVtable"][::std::mem::size_of::<AllocatorVtable>() - 32usize];
@@ -356,6 +361,7 @@ pub struct Allocator {
     #[doc = " Pointer to the allocator's vtable containing function pointers\n for memory operations (alloc, resize, remap, free)."]
     pub vtable: *const AllocatorVtable,
 }
+#[cfg(target_pointer_width = "64")]
 #[allow(clippy::unnecessary_operation, clippy::identity_op)]
 const _: () = {
     ["Size of Allocator"][::std::mem::size_of::<Allocator>() - 16usize];
@@ -435,6 +441,7 @@ pub struct ColorRgb {
     #[doc = "< Blue component (0-255)"]
     pub b: u8,
 }
+#[cfg(target_pointer_width = "64")]
 #[allow(clippy::unnecessary_operation, clippy::identity_op)]
 const _: () = {
     ["Size of ColorRgb"][::std::mem::size_of::<ColorRgb>() - 3usize];
@@ -451,6 +458,7 @@ pub type ColorPaletteIndex = u8;
 pub struct ColorPaletteMask {
     pub bits: [u64; 4usize],
 }
+#[cfg(target_pointer_width = "64")]
 #[allow(clippy::unnecessary_operation, clippy::identity_op)]
 const _: () = {
     ["Size of ColorPaletteMask"][::std::mem::size_of::<ColorPaletteMask>() - 32usize];
@@ -467,6 +475,7 @@ pub struct ColorX11Entry {
     #[doc = " The RGB value of the color."]
     pub color: ColorRgb,
 }
+#[cfg(target_pointer_width = "64")]
 #[allow(clippy::unnecessary_operation, clippy::identity_op)]
 const _: () = {
     ["Size of ColorX11Entry"][::std::mem::size_of::<ColorX11Entry>() - 16usize];
@@ -566,6 +575,7 @@ pub struct DeviceAttributesPrimary {
     #[doc = " Number of valid entries in the features array."]
     pub num_features: usize,
 }
+#[cfg(target_pointer_width = "64")]
 #[allow(clippy::unnecessary_operation, clippy::identity_op)]
 const _: () = {
     ["Size of DeviceAttributesPrimary"]
@@ -599,6 +609,7 @@ pub struct DeviceAttributesSecondary {
     #[doc = " ROM cartridge registration number (Pc). Always 0 for emulators."]
     pub rom_cartridge: u16,
 }
+#[cfg(target_pointer_width = "64")]
 #[allow(clippy::unnecessary_operation, clippy::identity_op)]
 const _: () = {
     ["Size of DeviceAttributesSecondary"]
@@ -619,6 +630,7 @@ pub struct DeviceAttributesTertiary {
     #[doc = " Unit ID encoded as 8 uppercase hex digits in the response."]
     pub unit_id: u32,
 }
+#[cfg(target_pointer_width = "64")]
 #[allow(clippy::unnecessary_operation, clippy::identity_op)]
 const _: () = {
     ["Size of DeviceAttributesTertiary"]
@@ -636,6 +648,7 @@ pub struct DeviceAttributes {
     pub secondary: DeviceAttributesSecondary,
     pub tertiary: DeviceAttributesTertiary,
 }
+#[cfg(target_pointer_width = "64")]
 #[allow(clippy::unnecessary_operation, clippy::identity_op)]
 const _: () = {
     ["Size of DeviceAttributes"][::std::mem::size_of::<DeviceAttributes>() - 160usize];
@@ -848,6 +861,7 @@ pub union StyleColorValue {
     pub rgb: ColorRgb,
     pub _padding: u64,
 }
+#[cfg(target_pointer_width = "64")]
 #[allow(clippy::unnecessary_operation, clippy::identity_op)]
 const _: () = {
     ["Size of StyleColorValue"][::std::mem::size_of::<StyleColorValue>() - 8usize];
@@ -875,6 +889,7 @@ pub struct StyleColor {
     pub tag: StyleColorTag::Type,
     pub value: StyleColorValue,
 }
+#[cfg(target_pointer_width = "64")]
 #[allow(clippy::unnecessary_operation, clippy::identity_op)]
 const _: () = {
     ["Size of StyleColor"][::std::mem::size_of::<StyleColor>() - 16usize];
@@ -910,6 +925,7 @@ pub struct Style {
     #[doc = "< One of GHOSTTY_SGR_UNDERLINE_* values"]
     pub underline: ::std::os::raw::c_int,
 }
+#[cfg(target_pointer_width = "64")]
 #[allow(clippy::unnecessary_operation, clippy::identity_op)]
 const _: () = {
     ["Size of Style"][::std::mem::size_of::<Style>() - 72usize];
@@ -956,6 +972,7 @@ pub struct GridRef {
     pub x: u16,
     pub y: u16,
 }
+#[cfg(target_pointer_width = "64")]
 #[allow(clippy::unnecessary_operation, clippy::identity_op)]
 const _: () = {
     ["Size of GridRef"][::std::mem::size_of::<GridRef>() - 24usize];
@@ -1013,6 +1030,7 @@ pub struct PointCoordinate {
     #[doc = " Row (0-indexed). May exceed page size for screen/history tags."]
     pub y: u32,
 }
+#[cfg(target_pointer_width = "64")]
 #[allow(clippy::unnecessary_operation, clippy::identity_op)]
 const _: () = {
     ["Size of PointCoordinate"][::std::mem::size_of::<PointCoordinate>() - 8usize];
@@ -1043,6 +1061,7 @@ pub union PointValue {
     #[doc = " Padding for ABI compatibility. Do not use."]
     pub _padding: [u64; 2usize],
 }
+#[cfg(target_pointer_width = "64")]
 #[allow(clippy::unnecessary_operation, clippy::identity_op)]
 const _: () = {
     ["Size of PointValue"][::std::mem::size_of::<PointValue>() - 16usize];
@@ -1068,6 +1087,7 @@ pub struct Point {
     pub tag: PointTag::Type,
     pub value: PointValue,
 }
+#[cfg(target_pointer_width = "64")]
 #[allow(clippy::unnecessary_operation, clippy::identity_op)]
 const _: () = {
     ["Size of Point"][::std::mem::size_of::<Point>() - 24usize];
@@ -1111,6 +1131,7 @@ pub struct Selection {
     #[doc = " Whether the endpoints are interpreted as a rectangular/block selection\n rather than a linear selection."]
     pub rectangle: bool,
 }
+#[cfg(target_pointer_width = "64")]
 #[allow(clippy::unnecessary_operation, clippy::identity_op)]
 const _: () = {
     ["Size of Selection"][::std::mem::size_of::<Selection>() - 64usize];
@@ -1143,6 +1164,7 @@ pub struct TerminalSelectWordOptions {
     #[doc = " Number of entries in boundary_codepoints."]
     pub boundary_codepoints_len: usize,
 }
+#[cfg(target_pointer_width = "64")]
 #[allow(clippy::unnecessary_operation, clippy::identity_op)]
 const _: () = {
     ["Size of TerminalSelectWordOptions"]
@@ -1182,6 +1204,7 @@ pub struct TerminalSelectWordBetweenOptions {
     #[doc = " Number of entries in boundary_codepoints."]
     pub boundary_codepoints_len: usize,
 }
+#[cfg(target_pointer_width = "64")]
 #[allow(clippy::unnecessary_operation, clippy::identity_op)]
 const _: () = {
     ["Size of TerminalSelectWordBetweenOptions"]
@@ -1225,6 +1248,7 @@ pub struct TerminalSelectLineOptions {
     #[doc = " Whether semantic prompt state changes should bound the line selection."]
     pub semantic_prompt_boundary: bool,
 }
+#[cfg(target_pointer_width = "64")]
 #[allow(clippy::unnecessary_operation, clippy::identity_op)]
 const _: () = {
     ["Size of TerminalSelectLineOptions"]
@@ -1266,6 +1290,7 @@ pub struct TerminalSelectionFormatOptions {
     #[doc = " Optional selection to format.\n\n If NULL, the terminal's current active selection is used. If the terminal\n has no active selection, formatting returns GHOSTTY_NO_VALUE.\n\n If non-NULL, the pointed-to selection must be a valid snapshot selection\n for this terminal and must obey GhosttySelection lifetime rules."]
     pub selection: *const Selection,
 }
+#[cfg(target_pointer_width = "64")]
 #[allow(clippy::unnecessary_operation, clippy::identity_op)]
 const _: () = {
     ["Size of TerminalSelectionFormatOptions"]
@@ -1357,6 +1382,7 @@ pub struct SelectionGestureBehaviors {
     #[doc = " Behavior for triple-click selection gestures."]
     pub triple_click: SelectionGestureBehavior::Type,
 }
+#[cfg(target_pointer_width = "64")]
 #[allow(clippy::unnecessary_operation, clippy::identity_op)]
 const _: () = {
     ["Size of SelectionGestureBehaviors"]
@@ -1392,6 +1418,7 @@ pub struct SelectionGestureGeometry {
     #[doc = " Height of the rendered terminal surface in surface pixels. Must be non-zero."]
     pub screen_height: u32,
 }
+#[cfg(target_pointer_width = "64")]
 #[allow(clippy::unnecessary_operation, clippy::identity_op)]
 const _: () = {
     ["Size of SelectionGestureGeometry"]
@@ -1698,6 +1725,7 @@ pub struct SizeReportSize {
     #[doc = " Height of a single terminal cell in pixels."]
     pub cell_height: u32,
 }
+#[cfg(target_pointer_width = "64")]
 #[allow(clippy::unnecessary_operation, clippy::identity_op)]
 const _: () = {
     ["Size of SizeReportSize"][::std::mem::size_of::<SizeReportSize>() - 12usize];
@@ -1854,6 +1882,7 @@ pub struct KittyGraphicsPlacementRenderInfo {
     #[doc = " Resolved source rectangle height in pixels."]
     pub source_height: u32,
 }
+#[cfg(target_pointer_width = "64")]
 #[allow(clippy::unnecessary_operation, clippy::identity_op)]
 const _: () = {
     ["Size of KittyGraphicsPlacementRenderInfo"]
@@ -2029,6 +2058,7 @@ pub struct TerminalOptions {
     #[doc = " Maximum number of lines to keep in scrollback history."]
     pub max_scrollback: usize,
 }
+#[cfg(target_pointer_width = "64")]
 #[allow(clippy::unnecessary_operation, clippy::identity_op)]
 const _: () = {
     ["Size of TerminalOptions"][::std::mem::size_of::<TerminalOptions>() - 16usize];
@@ -2087,6 +2117,7 @@ pub union TerminalScrollViewportValue {
     #[doc = " Padding for ABI compatibility. Do not use."]
     pub _padding: [u64; 2usize],
 }
+#[cfg(target_pointer_width = "64")]
 #[allow(clippy::unnecessary_operation, clippy::identity_op)]
 const _: () = {
     ["Size of TerminalScrollViewportValue"]
@@ -2116,6 +2147,7 @@ pub struct TerminalScrollViewport {
     pub tag: TerminalScrollViewportTag::Type,
     pub value: TerminalScrollViewportValue,
 }
+#[cfg(target_pointer_width = "64")]
 #[allow(clippy::unnecessary_operation, clippy::identity_op)]
 const _: () = {
     ["Size of TerminalScrollViewport"][::std::mem::size_of::<TerminalScrollViewport>() - 24usize];
@@ -2170,6 +2202,7 @@ pub struct TerminalScrollbar {
     #[doc = " Length of the visible area in rows."]
     pub len: u64,
 }
+#[cfg(target_pointer_width = "64")]
 #[allow(clippy::unnecessary_operation, clippy::identity_op)]
 const _: () = {
     ["Size of TerminalScrollbar"][::std::mem::size_of::<TerminalScrollbar>() - 24usize];
@@ -2206,6 +2239,7 @@ pub struct ClipboardContent {
     #[doc = " Decoded, binary-safe representation data."]
     pub data: String,
 }
+#[cfg(target_pointer_width = "64")]
 #[allow(clippy::unnecessary_operation, clippy::identity_op)]
 const _: () = {
     ["Size of ClipboardContent"][::std::mem::size_of::<ClipboardContent>() - 32usize];
@@ -2237,6 +2271,7 @@ pub struct ClipboardWrite {
     #[doc = " Number of entries in contents; zero means clear the destination."]
     pub contents_len: usize,
 }
+#[cfg(target_pointer_width = "64")]
 #[allow(clippy::unnecessary_operation, clippy::identity_op)]
 const _: () = {
     ["Size of ClipboardWrite"][::std::mem::size_of::<ClipboardWrite>() - 32usize];
@@ -2597,6 +2632,7 @@ pub struct FormatterScreenExtra {
     #[doc = " Emit character set designations and invocations."]
     pub charsets: bool,
 }
+#[cfg(target_pointer_width = "64")]
 #[allow(clippy::unnecessary_operation, clippy::identity_op)]
 const _: () = {
     ["Size of FormatterScreenExtra"][::std::mem::size_of::<FormatterScreenExtra>() - 16usize];
@@ -2637,6 +2673,7 @@ pub struct FormatterTerminalExtra {
     #[doc = " Screen-level extras."]
     pub screen: FormatterScreenExtra,
 }
+#[cfg(target_pointer_width = "64")]
 #[allow(clippy::unnecessary_operation, clippy::identity_op)]
 const _: () = {
     ["Size of FormatterTerminalExtra"][::std::mem::size_of::<FormatterTerminalExtra>() - 32usize];
@@ -2676,6 +2713,7 @@ pub struct FormatterTerminalOptions {
     #[doc = " Optional selection to restrict output to a range.\n  If NULL, the entire screen is formatted."]
     pub selection: *const Selection,
 }
+#[cfg(target_pointer_width = "64")]
 #[allow(clippy::unnecessary_operation, clippy::identity_op)]
 const _: () = {
     ["Size of FormatterTerminalOptions"]
@@ -2846,6 +2884,7 @@ pub struct RenderStateRowSelection {
     #[doc = " End column of the row-local selection range, inclusive."]
     pub end_x: u16,
 }
+#[cfg(target_pointer_width = "64")]
 #[allow(clippy::unnecessary_operation, clippy::identity_op)]
 const _: () = {
     ["Size of RenderStateRowSelection"][::std::mem::size_of::<RenderStateRowSelection>() - 16usize];
@@ -2875,6 +2914,7 @@ pub struct RenderStateColors {
     #[doc = " The active 256-color palette for this render state."]
     pub palette: [ColorRgb; 256usize],
 }
+#[cfg(target_pointer_width = "64")]
 #[allow(clippy::unnecessary_operation, clippy::identity_op)]
 const _: () = {
     ["Size of RenderStateColors"][::std::mem::size_of::<RenderStateColors>() - 792usize];
@@ -3224,6 +3264,7 @@ pub struct SgrUnknown {
     pub partial_ptr: *const u16,
     pub partial_len: usize,
 }
+#[cfg(target_pointer_width = "64")]
 #[allow(clippy::unnecessary_operation, clippy::identity_op)]
 const _: () = {
     ["Size of SgrUnknown"][::std::mem::size_of::<SgrUnknown>() - 32usize];
@@ -3264,6 +3305,7 @@ pub union SgrAttributeValue {
     pub fg_256: ColorPaletteIndex,
     pub _padding: [u64; 8usize],
 }
+#[cfg(target_pointer_width = "64")]
 #[allow(clippy::unnecessary_operation, clippy::identity_op)]
 const _: () = {
     ["Size of SgrAttributeValue"][::std::mem::size_of::<SgrAttributeValue>() - 64usize];
@@ -3311,6 +3353,7 @@ pub struct SgrAttribute {
     pub tag: SgrAttributeTag::Type,
     pub value: SgrAttributeValue,
 }
+#[cfg(target_pointer_width = "64")]
 #[allow(clippy::unnecessary_operation, clippy::identity_op)]
 const _: () = {
     ["Size of SgrAttribute"][::std::mem::size_of::<SgrAttribute>() - 72usize];
@@ -3381,6 +3424,7 @@ pub struct SysImage {
     #[doc = " Length of the pixel data in bytes."]
     pub data_len: usize,
 }
+#[cfg(target_pointer_width = "64")]
 #[allow(clippy::unnecessary_operation, clippy::identity_op)]
 const _: () = {
     ["Size of SysImage"][::std::mem::size_of::<SysImage>() - 24usize];
@@ -3854,6 +3898,7 @@ pub struct MousePosition {
     pub x: f32,
     pub y: f32,
 }
+#[cfg(target_pointer_width = "64")]
 #[allow(clippy::unnecessary_operation, clippy::identity_op)]
 const _: () = {
     ["Size of MousePosition"][::std::mem::size_of::<MousePosition>() - 8usize];
@@ -3967,6 +4012,7 @@ pub struct MouseEncoderSize {
     #[doc = " Left padding in pixels."]
     pub padding_left: u32,
 }
+#[cfg(target_pointer_width = "64")]
 #[allow(clippy::unnecessary_operation, clippy::identity_op)]
 const _: () = {
     ["Size of MouseEncoderSize"][::std::mem::size_of::<MouseEncoderSize>() - 40usize];
