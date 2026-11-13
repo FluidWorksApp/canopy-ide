@@ -519,11 +519,13 @@ impl Terminal {
         let Some(key) = parse_key(key) else {
             return out;
         };
-        let mut ev = KeyEvent::new(key).with_mods(Mods(mods)).with_kind(match kind {
-            1 => KeyEventKind::Repeat,
-            2 => KeyEventKind::Release,
-            _ => KeyEventKind::Press,
-        });
+        let mut ev = KeyEvent::new(key)
+            .with_mods(Mods(mods))
+            .with_kind(match kind {
+                1 => KeyEventKind::Repeat,
+                2 => KeyEventKind::Release,
+                _ => KeyEventKind::Press,
+            });
         if !text.is_empty() {
             ev = ev.with_text(text);
         }
