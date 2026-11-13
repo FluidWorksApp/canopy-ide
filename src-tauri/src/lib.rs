@@ -304,21 +304,6 @@ fn build_menu(app: &tauri::AppHandle, profile: &str) -> tauri::Result<Menu<tauri
             )?,
         ],
     )?;
-    // Beta native terminal window: drawn only where the binary ships (release
-    // macOS and Linux), so dev builds and Windows never show a dead row. Right
-    // after New Terminal (3 rows in: New…, New Agent in Workspace…, New Terminal).
-    if native_term::native_term_available() {
-        tabs.insert(
-            &MenuItem::with_id(
-                app,
-                "new-native-terminal",
-                "New Native Terminal Window (beta)",
-                true,
-                None::<&str>,
-            )?,
-            3,
-        )?;
-    }
     // Projects and the workspace auto-persist to ~/.canopy/projects.json;
     // these items are explicit open/export on top of that, not the only way
     // state survives.
