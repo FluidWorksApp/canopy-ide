@@ -162,19 +162,9 @@ describe("LaunchPalette", () => {
     expect(screen.getByText("No match")).toBeInTheDocument();
   });
 
-  it("hides the native terminal row when the build has none", () => {
+  it("has exactly one shell row and no separate-window row", () => {
     open();
-    expect(screen.queryByText("Native Terminal Window (beta)")).not.toBeInTheDocument();
-  });
-
-  it("lists the native terminal row after Shell, and Enter opens a window", async () => {
-    const onNativeTerminal = vi.fn();
-    const { onShell } = open({ onNativeTerminal });
-    expect(screen.getByText("Native Terminal Window (beta)")).toBeInTheDocument();
-    await userEvent.keyboard("nat");
-    expect(screen.queryByText("Shell")).not.toBeInTheDocument();
-    await userEvent.keyboard("{Enter}");
-    expect(onNativeTerminal).toHaveBeenCalledOnce();
-    expect(onShell).not.toHaveBeenCalled();
+    expect(screen.getAllByText("Shell")).toHaveLength(1);
+    expect(screen.queryByText(/Native Terminal/)).not.toBeInTheDocument();
   });
 });
