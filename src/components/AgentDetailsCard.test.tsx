@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("../ipc", () => ({
@@ -232,8 +232,9 @@ describe("AgentDetailsCard", () => {
     expect(screen.getByText("Ready")).toBeInTheDocument();
     expect(screen.getByText("+40")).toBeInTheDocument();
     expect(screen.getByText("Lineage · 1 running")).toBeInTheDocument();
-    expect(screen.getByText("1 done · 1 in progress · 1 not started")).toBeInTheDocument();
-    expect(screen.getByText("Wire it up")).toBeInTheDocument(); // current step while collapsed
+    expect(screen.getByLabelText("1 done · 1 in progress · 1 not started")).toBeInTheDocument();
+    // The current step is not repeated under the bar; it shows when the list opens.
+    expect(screen.queryByText("Wire it up")).toBeNull();
   });
 
   it("expands the task list and sends focus and complete requests to the agent", async () => {
@@ -390,9 +391,9 @@ describe("AgentDetailsCard", () => {
     expect(onSendToWorkspace).toHaveBeenCalledOnce();
   });
 
-  it("settles and unsettles the agent from the card", () => {
+  it("settles the agent from the card", () => {
     const onSettle = vi.fn();
-    const { rerender } = render(
+    render(
       <AgentDetailsCard
         agent="claude"
         repo="/r"
@@ -405,22 +406,8 @@ describe("AgentDetailsCard", () => {
       />,
     );
     fireEvent.click(screen.getByRole("button", { name: /^Settle/ }));
-    expect(onSettle).toHaveBeenLastCalledWith(true);
-    rerender(
-      <AgentDetailsCard
-        agent="claude"
-        repo="/r"
-        cwd="/r"
-        digest={digest}
-        life={idle}
-        onOpenWorkspace={() => {}}
-        onSendToAgent={() => {}}
-        onSettle={onSettle}
-        settled
-      />,
-    );
-    fireEvent.click(screen.getByRole("button", { name: /^Unsettle/ }));
-    expect(onSettle).toHaveBeenLastCalledWith(false);
+    expect(onSettle).toHaveBeenCalledOnce();
+    expect(screen.queryByRole("button", { name: /^Unsettle/ })).toBeNull();
   });
 
   it("has no send row when the callback is absent", () => {
@@ -515,7 +502,7 @@ describe("failing PR", () => {
 });
 
 describe("checks still running", () => {
-  it("names the checks that have not passed", async () => {
+  it("shows checks only on hover, each with its state, failures first", async () => {
     vi.mocked(ipc.ghPrList).mockResolvedValue([
       {
         number: 5,
@@ -528,8 +515,10 @@ describe("checks still running", () => {
         checks: "PENDING",
         checks_summary: "3/7 checks passed",
         check_runs: [
+          { name: "Lint", state: "passed" },
           { name: "Frontend", state: "running" },
           { name: "Secret scan", state: "queued" },
+          { name: "Rust", state: "failed" },
         ],
         mergeable: "MERGEABLE",
         additions: 1,
@@ -537,8 +526,22 @@ describe("checks still running", () => {
       },
     ] as never);
     setup({ repo: "/pending-checks", cwd: "/pending-checks" });
-    expect(await screen.findByText("Frontend")).toBeTruthy();
-    expect(screen.getByText("Secret scan")).toBeTruthy();
+    const badge = await screen.findByRole("button", { name: "1 of 4 checks passed" });
+    expect(badge.textContent).toBe("1/4");
+    expect(screen.queryByText("Frontend")).toBeNull();
+    fireEvent.mouseEnter(badge.parentElement!);
+    const list = () =>
+      within(screen.getByRole("list", { name: "Checks" }))
+        .getAllByRole("listitem")
+        .map((li) => li.textContent);
+    expect(list()).toEqual(["RustFailed", "FrontendRunning", "Secret scanQueued", "1 passed"]);
+    fireEvent.click(screen.getByRole("button", { name: "1 passed" }));
+    expect(list()).toEqual(["RustFailed", "FrontendRunning", "Secret scanQueued", "LintPassed"]);
+    vi.useFakeTimers();
+    fireEvent.mouseLeave(badge.parentElement!);
+    act(() => vi.advanceTimersByTime(200));
+    vi.useRealTimers();
+    expect(screen.queryByText("Frontend")).toBeNull();
   });
 });
 
@@ -646,9 +649,9 @@ describe("a PR from another branch", () => {
 describe("the task list", () => {
   it("shows all three states in words, on one line", () => {
     setup();
-    const headline = screen.getByText("1 done · 1 in progress · 1 not started");
-    expect(headline.className).toContain("agent-card-tasks-headline");
-    expect(headline.getAttribute("title")).toBe(headline.textContent);
+    const legend = screen.getByLabelText("1 done · 1 in progress · 1 not started");
+    expect(legend.getAttribute("title")).toBe("1 done · 1 in progress · 1 not started");
+    expect(legend.textContent).toBe("111");
   });
   it("stays open when the card remounts", () => {
     try {
@@ -743,7 +746,7 @@ describe("merging from the card", () => {
     );
     await waitFor(() => expect(screen.getByText("Merged")).toBeInTheDocument());
   });
-  it("disables merging while checks fail", async () => {
+  it("offers Fix it instead of merging while checks fail", async () => {
     vi.mocked(ipc.gitStatus).mockResolvedValue({
       is_repo: true,
       branch: "feat/x",
@@ -765,9 +768,8 @@ describe("merging from the card", () => {
       },
     ] as never);
     setup({ repo: "/red", cwd: "/red" });
-    expect(
-      await screen.findByRole("button", { name: "Squash & merge" }),
-    ).toBeDisabled();
+    expect(await screen.findByRole("button", { name: "Fix it" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Squash & merge" })).toBeNull();
   });
 
   describe("when GitHub's branch policy refuses the merge", () => {

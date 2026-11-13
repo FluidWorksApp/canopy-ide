@@ -1712,7 +1712,7 @@ pub async fn git_log(
 // The GitHub CLI is used rather than the REST API directly: it already holds
 // the user's auth in the system keyring, so we never handle a token.
 
-/// One check that has not passed. `state` is "running", "queued" or "failed".
+/// One check on the PR. `state` is "running", "queued", "failed" or "passed".
 #[derive(Serialize, Clone, Debug, PartialEq, Eq)]
 pub struct PrCheckRun {
     pub name: String,
@@ -1741,8 +1741,8 @@ pub struct PrInfo {
     pub checks: String,
     /// Human count for a tooltip, e.g. "3/4 checks passed" ("" when none).
     pub checks_summary: String,
-    /// The checks that have not passed, by name, so a panel can say which are
-    /// running rather than only how many. Passed checks are left out.
+    /// Every check by name with its state, so a panel can say which are
+    /// running, failed or passed rather than only how many.
     pub check_runs: Vec<PrCheckRun>,
     /// Full object id of the head commit ("" when gh did not say) — what a
     /// review request pins, and what a reviewer re-checks before submitting.
@@ -1795,9 +1795,9 @@ fn roll_up_checks(rollup: &serde_json::Value) -> (String, String) {
     (state.to_string(), format!("{passed}/{total} checks passed"))
 }
 
-/// The checks in gh's `statusCheckRollup` that have not passed, named.
+/// The checks in gh's `statusCheckRollup`, named, with their state.
 /// Same classification as `roll_up_checks`, so the two never disagree.
-fn unfinished_checks(rollup: &serde_json::Value) -> Vec<PrCheckRun> {
+fn named_checks(rollup: &serde_json::Value) -> Vec<PrCheckRun> {
     let Some(items) = rollup.as_array() else {
         return Vec::new();
     };
@@ -1810,14 +1810,14 @@ fn unfinished_checks(rollup: &serde_json::Value) -> Vec<PrCheckRun> {
             .to_string();
         let state = if let Some(state) = it["state"].as_str() {
             match state {
-                "SUCCESS" => continue,
+                "SUCCESS" => "passed",
                 "PENDING" | "EXPECTED" => "running",
                 _ => "failed",
             }
         } else {
             match it["status"].as_str().unwrap_or("") {
                 "COMPLETED" => match it["conclusion"].as_str().unwrap_or("") {
-                    "SUCCESS" | "NEUTRAL" | "SKIPPED" => continue,
+                    "SUCCESS" | "NEUTRAL" | "SKIPPED" => "passed",
                     _ => "failed",
                 },
                 "QUEUED" | "WAITING" | "PENDING" | "REQUESTED" => "queued",
@@ -1997,7 +1997,7 @@ pub async fn gh_pr_list(
                         mergeable: p["mergeable"].as_str().unwrap_or("UNKNOWN").to_string(),
                         checks,
                         checks_summary,
-                        check_runs: unfinished_checks(&p["statusCheckRollup"]),
+                        check_runs: named_checks(&p["statusCheckRollup"]),
                         head_sha: full_sha(p["headRefOid"].as_str()),
                         base_sha: full_sha(p["baseRefOid"].as_str()),
                     }
@@ -6363,7 +6363,7 @@ index 333..444 100644
     }
 
     #[test]
-    fn unfinished_checks_names_what_has_not_passed() {
+    fn named_checks_names_every_check_with_its_state() {
         let rollup = json!([
             {"name": "build", "status": "COMPLETED", "conclusion": "SUCCESS"},
             {"name": "lint", "status": "IN_PROGRESS"},
@@ -6373,20 +6373,22 @@ index 333..444 100644
             {"context": "ci/ok", "state": "SUCCESS"},
             {"name": "lint", "status": "IN_PROGRESS"}
         ]);
-        let got: Vec<(String, String)> = unfinished_checks(&rollup)
+        let got: Vec<(String, String)> = named_checks(&rollup)
             .into_iter()
             .map(|c| (c.name, c.state))
             .collect();
         assert_eq!(
             got,
             vec![
+                ("build".to_string(), "passed".to_string()),
                 ("lint".to_string(), "running".to_string()),
                 ("e2e".to_string(), "queued".to_string()),
                 ("unit".to_string(), "failed".to_string()),
                 ("ci/legacy".to_string(), "running".to_string()),
+                ("ci/ok".to_string(), "passed".to_string()),
             ]
         );
-        assert!(unfinished_checks(&json!(null)).is_empty());
+        assert!(named_checks(&json!(null)).is_empty());
     }
 
     #[test]

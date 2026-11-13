@@ -42,6 +42,7 @@
 #![allow(clippy::upper_case_acronyms)]
 
 use crate::protocol::SpawnSpec;
+use crate::sync::LockExt;
 use portable_pty::{Child, ChildKiller, ExitStatus, MasterPty, PtySize};
 use std::ffi::{c_void, OsStr, OsString};
 use std::fs::File;
@@ -373,12 +374,12 @@ impl PipeStream {
     }
 
     pub fn set_read_timeout(&self, timeout: Option<Duration>) -> io::Result<()> {
-        *self.inner.read_timeout.lock().unwrap() = timeout;
+        *self.inner.read_timeout.lock_ok() = timeout;
         Ok(())
     }
 
     pub fn set_write_timeout(&self, timeout: Option<Duration>) -> io::Result<()> {
-        *self.inner.write_timeout.lock().unwrap() = timeout;
+        *self.inner.write_timeout.lock_ok() = timeout;
         Ok(())
     }
 
@@ -409,9 +410,9 @@ impl PipeStream {
         }
         let len = len.min(u32::MAX as usize) as u32;
         let timeout = if write {
-            *self.inner.write_timeout.lock().unwrap()
+            *self.inner.write_timeout.lock_ok()
         } else {
-            *self.inner.read_timeout.lock().unwrap()
+            *self.inner.read_timeout.lock_ok()
         };
         let handle = raw(&self.inner.handle);
         let event = new_event()?;
@@ -838,7 +839,7 @@ impl Group {
     /// `CTRL_CLOSE_EVENT`). Off-thread: closing can wait on conhost, which may
     /// itself wait for a paused reader.
     pub(crate) fn hang_up(&self) {
-        let console = self.console.lock().unwrap().take();
+        let console = self.console.lock_ok().take();
         if let Some(console) = console {
             std::thread::spawn(move || drop(console));
         }
@@ -856,7 +857,7 @@ impl Group {
     /// closing waits on conhost, which waits on a reader that backpressure may
     /// have paused.
     pub(crate) fn child_exited(&self) {
-        let console = self.console.lock().unwrap().take();
+        let console = self.console.lock_ok().take();
         if let Some(console) = console {
             let (done, closed) = std::sync::mpsc::channel();
             std::thread::spawn(move || {
@@ -877,7 +878,7 @@ struct ConPtyMaster {
 
 impl MasterPty for ConPtyMaster {
     fn resize(&self, size: PtySize) -> anyhow::Result<()> {
-        let console = self.console.lock().unwrap();
+        let console = self.console.lock_ok();
         let Some(console) = console.as_ref() else {
             anyhow::bail!("the session's console is closed");
         };
@@ -888,12 +889,12 @@ impl MasterPty for ConPtyMaster {
         // SAFETY: a live pseudoconsole, held under the lock.
         let hr = unsafe { ResizePseudoConsole(console.0, coord) };
         anyhow::ensure!(hr == S_OK, "ResizePseudoConsole failed: HRESULT {hr:#x}");
-        *self.size.lock().unwrap() = size;
+        *self.size.lock_ok() = size;
         Ok(())
     }
 
     fn get_size(&self) -> anyhow::Result<PtySize> {
-        Ok(*self.size.lock().unwrap())
+        Ok(*self.size.lock_ok())
     }
 
     fn try_clone_reader(&self) -> anyhow::Result<Box<dyn Read + Send>> {
@@ -901,7 +902,7 @@ impl MasterPty for ConPtyMaster {
     }
 
     fn take_writer(&self) -> anyhow::Result<Box<dyn Write + Send>> {
-        let writer = self.writer.lock().unwrap().take();
+        let writer = self.writer.lock_ok().take();
         writer
             .map(|w| Box::new(w) as Box<dyn Write + Send>)
             .ok_or_else(|| anyhow::anyhow!("writer already taken"))

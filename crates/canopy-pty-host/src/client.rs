@@ -7,6 +7,7 @@ use crate::protocol::{
     AttachReply, Request, Response, SessionInfo, SpawnSpec, EXCLUSIVE_ATTACH_VERSION,
     MIN_HOST_VERSION, PROTOCOL_VERSION,
 };
+use crate::sync::LockExt;
 use portable_pty::{Child, ChildKiller, ExitStatus, MasterPty, PtySize};
 use std::io::{Read, Write};
 #[cfg(unix)]
@@ -576,7 +577,7 @@ impl HostClient {
             .args(extra_args)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
-            .stderr(Stdio::null());
+            .stderr(host_stderr(socket));
         // Hygiene: the long-lived host does not inherit the app's dynamic-loader
         // overrides. (It does not stop anyone starting the binary by hand.)
         for (key, _) in std::env::vars_os() {
@@ -833,12 +834,12 @@ impl HostMaster {
 impl MasterPty for HostMaster {
     fn resize(&self, size: PtySize) -> anyhow::Result<()> {
         self.client.resize(self.id, size.cols, size.rows)?;
-        *self.size.lock().unwrap() = (size.cols, size.rows);
+        *self.size.lock_ok() = (size.cols, size.rows);
         Ok(())
     }
 
     fn get_size(&self) -> anyhow::Result<PtySize> {
-        let (cols, rows) = *self.size.lock().unwrap();
+        let (cols, rows) = *self.size.lock_ok();
         Ok(PtySize {
             rows,
             cols,
@@ -980,4 +981,27 @@ impl Child for HostChild {
     fn as_raw_handle(&self) -> Option<std::os::windows::io::RawHandle> {
         None
     }
+}
+
+/// Where a started host's stderr goes: `host.stderr.log` beside the socket
+/// (mode 0600, moved to `.1` past 1 MiB), so an abort message, a stack
+/// overflow notice or a failure before the host's own log is set up still
+/// leaves a trace. Discarded if the file cannot be opened.
+#[cfg(unix)]
+fn host_stderr(socket: &Path) -> Stdio {
+    use std::os::unix::fs::OpenOptionsExt;
+    let Some(dir) = socket.parent() else {
+        return Stdio::null();
+    };
+    let path = dir.join("host.stderr.log");
+    if std::fs::metadata(&path).is_ok_and(|m| m.len() >= 1024 * 1024) {
+        let _ = std::fs::rename(&path, dir.join("host.stderr.log.1"));
+    }
+    std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .mode(0o600)
+        .open(&path)
+        .map(Stdio::from)
+        .unwrap_or_else(|_| Stdio::null())
 }
