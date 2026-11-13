@@ -5,6 +5,7 @@ import {
   pickReusableWorkspace,
   reapDecision,
   reuseAgentWorkspace,
+  settledCleanup,
 } from "./agentWorkspaceLifecycle";
 import type { BranchWork, WorktreeInfo } from "./ipc";
 
@@ -219,5 +220,40 @@ describe("sweepEligible", () => {
     expect(sweepEligible(work, 0, true)).toBe(false);
     expect(sweepEligible({ ...work, protected: true }, 0, false)).toBe(false);
     expect(sweepEligible({ ...work, current: true }, 0, false)).toBe(false);
+  });
+});
+
+describe("settledCleanup", () => {
+  it("forgets when there is no worktree or it is already gone", () => {
+    expect(settledCleanup(false, undefined, undefined)).toEqual({ kind: "forget" });
+    expect(settledCleanup(true, undefined, undefined)).toEqual({ kind: "forget" });
+  });
+  it("removes a clean worktree whose work is elsewhere", () => {
+    expect(settledCleanup(true, worktree(), work())).toMatchObject({ kind: "remove", deleteBranch: true });
+  });
+  it("keeps and flags uncommitted or unpushed work", () => {
+    expect(settledCleanup(true, worktree({ dirty: 2 }), work())).toEqual({ kind: "flag", dirty: 2, unpushed: 0 });
+    expect(settledCleanup(true, worktree(), work({ ahead: 3, upstream: "origin/x" }))).toEqual({
+      kind: "flag",
+      dirty: 0,
+      unpushed: 3,
+    });
+  });
+  it("removes unpushed commits that landed through a merged PR, never dirty files", () => {
+    expect(settledCleanup(true, worktree(), work({ ahead: 3 }), true)).toMatchObject({ kind: "remove" });
+    expect(settledCleanup(true, worktree({ dirty: 1 }), work({ ahead: 3 }), true)).toMatchObject({ kind: "flag" });
+  });
+  it("never removes the main checkout, a locked one, or a non-agent branch: it flags them", () => {
+    expect(settledCleanup(true, worktree({ is_main: true }), work())).toMatchObject({ kind: "flag", note: "main checkout" });
+    expect(settledCleanup(true, worktree({ locked: "" }), work())).toMatchObject({ kind: "flag", note: "locked" });
+    expect(settledCleanup(true, worktree({ branch: "feature/x" }), work())).toMatchObject({ kind: "flag" });
+    expect(settledCleanup(true, worktree(), undefined)).toMatchObject({ kind: "flag" });
+  });
+});
+
+describe("pickReusableWorkspace with settled agents", () => {
+  it("never hands a settled agent's worktree to a new agent", () => {
+    expect(pickReusableWorkspace("claude", [worktree()], [work()])).not.toBeNull();
+    expect(pickReusableWorkspace("claude", [worktree()], [work()], new Set(["/repo-wt-agent"]))).toBeNull();
   });
 });

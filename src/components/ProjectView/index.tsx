@@ -233,6 +233,7 @@ import {
   agentWorkspaceRoot,
   prLanded,
   reapDecision,
+  settledCleanup,
   reuseAgentWorkspace,
   sweepEligible,
 } from "../../agentWorkspaceLifecycle";
@@ -458,7 +459,7 @@ import { ContextMenu, useContextMenu, type MenuItem } from "../ContextMenu";
 import { FileTree } from "../FileTree";
 import {useRemoteUpload} from "../../remoteExecution/useRemoteUpload";
 import {ProjectSetupDialog} from "../../remoteExecution/ProjectSetupDialog";
-import {SendToWorkspace} from "../../remoteExecution/SendToWorkspace";
+import {SendToWorkspace, useHasSendTargets} from "../../remoteExecution/SendToWorkspace";
 import { FileView, hasDiffToolbar } from "../FileView";
 import { ChangesPanel, type ChangeGroup } from "../ChangesPanel";
 import { Dialog } from "../Dialog";
@@ -594,6 +595,17 @@ import {
   type Restorable,
 } from "../../restorable";
 import {
+  clearSettled,
+  dueForCleanup,
+  flagUnsaved,
+  settledRoots,
+  inProject,
+  markSettled,
+  settledSessions,
+  subscribeSettled,
+  type SettledSession,
+} from "../../settledSessions";
+import {
   buildSnapshot,
   terminalLaunch,
   wakeSteps,
@@ -691,7 +703,6 @@ import {
   type SideTab,
   type StripGroup,
   isPinnedTab,
-  isSettledTab,
   splitPinned,
   type SubTab,
   type DocSubTab,
@@ -1889,6 +1900,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
     [onNotice, project.id],
   );
   const [sendOpen, setSendOpen] = useState(false);
+  const hasSendTargets = useHasSendTargets();
   // A Claude agent being moved to a workspace (teleport): the tab it runs in
   // and the session, folder and state it had when the person asked.
   const [teleport, setTeleport] = useState<{ tabId: string; sessionId: string; cwd: string; idle: boolean } | null>(null);
@@ -7367,7 +7379,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
                   d.cwd && (d.cwd === worktree.path || d.cwd.startsWith(`${worktree.path}/`)) &&
                   lifeFor({ digest: d as never, now: Date.now() / 1000 }).state !== "ended",
               );
-            if (!sweepEligible(work, worktree.dirty, inUse)) continue;
+            if (!sweepEligible(work, worktree.dirty, inUse || settledRoots().has(worktree.path))) continue;
             if (tabsRef.current.some((t) => t.type === "terminal" && (t.cwd === worktree.path || t.cwd.startsWith(`${worktree.path}/`)))) continue;
             let decision = reapDecision(worktree, work);
             if (decision.kind !== "remove" && decision.kind !== "ask") continue;
@@ -7430,9 +7442,8 @@ const ProjectViewBody = memo(function ProjectViewBody({
               // Only a session known to be finished or idle: anything else
               // (working, waiting, unknown) keeps its tab.
               if (state !== "idle" && state !== "ended") continue;
-              // A merged PR means this work is done: put the tab away, and close
-              // it as well when the setting says so.
-              patchTabRaw(id, { settled: true } as Partial<SubTab>);
+              // A merged PR means this work is done: close the tab when the
+              // setting says so (its landed worktree is reaped as usual).
               if (getSettings().closeAgentOnMerge) closeTabRef.current(id, "automatic");
             }
           }
@@ -7445,7 +7456,9 @@ const ProjectViewBody = memo(function ProjectViewBody({
 
   const finalizeTabClose = useCallback((
     id: string,
-    origin: "automatic" | "user" = "automatic",
+    // "settle": the tab retires but its worktree stays for a restore; the
+    // settled sweep cleans it up a day later.
+    origin: "automatic" | "user" | "settle" = "automatic",
   ) => {
     const pendingClose = [...pendingAgentClosesRef.current.values()].find(
       (close) => close.tabIds.includes(id),
@@ -7473,7 +7486,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
     if (closingTab?.type === "terminal") closeLink(closingTab.attachId ?? closingTab.ptyId ?? -1);
     // A terminal on another machine has no local folder to reap: its cwd is a
     // path on that machine, and no git call here may be made from it.
-    if (closingTab?.type === "terminal" && closingTab.cwd && !closingTab.machine) {
+    if (closingTab?.type === "terminal" && closingTab.cwd && !closingTab.machine && origin !== "settle") {
       const closingCwd = closingTab.cwd;
       // After the unmount's PTY kill, not during it: git won't remove a
       // folder a live process still holds open.
@@ -7836,6 +7849,192 @@ const ProjectViewBody = memo(function ProjectViewBody({
     },
     [commitPendingAgentCloses],
   );
+
+  /** Settle: retire an agent's tab. The terminal closes (stopping the agent),
+   *  and the agent is listed under Agents → Settled, where Restore resumes the
+   *  conversation. A day later the sweep below cleans up its worktree. */
+  const settleTab = useCallback((id: string) => {
+    const tab = tabsRef.current.find((t): t is TermSubTab => t.id === id && t.type === "terminal");
+    if (!tab || tab.machine) return;
+    // A terminal attached from elsewhere or handed to a native window keeps
+    // running when this tab closes, so settling it would stop nothing.
+    if ((tab.attachId != null && !tab.killAttachedOnClose) || handedState(handoverRef.current, tab.ptyId) !== null) {
+      onNotice("This agent runs outside this tab. Close it where it runs, then settle.");
+      return;
+    }
+    const sessionId =
+      (tab.ptyId != null
+        ? liveSessionByPtyRef.current.get(tab.ptyId) ??
+          digestBySurface(wsDigestsRef.current, thisInstanceRef.current).get(String(tab.ptyId))?.session_id
+        : undefined) ??
+      resumeSessionId(tab.command) ??
+      tab.rememberedSessionId;
+    const digest = sessionId ? wsDigestsRef.current.find((d) => d.session_id === sessionId) : undefined;
+    const agentId = agentIdForCommand(tab.command) ?? digest?.agent ?? "agent";
+    markSettled({
+      id: sessionId ?? `tab:${id}`,
+      resumable: !!sessionId,
+      agentId,
+      title: agentCliFor(agentId)?.name ?? agentId,
+      cwd: digest ? resumeCwd(digest) || tab.cwd : tab.cwd,
+      command: tab.command,
+      profile: tab.profile ?? digest?.profile ?? undefined,
+      worktree: agentWorkspaceRoot(tab.cwd, repoPaths) ?? undefined,
+      branch: digest?.branch ?? undefined,
+      projectId: project.id,
+      settledAt: Date.now(),
+    });
+    finalizeTabClose(id, "settle");
+  }, [finalizeTabClose, repoPaths, project.id, onNotice]);
+
+  const settled = useSyncExternalStore(subscribeSettled, settledSessions);
+  const projectSettled = useMemo(
+    () => settled.filter((s) => inProject(s, repoPaths, project.id)),
+    [settled, repoPaths, project.id],
+  );
+
+  /** Whether anything (a tab here, or a live session in any window) is using a
+   *  settled agent's folder or conversation. */
+  const settledInUse = (entry: SettledSession) => {
+    const root = entry.worktree?.root;
+    const under = (path?: string | null) => !!root && !!path && (path === root || path.startsWith(`${root}/`));
+    return (
+      tabsRef.current.some(
+        (t) =>
+          t.type === "terminal" &&
+          (under(t.cwd) ||
+            (t.ptyId != null && liveSessionByPtyRef.current.get(t.ptyId) === entry.id) ||
+            resumeSessionId(t.command) === entry.id),
+      ) ||
+      // A session elsewhere is in use when its terminal is alive here, or it
+      // has written since this agent was settled (another window resumed it).
+      // A killed agent's digest can still say "working", so its state alone
+      // is not evidence.
+      wsDigestsRef.current.some(
+        (d) =>
+          (d.session_id === entry.id || under(d.cwd)) &&
+          ((!!d.surface && statsRef.current.some((st) => String(st.id) === d.surface)) ||
+            (d.updated ?? 0) * 1000 > entry.settledAt + 60_000),
+      )
+    );
+  };
+  const settledInUseRef = useRef(settledInUse);
+  settledInUseRef.current = settledInUse;
+
+  /** Drop a settled agent's session for good: the record and the tombstone,
+   *  so a rescan doesn't bring it back as restorable. */
+  const forgetSettledSession = async (entry: SettledSession) => {
+    if (!entry.resumable) return;
+    const digest = wsDigestsRef.current.find((d) => d.session_id === entry.id);
+    forgetSessions([digest ?? ({ session_id: entry.id } as ipc.SessionDigest)]);
+    await ipc.sessionForget(entry.id).catch(() => {});
+  };
+
+  /** Bring a settled agent back as a tab, resuming its conversation. */
+  const restoreSettled = useCallback(async (entry: SettledSession) => {
+    if (entry.worktree) {
+      const { repo, root } = entry.worktree;
+      const present = (await ipc.gitWorktrees(repo).catch(() => null))?.some((w) => w.path === root);
+      if (present === false) {
+        onNotice("Its worktree is gone, so this agent can't be restored there.");
+        clearSettled(entry.id);
+        return;
+      }
+    }
+    if (entry.resumable) {
+      const digest =
+        wsDigestsRef.current.find((d) => d.session_id === entry.id) ??
+        ({ session_id: entry.id, agent: entry.agentId } as ipc.SessionDigest);
+      const command = restoreCommand(entry.agentId, entry.id) || entry.command;
+      if (command) {
+        const opened = await resumeSession({
+          digest,
+          agentId: entry.agentId,
+          cwd: entry.cwd,
+          command,
+          prompt: "",
+          profile: entry.profile || "default",
+          superseded: [],
+        });
+        if (opened) clearSettled(entry.id);
+        return;
+      }
+    }
+    addTerminal(entry.cwd, entry.command, entry.title, agentCliFor(entry.agentId)?.icon);
+    clearSettled(entry.id);
+  }, [resumeSession, addTerminal, onNotice]);
+
+  /** Remove everything a settled agent left: its worktree and branch (even
+   *  with unsaved work: the person asked), and its session record. */
+  const discardSettled = useCallback(async (entry: SettledSession) => {
+    if (settledInUseRef.current(entry)) {
+      onNotice("This agent is open again; close it before discarding.");
+      return;
+    }
+    if (entry.worktree) {
+      const { repo, root } = entry.worktree;
+      try {
+        const wt = (await ipc.gitWorktrees(repo)).find((w) => w.path === root);
+        if (wt && !wt.is_main) {
+          await ipc.gitWorktreeRemove(repo, root, 1);
+          if (wt.branch?.startsWith("agent/")) await ipc.gitBranchDelete(repo, wt.branch).catch(() => {});
+        }
+      } catch (err) {
+        // Nothing is forgotten while its folder is still on disk.
+        onNotice(`Couldn't remove its worktree: ${String(err)}`);
+        return;
+      }
+    }
+    await forgetSettledSession(entry);
+    clearSettled(entry.id);
+  }, [onNotice]);
+
+  // A day after settling: clean up. A worktree with nothing only-here goes
+  // (and its branch when that holds nothing either); one with uncommitted or
+  // unpushed work is kept and flagged under Agents. The main checkout is never
+  // touched. Runs shortly after opening and then hourly.
+  useEffect(() => {
+    if (!visible || repoPaths.length === 0) return;
+    const sweep = async () => {
+      for (const entry of dueForCleanup(settledSessions().filter((s) => inProject(s, repoPaths, project.id)), Date.now())) {
+        // Restored since, or open in another window: not ours to clean.
+        if (settledInUseRef.current(entry)) continue;
+        try {
+          let plan = settledCleanup(false, undefined, undefined);
+          if (entry.worktree) {
+            const { repo, root } = entry.worktree;
+            const [worktrees, audit] = await Promise.all([ipc.gitWorktrees(repo), ipc.gitWorkAudit(repo)]);
+            const wt = worktrees.find((w) => w.path === root);
+            const work = audit.items.find((item) => item.branch === wt?.branch);
+            plan = settledCleanup(true, wt, work);
+            if (plan.kind === "flag" && plan.dirty === 0 && plan.unpushed > 0 && wt?.branch) {
+              const state = await ipc.ghPrBranchState(repo, wt.branch).catch(() => "");
+              plan = settledCleanup(true, wt, work, prLanded(state, wt.head));
+            }
+            if (plan.kind === "remove") {
+              await ipc.gitWorktreeRemove(repo, root, 0);
+              if (plan.deleteBranch) await ipc.gitBranchDelete(repo, plan.branch).catch(() => {});
+            }
+          }
+          if (plan.kind === "flag") {
+            flagUnsaved(entry.id, { dirty: plan.dirty, unpushed: plan.unpushed, note: plan.note });
+            continue;
+          }
+          await forgetSettledSession(entry);
+          clearSettled(entry.id);
+        } catch {
+          /* Git unreadable now: try again next sweep. */
+        }
+      }
+    };
+    const first = window.setTimeout(() => void sweep(), 30_000);
+    const hourly = window.setInterval(() => void sweep(), 60 * 60 * 1000);
+    return () => {
+      window.clearTimeout(first);
+      window.clearInterval(hourly);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [visible, repoKey]);
 
   const closeTab = useCallback((
     id: string,
@@ -10560,19 +10759,6 @@ const ProjectViewBody = memo(function ProjectViewBody({
   );
   lifeForPtyRef.current = lifeForPty;
 
-  // A settled agent that starts working or needs you again is not finished:
-  // it comes back out of the Settled group on its own (T3 Code un-settles a
-  // thread on a new message the same way).
-  useEffect(() => {
-    for (const tab of tabs) {
-      if (tab.type !== "terminal" || !isSettledTab(tab)) continue;
-      const state = lifeForPty(tab.ptyId)?.state;
-      if (state === "working" || state === "waiting") {
-        patchTabRaw(tab.id, { settled: false } as Partial<SubTab>);
-      }
-    }
-  }, [tabs, lifeForPty, patchTabRaw]);
-
   const watchdogViews = useStableViews(() => {
     const views: AgentLifeView[] = [];
     for (const tab of tabs) {
@@ -10859,8 +11045,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
   // Pinned tabs sit first and outside the status groups, so they never move
   // with their agent's state (see isPinnedTab).
   const pinnedTabs = useMemo(() => splitPinned(stripTabs).pinned, [stripTabs]);
-  const unpinnedAgentTabs = useMemo(() => agentTabs.filter((t) => !isPinnedTab(t) && !isSettledTab(t)), [agentTabs]);
-  const settledTabs = useMemo(() => agentTabs.filter((t) => isSettledTab(t)), [agentTabs]);
+  const unpinnedAgentTabs = useMemo(() => agentTabs.filter((t) => !isPinnedTab(t)), [agentTabs]);
   const byStatus = useCallback(
     (s: TabStatus) => (grouped ? unpinnedAgentTabs.filter((t) => groupOf(t.id) === s) : []),
     [grouped, unpinnedAgentTabs, groupOf],
@@ -10945,7 +11130,6 @@ const ProjectViewBody = memo(function ProjectViewBody({
             ),
           ]
         : [run("all", null, null, null, unpinnedAgentTabs)]),
-      ...(settledTabs.length > 0 ? [run("settled", "SETTLED", null, null, settledTabs)] : []),
       ...DOC_STACKS.map((d) =>
         run(
           d.key,
@@ -10960,7 +11144,6 @@ const ProjectViewBody = memo(function ProjectViewBody({
     grouped,
     pinnedTabs,
     unpinnedAgentTabs,
-    settledTabs,
     refTabs,
     attentionTabs,
     workingTabs,
@@ -13309,20 +13492,18 @@ const ProjectViewBody = memo(function ProjectViewBody({
       // Pinning keeps a tab at the front of the strip, whatever its agent is
       // doing, until it is unpinned.
       const pinned = isPinnedTab(tab);
-      const settled = isSettledTab(tab);
       tabMenu.open(e, [
         {
           label: pinned ? "Unpin tab" : "Pin tab",
           onClick: () => patchTabRaw(tab.id, { pinned: !pinned } as Partial<SubTab>),
         },
-        // Finished work, put away: the tab moves to the collapsed Settled group
-        // and out of the way of what is still running.
-        ...(tab.type === "terminal" && isAgentTab(tab) && !pinned
+        // Finished work: the tab retires, restorable from Agents → Settled.
+        ...(tab.type === "terminal" && isAgentTab(tab) && !pinned && !tab.machine
           ? [
               {
-                label: settled ? "Unsettle" : "Settle",
-                hint: settled ? undefined : "puts finished work away",
-                onClick: () => patchTabRaw(tab.id, { settled: !settled } as Partial<SubTab>),
+                label: "Settle",
+                hint: "close, keep under Agents",
+                onClick: () => settleTab(tab.id),
               },
             ]
           : []),
@@ -14029,6 +14210,9 @@ const ProjectViewBody = memo(function ProjectViewBody({
             shareContext={Boolean(project.shareContext)}
             onShareContext={onShareContext}
             liveSessionIds={liveSessionIds}
+            settled={projectSettled}
+            onRestoreSettled={(entry) => void restoreSettled(entry)}
+            onDiscardSettled={(entry) => void discardSettled(entry)}
             onRestore={(cwd, cmd, title, agentId) =>
               addTerminal(
                 cwd,
@@ -15306,16 +15490,15 @@ const ProjectViewBody = memo(function ProjectViewBody({
                 life={lifeForPty(agentTermWs.ptyId)}
                 onOpenWorkspace={() => setWsDrawerOpen(true)}
                 onDockChange={setCardDocked}
-                onSendToWorkspace={isRemoteHost() ? undefined : () => {
+                onSendToWorkspace={isRemoteHost() || !hasSendTargets ? undefined : () => {
                   const tab = tabs.find((t): t is TermSubTab => t.type === "terminal" && t.ptyId === agentTermWs.ptyId);
                   const candidate = tab ? teleportCandidate(tab) : null;
                   if (candidate) setTeleport(candidate);
                   else setSendOpen(true);
                 }}
-                settled={isSettledTab(tabs.find((t) => t.type === "terminal" && t.ptyId === agentTermWs.ptyId) ?? {})}
-                onSettle={(settle) => {
+                onSettle={agentTermWs.machine ? undefined : () => {
                   const tab = tabs.find((t) => t.type === "terminal" && t.ptyId === agentTermWs.ptyId);
-                  if (tab) patchTabRaw(tab.id, { settled: settle } as Partial<SubTab>);
+                  if (tab) settleTab(tab.id);
                 }}
                 onOpenAsset={(path, opts) => {
                   // A click is the person's own say-so. With a modifier: their
@@ -15983,6 +16166,9 @@ const ProjectViewBody = memo(function ProjectViewBody({
           shareContext={Boolean(project.shareContext)}
           onShareContext={onShareContext}
           liveSessionIds={liveSessionIds}
+          settled={projectSettled}
+          onRestoreSettled={(entry) => void restoreSettled(entry)}
+          onDiscardSettled={(entry) => void discardSettled(entry)}
           onRestore={(cwd, cmd, title, agentId) =>
             addTerminal(
               cwd,

@@ -6,13 +6,47 @@
 import { useEffect, useRef, useState } from "react";
 import { Button } from "../components/ui";
 import type { ManagedWorkspace } from "./ManagedWorkspaces";
-import { peekWorkspaceList, refreshWorkspaceList } from "./workspaceListCache";
+import { peekWorkspaceList, refreshWorkspaceList, restoreWorkspaceList, subscribeWorkspaceList } from "./workspaceListCache";
 import { ProjectSetupDialog } from "./ProjectSetupDialog";
 import { openTemporaryWorkspace, type TemporaryWorkspace } from "./temporaryWorkspace";
 
 /** Workspaces a project can be sent to: ready, and this account may connect. */
 export const sendTargets = (workspaces: readonly ManagedWorkspace[]): ManagedWorkspace[] =>
   workspaces.filter((w) => w.state === "ready" && w.access?.canConnect !== false);
+
+let lastTargetsFetch = 0;
+/** Fetch the list at most once a minute however many callers ask. */
+function refreshTargetsSoon() {
+  if (Date.now() - lastTargetsFetch < 60_000) return;
+  lastTargetsFetch = Date.now();
+  void refreshWorkspaceList().catch(() => {});
+}
+/** Whether there is any workspace this project could be sent to. Unknown counts
+ *  as none, so the offer appears only once a ready workspace is seen. Checked
+ *  again when the window regains focus and when the account changes. */
+export function useHasSendTargets(): boolean {
+  const [has, setHas] = useState(() => sendTargets(peekWorkspaceList()?.workspaces ?? []).length > 0);
+  useEffect(() => {
+    const unsubscribe = subscribeWorkspaceList((snap) => setHas(sendTargets(snap.workspaces).length > 0));
+    void restoreWorkspaceList()
+      .then((snap) => { if (snap) setHas(sendTargets(snap.workspaces).length > 0); })
+      .catch(() => {})
+      .finally(refreshTargetsSoon);
+    const onAccount = () => {
+      setHas(false);
+      lastTargetsFetch = 0;
+      refreshTargetsSoon();
+    };
+    window.addEventListener("focus", refreshTargetsSoon);
+    window.addEventListener("canopy:account-changed", onAccount);
+    return () => {
+      unsubscribe();
+      window.removeEventListener("focus", refreshTargetsSoon);
+      window.removeEventListener("canopy:account-changed", onAccount);
+    };
+  }, []);
+  return has;
+}
 
 export function SendToWorkspace({
   projectId,

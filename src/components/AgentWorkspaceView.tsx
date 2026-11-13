@@ -1857,9 +1857,9 @@ export function AgentWorkspaceView({
               )}
               <span className="loose-chip">{pr.state.toLowerCase()}</span>
             </button>
-            {!!pr.check_runs?.length && (
+            {!!pr.check_runs?.some((c) => c.state !== "passed") && (
               <div className="aw-pr-checks" aria-label="Checks not yet passed">
-                {pr.check_runs.map((c, i) => (
+                {pr.check_runs.filter((c) => c.state !== "passed").map((c, i) => (
                   <span key={`${i}:${c.name}`} className={`loose-chip aw-pr-check-${c.state}`}>
                     {c.name} · {c.state}
                   </span>

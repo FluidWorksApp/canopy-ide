@@ -1,3 +1,4 @@
+import type { SettledSession } from "../settledSessions";
 import { fixedNumber } from "../format";
 // Agent management, as a page rather than a column.
 //
@@ -118,6 +119,10 @@ export interface AgentsViewProps {
   liveSessionIds?: string[];
   /** Reopen a past session: runs `cmd` in `cwd` as a new terminal. */
   onRestore?: (cwd: string, cmd: string, title: string, agentId: string) => void;
+  /** Agents put away with Settle in this project. */
+  settled?: SettledSession[];
+  onRestoreSettled?: (entry: SettledSession) => void;
+  onDiscardSettled?: (entry: SettledSession) => void;
   /** Open the agent-instructions tab. */
   onOpenInstructions?: (focus?: string) => void;
   /** Open one file claim as its own tab — who took it, why, and what it has
@@ -201,6 +206,9 @@ export function AgentsView({
   onShareContext,
   liveSessionIds = [],
   onRestore,
+  settled = [],
+  onRestoreSettled,
+  onDiscardSettled,
   onOpenInstructions,
   onOpenClaim,
   onNotice,
@@ -733,6 +741,67 @@ export function AgentsView({
                   </Button>
                 </div>
               ))}
+            </div>
+          </Section>
+        )}
+
+        {settled.length > 0 && (
+          <Section
+            title="Settled"
+            count={settled.length}
+            note="put away with Settle; a day later a clean worktree is removed, one with unsaved work is kept"
+          >
+            <div className="agv-past">
+              {settled.map((entry) => {
+                const unsaved = entry.unsaved
+                  ? [
+                      entry.unsaved.note,
+                      entry.unsaved.dirty > 0 && `${entry.unsaved.dirty} uncommitted`,
+                      entry.unsaved.unpushed > 0 && `${entry.unsaved.unpushed} unpushed`,
+                    ]
+                      .filter(Boolean)
+                      .join(", ")
+                  : "";
+                return (
+                  <div key={entry.id} className="agv-past-row">
+                    <AgentIcon id={entry.agentId} size={15} className="agv-card-mark" />
+                    <div className="agv-past-main">
+                      <div className="agv-past-line">
+                        <span className="agv-past-agent">{entry.title}</span>
+                        <span className="agv-chip" title={entry.cwd}>
+                          {basename(entry.worktree?.root ?? entry.cwd)}
+                        </span>
+                        {entry.branch && (
+                          <span className="agv-chip agv-chip-branch">⎇ {entry.branch}</span>
+                        )}
+                        {unsaved && <span className="agv-chip ap2-chip-warn">Kept: {unsaved}</span>}
+                        <span className="agv-past-when">{ago(Math.floor(entry.settledAt / 1000))}</span>
+                      </div>
+                    </div>
+                    <div className="agv-past-acts">
+                      <Button size="sm" onClick={() => onRestoreSettled?.(entry)}>
+                        <RestartIcon size={12} /> Restore
+                      </Button>
+                      <Button
+                        icon
+                        size="sm"
+                        title={
+                          unsaved
+                            ? `Discard: deletes its worktree with ${unsaved}`
+                            : "Discard: remove its worktree and record now"
+                        }
+                        aria-label={`Discard ${entry.title}`}
+                        onClick={() => {
+                          if (!unsaved || window.confirm(`Delete this worktree with ${unsaved}?`))
+                            onDiscardSettled?.(entry);
+                        }}
+                      >
+                        <TrashIcon size={12} />
+                      </Button>
+                    </div>
+                  </div>
+                );
+              })}
             </div>
           </Section>
         )}
