@@ -27,6 +27,7 @@ import {
 } from "../../terminalRecovery";
 import {subscribeTeamUnread,getTeamUnread,getUnreadSummary} from "../../teamMessaging/session";
 import {isReadOnlyHost,isRemoteHost,isWorkspaceHost} from "../../host";
+import { reconnectDiagnostic } from "../../reconnectDiagnostic";
 import { AgentIntegrationWarning } from "../AgentIntegrationWarning";
 import {AccountChatView,type AccountConversation} from "../AccountChatView";
 // One open project: icon rail + collapsible side panel (components / source
@@ -2470,6 +2471,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
         d.activate !== false ||
         (d.recovered && !activatedRecoveredTerminalRef.current);
       if (d.recovered && activate) activatedRecoveredTerminalRef.current = true;
+      if (d.recovered) reconnectDiagnostic("tab-attached");
       attachTerminal(
         d.ptyId,
         d.cwd,

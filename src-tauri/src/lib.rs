@@ -457,6 +457,14 @@ fn js_log(level: String, message: String) {
                 | "remote-stage:desktop-failed"
         ) {
             log::info!(target: "canopy::watchdog::remote", "{message}");
+        } else if matches!(
+            message.as_str(),
+            "reconnect-stage:routing-ready"
+                | "reconnect-stage:routed"
+                | "reconnect-stage:outside-project"
+                | "reconnect-stage:tab-attached"
+        ) {
+            log::info!(target: "canopy::watchdog::reconnect", "{message}");
         }
         return;
     }

@@ -67,6 +67,7 @@ import { startRequestTasks } from "./requestTasks";
 import { startAwareness } from "./awareness/engine";
 import { setCloudNoteSender, setCloudRosterProvider } from "./awareness/roster";
 import { isWorkspaceHost } from "./host";
+import { reconnectDiagnostic } from "./reconnectDiagnostic";
 import { startCloudSync } from "./remoteExecution/cloudSync";
 import { WorkspaceHooksNotice } from "./remoteExecution/WorkspaceHooksNotice";
 import { installOutcomes } from "./outcomes";
@@ -2508,6 +2509,7 @@ export default function App() {
     // fresh native snapshot so a phone spawn during hydration is not trapped
     // between the boot snapshot and this listener.
     if (!loaded) return;
+    reconnectDiagnostic("routing-ready");
     let cancelled = false;
     let unSpawn: (() => void) | undefined;
     let unExit: (() => void) | undefined;
@@ -2529,6 +2531,7 @@ export default function App() {
           ? e.project_id
           : undefined) ?? projectForTerminalCwd(wsRef.current.projects, e.cwd);
       if (!projectId) {
+        if (restored) reconnectDiagnostic("outside-project");
         notify(
           `An active terminal is in ${e.cwd}, outside any project.`,
           "info",
@@ -2563,6 +2566,7 @@ export default function App() {
         resumedFrom: e.resumed_from ?? undefined,
       });
       routedTerminalIdentities.current.add(identity);
+      if (restored) reconnectDiagnostic("routed");
     };
     const terminalEnded = (e: ipc.PtyExit) => {
       const identity = `${e.id}:${e.session_generation}`;
