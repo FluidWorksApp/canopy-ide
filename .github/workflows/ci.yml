@@ -72,7 +72,9 @@ jobs:
         with:
           node-version: 22
           cache: npm
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.99.1
       - run: npm ci
       - run: npm run licenses:check
 
@@ -81,8 +83,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: 1.99.1
           components: rustfmt
       - uses: swatinem/rust-cache@v2
         with:
@@ -105,8 +108,9 @@ jobs:
         os: [ubuntu-latest, macos-15, windows-2022]
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: 1.99.1
           components: rustfmt
       - uses: swatinem/rust-cache@v2
         with:
@@ -171,8 +175,9 @@ jobs:
       ZIG_VERSION: 0.15.2
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: 1.99.1
           components: rustfmt
       - name: Install Zig ${{ env.ZIG_VERSION }} (official zip, checksum verified)
         if: runner.os == 'Windows'
@@ -239,8 +244,9 @@ jobs:
         os: [ubuntu-latest, macos-15, windows-2022]
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: 1.99.1
           components: rustfmt
       - uses: swatinem/rust-cache@v2
         with:
@@ -283,7 +289,9 @@ jobs:
       ZIG_VERSION: 0.15.2
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.99.1
       - name: Install Zig ${{ env.ZIG_VERSION }} (official zip, checksum verified)
         if: runner.os == 'Windows'
         shell: pwsh
@@ -367,8 +375,9 @@ jobs:
             build-essential \
             curl wget file libssl-dev libgtk-3-dev
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: 1.99.1
           components: rustfmt, clippy
 
       - uses: swatinem/rust-cache@v2
@@ -415,7 +424,9 @@ jobs:
         os: [macos-15, windows-2022]
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.99.1
       - uses: swatinem/rust-cache@v2
         with:
           workspaces: "./src-tauri -> target"

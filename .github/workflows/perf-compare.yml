@@ -46,7 +46,9 @@ jobs:
         with:
           ref: spike/libghostty-vt
           path: spike
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.99.1
 
       - name: Install Zig ${{ env.ZIG_VERSION }} (official release, checksum verified)
         run: |

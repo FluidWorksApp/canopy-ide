@@ -70,10 +70,10 @@ jobs:
           TARGET: ${{ matrix.rust_target }}
         run: |
           sudo apt-get install -y musl-tools
-          rustup toolchain install stable --profile minimal --target "$TARGET"
+          rustup toolchain install 1.99.1 --profile minimal --target "$TARGET"
           target_env=$(printf '%s' "$TARGET" | tr '[:lower:]-' '[:upper:]_')
           export "CC_$(printf '%s' "$TARGET" | tr '-' '_')=musl-gcc" "CARGO_TARGET_${target_env}_LINKER=musl-gcc"
-          cargo +stable build --locked --release --manifest-path crates/canopy-service/Cargo.toml -p canopy-service --bin canopy-serviced --target "$TARGET"
+          cargo +1.99.1 build --locked --release --manifest-path crates/canopy-service/Cargo.toml -p canopy-service --bin canopy-serviced --target "$TARGET"
           mkdir -p service-bin
           install -m 0755 "src-tauri/target/$TARGET/release/canopy-serviced" "service-bin/canopy-serviced-linux-${{ matrix.arch }}"
           # x86_64 musl produces static PIE; both formats are self-contained.
