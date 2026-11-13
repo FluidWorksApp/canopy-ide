@@ -12,6 +12,9 @@ Two changes in `build.rs`, both only for wasm32:
   `wasm32-freestanding`. Upstream panics on any target outside its list.
 - The include directory is the source tree's `include/`: ghostty's wasm32
   build installs the static archive but not the headers.
+- For wasm32 the build compiles a copy of the ghostty source in `OUT_DIR`
+  whose `src/os/wasm/log.zig` import `env.log` is a local no-op (a page has
+  no `env` module). The given source tree is never modified.
 
 And one in `src/bindings.rs`: the 46 generated layout assertions (sizes and
 offsets computed by bindgen on a 64-bit host) are compiled only where

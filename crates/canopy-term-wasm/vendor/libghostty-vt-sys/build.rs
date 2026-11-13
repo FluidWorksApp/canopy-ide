@@ -128,6 +128,12 @@ fn build_vendored(link_mode: LinkMode, target: &str) {
         }
         Err(_) => fetch_ghostty(&out_dir),
     };
+    // Canopy patch: see `wasm_source`.
+    let ghostty_dir = if target.starts_with("wasm32") {
+        wasm_source(&ghostty_dir, &out_dir)
+    } else {
+        ghostty_dir
+    };
 
     // Build libghostty-vt via zig.
     let install_prefix = out_dir.join("ghostty-install");
@@ -238,6 +244,64 @@ fn build_vendored(link_mode: LinkMode, target: &str) {
         LinkMode::Static => emit_static_link_lib(target),
     }
     emit_include_metadata(&[include_dir]);
+}
+
+/// Canopy patch: ghostty's freestanding logger sends `std.log` output to an
+/// imported `env.log(ptr, len)`. A page has no module named `env`, and the
+/// import survives linking into Rust's wasm (it names its module), so the
+/// wasm build compiles a copy of the source whose import is a local no-op.
+/// The source tree given (possibly a shared, read-only cache) is not touched.
+fn wasm_source(src: &Path, out_dir: &Path) -> PathBuf {
+    let dest = out_dir.join("ghostty-src-wasm");
+    let _ = std::fs::remove_dir_all(&dest);
+    copy_tree(src, &dest);
+    let log = dest.join("src").join("os").join("wasm").join("log.zig");
+    let text = std::fs::read_to_string(&log)
+        .unwrap_or_else(|e| panic!("failed to read {}: {e}", log.display()));
+    let import = "extern \"env\" fn log(ptr: [*]const u8, len: usize) void;";
+    assert!(
+        text.contains(import),
+        "ghostty's wasm logger changed; update the canopy patch in build.rs"
+    );
+    let patched = text.replace(
+        import,
+        "fn log(ptr: [*]const u8, len: usize) void {\n            _ = ptr;\n            _ = len;\n        }",
+    );
+    std::fs::write(&log, patched)
+        .unwrap_or_else(|e| panic!("failed to write {}: {e}", log.display()));
+    dest
+}
+
+fn copy_tree(from: &Path, to: &Path) {
+    std::fs::create_dir_all(to)
+        .unwrap_or_else(|e| panic!("failed to create {}: {e}", to.display()));
+    for entry in
+        std::fs::read_dir(from).unwrap_or_else(|e| panic!("failed to read {}: {e}", from.display()))
+    {
+        let entry = entry.expect("directory entry");
+        let name = entry.file_name();
+        if matches!(
+            name.to_str(),
+            Some(".git" | ".zig-cache" | "zig-out" | "zig-cache")
+        ) {
+            continue;
+        }
+        let path = entry.path();
+        let target = to.join(&name);
+        let kind = entry.file_type().expect("file type");
+        if kind.is_dir() {
+            copy_tree(&path, &target);
+        } else if kind.is_symlink() {
+            let link = std::fs::read_link(&path).expect("symlink target");
+            #[cfg(unix)]
+            let _ = std::os::unix::fs::symlink(link, &target);
+            #[cfg(not(unix))]
+            let _ = std::fs::copy(path.join(link), &target);
+        } else {
+            std::fs::copy(&path, &target)
+                .unwrap_or_else(|e| panic!("failed to copy {}: {e}", path.display()));
+        }
+    }
 }
 
 /// Emit the link directive for the static archive.
