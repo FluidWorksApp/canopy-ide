@@ -115,11 +115,13 @@ verified.
 
 ### Kiro flags
 
-`kiro-cli --agent canopy --trust-all-tools` fails with "unexpected argument" on
-older kiro-cli versions: `--trust-all-tools` belongs to `kiro-cli chat` and
-`kiro-cli acp`, not the top level. The ACP launch uses `kiro-cli acp --agent
-canopy [--trust-all-tools]`. Canopy was verified on kiro-cli 3.1.0; older
-versions are untested.
+`kiro-cli --agent canopy --trust-all-tools` fails with "unexpected argument"
+(checked on kiro-cli 3.3.0): `--trust-all-tools`, `--model` and `--effort` belong
+to `kiro-cli chat` and `kiro-cli acp`, not the top level, which takes only
+`--agent` and `--resume-id` as shorthands. So every terminal launch names `chat`
+(`kiro-cli chat --agent canopy [--trust-all-tools]`, resume `kiro-cli chat
+--resume-id <id> ...`; the entry's `launchSubcommand`), and the ACP launch uses
+`kiro-cli acp --agent canopy [--trust-all-tools]`.
 
 ## What stays off ACP
 
