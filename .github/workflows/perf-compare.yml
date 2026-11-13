@@ -46,7 +46,7 @@ jobs:
         with:
           ref: spike/libghostty-vt
           path: spike
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.99.1 # pinned: cargo 1.100 build-dir layout breaks tauri-build 2.6.3 sidecar copy
 
       - name: Install Zig ${{ env.ZIG_VERSION }} (official release, checksum verified)
         run: |
