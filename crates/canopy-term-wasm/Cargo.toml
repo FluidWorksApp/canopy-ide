@@ -1,0 +1,46 @@
+[package]
+name = "canopy-term-wasm"
+version = "0.1.0"
+description = "canopy-term-core (libghostty-vt) built for the webview and the browser: the engine behind every terminal tab"
+authors = ["Cause Connect Pte Ltd <sam@fluidwords.app>"]
+license = "MIT"
+edition = "2021"
+# canopy-term-core's floor (libghostty-vt is edition 2024).
+rust-version = "1.90"
+publish = false
+
+# Its own workspace root with its own lock, like canopy-term-core.
+[workspace]
+
+[lib]
+# cdylib: the .wasm the page loads. rlib: the native example and tests.
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+canopy-term-core = { path = "../canopy-term-core" }
+# Key, mouse, paste and focus encoders: the page sends events, the same
+# tables the native window uses turn them into bytes.
+canopy-term-input = { path = "../canopy-term-input" }
+# Exact pin: the wasm-bindgen CLI that post-processes the .wasm must be the
+# same version (CI installs this one).
+wasm-bindgen = "=0.2.100"
+
+# The published libghostty-vt-sys panics on the wasm32 target; the vendored
+# copy maps it to Zig's wasm32-freestanding (see vendor/libghostty-vt-sys/VENDORED.md).
+# Only this workspace is patched.
+[patch.crates-io]
+libghostty-vt-sys = { path = "vendor/libghostty-vt-sys" }
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+panic = "abort"
+
+# Tests and the digest example compare engines byte for byte; build the
+# engine optimised so the large corpus runs in seconds.
+[profile.dev.package."*"]
+opt-level = 3
+debug = false
+debug-assertions = false
+overflow-checks = false

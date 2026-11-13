@@ -1,4 +1,3 @@
-import {trackMouseEncoding} from '../../packages/remote-host/terminal-mouse-modes.mjs';
 import {registerSelectAll} from '../selectAll';
 import { pastedImages } from '../spotCompose';
 import { MAX_CONTEXT_IMAGE_BYTES, readFileBase64 } from '../fileData';
@@ -11,15 +10,13 @@ import {
   useReducer,
   useRef,
   type MouseEvent as ReactMouseEvent,
+  useState,
 } from "react";
 import { DropUploadProgress } from "./DropUploadProgress";
 import { dropUploadErrorText, dropUploadReducer } from "../dropUpload";
-import { Terminal } from "@xterm/xterm";
-import { FitAddon } from "@xterm/addon-fit";
-import { SerializeAddon } from "@xterm/addon-serialize";
-import { Unicode11Addon } from "@xterm/addon-unicode11";
-import { WebLinksAddon } from "@xterm/addon-web-links";
 import "@xterm/xterm/css/xterm.css";
+import { createTerminal, type CreatedTerminal, type TerminalStats, type TermLike } from "../terminalEngine";
+import { TerminalEngineStats } from "./TerminalEngineStats";
 import { openFileLink, openLink } from "../links";
 
 /** Link detection runs on every pointer move over a row. A row's answer is kept
@@ -196,8 +193,9 @@ export const Term = forwardRef<TermHandle, TermProps>(function Term(
   const attachIdRef = useRef(attachId);
   const killAttachedOnCloseRef = useRef(killAttachedOnClose);
   const containerRef = useRef<HTMLDivElement>(null);
-  const termRef = useRef<Terminal | null>(null);
-  const mouseModesRef = useRef<ReturnType<typeof trackMouseEncoding> | null>(null);
+  const termRef = useRef<TermLike | null>(null);
+  const [engineStats, setEngineStats] = useState<TerminalStats | null>(null);
+  const mouseModesRef = useRef<CreatedTerminal["mouseModes"] | null>(null);
   const ptyIdRef = useRef<number | null>(null);
   /** Attach/detach the native output viewer as this pane becomes visible/hidden. */
   const streamVisibilityRef = useRef<((visible: boolean) => void) | null>(null);
@@ -350,8 +348,30 @@ export const Term = forwardRef<TermHandle, TermProps>(function Term(
     if (!el) return;
 
     const settings = getSettings();
-    const term = new Terminal({
-      allowProposedApi: true,
+    // Links must go through the OS, not window.open(): WKWebView has no popup
+    // support, so a default handler gets null back from window.open() and the
+    // click dies silently. The opener plugin's default scope already allows
+    // http/https, which is all the URL matcher produces.
+    //
+    // Same fixed rule as every other URL: click opens in Canopy and command-click
+    // opens the OS browser. Selection gestures still fall through untouched.
+    const linkHint = createLinkHint(el);
+    // The engine is chosen once, when the tab opens (Settings > Terminal):
+    // our Ghostty engine by default, xterm.js when the user picked it or the
+    // engine is unavailable. Everything below works the same on either.
+    const created = createTerminal({
+      engine: settings.terminalEngine,
+      webLinks: {
+        activate: (event, uri) => {
+          if (!opensLink(event, term.hasSelection())) return;
+          linkHint.hide();
+          // Same route as every other link in the app — a dev server printing
+          // its address is the case the in-app browser was built for.
+          openLink(uri, matchesModifierClick(event, "open-external"));
+        },
+        hover: (event) => linkHint.show(event),
+        leave: () => linkHint.hide(),
+      },
       scrollback: settings.scrollback,
       fontSize: settings.fontSize,
       fontFamily: settings.terminalFontFamily,
@@ -366,8 +386,14 @@ export const Term = forwardRef<TermHandle, TermProps>(function Term(
       minimumContrastRatio,
       theme: themeFor(settings),
     });
+    const { term, fit, serializer, mouseModes } = created;
+    setEngineStats(created.stats);
+    // Our engine repairs itself and, failing that, the tab carries on with
+    // xterm (shared/terminalEngine). This fires only if that failed too.
+    const engineFailureSub = created.onEngineFailure(() => {
+      el.dataset.engineFailed = "true";
+    });
     termRef.current = term;
-    const mouseModes = trackMouseEncoding(term);
     mouseModesRef.current = mouseModes;
 
     // Everything else recolors for free via CSS custom properties when the
@@ -396,32 +422,6 @@ export const Term = forwardRef<TermHandle, TermProps>(function Term(
       term.options.cursorBlink = next.terminalCursorBlink;
       if (metricsChanged) syncNowRef.current?.();
     };
-    const fit = new FitAddon();
-    term.loadAddon(fit);
-    const serializer = new SerializeAddon();
-    term.loadAddon(serializer);
-    term.loadAddon(new Unicode11Addon());
-    term.unicode.activeVersion = "11";
-    // Links must go through the OS, not window.open(): WKWebView has no popup
-    // support, so the addon's default handler gets null back from window.open()
-    // and the click dies silently. The opener plugin's default scope already
-    // allows http/https, which is all the addon's URL matcher produces.
-    //
-    // Same fixed rule as every other URL: click opens in Canopy and command-click
-    // opens the OS browser. Selection gestures still fall through untouched.
-    const linkHint = createLinkHint(el);
-    term.loadAddon(
-      new WebLinksAddon(
-        (event, uri) => {
-          if (!opensLink(event, term.hasSelection())) return;
-          linkHint.hide();
-          // Same route as every other link in the app — a dev server printing
-          // its address is the case the in-app browser was built for.
-          openLink(uri, matchesModifierClick(event, "open-external"));
-        },
-        { hover: (event) => linkHint.show(event), leave: () => linkHint.hide() },
-      ),
-    );
     // The addon only covers URLs typed out in the text. OSC 8 hyperlinks — the
     // explicit kind agent TUIs emit, where the visible text is a label and the
     // URL travels in the escape sequence — are claimed by xterm's own OSC link
@@ -1368,6 +1368,7 @@ export const Term = forwardRef<TermHandle, TermProps>(function Term(
       dataSub.dispose();
       binarySub.dispose();
       mouseModes.dispose();
+      engineFailureSub.dispose();
       mouseModesRef.current = null;
       titleSub.dispose();
       unregisterPressureShedder();
@@ -1418,6 +1419,7 @@ export const Term = forwardRef<TermHandle, TermProps>(function Term(
   return (
     <>
       <div className="term-container" ref={containerRef} onContextMenu={openMenu} />
+      <TerminalEngineStats stats={engineStats} />
       {dropUpload && (
         <DropUploadProgress state={dropUpload} onDismiss={() => dispatchDrop({ type: "dismiss" })} />
       )}

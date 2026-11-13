@@ -235,6 +235,88 @@ jobs:
             echo "::endgroup::"
           done
 
+  # The engine behind every terminal tab: canopy-term-core (libghostty-vt)
+  # built for wasm32 and loaded by the page. Gate: it builds, the smoke test
+  # passes under Node, and on five generated streams its screen (grid, cursor,
+  # modes, title, every scrollback line) hashes identically to the native
+  # engine's. Prints size, throughput and per-terminal memory to the log.
+  term-wasm:
+    name: Terminal engine (wasm)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      WASM_BINDGEN_VERSION: 0.2.100
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.99.1
+          targets: wasm32-unknown-unknown
+      - uses: ./.github/actions/install-zig
+      - name: Ghostty source and Zig package cache (no network clone in the build)
+        uses: ./.github/actions/ghostty-vendor
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: crates/canopy-term-wasm
+          key: term-wasm
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Install wasm-bindgen-cli ${{ env.WASM_BINDGEN_VERSION }} (same version as the crate's pin)
+        run: cargo install --locked --version "$WASM_BINDGEN_VERSION" wasm-bindgen-cli
+      - name: Build the engine for wasm32
+        run: cargo build --locked --release --lib --target wasm32-unknown-unknown --manifest-path crates/canopy-term-wasm/Cargo.toml
+      - name: Generate JS bindings (node and web)
+        run: |
+          set -euo pipefail
+          wasm=crates/canopy-term-wasm/target/wasm32-unknown-unknown/release/canopy_term_wasm.wasm
+          wasm-bindgen --target nodejs --out-dir "$RUNNER_TEMP/pkg-node" "$wasm"
+          wasm-bindgen --target web --out-dir "$RUNNER_TEMP/pkg-web" "$wasm"
+          for f in "$wasm" "$RUNNER_TEMP/pkg-web/canopy_term_wasm_bg.wasm"; do
+            echo "$(basename "$f"): $(wc -c < "$f") bytes, $(gzip -9c "$f" | wc -c) gzipped" | tee -a "$GITHUB_STEP_SUMMARY"
+          done
+      # Every import must be satisfied by wasm-bindgen's own glue: an `env`
+      # import is a C/Zig symbol nothing provides, and the page cannot load it.
+      - name: Check the module's imports
+        run: |
+          node -e '
+            const fs = require("fs");
+            const m = new WebAssembly.Module(fs.readFileSync(process.argv[1]));
+            const env = WebAssembly.Module.imports(m).filter((i) => i.module === "env");
+            for (const i of env) console.log(`env import: ${i.name} (${i.kind})`);
+            if (env.length) { console.error(`${env.length} unresolved env import(s)`); process.exit(1); }
+            console.log("no env imports");
+          ' crates/canopy-term-wasm/target/wasm32-unknown-unknown/release/canopy_term_wasm.wasm
+      - name: Smoke test under Node
+        run: node crates/canopy-term-wasm/js/smoke.mjs "$RUNNER_TEMP/pkg-node" | tee -a "$GITHUB_STEP_SUMMARY"
+      - name: Parity with the native engine
+        run: |
+          set -euo pipefail
+          cd crates/canopy-term-wasm
+          node js/streams.mjs "$RUNNER_TEMP/streams" > /dev/null
+          cargo run --locked --release --example digest -- "$RUNNER_TEMP"/streams/*.bin | tee "$RUNNER_TEMP/native.txt"
+          node js/parity.mjs "$RUNNER_TEMP/pkg-node" "$RUNNER_TEMP/native.txt" | tee -a "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: canopy-term-wasm
+          path: |
+            ${{ runner.temp }}/pkg-web
+            ${{ runner.temp }}/pkg-node
+          retention-days: 14
+      # The app ships a prebuilt copy of this module (shared/terminalEngine/pkg) so
+      # the frontend builds without Rust or Zig. It must be the build of these
+      # sources: after the artifact above is uploaded, so a stale copy can be
+      # refreshed from this very run (scripts/update-terminal-engine.sh).
+      - name: Bundled engine matches its sources
+        run: |
+          set -euo pipefail
+          node crates/canopy-term-wasm/js/source-hash.mjs --check
+          if cmp -s "$RUNNER_TEMP/pkg-web/canopy_term_wasm_bg.wasm" shared/terminalEngine/pkg/canopy_term_wasm_bg.wasm; then
+            echo "bundled engine is byte-identical to this build" | tee -a "$GITHUB_STEP_SUMMARY"
+          else
+            echo "bundled engine differs byte-for-byte from this build (same sources; the build is not bit-reproducible)" | tee -a "$GITHUB_STEP_SUMMARY"
+          fi
+
   term-cli:
     name: canopy-term (${{ matrix.os }})
     runs-on: ${{ matrix.os }}

@@ -8086,6 +8086,36 @@ body.dragging-tab * {
   background: var(--bg-alt);
 }
 
+/* Shown only if neither terminal engine could draw this tab. */
+.term-container[data-engine-failed="true"]::before {
+  content: "This terminal stopped drawing. The program is still running: quit and reopen Canopy to see it again.";
+  position: absolute;
+  inset: 8px 12px auto 12px;
+  z-index: 400;
+  padding: 6px 10px;
+  border-radius: 6px;
+  font-size: 12px;
+  color: var(--text);
+  background: var(--bg);
+  border: 1px solid var(--border);
+}
+
+/* Settings > Terminal > Show engine stats. */
+.term-engine-stats {
+  position: absolute;
+  top: 6px;
+  right: 16px;
+  z-index: 300;
+  padding: 4px 8px;
+  border-radius: 6px;
+  font: 10px/1.45 var(--font-mono, ui-monospace, monospace);
+  color: var(--text-dim);
+  background: color-mix(in srgb, var(--bg) 88%, transparent);
+  border: 1px solid var(--border);
+  pointer-events: none;
+  white-space: nowrap;
+}
+
 .term-container[data-reconnecting="true"]::after {
   content: "Reconnecting…";
   position: absolute;

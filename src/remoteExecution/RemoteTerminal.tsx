@@ -1,9 +1,9 @@
 import { useEffect, useRef, useState } from "react";
-import { Terminal } from "@xterm/xterm";
 import { coalesced } from "./coalesced";
 import { TerminalInput } from "./terminalInput";
-import { FitAddon } from "@xterm/addon-fit";
 import "@xterm/xterm/css/xterm.css";
+import { createTerminal } from "../terminalEngine";
+import { getSettings } from "../settings";
 import type { RemoteExecutionClient } from "./client";
 
 export function RemoteTerminal({ client, workspaceId, sessionId, sharedSessionId, writable }: {
@@ -13,8 +13,8 @@ export function RemoteTerminal({ client, workspaceId, sessionId, sharedSessionId
   const [status, setStatus] = useState("Connecting…");
   useEffect(() => {
     const sessionRoute=sharedSessionId?`/shared-sessions/${sharedSessionId}`:`/sessions/${sessionId}`;
-    const term = new Terminal({ scrollback: 2000, disableStdin: !writable, theme: { background: "#0d0f12" } });
-    const fit = new FitAddon(); term.loadAddon(fit); term.open(surface.current!);
+    const { term, fit } = createTerminal({ engine: getSettings().terminalEngine, scrollback: 2000, disableStdin: !writable, theme: { background: "#0d0f12" }, xtermAddons: "fit" });
+    term.open(surface.current!);
     let disposed = false;
     let socket: WebSocket | undefined;
     let retry: number | undefined;

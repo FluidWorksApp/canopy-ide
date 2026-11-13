@@ -69,6 +69,8 @@ export const SETTINGS_INDEX: SettingEntry[] = [
   { tab: "editor", name: "File associations", desc: "Which language each file type is highlighted as.", keywords: ["syntax", "language", "highlighting", "extensions", "monaco"] },
   { tab: "terminal", name: "Automatic session names", desc: "Agent callsign words.", tag: "New terminals only", keywords: ["titles", "rename", "tab names"] },
   { tab: "terminal", name: "Font and cursor", desc: "Monospace fonts found on this machine.", tag: "New terminals only", keywords: ["font size", "typeface", "cursor style", "blink", "line height"] },
+  { tab: "terminal", name: "Engine", desc: "Ghostty is Canopy's own terminal. New terminals only.", tag: "Beta", keywords: ["ghostty", "xterm", "classic", "renderer", "native terminal", "beta"] },
+  { tab: "terminal", name: "Show engine stats", desc: "Engine, speed and memory on each terminal.", keywords: ["performance", "debug", "developer", "fps", "overlay", "usage"] },
   { tab: "terminal", name: "Scrollback", desc: "Lines kept per terminal. New terminals only.", keywords: ["history", "buffer", "lines", "memory"] },
   { tab: "terminal", name: "Keep terminals running after quit", desc: "Terminals and agents stay alive for 2 hours after you quit or update, and reconnect on next launch. Applies after restart. Mac and Linux.", keywords: ["persistent", "quit", "update", "background", "reconnect", "survive", "host"] },
   { tab: "privacy", name: "Files outside projects", desc: "Open them from terminal links.", keywords: ["links", "terminal", "outside", "folders", "open file", "privacy"] },
