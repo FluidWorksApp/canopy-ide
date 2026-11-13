@@ -169,10 +169,10 @@ pub fn launch_report(adopted: usize) -> String {
     let decision = if !enabled() {
         "hosting-off"
     } else {
-        match unix::resolution() {
-            unix::Resolution::Fresh => "fresh",
-            unix::Resolution::Reuse(_) => "reuse",
-            unix::Resolution::HostUnusable => "host-unusable",
+        match resolution() {
+            Resolution::Fresh => "fresh",
+            Resolution::Reuse(_) => "reuse",
+            Resolution::HostUnusable => "host-unusable",
         }
     };
     #[cfg(not(unix))]
