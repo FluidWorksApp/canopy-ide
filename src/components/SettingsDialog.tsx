@@ -52,6 +52,7 @@ import {
 import { clearCompanionView, clearRun } from "../companionSession";
 import { Mascot } from "./Mascot";
 import { Button, Checkbox, Field, Row, Segmented, Select, Stepper, Switch, TextInput } from "./ui";
+import { ghosttyFailure } from "../terminalEngine";
 import { notOnServerYet, serverFeatureError } from "../accountErrors";
 import { peekTeamIdentity, subscribeTeamIdentity, teamIdentity, type TeamIdentity } from "../teamIdentity";
 
@@ -2524,6 +2525,36 @@ export function SettingsDialog({ onClose, initialTab = "appearance", projects = 
                     "terminalCursorStyle",
                     "terminalCursorBlink",
                   )}
+                </Item>
+                <Item
+                  name="Engine"
+                  tag="Beta"
+                  desc="Ghostty is Canopy's own terminal. New terminals only."
+                >
+                  <Segmented<"ghostty" | "xterm">
+                    aria-label="Terminal engine"
+                    options={[
+                      { id: "ghostty", label: "Ghostty" },
+                      { id: "xterm", label: "Classic" },
+                    ]}
+                    value={s.terminalEngine}
+                    onChange={(terminalEngine) => patch({ terminalEngine })}
+                  />
+                  {s.terminalEngine === "ghostty" && ghosttyFailure() && (
+                    <span className="set-warn" role="status">
+                      Ghostty can't run here; using Classic.
+                    </span>
+                  )}
+                </Item>
+                <Item
+                  name="Show engine stats"
+                  desc="Engine, speed and memory on each terminal."
+                >
+                  <Switch
+                    checked={s.terminalEngineStats}
+                    onChange={(terminalEngineStats) => patch({ terminalEngineStats })}
+                    aria-label="Show engine stats"
+                  />
                 </Item>
                 <Item
                   name="Scrollback"

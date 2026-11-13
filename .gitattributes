@@ -11,3 +11,7 @@
 *.tsx text diff
 *.rs  text diff
 *.css text diff
+
+# The prebuilt terminal engine (see src/terminalEngine/pkg/README.md).
+*.wasm binary
+src/terminalEngine/pkg/canopy_term_wasm* linguist-generated

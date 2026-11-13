@@ -341,6 +341,13 @@ export interface Settings {
   terminalFontFamily: string;
   terminalCursorStyle: CursorStyle;
   terminalCursorBlink: boolean;
+  /** What draws a terminal tab: "ghostty" is Canopy's own engine (the one the
+   *  native Canopy Terminal uses, compiled for the webview), "xterm" is
+   *  xterm.js. New terminals only. A terminal falls back to xterm by itself
+   *  when the engine cannot run here (see src/terminalEngine). */
+  terminalEngine: "ghostty" | "xterm";
+  /** A small badge over each terminal: its engine, speed and memory. */
+  terminalEngineStats: boolean;
   editorFontFamily: string;
   editorFontSize: number;
   editorCursorStyle: CursorStyle;
@@ -814,6 +821,8 @@ export const DEFAULTS: Settings = {
   terminalFontFamily: TERMINAL_FONT_DEFAULT,
   terminalCursorStyle: "block",
   terminalCursorBlink: true,
+  terminalEngine: "ghostty",
+  terminalEngineStats: false,
   editorFontFamily: EDITOR_FONT_DEFAULT,
   editorFontSize: 13,
   editorCursorStyle: "bar",
@@ -955,6 +964,7 @@ export function getSettings(): Settings {
     const stored = JSON.parse(raw ?? "{}") as Partial<Settings>;
     value = { ...DEFAULTS, ...stored };
     value.scrollback = boundedScrollback(stored.scrollback);
+    if (value.terminalEngine !== "xterm") value.terminalEngine = "ghostty";
     if (!isSessionNameTheme(value.sessionNameTheme))
       value.sessionNameTheme = DEFAULTS.sessionNameTheme;
     if (stored.dictationTriggerRevision !== DICTATION_TRIGGER_REVISION) {

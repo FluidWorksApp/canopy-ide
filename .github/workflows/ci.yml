@@ -303,6 +303,19 @@ jobs:
             ${{ runner.temp }}/pkg-web
             ${{ runner.temp }}/pkg-node
           retention-days: 14
+      # The app ships a prebuilt copy of this module (src/terminalEngine/pkg) so
+      # the frontend builds without Rust or Zig. It must be the build of these
+      # sources: after the artifact above is uploaded, so a stale copy can be
+      # refreshed from this very run (scripts/update-terminal-engine.sh).
+      - name: Bundled engine matches its sources
+        run: |
+          set -euo pipefail
+          node crates/canopy-term-wasm/js/source-hash.mjs --check
+          if cmp -s "$RUNNER_TEMP/pkg-web/canopy_term_wasm_bg.wasm" src/terminalEngine/pkg/canopy_term_wasm_bg.wasm; then
+            echo "bundled engine is byte-identical to this build" | tee -a "$GITHUB_STEP_SUMMARY"
+          else
+            echo "bundled engine differs byte-for-byte from this build (same sources; the build is not bit-reproducible)" | tee -a "$GITHUB_STEP_SUMMARY"
+          fi
 
   term-cli:
     name: canopy-term (${{ matrix.os }})
