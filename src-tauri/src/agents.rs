@@ -1190,7 +1190,7 @@ const KIRO_HOOK_EVENTS: &[&str] = &[
 
 /// Kiro runs hooks only from the active agent's config, so Canopy installs a
 /// global agent named `canopy` (`~/.kiro/agents/canopy.json`) and launches
-/// `kiro-cli --agent canopy` (see sessionArgs in projects.ts). It mirrors the
+/// `kiro-cli chat --agent canopy` (see sessionArgs in projects.ts). It mirrors the
 /// built-in default agent (all tools, the user's MCP servers, steering and
 /// AGENTS.md as context), so a Canopy session behaves like a plain one while
 /// the hooks report turns and tool use. An unknown agent name falls back to

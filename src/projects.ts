@@ -735,6 +735,12 @@ export interface AgentCli {
   /** Arguments every interactive session of this CLI carries (bare launch,
    *  prompt, resume), whatever the permission settings. */
   sessionArgs?: string;
+  /** Subcommand a bare interactive launch must name because the CLI's
+   *  session options (`skipPermissions`, `execution` flags) belong to it,
+   *  not to the top level. kiro-cli: `--trust-all-tools`, `--model` and
+   *  `--effort` are `chat` options, so `kiro-cli --agent canopy
+   *  --trust-all-tools` fails with "unexpected argument". */
+  launchSubcommand?: string;
 
   /**
    * Default automatic working mode for every Canopy launch and restore.
@@ -872,6 +878,10 @@ export type AgentLaunchOptions = Readonly<Record<string, string | undefined>>;
 export interface AgentCliDef extends Omit<AgentCli, "resume" | "prompt" | "rebound"> {
   resume?: (sessionId: string, bin: string) => string;
   prompt?: (text: string, bin: string) => string;
+  /** A resume spelling Canopy used to write, read back by resumeSessionId
+   *  only, so a terminal remembered from it keeps its session and is rebuilt
+   *  with today's `resume`. Never launched. */
+  legacyResume?: (sessionId: string, bin: string) => string;
 }
 
 /** Single-quote a string for a POSIX shell. */
@@ -1516,10 +1526,13 @@ export const BUILTIN_AGENT_CLIS: AgentCliDef[] = [
         source: "`kiro-cli update --help`; `kiro-cli settings list` (app.disableAutoupdates)",
       },
     },
-    // Verified against kiro-cli 3.1.0 --help: the top-level command takes
-    // `--resume-id <SESSION_ID>` and `--agent <AGENT>` as shorthands for
-    // `chat --resume-id` / `chat --agent`.
-    resume: (id, bin) => `${bin} --resume-id ${id}`,
+    // Verified against kiro-cli 3.3.0 --help: the top level takes only
+    // `--agent` and `--resume-id` as shorthands; `--trust-all-tools`,
+    // `--model` and `--effort` are `chat` options and are rejected there
+    // ("unexpected argument"). Every interactive launch therefore names `chat`.
+    resume: (id, bin) => `${bin} chat --resume-id ${id}`,
+    legacyResume: (id, bin) => `${bin} --resume-id ${id}`,
+    launchSubcommand: "chat",
     // A bare word at the top level is read as a subcommand, so the opening
     // prompt goes to `chat`, whose [INPUT] is "The first question to ask".
     prompt: (text, bin) => `${bin} chat ${shellQuote(text)}`,
@@ -1728,7 +1741,7 @@ export function agentCliDefs(): AgentCliDef[] {
 
 /** Bind a definition to the binary this machine actually has. */
 function bindCli(def: AgentCliDef, bin: string): AgentCli {
-  const { resume, prompt, ...rest } = def;
+  const { resume, prompt, legacyResume: _legacy, ...rest } = def;
   // `bin` stays raw on the entry — it is the key every probe answer and every
   // identity comparison is looked up under. Only the templates, which build a
   // line for a shell to read, get the quoted form.
@@ -2146,9 +2159,16 @@ function withSkipPermissions(command: string, cli: AgentCli | undefined): string
   return flag && getSettings().dangerouslySkipPermissions ? `${withSession} ${flag}` : withSession;
 }
 
+/** The head of a bare interactive launch: the binary, plus the subcommand its
+ *  session options belong to when it has one. */
+function launchBase(cli: AgentCli): string {
+  const bin = shellBin(cli.bin);
+  return cli.launchSubcommand ? `${bin} ${cli.launchSubcommand}` : bin;
+}
+
 /** Shared default for local launches and the remote portal's registry. */
 export function launchCommand(cli: AgentCli, ctx?: UnattendedContext): string {
-  return withUnattendedMode(withSkipPermissions(shellBin(cli.bin), cli), cli, ctx);
+  return withUnattendedMode(withSkipPermissions(launchBase(cli), cli), cli, ctx);
 }
 
 /** Pin automatic mode unless the explicit skip-permissions override applies.
@@ -2238,7 +2258,10 @@ export function rememberedAgentCommand(command: string | undefined, sessionId?: 
   if (id) return restoreCommand(cli.id, id) || command;
   const bin = shellBin(cli.bin);
   const mode = typeof cli.unattended === "function" ? cli.unattended({}) : cli.unattended;
-  const bases = [bin, ...(cli.sessionArgs ? [`${bin} ${cli.sessionArgs}`] : [])];
+  // Today's head and, for a CLI that gained a launch subcommand, the bare one
+  // it used to be launched with, so those remembered launches are rebuilt.
+  const heads = [...new Set([bin, launchBase(cli)])];
+  const bases = heads.flatMap(head => [head, ...(cli.sessionArgs ? [`${head} ${cli.sessionArgs}`] : [])]);
   const launches = bases.flatMap(base => [
     base,
     ...(mode ? [`${base} ${mode}`] : []),
@@ -2268,7 +2291,8 @@ export function resumeSessionId(command: string | null | undefined): string | nu
     // to the shell quoted, so that is the form a remembered resume command
     // carries — while an id from before the override is still bare.
     return [...new Set([...bins].flatMap((bin) => [bin, shellBin(bin)]))].flatMap((bin) => {
-      const tmpl = d.resume?.(SENTINEL, bin);
+      const spellings = [d.resume?.(SENTINEL, bin), d.legacyResume?.(SENTINEL, bin)];
+      return spellings.flatMap((tmpl) => {
       // The flagged spelling is tried unconditionally, not only while the
       // setting is on: a command remembered from a skip-permissions launch
       // must still yield its session id after the setting is switched off,
@@ -2283,6 +2307,7 @@ export function resumeSessionId(command: string | null | undefined): string | nu
             ...(d.unattended ? [`${base} ${d.unattended}`] : []),
           ])
         : [tmpl];
+      });
     });
   });
   for (const tmpl of templates) {

@@ -73,7 +73,7 @@ export function grokConfig(helper){
  }};
 }
 
-/** The Kiro agent Canopy launches with (`kiro-cli --agent canopy`): Kiro runs
+/** The Kiro agent Canopy launches with (`kiro-cli chat --agent canopy`): Kiro runs
  *  hooks only from the active agent's config. Mirrors setup_kiro_hooks. */
 export function kiroConfig(helper){
  const command=`${quote(helper)} --agent kiro`;
