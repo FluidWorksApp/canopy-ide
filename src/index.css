@@ -6628,9 +6628,10 @@ body.dragging-tab * {
 @supports (backdrop-filter: blur(1px)) {
   .agent-card,
   .agent-card-pill {
-    /* Dense enough that terminal text behind it never shows through: the blur
-       does not reach a terminal's own layer. */
-    background: color-mix(in srgb, var(--bg-raised) 95%, transparent);
+    /* The skin's solid floating surface: --bg-raised is itself see-through on
+       the glass skin, so a mix of it let terminal text show through (the blur
+       does not reach a terminal's own layer). Same fix as the workspace menu. */
+    background: var(--bg-overlay);
     backdrop-filter: blur(14px) saturate(1.14);
     -webkit-backdrop-filter: blur(14px) saturate(1.14);
   }

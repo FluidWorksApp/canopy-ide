@@ -12,7 +12,6 @@ import { useEscapeLayer } from "../useEscape";
 
 type Row =
   | { kind: "shell" }
-  | { kind: "native" }
   | { kind: "cli"; cli: AgentCli };
 
 interface LaunchPaletteProps {
@@ -24,10 +23,9 @@ interface LaunchPaletteProps {
   >;
   /** Where the launch lands — shown in the footer so it isn't a guess. */
   targetLabel?: string;
+  /** The one shell row. Which terminal engine draws it is a setting, not a
+   *  second row. */
   onShell: () => void;
-  /** Opens a native terminal window (beta). Absent where the build has none:
-   *  the row is then not listed at all. */
-  onNativeTerminal?: () => void;
   onLaunchCli: (cli: AgentCli, where: "workspace" | "current") => void;
   /** Overrides where ↵ puts an agent for this opening — ⌘⇧N passes
    *  "workspace". Absent, the agentWorkspaceByDefault setting decides. */
@@ -38,14 +36,13 @@ interface LaunchPaletteProps {
 
 const rowKey = (r: Row) => (r.kind === "cli" ? `cli:${r.cli.id}` : r.kind);
 const rowLabel = (r: Row) =>
-  r.kind === "cli" ? r.cli.name : r.kind === "native" ? "Native Terminal Window (beta)" : "Shell";
+  r.kind === "cli" ? r.cli.name : "Shell";
 
 export function LaunchPalette({
   installed,
   cliUpdates,
   targetLabel,
   onShell,
-  onNativeTerminal,
   onLaunchCli,
   onCancel,
   defaultWhere: requestedWhere,
@@ -66,7 +63,6 @@ export function LaunchPalette({
   const rows: Row[] = useMemo(() => {
     const all: Row[] = [
       { kind: "shell" },
-      ...(onNativeTerminal ? [{ kind: "native" as const }] : []),
       ...listedForLaunch(AGENT_CLIS, installed).map((cli) => ({ kind: "cli" as const, cli })),
     ];
     if (!query.trim()) return all;
@@ -74,7 +70,7 @@ export function LaunchPalette({
     // enough to read, and a list that reshuffles under the cursor is worse
     // than one whose order you can predict.
     return all.filter((r) => fuzzy(query, rowLabel(r)) !== null);
-  }, [query, installed, onNativeTerminal]);
+  }, [query, installed]);
 
   useEffect(() => setSel(0), [query]);
   useEffect(() => {
@@ -98,7 +94,6 @@ export function LaunchPalette({
   const commit = (row: Row | undefined, where: "workspace" | "current" = defaultWhere) => {
     if (!row) return;
     if (row.kind === "shell") onShell();
-    else if (row.kind === "native") onNativeTerminal?.();
     else onLaunchCli(row.cli, where);
   };
 

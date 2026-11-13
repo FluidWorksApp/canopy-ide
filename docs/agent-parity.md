@@ -32,7 +32,7 @@ for every CLI with a native MCP client — all of them except Aider.
 
 | Feature | claude | codex | amp | aider | agy | opencode | omp | cursor | grok | kiro |
 |---|---|---|---|---|---|---|---|---|---|---|
-| Hook auto-setup | full | full (needs `/hooks` trust) | plugin | notification command | full | plugin | extension | hooks.json | hooks.json | agent file (`kiro-cli --agent canopy`) |
+| Hook auto-setup | full | full (needs `/hooks` trust) | plugin | notification command | full | plugin | extension | hooks.json | hooks.json | agent file (`kiro-cli chat --agent canopy`) |
 | Event stream (stamped w/ pty) | yes | yes | yes | limited | yes | yes | yes | yes | yes | yes (needs a signed-in session to verify) |
 | MCP auto-setup | yes | yes | yes | no native MCP | yes | yes | yes | yes | yes | yes |
 | Canopy bootstrap | MCP system instructions | MCP system instructions | MCP system instructions | read-only context | MCP system instructions | MCP system instructions | system-prompt hook + MCP | MCP system instructions | MCP system instructions | MCP system instructions |
@@ -265,9 +265,10 @@ The load-bearing pieces every feature hangs off:
   JSON, USD) is not wired. Subagent hook events are dropped by the helper.
 
 ### Kiro CLI (`kiro`, binary `kiro-cli`, 3.1.0)
-- **Launch**: `kiro-cli --agent canopy` (bare), `kiro-cli chat '<prompt>' --agent canopy`
-  (the top-level command reads a bare word as a subcommand, so a prompt goes to `chat`),
-  `kiro-cli --resume-id <id> --agent canopy` (resume). `--trust-all-tools` is the skip
+- **Launch**: `kiro-cli chat --agent canopy` (bare), `kiro-cli chat '<prompt>' --agent canopy`,
+  `kiro-cli chat --resume-id <id> --agent canopy` (resume). Always under `chat`: the top level
+  accepts only `--agent` and `--resume-id`, and rejects `--trust-all-tools`, `--model` and
+  `--effort` ("unexpected argument", kiro-cli 3.3.0). `--trust-all-tools` is the skip
   permissions flag; `--model` and `--effort` come from the agent's launch settings. There is
   no reviewed automatic mode, so Kiro keeps asking unless skip permissions is on. All flags
   were read from `kiro-cli --help` and `kiro-cli chat --help`.
