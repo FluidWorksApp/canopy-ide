@@ -193,10 +193,106 @@ fn id_seed() -> u32 {
 
 #[cfg(unix)]
 static SIGNALLED: AtomicBool = AtomicBool::new(false);
+/// The signal that stopped the host and the pid that sent it (0: unknown),
+/// for the log. Written by the handler (atomic stores only), read by the
+/// watcher thread.
+#[cfg(unix)]
+static SIGNAL_NUMBER: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(0);
+#[cfg(unix)]
+static SIGNAL_SENDER: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(0);
 
 #[cfg(unix)]
-extern "C" fn on_signal(_: libc::c_int) {
+extern "C" fn on_signal(
+    signal: libc::c_int,
+    info: *mut libc::siginfo_t,
+    _context: *mut libc::c_void,
+) {
+    SIGNAL_NUMBER.store(signal, Ordering::SeqCst);
+    SIGNAL_SENDER.store(signal_sender(info), Ordering::SeqCst);
     SIGNALLED.store(true, Ordering::SeqCst);
+}
+
+/// The sending pid from an SA_SIGINFO handler's siginfo (0 when absent).
+#[cfg(any(target_os = "linux", target_os = "android"))]
+fn signal_sender(info: *const libc::siginfo_t) -> libc::pid_t {
+    if info.is_null() {
+        return 0;
+    }
+    // SAFETY: the kernel passes a valid siginfo_t to SA_SIGINFO handlers; this
+    // is a plain load.
+    unsafe { (*info).si_pid() }
+}
+
+#[cfg(all(unix, not(any(target_os = "linux", target_os = "android"))))]
+fn signal_sender(info: *const libc::siginfo_t) -> libc::pid_t {
+    if info.is_null() {
+        return 0;
+    }
+    // SAFETY: as above.
+    unsafe { (*info).si_pid }
+}
+
+#[cfg(unix)]
+fn signal_name(signal: libc::c_int) -> &'static str {
+    match signal {
+        libc::SIGTERM => "SIGTERM",
+        libc::SIGINT => "SIGINT",
+        libc::SIGHUP => "SIGHUP",
+        _ => "other",
+    }
+}
+
+/// The pid of the process at the other end of a connection, for the log.
+#[cfg(unix)]
+fn peer_pid(stream: &UnixStream) -> Option<i32> {
+    let fd = stream.as_raw_fd();
+    #[cfg(target_os = "linux")]
+    {
+        // SAFETY: getsockopt writes a ucred of the stated length into `cred`.
+        unsafe {
+            let mut cred: libc::ucred = std::mem::zeroed();
+            let mut len = std::mem::size_of::<libc::ucred>() as libc::socklen_t;
+            let rc = libc::getsockopt(
+                fd,
+                libc::SOL_SOCKET,
+                libc::SO_PEERCRED,
+                &mut cred as *mut libc::ucred as *mut libc::c_void,
+                &mut len,
+            );
+            return (rc == 0).then_some(cred.pid);
+        }
+    }
+    #[cfg(target_os = "macos")]
+    {
+        // SAFETY: getsockopt writes one pid_t of the stated length.
+        unsafe {
+            let mut pid: libc::pid_t = 0;
+            let mut len = std::mem::size_of::<libc::pid_t>() as libc::socklen_t;
+            let rc = libc::getsockopt(
+                fd,
+                libc::SOL_LOCAL,
+                libc::LOCAL_PEERPID,
+                &mut pid as *mut libc::pid_t as *mut libc::c_void,
+                &mut len,
+            );
+            return (rc == 0).then_some(pid);
+        }
+    }
+    #[allow(unreachable_code)]
+    {
+        let _ = fd;
+        None
+    }
+}
+
+#[cfg(windows)]
+fn peer_pid(_stream: &Conn) -> Option<i32> {
+    None
+}
+
+/// `peer=<pid>` or `peer=?`.
+fn peer(stream: &Conn) -> String {
+    peer_pid(stream).map_or_else(|| "?".to_owned(), |p| p.to_string())
 }
 
 #[cfg(unix)]
@@ -361,6 +457,7 @@ pub fn run(config: ServerConfig) -> std::io::Result<()> {
     // winner's live socket and orphan its sessions.
     let bind_lock = lock_bind(&config.socket)?;
     if UnixStream::connect(&config.socket).is_ok() {
+        crate::hostlog!("not serving: a live host already owns the socket");
         return Ok(());
     }
     let _ = std::fs::remove_file(&config.socket);
@@ -373,10 +470,19 @@ pub fn run(config: ServerConfig) -> std::io::Result<()> {
     // the lock for the host's lifetime would block them here instead.
     drop(bind_lock);
 
-    // SAFETY: the handler only stores to an atomic.
+    crate::hostlog!("serving");
+    // SAFETY: the handler only stores to atomics. SIGHUP is handled like
+    // SIGTERM (it ended the host silently before): the host has no
+    // controlling terminal, so a SIGHUP is always sent on purpose by someone,
+    // and the log should name them.
     unsafe {
-        libc::signal(libc::SIGTERM, on_signal as *const () as libc::sighandler_t);
-        libc::signal(libc::SIGINT, on_signal as *const () as libc::sighandler_t);
+        let mut action: libc::sigaction = std::mem::zeroed();
+        action.sa_sigaction = on_signal as *const () as libc::sighandler_t;
+        action.sa_flags = libc::SA_SIGINFO;
+        libc::sigemptyset(&mut action.sa_mask);
+        for signal in [libc::SIGTERM, libc::SIGINT, libc::SIGHUP] {
+            libc::sigaction(signal, &action, std::ptr::null_mut());
+        }
         libc::signal(libc::SIGPIPE, libc::SIG_IGN);
     }
     let stop = Arc::new(AtomicBool::new(false));
@@ -386,6 +492,12 @@ pub fn run(config: ServerConfig) -> std::io::Result<()> {
             while !SIGNALLED.load(Ordering::SeqCst) {
                 thread::sleep(Duration::from_millis(50));
             }
+            let signal = SIGNAL_NUMBER.load(Ordering::SeqCst);
+            crate::hostlog!(
+                "stopping: received {} ({signal}) from pid {}",
+                signal_name(signal),
+                SIGNAL_SENDER.load(Ordering::SeqCst)
+            );
             stop.store(true, Ordering::SeqCst);
         });
     }
@@ -400,9 +512,13 @@ pub fn run(config: ServerConfig) -> std::io::Result<()> {
 pub fn run(config: ServerConfig) -> std::io::Result<()> {
     let listener = match PipeListener::bind(&config.socket) {
         Ok(listener) => listener,
-        Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => return Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => {
+            crate::hostlog!("not serving: a live host already owns the pipe");
+            return Ok(());
+        }
         Err(e) => return Err(e),
     };
+    crate::hostlog!("serving");
     serve(listener, &config, Arc::new(AtomicBool::new(false)))
 }
 
@@ -530,15 +646,22 @@ fn serve_bound(
             Ok(None) => {}
             Err(_) => thread::sleep(Duration::from_millis(100)),
         }
+        let mut dropped = Vec::new();
+        let mut lingered = Vec::new();
         let live = {
             let mut sessions = host.sessions.lock().unwrap();
             // Drop exited sessions nobody reaped, so each cannot hold a ring
             // for the host's whole lifetime.
             sessions.retain(|_, s| {
-                s.exited_at
+                let keep = s
+                    .exited_at
                     .lock()
                     .unwrap()
-                    .is_none_or(|at| at.elapsed() < config.exited_ttl)
+                    .is_none_or(|at| at.elapsed() < config.exited_ttl);
+                if !keep {
+                    dropped.push(s.id);
+                }
+                keep
             });
             for s in sessions.values() {
                 if let (Some(linger), None) = (*s.linger.lock().unwrap(), s.exit_code()) {
@@ -546,6 +669,7 @@ fn serve_bound(
                     if detached.is_some_and(|at| at.elapsed() >= linger)
                         && !s.lingered.swap(true, Ordering::SeqCst)
                     {
+                        lingered.push((s.id, linger.as_secs()));
                         s.signal_group(libc::SIGTERM);
                         let s = Arc::clone(s);
                         thread::spawn(move || {
@@ -557,9 +681,20 @@ fn serve_bound(
             }
             sessions.values().any(|s| s.exit_code().is_none())
         };
+        // Logged after the sessions lock is released: no file I/O under it.
+        for id in dropped {
+            crate::hostlog!("dropped exited session id={id} (nobody reaped it)");
+        }
+        for (id, secs) in lingered {
+            crate::hostlog!("stopping session id={id}: unattended past its linger ({secs}s)");
+        }
         if live || host.connections.load(Ordering::SeqCst) > 0 {
             quiet_since = Instant::now();
         } else if quiet_since.elapsed() >= config.idle_exit {
+            crate::hostlog!(
+                "idle exit: no running session and no connection for {}s",
+                config.idle_exit.as_secs()
+            );
             break;
         }
     }
@@ -573,6 +708,15 @@ fn serve_bound(
 /// SIGTERM the groups, wait out the grace period, then SIGKILL stragglers.
 fn shutdown_sessions(host: &Host) {
     let sessions: Vec<Arc<Session>> = host.sessions.lock().unwrap().values().cloned().collect();
+    let running: Vec<u32> = sessions
+        .iter()
+        .filter(|s| s.exit_code().is_none())
+        .map(|s| s.id)
+        .collect();
+    crate::hostlog!(
+        "shutting down: stopping {} running session(s) {running:?}",
+        running.len()
+    );
     for s in &sessions {
         s.signal_group(libc::SIGTERM);
     }
@@ -690,6 +834,10 @@ fn handle(host: &Arc<Host>, mut stream: Conn) -> std::io::Result<()> {
             // from before the field existed), which is protocol 1, not exempt.
             let client_version = client_version.max(1);
             if client_version < min_client {
+                crate::hostlog!(
+                    "refused client protocol {client_version} (host accepts {min_client}) peer={}",
+                    peer(&stream)
+                );
                 return write_line(
                     &mut stream,
                     &Response {
@@ -718,7 +866,19 @@ fn handle(host: &Arc<Host>, mut stream: Conn) -> std::io::Result<()> {
             )
         }
         Request::Spawn(spec) => {
-            let reply = match spawn(host, spec) {
+            let linger = spec.linger_secs;
+            let keyed = spec.key.is_some();
+            let result = spawn(host, spec);
+            match &result {
+                Ok((session, existing)) => crate::hostlog!(
+                    "spawn id={} pid={} existing={existing} keyed={keyed} linger_secs={linger:?} peer={}",
+                    session.id,
+                    session.pid,
+                    peer(&stream)
+                ),
+                Err(e) => crate::hostlog!("spawn failed: {e} peer={}", peer(&stream)),
+            }
+            let reply = match result {
                 Ok((session, existing)) => Response {
                     ok: true,
                     id: Some(session.id),
@@ -766,6 +926,7 @@ fn handle(host: &Arc<Host>, mut stream: Conn) -> std::io::Result<()> {
             write_line(&mut stream, &reply)
         }
         Request::Kill { id } => {
+            crate::hostlog!("kill id={id} peer={}", peer(&stream));
             let reply = with_session(host, id, |s| {
                 s.signal_group(libc::SIGTERM);
                 let s = Arc::clone(s);
@@ -785,6 +946,10 @@ fn handle(host: &Arc<Host>, mut stream: Conn) -> std::io::Result<()> {
             write_line(&mut stream, &reply)
         }
         Request::SetLinger { id, linger_secs } => {
+            crate::hostlog!(
+                "set_linger id={id} secs={linger_secs:?} peer={}",
+                peer(&stream)
+            );
             let reply = with_session(host, id, |s| {
                 *s.linger.lock().unwrap() = linger_secs.map(Duration::from_secs);
                 // Restart the clock from now so lifting then re-imposing a
@@ -869,6 +1034,7 @@ fn handle(host: &Arc<Host>, mut stream: Conn) -> std::io::Result<()> {
             write_line(&mut stream, &reply)
         }
         Request::Reap { id } => {
+            crate::hostlog!("reap id={id} peer={}", peer(&stream));
             let mut sessions = host.sessions.lock().unwrap();
             let reply = match sessions.get(&id) {
                 Some(s) if s.exit_code().is_some() => {
@@ -900,6 +1066,11 @@ fn handle(host: &Arc<Host>, mut stream: Conn) -> std::io::Result<()> {
                 );
             }
             let session = host.sessions.lock().unwrap().get(&id).cloned();
+            crate::hostlog!(
+                "attach id={id} exclusive={exclusive} found={} peer={}",
+                session.is_some(),
+                peer(&stream)
+            );
             match session {
                 Some(session) => attach(session, stream, after, exclusive),
                 None => write_line(
@@ -925,6 +1096,7 @@ fn handle(host: &Arc<Host>, mut stream: Conn) -> std::io::Result<()> {
             }
         }
         Request::Shutdown => {
+            crate::hostlog!("stopping: shutdown requested peer={}", peer(&stream));
             write_line(&mut stream, &Response::ok())?;
             host.stop.store(true, Ordering::SeqCst);
             Ok(())
@@ -932,6 +1104,11 @@ fn handle(host: &Arc<Host>, mut stream: Conn) -> std::io::Result<()> {
         Request::ShutdownIfIdle => {
             let reply = shutdown_if_idle(host);
             let stopping = reply.ok;
+            crate::hostlog!(
+                "shutdown_if_idle accepted={stopping} running={} peer={}",
+                reply.running.unwrap_or(0),
+                peer(&stream)
+            );
             write_line(&mut stream, &reply)?;
             if stopping {
                 host.stop.store(true, Ordering::SeqCst);
@@ -1060,6 +1237,7 @@ fn spawn(host: &Arc<Host>, spec: SpawnSpec) -> Result<(Arc<Session>, bool), Stri
             *session.exited.lock().unwrap() = Some(code);
             *session.exited_at.lock().unwrap() = Some(Instant::now());
             session.cv.notify_all();
+            crate::hostlog!("session exited id={} code={code}", session.id);
         });
     }
     // Reader: output -> ring, paused while the attached client is too far behind.
@@ -1200,16 +1378,25 @@ fn read_ring(
 /// Every path that stops serving a client runs this, so a session is never left
 /// attached to a connection nobody serves.
 fn release(session: &Session, generation: u64) {
-    let mut ring = session.ring.lock().unwrap();
-    if ring.generation == generation {
-        ring.attached = None;
-        ring.conn = None;
-        let mut detached = session.detached_at.lock().unwrap();
-        if detached.is_none() {
-            *detached = Some(Instant::now());
+    let current = {
+        let mut ring = session.ring.lock().unwrap();
+        let current = ring.generation == generation;
+        if current {
+            ring.attached = None;
+            ring.conn = None;
+            let mut detached = session.detached_at.lock().unwrap();
+            if detached.is_none() {
+                *detached = Some(Instant::now());
+            }
         }
+        session.cv.notify_all();
+        current
+    };
+    // Only the attachment that was current: a replaced one already handed
+    // the session to its successor. After the ring lock: no file I/O under it.
+    if current {
+        crate::hostlog!("detach id={} (client gone)", session.id);
     }
-    session.cv.notify_all();
 }
 
 /// What became of one chunk of client input.

@@ -714,6 +714,13 @@ pub fn run() {
                         .build(),
                 )?;
             }
+            // Adoption ran before the log plugin existed; its outcome goes in
+            // the resilience log now (content-free: counts and reason words).
+            log::info!(
+                target: "canopy::watchdog::pty_host",
+                "{}",
+                pty_hosted::launch_report(adopted)
+            );
             // Edge's built-in shortcuts are not Canopy's to hand out — see
             // webview_keys.rs. Done here rather than at window creation
             // because the setting lives on CoreWebView2, which only exists

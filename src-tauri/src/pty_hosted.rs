@@ -152,6 +152,54 @@ pub struct HostNotice {
 
 static LEFT_BEHIND: std::sync::Mutex<Vec<LeftBehind>> = std::sync::Mutex::new(Vec::new());
 static FELL_BACK: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+/// What the launch probe saw in the host: sessions listed and, of those,
+/// running ones no app is attached to (-1: not asked or no answer).
+static PROBE_LISTED: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(-1);
+static PROBE_FREE: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(-1);
+
+/// One content-free line about this launch's terminal host, for the
+/// resilience log: whether hosting is on, what the launch decided (reuse a
+/// previous launch's terminals, start fresh, or host unusable), what the
+/// probe saw, how many terminals were adopted and how many were left behind
+/// (reason words only). Written after the log plugin is up; adoption runs
+/// before it.
+pub fn launch_report(adopted: usize) -> String {
+    use std::sync::atomic::Ordering;
+    #[cfg(unix)]
+    let decision = if !enabled() {
+        "hosting-off"
+    } else {
+        match unix::resolution() {
+            unix::Resolution::Fresh => "fresh",
+            unix::Resolution::Reuse(_) => "reuse",
+            unix::Resolution::HostUnusable => "host-unusable",
+        }
+    };
+    #[cfg(not(unix))]
+    let decision = "hosting-unsupported";
+    let left = LEFT_BEHIND.lock().unwrap_or_else(|e| e.into_inner());
+    let mut reasons: Vec<&str> = left
+        .iter()
+        .map(|l| {
+            if l.reason.contains("too long") {
+                "timeout"
+            } else if l.reason.contains("could not adopt") {
+                "adopt-failed"
+            } else {
+                "other"
+            }
+        })
+        .collect();
+    reasons.sort_unstable();
+    reasons.dedup();
+    format!(
+        "pty-host launch: decision={decision} listed={} free={} adopted={adopted} left_behind={} reasons={reasons:?} fell_back={}",
+        PROBE_LISTED.load(Ordering::SeqCst),
+        PROBE_FREE.load(Ordering::SeqCst),
+        left.len(),
+        FELL_BACK.load(Ordering::SeqCst)
+    )
+}
 
 /// Records, for the UI as well as the log, a hosted session that was not
 /// adopted. It stays in the host (and Stop All can stop it); the user would
@@ -1064,7 +1112,19 @@ mod adoption {
             let probe = HostClient::new(socket);
             let key = crate::adoption_seal::key_nowait();
             resolve_from(
-                || probe.list_within(LAUNCH_WAIT),
+                || {
+                    let answer = probe.list_within(LAUNCH_WAIT);
+                    if let Ok(sessions) = &answer {
+                        use std::sync::atomic::Ordering;
+                        let free = sessions
+                            .iter()
+                            .filter(|s| s.exited.is_none() && s.attached == Some(false))
+                            .count();
+                        super::PROBE_LISTED.store(sessions.len() as i64, Ordering::SeqCst);
+                        super::PROBE_FREE.store(free as i64, Ordering::SeqCst);
+                    }
+                    answer
+                },
                 std::thread::sleep,
                 key.as_ref(),
             )

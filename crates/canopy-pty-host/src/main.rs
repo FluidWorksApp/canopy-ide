@@ -39,6 +39,41 @@ fn main() {
         eprintln!("usage: canopy-pty-host --socket PATH [--idle-secs N]");
         std::process::exit(2);
     };
+    if let Some(path) = canopy_pty_host::hostlog::path_for(std::path::Path::new(&socket)) {
+        canopy_pty_host::hostlog::init(path);
+    }
+    // Before anything can panic: stderr is discarded, so without this a panic
+    // (or a poisoned lock after one) ends the host with no trace.
+    let default_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let thread = std::thread::current();
+        let location = info
+            .location()
+            .map(|l| format!("{}:{}", l.file(), l.line()))
+            .unwrap_or_default();
+        let message = info
+            .payload()
+            .downcast_ref::<&str>()
+            .map(|s| s.to_string())
+            .or_else(|| info.payload().downcast_ref::<String>().cloned())
+            .unwrap_or_default();
+        canopy_pty_host::hostlog!(
+            "panic thread={} at={location} message={message:?}",
+            thread.name().unwrap_or("unnamed")
+        );
+        default_hook(info);
+    }));
+    // The installed copy's folder names the app build (`0.5.15-<hash>`); the
+    // folder name only, never the path (it holds the home directory).
+    let build = std::env::current_exe()
+        .ok()
+        .and_then(|exe| exe.parent()?.file_name()?.to_str().map(str::to_owned))
+        .unwrap_or_default();
+    canopy_pty_host::hostlog!(
+        "start build={build} crate={} protocol={} idle_secs={idle} exited_ttl_secs={exited_ttl} min_client={min_client}",
+        env!("CARGO_PKG_VERSION"),
+        canopy_pty_host::protocol::PROTOCOL_VERSION
+    );
     let config = canopy_pty_host::server::ServerConfig {
         socket: socket.into(),
         min_client,
@@ -46,9 +81,11 @@ fn main() {
         exited_ttl: std::time::Duration::from_secs(exited_ttl),
     };
     if let Err(error) = canopy_pty_host::server::run(config) {
+        canopy_pty_host::hostlog!("exit status=1 error={:?}", error.kind());
         eprintln!("canopy-pty-host: {error}");
         std::process::exit(1);
     }
+    canopy_pty_host::hostlog!("exit status=0");
 }
 
 #[cfg(not(any(unix, windows)))]
