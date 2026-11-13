@@ -10,6 +10,7 @@
 use crate::protocol::{
     AttachReply, Request, Response, SessionInfo, SpawnSpec, BUSY, PROTOCOL_VERSION,
 };
+use crate::sync::{CondvarExt, LockExt};
 #[cfg(unix)]
 use portable_pty::{native_pty_system, CommandBuilder};
 use portable_pty::{Child, MasterPty, PtySize};
@@ -119,7 +120,7 @@ struct Session {
 
 impl Session {
     fn exit_code(&self) -> Option<i32> {
-        *self.exited.lock().unwrap()
+        *self.exited.lock_ok()
     }
 
     /// Soft stop closes the pseudoconsole; hard stop terminates the job. The
@@ -148,8 +149,8 @@ impl Session {
     }
 
     fn info(&self) -> SessionInfo {
-        let ring = self.ring.lock().unwrap();
-        let (cols, rows) = *self.size.lock().unwrap();
+        let ring = self.ring.lock_ok();
+        let (cols, rows) = *self.size.lock_ok();
         SessionInfo {
             id: self.id,
             pid: Some(self.pid),
@@ -158,7 +159,7 @@ impl Session {
             start: ring.base,
             end: ring.base + ring.bytes.len() as u64,
             exited: self.exit_code(),
-            meta: self.meta.lock().unwrap().clone(),
+            meta: self.meta.lock_ok().clone(),
             key: self.key.clone(),
             attached: Some(ring.attached.is_some()),
         }
@@ -191,6 +192,33 @@ fn id_seed() -> u32 {
     ((mixed >> 8) as u32 & 0x3fff_ffff).max(1)
 }
 
+/// Starts a named worker thread. A panic inside it is caught (the panic hook
+/// has already logged where) so it ends only that thread, never the host; a
+/// thread that cannot be started is logged and reported as `false` instead of
+/// panicking the caller (`thread::spawn` panics, and in the main loop that
+/// would end every terminal).
+fn worker(name: &str, f: impl FnOnce() + Send + 'static) -> bool {
+    let label = name.to_owned();
+    let started = thread::Builder::new().name(name.to_owned()).spawn(move || {
+        if std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)).is_err() {
+            crate::hostlog!("worker {label} panicked; the host keeps serving");
+        }
+    });
+    if let Err(e) = &started {
+        crate::hostlog!("could not start worker {name}: {e}");
+    }
+    started.is_ok()
+}
+
+/// Gives a connection's slot back however its thread ends.
+struct ConnectionSlot(Arc<Host>);
+
+impl Drop for ConnectionSlot {
+    fn drop(&mut self) {
+        self.0.connections.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
 #[cfg(unix)]
 static SIGNALLED: AtomicBool = AtomicBool::new(false);
 /// The signal that stopped the host and the pid that sent it (0: unknown),
@@ -200,6 +228,11 @@ static SIGNALLED: AtomicBool = AtomicBool::new(false);
 static SIGNAL_NUMBER: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(0);
 #[cfg(unix)]
 static SIGNAL_SENDER: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(0);
+/// A SIGHUP arrived (and from whom): logged, never a reason to stop. The host
+/// has no controlling terminal, so a hangup can only be sent on purpose, and
+/// stopping on it would end every terminal.
+#[cfg(unix)]
+static HUP_SENDER: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(-1);
 
 #[cfg(unix)]
 extern "C" fn on_signal(
@@ -207,6 +240,10 @@ extern "C" fn on_signal(
     info: *mut libc::siginfo_t,
     _context: *mut libc::c_void,
 ) {
+    if signal == libc::SIGHUP {
+        HUP_SENDER.store(signal_sender(info), Ordering::SeqCst);
+        return;
+    }
     SIGNAL_NUMBER.store(signal, Ordering::SeqCst);
     SIGNAL_SENDER.store(signal_sender(info), Ordering::SeqCst);
     SIGNALLED.store(true, Ordering::SeqCst);
@@ -471,10 +508,9 @@ pub fn run(config: ServerConfig) -> std::io::Result<()> {
     drop(bind_lock);
 
     crate::hostlog!("serving");
-    // SAFETY: the handler only stores to atomics. SIGHUP is handled like
-    // SIGTERM (it ended the host silently before): the host has no
-    // controlling terminal, so a SIGHUP is always sent on purpose by someone,
-    // and the log should name them.
+    // SAFETY: the handler only stores to atomics. SIGTERM and SIGINT stop the
+    // host; SIGHUP (which ended it silently before) is logged with its sender
+    // and ignored.
     unsafe {
         let mut action: libc::sigaction = std::mem::zeroed();
         action.sa_sigaction = on_signal as *const () as libc::sighandler_t;
@@ -488,8 +524,12 @@ pub fn run(config: ServerConfig) -> std::io::Result<()> {
     let stop = Arc::new(AtomicBool::new(false));
     {
         let stop = Arc::clone(&stop);
-        thread::spawn(move || {
+        worker("signals", move || {
             while !SIGNALLED.load(Ordering::SeqCst) {
+                let hup = HUP_SENDER.swap(-1, Ordering::SeqCst);
+                if hup >= 0 {
+                    crate::hostlog!("received SIGHUP from pid {hup}; ignored, still serving");
+                }
                 thread::sleep(Duration::from_millis(50));
             }
             let signal = SIGNAL_NUMBER.load(Ordering::SeqCst);
@@ -637,26 +677,32 @@ fn serve_bound(
                     continue;
                 }
                 host.connections.fetch_add(1, Ordering::SeqCst);
-                let host = Arc::clone(&host);
-                thread::spawn(move || {
-                    let _ = handle(&host, stream);
-                    host.connections.fetch_sub(1, Ordering::SeqCst);
+                let served = Arc::clone(&host);
+                let started = worker("connection", move || {
+                    let _slot = ConnectionSlot(Arc::clone(&served));
+                    let _ = handle(&served, stream);
                 });
+                if !started {
+                    // The closure never ran, so its slot was never taken.
+                    host.connections.fetch_sub(1, Ordering::SeqCst);
+                }
             }
             Ok(None) => {}
             Err(_) => thread::sleep(Duration::from_millis(100)),
         }
         let mut dropped = Vec::new();
         let mut lingered = Vec::new();
-        let live = {
-            let mut sessions = host.sessions.lock().unwrap();
+        // Contained like a worker: a panic in this bookkeeping must not end the
+        // main loop (and with it every terminal). Counted as busy, so it never
+        // causes an idle exit.
+        let live = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let mut sessions = host.sessions.lock_ok();
             // Drop exited sessions nobody reaped, so each cannot hold a ring
             // for the host's whole lifetime.
             sessions.retain(|_, s| {
                 let keep = s
                     .exited_at
-                    .lock()
-                    .unwrap()
+                    .lock_ok()
                     .is_none_or(|at| at.elapsed() < config.exited_ttl);
                 if !keep {
                     dropped.push(s.id);
@@ -664,15 +710,15 @@ fn serve_bound(
                 keep
             });
             for s in sessions.values() {
-                if let (Some(linger), None) = (*s.linger.lock().unwrap(), s.exit_code()) {
-                    let detached = *s.detached_at.lock().unwrap();
+                if let (Some(linger), None) = (*s.linger.lock_ok(), s.exit_code()) {
+                    let detached = *s.detached_at.lock_ok();
                     if detached.is_some_and(|at| at.elapsed() >= linger)
                         && !s.lingered.swap(true, Ordering::SeqCst)
                     {
                         lingered.push((s.id, linger.as_secs()));
                         s.signal_group(libc::SIGTERM);
                         let s = Arc::clone(s);
-                        thread::spawn(move || {
+                        worker("linger-kill", move || {
                             thread::sleep(TERM_GRACE);
                             s.signal_group(libc::SIGKILL);
                         });
@@ -680,7 +726,11 @@ fn serve_bound(
                 }
             }
             sessions.values().any(|s| s.exit_code().is_none())
-        };
+        }))
+        .unwrap_or_else(|_| {
+            crate::hostlog!("session bookkeeping panicked; the host keeps serving");
+            true
+        });
         // Logged after the sessions lock is released: no file I/O under it.
         for id in dropped {
             crate::hostlog!("dropped exited session id={id} (nobody reaped it)");
@@ -707,7 +757,7 @@ fn serve_bound(
 
 /// SIGTERM the groups, wait out the grace period, then SIGKILL stragglers.
 fn shutdown_sessions(host: &Host) {
-    let sessions: Vec<Arc<Session>> = host.sessions.lock().unwrap().values().cloned().collect();
+    let sessions: Vec<Arc<Session>> = host.sessions.lock_ok().values().cloned().collect();
     let running: Vec<u32> = sessions
         .iter()
         .filter(|s| s.exit_code().is_none())
@@ -891,13 +941,8 @@ fn handle(host: &Arc<Host>, mut stream: Conn) -> std::io::Result<()> {
             write_line(&mut stream, &reply)
         }
         Request::List => {
-            let mut sessions: Vec<SessionInfo> = host
-                .sessions
-                .lock()
-                .unwrap()
-                .values()
-                .map(|s| s.info())
-                .collect();
+            let mut sessions: Vec<SessionInfo> =
+                host.sessions.lock_ok().values().map(|s| s.info()).collect();
             sessions.sort_by_key(|s| s.id);
             write_line(
                 &mut stream,
@@ -911,8 +956,7 @@ fn handle(host: &Arc<Host>, mut stream: Conn) -> std::io::Result<()> {
         Request::Resize { id, cols, rows } => {
             let reply = with_session(host, id, |s| {
                 s.master
-                    .lock()
-                    .unwrap()
+                    .lock_ok()
                     .resize(PtySize {
                         rows,
                         cols,
@@ -920,7 +964,7 @@ fn handle(host: &Arc<Host>, mut stream: Conn) -> std::io::Result<()> {
                         pixel_height: 0,
                     })
                     .map_err(|e| e.to_string())?;
-                *s.size.lock().unwrap() = (cols, rows);
+                *s.size.lock_ok() = (cols, rows);
                 Ok(Response::ok())
             });
             write_line(&mut stream, &reply)
@@ -930,7 +974,7 @@ fn handle(host: &Arc<Host>, mut stream: Conn) -> std::io::Result<()> {
             let reply = with_session(host, id, |s| {
                 s.signal_group(libc::SIGTERM);
                 let s = Arc::clone(s);
-                thread::spawn(move || {
+                worker("kill", move || {
                     thread::sleep(TERM_GRACE);
                     s.signal_group(libc::SIGKILL);
                 });
@@ -940,7 +984,7 @@ fn handle(host: &Arc<Host>, mut stream: Conn) -> std::io::Result<()> {
         }
         Request::SetMeta { id, meta } => {
             let reply = with_session(host, id, |s| {
-                *s.meta.lock().unwrap() = meta;
+                *s.meta.lock_ok() = meta;
                 Ok(Response::ok())
             });
             write_line(&mut stream, &reply)
@@ -951,13 +995,13 @@ fn handle(host: &Arc<Host>, mut stream: Conn) -> std::io::Result<()> {
                 peer(&stream)
             );
             let reply = with_session(host, id, |s| {
-                *s.linger.lock().unwrap() = linger_secs.map(Duration::from_secs);
+                *s.linger.lock_ok() = linger_secs.map(Duration::from_secs);
                 // Restart the clock from now so lifting then re-imposing a
                 // limit does not kill a session that has been unattended a while.
                 // Under the ring lock, like attach, so the check and the stamp
                 // cannot straddle an attach that clears `detached_at`.
-                let _ring = s.ring.lock().unwrap();
-                let mut detached = s.detached_at.lock().unwrap();
+                let _ring = s.ring.lock_ok();
+                let mut detached = s.detached_at.lock_ok();
                 if detached.is_some() {
                     *detached = Some(Instant::now());
                 }
@@ -970,7 +1014,7 @@ fn handle(host: &Arc<Host>, mut stream: Conn) -> std::io::Result<()> {
             value,
             if_unset,
         } => {
-            let mut state = host.state.lock().unwrap();
+            let mut state = host.state.lock_ok();
             if !(if_unset && state.contains_key(&key)) {
                 state.insert(key.clone(), value);
             }
@@ -985,7 +1029,7 @@ fn handle(host: &Arc<Host>, mut stream: Conn) -> std::io::Result<()> {
         Request::GetState { key } => {
             let reply = Response {
                 ok: true,
-                value: host.state.lock().unwrap().get(&key).cloned(),
+                value: host.state.lock_ok().get(&key).cloned(),
                 ..Default::default()
             };
             write_line(&mut stream, &reply)
@@ -994,7 +1038,7 @@ fn handle(host: &Arc<Host>, mut stream: Conn) -> std::io::Result<()> {
             let reply = with_session(host, id, |s| {
                 // Windows has no foreground process group to report.
                 #[cfg(unix)]
-                let pgrp = s.master.lock().unwrap().process_group_leader();
+                let pgrp = s.master.lock_ok().process_group_leader();
                 #[cfg(windows)]
                 let pgrp: Option<i32> = {
                     let _ = s;
@@ -1010,7 +1054,7 @@ fn handle(host: &Arc<Host>, mut stream: Conn) -> std::io::Result<()> {
         }
         Request::RawMode { id } => {
             let reply = with_session(host, id, |s| {
-                let master = s.master.lock().unwrap();
+                let master = s.master.lock_ok();
                 #[cfg(unix)]
                 let raw = master.as_raw_fd().map(|fd| {
                     // SAFETY: fd belongs to the live master held under the lock.
@@ -1035,7 +1079,7 @@ fn handle(host: &Arc<Host>, mut stream: Conn) -> std::io::Result<()> {
         }
         Request::Reap { id } => {
             crate::hostlog!("reap id={id} peer={}", peer(&stream));
-            let mut sessions = host.sessions.lock().unwrap();
+            let mut sessions = host.sessions.lock_ok();
             let reply = match sessions.get(&id) {
                 Some(s) if s.exit_code().is_some() => {
                     sessions.remove(&id);
@@ -1065,7 +1109,7 @@ fn handle(host: &Arc<Host>, mut stream: Conn) -> std::io::Result<()> {
                     },
                 );
             }
-            let session = host.sessions.lock().unwrap().get(&id).cloned();
+            let session = host.sessions.lock_ok().get(&id).cloned();
             crate::hostlog!(
                 "attach id={id} exclusive={exclusive} found={} peer={}",
                 session.is_some(),
@@ -1083,7 +1127,7 @@ fn handle(host: &Arc<Host>, mut stream: Conn) -> std::io::Result<()> {
             }
         }
         Request::ReadRing { id, after, max } => {
-            let session = host.sessions.lock().unwrap().get(&id).cloned();
+            let session = host.sessions.lock_ok().get(&id).cloned();
             match session {
                 Some(session) => read_ring(&session, stream, after, max),
                 None => write_line(
@@ -1122,11 +1166,10 @@ fn handle(host: &Arc<Host>, mut stream: Conn) -> std::io::Result<()> {
 /// is running" and "no spawn may start one from now on" one step: a spawn either
 /// finished first (and is counted) or is refused afterwards.
 fn shutdown_if_idle(host: &Host) -> Response {
-    let _no_spawn_meanwhile = host.spawn_lock.lock().unwrap();
+    let _no_spawn_meanwhile = host.spawn_lock.lock_ok();
     let running = host
         .sessions
-        .lock()
-        .unwrap()
+        .lock_ok()
         .values()
         .filter(|s| s.exit_code().is_none())
         .count();
@@ -1146,7 +1189,7 @@ fn with_session(
     id: u32,
     f: impl FnOnce(&Arc<Session>) -> Result<Response, String>,
 ) -> Response {
-    let session = host.sessions.lock().unwrap().get(&id).cloned();
+    let session = host.sessions.lock_ok().get(&id).cloned();
     match session {
         Some(session) => f(&session).unwrap_or_else(Response::err),
         None => Response::err("no such session"),
@@ -1155,15 +1198,14 @@ fn with_session(
 
 /// Returns the session and whether it already existed for the spawn's key.
 fn spawn(host: &Arc<Host>, spec: SpawnSpec) -> Result<(Arc<Session>, bool), String> {
-    let _one_spawn_at_a_time = host.spawn_lock.lock().unwrap();
+    let _one_spawn_at_a_time = host.spawn_lock.lock_ok();
     if host.closing.load(Ordering::SeqCst) {
         return Err("host is shutting down".into());
     }
     if let Some(key) = &spec.key {
         let existing = host
             .sessions
-            .lock()
-            .unwrap()
+            .lock_ok()
             .values()
             .find(|s| s.key.as_deref() == Some(key.as_str()))
             .cloned();
@@ -1188,7 +1230,7 @@ fn spawn(host: &Arc<Host>, spec: SpawnSpec) -> Result<(Arc<Session>, bool), Stri
     let mut reader = master.try_clone_reader().map_err(|e| e.to_string())?;
     let mut writer = master.take_writer().map_err(|e| e.to_string())?;
     let (input_tx, input_rx) = sync_channel::<Vec<u8>>(INPUT_QUEUE);
-    thread::spawn(move || {
+    let mut started = worker("pty-writer", move || {
         while let Ok(chunk) = input_rx.recv() {
             if writer.write_all(&chunk).is_err() {
                 break;
@@ -1226,7 +1268,7 @@ fn spawn(host: &Arc<Host>, spec: SpawnSpec) -> Result<(Arc<Session>, bool), Stri
     // Reaper: records the exit status. Only after this may the pid be reused.
     {
         let session = Arc::clone(&session);
-        thread::spawn(move || {
+        started &= worker("reaper", move || {
             let code = match child.wait() {
                 Ok(status) => status.exit_code() as i32,
                 Err(_) => -1,
@@ -1234,8 +1276,8 @@ fn spawn(host: &Arc<Host>, spec: SpawnSpec) -> Result<(Arc<Session>, bool), Stri
             // ConPTY's output pipe only ends once the console is closed.
             #[cfg(windows)]
             session.group.child_exited();
-            *session.exited.lock().unwrap() = Some(code);
-            *session.exited_at.lock().unwrap() = Some(Instant::now());
+            *session.exited.lock_ok() = Some(code);
+            *session.exited_at.lock_ok() = Some(Instant::now());
             session.cv.notify_all();
             crate::hostlog!("session exited id={} code={code}", session.id);
         });
@@ -1243,15 +1285,15 @@ fn spawn(host: &Arc<Host>, spec: SpawnSpec) -> Result<(Arc<Session>, bool), Stri
     // Reader: output -> ring, paused while the attached client is too far behind.
     {
         let session = Arc::clone(&session);
-        thread::spawn(move || {
+        started &= worker("pty-reader", move || {
             let mut buf = vec![0u8; READ_BUF];
             loop {
                 {
-                    let mut ring = session.ring.lock().unwrap();
+                    let mut ring = session.ring.lock_ok();
                     while let Some(sent) = ring.attached {
                         let end = ring.base + ring.bytes.len() as u64;
                         if end.saturating_sub(sent) as usize > HIGH_WATER {
-                            ring = session.cv.wait(ring).unwrap();
+                            ring = session.cv.wait_ok(ring);
                         } else {
                             break;
                         }
@@ -1261,19 +1303,24 @@ fn spawn(host: &Arc<Host>, spec: SpawnSpec) -> Result<(Arc<Session>, bool), Stri
                     Ok(0) | Err(_) => break,
                     Ok(n) => n,
                 };
-                let mut ring = session.ring.lock().unwrap();
+                let mut ring = session.ring.lock_ok();
                 push_output(&mut ring, &buf[..n]);
                 session.cv.notify_all();
             }
-            let mut ring = session.ring.lock().unwrap();
+            let mut ring = session.ring.lock_ok();
             ring.eof = true;
             session.cv.notify_all();
         });
     }
 
+    if !started {
+        // A session without its reaper, reader or writer can never be served
+        // or reported as exited: stop the child rather than keep a ghost.
+        session.signal_group(libc::SIGKILL);
+        return Err("could not start the session's threads".into());
+    }
     host.sessions
-        .lock()
-        .unwrap()
+        .lock_ok()
         .insert(session.id, Arc::clone(&session));
     Ok((session, false))
 }
@@ -1344,12 +1391,12 @@ fn read_ring(
     max: Option<u64>,
 ) -> std::io::Result<()> {
     let (reply, bytes) = {
-        let ring = session.ring.lock().unwrap();
+        let ring = session.ring.lock_ok();
         let end = ring.base + ring.bytes.len() as u64;
         let start = after.max(ring.base).min(end);
         let limit = max.unwrap_or(RING_CAP as u64).min(RING_CAP as u64);
         let take = (end - start).min(limit) as usize;
-        let (cols, rows) = *session.size.lock().unwrap();
+        let (cols, rows) = *session.size.lock_ok();
         (
             AttachReply {
                 ok: true,
@@ -1379,12 +1426,12 @@ fn read_ring(
 /// attached to a connection nobody serves.
 fn release(session: &Session, generation: u64) {
     let current = {
-        let mut ring = session.ring.lock().unwrap();
+        let mut ring = session.ring.lock_ok();
         let current = ring.generation == generation;
         if current {
             ring.attached = None;
             ring.conn = None;
-            let mut detached = session.detached_at.lock().unwrap();
+            let mut detached = session.detached_at.lock_ok();
             if detached.is_none() {
                 *detached = Some(Instant::now());
             }
@@ -1473,7 +1520,7 @@ fn attach(
     let mut input = stream.try_clone()?;
     stream.set_write_timeout(Some(Duration::from_secs(10)))?;
     let (start, generation, reply) = {
-        let mut ring = session.ring.lock().unwrap();
+        let mut ring = session.ring.lock_ok();
         if exclusive && ring.attached.is_some() {
             drop(ring);
             return write_line(
@@ -1496,9 +1543,9 @@ fn attach(
         // thread stamps `detached_at` only while it still owns the generation,
         // so clearing earlier would let that stamp land after ours and start a
         // linger clock on a session that is attached.
-        *session.detached_at.lock().unwrap() = None;
+        *session.detached_at.lock_ok() = None;
         session.cv.notify_all();
-        let (cols, rows) = *session.size.lock().unwrap();
+        let (cols, rows) = *session.size.lock_ok();
         let reply = AttachReply {
             ok: true,
             error: None,
@@ -1524,10 +1571,10 @@ fn attach(
     // loop below (which only finds out on a write) stops, a paused reader is
     // released, and the linger clock starts.
     let closed = Arc::new(AtomicBool::new(false));
-    {
+    let input_started = {
         let session = Arc::clone(&session);
-        let closed = Arc::clone(&closed);
-        thread::spawn(move || {
+        let input_closed = Arc::clone(&closed);
+        worker("attach-input", move || {
             if forward_input(&mut input, &session.input) == InputEnd::Lost {
                 eprintln!(
                     "canopy-pty-host: a terminal stopped reading input; ending the attachment so the lost input is not followed by the rest"
@@ -1535,16 +1582,22 @@ fn attach(
                 // The client sees EOF, not a silent hole in what it typed.
                 let _ = input.shutdown(std::net::Shutdown::Both);
             }
-            closed.store(true, Ordering::SeqCst);
+            input_closed.store(true, Ordering::SeqCst);
             release(&session, generation);
-        });
+        })
+    };
+    if !input_started {
+        // Without its input thread nobody notices the client leaving: detach
+        // now; the client sees EOF and can attach again.
+        release(&session, generation);
+        return Ok(());
     }
 
     // PTY -> client.
     let mut pos = start;
     loop {
         let chunk: Vec<u8> = {
-            let mut ring = session.ring.lock().unwrap();
+            let mut ring = session.ring.lock_ok();
             loop {
                 if ring.generation != generation || closed.load(Ordering::SeqCst) {
                     return Ok(()); // replaced by a newer attach, or the client left
@@ -1561,7 +1614,7 @@ fn attach(
                         // registered until the input thread ends, so a newer attach
                         // can still shut this client down.
                         ring.attached = None;
-                        let mut detached = session.detached_at.lock().unwrap();
+                        let mut detached = session.detached_at.lock_ok();
                         if detached.is_none() {
                             *detached = Some(Instant::now());
                         }
@@ -1573,8 +1626,7 @@ fn attach(
                 }
                 ring = session
                     .cv
-                    .wait_timeout(ring, Duration::from_millis(500))
-                    .unwrap()
+                    .wait_timeout_ok(ring, Duration::from_millis(500))
                     .0;
             }
         };
@@ -1583,7 +1635,7 @@ fn attach(
             return Ok(());
         }
         pos += chunk.len() as u64;
-        let mut ring = session.ring.lock().unwrap();
+        let mut ring = session.ring.lock_ok();
         if ring.generation == generation {
             ring.attached = Some(pos);
             session.cv.notify_all();

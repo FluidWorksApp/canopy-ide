@@ -9,6 +9,8 @@ pub mod protocol;
 
 #[cfg(any(unix, windows))]
 pub mod hostlog;
+#[cfg(any(unix, windows))]
+mod sync;
 
 #[cfg(any(unix, windows))]
 pub mod client;

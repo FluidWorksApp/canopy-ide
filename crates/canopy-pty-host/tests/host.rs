@@ -1562,3 +1562,99 @@ fn a_socket_directory_that_is_not_private_is_refused_and_not_chmoded() {
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// The 0.5.15 failure: after a plain Quit the app's attachments went away and
+/// the host died seconds later with every terminal. Many attach / resize /
+/// drop cycles, connections dropped mid-request, garbage and half lines must
+/// leave the host answering and the session running.
+#[test]
+fn host_survives_attach_resize_drop_cycles_and_broken_connections() {
+    let h = Harness::start("churn", 60);
+    let (id, pid) = h.client.spawn(spec(pick(TICKER, TICKER_PS))).unwrap();
+    let socket = h.client.socket().to_path_buf();
+    for round in 0..25u16 {
+        let mut attached = h.client.attach(id, 0).unwrap();
+        let _ = read_until(&mut attached, Duration::from_millis(100), |b| !b.is_empty());
+        h.client.resize(id, 80 + round, 24).unwrap();
+        h.client.resize(id, 100, 30 + round % 5).unwrap();
+        drop(attached); // the app quits mid-stream
+                        // A connection that dies before finishing its request line.
+        if let Ok(mut raw) = raw_connect(&socket) {
+            let _ = raw.write_all(br#"{"op":"attach","id":"#);
+        }
+        // Garbage and an unknown request.
+        let _ = raw_call(&socket, "not json at all");
+        let _ = raw_call(&socket, r#"{"op":"no_such_op"}"#);
+    }
+    std::thread::sleep(t(5));
+    assert!(h.client.hello().is_ok(), "the host stopped answering");
+    assert!(alive(pid), "the session died with its clients");
+    let listed = h.client.list().unwrap();
+    assert!(
+        listed.iter().any(|s| s.id == id && s.exited.is_none()),
+        "the session is no longer running: {listed:?}"
+    );
+}
+
+/// A hangup used to end the host silently, and every terminal with it. It is
+/// now logged with its sender and ignored.
+#[cfg(unix)]
+#[test]
+fn sighup_is_logged_and_the_host_keeps_serving() {
+    let h = Harness::start("hup", 60);
+    let (_, pid) = h.client.spawn(spec(TICKER)).unwrap();
+    let host_pid = h.client.hello().unwrap().host_pid.unwrap();
+    // SAFETY: signalling the host process this test started.
+    unsafe { libc::kill(host_pid as libc::pid_t, libc::SIGHUP) };
+    std::thread::sleep(Duration::from_secs(1));
+    assert!(h.client.hello().is_ok(), "SIGHUP stopped the host");
+    assert!(alive(host_pid) && alive(pid));
+    let log = std::fs::read_to_string(h.dir.join("host.log")).unwrap_or_default();
+    assert!(
+        wait_until(Duration::from_secs(3), || std::fs::read_to_string(
+            h.dir.join("host.log")
+        )
+        .unwrap_or_default()
+        .contains("received SIGHUP")),
+        "no SIGHUP line in host.log: {log}"
+    );
+}
+
+/// The host log says when it started, what it spawned and why it stopped,
+/// and never what ran (argv) or where (cwd).
+#[cfg(unix)]
+#[test]
+fn host_log_records_start_spawn_and_stop_without_content() {
+    let h = Harness::start("log", 60);
+    let mut s = spec("echo secret-argv-marker; sleep 30");
+    s.cwd = Some(std::env::temp_dir().to_string_lossy().into_owned());
+    let (id, _) = h.client.spawn(s).unwrap();
+    let host_pid = h.client.hello().unwrap().host_pid.unwrap();
+    stop_host(host_pid);
+    let path = h.dir.join("host.log");
+    assert!(
+        wait_until(Duration::from_secs(10), || std::fs::read_to_string(&path)
+            .unwrap_or_default()
+            .contains("exit status=0")),
+        "no exit line: {}",
+        std::fs::read_to_string(&path).unwrap_or_default()
+    );
+    let log = std::fs::read_to_string(&path).unwrap();
+    assert!(log.contains("start build="), "{log}");
+    assert!(log.contains(&format!("spawn id={id} ")), "{log}");
+    assert!(log.contains("stopping: received SIGTERM"), "{log}");
+    assert!(
+        log.contains("shutting down: stopping 1 running session"),
+        "{log}"
+    );
+    assert!(
+        !log.contains("secret-argv-marker"),
+        "argv leaked into the log"
+    );
+    assert!(!log.contains("test-meta"), "metadata leaked into the log");
+    let tmp = std::env::temp_dir().to_string_lossy().into_owned();
+    assert!(
+        !log.contains(tmp.trim_end_matches('/')),
+        "a path leaked into the log"
+    );
+}

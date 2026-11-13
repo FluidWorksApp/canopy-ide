@@ -386,21 +386,6 @@ jobs:
           touch "src-tauri/binaries/canopy-hook-${triple}"
           touch "src-tauri/binaries/canopy-pty-host-${triple}"
 
-      # tauri-build copies each sidecar to target/debug/<name>, deleting the old
-      # copy with remove_file first; a directory restored there by the cache
-      # makes that panic (IsADirectory) and fails every PR. Show what it was,
-      # then clear it.
-      - name: Clear non-file sidecar copies restored by the cache
-        run: |
-          for name in canopy-hook canopy-pty-host; do
-            p="src-tauri/target/debug/$name"
-            if [ -d "$p" ]; then
-              echo "::warning::$p is a directory (restored by the cache); removing it"
-              find "$p" -maxdepth 3 | head -50
-              rm -rf "$p"
-            fi
-          done
-
       # Dictation (ONNX Runtime) is compiled OUT here: staging the runtime is
       # release-only machinery, the feature has no logic these unit tests cover,
       # and --no-default-features is the exact configuration the Intel-macOS
