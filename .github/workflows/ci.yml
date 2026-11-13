@@ -269,6 +269,18 @@ jobs:
           for f in "$wasm" "$RUNNER_TEMP/pkg-web/canopy_term_wasm_bg.wasm"; do
             echo "$(basename "$f"): $(wc -c < "$f") bytes, $(gzip -9c "$f" | wc -c) gzipped" | tee -a "$GITHUB_STEP_SUMMARY"
           done
+      # Every import must be satisfied by wasm-bindgen's own glue: an `env`
+      # import is a C/Zig symbol nothing provides, and the page cannot load it.
+      - name: Check the module's imports
+        run: |
+          node -e '
+            const fs = require("fs");
+            const m = new WebAssembly.Module(fs.readFileSync(process.argv[1]));
+            const env = WebAssembly.Module.imports(m).filter((i) => i.module === "env");
+            for (const i of env) console.log(`env import: ${i.name} (${i.kind})`);
+            if (env.length) { console.error(`${env.length} unresolved env import(s)`); process.exit(1); }
+            console.log("no env imports");
+          ' crates/canopy-term-wasm/target/wasm32-unknown-unknown/release/canopy_term_wasm.wasm
       - name: Smoke test under Node
         run: node crates/canopy-term-wasm/js/smoke.mjs "$RUNNER_TEMP/pkg-node" | tee -a "$GITHUB_STEP_SUMMARY"
       - name: Parity with the native engine
