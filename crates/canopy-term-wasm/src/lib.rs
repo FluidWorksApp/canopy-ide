@@ -28,6 +28,34 @@ use canopy_term_core::frame::{Cell, Color, CursorShape, Frame, MouseEncoding, Mo
 use canopy_term_core::{Event, PromptKind, Row, Screen};
 use wasm_bindgen::prelude::*;
 
+/// Ghostty's freestanding build sends `std.log` output to an imported
+/// `env.log(ptr, len)`; the page has no module called `env`, so it is defined
+/// here and forwarded to the console. The name is C's `log`: on wasm32 a
+/// Rust `f64::ln` would also resolve to this symbol, so the engine crates
+/// must not use it (CI's import check passing proves nothing else defines or
+/// needs `log`).
+#[cfg(target_arch = "wasm32")]
+mod ghostty_log {
+    use wasm_bindgen::prelude::*;
+
+    #[wasm_bindgen]
+    extern "C" {
+        #[wasm_bindgen(js_namespace = console, js_name = debug)]
+        fn console_debug(s: &str);
+    }
+
+    #[no_mangle]
+    pub extern "C" fn log(ptr: *const u8, len: usize) {
+        if ptr.is_null() {
+            return;
+        }
+        // SAFETY: ghostty passes a pointer to `len` bytes of its own buffer,
+        // valid for the duration of the call.
+        let bytes = unsafe { std::slice::from_raw_parts(ptr, len) };
+        console_debug(&format!("ghostty {}", String::from_utf8_lossy(bytes)));
+    }
+}
+
 /// Words per packed cell.
 pub const WORDS_PER_CELL: usize = 6;
 
